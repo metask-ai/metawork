@@ -183,6 +183,21 @@ reject new work
 - 当前只允许临时或明确 trusted Workspace；
 - UI/文档不宣称 strict Workspace security。
 
+### 当前实现与复现
+
+Gate 2 基础实现位于 `src/host/lifecycle.zig`，验证工程位于 `spikes/host-lifecycle/`。验证工程只从显式 `AGENTCORE_BUNDLE_ROOT` 导入 bundle SDK，并先按 `spikes/agentcore-contract/bundle.lock.json` 校验完整 manifest、checksum、平台、Zig 版本和 discovery symbol；它不进入正式应用 build graph。
+
+```bash
+AGENTCORE_BUNDLE_ROOT=/absolute/path/to/validated/bundle \
+  npm run test:host-lifecycle
+```
+
+需要同时执行仓库常规测试时使用同一个显式 bundle 环境运行 `npm run test:phase0a`；该命令不会在缺少 artifact 时静默跳过 Gate 2。
+
+当前 deterministic function-table fake 覆盖 bounded executor、每 Session 单 Run、queued/active/UI-wait close、并发 close/shutdown、callback quiescence、first-writer HostCause、stale/too-late abort status、Session/Runtime destroy retry、OOM、diagnostic release、credential snapshot 隔离和临时/trusted Workspace 的词法边界。测试进程有 30 秒上限，避免回归变成无限 CI hang。
+
+这仍是 Gate 2 raw lifecycle foundation，不是正式 AgentCore Host：UI response 只验证 identity、唤醒和 close/shutdown 路径，固定返回 `UI_UNAVAILABLE`；事件和 UI JSON 不在 MetaWork 复制或解析。真实 codec、typed status/StopReason 和 source-free consumer 仍由 Gate 3 验收。当前 bundle lock 指向精确的 dirty development identity，只可用于此阶段可复现验证，不能作为正式发布来源；executor 容量也尚未根据真实 trace 定标。
+
 ## 8. Gate 3：cc-zig typed SDK completion
 
 正式 Host 开始前，bundle SDK 必须提供并测试：

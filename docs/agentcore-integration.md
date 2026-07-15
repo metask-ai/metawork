@@ -166,9 +166,12 @@ Open.*
 - 第二个 Run 明确排队或拒绝；
 - run ID 单调且与 Session 绑定；
 - queued Run 不接触 AgentCore mutable state；
+- queued prompt 在复制前按 Host byte limit 拒绝，保证 executor 有界时输入内存也有明确上限；
 - active Run 独占 Session Conversation；
 - callback context 与 Session handle 具有独立 lifetime guard；
 - Run 返回不等于可以立刻 free callback context，必须确认 callback refcount 为零。
+
+Gate 2 的 raw lifecycle foundation 使用 bundle SDK 提供的精确 `ApiV1` table 作为可注入依赖，并显式接收 Zig `std.Io` 来实现 mutex/condition；它不导入 cc-zig source tree，也不建立 Adapter。`submit` 在持有 Session lock 时完成 bounded executor enqueue，避免 enqueue 与 close 之间出现未入队的悬空 `Queued` 状态。Core callback 在 `Closing` 后不得再取得新的 lifetime reference；已经进入的 callback 必须在 destroy 前归零。
 
 ### Close 顺序
 
@@ -190,9 +193,12 @@ Open.*
 - callback 内不得直接 destroy；
 - abort stale/too-late 不跳过 join；
 - `session_destroy` busy 说明 Host 顺序错误或 Run 尚未退出，不允许强行 free；
-- double close、重复 cancel 和 shutdown 竞态必须幂等；
+- double close、同一 Session/run ID 的重复 cancel 和 shutdown 竞态必须幂等；stale run ID 必须明确拒绝且不得触发 abort；
 - Runtime 记录活跃 Session，只有全部 Session Closed 后才能 destroy；
 - Host shutdown 对全部 Session 执行同样状态机，不另写一条危险的快速路径。
+- Host shutdown 本身必须串行化；并发调用不得重复 join executor、`session_destroy` 或 `runtime_destroy`；暂时的 destroy failure 必须可由后续显式 shutdown/close 重试，失败时不得强行 deinit。
+- abort 的 raw status 即使是 stale/too-late 也要保留供 diagnostic/telemetry 使用，且 owned diagnostic 仍按 bundle release contract 释放。
+- `Closed` tombstone 保留到 owner 显式 `releaseClosedSession`，以支持幂等 close 和事后 snapshot；释放后指针失效且 Host slot 才可复用。Host shutdown 开始后禁止单独 release，由统一 teardown 持有所有权。
 
 ### 必测 race
 
@@ -382,6 +388,7 @@ MetaWork 对 bundle SDK 的 typed StopReason 使用无 `else` switch。unknown r
 ### Workspace
 
 - Host 规范化用户选择路径并绑定 MetaWork Session；
+- Gate 2 的 lifecycle API 只接收 Host 已规范化的绝对路径，并再次拒绝空 component、`.`、`..`、尾随分隔符和临时根的词法逃逸；symlink/TOCTOU 仍不在此保证内；
 - 当前 v1 只运行临时 fixture 或用户明确 trusted 的 Workspace；
 - 不以 `workspace_root` 字段存在为 strict security 证据；
 - symlink、路径逃逸、不存在写入目标、sandbox、process tree 和 TOCTOU 矩阵属于后续安全 Gate；
