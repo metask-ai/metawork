@@ -4,7 +4,7 @@ MetaWork 是一款桌面端 Agent Workbench，面向工作区、会话、Agent �
 
 ## 当前状态
 
-技术选型与三层职责边界已经确认，macOS-first Phase 0 已完成 Gate 0 Native SDK React smoke，下一步进入 artifact-only AgentCore raw contract probe。Gate 0 的命令、trace、边界与已知限制见 [验证报告](docs/phase-0-gate-0-report.md)。
+技术选型与三层职责边界已经确认，macOS-first Phase 0 已完成 Gate 0 Native SDK React smoke 和 Gate 1 artifact-only AgentCore raw contract probe，下一步进入 Host 生命周期与安全基础。实测证据见 [Gate 0 报告](docs/phase-0-gate-0-report.md)与 [Gate 1 报告](docs/phase-0-gate-1-report.md)。
 
 第一条实现链路基于 cc-zig experimental AgentCore ABI revision 1，只验证同步 Run、结构化事件、built-in tools、同步 UI request、取消和 Host 生命周期。它不包含 async pending、suspend/resume、进程重建恢复、strict Workspace security 或正式 Host tools。
 
@@ -32,6 +32,7 @@ MetaWork 不直接编译 cc-zig source tree。当前从显式 bundle root 锁定
 - [AgentCore ABI v1 消费基线](docs/agentcore-abi-v1.md)
 - [Phase 0 验证计划](docs/phase-0-validation.md)
 - [Phase 0 Gate 0 验证报告](docs/phase-0-gate-0-report.md)
+- [Phase 0 Gate 1 验证报告](docs/phase-0-gate-1-report.md)
 - [Agent 工作约束](AGENTS.md)
 
 ## macOS 开发命令
@@ -49,6 +50,14 @@ npm run package:macos
 ```
 
 项目使用本地锁定的 `@native-sdk/cli`，不依赖全局 `native`。`npm run build:*` 先构建 React production assets，再生成 macOS binary；打包产物位于 `zig-out/package/metawork.app`。
+
+Gate 1 的隔离 probe 需要显式绝对 bundle root：
+
+```bash
+AGENTCORE_BUNDLE_ROOT=/absolute/path/to/bundle npm run probe:agentcore
+```
+
+该命令校验 bundle 后使用 `spikes/agentcore-contract` 的独立 build graph；正式应用 build/test/package 不读取该环境变量或 AgentCore bundle。
 
 ## 当前非目标
 

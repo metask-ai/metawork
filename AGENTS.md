@@ -75,3 +75,11 @@ npm run package:macos
 ```
 
 `npm run dev` 启动 React development server 和 Native SDK shell。Native SDK 由根 `package.json` 与 `package-lock.json` 精确锁定；不要改用全局 `native` 或提交 `.native/` 生成目录。Windows 命令进入 Phase 0B 后再补充。禁止让验证流程只存在于个人环境或聊天记录中。
+
+Gate 1 artifact-only probe 使用独立 build graph，必须显式指定绝对 bundle root：
+
+```bash
+AGENTCORE_BUNDLE_ROOT=/absolute/path/to/bundle npm run probe:agentcore
+```
+
+该变量不得进入正式应用 build/test/package，probe 也不得导入 cc-zig 实现源码。

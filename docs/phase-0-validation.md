@@ -101,6 +101,8 @@ Gate 未通过时不得用 source dependency、MetaWork 自制协议、无界队
 
 ## 6. Gate 1：artifact-only raw contract probe
 
+> 状态：已通过。实现与实测证据见 [Phase 0 Gate 1 验证报告](phase-0-gate-1-report.md)。
+
 该 probe 是隔离依赖验收，不属于正式 Host。
 
 ### Bundle 校验

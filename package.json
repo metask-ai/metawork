@@ -16,10 +16,12 @@
     "build:frontend": "npm --workspace @metawork/renderer run build && node scripts/verify-frontend-build.mjs",
     "build:debug": "npm run build:frontend && native build . --yes -Doptimize=Debug",
     "build:release": "npm run build:frontend && native build . --yes -Doptimize=ReleaseFast",
-    "test": "npm run check:frontend && native test . --yes",
-    "format": "zig fmt src app.zon && prettier --write frontend scripts package.json",
-    "format:check": "zig fmt --check src app.zon && prettier --check frontend scripts package.json",
-    "package:macos": "npm run build:release && node scripts/clean-macos-package.mjs && native package --target macos --assets frontend/dist && node scripts/verify-macos-package.mjs"
+    "test": "npm run check:frontend && npm run test:agentcore-bundle && native test . --yes",
+    "format": "zig fmt src spikes app.zon && prettier --write frontend scripts spikes/agentcore-contract/bundle.lock.json package.json",
+    "format:check": "zig fmt --check src spikes app.zon && prettier --check frontend scripts spikes/agentcore-contract/bundle.lock.json package.json",
+    "package:macos": "npm run build:release && node scripts/clean-macos-package.mjs && native package --target macos --assets frontend/dist && node scripts/verify-macos-package.mjs",
+    "test:agentcore-bundle": "node --test scripts/agentcore-bundle.test.mjs",
+    "probe:agentcore": "node scripts/run-agentcore-probe.mjs"
   },
   "devDependencies": {
     "@native-sdk/cli": "0.5.1",

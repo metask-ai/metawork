@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "name": "metacodes-agentcore",
+  "version": "0.0.0-dev+ab0f851562c3-dirty.66e2d4c61093",
+  "source": {
+    "cc_zig_commit": "ab0f851562c3cafe926b7e75b0a1b1f4842e2b0b",
+    "dirty": true,
+    "dirty_source_sha256": "66e2d4c610936e8de9760aeef387f1734dc3c1a484d2f4428adbe069eb418eef"
+  },
+  "toolchain": {
+    "zig_version": "0.16.0"
+  },
+  "build": {
+    "resolved_target": "aarch64-macos.13.0...15.6-none",
+    "architecture": "aarch64",
+    "os": "macos",
+    "macos_deployment_target": "13.0",
+    "optimize": "ReleaseSafe"
+  },
+  "contract": {
+    "binary_abi_version": 1,
+    "required_system_link_inputs": ["libc"],
+    "ui_request_mode": "synchronous"
+  },
+  "files": {
+    "lib/libmetacodes_agentcore.a": {
+      "sha256": "dfba7e38611cae51be1822ead14d9220e514bbbafd372ecc4258be982dcbd525"
+    },
+    "include/metacodes_agentcore.h": {
+      "sha256": "bed1a63f80154825577cda968a283ee306ed34de0d0db9caa4a485d772b90b4c"
+    },
+    "sdk/metacodes_agentcore.zig": {
+      "sha256": "ecd9bf2c88acbf23fbbadf1a99a6fde9b23fd6e66c8a30b8057fd4fefeaaddd0"
+    },
+    "sdk/metacodes_agentcore_types.zig": {
+      "sha256": "bf6b2f5ed556937c3eca9743d9bbb411fae961c9663e4fe518859ef31630b5ca"
+    }
+  }
+}
