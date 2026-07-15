@@ -12,18 +12,19 @@
 | Renderer | React + Tailwind | 当前正式 UI 技术栈，适合复杂 Workbench 界面 |
 | Desktop Framework | Native SDK | Zig 一等公民，负责系统 WebView、窗口、Bridge 和桌面生命周期 |
 | Workbench / Host | Zig | 承担产品编排、权限边界、状态协调和 AgentCore 接入 |
-| AgentCore | cc-zig 的 `metacodes-core` | 以 Zig library 形式集成，提供 agent loop 和结构化 UI contract |
+| AgentCore | cc-zig 的 `metacodes-core` library bundle | cc-zig 独立构建并发布版本化库产物；MetaWork 链接该产物，不把 cc-zig 源码纳入自身构建 |
 | Agent UI contract | cc-zig 原生协议 | React 消费语义数据，不消费终端字节流或 Provider SSE |
 
 由此排除以下正式主路径：
 
 - 不采用 Tauri + Rust；
-- 不为 AgentCore 额外维护 Rust/C ABI；
+- 不由 MetaWork 维护 AgentCore ABI 或复制协议；预构建库所需的单一 C-compatible binary ABI facade 由 cc-zig 自己维护并随库发布；
+- 不通过本地 path dependency、Git source dependency 或源码复制把 cc-zig 编进 MetaWork 正式应用；Phase 0 隔离 packaging spike 除外；
 - 不以 PTY、xterm 或模拟终端作为默认 Agent 架构；
 - 当前不使用 `.native` 取代 React；
 - 不建立 Native SDK Adapter、通用 Desktop Interface 或可替换框架抽象。
 
-架构阶段默认 cc-zig 能够完成 Windows 兼容。其兼容进度是 AgentCore 的交付问题，不改变 MetaWork 的目标边界。
+当前执行顺序是 macOS-first：Phase 0A 先验证 macOS 垂直链路，Phase 0B 再验证 Windows。架构阶段仍要求 cc-zig 最终完成 Windows 兼容；其兼容进度不阻塞 macOS Phase 0A，也不改变 MetaWork 的跨平台目标边界。
 
 ## 2. 高层结构
 
@@ -99,6 +100,32 @@ Host 内部可以按代码规模形成 Bridge、Workbench 和 AgentCore backend 
 - 通过每 Run 的 `AbortSignal` 接收当前已验证的跨线程中断。
 
 MetaWork 依赖 library contract，不依赖 CLI、REPL、TUI 或字符显示协议。cc-zig CLI 和 WebBackend 可以继续作为其他前端存在，但不构成 MetaWork 内部路径。
+
+### 3.4 AgentCore 库交付边界
+
+cc-zig 与 MetaWork 是两个独立构建单元。正式接入物是 cc-zig 构建并发布的版本化 `metacodes-core` library bundle，而不是 cc-zig source tree：
+
+- macOS 当前默认产物是静态库；后续平台提供对应 target/architecture 的库产物；
+- bundle 同时包含由 cc-zig 发布的 public Zig SDK definitions，向 MetaWork 暴露 ABI-safe 的事件、请求、停止原因、结果和 opaque handle；
+- public Zig SDK definitions 仍由 cc-zig 单一维护，MetaWork 不复制、改写或平行定义协议类型；
+- 开发初期由 cc-zig 本地构建命令产出 bundle，MetaWork 从本地 artifact cache 消费；这只是分发渠道的 bootstrap，不改变库边界；
+- 进入共享 CI 和正规发布后，cc-zig CI 将每个版本、target 和 architecture 的不可变 bundle 发布到远程 artifact repository；具体托管服务可以后定；
+- bundle manifest 固定 release version、cc-zig commit、精确 Zig toolchain、target、architecture、构建模式、API version 和 artifact checksum；
+- 本地开发 bundle 使用包含 cc-zig commit 的精确 dev version/build identity；正式 bundle 使用精确 release version。两者都必须锁定 checksum，不跟随 `latest` 或可变 tag；
+- MetaWork 构建按依赖锁从配置的 artifact source 解析 bundle：当前可以是本地 cache，正规流程中是远程下载后进入同一 cache；随后导入 public API 并链接库；
+- 本地 artifact source 只能指向 cc-zig 已构建的 bundle，不能指向 cc-zig source tree；
+- artifact 缺失或 checksum 不匹配时应明确失败，不静默退回 source dependency；
+- native Zig enum、slice、error union 和普通 `pub fn` 不能直接作为稳定 binary API；正式 bundle 必须由 cc-zig 提供 C-compatible ABI facade；
+- ABI wire 层只使用校验后的固定宽度整数 code、pointer+length、opaque handle、固定布局 extern struct 和带 caller context 的 callback；bundle Zig SDK 将合法 code 包装为类型化 enum。MetaWork 不自行维护 C header/adapter；
+- 初期仍固定 manifest 中的 Zig toolchain 以降低 SDK 语法与构建差异；binary ABI version 与 AgentCore API version 分别版本化。
+
+在 stable bundle 尚未通过双方消费验证前，实施顺序固定为：
+
+1. cc-zig 完成 UI-neutral Runtime/Session、真实工具、Host 请求、挂起恢复和所有权测试；
+2. cc-zig 产出 experimental bundle、public SDK definitions、manifest 和不访问实现源码的 artifact-only consumer；
+3. MetaWork 锁定该 bundle，在 macOS Phase 0A 完成真实 link/run 集成；
+4. 双方消费验证通过后，再冻结 ABI v1 layout、状态码、capability bits 和兼容政策；
+5. 正式应用继续只消费 cc-zig 发布的 bundle；如果最终选择独立 Worker，Worker 也消费同一库，IPC 另行定义。
 
 cc-zig 虽然定义了 `UiBackend.poll()` 和 `UiEvent`，但当前 `agent_loop` 生产路径尚未消费该 poll contract。MetaWork 不把未接通的接口当作已具备能力；反向控制的当前语义见 [AgentCore 集成契约](agentcore-integration.md#7-反向控制与-host-中断)。
 
@@ -184,7 +211,7 @@ Host 必须：
 
 Native SDK 是长期桌面平台方向，因为它将 Zig 作为一等公民，能够直接承载 Workbench 和 cc-zig，同时提供 WebView 与桌面宿主能力。
 
-项目固定明确版本或 commit。Windows WebView、Bridge、打包、签名、更新和 API 变化是 Phase 0 必须验证的外部依赖风险。
+项目固定明确版本或 commit。macOS WebView、Bridge、打包和 API 变化由 Phase 0A 优先验证；Windows WebView、Bridge、打包、签名和更新由 Phase 0B 验证。
 
 Native SDK 直接使用，不设置 Adapter。相关代码按职责集中是正常模块组织，不意味着建立框架替换层。
 
@@ -204,11 +231,13 @@ Native SDK 直接使用，不设置 Adapter。相关代码按职责集中是正�
 | Native SDK pre-1.0、API 变化 | 固定版本/commit；Phase 0 验证硬能力 |
 | Windows 打包、签名和更新路径 | 在形成深层依赖前完成 Windows spike |
 | cc-zig Windows 兼容仍在推进 | 独立建立 Windows CI 和最小运行验证 |
+| AgentCore binary ABI 演进 | cc-zig 单一维护 C-compatible facade；ABI version 与 API version 分离；MetaWork 精确锁定 bundle 并用独立 consumer 做 link/run smoke test |
+| AgentCore artifact 缺失或被替换 | 本地内容寻址缓存；构建前校验 checksum；禁止 `latest`、可变 tag 和静默 source fallback；正规远程流程允许缓存命中时离线重建 |
 | WebView Bridge 高频事件 | 使用有界事件泵；按集成契约压测 |
 | 同进程 AgentCore native crash | 明确认定零进程级隔离；比较 Worker 模型 |
 | 同步 `run()` 占满 worker | 有界 Run executor；每 Session 至多一个 in-flight Run；额外 Run 排队 |
 | 同步 permission 等待不可 checkpoint | crash 后 Run 标记 `interrupted`，工具保持未执行 |
-| cc-zig 对外文档与实际 enum/signature 漂移 | 固定 commit；从导入类型做编译期穷尽检查；Phase 0 校验契约 |
+| cc-zig 对外文档、内部类型与 bundle SDK 漂移 | cc-zig facade 对内部 enum 做无 `else` 穷尽映射；MetaWork 对 SDK enum 做同样检查；Phase 0 校验固定 commit 与 bundle manifest |
 | `.native` 生态成熟度不足 | 不影响 React 主线，仅独立观察 |
 
 ## 9. 已撤回的过度结论

@@ -2,12 +2,13 @@
 
 > 状态：待执行
 > 目标：用最小真实原型验证已选技术栈和关键风险，不在 Phase 0 完成整个产品
+> 顺序：Phase 0A 优先完成 macOS 垂直验证；Phase 0B 在其后验证 Windows，不阻塞 0A
 
 ## 1. 验证目标
 
 Phase 0 回答以下问题：
 
-1. Native SDK 能否在 Windows 上稳定承载 React production bundle、双向 Bridge 和桌面生命周期？
+1. Native SDK 能否先在 macOS 上稳定承载 React production bundle、双向 Bridge 和桌面生命周期？
 2. cc-zig 能否以 `metacodes-core` library 形式完成真实 agent loop？
 3. `MetaWorkUiBackend` 能否可靠处理 borrowed 数据、跨线程事件和 WebView 主线程投递？
 4. 多 Session 下的事件吞吐、内存和 UI 响应是否可控？
@@ -15,6 +16,7 @@ Phase 0 回答以下问题：
 6. cc-zig 当前可挂起 UI 请求与同步 permission 的恢复语义是否能形成可信产品行为？
 7. 每 Session 单 Run、有限 worker 和 allocator 生命周期是否在多 Session 下保持正确？
 8. 全部 `StopReason`、Host fatal abort 和当前真实反向控制路径是否能产生可信状态？
+9. macOS 基线成立后，Native SDK 与 cc-zig 能否分别在 Windows 上复现构建、运行、Bridge、Shell 和打包能力？
 
 ## 2. 最小垂直链路
 
@@ -62,7 +64,9 @@ React 输入
 
 ## 4. 验证矩阵
 
-### 4.1 Native SDK / Windows
+### 4.1 Native SDK / 平台
+
+以下能力先在 macOS Phase 0A 验证；Phase 0B 再在 Windows 重跑平台相关用例。Windows 失败不阻塞 0A 结论，但阻止项目声明 Windows 或跨平台交付就绪。
 
 - React development server 加载；
 - React production assets 加载；
@@ -79,11 +83,23 @@ Native SDK 与 cc-zig Windows 兼容是两条独立验证线，不能用其中�
 
 ### 4.2 cc-zig library
 
+- 以 [AgentCore ABI v1 需求规格](agentcore-abi-v1.md)作为 capability、函数职责和冻结门槛的 source of truth；
 - 固定并记录 cc-zig commit；
-- 作为 Zig dependency 引入 `metacodes-core`；
+- 固定精确 Zig toolchain、target、构建模式和 AgentCore API version；
+- 由 cc-zig 独立构建和测试版本化 `metacodes-core` library bundle；Phase 0A 允许先写入本地 artifact source，不要求远程发布设施先完成；
+- cc-zig 提供不访问实现源码的 artifact-only consumer，证明 bundle 能独立导入、链接和真实调用；
+- 本地开发 bundle 使用包含 cc-zig commit 的精确 dev version/build identity；MetaWork 依赖锁同时记录 target、architecture 和 artifact checksum；
+- bundle 至少包含 target-specific 静态库、cc-zig-owned public Zig SDK definitions 和 manifest；
+- MetaWork 正式应用不使用本地 path dependency、Git source dependency 或源码复制；常规构建期间不访问 cc-zig 实现源码；
+- 从 cc-zig 本地构建产物填充 artifact cache，验证 checksum、目标平台选择和重复构建 cache 命中；
+- 注入 checksum 不匹配和缺少目标平台 artifact，构建必须明确失败且不回退源码；
+- 从 MetaWork 独立消费工程导入 public SDK、链接 AgentCore 库并完成 link/run smoke test；
+- 验证 native `pub fn` 不能被误当作 binary export；ABI 不直接暴露 native slice、inferred-tag enum、allocator、error union 或 tagged union；
+- ABI facade wire 层使用校验后的固定宽度整数 code、pointer+length、opaque handles、固定布局 structs 和 callback context；bundle SDK 将合法 code 包装为类型化 enum，facade 对内部 `StopReason` 做无 `else` 穷尽映射；
+- 进入共享 CI/正规发布前，再验证远程上传、从空 cache 下载以及已填充 cache 的离线重建；该分发设施不阻塞本地 Phase 0A；
 - `agent_loop.run()` 真实运行；
 - Provider SSE 被 cc-zig 转换为 `CoreEvent`；
-- 直接从导入类型编译无 `else` 的九变体 `StopReason` switch；
+- 直接从 bundle SDK 导入 ABI `StopReason`，编译无 `else` 的九变体 switch；同时验证 cc-zig facade 对内部 enum 的穷尽映射；
 - 验证 `UiBackend.poll()` 当前是否存在真实生产消费点，不以接口声明或测试桩代替调用链证据；
 - 当前基线使用 per-Run `AbortSignal` 完成 stop/cancel；
 - 当前基线将生成期 `queue_message` 保存在 Host 有界队列，Run 结束后作为下一 Run 输入；
@@ -204,15 +220,20 @@ Native SDK 是已确认选型，但必须可证伪。如果 Phase 0 无法完成
 
 Phase 0 完成时必须产出：
 
-- 可运行的 Windows 垂直原型；
+- Phase 0A：可运行的 macOS 垂直原型；
+- Phase 0B：可运行的 Windows 垂直原型和平台差异报告；
 - 自动化或可复现的构建与测试命令；
 - 事件泵容量、批量窗口和压力数据；
 - Run executor 上限、排队策略、allocator 生命周期与同步等待资源数据；
 - 九个 `StopReason` 的 Host 映射测试和 cc-zig contract smoke test；
+- Phase 0A：cc-zig 产出的可复现本地 `metacodes-core` bundle、精确 build identity、checksum 和 artifact-only consumer 记录；
+- Phase 0A：MetaWork 对该 bundle 的 artifact cache、独立 link/run 和端到端消费记录；
+- 双方验证过的 library export 语义、build target、bundle layout 和发布规格；
+- 进入正规发布时：远程发布、下载校验和离线 cache 记录；
 - per-Run AbortSignal、Host fatal side channel、输入队列和 `UiBackend.poll()` 现状报告；
 - 同进程与 Worker 故障实验结果；
 - permission 与 suspend/resume 恢复记录；
 - Native SDK 继续使用或触发重估的明确结论；
-- 更新后的 [高层架构](architecture.md) 与 [AgentCore 集成契约](agentcore-integration.md)。
+- 更新后的 [高层架构](architecture.md)、[AgentCore 集成契约](agentcore-integration.md)与 [AgentCore ABI v1 需求规格](agentcore-abi-v1.md)。
 
 原型“能跑起来”不是完成；关键风险必须有数据、失败语义和可复现验证。

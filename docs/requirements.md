@@ -137,9 +137,10 @@ Turn 是用户提交的一次交互；Run 是 AgentCore 为该交互进行的一
 
 ### 平台
 
-- Windows 是 Phase 0 必须真实验证的目标平台；
-- cc-zig Windows 兼容与 Native SDK Windows 可行性分别验证；
-- 形成可复现的开发构建与可分发包路径。
+- macOS 是当前 Phase 0A 的优先真实验证平台，先完成可运行垂直链路和本地开发闭环；
+- Windows 是后续 Phase 0B 目标平台，不阻塞 Phase 0A，但在声明跨平台交付前必须完成真实验证；
+- cc-zig Windows 兼容与 Native SDK Windows 可行性分别验证，不能用 macOS 结果替代；
+- 对进入验证范围的平台形成可复现的开发构建与可分发包路径。
 
 ## 7. 第一阶段范围
 

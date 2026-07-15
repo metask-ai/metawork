@@ -3,16 +3,71 @@
 > 状态：高层集成约束已确认，容量与具体实现参数待 Phase 0 测量
 > 依赖：cc-zig / `metacodes-core`
 
-本文定义 MetaWork Zig Host 与 cc-zig 之间的规范边界。系统整体结构见 [高层架构](architecture.md)。
+本文定义 MetaWork Zig Host 与 cc-zig 之间的规范边界。系统整体结构见 [高层架构](architecture.md)，预编译库必须导出的首版能力见 [AgentCore ABI v1 需求规格](agentcore-abi-v1.md)。
 
 ## 1. 集成原则
 
 1. cc-zig 是 Agent 结构化协议的唯一来源；
 2. MetaWork 不解析模型 Provider SSE；
 3. MetaWork 不建立平行的 `AgentEvent` / `WorkbenchEvent` 体系；
-4. `MetaWorkUiBackend` 实现 cc-zig 的 `UiBackend` / `UiRequester` contract；
+4. cc-zig library facade 把内部 `UiBackend` / `UiRequester` contract 暴露为 ABI-safe callback contract，`MetaWorkUiBackend` 实现该 callback contract；
 5. MetaWork 只补充产品路由、运行生命周期、所有权和传输 envelope；
-6. AgentCore 与 Host 同进程或跨进程，不改变 Renderer 看到的产品边界。
+6. MetaWork 正式应用只消费 cc-zig 发布的版本化 AgentCore library bundle，不通过 path/Git dependency 直接编译 cc-zig 源码；Phase 0 隔离 packaging spike 是唯一例外；
+7. AgentCore 与 Host 同进程或跨进程，不改变 Renderer 看到的产品边界。
+
+### 1.1 library bundle 契约
+
+cc-zig 独立负责构建和验证 `metacodes-core`。MetaWork 的依赖输入必须是一个完整 library bundle：
+
+```text
+metacodes-core bundle
+├── target-specific static library
+├── cc-zig-owned public Zig SDK definitions
+└── manifest
+    ├── release version
+    ├── cc-zig commit
+    ├── API version
+    ├── exact Zig toolchain
+    ├── target / architecture / build mode
+    └── artifact checksum
+```
+
+规范要求：
+
+- MetaWork 正式应用及其常规 build/test/package 流程不得引用 cc-zig source tree、源码相对路径或 Git source package；
+- Phase 0 允许一个明确隔离的 packaging spike 读取本地 cc-zig source tree，其唯一目标是证明 bundle 能被构建和独立链接；spike 不得成为应用 target 的传递依赖；
+- 开发 bootstrap：cc-zig 本地构建 bundle 并写入本地 artifact cache；MetaWork 可以从该 cache 解析，但不能指向 cc-zig source tree；
+- 正规发布：cc-zig CI 按 release version、target 和 architecture 将同一格式的 bundle 发布到远程 artifact repository，已发布版本必须不可变；
+- MetaWork dependency lock 必须记录精确 version/build identity、artifact identity 和 checksum，禁止使用 `latest`、版本范围或可变 tag；
+- dependency resolver 根据 lock 和当前 target 从配置的 artifact source 获取 bundle，校验 checksum 后写入或命中本地内容寻址 cache；
+- artifact 缺失或校验失败时构建明确失败，不能改走 cc-zig source checkout；
+- public Zig SDK definitions 只声明库的正式 ABI 表面，并随 cc-zig artifact 一起发布；它们不是 MetaWork 维护的协议副本；
+- ABI-safe 的 event/request/result views、`StopReason`、opaque handles 和回调签名必须来自该 bundle；
+- 库实现、Provider SSE、工具和 agent loop 均在 cc-zig 构建中完成，MetaWork 只链接产物；
+- binary ABI 使用 C-compatible calling convention 和固定布局类型；不得直接导出 native Zig slice、Zig enum、allocator、error union 或 tagged union，wire enum/tag/status 使用校验后的固定宽度整数 code，由 bundle SDK 包装成类型化 enum；
+- cc-zig facade 负责在内部 native `CoreEvent` / `UiRequest` / `RunResult` 与 ABI views 之间转换，并对 enum 使用无 `else` 穷尽 switch；
+- 初期 artifact 与消费者仍使用 manifest 固定的同一 Zig toolchain；ABI 稳定性成熟后才评估放宽；
+- 只有独立消费工程在不访问 cc-zig 实现源码的条件下完成 link/run smoke test，才算 library bundle 可交付。
+
+cc-zig 内部以 UI-neutral Runtime/Session owner 统一 Provider、Conversation、Workspace、工具权限、PermissionContext、AbortSignal、Run identity 和 callback-failure state。native Zig `pub` 类型仍是源码接口，不视为已交付 binary ABI。正式 v1 只需满足 [ABI v1 消费需求](agentcore-abi-v1.md)；具体内部拆分、导出函数名和 wire layout 由 cc-zig 在真实 consumer 验证后确定。
+
+依赖升级是显式工程变更：修改锁定 version/build identity 和 checksum，获取新 bundle，重新执行 API/StopReason 穷尽编译、link/run、permission、取消和 suspend/resume contract tests。MetaWork 不在普通启动或构建过程中自动追踪新版本。
+
+本地 bootstrap 与远程正式发布必须使用同一 bundle layout、manifest 和校验规则。后续切换到远程只改变 artifact source，不改变 MetaWork 的链接方式和 AgentCore contract。
+
+### 1.2 cc-zig bundle 接收条件
+
+MetaWork 只接收由 cc-zig 构建的 bundle。开发期本地 bundle 与正式远程 bundle 使用同一 layout 和 manifest，至少必须包含：
+
+- 可重复执行的 AgentCore library 构建命令；
+- cc-zig-owned public SDK definitions；
+- 包含 commit/release、Zig toolchain、target、architecture、API/ABI version 和 checksum 的 manifest；
+- 不访问 cc-zig 实现源码的 artifact-only consumer；
+- consumer 对真实 agent loop、工具、Host 请求、suspend/resume、`StopReason`、事件 callback 和 abort 的 link/run 证据。
+
+MetaWork 仓库不维护 cc-zig 的 ABI facade、SDK 或打包实现。
+
+cc-zig CLI 二进制不属于该 bundle，也不是 MetaWork 的运行依赖。
 
 ## 2. Provider SSE 的归属
 
@@ -58,16 +113,18 @@ MetaWork 不包含 Anthropic/OpenAI SSE parser。cc-zig 的 HTTP/SSE `WebBackend
 
 `UiEvent` 是已定义的协议类型，不等于当前 `agent_loop` 已消费它。截止本文版本，cc-zig 生产代码没有调用 `UiBackend.poll()`；MetaWork 当前不能依赖 `poll()` 完成中断或生成期消息注入。
 
-主要源码：
+主要源码（相对 cc-zig 仓库根目录）：
 
-- `E:\project\cc-t2z\cc-zig\src\core\protocol\ui_event.zig`
-- `E:\project\cc-t2z\cc-zig\src\core\protocol\ui_backend.zig`
-- `E:\project\cc-t2z\cc-zig\src\core\protocol\ui_request.zig`
-- `E:\project\cc-t2z\cc-zig\src\core\agent_loop.zig`
+- `src/core/protocol/ui_event.zig`
+- `src/core/protocol/ui_backend.zig`
+- `src/core/protocol/ui_request.zig`
+- `src/core/agent_loop.zig`
 
 ## 4. MetaWorkUiBackend
 
 `MetaWorkUiBackend` 是 cc-zig backend，不是 Native SDK Adapter。
+
+下列代码表达内部语义 contract，不是最终 binary ABI 函数签名。library facade 在库内构造 native `UiBackend` / `UiRequester`；wire 层暴露固定布局 callback table、opaque handles、固定宽度整数 code 和 pointer+length views，bundle SDK 负责校验 code 并提供类型化 enum。
 
 其核心职责：
 
@@ -208,7 +265,7 @@ emit copy OOM / control queue timeout / unrecoverable bridge pipeline failure
   → Host 先检查 fatal_reason，再映射为 run.failed
 ```
 
-当前 cc-zig `AbortSignal.Reason` 没有 Host infrastructure failure 变体。Phase 0 应优先扩展明确原因；若依赖版本暂时不能扩展，必须保留独立 `fatal_reason` side channel，禁止把事件泵失败误报成用户取消。
+cc-zig 内部如何表示 Host failure 可以演进，但 ABI 必须保留可区分的原因。Host 同时保留结构化 `fatal_reason` side channel，用于记录具体基础设施故障并把 `.aborted` 映射为 `failed`，禁止误报成用户取消。
 
 ### 主线程边界
 
@@ -354,7 +411,7 @@ run.interrupted
 | `backgrounded` | `backgrounding` → `backgrounded` / background Run running | 当前 library 调用已返回，但产品任务未完成 | 深拷贝 Conversation 并成功启动后台执行；失败则保留前台状态 |
 | `budget` | `stopped`，Session=`awaiting_user` | 成本闸触顶，等待用户明确决定 | 提高/确认预算后创建新 Run，禁止自动继续 |
 
-实现必须直接 switch 导入的 cc-zig enum，且不写 `else`：
+实现必须先由 bundle SDK 校验 raw code，再直接 switch SDK 导入的类型化 cc-zig enum，且不写 `else`：
 
 ```zig
 return switch (result.stop_reason) {
@@ -398,7 +455,7 @@ MetaWork 已脱离终端协议，但 AgentCore 仍可执行 shell 子进程。
 
 `vim`、`top`、交互式 REPL、需要 TTY 的 SSH 等不属于默认 Bash 工具能力。第一阶段明确拒绝或限制。未来若需要交互式终端，应作为独立 `TerminalTool` + PTY/ConPTY 加入，不得重新成为整个 Agent 通信层。
 
-cc-zig Bash 源码：`E:\project\cc-t2z\cc-zig\src\tools\bash.zig`。
+cc-zig Bash 源码（相对 cc-zig 仓库根目录）：`src/tools/bash.zig`。
 
 ## 11. 进程模型的传输影响
 
