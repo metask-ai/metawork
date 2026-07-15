@@ -1,165 +1,121 @@
 # MetaWork AgentCore 集成契约
 
-> 状态：高层集成约束已确认，容量与具体实现参数待 Phase 0 测量
-> 依赖：cc-zig / `metacodes-core`
+> 状态：同步 ABI v1 集成边界已确认；容量参数待 Phase 0A 实测
+> 依赖：cc-zig AgentCore bundle
 
-本文定义 MetaWork Zig Host 与 cc-zig 之间的规范边界。系统整体结构见 [高层架构](architecture.md)，预编译库必须导出的首版能力见 [AgentCore ABI v1 需求规格](agentcore-abi-v1.md)。
+本文定义 MetaWork Zig Host 与 cc-zig 之间的规范边界。系统整体结构见 [高层架构](architecture.md)，当前预编译库能力见 [AgentCore ABI v1 消费基线](agentcore-abi-v1.md)。
 
 ## 1. 集成原则
 
 1. cc-zig 是 Agent 结构化协议的唯一来源；
 2. MetaWork 不解析模型 Provider SSE；
 3. MetaWork 不建立平行的 `AgentEvent` / `WorkbenchEvent` 体系；
-4. cc-zig library facade 把内部 `UiBackend` / `UiRequester` contract 暴露为 ABI-safe callback contract，`MetaWorkUiBackend` 实现该 callback contract；
-5. MetaWork 只补充产品路由、运行生命周期、所有权和传输 envelope；
-6. MetaWork 正式应用只消费 cc-zig 发布的版本化 AgentCore library bundle，不通过 path/Git dependency 直接编译 cc-zig 源码；Phase 0 隔离 packaging spike 是唯一例外；
-7. AgentCore 与 Host 同进程或跨进程，不改变 Renderer 看到的产品边界。
+4. MetaWork 正式 Host 只使用 bundle typed SDK 和 binary ABI；
+5. AgentCore/tool callback 不直接调用 WebView；
+6. MetaWork 只补充产品路由、生命周期、所有权、传输 envelope 和安全校验；
+7. 当前产品路径只使用 cc-zig built-in tools，不注册 v1 Host tools；
+8. 当前 UI request 是同步调用，不伪装成 async suspend/resume；
+9. 进程模型变化不得改变 Renderer 看到的产品边界。
 
-### 1.1 library bundle 契约
+## 2. Bundle 消费合同
 
-cc-zig 独立负责构建和验证 `metacodes-core`。MetaWork 的依赖输入必须是一个完整 library bundle：
+MetaWork 的依赖输入是一个完整 bundle，而不是 cc-zig source tree：
 
 ```text
-metacodes-core bundle
-├── target-specific static library
-├── cc-zig-owned public Zig SDK definitions
+AgentCore bundle
+├── target-specific library
+├── C header
+├── cc-zig-owned Zig SDK
 └── manifest
-    ├── release version
-    ├── cc-zig commit
-    ├── API version
-    ├── exact Zig toolchain
-    ├── target / architecture / build mode
-    └── artifact checksum
 ```
 
-规范要求：
+### 当前 bootstrap
 
-- MetaWork 正式应用及其常规 build/test/package 流程不得引用 cc-zig source tree、源码相对路径或 Git source package；
-- Phase 0 允许一个明确隔离的 packaging spike 读取本地 cc-zig source tree，其唯一目标是证明 bundle 能被构建和独立链接；spike 不得成为应用 target 的传递依赖；
-- 开发 bootstrap：cc-zig 本地构建 bundle 并写入本地 artifact cache；MetaWork 可以从该 cache 解析，但不能指向 cc-zig source tree；
-- 正规发布：cc-zig CI 按 release version、target 和 architecture 将同一格式的 bundle 发布到远程 artifact repository，已发布版本必须不可变；
-- MetaWork dependency lock 必须记录精确 version/build identity、artifact identity 和 checksum，禁止使用 `latest`、版本范围或可变 tag；
-- dependency resolver 根据 lock 和当前 target 从配置的 artifact source 获取 bundle，校验 checksum 后写入或命中本地内容寻址 cache；
-- artifact 缺失或校验失败时构建明确失败，不能改走 cc-zig source checkout；
-- public Zig SDK definitions 只声明库的正式 ABI 表面，并随 cc-zig artifact 一起发布；它们不是 MetaWork 维护的协议副本；
-- ABI-safe 的 event/request/result views、`StopReason`、opaque handles 和回调签名必须来自该 bundle；
-- 库实现、Provider SSE、工具和 agent loop 均在 cc-zig 构建中完成，MetaWork 只链接产物；
-- binary ABI 使用 C-compatible calling convention 和固定布局类型；不得直接导出 native Zig slice、Zig enum、allocator、error union 或 tagged union，wire enum/tag/status 使用校验后的固定宽度整数 code，由 bundle SDK 包装成类型化 enum；
-- cc-zig facade 负责在内部 native `CoreEvent` / `UiRequest` / `RunResult` 与 ABI views 之间转换，并对 enum 使用无 `else` 穷尽 switch；
-- 初期 artifact 与消费者仍使用 manifest 固定的同一 Zig toolchain；ABI 稳定性成熟后才评估放宽；
-- 只有独立消费工程在不访问 cc-zig 实现源码的条件下完成 link/run smoke test，才算 library bundle 可交付。
+- cc-zig 独立构建并测试 bundle；
+- MetaWork 通过显式绝对 bundle root 消费；
+- 依赖配置锁定 build identity、commit、target、toolchain、ABI version 和 checksum；
+- 常规 build/test/package 不访问 cc-zig source tree；
+- artifact 缺失、target 不匹配或 checksum 错误时明确失败；
+- 禁止 path/Git source dependency、源码复制、`latest`、版本范围、可变 tag 和 source fallback。
 
-cc-zig 内部以 UI-neutral Runtime/Session owner 统一 Provider、Conversation、Workspace、工具权限、PermissionContext、AbortSignal、Run identity 和 callback-failure state。native Zig `pub` 类型仍是源码接口，不视为已交付 binary ABI。正式 v1 只需满足 [ABI v1 消费需求](agentcore-abi-v1.md)；具体内部拆分、导出函数名和 wire layout 由 cc-zig 在真实 consumer 验证后确定。
+当前不先实现 dependency resolver 或 content-addressed cache。同步 baseline 通过后，本地 cache 与远程 artifact repository 必须复用同一 bundle layout 和校验规则，不能改变 AgentCore 链接方式。
 
-依赖升级是显式工程变更：修改锁定 version/build identity 和 checksum，获取新 bundle，重新执行 API/StopReason 穷尽编译、link/run、permission、取消和 suspend/resume contract tests。MetaWork 不在普通启动或构建过程中自动追踪新版本。
+### raw probe 与正式 Host
 
-本地 bootstrap 与远程正式发布必须使用同一 bundle layout、manifest 和校验规则。后续切换到远程只改变 artifact source，不改变 MetaWork 的链接方式和 AgentCore contract。
+隔离的 artifact-only raw contract probe 只用于证明当前产物可以 source-free discover/link/run，并记录 bundle SDK 的缺口。该 probe：
 
-### 1.2 cc-zig bundle 接收条件
+- 可以直接使用 bundle 当前 raw SDK 类型和常量；
+- 不能进入正式 Host target；
+- 不能成为产品状态映射或 UI JSON 解析实现；
+- 不能注册到 React/Native SDK 正式链路。
 
-MetaWork 只接收由 cc-zig 构建的 bundle。开发期本地 bundle 与正式远程 bundle 使用同一 layout 和 manifest，至少必须包含：
+正式 Host 必须等 cc-zig bundle SDK 提供 typed status、StopReason、`CoreEvent` / `UiRequest` decoder 和 `UiResponse` encoder。MetaWork 不通过手写 raw enum、tag switch 或 JSON schema 绕过该 Gate。
 
-- 可重复执行的 AgentCore library 构建命令；
-- cc-zig-owned public SDK definitions；
-- 包含 commit/release、Zig toolchain、target、architecture、API/ABI version 和 checksum 的 manifest；
-- 不访问 cc-zig 实现源码的 artifact-only consumer；
-- consumer 对真实 agent loop、工具、Host 请求、suspend/resume、`StopReason`、事件 callback 和 abort 的 link/run 证据。
+## 3. 当前协议表面
 
-MetaWork 仓库不维护 cc-zig 的 ABI facade、SDK 或打包实现。
-
-cc-zig CLI 二进制不属于该 bundle，也不是 MetaWork 的运行依赖。
-
-## 2. Provider SSE 的归属
-
-```mermaid
-flowchart LR
-    API["Claude / OpenAI / Provider"]
-    STREAM["cc-zig SSE Parser"]
-    LOOP["cc-zig agent_loop"]
-    CORE["CoreEvent / UiRequest / RunResult"]
-    BACKEND["MetaWorkUiBackend"]
-    PUMP["Host Event Pump"]
-    BRIDGE["Native SDK Bridge"]
-    UI["React"]
-
-    API -->|"原始 Provider SSE"| STREAM
-    STREAM --> LOOP
-    LOOP --> CORE
-    CORE --> BACKEND
-    BACKEND --> PUMP
-    PUMP --> BRIDGE
-    BRIDGE --> UI
-```
-
-cc-zig 负责：
-
-- SSE framing；
-- Provider-specific event 解析；
-- 文本增量与 tool-call 参数组装；
-- usage、stop reason 和重试；
-- 工具执行与后续 agent loop。
-
-MetaWork 不包含 Anthropic/OpenAI SSE parser。cc-zig 的 HTTP/SSE `WebBackend` 是参考前端实现，不是 library 强制协议；同进程 MetaWork 不启动本地 HTTP Server 来绕一圈连接 React。
-
-## 3. cc-zig 结构化协议
-
-| 类型 | 方向 | 主要内容 |
+| 类型 | 方向 | 当前 ABI v1 语义 |
 | --- | --- | --- |
-| `CoreEvent` | Core → UI | `text_chunk`、stream、tool、progress、usage、context、retry、diagnostics |
-| `UiEvent` | UI → Core | `interrupt`、`queue_message` |
-| `UiRequest` | Core → UI | `ask_question`、`permission`、`plan_approval`、`custom` |
-| `UiResponse` | UI → Core | answers、permission choice、plan approval、custom result |
-| `RunResult` | Core → Host | `StopReason`、turn/tool count、可选 `SuspendInfo` |
+| `CoreEvent` JSON | Core → Host | callback-scoped borrowed bytes；携带 callback Session handle 和 run ID |
+| `UiRequest` JSON | Core → Host | 同步 callback 请求 |
+| `UiResponse` JSON | Host → Core | 同一 callback 内 answered response；或 unavailable/fatal |
+| ABI status | Core → Host | function 调用层错误，独立于有效 Run 结果 |
+| `RunResult` | Core → Host | status OK 后才有效；包含 stop reason code、turn/tool count |
+| abort | Host → Core | 按 Session/Run 的 user/timeout 中断机制 |
 
-`UiEvent` 是已定义的协议类型，不等于当前 `agent_loop` 已消费它。截止本文版本，cc-zig 生产代码没有调用 `UiBackend.poll()`；MetaWork 当前不能依赖 `poll()` 完成中断或生成期消息注入。
+`UiEvent` / `UiBackend.poll()` 虽然存在于 cc-zig native 协议中，但当前生产 agent loop 未证明消费。MetaWork 不依赖它完成 stop、生成期 queue message 或 steering。
 
-主要源码（相对 cc-zig 仓库根目录）：
+当前 ABI `RunResult` 不包含 `SuspendInfo`、resume token 或 background handle。出现 `suspended` / `backgrounded` code 时，Host 只能判定依赖合同不完整，不能制造可恢复状态。
 
-- `src/core/protocol/ui_event.zig`
-- `src/core/protocol/ui_backend.zig`
-- `src/core/protocol/ui_request.zig`
-- `src/core/agent_loop.zig`
+## 4. Host binding
 
-## 4. MetaWorkUiBackend
+Host binding 是 cc-zig backend 的 ABI 消费者，不是 Native SDK Adapter。它直接持有 bundle SDK API table 和 opaque handles。
 
-`MetaWorkUiBackend` 是 cc-zig backend，不是 Native SDK Adapter。
+### Event callback
 
-下列代码表达内部语义 contract，不是最终 binary ABI 函数签名。library facade 在库内构造 native `UiBackend` / `UiRequester`；wire 层暴露固定布局 callback table、opaque handles、固定宽度整数 code 和 pointer+length views，bundle SDK 负责校验 code 并提供类型化 enum。
-
-其核心职责：
-
-```zig
-const MetaWorkUiBackend = struct {
-    fn emit(
-        ctx: *anyopaque,
-        session: SessionId,
-        event: CoreEvent,
-    ) void;
-
-    fn poll(
-        ctx: *anyopaque,
-        session: SessionId,
-    ) ?UiEvent;
-
-    fn request(
-        ctx: *anyopaque,
-        session: SessionId,
-        allocator: Allocator,
-        req: *const UiRequest,
-        out: *UiResponse,
-    ) !RequestOutcome;
-};
+```text
+AgentCore/tool thread
+→ SDK validates bytes/tag/payload
+→ Host deep-copies escaping bytes
+→ attach workspace/session/run routing envelope
+→ push bounded test sink/event pump
+→ return CONTINUE or FATAL
 ```
 
-- `emit`：复制并投递 Core 事件；
-- `poll`：保留实现 cc-zig vtable，但在 cc-zig 真正接入消费点前不得承载产品保证；
-- `request`：处理提问、permission、计划审批和 custom UI；
-- 维护 Session 路由、请求标识、运行状态和线程安全；
-- 不重新解释或重命名整套 `CoreEvent`。
+约束：
 
-## 5. Host envelope
+- callback bytes 默认只在返回前有效；
+- 校验和深拷贝必须在 callback 内完成；
+- callback 可能来自不同 Session 的并发线程；
+- 同一 Run 的事件顺序必须保留；
+- 无法验证、复制或接收关键事件时返回 callback fatal；
+- callback 不等待 WebView，也不调用 Session destroy 或 re-enter Run。
 
-cc-zig 的 `SessionId` 位于 backend 函数参数中，不重复嵌入每个 `CoreEvent`。MetaWork 转发给 React 时增加外层 envelope：
+Gate 4 正式接入时先连接有界测试 sink。只有 callback、生命周期和 typed SDK 测试通过后，Gate 5 才接真实 Native SDK Bridge。
+
+### UI request callback
+
+```text
+Core calls synchronous UI callback
+→ SDK validates UiRequest
+→ Host resolves callback Session handle
+→ bind to Session current_run
+→ enqueue control item
+→ callback waits on Host-owned condition/channel
+→ response / deadline / cancel / close / shutdown
+→ SDK encodes response or returns unavailable/fatal
+```
+
+Bridge handler 只写入 response channel，不同步等待 AgentCore。callback wait 仍占用 Run executor slot。
+
+### Host tools
+
+当前 v1 Host tool callback 的 public contract 尚未给出可验证的 MetaWork Session/Run 映射。MetaWork 不使用全局 current-session、TLS 或每 Session 一个 Runtime 绕过这一缺口。
+
+因此产品 Runtime 配置必须保持 `host_tool_count = 0`。Read/Bash/Edit 使用 built-in tool catalog。Host tool 只允许在隔离 contract probe 中测试 callback/release mechanics。
+
+## 5. Host envelope 与产品状态
+
+Host 可以在 cc-zig event 外增加产品路由 envelope：
 
 ```json
 {
@@ -167,7 +123,6 @@ cc-zig 的 `SessionId` 位于 backend 函数参数中，不重复嵌入每个 `C
   "sessionId": "session-12",
   "runId": "run-8",
   "sequence": 318,
-  "timestamp": 1784012345678,
   "event": {
     "tool_start": {
       "id": "toolu_123",
@@ -180,299 +135,304 @@ cc-zig 的 `SessionId` 位于 backend 函数参数中，不重复嵌入每个 `C
 
 其中：
 
-- `event` 保持 cc-zig 语义；
-- `workspaceId` / `runId` 属于 MetaWork 产品；
-- `sessionId` 来源于 backend 调用参数；
-- `sequence` 用于单 Session 排序、重连和诊断；
-- `timestamp` 是 Host 观察时间，不替代 sequence。
+- `event` 保持 cc-zig 语义，不复制为另一套 Agent event；
+- workspace/session/run ID 属于 MetaWork 产品路由；
+- `sequence` 是 Host 的单 Session/Run 传输序列；
+- Host 可以维护 `run.started/completed/stopped/failed/cancelled/interrupted/waiting_ui` 等产品生命周期状态；
+- envelope 必须保留 SDK 验证后的原始 stop code/reason；
+- Renderer view model 可以派生消息列表和工具卡片，但不能反向成为 AgentCore 协议来源。
 
-Host 可以补充 `run.started`、`run.completed`、`run.stopped`、`run.failed`、`run.cancelled`、`run.suspended`、`run.backgrounding`、`run.backgrounded`、`run.interrupted`，因为它们描述一次 library 调用或产品执行转换的生命周期。envelope 必须同时保留原始 `StopReason`；不得为了命名偏好复制全部 Core 类型。
+## 6. Session 与 Runtime 生命周期
 
-## 6. 跨线程事件泵
+### 状态机
+
+```text
+Open.Idle
+  → Open.Queued
+  → Open.Running
+  ↔ Open.WaitingUi
+  → Open.Idle / terminal Run state
+
+Open.*
+  → Closing
+  → Closed
+```
+
+`WaitingUi` 是仍在执行的同步 Run 子状态，不是可持久化 `suspended`。
+
+### 每 Session 规则
+
+- 至多一个 in-flight Run；
+- 第二个 Run 明确排队或拒绝；
+- run ID 单调且与 Session 绑定；
+- queued Run 不接触 AgentCore mutable state；
+- active Run 独占 Session Conversation；
+- callback context 与 Session handle 具有独立 lifetime guard；
+- Run 返回不等于可以立刻 free callback context，必须确认 callback refcount 为零。
+
+### Close 顺序
+
+```text
+1. CAS Session state → Closing
+2. reject new Run and UI response
+3. remove/cancel queued Run
+4. wake active synchronous UI wait
+5. set first-writer-wins HostCause if absent
+6. request abort for active Run
+7. join Run job
+8. wait callback refcount == 0
+9. call session_destroy
+10. free Host callback/session state and mark Closed
+```
+
+规则：
+
+- callback 内不得直接 destroy；
+- abort stale/too-late 不跳过 join；
+- `session_destroy` busy 说明 Host 顺序错误或 Run 尚未退出，不允许强行 free；
+- double close、重复 cancel 和 shutdown 竞态必须幂等；
+- Runtime 记录活跃 Session，只有全部 Session Closed 后才能 destroy；
+- Host shutdown 对全部 Session 执行同样状态机，不另写一条危险的快速路径。
+
+### 必测 race
+
+- cancel 与自然完成同时发生；
+- close queued Session；
+- close active Run；
+- close while WaitingUi；
+- callback fatal 与用户 cancel 同时发生；
+- Host shutdown 多 Session；
+- abort 返回 stale/too-late；
+- double close / duplicate response；
+- runtime destroy while Session alive；
+- diagnostic/release callback 恰好一次。
+
+## 7. HostCause 与错误传播
+
+每个 Run 持有：
+
+```text
+RunControl
+├── HostCause: atomic optional, first writer wins
+├── active run_id
+└── abort capability
+```
+
+HostCause 至少区分：
+
+- user cancel；
+- timeout；
+- Session close；
+- Host shutdown；
+- event validation/copy failure；
+- queue/control capacity failure；
+- unrecoverable Bridge pipeline failure。
+
+当前 wire abort reason 只作为 AgentCore 中断机制，产品最终状态由 HostCause 与 ABI status/StopReason 共同决定。
+
+### callback 内失败
+
+event validation、copy 或同步入队失败：
+
+```text
+set HostCause if absent
+→ return CALLBACK_FATAL
+→ session_run returns non-OK callback status
+→ Host releases diagnostic
+→ Run = failed
+```
+
+此路径不读取 `RunResult`。
+
+### callback 返回后的失败
+
+不可恢复 Bridge pipeline failure 发生在 Run 仍 active 时：
+
+```text
+set HostCause
+→ request abort
+→ wait for session_run return
+→ map final state from HostCause
+```
+
+临时 Renderer detach 不立即算 fatal。Host 可以在已定义的 count/byte/time 窗口内保留状态并重连；超过边界才升级为 pipeline failure。
+
+## 8. Event pump
 
 ### 固定路径
 
 ```mermaid
 flowchart LR
     CORE["AgentCore / Tool Threads"]
-    COPY["emit 内深拷贝<br/>分配 envelope"]
-    QUEUE["有界分级队列<br/>线程安全"]
-    PUMP["Host 主线程 pump<br/>批量 drain"]
+    COPY["callback validate + deep copy"]
+    QUEUE["bounded per-Session queues"]
+    PUMP["Host main-loop pump"]
     BRIDGE["Native SDK Bridge"]
     UI["React"]
 
-    CORE -->|"CoreEvent / UiRequest"| COPY
-    COPY --> QUEUE
-    QUEUE --> PUMP
-    PUMP --> BRIDGE
-    BRIDGE --> UI
+    CORE --> COPY --> QUEUE --> PUMP --> BRIDGE --> UI
 ```
 
-### 所有权
+### 必须测量和固定的维度
 
-`CoreEvent` 中字符串 slice 通常是 borrowed。`emit()` 返回后可能立即失效，因此禁止：
+- global queue count/bytes；
+- per-Session queue count/bytes；
+- maximum single event bytes；
+- control reserved capacity；
+- Bridge batch count/bytes/time window；
+- per-pump Session/event budget；
+- temporary detach retention count/bytes/time；
+- large object store byte/count/TTL（如果最终需要）。
 
-```zig
-queue.push(event); // 错误：保存 borrowed 指针
-```
+### 过载语义
 
-必须在 `emit()` 返回前复制全部逃逸数据：
-
-```zig
-const owned = copyCoreEvent(host_allocator, session, event) catch {
-    run_control.failAndAbort(.event_copy_failed);
-    return;
-};
-queue.push(owned);
-```
-
-队列消费后统一释放 owned event。错误路径、Bridge 失败和 Session 关闭必须覆盖释放逻辑。
-
-### 队列策略
-
-队列必须有界，并避免单 Session 垄断。具体容量由 Phase 0 测量，语义现在固定：
-
-| 数据 | 过载策略 |
+| 数据 | 允许策略 |
 | --- | --- |
-| `text_chunk` | 按 Session/Run 合并；当前不得丢失字节 |
-| `tool_progress` | 可以覆盖同一 tool 的旧进度，只保留最新值 |
-| `usage` | 累计合并 |
-| spinner/current-tool 状态 | 允许用最新状态覆盖旧状态 |
-| `diag_*` | 可按诊断配置采样 |
-| `tool_start` / `tool_result` | 不得静默丢失 |
-| `UiRequest` / approval | 不得静默丢失 |
-| error / cancel / stopped / suspended / backgrounded / completed | 不得静默丢失 |
+| `text_chunk` | 按 Session/Run 合并；最终字节必须一致 |
+| `tool_progress` | 同一 tool 只保留最新进度 |
+| `usage` | 正确累计或替换为最新完整值，取决于 cc-zig 事件语义 |
+| diagnostics | 按明确配置采样 |
+| tool start/result | 不得静默丢失 |
+| UI request/response state | 不得静默丢失 |
+| run/error/cancel/terminal state | 不得静默丢失 |
 
-cc-zig 当前没有携带完整最终 assistant 内容的消息快照事件。因此丢弃 `text_chunk` 会永久破坏回复，只能合并、短暂阻塞或显式失败。
+当前没有完整最终 assistant snapshot 时，`text_chunk` 不能丢。队列不能接收关键事件时，可以有限阻塞 callback；达到 deadline 后返回 fatal，而不是无限等待。
 
-为控制事件预留容量。队列仍无法接收控制事件时，可以短暂阻塞 producer；超过上限后显式终止当前 Run 并记录错误，不能伪装成功。
+按 Session 公平轮转，单一高输出 Session 不得饿死其他 Session。控制容量不能被文本增量占满。
 
-`emit()` 返回 `void` 表示没有显式可失败反压协议，不表示 Backend 不能通过同步阻塞形成有限反压。
+### 大 payload
 
-### 失败反向注入
+先测 Native SDK 和真实事件大小。只有事件或 batch 确实超过 Bridge 边界时才加入 Host-owned object reference：
 
-事件泵失败不能只改 Host 状态；同步运行的 `agent_loop` 必须被要求停止。每个 in-flight Run 持有独立的控制对象：
+- opaque object ID；
+- Session/Run ownership；
+- count/byte/TTL 上限；
+- Renderer fetch 命令的来源和归属校验；
+- Session close、Run terminal、reload 和 shutdown 清理。
+
+禁止为了假想大对象先建设通用 blob service。
+
+## 9. Renderer reload 与重连
+
+当前 baseline 只保证 WebView/Renderer reload 后从仍存活 Host 重建视图：
+
+- Native SDK 的真实 push/poll 机制由 Gate 0 先验证；
+- Host 维护可生成当前 view snapshot 的产品状态；
+- 重连策略必须定义 snapshot/event 的大小上限、旧连接隔离和清理；
+- reload 期间仍 active 的同步 UI request 可以重新展示，但响应仍须绑定原 Session/Run/request；
+- Host/AgentCore 进程退出后不恢复 active Run；
+- snapshot 不包含 Provider credential。
+
+不在验证 transport 前发明固定 `events.drain`、cursor 或轮询协议；最终机制必须以 Native SDK 事实和压力数据为依据。
+
+## 10. UI request 语义
+
+当前 ABI v1 只有同步 outcome：answered、unavailable、fatal。
+
+- answered response 由 SDK encoder 生成，并按照 bundle ownership 规则 release 恰好一次；
+- unavailable 表示当前 Host 无法回答，Core 按其工具语义安全失败；
+- fatal 表示 Host request pipeline 失败，Run 必须退出；
+- 每个 Run 同时最多一个 active UI wait；
+- deadline 到期默认 deny/unavailable，不允许无限等待；
+- cancel、close、shutdown 唤醒 wait；
+- response 必须拒绝 stale、duplicate、错误 Session/Run 和错误类型；
+- 同步 wait crash 后不恢复，工具保持未执行，Run 标记 interrupted。
+
+未来 async pending/resume 必须独立定义 request identity、SuspendInfo、持久化、exactly-once tool execution、subagent 限制和 crash recovery；不能只在 React 中保存审批框。
+
+## 11. RunResult 与 StopReason
+
+`session_run` 的处理顺序固定：
 
 ```text
-RunControl
-├── abort: AbortSignal
-└── fatal_reason: atomic optional HostFatalReason
-
-emit copy OOM / control queue timeout / unrecoverable bridge pipeline failure
-  → first-writer wins: set fatal_reason
-  → abort.abort(host failure reason)
-  → agent_loop 在检查点返回 stop_reason=.aborted
-  → Host 先检查 fatal_reason，再映射为 run.failed
+call ABI
+→ validate typed function Status
+→ non-OK: release diagnostic, do not read RunResult
+→ OK: validate RunResult and typed StopReason
+→ exhaustive Host mapping
 ```
 
-cc-zig 内部如何表示 Host failure 可以演进，但 ABI 必须保留可区分的原因。Host 同时保留结构化 `fatal_reason` side channel，用于记录具体基础设施故障并把 `.aborted` 映射为 `failed`，禁止误报成用户取消。
+| StopReason | 当前 Host 状态 |
+| --- | --- |
+| `end_turn` | completed |
+| `max_turns` | stopped / awaiting_user |
+| `aborted` | HostCause 决定 cancelled / interrupted / failed |
+| `tool_error` | failed |
+| `api_error` | failed |
+| `tool_loop` | stopped / awaiting_user |
+| `suspended` | dependency contract failure：当前没有 resume payload |
+| `backgrounded` | dependency contract failure：当前没有 background handle/state transfer |
+| `budget` | stopped / awaiting_user |
 
-### 主线程边界
+MetaWork 对 bundle SDK 的 typed StopReason 使用无 `else` switch。unknown raw code 必须在 SDK validation 层失败，并在 diagnostic 中保留 raw value。
 
-AgentCore 和工具线程不得直接操作 WebView。Native SDK Bridge 调用只发生在 Host/UI 事件循环。主线程 pump 以批量方式 drain，避免每个 token 单独触发一次 Bridge 调用。
+`stream_done` 只表示一次模型流结束，不等于整个 Run 完成。只有 ABI status 与 RunResult 映射完成后才能发布 terminal product state。
 
-`UiResponse` 和 Workbench command 使用线程安全通道进入对应 Run/Session。Bridge handler 不同步运行长耗时 agent loop。`UiEvent` 的当前限制与替代路径见下一节。
+## 12. Credential、Workspace 与工具安全
 
-## 7. 反向控制与 Host 中断
+### Credential
+
+- Provider key 从 Host process environment 或受控配置读取；
+- 只在 `session_create` 所需期间构造 borrowed view；
+- 不从 Renderer command 接收 key；
+- 不写日志、event、snapshot、crash diagnostic 或持久化 view；
+- Host 临时 buffer 在不再需要时及时清理；
+- cc-zig 是否复制并如何清理 Session credential 以锁定 bundle contract 为准。
+
+### Workspace
+
+- Host 规范化用户选择路径并绑定 MetaWork Session；
+- 当前 v1 只运行临时 fixture 或用户明确 trusted 的 Workspace；
+- 不以 `workspace_root` 字段存在为 strict security 证据；
+- symlink、路径逃逸、不存在写入目标、sandbox、process tree 和 TOCTOU 矩阵属于后续安全 Gate；
+- strict security 未完成前，UI 和文档不得宣称可以安全运行不可信 Workspace。
+
+### built-in tools
+
+- Runtime catalog 与 Session allowlist 共同限制可发布工具；
+- Provider 伪造未发布工具名必须 dispatch 失败；
+- Write/Edit/Bash 等危险操作执行前经过同步 permission；
+- 默认 Bash 是非交互 shell，不使用 PTY；
+- stdout/stderr/exit code 有界或通过后续对象引用展示。
+
+## 13. 反向控制
 
 ### 当前有效路径
 
-```mermaid
-flowchart LR
-    UI["React command"]
-    BRIDGE["Native SDK main thread"]
-    ROUTER["Run / Session router"]
-    ABORT["per-Run AbortSignal"]
-    INPUT["Host bounded input queue"]
-    RUN["AgentCore worker"]
-
-    UI --> BRIDGE --> ROUTER
-    ROUTER -->|"stop / cancel"| ABORT --> RUN
-    ROUTER -->|"queue message"| INPUT
-    INPUT -->|"current Run ends, next Run input"| RUN
-```
-
-- Stop/cancel 直接对目标 Run 的 `AbortSignal` 做原子中断，不经过 WebView 回调或 `UiBackend.poll()`；
-- 生成期间提交的 `queue_message` 先进入 Host 的 Session 输入队列，当前 Run 结束后合并或按产品规则启动下一 Run；
-- Host 输入队列按 Session 同时限制条数和总字节数。满载时 Bridge command 必须显式拒绝或让调用方重试，不能无限增长或静默丢弃；
-- interrupt 是每 Run 的幂等原子状态，不进入普通 FIFO，也不会被低优先级消息阻塞；
-- `UiResponse` 通过 request ID 路由，不与普通 `queue_message` 共用无类型缓冲区。
-
-### `UiBackend.poll()` 的启用门槛
-
-只有 cc-zig 在真实 `agent_loop` 检查点调用 `poll()`，并完成顺序、所有权、中断优先级和阻塞调用测试后，MetaWork 才能把 `UiEvent` 用作运行中反向通道。启用时仍必须满足：
-
-- `interrupt` 采用原子/合并语义，优先于普通消息；
-- `queue_message` 队列有 count 与 byte 双上限；
-- poll 返回的 owned slice 在 Core 消费后严格释放；
-- 中断、HTTP stream、长工具和 Run 边界都有可复现检查点测试。
-
-在此之前，文档和 UI 不得宣称支持“通过 `UiEvent` 实时 steering 当前 Run”。
-
-## 8. UI 请求与恢复语义
-
-cc-zig 当前存在两条不同路径。
-
-### 可挂起路径
-
-以下请求可返回 `.pending`：
-
-- `ask_question`
-- `plan_approval`
-- `custom`
-
-对应流程：
-
 ```text
-UiRequester returns .pending
-  → tool returns error.UiPending
-  → agent_loop returns stop_reason=.suspended
-  → RunResult.suspend_info
-  → Host persists transcript + SuspendInfo
-  → UI response arrives
-  → Host calls resumeRun
+React stop command
+→ Native SDK main thread handler
+→ validate Session/Run
+→ set HostCause=user_cancel
+→ session_abort(run_id)
+→ join synchronous run
+→ publish terminal state
 ```
 
-`.suspended` 是明确 checkpoint 边界。响应必须校验 Session、Run、request/tool-use ID 和当前状态，拒绝过期或重复响应。
+stop 不进入普通 FIFO，不能被文本或 queue message 阻塞。abort 只请求中断；UI 必须等待真实 Run 返回后才能显示 terminal state。
 
-### 单挂起点限制
+生成期 `queue_message` 当前只进入 Host 有界 Session 输入队列，在当前 Run 结束后按确定规则形成下一 Run 输入。它不依赖未接通的 `UiBackend.poll()`。
 
-cc-zig 当前每个 turn 只支持一个可恢复挂起点：
+## 14. Shell 边界
 
-- 同一 turn 出现多个返回 `.pending` 的 UI 工具时，只有第一个写入 `SuspendInfo`；
-- 其他 pending 工具被转换为 `ConcurrentSuspendUnsupported` error result；
-- MetaWork UI 每个 Run 只展示一个 active resumable request，不制造多个可同时响应的审批框；
-- 该限制只针对 `ask_question`、`plan_approval`、`custom` 等可挂起请求，不包含下面的同步 permission。
-
-### subagent 限制
-
-cc-zig 当前只在 `agent_depth == 0` 时向 `ToolContext` 注入 `UiRequester`。MetaWork Phase 0 固定以下行为：
-
-- 只有顶层 Run 可以进入可恢复 UI 挂起；
-- subagent 不得发起可挂起 UI 请求；
-- subagent 请求此能力时必须得到明确的 unsupported/unavailable tool error，不能等待、伪造成功或形成不可恢复的 `.suspended`；
-- 将来若允许 subagent 挂起，必须先定义父子 Run 的 request routing、checkpoint、恢复顺序和取消传播。
-
-### 同步 permission
-
-普通工具 `permission` 当前是 execute 前的同步门：
-
-- 只有 `.answered` 继续使用响应；
-- `.pending` 当前不会生成 `SuspendInfo`；
-- 无可用 TTY 的 GUI 路径安全 deny；
-- 同步等待期间发生 Host/Core crash，原生调用栈无法恢复。
-
-MetaWork 当前语义：
-
-```text
-crash during permission wait
-  → Run = interrupted
-  → pending permission invalidated
-  → tool remains not executed
-  → user explicitly retries or starts a new Run
-```
-
-若将来要求 permission 跨重启恢复，必须扩展 cc-zig suspend contract，并处理 stale approval、重复执行和 tool-use/tool-result 配对，不能只在 React 中保留一个审批框。
-
-## 9. Run 生命周期
-
-`stream_done` 只表示一次模型流结束，不等于整个 agent run 成功。Host 必须结合：
-
-- `RunResult.stop_reason`；
-- `RunResult.suspend_info`；
-- `agent_loop.run()` / `resumeRun()` 返回的 error；
-- abort 和 Host shutdown 状态。
-
-Host 使用稳定状态加原始 `StopReason`，而不是重新定义九套 Core 枚举：
-
-```text
-run.started
-run.completed
-run.stopped
-run.failed
-run.cancelled
-run.suspended
-run.backgrounding
-run.backgrounded
-run.interrupted
-```
-
-### StopReason 穷尽映射
-
-| cc-zig `StopReason` | Host 状态 / 转换 | UI 语义 | 恢复或继续方式 |
-| --- | --- | --- | --- |
-| `end_turn` | `completed` | 本次 Run 正常完成 | 无；下一次用户输入创建新 Run |
-| `max_turns` | `stopped`，Session=`awaiting_user` | 达到防呆轮数上限，任务可能未完成 | 用户确认或调整方向后创建新 Run |
-| `aborted` | `cancelled` / `interrupted` / `failed` | 由 user cancel、Host shutdown 或 Host fatal 原因决定 | 不调用 `resumeRun`；按原因重试或新建 Run |
-| `tool_error` | `failed` | 当前 Run 因不可恢复工具错误停止 | 修正后创建新 Run |
-| `api_error` | `failed` | Provider/API 重试耗尽或请求失败 | 重试时创建新 Run |
-| `tool_loop` | `stopped`，Session=`awaiting_user` | 重复无效动作熔断，不伪装完成 | 用户调整方向后创建新 Run |
-| `suspended` | `suspended` | 存在一个有效 `SuspendInfo` 和待响应 UI 请求 | 校验响应后对同一 Run 调用 `resumeRun` |
-| `backgrounded` | `backgrounding` → `backgrounded` / background Run running | 当前 library 调用已返回，但产品任务未完成 | 深拷贝 Conversation 并成功启动后台执行；失败则保留前台状态 |
-| `budget` | `stopped`，Session=`awaiting_user` | 成本闸触顶，等待用户明确决定 | 提高/确认预算后创建新 Run，禁止自动继续 |
-
-实现必须先由 bundle SDK 校验 raw code，再直接 switch SDK 导入的类型化 cc-zig enum，且不写 `else`：
-
-```zig
-return switch (result.stop_reason) {
-    .end_turn => ...,
-    .max_turns => ...,
-    .aborted => ...,
-    .tool_error => ...,
-    .api_error => ...,
-    .tool_loop => ...,
-    .suspended => ...,
-    .backgrounded => ...,
-    .budget => ...,
-};
-```
-
-`.aborted` 的 Host 映射必须检查 `RunControl.fatal_reason`、用户取消记录和 shutdown 状态。`.backgrounded` 只有在 Conversation clone 与后台执行启动都成功后才可发布成功转换；不能在收到 stop reason 时立即标记 completed。
-
-取消不能只是停止 React 渲染。只有 AgentCore 已确认 abort/stop 后，Run 才进入终态。
-
-### cc-zig 契约版本
-
-MetaWork 固定明确的 cc-zig commit。当前 cc-zig `doc/LIB_API.md`、`doc/CORE_REFERENCE.md` 与源码的 `StopReason`、Session 参数和 `UiRequester` 签名存在漂移，因此：
-
-- 构建直接导入 cc-zig 类型，不复制 enum 或 vtable 签名；
-- 用上述无 `else` switch 作为编译期变更探针；
-- Phase 0 保存实际 commit、导出类型检查结果和 contract smoke test；
-- cc-zig 对外文档未同步前，不把文档示例当作比编译器类型更高的事实来源。
-
-## 10. Shell 与终端边界
-
-MetaWork 已脱离终端协议，但 AgentCore 仍可执行 shell 子进程。
-
-| 能力 | 默认 Bash 工具 |
+| 能力 | 当前 Bash baseline |
 | --- | --- |
-| shell child process | 使用 |
-| stdout/stderr pipe 或文件 | 使用 |
+| hidden non-interactive child | 使用 |
+| stdout/stderr capture | 使用 |
+| exit code/timeout/cancel | 必须验证 |
 | Terminal Emulator | 不使用 |
-| PTY / ConPTY | 普通命令不使用 |
+| PTY/ConPTY | 不使用 |
+| TTY-only programs | 拒绝或明确报错 |
 
-当前 cc-zig POSIX 路径通过 `/bin/sh -c` 执行，捕获 stdout、stderr 和 exit code；后台任务重定向到文件。Windows 兼容实现应使用隐藏的非交互 shell 子进程和 pipe，不弹出控制台窗口。
+未来如需交互式终端，应作为独立 `TerminalTool` 设计，不得重新成为 Agent 通信层。
 
-`vim`、`top`、交互式 REPL、需要 TTY 的 SSH 等不属于默认 Bash 工具能力。第一阶段明确拒绝或限制。未来若需要交互式终端，应作为独立 `TerminalTool` + PTY/ConPTY 加入，不得重新成为整个 Agent 通信层。
+## 15. 进程模型
 
-cc-zig Bash 源码（相对 cc-zig 仓库根目录）：`src/tools/bash.zig`。
+当前先实现同进程 bounded executor，得到最小真实数据。完整 Phase 0A 还必须：
 
-## 11. 进程模型的传输影响
+1. 在独立测试进程注入 AgentCore/tool fatal crash，记录 Host 与全部 Session 的影响；
+2. 建立隔离的最小 Worker harness，验证 Host 存活、Session 失败、重启时间和危险工具不自动重放；
+3. 根据故障影响、资源、吞吐和复杂度选择同进程或单 Worker；
+4. 不把 spike IPC 当作正式产品协议；只有决定使用 Worker 后才设计版本化 IPC。
 
-同进程：
-
-```text
-Host → metacodes-core library call
-CoreEvent → UiBackend callback / queue
-```
-
-独立 Worker：
-
-```text
-Host → structured IPC command → Worker
-Worker → structured IPC event → Host
-```
-
-Renderer 始终面对 Host 的领域命令与 envelope。进程模型变化不得让 React 直接绑定 Worker、Provider SSE 或 cc-zig 内部内存。
-
-IPC framing 尚未锁定。无论使用长度前缀帧、NDJSON 或其他方案，都必须定义最大消息、关联 ID、版本、队列上限、断连和未完成 Run 语义。
+Renderer 始终只面对 Host 领域命令和产品 envelope，不直接绑定 Worker 或 AgentCore memory。

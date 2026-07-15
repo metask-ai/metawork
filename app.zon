@@ -1,0 +1,43 @@
+.{
+    .id = "dev.metawork.desktop",
+    .name = "metawork",
+    .display_name = "MetaWork",
+    .description = "A native workbench for structured agent sessions.",
+    .version = "0.0.1",
+    .platforms = .{"macos"},
+    .permissions = .{"window"},
+    .capabilities = .{ "webview", "js_bridge" },
+    .bridge = .{
+        .commands = .{
+            .{ .name = "metawork.smoke.ping", .origins = .{"zero://app"} },
+            .{ .name = "metawork.smoke.eventAck", .origins = .{"zero://app"} },
+        },
+    },
+    .frontend = .{
+        .dist = "frontend/dist",
+        .entry = "index.html",
+        .spa_fallback = true,
+        .dev = .{
+            .url = "http://127.0.0.1:5173/",
+            .command = .{ "npm", "--workspace", "@metawork/renderer", "run", "dev", "--", "--host", "127.0.0.1" },
+            .ready_path = "/",
+            .timeout_ms = 30000,
+        },
+    },
+    .security = .{
+        .navigation = .{
+            .allowed_origins = .{"zero://app"},
+            .external_links = .{ .action = "deny" },
+        },
+    },
+    .web_engine = "system",
+    .windows = .{
+        .{
+            .label = "main",
+            .title = "MetaWork · Phase 0",
+            .width = 1180,
+            .height = 760,
+            .restore_state = true,
+        },
+    },
+}

@@ -1,239 +1,422 @@
 # MetaWork Phase 0 验证计划
 
-> 状态：待执行
-> 目标：用最小真实原型验证已选技术栈和关键风险，不在 Phase 0 完成整个产品
-> 顺序：Phase 0A 优先完成 macOS 垂直验证；Phase 0B 在其后验证 Windows，不阻塞 0A
+> 状态：待执行；Gate 顺序已按 AgentCore ABI v1 同步能力收敛
+> 平台：Phase 0A macOS-first；Phase 0B 后续验证 Windows
 
-## 1. 验证目标
+Phase 0 用最小真实原型验证技术栈和关键风险，不交付完整产品。当前 AgentCore bundle 是 experimental ABI revision 1，同步 baseline 不包含 async suspend/resume、跨进程恢复、strict Workspace security 或正式 Host tools。
 
-Phase 0 回答以下问题：
+## 1. 里程碑定义
 
-1. Native SDK 能否先在 macOS 上稳定承载 React production bundle、双向 Bridge 和桌面生命周期？
-2. cc-zig 能否以 `metacodes-core` library 形式完成真实 agent loop？
-3. `MetaWorkUiBackend` 能否可靠处理 borrowed 数据、跨线程事件和 WebView 主线程投递？
-4. 多 Session 下的事件吞吐、内存和 UI 响应是否可控？
-5. 同进程与 Worker 模型的故障域和恢复代价分别是什么？
-6. cc-zig 当前可挂起 UI 请求与同步 permission 的恢复语义是否能形成可信产品行为？
-7. 每 Session 单 Run、有限 worker 和 allocator 生命周期是否在多 Session 下保持正确？
-8. 全部 `StopReason`、Host fatal abort 和当前真实反向控制路径是否能产生可信状态？
-9. macOS 基线成立后，Native SDK 与 cc-zig 能否分别在 Windows 上复现构建、运行、Bridge、Shell 和打包能力？
+### 同步 macOS baseline
+
+Gate -1 至 Gate 6 通过后，得到一个同进程 macOS 同步原型。它证明 UI、Bridge、AgentCore、built-in tools、同步审批、取消、事件泵和 shutdown 可以形成真实垂直链路。
+
+### 完整 Phase 0A
+
+同步原型之后还必须通过 Gate 7 fault-domain spike，并形成进程模型结论，才能称 Phase 0A 完成。
+
+### 后续发布与能力演进
+
+content-addressed cache、remote/empty-cache/offline 发布、stable ABI support policy、async resume、strict Workspace security、正式 Host tools 和 Windows Phase 0B 在 Phase 0A 同步验证之后推进。
 
 ## 2. 最小垂直链路
 
 ```text
-React 输入
-  → Native SDK Bridge
-  → Zig Workbench
-  → metacodes-core agent_loop
-  → cc-zig CoreEvent / UiRequest / RunResult
-  → MetaWorkUiBackend 有界事件泵
-  → Native SDK Bridge
-  → React 结构化渲染
+React input
+→ Native SDK Bridge
+→ Zig Workbench
+→ typed AgentCore bundle SDK
+→ synchronous session_run
+→ CoreEvent / synchronous UiRequest / RunResult
+→ bounded Host event pump
+→ Native SDK Bridge
+→ React structured UI
 ```
 
 模型 Provider SSE 必须止于 cc-zig。React 不接触原始 SSE，也不从终端字符推断 Agent 状态。
 
-## 3. 原型范围
+## 3. Gate 顺序
 
-### 必须实现
+```text
+Gate -1 specs
+→ Gate 0 Native SDK smoke
+→ Gate 1 artifact-only raw contract probe
+→ Gate 2 Host lifecycle/security foundation
+→ Gate 3 cc-zig typed SDK completion
+→ Gate 4 formal AgentCore Host + bounded test sink
+→ Gate 5 event pump/Bridge
+→ Gate 6 in-process macOS prototype
+→ Gate 7 fault-domain decision
+```
 
-- 打开一个本地 Workspace；
-- 创建和切换 Session；
-- 提交一轮真实 Agent 输入；
-- 流式显示 `text_chunk`；
-- 展示至少一次 `tool_start` / `tool_result`；
-- 执行一次非交互 shell 命令并展示 stdout、stderr 和 exit code；
-- 处理一次普通工具 permission；
-- 处理至少一种可 `.pending` 的 UI 请求并完成 suspend/resume；
-- 取消运行并得到真实终态；
-- 模拟全部九个 `StopReason` 并得到穷尽、可解释的 Host 状态；
-- 同时运行多个 Session；
-- Renderer 刷新后恢复保存的 Session 视图；
-- 正常关闭 Host 和 AgentCore。
+Gate 未通过时不得用 source dependency、MetaWork 自制协议、无界队列或放宽安全语义绕过。
 
-### 不在 Phase 0 实现
+## 4. Gate -1：规范对齐
 
-- 完整产品视觉系统；
-- `.native` Renderer；
-- 通用 Desktop Framework 抽象；
-- 完整 IDE；
-- 默认 PTY/Terminal Emulator；
-- 最终数据库和完整迁移体系；
-- 生产级自动更新服务；
-- 所有多 Agent 和后台任务产品能力。
+### 输入
 
-## 4. 验证矩阵
+- 当前 cc-zig bundle header、SDK、manifest 和 artifact-only consumer；
+- MetaWork 产品、架构、集成和 ABI 文档。
 
-### 4.1 Native SDK / 平台
+### 验收
 
-以下能力先在 macOS Phase 0A 验证；Phase 0B 再在 Windows 重跑平台相关用例。Windows 失败不阻塞 0A 结论，但阻止项目声明 Windows 或跨平台交付就绪。
+- 明确 experimental ABI revision 1 与 stable support policy 的区别；
+- 当前 v1 只声明同步能力；
+- async pending/resume、持久化、strict Workspace security 和正式 Host tools 移入后续 capability；
+- Renderer reload 与进程恢复明确分离；
+- 现有 v1 不兼容变化必须换 ABI version，兼容增量必须用 capability；
+- AGENTS、README 和所有 source of truth 无冲突。
 
+## 5. Gate 0：Native SDK macOS React smoke
+
+> 状态：已通过。实现与实测证据见 [Phase 0 Gate 0 验证报告](phase-0-gate-0-report.md)。
+
+### 必须验证
+
+- 固定 Native SDK 精确版本或 commit；
 - React development server 加载；
 - React production assets 加载；
 - JavaScript → Zig command；
-- Zig → React event；
+- 真实 Zig → React 传输方式；
+- WebView/main thread 调用约束；
+- command/result/event 最大 bytes；
+- dev origin allowlist 与 release origin policy 分离；
 - 文件/目录选择；
-- 窗口创建、关闭和正常退出；
-- Bridge 来源与命令白名单；
-- Debug 和 Release 构建；
-- 可复现的 Windows 分发包；
-- 签名和更新路径是否存在明确落地方案。
+- 窗口创建、reload、close 和正常退出；
+- Debug 与 Release macOS 构建。
 
-Native SDK 与 cc-zig Windows 兼容是两条独立验证线，不能用其中一条的成功代替另一条。
+### 禁止预设
 
-### 4.2 cc-zig library
+- 不在验证前发明 `events.drain`；
+- 不假定一定存在 native push API；
+- 不让 Provider credential 进入 Bridge；
+- 不先实现 AgentCore 或完整 Workbench UI。
 
-- 以 [AgentCore ABI v1 需求规格](agentcore-abi-v1.md)作为 capability、函数职责和冻结门槛的 source of truth；
-- 固定并记录 cc-zig commit；
-- 固定精确 Zig toolchain、target、构建模式和 AgentCore API version；
-- 由 cc-zig 独立构建和测试版本化 `metacodes-core` library bundle；Phase 0A 允许先写入本地 artifact source，不要求远程发布设施先完成；
-- cc-zig 提供不访问实现源码的 artifact-only consumer，证明 bundle 能独立导入、链接和真实调用；
-- 本地开发 bundle 使用包含 cc-zig commit 的精确 dev version/build identity；MetaWork 依赖锁同时记录 target、architecture 和 artifact checksum；
-- bundle 至少包含 target-specific 静态库、cc-zig-owned public Zig SDK definitions 和 manifest；
-- MetaWork 正式应用不使用本地 path dependency、Git source dependency 或源码复制；常规构建期间不访问 cc-zig 实现源码；
-- 从 cc-zig 本地构建产物填充 artifact cache，验证 checksum、目标平台选择和重复构建 cache 命中；
-- 注入 checksum 不匹配和缺少目标平台 artifact，构建必须明确失败且不回退源码；
-- 从 MetaWork 独立消费工程导入 public SDK、链接 AgentCore 库并完成 link/run smoke test；
-- 验证 native `pub fn` 不能被误当作 binary export；ABI 不直接暴露 native slice、inferred-tag enum、allocator、error union 或 tagged union；
-- ABI facade wire 层使用校验后的固定宽度整数 code、pointer+length、opaque handles、固定布局 structs 和 callback context；bundle SDK 将合法 code 包装为类型化 enum，facade 对内部 `StopReason` 做无 `else` 穷尽映射；
-- 进入共享 CI/正规发布前，再验证远程上传、从空 cache 下载以及已填充 cache 的离线重建；该分发设施不阻塞本地 Phase 0A；
-- `agent_loop.run()` 真实运行；
-- Provider SSE 被 cc-zig 转换为 `CoreEvent`；
-- 直接从 bundle SDK 导入 ABI `StopReason`，编译无 `else` 的九变体 switch；同时验证 cc-zig facade 对内部 enum 的穷尽映射；
-- 验证 `UiBackend.poll()` 当前是否存在真实生产消费点，不以接口声明或测试桩代替调用链证据；
-- 当前基线使用 per-Run `AbortSignal` 完成 stop/cancel；
-- 当前基线将生成期 `queue_message` 保存在 Host 有界队列，Run 结束后作为下一 Run 输入；
-- 若 Phase 0 选择在 cc-zig 接通 `UiBackend.poll()`，必须单独验证检查点、顺序、所有权和中断优先级后才能启用；
-- `UiRequest` / `UiResponse`；
-- `RunResult`、error 和 stop reason；
-- transcript、`SuspendInfo` 和 `resumeRun`。
+### 退出证据
 
-同时对照 cc-zig 源码检查 `doc/LIB_API.md` / `doc/CORE_REFERENCE.md`。发现 enum 或签名漂移时记录为依赖缺陷，MetaWork 以固定 commit 的编译器类型为准。
+- 最小 React shell；
+- dev/prod 可复现命令；
+- 双向 Bridge trace；
+- message size、线程和 origin policy 记录。
 
-### 4.3 事件泵与所有权
+## 6. Gate 1：artifact-only raw contract probe
 
-- 每个 borrowed slice 在 `emit()` 返回前深拷贝；
-- 工具线程并发调用 `emit()`；
-- AgentCore 线程不直接调用 WebView；
-- 队列有界且按 Session 公平；
-- `text_chunk` 合并后内容逐字节一致；
+该 probe 是隔离依赖验收，不属于正式 Host。
+
+### Bundle 校验
+
+- 从显式绝对 bundle root 读取，不访问 cc-zig source tree；
+- 校验 manifest schema、commit/build identity、ABI version、toolchain、target、architecture、deployment baseline 和 checksum；
+- 校验静态库、C header、两个 Zig SDK 文件和系统链接输入；
+- discovery symbol 存在；
+- API table size/version/capability/function pointer 合法；
+- target 缺失和 checksum mismatch 明确失败。
+
+### source-free consumer
+
+使用 Mock Provider 与临时 Workspace 验证：
+
+- Runtime create/destroy；
+- Session create/destroy；
+- real synchronous Run；
+- abort active Run；
+- destroy busy、abort stale/too-late 和 invalid argument；
+- tagged CoreEvent JSON callback；
+- synchronous UI answered/unavailable/fatal；
+- built-in Read、Bash、Edit；
+- callback borrowed lifetime；
+- Host/library-owned response/diagnostic release 恰好一次。
+
+可以额外验证 Host tool callback mechanics，但产品 Runtime 必须保持 `host_tool_count = 0`，不能用单 Session probe 证明多 Session Host tool 路由已成立。
+
+### 退出证据
+
+- probe 不进入正式 build target；
+- 不复制 cc-zig source 或协议定义；
+- 记录当前 raw SDK 缺失的 typed validators/codecs，作为 Gate 3 输入。
+
+## 7. Gate 2：Host 生命周期与安全基础
+
+测试可以注入 bundle `ApiV1` function table 的 deterministic fake；不得建立 `NativeSdkAdapter`、AgentCore Adapter 或新协议。
+
+### 状态与 executor
+
+- `Open.Idle / Open.Queued / Open.Running / Open.WaitingUi / Closing / Closed`；
+- 每 Session 至多一个 in-flight Run；
+- bounded executor，超过上限明确排队；
+- queued Run 在 close 时取消且不进入 Core；
+- UI wait 占用 executor slot但不阻塞 WebView/main thread。
+
+### Close/shutdown
+
+按固定顺序验证：
+
+```text
+reject new work
+→ cancel queued Run
+→ wake UI wait
+→ set first-writer-wins HostCause
+→ abort active Run
+→ join
+→ callback refcount == 0
+→ session_destroy
+→ runtime_destroy after all Sessions
+```
+
+### Race matrix
+
+- cancel vs natural completion；
+- close idle/queued/running/waiting UI；
+- callback fatal vs cancel；
+- abort stale/too-late；
+- double close/duplicate response；
+- multi-Session Host shutdown；
+- runtime destroy while busy；
+- allocator OOM 与 diagnostic release。
+
+### Credential/Workspace
+
+- credential 仅从 Host environment/受控配置进入 Session config；
+- Renderer、Bridge、event、log、snapshot 和测试 golden 不出现 key；
+- 当前只允许临时或明确 trusted Workspace；
+- UI/文档不宣称 strict Workspace security。
+
+## 8. Gate 3：cc-zig typed SDK completion
+
+正式 Host 开始前，bundle SDK 必须提供并测试：
+
+- typed ABI function `Status` validation；
+- typed `StopReason` validation；
+- `CoreEvent` bytes/tag/payload decoder；
+- `UiRequest` decoder；
+- `UiResponse` encoder；
+- null/length overflow、unknown code/tag、payload mismatch 错误；
+- callback 参数名称和语义；
+- callback threading、borrowed/owned/release 文档；
+- source-free typed consumer；
+- malformed/fuzz corpus 或等价的系统化负面测试。
+
+MetaWork 不在本仓库复制缺少的类型或 JSON schema。Gate 3 未通过，工作停在 raw probe 与生命周期基础，不进入正式 Host。
+
+Host tool 内部 session ID 到 MetaWork Session/Run 的合同仍未定义时，Host tools 继续禁用；这不阻塞 built-in Read/Bash/Edit。
+
+## 9. Gate 4：正式 AgentCore Host + bounded test sink
+
+### 接入规则
+
+- 直接使用 bundle typed SDK；
+- 不增加 AgentCore Adapter 或镜像接口；
+- Runtime/Session config 来自 Host 已校验状态；
+- product `host_tool_count = 0`；
+- callback 先校验再深拷贝；
+- callback 只写 bounded test sink，不调用 WebView。
+
+### ABI status 与 RunResult
+
+- non-OK status：读取/release diagnostic，禁止读取 `RunResult`；
+- OK status：SDK 校验 RunResult 与 StopReason；
+- 九个 StopReason 使用无 `else` switch；
+- unknown code 在 SDK 层失败并保留 raw code；
+- `suspended` / `backgrounded` 因缺少 payload 映射 dependency contract failure；
+- `aborted` 结合 HostCause 映射 cancelled/interrupted/failed。
+
+### 同步 UI
+
+- request 绑定 callback Session handle 与 current run ID；
+- Renderer response 验证 Session、Run、request 和类型；
+- stale/duplicate/mismatched response 拒绝；
+- deadline 安全 deny/unavailable；
+- cancel、close 和 shutdown 唤醒 wait；
+- response owned buffer release 恰好一次；
+- UI fatal 使 Run 退出，不 hang。
+
+### callback failure
+
+- validation/copy/test-sink capacity failure 返回 callback fatal；
+- session_run 返回 non-OK callback status；
+- HostCause 保留具体原因；
+- 不误报用户取消，不读取 zeroed RunResult。
+
+## 10. Gate 5：Event pump 与 Bridge
+
+### 容量维度
+
+实施前根据 Gate 0 transport 数据和 Gate 4 AgentCore trace 固定：
+
+- global count/bytes；
+- per-Session count/bytes；
+- max single event bytes；
+- control reserved count/bytes；
+- Bridge batch count/bytes/time；
+- per-pump Session/event budget；
+- detach retention count/bytes/time。
+
+### 正确性
+
+- callback 内 deep copy 后才返回；
+- 同一 Session/Run 顺序稳定；
+- 多 Session 公平轮转；
+- `text_chunk` 合并后逐字节一致；
 - `tool_progress` 覆盖旧状态；
-- `usage` 累计正确；
-- 控制事件在过载下不静默丢失；
-- 注入 event copy OOM、控制队列超时和不可恢复 Bridge pipeline failure；
-- Host 写入 `fatal_reason` 后触发目标 Run 的 `AbortSignal`，最终状态为 `failed` 而不是 `cancelled`；
-- Bridge 失败、Session 关闭和 Host shutdown 不泄漏 owned event；
-- 大型工具结果不无限制进入 Bridge。
+- `usage` 按事件真实语义累计或替换；
+- tool/UI/run 控制事件不静默丢失；
+- AgentCore/tool 线程不直接调用 WebView；
+- control capacity 耗尽在 deadline 后 fatal，不无限阻塞。
 
-### 4.4 多 Session
+### Renderer detach/reload
 
-- 至少四个 Session 同时产生文本和工具事件；
-- 每个 Session 至多一个 in-flight Run；第二个 Run 明确排队或拒绝；
-- Run executor 设置有限并发，超过上限的 Session 排队且 UI 仍可响应；
-- event envelope 路由无串台；
-- 单 Session 高输出不会饿死其他 Session；
-- 取消一个 Session 不影响其他 Session；
-- UI 切换不停止后台 Session；
-- Session 关闭时清理其队列、请求和运行资源；
-- Conversation/session allocator 在多个 Run 间保持有效；run-scoped scratch 释放后不存在 UAF；
-- 多个同步 permission 同时等待时只占 worker slot，不阻塞 WebView 主线程，并记录达到 executor 上限后的行为。
+- 区分临时 detach 与不可恢复 pipeline failure；
+- 有界 retention 内允许 Host snapshot/resync；
+- 旧连接不能消费新连接事件；
+- reload 后 active UI request 仍验证原 Session/Run/request；
+- snapshot 不包含 credential；
+- Host/AgentCore crash 不伪装为 reload recovery。
 
-### 4.5 UI 请求与恢复
+### 大 payload
 
-- `ask_question`、`plan_approval` 或 `custom` 返回 `.pending`；
-- `agent_loop` 返回 `.suspended` 和 `SuspendInfo`；
-- 同一 turn 注入两个 `.pending` 请求：只保留首个挂起点，其他结果为 `ConcurrentSuspendUnsupported`；
-- 每个 Run 的 UI 只存在一个 active resumable request；
-- subagent 发起可挂起 UI 请求时得到 unsupported/unavailable，父子 Run 均不 hang；
-- 保存 transcript + suspend state；
-- 重建 Conversation 并 `resumeRun`；
-- 过期、重复和错误 Session 的响应被拒绝；
-- permission 等待期间模拟 crash 后 Run 变为 `interrupted`；
-- crash 后未经新 permission 不执行工具。
+只有真实 event/batch 超过 Native SDK 上限时才加入 object reference，并验证 opaque ID、Session/Run ownership、byte/count/TTL、fetch 校验和所有终止路径清理。
 
-### 4.6 Run 生命周期与反向控制
+### Fatal 注入
 
-- 穷尽验证 `end_turn`、`max_turns`、`aborted`、`tool_error`、`api_error`、`tool_loop`、`suspended`、`backgrounded`、`budget`；
-- `max_turns` / `tool_loop` / `budget` 映射为受控 `stopped` 与 `awaiting_user`，不映射为 completed；
-- `aborted` 根据 user cancel、Host shutdown、Host fatal 分别映射为 `cancelled`、`interrupted`、`failed`；
-- `backgrounded` 在 clone 与 background spawn 成功前不发布成功状态，失败时前台 Conversation 保留；
-- Stop command 绕过普通 FIFO，直接命中正确 Session/Run 的 `AbortSignal`；
-- Host Session 输入队列同时设置 count/byte 上限，满载时返回明确错误；
-- 当前 Run 结束后，排队消息按确定顺序形成下一 Run 输入；
-- 如果启用 `UiBackend.poll()`，追加真实 agent loop 集成测试，而不是只测 backend mock。
+- event decode/copy OOM；
+- control queue deadline；
+- unrecoverable Bridge send/pipeline failure；
+- HostCause first-writer-wins；
+- in-flight Run 被要求停止；
+- 最终状态 failed，不误报 cancelled。
 
-### 4.7 Shell 边界
+## 11. Gate 6：同进程 macOS 同步原型
 
-- 普通命令通过隐藏 shell 子进程执行；
-- 不启动 Windows Terminal、xterm 或 PTY；
-- stdout/stderr/exit code 正确；
-- timeout 和 cancel 能终止进程树；
-- 超大输出有上限或引用机制；
-- TTY-only 程序被拒绝、限制或给出明确错误。
+### 最小 UI
 
-## 5. 故障隔离实验
+- 打开临时或明确 trusted Workspace；
+- 创建、切换和关闭 Session；
+- 提交真实 Agent input；
+- 流式文本；
+- built-in Read/Bash/Edit tool cards；
+- 同步 permission、question 或 plan request；
+- stdout/stderr/exit code；
+- stop/cancel；
+- terminal Run state；
+- WebView reload 后从存活 Host 恢复视图。
 
-故障注入必须放在独立测试进程，避免测试 runner 自身被同进程 panic 直接终止。
+不要求完整视觉系统、数据库、async resume、strict Workspace security 或 Host tools。
 
-### 同进程基线
+### Workload matrix
 
-注入 AgentCore/tool fatal crash：
+不能用单一“10,000 events”冒充压力测试。矩阵至少覆盖：
 
-- 记录 Host 是否随进程退出；
-- 记录全部 Session 状态损失；
-- 记录已持久化状态可以恢复到哪里；
-- 将结果明确标记为零进程级隔离基线。
+| 维度 | 取值方向 |
+| --- | --- |
+| Sessions | 1、4、超过 executor slots |
+| event rate | 低、真实流式、高速 burst |
+| event bytes | 小 text、普通 tool、接近/超过 Bridge limit |
+| duration | 短 Run、持续 Run |
+| UI waits | 无、单个、全部 worker 同时等待 |
+| Renderer | 正常、slow、detach/reload |
+| cancellation | provider stream、同步 wait、长 Bash |
 
-### 单 Worker
+### 退出条件
 
-注入 Worker fatal crash：
+- 无跨 Session 串台；
+- 文本最终字节一致；
+- executor/queue/Bridge 内存有界；
+- UI main thread 保持响应；
+- 全部 worker 等待 UI 时 response/cancel/shutdown 仍可执行；
+- Session close 和 Host shutdown 无 hang/UAF/leak；
+- reload 语义可信且不冒充进程恢复；
+- 可复现的 build/test/run 命令进入仓库。
 
-- Host 必须存活；
-- 所属 Session 进入明确的 failed/interrupted 状态；
-- 不自动重放危险工具；
-- 记录 Worker 重启和 Session 恢复时间；
-- 记录 Worker 内其他 Session 的影响。
+Gate 6 结束只能称“同进程 macOS 同步原型”。
+
+## 12. Gate 7：fault-domain spike
+
+故障注入必须放在独立测试进程，避免测试 runner 自身被 native crash 终止。
+
+### 同进程 baseline
+
+注入 AgentCore/tool panic、abort 或等价 fatal：
+
+- Host 是否退出；
+- 其他 Session 的影响；
+- 已完成 Host snapshot 的可用边界；
+- active Run 的最终可解释状态；
+- 重启与人工恢复时间。
+
+结果必须明确标记为零进程级隔离，不能美化。
+
+### 最小 Worker harness
+
+建立隔离、非产品化 spike，仅验证：
+
+- Worker crash 时 Host 存活；
+- 所属 Session 进入 failed/interrupted；
+- 其他 Host UI 状态可用；
+- 危险工具不自动重放；
+- Worker 重启时间与资源成本；
+- 最小 transport 的 message size、关联 ID 和断连语义。
+
+不在此 Gate 建正式 Worker API、通用 IPC framework 或生产 supervisor。
 
 ### 决策输出
 
-根据故障影响、恢复时间、资源、吞吐和实现复杂度，选择：
+根据故障影响、恢复时间、资源、吞吐和复杂度：
 
-- 同进程正式方案；
-- 单 AgentCore Worker；
-- 或继续验证每 Session Worker。
+- 接受同进程正式方向；
+- 选择单 AgentCore Worker；
+- 或列出缺失证据并继续验证。
 
-Phase 0 不允许仅凭“统一 Zig”或“IPC 麻烦”作出选择。
+没有数据不得默认单进程，也不得因为“IPC 更安全”直接建设复杂 Worker。
 
-## 6. Native SDK 退出与降级判据
+## 13. Phase 0A 完成判据
 
-Native SDK 是已确认选型，但必须可证伪。如果 Phase 0 无法完成以下任一硬能力，应暂停形成更深路径依赖并重新评估桌面框架：
+Phase 0A 完成时必须产出：
 
-- 稳定加载 React production bundle；
-- 可靠完成双向 Bridge 与主线程事件泵；
-- 多 Session 高频事件下保持有限内存和可接受 UI 响应；
-- 完成文件对话框、窗口生命周期和正常退出；
-- 产出可复现 Windows 分发包，并形成明确的签名与更新路径。
+- 可运行的 macOS 同步垂直原型；
+- Native SDK dev/prod/Bridge/size/origin 记录；
+- cc-zig 精确 bundle identity、manifest 和 checksum；
+- MetaWork artifact-only raw probe；
+- cc-zig typed SDK source-free consumer；
+- MetaWork typed SDK link/run 集成；
+- Host lifecycle/race/diagnostic release 测试；
+- event pump 容量、批量窗口、公平性和 workload matrix 数据；
+- built-in Read/Bash/Edit、同步 permission 和 cancel 记录；
+- 九个 StopReason 的 typed exhaustive mapping；
+- Renderer reload 与进程恢复边界记录；
+- 同进程与最小 Worker fault-domain 报告；
+- 进程模型明确结论或有证据的继续验证决定；
+- 仓库内可复现 build/test/run 命令；
+- 更新后的 requirements、architecture、integration 和 ABI 文档。
 
-重新评估不等于自动切换 Tauri，也不触发 `.native` 迁移。候选方案仍必须满足 React + Zig + cc-zig 的目标边界。
+原型“能跑起来”不是完成；内存边界、失败语义、shutdown 和 fault domain 必须有数据。
 
-## 7. 完成判据
+## 14. Phase 0A 当前非目标
 
-Phase 0 完成时必须产出：
+- 完整产品视觉系统；
+- `.native` Renderer；
+- 通用 Desktop/AgentCore Adapter；
+- 正式数据库和迁移体系；
+- async pending/suspend/resume；
+- Session/Conversation 跨进程恢复；
+- strict Workspace security 认证；
+- 产品 Host tools；
+- content-addressed cache 和远程 artifact 服务；
+- 正式 Worker IPC；
+- 自动更新服务；
+- 完整 IDE、PTY 或 Terminal Emulator；
+- Windows 交付。
 
-- Phase 0A：可运行的 macOS 垂直原型；
-- Phase 0B：可运行的 Windows 垂直原型和平台差异报告；
-- 自动化或可复现的构建与测试命令；
-- 事件泵容量、批量窗口和压力数据；
-- Run executor 上限、排队策略、allocator 生命周期与同步等待资源数据；
-- 九个 `StopReason` 的 Host 映射测试和 cc-zig contract smoke test；
-- Phase 0A：cc-zig 产出的可复现本地 `metacodes-core` bundle、精确 build identity、checksum 和 artifact-only consumer 记录；
-- Phase 0A：MetaWork 对该 bundle 的 artifact cache、独立 link/run 和端到端消费记录；
-- 双方验证过的 library export 语义、build target、bundle layout 和发布规格；
-- 进入正规发布时：远程发布、下载校验和离线 cache 记录；
-- per-Run AbortSignal、Host fatal side channel、输入队列和 `UiBackend.poll()` 现状报告；
-- 同进程与 Worker 故障实验结果；
-- permission 与 suspend/resume 恢复记录；
-- Native SDK 继续使用或触发重估的明确结论；
-- 更新后的 [高层架构](architecture.md)、[AgentCore 集成契约](agentcore-integration.md)与 [AgentCore ABI v1 需求规格](agentcore-abi-v1.md)。
+## 15. Phase 0B：Windows
 
-原型“能跑起来”不是完成；关键风险必须有数据、失败语义和可复现验证。
+macOS Phase 0A 完成后单独验证：
+
+- Native SDK Windows WebView dev/prod；
+- JS↔Zig Bridge；
+- cc-zig Windows target bundle；
+- hidden non-interactive shell、stdout/stderr、timeout 和 process tree；
+- window lifecycle、file dialog 和正常退出；
+- Debug/Release 构建与可复现分发包；
+- 签名和更新路径；
+- 与 macOS 相同语义 code/capability 的兼容性。
+
+Windows 失败不反向否定已通过的 macOS baseline，但阻止项目宣称跨平台交付完成。
