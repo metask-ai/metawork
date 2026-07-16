@@ -8,8 +8,8 @@
 
 Gate 4 直接扩展 Gate 2 lifecycle foundation，没有增加 `NativeSdkAdapter`、AgentCore Adapter 或平行协议：
 
-- `src/host/lifecycle.zig` 持有 bundle `sdk.Api`、Runtime/Session handles、bounded executor 和正式 callbacks；
-- `src/host/event_sink.zig` 只保存带 Host Session ID/Run ID 的 bundle `ParsedCoreEvent` owner；
+- `src/agentcore/session.zig` 持有 bundle `sdk.Api`、Runtime/Session handles 和正式 callbacks；bounded executor 已迁入 `src/workbench/executor.zig`；
+- `src/agentcore/event_sink.zig` 只保存带 Host Session ID/Run ID 的 bundle `ParsedCoreEvent` owner；
 - Runtime 的 Host tool table 始终为空；默认 built-in catalog/allowlist 是 Read、Bash、Edit、AskUserQuestion；
 - callback 不调用 WebView，Gate 5 前也不进入 Native SDK Bridge；
 - 仍只允许临时或用户明确 trusted Workspace，不宣称 strict security。

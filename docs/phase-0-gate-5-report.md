@@ -29,7 +29,7 @@ Gate 5 完成 Event pump、Renderer delivery state machine 和真实 Native SDK 
 
 ## 3. Event pump
 
-`src/host/event_pump.zig` 替换 Gate 4 的简单 sink，固定提供：
+`src/agentcore/event_pump.zig` 替换 Gate 4 的简单 sink，固定提供：
 
 - global 与 per-Session count/bytes；
 - global 与 per-Session control reserve；
@@ -44,7 +44,7 @@ callback 在返回前同时持有 bundle SDK parse owner和 Host raw JSON copy�
 
 ## 4. Delivery 与 Bridge
 
-`src/host/bridge_delivery.zig` 不导入 AgentCore SDK，只维护 MetaWork transport envelope：
+`src/bridge/delivery.zig` 不导入 AgentCore SDK，只维护 MetaWork transport envelope：
 
 - 7 KiB / 16-item batch，最多 4 Sessions、每 Session 4 items；
 - 6 KiB 以下 inline，超过后使用 Session/Run-scoped opaque object；

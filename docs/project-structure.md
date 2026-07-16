@@ -1,6 +1,6 @@
 # MetaWork 工程目录结构设计草案
 
-> 状态：Draft v0.2，供工程评审，不代表已经完成目录迁移  
+> 状态：Approved v0.2，正在按任务分阶段落地；目标子模块尚未全部拆完
 > 日期：2026-07-16  
 > 范围：仓库外层、React Renderer、Zig `src/`、依赖方向、状态所有权、测试布局与渐进迁移
 
@@ -21,12 +21,14 @@
 
 ## 2. 当前结构与评审结论
 
-当前仓库已经有清晰的底层模块，但组合层开始膨胀：
+首轮边界迁移已经落地：
 
-- `src/main.zig` 同时持有 Native SDK App、Bridge policy/handler、Workspace grant、snapshot transport、Host 装配和测试；
-- `src/host/lifecycle.zig` 已经固化 executor、Session/Run、callback quiescence、cancel/close/shutdown 等关键不变量；
-- `src/host/workbench.zig` 同时承担产品投影、Session view 和 snapshot writer；
-- `frontend/src/App.tsx` 同时声明 Host DTO、Bridge command、snapshot/event runtime、页面状态和全部 UI。
+- `src/main.zig` 只保留进程入口，Native SDK App 与 composition 已移入 `src/app.zig`；
+- Bridge command、policy、payload decoder、revision/snapshot delivery 和一次性 Workspace grant 已形成独立模块；
+- bounded executor 的队列、worker 和容量策略归 `workbench/executor.zig`，AgentCore 只持有最小调度 capability；
+- AgentCore Runtime/Session、callback quiescence、cancel/close/shutdown 语义仍集中在 `agentcore/session.zig`，后续只按已验证责任继续拆分；
+- `workbench/projection.zig` 仍同时承担产品投影、Session view 和 snapshot writer，后续任务再提取；
+- Renderer Host 合同已集中到 `frontend/src/host/`，页面和 feature 拆分仍按后续 UI 任务推进。
 
 评审方提出的 `main.zig + app.zig + bridge.zig + workbench.zig + agentcore.zig` 顶层结构总体合理，优于先建立多层 `host/` 空目录。它符合 Zig 以 module root 形成明确 surface 的方式，也保留当前 `build.zig` 的独立注入和测试能力。
 
@@ -255,7 +257,7 @@ flowchart LR
 
 ## 7. Zig `src/` 目录
 
-当前 `src/main.zig` 同时包含 Native SDK App、Bridge policy/handler、Workspace grant、snapshot transport、Host 装配和大量测试，`src/host/workbench.zig` 同时承担产品状态、Session 投影和 snapshot writer。正式 UI 扩展前应拆开这些责任。
+当前顶层 module root、App、Bridge transport、Workspace grant 和 Workbench executor 已完成首轮拆分；`agentcore/session.zig` 与 `workbench/projection.zig` 仍保留尚未形成独立不变量的代码，后续按 lifecycle 测试保护逐步提取，不为匹配目录树制造空模块。
 
 Zig 目标结构采用少量顶层 module entrypoint，而不是先建立多层 `host/` 空目录：
 
@@ -315,7 +317,7 @@ src/
 
 Run phase、last outcome、HostCause 和 StopReason 产品映射只归 `workbench/tasks.zig` 所有；`agentcore/session_handle.zig` 只返回 bundle SDK 已校验的 typed result。若低层开始缓存产品状态或高层开始操作 raw handle，依赖边界已经被破坏。
 
-当前 `lifecycle.zig` 已验证的 shutdown、callback quiescence、first-writer-wins cause 和 executor 行为只能按责任搬迁，不能在拆目录时重写语义。
+当前 `agentcore/session.zig` 已验证的 shutdown、callback quiescence 和 first-writer-wins cause，以及 `workbench/executor.zig` 的 bounded scheduling 行为，只能按责任搬迁，不能在拆目录时重写语义。
 
 如果某个目录只有一个很小文件且没有独立不变量，应先保留单文件，避免为了匹配目标树制造空壳模块。
 

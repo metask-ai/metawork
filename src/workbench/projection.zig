@@ -1,6 +1,6 @@
 const std = @import("std");
 const sdk = @import("metacodes_agentcore");
-const lifecycle = @import("host_lifecycle");
+const lifecycle = @import("metawork_agentcore");
 const contract_fixture = @import("workbench_contract_fixture");
 
 pub const Error = lifecycle.Error || std.mem.Allocator.Error || std.Thread.SpawnError || error{

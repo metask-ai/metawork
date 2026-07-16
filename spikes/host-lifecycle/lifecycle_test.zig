@@ -3,6 +3,7 @@ const lifecycle = @import("host_lifecycle");
 const host_workbench = @import("host_workbench");
 const event_pump = @import("event_pump");
 const bridge_delivery = @import("bridge_delivery");
+const workbench_executor = @import("workbench_executor");
 const sdk = @import("metacodes_agentcore");
 const wire = sdk.types;
 
@@ -512,8 +513,46 @@ fn openSession(host: *lifecycle.Host) !*lifecycle.Session {
     });
 }
 
-fn createHost(limits: lifecycle.Limits) !*lifecycle.Host {
-    return lifecycle.Host.init(std.testing.io, std.testing.allocator, &fake_api, limits);
+const TestHostLimits = struct {
+    worker_count: usize,
+    queue_capacity: usize,
+    max_sessions: usize,
+    max_prompt_bytes: ?usize = null,
+    event_capacity: ?usize = null,
+    per_session_event_capacity: ?usize = null,
+    control_reserved_capacity: ?usize = null,
+    per_session_control_reserved_capacity: ?usize = null,
+    max_ui_response_bytes: ?usize = null,
+    ui_request_timeout: ?std.Io.Duration = null,
+
+    fn hostLimits(self: @This()) lifecycle.Limits {
+        var limits = lifecycle.Limits{ .max_sessions = self.max_sessions };
+        if (self.max_prompt_bytes) |value| limits.max_prompt_bytes = value;
+        if (self.event_capacity) |value| limits.event_capacity = value;
+        if (self.per_session_event_capacity) |value| limits.per_session_event_capacity = value;
+        if (self.control_reserved_capacity) |value| limits.control_reserved_capacity = value;
+        if (self.per_session_control_reserved_capacity) |value|
+            limits.per_session_control_reserved_capacity = value;
+        if (self.max_ui_response_bytes) |value| limits.max_ui_response_bytes = value;
+        if (self.ui_request_timeout) |value| limits.ui_request_timeout = value;
+        return limits;
+    }
+};
+
+fn createHost(limits: TestHostLimits) !*lifecycle.Host {
+    const executor = try workbench_executor.Executor.create(
+        std.testing.io,
+        std.testing.allocator,
+        .{ .worker_count = limits.worker_count, .queue_capacity = limits.queue_capacity },
+    );
+    errdefer executor.destroy();
+    return lifecycle.Host.init(
+        std.testing.io,
+        std.testing.allocator,
+        &fake_api,
+        executor.scheduler(),
+        limits.hostLimits(),
+    );
 }
 
 fn workbenchSessionOptions() lifecycle.SessionOpenOptions {
@@ -561,7 +600,7 @@ fn shutdownOnThread(host: *lifecycle.Host) void {
 
 test "Host creates and destroys Runtime and idle Session" {
     fake_core.reset();
-    const host = try lifecycle.Host.init(std.testing.io, std.testing.allocator, &fake_api, .{
+    const host = try createHost(.{
         .worker_count = 1,
         .queue_capacity = 2,
         .max_sessions = 2,
@@ -583,7 +622,7 @@ test "Host creates and destroys Runtime and idle Session" {
 
 test "Workspace requires an absolute temporary or explicit trusted root" {
     fake_core.reset();
-    const host = try lifecycle.Host.init(std.testing.io, std.testing.allocator, &fake_api, .{
+    const host = try createHost(.{
         .worker_count = 1,
         .queue_capacity = 1,
         .max_sessions = 1,
@@ -1262,32 +1301,46 @@ test "concurrent Host shutdown serializes executor and Runtime destruction" {
     try std.testing.expectEqual(@as(usize, 1), runtime_destroyed);
 }
 
-test "Host initialization OOM destroys the already-created Runtime" {
+test "Host initialization OOM fails before acquiring the Runtime" {
     fake_core.reset();
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 4 });
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 3 });
+    const executor = try workbench_executor.Executor.create(
+        std.testing.io,
+        std.testing.allocator,
+        .{ .worker_count = 1, .queue_capacity = 1 },
+    );
+    defer executor.destroy();
     try std.testing.expectError(error.OutOfMemory, lifecycle.Host.init(
         std.testing.io,
         failing.allocator(),
         &fake_api,
-        .{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 },
+        executor.scheduler(),
+        .{ .max_sessions = 1 },
     ));
     try std.testing.expect(failing.has_induced_failure);
     fake_core.lock();
     const runtime_created = fake_core.runtime_created;
     const runtime_destroyed = fake_core.runtime_destroyed;
     fake_core.unlock();
-    try std.testing.expectEqual(@as(usize, 1), runtime_created);
-    try std.testing.expectEqual(@as(usize, 1), runtime_destroyed);
+    try std.testing.expectEqual(@as(usize, 0), runtime_created);
+    try std.testing.expectEqual(@as(usize, 0), runtime_destroyed);
 }
 
 test "Session creation OOM leaves Host reusable and credential Host-only" {
     fake_core.reset();
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const executor = try workbench_executor.Executor.create(
+        std.testing.io,
+        std.testing.allocator,
+        .{ .worker_count = 1, .queue_capacity = 1 },
+    );
+    errdefer executor.destroy();
     const host = try lifecycle.Host.init(
         std.testing.io,
         failing.allocator(),
         &fake_api,
-        .{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 },
+        executor.scheduler(),
+        .{ .max_sessions = 1 },
     );
     defer {
         host.shutdown() catch unreachable;

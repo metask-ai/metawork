@@ -56,6 +56,37 @@ pub const Notifier = struct {
     wake: *const fn (?*anyopaque) bool,
 };
 
+pub const ScheduledRun = struct {
+    context: *anyopaque,
+    execute: *const fn (*anyopaque) void,
+};
+
+/// Dependency-inverted scheduling capability. AgentCore owns Run mechanics;
+/// Workbench owns the bounded queue, admission capacity, and worker lifecycle.
+pub const Scheduler = struct {
+    context: *anyopaque,
+    enqueue_fn: *const fn (*anyopaque, ScheduledRun) error{ HostShuttingDown, QueueFull }!void,
+    cancel_fn: *const fn (*anyopaque, *anyopaque) bool,
+    shutdown_fn: *const fn (*anyopaque) void,
+    deinit_fn: *const fn (*anyopaque) void,
+
+    fn enqueue(self: Scheduler, run: ScheduledRun) error{ HostShuttingDown, QueueFull }!void {
+        return self.enqueue_fn(self.context, run);
+    }
+
+    fn cancel(self: Scheduler, run_context: *anyopaque) bool {
+        return self.cancel_fn(self.context, run_context);
+    }
+
+    fn shutdown(self: Scheduler) void {
+        self.shutdown_fn(self.context);
+    }
+
+    fn deinit(self: Scheduler) void {
+        self.deinit_fn(self.context);
+    }
+};
+
 pub const SessionOpenOptions = struct {
     provider_kind_code: u32,
     permission_mode_code: u32,
@@ -68,8 +99,6 @@ pub const SessionOpenOptions = struct {
 };
 
 pub const Limits = struct {
-    worker_count: usize,
-    queue_capacity: usize,
     max_sessions: usize,
     max_prompt_bytes: usize = 1024 * 1024,
     event_capacity: usize = 512,
@@ -151,7 +180,7 @@ pub const Host = struct {
     ui_request_timeout: std.Io.Duration,
     notifier: ?Notifier,
     events: event_pump.EventPump,
-    executor: Executor,
+    scheduler: Scheduler,
     sessions_mutex: std.Io.Mutex = .init,
     shutdown_condition: std.Io.Condition = .init,
     sessions: []?*Session,
@@ -163,14 +192,15 @@ pub const Host = struct {
 
     /// `raw_api` is borrowed for the Host lifetime. Bundle discovery tables
     /// are static; injected test tables must provide the same lifetime.
+    /// Scheduler ownership transfers to Host only when initialization succeeds.
     pub fn init(
         io: std.Io,
         allocator: std.mem.Allocator,
         raw_api: *const wire.ApiV1,
+        scheduler: Scheduler,
         limits: Limits,
-    ) (Error || std.mem.Allocator.Error || std.Thread.SpawnError || error{UnsupportedAbi})!*Host {
-        if (limits.worker_count == 0 or limits.queue_capacity == 0 or limits.max_sessions == 0 or
-            limits.max_prompt_bytes == 0 or limits.event_capacity == 0 or
+    ) (Error || std.mem.Allocator.Error || error{UnsupportedAbi})!*Host {
+        if (limits.max_sessions == 0 or limits.max_prompt_bytes == 0 or limits.event_capacity == 0 or
             limits.event_bytes == 0 or limits.per_session_event_capacity == 0 or
             limits.per_session_event_bytes == 0 or limits.max_event_bytes == 0 or
             limits.event_enqueue_timeout.nanoseconds <= 0 or limits.max_ui_request_bytes == 0 or
@@ -236,10 +266,9 @@ pub const Host = struct {
             .ui_request_timeout = limits.ui_request_timeout,
             .notifier = limits.notifier,
             .events = events,
-            .executor = undefined,
+            .scheduler = scheduler,
             .sessions = sessions,
         };
-        try self.executor.init(io, allocator, limits.worker_count, limits.queue_capacity);
         return self;
     }
 
@@ -356,7 +385,7 @@ pub const Host = struct {
         }
         if (first_error != null) return self.finishShutdown(first_error);
 
-        self.executor.shutdown();
+        self.scheduler.shutdown();
 
         if (self.runtime != null) {
             var diagnostic = emptyOwnedBytes();
@@ -451,6 +480,7 @@ pub const Host = struct {
         }
         self.events.deinit();
         self.allocator.free(self.sessions);
+        self.scheduler.deinit();
         const allocator = self.allocator;
         allocator.destroy(self);
     }
@@ -535,7 +565,10 @@ pub const Session = struct {
         self.last_outcome = null;
         self.cancel_requested = false;
         self.state = .queued;
-        self.host.executor.enqueue(self) catch |err| {
+        self.host.scheduler.enqueue(.{
+            .context = self,
+            .execute = executeQueuedSession,
+        }) catch |err| {
             self.state = .idle;
             self.active_run_id = 0;
             self.run_done = true;
@@ -571,7 +604,7 @@ pub const Session = struct {
         const was_queued = self.state == .queued;
         self.unlock();
 
-        if (was_queued and self.host.executor.cancel(self)) {
+        if (was_queued and self.host.scheduler.cancel(self)) {
             self.finishCancelledQueuedRun();
             return;
         }
@@ -727,7 +760,7 @@ pub const Session = struct {
         self.broadcast();
         self.unlock();
 
-        const cancelled_queued = was_queued and self.host.executor.cancel(self);
+        const cancelled_queued = was_queued and self.host.scheduler.cancel(self);
         if (cancelled_queued) self.finishCancelledQueuedRun();
         if (should_abort_now) self.abortRun(run_id, cause);
 
@@ -1080,138 +1113,10 @@ pub const Session = struct {
     }
 };
 
-const Executor = struct {
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    mutex: std.Io.Mutex = .init,
-    condition: std.Io.Condition = .init,
-    queue: []?*Session,
-    queued: usize = 0,
-    workers: []std.Thread,
-    stopping: bool = false,
-    joined: bool = false,
-
-    fn init(
-        self: *Executor,
-        io: std.Io,
-        allocator: std.mem.Allocator,
-        worker_count: usize,
-        queue_capacity: usize,
-    ) (std.mem.Allocator.Error || std.Thread.SpawnError)!void {
-        const queue = try allocator.alloc(?*Session, queue_capacity);
-        errdefer allocator.free(queue);
-        @memset(queue, null);
-        const workers = try allocator.alloc(std.Thread, worker_count);
-        errdefer allocator.free(workers);
-        self.* = .{
-            .io = io,
-            .allocator = allocator,
-            .queue = queue,
-            .workers = workers,
-        };
-        var started: usize = 0;
-        errdefer {
-            self.lock();
-            self.stopping = true;
-            self.broadcast();
-            self.unlock();
-            for (self.workers[0..started]) |thread| thread.join();
-        }
-        for (self.workers) |*worker| {
-            worker.* = try std.Thread.spawn(.{}, workerMain, .{self});
-            started += 1;
-        }
-    }
-
-    fn enqueue(self: *Executor, session: *Session) Error!void {
-        self.lock();
-        defer self.unlock();
-        if (self.stopping) return error.HostShuttingDown;
-        if (self.queued == self.queue.len) return error.QueueFull;
-        for (self.queue) |*entry| {
-            if (entry.* == null) {
-                entry.* = session;
-                self.queued += 1;
-                self.signal();
-                return;
-            }
-        }
-        unreachable;
-    }
-
-    fn cancel(self: *Executor, session: *Session) bool {
-        self.lock();
-        defer self.unlock();
-        for (self.queue) |*entry| {
-            if (entry.* == session) {
-                entry.* = null;
-                self.queued -= 1;
-                return true;
-            }
-        }
-        return false;
-    }
-
-    fn shutdown(self: *Executor) void {
-        self.lock();
-        if (self.joined) {
-            self.unlock();
-            return;
-        }
-        self.stopping = true;
-        self.broadcast();
-        self.unlock();
-        for (self.workers) |thread| thread.join();
-        self.lock();
-        self.joined = true;
-        self.unlock();
-        self.allocator.free(self.workers);
-        self.allocator.free(self.queue);
-    }
-
-    fn workerMain(self: *Executor) void {
-        while (true) {
-            self.lock();
-            while (self.queued == 0 and !self.stopping)
-                self.wait();
-            if (self.stopping and self.queued == 0) {
-                self.unlock();
-                return;
-            }
-            var session: ?*Session = null;
-            for (self.queue) |*entry| {
-                if (entry.*) |queued_session| {
-                    session = queued_session;
-                    entry.* = null;
-                    self.queued -= 1;
-                    break;
-                }
-            }
-            self.unlock();
-            session.?.executeRun();
-        }
-    }
-
-    fn lock(self: *Executor) void {
-        self.mutex.lockUncancelable(self.io);
-    }
-
-    fn unlock(self: *Executor) void {
-        self.mutex.unlock(self.io);
-    }
-
-    fn wait(self: *Executor) void {
-        self.condition.waitUncancelable(self.io, &self.mutex);
-    }
-
-    fn signal(self: *Executor) void {
-        self.condition.signal(self.io);
-    }
-
-    fn broadcast(self: *Executor) void {
-        self.condition.broadcast(self.io);
-    }
-};
+fn executeQueuedSession(context: *anyopaque) void {
+    const session: *Session = @ptrCast(@alignCast(context));
+    session.executeRun();
+}
 
 fn validateWorkspace(input: WorkspaceInput) Error!void {
     if (!isCanonicalAbsolutePath(input.canonical_root)) return error.InvalidWorkspace;

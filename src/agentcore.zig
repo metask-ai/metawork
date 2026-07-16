@@ -1,0 +1,21 @@
+//! MetaWork's narrow AgentCore integration surface.
+//! Product projection and Renderer transport do not belong here.
+
+const session_impl = @import("agentcore_session");
+
+pub const EventEnvelope = session_impl.EventEnvelope;
+pub const SessionState = session_impl.SessionState;
+pub const HostCause = session_impl.HostCause;
+pub const RunOutcome = session_impl.RunOutcome;
+pub const WorkspaceTrust = session_impl.WorkspaceTrust;
+pub const WorkspaceInput = session_impl.WorkspaceInput;
+pub const Notifier = session_impl.Notifier;
+pub const ScheduledRun = session_impl.ScheduledRun;
+pub const Scheduler = session_impl.Scheduler;
+pub const SessionOpenOptions = session_impl.SessionOpenOptions;
+pub const Limits = session_impl.Limits;
+pub const SessionSnapshot = session_impl.SessionSnapshot;
+pub const PendingUiRequest = session_impl.PendingUiRequest;
+pub const Error = session_impl.Error;
+pub const Host = session_impl.Host;
+pub const Session = session_impl.Session;

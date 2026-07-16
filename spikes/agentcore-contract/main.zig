@@ -2,6 +2,7 @@ const std = @import("std");
 const sdk = @import("metacodes_agentcore");
 const wire = sdk.types;
 const lifecycle = @import("host_lifecycle");
+const workbench_executor = @import("workbench_executor");
 const MockServer = @import("mock_server.zig").MockServer;
 
 const FINAL_SSE =
@@ -294,9 +295,13 @@ fn verifyFormalHost(io: std.Io, raw_api: *const wire.ApiV1, root: []const u8) !v
     const base_url = try server.url(allocator);
     defer allocator.free(base_url);
 
-    const host = try lifecycle.Host.init(io, allocator, raw_api, .{
-        .worker_count = 1,
-        .queue_capacity = 2,
+    const executor = try workbench_executor.Executor.create(
+        io,
+        allocator,
+        .{ .worker_count = 1, .queue_capacity = 2 },
+    );
+    errdefer executor.destroy();
+    const host = try lifecycle.Host.init(io, allocator, raw_api, executor.scheduler(), .{
         .max_sessions = 1,
     });
     defer {

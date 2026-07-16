@@ -1,0 +1,65 @@
+//! Snapshot identity and bounded chunk transport state.
+//! Workbench remains the only owner of snapshot serialization.
+
+const native_sdk = @import("native_sdk");
+
+pub const max_bytes: usize = 8 * 1024 * 1024;
+pub const chunk_bytes: usize = 256 * 1024;
+
+pub const Error = error{ StaleSnapshot, InvalidOffset, InvalidStorage };
+
+pub const State = struct {
+    storage: []u8 = @constCast(&.{}),
+    len: usize = 0,
+    id: u64 = 0,
+    generation: u64 = 0,
+    window_id: native_sdk.platform.WindowId = 0,
+
+    pub fn init(storage: []u8) Error!State {
+        if (storage.len != max_bytes) return error.InvalidStorage;
+        return .{ .storage = storage };
+    }
+
+    pub fn invalidate(self: *State) void {
+        self.len = 0;
+        self.generation = 0;
+        self.window_id = 0;
+    }
+
+    pub fn publish(
+        self: *State,
+        len: usize,
+        generation: u64,
+        window_id: native_sdk.platform.WindowId,
+    ) Error!void {
+        if (len == 0 or len > self.storage.len) return error.InvalidStorage;
+        self.id +%= 1;
+        if (self.id == 0) self.id = 1;
+        self.len = len;
+        self.generation = generation;
+        self.window_id = window_id;
+    }
+
+    pub fn chunk(
+        self: *const State,
+        snapshot_id: u64,
+        generation: u64,
+        window_id: native_sdk.platform.WindowId,
+        offset: usize,
+    ) Error![]const u8 {
+        if (snapshot_id != self.id or generation != self.generation or window_id != self.window_id)
+            return error.StaleSnapshot;
+        if (offset >= self.len) return error.InvalidOffset;
+        return self.storage[offset..@min(self.len, offset + chunk_bytes)];
+    }
+};
+
+test "snapshot transport binds chunks to identity generation and window" {
+    var bytes = [_]u8{ 1, 2, 3 };
+    var state = State{ .storage = &bytes };
+    try state.publish(bytes.len, 4, 7);
+    try @import("std").testing.expectEqualSlices(u8, &bytes, try state.chunk(1, 4, 7, 0));
+    try @import("std").testing.expectError(error.StaleSnapshot, state.chunk(1, 5, 7, 0));
+    state.invalidate();
+    try @import("std").testing.expectEqual(@as(usize, 0), state.len);
+}

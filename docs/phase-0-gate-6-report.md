@@ -25,8 +25,8 @@ Gate 7 随后已通过；进程模型结论见 [Gate 7 报告](phase-0-gate-7-re
 ## 2. 正式 Host 与产品投影
 
 - 根 `build.zig` 直接链接 `libmetacodes_agentcore.a`，并从 bundle 导入 facade、typed protocol 和 ABI types module；
-- `src/host/lifecycle.zig` 持有 Runtime、Session、bounded executor、callback lifetime、同步 UI wait 和 first-writer-wins `HostCause`；
-- `src/host/workbench.zig` 将 bundle-validated `CoreEvent` 投影成有界 Session/Run/tool/usage view，不在 Renderer 复制协议；
+- `src/agentcore/session.zig` 持有 Runtime、Session、callback lifetime、同步 UI wait 和 first-writer-wins `HostCause`，bounded executor 由 `src/workbench/executor.zig` 提供；
+- `src/workbench/projection.zig` 将 bundle-validated `CoreEvent` 投影成有界 Session/Run/tool/usage view，不在 Renderer 复制协议；
 - `src/main.zig` 暴露 Workspace/Session/Run/UI response 领域命令，Provider credential 只从 Host 环境读取；
 - Bridge send、projection 或 retention 失败按 Session/Run 路由为 `bridge_pipeline_failure`，不会让 Core 静默继续；
 - Session close 在 bounded Session 数量内离开 WebView 主线程执行，并在 snapshot 中公开 closing/closed/retryable failure。

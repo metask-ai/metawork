@@ -51,44 +51,63 @@ fn wireAgentCore(b: *std.Build, app: *std.Build.Module, bundle: agentcore_bundle
     sdk.addImport("metacodes_agentcore_types", types);
     sdk.addImport("metacodes_agentcore_protocol", protocol);
     const event_sink = b.createModule(.{
-        .root_source_file = b.path("src/host/event_sink.zig"),
+        .root_source_file = b.path("src/agentcore/event_sink.zig"),
         .target = target,
         .optimize = app.optimize,
     });
     event_sink.addImport("metacodes_agentcore", sdk);
     const event_pump = b.createModule(.{
-        .root_source_file = b.path("src/host/event_pump.zig"),
+        .root_source_file = b.path("src/agentcore/event_pump.zig"),
         .target = target,
         .optimize = app.optimize,
     });
     event_pump.addImport("metacodes_agentcore", sdk);
     event_pump.addImport("event_sink", event_sink);
-    const lifecycle = b.createModule(.{
-        .root_source_file = b.path("src/host/lifecycle.zig"),
+    const session = b.createModule(.{
+        .root_source_file = b.path("src/agentcore/session.zig"),
         .target = target,
         .optimize = app.optimize,
     });
-    lifecycle.addImport("metacodes_agentcore", sdk);
-    lifecycle.addImport("event_pump", event_pump);
-    const workbench = b.createModule(.{
-        .root_source_file = b.path("src/host/workbench.zig"),
+    session.addImport("metacodes_agentcore", sdk);
+    session.addImport("event_pump", event_pump);
+    const agentcore = b.createModule(.{
+        .root_source_file = b.path("src/agentcore.zig"),
         .target = target,
         .optimize = app.optimize,
     });
-    workbench.addImport("metacodes_agentcore", sdk);
-    workbench.addImport("host_lifecycle", lifecycle);
+    agentcore.addImport("agentcore_session", session);
+    const executor = b.createModule(.{
+        .root_source_file = b.path("src/workbench/executor.zig"),
+        .target = target,
+        .optimize = app.optimize,
+    });
+    executor.addImport("metawork_agentcore", agentcore);
+    const projection = b.createModule(.{
+        .root_source_file = b.path("src/workbench/projection.zig"),
+        .target = target,
+        .optimize = app.optimize,
+    });
+    projection.addImport("metacodes_agentcore", sdk);
+    projection.addImport("metawork_agentcore", agentcore);
     const workbench_contract_fixture = b.addOptions();
     workbench_contract_fixture.addOption(
         []const u8,
         "snapshot",
         @embedFile("frontend/src/host/__fixtures__/workbench-snapshot-v1.fixture"),
     );
-    workbench.addOptions("workbench_contract_fixture", workbench_contract_fixture);
+    projection.addOptions("workbench_contract_fixture", workbench_contract_fixture);
+    const workbench = b.createModule(.{
+        .root_source_file = b.path("src/workbench.zig"),
+        .target = target,
+        .optimize = app.optimize,
+    });
+    workbench.addImport("workbench_projection", projection);
+    workbench.addImport("workbench_executor", executor);
 
     app.addImport("metacodes_agentcore", sdk);
-    app.addImport("host_lifecycle", lifecycle);
-    app.addImport("host_workbench", workbench);
+    app.addImport("metawork_agentcore", agentcore);
+    app.addImport("metawork_workbench", workbench);
     app.addObjectFile(.{ .cwd_relative = bundle.library_path });
     app.link_libc = bundle.link_libc;
-    return workbench;
+    return projection;
 }
