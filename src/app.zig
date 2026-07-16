@@ -907,6 +907,8 @@ pub fn run(init: std.process.Init) !void {
         .max_snapshot_bytes = workbench_snapshot_capacity,
     });
     workbench_initialized = true;
+    if (init.environ_map.get("METAWORK_PROVIDER_API_KEY")) |credential|
+        try workbench.setKnownSecret(credential);
     app.workbench = &workbench;
     const mode = frontendMode(init.environ_map);
 

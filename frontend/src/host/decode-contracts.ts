@@ -7,6 +7,7 @@ import {
   type RunView,
   type SessionView,
   type ToolView,
+  type UiRecord,
   type WorkbenchSnapshot,
   type WorkspaceChoice,
 } from "./contracts.ts";
@@ -49,6 +50,24 @@ const hostCauses = [
   "bridge_pipeline_failure",
   "ui_pipeline_failure",
   "dependency_contract_failure",
+] as const;
+const uiRecordKinds = [
+  "ask_question",
+  "permission",
+  "plan_approval",
+  "custom",
+] as const;
+const uiRecordStates = [
+  "answered",
+  "allowed_once",
+  "allowed_always",
+  "denied",
+  "denied_session",
+  "approved",
+  "approved_with_edits",
+  "rejected",
+  "responded",
+  "cancelled",
 ] as const;
 
 function fail(path: string, message: string): never {
@@ -140,6 +159,7 @@ function nullableEnum<const T extends readonly string[]>(
 function decodeTool(value: unknown, path: string): ToolView {
   const item = object(value, path, [
     "id",
+    "order",
     "name",
     "input",
     "progress",
@@ -147,9 +167,14 @@ function decodeTool(value: unknown, path: string): ToolView {
     "state",
     "isError",
     "elapsedMs",
+    "inputTruncated",
+    "progressTruncated",
+    "contentTruncated",
+    "redacted",
   ]);
   return {
     id: stringValue(item.id, `${path}.id`),
+    order: positiveWireId(item.order, `${path}.order`),
     name: stringValue(item.name, `${path}.name`),
     input: stringValue(item.input, `${path}.input`),
     progress: stringValue(item.progress, `${path}.progress`),
@@ -161,6 +186,16 @@ function decodeTool(value: unknown, path: string): ToolView {
     ] as const),
     isError: booleanValue(item.isError, `${path}.isError`),
     elapsedMs: wireId(item.elapsedMs, `${path}.elapsedMs`),
+    inputTruncated: booleanValue(item.inputTruncated, `${path}.inputTruncated`),
+    progressTruncated: booleanValue(
+      item.progressTruncated,
+      `${path}.progressTruncated`,
+    ),
+    contentTruncated: booleanValue(
+      item.contentTruncated,
+      `${path}.contentTruncated`,
+    ),
+    redacted: booleanValue(item.redacted, `${path}.redacted`),
   };
 }
 
@@ -170,6 +205,7 @@ function decodeRun(value: unknown, path: string): RunView {
     "phase",
     "user",
     "assistant",
+    "assistantRedacted",
     "status",
     "outcome",
     "cause",
@@ -187,6 +223,10 @@ function decodeRun(value: unknown, path: string): RunView {
     phase: enumValue(item.phase, `${path}.phase`, runPhases),
     user: stringValue(item.user, `${path}.user`),
     assistant: stringValue(item.assistant, `${path}.assistant`),
+    assistantRedacted: booleanValue(
+      item.assistantRedacted,
+      `${path}.assistantRedacted`,
+    ),
     status: stringValue(item.status, `${path}.status`),
     outcome: nullableEnum(item.outcome, `${path}.outcome`, runOutcomes),
     cause: nullableEnum(item.cause, `${path}.cause`, hostCauses),
@@ -197,6 +237,34 @@ function decodeRun(value: unknown, path: string): RunView {
       cacheCreation: wireId(usage.cacheCreation, `${path}.usage.cacheCreation`),
     },
     tools: arrayValue(item.tools, `${path}.tools`, decodeTool),
+  };
+}
+
+function decodeUiRecord(value: unknown, path: string): UiRecord {
+  const item = object(value, path, [
+    "requestId",
+    "runId",
+    "order",
+    "kind",
+    "state",
+    "detail",
+    "itemCount",
+    "detailTruncated",
+    "redacted",
+  ]);
+  return {
+    requestId: positiveWireId(item.requestId, `${path}.requestId`),
+    runId: positiveWireId(item.runId, `${path}.runId`),
+    order: positiveWireId(item.order, `${path}.order`),
+    kind: enumValue(item.kind, `${path}.kind`, uiRecordKinds),
+    state: enumValue(item.state, `${path}.state`, uiRecordStates),
+    detail: stringValue(item.detail, `${path}.detail`),
+    itemCount: nonNegativeNumber(item.itemCount, `${path}.itemCount`),
+    detailTruncated: booleanValue(
+      item.detailTruncated,
+      `${path}.detailTruncated`,
+    ),
+    redacted: booleanValue(item.redacted, `${path}.redacted`),
   };
 }
 
@@ -228,12 +296,16 @@ function decodePendingUi(value: unknown, path: string): PendingUi | null {
     const item = object(value, path, [
       "requestId",
       "runId",
+      "order",
+      "redacted",
       "kind",
       "questions",
     ]);
     return {
       requestId: positiveWireId(item.requestId, `${path}.requestId`),
       runId: positiveWireId(item.runId, `${path}.runId`),
+      order: positiveWireId(item.order, `${path}.order`),
+      redacted: booleanValue(item.redacted, `${path}.redacted`),
       kind,
       questions: arrayValue(
         item.questions,
@@ -246,6 +318,8 @@ function decodePendingUi(value: unknown, path: string): PendingUi | null {
     const item = object(value, path, [
       "requestId",
       "runId",
+      "order",
+      "redacted",
       "kind",
       "tool",
       "args",
@@ -253,16 +327,27 @@ function decodePendingUi(value: unknown, path: string): PendingUi | null {
     return {
       requestId: positiveWireId(item.requestId, `${path}.requestId`),
       runId: positiveWireId(item.runId, `${path}.runId`),
+      order: positiveWireId(item.order, `${path}.order`),
+      redacted: booleanValue(item.redacted, `${path}.redacted`),
       kind,
       tool: stringValue(item.tool, `${path}.tool`),
       args: stringValue(item.args, `${path}.args`),
     };
   }
   if (kind === "plan_approval") {
-    const item = object(value, path, ["requestId", "runId", "kind", "plan"]);
+    const item = object(value, path, [
+      "requestId",
+      "runId",
+      "order",
+      "redacted",
+      "kind",
+      "plan",
+    ]);
     return {
       requestId: positiveWireId(item.requestId, `${path}.requestId`),
       runId: positiveWireId(item.runId, `${path}.runId`),
+      order: positiveWireId(item.order, `${path}.order`),
+      redacted: booleanValue(item.redacted, `${path}.redacted`),
       kind,
       plan: stringValue(item.plan, `${path}.plan`),
     };
@@ -271,6 +356,8 @@ function decodePendingUi(value: unknown, path: string): PendingUi | null {
     const item = object(value, path, [
       "requestId",
       "runId",
+      "order",
+      "redacted",
       "kind",
       "customKind",
       "payload",
@@ -278,6 +365,8 @@ function decodePendingUi(value: unknown, path: string): PendingUi | null {
     return {
       requestId: positiveWireId(item.requestId, `${path}.requestId`),
       runId: positiveWireId(item.runId, `${path}.runId`),
+      order: positiveWireId(item.order, `${path}.order`),
+      redacted: booleanValue(item.redacted, `${path}.redacted`),
       kind,
       customKind: stringValue(item.customKind, `${path}.customKind`),
       payload: stringValue(item.payload, `${path}.payload`),
@@ -300,6 +389,7 @@ function decodeSession(value: unknown, path: string): SessionView {
     "cause",
     "runs",
     "pendingUi",
+    "uiHistory",
   ]);
   const runs = arrayValue(item.runs, `${path}.runs`, decodeRun);
   const lifecycle = enumValue(
@@ -330,6 +420,38 @@ function decodeSession(value: unknown, path: string): SessionView {
     (currentRunPhase !== "waiting_ui" || pendingUi.runId !== currentRunId)
   )
     fail(path, "pending UI must belong to the current waiting Run");
+  const uiHistory = arrayValue(
+    item.uiHistory,
+    `${path}.uiHistory`,
+    decodeUiRecord,
+  );
+  const runIds = new Set(runs.map((run) => run.id));
+  const requestIds = new Set<string>();
+  const activityOrders = new Map(
+    runs.map((run) => [run.id, new Set(run.tools.map((tool) => tool.order))]),
+  );
+  for (const run of runs) {
+    if (activityOrders.get(run.id)!.size !== run.tools.length)
+      fail(path, "tool activity order must be unique within a Run");
+  }
+  for (const record of uiHistory) {
+    if (!runIds.has(record.runId))
+      fail(path, "UI history must reference a projected Run");
+    if (requestIds.has(record.requestId))
+      fail(path, "UI history request identities must be unique");
+    requestIds.add(record.requestId);
+    const orders = activityOrders.get(record.runId)!;
+    if (orders.has(record.order))
+      fail(path, "activity order must be unique within a Run");
+    orders.add(record.order);
+  }
+  if (pendingUi && requestIds.has(pendingUi.requestId))
+    fail(path, "a pending UI request cannot already be resolved");
+  if (pendingUi) {
+    const orders = activityOrders.get(pendingUi.runId)!;
+    if (orders.has(pendingUi.order))
+      fail(path, "activity order must be unique within a Run");
+  }
   return {
     id: positiveWireId(item.id, `${path}.id`),
     title: stringValue(item.title, `${path}.title`),
@@ -347,6 +469,7 @@ function decodeSession(value: unknown, path: string): SessionView {
     cause: nullableEnum(item.cause, `${path}.cause`, hostCauses),
     runs,
     pendingUi,
+    uiHistory,
   };
 }
 

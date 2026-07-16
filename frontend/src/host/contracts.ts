@@ -1,7 +1,8 @@
-export const WORKBENCH_SCHEMA_VERSION = 2 as const;
+export const WORKBENCH_SCHEMA_VERSION = 3 as const;
 
 export type ToolView = {
   id: string;
+  order: string;
   name: string;
   input: string;
   progress: string;
@@ -9,6 +10,10 @@ export type ToolView = {
   state: "running" | "completed" | "failed";
   isError: boolean;
   elapsedMs: string;
+  inputTruncated: boolean;
+  progressTruncated: boolean;
+  contentTruncated: boolean;
+  redacted: boolean;
 };
 
 export type RunPhase =
@@ -32,6 +37,7 @@ export type RunView = {
   phase: RunPhase;
   user: string;
   assistant: string;
+  assistantRedacted: boolean;
   status: string;
   outcome:
     | "completed"
@@ -78,12 +84,16 @@ export type PendingUi =
   | {
       requestId: string;
       runId: string;
+      order: string;
+      redacted: boolean;
       kind: "ask_question";
       questions: AskQuestion[];
     }
   | {
       requestId: string;
       runId: string;
+      order: string;
+      redacted: boolean;
       kind: "permission";
       tool: string;
       args: string;
@@ -91,16 +101,42 @@ export type PendingUi =
   | {
       requestId: string;
       runId: string;
+      order: string;
+      redacted: boolean;
       kind: "plan_approval";
       plan: string;
     }
   | {
       requestId: string;
       runId: string;
+      order: string;
+      redacted: boolean;
       kind: "custom";
       customKind: string;
       payload: string;
     };
+
+export type UiRecord = {
+  requestId: string;
+  runId: string;
+  order: string;
+  kind: "ask_question" | "permission" | "plan_approval" | "custom";
+  state:
+    | "answered"
+    | "allowed_once"
+    | "allowed_always"
+    | "denied"
+    | "denied_session"
+    | "approved"
+    | "approved_with_edits"
+    | "rejected"
+    | "responded"
+    | "cancelled";
+  detail: string;
+  itemCount: number;
+  detailTruncated: boolean;
+  redacted: boolean;
+};
 
 export type SessionView = {
   id: string;
@@ -115,6 +151,7 @@ export type SessionView = {
   cause: RunView["cause"];
   runs: RunView[];
   pendingUi: PendingUi | null;
+  uiHistory: UiRecord[];
 };
 
 export type WorkbenchSnapshot = {

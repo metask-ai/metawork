@@ -26,6 +26,7 @@ pub const Limits = struct {
     max_tool_field_bytes: usize = 256 * 1024,
     max_pending_ui_json_bytes: usize = 256 * 1024,
     max_pending_ui_requests: usize = 4,
+    max_ui_history_per_session: usize = 8,
     max_snapshot_bytes: usize = 8 * 1024 * 1024,
 };
 
@@ -36,7 +37,9 @@ const session_snapshot_overhead: usize = 512;
 const run_snapshot_overhead: usize = 1024;
 const tool_snapshot_overhead: usize = 512;
 const pending_ui_snapshot_overhead: usize = 8 * 1024;
-pub const snapshot_schema_version: u32 = 2;
+const ui_record_detail_capacity: usize = 512;
+const ui_record_snapshot_overhead: usize = 512;
+pub const snapshot_schema_version: u32 = 3;
 
 const ToolState = enum { running, completed, failed };
 const RunPhase = enum {
@@ -61,6 +64,7 @@ const TrackedText = struct {
 
 const ToolView = struct {
     id: []u8,
+    order: u64,
     name: []u8,
     input: []u8,
     progress: []u8,
@@ -68,6 +72,10 @@ const ToolView = struct {
     state: ToolState,
     is_error: bool = false,
     elapsed_ms: u64 = 0,
+    input_truncated: bool = false,
+    progress_truncated: bool = false,
+    content_truncated: bool = false,
+    redacted: bool = false,
 };
 
 const UsageView = struct {
@@ -81,12 +89,46 @@ const RunView = struct {
     id: u64,
     user: []u8,
     assistant: TrackedText = .{},
+    assistant_redacted: bool = false,
     phase: RunPhase = .queued,
     tools: []?ToolView,
     usage: UsageView = .{},
     status_text: []u8,
     outcome: ?lifecycle.RunOutcome = null,
     cause: ?lifecycle.HostCause = null,
+    next_activity_order: u64 = 1,
+};
+
+const UiRecordKind = enum { ask_question, permission, plan_approval, custom };
+
+const UiRecordState = enum {
+    answered,
+    allowed_once,
+    allowed_always,
+    denied,
+    denied_session,
+    approved,
+    approved_with_edits,
+    rejected,
+    responded,
+    cancelled,
+};
+
+const UiRecord = struct {
+    request_id: u64,
+    run_id: u64,
+    order: u64 = 0,
+    kind: UiRecordKind,
+    state: UiRecordState,
+    detail: [ui_record_detail_capacity]u8 = undefined,
+    detail_len: usize = 0,
+    item_count: u32 = 0,
+    detail_truncated: bool = false,
+    redacted: bool = false,
+
+    fn detailSlice(self: *const UiRecord) []const u8 {
+        return self.detail[0..self.detail_len];
+    }
 };
 
 const SessionView = struct {
@@ -96,6 +138,11 @@ const SessionView = struct {
     title: []u8,
     archived: bool = false,
     runs: []?RunView,
+    ui_history: []?UiRecord,
+    ui_history_count: usize = 0,
+    ui_history_next: usize = 0,
+    pending_ui_request_id: u64 = 0,
+    pending_ui_order: u64 = 0,
     state: lifecycle.SessionState = .idle,
     active_run_id: u64 = 0,
     outcome: ?lifecycle.RunOutcome = null,
@@ -117,6 +164,7 @@ pub const Workbench = struct {
     sessions: []?SessionView,
     projection_bytes: usize = 0,
     revision: u64 = 0,
+    known_secret: []u8 = &.{},
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -130,12 +178,32 @@ pub const Workbench = struct {
             limits.max_user_message_bytes == 0 or limits.max_assistant_message_bytes == 0 or
             limits.max_tool_field_bytes == 0 or limits.max_pending_ui_json_bytes == 0 or
             limits.max_pending_ui_requests == 0 or
+            limits.max_ui_history_per_session == 0 or
             limits.max_snapshot_bytes == 0 or
             (worstCaseSnapshotBytes(limits) orelse return error.ProjectionCapacity) > limits.max_snapshot_bytes)
             return error.ProjectionCapacity;
         const sessions = try allocator.alloc(?SessionView, limits.max_sessions);
         @memset(sessions, null);
         return .{ .allocator = allocator, .host = host, .limits = limits, .sessions = sessions };
+    }
+
+    /// Registers the Host-only provider credential that must never be copied
+    /// into the Renderer projection. Call this before opening any Session.
+    pub fn setKnownSecret(self: *Workbench, secret: []const u8) std.mem.Allocator.Error!void {
+        if (secret.len == 0) {
+            if (self.known_secret.len != 0) {
+                std.crypto.secureZero(u8, self.known_secret);
+                self.allocator.free(self.known_secret);
+                self.known_secret = &.{};
+            }
+            return;
+        }
+        const next = try self.allocator.dupe(u8, secret);
+        if (self.known_secret.len != 0) {
+            std.crypto.secureZero(u8, self.known_secret);
+            self.allocator.free(self.known_secret);
+        }
+        self.known_secret = next;
     }
 
     pub fn createSession(
@@ -151,6 +219,9 @@ pub const Workbench = struct {
         const runs = try self.allocator.alloc(?RunView, self.limits.max_runs_per_session);
         errdefer self.allocator.free(runs);
         @memset(runs, null);
+        const ui_history = try self.allocator.alloc(?UiRecord, self.limits.max_ui_history_per_session);
+        errdefer self.allocator.free(ui_history);
+        @memset(ui_history, null);
         const session = self.host.createSession(options) catch |err| return err;
         const snapshot = session.snapshot();
         self.sessions[slot] = .{
@@ -159,6 +230,7 @@ pub const Workbench = struct {
             .workspace_root = workspace,
             .title = title,
             .runs = runs,
+            .ui_history = ui_history,
             .state = snapshot.state,
             .active_run_id = snapshot.active_run_id,
             .outcome = snapshot.last_outcome,
@@ -201,7 +273,9 @@ pub const Workbench = struct {
         const view = self.findSession(session_id) orelse return error.UnknownSession;
         const session = view.session orelse
             return error.SessionClosing;
+        const record = self.prepareCancelledUiRecord(session, run_id);
         try session.requestCancel(run_id, .user_cancel);
+        if (record) |value| self.pushUiRecord(view, value);
         view.cancel_requested = true;
         if (findRun(view.runs, run_id)) |run| run.phase = .stopping;
         self.bumpRevision();
@@ -215,9 +289,12 @@ pub const Workbench = struct {
         response: sdk.UiResponse,
     ) Error!void {
         self.syncLifecycle();
-        const session = (self.findSession(session_id) orelse return error.UnknownSession).session orelse
+        const view = self.findSession(session_id) orelse return error.UnknownSession;
+        const session = view.session orelse
             return error.SessionClosing;
+        const record = self.prepareUiRecord(session, run_id, request_id, response);
         try session.respondUi(run_id, request_id, response);
+        self.pushUiRecord(view, record);
         self.bumpRevision();
     }
 
@@ -226,6 +303,7 @@ pub const Workbench = struct {
         const view = self.findSession(session_id) orelse return error.UnknownSession;
         if (view.close_result.load(.acquire) == .running) return error.CloseInProgress;
         const session = view.session orelse return;
+        const cancelled_ui = self.prepareCancelledUiRecord(session, view.active_run_id);
         view.session = null;
         view.closing_session = session;
         view.state = .closing;
@@ -242,6 +320,8 @@ pub const Workbench = struct {
             view.state = session.snapshot().state;
             return err;
         };
+        if (cancelled_ui) |record|
+            self.pushUiRecord(view, record);
         self.bumpRevision();
     }
 
@@ -315,6 +395,16 @@ pub const Workbench = struct {
             }
             const session = view.session orelse continue;
             const snapshot = session.snapshot();
+            const pending_request_id = snapshot.pending_ui_request_id orelse 0;
+            if (view.pending_ui_request_id != pending_request_id) {
+                view.pending_ui_request_id = pending_request_id;
+                view.pending_ui_order = 0;
+                if (pending_request_id != 0) {
+                    if (findRun(view.runs, snapshot.active_run_id)) |pending_run|
+                        view.pending_ui_order = takeActivityOrder(pending_run);
+                }
+                changed = true;
+            }
             if (snapshot.last_outcome != null or snapshot.state == .idle or snapshot.state == .closed)
                 view.cancel_requested = false;
             if (view.state != snapshot.state or view.active_run_id != snapshot.active_run_id or
@@ -347,26 +437,35 @@ pub const Workbench = struct {
         const session = self.findSession(envelope.session_id) orelse return error.UnknownSession;
         const run = findRun(session.runs, envelope.run_id) orelse return error.NoSuchRun;
         switch (envelope.event.value) {
-            .text_chunk => |text| try self.appendTrackedText(&run.assistant, text, self.limits.max_assistant_message_bytes),
+            .text_chunk => |text| {
+                try self.appendTrackedText(&run.assistant, text, self.limits.max_assistant_message_bytes);
+                if (self.redactTrackedText(&run.assistant)) run.assistant_redacted = true;
+            },
             .stream_begin => {
                 run.phase = .running;
-                try self.replaceTracked(&run.status_text, "Generating", self.limits.max_tool_field_bytes);
+                _ = try self.replaceTrackedProjected(&run.status_text, "Generating", self.limits.max_tool_field_bytes);
             },
             .tool_start => |tool| {
                 const view = try self.findOrCreateTool(run, tool.id, tool.name, tool.input);
                 view.state = .running;
-                try self.replaceTracked(&run.status_text, tool.name, self.limits.max_tool_field_bytes);
+                _ = try self.replaceTrackedProjected(&run.status_text, tool.name, self.limits.max_tool_field_bytes);
             },
-            .set_current_tool => |tool| try self.replaceTracked(&run.status_text, tool.name, self.limits.max_tool_field_bytes),
+            .set_current_tool => |tool| _ = try self.replaceTrackedProjected(&run.status_text, tool.name, self.limits.max_tool_field_bytes),
             .tool_progress => |progress| {
                 const tool = findTool(run.tools, progress.id) orelse return error.ToolCapacity;
-                try self.replaceTracked(&tool.progress, progress.text, self.limits.max_tool_field_bytes);
+                const projected = try self.replaceTrackedProjected(&tool.progress, progress.text, self.limits.max_tool_field_bytes);
+                tool.progress_truncated = projected.truncated;
+                tool.redacted = tool.redacted or projected.redacted;
             },
-            .progress => |progress| try self.replaceTracked(&run.status_text, progress.tool_name, self.limits.max_tool_field_bytes),
-            .clear_current_tool => try self.replaceTracked(&run.status_text, "Running", self.limits.max_tool_field_bytes),
+            .progress => |progress| _ = try self.replaceTrackedProjected(&run.status_text, progress.tool_name, self.limits.max_tool_field_bytes),
+            .clear_current_tool => _ = try self.replaceTrackedProjected(&run.status_text, "Running", self.limits.max_tool_field_bytes),
             .tool_result => |result| {
                 const tool = try self.findOrCreateTool(run, result.id, result.name, result.input);
-                try self.replaceTracked(&tool.content, result.content, self.limits.max_tool_field_bytes);
+                const input = try self.replaceTrackedProjected(&tool.input, result.input, self.limits.max_tool_field_bytes);
+                const content = try self.replaceTrackedProjected(&tool.content, result.content, self.limits.max_tool_field_bytes);
+                tool.input_truncated = input.truncated;
+                tool.content_truncated = content.truncated;
+                tool.redacted = tool.redacted or input.redacted or content.redacted;
                 tool.is_error = result.is_error;
                 tool.elapsed_ms = result.elapsed_ms;
                 tool.state = if (result.is_error) .failed else .completed;
@@ -377,10 +476,10 @@ pub const Workbench = struct {
                 run.usage.cache_read_input_tokens = try addU64(run.usage.cache_read_input_tokens, usage.cache_read_input_tokens);
                 run.usage.cache_creation_input_tokens = try addU64(run.usage.cache_creation_input_tokens, usage.cache_creation_input_tokens);
             },
-            .context_warning => |warning| try self.replaceTracked(&run.status_text, warning.level, self.limits.max_tool_field_bytes),
-            .auto_compact => try self.replaceTracked(&run.status_text, "Context compacted", self.limits.max_tool_field_bytes),
-            .retry_notice => try self.replaceTracked(&run.status_text, "Retrying provider", self.limits.max_tool_field_bytes),
-            .stream_done => try self.replaceTracked(&run.status_text, "Finishing", self.limits.max_tool_field_bytes),
+            .context_warning => |warning| _ = try self.replaceTrackedProjected(&run.status_text, warning.level, self.limits.max_tool_field_bytes),
+            .auto_compact => _ = try self.replaceTrackedProjected(&run.status_text, "Context compacted", self.limits.max_tool_field_bytes),
+            .retry_notice => _ = try self.replaceTrackedProjected(&run.status_text, "Retrying provider", self.limits.max_tool_field_bytes),
+            .stream_done => _ = try self.replaceTrackedProjected(&run.status_text, "Finishing", self.limits.max_tool_field_bytes),
             .diag_turn_begin,
             .diag_turn_end,
             .diag_breaker_tripped,
@@ -414,15 +513,19 @@ pub const Workbench = struct {
             self.deinitSessionView(session);
         }
         self.allocator.free(self.sessions);
+        if (self.known_secret.len != 0) {
+            std.crypto.secureZero(u8, self.known_secret);
+            self.allocator.free(self.known_secret);
+        }
         std.debug.assert(self.projection_bytes == 0);
         self.* = undefined;
     }
 
     fn writeSession(self: *Workbench, writer: *std.Io.Writer, view: *SessionView) Error!void {
         writer.print("{{\"id\":\"{d}\",\"title\":", .{view.id}) catch return error.SnapshotTooLarge;
-        jsonValue(writer, view.title) catch return error.SnapshotTooLarge;
+        try self.projectedJsonValue(writer, view.title);
         writer.writeAll(",\"workspaceRoot\":") catch return error.SnapshotTooLarge;
-        jsonValue(writer, view.workspace_root) catch return error.SnapshotTooLarge;
+        try self.projectedJsonValue(writer, view.workspace_root);
         writer.print(",\"lifecycle\":\"{s}\",\"archived\":{},\"closeFailed\":{},\"currentRunId\":\"{d}\",\"currentRunPhase\":", .{
             @tagName(taskLifecycle(view.state)),
             view.archived,
@@ -440,10 +543,13 @@ pub const Workbench = struct {
             const run = &(entry.* orelse continue);
             if (run_count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
             run_count += 1;
-            try writeRun(writer, run);
+            try self.writeRun(writer, run);
         }
         writer.writeAll("],\"pendingUi\":") catch return error.SnapshotTooLarge;
         try self.writePendingUi(writer, view);
+        writer.writeAll(",\"uiHistory\":[") catch return error.SnapshotTooLarge;
+        try self.writeUiHistory(writer, view);
+        writer.writeByte(']') catch return error.SnapshotTooLarge;
         writer.writeByte('}') catch return error.SnapshotTooLarge;
     }
 
@@ -462,7 +568,15 @@ pub const Workbench = struct {
         defer pending.deinit();
         var parsed = sdk.decodeUiRequest(self.allocator, pending.json) catch return error.InvalidUiResponse;
         defer parsed.deinit();
-        try writePendingUiProjection(writer, pending.request_id, pending.run_id, parsed.value);
+        if (view.pending_ui_request_id != pending.request_id or view.pending_ui_order == 0)
+            return error.NoSuchRun;
+        try self.writePendingUiProjection(
+            writer,
+            pending.request_id,
+            pending.run_id,
+            view.pending_ui_order,
+            parsed.value,
+        );
     }
 
     fn findOrCreateTool(
@@ -478,18 +592,22 @@ pub const Workbench = struct {
         errdefer self.freeTracked(owned_id);
         const owned_name = try self.copyBounded(name, self.limits.max_tool_field_bytes);
         errdefer self.freeTracked(owned_name);
-        const owned_input = try self.copyBounded(input, self.limits.max_tool_field_bytes);
+        const input_projection = try self.copyProjected(input, self.limits.max_tool_field_bytes);
+        const owned_input = input_projection.value;
         errdefer self.freeTracked(owned_input);
         const progress = try self.copyBounded("", self.limits.max_tool_field_bytes);
         errdefer self.freeTracked(progress);
         const content = try self.copyBounded("", self.limits.max_tool_field_bytes);
         run.tools[slot] = .{
             .id = owned_id,
+            .order = takeActivityOrder(run),
             .name = owned_name,
             .input = owned_input,
             .progress = progress,
             .content = content,
             .state = .running,
+            .input_truncated = input_projection.truncated,
+            .redacted = input_projection.redacted,
         };
         return &run.tools[slot].?;
     }
@@ -525,6 +643,7 @@ pub const Workbench = struct {
             self.freeTracked(run.status_text);
         }
         self.allocator.free(session.runs);
+        self.allocator.free(session.ui_history);
         self.freeTracked(session.workspace_root);
         self.freeTracked(session.title);
         session.* = undefined;
@@ -553,6 +672,321 @@ pub const Workbench = struct {
         target.list.appendSliceAssumeCapacity(suffix);
     }
 
+    const ProjectedCopy = struct {
+        value: []u8,
+        truncated: bool,
+        redacted: bool,
+    };
+
+    fn copyProjected(self: *Workbench, value: []const u8, max: usize) Error!ProjectedCopy {
+        const capacity = @min(value.len, max);
+        const scratch = try self.allocator.alloc(u8, capacity);
+        defer self.allocator.free(scratch);
+        const result = sanitizeInto(scratch, value, self.known_secret);
+        return .{
+            .value = try self.copyBounded(scratch[0..result.len], max),
+            .truncated = result.truncated,
+            .redacted = result.redacted,
+        };
+    }
+
+    fn replaceTrackedProjected(self: *Workbench, target: *[]u8, value: []const u8, max: usize) Error!SanitizeResult {
+        const capacity = @min(value.len, max);
+        const scratch = try self.allocator.alloc(u8, capacity);
+        defer self.allocator.free(scratch);
+        const result = sanitizeInto(scratch, value, self.known_secret);
+        try self.replaceTracked(target, scratch[0..result.len], max);
+        return result;
+    }
+
+    fn redactTrackedText(self: *Workbench, target: *TrackedText) bool {
+        if (self.known_secret.len == 0 or target.list.items.len < self.known_secret.len) return false;
+        var read: usize = 0;
+        var write: usize = 0;
+        var redacted = false;
+        const marker_len = @min(self.known_secret.len, 3);
+        while (read < target.list.items.len) {
+            if (std.mem.startsWith(u8, target.list.items[read..], self.known_secret)) {
+                @memset(target.list.items[write..][0..marker_len], '*');
+                write += marker_len;
+                read += self.known_secret.len;
+                redacted = true;
+            } else {
+                target.list.items[write] = target.list.items[read];
+                write += 1;
+                read += 1;
+            }
+        }
+        target.list.items.len = write;
+        return redacted;
+    }
+
+    fn projectedJsonValue(self: *Workbench, writer: *std.Io.Writer, value: []const u8) Error!void {
+        const hex = "0123456789abcdef";
+        writer.writeByte('"') catch return error.SnapshotTooLarge;
+        var index: usize = 0;
+        while (index < value.len) {
+            if (self.known_secret.len != 0 and std.mem.startsWith(u8, value[index..], self.known_secret)) {
+                _ = writer.splatByte('*', @min(self.known_secret.len, 3)) catch return error.SnapshotTooLarge;
+                index += self.known_secret.len;
+                continue;
+            }
+            const byte = value[index];
+            switch (byte) {
+                '"' => writer.writeAll("\\\"") catch return error.SnapshotTooLarge,
+                '\\' => writer.writeAll("\\\\") catch return error.SnapshotTooLarge,
+                0x08 => writer.writeAll("\\b") catch return error.SnapshotTooLarge,
+                0x0c => writer.writeAll("\\f") catch return error.SnapshotTooLarge,
+                '\n' => writer.writeAll("\\n") catch return error.SnapshotTooLarge,
+                '\r' => writer.writeAll("\\r") catch return error.SnapshotTooLarge,
+                '\t' => writer.writeAll("\\t") catch return error.SnapshotTooLarge,
+                0x00...0x07, 0x0b, 0x0e...0x1f => {
+                    writer.writeAll("\\u00") catch return error.SnapshotTooLarge;
+                    writer.writeByte(hex[byte >> 4]) catch return error.SnapshotTooLarge;
+                    writer.writeByte(hex[byte & 0x0f]) catch return error.SnapshotTooLarge;
+                },
+                else => writer.writeByte(byte) catch return error.SnapshotTooLarge,
+            }
+            index += 1;
+        }
+        writer.writeByte('"') catch return error.SnapshotTooLarge;
+    }
+
+    fn writePendingUiProjection(
+        self: *Workbench,
+        writer: *std.Io.Writer,
+        request_id: u64,
+        run_id: u64,
+        order: u64,
+        request: sdk.UiRequest,
+    ) Error!void {
+        writer.print("{{\"requestId\":\"{d}\",\"runId\":\"{d}\",\"order\":\"{d}\",\"redacted\":{},", .{
+            request_id,
+            run_id,
+            order,
+            self.requestContainsSecret(request),
+        }) catch return error.SnapshotTooLarge;
+        switch (request) {
+            .ask_question => |questions| {
+                writer.writeAll("\"kind\":\"ask_question\",\"questions\":[") catch return error.SnapshotTooLarge;
+                for (questions, 0..) |question, question_index| {
+                    if (question_index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+                    writer.writeAll("{\"question\":") catch return error.SnapshotTooLarge;
+                    try self.projectedJsonValue(writer, question.question);
+                    writer.writeAll(",\"header\":") catch return error.SnapshotTooLarge;
+                    try self.projectedJsonValue(writer, question.header);
+                    writer.print(",\"multi\":{},\"options\":[", .{question.multi}) catch return error.SnapshotTooLarge;
+                    for (question.options, 0..) |option, option_index| {
+                        if (option_index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+                        writer.writeAll("{\"label\":") catch return error.SnapshotTooLarge;
+                        try self.projectedJsonValue(writer, option.label);
+                        writer.writeAll(",\"description\":") catch return error.SnapshotTooLarge;
+                        try self.projectedJsonValue(writer, option.description);
+                        writer.writeAll(",\"preview\":") catch return error.SnapshotTooLarge;
+                        try self.projectedJsonValue(writer, option.preview);
+                        writer.writeByte('}') catch return error.SnapshotTooLarge;
+                    }
+                    writer.writeAll("]}") catch return error.SnapshotTooLarge;
+                }
+                writer.writeByte(']') catch return error.SnapshotTooLarge;
+            },
+            .permission => |permission| {
+                writer.writeAll("\"kind\":\"permission\",\"tool\":") catch return error.SnapshotTooLarge;
+                try self.projectedJsonValue(writer, permission.tool);
+                writer.writeAll(",\"args\":") catch return error.SnapshotTooLarge;
+                try self.projectedJsonValue(writer, permission.args);
+            },
+            .plan_approval => |plan| {
+                writer.writeAll("\"kind\":\"plan_approval\",\"plan\":") catch return error.SnapshotTooLarge;
+                try self.projectedJsonValue(writer, plan.plan_md);
+            },
+            .custom => |custom| {
+                writer.writeAll("\"kind\":\"custom\",\"customKind\":") catch return error.SnapshotTooLarge;
+                try self.projectedJsonValue(writer, custom.kind);
+                writer.writeAll(",\"payload\":") catch return error.SnapshotTooLarge;
+                try self.projectedJsonValue(writer, custom.payload_json);
+            },
+        }
+        writer.writeByte('}') catch return error.SnapshotTooLarge;
+    }
+
+    fn requestContainsSecret(self: *Workbench, request: sdk.UiRequest) bool {
+        if (self.known_secret.len == 0) return false;
+        return switch (request) {
+            .ask_question => |questions| questions_block: {
+                for (questions) |question| {
+                    if (self.containsKnownSecret(question.question) or self.containsKnownSecret(question.header))
+                        break :questions_block true;
+                    for (question.options) |option|
+                        if (self.containsKnownSecret(option.label) or
+                            self.containsKnownSecret(option.description) or
+                            self.containsKnownSecret(option.preview))
+                            break :questions_block true;
+                }
+                break :questions_block false;
+            },
+            .permission => |permission| self.containsKnownSecret(permission.tool) or
+                self.containsKnownSecret(permission.args),
+            .plan_approval => |plan| self.containsKnownSecret(plan.plan_md),
+            .custom => |custom| self.containsKnownSecret(custom.kind) or
+                self.containsKnownSecret(custom.payload_json),
+        };
+    }
+
+    fn containsKnownSecret(self: *Workbench, value: []const u8) bool {
+        return self.known_secret.len != 0 and std.mem.indexOf(u8, value, self.known_secret) != null;
+    }
+
+    fn writeRun(self: *Workbench, writer: *std.Io.Writer, run: *RunView) Error!void {
+        writer.print("{{\"id\":\"{d}\",\"phase\":\"{s}\",\"user\":", .{ run.id, @tagName(run.phase) }) catch return error.SnapshotTooLarge;
+        try self.projectedJsonValue(writer, run.user);
+        writer.writeAll(",\"assistant\":") catch return error.SnapshotTooLarge;
+        try self.projectedJsonValue(writer, run.assistant.list.items);
+        writer.print(",\"assistantRedacted\":{},\"status\":", .{run.assistant_redacted}) catch return error.SnapshotTooLarge;
+        try self.projectedJsonValue(writer, run.status_text);
+        writer.writeAll(",\"outcome\":") catch return error.SnapshotTooLarge;
+        if (run.outcome) |outcome| jsonValue(writer, @tagName(outcome)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeAll(",\"cause\":") catch return error.SnapshotTooLarge;
+        if (run.cause) |cause| jsonValue(writer, @tagName(cause)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.print(",\"usage\":{{\"input\":\"{d}\",\"output\":\"{d}\",\"cacheRead\":\"{d}\",\"cacheCreation\":\"{d}\"}},\"tools\":[", .{
+            run.usage.input_tokens,
+            run.usage.output_tokens,
+            run.usage.cache_read_input_tokens,
+            run.usage.cache_creation_input_tokens,
+        }) catch return error.SnapshotTooLarge;
+        var tool_count: usize = 0;
+        for (run.tools) |*entry| {
+            const tool = &(entry.* orelse continue);
+            if (tool_count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+            tool_count += 1;
+            writer.writeAll("{\"id\":") catch return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, tool.id);
+            writer.print(",\"order\":\"{d}\"", .{tool.order}) catch return error.SnapshotTooLarge;
+            writer.writeAll(",\"name\":") catch return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, tool.name);
+            writer.writeAll(",\"input\":") catch return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, tool.input);
+            writer.writeAll(",\"progress\":") catch return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, tool.progress);
+            writer.writeAll(",\"content\":") catch return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, tool.content);
+            writer.print(",\"state\":\"{s}\",\"isError\":{},\"elapsedMs\":\"{d}\",\"inputTruncated\":{},\"progressTruncated\":{},\"contentTruncated\":{},\"redacted\":{}}}", .{
+                @tagName(tool.state),
+                tool.is_error,
+                tool.elapsed_ms,
+                tool.input_truncated,
+                tool.progress_truncated,
+                tool.content_truncated,
+                tool.redacted,
+            }) catch return error.SnapshotTooLarge;
+        }
+        writer.writeAll("]}") catch return error.SnapshotTooLarge;
+    }
+
+    fn prepareUiRecord(
+        self: *Workbench,
+        session: *lifecycle.Session,
+        run_id: u64,
+        request_id: u64,
+        response: sdk.UiResponse,
+    ) UiRecord {
+        var record = UiRecord{
+            .request_id = request_id,
+            .run_id = run_id,
+            .kind = kindForResponse(response),
+            .state = stateForResponse(response),
+        };
+        var pending = session.copyPendingUiRequest(self.allocator) catch return record;
+        defer pending.deinit();
+        if (pending.run_id != run_id or pending.request_id != request_id) return record;
+        var parsed = sdk.decodeUiRequest(self.allocator, pending.json) catch return record;
+        defer parsed.deinit();
+        record.kind = kindForRequest(parsed.value);
+        self.fillUiRecord(&record, parsed.value);
+        return record;
+    }
+
+    fn prepareCancelledUiRecord(
+        self: *Workbench,
+        session: *lifecycle.Session,
+        run_id: u64,
+    ) ?UiRecord {
+        if (run_id == 0) return null;
+        var pending = session.copyPendingUiRequest(self.allocator) catch return null;
+        defer pending.deinit();
+        if (pending.run_id != run_id) return null;
+        var parsed = sdk.decodeUiRequest(self.allocator, pending.json) catch return UiRecord{
+            .request_id = pending.request_id,
+            .run_id = run_id,
+            .kind = .custom,
+            .state = .cancelled,
+        };
+        defer parsed.deinit();
+        var record = UiRecord{
+            .request_id = pending.request_id,
+            .run_id = run_id,
+            .kind = kindForRequest(parsed.value),
+            .state = .cancelled,
+        };
+        self.fillUiRecord(&record, parsed.value);
+        return record;
+    }
+
+    fn fillUiRecord(self: *Workbench, record: *UiRecord, request: sdk.UiRequest) void {
+        const value = switch (request) {
+            .ask_question => |questions| value: {
+                record.item_count = @intCast(@min(questions.len, std.math.maxInt(u32)));
+                break :value if (questions.len == 0) "" else questions[0].question;
+            },
+            .permission => |permission| permission.args,
+            .plan_approval => |plan| plan.plan_md,
+            .custom => |custom| custom.payload_json,
+        };
+        const result = sanitizeInto(&record.detail, value, self.known_secret);
+        record.detail_len = result.len;
+        record.detail_truncated = result.truncated;
+        record.redacted = result.redacted;
+    }
+
+    fn writeUiHistory(self: *Workbench, writer: *std.Io.Writer, view: *const SessionView) Error!void {
+        const start = if (view.ui_history_count == view.ui_history.len) view.ui_history_next else 0;
+        for (0..view.ui_history_count) |offset| {
+            if (offset != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+            const index = (start + offset) % view.ui_history.len;
+            const record = &(view.ui_history[index] orelse unreachable);
+            writer.print("{{\"requestId\":\"{d}\",\"runId\":\"{d}\",\"order\":\"{d}\",\"kind\":\"{s}\",\"state\":\"{s}\",\"detail\":", .{
+                record.request_id,
+                record.run_id,
+                record.order,
+                @tagName(record.kind),
+                @tagName(record.state),
+            }) catch return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, record.detailSlice());
+            writer.print(",\"itemCount\":{d},\"detailTruncated\":{},\"redacted\":{}}}", .{
+                record.item_count,
+                record.detail_truncated,
+                record.redacted,
+            }) catch return error.SnapshotTooLarge;
+        }
+    }
+
+    fn pushUiRecord(_: *Workbench, view: *SessionView, record: UiRecord) void {
+        for (view.ui_history) |entry| if (entry) |existing|
+            if (existing.request_id == record.request_id) return;
+        var stored = record;
+        if (view.pending_ui_request_id == stored.request_id and view.pending_ui_order != 0) {
+            stored.order = view.pending_ui_order;
+            view.pending_ui_request_id = 0;
+            view.pending_ui_order = 0;
+        } else {
+            const run = findRun(view.runs, stored.run_id) orelse unreachable;
+            stored.order = takeActivityOrder(run);
+        }
+        view.ui_history[view.ui_history_next] = stored;
+        view.ui_history_next = (view.ui_history_next + 1) % view.ui_history.len;
+        view.ui_history_count = @min(view.ui_history_count + 1, view.ui_history.len);
+    }
+
     fn freeTrackedText(self: *Workbench, target: *TrackedText) void {
         self.projection_bytes -= target.list.capacity;
         target.list.deinit(self.allocator);
@@ -577,38 +1011,6 @@ pub const Workbench = struct {
         if (self.revision != std.math.maxInt(u64)) self.revision += 1;
     }
 };
-
-fn writePendingUiProjection(
-    writer: *std.Io.Writer,
-    request_id: u64,
-    run_id: u64,
-    request: sdk.UiRequest,
-) Error!void {
-    writer.print("{{\"requestId\":\"{d}\",\"runId\":\"{d}\",", .{ request_id, run_id }) catch return error.SnapshotTooLarge;
-    switch (request) {
-        .ask_question => |questions| {
-            writer.writeAll("\"kind\":\"ask_question\",\"questions\":") catch return error.SnapshotTooLarge;
-            jsonValue(writer, questions) catch return error.SnapshotTooLarge;
-        },
-        .permission => |permission| {
-            writer.writeAll("\"kind\":\"permission\",\"tool\":") catch return error.SnapshotTooLarge;
-            jsonValue(writer, permission.tool) catch return error.SnapshotTooLarge;
-            writer.writeAll(",\"args\":") catch return error.SnapshotTooLarge;
-            jsonValue(writer, permission.args) catch return error.SnapshotTooLarge;
-        },
-        .plan_approval => |plan| {
-            writer.writeAll("\"kind\":\"plan_approval\",\"plan\":") catch return error.SnapshotTooLarge;
-            jsonValue(writer, plan.plan_md) catch return error.SnapshotTooLarge;
-        },
-        .custom => |custom| {
-            writer.writeAll("\"kind\":\"custom\",\"customKind\":") catch return error.SnapshotTooLarge;
-            jsonValue(writer, custom.kind) catch return error.SnapshotTooLarge;
-            writer.writeAll(",\"payload\":") catch return error.SnapshotTooLarge;
-            jsonValue(writer, custom.payload_json) catch return error.SnapshotTooLarge;
-        },
-    }
-    writer.writeByte('}') catch return error.SnapshotTooLarge;
-}
 
 fn closeWorker(
     host: *lifecycle.Host,
@@ -674,41 +1076,69 @@ fn isTerminalPhase(phase: RunPhase) bool {
     };
 }
 
-fn writeRun(writer: *std.Io.Writer, run: *RunView) Error!void {
-    writer.print("{{\"id\":\"{d}\",\"phase\":\"{s}\",\"user\":", .{ run.id, @tagName(run.phase) }) catch return error.SnapshotTooLarge;
-    jsonValue(writer, run.user) catch return error.SnapshotTooLarge;
-    writer.writeAll(",\"assistant\":") catch return error.SnapshotTooLarge;
-    jsonValue(writer, run.assistant.list.items) catch return error.SnapshotTooLarge;
-    writer.writeAll(",\"status\":") catch return error.SnapshotTooLarge;
-    jsonValue(writer, run.status_text) catch return error.SnapshotTooLarge;
-    writer.writeAll(",\"outcome\":") catch return error.SnapshotTooLarge;
-    if (run.outcome) |outcome| jsonValue(writer, @tagName(outcome)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
-    writer.writeAll(",\"cause\":") catch return error.SnapshotTooLarge;
-    if (run.cause) |cause| jsonValue(writer, @tagName(cause)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
-    writer.print(",\"usage\":{{\"input\":\"{d}\",\"output\":\"{d}\",\"cacheRead\":\"{d}\",\"cacheCreation\":\"{d}\"}},\"tools\":[", .{
-        run.usage.input_tokens,
-        run.usage.output_tokens,
-        run.usage.cache_read_input_tokens,
-        run.usage.cache_creation_input_tokens,
-    }) catch return error.SnapshotTooLarge;
-    var tool_count: usize = 0;
-    for (run.tools) |*entry| {
-        const tool = &(entry.* orelse continue);
-        if (tool_count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
-        tool_count += 1;
-        writer.writeAll("{\"id\":") catch return error.SnapshotTooLarge;
-        jsonValue(writer, tool.id) catch return error.SnapshotTooLarge;
-        writer.writeAll(",\"name\":") catch return error.SnapshotTooLarge;
-        jsonValue(writer, tool.name) catch return error.SnapshotTooLarge;
-        writer.writeAll(",\"input\":") catch return error.SnapshotTooLarge;
-        jsonValue(writer, tool.input) catch return error.SnapshotTooLarge;
-        writer.writeAll(",\"progress\":") catch return error.SnapshotTooLarge;
-        jsonValue(writer, tool.progress) catch return error.SnapshotTooLarge;
-        writer.writeAll(",\"content\":") catch return error.SnapshotTooLarge;
-        jsonValue(writer, tool.content) catch return error.SnapshotTooLarge;
-        writer.print(",\"state\":\"{s}\",\"isError\":{},\"elapsedMs\":\"{d}\"}}", .{ @tagName(tool.state), tool.is_error, tool.elapsed_ms }) catch return error.SnapshotTooLarge;
+const SanitizeResult = struct {
+    len: usize,
+    truncated: bool,
+    redacted: bool,
+};
+
+fn sanitizeInto(destination: []u8, value: []const u8, secret: []const u8) SanitizeResult {
+    var read: usize = 0;
+    var write: usize = 0;
+    var redacted = false;
+    while (read < value.len) {
+        if (secret.len != 0 and std.mem.startsWith(u8, value[read..], secret)) {
+            const marker_len = @min(secret.len, 3);
+            if (marker_len > destination.len - write) break;
+            @memset(destination[write..][0..marker_len], '*');
+            write += marker_len;
+            read += secret.len;
+            redacted = true;
+            continue;
+        }
+        const sequence_len: usize = std.unicode.utf8ByteSequenceLength(value[read]) catch 1;
+        if (sequence_len > value.len - read or sequence_len > destination.len - write) break;
+        @memcpy(destination[write..][0..sequence_len], value[read..][0..sequence_len]);
+        write += sequence_len;
+        read += sequence_len;
     }
-    writer.writeAll("]}") catch return error.SnapshotTooLarge;
+    return .{ .len = write, .truncated = read != value.len, .redacted = redacted };
+}
+
+fn kindForRequest(request: sdk.UiRequest) UiRecordKind {
+    return switch (request) {
+        .ask_question => .ask_question,
+        .permission => .permission,
+        .plan_approval => .plan_approval,
+        .custom => .custom,
+    };
+}
+
+fn kindForResponse(response: sdk.UiResponse) UiRecordKind {
+    return switch (response) {
+        .answers => .ask_question,
+        .permission => .permission,
+        .plan_approval => .plan_approval,
+        .custom => .custom,
+    };
+}
+
+fn stateForResponse(response: sdk.UiResponse) UiRecordState {
+    return switch (response) {
+        .answers => .answered,
+        .permission => |permission| switch (permission) {
+            .allow_once => .allowed_once,
+            .allow_always => .allowed_always,
+            .deny_once => .denied,
+            .deny_tool_session => .denied_session,
+        },
+        .plan_approval => |approval| switch (approval) {
+            .approve_default => .approved,
+            .approve_accept_edits => .approved_with_edits,
+            .reject => .rejected,
+        },
+        .custom => .responded,
+    };
 }
 
 fn jsonValue(writer: *std.Io.Writer, value: anytype) !void {
@@ -734,6 +1164,13 @@ fn findTool(entries: []?ToolView, id: []const u8) ?*ToolView {
 
 fn addU64(left: u64, right: u64) error{ProjectionCapacity}!u64 {
     return std.math.add(u64, left, right) catch error.ProjectionCapacity;
+}
+
+fn takeActivityOrder(run: *RunView) u64 {
+    const result = run.next_activity_order;
+    std.debug.assert(result != std.math.maxInt(u64));
+    run.next_activity_order += 1;
+    return result;
 }
 
 fn worstCaseSnapshotBytes(limits: Limits) ?usize {
@@ -771,6 +1208,21 @@ fn worstCaseSnapshotBytes(limits: Limits) ?usize {
         total,
         std.math.mul(usize, limits.max_pending_ui_requests, pending_ui) catch return null,
     ) catch return null;
+    const ui_record = std.math.add(
+        usize,
+        std.math.mul(usize, ui_record_detail_capacity, json_string_expansion) catch return null,
+        ui_record_snapshot_overhead,
+    ) catch return null;
+    const ui_records = std.math.mul(
+        usize,
+        limits.max_sessions,
+        limits.max_ui_history_per_session,
+    ) catch return null;
+    total = std.math.add(
+        usize,
+        total,
+        std.math.mul(usize, ui_records, ui_record) catch return null,
+    ) catch return null;
     return total;
 }
 
@@ -791,6 +1243,8 @@ fn testWorkbench() !Workbench {
     const workspace = try workbench.copyBounded("/tmp/metawork-test", workbench.limits.max_workspace_bytes);
     const runs = try workbench.allocator.alloc(?RunView, workbench.limits.max_runs_per_session);
     @memset(runs, null);
+    const ui_history = try workbench.allocator.alloc(?UiRecord, workbench.limits.max_ui_history_per_session);
+    @memset(ui_history, null);
     const tools = try workbench.allocator.alloc(?ToolView, workbench.limits.max_tools_per_run);
     @memset(tools, null);
     runs[0] = .{
@@ -806,6 +1260,7 @@ fn testWorkbench() !Workbench {
         .workspace_root = workspace,
         .title = try workbench.copyBounded("", workbench.limits.max_task_title_bytes),
         .runs = runs,
+        .ui_history = ui_history,
         .state = .running,
         .active_run_id = 7,
     };
@@ -824,7 +1279,7 @@ fn testEnvelope(session_id: u64, run_id: u64, encoded: []const u8) !lifecycle.Ev
     };
 }
 
-test "Workbench snapshot serializer matches the Renderer v2 contract fixture" {
+test "Workbench snapshot serializer matches the Renderer v3 contract fixture" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
 
@@ -924,12 +1379,15 @@ test "default snapshot budget contains the maximum structural projection" {
     for (0..limits.max_sessions) |session_index| {
         const runs = try workbench.allocator.alloc(?RunView, limits.max_runs_per_session);
         @memset(runs, null);
+        const ui_history = try workbench.allocator.alloc(?UiRecord, limits.max_ui_history_per_session);
+        @memset(ui_history, null);
         for (0..limits.max_runs_per_session) |run_index| {
             const tools = try workbench.allocator.alloc(?ToolView, limits.max_tools_per_run);
             @memset(tools, null);
             for (0..limits.max_tools_per_run) |tool_index| {
                 tools[tool_index] = .{
                     .id = try workbench.copyBounded("", limits.max_tool_field_bytes),
+                    .order = @intCast(tool_index + 1),
                     .name = try workbench.copyBounded("", limits.max_tool_field_bytes),
                     .input = try workbench.copyBounded("", limits.max_tool_field_bytes),
                     .progress = try workbench.copyBounded("", limits.max_tool_field_bytes),
@@ -951,7 +1409,22 @@ test "default snapshot budget contains the maximum structural projection" {
             .workspace_root = try workbench.copyBounded("", limits.max_workspace_bytes),
             .title = try workbench.copyBounded("", limits.max_task_title_bytes),
             .runs = runs,
+            .ui_history = ui_history,
         };
+        for (0..limits.max_ui_history_per_session) |record_index| {
+            var record = UiRecord{
+                .request_id = @intCast(record_index + 1),
+                .run_id = 1,
+                .order = @intCast(limits.max_tools_per_run + record_index + 1),
+                .kind = .permission,
+                .state = .allowed_once,
+                .detail_len = ui_record_detail_capacity,
+                .detail_truncated = true,
+            };
+            @memset(&record.detail, 3);
+            workbench.sessions[session_index].?.ui_history[record_index] = record;
+        }
+        workbench.sessions[session_index].?.ui_history_count = limits.max_ui_history_per_session;
     }
 
     const escaped_assistant = try std.testing.allocator.alloc(u8, limits.max_assistant_message_bytes);
@@ -994,8 +1467,11 @@ test "pending UI re-encoding remains inside its concurrent snapshot allowance" {
     const storage = try std.testing.allocator.alloc(u8, allowance);
     defer std.testing.allocator.free(storage);
     var writer = std.Io.Writer.fixed(storage);
-    try writePendingUiProjection(
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    try workbench.writePendingUiProjection(
         &writer,
+        std.math.maxInt(u64),
         std.math.maxInt(u64),
         std.math.maxInt(u64),
         request,
@@ -1026,6 +1502,86 @@ test "Workbench projects tools and full-width usage without parsing protocol in 
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "stdout\\nexit 0") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"elapsedMs\":\"18446744073709551615\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"input\":\"18446744073709551615\"") != null);
+}
+
+test "known Host credentials are removed from assistant, tool, and UI projections" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    try workbench.setKnownSecret("SECRET-KEY");
+
+    const events = [_][]const u8{
+        "{\"text_chunk\":\"prefix SECRET-\"}",
+        "{\"text_chunk\":\"KEY suffix\"}",
+        "{\"tool_start\":{\"id\":\"tool-secret\",\"name\":\"Bash\",\"input\":\"SECRET-KEY\"}}",
+        "{\"tool_progress\":{\"id\":\"tool-secret\",\"text\":\"using SECRET-KEY\"}}",
+        "{\"tool_result\":{\"id\":\"tool-secret\",\"name\":\"Bash\",\"input\":\"SECRET-KEY\",\"content\":\"SECRET-KEY\",\"is_error\":false,\"elapsed_ms\":1}}",
+    };
+    for (events) |encoded| {
+        var envelope = try testEnvelope(3, 7, encoded);
+        defer envelope.deinit();
+        try workbench.applyEvent(&envelope);
+    }
+
+    const request = sdk.UiRequest{ .permission = .{ .tool = "Bash", .args = "token=SECRET-KEY" } };
+    var pending_storage: [4096]u8 = undefined;
+    var pending_writer = std.Io.Writer.fixed(&pending_storage);
+    try workbench.writePendingUiProjection(&pending_writer, 9, 7, 1, request);
+
+    var snapshot_storage: [96 * 1024]u8 = undefined;
+    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null);
+    try std.testing.expect(std.mem.indexOf(u8, pending_writer.buffered(), "SECRET-KEY") == null);
+    try std.testing.expect(std.mem.indexOf(u8, pending_writer.buffered(), "\"redacted\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "prefix *** suffix") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"assistantRedacted\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"redacted\":true") != null);
+}
+
+test "streaming projection escaping is allocation-free JSON with redaction" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    try workbench.setKnownSecret("SECRET-KEY");
+
+    var storage: [256]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&storage);
+    try workbench.projectedJsonValue(&writer, "quote\" slash\\ control\x01 line\n 界 SECRET-KEY");
+    try std.testing.expectEqualStrings(
+        "\"quote\\\" slash\\\\ control\\u0001 line\\n 界 ***\"",
+        writer.buffered(),
+    );
+}
+
+test "tool projection truncates on UTF-8 boundaries and records bounded UI history" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+
+    const long = try std.testing.allocator.alloc(u8, workbench.limits.max_tool_field_bytes + 4);
+    defer std.testing.allocator.free(long);
+    @memset(long, 'x');
+    @memcpy(long[long.len - 3 ..], "界");
+    const projected = try workbench.copyProjected(long, workbench.limits.max_tool_field_bytes);
+    defer workbench.freeTracked(projected.value);
+    try std.testing.expect(projected.truncated);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(projected.value));
+
+    const view = &workbench.sessions[0].?;
+    for (1..11) |request_id| {
+        var record = UiRecord{
+            .request_id = request_id,
+            .run_id = 7,
+            .kind = .ask_question,
+            .state = .answered,
+        };
+        const detail = sanitizeInto(&record.detail, "Continue?", "");
+        record.detail_len = detail.len;
+        workbench.pushUiRecord(view, record);
+    }
+    try std.testing.expectEqual(workbench.limits.max_ui_history_per_session, view.ui_history_count);
+    var storage: [96 * 1024]u8 = undefined;
+    const snapshot = try workbench.writeSnapshot(&storage);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"requestId\":\"1\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"requestId\":\"3\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"requestId\":\"10\"") != null);
 }
 
 test "Workbench rejects cross-session routes and usage overflow" {

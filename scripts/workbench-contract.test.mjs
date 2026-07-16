@@ -15,7 +15,7 @@ import {
 const fixture = JSON.parse(
   readFileSync(
     new URL(
-      "../frontend/src/host/__fixtures__/workbench-snapshot-v2.fixture",
+      "../frontend/src/host/__fixtures__/workbench-snapshot-v3.fixture",
       import.meta.url,
     ),
     "utf8",
@@ -26,7 +26,7 @@ function clone(value) {
   return structuredClone(value);
 }
 
-test("the canonical v2 Workbench fixture decodes without normalization", () => {
+test("the canonical v3 Workbench fixture decodes without normalization", () => {
   assert.deepEqual(decodeWorkbenchSnapshot(fixture), fixture);
 });
 
@@ -82,6 +82,13 @@ test("Workbench decoding rejects version drift, extra fields, and invalid wire v
   delete missingField.sessions[0].runs[0].usage.cacheCreation;
   assert.throws(() => decodeWorkbenchSnapshot(missingField), /expected keys/);
 
+  const missingPrivacyFlag = clone(fixture);
+  delete missingPrivacyFlag.sessions[0].runs[0].assistantRedacted;
+  assert.throws(
+    () => decodeWorkbenchSnapshot(missingPrivacyFlag),
+    /expected keys/,
+  );
+
   const mismatchedCurrentRun = clone(fixture);
   mismatchedCurrentRun.sessions[0].currentRunPhase = "waiting_ui";
   assert.throws(
@@ -102,6 +109,92 @@ test("Workbench decoding rejects version drift, extra fields, and invalid wire v
   assert.throws(
     () => decodeWorkbenchSnapshot(archivedRunning),
     /archived Task/,
+  );
+
+  const foreignUiHistory = clone(fixture);
+  foreignUiHistory.sessions[0].uiHistory.push({
+    requestId: "8",
+    runId: "99",
+    order: "1",
+    kind: "permission",
+    state: "allowed_once",
+    detail: "{}",
+    itemCount: 0,
+    detailTruncated: false,
+    redacted: false,
+  });
+  assert.throws(
+    () => decodeWorkbenchSnapshot(foreignUiHistory),
+    /reference a projected Run/,
+  );
+
+  const duplicateUiHistory = clone(fixture);
+  const record = {
+    requestId: "8",
+    runId: "7",
+    order: "1",
+    kind: "permission",
+    state: "denied",
+    detail: "{}",
+    itemCount: 0,
+    detailTruncated: false,
+    redacted: false,
+  };
+  duplicateUiHistory.sessions[0].uiHistory.push(record, { ...record });
+  assert.throws(
+    () => decodeWorkbenchSnapshot(duplicateUiHistory),
+    /identities must be unique/,
+  );
+
+  const pendingPermission = clone(fixture);
+  pendingPermission.sessions[0].currentRunPhase = "waiting_ui";
+  pendingPermission.sessions[0].runs[0].phase = "waiting_ui";
+  pendingPermission.sessions[0].pendingUi = {
+    requestId: "9",
+    runId: "7",
+    order: "1",
+    redacted: true,
+    kind: "permission",
+    tool: "Bash",
+    args: "***",
+  };
+  assert.doesNotThrow(() => decodeWorkbenchSnapshot(pendingPermission));
+  delete pendingPermission.sessions[0].pendingUi.redacted;
+  assert.throws(
+    () => decodeWorkbenchSnapshot(pendingPermission),
+    /expected keys/,
+  );
+
+  const duplicateActivityOrder = clone(fixture);
+  duplicateActivityOrder.sessions[0].runs[0].tools.push({
+    id: "tool-1",
+    order: "1",
+    name: "Read",
+    input: "",
+    progress: "",
+    content: "done",
+    state: "completed",
+    isError: false,
+    elapsedMs: "1",
+    inputTruncated: false,
+    progressTruncated: false,
+    contentTruncated: false,
+    redacted: false,
+  });
+  duplicateActivityOrder.sessions[0].uiHistory.push({
+    requestId: "10",
+    runId: "7",
+    order: "1",
+    kind: "permission",
+    state: "allowed_once",
+    detail: "{}",
+    itemCount: 0,
+    detailTruncated: false,
+    redacted: false,
+  });
+  assert.throws(
+    () => decodeWorkbenchSnapshot(duplicateActivityOrder),
+    /activity order must be unique/,
   );
 });
 

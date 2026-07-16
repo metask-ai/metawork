@@ -15,7 +15,7 @@ test("Workbench snapshots are assembled from identity-checked chunks", async () 
   const expected = JSON.parse(
     readFileSync(
       new URL(
-        "../frontend/src/host/__fixtures__/workbench-snapshot-v2.fixture",
+        "../frontend/src/host/__fixtures__/workbench-snapshot-v3.fixture",
         import.meta.url,
       ),
       "utf8",
@@ -42,7 +42,7 @@ test("Workbench snapshots are assembled from identity-checked chunks", async () 
 
 test("Workbench snapshot assembly rejects a stale chunk", async () => {
   const source = Buffer.from(
-    '{"schemaVersion":2,"revision":"1","sessions":[]}',
+    '{"schemaVersion":3,"revision":"1","sessions":[]}',
   );
   const invoke = async (command) =>
     command === snapshotCommand

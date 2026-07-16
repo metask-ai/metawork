@@ -1,0 +1,105 @@
+import type { SessionView, ToolView } from "../host/contracts.ts";
+import { formatInteger } from "../i18n/formatters.ts";
+import { useI18n, type MessageId } from "../i18n/context.ts";
+import { taskActivity } from "./selectors.ts";
+
+function toolStateMessage(tool: ToolView): MessageId {
+  if (tool.state === "running") return "task.phase.running";
+  return tool.state === "failed" ? "outcome.failed" : "outcome.completed";
+}
+
+export function TaskActivity({
+  session,
+  currentStatus,
+  onFocusPending,
+}: {
+  session: SessionView | null;
+  currentStatus: string;
+  onFocusPending: () => void;
+}) {
+  const { locale, t } = useI18n();
+  const activity = taskActivity(session);
+  const activeTools = activity.currentRun?.tools ?? [];
+  const latestPlan = activity.latestPlan;
+
+  return (
+    <>
+      {session?.pendingUi && (
+        <section className="activity-section">
+          <p className="section-label">{t("activity.needs_attention")}</p>
+          <button
+            className="attention-link focus-ring"
+            onClick={onFocusPending}
+          >
+            <span>{t("activity.response_required")}</span>
+            <strong>{t("activity.view_request")}</strong>
+          </button>
+        </section>
+      )}
+
+      <section className="activity-section">
+        <p className="section-label">{t("activity.current")}</p>
+        <div className="current-activity">
+          <span
+            className={`activity-dot ${session?.currentRunPhase ? "is-live" : ""}`}
+          />
+          <div>
+            <p>{currentStatus}</p>
+            <span>
+              {!session
+                ? t("activity.current_empty")
+                : session.currentRunPhase === "waiting_ui"
+                  ? t("activity.current_waiting")
+                  : session.currentRunPhase !== null
+                    ? t("activity.current_working")
+                    : t("activity.current_ready")}
+            </span>
+          </div>
+        </div>
+      </section>
+
+      {(session?.pendingUi?.kind === "plan_approval" || latestPlan) && (
+        <section className="activity-section">
+          <p className="section-label">{t("activity.plan")}</p>
+          <p className="activity-summary">
+            {session?.pendingUi?.kind === "plan_approval"
+              ? t("activity.plan_pending")
+              : t(`ui.state.${latestPlan!.state}`)}
+          </p>
+          <span className="activity-detail">
+            {session?.pendingUi?.kind === "plan_approval"
+              ? session.pendingUi.plan
+              : latestPlan?.detail}
+          </span>
+        </section>
+      )}
+
+      {activeTools.length > 0 && (
+        <section className="activity-section">
+          <p className="section-label">{t("activity.tools")}</p>
+          <ul className="activity-list">
+            {activeTools.map((tool) => (
+              <li key={tool.id}>
+                <span
+                  className={`activity-dot ${tool.state === "running" ? "is-live" : ""}`}
+                />
+                <span>{tool.name}</span>
+                <small>{t(toolStateMessage(tool))}</small>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {activity.tokenTotal > 0n && (
+        <section className="activity-section">
+          <p className="section-label">{t("activity.context")}</p>
+          <p className="activity-metric">
+            {formatInteger(locale, activity.tokenTotal)}
+          </p>
+          <span className="activity-detail">{t("activity.tokens_used")}</span>
+        </section>
+      )}
+    </>
+  );
+}

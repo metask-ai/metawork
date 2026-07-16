@@ -9,6 +9,7 @@ import {
 } from "../frontend/src/workbench/drafts.ts";
 import {
   searchWorkbench,
+  taskActivity,
   taskSignals,
   workspaceLabel,
   workspaceSummaries,
@@ -20,6 +21,7 @@ function run(id, user, assistant, outcome, toolContent = "") {
     phase: outcome === null ? "running" : "completed",
     user,
     assistant,
+    assistantRedacted: false,
     status: "",
     outcome,
     cause: null,
@@ -28,6 +30,7 @@ function run(id, user, assistant, outcome, toolContent = "") {
       ? [
           {
             id: "tool",
+            order: "1",
             name: "Read",
             input: "",
             progress: "",
@@ -35,6 +38,10 @@ function run(id, user, assistant, outcome, toolContent = "") {
             state: "completed",
             isError: false,
             elapsedMs: "1",
+            inputTruncated: false,
+            progressTruncated: false,
+            contentTruncated: false,
+            redacted: false,
           },
         ]
       : [],
@@ -55,6 +62,7 @@ function session(overrides) {
     cause: null,
     runs: [],
     pendingUi: null,
+    uiHistory: [],
     ...overrides,
   };
 }
@@ -109,6 +117,40 @@ test("workspace navigation aggregates actionable cross-workspace signals without
     { running: false, attention: false, failed: true },
   );
   assert.equal(workspaceLabel("C:\\work\\metawork\\"), "metawork");
+});
+
+test("Task activity hides empty modules and derives only Host-projected content", () => {
+  assert.deepEqual(taskActivity(null), {
+    currentRun: null,
+    latestPlan: null,
+    tokenTotal: 0n,
+  });
+
+  const current = run("9", "Audit", "Working", null, "tool detail");
+  current.usage.input = "12";
+  current.usage.output = "5";
+  const resolvedPlan = {
+    requestId: "4",
+    runId: "9",
+    order: "2",
+    kind: "plan_approval",
+    state: "approved",
+    detail: "Inspect, validate, report",
+    itemCount: 0,
+    detailTruncated: false,
+    redacted: false,
+  };
+  const summary = taskActivity(
+    session({
+      currentRunId: "9",
+      currentRunPhase: "running",
+      runs: [current],
+      uiHistory: [resolvedPlan],
+    }),
+  );
+  assert.equal(summary.currentRun, current);
+  assert.equal(summary.latestPlan, resolvedPlan);
+  assert.equal(summary.tokenTotal, 17n);
 });
 
 test("global search finds product content and deliberately excludes raw tool output", () => {

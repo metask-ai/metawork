@@ -1,4 +1,9 @@
-import type { SessionView, WorkbenchSnapshot } from "../host/contracts.ts";
+import type {
+  RunView,
+  SessionView,
+  UiRecord,
+  WorkbenchSnapshot,
+} from "../host/contracts.ts";
 import type { WorkbenchState } from "./store.ts";
 
 export function selectActiveSession(state: WorkbenchState): SessionView | null {
@@ -80,6 +85,34 @@ export function selectCurrentWorkspace(state: WorkbenchState): string | null {
     state.snapshot.sessions[0]?.workspaceRoot ??
     null
   );
+}
+
+export type TaskActivity = {
+  currentRun: RunView | null;
+  latestPlan: UiRecord | null;
+  tokenTotal: bigint;
+};
+
+export function taskActivity(session: SessionView | null): TaskActivity {
+  if (!session) return { currentRun: null, latestPlan: null, tokenTotal: 0n };
+  let tokenTotal = 0n;
+  for (const run of session.runs) {
+    try {
+      tokenTotal += BigInt(run.usage.input) + BigInt(run.usage.output);
+    } catch {
+      // Exact decoding already validates wire integers; keep this selector
+      // fail-safe for isolated fixtures and future call sites.
+    }
+  }
+  return {
+    currentRun:
+      session.runs.find((run) => run.id === session.currentRunId) ?? null,
+    latestPlan:
+      [...session.uiHistory]
+        .reverse()
+        .find((record) => record.kind === "plan_approval") ?? null,
+    tokenTotal,
+  };
 }
 
 export type SearchResult = {

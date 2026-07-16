@@ -125,6 +125,8 @@ try {
       if (!session || !run) return null;
       const pending = session.pendingUi;
       if (pending && !answered.has(pending.requestId)) {
+        if (typeof pending.redacted !== "boolean")
+          throw new Error("pending UI omitted its projection privacy state");
         if (pending.runId !== runId)
           throw new Error(
             `pending UI routed to another run: ${JSON.stringify(pending)}`,
@@ -185,6 +187,7 @@ try {
     );
   if (!run.assistant.includes("metawork gate6 complete"))
     throw new Error("final assistant text was not projected");
+  const activityOrders = [];
   for (const [name, evidence] of [
     ["Read", "gate6-before"],
     ["Bash", "gate6-bash-ok"],
@@ -193,11 +196,50 @@ try {
     const tool = run.tools.find((item) => item.name === name);
     if (!tool || tool.state !== "completed" || tool.isError)
       throw new Error(`${name} did not complete: ${JSON.stringify(tool)}`);
+    if (!/^[1-9][0-9]*$/.test(tool.order))
+      throw new Error(`${name} omitted its stable activity order`);
+    activityOrders.push(tool.order);
+    for (const field of [
+      "inputTruncated",
+      "progressTruncated",
+      "contentTruncated",
+      "redacted",
+    ])
+      if (typeof tool[field] !== "boolean")
+        throw new Error(`${name} omitted projection safety flag ${field}`);
     if (evidence && !tool.content.includes(evidence))
       throw new Error(`${name} result omitted ${evidence}`);
   }
   if (reloadedRequest === null)
     throw new Error("AskUserQuestion did not exercise reload-safe resume");
+  if (session.pendingUi !== null)
+    throw new Error("completed run retained an actionable UI request");
+  if (!Array.isArray(session.uiHistory) || session.uiHistory.length === 0)
+    throw new Error("resolved UI requests were not retained in Task history");
+  for (const record of session.uiHistory) {
+    if (!/^[1-9][0-9]*$/.test(record.order))
+      throw new Error("resolved UI request omitted its stable activity order");
+    activityOrders.push(record.order);
+  }
+  if (new Set(activityOrders).size !== activityOrders.length)
+    throw new Error("Run activity order was not unique");
+  for (const requestId of answered)
+    if (!session.uiHistory.some((item) => item.requestId === requestId))
+      throw new Error(`resolved UI request ${requestId} was lost from history`);
+  if (
+    !session.uiHistory.some(
+      (item) => item.kind === "permission" && item.state === "allowed_once",
+    )
+  )
+    throw new Error("permission decision was not retained in Task history");
+  const restoredAnswer = session.uiHistory.find(
+    (item) => item.requestId === reloadedRequest,
+  );
+  if (
+    restoredAnswer?.kind !== "ask_question" ||
+    restoredAnswer.state !== "answered"
+  )
+    throw new Error("reload-safe question did not resolve into UI history");
   const edited = await readFile(fixturePath, "utf8");
   if (edited !== "gate6-after\n")
     throw new Error(
@@ -352,8 +394,11 @@ async function snapshot() {
       throw new Error(`invalid snapshot chunk: ${JSON.stringify(chunk)}`);
     decoded.copy(assembled, offset);
   }
-  const parsed = JSON.parse(assembled.toString("utf8"));
-  if (!Array.isArray(parsed.sessions))
+  const encoded = assembled.toString("utf8");
+  if (encoded.includes("metawork-gate6-fixture-key"))
+    throw new Error("Host provider credential reached the Renderer snapshot");
+  const parsed = JSON.parse(encoded);
+  if (parsed.schemaVersion !== 3 || !Array.isArray(parsed.sessions))
     throw new Error("invalid Workbench snapshot");
   return parsed;
 }

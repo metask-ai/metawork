@@ -24,7 +24,7 @@ function session(id, workspaceRoot, archived = false) {
 }
 
 function snapshot(revision, sessions) {
-  return { schemaVersion: 2, revision, sessions };
+  return { schemaVersion: 3, revision, sessions };
 }
 
 test("the Workbench store selects the first Task and preserves a valid choice", () => {

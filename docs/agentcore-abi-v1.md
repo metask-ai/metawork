@@ -107,6 +107,8 @@ abort 返回 stale/too-late 时仍必须 join 已有 Run job，再决定最终�
 
 上述 SDK 是随 bundle 编译进消费者的 cc-zig-owned source layer，不要求改变 C ABI layout，也不允许 MetaWork 自己补一份协议副本。
 
+当前精确 baseline 的 `CoreEvent` 只提供通用 tool start/progress/result 文本字段，没有 typed `FileChange`、`Output` 或 plan-progress 事件。MetaWork 因此只能投影可验证的工具活动，并保持 `Files changed` / `Outputs` 模块隐藏；不得解析 Bash/Edit 参数或 stdout 猜测文件变更，也不得把普通新文件自动归类为 Output。完整 Workbench 活动面继续推进的依赖门槛，是 cc-zig SDK 提供带明确 ownership、byte bound 和 secret annotation 语义的结构化事件。
+
 MetaWork 曾对 `0.0.0-dev+ab75314a3dcb` 完成 Gate 3 独立 source-free 验收；当前正式 baseline 已升级为 `0.0.0-dev+5fe198cfac4a`，并重跑完整 lock/checksum、source-free typed SDK、真实 AgentCore link/run 和 Gate 6 正式 Host 验收。升级证据见 [Phase 0 Gate 6 验证报告](phase-0-gate-6-report.md)。这只表示当前精确 experimental revision 可消费，不代表 stable compatibility policy 已冻结。
 
 ## 6. 工具与 Workspace
