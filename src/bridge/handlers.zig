@@ -24,6 +24,9 @@ pub const SessionCreate = struct {
 pub const SessionRun = struct { sessionId: []const u8, prompt: []const u8 };
 pub const SessionIdentity = struct { sessionId: []const u8, runId: []const u8 };
 pub const SessionClose = struct { sessionId: []const u8 };
+pub const TaskRename = struct { sessionId: []const u8, title: []const u8 };
+pub const TaskArchive = struct { sessionId: []const u8, archived: bool };
+pub const TaskDelete = struct { sessionId: []const u8 };
 pub const UiResponseRequest = struct {
     sessionId: []const u8,
     runId: []const u8,

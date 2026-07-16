@@ -6,11 +6,13 @@ import {
 export type WorkbenchState = {
   snapshot: WorkbenchSnapshot;
   activeSessionId: string | null;
+  activeWorkspaceRoot: string | null;
 };
 
 export type WorkbenchAction =
   | { type: "snapshot.accepted"; snapshot: WorkbenchSnapshot }
-  | { type: "session.selected"; sessionId: string };
+  | { type: "session.selected"; sessionId: string }
+  | { type: "workspace.selected"; workspaceRoot: string };
 
 export const initialWorkbenchState: WorkbenchState = {
   snapshot: {
@@ -19,6 +21,7 @@ export const initialWorkbenchState: WorkbenchState = {
     sessions: [],
   },
   activeSessionId: null,
+  activeWorkspaceRoot: null,
 };
 
 export function workbenchReducer(
@@ -26,21 +29,56 @@ export function workbenchReducer(
   action: WorkbenchAction,
 ): WorkbenchState {
   if (action.type === "session.selected") {
-    if (
-      !action.sessionId ||
-      !state.snapshot.sessions.some(
-        (session) => session.id === action.sessionId,
-      )
-    )
-      return state;
-    return { ...state, activeSessionId: action.sessionId };
+    const session = state.snapshot.sessions.find(
+      (candidate) => candidate.id === action.sessionId,
+    );
+    if (!session) return state;
+    return {
+      ...state,
+      activeSessionId: action.sessionId,
+      activeWorkspaceRoot: session.workspaceRoot,
+    };
   }
-  const activeSessionId =
-    state.activeSessionId &&
-    action.snapshot.sessions.some(
-      (session) => session.id === state.activeSessionId,
-    )
-      ? state.activeSessionId
-      : (action.snapshot.sessions[0]?.id ?? null);
-  return { snapshot: action.snapshot, activeSessionId };
+  if (action.type === "workspace.selected")
+    return action.workspaceRoot
+      ? {
+          ...state,
+          activeWorkspaceRoot: action.workspaceRoot,
+          activeSessionId:
+            state.snapshot.sessions.find(
+              (session) =>
+                session.workspaceRoot === action.workspaceRoot &&
+                !session.archived,
+            )?.id ??
+            state.snapshot.sessions.find(
+              (session) => session.workspaceRoot === action.workspaceRoot,
+            )?.id ??
+            null,
+        }
+      : state;
+  const requestedWorkspace = state.activeWorkspaceRoot;
+  const activeSessionStillExists = action.snapshot.sessions.some(
+    (session) => session.id === state.activeSessionId,
+  );
+  const activeSessionId = activeSessionStillExists
+    ? state.activeSessionId
+    : (action.snapshot.sessions.find(
+        (session) =>
+          session.workspaceRoot === requestedWorkspace && !session.archived,
+      )?.id ??
+      action.snapshot.sessions.find(
+        (session) => session.workspaceRoot === requestedWorkspace,
+      )?.id ??
+      action.snapshot.sessions.find((session) => !session.archived)?.id ??
+      action.snapshot.sessions[0]?.id ??
+      null);
+  const activeSession = action.snapshot.sessions.find(
+    (session) => session.id === activeSessionId,
+  );
+  return {
+    snapshot: action.snapshot,
+    activeSessionId,
+    activeWorkspaceRoot:
+      state.activeWorkspaceRoot ?? activeSession?.workspaceRoot ?? null,
+  };
 }

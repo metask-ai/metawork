@@ -32,6 +32,9 @@ const SessionCreate = renderer_bridge.handlers.SessionCreate;
 const SessionRun = renderer_bridge.handlers.SessionRun;
 const SessionIdentity = renderer_bridge.handlers.SessionIdentity;
 const SessionClose = renderer_bridge.handlers.SessionClose;
+const TaskRename = renderer_bridge.handlers.TaskRename;
+const TaskArchive = renderer_bridge.handlers.TaskArchive;
+const TaskDelete = renderer_bridge.handlers.TaskDelete;
 const UiResponseRequest = renderer_bridge.handlers.UiResponseRequest;
 const parsePayload = renderer_bridge.handlers.parsePayload;
 const parsePayloadWithLimit = renderer_bridge.handlers.parsePayloadWithLimit;
@@ -71,7 +74,7 @@ const App = struct {
         workbench: *host_workbench.Workbench,
         output: []u8,
     ) anyerror![]const u8 = null,
-    handlers: [15]native_sdk.bridge.Handler = undefined,
+    handlers: [18]native_sdk.bridge.Handler = undefined,
 
     fn app(self: *@This()) native_sdk.App {
         return .{
@@ -213,6 +216,21 @@ const App = struct {
             .name = renderer_bridge.commands.close_session,
             .context = self,
             .invoke_fn = closeSession,
+        };
+        self.handlers[15] = .{
+            .name = renderer_bridge.commands.rename_task,
+            .context = self,
+            .invoke_fn = renameTask,
+        };
+        self.handlers[16] = .{
+            .name = renderer_bridge.commands.archive_task,
+            .context = self,
+            .invoke_fn = archiveTask,
+        };
+        self.handlers[17] = .{
+            .name = renderer_bridge.commands.delete_task,
+            .context = self,
+            .invoke_fn = deleteTask,
         };
         return .{
             .policy = renderer_bridge.policy.product(mode),
@@ -613,6 +631,39 @@ const App = struct {
         try (self.workbench orelse return error.RuntimeUnavailable).closeSession(session_id);
         self.notifyCommitted();
         return std.fmt.bufPrint(output, "{{\"sessionId\":\"{d}\",\"closing\":true}}", .{session_id});
+    }
+
+    fn renameTask(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        try self.requireEventWindow(invocation.source.window_id);
+        var parsed = try parsePayload(TaskRename, invocation.request.payload);
+        defer parsed.deinit();
+        const session_id = try parseWireId(parsed.value.sessionId);
+        try (self.workbench orelse return error.RuntimeUnavailable).renameTask(session_id, parsed.value.title);
+        self.notifyCommitted();
+        return std.fmt.bufPrint(output, "{{\"sessionId\":\"{d}\",\"renamed\":true}}", .{session_id});
+    }
+
+    fn archiveTask(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        try self.requireEventWindow(invocation.source.window_id);
+        var parsed = try parsePayload(TaskArchive, invocation.request.payload);
+        defer parsed.deinit();
+        const session_id = try parseWireId(parsed.value.sessionId);
+        try (self.workbench orelse return error.RuntimeUnavailable).setTaskArchived(session_id, parsed.value.archived);
+        self.notifyCommitted();
+        return std.fmt.bufPrint(output, "{{\"sessionId\":\"{d}\",\"archived\":{}}}", .{ session_id, parsed.value.archived });
+    }
+
+    fn deleteTask(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        try self.requireEventWindow(invocation.source.window_id);
+        var parsed = try parsePayload(TaskDelete, invocation.request.payload);
+        defer parsed.deinit();
+        const session_id = try parseWireId(parsed.value.sessionId);
+        try (self.workbench orelse return error.RuntimeUnavailable).deleteTask(session_id);
+        self.notifyCommitted();
+        return std.fmt.bufPrint(output, "{{\"sessionId\":\"{d}\",\"deleted\":true}}", .{session_id});
     }
 
     fn emitAgentBatches(self: *@This(), runtime: *native_sdk.Runtime, window_id: native_sdk.platform.WindowId) !void {
@@ -1338,4 +1389,16 @@ test "Agent transport payload rejects unknown fields and oversized input" {
         error.InvalidBridgePayload,
         parsePayload(EventDisconnect, &oversized),
     );
+
+    var rename = try parsePayload(TaskRename, "{\"sessionId\":\"7\",\"title\":\"Release audit\"}");
+    defer rename.deinit();
+    try std.testing.expectEqualStrings("7", rename.value.sessionId);
+    try std.testing.expectEqualStrings("Release audit", rename.value.title);
+    try std.testing.expectError(
+        error.InvalidBridgePayload,
+        parsePayload(TaskRename, "{\"sessionId\":\"7\",\"title\":\"Release audit\",\"legacy\":true}"),
+    );
+    var archive = try parsePayload(TaskArchive, "{\"sessionId\":\"7\",\"archived\":true}");
+    defer archive.deinit();
+    try std.testing.expect(archive.value.archived);
 }

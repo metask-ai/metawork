@@ -5,6 +5,8 @@ import test from "node:test";
 import {
   assertDisconnected,
   assertSignalAcknowledged,
+  assertTaskArchived,
+  assertTaskFlag,
   decodeHostSignalEvent,
   decodePingResponse,
   decodeWorkbenchSnapshot,
@@ -13,7 +15,7 @@ import {
 const fixture = JSON.parse(
   readFileSync(
     new URL(
-      "../frontend/src/host/__fixtures__/workbench-snapshot-v1.fixture",
+      "../frontend/src/host/__fixtures__/workbench-snapshot-v2.fixture",
       import.meta.url,
     ),
     "utf8",
@@ -24,8 +26,33 @@ function clone(value) {
   return structuredClone(value);
 }
 
-test("the canonical v1 Workbench fixture decodes without normalization", () => {
+test("the canonical v2 Workbench fixture decodes without normalization", () => {
   assert.deepEqual(decodeWorkbenchSnapshot(fixture), fixture);
+});
+
+test("Task metadata mutation acknowledgements are identity-checked and exact", () => {
+  assert.doesNotThrow(() =>
+    assertTaskFlag({ sessionId: "3", renamed: true }, "3", "renamed"),
+  );
+  assert.doesNotThrow(() =>
+    assertTaskFlag({ sessionId: "3", deleted: true }, "3", "deleted"),
+  );
+  assert.doesNotThrow(() =>
+    assertTaskArchived({ sessionId: "3", archived: false }, "3", false),
+  );
+  assert.throws(
+    () => assertTaskFlag({ sessionId: "4", renamed: true }, "3", "renamed"),
+    /response mismatch/,
+  );
+  assert.throws(
+    () =>
+      assertTaskArchived(
+        { sessionId: "3", archived: true, compatibility: true },
+        "3",
+        true,
+      ),
+    /expected keys/,
+  );
 });
 
 test("Workbench decoding rejects version drift, extra fields, and invalid wire values", () => {
@@ -41,11 +68,11 @@ test("Workbench decoding rejects version drift, extra fields, and invalid wire v
   assert.throws(() => decodeWorkbenchSnapshot(extraField), /expected keys/);
 
   const invalidId = clone(fixture);
-  invalidId.sessions[0].activeRunId = "07";
+  invalidId.sessions[0].currentRunId = "07";
   assert.throws(() => decodeWorkbenchSnapshot(invalidId), /wire integer/);
 
   const invalidState = clone(fixture);
-  invalidState.sessions[0].state = "recovering";
+  invalidState.sessions[0].lifecycle = "recovering";
   assert.throws(
     () => decodeWorkbenchSnapshot(invalidState),
     /unexpected value/,
@@ -54,6 +81,28 @@ test("Workbench decoding rejects version drift, extra fields, and invalid wire v
   const missingField = clone(fixture);
   delete missingField.sessions[0].runs[0].usage.cacheCreation;
   assert.throws(() => decodeWorkbenchSnapshot(missingField), /expected keys/);
+
+  const mismatchedCurrentRun = clone(fixture);
+  mismatchedCurrentRun.sessions[0].currentRunPhase = "waiting_ui";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(mismatchedCurrentRun),
+    /matching projected Run/,
+  );
+
+  const terminalCurrentRun = clone(fixture);
+  terminalCurrentRun.sessions[0].currentRunPhase = "completed";
+  terminalCurrentRun.sessions[0].runs[0].phase = "completed";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(terminalCurrentRun),
+    /unexpected value/,
+  );
+
+  const archivedRunning = clone(fixture);
+  archivedRunning.sessions[0].archived = true;
+  assert.throws(
+    () => decodeWorkbenchSnapshot(archivedRunning),
+    /archived Task/,
+  );
 });
 
 test("Host notifications and lifecycle responses require their exact payload shapes", () => {

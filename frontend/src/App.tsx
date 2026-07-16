@@ -8,6 +8,11 @@ import {
 } from "react";
 
 import { AppShell } from "./app/AppShell.tsx";
+import { GlobalSearch } from "./app/GlobalSearch.tsx";
+import {
+  TaskSignals,
+  WorkspaceNavigation,
+} from "./app/WorkspaceNavigation.tsx";
 import { Icon } from "./components/ui/Icon.tsx";
 import { HostClient } from "./host/client.ts";
 import {
@@ -17,17 +22,25 @@ import {
 import type {
   PendingUi,
   RunView,
-  SessionView,
   ToolView,
   UiResponsePayload,
 } from "./host/contracts.ts";
-import {
-  formatInteger,
-  formatMilliseconds,
-  taskCountMessageId,
-} from "./i18n/formatters.ts";
+import { formatInteger, formatMilliseconds } from "./i18n/formatters.ts";
 import { useI18n, type MessageId } from "./i18n/context.ts";
-import { selectActiveSession } from "./workbench/selectors.ts";
+import {
+  searchWorkbench,
+  selectActiveSession,
+  selectCurrentWorkspace,
+  workspaceLabel,
+  workspaceSummaries,
+  type SearchResult,
+} from "./workbench/selectors.ts";
+import {
+  clearTaskDraft,
+  pruneTaskDrafts,
+  readTaskDraft,
+  writeTaskDraft,
+} from "./workbench/drafts.ts";
 import { initialWorkbenchState, workbenchReducer } from "./workbench/store.ts";
 
 const gate5FixtureLoader =
@@ -65,7 +78,8 @@ function runPhaseLabel(
     case "queued":
     case "running":
     case "waiting_ui":
-      return t(`task.status.${phase}`);
+    case "stopping":
+      return t(`task.phase.${phase}`);
     case "completed":
     case "stopped":
     case "cancelled":
@@ -100,7 +114,14 @@ export default function App() {
   );
   const [workspacePath, setWorkspacePath] = useState("");
   const [workspaceGrant, setWorkspaceGrant] = useState("");
-  const [prompt, setPrompt] = useState("");
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [showArchived, setShowArchived] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState("");
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [taskMenuOpen, setTaskMenuOpen] = useState(false);
   const [status, setStatus] = useState<StatusState>({
     id: "connection.connecting",
   });
@@ -110,11 +131,37 @@ export default function App() {
   const [answers, setAnswers] = useState<Record<string, string[]>>({});
   const client = useMemo(() => new HostClient(), []);
   const connection = useRef<WorkbenchConnection | null>(null);
+  const taskMenu = useRef<HTMLDivElement>(null);
   const snapshot = workbench.snapshot;
   const activeSession = useMemo(
     () => selectActiveSession(workbench),
     [workbench],
   );
+  const currentWorkspace = selectCurrentWorkspace(workbench);
+  const summaries = useMemo(() => workspaceSummaries(snapshot), [snapshot]);
+  const currentTasks = useMemo(
+    () =>
+      snapshot.sessions.filter(
+        (session) => session.workspaceRoot === currentWorkspace,
+      ),
+    [currentWorkspace, snapshot],
+  );
+  const searchResults = useMemo(
+    () => searchWorkbench(snapshot, searchQuery),
+    [searchQuery, snapshot],
+  );
+  const prompt = activeSession
+    ? (drafts[activeSession.id] ?? readTaskDraft(activeSession.id))
+    : "";
+  const mutationDisabled = viewSyncFailed || !bridgeReady || busy !== null;
+  const taskCanCompose =
+    activeSession?.lifecycle === "open" && !activeSession.archived;
+  const runInFlight = activeSession?.currentRunPhase !== null;
+  const canSubmit =
+    taskCanCompose &&
+    !runInFlight &&
+    prompt.trim().length > 0 &&
+    !mutationDisabled;
 
   const refreshSnapshot = useCallback(() => {
     const current = connection.current;
@@ -127,8 +174,20 @@ export default function App() {
       client,
       {
         onSnapshot: (next) => {
-          if (!cancelled)
+          if (!cancelled) {
+            const validSessionIds = new Set(
+              next.sessions.map((session) => session.id),
+            );
+            pruneTaskDrafts(validSessionIds);
+            setDrafts((current) =>
+              Object.fromEntries(
+                Object.entries(current).filter(([sessionId]) =>
+                  validSessionIds.has(sessionId),
+                ),
+              ),
+            );
             dispatchWorkbench({ type: "snapshot.accepted", snapshot: next });
+          }
         },
         onStatus: (next) => {
           if (!cancelled) setStatus(connectionStatus(next));
@@ -166,6 +225,55 @@ export default function App() {
     };
   }, [client]);
 
+  useEffect(() => {
+    const openSearch = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setSearchOpen(true);
+      }
+    };
+    window.addEventListener("keydown", openSearch);
+    return () => window.removeEventListener("keydown", openSearch);
+  }, []);
+
+  useEffect(() => {
+    setEditingTitle(false);
+    setConfirmDelete(false);
+    setTaskMenuOpen(false);
+  }, [activeSession?.id]);
+
+  useEffect(() => {
+    if (!taskMenuOpen) return;
+    const dismiss = (event: MouseEvent) => {
+      if (!taskMenu.current?.contains(event.target as Node))
+        setTaskMenuOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setTaskMenuOpen(false);
+      taskMenu.current?.querySelector<HTMLButtonElement>("button")?.focus();
+    };
+    document.addEventListener("mousedown", dismiss);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("mousedown", dismiss);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [taskMenuOpen]);
+
+  function updatePrompt(value: string) {
+    if (!activeSession) return;
+    setDrafts((current) => ({ ...current, [activeSession.id]: value }));
+    writeTaskDraft(activeSession.id, value);
+  }
+
+  function closeTaskMenuAndRestoreFocus() {
+    setTaskMenuOpen(false);
+    window.requestAnimationFrame(() =>
+      taskMenu.current?.querySelector<HTMLButtonElement>("button")?.focus(),
+    );
+  }
+
   async function retryViewSynchronization() {
     if (busy !== null) return;
     setBusy("reconnect");
@@ -197,6 +305,10 @@ export default function App() {
       if (result.selected) {
         setWorkspacePath(result.workspaceRoot);
         setWorkspaceGrant(result.grant);
+        dispatchWorkbench({
+          type: "workspace.selected",
+          workspaceRoot: result.workspaceRoot,
+        });
         setStatus({ id: "workspace.grant_confirmed" });
       } else {
         setWorkspacePath("");
@@ -236,16 +348,15 @@ export default function App() {
   }
 
   async function submitRun() {
-    if (viewSyncFailed || !bridgeReady || !activeSession || !prompt.trim())
-      return;
+    if (!canSubmit || !activeSession) return;
     const submitted = prompt;
-    setPrompt("");
+    updatePrompt("");
     setBusy("run");
     try {
       try {
         await client.run(activeSession.id, submitted);
       } catch (error) {
-        setPrompt(submitted);
+        updatePrompt(submitted);
         setStatus({
           id: "run.start_failed",
           values: { error: errorText(error) },
@@ -253,6 +364,7 @@ export default function App() {
         return;
       }
       await refreshAfterCommit("run.started", "operation.run_submit");
+      clearTaskDraft(activeSession.id);
     } finally {
       setBusy(null);
     }
@@ -263,13 +375,14 @@ export default function App() {
       viewSyncFailed ||
       !bridgeReady ||
       !activeSession ||
-      activeSession.activeRunId === "0"
+      activeSession.currentRunId === "0" ||
+      activeSession.currentRunPhase === null
     )
       return;
     setBusy("cancel");
     try {
       try {
-        await client.cancel(activeSession.id, activeSession.activeRunId);
+        await client.cancel(activeSession.id, activeSession.currentRunId);
       } catch (error) {
         setStatus({
           id: "run.stop_failed",
@@ -288,8 +401,8 @@ export default function App() {
       viewSyncFailed ||
       !bridgeReady ||
       !activeSession ||
-      (activeSession.state === "closing" && !activeSession.closeFailed) ||
-      activeSession.state === "closed"
+      (activeSession.lifecycle === "closing" && !activeSession.closeFailed) ||
+      activeSession.lifecycle === "closed"
     )
       return;
     setBusy("close");
@@ -307,6 +420,96 @@ export default function App() {
     } finally {
       setBusy(null);
     }
+  }
+
+  async function renameTask() {
+    if (!activeSession || mutationDisabled || !titleDraft.trim()) return;
+    setBusy("rename");
+    try {
+      try {
+        await client.renameTask(activeSession.id, titleDraft.trim());
+      } catch (error) {
+        setStatus({
+          id: "task.rename_failed",
+          values: { error: errorText(error) },
+        });
+        return;
+      }
+      setEditingTitle(false);
+      await refreshAfterCommit("task.renamed", "operation.task_rename");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function setArchived(archived: boolean) {
+    if (
+      !activeSession ||
+      mutationDisabled ||
+      activeSession.currentRunPhase !== null
+    )
+      return;
+    setBusy("archive");
+    try {
+      try {
+        await client.setTaskArchived(activeSession.id, archived);
+      } catch (error) {
+        setStatus({
+          id: archived ? "task.archive_failed" : "task.restore_failed",
+          values: { error: errorText(error) },
+        });
+        return;
+      }
+      if (archived) setShowArchived(true);
+      await refreshAfterCommit(
+        archived ? "task.archived_status" : "task.restored",
+        archived ? "operation.task_archive" : "operation.task_restore",
+      );
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function deleteTask() {
+    if (
+      !activeSession ||
+      mutationDisabled ||
+      activeSession.lifecycle !== "closed"
+    )
+      return;
+    setBusy("delete");
+    try {
+      try {
+        await client.deleteTask(activeSession.id);
+      } catch (error) {
+        setStatus({
+          id: "task.delete_failed",
+          values: { error: errorText(error) },
+        });
+        return;
+      }
+      clearTaskDraft(activeSession.id);
+      setConfirmDelete(false);
+      await refreshAfterCommit("task.deleted", "operation.task_delete");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  function selectSearchResult(result: SearchResult) {
+    dispatchWorkbench({
+      type: "workspace.selected",
+      workspaceRoot: result.workspaceRoot,
+    });
+    if (result.sessionId)
+      dispatchWorkbench({
+        type: "session.selected",
+        sessionId: result.sessionId,
+      });
+    setWorkspacePath(result.workspaceRoot);
+    setWorkspaceGrant("");
+    setSearchOpen(false);
+    setSearchQuery("");
   }
 
   async function respondUi(payload: UiResponsePayload) {
@@ -353,17 +556,18 @@ export default function App() {
   }
 
   const currentTaskStatus = activeSession
-    ? t(`task.status.${activeSession.state}`)
+    ? activeSession.currentRunPhase
+      ? t(`task.phase.${activeSession.currentRunPhase}`)
+      : t(`task.lifecycle.${activeSession.lifecycle}`)
+    : t("task.new");
+  const activeTaskTitle = activeSession
+    ? activeSession.title || t("task.item", { id: activeSession.id })
     : t("task.new");
 
   return (
     <AppShell
-      taskTitle={
-        activeSession ? t("task.item", { id: activeSession.id }) : t("task.new")
-      }
-      workspaceLabel={
-        activeSession?.workspaceRoot || workspacePath || t("workspace.none")
-      }
+      taskTitle={activeTaskTitle}
+      workspaceLabel={currentWorkspace || workspacePath || t("workspace.none")}
       status={t(status.id, status.values)}
       left={
         <>
@@ -377,73 +581,32 @@ export default function App() {
             </div>
           </div>
 
-          <section className="workspace-card">
-            <p className="section-label">{t("workspace.label")}</p>
-            <button
-              className="workspace-picker focus-ring"
-              disabled={busy !== null || viewSyncFailed || !bridgeReady}
-              onClick={() => void chooseWorkspace()}
-            >
-              <Icon name="workspace" />
-              <span className="truncate">
-                {workspacePath || t("workspace.choose")}
-              </span>
-              <Icon name="chevron" />
-            </button>
-            {workspaceGrant && (
-              <p className="workspace-grant">{t("workspace.grant_ready")}</p>
-            )}
-            <button
-              className="primary-button focus-ring"
-              disabled={
-                !workspacePath ||
-                !workspaceGrant ||
-                busy !== null ||
-                viewSyncFailed ||
-                !bridgeReady
-              }
-              onClick={() => void createSession()}
-            >
-              {busy === "create"
-                ? t("workspace.starting_task")
-                : t("workspace.start_task")}
-            </button>
-          </section>
-
-          <nav className="task-list" aria-label={t("task.list")}>
-            <div className="task-list-heading">
-              <p className="section-label">{t("task.list")}</p>
-              <span>
-                {t(taskCountMessageId(locale, snapshot.sessions.length), {
-                  count: formatInteger(locale, snapshot.sessions.length),
-                })}
-              </span>
-            </div>
-            {snapshot.sessions.map((session) => (
-              <button
-                key={session.id}
-                className="task-list-item focus-ring"
-                aria-current={
-                  activeSession?.id === session.id ? "page" : undefined
-                }
-                onClick={() =>
-                  dispatchWorkbench({
-                    type: "session.selected",
-                    sessionId: session.id,
-                  })
-                }
-              >
-                <span className="task-list-row">
-                  <span>{t("task.item", { id: session.id })}</span>
-                  <StatePill state={session.state} />
-                </span>
-                <span className="task-list-path">{session.workspaceRoot}</span>
-              </button>
-            ))}
-            {snapshot.sessions.length === 0 && (
-              <p className="task-list-empty">{t("task.no_tasks")}</p>
-            )}
-          </nav>
+          <WorkspaceNavigation
+            summaries={summaries}
+            currentWorkspace={currentWorkspace}
+            tasks={currentTasks}
+            activeSessionId={activeSession?.id ?? null}
+            selectedPath={workspacePath || currentWorkspace || ""}
+            grantReady={Boolean(workspacePath && workspaceGrant)}
+            showArchived={showArchived}
+            disabled={mutationDisabled}
+            creating={busy === "create"}
+            onSearch={() => setSearchOpen(true)}
+            onChooseWorkspace={() => void chooseWorkspace()}
+            onSelectWorkspace={(root) => {
+              setWorkspacePath(root);
+              setWorkspaceGrant("");
+              dispatchWorkbench({
+                type: "workspace.selected",
+                workspaceRoot: root,
+              });
+            }}
+            onCreateTask={() => void createSession()}
+            onSelectTask={(sessionId) =>
+              dispatchWorkbench({ type: "session.selected", sessionId })
+            }
+            onToggleArchived={() => setShowArchived((shown) => !shown)}
+          />
         </>
       }
       activity={
@@ -501,17 +664,16 @@ export default function App() {
             <p className="section-label">{t("activity.current")}</p>
             <div className="current-activity">
               <span
-                className={`activity-dot ${activeSession?.state === "running" ? "is-live" : ""}`}
+                className={`activity-dot ${activeSession?.currentRunPhase ? "is-live" : ""}`}
               />
               <div>
                 <p>{currentTaskStatus}</p>
                 <span>
                   {!activeSession
                     ? t("activity.current_empty")
-                    : activeSession.state === "waiting_ui"
+                    : activeSession.currentRunPhase === "waiting_ui"
                       ? t("activity.current_waiting")
-                      : activeSession.state === "running" ||
-                          activeSession.state === "queued"
+                      : activeSession.currentRunPhase !== null
                         ? t("activity.current_working")
                         : t("activity.current_ready")}
                 </span>
@@ -528,21 +690,54 @@ export default function App() {
               workspacePath ||
               t("workspace.none")}
           </p>
-          <h1>
-            {activeSession
-              ? t("task.item", { id: activeSession.id })
-              : t("task.open")}
-          </h1>
+          {activeSession && editingTitle ? (
+            <form
+              className="task-title-editor"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void renameTask();
+              }}
+            >
+              <input
+                autoFocus
+                maxLength={120}
+                value={titleDraft}
+                aria-label={t("task.rename")}
+                placeholder={t("task.item", { id: activeSession.id })}
+                onChange={(event) => setTitleDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") setEditingTitle(false);
+                }}
+              />
+              <button
+                className="secondary-button focus-ring"
+                disabled={!titleDraft.trim() || mutationDisabled}
+              >
+                {t("common.save")}
+              </button>
+              <button
+                type="button"
+                className="text-button focus-ring"
+                onClick={() => setEditingTitle(false)}
+              >
+                {t("common.cancel")}
+              </button>
+            </form>
+          ) : (
+            <div className="task-title-row">
+              <h1>{activeSession ? activeTaskTitle : t("task.open")}</h1>
+              {activeSession && <TaskSignals session={activeSession} />}
+            </div>
+          )}
         </div>
         <div className="task-actions">
           {activeSession &&
-            activeSession.activeRunId !== "0" &&
-            (activeSession.state === "queued" ||
-              activeSession.state === "running" ||
-              activeSession.state === "waiting_ui") && (
+            activeSession.currentRunId !== "0" &&
+            activeSession.currentRunPhase !== null &&
+            activeSession.currentRunPhase !== "stopping" && (
               <button
                 className="danger-button focus-ring"
-                disabled={busy !== null || viewSyncFailed || !bridgeReady}
+                disabled={mutationDisabled}
                 onClick={() => void cancelRun()}
               >
                 <Icon name="stop" />
@@ -550,27 +745,139 @@ export default function App() {
               </button>
             )}
           {activeSession && (
-            <button
-              className="secondary-button focus-ring"
-              disabled={
-                (activeSession.state === "closing" &&
-                  !activeSession.closeFailed) ||
-                activeSession.state === "closed" ||
-                busy !== null ||
-                viewSyncFailed ||
-                !bridgeReady
-              }
-              onClick={() => void closeSession()}
-            >
-              {activeSession.closeFailed
-                ? t("task.close_retry")
-                : activeSession.state === "closing"
-                  ? t("task.closing")
-                  : t("task.close")}
-            </button>
+            <div className="task-menu" ref={taskMenu}>
+              <button
+                className="secondary-button focus-ring"
+                aria-expanded={taskMenuOpen}
+                aria-haspopup="menu"
+                onClick={() => setTaskMenuOpen((open) => !open)}
+              >
+                {t("task.actions")}
+              </button>
+              {taskMenuOpen && (
+                <div
+                  className="task-menu-popover"
+                  role="menu"
+                  onKeyDown={(event) => {
+                    if (event.key !== "ArrowDown" && event.key !== "ArrowUp")
+                      return;
+                    const items = [
+                      ...event.currentTarget.querySelectorAll<HTMLButtonElement>(
+                        "button:not([disabled])",
+                      ),
+                    ];
+                    if (items.length === 0) return;
+                    event.preventDefault();
+                    const index = items.indexOf(
+                      document.activeElement as HTMLButtonElement,
+                    );
+                    const offset = event.key === "ArrowDown" ? 1 : -1;
+                    const next =
+                      index < 0
+                        ? event.key === "ArrowDown"
+                          ? 0
+                          : items.length - 1
+                        : (index + offset + items.length) % items.length;
+                    items[next].focus();
+                  }}
+                >
+                  <button
+                    role="menuitem"
+                    disabled={mutationDisabled}
+                    onClick={() => {
+                      setTitleDraft(activeSession.title);
+                      setEditingTitle(true);
+                      setTaskMenuOpen(false);
+                    }}
+                  >
+                    {t("task.rename")}
+                  </button>
+                  <button
+                    role="menuitem"
+                    disabled={
+                      mutationDisabled ||
+                      runInFlight ||
+                      activeSession.lifecycle === "closing"
+                    }
+                    onClick={() => {
+                      closeTaskMenuAndRestoreFocus();
+                      void setArchived(!activeSession.archived);
+                    }}
+                  >
+                    {activeSession.archived
+                      ? t("task.restore")
+                      : t("task.archive")}
+                  </button>
+                  <button
+                    role="menuitem"
+                    disabled={
+                      (activeSession.lifecycle === "closing" &&
+                        !activeSession.closeFailed) ||
+                      activeSession.lifecycle === "closed" ||
+                      mutationDisabled
+                    }
+                    onClick={() => {
+                      closeTaskMenuAndRestoreFocus();
+                      void closeSession();
+                    }}
+                  >
+                    {activeSession.closeFailed
+                      ? t("task.end_retry")
+                      : activeSession.lifecycle === "closing"
+                        ? t("task.ending")
+                        : t("task.end")}
+                  </button>
+                  <button
+                    role="menuitem"
+                    className="is-danger"
+                    disabled={
+                      activeSession.lifecycle !== "closed" || mutationDisabled
+                    }
+                    onClick={() => {
+                      setTaskMenuOpen(false);
+                      setConfirmDelete(true);
+                    }}
+                  >
+                    {t("task.delete")}
+                  </button>
+                </div>
+              )}
+            </div>
           )}
         </div>
       </header>
+
+      {activeSession && confirmDelete && (
+        <section
+          className="delete-confirmation"
+          role="alertdialog"
+          aria-labelledby="task-delete-title"
+          aria-describedby="task-delete-description"
+        >
+          <div>
+            <strong id="task-delete-title">
+              {t("task.delete_confirm_title")}
+            </strong>
+            <span id="task-delete-description">
+              {t("task.delete_confirm_body")}
+            </span>
+          </div>
+          <button
+            autoFocus
+            className="secondary-button focus-ring"
+            onClick={() => setConfirmDelete(false)}
+          >
+            {t("common.cancel")}
+          </button>
+          <button
+            className="danger-button focus-ring"
+            disabled={mutationDisabled}
+            onClick={() => void deleteTask()}
+          >
+            {t("task.delete")}
+          </button>
+        </section>
+      )}
 
       <div className="timeline-scroll">
         <div className="timeline">
@@ -583,7 +890,8 @@ export default function App() {
                 data-active={
                   run.phase === "queued" ||
                   run.phase === "running" ||
-                  run.phase === "waiting_ui"
+                  run.phase === "waiting_ui" ||
+                  run.phase === "stopping"
                 }
               >
                 <div className="workline-node" aria-hidden="true" />
@@ -654,21 +962,20 @@ export default function App() {
         <div className="composer">
           <textarea
             value={prompt}
-            disabled={
-              !activeSession ||
-              activeSession.state !== "idle" ||
-              busy !== null ||
-              viewSyncFailed ||
-              !bridgeReady
-            }
+            maxLength={16 * 1024}
+            disabled={!taskCanCompose || viewSyncFailed || !bridgeReady}
             placeholder={
-              activeSession
-                ? t("run.placeholder")
-                : t("run.placeholder_no_task")
+              !activeSession
+                ? t("run.placeholder_no_task")
+                : activeSession.archived
+                  ? t("run.placeholder_archived")
+                  : activeSession.lifecycle !== "open"
+                    ? t("run.placeholder_closed")
+                    : t("run.placeholder")
             }
-            onChange={(event) => setPrompt(event.target.value)}
+            onChange={(event) => updatePrompt(event.target.value)}
             onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey) {
+              if (event.key === "Enter" && !event.shiftKey && canSubmit) {
                 event.preventDefault();
                 void submitRun();
               }
@@ -678,34 +985,28 @@ export default function App() {
             className="composer-send focus-ring"
             aria-label={t("run.submit")}
             title={t("run.submit")}
-            disabled={
-              !activeSession ||
-              activeSession.state !== "idle" ||
-              !prompt.trim() ||
-              busy !== null ||
-              viewSyncFailed ||
-              !bridgeReady
-            }
+            disabled={!canSubmit}
             onClick={() => void submitRun()}
           >
             <Icon name="send" />
           </button>
         </div>
+        {taskCanCompose && runInFlight && (
+          <p className="composer-draft-note">{t("run.draft_only")}</p>
+        )}
       </footer>
+      <GlobalSearch
+        open={searchOpen}
+        query={searchQuery}
+        results={searchResults}
+        onQuery={setSearchQuery}
+        onClose={() => {
+          setSearchOpen(false);
+          setSearchQuery("");
+        }}
+        onSelect={selectSearchResult}
+      />
     </AppShell>
-  );
-}
-
-function StatePill({ state }: { state: SessionView["state"] }) {
-  const { t } = useI18n();
-  const active =
-    state === "running" || state === "queued" || state === "waiting_ui";
-  return (
-    <span
-      className={`rounded-full px-2 py-1 font-mono text-[9px] uppercase ${active ? "bg-cobalt/10 text-cobalt" : "bg-rule/60 text-muted"}`}
-    >
-      {t(`task.status.${state}`)}
-    </span>
   );
 }
 

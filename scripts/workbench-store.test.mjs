@@ -6,38 +6,87 @@ import {
   workbenchReducer,
 } from "../frontend/src/workbench/store.ts";
 
-function snapshot(revision, sessionIds) {
+function session(id, workspaceRoot, archived = false) {
   return {
-    schemaVersion: 1,
-    revision,
-    sessions: sessionIds.map((id) => ({ id })),
+    id,
+    title: "",
+    workspaceRoot,
+    lifecycle: "open",
+    archived,
+    closeFailed: false,
+    currentRunId: "0",
+    currentRunPhase: null,
+    lastRunOutcome: null,
+    cause: null,
+    runs: [],
+    pendingUi: null,
   };
 }
 
-test("the Workbench store selects the first Session and preserves a valid choice", () => {
+function snapshot(revision, sessions) {
+  return { schemaVersion: 2, revision, sessions };
+}
+
+test("the Workbench store selects the first Task and preserves a valid choice", () => {
   const accepted = workbenchReducer(initialWorkbenchState, {
     type: "snapshot.accepted",
-    snapshot: snapshot("1", ["2", "3"]),
+    snapshot: snapshot("1", [
+      session("2", "/repo/alpha"),
+      session("3", "/repo/beta"),
+    ]),
   });
   assert.equal(accepted.activeSessionId, "2");
+  assert.equal(accepted.activeWorkspaceRoot, "/repo/alpha");
 
   const selected = workbenchReducer(accepted, {
     type: "session.selected",
     sessionId: "3",
   });
   assert.equal(selected.activeSessionId, "3");
+  assert.equal(selected.activeWorkspaceRoot, "/repo/beta");
 
   const refreshed = workbenchReducer(selected, {
     type: "snapshot.accepted",
-    snapshot: snapshot("2", ["3", "4"]),
+    snapshot: snapshot("2", [
+      session("3", "/repo/beta"),
+      session("4", "/repo/alpha"),
+    ]),
   });
   assert.equal(refreshed.activeSessionId, "3");
 });
 
-test("the Workbench store rejects unknown choices and falls back after removal", () => {
+test("workspace selection chooses a visible local Task and never leaks another workspace", () => {
   const accepted = workbenchReducer(initialWorkbenchState, {
     type: "snapshot.accepted",
-    snapshot: snapshot("1", ["2", "3"]),
+    snapshot: snapshot("1", [
+      session("2", "/repo/alpha"),
+      session("3", "/repo/beta", true),
+      session("4", "/repo/beta"),
+    ]),
+  });
+  const selected = workbenchReducer(accepted, {
+    type: "workspace.selected",
+    workspaceRoot: "/repo/beta",
+  });
+  assert.equal(selected.activeWorkspaceRoot, "/repo/beta");
+  assert.equal(selected.activeSessionId, "4");
+
+  const newWorkspace = workbenchReducer(selected, {
+    type: "workspace.selected",
+    workspaceRoot: "/repo/new",
+  });
+  assert.equal(newWorkspace.activeWorkspaceRoot, "/repo/new");
+  assert.equal(newWorkspace.activeSessionId, null);
+});
+
+test("the Workbench store rejects unknown Tasks and falls back within the current workspace", () => {
+  const accepted = workbenchReducer(initialWorkbenchState, {
+    type: "snapshot.accepted",
+    snapshot: snapshot("1", [
+      session("2", "/repo/alpha"),
+      session("3", "/repo/alpha"),
+      session("4", "/repo/beta"),
+    ]),
   });
   assert.equal(
     workbenchReducer(accepted, {
@@ -48,7 +97,10 @@ test("the Workbench store rejects unknown choices and falls back after removal",
   );
   const removed = workbenchReducer(accepted, {
     type: "snapshot.accepted",
-    snapshot: snapshot("2", ["3"]),
+    snapshot: snapshot("2", [
+      session("3", "/repo/alpha"),
+      session("4", "/repo/beta"),
+    ]),
   });
   assert.equal(removed.activeSessionId, "3");
 });

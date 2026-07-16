@@ -1,4 +1,4 @@
-export const WORKBENCH_SCHEMA_VERSION = 1 as const;
+export const WORKBENCH_SCHEMA_VERSION = 2 as const;
 
 export type ToolView = {
   id: string;
@@ -11,17 +11,25 @@ export type ToolView = {
   elapsedMs: string;
 };
 
+export type RunPhase =
+  | "queued"
+  | "running"
+  | "waiting_ui"
+  | "stopping"
+  | "completed"
+  | "stopped"
+  | "cancelled"
+  | "interrupted"
+  | "failed";
+
+export type NonTerminalRunPhase = Extract<
+  RunPhase,
+  "queued" | "running" | "waiting_ui" | "stopping"
+>;
+
 export type RunView = {
   id: string;
-  phase:
-    | "queued"
-    | "running"
-    | "waiting_ui"
-    | "completed"
-    | "stopped"
-    | "cancelled"
-    | "interrupted"
-    | "failed";
+  phase: RunPhase;
   user: string;
   assistant: string;
   status: string;
@@ -96,11 +104,14 @@ export type PendingUi =
 
 export type SessionView = {
   id: string;
+  title: string;
   workspaceRoot: string;
-  state: "idle" | "queued" | "running" | "waiting_ui" | "closing" | "closed";
+  lifecycle: "open" | "closing" | "closed";
+  archived: boolean;
   closeFailed: boolean;
-  activeRunId: string;
-  outcome: RunView["outcome"];
+  currentRunId: string;
+  currentRunPhase: NonTerminalRunPhase | null;
+  lastRunOutcome: RunView["outcome"];
   cause: RunView["cause"];
   runs: RunView[];
   pendingUi: PendingUi | null;

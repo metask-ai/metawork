@@ -13,23 +13,23 @@ import {
 
 type JsonObject = Record<string, unknown>;
 
-const sessionStates = [
-  "idle",
-  "queued",
-  "running",
-  "waiting_ui",
-  "closing",
-  "closed",
-] as const;
+const taskLifecycles = ["open", "closing", "closed"] as const;
 const runPhases = [
   "queued",
   "running",
   "waiting_ui",
+  "stopping",
   "completed",
   "stopped",
   "cancelled",
   "interrupted",
   "failed",
+] as const;
+const nonTerminalRunPhases = [
+  "queued",
+  "running",
+  "waiting_ui",
+  "stopping",
 ] as const;
 const runOutcomes = [
   "completed",
@@ -289,25 +289,64 @@ function decodePendingUi(value: unknown, path: string): PendingUi | null {
 function decodeSession(value: unknown, path: string): SessionView {
   const item = object(value, path, [
     "id",
+    "title",
     "workspaceRoot",
-    "state",
+    "lifecycle",
+    "archived",
     "closeFailed",
-    "activeRunId",
-    "outcome",
+    "currentRunId",
+    "currentRunPhase",
+    "lastRunOutcome",
     "cause",
     "runs",
     "pendingUi",
   ]);
+  const runs = arrayValue(item.runs, `${path}.runs`, decodeRun);
+  const lifecycle = enumValue(
+    item.lifecycle,
+    `${path}.lifecycle`,
+    taskLifecycles,
+  );
+  const archived = booleanValue(item.archived, `${path}.archived`);
+  const currentRunId = wireId(item.currentRunId, `${path}.currentRunId`);
+  const currentRunPhase = nullableEnum(
+    item.currentRunPhase,
+    `${path}.currentRunPhase`,
+    nonTerminalRunPhases,
+  );
+  if ((currentRunId === "0") !== (currentRunPhase === null))
+    fail(path, "current Run identity and phase must both be present or absent");
+  if (currentRunPhase !== null) {
+    const current = runs.find((run) => run.id === currentRunId);
+    if (!current || current.phase !== currentRunPhase)
+      fail(path, "current Run must reference a matching projected Run");
+    if (archived) fail(path, "an archived Task cannot have a current Run");
+    if (lifecycle === "closed")
+      fail(path, "a closed Task cannot have a current Run");
+  }
+  const pendingUi = decodePendingUi(item.pendingUi, `${path}.pendingUi`);
+  if (
+    pendingUi &&
+    (currentRunPhase !== "waiting_ui" || pendingUi.runId !== currentRunId)
+  )
+    fail(path, "pending UI must belong to the current waiting Run");
   return {
     id: positiveWireId(item.id, `${path}.id`),
+    title: stringValue(item.title, `${path}.title`),
     workspaceRoot: stringValue(item.workspaceRoot, `${path}.workspaceRoot`),
-    state: enumValue(item.state, `${path}.state`, sessionStates),
+    lifecycle,
+    archived,
     closeFailed: booleanValue(item.closeFailed, `${path}.closeFailed`),
-    activeRunId: wireId(item.activeRunId, `${path}.activeRunId`),
-    outcome: nullableEnum(item.outcome, `${path}.outcome`, runOutcomes),
+    currentRunId,
+    currentRunPhase,
+    lastRunOutcome: nullableEnum(
+      item.lastRunOutcome,
+      `${path}.lastRunOutcome`,
+      runOutcomes,
+    ),
     cause: nullableEnum(item.cause, `${path}.cause`, hostCauses),
-    runs: arrayValue(item.runs, `${path}.runs`, decodeRun),
-    pendingUi: decodePendingUi(item.pendingUi, `${path}.pendingUi`),
+    runs,
+    pendingUi,
   };
 }
 
@@ -466,4 +505,30 @@ export function assertCloseAccepted(value: unknown, sessionId: string) {
     booleanValue(item.closing, "$.closing") !== true
   )
     fail("$", "close response mismatch");
+}
+
+export function assertTaskFlag(
+  value: unknown,
+  sessionId: string,
+  flag: "renamed" | "deleted",
+) {
+  const item = object(value, "$", ["sessionId", flag]);
+  if (
+    positiveWireId(item.sessionId, "$.sessionId") !== sessionId ||
+    booleanValue(item[flag], `$.${flag}`) !== true
+  )
+    fail("$", `${flag} response mismatch`);
+}
+
+export function assertTaskArchived(
+  value: unknown,
+  sessionId: string,
+  archived: boolean,
+) {
+  const item = object(value, "$", ["sessionId", "archived"]);
+  if (
+    positiveWireId(item.sessionId, "$.sessionId") !== sessionId ||
+    booleanValue(item.archived, "$.archived") !== archived
+  )
+    fail("$", "archive response mismatch");
 }

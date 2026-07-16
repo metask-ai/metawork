@@ -9,6 +9,9 @@ pub const Error = lifecycle.Error || std.mem.Allocator.Error || std.Thread.Spawn
     ToolCapacity,
     SnapshotTooLarge,
     CloseInProgress,
+    TaskBusy,
+    TaskNotClosed,
+    InvalidTaskTitle,
 };
 
 pub const Limits = struct {
@@ -17,6 +20,7 @@ pub const Limits = struct {
     max_tools_per_run: usize = 32,
     max_projection_bytes: usize = 512 * 1024,
     max_workspace_bytes: usize = 16 * 1024,
+    max_task_title_bytes: usize = 512,
     max_user_message_bytes: usize = 64 * 1024,
     max_assistant_message_bytes: usize = 256 * 1024,
     max_tool_field_bytes: usize = 256 * 1024,
@@ -32,19 +36,22 @@ const session_snapshot_overhead: usize = 512;
 const run_snapshot_overhead: usize = 1024;
 const tool_snapshot_overhead: usize = 512;
 const pending_ui_snapshot_overhead: usize = 8 * 1024;
-pub const snapshot_schema_version: u32 = 1;
+pub const snapshot_schema_version: u32 = 2;
 
 const ToolState = enum { running, completed, failed };
 const RunPhase = enum {
     queued,
     running,
     waiting_ui,
+    stopping,
     completed,
     stopped,
     cancelled,
     interrupted,
     failed,
 };
+
+const TaskLifecycle = enum { open, closing, closed };
 
 const CloseResult = enum(u8) { none, running, closed, failed };
 
@@ -86,6 +93,8 @@ const SessionView = struct {
     session: ?*lifecycle.Session,
     id: u64,
     workspace_root: []u8,
+    title: []u8,
+    archived: bool = false,
     runs: []?RunView,
     state: lifecycle.SessionState = .idle,
     active_run_id: u64 = 0,
@@ -95,6 +104,7 @@ const SessionView = struct {
     close_thread: ?std.Thread = null,
     close_result: std.atomic.Value(CloseResult) = .init(.none),
     close_failed: bool = false,
+    cancel_requested: bool = false,
 };
 
 /// Host-owned product projection. AgentCore protocol is interpreted only
@@ -116,6 +126,7 @@ pub const Workbench = struct {
         if (limits.max_sessions == 0 or limits.max_runs_per_session == 0 or
             limits.max_tools_per_run == 0 or limits.max_projection_bytes == 0 or
             limits.max_workspace_bytes == 0 or
+            limits.max_task_title_bytes == 0 or
             limits.max_user_message_bytes == 0 or limits.max_assistant_message_bytes == 0 or
             limits.max_tool_field_bytes == 0 or limits.max_pending_ui_json_bytes == 0 or
             limits.max_pending_ui_requests == 0 or
@@ -132,14 +143,11 @@ pub const Workbench = struct {
         options: lifecycle.SessionOpenOptions,
     ) Error!u64 {
         self.syncLifecycle();
-        const slot = findEmpty(SessionView, self.sessions) orelse self.findReusableClosed() orelse
-            return error.SessionCapacity;
-        if (self.sessions[slot]) |*prior| {
-            self.deinitSessionView(prior);
-            self.sessions[slot] = null;
-        }
+        const slot = findEmpty(SessionView, self.sessions) orelse return error.SessionCapacity;
         const workspace = try self.copyBounded(options.workspace.canonical_root, self.limits.max_workspace_bytes);
         errdefer self.freeTracked(workspace);
+        const title = try self.copyBounded("", self.limits.max_task_title_bytes);
+        errdefer self.freeTracked(title);
         const runs = try self.allocator.alloc(?RunView, self.limits.max_runs_per_session);
         errdefer self.allocator.free(runs);
         @memset(runs, null);
@@ -149,6 +157,7 @@ pub const Workbench = struct {
             .session = session,
             .id = snapshot.session_id,
             .workspace_root = workspace,
+            .title = title,
             .runs = runs,
             .state = snapshot.state,
             .active_run_id = snapshot.active_run_id,
@@ -182,15 +191,19 @@ pub const Workbench = struct {
         view.active_run_id = run_id;
         view.outcome = null;
         view.cause = null;
+        view.cancel_requested = false;
         self.bumpRevision();
         return run_id;
     }
 
     pub fn cancel(self: *Workbench, session_id: u64, run_id: u64) Error!void {
         self.syncLifecycle();
-        const session = (self.findSession(session_id) orelse return error.UnknownSession).session orelse
+        const view = self.findSession(session_id) orelse return error.UnknownSession;
+        const session = view.session orelse
             return error.SessionClosing;
         try session.requestCancel(run_id, .user_cancel);
+        view.cancel_requested = true;
+        if (findRun(view.runs, run_id)) |run| run.phase = .stopping;
         self.bumpRevision();
     }
 
@@ -216,6 +229,10 @@ pub const Workbench = struct {
         view.session = null;
         view.closing_session = session;
         view.state = .closing;
+        view.cancel_requested = view.active_run_id != 0;
+        if (findRun(view.runs, view.active_run_id)) |run| {
+            if (!isTerminalPhase(run.phase)) run.phase = .stopping;
+        }
         view.close_failed = false;
         view.close_result.store(.running, .release);
         view.close_thread = std.Thread.spawn(.{}, closeWorker, .{ self.host, view, session }) catch |err| {
@@ -225,6 +242,38 @@ pub const Workbench = struct {
             view.state = session.snapshot().state;
             return err;
         };
+        self.bumpRevision();
+    }
+
+    pub fn renameTask(self: *Workbench, session_id: u64, title: []const u8) Error!void {
+        self.syncLifecycle();
+        const view = self.findSession(session_id) orelse return error.UnknownSession;
+        const trimmed = std.mem.trim(u8, title, " \t\r\n");
+        if (trimmed.len == 0 or trimmed.len > self.limits.max_task_title_bytes or
+            !std.unicode.utf8ValidateSlice(trimmed))
+            return error.InvalidTaskTitle;
+        for (trimmed) |byte| if (byte < 0x20) return error.InvalidTaskTitle;
+        try self.replaceTracked(&view.title, trimmed, self.limits.max_task_title_bytes);
+        self.bumpRevision();
+    }
+
+    pub fn setTaskArchived(self: *Workbench, session_id: u64, archived: bool) Error!void {
+        self.syncLifecycle();
+        const view = self.findSession(session_id) orelse return error.UnknownSession;
+        if (view.state == .closing or hasNonTerminalRun(view)) return error.TaskBusy;
+        if (view.archived == archived) return;
+        view.archived = archived;
+        self.bumpRevision();
+    }
+
+    pub fn deleteTask(self: *Workbench, session_id: u64) Error!void {
+        self.syncLifecycle();
+        const index = self.findSessionIndex(session_id) orelse return error.UnknownSession;
+        const view = &(self.sessions[index] orelse unreachable);
+        if (view.state != .closed or view.close_thread != null or view.session != null)
+            return error.TaskNotClosed;
+        self.deinitSessionView(view);
+        self.sessions[index] = null;
         self.bumpRevision();
     }
 
@@ -251,6 +300,7 @@ pub const Workbench = struct {
                     view.state = .closed;
                     view.session = null;
                     view.close_failed = false;
+                    view.cancel_requested = false;
                 } else if (closing_session) |session| {
                     view.session = session;
                     const snapshot = session.snapshot();
@@ -259,11 +309,14 @@ pub const Workbench = struct {
                     view.outcome = snapshot.last_outcome;
                     view.cause = snapshot.cause;
                     view.close_failed = true;
+                    view.cancel_requested = false;
                 }
                 changed = true;
             }
             const session = view.session orelse continue;
             const snapshot = session.snapshot();
+            if (snapshot.last_outcome != null or snapshot.state == .idle or snapshot.state == .closed)
+                view.cancel_requested = false;
             if (view.state != snapshot.state or view.active_run_id != snapshot.active_run_id or
                 view.outcome != snapshot.last_outcome or view.cause != snapshot.cause)
             {
@@ -274,7 +327,12 @@ pub const Workbench = struct {
                 changed = true;
             }
             const run = findRun(view.runs, snapshot.active_run_id) orelse continue;
-            const next_phase = phaseFor(snapshot);
+            const next_phase: RunPhase = if (view.cancel_requested and
+                snapshot.last_outcome == null and
+                snapshot.state != .idle and snapshot.state != .closed)
+                .stopping
+            else
+                phaseFor(snapshot);
             if (run.phase != next_phase or run.outcome != snapshot.last_outcome or run.cause != snapshot.cause) {
                 run.phase = next_phase;
                 run.outcome = snapshot.last_outcome;
@@ -361,9 +419,18 @@ pub const Workbench = struct {
     }
 
     fn writeSession(self: *Workbench, writer: *std.Io.Writer, view: *SessionView) Error!void {
-        writer.print("{{\"id\":\"{d}\",\"workspaceRoot\":", .{view.id}) catch return error.SnapshotTooLarge;
+        writer.print("{{\"id\":\"{d}\",\"title\":", .{view.id}) catch return error.SnapshotTooLarge;
+        jsonValue(writer, view.title) catch return error.SnapshotTooLarge;
+        writer.writeAll(",\"workspaceRoot\":") catch return error.SnapshotTooLarge;
         jsonValue(writer, view.workspace_root) catch return error.SnapshotTooLarge;
-        writer.print(",\"state\":\"{s}\",\"closeFailed\":{},\"activeRunId\":\"{d}\",\"outcome\":", .{ @tagName(view.state), view.close_failed, view.active_run_id }) catch return error.SnapshotTooLarge;
+        writer.print(",\"lifecycle\":\"{s}\",\"archived\":{},\"closeFailed\":{},\"currentRunId\":\"{d}\",\"currentRunPhase\":", .{
+            @tagName(taskLifecycle(view.state)),
+            view.archived,
+            view.close_failed,
+            if (currentRunPhase(view) == null) 0 else view.active_run_id,
+        }) catch return error.SnapshotTooLarge;
+        if (currentRunPhase(view)) |phase| jsonValue(writer, @tagName(phase)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeAll(",\"lastRunOutcome\":") catch return error.SnapshotTooLarge;
         if (view.outcome) |outcome| jsonValue(writer, @tagName(outcome)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.writeAll(",\"cause\":") catch return error.SnapshotTooLarge;
         if (view.cause) |cause| jsonValue(writer, @tagName(cause)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
@@ -434,11 +501,10 @@ pub const Workbench = struct {
         return null;
     }
 
-    fn findReusableClosed(self: *Workbench) ?usize {
-        for (self.sessions, 0..) |entry, index| {
-            const session = entry orelse continue;
-            if (session.state == .closed and session.close_thread == null) return index;
-        }
+    fn findSessionIndex(self: *Workbench, session_id: u64) ?usize {
+        if (session_id == 0) return null;
+        for (self.sessions, 0..) |entry, index|
+            if (entry) |session| if (session.id == session_id) return index;
         return null;
     }
 
@@ -460,6 +526,7 @@ pub const Workbench = struct {
         }
         self.allocator.free(session.runs);
         self.freeTracked(session.workspace_root);
+        self.freeTracked(session.title);
         session.* = undefined;
     }
 
@@ -574,6 +641,36 @@ fn phaseForOutcome(outcome: lifecycle.RunOutcome) RunPhase {
         .cancelled => .cancelled,
         .interrupted => .interrupted,
         .failed, .dependency_contract_failure => .failed,
+    };
+}
+
+fn taskLifecycle(state: lifecycle.SessionState) TaskLifecycle {
+    return switch (state) {
+        .closing => .closing,
+        .closed => .closed,
+        .idle, .queued, .running, .waiting_ui => .open,
+    };
+}
+
+fn currentRunPhase(view: *const SessionView) ?RunPhase {
+    return switch (view.state) {
+        .queued, .running, .waiting_ui, .closing => if (findRun(view.runs, view.active_run_id)) |run|
+            if (isTerminalPhase(run.phase)) null else run.phase
+        else
+            null,
+        .idle, .closed => null,
+    };
+}
+
+fn hasNonTerminalRun(view: *const SessionView) bool {
+    if (currentRunPhase(view)) |phase| return !isTerminalPhase(phase);
+    return false;
+}
+
+fn isTerminalPhase(phase: RunPhase) bool {
+    return switch (phase) {
+        .queued, .running, .waiting_ui, .stopping => false,
+        .completed, .stopped, .cancelled, .interrupted, .failed => true,
     };
 }
 
@@ -699,6 +796,7 @@ fn testWorkbench() !Workbench {
     runs[0] = .{
         .id = 7,
         .user = try workbench.copyBounded("inspect", workbench.limits.max_user_message_bytes),
+        .phase = .running,
         .tools = tools,
         .status_text = try workbench.copyBounded("Queued", workbench.limits.max_tool_field_bytes),
     };
@@ -706,6 +804,7 @@ fn testWorkbench() !Workbench {
         .session = null,
         .id = 3,
         .workspace_root = workspace,
+        .title = try workbench.copyBounded("", workbench.limits.max_task_title_bytes),
         .runs = runs,
         .state = .running,
         .active_run_id = 7,
@@ -725,7 +824,7 @@ fn testEnvelope(session_id: u64, run_id: u64, encoded: []const u8) !lifecycle.Ev
     };
 }
 
-test "Workbench snapshot serializer matches the Renderer v1 contract fixture" {
+test "Workbench snapshot serializer matches the Renderer v2 contract fixture" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
 
@@ -737,6 +836,35 @@ test "Workbench snapshot serializer matches the Renderer v1 contract fixture" {
         "\r\n",
     );
     try std.testing.expectEqualStrings(fixture, snapshot);
+}
+
+test "Task metadata mutations preserve lifecycle guards and projection accounting" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+
+    try std.testing.expectError(error.TaskBusy, workbench.setTaskArchived(3, true));
+    try std.testing.expectError(error.TaskNotClosed, workbench.deleteTask(3));
+    try std.testing.expectError(error.InvalidTaskTitle, workbench.renameTask(3, "  \n  "));
+    try std.testing.expectError(error.InvalidTaskTitle, workbench.renameTask(3, "bad\ttitle"));
+    try std.testing.expectError(error.InvalidTaskTitle, workbench.renameTask(3, &.{0xff}));
+
+    try workbench.renameTask(3, "Review release readiness");
+    try std.testing.expectEqualStrings("Review release readiness", workbench.sessions[0].?.title);
+
+    workbench.sessions[0].?.state = .idle;
+    workbench.sessions[0].?.active_run_id = 0;
+    workbench.sessions[0].?.runs[0].?.phase = .completed;
+    try workbench.setTaskArchived(3, true);
+    try std.testing.expect(workbench.sessions[0].?.archived);
+
+    workbench.sessions[0].?.state = .closing;
+    try std.testing.expectError(error.TaskBusy, workbench.setTaskArchived(3, false));
+    workbench.sessions[0].?.state = .closed;
+    const tracked_before_delete = workbench.projection_bytes;
+    try workbench.deleteTask(3);
+    try std.testing.expect(workbench.sessions[0] == null);
+    try std.testing.expect(workbench.projection_bytes < tracked_before_delete);
+    try std.testing.expectError(error.UnknownSession, workbench.renameTask(3, "gone"));
 }
 
 test "Workbench projection preserves text bytes with bounded geometric growth" {
@@ -821,6 +949,7 @@ test "default snapshot budget contains the maximum structural projection" {
             .session = null,
             .id = @intCast(session_index + 1),
             .workspace_root = try workbench.copyBounded("", limits.max_workspace_bytes),
+            .title = try workbench.copyBounded("", limits.max_task_title_bytes),
             .runs = runs,
         };
     }

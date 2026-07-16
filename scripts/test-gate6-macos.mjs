@@ -209,20 +209,49 @@ try {
     );
   if (provider.error) throw provider.error;
 
+  await invokeBridge("metawork.tasks.rename", {
+    sessionId,
+    title: "Gate 6 release audit",
+  });
+  let metadataSnapshot = await snapshot();
+  let metadataSession = metadataSnapshot.sessions.find(
+    (item) => item.id === sessionId,
+  );
+  if (metadataSession?.title !== "Gate 6 release audit")
+    throw new Error("Task rename was not projected");
+  await invokeBridge("metawork.tasks.archive", {
+    sessionId,
+    archived: true,
+  });
+  metadataSnapshot = await snapshot();
+  metadataSession = metadataSnapshot.sessions.find(
+    (item) => item.id === sessionId,
+  );
+  if (metadataSession?.archived !== true)
+    throw new Error("Task archive was not projected");
+  await invokeBridge("metawork.tasks.archive", {
+    sessionId,
+    archived: false,
+  });
+
   const transport = await automate("snapshot");
   assertTransport(transport.stdout);
   await invokeBridge("metawork.sessions.close", { sessionId });
   await poll(
     async () => {
       const current = await snapshot();
-      return current.sessions.find((item) => item.id === sessionId)?.state ===
-        "closed"
+      return current.sessions.find((item) => item.id === sessionId)
+        ?.lifecycle === "closed"
         ? current
         : null;
     },
     commandTimeoutMs,
     "Session close",
   );
+  await invokeBridge("metawork.tasks.delete", { sessionId });
+  const afterDelete = await snapshot();
+  if (afterDelete.sessions.some((item) => item.id === sessionId))
+    throw new Error("Deleted Task record remained in the projection");
 
   await invokeBridge("native-sdk.window.close", { label: "main" });
   const final = await withTimeout(exited, commandTimeoutMs, "app stop");
@@ -232,7 +261,7 @@ try {
     throw new Error("normal runtime stop was not observed");
 
   process.stdout.write(
-    "Gate 6 macOS vertical passed: real bundle, Read/Bash/Edit, permission UI, reload-safe AskUserQuestion resume, terminal projection, async close.\n",
+    "Gate 6 macOS vertical passed: real bundle, Read/Bash/Edit, permission UI, reload-safe AskUserQuestion resume, Task metadata lifecycle, async close.\n",
   );
 } catch (error) {
   process.stderr.write(`${output}\n`);

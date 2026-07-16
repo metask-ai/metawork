@@ -11,6 +11,9 @@ export const commands = {
   cancel: "metawork.sessions.cancel",
   respondUi: "metawork.sessions.respondUi",
   closeSession: "metawork.sessions.close",
+  renameTask: "metawork.tasks.rename",
+  archiveTask: "metawork.tasks.archive",
+  deleteTask: "metawork.tasks.delete",
 } as const;
 
 export const events = {

@@ -15,6 +15,9 @@ pub const run = "metawork.sessions.run";
 pub const cancel = "metawork.sessions.cancel";
 pub const respond_ui = "metawork.sessions.respondUi";
 pub const close_session = "metawork.sessions.close";
+pub const rename_task = "metawork.tasks.rename";
+pub const archive_task = "metawork.tasks.archive";
+pub const delete_task = "metawork.tasks.delete";
 
 pub const product = [_][]const u8{
     ping,
@@ -29,6 +32,9 @@ pub const product = [_][]const u8{
     cancel,
     respond_ui,
     close_session,
+    rename_task,
+    archive_task,
+    delete_task,
 };
 
 pub const automation = product ++ [_][]const u8{ fixture_ack, fixture_fetch, fixture_emit };

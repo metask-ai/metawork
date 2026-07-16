@@ -10,6 +10,8 @@ import {
   assertDisconnected,
   assertRunAccepted,
   assertSignalAcknowledged,
+  assertTaskArchived,
+  assertTaskFlag,
   assertUiResponseAccepted,
   decodeGeneration,
   decodeHostSignalEvent,
@@ -145,6 +147,33 @@ export class HostClient {
     assertCloseAccepted(
       await this.bridge().invoke(commands.closeSession, { sessionId }),
       sessionId,
+    );
+  }
+
+  async renameTask(sessionId: string, title: string) {
+    assertTaskFlag(
+      await this.bridge().invoke(commands.renameTask, { sessionId, title }),
+      sessionId,
+      "renamed",
+    );
+  }
+
+  async setTaskArchived(sessionId: string, archived: boolean) {
+    assertTaskArchived(
+      await this.bridge().invoke(commands.archiveTask, {
+        sessionId,
+        archived,
+      }),
+      sessionId,
+      archived,
+    );
+  }
+
+  async deleteTask(sessionId: string) {
+    assertTaskFlag(
+      await this.bridge().invoke(commands.deleteTask, { sessionId }),
+      sessionId,
+      "deleted",
     );
   }
 }
