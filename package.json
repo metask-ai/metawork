@@ -24,7 +24,8 @@
     "test:agentcore-bundle": "node --test scripts/agentcore-bundle.test.mjs",
     "probe:agentcore": "node scripts/run-agentcore-probe.mjs",
     "test:host-lifecycle": "node scripts/run-host-lifecycle-tests.mjs",
-    "test:agentcore-sdk": "node scripts/run-agentcore-sdk-tests.mjs"
+    "test:agentcore-sdk": "node scripts/run-agentcore-sdk-tests.mjs",
+    "test:gate5:macos": "npm run build:frontend && native build . --yes -Doptimize=Debug -Dautomation=true && node scripts/test-gate5-macos.mjs"
   },
   "devDependencies": {
     "@native-sdk/cli": "0.5.1",

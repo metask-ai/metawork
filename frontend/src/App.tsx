@@ -6,6 +6,34 @@ type HostSignal = {
   origin: string;
   onMainThread: boolean;
   requestBytes?: number;
+  automation?: boolean;
+};
+
+type AgentBatchItem = {
+  sessionId: string;
+  runId: string;
+  sequence: string;
+  event?: unknown;
+  object?: { id: string; bytes: number };
+};
+
+type AgentBatch = {
+  generation: string;
+  items: AgentBatchItem[];
+};
+
+type AgentObject = {
+  generation: string;
+  sessionId: string;
+  runId: string;
+  sequence: string;
+  event: unknown;
+};
+
+type AgentStats = {
+  generation: string;
+  received: number;
+  objects: number;
 };
 
 type TraceEntry = HostSignal & {
@@ -17,6 +45,12 @@ type TraceEntry = HostSignal & {
 const bridgeCommand = "metawork.smoke.ping";
 const hostEvent = "metawork:host-signal";
 const eventAckCommand = "metawork.smoke.eventAck";
+const agentEvent = "metawork:agent-events";
+const agentConnectCommand = "metawork.events.connect";
+const agentDisconnectCommand = "metawork.events.disconnect";
+const agentAckCommand = "metawork.events.ack";
+const agentFetchCommand = "metawork.events.fetch";
+const gate5FixtureCommand = "metawork.gate5.emitFixture";
 
 function errorText(error: unknown) {
   if (error instanceof Error) return error.message;
@@ -29,8 +63,17 @@ export default function App() {
   const [busy, setBusy] = useState<string | null>(null);
   const [result, setResult] = useState("Waiting for the native shell.");
   const [childWindowId, setChildWindowId] = useState<number | null>(null);
+  const [automationMode, setAutomationMode] = useState(false);
+  const [agentStats, setAgentStats] = useState<AgentStats>({
+    generation: "0",
+    received: 0,
+    objects: 0,
+  });
   const traceId = useRef(0);
   const didAutoPing = useRef(false);
+  const didGate5Fixture = useRef(false);
+  const agentGeneration = useRef("0");
+  const agentChain = useRef(Promise.resolve());
 
   const appendTrace = useCallback(
     (direction: TraceEntry["direction"], signal: HostSignal) => {
@@ -79,6 +122,7 @@ export default function App() {
       );
       setResult(`Host answered on sequence ${response.sequence}.`);
       setBridgeReady(true);
+      setAutomationMode(response.automation === true);
     } catch (error) {
       setResult(`Bridge failed: ${errorText(error)}`);
     } finally {
@@ -107,6 +151,123 @@ export default function App() {
     }
     return unsubscribe;
   }, [appendTrace, runPing]);
+
+  useEffect(() => {
+    const zero = window.zero;
+    if (!zero) return;
+    let cancelled = false;
+
+    const consumeBatch = async (batch: AgentBatch) => {
+      if (
+        agentGeneration.current === "0" ||
+        batch.generation !== agentGeneration.current
+      )
+        return;
+      let received = 0;
+      let objects = 0;
+      for (const item of batch.items) {
+        if (batch.generation !== agentGeneration.current) return;
+        const hasInline = Object.prototype.hasOwnProperty.call(item, "event");
+        const hasObject = item.object !== undefined;
+        if (hasInline === hasObject)
+          throw new Error("Agent event envelope must contain one payload");
+        if (item.object) {
+          const fetched = await zero.invoke<AgentObject>(agentFetchCommand, {
+            generation: batch.generation,
+            sessionId: item.sessionId,
+            runId: item.runId,
+            objectId: item.object.id,
+          });
+          if (
+            fetched.generation !== batch.generation ||
+            fetched.sessionId !== item.sessionId ||
+            fetched.runId !== item.runId ||
+            fetched.sequence !== item.sequence
+          )
+            throw new Error("Fetched Agent event identity mismatch");
+          objects += 1;
+        }
+        await zero.invoke(agentAckCommand, {
+          generation: batch.generation,
+          sessionId: item.sessionId,
+          runId: item.runId,
+          sequence: item.sequence,
+        });
+        received += 1;
+      }
+      if (received === 0) return;
+      setAgentStats((current) => {
+        const next = {
+          generation: batch.generation,
+          received:
+            current.generation === batch.generation
+              ? current.received + received
+              : received,
+          objects:
+            current.generation === batch.generation
+              ? current.objects + objects
+              : objects,
+        };
+        sessionStorage.setItem(
+          "metawork:agent-transport",
+          JSON.stringify(next),
+        );
+        return next;
+      });
+      setResult(
+        `Agent transport acknowledged ${received} event${received === 1 ? "" : "s"}.`,
+      );
+    };
+
+    const unsubscribe = zero.on<AgentBatch>(agentEvent, (batch) => {
+      agentChain.current = agentChain.current
+        .then(() => consumeBatch(batch))
+        .catch((error) => {
+          setResult(`Agent event delivery failed: ${errorText(error)}`);
+        });
+    });
+
+    void zero
+      .invoke<{ generation: string }>(agentConnectCommand, {})
+      .then(({ generation }) => {
+        if (cancelled) return;
+        agentGeneration.current = generation;
+        setAgentStats({ generation, received: 0, objects: 0 });
+      })
+      .catch((error) => {
+        if (!cancelled)
+          setResult(`Agent event connection failed: ${errorText(error)}`);
+      });
+
+    const onPageHide = () => {
+      const generation = agentGeneration.current;
+      if (generation === "0") return;
+      void zero
+        .invoke(agentDisconnectCommand, { generation })
+        .catch(() => undefined);
+    };
+    window.addEventListener("pagehide", onPageHide);
+    return () => {
+      cancelled = true;
+      unsubscribe();
+      window.removeEventListener("pagehide", onPageHide);
+    };
+  }, []);
+
+  useEffect(() => {
+    const zero = window.zero;
+    if (
+      !zero ||
+      !automationMode ||
+      agentStats.generation === "0" ||
+      didGate5Fixture.current
+    )
+      return;
+    didGate5Fixture.current = true;
+    void zero.invoke(gate5FixtureCommand, {}).catch((error) => {
+      setResult(`Gate 5 fixture failed: ${errorText(error)}`);
+    });
+  }, [agentStats.generation, automationMode]);
 
   const previousSequence = useMemo(
     () => sessionStorage.getItem("metawork:last-host-sequence") ?? "none",
@@ -195,7 +356,7 @@ export default function App() {
                 className={`h-2.5 w-2.5 rounded-full ${bridgeReady ? "bg-ok shadow-[0_0_16px_#5ee6a8]" : "bg-warn"}`}
               />
               <span className="font-mono text-[11px] tracking-[0.24em] text-mist uppercase whitespace-nowrap">
-                Phase 0 / Gate 0
+                Phase 0 / Gate 5
               </span>
             </div>
             <span className="hidden font-mono text-[11px] text-steel sm:inline">
@@ -214,8 +375,8 @@ export default function App() {
             </h1>
             <p className="mt-10 max-w-2xl text-base leading-7 text-mist sm:text-lg">
               This shell proves that trusted React chrome can call Zig, receive
-              an explicit response, and accept a native event without inventing
-              an AgentCore protocol.
+              bounded Host batches, resolve oversized event objects, and
+              acknowledge delivery without inventing an AgentCore protocol.
             </p>
           </div>
 
@@ -252,6 +413,12 @@ export default function App() {
               active={bridgeReady}
             />
             <Status label="Before reload" value={previousSequence} />
+            <Status
+              label="Agent events"
+              value={String(agentStats.received)}
+              active={agentStats.received > 0}
+            />
+            <Status label="Object refs" value={String(agentStats.objects)} />
           </div>
 
           <div className="relative min-h-[280px] flex-1 overflow-y-auto py-6 pl-7">

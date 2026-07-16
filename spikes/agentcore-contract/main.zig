@@ -40,6 +40,8 @@ const UiMode = enum { answered, unavailable, fatal };
 
 const Probe = struct {
     event_calls: usize = 0,
+    event_bytes: usize = 0,
+    max_event_bytes: usize = 0,
     ui_calls: usize = 0,
     ui_releases: usize = 0,
     saw_read: bool = false,
@@ -56,6 +58,8 @@ const Probe = struct {
         var parsed = sdk.decodeCoreEvent(std.heap.c_allocator, json) catch return wire.CALLBACK_FATAL;
         defer parsed.deinit();
         self.event_calls += 1;
+        self.event_bytes += json.len;
+        self.max_event_bytes = @max(self.max_event_bytes, json.len);
         switch (parsed.value) {
             .tool_result => |result| {
                 if (std.mem.eql(u8, result.name, "Read") and
@@ -152,7 +156,10 @@ pub fn main(init: std.process.Init) !void {
     var file_buffer: [320]u8 = undefined;
     const file_path = try std.fmt.bufPrintZ(&file_buffer, "{s}/fixture.txt", .{root});
     defer _ = std.c.unlink(file_path.ptr);
-    try writeFile(file_path.ptr, "gate1-before");
+    const fixture = try allocator.alloc(u8, 12 * 1024);
+    @memset(fixture, 'x');
+    @memcpy(fixture[0.."gate1-before".len], "gate1-before");
+    try writeFile(file_path.ptr, fixture);
 
     const read_sse = try readSse(allocator, file_path);
     const edit_sse = try editSse(allocator, file_path);
@@ -242,7 +249,12 @@ pub fn main(init: std.process.Init) !void {
         return error.MissingCoreEvent;
     if (probe.ui_calls == 0 or probe.ui_calls != probe.ui_releases)
         return error.UiOwnershipMismatch;
-    try expectFile(file_path.ptr, "gate1-after");
+    std.debug.print(
+        "MetaWork AgentCore trace: events={d} bytes={d} max_event_bytes={d}\n",
+        .{ probe.event_calls, probe.event_bytes, probe.max_event_bytes },
+    );
+    if (probe.max_event_bytes <= 8 * 1024) return error.MissingOversizedEventEvidence;
+    try expectFilePrefix(file_path.ptr, "gate1-after");
 
     try expectStatus(
         wire.STATUS_TOO_LATE,
@@ -286,7 +298,6 @@ fn verifyFormalHost(io: std.Io, raw_api: *const wire.ApiV1, root: []const u8) !v
         .worker_count = 1,
         .queue_capacity = 2,
         .max_sessions = 1,
-        .event_capacity = 64,
     });
     defer {
         host.shutdown() catch unreachable;
@@ -578,13 +589,13 @@ fn writeFile(path: [*:0]const u8, content: []const u8) !void {
     if (std.c.write(file, content.ptr, content.len) != content.len) return error.WriteFailed;
 }
 
-fn expectFile(path: [*:0]const u8, expected: []const u8) !void {
+fn expectFilePrefix(path: [*:0]const u8, expected: []const u8) !void {
     const file = std.c.open(path, std.c.O{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
     if (file < 0) return error.OpenFailed;
     defer _ = std.c.close(file);
     var buffer: [128]u8 = undefined;
     const count = std.c.read(file, &buffer, buffer.len);
-    if (count < 0 or !std.mem.eql(u8, buffer[0..@intCast(count)], expected))
+    if (count < expected.len or !std.mem.eql(u8, buffer[0..expected.len], expected))
         return error.UnexpectedFileContent;
 }
 

@@ -1,7 +1,69 @@
 const std = @import("std");
 const lifecycle = @import("host_lifecycle");
+const event_pump = @import("event_pump");
+const bridge_delivery = @import("bridge_delivery");
 const sdk = @import("metacodes_agentcore");
 const wire = sdk.types;
+
+fn pumpEnvelope(session_id: u64, run_id: u64, json: []const u8) !event_pump.EventEnvelope {
+    const owned_json = try std.testing.allocator.dupe(u8, json);
+    errdefer std.testing.allocator.free(owned_json);
+    return .{
+        .session_id = session_id,
+        .run_id = run_id,
+        .encoded_bytes = json.len,
+        .json = owned_json,
+        .event = try sdk.decodeCoreEvent(std.testing.allocator, json),
+        .allocator = std.testing.allocator,
+    };
+}
+
+const PumpEnqueueContext = struct {
+    pump: *event_pump.EventPump,
+    envelope: event_pump.EventEnvelope,
+    timeout: std.Io.Duration,
+    succeeded: bool = false,
+    failure: ?event_pump.Error = null,
+};
+
+fn enqueuePumpOnThread(context: *PumpEnqueueContext) void {
+    context.pump.enqueueWithDeadline(context.envelope, context.timeout) catch |err| {
+        context.failure = err;
+        return;
+    };
+    context.succeeded = true;
+}
+
+fn ingestPumpEvent(delivery: *bridge_delivery.Delivery, pump: *event_pump.EventPump) !void {
+    var envelope = pump.takeFair().?;
+    const input = bridge_delivery.InputEvent{
+        .session_id = envelope.session_id,
+        .run_id = envelope.run_id,
+        .json = envelope.json,
+        .allocator = envelope.allocator,
+    };
+    envelope.event.deinit();
+    envelope = undefined;
+    delivery.ingest(input) catch |err| {
+        var owned = input;
+        owned.deinit();
+        return err;
+    };
+}
+
+fn deliveryInput(
+    allocator: std.mem.Allocator,
+    session_id: u64,
+    run_id: u64,
+    json: []const u8,
+) !bridge_delivery.InputEvent {
+    return .{
+        .session_id = session_id,
+        .run_id = run_id,
+        .json = try allocator.dupe(u8, json),
+        .allocator = allocator,
+    };
+}
 
 const Plan = enum {
     immediate,
@@ -655,6 +717,9 @@ test "typed Core events are deep-copied into a bounded routed sink" {
         .queue_capacity = 1,
         .max_sessions = 1,
         .event_capacity = 2,
+        .per_session_event_capacity = 2,
+        .control_reserved_capacity = 0,
+        .per_session_control_reserved_capacity = 0,
     });
     defer {
         host.shutdown() catch unreachable;
@@ -677,6 +742,7 @@ test "typed Core events are deep-copied into a bounded routed sink" {
     defer envelope.deinit();
     try std.testing.expect(envelope.session_id != 0);
     try std.testing.expectEqual(first_run, envelope.run_id);
+    try std.testing.expectEqualStrings("{\"text_chunk\":\"typed event\"}", envelope.json);
     try std.testing.expectEqualStrings("typed event", envelope.event.value.text_chunk);
     var second = host.takeEvent().?;
     try std.testing.expectEqual(second_run, second.run_id);
@@ -692,6 +758,9 @@ test "bounded event sink overflow returns callback fatal and preserves HostCause
         .queue_capacity = 1,
         .max_sessions = 1,
         .event_capacity = 1,
+        .per_session_event_capacity = 1,
+        .control_reserved_capacity = 0,
+        .per_session_control_reserved_capacity = 0,
     });
     defer {
         host.shutdown() catch unreachable;
@@ -880,7 +949,7 @@ test "concurrent close waits for callback quiescence and destroys once" {
         host.deinit();
     }
     const session = try openSession(host);
-    try std.testing.expect(session.retainCallback());
+    try std.testing.expect(session.retainReference());
     const first = try std.Thread.spawn(.{}, closeOnThread, .{session});
     try session.waitForState(.closing);
     const second = try std.Thread.spawn(.{}, closeOnThread, .{session});
@@ -889,7 +958,7 @@ test "concurrent close waits for callback quiescence and destroys once" {
     const destroys_while_retained = fake_core.session_destroyed;
     fake_core.unlock();
     try std.testing.expectEqual(@as(usize, 0), destroys_while_retained);
-    session.releaseCallback();
+    session.releaseReference();
     first.join();
     second.join();
     fake_core.lock();
@@ -1059,13 +1128,13 @@ test "concurrent Host shutdown serializes executor and Runtime destruction" {
     const host = try createHost(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 2 });
     const session = try openSession(host);
     const not_yet_closed = try openSession(host);
-    try std.testing.expect(session.retainCallback());
+    try std.testing.expect(session.retainReference());
     const first = try std.Thread.spawn(.{}, shutdownOnThread, .{host});
     try session.waitForState(.closing);
     try std.testing.expectError(error.HostShuttingDown, not_yet_closed.submit("too late"));
     const second = try std.Thread.spawn(.{}, shutdownOnThread, .{host});
     std.Thread.yield() catch {};
-    session.releaseCallback();
+    session.releaseReference();
     first.join();
     second.join();
     host.deinit();
@@ -1080,7 +1149,7 @@ test "concurrent Host shutdown serializes executor and Runtime destruction" {
 
 test "Host initialization OOM destroys the already-created Runtime" {
     fake_core.reset();
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 3 });
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 4 });
     try std.testing.expectError(error.OutOfMemory, lifecycle.Host.init(
         std.testing.io,
         failing.allocator(),
@@ -1117,5 +1186,444 @@ test "Session creation OOM leaves Host reusable and credential Host-only" {
     const snapshot = session.snapshot();
     try std.testing.expectEqualStrings("/tmp/metawork-gate2", snapshot.workspace_root);
     try std.testing.expect(fake_core.credential_seen);
+    try session.close(.session_close);
+}
+
+test "Gate 5 event pump preserves per-Session order with round-robin fairness" {
+    var pump = try event_pump.EventPump.init(std.testing.io, std.testing.allocator, .{
+        .global_count = 8,
+        .global_bytes = 4096,
+        .global_control_reserved_count = 2,
+        .global_control_reserved_bytes = 512,
+        .per_session_count = 4,
+        .per_session_bytes = 2048,
+        .per_session_control_reserved_count = 1,
+        .per_session_control_reserved_bytes = 256,
+        .session_slots = 2,
+    });
+    defer pump.deinit();
+
+    try pump.enqueue(try pumpEnvelope(1, 1, "{\"text_chunk\":\"one\"}"));
+    try pump.enqueue(try pumpEnvelope(1, 1, "{\"text_chunk\":\"two\"}"));
+    try pump.enqueue(try pumpEnvelope(2, 1, "{\"text_chunk\":\"other\"}"));
+
+    var first = pump.takeFair().?;
+    defer first.deinit();
+    var second = pump.takeFair().?;
+    defer second.deinit();
+    var third = pump.takeFair().?;
+    defer third.deinit();
+    try std.testing.expectEqual(@as(u64, 1), first.session_id);
+    try std.testing.expectEqualStrings("one", first.event.value.text_chunk);
+    try std.testing.expectEqual(@as(u64, 2), second.session_id);
+    try std.testing.expectEqualStrings("other", second.event.value.text_chunk);
+    try std.testing.expectEqual(@as(u64, 1), third.session_id);
+    try std.testing.expectEqualStrings("two", third.event.value.text_chunk);
+    try std.testing.expectEqual(@as(usize, 0), pump.stats().count);
+}
+
+test "Gate 5 data cannot consume reserved control capacity" {
+    var pump = try event_pump.EventPump.init(std.testing.io, std.testing.allocator, .{
+        .global_count = 4,
+        .global_bytes = 1024,
+        .global_control_reserved_count = 1,
+        .global_control_reserved_bytes = 128,
+        .per_session_count = 4,
+        .per_session_bytes = 1024,
+        .per_session_control_reserved_count = 1,
+        .per_session_control_reserved_bytes = 128,
+        .session_slots = 1,
+    });
+    defer pump.deinit();
+
+    try pump.enqueue(try pumpEnvelope(1, 1, "{\"text_chunk\":\"a\"}"));
+    try pump.enqueue(try pumpEnvelope(1, 1, "{\"text_chunk\":\"b\"}"));
+    try pump.enqueue(try pumpEnvelope(1, 1, "{\"text_chunk\":\"c\"}"));
+    var rejected = try pumpEnvelope(1, 1, "{\"text_chunk\":\"d\"}");
+    try std.testing.expectError(error.GlobalCapacity, pump.enqueue(rejected));
+    rejected.deinit();
+    try pump.enqueue(try pumpEnvelope(1, 1, "{\"stream_done\":{}}"));
+    const stats = pump.stats();
+    try std.testing.expectEqual(@as(usize, 4), stats.count);
+    try std.testing.expectEqual(@as(usize, 3), stats.data_count);
+}
+
+test "Gate 5 queues reject zero sentinel identities" {
+    var pump = try event_pump.EventPump.init(std.testing.io, std.testing.allocator, .{
+        .global_count = 2,
+        .global_bytes = 512,
+        .global_control_reserved_count = 0,
+        .global_control_reserved_bytes = 0,
+        .per_session_count = 2,
+        .per_session_bytes = 512,
+        .per_session_control_reserved_count = 0,
+        .per_session_control_reserved_bytes = 0,
+        .session_slots = 1,
+    });
+    defer pump.deinit();
+    var invalid_pump = try pumpEnvelope(0, 1, "{\"text_chunk\":\"invalid\"}");
+    try std.testing.expectError(error.InvalidIdentity, pump.enqueue(invalid_pump));
+    invalid_pump.deinit();
+
+    var delivery = try bridge_delivery.Delivery.init(std.testing.allocator, .{
+        .inline_event_bytes = 64,
+        .batch_count = 1,
+        .batch_bytes = 256,
+        .batch_sessions = 1,
+        .batch_per_session = 1,
+        .retention_count = 1,
+        .retention_bytes = 128,
+        .retention_ns = 100,
+        .object_count = 1,
+        .object_bytes = 64,
+        .per_session_object_count = 1,
+        .per_session_object_bytes = 64,
+        .max_object_bytes = 64,
+        .route_slots = 1,
+    });
+    defer delivery.deinit();
+    var invalid_delivery = try deliveryInput(std.testing.allocator, 1, 0, "{}");
+    try std.testing.expectError(error.InvalidIdentity, delivery.ingest(invalid_delivery));
+    invalid_delivery.deinit();
+}
+
+test "Gate 5 delivery rejects configurations that cannot fit an inline envelope" {
+    try std.testing.expectError(
+        error.InvalidLimits,
+        bridge_delivery.Delivery.init(std.testing.allocator, .{
+            .inline_event_bytes = 97,
+            .batch_count = 1,
+            .batch_bytes = 256,
+            .batch_sessions = 1,
+            .batch_per_session = 1,
+            .retention_count = 1,
+            .retention_bytes = 256,
+            .retention_ns = 100,
+            .object_count = 1,
+            .object_bytes = 128,
+            .per_session_object_count = 1,
+            .per_session_object_bytes = 128,
+            .max_object_bytes = 128,
+            .route_slots = 1,
+        }),
+    );
+}
+
+test "Gate 5 delivery batches inline events and generation-bound object references" {
+    var pump = try event_pump.EventPump.init(std.testing.io, std.testing.allocator, .{
+        .global_count = 8,
+        .global_bytes = 4096,
+        .global_control_reserved_count = 2,
+        .global_control_reserved_bytes = 512,
+        .per_session_count = 8,
+        .per_session_bytes = 4096,
+        .per_session_control_reserved_count = 2,
+        .per_session_control_reserved_bytes = 512,
+        .session_slots = 1,
+    });
+    defer pump.deinit();
+    var delivery = try bridge_delivery.Delivery.init(std.testing.allocator, .{
+        .inline_event_bytes = 64,
+        .batch_count = 4,
+        .batch_bytes = 512,
+        .batch_sessions = 1,
+        .batch_per_session = 4,
+        .retention_count = 8,
+        .retention_bytes = 4096,
+        .retention_ns = 100,
+        .object_count = 2,
+        .object_bytes = 2048,
+        .per_session_object_count = 2,
+        .per_session_object_bytes = 2048,
+        .max_object_bytes = 1024,
+        .route_slots = 1,
+    });
+    defer delivery.deinit();
+
+    try pump.enqueue(try pumpEnvelope(1, 7, "{\"text_chunk\":\"small\"}"));
+    const large =
+        "{\"text_chunk\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"}";
+    try pump.enqueue(try pumpEnvelope(1, 7, large));
+    try ingestPumpEvent(&delivery, &pump);
+    try ingestPumpEvent(&delivery, &pump);
+    const first_generation = try delivery.connect();
+    var first_batch = (try delivery.buildBatch(first_generation)).?;
+    defer first_batch.deinit();
+    try std.testing.expectEqual(@as(usize, 2), first_batch.item_count);
+    try std.testing.expect(std.mem.indexOf(u8, first_batch.json, "\"generation\":\"1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first_batch.json, "\"event\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first_batch.json, "\"object\":{\"id\":\"1\"") != null);
+    var fetch_buffer: [2048]u8 = undefined;
+    try std.testing.expectError(
+        error.UnknownObject,
+        delivery.fetchObject(first_generation, 1, 7, 1, &fetch_buffer),
+    );
+    var uncommitted_retry = (try delivery.buildBatch(first_generation)).?;
+    defer uncommitted_retry.deinit();
+    try std.testing.expectEqual(@as(usize, 2), uncommitted_retry.item_count);
+    try delivery.commitBatch(&first_batch);
+
+    const fetched = try delivery.fetchObject(first_generation, 1, 7, 1, &fetch_buffer);
+    try std.testing.expect(std.mem.indexOf(u8, fetched, large) != null);
+    try delivery.acknowledge(first_generation, 1, 7, 1);
+    try delivery.acknowledge(first_generation, 1, 7, 1);
+    try std.testing.expectEqual(@as(usize, 1), delivery.stats().retained_count);
+    try std.testing.expectError(
+        error.OutOfOrderAcknowledgement,
+        delivery.acknowledge(first_generation, 1, 7, 3),
+    );
+    try delivery.detach(first_generation, 10);
+    const second_generation = try delivery.connect();
+    try std.testing.expectError(
+        error.StaleConnection,
+        delivery.fetchObject(first_generation, 1, 7, 1, &fetch_buffer),
+    );
+    var replay = (try delivery.buildBatch(second_generation)).?;
+    defer replay.deinit();
+    try std.testing.expectEqual(@as(usize, 1), replay.item_count);
+    try delivery.commitBatch(&replay);
+    try std.testing.expect(delivery.firstExpired(100) == null);
+    try delivery.detach(second_generation, 100);
+    try std.testing.expect(delivery.firstExpired(199) == null);
+    const expired = delivery.firstExpired(200).?;
+    try std.testing.expectEqual(@as(u64, 1), expired.session_id);
+    try std.testing.expectEqual(@as(u64, 7), expired.run_id);
+    const third_generation = try delivery.connect();
+    var final_replay = (try delivery.buildBatch(third_generation)).?;
+    defer final_replay.deinit();
+    try delivery.commitBatch(&final_replay);
+    delivery.cleanupRun(1, 7);
+    try std.testing.expectError(
+        error.UnknownObject,
+        delivery.fetchObject(third_generation, 1, 7, 1, &fetch_buffer),
+    );
+}
+
+test "Gate 5 delivery enforces retention and object budgets and releases on acknowledgement" {
+    var delivery = try bridge_delivery.Delivery.init(std.testing.allocator, .{
+        .inline_event_bytes = 16,
+        .batch_count = 2,
+        .batch_bytes = 256,
+        .batch_sessions = 1,
+        .batch_per_session = 2,
+        .retention_count = 2,
+        .retention_bytes = 256,
+        .retention_ns = 100,
+        .object_count = 1,
+        .object_bytes = 128,
+        .per_session_object_count = 1,
+        .per_session_object_bytes = 128,
+        .max_object_bytes = 128,
+        .route_slots = 1,
+    });
+    defer delivery.deinit();
+
+    const object_json = "{\"payload\":\"xxxxxxxxxxxxxxxx\"}";
+    try delivery.ingest(try deliveryInput(std.testing.allocator, 1, 1, object_json));
+    var rejected_object = try deliveryInput(std.testing.allocator, 1, 1, object_json);
+    try std.testing.expectError(error.ObjectCapacity, delivery.ingest(rejected_object));
+    rejected_object.deinit();
+    try delivery.ingest(try deliveryInput(std.testing.allocator, 1, 1, "{}"));
+    var rejected_retention = try deliveryInput(std.testing.allocator, 1, 1, "{}");
+    try std.testing.expectError(error.RetentionCapacity, delivery.ingest(rejected_retention));
+    rejected_retention.deinit();
+
+    const generation = try delivery.connect();
+    var batch = (try delivery.buildBatch(generation)).?;
+    defer batch.deinit();
+    try delivery.commitBatch(&batch);
+    try delivery.acknowledge(generation, 1, 1, 1);
+    const after_object_ack = delivery.stats();
+    try std.testing.expectEqual(@as(usize, 1), after_object_ack.retained_count);
+    try std.testing.expectEqual(@as(usize, 0), after_object_ack.object_count);
+    try std.testing.expectEqual(@as(usize, 0), after_object_ack.object_bytes);
+    try delivery.acknowledge(generation, 1, 1, 2);
+    try std.testing.expectEqual(@as(usize, 0), delivery.stats().retained_count);
+}
+
+test "Gate 5 delivery batch is byte bounded and fair across Sessions" {
+    var delivery = try bridge_delivery.Delivery.init(std.testing.allocator, .{
+        .inline_event_bytes = 64,
+        .batch_count = 4,
+        .batch_bytes = 512,
+        .batch_sessions = 2,
+        .batch_per_session = 2,
+        .retention_count = 8,
+        .retention_bytes = 4096,
+        .retention_ns = 100,
+        .object_count = 2,
+        .object_bytes = 512,
+        .per_session_object_count = 1,
+        .per_session_object_bytes = 256,
+        .max_object_bytes = 256,
+        .route_slots = 3,
+    });
+    defer delivery.deinit();
+    for (0..3) |_| try delivery.ingest(try deliveryInput(std.testing.allocator, 1, 1, "{}"));
+    for (0..2) |_| try delivery.ingest(try deliveryInput(std.testing.allocator, 2, 1, "{}"));
+    try delivery.ingest(try deliveryInput(std.testing.allocator, 3, 1, "{}"));
+
+    const generation = try delivery.connect();
+    var first = (try delivery.buildBatch(generation)).?;
+    defer first.deinit();
+    try std.testing.expectEqual(@as(usize, 4), first.item_count);
+    try std.testing.expect(first.json.len <= 512);
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, first.json, "\"sessionId\":\"1\""));
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, first.json, "\"sessionId\":\"2\""));
+    try delivery.commitBatch(&first);
+    var second = (try delivery.buildBatch(generation)).?;
+    defer second.deinit();
+    try std.testing.expectEqual(@as(usize, 2), second.item_count);
+    try std.testing.expect(std.mem.indexOf(u8, second.json, "\"sessionId\":\"3\"") != null);
+    try delivery.commitBatch(&second);
+}
+
+test "Gate 5 delivery OOM does not mark an event sent" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var delivery = try bridge_delivery.Delivery.init(failing.allocator(), .{
+        .inline_event_bytes = 64,
+        .batch_count = 1,
+        .batch_bytes = 256,
+        .batch_sessions = 1,
+        .batch_per_session = 1,
+        .retention_count = 1,
+        .retention_bytes = 128,
+        .retention_ns = 100,
+        .object_count = 1,
+        .object_bytes = 64,
+        .per_session_object_count = 1,
+        .per_session_object_bytes = 64,
+        .max_object_bytes = 64,
+        .route_slots = 1,
+    });
+    defer delivery.deinit();
+    try delivery.ingest(try deliveryInput(std.testing.allocator, 1, 1, "{}"));
+    const generation = try delivery.connect();
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, delivery.buildBatch(generation));
+    try std.testing.expect(failing.has_induced_failure);
+    failing.fail_index = std.math.maxInt(usize);
+    var retry = (try delivery.buildBatch(generation)).?;
+    defer retry.deinit();
+    try std.testing.expectEqual(@as(usize, 1), retry.item_count);
+}
+
+test "Gate 5 delivery rejects a batch built by another owner" {
+    const limits = bridge_delivery.Limits{
+        .inline_event_bytes = 64,
+        .batch_count = 1,
+        .batch_bytes = 256,
+        .batch_sessions = 1,
+        .batch_per_session = 1,
+        .retention_count = 1,
+        .retention_bytes = 128,
+        .retention_ns = 100,
+        .object_count = 1,
+        .object_bytes = 64,
+        .per_session_object_count = 1,
+        .per_session_object_bytes = 64,
+        .max_object_bytes = 64,
+        .route_slots = 1,
+    };
+    var first = try bridge_delivery.Delivery.init(std.testing.allocator, limits);
+    defer first.deinit();
+    var second = try bridge_delivery.Delivery.init(std.testing.allocator, limits);
+    defer second.deinit();
+    try first.ingest(try deliveryInput(std.testing.allocator, 1, 1, "{}"));
+    const generation = try first.connect();
+    _ = try second.connect();
+    var batch = (try first.buildBatch(generation)).?;
+    defer batch.deinit();
+    try std.testing.expectError(error.ForeignBatch, second.commitBatch(&batch));
+    try first.commitBatch(&batch);
+}
+
+test "Gate 5 text chunks remain byte lossless through the event pump" {
+    var pump = try event_pump.EventPump.init(std.testing.io, std.testing.allocator, .{
+        .global_count = 4,
+        .global_bytes = 1024,
+        .global_control_reserved_count = 1,
+        .global_control_reserved_bytes = 128,
+        .per_session_count = 4,
+        .per_session_bytes = 1024,
+        .per_session_control_reserved_count = 1,
+        .per_session_control_reserved_bytes = 128,
+        .session_slots = 1,
+    });
+    defer pump.deinit();
+    try pump.enqueue(try pumpEnvelope(1, 1, "{\"text_chunk\":\"hello \"}"));
+    try pump.enqueue(try pumpEnvelope(1, 1, "{\"text_chunk\":\"世界\"}"));
+    try pump.enqueue(try pumpEnvelope(1, 1, "{\"text_chunk\":\"!\"}"));
+    var storage: [64]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&storage);
+    while (pump.takeFair()) |value| {
+        var event = value;
+        try writer.writeAll(event.event.value.text_chunk);
+        event.deinit();
+    }
+    try std.testing.expectEqualStrings("hello 世界!", writer.buffered());
+}
+
+test "Gate 5 enqueue waits for a slow consumer and fails at the hard deadline" {
+    var pump = try event_pump.EventPump.init(std.testing.io, std.testing.allocator, .{
+        .global_count = 1,
+        .global_bytes = 1024,
+        .global_control_reserved_count = 0,
+        .global_control_reserved_bytes = 0,
+        .per_session_count = 1,
+        .per_session_bytes = 1024,
+        .per_session_control_reserved_count = 0,
+        .per_session_control_reserved_bytes = 0,
+        .session_slots = 1,
+    });
+    defer pump.deinit();
+    try pump.enqueue(try pumpEnvelope(1, 1, "{\"text_chunk\":\"first\"}"));
+    var context = PumpEnqueueContext{
+        .pump = &pump,
+        .envelope = try pumpEnvelope(1, 1, "{\"text_chunk\":\"second\"}"),
+        .timeout = .fromSeconds(1),
+    };
+    const thread = try std.Thread.spawn(.{}, enqueuePumpOnThread, .{&context});
+    try std.testing.io.sleep(.fromMilliseconds(20), .awake);
+    var first = pump.takeFair().?;
+    first.deinit();
+    thread.join();
+    try std.testing.expect(context.succeeded);
+    try std.testing.expect(context.failure == null);
+    var second = pump.takeFair().?;
+    second.deinit();
+
+    try pump.enqueue(try pumpEnvelope(1, 1, "{\"text_chunk\":\"third\"}"));
+    var timed_out = try pumpEnvelope(1, 1, "{\"text_chunk\":\"fourth\"}");
+    try std.testing.expectError(
+        error.DeadlineExceeded,
+        pump.enqueueWithDeadline(timed_out, .fromMilliseconds(5)),
+    );
+    timed_out.deinit();
+    var third = pump.takeFair().?;
+    third.deinit();
+}
+
+test "Gate 5 post-callback pipeline failure aborts the routed Run as failed" {
+    fake_core.reset();
+    fake_core.setNextPlan(.controlled);
+    const host = try createHost(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
+    defer {
+        host.shutdown() catch unreachable;
+        host.deinit();
+    }
+    const session = try openSession(host);
+    const run_id = try session.submit("fail after callback returned");
+    try session.waitForState(.running);
+    const session_id = session.snapshot().session_id;
+    try host.failRun(session_id, run_id, .bridge_pipeline_failure);
+    try session.waitRun(run_id);
+    const snapshot = session.snapshot();
+    try std.testing.expectEqual(
+        @as(?lifecycle.HostCause, .bridge_pipeline_failure),
+        snapshot.cause,
+    );
+    try std.testing.expectEqual(@as(?lifecycle.RunOutcome, .failed), snapshot.last_outcome);
+    try std.testing.expectEqual(@as(?u32, wire.STATUS_OK), snapshot.last_abort_status);
     try session.close(.session_close);
 }

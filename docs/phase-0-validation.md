@@ -1,6 +1,6 @@
 # MetaWork Phase 0 验证计划
 
-> 状态：执行中；Gate 0 至 Gate 4 已通过
+> 状态：执行中；Gate 0 至 Gate 5 已通过
 > 平台：Phase 0A macOS-first；Phase 0B 后续验证 Windows
 
 Phase 0 用最小真实原型验证技术栈和关键风险，不交付完整产品。当前 AgentCore bundle 是 experimental ABI revision 1，同步 baseline 不包含 async suspend/resume、跨进程恢复、strict Workspace security 或正式 Host tools。
@@ -279,9 +279,11 @@ AGENTCORE_BUNDLE_ROOT=/absolute/path/to/validated/bundle \
   npm run probe:agentcore
 ```
 
-当前 sink 只提供 Gate 4 所需的全局 event count 和单 event bytes 硬上限。per-Session count/bytes、公平轮转、control reserve、text merge、Bridge batch 和 reload retention 仍属于 Gate 5，不能根据 Gate 4 通过推断它们已经存在。
+Gate 4 通过时的 sink 只提供全局 event count 和单 event bytes 硬上限；当前实现已在 Gate 5 将它替换为有界 Event pump。历史 Gate 4 结论仍不得用来反推 Gate 5 已经通过，Gate 5 的独立证据见下节报告。
 
 ## 10. Gate 5：Event pump 与 Bridge
+
+> 状态：已通过。容量输入见 [Gate 5 Event pump 容量测量与实现规格](phase-0-gate-5-measurement.md)，实现与实测证据见 [Phase 0 Gate 5 验证报告](phase-0-gate-5-report.md)。
 
 ### 容量维度
 
@@ -300,9 +302,8 @@ AGENTCORE_BUNDLE_ROOT=/absolute/path/to/validated/bundle \
 - callback 内 deep copy 后才返回；
 - 同一 Session/Run 顺序稳定；
 - 多 Session 公平轮转；
-- `text_chunk` 合并后逐字节一致；
-- `tool_progress` 覆盖旧状态；
-- `usage` 按事件真实语义累计或替换；
+- `text_chunk` 无论是否合并都逐字节一致；当前 baseline 不在 pump 内合并；
+- pump 不擅自折叠 `tool_progress` 或 `usage`，保持 bundle event 顺序和原始 bytes；Gate 6 的 Renderer projection 再按 SDK 语义覆盖或累计；
 - tool/UI/run 控制事件不静默丢失；
 - AgentCore/tool 线程不直接调用 WebView；
 - control capacity 耗尽在 deadline 后 fatal，不无限阻塞。
@@ -312,7 +313,7 @@ AGENTCORE_BUNDLE_ROOT=/absolute/path/to/validated/bundle \
 - 区分临时 detach 与不可恢复 pipeline failure；
 - 有界 retention 内允许 Host snapshot/resync；
 - 旧连接不能消费新连接事件；
-- reload 后 active UI request 仍验证原 Session/Run/request；
+- Gate 5 transport 保留 Session/Run identity、未 ack event 和 object，并拒绝旧 generation；Gate 6 完整链路再验证 reload 后 active UI request 的原 Session/Run/request；
 - snapshot 不包含 credential；
 - Host/AgentCore crash 不伪装为 reload recovery。
 
@@ -324,12 +325,16 @@ AGENTCORE_BUNDLE_ROOT=/absolute/path/to/validated/bundle \
 
 - event decode/copy OOM；
 - control queue deadline；
-- unrecoverable Bridge send/pipeline failure；
+- 两阶段 batch 在 Bridge send 失败前不 commit；Gate 5 验证 `Host.failRun` 的 fatal 路由，Gate 6 再把真实 send failure 与对应 Run 自动接线；
 - HostCause first-writer-wins；
 - in-flight Run 被要求停止；
 - 最终状态 failed，不误报 cancelled。
 
 ## 11. Gate 6：同进程 macOS 同步原型
+
+### 依赖前置条件
+
+Gate 6 默认继续消费 Gate 3 至 Gate 5 已验收的 clean bundle `0.0.0-dev+ab75314a3dcb`。cc-zig source checkout 的新 commit、目录改名或 ABI layout 未变化，都不能代替 bundle 升级验收。任何新 bundle 必须先通过 manifest/checksum identity、artifact-only link/run 和完整 typed SDK contract；缺少 typed protocol module 或 validator/codec 时不得切换，也不得由 MetaWork 复制协议补齐。
 
 ### 最小 UI
 

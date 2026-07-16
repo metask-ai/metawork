@@ -109,6 +109,21 @@ pub fn build(b: *std.Build) void {
         .link_libc = link_libc,
     });
     probe_module.addImport("metacodes_agentcore", sdk);
+    const event_sink = b.createModule(.{
+        .root_source_file = b.path("../../src/host/event_sink.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = link_libc,
+    });
+    event_sink.addImport("metacodes_agentcore", sdk);
+    const event_pump = b.createModule(.{
+        .root_source_file = b.path("../../src/host/event_pump.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = link_libc,
+    });
+    event_pump.addImport("metacodes_agentcore", sdk);
+    event_pump.addImport("event_sink", event_sink);
     const host_lifecycle = b.createModule(.{
         .root_source_file = b.path("../../src/host/lifecycle.zig"),
         .target = target,
@@ -116,6 +131,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = link_libc,
     });
     host_lifecycle.addImport("metacodes_agentcore", sdk);
+    host_lifecycle.addImport("event_pump", event_pump);
     probe_module.addImport("host_lifecycle", host_lifecycle);
     probe_module.addObjectFile(.{ .cwd_relative = lib_path });
     const probe = b.addExecutable(.{

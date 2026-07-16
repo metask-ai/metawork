@@ -92,7 +92,7 @@ AgentCore/tool thread
 - 无法验证、复制或接收关键事件时返回 callback fatal；
 - callback 不等待 WebView，也不调用 Session destroy 或 re-enter Run。
 
-Gate 4 已把正式 Host 连接到 FIFO bounded test sink，并通过 typed callback、生命周期、同步 UI 和真实 bundle link/run 验证。Gate 5 才接真实 Native SDK Bridge，并补 per-Session fairness、control reserve、batching 和 reload retention。
+Gate 4 把正式 Host 连接到 FIFO bounded test sink，并通过 typed callback、生命周期、同步 UI 和真实 bundle link/run 验证。Gate 5 已将它替换为 per-Session/global count+bytes、control reserve 和 deadline 受限的 Event pump，并以真实 Native SDK Bridge 验证 batching、object fetch/ack 和 reload generation；正式 AgentCore→Renderer 垂直接线仍属于 Gate 6。
 
 ### UI request callback
 
@@ -283,7 +283,7 @@ flowchart LR
     CORE --> COPY --> QUEUE --> PUMP --> BRIDGE --> UI
 ```
 
-### 必须测量和固定的维度
+### 当前已测量并固定的维度
 
 - global queue count/bytes；
 - per-Session queue count/bytes；
@@ -298,9 +298,9 @@ flowchart LR
 
 | 数据 | 允许策略 |
 | --- | --- |
-| `text_chunk` | 按 Session/Run 合并；最终字节必须一致 |
-| `tool_progress` | 同一 tool 只保留最新进度 |
-| `usage` | 正确累计或替换为最新完整值，取决于 cc-zig 事件语义 |
+| `text_chunk` | 当前逐项保留；若后续按 Session/Run 合并，最终字节必须一致 |
+| `tool_progress` | pump 逐项保留；Renderer projection 按同一 tool 覆盖旧进度 |
+| `usage` | pump 逐项保留；Renderer projection 根据 cc-zig 事件语义累计或替换 |
 | diagnostics | 按明确配置采样 |
 | tool start/result | 不得静默丢失 |
 | UI request/response state | 不得静默丢失 |
@@ -312,7 +312,7 @@ flowchart LR
 
 ### 大 payload
 
-先测 Native SDK 和真实事件大小。只有事件或 batch 确实超过 Bridge 边界时才加入 Host-owned object reference：
+Native SDK 和真实事件大小已经测量；49,703-byte 真实 event 超过当前 8 KiB Host window-event budget，因此当前使用受限 Host-owned object reference：
 
 - opaque object ID；
 - Session/Run ownership；

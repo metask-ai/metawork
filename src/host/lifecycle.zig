@@ -5,9 +5,9 @@
 const std = @import("std");
 const sdk = @import("metacodes_agentcore");
 const wire = sdk.types;
-const event_sink = @import("event_sink.zig");
+const event_pump = @import("event_pump");
 
-pub const EventEnvelope = event_sink.EventEnvelope;
+pub const EventEnvelope = event_pump.EventEnvelope;
 
 const default_builtin_tools = [_][]const u8{ "Read", "Bash", "Edit", "AskUserQuestion" };
 
@@ -67,14 +67,23 @@ pub const Limits = struct {
     queue_capacity: usize,
     max_sessions: usize,
     max_prompt_bytes: usize = 1024 * 1024,
-    event_capacity: usize = 256,
-    max_event_bytes: usize = 1024 * 1024,
+    event_capacity: usize = 512,
+    event_bytes: usize = 8 * 1024 * 1024,
+    per_session_event_capacity: usize = 128,
+    per_session_event_bytes: usize = 2 * 1024 * 1024,
+    control_reserved_capacity: usize = 64,
+    control_reserved_bytes: usize = 2 * 1024 * 1024,
+    per_session_control_reserved_capacity: usize = 16,
+    per_session_control_reserved_bytes: usize = 512 * 1024,
+    max_event_bytes: usize = 512 * 1024,
+    event_enqueue_timeout: std.Io.Duration = .fromMilliseconds(100),
     max_ui_request_bytes: usize = 256 * 1024,
     max_ui_response_bytes: usize = 256 * 1024,
     ui_request_timeout: std.Io.Duration = .fromSeconds(30),
 };
 
 pub const SessionSnapshot = struct {
+    session_id: u64,
     state: SessionState,
     workspace_root: []const u8,
     active_run_id: u64,
@@ -130,10 +139,11 @@ pub const Host = struct {
     runtime: ?*wire.RuntimeHandle,
     max_prompt_bytes: usize,
     max_event_bytes: usize,
+    event_enqueue_timeout: std.Io.Duration,
     max_ui_request_bytes: usize,
     max_ui_response_bytes: usize,
     ui_request_timeout: std.Io.Duration,
-    events: event_sink.BoundedEventSink,
+    events: event_pump.EventPump,
     executor: Executor,
     sessions_mutex: std.Io.Mutex = .init,
     shutdown_condition: std.Io.Condition = .init,
@@ -154,7 +164,9 @@ pub const Host = struct {
     ) (Error || std.mem.Allocator.Error || std.Thread.SpawnError || error{UnsupportedAbi})!*Host {
         if (limits.worker_count == 0 or limits.queue_capacity == 0 or limits.max_sessions == 0 or
             limits.max_prompt_bytes == 0 or limits.event_capacity == 0 or
-            limits.max_event_bytes == 0 or limits.max_ui_request_bytes == 0 or
+            limits.event_bytes == 0 or limits.per_session_event_capacity == 0 or
+            limits.per_session_event_bytes == 0 or limits.max_event_bytes == 0 or
+            limits.event_enqueue_timeout.nanoseconds <= 0 or limits.max_ui_request_bytes == 0 or
             limits.max_ui_response_bytes == 0 or limits.ui_request_timeout.nanoseconds <= 0)
             return error.InvalidLimits;
         _ = std.math.mul(usize, limits.event_capacity, limits.max_event_bytes) catch
@@ -165,11 +177,21 @@ pub const Host = struct {
         const sessions = try allocator.alloc(?*Session, limits.max_sessions);
         errdefer allocator.free(sessions);
         @memset(sessions, null);
-        var events = try event_sink.BoundedEventSink.init(
+        var events = try event_pump.EventPump.init(
             io,
             allocator,
-            limits.event_capacity,
-            limits.max_event_bytes,
+            .{
+                .max_event_bytes = limits.max_event_bytes,
+                .global_count = limits.event_capacity,
+                .global_bytes = limits.event_bytes,
+                .global_control_reserved_count = limits.control_reserved_capacity,
+                .global_control_reserved_bytes = limits.control_reserved_bytes,
+                .per_session_count = limits.per_session_event_capacity,
+                .per_session_bytes = limits.per_session_event_bytes,
+                .per_session_control_reserved_count = limits.per_session_control_reserved_capacity,
+                .per_session_control_reserved_bytes = limits.per_session_control_reserved_bytes,
+                .session_slots = limits.max_sessions,
+            },
         );
         errdefer events.deinit();
 
@@ -201,6 +223,7 @@ pub const Host = struct {
             .runtime = runtime,
             .max_prompt_bytes = limits.max_prompt_bytes,
             .max_event_bytes = limits.max_event_bytes,
+            .event_enqueue_timeout = limits.event_enqueue_timeout,
             .max_ui_request_bytes = limits.max_ui_request_bytes,
             .max_ui_response_bytes = limits.max_ui_response_bytes,
             .ui_request_timeout = limits.ui_request_timeout,
@@ -362,7 +385,7 @@ pub const Host = struct {
             session.unlock();
             return error.SessionNotClosed;
         }
-        std.debug.assert(session.callback_refs == 0);
+        std.debug.assert(session.active_refs == 0);
         session.unlock();
 
         self.sessions[session_slot] = null;
@@ -371,7 +394,24 @@ pub const Host = struct {
     }
 
     pub fn takeEvent(self: *Host) ?EventEnvelope {
-        return self.events.take();
+        return self.events.takeFair();
+    }
+
+    pub fn failRun(self: *Host, session_id: u64, run_id: u64, cause: HostCause) Error!void {
+        self.sessions_mutex.lockUncancelable(self.io);
+        var retained: ?*Session = null;
+        var found = false;
+        for (self.sessions) |entry| {
+            const session = entry orelse continue;
+            if (session.id != session_id) continue;
+            found = true;
+            if (session.retainReference()) retained = session;
+            break;
+        }
+        self.sessions_mutex.unlock(self.io);
+        const session = retained orelse return if (found) error.SessionClosing else error.UnknownSession;
+        defer session.releaseReference();
+        return session.requestCancel(run_id, cause);
     }
 
     fn finishShutdown(self: *Host, result: ?Error) Error!void {
@@ -418,7 +458,7 @@ pub const Session = struct {
     last_stop_reason_code: ?u32 = null,
     last_outcome: ?RunOutcome = null,
     cancel_requested: bool = false,
-    callback_refs: usize = 0,
+    active_refs: usize = 0,
     ui_active: bool = false,
     ui_request_id: u64 = 0,
     ui_answered: bool = false,
@@ -609,6 +649,7 @@ pub const Session = struct {
         self.lock();
         defer self.unlock();
         return .{
+            .session_id = self.id,
             .state = self.state,
             .workspace_root = self.workspace_root,
             .active_run_id = self.active_run_id,
@@ -621,20 +662,20 @@ pub const Session = struct {
         };
     }
 
-    pub fn retainCallback(self: *Session) bool {
+    pub fn retainReference(self: *Session) bool {
         self.lock();
         defer self.unlock();
         if (self.state == .closing or self.state == .closed) return false;
-        self.callback_refs += 1;
+        self.active_refs += 1;
         return true;
     }
 
-    pub fn releaseCallback(self: *Session) void {
+    pub fn releaseReference(self: *Session) void {
         self.lock();
         defer self.unlock();
-        std.debug.assert(self.callback_refs > 0);
-        self.callback_refs -= 1;
-        if (self.callback_refs == 0) self.broadcast();
+        std.debug.assert(self.active_refs > 0);
+        self.active_refs -= 1;
+        if (self.active_refs == 0) self.broadcast();
     }
 
     pub fn recordCause(self: *Session, cause: HostCause) void {
@@ -681,7 +722,7 @@ pub const Session = struct {
 
         self.lock();
         while (!self.run_done) self.wait();
-        while (self.callback_refs != 0) self.wait();
+        while (self.active_refs != 0) self.wait();
         self.unlock();
 
         return self.destroyRawSession();
@@ -813,7 +854,7 @@ pub const Session = struct {
 
     fn deinit(self: *Session) void {
         std.debug.assert(self.state == .closed);
-        std.debug.assert(self.callback_refs == 0);
+        std.debug.assert(self.active_refs == 0);
         if (self.prompt) |prompt| self.host.allocator.free(prompt);
         if (self.ui_request_json) |json| self.host.allocator.free(json);
         if (self.ui_response_json) |json| self.host.allocator.free(json);
@@ -828,7 +869,7 @@ pub const Session = struct {
     ) callconv(.c) u32 {
         const self: *Session = @ptrCast(@alignCast(context orelse return wire.CALLBACK_FATAL));
         if (!self.retainCoreCallback(handle, run_id)) return wire.CALLBACK_FATAL;
-        defer self.releaseCallback();
+        defer self.releaseReference();
         const encoded = sdk.borrowedBytes(event_json) catch {
             self.recordCause(.event_pipeline_failure);
             return wire.CALLBACK_FATAL;
@@ -841,16 +882,32 @@ pub const Session = struct {
             self.recordCause(.event_pipeline_failure);
             return wire.CALLBACK_FATAL;
         };
+        const owned_json = self.host.allocator.dupe(u8, encoded) catch {
+            var owner = parsed;
+            owner.deinit();
+            self.recordCause(.event_pipeline_failure);
+            return wire.CALLBACK_FATAL;
+        };
         var envelope = EventEnvelope{
             .session_id = self.id,
             .run_id = run_id,
             .encoded_bytes = encoded.len,
+            .json = owned_json,
             .event = parsed,
+            .allocator = self.host.allocator,
         };
-        self.host.events.push(envelope) catch |err| {
+        self.host.events.enqueueWithDeadline(envelope, self.host.event_enqueue_timeout) catch |err| {
             envelope.deinit();
             self.recordCause(switch (err) {
-                error.EventTooLarge, error.SinkFull => .queue_capacity_failure,
+                error.EventTooLarge,
+                error.InvalidIdentity,
+                error.GlobalCapacity,
+                error.SessionCapacity,
+                error.SessionSlotCapacity,
+                error.SequenceExhausted,
+                error.InvalidLimits,
+                error.DeadlineExceeded,
+                => .queue_capacity_failure,
             });
             return wire.CALLBACK_FATAL;
         };
@@ -870,7 +927,7 @@ pub const Session = struct {
             return wire.UI_FATAL;
         };
         if (!self.retainCoreCallback(handle, null)) return wire.UI_FATAL;
-        defer self.releaseCallback();
+        defer self.releaseReference();
 
         const encoded_request = sdk.borrowedBytes(request_json) catch {
             self.recordCause(.ui_pipeline_failure);
@@ -982,7 +1039,7 @@ pub const Session = struct {
         if (run_id) |id| {
             if (!self.run_started or id != self.active_run_id) return false;
         }
-        self.callback_refs += 1;
+        self.active_refs += 1;
         return true;
     }
 };

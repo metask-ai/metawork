@@ -10,11 +10,14 @@ pub const EventEnvelope = struct {
     session_id: u64,
     run_id: u64,
     encoded_bytes: usize,
+    json: []u8,
     event: sdk.ParsedCoreEvent,
+    allocator: std.mem.Allocator,
 
     /// Ownership transfers from the sink to the caller. Do not copy this
     /// value; call `deinit` exactly once after consuming the SDK parse owner.
     pub fn deinit(self: *EventEnvelope) void {
+        self.allocator.free(self.json);
         self.event.deinit();
         self.* = undefined;
     }

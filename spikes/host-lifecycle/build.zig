@@ -22,6 +22,12 @@ pub fn build(b: *std.Build) void {
     });
     sdk.addImport("metacodes_agentcore_types", types);
 
+    const event_sink = b.createModule(.{
+        .root_source_file = b.path("../../src/host/event_sink.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    event_sink.addImport("metacodes_agentcore", sdk);
     const lifecycle = b.createModule(.{
         .root_source_file = b.path("../../src/host/lifecycle.zig"),
         .target = target,
@@ -29,6 +35,19 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     lifecycle.addImport("metacodes_agentcore", sdk);
+    const event_pump = b.createModule(.{
+        .root_source_file = b.path("../../src/host/event_pump.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    event_pump.addImport("metacodes_agentcore", sdk);
+    event_pump.addImport("event_sink", event_sink);
+    lifecycle.addImport("event_pump", event_pump);
+    const bridge_delivery = b.createModule(.{
+        .root_source_file = b.path("../../src/host/bridge_delivery.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
 
     const tests = b.createModule(.{
         .root_source_file = b.path("lifecycle_test.zig"),
@@ -37,6 +56,8 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     tests.addImport("host_lifecycle", lifecycle);
+    tests.addImport("event_pump", event_pump);
+    tests.addImport("bridge_delivery", bridge_delivery);
     tests.addImport("metacodes_agentcore", sdk);
     const test_artifact = b.addTest(.{
         .root_module = tests,
