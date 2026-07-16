@@ -105,8 +105,21 @@ export const enUS = {
   "run.start_failed": "Work could not start: {error}",
   "run.stop_failed": "Task could not be stopped: {error}",
   "run.stop_requested": "Stopping the current work…",
-  "run.outcome": "Result: {outcome}",
-  "run.cause": "Reason: {cause}",
+  "run.terminal.completed": "Work completed",
+  "run.terminal.stopped": "Work stopped",
+  "run.terminal.interrupted": "Work interrupted",
+  "run.terminal.failed": "Work failed",
+  "run.prepare_retry": "Use instruction again",
+  "run.retry_help":
+    "Copies this instruction to the Composer for review. Nothing is sent automatically.",
+  "run.review_draft": "Review current draft",
+  "run.review_draft_help":
+    "Keeps your current draft unchanged and moves focus to the Composer.",
+  "run.retry_prepared":
+    "Instruction copied to the Composer. Review it before sending.",
+  "run.draft_preserved": "Your current Composer draft was kept unchanged.",
+  "run.retry_too_long":
+    "This instruction is too long for the Composer. Write a shorter follow-up instead.",
   "message.you": "You",
   "message.agent": "Agent",
   "tool.input": "Input",
@@ -124,6 +137,10 @@ export const enUS = {
   "activity.current_ready": "Ready for your next instruction.",
   "activity.current_working": "The task is working in the background.",
   "activity.current_waiting": "A response is required to continue.",
+  "activity.current_recover":
+    "Review what happened, then prepare a new instruction when you're ready.",
+  "activity.current_archived": "Restore this task before continuing.",
+  "activity.current_closed": "This task no longer accepts instructions.",
   "activity.no_decision": "Nothing needs your attention.",
   "activity.no_decision_help":
     "Questions and approvals will appear here and remain attached to their task.",

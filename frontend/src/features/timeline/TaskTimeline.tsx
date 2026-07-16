@@ -49,6 +49,40 @@ function runPhaseLabel(
   }
 }
 
+function isNonTerminalRun(phase: RunView["phase"]): boolean {
+  return (
+    phase === "queued" ||
+    phase === "running" ||
+    phase === "waiting_ui" ||
+    phase === "stopping"
+  );
+}
+
+function terminalMessageId(
+  outcome: NonNullable<RunView["outcome"]>,
+): MessageId {
+  switch (outcome) {
+    case "completed":
+      return "run.terminal.completed";
+    case "stopped":
+    case "cancelled":
+      return "run.terminal.stopped";
+    case "interrupted":
+      return "run.terminal.interrupted";
+    case "failed":
+    case "dependency_contract_failure":
+      return "run.terminal.failed";
+  }
+}
+
+function retryableOutcome(outcome: NonNullable<RunView["outcome"]>): boolean {
+  return (
+    outcome === "failed" ||
+    outcome === "interrupted" ||
+    outcome === "dependency_contract_failure"
+  );
+}
+
 type RunActivity =
   | { kind: "tool"; order: string; value: ToolView }
   | { kind: "resolved_ui"; order: string; value: UiRecord }
@@ -85,14 +119,20 @@ function orderedActivity(run: RunView, session: SessionView): RunActivity[] {
 export function TaskTimeline({
   session,
   revision,
+  composerHasDraft,
+  retryAvailable,
   responseDisabled,
+  onPrepareRetry,
   onRespond,
   renderPendingUi,
   renderUiRecord,
 }: {
   session: SessionView | null;
   revision: string;
+  composerHasDraft: boolean;
+  retryAvailable: boolean;
   responseDisabled: boolean;
+  onPrepareRetry: (instruction: string) => void;
   onRespond: (payload: UiResponsePayload) => void;
   renderPendingUi: (props: {
     sessionId: string;
@@ -106,6 +146,7 @@ export function TaskTimeline({
   const [showJumpLatest, setShowJumpLatest] = useState(false);
   const timelineScroll = useRef<HTMLDivElement>(null);
   const followingLatest = useRef(true);
+  const latestRunId = session?.runs.at(-1)?.id ?? null;
 
   useEffect(() => {
     followingLatest.current = true;
@@ -214,24 +255,20 @@ export function TaskTimeline({
                       </Fragment>
                     );
                   })}
-                  {!run.assistant && run.tools.length === 0 && (
-                    <p className="preparing-copy">{t("run.preparing")}</p>
-                  )}
+                  {!run.assistant &&
+                    run.tools.length === 0 &&
+                    isNonTerminalRun(run.phase) && (
+                      <p className="preparing-copy">{t("run.preparing")}</p>
+                    )}
                   {run.outcome && (
-                    <div className="run-outcome" data-phase={run.phase}>
-                      <p>
-                        {t("run.outcome", {
-                          outcome: t(`outcome.${run.outcome}`),
-                        })}
-                      </p>
-                      {run.cause && (
-                        <span>
-                          {t("run.cause", {
-                            cause: t(`cause.${run.cause}`),
-                          })}
-                        </span>
-                      )}
-                    </div>
+                    <RunOutcome
+                      run={run}
+                      outcome={run.outcome}
+                      composerHasDraft={composerHasDraft}
+                      latest={run.id === latestRunId}
+                      retryAvailable={retryAvailable && run.id === latestRunId}
+                      onPrepareRetry={onPrepareRetry}
+                    />
                   )}
                 </div>
               </article>
@@ -261,6 +298,47 @@ export function TaskTimeline({
   );
 }
 
+function RunOutcome({
+  run,
+  outcome,
+  composerHasDraft,
+  latest,
+  retryAvailable,
+  onPrepareRetry,
+}: {
+  run: RunView;
+  outcome: NonNullable<RunView["outcome"]>;
+  composerHasDraft: boolean;
+  latest: boolean;
+  retryAvailable: boolean;
+  onPrepareRetry: (instruction: string) => void;
+}) {
+  const { t } = useI18n();
+  return (
+    <section
+      className="run-outcome"
+      data-phase={run.phase}
+      role={latest ? "status" : undefined}
+    >
+      <div className="run-outcome-copy">
+        <p>{t(terminalMessageId(outcome))}</p>
+        {run.cause && <span>{t(`cause.${run.cause}`)}</span>}
+      </div>
+      {retryAvailable && retryableOutcome(outcome) && (
+        <button
+          className="outcome-action focus-ring"
+          title={
+            composerHasDraft ? t("run.review_draft_help") : t("run.retry_help")
+          }
+          onClick={() => onPrepareRetry(run.user)}
+        >
+          {composerHasDraft ? t("run.review_draft") : t("run.prepare_retry")}
+        </button>
+      )}
+    </section>
+  );
+}
+
 function Message({
   role,
   text,
@@ -286,6 +364,10 @@ function ToolCard({ tool }: { tool: ToolView }) {
   } catch {
     duration = null;
   }
+  const state = runPhaseLabel(
+    t,
+    tool.state === "completed" ? "completed" : tool.state,
+  );
   return (
     <details
       className="group rounded-xl border border-rule bg-canvas"
@@ -295,18 +377,19 @@ function ToolCard({ tool }: { tool: ToolView }) {
         <span className="flex items-center gap-3">
           <span
             className={`h-2 w-2 rounded-full ${tool.state === "failed" ? "bg-danger" : tool.state === "running" ? "bg-cobalt" : "bg-live"}`}
+            aria-hidden="true"
           />
           <span className="font-mono text-xs font-semibold">{tool.name}</span>
         </span>
-        <span className="font-mono text-[10px] text-muted">
-          {duration === null || duration === 0n
-            ? runPhaseLabel(
-                t,
-                tool.state === "completed" ? "completed" : tool.state,
-              )
-            : t("tool.duration_ms", {
+        <span className="tool-summary-state" data-state={tool.state}>
+          <strong>{state}</strong>
+          {duration !== null && duration > 0n && (
+            <span>
+              {t("tool.duration_ms", {
                 count: formatMilliseconds(locale, duration),
               })}
+            </span>
+          )}
         </span>
       </summary>
       <div className="grid gap-3 border-t border-rule px-4 py-4 text-xs">

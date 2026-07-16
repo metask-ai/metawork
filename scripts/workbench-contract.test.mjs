@@ -99,9 +99,46 @@ test("Workbench decoding rejects version drift, extra fields, and invalid wire v
   const terminalCurrentRun = clone(fixture);
   terminalCurrentRun.sessions[0].currentRunPhase = "completed";
   terminalCurrentRun.sessions[0].runs[0].phase = "completed";
+  terminalCurrentRun.sessions[0].runs[0].outcome = "completed";
   assert.throws(
     () => decodeWorkbenchSnapshot(terminalCurrentRun),
     /unexpected value/,
+  );
+
+  const nonTerminalOutcome = clone(fixture);
+  nonTerminalOutcome.sessions[0].runs[0].outcome = "completed";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(nonTerminalOutcome),
+    /non-terminal Run cannot have an outcome/,
+  );
+
+  const mismatchedTerminalOutcome = clone(fixture);
+  mismatchedTerminalOutcome.sessions[0].runs[0].phase = "failed";
+  mismatchedTerminalOutcome.sessions[0].runs[0].outcome = "completed";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(mismatchedTerminalOutcome),
+    /failed Run phase and outcome must agree/,
+  );
+
+  const mismatchedToolFailure = clone(fixture);
+  mismatchedToolFailure.sessions[0].runs[0].tools.push({
+    id: "tool-mismatch",
+    order: "1",
+    name: "Bash",
+    input: "false",
+    progress: "",
+    content: "exit 1",
+    state: "completed",
+    isError: true,
+    elapsedMs: "5",
+    inputTruncated: false,
+    progressTruncated: false,
+    contentTruncated: false,
+    redacted: false,
+  });
+  assert.throws(
+    () => decodeWorkbenchSnapshot(mismatchedToolFailure),
+    /tool failure state and error flag must agree/,
   );
 
   const archivedRunning = clone(fixture);

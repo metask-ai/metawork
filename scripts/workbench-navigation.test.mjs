@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   clearTaskDraft,
+  prepareRetryDraft,
   pruneTaskDrafts,
   readTaskDraft,
   writeTaskDraft,
@@ -10,6 +11,7 @@ import {
 import {
   searchWorkbench,
   taskActivity,
+  taskDisplayState,
   taskSignals,
   workspaceLabel,
   workspaceSummaries,
@@ -119,6 +121,35 @@ test("workspace navigation aggregates actionable cross-workspace signals without
   assert.equal(workspaceLabel("C:\\work\\metawork\\"), "metawork");
 });
 
+test("Task display state preserves Run, lifecycle, archive, and outcome precedence", () => {
+  assert.deepEqual(
+    taskDisplayState(
+      session({
+        currentRunId: "9",
+        currentRunPhase: "running",
+        lifecycle: "closing",
+        lastRunOutcome: "failed",
+      }),
+    ),
+    { kind: "phase", value: "running" },
+  );
+  assert.deepEqual(
+    taskDisplayState(
+      session({ lifecycle: "closing", lastRunOutcome: "failed" }),
+    ),
+    { kind: "lifecycle", value: "closing" },
+  );
+  assert.deepEqual(
+    taskDisplayState(session({ archived: true, lastRunOutcome: "failed" })),
+    { kind: "archived" },
+  );
+  assert.deepEqual(taskDisplayState(session({ lastRunOutcome: "failed" })), {
+    kind: "outcome",
+    value: "failed",
+  });
+  assert.deepEqual(taskDisplayState(session({})), { kind: "ready" });
+});
+
 test("Task activity hides empty modules and derives only Host-projected content", () => {
   assert.deepEqual(taskActivity(null), {
     currentRun: null,
@@ -206,4 +237,19 @@ test("Composer drafts survive a WebView reload scope and fail safely when storag
   assert.doesNotThrow(() => writeTaskDraft("7", "still typeable"));
   assert.equal(readTaskDraft("7"), "");
   delete globalThis.window;
+});
+
+test("preparing a retry never overwrites an existing Composer draft", () => {
+  assert.deepEqual(prepareRetryDraft("", "Run the release checks"), {
+    draft: "Run the release checks",
+    kind: "prepared",
+  });
+  assert.deepEqual(prepareRetryDraft("Current draft", "Old instruction"), {
+    draft: "Current draft",
+    kind: "preserved",
+  });
+  assert.deepEqual(prepareRetryDraft("", "x".repeat(16 * 1024 + 1)), {
+    draft: "",
+    kind: "too_long",
+  });
 });

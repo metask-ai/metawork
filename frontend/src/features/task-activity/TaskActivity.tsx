@@ -8,6 +8,22 @@ function toolStateMessage(tool: ToolView): MessageId {
   return tool.state === "failed" ? "outcome.failed" : "outcome.completed";
 }
 
+function currentActivityMessage(session: SessionView | null): MessageId {
+  if (!session) return "activity.current_empty";
+  if (session.currentRunPhase === "waiting_ui")
+    return "activity.current_waiting";
+  if (session.currentRunPhase !== null) return "activity.current_working";
+  if (session.lifecycle !== "open") return "activity.current_closed";
+  if (session.archived) return "activity.current_archived";
+  if (
+    session.lastRunOutcome === "failed" ||
+    session.lastRunOutcome === "interrupted" ||
+    session.lastRunOutcome === "dependency_contract_failure"
+  )
+    return "activity.current_recover";
+  return "activity.current_ready";
+}
+
 export function TaskActivity({
   session,
   currentStatus,
@@ -45,15 +61,7 @@ export function TaskActivity({
           />
           <div>
             <p>{currentStatus}</p>
-            <span>
-              {!session
-                ? t("activity.current_empty")
-                : session.currentRunPhase === "waiting_ui"
-                  ? t("activity.current_waiting")
-                  : session.currentRunPhase !== null
-                    ? t("activity.current_working")
-                    : t("activity.current_ready")}
-            </span>
+            <span>{t(currentActivityMessage(session))}</span>
           </div>
         </div>
       </section>

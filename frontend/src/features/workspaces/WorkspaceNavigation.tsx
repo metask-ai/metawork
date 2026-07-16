@@ -5,6 +5,7 @@ import type { SessionView } from "../../host/contracts.ts";
 import { taskCountMessageId } from "../../i18n/formatters.ts";
 import { useI18n } from "../../i18n/context.ts";
 import {
+  taskDisplayState,
   taskSignals,
   workspaceLabel,
   type WorkspaceSummary,
@@ -225,13 +226,13 @@ function taskStateLabel(
   session: SessionView,
   t: ReturnType<typeof useI18n>["t"],
 ) {
-  if (session.currentRunPhase)
-    return t(`task.phase.${session.currentRunPhase}`);
-  if (session.lifecycle !== "open")
-    return t(`task.lifecycle.${session.lifecycle}`);
-  if (session.lastRunOutcome)
+  const state = taskDisplayState(session);
+  if (state.kind === "phase") return t(`task.phase.${state.value}`);
+  if (state.kind === "lifecycle") return t(`task.lifecycle.${state.value}`);
+  if (state.kind === "archived") return t("task.archived");
+  if (state.kind === "outcome")
     return t("task.last_result", {
-      result: t(`outcome.${session.lastRunOutcome}`),
+      result: t(`outcome.${state.value}`),
     });
   return t("task.ready");
 }

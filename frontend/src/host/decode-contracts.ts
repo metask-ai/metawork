@@ -172,6 +172,14 @@ function decodeTool(value: unknown, path: string): ToolView {
     "contentTruncated",
     "redacted",
   ]);
+  const state = enumValue(item.state, `${path}.state`, [
+    "running",
+    "completed",
+    "failed",
+  ] as const);
+  const isError = booleanValue(item.isError, `${path}.isError`);
+  if ((state === "failed") !== isError)
+    fail(path, "tool failure state and error flag must agree");
   return {
     id: stringValue(item.id, `${path}.id`),
     order: positiveWireId(item.order, `${path}.order`),
@@ -179,12 +187,8 @@ function decodeTool(value: unknown, path: string): ToolView {
     input: stringValue(item.input, `${path}.input`),
     progress: stringValue(item.progress, `${path}.progress`),
     content: stringValue(item.content, `${path}.content`),
-    state: enumValue(item.state, `${path}.state`, [
-      "running",
-      "completed",
-      "failed",
-    ] as const),
-    isError: booleanValue(item.isError, `${path}.isError`),
+    state,
+    isError,
     elapsedMs: wireId(item.elapsedMs, `${path}.elapsedMs`),
     inputTruncated: booleanValue(item.inputTruncated, `${path}.inputTruncated`),
     progressTruncated: booleanValue(
@@ -218,9 +222,12 @@ function decodeRun(value: unknown, path: string): RunView {
     "cacheRead",
     "cacheCreation",
   ]);
+  const phase = enumValue(item.phase, `${path}.phase`, runPhases);
+  const outcome = nullableEnum(item.outcome, `${path}.outcome`, runOutcomes);
+  validateRunTerminalState(phase, outcome, path);
   return {
     id: positiveWireId(item.id, `${path}.id`),
-    phase: enumValue(item.phase, `${path}.phase`, runPhases),
+    phase,
     user: stringValue(item.user, `${path}.user`),
     assistant: stringValue(item.assistant, `${path}.assistant`),
     assistantRedacted: booleanValue(
@@ -228,7 +235,7 @@ function decodeRun(value: unknown, path: string): RunView {
       `${path}.assistantRedacted`,
     ),
     status: stringValue(item.status, `${path}.status`),
-    outcome: nullableEnum(item.outcome, `${path}.outcome`, runOutcomes),
+    outcome,
     cause: nullableEnum(item.cause, `${path}.cause`, hostCauses),
     usage: {
       input: wireId(usage.input, `${path}.usage.input`),
@@ -238,6 +245,41 @@ function decodeRun(value: unknown, path: string): RunView {
     },
     tools: arrayValue(item.tools, `${path}.tools`, decodeTool),
   };
+}
+
+function validateRunTerminalState(
+  phase: RunView["phase"],
+  outcome: RunView["outcome"],
+  path: string,
+) {
+  switch (phase) {
+    case "queued":
+    case "running":
+    case "waiting_ui":
+    case "stopping":
+      if (outcome !== null)
+        fail(path, "a non-terminal Run cannot have an outcome");
+      return;
+    case "completed":
+      if (outcome !== "completed")
+        fail(path, "completed Run phase and outcome must agree");
+      return;
+    case "stopped":
+      if (outcome !== "stopped")
+        fail(path, "stopped Run phase and outcome must agree");
+      return;
+    case "cancelled":
+      if (outcome !== "cancelled")
+        fail(path, "cancelled Run phase and outcome must agree");
+      return;
+    case "interrupted":
+      if (outcome !== "interrupted")
+        fail(path, "interrupted Run phase and outcome must agree");
+      return;
+    case "failed":
+      if (outcome !== "failed" && outcome !== "dependency_contract_failure")
+        fail(path, "failed Run phase and outcome must agree");
+  }
 }
 
 function decodeUiRecord(value: unknown, path: string): UiRecord {

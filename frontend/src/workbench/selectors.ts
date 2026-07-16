@@ -29,6 +29,27 @@ export type TaskSignals = {
   failed: boolean;
 };
 
+export type TaskDisplayState =
+  | {
+      kind: "phase";
+      value: NonNullable<SessionView["currentRunPhase"]>;
+    }
+  | { kind: "lifecycle"; value: Exclude<SessionView["lifecycle"], "open"> }
+  | { kind: "archived" }
+  | { kind: "outcome"; value: NonNullable<SessionView["lastRunOutcome"]> }
+  | { kind: "ready" };
+
+export function taskDisplayState(session: SessionView): TaskDisplayState {
+  if (session.currentRunPhase)
+    return { kind: "phase", value: session.currentRunPhase };
+  if (session.lifecycle !== "open")
+    return { kind: "lifecycle", value: session.lifecycle };
+  if (session.archived) return { kind: "archived" };
+  if (session.lastRunOutcome)
+    return { kind: "outcome", value: session.lastRunOutcome };
+  return { kind: "ready" };
+}
+
 export function taskSignals(session: SessionView): TaskSignals {
   return {
     running:

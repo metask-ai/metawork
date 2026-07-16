@@ -24,6 +24,10 @@ import {
   WorkspaceNavigation,
 } from "../features/workspaces/WorkspaceNavigation.tsx";
 import { useTaskDrafts } from "../features/composer/useTaskDrafts.ts";
+import {
+  maxComposerCharacters,
+  prepareRetryDraft,
+} from "../features/composer/drafts.ts";
 import { HostClient } from "../host/client.ts";
 import {
   WorkbenchConnection,
@@ -35,6 +39,7 @@ import {
   searchWorkbench,
   selectActiveSession,
   selectCurrentWorkspace,
+  taskDisplayState,
   workspaceLabel,
   workspaceSummaries,
   type SearchResult,
@@ -105,6 +110,7 @@ export default function App() {
   const client = useMemo(() => new HostClient(), []);
   const connection = useRef<WorkbenchConnection | null>(null);
   const taskMenu = useRef<HTMLDivElement>(null);
+  const composer = useRef<HTMLTextAreaElement>(null);
   const snapshot = workbench.snapshot;
   const activeSession = useMemo(
     () => selectActiveSession(workbench),
@@ -514,6 +520,24 @@ export default function App() {
     }
   }
 
+  function prepareRetry(instruction: string) {
+    if (!activeSession || !taskCanCompose) return;
+    const prepared = prepareRetryDraft(prompt, instruction);
+    switch (prepared.kind) {
+      case "prepared":
+        updatePrompt(prepared.draft);
+        setStatus({ id: "run.retry_prepared" });
+        break;
+      case "preserved":
+        setStatus({ id: "run.draft_preserved" });
+        break;
+      case "too_long":
+        setStatus({ id: "run.retry_too_long" });
+        break;
+    }
+    window.requestAnimationFrame(() => composer.current?.focus());
+  }
+
   async function refreshAfterCommit(success: MessageId, operation: MessageId) {
     try {
       await refreshSnapshot();
@@ -529,11 +553,20 @@ export default function App() {
     }
   }
 
-  const currentTaskStatus = activeSession
-    ? activeSession.currentRunPhase
-      ? t(`task.phase.${activeSession.currentRunPhase}`)
-      : t(`task.lifecycle.${activeSession.lifecycle}`)
-    : t("task.new");
+  const currentTaskState = activeSession
+    ? taskDisplayState(activeSession)
+    : null;
+  const currentTaskStatus = !currentTaskState
+    ? t("task.new")
+    : currentTaskState.kind === "phase"
+      ? t(`task.phase.${currentTaskState.value}`)
+      : currentTaskState.kind === "lifecycle"
+        ? t(`task.lifecycle.${currentTaskState.value}`)
+        : currentTaskState.kind === "archived"
+          ? t("task.archived")
+          : currentTaskState.kind === "outcome"
+            ? t(`outcome.${currentTaskState.value}`)
+            : t("task.ready");
   const activeTaskTitle = activeSession
     ? activeSession.title || t("task.item", { id: activeSession.id })
     : t("task.new");
@@ -818,7 +851,10 @@ export default function App() {
       <TaskTimeline
         session={activeSession}
         revision={snapshot.revision}
+        composerHasDraft={prompt.trim().length > 0}
+        retryAvailable={taskCanCompose && !runInFlight}
         responseDisabled={busy !== null || viewSyncFailed || !bridgeReady}
+        onPrepareRetry={prepareRetry}
         onRespond={(payload) => void respondUi(payload)}
         renderPendingUi={(props) => {
           const { sessionId, ...panelProps } = props;
@@ -836,8 +872,9 @@ export default function App() {
       <footer className="composer-bar">
         <div className="composer">
           <textarea
+            ref={composer}
             value={prompt}
-            maxLength={16 * 1024}
+            maxLength={maxComposerCharacters}
             disabled={!taskCanCompose || viewSyncFailed || !bridgeReady}
             placeholder={
               !activeSession

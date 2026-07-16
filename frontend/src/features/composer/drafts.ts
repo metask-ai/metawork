@@ -1,5 +1,20 @@
 // Drafts are local Composer state, never part of the Host projection.
 const prefix = "metawork.task-draft.";
+export const maxComposerCharacters = 16 * 1024;
+
+export function prepareRetryDraft(
+  currentDraft: string,
+  instruction: string,
+): {
+  draft: string;
+  kind: "prepared" | "preserved" | "too_long";
+} {
+  if (currentDraft.trim().length > 0)
+    return { draft: currentDraft, kind: "preserved" };
+  if (instruction.length > maxComposerCharacters)
+    return { draft: currentDraft, kind: "too_long" };
+  return { draft: instruction, kind: "prepared" };
+}
 
 function storage(): Storage | null {
   if (typeof window === "undefined") return null;
