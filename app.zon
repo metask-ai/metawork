@@ -11,6 +11,16 @@
         .commands = .{
             .{ .name = "metawork.smoke.ping", .origins = .{"zero://app"} },
             .{ .name = "metawork.smoke.eventAck", .origins = .{"zero://app"} },
+            .{ .name = "metawork.events.connect", .origins = .{"zero://app"} },
+            .{ .name = "metawork.events.disconnect", .origins = .{"zero://app"} },
+            .{ .name = "metawork.events.ack", .origins = .{"zero://app"} },
+            .{ .name = "metawork.events.fetch", .origins = .{"zero://app"} },
+            .{ .name = "metawork.workbench.snapshot", .origins = .{"zero://app"} },
+            .{ .name = "metawork.sessions.create", .origins = .{"zero://app"} },
+            .{ .name = "metawork.sessions.run", .origins = .{"zero://app"} },
+            .{ .name = "metawork.sessions.cancel", .origins = .{"zero://app"} },
+            .{ .name = "metawork.sessions.respondUi", .origins = .{"zero://app"} },
+            .{ .name = "metawork.sessions.close", .origins = .{"zero://app"} },
         },
     },
     .frontend = .{

@@ -16,7 +16,11 @@ let output = "";
 let exitState = null;
 const app = spawn(binary, [], {
   cwd: root,
-  env: { ...process.env, METAWORK_GATE0_AUTOMATION: "1" },
+  env: {
+    ...process.env,
+    METAWORK_GATE0_AUTOMATION: "1",
+    METAWORK_GATE5_FIXTURE: "1",
+  },
   stdio: ["ignore", "pipe", "pipe"],
 });
 app.stdout.setEncoding("utf8");
