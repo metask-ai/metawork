@@ -1,6 +1,6 @@
 # MetaWork Phase 0 验证计划
 
-> 状态：执行中；Gate 0 至 Gate 3 已通过
+> 状态：执行中；Gate 0 至 Gate 4 已通过
 > 平台：Phase 0A macOS-first；Phase 0B 后续验证 Windows
 
 Phase 0 用最小真实原型验证技术栈和关键风险，不交付完整产品。当前 AgentCore bundle 是 experimental ABI revision 1，同步 baseline 不包含 async suspend/resume、跨进程恢复、strict Workspace security 或正式 Host tools。
@@ -230,6 +230,8 @@ Host tool 内部 session ID 到 MetaWork Session/Run 的合同仍未定义时，
 
 ## 9. Gate 4：正式 AgentCore Host + bounded test sink
 
+> 状态：已通过。实现与实测证据见 [Phase 0 Gate 4 验证报告](phase-0-gate-4-report.md)。
+
 ### 接入规则
 
 - 直接使用 bundle typed SDK；
@@ -264,6 +266,20 @@ Host tool 内部 session ID 到 MetaWork Session/Run 的合同仍未定义时，
 - session_run 返回 non-OK callback status；
 - HostCause 保留具体原因；
 - 不误报用户取消，不读取 zeroed RunResult。
+
+### 当前实现与复现
+
+正式 Host 位于 `src/host/lifecycle.zig`，最小 FIFO bounded sink 位于 `src/host/event_sink.zig`。deterministic fake 覆盖 22 个 lifecycle/typed callback/result/UI 测试；Gate 1 artifact-only probe 还会使用真实 bundle、Mock Provider 和正式 Host 再跑同步 `AskUserQuestion`、typed event sink 与 terminal outcome。
+
+```bash
+AGENTCORE_BUNDLE_ROOT=/absolute/path/to/validated/bundle \
+  npm run test:host-lifecycle
+
+AGENTCORE_BUNDLE_ROOT=/absolute/path/to/validated/bundle \
+  npm run probe:agentcore
+```
+
+当前 sink 只提供 Gate 4 所需的全局 event count 和单 event bytes 硬上限。per-Session count/bytes、公平轮转、control reserve、text merge、Bridge batch 和 reload retention 仍属于 Gate 5，不能根据 Gate 4 通过推断它们已经存在。
 
 ## 10. Gate 5：Event pump 与 Bridge
 

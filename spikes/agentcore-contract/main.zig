@@ -1,6 +1,7 @@
 const std = @import("std");
 const sdk = @import("metacodes_agentcore");
 const wire = sdk.types;
+const lifecycle = @import("host_lifecycle");
 const MockServer = @import("mock_server.zig").MockServer;
 
 const FINAL_SSE =
@@ -266,10 +267,74 @@ pub fn main(init: std.process.Init) !void {
     try expectStatus(wire.STATUS_OK, api.runtimeDestroy()(runtime, &diagnostic), diagnostic);
     runtime = null;
     if (diagnostic_releases != 4) return error.DiagnosticReleaseMismatch;
+    try verifyFormalHost(init.io, api.raw, root);
     std.debug.print(
-        "MetaWork AgentCore raw probe: Read/Bash/Edit, UI, events, lifecycle and releases OK\n",
+        "MetaWork AgentCore probe: raw ABI and formal typed Host integration OK\n",
         .{},
     );
+}
+
+fn verifyFormalHost(io: std.Io, raw_api: *const wire.ApiV1, root: []const u8) !void {
+    const responses = [_][]const u8{ ASK_SSE, FINAL_SSE };
+    const server = try MockServer.start(&responses);
+    defer server.stop();
+    const allocator = std.heap.c_allocator;
+    const base_url = try server.url(allocator);
+    defer allocator.free(base_url);
+
+    const host = try lifecycle.Host.init(io, allocator, raw_api, .{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_sessions = 1,
+        .event_capacity = 64,
+    });
+    defer {
+        host.shutdown() catch unreachable;
+        host.deinit();
+    }
+    const session = try host.createSession(.{
+        .provider_kind_code = wire.PROVIDER_ANTHROPIC,
+        .permission_mode_code = wire.PERMISSION_DEFAULT,
+        .shell_policy_code = wire.SHELL_UNRESTRICTED,
+        .credential = "metawork-formal-host-fixture-key",
+        .model = "metawork-formal-host-fixture-model",
+        .base_url = base_url,
+        .workspace = .{
+            .canonical_root = root,
+            .trust = .{ .temporary = "/tmp" },
+        },
+    });
+    const run_id = try session.submit("exercise formal Host synchronous UI and events");
+    try session.waitForState(.waiting_ui);
+    const request_id = session.pendingUiRequest() orelse return error.MissingFormalHostUiRequest;
+    const answers = [_][]const u8{"Yes"};
+    try session.respondUi(run_id, request_id, .{ .answers = &answers });
+    try session.waitRun(run_id);
+
+    var saw_ui_tool = false;
+    var saw_final = false;
+    while (host.takeEvent()) |value| {
+        var envelope = value;
+        defer envelope.deinit();
+        if (envelope.run_id != run_id) return error.FormalHostRoutingMismatch;
+        switch (envelope.event.value) {
+            .tool_result => |result| {
+                if (std.mem.eql(u8, result.name, "AskUserQuestion"))
+                    saw_ui_tool = true;
+            },
+            .text_chunk => |chunk| {
+                if (std.mem.indexOf(u8, chunk, "metawork gate1 complete") != null)
+                    saw_final = true;
+            },
+            else => {},
+        }
+    }
+    const snapshot = session.snapshot();
+    if (snapshot.last_status != wire.STATUS_OK or
+        snapshot.last_stop_reason_code != wire.STOP_END_TURN or
+        snapshot.last_outcome != .completed or !saw_ui_tool or !saw_final)
+        return error.UnexpectedFormalHostRun;
+    try session.close(.session_close);
 }
 
 fn verifyUiOutcome(

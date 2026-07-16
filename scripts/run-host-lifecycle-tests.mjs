@@ -20,18 +20,22 @@ const lockPath = path.join(
 const expectedManifest = JSON.parse(await readFile(lockPath, "utf8"));
 const bundle = await validateAgentCoreBundle(bundleRoot, { expectedManifest });
 const testRoot = path.join(repositoryRoot, "spikes", "host-lifecycle");
+const testFilter = process.env.HOST_LIFECYCLE_TEST_FILTER;
 
-const child = spawn(
-  "zig",
-  [
-    "build",
-    "test",
-    `-Dbundle-root=${bundle.root}`,
-    `-Dtarget=${bundle.target}`,
-    "-Doptimize=Debug",
-  ],
-  { cwd: testRoot, stdio: "inherit", detached: true },
-);
+const zigArguments = [
+  "build",
+  "test",
+  `-Dbundle-root=${bundle.root}`,
+  `-Dtarget=${bundle.target}`,
+  "-Doptimize=Debug",
+];
+if (testFilter) zigArguments.push(`-Dtfilter=${testFilter}`);
+
+const child = spawn("zig", zigArguments, {
+  cwd: testRoot,
+  stdio: "inherit",
+  detached: true,
+});
 let timedOut = false;
 const timeout = setTimeout(() => {
   timedOut = true;

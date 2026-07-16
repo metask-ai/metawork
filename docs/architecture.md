@@ -248,7 +248,7 @@ Native SDK 是当前选型，但 Phase 0A 必须验证：
 | 风险 | 当前控制方式 |
 | --- | --- |
 | Native SDK Zig → React 路径不符合预期 | Gate 0 先做真实 dev/prod smoke |
-| raw SDK 缺少类型化校验 | Gate 3 是正式 Host 硬门槛 |
+| typed SDK 与真实 producer wire 漂移 | Gate 3 source-free corpus + Gate 4 真实 Host link/run 回归 |
 | callback 数据返回后失效 | callback 内验证并深拷贝 |
 | callback/close race 造成 UAF | abort、join、callback quiescence 后 destroy |
 | 同步 UI 耗尽 executor | bounded slots、deadline、cancel/close/shutdown 唤醒和压力测试 |

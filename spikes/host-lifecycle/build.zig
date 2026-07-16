@@ -3,6 +3,7 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const test_filter = b.option([]const u8, "tfilter", "Test name filter");
     const bundle_root = b.option([]const u8, "bundle-root", "Validated AgentCore bundle root") orelse
         @panic("-Dbundle-root is required");
     if (!std.fs.path.isAbsolute(bundle_root)) @panic("-Dbundle-root must be absolute");
@@ -37,7 +38,10 @@ pub fn build(b: *std.Build) void {
     });
     tests.addImport("host_lifecycle", lifecycle);
     tests.addImport("metacodes_agentcore", sdk);
-    const test_artifact = b.addTest(.{ .root_module = tests });
+    const test_artifact = b.addTest(.{
+        .root_module = tests,
+        .filters = if (test_filter) |filter| &.{filter} else &.{},
+    });
     const run = b.addRunArtifact(test_artifact);
     const step = b.step("test", "Run deterministic Host lifecycle and security tests");
     step.dependOn(&run.step);

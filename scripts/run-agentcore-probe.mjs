@@ -33,12 +33,27 @@ const child = spawn(
     `-Dtarget=${bundle.target}`,
     "-Doptimize=Debug",
   ],
-  { cwd: spikeRoot, stdio: "inherit" },
+  { cwd: spikeRoot, stdio: "inherit", detached: true },
 );
 
-const exitCode = await new Promise((resolve, reject) => {
-  child.once("error", reject);
-  child.once("exit", resolve);
-});
+let timedOut = false;
+const timeout = setTimeout(() => {
+  timedOut = true;
+  try {
+    if (child.pid) process.kill(-child.pid, "SIGKILL");
+  } catch {
+    child.kill("SIGKILL");
+  }
+}, 30_000);
+let exitCode;
+try {
+  exitCode = await new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("exit", resolve);
+  });
+} finally {
+  clearTimeout(timeout);
+}
+if (timedOut) throw new Error("AgentCore contract probe exceeded 30 seconds");
 if (exitCode !== 0)
   throw new Error(`AgentCore contract probe failed with exit code ${exitCode}`);

@@ -109,6 +109,14 @@ pub fn build(b: *std.Build) void {
         .link_libc = link_libc,
     });
     probe_module.addImport("metacodes_agentcore", sdk);
+    const host_lifecycle = b.createModule(.{
+        .root_source_file = b.path("../../src/host/lifecycle.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = link_libc,
+    });
+    host_lifecycle.addImport("metacodes_agentcore", sdk);
+    probe_module.addImport("host_lifecycle", host_lifecycle);
     probe_module.addObjectFile(.{ .cwd_relative = lib_path });
     const probe = b.addExecutable(.{
         .name = "metawork-agentcore-contract-probe",

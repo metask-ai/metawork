@@ -223,6 +223,8 @@ manifest 必须记录精确 cc-zig commit/build identity、binary ABI version、
 
 ### 正式 Host gate
 
+> Gate 4 的正式 Host 消费已通过；证据见 [Phase 0 Gate 4 验证报告](phase-0-gate-4-report.md)。该结果不包含 Gate 5 Bridge/event-pump 完整容量语义。
+
 - typed SDK 完成并通过 source-free consumer；
 - status-before-result 和 diagnostic release 测试；
 - 九个 StopReason 穷尽编译与 unknown code 测试；

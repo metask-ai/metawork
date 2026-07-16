@@ -1,11 +1,15 @@
-//! Gate 2 lifecycle foundation for an injected bundle-owned `ApiV1` table.
-//! This module deliberately does not decode AgentCore events or encode UI
-//! responses. Until the typed SDK and bounded event sink exist, events fail
-//! closed and UI responses remain unavailable. It is not the formal Host.
+//! Formal AgentCore Host binding over the bundle-owned typed SDK and ABI v1.
+//! Core callbacks validate through the SDK, retain only Host-owned data, and
+//! feed a bounded sink. No callback calls WebView or registers Host tools.
 
 const std = @import("std");
 const sdk = @import("metacodes_agentcore");
 const wire = sdk.types;
+const event_sink = @import("event_sink.zig");
+
+pub const EventEnvelope = event_sink.EventEnvelope;
+
+const default_builtin_tools = [_][]const u8{ "Read", "Bash", "Edit", "AskUserQuestion" };
 
 pub const SessionState = enum {
     idle,
@@ -24,6 +28,17 @@ pub const HostCause = enum {
     event_pipeline_failure,
     queue_capacity_failure,
     bridge_pipeline_failure,
+    ui_pipeline_failure,
+    dependency_contract_failure,
+};
+
+pub const RunOutcome = enum {
+    completed,
+    stopped,
+    cancelled,
+    interrupted,
+    failed,
+    dependency_contract_failure,
 };
 
 pub const WorkspaceTrust = union(enum) {
@@ -44,6 +59,7 @@ pub const SessionOpenOptions = struct {
     model: []const u8,
     base_url: []const u8 = "",
     workspace: WorkspaceInput,
+    allowed_tools: []const []const u8 = &default_builtin_tools,
 };
 
 pub const Limits = struct {
@@ -51,6 +67,11 @@ pub const Limits = struct {
     queue_capacity: usize,
     max_sessions: usize,
     max_prompt_bytes: usize = 1024 * 1024,
+    event_capacity: usize = 256,
+    max_event_bytes: usize = 1024 * 1024,
+    max_ui_request_bytes: usize = 256 * 1024,
+    max_ui_response_bytes: usize = 256 * 1024,
+    ui_request_timeout: std.Io.Duration = .fromSeconds(30),
 };
 
 pub const SessionSnapshot = struct {
@@ -61,6 +82,21 @@ pub const SessionSnapshot = struct {
     cause: ?HostCause,
     last_status: ?u32,
     last_abort_status: ?u32,
+    last_stop_reason_code: ?u32,
+    last_outcome: ?RunOutcome,
+};
+
+pub const PendingUiRequest = struct {
+    session_id: u64,
+    run_id: u64,
+    request_id: u64,
+    json: []u8,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *PendingUiRequest) void {
+        self.allocator.free(self.json);
+        self.* = undefined;
+    }
 };
 
 pub const Error = error{
@@ -77,9 +113,12 @@ pub const Error = error{
     SessionClosing,
     PromptTooLarge,
     RunIdExhausted,
+    SessionIdExhausted,
     NoSuchRun,
     NoPendingUiRequest,
     StaleUiResponse,
+    InvalidUiResponse,
+    StateNotReached,
     SessionDestroyFailed,
     RuntimeDestroyFailed,
 };
@@ -90,6 +129,11 @@ pub const Host = struct {
     api: sdk.Api,
     runtime: ?*wire.RuntimeHandle,
     max_prompt_bytes: usize,
+    max_event_bytes: usize,
+    max_ui_request_bytes: usize,
+    max_ui_response_bytes: usize,
+    ui_request_timeout: std.Io.Duration,
+    events: event_sink.BoundedEventSink,
     executor: Executor,
     sessions_mutex: std.Io.Mutex = .init,
     shutdown_condition: std.Io.Condition = .init,
@@ -98,6 +142,7 @@ pub const Host = struct {
     shutdown_running: bool = false,
     shutdown_complete: bool = false,
     last_shutdown_error: ?Error = null,
+    next_session_id: u64 = 0,
 
     /// `raw_api` is borrowed for the Host lifetime. Bundle discovery tables
     /// are static; injected test tables must provide the same lifetime.
@@ -108,7 +153,11 @@ pub const Host = struct {
         limits: Limits,
     ) (Error || std.mem.Allocator.Error || std.Thread.SpawnError || error{UnsupportedAbi})!*Host {
         if (limits.worker_count == 0 or limits.queue_capacity == 0 or limits.max_sessions == 0 or
-            limits.max_prompt_bytes == 0)
+            limits.max_prompt_bytes == 0 or limits.event_capacity == 0 or
+            limits.max_event_bytes == 0 or limits.max_ui_request_bytes == 0 or
+            limits.max_ui_response_bytes == 0 or limits.ui_request_timeout.nanoseconds <= 0)
+            return error.InvalidLimits;
+        _ = std.math.mul(usize, limits.event_capacity, limits.max_event_bytes) catch
             return error.InvalidLimits;
         const api = try sdk.Api.validate(raw_api);
         const self = try allocator.create(Host);
@@ -116,14 +165,29 @@ pub const Host = struct {
         const sessions = try allocator.alloc(?*Session, limits.max_sessions);
         errdefer allocator.free(sessions);
         @memset(sessions, null);
+        var events = try event_sink.BoundedEventSink.init(
+            io,
+            allocator,
+            limits.event_capacity,
+            limits.max_event_bytes,
+        );
+        errdefer events.deinit();
 
         var runtime_config = std.mem.zeroes(wire.RuntimeConfigV1);
         runtime_config.struct_size = @sizeOf(wire.RuntimeConfigV1);
+        var builtin_views: [default_builtin_tools.len]wire.BytesViewV1 = undefined;
+        for (default_builtin_tools, 0..) |name, index|
+            builtin_views[index] = sdk.bytesView(name);
+        runtime_config.builtin_tools = &builtin_views;
+        runtime_config.builtin_tool_count = builtin_views.len;
+        runtime_config.host_tools = null;
+        runtime_config.host_tool_count = 0;
         var diagnostic = emptyOwnedBytes();
         var runtime: ?*wire.RuntimeHandle = null;
         const status = api.runtimeCreate()(&runtime_config, &runtime, &diagnostic);
         defer releaseOwned(api, &diagnostic);
-        if (status != wire.STATUS_OK or runtime == null) return error.CoreCallFailed;
+        const typed_status = sdk.Status.fromCode(status) catch return error.CoreCallFailed;
+        if (typed_status != .ok or runtime == null) return error.CoreCallFailed;
         errdefer {
             var destroy_diagnostic = emptyOwnedBytes();
             _ = api.runtimeDestroy()(runtime, &destroy_diagnostic);
@@ -136,6 +200,11 @@ pub const Host = struct {
             .api = api,
             .runtime = runtime,
             .max_prompt_bytes = limits.max_prompt_bytes,
+            .max_event_bytes = limits.max_event_bytes,
+            .max_ui_request_bytes = limits.max_ui_request_bytes,
+            .max_ui_response_bytes = limits.max_ui_response_bytes,
+            .ui_request_timeout = limits.ui_request_timeout,
+            .events = events,
             .executor = undefined,
             .sessions = sessions,
         };
@@ -162,6 +231,9 @@ pub const Host = struct {
             }
         }
         const session_slot = slot orelse return error.SessionCapacity;
+        if (self.next_session_id == std.math.maxInt(u64)) return error.SessionIdExhausted;
+        self.next_session_id += 1;
+        const session_id = self.next_session_id;
 
         const session = try self.allocator.create(Session);
         errdefer self.allocator.destroy(session);
@@ -169,6 +241,7 @@ pub const Host = struct {
         errdefer self.allocator.free(workspace_root);
         session.* = .{
             .host = self,
+            .id = session_id,
             .workspace_root = workspace_root,
         };
 
@@ -193,6 +266,12 @@ pub const Host = struct {
         config.base_url = sdk.bytesView(options.base_url);
         config.workspace_root = sdk.bytesView(workspace_root);
         config.workspace_home = sdk.bytesView(workspace_root);
+        const allowed_views = try self.allocator.alloc(wire.BytesViewV1, options.allowed_tools.len);
+        defer self.allocator.free(allowed_views);
+        for (options.allowed_tools, 0..) |name, index|
+            allowed_views[index] = sdk.bytesView(name);
+        config.allowed_tools = if (allowed_views.len == 0) null else allowed_views.ptr;
+        config.allowed_tool_count = allowed_views.len;
 
         var diagnostic = emptyOwnedBytes();
         var raw_session: ?*wire.SessionHandle = null;
@@ -204,7 +283,8 @@ pub const Host = struct {
             &diagnostic,
         );
         defer releaseOwned(self.api, &diagnostic);
-        if (status != wire.STATUS_OK or raw_session == null) {
+        const typed_status = sdk.Status.fromCode(status) catch return error.CoreCallFailed;
+        if (typed_status != .ok or raw_session == null) {
             return error.CoreCallFailed;
         }
         session.raw = raw_session;
@@ -251,7 +331,8 @@ pub const Host = struct {
             var diagnostic = emptyOwnedBytes();
             const status = self.api.runtimeDestroy()(self.runtime, &diagnostic);
             releaseOwned(self.api, &diagnostic);
-            if (status == wire.STATUS_OK) {
+            const typed_status = sdk.Status.fromCode(status) catch null;
+            if (typed_status == .ok) {
                 self.runtime = null;
             } else {
                 first_error = error.RuntimeDestroyFailed;
@@ -289,6 +370,10 @@ pub const Host = struct {
         self.allocator.destroy(session);
     }
 
+    pub fn takeEvent(self: *Host) ?EventEnvelope {
+        return self.events.take();
+    }
+
     fn finishShutdown(self: *Host, result: ?Error) Error!void {
         self.sessions_mutex.lockUncancelable(self.io);
         self.shutdown_running = false;
@@ -307,6 +392,7 @@ pub const Host = struct {
                 self.allocator.destroy(session);
             }
         }
+        self.events.deinit();
         self.allocator.free(self.sessions);
         const allocator = self.allocator;
         allocator.destroy(self);
@@ -315,6 +401,7 @@ pub const Host = struct {
 
 pub const Session = struct {
     host: *Host,
+    id: u64,
     raw: ?*wire.SessionHandle = null,
     workspace_root: []u8,
     mutex: std.Io.Mutex = .init,
@@ -328,11 +415,16 @@ pub const Session = struct {
     cause: ?HostCause = null,
     last_status: ?u32 = null,
     last_abort_status: ?u32 = null,
+    last_stop_reason_code: ?u32 = null,
+    last_outcome: ?RunOutcome = null,
     cancel_requested: bool = false,
     callback_refs: usize = 0,
     ui_active: bool = false,
     ui_request_id: u64 = 0,
     ui_answered: bool = false,
+    ui_request_json: ?[]u8 = null,
+    ui_request_value: ?*const sdk.UiRequest = null,
+    ui_response_json: ?[]u8 = null,
     close_finished: bool = false,
     close_failed: bool = false,
 
@@ -382,6 +474,8 @@ pub const Session = struct {
         self.cause = null;
         self.last_status = null;
         self.last_abort_status = null;
+        self.last_stop_reason_code = null;
+        self.last_outcome = null;
         self.cancel_requested = false;
         self.state = .queued;
         self.host.executor.enqueue(self) catch |err| {
@@ -435,13 +529,34 @@ pub const Session = struct {
         self.abortRun(run_id, cause);
     }
 
-    pub fn respondUi(self: *Session, run_id: u64, request_id: u64) Error!void {
+    pub fn respondUi(
+        self: *Session,
+        run_id: u64,
+        request_id: u64,
+        response: sdk.UiResponse,
+    ) (Error || std.mem.Allocator.Error)!void {
         self.lock();
         defer self.unlock();
         if (self.state == .closing or self.state == .closed) return error.SessionClosing;
-        if (!self.ui_active) return error.NoPendingUiRequest;
+        if (!self.ui_active) {
+            if (self.ui_request_id != 0 and run_id == self.active_run_id and
+                request_id == self.ui_request_id)
+                return error.StaleUiResponse;
+            return error.NoPendingUiRequest;
+        }
         if (run_id != self.active_run_id or request_id != self.ui_request_id or self.ui_answered)
             return error.StaleUiResponse;
+        const request = self.ui_request_value orelse return error.NoPendingUiRequest;
+        const scratch = try self.host.allocator.alloc(u8, self.host.max_ui_response_bytes);
+        defer self.host.allocator.free(scratch);
+        var fixed = std.heap.FixedBufferAllocator.init(scratch);
+        const bounded = sdk.encodeUiResponse(fixed.allocator(), request.*, response) catch |err| switch (err) {
+            error.OutOfMemory => return error.InvalidUiResponse,
+            error.MismatchedResponse, error.InvalidResponse => return error.InvalidUiResponse,
+        };
+        const encoded = try self.host.allocator.dupe(u8, bounded);
+        std.debug.assert(self.ui_response_json == null);
+        self.ui_response_json = encoded;
         self.ui_answered = true;
         self.ui_active = false;
         self.broadcast();
@@ -453,13 +568,32 @@ pub const Session = struct {
         return if (self.ui_active) self.ui_request_id else null;
     }
 
+    pub fn copyPendingUiRequest(
+        self: *Session,
+        allocator: std.mem.Allocator,
+    ) (Error || std.mem.Allocator.Error)!PendingUiRequest {
+        self.lock();
+        defer self.unlock();
+        const json = self.ui_request_json orelse return error.NoPendingUiRequest;
+        if (!self.ui_active) return error.StaleUiResponse;
+        return .{
+            .session_id = self.id,
+            .run_id = self.active_run_id,
+            .request_id = self.ui_request_id,
+            .json = try allocator.dupe(u8, json),
+            .allocator = allocator,
+        };
+    }
+
     pub fn waitForState(self: *Session, wanted: SessionState) Error!void {
         self.lock();
         defer self.unlock();
-        while (self.state != wanted and self.state != .closed and !self.close_failed)
+        while (self.state != wanted and self.state != .closed and !self.close_failed and
+            !(self.run_done and isRunProgressState(wanted)))
             self.wait();
         if (self.state == wanted) return;
         if (self.close_failed) return error.SessionDestroyFailed;
+        if (self.run_done and isRunProgressState(wanted)) return error.StateNotReached;
         return error.SessionClosing;
     }
 
@@ -482,6 +616,8 @@ pub const Session = struct {
             .cause = self.cause,
             .last_status = self.last_status,
             .last_abort_status = self.last_abort_status,
+            .last_stop_reason_code = self.last_stop_reason_code,
+            .last_outcome = self.last_outcome,
         };
     }
 
@@ -555,9 +691,10 @@ pub const Session = struct {
         var diagnostic = emptyOwnedBytes();
         const status = self.host.api.sessionDestroy()(self.raw, &diagnostic);
         releaseOwned(self.host.api, &diagnostic);
+        const typed_status = sdk.Status.fromCode(status) catch null;
         self.lock();
         self.close_finished = true;
-        if (status == wire.STATUS_OK) {
+        if (typed_status == .ok) {
             self.raw = null;
             self.state = .closed;
             self.close_failed = false;
@@ -592,7 +729,10 @@ pub const Session = struct {
         var options = std.mem.zeroes(wire.RunOptionsV1);
         options.struct_size = @sizeOf(wire.RunOptionsV1);
         options.max_turns = 16;
-        var result: wire.RunResultV1 = undefined;
+        // A successful Core call must still populate and validate the complete
+        // fixed-layout result. Zero initialization makes a missing write fail
+        // deterministically on `struct_size` instead of exposing undefined data.
+        var result = std.mem.zeroes(wire.RunResultV1);
         var diagnostic = emptyOwnedBytes();
         const status = self.host.api.sessionRun()(
             self.raw,
@@ -602,14 +742,36 @@ pub const Session = struct {
             &result,
             &diagnostic,
         );
+        const typed_status = sdk.Status.fromCode(status) catch null;
         releaseOwned(self.host.api, &diagnostic);
 
         self.lock();
         self.host.allocator.free(prompt);
         self.prompt = null;
         self.last_status = status;
-        if (status == wire.STATUS_CALLBACK_FAILED)
-            setCauseLocked(self, .event_pipeline_failure);
+        if (typed_status) |known_status| {
+            if (known_status == .ok) {
+                if (result.struct_size != @sizeOf(wire.RunResultV1) or !allZero(&result.reserved)) {
+                    setCauseLocked(self, .dependency_contract_failure);
+                    self.last_outcome = .dependency_contract_failure;
+                } else {
+                    self.last_stop_reason_code = result.stop_reason_code;
+                    if (sdk.StopReason.fromCode(result.stop_reason_code)) |reason| {
+                        self.last_outcome = applyStopReasonLocked(self, reason);
+                    } else |_| {
+                        setCauseLocked(self, .dependency_contract_failure);
+                        self.last_outcome = .dependency_contract_failure;
+                    }
+                }
+            } else {
+                if (known_status == .callback_failed and self.cause == null)
+                    setCauseLocked(self, .event_pipeline_failure);
+                self.last_outcome = .failed;
+            }
+        } else {
+            setCauseLocked(self, .dependency_contract_failure);
+            self.last_outcome = .dependency_contract_failure;
+        }
         self.run_started = false;
         self.run_done = true;
         if (self.state != .closing) self.state = .idle;
@@ -627,7 +789,12 @@ pub const Session = struct {
         );
         releaseOwned(self.host.api, &diagnostic);
         self.lock();
-        if (self.active_run_id == run_id) self.last_abort_status = status;
+        if (self.active_run_id == run_id) {
+            self.last_abort_status = status;
+            if (sdk.Status.fromCode(status)) |_| {} else |_| {
+                setCauseLocked(self, .dependency_contract_failure);
+            }
+        }
         self.unlock();
     }
 
@@ -637,6 +804,7 @@ pub const Session = struct {
             self.host.allocator.free(prompt);
             self.prompt = null;
         }
+        self.last_outcome = abortedOutcome(self.cause);
         self.run_done = true;
         if (self.state != .closing) self.state = .idle;
         self.broadcast();
@@ -647,6 +815,8 @@ pub const Session = struct {
         std.debug.assert(self.state == .closed);
         std.debug.assert(self.callback_refs == 0);
         if (self.prompt) |prompt| self.host.allocator.free(prompt);
+        if (self.ui_request_json) |json| self.host.allocator.free(json);
+        if (self.ui_response_json) |json| self.host.allocator.free(json);
         self.host.allocator.free(self.workspace_root);
     }
 
@@ -654,55 +824,150 @@ pub const Session = struct {
         context: ?*anyopaque,
         handle: ?*wire.SessionHandle,
         run_id: u64,
-        _: wire.BytesViewV1,
+        event_json: wire.BytesViewV1,
     ) callconv(.c) u32 {
         const self: *Session = @ptrCast(@alignCast(context orelse return wire.CALLBACK_FATAL));
         if (!self.retainCoreCallback(handle, run_id)) return wire.CALLBACK_FATAL;
         defer self.releaseCallback();
-        self.recordCause(.event_pipeline_failure);
-        return wire.CALLBACK_FATAL;
+        const encoded = sdk.borrowedBytes(event_json) catch {
+            self.recordCause(.event_pipeline_failure);
+            return wire.CALLBACK_FATAL;
+        };
+        if (encoded.len > self.host.max_event_bytes) {
+            self.recordCause(.queue_capacity_failure);
+            return wire.CALLBACK_FATAL;
+        }
+        const parsed = sdk.decodeCoreEvent(self.host.allocator, encoded) catch {
+            self.recordCause(.event_pipeline_failure);
+            return wire.CALLBACK_FATAL;
+        };
+        var envelope = EventEnvelope{
+            .session_id = self.id,
+            .run_id = run_id,
+            .encoded_bytes = encoded.len,
+            .event = parsed,
+        };
+        self.host.events.push(envelope) catch |err| {
+            envelope.deinit();
+            self.recordCause(switch (err) {
+                error.EventTooLarge, error.SinkFull => .queue_capacity_failure,
+            });
+            return wire.CALLBACK_FATAL;
+        };
+        return wire.CALLBACK_CONTINUE;
     }
 
     fn onUiRequest(
         context: ?*anyopaque,
         handle: ?*wire.SessionHandle,
-        _: wire.BytesViewV1,
+        request_json: wire.BytesViewV1,
         out_response: ?*wire.OwnedBytesV1,
     ) callconv(.c) u32 {
         if (out_response) |out| out.* = emptyOwnedBytes();
         const self: *Session = @ptrCast(@alignCast(context orelse return wire.UI_FATAL));
+        const output = out_response orelse {
+            self.recordCause(.ui_pipeline_failure);
+            return wire.UI_FATAL;
+        };
         if (!self.retainCoreCallback(handle, null)) return wire.UI_FATAL;
         defer self.releaseCallback();
 
+        const encoded_request = sdk.borrowedBytes(request_json) catch {
+            self.recordCause(.ui_pipeline_failure);
+            return wire.UI_FATAL;
+        };
+        if (encoded_request.len > self.host.max_ui_request_bytes) {
+            self.recordCause(.queue_capacity_failure);
+            return wire.UI_FATAL;
+        }
+        var parsed = sdk.decodeUiRequest(self.host.allocator, encoded_request) catch {
+            self.recordCause(.ui_pipeline_failure);
+            return wire.UI_FATAL;
+        };
+        defer parsed.deinit();
+        const owned_request = self.host.allocator.dupe(u8, encoded_request) catch {
+            self.recordCause(.ui_pipeline_failure);
+            return wire.UI_FATAL;
+        };
+
         self.lock();
         if (self.state != .running or self.ui_active) {
+            setCauseLocked(self, .ui_pipeline_failure);
             self.unlock();
+            self.host.allocator.free(owned_request);
             return wire.UI_FATAL;
         }
         if (self.ui_request_id == std.math.maxInt(u64)) {
+            setCauseLocked(self, .dependency_contract_failure);
             self.unlock();
+            self.host.allocator.free(owned_request);
             return wire.UI_FATAL;
         }
         self.ui_request_id += 1;
+        const request_id = self.ui_request_id;
         self.ui_active = true;
         self.ui_answered = false;
+        std.debug.assert(self.ui_request_json == null);
+        std.debug.assert(self.ui_request_value == null);
+        std.debug.assert(self.ui_response_json == null);
+        self.ui_request_json = owned_request;
+        self.ui_request_value = &parsed.value;
         self.state = .waiting_ui;
-        self.broadcast();
-        while (self.ui_active and self.state == .waiting_ui)
-            self.wait();
-        if (self.state == .waiting_ui) self.state = .running;
-        const answered = self.ui_answered;
         self.broadcast();
         self.unlock();
 
-        // Gate 2 intentionally does not encode UiResponse JSON. A successful
-        // wake proves lifecycle only; Gate 3 must provide the real encoder.
-        _ = answered;
+        var timer = self.host.io.async(expireUiRequest, .{ self, request_id });
+        self.lock();
+        while (self.ui_active and self.state == .waiting_ui)
+            self.wait();
+        if (self.state == .waiting_ui) self.state = .running;
+        const answered = self.ui_answered and self.cause == null and self.state != .closing;
+        const response = self.ui_response_json;
+        self.ui_response_json = null;
+        const request_copy = self.ui_request_json.?;
+        self.ui_request_json = null;
+        self.ui_request_value = null;
+        self.broadcast();
+        self.unlock();
+
+        timer.cancel(self.host.io) catch |err| switch (err) {
+            error.Canceled => {},
+        };
+        self.host.allocator.free(request_copy);
+
+        if (answered) {
+            const bytes = response orelse {
+                self.recordCause(.ui_pipeline_failure);
+                return wire.UI_FATAL;
+            };
+            output.* = .{ .ptr = bytes.ptr, .len = bytes.len };
+            return wire.UI_ANSWERED;
+        }
+        if (response) |bytes| self.host.allocator.free(bytes);
         return wire.UI_UNAVAILABLE;
     }
 
-    fn releaseUiResponse(_: ?*anyopaque, out: ?*wire.OwnedBytesV1) callconv(.c) void {
-        if (out) |value| value.* = emptyOwnedBytes();
+    fn expireUiRequest(self: *Session, request_id: u64) std.Io.Cancelable!void {
+        try self.host.io.sleep(self.host.ui_request_timeout, .awake);
+        self.lock();
+        defer self.unlock();
+        if (self.ui_active and self.ui_request_id == request_id) {
+            self.ui_active = false;
+            if (self.state == .waiting_ui) self.state = .running;
+            self.broadcast();
+        }
+    }
+
+    fn releaseUiResponse(context: ?*anyopaque, out: ?*wire.OwnedBytesV1) callconv(.c) void {
+        const self: *Session = @ptrCast(@alignCast(context orelse return));
+        const value = out orelse return;
+        const len = std.math.cast(usize, value.len) orelse return;
+        const ptr = value.ptr orelse {
+            value.* = emptyOwnedBytes();
+            return;
+        };
+        self.host.allocator.free(ptr[0..len]);
+        value.* = emptyOwnedBytes();
     }
 
     fn retainCoreCallback(
@@ -888,6 +1153,46 @@ fn pathWithin(parent: []const u8, child: []const u8) bool {
 
 fn setCauseLocked(self: *Session, cause: HostCause) void {
     if (self.cause == null) self.cause = cause;
+}
+
+fn isRunProgressState(state: SessionState) bool {
+    return state == .queued or state == .running or state == .waiting_ui;
+}
+
+fn applyStopReasonLocked(self: *Session, reason: sdk.StopReason) RunOutcome {
+    return switch (reason) {
+        .invalid => outcome: {
+            setCauseLocked(self, .dependency_contract_failure);
+            break :outcome .dependency_contract_failure;
+        },
+        .end_turn => .completed,
+        .max_turns, .tool_loop, .budget => .stopped,
+        .aborted => abortedOutcome(self.cause),
+        .tool_error, .api_error => .failed,
+        .suspended, .backgrounded => outcome: {
+            setCauseLocked(self, .dependency_contract_failure);
+            break :outcome .dependency_contract_failure;
+        },
+    };
+}
+
+fn abortedOutcome(cause: ?HostCause) RunOutcome {
+    const value = cause orelse return .failed;
+    return switch (value) {
+        .user_cancel, .timeout => .cancelled,
+        .session_close, .host_shutdown => .interrupted,
+        .event_pipeline_failure,
+        .queue_capacity_failure,
+        .bridge_pipeline_failure,
+        .ui_pipeline_failure,
+        .dependency_contract_failure,
+        => .failed,
+    };
+}
+
+fn allZero(values: []const u64) bool {
+    for (values) |value| if (value != 0) return false;
+    return true;
 }
 
 fn abortReason(cause: HostCause) u32 {

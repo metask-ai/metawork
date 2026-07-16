@@ -10,6 +10,13 @@ const Plan = enum {
     callback_failed,
     controlled_callback_failed,
     event_callback,
+    malformed_event_callback,
+    malformed_ui_callback,
+    suspended_result,
+    backgrounded_result,
+    unknown_stop_result,
+    invalid_result_layout,
+    unknown_status,
 };
 
 const FakeRuntime = struct {};
@@ -59,6 +66,7 @@ const FakeCore = struct {
     buffer_releases: usize = 0,
     credential_seen: bool = false,
     zero_host_tools_seen: bool = false,
+    builtin_allowlist_seen: bool = false,
     session_destroy_failures: usize = 0,
     runtime_destroy_failures: usize = 0,
     session_create_failures: usize = 0,
@@ -147,8 +155,8 @@ fn runtimeCreate(
     fake_core.runtime_created += 1;
     fake_core.zero_host_tools_seen = config.?.host_tools == null and
         config.?.host_tool_count == 0 and
-        config.?.builtin_tools == null and
-        config.?.builtin_tool_count == 0;
+        config.?.builtin_tools != null and
+        config.?.builtin_tool_count == 4;
     out_runtime.?.* = @ptrCast(&fake_core.runtime);
     return wire.STATUS_OK;
 }
@@ -212,6 +220,8 @@ fn sessionCreate(
             fake_core.next_plan = .immediate;
             fake_core.session_created += 1;
             fake_core.credential_seen = std.mem.eql(u8, key, "fixture-secret");
+            fake_core.builtin_allowlist_seen = config.?.allowed_tools != null and
+                config.?.allowed_tool_count == 4;
             out_session.?.* = @ptrCast(session);
             return wire.STATUS_OK;
         }
@@ -276,12 +286,16 @@ fn sessionRun(
     session.broadcast();
     session.unlock();
 
-    if (plan == .event_callback) {
+    if (plan == .event_callback or plan == .malformed_event_callback) {
         const callback = session.callbacks.on_event orelse {
             diagnostic(out_error);
             return wire.STATUS_CALLBACK_FAILED;
         };
-        if (callback(session.callbacks.ctx, handle, run_id, sdk.bytesView("{}")) != wire.CALLBACK_CONTINUE) {
+        var event_buffer = "{\"text_chunk\":\"typed event\"}".*;
+        const event_json: []const u8 = if (plan == .event_callback) &event_buffer else "{}";
+        const callback_status = callback(session.callbacks.ctx, handle, run_id, sdk.bytesView(event_json));
+        @memset(&event_buffer, 'x');
+        if (callback_status != wire.CALLBACK_CONTINUE) {
             session.lock();
             session.running = false;
             session.broadcast();
@@ -291,13 +305,40 @@ fn sessionRun(
         }
     }
 
-    if (plan == .ui_wait) {
+    if (plan == .ui_wait or plan == .malformed_ui_callback) {
         var response = wire.OwnedBytesV1{ .ptr = null, .len = 0 };
         const callback = session.callbacks.on_ui_request orelse {
             diagnostic(out_error);
             return wire.STATUS_CALLBACK_FAILED;
         };
-        _ = callback(session.callbacks.ctx, handle, sdk.bytesView("{}"), &response);
+        const request_json = if (plan == .ui_wait)
+            "{\"permission\":{\"tool\":\"Bash\",\"args\":\"{}\"}}"
+        else
+            "{}";
+        const callback_status = callback(
+            session.callbacks.ctx,
+            handle,
+            sdk.bytesView(request_json),
+            &response,
+        );
+        if (callback_status == wire.UI_ANSWERED) {
+            const release = session.callbacks.release_response orelse {
+                diagnostic(out_error);
+                return wire.STATUS_CALLBACK_FAILED;
+            };
+            release(session.callbacks.ctx, &response);
+            if (response.ptr != null or response.len != 0) {
+                diagnostic(out_error);
+                return wire.STATUS_CALLBACK_FAILED;
+            }
+        } else if (callback_status == wire.UI_FATAL) {
+            session.lock();
+            session.running = false;
+            session.broadcast();
+            session.unlock();
+            diagnostic(out_error);
+            return wire.STATUS_CALLBACK_FAILED;
+        }
     }
 
     session.lock();
@@ -313,10 +354,26 @@ fn sessionRun(
         diagnostic(out_error);
         return wire.STATUS_CALLBACK_FAILED;
     }
+    if (plan == .unknown_status) {
+        if (out_result) |result| {
+            result.* = std.mem.zeroes(wire.RunResultV1);
+            result.struct_size = @sizeOf(wire.RunResultV1);
+            result.stop_reason_code = wire.STOP_END_TURN;
+        }
+        diagnostic(out_error);
+        return 42;
+    }
     if (out_result) |result| {
         result.* = std.mem.zeroes(wire.RunResultV1);
-        result.struct_size = @sizeOf(wire.RunResultV1);
-        result.stop_reason_code = if (aborted) wire.STOP_ABORTED else wire.STOP_END_TURN;
+        result.struct_size = if (plan == .invalid_result_layout) 0 else @sizeOf(wire.RunResultV1);
+        result.stop_reason_code = if (aborted)
+            wire.STOP_ABORTED
+        else switch (plan) {
+            .suspended_result => wire.STOP_SUSPENDED,
+            .backgrounded_result => wire.STOP_BACKGROUNDED,
+            .unknown_stop_result => 42,
+            else => wire.STOP_END_TURN,
+        };
     }
     return wire.STATUS_OK;
 }
@@ -423,6 +480,7 @@ test "Host creates and destroys Runtime and idle Session" {
     const session = try openSession(host);
     try std.testing.expect(fake_core.credential_seen);
     try std.testing.expect(fake_core.zero_host_tools_seen);
+    try std.testing.expect(fake_core.builtin_allowlist_seen);
     try std.testing.expectEqual(lifecycle.SessionState.idle, session.snapshot().state);
     try session.close(.session_close);
     try session.close(.session_close);
@@ -496,6 +554,15 @@ test "bounded executor rejects overflow and close cancels a queued Run" {
     try std.testing.expectEqual(lifecycle.SessionState.idle, rejected.snapshot().state);
 
     try queued.close(.session_close);
+    const queued_snapshot = queued.snapshot();
+    try std.testing.expectEqual(
+        @as(?lifecycle.HostCause, .session_close),
+        queued_snapshot.cause,
+    );
+    try std.testing.expectEqual(
+        @as(?lifecycle.RunOutcome, .interrupted),
+        queued_snapshot.last_outcome,
+    );
     fake_core.lock();
     const calls_before_release = fake_core.run_calls;
     fake_core.unlock();
@@ -555,16 +622,16 @@ test "closing an active Run aborts, joins, and preserves the first HostCause" {
     try std.testing.expectEqual(@as(usize, 1), abort_calls);
 }
 
-test "raw lifecycle fails closed instead of silently dropping Core events" {
+test "malformed Core events fail the Run instead of entering the bounded sink" {
     fake_core.reset();
-    fake_core.setNextPlan(.event_callback);
+    fake_core.setNextPlan(.malformed_event_callback);
     const host = try createHost(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
     defer {
         host.shutdown() catch unreachable;
         host.deinit();
     }
     const session = try openSession(host);
-    const run_id = try session.submit("emit without a sink");
+    const run_id = try session.submit("emit malformed event");
     try session.waitRun(run_id);
     const snapshot = session.snapshot();
     try std.testing.expectEqual(@as(?u32, wire.STATUS_CALLBACK_FAILED), snapshot.last_status);
@@ -572,11 +639,76 @@ test "raw lifecycle fails closed instead of silently dropping Core events" {
         @as(?lifecycle.HostCause, .event_pipeline_failure),
         snapshot.cause,
     );
+    try std.testing.expect(host.takeEvent() == null);
     try session.close(.session_close);
     fake_core.lock();
     const releases = fake_core.buffer_releases;
     fake_core.unlock();
     try std.testing.expectEqual(@as(usize, 1), releases);
+}
+
+test "typed Core events are deep-copied into a bounded routed sink" {
+    fake_core.reset();
+    fake_core.setNextPlan(.event_callback);
+    const host = try createHost(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 1,
+        .event_capacity = 2,
+    });
+    defer {
+        host.shutdown() catch unreachable;
+        host.deinit();
+    }
+    const session = try openSession(host);
+    const first_run = try session.submit("emit typed event");
+    try session.waitRun(first_run);
+    const first_snapshot = session.snapshot();
+    try std.testing.expectEqual(@as(?u32, wire.STATUS_OK), first_snapshot.last_status);
+    try std.testing.expectEqual(@as(?u32, wire.STOP_END_TURN), first_snapshot.last_stop_reason_code);
+    try std.testing.expectEqual(@as(?lifecycle.RunOutcome, .completed), first_snapshot.last_outcome);
+
+    const second_run = try session.submit("preserve FIFO order");
+    try session.waitRun(second_run);
+    const second_snapshot = session.snapshot();
+    try std.testing.expectEqual(@as(?lifecycle.RunOutcome, .completed), second_snapshot.last_outcome);
+
+    var envelope = host.takeEvent().?;
+    defer envelope.deinit();
+    try std.testing.expect(envelope.session_id != 0);
+    try std.testing.expectEqual(first_run, envelope.run_id);
+    try std.testing.expectEqualStrings("typed event", envelope.event.value.text_chunk);
+    var second = host.takeEvent().?;
+    try std.testing.expectEqual(second_run, second.run_id);
+    second.deinit();
+    try session.close(.session_close);
+}
+
+test "bounded event sink overflow returns callback fatal and preserves HostCause" {
+    fake_core.reset();
+    fake_core.setNextPlan(.event_callback);
+    const host = try createHost(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 1,
+        .event_capacity = 1,
+    });
+    defer {
+        host.shutdown() catch unreachable;
+        host.deinit();
+    }
+    const session = try openSession(host);
+    const first_run = try session.submit("retain first event");
+    try session.waitRun(first_run);
+    const second_run = try session.submit("overflow sink");
+    try session.waitRun(second_run);
+    const snapshot = session.snapshot();
+    try std.testing.expectEqual(@as(?u32, wire.STATUS_CALLBACK_FAILED), snapshot.last_status);
+    try std.testing.expectEqual(@as(?lifecycle.HostCause, .queue_capacity_failure), snapshot.cause);
+    try std.testing.expectEqual(@as(?lifecycle.RunOutcome, .failed), snapshot.last_outcome);
+    var retained = host.takeEvent().?;
+    retained.deinit();
+    try session.close(.session_close);
 }
 
 test "UI request validates identity and close wakes a suspended callback" {
@@ -591,10 +723,22 @@ test "UI request validates identity and close wakes a suspended callback" {
     const run_id = try answered.submit("request UI");
     try answered.waitForState(.waiting_ui);
     const request_id = answered.pendingUiRequest().?;
-    try std.testing.expectError(error.StaleUiResponse, answered.respondUi(run_id + 1, request_id));
-    try std.testing.expectError(error.StaleUiResponse, answered.respondUi(run_id, request_id + 1));
-    try answered.respondUi(run_id, request_id);
-    try std.testing.expectError(error.NoPendingUiRequest, answered.respondUi(run_id, request_id));
+    var pending = try answered.copyPendingUiRequest(std.testing.allocator);
+    defer pending.deinit();
+    try std.testing.expectEqual(run_id, pending.run_id);
+    try std.testing.expectEqual(request_id, pending.request_id);
+    var decoded = try sdk.decodeUiRequest(std.testing.allocator, pending.json);
+    defer decoded.deinit();
+    try std.testing.expectEqual(std.meta.Tag(sdk.UiRequest).permission, std.meta.activeTag(decoded.value));
+    const response = sdk.UiResponse{ .permission = .allow_once };
+    try std.testing.expectError(error.StaleUiResponse, answered.respondUi(run_id + 1, request_id, response));
+    try std.testing.expectError(error.StaleUiResponse, answered.respondUi(run_id, request_id + 1, response));
+    try std.testing.expectError(
+        error.InvalidUiResponse,
+        answered.respondUi(run_id, request_id, .{ .custom = "{}" }),
+    );
+    try answered.respondUi(run_id, request_id, response);
+    try std.testing.expectError(error.StaleUiResponse, answered.respondUi(run_id, request_id, response));
     fake_core.releaseControlled();
     try answered.waitRun(run_id);
     try answered.close(.session_close);
@@ -619,6 +763,113 @@ test "UI request validates identity and close wakes a suspended callback" {
         cancelled.snapshot().cause,
     );
     try cancelled.close(.session_close);
+}
+
+test "UI deadline returns unavailable and malformed UI fails the Run" {
+    fake_core.reset();
+    fake_core.setNextPlan(.ui_wait);
+    const host = try createHost(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 2,
+        .ui_request_timeout = .fromMilliseconds(20),
+    });
+    defer {
+        host.shutdown() catch unreachable;
+        host.deinit();
+    }
+    const timed_out = try openSession(host);
+    const timeout_run = try timed_out.submit("let UI expire");
+    try timed_out.waitForState(.waiting_ui);
+    try timed_out.waitForState(.running);
+    try std.testing.expect(timed_out.pendingUiRequest() == null);
+    fake_core.releaseControlled();
+    try timed_out.waitRun(timeout_run);
+    try std.testing.expectEqual(
+        @as(?lifecycle.RunOutcome, .completed),
+        timed_out.snapshot().last_outcome,
+    );
+    try timed_out.close(.session_close);
+
+    fake_core.setNextPlan(.malformed_ui_callback);
+    const malformed = try openSession(host);
+    const malformed_run = try malformed.submit("malformed UI request");
+    try malformed.waitRun(malformed_run);
+    const malformed_snapshot = malformed.snapshot();
+    try std.testing.expectEqual(@as(?u32, wire.STATUS_CALLBACK_FAILED), malformed_snapshot.last_status);
+    try std.testing.expectEqual(@as(?lifecycle.HostCause, .ui_pipeline_failure), malformed_snapshot.cause);
+    try std.testing.expectEqual(@as(?lifecycle.RunOutcome, .failed), malformed_snapshot.last_outcome);
+    try malformed.close(.session_close);
+}
+
+test "UI response encoding is bounded before ownership transfer" {
+    fake_core.reset();
+    fake_core.setNextPlan(.ui_wait);
+    const host = try createHost(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 1,
+        .max_ui_response_bytes = 8,
+    });
+    defer {
+        host.shutdown() catch unreachable;
+        host.deinit();
+    }
+    const session = try openSession(host);
+    const run_id = try session.submit("bound response");
+    try session.waitForState(.waiting_ui);
+    const request_id = session.pendingUiRequest().?;
+    try std.testing.expectError(
+        error.InvalidUiResponse,
+        session.respondUi(run_id, request_id, .{ .permission = .allow_once }),
+    );
+    try std.testing.expectEqual(request_id, session.pendingUiRequest().?);
+    try session.requestCancel(run_id, .user_cancel);
+    try session.waitRun(run_id);
+    try std.testing.expectEqual(
+        @as(?lifecycle.RunOutcome, .cancelled),
+        session.snapshot().last_outcome,
+    );
+    try session.close(.session_close);
+}
+
+test "status is validated before RunResult and unsupported stop reasons fail dependency contract" {
+    fake_core.reset();
+    const host = try createHost(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 5 });
+    defer {
+        host.shutdown() catch unreachable;
+        host.deinit();
+    }
+
+    const cases = [_]struct {
+        plan: Plan,
+        expected_status: u32,
+        expected_stop: ?u32,
+    }{
+        .{ .plan = .suspended_result, .expected_status = wire.STATUS_OK, .expected_stop = wire.STOP_SUSPENDED },
+        .{ .plan = .backgrounded_result, .expected_status = wire.STATUS_OK, .expected_stop = wire.STOP_BACKGROUNDED },
+        .{ .plan = .unknown_stop_result, .expected_status = wire.STATUS_OK, .expected_stop = 42 },
+        .{ .plan = .invalid_result_layout, .expected_status = wire.STATUS_OK, .expected_stop = null },
+        .{ .plan = .unknown_status, .expected_status = 42, .expected_stop = null },
+    };
+    for (cases) |case| {
+        fake_core.setNextPlan(case.plan);
+        const session = try openSession(host);
+        const run_id = try session.submit("validate result boundary");
+        try session.waitRun(run_id);
+        const snapshot = session.snapshot();
+        try std.testing.expectEqual(@as(?u32, case.expected_status), snapshot.last_status);
+        try std.testing.expectEqual(case.expected_stop, snapshot.last_stop_reason_code);
+        try std.testing.expectEqual(
+            @as(?lifecycle.HostCause, .dependency_contract_failure),
+            snapshot.cause,
+        );
+        try std.testing.expectEqual(
+            @as(?lifecycle.RunOutcome, .dependency_contract_failure),
+            snapshot.last_outcome,
+        );
+        try session.close(.session_close);
+    }
 }
 
 test "concurrent close waits for callback quiescence and destroys once" {
@@ -829,7 +1080,7 @@ test "concurrent Host shutdown serializes executor and Runtime destruction" {
 
 test "Host initialization OOM destroys the already-created Runtime" {
     fake_core.reset();
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 2 });
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 3 });
     try std.testing.expectError(error.OutOfMemory, lifecycle.Host.init(
         std.testing.io,
         failing.allocator(),

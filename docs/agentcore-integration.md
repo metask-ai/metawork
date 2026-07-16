@@ -92,7 +92,7 @@ AgentCore/tool thread
 - 无法验证、复制或接收关键事件时返回 callback fatal；
 - callback 不等待 WebView，也不调用 Session destroy 或 re-enter Run。
 
-Gate 4 正式接入时先连接有界测试 sink。只有 callback、生命周期和 typed SDK 测试通过后，Gate 5 才接真实 Native SDK Bridge。
+Gate 4 已把正式 Host 连接到 FIFO bounded test sink，并通过 typed callback、生命周期、同步 UI 和真实 bundle link/run 验证。Gate 5 才接真实 Native SDK Bridge，并补 per-Session fairness、control reserve、batching 和 reload retention。
 
 ### UI request callback
 
@@ -174,6 +174,8 @@ Open.*
 - Run 返回不等于可以立刻 free callback context，必须确认 callback refcount 为零。
 
 Gate 2 的 raw lifecycle foundation 使用 bundle SDK 提供的精确 `ApiV1` table 作为可注入依赖，并显式接收 Zig `std.Io` 来实现 mutex/condition；它不导入 cc-zig source tree，也不建立 Adapter。`submit` 在持有 Session lock 时完成 bounded executor enqueue，避免 enqueue 与 close 之间出现未入队的悬空 `Queued` 状态。Core callback 在 `Closing` 后不得再取得新的 lifetime reference；已经进入的 callback 必须在 destroy 前归零。
+
+Gate 4 在同一状态机上直接加入 bundle typed SDK，不另建 Adapter：event callback 先校验并形成 SDK-owned parse owner，再以单调 Host Session ID 和 Run ID 进入 FIFO bounded sink；UI callback 保留校验后的 request owner，response 只由 request-aware SDK encoder 生成。同步 UI deadline 使用 Host `std.Io` future，response、cancel、close、shutdown 或 deadline 都在 callback 返回前收敛并回收 timer。
 
 ### Close 顺序
 
