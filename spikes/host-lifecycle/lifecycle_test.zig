@@ -1157,7 +1157,7 @@ test "Gate 6 Workbench closes off-thread and exposes retryable close failure" {
     try waitWorkbenchSnapshot(&workbench, "\"closeFailed\":true");
 
     try workbench.closeSession(session_id);
-    try waitWorkbenchSnapshot(&workbench, "\"state\":\"closed\"");
+    try waitWorkbenchSnapshot(&workbench, "\"lifecycle\":\"closed\"");
     fake_core.lock();
     const destroyed = fake_core.session_destroyed;
     fake_core.unlock();
@@ -1182,7 +1182,7 @@ test "Gate 6 Workbench close cancels a queued Run without blocking the caller" {
     const session_id = try workbench.createSession(workbenchSessionOptions());
     _ = try workbench.submit(session_id, "close this run");
     try workbench.closeSession(session_id);
-    try waitWorkbenchSnapshot(&workbench, "\"state\":\"closed\"");
+    try waitWorkbenchSnapshot(&workbench, "\"lifecycle\":\"closed\"");
     fake_core.lock();
     const abort_calls = fake_core.abort_calls;
     const destroyed = fake_core.session_destroyed;
