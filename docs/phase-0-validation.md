@@ -1,6 +1,6 @@
 # MetaWork Phase 0 验证计划
 
-> 状态：执行中；Gate 0 至 Gate 5 已通过
+> 状态：Phase 0A Gate 0 至 Gate 7 已通过；下一阶段为分发与后续 capability
 > 平台：Phase 0A macOS-first；Phase 0B 后续验证 Windows
 
 Phase 0 用最小真实原型验证技术栈和关键风险，不交付完整产品。当前 AgentCore bundle 是 experimental ABI revision 1，同步 baseline 不包含 async suspend/resume、跨进程恢复、strict Workspace security 或正式 Host tools。
@@ -334,7 +334,7 @@ Gate 4 通过时的 sink 只提供全局 event count 和单 event bytes 硬上�
 
 ### 依赖前置条件
 
-Gate 6 默认继续消费 Gate 3 至 Gate 5 已验收的 clean bundle `0.0.0-dev+ab75314a3dcb`。cc-zig source checkout 的新 commit、目录改名或 ABI layout 未变化，都不能代替 bundle 升级验收。任何新 bundle 必须先通过 manifest/checksum identity、artifact-only link/run 和完整 typed SDK contract；缺少 typed protocol module 或 validator/codec 时不得切换，也不得由 MetaWork 复制协议补齐。
+Gate 6 已切换并精确锁定 clean bundle `0.0.0-dev+3237ac3fc4df`。该升级先通过 manifest/checksum identity、artifact-only link/run、完整 typed SDK contract 和独立 clean consumer，再进入正式应用 build graph；MetaWork 没有访问 metacodes source tree 或复制协议。锁定规格与实测见 [Gate 6 验证报告](phase-0-gate-6-report.md)。
 
 ### 最小 UI
 
@@ -376,9 +376,13 @@ Gate 6 默认继续消费 Gate 3 至 Gate 5 已验收的 clean bundle `0.0.0-dev
 - reload 语义可信且不冒充进程恢复；
 - 可复现的 build/test/run 命令进入仓库。
 
-Gate 6 结束只能称“同进程 macOS 同步原型”。
+> 状态：已通过。可复现证据见 [Phase 0 Gate 6 验证报告](phase-0-gate-6-report.md)。
+
+Gate 6 验收当时只能称“同进程 macOS 同步原型”；完成下述 Gate 7 后才达到完整 Phase 0A。
 
 ## 12. Gate 7：fault-domain spike
+
+> 状态：已通过。实测数据、限制和进程模型决定见 [Phase 0 Gate 7 验证报告](phase-0-gate-7-report.md)。后续正式方向选择单 AgentCore Worker；当前应用仍是同进程 prototype。
 
 故障注入必须放在独立测试进程，避免测试 runner 自身被 native crash 终止。
 
@@ -416,6 +420,8 @@ Gate 6 结束只能称“同进程 macOS 同步原型”。
 - 或列出缺失证据并继续验证。
 
 没有数据不得默认单进程，也不得因为“IPC 更安全”直接建设复杂 Worker。
+
+本 Gate 的结论是选择单 AgentCore Worker 作为后续正式故障域。该结论不冻结 spike IPC，不提供 Run 自动恢复，也不证明当前同进程应用已经具备隔离。
 
 ## 13. Phase 0A 完成判据
 

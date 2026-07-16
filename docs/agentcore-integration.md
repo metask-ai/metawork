@@ -1,7 +1,7 @@
 # MetaWork AgentCore 集成契约
 
-> 状态：同步 ABI v1 集成边界已确认；容量参数待 Phase 0A 实测
-> 依赖：cc-zig AgentCore bundle
+> 状态：Phase 0A Gate 6 同进程垂直链路与 Gate 7 fault-domain 对照均已通过；后续正式方向选择单 AgentCore Worker
+> 依赖：metacodes（原 cc-zig）AgentCore bundle `0.0.0-dev+3237ac3fc4df`
 
 本文定义 MetaWork Zig Host 与 cc-zig 之间的规范边界。系统整体结构见 [高层架构](architecture.md)，当前预编译库能力见 [AgentCore ABI v1 消费基线](agentcore-abi-v1.md)。
 
@@ -51,7 +51,7 @@ AgentCore bundle
 - 不能成为产品状态映射或 UI JSON 解析实现；
 - 不能注册到 React/Native SDK 正式链路。
 
-clean bundle `ab75314a3dcb595509862a9b54b3bf3b4d3a44c0` 已提供 typed status、StopReason、`CoreEvent` / `UiRequest` decoder 和 request-aware `UiResponse` encoder，并通过 MetaWork Gate 3 source-free consumer。正式 Host 必须直接使用这些表面；MetaWork 不手写 raw enum、tag switch 或 JSON schema。
+当前 clean bundle `3237ac3fc4df95009f91eb6bad97d83a26958a0f` 已提供 typed status、StopReason、`CoreEvent` / `UiRequest` decoder 和 request-aware `UiResponse` encoder，并重新通过 source-free consumer、真实 link/run 和 Gate 6 正式 Host 垂直测试。正式 Host 直接使用这些表面；MetaWork 不手写 raw enum、tag switch 或 JSON schema。
 
 ## 3. 当前协议表面
 
@@ -92,7 +92,7 @@ AgentCore/tool thread
 - 无法验证、复制或接收关键事件时返回 callback fatal；
 - callback 不等待 WebView，也不调用 Session destroy 或 re-enter Run。
 
-Gate 4 把正式 Host 连接到 FIFO bounded test sink，并通过 typed callback、生命周期、同步 UI 和真实 bundle link/run 验证。Gate 5 已将它替换为 per-Session/global count+bytes、control reserve 和 deadline 受限的 Event pump，并以真实 Native SDK Bridge 验证 batching、object fetch/ack 和 reload generation；正式 AgentCore→Renderer 垂直接线仍属于 Gate 6。
+Gate 4 把正式 Host 连接到 FIFO bounded test sink，并通过 typed callback、生命周期、同步 UI 和真实 bundle link/run 验证。Gate 5 将它替换为 per-Session/global count+bytes、control reserve 和 deadline 受限的 Event pump。Gate 6 已完成正式 AgentCore→Workbench projection→Native SDK Bridge→React 垂直接线，并验证同步权限、AskUserQuestion、Renderer reload、终态和异步 Session close；详见 [Gate 6 报告](phase-0-gate-6-report.md)。
 
 ### UI request callback
 
@@ -439,11 +439,8 @@ stop 不进入普通 FIFO，不能被文本或 queue message 阻塞。abort 只�
 
 ## 15. 进程模型
 
-当前先实现同进程 bounded executor，得到最小真实数据。完整 Phase 0A 还必须：
+Gate 7 已在独立测试进程完成同进程 fatal baseline 和最小 Worker harness。结果是同进程 fatal 会带走 Host 与全部进程内 Session；Worker crash 时 Host 与已有产品 snapshot 可继续存活，归属 active Run 进入 `interrupted/worker_disconnected`，危险工具不自动重放。因此后续正式方向选择单 AgentCore Worker。
 
-1. 在独立测试进程注入 AgentCore/tool fatal crash，记录 Host 与全部 Session 的影响；
-2. 建立隔离的最小 Worker harness，验证 Host 存活、Session 失败、重启时间和危险工具不自动重放；
-3. 根据故障影响、资源、吞吐和复杂度选择同进程或单 Worker；
-4. 不把 spike IPC 当作正式产品协议；只有决定使用 Worker 后才设计版本化 IPC。
+当前应用仍是同进程 bounded-executor prototype。正式 Worker 尚未实现，spike IPC 不是产品协议。后续必须单独定义版本化 transport、容量/backpressure、ownership、correlation、credential、disconnect 和 shutdown；在 AgentCore 没有 checkpoint capability 时，Worker restart 不等于 Run 或 Conversation 恢复。
 
 Renderer 始终只面对 Host 领域命令和产品 envelope，不直接绑定 Worker 或 AgentCore memory。

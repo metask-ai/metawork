@@ -166,7 +166,7 @@ Turn 是用户提交的一次交互；Run 是 AgentCore 为该交互进行的一
 
 ### 7.2 完整 Phase 0A
 
-同步原型通过后，必须完成事件泵数据、生命周期压力测试和同进程/最小 Worker fault-domain spike，才能结束 Phase 0A。
+事件泵数据、生命周期压力测试和同进程/最小 Worker fault-domain spike 已通过，Phase 0A 完成。Gate 7 选择单 AgentCore Worker 作为后续正式故障域；当前应用仍是同进程 prototype，正式 Worker、跨进程恢复和危险工具重放策略不属于当前交付。
 
 ### 7.3 后续产品能力
 

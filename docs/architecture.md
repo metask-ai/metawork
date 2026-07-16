@@ -1,9 +1,9 @@
 # MetaWork 高层架构
 
-> 状态：技术选型与系统边界已确认；当前实现基线已对齐 AgentCore ABI revision 1
-> 日期：2026-07-15
+> 状态：Phase 0A 已完成；当前实现基线已对齐 AgentCore ABI revision 1，后续正式方向选择单 AgentCore Worker
+> 日期：2026-07-16
 
-产品范围见 [产品需求](requirements.md)，cc-zig 的具体接入约束见 [AgentCore 集成契约](agentcore-integration.md)，当前 bundle 能力见 [AgentCore ABI v1 消费基线](agentcore-abi-v1.md)。
+产品范围见 [产品需求](requirements.md)，metacodes（原 cc-zig）的具体接入约束见 [AgentCore 集成契约](agentcore-integration.md)，当前 bundle 能力见 [AgentCore ABI v1 消费基线](agentcore-abi-v1.md)。历史报告中的 cc-zig 名称保留当时仓库身份。
 
 ## 1. 已确认的技术选型
 
@@ -12,8 +12,8 @@
 | Renderer | React + Tailwind | 当前正式 UI 技术栈，适合复杂 Workbench 界面 |
 | Desktop Framework | Native SDK | Zig 一等公民，负责系统 WebView、窗口、Bridge 和桌面生命周期 |
 | Workbench / Host | Zig | 承担产品编排、权限边界、状态协调和 AgentCore 接入 |
-| AgentCore | cc-zig AgentCore library bundle | cc-zig 独立构建和发布；MetaWork 链接产物，不把 cc-zig 源码纳入自身构建 |
-| Agent UI contract | cc-zig 原生结构化协议 | React 消费语义数据，不消费终端字节流或 Provider SSE |
+| AgentCore | metacodes AgentCore library bundle | metacodes 独立构建和发布；MetaWork 链接产物，不把上游源码纳入自身构建 |
+| Agent UI contract | metacodes 原生结构化协议 | React 消费 Host 产品投影，不消费终端字节流或 Provider SSE |
 
 由此排除以下正式主路径：
 
@@ -28,7 +28,7 @@
 
 ### 同步 macOS baseline
 
-当前 cc-zig bundle 提供 experimental AgentCore ABI revision 1。MetaWork 首先验证同步 Run、built-in tools、`CoreEvent` JSON、同步 Host UI、abort 和生命周期。
+当前锁定 metacodes bundle `0.0.0-dev+3237ac3fc4df` 提供 experimental AgentCore ABI revision 1。同步 Run、built-in tools、`CoreEvent` JSON、同步 Host UI、abort、生命周期和同进程 macOS 垂直链路已通过 Gate 6。
 
 该 baseline 不包含：
 
@@ -40,7 +40,7 @@
 
 ### 完整 Phase 0A
 
-同步原型通过后，还必须完成事件泵容量数据、shutdown race、同进程 crash baseline 和最小 Worker fault-domain spike。完成这些验证才能结束 Phase 0A。
+事件泵容量、shutdown race、同进程 crash baseline 和最小 Worker fault-domain spike 均已通过，Phase 0A 完成。Gate 7 选择单 AgentCore Worker 作为后续正式故障域；当前应用仍是同进程 prototype，不能宣称已经具备进程隔离或 crash recovery。
 
 ### 后续能力
 
@@ -60,7 +60,7 @@ flowchart TB
         WB <--> BACKEND
     end
 
-    CORE["AgentCore bundle<br/>cc-zig"]
+    CORE["AgentCore bundle<br/>metacodes"]
 
     UI <-->|"领域命令 + 结构化数据"| NATIVE
     BACKEND <-->|"bundle SDK + binary ABI"| CORE
@@ -125,21 +125,22 @@ async suspend/resume、持久化恢复和后台转换属于后续 AgentCore capa
 
 ## 5. AgentCore bundle 边界
 
-cc-zig 与 MetaWork 是两个独立构建单元。正式接入物是 cc-zig 构建的 target-specific bundle：
+metacodes 与 MetaWork 是两个独立构建单元。正式接入物是 metacodes 构建的 target-specific bundle：
 
 ```text
 AgentCore bundle
 ├── lib/libmetacodes_agentcore.a
 ├── include/metacodes_agentcore.h
 ├── sdk/metacodes_agentcore.zig
+├── sdk/metacodes_agentcore_protocol.zig
 ├── sdk/metacodes_agentcore_types.zig
 └── manifest.json
 ```
 
 规范要求：
 
-- cc-zig 单一维护 binary facade、C header、Zig SDK 和内部映射；
-- MetaWork 当前从显式 bundle root 消费，不访问 cc-zig source tree；
+- metacodes 单一维护 binary facade、C header、Zig SDK 和内部映射；
+- MetaWork 的 probe 从显式 bundle root 消费，正式 build 使用经 lock 校验并 staged 的同布局 bundle；两者都不访问上游 source tree；
 - manifest 锁定 commit/build identity、Zig toolchain、target、architecture、构建模式、ABI version、系统链接输入和 checksum；
 - artifact 缺失、target 不匹配或 checksum 错误时明确失败；
 - 不使用 `latest`、版本范围、可变 tag 或 source fallback；
@@ -200,10 +201,10 @@ RunJob
 | 模型 | 故障隔离 | 作用 |
 | --- | --- | --- |
 | 同进程 + bounded executor | 零进程级隔离 | 当前最小真实 baseline |
-| 单 AgentCore Worker | Host 与 AgentCore 隔离 | Phase 0A fault-domain 对照 |
+| 单 AgentCore Worker | Host 与 AgentCore 隔离 | Gate 7 选定的后续正式方向 |
 | 每活跃 Session Worker | 会话级隔离 | 只有前两者数据不足时再验证 |
 
-统一 Zig 不提供隔离。Phase 0A 必须通过独立测试进程注入 crash；在完成同进程与最小 Worker 对照前，不确定正式进程模型。
+统一 Zig 不提供隔离。Gate 7 的独立 crash 对照证明同进程是零进程级隔离，并选择单 AgentCore Worker 作为后续正式方向。该决定不把 spike IPC 升格为产品协议；版本化 transport、backpressure、shutdown、credential 和真实 bundle 资源数据在后续 Gate 定义。当前同进程应用仍只是 prototype。
 
 ## 8. 状态与恢复边界
 

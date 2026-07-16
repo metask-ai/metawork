@@ -1,13 +1,13 @@
 # MetaWork AgentCore ABI v1 消费基线
 
 > 状态：experimental ABI revision 1；同步 macOS baseline 已确定，stable compatibility policy 尚未冻结
-> 所有者：cc-zig 负责 facade、SDK、bundle 和兼容政策；MetaWork 负责消费验证
+> 所有者：metacodes（原 cc-zig）负责 facade、SDK、bundle 和兼容政策；MetaWork 负责消费验证
 
 本文记录 MetaWork 对当前 AgentCore binary ABI version 1 的真实消费边界。线程、事件泵和 Host 生命周期见 [AgentCore 集成契约](agentcore-integration.md)，验收顺序见 [Phase 0 验证计划](phase-0-validation.md)。
 
 ## 1. 版本含义
 
-当前 cc-zig bundle 已经发布名为 ABI version 1 的固定布局 header、Zig SDK、静态库和 manifest。MetaWork 对它采用以下规则：
+当前锁定的 metacodes bundle `0.0.0-dev+3237ac3fc4df`（commit `3237ac3fc4df95009f91eb6bad97d83a26958a0f`）发布 ABI version 1 的固定布局 header、Zig SDK、静态库和 manifest。它是 macOS arm64、最低 macOS 13.0、Zig 0.16.0、ReleaseSafe、strip=true、链接 libc 的 clean artifact。MetaWork 对它采用以下规则：
 
 - 每次消费锁定精确 bundle identity、cc-zig commit、target、toolchain 和 checksum；
 - 对一个固定 bundle，layout、整数 code、callback 签名和语义不得漂移；
@@ -107,7 +107,7 @@ abort 返回 stale/too-late 时仍必须 join 已有 Run job，再决定最终�
 
 上述 SDK 是随 bundle 编译进消费者的 cc-zig-owned source layer，不要求改变 C ABI layout，也不允许 MetaWork 自己补一份协议副本。
 
-MetaWork 已对 clean bundle `0.0.0-dev+ab75314a3dcb` 完成独立 source-free 验收。该 bundle 的 SDK 将 raw declarations、typed status/stop reason 和 JSON protocol 分为三个文件；具体证据见 [Phase 0 Gate 3 验证报告](phase-0-gate-3-report.md)。这只表示当前精确 experimental revision 可消费，不代表 stable compatibility policy 已冻结。
+MetaWork 曾对 `0.0.0-dev+ab75314a3dcb` 完成 Gate 3 独立 source-free 验收；当前正式 baseline 已升级为 `0.0.0-dev+3237ac3fc4df`，并重跑完整 lock/checksum、source-free typed SDK、真实 AgentCore link/run 和 Gate 6 正式 Host 验收。升级证据见 [Phase 0 Gate 6 验证报告](phase-0-gate-6-report.md)。这只表示当前精确 experimental revision 可消费，不代表 stable compatibility policy 已冻结。
 
 ## 6. 工具与 Workspace
 
