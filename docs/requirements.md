@@ -70,10 +70,11 @@ Turn 是用户提交的一次交互；Run 是 AgentCore 为该交互进行的一
 ### 5.2 会话
 
 - 用户可以在 Workspace 中创建、切换和关闭 Session；
+- `Session` 是内部生命周期术语，产品界面统一显示为 `Task / 任务`；
 - 多个 Session 可以同时存在；
 - 后台 Session 的运行状态不能因 UI 切换而丢失；
 - 每条事件、审批和工具结果必须路由到正确 Session；
-- 每个 Session 至多一个 in-flight Run，额外 Run 明确排队或拒绝。
+- 每个 Session 至多一个 non-terminal Run，包括 executor 中的 `queued` Run；当前 Run 结束前 Host 拒绝第二次提交，Renderer 只能保留未提交草稿。
 
 ### 5.3 Agent 交互
 
@@ -91,6 +92,9 @@ Turn 是用户提交的一次交互；Run 是 AgentCore 为该交互进行的一
 - 审批和回答必须绑定 Session、Run 和请求标识，拒绝过期或重复响应；
 - 同步等待必须支持 deadline、用户取消、Session close 和 Host shutdown 唤醒；
 - 同步等待区间发生 Host/Core crash 后，Run 标记 `interrupted`，工具不得自动执行；
+- 目标产品支持用户主动创建和撤销 Host-owned 持久权限规则，但 UI 只能在 Host 声明当前请求可形成安全、范围明确的规则时显示 `Always allow`；
+- 持久规则必须绑定稳定 Workspace identity、tool identity 与版本、operation 和规范化资源约束，并定义 Workspace、tool、脚本内容或安全能力变化时的失效规则；
+- strict Workspace security 和对应规则匹配/审计能力未通过验证前，不得开放 Workspace 级文件规则；受控进程、process tree、network 和 environment 边界未通过独立验证前，不得开放项目脚本、Bash、Network 或 `Full access` 持久授权；
 - async pending、跨重启恢复和 subagent suspend 只有在 AgentCore 发布明确 capability 后才能进入产品范围。
 
 ### 5.5 命令执行
@@ -116,6 +120,18 @@ Turn 是用户提交的一次交互；Run 是 AgentCore 为该交互进行的一
 - 为通知、更新和系统集成保留明确入口；
 - Renderer 只能调用 Host 显式开放的领域命令。
 
+### 5.8 Workbench 界面与任务组织
+
+- 首个正式版本采用单主窗口；多个 Task 可以后台运行，切换 Workspace 或 Task 不停止执行；
+- 左栏只展开当前 Workspace 的 Task，Workspace 切换器必须汇总其他 Workspace 的运行、待处理和失败状态，不能让后台请求只依赖系统通知；
+- Task 是可持续补充、归档和删除的产品对象；Task lifecycle、当前 Run phase 和最近一次 Run outcome 是三类独立状态，Renderer 只能从 Host projection 派生展示标签；
+- 中间区域以用户指令、Agent 回复、工具活动、审批和结果构成可追溯时间线，不展示 raw AgentCore event 或 chain-of-thought；
+- Run 执行期间的新输入不得暗示可以修改当前 Run；首版只保存 Renderer 草稿，等待当前 Run terminal 后由用户明确发送，不自动创建或启动下一次 Run；
+- `Files changed` 表示实际文件变更集合，`Outputs` 表示用户关心的交付结果，两者不得用“新建文件”自动等同；
+- Task 归档只隐藏日常列表；归档、删除 Task 或移除 Workspace 前必须先终止其 queued/running/waiting/stopping Run；删除 Task 记录不删除 Workspace 中的真实文件；移除 Workspace 同时撤销一次性 grant 并使其持久权限失效；
+- 全局搜索覆盖 Workspace、Task、用户指令、完成消息和 Output 文件名；工具原始日志默认不进入普通搜索；
+- `en-US` 是规范产品文案和回退语言，`zh-CN` 是首个完整 locale；Host 传递 structured code 与参数，Renderer 负责本地化。
+
 ## 6. 非功能需求
 
 ### 安全
@@ -124,6 +140,7 @@ Turn 是用户提交的一次交互；Run 是 AgentCore 为该交互进行的一
 - Host 命令默认拒绝，只开放白名单；
 - 校验来源、payload、Workspace、Session 和权限；
 - Provider credential 不得进入 Renderer、Bridge、日志、事件或视图 snapshot；
+- Host 必须在形成产品 projection 前移除已知 Host-held credential 和 schema 标记的 secret 字段，并对命令与工具输出设置明确上限和 truncation 状态；不得把秘密过滤责任推给 Renderer；
 - 文件访问、进程启动和高风险工具最终必须经过能力控制；
 - 不向 Renderer 暴露通用任意执行或任意文件接口。
 
@@ -176,10 +193,6 @@ async pending、持久化恢复、strict Workspace security、正式 Host tools�
 
 ## 8. 待细化的产品问题
 
-- Workspace 首页、Session 列表和运行中状态的具体信息架构；
-- 文件修改、diff 和工作产物的展示方式；
-- 后台 Session、通知和任务中心的交互；
-- permission 规则的用户级、Workspace 级和 Session 级产品语义；
-- Session 删除、归档、导出和搜索；
+- Task 导出格式、敏感信息清理和重新导入语义；
 - 多 Agent、子 Agent 和任务图在 UI 中的呈现；
 - TerminalTool 是否进入后续正式产品范围。

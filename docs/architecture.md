@@ -221,6 +221,8 @@ Renderer reload 只重建仍存活 Host 的视图。Host/AgentCore crash 后当�
 
 Host view snapshot 使用独立的 8 MiB 有界存储，不受 Bridge 单次 1 MiB result 上限反向约束。Renderer 通过带 snapshot identity 的 256 KiB 分块读取完成 resync；begin 写入前先使旧 descriptor 失效，序列化失败后旧 identity 必须保持 stale，不能继续读取已被部分覆盖的 store。revision 通知和 snapshot 拉取分别保留 pending/retry 状态，瞬时发送或读取失败不能把旧视图标记为最新。snapshot 自动重试预算按 generation 限制，耗尽后进入显式 view-sync failure 并禁止 mutation；revision emit 与 retry timer 同时失败时当前 event connection fail closed。新 event generation 建立时若仍有旧 generation 的 snapshot Promise，必须在旧 Promise 退出后继续完成新 generation 的实际 resync，不能把等待旧 Promise 误判为同步成功。
 
+Host 与 Renderer 随同一应用包原子发布，Workbench snapshot 使用精确 schema version，不承担旧 Renderer/新 Host 或新 Renderer/旧 Host 的兼容。Renderer 必须 runtime decode Host payload；unknown version、malformed payload 或 decoder/serializer contract mismatch 一律进入 fail-closed view-sync failure，不能猜测字段或静默降级。
+
 ## 9. 安全边界
 
 Renderer 按不可信调用方处理：
@@ -230,9 +232,12 @@ Renderer 按不可信调用方处理：
 - Host 校验 payload、Session/Run 归属和请求时效；
 - trusted Workspace 只能由 Host 原生目录选择与原生确认生成一次性 grant；Renderer 不能提交路径加 boolean 自行授信；
 - Provider credential 不进入 Bridge、事件、日志或 snapshot；
+- Host 在形成产品 projection 前移除已知 Host-held credential 和 schema 标记的 secret 字段，并对命令与工具输出设置 byte 上限和 truncation 状态；Renderer 不是秘密过滤边界；
 - 当前不暴露通用 Host tool 或任意执行接口；
 - built-in Bash 使用非交互子进程；
 - strict Workspace security 未通过前，只运行临时或明确 trusted Workspace。
+
+持久 permission 是 Host-owned 产品状态，不是 Renderer preference 或 AgentCore parallel protocol。规则必须绑定 stable Workspace identity、tool identity/version、operation、canonical resource constraint 和 rule schema version；canonical path 字符串本身不能充当 stable identity。Workspace、tool、script 或 capability 变化时规则 fail closed。Workspace 文件边界、process tree、network、environment、审计和撤销分别通过对应安全 Gate 前，UI 不得为相关能力提供 `Always allow` 或 `Full access`。
 
 ## 10. Native SDK 边界
 
