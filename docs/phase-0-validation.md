@@ -1,6 +1,6 @@
 # MetaWork Phase 0 验证计划
 
-> 状态：待执行；Gate 顺序已按 AgentCore ABI v1 同步能力收敛
+> 状态：执行中；Gate 0 至 Gate 3 已通过
 > 平台：Phase 0A macOS-first；Phase 0B 后续验证 Windows
 
 Phase 0 用最小真实原型验证技术栈和关键风险，不交付完整产品。当前 AgentCore bundle 是 experimental ABI revision 1，同步 baseline 不包含 async suspend/resume、跨进程恢复、strict Workspace security 或正式 Host tools。
@@ -109,7 +109,7 @@ Gate 未通过时不得用 source dependency、MetaWork 自制协议、无界队
 
 - 从显式绝对 bundle root 读取，不访问 cc-zig source tree；
 - 校验 manifest schema、commit/build identity、ABI version、toolchain、target、architecture、deployment baseline 和 checksum；
-- 校验静态库、C header、两个 Zig SDK 文件和系统链接输入；
+- 校验静态库、C header、三个 Zig SDK 文件和系统链接输入；
 - discovery symbol 存在；
 - API table size/version/capability/function pointer 合法；
 - target 缺失和 checksum mismatch 明确失败。
@@ -196,9 +196,11 @@ AGENTCORE_BUNDLE_ROOT=/absolute/path/to/validated/bundle \
 
 当前 deterministic function-table fake 覆盖 bounded executor、每 Session 单 Run、queued/active/UI-wait close、并发 close/shutdown、callback quiescence、first-writer HostCause、stale/too-late abort status、Session/Runtime destroy retry、OOM、diagnostic release、credential snapshot 隔离和临时/trusted Workspace 的词法边界。测试进程有 30 秒上限，避免回归变成无限 CI hang。
 
-这仍是 Gate 2 raw lifecycle foundation，不是正式 AgentCore Host：UI response 只验证 identity、唤醒和 close/shutdown 路径，固定返回 `UI_UNAVAILABLE`；事件和 UI JSON 不在 MetaWork 复制或解析。真实 codec、typed status/StopReason 和 source-free consumer 仍由 Gate 3 验收。当前 bundle lock 指向精确的 dirty development identity，只可用于此阶段可复现验证，不能作为正式发布来源；executor 容量也尚未根据真实 trace 定标。
+这仍是 Gate 2 raw lifecycle foundation，不是正式 AgentCore Host：UI response 只验证 identity、唤醒和 close/shutdown 路径，固定返回 `UI_UNAVAILABLE`；事件和 UI JSON 不在 MetaWork 复制或解析。Gate 3 已在后续 clean bundle 上独立完成 typed SDK 验收。executor 容量仍尚未根据真实 trace 定标。
 
 ## 8. Gate 3：cc-zig typed SDK completion
+
+> 状态：已通过。实现与实测证据见 [Phase 0 Gate 3 验证报告](phase-0-gate-3-report.md)。
 
 正式 Host 开始前，bundle SDK 必须提供并测试：
 
@@ -213,7 +215,16 @@ AGENTCORE_BUNDLE_ROOT=/absolute/path/to/validated/bundle \
 - source-free typed consumer；
 - malformed/fuzz corpus 或等价的系统化负面测试。
 
-MetaWork 不在本仓库复制缺少的类型或 JSON schema。Gate 3 未通过，工作停在 raw probe 与生命周期基础，不进入正式 Host。
+MetaWork 不在本仓库复制类型或 JSON schema。Gate 3 consumer 只构造 bundle SDK 类型并调用其 validator/codec；未知和 malformed JSON 字面量仅作为负向输入，不构成协议实现。
+
+当前 clean bundle 精确锁定在 cc-zig `ab75314a3dcb595509862a9b54b3bf3b4d3a44c0`。source-free consumer 位于 `spikes/agentcore-sdk-contract/`，可复现命令为：
+
+```bash
+AGENTCORE_BUNDLE_ROOT=/absolute/path/to/validated/bundle \
+  npm run test:agentcore-sdk
+```
+
+`npm run test:phase0a` 使用同一个显式 bundle，依次重跑仓库测试、Gate 1 raw probe、Gate 2 lifecycle 和 Gate 3 typed SDK consumer；任何 artifact 缺失或 identity 漂移都会失败，不会跳过或回退源码。
 
 Host tool 内部 session ID 到 MetaWork Session/Run 的合同仍未定义时，Host tools 继续禁用；这不阻塞 built-in Read/Bash/Edit。
 

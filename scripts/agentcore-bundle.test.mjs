@@ -94,6 +94,15 @@ test("rejects a missing or extra manifest artifact", async (t) => {
   );
 });
 
+test("rejects an unlisted file in the bundle filesystem", async (t) => {
+  const root = await fixture(t);
+  await writeFile(path.join(root, "sdk", "stale.zig"), "stale");
+  await assert.rejects(
+    validateAgentCoreBundle(root, injectedChecks),
+    /filesystem contains missing or unknown entries/,
+  );
+});
+
 test("rejects a bundle for another target", async (t) => {
   const root = await fixture(t);
   await assert.rejects(

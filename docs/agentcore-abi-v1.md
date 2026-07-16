@@ -107,6 +107,8 @@ abort 返回 stale/too-late 时仍必须 join 已有 Run job，再决定最终�
 
 上述 SDK 是随 bundle 编译进消费者的 cc-zig-owned source layer，不要求改变 C ABI layout，也不允许 MetaWork 自己补一份协议副本。
 
+MetaWork 已对 clean bundle `0.0.0-dev+ab75314a3dcb` 完成独立 source-free 验收。该 bundle 的 SDK 将 raw declarations、typed status/stop reason 和 JSON protocol 分为三个文件；具体证据见 [Phase 0 Gate 3 验证报告](phase-0-gate-3-report.md)。这只表示当前精确 experimental revision 可消费，不代表 stable compatibility policy 已冻结。
+
 ## 6. 工具与 Workspace
 
 ### built-in tools
@@ -197,7 +199,9 @@ wire abort reason 只提供当前 v1 的中断机制；用户取消、timeout、
 ```text
 target-specific AgentCore library
 C header
-cc-zig-owned Zig SDK
+cc-zig-owned Zig SDK facade
+cc-zig-owned typed protocol module
+cc-zig-owned ABI types module
 manifest
 ```
 

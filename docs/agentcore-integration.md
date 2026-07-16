@@ -23,9 +23,11 @@ MetaWork 的依赖输入是一个完整 bundle，而不是 cc-zig source tree：
 
 ```text
 AgentCore bundle
-├── target-specific library
-├── C header
-├── cc-zig-owned Zig SDK
+├── lib/libmetacodes_agentcore.a
+├── include/metacodes_agentcore.h
+├── sdk/metacodes_agentcore.zig
+├── sdk/metacodes_agentcore_protocol.zig
+├── sdk/metacodes_agentcore_types.zig
 └── manifest
 ```
 
@@ -42,14 +44,14 @@ AgentCore bundle
 
 ### raw probe 与正式 Host
 
-隔离的 artifact-only raw contract probe 只用于证明当前产物可以 source-free discover/link/run，并记录 bundle SDK 的缺口。该 probe：
+隔离的 artifact-only raw contract probe 只用于证明产物可以 source-free discover/link/run，并保留 raw ABI 回归覆盖。该 probe：
 
 - 可以直接使用 bundle 当前 raw SDK 类型和常量；
 - 不能进入正式 Host target；
 - 不能成为产品状态映射或 UI JSON 解析实现；
 - 不能注册到 React/Native SDK 正式链路。
 
-正式 Host 必须等 cc-zig bundle SDK 提供 typed status、StopReason、`CoreEvent` / `UiRequest` decoder 和 `UiResponse` encoder。MetaWork 不通过手写 raw enum、tag switch 或 JSON schema 绕过该 Gate。
+clean bundle `ab75314a3dcb595509862a9b54b3bf3b4d3a44c0` 已提供 typed status、StopReason、`CoreEvent` / `UiRequest` decoder 和 request-aware `UiResponse` encoder，并通过 MetaWork Gate 3 source-free consumer。正式 Host 必须直接使用这些表面；MetaWork 不手写 raw enum、tag switch 或 JSON schema。
 
 ## 3. 当前协议表面
 

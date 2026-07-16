@@ -16,6 +16,7 @@ const Manifest = struct {
         @"lib/libmetacodes_agentcore.a": struct { sha256: []const u8 },
         @"include/metacodes_agentcore.h": struct { sha256: []const u8 },
         @"sdk/metacodes_agentcore.zig": struct { sha256: []const u8 },
+        @"sdk/metacodes_agentcore_protocol.zig": struct { sha256: []const u8 },
         @"sdk/metacodes_agentcore_types.zig": struct { sha256: []const u8 },
     },
 };
@@ -43,6 +44,7 @@ pub fn build(b: *std.Build) void {
     const lib_path = b.pathJoin(&.{ bundle_root, "lib", "libmetacodes_agentcore.a" });
     const header_path = b.pathJoin(&.{ bundle_root, "include", "metacodes_agentcore.h" });
     const sdk_path = b.pathJoin(&.{ bundle_root, "sdk", "metacodes_agentcore.zig" });
+    const protocol_path = b.pathJoin(&.{ bundle_root, "sdk", "metacodes_agentcore_protocol.zig" });
     const types_path = b.pathJoin(&.{ bundle_root, "sdk", "metacodes_agentcore_types.zig" });
     const manifest_path = b.pathJoin(&.{ bundle_root, "manifest.json" });
     const manifest_bytes = std.Io.Dir.cwd().readFileAlloc(
@@ -76,6 +78,7 @@ pub fn build(b: *std.Build) void {
     verifySha256(b, lib_path, manifest.files.@"lib/libmetacodes_agentcore.a".sha256);
     verifySha256(b, header_path, manifest.files.@"include/metacodes_agentcore.h".sha256);
     verifySha256(b, sdk_path, manifest.files.@"sdk/metacodes_agentcore.zig".sha256);
+    verifySha256(b, protocol_path, manifest.files.@"sdk/metacodes_agentcore_protocol.zig".sha256);
     verifySha256(b, types_path, manifest.files.@"sdk/metacodes_agentcore_types.zig".sha256);
 
     var link_libc = false;

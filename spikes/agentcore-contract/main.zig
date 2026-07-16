@@ -52,38 +52,29 @@ const Probe = struct {
         const self: *Probe = @ptrCast(@alignCast(raw orelse return wire.CALLBACK_FATAL));
         if (session == null or run_id != 1) return wire.CALLBACK_FATAL;
         const json = sdk.borrowedBytes(view) catch return wire.CALLBACK_FATAL;
-        const parsed = std.json.parseFromSlice(std.json.Value, std.heap.page_allocator, json, .{}) catch
-            return wire.CALLBACK_FATAL;
+        var parsed = sdk.decodeCoreEvent(std.heap.c_allocator, json) catch return wire.CALLBACK_FATAL;
         defer parsed.deinit();
-        if (parsed.value != .object) return wire.CALLBACK_FATAL;
         self.event_calls += 1;
-        if (parsed.value.object.get("tool_result")) |result| {
-            if (result != .object) return wire.CALLBACK_FATAL;
-            const name = result.object.get("name") orelse return wire.CALLBACK_FATAL;
-            const content = result.object.get("content") orelse return wire.CALLBACK_FATAL;
-            const is_error = result.object.get("is_error") orelse return wire.CALLBACK_FATAL;
-            if (name != .string or content != .string or is_error != .bool)
-                return wire.CALLBACK_FATAL;
-            if (std.mem.eql(u8, name.string, "Read") and
-                std.mem.indexOf(u8, content.string, "gate1-before") != null)
-                self.saw_read = true;
-            if (std.mem.eql(u8, name.string, "Bash") and
-                std.mem.indexOf(u8, content.string, "gate1-bash-ok") != null)
-                self.saw_bash = true;
-            if (std.mem.eql(u8, name.string, "Edit") and !is_error.bool)
-                self.saw_edit = true;
-        }
-        if (parsed.value.object.get("text_chunk")) |chunk| {
-            if (chunk != .string) return wire.CALLBACK_FATAL;
-            if (std.mem.indexOf(u8, chunk.string, "metawork gate1 complete") != null)
-                self.saw_final = true;
-        }
-        if (parsed.value.object.get("tool_start")) |tool_start| {
-            if (tool_start != .object) return wire.CALLBACK_FATAL;
-            const input = tool_start.object.get("input") orelse return wire.CALLBACK_FATAL;
-            if (input != .string) return wire.CALLBACK_FATAL;
-            if (std.mem.indexOf(u8, input.string, "sleep 10") != null)
-                self.sleep_started.store(true, .release);
+        switch (parsed.value) {
+            .tool_result => |result| {
+                if (std.mem.eql(u8, result.name, "Read") and
+                    std.mem.indexOf(u8, result.content, "gate1-before") != null)
+                    self.saw_read = true;
+                if (std.mem.eql(u8, result.name, "Bash") and
+                    std.mem.indexOf(u8, result.content, "gate1-bash-ok") != null)
+                    self.saw_bash = true;
+                if (std.mem.eql(u8, result.name, "Edit") and !result.is_error)
+                    self.saw_edit = true;
+            },
+            .text_chunk => |chunk| {
+                if (std.mem.indexOf(u8, chunk, "metawork gate1 complete") != null)
+                    self.saw_final = true;
+            },
+            .tool_start => |tool_start| {
+                if (std.mem.indexOf(u8, tool_start.input, "sleep 10") != null)
+                    self.sleep_started.store(true, .release);
+            },
+            else => {},
         }
         return wire.CALLBACK_CONTINUE;
     }
@@ -91,9 +82,9 @@ const Probe = struct {
     fn onUiRequest(raw: ?*anyopaque, session: ?*wire.SessionHandle, request: wire.BytesViewV1, out: ?*wire.OwnedBytesV1) callconv(.c) u32 {
         const self: *Probe = @ptrCast(@alignCast(raw orelse return wire.UI_FATAL));
         if (session == null) return wire.UI_FATAL;
+        const output = out orelse return wire.UI_FATAL;
         const json = sdk.borrowedBytes(request) catch return wire.UI_FATAL;
-        const parsed = std.json.parseFromSlice(std.json.Value, std.heap.page_allocator, json, .{}) catch
-            return wire.UI_FATAL;
+        var parsed = sdk.decodeUiRequest(std.heap.c_allocator, json) catch return wire.UI_FATAL;
         defer parsed.deinit();
         self.ui_calls += 1;
         switch (self.ui_mode) {
@@ -101,14 +92,36 @@ const Probe = struct {
             .fatal => return wire.UI_FATAL,
             .answered => {},
         }
-        const response = if (std.mem.indexOf(u8, json, "permission") != null)
-            "{\"permission\":\"allow_once\"}"
-        else if (std.mem.indexOf(u8, json, "ask_question") != null)
-            "{\"answers\":[\"Yes\"]}"
-        else
-            return wire.UI_FATAL;
-        (out orelse return wire.UI_FATAL).* = .{
-            .ptr = @constCast(response.ptr),
+        const response = switch (parsed.value) {
+            .ask_question => |questions| response: {
+                const answers = std.heap.c_allocator.alloc([]const u8, questions.len) catch
+                    return wire.UI_FATAL;
+                defer std.heap.c_allocator.free(answers);
+                for (answers) |*answer| answer.* = "Yes";
+                break :response sdk.encodeUiResponse(
+                    std.heap.c_allocator,
+                    parsed.value,
+                    .{ .answers = answers },
+                ) catch return wire.UI_FATAL;
+            },
+            .permission => sdk.encodeUiResponse(
+                std.heap.c_allocator,
+                parsed.value,
+                .{ .permission = .allow_once },
+            ) catch return wire.UI_FATAL,
+            .plan_approval => sdk.encodeUiResponse(
+                std.heap.c_allocator,
+                parsed.value,
+                .{ .plan_approval = .approve_default },
+            ) catch return wire.UI_FATAL,
+            .custom => sdk.encodeUiResponse(
+                std.heap.c_allocator,
+                parsed.value,
+                .{ .custom = "{}" },
+            ) catch return wire.UI_FATAL,
+        };
+        output.* = .{
+            .ptr = response.ptr,
             .len = response.len,
         };
         return wire.UI_ANSWERED;
@@ -116,8 +129,12 @@ const Probe = struct {
 
     fn releaseUiResponse(raw: ?*anyopaque, out: ?*wire.OwnedBytesV1) callconv(.c) void {
         const self: *Probe = @ptrCast(@alignCast(raw orelse return));
+        const value = out orelse return;
+        const len = std.math.cast(usize, value.len) orelse return;
+        const ptr = value.ptr orelse return;
+        std.heap.c_allocator.free(ptr[0..len]);
         self.ui_releases += 1;
-        if (out) |value| value.* = .{ .ptr = null, .len = 0 };
+        value.* = .{ .ptr = null, .len = 0 };
     }
 };
 

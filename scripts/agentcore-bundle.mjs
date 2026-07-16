@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { readFile, realpath, stat } from "node:fs/promises";
+import { lstat, readFile, readdir, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { isDeepStrictEqual, promisify } from "node:util";
 
@@ -10,8 +10,16 @@ export const bundleFiles = [
   "lib/libmetacodes_agentcore.a",
   "include/metacodes_agentcore.h",
   "sdk/metacodes_agentcore.zig",
+  "sdk/metacodes_agentcore_protocol.zig",
   "sdk/metacodes_agentcore_types.zig",
 ];
+
+const bundleDirectories = ["include/", "lib/", "sdk/"];
+const bundleEntries = [
+  ...bundleDirectories,
+  "manifest.json",
+  ...bundleFiles,
+].sort();
 
 function requireValue(condition, message) {
   if (!condition) throw new Error(message);
@@ -44,12 +52,43 @@ async function sha256(filePath) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+async function listBundleEntries(root, relativeDirectory = "") {
+  const entries = await readdir(path.join(root, relativeDirectory), {
+    withFileTypes: true,
+  });
+  const result = [];
+  for (const entry of entries) {
+    const relativePath = path.posix.join(relativeDirectory, entry.name);
+    const metadata = await lstat(path.join(root, relativePath));
+    requireValue(
+      !metadata.isSymbolicLink(),
+      `AgentCore bundle contains a symbolic link: ${relativePath}`,
+    );
+    if (metadata.isDirectory()) {
+      result.push(`${relativePath}/`);
+      result.push(...(await listBundleEntries(root, relativePath)));
+    } else {
+      requireValue(
+        metadata.isFile(),
+        `AgentCore bundle contains a non-file entry: ${relativePath}`,
+      );
+      result.push(relativePath);
+    }
+  }
+  return result;
+}
+
 export async function validateAgentCoreBundle(bundleRoot, options = {}) {
   requireValue(
     path.isAbsolute(bundleRoot),
     "AGENTCORE_BUNDLE_ROOT must be absolute",
   );
   const root = await realpath(bundleRoot);
+  const actualEntries = (await listBundleEntries(root)).sort();
+  requireValue(
+    isDeepStrictEqual(actualEntries, bundleEntries),
+    "AgentCore bundle filesystem contains missing or unknown entries",
+  );
   const manifestPath = path.join(root, "manifest.json");
   requireValue(
     (await stat(manifestPath)).size <= 1024 * 1024,
