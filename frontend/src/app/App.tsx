@@ -11,6 +11,11 @@ import { AppShell } from "./AppShell.tsx";
 import { Icon } from "../components/ui/Icon.tsx";
 import { ApprovalPanel } from "../features/approvals/ApprovalPanel.tsx";
 import { UiRecordCard } from "../features/approvals/UiRecordCard.tsx";
+import {
+  uiRequestIdentity,
+  uiResponsePhase,
+} from "../features/approvals/response-state.ts";
+import { useUiResponseStates } from "../features/approvals/useUiResponseStates.ts";
 import { GlobalSearch } from "../features/search/GlobalSearch.tsx";
 import { TaskActivity } from "../features/task-activity/TaskActivity.tsx";
 import { TaskTimeline } from "../features/timeline/TaskTimeline.tsx";
@@ -90,6 +95,13 @@ export default function App() {
   const [busy, setBusy] = useState<string | null>(null);
   const [bridgeReady, setBridgeReady] = useState(false);
   const [viewSyncFailed, setViewSyncFailed] = useState(false);
+  const {
+    states: uiResponseStates,
+    begin: beginUiResponse,
+    accepted: acceptUiResponse,
+    failed: failUiResponse,
+    observeSnapshot: observeUiResponseSnapshot,
+  } = useUiResponseStates();
   const client = useMemo(() => new HostClient(), []);
   const connection = useRef<WorkbenchConnection | null>(null);
   const taskMenu = useRef<HTMLDivElement>(null);
@@ -139,6 +151,7 @@ export default function App() {
       {
         onSnapshot: (next) => {
           if (!cancelled) {
+            observeUiResponseSnapshot(next);
             pruneDrafts(next.sessions.map((session) => session.id));
             dispatchWorkbench({ type: "snapshot.accepted", snapshot: next });
           }
@@ -177,7 +190,7 @@ export default function App() {
       window.removeEventListener("pagehide", onPageHide);
       void current.stop();
     };
-  }, [client, pruneDrafts]);
+  }, [client, observeUiResponseSnapshot, pruneDrafts]);
 
   useEffect(() => {
     const openSearch = (event: KeyboardEvent) => {
@@ -471,6 +484,8 @@ export default function App() {
   async function respondUi(payload: UiResponsePayload) {
     const pending = activeSession?.pendingUi;
     if (viewSyncFailed || !bridgeReady || !activeSession || !pending) return;
+    const identity = uiRequestIdentity(activeSession.id, pending);
+    if (!beginUiResponse(identity)) return;
     setBusy("respond");
     try {
       try {
@@ -481,12 +496,15 @@ export default function App() {
           payload,
         );
       } catch (error) {
+        failUiResponse(identity);
         setStatus({
           id: "approval.response_failed",
           values: { error: errorText(error) },
         });
+        await refreshSnapshot().catch(() => undefined);
         return;
       }
+      acceptUiResponse(identity);
       await refreshAfterCommit(
         "approval.response_sent",
         "operation.ui_response",
@@ -802,7 +820,16 @@ export default function App() {
         revision={snapshot.revision}
         responseDisabled={busy !== null || viewSyncFailed || !bridgeReady}
         onRespond={(payload) => void respondUi(payload)}
-        renderPendingUi={(props) => <ApprovalPanel {...props} />}
+        renderPendingUi={(props) => {
+          const { sessionId, ...panelProps } = props;
+          const identity = uiRequestIdentity(sessionId, props.pending);
+          return (
+            <ApprovalPanel
+              {...panelProps}
+              responsePhase={uiResponsePhase(uiResponseStates, identity)}
+            />
+          );
+        }}
         renderUiRecord={(record) => <UiRecordCard record={record} />}
       />
 

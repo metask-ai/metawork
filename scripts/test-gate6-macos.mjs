@@ -131,14 +131,15 @@ try {
           throw new Error(
             `pending UI routed to another run: ${JSON.stringify(pending)}`,
           );
+        let responsePayload;
         if (pending.kind === "permission") {
-          await invokeBridge("metawork.sessions.respondUi", {
+          responsePayload = {
             sessionId,
             runId,
             requestId: pending.requestId,
             kind: "permission",
             permission: "allow_once",
-          });
+          };
         } else if (pending.kind === "ask_question") {
           if (reloadedRequest === null) {
             reloadedRequest = pending.requestId;
@@ -156,18 +157,24 @@ try {
                 "Renderer reload lost or rerouted the pending UI request",
               );
           }
-          await invokeBridge("metawork.sessions.respondUi", {
+          responsePayload = {
             sessionId,
             runId,
             requestId: pending.requestId,
             kind: "answers",
             answers: ["Yes"],
-          });
+          };
         } else {
           throw new Error(
             `unexpected Gate 6 UI request: ${JSON.stringify(pending)}`,
           );
         }
+        await invokeBridge("metawork.sessions.respondUi", responsePayload);
+        await expectBridgeFailure(
+          "metawork.sessions.respondUi",
+          responsePayload,
+          `duplicate UI response ${pending.requestId}`,
+        );
         answered.add(pending.requestId);
       }
       if (terminal.has(run.phase)) return current;
@@ -303,7 +310,7 @@ try {
     throw new Error("normal runtime stop was not observed");
 
   process.stdout.write(
-    "Gate 6 macOS vertical passed: real bundle, Read/Bash/Edit, permission UI, reload-safe AskUserQuestion resume, Task metadata lifecycle, async close.\n",
+    "Gate 6 macOS vertical passed: real bundle, Read/Bash/Edit, permission UI, duplicate UI-response rejection, reload-safe AskUserQuestion resume, Task metadata lifecycle, async close.\n",
   );
 } catch (error) {
   process.stderr.write(`${output}\n`);
@@ -352,6 +359,15 @@ async function invokeBridge(command, payload) {
   if (response && !response.ok)
     throw new Error(`${command} failed: ${JSON.stringify(response.error)}`);
   return response?.result ?? null;
+}
+
+async function expectBridgeFailure(command, payload, context) {
+  try {
+    await invokeBridge(command, payload);
+  } catch {
+    return;
+  }
+  throw new Error(`${context} was accepted`);
 }
 
 async function snapshot() {

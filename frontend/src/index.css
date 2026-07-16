@@ -844,6 +844,55 @@ summary::-webkit-details-marker {
   margin-left: 0;
 }
 
+.approval-shortcut {
+  margin: -12px 0 0;
+  color: var(--color-muted);
+  font-family: var(--font-mono);
+  font-size: 9px;
+}
+
+.approval-option-preview,
+.approval-option-detail {
+  overflow-wrap: anywhere;
+}
+
+.approval-option-detail {
+  margin-top: 7px;
+  padding: 8px 10px;
+  border-radius: 7px;
+  color: var(--color-muted);
+  background: rgba(47, 116, 130, 0.06);
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.approval-option-detail p {
+  margin: 0;
+}
+
+.approval-option-detail code {
+  display: block;
+  margin-top: 4px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+}
+
+.request-response-status {
+  margin: 16px 0 0;
+  padding: 9px 11px;
+  border-left: 3px solid var(--color-cobalt);
+  border-radius: 7px;
+  color: var(--color-graphite);
+  background: rgba(47, 116, 130, 0.08);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.request-response-status[data-phase="failed"] {
+  border-left-color: var(--color-danger);
+  background: rgba(164, 65, 65, 0.08);
+}
+
 .ui-record {
   padding: 12px 14px;
   border: 1px solid var(--color-rule);

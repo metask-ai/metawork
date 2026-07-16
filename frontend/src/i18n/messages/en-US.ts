@@ -141,14 +141,20 @@ export const enUS = {
   "approval.allow_once": "Allow once",
   "approval.choose": "Choose…",
   "approval.send_answers": "Continue",
+  "approval.submit_shortcut": "Press ⌘/Ctrl + Enter to continue",
   "approval.review_plan": "Review the proposed plan",
   "approval.reject_plan": "Request changes",
   "approval.approve_plan": "Start work",
   "approval.custom_request":
     "This request has no supported response in the current product baseline.",
   "approval.request": "Request",
-  "approval.response_failed": "Response was rejected: {error}",
+  "approval.response_failed": "Couldn't send the response: {error}",
   "approval.response_sent": "Response sent.",
+  "approval.sending": "Sending your response…",
+  "approval.awaiting_snapshot":
+    "Response received. Updating this task before another action is allowed…",
+  "approval.retry_response":
+    "The response wasn't sent. Review the request and try again.",
   "ui.kind.ask_question": "Question",
   "ui.kind.permission": "Permission request",
   "ui.kind.plan_approval": "Plan review",

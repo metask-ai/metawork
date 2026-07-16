@@ -95,16 +95,14 @@ export function TaskTimeline({
   responseDisabled: boolean;
   onRespond: (payload: UiResponsePayload) => void;
   renderPendingUi: (props: {
+    sessionId: string;
     pending: PendingUi;
-    answers: string[];
     busy: boolean;
-    setAnswers: (answers: string[]) => void;
     respond: (payload: UiResponsePayload) => void;
   }) => ReactNode;
   renderUiRecord: (record: UiRecord) => ReactNode;
 }) {
   const { locale, t } = useI18n();
-  const [answers, setAnswers] = useState<Record<string, string[]>>({});
   const [showJumpLatest, setShowJumpLatest] = useState(false);
   const timelineScroll = useRef<HTMLDivElement>(null);
   const followingLatest = useRef(true);
@@ -113,15 +111,6 @@ export function TaskTimeline({
     followingLatest.current = true;
     setShowJumpLatest(false);
   }, [session?.id]);
-
-  useEffect(() => {
-    const requestId = session?.pendingUi?.requestId;
-    setAnswers((current) => {
-      if (!requestId) return {};
-      const retained = current[requestId];
-      return retained ? { [requestId]: retained } : {};
-    });
-  }, [session?.pendingUi?.requestId]);
 
   useLayoutEffect(() => {
     const viewport = timelineScroll.current;
@@ -217,14 +206,9 @@ export function TaskTimeline({
                     return (
                       <Fragment key={`ui:${pending.requestId}`}>
                         {renderPendingUi({
+                          sessionId: session.id,
                           pending,
-                          answers: answers[pending.requestId] ?? [],
                           busy: responseDisabled,
-                          setAnswers: (next) =>
-                            setAnswers((current) => ({
-                              ...current,
-                              [pending.requestId]: next,
-                            })),
                           respond: onRespond,
                         })}
                       </Fragment>
