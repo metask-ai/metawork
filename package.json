@@ -10,6 +10,7 @@
   ],
   "scripts": {
     "dev": "native dev . --yes",
+    "agentcore:stage": "node scripts/stage-agentcore-bundle.mjs",
     "check": "npm run check:frontend && native check . --strict",
     "check:frontend": "npm --workspace @metawork/renderer run check",
     "build": "npm run build:release",

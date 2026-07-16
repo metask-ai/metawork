@@ -270,12 +270,10 @@ pub fn classify(event: sdk.CoreEvent) EventClass {
         .progress,
         .clear_current_tool,
         .tool_result,
-        .phase_change,
         .context_warning,
         .auto_compact,
         .retry_notice,
         .stream_done,
-        .ui_request_pending,
         => .control,
     };
 }

@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
   "name": "metacodes-agentcore",
-  "version": "0.0.0-dev+ab75314a3dcb",
+  "version": "0.0.0-dev+3237ac3fc4df",
   "source": {
-    "cc_zig_commit": "ab75314a3dcb595509862a9b54b3bf3b4d3a44c0",
+    "cc_zig_commit": "3237ac3fc4df95009f91eb6bad97d83a26958a0f",
     "dirty": false,
     "dirty_source_sha256": ""
   },
@@ -15,7 +15,8 @@
     "architecture": "aarch64",
     "os": "macos",
     "macos_deployment_target": "13.0",
-    "optimize": "ReleaseSafe"
+    "optimize": "ReleaseSafe",
+    "strip": true
   },
   "contract": {
     "binary_abi_version": 1,
@@ -24,16 +25,16 @@
   },
   "files": {
     "lib/libmetacodes_agentcore.a": {
-      "sha256": "920590e0eab9d8fe2479975795198277adec87bc62c0d5fd69dfc0b5afc07ff7"
+      "sha256": "89d54fc90ca45b0457fa1035ef358c259fb3cf3e7d1f103a482fb7d71a3e6e7a"
     },
     "include/metacodes_agentcore.h": {
       "sha256": "bed1a63f80154825577cda968a283ee306ed34de0d0db9caa4a485d772b90b4c"
     },
     "sdk/metacodes_agentcore.zig": {
-      "sha256": "d2193e8e6813ff997a144f291083d87b81b403247d970a438b6a96038f00fcdf"
+      "sha256": "b1b251ad0ea742205b4758caa88b0685579423fa60622c829ee8298e4f2665ba"
     },
     "sdk/metacodes_agentcore_protocol.zig": {
-      "sha256": "924bde4b5d4f204daa63e5780f9869a43b23709f4cadeffe94edb98fd5ecefd0"
+      "sha256": "49972f472d849d15f5c8a5db021dc0bd3cc788d3326231a2e8bba3173f3dcbef"
     },
     "sdk/metacodes_agentcore_types.zig": {
       "sha256": "5d9aef371f85999461e62e20fe37b08594f8c8b7e7c68922f79429e683b30217"

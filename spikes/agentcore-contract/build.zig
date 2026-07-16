@@ -95,12 +95,18 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const protocol = b.createModule(.{
+        .root_source_file = .{ .cwd_relative = protocol_path },
+        .target = target,
+        .optimize = optimize,
+    });
     const sdk = b.createModule(.{
         .root_source_file = .{ .cwd_relative = sdk_path },
         .target = target,
         .optimize = optimize,
     });
     sdk.addImport("metacodes_agentcore_types", types);
+    sdk.addImport("metacodes_agentcore_protocol", protocol);
 
     const probe_module = b.createModule(.{
         .root_source_file = b.path("main.zig"),

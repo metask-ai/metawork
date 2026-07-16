@@ -8,11 +8,17 @@ pub fn build(b: *std.Build) void {
     if (!std.fs.path.isAbsolute(bundle_root)) @panic("-Dbundle-root must be absolute");
 
     const sdk_path = b.pathJoin(&.{ bundle_root, "sdk", "metacodes_agentcore.zig" });
+    const protocol_path = b.pathJoin(&.{ bundle_root, "sdk", "metacodes_agentcore_protocol.zig" });
     const types_path = b.pathJoin(&.{ bundle_root, "sdk", "metacodes_agentcore_types.zig" });
     const library_path = b.pathJoin(&.{ bundle_root, "lib", "libmetacodes_agentcore.a" });
 
     const types = b.createModule(.{
         .root_source_file = .{ .cwd_relative = types_path },
+        .target = target,
+        .optimize = optimize,
+    });
+    const protocol = b.createModule(.{
+        .root_source_file = .{ .cwd_relative = protocol_path },
         .target = target,
         .optimize = optimize,
     });
@@ -22,6 +28,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     sdk.addImport("metacodes_agentcore_types", types);
+    sdk.addImport("metacodes_agentcore_protocol", protocol);
 
     const tests = b.createModule(.{
         .root_source_file = b.path("sdk_contract_test.zig"),
