@@ -64,6 +64,7 @@ pub const OwnedBatch = struct {
 };
 
 pub const ExpiredRoute = struct { session_id: u64, run_id: u64 };
+pub const RouteIdentity = struct { session_id: u64, run_id: u64 };
 
 pub const Stats = struct {
     retained_count: usize,
@@ -128,6 +129,10 @@ pub const Delivery = struct {
 
     pub fn connectedGeneration(self: *const Delivery) ?u64 {
         return if (self.attached) self.generation else null;
+    }
+
+    pub fn retentionNanoseconds(self: *const Delivery) u64 {
+        return self.limits.retention_ns;
     }
 
     pub fn detach(self: *Delivery, generation: u64, now_ns: u64) Error!void {
@@ -250,6 +255,15 @@ pub const Delivery = struct {
             const item = &self.retained[index].?;
             item.last_sent_generation = batch.generation;
         }
+    }
+
+    pub fn batchRoute(self: *Delivery, batch: *const OwnedBatch, item_index: usize) Error!RouteIdentity {
+        if (batch.owner != self) return error.ForeignBatch;
+        if (item_index >= batch.item_count) return error.StaleBatch;
+        const retained_index = batch.selected_storage[item_index];
+        if (retained_index >= self.retained.len) return error.StaleBatch;
+        const item = self.retained[retained_index] orelse return error.StaleBatch;
+        return .{ .session_id = item.session_id, .run_id = item.run_id };
     }
 
     pub fn acknowledge(self: *Delivery, generation: u64, session_id: u64, run_id: u64, sequence: u64) Error!void {
@@ -490,4 +504,41 @@ fn recordSession(session_id: u64, sessions: []u64, counts: []usize) void {
         return;
     };
     unreachable;
+}
+
+test "batch routes remain exact and detached retention expires by run" {
+    var delivery = try Delivery.init(std.testing.allocator, .{
+        .route_slots = 4,
+        .retention_ns = 10,
+    });
+    defer delivery.deinit();
+    const generation = try delivery.connect();
+    for ([_]RouteIdentity{
+        .{ .session_id = 1, .run_id = 11 },
+        .{ .session_id = 2, .run_id = 22 },
+    }) |route| {
+        const json = try std.testing.allocator.dupe(u8, "{\"stream_begin\":{}}");
+        try delivery.ingest(.{
+            .session_id = route.session_id,
+            .run_id = route.run_id,
+            .json = json,
+            .allocator = std.testing.allocator,
+        });
+    }
+    var batch = (try delivery.buildBatch(generation)).?;
+    defer batch.deinit();
+    try std.testing.expectEqual(@as(usize, 2), batch.item_count);
+    const first = try delivery.batchRoute(&batch, 0);
+    const second = try delivery.batchRoute(&batch, 1);
+    try std.testing.expect(first.session_id != second.session_id);
+    try std.testing.expectError(error.StaleBatch, delivery.batchRoute(&batch, 2));
+    try delivery.commitBatch(&batch);
+    try delivery.detach(generation, 100);
+    try std.testing.expectEqual(@as(?ExpiredRoute, null), delivery.firstExpired(109));
+    const expired = delivery.firstExpired(110).?;
+    delivery.cleanupRun(expired.session_id, expired.run_id);
+    try std.testing.expect(delivery.firstExpired(110) != null);
+    const remaining = delivery.firstExpired(110).?;
+    delivery.cleanupRun(remaining.session_id, remaining.run_id);
+    try std.testing.expectEqual(@as(usize, 0), delivery.stats().retained_count);
 }

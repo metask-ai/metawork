@@ -1,5 +1,6 @@
 const std = @import("std");
 const lifecycle = @import("host_lifecycle");
+const host_workbench = @import("host_workbench");
 const event_pump = @import("event_pump");
 const bridge_delivery = @import("bridge_delivery");
 const sdk = @import("metacodes_agentcore");
@@ -515,6 +516,33 @@ fn createHost(limits: lifecycle.Limits) !*lifecycle.Host {
     return lifecycle.Host.init(std.testing.io, std.testing.allocator, &fake_api, limits);
 }
 
+fn workbenchSessionOptions() lifecycle.SessionOpenOptions {
+    return .{
+        .provider_kind_code = wire.PROVIDER_ANTHROPIC,
+        .permission_mode_code = wire.PERMISSION_DEFAULT,
+        .shell_policy_code = wire.SHELL_DISABLED,
+        .credential = "fixture-secret",
+        .model = "fixture-model",
+        .workspace = .{
+            .canonical_root = "/tmp/metawork-gate6",
+            .trust = .{ .temporary = "/tmp" },
+        },
+    };
+}
+
+fn waitWorkbenchSnapshot(
+    workbench: *host_workbench.Workbench,
+    needle: []const u8,
+) !void {
+    var output: [128 * 1024]u8 = undefined;
+    for (0..10_000) |_| {
+        const snapshot = try workbench.writeSnapshot(&output);
+        if (std.mem.indexOf(u8, snapshot, needle) != null) return;
+        std.Thread.yield() catch {};
+    }
+    return error.TestUnexpectedResult;
+}
+
 fn closeOnThread(session: *lifecycle.Session) void {
     session.close(.session_close) catch unreachable;
 }
@@ -871,6 +899,39 @@ test "UI deadline returns unavailable and malformed UI fails the Run" {
     try malformed.close(.session_close);
 }
 
+test "Gate 6 all executor workers waiting on UI remain controllable" {
+    fake_core.reset();
+    const host = try createHost(.{ .worker_count = 4, .queue_capacity = 4, .max_sessions = 4 });
+    defer {
+        host.shutdown() catch unreachable;
+        host.deinit();
+    }
+    var sessions: [4]*lifecycle.Session = undefined;
+    var run_ids: [4]u64 = undefined;
+    for (&sessions, 0..) |*session, index| {
+        fake_core.setNextPlan(.ui_wait);
+        session.* = try openSession(host);
+        run_ids[index] = try session.*.submit("occupy executor with synchronous UI");
+    }
+    for (sessions) |session| try session.waitForState(.waiting_ui);
+
+    const first_request = sessions[0].pendingUiRequest().?;
+    try sessions[0].respondUi(run_ids[0], first_request, .{ .permission = .allow_once });
+    try sessions[1].requestCancel(run_ids[1], .user_cancel);
+    try sessions[2].close(.session_close);
+    fake_core.releaseControlled();
+    try sessions[0].waitRun(run_ids[0]);
+    try sessions[1].waitRun(run_ids[1]);
+    try sessions[0].close(.session_close);
+    try sessions[1].close(.session_close);
+
+    try host.shutdown();
+    fake_core.lock();
+    const destroyed = fake_core.session_destroyed;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 4), destroyed);
+}
+
 test "UI response encoding is bounded before ownership transfer" {
     fake_core.reset();
     fake_core.setNextPlan(.ui_wait);
@@ -1035,6 +1096,60 @@ test "transient Session and Runtime destroy failures are explicit and retryable"
     const releases = fake_core.buffer_releases;
     fake_core.unlock();
     try std.testing.expectEqual(@as(usize, 2), releases);
+}
+
+test "Gate 6 Workbench closes off-thread and exposes retryable close failure" {
+    fake_core.reset();
+    const host = try createHost(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 2 });
+    defer {
+        host.shutdown() catch unreachable;
+        host.deinit();
+    }
+    var workbench = try host_workbench.Workbench.init(std.testing.allocator, host, .{
+        .max_sessions = 2,
+        .max_runs_per_session = 2,
+        .max_tools_per_run = 2,
+    });
+    defer workbench.deinit();
+
+    const session_id = try workbench.createSession(workbenchSessionOptions());
+    fake_core.failNextSessionDestroy();
+    try workbench.closeSession(session_id);
+    try waitWorkbenchSnapshot(&workbench, "\"closeFailed\":true");
+
+    try workbench.closeSession(session_id);
+    try waitWorkbenchSnapshot(&workbench, "\"state\":\"closed\"");
+    fake_core.lock();
+    const destroyed = fake_core.session_destroyed;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 1), destroyed);
+}
+
+test "Gate 6 Workbench close cancels a queued Run without blocking the caller" {
+    fake_core.reset();
+    fake_core.setNextPlan(.controlled);
+    const host = try createHost(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 1 });
+    defer {
+        host.shutdown() catch unreachable;
+        host.deinit();
+    }
+    var workbench = try host_workbench.Workbench.init(std.testing.allocator, host, .{
+        .max_sessions = 1,
+        .max_runs_per_session = 1,
+        .max_tools_per_run = 1,
+    });
+    defer workbench.deinit();
+
+    const session_id = try workbench.createSession(workbenchSessionOptions());
+    _ = try workbench.submit(session_id, "close this run");
+    try workbench.closeSession(session_id);
+    try waitWorkbenchSnapshot(&workbench, "\"state\":\"closed\"");
+    fake_core.lock();
+    const abort_calls = fake_core.abort_calls;
+    const destroyed = fake_core.session_destroyed;
+    fake_core.unlock();
+    try std.testing.expect(abort_calls <= 1);
+    try std.testing.expectEqual(@as(usize, 1), destroyed);
 }
 
 test "Core Session creation failure releases diagnostics and leaves capacity reusable" {

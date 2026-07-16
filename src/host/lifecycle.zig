@@ -51,6 +51,11 @@ pub const WorkspaceInput = struct {
     trust: WorkspaceTrust,
 };
 
+pub const Notifier = struct {
+    context: ?*anyopaque,
+    wake: *const fn (?*anyopaque) bool,
+};
+
 pub const SessionOpenOptions = struct {
     provider_kind_code: u32,
     permission_mode_code: u32,
@@ -80,6 +85,7 @@ pub const Limits = struct {
     max_ui_request_bytes: usize = 256 * 1024,
     max_ui_response_bytes: usize = 256 * 1024,
     ui_request_timeout: std.Io.Duration = .fromSeconds(30),
+    notifier: ?Notifier = null,
 };
 
 pub const SessionSnapshot = struct {
@@ -143,6 +149,7 @@ pub const Host = struct {
     max_ui_request_bytes: usize,
     max_ui_response_bytes: usize,
     ui_request_timeout: std.Io.Duration,
+    notifier: ?Notifier,
     events: event_pump.EventPump,
     executor: Executor,
     sessions_mutex: std.Io.Mutex = .init,
@@ -227,6 +234,7 @@ pub const Host = struct {
             .max_ui_request_bytes = limits.max_ui_request_bytes,
             .max_ui_response_bytes = limits.max_ui_response_bytes,
             .ui_request_timeout = limits.ui_request_timeout,
+            .notifier = limits.notifier,
             .events = events,
             .executor = undefined,
             .sessions = sessions,
@@ -395,6 +403,15 @@ pub const Host = struct {
 
     pub fn takeEvent(self: *Host) ?EventEnvelope {
         return self.events.takeFair();
+    }
+
+    fn notify(self: *Host) bool {
+        const notifier = self.notifier orelse return true;
+        return notifier.wake(notifier.context);
+    }
+
+    pub fn requestWake(self: *Host) bool {
+        return self.notify();
     }
 
     pub fn failRun(self: *Host, session_id: u64, run_id: u64, cause: HostCause) Error!void {
@@ -766,6 +783,7 @@ pub const Session = struct {
         const prompt = self.prompt.?;
         self.broadcast();
         self.unlock();
+        _ = self.host.notify();
 
         var options = std.mem.zeroes(wire.RunOptionsV1);
         options.struct_size = @sizeOf(wire.RunOptionsV1);
@@ -818,6 +836,7 @@ pub const Session = struct {
         if (self.state != .closing) self.state = .idle;
         self.broadcast();
         self.unlock();
+        _ = self.host.notify();
     }
 
     fn abortRun(self: *Session, run_id: u64, cause: HostCause) void {
@@ -911,6 +930,10 @@ pub const Session = struct {
             });
             return wire.CALLBACK_FATAL;
         };
+        if (!self.host.notify()) {
+            self.recordCause(.bridge_pipeline_failure);
+            return wire.CALLBACK_FATAL;
+        }
         return wire.CALLBACK_CONTINUE;
     }
 
@@ -973,6 +996,15 @@ pub const Session = struct {
         self.broadcast();
         self.unlock();
 
+        if (!self.host.notify()) {
+            self.lock();
+            setCauseLocked(self, .bridge_pipeline_failure);
+            self.ui_active = false;
+            if (self.state == .waiting_ui) self.state = .running;
+            self.broadcast();
+            self.unlock();
+        }
+
         var timer = self.host.io.async(expireUiRequest, .{ self, request_id });
         self.lock();
         while (self.ui_active and self.state == .waiting_ui)
@@ -991,6 +1023,7 @@ pub const Session = struct {
             error.Canceled => {},
         };
         self.host.allocator.free(request_copy);
+        _ = self.host.notify();
 
         if (answered) {
             const bytes = response orelse {
@@ -1007,12 +1040,15 @@ pub const Session = struct {
     fn expireUiRequest(self: *Session, request_id: u64) std.Io.Cancelable!void {
         try self.host.io.sleep(self.host.ui_request_timeout, .awake);
         self.lock();
-        defer self.unlock();
+        var expired = false;
         if (self.ui_active and self.ui_request_id == request_id) {
             self.ui_active = false;
             if (self.state == .waiting_ui) self.state = .running;
             self.broadcast();
+            expired = true;
         }
+        self.unlock();
+        if (expired) _ = self.host.notify();
     }
 
     fn releaseUiResponse(context: ?*anyopaque, out: ?*wire.OwnedBytesV1) callconv(.c) void {

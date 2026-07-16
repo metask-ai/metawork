@@ -50,6 +50,14 @@ pub fn build(b: *std.Build) void {
     event_pump.addImport("metacodes_agentcore", sdk);
     event_pump.addImport("event_sink", event_sink);
     lifecycle.addImport("event_pump", event_pump);
+    const workbench = b.createModule(.{
+        .root_source_file = b.path("../../src/host/workbench.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    workbench.addImport("metacodes_agentcore", sdk);
+    workbench.addImport("host_lifecycle", lifecycle);
     const bridge_delivery = b.createModule(.{
         .root_source_file = b.path("../../src/host/bridge_delivery.zig"),
         .target = target,
@@ -63,6 +71,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     tests.addImport("host_lifecycle", lifecycle);
+    tests.addImport("host_workbench", workbench);
     tests.addImport("event_pump", event_pump);
     tests.addImport("bridge_delivery", bridge_delivery);
     tests.addImport("metacodes_agentcore", sdk);

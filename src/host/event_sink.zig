@@ -21,6 +21,32 @@ pub const EventEnvelope = struct {
         self.event.deinit();
         self.* = undefined;
     }
+
+    /// Drops the SDK parse owner and transfers the raw, already-validated
+    /// event bytes to the transport layer without copying them again.
+    pub fn takeJson(self: *EventEnvelope) OwnedEventJson {
+        self.event.deinit();
+        const result = OwnedEventJson{
+            .session_id = self.session_id,
+            .run_id = self.run_id,
+            .json = self.json,
+            .allocator = self.allocator,
+        };
+        self.* = undefined;
+        return result;
+    }
+};
+
+pub const OwnedEventJson = struct {
+    session_id: u64,
+    run_id: u64,
+    json: []u8,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *OwnedEventJson) void {
+        self.allocator.free(self.json);
+        self.* = undefined;
+    }
 };
 
 pub const BoundedEventSink = struct {
