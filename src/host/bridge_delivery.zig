@@ -542,3 +542,31 @@ test "batch routes remain exact and detached retention expires by run" {
     delivery.cleanupRun(remaining.session_id, remaining.run_id);
     try std.testing.expectEqual(@as(usize, 0), delivery.stats().retained_count);
 }
+
+test "a new generation resends committed but unacknowledged events" {
+    var delivery = try Delivery.init(std.testing.allocator, .{ .route_slots = 4 });
+    defer delivery.deinit();
+    const first_generation = try delivery.connect();
+    for ([_][]const u8{ "{\"text_chunk\":\"one\"}", "{\"text_chunk\":\"two\"}" }) |encoded| {
+        try delivery.ingest(.{
+            .session_id = 1,
+            .run_id = 2,
+            .json = try std.testing.allocator.dupe(u8, encoded),
+            .allocator = std.testing.allocator,
+        });
+    }
+    var first_batch = (try delivery.buildBatch(first_generation)).?;
+    try delivery.commitBatch(&first_batch);
+    first_batch.deinit();
+    try delivery.acknowledge(first_generation, 1, 2, 1);
+
+    try delivery.detach(first_generation, 100);
+    const second_generation = try delivery.connect();
+    var resent = (try delivery.buildBatch(second_generation)).?;
+    defer resent.deinit();
+    try std.testing.expectEqual(@as(usize, 1), resent.item_count);
+    try std.testing.expect(std.mem.indexOf(u8, resent.json, "\"sequence\":\"2\"") != null);
+    try delivery.commitBatch(&resent);
+    try delivery.acknowledge(second_generation, 1, 2, 2);
+    try std.testing.expectEqual(@as(usize, 0), delivery.stats().retained_count);
+}

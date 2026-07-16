@@ -7,13 +7,13 @@
 
 ## 1. 已确认的技术选型
 
-| 层级 | 选择 | 决策说明 |
-| --- | --- | --- |
-| Renderer | React + Tailwind | 当前正式 UI 技术栈，适合复杂 Workbench 界面 |
-| Desktop Framework | Native SDK | Zig 一等公民，负责系统 WebView、窗口、Bridge 和桌面生命周期 |
-| Workbench / Host | Zig | 承担产品编排、权限边界、状态协调和 AgentCore 接入 |
-| AgentCore | metacodes AgentCore library bundle | metacodes 独立构建和发布；MetaWork 链接产物，不把上游源码纳入自身构建 |
-| Agent UI contract | metacodes 原生结构化协议 | React 消费 Host 产品投影，不消费终端字节流或 Provider SSE |
+| 层级              | 选择                               | 决策说明                                                              |
+| ----------------- | ---------------------------------- | --------------------------------------------------------------------- |
+| Renderer          | React + Tailwind                   | 当前正式 UI 技术栈，适合复杂 Workbench 界面                           |
+| Desktop Framework | Native SDK                         | Zig 一等公民，负责系统 WebView、窗口、Bridge 和桌面生命周期           |
+| Workbench / Host  | Zig                                | 承担产品编排、权限边界、状态协调和 AgentCore 接入                     |
+| AgentCore         | metacodes AgentCore library bundle | metacodes 独立构建和发布；MetaWork 链接产物，不把上游源码纳入自身构建 |
+| Agent UI contract | metacodes 原生结构化协议           | React 消费 Host 产品投影，不消费终端字节流或 Provider SSE             |
 
 由此排除以下正式主路径：
 
@@ -198,11 +198,11 @@ RunJob
 
 ### 7.2 进程模型
 
-| 模型 | 故障隔离 | 作用 |
-| --- | --- | --- |
-| 同进程 + bounded executor | 零进程级隔离 | 当前最小真实 baseline |
-| 单 AgentCore Worker | Host 与 AgentCore 隔离 | Gate 7 选定的后续正式方向 |
-| 每活跃 Session Worker | 会话级隔离 | 只有前两者数据不足时再验证 |
+| 模型                      | 故障隔离               | 作用                       |
+| ------------------------- | ---------------------- | -------------------------- |
+| 同进程 + bounded executor | 零进程级隔离           | 当前最小真实 baseline      |
+| 单 AgentCore Worker       | Host 与 AgentCore 隔离 | Gate 7 选定的后续正式方向  |
+| 每活跃 Session Worker     | 会话级隔离             | 只有前两者数据不足时再验证 |
 
 统一 Zig 不提供隔离。Gate 7 的独立 crash 对照证明同进程是零进程级隔离，并选择单 AgentCore Worker 作为后续正式方向。该决定不把 spike IPC 升格为产品协议；版本化 transport、backpressure、shutdown、credential 和真实 bundle 资源数据在后续 Gate 定义。当前同进程应用仍只是 prototype。
 
@@ -219,6 +219,8 @@ RunJob
 
 Renderer reload 只重建仍存活 Host 的视图。Host/AgentCore crash 后当前 Run 必须标记 interrupted，危险工具不得自动重放。Conversation/checkpoint 跨进程恢复只有在未来 AgentCore capability 明确提供后才能设计。
 
+Host view snapshot 使用独立的 8 MiB 有界存储，不受 Bridge 单次 1 MiB result 上限反向约束。Renderer 通过带 snapshot identity 的 256 KiB 分块读取完成 resync；begin 写入前先使旧 descriptor 失效，序列化失败后旧 identity 必须保持 stale，不能继续读取已被部分覆盖的 store。revision 通知和 snapshot 拉取分别保留 pending/retry 状态，瞬时发送或读取失败不能把旧视图标记为最新。snapshot 自动重试预算按 generation 限制，耗尽后进入显式 view-sync failure 并禁止 mutation；revision emit 与 retry timer 同时失败时当前 event connection fail closed。新 event generation 建立时若仍有旧 generation 的 snapshot Promise，必须在旧 Promise 退出后继续完成新 generation 的实际 resync，不能把等待旧 Promise 误判为同步成功。
+
 ## 9. 安全边界
 
 Renderer 按不可信调用方处理：
@@ -226,6 +228,7 @@ Renderer 按不可信调用方处理：
 - Bridge 命令默认拒绝，只开放白名单；
 - dev origin 和 release origin 分离，开发配置不得泄漏到发布包；
 - Host 校验 payload、Session/Run 归属和请求时效；
+- trusted Workspace 只能由 Host 原生目录选择与原生确认生成一次性 grant；Renderer 不能提交路径加 boolean 自行授信；
 - Provider credential 不进入 Bridge、事件、日志或 snapshot；
 - 当前不暴露通用 Host tool 或任意执行接口；
 - built-in Bash 使用非交互子进程；
@@ -246,15 +249,15 @@ Native SDK 是当前选型，但 Phase 0A 必须验证：
 
 ## 11. 主要风险
 
-| 风险 | 当前控制方式 |
-| --- | --- |
-| Native SDK Zig → React 路径不符合预期 | Gate 0 先做真实 dev/prod smoke |
-| typed SDK 与真实 producer wire 漂移 | Gate 3 source-free corpus + Gate 4 真实 Host link/run 回归 |
-| callback 数据返回后失效 | callback 内验证并深拷贝 |
-| callback/close race 造成 UAF | abort、join、callback quiescence 后 destroy |
-| 同步 UI 耗尽 executor | bounded slots、deadline、cancel/close/shutdown 唤醒和压力测试 |
-| Bridge/event 造成无限内存 | count/byte/time 多维上限和公平调度 |
-| Host fatal 被误报用户取消 | per-Run `HostCause` 是产品状态真相 |
-| v1 Workspace 被误报安全 | 只允许临时/trusted 验证并显式标注限制 |
-| 同进程 native crash 带走全部状态 | Gate 7 fault-domain spike 后再决定进程模型 |
-| 过早建设发布系统 | baseline 通过后再做 cache 与 remote |
+| 风险                                  | 当前控制方式                                                  |
+| ------------------------------------- | ------------------------------------------------------------- |
+| Native SDK Zig → React 路径不符合预期 | Gate 0 先做真实 dev/prod smoke                                |
+| typed SDK 与真实 producer wire 漂移   | Gate 3 source-free corpus + Gate 4 真实 Host link/run 回归    |
+| callback 数据返回后失效               | callback 内验证并深拷贝                                       |
+| callback/close race 造成 UAF          | abort、join、callback quiescence 后 destroy                   |
+| 同步 UI 耗尽 executor                 | bounded slots、deadline、cancel/close/shutdown 唤醒和压力测试 |
+| Bridge/event 造成无限内存             | count/byte/time 多维上限和公平调度                            |
+| Host fatal 被误报用户取消             | per-Run `HostCause` 是产品状态真相                            |
+| v1 Workspace 被误报安全               | 只允许临时/trusted 验证并显式标注限制                         |
+| 同进程 native crash 带走全部状态      | Gate 7 fault-domain spike 后再决定进程模型                    |
+| 过早建设发布系统                      | baseline 通过后再做 cache 与 remote                           |

@@ -55,14 +55,14 @@ AgentCore bundle
 
 ## 3. 当前协议表面
 
-| 类型 | 方向 | 当前 ABI v1 语义 |
-| --- | --- | --- |
-| `CoreEvent` JSON | Core → Host | callback-scoped borrowed bytes；携带 callback Session handle 和 run ID |
-| `UiRequest` JSON | Core → Host | 同步 callback 请求 |
-| `UiResponse` JSON | Host → Core | 同一 callback 内 answered response；或 unavailable/fatal |
-| ABI status | Core → Host | function 调用层错误，独立于有效 Run 结果 |
-| `RunResult` | Core → Host | status OK 后才有效；包含 stop reason code、turn/tool count |
-| abort | Host → Core | 按 Session/Run 的 user/timeout 中断机制 |
+| 类型              | 方向        | 当前 ABI v1 语义                                                       |
+| ----------------- | ----------- | ---------------------------------------------------------------------- |
+| `CoreEvent` JSON  | Core → Host | callback-scoped borrowed bytes；携带 callback Session handle 和 run ID |
+| `UiRequest` JSON  | Core → Host | 同步 callback 请求                                                     |
+| `UiResponse` JSON | Host → Core | 同一 callback 内 answered response；或 unavailable/fatal               |
+| ABI status        | Core → Host | function 调用层错误，独立于有效 Run 结果                               |
+| `RunResult`       | Core → Host | status OK 后才有效；包含 stop reason code、turn/tool count             |
+| abort             | Host → Core | 按 Session/Run 的 user/timeout 中断机制                                |
 
 `UiEvent` / `UiBackend.poll()` 虽然存在于 cc-zig native 协议中，但当前生产 agent loop 未证明消费。MetaWork 不依赖它完成 stop、生成期 queue message 或 steering。
 
@@ -296,15 +296,15 @@ flowchart LR
 
 ### 过载语义
 
-| 数据 | 允许策略 |
-| --- | --- |
-| `text_chunk` | 当前逐项保留；若后续按 Session/Run 合并，最终字节必须一致 |
-| `tool_progress` | pump 逐项保留；Renderer projection 按同一 tool 覆盖旧进度 |
-| `usage` | pump 逐项保留；Renderer projection 根据 cc-zig 事件语义累计或替换 |
-| diagnostics | 按明确配置采样 |
-| tool start/result | 不得静默丢失 |
-| UI request/response state | 不得静默丢失 |
-| run/error/cancel/terminal state | 不得静默丢失 |
+| 数据                            | 允许策略                                                          |
+| ------------------------------- | ----------------------------------------------------------------- |
+| `text_chunk`                    | 当前逐项保留；若后续按 Session/Run 合并，最终字节必须一致         |
+| `tool_progress`                 | pump 逐项保留；Renderer projection 按同一 tool 覆盖旧进度         |
+| `usage`                         | pump 逐项保留；Renderer projection 根据 cc-zig 事件语义累计或替换 |
+| diagnostics                     | 按明确配置采样                                                    |
+| tool start/result               | 不得静默丢失                                                      |
+| UI request/response state       | 不得静默丢失                                                      |
+| run/error/cancel/terminal state | 不得静默丢失                                                      |
 
 当前没有完整最终 assistant snapshot 时，`text_chunk` 不能丢。队列不能接收关键事件时，可以有限阻塞 callback；达到 deadline 后返回 fatal，而不是无限等待。
 
@@ -332,6 +332,12 @@ Native SDK 和真实事件大小已经测量；49,703-byte 真实 event 超过�
 - reload 期间仍 active 的同步 UI request 可以重新展示，但响应仍须绑定原 Session/Run/request；
 - Host/AgentCore 进程退出后不恢复 active Run；
 - snapshot 不包含 Provider credential。
+
+当前 event delivery 的 batch fetch/ACK 任一步失败时，Renderer 必须停止消费旧 generation，显式 disconnect 后以有上限的退避序列重新 connect；Host 只在新 generation 重发未 ACK 项。旧 batch 在重连后直接失效，不能吞掉错误后继续 ACK 后续 sequence。Workbench revision 通知只在 revision 变化时发送，Renderer 合并并发 refresh；Host 发送失败时保留最新 revision 并由一次性 timer 重试，若 timer 也无法建立则立即使当前 event connection 失效，不能只记录日志后继续宣称可用。Renderer snapshot 拉取失败时保留目标 revision；每个 generation 的自动重试预算耗尽后停止请求、禁止产品 mutation 并等待用户显式恢复，不得把失败误记成已同步，也不得永久循环重试。raw transport batch 只负责完整 ACK，不再额外触发一次全量 snapshot。
+
+正式 AgentCore 产品事件在 Host event pump 中完成 typed projection 后即释放，不再把同一 raw `CoreEvent` 复制到 Renderer 再丢弃。`metawork:agent-events` raw batch/object/ACK 路径只保留为隔离的 Gate 5 transport fixture；产品 Renderer 的数据面是 Host-owned Workbench revision + bounded snapshot。
+
+当前 Bridge 单次 result 上限为 1 MiB，但它不是 Workbench 产品状态容量。Host 在固定 8 MiB snapshot store 中生成一致的完整 JSON，再由 Renderer 以绑定 snapshot ID、generation、window、offset 和长度的 256 KiB 原始分块拉取；分块使用 base64 后仍低于单次 result 上限。新的 begin 在写入 store 前必须先使旧 descriptor 失效；写入失败不能让旧 identity 继续读取被部分覆盖的 buffer。Workbench 以 JSON 字符串最坏六倍 escaping、Session/Run/Tool 最大结构数量，以及“同步 UI 最多占满四个 executor slot”的并发 pending UI 最坏值，在初始化时验证完整 snapshot 预算，并以最大结构的真实 serializer 测试校验估算上界。当前 projection 上限恢复为 512 KiB；不得为了适配 Bridge 缩小产品状态，也不得允许合法 projection 进入永久 `SnapshotTooLarge` 状态。
 
 不在验证 transport 前发明固定 `events.drain`、cursor 或轮询协议；最终机制必须以 Native SDK 事实和压力数据为依据。
 
@@ -362,17 +368,17 @@ call ABI
 → exhaustive Host mapping
 ```
 
-| StopReason | 当前 Host 状态 |
-| --- | --- |
-| `end_turn` | completed |
-| `max_turns` | stopped / awaiting_user |
-| `aborted` | HostCause 决定 cancelled / interrupted / failed |
-| `tool_error` | failed |
-| `api_error` | failed |
-| `tool_loop` | stopped / awaiting_user |
-| `suspended` | dependency contract failure：当前没有 resume payload |
+| StopReason     | 当前 Host 状态                                                         |
+| -------------- | ---------------------------------------------------------------------- |
+| `end_turn`     | completed                                                              |
+| `max_turns`    | stopped / awaiting_user                                                |
+| `aborted`      | HostCause 决定 cancelled / interrupted / failed                        |
+| `tool_error`   | failed                                                                 |
+| `api_error`    | failed                                                                 |
+| `tool_loop`    | stopped / awaiting_user                                                |
+| `suspended`    | dependency contract failure：当前没有 resume payload                   |
 | `backgrounded` | dependency contract failure：当前没有 background handle/state transfer |
-| `budget` | stopped / awaiting_user |
+| `budget`       | stopped / awaiting_user                                                |
 
 MetaWork 对 bundle SDK 的 typed StopReason 使用无 `else` switch。unknown raw code 必须在 SDK validation 层失败，并在 diagnostic 中保留 raw value。
 
@@ -391,7 +397,8 @@ MetaWork 对 bundle SDK 的 typed StopReason 使用无 `else` switch。unknown r
 
 ### Workspace
 
-- Host 规范化用户选择路径并绑定 MetaWork Session；
+- Host 直接发起原生目录选择与原生 trust 确认，规范化结果后签发绑定 window、event delivery generation 和 canonical path 的一次性 grant；
+- Renderer 创建 Session 时只回传 grant，不得回传任意路径加 `trusted` boolean；grant 在 disconnect、拒绝、替换或首次消费后失效；
 - Gate 2 的 lifecycle API 只接收 Host 已规范化的绝对路径，并再次拒绝空 component、`.`、`..`、尾随分隔符和临时根的词法逃逸；symlink/TOCTOU 仍不在此保证内；
 - 当前 v1 只运行临时 fixture 或用户明确 trusted 的 Workspace；
 - 不以 `workspace_root` 字段存在为 strict security 证据；
@@ -426,14 +433,14 @@ stop 不进入普通 FIFO，不能被文本或 queue message 阻塞。abort 只�
 
 ## 14. Shell 边界
 
-| 能力 | 当前 Bash baseline |
-| --- | --- |
-| hidden non-interactive child | 使用 |
-| stdout/stderr capture | 使用 |
-| exit code/timeout/cancel | 必须验证 |
-| Terminal Emulator | 不使用 |
-| PTY/ConPTY | 不使用 |
-| TTY-only programs | 拒绝或明确报错 |
+| 能力                         | 当前 Bash baseline |
+| ---------------------------- | ------------------ |
+| hidden non-interactive child | 使用               |
+| stdout/stderr capture        | 使用               |
+| exit code/timeout/cancel     | 必须验证           |
+| Terminal Emulator            | 不使用             |
+| PTY/ConPTY                   | 不使用             |
+| TTY-only programs            | 拒绝或明确报错     |
 
 未来如需交互式终端，应作为独立 `TerminalTool` 设计，不得重新成为 Agent 通信层。
 

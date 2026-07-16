@@ -314,6 +314,13 @@ Gate 4 通过时的 sink 只提供全局 event count 和单 event bytes 硬上�
 - 有界 retention 内允许 Host snapshot/resync；
 - 旧连接不能消费新连接事件；
 - Gate 5 transport 保留 Session/Run identity、未 ack event 和 object，并拒绝旧 generation；Gate 6 完整链路再验证 reload 后 active UI request 的原 Session/Run/request；
+- fetch/ACK 故障必须断开旧 generation 并重连，未 ACK 项在新 generation 重发，旧 batch 不得继续消费；
+- 注入首次 reconnect 失败，验证 bounded backoff 后可建立新 generation；耗尽后必须进入显式 offline 状态；
+- 注入 revision event 发送失败和 snapshot chunk 拉取失败，验证 pending revision 不丢失、重试合并到最新 revision，旧 snapshot identity 被拒绝；
+- 注入 snapshot serializer 中途失败，验证此前 descriptor 已 stale，不能读取被部分覆盖的 store；
+- 同时注入 revision emit 和 retry timer 失败，验证当前 generation fail closed；
+- snapshot 自动重试预算耗尽后不得继续产生 Bridge 请求，恢复必须由新 generation 或用户显式操作触发；
+- 以四个并发 pending UI request 计算 snapshot 最坏预算，并验证 512 KiB projection 可通过 8 MiB Host store 与 256 KiB 分块完整重建；
 - snapshot 不包含 credential；
 - Host/AgentCore crash 不伪装为 reload recovery。
 
@@ -338,7 +345,7 @@ Gate 6 已切换并精确锁定 clean bundle `0.0.0-dev+3237ac3fc4df`。该升�
 
 ### 最小 UI
 
-- 打开临时或明确 trusted Workspace；
+- 自动化只打开受控临时 Workspace；产品 UI 由 Host 原生选择和原生确认签发一次性 trusted Workspace grant；
 - 创建、切换和关闭 Session；
 - 提交真实 Agent input；
 - 流式文本；
@@ -355,15 +362,15 @@ Gate 6 已切换并精确锁定 clean bundle `0.0.0-dev+3237ac3fc4df`。该升�
 
 不能用单一“10,000 events”冒充压力测试。矩阵至少覆盖：
 
-| 维度 | 取值方向 |
-| --- | --- |
-| Sessions | 1、4、超过 executor slots |
-| event rate | 低、真实流式、高速 burst |
-| event bytes | 小 text、普通 tool、接近/超过 Bridge limit |
-| duration | 短 Run、持续 Run |
-| UI waits | 无、单个、全部 worker 同时等待 |
-| Renderer | 正常、slow、detach/reload |
-| cancellation | provider stream、同步 wait、长 Bash |
+| 维度         | 取值方向                                   |
+| ------------ | ------------------------------------------ |
+| Sessions     | 1、4、超过 executor slots                  |
+| event rate   | 低、真实流式、高速 burst                   |
+| event bytes  | 小 text、普通 tool、接近/超过 Bridge limit |
+| duration     | 短 Run、持续 Run                           |
+| UI waits     | 无、单个、全部 worker 同时等待             |
+| Renderer     | 正常、slow、detach/reload                  |
+| cancellation | provider stream、同步 wait、长 Bash        |
 
 ### 退出条件
 

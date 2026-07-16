@@ -19,7 +19,18 @@ pub const Limits = struct {
     max_user_message_bytes: usize = 64 * 1024,
     max_assistant_message_bytes: usize = 256 * 1024,
     max_tool_field_bytes: usize = 256 * 1024,
+    max_pending_ui_json_bytes: usize = 256 * 1024,
+    max_pending_ui_requests: usize = 4,
+    max_snapshot_bytes: usize = 8 * 1024 * 1024,
 };
+
+const json_string_expansion: usize = 6;
+const pending_ui_reencode_expansion: usize = 2;
+const root_snapshot_overhead: usize = 128;
+const session_snapshot_overhead: usize = 512;
+const run_snapshot_overhead: usize = 1024;
+const tool_snapshot_overhead: usize = 512;
+const pending_ui_snapshot_overhead: usize = 8 * 1024;
 
 const ToolState = enum { running, completed, failed };
 const RunPhase = enum {
@@ -104,7 +115,10 @@ pub const Workbench = struct {
             limits.max_tools_per_run == 0 or limits.max_projection_bytes == 0 or
             limits.max_workspace_bytes == 0 or
             limits.max_user_message_bytes == 0 or limits.max_assistant_message_bytes == 0 or
-            limits.max_tool_field_bytes == 0)
+            limits.max_tool_field_bytes == 0 or limits.max_pending_ui_json_bytes == 0 or
+            limits.max_pending_ui_requests == 0 or
+            limits.max_snapshot_bytes == 0 or
+            (worstCaseSnapshotBytes(limits) orelse return error.ProjectionCapacity) > limits.max_snapshot_bytes)
             return error.ProjectionCapacity;
         const sessions = try allocator.alloc(?SessionView, limits.max_sessions);
         @memset(sessions, null);
@@ -379,30 +393,7 @@ pub const Workbench = struct {
         defer pending.deinit();
         var parsed = sdk.decodeUiRequest(self.allocator, pending.json) catch return error.InvalidUiResponse;
         defer parsed.deinit();
-        writer.print("{{\"requestId\":\"{d}\",\"runId\":\"{d}\",", .{ pending.request_id, pending.run_id }) catch return error.SnapshotTooLarge;
-        switch (parsed.value) {
-            .ask_question => |questions| {
-                writer.writeAll("\"kind\":\"ask_question\",\"questions\":") catch return error.SnapshotTooLarge;
-                jsonValue(writer, questions) catch return error.SnapshotTooLarge;
-            },
-            .permission => |permission| {
-                writer.writeAll("\"kind\":\"permission\",\"tool\":") catch return error.SnapshotTooLarge;
-                jsonValue(writer, permission.tool) catch return error.SnapshotTooLarge;
-                writer.writeAll(",\"args\":") catch return error.SnapshotTooLarge;
-                jsonValue(writer, permission.args) catch return error.SnapshotTooLarge;
-            },
-            .plan_approval => |plan| {
-                writer.writeAll("\"kind\":\"plan_approval\",\"plan\":") catch return error.SnapshotTooLarge;
-                jsonValue(writer, plan.plan_md) catch return error.SnapshotTooLarge;
-            },
-            .custom => |custom| {
-                writer.writeAll("\"kind\":\"custom\",\"customKind\":") catch return error.SnapshotTooLarge;
-                jsonValue(writer, custom.kind) catch return error.SnapshotTooLarge;
-                writer.writeAll(",\"payload\":") catch return error.SnapshotTooLarge;
-                jsonValue(writer, custom.payload_json) catch return error.SnapshotTooLarge;
-            },
-        }
-        writer.writeByte('}') catch return error.SnapshotTooLarge;
+        try writePendingUiProjection(writer, pending.request_id, pending.run_id, parsed.value);
     }
 
     fn findOrCreateTool(
@@ -518,6 +509,38 @@ pub const Workbench = struct {
     }
 };
 
+fn writePendingUiProjection(
+    writer: *std.Io.Writer,
+    request_id: u64,
+    run_id: u64,
+    request: sdk.UiRequest,
+) Error!void {
+    writer.print("{{\"requestId\":\"{d}\",\"runId\":\"{d}\",", .{ request_id, run_id }) catch return error.SnapshotTooLarge;
+    switch (request) {
+        .ask_question => |questions| {
+            writer.writeAll("\"kind\":\"ask_question\",\"questions\":") catch return error.SnapshotTooLarge;
+            jsonValue(writer, questions) catch return error.SnapshotTooLarge;
+        },
+        .permission => |permission| {
+            writer.writeAll("\"kind\":\"permission\",\"tool\":") catch return error.SnapshotTooLarge;
+            jsonValue(writer, permission.tool) catch return error.SnapshotTooLarge;
+            writer.writeAll(",\"args\":") catch return error.SnapshotTooLarge;
+            jsonValue(writer, permission.args) catch return error.SnapshotTooLarge;
+        },
+        .plan_approval => |plan| {
+            writer.writeAll("\"kind\":\"plan_approval\",\"plan\":") catch return error.SnapshotTooLarge;
+            jsonValue(writer, plan.plan_md) catch return error.SnapshotTooLarge;
+        },
+        .custom => |custom| {
+            writer.writeAll("\"kind\":\"custom\",\"customKind\":") catch return error.SnapshotTooLarge;
+            jsonValue(writer, custom.kind) catch return error.SnapshotTooLarge;
+            writer.writeAll(",\"payload\":") catch return error.SnapshotTooLarge;
+            jsonValue(writer, custom.payload_json) catch return error.SnapshotTooLarge;
+        },
+    }
+    writer.writeByte('}') catch return error.SnapshotTooLarge;
+}
+
 fn closeWorker(
     host: *lifecycle.Host,
     view: *SessionView,
@@ -614,6 +637,44 @@ fn addU64(left: u64, right: u64) error{ProjectionCapacity}!u64 {
     return std.math.add(u64, left, right) catch error.ProjectionCapacity;
 }
 
+fn worstCaseSnapshotBytes(limits: Limits) ?usize {
+    var total = std.math.mul(usize, limits.max_projection_bytes, json_string_expansion) catch return null;
+    total = std.math.add(usize, total, root_snapshot_overhead) catch return null;
+    total = std.math.add(
+        usize,
+        total,
+        std.math.mul(usize, limits.max_sessions, session_snapshot_overhead) catch return null,
+    ) catch return null;
+    const runs = std.math.mul(usize, limits.max_sessions, limits.max_runs_per_session) catch return null;
+    total = std.math.add(
+        usize,
+        total,
+        std.math.mul(usize, runs, run_snapshot_overhead) catch return null,
+    ) catch return null;
+    const tools = std.math.mul(usize, runs, limits.max_tools_per_run) catch return null;
+    total = std.math.add(
+        usize,
+        total,
+        std.math.mul(usize, tools, tool_snapshot_overhead) catch return null,
+    ) catch return null;
+    const pending_ui_payload = std.math.mul(
+        usize,
+        limits.max_pending_ui_json_bytes,
+        pending_ui_reencode_expansion,
+    ) catch return null;
+    const pending_ui = std.math.add(
+        usize,
+        pending_ui_payload,
+        pending_ui_snapshot_overhead,
+    ) catch return null;
+    total = std.math.add(
+        usize,
+        total,
+        std.math.mul(usize, limits.max_pending_ui_requests, pending_ui) catch return null,
+    ) catch return null;
+    return total;
+}
+
 fn testWorkbench() !Workbench {
     var workbench = try Workbench.init(std.testing.allocator, undefined, .{
         .max_sessions = 2,
@@ -624,6 +685,9 @@ fn testWorkbench() !Workbench {
         .max_user_message_bytes = 1024,
         .max_assistant_message_bytes = 32 * 1024,
         .max_tool_field_bytes = 8 * 1024,
+        .max_pending_ui_json_bytes = 64 * 1024,
+        .max_pending_ui_requests = 2,
+        .max_snapshot_bytes = 1024 * 1024,
     });
     const workspace = try workbench.copyBounded("/tmp/metawork-test", workbench.limits.max_workspace_bytes);
     const runs = try workbench.allocator.alloc(?RunView, workbench.limits.max_runs_per_session);
@@ -678,6 +742,120 @@ test "Workbench projection preserves text bytes with bounded geometric growth" {
     try std.testing.expectError(error.ProjectionCapacity, workbench.applyEvent(&overflow));
     try std.testing.expect(run.assistant.list.capacity <= workbench.limits.max_assistant_message_bytes);
     try std.testing.expect(workbench.projection_bytes <= workbench.limits.max_projection_bytes);
+}
+
+test "Workbench snapshot budget includes JSON escaping and structural overhead" {
+    const limits = Limits{};
+    const worst_case = worstCaseSnapshotBytes(limits).?;
+    try std.testing.expect(worst_case <= limits.max_snapshot_bytes);
+    try std.testing.expect(worst_case > 1024 * 1024);
+    try std.testing.expectEqual(@as(usize, 512 * 1024), limits.max_projection_bytes);
+    try std.testing.expectEqual(@as(usize, 16), limits.max_runs_per_session);
+    const single_pending_budget = limits.max_pending_ui_json_bytes * pending_ui_reencode_expansion + pending_ui_snapshot_overhead;
+    try std.testing.expect(worst_case >= single_pending_budget * limits.max_pending_ui_requests);
+
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    const run = findRun(workbench.sessions[0].?.runs, 7).?;
+    const remaining = @min(
+        workbench.limits.max_assistant_message_bytes,
+        workbench.limits.max_projection_bytes - workbench.projection_bytes,
+    );
+    const controls = try std.testing.allocator.alloc(u8, remaining);
+    defer std.testing.allocator.free(controls);
+    @memset(controls, 1);
+    try workbench.appendTrackedText(&run.assistant, controls, workbench.limits.max_assistant_message_bytes);
+
+    const snapshot_storage = try std.testing.allocator.alloc(u8, workbench.limits.max_snapshot_bytes);
+    defer std.testing.allocator.free(snapshot_storage);
+    const snapshot = try workbench.writeSnapshot(snapshot_storage);
+    try std.testing.expect(snapshot.len > controls.len * 5);
+}
+
+test "default snapshot budget contains the maximum structural projection" {
+    const limits = Limits{};
+    var workbench = try Workbench.init(std.testing.allocator, undefined, limits);
+    defer workbench.deinit();
+
+    for (0..limits.max_sessions) |session_index| {
+        const runs = try workbench.allocator.alloc(?RunView, limits.max_runs_per_session);
+        @memset(runs, null);
+        for (0..limits.max_runs_per_session) |run_index| {
+            const tools = try workbench.allocator.alloc(?ToolView, limits.max_tools_per_run);
+            @memset(tools, null);
+            for (0..limits.max_tools_per_run) |tool_index| {
+                tools[tool_index] = .{
+                    .id = try workbench.copyBounded("", limits.max_tool_field_bytes),
+                    .name = try workbench.copyBounded("", limits.max_tool_field_bytes),
+                    .input = try workbench.copyBounded("", limits.max_tool_field_bytes),
+                    .progress = try workbench.copyBounded("", limits.max_tool_field_bytes),
+                    .content = try workbench.copyBounded("", limits.max_tool_field_bytes),
+                    .state = .completed,
+                    .elapsed_ms = std.math.maxInt(u64),
+                };
+            }
+            runs[run_index] = .{
+                .id = @intCast(run_index + 1),
+                .user = try workbench.copyBounded("", limits.max_user_message_bytes),
+                .tools = tools,
+                .status_text = try workbench.copyBounded("", limits.max_tool_field_bytes),
+            };
+        }
+        workbench.sessions[session_index] = .{
+            .session = null,
+            .id = @intCast(session_index + 1),
+            .workspace_root = try workbench.copyBounded("", limits.max_workspace_bytes),
+            .runs = runs,
+        };
+    }
+
+    const escaped_assistant = try std.testing.allocator.alloc(u8, limits.max_assistant_message_bytes);
+    defer std.testing.allocator.free(escaped_assistant);
+    @memset(escaped_assistant, 1);
+    try workbench.appendTrackedText(
+        &workbench.sessions[0].?.runs[0].?.assistant,
+        escaped_assistant,
+        limits.max_assistant_message_bytes,
+    );
+    const escaped_tool = try std.testing.allocator.alloc(u8, limits.max_tool_field_bytes);
+    defer std.testing.allocator.free(escaped_tool);
+    @memset(escaped_tool, 2);
+    try workbench.replaceTracked(
+        &workbench.sessions[0].?.runs[0].?.tools[0].?.content,
+        escaped_tool,
+        limits.max_tool_field_bytes,
+    );
+    try std.testing.expectEqual(limits.max_projection_bytes, workbench.projection_bytes);
+
+    const storage = try std.testing.allocator.alloc(u8, limits.max_snapshot_bytes);
+    defer std.testing.allocator.free(storage);
+    const snapshot = try workbench.writeSnapshot(storage);
+    try std.testing.expect(snapshot.len <= worstCaseSnapshotBytes(limits).?);
+    try std.testing.expect(snapshot.len <= limits.max_snapshot_bytes);
+}
+
+test "pending UI re-encoding remains inside its concurrent snapshot allowance" {
+    const limits = Limits{};
+    const payload_len = (limits.max_pending_ui_json_bytes - 256) / json_string_expansion;
+    const payload = try std.testing.allocator.alloc(u8, payload_len);
+    defer std.testing.allocator.free(payload);
+    @memset(payload, 1);
+    const request = sdk.UiRequest{ .custom = .{ .kind = "custom", .payload_json = payload } };
+    const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, request, .{});
+    defer std.testing.allocator.free(encoded);
+    try std.testing.expect(encoded.len <= limits.max_pending_ui_json_bytes);
+
+    const allowance = limits.max_pending_ui_json_bytes * pending_ui_reencode_expansion + pending_ui_snapshot_overhead;
+    const storage = try std.testing.allocator.alloc(u8, allowance);
+    defer std.testing.allocator.free(storage);
+    var writer = std.Io.Writer.fixed(storage);
+    try writePendingUiProjection(
+        &writer,
+        std.math.maxInt(u64),
+        std.math.maxInt(u64),
+        request,
+    );
+    try std.testing.expect(writer.buffered().len <= allowance);
 }
 
 test "Workbench projects tools and full-width usage without parsing protocol in Renderer" {

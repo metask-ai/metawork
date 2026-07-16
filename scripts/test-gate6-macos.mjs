@@ -77,7 +77,6 @@ try {
   const beforeCreate = await snapshot();
   await invokeBridge("metawork.sessions.create", {
     workspaceRoot: workspace,
-    trusted: false,
   });
   const createdSession = await poll(
     async () => {
@@ -268,24 +267,66 @@ async function invokeBridge(command, payload) {
       }
     })
     .filter(Boolean);
-  const response = responses.find((value) => value.id === id) ?? null;
+  let response = responses.find((value) => value.id === id) ?? null;
+  if (response === null) {
+    try {
+      const latest = JSON.parse(
+        await readFile(join(automationDir, "bridge-response.txt"), "utf8"),
+      );
+      if (latest.id === id) response = latest;
+    } catch {
+      // The runtime replaces this file, so another bridge call may win.
+    }
+  }
   if (response && !response.ok)
     throw new Error(`${command} failed: ${JSON.stringify(response.error)}`);
   return response?.result ?? null;
 }
 
 async function snapshot() {
-  const direct = await invokeBridge("metawork.workbench.snapshot", {});
-  if (Array.isArray(direct?.sessions)) return direct;
-  const responseFile = join(automationDir, "bridge-response.txt");
-  try {
-    const latest = JSON.parse(await readFile(responseFile, "utf8"));
-    if (latest.ok && Array.isArray(latest.result?.sessions))
-      return latest.result;
-  } catch {
-    // The runtime replaces this single file, so a read may race a write.
+  const descriptor = await invokeBridge("metawork.workbench.snapshot", {});
+  if (
+    !descriptor ||
+    !/^[1-9][0-9]*$/.test(descriptor.snapshotId) ||
+    !Number.isSafeInteger(descriptor.bytes) ||
+    descriptor.bytes <= 0 ||
+    descriptor.bytes > 8 * 1024 * 1024 ||
+    !Number.isSafeInteger(descriptor.chunkBytes) ||
+    descriptor.chunkBytes <= 0 ||
+    descriptor.chunkBytes > 256 * 1024
+  )
+    throw new Error(
+      `invalid snapshot descriptor: ${JSON.stringify(descriptor)}`,
+    );
+
+  const assembled = Buffer.alloc(descriptor.bytes);
+  for (
+    let offset = 0;
+    offset < descriptor.bytes;
+    offset += descriptor.chunkBytes
+  ) {
+    const chunk = await invokeBridge("metawork.workbench.snapshot.chunk", {
+      snapshotId: descriptor.snapshotId,
+      offset: String(offset),
+    });
+    const expectedBytes = Math.min(
+      descriptor.chunkBytes,
+      descriptor.bytes - offset,
+    );
+    const decoded = Buffer.from(chunk?.data ?? "", "base64");
+    if (
+      chunk?.snapshotId !== descriptor.snapshotId ||
+      chunk?.offset !== offset ||
+      chunk?.bytes !== expectedBytes ||
+      decoded.length !== expectedBytes
+    )
+      throw new Error(`invalid snapshot chunk: ${JSON.stringify(chunk)}`);
+    decoded.copy(assembled, offset);
   }
-  throw new Error("Workbench snapshot was displaced by another bridge call");
+  const parsed = JSON.parse(assembled.toString("utf8"));
+  if (!Array.isArray(parsed.sessions))
+    throw new Error("invalid Workbench snapshot");
+  return parsed;
 }
 
 async function automate(...args) {

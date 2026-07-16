@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { EventDelivery } from "./event-delivery";
+import { fetchWorkbenchSnapshot } from "./snapshot-client";
+import { SnapshotDemand } from "./snapshot-demand";
+
 type ToolView = {
   id: string;
   name: string;
@@ -97,7 +101,9 @@ const commands = {
   disconnect: "metawork.events.disconnect",
   ack: "metawork.events.ack",
   fetch: "metawork.events.fetch",
+  chooseWorkspace: "metawork.workspace.choose",
   snapshot: "metawork.workbench.snapshot",
+  snapshotChunk: "metawork.workbench.snapshot.chunk",
   createSession: "metawork.sessions.create",
   run: "metawork.sessions.run",
   cancel: "metawork.sessions.cancel",
@@ -139,16 +145,18 @@ export default function App() {
   });
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [workspacePath, setWorkspacePath] = useState("");
-  const [trusted, setTrusted] = useState(false);
+  const [workspaceGrant, setWorkspaceGrant] = useState("");
   const [prompt, setPrompt] = useState("");
   const [status, setStatus] = useState("Connect the native shell to begin.");
   const [busy, setBusy] = useState<string | null>(null);
   const [bridgeReady, setBridgeReady] = useState(false);
+  const [viewSyncFailed, setViewSyncFailed] = useState(false);
   const [answers, setAnswers] = useState<Record<string, string[]>>({});
   const generation = useRef("0");
-  const agentChain = useRef(Promise.resolve());
   const didGate5Fixture = useRef(false);
-  const latestRevision = useRef(0n);
+  const snapshotDemand = useRef(new SnapshotDemand());
+  const snapshotInFlight = useRef<Promise<void> | null>(null);
+  const deliveryRestart = useRef<(() => Promise<void>) | null>(null);
 
   const activeSession = useMemo(
     () =>
@@ -158,29 +166,76 @@ export default function App() {
     [activeSessionId, snapshot.sessions],
   );
 
-  const refreshSnapshot = useCallback(async () => {
-    const zero = window.zero;
-    if (!zero || generation.current === "0") return;
-    const next = await zero.invoke<WorkbenchSnapshot>(commands.snapshot, {});
-    const revision = revisionValue(next.revision);
-    if (revision < latestRevision.current) return;
-    latestRevision.current = revision;
-    setSnapshot(next);
-    setActiveSessionId((current) => {
-      if (current && next.sessions.some((session) => session.id === current))
-        return current;
-      return next.sessions[0]?.id ?? null;
-    });
-  }, []);
+  const refreshSnapshot = useCallback(
+    (targetRevision?: string): Promise<void> => {
+      if (targetRevision === undefined) {
+        snapshotDemand.current.request();
+      } else {
+        snapshotDemand.current.request(revisionValue(targetRevision));
+        if (!snapshotDemand.current.needsRefresh() && !snapshotInFlight.current)
+          return Promise.resolve();
+      }
+      if (snapshotInFlight.current) return snapshotInFlight.current;
+
+      const pending = (async () => {
+        try {
+          while (snapshotDemand.current.needsRefresh()) {
+            const zero = window.zero;
+            if (!zero || generation.current === "0") return;
+            const attemptGeneration = generation.current;
+            snapshotDemand.current.beginAttempt();
+            try {
+              const next = await fetchWorkbenchSnapshot<WorkbenchSnapshot>(
+                (command, payload) => zero.invoke(command, payload),
+                commands.snapshot,
+                commands.snapshotChunk,
+              );
+              if (generation.current !== attemptGeneration) return;
+              const revision = revisionValue(next.revision);
+              if (revision < 0n)
+                throw new Error("Host returned an invalid Workbench revision");
+              if (!snapshotDemand.current.accept(revision)) continue;
+              setViewSyncFailed(false);
+              setBridgeReady(true);
+              setSnapshot(next);
+              setActiveSessionId((current) => {
+                if (
+                  current &&
+                  next.sessions.some((session) => session.id === current)
+                )
+                  return current;
+                return next.sessions[0]?.id ?? null;
+              });
+            } catch (error) {
+              if (generation.current !== attemptGeneration) return;
+              const delay = snapshotDemand.current.failAttempt();
+              if (delay === null) {
+                setViewSyncFailed(true);
+                setBridgeReady(false);
+                throw error;
+              }
+              await new Promise((resolve) => window.setTimeout(resolve, delay));
+              if (generation.current !== attemptGeneration) return;
+            }
+          }
+        } finally {
+          snapshotInFlight.current = null;
+        }
+      })();
+      snapshotInFlight.current = pending;
+      return pending;
+    },
+    [],
+  );
 
   useEffect(() => {
     const zero = window.zero;
     if (!zero) return;
     let cancelled = false;
-    let connectedGeneration = "0";
+    let pendingWorkbenchRevision = "0";
+    let workbenchRefreshTimer: number | null = null;
 
     const consumeBatch = async (batch: AgentBatch) => {
-      if (batch.generation !== generation.current) return;
       for (const item of batch.items) {
         if (batch.generation !== generation.current) return;
         const inline = Object.prototype.hasOwnProperty.call(item, "event");
@@ -208,20 +263,66 @@ export default function App() {
           sequence: item.sequence,
         });
       }
-      await refreshSnapshot();
     };
 
-    const removeAgent = zero.on<AgentBatch>(events.agent, (batch) => {
-      agentChain.current = agentChain.current
-        .then(() => consumeBatch(batch))
-        .catch((error) =>
-          setStatus(`Event delivery failed: ${errorText(error)}`),
-        );
+    const delivery = new EventDelivery<AgentBatch>({
+      connect: async () =>
+        (await zero.invoke<{ generation: string }>(commands.connect, {}))
+          .generation,
+      disconnect: async (activeGeneration) => {
+        await zero.invoke(commands.disconnect, {
+          generation: activeGeneration,
+        });
+      },
+      consume: consumeBatch,
+      onConnected: async (activeGeneration, recovered) => {
+        generation.current = activeGeneration;
+        snapshotDemand.current.beginGeneration(activeGeneration);
+        setViewSyncFailed(false);
+        setBridgeReady(true);
+        await refreshSnapshot();
+        if (generation.current !== activeGeneration)
+          throw new Error("Event delivery generation changed during resync");
+        // A request from the previous generation can still own the shared
+        // in-flight Promise. It returns without publishing, while preserving
+        // this generation's demand. Start the real resync before declaring
+        // the new connection ready.
+        if (snapshotDemand.current.needsRefresh()) await refreshSnapshot();
+        if (recovered)
+          setStatus("Event delivery recovered with a new Host generation.");
+      },
+      onDisconnected: () => {
+        generation.current = "0";
+        snapshotDemand.current.beginGeneration("0");
+        setBridgeReady(false);
+      },
+      onRecoveryFailure: (error) => {
+        setViewSyncFailed(true);
+        setStatus(`Event delivery recovery failed: ${errorText(error)}`);
+      },
     });
+    deliveryRestart.current = () =>
+      delivery.restart(new Error("User requested event delivery recovery"));
+
+    const removeAgent = zero.on<AgentBatch>(events.agent, (batch) => {
+      delivery.enqueue(batch);
+    });
+    const scheduleWorkbenchRefresh = (revision: string) => {
+      if (revisionValue(revision) > revisionValue(pendingWorkbenchRevision))
+        pendingWorkbenchRevision = revision;
+      if (workbenchRefreshTimer !== null) return;
+      workbenchRefreshTimer = window.setTimeout(() => {
+        workbenchRefreshTimer = null;
+        const target = pendingWorkbenchRevision;
+        pendingWorkbenchRevision = "0";
+        void refreshSnapshot(target).catch((error) =>
+          setStatus(errorText(error)),
+        );
+      }, 32);
+    };
     const removeWorkbench = zero.on<{ revision: string }>(
       events.workbench,
-      () =>
-        void refreshSnapshot().catch((error) => setStatus(errorText(error))),
+      ({ revision }) => scheduleWorkbenchRefresh(revision),
     );
     const removeHostSignal = zero.on<HostSignal>(
       events.hostSignal,
@@ -230,22 +331,13 @@ export default function App() {
       },
     );
 
-    void zero
-      .invoke<{ generation: string }>(commands.connect, {})
-      .then(async ({ generation: nextGeneration }) => {
-        connectedGeneration = nextGeneration;
-        if (cancelled) {
-          await zero
-            .invoke(commands.disconnect, { generation: nextGeneration })
-            .catch(() => undefined);
-          return;
-        }
-        generation.current = nextGeneration;
-        setBridgeReady(true);
+    void delivery
+      .start()
+      .then(async () => {
+        if (cancelled) return;
         const signal = await zero.invoke<HostSignal>(commands.ping, {
           source: "gate-6-workbench",
         });
-        await refreshSnapshot();
         setStatus("Workbench connected.");
         if (signal.gate5Fixture === true && !didGate5Fixture.current) {
           didGate5Fixture.current = true;
@@ -253,15 +345,14 @@ export default function App() {
         }
       })
       .catch((error) => {
-        if (!cancelled)
+        if (!cancelled) {
+          setViewSyncFailed(true);
           setStatus(`Host connection failed: ${errorText(error)}`);
+        }
       });
 
     const onPageHide = () => {
-      if (generation.current !== "0")
-        void zero
-          .invoke(commands.disconnect, { generation: generation.current })
-          .catch(() => undefined);
+      void delivery.stop();
     };
     window.addEventListener("pagehide", onPageHide);
     return () => {
@@ -270,31 +361,56 @@ export default function App() {
       removeAgent();
       removeWorkbench();
       removeHostSignal();
+      if (workbenchRefreshTimer !== null)
+        window.clearTimeout(workbenchRefreshTimer);
+      deliveryRestart.current = null;
       window.removeEventListener("pagehide", onPageHide);
-      if (connectedGeneration !== "0")
-        void zero
-          .invoke(commands.disconnect, { generation: connectedGeneration })
-          .catch(() => undefined);
-      generation.current = "0";
+      void delivery.stop();
     };
   }, [refreshSnapshot]);
 
+  async function retryViewSynchronization() {
+    if (busy !== null) return;
+    setBusy("reconnect");
+    snapshotDemand.current.resetRetry();
+    setViewSyncFailed(false);
+    try {
+      if (generation.current !== "0") {
+        await refreshSnapshot();
+      } else {
+        const restart = deliveryRestart.current;
+        if (!restart) throw new Error("Event delivery is not available");
+        await restart();
+      }
+      setBridgeReady(true);
+      setStatus("Workbench view synchronized.");
+    } catch (error) {
+      setViewSyncFailed(true);
+      setBridgeReady(false);
+      setStatus(`Workbench recovery failed: ${errorText(error)}`);
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function chooseWorkspace() {
     const zero = window.zero;
-    if (!zero) return;
+    if (!zero || viewSyncFailed || !bridgeReady) return;
     setBusy("workspace");
+    setWorkspaceGrant("");
     try {
-      const paths = await zero.dialogs.openFile({
-        title: "Choose a workspace for this Agent session",
-        allowDirectories: true,
-        allowMultiple: false,
-      });
-      if (paths?.[0]) {
-        setWorkspacePath(paths[0]);
-        setTrusted(false);
-        setStatus(
-          "Review the path, then explicitly trust it for this prototype.",
-        );
+      const result = await zero.invoke<{
+        selected: boolean;
+        workspaceRoot?: string;
+        grant?: string;
+      }>(commands.chooseWorkspace, {});
+      if (result.selected && result.workspaceRoot && result.grant) {
+        setWorkspacePath(result.workspaceRoot);
+        setWorkspaceGrant(result.grant);
+        setStatus("The Host confirmed a one-time trust grant for this path.");
+      } else {
+        setWorkspacePath("");
+        setStatus("Workspace selection was cancelled.");
       }
     } catch (error) {
       setStatus(`Workspace selection failed: ${errorText(error)}`);
@@ -305,39 +421,62 @@ export default function App() {
 
   async function createSession() {
     const zero = window.zero;
-    if (!zero || !workspacePath || !trusted) return;
+    if (
+      !zero ||
+      viewSyncFailed ||
+      !bridgeReady ||
+      !workspacePath ||
+      !workspaceGrant
+    )
+      return;
     setBusy("create");
     try {
-      const result = await zero.invoke<{ sessionId: string }>(
-        commands.createSession,
-        { workspaceRoot: workspacePath, trusted },
-      );
+      let result: { sessionId: string };
+      try {
+        result = await zero.invoke<{ sessionId: string }>(
+          commands.createSession,
+          { workspaceGrant },
+        );
+      } catch (error) {
+        setStatus(`Session creation failed: ${errorText(error)}`);
+        return;
+      }
       setActiveSessionId(result.sessionId);
-      await refreshSnapshot();
-      setStatus("Session created. AgentCore credentials remain in the Host.");
-    } catch (error) {
-      setStatus(`Session creation failed: ${errorText(error)}`);
+      await refreshAfterCommit(
+        "Session created. AgentCore credentials remain in the Host.",
+        "Session creation",
+      );
     } finally {
+      setWorkspaceGrant("");
       setBusy(null);
     }
   }
 
   async function submitRun() {
     const zero = window.zero;
-    if (!zero || !activeSession || !prompt.trim()) return;
+    if (
+      !zero ||
+      viewSyncFailed ||
+      !bridgeReady ||
+      !activeSession ||
+      !prompt.trim()
+    )
+      return;
     const submitted = prompt;
     setPrompt("");
     setBusy("run");
     try {
-      await zero.invoke(commands.run, {
-        sessionId: activeSession.id,
-        prompt: submitted,
-      });
-      await refreshSnapshot();
-      setStatus("Run accepted by AgentCore.");
-    } catch (error) {
-      setPrompt(submitted);
-      setStatus(`Run failed to start: ${errorText(error)}`);
+      try {
+        await zero.invoke(commands.run, {
+          sessionId: activeSession.id,
+          prompt: submitted,
+        });
+      } catch (error) {
+        setPrompt(submitted);
+        setStatus(`Run failed to start: ${errorText(error)}`);
+        return;
+      }
+      await refreshAfterCommit("Run accepted by AgentCore.", "Run submission");
     } finally {
       setBusy(null);
     }
@@ -345,16 +484,29 @@ export default function App() {
 
   async function cancelRun() {
     const zero = window.zero;
-    if (!zero || !activeSession || activeSession.activeRunId === "0") return;
+    if (
+      !zero ||
+      viewSyncFailed ||
+      !bridgeReady ||
+      !activeSession ||
+      activeSession.activeRunId === "0"
+    )
+      return;
     setBusy("cancel");
     try {
-      await zero.invoke(commands.cancel, {
-        sessionId: activeSession.id,
-        runId: activeSession.activeRunId,
-      });
-      setStatus("Cancellation requested; waiting for AgentCore to stop.");
-    } catch (error) {
-      setStatus(`Cancellation failed: ${errorText(error)}`);
+      try {
+        await zero.invoke(commands.cancel, {
+          sessionId: activeSession.id,
+          runId: activeSession.activeRunId,
+        });
+      } catch (error) {
+        setStatus(`Cancellation failed: ${errorText(error)}`);
+        return;
+      }
+      await refreshAfterCommit(
+        "Cancellation requested; waiting for AgentCore to stop.",
+        "Cancellation request",
+      );
     } finally {
       setBusy(null);
     }
@@ -364,6 +516,8 @@ export default function App() {
     const zero = window.zero;
     if (
       !zero ||
+      viewSyncFailed ||
+      !bridgeReady ||
       !activeSession ||
       (activeSession.state === "closing" && !activeSession.closeFailed) ||
       activeSession.state === "closed"
@@ -371,13 +525,18 @@ export default function App() {
       return;
     setBusy("close");
     try {
-      await zero.invoke(commands.closeSession, { sessionId: activeSession.id });
-      await refreshSnapshot();
-      setStatus(
+      try {
+        await zero.invoke(commands.closeSession, {
+          sessionId: activeSession.id,
+        });
+      } catch (error) {
+        setStatus(`Session close failed: ${errorText(error)}`);
+        return;
+      }
+      await refreshAfterCommit(
         "Session close requested; AgentCore cleanup continues off the UI thread.",
+        "Session close request",
       );
-    } catch (error) {
-      setStatus(`Session close failed: ${errorText(error)}`);
     } finally {
       setBusy(null);
     }
@@ -386,21 +545,38 @@ export default function App() {
   async function respondUi(payload: Record<string, unknown>) {
     const zero = window.zero;
     const pending = activeSession?.pendingUi;
-    if (!zero || !activeSession || !pending) return;
+    if (!zero || viewSyncFailed || !bridgeReady || !activeSession || !pending)
+      return;
     setBusy("respond");
     try {
-      await zero.invoke(commands.respondUi, {
-        sessionId: activeSession.id,
-        runId: pending.runId,
-        requestId: pending.requestId,
-        ...payload,
-      });
-      await refreshSnapshot();
-      setStatus("Response delivered to AgentCore.");
-    } catch (error) {
-      setStatus(`Response rejected: ${errorText(error)}`);
+      try {
+        await zero.invoke(commands.respondUi, {
+          sessionId: activeSession.id,
+          runId: pending.runId,
+          requestId: pending.requestId,
+          ...payload,
+        });
+      } catch (error) {
+        setStatus(`Response rejected: ${errorText(error)}`);
+        return;
+      }
+      await refreshAfterCommit(
+        "Response delivered to AgentCore.",
+        "UI response",
+      );
     } finally {
       setBusy(null);
+    }
+  }
+
+  async function refreshAfterCommit(success: string, operation: string) {
+    try {
+      await refreshSnapshot();
+      setStatus(success);
+    } catch (error) {
+      setStatus(
+        `${operation} was committed, but the view refresh failed: ${errorText(error)}`,
+      );
     }
   }
 
@@ -419,7 +595,13 @@ export default function App() {
             </div>
             <span
               className={`h-2.5 w-2.5 rounded-full ${bridgeReady ? "bg-live" : "bg-danger"}`}
-              title={bridgeReady ? "Host connected" : "Host offline"}
+              title={
+                viewSyncFailed
+                  ? "Workbench view synchronization failed"
+                  : bridgeReady
+                    ? "Host connected"
+                    : "Host offline"
+              }
             />
           </div>
 
@@ -429,26 +611,26 @@ export default function App() {
             </p>
             <button
               className="focus-ring mt-2 w-full rounded-lg border border-rule bg-paper px-3 py-2 text-left text-sm hover:border-cobalt"
-              disabled={busy !== null}
+              disabled={busy !== null || viewSyncFailed || !bridgeReady}
               onClick={() => void chooseWorkspace()}
             >
               {workspacePath || "Choose a folder…"}
             </button>
-            {workspacePath && (
-              <label className="mt-3 flex items-start gap-2 text-xs leading-5 text-muted">
-                <input
-                  className="mt-1 accent-cobalt"
-                  type="checkbox"
-                  checked={trusted}
-                  onChange={(event) => setTrusted(event.target.checked)}
-                />
-                Trust this workspace for the current prototype. Strict workspace
-                security is not yet claimed.
-              </label>
+            {workspaceGrant && (
+              <p className="mt-3 text-xs leading-5 text-muted">
+                Host-confirmed one-time trust grant. Strict workspace security
+                is not yet claimed.
+              </p>
             )}
             <button
               className="focus-ring mt-3 w-full rounded-lg bg-cobalt px-3 py-2 text-sm font-semibold text-white disabled:opacity-40"
-              disabled={!workspacePath || !trusted || busy !== null}
+              disabled={
+                !workspacePath ||
+                !workspaceGrant ||
+                busy !== null ||
+                viewSyncFailed ||
+                !bridgeReady
+              }
               onClick={() => void createSession()}
             >
               Create session
@@ -502,7 +684,7 @@ export default function App() {
                   activeSession.state === "waiting_ui") && (
                   <button
                     className="focus-ring rounded-lg border border-danger/50 px-3 py-2 text-sm font-medium text-danger hover:bg-danger/8 disabled:opacity-40"
-                    disabled={busy !== null}
+                    disabled={busy !== null || viewSyncFailed || !bridgeReady}
                     onClick={() => void cancelRun()}
                   >
                     Stop run
@@ -515,7 +697,9 @@ export default function App() {
                   (activeSession.state === "closing" &&
                     !activeSession.closeFailed) ||
                   activeSession.state === "closed" ||
-                  busy !== null
+                  busy !== null ||
+                  viewSyncFailed ||
+                  !bridgeReady
                 }
                 onClick={() => void closeSession()}
               >
@@ -603,7 +787,9 @@ export default function App() {
                 disabled={
                   !activeSession ||
                   activeSession.state !== "idle" ||
-                  busy !== null
+                  busy !== null ||
+                  viewSyncFailed ||
+                  !bridgeReady
                 }
                 placeholder={
                   activeSession
@@ -624,7 +810,9 @@ export default function App() {
                   !activeSession ||
                   activeSession.state !== "idle" ||
                   !prompt.trim() ||
-                  busy !== null
+                  busy !== null ||
+                  viewSyncFailed ||
+                  !bridgeReady
                 }
                 onClick={() => void submitRun()}
               >
@@ -642,7 +830,7 @@ export default function App() {
             <ApprovalPanel
               pending={activeSession.pendingUi}
               answers={answers[activeSession.pendingUi.requestId] ?? []}
-              busy={busy !== null}
+              busy={busy !== null || viewSyncFailed || !bridgeReady}
               setAnswers={(next) =>
                 setAnswers((current) => ({
                   ...current,
@@ -665,6 +853,15 @@ export default function App() {
               Host status
             </p>
             <p className="mt-2 text-sm leading-6">{status}</p>
+            {viewSyncFailed && (
+              <button
+                className="focus-ring mt-3 rounded-lg border border-danger/40 px-3 py-2 text-xs font-medium text-danger hover:bg-danger/8 disabled:opacity-40"
+                disabled={busy !== null}
+                onClick={() => void retryViewSynchronization()}
+              >
+                Retry Workbench connection
+              </button>
+            )}
             <dl className="mt-5 grid grid-cols-2 gap-3 text-xs">
               <Metric label="Revision" value={snapshot.revision} />
               <Metric label="Contract" value="ABI v1" />
