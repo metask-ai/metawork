@@ -1,20 +1,32 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
-import { fetchWorkbenchSnapshot } from "../frontend/src/snapshot-client.ts";
+import { fetchWorkbenchSnapshot } from "../frontend/src/host/snapshot/snapshot-client.ts";
+
+const snapshotCommand = "metawork.workbench.snapshot";
+const chunkCommand = "metawork.workbench.snapshot.chunk";
 
 function encoded(value) {
   return Buffer.from(value).toString("base64");
 }
 
 test("Workbench snapshots are assembled from identity-checked chunks", async () => {
-  const expected = { revision: "9", sessions: [{ id: "3", user: "你好" }] };
+  const expected = JSON.parse(
+    readFileSync(
+      new URL(
+        "../frontend/src/host/__fixtures__/workbench-snapshot-v1.fixture",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
   const source = Buffer.from(JSON.stringify(expected));
   const chunkBytes = 11;
   const invoke = async (command, payload) => {
-    if (command === "begin")
+    if (command === snapshotCommand)
       return { snapshotId: "17", bytes: source.length, chunkBytes };
-    assert.equal(command, "chunk");
+    assert.equal(command, chunkCommand);
     const offset = Number(payload.offset);
     const chunk = source.subarray(offset, offset + chunkBytes);
     return {
@@ -25,16 +37,15 @@ test("Workbench snapshots are assembled from identity-checked chunks", async () 
     };
   };
 
-  assert.deepEqual(
-    await fetchWorkbenchSnapshot(invoke, "begin", "chunk"),
-    expected,
-  );
+  assert.deepEqual(await fetchWorkbenchSnapshot(invoke), expected);
 });
 
 test("Workbench snapshot assembly rejects a stale chunk", async () => {
-  const source = Buffer.from('{"revision":"1","sessions":[]}');
+  const source = Buffer.from(
+    '{"schemaVersion":1,"revision":"1","sessions":[]}',
+  );
   const invoke = async (command) =>
-    command === "begin"
+    command === snapshotCommand
       ? { snapshotId: "2", bytes: source.length, chunkBytes: source.length }
       : {
           snapshotId: "1",
@@ -43,8 +54,5 @@ test("Workbench snapshot assembly rejects a stale chunk", async () => {
           data: encoded(source),
         };
 
-  await assert.rejects(
-    fetchWorkbenchSnapshot(invoke, "begin", "chunk"),
-    /identity mismatch/,
-  );
+  await assert.rejects(fetchWorkbenchSnapshot(invoke), /identity mismatch/);
 });

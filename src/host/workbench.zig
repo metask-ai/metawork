@@ -1,6 +1,7 @@
 const std = @import("std");
 const sdk = @import("metacodes_agentcore");
 const lifecycle = @import("host_lifecycle");
+const contract_fixture = @import("workbench_contract_fixture");
 
 pub const Error = lifecycle.Error || std.mem.Allocator.Error || std.Thread.SpawnError || error{
     ProjectionCapacity,
@@ -31,6 +32,7 @@ const session_snapshot_overhead: usize = 512;
 const run_snapshot_overhead: usize = 1024;
 const tool_snapshot_overhead: usize = 512;
 const pending_ui_snapshot_overhead: usize = 8 * 1024;
+pub const snapshot_schema_version: u32 = 1;
 
 const ToolState = enum { running, completed, failed };
 const RunPhase = enum {
@@ -335,7 +337,7 @@ pub const Workbench = struct {
     pub fn writeSnapshot(self: *Workbench, output: []u8) Error![]const u8 {
         self.syncLifecycle();
         var writer = std.Io.Writer.fixed(output);
-        writer.print("{{\"revision\":\"{d}\",\"sessions\":[", .{self.revision}) catch return error.SnapshotTooLarge;
+        writer.print("{{\"schemaVersion\":{d},\"revision\":\"{d}\",\"sessions\":[", .{ snapshot_schema_version, self.revision }) catch return error.SnapshotTooLarge;
         var session_count: usize = 0;
         for (self.sessions) |*entry| {
             const session = &(entry.* orelse continue);
@@ -721,6 +723,20 @@ fn testEnvelope(session_id: u64, run_id: u64, encoded: []const u8) !lifecycle.Ev
         .event = try sdk.decodeCoreEvent(allocator, encoded),
         .allocator = allocator,
     };
+}
+
+test "Workbench snapshot serializer matches the Renderer v1 contract fixture" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+
+    var storage: [4096]u8 = undefined;
+    const snapshot = try workbench.writeSnapshot(&storage);
+    const fixture = std.mem.trimEnd(
+        u8,
+        contract_fixture.snapshot,
+        "\r\n",
+    );
+    try std.testing.expectEqualStrings(fixture, snapshot);
 }
 
 test "Workbench projection preserves text bytes with bounded geometric growth" {

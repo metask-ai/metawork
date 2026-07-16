@@ -1,133 +1,31 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+} from "react";
 
-import { EventDelivery } from "./event-delivery";
-import { fetchWorkbenchSnapshot } from "./snapshot-client";
-import { SnapshotDemand } from "./snapshot-demand";
+import { HostClient } from "./host/client.ts";
+import { WorkbenchConnection } from "./host/connection.ts";
+import type {
+  PendingUi,
+  RunView,
+  SessionView,
+  ToolView,
+  UiResponsePayload,
+} from "./host/contracts.ts";
+import { selectActiveSession } from "./workbench/selectors.ts";
+import { initialWorkbenchState, workbenchReducer } from "./workbench/store.ts";
 
-type ToolView = {
-  id: string;
-  name: string;
-  input: string;
-  progress: string;
-  content: string;
-  state: "running" | "completed" | "failed";
-  isError: boolean;
-  elapsedMs: string;
-};
-
-type RunView = {
-  id: string;
-  phase:
-    | "queued"
-    | "running"
-    | "waiting_ui"
-    | "completed"
-    | "stopped"
-    | "cancelled"
-    | "interrupted"
-    | "failed";
-  user: string;
-  assistant: string;
-  status: string;
-  outcome: string | null;
-  cause: string | null;
-  usage: {
-    input: string;
-    output: string;
-    cacheRead: string;
-    cacheCreation: string;
-  };
-  tools: ToolView[];
-};
-
-type AskOption = { label: string; description: string; preview?: string };
-type AskQuestion = {
-  question: string;
-  header: string;
-  multi: boolean;
-  options: AskOption[];
-};
-
-type PendingUi = {
-  requestId: string;
-  runId: string;
-  kind: "ask_question" | "permission" | "plan_approval" | "custom";
-  questions?: AskQuestion[];
-  tool?: string;
-  args?: string;
-  plan?: string;
-  customKind?: string;
-  payload?: string;
-};
-
-type SessionView = {
-  id: string;
-  workspaceRoot: string;
-  state: "idle" | "queued" | "running" | "waiting_ui" | "closing" | "closed";
-  closeFailed: boolean;
-  activeRunId: string;
-  outcome: string | null;
-  cause: string | null;
-  runs: RunView[];
-  pendingUi: PendingUi | null;
-};
-
-type WorkbenchSnapshot = { revision: string; sessions: SessionView[] };
-type AgentBatchItem = {
-  sessionId: string;
-  runId: string;
-  sequence: string;
-  event?: unknown;
-  object?: { id: string; bytes: number };
-};
-type AgentBatch = { generation: string; items: AgentBatchItem[] };
-type AgentObject = {
-  generation: string;
-  sessionId: string;
-  runId: string;
-  sequence: string;
-  event: unknown;
-};
-type HostSignal = {
-  sequence: number;
-  automation?: boolean;
-  gate5Fixture?: boolean;
-};
-
-const commands = {
-  ping: "metawork.smoke.ping",
-  pingAck: "metawork.smoke.eventAck",
-  connect: "metawork.events.connect",
-  disconnect: "metawork.events.disconnect",
-  ack: "metawork.events.ack",
-  fetch: "metawork.events.fetch",
-  chooseWorkspace: "metawork.workspace.choose",
-  snapshot: "metawork.workbench.snapshot",
-  snapshotChunk: "metawork.workbench.snapshot.chunk",
-  createSession: "metawork.sessions.create",
-  run: "metawork.sessions.run",
-  cancel: "metawork.sessions.cancel",
-  respondUi: "metawork.sessions.respondUi",
-  closeSession: "metawork.sessions.close",
-  gate5Fixture: "metawork.gate5.emitFixture",
-} as const;
-
-const events = {
-  hostSignal: "metawork:host-signal",
-  agent: "metawork:agent-events",
-  workbench: "metawork:workbench-changed",
-} as const;
+const gate5FixtureLoader =
+  import.meta.env.VITE_METAWORK_GATE5_FIXTURE === "1"
+    ? () => import("./host/fixtures/gate5-fixture.ts")
+    : undefined;
 
 function errorText(error: unknown) {
   return error instanceof Error ? error.message : String(error);
-}
-
-function revisionValue(value: string) {
-  try {
-    return BigInt(value);
-  } catch {
-    return -1n;
-  }
 }
 
 function tokenTotal(run: RunView) {
@@ -139,11 +37,10 @@ function tokenTotal(run: RunView) {
 }
 
 export default function App() {
-  const [snapshot, setSnapshot] = useState<WorkbenchSnapshot>({
-    revision: "0",
-    sessions: [],
-  });
-  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [workbench, dispatchWorkbench] = useReducer(
+    workbenchReducer,
+    initialWorkbenchState,
+  );
   const [workspacePath, setWorkspacePath] = useState("");
   const [workspaceGrant, setWorkspaceGrant] = useState("");
   const [prompt, setPrompt] = useState("");
@@ -152,236 +49,69 @@ export default function App() {
   const [bridgeReady, setBridgeReady] = useState(false);
   const [viewSyncFailed, setViewSyncFailed] = useState(false);
   const [answers, setAnswers] = useState<Record<string, string[]>>({});
-  const generation = useRef("0");
-  const didGate5Fixture = useRef(false);
-  const snapshotDemand = useRef(new SnapshotDemand());
-  const snapshotInFlight = useRef<Promise<void> | null>(null);
-  const deliveryRestart = useRef<(() => Promise<void>) | null>(null);
-
+  const client = useMemo(() => new HostClient(), []);
+  const connection = useRef<WorkbenchConnection | null>(null);
+  const snapshot = workbench.snapshot;
   const activeSession = useMemo(
-    () =>
-      snapshot.sessions.find((session) => session.id === activeSessionId) ??
-      snapshot.sessions[0] ??
-      null,
-    [activeSessionId, snapshot.sessions],
+    () => selectActiveSession(workbench),
+    [workbench],
   );
 
-  const refreshSnapshot = useCallback(
-    (targetRevision?: string): Promise<void> => {
-      if (targetRevision === undefined) {
-        snapshotDemand.current.request();
-      } else {
-        snapshotDemand.current.request(revisionValue(targetRevision));
-        if (!snapshotDemand.current.needsRefresh() && !snapshotInFlight.current)
-          return Promise.resolve();
-      }
-      if (snapshotInFlight.current) return snapshotInFlight.current;
-
-      const pending = (async () => {
-        try {
-          while (snapshotDemand.current.needsRefresh()) {
-            const zero = window.zero;
-            if (!zero || generation.current === "0") return;
-            const attemptGeneration = generation.current;
-            snapshotDemand.current.beginAttempt();
-            try {
-              const next = await fetchWorkbenchSnapshot<WorkbenchSnapshot>(
-                (command, payload) => zero.invoke(command, payload),
-                commands.snapshot,
-                commands.snapshotChunk,
-              );
-              if (generation.current !== attemptGeneration) return;
-              const revision = revisionValue(next.revision);
-              if (revision < 0n)
-                throw new Error("Host returned an invalid Workbench revision");
-              if (!snapshotDemand.current.accept(revision)) continue;
-              setViewSyncFailed(false);
-              setBridgeReady(true);
-              setSnapshot(next);
-              setActiveSessionId((current) => {
-                if (
-                  current &&
-                  next.sessions.some((session) => session.id === current)
-                )
-                  return current;
-                return next.sessions[0]?.id ?? null;
-              });
-            } catch (error) {
-              if (generation.current !== attemptGeneration) return;
-              const delay = snapshotDemand.current.failAttempt();
-              if (delay === null) {
-                setViewSyncFailed(true);
-                setBridgeReady(false);
-                throw error;
-              }
-              await new Promise((resolve) => window.setTimeout(resolve, delay));
-              if (generation.current !== attemptGeneration) return;
-            }
-          }
-        } finally {
-          snapshotInFlight.current = null;
-        }
-      })();
-      snapshotInFlight.current = pending;
-      return pending;
-    },
-    [],
-  );
+  const refreshSnapshot = useCallback(() => {
+    const current = connection.current;
+    return current ? current.refresh() : Promise.resolve();
+  }, []);
 
   useEffect(() => {
-    const zero = window.zero;
-    if (!zero) return;
     let cancelled = false;
-    let pendingWorkbenchRevision = "0";
-    let workbenchRefreshTimer: number | null = null;
-
-    const consumeBatch = async (batch: AgentBatch) => {
-      for (const item of batch.items) {
-        if (batch.generation !== generation.current) return;
-        const inline = Object.prototype.hasOwnProperty.call(item, "event");
-        if (inline === Boolean(item.object))
-          throw new Error("Invalid Agent event envelope");
-        if (item.object) {
-          const fetched = await zero.invoke<AgentObject>(commands.fetch, {
-            generation: batch.generation,
-            sessionId: item.sessionId,
-            runId: item.runId,
-            objectId: item.object.id,
-          });
-          if (
-            fetched.generation !== batch.generation ||
-            fetched.sessionId !== item.sessionId ||
-            fetched.runId !== item.runId ||
-            fetched.sequence !== item.sequence
-          )
-            throw new Error("Fetched Agent event identity mismatch");
-        }
-        await zero.invoke(commands.ack, {
-          generation: batch.generation,
-          sessionId: item.sessionId,
-          runId: item.runId,
-          sequence: item.sequence,
-        });
-      }
-    };
-
-    const delivery = new EventDelivery<AgentBatch>({
-      connect: async () =>
-        (await zero.invoke<{ generation: string }>(commands.connect, {}))
-          .generation,
-      disconnect: async (activeGeneration) => {
-        await zero.invoke(commands.disconnect, {
-          generation: activeGeneration,
-        });
+    const current = new WorkbenchConnection(
+      client,
+      {
+        onSnapshot: (next) => {
+          if (!cancelled)
+            dispatchWorkbench({ type: "snapshot.accepted", snapshot: next });
+        },
+        onStatus: (next) => {
+          if (!cancelled) setStatus(next);
+        },
+        onReady: (ready) => {
+          if (!cancelled) setBridgeReady(ready);
+        },
+        onViewSyncFailed: (failed) => {
+          if (!cancelled) setViewSyncFailed(failed);
+        },
       },
-      consume: consumeBatch,
-      onConnected: async (activeGeneration, recovered) => {
-        generation.current = activeGeneration;
-        snapshotDemand.current.beginGeneration(activeGeneration);
-        setViewSyncFailed(false);
-        setBridgeReady(true);
-        await refreshSnapshot();
-        if (generation.current !== activeGeneration)
-          throw new Error("Event delivery generation changed during resync");
-        // A request from the previous generation can still own the shared
-        // in-flight Promise. It returns without publishing, while preserving
-        // this generation's demand. Start the real resync before declaring
-        // the new connection ready.
-        if (snapshotDemand.current.needsRefresh()) await refreshSnapshot();
-        if (recovered)
-          setStatus("Event delivery recovered with a new Host generation.");
-      },
-      onDisconnected: () => {
-        generation.current = "0";
-        snapshotDemand.current.beginGeneration("0");
-        setBridgeReady(false);
-      },
-      onRecoveryFailure: (error) => {
+      { gate5FixtureLoader },
+    );
+    connection.current = current;
+    void current.start().catch((error) => {
+      if (!cancelled) {
         setViewSyncFailed(true);
-        setStatus(`Event delivery recovery failed: ${errorText(error)}`);
-      },
+        setStatus(`Host connection failed: ${errorText(error)}`);
+      }
     });
-    deliveryRestart.current = () =>
-      delivery.restart(new Error("User requested event delivery recovery"));
-
-    const removeAgent = zero.on<AgentBatch>(events.agent, (batch) => {
-      delivery.enqueue(batch);
-    });
-    const scheduleWorkbenchRefresh = (revision: string) => {
-      if (revisionValue(revision) > revisionValue(pendingWorkbenchRevision))
-        pendingWorkbenchRevision = revision;
-      if (workbenchRefreshTimer !== null) return;
-      workbenchRefreshTimer = window.setTimeout(() => {
-        workbenchRefreshTimer = null;
-        const target = pendingWorkbenchRevision;
-        pendingWorkbenchRevision = "0";
-        void refreshSnapshot(target).catch((error) =>
-          setStatus(errorText(error)),
-        );
-      }, 32);
-    };
-    const removeWorkbench = zero.on<{ revision: string }>(
-      events.workbench,
-      ({ revision }) => scheduleWorkbenchRefresh(revision),
-    );
-    const removeHostSignal = zero.on<HostSignal>(
-      events.hostSignal,
-      (signal) => {
-        void zero.invoke(commands.pingAck, { sequence: signal.sequence });
-      },
-    );
-
-    void delivery
-      .start()
-      .then(async () => {
-        if (cancelled) return;
-        const signal = await zero.invoke<HostSignal>(commands.ping, {
-          source: "gate-6-workbench",
-        });
-        setStatus("Workbench connected.");
-        if (signal.gate5Fixture === true && !didGate5Fixture.current) {
-          didGate5Fixture.current = true;
-          await zero.invoke(commands.gate5Fixture, {});
-        }
-      })
-      .catch((error) => {
-        if (!cancelled) {
-          setViewSyncFailed(true);
-          setStatus(`Host connection failed: ${errorText(error)}`);
-        }
-      });
 
     const onPageHide = () => {
-      void delivery.stop();
+      void current.stop();
     };
     window.addEventListener("pagehide", onPageHide);
     return () => {
       cancelled = true;
+      if (connection.current === current) connection.current = null;
       setBridgeReady(false);
-      removeAgent();
-      removeWorkbench();
-      removeHostSignal();
-      if (workbenchRefreshTimer !== null)
-        window.clearTimeout(workbenchRefreshTimer);
-      deliveryRestart.current = null;
       window.removeEventListener("pagehide", onPageHide);
-      void delivery.stop();
+      void current.stop();
     };
-  }, [refreshSnapshot]);
+  }, [client]);
 
   async function retryViewSynchronization() {
     if (busy !== null) return;
     setBusy("reconnect");
-    snapshotDemand.current.resetRetry();
     setViewSyncFailed(false);
     try {
-      if (generation.current !== "0") {
-        await refreshSnapshot();
-      } else {
-        const restart = deliveryRestart.current;
-        if (!restart) throw new Error("Event delivery is not available");
-        await restart();
-      }
+      const current = connection.current;
+      if (!current) throw new Error("Workbench connection is not available");
+      await current.retry();
       setBridgeReady(true);
       setStatus("Workbench view synchronized.");
     } catch (error) {
@@ -394,17 +124,12 @@ export default function App() {
   }
 
   async function chooseWorkspace() {
-    const zero = window.zero;
-    if (!zero || viewSyncFailed || !bridgeReady) return;
+    if (viewSyncFailed || !bridgeReady) return;
     setBusy("workspace");
     setWorkspaceGrant("");
     try {
-      const result = await zero.invoke<{
-        selected: boolean;
-        workspaceRoot?: string;
-        grant?: string;
-      }>(commands.chooseWorkspace, {});
-      if (result.selected && result.workspaceRoot && result.grant) {
+      const result = await client.chooseWorkspace();
+      if (result.selected) {
         setWorkspacePath(result.workspaceRoot);
         setWorkspaceGrant(result.grant);
         setStatus("The Host confirmed a one-time trust grant for this path.");
@@ -420,32 +145,22 @@ export default function App() {
   }
 
   async function createSession() {
-    const zero = window.zero;
-    if (
-      !zero ||
-      viewSyncFailed ||
-      !bridgeReady ||
-      !workspacePath ||
-      !workspaceGrant
-    )
+    if (viewSyncFailed || !bridgeReady || !workspacePath || !workspaceGrant)
       return;
     setBusy("create");
     try {
-      let result: { sessionId: string };
+      let sessionId: string;
       try {
-        result = await zero.invoke<{ sessionId: string }>(
-          commands.createSession,
-          { workspaceGrant },
-        );
+        sessionId = await client.createSession(workspaceGrant);
       } catch (error) {
         setStatus(`Session creation failed: ${errorText(error)}`);
         return;
       }
-      setActiveSessionId(result.sessionId);
       await refreshAfterCommit(
         "Session created. AgentCore credentials remain in the Host.",
         "Session creation",
       );
+      dispatchWorkbench({ type: "session.selected", sessionId });
     } finally {
       setWorkspaceGrant("");
       setBusy(null);
@@ -453,24 +168,14 @@ export default function App() {
   }
 
   async function submitRun() {
-    const zero = window.zero;
-    if (
-      !zero ||
-      viewSyncFailed ||
-      !bridgeReady ||
-      !activeSession ||
-      !prompt.trim()
-    )
+    if (viewSyncFailed || !bridgeReady || !activeSession || !prompt.trim())
       return;
     const submitted = prompt;
     setPrompt("");
     setBusy("run");
     try {
       try {
-        await zero.invoke(commands.run, {
-          sessionId: activeSession.id,
-          prompt: submitted,
-        });
+        await client.run(activeSession.id, submitted);
       } catch (error) {
         setPrompt(submitted);
         setStatus(`Run failed to start: ${errorText(error)}`);
@@ -483,9 +188,7 @@ export default function App() {
   }
 
   async function cancelRun() {
-    const zero = window.zero;
     if (
-      !zero ||
       viewSyncFailed ||
       !bridgeReady ||
       !activeSession ||
@@ -495,10 +198,7 @@ export default function App() {
     setBusy("cancel");
     try {
       try {
-        await zero.invoke(commands.cancel, {
-          sessionId: activeSession.id,
-          runId: activeSession.activeRunId,
-        });
+        await client.cancel(activeSession.id, activeSession.activeRunId);
       } catch (error) {
         setStatus(`Cancellation failed: ${errorText(error)}`);
         return;
@@ -513,9 +213,7 @@ export default function App() {
   }
 
   async function closeSession() {
-    const zero = window.zero;
     if (
-      !zero ||
       viewSyncFailed ||
       !bridgeReady ||
       !activeSession ||
@@ -526,9 +224,7 @@ export default function App() {
     setBusy("close");
     try {
       try {
-        await zero.invoke(commands.closeSession, {
-          sessionId: activeSession.id,
-        });
+        await client.closeSession(activeSession.id);
       } catch (error) {
         setStatus(`Session close failed: ${errorText(error)}`);
         return;
@@ -542,20 +238,18 @@ export default function App() {
     }
   }
 
-  async function respondUi(payload: Record<string, unknown>) {
-    const zero = window.zero;
+  async function respondUi(payload: UiResponsePayload) {
     const pending = activeSession?.pendingUi;
-    if (!zero || viewSyncFailed || !bridgeReady || !activeSession || !pending)
-      return;
+    if (viewSyncFailed || !bridgeReady || !activeSession || !pending) return;
     setBusy("respond");
     try {
       try {
-        await zero.invoke(commands.respondUi, {
-          sessionId: activeSession.id,
-          runId: pending.runId,
-          requestId: pending.requestId,
-          ...payload,
-        });
+        await client.respondUi(
+          activeSession.id,
+          pending.runId,
+          pending.requestId,
+          payload,
+        );
       } catch (error) {
         setStatus(`Response rejected: ${errorText(error)}`);
         return;
@@ -645,7 +339,12 @@ export default function App() {
               <button
                 key={session.id}
                 className={`focus-ring w-full rounded-xl border px-3 py-3 text-left transition ${activeSession?.id === session.id ? "border-cobalt bg-cobalt/8" : "border-transparent hover:border-rule hover:bg-paper"}`}
-                onClick={() => setActiveSessionId(session.id)}
+                onClick={() =>
+                  dispatchWorkbench({
+                    type: "session.selected",
+                    sessionId: session.id,
+                  })
+                }
               >
                 <span className="flex items-center justify-between gap-2">
                   <span className="font-mono text-xs">S-{session.id}</span>
@@ -965,7 +664,7 @@ function ApprovalPanel({
   answers: string[];
   busy: boolean;
   setAnswers: (answers: string[]) => void;
-  respond: (payload: Record<string, unknown>) => void;
+  respond: (payload: UiResponsePayload) => void;
 }) {
   return (
     <div className="mt-5 rounded-2xl border border-amber bg-amber/8 p-4">

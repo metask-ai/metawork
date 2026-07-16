@@ -77,6 +77,13 @@ fn wireAgentCore(b: *std.Build, app: *std.Build.Module, bundle: agentcore_bundle
     });
     workbench.addImport("metacodes_agentcore", sdk);
     workbench.addImport("host_lifecycle", lifecycle);
+    const workbench_contract_fixture = b.addOptions();
+    workbench_contract_fixture.addOption(
+        []const u8,
+        "snapshot",
+        @embedFile("frontend/src/host/__fixtures__/workbench-snapshot-v1.fixture"),
+    );
+    workbench.addOptions("workbench_contract_fixture", workbench_contract_fixture);
 
     app.addImport("metacodes_agentcore", sdk);
     app.addImport("host_lifecycle", lifecycle);

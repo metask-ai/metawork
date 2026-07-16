@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { SnapshotDemand } from "../frontend/src/snapshot-demand.ts";
+import { SnapshotDemand } from "../frontend/src/host/snapshot/snapshot-demand.ts";
 
 test("a failed snapshot attempt preserves its target revision", () => {
   const demand = new SnapshotDemand();
@@ -47,4 +47,25 @@ test("snapshot retry is exhausted once per generation and requires an explicit r
   assert.equal(demand.needsRefresh(), true);
   demand.beginGeneration("5");
   assert.equal(demand.needsRefresh(), true);
+});
+
+test("snapshots below a notified revision do not reset the retry budget", () => {
+  const demand = new SnapshotDemand();
+  demand.beginGeneration("8");
+  demand.request(9n);
+  for (const [revision, delay] of [
+    [4n, 100],
+    [5n, 250],
+    [6n, 500],
+    [7n, 1000],
+  ]) {
+    demand.beginAttempt();
+    assert.equal(demand.accept(revision), true);
+    assert.equal(demand.needsRefresh(), true);
+    assert.equal(demand.failAttempt(), delay);
+  }
+  demand.beginAttempt();
+  assert.equal(demand.accept(8n), true);
+  assert.equal(demand.failAttempt(), null);
+  assert.equal(demand.needsRefresh(), false);
 });

@@ -52,8 +52,10 @@ export class SnapshotDemand {
   accept(revision: bigint) {
     if (revision < this.latestRevision) return false;
     this.latestRevision = revision;
-    this.failures = 0;
-    this.exhausted = false;
+    if (!this.hasPending()) {
+      this.failures = 0;
+      this.exhausted = false;
+    }
     return true;
   }
 }

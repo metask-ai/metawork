@@ -23,11 +23,11 @@
     "format:check": "zig fmt --check build.zig build_support src spikes app.zon && prettier --check frontend scripts spikes/agentcore-contract/bundle.lock.json package.json",
     "package:macos": "npm run build:release && node scripts/clean-macos-package.mjs && native package --target macos --assets frontend/dist && node scripts/verify-macos-package.mjs",
     "test:agentcore-bundle": "node --test scripts/agentcore-bundle.test.mjs",
-    "test:renderer-runtime": "node --experimental-strip-types --test scripts/event-delivery.test.mjs scripts/snapshot-client.test.mjs scripts/snapshot-demand.test.mjs",
+    "test:renderer-runtime": "node --experimental-strip-types --test scripts/event-delivery.test.mjs scripts/snapshot-client.test.mjs scripts/snapshot-demand.test.mjs scripts/workbench-connection.test.mjs scripts/workbench-contract.test.mjs scripts/workbench-store.test.mjs",
     "probe:agentcore": "node scripts/run-agentcore-probe.mjs",
     "test:host-lifecycle": "node scripts/run-host-lifecycle-tests.mjs",
     "test:agentcore-sdk": "node scripts/run-agentcore-sdk-tests.mjs",
-    "test:gate5:macos": "npm run build:frontend && native build . --yes -Doptimize=Debug -Dautomation=true && node scripts/test-gate5-macos.mjs",
+    "test:gate5:macos": "VITE_METAWORK_GATE5_FIXTURE=1 npm run build:frontend && native build . --yes -Doptimize=Debug -Dautomation=true && node scripts/test-gate5-macos.mjs",
     "test:gate6:macos": "npm run build:frontend && native build . --yes -Doptimize=Debug -Dautomation=true && node scripts/test-gate6-macos.mjs",
     "test:gate7:macos": "node scripts/test-gate7-macos.mjs"
   },

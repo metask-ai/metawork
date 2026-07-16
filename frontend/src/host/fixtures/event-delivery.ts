@@ -10,6 +10,7 @@ export type EventDeliveryOptions<T extends DeliveryBatch> = {
   retryDelaysMs?: readonly number[];
 };
 
+/** Gate 5 raw transport fixture. Product Renderer code must not import this. */
 export class EventDelivery<T extends DeliveryBatch> {
   private readonly options: EventDeliveryOptions<T>;
   private generation = "0";

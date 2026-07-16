@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { cspPlaceholder, releaseCsp } from "../frontend/csp.mjs";
@@ -32,4 +32,34 @@ for (const token of forbiddenTokens) {
   }
 }
 
-console.log("verified production Renderer CSP");
+const assetsPath = path.join(repositoryRoot, "frontend", "dist", "assets");
+const scripts = (await readdir(assetsPath)).filter((name) =>
+  name.endsWith(".js"),
+);
+const scriptText = (
+  await Promise.all(
+    scripts.map((name) => readFile(path.join(assetsPath, name), "utf8")),
+  )
+).join("\n");
+const rawFixtureTokens = [
+  "metawork:agent-events",
+  "metawork.events.ack",
+  "metawork.events.fetch",
+  "metawork.gate5.emitFixture",
+];
+const fixtureExpected = process.env.VITE_METAWORK_GATE5_FIXTURE === "1";
+for (const token of rawFixtureTokens) {
+  const present = scriptText.includes(token);
+  if (present !== fixtureExpected)
+    throw new Error(
+      fixtureExpected
+        ? `Gate 5 Renderer build is missing fixture token ${token}`
+        : `production Renderer contains raw Gate 5 fixture token ${token}`,
+    );
+}
+
+console.log(
+  fixtureExpected
+    ? "verified Gate 5 Renderer fixture and production CSP"
+    : "verified production Renderer CSP and raw fixture isolation",
+);
