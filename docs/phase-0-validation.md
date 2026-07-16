@@ -341,7 +341,7 @@ Gate 4 通过时的 sink 只提供全局 event count 和单 event bytes 硬上�
 
 ### 依赖前置条件
 
-Gate 6 已切换并精确锁定 clean bundle `0.0.0-dev+3237ac3fc4df`。该升级先通过 manifest/checksum identity、artifact-only link/run、完整 typed SDK contract 和独立 clean consumer，再进入正式应用 build graph；MetaWork 没有访问 metacodes source tree 或复制协议。锁定规格与实测见 [Gate 6 验证报告](phase-0-gate-6-report.md)。
+Gate 6 当前精确锁定 clean bundle `0.0.0-dev+5fe198cfac4a`。该升级只接受现行 experimental manifest 字段布局，不保留旧格式兼容；bundle 先通过 manifest/checksum identity、artifact-only link/run、完整 typed SDK contract 和独立 clean consumer，再进入正式应用 build graph。MetaWork 没有访问 metacodes source tree 或复制协议。锁定规格与实测见 [Gate 6 验证报告](phase-0-gate-6-report.md)。
 
 ### 最小 UI
 

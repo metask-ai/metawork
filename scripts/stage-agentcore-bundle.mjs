@@ -63,6 +63,4 @@ try {
   await rm(staging, { recursive: true, force: true });
 }
 
-console.log(
-  `staged ${lock.version} (${lock.source.cc_zig_commit}) at ${target}`,
-);
+console.log(`staged ${lock.version} (${lock.source.commit}) at ${target}`);

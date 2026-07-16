@@ -1,24 +1,42 @@
 const std = @import("std");
 
+const ManifestFile = struct {
+    path: []const u8,
+    sha256: []const u8,
+};
+
 const Manifest = struct {
+    schema_version: u32,
+    name: []const u8,
+    version: []const u8,
+    source: struct {
+        commit: []const u8,
+        dirty: bool,
+        dirty_source_sha256: []const u8,
+    },
     toolchain: struct { zig_version: []const u8 },
     build: struct {
+        resolved_target: []const u8,
         architecture: []const u8,
         os: []const u8,
-        macos_deployment_target: []const u8,
+        abi: []const u8,
+        optimize: []const u8,
+        strip: bool,
     },
     contract: struct {
         binary_abi_version: u32,
         required_system_link_inputs: []const []const u8,
         ui_request_mode: []const u8,
     },
-    files: struct {
-        @"lib/libmetacodes_agentcore.a": struct { sha256: []const u8 },
-        @"include/metacodes_agentcore.h": struct { sha256: []const u8 },
-        @"sdk/metacodes_agentcore.zig": struct { sha256: []const u8 },
-        @"sdk/metacodes_agentcore_protocol.zig": struct { sha256: []const u8 },
-        @"sdk/metacodes_agentcore_types.zig": struct { sha256: []const u8 },
-    },
+    files: []const ManifestFile,
+};
+
+const bundle_file_paths = [_][]const u8{
+    "lib/libmetacodes_agentcore.a",
+    "include/metacodes_agentcore.h",
+    "sdk/metacodes_agentcore.zig",
+    "sdk/metacodes_agentcore_protocol.zig",
+    "sdk/metacodes_agentcore_types.zig",
 };
 
 fn verifySha256(b: *std.Build, file_path: []const u8, expected: []const u8) void {
@@ -57,29 +75,34 @@ pub fn build(b: *std.Build) void {
         Manifest,
         b.allocator,
         manifest_bytes,
-        .{ .ignore_unknown_fields = true },
+        .{ .ignore_unknown_fields = false },
     ) catch @panic("invalid AgentCore manifest.json");
     const manifest = parsed.value;
 
+    if (manifest.schema_version != 1 or
+        !std.mem.eql(u8, manifest.name, "metacodes-agentcore") or
+        manifest.source.commit.len != 40 or manifest.source.dirty)
+        @panic("unsupported AgentCore bundle identity");
     if (!std.mem.eql(u8, manifest.toolchain.zig_version, builtin.zig_version_string))
         @panic("AgentCore bundle and consumer Zig versions differ");
     if (manifest.contract.binary_abi_version != 1 or
         !std.mem.eql(u8, manifest.contract.ui_request_mode, "synchronous"))
         @panic("unsupported AgentCore contract");
-    const resolved_target = target.result.zigTriple(b.allocator) catch @panic("OOM");
-    const expected_prefix = b.fmt("{s}-macos.{s}", .{
-        manifest.build.architecture,
-        manifest.build.macos_deployment_target,
-    });
     if (!std.mem.eql(u8, manifest.build.os, "macos") or
-        !std.mem.startsWith(u8, resolved_target, expected_prefix))
+        !std.mem.eql(u8, manifest.build.abi, "none") or
+        !std.mem.eql(u8, manifest.build.optimize, "ReleaseSafe") or
+        !manifest.build.strip)
+        @panic("unsupported AgentCore build identity");
+    const resolved_target = target.result.zigTriple(b.allocator) catch @panic("OOM");
+    if (!std.mem.eql(u8, resolved_target, manifest.build.resolved_target))
         @panic("consumer target does not match AgentCore bundle target");
 
-    verifySha256(b, lib_path, manifest.files.@"lib/libmetacodes_agentcore.a".sha256);
-    verifySha256(b, header_path, manifest.files.@"include/metacodes_agentcore.h".sha256);
-    verifySha256(b, sdk_path, manifest.files.@"sdk/metacodes_agentcore.zig".sha256);
-    verifySha256(b, protocol_path, manifest.files.@"sdk/metacodes_agentcore_protocol.zig".sha256);
-    verifySha256(b, types_path, manifest.files.@"sdk/metacodes_agentcore_types.zig".sha256);
+    validateManifestFiles(manifest.files);
+    verifySha256(b, lib_path, checksumFor(manifest.files, bundle_file_paths[0]));
+    verifySha256(b, header_path, checksumFor(manifest.files, bundle_file_paths[1]));
+    verifySha256(b, sdk_path, checksumFor(manifest.files, bundle_file_paths[2]));
+    verifySha256(b, protocol_path, checksumFor(manifest.files, bundle_file_paths[3]));
+    verifySha256(b, types_path, checksumFor(manifest.files, bundle_file_paths[4]));
 
     var link_libc = false;
     for (manifest.contract.required_system_link_inputs) |input| {
@@ -166,6 +189,24 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run the isolated source-free AgentCore contract probe");
     test_step.dependOn(&run_probe.step);
     test_step.dependOn(&run_header_probe.step);
+}
+
+fn validateManifestFiles(files: []const ManifestFile) void {
+    if (files.len != bundle_file_paths.len)
+        @panic("AgentCore manifest file set is incomplete or contains unknown files");
+    var seen: [bundle_file_paths.len]bool = @splat(false);
+    for (files) |file| {
+        const index = for (bundle_file_paths, 0..) |expected, i| {
+            if (std.mem.eql(u8, file.path, expected)) break i;
+        } else @panic("AgentCore manifest contains an unknown file");
+        if (seen[index]) @panic("AgentCore manifest contains a duplicate file");
+        seen[index] = true;
+    }
+}
+
+fn checksumFor(files: []const ManifestFile, path: []const u8) []const u8 {
+    for (files) |file| if (std.mem.eql(u8, file.path, path)) return file.sha256;
+    @panic("AgentCore manifest file is missing");
 }
 
 const builtin = @import("builtin");

@@ -13,30 +13,32 @@ function digest(bytes) {
 async function fixture(t, mutateManifest = () => {}) {
   const root = await mkdtemp(path.join(tmpdir(), "metawork-agentcore-bundle-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const files = {};
+  const files = [];
   for (const relativePath of bundleFiles) {
     const content = `fixture:${relativePath}`;
     await mkdir(path.dirname(path.join(root, relativePath)), {
       recursive: true,
     });
     await writeFile(path.join(root, relativePath), content);
-    files[relativePath] = { sha256: digest(content) };
+    files.push({ path: relativePath, sha256: digest(content) });
   }
   const manifest = {
     schema_version: 1,
     name: "metacodes-agentcore",
-    version: "0.0.0-test+0123456789ab",
+    version: "0.0.0-dev+0123456789ab",
     source: {
-      cc_zig_commit: "0123456789abcdef0123456789abcdef01234567",
+      commit: "0123456789abcdef0123456789abcdef01234567",
       dirty: false,
+      dirty_source_sha256: "",
     },
     toolchain: { zig_version: "0.16.0" },
     build: {
       resolved_target: "aarch64-macos.13.0...15.6-none",
       architecture: "aarch64",
       os: "macos",
-      macos_deployment_target: "13.0",
+      abi: "none",
       optimize: "ReleaseSafe",
+      strip: true,
     },
     contract: {
       binary_abi_version: 1,
@@ -86,7 +88,9 @@ test("rejects a self-consistent bundle that differs from the repository lock", a
 
 test("rejects a missing or extra manifest artifact", async (t) => {
   const root = await fixture(t, (manifest) => {
-    delete manifest.files[bundleFiles[1]];
+    manifest.files = manifest.files.filter(
+      (file) => file.path !== bundleFiles[1],
+    );
   });
   await assert.rejects(
     validateAgentCoreBundle(root, injectedChecks),
@@ -118,6 +122,54 @@ test("rejects a dirty bundle without its source digest", async (t) => {
   await assert.rejects(
     validateAgentCoreBundle(root, injectedChecks),
     /dirty_source_sha256/,
+  );
+});
+
+test("rejects a clean version that does not match its commit", async (t) => {
+  const root = await fixture(t, (manifest) => {
+    manifest.version = "0.0.0-dev+ffffffffffff";
+  });
+  await assert.rejects(
+    validateAgentCoreBundle(root, injectedChecks),
+    /version does not match source identity/,
+  );
+});
+
+test("rejects a dirty version that does not match its source digest", async (t) => {
+  const root = await fixture(t, (manifest) => {
+    manifest.source.dirty = true;
+    manifest.source.dirty_source_sha256 = "a".repeat(64);
+    manifest.version = "0.0.0-dev+0123456789ab-dirty.bbbbbbbbbbbb";
+  });
+  await assert.rejects(
+    validateAgentCoreBundle(root, injectedChecks),
+    /version does not match source identity/,
+  );
+});
+
+test("rejects the superseded manifest field layout", async (t) => {
+  const root = await fixture(t, (manifest) => {
+    manifest.source.cc_zig_commit = manifest.source.commit;
+    delete manifest.source.commit;
+  });
+  await assert.rejects(
+    validateAgentCoreBundle(root, injectedChecks),
+    /source fields do not match/,
+  );
+});
+
+test("rejects the superseded object-shaped manifest file list", async (t) => {
+  const root = await fixture(t, (manifest) => {
+    manifest.files = Object.fromEntries(
+      manifest.files.map(({ path: relativePath, sha256 }) => [
+        relativePath,
+        { sha256 },
+      ]),
+    );
+  });
+  await assert.rejects(
+    validateAgentCoreBundle(root, injectedChecks),
+    /files must be an array/,
   );
 });
 

@@ -11,8 +11,8 @@ Gate 7 随后已通过；进程模型结论见 [Gate 7 报告](phase-0-gate-7-re
 
 | 字段 | 值 |
 | --- | --- |
-| version | `0.0.0-dev+3237ac3fc4df` |
-| source commit | `3237ac3fc4df95009f91eb6bad97d83a26958a0f` |
+| version | `0.0.0-dev+5fe198cfac4a` |
+| source commit | `5fe198cfac4a5cd8230425136086f0463fdc52bd` |
 | target | `aarch64-macos.13.0...15.6-none` |
 | toolchain | Zig `0.16.0` |
 | build | `ReleaseSafe`、`strip=true` |
@@ -20,7 +20,7 @@ Gate 7 随后已通过；进程模型结论见 [Gate 7 报告](phase-0-gate-7-re
 | UI mode | synchronous |
 | system link | `libc` |
 
-`spikes/agentcore-contract/bundle.lock.json` 锁定 manifest 和五个文件的 SHA-256。`npm run agentcore:stage -- /absolute/bundle` 只接受与 lock 完全相等、无额外文件且 discovery symbol 唯一的 artifact，并原子 staged 到被忽略的 `.agentcore/bundle`。正式 build 只读取该固定布局，不读取 `AGENTCORE_BUNDLE_ROOT`，不访问 metacodes source tree，也没有 source fallback。
+`spikes/agentcore-contract/bundle.lock.json` 锁定 manifest 和五个文件的 SHA-256。当前 validator 只接受 `source.commit`、`build.abi` 和 `files[]` 组成的现行 experimental manifest，不解析旧字段布局。`npm run agentcore:stage -- /absolute/bundle` 只接受与 lock 完全相等、无额外文件且 discovery symbol 唯一的 artifact，并原子 staged 到被忽略的 `.agentcore/bundle`。正式 build 只读取该固定布局，不读取 `AGENTCORE_BUNDLE_ROOT`，不访问 metacodes source tree，也没有 source fallback。
 
 ## 2. 正式 Host 与产品投影
 

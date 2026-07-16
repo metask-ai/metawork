@@ -6,7 +6,7 @@ MetaWork 是一款桌面端 Agent Workbench，面向工作区、会话、Agent �
 
 技术选型与三层职责边界已经确认，macOS-first Phase 0A Gate 0 至 Gate 7 已通过。当前有一条真实的同进程同步垂直原型，完成 Native SDK Bridge、React Workbench、锁定 AgentCore bundle、built-in Read/Bash/Edit、同步权限、取消、reload 视图恢复、bounded event/lifecycle 和 fault-domain 对照。
 
-第一条实现链路精确锁定 metacodes（原 cc-zig）bundle `0.0.0-dev+3237ac3fc4df` 的 experimental AgentCore ABI revision 1，只验证同步 Run、结构化事件、built-in tools、同步 UI request、取消和 Host 生命周期。它不包含 async pending、suspend/resume、进程重建恢复、strict Workspace security 或正式 Host tools。
+第一条实现链路当前精确锁定 metacodes（原 cc-zig）bundle `0.0.0-dev+5fe198cfac4a` 的 experimental AgentCore ABI revision 1，只验证同步 Run、结构化事件、built-in tools、同步 UI request、取消和 Host 生命周期。它不包含 async pending、suspend/resume、进程重建恢复、strict Workspace security 或正式 Host tools。
 
 Gate 7 已证明当前同进程路径是零进程级隔离，并选择单 AgentCore Worker 作为后续正式方向。Worker 尚未实现，当前应用不得宣称具备 crash recovery。Windows 作为 Phase 0B 后续验证，不阻塞 macOS baseline。
 

@@ -1,7 +1,7 @@
 # MetaWork AgentCore 集成契约
 
 > 状态：Phase 0A Gate 6 同进程垂直链路与 Gate 7 fault-domain 对照均已通过；后续正式方向选择单 AgentCore Worker
-> 依赖：metacodes（原 cc-zig）AgentCore bundle `0.0.0-dev+3237ac3fc4df`
+> 依赖：metacodes（原 cc-zig）AgentCore bundle `0.0.0-dev+5fe198cfac4a`
 
 本文定义 MetaWork Zig Host 与 cc-zig 之间的规范边界。系统整体结构见 [高层架构](architecture.md)，当前预编译库能力见 [AgentCore ABI v1 消费基线](agentcore-abi-v1.md)。
 
@@ -40,6 +40,8 @@ AgentCore bundle
 - artifact 缺失、target 不匹配或 checksum 错误时明确失败；
 - 禁止 path/Git source dependency、源码复制、`latest`、版本范围、可变 tag 和 source fallback。
 
+当前 experimental manifest 只消费锁定 bundle 的现行字段布局：`source.commit`、带 `abi` 的 build identity，以及 `{path, sha256}` 组成的 `files` 数组。MetaWork 不保留旧字段名、旧 object-shaped `files` 或双格式 fallback；上游协议变化与 lock、validator、stager 和 build graph 原子升级。
+
 当前不先实现 dependency resolver 或 content-addressed cache。同步 baseline 通过后，本地 cache 与远程 artifact repository 必须复用同一 bundle layout 和校验规则，不能改变 AgentCore 链接方式。
 
 ### raw probe 与正式 Host
@@ -51,7 +53,7 @@ AgentCore bundle
 - 不能成为产品状态映射或 UI JSON 解析实现；
 - 不能注册到 React/Native SDK 正式链路。
 
-当前 clean bundle `3237ac3fc4df95009f91eb6bad97d83a26958a0f` 已提供 typed status、StopReason、`CoreEvent` / `UiRequest` decoder 和 request-aware `UiResponse` encoder，并重新通过 source-free consumer、真实 link/run 和 Gate 6 正式 Host 垂直测试。正式 Host 直接使用这些表面；MetaWork 不手写 raw enum、tag switch 或 JSON schema。
+当前 clean bundle `5fe198cfac4a5cd8230425136086f0463fdc52bd` 已提供 typed status、StopReason、`CoreEvent` / `UiRequest` decoder 和 request-aware `UiResponse` encoder，并修正 built-in file/shell tools 相对 `workspace_root` 的执行合同；它已重新通过 source-free consumer、真实 link/run 和 Gate 6 正式 Host 垂直测试。正式 Host 直接使用这些表面；MetaWork 不手写 raw enum、tag switch 或 JSON schema。
 
 ## 3. 当前协议表面
 

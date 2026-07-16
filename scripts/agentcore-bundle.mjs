@@ -33,6 +33,17 @@ function requireString(value, field) {
   return value;
 }
 
+function requireExactKeys(value, keys, field) {
+  requireValue(
+    value !== null && typeof value === "object" && !Array.isArray(value),
+    `${field} must be an object`,
+  );
+  requireValue(
+    isDeepStrictEqual(Object.keys(value).sort(), [...keys].sort()),
+    `${field} fields do not match the AgentCore manifest contract`,
+  );
+}
+
 function expectedBundlePlatform(platform) {
   if (platform === "darwin") return "macos";
   throw new Error(`unsupported AgentCore host platform: ${platform}`);
@@ -103,6 +114,36 @@ export async function validateAgentCoreBundle(bundleRoot, options = {}) {
       cause: error,
     });
   }
+  requireExactKeys(
+    manifest,
+    [
+      "schema_version",
+      "name",
+      "version",
+      "source",
+      "toolchain",
+      "build",
+      "contract",
+      "files",
+    ],
+    "manifest",
+  );
+  requireExactKeys(
+    manifest.source,
+    ["commit", "dirty", "dirty_source_sha256"],
+    "source",
+  );
+  requireExactKeys(manifest.toolchain, ["zig_version"], "toolchain");
+  requireExactKeys(
+    manifest.build,
+    ["resolved_target", "architecture", "os", "abi", "optimize", "strip"],
+    "build",
+  );
+  requireExactKeys(
+    manifest.contract,
+    ["binary_abi_version", "required_system_link_inputs", "ui_request_mode"],
+    "contract",
+  );
   if (options.expectedManifest) {
     requireValue(
       isDeepStrictEqual(manifest, options.expectedManifest),
@@ -118,25 +159,35 @@ export async function validateAgentCoreBundle(bundleRoot, options = {}) {
     manifest.name === "metacodes-agentcore",
     "unexpected AgentCore bundle name",
   );
-  requireString(manifest.version, "version");
-  const commit = requireString(
-    manifest.source?.cc_zig_commit,
-    "source.cc_zig_commit",
-  );
+  const version = requireString(manifest.version, "version");
+  const commit = requireString(manifest.source.commit, "source.commit");
   requireValue(
     /^[0-9a-f]{40}$/.test(commit),
-    "source.cc_zig_commit must be a full lowercase SHA",
+    "source.commit must be a full lowercase SHA",
   );
   requireValue(
     typeof manifest.source?.dirty === "boolean",
     "source.dirty must be boolean",
   );
+  const dirtySourceDigest = manifest.source.dirty_source_sha256;
   if (manifest.source.dirty) {
     requireValue(
-      /^[0-9a-f]{64}$/.test(manifest.source.dirty_source_sha256 ?? ""),
+      /^[0-9a-f]{64}$/.test(dirtySourceDigest),
       "dirty bundle must include dirty_source_sha256",
     );
+  } else {
+    requireValue(
+      dirtySourceDigest === "",
+      "clean bundle must use an empty dirty_source_sha256",
+    );
   }
+  const expectedVersion = `0.0.0-dev+${commit.slice(0, 12)}${
+    manifest.source.dirty ? `-dirty.${dirtySourceDigest.slice(0, 12)}` : ""
+  }`;
+  requireValue(
+    version === expectedVersion,
+    "AgentCore version does not match source identity",
+  );
 
   const zigVersion = requireString(
     manifest.toolchain?.zig_version,
@@ -155,19 +206,27 @@ export async function validateAgentCoreBundle(bundleRoot, options = {}) {
     `bundle architecture ${manifest.build?.architecture} does not match ${architecture}`,
   );
   const deploymentTarget = requireString(
-    manifest.build?.macos_deployment_target,
-    "build.macos_deployment_target",
+    requireString(
+      manifest.build.resolved_target,
+      "build.resolved_target",
+    ).match(
+      new RegExp(
+        `^${architecture}-macos\\.(\\d+\\.\\d+(?:\\.\\d+)?)(?:\\.\\.\\.[^-]+)?-none$`,
+      ),
+    )?.[1],
+    "build.resolved_target macOS deployment target",
   );
   requireValue(
-    requireString(
-      manifest.build?.resolved_target,
-      "build.resolved_target",
-    ).startsWith(`${architecture}-macos.${deploymentTarget}`),
-    "resolved target and deployment target disagree",
+    manifest.build.abi === "none",
+    "unsupported AgentCore target ABI",
   );
   requireValue(
     manifest.build?.optimize === "ReleaseSafe",
     "unsupported AgentCore optimize mode",
+  );
+  requireValue(
+    manifest.build?.strip === true,
+    "AgentCore bundle must be stripped",
   );
   requireValue(
     manifest.contract?.binary_abi_version === 1,
@@ -183,17 +242,27 @@ export async function validateAgentCoreBundle(bundleRoot, options = {}) {
     "unsupported AgentCore system link inputs",
   );
 
-  const declaredFiles = Object.keys(manifest.files ?? {}).sort();
   requireValue(
-    JSON.stringify(declaredFiles) === JSON.stringify([...bundleFiles].sort()),
+    Array.isArray(manifest.files),
+    "AgentCore manifest files must be an array",
+  );
+  const declaredFiles = manifest.files.map((file, index) => {
+    requireExactKeys(file, ["path", "sha256"], `files[${index}]`);
+    const relativePath = requireString(file.path, `files[${index}].path`);
+    requireValue(
+      /^[0-9a-f]{64}$/.test(file.sha256),
+      `invalid checksum for ${relativePath}`,
+    );
+    return relativePath;
+  });
+  requireValue(
+    isDeepStrictEqual([...declaredFiles].sort(), [...bundleFiles].sort()),
     "AgentCore manifest file set is incomplete or contains unknown files",
   );
   for (const relativePath of bundleFiles) {
-    const expected = manifest.files[relativePath]?.sha256;
-    requireValue(
-      /^[0-9a-f]{64}$/.test(expected ?? ""),
-      `invalid checksum for ${relativePath}`,
-    );
+    const expected = manifest.files.find(
+      (file) => file.path === relativePath,
+    ).sha256;
     const actual = await sha256(path.join(root, relativePath));
     requireValue(
       actual === expected,

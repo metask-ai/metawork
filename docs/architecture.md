@@ -28,7 +28,7 @@
 
 ### 同步 macOS baseline
 
-当前锁定 metacodes bundle `0.0.0-dev+3237ac3fc4df` 提供 experimental AgentCore ABI revision 1。同步 Run、built-in tools、`CoreEvent` JSON、同步 Host UI、abort、生命周期和同进程 macOS 垂直链路已通过 Gate 6。
+当前锁定 metacodes bundle `0.0.0-dev+5fe198cfac4a` 提供 experimental AgentCore ABI revision 1。同步 Run、built-in tools、`CoreEvent` JSON、同步 Host UI、abort、生命周期和同进程 macOS 垂直链路已通过 Gate 6。
 
 该 baseline 不包含：
 

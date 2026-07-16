@@ -1,11 +1,16 @@
 const std = @import("std");
 
+const ManifestFile = struct {
+    path: []const u8,
+    sha256: []const u8,
+};
+
 const Manifest = struct {
     schema_version: u32,
     name: []const u8,
     version: []const u8,
     source: struct {
-        cc_zig_commit: []const u8,
+        commit: []const u8,
         dirty: bool,
         dirty_source_sha256: []const u8,
     },
@@ -14,7 +19,7 @@ const Manifest = struct {
         resolved_target: []const u8,
         architecture: []const u8,
         os: []const u8,
-        macos_deployment_target: []const u8,
+        abi: []const u8,
         optimize: []const u8,
         strip: bool,
     },
@@ -23,13 +28,15 @@ const Manifest = struct {
         required_system_link_inputs: []const []const u8,
         ui_request_mode: []const u8,
     },
-    files: struct {
-        @"lib/libmetacodes_agentcore.a": struct { sha256: []const u8 },
-        @"include/metacodes_agentcore.h": struct { sha256: []const u8 },
-        @"sdk/metacodes_agentcore.zig": struct { sha256: []const u8 },
-        @"sdk/metacodes_agentcore_protocol.zig": struct { sha256: []const u8 },
-        @"sdk/metacodes_agentcore_types.zig": struct { sha256: []const u8 },
-    },
+    files: []const ManifestFile,
+};
+
+const bundle_file_paths = [_][]const u8{
+    "lib/libmetacodes_agentcore.a",
+    "include/metacodes_agentcore.h",
+    "sdk/metacodes_agentcore.zig",
+    "sdk/metacodes_agentcore_protocol.zig",
+    "sdk/metacodes_agentcore_types.zig",
 };
 
 pub const Bundle = struct {
@@ -58,6 +65,7 @@ pub fn verify(b: *std.Build, root: []const u8) Bundle {
         @panic("unsupported locked AgentCore bundle contract");
     if (!std.mem.eql(u8, lock.build.os, "macos") or
         !std.mem.eql(u8, lock.build.architecture, "aarch64") or
+        !std.mem.eql(u8, lock.build.abi, "none") or
         !std.mem.eql(u8, lock.build.optimize, "ReleaseSafe") or
         !lock.build.strip)
         @panic("unsupported locked AgentCore build identity");
@@ -69,21 +77,15 @@ pub fn verify(b: *std.Build, root: []const u8) Bundle {
         } else @panic("unsupported AgentCore system link input");
     }
 
-    const files = [_]struct { path: []const u8, sha256: []const u8 }{
-        .{ .path = "lib/libmetacodes_agentcore.a", .sha256 = lock.files.@"lib/libmetacodes_agentcore.a".sha256 },
-        .{ .path = "include/metacodes_agentcore.h", .sha256 = lock.files.@"include/metacodes_agentcore.h".sha256 },
-        .{ .path = "sdk/metacodes_agentcore.zig", .sha256 = lock.files.@"sdk/metacodes_agentcore.zig".sha256 },
-        .{ .path = "sdk/metacodes_agentcore_protocol.zig", .sha256 = lock.files.@"sdk/metacodes_agentcore_protocol.zig".sha256 },
-        .{ .path = "sdk/metacodes_agentcore_types.zig", .sha256 = lock.files.@"sdk/metacodes_agentcore_types.zig".sha256 },
-    };
-    for (files) |file| verifySha256(b, b.pathJoin(&.{ root, file.path }), file.sha256);
+    validateManifestFiles(lock.files);
+    for (bundle_file_paths) |path|
+        verifySha256(b, b.pathJoin(&.{ root, path }), checksumFor(lock.files, path));
 
-    const deployment_text = if (std.mem.count(u8, lock.build.macos_deployment_target, ".") == 1)
-        b.fmt("{s}.0", .{lock.build.macos_deployment_target})
-    else
-        lock.build.macos_deployment_target;
-    const deployment_target = std.SemanticVersion.parse(deployment_text) catch
-        @panic("invalid AgentCore macOS deployment target");
+    const deployment_target = deploymentTargetFromResolvedTarget(
+        b,
+        lock.build.resolved_target,
+        lock.build.architecture,
+    );
     return .{
         .root = root,
         .library_path = b.pathJoin(&.{ root, "lib", "libmetacodes_agentcore.a" }),
@@ -154,25 +156,68 @@ fn requireSameManifest(expected: Manifest, actual: Manifest) void {
     if (expected.schema_version != actual.schema_version or
         !std.mem.eql(u8, expected.name, actual.name) or
         !std.mem.eql(u8, expected.version, actual.version) or
-        !std.mem.eql(u8, expected.source.cc_zig_commit, actual.source.cc_zig_commit) or
+        !std.mem.eql(u8, expected.source.commit, actual.source.commit) or
         expected.source.dirty != actual.source.dirty or
         !std.mem.eql(u8, expected.source.dirty_source_sha256, actual.source.dirty_source_sha256) or
         !std.mem.eql(u8, expected.toolchain.zig_version, actual.toolchain.zig_version) or
         !std.mem.eql(u8, expected.build.resolved_target, actual.build.resolved_target) or
         !std.mem.eql(u8, expected.build.architecture, actual.build.architecture) or
         !std.mem.eql(u8, expected.build.os, actual.build.os) or
-        !std.mem.eql(u8, expected.build.macos_deployment_target, actual.build.macos_deployment_target) or
+        !std.mem.eql(u8, expected.build.abi, actual.build.abi) or
         !std.mem.eql(u8, expected.build.optimize, actual.build.optimize) or
         expected.build.strip != actual.build.strip or
         expected.contract.binary_abi_version != actual.contract.binary_abi_version or
         !stringListsEqual(expected.contract.required_system_link_inputs, actual.contract.required_system_link_inputs) or
         !std.mem.eql(u8, expected.contract.ui_request_mode, actual.contract.ui_request_mode) or
-        !std.mem.eql(u8, expected.files.@"lib/libmetacodes_agentcore.a".sha256, actual.files.@"lib/libmetacodes_agentcore.a".sha256) or
-        !std.mem.eql(u8, expected.files.@"include/metacodes_agentcore.h".sha256, actual.files.@"include/metacodes_agentcore.h".sha256) or
-        !std.mem.eql(u8, expected.files.@"sdk/metacodes_agentcore.zig".sha256, actual.files.@"sdk/metacodes_agentcore.zig".sha256) or
-        !std.mem.eql(u8, expected.files.@"sdk/metacodes_agentcore_protocol.zig".sha256, actual.files.@"sdk/metacodes_agentcore_protocol.zig".sha256) or
-        !std.mem.eql(u8, expected.files.@"sdk/metacodes_agentcore_types.zig".sha256, actual.files.@"sdk/metacodes_agentcore_types.zig".sha256))
+        !manifestFilesEqual(expected.files, actual.files))
         @panic("AgentCore manifest does not match the repository lock");
+}
+
+fn manifestFilesEqual(left: []const ManifestFile, right: []const ManifestFile) bool {
+    if (left.len != right.len) return false;
+    for (left, right) |a, b| {
+        if (!std.mem.eql(u8, a.path, b.path) or !std.mem.eql(u8, a.sha256, b.sha256))
+            return false;
+    }
+    return true;
+}
+
+fn validateManifestFiles(files: []const ManifestFile) void {
+    if (files.len != bundle_file_paths.len)
+        @panic("AgentCore manifest file set is incomplete or contains unknown files");
+    var seen: [bundle_file_paths.len]bool = @splat(false);
+    for (files) |file| {
+        const index = for (bundle_file_paths, 0..) |expected, i| {
+            if (std.mem.eql(u8, file.path, expected)) break i;
+        } else @panic("AgentCore manifest contains an unknown file");
+        if (seen[index]) @panic("AgentCore manifest contains a duplicate file");
+        seen[index] = true;
+    }
+}
+
+fn checksumFor(files: []const ManifestFile, path: []const u8) []const u8 {
+    for (files) |file| if (std.mem.eql(u8, file.path, path)) return file.sha256;
+    @panic("AgentCore manifest file is missing");
+}
+
+fn deploymentTargetFromResolvedTarget(
+    b: *std.Build,
+    resolved_target: []const u8,
+    architecture: []const u8,
+) std.SemanticVersion {
+    const prefix = b.fmt("{s}-macos.", .{architecture});
+    if (!std.mem.startsWith(u8, resolved_target, prefix) or
+        !std.mem.endsWith(u8, resolved_target, "-none"))
+        @panic("invalid AgentCore resolved macOS target");
+    const range_start = std.mem.indexOfPos(u8, resolved_target, prefix.len, "...") orelse
+        @panic("AgentCore resolved target is missing its supported OS range");
+    const minimum = resolved_target[prefix.len..range_start];
+    const semantic = if (std.mem.count(u8, minimum, ".") == 1)
+        b.fmt("{s}.0", .{minimum})
+    else
+        minimum;
+    return std.SemanticVersion.parse(semantic) catch
+        @panic("invalid AgentCore resolved macOS deployment target");
 }
 
 fn stringListsEqual(left: []const []const u8, right: []const []const u8) bool {
