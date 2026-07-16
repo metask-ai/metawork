@@ -33,14 +33,30 @@ for (const token of forbiddenTokens) {
 }
 
 const assetsPath = path.join(repositoryRoot, "frontend", "dist", "assets");
-const scripts = (await readdir(assetsPath)).filter((name) =>
-  name.endsWith(".js"),
-);
+const assets = await readdir(assetsPath);
+const scripts = assets.filter((name) => name.endsWith(".js"));
 const scriptText = (
   await Promise.all(
     scripts.map((name) => readFile(path.join(assetsPath, name), "utf8")),
   )
 ).join("\n");
+const styleText = (
+  await Promise.all(
+    assets
+      .filter((name) => name.endsWith(".css"))
+      .map((name) => readFile(path.join(assetsPath, name), "utf8")),
+  )
+).join("\n");
+if (styleText.includes("@media (width<="))
+  throw new Error(
+    "production CSS contains media-query range syntax unsupported by the macOS 13.0 baseline",
+  );
+for (const query of [1099, 819, 560]) {
+  if (!styleText.includes(`@media (max-width:${query}px)`))
+    throw new Error(
+      `production CSS is missing the ${query}px responsive query`,
+    );
+}
 const rawFixtureTokens = [
   "metawork:agent-events",
   "metawork.events.ack",

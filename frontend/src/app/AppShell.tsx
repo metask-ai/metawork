@@ -1,0 +1,158 @@
+import { useEffect, useState, type ReactNode } from "react";
+
+import { Icon } from "../components/ui/Icon.tsx";
+import { useI18n, type Locale } from "../i18n/context.ts";
+import {
+  readLocalPreference,
+  writeLocalPreference,
+} from "../platform/local-preferences.ts";
+
+const leftPreference = "metawork.panel.workspaces";
+const rightPreference = "metawork.panel.activity";
+
+function initialPanel(key: string, minimumWidth: number) {
+  if (typeof window === "undefined") return true;
+  const stored = readLocalPreference(key);
+  return window.innerWidth >= minimumWidth && stored !== "closed";
+}
+
+export function AppShell({
+  taskTitle,
+  workspaceLabel,
+  status,
+  left,
+  activity,
+  children,
+}: {
+  taskTitle: string;
+  workspaceLabel: string;
+  status: string;
+  left: ReactNode;
+  activity: ReactNode;
+  children: ReactNode;
+}) {
+  const { locale, setLocale, t } = useI18n();
+  const [leftOpen, setLeftOpen] = useState(() =>
+    initialPanel(leftPreference, 820),
+  );
+  const [rightOpen, setRightOpen] = useState(() =>
+    initialPanel(rightPreference, 1100),
+  );
+
+  useEffect(() => {
+    const narrow = window.matchMedia("(max-width: 819px)");
+    const medium = window.matchMedia("(max-width: 1099px)");
+    const closeForViewport = () => {
+      if (narrow.matches) setLeftOpen(false);
+      if (medium.matches) setRightOpen(false);
+    };
+    narrow.addEventListener("change", closeForViewport);
+    medium.addEventListener("change", closeForViewport);
+    return () => {
+      narrow.removeEventListener("change", closeForViewport);
+      medium.removeEventListener("change", closeForViewport);
+    };
+  }, []);
+
+  function toggleLeft() {
+    setLeftOpen((open) => {
+      const next = !open;
+      if (next && window.innerWidth < 820) setRightOpen(false);
+      writeLocalPreference(leftPreference, next ? "open" : "closed");
+      return next;
+    });
+  }
+
+  function toggleRight() {
+    setRightOpen((open) => {
+      const next = !open;
+      if (next && window.innerWidth < 820) setLeftOpen(false);
+      writeLocalPreference(rightPreference, next ? "open" : "closed");
+      return next;
+    });
+  }
+
+  return (
+    <main
+      className="app-window"
+      data-left-open={leftOpen}
+      data-right-open={rightOpen}
+    >
+      <header className="app-titlebar">
+        <button
+          className="icon-button focus-ring"
+          aria-controls="workspace-sidebar"
+          aria-expanded={leftOpen}
+          aria-label={t("app.toggle_workspaces")}
+          title={t("app.toggle_workspaces")}
+          onClick={toggleLeft}
+        >
+          <Icon name="sidebar" />
+        </button>
+        <div className="titlebar-identity">
+          <span className="titlebar-task">{taskTitle}</span>
+          <span className="titlebar-workspace">{workspaceLabel}</span>
+        </div>
+        <p className="titlebar-status" aria-live="polite">
+          {status}
+        </p>
+        <label className="locale-control">
+          <span className="sr-only">{t("app.language")}</span>
+          <select
+            className="focus-ring"
+            aria-label={t("app.language")}
+            value={locale}
+            onChange={(event) => setLocale(event.target.value as Locale)}
+          >
+            <option value="en-US">{t("app.language.en-US")}</option>
+            <option value="zh-CN">{t("app.language.zh-CN")}</option>
+            {import.meta.env.DEV && (
+              <option value="pseudo">{t("app.language.pseudo")}</option>
+            )}
+          </select>
+        </label>
+        <button
+          className="icon-button focus-ring"
+          aria-controls="task-activity"
+          aria-expanded={rightOpen}
+          aria-label={t("app.toggle_activity")}
+          title={t("app.toggle_activity")}
+          onClick={toggleRight}
+        >
+          <Icon name="activity" />
+        </button>
+      </header>
+
+      <div className="app-columns">
+        <aside
+          id="workspace-sidebar"
+          className="workspace-sidebar"
+          aria-hidden={!leftOpen}
+          inert={!leftOpen}
+        >
+          {left}
+        </aside>
+        <section className="task-stage">{children}</section>
+        <aside
+          id="task-activity"
+          className="task-activity"
+          aria-hidden={!rightOpen}
+          inert={!rightOpen}
+        >
+          {activity}
+        </aside>
+      </div>
+
+      {(leftOpen || rightOpen) && (
+        <button
+          className="panel-scrim"
+          aria-label={t("app.dismiss_panels")}
+          onClick={() => {
+            if (window.innerWidth < 820) setLeftOpen(false);
+            if (window.innerWidth < 1100) setRightOpen(false);
+          }}
+        />
+      )}
+    </main>
+  );
+}

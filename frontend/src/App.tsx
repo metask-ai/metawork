@@ -7,8 +7,13 @@ import {
   useState,
 } from "react";
 
+import { AppShell } from "./app/AppShell.tsx";
+import { Icon } from "./components/ui/Icon.tsx";
 import { HostClient } from "./host/client.ts";
-import { WorkbenchConnection } from "./host/connection.ts";
+import {
+  WorkbenchConnection,
+  type WorkbenchConnectionStatus,
+} from "./host/connection.ts";
 import type {
   PendingUi,
   RunView,
@@ -16,6 +21,12 @@ import type {
   ToolView,
   UiResponsePayload,
 } from "./host/contracts.ts";
+import {
+  formatInteger,
+  formatMilliseconds,
+  taskCountMessageId,
+} from "./i18n/formatters.ts";
+import { useI18n, type MessageId } from "./i18n/context.ts";
 import { selectActiveSession } from "./workbench/selectors.ts";
 import { initialWorkbenchState, workbenchReducer } from "./workbench/store.ts";
 
@@ -28,15 +39,61 @@ function errorText(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
-function tokenTotal(run: RunView) {
+function tokenTotal(run: RunView): bigint | null {
   try {
-    return (BigInt(run.usage.input) + BigInt(run.usage.output)).toString();
+    return BigInt(run.usage.input) + BigInt(run.usage.output);
   } catch {
-    return "invalid";
+    return null;
   }
 }
 
+type StatusState = {
+  id: MessageId;
+  values?: Record<string, string>;
+  diagnostic?: string;
+  sourceId?: MessageId;
+};
+
+function runPhaseLabel(
+  t: (
+    id: MessageId,
+    values?: Record<string, string | number | bigint>,
+  ) => string,
+  phase: RunView["phase"],
+) {
+  switch (phase) {
+    case "queued":
+    case "running":
+    case "waiting_ui":
+      return t(`task.status.${phase}`);
+    case "completed":
+    case "stopped":
+    case "cancelled":
+    case "interrupted":
+    case "failed":
+      return t(`outcome.${phase}`);
+  }
+}
+
+function connectionStatus(status: WorkbenchConnectionStatus): StatusState {
+  if (status.kind === "connected")
+    return {
+      id: status.recovered ? "connection.recovered" : "connection.connected",
+    };
+  if (status.kind === "refresh_failed")
+    return {
+      id: "connection.refresh_failed",
+      diagnostic: status.diagnostic,
+    };
+  return {
+    id: "connection.failed",
+    diagnostic: status.diagnostic,
+    sourceId: `connection.source.${status.source}`,
+  };
+}
+
 export default function App() {
+  const { locale, t } = useI18n();
   const [workbench, dispatchWorkbench] = useReducer(
     workbenchReducer,
     initialWorkbenchState,
@@ -44,7 +101,9 @@ export default function App() {
   const [workspacePath, setWorkspacePath] = useState("");
   const [workspaceGrant, setWorkspaceGrant] = useState("");
   const [prompt, setPrompt] = useState("");
-  const [status, setStatus] = useState("Connect the native shell to begin.");
+  const [status, setStatus] = useState<StatusState>({
+    id: "connection.connecting",
+  });
   const [busy, setBusy] = useState<string | null>(null);
   const [bridgeReady, setBridgeReady] = useState(false);
   const [viewSyncFailed, setViewSyncFailed] = useState(false);
@@ -72,7 +131,7 @@ export default function App() {
             dispatchWorkbench({ type: "snapshot.accepted", snapshot: next });
         },
         onStatus: (next) => {
-          if (!cancelled) setStatus(next);
+          if (!cancelled) setStatus(connectionStatus(next));
         },
         onReady: (ready) => {
           if (!cancelled) setBridgeReady(ready);
@@ -87,7 +146,10 @@ export default function App() {
     void current.start().catch((error) => {
       if (!cancelled) {
         setViewSyncFailed(true);
-        setStatus(`Host connection failed: ${errorText(error)}`);
+        setStatus({
+          id: "connection.failed",
+          diagnostic: errorText(error),
+        });
       }
     });
 
@@ -113,11 +175,14 @@ export default function App() {
       if (!current) throw new Error("Workbench connection is not available");
       await current.retry();
       setBridgeReady(true);
-      setStatus("Workbench view synchronized.");
+      setStatus({ id: "connection.recovered" });
     } catch (error) {
       setViewSyncFailed(true);
       setBridgeReady(false);
-      setStatus(`Workbench recovery failed: ${errorText(error)}`);
+      setStatus({
+        id: "connection.failed",
+        diagnostic: errorText(error),
+      });
     } finally {
       setBusy(null);
     }
@@ -132,13 +197,16 @@ export default function App() {
       if (result.selected) {
         setWorkspacePath(result.workspaceRoot);
         setWorkspaceGrant(result.grant);
-        setStatus("The Host confirmed a one-time trust grant for this path.");
+        setStatus({ id: "workspace.grant_confirmed" });
       } else {
         setWorkspacePath("");
-        setStatus("Workspace selection was cancelled.");
+        setStatus({ id: "workspace.selection_cancelled" });
       }
     } catch (error) {
-      setStatus(`Workspace selection failed: ${errorText(error)}`);
+      setStatus({
+        id: "workspace.selection_failed",
+        values: { error: errorText(error) },
+      });
     } finally {
       setBusy(null);
     }
@@ -153,13 +221,13 @@ export default function App() {
       try {
         sessionId = await client.createSession(workspaceGrant);
       } catch (error) {
-        setStatus(`Session creation failed: ${errorText(error)}`);
+        setStatus({
+          id: "task.create_failed",
+          values: { error: errorText(error) },
+        });
         return;
       }
-      await refreshAfterCommit(
-        "Session created. AgentCore credentials remain in the Host.",
-        "Session creation",
-      );
+      await refreshAfterCommit("task.created", "operation.task_create");
       dispatchWorkbench({ type: "session.selected", sessionId });
     } finally {
       setWorkspaceGrant("");
@@ -178,10 +246,13 @@ export default function App() {
         await client.run(activeSession.id, submitted);
       } catch (error) {
         setPrompt(submitted);
-        setStatus(`Run failed to start: ${errorText(error)}`);
+        setStatus({
+          id: "run.start_failed",
+          values: { error: errorText(error) },
+        });
         return;
       }
-      await refreshAfterCommit("Run accepted by AgentCore.", "Run submission");
+      await refreshAfterCommit("run.started", "operation.run_submit");
     } finally {
       setBusy(null);
     }
@@ -200,13 +271,13 @@ export default function App() {
       try {
         await client.cancel(activeSession.id, activeSession.activeRunId);
       } catch (error) {
-        setStatus(`Cancellation failed: ${errorText(error)}`);
+        setStatus({
+          id: "run.stop_failed",
+          values: { error: errorText(error) },
+        });
         return;
       }
-      await refreshAfterCommit(
-        "Cancellation requested; waiting for AgentCore to stop.",
-        "Cancellation request",
-      );
+      await refreshAfterCommit("run.stop_requested", "operation.run_stop");
     } finally {
       setBusy(null);
     }
@@ -226,13 +297,13 @@ export default function App() {
       try {
         await client.closeSession(activeSession.id);
       } catch (error) {
-        setStatus(`Session close failed: ${errorText(error)}`);
+        setStatus({
+          id: "task.close_failed",
+          values: { error: errorText(error) },
+        });
         return;
       }
-      await refreshAfterCommit(
-        "Session close requested; AgentCore cleanup continues off the UI thread.",
-        "Session close request",
-      );
+      await refreshAfterCommit("task.close_requested", "operation.task_close");
     } finally {
       setBusy(null);
     }
@@ -251,73 +322,79 @@ export default function App() {
           payload,
         );
       } catch (error) {
-        setStatus(`Response rejected: ${errorText(error)}`);
+        setStatus({
+          id: "approval.response_failed",
+          values: { error: errorText(error) },
+        });
         return;
       }
       await refreshAfterCommit(
-        "Response delivered to AgentCore.",
-        "UI response",
+        "approval.response_sent",
+        "operation.ui_response",
       );
     } finally {
       setBusy(null);
     }
   }
 
-  async function refreshAfterCommit(success: string, operation: string) {
+  async function refreshAfterCommit(success: MessageId, operation: MessageId) {
     try {
       await refreshSnapshot();
-      setStatus(success);
+      setStatus({ id: success });
     } catch (error) {
-      setStatus(
-        `${operation} was committed, but the view refresh failed: ${errorText(error)}`,
-      );
+      setStatus({
+        id: "view.refresh_after_commit_failed",
+        values: {
+          operation: t(operation),
+          error: errorText(error),
+        },
+      });
     }
   }
 
+  const currentTaskStatus = activeSession
+    ? t(`task.status.${activeSession.state}`)
+    : t("task.new");
+
   return (
-    <main className="min-h-screen bg-canvas text-graphite">
-      <div className="grid min-h-screen grid-cols-1 xl:grid-cols-[260px_minmax(0,1fr)_340px]">
-        <aside className="border-b border-rule bg-rail p-5 xl:border-r xl:border-b-0">
-          <div className="flex items-center justify-between gap-3">
+    <AppShell
+      taskTitle={
+        activeSession ? t("task.item", { id: activeSession.id }) : t("task.new")
+      }
+      workspaceLabel={
+        activeSession?.workspaceRoot || workspacePath || t("workspace.none")
+      }
+      status={t(status.id, status.values)}
+      left={
+        <>
+          <div className="brand-lockup">
+            <span className="brand-mark" aria-hidden="true">
+              M
+            </span>
             <div>
-              <p className="font-mono text-[10px] tracking-[0.2em] text-muted uppercase">
-                MetaWork / Phase 0
-              </p>
-              <h1 className="mt-1 font-display text-2xl font-semibold tracking-[-0.04em]">
-                Run desk
-              </h1>
+              <p className="brand-name">{t("app.name")}</p>
+              <p className="brand-subtitle">{t("app.window_label")}</p>
             </div>
-            <span
-              className={`h-2.5 w-2.5 rounded-full ${bridgeReady ? "bg-live" : "bg-danger"}`}
-              title={
-                viewSyncFailed
-                  ? "Workbench view synchronization failed"
-                  : bridgeReady
-                    ? "Host connected"
-                    : "Host offline"
-              }
-            />
           </div>
 
-          <div className="mt-8 rounded-xl border border-rule bg-canvas/70 p-3">
-            <p className="font-mono text-[10px] text-muted uppercase">
-              Workspace
-            </p>
+          <section className="workspace-card">
+            <p className="section-label">{t("workspace.label")}</p>
             <button
-              className="focus-ring mt-2 w-full rounded-lg border border-rule bg-paper px-3 py-2 text-left text-sm hover:border-cobalt"
+              className="workspace-picker focus-ring"
               disabled={busy !== null || viewSyncFailed || !bridgeReady}
               onClick={() => void chooseWorkspace()}
             >
-              {workspacePath || "Choose a folder…"}
+              <Icon name="workspace" />
+              <span className="truncate">
+                {workspacePath || t("workspace.choose")}
+              </span>
+              <Icon name="chevron" />
             </button>
             {workspaceGrant && (
-              <p className="mt-3 text-xs leading-5 text-muted">
-                Host-confirmed one-time trust grant. Strict workspace security
-                is not yet claimed.
-              </p>
+              <p className="workspace-grant">{t("workspace.grant_ready")}</p>
             )}
             <button
-              className="focus-ring mt-3 w-full rounded-lg bg-cobalt px-3 py-2 text-sm font-semibold text-white disabled:opacity-40"
+              className="primary-button focus-ring"
               disabled={
                 !workspacePath ||
                 !workspaceGrant ||
@@ -327,18 +404,28 @@ export default function App() {
               }
               onClick={() => void createSession()}
             >
-              Create session
+              {busy === "create"
+                ? t("workspace.starting_task")
+                : t("workspace.start_task")}
             </button>
-          </div>
+          </section>
 
-          <nav className="mt-6 space-y-2" aria-label="Sessions">
-            <p className="mb-3 font-mono text-[10px] tracking-[0.16em] text-muted uppercase">
-              Sessions · {snapshot.sessions.length}
-            </p>
+          <nav className="task-list" aria-label={t("task.list")}>
+            <div className="task-list-heading">
+              <p className="section-label">{t("task.list")}</p>
+              <span>
+                {t(taskCountMessageId(locale, snapshot.sessions.length), {
+                  count: formatInteger(locale, snapshot.sessions.length),
+                })}
+              </span>
+            </div>
             {snapshot.sessions.map((session) => (
               <button
                 key={session.id}
-                className={`focus-ring w-full rounded-xl border px-3 py-3 text-left transition ${activeSession?.id === session.id ? "border-cobalt bg-cobalt/8" : "border-transparent hover:border-rule hover:bg-paper"}`}
+                className="task-list-item focus-ring"
+                aria-current={
+                  activeSession?.id === session.id ? "page" : undefined
+                }
                 onClick={() =>
                   dispatchWorkbench({
                     type: "session.selected",
@@ -346,242 +433,278 @@ export default function App() {
                   })
                 }
               >
-                <span className="flex items-center justify-between gap-2">
-                  <span className="font-mono text-xs">S-{session.id}</span>
+                <span className="task-list-row">
+                  <span>{t("task.item", { id: session.id })}</span>
                   <StatePill state={session.state} />
                 </span>
-                <span className="mt-2 block truncate text-xs text-muted">
-                  {session.workspaceRoot}
-                </span>
+                <span className="task-list-path">{session.workspaceRoot}</span>
               </button>
             ))}
             {snapshot.sessions.length === 0 && (
-              <p className="rounded-xl border border-dashed border-rule p-4 text-sm leading-6 text-muted">
-                Choose a trusted workspace to create the first Session.
-              </p>
+              <p className="task-list-empty">{t("task.no_tasks")}</p>
             )}
           </nav>
-        </aside>
-
-        <section className="flex min-h-[70vh] min-w-0 flex-col">
-          <header className="flex min-h-20 items-center justify-between gap-5 border-b border-rule bg-paper/70 px-6 backdrop-blur">
-            <div className="min-w-0">
-              <p className="truncate font-mono text-[10px] tracking-[0.14em] text-muted uppercase">
-                {activeSession?.workspaceRoot ?? "No active workspace"}
-              </p>
-              <h2 className="mt-1 text-lg font-semibold">
-                {activeSession
-                  ? `Session ${activeSession.id}`
-                  : "Open a Session"}
-              </h2>
-            </div>
-            <div className="flex items-center gap-2">
-              {activeSession &&
-                activeSession.activeRunId !== "0" &&
-                (activeSession.state === "queued" ||
-                  activeSession.state === "running" ||
-                  activeSession.state === "waiting_ui") && (
-                  <button
-                    className="focus-ring rounded-lg border border-danger/50 px-3 py-2 text-sm font-medium text-danger hover:bg-danger/8 disabled:opacity-40"
-                    disabled={busy !== null || viewSyncFailed || !bridgeReady}
-                    onClick={() => void cancelRun()}
-                  >
-                    Stop run
-                  </button>
-                )}
+        </>
+      }
+      activity={
+        <>
+          <h2 className="activity-title">{t("activity.title")}</h2>
+          {viewSyncFailed && (
+            <section className="sync-failure" role="alert">
+              <h3>{t("connection.failed")}</h3>
+              <p>{t("connection.failed_help")}</p>
               <button
-                className="focus-ring rounded-lg border border-rule px-3 py-2 text-sm text-muted hover:border-graphite hover:text-graphite disabled:opacity-30"
-                disabled={
-                  !activeSession ||
-                  (activeSession.state === "closing" &&
-                    !activeSession.closeFailed) ||
-                  activeSession.state === "closed" ||
-                  busy !== null ||
-                  viewSyncFailed ||
-                  !bridgeReady
-                }
-                onClick={() => void closeSession()}
-              >
-                {activeSession?.closeFailed
-                  ? "Retry close"
-                  : activeSession?.state === "closing"
-                    ? "Closing…"
-                    : "Close"}
-              </button>
-            </div>
-          </header>
-
-          <div className="flex-1 overflow-y-auto px-5 py-8 sm:px-8">
-            <div className="mx-auto max-w-4xl">
-              {activeSession?.runs.map((run, index) => (
-                <article
-                  key={run.id}
-                  className="run-spine relative pb-12 pl-10"
-                >
-                  <span className="absolute top-0 left-0 grid h-7 w-7 place-items-center rounded-full border border-cobalt bg-canvas font-mono text-[10px] text-cobalt">
-                    {index + 1}
-                  </span>
-                  <div className="rounded-2xl border border-rule bg-paper p-5 shadow-[0_16px_50px_rgba(52,68,92,0.06)]">
-                    <div className="flex items-center justify-between gap-4 border-b border-rule pb-4">
-                      <p className="font-mono text-[10px] tracking-[0.14em] text-muted uppercase">
-                        Run {run.id} · {run.status}
-                      </p>
-                      <span className="font-mono text-[10px] text-muted">
-                        {tokenTotal(run)} tokens
-                      </span>
-                    </div>
-                    <div className="mt-5 grid gap-5">
-                      <Message role="You" text={run.user} />
-                      {run.assistant && (
-                        <Message role="Agent" text={run.assistant} agent />
-                      )}
-                      {run.tools.map((tool) => (
-                        <ToolCard key={tool.id} tool={tool} />
-                      ))}
-                      {!run.assistant && run.tools.length === 0 && (
-                        <p className="text-sm text-muted">
-                          AgentCore is preparing this Run…
-                        </p>
-                      )}
-                      {run.outcome && (
-                        <div
-                          className={`rounded-xl border px-4 py-3 text-xs ${run.phase === "completed" ? "border-live/40 bg-live/5 text-live" : "border-danger/30 bg-danger/5 text-danger"}`}
-                        >
-                          Run {run.outcome.replaceAll("_", " ")}
-                          {run.cause
-                            ? ` · ${run.cause.replaceAll("_", " ")}`
-                            : ""}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </article>
-              ))}
-              {activeSession && activeSession.runs.length === 0 && (
-                <div className="grid min-h-[45vh] place-items-center text-center">
-                  <div>
-                    <p className="font-display text-4xl font-semibold tracking-[-0.05em] text-graphite/25">
-                      Ready when you are.
-                    </p>
-                    <p className="mx-auto mt-4 max-w-md text-sm leading-6 text-muted">
-                      Ask the Agent to inspect this workspace. Read, Bash and
-                      Edit run through AgentCore built-in tools.
-                    </p>
-                  </div>
-                </div>
-              )}
-              {!activeSession && (
-                <div className="grid min-h-[60vh] place-items-center text-center text-muted">
-                  <p>Create a Session from the workspace rail.</p>
-                </div>
-              )}
-            </div>
-          </div>
-
-          <footer className="border-t border-rule bg-paper p-4 sm:px-8">
-            <div className="mx-auto flex max-w-4xl items-end gap-3 rounded-2xl border border-rule bg-canvas p-2 focus-within:border-cobalt">
-              <textarea
-                className="min-h-16 flex-1 resize-none bg-transparent px-3 py-2 text-sm leading-6 outline-none placeholder:text-muted/70"
-                value={prompt}
-                disabled={
-                  !activeSession ||
-                  activeSession.state !== "idle" ||
-                  busy !== null ||
-                  viewSyncFailed ||
-                  !bridgeReady
-                }
-                placeholder={
-                  activeSession
-                    ? "Describe the work to do…"
-                    : "Create a Session first"
-                }
-                onChange={(event) => setPrompt(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" && !event.shiftKey) {
-                    event.preventDefault();
-                    void submitRun();
-                  }
-                }}
-              />
-              <button
-                className="focus-ring rounded-xl bg-graphite px-4 py-3 text-sm font-semibold text-white disabled:opacity-30"
-                disabled={
-                  !activeSession ||
-                  activeSession.state !== "idle" ||
-                  !prompt.trim() ||
-                  busy !== null ||
-                  viewSyncFailed ||
-                  !bridgeReady
-                }
-                onClick={() => void submitRun()}
-              >
-                Run
-              </button>
-            </div>
-          </footer>
-        </section>
-
-        <aside className="border-t border-rule bg-inspector p-5 xl:border-t-0 xl:border-l">
-          <p className="font-mono text-[10px] tracking-[0.18em] text-muted uppercase">
-            Decision desk
-          </p>
-          {activeSession?.pendingUi ? (
-            <ApprovalPanel
-              pending={activeSession.pendingUi}
-              answers={answers[activeSession.pendingUi.requestId] ?? []}
-              busy={busy !== null || viewSyncFailed || !bridgeReady}
-              setAnswers={(next) =>
-                setAnswers((current) => ({
-                  ...current,
-                  [activeSession.pendingUi!.requestId]: next,
-                }))
-              }
-              respond={(payload) => void respondUi(payload)}
-            />
-          ) : (
-            <div className="mt-5 rounded-2xl border border-dashed border-rule p-5">
-              <p className="text-sm font-medium">No decision waiting</p>
-              <p className="mt-2 text-xs leading-5 text-muted">
-                Permission prompts and questions remain bound to their original
-                Session and Run, including after a Renderer reload.
-              </p>
-            </div>
-          )}
-          <div className="mt-6 border-t border-rule pt-5">
-            <p className="font-mono text-[10px] text-muted uppercase">
-              Host status
-            </p>
-            <p className="mt-2 text-sm leading-6">{status}</p>
-            {viewSyncFailed && (
-              <button
-                className="focus-ring mt-3 rounded-lg border border-danger/40 px-3 py-2 text-xs font-medium text-danger hover:bg-danger/8 disabled:opacity-40"
+                className="secondary-button focus-ring"
                 disabled={busy !== null}
                 onClick={() => void retryViewSynchronization()}
               >
-                Retry Workbench connection
+                {busy === "reconnect"
+                  ? t("connection.retrying")
+                  : t("connection.retry")}
+              </button>
+              {status.diagnostic && (
+                <details>
+                  <summary>{t("connection.details")}</summary>
+                  <p>
+                    {status.sourceId ? `${t(status.sourceId)}: ` : ""}
+                    {status.diagnostic}
+                  </p>
+                </details>
+              )}
+            </section>
+          )}
+
+          <section className="activity-section">
+            <p className="section-label">{t("activity.needs_attention")}</p>
+            {activeSession?.pendingUi ? (
+              <ApprovalPanel
+                pending={activeSession.pendingUi}
+                answers={answers[activeSession.pendingUi.requestId] ?? []}
+                busy={busy !== null || viewSyncFailed || !bridgeReady}
+                setAnswers={(next) =>
+                  setAnswers((current) => ({
+                    ...current,
+                    [activeSession.pendingUi!.requestId]: next,
+                  }))
+                }
+                respond={(payload) => void respondUi(payload)}
+              />
+            ) : (
+              <div className="activity-empty">
+                <p>{t("activity.no_decision")}</p>
+                <span>{t("activity.no_decision_help")}</span>
+              </div>
+            )}
+          </section>
+
+          <section className="activity-section">
+            <p className="section-label">{t("activity.current")}</p>
+            <div className="current-activity">
+              <span
+                className={`activity-dot ${activeSession?.state === "running" ? "is-live" : ""}`}
+              />
+              <div>
+                <p>{currentTaskStatus}</p>
+                <span>
+                  {!activeSession
+                    ? t("activity.current_empty")
+                    : activeSession.state === "waiting_ui"
+                      ? t("activity.current_waiting")
+                      : activeSession.state === "running" ||
+                          activeSession.state === "queued"
+                        ? t("activity.current_working")
+                        : t("activity.current_ready")}
+                </span>
+              </div>
+            </div>
+          </section>
+        </>
+      }
+    >
+      <header className="task-header">
+        <div className="min-w-0">
+          <p className="task-header-workspace">
+            {activeSession?.workspaceRoot ||
+              workspacePath ||
+              t("workspace.none")}
+          </p>
+          <h1>
+            {activeSession
+              ? t("task.item", { id: activeSession.id })
+              : t("task.open")}
+          </h1>
+        </div>
+        <div className="task-actions">
+          {activeSession &&
+            activeSession.activeRunId !== "0" &&
+            (activeSession.state === "queued" ||
+              activeSession.state === "running" ||
+              activeSession.state === "waiting_ui") && (
+              <button
+                className="danger-button focus-ring"
+                disabled={busy !== null || viewSyncFailed || !bridgeReady}
+                onClick={() => void cancelRun()}
+              >
+                <Icon name="stop" />
+                {t("task.stop")}
               </button>
             )}
-            <dl className="mt-5 grid grid-cols-2 gap-3 text-xs">
-              <Metric label="Revision" value={snapshot.revision} />
-              <Metric label="Contract" value="ABI v1" />
-              <Metric label="Platform" value="macOS 13+" />
-              <Metric label="Mode" value="In process" />
-            </dl>
-          </div>
-        </aside>
+          {activeSession && (
+            <button
+              className="secondary-button focus-ring"
+              disabled={
+                (activeSession.state === "closing" &&
+                  !activeSession.closeFailed) ||
+                activeSession.state === "closed" ||
+                busy !== null ||
+                viewSyncFailed ||
+                !bridgeReady
+              }
+              onClick={() => void closeSession()}
+            >
+              {activeSession.closeFailed
+                ? t("task.close_retry")
+                : activeSession.state === "closing"
+                  ? t("task.closing")
+                  : t("task.close")}
+            </button>
+          )}
+        </div>
+      </header>
+
+      <div className="timeline-scroll">
+        <div className="timeline">
+          {activeSession?.runs.map((run) => {
+            const total = tokenTotal(run);
+            return (
+              <article
+                key={run.id}
+                className="timeline-run"
+                data-active={
+                  run.phase === "queued" ||
+                  run.phase === "running" ||
+                  run.phase === "waiting_ui"
+                }
+              >
+                <div className="workline-node" aria-hidden="true" />
+                <header className="run-heading">
+                  <p>
+                    {t("run.label", { id: run.id })} ·{" "}
+                    {runPhaseLabel(t, run.phase)}
+                  </p>
+                  {total !== null && (
+                    <span>
+                      {t("run.tokens", {
+                        count: formatInteger(locale, total),
+                      })}
+                    </span>
+                  )}
+                </header>
+                <div className="run-content">
+                  <Message role={t("message.you")} text={run.user} />
+                  {run.assistant && (
+                    <Message
+                      role={t("message.agent")}
+                      text={run.assistant}
+                      agent
+                    />
+                  )}
+                  {run.tools.map((tool) => (
+                    <ToolCard key={tool.id} tool={tool} />
+                  ))}
+                  {!run.assistant && run.tools.length === 0 && (
+                    <p className="preparing-copy">{t("run.preparing")}</p>
+                  )}
+                  {run.outcome && (
+                    <div className="run-outcome" data-phase={run.phase}>
+                      <p>
+                        {t("run.outcome", {
+                          outcome: t(`outcome.${run.outcome}`),
+                        })}
+                      </p>
+                      {run.cause && (
+                        <span>
+                          {t("run.cause", {
+                            cause: t(`cause.${run.cause}`),
+                          })}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </article>
+            );
+          })}
+          {activeSession && activeSession.runs.length === 0 && (
+            <div className="task-empty-state">
+              <h2>{t("task.empty_title")}</h2>
+              <p>{t("task.empty_body")}</p>
+            </div>
+          )}
+          {!activeSession && (
+            <div className="task-empty-state">
+              <h2>{t("task.new")}</h2>
+              <p>{t("task.no_tasks")}</p>
+            </div>
+          )}
+        </div>
       </div>
-    </main>
+
+      <footer className="composer-bar">
+        <div className="composer">
+          <textarea
+            value={prompt}
+            disabled={
+              !activeSession ||
+              activeSession.state !== "idle" ||
+              busy !== null ||
+              viewSyncFailed ||
+              !bridgeReady
+            }
+            placeholder={
+              activeSession
+                ? t("run.placeholder")
+                : t("run.placeholder_no_task")
+            }
+            onChange={(event) => setPrompt(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                void submitRun();
+              }
+            }}
+          />
+          <button
+            className="composer-send focus-ring"
+            aria-label={t("run.submit")}
+            title={t("run.submit")}
+            disabled={
+              !activeSession ||
+              activeSession.state !== "idle" ||
+              !prompt.trim() ||
+              busy !== null ||
+              viewSyncFailed ||
+              !bridgeReady
+            }
+            onClick={() => void submitRun()}
+          >
+            <Icon name="send" />
+          </button>
+        </div>
+      </footer>
+    </AppShell>
   );
 }
 
 function StatePill({ state }: { state: SessionView["state"] }) {
+  const { t } = useI18n();
   const active =
     state === "running" || state === "queued" || state === "waiting_ui";
   return (
     <span
       className={`rounded-full px-2 py-1 font-mono text-[9px] uppercase ${active ? "bg-cobalt/10 text-cobalt" : "bg-rule/60 text-muted"}`}
     >
-      {state.replace("_", " ")}
+      {t(`task.status.${state}`)}
     </span>
   );
 }
@@ -596,20 +719,21 @@ function Message({
   agent?: boolean;
 }) {
   return (
-    <section
-      className={
-        agent ? "border-l-2 border-cobalt pl-4" : "border-l-2 border-rule pl-4"
-      }
-    >
-      <p className="font-mono text-[10px] tracking-[0.14em] text-muted uppercase">
-        {role}
-      </p>
-      <p className="mt-2 whitespace-pre-wrap text-sm leading-7">{text}</p>
+    <section className={`timeline-message ${agent ? "is-agent" : "is-user"}`}>
+      <p className="message-role">{role}</p>
+      <p className="message-body">{text}</p>
     </section>
   );
 }
 
 function ToolCard({ tool }: { tool: ToolView }) {
+  const { locale, t } = useI18n();
+  let duration: bigint | null = null;
+  try {
+    duration = BigInt(tool.elapsedMs);
+  } catch {
+    duration = null;
+  }
   return (
     <details
       className="group rounded-xl border border-rule bg-canvas"
@@ -623,15 +747,24 @@ function ToolCard({ tool }: { tool: ToolView }) {
           <span className="font-mono text-xs font-semibold">{tool.name}</span>
         </span>
         <span className="font-mono text-[10px] text-muted">
-          {tool.elapsedMs === "0" ? tool.state : `${tool.elapsedMs} ms`}
+          {duration === null || duration === 0n
+            ? runPhaseLabel(
+                t,
+                tool.state === "completed" ? "completed" : tool.state,
+              )
+            : t("tool.duration_ms", {
+                count: formatMilliseconds(locale, duration),
+              })}
         </span>
       </summary>
       <div className="grid gap-3 border-t border-rule px-4 py-4 text-xs">
-        <CodeBlock label="Input" value={tool.input} />
-        {tool.progress && <CodeBlock label="Progress" value={tool.progress} />}
+        <CodeBlock label={t("tool.input")} value={tool.input} />
+        {tool.progress && (
+          <CodeBlock label={t("tool.progress")} value={tool.progress} />
+        )}
         {tool.content && (
           <CodeBlock
-            label={tool.isError ? "Error" : "Result"}
+            label={tool.isError ? t("tool.error") : t("tool.result")}
             value={tool.content}
           />
         )}
@@ -666,15 +799,21 @@ function ApprovalPanel({
   setAnswers: (answers: string[]) => void;
   respond: (payload: UiResponsePayload) => void;
 }) {
+  const { t } = useI18n();
   return (
     <div className="mt-5 rounded-2xl border border-amber bg-amber/8 p-4">
       <p className="font-mono text-[10px] tracking-[0.14em] text-amber-ink uppercase">
-        Run {pending.runId} · response required
+        {t("approval.response_required", { id: pending.runId })}
       </p>
       {pending.kind === "permission" && (
         <div className="mt-4">
-          <h3 className="font-semibold">Allow {pending.tool}?</h3>
-          <CodeBlock label="Arguments" value={pending.args ?? ""} />
+          <h3 className="font-semibold">
+            {t("approval.allow_tool", { tool: pending.tool })}
+          </h3>
+          <CodeBlock
+            label={t("approval.arguments")}
+            value={pending.args ?? ""}
+          />
           <div className="mt-4 grid grid-cols-2 gap-2">
             <DecisionButton
               disabled={busy}
@@ -682,7 +821,7 @@ function ApprovalPanel({
                 respond({ kind: "permission", permission: "deny_once" })
               }
             >
-              Deny
+              {t("approval.deny")}
             </DecisionButton>
             <DecisionButton
               primary
@@ -691,7 +830,7 @@ function ApprovalPanel({
                 respond({ kind: "permission", permission: "allow_once" })
               }
             >
-              Allow once
+              {t("approval.allow_once")}
             </DecisionButton>
           </div>
         </div>
@@ -749,7 +888,7 @@ function ApprovalPanel({
                     setAnswers(next);
                   }}
                 >
-                  <option value="">Choose…</option>
+                  <option value="">{t("approval.choose")}</option>
                   {question.options.map((option) => (
                     <option key={option.label} value={option.label}>
                       {option.label}
@@ -778,13 +917,13 @@ function ApprovalPanel({
             }
             onClick={() => respond({ kind: "answers", answers })}
           >
-            Send answers
+            {t("approval.send_answers")}
           </DecisionButton>
         </div>
       )}
       {pending.kind === "plan_approval" && (
         <div className="mt-4">
-          <h3 className="font-semibold">Review the proposed plan</h3>
+          <h3 className="font-semibold">{t("approval.review_plan")}</h3>
           <p className="mt-3 whitespace-pre-wrap text-xs leading-6 text-muted">
             {pending.plan}
           </p>
@@ -795,7 +934,7 @@ function ApprovalPanel({
                 respond({ kind: "plan_approval", planApproval: "reject" })
               }
             >
-              Reject
+              {t("approval.reject_plan")}
             </DecisionButton>
             <DecisionButton
               primary
@@ -807,7 +946,7 @@ function ApprovalPanel({
                 })
               }
             >
-              Approve
+              {t("approval.approve_plan")}
             </DecisionButton>
           </div>
         </div>
@@ -815,10 +954,12 @@ function ApprovalPanel({
       {pending.kind === "custom" && (
         <div className="mt-4">
           <h3 className="font-semibold">{pending.customKind}</h3>
-          <CodeBlock label="Request" value={pending.payload ?? ""} />
+          <CodeBlock
+            label={t("approval.request")}
+            value={pending.payload ?? ""}
+          />
           <p className="mt-3 text-xs text-muted">
-            This custom request has no product response control in the current
-            baseline.
+            {t("approval.custom_request")}
           </p>
         </div>
       )}
@@ -835,16 +976,5 @@ function DecisionButton({
       {...props}
       className={`focus-ring rounded-lg px-3 py-2 text-sm font-semibold disabled:opacity-40 ${primary ? "bg-amber-ink text-white" : "border border-amber/60 text-amber-ink"}`}
     />
-  );
-}
-
-function Metric({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-lg border border-rule bg-paper p-3">
-      <dt className="font-mono text-[9px] tracking-[0.12em] text-muted uppercase">
-        {label}
-      </dt>
-      <dd className="mt-1 font-mono text-xs">{value}</dd>
-    </div>
   );
 }

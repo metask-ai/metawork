@@ -861,7 +861,7 @@ pub fn run(init: std.process.Init) !void {
 
     try runner.runWithOptions(app.app(), .{
         .app_name = "MetaWork",
-        .window_title = "MetaWork · Phase 0",
+        .window_title = "MetaWork",
         .bundle_id = "dev.metawork.desktop",
         .bridge = app.bridge(mode),
         .builtin_bridge = builtinBridgePolicy(mode),

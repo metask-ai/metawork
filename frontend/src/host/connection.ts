@@ -5,10 +5,19 @@ import { SnapshotDemand } from "./snapshot/snapshot-demand.ts";
 
 export type WorkbenchConnectionCallbacks = {
   onSnapshot: (snapshot: WorkbenchSnapshot) => void;
-  onStatus: (status: string) => void;
+  onStatus: (status: WorkbenchConnectionStatus) => void;
   onReady: (ready: boolean) => void;
   onViewSyncFailed: (failed: boolean) => void;
 };
+
+export type WorkbenchConnectionStatus =
+  | { kind: "connected"; recovered: boolean }
+  | { kind: "refresh_failed"; diagnostic: string }
+  | {
+      kind: "contract_failed";
+      source: "revision" | "host_signal_ack" | "host_signal" | "fixture";
+      diagnostic: string;
+    };
 
 type Gate5FixtureModule = {
   installGate5Fixture: (
@@ -58,7 +67,10 @@ export class WorkbenchConnection {
     this.options = options;
     this.revisions = new RevisionNotificationQueue((revision) => {
       void this.refresh(revision).catch((error) =>
-        this.callbacks.onStatus(errorText(error)),
+        this.callbacks.onStatus({
+          kind: "refresh_failed",
+          diagnostic: errorText(error),
+        }),
       );
     });
   }
@@ -67,15 +79,15 @@ export class WorkbenchConnection {
     if (!this.client.available()) return;
     this.removeWorkbench = this.client.onWorkbenchRevision(
       (revision) => this.revisions.push(revision),
-      (error) => this.failNotification("Workbench revision", error),
+      (error) => this.failNotification("revision", error),
     );
     this.removeHostSignal = this.client.onHostSignal(
       (signal) => {
         void this.client
           .acknowledgeSignal(signal.sequence)
-          .catch((error) => this.failNotification("Host signal ACK", error));
+          .catch((error) => this.failNotification("host_signal_ack", error));
       },
-      (error) => this.failNotification("Host signal", error),
+      (error) => this.failNotification("host_signal", error),
     );
     await this.connect();
     if (this.stopped) return;
@@ -236,7 +248,7 @@ export class WorkbenchConnection {
       const fixture = installGate5Fixture(
         this.client.nativeBridgeForAutomationFixture(),
         () => this.generation,
-        (error) => this.failNotification("Gate 5 fixture", error),
+        (error) => this.failNotification("fixture", error),
       );
       this.removeFixture = fixture.remove;
       if (this.stopped) {
@@ -254,17 +266,23 @@ export class WorkbenchConnection {
         throw error;
       }
     }
-    this.callbacks.onStatus(
-      recovered
-        ? "Workbench connection recovered with a new Host generation."
-        : "Workbench connected.",
-    );
+    this.callbacks.onStatus({ kind: "connected", recovered });
   }
 
-  private failNotification(label: string, error: unknown) {
+  private failNotification(
+    source: Extract<
+      WorkbenchConnectionStatus,
+      { kind: "contract_failed" }
+    >["source"],
+    error: unknown,
+  ) {
     if (this.stopped) return;
     this.callbacks.onViewSyncFailed(true);
     this.callbacks.onReady(false);
-    this.callbacks.onStatus(`${label} contract failed: ${errorText(error)}`);
+    this.callbacks.onStatus({
+      kind: "contract_failed",
+      source,
+      diagnostic: errorText(error),
+    });
   }
 }

@@ -26,6 +26,10 @@ export default defineConfig(({ command }) => ({
       },
     },
   ],
+  build: {
+    target: "safari16",
+    cssTarget: "safari16",
+  },
   server: {
     host: "127.0.0.1",
     port: 5173,
