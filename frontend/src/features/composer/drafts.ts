@@ -1,3 +1,4 @@
+// Drafts are local Composer state, never part of the Host projection.
 const prefix = "metawork.task-draft.";
 
 function storage(): Storage | null {

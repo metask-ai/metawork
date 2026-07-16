@@ -7,20 +7,25 @@ import {
   useState,
 } from "react";
 
-import { AppShell } from "./app/AppShell.tsx";
-import { GlobalSearch } from "./app/GlobalSearch.tsx";
+import { AppShell } from "./AppShell.tsx";
+import { Icon } from "../components/ui/Icon.tsx";
+import { ApprovalPanel } from "../features/approvals/ApprovalPanel.tsx";
+import { UiRecordCard } from "../features/approvals/UiRecordCard.tsx";
+import { GlobalSearch } from "../features/search/GlobalSearch.tsx";
+import { TaskActivity } from "../features/task-activity/TaskActivity.tsx";
+import { TaskTimeline } from "../features/timeline/TaskTimeline.tsx";
 import {
   TaskSignals,
   WorkspaceNavigation,
-} from "./app/WorkspaceNavigation.tsx";
-import { Icon } from "./components/ui/Icon.tsx";
-import { HostClient } from "./host/client.ts";
+} from "../features/workspaces/WorkspaceNavigation.tsx";
+import { useTaskDrafts } from "../features/composer/useTaskDrafts.ts";
+import { HostClient } from "../host/client.ts";
 import {
   WorkbenchConnection,
   type WorkbenchConnectionStatus,
-} from "./host/connection.ts";
-import type { UiResponsePayload } from "./host/contracts.ts";
-import { useI18n, type MessageId } from "./i18n/context.ts";
+} from "../host/connection.ts";
+import type { UiResponsePayload } from "../host/contracts.ts";
+import { useI18n, type MessageId } from "../i18n/context.ts";
 import {
   searchWorkbench,
   selectActiveSession,
@@ -28,20 +33,12 @@ import {
   workspaceLabel,
   workspaceSummaries,
   type SearchResult,
-} from "./workbench/selectors.ts";
-import {
-  clearTaskDraft,
-  pruneTaskDrafts,
-  readTaskDraft,
-  writeTaskDraft,
-} from "./workbench/drafts.ts";
-import { initialWorkbenchState, workbenchReducer } from "./workbench/store.ts";
-import { TaskActivity } from "./workbench/TaskActivity.tsx";
-import { TaskTimeline } from "./workbench/TaskTimeline.tsx";
+} from "../workbench/selectors.ts";
+import { initialWorkbenchState, workbenchReducer } from "../workbench/store.ts";
 
 const gate5FixtureLoader =
   import.meta.env.VITE_METAWORK_GATE5_FIXTURE === "1"
-    ? () => import("./host/fixtures/gate5-fixture.ts")
+    ? () => import("../host/fixtures/gate5-fixture.ts")
     : undefined;
 
 function errorText(error: unknown) {
@@ -80,7 +77,6 @@ export default function App() {
   );
   const [workspacePath, setWorkspacePath] = useState("");
   const [workspaceGrant, setWorkspaceGrant] = useState("");
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [showArchived, setShowArchived] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -115,9 +111,12 @@ export default function App() {
     () => searchWorkbench(snapshot, searchQuery),
     [searchQuery, snapshot],
   );
-  const prompt = activeSession
-    ? (drafts[activeSession.id] ?? readTaskDraft(activeSession.id))
-    : "";
+  const {
+    draft: prompt,
+    updateDraft: updatePrompt,
+    clearDraft,
+    pruneDrafts,
+  } = useTaskDrafts(activeSession?.id ?? null);
   const mutationDisabled = viewSyncFailed || !bridgeReady || busy !== null;
   const taskCanCompose =
     activeSession?.lifecycle === "open" && !activeSession.archived;
@@ -140,17 +139,7 @@ export default function App() {
       {
         onSnapshot: (next) => {
           if (!cancelled) {
-            const validSessionIds = new Set(
-              next.sessions.map((session) => session.id),
-            );
-            pruneTaskDrafts(validSessionIds);
-            setDrafts((current) =>
-              Object.fromEntries(
-                Object.entries(current).filter(([sessionId]) =>
-                  validSessionIds.has(sessionId),
-                ),
-              ),
-            );
+            pruneDrafts(next.sessions.map((session) => session.id));
             dispatchWorkbench({ type: "snapshot.accepted", snapshot: next });
           }
         },
@@ -188,7 +177,7 @@ export default function App() {
       window.removeEventListener("pagehide", onPageHide);
       void current.stop();
     };
-  }, [client]);
+  }, [client, pruneDrafts]);
 
   useEffect(() => {
     const openSearch = (event: KeyboardEvent) => {
@@ -233,12 +222,6 @@ export default function App() {
       window.removeEventListener("keydown", closeOnEscape);
     };
   }, [taskMenuOpen]);
-
-  function updatePrompt(value: string) {
-    if (!activeSession) return;
-    setDrafts((current) => ({ ...current, [activeSession.id]: value }));
-    writeTaskDraft(activeSession.id, value);
-  }
 
   function closeTaskMenuAndRestoreFocus() {
     setTaskMenuOpen(false);
@@ -337,7 +320,7 @@ export default function App() {
         return;
       }
       await refreshAfterCommit("run.started", "operation.run_submit");
-      clearTaskDraft(activeSession.id);
+      clearDraft(activeSession.id);
     } finally {
       setBusy(null);
     }
@@ -461,7 +444,7 @@ export default function App() {
         });
         return;
       }
-      clearTaskDraft(activeSession.id);
+      clearDraft(activeSession.id);
       setConfirmDelete(false);
       await refreshAfterCommit("task.deleted", "operation.task_delete");
     } finally {
@@ -819,6 +802,8 @@ export default function App() {
         revision={snapshot.revision}
         responseDisabled={busy !== null || viewSyncFailed || !bridgeReady}
         onRespond={(payload) => void respondUi(payload)}
+        renderPendingUi={(props) => <ApprovalPanel {...props} />}
+        renderUiRecord={(record) => <UiRecordCard record={record} />}
       />
 
       <footer className="composer-bar">

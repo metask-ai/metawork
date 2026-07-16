@@ -1,14 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 
-import { Icon } from "../components/ui/Icon.tsx";
-import type { SessionView } from "../host/contracts.ts";
-import { taskCountMessageId } from "../i18n/formatters.ts";
-import { useI18n } from "../i18n/context.ts";
+import { Icon } from "../../components/ui/Icon.tsx";
+import type { SessionView } from "../../host/contracts.ts";
+import { taskCountMessageId } from "../../i18n/formatters.ts";
+import { useI18n } from "../../i18n/context.ts";
 import {
   taskSignals,
   workspaceLabel,
   type WorkspaceSummary,
-} from "../workbench/selectors.ts";
+} from "../../workbench/selectors.ts";
 
 export function WorkspaceNavigation({
   summaries,

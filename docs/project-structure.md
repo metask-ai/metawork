@@ -28,7 +28,7 @@
 - bounded executor 的队列、worker 和容量策略归 `workbench/executor.zig`，AgentCore 只持有最小调度 capability；
 - AgentCore Runtime/Session、callback quiescence、cancel/close/shutdown 语义仍集中在 `agentcore/session.zig`，后续只按已验证责任继续拆分；
 - `workbench/projection.zig` 仍同时承担产品投影、Session view 和 snapshot writer，后续任务再提取；
-- Renderer Host 合同已集中到 `frontend/src/host/`，页面和 feature 拆分仍按后续 UI 任务推进。
+- Renderer Host 合同已集中到 `frontend/src/host/`；应用 composition 已进入 `frontend/src/app/`，已落地的 Workspace navigation、Search、Timeline、Approvals、Composer draft 和 Task activity 进入各自 `frontend/src/features/`，`workbench/` 只保留 projection store 与 selector。尚未形成真实产品能力的 Outputs、Permissions 和 Settings 不创建空模块。
 
 评审方提出的 `main.zig + app.zig + bridge.zig + workbench.zig + agentcore.zig` 顶层结构总体合理，优于先建立多层 `host/` 空目录。它符合 Zig 以 module root 形成明确 surface 的方式，也保留当前 `build.zig` 的独立注入和测试能力。
 
@@ -170,6 +170,8 @@ frontend/src/
 - 切换全局错误、启动和 view-sync 状态。
 
 `App.tsx` 不声明 Host command 字符串、snapshot wire 类型或 feature 内部组件。
+
+当前 `app/App.tsx` 已成为唯一 composition entry，并从 feature public component 组装主窗口。后续只有在 controller 状态形成可独立测试的不变量时才继续提取 `app-state.ts` 或 hooks；不得为了缩短文件制造无所有权的 callback 转发层。
 
 #### `host/`
 

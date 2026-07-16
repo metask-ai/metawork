@@ -6,7 +6,7 @@ import {
   pruneTaskDrafts,
   readTaskDraft,
   writeTaskDraft,
-} from "../frontend/src/workbench/drafts.ts";
+} from "../frontend/src/features/composer/drafts.ts";
 import {
   searchWorkbench,
   taskActivity,

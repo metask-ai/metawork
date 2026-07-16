@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { enUS } from "../frontend/src/i18n/messages/en-US.ts";
@@ -15,6 +15,20 @@ function placeholders(message) {
   return [...message.matchAll(/\{([a-zA-Z0-9_]+)\}/g)]
     .map((match) => match[1])
     .sort();
+}
+
+async function productSourceFiles(directory) {
+  const entries = await readdir(directory, { withFileTypes: true });
+  const sources = [];
+  for (const entry of entries) {
+    const url = new URL(
+      `${entry.name}${entry.isDirectory() ? "/" : ""}`,
+      directory,
+    );
+    if (entry.isDirectory()) sources.push(...(await productSourceFiles(url)));
+    else if (entry.name.endsWith(".tsx")) sources.push(url);
+  }
+  return sources;
 }
 
 test("English is the complete source catalog and zh-CN has exact key parity", () => {
@@ -67,10 +81,11 @@ test("runtime translation interpolates values and pseudo-locale expands copy", (
 });
 
 test("application product copy is catalog-backed", async () => {
+  const sourceFiles = await productSourceFiles(
+    new URL("../frontend/src/", import.meta.url),
+  );
   const sources = await Promise.all(
-    ["App.tsx", "app/AppShell.tsx"].map((path) =>
-      readFile(new URL(`../frontend/src/${path}`, import.meta.url), "utf8"),
-    ),
+    sourceFiles.map((path) => readFile(path, "utf8")),
   );
   const source = sources.join("\n");
   const staticMessageIds = [...source.matchAll(/\bt\("([a-z0-9_.-]+)"/g)].map(

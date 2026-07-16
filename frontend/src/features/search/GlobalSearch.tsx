@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
-import { useI18n } from "../i18n/context.ts";
-import type { SearchResult } from "../workbench/selectors.ts";
+import { useI18n } from "../../i18n/context.ts";
+import type { SearchResult } from "../../workbench/selectors.ts";
 
 export function GlobalSearch({
   open,
