@@ -9,6 +9,7 @@ import {
 
 import { AppShell } from "./AppShell.tsx";
 import { Icon } from "../components/ui/Icon.tsx";
+import { ComposerFooter } from "../features/composer/ComposerFooter.tsx";
 import { ApprovalPanel } from "../features/approvals/ApprovalPanel.tsx";
 import { UiRecordCard } from "../features/approvals/UiRecordCard.tsx";
 import {
@@ -23,11 +24,12 @@ import {
   TaskSignals,
   WorkspaceNavigation,
 } from "../features/workspaces/WorkspaceNavigation.tsx";
-import { useTaskDrafts } from "../features/composer/useTaskDrafts.ts";
 import {
-  maxComposerCharacters,
-  prepareRetryDraft,
-} from "../features/composer/drafts.ts";
+  useNewTaskDrafts,
+  useTaskDrafts,
+} from "../features/composer/useTaskDrafts.ts";
+import { prepareRetryDraft } from "../features/composer/drafts.ts";
+import { submitTaskInstruction } from "../features/composer/submitTaskInstruction.ts";
 import { HostClient } from "../host/client.ts";
 import {
   WorkbenchConnection,
@@ -37,6 +39,7 @@ import type { UiResponsePayload } from "../host/contracts.ts";
 import { useI18n, type MessageId } from "../i18n/context.ts";
 import {
   searchWorkbench,
+  isRunInFlight,
   selectActiveSession,
   selectCurrentWorkspace,
   taskDisplayState,
@@ -109,6 +112,8 @@ export default function App() {
   } = useUiResponseStates();
   const client = useMemo(() => new HostClient(), []);
   const connection = useRef<WorkbenchConnection | null>(null);
+  const pendingSessionSelection = useRef<string | null>(null);
+  const pendingSessionDraftRetention = useRef(new Set<string>());
   const taskMenu = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
   const snapshot = workbench.snapshot;
@@ -129,18 +134,22 @@ export default function App() {
     () => searchWorkbench(snapshot, searchQuery),
     [searchQuery, snapshot],
   );
-  const {
-    draft: prompt,
-    updateDraft: updatePrompt,
-    clearDraft,
-    pruneDrafts,
-  } = useTaskDrafts(activeSession?.id ?? null);
+  const taskDrafts = useTaskDrafts(activeSession?.id ?? null);
+  const newTaskDrafts = useNewTaskDrafts(workbench.draftWorkspaceRoot);
+  const prompt = workbench.draftWorkspaceRoot
+    ? newTaskDrafts.draft
+    : taskDrafts.draft;
+  const updatePrompt = workbench.draftWorkspaceRoot
+    ? newTaskDrafts.updateDraft
+    : taskDrafts.updateDraft;
   const mutationDisabled = viewSyncFailed || !bridgeReady || busy !== null;
   const taskCanCompose =
-    activeSession?.lifecycle === "open" && !activeSession.archived;
-  const runInFlight = activeSession?.currentRunPhase !== null;
+    Boolean(workbench.draftWorkspaceRoot) ||
+    (activeSession?.lifecycle === "open" && !activeSession.archived);
+  const runInFlight = isRunInFlight(activeSession);
   const canSubmit =
     taskCanCompose &&
+    (!workbench.draftWorkspaceRoot || Boolean(workspaceGrant)) &&
     !runInFlight &&
     prompt.trim().length > 0 &&
     !mutationDisabled;
@@ -158,8 +167,27 @@ export default function App() {
         onSnapshot: (next) => {
           if (!cancelled) {
             observeUiResponseSnapshot(next);
-            pruneDrafts(next.sessions.map((session) => session.id));
+            const projectedSessionIds = next.sessions.map(
+              (session) => session.id,
+            );
+            taskDrafts.pruneDrafts([
+              ...projectedSessionIds,
+              ...pendingSessionDraftRetention.current,
+            ]);
+            for (const sessionId of projectedSessionIds)
+              pendingSessionDraftRetention.current.delete(sessionId);
             dispatchWorkbench({ type: "snapshot.accepted", snapshot: next });
+            const pendingSessionId = pendingSessionSelection.current;
+            if (
+              pendingSessionId &&
+              next.sessions.some((session) => session.id === pendingSessionId)
+            ) {
+              pendingSessionSelection.current = null;
+              dispatchWorkbench({
+                type: "session.selected",
+                sessionId: pendingSessionId,
+              });
+            }
           }
         },
         onStatus: (next) => {
@@ -196,7 +224,7 @@ export default function App() {
       window.removeEventListener("pagehide", onPageHide);
       void current.stop();
     };
-  }, [client, observeUiResponseSnapshot, pruneDrafts]);
+  }, [client, observeUiResponseSnapshot, taskDrafts.pruneDrafts]);
 
   useEffect(() => {
     const openSearch = (event: KeyboardEvent) => {
@@ -271,22 +299,30 @@ export default function App() {
     }
   }
 
-  async function chooseWorkspace() {
+  async function chooseWorkspace(openDraft = false) {
     if (viewSyncFailed || !bridgeReady) return;
-    setBusy("workspace");
+    setBusy(openDraft ? "new-task" : "workspace");
     setWorkspaceGrant("");
     try {
       const result = await client.chooseWorkspace();
       if (result.selected) {
         setWorkspacePath(result.workspaceRoot);
         setWorkspaceGrant(result.grant);
-        dispatchWorkbench({
-          type: "workspace.selected",
-          workspaceRoot: result.workspaceRoot,
-        });
+        dispatchWorkbench(
+          openDraft
+            ? {
+                type: "task.draft.opened",
+                workspaceRoot: result.workspaceRoot,
+              }
+            : {
+                type: "workspace.selected",
+                workspaceRoot: result.workspaceRoot,
+              },
+        );
         setStatus({ id: "workspace.grant_confirmed" });
+        if (openDraft)
+          window.requestAnimationFrame(() => composer.current?.focus());
       } else {
-        setWorkspacePath("");
         setStatus({ id: "workspace.selection_cancelled" });
       }
     } catch (error) {
@@ -299,47 +335,62 @@ export default function App() {
     }
   }
 
-  async function createSession() {
-    if (viewSyncFailed || !bridgeReady || !workspacePath || !workspaceGrant)
+  async function beginNewTask() {
+    if (mutationDisabled) return;
+    pendingSessionSelection.current = null;
+    if (workspacePath && workspaceGrant) {
+      dispatchWorkbench({
+        type: "task.draft.opened",
+        workspaceRoot: workspacePath,
+      });
+      window.requestAnimationFrame(() => composer.current?.focus());
       return;
-    setBusy("create");
-    try {
-      let sessionId: string;
-      try {
-        sessionId = await client.createSession(workspaceGrant);
-      } catch (error) {
-        setStatus({
-          id: "task.create_failed",
-          values: { error: errorText(error) },
-        });
-        return;
-      }
-      await refreshAfterCommit("task.created", "operation.task_create");
-      dispatchWorkbench({ type: "session.selected", sessionId });
-    } finally {
-      setWorkspaceGrant("");
-      setBusy(null);
     }
+    await chooseWorkspace(true);
   }
 
   async function submitRun() {
-    if (!canSubmit || !activeSession) return;
+    if (!canSubmit) return;
     const submitted = prompt;
+    const draftWorkspaceRoot = workbench.draftWorkspaceRoot;
+    const existingSessionId = activeSession?.id ?? null;
     updatePrompt("");
     setBusy("run");
     try {
-      try {
-        await client.run(activeSession.id, submitted);
-      } catch (error) {
-        updatePrompt(submitted);
+      const result = await submitTaskInstruction({
+        client,
+        sessionId: existingSessionId,
+        workspaceGrant,
+        instruction: submitted,
+        onSessionCreated: (sessionId) => {
+          setWorkspaceGrant("");
+          pendingSessionSelection.current = sessionId;
+          pendingSessionDraftRetention.current.add(sessionId);
+          if (draftWorkspaceRoot) newTaskDrafts.clearDraft(draftWorkspaceRoot);
+          taskDrafts.setDraft(sessionId, submitted);
+          dispatchWorkbench({ type: "task.draft.closed" });
+        },
+      });
+      if (result.kind === "create_failed") {
+        setWorkspaceGrant("");
+        newTaskDrafts.updateDraft(submitted);
         setStatus({
-          id: "run.start_failed",
-          values: { error: errorText(error) },
+          id: "task.create_failed",
+          values: { error: errorText(result.error) },
         });
         return;
       }
+      if (result.kind === "run_failed") {
+        taskDrafts.setDraft(result.sessionId, submitted);
+        setStatus({
+          id: "run.start_failed",
+          values: { error: errorText(result.error) },
+        });
+        if (result.created) await refreshSnapshot().catch(() => undefined);
+        return;
+      }
+      taskDrafts.clearDraft(result.sessionId);
       await refreshAfterCommit("run.started", "operation.run_submit");
-      clearDraft(activeSession.id);
     } finally {
       setBusy(null);
     }
@@ -463,7 +514,7 @@ export default function App() {
         });
         return;
       }
-      clearDraft(activeSession.id);
+      taskDrafts.clearDraft(activeSession.id);
       setConfirmDelete(false);
       await refreshAfterCommit("task.deleted", "operation.task_delete");
     } finally {
@@ -472,6 +523,9 @@ export default function App() {
   }
 
   function selectSearchResult(result: SearchResult) {
+    pendingSessionSelection.current = null;
+    setWorkspacePath(result.workspaceRoot);
+    setWorkspaceGrant("");
     dispatchWorkbench({
       type: "workspace.selected",
       workspaceRoot: result.workspaceRoot,
@@ -557,7 +611,7 @@ export default function App() {
     ? taskDisplayState(activeSession)
     : null;
   const currentTaskStatus = !currentTaskState
-    ? t("task.new")
+    ? t(workbench.draftWorkspaceRoot ? "task.new" : "task.open")
     : currentTaskState.kind === "phase"
       ? t(`task.phase.${currentTaskState.value}`)
       : currentTaskState.kind === "lifecycle"
@@ -569,7 +623,7 @@ export default function App() {
             : t("task.ready");
   const activeTaskTitle = activeSession
     ? activeSession.title || t("task.item", { id: activeSession.id })
-    : t("task.new");
+    : t(workbench.draftWorkspaceRoot ? "task.new" : "task.open");
 
   return (
     <AppShell
@@ -597,10 +651,11 @@ export default function App() {
             grantReady={Boolean(workspacePath && workspaceGrant)}
             showArchived={showArchived}
             disabled={mutationDisabled}
-            creating={busy === "create"}
+            creating={busy === "new-task"}
             onSearch={() => setSearchOpen(true)}
-            onChooseWorkspace={() => void chooseWorkspace()}
+            onChooseWorkspace={() => void chooseWorkspace(false)}
             onSelectWorkspace={(root) => {
+              pendingSessionSelection.current = null;
               setWorkspacePath(root);
               setWorkspaceGrant("");
               dispatchWorkbench({
@@ -608,10 +663,11 @@ export default function App() {
                 workspaceRoot: root,
               });
             }}
-            onCreateTask={() => void createSession()}
-            onSelectTask={(sessionId) =>
-              dispatchWorkbench({ type: "session.selected", sessionId })
-            }
+            onCreateTask={() => void beginNewTask()}
+            onSelectTask={(sessionId) => {
+              pendingSessionSelection.current = null;
+              dispatchWorkbench({ type: "session.selected", sessionId });
+            }}
             onToggleArchived={() => setShowArchived((shown) => !shown)}
           />
         </>
@@ -646,6 +702,7 @@ export default function App() {
 
           <TaskActivity
             session={activeSession}
+            draft={Boolean(workbench.draftWorkspaceRoot)}
             currentStatus={currentTaskStatus}
             onFocusPending={focusPendingRequest}
           />
@@ -694,7 +751,13 @@ export default function App() {
             </form>
           ) : (
             <div className="task-title-row">
-              <h1>{activeSession ? activeTaskTitle : t("task.open")}</h1>
+              <h1>
+                {activeSession
+                  ? activeTaskTitle
+                  : workbench.draftWorkspaceRoot
+                    ? t("task.new")
+                    : t("task.open")}
+              </h1>
               {activeSession && <TaskSignals session={activeSession} />}
             </div>
           )}
@@ -850,6 +913,7 @@ export default function App() {
 
       <TaskTimeline
         session={activeSession}
+        draft={Boolean(workbench.draftWorkspaceRoot)}
         revision={snapshot.revision}
         composerHasDraft={prompt.trim().length > 0}
         retryAvailable={taskCanCompose && !runInFlight}
@@ -869,44 +933,25 @@ export default function App() {
         renderUiRecord={(record) => <UiRecordCard record={record} />}
       />
 
-      <footer className="composer-bar">
-        <div className="composer">
-          <textarea
-            ref={composer}
-            value={prompt}
-            maxLength={maxComposerCharacters}
-            disabled={!taskCanCompose || viewSyncFailed || !bridgeReady}
-            placeholder={
-              !activeSession
-                ? t("run.placeholder_no_task")
-                : activeSession.archived
-                  ? t("run.placeholder_archived")
-                  : activeSession.lifecycle !== "open"
-                    ? t("run.placeholder_closed")
-                    : t("run.placeholder")
-            }
-            onChange={(event) => updatePrompt(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey && canSubmit) {
-                event.preventDefault();
-                void submitRun();
-              }
-            }}
-          />
-          <button
-            className="composer-send focus-ring"
-            aria-label={t("run.submit")}
-            title={t("run.submit")}
-            disabled={!canSubmit}
-            onClick={() => void submitRun()}
-          >
-            <Icon name="send" />
-          </button>
-        </div>
-        {taskCanCompose && runInFlight && (
-          <p className="composer-draft-note">{t("run.draft_only")}</p>
+      <ComposerFooter
+        textareaRef={composer}
+        hasTask={Boolean(activeSession)}
+        draft={Boolean(workbench.draftWorkspaceRoot)}
+        archived={Boolean(activeSession?.archived)}
+        closed={Boolean(activeSession && activeSession.lifecycle !== "open")}
+        prompt={prompt}
+        composeDisabled={!taskCanCompose || mutationDisabled}
+        canSubmit={canSubmit}
+        runInFlight={Boolean(taskCanCompose && runInFlight)}
+        accessRequired={Boolean(
+          workbench.draftWorkspaceRoot && !workspaceGrant,
         )}
-      </footer>
+        actionDisabled={mutationDisabled}
+        onStart={() => void beginNewTask()}
+        onPromptChange={updatePrompt}
+        onSubmit={() => void submitRun()}
+        onConfirmAccess={() => void chooseWorkspace(true)}
+      />
       <GlobalSearch
         open={searchOpen}
         query={searchQuery}

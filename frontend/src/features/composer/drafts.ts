@@ -1,5 +1,6 @@
 // Drafts are local Composer state, never part of the Host projection.
 const prefix = "metawork.task-draft.";
+const newTaskPrefix = "metawork.new-task-draft.";
 export const maxComposerCharacters = 16 * 1024;
 
 export function prepareRetryDraft(
@@ -46,6 +47,29 @@ export function writeTaskDraft(sessionId: string, value: string): void {
 
 export function clearTaskDraft(sessionId: string): void {
   writeTaskDraft(sessionId, "");
+}
+
+export function readNewTaskDraft(workspaceRoot: string): string {
+  try {
+    return storage()?.getItem(`${newTaskPrefix}${workspaceRoot}`) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+export function writeNewTaskDraft(workspaceRoot: string, value: string): void {
+  try {
+    const target = storage();
+    if (!target) return;
+    if (value) target.setItem(`${newTaskPrefix}${workspaceRoot}`, value);
+    else target.removeItem(`${newTaskPrefix}${workspaceRoot}`);
+  } catch {
+    // Draft persistence is helpful, but never a prerequisite for composing.
+  }
+}
+
+export function clearNewTaskDraft(workspaceRoot: string): void {
+  writeNewTaskDraft(workspaceRoot, "");
 }
 
 export function pruneTaskDrafts(validSessionIds: ReadonlySet<string>): void {

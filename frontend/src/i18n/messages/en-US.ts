@@ -35,12 +35,18 @@ export const enUS = {
   "workspace.selection_cancelled": "Workspace selection cancelled.",
   "workspace.selection_failed": "Workspace selection failed: {error}",
   "workspace.grant_confirmed": "Workspace access confirmed.",
-  "workspace.starting_task": "Starting task…",
+  "workspace.access_required":
+    "Confirm workspace access again before sending this draft.",
+  "workspace.confirm_access": "Confirm access",
+  "workspace.starting_task": "Choosing workspace…",
   "task.list": "Tasks",
   "task.count.one": "{count} task",
   "task.count.other": "{count} tasks",
   "task.item": "Task {id}",
   "task.new": "New task",
+  "task.start_new": "Start a new task",
+  "task.start_new_help":
+    "Choose or confirm a trusted workspace, then describe the outcome you need.",
   "task.open": "Open a task",
   "task.empty_title": "Put this workspace to work.",
   "task.empty_body":
@@ -134,6 +140,7 @@ export const enUS = {
   "activity.needs_attention": "Needs your attention",
   "activity.current": "Current activity",
   "activity.current_empty": "No task is active.",
+  "activity.current_draft": "Ready for the first instruction.",
   "activity.current_ready": "Ready for your next instruction.",
   "activity.current_working": "The task is working in the background.",
   "activity.current_waiting": "A response is required to continue.",

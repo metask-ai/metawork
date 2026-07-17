@@ -8,8 +8,12 @@ function toolStateMessage(tool: ToolView): MessageId {
   return tool.state === "failed" ? "outcome.failed" : "outcome.completed";
 }
 
-function currentActivityMessage(session: SessionView | null): MessageId {
-  if (!session) return "activity.current_empty";
+function currentActivityMessage(
+  session: SessionView | null,
+  draft: boolean,
+): MessageId {
+  if (!session)
+    return draft ? "activity.current_draft" : "activity.current_empty";
   if (session.currentRunPhase === "waiting_ui")
     return "activity.current_waiting";
   if (session.currentRunPhase !== null) return "activity.current_working";
@@ -26,10 +30,12 @@ function currentActivityMessage(session: SessionView | null): MessageId {
 
 export function TaskActivity({
   session,
+  draft,
   currentStatus,
   onFocusPending,
 }: {
   session: SessionView | null;
+  draft: boolean;
   currentStatus: string;
   onFocusPending: () => void;
 }) {
@@ -61,7 +67,7 @@ export function TaskActivity({
           />
           <div>
             <p>{currentStatus}</p>
-            <span>{t(currentActivityMessage(session))}</span>
+            <span>{t(currentActivityMessage(session, draft))}</span>
           </div>
         </div>
       </section>

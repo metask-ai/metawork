@@ -7,12 +7,15 @@ export type WorkbenchState = {
   snapshot: WorkbenchSnapshot;
   activeSessionId: string | null;
   activeWorkspaceRoot: string | null;
+  draftWorkspaceRoot: string | null;
 };
 
 export type WorkbenchAction =
   | { type: "snapshot.accepted"; snapshot: WorkbenchSnapshot }
   | { type: "session.selected"; sessionId: string }
-  | { type: "workspace.selected"; workspaceRoot: string };
+  | { type: "workspace.selected"; workspaceRoot: string }
+  | { type: "task.draft.opened"; workspaceRoot: string }
+  | { type: "task.draft.closed" };
 
 export const initialWorkbenchState: WorkbenchState = {
   snapshot: {
@@ -22,6 +25,7 @@ export const initialWorkbenchState: WorkbenchState = {
   },
   activeSessionId: null,
   activeWorkspaceRoot: null,
+  draftWorkspaceRoot: null,
 };
 
 export function workbenchReducer(
@@ -37,8 +41,18 @@ export function workbenchReducer(
       ...state,
       activeSessionId: action.sessionId,
       activeWorkspaceRoot: session.workspaceRoot,
+      draftWorkspaceRoot: null,
     };
   }
+  if (action.type === "task.draft.opened")
+    return {
+      ...state,
+      activeSessionId: null,
+      activeWorkspaceRoot: action.workspaceRoot,
+      draftWorkspaceRoot: action.workspaceRoot,
+    };
+  if (action.type === "task.draft.closed")
+    return { ...state, activeSessionId: null, draftWorkspaceRoot: null };
   if (action.type === "workspace.selected")
     return action.workspaceRoot
       ? {
@@ -54,8 +68,16 @@ export function workbenchReducer(
               (session) => session.workspaceRoot === action.workspaceRoot,
             )?.id ??
             null,
+          draftWorkspaceRoot: null,
         }
       : state;
+  if (state.draftWorkspaceRoot)
+    return {
+      ...state,
+      snapshot: action.snapshot,
+      activeSessionId: null,
+      activeWorkspaceRoot: state.draftWorkspaceRoot,
+    };
   const requestedWorkspace = state.activeWorkspaceRoot;
   const activeSessionStillExists = action.snapshot.sessions.some(
     (session) => session.id === state.activeSessionId,
@@ -80,5 +102,6 @@ export function workbenchReducer(
     activeSessionId,
     activeWorkspaceRoot:
       state.activeWorkspaceRoot ?? activeSession?.workspaceRoot ?? null,
+    draftWorkspaceRoot: null,
   };
 }

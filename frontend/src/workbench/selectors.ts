@@ -14,6 +14,10 @@ export function selectActiveSession(state: WorkbenchState): SessionView | null {
   );
 }
 
+export function isRunInFlight(session: SessionView | null): boolean {
+  return session?.currentRunPhase != null;
+}
+
 export type WorkspaceSummary = {
   root: string;
   label: string;

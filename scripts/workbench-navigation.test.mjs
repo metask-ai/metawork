@@ -2,13 +2,17 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  clearNewTaskDraft,
   clearTaskDraft,
   prepareRetryDraft,
   pruneTaskDrafts,
+  readNewTaskDraft,
   readTaskDraft,
+  writeNewTaskDraft,
   writeTaskDraft,
 } from "../frontend/src/features/composer/drafts.ts";
 import {
+  isRunInFlight,
   searchWorkbench,
   taskActivity,
   taskDisplayState,
@@ -184,6 +188,12 @@ test("Task activity hides empty modules and derives only Host-projected content"
   assert.equal(summary.tokenTotal, 17n);
 });
 
+test("a new Task draft is not mistaken for an in-flight Run", () => {
+  assert.equal(isRunInFlight(null), false);
+  assert.equal(isRunInFlight(session({ currentRunPhase: null })), false);
+  assert.equal(isRunInFlight(session({ currentRunPhase: "queued" })), true);
+});
+
 test("global search finds product content and deliberately excludes raw tool output", () => {
   const snapshot = {
     sessions: [
@@ -222,12 +232,16 @@ test("Composer drafts survive a WebView reload scope and fail safely when storag
   };
   writeTaskDraft("7", "Follow up after this run");
   writeTaskDraft("8", "Stale draft");
+  writeNewTaskDraft("/repo/alpha", "First instruction");
   assert.equal(readTaskDraft("7"), "Follow up after this run");
   pruneTaskDrafts(new Set(["7"]));
   assert.equal(readTaskDraft("7"), "Follow up after this run");
   assert.equal(readTaskDraft("8"), "");
+  assert.equal(readNewTaskDraft("/repo/alpha"), "First instruction");
   clearTaskDraft("7");
+  clearNewTaskDraft("/repo/alpha");
   assert.equal(readTaskDraft("7"), "");
+  assert.equal(readNewTaskDraft("/repo/alpha"), "");
 
   Object.defineProperty(globalThis.window, "sessionStorage", {
     get() {
@@ -235,7 +249,9 @@ test("Composer drafts survive a WebView reload scope and fail safely when storag
     },
   });
   assert.doesNotThrow(() => writeTaskDraft("7", "still typeable"));
+  assert.doesNotThrow(() => writeNewTaskDraft("/repo/alpha", "still typeable"));
   assert.equal(readTaskDraft("7"), "");
+  assert.equal(readNewTaskDraft("/repo/alpha"), "");
   delete globalThis.window;
 });
 

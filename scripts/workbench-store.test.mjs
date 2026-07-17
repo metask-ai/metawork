@@ -104,3 +104,34 @@ test("the Workbench store rejects unknown Tasks and falls back within the curren
   });
   assert.equal(removed.activeSessionId, "3");
 });
+
+test("a new Task stays a Renderer draft until first send creates an authoritative Session", () => {
+  const accepted = workbenchReducer(initialWorkbenchState, {
+    type: "snapshot.accepted",
+    snapshot: snapshot("1", [session("2", "/repo/alpha")]),
+  });
+  const draft = workbenchReducer(accepted, {
+    type: "task.draft.opened",
+    workspaceRoot: "/repo/alpha",
+  });
+  assert.equal(draft.activeSessionId, null);
+  assert.equal(draft.activeWorkspaceRoot, "/repo/alpha");
+  assert.equal(draft.draftWorkspaceRoot, "/repo/alpha");
+
+  const refreshed = workbenchReducer(draft, {
+    type: "snapshot.accepted",
+    snapshot: snapshot("2", [
+      session("2", "/repo/alpha"),
+      session("3", "/repo/beta"),
+    ]),
+  });
+  assert.equal(refreshed.activeSessionId, null);
+  assert.equal(refreshed.draftWorkspaceRoot, "/repo/alpha");
+
+  const selected = workbenchReducer(refreshed, {
+    type: "session.selected",
+    sessionId: "2",
+  });
+  assert.equal(selected.activeSessionId, "2");
+  assert.equal(selected.draftWorkspaceRoot, null);
+});

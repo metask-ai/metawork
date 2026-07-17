@@ -1117,6 +1117,57 @@ summary::-webkit-details-marker {
   background: rgba(255, 255, 255, 0.96);
 }
 
+.composer-start {
+  width: min(760px, 100%);
+  min-height: 68px;
+  margin: 0 auto;
+  border: 1px solid var(--color-rule);
+  border-radius: 14px;
+  background: var(--color-paper);
+  color: var(--color-graphite);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 13px 16px;
+  text-align: left;
+}
+
+.composer-start:hover:not(:disabled) {
+  border-color: var(--color-cobalt);
+  background: var(--color-canvas);
+}
+
+.composer-start > svg {
+  flex: 0 0 auto;
+  color: var(--color-cobalt);
+}
+
+.composer-start span {
+  display: grid;
+  gap: 2px;
+}
+
+.composer-start strong {
+  font-size: 13px;
+}
+
+.composer-start small,
+.composer-access-note {
+  color: var(--color-muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.composer-access-note {
+  width: min(760px, 100%);
+  margin: 7px auto 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
 .jump-latest {
   position: absolute;
   z-index: 12;

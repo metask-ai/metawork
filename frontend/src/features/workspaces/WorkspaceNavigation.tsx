@@ -127,7 +127,7 @@ export function WorkspaceNavigation({
         )}
         <button
           className="primary-button focus-ring"
-          disabled={!grantReady || disabled}
+          disabled={disabled}
           onClick={onCreateTask}
         >
           {creating ? t("workspace.starting_task") : t("task.new")}

@@ -118,6 +118,7 @@ function orderedActivity(run: RunView, session: SessionView): RunActivity[] {
 
 export function TaskTimeline({
   session,
+  draft,
   revision,
   composerHasDraft,
   retryAvailable,
@@ -128,6 +129,7 @@ export function TaskTimeline({
   renderUiRecord,
 }: {
   session: SessionView | null;
+  draft: boolean;
   revision: string;
   composerHasDraft: boolean;
   retryAvailable: boolean;
@@ -282,8 +284,8 @@ export function TaskTimeline({
           )}
           {!session && (
             <div className="task-empty-state">
-              <h2>{t("task.new")}</h2>
-              <p>{t("task.no_tasks")}</p>
+              <h2>{t(draft ? "task.empty_title" : "task.new")}</h2>
+              <p>{t(draft ? "task.empty_body" : "task.no_tasks")}</p>
             </div>
           )}
         </div>
