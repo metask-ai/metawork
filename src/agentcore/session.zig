@@ -16,6 +16,7 @@ pub const SessionState = enum {
     queued,
     running,
     waiting_ui,
+    poisoned,
     closing,
     closed,
 };
@@ -154,6 +155,7 @@ pub const Error = error{
     CoreCallFailed,
     QueueFull,
     SessionNotIdle,
+    SessionPoisoned,
     SessionClosing,
     PromptTooLarge,
     RunIdExhausted,
@@ -544,6 +546,10 @@ pub const Session = struct {
             self.unlock();
             return error.SessionClosing;
         }
+        if (self.state == .poisoned) {
+            self.unlock();
+            return error.SessionPoisoned;
+        }
         if (self.state != .idle) {
             self.unlock();
             return error.SessionNotIdle;
@@ -585,6 +591,10 @@ pub const Session = struct {
         if (self.state == .closing or self.state == .closed) {
             self.unlock();
             return error.SessionClosing;
+        }
+        if (self.state == .poisoned) {
+            self.unlock();
+            return error.SessionPoisoned;
         }
         if (run_id == 0 or run_id != self.active_run_id) {
             self.unlock();
@@ -846,6 +856,7 @@ pub const Session = struct {
                 if (result.struct_size != @sizeOf(wire.RunResultV1) or !allZero(&result.reserved)) {
                     setCauseLocked(self, .dependency_contract_failure);
                     self.last_outcome = .dependency_contract_failure;
+                    self.state = .poisoned;
                 } else {
                     self.last_stop_reason_code = result.stop_reason_code;
                     if (sdk.StopReason.fromCode(result.stop_reason_code)) |reason| {
@@ -853,20 +864,23 @@ pub const Session = struct {
                     } else |_| {
                         setCauseLocked(self, .dependency_contract_failure);
                         self.last_outcome = .dependency_contract_failure;
+                        self.state = .poisoned;
                     }
                 }
             } else {
                 if (known_status == .callback_failed and self.cause == null)
                     setCauseLocked(self, .event_pipeline_failure);
                 self.last_outcome = .failed;
+                if (statusPoisonsSession(known_status)) self.state = .poisoned;
             }
         } else {
             setCauseLocked(self, .dependency_contract_failure);
             self.last_outcome = .dependency_contract_failure;
+            self.state = .poisoned;
         }
         self.run_started = false;
         self.run_done = true;
-        if (self.state != .closing) self.state = .idle;
+        if (self.state != .closing and self.state != .poisoned) self.state = .idle;
         self.broadcast();
         self.unlock();
         _ = self.host.notify();
@@ -930,13 +944,19 @@ pub const Session = struct {
             self.recordCause(.queue_capacity_failure);
             return wire.CALLBACK_FATAL;
         }
-        const parsed = sdk.decodeCoreEvent(self.host.allocator, encoded) catch {
+        var parsed = sdk.decodeCoreEvent(self.host.allocator, encoded) catch {
             self.recordCause(.event_pipeline_failure);
             return wire.CALLBACK_FATAL;
         };
+        switch (parsed.value) {
+            .known => {},
+            .unknown => {
+                parsed.deinit();
+                return wire.CALLBACK_CONTINUE;
+            },
+        }
         const owned_json = self.host.allocator.dupe(u8, encoded) catch {
-            var owner = parsed;
-            owner.deinit();
+            parsed.deinit();
             self.recordCause(.event_pipeline_failure);
             return wire.CALLBACK_FATAL;
         };
@@ -1159,18 +1179,28 @@ fn isRunProgressState(state: SessionState) bool {
 
 fn applyStopReasonLocked(self: *Session, reason: sdk.StopReason) RunOutcome {
     return switch (reason) {
-        .invalid => outcome: {
-            setCauseLocked(self, .dependency_contract_failure);
-            break :outcome .dependency_contract_failure;
-        },
         .end_turn => .completed,
-        .max_turns, .tool_loop, .budget => .stopped,
+        .max_turns, .tool_loop => .stopped,
         .aborted => abortedOutcome(self.cause),
         .tool_error, .api_error => .failed,
-        .suspended, .backgrounded => outcome: {
-            setCauseLocked(self, .dependency_contract_failure);
-            break :outcome .dependency_contract_failure;
-        },
+    };
+}
+
+fn statusPoisonsSession(status: sdk.Status) bool {
+    return switch (status) {
+        .out_of_memory,
+        .invalid_state,
+        .core_error,
+        .callback_failed,
+        .internal_error,
+        => true,
+        .ok,
+        .invalid_argument,
+        .busy,
+        .stale_run,
+        .too_late,
+        .resource_limit,
+        => false,
     };
 }
 

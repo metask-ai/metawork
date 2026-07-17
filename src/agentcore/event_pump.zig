@@ -252,29 +252,23 @@ pub const EventPump = struct {
     }
 };
 
-pub fn classify(event: sdk.CoreEvent) EventClass {
+pub fn classify(event: sdk.DecodedCoreEvent) EventClass {
     return switch (event) {
-        .text_chunk,
-        .tool_progress,
-        .usage,
-        .diag_turn_begin,
-        .diag_turn_end,
-        .diag_breaker_tripped,
-        .diag_cache_break,
-        .diag_continuation,
-        .diag_run_end,
-        => .data,
-        .stream_begin,
-        .tool_start,
-        .set_current_tool,
-        .progress,
-        .clear_current_tool,
-        .tool_result,
-        .context_warning,
-        .auto_compact,
-        .retry_notice,
-        .stream_done,
-        => .control,
+        .unknown => .data,
+        .known => |known| switch (known) {
+            .text_chunk,
+            .tool_progress,
+            .usage,
+            => .data,
+            .tool_start,
+            .progress,
+            .tool_result,
+            .context_warning,
+            .auto_compact,
+            .retry_notice,
+            .stream_done,
+            => .control,
+        },
     };
 }
 

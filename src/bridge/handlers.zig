@@ -34,8 +34,6 @@ pub const UiResponseRequest = struct {
     kind: []const u8,
     answers: ?[]const []const u8 = null,
     permission: ?[]const u8 = null,
-    planApproval: ?[]const u8 = null,
-    custom: ?[]const u8 = null,
 };
 
 pub fn parsePayload(comptime T: type, payload: []const u8) !std.json.Parsed(T) {
@@ -68,12 +66,5 @@ pub fn permissionChoice(value: []const u8) ?agentcore.protocol.PermissionChoice 
     if (std.mem.eql(u8, value, "allow_always")) return .allow_always;
     if (std.mem.eql(u8, value, "deny_once")) return .deny_once;
     if (std.mem.eql(u8, value, "deny_tool_session")) return .deny_tool_session;
-    return null;
-}
-
-pub fn planApproval(value: []const u8) ?agentcore.protocol.PlanApproval {
-    if (std.mem.eql(u8, value, "approve_default")) return .approve_default;
-    if (std.mem.eql(u8, value, "approve_accept_edits")) return .approve_accept_edits;
-    if (std.mem.eql(u8, value, "reject")) return .reject;
     return null;
 }

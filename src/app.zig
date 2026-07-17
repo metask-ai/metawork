@@ -40,7 +40,6 @@ const parsePayload = renderer_bridge.handlers.parsePayload;
 const parsePayloadWithLimit = renderer_bridge.handlers.parsePayloadWithLimit;
 const parseWireId = renderer_bridge.handlers.parseWireId;
 const permissionChoice = renderer_bridge.handlers.permissionChoice;
-const planApproval = renderer_bridge.handlers.planApproval;
 const acknowledgementSequence = renderer_bridge.handlers.acknowledgementSequence;
 
 const App = struct {
@@ -601,21 +600,13 @@ const App = struct {
         const run_id = try parseWireId(request.runId);
         const request_id = try parseWireId(request.requestId);
         const response: agentcore.UiResponse = if (std.mem.eql(u8, request.kind, "answers")) answer: {
-            if (request.answers == null or request.permission != null or request.planApproval != null or request.custom != null)
+            if (request.answers == null or request.permission != null)
                 return error.InvalidUiResponse;
             break :answer .{ .answers = request.answers.? };
         } else if (std.mem.eql(u8, request.kind, "permission")) permission: {
-            if (request.answers != null or request.permission == null or request.planApproval != null or request.custom != null)
+            if (request.answers != null or request.permission == null)
                 return error.InvalidUiResponse;
             break :permission .{ .permission = permissionChoice(request.permission.?) orelse return error.InvalidUiResponse };
-        } else if (std.mem.eql(u8, request.kind, "plan_approval")) plan: {
-            if (request.answers != null or request.permission != null or request.planApproval == null or request.custom != null)
-                return error.InvalidUiResponse;
-            break :plan .{ .plan_approval = planApproval(request.planApproval.?) orelse return error.InvalidUiResponse };
-        } else if (std.mem.eql(u8, request.kind, "custom")) custom: {
-            if (request.answers != null or request.permission != null or request.planApproval != null or request.custom == null)
-                return error.InvalidUiResponse;
-            break :custom .{ .custom = request.custom.? };
         } else return error.InvalidUiResponse;
         try (self.workbench orelse return error.RuntimeUnavailable).respondUi(session_id, run_id, request_id, response);
         self.notifyCommitted();

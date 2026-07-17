@@ -20,6 +20,16 @@ fn pumpEnvelope(session_id: u64, run_id: u64, json: []const u8) !event_pump.Even
     };
 }
 
+fn textChunk(event: sdk.DecodedCoreEvent) ![]const u8 {
+    return switch (event) {
+        .known => |known| switch (known) {
+            .text_chunk => |text| text,
+            else => error.UnexpectedEvent,
+        },
+        .unknown => error.UnexpectedEvent,
+    };
+}
+
 const PumpEnqueueContext = struct {
     pump: *event_pump.EventPump,
     envelope: event_pump.EventEnvelope,
@@ -74,10 +84,10 @@ const Plan = enum {
     callback_failed,
     controlled_callback_failed,
     event_callback,
+    unknown_event_callback,
     malformed_event_callback,
     malformed_ui_callback,
-    suspended_result,
-    backgrounded_result,
+    resource_limit,
     unknown_stop_result,
     invalid_result_layout,
     unknown_status,
@@ -350,13 +360,20 @@ fn sessionRun(
     session.broadcast();
     session.unlock();
 
-    if (plan == .event_callback or plan == .malformed_event_callback) {
+    if (plan == .event_callback or plan == .unknown_event_callback or
+        plan == .malformed_event_callback)
+    {
         const callback = session.callbacks.on_event orelse {
             diagnostic(out_error);
             return wire.STATUS_CALLBACK_FAILED;
         };
         var event_buffer = "{\"text_chunk\":\"typed event\"}".*;
-        const event_json: []const u8 = if (plan == .event_callback) &event_buffer else "{}";
+        const event_json: []const u8 = switch (plan) {
+            .event_callback => &event_buffer,
+            .unknown_event_callback => "{\"future_observation\":{\"answer\":42}}",
+            .malformed_event_callback => "{}",
+            else => unreachable,
+        };
         const callback_status = callback(session.callbacks.ctx, handle, run_id, sdk.bytesView(event_json));
         @memset(&event_buffer, 'x');
         if (callback_status != wire.CALLBACK_CONTINUE) {
@@ -418,6 +435,10 @@ fn sessionRun(
         diagnostic(out_error);
         return wire.STATUS_CALLBACK_FAILED;
     }
+    if (plan == .resource_limit) {
+        diagnostic(out_error);
+        return wire.STATUS_RESOURCE_LIMIT;
+    }
     if (plan == .unknown_status) {
         if (out_result) |result| {
             result.* = std.mem.zeroes(wire.RunResultV1);
@@ -433,8 +454,6 @@ fn sessionRun(
         result.stop_reason_code = if (aborted)
             wire.STOP_ABORTED
         else switch (plan) {
-            .suspended_result => wire.STOP_SUSPENDED,
-            .backgrounded_result => wire.STOP_BACKGROUNDED,
             .unknown_stop_result => 42,
             else => wire.STOP_END_TURN,
         };
@@ -721,6 +740,28 @@ test "queued prompt memory is bounded before allocation" {
     try session.close(.session_close);
 }
 
+test "pre-admission resource limit leaves the Session reusable" {
+    fake_core.reset();
+    fake_core.setNextPlan(.resource_limit);
+    const host = try createHost(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
+    defer {
+        host.shutdown() catch unreachable;
+        host.deinit();
+    }
+    const session = try openSession(host);
+    const first_run = try session.submit("exceed a Core resource limit");
+    try session.waitRun(first_run);
+    const first = session.snapshot();
+    try std.testing.expectEqual(@as(?u32, wire.STATUS_RESOURCE_LIMIT), first.last_status);
+    try std.testing.expectEqual(@as(?lifecycle.RunOutcome, .failed), first.last_outcome);
+    try std.testing.expectEqual(lifecycle.SessionState.idle, first.state);
+
+    const second_run = try session.submit("the Session remains admitted");
+    try session.waitRun(second_run);
+    try std.testing.expectEqual(lifecycle.SessionState.idle, session.snapshot().state);
+    try session.close(.session_close);
+}
+
 test "closing an active Run aborts, joins, and preserves the first HostCause" {
     fake_core.reset();
     fake_core.setNextPlan(.controlled_callback_failed);
@@ -768,12 +809,41 @@ test "malformed Core events fail the Run instead of entering the bounded sink" {
         @as(?lifecycle.HostCause, .event_pipeline_failure),
         snapshot.cause,
     );
+    try std.testing.expectEqual(lifecycle.SessionState.poisoned, snapshot.state);
+    try std.testing.expectError(error.SessionPoisoned, session.submit("must not continue"));
     try std.testing.expect(host.takeEvent() == null);
     try session.close(.session_close);
     fake_core.lock();
     const releases = fake_core.buffer_releases;
     fake_core.unlock();
     try std.testing.expectEqual(@as(usize, 1), releases);
+}
+
+test "valid unknown observations are ignored without consuming pump capacity" {
+    fake_core.reset();
+    fake_core.setNextPlan(.unknown_event_callback);
+    const host = try createHost(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 1,
+        .event_capacity = 1,
+        .per_session_event_capacity = 1,
+        .control_reserved_capacity = 0,
+        .per_session_control_reserved_capacity = 0,
+    });
+    defer {
+        host.shutdown() catch unreachable;
+        host.deinit();
+    }
+    const session = try openSession(host);
+    const run_id = try session.submit("emit a future observation");
+    try session.waitRun(run_id);
+    const snapshot = session.snapshot();
+    try std.testing.expectEqual(@as(?u32, wire.STATUS_OK), snapshot.last_status);
+    try std.testing.expectEqual(@as(?lifecycle.RunOutcome, .completed), snapshot.last_outcome);
+    try std.testing.expectEqual(lifecycle.SessionState.idle, snapshot.state);
+    try std.testing.expect(host.takeEvent() == null);
+    try session.close(.session_close);
 }
 
 test "typed Core events are deep-copied into a bounded routed sink" {
@@ -810,7 +880,7 @@ test "typed Core events are deep-copied into a bounded routed sink" {
     try std.testing.expect(envelope.session_id != 0);
     try std.testing.expectEqual(first_run, envelope.run_id);
     try std.testing.expectEqualStrings("{\"text_chunk\":\"typed event\"}", envelope.json);
-    try std.testing.expectEqualStrings("typed event", envelope.event.value.text_chunk);
+    try std.testing.expectEqualStrings("typed event", try textChunk(envelope.event.value));
     var second = host.takeEvent().?;
     try std.testing.expectEqual(second_run, second.run_id);
     second.deinit();
@@ -871,7 +941,7 @@ test "UI request validates identity and close wakes a suspended callback" {
     try std.testing.expectError(error.StaleUiResponse, answered.respondUi(run_id, request_id + 1, response));
     try std.testing.expectError(
         error.InvalidUiResponse,
-        answered.respondUi(run_id, request_id, .{ .custom = "{}" }),
+        answered.respondUi(run_id, request_id, .{ .answers = &.{"Yes"} }),
     );
     try answered.respondUi(run_id, request_id, response);
     try std.testing.expectError(error.StaleUiResponse, answered.respondUi(run_id, request_id, response));
@@ -1002,9 +1072,9 @@ test "UI response encoding is bounded before ownership transfer" {
     try session.close(.session_close);
 }
 
-test "status is validated before RunResult and unsupported stop reasons fail dependency contract" {
+test "status is validated before RunResult and invalid results poison the Session" {
     fake_core.reset();
-    const host = try createHost(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 5 });
+    const host = try createHost(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 3 });
     defer {
         host.shutdown() catch unreachable;
         host.deinit();
@@ -1015,8 +1085,6 @@ test "status is validated before RunResult and unsupported stop reasons fail dep
         expected_status: u32,
         expected_stop: ?u32,
     }{
-        .{ .plan = .suspended_result, .expected_status = wire.STATUS_OK, .expected_stop = wire.STOP_SUSPENDED },
-        .{ .plan = .backgrounded_result, .expected_status = wire.STATUS_OK, .expected_stop = wire.STOP_BACKGROUNDED },
         .{ .plan = .unknown_stop_result, .expected_status = wire.STATUS_OK, .expected_stop = 42 },
         .{ .plan = .invalid_result_layout, .expected_status = wire.STATUS_OK, .expected_stop = null },
         .{ .plan = .unknown_status, .expected_status = 42, .expected_stop = null },
@@ -1037,6 +1105,8 @@ test "status is validated before RunResult and unsupported stop reasons fail dep
             @as(?lifecycle.RunOutcome, .dependency_contract_failure),
             snapshot.last_outcome,
         );
+        try std.testing.expectEqual(lifecycle.SessionState.poisoned, snapshot.state);
+        try std.testing.expectError(error.SessionPoisoned, session.submit("must not continue"));
         try session.close(.session_close);
     }
 }
@@ -1382,11 +1452,11 @@ test "Gate 5 event pump preserves per-Session order with round-robin fairness" {
     var third = pump.takeFair().?;
     defer third.deinit();
     try std.testing.expectEqual(@as(u64, 1), first.session_id);
-    try std.testing.expectEqualStrings("one", first.event.value.text_chunk);
+    try std.testing.expectEqualStrings("one", try textChunk(first.event.value));
     try std.testing.expectEqual(@as(u64, 2), second.session_id);
-    try std.testing.expectEqualStrings("other", second.event.value.text_chunk);
+    try std.testing.expectEqualStrings("other", try textChunk(second.event.value));
     try std.testing.expectEqual(@as(u64, 1), third.session_id);
-    try std.testing.expectEqualStrings("two", third.event.value.text_chunk);
+    try std.testing.expectEqualStrings("two", try textChunk(third.event.value));
     try std.testing.expectEqual(@as(usize, 0), pump.stats().count);
 }
 
@@ -1726,7 +1796,7 @@ test "Gate 5 text chunks remain byte lossless through the event pump" {
     var writer = std.Io.Writer.fixed(&storage);
     while (pump.takeFair()) |value| {
         var event = value;
-        try writer.writeAll(event.event.value.text_chunk);
+        try writer.writeAll(try textChunk(event.event.value));
         event.deinit();
     }
     try std.testing.expectEqualStrings("hello 世界!", writer.buffered());

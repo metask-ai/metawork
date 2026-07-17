@@ -39,7 +39,7 @@ const tool_snapshot_overhead: usize = 512;
 const pending_ui_snapshot_overhead: usize = 8 * 1024;
 const ui_record_detail_capacity: usize = 512;
 const ui_record_snapshot_overhead: usize = 512;
-pub const snapshot_schema_version: u32 = 3;
+pub const snapshot_schema_version: u32 = 4;
 
 const ToolState = enum { running, completed, failed };
 const RunPhase = enum {
@@ -99,7 +99,7 @@ const RunView = struct {
     next_activity_order: u64 = 1,
 };
 
-const UiRecordKind = enum { ask_question, permission, plan_approval, custom };
+const UiRecordKind = enum { ask_question, permission };
 
 const UiRecordState = enum {
     answered,
@@ -107,10 +107,6 @@ const UiRecordState = enum {
     allowed_always,
     denied,
     denied_session,
-    approved,
-    approved_with_edits,
-    rejected,
-    responded,
     cancelled,
 };
 
@@ -436,21 +432,20 @@ pub const Workbench = struct {
     pub fn applyEvent(self: *Workbench, envelope: *const lifecycle.EventEnvelope) Error!void {
         const session = self.findSession(envelope.session_id) orelse return error.UnknownSession;
         const run = findRun(session.runs, envelope.run_id) orelse return error.NoSuchRun;
-        switch (envelope.event.value) {
+        const event = switch (envelope.event.value) {
+            .unknown => return,
+            .known => |known| known,
+        };
+        switch (event) {
             .text_chunk => |text| {
                 try self.appendTrackedText(&run.assistant, text, self.limits.max_assistant_message_bytes);
                 if (self.redactTrackedText(&run.assistant)) run.assistant_redacted = true;
-            },
-            .stream_begin => {
-                run.phase = .running;
-                _ = try self.replaceTrackedProjected(&run.status_text, "Generating", self.limits.max_tool_field_bytes);
             },
             .tool_start => |tool| {
                 const view = try self.findOrCreateTool(run, tool.id, tool.name, tool.input);
                 view.state = .running;
                 _ = try self.replaceTrackedProjected(&run.status_text, tool.name, self.limits.max_tool_field_bytes);
             },
-            .set_current_tool => |tool| _ = try self.replaceTrackedProjected(&run.status_text, tool.name, self.limits.max_tool_field_bytes),
             .tool_progress => |progress| {
                 const tool = findTool(run.tools, progress.id) orelse return error.ToolCapacity;
                 const projected = try self.replaceTrackedProjected(&tool.progress, progress.text, self.limits.max_tool_field_bytes);
@@ -458,7 +453,6 @@ pub const Workbench = struct {
                 tool.redacted = tool.redacted or projected.redacted;
             },
             .progress => |progress| _ = try self.replaceTrackedProjected(&run.status_text, progress.tool_name, self.limits.max_tool_field_bytes),
-            .clear_current_tool => _ = try self.replaceTrackedProjected(&run.status_text, "Running", self.limits.max_tool_field_bytes),
             .tool_result => |result| {
                 const tool = try self.findOrCreateTool(run, result.id, result.name, result.input);
                 const input = try self.replaceTrackedProjected(&tool.input, result.input, self.limits.max_tool_field_bytes);
@@ -480,13 +474,6 @@ pub const Workbench = struct {
             .auto_compact => _ = try self.replaceTrackedProjected(&run.status_text, "Context compacted", self.limits.max_tool_field_bytes),
             .retry_notice => _ = try self.replaceTrackedProjected(&run.status_text, "Retrying provider", self.limits.max_tool_field_bytes),
             .stream_done => _ = try self.replaceTrackedProjected(&run.status_text, "Finishing", self.limits.max_tool_field_bytes),
-            .diag_turn_begin,
-            .diag_turn_end,
-            .diag_breaker_tripped,
-            .diag_cache_break,
-            .diag_continuation,
-            .diag_run_end,
-            => {},
         }
         self.bumpRevision();
     }
@@ -526,8 +513,9 @@ pub const Workbench = struct {
         try self.projectedJsonValue(writer, view.title);
         writer.writeAll(",\"workspaceRoot\":") catch return error.SnapshotTooLarge;
         try self.projectedJsonValue(writer, view.workspace_root);
-        writer.print(",\"lifecycle\":\"{s}\",\"archived\":{},\"closeFailed\":{},\"currentRunId\":\"{d}\",\"currentRunPhase\":", .{
+        writer.print(",\"lifecycle\":\"{s}\",\"continuationAvailable\":{},\"archived\":{},\"closeFailed\":{},\"currentRunId\":\"{d}\",\"currentRunPhase\":", .{
             @tagName(taskLifecycle(view.state)),
+            continuationAvailable(view.state),
             view.archived,
             view.close_failed,
             if (currentRunPhase(view) == null) 0 else view.active_run_id,
@@ -796,16 +784,6 @@ pub const Workbench = struct {
                 writer.writeAll(",\"args\":") catch return error.SnapshotTooLarge;
                 try self.projectedJsonValue(writer, permission.args);
             },
-            .plan_approval => |plan| {
-                writer.writeAll("\"kind\":\"plan_approval\",\"plan\":") catch return error.SnapshotTooLarge;
-                try self.projectedJsonValue(writer, plan.plan_md);
-            },
-            .custom => |custom| {
-                writer.writeAll("\"kind\":\"custom\",\"customKind\":") catch return error.SnapshotTooLarge;
-                try self.projectedJsonValue(writer, custom.kind);
-                writer.writeAll(",\"payload\":") catch return error.SnapshotTooLarge;
-                try self.projectedJsonValue(writer, custom.payload_json);
-            },
         }
         writer.writeByte('}') catch return error.SnapshotTooLarge;
     }
@@ -827,9 +805,6 @@ pub const Workbench = struct {
             },
             .permission => |permission| self.containsKnownSecret(permission.tool) or
                 self.containsKnownSecret(permission.args),
-            .plan_approval => |plan| self.containsKnownSecret(plan.plan_md),
-            .custom => |custom| self.containsKnownSecret(custom.kind) or
-                self.containsKnownSecret(custom.payload_json),
         };
     }
 
@@ -915,12 +890,7 @@ pub const Workbench = struct {
         var pending = session.copyPendingUiRequest(self.allocator) catch return null;
         defer pending.deinit();
         if (pending.run_id != run_id) return null;
-        var parsed = sdk.decodeUiRequest(self.allocator, pending.json) catch return UiRecord{
-            .request_id = pending.request_id,
-            .run_id = run_id,
-            .kind = .custom,
-            .state = .cancelled,
-        };
+        var parsed = sdk.decodeUiRequest(self.allocator, pending.json) catch return null;
         defer parsed.deinit();
         var record = UiRecord{
             .request_id = pending.request_id,
@@ -939,8 +909,6 @@ pub const Workbench = struct {
                 break :value if (questions.len == 0) "" else questions[0].question;
             },
             .permission => |permission| permission.args,
-            .plan_approval => |plan| plan.plan_md,
-            .custom => |custom| custom.payload_json,
         };
         const result = sanitizeInto(&record.detail, value, self.known_secret);
         record.detail_len = result.len;
@@ -1032,7 +1000,7 @@ fn phaseFor(snapshot: lifecycle.SessionSnapshot) RunPhase {
         .running => .running,
         .waiting_ui => .waiting_ui,
         .closing => if (snapshot.last_outcome) |outcome| phaseForOutcome(outcome) else .running,
-        .idle, .closed => if (snapshot.last_outcome) |outcome| phaseForOutcome(outcome) else .queued,
+        .idle, .poisoned, .closed => if (snapshot.last_outcome) |outcome| phaseForOutcome(outcome) else .queued,
     };
 }
 
@@ -1050,7 +1018,7 @@ fn taskLifecycle(state: lifecycle.SessionState) TaskLifecycle {
     return switch (state) {
         .closing => .closing,
         .closed => .closed,
-        .idle, .queued, .running, .waiting_ui => .open,
+        .idle, .queued, .running, .waiting_ui, .poisoned => .open,
     };
 }
 
@@ -1060,7 +1028,14 @@ fn currentRunPhase(view: *const SessionView) ?RunPhase {
             if (isTerminalPhase(run.phase)) null else run.phase
         else
             null,
-        .idle, .closed => null,
+        .idle, .poisoned, .closed => null,
+    };
+}
+
+fn continuationAvailable(state: lifecycle.SessionState) bool {
+    return switch (state) {
+        .idle, .queued, .running, .waiting_ui => true,
+        .poisoned, .closing, .closed => false,
     };
 }
 
@@ -1109,8 +1084,6 @@ fn kindForRequest(request: sdk.UiRequest) UiRecordKind {
     return switch (request) {
         .ask_question => .ask_question,
         .permission => .permission,
-        .plan_approval => .plan_approval,
-        .custom => .custom,
     };
 }
 
@@ -1118,8 +1091,6 @@ fn kindForResponse(response: sdk.UiResponse) UiRecordKind {
     return switch (response) {
         .answers => .ask_question,
         .permission => .permission,
-        .plan_approval => .plan_approval,
-        .custom => .custom,
     };
 }
 
@@ -1132,12 +1103,6 @@ fn stateForResponse(response: sdk.UiResponse) UiRecordState {
             .deny_once => .denied,
             .deny_tool_session => .denied_session,
         },
-        .plan_approval => |approval| switch (approval) {
-            .approve_default => .approved,
-            .approve_accept_edits => .approved_with_edits,
-            .reject => .rejected,
-        },
-        .custom => .responded,
     };
 }
 
@@ -1279,7 +1244,7 @@ fn testEnvelope(session_id: u64, run_id: u64, encoded: []const u8) !lifecycle.Ev
     };
 }
 
-test "Workbench snapshot serializer matches the Renderer v3 contract fixture" {
+test "Workbench snapshot serializer matches the Renderer v4 contract fixture" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
 
@@ -1458,7 +1423,12 @@ test "pending UI re-encoding remains inside its concurrent snapshot allowance" {
     const payload = try std.testing.allocator.alloc(u8, payload_len);
     defer std.testing.allocator.free(payload);
     @memset(payload, 1);
-    const request = sdk.UiRequest{ .custom = .{ .kind = "custom", .payload_json = payload } };
+    const request = sdk.UiRequest{ .ask_question = &.{.{
+        .question = payload,
+        .header = "Large request",
+        .multi = false,
+        .options = &.{},
+    }} };
     const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, request, .{});
     defer std.testing.allocator.free(encoded);
     try std.testing.expect(encoded.len <= limits.max_pending_ui_json_bytes);
@@ -1484,7 +1454,6 @@ test "Workbench projects tools and full-width usage without parsing protocol in 
     defer workbench.deinit();
 
     const events = [_][]const u8{
-        "{\"stream_begin\":{}}",
         "{\"tool_start\":{\"id\":\"tool-1\",\"name\":\"Bash\",\"input\":\"{\\\"command\\\":\\\"printf ok\\\"}\"}}",
         "{\"tool_progress\":{\"id\":\"tool-1\",\"text\":\"running\"}}",
         "{\"tool_result\":{\"id\":\"tool-1\",\"name\":\"Bash\",\"input\":\"{}\",\"content\":\"stdout\\nexit 0\",\"is_error\":false,\"elapsed_ms\":18446744073709551615}}",

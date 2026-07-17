@@ -517,7 +517,7 @@ test "batch routes remain exact and detached retention expires by run" {
         .{ .session_id = 1, .run_id = 11 },
         .{ .session_id = 2, .run_id = 22 },
     }) |route| {
-        const json = try std.testing.allocator.dupe(u8, "{\"stream_begin\":{}}");
+        const json = try std.testing.allocator.dupe(u8, "{\"stream_done\":{}}");
         try delivery.ingest(.{
             .session_id = route.session_id,
             .run_id = route.run_id,

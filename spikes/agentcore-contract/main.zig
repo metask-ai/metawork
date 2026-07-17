@@ -62,25 +62,28 @@ const Probe = struct {
         self.event_bytes += json.len;
         self.max_event_bytes = @max(self.max_event_bytes, json.len);
         switch (parsed.value) {
-            .tool_result => |result| {
-                if (std.mem.eql(u8, result.name, "Read") and
-                    std.mem.indexOf(u8, result.content, "gate1-before") != null)
-                    self.saw_read = true;
-                if (std.mem.eql(u8, result.name, "Bash") and
-                    std.mem.indexOf(u8, result.content, "gate1-bash-ok") != null)
-                    self.saw_bash = true;
-                if (std.mem.eql(u8, result.name, "Edit") and !result.is_error)
-                    self.saw_edit = true;
+            .known => |event| switch (event) {
+                .tool_result => |result| {
+                    if (std.mem.eql(u8, result.name, "Read") and
+                        std.mem.indexOf(u8, result.content, "gate1-before") != null)
+                        self.saw_read = true;
+                    if (std.mem.eql(u8, result.name, "Bash") and
+                        std.mem.indexOf(u8, result.content, "gate1-bash-ok") != null)
+                        self.saw_bash = true;
+                    if (std.mem.eql(u8, result.name, "Edit") and !result.is_error)
+                        self.saw_edit = true;
+                },
+                .text_chunk => |chunk| {
+                    if (std.mem.indexOf(u8, chunk, "metawork gate1 complete") != null)
+                        self.saw_final = true;
+                },
+                .tool_start => |tool_start| {
+                    if (std.mem.indexOf(u8, tool_start.input, "sleep 10") != null)
+                        self.sleep_started.store(true, .release);
+                },
+                else => {},
             },
-            .text_chunk => |chunk| {
-                if (std.mem.indexOf(u8, chunk, "metawork gate1 complete") != null)
-                    self.saw_final = true;
-            },
-            .tool_start => |tool_start| {
-                if (std.mem.indexOf(u8, tool_start.input, "sleep 10") != null)
-                    self.sleep_started.store(true, .release);
-            },
-            else => {},
+            .unknown => {},
         }
         return wire.CALLBACK_CONTINUE;
     }
@@ -114,16 +117,6 @@ const Probe = struct {
                 std.heap.c_allocator,
                 parsed.value,
                 .{ .permission = .allow_once },
-            ) catch return wire.UI_FATAL,
-            .plan_approval => sdk.encodeUiResponse(
-                std.heap.c_allocator,
-                parsed.value,
-                .{ .plan_approval = .approve_default },
-            ) catch return wire.UI_FATAL,
-            .custom => sdk.encodeUiResponse(
-                std.heap.c_allocator,
-                parsed.value,
-                .{ .custom = "{}" },
             ) catch return wire.UI_FATAL,
         };
         output.* = .{
@@ -334,15 +327,18 @@ fn verifyFormalHost(io: std.Io, raw_api: *const wire.ApiV1, root: []const u8) !v
         defer envelope.deinit();
         if (envelope.run_id != run_id) return error.FormalHostRoutingMismatch;
         switch (envelope.event.value) {
-            .tool_result => |result| {
-                if (std.mem.eql(u8, result.name, "AskUserQuestion"))
-                    saw_ui_tool = true;
+            .known => |event| switch (event) {
+                .tool_result => |result| {
+                    if (std.mem.eql(u8, result.name, "AskUserQuestion"))
+                        saw_ui_tool = true;
+                },
+                .text_chunk => |chunk| {
+                    if (std.mem.indexOf(u8, chunk, "metawork gate1 complete") != null)
+                        saw_final = true;
+                },
+                else => {},
             },
-            .text_chunk => |chunk| {
-                if (std.mem.indexOf(u8, chunk, "metawork gate1 complete") != null)
-                    saw_final = true;
-            },
-            else => {},
+            .unknown => {},
         }
     }
     const snapshot = session.snapshot();
