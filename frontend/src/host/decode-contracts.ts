@@ -51,22 +51,13 @@ const hostCauses = [
   "ui_pipeline_failure",
   "dependency_contract_failure",
 ] as const;
-const uiRecordKinds = [
-  "ask_question",
-  "permission",
-  "plan_approval",
-  "custom",
-] as const;
+const uiRecordKinds = ["ask_question", "permission"] as const;
 const uiRecordStates = [
   "answered",
   "allowed_once",
   "allowed_always",
   "denied",
   "denied_session",
-  "approved",
-  "approved_with_edits",
-  "rejected",
-  "responded",
   "cancelled",
 ] as const;
 
@@ -376,44 +367,6 @@ function decodePendingUi(value: unknown, path: string): PendingUi | null {
       args: stringValue(item.args, `${path}.args`),
     };
   }
-  if (kind === "plan_approval") {
-    const item = object(value, path, [
-      "requestId",
-      "runId",
-      "order",
-      "redacted",
-      "kind",
-      "plan",
-    ]);
-    return {
-      requestId: positiveWireId(item.requestId, `${path}.requestId`),
-      runId: positiveWireId(item.runId, `${path}.runId`),
-      order: positiveWireId(item.order, `${path}.order`),
-      redacted: booleanValue(item.redacted, `${path}.redacted`),
-      kind,
-      plan: stringValue(item.plan, `${path}.plan`),
-    };
-  }
-  if (kind === "custom") {
-    const item = object(value, path, [
-      "requestId",
-      "runId",
-      "order",
-      "redacted",
-      "kind",
-      "customKind",
-      "payload",
-    ]);
-    return {
-      requestId: positiveWireId(item.requestId, `${path}.requestId`),
-      runId: positiveWireId(item.runId, `${path}.runId`),
-      order: positiveWireId(item.order, `${path}.order`),
-      redacted: booleanValue(item.redacted, `${path}.redacted`),
-      kind,
-      customKind: stringValue(item.customKind, `${path}.customKind`),
-      payload: stringValue(item.payload, `${path}.payload`),
-    };
-  }
   return fail(`${path}.kind`, `unexpected request kind ${kind}`);
 }
 
@@ -423,6 +376,7 @@ function decodeSession(value: unknown, path: string): SessionView {
     "title",
     "workspaceRoot",
     "lifecycle",
+    "continuationAvailable",
     "archived",
     "closeFailed",
     "currentRunId",
@@ -438,6 +392,10 @@ function decodeSession(value: unknown, path: string): SessionView {
     item.lifecycle,
     `${path}.lifecycle`,
     taskLifecycles,
+  );
+  const continuationAvailable = booleanValue(
+    item.continuationAvailable,
+    `${path}.continuationAvailable`,
   );
   const archived = booleanValue(item.archived, `${path}.archived`);
   const currentRunId = wireId(item.currentRunId, `${path}.currentRunId`);
@@ -489,16 +447,27 @@ function decodeSession(value: unknown, path: string): SessionView {
   }
   if (pendingUi && requestIds.has(pendingUi.requestId))
     fail(path, "a pending UI request cannot already be resolved");
+  if (pendingUi && lifecycle !== "open")
+    fail(path, "a non-open Task cannot expose actionable UI");
   if (pendingUi) {
     const orders = activityOrders.get(pendingUi.runId)!;
     if (orders.has(pendingUi.order))
       fail(path, "activity order must be unique within a Run");
   }
+  if (
+    !continuationAvailable &&
+    lifecycle === "open" &&
+    (currentRunPhase !== null || pendingUi !== null)
+  )
+    fail(path, "an open non-continuable Task cannot have active work");
+  if (lifecycle !== "open" && continuationAvailable)
+    fail(path, "a non-open Task cannot accept future work");
   return {
     id: positiveWireId(item.id, `${path}.id`),
     title: stringValue(item.title, `${path}.title`),
     workspaceRoot: stringValue(item.workspaceRoot, `${path}.workspaceRoot`),
     lifecycle,
+    continuationAvailable,
     archived,
     closeFailed: booleanValue(item.closeFailed, `${path}.closeFailed`),
     currentRunId,

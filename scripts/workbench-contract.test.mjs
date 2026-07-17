@@ -15,7 +15,7 @@ import {
 const fixture = JSON.parse(
   readFileSync(
     new URL(
-      "../frontend/src/host/__fixtures__/workbench-snapshot-v3.fixture",
+      "../frontend/src/host/__fixtures__/workbench-snapshot-v4.fixture",
       import.meta.url,
     ),
     "utf8",
@@ -26,7 +26,7 @@ function clone(value) {
   return structuredClone(value);
 }
 
-test("the canonical v3 Workbench fixture decodes without normalization", () => {
+test("the canonical v4 Workbench fixture decodes without normalization", () => {
   assert.deepEqual(decodeWorkbenchSnapshot(fixture), fixture);
 });
 
@@ -146,6 +146,44 @@ test("Workbench decoding rejects version drift, extra fields, and invalid wire v
   assert.throws(
     () => decodeWorkbenchSnapshot(archivedRunning),
     /archived Task/,
+  );
+
+  const nonContinuableRunning = clone(fixture);
+  nonContinuableRunning.sessions[0].continuationAvailable = false;
+  assert.throws(
+    () => decodeWorkbenchSnapshot(nonContinuableRunning),
+    /open non-continuable Task cannot have active work/,
+  );
+
+  const closingRun = clone(fixture);
+  closingRun.sessions[0].lifecycle = "closing";
+  closingRun.sessions[0].continuationAvailable = false;
+  closingRun.sessions[0].currentRunPhase = "stopping";
+  closingRun.sessions[0].runs[0].phase = "stopping";
+  assert.doesNotThrow(() => decodeWorkbenchSnapshot(closingRun));
+
+  const continuableClosing = clone(closingRun);
+  continuableClosing.sessions[0].continuationAvailable = true;
+  assert.throws(
+    () => decodeWorkbenchSnapshot(continuableClosing),
+    /non-open Task cannot accept future work/,
+  );
+
+  const closingWithRequest = clone(closingRun);
+  closingWithRequest.sessions[0].currentRunPhase = "waiting_ui";
+  closingWithRequest.sessions[0].runs[0].phase = "waiting_ui";
+  closingWithRequest.sessions[0].pendingUi = {
+    requestId: "9",
+    runId: "7",
+    order: "1",
+    redacted: true,
+    kind: "permission",
+    tool: "Bash",
+    args: "***",
+  };
+  assert.throws(
+    () => decodeWorkbenchSnapshot(closingWithRequest),
+    /non-open Task cannot expose actionable UI/,
   );
 
   const foreignUiHistory = clone(fixture);

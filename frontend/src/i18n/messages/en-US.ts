@@ -104,7 +104,10 @@ export const enUS = {
   "run.placeholder": "Describe the outcome you need…",
   "run.placeholder_no_task": "Start a task first",
   "run.placeholder_archived": "Restore this task to continue",
+  "run.placeholder_closing": "This task is ending",
   "run.placeholder_closed": "This task has ended",
+  "run.placeholder_unavailable":
+    "End this task and start a new one to continue",
   "run.draft_only":
     "Saved locally as a draft. You can send it after the current work finishes.",
   "run.started": "Work started.",
@@ -148,13 +151,13 @@ export const enUS = {
     "Review what happened, then prepare a new instruction when you're ready.",
   "activity.current_archived": "Restore this task before continuing.",
   "activity.current_closed": "This task no longer accepts instructions.",
+  "activity.current_unavailable":
+    "This task cannot continue safely. End it and start a new task.",
   "activity.no_decision": "Nothing needs your attention.",
   "activity.no_decision_help":
     "Questions and approvals will appear here and remain attached to their task.",
   "activity.response_required": "Work is waiting for your response.",
   "activity.view_request": "View request",
-  "activity.plan": "Plan",
-  "activity.plan_pending": "Waiting for your review",
   "activity.tools": "Tools",
   "activity.context": "Context and usage",
   "activity.tokens_used": "Input and output tokens used by this task",
@@ -166,12 +169,6 @@ export const enUS = {
   "approval.choose": "Choose…",
   "approval.send_answers": "Continue",
   "approval.submit_shortcut": "Press ⌘/Ctrl + Enter to continue",
-  "approval.review_plan": "Review the proposed plan",
-  "approval.reject_plan": "Request changes",
-  "approval.approve_plan": "Start work",
-  "approval.custom_request":
-    "This request has no supported response in the current product baseline.",
-  "approval.request": "Request",
   "approval.response_failed": "Couldn't send the response: {error}",
   "approval.response_sent": "Response sent.",
   "approval.sending": "Sending your response…",
@@ -181,17 +178,11 @@ export const enUS = {
     "The response wasn't sent. Review the request and try again.",
   "ui.kind.ask_question": "Question",
   "ui.kind.permission": "Permission request",
-  "ui.kind.plan_approval": "Plan review",
-  "ui.kind.custom": "Request",
   "ui.state.answered": "Answered",
   "ui.state.allowed_once": "Allowed once",
   "ui.state.allowed_always": "Always allowed",
   "ui.state.denied": "Denied",
   "ui.state.denied_session": "Denied for this task",
-  "ui.state.approved": "Approved",
-  "ui.state.approved_with_edits": "Approved with edits",
-  "ui.state.rejected": "Changes requested",
-  "ui.state.responded": "Responded",
   "ui.state.cancelled": "Cancelled",
   "view.refresh_after_commit_failed":
     "{operation} succeeded, but the latest view could not be loaded: {error}",
@@ -219,7 +210,7 @@ export const enUS = {
   "outcome.cancelled": "Stopped",
   "outcome.interrupted": "Interrupted",
   "outcome.failed": "Failed",
-  "outcome.dependency_contract_failure": "Dependency failure",
+  "outcome.dependency_contract_failure": "Task runtime failed",
   "cause.user_cancel": "Stopped by you",
   "cause.timeout": "Timed out",
   "cause.session_close": "Task closed",
@@ -228,7 +219,7 @@ export const enUS = {
   "cause.queue_capacity_failure": "Workbench capacity reached",
   "cause.bridge_pipeline_failure": "View delivery failed",
   "cause.ui_pipeline_failure": "Response delivery failed",
-  "cause.dependency_contract_failure": "AgentCore contract failed",
+  "cause.dependency_contract_failure": "Task runtime became incompatible",
 } as const;
 
 export type MessageId = keyof typeof enUS;

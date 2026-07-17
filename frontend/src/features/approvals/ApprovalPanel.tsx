@@ -204,45 +204,6 @@ export function ApprovalPanel({
           <p className="approval-shortcut">{t("approval.submit_shortcut")}</p>
         </div>
       )}
-      {pending.kind === "plan_approval" && (
-        <div className="mt-4">
-          <h3 className="font-semibold">{t("approval.review_plan")}</h3>
-          <p className="mt-3 whitespace-pre-wrap text-xs leading-6 text-muted">
-            {pending.plan}
-          </p>
-          <div className="mt-4 grid grid-cols-2 gap-2">
-            <DecisionButton
-              disabled={actionDisabled}
-              onClick={() =>
-                respond({ kind: "plan_approval", planApproval: "reject" })
-              }
-            >
-              {t("approval.reject_plan")}
-            </DecisionButton>
-            <DecisionButton
-              primary
-              disabled={actionDisabled}
-              onClick={() =>
-                respond({
-                  kind: "plan_approval",
-                  planApproval: "approve_default",
-                })
-              }
-            >
-              {t("approval.approve_plan")}
-            </DecisionButton>
-          </div>
-        </div>
-      )}
-      {pending.kind === "custom" && (
-        <div className="mt-4">
-          <h3 className="font-semibold">{pending.customKind}</h3>
-          <CodeBlock label={t("approval.request")} value={pending.payload} />
-          <p className="mt-3 text-xs text-muted">
-            {t("approval.custom_request")}
-          </p>
-        </div>
-      )}
       {responsePhase !== "idle" && (
         <p
           className="request-response-status"

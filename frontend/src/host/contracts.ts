@@ -1,4 +1,4 @@
-export const WORKBENCH_SCHEMA_VERSION = 3 as const;
+export const WORKBENCH_SCHEMA_VERSION = 4 as const;
 
 export type ToolView = {
   id: string;
@@ -97,40 +97,19 @@ export type PendingUi =
       kind: "permission";
       tool: string;
       args: string;
-    }
-  | {
-      requestId: string;
-      runId: string;
-      order: string;
-      redacted: boolean;
-      kind: "plan_approval";
-      plan: string;
-    }
-  | {
-      requestId: string;
-      runId: string;
-      order: string;
-      redacted: boolean;
-      kind: "custom";
-      customKind: string;
-      payload: string;
     };
 
 export type UiRecord = {
   requestId: string;
   runId: string;
   order: string;
-  kind: "ask_question" | "permission" | "plan_approval" | "custom";
+  kind: "ask_question" | "permission";
   state:
     | "answered"
     | "allowed_once"
     | "allowed_always"
     | "denied"
     | "denied_session"
-    | "approved"
-    | "approved_with_edits"
-    | "rejected"
-    | "responded"
     | "cancelled";
   detail: string;
   itemCount: number;
@@ -143,6 +122,7 @@ export type SessionView = {
   title: string;
   workspaceRoot: string;
   lifecycle: "open" | "closing" | "closed";
+  continuationAvailable: boolean;
   archived: boolean;
   closeFailed: boolean;
   currentRunId: string;
@@ -172,8 +152,4 @@ export type WorkspaceChoice =
 
 export type UiResponsePayload =
   | { kind: "permission"; permission: "deny_once" | "allow_once" }
-  | { kind: "answers"; answers: string[] }
-  | {
-      kind: "plan_approval";
-      planApproval: "reject" | "approve_default";
-    };
+  | { kind: "answers"; answers: string[] };

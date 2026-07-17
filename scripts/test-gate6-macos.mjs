@@ -186,6 +186,10 @@ try {
 
   const session = finalSnapshot.sessions.find((item) => item.id === sessionId);
   const run = session.runs.find((item) => item.id === runId);
+  if (session.continuationAvailable !== true)
+    throw new Error(
+      "completed Session did not remain available for continuation",
+    );
   if (run.phase !== "completed" || run.outcome !== "completed")
     throw new Error(`run did not complete truthfully: ${JSON.stringify(run)}`);
   if (run.cause !== null || session.cause !== null)
@@ -414,7 +418,7 @@ async function snapshot() {
   if (encoded.includes("metawork-gate6-fixture-key"))
     throw new Error("Host provider credential reached the Renderer snapshot");
   const parsed = JSON.parse(encoded);
-  if (parsed.schemaVersion !== 3 || !Array.isArray(parsed.sessions))
+  if (parsed.schemaVersion !== 4 || !Array.isArray(parsed.sessions))
     throw new Error("invalid Workbench snapshot");
   return parsed;
 }

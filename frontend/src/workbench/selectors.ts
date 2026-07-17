@@ -1,7 +1,6 @@
 import type {
   RunView,
   SessionView,
-  UiRecord,
   WorkbenchSnapshot,
 } from "../host/contracts.ts";
 import type { WorkbenchState } from "./store.ts";
@@ -114,12 +113,11 @@ export function selectCurrentWorkspace(state: WorkbenchState): string | null {
 
 export type TaskActivity = {
   currentRun: RunView | null;
-  latestPlan: UiRecord | null;
   tokenTotal: bigint;
 };
 
 export function taskActivity(session: SessionView | null): TaskActivity {
-  if (!session) return { currentRun: null, latestPlan: null, tokenTotal: 0n };
+  if (!session) return { currentRun: null, tokenTotal: 0n };
   let tokenTotal = 0n;
   for (const run of session.runs) {
     try {
@@ -132,10 +130,6 @@ export function taskActivity(session: SessionView | null): TaskActivity {
   return {
     currentRun:
       session.runs.find((run) => run.id === session.currentRunId) ?? null,
-    latestPlan:
-      [...session.uiHistory]
-        .reverse()
-        .find((record) => record.kind === "plan_approval") ?? null,
     tokenTotal,
   };
 }

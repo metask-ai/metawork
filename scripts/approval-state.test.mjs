@@ -38,6 +38,7 @@ function session(identity, pendingUi = pending(identity)) {
     title: "",
     workspaceRoot: "/repo",
     lifecycle: "open",
+    continuationAvailable: true,
     archived: false,
     closeFailed: false,
     currentRunId: identity.runId,
@@ -51,7 +52,7 @@ function session(identity, pendingUi = pending(identity)) {
 }
 
 function snapshot(sessions) {
-  return { schemaVersion: 3, revision: "1", sessions };
+  return { schemaVersion: 4, revision: "1", sessions };
 }
 
 test("UI response state waits for the authoritative snapshot and never reopens an accepted request", () => {

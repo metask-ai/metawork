@@ -60,6 +60,7 @@ function session(overrides) {
     title: "Release audit",
     workspaceRoot: "/repo/alpha",
     lifecycle: "open",
+    continuationAvailable: true,
     archived: false,
     closeFailed: false,
     currentRunId: "0",
@@ -157,34 +158,20 @@ test("Task display state preserves Run, lifecycle, archive, and outcome preceden
 test("Task activity hides empty modules and derives only Host-projected content", () => {
   assert.deepEqual(taskActivity(null), {
     currentRun: null,
-    latestPlan: null,
     tokenTotal: 0n,
   });
 
   const current = run("9", "Audit", "Working", null, "tool detail");
   current.usage.input = "12";
   current.usage.output = "5";
-  const resolvedPlan = {
-    requestId: "4",
-    runId: "9",
-    order: "2",
-    kind: "plan_approval",
-    state: "approved",
-    detail: "Inspect, validate, report",
-    itemCount: 0,
-    detailTruncated: false,
-    redacted: false,
-  };
   const summary = taskActivity(
     session({
       currentRunId: "9",
       currentRunPhase: "running",
       runs: [current],
-      uiHistory: [resolvedPlan],
     }),
   );
   assert.equal(summary.currentRun, current);
-  assert.equal(summary.latestPlan, resolvedPlan);
   assert.equal(summary.tokenTotal, 17n);
 });
 

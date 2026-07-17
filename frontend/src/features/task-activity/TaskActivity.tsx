@@ -18,6 +18,7 @@ function currentActivityMessage(
     return "activity.current_waiting";
   if (session.currentRunPhase !== null) return "activity.current_working";
   if (session.lifecycle !== "open") return "activity.current_closed";
+  if (!session.continuationAvailable) return "activity.current_unavailable";
   if (session.archived) return "activity.current_archived";
   if (
     session.lastRunOutcome === "failed" ||
@@ -42,7 +43,6 @@ export function TaskActivity({
   const { locale, t } = useI18n();
   const activity = taskActivity(session);
   const activeTools = activity.currentRun?.tools ?? [];
-  const latestPlan = activity.latestPlan;
 
   return (
     <>
@@ -71,22 +71,6 @@ export function TaskActivity({
           </div>
         </div>
       </section>
-
-      {(session?.pendingUi?.kind === "plan_approval" || latestPlan) && (
-        <section className="activity-section">
-          <p className="section-label">{t("activity.plan")}</p>
-          <p className="activity-summary">
-            {session?.pendingUi?.kind === "plan_approval"
-              ? t("activity.plan_pending")
-              : t(`ui.state.${latestPlan!.state}`)}
-          </p>
-          <span className="activity-detail">
-            {session?.pendingUi?.kind === "plan_approval"
-              ? session.pendingUi.plan
-              : latestPlan?.detail}
-          </span>
-        </section>
-      )}
 
       {activeTools.length > 0 && (
         <section className="activity-section">
