@@ -9,7 +9,9 @@ export function ComposerFooter({
   hasTask,
   draft,
   archived,
+  closing,
   closed,
+  unavailable,
   prompt,
   composeDisabled,
   canSubmit,
@@ -25,7 +27,9 @@ export function ComposerFooter({
   hasTask: boolean;
   draft: boolean;
   archived: boolean;
+  closing: boolean;
   closed: boolean;
+  unavailable: boolean;
   prompt: string;
   composeDisabled: boolean;
   canSubmit: boolean;
@@ -61,11 +65,15 @@ export function ComposerFooter({
               maxLength={maxComposerCharacters}
               disabled={composeDisabled}
               placeholder={
-                archived
-                  ? t("run.placeholder_archived")
-                  : closed
-                    ? t("run.placeholder_closed")
-                    : t("run.placeholder")
+                closed
+                  ? t("run.placeholder_closed")
+                  : closing
+                    ? t("run.placeholder_closing")
+                    : unavailable
+                      ? t("run.placeholder_unavailable")
+                      : archived
+                        ? t("run.placeholder_archived")
+                        : t("run.placeholder")
               }
               onChange={(event) => onPromptChange(event.target.value)}
               onKeyDown={(event) => {

@@ -145,7 +145,9 @@ export default function App() {
   const mutationDisabled = viewSyncFailed || !bridgeReady || busy !== null;
   const taskCanCompose =
     Boolean(workbench.draftWorkspaceRoot) ||
-    (activeSession?.lifecycle === "open" && !activeSession.archived);
+    (activeSession?.lifecycle === "open" &&
+      activeSession.continuationAvailable &&
+      !activeSession.archived);
   const runInFlight = isRunInFlight(activeSession);
   const canSubmit =
     taskCanCompose &&
@@ -938,7 +940,13 @@ export default function App() {
         hasTask={Boolean(activeSession)}
         draft={Boolean(workbench.draftWorkspaceRoot)}
         archived={Boolean(activeSession?.archived)}
-        closed={Boolean(activeSession && activeSession.lifecycle !== "open")}
+        closing={activeSession?.lifecycle === "closing"}
+        closed={activeSession?.lifecycle === "closed"}
+        unavailable={Boolean(
+          activeSession &&
+          activeSession.lifecycle === "open" &&
+          !activeSession.continuationAvailable,
+        )}
         prompt={prompt}
         composeDisabled={!taskCanCompose || mutationDisabled}
         canSubmit={canSubmit}

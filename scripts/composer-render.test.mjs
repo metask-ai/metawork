@@ -28,7 +28,9 @@ const base = {
   hasTask: false,
   draft: false,
   archived: false,
+  closing: false,
   closed: false,
+  unavailable: false,
   prompt: "",
   composeDisabled: false,
   canSubmit: false,
@@ -102,4 +104,35 @@ test("only non-composable Task states disable the Composer", () => {
   });
   assert.match(markup.match(/<textarea[^>]*>/)?.[0] ?? "", /disabled/);
   assert.match(markup, /Restore this task to continue/);
+});
+
+test("a poisoned Session explains why continuation is unavailable", () => {
+  const markup = render({
+    hasTask: true,
+    unavailable: true,
+    composeDisabled: true,
+  });
+  assert.match(markup.match(/<textarea[^>]*>/)?.[0] ?? "", /disabled/);
+  assert.match(markup, /End this task and start a new one to continue/);
+});
+
+test("terminal state takes precedence over archive state in Composer guidance", () => {
+  assert.match(
+    render({
+      hasTask: true,
+      archived: true,
+      closing: true,
+      composeDisabled: true,
+    }),
+    /This task is ending/,
+  );
+  assert.match(
+    render({
+      hasTask: true,
+      archived: true,
+      closed: true,
+      composeDisabled: true,
+    }),
+    /This task has ended/,
+  );
 });
