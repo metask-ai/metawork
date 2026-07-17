@@ -3,7 +3,7 @@
 > 状态：Phase 0A Gate 0 至 Gate 7 已通过；下一阶段为分发与后续 capability
 > 平台：Phase 0A macOS-first；Phase 0B 后续验证 Windows
 
-Phase 0 用最小真实原型验证技术栈和关键风险，不交付完整产品。当前 AgentCore bundle 是 experimental ABI revision 1，同步 baseline 不包含 async suspend/resume、跨进程恢复、strict Workspace security 或正式 Host tools。
+Phase 0 用最小真实原型验证技术栈和关键风险，不交付完整产品。当前 AgentCore bundle 使用 stable ABI v1，同步 baseline 不包含 async suspend/resume、跨进程恢复、strict Workspace security、正式 Host tools、typed Output/FileChange/plan-progress 或 plan/custom UI control。
 
 ## 1. 里程碑定义
 
@@ -60,7 +60,7 @@ Gate 未通过时不得用 source dependency、MetaWork 自制协议、无界队
 
 ### 验收
 
-- 明确 experimental ABI revision 1 与 stable support policy 的区别；
+- 明确 stable ABI v1 与精确 bundle identity、发布支持政策的区别；
 - 当前 v1 只声明同步能力；
 - async pending/resume、持久化、strict Workspace security 和正式 Host tools 移入后续 capability；
 - Renderer reload 与进程恢复明确分离；
@@ -245,9 +245,9 @@ Host tool 内部 session ID 到 MetaWork Session/Run 的合同仍未定义时，
 
 - non-OK status：读取/release diagnostic，禁止读取 `RunResult`；
 - OK status：SDK 校验 RunResult 与 StopReason；
-- 九个 StopReason 使用无 `else` switch；
+- 六个 StopReason 使用无 `else` switch；
 - unknown code 在 SDK 层失败并保留 raw code；
-- `suspended` / `backgrounded` 因缺少 payload 映射 dependency contract failure；
+- `resource_limit` 与 admitted fatal Session poisoning 语义经过测试；
 - `aborted` 结合 HostCause 映射 cancelled/interrupted/failed。
 
 ### 同步 UI
@@ -341,7 +341,7 @@ Gate 4 通过时的 sink 只提供全局 event count 和单 event bytes 硬上�
 
 ### 依赖前置条件
 
-Gate 6 当前精确锁定 clean bundle `0.0.0-dev+5fe198cfac4a`。该升级只接受现行 experimental manifest 字段布局，不保留旧格式兼容；bundle 先通过 manifest/checksum identity、artifact-only link/run、完整 typed SDK contract 和独立 clean consumer，再进入正式应用 build graph。MetaWork 没有访问 metacodes source tree 或复制协议。锁定规格与实测见 [Gate 6 验证报告](phase-0-gate-6-report.md)。
+当前产品基线迁移到 clean bundle `0.0.0-dev+db052085b197`。迁移只接受 stable ABI v1 的现行 manifest 和 SDK 表面，不保留旧格式或旧协议兼容；bundle 先通过 manifest/checksum identity、artifact-only link/run、完整 typed SDK contract 和独立 clean consumer，再进入正式应用 build graph。历史 Gate 6 报告保留当时 `5fe198c` 的验收事实，本次迁移必须重新运行完整 Gate 6 macOS 链路。
 
 ### 最小 UI
 
@@ -350,7 +350,7 @@ Gate 6 当前精确锁定 clean bundle `0.0.0-dev+5fe198cfac4a`。该升级只�
 - 提交真实 Agent input；
 - 流式文本；
 - built-in Read/Bash/Edit tool cards；
-- 同步 permission、question 或 plan request；
+- 同步 permission 或 question；
 - stdout/stderr/exit code；
 - stop/cancel；
 - terminal Run state；
@@ -443,7 +443,7 @@ Phase 0A 完成时必须产出：
 - Host lifecycle/race/diagnostic release 测试；
 - event pump 容量、批量窗口、公平性和 workload matrix 数据；
 - built-in Read/Bash/Edit、同步 permission 和 cancel 记录；
-- 九个 StopReason 的 typed exhaustive mapping；
+- 六个 StopReason 的 typed exhaustive mapping；
 - Renderer reload 与进程恢复边界记录；
 - 同进程与最小 Worker fault-domain 报告；
 - 进程模型明确结论或有证据的继续验证决定；

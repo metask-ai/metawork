@@ -1,7 +1,7 @@
 # MetaWork 工程目录结构设计草案
 
 > 状态：Approved v0.2，正在按任务分阶段落地；目标子模块尚未全部拆完
-> 日期：2026-07-16  
+> 日期：2026-07-17
 > 范围：仓库外层、React Renderer、Zig `src/`、依赖方向、状态所有权、测试布局与渐进迁移
 
 ## 1. 文档职责
@@ -28,7 +28,7 @@
 - bounded executor 的队列、worker 和容量策略归 `workbench/executor.zig`，AgentCore 只持有最小调度 capability；
 - AgentCore Runtime/Session、callback quiescence、cancel/close/shutdown 语义仍集中在 `agentcore/session.zig`，后续只按已验证责任继续拆分；
 - `workbench/projection.zig` 仍同时承担产品投影、Session view 和 snapshot writer，后续任务再提取；
-- Renderer Host 合同已集中到 `frontend/src/host/`；应用 composition 已进入 `frontend/src/app/`，已落地的 Workspace navigation、Search、Timeline、Approvals、Composer draft 和 Task activity 进入各自 `frontend/src/features/`，`workbench/` 只保留 projection store 与 selector。尚未形成真实产品能力的 Outputs、Permissions 和 Settings 不创建空模块。
+- Renderer Host 合同已集中到 `frontend/src/host/`；应用 composition 已进入 `frontend/src/app/`，已落地的 Workspace navigation、Search、Timeline、question/permission Approvals、Composer draft 和 Task activity 进入各自 `frontend/src/features/`，`workbench/` 只保留 projection store 与 selector。尚未形成真实产品能力的 Outputs、持久权限管理和 Settings 不创建空模块。
 
 评审方提出的 `main.zig + app.zig + bridge.zig + workbench.zig + agentcore.zig` 顶层结构总体合理，优于先建立多层 `host/` 空目录。它符合 Zig 以 module root 形成明确 surface 的方式，也保留当前 `build.zig` 的独立注入和测试能力。
 

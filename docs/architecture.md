@@ -1,7 +1,7 @@
 # MetaWork 高层架构
 
-> 状态：Phase 0A 已完成；当前实现基线已对齐 AgentCore ABI revision 1，后续正式方向选择单 AgentCore Worker
-> 日期：2026-07-16
+> 状态：Phase 0A 已完成；当前实现基线迁移到 stable AgentCore ABI v1，后续正式方向选择单 AgentCore Worker
+> 日期：2026-07-17
 
 产品范围见 [产品需求](requirements.md)，metacodes（原 cc-zig）的具体接入约束见 [AgentCore 集成契约](agentcore-integration.md)，当前 bundle 能力见 [AgentCore ABI v1 消费基线](agentcore-abi-v1.md)。历史报告中的 cc-zig 名称保留当时仓库身份。
 
@@ -28,7 +28,7 @@
 
 ### 同步 macOS baseline
 
-当前锁定 metacodes bundle `0.0.0-dev+5fe198cfac4a` 提供 experimental AgentCore ABI revision 1。同步 Run、built-in tools、`CoreEvent` JSON、同步 Host UI、abort、生命周期和同进程 macOS 垂直链路已通过 Gate 6。
+当前锁定 metacodes bundle `0.0.0-dev+db052085b197`（commit `db052085b1970675b54426cfea7d71222bf174af`）提供 stable AgentCore ABI v1。同步 Run、built-in tools、结构化 observation events、同步 question/permission、abort、生命周期和同进程 macOS 垂直链路沿用 Gate 6 的产品边界，并在本次精确 bundle 迁移中重新验收。
 
 该 baseline 不包含：
 
@@ -36,6 +36,8 @@
 - Session/Conversation 跨进程恢复；
 - strict Workspace security；
 - 可映射到 MetaWork Session/Run 的正式 Host tools；
+- typed `Output`、`FileChange` 和 plan-progress observation；
+- plan approval 或 custom UI control；
 - Windows 产物。
 
 ### 完整 Phase 0A
@@ -148,7 +150,7 @@ AgentCore bundle
 - 同步 baseline 通过后，再建设内容寻址 cache 和远程 artifact source；切换来源不能改变 bundle layout 或链接方式；
 - 当前产品 Runtime 配置不注册 Host tools，Read/Bash/Edit 使用 AgentCore built-in tools。
 
-现有 ABI version 1 对一个精确 bundle 的 layout、code 和语义是确定的。未来不兼容变化必须使用新的 ABI version；兼容增量必须通过 capability 与新 bundle identity 明确表达，不能在相同版本下静默漂移。
+ABI v1 使用刚性 struct size 和 reserved-zero 规则。新增 layout、function table 或 UI/control tag 必须发布新 ABI version；新增 observation tag 可以使用新的 bundle identity 兼容发布，旧 SDK 将其解码为 owned unknown observation。MetaWork 在 SDK 校验后立即释放并忽略 unknown observation，不让它占用产品事件泵，也不传给 Renderer 或猜测为产品状态。
 
 ## 6. 实施 Gate
 

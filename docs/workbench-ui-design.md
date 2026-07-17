@@ -1,7 +1,7 @@
 # MetaWork Workbench UI 设计草案
 
 > 状态：Draft v0.2，供产品与交互评审，不代表当前实现已经具备全部能力  
-> 日期：2026-07-16  
+> 日期：2026-07-17
 > 设计基线：设计师提供的 Agent Workbench Windows 视觉稿；macOS 共用内容布局，仅适配原生窗口壳与平台语义
 
 ## 1. 文档职责
@@ -39,6 +39,16 @@ MetaWork 是面向本地工作区的桌面 Agent Workbench，不是终端模拟�
 MetaWork 的视觉记忆点不是装饰性的暖色或衬线字体，而是：
 
 > 中间区域形成可阅读的工作叙事，右侧 Task activity 持续汇总当前活动、计划和结果。
+
+### 2.1 当前 ABI v1 capability profile
+
+当前锁定的 stable ABI v1 只为以下界面提供可验证数据：
+
+- 文本流、工具开始/进度/结果、Run progress、usage、context warning、auto compact、retry 和 stream done；
+- Ask question 与 permission 两类同步用户请求；
+- Run 状态、六种终止原因，以及 Session 是否仍可继续。
+
+因此当前产品只显示时间线、工具活动、问题/权限卡片、Current activity 和真实 usage。Plan、plan approval、Outputs、Files changed、持久权限管理和 custom UI 均保持隐藏；它们在本文档中的设计是后续 capability 到位后的产品规范，不是当前实现承诺。Renderer 不解析工具参数、stdout 或普通文本来猜测这些状态。
 
 ## 3. 用户可见对象与术语
 
@@ -435,6 +445,8 @@ Full access
 - Context and usage 显示真实 usage、预算、压缩或警告，不显示伪百分比；
 - 右栏折叠不影响通知、审批或 Task 状态。
 
+当前 ABI v1 下只有 Needs your attention、Current activity、Tools and connections、Context and usage 在有真实数据时可出现。Plan 和 Outputs 不渲染空壳、占位符或“即将推出”模块。
+
 ## 12. 文件变更与结果文件
 
 ### 12.1 两类对象
@@ -729,7 +741,7 @@ Workbench 的仓库外层、Renderer、Zig `src/`、依赖方向、测试布局�
 3. 建立状态驱动的 Task timeline 与 Composer；
 4. 接入真实文本流和工具活动；
 5. 接入同步 UI request；
-6. 增加 Output、文件变更和右栏 Task activity；
+6. 完成当前 ABI v1 可验证的右栏 Task activity；typed capability 到位后再增加 Output 和文件变更；
 7. strict Workspace security 和规则 capability 通过独立验证后，增加持久权限规则及管理入口；
 8. 增加国际化、pseudo-locale 和完整 UI 测试；
 9. 最后再开放搜索、通知和后续 capability 入口。

@@ -1,7 +1,7 @@
 # MetaWork 产品需求
 
 > 状态：v0.2，产品目标保留；当前实现范围收敛为同步 macOS baseline
-> 日期：2026-07-15
+> 日期：2026-07-17
 
 ## 1. 产品定义
 
@@ -43,7 +43,7 @@ MetaWork 当前不定义为：
 
 ### Turn / Run
 
-Turn 是用户提交的一次交互；Run 是 AgentCore 为该交互进行的一次实际运行。产品必须区分排队、运行、同步等待用户、已完成、已取消、失败和中断等状态。`max_turns`、`tool_loop`、`budget` 等受控停止不得伪装成完成或笼统失败。
+Turn 是用户提交的一次交互；Run 是 AgentCore 为该交互进行的一次实际运行。产品必须区分排队、运行、同步等待用户、已完成、已取消、失败和中断等状态。当前 ABI v1 提供的 `max_turns`、`tool_loop` 等受控停止不得伪装成完成或笼统失败；成本预算停止只有在 AgentCore 发布相应 typed capability 后才进入产品状态。
 
 未来具备相应 AgentCore capability 后，再加入可恢复 `suspended`、持久化恢复和后台转换状态。
 
@@ -53,7 +53,7 @@ Turn 是用户提交的一次交互；Run 是 AgentCore 为该交互进行的一
 
 ### Approval / UI Request
 
-代表 Agent 继续工作前需要用户作出的选择，包括工具 permission、问题回答、计划审批和自定义结构化交互。当前 ABI v1 baseline 使用同步 request/response；等待期间 Run 仍占用 executor slot，不形成可持久化挂起点。
+代表 Agent 继续工作前需要用户作出的选择。当前 ABI v1 只提供工具 permission 和问题回答，并使用同步 request/response；等待期间 Run 仍占用 executor slot，不形成可持久化挂起点。计划审批和自定义结构化交互只有在 AgentCore 发布相应控制协议后才进入产品范围。
 
 ## 5. 产品功能需求
 
@@ -88,7 +88,7 @@ Turn 是用户提交的一次交互；Run 是 AgentCore 为该交互进行的一
 ### 5.4 审批与输入
 
 - 工具 permission 默认拒绝，只有明确授权才允许执行；
-- 用户可以回答 Agent 问题并批准或拒绝计划；
+- 用户可以回答 Agent 问题；计划批准或拒绝只有在 AgentCore 发布 typed control capability 后才显示；
 - 审批和回答必须绑定 Session、Run 和请求标识，拒绝过期或重复响应；
 - 同步等待必须支持 deadline、用户取消、Session close 和 Host shutdown 唤醒；
 - 同步等待区间发生 Host/Core crash 后，Run 标记 `interrupted`，工具不得自动执行；
@@ -125,9 +125,9 @@ Turn 是用户提交的一次交互；Run 是 AgentCore 为该交互进行的一
 - 首个正式版本采用单主窗口；多个 Task 可以后台运行，切换 Workspace 或 Task 不停止执行；
 - 左栏只展开当前 Workspace 的 Task，Workspace 切换器必须汇总其他 Workspace 的运行、待处理和失败状态，不能让后台请求只依赖系统通知；
 - Task 是可持续补充、归档和删除的产品对象；Task lifecycle、当前 Run phase 和最近一次 Run outcome 是三类独立状态，Renderer 只能从 Host projection 派生展示标签；
-- 中间区域以用户指令、Agent 回复、工具活动、审批和结果构成可追溯时间线，不展示 raw AgentCore event 或 chain-of-thought；
+- 中间区域以用户指令、Agent 回复、工具活动、可用审批和结果构成可追溯时间线，不展示 raw AgentCore event 或 chain-of-thought；
 - Run 执行期间的新输入不得暗示可以修改当前 Run；首版只保存 Renderer 草稿，等待当前 Run terminal 后由用户明确发送，不自动创建或启动下一次 Run；
-- `Files changed` 表示实际文件变更集合，`Outputs` 表示用户关心的交付结果，两者不得用“新建文件”自动等同；
+- `Files changed` 表示实际文件变更集合，`Outputs` 表示用户关心的交付结果，两者不得用“新建文件”自动等同；当前 ABI v1 未提供这两类 typed event 时，相关模块必须隐藏；
 - Task 归档只隐藏日常列表；归档、删除 Task 或移除 Workspace 前必须先终止其 queued/running/waiting/stopping Run；删除 Task 记录不删除 Workspace 中的真实文件；移除 Workspace 同时撤销一次性 grant 并使其持久权限失效；
 - 全局搜索覆盖 Workspace、Task、用户指令、完成消息和 Output 文件名；工具原始日志默认不进入普通搜索；
 - `en-US` 是规范产品文案和回退语言，`zh-CN` 是首个完整 locale；Host 传递 structured code 与参数，Renderer 负责本地化。
@@ -175,7 +175,7 @@ Turn 是用户提交的一次交互；Run 是 AgentCore 为该交互进行的一
 
 ```text
 临时或 trusted Workspace → Session → 用户输入 → 同步 Agent Run
-→ 文本流 → built-in Read/Bash/Edit → 同步 permission / UI request
+→ 文本流 → built-in Read/Bash/Edit → 同步 permission / question
 → 工具结果 → 最终回复 → 取消/关闭 → Renderer reload 视图重建
 ```
 

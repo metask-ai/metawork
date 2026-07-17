@@ -1,7 +1,7 @@
 # MetaWork AgentCore 集成契约
 
 > 状态：Phase 0A Gate 6 同进程垂直链路与 Gate 7 fault-domain 对照均已通过；后续正式方向选择单 AgentCore Worker
-> 依赖：metacodes（原 cc-zig）AgentCore bundle `0.0.0-dev+5fe198cfac4a`
+> 依赖：metacodes AgentCore bundle `0.0.0-dev+db052085b197`
 
 本文定义 MetaWork Zig Host 与 cc-zig 之间的规范边界。系统整体结构见 [高层架构](architecture.md)，当前预编译库能力见 [AgentCore ABI v1 消费基线](agentcore-abi-v1.md)。
 
@@ -40,7 +40,7 @@ AgentCore bundle
 - artifact 缺失、target 不匹配或 checksum 错误时明确失败；
 - 禁止 path/Git source dependency、源码复制、`latest`、版本范围、可变 tag 和 source fallback。
 
-当前 experimental manifest 只消费锁定 bundle 的现行字段布局：`source.commit`、带 `abi` 的 build identity，以及 `{path, sha256}` 组成的 `files` 数组。MetaWork 不保留旧字段名、旧 object-shaped `files` 或双格式 fallback；上游协议变化与 lock、validator、stager 和 build graph 原子升级。
+当前 stable ABI v1 manifest 只消费锁定 bundle 的现行字段布局：`source.commit`、带 `abi` 的 build identity，以及 `{path, sha256}` 组成的 `files` 数组。MetaWork 不保留旧字段名、旧 object-shaped `files` 或双格式 fallback；上游协议变化与 lock、validator、stager 和 build graph 原子升级。
 
 当前不先实现 dependency resolver 或 content-addressed cache。同步 baseline 通过后，本地 cache 与远程 artifact repository 必须复用同一 bundle layout 和校验规则，不能改变 AgentCore 链接方式。
 
@@ -53,7 +53,7 @@ AgentCore bundle
 - 不能成为产品状态映射或 UI JSON 解析实现；
 - 不能注册到 React/Native SDK 正式链路。
 
-当前 clean bundle `5fe198cfac4a5cd8230425136086f0463fdc52bd` 已提供 typed status、StopReason、`CoreEvent` / `UiRequest` decoder 和 request-aware `UiResponse` encoder，并修正 built-in file/shell tools 相对 `workspace_root` 的执行合同；它已重新通过 source-free consumer、真实 link/run 和 Gate 6 正式 Host 垂直测试。正式 Host 直接使用这些表面；MetaWork 不手写 raw enum、tag switch 或 JSON schema。
+当前 clean bundle `db052085b1970675b54426cfea7d71222bf174af` 提供 typed status、六个 StopReason、known/unknown observation decoder、`UiRequest` decoder 和 request-aware `UiResponse` encoder，并固定 built-in file/shell tools 相对 `workspace_root` 的执行合同。正式 Host 直接使用这些表面；MetaWork 不手写 raw enum、tag switch 或 JSON schema。
 
 ## 3. 当前协议表面
 
@@ -68,7 +68,7 @@ AgentCore bundle
 
 `UiEvent` / `UiBackend.poll()` 虽然存在于 cc-zig native 协议中，但当前生产 agent loop 未证明消费。MetaWork 不依赖它完成 stop、生成期 queue message 或 steering。
 
-当前 ABI `RunResult` 不包含 `SuspendInfo`、resume token 或 background handle。出现 `suspended` / `backgrounded` code 时，Host 只能判定依赖合同不完整，不能制造可恢复状态。
+当前 ABI `RunResult` 不包含 `SuspendInfo`、resume token、background handle 或 budget stop。unknown stop code 在 SDK validation 层失败；Host 不能制造这些产品状态。
 
 ## 4. Host binding
 
@@ -78,8 +78,9 @@ Host binding 是 cc-zig backend 的 ABI 消费者，不是 Native SDK Adapter。
 
 ```text
 AgentCore/tool thread
-→ SDK validates bytes/tag/payload
-→ Host deep-copies escaping bytes
+→ SDK validates bytes/tag/payload as known or owned unknown observation
+→ unknown observation: Host releases the SDK owner and returns continue
+→ known observation: Host deep-copies escaping bytes
 → attach workspace/session/run routing envelope
 → push bounded test sink/event pump
 → return CONTINUE or FATAL
@@ -92,6 +93,7 @@ AgentCore/tool thread
 - callback 可能来自不同 Session 的并发线程；
 - 同一 Run 的事件顺序必须保留；
 - 无法验证、复制或接收关键事件时返回 callback fatal；
+- valid unknown observation 在 SDK 完成结构、ownership 和 byte-bound 校验后立即释放并忽略，不占用产品事件泵，不得传给 Renderer 或猜测为产品状态；
 - callback 不等待 WebView，也不调用 Session destroy 或 re-enter Run。
 
 Gate 4 把正式 Host 连接到 FIFO bounded test sink，并通过 typed callback、生命周期、同步 UI 和真实 bundle link/run 验证。Gate 5 将它替换为 per-Session/global count+bytes、control reserve 和 deadline 受限的 Event pump。Gate 6 已完成正式 AgentCore→Workbench projection→Native SDK Bridge→React 垂直接线，并验证同步权限、AskUserQuestion、Renderer reload、终态和异步 Session close；详见 [Gate 6 报告](phase-0-gate-6-report.md)。
@@ -110,6 +112,8 @@ Core calls synchronous UI callback
 ```
 
 Bridge handler 只写入 response channel，不同步等待 AgentCore。callback wait 仍占用 Run executor slot。
+
+当前 stable ABI v1 的 `UiRequest` / `UiResponse` 只有 `ask_question`/`answers` 与 `permission`。旧 experimental bundle 的 `plan_approval` 和 `custom` 已从 Host、Bridge、Renderer 与测试移除；未来控制消息扩展需要新的 ABI version。
 
 ### Host tools
 
@@ -378,11 +382,10 @@ call ABI
 | `tool_error`   | failed                                                                 |
 | `api_error`    | failed                                                                 |
 | `tool_loop`    | stopped / awaiting_user                                                |
-| `suspended`    | dependency contract failure：当前没有 resume payload                   |
-| `backgrounded` | dependency contract failure：当前没有 background handle/state transfer |
-| `budget`       | stopped / awaiting_user                                                |
 
 MetaWork 对 bundle SDK 的 typed StopReason 使用无 `else` switch。unknown raw code 必须在 SDK validation 层失败，并在 diagnostic 中保留 raw value。
+
+ABI status 新增 `resource_limit`。它与 pre-admission `invalid_argument`、`busy`、`stale_run` 一样不污染 Session；一旦 Run 已 admission，`out_of_memory`、`core_error`、`callback_failed` 或 `internal_error` 会 poison Session。Host 在这些状态后拒绝新 Run 并要求关闭或重建 Task 的 AgentCore Session，不能提供虚假的原 Session retry。
 
 `stream_done` 只表示一次模型流结束，不等于整个 Run 完成。只有 ABI status 与 RunResult 映射完成后才能发布 terminal product state。
 
