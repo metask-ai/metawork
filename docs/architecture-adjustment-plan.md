@@ -320,9 +320,10 @@ Workbench record 在发布 `running` 时持有一个 base control reference。ca
 
 ```zig
 workbench.lock();
+std.debug.assert(run_ref.state() == .running);
 const lease = run_ref.tryAcquireControlLease() orelse {
     workbench.unlock();
-    return error.RunAlreadyTerminal;
+    return .already_finishing;
 };
 workbench.unlock();
 
@@ -330,7 +331,9 @@ defer lease.deinit();
 _ = lease.requestTermination(.cancelled);
 ```
 
-`tryAcquireControlLease()` 只允许执行不阻塞、不得失败为 allocator error 的 atomic lifetime retain；它不得取得 Agent mutex 或执行 Agent 状态转换，因此不违反“持有 Workbench lock 时不调用 Agent 状态机”的锁序规则。terminal publication 可以释放 record 的 base reference，但已经取得的 lease 必须继续保活。Session close 先禁止新 lease，再等待全部 control references 和 callback references 归零，最后才释放 `SessionControlBlock`。
+`tryAcquireControlLease()` 只允许在 Workbench lock 下确认 record 为 `running` 后调用；`starting` 时 control 未发布不是可接受的空值原因。它只执行不阻塞、不得失败为 allocator error 的 atomic lifetime retain，不得取得 Agent mutex 或执行 Agent 状态转换，因此不违反“持有 Workbench lock 时不调用 Agent 状态机”的锁序规则。在 `running` 前置条件下仍无法取得 lease，只能表示 Agent terminalization 或 Session close 已经禁止新 lease，该路径必须拥有后续 completion；调用方返回幂等的 `already_finishing`，不得伪称 Run 已经 terminal。
+
+terminal publication 可以释放 record 的 base reference，但已经取得的 lease 必须继续保活。Session close 先禁止新 lease，再等待全部 control references 和 callback references 归零，最后才释放 `SessionControlBlock`。禁止在持有 Workbench lock 时等待这些 reference 归零；close 只能在锁外进入 quiescence wait，否则 worker 无法取得 Workbench lock 发布 terminal payload 并释放 record 的 base reference，等待必然死锁。
 
 ### 6.3 Agent Run 的 total completion
 
