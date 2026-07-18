@@ -1,7 +1,7 @@
 # MetaWork 工程目录结构设计草案
 
-> 状态：Approved v0.3；Zig module boundary 阶段已落地，状态所有权迁移继续按正式调整方案推进
-> 日期：2026-07-18
+> 状态：Approved v0.4；Zig module boundary 与 Bridge product delivery ownership 已落地，后续继续收口 automation build boundary
+> 日期：2026-07-19
 > 范围：仓库外层、React Renderer、Zig `src/`、依赖方向、状态所有权、测试布局与渐进迁移
 
 ## 1. 文档职责
@@ -24,7 +24,7 @@
 首轮边界迁移已经落地：
 
 - `src/main.zig` 只保留进程入口，Native SDK App 与 composition 已移入 `src/app.zig`；
-- Bridge command、policy、payload decoder、revision/snapshot delivery 和一次性 Workspace grant 已形成独立模块；
+- Bridge command、policy、payload decoder、callback ingress gate、`ProductDelivery` 和一次性 Workspace grant 已形成独立模块；`ProductDelivery` 独占 connection generation、revision retry/timer、snapshot identity 与 owned storage；
 - bounded executor 的队列、worker、容量策略和 shutdown 归 `workbench/executor.zig`；Agent 不持有调度 capability，也不反向 enqueue；
 - Agent Runtime/Session、callback quiescence、cancel/close/shutdown 语义仍集中在 `agent/session.zig`，后续只按已验证责任继续拆分；
 - `workbench/projection.zig` 仍同时承担产品 Task view 和 snapshot writer，后续任务再提取；
@@ -262,7 +262,7 @@ flowchart LR
 
 ## 7. Zig `src/` 目录
 
-当前四个 named module root、App、Bridge transport、Workspace grant 和 Workbench executor 已完成首轮拆分；`agent/session.zig` 与 `workbench/projection.zig` 仍保留尚未形成独立不变量的代码，后续按 lifecycle 测试保护逐步提取，不为匹配目录树制造空模块。
+当前四个 named module root、App、Bridge product delivery、Workspace grant 和 Workbench executor 已完成责任拆分；`agent/session.zig` 与 `workbench/projection.zig` 仍保留尚未形成独立不变量的代码，后续按 lifecycle 测试保护逐步提取，不为匹配目录树制造空模块。automation-only raw event transport 暂存于 `bridge/delivery.zig`，只跟随产品 generation，不进入产品 `ProductDelivery`，并将在 automation build-boundary 阶段从 release graph 移除。
 
 Zig 目标结构采用少量顶层 module entrypoint，而不是先建立多层 `host/` 空目录：
 
@@ -276,8 +276,11 @@ src/
 │   ├── commands.zig
 │   ├── policy.zig
 │   ├── handlers.zig
+│   ├── callback_gate.zig
+│   ├── product_delivery.zig
 │   ├── revision_delivery.zig
 │   ├── snapshot_delivery.zig
+│   ├── delivery.zig
 │   └── workspace_grant.zig
 │
 ├── workbench.zig
@@ -306,8 +309,11 @@ src/
 - `bridge/commands.zig`：公开领域 command 名称和 payload 上限；
 - `bridge/policy.zig`：release/development/automation origin、command 和 builtin policy；
 - `bridge/handlers.zig`：payload 校验、Task/Run/request 归属校验和领域调用；
-- `bridge/revision_delivery.zig`：发送有界、可重试的 Workbench revision notification；不传输 AgentCore raw event、batch/object/ACK 或通用大对象；
-- `bridge/snapshot_delivery.zig`：snapshot id、window/generation 绑定、分块读取和 transport storage；不负责生成 Workbench JSON；
+- `bridge/callback_gate.zig`：同步 Native Bridge callback 的 ingress stop 与 quiescence 合同；若 Native callback 改为跨线程异步，该模块必须升级为真实 wait primitive；
+- `bridge/product_delivery.zig`：产品 connection generation、revision retry/timer、snapshot identity 与 owned transport storage 的唯一 owner；只通过 capability 调用 Native emit/timer 和 Workbench snapshot writer；
+- `bridge/revision_delivery.zig`：`ProductDelivery` 的内部 revision 状态，不从 `bridge.zig` 单独公开；不传输 AgentCore raw event、batch/object/ACK；
+- `bridge/snapshot_delivery.zig`：`ProductDelivery` 的内部 snapshot id、window/generation 绑定、分块读取和 storage 实现；不负责生成 Workbench JSON；
+- `bridge/delivery.zig`：automation-only raw Agent batch/object/ACK retention；只跟随 `ProductDelivery` 分配的 generation，不拥有产品连接或 view-sync 状态，并在阶段 8 从 release build graph 移除；
 - `bridge/workspace_grant.zig`：由原生目录选择产生、绑定 window/source、一次性消费的 Renderer capability；它不是持久 Workspace registry；
 - `workbench.zig`：产品编排的最小公开入口；
 - `workbench/tasks.zig`：产品 Task 集合、当前/排队 Run 和生命周期投影；

@@ -1,7 +1,7 @@
 # MetaWork 高层架构
 
 > 状态：Phase 0A 已完成；当前实现基线迁移到 stable AgentCore ABI v1，后续正式方向选择单 AgentCore Worker
-> 日期：2026-07-18
+> 日期：2026-07-19
 
 产品范围见 [产品需求](requirements.md)，metacodes（原 cc-zig）的具体接入约束见 [AgentCore 集成契约](agentcore-integration.md)，当前 bundle 能力见 [AgentCore ABI v1 消费基线](agentcore-abi-v1.md)。历史报告中的 cc-zig 名称保留当时仓库身份。
 
@@ -101,6 +101,8 @@ flowchart TB
 ### 4.2 MetaWork Zig Desktop Host
 
 Native SDK 直接构成桌面 Runtime 与窗口能力。MetaWork 内部固定为四个 named modules：`app` 负责 composition，`bridge` 负责验证与运输，`workbench` 拥有产品状态与队列，`agent` 执行并收口一个真实 Agent Run。`AgentCore` 只指 metacodes 外部 bundle。
+
+Bridge 的产品数据面由 `ProductDelivery` 统一拥有：connection generation、revision retry/timer、snapshot identity 和 snapshot transport storage 都不再存放在 App。App 只注入 Native emit/timer capability 与 Workbench snapshot writer，并按顺序组织 shutdown。automation-only raw Agent batch/object/ACK transport 不并入产品数据面；它只跟随产品 generation，后续由 build graph 从 release 产物裁掉。
 
 Host 负责：
 
@@ -231,7 +233,7 @@ Workbench 在 admission 时为每个 Run 建立稳定 record slot、单调 gener
 
 Renderer reload 只重建仍存活 Host 的视图。Host/AgentCore crash 后当前 Run 必须标记 interrupted，危险工具不得自动重放。Conversation/checkpoint 跨进程恢复只有在未来 AgentCore capability 明确提供后才能设计。
 
-Host view snapshot 使用独立的 8 MiB 有界存储，不受 Bridge 单次 1 MiB result 上限反向约束。Renderer 通过带 snapshot identity 的 256 KiB 分块读取完成 resync；begin 写入前先使旧 descriptor 失效，序列化失败后旧 identity 必须保持 stale，不能继续读取已被部分覆盖的 store。revision 通知和 snapshot 拉取分别保留 pending/retry 状态，瞬时发送或读取失败不能把旧视图标记为最新。snapshot 自动重试预算按 generation 限制，耗尽后进入显式 view-sync failure 并禁止 mutation；revision emit 与 retry timer 同时失败时当前 event connection fail closed。新 event generation 建立时若仍有旧 generation 的 snapshot Promise，必须在旧 Promise 退出后继续完成新 generation 的实际 resync，不能把等待旧 Promise 误判为同步成功。Bridge 异步保留的 event JSON 和 encoded batch 必须自有；App shutdown 先 stop Bridge ingress，在 Native platform loop 上确认同步 handler quiescence，然后 detach Workbench，最后才独立释放 delivery buffers。
+Host view snapshot 使用 Bridge `ProductDelivery` 独占的 8 MiB 有界存储，不受 Bridge 单次 1 MiB result 上限反向约束。Workbench writer 只能在同步调用期间借用这块输出 buffer；返回后 Bridge 独占 encoded bytes，禁止保存 Workbench borrowed view。Renderer 通过带 snapshot identity 的 256 KiB 分块读取完成 resync；begin 写入前先使旧 descriptor 失效，序列化失败后旧 identity 必须保持 stale，不能继续读取已被部分覆盖的 store。revision 通知和 snapshot 拉取分别保留 pending/retry 状态，瞬时发送或读取失败不能把旧视图标记为最新。revision retry 同时受 attempt 和 deadline 预算约束，耗尽或 retry timer 不可用时当前 event connection fail closed，但不终止后台 Agent Run。新 event generation 建立时会使旧 snapshot descriptor 失效；Renderer 若仍持有旧 generation Promise，必须在旧 Promise 退出后继续完成新 generation 的实际 resync，不能把等待旧 Promise 误判为同步成功。Bridge 异步保留的 payload 必须自有；App shutdown 先 stop Bridge ingress、关闭 delivery connection 并取消 timer，在 Native platform loop 上确认同步 handler quiescence，然后 detach Workbench，最后才独立释放 delivery buffers。
 
 Host 与 Renderer 随同一应用包原子发布，Workbench snapshot 使用精确 schema version，不承担旧 Renderer/新 Host 或新 Renderer/旧 Host 的兼容。Renderer 必须 runtime decode Host payload；unknown version、malformed payload 或 decoder/serializer contract mismatch 一律进入 fail-closed view-sync failure，不能猜测字段或静默降级。
 

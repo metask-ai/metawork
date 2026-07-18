@@ -2,10 +2,10 @@
 
 const delivery_impl = @import("bridge/delivery.zig");
 const commands_impl = @import("bridge/commands.zig");
+const callback_gate_impl = @import("bridge/callback_gate.zig");
 const handlers_impl = @import("bridge/handlers.zig");
 const policy_impl = @import("bridge/policy.zig");
-const revision_delivery_impl = @import("bridge/revision_delivery.zig");
-const snapshot_delivery_impl = @import("bridge/snapshot_delivery.zig");
+const product_delivery_impl = @import("bridge/product_delivery.zig");
 const workspace_grant_impl = @import("bridge/workspace_grant.zig");
 
 pub const delivery = struct {
@@ -18,6 +18,17 @@ pub const delivery = struct {
     pub const Stats = delivery_impl.Stats;
     pub const Delivery = delivery_impl.Delivery;
 };
+
+pub const CallbackGate = callback_gate_impl.State;
+
+pub const ProductDelivery = product_delivery_impl.Delivery;
+pub const ProductDeliveryTransport = product_delivery_impl.Transport;
+pub const SnapshotWriter = product_delivery_impl.SnapshotWriter;
+pub const ProductRevisionResult = product_delivery_impl.RevisionResult;
+pub const product_retry_timer_id = product_delivery_impl.retry_timer_id;
+pub const product_event_name = product_delivery_impl.event_name;
+pub const snapshot_max_bytes = product_delivery_impl.snapshot_max_bytes;
+pub const snapshot_chunk_bytes = product_delivery_impl.snapshot_chunk_bytes;
 
 pub const commands = struct {
     pub const ping = commands_impl.ping;
@@ -67,20 +78,6 @@ pub const policy = struct {
     pub const product = policy_impl.product;
     pub const builtin = policy_impl.builtin;
     pub const origins = policy_impl.origins;
-};
-
-pub const revision_delivery = struct {
-    pub const retry_timer_id = revision_delivery_impl.retry_timer_id;
-    pub const retry_interval_ns = revision_delivery_impl.retry_interval_ns;
-    pub const event_name = revision_delivery_impl.event_name;
-    pub const State = revision_delivery_impl.State;
-};
-
-pub const snapshot_delivery = struct {
-    pub const max_bytes = snapshot_delivery_impl.max_bytes;
-    pub const chunk_bytes = snapshot_delivery_impl.chunk_bytes;
-    pub const Error = snapshot_delivery_impl.Error;
-    pub const State = snapshot_delivery_impl.State;
 };
 
 pub const workspace_grant = struct {

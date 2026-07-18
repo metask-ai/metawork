@@ -2118,7 +2118,8 @@ test "Workbench snapshot budget includes JSON escaping and structural overhead" 
 
 test "default snapshot budget contains the maximum structural projection" {
     const limits = Limits{};
-    var workbench = try Workbench.init(std.testing.allocator, undefined, limits);
+    test_agent_runtime.io = std.testing.io;
+    var workbench = try Workbench.init(std.testing.allocator, &test_agent_runtime, limits);
     defer workbench.deinit();
 
     for (0..limits.max_tasks) |task_index| {
@@ -2183,7 +2184,11 @@ test "default snapshot budget contains the maximum structural projection" {
         escaped_assistant,
         limits.max_assistant_message_bytes,
     );
-    const escaped_tool = try std.testing.allocator.alloc(u8, limits.max_tool_field_bytes);
+    const remaining_projection = limits.max_projection_bytes - workbench.projection_bytes;
+    const escaped_tool = try std.testing.allocator.alloc(
+        u8,
+        @min(limits.max_tool_field_bytes, remaining_projection),
+    );
     defer std.testing.allocator.free(escaped_tool);
     @memset(escaped_tool, 2);
     try workbench.replaceTracked(

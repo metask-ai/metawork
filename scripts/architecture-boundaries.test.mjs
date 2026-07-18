@@ -154,6 +154,44 @@ test("canonical notification and Renderer transport failures stay isolated", () 
   assert.match(delivery, /pub fn deinitOwnedBuffers/);
 });
 
+test("Bridge owns product delivery state while automation transport stays explicit", () => {
+  const bridgeRoot = read("src/bridge.zig");
+  assert.match(bridgeRoot, /pub const ProductDelivery =/);
+  assert.match(bridgeRoot, /pub const ProductDeliveryTransport =/);
+  assert.doesNotMatch(
+    bridgeRoot,
+    /pub const (?:revision_delivery|snapshot_delivery) =/,
+  );
+
+  const productDelivery = read("src/bridge/product_delivery.zig");
+  assert.match(productDelivery, /pub const Delivery = struct/);
+  for (const owned of ["generation", "window_id", "revision", "snapshot"]) {
+    assert.match(productDelivery, new RegExp(`\\b${owned}:`));
+  }
+  assert.match(productDelivery, /initOwned\(allocator\)/);
+  assert.match(productDelivery, /RevisionRetryExhausted/);
+  assert.doesNotMatch(
+    productDelivery,
+    /@import\("(?:metawork_app|metawork_workbench|native_sdk)"\)/,
+  );
+
+  const app = read("src/app.zig");
+  assert.match(app, /product_delivery: renderer_bridge\.ProductDelivery/);
+  assert.match(app, /automation_delivery: \*automation_delivery_api\.Delivery/);
+  assert.doesNotMatch(
+    app,
+    /event_window_id|bridge_callbacks_active|revision_delivery:\s|snapshot_delivery:\s/,
+  );
+  assert.doesNotMatch(
+    app,
+    /renderer_bridge\.(?:revision_delivery|snapshot_delivery)/,
+  );
+
+  const automationDelivery = read("src/bridge/delivery.zig");
+  assert.match(automationDelivery, /Automation-only raw Agent event transport/);
+  assert.match(automationDelivery, /pub fn connectAt/);
+});
+
 test("Workbench owns queue and worker lifecycle", () => {
   const agent = read("src/agent/session.zig");
   assert.doesNotMatch(
@@ -222,6 +260,7 @@ test("Agent terminal facts have one immutable handoff and no legacy history latc
 test("product wire contract is atomically on Task schema v5", () => {
   const zigCommands = read("src/bridge/commands.zig");
   const rendererCommands = read("frontend/src/host/commands.ts");
+  const appManifest = read("app.zon");
   for (const command of [
     "create",
     "run",
@@ -235,9 +274,11 @@ test("product wire contract is atomically on Task schema v5", () => {
     const wireName = `metawork.tasks.${command}`;
     assert.ok(zigCommands.includes(wireName));
     assert.ok(rendererCommands.includes(wireName));
+    assert.ok(appManifest.includes(wireName));
   }
   assert.doesNotMatch(zigCommands, /metawork\.sessions\./);
   assert.doesNotMatch(rendererCommands, /metawork\.sessions\./);
+  assert.doesNotMatch(appManifest, /metawork\.sessions\./);
 
   const projection = read("src/workbench/projection.zig");
   assert.match(projection, /snapshot_schema_version: u32 = 5/);

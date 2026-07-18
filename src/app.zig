@@ -2,7 +2,7 @@ const std = @import("std");
 const runner = @import("runner");
 const native_sdk = @import("native_sdk");
 const renderer_bridge = @import("metawork_bridge");
-const bridge_delivery = renderer_bridge.delivery;
+const automation_delivery_api = renderer_bridge.delivery;
 const agent = @import("metawork_agent");
 const workbench_api = @import("metawork_workbench");
 
@@ -11,19 +11,17 @@ pub const panic = std.debug.FullPanic(native_sdk.debug.capturePanic);
 const frontend_url_env = "NATIVE_SDK_FRONTEND_URL";
 const gate0_automation_env = "METAWORK_GATE0_AUTOMATION";
 const gate5_fixture_env = "METAWORK_GATE5_FIXTURE";
-const delivery_retention_timer_id: u64 = 0x4d57_4445_4c49_5652;
-const workbench_revision_retry_timer_id = renderer_bridge.revision_delivery.retry_timer_id;
+const automation_retention_timer_id: u64 = 0x4d57_4445_4c49_5652;
 const event_name = "metawork:host-signal";
 const agent_event_name = "metawork:agent-events";
-const workbench_event_name = renderer_bridge.revision_delivery.event_name;
 const workspace_path_capacity = renderer_bridge.workspace_grant.max_path_bytes;
 const pending_ui_json_capacity = 256 * 1024;
 const terminal_diagnostic_capacity = 512;
 const agent_event_retry_interval: std.Io.Duration = .fromMilliseconds(5);
 const agent_event_notification_timeout: std.Io.Duration = .fromMilliseconds(50);
 const host_worker_count = 4;
-const workbench_snapshot_capacity = renderer_bridge.snapshot_delivery.max_bytes;
-const workbench_snapshot_chunk_bytes = renderer_bridge.snapshot_delivery.chunk_bytes;
+const workbench_snapshot_capacity = renderer_bridge.snapshot_max_bytes;
+const workbench_snapshot_chunk_bytes = renderer_bridge.snapshot_chunk_bytes;
 
 const FrontendMode = renderer_bridge.policy.Mode;
 const EventDisconnect = renderer_bridge.handlers.EventDisconnect;
@@ -47,24 +45,21 @@ const acknowledgementSequence = renderer_bridge.handlers.acknowledgementSequence
 const App = struct {
     env_map: *std.process.Environ.Map,
     io: std.Io,
-    delivery: *bridge_delivery.Delivery,
+    automation_delivery: *automation_delivery_api.Delivery,
+    product_delivery: renderer_bridge.ProductDelivery = .{},
+    bridge_callbacks: renderer_bridge.CallbackGate = .{},
     agent_runtime: ?*agent.Runtime = null,
     workbench: ?*workbench_api.Workbench = null,
     agent_shutdown: bool = false,
-    bridge_ingress_open: bool = true,
-    bridge_callbacks_active: usize = 0,
     agent_event_wake_pending: std.atomic.Value(bool) = .init(false),
     main_thread_id: std.Thread.Id,
     mode: FrontendMode = .release,
     native_runtime: ?*native_sdk.Runtime = null,
     platform_services: ?native_sdk.platform.PlatformServices = null,
-    event_window_id: ?native_sdk.platform.WindowId = null,
     fixture_thread: ?std.Thread = null,
     sequence: u64 = 0,
     acknowledged_sequence: u64 = 0,
     workspace_grants: renderer_bridge.workspace_grant.State = .{},
-    revision_delivery: renderer_bridge.revision_delivery.State = .{},
-    snapshot_delivery: renderer_bridge.snapshot_delivery.State = .{},
     emit_window_event_context: ?*anyopaque = null,
     emit_window_event_override: ?*const fn (
         context: ?*anyopaque,
@@ -79,16 +74,6 @@ const App = struct {
         output: []u8,
     ) anyerror![]const u8 = null,
     handlers: [18]native_sdk.bridge.Handler = undefined,
-
-    const BridgeCallbackLease = struct {
-        active: *usize,
-
-        fn deinit(self: *@This()) void {
-            std.debug.assert(self.active.* != 0);
-            self.active.* -= 1;
-            self.* = undefined;
-        }
-    };
 
     fn app(self: *@This()) native_sdk.App {
         return .{
@@ -120,10 +105,8 @@ const App = struct {
         const self: *@This() = @ptrCast(@alignCast(context));
         self.stopBridgeIngress();
         self.joinFixtureWorker();
-        if (self.platform_services) |services| {
-            services.cancelTimer(delivery_retention_timer_id) catch {};
-            services.cancelTimer(workbench_revision_retry_timer_id) catch {};
-        }
+        if (self.platform_services) |services|
+            services.cancelTimer(automation_retention_timer_id) catch {};
         if (self.workbench) |workbench| workbench.shutdownExecutor();
         if (self.agent_runtime) |agent_runtime| {
             try agent_runtime.shutdown();
@@ -131,14 +114,13 @@ const App = struct {
         }
         self.drainAgentEvents();
         if (self.workbench) |workbench| workbench.syncLifecycle();
-        if (self.delivery.connectedGeneration()) |generation|
-            self.delivery.detach(generation, native_sdk.monotonicNanoseconds()) catch {};
+        if (self.automation_delivery.connectedGeneration()) |generation|
+            self.automation_delivery.detach(generation, native_sdk.monotonicNanoseconds()) catch {};
+        self.product_delivery.breakConnection(self.productTransport());
         self.quiesceBridgeCallbacks();
         self.detachWorkbench();
         self.platform_services = null;
-        self.event_window_id = null;
         self.workspace_grants.invalidate();
-        self.invalidateSnapshot();
         if (self.native_runtime == native_runtime) self.native_runtime = null;
     }
 
@@ -148,15 +130,15 @@ const App = struct {
             .effects_wake => {
                 self.drainAgentEvents();
                 self.expireDetachedRoutes(native_sdk.monotonicNanoseconds());
-                if (self.event_window_id) |window_id| {
+                if (self.product_delivery.connectedWindow()) |window_id| {
                     try self.emitAgentBatches(native_runtime, window_id);
-                    try self.emitWorkbenchChanged(native_runtime, window_id);
+                    try self.emitWorkbenchChanged();
                 }
             },
-            .timer => |timer| if (timer.id == delivery_retention_timer_id) {
+            .timer => |timer| if (timer.id == automation_retention_timer_id) {
                 self.expireDetachedRoutes(native_sdk.monotonicNanoseconds());
-            } else if (timer.id == workbench_revision_retry_timer_id) {
-                if (self.event_window_id) |window_id| try self.emitWorkbenchChanged(native_runtime, window_id);
+            } else if (self.product_delivery.onTimer(timer.id)) {
+                try self.emitWorkbenchChanged();
             },
             else => {},
         }
@@ -323,17 +305,19 @@ const App = struct {
         defer callback.deinit();
         _ = self.native_runtime orelse return error.RuntimeUnavailable;
         const services = self.platform_services orelse return error.RuntimeUnavailable;
-        if (self.event_window_id) |window_id|
+        if (self.product_delivery.connectedWindow()) |window_id|
             if (window_id != invocation.source.window_id) return error.EventWindowMismatch;
         self.expireDetachedRoutes(native_sdk.monotonicNanoseconds());
-        try services.cancelTimer(delivery_retention_timer_id);
-        const generation = try self.delivery.connect();
-        self.event_window_id = invocation.source.window_id;
-        self.invalidateSnapshot();
+        try services.cancelTimer(automation_retention_timer_id);
+        const generation = try self.product_delivery.connect(
+            invocation.source.window_id,
+            self.productTransport(),
+        );
         errdefer {
-            self.detachDelivery(generation) catch {};
-            self.event_window_id = null;
+            self.product_delivery.breakConnection(self.productTransport());
         }
+        try self.automation_delivery.connectAt(generation);
+        errdefer self.detachDelivery(generation) catch {};
         try services.wake();
         return std.fmt.bufPrint(output, "{{\"generation\":\"{d}\"}}", .{generation});
     }
@@ -346,11 +330,9 @@ const App = struct {
         defer parsed.deinit();
         const request = parsed.value;
         const generation = try parseWireId(request.generation);
-        if (self.event_window_id == null or self.event_window_id.? != invocation.source.window_id)
-            return error.EventWindowMismatch;
-        defer self.event_window_id = null;
+        try self.product_delivery.validateConnection(generation, invocation.source.window_id);
         defer self.workspace_grants.invalidate();
-        defer self.invalidateSnapshot();
+        defer self.product_delivery.breakConnection(self.productTransport());
         try self.detachDelivery(generation);
         return std.fmt.bufPrint(output, "{{\"generation\":\"{d}\",\"detached\":true}}", .{generation});
     }
@@ -367,7 +349,7 @@ const App = struct {
         const run_id = try parseWireId(request.runId);
         const sequence = try parseWireId(request.sequence);
         try self.requireEventWindow(invocation.source.window_id);
-        try self.delivery.acknowledge(generation, session_id, run_id, sequence);
+        try self.automation_delivery.acknowledge(generation, session_id, run_id, sequence);
         std.debug.print("metawork.gate5.ack generation={d} session={d} run={d} sequence={d} main_thread={}\n", .{
             generation,
             session_id,
@@ -390,7 +372,7 @@ const App = struct {
         const run_id = try parseWireId(request.runId);
         const object_id = try parseWireId(request.objectId);
         try self.requireEventWindow(invocation.source.window_id);
-        const response = try self.delivery.fetchObject(
+        const response = try self.automation_delivery.fetchObject(
             generation,
             session_id,
             run_id,
@@ -413,18 +395,18 @@ const App = struct {
         defer callback.deinit();
         if (self.mode != .gate0_automation) return error.AutomationOnly;
         try self.requireEventWindow(invocation.source.window_id);
-        _ = self.delivery.connectedGeneration() orelse return error.NoConnection;
-        errdefer self.delivery.cleanupRun(1, 1);
+        _ = self.automation_delivery.connectedGeneration() orelse return error.NoConnection;
+        errdefer self.automation_delivery.cleanupRun(1, 1);
 
         const allocator = std.heap.c_allocator;
         const inline_json = try allocator.dupe(u8, "{\"fixture\":\"inline\",\"payload\":\"gate5\"}");
-        var inline_event = bridge_delivery.InputEvent{
+        var inline_event = automation_delivery_api.InputEvent{
             .session_id = 1,
             .run_id = 1,
             .json = inline_json,
             .allocator = allocator,
         };
-        self.delivery.ingest(inline_event) catch |err| {
+        self.automation_delivery.ingest(inline_event) catch |err| {
             inline_event.deinit();
             return err;
         };
@@ -436,13 +418,13 @@ const App = struct {
         @memcpy(object_json[0..prefix.len], prefix);
         @memset(object_json[prefix.len .. object_json.len - suffix.len], 'x');
         @memcpy(object_json[object_json.len - suffix.len ..], suffix);
-        var object_event = bridge_delivery.InputEvent{
+        var object_event = automation_delivery_api.InputEvent{
             .session_id = 1,
             .run_id = 1,
             .json = object_json,
             .allocator = allocator,
         };
-        self.delivery.ingest(object_event) catch |err| {
+        self.automation_delivery.ingest(object_event) catch |err| {
             object_event.deinit();
             return err;
         };
@@ -458,23 +440,18 @@ const App = struct {
         var callback = try self.enterBridgeCallback();
         defer callback.deinit();
         try self.requireEventWindow(invocation.source.window_id);
-        const workbench = self.workbench orelse return error.RuntimeUnavailable;
-        if (self.snapshot_delivery.storage.len != workbench_snapshot_capacity) return error.RuntimeUnavailable;
-        self.invalidateSnapshot();
-        const snapshot = self.writeWorkbenchSnapshot(workbench) catch |err| {
+        const snapshot = self.product_delivery.publishSnapshot(
+            invocation.source.window_id,
+            .{ .context = self, .write_fn = App.writeProductSnapshot },
+        ) catch |err| {
             const decision = workbench_api.decideTransportFailure(.{ .stage = .snapshot_transport });
             std.debug.assert(decision == .retry);
             return err;
         };
-        try self.snapshot_delivery.publish(
-            snapshot.len,
-            self.delivery.connectedGeneration() orelse return error.NoConnection,
-            invocation.source.window_id,
-        );
         return std.fmt.bufPrint(
             output,
             "{{\"snapshotId\":\"{d}\",\"bytes\":{d},\"chunkBytes\":{d}}}",
-            .{ self.snapshot_delivery.id, self.snapshot_delivery.len, workbench_snapshot_chunk_bytes },
+            .{ snapshot.id, snapshot.bytes, workbench_snapshot_chunk_bytes },
         );
     }
 
@@ -487,16 +464,15 @@ const App = struct {
         defer parsed.deinit();
         const snapshot_id = try parseWireId(parsed.value.snapshotId);
         const offset = std.fmt.parseInt(usize, parsed.value.offset, 10) catch return error.InvalidBridgePayload;
-        const generation = self.delivery.connectedGeneration() orelse return error.NoConnection;
-        const chunk = self.snapshot_delivery.chunk(
-            snapshot_id,
-            generation,
+        const chunk = self.product_delivery.snapshotChunk(
             invocation.source.window_id,
+            snapshot_id,
             offset,
         ) catch |err| switch (err) {
             error.StaleSnapshot => return error.StaleSnapshot,
             error.InvalidOffset => return error.InvalidBridgePayload,
             error.InvalidStorage => unreachable,
+            error.NoConnection, error.StaleConnection, error.EventWindowMismatch => return err,
         };
 
         var writer = std.Io.Writer.fixed(output);
@@ -515,7 +491,7 @@ const App = struct {
         defer callback.deinit();
         try self.requireEventWindow(invocation.source.window_id);
         if (self.mode == .gate0_automation) return error.AutomationOnly;
-        const generation = self.delivery.connectedGeneration() orelse return error.NoConnection;
+        const generation = self.product_delivery.connectedGeneration() orelse return error.NoConnection;
         const services = self.platform_services orelse return error.RuntimeUnavailable;
         self.workspace_grants.invalidate();
         var dialog_storage: [native_sdk.platform.max_dialog_paths_bytes]u8 = undefined;
@@ -578,7 +554,7 @@ const App = struct {
             const granted = try self.workspace_grants.consume(
                 token,
                 invocation.source.window_id,
-                self.delivery.connectedGeneration() orelse return error.NoConnection,
+                self.automation_delivery.connectedGeneration() orelse return error.NoConnection,
                 &granted_path_storage,
             );
             break :trusted granted;
@@ -727,8 +703,8 @@ const App = struct {
     }
 
     fn emitAgentBatches(self: *@This(), native_runtime: *native_sdk.Runtime, window_id: native_sdk.platform.WindowId) !void {
-        const generation = self.delivery.connectedGeneration() orelse return;
-        while (try self.delivery.buildBatch(generation)) |value| {
+        const generation = self.automation_delivery.connectedGeneration() orelse return;
+        while (try self.automation_delivery.buildBatch(generation)) |value| {
             var batch = value;
             defer batch.deinit();
             native_runtime.emitWindowEvent(window_id, agent_event_name, batch.json) catch |err| {
@@ -738,10 +714,10 @@ const App = struct {
                     "Agent event delivery failed and Renderer detach also failed: emit={s} detach={s}",
                     .{ @errorName(err), @errorName(detach_err) },
                 );
-                self.event_window_id = null;
+                self.product_delivery.breakConnection(self.productTransport());
                 return err;
             };
-            try self.delivery.commitBatch(&batch);
+            try self.automation_delivery.commitBatch(&batch);
             std.debug.print("metawork.gate5.emit generation={d} items={d} bytes={d} main_thread={}\n", .{
                 batch.generation,
                 batch.item_count,
@@ -751,48 +727,35 @@ const App = struct {
         }
     }
 
-    fn emitWorkbenchChanged(self: *@This(), native_runtime: ?*native_sdk.Runtime, window_id: native_sdk.platform.WindowId) !void {
+    fn emitWorkbenchChanged(self: *@This()) !void {
         const workbench = self.workbench orelse return;
         const revision = workbench.currentRevision();
-        if (!self.revision_delivery.needsDelivery(revision)) return;
-        var detail_buffer: [96]u8 = undefined;
-        const detail = try std.fmt.bufPrint(&detail_buffer, "{{\"revision\":\"{d}\"}}", .{revision});
-        self.emitWindowEvent(native_runtime, window_id, workbench_event_name, detail) catch |err| {
-            const decision = workbench_api.decideTransportFailure(.{ .stage = .revision_delivery });
-            std.debug.assert(decision == .retry);
-            self.revision_delivery.fail();
-            const services = self.platform_services orelse {
-                self.breakEventConnection();
-                return error.WorkbenchRevisionDeliveryUnavailable;
-            };
-            services.startTimer(
-                workbench_revision_retry_timer_id,
-                renderer_bridge.revision_delivery.retry_interval_ns,
-                false,
-            ) catch |timer_err| {
+        _ = self.product_delivery.deliverRevision(
+            revision,
+            native_sdk.monotonicNanoseconds(),
+            self.productTransport(),
+        ) catch |err| switch (err) {
+            error.RevisionRetryExhausted, error.RevisionRetryUnavailable => {
+                const revision_decision = workbench_api.decideTransportFailure(.{ .stage = .revision_delivery });
                 const connection_decision = workbench_api.decideTransportFailure(.{ .stage = .connection_generation });
+                std.debug.assert(revision_decision == .retry);
                 std.debug.assert(connection_decision == .detach_renderer);
-                std.log.warn("Workbench revision {d} delivery and retry scheduling failed: emit={s} timer={s}", .{
+                std.log.warn("Workbench revision {d} delivery became unavailable: {s}", .{
                     revision,
                     @errorName(err),
-                    @errorName(timer_err),
                 });
                 self.breakEventConnection();
                 return error.WorkbenchRevisionDeliveryUnavailable;
-            };
-            return;
+            },
+            else => return err,
         };
-        self.revision_delivery.commit(revision);
-        if (self.platform_services) |services|
-            services.cancelTimer(workbench_revision_retry_timer_id) catch {};
     }
 
     fn breakEventConnection(self: *@This()) void {
-        if (self.delivery.connectedGeneration()) |generation|
+        if (self.automation_delivery.connectedGeneration()) |generation|
             self.detachDelivery(generation) catch {};
-        self.event_window_id = null;
+        self.product_delivery.breakConnection(self.productTransport());
         self.workspace_grants.invalidate();
-        self.invalidateSnapshot();
     }
 
     fn drainAgentEvents(self: *@This()) void {
@@ -818,23 +781,23 @@ const App = struct {
     }
 
     fn expireDetachedRoutes(self: *@This(), now_ns: u64) void {
-        while (self.delivery.firstExpired(now_ns)) |route| {
+        while (self.automation_delivery.firstExpired(now_ns)) |route| {
             const decision = workbench_api.decideTransportFailure(.{
                 .stage = .detached_retention_expired,
                 .session_id = route.session_id,
                 .run_id = route.run_id,
             });
             std.debug.assert(decision == .discard_transport_payload);
-            self.delivery.cleanupRun(route.session_id, route.run_id);
+            self.automation_delivery.cleanupRun(route.session_id, route.run_id);
         }
     }
 
     fn detachDelivery(self: *@This(), generation: u64) !void {
-        try self.delivery.detach(generation, native_sdk.monotonicNanoseconds());
+        try self.automation_delivery.detach(generation, native_sdk.monotonicNanoseconds());
         const services = self.platform_services orelse return error.RuntimeUnavailable;
         services.startTimer(
-            delivery_retention_timer_id,
-            self.delivery.retentionNanoseconds(),
+            automation_retention_timer_id,
+            self.automation_delivery.retentionNanoseconds(),
             false,
         ) catch |err| {
             // Without a deadline source, keeping detached events would make
@@ -871,15 +834,12 @@ const App = struct {
         };
     }
 
-    fn enterBridgeCallback(self: *@This()) !BridgeCallbackLease {
-        if (!self.bridge_ingress_open) return error.BridgeStopping;
-        self.bridge_callbacks_active = std.math.add(usize, self.bridge_callbacks_active, 1) catch
-            return error.BridgeCallbackCapacity;
-        return .{ .active = &self.bridge_callbacks_active };
+    fn enterBridgeCallback(self: *@This()) !renderer_bridge.CallbackGate.Lease {
+        return self.bridge_callbacks.enter();
     }
 
     fn stopBridgeIngress(self: *@This()) void {
-        self.bridge_ingress_open = false;
+        self.bridge_callbacks.stopIngress();
     }
 
     fn detachWorkbench(self: *@This()) void {
@@ -887,19 +847,11 @@ const App = struct {
     }
 
     fn quiesceBridgeCallbacks(self: *@This()) void {
-        // Native SDK dispatches synchronous Bridge handlers and app.stop on
-        // the platform loop, so closing ingress makes zero active callbacks
-        // an assertion, not a condition-variable wait.
-        std.debug.assert(self.bridge_callbacks_active == 0);
+        self.bridge_callbacks.assertQuiescent();
     }
 
     fn requireEventWindow(self: *@This(), window_id: native_sdk.platform.WindowId) !void {
-        if (self.event_window_id == null or self.event_window_id.? != window_id)
-            return error.EventWindowMismatch;
-    }
-
-    fn invalidateSnapshot(self: *@This()) void {
-        self.snapshot_delivery.invalidate();
+        _ = try self.product_delivery.requireWindow(window_id);
     }
 
     fn emitWindowEvent(
@@ -914,10 +866,48 @@ const App = struct {
         try (native_runtime orelse return error.RuntimeUnavailable).emitWindowEvent(window_id, name, detail);
     }
 
-    fn writeWorkbenchSnapshot(self: *@This(), workbench_state: *workbench_api.Workbench) ![]const u8 {
+    fn productTransport(self: *@This()) renderer_bridge.ProductDeliveryTransport {
+        return .{
+            .context = self,
+            .emit_fn = emitProductEvent,
+            .start_timer_fn = startProductTimer,
+            .cancel_timer_fn = cancelProductTimer,
+        };
+    }
+
+    fn emitProductEvent(
+        context: ?*anyopaque,
+        window_id: native_sdk.platform.WindowId,
+        name: []const u8,
+        detail: []const u8,
+    ) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        return self.emitWindowEvent(self.native_runtime, window_id, name, detail);
+    }
+
+    fn startProductTimer(
+        context: ?*anyopaque,
+        timer_id: u64,
+        interval_ns: u64,
+        repeats: bool,
+    ) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        const services = self.platform_services orelse return error.RuntimeUnavailable;
+        return services.startTimer(timer_id, interval_ns, repeats);
+    }
+
+    fn cancelProductTimer(context: ?*anyopaque, timer_id: u64) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        const services = self.platform_services orelse return error.RuntimeUnavailable;
+        return services.cancelTimer(timer_id);
+    }
+
+    fn writeProductSnapshot(context: ?*anyopaque, output: []u8) anyerror![]const u8 {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        const workbench_state = self.workbench orelse return error.RuntimeUnavailable;
         if (self.snapshot_write_override) |write|
-            return write(self.snapshot_write_context, workbench_state, self.snapshot_delivery.storage);
-        return workbench_state.writeSnapshot(self.snapshot_delivery.storage);
+            return write(self.snapshot_write_context, workbench_state, output);
+        return workbench_state.writeSnapshot(output);
     }
 
     fn joinFixtureWorker(self: *@This()) void {
@@ -981,17 +971,19 @@ fn createAgentRuntime(
 }
 
 pub fn run(init: std.process.Init) !void {
-    var delivery = try bridge_delivery.Delivery.init(std.heap.c_allocator, .{ .route_slots = 16 });
+    var delivery = try automation_delivery_api.Delivery.init(std.heap.c_allocator, .{ .route_slots = 16 });
     defer delivery.deinitOwnedBuffers();
-    const snapshot_storage = try std.heap.c_allocator.alloc(u8, workbench_snapshot_capacity);
-    defer std.heap.c_allocator.free(snapshot_storage);
     var app = App{
         .env_map = init.environ_map,
         .io = init.io,
-        .delivery = &delivery,
+        .automation_delivery = &delivery,
+        .product_delivery = try renderer_bridge.ProductDelivery.init(std.heap.c_allocator),
         .main_thread_id = std.Thread.getCurrentId(),
-        .snapshot_delivery = try renderer_bridge.snapshot_delivery.State.init(snapshot_storage),
     };
+    defer {
+        app.product_delivery.breakConnection(app.productTransport());
+        app.product_delivery.deinitOwnedBuffers();
+    }
     const agent_runtime = try createAgentRuntime(init.io, .{
         .context = &app,
         .notify_fn = App.notifyAgentEventConsumer,
@@ -1049,12 +1041,12 @@ test "transport limits and origin sets are explicit" {
 }
 
 test "bridge rejects an untrusted origin before handler dispatch" {
-    var delivery = try bridge_delivery.Delivery.init(std.testing.allocator, .{ .route_slots = 4 });
+    var delivery = try automation_delivery_api.Delivery.init(std.testing.allocator, .{ .route_slots = 4 });
     defer delivery.deinit();
     var app = App{
         .env_map = undefined,
         .io = std.testing.io,
-        .delivery = &delivery,
+        .automation_delivery = &delivery,
         .main_thread_id = std.Thread.getCurrentId(),
     };
     var response_buffer: [512]u8 = undefined;
@@ -1069,12 +1061,12 @@ test "bridge rejects an untrusted origin before handler dispatch" {
 }
 
 test "release policy cannot dispatch the Gate 5 automation fixture" {
-    var delivery = try bridge_delivery.Delivery.init(std.testing.allocator, .{ .route_slots = 4 });
+    var delivery = try automation_delivery_api.Delivery.init(std.testing.allocator, .{ .route_slots = 4 });
     defer delivery.deinit();
     var app = App{
         .env_map = undefined,
         .io = std.testing.io,
-        .delivery = &delivery,
+        .automation_delivery = &delivery,
         .main_thread_id = std.Thread.getCurrentId(),
     };
     var response_buffer: [512]u8 = undefined;
@@ -1088,12 +1080,12 @@ test "release policy cannot dispatch the Gate 5 automation fixture" {
 }
 
 test "Bridge shutdown closes ingress before Workbench detaches" {
-    var delivery = try bridge_delivery.Delivery.init(std.testing.allocator, .{ .route_slots = 4 });
+    var delivery = try automation_delivery_api.Delivery.init(std.testing.allocator, .{ .route_slots = 4 });
     defer delivery.deinit();
     var app = App{
         .env_map = undefined,
         .io = std.testing.io,
-        .delivery = &delivery,
+        .automation_delivery = &delivery,
         .main_thread_id = std.Thread.getCurrentId(),
     };
     app.stopBridgeIngress();
@@ -1108,7 +1100,7 @@ test "Bridge shutdown closes ingress before Workbench detaches" {
     );
     try std.testing.expect(std.mem.indexOf(u8, response, "\"handler_failed\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, response, "BridgeStopping") != null);
-    try std.testing.expectEqual(@as(usize, 0), app.bridge_callbacks_active);
+    try std.testing.expectEqual(@as(usize, 0), app.bridge_callbacks.active);
 }
 
 test "event acknowledgement payload is exact and bounded" {
@@ -1119,12 +1111,12 @@ test "event acknowledgement payload is exact and bounded" {
 }
 
 test "Workspace trust grants are bound to window and generation and consumed once" {
-    var delivery = try bridge_delivery.Delivery.init(std.testing.allocator, .{ .route_slots = 4 });
+    var delivery = try automation_delivery_api.Delivery.init(std.testing.allocator, .{ .route_slots = 4 });
     defer delivery.deinit();
     var app = App{
         .env_map = undefined,
         .io = std.testing.io,
-        .delivery = &delivery,
+        .automation_delivery = &delivery,
         .main_thread_id = std.Thread.getCurrentId(),
     };
     var token = try app.workspace_grants.issue(9, 3, "/tmp/metawork-granted");
@@ -1170,22 +1162,22 @@ test "release Workspace selection uses native confirmation before issuing a one-
         }
     };
     var harness = Harness{};
-    var delivery = try bridge_delivery.Delivery.init(std.testing.allocator, .{ .route_slots = 4 });
+    var delivery = try automation_delivery_api.Delivery.init(std.testing.allocator, .{ .route_slots = 4 });
     defer delivery.deinit();
-    const generation = try delivery.connect();
     var app = App{
         .env_map = undefined,
         .io = std.testing.io,
-        .delivery = &delivery,
+        .automation_delivery = &delivery,
         .main_thread_id = std.Thread.getCurrentId(),
         .mode = .release,
-        .event_window_id = 3,
         .platform_services = .{
             .context = &harness,
             .show_open_dialog_fn = Harness.open,
             .show_message_dialog_fn = Harness.confirm,
         },
     };
+    const generation = try app.product_delivery.connect(3, app.productTransport());
+    try delivery.connectAt(generation);
     var output: [4096]u8 = undefined;
     const response = app.bridge(.release).dispatch(
         "{\"id\":\"workspace\",\"command\":\"metawork.workspace.choose\",\"payload\":{}}",
@@ -1226,12 +1218,12 @@ test "post-commit wake failure is not returned as a mutation failure" {
         }
     };
     var harness = Harness{};
-    var delivery = try bridge_delivery.Delivery.init(std.testing.allocator, .{ .route_slots = 4 });
+    var delivery = try automation_delivery_api.Delivery.init(std.testing.allocator, .{ .route_slots = 4 });
     defer delivery.deinit();
     var app = App{
         .env_map = undefined,
         .io = std.testing.io,
-        .delivery = &delivery,
+        .automation_delivery = &delivery,
         .main_thread_id = std.Thread.getCurrentId(),
         .platform_services = .{ .context = &harness, .wake_fn = Harness.wake },
     };
@@ -1256,7 +1248,7 @@ test "Workbench revision delivery retries and coalesces to the newest revision" 
             const self: *@This() = @ptrCast(@alignCast(context.?));
             self.emit_calls += 1;
             try std.testing.expectEqual(@as(native_sdk.platform.WindowId, 4), window_id);
-            try std.testing.expectEqualStrings(workbench_event_name, name);
+            try std.testing.expectEqualStrings(renderer_bridge.product_event_name, name);
             if (self.emit_calls == 1) return error.InjectedEmitFailure;
             @memcpy(self.last_detail[0..detail.len], detail);
             self.last_detail_len = detail.len;
@@ -1265,7 +1257,7 @@ test "Workbench revision delivery retries and coalesces to the newest revision" 
         fn startTimer(context: ?*anyopaque, id: u64, interval_ns: u64, repeats: bool) anyerror!void {
             const self: *@This() = @ptrCast(@alignCast(context.?));
             self.timer_starts += 1;
-            try std.testing.expectEqual(workbench_revision_retry_timer_id, id);
+            try std.testing.expectEqual(renderer_bridge.product_retry_timer_id, id);
             try std.testing.expect(interval_ns > 0);
             try std.testing.expect(!repeats);
         }
@@ -1273,11 +1265,11 @@ test "Workbench revision delivery retries and coalesces to the newest revision" 
         fn cancelTimer(context: ?*anyopaque, id: u64) anyerror!void {
             const self: *@This() = @ptrCast(@alignCast(context.?));
             self.timer_cancels += 1;
-            try std.testing.expectEqual(workbench_revision_retry_timer_id, id);
+            try std.testing.expectEqual(renderer_bridge.product_retry_timer_id, id);
         }
     };
     var harness = Harness{};
-    var delivery = try bridge_delivery.Delivery.init(std.testing.allocator, .{ .route_slots = 4 });
+    var delivery = try automation_delivery_api.Delivery.init(std.testing.allocator, .{ .route_slots = 4 });
     defer delivery.deinit();
     var workbench = try workbench_api.Workbench.init(std.testing.allocator, undefined, .{});
     defer workbench.deinit();
@@ -1285,7 +1277,7 @@ test "Workbench revision delivery retries and coalesces to the newest revision" 
     var app = App{
         .env_map = undefined,
         .io = std.testing.io,
-        .delivery = &delivery,
+        .automation_delivery = &delivery,
         .workbench = &workbench,
         .main_thread_id = std.Thread.getCurrentId(),
         .platform_services = .{
@@ -1296,14 +1288,16 @@ test "Workbench revision delivery retries and coalesces to the newest revision" 
         .emit_window_event_context = &harness,
         .emit_window_event_override = Harness.emit,
     };
+    const generation = try app.product_delivery.connect(4, app.productTransport());
+    try delivery.connectAt(generation);
 
-    try app.emitWorkbenchChanged(null, 4);
-    try std.testing.expect(app.revision_delivery.pending);
-    try std.testing.expectEqual(@as(u64, 0), app.revision_delivery.last_emitted);
+    try app.emitWorkbenchChanged();
+    try std.testing.expect(app.product_delivery.revision.pending);
+    try std.testing.expectEqual(@as(u64, 0), app.product_delivery.revision.last_emitted);
     workbench.revision = 9;
-    try app.emitWorkbenchChanged(null, 4);
-    try std.testing.expect(!app.revision_delivery.pending);
-    try std.testing.expectEqual(@as(u64, 9), app.revision_delivery.last_emitted);
+    try app.emitWorkbenchChanged();
+    try std.testing.expect(!app.product_delivery.revision.pending);
+    try std.testing.expectEqual(@as(u64, 9), app.product_delivery.revision.last_emitted);
     try std.testing.expectEqual(@as(usize, 2), harness.emit_calls);
     try std.testing.expectEqual(@as(usize, 1), harness.timer_starts);
     try std.testing.expectEqual(@as(usize, 1), harness.timer_cancels);
@@ -1324,7 +1318,7 @@ test "Workbench revision delivery fails closed when retry scheduling is unavaila
             _ = context;
             _ = interval_ns;
             _ = repeats;
-            if (id == workbench_revision_retry_timer_id) return error.InjectedTimerFailure;
+            if (id == renderer_bridge.product_retry_timer_id) return error.InjectedTimerFailure;
         }
 
         fn cancelTimer(context: ?*anyopaque, id: u64) anyerror!void {
@@ -1332,52 +1326,89 @@ test "Workbench revision delivery fails closed when retry scheduling is unavaila
             _ = id;
         }
     };
-    var delivery = try bridge_delivery.Delivery.init(std.testing.allocator, .{ .route_slots = 4 });
+    var delivery = try automation_delivery_api.Delivery.init(std.testing.allocator, .{ .route_slots = 4 });
     defer delivery.deinit();
-    _ = try delivery.connect();
     var workbench = try workbench_api.Workbench.init(std.testing.allocator, undefined, .{});
     defer workbench.deinit();
     workbench.revision = 1;
     var app = App{
         .env_map = undefined,
         .io = std.testing.io,
-        .delivery = &delivery,
+        .automation_delivery = &delivery,
         .workbench = &workbench,
         .main_thread_id = std.Thread.getCurrentId(),
-        .event_window_id = 4,
         .platform_services = .{
             .start_timer_fn = Harness.startTimer,
             .cancel_timer_fn = Harness.cancelTimer,
         },
         .emit_window_event_override = Harness.emit,
     };
+    const generation = try app.product_delivery.connect(4, app.productTransport());
+    try delivery.connectAt(generation);
 
     try std.testing.expectError(
         error.WorkbenchRevisionDeliveryUnavailable,
-        app.emitWorkbenchChanged(null, 4),
+        app.emitWorkbenchChanged(),
     );
-    try std.testing.expectEqual(@as(?native_sdk.platform.WindowId, null), app.event_window_id);
+    try std.testing.expectEqual(@as(?native_sdk.platform.WindowId, null), app.product_delivery.connectedWindow());
     try std.testing.expectEqual(@as(?u64, null), delivery.connectedGeneration());
-    try std.testing.expectEqual(@as(usize, 0), app.snapshot_delivery.len);
+    try std.testing.expectEqual(@as(usize, 0), app.product_delivery.snapshot.len);
+}
+
+test "event disconnect closes product and automation delivery when retention timer is unavailable" {
+    const Harness = struct {
+        fn startTimer(_: ?*anyopaque, id: u64, _: u64, _: bool) anyerror!void {
+            if (id == automation_retention_timer_id) return error.InjectedTimerFailure;
+        }
+    };
+    var delivery = try automation_delivery_api.Delivery.init(std.testing.allocator, .{ .route_slots = 4 });
+    defer delivery.deinit();
+    var app = App{
+        .env_map = undefined,
+        .io = std.testing.io,
+        .automation_delivery = &delivery,
+        .main_thread_id = std.Thread.getCurrentId(),
+        .platform_services = .{ .start_timer_fn = Harness.startTimer },
+    };
+    const generation = try app.product_delivery.connect(4, app.productTransport());
+    try delivery.connectAt(generation);
+    var output: [512]u8 = undefined;
+
+    try std.testing.expectError(
+        error.InjectedTimerFailure,
+        App.disconnectEvents(&app, .{
+            .request = .{
+                .id = "disconnect",
+                .command = "metawork.events.disconnect",
+                .payload = "{\"generation\":\"1\"}",
+            },
+            .source = .{ .origin = "zero://app", .window_id = 4 },
+        }, &output),
+    );
+    try std.testing.expectEqual(@as(?u64, null), app.product_delivery.connectedGeneration());
+    try std.testing.expectEqual(@as(?u64, null), delivery.connectedGeneration());
 }
 
 test "Workbench snapshot chunk handler binds identity generation and offset" {
-    var delivery = try bridge_delivery.Delivery.init(std.testing.allocator, .{ .route_slots = 4 });
+    var delivery = try automation_delivery_api.Delivery.init(std.testing.allocator, .{ .route_slots = 4 });
     defer delivery.deinit();
     const generation = try delivery.connect();
     var snapshot_storage = [_]u8{ 0, 1, 2, 3, 254, 255 };
     var app = App{
         .env_map = undefined,
         .io = std.testing.io,
-        .delivery = &delivery,
+        .automation_delivery = &delivery,
         .main_thread_id = std.Thread.getCurrentId(),
-        .event_window_id = 2,
-        .snapshot_delivery = .{
-            .storage = &snapshot_storage,
-            .len = snapshot_storage.len,
-            .id = 5,
+        .product_delivery = .{
             .generation = generation,
             .window_id = 2,
+            .snapshot = .{
+                .storage = &snapshot_storage,
+                .len = snapshot_storage.len,
+                .id = 5,
+                .generation = generation,
+                .window_id = 2,
+            },
         },
     };
     var output: [512]u8 = undefined;
@@ -1429,7 +1460,7 @@ test "a failed snapshot write invalidates the previously published descriptor" {
             return error.InjectedSnapshotFailure;
         }
     };
-    var delivery = try bridge_delivery.Delivery.init(std.testing.allocator, .{ .route_slots = 4 });
+    var delivery = try automation_delivery_api.Delivery.init(std.testing.allocator, .{ .route_slots = 4 });
     defer delivery.deinit();
     const generation = try delivery.connect();
     var workbench = try workbench_api.Workbench.init(std.testing.allocator, undefined, .{});
@@ -1439,17 +1470,20 @@ test "a failed snapshot write invalidates the previously published descriptor" {
     var app = App{
         .env_map = undefined,
         .io = std.testing.io,
-        .delivery = &delivery,
+        .automation_delivery = &delivery,
         .workbench = &workbench,
         .main_thread_id = std.Thread.getCurrentId(),
-        .event_window_id = 2,
-        .snapshot_delivery = try renderer_bridge.snapshot_delivery.State.init(snapshot_storage),
+        .product_delivery = .{
+            .generation = generation,
+            .window_id = 2,
+            .snapshot = .{ .storage = snapshot_storage },
+        },
         .snapshot_write_override = Harness.write,
     };
-    app.snapshot_delivery.len = 128;
-    app.snapshot_delivery.id = 9;
-    app.snapshot_delivery.generation = generation;
-    app.snapshot_delivery.window_id = 2;
+    app.product_delivery.snapshot.len = 128;
+    app.product_delivery.snapshot.id = 9;
+    app.product_delivery.snapshot.generation = generation;
+    app.product_delivery.snapshot.window_id = 2;
     var output: [512]u8 = undefined;
     try std.testing.expectError(
         error.InjectedSnapshotFailure,
@@ -1458,8 +1492,8 @@ test "a failed snapshot write invalidates the previously published descriptor" {
             .source = .{ .origin = "zero://app", .window_id = 2 },
         }, &output),
     );
-    try std.testing.expectEqual(@as(usize, 0), app.snapshot_delivery.len);
-    try std.testing.expectEqual(@as(u64, 0), app.snapshot_delivery.generation);
+    try std.testing.expectEqual(@as(usize, 0), app.product_delivery.snapshot.len);
+    try std.testing.expectEqual(@as(u64, 0), app.product_delivery.snapshot.generation);
     try std.testing.expectError(
         error.StaleSnapshot,
         App.fetchWorkbenchSnapshotChunk(&app, .{
@@ -1491,7 +1525,7 @@ test "Agent transport ids preserve the complete u64 domain" {
 }
 
 test "expired detached delivery is cleaned before a Renderer reconnect" {
-    var delivery = try bridge_delivery.Delivery.init(std.testing.allocator, .{
+    var delivery = try automation_delivery_api.Delivery.init(std.testing.allocator, .{
         .route_slots = 4,
         .retention_ns = 10,
     });
@@ -1508,14 +1542,14 @@ test "expired detached delivery is cleaned before a Renderer reconnect" {
     var app = App{
         .env_map = undefined,
         .io = std.testing.io,
-        .delivery = &delivery,
+        .automation_delivery = &delivery,
         .main_thread_id = std.Thread.getCurrentId(),
     };
     app.expireDetachedRoutes(109);
     try std.testing.expectEqual(@as(usize, 1), delivery.stats().retained_count);
     app.expireDetachedRoutes(110);
     try std.testing.expectEqual(@as(usize, 0), delivery.stats().retained_count);
-    try std.testing.expectEqual(@as(?bridge_delivery.ExpiredRoute, null), delivery.firstExpired(111));
+    try std.testing.expectEqual(@as(?automation_delivery_api.ExpiredRoute, null), delivery.firstExpired(111));
 }
 
 test "Agent transport payload rejects unknown fields and oversized input" {

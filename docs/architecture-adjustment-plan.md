@@ -1,10 +1,10 @@
 # MetaWork 架构与目录调整方案
 
 > 状态：正式迁移基线，尚未全部实现
-> 日期：2026-07-18
+> 日期：2026-07-19
 > 适用范围：Zig Native 应用、React Renderer、metacodes AgentCore 集成与自动化构建边界
 
-实施进度：阶段 1 至 6 已落地；Workbench 已独占 Executor，generation-checked RunControl、tagged termination latch、immutable Agent TerminalResult、Workbench no-fail terminal commit 和 pre-execution terminal record 已连通；Agent 是唯一 AgentCore SDK consumer，`OwnedCoreEvent` 与 bounded canonical notification retry/deadline 已连通；产品 wire contract 已原子切换到 Task schema v5。Bridge delivery extraction 与 automation build isolation仍按后续切片推进。
+实施进度：阶段 1 至 7 已落地；Workbench 已独占 Executor，generation-checked RunControl、tagged termination latch、immutable Agent TerminalResult、Workbench no-fail terminal commit 和 pre-execution terminal record 已连通；Agent 是唯一 AgentCore SDK consumer，`OwnedCoreEvent` 与 bounded canonical notification retry/deadline 已连通；产品 wire contract 已原子切换到 Task schema v5；Bridge `ProductDelivery` 已独占 Renderer connection generation、revision retry/timer、snapshot identity 与 owned storage。automation-only raw event retention 仍保持显式隔离，并随阶段 8 从 release build graph 移除。
 
 ## 1. 目的与决策
 
@@ -80,9 +80,11 @@ src/
     ├── commands.zig
     ├── handlers.zig
     ├── policy.zig
-    ├── delivery.zig
+    ├── callback_gate.zig
+    ├── product_delivery.zig
     ├── revision_delivery.zig
     ├── snapshot_delivery.zig
+    ├── delivery.zig          # automation-only raw event transport，阶段 8 隔离
     └── workspace_grant.zig
 ```
 
@@ -645,10 +647,12 @@ root 应显式导出稳定消费表面，并让内部模块可以自由重构。
 
 ### 阶段 7：Bridge delivery implementation boundary
 
-- 将 `revision_delivery.State`、`snapshot_delivery.State`、retry timer 与 generation/retention coordination 从 `app.zig` 移入 `bridge/`；
+- 以 `bridge/product_delivery.zig` 统一拥有 Renderer connection generation、`revision_delivery.State`、`snapshot_delivery.State`、retry timer policy 与 owned snapshot storage；
 - App 只注入 Native transport capability、连接 Workbench observer，并组织构造/关停顺序；
 - Bridge-owned state 不借用 Workbench bytes，typed failure 继续只报告给 Workbench policy；
 - 增加 retry exhaustion、Renderer detach/reload、callback/timer quiescence 与 owned-buffer tests。
+
+本阶段不把 automation-only raw Agent batch/object/ACK retention 塞进产品 `ProductDelivery`。该 transport 只跟随产品 connection generation，不拥有 generation；它的 release build-graph 隔离、fixture command 删除和剩余 retention adapter 收口归阶段 8。用一个“大而全 Delivery”统一两者会重新混淆产品 view-sync 与测试 transport 生命周期，因此明确拒绝。
 
 同步更新：`architecture.md`、`project-structure.md`、Bridge/Renderer contract 文档。
 
