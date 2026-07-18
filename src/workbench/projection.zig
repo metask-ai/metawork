@@ -69,6 +69,45 @@ pub const ChangeNotifier = struct {
     }
 };
 
+pub const TransportFailureStage = enum {
+    ingress_validation,
+    command_dispatch,
+    response_delivery,
+    revision_delivery,
+    snapshot_transport,
+    connection_generation,
+    agent_event_delivery,
+    detached_retention_expired,
+};
+
+pub const TransportFailureReport = struct {
+    stage: TransportFailureStage,
+    session_id: u64 = 0,
+    run_id: u64 = 0,
+};
+
+pub const TransportFailureDecision = enum {
+    reject_command,
+    retry,
+    detach_renderer,
+    retain_for_reconnect,
+    discard_transport_payload,
+    request_run_termination,
+};
+
+/// Workbench owns product impact policy; Bridge supplies transport facts only.
+/// Current Renderer transport failures never terminate an Agent Run.
+pub fn decideTransportFailure(report: TransportFailureReport) TransportFailureDecision {
+    std.debug.assert((report.session_id == 0) == (report.run_id == 0));
+    return switch (report.stage) {
+        .ingress_validation, .command_dispatch => .reject_command,
+        .revision_delivery, .snapshot_transport => .retry,
+        .response_delivery, .connection_generation => .detach_renderer,
+        .agent_event_delivery => .retain_for_reconnect,
+        .detached_retention_expired => .discard_transport_payload,
+    };
+}
+
 const TrackedText = struct {
     list: std.ArrayList(u8) = .empty,
 };
@@ -466,10 +505,13 @@ pub const Workbench = struct {
                 view.closing_session = null;
                 view.close_result.store(.none, .release);
                 if (close_result == .closed) {
-                    if (view.close_terminal_facts) |facts|
-                        if (facts.outcome) |outcome|
-                            if (findRun(view.runs, facts.run_id)) |run|
+                    if (view.close_terminal_facts) |facts| {
+                        if (facts.outcome) |outcome| {
+                            if (findRun(view.runs, facts.run_id)) |run| {
                                 changed = commitTerminal(run, phaseForOutcome(outcome), outcome, facts.cause, "") or changed;
+                            }
+                        }
+                    }
                     view.state = .closed;
                     view.session = null;
                     view.close_failed = false;
@@ -1542,6 +1584,27 @@ test "terminal publication is allocation-free write-once bounded history" {
     try std.testing.expect(!commitTerminal(run, .interrupted, .interrupted, .session_close, "late mutation"));
     try std.testing.expectEqual(lifecycle.RunOutcome.failed, terminalPayload(run).?.outcome);
     try std.testing.expectEqual(@as(?lifecycle.HostCause, .event_pipeline_failure), terminalPayload(run).?.cause);
+}
+
+test "Renderer transport failures never own Agent Run termination" {
+    const cases = [_]struct {
+        stage: TransportFailureStage,
+        decision: TransportFailureDecision,
+    }{
+        .{ .stage = .ingress_validation, .decision = .reject_command },
+        .{ .stage = .command_dispatch, .decision = .reject_command },
+        .{ .stage = .response_delivery, .decision = .detach_renderer },
+        .{ .stage = .revision_delivery, .decision = .retry },
+        .{ .stage = .snapshot_transport, .decision = .retry },
+        .{ .stage = .connection_generation, .decision = .detach_renderer },
+        .{ .stage = .agent_event_delivery, .decision = .retain_for_reconnect },
+        .{ .stage = .detached_retention_expired, .decision = .discard_transport_payload },
+    };
+    for (cases) |case| {
+        const decision = decideTransportFailure(.{ .stage = case.stage });
+        try std.testing.expectEqual(case.decision, decision);
+        try std.testing.expect(decision != .request_run_termination);
+    }
 }
 
 test "delete waits for RunRef quiescence and stale generations fail validation" {

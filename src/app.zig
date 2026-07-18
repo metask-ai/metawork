@@ -49,6 +49,8 @@ const App = struct {
     agent_runtime: ?*agent.Runtime = null,
     workbench: ?*workbench_api.Workbench = null,
     agent_shutdown: bool = false,
+    bridge_ingress_open: bool = true,
+    bridge_callbacks_active: usize = 0,
     main_thread_id: std.Thread.Id,
     mode: FrontendMode = .release,
     native_runtime: ?*native_sdk.Runtime = null,
@@ -74,6 +76,16 @@ const App = struct {
         output: []u8,
     ) anyerror![]const u8 = null,
     handlers: [18]native_sdk.bridge.Handler = undefined,
+
+    const BridgeCallbackLease = struct {
+        active: *usize,
+
+        fn deinit(self: *@This()) void {
+            std.debug.assert(self.active.* != 0);
+            self.active.* -= 1;
+            self.* = undefined;
+        }
+    };
 
     fn app(self: *@This()) native_sdk.App {
         return .{
@@ -103,6 +115,7 @@ const App = struct {
 
     fn stop(context: *anyopaque, native_runtime: *native_sdk.Runtime) anyerror!void {
         const self: *@This() = @ptrCast(@alignCast(context));
+        self.stopBridgeIngress();
         self.joinFixtureWorker();
         if (self.platform_services) |services| {
             services.cancelTimer(delivery_retention_timer_id) catch {};
@@ -112,6 +125,12 @@ const App = struct {
             try agent_runtime.shutdown();
             self.agent_shutdown = true;
         }
+        self.drainAgentEvents();
+        if (self.workbench) |workbench| workbench.syncLifecycle();
+        if (self.delivery.connectedGeneration()) |generation|
+            self.delivery.detach(generation, native_sdk.monotonicNanoseconds()) catch {};
+        self.quiesceBridgeCallbacks();
+        self.detachWorkbench();
         self.platform_services = null;
         self.event_window_id = null;
         self.workspace_grants.invalidate();
@@ -239,6 +258,8 @@ const App = struct {
 
     fn ping(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
         const self: *@This() = @ptrCast(@alignCast(context));
+        var callback = try self.enterBridgeCallback();
+        defer callback.deinit();
         const native_runtime = self.native_runtime orelse return error.RuntimeUnavailable;
         self.sequence += 1;
 
@@ -273,6 +294,8 @@ const App = struct {
 
     fn acknowledgeEvent(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
         const self: *@This() = @ptrCast(@alignCast(context));
+        var callback = try self.enterBridgeCallback();
+        defer callback.deinit();
         _ = self.native_runtime orelse return error.RuntimeUnavailable;
         const acknowledged_sequence = try acknowledgementSequence(invocation.request.payload);
         if (acknowledged_sequence == 0 or acknowledged_sequence > self.sequence) return error.SequenceMismatch;
@@ -292,6 +315,8 @@ const App = struct {
 
     fn connectEvents(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
         const self: *@This() = @ptrCast(@alignCast(context));
+        var callback = try self.enterBridgeCallback();
+        defer callback.deinit();
         _ = self.native_runtime orelse return error.RuntimeUnavailable;
         const services = self.platform_services orelse return error.RuntimeUnavailable;
         if (self.event_window_id) |window_id|
@@ -311,6 +336,8 @@ const App = struct {
 
     fn disconnectEvents(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
         const self: *@This() = @ptrCast(@alignCast(context));
+        var callback = try self.enterBridgeCallback();
+        defer callback.deinit();
         var parsed = try parsePayload(EventDisconnect, invocation.request.payload);
         defer parsed.deinit();
         const request = parsed.value;
@@ -326,6 +353,8 @@ const App = struct {
 
     fn acknowledgeAgentEvent(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
         const self: *@This() = @ptrCast(@alignCast(context));
+        var callback = try self.enterBridgeCallback();
+        defer callback.deinit();
         var parsed = try parsePayload(EventAck, invocation.request.payload);
         defer parsed.deinit();
         const request = parsed.value;
@@ -347,6 +376,8 @@ const App = struct {
 
     fn fetchAgentEvent(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
         const self: *@This() = @ptrCast(@alignCast(context));
+        var callback = try self.enterBridgeCallback();
+        defer callback.deinit();
         var parsed = try parsePayload(EventFetch, invocation.request.payload);
         defer parsed.deinit();
         const request = parsed.value;
@@ -374,6 +405,8 @@ const App = struct {
 
     fn emitGate5Fixture(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
         const self: *@This() = @ptrCast(@alignCast(context));
+        var callback = try self.enterBridgeCallback();
+        defer callback.deinit();
         if (self.mode != .gate0_automation) return error.AutomationOnly;
         try self.requireEventWindow(invocation.source.window_id);
         _ = self.delivery.connectedGeneration() orelse return error.NoConnection;
@@ -418,11 +451,17 @@ const App = struct {
 
     fn beginWorkbenchSnapshot(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
         const self: *@This() = @ptrCast(@alignCast(context));
+        var callback = try self.enterBridgeCallback();
+        defer callback.deinit();
         try self.requireEventWindow(invocation.source.window_id);
         const workbench = self.workbench orelse return error.RuntimeUnavailable;
         if (self.snapshot_delivery.storage.len != workbench_snapshot_capacity) return error.RuntimeUnavailable;
         self.invalidateSnapshot();
-        const snapshot = try self.writeWorkbenchSnapshot(workbench);
+        const snapshot = self.writeWorkbenchSnapshot(workbench) catch |err| {
+            const decision = workbench_api.decideTransportFailure(.{ .stage = .snapshot_transport });
+            std.debug.assert(decision == .retry);
+            return err;
+        };
         try self.snapshot_delivery.publish(
             snapshot.len,
             self.delivery.connectedGeneration() orelse return error.NoConnection,
@@ -437,6 +476,8 @@ const App = struct {
 
     fn fetchWorkbenchSnapshotChunk(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
         const self: *@This() = @ptrCast(@alignCast(context));
+        var callback = try self.enterBridgeCallback();
+        defer callback.deinit();
         try self.requireEventWindow(invocation.source.window_id);
         var parsed = try parsePayload(WorkbenchSnapshotChunk, invocation.request.payload);
         defer parsed.deinit();
@@ -466,6 +507,8 @@ const App = struct {
 
     fn chooseWorkspace(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
         const self: *@This() = @ptrCast(@alignCast(context));
+        var callback = try self.enterBridgeCallback();
+        defer callback.deinit();
         try self.requireEventWindow(invocation.source.window_id);
         if (self.mode == .gate0_automation) return error.AutomationOnly;
         const generation = self.delivery.connectedGeneration() orelse return error.NoConnection;
@@ -515,6 +558,8 @@ const App = struct {
 
     fn createSession(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
         const self: *@This() = @ptrCast(@alignCast(context));
+        var callback = try self.enterBridgeCallback();
+        defer callback.deinit();
         try self.requireEventWindow(invocation.source.window_id);
         var parsed = try parsePayload(SessionCreate, invocation.request.payload);
         defer parsed.deinit();
@@ -568,6 +613,8 @@ const App = struct {
 
     fn runSession(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
         const self: *@This() = @ptrCast(@alignCast(context));
+        var callback = try self.enterBridgeCallback();
+        defer callback.deinit();
         try self.requireEventWindow(invocation.source.window_id);
         var parsed = try parsePayloadWithLimit(SessionRun, invocation.request.payload, 128 * 1024);
         defer parsed.deinit();
@@ -580,6 +627,8 @@ const App = struct {
 
     fn cancelSession(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
         const self: *@This() = @ptrCast(@alignCast(context));
+        var callback = try self.enterBridgeCallback();
+        defer callback.deinit();
         try self.requireEventWindow(invocation.source.window_id);
         var parsed = try parsePayload(SessionIdentity, invocation.request.payload);
         defer parsed.deinit();
@@ -592,6 +641,8 @@ const App = struct {
 
     fn respondUi(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
         const self: *@This() = @ptrCast(@alignCast(context));
+        var callback = try self.enterBridgeCallback();
+        defer callback.deinit();
         try self.requireEventWindow(invocation.source.window_id);
         var parsed = try parsePayloadWithLimit(UiResponseRequest, invocation.request.payload, 256 * 1024);
         defer parsed.deinit();
@@ -615,6 +666,8 @@ const App = struct {
 
     fn closeSession(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
         const self: *@This() = @ptrCast(@alignCast(context));
+        var callback = try self.enterBridgeCallback();
+        defer callback.deinit();
         try self.requireEventWindow(invocation.source.window_id);
         var parsed = try parsePayload(SessionClose, invocation.request.payload);
         defer parsed.deinit();
@@ -626,6 +679,8 @@ const App = struct {
 
     fn renameTask(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
         const self: *@This() = @ptrCast(@alignCast(context));
+        var callback = try self.enterBridgeCallback();
+        defer callback.deinit();
         try self.requireEventWindow(invocation.source.window_id);
         var parsed = try parsePayload(TaskRename, invocation.request.payload);
         defer parsed.deinit();
@@ -637,6 +692,8 @@ const App = struct {
 
     fn archiveTask(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
         const self: *@This() = @ptrCast(@alignCast(context));
+        var callback = try self.enterBridgeCallback();
+        defer callback.deinit();
         try self.requireEventWindow(invocation.source.window_id);
         var parsed = try parsePayload(TaskArchive, invocation.request.payload);
         defer parsed.deinit();
@@ -648,6 +705,8 @@ const App = struct {
 
     fn deleteTask(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
         const self: *@This() = @ptrCast(@alignCast(context));
+        var callback = try self.enterBridgeCallback();
+        defer callback.deinit();
         try self.requireEventWindow(invocation.source.window_id);
         var parsed = try parsePayload(TaskDelete, invocation.request.payload);
         defer parsed.deinit();
@@ -663,14 +722,12 @@ const App = struct {
             var batch = value;
             defer batch.deinit();
             native_runtime.emitWindowEvent(window_id, agent_event_name, batch.json) catch |err| {
-                if (self.agent_runtime) |agent_runtime| {
-                    for (0..batch.item_count) |index| {
-                        const route = self.delivery.batchRoute(&batch, index) catch continue;
-                        agent_runtime.failRun(route.session_id, route.run_id, .bridge_pipeline_failure) catch {};
-                        self.delivery.cleanupRun(route.session_id, route.run_id);
-                    }
-                }
-                self.detachDelivery(generation) catch {};
+                const decision = workbench_api.decideTransportFailure(.{ .stage = .agent_event_delivery });
+                std.debug.assert(decision == .retain_for_reconnect);
+                self.detachDelivery(generation) catch |detach_err| std.log.warn(
+                    "Agent event delivery failed and Renderer detach also failed: emit={s} detach={s}",
+                    .{ @errorName(err), @errorName(detach_err) },
+                );
                 self.event_window_id = null;
                 return err;
             };
@@ -691,6 +748,8 @@ const App = struct {
         var detail_buffer: [96]u8 = undefined;
         const detail = try std.fmt.bufPrint(&detail_buffer, "{{\"revision\":\"{d}\"}}", .{revision});
         self.emitWindowEvent(native_runtime, window_id, workbench_event_name, detail) catch |err| {
+            const decision = workbench_api.decideTransportFailure(.{ .stage = .revision_delivery });
+            std.debug.assert(decision == .retry);
             self.revision_delivery.fail();
             const services = self.platform_services orelse {
                 self.breakEventConnection();
@@ -701,6 +760,8 @@ const App = struct {
                 renderer_bridge.revision_delivery.retry_interval_ns,
                 false,
             ) catch |timer_err| {
+                const connection_decision = workbench_api.decideTransportFailure(.{ .stage = .connection_generation });
+                std.debug.assert(connection_decision == .detach_renderer);
                 std.log.warn("Workbench revision {d} delivery and retry scheduling failed: emit={s} timer={s}", .{
                     revision,
                     @errorName(err),
@@ -732,7 +793,7 @@ const App = struct {
             if (self.workbench) |workbench| workbench.applyEvent(&envelope) catch {
                 const session_id = envelope.session_id;
                 const run_id = envelope.run_id;
-                agent_runtime.failRun(session_id, run_id, .bridge_pipeline_failure) catch {};
+                agent_runtime.failRun(session_id, run_id, .event_pipeline_failure) catch {};
                 continue;
             };
         }
@@ -740,8 +801,12 @@ const App = struct {
 
     fn expireDetachedRoutes(self: *@This(), now_ns: u64) void {
         while (self.delivery.firstExpired(now_ns)) |route| {
-            if (self.agent_runtime) |agent_runtime|
-                agent_runtime.failRun(route.session_id, route.run_id, .bridge_pipeline_failure) catch {};
+            const decision = workbench_api.decideTransportFailure(.{
+                .stage = .detached_retention_expired,
+                .session_id = route.session_id,
+                .run_id = route.run_id,
+            });
+            std.debug.assert(decision == .discard_transport_payload);
             self.delivery.cleanupRun(route.session_id, route.run_id);
         }
     }
@@ -755,7 +820,8 @@ const App = struct {
             false,
         ) catch |err| {
             // Without a deadline source, keeping detached events would make
-            // the advertised retention TTL a lie. Fail the affected routes now.
+            // the advertised retention TTL a lie. Drop transport copies now;
+            // Renderer availability never owns Agent Run termination.
             self.expireDetachedRoutes(std.math.maxInt(u64));
             return err;
         };
@@ -768,6 +834,10 @@ const App = struct {
         return true;
     }
 
+    fn notifyAgentEventConsumer(context: ?*anyopaque) agent.EventReadyNotification {
+        return if (notifyMainLoop(context)) .scheduled else .unavailable;
+    }
+
     fn notifyNativeMainLoop(self: *@This()) !void {
         const services = self.platform_services orelse return error.RuntimeUnavailable;
         try services.wake();
@@ -777,6 +847,28 @@ const App = struct {
         self.notifyNativeMainLoop() catch |err| {
             std.log.warn("committed Workbench mutation could not schedule a UI wake: {s}", .{@errorName(err)});
         };
+    }
+
+    fn enterBridgeCallback(self: *@This()) !BridgeCallbackLease {
+        if (!self.bridge_ingress_open) return error.BridgeStopping;
+        self.bridge_callbacks_active = std.math.add(usize, self.bridge_callbacks_active, 1) catch
+            return error.BridgeCallbackCapacity;
+        return .{ .active = &self.bridge_callbacks_active };
+    }
+
+    fn stopBridgeIngress(self: *@This()) void {
+        self.bridge_ingress_open = false;
+    }
+
+    fn detachWorkbench(self: *@This()) void {
+        self.workbench = null;
+    }
+
+    fn quiesceBridgeCallbacks(self: *@This()) void {
+        // Native SDK dispatches synchronous Bridge handlers and app.stop on
+        // the platform loop, so closing ingress makes zero active callbacks
+        // an assertion, not a condition-variable wait.
+        std.debug.assert(self.bridge_callbacks_active == 0);
     }
 
     fn requireEventWindow(self: *@This(), window_id: native_sdk.platform.WindowId) !void {
@@ -855,7 +947,7 @@ fn allowedOrigins(mode: FrontendMode) []const []const u8 {
 fn createAgentRuntime(
     io: std.Io,
     raw_api: *const agentcore.types.ApiV1,
-    notifier: agent.Notifier,
+    notifier: agent.EventReadyNotifier,
 ) !*agent.Runtime {
     const executor = try workbench_api.Executor.create(
         io,
@@ -866,13 +958,13 @@ fn createAgentRuntime(
     return agent.Runtime.init(io, std.heap.c_allocator, raw_api, executor.scheduler(), .{
         .max_sessions = 8,
         .max_ui_request_bytes = pending_ui_json_capacity,
-        .notifier = notifier,
+        .event_ready_notifier = notifier,
     });
 }
 
 pub fn run(init: std.process.Init) !void {
     var delivery = try bridge_delivery.Delivery.init(std.heap.c_allocator, .{ .route_slots = 16 });
-    defer delivery.deinit();
+    defer delivery.deinitOwnedBuffers();
     const snapshot_storage = try std.heap.c_allocator.alloc(u8, workbench_snapshot_capacity);
     defer std.heap.c_allocator.free(snapshot_storage);
     var app = App{
@@ -883,7 +975,10 @@ pub fn run(init: std.process.Init) !void {
         .snapshot_delivery = try renderer_bridge.snapshot_delivery.State.init(snapshot_storage),
     };
     const api = try agentcore.Api.discover();
-    const agent_runtime = try createAgentRuntime(init.io, api.raw, .{ .context = &app, .wake = App.notifyMainLoop });
+    const agent_runtime = try createAgentRuntime(init.io, api.raw, .{
+        .context = &app,
+        .notify_fn = App.notifyAgentEventConsumer,
+    });
     app.agent_runtime = agent_runtime;
     var workbench_state: workbench_api.Workbench = undefined;
     var workbench_initialized = false;
@@ -969,6 +1064,30 @@ test "release policy cannot dispatch the Gate 5 automation fixture" {
     );
     try std.testing.expect(std.mem.indexOf(u8, response, "\"permission_denied\"") != null);
     try std.testing.expectEqual(@as(usize, 0), delivery.stats().retained_count);
+}
+
+test "Bridge shutdown closes ingress before Workbench detaches" {
+    var delivery = try bridge_delivery.Delivery.init(std.testing.allocator, .{ .route_slots = 4 });
+    defer delivery.deinit();
+    var app = App{
+        .env_map = undefined,
+        .io = std.testing.io,
+        .delivery = &delivery,
+        .main_thread_id = std.Thread.getCurrentId(),
+    };
+    app.stopBridgeIngress();
+    app.quiesceBridgeCallbacks();
+    app.detachWorkbench();
+
+    var response_buffer: [1024]u8 = undefined;
+    const response = app.bridge(.release).dispatch(
+        "{\"id\":\"after-stop\",\"command\":\"metawork.smoke.ping\",\"payload\":{}}",
+        .{ .origin = "zero://app", .window_id = 1 },
+        &response_buffer,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, response, "\"handler_failed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "BridgeStopping") != null);
+    try std.testing.expectEqual(@as(usize, 0), app.bridge_callbacks_active);
 }
 
 test "event acknowledgement payload is exact and bounded" {
@@ -1097,6 +1216,11 @@ test "post-commit wake failure is not returned as a mutation failure" {
     };
     app.notifyCommitted();
     try std.testing.expectEqual(@as(usize, 1), harness.wake_calls);
+    try std.testing.expectEqual(
+        agent.EventReadyNotification.unavailable,
+        App.notifyAgentEventConsumer(&app),
+    );
+    try std.testing.expectEqual(@as(usize, 2), harness.wake_calls);
 }
 
 test "Workbench revision delivery retries and coalesces to the newest revision" {

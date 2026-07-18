@@ -1842,7 +1842,7 @@ test "Gate 5 enqueue waits for a slow consumer and fails at the hard deadline" {
     third.deinit();
 }
 
-test "Gate 5 post-callback pipeline failure aborts the routed Run as failed" {
+test "post-callback canonical pipeline failure aborts the routed Run as failed" {
     fake_core.reset();
     fake_core.setNextPlan(.controlled);
     const host = try createHost(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
@@ -1854,11 +1854,11 @@ test "Gate 5 post-callback pipeline failure aborts the routed Run as failed" {
     const run_id = try session.submit("fail after callback returned");
     try session.waitForState(.running);
     const session_id = session.snapshot().session_id;
-    try host.failRun(session_id, run_id, .bridge_pipeline_failure);
+    try host.failRun(session_id, run_id, .event_pipeline_failure);
     try session.waitRun(run_id);
     const snapshot = session.snapshot();
     try std.testing.expectEqual(
-        @as(?lifecycle.HostCause, .bridge_pipeline_failure),
+        @as(?lifecycle.HostCause, .event_pipeline_failure),
         snapshot.cause,
     );
     try std.testing.expectEqual(@as(?lifecycle.RunOutcome, .failed), snapshot.last_outcome);

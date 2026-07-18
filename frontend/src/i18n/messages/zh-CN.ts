@@ -208,7 +208,6 @@ export const zhCN: Record<MessageId, string> = {
   "cause.host_shutdown": "工作台已关闭",
   "cause.event_pipeline_failure": "活动传递失败",
   "cause.queue_capacity_failure": "工作台容量已满",
-  "cause.bridge_pipeline_failure": "视图传递失败",
   "cause.ui_pipeline_failure": "回复传递失败",
   "cause.dependency_contract_failure": "任务运行环境已不兼容",
 };

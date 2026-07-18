@@ -98,3 +98,27 @@ test("build graph registers the four named module boundaries", () => {
   }
   assert.doesNotMatch(source, /src\/agentcore(?:\/|\.zig)/);
 });
+
+test("canonical notification and Renderer transport failures stay isolated", () => {
+  const agent = read("src/agent/session.zig");
+  assert.match(agent, /pub const EventReadyNotification = enum/);
+  for (const outcome of ["scheduled", "already_pending", "unavailable"]) {
+    assert.match(agent, new RegExp(`\\b${outcome}\\b`));
+  }
+  assert.doesNotMatch(
+    agent,
+    /bridge_pipeline_failure|notifyMainLoop|metawork_bridge/,
+  );
+
+  const app = read("src/app.zig");
+  assert.doesNotMatch(app, /bridge_pipeline_failure/);
+  assert.match(app, /decideTransportFailure/);
+  const stopIngress = app.indexOf("self.stopBridgeIngress();");
+  const quiesceCallbacks = app.indexOf("self.quiesceBridgeCallbacks();");
+  const detachWorkbench = app.indexOf("self.detachWorkbench();");
+  assert.ok(stopIngress >= 0 && stopIngress < quiesceCallbacks);
+  assert.ok(quiesceCallbacks < detachWorkbench);
+
+  const delivery = read("src/bridge/delivery.zig");
+  assert.match(delivery, /pub fn deinitOwnedBuffers/);
+});

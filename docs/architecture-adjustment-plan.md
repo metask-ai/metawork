@@ -4,7 +4,7 @@
 > 日期：2026-07-18
 > 适用范围：Zig Native 应用、React Renderer、metacodes AgentCore 集成与自动化构建边界
 
-实施进度：阶段 1 与阶段 2 foundation 已落地；canonical notification、Executor handoff、Agent terminal model、schema v5 与 automation build isolation 仍按后续阶段推进。
+实施进度：阶段 1、2 与 3 已落地；Executor handoff、Agent terminal model、schema v5 与 automation build isolation 仍按后续阶段推进。
 
 ## 1. 目的与决策
 
@@ -554,19 +554,13 @@ root 应显式导出稳定消费表面，并让内部模块可以自由重构。
 
 | 当前实现 | 目标 |
 | --- | --- |
-| `src/agentcore/` 表达本地层 | 重命名为 `src/agent/`，AgentCore 只表示外部依赖 |
 | `Host` 同时持有 Agent Runtime、Sessions 和 Workbench Scheduler | Agent Runtime 不拥有 Workbench Executor |
 | `Session.submit() -> Scheduler.enqueue()` | Workbench worker 主动 begin/execute Agent Run |
-| `HostCause` 混合 interruption、callback、Bridge 和 contract failure | tagged termination + immutable terminal facts |
-| Workbench admission 已分配部分 RunView，但 terminal 仍从活 Session snapshot 同步 | admission 建立 durable record/RunRef；terminal 通过 no-fail write-once payload 发布 |
+| `HostCause` 仍混合 interruption、callback 和 contract failure，但已删除 Bridge transport | tagged termination + immutable terminal facts |
+| Workbench admission/durable RunRef/no-fail payload 已落地，terminal facts 仍从活 Session snapshot 同步 | Agent `TerminalResult` 直接提交，不回查 Session snapshot |
 | Workbench/Bridge 直接 import `metacodes_agentcore` | 只有 Agent 消费 SDK，其他模块通过 Agent/Workbench 公共类型 |
-| Bridge failure 直接 `failRun()` | typed report → Workbench policy → 必要时请求 Agent termination |
-| Agent cause 直接命名 `bridge_pipeline_failure`/main-loop 实现 | Agent 只表达 generic event/callback failure；App 实现 `notifyMainLoop()` |
-| Task 关闭后才能删除，但 worker/result 没有正式 stable record reference 合同 | `RunRef`/generation 阻止悬空；non-terminal delete 转为 `delete_pending` |
-| Bridge delivery 当前大多持有 owned JSON，但 shutdown 没有统一 quiescence 合同 | owned async payload + stop ingress/detach/quiesce 后才释放 Workbench |
 | `sessions.*` 与 `tasks.*` 混用 | schema v5 原子迁移到 `tasks.*` |
 | automation handler/token 无条件编入 App source graph | `build.zig` 条件注入 automation module |
-| module root 整包 re-export 内部模块 | 最小公开表面 + architecture import test |
 
 ## 14. 迁移阶段
 

@@ -28,7 +28,6 @@ pub const HostCause = enum {
     host_shutdown,
     event_pipeline_failure,
     queue_capacity_failure,
-    bridge_pipeline_failure,
     ui_pipeline_failure,
     dependency_contract_failure,
 };
@@ -52,10 +51,41 @@ pub const WorkspaceInput = struct {
     trust: WorkspaceTrust,
 };
 
-pub const Notifier = struct {
-    context: ?*anyopaque,
-    wake: *const fn (?*anyopaque) bool,
+pub const EventReadyNotification = enum {
+    scheduled,
+    already_pending,
+    unavailable,
 };
+
+pub const EventReadyNotifier = struct {
+    context: ?*anyopaque,
+    notify_fn: *const fn (?*anyopaque) EventReadyNotification,
+
+    pub fn notify(self: EventReadyNotifier) EventReadyNotification {
+        return self.notify_fn(self.context);
+    }
+};
+
+test "EventReadyNotifier preserves scheduled, coalesced, and unavailable outcomes" {
+    const Harness = struct {
+        result: EventReadyNotification,
+
+        fn notify(context: ?*anyopaque) EventReadyNotification {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            return self.result;
+        }
+    };
+    var harness = Harness{ .result = .scheduled };
+    const notifier = EventReadyNotifier{ .context = &harness, .notify_fn = Harness.notify };
+    inline for (.{
+        EventReadyNotification.scheduled,
+        EventReadyNotification.already_pending,
+        EventReadyNotification.unavailable,
+    }) |result| {
+        harness.result = result;
+        try std.testing.expectEqual(result, notifier.notify());
+    }
+}
 
 pub const ScheduledRun = struct {
     context: *anyopaque,
@@ -115,7 +145,7 @@ pub const Limits = struct {
     max_ui_request_bytes: usize = 256 * 1024,
     max_ui_response_bytes: usize = 256 * 1024,
     ui_request_timeout: std.Io.Duration = .fromSeconds(30),
-    notifier: ?Notifier = null,
+    event_ready_notifier: ?EventReadyNotifier = null,
 };
 
 pub const SessionSnapshot = struct {
@@ -180,7 +210,7 @@ pub const Runtime = struct {
     max_ui_request_bytes: usize,
     max_ui_response_bytes: usize,
     ui_request_timeout: std.Io.Duration,
-    notifier: ?Notifier,
+    event_ready_notifier: ?EventReadyNotifier,
     events: event_pump.EventPump,
     scheduler: Scheduler,
     sessions_mutex: std.Io.Mutex = .init,
@@ -266,7 +296,7 @@ pub const Runtime = struct {
             .max_ui_request_bytes = limits.max_ui_request_bytes,
             .max_ui_response_bytes = limits.max_ui_response_bytes,
             .ui_request_timeout = limits.ui_request_timeout,
-            .notifier = limits.notifier,
+            .event_ready_notifier = limits.event_ready_notifier,
             .events = events,
             .scheduler = scheduler,
             .sessions = sessions,
@@ -436,13 +466,13 @@ pub const Runtime = struct {
         return self.events.takeFair();
     }
 
-    fn notify(self: *Runtime) bool {
-        const notifier = self.notifier orelse return true;
-        return notifier.wake(notifier.context);
+    fn notifyEventConsumer(self: *Runtime) EventReadyNotification {
+        const notifier = self.event_ready_notifier orelse return .scheduled;
+        return notifier.notify();
     }
 
     pub fn requestWake(self: *Runtime) bool {
-        return self.notify();
+        return self.notifyEventConsumer() != .unavailable;
     }
 
     pub fn failRun(self: *Runtime, session_id: u64, run_id: u64, cause: HostCause) Error!void {
@@ -826,7 +856,7 @@ pub const Session = struct {
         const prompt = self.prompt.?;
         self.broadcast();
         self.unlock();
-        _ = self.agent_runtime.notify();
+        _ = self.agent_runtime.notifyEventConsumer();
 
         var options = std.mem.zeroes(wire.RunOptionsV1);
         options.struct_size = @sizeOf(wire.RunOptionsV1);
@@ -883,7 +913,7 @@ pub const Session = struct {
         if (self.state != .closing and self.state != .poisoned) self.state = .idle;
         self.broadcast();
         self.unlock();
-        _ = self.agent_runtime.notify();
+        _ = self.agent_runtime.notifyEventConsumer();
     }
 
     fn abortRun(self: *Session, run_id: u64, cause: HostCause) void {
@@ -983,8 +1013,8 @@ pub const Session = struct {
             });
             return wire.CALLBACK_FATAL;
         };
-        if (!self.agent_runtime.notify()) {
-            self.recordCause(.bridge_pipeline_failure);
+        if (self.agent_runtime.notifyEventConsumer() == .unavailable) {
+            self.recordCause(.event_pipeline_failure);
             return wire.CALLBACK_FATAL;
         }
         return wire.CALLBACK_CONTINUE;
@@ -1049,9 +1079,9 @@ pub const Session = struct {
         self.broadcast();
         self.unlock();
 
-        if (!self.agent_runtime.notify()) {
+        if (self.agent_runtime.notifyEventConsumer() == .unavailable) {
             self.lock();
-            setCauseLocked(self, .bridge_pipeline_failure);
+            setCauseLocked(self, .event_pipeline_failure);
             self.ui_active = false;
             if (self.state == .waiting_ui) self.state = .running;
             self.broadcast();
@@ -1076,7 +1106,7 @@ pub const Session = struct {
             error.Canceled => {},
         };
         self.agent_runtime.allocator.free(request_copy);
-        _ = self.agent_runtime.notify();
+        _ = self.agent_runtime.notifyEventConsumer();
 
         if (answered) {
             const bytes = response orelse {
@@ -1101,7 +1131,7 @@ pub const Session = struct {
             expired = true;
         }
         self.unlock();
-        if (expired) _ = self.agent_runtime.notify();
+        if (expired) _ = self.agent_runtime.notifyEventConsumer();
     }
 
     fn releaseUiResponse(context: ?*anyopaque, out: ?*wire.OwnedBytesV1) callconv(.c) void {
@@ -1211,7 +1241,6 @@ fn abortedOutcome(cause: ?HostCause) RunOutcome {
         .session_close, .host_shutdown => .interrupted,
         .event_pipeline_failure,
         .queue_capacity_failure,
-        .bridge_pipeline_failure,
         .ui_pipeline_failure,
         .dependency_contract_failure,
         => .failed,

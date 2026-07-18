@@ -310,7 +310,7 @@ Gate 4 通过时的 sink 只提供全局 event count 和单 event bytes 硬上�
 
 ### Renderer detach/reload
 
-- 区分临时 detach 与不可恢复 pipeline failure；
+- Renderer transport failure 与 canonical event/projection failure 使用不同 typed path，不共享 Run cause；
 - 有界 retention 内允许 Host snapshot/resync；
 - 旧连接不能消费新连接事件；
 - Gate 5 transport 保留 Session/Run identity、未 ack event 和 object，并拒绝旧 generation；Gate 6 完整链路再验证 reload 后 active UI request 的原 Session/Run/request；
@@ -323,6 +323,9 @@ Gate 4 通过时的 sink 只提供全局 event count 和单 event bytes 硬上�
 - 以四个并发 pending UI request 计算 snapshot 最坏预算，并验证 512 KiB projection 可通过 8 MiB Host store 与 256 KiB 分块完整重建；
 - snapshot 不包含 credential；
 - Host/AgentCore crash 不伪装为 reload recovery。
+- event delivery 失败前两阶段 batch 不 commit，断开后在新 generation 重发，不中止 Run；
+- retention expiry 只释放 Bridge-owned transport copy，不改写 Workbench terminal history；
+- shutdown 按 stop ingress → quiesce synchronous handlers → detach Workbench → deinit owned buffers 验证无 UAF/leak。
 
 ### 大 payload
 
@@ -332,8 +335,8 @@ Gate 4 通过时的 sink 只提供全局 event count 和单 event bytes 硬上�
 
 - event decode/copy OOM；
 - control queue deadline；
-- 两阶段 batch 在 Bridge send 失败前不 commit；Gate 5 验证 `Host.failRun` 的 fatal 路由，Gate 6 再把真实 send failure 与对应 Run 自动接线；
-- HostCause first-writer-wins；
+- canonical Workbench projection failure 按 Session/Run identity 请求 Agent 终止；
+- 迁移期 HostCause first-writer-wins，但不包含 Renderer transport；
 - in-flight Run 被要求停止；
 - 最终状态 failed，不误报 cancelled。
 

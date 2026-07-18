@@ -47,7 +47,6 @@ const hostCauses = [
   "host_shutdown",
   "event_pipeline_failure",
   "queue_capacity_failure",
-  "bridge_pipeline_failure",
   "ui_pipeline_failure",
   "dependency_contract_failure",
 ] as const;

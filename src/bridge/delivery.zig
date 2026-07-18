@@ -342,6 +342,10 @@ pub const Delivery = struct {
     }
 
     pub fn deinit(self: *Delivery) void {
+        self.deinitOwnedBuffers();
+    }
+
+    pub fn deinitOwnedBuffers(self: *Delivery) void {
         for (self.retained) |entry| {
             const item = entry orelse continue;
             item.allocator.free(item.json);

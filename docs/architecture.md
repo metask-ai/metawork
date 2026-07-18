@@ -188,7 +188,7 @@ SessionRuntime
 
 RunJob
 ├── run_id
-├── HostCause（first writer wins）
+├── HostCause（迁移期 first writer wins，不包含 Renderer transport）
 ├── executor slot
 └── run-scoped Host scratch
 ```
@@ -197,6 +197,8 @@ RunJob
 - Host 使用有上限的 Run executor；
 - 空闲 Session 不占 worker；同步 Run 和同步 UI wait 占用 execution slot；
 - Bridge/main thread 不执行长耗时 Run，也不等待 permission；
+- Agent 通过 `EventReadyNotifier` 只报告 `scheduled` / `already_pending` / `unavailable`，不知道 Native main loop 或 Renderer；
+- Renderer delivery、revision、snapshot、connection 和 retention failure 作为 typed transport fact 进入 Workbench policy，默认只重试、断开或丢弃 transport copy，不中止后台 Agent Run；
 - Session close 必须在 join 与 callback quiescence 后才销毁 AgentCore handle；
 - Runtime 只能在全部 Session 销毁后销毁。
 
@@ -227,7 +229,7 @@ Workbench 在 admission 时为每个 Run 建立稳定 record slot、单调 gener
 
 Renderer reload 只重建仍存活 Host 的视图。Host/AgentCore crash 后当前 Run 必须标记 interrupted，危险工具不得自动重放。Conversation/checkpoint 跨进程恢复只有在未来 AgentCore capability 明确提供后才能设计。
 
-Host view snapshot 使用独立的 8 MiB 有界存储，不受 Bridge 单次 1 MiB result 上限反向约束。Renderer 通过带 snapshot identity 的 256 KiB 分块读取完成 resync；begin 写入前先使旧 descriptor 失效，序列化失败后旧 identity 必须保持 stale，不能继续读取已被部分覆盖的 store。revision 通知和 snapshot 拉取分别保留 pending/retry 状态，瞬时发送或读取失败不能把旧视图标记为最新。snapshot 自动重试预算按 generation 限制，耗尽后进入显式 view-sync failure 并禁止 mutation；revision emit 与 retry timer 同时失败时当前 event connection fail closed。新 event generation 建立时若仍有旧 generation 的 snapshot Promise，必须在旧 Promise 退出后继续完成新 generation 的实际 resync，不能把等待旧 Promise 误判为同步成功。
+Host view snapshot 使用独立的 8 MiB 有界存储，不受 Bridge 单次 1 MiB result 上限反向约束。Renderer 通过带 snapshot identity 的 256 KiB 分块读取完成 resync；begin 写入前先使旧 descriptor 失效，序列化失败后旧 identity 必须保持 stale，不能继续读取已被部分覆盖的 store。revision 通知和 snapshot 拉取分别保留 pending/retry 状态，瞬时发送或读取失败不能把旧视图标记为最新。snapshot 自动重试预算按 generation 限制，耗尽后进入显式 view-sync failure 并禁止 mutation；revision emit 与 retry timer 同时失败时当前 event connection fail closed。新 event generation 建立时若仍有旧 generation 的 snapshot Promise，必须在旧 Promise 退出后继续完成新 generation 的实际 resync，不能把等待旧 Promise 误判为同步成功。Bridge 异步保留的 event JSON 和 encoded batch 必须自有；App shutdown 先 stop Bridge ingress，在 Native platform loop 上确认同步 handler quiescence，然后 detach Workbench，最后才独立释放 delivery buffers。
 
 Host 与 Renderer 随同一应用包原子发布，Workbench snapshot 使用精确 schema version，不承担旧 Renderer/新 Host 或新 Renderer/旧 Host 的兼容。Renderer 必须 runtime decode Host payload；unknown version、malformed payload 或 decoder/serializer contract mismatch 一律进入 fail-closed view-sync failure，不能猜测字段或静默降级。
 
@@ -270,7 +272,8 @@ Native SDK 是当前选型，但 Phase 0A 必须验证：
 | callback/close race 造成 UAF          | abort、join、callback quiescence 后 destroy                   |
 | 同步 UI 耗尽 executor                 | bounded slots、deadline、cancel/close/shutdown 唤醒和压力测试 |
 | Bridge/event 造成无限内存             | count/byte/time 多维上限和公平调度                            |
-| Host fatal 被误报用户取消             | per-Run `HostCause` 是产品状态真相                            |
+| Run failure 被误报用户取消         | active first-writer cause 与 Workbench write-once terminal history 分层 |
+| Renderer 掉线杀死后台 Run              | typed transport policy 不向 Agent termination 反向泄漏          |
 | v1 Workspace 被误报安全               | 只允许临时/trusted 验证并显式标注限制                         |
 | 同进程 native crash 带走全部状态      | Gate 7 fault-domain spike 后再决定进程模型                    |
 | 过早建设发布系统                      | baseline 通过后再做 cache 与 remote                           |

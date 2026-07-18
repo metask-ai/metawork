@@ -123,6 +123,7 @@ Turn 是用户提交的一次交互；Run 是 AgentCore 为该交互进行的一
 ### 5.8 Workbench 界面与任务组织
 
 - 首个正式版本采用单主窗口；多个 Task 可以后台运行，切换 Workspace 或 Task 不停止执行；
+- Renderer reload、断开连接以及 Bridge revision/snapshot/event delivery failure 默认只影响视图同步和重连，不得终止后台 Agent Run；只有 Workbench 根据 canonical 产品状态作出的显式 termination 决策才能请求结束 Run；
 - 左栏只展开当前 Workspace 的 Task，Workspace 切换器必须汇总其他 Workspace 的运行、待处理和失败状态，不能让后台请求只依赖系统通知；
 - Task 是可持续补充、归档和删除的产品对象；Task lifecycle、当前 Run phase 和最近一次 Run outcome 是三类独立状态，Renderer 只能从 Host projection 派生展示标签；
 - 中间区域以用户指令、Agent 回复、工具活动、可用审批和结果构成可追溯时间线，不展示 raw AgentCore event 或 chain-of-thought；

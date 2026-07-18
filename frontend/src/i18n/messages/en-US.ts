@@ -217,7 +217,6 @@ export const enUS = {
   "cause.host_shutdown": "Workbench closed",
   "cause.event_pipeline_failure": "Activity delivery failed",
   "cause.queue_capacity_failure": "Workbench capacity reached",
-  "cause.bridge_pipeline_failure": "View delivery failed",
   "cause.ui_pipeline_failure": "Response delivery failed",
   "cause.dependency_contract_failure": "Task runtime became incompatible",
 } as const;

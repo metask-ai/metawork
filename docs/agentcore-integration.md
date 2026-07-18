@@ -251,10 +251,9 @@ HostCause 至少区分：
 - Session close；
 - Host shutdown；
 - event validation/copy failure；
-- queue/control capacity failure；
-- unrecoverable Bridge pipeline failure。
+- queue/control capacity failure。
 
-当前 wire abort reason 只作为 AgentCore 中断机制，产品最终状态由 HostCause 与 ABI status/StopReason 共同决定。
+当前 wire abort reason 只作为 AgentCore 中断机制，产品最终状态由 HostCause 与 ABI status/StopReason 共同决定。`bridge_pipeline_failure` 已从该 interim enum 删除；Renderer transport 不是 active Run cause，不得写入 Agent 中断状态。HostCause 中剩余的可变控制状态与 Workbench immutable terminal history 仍在 Executor/terminal-model 迁移阶段拆分。
 
 ### callback 内失败
 
@@ -270,18 +269,13 @@ set HostCause if absent
 
 此路径不读取 `RunResult`。
 
-### callback 返回后的失败
+### notification、projection 与 Renderer transport
 
-不可恢复 Bridge pipeline failure 发生在 Run 仍 active 时：
+event 入泵后 ownership 已经转移给 Agent event pump。`EventReadyNotifier` 只返回 `scheduled`、`already_pending` 或 `unavailable`；App 当前将 Native `services.wake()` 映射为 `scheduled/unavailable`。`unavailable` 表示 canonical consumer 无法被通知，callback 返回 fatal 并记录 interim `event_pipeline_failure`；已 owned event 仍由 pump 负责释放，不得泄漏。
 
-```text
-set HostCause
-→ request abort
-→ wait for session_run return
-→ map final state from HostCause
-```
+callback 返回后的 Workbench canonical projection failure 仍可以按 Run identity 请求 Agent 终止，当前迁移期使用 `event_pipeline_failure`；这不是 Bridge failure。Renderer event delivery、revision、snapshot、connection/generation 和 detached retention expiry 则形成 typed transport report，由 Workbench policy 决定 reject/retry/detach/discard。当前所有 Renderer transport stage 都明确不返回 `request_run_termination`；Renderer detach/reload 或 retention expiry 不得杀死后台 Run。
 
-临时 Renderer detach 不立即算 fatal。Host 可以在已定义的 count/byte/time 窗口内保留状态并重连；超过边界才升级为 pipeline failure。
+Bridge 异步 payload 必须是 owned copy 或显式 ownership transfer。Native SDK 在 platform loop 上串行执行同步 Bridge handler 与 `app.stop`；App 先关闭 ingress，用 callback lease 计数断言 quiescence，再 detach Workbench。Bridge retained JSON/batch 不借用 Workbench memory，因此在 Workbench deinit 后独立释放。
 
 ## 8. Event pump
 
@@ -388,7 +382,7 @@ call ABI
 | -------------- | ---------------------------------------------------------------------- |
 | `end_turn`     | completed                                                              |
 | `max_turns`    | stopped / awaiting_user                                                |
-| `aborted`      | HostCause 决定 cancelled / interrupted / failed                        |
+| `aborted`      | 迁移期 HostCause 决定 cancelled / interrupted / failed                  |
 | `tool_error`   | failed                                                                 |
 | `api_error`    | failed                                                                 |
 | `tool_loop`    | stopped / awaiting_user                                                |

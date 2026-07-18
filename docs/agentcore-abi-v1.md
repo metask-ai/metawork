@@ -94,7 +94,8 @@ abort 返回 stale/too-late 时仍必须 join 已有 Run job，再决定最终�
 - 携带正确 Session handle 与 run ID 进入 Host envelope；
 - 不重新定义平行的 Agent event 类型体系；
 - 不从 callback 直接调用 WebView；
-- 无法验证、复制或入队关键事件时返回 callback fatal。
+- 无法验证、复制、入队关键事件或通知 canonical consumer 时返回 callback fatal；
+- callback 返回后的 Renderer/Bridge transport failure 不属于 ABI callback failure，不得直接 abort Run。
 
 隔离的 artifact-only raw contract probe 可以使用 bundle 现有 raw SDK 表面证明 artifact 能调用，并记录 SDK 缺口；该代码不得进入正式 Host。
 
@@ -203,7 +204,7 @@ status == OK
 | `tool_error` | `failed` |
 | `api_error` | `failed` |
 | `tool_loop` | `stopped` + `awaiting_user` |
-wire abort reason 只提供当前 v1 的中断机制；用户取消、timeout、Host fatal 和 shutdown 的产品分类由 per-Run `HostCause` 记录。callback 内失败优先直接返回 callback fatal；callback 返回后的不可恢复 pipeline failure 设置 HostCause 后请求 abort。
+wire abort reason 只提供当前 v1 的中断机制；用户取消、timeout、Host fatal 和 shutdown 的产品分类由迁移期 per-Run `HostCause` 记录。callback 内失败优先直接返回 callback fatal；callback 返回后只有 canonical event/projection failure 可以按 Run identity 请求 abort。Renderer/Bridge transport failure 由 Workbench policy 处理，不进入 `HostCause`。
 
 Status 还包括 `resource_limit`。pre-admission validation/resource-limit/busy/stale-run failure 保持 Session 可复用；admission 后的 `out_of_memory`、`core_error`、`callback_failed` 或 `internal_error` poison Session，之后的 Run/abort 返回 `invalid_state`，仅 destroy 仍有效。
 
