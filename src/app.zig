@@ -892,11 +892,16 @@ pub fn run(init: std.process.Init) !void {
         if (workbench_initialized) workbench_state.deinit();
         agent_runtime.deinit();
     }
-    workbench_state = try workbench_api.Workbench.init(std.heap.c_allocator, agent_runtime, .{
-        .max_pending_ui_json_bytes = pending_ui_json_capacity,
-        .max_pending_ui_requests = host_worker_count,
-        .max_snapshot_bytes = workbench_snapshot_capacity,
-    });
+    workbench_state = try workbench_api.Workbench.initWithNotifier(
+        std.heap.c_allocator,
+        agent_runtime,
+        .{
+            .max_pending_ui_json_bytes = pending_ui_json_capacity,
+            .max_pending_ui_requests = host_worker_count,
+            .max_snapshot_bytes = workbench_snapshot_capacity,
+        },
+        .{ .context = &app, .wake = App.notifyMainLoop },
+    );
     workbench_initialized = true;
     if (init.environ_map.get("METAWORK_PROVIDER_API_KEY")) |credential|
         try workbench_state.setKnownSecret(credential);

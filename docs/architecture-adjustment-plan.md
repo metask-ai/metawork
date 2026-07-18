@@ -4,6 +4,8 @@
 > 日期：2026-07-18
 > 适用范围：Zig Native 应用、React Renderer、metacodes AgentCore 集成与自动化构建边界
 
+实施进度：阶段 1 与阶段 2 foundation 已落地；canonical notification、Executor handoff、Agent terminal model、schema v5 与 automation build isolation 仍按后续阶段推进。
+
 ## 1. 目的与决策
 
 本方案收口 MetaWork 当前目录、所有权和生命周期模型。调整的目标不是把文件换个名字，而是让执行、产品状态、传输和 composition 四种责任具有唯一所有者，并让代码依赖与文档描述一致。

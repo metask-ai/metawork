@@ -12,6 +12,7 @@ pub const Error = lifecycle.Error || std.mem.Allocator.Error || std.Thread.Spawn
     TaskBusy,
     TaskNotClosed,
     InvalidTaskTitle,
+    RunGenerationExhausted,
 };
 
 pub const Limits = struct {
@@ -27,6 +28,7 @@ pub const Limits = struct {
     max_pending_ui_json_bytes: usize = 256 * 1024,
     max_pending_ui_requests: usize = 4,
     max_ui_history_per_session: usize = 8,
+    max_terminal_diagnostic_bytes: usize = 512,
     max_snapshot_bytes: usize = 8 * 1024 * 1024,
 };
 
@@ -58,6 +60,15 @@ const TaskLifecycle = enum { open, closing, closed };
 
 const CloseResult = enum(u8) { none, running, closed, failed };
 
+pub const ChangeNotifier = struct {
+    context: ?*anyopaque = null,
+    wake: *const fn (?*anyopaque) bool = noChangeNotification,
+
+    fn notify(self: ChangeNotifier) bool {
+        return self.wake(self.context);
+    }
+};
+
 const TrackedText = struct {
     list: std.ArrayList(u8) = .empty,
 };
@@ -85,18 +96,36 @@ const UsageView = struct {
     cache_creation_input_tokens: u64 = 0,
 };
 
-const RunView = struct {
+const TerminalPublication = enum(u8) { open, publishing, published };
+
+const TerminalPayload = struct {
+    phase: RunPhase,
+    outcome: lifecycle.RunOutcome,
+    cause: ?lifecycle.HostCause,
+    diagnostic_len: usize = 0,
+    diagnostic_truncated: bool = false,
+};
+
+const RunRecord = struct {
     id: u64,
+    generation: u64,
     user: []u8,
     assistant: TrackedText = .{},
     assistant_redacted: bool = false,
-    phase: RunPhase = .queued,
+    active_phase: RunPhase = .queued,
     tools: []?ToolView,
     usage: UsageView = .{},
     status_text: []u8,
-    outcome: ?lifecycle.RunOutcome = null,
-    cause: ?lifecycle.HostCause = null,
+    terminal_publication: std.atomic.Value(TerminalPublication) = .init(.open),
+    terminal_payload: TerminalPayload = undefined,
+    terminal_diagnostic: []u8,
     next_activity_order: u64 = 1,
+};
+
+const CloseTerminalFacts = struct {
+    run_id: u64,
+    outcome: ?lifecycle.RunOutcome,
+    cause: ?lifecycle.HostCause,
 };
 
 const UiRecordKind = enum { ask_question, permission };
@@ -133,7 +162,10 @@ const SessionView = struct {
     workspace_root: []u8,
     title: []u8,
     archived: bool = false,
-    runs: []?RunView,
+    runs: []?RunRecord,
+    next_run_generation: u64 = 0,
+    run_references: std.atomic.Value(usize) = .init(0),
+    delete_pending: bool = false,
     ui_history: []?UiRecord,
     ui_history_count: usize = 0,
     ui_history_next: usize = 0,
@@ -141,13 +173,41 @@ const SessionView = struct {
     pending_ui_order: u64 = 0,
     state: lifecycle.SessionState = .idle,
     active_run_id: u64 = 0,
-    outcome: ?lifecycle.RunOutcome = null,
-    cause: ?lifecycle.HostCause = null,
     closing_session: ?*lifecycle.Session = null,
+    close_terminal_facts: ?CloseTerminalFacts = null,
     close_thread: ?std.Thread = null,
     close_result: std.atomic.Value(CloseResult) = .init(.none),
     close_failed: bool = false,
     cancel_requested: bool = false,
+};
+
+/// Stable worker reference to an admitted Run record. This value is a lease:
+/// it must not be copied, and `release` must be called exactly once.
+pub const RunRef = struct {
+    workbench: *Workbench,
+    task: *SessionView,
+    record: *RunRecord,
+    session_id: u64,
+    run_id: u64,
+    generation: u64,
+    released: bool = false,
+
+    pub fn isCurrent(self: *const RunRef) bool {
+        return !self.released and self.task.id == self.session_id and
+            self.record.id == self.run_id and self.record.generation == self.generation;
+    }
+
+    pub fn release(self: *RunRef) void {
+        std.debug.assert(!self.released);
+        std.debug.assert(self.isCurrent());
+        self.released = true;
+        const previous = self.task.run_references.fetchSub(1, .release);
+        std.debug.assert(previous != 0);
+        if (previous == 1) {
+            _ = self.task.run_references.load(.acquire);
+            _ = self.workbench.change_notifier.notify();
+        }
+    }
 };
 
 /// Workbench-owned product projection. AgentCore protocol is interpreted only
@@ -158,6 +218,7 @@ pub const Workbench = struct {
     agent_runtime: *lifecycle.Runtime,
     limits: Limits,
     sessions: []?SessionView,
+    change_notifier: ChangeNotifier,
     projection_bytes: usize = 0,
     revision: u64 = 0,
     known_secret: []u8 = &.{},
@@ -167,6 +228,15 @@ pub const Workbench = struct {
         agent_runtime: *lifecycle.Runtime,
         limits: Limits,
     ) (std.mem.Allocator.Error || error{ProjectionCapacity})!Workbench {
+        return initWithNotifier(allocator, agent_runtime, limits, .{});
+    }
+
+    pub fn initWithNotifier(
+        allocator: std.mem.Allocator,
+        agent_runtime: *lifecycle.Runtime,
+        limits: Limits,
+        change_notifier: ChangeNotifier,
+    ) (std.mem.Allocator.Error || error{ProjectionCapacity})!Workbench {
         if (limits.max_sessions == 0 or limits.max_runs_per_session == 0 or
             limits.max_tools_per_run == 0 or limits.max_projection_bytes == 0 or
             limits.max_workspace_bytes == 0 or
@@ -175,12 +245,19 @@ pub const Workbench = struct {
             limits.max_tool_field_bytes == 0 or limits.max_pending_ui_json_bytes == 0 or
             limits.max_pending_ui_requests == 0 or
             limits.max_ui_history_per_session == 0 or
+            limits.max_terminal_diagnostic_bytes == 0 or
             limits.max_snapshot_bytes == 0 or
             (worstCaseSnapshotBytes(limits) orelse return error.ProjectionCapacity) > limits.max_snapshot_bytes)
             return error.ProjectionCapacity;
         const sessions = try allocator.alloc(?SessionView, limits.max_sessions);
         @memset(sessions, null);
-        return .{ .allocator = allocator, .agent_runtime = agent_runtime, .limits = limits, .sessions = sessions };
+        return .{
+            .allocator = allocator,
+            .agent_runtime = agent_runtime,
+            .limits = limits,
+            .sessions = sessions,
+            .change_notifier = change_notifier,
+        };
     }
 
     /// Registers the Host-only provider credential that must never be copied
@@ -212,7 +289,7 @@ pub const Workbench = struct {
         errdefer self.freeTracked(workspace);
         const title = try self.copyBounded("", self.limits.max_task_title_bytes);
         errdefer self.freeTracked(title);
-        const runs = try self.allocator.alloc(?RunView, self.limits.max_runs_per_session);
+        const runs = try self.allocator.alloc(?RunRecord, self.limits.max_runs_per_session);
         errdefer self.allocator.free(runs);
         @memset(runs, null);
         const ui_history = try self.allocator.alloc(?UiRecord, self.limits.max_ui_history_per_session);
@@ -229,8 +306,6 @@ pub const Workbench = struct {
             .ui_history = ui_history,
             .state = snapshot.state,
             .active_run_id = snapshot.active_run_id,
-            .outcome = snapshot.last_outcome,
-            .cause = snapshot.cause,
         };
         self.bumpRevision();
         return self.sessions[slot].?.id;
@@ -240,28 +315,30 @@ pub const Workbench = struct {
         self.syncLifecycle();
         const view = self.findSession(session_id) orelse return error.UnknownSession;
         const session = view.session orelse return error.SessionClosing;
-        const slot = findEmpty(RunView, view.runs) orelse return error.RunCapacity;
-        const user = try self.copyBounded(prompt, self.limits.max_user_message_bytes);
-        errdefer self.freeTracked(user);
-        const status_text = try self.copyBounded("Queued", self.limits.max_tool_field_bytes);
-        errdefer self.freeTracked(status_text);
-        const tools = try self.allocator.alloc(?ToolView, self.limits.max_tools_per_run);
-        errdefer self.allocator.free(tools);
-        @memset(tools, null);
+        const slot = try self.reserveRunRecord(view, prompt);
+        errdefer self.discardRunRecord(view, slot);
         const run_id = session.submit(prompt) catch |err| return err;
-        view.runs[slot] = .{
-            .id = run_id,
-            .user = user,
-            .tools = tools,
-            .status_text = status_text,
-        };
+        view.runs[slot].?.id = run_id;
         view.state = .queued;
         view.active_run_id = run_id;
-        view.outcome = null;
-        view.cause = null;
         view.cancel_requested = false;
         self.bumpRevision();
         return run_id;
+    }
+
+    pub fn acquireRunRef(self: *Workbench, session_id: u64, run_id: u64) Error!RunRef {
+        const task = self.findSession(session_id) orelse return error.UnknownSession;
+        if (task.delete_pending) return error.UnknownSession;
+        const record = findRun(task.runs, run_id) orelse return error.NoSuchRun;
+        _ = task.run_references.fetchAdd(1, .acq_rel);
+        return .{
+            .workbench = self,
+            .task = task,
+            .record = record,
+            .session_id = session_id,
+            .run_id = run_id,
+            .generation = record.generation,
+        };
     }
 
     pub fn cancel(self: *Workbench, session_id: u64, run_id: u64) Error!void {
@@ -273,7 +350,7 @@ pub const Workbench = struct {
         try session.requestCancel(run_id, .user_cancel);
         if (record) |value| self.pushUiRecord(view, value);
         view.cancel_requested = true;
-        if (findRun(view.runs, run_id)) |run| run.phase = .stopping;
+        if (findRun(view.runs, run_id)) |run| setActivePhase(run, .stopping);
         self.bumpRevision();
     }
 
@@ -305,9 +382,10 @@ pub const Workbench = struct {
         view.state = .closing;
         view.cancel_requested = view.active_run_id != 0;
         if (findRun(view.runs, view.active_run_id)) |run| {
-            if (!isTerminalPhase(run.phase)) run.phase = .stopping;
+            if (!isTerminalPhase(runPhase(run))) setActivePhase(run, .stopping);
         }
         view.close_failed = false;
+        view.close_terminal_facts = null;
         view.close_result.store(.running, .release);
         view.close_thread = std.Thread.spawn(.{}, closeWorker, .{ self.agent_runtime, view, session }) catch |err| {
             view.close_result.store(.none, .release);
@@ -348,6 +426,13 @@ pub const Workbench = struct {
         const view = &(self.sessions[index] orelse unreachable);
         if (view.state != .closed or view.close_thread != null or view.session != null)
             return error.TaskNotClosed;
+        if (view.run_references.load(.acquire) != 0) {
+            if (!view.delete_pending) {
+                view.delete_pending = true;
+                self.bumpRevision();
+            }
+            return;
+        }
         self.deinitSessionView(view);
         self.sessions[index] = null;
         self.bumpRevision();
@@ -365,6 +450,14 @@ pub const Workbench = struct {
         var changed = false;
         for (self.sessions) |*entry| {
             const view = &(entry.* orelse continue);
+            if (view.delete_pending and view.state == .closed and view.close_thread == null and
+                view.session == null and view.run_references.load(.acquire) == 0)
+            {
+                self.deinitSessionView(view);
+                entry.* = null;
+                changed = true;
+                continue;
+            }
             const close_result = view.close_result.load(.acquire);
             if (close_result != .none and close_result != .running) {
                 view.close_thread.?.join();
@@ -373,6 +466,10 @@ pub const Workbench = struct {
                 view.closing_session = null;
                 view.close_result.store(.none, .release);
                 if (close_result == .closed) {
+                    if (view.close_terminal_facts) |facts|
+                        if (facts.outcome) |outcome|
+                            if (findRun(view.runs, facts.run_id)) |run|
+                                changed = commitTerminal(run, phaseForOutcome(outcome), outcome, facts.cause, "") or changed;
                     view.state = .closed;
                     view.session = null;
                     view.close_failed = false;
@@ -382,11 +479,10 @@ pub const Workbench = struct {
                     const snapshot = session.snapshot();
                     view.state = snapshot.state;
                     view.active_run_id = snapshot.active_run_id;
-                    view.outcome = snapshot.last_outcome;
-                    view.cause = snapshot.cause;
                     view.close_failed = true;
                     view.cancel_requested = false;
                 }
+                view.close_terminal_facts = null;
                 changed = true;
             }
             const session = view.session orelse continue;
@@ -403,13 +499,9 @@ pub const Workbench = struct {
             }
             if (snapshot.last_outcome != null or snapshot.state == .idle or snapshot.state == .closed)
                 view.cancel_requested = false;
-            if (view.state != snapshot.state or view.active_run_id != snapshot.active_run_id or
-                view.outcome != snapshot.last_outcome or view.cause != snapshot.cause)
-            {
+            if (view.state != snapshot.state or view.active_run_id != snapshot.active_run_id) {
                 view.state = snapshot.state;
                 view.active_run_id = snapshot.active_run_id;
-                view.outcome = snapshot.last_outcome;
-                view.cause = snapshot.cause;
                 changed = true;
             }
             const run = findRun(view.runs, snapshot.active_run_id) orelse continue;
@@ -419,10 +511,10 @@ pub const Workbench = struct {
                 .stopping
             else
                 phaseFor(snapshot);
-            if (run.phase != next_phase or run.outcome != snapshot.last_outcome or run.cause != snapshot.cause) {
-                run.phase = next_phase;
-                run.outcome = snapshot.last_outcome;
-                run.cause = snapshot.cause;
+            if (snapshot.last_outcome) |outcome| {
+                changed = commitTerminal(run, phaseForOutcome(outcome), outcome, snapshot.cause, "") or changed;
+            } else if (runPhase(run) != next_phase) {
+                setActivePhase(run, next_phase);
                 changed = true;
             }
         }
@@ -521,10 +613,13 @@ pub const Workbench = struct {
             if (currentRunPhase(view) == null) 0 else view.active_run_id,
         }) catch return error.SnapshotTooLarge;
         if (currentRunPhase(view)) |phase| jsonValue(writer, @tagName(phase)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        const last_terminal = lastTerminalPayload(view.runs);
         writer.writeAll(",\"lastRunOutcome\":") catch return error.SnapshotTooLarge;
-        if (view.outcome) |outcome| jsonValue(writer, @tagName(outcome)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        if (last_terminal) |terminal| jsonValue(writer, @tagName(terminal.outcome)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.writeAll(",\"cause\":") catch return error.SnapshotTooLarge;
-        if (view.cause) |cause| jsonValue(writer, @tagName(cause)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        if (last_terminal) |terminal| {
+            if (terminal.cause) |cause| jsonValue(writer, @tagName(cause)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        } else writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.writeAll(",\"runs\":[") catch return error.SnapshotTooLarge;
         var run_count: usize = 0;
         for (view.runs) |*entry| {
@@ -569,7 +664,7 @@ pub const Workbench = struct {
 
     fn findOrCreateTool(
         self: *Workbench,
-        run: *RunView,
+        run: *RunRecord,
         id: []const u8,
         name: []const u8,
         input: []const u8,
@@ -614,21 +709,58 @@ pub const Workbench = struct {
         return null;
     }
 
+    fn reserveRunRecord(self: *Workbench, task: *SessionView, prompt: []const u8) Error!usize {
+        const slot = findEmpty(RunRecord, task.runs) orelse return error.RunCapacity;
+        if (task.next_run_generation == std.math.maxInt(u64)) return error.RunGenerationExhausted;
+        const user = try self.copyBounded(prompt, self.limits.max_user_message_bytes);
+        errdefer self.freeTracked(user);
+        const status_text = try self.copyBounded("Queued", self.limits.max_tool_field_bytes);
+        errdefer self.freeTracked(status_text);
+        const tools = try self.allocator.alloc(?ToolView, self.limits.max_tools_per_run);
+        errdefer self.allocator.free(tools);
+        @memset(tools, null);
+        const terminal_diagnostic = try self.allocTrackedCapacity(self.limits.max_terminal_diagnostic_bytes);
+        errdefer self.freeTracked(terminal_diagnostic);
+        task.next_run_generation += 1;
+        task.runs[slot] = .{
+            .id = 0,
+            .generation = task.next_run_generation,
+            .user = user,
+            .tools = tools,
+            .status_text = status_text,
+            .terminal_diagnostic = terminal_diagnostic,
+        };
+        return slot;
+    }
+
+    fn discardRunRecord(self: *Workbench, task: *SessionView, slot: usize) void {
+        const run = &(task.runs[slot] orelse return);
+        self.deinitRunRecord(run);
+        task.runs[slot] = null;
+    }
+
+    fn deinitRunRecord(self: *Workbench, run: *RunRecord) void {
+        for (run.tools) |*tool_entry| {
+            const tool = &(tool_entry.* orelse continue);
+            self.freeTracked(tool.id);
+            self.freeTracked(tool.name);
+            self.freeTracked(tool.input);
+            self.freeTracked(tool.progress);
+            self.freeTracked(tool.content);
+        }
+        self.allocator.free(run.tools);
+        self.freeTracked(run.user);
+        self.freeTrackedText(&run.assistant);
+        self.freeTracked(run.status_text);
+        self.freeTracked(run.terminal_diagnostic);
+        run.* = undefined;
+    }
+
     fn deinitSessionView(self: *Workbench, session: *SessionView) void {
+        std.debug.assert(session.run_references.load(.acquire) == 0);
         for (session.runs) |*run_entry| {
             const run = &(run_entry.* orelse continue);
-            for (run.tools) |*tool_entry| {
-                const tool = &(tool_entry.* orelse continue);
-                self.freeTracked(tool.id);
-                self.freeTracked(tool.name);
-                self.freeTracked(tool.input);
-                self.freeTracked(tool.progress);
-                self.freeTracked(tool.content);
-            }
-            self.allocator.free(run.tools);
-            self.freeTracked(run.user);
-            self.freeTrackedText(&run.assistant);
-            self.freeTracked(run.status_text);
+            self.deinitRunRecord(run);
         }
         self.allocator.free(session.runs);
         self.allocator.free(session.ui_history);
@@ -641,6 +773,14 @@ pub const Workbench = struct {
         if (value.len > max or value.len > self.limits.max_projection_bytes - self.projection_bytes)
             return error.ProjectionCapacity;
         const result = try self.allocator.dupe(u8, value);
+        self.projection_bytes += result.len;
+        return result;
+    }
+
+    fn allocTrackedCapacity(self: *Workbench, capacity: usize) Error![]u8 {
+        if (capacity > self.limits.max_projection_bytes - self.projection_bytes)
+            return error.ProjectionCapacity;
+        const result = try self.allocator.alloc(u8, capacity);
         self.projection_bytes += result.len;
         return result;
     }
@@ -812,17 +952,20 @@ pub const Workbench = struct {
         return self.known_secret.len != 0 and std.mem.indexOf(u8, value, self.known_secret) != null;
     }
 
-    fn writeRun(self: *Workbench, writer: *std.Io.Writer, run: *RunView) Error!void {
-        writer.print("{{\"id\":\"{d}\",\"phase\":\"{s}\",\"user\":", .{ run.id, @tagName(run.phase) }) catch return error.SnapshotTooLarge;
+    fn writeRun(self: *Workbench, writer: *std.Io.Writer, run: *RunRecord) Error!void {
+        const terminal = terminalPayload(run);
+        writer.print("{{\"id\":\"{d}\",\"phase\":\"{s}\",\"user\":", .{ run.id, @tagName(runPhase(run)) }) catch return error.SnapshotTooLarge;
         try self.projectedJsonValue(writer, run.user);
         writer.writeAll(",\"assistant\":") catch return error.SnapshotTooLarge;
         try self.projectedJsonValue(writer, run.assistant.list.items);
         writer.print(",\"assistantRedacted\":{},\"status\":", .{run.assistant_redacted}) catch return error.SnapshotTooLarge;
         try self.projectedJsonValue(writer, run.status_text);
         writer.writeAll(",\"outcome\":") catch return error.SnapshotTooLarge;
-        if (run.outcome) |outcome| jsonValue(writer, @tagName(outcome)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        if (terminal) |value| jsonValue(writer, @tagName(value.outcome)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.writeAll(",\"cause\":") catch return error.SnapshotTooLarge;
-        if (run.cause) |cause| jsonValue(writer, @tagName(cause)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        if (terminal) |value| {
+            if (value.cause) |cause| jsonValue(writer, @tagName(cause)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        } else writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.print(",\"usage\":{{\"input\":\"{d}\",\"output\":\"{d}\",\"cacheRead\":\"{d}\",\"cacheCreation\":\"{d}\"}},\"tools\":[", .{
             run.usage.input_tokens,
             run.usage.output_tokens,
@@ -987,11 +1130,21 @@ fn closeWorker(
 ) void {
     const result: CloseResult = close: {
         session.close(.session_close) catch break :close .failed;
+        const snapshot = session.snapshot();
+        view.close_terminal_facts = .{
+            .run_id = snapshot.active_run_id,
+            .outcome = snapshot.last_outcome,
+            .cause = snapshot.cause,
+        };
         agent_runtime.releaseClosedSession(session) catch break :close .failed;
         break :close .closed;
     };
     view.close_result.store(result, .release);
     _ = agent_runtime.requestWake();
+}
+
+fn noChangeNotification(_: ?*anyopaque) bool {
+    return true;
 }
 
 fn phaseFor(snapshot: lifecycle.SessionSnapshot) RunPhase {
@@ -1014,6 +1167,58 @@ fn phaseForOutcome(outcome: lifecycle.RunOutcome) RunPhase {
     };
 }
 
+fn commitTerminal(
+    run: *RunRecord,
+    phase: RunPhase,
+    outcome: lifecycle.RunOutcome,
+    cause: ?lifecycle.HostCause,
+    diagnostic: []const u8,
+) bool {
+    std.debug.assert(isTerminalPhase(phase));
+    if (run.terminal_publication.cmpxchgStrong(.open, .publishing, .acq_rel, .acquire) == null) {
+        const diagnostic_len = @min(diagnostic.len, run.terminal_diagnostic.len);
+        @memcpy(run.terminal_diagnostic[0..diagnostic_len], diagnostic[0..diagnostic_len]);
+        run.terminal_payload = .{
+            .phase = phase,
+            .outcome = outcome,
+            .cause = cause,
+            .diagnostic_len = diagnostic_len,
+            .diagnostic_truncated = diagnostic_len != diagnostic.len,
+        };
+        run.terminal_publication.store(.published, .release);
+        return true;
+    }
+    _ = terminalPayload(run).?;
+    return false;
+}
+
+fn terminalPayload(run: *const RunRecord) ?*const TerminalPayload {
+    while (true) switch (run.terminal_publication.load(.acquire)) {
+        .open => return null,
+        .publishing => std.atomic.spinLoopHint(),
+        .published => return &run.terminal_payload,
+    };
+}
+
+fn runPhase(run: *const RunRecord) RunPhase {
+    return if (terminalPayload(run)) |terminal| terminal.phase else run.active_phase;
+}
+
+fn setActivePhase(run: *RunRecord, phase: RunPhase) void {
+    std.debug.assert(!isTerminalPhase(phase));
+    std.debug.assert(terminalPayload(run) == null);
+    run.active_phase = phase;
+}
+
+fn lastTerminalPayload(runs: []?RunRecord) ?*const TerminalPayload {
+    var latest: ?*const RunRecord = null;
+    for (runs) |*entry| {
+        const run = &(entry.* orelse continue);
+        if (latest == null or run.id > latest.?.id) latest = run;
+    }
+    return if (latest) |run| terminalPayload(run) else null;
+}
+
 fn taskLifecycle(state: lifecycle.SessionState) TaskLifecycle {
     return switch (state) {
         .closing => .closing,
@@ -1025,7 +1230,7 @@ fn taskLifecycle(state: lifecycle.SessionState) TaskLifecycle {
 fn currentRunPhase(view: *const SessionView) ?RunPhase {
     return switch (view.state) {
         .queued, .running, .waiting_ui, .closing => if (findRun(view.runs, view.active_run_id)) |run|
-            if (isTerminalPhase(run.phase)) null else run.phase
+            if (isTerminalPhase(runPhase(run))) null else runPhase(run)
         else
             null,
         .idle, .poisoned, .closed => null,
@@ -1115,7 +1320,7 @@ fn findEmpty(comptime T: type, entries: []?T) ?usize {
     return null;
 }
 
-fn findRun(entries: []?RunView, run_id: u64) ?*RunView {
+fn findRun(entries: []?RunRecord, run_id: u64) ?*RunRecord {
     if (run_id == 0) return null;
     for (entries) |*entry| if (entry.*) |*run| if (run.id == run_id) return run;
     return null;
@@ -1131,7 +1336,7 @@ fn addU64(left: u64, right: u64) error{ProjectionCapacity}!u64 {
     return std.math.add(u64, left, right) catch error.ProjectionCapacity;
 }
 
-fn takeActivityOrder(run: *RunView) u64 {
+fn takeActivityOrder(run: *RunRecord) u64 {
     const result = run.next_activity_order;
     std.debug.assert(result != std.math.maxInt(u64));
     run.next_activity_order += 1;
@@ -1206,7 +1411,7 @@ fn testWorkbench() !Workbench {
         .max_snapshot_bytes = 1024 * 1024,
     });
     const workspace = try workbench.copyBounded("/tmp/metawork-test", workbench.limits.max_workspace_bytes);
-    const runs = try workbench.allocator.alloc(?RunView, workbench.limits.max_runs_per_session);
+    const runs = try workbench.allocator.alloc(?RunRecord, workbench.limits.max_runs_per_session);
     @memset(runs, null);
     const ui_history = try workbench.allocator.alloc(?UiRecord, workbench.limits.max_ui_history_per_session);
     @memset(ui_history, null);
@@ -1214,10 +1419,12 @@ fn testWorkbench() !Workbench {
     @memset(tools, null);
     runs[0] = .{
         .id = 7,
+        .generation = 1,
         .user = try workbench.copyBounded("inspect", workbench.limits.max_user_message_bytes),
-        .phase = .running,
+        .active_phase = .running,
         .tools = tools,
         .status_text = try workbench.copyBounded("Queued", workbench.limits.max_tool_field_bytes),
+        .terminal_diagnostic = try workbench.allocTrackedCapacity(workbench.limits.max_terminal_diagnostic_bytes),
     };
     workbench.sessions[0] = .{
         .session = null,
@@ -1225,6 +1432,7 @@ fn testWorkbench() !Workbench {
         .workspace_root = workspace,
         .title = try workbench.copyBounded("", workbench.limits.max_task_title_bytes),
         .runs = runs,
+        .next_run_generation = 1,
         .ui_history = ui_history,
         .state = .running,
         .active_run_id = 7,
@@ -1273,7 +1481,8 @@ test "Task metadata mutations preserve lifecycle guards and projection accountin
 
     workbench.sessions[0].?.state = .idle;
     workbench.sessions[0].?.active_run_id = 0;
-    workbench.sessions[0].?.runs[0].?.phase = .completed;
+    const completed = &workbench.sessions[0].?.runs[0].?;
+    _ = commitTerminal(completed, .completed, .completed, null, "");
     try workbench.setTaskArchived(3, true);
     try std.testing.expect(workbench.sessions[0].?.archived);
 
@@ -1285,6 +1494,86 @@ test "Task metadata mutations preserve lifecycle guards and projection accountin
     try std.testing.expect(workbench.sessions[0] == null);
     try std.testing.expect(workbench.projection_bytes < tracked_before_delete);
     try std.testing.expectError(error.UnknownSession, workbench.renameTask(3, "gone"));
+}
+
+test "Run admission reserves a stable generation and rolls back every fallible allocation" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    const task = &workbench.sessions[0].?;
+    const tracked_before = workbench.projection_bytes;
+    const generation_before = task.next_run_generation;
+
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    const allocator = workbench.allocator;
+    workbench.allocator = failing.allocator();
+    defer workbench.allocator = allocator;
+    try std.testing.expectError(error.OutOfMemory, workbench.reserveRunRecord(task, "will fail"));
+    workbench.allocator = allocator;
+    try std.testing.expectEqual(tracked_before, workbench.projection_bytes);
+    try std.testing.expectEqual(generation_before, task.next_run_generation);
+
+    const slot = try workbench.reserveRunRecord(task, "reserved");
+    const first_generation = task.runs[slot].?.generation;
+    workbench.discardRunRecord(task, slot);
+    const reused_slot = try workbench.reserveRunRecord(task, "reserved again");
+    try std.testing.expectEqual(slot, reused_slot);
+    try std.testing.expect(task.runs[reused_slot].?.generation > first_generation);
+    try std.testing.expectError(error.RunCapacity, workbench.reserveRunRecord(task, "overflow"));
+    workbench.discardRunRecord(task, reused_slot);
+}
+
+test "terminal publication is allocation-free write-once bounded history" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    const run = &workbench.sessions[0].?.runs[0].?;
+    const diagnostic = try std.testing.allocator.alloc(u8, run.terminal_diagnostic.len + 17);
+    defer std.testing.allocator.free(diagnostic);
+    @memset(diagnostic, 'x');
+
+    try std.testing.expect(commitTerminal(run, .failed, .failed, .event_pipeline_failure, diagnostic));
+    const terminal = terminalPayload(run).?;
+    try std.testing.expectEqual(RunPhase.failed, terminal.phase);
+    try std.testing.expectEqual(lifecycle.RunOutcome.failed, terminal.outcome);
+    try std.testing.expectEqual(@as(?lifecycle.HostCause, .event_pipeline_failure), terminal.cause);
+    try std.testing.expectEqual(run.terminal_diagnostic.len, terminal.diagnostic_len);
+    try std.testing.expect(terminal.diagnostic_truncated);
+    try std.testing.expectEqualSlices(u8, diagnostic[0..run.terminal_diagnostic.len], run.terminal_diagnostic);
+    try std.testing.expect(!commitTerminal(run, .failed, .failed, .event_pipeline_failure, diagnostic));
+    try std.testing.expect(!commitTerminal(run, .interrupted, .interrupted, .session_close, "late mutation"));
+    try std.testing.expectEqual(lifecycle.RunOutcome.failed, terminalPayload(run).?.outcome);
+    try std.testing.expectEqual(@as(?lifecycle.HostCause, .event_pipeline_failure), terminalPayload(run).?.cause);
+}
+
+test "delete waits for RunRef quiescence and stale generations fail validation" {
+    const Harness = struct {
+        fn wake(context: ?*anyopaque) bool {
+            const count: *usize = @ptrCast(@alignCast(context.?));
+            count.* += 1;
+            return true;
+        }
+    };
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    var wake_count: usize = 0;
+    workbench.change_notifier = .{ .context = &wake_count, .wake = Harness.wake };
+    const task = &workbench.sessions[0].?;
+    task.state = .closed;
+    task.active_run_id = 0;
+    _ = commitTerminal(&task.runs[0].?, .completed, .completed, null, "");
+
+    var run_ref = try workbench.acquireRunRef(3, 7);
+    try std.testing.expect(run_ref.isCurrent());
+    run_ref.record.generation += 1;
+    try std.testing.expect(!run_ref.isCurrent());
+    run_ref.record.generation = run_ref.generation;
+
+    try workbench.deleteTask(3);
+    try std.testing.expect(task.delete_pending);
+    try std.testing.expect(workbench.sessions[0] != null);
+    run_ref.release();
+    try std.testing.expectEqual(@as(usize, 1), wake_count);
+    workbench.syncLifecycle();
+    try std.testing.expect(workbench.sessions[0] == null);
 }
 
 test "Workbench projection preserves text bytes with bounded geometric growth" {
@@ -1342,7 +1631,7 @@ test "default snapshot budget contains the maximum structural projection" {
     defer workbench.deinit();
 
     for (0..limits.max_sessions) |session_index| {
-        const runs = try workbench.allocator.alloc(?RunView, limits.max_runs_per_session);
+        const runs = try workbench.allocator.alloc(?RunRecord, limits.max_runs_per_session);
         @memset(runs, null);
         const ui_history = try workbench.allocator.alloc(?UiRecord, limits.max_ui_history_per_session);
         @memset(ui_history, null);
@@ -1363,9 +1652,11 @@ test "default snapshot budget contains the maximum structural projection" {
             }
             runs[run_index] = .{
                 .id = @intCast(run_index + 1),
+                .generation = @intCast(run_index + 1),
                 .user = try workbench.copyBounded("", limits.max_user_message_bytes),
                 .tools = tools,
                 .status_text = try workbench.copyBounded("", limits.max_tool_field_bytes),
+                .terminal_diagnostic = try workbench.allocTrackedCapacity(limits.max_terminal_diagnostic_bytes),
             };
         }
         workbench.sessions[session_index] = .{
@@ -1374,6 +1665,7 @@ test "default snapshot budget contains the maximum structural projection" {
             .workspace_root = try workbench.copyBounded("", limits.max_workspace_bytes),
             .title = try workbench.copyBounded("", limits.max_task_title_bytes),
             .runs = runs,
+            .next_run_generation = @intCast(limits.max_runs_per_session),
             .ui_history = ui_history,
         };
         for (0..limits.max_ui_history_per_session) |record_index| {

@@ -191,6 +191,8 @@ Gate 2 的 raw lifecycle foundation 使用 bundle SDK 提供的精确 `ApiV1` ta
 
 Gate 4 在同一状态机上直接加入 bundle typed SDK，不另建 Adapter：event callback 先校验并形成 SDK-owned parse owner，再以单调 Host Session ID 和 Run ID 进入 FIFO bounded sink；UI callback 保留校验后的 request owner，response 只由 request-aware SDK encoder 生成。同步 UI deadline 使用 Host `std.Io` future，response、cancel、close、shutdown 或 deadline 都在 callback 返回前收敛并回收 timer。
 
+当前迁移阶段由 Workbench 在调用 `Session.submit()` 前预留 durable Run record、generation、tool slots 与 terminal diagnostic buffer；任何 admission 分配失败都发生在 Agent Run 建立之前。Session 正常 terminal 或 close worker 销毁 Session 前，将固定大小 terminal facts 交给 Workbench 的 write-once publication；同一 record 的迟到重复提交不得改写已经发布的产品历史。`RunRef` 引用归零前，所属 Task 即使已关闭并请求删除也只进入 `delete_pending`。
+
 ### Close 顺序
 
 ```text
