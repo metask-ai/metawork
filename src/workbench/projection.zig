@@ -140,6 +140,23 @@ const UsageView = struct {
 };
 
 const TerminalPublication = enum(u8) { open, publishing, published };
+const AgentHandoffState = enum(u8) { queued, starting, running, finishing };
+const RunTerminationDispatch = enum {
+    pending,
+    requested,
+    already_requested,
+    already_finishing,
+    already_terminal,
+    stale_run,
+    session_closing,
+};
+
+comptime {
+    for (std.meta.fields(lifecycle.HostCause)) |field| {
+        if (field.value >= std.math.maxInt(u8))
+            @compileError("HostCause no longer fits pending_termination's cause-plus-one encoding");
+    }
+}
 
 const TerminalPayload = struct {
     phase: RunPhase,
@@ -167,6 +184,9 @@ const RunRecord = struct {
     task: *SessionView = undefined,
     session: *lifecycle.Session = undefined,
     worker_reference_held: std.atomic.Value(bool) = .init(false),
+    agent_handoff: std.atomic.Value(AgentHandoffState) = .init(.queued),
+    pending_termination: std.atomic.Value(u8) = .init(0),
+    run_control: lifecycle.RunControl = undefined,
 };
 
 const CloseTerminalFacts = struct {
@@ -394,7 +414,7 @@ pub const Workbench = struct {
                 error.QueueFull => .queue_capacity_failure,
                 error.ExecutorShuttingDown => .host_shutdown,
             };
-            session.cancelPreparedRun(run_id, cause) catch {};
+            cancelPreparedRunOrPanic(session, run_id, cause);
             releaseWorkerReference(run);
             return err;
         };
@@ -423,15 +443,23 @@ pub const Workbench = struct {
     pub fn cancel(self: *Workbench, session_id: u64, run_id: u64) Error!void {
         self.syncLifecycle();
         const view = self.findSession(session_id) orelse return error.UnknownSession;
+        const run = findRun(view.runs, run_id) orelse return error.NoSuchRun;
+        if (terminalPayload(run) != null) return;
         const session = view.session orelse
             return error.SessionClosing;
         const record = self.prepareCancelledUiRecord(session, run_id);
-        const run = findRun(view.runs, run_id) orelse return error.NoSuchRun;
-        if (self.executor.cancel(run)) {
-            try session.cancelPreparedRun(run_id, .user_cancel);
+        const dispatch: RunTerminationDispatch = if (self.executor.cancel(run)) dispatch: {
+            cancelPreparedRunOrPanic(session, run_id, .user_cancel);
             releaseWorkerReference(run);
-        } else {
-            try session.requestCancel(run_id, .user_cancel);
+            break :dispatch .requested;
+        } else requestRunTermination(run, .user_cancel);
+        const stopping = switch (dispatch) {
+            .pending, .requested, .already_requested => true,
+            .already_finishing, .already_terminal, .stale_run, .session_closing => false,
+        };
+        if (!stopping) {
+            self.syncLifecycle();
+            return;
         }
         if (record) |value| self.pushUiRecord(view, value);
         view.cancel_requested = true;
@@ -464,9 +492,12 @@ pub const Workbench = struct {
         const cancelled_ui = self.prepareCancelledUiRecord(session, view.active_run_id);
         if (findRun(view.runs, view.active_run_id)) |run| {
             if (self.executor.cancel(run)) {
-                session.cancelPreparedRun(view.active_run_id, .session_close) catch {};
+                cancelPreparedRunOrPanic(session, view.active_run_id, .session_close);
                 releaseWorkerReference(run);
-            }
+            } else consumeLifecycleTermination(
+                requestRunTermination(run, .session_close),
+                run.id,
+            );
         }
         view.session = null;
         view.closing_session = session;
@@ -708,10 +739,10 @@ pub const Workbench = struct {
                 cancelPreparedRunOrPanic(session, run.id, .host_shutdown);
                 releaseWorkerReference(run);
             } else {
-                session.requestCancel(run.id, .host_shutdown) catch |err| switch (err) {
-                    error.SessionClosing, error.SessionPoisoned, error.NoSuchRun => {},
-                    else => unreachable,
-                };
+                consumeLifecycleTermination(
+                    requestRunTermination(run, .host_shutdown),
+                    run.id,
+                );
             }
         }
         self.executor.shutdown();
@@ -1267,10 +1298,85 @@ fn closeWorker(
 
 fn executeRunJob(context: *anyopaque) void {
     const run: *RunRecord = @ptrCast(@alignCast(context));
-    run.session.executePreparedRun();
+    const claimed = run.agent_handoff.cmpxchgStrong(
+        .queued,
+        .starting,
+        .acq_rel,
+        .acquire,
+    );
+    std.debug.assert(claimed == null);
+    var agent_run = run.session.beginRun(run.id) catch {
+        run.agent_handoff.store(.finishing, .release);
+        const notifier = run.workbench.change_notifier;
+        releaseWorkerReference(run);
+        _ = notifier.notify();
+        return;
+    };
+    run.run_control = agent_run.control();
+    run.agent_handoff.store(.running, .release);
+    if (run.pending_termination.load(.acquire) != 0) {
+        if (run.run_control.tryAcquireLease()) |lease_value| {
+            var lease = lease_value;
+            const result = lease.requestTermination(pendingTerminationCause(run));
+            lease.deinit();
+            if (result == .stale_run) std.debug.panic(
+                "newly published RunControl for Run {d} was already stale",
+                .{run.id},
+            );
+        }
+    }
+    agent_run.execute();
+    run.agent_handoff.store(.finishing, .release);
+    agent_run.deinit();
     const notifier = run.workbench.change_notifier;
     releaseWorkerReference(run);
     _ = notifier.notify();
+}
+
+fn requestRunTermination(run: *RunRecord, cause: lifecycle.HostCause) RunTerminationDispatch {
+    const encoded = encodePendingTerminationCause(cause);
+    _ = run.pending_termination.cmpxchgStrong(0, encoded, .acq_rel, .acquire);
+    switch (run.agent_handoff.load(.acquire)) {
+        .queued, .starting => return .pending,
+        .finishing => return .already_finishing,
+        .running => {},
+    }
+    const lease_value = run.run_control.tryAcquireLease() orelse return .already_finishing;
+    var lease = lease_value;
+    defer lease.deinit();
+    return switch (lease.requestTermination(pendingTerminationCause(run))) {
+        .requested => .requested,
+        .already_requested => .already_requested,
+        .already_terminal => .already_terminal,
+        .stale_run => .stale_run,
+        .session_closing => .session_closing,
+    };
+}
+
+fn consumeLifecycleTermination(dispatch: RunTerminationDispatch, run_id: u64) void {
+    switch (dispatch) {
+        .pending,
+        .requested,
+        .already_requested,
+        .already_finishing,
+        .already_terminal,
+        .session_closing,
+        => {},
+        .stale_run => std.debug.panic(
+            "active lifecycle Run {d} published a stale RunControl",
+            .{run_id},
+        ),
+    }
+}
+
+fn encodePendingTerminationCause(cause: lifecycle.HostCause) u8 {
+    return @as(u8, @intCast(@intFromEnum(cause))) + 1;
+}
+
+fn pendingTerminationCause(run: *const RunRecord) lifecycle.HostCause {
+    const encoded = run.pending_termination.load(.acquire);
+    std.debug.assert(encoded != 0);
+    return @enumFromInt(encoded - 1);
 }
 
 fn cancelRunJobForShutdown(context: *anyopaque) void {

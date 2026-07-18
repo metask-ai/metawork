@@ -41,6 +41,141 @@ pub const RunOutcome = enum {
     dependency_contract_failure,
 };
 
+pub const TerminationRequestResult = enum {
+    requested,
+    already_requested,
+    already_terminal,
+    stale_run,
+    session_closing,
+};
+
+const control_closed_bit = @as(usize, 1) << (@bitSizeOf(usize) - 1);
+const control_reference_mask = control_closed_bit - 1;
+
+const SessionControlBlock = struct {
+    session: *Session,
+    lifetime: std.atomic.Value(usize) = .init(1),
+    wait_mutex: std.Io.Mutex = .init,
+    wait_condition: std.Io.Condition = .init,
+
+    fn tryRetain(self: *SessionControlBlock) bool {
+        var current = self.lifetime.load(.acquire);
+        while (current & control_closed_bit == 0) {
+            const references = current & control_reference_mask;
+            if (references == control_reference_mask) return false;
+            if (self.lifetime.cmpxchgWeak(
+                current,
+                current + 1,
+                .acq_rel,
+                .acquire,
+            )) |observed| {
+                current = observed;
+            } else return true;
+        }
+        return false;
+    }
+
+    fn release(self: *SessionControlBlock) void {
+        self.wait_mutex.lockUncancelable(self.session.agent_runtime.io);
+        const previous = self.lifetime.fetchSub(1, .acq_rel);
+        std.debug.assert(previous & control_reference_mask > 1);
+        self.wait_condition.broadcast(self.session.agent_runtime.io);
+        self.wait_mutex.unlock(self.session.agent_runtime.io);
+    }
+
+    fn disableNewLeases(self: *SessionControlBlock) void {
+        _ = self.lifetime.fetchOr(control_closed_bit, .acq_rel);
+    }
+
+    fn waitForLeaseQuiescence(self: *SessionControlBlock) void {
+        self.wait_mutex.lockUncancelable(self.session.agent_runtime.io);
+        defer self.wait_mutex.unlock(self.session.agent_runtime.io);
+        while (self.lifetime.load(.acquire) & control_reference_mask != 1)
+            self.wait_condition.waitUncancelable(
+                self.session.agent_runtime.io,
+                &self.wait_mutex,
+            );
+    }
+
+    fn deinit(self: *SessionControlBlock) void {
+        const lifetime = self.lifetime.load(.acquire);
+        std.debug.assert(lifetime & control_closed_bit != 0);
+        std.debug.assert(lifetime & control_reference_mask == 1);
+    }
+};
+
+pub const RunControl = struct {
+    block: *SessionControlBlock,
+    run_id: u64,
+    generation: u64,
+
+    pub fn tryAcquireLease(self: RunControl) ?RunControlLease {
+        if (!self.block.tryRetain()) return null;
+        return .{
+            .block = self.block,
+            .run_id = self.run_id,
+            .generation = self.generation,
+        };
+    }
+};
+
+/// A retained Agent control reference. This is a linear value: callers must
+/// not copy it and must call `deinit` exactly once.
+pub const RunControlLease = struct {
+    block: *SessionControlBlock,
+    run_id: u64,
+    generation: u64,
+    released: bool = false,
+
+    pub fn requestTermination(
+        self: *const RunControlLease,
+        cause: HostCause,
+    ) TerminationRequestResult {
+        std.debug.assert(!self.released);
+        return self.block.session.requestControlledTermination(
+            self.run_id,
+            self.generation,
+            cause,
+        );
+    }
+
+    pub fn deinit(self: *RunControlLease) void {
+        std.debug.assert(!self.released);
+        self.released = true;
+        self.block.release();
+    }
+};
+
+/// The unique execution owner returned by `Session.beginRun`. This is a linear
+/// value and must execute and deinitialize exactly once.
+pub const Run = struct {
+    session: *Session,
+    run_id: u64,
+    generation: u64,
+    base_lease: RunControlLease,
+    executed: bool = false,
+
+    pub fn control(self: *const Run) RunControl {
+        return .{
+            .block = self.base_lease.block,
+            .run_id = self.run_id,
+            .generation = self.generation,
+        };
+    }
+
+    pub fn execute(self: *Run) void {
+        std.debug.assert(!self.executed);
+        self.executed = true;
+        self.session.executeBegunRun(self.run_id, self.generation);
+    }
+
+    pub fn deinit(self: *Run) void {
+        std.debug.assert(self.executed);
+        self.base_lease.deinit();
+        self.* = undefined;
+    }
+};
+
 pub const WorkspaceTrust = union(enum) {
     temporary: []const u8,
     explicitly_trusted,
@@ -158,6 +293,7 @@ pub const Error = error{
     SessionClosing,
     PromptTooLarge,
     RunIdExhausted,
+    RunGenerationExhausted,
     SessionIdExhausted,
     NoSuchRun,
     NoPendingUiRequest,
@@ -294,13 +430,17 @@ pub const Runtime = struct {
 
         const session = try self.allocator.create(Session);
         errdefer self.allocator.destroy(session);
+        const control_block = try self.allocator.create(SessionControlBlock);
+        errdefer self.allocator.destroy(control_block);
         const workspace_root = try self.allocator.dupe(u8, options.workspace.canonical_root);
         errdefer self.allocator.free(workspace_root);
         session.* = .{
             .agent_runtime = self,
             .id = session_id,
             .workspace_root = workspace_root,
+            .control_block = control_block,
         };
+        control_block.* = .{ .session = session };
 
         const secret = try self.allocator.dupe(u8, options.credential);
         defer {
@@ -485,12 +625,16 @@ pub const Session = struct {
     id: u64,
     raw: ?*wire.SessionHandle = null,
     workspace_root: []u8,
+    control_block: *SessionControlBlock,
     mutex: std.Io.Mutex = .init,
     condition: std.Io.Condition = .init,
     state: SessionState = .idle,
     next_run_id: u64 = 0,
+    next_run_generation: u64 = 0,
     active_run_id: u64 = 0,
+    active_run_generation: u64 = 0,
     run_started: bool = false,
+    core_call_in_progress: bool = false,
     run_done: bool = true,
     prompt: ?[]u8 = null,
     cause: ?HostCause = null,
@@ -526,7 +670,7 @@ pub const Session = struct {
     }
 
     /// Prepares an Agent Run after Workbench admission. Workbench owns queueing
-    /// and must call exactly one of `executePreparedRun` or `cancelPreparedRun`.
+    /// and must call exactly one of `beginRun` or `cancelPreparedRun`.
     pub fn prepareRun(self: *Session, prompt: []const u8) (Error || std.mem.Allocator.Error)!u64 {
         if (prompt.len > self.agent_runtime.max_prompt_bytes) return error.PromptTooLarge;
         const owned_prompt = try self.agent_runtime.allocator.dupe(u8, prompt);
@@ -552,10 +696,17 @@ pub const Session = struct {
             self.unlock();
             return error.RunIdExhausted;
         }
+        if (self.next_run_generation == std.math.maxInt(u64)) {
+            self.unlock();
+            return error.RunGenerationExhausted;
+        }
         self.next_run_id += 1;
+        self.next_run_generation += 1;
         const run_id = self.next_run_id;
         self.active_run_id = run_id;
+        self.active_run_generation = self.next_run_generation;
         self.run_started = false;
+        self.core_call_in_progress = false;
         self.run_done = false;
         self.prompt = owned_prompt;
         self.cause = null;
@@ -569,8 +720,59 @@ pub const Session = struct {
         return run_id;
     }
 
+    /// Installs the generation-checked termination control and transfers
+    /// execution ownership from Workbench to Agent. A successful call must be
+    /// followed by exactly one `Run.execute` and `Run.deinit`.
+    pub fn beginRun(self: *Session, run_id: u64) Error!Run {
+        self.lock();
+        if (run_id == 0 or run_id != self.active_run_id) {
+            self.unlock();
+            return error.NoSuchRun;
+        }
+        if (self.state != .queued) {
+            const begin_error: Error = switch (self.state) {
+                .poisoned => error.SessionPoisoned,
+                .closing, .closed => error.SessionClosing,
+                .idle, .running, .waiting_ui, .queued => error.NoSuchRun,
+            };
+            if ((self.state == .closing or self.state == .closed) and !self.run_done and
+                !self.run_started)
+                self.finishBeforeCoreCallLocked();
+            self.unlock();
+            return begin_error;
+        }
+        const generation = self.active_run_generation;
+        std.debug.assert(generation != 0);
+        const retained = self.control_block.tryRetain();
+        std.debug.assert(retained);
+        self.state = .running;
+        self.run_started = true;
+        self.core_call_in_progress = false;
+        self.broadcast();
+        self.unlock();
+        _ = self.agent_runtime.notifyEventConsumer();
+        return .{
+            .session = self,
+            .run_id = run_id,
+            .generation = generation,
+            .base_lease = .{
+                .block = self.control_block,
+                .run_id = run_id,
+                .generation = generation,
+            },
+        };
+    }
+
+    /// Transitional compatibility entry point for isolated contract probes.
+    /// Product code must use `beginRun` so it can publish `RunControl` before
+    /// entering the synchronous ABI call.
     pub fn executePreparedRun(self: *Session) void {
-        self.executeRun();
+        self.lock();
+        const run_id = self.active_run_id;
+        self.unlock();
+        var run = self.beginRun(run_id) catch return;
+        defer run.deinit();
+        run.execute();
     }
 
     pub fn cancelPreparedRun(self: *Session, run_id: u64, cause: HostCause) Error!void {
@@ -616,12 +818,47 @@ pub const Session = struct {
         if (was_queued) {
             self.lock();
             while (!self.run_done and !self.run_started) self.wait();
-            const should_abort = self.run_started and !self.run_done;
+            const should_abort = self.core_call_in_progress and !self.run_done;
             self.unlock();
             if (should_abort) self.abortRun(run_id, cause);
             return;
         }
-        self.abortRun(run_id, cause);
+        self.lock();
+        const should_abort = self.core_call_in_progress and !self.run_done;
+        self.unlock();
+        if (should_abort) self.abortRun(run_id, cause);
+    }
+
+    fn requestControlledTermination(
+        self: *Session,
+        run_id: u64,
+        generation: u64,
+        cause: HostCause,
+    ) TerminationRequestResult {
+        self.lock();
+        if (run_id != self.active_run_id or generation != self.active_run_generation) {
+            self.unlock();
+            return .stale_run;
+        }
+        if (self.run_done) {
+            self.unlock();
+            return .already_terminal;
+        }
+        if (self.state == .closing or self.state == .closed) {
+            self.unlock();
+            return .session_closing;
+        }
+        if (self.cancel_requested) {
+            self.unlock();
+            return .already_requested;
+        }
+        self.cancel_requested = true;
+        setCauseLocked(self, cause);
+        wakeUiLocked(self);
+        const should_abort = self.core_call_in_progress;
+        self.unlock();
+        if (should_abort) self.abortRun(run_id, cause);
+        return .requested;
     }
 
     pub fn respondUi(
@@ -756,7 +993,8 @@ pub const Session = struct {
             self.unlock();
             return self.destroyRawSession();
         }
-        const should_abort_now = self.run_started and !self.run_done;
+        self.control_block.disableNewLeases();
+        const should_abort_now = self.core_call_in_progress and !self.run_done;
         const run_id = self.active_run_id;
         self.state = .closing;
         setCauseLocked(self, cause);
@@ -768,7 +1006,7 @@ pub const Session = struct {
 
         self.lock();
         while (!self.run_done and !self.run_started) self.wait();
-        const should_abort_late = !should_abort_now and self.run_started and !self.run_done;
+        const should_abort_late = !should_abort_now and self.core_call_in_progress and !self.run_done;
         self.unlock();
         if (should_abort_late) self.abortRun(run_id, cause);
 
@@ -776,6 +1014,11 @@ pub const Session = struct {
         while (!self.run_done) self.wait();
         while (self.active_refs != 0) self.wait();
         self.unlock();
+
+        // Never wait for Agent control references while holding a Workbench or
+        // Session lock. A worker may need both to publish terminal completion
+        // and release the execution base lease.
+        self.control_block.waitForLeaseQuiescence();
 
         return self.destroyRawSession();
     }
@@ -800,25 +1043,20 @@ pub const Session = struct {
         if (failed) return error.SessionDestroyFailed;
     }
 
-    fn executeRun(self: *Session) void {
+    fn executeBegunRun(self: *Session, run_id: u64, generation: u64) void {
         self.lock();
-        if (self.state != .queued) {
-            self.run_done = true;
-            if (self.prompt) |prompt| {
-                self.agent_runtime.allocator.free(prompt);
-                self.prompt = null;
-            }
-            self.broadcast();
+        std.debug.assert(run_id == self.active_run_id);
+        std.debug.assert(generation == self.active_run_generation);
+        std.debug.assert(self.run_started and !self.run_done);
+        if (self.cancel_requested or self.state == .closing) {
+            self.finishBeforeCoreCallLocked();
             self.unlock();
+            _ = self.agent_runtime.notifyEventConsumer();
             return;
         }
-        self.state = .running;
-        self.run_started = true;
-        const run_id = self.active_run_id;
+        self.core_call_in_progress = true;
         const prompt = self.prompt.?;
-        self.broadcast();
         self.unlock();
-        _ = self.agent_runtime.notifyEventConsumer();
 
         var options = std.mem.zeroes(wire.RunOptionsV1);
         options.struct_size = @sizeOf(wire.RunOptionsV1);
@@ -840,6 +1078,7 @@ pub const Session = struct {
         releaseOwned(self.agent_runtime.api, &diagnostic);
 
         self.lock();
+        self.core_call_in_progress = false;
         self.agent_runtime.allocator.free(prompt);
         self.prompt = null;
         self.last_status = status;
@@ -878,6 +1117,19 @@ pub const Session = struct {
         _ = self.agent_runtime.notifyEventConsumer();
     }
 
+    fn finishBeforeCoreCallLocked(self: *Session) void {
+        std.debug.assert(!self.core_call_in_progress);
+        if (self.prompt) |prompt| {
+            self.agent_runtime.allocator.free(prompt);
+            self.prompt = null;
+        }
+        self.last_outcome = abortedOutcome(self.cause);
+        self.run_started = false;
+        self.run_done = true;
+        if (self.state != .closing and self.state != .poisoned) self.state = .idle;
+        self.broadcast();
+    }
+
     fn abortRun(self: *Session, run_id: u64, cause: HostCause) void {
         var diagnostic = emptyOwnedBytes();
         const status = self.agent_runtime.api.sessionAbort()(
@@ -899,20 +1151,15 @@ pub const Session = struct {
 
     fn finishCancelledQueuedRun(self: *Session) void {
         self.lock();
-        if (self.prompt) |prompt| {
-            self.agent_runtime.allocator.free(prompt);
-            self.prompt = null;
-        }
-        self.last_outcome = abortedOutcome(self.cause);
-        self.run_done = true;
-        if (self.state != .closing) self.state = .idle;
-        self.broadcast();
+        self.finishBeforeCoreCallLocked();
         self.unlock();
     }
 
     fn deinit(self: *Session) void {
         std.debug.assert(self.state == .closed);
         std.debug.assert(self.active_refs == 0);
+        self.control_block.deinit();
+        self.agent_runtime.allocator.destroy(self.control_block);
         if (self.prompt) |prompt| self.agent_runtime.allocator.free(prompt);
         if (self.ui_request_json) |json| self.agent_runtime.allocator.free(json);
         if (self.ui_response_json) |json| self.agent_runtime.allocator.free(json);

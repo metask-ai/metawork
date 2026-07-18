@@ -519,6 +519,8 @@ const fake_api = wire.ApiV1{
 };
 
 fn openSession(host: *lifecycle.Runtime) !*lifecycle.Session {
+    const workspace_root = if (std.fs.path.sep == '\\') "C:\\tmp\\metawork-gate2" else "/tmp/metawork-gate2";
+    const temporary_root = if (std.fs.path.sep == '\\') "C:\\tmp" else "/tmp";
     return host.createSession(.{
         .provider_kind_code = wire.PROVIDER_ANTHROPIC,
         .permission_mode_code = wire.PERMISSION_DEFAULT,
@@ -526,8 +528,8 @@ fn openSession(host: *lifecycle.Runtime) !*lifecycle.Session {
         .credential = "fixture-secret",
         .model = "fixture-model",
         .workspace = .{
-            .canonical_root = "/tmp/metawork-gate2",
-            .trust = .{ .temporary = "/tmp" },
+            .canonical_root = workspace_root,
+            .trust = .{ .temporary = temporary_root },
         },
     });
 }
@@ -553,7 +555,14 @@ const TestHostLimits = struct {
         if (self.per_session_control_reserved_capacity) |value|
             limits.per_session_control_reserved_capacity = value;
         if (self.max_ui_response_bytes) |value| limits.max_ui_response_bytes = value;
-        if (self.ui_request_timeout) |value| limits.ui_request_timeout = value;
+        if (self.ui_request_timeout) |value| {
+            limits.ui_request_timeout = value;
+        } else if (std.fs.path.sep == '\\') {
+            // Windows ThreadedIo retains canceled sleep futures until their
+            // deadline. Keep native cross-platform tests bounded; the explicit
+            // deadline test supplies its own shorter value.
+            limits.ui_request_timeout = .fromSeconds(5);
+        }
         return limits;
     }
 };
@@ -643,8 +652,13 @@ fn closeSession(session: *lifecycle.Session, cause: lifecycle.HostCause) !void {
 fn shutdownHost(runtime: *lifecycle.Runtime) !void {
     const entry = testHostEntry(runtime);
     if (entry.executor_shutdown.cmpxchgStrong(.open, .running, .acq_rel, .acquire) == null) {
+        var runtime_error: ?lifecycle.Error = null;
+        runtime.shutdown() catch |err| {
+            runtime_error = err;
+        };
         entry.executor.shutdown();
         entry.executor_shutdown.store(.complete, .release);
+        if (runtime_error) |err| return err;
     } else {
         while (entry.executor_shutdown.load(.acquire) != .complete)
             std.Thread.yield() catch {};
@@ -682,6 +696,8 @@ fn createHost(limits: TestHostLimits) !*lifecycle.Runtime {
 }
 
 fn workbenchSessionOptions() lifecycle.SessionOpenOptions {
+    const workspace_root = if (std.fs.path.sep == '\\') "C:\\tmp\\metawork-gate6" else "/tmp/metawork-gate6";
+    const temporary_root = if (std.fs.path.sep == '\\') "C:\\tmp" else "/tmp";
     return .{
         .provider_kind_code = wire.PROVIDER_ANTHROPIC,
         .permission_mode_code = wire.PERMISSION_DEFAULT,
@@ -689,8 +705,8 @@ fn workbenchSessionOptions() lifecycle.SessionOpenOptions {
         .credential = "fixture-secret",
         .model = "fixture-model",
         .workspace = .{
-            .canonical_root = "/tmp/metawork-gate6",
-            .trust = .{ .temporary = "/tmp" },
+            .canonical_root = workspace_root,
+            .trust = .{ .temporary = temporary_root },
         },
     };
 }
@@ -724,6 +740,113 @@ fn shutdownOnThread(host: *lifecycle.Runtime) void {
     shutdownHost(host) catch unreachable;
 }
 
+test "RunControlLease remains safe after natural completion" {
+    fake_core.reset();
+    const host = try createHost(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
+    defer {
+        shutdownHost(host) catch unreachable;
+        deinitHost(host);
+    }
+    const session = try openSession(host);
+    const run_id = try session.prepareRun("complete before the retained lease is released");
+    var run = try session.beginRun(run_id);
+    var lease = run.control().tryAcquireLease().?;
+    run.execute();
+    run.deinit();
+
+    try std.testing.expectEqual(
+        lifecycle.TerminationRequestResult.already_terminal,
+        lease.requestTermination(.user_cancel),
+    );
+    lease.deinit();
+    try closeSession(session, .session_close);
+}
+
+test "RunControlLease rejects a stale generation after slot reuse" {
+    fake_core.reset();
+    const host = try createHost(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
+    defer {
+        shutdownHost(host) catch unreachable;
+        deinitHost(host);
+    }
+    const session = try openSession(host);
+
+    const first_id = try session.prepareRun("first generation");
+    var first = try session.beginRun(first_id);
+    var stale = first.control().tryAcquireLease().?;
+    first.execute();
+    first.deinit();
+
+    const second_id = try session.prepareRun("second generation");
+    var second = try session.beginRun(second_id);
+    try std.testing.expectEqual(
+        lifecycle.TerminationRequestResult.stale_run,
+        stale.requestTermination(.user_cancel),
+    );
+    stale.deinit();
+    second.execute();
+    second.deinit();
+    try closeSession(session, .session_close);
+}
+
+test "RunControlLease termination before execute avoids the Core call" {
+    fake_core.reset();
+    const host = try createHost(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
+    defer {
+        shutdownHost(host) catch unreachable;
+        deinitHost(host);
+    }
+    const session = try openSession(host);
+    const run_id = try session.prepareRun("cancel before entering Core");
+    var run = try session.beginRun(run_id);
+    var lease = run.control().tryAcquireLease().?;
+    try std.testing.expectEqual(
+        lifecycle.TerminationRequestResult.requested,
+        lease.requestTermination(.user_cancel),
+    );
+    lease.deinit();
+    run.execute();
+    run.deinit();
+
+    const snapshot = session.snapshot();
+    try std.testing.expectEqual(@as(?u32, null), snapshot.last_status);
+    try std.testing.expectEqual(@as(?lifecycle.RunOutcome, .cancelled), snapshot.last_outcome);
+    fake_core.lock();
+    const run_calls = fake_core.run_calls;
+    const abort_calls = fake_core.abort_calls;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 0), run_calls);
+    try std.testing.expectEqual(@as(usize, 0), abort_calls);
+    try closeSession(session, .session_close);
+}
+
+test "RunControlLease close disables acquisition and waits for quiescence" {
+    fake_core.reset();
+    const host = try createHost(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
+    defer {
+        shutdownHost(host) catch unreachable;
+        deinitHost(host);
+    }
+    const session = try openSession(host);
+    const run_id = try session.prepareRun("retain control across close");
+    var run = try session.beginRun(run_id);
+    const control = run.control();
+    var lease = control.tryAcquireLease().?;
+    run.execute();
+    run.deinit();
+
+    const close_thread = try std.Thread.spawn(.{}, closeOnThread, .{session});
+    try session.waitForState(.closing);
+    try std.testing.expect(control.tryAcquireLease() == null);
+    fake_core.lock();
+    const destroyed_while_leased = fake_core.session_destroyed;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 0), destroyed_while_leased);
+    lease.deinit();
+    close_thread.join();
+    try std.testing.expectEqual(lifecycle.SessionState.closed, session.snapshot().state);
+}
+
 test "Host creates and destroys Runtime and idle Session" {
     fake_core.reset();
     const host = try createHost(.{
@@ -748,6 +871,9 @@ test "Host creates and destroys Runtime and idle Session" {
 
 test "Workspace requires an absolute temporary or explicit trusted root" {
     fake_core.reset();
+    const outside_temporary = if (std.fs.path.sep == '\\') "C:\\var\\not-temp" else "/var/not-temp";
+    const temporary_root = if (std.fs.path.sep == '\\') "C:\\tmp" else "/tmp";
+    const non_canonical = if (std.fs.path.sep == '\\') "C:\\tmp\\..\\etc" else "/tmp/../etc";
     const host = try createHost(.{
         .worker_count = 1,
         .queue_capacity = 1,
@@ -772,8 +898,8 @@ test "Workspace requires an absolute temporary or explicit trusted root" {
         .credential = "fixture-secret",
         .model = "fixture-model",
         .workspace = .{
-            .canonical_root = "/var/not-temp",
-            .trust = .{ .temporary = "/tmp" },
+            .canonical_root = outside_temporary,
+            .trust = .{ .temporary = temporary_root },
         },
     }));
     try std.testing.expectError(error.InvalidWorkspace, host.createSession(.{
@@ -783,8 +909,8 @@ test "Workspace requires an absolute temporary or explicit trusted root" {
         .credential = "fixture-secret",
         .model = "fixture-model",
         .workspace = .{
-            .canonical_root = "/tmp/../etc",
-            .trust = .{ .temporary = "/tmp" },
+            .canonical_root = non_canonical,
+            .trust = .{ .temporary = temporary_root },
         },
     }));
 }
@@ -1368,6 +1494,34 @@ test "Gate 6 Workbench close cancels a queued Run without blocking the caller" {
     try std.testing.expectEqual(@as(usize, 1), destroyed);
 }
 
+test "Workbench cancel of a completed Run is an idempotent no-op" {
+    fake_core.reset();
+    const host = try createHost(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
+    defer {
+        shutdownHost(host) catch unreachable;
+        deinitHost(host);
+    }
+    var workbench = try host_workbench.Workbench.init(std.testing.allocator, host, .{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 1,
+        .max_runs_per_session = 1,
+        .max_tools_per_run = 1,
+    });
+    defer workbench.deinit();
+
+    const session_id = try workbench.createSession(workbenchSessionOptions());
+    const run_id = try workbench.submit(session_id, "finish before cancel arrives");
+    try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
+    const revision = workbench.currentRevision();
+    try workbench.cancel(session_id, run_id);
+    try std.testing.expectEqual(revision, workbench.currentRevision());
+    try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
+
+    try workbench.closeSession(session_id);
+    try waitWorkbenchSnapshot(&workbench, "\"lifecycle\":\"closed\"");
+}
+
 test "Workbench shutdown terminates a waiting UI Run before joining workers" {
     fake_core.reset();
     fake_core.setNextPlan(.ui_wait);
@@ -1548,7 +1702,8 @@ test "Session creation OOM leaves Host reusable and credential Host-only" {
     failing.fail_index = std.math.maxInt(usize);
     const session = try openSession(host);
     const snapshot = session.snapshot();
-    try std.testing.expectEqualStrings("/tmp/metawork-gate2", snapshot.workspace_root);
+    const expected_workspace = if (std.fs.path.sep == '\\') "C:\\tmp\\metawork-gate2" else "/tmp/metawork-gate2";
+    try std.testing.expectEqualStrings(expected_workspace, snapshot.workspace_root);
     try std.testing.expect(fake_core.credential_seen);
     try closeSession(session, .session_close);
 }

@@ -191,12 +191,14 @@ Gate 2 的 raw lifecycle foundation 使用 bundle SDK 提供的精确 `ApiV1` ta
 
 Gate 4 在同一状态机上直接加入 bundle typed SDK，不另建 Adapter：event callback 先校验并形成 SDK-owned parse owner，再以单调 Host Session ID 和 Run ID 进入 FIFO bounded sink；UI callback 保留校验后的 request owner，response 只由 request-aware SDK encoder 生成。同步 UI deadline 使用 Host `std.Io` future，response、cancel、close、shutdown 或 deadline 都在 callback 返回前收敛并回收 timer。
 
-当前迁移阶段由 Workbench 预留 durable Run record、generation、tool slots 与 terminal diagnostic buffer，再调用 `Session.prepareRun()` 并把 Workbench-owned job 放入自身 bounded Executor。worker 主动调用 transitional `executePreparedRun()`；Agent Runtime 不 enqueue、不停止、也不销毁 Executor。Session 正常 terminal 或 close worker 销毁 Session 前，将固定大小 terminal facts 交给 Workbench 的 write-once publication；同一 record 的迟到重复提交不得改写已经发布的产品历史。`RunRef` 引用归零前，所属 Task 即使已关闭并请求删除也只进入 `delete_pending`。
+当前迁移阶段由 Workbench 预留 durable Run record、generation、tool slots 与 terminal diagnostic buffer，再调用 `Session.prepareRun()` 并把 Workbench-owned job 放入自身 bounded Executor。worker claim 后以原子 `starting` 状态调用 `Session.beginRun()`；成功后先发布 generation-bound `RunControl` 和 `running`，再调用唯一 latch-aware `Run.execute()`。cancel/close/shutdown 在 `starting` 时只发布 first-writer pending termination，在 `running` 时取得 `RunControlLease` 后于锁外请求终止。Agent Runtime 不 enqueue、不停止、也不销毁 Executor。
+
+每个 Session 拥有独立分配、存活到 Session release 的 `SessionControlBlock`。`RunControlLease` 用 closed-bit + atomic reference count 保活该 control block，并携带单调 `run_generation`；旧 lease 在下一 Run 复用执行槽后返回 `stale_run`，Run 自然完成后返回 `already_terminal`。Session close 先关闭 lease acquisition gate，再等待 Run、callback 和全部 control lease 归零；该 quiescence wait 不持有 Session/Workbench lock。当前 terminal facts 仍从 Session snapshot 进入 Workbench write-once publication，下一 terminal-model 切片将改为 immutable `TerminalResult` 直接提交。`RunRef` 引用归零前，所属 Task 即使已关闭并请求删除也只进入 `delete_pending`。
 
 ### Close 顺序
 
 ```text
-1. CAS Session state → Closing
+1. close control lease acquisition gate and CAS Session state → Closing
 2. reject new Run and UI response
 3. remove/cancel queued Run
 4. wake active synchronous UI wait
@@ -204,8 +206,9 @@ Gate 4 在同一状态机上直接加入 bundle typed SDK，不另建 Adapter：
 6. request abort for active Run
 7. join Run job
 8. wait callback refcount == 0
-9. call session_destroy
-10. free Host callback/session state and mark Closed
+9. wait control refcount == owner only
+10. call session_destroy
+11. free Host callback/session state and mark Closed
 ```
 
 规则：
@@ -238,10 +241,15 @@ Gate 4 在同一状态机上直接加入 bundle typed SDK，不另建 Adapter：
 每个 Run 持有：
 
 ```text
-RunControl
-├── HostCause: atomic optional, first writer wins
+SessionControlBlock (Session lifetime)
+├── closed-bit + atomic control reference count
+├── Session termination capability
+└── close quiescence wait
+
+RunControl / RunControlLease
 ├── active run_id
-└── abort capability
+├── monotonic run_generation
+└── requestTermination() → requested / already_requested / already_terminal / stale_run / session_closing
 ```
 
 HostCause 至少区分：

@@ -146,3 +146,29 @@ test("Workbench owns queue and worker lifecycle", () => {
   const stopAgent = app.indexOf("agent_runtime.shutdown();");
   assert.ok(stopExecutor >= 0 && stopExecutor < stopAgent);
 });
+
+test("Workbench hands running cancellation through generation-checked control", () => {
+  const agent = read("src/agent/session.zig");
+  assert.match(agent, /const SessionControlBlock = struct/);
+  assert.match(agent, /pub const RunControlLease = struct/);
+  assert.match(agent, /pub fn beginRun/);
+  assert.match(agent, /pub fn requestTermination/);
+
+  const workbench = read("src/workbench/projection.zig");
+  assert.match(workbench, /AgentHandoffState/);
+  assert.match(workbench, /\.beginRun\(/);
+  assert.match(workbench, /\.tryAcquireLease\(/);
+  assert.doesNotMatch(workbench, /\.executePreparedRun\(/);
+  assert.doesNotMatch(workbench, /\.requestCancel\(/);
+  assert.doesNotMatch(workbench, /_ = lease\.requestTermination\(/);
+
+  const cancel = workbench.slice(
+    workbench.indexOf("pub fn cancel("),
+    workbench.indexOf("pub fn respondUi("),
+  );
+  const terminalNoOp = cancel.indexOf(
+    "if (terminalPayload(run) != null) return;",
+  );
+  const stoppingWrite = cancel.indexOf("setActivePhase(run, .stopping);");
+  assert.ok(terminalNoOp >= 0 && terminalNoOp < stoppingWrite);
+});

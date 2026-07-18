@@ -4,7 +4,7 @@
 > 日期：2026-07-18
 > 适用范围：Zig Native 应用、React Renderer、metacodes AgentCore 集成与自动化构建边界
 
-实施进度：阶段 1、2 与 3 已落地；阶段 4 的 Executor ownership/handoff 纵向切片已落地，RunControl lease、Agent terminal model、schema v5、Bridge delivery extraction 与 automation build isolation 仍按后续切片推进。
+实施进度：阶段 1、2 与 3 已落地；阶段 4 的 Executor ownership/handoff 以及 SessionControlBlock/RunControlLease 纵向切片已落地，Agent terminal model、schema v5、Bridge delivery extraction 与 automation build isolation 仍按后续切片推进。
 
 ## 1. 目的与决策
 
@@ -279,61 +279,61 @@ terminal   Workbench publishes write-once terminal payload with no allocation
 
 `RunRef` 必须在 Task slot 被复用后仍能检测 stale generation，或者通过引用计数阻止 slot 被复用。Task delete、close 或 archive 不得使 worker 手中的 `RunRef` 悬空。
 
-`beginRun()` 成功安装 Agent termination control 是执行所有权的交接点，但跨 Workbench/Agent 两个锁域的取消交接通过以下固定协议完成，而不是依赖“立即”这种没有并发含义的副词：
+`beginRun()` 成功安装 Agent termination control 是执行所有权的交接点。当前 main-thread reconciliation 实现通过 release/acquire handoff 完成取消交接，而不是依赖“立即”这种没有并发含义的副词：
 
 ```zig
-const run_ref = workbench.claimQueuedRun(job) orelse return;
+std.debug.assert(run.agent_handoff.cmpxchgStrong(
+    .queued, .starting, .acq_rel, .acquire,
+) == null);
 
-const agent_run = session.beginRun(request) catch |err| {
-    workbench.commitPreExecutionFailure(run_ref, err); // no allocation, no failure
+var agent_run = session.beginRun(run.id) catch |err| {
+    run.agent_handoff.store(.finishing, .release);
+    workbench.commitPreExecutionFailure(run, err); // no allocation, no failure
     return;
 };
 
-workbench.lock();
-std.debug.assert(run_ref.state() == .starting);
-run_ref.publishRunControl(agent_run.control());
-run_ref.setState(.running);
-const cancel_pending = run_ref.cancelPending();
-workbench.unlock();
+run.run_control = agent_run.control();
+run.agent_handoff.store(.running, .release);
+const cancel_pending = run.pending_termination.load(.acquire);
 
-if (cancel_pending) agent_run.requestTermination(.cancelled);
+if (cancel_pending != 0) forwardPendingTermination(run);
 
-var result = agent_run.execute();
-defer result.deinit();
-workbench.commitAgentTerminal(run_ref, &result); // bounded copy, no failure
+agent_run.execute(); // transitional; TerminalResult 在本阶段下一切片接入
+run.agent_handoff.store(.finishing, .release);
+agent_run.deinit(); // release execution base reference
 ```
 
-禁止持有 Workbench lock 调用 Agent。锁内只允许状态发布、读取 flag 和复制 thread-safe `RunControl`；`requestTermination()`、`beginRun()` 和 `execute()` 都在锁外调用，避免 lock inversion。
+当前实现没有 Workbench 全局锁；任何未来引入的 record lock 也不得跨越 `requestTermination()`、`beginRun()` 或 `execute()`，避免 lock inversion。
 
-cancel handler 使用同一 Workbench lock：
+cancel handler 使用同一组 atomic handoff 状态：
 
-- 看到 `starting`：只设置 `cancel_pending`；
-- 看到 `running`：取得显式 `RunControlLease`，释放 Workbench lock 后请求 termination，最后释放 lease；
-- worker 发布 `running` 时在同一临界区读取 `cancel_pending`；
+- 看到 `queued` / `starting`：只 CAS 设置 first-writer `pending_termination`；
+- acquire-load 看到 `running`：取得显式 `RunControlLease`，请求 termination，最后释放 lease；
+- worker release-store 发布 `running` 后读取 `pending_termination`；
 - 因此 cancel 要么被 worker 转发，要么由看到 `running` 的 cancel handler 转发，不存在无人负责的窗口。
 
 重复 termination request 必须幂等。请求与 Run 自然完成的竞态由 Agent first-writer-wins latch/terminalization 和 Workbench write-once terminal payload 共同收口。
 
 `RunControl` 不能指向随 `execute()` 返回而释放的 Run object。它由 Session-lifetime `SessionControlBlock` 和 `run_generation` 组成：natural completion 只把对应 generation 标记为 terminal，不释放 control block；新的 Run 复用 slot 时递增 generation，旧 control 返回 `stale_run`。
 
-Workbench record 在发布 `running` 时持有一个 base control reference。cancel/close/shutdown handler 必须在 Workbench lock 下通过 non-blocking atomic retain 取得 `RunControlLease`，然后释放 Workbench lock，再调用 Agent：
+当前实现采用 main-thread reconciliation + atomic handoff，而没有为了照抄概念协议增加 Workbench 全局锁。`agent.Run` 这个唯一 worker execution owner 持有 base control reference；Workbench record 只保存 generation-bound、非 owning 的 `RunControl`。worker 先写入 control，再以 release-store 发布 `running`；handler acquire-load 到 `running` 后才能尝试取得 `RunControlLease`。worker 在释放 base reference 前先 release-store `finishing`，因此 handler 要么在 base 存活时成功 retain，要么观察到 `already_finishing`，不能在二者之间解引用悬空 control。
+
+cancel/close/shutdown handler 只有在 Task 仍持有 live Session 且 handoff 为 `running` 时才通过 non-blocking atomic retain 取得 `RunControlLease`，再调用 Agent：
 
 ```zig
-workbench.lock();
-std.debug.assert(run_ref.state() == .running);
-const lease = run_ref.tryAcquireControlLease() orelse {
-    workbench.unlock();
+if (view.session == null) return .session_closing;
+if (run.agent_handoff.load(.acquire) != .running)
     return .already_finishing;
-};
-workbench.unlock();
+const lease = run.run_control.tryAcquireLease() orelse
+    return .already_finishing;
 
 defer lease.deinit();
-_ = lease.requestTermination(.cancelled);
+return lease.requestTermination(.cancelled);
 ```
 
-`tryAcquireControlLease()` 只允许在 Workbench lock 下确认 record 为 `running` 后调用；`starting` 时 control 未发布不是可接受的空值原因。它只执行不阻塞、不得失败为 allocator error 的 atomic lifetime retain，不得取得 Agent mutex 或执行 Agent 状态转换，因此不违反“持有 Workbench lock 时不调用 Agent 状态机”的锁序规则。在 `running` 前置条件下仍无法取得 lease，只能表示 Agent terminalization 或 Session close 已经禁止新 lease，该路径必须拥有后续 completion；调用方返回幂等的 `already_finishing`，不得伪称 Run 已经 terminal。
+`tryAcquireLease()` 只允许在 acquire-load 确认 record 为 `running` 后调用；`starting` 时 control 未发布不是可接受的空值原因。它只执行不阻塞、不得失败为 allocator error 的 atomic lifetime retain，不得取得 Agent mutex 或执行 Agent 状态转换。在 `running` 前置条件下仍无法取得 lease，只能表示 Agent terminalization 或 Session close 已经禁止新 lease，该路径返回幂等的 `already_finishing`，不得伪称 Run 已经 terminal。
 
-terminal publication 可以释放 record 的 base reference，但已经取得的 lease 必须继续保活。Session close 先禁止新 lease，再等待全部 control references 和 callback references 归零，最后才释放 `SessionControlBlock`。禁止在持有 Workbench lock 时等待这些 reference 归零；close 只能在锁外进入 quiescence wait，否则 worker 无法取得 Workbench lock 发布 terminal payload 并释放 record 的 base reference，等待必然死锁。
+worker 在 `Run.execute()` 返回并发布 `finishing` 后释放 execution base reference，但已经取得的 lease 必须继续保活。Workbench close 在启动 close worker 前把 `view.session` 置空，阻止新的产品侧 control 获取；Session close 同时关闭 control block 的 retain gate，再等待全部 control references 和 callback references 归零，最后才释放 `SessionControlBlock`。禁止在持有 Workbench 或 Session lock 时等待这些 reference 归零；close 只能在锁外进入 quiescence wait，否则 worker 无法完成 terminalization 并释放 execution base reference，等待必然死锁。
 
 ### 6.3 Agent Run 的 total completion
 
@@ -554,7 +554,7 @@ root 应显式导出稳定消费表面，并让内部模块可以自由重构。
 
 | 当前实现 | 目标 |
 | --- | --- |
-| Workbench 已独占 Executor、queue、workers 与 shutdown；worker 暂调用 transitional `executePreparedRun()` | 进一步收口为 `beginRun()` + 唯一 latch-aware `execute()` |
+| Workbench 已独占 Executor、queue、workers 与 shutdown；worker 已通过原子 `starting/running/finishing` handoff 调用 `beginRun()` + 唯一 latch-aware `Run.execute()` | 进一步让 `Run.execute()` 直接返回 immutable `TerminalResult`，删除 contract probe 使用的 transitional `executePreparedRun()` |
 | `HostCause` 仍混合 interruption、callback 和 contract failure，但已删除 Bridge transport | tagged termination + immutable terminal facts |
 | Workbench admission/durable RunRef/no-fail payload 已落地，terminal facts 仍从活 Session snapshot 同步 | Agent `TerminalResult` 直接提交，不回查 Session snapshot |
 | Workbench/Bridge 直接 import `metacodes_agentcore` | 只有 Agent 消费 SDK，其他模块通过 Agent/Workbench 公共类型 |
