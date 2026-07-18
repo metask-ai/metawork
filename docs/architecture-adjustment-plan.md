@@ -4,7 +4,7 @@
 > 日期：2026-07-18
 > 适用范围：Zig Native 应用、React Renderer、metacodes AgentCore 集成与自动化构建边界
 
-实施进度：阶段 1、2、3 与 4 已落地；Workbench 已独占 Executor，generation-checked RunControl、tagged termination latch、immutable Agent TerminalResult、Workbench no-fail terminal commit 和 pre-execution terminal record 已连通。schema v5、Bridge delivery extraction 与 automation build isolation 仍按后续切片推进。
+实施进度：阶段 1 至 5 已落地；Workbench 已独占 Executor，generation-checked RunControl、tagged termination latch、immutable Agent TerminalResult、Workbench no-fail terminal commit 和 pre-execution terminal record 已连通；Agent 是唯一 AgentCore SDK consumer，`OwnedCoreEvent` 与 bounded canonical notification retry/deadline 已连通。schema v5、Bridge delivery extraction 与 automation build isolation 仍按后续切片推进。
 
 ## 1. 目的与决策
 
@@ -167,7 +167,7 @@ pub fn main(init: @import("std").process.Init) !void {
 - `RunControl` / `RunControlLease`；
 - `TerminalResult`；
 - `Termination`；
-- `EventEnvelope` / `OwnedCoreEvent`；
+- `OwnedCoreEvent`；
 - 明确的 error set。
 
 `agent/` 负责：
@@ -559,7 +559,7 @@ root 应显式导出稳定消费表面，并让内部模块可以自由重构。
 | Workbench 已独占 Executor、queue、workers 与 shutdown；worker 通过原子 `starting/running/finishing` handoff 调用 `beginRun()` + 唯一 latch-aware `Run.execute()` | 已达成 |
 | Agent 使用 tagged `TerminationSignal`，callback/event-pump/notification 与 external interruption 分型；contract failure 是 terminal fact，不伪装成 abort | 已达成 |
 | Workbench admission/durable RunRef/no-fail payload 已落地，Agent `TerminalResult` 直接提交，terminal 后不回查 Session snapshot | 已达成 |
-| Workbench/Bridge 直接 import `metacodes_agentcore` | 只有 Agent 消费 SDK，其他模块通过 Agent/Workbench 公共类型 |
+| 只有 `agent/` import `metacodes_agentcore`；App 通过 Agent 构造 Runtime，Workbench 通过 `agent.OwnedCoreEvent`/validated UI types 消费，Bridge DTO 使用自身 transport enum | 已达成 |
 | `sessions.*` 与 `tasks.*` 混用 | schema v5 原子迁移到 `tasks.*` |
 | automation handler/token 无条件编入 App source graph | `build.zig` 条件注入 automation module |
 

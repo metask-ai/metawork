@@ -1,7 +1,13 @@
 //! Strict payload records and parsing shared by Bridge handlers.
 
 const std = @import("std");
-const agentcore = @import("metacodes_agentcore");
+
+pub const PermissionChoice = enum {
+    allow_once,
+    allow_always,
+    deny_once,
+    deny_tool_session,
+};
 
 pub const EventDisconnect = struct { generation: []const u8 };
 pub const EventAck = struct {
@@ -61,7 +67,7 @@ pub fn acknowledgementSequence(payload: []const u8) !u64 {
     return parseWireId(digits) catch error.InvalidAcknowledgement;
 }
 
-pub fn permissionChoice(value: []const u8) ?agentcore.protocol.PermissionChoice {
+pub fn permissionChoice(value: []const u8) ?PermissionChoice {
     if (std.mem.eql(u8, value, "allow_once")) return .allow_once;
     if (std.mem.eql(u8, value, "allow_always")) return .allow_always;
     if (std.mem.eql(u8, value, "deny_once")) return .deny_once;

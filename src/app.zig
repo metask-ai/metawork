@@ -3,7 +3,6 @@ const runner = @import("runner");
 const native_sdk = @import("native_sdk");
 const renderer_bridge = @import("metawork_bridge");
 const bridge_delivery = renderer_bridge.delivery;
-const agentcore = @import("metacodes_agentcore");
 const agent = @import("metawork_agent");
 const workbench_api = @import("metawork_workbench");
 
@@ -20,6 +19,8 @@ const workbench_event_name = renderer_bridge.revision_delivery.event_name;
 const workspace_path_capacity = renderer_bridge.workspace_grant.max_path_bytes;
 const pending_ui_json_capacity = 256 * 1024;
 const terminal_diagnostic_capacity = 512;
+const agent_event_retry_interval: std.Io.Duration = .fromMilliseconds(5);
+const agent_event_notification_timeout: std.Io.Duration = .fromMilliseconds(50);
 const host_worker_count = 4;
 const workbench_snapshot_capacity = renderer_bridge.snapshot_delivery.max_bytes;
 const workbench_snapshot_chunk_bytes = renderer_bridge.snapshot_delivery.chunk_bytes;
@@ -52,6 +53,7 @@ const App = struct {
     agent_shutdown: bool = false,
     bridge_ingress_open: bool = true,
     bridge_callbacks_active: usize = 0,
+    agent_event_wake_pending: std.atomic.Value(bool) = .init(false),
     main_thread_id: std.Thread.Id,
     mode: FrontendMode = .release,
     native_runtime: ?*native_sdk.Runtime = null,
@@ -598,9 +600,9 @@ const App = struct {
         const base_url = self.env_map.get("METAWORK_PROVIDER_BASE_URL") orelse "";
         const workbench = self.workbench orelse return error.RuntimeUnavailable;
         const session_id = try workbench.createSession(.{
-            .provider_kind_code = provider,
-            .permission_mode_code = agentcore.types.PERMISSION_DEFAULT,
-            .shell_policy_code = agentcore.types.SHELL_UNRESTRICTED,
+            .provider = provider,
+            .permission_mode = .default,
+            .shell_policy = .unrestricted,
             .credential = credential,
             .model = model,
             .base_url = base_url,
@@ -652,14 +654,20 @@ const App = struct {
         const session_id = try parseWireId(request.sessionId);
         const run_id = try parseWireId(request.runId);
         const request_id = try parseWireId(request.requestId);
-        const response: agentcore.UiResponse = if (std.mem.eql(u8, request.kind, "answers")) answer: {
+        const response: agent.UiResponse = if (std.mem.eql(u8, request.kind, "answers")) answer: {
             if (request.answers == null or request.permission != null)
                 return error.InvalidUiResponse;
             break :answer .{ .answers = request.answers.? };
         } else if (std.mem.eql(u8, request.kind, "permission")) permission: {
             if (request.answers != null or request.permission == null)
                 return error.InvalidUiResponse;
-            break :permission .{ .permission = permissionChoice(request.permission.?) orelse return error.InvalidUiResponse };
+            const choice = permissionChoice(request.permission.?) orelse return error.InvalidUiResponse;
+            break :permission .{ .permission = switch (choice) {
+                .allow_once => .allow_once,
+                .allow_always => .allow_always,
+                .deny_once => .deny_once,
+                .deny_tool_session => .deny_tool_session,
+            } };
         } else return error.InvalidUiResponse;
         try (self.workbench orelse return error.RuntimeUnavailable).respondUi(session_id, run_id, request_id, response);
         self.notifyCommitted();
@@ -789,6 +797,10 @@ const App = struct {
 
     fn drainAgentEvents(self: *@This()) void {
         const agent_runtime = self.agent_runtime orelse return;
+        // Clear before draining: an event published concurrently after this
+        // point schedules another wake instead of disappearing behind a stale
+        // coalescing bit. A redundant wake is harmless; a lost wake is not.
+        self.agent_event_wake_pending.store(false, .release);
         while (agent_runtime.takeEvent()) |value| {
             var envelope = value;
             defer envelope.deinit();
@@ -841,7 +853,11 @@ const App = struct {
     }
 
     fn notifyAgentEventConsumer(context: ?*anyopaque) agent.EventReadyNotification {
-        return if (notifyMainLoop(context)) .scheduled else .unavailable;
+        const self: *@This() = @ptrCast(@alignCast(context orelse return .unavailable));
+        if (self.agent_event_wake_pending.swap(true, .acq_rel)) return .already_pending;
+        if (notifyMainLoop(context)) return .scheduled;
+        self.agent_event_wake_pending.store(false, .release);
+        return .unavailable;
     }
 
     fn notifyNativeMainLoop(self: *@This()) !void {
@@ -912,10 +928,10 @@ const App = struct {
     }
 };
 
-fn providerKind(value: []const u8) ?u32 {
-    if (std.mem.eql(u8, value, "anthropic")) return agentcore.types.PROVIDER_ANTHROPIC;
-    if (std.mem.eql(u8, value, "openai")) return agentcore.types.PROVIDER_OPENAI;
-    if (std.mem.eql(u8, value, "gemini")) return agentcore.types.PROVIDER_GEMINI;
+fn providerKind(value: []const u8) ?agent.ProviderKind {
+    if (std.mem.eql(u8, value, "anthropic")) return .anthropic;
+    if (std.mem.eql(u8, value, "openai")) return .openai;
+    if (std.mem.eql(u8, value, "gemini")) return .gemini;
     return null;
 }
 
@@ -952,14 +968,15 @@ fn allowedOrigins(mode: FrontendMode) []const []const u8 {
 
 fn createAgentRuntime(
     io: std.Io,
-    raw_api: *const agentcore.types.ApiV1,
     notifier: agent.EventReadyNotifier,
 ) !*agent.Runtime {
-    return agent.Runtime.init(io, std.heap.c_allocator, raw_api, .{
+    return agent.Runtime.init(io, std.heap.c_allocator, .{
         .max_sessions = 8,
         .max_ui_request_bytes = pending_ui_json_capacity,
         .max_terminal_diagnostic_bytes = terminal_diagnostic_capacity,
         .event_ready_notifier = notifier,
+        .event_ready_retry_interval = agent_event_retry_interval,
+        .event_ready_timeout = agent_event_notification_timeout,
     });
 }
 
@@ -975,8 +992,7 @@ pub fn run(init: std.process.Init) !void {
         .main_thread_id = std.Thread.getCurrentId(),
         .snapshot_delivery = try renderer_bridge.snapshot_delivery.State.init(snapshot_storage),
     };
-    const api = try agentcore.Api.discover();
-    const agent_runtime = try createAgentRuntime(init.io, api.raw, .{
+    const agent_runtime = try createAgentRuntime(init.io, .{
         .context = &app,
         .notify_fn = App.notifyAgentEventConsumer,
     });

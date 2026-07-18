@@ -53,6 +53,7 @@ pub const handlers = struct {
     pub const TaskArchive = handlers_impl.TaskArchive;
     pub const TaskDelete = handlers_impl.TaskDelete;
     pub const UiResponseRequest = handlers_impl.UiResponseRequest;
+    pub const PermissionChoice = handlers_impl.PermissionChoice;
     pub const parsePayload = handlers_impl.parsePayload;
     pub const parsePayloadWithLimit = handlers_impl.parsePayloadWithLimit;
     pub const parseWireId = handlers_impl.parseWireId;

@@ -94,7 +94,7 @@ abort 返回 stale/too-late 时仍必须 join 已有 Run job，再决定最终�
 - 携带正确 Session handle 与 run ID 进入 Host envelope；
 - 不重新定义平行的 Agent event 类型体系；
 - 不从 callback 直接调用 WebView；
-- 无法验证、复制、入队关键事件或通知 canonical consumer 时返回 callback fatal；
+- 无法验证、复制或入队关键事件时返回 callback fatal；canonical consumer notification 暂时 unavailable 时先执行有界 retry/deadline，耗尽后才返回 callback fatal，且不得撤销 pump 对 owned event 的所有权；
 - callback 返回后的 Renderer/Bridge transport failure 不属于 ABI callback failure，不得直接 abort Run。
 
 隔离的 artifact-only raw contract probe 可以使用 bundle 现有 raw SDK 表面证明 artifact 能调用，并记录 SDK 缺口；该代码不得进入正式 Host。
@@ -110,6 +110,8 @@ abort 返回 stale/too-late 时仍必须 join 已有 Run job，再决定最终�
 - callback 参数语义、线程和 ownership 文档。
 
 上述 SDK 是随 bundle 编译进消费者的 cc-zig-owned source layer，不要求改变 C ABI layout，也不允许 MetaWork 自己补一份协议副本。
+
+生产 build graph 只把 SDK 注入 `agent/` 的 event sink、event pump 和 Session 实现。App 通过 Agent Runtime 完成 ABI discovery；Workbench 只消费 Agent module root 暴露的 SDK-validated owned/typed 表面；Bridge wire DTO 不引用 SDK enum、owner 或 handle。该边界避免复制协议，同时阻止 transport 与产品层直接依赖 bundle module。
 
 当前精确 baseline 的 `CoreEvent` 提供十个 known observation tags：`text_chunk`、`tool_start`、`tool_progress`、`progress`、`tool_result`、`usage`、`context_warning`、`auto_compact`、`retry_notice` 和 `stream_done`。有效的新 observation tag 被解码成 owned `UnknownCoreEvent`；当前 Host 在 SDK 完成结构、ownership 和 byte-bound 校验后立即释放并忽略它，不让未知产品语义消耗事件泵容量，也不得把 raw tag/payload 传给 Renderer。
 

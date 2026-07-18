@@ -2,7 +2,7 @@ const std = @import("std");
 const sdk = @import("metacodes_agentcore");
 const event_sink = @import("event_sink");
 
-pub const EventEnvelope = event_sink.EventEnvelope;
+pub const OwnedCoreEvent = event_sink.OwnedCoreEvent;
 
 pub const EventClass = enum { data, control };
 
@@ -38,7 +38,7 @@ pub const Stats = struct {
 };
 
 const Entry = struct {
-    envelope: EventEnvelope,
+    envelope: OwnedCoreEvent,
     order: u64,
     class: EventClass,
 };
@@ -88,7 +88,7 @@ pub const EventPump = struct {
         };
     }
 
-    pub fn enqueue(self: *EventPump, envelope: EventEnvelope) Error!void {
+    pub fn enqueue(self: *EventPump, envelope: OwnedCoreEvent) Error!void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         return self.enqueueLocked(envelope);
@@ -96,7 +96,7 @@ pub const EventPump = struct {
 
     pub fn enqueueWithDeadline(
         self: *EventPump,
-        envelope: EventEnvelope,
+        envelope: OwnedCoreEvent,
         timeout: std.Io.Duration,
     ) Error!void {
         if (timeout.nanoseconds <= 0) return error.DeadlineExceeded;
@@ -134,7 +134,7 @@ pub const EventPump = struct {
         self.mutex.unlock(self.io);
     }
 
-    pub fn takeFair(self: *EventPump) ?EventEnvelope {
+    pub fn takeFair(self: *EventPump) ?OwnedCoreEvent {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (self.count == 0) return null;
@@ -168,7 +168,7 @@ pub const EventPump = struct {
         self.* = undefined;
     }
 
-    fn enqueueLocked(self: *EventPump, envelope: EventEnvelope) Error!void {
+    fn enqueueLocked(self: *EventPump, envelope: OwnedCoreEvent) Error!void {
         if (envelope.session_id == 0 or envelope.run_id == 0) return error.InvalidIdentity;
         if (envelope.encoded_bytes != envelope.json.len or
             envelope.encoded_bytes > self.limits.max_event_bytes)

@@ -59,7 +59,9 @@ AgentCore bundle
 
 - `src/agent.zig` 是 Agent 执行层的 named module root；
 - `src/agent/` 直接消费 `metacodes_agentcore`，不得 import Workbench、Bridge 或 App；
-- Workbench 只通过 `metawork_agent` 公共表面协调 Session/Run；
+- App 不再直接 discover AgentCore ABI；`agent.Runtime.init()` 在 Agent 边界内完成 bundle SDK discovery，raw function-table injection 只保留给隔离测试；
+- Workbench 只通过 `metawork_agent` 公共表面协调 Session/Run，并消费 SDK-validated `OwnedCoreEvent`/UI types；这不是复制一套 `AgentEvent`/UI schema；
+- Bridge DTO 使用 Bridge-owned transport enum，由 App 显式映射到 Agent UI response，不返回 SDK enum、owner 或 handle；
 - `src/main.zig` 只进入 `metawork_app`，不能绕过 App 组装低层模块；
 - Executor、queue 与 workers 归 Workbench 独占，Agent Runtime 不接收 Scheduler capability。Agent active Run 只保留 first-writer-wins `TerminationSignal`，并通过 immutable `TerminalResult` 向 Workbench 提交 terminal facts；Session snapshot 不保存历史结果。
 
@@ -272,7 +274,7 @@ set typed TerminationSignal if absent
 
 ### notification、projection 与 Renderer transport
 
-event 入泵后 ownership 已经转移给 Agent event pump。`EventReadyNotifier` 只返回 `scheduled`、`already_pending` 或 `unavailable`；App 当前将 Native `services.wake()` 映射为 `scheduled/unavailable`。`unavailable` 表示 canonical consumer 无法被通知，callback 返回 fatal 并记录 typed `event_consumer_notification_failure`；已 owned event 仍由 pump 负责释放，不得泄漏。
+event 入泵后 ownership 已经转移给 Agent event pump。`EventReadyNotifier` 只返回 `scheduled`、`already_pending` 或 `unavailable`；App 使用原子 pending gate 将重复 Native `services.wake()` 合并为 `already_pending`，并在 drain 前清 gate，避免 producer 与 consumer 交错时丢 wake。Agent 对 `unavailable` 按 composition 提供的 retry interval 和 deadline 同步重试；deadline 耗尽后 callback 才返回 fatal 并记录 typed `event_consumer_notification_failure`。失败不会撤销已经完成的 pump ownership transfer，事件仍由 pump 负责释放或交给 canonical consumer。
 
 callback 返回后的 Workbench canonical projection failure 仍可以按 Run identity 请求 Agent 终止，并使用不含 Workbench 名称的 `event_pump_failure.consumer_rejected`；这不是 Bridge failure。Renderer event delivery、revision、snapshot、connection/generation 和 detached retention expiry 则形成 typed transport report，由 Workbench policy 决定 reject/retry/detach/discard。当前所有 Renderer transport stage 都明确不返回 `request_run_termination`；Renderer detach/reload 或 retention expiry 不得杀死后台 Run。
 

@@ -7,9 +7,55 @@ const sdk = @import("metacodes_agentcore");
 const wire = sdk.types;
 const event_pump = @import("event_pump");
 
-pub const EventEnvelope = event_pump.EventEnvelope;
+pub const OwnedCoreEvent = event_pump.OwnedCoreEvent;
+pub const Status = sdk.Status;
+pub const StopReason = sdk.StopReason;
+pub const UiRequest = sdk.UiRequest;
+pub const UiResponse = sdk.UiResponse;
+pub const PermissionChoice = sdk.protocol.PermissionChoice;
+pub const ParsedUiRequest = sdk.ParsedUiRequest;
+
+pub fn decodeUiRequest(
+    allocator: std.mem.Allocator,
+    encoded: []const u8,
+) sdk.DecodeError!ParsedUiRequest {
+    return sdk.decodeUiRequest(allocator, encoded);
+}
+
+pub fn decodeCoreEvent(
+    allocator: std.mem.Allocator,
+    encoded: []const u8,
+) sdk.DecodeError!sdk.ParsedCoreEvent {
+    return sdk.decodeCoreEvent(allocator, encoded);
+}
 
 const default_builtin_tools = [_][]const u8{ "Read", "Bash", "Edit", "AskUserQuestion" };
+
+fn providerKindCode(value: ProviderKind) u32 {
+    return switch (value) {
+        .anthropic => wire.PROVIDER_ANTHROPIC,
+        .openai => wire.PROVIDER_OPENAI,
+        .gemini => wire.PROVIDER_GEMINI,
+    };
+}
+
+fn permissionModeCode(value: PermissionMode) u32 {
+    return switch (value) {
+        .default => wire.PERMISSION_DEFAULT,
+        .accept_edits => wire.PERMISSION_ACCEPT_EDITS,
+        .auto => wire.PERMISSION_AUTO,
+        .dont_ask => wire.PERMISSION_DONT_ASK,
+        .bypass => wire.PERMISSION_BYPASS,
+    };
+}
+
+fn shellPolicyCode(value: ShellPolicy) u32 {
+    return switch (value) {
+        .disabled => wire.SHELL_DISABLED,
+        .sandboxed => wire.SHELL_SANDBOXED,
+        .unrestricted => wire.SHELL_UNRESTRICTED,
+    };
+}
 
 pub const SessionState = enum {
     idle,
@@ -252,6 +298,25 @@ pub const EventReadyNotifier = struct {
     pub fn notify(self: EventReadyNotifier) EventReadyNotification {
         return self.notify_fn(self.context);
     }
+
+    pub fn notifyWithRetry(
+        self: EventReadyNotifier,
+        io: std.Io,
+        retry_interval: std.Io.Duration,
+        timeout: std.Io.Duration,
+    ) EventReadyNotification {
+        std.debug.assert(retry_interval.nanoseconds > 0);
+        std.debug.assert(timeout.nanoseconds > 0);
+        var waited: i96 = 0;
+        while (true) {
+            const result = self.notify();
+            if (result != .unavailable) return result;
+            if (waited >= timeout.nanoseconds) return .unavailable;
+            const sleep_ns = @min(retry_interval.nanoseconds, timeout.nanoseconds - waited);
+            io.sleep(.fromNanoseconds(sleep_ns), .awake) catch return .unavailable;
+            waited += sleep_ns;
+        }
+    }
 };
 
 test "EventReadyNotifier preserves scheduled, coalesced, and unavailable outcomes" {
@@ -275,10 +340,73 @@ test "EventReadyNotifier preserves scheduled, coalesced, and unavailable outcome
     }
 }
 
+test "EventReadyNotifier retries unavailable without losing terminal outcomes" {
+    const Harness = struct {
+        unavailable_before_success: usize,
+        calls: usize = 0,
+
+        fn notify(context: ?*anyopaque) EventReadyNotification {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.calls += 1;
+            if (self.calls <= self.unavailable_before_success) return .unavailable;
+            return .already_pending;
+        }
+    };
+    var recovering = Harness{ .unavailable_before_success = 2 };
+    const recovering_notifier = EventReadyNotifier{
+        .context = &recovering,
+        .notify_fn = Harness.notify,
+    };
+    try std.testing.expectEqual(
+        EventReadyNotification.already_pending,
+        recovering_notifier.notifyWithRetry(
+            std.testing.io,
+            .fromNanoseconds(1),
+            .fromNanoseconds(3),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 3), recovering.calls);
+
+    var unavailable = Harness{ .unavailable_before_success = std.math.maxInt(usize) };
+    const unavailable_notifier = EventReadyNotifier{
+        .context = &unavailable,
+        .notify_fn = Harness.notify,
+    };
+    try std.testing.expectEqual(
+        EventReadyNotification.unavailable,
+        unavailable_notifier.notifyWithRetry(
+            std.testing.io,
+            .fromNanoseconds(1),
+            .fromNanoseconds(2),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 3), unavailable.calls);
+}
+
+pub const ProviderKind = enum {
+    anthropic,
+    openai,
+    gemini,
+};
+
+pub const PermissionMode = enum {
+    default,
+    accept_edits,
+    auto,
+    dont_ask,
+    bypass,
+};
+
+pub const ShellPolicy = enum {
+    disabled,
+    sandboxed,
+    unrestricted,
+};
+
 pub const SessionOpenOptions = struct {
-    provider_kind_code: u32,
-    permission_mode_code: u32,
-    shell_policy_code: u32,
+    provider: ProviderKind,
+    permission_mode: PermissionMode,
+    shell_policy: ShellPolicy,
     credential: []const u8,
     model: []const u8,
     base_url: []const u8 = "",
@@ -304,6 +432,8 @@ pub const Limits = struct {
     max_terminal_diagnostic_bytes: usize = 512,
     ui_request_timeout: std.Io.Duration = .fromSeconds(30),
     event_ready_notifier: ?EventReadyNotifier = null,
+    event_ready_retry_interval: std.Io.Duration = .fromMilliseconds(5),
+    event_ready_timeout: std.Io.Duration = .fromMilliseconds(50),
 };
 
 pub const SessionSnapshot = struct {
@@ -366,6 +496,8 @@ pub const Runtime = struct {
     max_terminal_diagnostic_bytes: usize,
     ui_request_timeout: std.Io.Duration,
     event_ready_notifier: ?EventReadyNotifier,
+    event_ready_retry_interval: std.Io.Duration,
+    event_ready_timeout: std.Io.Duration,
     events: event_pump.EventPump,
     sessions_mutex: std.Io.Mutex = .init,
     shutdown_condition: std.Io.Condition = .init,
@@ -376,24 +508,43 @@ pub const Runtime = struct {
     last_shutdown_error: ?Error = null,
     next_session_id: u64 = 0,
 
-    /// `raw_api` is borrowed for the Agent Runtime lifetime. Bundle discovery tables
-    /// are static; injected test tables must provide the same lifetime.
     pub fn init(
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        limits: Limits,
+    ) (Error || std.mem.Allocator.Error || error{UnsupportedAbi})!*Runtime {
+        return initWithValidatedApi(io, allocator, try sdk.Api.discover(), limits);
+    }
+
+    /// Test-only injection boundary. `raw_api` is borrowed for the Agent
+    /// Runtime lifetime and must outlive the Runtime.
+    pub fn initWithApi(
         io: std.Io,
         allocator: std.mem.Allocator,
         raw_api: *const wire.ApiV1,
         limits: Limits,
     ) (Error || std.mem.Allocator.Error || error{UnsupportedAbi})!*Runtime {
+        return initWithValidatedApi(io, allocator, try sdk.Api.validate(raw_api), limits);
+    }
+
+    fn initWithValidatedApi(
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        api: sdk.Api,
+        limits: Limits,
+    ) (Error || std.mem.Allocator.Error)!*Runtime {
         if (limits.max_sessions == 0 or limits.max_prompt_bytes == 0 or limits.event_capacity == 0 or
             limits.event_bytes == 0 or limits.per_session_event_capacity == 0 or
             limits.per_session_event_bytes == 0 or limits.max_event_bytes == 0 or
             limits.event_enqueue_timeout.nanoseconds <= 0 or limits.max_ui_request_bytes == 0 or
             limits.max_ui_response_bytes == 0 or limits.max_terminal_diagnostic_bytes == 0 or
-            limits.ui_request_timeout.nanoseconds <= 0)
+            limits.ui_request_timeout.nanoseconds <= 0 or
+            limits.event_ready_retry_interval.nanoseconds <= 0 or
+            limits.event_ready_timeout.nanoseconds <= 0 or
+            limits.event_ready_retry_interval.nanoseconds > limits.event_ready_timeout.nanoseconds)
             return error.InvalidLimits;
         _ = std.math.mul(usize, limits.event_capacity, limits.max_event_bytes) catch
             return error.InvalidLimits;
-        const api = try sdk.Api.validate(raw_api);
         const self = try allocator.create(Runtime);
         errdefer allocator.destroy(self);
         const sessions = try allocator.alloc(?*Session, limits.max_sessions);
@@ -451,6 +602,8 @@ pub const Runtime = struct {
             .max_terminal_diagnostic_bytes = limits.max_terminal_diagnostic_bytes,
             .ui_request_timeout = limits.ui_request_timeout,
             .event_ready_notifier = limits.event_ready_notifier,
+            .event_ready_retry_interval = limits.event_ready_retry_interval,
+            .event_ready_timeout = limits.event_ready_timeout,
             .events = events,
             .sessions = sessions,
         };
@@ -507,9 +660,9 @@ pub const Runtime = struct {
         callbacks.release_response = Session.releaseUiResponse;
         var config = std.mem.zeroes(wire.SessionConfigV1);
         config.struct_size = @sizeOf(wire.SessionConfigV1);
-        config.provider_kind_code = options.provider_kind_code;
-        config.permission_mode_code = options.permission_mode_code;
-        config.shell_policy_code = options.shell_policy_code;
+        config.provider_kind_code = providerKindCode(options.provider);
+        config.permission_mode_code = permissionModeCode(options.permission_mode);
+        config.shell_policy_code = shellPolicyCode(options.shell_policy);
         config.api_key = sdk.bytesView(secret);
         config.model = sdk.bytesView(options.model);
         config.base_url = sdk.bytesView(options.base_url);
@@ -617,13 +770,17 @@ pub const Runtime = struct {
         self.allocator.destroy(session);
     }
 
-    pub fn takeEvent(self: *Runtime) ?EventEnvelope {
+    pub fn takeEvent(self: *Runtime) ?OwnedCoreEvent {
         return self.events.takeFair();
     }
 
     fn notifyEventConsumer(self: *Runtime) EventReadyNotification {
         const notifier = self.event_ready_notifier orelse return .scheduled;
-        return notifier.notify();
+        return notifier.notifyWithRetry(
+            self.io,
+            self.event_ready_retry_interval,
+            self.event_ready_timeout,
+        );
     }
 
     pub fn requestWake(self: *Runtime) bool {
@@ -1340,7 +1497,7 @@ pub const Session = struct {
             self.recordTerminationSignal(.{ .event_pump_failure = .allocation });
             return wire.CALLBACK_FATAL;
         };
-        var envelope = EventEnvelope{
+        var envelope = OwnedCoreEvent{
             .session_id = self.id,
             .run_id = run_id,
             .encoded_bytes = encoded.len,

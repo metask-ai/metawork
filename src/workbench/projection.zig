@@ -1,6 +1,4 @@
 const std = @import("std");
-const sdk = @import("metacodes_agentcore");
-const wire = sdk.types;
 const lifecycle = @import("metawork_agent");
 const executor_impl = @import("workbench_executor");
 const contract_fixture = @import("workbench_contract_fixture");
@@ -492,7 +490,7 @@ pub const Workbench = struct {
         session_id: u64,
         run_id: u64,
         request_id: u64,
-        response: sdk.UiResponse,
+        response: lifecycle.UiResponse,
     ) Error!void {
         self.syncLifecycle();
         const view = self.findSession(session_id) orelse return error.UnknownSession;
@@ -665,7 +663,7 @@ pub const Workbench = struct {
         if (changed) self.bumpRevision();
     }
 
-    pub fn applyEvent(self: *Workbench, envelope: *const lifecycle.EventEnvelope) Error!void {
+    pub fn applyEvent(self: *Workbench, envelope: *const lifecycle.OwnedCoreEvent) Error!void {
         const session = self.findSession(envelope.session_id) orelse return error.UnknownSession;
         const run = findRun(session.runs, envelope.run_id) orelse return error.NoSuchRun;
         const event = switch (envelope.event.value) {
@@ -820,7 +818,7 @@ pub const Workbench = struct {
             else => return err,
         };
         defer pending.deinit();
-        var parsed = sdk.decodeUiRequest(self.allocator, pending.json) catch return error.InvalidUiResponse;
+        var parsed = lifecycle.decodeUiRequest(self.allocator, pending.json) catch return error.InvalidUiResponse;
         defer parsed.deinit();
         // The synchronous callback may publish between lifecycle reconciliation
         // and serialization. Omit that just-arrived request from this snapshot;
@@ -1066,7 +1064,7 @@ pub const Workbench = struct {
         request_id: u64,
         run_id: u64,
         order: u64,
-        request: sdk.UiRequest,
+        request: lifecycle.UiRequest,
     ) Error!void {
         writer.print("{{\"requestId\":\"{d}\",\"runId\":\"{d}\",\"order\":\"{d}\",\"redacted\":{},", .{
             request_id,
@@ -1108,7 +1106,7 @@ pub const Workbench = struct {
         writer.writeByte('}') catch return error.SnapshotTooLarge;
     }
 
-    fn requestContainsSecret(self: *Workbench, request: sdk.UiRequest) bool {
+    fn requestContainsSecret(self: *Workbench, request: lifecycle.UiRequest) bool {
         if (self.known_secret.len == 0) return false;
         return switch (request) {
             .ask_question => |questions| questions_block: {
@@ -1186,7 +1184,7 @@ pub const Workbench = struct {
         session: *lifecycle.Session,
         run_id: u64,
         request_id: u64,
-        response: sdk.UiResponse,
+        response: lifecycle.UiResponse,
     ) UiRecord {
         var record = UiRecord{
             .request_id = request_id,
@@ -1197,7 +1195,7 @@ pub const Workbench = struct {
         var pending = session.copyPendingUiRequest(self.allocator) catch return record;
         defer pending.deinit();
         if (pending.run_id != run_id or pending.request_id != request_id) return record;
-        var parsed = sdk.decodeUiRequest(self.allocator, pending.json) catch return record;
+        var parsed = lifecycle.decodeUiRequest(self.allocator, pending.json) catch return record;
         defer parsed.deinit();
         record.kind = kindForRequest(parsed.value);
         self.fillUiRecord(&record, parsed.value);
@@ -1213,7 +1211,7 @@ pub const Workbench = struct {
         var pending = session.copyPendingUiRequest(self.allocator) catch return null;
         defer pending.deinit();
         if (pending.run_id != run_id) return null;
-        var parsed = sdk.decodeUiRequest(self.allocator, pending.json) catch return null;
+        var parsed = lifecycle.decodeUiRequest(self.allocator, pending.json) catch return null;
         defer parsed.deinit();
         var record = UiRecord{
             .request_id = pending.request_id,
@@ -1225,7 +1223,7 @@ pub const Workbench = struct {
         return record;
     }
 
-    fn fillUiRecord(self: *Workbench, record: *UiRecord, request: sdk.UiRequest) void {
+    fn fillUiRecord(self: *Workbench, record: *UiRecord, request: lifecycle.UiRequest) void {
         const value = switch (request) {
             .ask_question => |questions| value: {
                 record.item_count = @intCast(@min(questions.len, std.math.maxInt(u32)));
@@ -1695,21 +1693,21 @@ fn sanitizeInto(destination: []u8, value: []const u8, secret: []const u8) Saniti
     return .{ .len = write, .truncated = read != value.len, .redacted = redacted };
 }
 
-fn kindForRequest(request: sdk.UiRequest) UiRecordKind {
+fn kindForRequest(request: lifecycle.UiRequest) UiRecordKind {
     return switch (request) {
         .ask_question => .ask_question,
         .permission => .permission,
     };
 }
 
-fn kindForResponse(response: sdk.UiResponse) UiRecordKind {
+fn kindForResponse(response: lifecycle.UiResponse) UiRecordKind {
     return switch (response) {
         .answers => .ask_question,
         .permission => .permission,
     };
 }
 
-fn stateForResponse(response: sdk.UiResponse) UiRecordState {
+fn stateForResponse(response: lifecycle.UiResponse) UiRecordState {
     return switch (response) {
         .answers => .answered,
         .permission => |permission| switch (permission) {
@@ -1853,14 +1851,14 @@ fn testWorkbench() !Workbench {
     return workbench;
 }
 
-fn testEnvelope(session_id: u64, run_id: u64, encoded: []const u8) !lifecycle.EventEnvelope {
+fn testEnvelope(session_id: u64, run_id: u64, encoded: []const u8) !lifecycle.OwnedCoreEvent {
     const allocator = std.testing.allocator;
     return .{
         .session_id = session_id,
         .run_id = run_id,
         .encoded_bytes = encoded.len,
         .json = try allocator.dupe(u8, encoded),
-        .event = try sdk.decodeCoreEvent(allocator, encoded),
+        .event = try lifecycle.decodeCoreEvent(allocator, encoded),
         .allocator = allocator,
     };
 }
@@ -1964,9 +1962,9 @@ test "Agent terminal facts map once into Workbench product outcomes" {
         .diagnostic_len = 0,
         .diagnostic_truncated = false,
         .abi_status = .ok,
-        .raw_status_code = wire.STATUS_OK,
+        .raw_status_code = @intFromEnum(lifecycle.Status.ok),
         .stop_reason = .end_turn,
-        .raw_stop_reason_code = wire.STOP_END_TURN,
+        .raw_stop_reason_code = @intFromEnum(lifecycle.StopReason.end_turn),
         .abort_status = null,
         .raw_abort_status_code = null,
         .termination_signal = null,
@@ -1988,7 +1986,7 @@ test "Agent terminal facts map once into Workbench product outcomes" {
         classifyAgentTerminal(&terminal),
     );
 
-    terminal.raw_status_code = wire.STATUS_CALLBACK_FAILED;
+    terminal.raw_status_code = @intFromEnum(lifecycle.Status.callback_failed);
     terminal.failure = .abi_status;
     terminal.termination_signal = .{ .callback_failure = .ui };
     try std.testing.expectEqual(
@@ -2199,7 +2197,7 @@ test "pending UI re-encoding remains inside its concurrent snapshot allowance" {
     const payload = try std.testing.allocator.alloc(u8, payload_len);
     defer std.testing.allocator.free(payload);
     @memset(payload, 1);
-    const request = sdk.UiRequest{ .ask_question = &.{.{
+    const request = lifecycle.UiRequest{ .ask_question = &.{.{
         .question = payload,
         .header = "Large request",
         .multi = false,
@@ -2267,7 +2265,7 @@ test "known Host credentials are removed from assistant, tool, and UI projection
         try workbench.applyEvent(&envelope);
     }
 
-    const request = sdk.UiRequest{ .permission = .{ .tool = "Bash", .args = "token=SECRET-KEY" } };
+    const request = lifecycle.UiRequest{ .permission = .{ .tool = "Bash", .args = "token=SECRET-KEY" } };
     var pending_storage: [4096]u8 = undefined;
     var pending_writer = std.Io.Writer.fixed(&pending_storage);
     try workbench.writePendingUiProjection(&pending_writer, 9, 7, 1, request);

@@ -198,7 +198,8 @@ RunJob
 - 空闲 Session 不占 worker；同步 Run 和同步 UI wait 占用 execution slot；
 - Workbench 创建、排队、停止并销毁 bounded Executor；Agent Runtime 不接收 Scheduler capability，worker 从 Workbench queue 主动进入 Agent Run；
 - Bridge/main thread 不执行长耗时 Run，也不等待 permission；
-- Agent 通过 `EventReadyNotifier` 只报告 `scheduled` / `already_pending` / `unavailable`，不知道 Native main loop 或 Renderer；
+- 只有 `agent/` import `metacodes_agentcore`；App 让 Agent 内部完成 ABI discovery，Workbench 通过 Agent 公共 validated types 消费，Bridge DTO 不暴露 SDK enum/owner/handle；
+- Agent 通过 `EventReadyNotifier` 只报告 `scheduled` / `already_pending` / `unavailable`，不知道 Native main loop 或 Renderer；App 用原子 pending gate 合并重复 wake，Agent 对 `unavailable` 执行有界 retry/deadline；
 - Renderer delivery、revision、snapshot、connection 和 retention failure 作为 typed transport fact 进入 Workbench policy，默认只重试、断开或丢弃 transport copy，不中止后台 Agent Run；
 - Session close 必须在 join 与 callback quiescence 后才销毁 AgentCore handle；
 - Runtime 只能在全部 Session 销毁后销毁。

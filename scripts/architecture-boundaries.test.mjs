@@ -86,6 +86,28 @@ test("lower layers cannot reach composition or transport internals", () => {
   ]);
 });
 
+test("only Agent implementation imports the AgentCore SDK", () => {
+  const forbidden = zigFiles("src/").filter(
+    (file) => file !== "src/agent.zig" && !file.startsWith("src/agent/"),
+  );
+  assertNoImports(forbidden, ["metacodes_agentcore"]);
+
+  const build = read("build.zig");
+  assert.equal(
+    [...build.matchAll(/\.addImport\("metacodes_agentcore", sdk\)/g)].length,
+    3,
+    "only event_sink, event_pump, and session may receive the SDK module",
+  );
+
+  const agentRoot = read("src/agent.zig");
+  assert.match(agentRoot, /pub const OwnedCoreEvent/);
+  assert.doesNotMatch(agentRoot, /EventEnvelope/);
+  const workbench = read("src/workbench/projection.zig");
+  assert.match(workbench, /lifecycle\.OwnedCoreEvent/);
+  const bridgeHandlers = read("src/bridge/handlers.zig");
+  assert.match(bridgeHandlers, /pub const PermissionChoice = enum/);
+});
+
 test("build graph registers the four named module boundaries", () => {
   const source = read("build.zig");
   for (const name of [
@@ -105,6 +127,9 @@ test("canonical notification and Renderer transport failures stay isolated", () 
   for (const outcome of ["scheduled", "already_pending", "unavailable"]) {
     assert.match(agent, new RegExp(`\\b${outcome}\\b`));
   }
+  assert.match(agent, /pub fn notifyWithRetry/);
+  assert.match(agent, /event_ready_retry_interval/);
+  assert.match(agent, /event_ready_timeout/);
   assert.doesNotMatch(
     agent,
     /bridge_pipeline_failure|notifyMainLoop|metawork_bridge/,
@@ -113,6 +138,12 @@ test("canonical notification and Renderer transport failures stay isolated", () 
   const app = read("src/app.zig");
   assert.doesNotMatch(app, /bridge_pipeline_failure/);
   assert.match(app, /decideTransportFailure/);
+  assert.match(app, /agent_event_wake_pending\.swap\(true, \.acq_rel\)/);
+  const clearWake = app.indexOf(
+    "self.agent_event_wake_pending.store(false, .release);",
+  );
+  const drainEvents = app.indexOf("while (agent_runtime.takeEvent())");
+  assert.ok(clearWake >= 0 && clearWake < drainEvents);
   const stopIngress = app.indexOf("self.stopBridgeIngress();");
   const quiesceCallbacks = app.indexOf("self.quiesceBridgeCallbacks();");
   const detachWorkbench = app.indexOf("self.detachWorkbench();");

@@ -7,7 +7,7 @@ const workbench_executor = @import("workbench_executor");
 const sdk = @import("metacodes_agentcore");
 const wire = sdk.types;
 
-fn pumpEnvelope(session_id: u64, run_id: u64, json: []const u8) !event_pump.EventEnvelope {
+fn pumpEnvelope(session_id: u64, run_id: u64, json: []const u8) !event_pump.OwnedCoreEvent {
     const owned_json = try std.testing.allocator.dupe(u8, json);
     errdefer std.testing.allocator.free(owned_json);
     return .{
@@ -32,7 +32,7 @@ fn textChunk(event: sdk.DecodedCoreEvent) ![]const u8 {
 
 const PumpEnqueueContext = struct {
     pump: *event_pump.EventPump,
-    envelope: event_pump.EventEnvelope,
+    envelope: event_pump.OwnedCoreEvent,
     timeout: std.Io.Duration,
     succeeded: bool = false,
     failure: ?event_pump.Error = null,
@@ -522,9 +522,9 @@ fn openSession(host: *lifecycle.Runtime) !*lifecycle.Session {
     const workspace_root = if (std.fs.path.sep == '\\') "C:\\tmp\\metawork-gate2" else "/tmp/metawork-gate2";
     const temporary_root = if (std.fs.path.sep == '\\') "C:\\tmp" else "/tmp";
     return host.createSession(.{
-        .provider_kind_code = wire.PROVIDER_ANTHROPIC,
-        .permission_mode_code = wire.PERMISSION_DEFAULT,
-        .shell_policy_code = wire.SHELL_DISABLED,
+        .provider = .anthropic,
+        .permission_mode = .default,
+        .shell_policy = .disabled,
         .credential = "fixture-secret",
         .model = "fixture-model",
         .workspace = .{
@@ -546,6 +546,8 @@ const TestHostLimits = struct {
     max_ui_response_bytes: ?usize = null,
     ui_request_timeout: ?std.Io.Duration = null,
     event_ready_notifier: ?lifecycle.EventReadyNotifier = null,
+    event_ready_retry_interval: ?std.Io.Duration = null,
+    event_ready_timeout: ?std.Io.Duration = null,
 
     fn hostLimits(self: @This()) lifecycle.Limits {
         var limits = lifecycle.Limits{ .max_sessions = self.max_sessions };
@@ -557,6 +559,8 @@ const TestHostLimits = struct {
             limits.per_session_control_reserved_capacity = value;
         if (self.max_ui_response_bytes) |value| limits.max_ui_response_bytes = value;
         limits.event_ready_notifier = self.event_ready_notifier;
+        if (self.event_ready_retry_interval) |value| limits.event_ready_retry_interval = value;
+        if (self.event_ready_timeout) |value| limits.event_ready_timeout = value;
         if (self.ui_request_timeout) |value| {
             limits.ui_request_timeout = value;
         } else if (std.fs.path.sep == '\\') {
@@ -737,7 +741,7 @@ fn createHost(limits: TestHostLimits) !*lifecycle.Runtime {
     );
     var executor_registered = false;
     errdefer if (!executor_registered) executor.deinit();
-    const runtime = try lifecycle.Runtime.init(
+    const runtime = try lifecycle.Runtime.initWithApi(
         std.testing.io,
         std.testing.allocator,
         &fake_api,
@@ -756,9 +760,9 @@ fn workbenchSessionOptions() lifecycle.SessionOpenOptions {
     const workspace_root = if (std.fs.path.sep == '\\') "C:\\tmp\\metawork-gate6" else "/tmp/metawork-gate6";
     const temporary_root = if (std.fs.path.sep == '\\') "C:\\tmp" else "/tmp";
     return .{
-        .provider_kind_code = wire.PROVIDER_ANTHROPIC,
-        .permission_mode_code = wire.PERMISSION_DEFAULT,
-        .shell_policy_code = wire.SHELL_DISABLED,
+        .provider = .anthropic,
+        .permission_mode = .default,
+        .shell_policy = .disabled,
         .credential = "fixture-secret",
         .model = "fixture-model",
         .workspace = .{
@@ -948,17 +952,17 @@ test "Workspace requires an absolute temporary or explicit trusted root" {
         deinitHost(host);
     }
     try std.testing.expectError(error.InvalidWorkspace, host.createSession(.{
-        .provider_kind_code = wire.PROVIDER_ANTHROPIC,
-        .permission_mode_code = wire.PERMISSION_DEFAULT,
-        .shell_policy_code = wire.SHELL_DISABLED,
+        .provider = .anthropic,
+        .permission_mode = .default,
+        .shell_policy = .disabled,
         .credential = "fixture-secret",
         .model = "fixture-model",
         .workspace = .{ .canonical_root = "relative", .trust = .explicitly_trusted },
     }));
     try std.testing.expectError(error.WorkspaceNotTrusted, host.createSession(.{
-        .provider_kind_code = wire.PROVIDER_ANTHROPIC,
-        .permission_mode_code = wire.PERMISSION_DEFAULT,
-        .shell_policy_code = wire.SHELL_DISABLED,
+        .provider = .anthropic,
+        .permission_mode = .default,
+        .shell_policy = .disabled,
         .credential = "fixture-secret",
         .model = "fixture-model",
         .workspace = .{
@@ -967,9 +971,9 @@ test "Workspace requires an absolute temporary or explicit trusted root" {
         },
     }));
     try std.testing.expectError(error.InvalidWorkspace, host.createSession(.{
-        .provider_kind_code = wire.PROVIDER_ANTHROPIC,
-        .permission_mode_code = wire.PERMISSION_DEFAULT,
-        .shell_policy_code = wire.SHELL_DISABLED,
+        .provider = .anthropic,
+        .permission_mode = .default,
+        .shell_policy = .disabled,
         .credential = "fixture-secret",
         .model = "fixture-model",
         .workspace = .{
@@ -1355,6 +1359,42 @@ test "UI notification failure is a typed fatal terminal signal" {
         },
         terminal.termination_signal.?,
     );
+    try closeSession(session, .session_close);
+}
+
+test "event notification deadline preserves the pump-owned event" {
+    fake_core.reset();
+    fake_core.setNextPlan(.event_callback);
+    const host = try createHost(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 1,
+        .event_ready_notifier = .{
+            .context = null,
+            .notify_fn = unavailableEventConsumer,
+        },
+        .event_ready_retry_interval = .fromNanoseconds(1),
+        .event_ready_timeout = .fromNanoseconds(2),
+    });
+    defer {
+        shutdownHost(host) catch unreachable;
+        deinitHost(host);
+    }
+    const session = try openSession(host);
+    const run_id = try submitSession(session, "notification deadline retains owned event");
+    try session.waitRun(run_id);
+    var terminal = takeTestTerminal(session, run_id);
+    defer terminal.deinit();
+    try std.testing.expectEqual(
+        lifecycle.TerminationSignal{
+            .event_consumer_notification_failure = .unavailable,
+        },
+        terminal.termination_signal.?,
+    );
+    var retained = host.takeEvent() orelse return error.ExpectedOwnedEvent;
+    defer retained.deinit();
+    try std.testing.expectEqual(session.id, retained.session_id);
+    try std.testing.expectEqual(run_id, retained.run_id);
     try closeSession(session, .session_close);
 }
 
@@ -1784,7 +1824,7 @@ test "concurrent Host shutdown serializes executor and Runtime destruction" {
 test "Host initialization OOM fails before acquiring the Runtime" {
     fake_core.reset();
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 3 });
-    try std.testing.expectError(error.OutOfMemory, lifecycle.Runtime.init(
+    try std.testing.expectError(error.OutOfMemory, lifecycle.Runtime.initWithApi(
         std.testing.io,
         failing.allocator(),
         &fake_api,
@@ -1809,7 +1849,7 @@ test "Session creation OOM leaves Host reusable and credential Host-only" {
     );
     var executor_registered = false;
     errdefer if (!executor_registered) executor.deinit();
-    const host = try lifecycle.Runtime.init(
+    const host = try lifecycle.Runtime.initWithApi(
         std.testing.io,
         failing.allocator(),
         &fake_api,

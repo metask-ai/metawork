@@ -86,7 +86,6 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .target = target,
         .optimize = root_module.optimize,
     });
-    projection.addImport("metacodes_agentcore", sdk);
     projection.addImport("metawork_agent", agent);
     projection.addImport("workbench_executor", executor);
     const workbench_contract_fixture = b.addOptions();
@@ -109,7 +108,6 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .optimize = root_module.optimize,
     });
     bridge.addImport("native_sdk", existingImport(root_module, "native_sdk"));
-    bridge.addImport("metacodes_agentcore", sdk);
 
     const app = b.createModule(.{
         .root_source_file = b.path("src/app.zig"),
@@ -118,7 +116,6 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     });
     app.addImport("runner", existingImport(root_module, "runner"));
     app.addImport("native_sdk", existingImport(root_module, "native_sdk"));
-    app.addImport("metacodes_agentcore", sdk);
     app.addImport("metawork_agent", agent);
     app.addImport("metawork_workbench", workbench);
     app.addImport("metawork_bridge", bridge);

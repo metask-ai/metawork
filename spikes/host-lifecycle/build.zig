@@ -67,7 +67,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    workbench.addImport("metacodes_agentcore", sdk);
     workbench.addImport("metawork_agent", agent);
     workbench.addImport("workbench_executor", executor);
     const workbench_contract_fixture = b.addOptions();
