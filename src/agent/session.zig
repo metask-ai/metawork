@@ -87,37 +87,6 @@ test "EventReadyNotifier preserves scheduled, coalesced, and unavailable outcome
     }
 }
 
-pub const ScheduledRun = struct {
-    context: *anyopaque,
-    execute: *const fn (*anyopaque) void,
-};
-
-/// Dependency-inverted scheduling capability. AgentCore owns Run mechanics;
-/// Workbench owns the bounded queue, admission capacity, and worker lifecycle.
-pub const Scheduler = struct {
-    context: *anyopaque,
-    enqueue_fn: *const fn (*anyopaque, ScheduledRun) error{ HostShuttingDown, QueueFull }!void,
-    cancel_fn: *const fn (*anyopaque, *anyopaque) bool,
-    shutdown_fn: *const fn (*anyopaque) void,
-    deinit_fn: *const fn (*anyopaque) void,
-
-    fn enqueue(self: Scheduler, run: ScheduledRun) error{ HostShuttingDown, QueueFull }!void {
-        return self.enqueue_fn(self.context, run);
-    }
-
-    fn cancel(self: Scheduler, run_context: *anyopaque) bool {
-        return self.cancel_fn(self.context, run_context);
-    }
-
-    fn shutdown(self: Scheduler) void {
-        self.shutdown_fn(self.context);
-    }
-
-    fn deinit(self: Scheduler) void {
-        self.deinit_fn(self.context);
-    }
-};
-
 pub const SessionOpenOptions = struct {
     provider_kind_code: u32,
     permission_mode_code: u32,
@@ -212,7 +181,6 @@ pub const Runtime = struct {
     ui_request_timeout: std.Io.Duration,
     event_ready_notifier: ?EventReadyNotifier,
     events: event_pump.EventPump,
-    scheduler: Scheduler,
     sessions_mutex: std.Io.Mutex = .init,
     shutdown_condition: std.Io.Condition = .init,
     sessions: []?*Session,
@@ -224,12 +192,10 @@ pub const Runtime = struct {
 
     /// `raw_api` is borrowed for the Agent Runtime lifetime. Bundle discovery tables
     /// are static; injected test tables must provide the same lifetime.
-    /// Scheduler ownership transfers to Runtime only when initialization succeeds.
     pub fn init(
         io: std.Io,
         allocator: std.mem.Allocator,
         raw_api: *const wire.ApiV1,
-        scheduler: Scheduler,
         limits: Limits,
     ) (Error || std.mem.Allocator.Error || error{UnsupportedAbi})!*Runtime {
         if (limits.max_sessions == 0 or limits.max_prompt_bytes == 0 or limits.event_capacity == 0 or
@@ -298,7 +264,6 @@ pub const Runtime = struct {
             .ui_request_timeout = limits.ui_request_timeout,
             .event_ready_notifier = limits.event_ready_notifier,
             .events = events,
-            .scheduler = scheduler,
             .sessions = sessions,
         };
         return self;
@@ -417,8 +382,6 @@ pub const Runtime = struct {
         }
         if (first_error != null) return self.finishShutdown(first_error);
 
-        self.scheduler.shutdown();
-
         if (self.runtime != null) {
             var diagnostic = emptyOwnedBytes();
             const status = self.api.runtimeDestroy()(self.runtime, &diagnostic);
@@ -512,7 +475,6 @@ pub const Runtime = struct {
         }
         self.events.deinit();
         self.allocator.free(self.sessions);
-        self.scheduler.deinit();
         const allocator = self.allocator;
         allocator.destroy(self);
     }
@@ -563,7 +525,9 @@ pub const Session = struct {
         self.condition.broadcast(self.agent_runtime.io);
     }
 
-    pub fn submit(self: *Session, prompt: []const u8) (Error || std.mem.Allocator.Error)!u64 {
+    /// Prepares an Agent Run after Workbench admission. Workbench owns queueing
+    /// and must call exactly one of `executePreparedRun` or `cancelPreparedRun`.
+    pub fn prepareRun(self: *Session, prompt: []const u8) (Error || std.mem.Allocator.Error)!u64 {
         if (prompt.len > self.agent_runtime.max_prompt_bytes) return error.PromptTooLarge;
         const owned_prompt = try self.agent_runtime.allocator.dupe(u8, prompt);
         errdefer self.agent_runtime.allocator.free(owned_prompt);
@@ -601,19 +565,24 @@ pub const Session = struct {
         self.last_outcome = null;
         self.cancel_requested = false;
         self.state = .queued;
-        self.agent_runtime.scheduler.enqueue(.{
-            .context = self,
-            .execute = executeQueuedSession,
-        }) catch |err| {
-            self.state = .idle;
-            self.active_run_id = 0;
-            self.run_done = true;
-            self.prompt = null;
-            self.unlock();
-            return err;
-        };
         self.unlock();
         return run_id;
+    }
+
+    pub fn executePreparedRun(self: *Session) void {
+        self.executeRun();
+    }
+
+    pub fn cancelPreparedRun(self: *Session, run_id: u64, cause: HostCause) Error!void {
+        self.lock();
+        if (run_id == 0 or run_id != self.active_run_id or self.state != .queued) {
+            self.unlock();
+            return error.NoSuchRun;
+        }
+        self.cancel_requested = true;
+        setCauseLocked(self, cause);
+        self.unlock();
+        self.finishCancelledQueuedRun();
     }
 
     pub fn requestCancel(self: *Session, run_id: u64, cause: HostCause) Error!void {
@@ -644,10 +613,6 @@ pub const Session = struct {
         const was_queued = self.state == .queued;
         self.unlock();
 
-        if (was_queued and self.agent_runtime.scheduler.cancel(self)) {
-            self.finishCancelledQueuedRun();
-            return;
-        }
         if (was_queued) {
             self.lock();
             while (!self.run_done and !self.run_started) self.wait();
@@ -791,7 +756,6 @@ pub const Session = struct {
             self.unlock();
             return self.destroyRawSession();
         }
-        const was_queued = self.state == .queued;
         const should_abort_now = self.run_started and !self.run_done;
         const run_id = self.active_run_id;
         self.state = .closing;
@@ -800,8 +764,6 @@ pub const Session = struct {
         self.broadcast();
         self.unlock();
 
-        const cancelled_queued = was_queued and self.agent_runtime.scheduler.cancel(self);
-        if (cancelled_queued) self.finishCancelledQueuedRun();
         if (should_abort_now) self.abortRun(run_id, cause);
 
         self.lock();
@@ -1162,11 +1124,6 @@ pub const Session = struct {
         return true;
     }
 };
-
-fn executeQueuedSession(context: *anyopaque) void {
-    const session: *Session = @ptrCast(@alignCast(context));
-    session.executeRun();
-}
 
 fn validateWorkspace(input: WorkspaceInput) Error!void {
     if (!isCanonicalAbsolutePath(input.canonical_root)) return error.InvalidWorkspace;

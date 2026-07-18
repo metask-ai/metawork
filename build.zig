@@ -81,7 +81,6 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .target = target,
         .optimize = root_module.optimize,
     });
-    executor.addImport("metawork_agent", agent);
     const projection = b.createModule(.{
         .root_source_file = b.path("src/workbench/projection.zig"),
         .target = target,
@@ -89,6 +88,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     });
     projection.addImport("metacodes_agentcore", sdk);
     projection.addImport("metawork_agent", agent);
+    projection.addImport("workbench_executor", executor);
     const workbench_contract_fixture = b.addOptions();
     workbench_contract_fixture.addOption(
         []const u8,
@@ -102,7 +102,6 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .optimize = root_module.optimize,
     });
     workbench.addImport("workbench_projection", projection);
-    workbench.addImport("workbench_executor", executor);
 
     const bridge = b.createModule(.{
         .root_source_file = b.path("src/bridge.zig"),

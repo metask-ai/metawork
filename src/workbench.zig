@@ -1,7 +1,6 @@
 //! Workbench-owned product orchestration and durable projection surface.
 
 const projection_impl = @import("workbench_projection");
-const executor_impl = @import("workbench_executor");
 
 pub const Error = projection_impl.Error;
 pub const Limits = projection_impl.Limits;
@@ -13,5 +12,3 @@ pub const TransportFailureReport = projection_impl.TransportFailureReport;
 pub const TransportFailureDecision = projection_impl.TransportFailureDecision;
 pub const decideTransportFailure = projection_impl.decideTransportFailure;
 pub const snapshot_schema_version = projection_impl.snapshot_schema_version;
-pub const Executor = executor_impl.Executor;
-pub const ExecutorLimits = executor_impl.Limits;

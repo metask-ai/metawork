@@ -1,6 +1,7 @@
 const std = @import("std");
 const sdk = @import("metacodes_agentcore");
 const lifecycle = @import("metawork_agent");
+const executor_impl = @import("workbench_executor");
 const contract_fixture = @import("workbench_contract_fixture");
 
 pub const Error = lifecycle.Error || std.mem.Allocator.Error || std.Thread.SpawnError || error{
@@ -16,6 +17,8 @@ pub const Error = lifecycle.Error || std.mem.Allocator.Error || std.Thread.Spawn
 };
 
 pub const Limits = struct {
+    worker_count: usize = 4,
+    queue_capacity: usize = 16,
     max_sessions: usize = 8,
     max_runs_per_session: usize = 16,
     max_tools_per_run: usize = 32,
@@ -159,6 +162,10 @@ const RunRecord = struct {
     terminal_payload: TerminalPayload = undefined,
     terminal_diagnostic: []u8,
     next_activity_order: u64 = 1,
+    workbench: *Workbench = undefined,
+    task: *SessionView = undefined,
+    session: *lifecycle.Session = undefined,
+    worker_reference_held: std.atomic.Value(bool) = .init(false),
 };
 
 const CloseTerminalFacts = struct {
@@ -240,12 +247,11 @@ pub const RunRef = struct {
         std.debug.assert(!self.released);
         std.debug.assert(self.isCurrent());
         self.released = true;
-        const previous = self.task.run_references.fetchSub(1, .release);
+        const references = &self.task.run_references;
+        const workbench = self.workbench;
+        const previous = references.fetchSub(1, .release);
         std.debug.assert(previous != 0);
-        if (previous == 1) {
-            _ = self.task.run_references.load(.acquire);
-            _ = self.workbench.change_notifier.notify();
-        }
+        if (previous == 1) _ = workbench.change_notifier.notify();
     }
 };
 
@@ -258,6 +264,8 @@ pub const Workbench = struct {
     limits: Limits,
     sessions: []?SessionView,
     change_notifier: ChangeNotifier,
+    executor: *executor_impl.Executor,
+    executor_shutdown: bool = false,
     projection_bytes: usize = 0,
     revision: u64 = 0,
     known_secret: []u8 = &.{},
@@ -266,7 +274,7 @@ pub const Workbench = struct {
         allocator: std.mem.Allocator,
         agent_runtime: *lifecycle.Runtime,
         limits: Limits,
-    ) (std.mem.Allocator.Error || error{ProjectionCapacity})!Workbench {
+    ) Error!Workbench {
         return initWithNotifier(allocator, agent_runtime, limits, .{});
     }
 
@@ -275,8 +283,9 @@ pub const Workbench = struct {
         agent_runtime: *lifecycle.Runtime,
         limits: Limits,
         change_notifier: ChangeNotifier,
-    ) (std.mem.Allocator.Error || error{ProjectionCapacity})!Workbench {
-        if (limits.max_sessions == 0 or limits.max_runs_per_session == 0 or
+    ) Error!Workbench {
+        if (limits.worker_count == 0 or limits.queue_capacity == 0 or
+            limits.max_sessions == 0 or limits.max_runs_per_session == 0 or
             limits.max_tools_per_run == 0 or limits.max_projection_bytes == 0 or
             limits.max_workspace_bytes == 0 or
             limits.max_task_title_bytes == 0 or
@@ -289,13 +298,22 @@ pub const Workbench = struct {
             (worstCaseSnapshotBytes(limits) orelse return error.ProjectionCapacity) > limits.max_snapshot_bytes)
             return error.ProjectionCapacity;
         const sessions = try allocator.alloc(?SessionView, limits.max_sessions);
+        errdefer allocator.free(sessions);
         @memset(sessions, null);
+        const executor = executor_impl.Executor.create(agent_runtime.io, allocator, .{
+            .worker_count = limits.worker_count,
+            .queue_capacity = limits.queue_capacity,
+        }) catch |err| switch (err) {
+            error.InvalidLimits => unreachable,
+            else => return err,
+        };
         return .{
             .allocator = allocator,
             .agent_runtime = agent_runtime,
             .limits = limits,
             .sessions = sessions,
             .change_notifier = change_notifier,
+            .executor = executor,
         };
     }
 
@@ -356,8 +374,27 @@ pub const Workbench = struct {
         const session = view.session orelse return error.SessionClosing;
         const slot = try self.reserveRunRecord(view, prompt);
         errdefer self.discardRunRecord(view, slot);
-        const run_id = session.submit(prompt) catch |err| return err;
-        view.runs[slot].?.id = run_id;
+        const run = &view.runs[slot].?;
+        const run_id = session.prepareRun(prompt) catch |err| return err;
+        run.id = run_id;
+        run.workbench = self;
+        run.task = view;
+        run.session = session;
+        _ = view.run_references.fetchAdd(1, .acq_rel);
+        run.worker_reference_held.store(true, .release);
+        self.executor.enqueue(.{
+            .context = run,
+            .execute_fn = executeRunJob,
+            .cancel_fn = cancelRunJobForShutdown,
+        }) catch |err| {
+            const cause: lifecycle.HostCause = switch (err) {
+                error.QueueFull => .queue_capacity_failure,
+                error.HostShuttingDown => .host_shutdown,
+            };
+            session.cancelPreparedRun(run_id, cause) catch {};
+            releaseWorkerReference(run);
+            return err;
+        };
         view.state = .queued;
         view.active_run_id = run_id;
         view.cancel_requested = false;
@@ -386,10 +423,16 @@ pub const Workbench = struct {
         const session = view.session orelse
             return error.SessionClosing;
         const record = self.prepareCancelledUiRecord(session, run_id);
-        try session.requestCancel(run_id, .user_cancel);
+        const run = findRun(view.runs, run_id) orelse return error.NoSuchRun;
+        if (self.executor.cancel(run)) {
+            try session.cancelPreparedRun(run_id, .user_cancel);
+            releaseWorkerReference(run);
+        } else {
+            try session.requestCancel(run_id, .user_cancel);
+        }
         if (record) |value| self.pushUiRecord(view, value);
         view.cancel_requested = true;
-        if (findRun(view.runs, run_id)) |run| setActivePhase(run, .stopping);
+        setActivePhase(run, .stopping);
         self.bumpRevision();
     }
 
@@ -416,6 +459,12 @@ pub const Workbench = struct {
         if (view.close_result.load(.acquire) == .running) return error.CloseInProgress;
         const session = view.session orelse return;
         const cancelled_ui = self.prepareCancelledUiRecord(session, view.active_run_id);
+        if (findRun(view.runs, view.active_run_id)) |run| {
+            if (self.executor.cancel(run)) {
+                session.cancelPreparedRun(view.active_run_id, .session_close) catch {};
+                releaseWorkerReference(run);
+            }
+        }
         view.session = null;
         view.closing_session = session;
         view.state = .closing;
@@ -628,6 +677,7 @@ pub const Workbench = struct {
     }
 
     pub fn deinit(self: *Workbench) void {
+        self.shutdownExecutor();
         for (self.sessions) |*entry| {
             const session = &(entry.* orelse continue);
             if (session.close_thread) |thread| thread.join();
@@ -639,7 +689,15 @@ pub const Workbench = struct {
             self.allocator.free(self.known_secret);
         }
         std.debug.assert(self.projection_bytes == 0);
+        self.executor.deinit();
         self.* = undefined;
+    }
+
+    pub fn shutdownExecutor(self: *Workbench) void {
+        if (self.executor_shutdown) return;
+        self.executor.shutdown();
+        self.executor_shutdown = true;
+        self.syncLifecycle();
     }
 
     fn writeSession(self: *Workbench, writer: *std.Io.Writer, view: *SessionView) Error!void {
@@ -771,6 +829,9 @@ pub const Workbench = struct {
             .tools = tools,
             .status_text = status_text,
             .terminal_diagnostic = terminal_diagnostic,
+            .workbench = undefined,
+            .task = undefined,
+            .session = undefined,
         };
         return slot;
     }
@@ -1183,6 +1244,27 @@ fn closeWorker(
     };
     view.close_result.store(result, .release);
     _ = agent_runtime.requestWake();
+}
+
+fn executeRunJob(context: *anyopaque) void {
+    const run: *RunRecord = @ptrCast(@alignCast(context));
+    run.session.executePreparedRun();
+    _ = run.workbench.change_notifier.notify();
+    releaseWorkerReference(run);
+}
+
+fn cancelRunJobForShutdown(context: *anyopaque) void {
+    const run: *RunRecord = @ptrCast(@alignCast(context));
+    run.session.cancelPreparedRun(run.id, .host_shutdown) catch {};
+    _ = run.workbench.change_notifier.notify();
+    releaseWorkerReference(run);
+}
+
+fn releaseWorkerReference(run: *RunRecord) void {
+    std.debug.assert(run.worker_reference_held.swap(false, .acq_rel));
+    const references = &run.task.run_references;
+    const previous = references.fetchSub(1, .release);
+    std.debug.assert(previous != 0);
 }
 
 fn noChangeNotification(_: ?*anyopaque) bool {

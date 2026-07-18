@@ -293,13 +293,15 @@ fn verifyFormalHost(io: std.Io, raw_api: *const wire.ApiV1, root: []const u8) !v
         allocator,
         .{ .worker_count = 1, .queue_capacity = 2 },
     );
-    errdefer executor.destroy();
-    const host = try lifecycle.Runtime.init(io, allocator, raw_api, executor.scheduler(), .{
+    errdefer executor.deinit();
+    const host = try lifecycle.Runtime.init(io, allocator, raw_api, .{
         .max_sessions = 1,
     });
     defer {
+        executor.shutdown();
         host.shutdown() catch unreachable;
         host.deinit();
+        executor.deinit();
     }
     const session = try host.createSession(.{
         .provider_kind_code = wire.PROVIDER_ANTHROPIC,
@@ -313,7 +315,24 @@ fn verifyFormalHost(io: std.Io, raw_api: *const wire.ApiV1, root: []const u8) !v
             .trust = .{ .temporary = "/tmp" },
         },
     });
-    const run_id = try session.submit("exercise formal Host synchronous UI and events");
+    const RunJob = struct {
+        fn execute(context: *anyopaque) void {
+            const value: *lifecycle.Session = @ptrCast(@alignCast(context));
+            value.executePreparedRun();
+        }
+
+        fn cancel(context: *anyopaque) void {
+            const value: *lifecycle.Session = @ptrCast(@alignCast(context));
+            const active_run_id = value.snapshot().active_run_id;
+            value.cancelPreparedRun(active_run_id, .host_shutdown) catch {};
+        }
+    };
+    const run_id = try session.prepareRun("exercise formal Host synchronous UI and events");
+    try executor.enqueue(.{
+        .context = session,
+        .execute_fn = RunJob.execute,
+        .cancel_fn = RunJob.cancel,
+    });
     try session.waitForState(.waiting_ui);
     const request_id = session.pendingUiRequest() orelse return error.MissingFormalHostUiRequest;
     const answers = [_][]const u8{"Yes"};

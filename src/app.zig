@@ -121,6 +121,7 @@ const App = struct {
             services.cancelTimer(delivery_retention_timer_id) catch {};
             services.cancelTimer(workbench_revision_retry_timer_id) catch {};
         }
+        if (self.workbench) |workbench| workbench.shutdownExecutor();
         if (self.agent_runtime) |agent_runtime| {
             try agent_runtime.shutdown();
             self.agent_shutdown = true;
@@ -949,13 +950,7 @@ fn createAgentRuntime(
     raw_api: *const agentcore.types.ApiV1,
     notifier: agent.EventReadyNotifier,
 ) !*agent.Runtime {
-    const executor = try workbench_api.Executor.create(
-        io,
-        std.heap.c_allocator,
-        .{ .worker_count = host_worker_count, .queue_capacity = 8 },
-    );
-    errdefer executor.destroy();
-    return agent.Runtime.init(io, std.heap.c_allocator, raw_api, executor.scheduler(), .{
+    return agent.Runtime.init(io, std.heap.c_allocator, raw_api, .{
         .max_sessions = 8,
         .max_ui_request_bytes = pending_ui_json_capacity,
         .event_ready_notifier = notifier,
@@ -983,6 +978,7 @@ pub fn run(init: std.process.Init) !void {
     var workbench_state: workbench_api.Workbench = undefined;
     var workbench_initialized = false;
     defer {
+        if (workbench_initialized) workbench_state.shutdownExecutor();
         if (!app.agent_shutdown) agent_runtime.shutdown() catch {};
         if (workbench_initialized) workbench_state.deinit();
         agent_runtime.deinit();
@@ -991,6 +987,8 @@ pub fn run(init: std.process.Init) !void {
         std.heap.c_allocator,
         agent_runtime,
         .{
+            .worker_count = host_worker_count,
+            .queue_capacity = 8,
             .max_pending_ui_json_bytes = pending_ui_json_capacity,
             .max_pending_ui_requests = host_worker_count,
             .max_snapshot_bytes = workbench_snapshot_capacity,

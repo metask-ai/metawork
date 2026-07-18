@@ -196,6 +196,7 @@ RunJob
 - 每个 Session 至多一个 in-flight Run；
 - Host 使用有上限的 Run executor；
 - 空闲 Session 不占 worker；同步 Run 和同步 UI wait 占用 execution slot；
+- Workbench 创建、排队、停止并销毁 bounded Executor；Agent Runtime 不接收 Scheduler capability，worker 从 Workbench queue 主动进入 Agent Run；
 - Bridge/main thread 不执行长耗时 Run，也不等待 permission；
 - Agent 通过 `EventReadyNotifier` 只报告 `scheduled` / `already_pending` / `unavailable`，不知道 Native main loop 或 Renderer；
 - Renderer delivery、revision、snapshot、connection 和 retention failure 作为 typed transport fact 进入 Workbench policy，默认只重试、断开或丢弃 transport copy，不中止后台 Agent Run；

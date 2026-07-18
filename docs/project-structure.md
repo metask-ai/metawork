@@ -28,7 +28,7 @@
 - bounded executor 的队列、worker 和容量策略归 `workbench/executor.zig`，AgentCore 只持有最小调度 capability；
 - Agent Runtime/Session、callback quiescence、cancel/close/shutdown 语义仍集中在 `agent/session.zig`，后续只按已验证责任继续拆分；
 - `workbench/projection.zig` 仍同时承担产品投影、Session view 和 snapshot writer，后续任务再提取；
-- Workbench admission 已在 `workbench/projection.zig` 建立 stable Run record、generation、`RunRef`、write-once terminal publication 与 `delete_pending` 基础；Executor handoff 完成前仍由现有 Session snapshot 提供 terminal facts；
+- Workbench admission 已在 `workbench/projection.zig` 建立 stable Run record、generation、`RunRef`、write-once terminal publication 与 `delete_pending` 基础，并已独占 Executor/queue/workers；Agent terminal model 完成前仍由现有 Session snapshot 提供 terminal facts；
 - Renderer Host 合同已集中到 `frontend/src/host/`；应用 composition 已进入 `frontend/src/app/`，已落地的 Workspace navigation、Search、Timeline、question/permission Approvals、Composer draft 和 Task activity 进入各自 `frontend/src/features/`，`workbench/` 只保留 projection store 与 selector。尚未形成真实产品能力的 Outputs、持久权限管理和 Settings 不创建空模块。
 
 当前 Zig 顶层固定为 `main.zig + app.zig + agent.zig + workbench.zig + bridge.zig`。`agent/` 表达 MetaWork 自己拥有的执行子系统；`AgentCore` 只指 metacodes 构建的外部 bundle。完整后续状态机与迁移顺序见 [架构调整实施方案](architecture-adjustment-plan.md)。
@@ -318,7 +318,7 @@ src/
 - `agent/runtime.zig`、`session.zig` 和 `run.zig`：目标上直接拥有 SDK Runtime/Session handle、Conversation、同步 run 调用与收口；不拥有产品队列；
 - `agent/callbacks.zig`、`event_sink.zig` 和 `event_pump.zig`：callback copy、同步 UI wait、事件所有权、backpressure 和 notification。尚未形成独立不变量的代码暂留 `agent/session.zig`。
 
-目标模型中 Run phase、产品 outcome 和 StopReason 映射只归 `workbench/tasks.zig`；`agent/` 只返回 bundle SDK 已校验的 typed terminal facts。当前 `HostCause` 与 Scheduler 倒挂仍是待迁移现状，不因目录改名而获准成为终态。
+目标模型中 Run phase、产品 outcome 和 StopReason 映射只归 `workbench/tasks.zig`；`agent/` 只返回 bundle SDK 已校验的 typed terminal facts。Scheduler 倒挂已经移除；当前剩余 `HostCause` 与 Session snapshot terminal 回查仍是待迁移现状，不因 Executor ownership 已修正就获准成为终态。
 
 当前 `agent/session.zig` 已验证的 shutdown、callback quiescence 和 first-writer-wins cause，以及 `workbench/executor.zig` 的 bounded scheduling 行为，只能按正式迁移阶段改写，不能与纯路径迁移混成一次不可审查的变化。
 

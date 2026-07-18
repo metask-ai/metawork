@@ -174,7 +174,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = link_libc,
     });
-    executor.addImport("metawork_agent", agent);
     probe_module.addImport("metawork_agent", agent);
     probe_module.addImport("workbench_executor", executor);
     probe_module.addObjectFile(.{ .cwd_relative = lib_path });

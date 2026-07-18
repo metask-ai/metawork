@@ -61,7 +61,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    executor.addImport("metawork_agent", agent);
     const workbench = b.createModule(.{
         .root_source_file = b.path("../../src/workbench/projection.zig"),
         .target = target,
@@ -70,6 +69,7 @@ pub fn build(b: *std.Build) void {
     });
     workbench.addImport("metacodes_agentcore", sdk);
     workbench.addImport("metawork_agent", agent);
+    workbench.addImport("workbench_executor", executor);
     const bridge_delivery = b.createModule(.{
         .root_source_file = b.path("../../src/bridge/delivery.zig"),
         .target = target,

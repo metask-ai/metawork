@@ -61,7 +61,7 @@ AgentCore bundle
 - `src/agent/` 直接消费 `metacodes_agentcore`，不得 import Workbench、Bridge 或 App；
 - Workbench 只通过 `metawork_agent` 公共表面协调 Session/Run；
 - `src/main.zig` 只进入 `metawork_app`，不能绕过 App 组装低层模块；
-- 当前 `HostCause` 与 injected Scheduler 是待迁移现状，其最终模型以 [架构调整实施方案](architecture-adjustment-plan.md) 为准。
+- 当前 `HostCause` 仍是待迁移现状；Executor、queue 与 workers 已归 Workbench 独占，Agent Runtime 不再接收 Scheduler capability。最终 terminal model 以 [架构调整实施方案](architecture-adjustment-plan.md) 为准。
 
 ## 3. 当前协议表面
 
@@ -191,7 +191,7 @@ Gate 2 的 raw lifecycle foundation 使用 bundle SDK 提供的精确 `ApiV1` ta
 
 Gate 4 在同一状态机上直接加入 bundle typed SDK，不另建 Adapter：event callback 先校验并形成 SDK-owned parse owner，再以单调 Host Session ID 和 Run ID 进入 FIFO bounded sink；UI callback 保留校验后的 request owner，response 只由 request-aware SDK encoder 生成。同步 UI deadline 使用 Host `std.Io` future，response、cancel、close、shutdown 或 deadline 都在 callback 返回前收敛并回收 timer。
 
-当前迁移阶段由 Workbench 在调用 `Session.submit()` 前预留 durable Run record、generation、tool slots 与 terminal diagnostic buffer；任何 admission 分配失败都发生在 Agent Run 建立之前。Session 正常 terminal 或 close worker 销毁 Session 前，将固定大小 terminal facts 交给 Workbench 的 write-once publication；同一 record 的迟到重复提交不得改写已经发布的产品历史。`RunRef` 引用归零前，所属 Task 即使已关闭并请求删除也只进入 `delete_pending`。
+当前迁移阶段由 Workbench 预留 durable Run record、generation、tool slots 与 terminal diagnostic buffer，再调用 `Session.prepareRun()` 并把 Workbench-owned job 放入自身 bounded Executor。worker 主动调用 transitional `executePreparedRun()`；Agent Runtime 不 enqueue、不停止、也不销毁 Executor。Session 正常 terminal 或 close worker 销毁 Session 前，将固定大小 terminal facts 交给 Workbench 的 write-once publication；同一 record 的迟到重复提交不得改写已经发布的产品历史。`RunRef` 引用归零前，所属 Task 即使已关闭并请求删除也只进入 `delete_pending`。
 
 ### Close 顺序
 

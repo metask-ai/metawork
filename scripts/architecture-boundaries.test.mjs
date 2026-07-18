@@ -122,3 +122,26 @@ test("canonical notification and Renderer transport failures stay isolated", () 
   const delivery = read("src/bridge/delivery.zig");
   assert.match(delivery, /pub fn deinitOwnedBuffers/);
 });
+
+test("Workbench owns queue and worker lifecycle", () => {
+  const agent = read("src/agent/session.zig");
+  assert.doesNotMatch(
+    agent,
+    /pub const (?:Scheduler|ScheduledRun)|enqueue_fn|shutdown_fn|deinit_fn|\.scheduler/,
+  );
+
+  const executor = read("src/workbench/executor.zig");
+  assert.doesNotMatch(executor, /@import\("metawork_agent"\)/);
+  assert.match(executor, /pub fn enqueue/);
+  assert.match(executor, /pub fn shutdown/);
+
+  const workbench = read("src/workbench/projection.zig");
+  assert.match(workbench, /@import\("workbench_executor"\)/);
+  assert.match(workbench, /self\.executor\.enqueue/);
+  assert.match(workbench, /pub fn shutdownExecutor/);
+
+  const app = read("src/app.zig");
+  const stopExecutor = app.indexOf("workbench.shutdownExecutor();");
+  const stopAgent = app.indexOf("agent_runtime.shutdown();");
+  assert.ok(stopExecutor >= 0 && stopExecutor < stopAgent);
+});

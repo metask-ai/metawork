@@ -558,20 +558,127 @@ const TestHostLimits = struct {
     }
 };
 
+const TestHostEntry = struct {
+    runtime: *lifecycle.Runtime,
+    executor: *workbench_executor.Executor,
+    executor_shutdown: std.atomic.Value(enum(u8) { open, running, complete }) = .init(.open),
+};
+
+var test_host_entries: [32]?TestHostEntry = @splat(null);
+
+fn registerTestHost(runtime: *lifecycle.Runtime, executor: *workbench_executor.Executor) !void {
+    for (&test_host_entries) |*entry| {
+        if (entry.* == null) {
+            entry.* = .{ .runtime = runtime, .executor = executor };
+            return;
+        }
+    }
+    return error.TestHostCapacity;
+}
+
+fn testHostEntry(runtime: *lifecycle.Runtime) *TestHostEntry {
+    for (&test_host_entries) |*entry| {
+        const value = &(entry.* orelse continue);
+        if (value.runtime == runtime) return value;
+    }
+    unreachable;
+}
+
+fn testExecutor(runtime: *lifecycle.Runtime) *workbench_executor.Executor {
+    return testHostEntry(runtime).executor;
+}
+
+fn unregisterTestHost(runtime: *lifecycle.Runtime) *workbench_executor.Executor {
+    for (&test_host_entries) |*entry| {
+        const value = entry.* orelse continue;
+        if (value.runtime == runtime) {
+            entry.* = null;
+            return value.executor;
+        }
+    }
+    unreachable;
+}
+
+fn executeTestRun(context: *anyopaque) void {
+    const session: *lifecycle.Session = @ptrCast(@alignCast(context));
+    session.executePreparedRun();
+}
+
+fn cancelTestRunForShutdown(context: *anyopaque) void {
+    const session: *lifecycle.Session = @ptrCast(@alignCast(context));
+    const run_id = session.snapshot().active_run_id;
+    session.cancelPreparedRun(run_id, .host_shutdown) catch {};
+}
+
+fn submitSession(session: *lifecycle.Session, prompt: []const u8) !u64 {
+    const run_id = try session.prepareRun(prompt);
+    testExecutor(session.agent_runtime).enqueue(.{
+        .context = session,
+        .execute_fn = executeTestRun,
+        .cancel_fn = cancelTestRunForShutdown,
+    }) catch |err| {
+        const cause: lifecycle.HostCause = switch (err) {
+            error.QueueFull => .queue_capacity_failure,
+            error.HostShuttingDown => .host_shutdown,
+        };
+        session.cancelPreparedRun(run_id, cause) catch {};
+        return err;
+    };
+    return run_id;
+}
+
+fn cancelSession(session: *lifecycle.Session, run_id: u64, cause: lifecycle.HostCause) !void {
+    if (testExecutor(session.agent_runtime).cancel(session))
+        return session.cancelPreparedRun(run_id, cause);
+    return session.requestCancel(run_id, cause);
+}
+
+fn closeSession(session: *lifecycle.Session, cause: lifecycle.HostCause) !void {
+    const snapshot = session.snapshot();
+    if (snapshot.state == .queued and testExecutor(session.agent_runtime).cancel(session))
+        try session.cancelPreparedRun(snapshot.active_run_id, cause);
+    return session.close(cause);
+}
+
+fn shutdownHost(runtime: *lifecycle.Runtime) !void {
+    const entry = testHostEntry(runtime);
+    if (entry.executor_shutdown.cmpxchgStrong(.open, .running, .acq_rel, .acquire) == null) {
+        entry.executor.shutdown();
+        entry.executor_shutdown.store(.complete, .release);
+    } else {
+        while (entry.executor_shutdown.load(.acquire) != .complete)
+            std.Thread.yield() catch {};
+    }
+    return runtime.shutdown();
+}
+
+fn deinitHost(runtime: *lifecycle.Runtime) void {
+    const executor = unregisterTestHost(runtime);
+    executor.deinit();
+    runtime.deinit();
+}
+
 fn createHost(limits: TestHostLimits) !*lifecycle.Runtime {
     const executor = try workbench_executor.Executor.create(
         std.testing.io,
         std.testing.allocator,
         .{ .worker_count = limits.worker_count, .queue_capacity = limits.queue_capacity },
     );
-    errdefer executor.destroy();
-    return lifecycle.Runtime.init(
+    var executor_registered = false;
+    errdefer if (!executor_registered) executor.deinit();
+    const runtime = try lifecycle.Runtime.init(
         std.testing.io,
         std.testing.allocator,
         &fake_api,
-        executor.scheduler(),
         limits.hostLimits(),
     );
+    errdefer {
+        runtime.shutdown() catch {};
+        runtime.deinit();
+    }
+    try registerTestHost(runtime, executor);
+    executor_registered = true;
+    return runtime;
 }
 
 fn workbenchSessionOptions() lifecycle.SessionOpenOptions {
@@ -602,11 +709,11 @@ fn waitWorkbenchSnapshot(
 }
 
 fn closeOnThread(session: *lifecycle.Session) void {
-    session.close(.session_close) catch unreachable;
+    closeSession(session, .session_close) catch unreachable;
 }
 
 fn cancelOnThread(session: *lifecycle.Session, run_id: u64) void {
-    session.requestCancel(run_id, .user_cancel) catch unreachable;
+    cancelSession(session, run_id, .user_cancel) catch unreachable;
 }
 
 fn failPipelineOnThread(session: *lifecycle.Session) void {
@@ -614,7 +721,7 @@ fn failPipelineOnThread(session: *lifecycle.Session) void {
 }
 
 fn shutdownOnThread(host: *lifecycle.Runtime) void {
-    host.shutdown() catch unreachable;
+    shutdownHost(host) catch unreachable;
 }
 
 test "Host creates and destroys Runtime and idle Session" {
@@ -624,16 +731,16 @@ test "Host creates and destroys Runtime and idle Session" {
         .queue_capacity = 2,
         .max_sessions = 2,
     });
-    defer host.deinit();
+    defer deinitHost(host);
     const session = try openSession(host);
     try std.testing.expect(fake_core.credential_seen);
     try std.testing.expect(fake_core.zero_host_tools_seen);
     try std.testing.expect(fake_core.builtin_allowlist_seen);
     try std.testing.expectEqual(lifecycle.SessionState.idle, session.snapshot().state);
-    try session.close(.session_close);
-    try session.close(.session_close);
-    try host.shutdown();
-    try host.shutdown();
+    try closeSession(session, .session_close);
+    try closeSession(session, .session_close);
+    try shutdownHost(host);
+    try shutdownHost(host);
     try std.testing.expectEqual(@as(usize, 1), fake_core.runtime_created);
     try std.testing.expectEqual(@as(usize, 1), fake_core.runtime_destroyed);
     try std.testing.expectEqual(@as(usize, 1), fake_core.session_destroyed);
@@ -647,8 +754,8 @@ test "Workspace requires an absolute temporary or explicit trusted root" {
         .max_sessions = 1,
     });
     defer {
-        host.shutdown() catch unreachable;
-        host.deinit();
+        shutdownHost(host) catch unreachable;
+        deinitHost(host);
     }
     try std.testing.expectError(error.InvalidWorkspace, host.createSession(.{
         .provider_kind_code = wire.PROVIDER_ANTHROPIC,
@@ -687,21 +794,21 @@ test "bounded executor rejects overflow and close cancels a queued Run" {
     fake_core.setNextPlan(.controlled);
     const host = try createHost(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 3 });
     defer {
-        host.shutdown() catch unreachable;
-        host.deinit();
+        shutdownHost(host) catch unreachable;
+        deinitHost(host);
     }
     const running = try openSession(host);
     const queued = try openSession(host);
     const rejected = try openSession(host);
 
-    const running_id = try running.submit("hold worker");
+    const running_id = try submitSession(running, "hold worker");
     try running.waitForState(.running);
-    _ = try queued.submit("stay queued");
-    try std.testing.expectError(error.SessionNotIdle, queued.submit("second in-flight"));
-    try std.testing.expectError(error.QueueFull, rejected.submit("overflow"));
+    _ = try submitSession(queued, "stay queued");
+    try std.testing.expectError(error.SessionNotIdle, submitSession(queued, "second in-flight"));
+    try std.testing.expectError(error.QueueFull, submitSession(rejected, "overflow"));
     try std.testing.expectEqual(lifecycle.SessionState.idle, rejected.snapshot().state);
 
-    try queued.close(.session_close);
+    try closeSession(queued, .session_close);
     const queued_snapshot = queued.snapshot();
     try std.testing.expectEqual(
         @as(?lifecycle.HostCause, .session_close),
@@ -718,8 +825,8 @@ test "bounded executor rejects overflow and close cancels a queued Run" {
 
     fake_core.releaseControlled();
     try running.waitRun(running_id);
-    try running.close(.session_close);
-    try rejected.close(.session_close);
+    try closeSession(running, .session_close);
+    try closeSession(rejected, .session_close);
 }
 
 test "queued prompt memory is bounded before allocation" {
@@ -731,13 +838,13 @@ test "queued prompt memory is bounded before allocation" {
         .max_prompt_bytes = 4,
     });
     defer {
-        host.shutdown() catch unreachable;
-        host.deinit();
+        shutdownHost(host) catch unreachable;
+        deinitHost(host);
     }
     const session = try openSession(host);
-    try std.testing.expectError(error.PromptTooLarge, session.submit("12345"));
+    try std.testing.expectError(error.PromptTooLarge, submitSession(session, "12345"));
     try std.testing.expectEqual(lifecycle.SessionState.idle, session.snapshot().state);
-    try session.close(.session_close);
+    try closeSession(session, .session_close);
 }
 
 test "pre-admission resource limit leaves the Session reusable" {
@@ -745,21 +852,21 @@ test "pre-admission resource limit leaves the Session reusable" {
     fake_core.setNextPlan(.resource_limit);
     const host = try createHost(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
     defer {
-        host.shutdown() catch unreachable;
-        host.deinit();
+        shutdownHost(host) catch unreachable;
+        deinitHost(host);
     }
     const session = try openSession(host);
-    const first_run = try session.submit("exceed a Core resource limit");
+    const first_run = try submitSession(session, "exceed a Core resource limit");
     try session.waitRun(first_run);
     const first = session.snapshot();
     try std.testing.expectEqual(@as(?u32, wire.STATUS_RESOURCE_LIMIT), first.last_status);
     try std.testing.expectEqual(@as(?lifecycle.RunOutcome, .failed), first.last_outcome);
     try std.testing.expectEqual(lifecycle.SessionState.idle, first.state);
 
-    const second_run = try session.submit("the Session remains admitted");
+    const second_run = try submitSession(session, "the Session remains admitted");
     try session.waitRun(second_run);
     try std.testing.expectEqual(lifecycle.SessionState.idle, session.snapshot().state);
-    try session.close(.session_close);
+    try closeSession(session, .session_close);
 }
 
 test "closing an active Run aborts, joins, and preserves the first HostCause" {
@@ -767,11 +874,11 @@ test "closing an active Run aborts, joins, and preserves the first HostCause" {
     fake_core.setNextPlan(.controlled_callback_failed);
     const host = try createHost(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
     defer {
-        host.shutdown() catch unreachable;
-        host.deinit();
+        shutdownHost(host) catch unreachable;
+        deinitHost(host);
     }
     const session = try openSession(host);
-    const run_id = try session.submit("race cancel with callback failure");
+    const run_id = try submitSession(session, "race cancel with callback failure");
     try session.waitForState(.running);
 
     const cancel_thread = try std.Thread.spawn(.{}, cancelOnThread, .{ session, run_id });
@@ -785,7 +892,7 @@ test "closing an active Run aborts, joins, and preserves the first HostCause" {
     try std.testing.expectEqual(@as(?u32, wire.STATUS_CALLBACK_FAILED), before.last_status);
     session.recordCause(.timeout);
     try std.testing.expectEqual(before.cause, session.snapshot().cause);
-    try session.close(.session_close);
+    try closeSession(session, .session_close);
     fake_core.lock();
     const abort_calls = fake_core.abort_calls;
     fake_core.unlock();
@@ -797,11 +904,11 @@ test "malformed Core events fail the Run instead of entering the bounded sink" {
     fake_core.setNextPlan(.malformed_event_callback);
     const host = try createHost(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
     defer {
-        host.shutdown() catch unreachable;
-        host.deinit();
+        shutdownHost(host) catch unreachable;
+        deinitHost(host);
     }
     const session = try openSession(host);
-    const run_id = try session.submit("emit malformed event");
+    const run_id = try submitSession(session, "emit malformed event");
     try session.waitRun(run_id);
     const snapshot = session.snapshot();
     try std.testing.expectEqual(@as(?u32, wire.STATUS_CALLBACK_FAILED), snapshot.last_status);
@@ -810,9 +917,9 @@ test "malformed Core events fail the Run instead of entering the bounded sink" {
         snapshot.cause,
     );
     try std.testing.expectEqual(lifecycle.SessionState.poisoned, snapshot.state);
-    try std.testing.expectError(error.SessionPoisoned, session.submit("must not continue"));
+    try std.testing.expectError(error.SessionPoisoned, submitSession(session, "must not continue"));
     try std.testing.expect(host.takeEvent() == null);
-    try session.close(.session_close);
+    try closeSession(session, .session_close);
     fake_core.lock();
     const releases = fake_core.buffer_releases;
     fake_core.unlock();
@@ -832,18 +939,18 @@ test "valid unknown observations are ignored without consuming pump capacity" {
         .per_session_control_reserved_capacity = 0,
     });
     defer {
-        host.shutdown() catch unreachable;
-        host.deinit();
+        shutdownHost(host) catch unreachable;
+        deinitHost(host);
     }
     const session = try openSession(host);
-    const run_id = try session.submit("emit a future observation");
+    const run_id = try submitSession(session, "emit a future observation");
     try session.waitRun(run_id);
     const snapshot = session.snapshot();
     try std.testing.expectEqual(@as(?u32, wire.STATUS_OK), snapshot.last_status);
     try std.testing.expectEqual(@as(?lifecycle.RunOutcome, .completed), snapshot.last_outcome);
     try std.testing.expectEqual(lifecycle.SessionState.idle, snapshot.state);
     try std.testing.expect(host.takeEvent() == null);
-    try session.close(.session_close);
+    try closeSession(session, .session_close);
 }
 
 test "typed Core events are deep-copied into a bounded routed sink" {
@@ -859,18 +966,18 @@ test "typed Core events are deep-copied into a bounded routed sink" {
         .per_session_control_reserved_capacity = 0,
     });
     defer {
-        host.shutdown() catch unreachable;
-        host.deinit();
+        shutdownHost(host) catch unreachable;
+        deinitHost(host);
     }
     const session = try openSession(host);
-    const first_run = try session.submit("emit typed event");
+    const first_run = try submitSession(session, "emit typed event");
     try session.waitRun(first_run);
     const first_snapshot = session.snapshot();
     try std.testing.expectEqual(@as(?u32, wire.STATUS_OK), first_snapshot.last_status);
     try std.testing.expectEqual(@as(?u32, wire.STOP_END_TURN), first_snapshot.last_stop_reason_code);
     try std.testing.expectEqual(@as(?lifecycle.RunOutcome, .completed), first_snapshot.last_outcome);
 
-    const second_run = try session.submit("preserve FIFO order");
+    const second_run = try submitSession(session, "preserve FIFO order");
     try session.waitRun(second_run);
     const second_snapshot = session.snapshot();
     try std.testing.expectEqual(@as(?lifecycle.RunOutcome, .completed), second_snapshot.last_outcome);
@@ -884,7 +991,7 @@ test "typed Core events are deep-copied into a bounded routed sink" {
     var second = host.takeEvent().?;
     try std.testing.expectEqual(second_run, second.run_id);
     second.deinit();
-    try session.close(.session_close);
+    try closeSession(session, .session_close);
 }
 
 test "bounded event sink overflow returns callback fatal and preserves HostCause" {
@@ -900,13 +1007,13 @@ test "bounded event sink overflow returns callback fatal and preserves HostCause
         .per_session_control_reserved_capacity = 0,
     });
     defer {
-        host.shutdown() catch unreachable;
-        host.deinit();
+        shutdownHost(host) catch unreachable;
+        deinitHost(host);
     }
     const session = try openSession(host);
-    const first_run = try session.submit("retain first event");
+    const first_run = try submitSession(session, "retain first event");
     try session.waitRun(first_run);
-    const second_run = try session.submit("overflow sink");
+    const second_run = try submitSession(session, "overflow sink");
     try session.waitRun(second_run);
     const snapshot = session.snapshot();
     try std.testing.expectEqual(@as(?u32, wire.STATUS_CALLBACK_FAILED), snapshot.last_status);
@@ -914,7 +1021,7 @@ test "bounded event sink overflow returns callback fatal and preserves HostCause
     try std.testing.expectEqual(@as(?lifecycle.RunOutcome, .failed), snapshot.last_outcome);
     var retained = host.takeEvent().?;
     retained.deinit();
-    try session.close(.session_close);
+    try closeSession(session, .session_close);
 }
 
 test "UI request validates identity and close wakes a suspended callback" {
@@ -922,11 +1029,11 @@ test "UI request validates identity and close wakes a suspended callback" {
     fake_core.setNextPlan(.ui_wait);
     const host = try createHost(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 3 });
     defer {
-        host.shutdown() catch unreachable;
-        host.deinit();
+        shutdownHost(host) catch unreachable;
+        deinitHost(host);
     }
     const answered = try openSession(host);
-    const run_id = try answered.submit("request UI");
+    const run_id = try submitSession(answered, "request UI");
     try answered.waitForState(.waiting_ui);
     const request_id = answered.pendingUiRequest().?;
     var pending = try answered.copyPendingUiRequest(std.testing.allocator);
@@ -947,28 +1054,28 @@ test "UI request validates identity and close wakes a suspended callback" {
     try std.testing.expectError(error.StaleUiResponse, answered.respondUi(run_id, request_id, response));
     fake_core.releaseControlled();
     try answered.waitRun(run_id);
-    try answered.close(.session_close);
+    try closeSession(answered, .session_close);
 
     fake_core.setNextPlan(.ui_wait);
     const closing = try openSession(host);
-    _ = try closing.submit("close while UI waits");
+    _ = try submitSession(closing, "close while UI waits");
     try closing.waitForState(.waiting_ui);
-    try closing.close(.session_close);
+    try closeSession(closing, .session_close);
     const snapshot = closing.snapshot();
     try std.testing.expectEqual(lifecycle.SessionState.closed, snapshot.state);
     try std.testing.expectEqual(@as(?lifecycle.HostCause, .session_close), snapshot.cause);
 
     fake_core.setNextPlan(.ui_wait);
     const cancelled = try openSession(host);
-    const cancelled_run = try cancelled.submit("cancel while UI waits");
+    const cancelled_run = try submitSession(cancelled, "cancel while UI waits");
     try cancelled.waitForState(.waiting_ui);
-    try cancelled.requestCancel(cancelled_run, .user_cancel);
+    try cancelSession(cancelled, cancelled_run, .user_cancel);
     try cancelled.waitRun(cancelled_run);
     try std.testing.expectEqual(
         @as(?lifecycle.HostCause, .user_cancel),
         cancelled.snapshot().cause,
     );
-    try cancelled.close(.session_close);
+    try closeSession(cancelled, .session_close);
 }
 
 test "UI deadline returns unavailable and malformed UI fails the Run" {
@@ -981,11 +1088,11 @@ test "UI deadline returns unavailable and malformed UI fails the Run" {
         .ui_request_timeout = .fromMilliseconds(20),
     });
     defer {
-        host.shutdown() catch unreachable;
-        host.deinit();
+        shutdownHost(host) catch unreachable;
+        deinitHost(host);
     }
     const timed_out = try openSession(host);
-    const timeout_run = try timed_out.submit("let UI expire");
+    const timeout_run = try submitSession(timed_out, "let UI expire");
     try timed_out.waitForState(.waiting_ui);
     try timed_out.waitForState(.running);
     try std.testing.expect(timed_out.pendingUiRequest() == null);
@@ -995,46 +1102,46 @@ test "UI deadline returns unavailable and malformed UI fails the Run" {
         @as(?lifecycle.RunOutcome, .completed),
         timed_out.snapshot().last_outcome,
     );
-    try timed_out.close(.session_close);
+    try closeSession(timed_out, .session_close);
 
     fake_core.setNextPlan(.malformed_ui_callback);
     const malformed = try openSession(host);
-    const malformed_run = try malformed.submit("malformed UI request");
+    const malformed_run = try submitSession(malformed, "malformed UI request");
     try malformed.waitRun(malformed_run);
     const malformed_snapshot = malformed.snapshot();
     try std.testing.expectEqual(@as(?u32, wire.STATUS_CALLBACK_FAILED), malformed_snapshot.last_status);
     try std.testing.expectEqual(@as(?lifecycle.HostCause, .ui_pipeline_failure), malformed_snapshot.cause);
     try std.testing.expectEqual(@as(?lifecycle.RunOutcome, .failed), malformed_snapshot.last_outcome);
-    try malformed.close(.session_close);
+    try closeSession(malformed, .session_close);
 }
 
 test "Gate 6 all executor workers waiting on UI remain controllable" {
     fake_core.reset();
     const host = try createHost(.{ .worker_count = 4, .queue_capacity = 4, .max_sessions = 4 });
     defer {
-        host.shutdown() catch unreachable;
-        host.deinit();
+        shutdownHost(host) catch unreachable;
+        deinitHost(host);
     }
     var sessions: [4]*lifecycle.Session = undefined;
     var run_ids: [4]u64 = undefined;
     for (&sessions, 0..) |*session, index| {
         fake_core.setNextPlan(.ui_wait);
         session.* = try openSession(host);
-        run_ids[index] = try session.*.submit("occupy executor with synchronous UI");
+        run_ids[index] = try submitSession(session.*, "occupy executor with synchronous UI");
     }
     for (sessions) |session| try session.waitForState(.waiting_ui);
 
     const first_request = sessions[0].pendingUiRequest().?;
     try sessions[0].respondUi(run_ids[0], first_request, .{ .permission = .allow_once });
-    try sessions[1].requestCancel(run_ids[1], .user_cancel);
-    try sessions[2].close(.session_close);
+    try cancelSession(sessions[1], run_ids[1], .user_cancel);
+    try closeSession(sessions[2], .session_close);
     fake_core.releaseControlled();
     try sessions[0].waitRun(run_ids[0]);
     try sessions[1].waitRun(run_ids[1]);
-    try sessions[0].close(.session_close);
-    try sessions[1].close(.session_close);
+    try closeSession(sessions[0], .session_close);
+    try closeSession(sessions[1], .session_close);
 
-    try host.shutdown();
+    try shutdownHost(host);
     fake_core.lock();
     const destroyed = fake_core.session_destroyed;
     fake_core.unlock();
@@ -1051,11 +1158,11 @@ test "UI response encoding is bounded before ownership transfer" {
         .max_ui_response_bytes = 8,
     });
     defer {
-        host.shutdown() catch unreachable;
-        host.deinit();
+        shutdownHost(host) catch unreachable;
+        deinitHost(host);
     }
     const session = try openSession(host);
-    const run_id = try session.submit("bound response");
+    const run_id = try submitSession(session, "bound response");
     try session.waitForState(.waiting_ui);
     const request_id = session.pendingUiRequest().?;
     try std.testing.expectError(
@@ -1063,21 +1170,21 @@ test "UI response encoding is bounded before ownership transfer" {
         session.respondUi(run_id, request_id, .{ .permission = .allow_once }),
     );
     try std.testing.expectEqual(request_id, session.pendingUiRequest().?);
-    try session.requestCancel(run_id, .user_cancel);
+    try cancelSession(session, run_id, .user_cancel);
     try session.waitRun(run_id);
     try std.testing.expectEqual(
         @as(?lifecycle.RunOutcome, .cancelled),
         session.snapshot().last_outcome,
     );
-    try session.close(.session_close);
+    try closeSession(session, .session_close);
 }
 
 test "status is validated before RunResult and invalid results poison the Session" {
     fake_core.reset();
     const host = try createHost(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 3 });
     defer {
-        host.shutdown() catch unreachable;
-        host.deinit();
+        shutdownHost(host) catch unreachable;
+        deinitHost(host);
     }
 
     const cases = [_]struct {
@@ -1092,7 +1199,7 @@ test "status is validated before RunResult and invalid results poison the Sessio
     for (cases) |case| {
         fake_core.setNextPlan(case.plan);
         const session = try openSession(host);
-        const run_id = try session.submit("validate result boundary");
+        const run_id = try submitSession(session, "validate result boundary");
         try session.waitRun(run_id);
         const snapshot = session.snapshot();
         try std.testing.expectEqual(@as(?u32, case.expected_status), snapshot.last_status);
@@ -1106,8 +1213,8 @@ test "status is validated before RunResult and invalid results poison the Sessio
             snapshot.last_outcome,
         );
         try std.testing.expectEqual(lifecycle.SessionState.poisoned, snapshot.state);
-        try std.testing.expectError(error.SessionPoisoned, session.submit("must not continue"));
-        try session.close(.session_close);
+        try std.testing.expectError(error.SessionPoisoned, submitSession(session, "must not continue"));
+        try closeSession(session, .session_close);
     }
 }
 
@@ -1115,8 +1222,8 @@ test "concurrent close waits for callback quiescence and destroys once" {
     fake_core.reset();
     const host = try createHost(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
     defer {
-        host.shutdown() catch unreachable;
-        host.deinit();
+        shutdownHost(host) catch unreachable;
+        deinitHost(host);
     }
     const session = try openSession(host);
     try std.testing.expect(session.retainReference());
@@ -1141,15 +1248,15 @@ test "Host shutdown closes active queued and idle Sessions before Runtime" {
     fake_core.reset();
     fake_core.setNextPlan(.controlled);
     const host = try createHost(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 3 });
-    defer host.deinit();
+    defer deinitHost(host);
     const active = try openSession(host);
     const queued = try openSession(host);
     _ = try openSession(host);
-    _ = try active.submit("active");
+    _ = try submitSession(active, "active");
     try active.waitForState(.running);
-    _ = try queued.submit("queued");
+    _ = try submitSession(queued, "queued");
 
-    try host.shutdown();
+    try shutdownHost(host);
     fake_core.lock();
     const session_destroyed = fake_core.session_destroyed;
     const runtime_destroyed = fake_core.runtime_destroyed;
@@ -1162,8 +1269,8 @@ test "Runtime destroy while a Session is live returns busy without consuming own
     fake_core.reset();
     const host = try createHost(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
     defer {
-        host.shutdown() catch unreachable;
-        host.deinit();
+        shutdownHost(host) catch unreachable;
+        deinitHost(host);
     }
     const session = try openSession(host);
     var diagnostic_buffer = wire.OwnedBytesV1{ .ptr = null, .len = 0 };
@@ -1172,8 +1279,8 @@ test "Runtime destroy while a Session is live returns busy without consuming own
         runtimeDestroy(host.runtime, &diagnostic_buffer),
     );
     bufferRelease(&diagnostic_buffer);
-    try session.close(.session_close);
-    try host.shutdown();
+    try closeSession(session, .session_close);
+    try shutdownHost(host);
 
     fake_core.lock();
     const busy_attempts = fake_core.runtime_destroy_busy_attempts;
@@ -1189,18 +1296,18 @@ test "transient Session and Runtime destroy failures are explicit and retryable"
     fake_core.reset();
     const host = try createHost(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
     defer {
-        host.shutdown() catch unreachable;
-        host.deinit();
+        shutdownHost(host) catch unreachable;
+        deinitHost(host);
     }
     const session = try openSession(host);
     fake_core.failNextSessionDestroy();
-    try std.testing.expectError(error.SessionDestroyFailed, session.close(.session_close));
+    try std.testing.expectError(error.SessionDestroyFailed, closeSession(session, .session_close));
     try std.testing.expectEqual(lifecycle.SessionState.closing, session.snapshot().state);
-    try session.close(.session_close);
+    try closeSession(session, .session_close);
 
     fake_core.failNextRuntimeDestroy();
-    try std.testing.expectError(error.RuntimeDestroyFailed, host.shutdown());
-    try host.shutdown();
+    try std.testing.expectError(error.RuntimeDestroyFailed, shutdownHost(host));
+    try shutdownHost(host);
     fake_core.lock();
     const releases = fake_core.buffer_releases;
     fake_core.unlock();
@@ -1211,8 +1318,8 @@ test "Gate 6 Workbench closes off-thread and exposes retryable close failure" {
     fake_core.reset();
     const host = try createHost(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 2 });
     defer {
-        host.shutdown() catch unreachable;
-        host.deinit();
+        shutdownHost(host) catch unreachable;
+        deinitHost(host);
     }
     var workbench = try host_workbench.Workbench.init(std.testing.allocator, host, .{
         .max_sessions = 2,
@@ -1239,8 +1346,8 @@ test "Gate 6 Workbench close cancels a queued Run without blocking the caller" {
     fake_core.setNextPlan(.controlled);
     const host = try createHost(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 1 });
     defer {
-        host.shutdown() catch unreachable;
-        host.deinit();
+        shutdownHost(host) catch unreachable;
+        deinitHost(host);
     }
     var workbench = try host_workbench.Workbench.init(std.testing.allocator, host, .{
         .max_sessions = 1,
@@ -1265,13 +1372,13 @@ test "Core Session creation failure releases diagnostics and leaves capacity reu
     fake_core.reset();
     const host = try createHost(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
     defer {
-        host.shutdown() catch unreachable;
-        host.deinit();
+        shutdownHost(host) catch unreachable;
+        deinitHost(host);
     }
     fake_core.failNextSessionCreate();
     try std.testing.expectError(error.CoreCallFailed, openSession(host));
     const session = try openSession(host);
-    try session.close(.session_close);
+    try closeSession(session, .session_close);
     fake_core.lock();
     const releases = fake_core.buffer_releases;
     const creates = fake_core.session_created;
@@ -1284,17 +1391,17 @@ test "closed Session storage is reused only after explicit Host release" {
     fake_core.reset();
     const host = try createHost(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
     defer {
-        host.shutdown() catch unreachable;
-        host.deinit();
+        shutdownHost(host) catch unreachable;
+        deinitHost(host);
     }
     const first = try openSession(host);
     try std.testing.expectError(error.SessionNotClosed, host.releaseClosedSession(first));
-    try first.close(.session_close);
+    try closeSession(first, .session_close);
     try std.testing.expectError(error.SessionCapacity, openSession(host));
     try host.releaseClosedSession(first);
 
     const second = try openSession(host);
-    try second.close(.session_close);
+    try closeSession(second, .session_close);
 }
 
 test "abort stale and too-late statuses remain observable without losing diagnostics" {
@@ -1302,40 +1409,40 @@ test "abort stale and too-late statuses remain observable without losing diagnos
     fake_core.setNextPlan(.controlled);
     const host = try createHost(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
     defer {
-        host.shutdown() catch unreachable;
-        host.deinit();
+        shutdownHost(host) catch unreachable;
+        deinitHost(host);
     }
     const session = try openSession(host);
 
-    const first = try session.submit("too late");
+    const first = try submitSession(session, "too late");
     try session.waitForState(.running);
-    try std.testing.expectError(error.NoSuchRun, session.requestCancel(first + 1, .user_cancel));
+    try std.testing.expectError(error.NoSuchRun, cancelSession(session, first + 1, .user_cancel));
     fake_core.forceNextAbortStatus(wire.STATUS_TOO_LATE);
-    try session.requestCancel(first, .user_cancel);
-    try session.requestCancel(first, .user_cancel);
+    try cancelSession(session, first, .user_cancel);
+    try cancelSession(session, first, .user_cancel);
     fake_core.releaseControlled();
     try session.waitRun(first);
     try std.testing.expectEqual(@as(?u32, wire.STATUS_TOO_LATE), session.snapshot().last_abort_status);
 
     fake_core.rearmControlled();
-    const second = try session.submit("stale");
+    const second = try submitSession(session, "stale");
     try session.waitForState(.running);
     fake_core.forceNextAbortStatus(wire.STATUS_STALE_RUN);
-    try session.requestCancel(second, .user_cancel);
-    try session.requestCancel(second, .user_cancel);
+    try cancelSession(session, second, .user_cancel);
+    try cancelSession(session, second, .user_cancel);
     fake_core.releaseControlled();
     try session.waitRun(second);
     try std.testing.expectEqual(@as(?u32, wire.STATUS_STALE_RUN), session.snapshot().last_abort_status);
 
     fake_core.rearmControlled();
-    const third = try session.submit("timeout");
+    const third = try submitSession(session, "timeout");
     try session.waitForState(.running);
-    try session.requestCancel(third, .timeout);
+    try cancelSession(session, third, .timeout);
     try session.waitRun(third);
     const timeout_snapshot = session.snapshot();
     try std.testing.expectEqual(@as(?u32, wire.STATUS_OK), timeout_snapshot.last_abort_status);
     try std.testing.expectEqual(@as(?lifecycle.HostCause, .timeout), timeout_snapshot.cause);
-    try session.close(.session_close);
+    try closeSession(session, .session_close);
 
     fake_core.lock();
     const releases = fake_core.buffer_releases;
@@ -1355,13 +1462,13 @@ test "concurrent Host shutdown serializes executor and Runtime destruction" {
     try std.testing.expect(session.retainReference());
     const first = try std.Thread.spawn(.{}, shutdownOnThread, .{host});
     try session.waitForState(.closing);
-    try std.testing.expectError(error.HostShuttingDown, not_yet_closed.submit("too late"));
+    try std.testing.expectError(error.HostShuttingDown, submitSession(not_yet_closed, "too late"));
     const second = try std.Thread.spawn(.{}, shutdownOnThread, .{host});
     std.Thread.yield() catch {};
     session.releaseReference();
     first.join();
     second.join();
-    host.deinit();
+    deinitHost(host);
 
     fake_core.lock();
     const runtime_destroyed = fake_core.runtime_destroyed;
@@ -1374,17 +1481,10 @@ test "concurrent Host shutdown serializes executor and Runtime destruction" {
 test "Host initialization OOM fails before acquiring the Runtime" {
     fake_core.reset();
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 3 });
-    const executor = try workbench_executor.Executor.create(
-        std.testing.io,
-        std.testing.allocator,
-        .{ .worker_count = 1, .queue_capacity = 1 },
-    );
-    defer executor.destroy();
     try std.testing.expectError(error.OutOfMemory, lifecycle.Runtime.init(
         std.testing.io,
         failing.allocator(),
         &fake_api,
-        executor.scheduler(),
         .{ .max_sessions = 1 },
     ));
     try std.testing.expect(failing.has_induced_failure);
@@ -1404,17 +1504,19 @@ test "Session creation OOM leaves Host reusable and credential Host-only" {
         std.testing.allocator,
         .{ .worker_count = 1, .queue_capacity = 1 },
     );
-    errdefer executor.destroy();
+    var executor_registered = false;
+    errdefer if (!executor_registered) executor.deinit();
     const host = try lifecycle.Runtime.init(
         std.testing.io,
         failing.allocator(),
         &fake_api,
-        executor.scheduler(),
         .{ .max_sessions = 1 },
     );
+    try registerTestHost(host, executor);
+    executor_registered = true;
     defer {
-        host.shutdown() catch unreachable;
-        host.deinit();
+        shutdownHost(host) catch unreachable;
+        deinitHost(host);
     }
     failing.fail_index = failing.alloc_index;
     try std.testing.expectError(error.OutOfMemory, openSession(host));
@@ -1424,7 +1526,7 @@ test "Session creation OOM leaves Host reusable and credential Host-only" {
     const snapshot = session.snapshot();
     try std.testing.expectEqualStrings("/tmp/metawork-gate2", snapshot.workspace_root);
     try std.testing.expect(fake_core.credential_seen);
-    try session.close(.session_close);
+    try closeSession(session, .session_close);
 }
 
 test "Gate 5 event pump preserves per-Session order with round-robin fairness" {
@@ -1847,11 +1949,11 @@ test "post-callback canonical pipeline failure aborts the routed Run as failed" 
     fake_core.setNextPlan(.controlled);
     const host = try createHost(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
     defer {
-        host.shutdown() catch unreachable;
-        host.deinit();
+        shutdownHost(host) catch unreachable;
+        deinitHost(host);
     }
     const session = try openSession(host);
-    const run_id = try session.submit("fail after callback returned");
+    const run_id = try submitSession(session, "fail after callback returned");
     try session.waitForState(.running);
     const session_id = session.snapshot().session_id;
     try host.failRun(session_id, run_id, .event_pipeline_failure);
@@ -1863,5 +1965,5 @@ test "post-callback canonical pipeline failure aborts the routed Run as failed" 
     );
     try std.testing.expectEqual(@as(?lifecycle.RunOutcome, .failed), snapshot.last_outcome);
     try std.testing.expectEqual(@as(?u32, wire.STATUS_OK), snapshot.last_abort_status);
-    try session.close(.session_close);
+    try closeSession(session, .session_close);
 }

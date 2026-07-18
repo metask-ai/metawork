@@ -4,7 +4,7 @@
 > 日期：2026-07-18
 > 适用范围：Zig Native 应用、React Renderer、metacodes AgentCore 集成与自动化构建边界
 
-实施进度：阶段 1、2 与 3 已落地；Executor handoff、Agent terminal model、schema v5 与 automation build isolation 仍按后续阶段推进。
+实施进度：阶段 1、2 与 3 已落地；阶段 4 的 Executor ownership/handoff 纵向切片已落地，RunControl lease、Agent terminal model、schema v5 与 automation build isolation 仍按后续切片推进。
 
 ## 1. 目的与决策
 
@@ -554,8 +554,7 @@ root 应显式导出稳定消费表面，并让内部模块可以自由重构。
 
 | 当前实现 | 目标 |
 | --- | --- |
-| `Host` 同时持有 Agent Runtime、Sessions 和 Workbench Scheduler | Agent Runtime 不拥有 Workbench Executor |
-| `Session.submit() -> Scheduler.enqueue()` | Workbench worker 主动 begin/execute Agent Run |
+| Workbench 已独占 Executor、queue、workers 与 shutdown；worker 暂调用 transitional `executePreparedRun()` | 进一步收口为 `beginRun()` + 唯一 latch-aware `execute()` |
 | `HostCause` 仍混合 interruption、callback 和 contract failure，但已删除 Bridge transport | tagged termination + immutable terminal facts |
 | Workbench admission/durable RunRef/no-fail payload 已落地，terminal facts 仍从活 Session snapshot 同步 | Agent `TerminalResult` 直接提交，不回查 Session snapshot |
 | Workbench/Bridge 直接 import `metacodes_agentcore` | 只有 Agent 消费 SDK，其他模块通过 Agent/Workbench 公共类型 |

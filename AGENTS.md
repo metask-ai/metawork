@@ -47,6 +47,7 @@
 - 当前 UI request 是同步 callback。等待用户期间占用 Run executor slot，但不得阻塞 WebView 主线程；deadline、cancel、Session close 和 Host shutdown 都必须唤醒等待。
 - 每个 Session 至多一个 in-flight Run；同步 `run()` 通过有上限的 executor 调度，不为任意数量 Session 无上限创建线程。
 - Session close 必须遵循：拒绝新任务、取消 queued Run、唤醒 UI wait、设置 first-writer-wins `HostCause`、abort、join、等待 callback quiescence、destroy。Runtime 只能在全部 Session 销毁后销毁。
+- Workbench 独占 Executor、queue 与 workers 的创建、admission、shutdown 和释放；Agent Runtime 不接收 Scheduler capability，也不得反向 enqueue 或销毁 Workbench 执行资源。
 - `Conversation` 和跨 Run 状态属于 Session 生命周期；不得让它们引用已释放的 run-scoped arena。
 - Renderer 不是安全边界。Host 必须执行命令白名单、来源、payload、会话归属、工作区和权限校验。
 - 不以 PTY、xterm 或终端字符流作为默认 Agent 通信协议。普通 Bash 工具使用非交互 shell 子进程和 stdout/stderr capture。
