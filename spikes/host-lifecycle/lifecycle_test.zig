@@ -619,7 +619,7 @@ fn submitSession(session: *lifecycle.Session, prompt: []const u8) !u64 {
     }) catch |err| {
         const cause: lifecycle.HostCause = switch (err) {
             error.QueueFull => .queue_capacity_failure,
-            error.HostShuttingDown => .host_shutdown,
+            error.ExecutorShuttingDown => .host_shutdown,
         };
         session.cancelPreparedRun(run_id, cause) catch {};
         return err;
@@ -1366,6 +1366,30 @@ test "Gate 6 Workbench close cancels a queued Run without blocking the caller" {
     fake_core.unlock();
     try std.testing.expect(abort_calls <= 1);
     try std.testing.expectEqual(@as(usize, 1), destroyed);
+}
+
+test "Workbench shutdown terminates a waiting UI Run before joining workers" {
+    fake_core.reset();
+    fake_core.setNextPlan(.ui_wait);
+    const host = try createHost(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
+    defer {
+        shutdownHost(host) catch unreachable;
+        deinitHost(host);
+    }
+    var workbench = try host_workbench.Workbench.init(std.testing.allocator, host, .{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_sessions = 1,
+        .max_runs_per_session = 1,
+        .max_tools_per_run = 1,
+    });
+    defer workbench.deinit();
+
+    const session_id = try workbench.createSession(workbenchSessionOptions());
+    _ = try workbench.submit(session_id, "wait for shutdown");
+    try waitWorkbenchSnapshot(&workbench, "\"currentRunPhase\":\"waiting_ui\"");
+    workbench.shutdownExecutor();
+    try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"interrupted\"");
 }
 
 test "Core Session creation failure releases diagnostics and leaves capacity reusable" {

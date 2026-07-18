@@ -132,6 +132,7 @@ test("Workbench owns queue and worker lifecycle", () => {
 
   const executor = read("src/workbench/executor.zig");
   assert.doesNotMatch(executor, /@import\("metawork_agent"\)/);
+  assert.doesNotMatch(executor, /HostShuttingDown/);
   assert.match(executor, /pub fn enqueue/);
   assert.match(executor, /pub fn shutdown/);
 

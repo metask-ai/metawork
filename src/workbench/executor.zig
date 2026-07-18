@@ -1,7 +1,7 @@
 const std = @import("std");
 
 pub const Error = error{
-    HostShuttingDown,
+    ExecutorShuttingDown,
     QueueFull,
 };
 
@@ -30,9 +30,12 @@ pub const Executor = struct {
     mutex: std.Io.Mutex = .init,
     condition: std.Io.Condition = .init,
     queue: []?Job,
+    head: usize = 0,
+    tail: usize = 0,
     queued: usize = 0,
     workers: []std.Thread,
     stopping: bool = false,
+    shutdown_running: bool = false,
     joined: bool = false,
 
     pub fn create(
@@ -79,63 +82,68 @@ pub const Executor = struct {
     pub fn enqueue(self: *Executor, item: Job) Error!void {
         self.lock();
         defer self.unlock();
-        if (self.stopping) return error.HostShuttingDown;
+        if (self.stopping) return error.ExecutorShuttingDown;
         if (self.queued == self.queue.len) return error.QueueFull;
-        for (self.queue) |*entry| {
-            if (entry.* == null) {
-                entry.* = item;
-                self.queued += 1;
-                self.signal();
-                return;
-            }
-        }
-        unreachable;
+        std.debug.assert(self.queue[self.tail] == null);
+        self.queue[self.tail] = item;
+        self.tail = (self.tail + 1) % self.queue.len;
+        self.queued += 1;
+        self.signal();
     }
 
     pub fn cancel(self: *Executor, context: *anyopaque) bool {
         self.lock();
         defer self.unlock();
-        for (self.queue) |*entry| {
-            if (entry.*) |item| {
-                if (item.context == context) {
-                    entry.* = null;
-                    self.queued -= 1;
-                    return true;
-                }
+        for (0..self.queued) |offset| {
+            const index = (self.head + offset) % self.queue.len;
+            const item = self.queue[index].?;
+            if (item.context != context) continue;
+            for (offset..self.queued - 1) |shift| {
+                const destination = (self.head + shift) % self.queue.len;
+                const source = (self.head + shift + 1) % self.queue.len;
+                self.queue[destination] = self.queue[source];
             }
+            self.tail = (self.tail + self.queue.len - 1) % self.queue.len;
+            self.queue[self.tail] = null;
+            self.queued -= 1;
+            return true;
         }
         return false;
     }
 
+    /// Concurrent shutdown callers serialize here. `deinit` still requires all
+    /// external callers to be quiescent before destroying the Executor object.
     pub fn shutdown(self: *Executor) void {
         self.lock();
         if (self.joined) {
             self.unlock();
             return;
         }
+        if (self.shutdown_running) {
+            while (!self.joined) self.wait();
+            self.unlock();
+            return;
+        }
+        self.shutdown_running = true;
         self.stopping = true;
         self.broadcast();
         while (self.queued != 0) {
-            var cancelled: ?Job = null;
-            for (self.queue) |*entry| {
-                if (entry.*) |item| {
-                    cancelled = item;
-                    entry.* = null;
-                    self.queued -= 1;
-                    break;
-                }
-            }
+            const cancelled = self.popLocked();
             self.unlock();
-            cancelled.?.cancel();
+            cancelled.cancel();
             self.lock();
         }
         self.unlock();
         for (self.workers) |thread| thread.join();
-        self.lock();
-        self.joined = true;
-        self.unlock();
         self.allocator.free(self.workers);
         self.allocator.free(self.queue);
+        self.workers = &.{};
+        self.queue = &.{};
+        self.lock();
+        self.joined = true;
+        self.shutdown_running = false;
+        self.broadcast();
+        self.unlock();
     }
 
     fn workerMain(self: *Executor) void {
@@ -147,19 +155,19 @@ pub const Executor = struct {
                 self.unlock();
                 return;
             }
-            var next: ?Job = null;
-            for (self.queue) |*entry| {
-                if (entry.*) |item| {
-                    next = item;
-                    entry.* = null;
-                    self.queued -= 1;
-                    break;
-                }
-            }
+            const next = self.popLocked();
             self.unlock();
-            const item = next.?;
-            item.execute();
+            next.execute();
         }
+    }
+
+    fn popLocked(self: *Executor) Job {
+        std.debug.assert(self.queued != 0);
+        const item = self.queue[self.head].?;
+        self.queue[self.head] = null;
+        self.head = (self.head + 1) % self.queue.len;
+        self.queued -= 1;
+        return item;
     }
 
     fn lock(self: *Executor) void {
@@ -226,11 +234,61 @@ test "shutdown cancels queued jobs and joins the active worker" {
         .cancel_fn = Harness.cancel,
     });
 
-    const shutdown_thread = try std.Thread.spawn(.{}, Shutdown.run, .{executor});
+    const first_shutdown = try std.Thread.spawn(.{}, Shutdown.run, .{executor});
+    const second_shutdown = try std.Thread.spawn(.{}, Shutdown.run, .{executor});
     while (harness.cancelled.load(.acquire) == 0) std.Thread.yield() catch {};
     harness.release.store(true, .release);
-    shutdown_thread.join();
+    first_shutdown.join();
+    second_shutdown.join();
 
     try std.testing.expectEqual(@as(usize, 1), harness.executed.load(.acquire));
     try std.testing.expectEqual(@as(usize, 1), harness.cancelled.load(.acquire));
+}
+
+test "ring queue preserves FIFO when a freed head slot is reused" {
+    const Harness = struct {
+        order: [3]u8 = undefined,
+        count: std.atomic.Value(usize) = .init(0),
+        first_started: std.atomic.Value(bool) = .init(false),
+        release_first: std.atomic.Value(bool) = .init(false),
+    };
+    const Item = struct {
+        harness: *Harness,
+        id: u8,
+        block: bool = false,
+
+        fn execute(context: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            const index = self.harness.count.load(.monotonic);
+            self.harness.order[index] = self.id;
+            self.harness.count.store(index + 1, .release);
+            if (self.block) {
+                self.harness.first_started.store(true, .release);
+                while (!self.harness.release_first.load(.acquire)) std.Thread.yield() catch {};
+            }
+        }
+
+        fn cancel(_: *anyopaque) void {
+            unreachable;
+        }
+    };
+
+    var harness = Harness{};
+    var first = Item{ .harness = &harness, .id = 1, .block = true };
+    var second = Item{ .harness = &harness, .id = 2 };
+    var third = Item{ .harness = &harness, .id = 3 };
+    const executor = try Executor.create(std.testing.io, std.testing.allocator, .{
+        .worker_count = 1,
+        .queue_capacity = 2,
+    });
+    defer executor.deinit();
+    try executor.enqueue(.{ .context = &first, .execute_fn = Item.execute, .cancel_fn = Item.cancel });
+    while (!harness.first_started.load(.acquire)) std.Thread.yield() catch {};
+    try executor.enqueue(.{ .context = &second, .execute_fn = Item.execute, .cancel_fn = Item.cancel });
+    try executor.enqueue(.{ .context = &third, .execute_fn = Item.execute, .cancel_fn = Item.cancel });
+    harness.release_first.store(true, .release);
+    while (harness.count.load(.acquire) != 3) std.Thread.yield() catch {};
+    executor.shutdown();
+
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3 }, &harness.order);
 }

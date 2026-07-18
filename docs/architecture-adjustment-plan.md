@@ -4,7 +4,7 @@
 > 日期：2026-07-18
 > 适用范围：Zig Native 应用、React Renderer、metacodes AgentCore 集成与自动化构建边界
 
-实施进度：阶段 1、2 与 3 已落地；阶段 4 的 Executor ownership/handoff 纵向切片已落地，RunControl lease、Agent terminal model、schema v5 与 automation build isolation 仍按后续切片推进。
+实施进度：阶段 1、2 与 3 已落地；阶段 4 的 Executor ownership/handoff 纵向切片已落地，RunControl lease、Agent terminal model、schema v5、Bridge delivery extraction 与 automation build isolation 仍按后续切片推进。
 
 ## 1. 目的与决策
 
@@ -640,7 +640,16 @@ root 应显式导出稳定消费表面，并让内部模块可以自由重构。
 
 同步更新：`requirements.md`、`workbench-ui-design.md`、`project-structure.md`。
 
-### 阶段 7：Renderer 与 automation build boundary
+### 阶段 7：Bridge delivery implementation boundary
+
+- 将 `revision_delivery.State`、`snapshot_delivery.State`、retry timer 与 generation/retention coordination 从 `app.zig` 移入 `bridge/`；
+- App 只注入 Native transport capability、连接 Workbench observer，并组织构造/关停顺序；
+- Bridge-owned state 不借用 Workbench bytes，typed failure 继续只报告给 Workbench policy；
+- 增加 retry exhaustion、Renderer detach/reload、callback/timer quiescence 与 owned-buffer tests。
+
+同步更新：`architecture.md`、`project-structure.md`、Bridge/Renderer contract 文档。
+
+### 阶段 8：Renderer 与 automation build boundary
 
 - `frontend/src/host/` → `frontend/src/bridge/`；
 - 只有 `bridge/client.ts` 访问 `window.zero`；
@@ -650,7 +659,7 @@ root 应显式导出稳定消费表面，并让内部模块可以自由重构。
 
 同步更新：`project-structure.md`、Gate automation 运行说明；历史报告不改。
 
-### 阶段 8：测试按不变量拆分
+### 阶段 9：测试按不变量拆分
 
 - Agent lifecycle/callback/quiescence → `tests/agent/`；
 - Executor/admission/shutdown → `tests/workbench/`；

@@ -14,6 +14,7 @@ pub const Error = lifecycle.Error || std.mem.Allocator.Error || std.Thread.Spawn
     TaskNotClosed,
     InvalidTaskTitle,
     RunGenerationExhausted,
+    ExecutorShuttingDown,
 };
 
 pub const Limits = struct {
@@ -265,6 +266,7 @@ pub const Workbench = struct {
     sessions: []?SessionView,
     change_notifier: ChangeNotifier,
     executor: *executor_impl.Executor,
+    shutting_down: bool = false,
     executor_shutdown: bool = false,
     projection_bytes: usize = 0,
     revision: u64 = 0,
@@ -369,6 +371,7 @@ pub const Workbench = struct {
     }
 
     pub fn submit(self: *Workbench, session_id: u64, prompt: []const u8) Error!u64 {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
         const view = self.findSession(session_id) orelse return error.UnknownSession;
         const session = view.session orelse return error.SessionClosing;
@@ -389,7 +392,7 @@ pub const Workbench = struct {
         }) catch |err| {
             const cause: lifecycle.HostCause = switch (err) {
                 error.QueueFull => .queue_capacity_failure,
-                error.HostShuttingDown => .host_shutdown,
+                error.ExecutorShuttingDown => .host_shutdown,
             };
             session.cancelPreparedRun(run_id, cause) catch {};
             releaseWorkerReference(run);
@@ -695,6 +698,22 @@ pub const Workbench = struct {
 
     pub fn shutdownExecutor(self: *Workbench) void {
         if (self.executor_shutdown) return;
+        self.shutting_down = true;
+        for (self.sessions) |*entry| {
+            const view = &(entry.* orelse continue);
+            const session = view.session orelse continue;
+            const run = findRun(view.runs, view.active_run_id) orelse continue;
+            if (isTerminalPhase(runPhase(run))) continue;
+            if (self.executor.cancel(run)) {
+                cancelPreparedRunOrPanic(session, run.id, .host_shutdown);
+                releaseWorkerReference(run);
+            } else {
+                session.requestCancel(run.id, .host_shutdown) catch |err| switch (err) {
+                    error.SessionClosing, error.SessionPoisoned, error.NoSuchRun => {},
+                    else => unreachable,
+                };
+            }
+        }
         self.executor.shutdown();
         self.executor_shutdown = true;
         self.syncLifecycle();
@@ -1249,15 +1268,28 @@ fn closeWorker(
 fn executeRunJob(context: *anyopaque) void {
     const run: *RunRecord = @ptrCast(@alignCast(context));
     run.session.executePreparedRun();
-    _ = run.workbench.change_notifier.notify();
+    const notifier = run.workbench.change_notifier;
     releaseWorkerReference(run);
+    _ = notifier.notify();
 }
 
 fn cancelRunJobForShutdown(context: *anyopaque) void {
     const run: *RunRecord = @ptrCast(@alignCast(context));
-    run.session.cancelPreparedRun(run.id, .host_shutdown) catch {};
-    _ = run.workbench.change_notifier.notify();
+    cancelPreparedRunOrPanic(run.session, run.id, .host_shutdown);
+    const notifier = run.workbench.change_notifier;
     releaseWorkerReference(run);
+    _ = notifier.notify();
+}
+
+fn cancelPreparedRunOrPanic(
+    session: *lifecycle.Session,
+    run_id: u64,
+    cause: lifecycle.HostCause,
+) void {
+    session.cancelPreparedRun(run_id, cause) catch |err| std.debug.panic(
+        "Executor removed queued Run {d}, but Agent rejected prepared cancellation: {s}",
+        .{ run_id, @errorName(err) },
+    );
 }
 
 fn releaseWorkerReference(run: *RunRecord) void {
