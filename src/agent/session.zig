@@ -1,6 +1,6 @@
-//! Formal AgentCore Host binding over the bundle-owned typed SDK and ABI v1.
-//! Core callbacks validate through the SDK, retain only Host-owned data, and
-//! feed a bounded sink. No callback calls WebView or registers Host tools.
+//! MetaWork Agent Runtime over the bundle-owned typed SDK and ABI v1.
+//! Core callbacks validate through the SDK, retain only Agent-owned data, and
+//! feed a bounded sink. No callback calls WebView or registers desktop tools.
 
 const std = @import("std");
 const sdk = @import("metacodes_agentcore");
@@ -169,7 +169,7 @@ pub const Error = error{
     RuntimeDestroyFailed,
 };
 
-pub const Host = struct {
+pub const Runtime = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
     api: sdk.Api,
@@ -192,16 +192,16 @@ pub const Host = struct {
     last_shutdown_error: ?Error = null,
     next_session_id: u64 = 0,
 
-    /// `raw_api` is borrowed for the Host lifetime. Bundle discovery tables
+    /// `raw_api` is borrowed for the Agent Runtime lifetime. Bundle discovery tables
     /// are static; injected test tables must provide the same lifetime.
-    /// Scheduler ownership transfers to Host only when initialization succeeds.
+    /// Scheduler ownership transfers to Runtime only when initialization succeeds.
     pub fn init(
         io: std.Io,
         allocator: std.mem.Allocator,
         raw_api: *const wire.ApiV1,
         scheduler: Scheduler,
         limits: Limits,
-    ) (Error || std.mem.Allocator.Error || error{UnsupportedAbi})!*Host {
+    ) (Error || std.mem.Allocator.Error || error{UnsupportedAbi})!*Runtime {
         if (limits.max_sessions == 0 or limits.max_prompt_bytes == 0 or limits.event_capacity == 0 or
             limits.event_bytes == 0 or limits.per_session_event_capacity == 0 or
             limits.per_session_event_bytes == 0 or limits.max_event_bytes == 0 or
@@ -211,7 +211,7 @@ pub const Host = struct {
         _ = std.math.mul(usize, limits.event_capacity, limits.max_event_bytes) catch
             return error.InvalidLimits;
         const api = try sdk.Api.validate(raw_api);
-        const self = try allocator.create(Host);
+        const self = try allocator.create(Runtime);
         errdefer allocator.destroy(self);
         const sessions = try allocator.alloc(?*Session, limits.max_sessions);
         errdefer allocator.free(sessions);
@@ -275,7 +275,7 @@ pub const Host = struct {
     }
 
     pub fn createSession(
-        self: *Host,
+        self: *Runtime,
         options: SessionOpenOptions,
     ) (Error || std.mem.Allocator.Error)!*Session {
         try validateWorkspace(options.workspace);
@@ -302,7 +302,7 @@ pub const Host = struct {
         const workspace_root = try self.allocator.dupe(u8, options.workspace.canonical_root);
         errdefer self.allocator.free(workspace_root);
         session.* = .{
-            .host = self,
+            .agent_runtime = self,
             .id = session_id,
             .workspace_root = workspace_root,
         };
@@ -354,7 +354,7 @@ pub const Host = struct {
         return session;
     }
 
-    pub fn shutdown(self: *Host) Error!void {
+    pub fn shutdown(self: *Runtime) Error!void {
         self.sessions_mutex.lockUncancelable(self.io);
         var waited = false;
         while (self.shutdown_running) {
@@ -404,8 +404,8 @@ pub const Host = struct {
         return self.finishShutdown(first_error);
     }
 
-    pub fn releaseClosedSession(self: *Host, session: *Session) Error!void {
-        // Successful release transfers the last owner reference to Host and
+    pub fn releaseClosedSession(self: *Runtime, session: *Session) Error!void {
+        // Successful release transfers the last owner reference to Runtime and
         // invalidates `session`; callers must quiesce their own references.
         self.sessions_mutex.lockUncancelable(self.io);
         defer self.sessions_mutex.unlock(self.io);
@@ -432,20 +432,20 @@ pub const Host = struct {
         self.allocator.destroy(session);
     }
 
-    pub fn takeEvent(self: *Host) ?EventEnvelope {
+    pub fn takeEvent(self: *Runtime) ?EventEnvelope {
         return self.events.takeFair();
     }
 
-    fn notify(self: *Host) bool {
+    fn notify(self: *Runtime) bool {
         const notifier = self.notifier orelse return true;
         return notifier.wake(notifier.context);
     }
 
-    pub fn requestWake(self: *Host) bool {
+    pub fn requestWake(self: *Runtime) bool {
         return self.notify();
     }
 
-    pub fn failRun(self: *Host, session_id: u64, run_id: u64, cause: HostCause) Error!void {
+    pub fn failRun(self: *Runtime, session_id: u64, run_id: u64, cause: HostCause) Error!void {
         self.sessions_mutex.lockUncancelable(self.io);
         var retained: ?*Session = null;
         var found = false;
@@ -462,7 +462,7 @@ pub const Host = struct {
         return session.requestCancel(run_id, cause);
     }
 
-    fn finishShutdown(self: *Host, result: ?Error) Error!void {
+    fn finishShutdown(self: *Runtime, result: ?Error) Error!void {
         self.sessions_mutex.lockUncancelable(self.io);
         self.shutdown_running = false;
         self.shutdown_complete = result == null;
@@ -472,7 +472,7 @@ pub const Host = struct {
         if (result) |err| return err;
     }
 
-    pub fn deinit(self: *Host) void {
+    pub fn deinit(self: *Runtime) void {
         std.debug.assert(self.shutdown_complete);
         for (self.sessions) |entry| {
             if (entry) |session| {
@@ -489,7 +489,7 @@ pub const Host = struct {
 };
 
 pub const Session = struct {
-    host: *Host,
+    agent_runtime: *Runtime,
     id: u64,
     raw: ?*wire.SessionHandle = null,
     workspace_root: []u8,
@@ -518,27 +518,27 @@ pub const Session = struct {
     close_failed: bool = false,
 
     fn lock(self: *Session) void {
-        self.mutex.lockUncancelable(self.host.io);
+        self.mutex.lockUncancelable(self.agent_runtime.io);
     }
 
     fn unlock(self: *Session) void {
-        self.mutex.unlock(self.host.io);
+        self.mutex.unlock(self.agent_runtime.io);
     }
 
     fn wait(self: *Session) void {
-        self.condition.waitUncancelable(self.host.io, &self.mutex);
+        self.condition.waitUncancelable(self.agent_runtime.io, &self.mutex);
     }
 
     fn broadcast(self: *Session) void {
-        self.condition.broadcast(self.host.io);
+        self.condition.broadcast(self.agent_runtime.io);
     }
 
     pub fn submit(self: *Session, prompt: []const u8) (Error || std.mem.Allocator.Error)!u64 {
-        if (prompt.len > self.host.max_prompt_bytes) return error.PromptTooLarge;
-        const owned_prompt = try self.host.allocator.dupe(u8, prompt);
-        errdefer self.host.allocator.free(owned_prompt);
+        if (prompt.len > self.agent_runtime.max_prompt_bytes) return error.PromptTooLarge;
+        const owned_prompt = try self.agent_runtime.allocator.dupe(u8, prompt);
+        errdefer self.agent_runtime.allocator.free(owned_prompt);
         self.lock();
-        if (self.host.shutting_down.load(.acquire)) {
+        if (self.agent_runtime.shutting_down.load(.acquire)) {
             self.unlock();
             return error.HostShuttingDown;
         }
@@ -571,7 +571,7 @@ pub const Session = struct {
         self.last_outcome = null;
         self.cancel_requested = false;
         self.state = .queued;
-        self.host.scheduler.enqueue(.{
+        self.agent_runtime.scheduler.enqueue(.{
             .context = self,
             .execute = executeQueuedSession,
         }) catch |err| {
@@ -614,7 +614,7 @@ pub const Session = struct {
         const was_queued = self.state == .queued;
         self.unlock();
 
-        if (was_queued and self.host.scheduler.cancel(self)) {
+        if (was_queued and self.agent_runtime.scheduler.cancel(self)) {
             self.finishCancelledQueuedRun();
             return;
         }
@@ -647,14 +647,14 @@ pub const Session = struct {
         if (run_id != self.active_run_id or request_id != self.ui_request_id or self.ui_answered)
             return error.StaleUiResponse;
         const request = self.ui_request_value orelse return error.NoPendingUiRequest;
-        const scratch = try self.host.allocator.alloc(u8, self.host.max_ui_response_bytes);
-        defer self.host.allocator.free(scratch);
+        const scratch = try self.agent_runtime.allocator.alloc(u8, self.agent_runtime.max_ui_response_bytes);
+        defer self.agent_runtime.allocator.free(scratch);
         var fixed = std.heap.FixedBufferAllocator.init(scratch);
         const bounded = sdk.encodeUiResponse(fixed.allocator(), request.*, response) catch |err| switch (err) {
             error.OutOfMemory => return error.InvalidUiResponse,
             error.MismatchedResponse, error.InvalidResponse => return error.InvalidUiResponse,
         };
-        const encoded = try self.host.allocator.dupe(u8, bounded);
+        const encoded = try self.agent_runtime.allocator.dupe(u8, bounded);
         std.debug.assert(self.ui_response_json == null);
         self.ui_response_json = encoded;
         self.ui_answered = true;
@@ -770,7 +770,7 @@ pub const Session = struct {
         self.broadcast();
         self.unlock();
 
-        const cancelled_queued = was_queued and self.host.scheduler.cancel(self);
+        const cancelled_queued = was_queued and self.agent_runtime.scheduler.cancel(self);
         if (cancelled_queued) self.finishCancelledQueuedRun();
         if (should_abort_now) self.abortRun(run_id, cause);
 
@@ -790,8 +790,8 @@ pub const Session = struct {
 
     fn destroyRawSession(self: *Session) Error!void {
         var diagnostic = emptyOwnedBytes();
-        const status = self.host.api.sessionDestroy()(self.raw, &diagnostic);
-        releaseOwned(self.host.api, &diagnostic);
+        const status = self.agent_runtime.api.sessionDestroy()(self.raw, &diagnostic);
+        releaseOwned(self.agent_runtime.api, &diagnostic);
         const typed_status = sdk.Status.fromCode(status) catch null;
         self.lock();
         self.close_finished = true;
@@ -813,7 +813,7 @@ pub const Session = struct {
         if (self.state != .queued) {
             self.run_done = true;
             if (self.prompt) |prompt| {
-                self.host.allocator.free(prompt);
+                self.agent_runtime.allocator.free(prompt);
                 self.prompt = null;
             }
             self.broadcast();
@@ -826,7 +826,7 @@ pub const Session = struct {
         const prompt = self.prompt.?;
         self.broadcast();
         self.unlock();
-        _ = self.host.notify();
+        _ = self.agent_runtime.notify();
 
         var options = std.mem.zeroes(wire.RunOptionsV1);
         options.struct_size = @sizeOf(wire.RunOptionsV1);
@@ -836,7 +836,7 @@ pub const Session = struct {
         // deterministically on `struct_size` instead of exposing undefined data.
         var result = std.mem.zeroes(wire.RunResultV1);
         var diagnostic = emptyOwnedBytes();
-        const status = self.host.api.sessionRun()(
+        const status = self.agent_runtime.api.sessionRun()(
             self.raw,
             run_id,
             sdk.bytesView(prompt),
@@ -845,10 +845,10 @@ pub const Session = struct {
             &diagnostic,
         );
         const typed_status = sdk.Status.fromCode(status) catch null;
-        releaseOwned(self.host.api, &diagnostic);
+        releaseOwned(self.agent_runtime.api, &diagnostic);
 
         self.lock();
-        self.host.allocator.free(prompt);
+        self.agent_runtime.allocator.free(prompt);
         self.prompt = null;
         self.last_status = status;
         if (typed_status) |known_status| {
@@ -883,18 +883,18 @@ pub const Session = struct {
         if (self.state != .closing and self.state != .poisoned) self.state = .idle;
         self.broadcast();
         self.unlock();
-        _ = self.host.notify();
+        _ = self.agent_runtime.notify();
     }
 
     fn abortRun(self: *Session, run_id: u64, cause: HostCause) void {
         var diagnostic = emptyOwnedBytes();
-        const status = self.host.api.sessionAbort()(
+        const status = self.agent_runtime.api.sessionAbort()(
             self.raw,
             run_id,
             abortReason(cause),
             &diagnostic,
         );
-        releaseOwned(self.host.api, &diagnostic);
+        releaseOwned(self.agent_runtime.api, &diagnostic);
         self.lock();
         if (self.active_run_id == run_id) {
             self.last_abort_status = status;
@@ -908,7 +908,7 @@ pub const Session = struct {
     fn finishCancelledQueuedRun(self: *Session) void {
         self.lock();
         if (self.prompt) |prompt| {
-            self.host.allocator.free(prompt);
+            self.agent_runtime.allocator.free(prompt);
             self.prompt = null;
         }
         self.last_outcome = abortedOutcome(self.cause);
@@ -921,10 +921,10 @@ pub const Session = struct {
     fn deinit(self: *Session) void {
         std.debug.assert(self.state == .closed);
         std.debug.assert(self.active_refs == 0);
-        if (self.prompt) |prompt| self.host.allocator.free(prompt);
-        if (self.ui_request_json) |json| self.host.allocator.free(json);
-        if (self.ui_response_json) |json| self.host.allocator.free(json);
-        self.host.allocator.free(self.workspace_root);
+        if (self.prompt) |prompt| self.agent_runtime.allocator.free(prompt);
+        if (self.ui_request_json) |json| self.agent_runtime.allocator.free(json);
+        if (self.ui_response_json) |json| self.agent_runtime.allocator.free(json);
+        self.agent_runtime.allocator.free(self.workspace_root);
     }
 
     fn onEvent(
@@ -940,11 +940,11 @@ pub const Session = struct {
             self.recordCause(.event_pipeline_failure);
             return wire.CALLBACK_FATAL;
         };
-        if (encoded.len > self.host.max_event_bytes) {
+        if (encoded.len > self.agent_runtime.max_event_bytes) {
             self.recordCause(.queue_capacity_failure);
             return wire.CALLBACK_FATAL;
         }
-        var parsed = sdk.decodeCoreEvent(self.host.allocator, encoded) catch {
+        var parsed = sdk.decodeCoreEvent(self.agent_runtime.allocator, encoded) catch {
             self.recordCause(.event_pipeline_failure);
             return wire.CALLBACK_FATAL;
         };
@@ -955,7 +955,7 @@ pub const Session = struct {
                 return wire.CALLBACK_CONTINUE;
             },
         }
-        const owned_json = self.host.allocator.dupe(u8, encoded) catch {
+        const owned_json = self.agent_runtime.allocator.dupe(u8, encoded) catch {
             parsed.deinit();
             self.recordCause(.event_pipeline_failure);
             return wire.CALLBACK_FATAL;
@@ -966,9 +966,9 @@ pub const Session = struct {
             .encoded_bytes = encoded.len,
             .json = owned_json,
             .event = parsed,
-            .allocator = self.host.allocator,
+            .allocator = self.agent_runtime.allocator,
         };
-        self.host.events.enqueueWithDeadline(envelope, self.host.event_enqueue_timeout) catch |err| {
+        self.agent_runtime.events.enqueueWithDeadline(envelope, self.agent_runtime.event_enqueue_timeout) catch |err| {
             envelope.deinit();
             self.recordCause(switch (err) {
                 error.EventTooLarge,
@@ -983,7 +983,7 @@ pub const Session = struct {
             });
             return wire.CALLBACK_FATAL;
         };
-        if (!self.host.notify()) {
+        if (!self.agent_runtime.notify()) {
             self.recordCause(.bridge_pipeline_failure);
             return wire.CALLBACK_FATAL;
         }
@@ -1009,16 +1009,16 @@ pub const Session = struct {
             self.recordCause(.ui_pipeline_failure);
             return wire.UI_FATAL;
         };
-        if (encoded_request.len > self.host.max_ui_request_bytes) {
+        if (encoded_request.len > self.agent_runtime.max_ui_request_bytes) {
             self.recordCause(.queue_capacity_failure);
             return wire.UI_FATAL;
         }
-        var parsed = sdk.decodeUiRequest(self.host.allocator, encoded_request) catch {
+        var parsed = sdk.decodeUiRequest(self.agent_runtime.allocator, encoded_request) catch {
             self.recordCause(.ui_pipeline_failure);
             return wire.UI_FATAL;
         };
         defer parsed.deinit();
-        const owned_request = self.host.allocator.dupe(u8, encoded_request) catch {
+        const owned_request = self.agent_runtime.allocator.dupe(u8, encoded_request) catch {
             self.recordCause(.ui_pipeline_failure);
             return wire.UI_FATAL;
         };
@@ -1027,13 +1027,13 @@ pub const Session = struct {
         if (self.state != .running or self.ui_active) {
             setCauseLocked(self, .ui_pipeline_failure);
             self.unlock();
-            self.host.allocator.free(owned_request);
+            self.agent_runtime.allocator.free(owned_request);
             return wire.UI_FATAL;
         }
         if (self.ui_request_id == std.math.maxInt(u64)) {
             setCauseLocked(self, .dependency_contract_failure);
             self.unlock();
-            self.host.allocator.free(owned_request);
+            self.agent_runtime.allocator.free(owned_request);
             return wire.UI_FATAL;
         }
         self.ui_request_id += 1;
@@ -1049,7 +1049,7 @@ pub const Session = struct {
         self.broadcast();
         self.unlock();
 
-        if (!self.host.notify()) {
+        if (!self.agent_runtime.notify()) {
             self.lock();
             setCauseLocked(self, .bridge_pipeline_failure);
             self.ui_active = false;
@@ -1058,7 +1058,7 @@ pub const Session = struct {
             self.unlock();
         }
 
-        var timer = self.host.io.async(expireUiRequest, .{ self, request_id });
+        var timer = self.agent_runtime.io.async(expireUiRequest, .{ self, request_id });
         self.lock();
         while (self.ui_active and self.state == .waiting_ui)
             self.wait();
@@ -1072,11 +1072,11 @@ pub const Session = struct {
         self.broadcast();
         self.unlock();
 
-        timer.cancel(self.host.io) catch |err| switch (err) {
+        timer.cancel(self.agent_runtime.io) catch |err| switch (err) {
             error.Canceled => {},
         };
-        self.host.allocator.free(request_copy);
-        _ = self.host.notify();
+        self.agent_runtime.allocator.free(request_copy);
+        _ = self.agent_runtime.notify();
 
         if (answered) {
             const bytes = response orelse {
@@ -1086,12 +1086,12 @@ pub const Session = struct {
             output.* = .{ .ptr = bytes.ptr, .len = bytes.len };
             return wire.UI_ANSWERED;
         }
-        if (response) |bytes| self.host.allocator.free(bytes);
+        if (response) |bytes| self.agent_runtime.allocator.free(bytes);
         return wire.UI_UNAVAILABLE;
     }
 
     fn expireUiRequest(self: *Session, request_id: u64) std.Io.Cancelable!void {
-        try self.host.io.sleep(self.host.ui_request_timeout, .awake);
+        try self.agent_runtime.io.sleep(self.agent_runtime.ui_request_timeout, .awake);
         self.lock();
         var expired = false;
         if (self.ui_active and self.ui_request_id == request_id) {
@@ -1101,7 +1101,7 @@ pub const Session = struct {
             expired = true;
         }
         self.unlock();
-        if (expired) _ = self.host.notify();
+        if (expired) _ = self.agent_runtime.notify();
     }
 
     fn releaseUiResponse(context: ?*anyopaque, out: ?*wire.OwnedBytesV1) callconv(.c) void {
@@ -1112,7 +1112,7 @@ pub const Session = struct {
             value.* = emptyOwnedBytes();
             return;
         };
-        self.host.allocator.free(ptr[0..len]);
+        self.agent_runtime.allocator.free(ptr[0..len]);
         value.* = emptyOwnedBytes();
     }
 

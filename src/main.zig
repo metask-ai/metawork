@@ -1,4 +1,4 @@
-const app = @import("app.zig");
+const app = @import("metawork_app");
 
 pub const panic = app.panic;
 

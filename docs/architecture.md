@@ -1,7 +1,7 @@
 # MetaWork 高层架构
 
 > 状态：Phase 0A 已完成；当前实现基线迁移到 stable AgentCore ABI v1，后续正式方向选择单 AgentCore Worker
-> 日期：2026-07-17
+> 日期：2026-07-18
 
 产品范围见 [产品需求](requirements.md)，metacodes（原 cc-zig）的具体接入约束见 [AgentCore 集成契约](agentcore-integration.md)，当前 bundle 能力见 [AgentCore ABI v1 消费基线](agentcore-abi-v1.md)。历史报告中的 cc-zig 名称保留当时仓库身份。
 
@@ -11,7 +11,7 @@
 | ----------------- | ---------------------------------- | --------------------------------------------------------------------- |
 | Renderer          | React + Tailwind                   | 当前正式 UI 技术栈，适合复杂 Workbench 界面                           |
 | Desktop Framework | Native SDK                         | Zig 一等公民，负责系统 WebView、窗口、Bridge 和桌面生命周期           |
-| Workbench / Host  | Zig                                | 承担产品编排、权限边界、状态协调和 AgentCore 接入                     |
+| App / Workbench / Agent | Zig                           | 分别承担 composition、产品状态和 AgentCore 执行边界                   |
 | AgentCore         | metacodes AgentCore library bundle | metacodes 独立构建和发布；MetaWork 链接产物，不把上游源码纳入自身构建 |
 | Agent UI contract | metacodes 原生结构化协议           | React 消费 Host 产品投影，不消费终端字节流或 Provider SSE             |
 
@@ -54,24 +54,28 @@ artifact cache/remote 发布、async resume、strict Workspace security、正式
 flowchart TB
     UI["React + Tailwind Renderer<br/>Workbench UI"]
 
-    subgraph HOST["MetaWork Desktop Host / Workbench · Zig"]
-        NATIVE["Native SDK Runtime + Bridge<br/>直接使用"]
-        WB["Workbench 编排<br/>Workspace / Session / Run"]
-        BACKEND["AgentCore Host Binding<br/>callbacks + event pump"]
-        NATIVE <--> WB
-        WB <--> BACKEND
+    subgraph HOST["MetaWork Desktop Host · Zig"]
+        APP["App composition<br/>Native SDK Runtime"]
+        BRIDGE["Bridge transport"]
+        WB["Workbench 产品状态<br/>Task / Run history / queue"]
+        AGENT["Agent execution<br/>Session / active Run / callbacks"]
+        APP --> BRIDGE
+        APP --> WB
+        APP --> AGENT
+        BRIDGE --> WB
+        WB --> AGENT
     end
 
     CORE["AgentCore bundle<br/>metacodes"]
 
-    UI <-->|"领域命令 + 结构化数据"| NATIVE
-    BACKEND <-->|"bundle SDK + binary ABI"| CORE
+    UI <-->|"领域命令 + 结构化数据"| BRIDGE
+    AGENT <-->|"bundle SDK + binary ABI"| CORE
 ```
 
 这是三层职责边界，不等于三个进程：
 
 1. Renderer：产品界面；
-2. Zig Host / Workbench：桌面宿主、产品编排和安全边界；
+2. Zig Desktop Host：由 App、Bridge、Workbench、Agent 四个明确 module boundary 组成；
 3. AgentCore：Agent loop、模型、工具和结构化事件。
 
 ## 4. 组件职责
@@ -94,9 +98,9 @@ flowchart TB
 - 持有 Provider credential；
 - 作为权限或安全边界。
 
-### 4.2 MetaWork Zig Host / Workbench
+### 4.2 MetaWork Zig Desktop Host
 
-Native SDK 直接构成这一层的 Runtime、窗口和 Bridge。Host 内部可以按代码规模形成 Bridge、Workbench 和 AgentCore 模块，但不得为假想替换需求再包装一套镜像接口。
+Native SDK 直接构成桌面 Runtime 与窗口能力。MetaWork 内部固定为四个 named modules：`app` 负责 composition，`bridge` 负责验证与运输，`workbench` 拥有产品状态与队列，`agent` 执行并收口一个真实 Agent Run。`AgentCore` 只指 metacodes 外部 bundle。
 
 Host 负责：
 
@@ -104,8 +108,8 @@ Host 负责：
 - 暴露小而明确的领域命令；
 - 校验来源、参数、Workspace、Session 和权限；
 - 在 Renderer 之外读取并持有 Provider credential；
-- 管理 Session、Run、队列、取消、关闭和当前进程内状态；
-- 实现 AgentCore callback binding 和有界事件泵；
+- 由 Workbench 管理 Task、Run record、队列、取消协调和产品历史；
+- 由 Agent 管理 AgentCore Session、active Run、callback binding 和有界事件泵；
 - 管理跨会话产品状态；
 - 提供文件对话框、通知、更新和应用生命周期能力。
 

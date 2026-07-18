@@ -1,6 +1,6 @@
 const std = @import("std");
 const sdk = @import("metacodes_agentcore");
-const lifecycle = @import("metawork_agentcore");
+const lifecycle = @import("metawork_agent");
 const contract_fixture = @import("workbench_contract_fixture");
 
 pub const Error = lifecycle.Error || std.mem.Allocator.Error || std.Thread.SpawnError || error{
@@ -150,12 +150,12 @@ const SessionView = struct {
     cancel_requested: bool = false,
 };
 
-/// Host-owned product projection. AgentCore protocol is interpreted only
+/// Workbench-owned product projection. AgentCore protocol is interpreted only
 /// through the bundle SDK; the Renderer receives this bounded domain view.
 /// All methods currently run on the Native loop thread.
 pub const Workbench = struct {
     allocator: std.mem.Allocator,
-    host: *lifecycle.Host,
+    agent_runtime: *lifecycle.Runtime,
     limits: Limits,
     sessions: []?SessionView,
     projection_bytes: usize = 0,
@@ -164,7 +164,7 @@ pub const Workbench = struct {
 
     pub fn init(
         allocator: std.mem.Allocator,
-        host: *lifecycle.Host,
+        agent_runtime: *lifecycle.Runtime,
         limits: Limits,
     ) (std.mem.Allocator.Error || error{ProjectionCapacity})!Workbench {
         if (limits.max_sessions == 0 or limits.max_runs_per_session == 0 or
@@ -180,7 +180,7 @@ pub const Workbench = struct {
             return error.ProjectionCapacity;
         const sessions = try allocator.alloc(?SessionView, limits.max_sessions);
         @memset(sessions, null);
-        return .{ .allocator = allocator, .host = host, .limits = limits, .sessions = sessions };
+        return .{ .allocator = allocator, .agent_runtime = agent_runtime, .limits = limits, .sessions = sessions };
     }
 
     /// Registers the Host-only provider credential that must never be copied
@@ -218,7 +218,7 @@ pub const Workbench = struct {
         const ui_history = try self.allocator.alloc(?UiRecord, self.limits.max_ui_history_per_session);
         errdefer self.allocator.free(ui_history);
         @memset(ui_history, null);
-        const session = self.host.createSession(options) catch |err| return err;
+        const session = self.agent_runtime.createSession(options) catch |err| return err;
         const snapshot = session.snapshot();
         self.sessions[slot] = .{
             .session = session,
@@ -309,7 +309,7 @@ pub const Workbench = struct {
         }
         view.close_failed = false;
         view.close_result.store(.running, .release);
-        view.close_thread = std.Thread.spawn(.{}, closeWorker, .{ self.host, view, session }) catch |err| {
+        view.close_thread = std.Thread.spawn(.{}, closeWorker, .{ self.agent_runtime, view, session }) catch |err| {
             view.close_result.store(.none, .release);
             view.closing_session = null;
             view.session = session;
@@ -981,17 +981,17 @@ pub const Workbench = struct {
 };
 
 fn closeWorker(
-    host: *lifecycle.Host,
+    agent_runtime: *lifecycle.Runtime,
     view: *SessionView,
     session: *lifecycle.Session,
 ) void {
     const result: CloseResult = close: {
         session.close(.session_close) catch break :close .failed;
-        host.releaseClosedSession(session) catch break :close .failed;
+        agent_runtime.releaseClosedSession(session) catch break :close .failed;
         break :close .closed;
     };
     view.close_result.store(result, .release);
-    _ = host.requestWake();
+    _ = agent_runtime.requestWake();
 }
 
 fn phaseFor(snapshot: lifecycle.SessionSnapshot) RunPhase {

@@ -185,7 +185,7 @@ reject new work
 
 ### 当前实现与复现
 
-Gate 2 基础实现当前位于 `src/agentcore/session.zig`，bounded executor 位于 `src/workbench/executor.zig`，验证工程位于 `spikes/host-lifecycle/`。验证工程只从显式 `AGENTCORE_BUNDLE_ROOT` 导入 bundle SDK，并先按 `spikes/agentcore-contract/bundle.lock.json` 校验完整 manifest、checksum、平台、Zig 版本和 discovery symbol；它不进入正式应用 build graph。
+Gate 2 基础实现当前位于 `src/agent/session.zig`，bounded executor 位于 `src/workbench/executor.zig`，验证工程位于 `spikes/host-lifecycle/`。验证工程只从显式 `AGENTCORE_BUNDLE_ROOT` 导入 bundle SDK，并先按 `spikes/agentcore-contract/bundle.lock.json` 校验完整 manifest、checksum、平台、Zig 版本和 discovery symbol；它不进入正式应用 build graph。
 
 ```bash
 AGENTCORE_BUNDLE_ROOT=/absolute/path/to/validated/bundle \
@@ -269,7 +269,7 @@ Host tool 内部 session ID 到 MetaWork Session/Run 的合同仍未定义时，
 
 ### 当前实现与复现
 
-正式 Host 位于 `src/agentcore/session.zig`，最小 FIFO bounded sink 位于 `src/agentcore/event_sink.zig`。deterministic fake 覆盖 lifecycle/typed callback/result/UI 测试；Gate 1 artifact-only probe 还会使用真实 bundle、Mock Provider 和正式 Host 再跑同步 `AskUserQuestion`、typed event sink 与 terminal outcome。
+当前正式 Agent Runtime 实现位于 `src/agent/session.zig`，最小 FIFO bounded sink 位于 `src/agent/event_sink.zig`。deterministic fake 覆盖 lifecycle/typed callback/result/UI 测试；Gate 1 artifact-only probe 还会使用真实 bundle、Mock Provider 和正式 Agent Runtime 再跑同步 `AskUserQuestion`、typed event sink 与 terminal outcome。
 
 ```bash
 AGENTCORE_BUNDLE_ROOT=/absolute/path/to/validated/bundle \

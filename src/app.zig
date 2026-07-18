@@ -1,11 +1,11 @@
 const std = @import("std");
 const runner = @import("runner");
 const native_sdk = @import("native_sdk");
-const renderer_bridge = @import("bridge.zig");
+const renderer_bridge = @import("metawork_bridge");
 const bridge_delivery = renderer_bridge.delivery;
 const agentcore = @import("metacodes_agentcore");
-const host_lifecycle = @import("metawork_agentcore");
-const host_workbench = @import("metawork_workbench");
+const agent = @import("metawork_agent");
+const workbench_api = @import("metawork_workbench");
 
 pub const panic = std.debug.FullPanic(native_sdk.debug.capturePanic);
 
@@ -46,12 +46,12 @@ const App = struct {
     env_map: *std.process.Environ.Map,
     io: std.Io,
     delivery: *bridge_delivery.Delivery,
-    host: ?*host_lifecycle.Host = null,
-    workbench: ?*host_workbench.Workbench = null,
-    host_shutdown: bool = false,
+    agent_runtime: ?*agent.Runtime = null,
+    workbench: ?*workbench_api.Workbench = null,
+    agent_shutdown: bool = false,
     main_thread_id: std.Thread.Id,
     mode: FrontendMode = .release,
-    runtime: ?*native_sdk.Runtime = null,
+    native_runtime: ?*native_sdk.Runtime = null,
     platform_services: ?native_sdk.platform.PlatformServices = null,
     event_window_id: ?native_sdk.platform.WindowId = null,
     fixture_thread: ?std.Thread = null,
@@ -70,7 +70,7 @@ const App = struct {
     snapshot_write_context: ?*anyopaque = null,
     snapshot_write_override: ?*const fn (
         context: ?*anyopaque,
-        workbench: *host_workbench.Workbench,
+        workbench: *workbench_api.Workbench,
         output: []u8,
     ) anyerror![]const u8 = null,
     handlers: [18]native_sdk.bridge.Handler = undefined,
@@ -95,45 +95,45 @@ const App = struct {
         });
     }
 
-    fn start(context: *anyopaque, runtime: *native_sdk.Runtime) anyerror!void {
+    fn start(context: *anyopaque, native_runtime: *native_sdk.Runtime) anyerror!void {
         const self: *@This() = @ptrCast(@alignCast(context));
-        self.runtime = runtime;
-        self.platform_services = runtime.options.platform.services;
+        self.native_runtime = native_runtime;
+        self.platform_services = native_runtime.options.platform.services;
     }
 
-    fn stop(context: *anyopaque, runtime: *native_sdk.Runtime) anyerror!void {
+    fn stop(context: *anyopaque, native_runtime: *native_sdk.Runtime) anyerror!void {
         const self: *@This() = @ptrCast(@alignCast(context));
         self.joinFixtureWorker();
         if (self.platform_services) |services| {
             services.cancelTimer(delivery_retention_timer_id) catch {};
             services.cancelTimer(workbench_revision_retry_timer_id) catch {};
         }
-        if (self.host) |host| {
-            try host.shutdown();
-            self.host_shutdown = true;
+        if (self.agent_runtime) |agent_runtime| {
+            try agent_runtime.shutdown();
+            self.agent_shutdown = true;
         }
         self.platform_services = null;
         self.event_window_id = null;
         self.workspace_grants.invalidate();
         self.invalidateSnapshot();
-        if (self.runtime == runtime) self.runtime = null;
+        if (self.native_runtime == native_runtime) self.native_runtime = null;
     }
 
-    fn event(context: *anyopaque, runtime: *native_sdk.Runtime, value: native_sdk.Event) anyerror!void {
+    fn event(context: *anyopaque, native_runtime: *native_sdk.Runtime, value: native_sdk.Event) anyerror!void {
         const self: *@This() = @ptrCast(@alignCast(context));
         switch (value) {
             .effects_wake => {
-                self.drainHostEvents();
+                self.drainAgentEvents();
                 self.expireDetachedRoutes(native_sdk.monotonicNanoseconds());
                 if (self.event_window_id) |window_id| {
-                    try self.emitAgentBatches(runtime, window_id);
-                    try self.emitWorkbenchChanged(runtime, window_id);
+                    try self.emitAgentBatches(native_runtime, window_id);
+                    try self.emitWorkbenchChanged(native_runtime, window_id);
                 }
             },
             .timer => |timer| if (timer.id == delivery_retention_timer_id) {
                 self.expireDetachedRoutes(native_sdk.monotonicNanoseconds());
             } else if (timer.id == workbench_revision_retry_timer_id) {
-                if (self.event_window_id) |window_id| try self.emitWorkbenchChanged(runtime, window_id);
+                if (self.event_window_id) |window_id| try self.emitWorkbenchChanged(native_runtime, window_id);
             },
             else => {},
         }
@@ -239,7 +239,7 @@ const App = struct {
 
     fn ping(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
         const self: *@This() = @ptrCast(@alignCast(context));
-        const runtime = self.runtime orelse return error.RuntimeUnavailable;
+        const native_runtime = self.native_runtime orelse return error.RuntimeUnavailable;
         self.sequence += 1;
 
         const on_main_thread = std.Thread.getCurrentId() == self.main_thread_id;
@@ -256,7 +256,7 @@ const App = struct {
                 envFlag(self.env_map, gate5_fixture_env),
             },
         );
-        try runtime.emitWindowEvent(invocation.source.window_id, event_name, detail);
+        try native_runtime.emitWindowEvent(invocation.source.window_id, event_name, detail);
 
         return std.fmt.bufPrint(
             output,
@@ -273,7 +273,7 @@ const App = struct {
 
     fn acknowledgeEvent(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
         const self: *@This() = @ptrCast(@alignCast(context));
-        _ = self.runtime orelse return error.RuntimeUnavailable;
+        _ = self.native_runtime orelse return error.RuntimeUnavailable;
         const acknowledged_sequence = try acknowledgementSequence(invocation.request.payload);
         if (acknowledged_sequence == 0 or acknowledged_sequence > self.sequence) return error.SequenceMismatch;
         self.acknowledged_sequence = @max(self.acknowledged_sequence, acknowledged_sequence);
@@ -292,7 +292,7 @@ const App = struct {
 
     fn connectEvents(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
         const self: *@This() = @ptrCast(@alignCast(context));
-        _ = self.runtime orelse return error.RuntimeUnavailable;
+        _ = self.native_runtime orelse return error.RuntimeUnavailable;
         const services = self.platform_services orelse return error.RuntimeUnavailable;
         if (self.event_window_id) |window_id|
             if (window_id != invocation.source.window_id) return error.EventWindowMismatch;
@@ -540,7 +540,7 @@ const App = struct {
         if (workspace_stat.kind != .directory) return error.InvalidWorkspace;
         const temp_root = try std.Io.Dir.realPathFileAbsoluteAlloc(self.io, "/tmp", std.heap.c_allocator);
         defer std.heap.c_allocator.free(temp_root);
-        const workspace_trust: host_lifecycle.WorkspaceTrust = if (self.mode == .gate0_automation)
+        const workspace_trust: agent.WorkspaceTrust = if (self.mode == .gate0_automation)
             .{ .temporary = temp_root }
         else
             .explicitly_trusted;
@@ -657,16 +657,16 @@ const App = struct {
         return std.fmt.bufPrint(output, "{{\"sessionId\":\"{d}\",\"deleted\":true}}", .{session_id});
     }
 
-    fn emitAgentBatches(self: *@This(), runtime: *native_sdk.Runtime, window_id: native_sdk.platform.WindowId) !void {
+    fn emitAgentBatches(self: *@This(), native_runtime: *native_sdk.Runtime, window_id: native_sdk.platform.WindowId) !void {
         const generation = self.delivery.connectedGeneration() orelse return;
         while (try self.delivery.buildBatch(generation)) |value| {
             var batch = value;
             defer batch.deinit();
-            runtime.emitWindowEvent(window_id, agent_event_name, batch.json) catch |err| {
-                if (self.host) |host| {
+            native_runtime.emitWindowEvent(window_id, agent_event_name, batch.json) catch |err| {
+                if (self.agent_runtime) |agent_runtime| {
                     for (0..batch.item_count) |index| {
                         const route = self.delivery.batchRoute(&batch, index) catch continue;
-                        host.failRun(route.session_id, route.run_id, .bridge_pipeline_failure) catch {};
+                        agent_runtime.failRun(route.session_id, route.run_id, .bridge_pipeline_failure) catch {};
                         self.delivery.cleanupRun(route.session_id, route.run_id);
                     }
                 }
@@ -684,13 +684,13 @@ const App = struct {
         }
     }
 
-    fn emitWorkbenchChanged(self: *@This(), runtime: ?*native_sdk.Runtime, window_id: native_sdk.platform.WindowId) !void {
+    fn emitWorkbenchChanged(self: *@This(), native_runtime: ?*native_sdk.Runtime, window_id: native_sdk.platform.WindowId) !void {
         const workbench = self.workbench orelse return;
         const revision = workbench.currentRevision();
         if (!self.revision_delivery.needsDelivery(revision)) return;
         var detail_buffer: [96]u8 = undefined;
         const detail = try std.fmt.bufPrint(&detail_buffer, "{{\"revision\":\"{d}\"}}", .{revision});
-        self.emitWindowEvent(runtime, window_id, workbench_event_name, detail) catch |err| {
+        self.emitWindowEvent(native_runtime, window_id, workbench_event_name, detail) catch |err| {
             self.revision_delivery.fail();
             const services = self.platform_services orelse {
                 self.breakEventConnection();
@@ -724,15 +724,15 @@ const App = struct {
         self.invalidateSnapshot();
     }
 
-    fn drainHostEvents(self: *@This()) void {
-        const host = self.host orelse return;
-        while (host.takeEvent()) |value| {
+    fn drainAgentEvents(self: *@This()) void {
+        const agent_runtime = self.agent_runtime orelse return;
+        while (agent_runtime.takeEvent()) |value| {
             var envelope = value;
             defer envelope.deinit();
             if (self.workbench) |workbench| workbench.applyEvent(&envelope) catch {
                 const session_id = envelope.session_id;
                 const run_id = envelope.run_id;
-                host.failRun(session_id, run_id, .bridge_pipeline_failure) catch {};
+                agent_runtime.failRun(session_id, run_id, .bridge_pipeline_failure) catch {};
                 continue;
             };
         }
@@ -740,8 +740,8 @@ const App = struct {
 
     fn expireDetachedRoutes(self: *@This(), now_ns: u64) void {
         while (self.delivery.firstExpired(now_ns)) |route| {
-            if (self.host) |host|
-                host.failRun(route.session_id, route.run_id, .bridge_pipeline_failure) catch {};
+            if (self.agent_runtime) |agent_runtime|
+                agent_runtime.failRun(route.session_id, route.run_id, .bridge_pipeline_failure) catch {};
             self.delivery.cleanupRun(route.session_id, route.run_id);
         }
     }
@@ -761,20 +761,20 @@ const App = struct {
         };
     }
 
-    fn wakeHost(context: ?*anyopaque) bool {
+    fn notifyMainLoop(context: ?*anyopaque) bool {
         const self: *@This() = @ptrCast(@alignCast(context orelse return false));
         const services = self.platform_services orelse return false;
         services.wake() catch return false;
         return true;
     }
 
-    fn wakePlatform(self: *@This()) !void {
+    fn notifyNativeMainLoop(self: *@This()) !void {
         const services = self.platform_services orelse return error.RuntimeUnavailable;
         try services.wake();
     }
 
     fn notifyCommitted(self: *@This()) void {
-        self.wakePlatform() catch |err| {
+        self.notifyNativeMainLoop() catch |err| {
             std.log.warn("committed Workbench mutation could not schedule a UI wake: {s}", .{@errorName(err)});
         };
     }
@@ -790,20 +790,20 @@ const App = struct {
 
     fn emitWindowEvent(
         self: *@This(),
-        runtime: ?*native_sdk.Runtime,
+        native_runtime: ?*native_sdk.Runtime,
         window_id: native_sdk.platform.WindowId,
         name: []const u8,
         detail: []const u8,
     ) !void {
         if (self.emit_window_event_override) |emit|
             return emit(self.emit_window_event_context, window_id, name, detail);
-        try (runtime orelse return error.RuntimeUnavailable).emitWindowEvent(window_id, name, detail);
+        try (native_runtime orelse return error.RuntimeUnavailable).emitWindowEvent(window_id, name, detail);
     }
 
-    fn writeWorkbenchSnapshot(self: *@This(), workbench: *host_workbench.Workbench) ![]const u8 {
+    fn writeWorkbenchSnapshot(self: *@This(), workbench_state: *workbench_api.Workbench) ![]const u8 {
         if (self.snapshot_write_override) |write|
-            return write(self.snapshot_write_context, workbench, self.snapshot_delivery.storage);
-        return workbench.writeSnapshot(self.snapshot_delivery.storage);
+            return write(self.snapshot_write_context, workbench_state, self.snapshot_delivery.storage);
+        return workbench_state.writeSnapshot(self.snapshot_delivery.storage);
     }
 
     fn joinFixtureWorker(self: *@This()) void {
@@ -852,18 +852,18 @@ fn allowedOrigins(mode: FrontendMode) []const []const u8 {
     return renderer_bridge.policy.origins(mode);
 }
 
-fn createHost(
+fn createAgentRuntime(
     io: std.Io,
     raw_api: *const agentcore.types.ApiV1,
-    notifier: host_lifecycle.Notifier,
-) !*host_lifecycle.Host {
-    const executor = try host_workbench.executor.Executor.create(
+    notifier: agent.Notifier,
+) !*agent.Runtime {
+    const executor = try workbench_api.Executor.create(
         io,
         std.heap.c_allocator,
         .{ .worker_count = host_worker_count, .queue_capacity = 8 },
     );
     errdefer executor.destroy();
-    return host_lifecycle.Host.init(io, std.heap.c_allocator, raw_api, executor.scheduler(), .{
+    return agent.Runtime.init(io, std.heap.c_allocator, raw_api, executor.scheduler(), .{
         .max_sessions = 8,
         .max_ui_request_bytes = pending_ui_json_capacity,
         .notifier = notifier,
@@ -883,24 +883,24 @@ pub fn run(init: std.process.Init) !void {
         .snapshot_delivery = try renderer_bridge.snapshot_delivery.State.init(snapshot_storage),
     };
     const api = try agentcore.Api.discover();
-    const host = try createHost(init.io, api.raw, .{ .context = &app, .wake = App.wakeHost });
-    app.host = host;
-    var workbench: host_workbench.Workbench = undefined;
+    const agent_runtime = try createAgentRuntime(init.io, api.raw, .{ .context = &app, .wake = App.notifyMainLoop });
+    app.agent_runtime = agent_runtime;
+    var workbench_state: workbench_api.Workbench = undefined;
     var workbench_initialized = false;
     defer {
-        if (!app.host_shutdown) host.shutdown() catch {};
-        if (workbench_initialized) workbench.deinit();
-        host.deinit();
+        if (!app.agent_shutdown) agent_runtime.shutdown() catch {};
+        if (workbench_initialized) workbench_state.deinit();
+        agent_runtime.deinit();
     }
-    workbench = try host_workbench.Workbench.init(std.heap.c_allocator, host, .{
+    workbench_state = try workbench_api.Workbench.init(std.heap.c_allocator, agent_runtime, .{
         .max_pending_ui_json_bytes = pending_ui_json_capacity,
         .max_pending_ui_requests = host_worker_count,
         .max_snapshot_bytes = workbench_snapshot_capacity,
     });
     workbench_initialized = true;
     if (init.environ_map.get("METAWORK_PROVIDER_API_KEY")) |credential|
-        try workbench.setKnownSecret(credential);
-    app.workbench = &workbench;
+        try workbench_state.setKnownSecret(credential);
+    app.workbench = &workbench_state;
     const mode = frontendMode(init.environ_map);
 
     try runner.runWithOptions(app.app(), .{
@@ -1129,7 +1129,7 @@ test "Workbench revision delivery retries and coalesces to the newest revision" 
     var harness = Harness{};
     var delivery = try bridge_delivery.Delivery.init(std.testing.allocator, .{ .route_slots = 4 });
     defer delivery.deinit();
-    var workbench = try host_workbench.Workbench.init(std.testing.allocator, undefined, .{});
+    var workbench = try workbench_api.Workbench.init(std.testing.allocator, undefined, .{});
     defer workbench.deinit();
     workbench.revision = 7;
     var app = App{
@@ -1185,7 +1185,7 @@ test "Workbench revision delivery fails closed when retry scheduling is unavaila
     var delivery = try bridge_delivery.Delivery.init(std.testing.allocator, .{ .route_slots = 4 });
     defer delivery.deinit();
     _ = try delivery.connect();
-    var workbench = try host_workbench.Workbench.init(std.testing.allocator, undefined, .{});
+    var workbench = try workbench_api.Workbench.init(std.testing.allocator, undefined, .{});
     defer workbench.deinit();
     workbench.revision = 1;
     var app = App{
@@ -1270,7 +1270,7 @@ test "a failed snapshot write invalidates the previously published descriptor" {
     const Harness = struct {
         fn write(
             context: ?*anyopaque,
-            workbench: *host_workbench.Workbench,
+            workbench: *workbench_api.Workbench,
             output: []u8,
         ) anyerror![]const u8 {
             _ = context;
@@ -1282,7 +1282,7 @@ test "a failed snapshot write invalidates the previously published descriptor" {
     var delivery = try bridge_delivery.Delivery.init(std.testing.allocator, .{ .route_slots = 4 });
     defer delivery.deinit();
     const generation = try delivery.connect();
-    var workbench = try host_workbench.Workbench.init(std.testing.allocator, undefined, .{});
+    var workbench = try workbench_api.Workbench.init(std.testing.allocator, undefined, .{});
     defer workbench.deinit();
     const snapshot_storage = try std.testing.allocator.alloc(u8, workbench_snapshot_capacity);
     defer std.testing.allocator.free(snapshot_storage);

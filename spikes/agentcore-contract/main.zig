@@ -1,7 +1,7 @@
 const std = @import("std");
 const sdk = @import("metacodes_agentcore");
 const wire = sdk.types;
-const lifecycle = @import("host_lifecycle");
+const lifecycle = @import("metawork_agent");
 const workbench_executor = @import("workbench_executor");
 const MockServer = @import("mock_server.zig").MockServer;
 
@@ -294,7 +294,7 @@ fn verifyFormalHost(io: std.Io, raw_api: *const wire.ApiV1, root: []const u8) !v
         .{ .worker_count = 1, .queue_capacity = 2 },
     );
     errdefer executor.destroy();
-    const host = try lifecycle.Host.init(io, allocator, raw_api, executor.scheduler(), .{
+    const host = try lifecycle.Runtime.init(io, allocator, raw_api, executor.scheduler(), .{
         .max_sessions = 1,
     });
     defer {

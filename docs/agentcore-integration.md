@@ -3,14 +3,14 @@
 > 状态：Phase 0A Gate 6 同进程垂直链路与 Gate 7 fault-domain 对照均已通过；后续正式方向选择单 AgentCore Worker
 > 依赖：metacodes AgentCore bundle `0.0.0-dev+db052085b197`
 
-本文定义 MetaWork Zig Host 与 cc-zig 之间的规范边界。系统整体结构见 [高层架构](architecture.md)，当前预编译库能力见 [AgentCore ABI v1 消费基线](agentcore-abi-v1.md)。
+本文定义 MetaWork `agent/` 执行子系统与 cc-zig 之间的规范边界。Desktop Host 的 composition、Workbench 产品状态和 Bridge transport 见 [高层架构](architecture.md)，当前预编译库能力见 [AgentCore ABI v1 消费基线](agentcore-abi-v1.md)。
 
 ## 1. 集成原则
 
 1. cc-zig 是 Agent 结构化协议的唯一来源；
 2. MetaWork 不解析模型 Provider SSE；
 3. MetaWork 不建立平行的 `AgentEvent` / `WorkbenchEvent` 体系；
-4. MetaWork 正式 Host 只使用 bundle typed SDK 和 binary ABI；
+4. MetaWork 正式 Agent module 只使用 bundle typed SDK 和 binary ABI；
 5. AgentCore/tool callback 不直接调用 WebView；
 6. MetaWork 只补充产品路由、生命周期、所有权、传输 envelope 和安全校验；
 7. 当前产品路径只使用 cc-zig built-in tools，不注册 v1 Host tools；
@@ -44,7 +44,7 @@ AgentCore bundle
 
 当前不先实现 dependency resolver 或 content-addressed cache。同步 baseline 通过后，本地 cache 与远程 artifact repository 必须复用同一 bundle layout 和校验规则，不能改变 AgentCore 链接方式。
 
-### raw probe 与正式 Host
+### raw probe 与正式 Agent module
 
 隔离的 artifact-only raw contract probe 只用于证明产物可以 source-free discover/link/run，并保留 raw ABI 回归覆盖。该 probe：
 
@@ -53,7 +53,15 @@ AgentCore bundle
 - 不能成为产品状态映射或 UI JSON 解析实现；
 - 不能注册到 React/Native SDK 正式链路。
 
-当前 clean bundle `db052085b1970675b54426cfea7d71222bf174af` 提供 typed status、六个 StopReason、known/unknown observation decoder、`UiRequest` decoder 和 request-aware `UiResponse` encoder，并固定 built-in file/shell tools 相对 `workspace_root` 的执行合同。正式 Host 直接使用这些表面；MetaWork 不手写 raw enum、tag switch 或 JSON schema。
+当前 clean bundle `db052085b1970675b54426cfea7d71222bf174af` 提供 typed status、六个 StopReason、known/unknown observation decoder、`UiRequest` decoder 和 request-aware `UiResponse` encoder，并固定 built-in file/shell tools 相对 `workspace_root` 的执行合同。正式 `agent/` 直接使用这些表面；MetaWork 不手写 raw enum、tag switch 或 JSON schema。
+
+### MetaWork module boundary
+
+- `src/agent.zig` 是 Agent 执行层的 named module root；
+- `src/agent/` 直接消费 `metacodes_agentcore`，不得 import Workbench、Bridge 或 App；
+- Workbench 只通过 `metawork_agent` 公共表面协调 Session/Run；
+- `src/main.zig` 只进入 `metawork_app`，不能绕过 App 组装低层模块；
+- 当前 `HostCause` 与 injected Scheduler 是待迁移现状，其最终模型以 [架构调整实施方案](architecture-adjustment-plan.md) 为准。
 
 ## 3. 当前协议表面
 
@@ -70,9 +78,9 @@ AgentCore bundle
 
 当前 ABI `RunResult` 不包含 `SuspendInfo`、resume token、background handle 或 budget stop。unknown stop code 在 SDK validation 层失败；Host 不能制造这些产品状态。
 
-## 4. Host binding
+## 4. Agent binding
 
-Host binding 是 cc-zig backend 的 ABI 消费者，不是 Native SDK Adapter。它直接持有 bundle SDK API table 和 opaque handles。
+Agent binding 是 cc-zig backend 的 ABI 消费者，不是 Native SDK Adapter。它直接持有 bundle SDK API table 和 opaque handles。
 
 ### Event callback
 

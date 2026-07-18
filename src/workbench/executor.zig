@@ -1,5 +1,5 @@
 const std = @import("std");
-const agentcore = @import("metawork_agentcore");
+const agent = @import("metawork_agent");
 
 pub const Error = error{
     HostShuttingDown,
@@ -16,7 +16,7 @@ pub const Executor = struct {
     allocator: std.mem.Allocator,
     mutex: std.Io.Mutex = .init,
     condition: std.Io.Condition = .init,
-    queue: []?agentcore.ScheduledRun,
+    queue: []?agent.ScheduledRun,
     queued: usize = 0,
     workers: []std.Thread,
     stopping: bool = false,
@@ -30,7 +30,7 @@ pub const Executor = struct {
         if (limits.worker_count == 0 or limits.queue_capacity == 0) return error.InvalidLimits;
         const self = try allocator.create(Executor);
         errdefer allocator.destroy(self);
-        const queue = try allocator.alloc(?agentcore.ScheduledRun, limits.queue_capacity);
+        const queue = try allocator.alloc(?agent.ScheduledRun, limits.queue_capacity);
         errdefer allocator.free(queue);
         @memset(queue, null);
         const workers = try allocator.alloc(std.Thread, limits.worker_count);
@@ -56,7 +56,7 @@ pub const Executor = struct {
         return self;
     }
 
-    pub fn scheduler(self: *Executor) agentcore.Scheduler {
+    pub fn scheduler(self: *Executor) agent.Scheduler {
         return .{
             .context = self,
             .enqueue_fn = enqueueFromAgentCore,
@@ -67,13 +67,13 @@ pub const Executor = struct {
     }
 
     /// Releases an executor whose scheduler ownership was not transferred to
-    /// AgentCore Host initialization.
+    /// Agent Runtime initialization.
     pub fn destroy(self: *Executor) void {
         self.shutdown();
         deinitFromAgentCore(self);
     }
 
-    fn enqueue(self: *Executor, item: agentcore.ScheduledRun) Error!void {
+    fn enqueue(self: *Executor, item: agent.ScheduledRun) Error!void {
         self.lock();
         defer self.unlock();
         if (self.stopping) return error.HostShuttingDown;
@@ -130,7 +130,7 @@ pub const Executor = struct {
                 self.unlock();
                 return;
             }
-            var next: ?agentcore.ScheduledRun = null;
+            var next: ?agent.ScheduledRun = null;
             for (self.queue) |*entry| {
                 if (entry.*) |item| {
                     next = item;
@@ -165,7 +165,7 @@ pub const Executor = struct {
         self.condition.broadcast(self.io);
     }
 
-    fn enqueueFromAgentCore(context: *anyopaque, run: agentcore.ScheduledRun) error{ HostShuttingDown, QueueFull }!void {
+    fn enqueueFromAgentCore(context: *anyopaque, run: agent.ScheduledRun) error{ HostShuttingDown, QueueFull }!void {
         const self: *Executor = @ptrCast(@alignCast(context));
         return self.enqueue(run);
     }

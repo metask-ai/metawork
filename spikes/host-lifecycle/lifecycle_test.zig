@@ -1,6 +1,6 @@
 const std = @import("std");
-const lifecycle = @import("host_lifecycle");
-const host_workbench = @import("host_workbench");
+const lifecycle = @import("metawork_agent");
+const host_workbench = @import("metawork_workbench");
 const event_pump = @import("event_pump");
 const bridge_delivery = @import("bridge_delivery");
 const workbench_executor = @import("workbench_executor");
@@ -518,7 +518,7 @@ const fake_api = wire.ApiV1{
     .reserved = [_]u64{0} ** 4,
 };
 
-fn openSession(host: *lifecycle.Host) !*lifecycle.Session {
+fn openSession(host: *lifecycle.Runtime) !*lifecycle.Session {
     return host.createSession(.{
         .provider_kind_code = wire.PROVIDER_ANTHROPIC,
         .permission_mode_code = wire.PERMISSION_DEFAULT,
@@ -558,14 +558,14 @@ const TestHostLimits = struct {
     }
 };
 
-fn createHost(limits: TestHostLimits) !*lifecycle.Host {
+fn createHost(limits: TestHostLimits) !*lifecycle.Runtime {
     const executor = try workbench_executor.Executor.create(
         std.testing.io,
         std.testing.allocator,
         .{ .worker_count = limits.worker_count, .queue_capacity = limits.queue_capacity },
     );
     errdefer executor.destroy();
-    return lifecycle.Host.init(
+    return lifecycle.Runtime.init(
         std.testing.io,
         std.testing.allocator,
         &fake_api,
@@ -613,7 +613,7 @@ fn failPipelineOnThread(session: *lifecycle.Session) void {
     session.recordCause(.event_pipeline_failure);
 }
 
-fn shutdownOnThread(host: *lifecycle.Host) void {
+fn shutdownOnThread(host: *lifecycle.Runtime) void {
     host.shutdown() catch unreachable;
 }
 
@@ -1380,7 +1380,7 @@ test "Host initialization OOM fails before acquiring the Runtime" {
         .{ .worker_count = 1, .queue_capacity = 1 },
     );
     defer executor.destroy();
-    try std.testing.expectError(error.OutOfMemory, lifecycle.Host.init(
+    try std.testing.expectError(error.OutOfMemory, lifecycle.Runtime.init(
         std.testing.io,
         failing.allocator(),
         &fake_api,
@@ -1405,7 +1405,7 @@ test "Session creation OOM leaves Host reusable and credential Host-only" {
         .{ .worker_count = 1, .queue_capacity = 1 },
     );
     errdefer executor.destroy();
-    const host = try lifecycle.Host.init(
+    const host = try lifecycle.Runtime.init(
         std.testing.io,
         failing.allocator(),
         &fake_api,

@@ -30,38 +30,38 @@ pub fn build(b: *std.Build) void {
     sdk.addImport("metacodes_agentcore_protocol", protocol);
 
     const event_sink = b.createModule(.{
-        .root_source_file = b.path("../../src/agentcore/event_sink.zig"),
+        .root_source_file = b.path("../../src/agent/event_sink.zig"),
         .target = target,
         .optimize = optimize,
     });
     event_sink.addImport("metacodes_agentcore", sdk);
     const lifecycle = b.createModule(.{
-        .root_source_file = b.path("../../src/agentcore/session.zig"),
+        .root_source_file = b.path("../../src/agent/session.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
     lifecycle.addImport("metacodes_agentcore", sdk);
     const event_pump = b.createModule(.{
-        .root_source_file = b.path("../../src/agentcore/event_pump.zig"),
+        .root_source_file = b.path("../../src/agent/event_pump.zig"),
         .target = target,
         .optimize = optimize,
     });
     event_pump.addImport("metacodes_agentcore", sdk);
     event_pump.addImport("event_sink", event_sink);
     lifecycle.addImport("event_pump", event_pump);
-    const agentcore = b.createModule(.{
-        .root_source_file = b.path("../../src/agentcore.zig"),
+    const agent = b.createModule(.{
+        .root_source_file = b.path("../../src/agent.zig"),
         .target = target,
         .optimize = optimize,
     });
-    agentcore.addImport("agentcore_session", lifecycle);
+    agent.addImport("agent_session", lifecycle);
     const executor = b.createModule(.{
         .root_source_file = b.path("../../src/workbench/executor.zig"),
         .target = target,
         .optimize = optimize,
     });
-    executor.addImport("metawork_agentcore", agentcore);
+    executor.addImport("metawork_agent", agent);
     const workbench = b.createModule(.{
         .root_source_file = b.path("../../src/workbench/projection.zig"),
         .target = target,
@@ -69,7 +69,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     workbench.addImport("metacodes_agentcore", sdk);
-    workbench.addImport("metawork_agentcore", agentcore);
+    workbench.addImport("metawork_agent", agent);
     const bridge_delivery = b.createModule(.{
         .root_source_file = b.path("../../src/bridge/delivery.zig"),
         .target = target,
@@ -82,8 +82,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    tests.addImport("host_lifecycle", lifecycle);
-    tests.addImport("host_workbench", workbench);
+    tests.addImport("metawork_agent", agent);
+    tests.addImport("metawork_workbench", workbench);
     tests.addImport("event_pump", event_pump);
     tests.addImport("bridge_delivery", bridge_delivery);
     tests.addImport("metacodes_agentcore", sdk);

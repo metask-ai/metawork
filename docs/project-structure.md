@@ -1,7 +1,7 @@
 # MetaWork 工程目录结构设计草案
 
-> 状态：Approved v0.2，正在按任务分阶段落地；目标子模块尚未全部拆完
-> 日期：2026-07-17
+> 状态：Approved v0.3；Zig module boundary 阶段已落地，状态所有权迁移继续按正式调整方案推进
+> 日期：2026-07-18
 > 范围：仓库外层、React Renderer、Zig `src/`、依赖方向、状态所有权、测试布局与渐进迁移
 
 ## 1. 文档职责
@@ -26,11 +26,11 @@
 - `src/main.zig` 只保留进程入口，Native SDK App 与 composition 已移入 `src/app.zig`；
 - Bridge command、policy、payload decoder、revision/snapshot delivery 和一次性 Workspace grant 已形成独立模块；
 - bounded executor 的队列、worker 和容量策略归 `workbench/executor.zig`，AgentCore 只持有最小调度 capability；
-- AgentCore Runtime/Session、callback quiescence、cancel/close/shutdown 语义仍集中在 `agentcore/session.zig`，后续只按已验证责任继续拆分；
+- Agent Runtime/Session、callback quiescence、cancel/close/shutdown 语义仍集中在 `agent/session.zig`，后续只按已验证责任继续拆分；
 - `workbench/projection.zig` 仍同时承担产品投影、Session view 和 snapshot writer，后续任务再提取；
 - Renderer Host 合同已集中到 `frontend/src/host/`；应用 composition 已进入 `frontend/src/app/`，已落地的 Workspace navigation、Search、Timeline、question/permission Approvals、Composer draft 和 Task activity 进入各自 `frontend/src/features/`，`workbench/` 只保留 projection store 与 selector。尚未形成真实产品能力的 Outputs、持久权限管理和 Settings 不创建空模块。
 
-评审方提出的 `main.zig + app.zig + bridge.zig + workbench.zig + agentcore.zig` 顶层结构总体合理，优于先建立多层 `host/` 空目录。它符合 Zig 以 module root 形成明确 surface 的方式，也保留当前 `build.zig` 的独立注入和测试能力。
+当前 Zig 顶层固定为 `main.zig + app.zig + agent.zig + workbench.zig + bridge.zig`。`agent/` 表达 MetaWork 自己拥有的执行子系统；`AgentCore` 只指 metacodes 构建的外部 bundle。完整后续状态机与迁移顺序见 [架构调整实施方案](architecture-adjustment-plan.md)。
 
 采纳时做六项收敛：
 
@@ -92,8 +92,8 @@ metawork/
 │   ├── bridge/
 │   ├── workbench.zig
 │   ├── workbench/
-│   ├── agentcore.zig
-│   └── agentcore/
+│   ├── agent.zig
+│   └── agent/
 ├── build_support/
 ├── scripts/
 ├── spikes/
@@ -259,7 +259,7 @@ flowchart LR
 
 ## 7. Zig `src/` 目录
 
-当前顶层 module root、App、Bridge transport、Workspace grant 和 Workbench executor 已完成首轮拆分；`agentcore/session.zig` 与 `workbench/projection.zig` 仍保留尚未形成独立不变量的代码，后续按 lifecycle 测试保护逐步提取，不为匹配目录树制造空模块。
+当前四个 named module root、App、Bridge transport、Workspace grant 和 Workbench executor 已完成首轮拆分；`agent/session.zig` 与 `workbench/projection.zig` 仍保留尚未形成独立不变量的代码，后续按 lifecycle 测试保护逐步提取，不为匹配目录树制造空模块。
 
 Zig 目标结构采用少量顶层 module entrypoint，而不是先建立多层 `host/` 空目录：
 
@@ -286,8 +286,8 @@ src/
 │   ├── workspaces.zig
 │   └── permissions.zig
 │
-├── agentcore.zig
-└── agentcore/
+├── agent.zig
+└── agent/
     ├── runtime.zig
     ├── session_handle.zig
     ├── callbacks.zig
@@ -297,8 +297,8 @@ src/
 
 职责：
 
-- `main.zig`：进程 composition root，只构造 AgentCore、Workbench、Bridge/App 状态并调用 Native SDK runner；测试移回对应模块；
-- `app.zig`：定义 `native_sdk.App`、source/start/event/stop callback 和 Runtime 引用，不接管 Native SDK 自己拥有的 Runtime 构造；
+- `main.zig`：只导入 named `metawork_app` 并调用 `app.run()`；
+- `app.zig`：composition root，定义 `native_sdk.App` callbacks，明确区分 `native_runtime` 与 `agent_runtime`；
 - `bridge.zig`：Renderer Bridge 的最小公开入口，显式导出 command/policy/handler 所需类型，不使用 `usingnamespace` 倾倒全部内部符号；
 - `bridge/commands.zig`：公开领域 command 名称和 payload 上限；
 - `bridge/policy.zig`：release/development/automation origin、command 和 builtin policy；
@@ -313,13 +313,13 @@ src/
 - `workbench/snapshot_writer.zig`：把 canonical projection 序列化为 bounded snapshot；
 - `workbench/workspaces.zig`：Workspace identity、registry 和与 Task 的归属关系；
 - `workbench/permissions.zig`：Host-owned 持久权限规则、匹配、撤销和审计；规则与存储真的形成独立不变量后再拆子目录；
-- `agentcore.zig`：MetaWork 使用 bundle SDK 的最小 module entrypoint，不镜像 bundle types、code 或 binary facade；
-- `agentcore/runtime.zig` 和 `session_handle.zig`：直接拥有 SDK Runtime/Session handle、Conversation、一次已获准的同步 run 调用和资源释放；不拥有产品队列；
-- `agentcore/callbacks.zig`、`event_sink.zig` 和 `event_pump.zig`：callback copy、同步 UI wait、事件所有权、backpressure 和 wake。
+- `agent.zig`：MetaWork Agent 执行子系统的最小 module entrypoint，不镜像 bundle types、code 或 binary facade；
+- `agent/runtime.zig`、`session.zig` 和 `run.zig`：目标上直接拥有 SDK Runtime/Session handle、Conversation、同步 run 调用与收口；不拥有产品队列；
+- `agent/callbacks.zig`、`event_sink.zig` 和 `event_pump.zig`：callback copy、同步 UI wait、事件所有权、backpressure 和 notification。尚未形成独立不变量的代码暂留 `agent/session.zig`。
 
-Run phase、last outcome、HostCause 和 StopReason 产品映射只归 `workbench/tasks.zig` 所有；`agentcore/session_handle.zig` 只返回 bundle SDK 已校验的 typed result。若低层开始缓存产品状态或高层开始操作 raw handle，依赖边界已经被破坏。
+目标模型中 Run phase、产品 outcome 和 StopReason 映射只归 `workbench/tasks.zig`；`agent/` 只返回 bundle SDK 已校验的 typed terminal facts。当前 `HostCause` 与 Scheduler 倒挂仍是待迁移现状，不因目录改名而获准成为终态。
 
-当前 `agentcore/session.zig` 已验证的 shutdown、callback quiescence 和 first-writer-wins cause，以及 `workbench/executor.zig` 的 bounded scheduling 行为，只能按责任搬迁，不能在拆目录时重写语义。
+当前 `agent/session.zig` 已验证的 shutdown、callback quiescence 和 first-writer-wins cause，以及 `workbench/executor.zig` 的 bounded scheduling 行为，只能按正式迁移阶段改写，不能与纯路径迁移混成一次不可审查的变化。
 
 如果某个目录只有一个很小文件且没有独立不变量，应先保留单文件，避免为了匹配目标树制造空壳模块。
 
@@ -328,30 +328,28 @@ Run phase、last outcome、HostCause 和 StopReason 产品映射只归 `workbenc
 ```mermaid
 flowchart TB
     MAIN["main.zig"] --> APP["app.zig"]
-    MAIN --> BRIDGE["bridge.zig"]
-    MAIN --> WB["workbench.zig"]
-    MAIN --> CORE["agentcore.zig"]
+    APP --> AGENT["agent.zig"]
     APP --> NATIVE["Native SDK"]
-    APP --> BRIDGE
-    APP --> WB
+    APP --> BRIDGE["bridge.zig"]
+    APP --> WB["workbench.zig"]
     BRIDGE --> NATIVE
     BRIDGE --> WB
-    WB --> CORE
-    CORE --> SDK["metacodes bundle SDK"]
-    CORE --> PUMP["callbacks / event pump"]
+    WB --> AGENT
+    AGENT --> SDK["metacodes bundle SDK"]
+    AGENT --> PUMP["callbacks / event pump"]
 ```
 
 禁止方向：
 
 - bundle SDK 不反向依赖 MetaWork；
-- `agentcore/` 不依赖 `workbench/`、`bridge/` 或 `app.zig`；callback 只写入自身 sink/pump；
+- `agent/` 不依赖 `workbench/`、`bridge/` 或 `app.zig`；callback 只写入自身 sink/pump；
 - Workbench projection 不解析 Provider SSE、终端字符流或 AgentCore raw JSON；
 - permission store 不由 Renderer 写入；
 - bridge handler 不绕过 Workbench 直接操作 AgentCore handle；
 - app 层不复制 Host 产品状态；
 - 不建立通用 adapter 只为让 Native SDK 或 AgentCore 看起来可替换。
 
-`bridge.zig`、`workbench.zig` 和 `agentcore.zig` 作为 build module root 可以保留现有测试注入和独立 build graph；它们必须只暴露实际消费者需要的表面，不能变成机械 re-export 文件。
+`app.zig`、`bridge.zig`、`workbench.zig` 和 `agent.zig` 由 `build.zig` 注册为 named modules；边界由 build graph 与 `scripts/architecture-boundaries.test.mjs` 共同检查，不能只靠目录文档。
 
 ## 9. 状态与类型所有权
 
@@ -393,7 +391,7 @@ Zig 文件和符号遵循现有 `snake_case` 与 Zig 风格。
 3. 建立 app shell、三栏 layout 和 token；
 4. 按 Workspace、Task、timeline、approval、output 顺序提取 feature；
 5. 接入 en-US/zh-CN message catalog 后再扩展新文案；
-6. 先建立 `bridge.zig`、`workbench.zig` 和 `agentcore.zig` module root，不改变现有行为；
+6. 建立 named `app.zig`、`bridge.zig`、`workbench.zig` 和 `agent.zig` module root，不改变现有行为；
 7. 从 `src/main.zig` 提取 `app.zig`、Bridge policy/handler、Workspace grant 和 snapshot delivery；
 8. 按现有 `lifecycle.zig` 的真实责任拆出 Workbench executor/Task policy 与 AgentCore session handle/callback，保持所有 lifecycle 测试不变；
 9. 从现有 Workbench 投影中提取 tasks、projection 和 snapshot writer；
@@ -404,9 +402,9 @@ Zig 文件和符号遵循现有 `snake_case` 与 Zig 风格。
 
 目录调整只有同时满足以下条件才算完成：
 
-- `main.zig` 只做 composition 和 runner 启动，不再包含领域 handler 或大段测试；
+- `main.zig` 只调用 `app.run()`，不包含 composition、领域 handler 或大段测试；
 - 顶层 module root 只显式暴露实际消费者需要的类型和函数；
-- `agentcore/` 不依赖 `workbench/`、`bridge/` 或 `app.zig`；
+- `agent/` 不依赖 `workbench/`、`bridge/` 或 `app.zig`；
 - Bridge handler 不能绕过 Workbench 直接操作 AgentCore handle；
 - Renderer component 不直接访问 `window.zero`；
 - Renderer 对所有 Host payload 做 runtime decode，并由真实 Zig serializer fixture 验证跨语言合同；
