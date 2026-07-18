@@ -5,16 +5,16 @@
 
 ## 1. 产品定义
 
-MetaWork 是一款桌面端 **Agent Workbench**。它帮助用户在本地工作区中创建和管理 Agent 会话，观察 Agent 推理后的可见工作过程，处理工具审批，并查看最终结果。
+MetaWork 是一款桌面端 **Agent Workbench**。它帮助用户在本地工作区中创建和管理 Task，观察 Agent 推理后的可见工作过程，处理工具审批，并查看最终结果。
 
 MetaWork 的核心不是模拟终端，而是把 Agent 工作表达为结构化的产品界面：消息、工具卡片、审批、任务状态、文件变更、错误和工作产物。
 
 ## 2. 产品目标
 
 - 提供清晰、稳定的桌面 Agent 工作入口；
-- 支持一个或多个工作区及其会话；
+- 支持一个或多个工作区及其 Task；
 - 以结构化 UI 展示 Agent 文本、工具调用、进度、审批和结果；
-- 允许多个会话独立运行和切换；
+- 允许多个 Task 独立运行和切换；
 - 在取消、刷新、关闭和异常后给出明确且可信的状态；
 - 为未来的后台任务、持久化恢复、通知和多 Agent 协作保留合理产品边界。
 
@@ -35,11 +35,11 @@ MetaWork 当前不定义为：
 
 ### Workspace
 
-代表 Agent 工作所针对的本地目录和权限范围。Workspace 最终应成为文件访问、工具执行和会话归属的安全边界。当前同步 baseline 只在临时或用户明确 trusted 的 Workspace 中验证，不能据此宣称 strict Workspace security 已完成。
+代表 Agent 工作所针对的本地目录和权限范围。Workspace 最终应成为文件访问、工具执行和 Task 归属的安全边界。当前同步 baseline 只在临时或用户明确 trusted 的 Workspace 中验证，不能据此宣称 strict Workspace security 已完成。
 
-### Session
+### Task 与内部 Agent Session
 
-代表一条可持续的 Agent 对话和工作上下文。Session 归属于 Workspace，拥有自己的消息、运行状态和当前进程内的 Conversation。跨进程持久化恢复属于后续能力。
+Task 是用户可持续补充的产品工作上下文，归属于 Workspace，拥有消息、运行状态和 Run 历史。每个 live Task 在当前进程中持有一个内部 Agent Session 与 Conversation；Session 是执行生命周期术语，不是第二个产品对象或 Renderer 身份。跨进程持久化恢复属于后续能力。
 
 ### Turn / Run
 
@@ -64,17 +64,18 @@ Turn 是用户提交的一次交互；Run 是 AgentCore 为该交互进行的一
 - 用户可以选择并打开本地 Workspace；
 - Host 校验并保存 Workspace 的规范路径；
 - 文件和工具能力最终必须受 Workspace 与显式权限约束；
-- UI 能显示当前会话所属 Workspace；
+- UI 能显示当前 Task 所属 Workspace；
 - strict Workspace security 未验证前，产品必须明确限制使用范围，不能制造虚假的安全承诺。
 
-### 5.2 会话
+### 5.2 Task
 
-- 用户可以在 Workspace 中创建、切换和关闭 Session；
-- `Session` 是内部生命周期术语，产品界面统一显示为 `Task / 任务`；
-- 多个 Session 可以同时存在；
-- 后台 Session 的运行状态不能因 UI 切换而丢失；
-- 每条事件、审批和工具结果必须路由到正确 Session；
-- 每个 Session 至多一个 non-terminal Run，包括 executor 中的 `queued` Run；当前 Run 结束前 Host 拒绝第二次提交，Renderer 只能保留未提交草稿。
+- 用户可以在 Workspace 中创建、切换和关闭 Task；
+- 多个 Task 可以同时存在；
+- 后台 Task 的运行状态不能因 UI 切换而丢失；
+- 每条事件、审批和工具结果必须路由到正确 Task/Run；
+- 每个 Task 至多一个 non-terminal Run，包括 executor 中的 `queued` Run；当前 Run 结束前 Workbench 拒绝第二次提交，Renderer 只能保留未提交草稿；
+- Renderer 产品合同使用 schema v5：命令统一为 `metawork.tasks.*`，payload/result 使用 `taskId`，snapshot 根集合使用 `tasks`，应用关停 cause 使用 `app_shutdown`；不接受或双写 schema v4 的 `sessions.*`、`sessionId`、`sessions`、`host_shutdown` 别名；
+- 内部 Agent/Gate 原始事件可以使用 Session route identity，但该身份不得进入产品 snapshot，也不与 Task 建立双 ID 体系。
 
 ### 5.3 Agent 交互
 
@@ -89,8 +90,8 @@ Turn 是用户提交的一次交互；Run 是 AgentCore 为该交互进行的一
 
 - 工具 permission 默认拒绝，只有明确授权才允许执行；
 - 用户可以回答 Agent 问题；计划批准或拒绝只有在 AgentCore 发布 typed control capability 后才显示；
-- 审批和回答必须绑定 Session、Run 和请求标识，拒绝过期或重复响应；
-- 同步等待必须支持 deadline、用户取消、Session close 和 Host shutdown 唤醒；
+- 审批和回答必须绑定 Task、Run 和请求标识，拒绝过期或重复响应；
+- 同步等待必须支持 deadline、用户取消、Task close 和 App shutdown 唤醒；
 - 同步等待区间发生 Host/Core crash 后，Run 标记 `interrupted`，工具不得自动执行；
 - 目标产品支持用户主动创建和撤销 Host-owned 持久权限规则，但 UI 只能在 Host 声明当前请求可形成安全、范围明确的规则时显示 `Always allow`；
 - 持久规则必须绑定稳定 Workspace identity、tool identity 与版本、operation 和规范化资源约束，并定义 Workspace、tool、脚本内容或安全能力变化时的失效规则；
@@ -106,12 +107,12 @@ Turn 是用户提交的一次交互；Run 是 AgentCore 为该交互进行的一
 
 ### 5.6 状态与恢复
 
-- 用户消息、已完成 assistant 消息、工具结果、审批决策和关键 Run 状态应形成可靠状态边界；Run admission 必须先建立稳定、带 generation 的 Workbench Run record，terminal payload 一经发布不可变，Session 关闭或销毁后历史仍可独立生成 snapshot；
+- 用户消息、已完成 assistant 消息、工具结果、审批决策和关键 Run 状态应形成可靠状态边界；Run admission 必须先建立稳定、带 generation 的 Workbench Run record，terminal payload 一经发布不可变，内部 Agent Session 关闭或销毁后 Task 历史仍可独立生成 snapshot；
 - 当前 baseline 的 Renderer reload 只能从仍存活的 Host 恢复视图；
 - Host 或 AgentCore 进程退出时，当前同步 Run 标记 `interrupted`，不得伪装完成；
 - 崩溃后不得自动重放可能产生副作用的工具；
 - 可 checkpoint 的 AgentCore suspend/resume 和跨进程 Conversation 恢复属于后续 capability；
-- 成本预算、轮数上限或工具循环熔断后，Session 进入等待用户状态，只有用户明确继续后才创建新 Run。
+- 成本预算、轮数上限或工具循环熔断后，Task 进入等待用户状态，只有用户明确继续后才创建新 Run。
 
 ### 5.7 桌面能力
 
@@ -125,7 +126,7 @@ Turn 是用户提交的一次交互；Run 是 AgentCore 为该交互进行的一
 - 首个正式版本采用单主窗口；多个 Task 可以后台运行，切换 Workspace 或 Task 不停止执行；
 - Renderer reload、断开连接以及 Bridge revision/snapshot/event delivery failure 默认只影响视图同步和重连，不得终止后台 Agent Run；只有 Workbench 根据 canonical 产品状态作出的显式 termination 决策才能请求结束 Run；
 - 左栏只展开当前 Workspace 的 Task，Workspace 切换器必须汇总其他 Workspace 的运行、待处理和失败状态，不能让后台请求只依赖系统通知；
-- Task 是可持续补充、归档和删除的产品对象；Task lifecycle、当前 Run phase 和最近一次 Run outcome 是三类独立状态，Renderer 只能从 Host projection 派生展示标签；
+- Task 是可持续补充、归档和删除的产品对象；Task lifecycle、当前 Run phase 和最近一次 Run outcome 是三类独立状态，Renderer 只能从 Workbench projection 派生展示标签；
 - 中间区域以用户指令、Agent 回复、工具活动、可用审批和结果构成可追溯时间线，不展示 raw AgentCore event 或 chain-of-thought；
 - Run 执行期间的新输入不得暗示可以修改当前 Run；首版只保存 Renderer 草稿，等待当前 Run terminal 后由用户明确发送，不自动创建或启动下一次 Run；
 - `Files changed` 表示实际文件变更集合，`Outputs` 表示用户关心的交付结果，两者不得用“新建文件”自动等同；当前 ABI v1 未提供这两类 typed event 时，相关模块必须隐藏；
@@ -139,7 +140,7 @@ Turn 是用户提交的一次交互；Run 是 AgentCore 为该交互进行的一
 
 - Renderer 按不可信调用方处理；
 - Host 命令默认拒绝，只开放白名单；
-- 校验来源、payload、Workspace、Session 和权限；
+- 校验来源、payload、Workspace、Task/Run 归属和权限；
 - Provider credential 不得进入 Renderer、Bridge、日志、事件或视图 snapshot；
 - Host 必须在形成产品 projection 前移除已知 Host-held credential 和 schema 标记的 secret 字段，并对命令与工具输出设置明确上限和 truncation 状态；不得把秘密过滤责任推给 Renderer；
 - 文件访问、进程启动和高风险工具最终必须经过能力控制；
@@ -149,8 +150,8 @@ Turn 是用户提交的一次交互；Run 是 AgentCore 为该交互进行的一
 
 - 高频事件不能造成无限内存增长；
 - 控制事件、工具结果和审批不能静默丢失；
-- 单个 Session 的事件不得串入其他 Session；
-- Session close 和 Host shutdown 必须等待 Run 与 callback 安全退出；
+- 单个 Task 的事件不得串入其他 Task；
+- Task close 和 App shutdown 必须等待 Run 与 callback 安全退出；
 - 进程模型必须通过故障注入和恢复数据选择。
 
 ### 性能
@@ -158,7 +159,7 @@ Turn 是用户提交的一次交互；Run 是 AgentCore 为该交互进行的一
 - 文本流应保持可感知的实时性；
 - 高频增量允许批量合并，但不得破坏最终内容；
 - 大型工具结果应通过有界对象或文件引用展示，避免无限制穿过 WebView Bridge；
-- 多会话运行时 UI 应保持响应；
+- 多 Task 运行时 UI 应保持响应；
 - executor、事件泵和 Bridge 必须同时设置 count、byte 和时间边界。
 
 ### 平台
@@ -175,7 +176,7 @@ Turn 是用户提交的一次交互；Run 是 AgentCore 为该交互进行的一
 当前首先交付：
 
 ```text
-临时或 trusted Workspace → Session → 用户输入 → 同步 Agent Run
+临时或 trusted Workspace → Task（持有内部 Agent Session）→ 用户输入 → 同步 Agent Run
 → 文本流 → built-in Read/Bash/Edit → 同步 permission / question
 → 工具结果 → 最终回复 → 取消/关闭 → Renderer reload 视图重建
 ```

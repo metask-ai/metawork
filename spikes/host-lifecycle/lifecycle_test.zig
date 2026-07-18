@@ -1605,18 +1605,18 @@ test "Gate 6 Workbench closes off-thread and exposes retryable close failure" {
         deinitHost(host);
     }
     var workbench = try host_workbench.Workbench.init(std.testing.allocator, host, .{
-        .max_sessions = 2,
-        .max_runs_per_session = 2,
+        .max_tasks = 2,
+        .max_runs_per_task = 2,
         .max_tools_per_run = 2,
     });
     defer workbench.deinit();
 
-    const session_id = try workbench.createSession(workbenchSessionOptions());
+    const task_id = try workbench.createTask(workbenchSessionOptions());
     fake_core.failNextSessionDestroy();
-    try workbench.closeSession(session_id);
+    try workbench.closeTask(task_id);
     try waitWorkbenchSnapshot(&workbench, "\"closeFailed\":true");
 
-    try workbench.closeSession(session_id);
+    try workbench.closeTask(task_id);
     try waitWorkbenchSnapshot(&workbench, "\"lifecycle\":\"closed\"");
     fake_core.lock();
     const destroyed = fake_core.session_destroyed;
@@ -1633,15 +1633,15 @@ test "Gate 6 Workbench close cancels a queued Run without blocking the caller" {
         deinitHost(host);
     }
     var workbench = try host_workbench.Workbench.init(std.testing.allocator, host, .{
-        .max_sessions = 1,
-        .max_runs_per_session = 1,
+        .max_tasks = 1,
+        .max_runs_per_task = 1,
         .max_tools_per_run = 1,
     });
     defer workbench.deinit();
 
-    const session_id = try workbench.createSession(workbenchSessionOptions());
-    _ = try workbench.submit(session_id, "close this run");
-    try workbench.closeSession(session_id);
+    const task_id = try workbench.createTask(workbenchSessionOptions());
+    _ = try workbench.runTask(task_id, "close this run");
+    try workbench.closeTask(task_id);
     try waitWorkbenchSnapshot(&workbench, "\"lifecycle\":\"closed\"");
     fake_core.lock();
     const abort_calls = fake_core.abort_calls;
@@ -1661,21 +1661,21 @@ test "Workbench cancel of a completed Run is an idempotent no-op" {
     var workbench = try host_workbench.Workbench.init(std.testing.allocator, host, .{
         .worker_count = 1,
         .queue_capacity = 1,
-        .max_sessions = 1,
-        .max_runs_per_session = 1,
+        .max_tasks = 1,
+        .max_runs_per_task = 1,
         .max_tools_per_run = 1,
     });
     defer workbench.deinit();
 
-    const session_id = try workbench.createSession(workbenchSessionOptions());
-    const run_id = try workbench.submit(session_id, "finish before cancel arrives");
+    const task_id = try workbench.createTask(workbenchSessionOptions());
+    const run_id = try workbench.runTask(task_id, "finish before cancel arrives");
     try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
     const revision = workbench.currentRevision();
-    try workbench.cancel(session_id, run_id);
+    try workbench.cancel(task_id, run_id);
     try std.testing.expectEqual(revision, workbench.currentRevision());
     try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
 
-    try workbench.closeSession(session_id);
+    try workbench.closeTask(task_id);
     try waitWorkbenchSnapshot(&workbench, "\"lifecycle\":\"closed\"");
 }
 
@@ -1690,14 +1690,14 @@ test "Workbench shutdown terminates a waiting UI Run before joining workers" {
     var workbench = try host_workbench.Workbench.init(std.testing.allocator, host, .{
         .worker_count = 1,
         .queue_capacity = 2,
-        .max_sessions = 1,
-        .max_runs_per_session = 1,
+        .max_tasks = 1,
+        .max_runs_per_task = 1,
         .max_tools_per_run = 1,
     });
     defer workbench.deinit();
 
-    const session_id = try workbench.createSession(workbenchSessionOptions());
-    _ = try workbench.submit(session_id, "wait for shutdown");
+    const task_id = try workbench.createTask(workbenchSessionOptions());
+    _ = try workbench.runTask(task_id, "wait for shutdown");
     try waitWorkbenchSnapshot(&workbench, "\"currentRunPhase\":\"waiting_ui\"");
     workbench.shutdownExecutor();
     try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"interrupted\"");

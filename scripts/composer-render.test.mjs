@@ -106,7 +106,7 @@ test("only non-composable Task states disable the Composer", () => {
   assert.match(markup, /Restore this task to continue/);
 });
 
-test("a poisoned Session explains why continuation is unavailable", () => {
+test("a poisoned Task explains why continuation is unavailable", () => {
   const markup = render({
     hasTask: true,
     unavailable: true,

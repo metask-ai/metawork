@@ -92,7 +92,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     workbench_contract_fixture.addOption(
         []const u8,
         "snapshot",
-        @embedFile("frontend/src/host/__fixtures__/workbench-snapshot-v4.fixture"),
+        @embedFile("frontend/src/host/__fixtures__/workbench-snapshot-v5.fixture"),
     );
     projection.addOptions("workbench_contract_fixture", workbench_contract_fixture);
     const workbench = b.createModule(.{

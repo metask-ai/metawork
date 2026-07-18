@@ -25,9 +25,9 @@
 
 - `src/main.zig` 只保留进程入口，Native SDK App 与 composition 已移入 `src/app.zig`；
 - Bridge command、policy、payload decoder、revision/snapshot delivery 和一次性 Workspace grant 已形成独立模块；
-- bounded executor 的队列、worker 和容量策略归 `workbench/executor.zig`，AgentCore 只持有最小调度 capability；
+- bounded executor 的队列、worker、容量策略和 shutdown 归 `workbench/executor.zig`；Agent 不持有调度 capability，也不反向 enqueue；
 - Agent Runtime/Session、callback quiescence、cancel/close/shutdown 语义仍集中在 `agent/session.zig`，后续只按已验证责任继续拆分；
-- `workbench/projection.zig` 仍同时承担产品投影、Session view 和 snapshot writer，后续任务再提取；
+- `workbench/projection.zig` 仍同时承担产品 Task view 和 snapshot writer，后续任务再提取；
 - Workbench admission 已在 `workbench/projection.zig` 建立 stable Run record、generation、`RunRef`、write-once terminal publication 与 `delete_pending`，并独占 Executor/queue/workers；已开始执行的 Run 由 Agent immutable `TerminalResult` 收口，queued-before-execute 由 Workbench 生成产品结果；
 - Renderer Host 合同已集中到 `frontend/src/host/`；应用 composition 已进入 `frontend/src/app/`，已落地的 Workspace navigation、Search、Timeline、question/permission Approvals、Composer draft 和 Task activity 进入各自 `frontend/src/features/`，`workbench/` 只保留 projection store 与 selector。尚未形成真实产品能力的 Outputs、持久权限管理和 Settings 不创建空模块。
 
@@ -41,6 +41,8 @@
 4. 正式产品只保留 Workbench revision notification + bounded snapshot 数据面；raw batch/object/ACK 只留在隔离 transport fixture；
 5. bounded executor 和排队策略属于 Workbench/Host lifecycle，不下沉到 AgentCore 集成层；
 6. 产品 Task 与 bundle Session handle 使用不同命名，不靠注释解释两个 `session` 模块为什么没有重复所有权。
+
+产品边界已统一为 schema v5：Bridge/Renderer command 使用 `metawork.tasks.*`，产品 payload/result 使用 `taskId`，snapshot 根集合使用 `tasks`。内部 Agent Session route identity 只存在于 Agent 与隔离 transport fixture，不建立第二套可持久化产品 ID，也不提供 schema v4 兼容别名。
 
 `app.zig` 定义 Native SDK App 与 callback，但 Native SDK runner 仍然拥有 Runtime 的构造和驱动，MetaWork 不再包一层替代 Runtime。
 
@@ -303,7 +305,7 @@ src/
 - `bridge.zig`：Renderer Bridge 的最小公开入口，显式导出 command/policy/handler 所需类型，不使用 `usingnamespace` 倾倒全部内部符号；
 - `bridge/commands.zig`：公开领域 command 名称和 payload 上限；
 - `bridge/policy.zig`：release/development/automation origin、command 和 builtin policy；
-- `bridge/handlers.zig`：payload 校验、Session/Run/request 归属校验和领域调用；
+- `bridge/handlers.zig`：payload 校验、Task/Run/request 归属校验和领域调用；
 - `bridge/revision_delivery.zig`：发送有界、可重试的 Workbench revision notification；不传输 AgentCore raw event、batch/object/ACK 或通用大对象；
 - `bridge/snapshot_delivery.zig`：snapshot id、window/generation 绑定、分块读取和 transport storage；不负责生成 Workbench JSON；
 - `bridge/workspace_grant.zig`：由原生目录选择产生、绑定 window/source、一次性消费的 Renderer capability；它不是持久 Workspace registry；

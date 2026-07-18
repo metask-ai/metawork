@@ -30,10 +30,10 @@ const EventDisconnect = renderer_bridge.handlers.EventDisconnect;
 const EventAck = renderer_bridge.handlers.EventAck;
 const EventFetch = renderer_bridge.handlers.EventFetch;
 const WorkbenchSnapshotChunk = renderer_bridge.handlers.WorkbenchSnapshotChunk;
-const SessionCreate = renderer_bridge.handlers.SessionCreate;
-const SessionRun = renderer_bridge.handlers.SessionRun;
-const SessionIdentity = renderer_bridge.handlers.SessionIdentity;
-const SessionClose = renderer_bridge.handlers.SessionClose;
+const TaskCreate = renderer_bridge.handlers.TaskCreate;
+const TaskRun = renderer_bridge.handlers.TaskRun;
+const TaskIdentity = renderer_bridge.handlers.TaskIdentity;
+const TaskClose = renderer_bridge.handlers.TaskClose;
 const TaskRename = renderer_bridge.handlers.TaskRename;
 const TaskArchive = renderer_bridge.handlers.TaskArchive;
 const TaskDelete = renderer_bridge.handlers.TaskDelete;
@@ -215,19 +215,19 @@ const App = struct {
             .invoke_fn = fetchWorkbenchSnapshotChunk,
         };
         self.handlers[10] = .{
-            .name = renderer_bridge.commands.create_session,
+            .name = renderer_bridge.commands.create_task,
             .context = self,
-            .invoke_fn = createSession,
+            .invoke_fn = createTask,
         };
         self.handlers[11] = .{
             .name = renderer_bridge.commands.run,
             .context = self,
-            .invoke_fn = runSession,
+            .invoke_fn = runTask,
         };
         self.handlers[12] = .{
             .name = renderer_bridge.commands.cancel,
             .context = self,
-            .invoke_fn = cancelSession,
+            .invoke_fn = cancelTask,
         };
         self.handlers[13] = .{
             .name = renderer_bridge.commands.respond_ui,
@@ -235,9 +235,9 @@ const App = struct {
             .invoke_fn = respondUi,
         };
         self.handlers[14] = .{
-            .name = renderer_bridge.commands.close_session,
+            .name = renderer_bridge.commands.close_task,
             .context = self,
-            .invoke_fn = closeSession,
+            .invoke_fn = closeTask,
         };
         self.handlers[15] = .{
             .name = renderer_bridge.commands.rename_task,
@@ -560,12 +560,12 @@ const App = struct {
         return writer.buffered();
     }
 
-    fn createSession(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+    fn createTask(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
         const self: *@This() = @ptrCast(@alignCast(context));
         var callback = try self.enterBridgeCallback();
         defer callback.deinit();
         try self.requireEventWindow(invocation.source.window_id);
-        var parsed = try parsePayload(SessionCreate, invocation.request.payload);
+        var parsed = try parsePayload(TaskCreate, invocation.request.payload);
         defer parsed.deinit();
         const request = parsed.value;
         var granted_path_storage: [workspace_path_capacity]u8 = undefined;
@@ -599,7 +599,7 @@ const App = struct {
             return error.UnsupportedProvider;
         const base_url = self.env_map.get("METAWORK_PROVIDER_BASE_URL") orelse "";
         const workbench = self.workbench orelse return error.RuntimeUnavailable;
-        const session_id = try workbench.createSession(.{
+        const task_id = try workbench.createTask(.{
             .provider = provider,
             .permission_mode = .default,
             .shell_policy = .unrestricted,
@@ -612,35 +612,35 @@ const App = struct {
             },
         });
         self.notifyCommitted();
-        return std.fmt.bufPrint(output, "{{\"sessionId\":\"{d}\"}}", .{session_id});
+        return std.fmt.bufPrint(output, "{{\"taskId\":\"{d}\"}}", .{task_id});
     }
 
-    fn runSession(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+    fn runTask(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
         const self: *@This() = @ptrCast(@alignCast(context));
         var callback = try self.enterBridgeCallback();
         defer callback.deinit();
         try self.requireEventWindow(invocation.source.window_id);
-        var parsed = try parsePayloadWithLimit(SessionRun, invocation.request.payload, 128 * 1024);
+        var parsed = try parsePayloadWithLimit(TaskRun, invocation.request.payload, 128 * 1024);
         defer parsed.deinit();
-        const session_id = try parseWireId(parsed.value.sessionId);
+        const task_id = try parseWireId(parsed.value.taskId);
         if (parsed.value.prompt.len == 0) return error.EmptyPrompt;
-        const run_id = try (self.workbench orelse return error.RuntimeUnavailable).submit(session_id, parsed.value.prompt);
+        const run_id = try (self.workbench orelse return error.RuntimeUnavailable).runTask(task_id, parsed.value.prompt);
         self.notifyCommitted();
-        return std.fmt.bufPrint(output, "{{\"sessionId\":\"{d}\",\"runId\":\"{d}\"}}", .{ session_id, run_id });
+        return std.fmt.bufPrint(output, "{{\"taskId\":\"{d}\",\"runId\":\"{d}\"}}", .{ task_id, run_id });
     }
 
-    fn cancelSession(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+    fn cancelTask(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
         const self: *@This() = @ptrCast(@alignCast(context));
         var callback = try self.enterBridgeCallback();
         defer callback.deinit();
         try self.requireEventWindow(invocation.source.window_id);
-        var parsed = try parsePayload(SessionIdentity, invocation.request.payload);
+        var parsed = try parsePayload(TaskIdentity, invocation.request.payload);
         defer parsed.deinit();
-        const session_id = try parseWireId(parsed.value.sessionId);
+        const task_id = try parseWireId(parsed.value.taskId);
         const run_id = try parseWireId(parsed.value.runId);
-        try (self.workbench orelse return error.RuntimeUnavailable).cancel(session_id, run_id);
+        try (self.workbench orelse return error.RuntimeUnavailable).cancel(task_id, run_id);
         self.notifyCommitted();
-        return std.fmt.bufPrint(output, "{{\"sessionId\":\"{d}\",\"runId\":\"{d}\",\"cancelRequested\":true}}", .{ session_id, run_id });
+        return std.fmt.bufPrint(output, "{{\"taskId\":\"{d}\",\"runId\":\"{d}\",\"cancelRequested\":true}}", .{ task_id, run_id });
     }
 
     fn respondUi(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
@@ -651,7 +651,7 @@ const App = struct {
         var parsed = try parsePayloadWithLimit(UiResponseRequest, invocation.request.payload, 256 * 1024);
         defer parsed.deinit();
         const request = parsed.value;
-        const session_id = try parseWireId(request.sessionId);
+        const task_id = try parseWireId(request.taskId);
         const run_id = try parseWireId(request.runId);
         const request_id = try parseWireId(request.requestId);
         const response: agent.UiResponse = if (std.mem.eql(u8, request.kind, "answers")) answer: {
@@ -669,22 +669,22 @@ const App = struct {
                 .deny_tool_session => .deny_tool_session,
             } };
         } else return error.InvalidUiResponse;
-        try (self.workbench orelse return error.RuntimeUnavailable).respondUi(session_id, run_id, request_id, response);
+        try (self.workbench orelse return error.RuntimeUnavailable).respondUi(task_id, run_id, request_id, response);
         self.notifyCommitted();
-        return std.fmt.bufPrint(output, "{{\"sessionId\":\"{d}\",\"runId\":\"{d}\",\"requestId\":\"{d}\",\"answered\":true}}", .{ session_id, run_id, request_id });
+        return std.fmt.bufPrint(output, "{{\"taskId\":\"{d}\",\"runId\":\"{d}\",\"requestId\":\"{d}\",\"answered\":true}}", .{ task_id, run_id, request_id });
     }
 
-    fn closeSession(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+    fn closeTask(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
         const self: *@This() = @ptrCast(@alignCast(context));
         var callback = try self.enterBridgeCallback();
         defer callback.deinit();
         try self.requireEventWindow(invocation.source.window_id);
-        var parsed = try parsePayload(SessionClose, invocation.request.payload);
+        var parsed = try parsePayload(TaskClose, invocation.request.payload);
         defer parsed.deinit();
-        const session_id = try parseWireId(parsed.value.sessionId);
-        try (self.workbench orelse return error.RuntimeUnavailable).closeSession(session_id);
+        const task_id = try parseWireId(parsed.value.taskId);
+        try (self.workbench orelse return error.RuntimeUnavailable).closeTask(task_id);
         self.notifyCommitted();
-        return std.fmt.bufPrint(output, "{{\"sessionId\":\"{d}\",\"closing\":true}}", .{session_id});
+        return std.fmt.bufPrint(output, "{{\"taskId\":\"{d}\",\"closing\":true}}", .{task_id});
     }
 
     fn renameTask(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
@@ -694,10 +694,10 @@ const App = struct {
         try self.requireEventWindow(invocation.source.window_id);
         var parsed = try parsePayload(TaskRename, invocation.request.payload);
         defer parsed.deinit();
-        const session_id = try parseWireId(parsed.value.sessionId);
-        try (self.workbench orelse return error.RuntimeUnavailable).renameTask(session_id, parsed.value.title);
+        const task_id = try parseWireId(parsed.value.taskId);
+        try (self.workbench orelse return error.RuntimeUnavailable).renameTask(task_id, parsed.value.title);
         self.notifyCommitted();
-        return std.fmt.bufPrint(output, "{{\"sessionId\":\"{d}\",\"renamed\":true}}", .{session_id});
+        return std.fmt.bufPrint(output, "{{\"taskId\":\"{d}\",\"renamed\":true}}", .{task_id});
     }
 
     fn archiveTask(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
@@ -707,10 +707,10 @@ const App = struct {
         try self.requireEventWindow(invocation.source.window_id);
         var parsed = try parsePayload(TaskArchive, invocation.request.payload);
         defer parsed.deinit();
-        const session_id = try parseWireId(parsed.value.sessionId);
-        try (self.workbench orelse return error.RuntimeUnavailable).setTaskArchived(session_id, parsed.value.archived);
+        const task_id = try parseWireId(parsed.value.taskId);
+        try (self.workbench orelse return error.RuntimeUnavailable).setTaskArchived(task_id, parsed.value.archived);
         self.notifyCommitted();
-        return std.fmt.bufPrint(output, "{{\"sessionId\":\"{d}\",\"archived\":{}}}", .{ session_id, parsed.value.archived });
+        return std.fmt.bufPrint(output, "{{\"taskId\":\"{d}\",\"archived\":{}}}", .{ task_id, parsed.value.archived });
     }
 
     fn deleteTask(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
@@ -720,10 +720,10 @@ const App = struct {
         try self.requireEventWindow(invocation.source.window_id);
         var parsed = try parsePayload(TaskDelete, invocation.request.payload);
         defer parsed.deinit();
-        const session_id = try parseWireId(parsed.value.sessionId);
-        try (self.workbench orelse return error.RuntimeUnavailable).deleteTask(session_id);
+        const task_id = try parseWireId(parsed.value.taskId);
+        try (self.workbench orelse return error.RuntimeUnavailable).deleteTask(task_id);
         self.notifyCommitted();
-        return std.fmt.bufPrint(output, "{{\"sessionId\":\"{d}\",\"deleted\":true}}", .{session_id});
+        return std.fmt.bufPrint(output, "{{\"taskId\":\"{d}\",\"deleted\":true}}", .{task_id});
     }
 
     fn emitAgentBatches(self: *@This(), native_runtime: *native_sdk.Runtime, window_id: native_sdk.platform.WindowId) !void {
@@ -1533,15 +1533,15 @@ test "Agent transport payload rejects unknown fields and oversized input" {
         parsePayload(EventDisconnect, &oversized),
     );
 
-    var rename = try parsePayload(TaskRename, "{\"sessionId\":\"7\",\"title\":\"Release audit\"}");
+    var rename = try parsePayload(TaskRename, "{\"taskId\":\"7\",\"title\":\"Release audit\"}");
     defer rename.deinit();
-    try std.testing.expectEqualStrings("7", rename.value.sessionId);
+    try std.testing.expectEqualStrings("7", rename.value.taskId);
     try std.testing.expectEqualStrings("Release audit", rename.value.title);
     try std.testing.expectError(
         error.InvalidBridgePayload,
-        parsePayload(TaskRename, "{\"sessionId\":\"7\",\"title\":\"Release audit\",\"legacy\":true}"),
+        parsePayload(TaskRename, "{\"taskId\":\"7\",\"title\":\"Release audit\",\"legacy\":true}"),
     );
-    var archive = try parsePayload(TaskArchive, "{\"sessionId\":\"7\",\"archived\":true}");
+    var archive = try parsePayload(TaskArchive, "{\"taskId\":\"7\",\"archived\":true}");
     defer archive.deinit();
     try std.testing.expect(archive.value.archived);
 }

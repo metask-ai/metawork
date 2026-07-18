@@ -17,8 +17,8 @@ import {
   uiResponsePhase,
 } from "../frontend/src/features/approvals/response-state.ts";
 
-const requestA = { sessionId: "3", runId: "7", requestId: "11" };
-const requestB = { sessionId: "4", runId: "8", requestId: "12" };
+const requestA = { taskId: "3", runId: "7", requestId: "11" };
+const requestB = { taskId: "4", runId: "8", requestId: "12" };
 
 function pending(identity) {
   return {
@@ -32,9 +32,9 @@ function pending(identity) {
   };
 }
 
-function session(identity, pendingUi = pending(identity)) {
+function task(identity, pendingUi = pending(identity)) {
   return {
-    id: identity.sessionId,
+    id: identity.taskId,
     title: "",
     workspaceRoot: "/repo",
     lifecycle: "open",
@@ -51,8 +51,8 @@ function session(identity, pendingUi = pending(identity)) {
   };
 }
 
-function snapshot(sessions) {
-  return { schemaVersion: 4, revision: "1", sessions };
+function snapshot(tasks) {
+  return { schemaVersion: 5, revision: "1", tasks };
 }
 
 test("UI response state waits for the authoritative snapshot and never reopens an accepted request", () => {
@@ -68,11 +68,11 @@ test("UI response state waits for the authoritative snapshot and never reopens a
   assert.equal(uiResponsePhase(states, requestB), "sending");
   states = observeUiResponseSnapshot(
     states,
-    snapshot([session(requestA), session(requestB)]),
+    snapshot([task(requestA), task(requestB)]),
   );
   assert.equal(uiResponsePhase(states, requestA), "awaiting_snapshot");
 
-  states = observeUiResponseSnapshot(states, snapshot([session(requestB)]));
+  states = observeUiResponseSnapshot(states, snapshot([task(requestB)]));
   assert.equal(uiResponsePhase(states, requestA), "idle");
   assert.equal(uiResponsePhase(states, requestB), "sending");
 });
@@ -85,7 +85,7 @@ test("a resolving snapshot wins races with late command completion", () => {
   assert.equal(failUiResponse(resolved, requestA), resolved);
 });
 
-test("snapshot observation requires the complete Session, Run, and request identity", () => {
+test("snapshot observation requires the complete Task, Run, and request identity", () => {
   const awaiting = acceptUiResponse(
     beginUiResponse(initialUiResponseStates, requestA),
     requestA,
@@ -96,7 +96,7 @@ test("snapshot observation requires the complete Session, Run, and request ident
   };
   const resolved = observeUiResponseSnapshot(
     awaiting,
-    snapshot([session(wrongRun)]),
+    snapshot([task(wrongRun)]),
   );
   assert.equal(uiResponsePhase(resolved, requestA), "idle");
 });

@@ -23,18 +23,18 @@ pub const EventFetch = struct {
     objectId: []const u8,
 };
 pub const WorkbenchSnapshotChunk = struct { snapshotId: []const u8, offset: []const u8 };
-pub const SessionCreate = struct {
+pub const TaskCreate = struct {
     workspaceGrant: ?[]const u8 = null,
     workspaceRoot: ?[]const u8 = null,
 };
-pub const SessionRun = struct { sessionId: []const u8, prompt: []const u8 };
-pub const SessionIdentity = struct { sessionId: []const u8, runId: []const u8 };
-pub const SessionClose = struct { sessionId: []const u8 };
-pub const TaskRename = struct { sessionId: []const u8, title: []const u8 };
-pub const TaskArchive = struct { sessionId: []const u8, archived: bool };
-pub const TaskDelete = struct { sessionId: []const u8 };
+pub const TaskRun = struct { taskId: []const u8, prompt: []const u8 };
+pub const TaskIdentity = struct { taskId: []const u8, runId: []const u8 };
+pub const TaskClose = struct { taskId: []const u8 };
+pub const TaskRename = struct { taskId: []const u8, title: []const u8 };
+pub const TaskArchive = struct { taskId: []const u8, archived: bool };
+pub const TaskDelete = struct { taskId: []const u8 };
 pub const UiResponseRequest = struct {
-    sessionId: []const u8,
+    taskId: []const u8,
     runId: []const u8,
     requestId: []const u8,
     kind: []const u8,

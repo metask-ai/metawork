@@ -205,7 +205,7 @@ export const zhCN: Record<MessageId, string> = {
   "cause.user_cancel": "由你停止",
   "cause.timeout": "已超时",
   "cause.session_close": "任务已关闭",
-  "cause.host_shutdown": "工作台已关闭",
+  "cause.app_shutdown": "工作台已关闭",
   "cause.event_pipeline_failure": "活动传递失败",
   "cause.queue_capacity_failure": "工作台容量已满",
   "cause.ui_pipeline_failure": "回复传递失败",

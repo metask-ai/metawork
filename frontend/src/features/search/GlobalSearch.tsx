@@ -126,8 +126,8 @@ export function GlobalSearch({
               <span className="search-result-copy">
                 <strong>
                   {result.title ||
-                    (result.sessionId
-                      ? t("task.item", { id: result.sessionId })
+                    (result.taskId
+                      ? t("task.item", { id: result.taskId })
                       : result.workspaceRoot)}
                 </strong>
                 <small>{result.detail}</small>

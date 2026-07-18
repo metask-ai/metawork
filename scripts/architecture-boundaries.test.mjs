@@ -218,3 +218,60 @@ test("Agent terminal facts have one immutable handoff and no legacy history latc
   assert.match(workbench, /commitAgentTerminal\(run, &terminal\)/);
   assert.doesNotMatch(workbench, /snapshot\.last_outcome|snapshot\.cause/);
 });
+
+test("product wire contract is atomically on Task schema v5", () => {
+  const zigCommands = read("src/bridge/commands.zig");
+  const rendererCommands = read("frontend/src/host/commands.ts");
+  for (const command of [
+    "create",
+    "run",
+    "cancel",
+    "respondUi",
+    "close",
+    "rename",
+    "archive",
+    "delete",
+  ]) {
+    const wireName = `metawork.tasks.${command}`;
+    assert.ok(zigCommands.includes(wireName));
+    assert.ok(rendererCommands.includes(wireName));
+  }
+  assert.doesNotMatch(zigCommands, /metawork\.sessions\./);
+  assert.doesNotMatch(rendererCommands, /metawork\.sessions\./);
+
+  const projection = read("src/workbench/projection.zig");
+  assert.match(projection, /snapshot_schema_version: u32 = 5/);
+  assert.match(projection, /\\"tasks\\":\[/);
+  assert.match(projection, /pub fn createTask/);
+  assert.match(projection, /pub fn runTask/);
+  assert.doesNotMatch(projection, /host_shutdown|\\"sessions\\":\[/);
+  assert.doesNotMatch(
+    projection,
+    /const SessionView|pub fn submit|max_runs_per_session/,
+  );
+
+  const contracts = read("frontend/src/host/contracts.ts");
+  assert.match(contracts, /WORKBENCH_SCHEMA_VERSION = 5/);
+  assert.match(contracts, /tasks: TaskView\[\]/);
+  assert.match(contracts, /"app_shutdown"/);
+  assert.doesNotMatch(contracts, /host_shutdown|sessions: SessionView/);
+
+  assert.equal(
+    existsSync(
+      new URL(
+        "frontend/src/host/__fixtures__/workbench-snapshot-v5.fixture",
+        root,
+      ),
+    ),
+    true,
+  );
+  assert.equal(
+    existsSync(
+      new URL(
+        "frontend/src/host/__fixtures__/workbench-snapshot-v4.fixture",
+        root,
+      ),
+    ),
+    false,
+  );
+});

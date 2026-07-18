@@ -54,7 +54,7 @@ function run(id, user, assistant, outcome, toolContent = "") {
   };
 }
 
-function session(overrides) {
+function task(overrides) {
   return {
     id: "1",
     title: "Release audit",
@@ -75,26 +75,26 @@ function session(overrides) {
 }
 
 test("workspace navigation aggregates actionable cross-workspace signals without conflating axes", () => {
-  const sessions = [
-    session({ id: "1", currentRunId: "9", currentRunPhase: "running" }),
-    session({
+  const tasks = [
+    task({ id: "1", currentRunId: "9", currentRunPhase: "running" }),
+    task({
       id: "2",
       currentRunId: "10",
       currentRunPhase: "waiting_ui",
     }),
-    session({
+    task({
       id: "3",
       workspaceRoot: "/repo/beta",
       lastRunOutcome: "failed",
     }),
-    session({
+    task({
       id: "4",
       workspaceRoot: "/repo/beta",
       archived: true,
       lastRunOutcome: "failed",
     }),
   ];
-  assert.deepEqual(workspaceSummaries({ sessions }), [
+  assert.deepEqual(workspaceSummaries({ tasks: tasks }), [
     {
       root: "/repo/alpha",
       label: "alpha",
@@ -112,15 +112,13 @@ test("workspace navigation aggregates actionable cross-workspace signals without
       failed: 1,
     },
   ]);
-  assert.deepEqual(taskSignals(sessions[2]), {
+  assert.deepEqual(taskSignals(tasks[2]), {
     running: false,
     attention: false,
     failed: true,
   });
   assert.deepEqual(
-    taskSignals(
-      session({ lastRunOutcome: "interrupted", cause: "host_shutdown" }),
-    ),
+    taskSignals(task({ lastRunOutcome: "interrupted", cause: "app_shutdown" })),
     { running: false, attention: false, failed: true },
   );
   assert.equal(workspaceLabel("C:\\work\\metawork\\"), "metawork");
@@ -129,7 +127,7 @@ test("workspace navigation aggregates actionable cross-workspace signals without
 test("Task display state preserves Run, lifecycle, archive, and outcome precedence", () => {
   assert.deepEqual(
     taskDisplayState(
-      session({
+      task({
         currentRunId: "9",
         currentRunPhase: "running",
         lifecycle: "closing",
@@ -139,20 +137,18 @@ test("Task display state preserves Run, lifecycle, archive, and outcome preceden
     { kind: "phase", value: "running" },
   );
   assert.deepEqual(
-    taskDisplayState(
-      session({ lifecycle: "closing", lastRunOutcome: "failed" }),
-    ),
+    taskDisplayState(task({ lifecycle: "closing", lastRunOutcome: "failed" })),
     { kind: "lifecycle", value: "closing" },
   );
   assert.deepEqual(
-    taskDisplayState(session({ archived: true, lastRunOutcome: "failed" })),
+    taskDisplayState(task({ archived: true, lastRunOutcome: "failed" })),
     { kind: "archived" },
   );
-  assert.deepEqual(taskDisplayState(session({ lastRunOutcome: "failed" })), {
+  assert.deepEqual(taskDisplayState(task({ lastRunOutcome: "failed" })), {
     kind: "outcome",
     value: "failed",
   });
-  assert.deepEqual(taskDisplayState(session({})), { kind: "ready" });
+  assert.deepEqual(taskDisplayState(task({})), { kind: "ready" });
 });
 
 test("Task activity hides empty modules and derives only Host-projected content", () => {
@@ -165,7 +161,7 @@ test("Task activity hides empty modules and derives only Host-projected content"
   current.usage.input = "12";
   current.usage.output = "5";
   const summary = taskActivity(
-    session({
+    task({
       currentRunId: "9",
       currentRunPhase: "running",
       runs: [current],
@@ -177,14 +173,14 @@ test("Task activity hides empty modules and derives only Host-projected content"
 
 test("a new Task draft is not mistaken for an in-flight Run", () => {
   assert.equal(isRunInFlight(null), false);
-  assert.equal(isRunInFlight(session({ currentRunPhase: null })), false);
-  assert.equal(isRunInFlight(session({ currentRunPhase: "queued" })), true);
+  assert.equal(isRunInFlight(task({ currentRunPhase: null })), false);
+  assert.equal(isRunInFlight(task({ currentRunPhase: "queued" })), true);
 });
 
 test("global search finds product content and deliberately excludes raw tool output", () => {
   const snapshot = {
-    sessions: [
-      session({
+    tasks: [
+      task({
         runs: [
           run(
             "9",

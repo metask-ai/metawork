@@ -1,4 +1,4 @@
-import type { SessionView, ToolView } from "../../host/contracts.ts";
+import type { TaskView, ToolView } from "../../host/contracts.ts";
 import { formatInteger } from "../../i18n/formatters.ts";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
 import { taskActivity } from "../../workbench/selectors.ts";
@@ -9,44 +9,42 @@ function toolStateMessage(tool: ToolView): MessageId {
 }
 
 function currentActivityMessage(
-  session: SessionView | null,
+  task: TaskView | null,
   draft: boolean,
 ): MessageId {
-  if (!session)
-    return draft ? "activity.current_draft" : "activity.current_empty";
-  if (session.currentRunPhase === "waiting_ui")
-    return "activity.current_waiting";
-  if (session.currentRunPhase !== null) return "activity.current_working";
-  if (session.lifecycle !== "open") return "activity.current_closed";
-  if (!session.continuationAvailable) return "activity.current_unavailable";
-  if (session.archived) return "activity.current_archived";
+  if (!task) return draft ? "activity.current_draft" : "activity.current_empty";
+  if (task.currentRunPhase === "waiting_ui") return "activity.current_waiting";
+  if (task.currentRunPhase !== null) return "activity.current_working";
+  if (task.lifecycle !== "open") return "activity.current_closed";
+  if (!task.continuationAvailable) return "activity.current_unavailable";
+  if (task.archived) return "activity.current_archived";
   if (
-    session.lastRunOutcome === "failed" ||
-    session.lastRunOutcome === "interrupted" ||
-    session.lastRunOutcome === "dependency_contract_failure"
+    task.lastRunOutcome === "failed" ||
+    task.lastRunOutcome === "interrupted" ||
+    task.lastRunOutcome === "dependency_contract_failure"
   )
     return "activity.current_recover";
   return "activity.current_ready";
 }
 
 export function TaskActivity({
-  session,
+  task,
   draft,
   currentStatus,
   onFocusPending,
 }: {
-  session: SessionView | null;
+  task: TaskView | null;
   draft: boolean;
   currentStatus: string;
   onFocusPending: () => void;
 }) {
   const { locale, t } = useI18n();
-  const activity = taskActivity(session);
+  const activity = taskActivity(task);
   const activeTools = activity.currentRun?.tools ?? [];
 
   return (
     <>
-      {session?.pendingUi && (
+      {task?.pendingUi && (
         <section className="activity-section">
           <p className="section-label">{t("activity.needs_attention")}</p>
           <button
@@ -63,11 +61,11 @@ export function TaskActivity({
         <p className="section-label">{t("activity.current")}</p>
         <div className="current-activity">
           <span
-            className={`activity-dot ${session?.currentRunPhase ? "is-live" : ""}`}
+            className={`activity-dot ${task?.currentRunPhase ? "is-live" : ""}`}
           />
           <div>
             <p>{currentStatus}</p>
-            <span>{t(currentActivityMessage(session, draft))}</span>
+            <span>{t(currentActivityMessage(task, draft))}</span>
           </div>
         </div>
       </section>

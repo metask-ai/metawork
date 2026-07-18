@@ -9,7 +9,7 @@ globalThis.window ??= {
 };
 
 function snapshot(revision) {
-  return { schemaVersion: 4, revision, sessions: [] };
+  return { schemaVersion: 5, revision, tasks: [] };
 }
 
 test("Workbench connection publishes only synchronized snapshots", async () => {

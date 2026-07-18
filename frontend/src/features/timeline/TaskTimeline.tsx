@@ -11,7 +11,7 @@ import { CodeBlock } from "../../components/ui/CodeBlock.tsx";
 import type {
   PendingUi,
   RunView,
-  SessionView,
+  TaskView,
   ToolView,
   UiRecord,
   UiResponsePayload,
@@ -88,14 +88,14 @@ type RunActivity =
   | { kind: "resolved_ui"; order: string; value: UiRecord }
   | { kind: "pending_ui"; order: string; value: PendingUi };
 
-function orderedActivity(run: RunView, session: SessionView): RunActivity[] {
+function orderedActivity(run: RunView, task: TaskView): RunActivity[] {
   const items: RunActivity[] = [
     ...run.tools.map((value) => ({
       kind: "tool" as const,
       order: value.order,
       value,
     })),
-    ...session.uiHistory
+    ...task.uiHistory
       .filter((record) => record.runId === run.id)
       .map((value) => ({
         kind: "resolved_ui" as const,
@@ -103,11 +103,11 @@ function orderedActivity(run: RunView, session: SessionView): RunActivity[] {
         value,
       })),
   ];
-  if (session.pendingUi?.runId === run.id)
+  if (task.pendingUi?.runId === run.id)
     items.push({
       kind: "pending_ui",
-      order: session.pendingUi.order,
-      value: session.pendingUi,
+      order: task.pendingUi.order,
+      value: task.pendingUi,
     });
   return items.sort((left, right) => {
     const leftOrder = BigInt(left.order);
@@ -117,7 +117,7 @@ function orderedActivity(run: RunView, session: SessionView): RunActivity[] {
 }
 
 export function TaskTimeline({
-  session,
+  task,
   draft,
   revision,
   composerHasDraft,
@@ -128,7 +128,7 @@ export function TaskTimeline({
   renderPendingUi,
   renderUiRecord,
 }: {
-  session: SessionView | null;
+  task: TaskView | null;
   draft: boolean;
   revision: string;
   composerHasDraft: boolean;
@@ -137,7 +137,7 @@ export function TaskTimeline({
   onPrepareRetry: (instruction: string) => void;
   onRespond: (payload: UiResponsePayload) => void;
   renderPendingUi: (props: {
-    sessionId: string;
+    taskId: string;
     pending: PendingUi;
     busy: boolean;
     respond: (payload: UiResponsePayload) => void;
@@ -148,19 +148,19 @@ export function TaskTimeline({
   const [showJumpLatest, setShowJumpLatest] = useState(false);
   const timelineScroll = useRef<HTMLDivElement>(null);
   const followingLatest = useRef(true);
-  const latestRunId = session?.runs.at(-1)?.id ?? null;
+  const latestRunId = task?.runs.at(-1)?.id ?? null;
 
   useEffect(() => {
     followingLatest.current = true;
     setShowJumpLatest(false);
-  }, [session?.id]);
+  }, [task?.id]);
 
   useLayoutEffect(() => {
     const viewport = timelineScroll.current;
     if (!viewport || !followingLatest.current) return;
     viewport.scrollTop = viewport.scrollHeight;
     setShowJumpLatest(false);
-  }, [session?.id, revision]);
+  }, [task?.id, revision]);
 
   function updateFollowState() {
     const viewport = timelineScroll.current;
@@ -187,9 +187,9 @@ export function TaskTimeline({
         onScroll={updateFollowState}
       >
         <div className="timeline">
-          {session?.runs.map((run) => {
+          {task?.runs.map((run) => {
             const total = tokenTotal(run);
-            const activities = orderedActivity(run, session);
+            const activities = orderedActivity(run, task);
             return (
               <article
                 key={run.id}
@@ -249,7 +249,7 @@ export function TaskTimeline({
                     return (
                       <Fragment key={`ui:${pending.requestId}`}>
                         {renderPendingUi({
-                          sessionId: session.id,
+                          taskId: task.id,
                           pending,
                           busy: responseDisabled,
                           respond: onRespond,
@@ -276,13 +276,13 @@ export function TaskTimeline({
               </article>
             );
           })}
-          {session && session.runs.length === 0 && (
+          {task && task.runs.length === 0 && (
             <div className="task-empty-state">
               <h2>{t("task.empty_title")}</h2>
               <p>{t("task.empty_body")}</p>
             </div>
           )}
-          {!session && (
+          {!task && (
             <div className="task-empty-state">
               <h2>{t(draft ? "task.empty_title" : "task.new")}</h2>
               <p>{t(draft ? "task.empty_body" : "task.no_tasks")}</p>

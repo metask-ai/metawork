@@ -40,7 +40,7 @@ import { useI18n, type MessageId } from "../i18n/context.ts";
 import {
   searchWorkbench,
   isRunInFlight,
-  selectActiveSession,
+  selectActiveTask,
   selectCurrentWorkspace,
   taskDisplayState,
   workspaceLabel,
@@ -112,29 +112,24 @@ export default function App() {
   } = useUiResponseStates();
   const client = useMemo(() => new HostClient(), []);
   const connection = useRef<WorkbenchConnection | null>(null);
-  const pendingSessionSelection = useRef<string | null>(null);
-  const pendingSessionDraftRetention = useRef(new Set<string>());
+  const pendingTaskSelection = useRef<string | null>(null);
+  const pendingTaskDraftRetention = useRef(new Set<string>());
   const taskMenu = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
   const snapshot = workbench.snapshot;
-  const activeSession = useMemo(
-    () => selectActiveSession(workbench),
-    [workbench],
-  );
+  const activeTask = useMemo(() => selectActiveTask(workbench), [workbench]);
   const currentWorkspace = selectCurrentWorkspace(workbench);
   const summaries = useMemo(() => workspaceSummaries(snapshot), [snapshot]);
   const currentTasks = useMemo(
     () =>
-      snapshot.sessions.filter(
-        (session) => session.workspaceRoot === currentWorkspace,
-      ),
+      snapshot.tasks.filter((task) => task.workspaceRoot === currentWorkspace),
     [currentWorkspace, snapshot],
   );
   const searchResults = useMemo(
     () => searchWorkbench(snapshot, searchQuery),
     [searchQuery, snapshot],
   );
-  const taskDrafts = useTaskDrafts(activeSession?.id ?? null);
+  const taskDrafts = useTaskDrafts(activeTask?.id ?? null);
   const newTaskDrafts = useNewTaskDrafts(workbench.draftWorkspaceRoot);
   const prompt = workbench.draftWorkspaceRoot
     ? newTaskDrafts.draft
@@ -145,10 +140,10 @@ export default function App() {
   const mutationDisabled = viewSyncFailed || !bridgeReady || busy !== null;
   const taskCanCompose =
     Boolean(workbench.draftWorkspaceRoot) ||
-    (activeSession?.lifecycle === "open" &&
-      activeSession.continuationAvailable &&
-      !activeSession.archived);
-  const runInFlight = isRunInFlight(activeSession);
+    (activeTask?.lifecycle === "open" &&
+      activeTask.continuationAvailable &&
+      !activeTask.archived);
+  const runInFlight = isRunInFlight(activeTask);
   const canSubmit =
     taskCanCompose &&
     (!workbench.draftWorkspaceRoot || Boolean(workspaceGrant)) &&
@@ -169,25 +164,23 @@ export default function App() {
         onSnapshot: (next) => {
           if (!cancelled) {
             observeUiResponseSnapshot(next);
-            const projectedSessionIds = next.sessions.map(
-              (session) => session.id,
-            );
+            const projectedTaskIds = next.tasks.map((task) => task.id);
             taskDrafts.pruneDrafts([
-              ...projectedSessionIds,
-              ...pendingSessionDraftRetention.current,
+              ...projectedTaskIds,
+              ...pendingTaskDraftRetention.current,
             ]);
-            for (const sessionId of projectedSessionIds)
-              pendingSessionDraftRetention.current.delete(sessionId);
+            for (const taskId of projectedTaskIds)
+              pendingTaskDraftRetention.current.delete(taskId);
             dispatchWorkbench({ type: "snapshot.accepted", snapshot: next });
-            const pendingSessionId = pendingSessionSelection.current;
+            const pendingTaskId = pendingTaskSelection.current;
             if (
-              pendingSessionId &&
-              next.sessions.some((session) => session.id === pendingSessionId)
+              pendingTaskId &&
+              next.tasks.some((task) => task.id === pendingTaskId)
             ) {
-              pendingSessionSelection.current = null;
+              pendingTaskSelection.current = null;
               dispatchWorkbench({
-                type: "session.selected",
-                sessionId: pendingSessionId,
+                type: "task.selected",
+                taskId: pendingTaskId,
               });
             }
           }
@@ -243,10 +236,10 @@ export default function App() {
     setEditingTitle(false);
     setConfirmDelete(false);
     setTaskMenuOpen(false);
-  }, [activeSession?.id]);
+  }, [activeTask?.id]);
 
   function focusPendingRequest() {
-    const requestId = activeSession?.pendingUi?.requestId;
+    const requestId = activeTask?.pendingUi?.requestId;
     if (!requestId) return;
     const target = document.getElementById(`ui-request-${requestId}`);
     target?.scrollIntoView({ block: "center", behavior: "smooth" });
@@ -339,7 +332,7 @@ export default function App() {
 
   async function beginNewTask() {
     if (mutationDisabled) return;
-    pendingSessionSelection.current = null;
+    pendingTaskSelection.current = null;
     if (workspacePath && workspaceGrant) {
       dispatchWorkbench({
         type: "task.draft.opened",
@@ -355,21 +348,21 @@ export default function App() {
     if (!canSubmit) return;
     const submitted = prompt;
     const draftWorkspaceRoot = workbench.draftWorkspaceRoot;
-    const existingSessionId = activeSession?.id ?? null;
+    const existingTaskId = activeTask?.id ?? null;
     updatePrompt("");
     setBusy("run");
     try {
       const result = await submitTaskInstruction({
         client,
-        sessionId: existingSessionId,
+        taskId: existingTaskId,
         workspaceGrant,
         instruction: submitted,
-        onSessionCreated: (sessionId) => {
+        onTaskCreated: (taskId) => {
           setWorkspaceGrant("");
-          pendingSessionSelection.current = sessionId;
-          pendingSessionDraftRetention.current.add(sessionId);
+          pendingTaskSelection.current = taskId;
+          pendingTaskDraftRetention.current.add(taskId);
           if (draftWorkspaceRoot) newTaskDrafts.clearDraft(draftWorkspaceRoot);
-          taskDrafts.setDraft(sessionId, submitted);
+          taskDrafts.setDraft(taskId, submitted);
           dispatchWorkbench({ type: "task.draft.closed" });
         },
       });
@@ -383,7 +376,7 @@ export default function App() {
         return;
       }
       if (result.kind === "run_failed") {
-        taskDrafts.setDraft(result.sessionId, submitted);
+        taskDrafts.setDraft(result.taskId, submitted);
         setStatus({
           id: "run.start_failed",
           values: { error: errorText(result.error) },
@@ -391,7 +384,7 @@ export default function App() {
         if (result.created) await refreshSnapshot().catch(() => undefined);
         return;
       }
-      taskDrafts.clearDraft(result.sessionId);
+      taskDrafts.clearDraft(result.taskId);
       await refreshAfterCommit("run.started", "operation.run_submit");
     } finally {
       setBusy(null);
@@ -402,15 +395,15 @@ export default function App() {
     if (
       viewSyncFailed ||
       !bridgeReady ||
-      !activeSession ||
-      activeSession.currentRunId === "0" ||
-      activeSession.currentRunPhase === null
+      !activeTask ||
+      activeTask.currentRunId === "0" ||
+      activeTask.currentRunPhase === null
     )
       return;
     setBusy("cancel");
     try {
       try {
-        await client.cancel(activeSession.id, activeSession.currentRunId);
+        await client.cancel(activeTask.id, activeTask.currentRunId);
       } catch (error) {
         setStatus({
           id: "run.stop_failed",
@@ -424,19 +417,19 @@ export default function App() {
     }
   }
 
-  async function closeSession() {
+  async function closeTask() {
     if (
       viewSyncFailed ||
       !bridgeReady ||
-      !activeSession ||
-      (activeSession.lifecycle === "closing" && !activeSession.closeFailed) ||
-      activeSession.lifecycle === "closed"
+      !activeTask ||
+      (activeTask.lifecycle === "closing" && !activeTask.closeFailed) ||
+      activeTask.lifecycle === "closed"
     )
       return;
     setBusy("close");
     try {
       try {
-        await client.closeSession(activeSession.id);
+        await client.closeTask(activeTask.id);
       } catch (error) {
         setStatus({
           id: "task.close_failed",
@@ -451,11 +444,11 @@ export default function App() {
   }
 
   async function renameTask() {
-    if (!activeSession || mutationDisabled || !titleDraft.trim()) return;
+    if (!activeTask || mutationDisabled || !titleDraft.trim()) return;
     setBusy("rename");
     try {
       try {
-        await client.renameTask(activeSession.id, titleDraft.trim());
+        await client.renameTask(activeTask.id, titleDraft.trim());
       } catch (error) {
         setStatus({
           id: "task.rename_failed",
@@ -471,16 +464,12 @@ export default function App() {
   }
 
   async function setArchived(archived: boolean) {
-    if (
-      !activeSession ||
-      mutationDisabled ||
-      activeSession.currentRunPhase !== null
-    )
+    if (!activeTask || mutationDisabled || activeTask.currentRunPhase !== null)
       return;
     setBusy("archive");
     try {
       try {
-        await client.setTaskArchived(activeSession.id, archived);
+        await client.setTaskArchived(activeTask.id, archived);
       } catch (error) {
         setStatus({
           id: archived ? "task.archive_failed" : "task.restore_failed",
@@ -499,16 +488,12 @@ export default function App() {
   }
 
   async function deleteTask() {
-    if (
-      !activeSession ||
-      mutationDisabled ||
-      activeSession.lifecycle !== "closed"
-    )
+    if (!activeTask || mutationDisabled || activeTask.lifecycle !== "closed")
       return;
     setBusy("delete");
     try {
       try {
-        await client.deleteTask(activeSession.id);
+        await client.deleteTask(activeTask.id);
       } catch (error) {
         setStatus({
           id: "task.delete_failed",
@@ -516,7 +501,7 @@ export default function App() {
         });
         return;
       }
-      taskDrafts.clearDraft(activeSession.id);
+      taskDrafts.clearDraft(activeTask.id);
       setConfirmDelete(false);
       await refreshAfterCommit("task.deleted", "operation.task_delete");
     } finally {
@@ -525,17 +510,17 @@ export default function App() {
   }
 
   function selectSearchResult(result: SearchResult) {
-    pendingSessionSelection.current = null;
+    pendingTaskSelection.current = null;
     setWorkspacePath(result.workspaceRoot);
     setWorkspaceGrant("");
     dispatchWorkbench({
       type: "workspace.selected",
       workspaceRoot: result.workspaceRoot,
     });
-    if (result.sessionId)
+    if (result.taskId)
       dispatchWorkbench({
-        type: "session.selected",
-        sessionId: result.sessionId,
+        type: "task.selected",
+        taskId: result.taskId,
       });
     setWorkspacePath(result.workspaceRoot);
     setWorkspaceGrant("");
@@ -544,15 +529,15 @@ export default function App() {
   }
 
   async function respondUi(payload: UiResponsePayload) {
-    const pending = activeSession?.pendingUi;
-    if (viewSyncFailed || !bridgeReady || !activeSession || !pending) return;
-    const identity = uiRequestIdentity(activeSession.id, pending);
+    const pending = activeTask?.pendingUi;
+    if (viewSyncFailed || !bridgeReady || !activeTask || !pending) return;
+    const identity = uiRequestIdentity(activeTask.id, pending);
     if (!beginUiResponse(identity)) return;
     setBusy("respond");
     try {
       try {
         await client.respondUi(
-          activeSession.id,
+          activeTask.id,
           pending.runId,
           pending.requestId,
           payload,
@@ -577,7 +562,7 @@ export default function App() {
   }
 
   function prepareRetry(instruction: string) {
-    if (!activeSession || !taskCanCompose) return;
+    if (!activeTask || !taskCanCompose) return;
     const prepared = prepareRetryDraft(prompt, instruction);
     switch (prepared.kind) {
       case "prepared":
@@ -609,9 +594,7 @@ export default function App() {
     }
   }
 
-  const currentTaskState = activeSession
-    ? taskDisplayState(activeSession)
-    : null;
+  const currentTaskState = activeTask ? taskDisplayState(activeTask) : null;
   const currentTaskStatus = !currentTaskState
     ? t(workbench.draftWorkspaceRoot ? "task.new" : "task.open")
     : currentTaskState.kind === "phase"
@@ -623,8 +606,8 @@ export default function App() {
           : currentTaskState.kind === "outcome"
             ? t(`outcome.${currentTaskState.value}`)
             : t("task.ready");
-  const activeTaskTitle = activeSession
-    ? activeSession.title || t("task.item", { id: activeSession.id })
+  const activeTaskTitle = activeTask
+    ? activeTask.title || t("task.item", { id: activeTask.id })
     : t(workbench.draftWorkspaceRoot ? "task.new" : "task.open");
 
   return (
@@ -648,7 +631,7 @@ export default function App() {
             summaries={summaries}
             currentWorkspace={currentWorkspace}
             tasks={currentTasks}
-            activeSessionId={activeSession?.id ?? null}
+            activeTaskId={activeTask?.id ?? null}
             selectedPath={workspacePath || currentWorkspace || ""}
             grantReady={Boolean(workspacePath && workspaceGrant)}
             showArchived={showArchived}
@@ -657,7 +640,7 @@ export default function App() {
             onSearch={() => setSearchOpen(true)}
             onChooseWorkspace={() => void chooseWorkspace(false)}
             onSelectWorkspace={(root) => {
-              pendingSessionSelection.current = null;
+              pendingTaskSelection.current = null;
               setWorkspacePath(root);
               setWorkspaceGrant("");
               dispatchWorkbench({
@@ -666,9 +649,9 @@ export default function App() {
               });
             }}
             onCreateTask={() => void beginNewTask()}
-            onSelectTask={(sessionId) => {
-              pendingSessionSelection.current = null;
-              dispatchWorkbench({ type: "session.selected", sessionId });
+            onSelectTask={(taskId) => {
+              pendingTaskSelection.current = null;
+              dispatchWorkbench({ type: "task.selected", taskId });
             }}
             onToggleArchived={() => setShowArchived((shown) => !shown)}
           />
@@ -703,7 +686,7 @@ export default function App() {
           )}
 
           <TaskActivity
-            session={activeSession}
+            task={activeTask}
             draft={Boolean(workbench.draftWorkspaceRoot)}
             currentStatus={currentTaskStatus}
             onFocusPending={focusPendingRequest}
@@ -714,11 +697,9 @@ export default function App() {
       <header className="task-header">
         <div className="min-w-0">
           <p className="task-header-workspace">
-            {activeSession?.workspaceRoot ||
-              workspacePath ||
-              t("workspace.none")}
+            {activeTask?.workspaceRoot || workspacePath || t("workspace.none")}
           </p>
-          {activeSession && editingTitle ? (
+          {activeTask && editingTitle ? (
             <form
               className="task-title-editor"
               onSubmit={(event) => {
@@ -731,7 +712,7 @@ export default function App() {
                 maxLength={120}
                 value={titleDraft}
                 aria-label={t("task.rename")}
-                placeholder={t("task.item", { id: activeSession.id })}
+                placeholder={t("task.item", { id: activeTask.id })}
                 onChange={(event) => setTitleDraft(event.target.value)}
                 onKeyDown={(event) => {
                   if (event.key === "Escape") setEditingTitle(false);
@@ -754,21 +735,21 @@ export default function App() {
           ) : (
             <div className="task-title-row">
               <h1>
-                {activeSession
+                {activeTask
                   ? activeTaskTitle
                   : workbench.draftWorkspaceRoot
                     ? t("task.new")
                     : t("task.open")}
               </h1>
-              {activeSession && <TaskSignals session={activeSession} />}
+              {activeTask && <TaskSignals task={activeTask} />}
             </div>
           )}
         </div>
         <div className="task-actions">
-          {activeSession &&
-            activeSession.currentRunId !== "0" &&
-            activeSession.currentRunPhase !== null &&
-            activeSession.currentRunPhase !== "stopping" && (
+          {activeTask &&
+            activeTask.currentRunId !== "0" &&
+            activeTask.currentRunPhase !== null &&
+            activeTask.currentRunPhase !== "stopping" && (
               <button
                 className="danger-button focus-ring"
                 disabled={mutationDisabled}
@@ -778,7 +759,7 @@ export default function App() {
                 {t("task.stop")}
               </button>
             )}
-          {activeSession && (
+          {activeTask && (
             <div className="task-menu" ref={taskMenu}>
               <button
                 className="secondary-button focus-ring"
@@ -819,7 +800,7 @@ export default function App() {
                     role="menuitem"
                     disabled={mutationDisabled}
                     onClick={() => {
-                      setTitleDraft(activeSession.title);
+                      setTitleDraft(activeTask.title);
                       setEditingTitle(true);
                       setTaskMenuOpen(false);
                     }}
@@ -831,33 +812,33 @@ export default function App() {
                     disabled={
                       mutationDisabled ||
                       runInFlight ||
-                      activeSession.lifecycle === "closing"
+                      activeTask.lifecycle === "closing"
                     }
                     onClick={() => {
                       closeTaskMenuAndRestoreFocus();
-                      void setArchived(!activeSession.archived);
+                      void setArchived(!activeTask.archived);
                     }}
                   >
-                    {activeSession.archived
+                    {activeTask.archived
                       ? t("task.restore")
                       : t("task.archive")}
                   </button>
                   <button
                     role="menuitem"
                     disabled={
-                      (activeSession.lifecycle === "closing" &&
-                        !activeSession.closeFailed) ||
-                      activeSession.lifecycle === "closed" ||
+                      (activeTask.lifecycle === "closing" &&
+                        !activeTask.closeFailed) ||
+                      activeTask.lifecycle === "closed" ||
                       mutationDisabled
                     }
                     onClick={() => {
                       closeTaskMenuAndRestoreFocus();
-                      void closeSession();
+                      void closeTask();
                     }}
                   >
-                    {activeSession.closeFailed
+                    {activeTask.closeFailed
                       ? t("task.end_retry")
-                      : activeSession.lifecycle === "closing"
+                      : activeTask.lifecycle === "closing"
                         ? t("task.ending")
                         : t("task.end")}
                   </button>
@@ -865,7 +846,7 @@ export default function App() {
                     role="menuitem"
                     className="is-danger"
                     disabled={
-                      activeSession.lifecycle !== "closed" || mutationDisabled
+                      activeTask.lifecycle !== "closed" || mutationDisabled
                     }
                     onClick={() => {
                       setTaskMenuOpen(false);
@@ -881,7 +862,7 @@ export default function App() {
         </div>
       </header>
 
-      {activeSession && confirmDelete && (
+      {activeTask && confirmDelete && (
         <section
           className="delete-confirmation"
           role="alertdialog"
@@ -914,7 +895,7 @@ export default function App() {
       )}
 
       <TaskTimeline
-        session={activeSession}
+        task={activeTask}
         draft={Boolean(workbench.draftWorkspaceRoot)}
         revision={snapshot.revision}
         composerHasDraft={prompt.trim().length > 0}
@@ -923,8 +904,8 @@ export default function App() {
         onPrepareRetry={prepareRetry}
         onRespond={(payload) => void respondUi(payload)}
         renderPendingUi={(props) => {
-          const { sessionId, ...panelProps } = props;
-          const identity = uiRequestIdentity(sessionId, props.pending);
+          const { taskId, ...panelProps } = props;
+          const identity = uiRequestIdentity(taskId, props.pending);
           return (
             <ApprovalPanel
               {...panelProps}
@@ -937,15 +918,15 @@ export default function App() {
 
       <ComposerFooter
         textareaRef={composer}
-        hasTask={Boolean(activeSession)}
+        hasTask={Boolean(activeTask)}
         draft={Boolean(workbench.draftWorkspaceRoot)}
-        archived={Boolean(activeSession?.archived)}
-        closing={activeSession?.lifecycle === "closing"}
-        closed={activeSession?.lifecycle === "closed"}
+        archived={Boolean(activeTask?.archived)}
+        closing={activeTask?.lifecycle === "closing"}
+        closed={activeTask?.lifecycle === "closed"}
         unavailable={Boolean(
-          activeSession &&
-          activeSession.lifecycle === "open" &&
-          !activeSession.continuationAvailable,
+          activeTask &&
+          activeTask.lifecycle === "open" &&
+          !activeTask.continuationAvailable,
         )}
         prompt={prompt}
         composeDisabled={!taskCanCompose || mutationDisabled}

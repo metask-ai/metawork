@@ -214,7 +214,7 @@ export const enUS = {
   "cause.user_cancel": "Stopped by you",
   "cause.timeout": "Timed out",
   "cause.session_close": "Task closed",
-  "cause.host_shutdown": "Workbench closed",
+  "cause.app_shutdown": "Workbench closed",
   "cause.event_pipeline_failure": "Activity delivery failed",
   "cause.queue_capacity_failure": "Workbench capacity reached",
   "cause.ui_pipeline_failure": "Response delivery failed",

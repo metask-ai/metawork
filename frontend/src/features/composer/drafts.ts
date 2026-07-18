@@ -26,27 +26,27 @@ function storage(): Storage | null {
   }
 }
 
-export function readTaskDraft(sessionId: string): string {
+export function readTaskDraft(taskId: string): string {
   try {
-    return storage()?.getItem(`${prefix}${sessionId}`) ?? "";
+    return storage()?.getItem(`${prefix}${taskId}`) ?? "";
   } catch {
     return "";
   }
 }
 
-export function writeTaskDraft(sessionId: string, value: string): void {
+export function writeTaskDraft(taskId: string, value: string): void {
   try {
     const target = storage();
     if (!target) return;
-    if (value) target.setItem(`${prefix}${sessionId}`, value);
-    else target.removeItem(`${prefix}${sessionId}`);
+    if (value) target.setItem(`${prefix}${taskId}`, value);
+    else target.removeItem(`${prefix}${taskId}`);
   } catch {
     // A local draft is helpful, but storage policy must not break the Composer.
   }
 }
 
-export function clearTaskDraft(sessionId: string): void {
-  writeTaskDraft(sessionId, "");
+export function clearTaskDraft(taskId: string): void {
+  writeTaskDraft(taskId, "");
 }
 
 export function readNewTaskDraft(workspaceRoot: string): string {
@@ -72,7 +72,7 @@ export function clearNewTaskDraft(workspaceRoot: string): void {
   writeNewTaskDraft(workspaceRoot, "");
 }
 
-export function pruneTaskDrafts(validSessionIds: ReadonlySet<string>): void {
+export function pruneTaskDrafts(validTaskIds: ReadonlySet<string>): void {
   try {
     const target = storage();
     if (!target) return;
@@ -81,7 +81,7 @@ export function pruneTaskDrafts(validSessionIds: ReadonlySet<string>): void {
       const key = target.key(index);
       if (
         key?.startsWith(prefix) &&
-        !validSessionIds.has(key.slice(prefix.length))
+        !validTaskIds.has(key.slice(prefix.length))
       )
         stale.push(key);
     }

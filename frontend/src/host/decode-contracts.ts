@@ -5,7 +5,7 @@ import {
   type HostSignal,
   type PendingUi,
   type RunView,
-  type SessionView,
+  type TaskView,
   type ToolView,
   type UiRecord,
   type WorkbenchSnapshot,
@@ -44,7 +44,7 @@ const hostCauses = [
   "user_cancel",
   "timeout",
   "session_close",
-  "host_shutdown",
+  "app_shutdown",
   "event_pipeline_failure",
   "queue_capacity_failure",
   "ui_pipeline_failure",
@@ -369,7 +369,7 @@ function decodePendingUi(value: unknown, path: string): PendingUi | null {
   return fail(`${path}.kind`, `unexpected request kind ${kind}`);
 }
 
-function decodeSession(value: unknown, path: string): SessionView {
+function decodeTask(value: unknown, path: string): TaskView {
   const item = object(value, path, [
     "id",
     "title",
@@ -484,14 +484,14 @@ function decodeSession(value: unknown, path: string): SessionView {
 }
 
 export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
-  const root = object(value, "$", ["schemaVersion", "revision", "sessions"]);
+  const root = object(value, "$", ["schemaVersion", "revision", "tasks"]);
   const schemaVersion = numberValue(root.schemaVersion, "$.schemaVersion");
   if (schemaVersion !== WORKBENCH_SCHEMA_VERSION)
     fail("$.schemaVersion", `unsupported version ${schemaVersion}`);
   return {
     schemaVersion,
     revision: wireId(root.revision, "$.revision"),
-    sessions: arrayValue(root.sessions, "$.sessions", decodeSession),
+    tasks: arrayValue(root.tasks, "$.tasks", decodeTask),
   };
 }
 
@@ -584,26 +584,26 @@ export function decodeWorkspaceChoice(value: unknown): WorkspaceChoice {
   };
 }
 
-export function decodeSessionId(value: unknown) {
-  const item = object(value, "$", ["sessionId"]);
-  return positiveWireId(item.sessionId, "$.sessionId");
+export function decodeTaskId(value: unknown) {
+  const item = object(value, "$", ["taskId"]);
+  return positiveWireId(item.taskId, "$.taskId");
 }
 
-export function assertRunAccepted(value: unknown, sessionId: string) {
-  const item = object(value, "$", ["sessionId", "runId"]);
-  if (positiveWireId(item.sessionId, "$.sessionId") !== sessionId)
-    fail("$.sessionId", "response identity mismatch");
+export function assertRunAccepted(value: unknown, taskId: string) {
+  const item = object(value, "$", ["taskId", "runId"]);
+  if (positiveWireId(item.taskId, "$.taskId") !== taskId)
+    fail("$.taskId", "response identity mismatch");
   return positiveWireId(item.runId, "$.runId");
 }
 
 export function assertCancelAccepted(
   value: unknown,
-  sessionId: string,
+  taskId: string,
   runId: string,
 ) {
-  const item = object(value, "$", ["sessionId", "runId", "cancelRequested"]);
+  const item = object(value, "$", ["taskId", "runId", "cancelRequested"]);
   if (
-    positiveWireId(item.sessionId, "$.sessionId") !== sessionId ||
+    positiveWireId(item.taskId, "$.taskId") !== taskId ||
     positiveWireId(item.runId, "$.runId") !== runId ||
     booleanValue(item.cancelRequested, "$.cancelRequested") !== true
   )
@@ -612,18 +612,13 @@ export function assertCancelAccepted(
 
 export function assertUiResponseAccepted(
   value: unknown,
-  sessionId: string,
+  taskId: string,
   runId: string,
   requestId: string,
 ) {
-  const item = object(value, "$", [
-    "sessionId",
-    "runId",
-    "requestId",
-    "answered",
-  ]);
+  const item = object(value, "$", ["taskId", "runId", "requestId", "answered"]);
   if (
-    positiveWireId(item.sessionId, "$.sessionId") !== sessionId ||
+    positiveWireId(item.taskId, "$.taskId") !== taskId ||
     positiveWireId(item.runId, "$.runId") !== runId ||
     positiveWireId(item.requestId, "$.requestId") !== requestId ||
     booleanValue(item.answered, "$.answered") !== true
@@ -631,10 +626,10 @@ export function assertUiResponseAccepted(
     fail("$", "UI response identity mismatch");
 }
 
-export function assertCloseAccepted(value: unknown, sessionId: string) {
-  const item = object(value, "$", ["sessionId", "closing"]);
+export function assertCloseAccepted(value: unknown, taskId: string) {
+  const item = object(value, "$", ["taskId", "closing"]);
   if (
-    positiveWireId(item.sessionId, "$.sessionId") !== sessionId ||
+    positiveWireId(item.taskId, "$.taskId") !== taskId ||
     booleanValue(item.closing, "$.closing") !== true
   )
     fail("$", "close response mismatch");
@@ -642,12 +637,12 @@ export function assertCloseAccepted(value: unknown, sessionId: string) {
 
 export function assertTaskFlag(
   value: unknown,
-  sessionId: string,
+  taskId: string,
   flag: "renamed" | "deleted",
 ) {
-  const item = object(value, "$", ["sessionId", flag]);
+  const item = object(value, "$", ["taskId", flag]);
   if (
-    positiveWireId(item.sessionId, "$.sessionId") !== sessionId ||
+    positiveWireId(item.taskId, "$.taskId") !== taskId ||
     booleanValue(item[flag], `$.${flag}`) !== true
   )
     fail("$", `${flag} response mismatch`);
@@ -655,12 +650,12 @@ export function assertTaskFlag(
 
 export function assertTaskArchived(
   value: unknown,
-  sessionId: string,
+  taskId: string,
   archived: boolean,
 ) {
-  const item = object(value, "$", ["sessionId", "archived"]);
+  const item = object(value, "$", ["taskId", "archived"]);
   if (
-    positiveWireId(item.sessionId, "$.sessionId") !== sessionId ||
+    positiveWireId(item.taskId, "$.taskId") !== taskId ||
     booleanValue(item.archived, "$.archived") !== archived
   )
     fail("$", "archive response mismatch");
