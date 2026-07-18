@@ -5,8 +5,14 @@ const session_impl = @import("agent_session");
 
 pub const EventEnvelope = session_impl.EventEnvelope;
 pub const SessionState = session_impl.SessionState;
-pub const HostCause = session_impl.HostCause;
-pub const RunOutcome = session_impl.RunOutcome;
+pub const ExternalInterruption = session_impl.ExternalInterruption;
+pub const CallbackFailure = session_impl.CallbackFailure;
+pub const EventPumpFailure = session_impl.EventPumpFailure;
+pub const EventConsumerNotificationFailure = session_impl.EventConsumerNotificationFailure;
+pub const TerminationSignal = session_impl.TerminationSignal;
+pub const TerminalFailure = session_impl.TerminalFailure;
+pub const SessionDisposition = session_impl.SessionDisposition;
+pub const TerminalResult = session_impl.TerminalResult;
 pub const TerminationRequestResult = session_impl.TerminationRequestResult;
 pub const RunControl = session_impl.RunControl;
 pub const RunControlLease = session_impl.RunControlLease;

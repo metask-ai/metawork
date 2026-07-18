@@ -21,24 +21,77 @@ pub const SessionState = enum {
     closed,
 };
 
-pub const HostCause = enum {
+pub const ExternalInterruption = enum {
     user_cancel,
     timeout,
     session_close,
-    host_shutdown,
-    event_pipeline_failure,
-    queue_capacity_failure,
-    ui_pipeline_failure,
-    dependency_contract_failure,
+    app_shutdown,
 };
 
-pub const RunOutcome = enum {
-    completed,
-    stopped,
-    cancelled,
-    interrupted,
-    failed,
-    dependency_contract_failure,
+pub const CallbackFailure = enum {
+    event,
+    ui,
+};
+
+pub const EventPumpFailure = enum {
+    invalid_event,
+    event_too_large,
+    capacity,
+    allocation,
+    consumer_rejected,
+};
+
+pub const EventConsumerNotificationFailure = enum {
+    unavailable,
+};
+
+/// The single mutable, first-writer-wins termination latch for an active Run.
+/// This is execution control state, not a durable product outcome.
+pub const TerminationSignal = union(enum) {
+    interrupted: ExternalInterruption,
+    callback_failure: CallbackFailure,
+    event_pump_failure: EventPumpFailure,
+    event_consumer_notification_failure: EventConsumerNotificationFailure,
+};
+
+pub const TerminalFailure = enum {
+    abi_status,
+    dependency_contract,
+};
+
+pub const SessionDisposition = enum {
+    reusable,
+    poisoned,
+    closing,
+};
+
+/// Immutable Agent-owned facts for exactly one begun Run. Workbench must copy
+/// the bounded diagnostic into its admission-reserved Run record, then deinit
+/// this value. `session_disposition_at_completion` is a completion-time
+/// snapshot, never live Session state.
+pub const TerminalResult = struct {
+    allocator: std.mem.Allocator,
+    diagnostic_storage: []u8,
+    diagnostic_len: usize,
+    diagnostic_truncated: bool,
+    abi_status: ?sdk.Status,
+    raw_status_code: ?u32,
+    stop_reason: ?sdk.StopReason,
+    raw_stop_reason_code: ?u32,
+    abort_status: ?sdk.Status,
+    raw_abort_status_code: ?u32,
+    termination_signal: ?TerminationSignal,
+    failure: ?TerminalFailure,
+    session_disposition_at_completion: SessionDisposition,
+
+    pub fn diagnostic(self: *const TerminalResult) []const u8 {
+        return self.diagnostic_storage[0..self.diagnostic_len];
+    }
+
+    pub fn deinit(self: *TerminalResult) void {
+        self.allocator.free(self.diagnostic_storage);
+        self.* = undefined;
+    }
 };
 
 pub const TerminationRequestResult = enum {
@@ -129,13 +182,13 @@ pub const RunControlLease = struct {
 
     pub fn requestTermination(
         self: *const RunControlLease,
-        cause: HostCause,
+        signal: TerminationSignal,
     ) TerminationRequestResult {
         std.debug.assert(!self.released);
         return self.block.session.requestControlledTermination(
             self.run_id,
             self.generation,
-            cause,
+            signal,
         );
     }
 
@@ -163,10 +216,10 @@ pub const Run = struct {
         };
     }
 
-    pub fn execute(self: *Run) void {
+    pub fn execute(self: *Run) TerminalResult {
         std.debug.assert(!self.executed);
         self.executed = true;
-        self.session.executeBegunRun(self.run_id, self.generation);
+        return self.session.executeBegunRun(self.run_id, self.generation);
     }
 
     pub fn deinit(self: *Run) void {
@@ -248,6 +301,7 @@ pub const Limits = struct {
     event_enqueue_timeout: std.Io.Duration = .fromMilliseconds(100),
     max_ui_request_bytes: usize = 256 * 1024,
     max_ui_response_bytes: usize = 256 * 1024,
+    max_terminal_diagnostic_bytes: usize = 512,
     ui_request_timeout: std.Io.Duration = .fromSeconds(30),
     event_ready_notifier: ?EventReadyNotifier = null,
 };
@@ -258,11 +312,6 @@ pub const SessionSnapshot = struct {
     workspace_root: []const u8,
     active_run_id: u64,
     pending_ui_request_id: ?u64,
-    cause: ?HostCause,
-    last_status: ?u32,
-    last_abort_status: ?u32,
-    last_stop_reason_code: ?u32,
-    last_outcome: ?RunOutcome,
 };
 
 pub const PendingUiRequest = struct {
@@ -282,7 +331,7 @@ pub const Error = error{
     InvalidLimits,
     InvalidWorkspace,
     WorkspaceNotTrusted,
-    HostShuttingDown,
+    RuntimeShuttingDown,
     SessionCapacity,
     UnknownSession,
     SessionNotClosed,
@@ -314,6 +363,7 @@ pub const Runtime = struct {
     event_enqueue_timeout: std.Io.Duration,
     max_ui_request_bytes: usize,
     max_ui_response_bytes: usize,
+    max_terminal_diagnostic_bytes: usize,
     ui_request_timeout: std.Io.Duration,
     event_ready_notifier: ?EventReadyNotifier,
     events: event_pump.EventPump,
@@ -338,7 +388,8 @@ pub const Runtime = struct {
             limits.event_bytes == 0 or limits.per_session_event_capacity == 0 or
             limits.per_session_event_bytes == 0 or limits.max_event_bytes == 0 or
             limits.event_enqueue_timeout.nanoseconds <= 0 or limits.max_ui_request_bytes == 0 or
-            limits.max_ui_response_bytes == 0 or limits.ui_request_timeout.nanoseconds <= 0)
+            limits.max_ui_response_bytes == 0 or limits.max_terminal_diagnostic_bytes == 0 or
+            limits.ui_request_timeout.nanoseconds <= 0)
             return error.InvalidLimits;
         _ = std.math.mul(usize, limits.event_capacity, limits.max_event_bytes) catch
             return error.InvalidLimits;
@@ -397,6 +448,7 @@ pub const Runtime = struct {
             .event_enqueue_timeout = limits.event_enqueue_timeout,
             .max_ui_request_bytes = limits.max_ui_request_bytes,
             .max_ui_response_bytes = limits.max_ui_response_bytes,
+            .max_terminal_diagnostic_bytes = limits.max_terminal_diagnostic_bytes,
             .ui_request_timeout = limits.ui_request_timeout,
             .event_ready_notifier = limits.event_ready_notifier,
             .events = events,
@@ -415,7 +467,7 @@ pub const Runtime = struct {
 
         self.sessions_mutex.lockUncancelable(self.io);
         defer self.sessions_mutex.unlock(self.io);
-        if (self.shutting_down.load(.acquire)) return error.HostShuttingDown;
+        if (self.shutting_down.load(.acquire)) return error.RuntimeShuttingDown;
         var slot: ?usize = null;
         for (self.sessions, 0..) |entry, index| {
             if (entry == null) {
@@ -515,7 +567,7 @@ pub const Runtime = struct {
         var first_error: ?Error = null;
         for (sessions) |entry| {
             if (entry) |session| {
-                session.close(.host_shutdown) catch |err| if (first_error == null) {
+                session.close(.app_shutdown) catch |err| if (first_error == null) {
                     first_error = err;
                 };
             }
@@ -542,7 +594,7 @@ pub const Runtime = struct {
         // invalidates `session`; callers must quiesce their own references.
         self.sessions_mutex.lockUncancelable(self.io);
         defer self.sessions_mutex.unlock(self.io);
-        if (self.shutting_down.load(.acquire)) return error.HostShuttingDown;
+        if (self.shutting_down.load(.acquire)) return error.RuntimeShuttingDown;
 
         var slot: ?usize = null;
         for (self.sessions, 0..) |entry, index| {
@@ -578,7 +630,12 @@ pub const Runtime = struct {
         return self.notifyEventConsumer() != .unavailable;
     }
 
-    pub fn failRun(self: *Runtime, session_id: u64, run_id: u64, cause: HostCause) Error!void {
+    pub fn requestRunTermination(
+        self: *Runtime,
+        session_id: u64,
+        run_id: u64,
+        signal: TerminationSignal,
+    ) Error!void {
         self.sessions_mutex.lockUncancelable(self.io);
         var retained: ?*Session = null;
         var found = false;
@@ -592,7 +649,7 @@ pub const Runtime = struct {
         self.sessions_mutex.unlock(self.io);
         const session = retained orelse return if (found) error.SessionClosing else error.UnknownSession;
         defer session.releaseReference();
-        return session.requestCancel(run_id, cause);
+        return session.requestTermination(run_id, signal);
     }
 
     fn finishShutdown(self: *Runtime, result: ?Error) Error!void {
@@ -635,13 +692,16 @@ pub const Session = struct {
     active_run_generation: u64 = 0,
     run_started: bool = false,
     core_call_in_progress: bool = false,
+    abort_calls_in_progress: usize = 0,
     run_done: bool = true,
     prompt: ?[]u8 = null,
-    cause: ?HostCause = null,
-    last_status: ?u32 = null,
-    last_abort_status: ?u32 = null,
-    last_stop_reason_code: ?u32 = null,
-    last_outcome: ?RunOutcome = null,
+    terminal_diagnostic: ?[]u8 = null,
+    terminal_diagnostic_len: usize = 0,
+    terminal_diagnostic_truncated: bool = false,
+    termination_signal: ?TerminationSignal = null,
+    abort_status: ?sdk.Status = null,
+    raw_abort_status_code: ?u32 = null,
+    dependency_contract_failure: bool = false,
     cancel_requested: bool = false,
     active_refs: usize = 0,
     ui_active: bool = false,
@@ -675,10 +735,15 @@ pub const Session = struct {
         if (prompt.len > self.agent_runtime.max_prompt_bytes) return error.PromptTooLarge;
         const owned_prompt = try self.agent_runtime.allocator.dupe(u8, prompt);
         errdefer self.agent_runtime.allocator.free(owned_prompt);
+        const terminal_diagnostic = try self.agent_runtime.allocator.alloc(
+            u8,
+            self.agent_runtime.max_terminal_diagnostic_bytes,
+        );
+        errdefer self.agent_runtime.allocator.free(terminal_diagnostic);
         self.lock();
         if (self.agent_runtime.shutting_down.load(.acquire)) {
             self.unlock();
-            return error.HostShuttingDown;
+            return error.RuntimeShuttingDown;
         }
         if (self.state == .closing or self.state == .closed) {
             self.unlock();
@@ -700,6 +765,13 @@ pub const Session = struct {
             self.unlock();
             return error.RunGenerationExhausted;
         }
+        // An idle Session must have completely quiesced the previous Run. Do
+        // not reset these fields here: that would hide an unmatched abort or
+        // an incomplete terminal transition.
+        std.debug.assert(self.run_done);
+        std.debug.assert(!self.run_started);
+        std.debug.assert(!self.core_call_in_progress);
+        std.debug.assert(self.abort_calls_in_progress == 0);
         self.next_run_id += 1;
         self.next_run_generation += 1;
         const run_id = self.next_run_id;
@@ -709,11 +781,13 @@ pub const Session = struct {
         self.core_call_in_progress = false;
         self.run_done = false;
         self.prompt = owned_prompt;
-        self.cause = null;
-        self.last_status = null;
-        self.last_abort_status = null;
-        self.last_stop_reason_code = null;
-        self.last_outcome = null;
+        self.terminal_diagnostic = terminal_diagnostic;
+        self.terminal_diagnostic_len = 0;
+        self.terminal_diagnostic_truncated = false;
+        self.termination_signal = null;
+        self.abort_status = null;
+        self.raw_abort_status_code = null;
+        self.dependency_contract_failure = false;
         self.cancel_requested = false;
         self.state = .queued;
         self.unlock();
@@ -737,7 +811,7 @@ pub const Session = struct {
             };
             if ((self.state == .closing or self.state == .closed) and !self.run_done and
                 !self.run_started)
-                self.finishBeforeCoreCallLocked();
+                self.finishPreparedRunLocked();
             self.unlock();
             return begin_error;
         }
@@ -763,31 +837,22 @@ pub const Session = struct {
         };
     }
 
-    /// Transitional compatibility entry point for isolated contract probes.
-    /// Product code must use `beginRun` so it can publish `RunControl` before
-    /// entering the synchronous ABI call.
-    pub fn executePreparedRun(self: *Session) void {
-        self.lock();
-        const run_id = self.active_run_id;
-        self.unlock();
-        var run = self.beginRun(run_id) catch return;
-        defer run.deinit();
-        run.execute();
-    }
-
-    pub fn cancelPreparedRun(self: *Session, run_id: u64, cause: HostCause) Error!void {
+    pub fn cancelPreparedRun(self: *Session, run_id: u64) Error!void {
         self.lock();
         if (run_id == 0 or run_id != self.active_run_id or self.state != .queued) {
             self.unlock();
             return error.NoSuchRun;
         }
-        self.cancel_requested = true;
-        setCauseLocked(self, cause);
+        self.finishPreparedRunLocked();
         self.unlock();
-        self.finishCancelledQueuedRun();
+        _ = self.agent_runtime.notifyEventConsumer();
     }
 
-    pub fn requestCancel(self: *Session, run_id: u64, cause: HostCause) Error!void {
+    pub fn requestTermination(
+        self: *Session,
+        run_id: u64,
+        signal: TerminationSignal,
+    ) Error!void {
         self.lock();
         if (self.state == .closing or self.state == .closed) {
             self.unlock();
@@ -810,30 +875,25 @@ pub const Session = struct {
             return error.NoSuchRun;
         }
         self.cancel_requested = true;
-        setCauseLocked(self, cause);
+        setTerminationSignalLocked(self, signal);
         wakeUiLocked(self);
         const was_queued = self.state == .queued;
+        const should_abort = !was_queued and self.core_call_in_progress and !self.run_done;
+        if (should_abort) self.abort_calls_in_progress += 1;
         self.unlock();
 
         if (was_queued) {
-            self.lock();
-            while (!self.run_done and !self.run_started) self.wait();
-            const should_abort = self.core_call_in_progress and !self.run_done;
-            self.unlock();
-            if (should_abort) self.abortRun(run_id, cause);
+            _ = self.agent_runtime.notifyEventConsumer();
             return;
         }
-        self.lock();
-        const should_abort = self.core_call_in_progress and !self.run_done;
-        self.unlock();
-        if (should_abort) self.abortRun(run_id, cause);
+        if (should_abort) self.abortRun(run_id, signal);
     }
 
     fn requestControlledTermination(
         self: *Session,
         run_id: u64,
         generation: u64,
-        cause: HostCause,
+        signal: TerminationSignal,
     ) TerminationRequestResult {
         self.lock();
         if (run_id != self.active_run_id or generation != self.active_run_generation) {
@@ -853,11 +913,12 @@ pub const Session = struct {
             return .already_requested;
         }
         self.cancel_requested = true;
-        setCauseLocked(self, cause);
+        setTerminationSignalLocked(self, signal);
         wakeUiLocked(self);
         const should_abort = self.core_call_in_progress;
+        if (should_abort) self.abort_calls_in_progress += 1;
         self.unlock();
-        if (should_abort) self.abortRun(run_id, cause);
+        if (should_abort) self.abortRun(run_id, signal);
         return .requested;
     }
 
@@ -946,11 +1007,6 @@ pub const Session = struct {
             .workspace_root = self.workspace_root,
             .active_run_id = self.active_run_id,
             .pending_ui_request_id = if (self.ui_active) self.ui_request_id else null,
-            .cause = self.cause,
-            .last_status = self.last_status,
-            .last_abort_status = self.last_abort_status,
-            .last_stop_reason_code = self.last_stop_reason_code,
-            .last_outcome = self.last_outcome,
         };
     }
 
@@ -970,13 +1026,13 @@ pub const Session = struct {
         if (self.active_refs == 0) self.broadcast();
     }
 
-    pub fn recordCause(self: *Session, cause: HostCause) void {
+    pub fn recordTerminationSignal(self: *Session, signal: TerminationSignal) void {
         self.lock();
         defer self.unlock();
-        setCauseLocked(self, cause);
+        if (!self.run_done) setTerminationSignalLocked(self, signal);
     }
 
-    pub fn close(self: *Session, cause: HostCause) Error!void {
+    pub fn close(self: *Session, interruption: ExternalInterruption) Error!void {
         self.lock();
         if (self.state == .closed) {
             self.unlock();
@@ -994,21 +1050,28 @@ pub const Session = struct {
             return self.destroyRawSession();
         }
         self.control_block.disableNewLeases();
-        const should_abort_now = self.core_call_in_progress and !self.run_done;
+        const should_abort_now = self.core_call_in_progress and !self.run_done and
+            self.abort_calls_in_progress == 0 and self.raw_abort_status_code == null;
+        if (should_abort_now) self.abort_calls_in_progress += 1;
         const run_id = self.active_run_id;
         self.state = .closing;
-        setCauseLocked(self, cause);
+        const signal: TerminationSignal = .{ .interrupted = interruption };
+        if (!self.run_done) setTerminationSignalLocked(self, signal);
         wakeUiLocked(self);
+        if (!self.run_done and !self.run_started) self.finishPreparedRunLocked();
         self.broadcast();
         self.unlock();
 
-        if (should_abort_now) self.abortRun(run_id, cause);
+        if (should_abort_now) self.abortRun(run_id, signal);
 
         self.lock();
         while (!self.run_done and !self.run_started) self.wait();
-        const should_abort_late = !should_abort_now and self.core_call_in_progress and !self.run_done;
+        const should_abort_late = !should_abort_now and self.core_call_in_progress and
+            !self.run_done and self.abort_calls_in_progress == 0 and
+            self.raw_abort_status_code == null;
+        if (should_abort_late) self.abort_calls_in_progress += 1;
         self.unlock();
-        if (should_abort_late) self.abortRun(run_id, cause);
+        if (should_abort_late) self.abortRun(run_id, signal);
 
         self.lock();
         while (!self.run_done) self.wait();
@@ -1043,16 +1106,16 @@ pub const Session = struct {
         if (failed) return error.SessionDestroyFailed;
     }
 
-    fn executeBegunRun(self: *Session, run_id: u64, generation: u64) void {
+    fn executeBegunRun(self: *Session, run_id: u64, generation: u64) TerminalResult {
         self.lock();
         std.debug.assert(run_id == self.active_run_id);
         std.debug.assert(generation == self.active_run_generation);
         std.debug.assert(self.run_started and !self.run_done);
         if (self.cancel_requested or self.state == .closing) {
-            self.finishBeforeCoreCallLocked();
+            const terminal = self.finishBeforeCoreCallLocked();
             self.unlock();
             _ = self.agent_runtime.notifyEventConsumer();
-            return;
+            return terminal;
         }
         self.core_call_in_progress = true;
         const prompt = self.prompt.?;
@@ -1075,84 +1138,161 @@ pub const Session = struct {
             &diagnostic,
         );
         const typed_status = sdk.Status.fromCode(status) catch null;
+        const diagnostic_valid = self.copyTerminalDiagnostic(diagnostic);
         releaseOwned(self.agent_runtime.api, &diagnostic);
 
         self.lock();
         self.core_call_in_progress = false;
+        while (self.abort_calls_in_progress != 0) self.wait();
         self.agent_runtime.allocator.free(prompt);
         self.prompt = null;
-        self.last_status = status;
-        if (typed_status) |known_status| {
+        var stop_reason: ?sdk.StopReason = null;
+        var raw_stop_reason_code: ?u32 = null;
+        var failure: ?TerminalFailure = null;
+        if (!diagnostic_valid) {
+            self.dependency_contract_failure = true;
+            failure = .dependency_contract;
+            self.state = .poisoned;
+        } else if (typed_status) |known_status| {
             if (known_status == .ok) {
                 if (result.struct_size != @sizeOf(wire.RunResultV1) or !allZero(&result.reserved)) {
-                    setCauseLocked(self, .dependency_contract_failure);
-                    self.last_outcome = .dependency_contract_failure;
+                    self.dependency_contract_failure = true;
+                    failure = .dependency_contract;
                     self.state = .poisoned;
                 } else {
-                    self.last_stop_reason_code = result.stop_reason_code;
+                    raw_stop_reason_code = result.stop_reason_code;
                     if (sdk.StopReason.fromCode(result.stop_reason_code)) |reason| {
-                        self.last_outcome = applyStopReasonLocked(self, reason);
+                        stop_reason = reason;
                     } else |_| {
-                        setCauseLocked(self, .dependency_contract_failure);
-                        self.last_outcome = .dependency_contract_failure;
+                        self.dependency_contract_failure = true;
+                        failure = .dependency_contract;
                         self.state = .poisoned;
                     }
                 }
             } else {
-                if (known_status == .callback_failed and self.cause == null)
-                    setCauseLocked(self, .event_pipeline_failure);
-                self.last_outcome = .failed;
+                if (known_status == .callback_failed and self.termination_signal == null)
+                    setTerminationSignalLocked(self, .{ .callback_failure = .event });
+                failure = .abi_status;
                 if (statusPoisonsSession(known_status)) self.state = .poisoned;
             }
         } else {
-            setCauseLocked(self, .dependency_contract_failure);
-            self.last_outcome = .dependency_contract_failure;
+            self.dependency_contract_failure = true;
+            failure = .dependency_contract;
+            self.state = .poisoned;
+        }
+        if (self.dependency_contract_failure) {
+            failure = .dependency_contract;
             self.state = .poisoned;
         }
         self.run_started = false;
         self.run_done = true;
         if (self.state != .closing and self.state != .poisoned) self.state = .idle;
+        const terminal = self.takeTerminalResultLocked(
+            typed_status,
+            status,
+            stop_reason,
+            raw_stop_reason_code,
+            failure,
+        );
         self.broadcast();
         self.unlock();
         _ = self.agent_runtime.notifyEventConsumer();
+        return terminal;
     }
 
-    fn finishBeforeCoreCallLocked(self: *Session) void {
+    fn finishBeforeCoreCallLocked(self: *Session) TerminalResult {
         std.debug.assert(!self.core_call_in_progress);
         if (self.prompt) |prompt| {
             self.agent_runtime.allocator.free(prompt);
             self.prompt = null;
         }
-        self.last_outcome = abortedOutcome(self.cause);
         self.run_started = false;
+        self.run_done = true;
+        if (self.state != .closing and self.state != .poisoned) self.state = .idle;
+        const terminal = self.takeTerminalResultLocked(null, null, null, null, null);
+        self.broadcast();
+        return terminal;
+    }
+
+    fn abortRun(self: *Session, run_id: u64, signal: TerminationSignal) void {
+        var diagnostic = emptyOwnedBytes();
+        const status = self.agent_runtime.api.sessionAbort()(
+            self.raw,
+            run_id,
+            abortReason(signal),
+            &diagnostic,
+        );
+        releaseOwned(self.agent_runtime.api, &diagnostic);
+        self.lock();
+        std.debug.assert(self.abort_calls_in_progress != 0);
+        if (self.active_run_id == run_id) {
+            self.raw_abort_status_code = status;
+            self.abort_status = sdk.Status.fromCode(status) catch null;
+            if (self.abort_status == null) self.dependency_contract_failure = true;
+        }
+        self.abort_calls_in_progress -= 1;
+        self.broadcast();
+        self.unlock();
+    }
+
+    fn finishPreparedRunLocked(self: *Session) void {
+        std.debug.assert(!self.run_started and !self.core_call_in_progress);
+        if (self.prompt) |prompt| {
+            self.agent_runtime.allocator.free(prompt);
+            self.prompt = null;
+        }
+        if (self.terminal_diagnostic) |buffer| {
+            self.agent_runtime.allocator.free(buffer);
+            self.terminal_diagnostic = null;
+        }
         self.run_done = true;
         if (self.state != .closing and self.state != .poisoned) self.state = .idle;
         self.broadcast();
     }
 
-    fn abortRun(self: *Session, run_id: u64, cause: HostCause) void {
-        var diagnostic = emptyOwnedBytes();
-        const status = self.agent_runtime.api.sessionAbort()(
-            self.raw,
-            run_id,
-            abortReason(cause),
-            &diagnostic,
-        );
-        releaseOwned(self.agent_runtime.api, &diagnostic);
-        self.lock();
-        if (self.active_run_id == run_id) {
-            self.last_abort_status = status;
-            if (sdk.Status.fromCode(status)) |_| {} else |_| {
-                setCauseLocked(self, .dependency_contract_failure);
-            }
-        }
-        self.unlock();
+    fn copyTerminalDiagnostic(self: *Session, diagnostic: wire.OwnedBytesV1) bool {
+        const bytes = sdk.borrowedBytes(.{ .ptr = diagnostic.ptr, .len = diagnostic.len }) catch
+            return false;
+        const storage = self.terminal_diagnostic orelse unreachable;
+        const len = @min(bytes.len, storage.len);
+        @memcpy(storage[0..len], bytes[0..len]);
+        self.terminal_diagnostic_len = len;
+        self.terminal_diagnostic_truncated = bytes.len != len;
+        return true;
     }
 
-    fn finishCancelledQueuedRun(self: *Session) void {
-        self.lock();
-        self.finishBeforeCoreCallLocked();
-        self.unlock();
+    fn takeTerminalResultLocked(
+        self: *Session,
+        abi_status: ?sdk.Status,
+        raw_status_code: ?u32,
+        stop_reason: ?sdk.StopReason,
+        raw_stop_reason_code: ?u32,
+        failure: ?TerminalFailure,
+    ) TerminalResult {
+        const storage = self.terminal_diagnostic orelse unreachable;
+        self.terminal_diagnostic = null;
+        return .{
+            .allocator = self.agent_runtime.allocator,
+            .diagnostic_storage = storage,
+            .diagnostic_len = self.terminal_diagnostic_len,
+            .diagnostic_truncated = self.terminal_diagnostic_truncated,
+            .abi_status = abi_status,
+            .raw_status_code = raw_status_code,
+            .stop_reason = stop_reason,
+            .raw_stop_reason_code = raw_stop_reason_code,
+            .abort_status = self.abort_status,
+            .raw_abort_status_code = self.raw_abort_status_code,
+            .termination_signal = self.termination_signal,
+            .failure = if (self.dependency_contract_failure)
+                .dependency_contract
+            else
+                failure,
+            .session_disposition_at_completion = switch (self.state) {
+                .poisoned => .poisoned,
+                .closing, .closed => .closing,
+                .idle, .queued, .running, .waiting_ui => .reusable,
+            },
+        };
     }
 
     fn deinit(self: *Session) void {
@@ -1161,6 +1301,7 @@ pub const Session = struct {
         self.control_block.deinit();
         self.agent_runtime.allocator.destroy(self.control_block);
         if (self.prompt) |prompt| self.agent_runtime.allocator.free(prompt);
+        if (self.terminal_diagnostic) |buffer| self.agent_runtime.allocator.free(buffer);
         if (self.ui_request_json) |json| self.agent_runtime.allocator.free(json);
         if (self.ui_response_json) |json| self.agent_runtime.allocator.free(json);
         self.agent_runtime.allocator.free(self.workspace_root);
@@ -1176,15 +1317,15 @@ pub const Session = struct {
         if (!self.retainCoreCallback(handle, run_id)) return wire.CALLBACK_FATAL;
         defer self.releaseReference();
         const encoded = sdk.borrowedBytes(event_json) catch {
-            self.recordCause(.event_pipeline_failure);
+            self.recordTerminationSignal(.{ .event_pump_failure = .invalid_event });
             return wire.CALLBACK_FATAL;
         };
         if (encoded.len > self.agent_runtime.max_event_bytes) {
-            self.recordCause(.queue_capacity_failure);
+            self.recordTerminationSignal(.{ .event_pump_failure = .event_too_large });
             return wire.CALLBACK_FATAL;
         }
         var parsed = sdk.decodeCoreEvent(self.agent_runtime.allocator, encoded) catch {
-            self.recordCause(.event_pipeline_failure);
+            self.recordTerminationSignal(.{ .event_pump_failure = .invalid_event });
             return wire.CALLBACK_FATAL;
         };
         switch (parsed.value) {
@@ -1196,7 +1337,7 @@ pub const Session = struct {
         }
         const owned_json = self.agent_runtime.allocator.dupe(u8, encoded) catch {
             parsed.deinit();
-            self.recordCause(.event_pipeline_failure);
+            self.recordTerminationSignal(.{ .event_pump_failure = .allocation });
             return wire.CALLBACK_FATAL;
         };
         var envelope = EventEnvelope{
@@ -1209,21 +1350,25 @@ pub const Session = struct {
         };
         self.agent_runtime.events.enqueueWithDeadline(envelope, self.agent_runtime.event_enqueue_timeout) catch |err| {
             envelope.deinit();
-            self.recordCause(switch (err) {
-                error.EventTooLarge,
+            self.recordTerminationSignal(.{ .event_pump_failure = switch (err) {
+                error.EventTooLarge => .event_too_large,
                 error.InvalidIdentity,
+                error.InvalidLimits,
+                => .invalid_event,
                 error.GlobalCapacity,
                 error.SessionCapacity,
                 error.SessionSlotCapacity,
                 error.SequenceExhausted,
-                error.InvalidLimits,
                 error.DeadlineExceeded,
-                => .queue_capacity_failure,
-            });
+                => .capacity,
+            } });
             return wire.CALLBACK_FATAL;
         };
-        if (self.agent_runtime.notifyEventConsumer() == .unavailable) {
-            self.recordCause(.event_pipeline_failure);
+        const notification_failed = self.agent_runtime.notifyEventConsumer() == .unavailable;
+        if (notification_failed) {
+            self.recordTerminationSignal(.{
+                .event_consumer_notification_failure = .unavailable,
+            });
             return wire.CALLBACK_FATAL;
         }
         return wire.CALLBACK_CONTINUE;
@@ -1238,39 +1383,39 @@ pub const Session = struct {
         if (out_response) |out| out.* = emptyOwnedBytes();
         const self: *Session = @ptrCast(@alignCast(context orelse return wire.UI_FATAL));
         const output = out_response orelse {
-            self.recordCause(.ui_pipeline_failure);
+            self.recordTerminationSignal(.{ .callback_failure = .ui });
             return wire.UI_FATAL;
         };
         if (!self.retainCoreCallback(handle, null)) return wire.UI_FATAL;
         defer self.releaseReference();
 
         const encoded_request = sdk.borrowedBytes(request_json) catch {
-            self.recordCause(.ui_pipeline_failure);
+            self.recordTerminationSignal(.{ .callback_failure = .ui });
             return wire.UI_FATAL;
         };
         if (encoded_request.len > self.agent_runtime.max_ui_request_bytes) {
-            self.recordCause(.queue_capacity_failure);
+            self.recordTerminationSignal(.{ .event_pump_failure = .event_too_large });
             return wire.UI_FATAL;
         }
         var parsed = sdk.decodeUiRequest(self.agent_runtime.allocator, encoded_request) catch {
-            self.recordCause(.ui_pipeline_failure);
+            self.recordTerminationSignal(.{ .callback_failure = .ui });
             return wire.UI_FATAL;
         };
         defer parsed.deinit();
         const owned_request = self.agent_runtime.allocator.dupe(u8, encoded_request) catch {
-            self.recordCause(.ui_pipeline_failure);
+            self.recordTerminationSignal(.{ .event_pump_failure = .allocation });
             return wire.UI_FATAL;
         };
 
         self.lock();
         if (self.state != .running or self.ui_active) {
-            setCauseLocked(self, .ui_pipeline_failure);
+            setTerminationSignalLocked(self, .{ .callback_failure = .ui });
             self.unlock();
             self.agent_runtime.allocator.free(owned_request);
             return wire.UI_FATAL;
         }
         if (self.ui_request_id == std.math.maxInt(u64)) {
-            setCauseLocked(self, .dependency_contract_failure);
+            self.dependency_contract_failure = true;
             self.unlock();
             self.agent_runtime.allocator.free(owned_request);
             return wire.UI_FATAL;
@@ -1288,9 +1433,12 @@ pub const Session = struct {
         self.broadcast();
         self.unlock();
 
-        if (self.agent_runtime.notifyEventConsumer() == .unavailable) {
+        const notification_failed = self.agent_runtime.notifyEventConsumer() == .unavailable;
+        if (notification_failed) {
             self.lock();
-            setCauseLocked(self, .event_pipeline_failure);
+            setTerminationSignalLocked(self, .{
+                .event_consumer_notification_failure = .unavailable,
+            });
             self.ui_active = false;
             if (self.state == .waiting_ui) self.state = .running;
             self.broadcast();
@@ -1302,7 +1450,7 @@ pub const Session = struct {
         while (self.ui_active and self.state == .waiting_ui)
             self.wait();
         if (self.state == .waiting_ui) self.state = .running;
-        const answered = self.ui_answered and self.cause == null and self.state != .closing;
+        const answered = self.ui_answered and self.termination_signal == null and self.state != .closing;
         const response = self.ui_response_json;
         self.ui_response_json = null;
         const request_copy = self.ui_request_json.?;
@@ -1319,14 +1467,14 @@ pub const Session = struct {
 
         if (answered) {
             const bytes = response orelse {
-                self.recordCause(.ui_pipeline_failure);
+                self.recordTerminationSignal(.{ .callback_failure = .ui });
                 return wire.UI_FATAL;
             };
             output.* = .{ .ptr = bytes.ptr, .len = bytes.len };
             return wire.UI_ANSWERED;
         }
         if (response) |bytes| self.agent_runtime.allocator.free(bytes);
-        return wire.UI_UNAVAILABLE;
+        return if (notification_failed) wire.UI_FATAL else wire.UI_UNAVAILABLE;
     }
 
     fn expireUiRequest(self: *Session, request_id: u64) std.Io.Cancelable!void {
@@ -1403,21 +1551,12 @@ fn pathWithin(parent: []const u8, child: []const u8) bool {
     return child.len > parent.len and child[parent.len] == std.fs.path.sep;
 }
 
-fn setCauseLocked(self: *Session, cause: HostCause) void {
-    if (self.cause == null) self.cause = cause;
+fn setTerminationSignalLocked(self: *Session, signal: TerminationSignal) void {
+    if (self.termination_signal == null) self.termination_signal = signal;
 }
 
 fn isRunProgressState(state: SessionState) bool {
     return state == .queued or state == .running or state == .waiting_ui;
-}
-
-fn applyStopReasonLocked(self: *Session, reason: sdk.StopReason) RunOutcome {
-    return switch (reason) {
-        .end_turn => .completed,
-        .max_turns, .tool_loop => .stopped,
-        .aborted => abortedOutcome(self.cause),
-        .tool_error, .api_error => .failed,
-    };
 }
 
 fn statusPoisonsSession(status: sdk.Status) bool {
@@ -1438,26 +1577,22 @@ fn statusPoisonsSession(status: sdk.Status) bool {
     };
 }
 
-fn abortedOutcome(cause: ?HostCause) RunOutcome {
-    const value = cause orelse return .failed;
-    return switch (value) {
-        .user_cancel, .timeout => .cancelled,
-        .session_close, .host_shutdown => .interrupted,
-        .event_pipeline_failure,
-        .queue_capacity_failure,
-        .ui_pipeline_failure,
-        .dependency_contract_failure,
-        => .failed,
-    };
-}
-
 fn allZero(values: []const u64) bool {
     for (values) |value| if (value != 0) return false;
     return true;
 }
 
-fn abortReason(cause: HostCause) u32 {
-    return if (cause == .timeout) wire.ABORT_TIMEOUT else wire.ABORT_USER_REQUEST;
+fn abortReason(signal: TerminationSignal) u32 {
+    return switch (signal) {
+        .interrupted => |interruption| if (interruption == .timeout)
+            wire.ABORT_TIMEOUT
+        else
+            wire.ABORT_USER_REQUEST,
+        .callback_failure,
+        .event_pump_failure,
+        .event_consumer_notification_failure,
+        => wire.ABORT_USER_REQUEST,
+    };
 }
 
 fn wakeUiLocked(self: *Session) void {

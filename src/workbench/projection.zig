@@ -1,5 +1,6 @@
 const std = @import("std");
 const sdk = @import("metacodes_agentcore");
+const wire = sdk.types;
 const lifecycle = @import("metawork_agent");
 const executor_impl = @import("workbench_executor");
 const contract_fixture = @import("workbench_contract_fixture");
@@ -58,6 +59,28 @@ const RunPhase = enum {
     cancelled,
     interrupted,
     failed,
+};
+
+const RunOutcome = enum {
+    completed,
+    stopped,
+    cancelled,
+    interrupted,
+    failed,
+    dependency_contract_failure,
+};
+
+/// Workbench-owned durable product cause. Wire spellings remain schema-v4
+/// compatible until the planned atomic Task schema migration.
+const RunCause = enum {
+    user_cancel,
+    timeout,
+    session_close,
+    host_shutdown,
+    event_pipeline_failure,
+    queue_capacity_failure,
+    ui_pipeline_failure,
+    dependency_contract_failure,
 };
 
 const TaskLifecycle = enum { open, closing, closed };
@@ -151,17 +174,18 @@ const RunTerminationDispatch = enum {
     session_closing,
 };
 
-comptime {
-    for (std.meta.fields(lifecycle.HostCause)) |field| {
-        if (field.value >= std.math.maxInt(u8))
-            @compileError("HostCause no longer fits pending_termination's cause-plus-one encoding");
-    }
-}
+const PendingInterruption = enum(u8) {
+    none,
+    user_cancel,
+    timeout,
+    session_close,
+    app_shutdown,
+};
 
 const TerminalPayload = struct {
     phase: RunPhase,
-    outcome: lifecycle.RunOutcome,
-    cause: ?lifecycle.HostCause,
+    outcome: RunOutcome,
+    cause: ?RunCause,
     diagnostic_len: usize = 0,
     diagnostic_truncated: bool = false,
 };
@@ -178,6 +202,7 @@ const RunRecord = struct {
     status_text: []u8,
     terminal_publication: std.atomic.Value(TerminalPublication) = .init(.open),
     terminal_payload: TerminalPayload = undefined,
+    terminal_observed: bool = false,
     terminal_diagnostic: []u8,
     next_activity_order: u64 = 1,
     workbench: *Workbench = undefined,
@@ -185,14 +210,8 @@ const RunRecord = struct {
     session: *lifecycle.Session = undefined,
     worker_reference_held: std.atomic.Value(bool) = .init(false),
     agent_handoff: std.atomic.Value(AgentHandoffState) = .init(.queued),
-    pending_termination: std.atomic.Value(u8) = .init(0),
+    pending_termination: std.atomic.Value(PendingInterruption) = .init(.none),
     run_control: lifecycle.RunControl = undefined,
-};
-
-const CloseTerminalFacts = struct {
-    run_id: u64,
-    outcome: ?lifecycle.RunOutcome,
-    cause: ?lifecycle.HostCause,
 };
 
 const UiRecordKind = enum { ask_question, permission };
@@ -241,7 +260,6 @@ const SessionView = struct {
     state: lifecycle.SessionState = .idle,
     active_run_id: u64 = 0,
     closing_session: ?*lifecycle.Session = null,
-    close_terminal_facts: ?CloseTerminalFacts = null,
     close_thread: ?std.Thread = null,
     close_result: std.atomic.Value(CloseResult) = .init(.none),
     close_failed: bool = false,
@@ -410,11 +428,7 @@ pub const Workbench = struct {
             .execute_fn = executeRunJob,
             .cancel_fn = cancelRunJobForShutdown,
         }) catch |err| {
-            const cause: lifecycle.HostCause = switch (err) {
-                error.QueueFull => .queue_capacity_failure,
-                error.ExecutorShuttingDown => .host_shutdown,
-            };
-            cancelPreparedRunOrPanic(session, run_id, cause);
+            cancelPreparedRunOrPanic(session, run_id);
             releaseWorkerReference(run);
             return err;
         };
@@ -448,11 +462,17 @@ pub const Workbench = struct {
         const session = view.session orelse
             return error.SessionClosing;
         const record = self.prepareCancelledUiRecord(session, run_id);
-        const dispatch: RunTerminationDispatch = if (self.executor.cancel(run)) dispatch: {
-            cancelPreparedRunOrPanic(session, run_id, .user_cancel);
+        if (self.executor.cancel(run)) {
+            cancelPreparedRunOrPanic(session, run_id);
             releaseWorkerReference(run);
-            break :dispatch .requested;
-        } else requestRunTermination(run, .user_cancel);
+            _ = commitTerminal(run, .cancelled, .cancelled, .user_cancel, "", false);
+            run.terminal_observed = true;
+            if (record) |value| self.pushUiRecord(view, value);
+            view.cancel_requested = false;
+            self.bumpRevision();
+            return;
+        }
+        const dispatch = requestRunTermination(run, .user_cancel);
         const stopping = switch (dispatch) {
             .pending, .requested, .already_requested => true,
             .already_finishing, .already_terminal, .stale_run, .session_closing => false,
@@ -492,8 +512,10 @@ pub const Workbench = struct {
         const cancelled_ui = self.prepareCancelledUiRecord(session, view.active_run_id);
         if (findRun(view.runs, view.active_run_id)) |run| {
             if (self.executor.cancel(run)) {
-                cancelPreparedRunOrPanic(session, view.active_run_id, .session_close);
+                cancelPreparedRunOrPanic(session, view.active_run_id);
                 releaseWorkerReference(run);
+                _ = commitTerminal(run, .interrupted, .interrupted, .session_close, "", false);
+                run.terminal_observed = true;
             } else consumeLifecycleTermination(
                 requestRunTermination(run, .session_close),
                 run.id,
@@ -507,7 +529,6 @@ pub const Workbench = struct {
             if (!isTerminalPhase(runPhase(run))) setActivePhase(run, .stopping);
         }
         view.close_failed = false;
-        view.close_terminal_facts = null;
         view.close_result.store(.running, .release);
         view.close_thread = std.Thread.spawn(.{}, closeWorker, .{ self.agent_runtime, view, session }) catch |err| {
             view.close_result.store(.none, .release);
@@ -588,13 +609,6 @@ pub const Workbench = struct {
                 view.closing_session = null;
                 view.close_result.store(.none, .release);
                 if (close_result == .closed) {
-                    if (view.close_terminal_facts) |facts| {
-                        if (facts.outcome) |outcome| {
-                            if (findRun(view.runs, facts.run_id)) |run| {
-                                changed = commitTerminal(run, phaseForOutcome(outcome), outcome, facts.cause, "") or changed;
-                            }
-                        }
-                    }
                     view.state = .closed;
                     view.session = null;
                     view.close_failed = false;
@@ -607,7 +621,6 @@ pub const Workbench = struct {
                     view.close_failed = true;
                     view.cancel_requested = false;
                 }
-                view.close_terminal_facts = null;
                 changed = true;
             }
             const session = view.session orelse continue;
@@ -622,23 +635,29 @@ pub const Workbench = struct {
                 }
                 changed = true;
             }
-            if (snapshot.last_outcome != null or snapshot.state == .idle or snapshot.state == .closed)
-                view.cancel_requested = false;
             if (view.state != snapshot.state or view.active_run_id != snapshot.active_run_id) {
                 view.state = snapshot.state;
                 view.active_run_id = snapshot.active_run_id;
                 changed = true;
             }
             const run = findRun(view.runs, snapshot.active_run_id) orelse continue;
+            if (terminalPayload(run) != null) {
+                view.cancel_requested = false;
+                if (!run.terminal_observed) {
+                    run.terminal_observed = true;
+                    changed = true;
+                }
+                continue;
+            }
             const next_phase: RunPhase = if (view.cancel_requested and
-                snapshot.last_outcome == null and
                 snapshot.state != .idle and snapshot.state != .closed)
                 .stopping
+            else if (snapshot.state == .idle or snapshot.state == .poisoned or
+                snapshot.state == .closing or snapshot.state == .closed)
+                run.active_phase
             else
                 phaseFor(snapshot);
-            if (snapshot.last_outcome) |outcome| {
-                changed = commitTerminal(run, phaseForOutcome(outcome), outcome, snapshot.cause, "") or changed;
-            } else if (runPhase(run) != next_phase) {
+            if (runPhase(run) != next_phase) {
                 setActivePhase(run, next_phase);
                 changed = true;
             }
@@ -736,11 +755,13 @@ pub const Workbench = struct {
             const run = findRun(view.runs, view.active_run_id) orelse continue;
             if (isTerminalPhase(runPhase(run))) continue;
             if (self.executor.cancel(run)) {
-                cancelPreparedRunOrPanic(session, run.id, .host_shutdown);
+                cancelPreparedRunOrPanic(session, run.id);
                 releaseWorkerReference(run);
+                _ = commitTerminal(run, .interrupted, .interrupted, .host_shutdown, "", false);
+                run.terminal_observed = true;
             } else {
                 consumeLifecycleTermination(
-                    requestRunTermination(run, .host_shutdown),
+                    requestRunTermination(run, .app_shutdown),
                     run.id,
                 );
             }
@@ -801,8 +822,14 @@ pub const Workbench = struct {
         defer pending.deinit();
         var parsed = sdk.decodeUiRequest(self.allocator, pending.json) catch return error.InvalidUiResponse;
         defer parsed.deinit();
-        if (view.pending_ui_request_id != pending.request_id or view.pending_ui_order == 0)
-            return error.NoSuchRun;
+        // The synchronous callback may publish between lifecycle reconciliation
+        // and serialization. Omit that just-arrived request from this snapshot;
+        // its notification drives the next revision instead of failing the
+        // whole product snapshot on a benign observation race.
+        if (view.pending_ui_request_id != pending.request_id or view.pending_ui_order == 0) {
+            writer.writeAll("null") catch return error.SnapshotTooLarge;
+            return;
+        }
         try self.writePendingUiProjection(
             writer,
             pending.request_id,
@@ -1283,12 +1310,6 @@ fn closeWorker(
 ) void {
     const result: CloseResult = close: {
         session.close(.session_close) catch break :close .failed;
-        const snapshot = session.snapshot();
-        view.close_terminal_facts = .{
-            .run_id = snapshot.active_run_id,
-            .outcome = snapshot.last_outcome,
-            .cause = snapshot.cause,
-        };
         agent_runtime.releaseClosedSession(session) catch break :close .failed;
         break :close .closed;
     };
@@ -1305,8 +1326,9 @@ fn executeRunJob(context: *anyopaque) void {
         .acquire,
     );
     std.debug.assert(claimed == null);
-    var agent_run = run.session.beginRun(run.id) catch {
+    var agent_run = run.session.beginRun(run.id) catch |err| {
         run.agent_handoff.store(.finishing, .release);
+        commitBeginFailure(run, err);
         const notifier = run.workbench.change_notifier;
         releaseWorkerReference(run);
         _ = notifier.notify();
@@ -1314,10 +1336,10 @@ fn executeRunJob(context: *anyopaque) void {
     };
     run.run_control = agent_run.control();
     run.agent_handoff.store(.running, .release);
-    if (run.pending_termination.load(.acquire) != 0) {
+    if (run.pending_termination.load(.acquire) != .none) {
         if (run.run_control.tryAcquireLease()) |lease_value| {
             var lease = lease_value;
-            const result = lease.requestTermination(pendingTerminationCause(run));
+            const result = lease.requestTermination(pendingTerminationSignal(run));
             lease.deinit();
             if (result == .stale_run) std.debug.panic(
                 "newly published RunControl for Run {d} was already stale",
@@ -1325,17 +1347,22 @@ fn executeRunJob(context: *anyopaque) void {
             );
         }
     }
-    agent_run.execute();
+    var terminal = agent_run.execute();
     run.agent_handoff.store(.finishing, .release);
+    _ = commitAgentTerminal(run, &terminal);
+    terminal.deinit();
     agent_run.deinit();
     const notifier = run.workbench.change_notifier;
     releaseWorkerReference(run);
     _ = notifier.notify();
 }
 
-fn requestRunTermination(run: *RunRecord, cause: lifecycle.HostCause) RunTerminationDispatch {
-    const encoded = encodePendingTerminationCause(cause);
-    _ = run.pending_termination.cmpxchgStrong(0, encoded, .acq_rel, .acquire);
+fn requestRunTermination(
+    run: *RunRecord,
+    interruption: lifecycle.ExternalInterruption,
+) RunTerminationDispatch {
+    const pending = pendingInterruption(interruption);
+    _ = run.pending_termination.cmpxchgStrong(.none, pending, .acq_rel, .acquire);
     switch (run.agent_handoff.load(.acquire)) {
         .queued, .starting => return .pending,
         .finishing => return .already_finishing,
@@ -1344,7 +1371,7 @@ fn requestRunTermination(run: *RunRecord, cause: lifecycle.HostCause) RunTermina
     const lease_value = run.run_control.tryAcquireLease() orelse return .already_finishing;
     var lease = lease_value;
     defer lease.deinit();
-    return switch (lease.requestTermination(pendingTerminationCause(run))) {
+    return switch (lease.requestTermination(pendingTerminationSignal(run))) {
         .requested => .requested,
         .already_requested => .already_requested,
         .already_terminal => .already_terminal,
@@ -1369,19 +1396,29 @@ fn consumeLifecycleTermination(dispatch: RunTerminationDispatch, run_id: u64) vo
     }
 }
 
-fn encodePendingTerminationCause(cause: lifecycle.HostCause) u8 {
-    return @as(u8, @intCast(@intFromEnum(cause))) + 1;
+fn pendingInterruption(interruption: lifecycle.ExternalInterruption) PendingInterruption {
+    return switch (interruption) {
+        .user_cancel => .user_cancel,
+        .session_close => .session_close,
+        .app_shutdown => .app_shutdown,
+        .timeout => .timeout,
+    };
 }
 
-fn pendingTerminationCause(run: *const RunRecord) lifecycle.HostCause {
-    const encoded = run.pending_termination.load(.acquire);
-    std.debug.assert(encoded != 0);
-    return @enumFromInt(encoded - 1);
+fn pendingTerminationSignal(run: *const RunRecord) lifecycle.TerminationSignal {
+    return .{ .interrupted = switch (run.pending_termination.load(.acquire)) {
+        .none => unreachable,
+        .user_cancel => .user_cancel,
+        .timeout => .timeout,
+        .session_close => .session_close,
+        .app_shutdown => .app_shutdown,
+    } };
 }
 
 fn cancelRunJobForShutdown(context: *anyopaque) void {
     const run: *RunRecord = @ptrCast(@alignCast(context));
-    cancelPreparedRunOrPanic(run.session, run.id, .host_shutdown);
+    cancelPreparedRunOrPanic(run.session, run.id);
+    _ = commitTerminal(run, .interrupted, .interrupted, .host_shutdown, "", false);
     const notifier = run.workbench.change_notifier;
     releaseWorkerReference(run);
     _ = notifier.notify();
@@ -1390,9 +1427,8 @@ fn cancelRunJobForShutdown(context: *anyopaque) void {
 fn cancelPreparedRunOrPanic(
     session: *lifecycle.Session,
     run_id: u64,
-    cause: lifecycle.HostCause,
 ) void {
-    session.cancelPreparedRun(run_id, cause) catch |err| std.debug.panic(
+    session.cancelPreparedRun(run_id) catch |err| std.debug.panic(
         "Executor removed queued Run {d}, but Agent rejected prepared cancellation: {s}",
         .{ run_id, @errorName(err) },
     );
@@ -1414,12 +1450,12 @@ fn phaseFor(snapshot: lifecycle.SessionSnapshot) RunPhase {
         .queued => .queued,
         .running => .running,
         .waiting_ui => .waiting_ui,
-        .closing => if (snapshot.last_outcome) |outcome| phaseForOutcome(outcome) else .running,
-        .idle, .poisoned, .closed => if (snapshot.last_outcome) |outcome| phaseForOutcome(outcome) else .queued,
+        .closing => .running,
+        .idle, .poisoned, .closed => .queued,
     };
 }
 
-fn phaseForOutcome(outcome: lifecycle.RunOutcome) RunPhase {
+fn phaseForOutcome(outcome: RunOutcome) RunPhase {
     return switch (outcome) {
         .completed => .completed,
         .stopped => .stopped,
@@ -1432,9 +1468,10 @@ fn phaseForOutcome(outcome: lifecycle.RunOutcome) RunPhase {
 fn commitTerminal(
     run: *RunRecord,
     phase: RunPhase,
-    outcome: lifecycle.RunOutcome,
-    cause: ?lifecycle.HostCause,
+    outcome: RunOutcome,
+    cause: ?RunCause,
     diagnostic: []const u8,
+    source_diagnostic_truncated: bool,
 ) bool {
     std.debug.assert(isTerminalPhase(phase));
     if (run.terminal_publication.cmpxchgStrong(.open, .publishing, .acq_rel, .acquire) == null) {
@@ -1445,13 +1482,124 @@ fn commitTerminal(
             .outcome = outcome,
             .cause = cause,
             .diagnostic_len = diagnostic_len,
-            .diagnostic_truncated = diagnostic_len != diagnostic.len,
+            .diagnostic_truncated = source_diagnostic_truncated or diagnostic_len != diagnostic.len,
         };
         run.terminal_publication.store(.published, .release);
         return true;
     }
     _ = terminalPayload(run).?;
     return false;
+}
+
+const TerminalDecision = struct {
+    phase: RunPhase,
+    outcome: RunOutcome,
+    cause: ?RunCause,
+};
+
+fn commitAgentTerminal(run: *RunRecord, result: *const lifecycle.TerminalResult) bool {
+    const decision = classifyAgentTerminal(result);
+    return commitTerminal(
+        run,
+        decision.phase,
+        decision.outcome,
+        decision.cause,
+        result.diagnostic(),
+        result.diagnostic_truncated,
+    );
+}
+
+fn classifyAgentTerminal(result: *const lifecycle.TerminalResult) TerminalDecision {
+    if (result.failure == .dependency_contract) return .{
+        .phase = .failed,
+        .outcome = .dependency_contract_failure,
+        .cause = .dependency_contract_failure,
+    };
+    if (result.failure == .abi_status) return .{
+        .phase = .failed,
+        .outcome = .failed,
+        .cause = if (result.termination_signal) |signal| causeForSignal(signal) else null,
+    };
+    if (result.stop_reason) |reason| return switch (reason) {
+        .end_turn => .{ .phase = .completed, .outcome = .completed, .cause = null },
+        .max_turns, .tool_loop => .{ .phase = .stopped, .outcome = .stopped, .cause = null },
+        .aborted => decisionForSignal(result.termination_signal),
+        .tool_error, .api_error => .{
+            .phase = .failed,
+            .outcome = .failed,
+            .cause = if (result.termination_signal) |signal| causeForSignal(signal) else null,
+        },
+    };
+    if (result.termination_signal != null and result.raw_status_code == null)
+        return decisionForSignal(result.termination_signal);
+    return .{
+        .phase = .failed,
+        .outcome = .dependency_contract_failure,
+        .cause = .dependency_contract_failure,
+    };
+}
+
+fn decisionForSignal(signal: ?lifecycle.TerminationSignal) TerminalDecision {
+    const value = signal orelse return .{ .phase = .failed, .outcome = .failed, .cause = null };
+    return switch (value) {
+        .interrupted => |interruption| switch (interruption) {
+            .user_cancel, .timeout => .{
+                .phase = .cancelled,
+                .outcome = .cancelled,
+                .cause = causeForSignal(value),
+            },
+            .session_close, .app_shutdown => .{
+                .phase = .interrupted,
+                .outcome = .interrupted,
+                .cause = causeForSignal(value),
+            },
+        },
+        .callback_failure,
+        .event_pump_failure,
+        .event_consumer_notification_failure,
+        => .{ .phase = .failed, .outcome = .failed, .cause = causeForSignal(value) },
+    };
+}
+
+fn causeForSignal(signal: lifecycle.TerminationSignal) RunCause {
+    return switch (signal) {
+        .interrupted => |interruption| switch (interruption) {
+            .user_cancel => .user_cancel,
+            .timeout => .timeout,
+            .session_close => .session_close,
+            .app_shutdown => .host_shutdown,
+        },
+        .callback_failure => |failure| switch (failure) {
+            .event => .event_pipeline_failure,
+            .ui => .ui_pipeline_failure,
+        },
+        .event_pump_failure => |failure| switch (failure) {
+            .event_too_large, .capacity => .queue_capacity_failure,
+            .invalid_event, .allocation, .consumer_rejected => .event_pipeline_failure,
+        },
+        .event_consumer_notification_failure => .event_pipeline_failure,
+    };
+}
+
+fn commitBeginFailure(run: *RunRecord, err: lifecycle.Error) void {
+    const pending = run.pending_termination.load(.acquire);
+    if (pending != .none) {
+        const decision = decisionForSignal(pendingTerminationSignal(run));
+        _ = commitTerminal(run, decision.phase, decision.outcome, decision.cause, "", false);
+        return;
+    }
+    if (err == error.SessionClosing) {
+        _ = commitTerminal(run, .interrupted, .interrupted, .session_close, "", false);
+        return;
+    }
+    _ = commitTerminal(
+        run,
+        .failed,
+        .dependency_contract_failure,
+        .dependency_contract_failure,
+        "",
+        false,
+    );
 }
 
 fn terminalPayload(run: *const RunRecord) ?*const TerminalPayload {
@@ -1658,8 +1806,11 @@ fn worstCaseSnapshotBytes(limits: Limits) ?usize {
     return total;
 }
 
+var test_agent_runtime: lifecycle.Runtime = undefined;
+
 fn testWorkbench() !Workbench {
-    var workbench = try Workbench.init(std.testing.allocator, undefined, .{
+    test_agent_runtime.io = std.testing.io;
+    var workbench = try Workbench.init(std.testing.allocator, &test_agent_runtime, .{
         .max_sessions = 2,
         .max_runs_per_session = 2,
         .max_tools_per_run = 2,
@@ -1744,7 +1895,7 @@ test "Task metadata mutations preserve lifecycle guards and projection accountin
     workbench.sessions[0].?.state = .idle;
     workbench.sessions[0].?.active_run_id = 0;
     const completed = &workbench.sessions[0].?.runs[0].?;
-    _ = commitTerminal(completed, .completed, .completed, null, "");
+    _ = commitTerminal(completed, .completed, .completed, null, "", false);
     try workbench.setTaskArchived(3, true);
     try std.testing.expect(workbench.sessions[0].?.archived);
 
@@ -1792,18 +1943,68 @@ test "terminal publication is allocation-free write-once bounded history" {
     defer std.testing.allocator.free(diagnostic);
     @memset(diagnostic, 'x');
 
-    try std.testing.expect(commitTerminal(run, .failed, .failed, .event_pipeline_failure, diagnostic));
+    try std.testing.expect(commitTerminal(run, .failed, .failed, .event_pipeline_failure, diagnostic, false));
     const terminal = terminalPayload(run).?;
     try std.testing.expectEqual(RunPhase.failed, terminal.phase);
-    try std.testing.expectEqual(lifecycle.RunOutcome.failed, terminal.outcome);
-    try std.testing.expectEqual(@as(?lifecycle.HostCause, .event_pipeline_failure), terminal.cause);
+    try std.testing.expectEqual(RunOutcome.failed, terminal.outcome);
+    try std.testing.expectEqual(@as(?RunCause, .event_pipeline_failure), terminal.cause);
     try std.testing.expectEqual(run.terminal_diagnostic.len, terminal.diagnostic_len);
     try std.testing.expect(terminal.diagnostic_truncated);
     try std.testing.expectEqualSlices(u8, diagnostic[0..run.terminal_diagnostic.len], run.terminal_diagnostic);
-    try std.testing.expect(!commitTerminal(run, .failed, .failed, .event_pipeline_failure, diagnostic));
-    try std.testing.expect(!commitTerminal(run, .interrupted, .interrupted, .session_close, "late mutation"));
-    try std.testing.expectEqual(lifecycle.RunOutcome.failed, terminalPayload(run).?.outcome);
-    try std.testing.expectEqual(@as(?lifecycle.HostCause, .event_pipeline_failure), terminalPayload(run).?.cause);
+    try std.testing.expect(!commitTerminal(run, .failed, .failed, .event_pipeline_failure, diagnostic, false));
+    try std.testing.expect(!commitTerminal(run, .interrupted, .interrupted, .session_close, "late mutation", false));
+    try std.testing.expectEqual(RunOutcome.failed, terminalPayload(run).?.outcome);
+    try std.testing.expectEqual(@as(?RunCause, .event_pipeline_failure), terminalPayload(run).?.cause);
+}
+
+test "Agent terminal facts map once into Workbench product outcomes" {
+    var terminal = lifecycle.TerminalResult{
+        .allocator = std.testing.allocator,
+        .diagnostic_storage = &.{},
+        .diagnostic_len = 0,
+        .diagnostic_truncated = false,
+        .abi_status = .ok,
+        .raw_status_code = wire.STATUS_OK,
+        .stop_reason = .end_turn,
+        .raw_stop_reason_code = wire.STOP_END_TURN,
+        .abort_status = null,
+        .raw_abort_status_code = null,
+        .termination_signal = null,
+        .failure = null,
+        .session_disposition_at_completion = .reusable,
+    };
+    try std.testing.expectEqual(
+        TerminalDecision{ .phase = .completed, .outcome = .completed, .cause = null },
+        classifyAgentTerminal(&terminal),
+    );
+
+    terminal.abi_status = null;
+    terminal.raw_status_code = null;
+    terminal.stop_reason = null;
+    terminal.raw_stop_reason_code = null;
+    terminal.termination_signal = .{ .interrupted = .user_cancel };
+    try std.testing.expectEqual(
+        TerminalDecision{ .phase = .cancelled, .outcome = .cancelled, .cause = .user_cancel },
+        classifyAgentTerminal(&terminal),
+    );
+
+    terminal.raw_status_code = wire.STATUS_CALLBACK_FAILED;
+    terminal.failure = .abi_status;
+    terminal.termination_signal = .{ .callback_failure = .ui };
+    try std.testing.expectEqual(
+        TerminalDecision{ .phase = .failed, .outcome = .failed, .cause = .ui_pipeline_failure },
+        classifyAgentTerminal(&terminal),
+    );
+
+    terminal.failure = .dependency_contract;
+    try std.testing.expectEqual(
+        TerminalDecision{
+            .phase = .failed,
+            .outcome = .dependency_contract_failure,
+            .cause = .dependency_contract_failure,
+        },
+        classifyAgentTerminal(&terminal),
+    );
 }
 
 test "Renderer transport failures never own Agent Run termination" {
@@ -1842,7 +2043,7 @@ test "delete waits for RunRef quiescence and stale generations fail validation" 
     const task = &workbench.sessions[0].?;
     task.state = .closed;
     task.active_run_id = 0;
-    _ = commitTerminal(&task.runs[0].?, .completed, .completed, null, "");
+    _ = commitTerminal(&task.runs[0].?, .completed, .completed, null, "", false);
 
     var run_ref = try workbench.acquireRunRef(3, 7);
     try std.testing.expect(run_ref.isCurrent());
@@ -2148,27 +2349,10 @@ test "Workbench rejects cross-session routes and usage overflow" {
     try std.testing.expectError(error.ProjectionCapacity, workbench.applyEvent(&overflow));
 }
 
-test "lifecycle outcomes map to truthful terminal product phases" {
-    const base = lifecycle.SessionSnapshot{
-        .session_id = 1,
-        .state = .idle,
-        .workspace_root = "/tmp",
-        .active_run_id = 1,
-        .pending_ui_request_id = null,
-        .cause = null,
-        .last_status = null,
-        .last_abort_status = null,
-        .last_stop_reason_code = null,
-        .last_outcome = .completed,
-    };
-    try std.testing.expectEqual(RunPhase.completed, phaseFor(base));
-    var value = base;
-    value.last_outcome = .stopped;
-    try std.testing.expectEqual(RunPhase.stopped, phaseFor(value));
-    value.last_outcome = .cancelled;
-    try std.testing.expectEqual(RunPhase.cancelled, phaseFor(value));
-    value.last_outcome = .interrupted;
-    try std.testing.expectEqual(RunPhase.interrupted, phaseFor(value));
-    value.last_outcome = .dependency_contract_failure;
-    try std.testing.expectEqual(RunPhase.failed, phaseFor(value));
+test "Workbench outcomes map to truthful terminal product phases" {
+    try std.testing.expectEqual(RunPhase.completed, phaseForOutcome(.completed));
+    try std.testing.expectEqual(RunPhase.stopped, phaseForOutcome(.stopped));
+    try std.testing.expectEqual(RunPhase.cancelled, phaseForOutcome(.cancelled));
+    try std.testing.expectEqual(RunPhase.interrupted, phaseForOutcome(.interrupted));
+    try std.testing.expectEqual(RunPhase.failed, phaseForOutcome(.dependency_contract_failure));
 }

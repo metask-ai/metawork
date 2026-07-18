@@ -4,7 +4,7 @@
 > 日期：2026-07-18
 > 适用范围：Zig Native 应用、React Renderer、metacodes AgentCore 集成与自动化构建边界
 
-实施进度：阶段 1、2 与 3 已落地；阶段 4 的 Executor ownership/handoff 以及 SessionControlBlock/RunControlLease 纵向切片已落地，Agent terminal model、schema v5、Bridge delivery extraction 与 automation build isolation 仍按后续切片推进。
+实施进度：阶段 1、2、3 与 4 已落地；Workbench 已独占 Executor，generation-checked RunControl、tagged termination latch、immutable Agent TerminalResult、Workbench no-fail terminal commit 和 pre-execution terminal record 已连通。schema v5、Bridge delivery extraction 与 automation build isolation 仍按后续切片推进。
 
 ## 1. 目的与决策
 
@@ -298,8 +298,10 @@ const cancel_pending = run.pending_termination.load(.acquire);
 
 if (cancel_pending != 0) forwardPendingTermination(run);
 
-agent_run.execute(); // transitional; TerminalResult 在本阶段下一切片接入
+var terminal = agent_run.execute();
+defer terminal.deinit();
 run.agent_handoff.store(.finishing, .release);
+commitAgentTerminal(run_record, terminal); // no allocation, write once
 agent_run.deinit(); // release execution base reference
 ```
 
@@ -554,9 +556,9 @@ root 应显式导出稳定消费表面，并让内部模块可以自由重构。
 
 | 当前实现 | 目标 |
 | --- | --- |
-| Workbench 已独占 Executor、queue、workers 与 shutdown；worker 已通过原子 `starting/running/finishing` handoff 调用 `beginRun()` + 唯一 latch-aware `Run.execute()` | 进一步让 `Run.execute()` 直接返回 immutable `TerminalResult`，删除 contract probe 使用的 transitional `executePreparedRun()` |
-| `HostCause` 仍混合 interruption、callback 和 contract failure，但已删除 Bridge transport | tagged termination + immutable terminal facts |
-| Workbench admission/durable RunRef/no-fail payload 已落地，terminal facts 仍从活 Session snapshot 同步 | Agent `TerminalResult` 直接提交，不回查 Session snapshot |
+| Workbench 已独占 Executor、queue、workers 与 shutdown；worker 通过原子 `starting/running/finishing` handoff 调用 `beginRun()` + 唯一 latch-aware `Run.execute()` | 已达成 |
+| Agent 使用 tagged `TerminationSignal`，callback/event-pump/notification 与 external interruption 分型；contract failure 是 terminal fact，不伪装成 abort | 已达成 |
+| Workbench admission/durable RunRef/no-fail payload 已落地，Agent `TerminalResult` 直接提交，terminal 后不回查 Session snapshot | 已达成 |
 | Workbench/Bridge 直接 import `metacodes_agentcore` | 只有 Agent 消费 SDK，其他模块通过 Agent/Workbench 公共类型 |
 | `sessions.*` 与 `tasks.*` 混用 | schema v5 原子迁移到 `tasks.*` |
 | automation handler/token 无条件编入 App source graph | `build.zig` 条件注入 automation module |
@@ -634,6 +636,7 @@ root 应显式导出稳定消费表面，并让内部模块可以自由重构。
 ### 阶段 6：Task schema v5
 
 - Zig、Renderer、fixtures、tests 原子切换 `tasks.*`；
+- 将 schema-v4 的 wire cause `host_shutdown` 原子改名为 `app_shutdown`，同步修改 Zig serializer、Renderer contracts/i18n、fixtures 与 tests；不保留别名或双写；
 - 冻结 cancel/close/archive/delete 语义；
 - snapshot schema 升级到 v5；
 - 不建立 TaskId/SessionId 双写或兼容层。

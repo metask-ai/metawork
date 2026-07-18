@@ -545,6 +545,7 @@ const TestHostLimits = struct {
     per_session_control_reserved_capacity: ?usize = null,
     max_ui_response_bytes: ?usize = null,
     ui_request_timeout: ?std.Io.Duration = null,
+    event_ready_notifier: ?lifecycle.EventReadyNotifier = null,
 
     fn hostLimits(self: @This()) lifecycle.Limits {
         var limits = lifecycle.Limits{ .max_sessions = self.max_sessions };
@@ -555,6 +556,7 @@ const TestHostLimits = struct {
         if (self.per_session_control_reserved_capacity) |value|
             limits.per_session_control_reserved_capacity = value;
         if (self.max_ui_response_bytes) |value| limits.max_ui_response_bytes = value;
+        limits.event_ready_notifier = self.event_ready_notifier;
         if (self.ui_request_timeout) |value| {
             limits.ui_request_timeout = value;
         } else if (std.fs.path.sep == '\\') {
@@ -567,10 +569,23 @@ const TestHostLimits = struct {
     }
 };
 
+fn unavailableEventConsumer(_: ?*anyopaque) lifecycle.EventReadyNotification {
+    return .unavailable;
+}
+
 const TestHostEntry = struct {
     runtime: *lifecycle.Runtime,
     executor: *workbench_executor.Executor,
     executor_shutdown: std.atomic.Value(enum(u8) { open, running, complete }) = .init(.open),
+    terminal_mutex: std.Io.Mutex = .init,
+    terminal_condition: std.Io.Condition = .init,
+    terminal_results: [64]?StoredTerminalResult = @splat(null),
+};
+
+const StoredTerminalResult = struct {
+    session_id: u64,
+    run_id: u64,
+    result: lifecycle.TerminalResult,
 };
 
 var test_host_entries: [32]?TestHostEntry = @splat(null);
@@ -601,6 +616,11 @@ fn unregisterTestHost(runtime: *lifecycle.Runtime) *workbench_executor.Executor 
     for (&test_host_entries) |*entry| {
         const value = entry.* orelse continue;
         if (value.runtime == runtime) {
+            const stored_entry = &entry.*.?;
+            for (&stored_entry.terminal_results) |*result| {
+                if (result.*) |*stored| stored.result.deinit();
+                result.* = null;
+            }
             entry.* = null;
             return value.executor;
         }
@@ -610,13 +630,17 @@ fn unregisterTestHost(runtime: *lifecycle.Runtime) *workbench_executor.Executor 
 
 fn executeTestRun(context: *anyopaque) void {
     const session: *lifecycle.Session = @ptrCast(@alignCast(context));
-    session.executePreparedRun();
+    const snapshot = session.snapshot();
+    var run = session.beginRun(snapshot.active_run_id) catch return;
+    const result = run.execute();
+    run.deinit();
+    storeTestTerminal(session, snapshot.active_run_id, result);
 }
 
 fn cancelTestRunForShutdown(context: *anyopaque) void {
     const session: *lifecycle.Session = @ptrCast(@alignCast(context));
     const run_id = session.snapshot().active_run_id;
-    session.cancelPreparedRun(run_id, .host_shutdown) catch {};
+    session.cancelPreparedRun(run_id) catch {};
 }
 
 fn submitSession(session: *lifecycle.Session, prompt: []const u8) !u64 {
@@ -626,27 +650,60 @@ fn submitSession(session: *lifecycle.Session, prompt: []const u8) !u64 {
         .execute_fn = executeTestRun,
         .cancel_fn = cancelTestRunForShutdown,
     }) catch |err| {
-        const cause: lifecycle.HostCause = switch (err) {
-            error.QueueFull => .queue_capacity_failure,
-            error.ExecutorShuttingDown => .host_shutdown,
-        };
-        session.cancelPreparedRun(run_id, cause) catch {};
+        session.cancelPreparedRun(run_id) catch {};
         return err;
     };
     return run_id;
 }
 
-fn cancelSession(session: *lifecycle.Session, run_id: u64, cause: lifecycle.HostCause) !void {
+fn cancelSession(
+    session: *lifecycle.Session,
+    run_id: u64,
+    interruption: lifecycle.ExternalInterruption,
+) !void {
     if (testExecutor(session.agent_runtime).cancel(session))
-        return session.cancelPreparedRun(run_id, cause);
-    return session.requestCancel(run_id, cause);
+        return session.cancelPreparedRun(run_id);
+    return session.requestTermination(run_id, .{ .interrupted = interruption });
 }
 
-fn closeSession(session: *lifecycle.Session, cause: lifecycle.HostCause) !void {
+fn closeSession(session: *lifecycle.Session, interruption: lifecycle.ExternalInterruption) !void {
     const snapshot = session.snapshot();
     if (snapshot.state == .queued and testExecutor(session.agent_runtime).cancel(session))
-        try session.cancelPreparedRun(snapshot.active_run_id, cause);
-    return session.close(cause);
+        try session.cancelPreparedRun(snapshot.active_run_id);
+    return session.close(interruption);
+}
+
+fn storeTestTerminal(
+    session: *lifecycle.Session,
+    run_id: u64,
+    result: lifecycle.TerminalResult,
+) void {
+    const entry = testHostEntry(session.agent_runtime);
+    entry.terminal_mutex.lockUncancelable(std.testing.io);
+    defer entry.terminal_mutex.unlock(std.testing.io);
+    for (&entry.terminal_results) |*slot| {
+        if (slot.* == null) {
+            slot.* = .{ .session_id = session.id, .run_id = run_id, .result = result };
+            entry.terminal_condition.broadcast(std.testing.io);
+            return;
+        }
+    }
+    std.debug.panic("test TerminalResult capacity exhausted", .{});
+}
+
+fn takeTestTerminal(session: *lifecycle.Session, run_id: u64) lifecycle.TerminalResult {
+    const entry = testHostEntry(session.agent_runtime);
+    entry.terminal_mutex.lockUncancelable(std.testing.io);
+    defer entry.terminal_mutex.unlock(std.testing.io);
+    while (true) {
+        for (&entry.terminal_results) |*slot| {
+            const stored = slot.* orelse continue;
+            if (stored.session_id != session.id or stored.run_id != run_id) continue;
+            slot.* = null;
+            return stored.result;
+        }
+        entry.terminal_condition.waitUncancelable(std.testing.io, &entry.terminal_mutex);
+    }
 }
 
 fn shutdownHost(runtime: *lifecycle.Runtime) !void {
@@ -733,7 +790,7 @@ fn cancelOnThread(session: *lifecycle.Session, run_id: u64) void {
 }
 
 fn failPipelineOnThread(session: *lifecycle.Session) void {
-    session.recordCause(.event_pipeline_failure);
+    session.recordTerminationSignal(.{ .event_pump_failure = .consumer_rejected });
 }
 
 fn shutdownOnThread(host: *lifecycle.Runtime) void {
@@ -751,12 +808,13 @@ test "RunControlLease remains safe after natural completion" {
     const run_id = try session.prepareRun("complete before the retained lease is released");
     var run = try session.beginRun(run_id);
     var lease = run.control().tryAcquireLease().?;
-    run.execute();
+    var terminal = run.execute();
+    defer terminal.deinit();
     run.deinit();
 
     try std.testing.expectEqual(
         lifecycle.TerminationRequestResult.already_terminal,
-        lease.requestTermination(.user_cancel),
+        lease.requestTermination(.{ .interrupted = .user_cancel }),
     );
     lease.deinit();
     try closeSession(session, .session_close);
@@ -774,17 +832,19 @@ test "RunControlLease rejects a stale generation after slot reuse" {
     const first_id = try session.prepareRun("first generation");
     var first = try session.beginRun(first_id);
     var stale = first.control().tryAcquireLease().?;
-    first.execute();
+    var first_terminal = first.execute();
+    defer first_terminal.deinit();
     first.deinit();
 
     const second_id = try session.prepareRun("second generation");
     var second = try session.beginRun(second_id);
     try std.testing.expectEqual(
         lifecycle.TerminationRequestResult.stale_run,
-        stale.requestTermination(.user_cancel),
+        stale.requestTermination(.{ .interrupted = .user_cancel }),
     );
     stale.deinit();
-    second.execute();
+    var second_terminal = second.execute();
+    defer second_terminal.deinit();
     second.deinit();
     try closeSession(session, .session_close);
 }
@@ -802,15 +862,18 @@ test "RunControlLease termination before execute avoids the Core call" {
     var lease = run.control().tryAcquireLease().?;
     try std.testing.expectEqual(
         lifecycle.TerminationRequestResult.requested,
-        lease.requestTermination(.user_cancel),
+        lease.requestTermination(.{ .interrupted = .user_cancel }),
     );
     lease.deinit();
-    run.execute();
+    var terminal = run.execute();
+    defer terminal.deinit();
     run.deinit();
 
-    const snapshot = session.snapshot();
-    try std.testing.expectEqual(@as(?u32, null), snapshot.last_status);
-    try std.testing.expectEqual(@as(?lifecycle.RunOutcome, .cancelled), snapshot.last_outcome);
+    try std.testing.expectEqual(@as(?u32, null), terminal.raw_status_code);
+    try std.testing.expectEqual(
+        lifecycle.TerminationSignal{ .interrupted = .user_cancel },
+        terminal.termination_signal.?,
+    );
     fake_core.lock();
     const run_calls = fake_core.run_calls;
     const abort_calls = fake_core.abort_calls;
@@ -832,7 +895,8 @@ test "RunControlLease close disables acquisition and waits for quiescence" {
     var run = try session.beginRun(run_id);
     const control = run.control();
     var lease = control.tryAcquireLease().?;
-    run.execute();
+    var terminal = run.execute();
+    terminal.deinit();
     run.deinit();
 
     const close_thread = try std.Thread.spawn(.{}, closeOnThread, .{session});
@@ -936,14 +1000,7 @@ test "bounded executor rejects overflow and close cancels a queued Run" {
 
     try closeSession(queued, .session_close);
     const queued_snapshot = queued.snapshot();
-    try std.testing.expectEqual(
-        @as(?lifecycle.HostCause, .session_close),
-        queued_snapshot.cause,
-    );
-    try std.testing.expectEqual(
-        @as(?lifecycle.RunOutcome, .interrupted),
-        queued_snapshot.last_outcome,
-    );
+    try std.testing.expectEqual(lifecycle.SessionState.closed, queued_snapshot.state);
     fake_core.lock();
     const calls_before_release = fake_core.run_calls;
     fake_core.unlock();
@@ -984,9 +1041,14 @@ test "pre-admission resource limit leaves the Session reusable" {
     const session = try openSession(host);
     const first_run = try submitSession(session, "exceed a Core resource limit");
     try session.waitRun(first_run);
+    var first_terminal = takeTestTerminal(session, first_run);
+    defer first_terminal.deinit();
     const first = session.snapshot();
-    try std.testing.expectEqual(@as(?u32, wire.STATUS_RESOURCE_LIMIT), first.last_status);
-    try std.testing.expectEqual(@as(?lifecycle.RunOutcome, .failed), first.last_outcome);
+    try std.testing.expectEqual(@as(?u32, wire.STATUS_RESOURCE_LIMIT), first_terminal.raw_status_code);
+    try std.testing.expectEqual(@as(?lifecycle.TerminalFailure, .abi_status), first_terminal.failure);
+    try std.testing.expectEqual(lifecycle.SessionDisposition.reusable, first_terminal.session_disposition_at_completion);
+    try std.testing.expectEqualSlices(u8, &.{diagnostic_byte}, first_terminal.diagnostic());
+    try std.testing.expect(!first_terminal.diagnostic_truncated);
     try std.testing.expectEqual(lifecycle.SessionState.idle, first.state);
 
     const second_run = try submitSession(session, "the Session remains admitted");
@@ -995,7 +1057,7 @@ test "pre-admission resource limit leaves the Session reusable" {
     try closeSession(session, .session_close);
 }
 
-test "closing an active Run aborts, joins, and preserves the first HostCause" {
+test "closing an active Run aborts, joins, and preserves the first termination signal" {
     fake_core.reset();
     fake_core.setNextPlan(.controlled_callback_failed);
     const host = try createHost(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
@@ -1013,11 +1075,16 @@ test "closing an active Run aborts, joins, and preserves the first HostCause" {
     failure_thread.join();
     try session.waitRun(run_id);
 
-    const before = session.snapshot();
-    try std.testing.expect(before.cause == .user_cancel or before.cause == .event_pipeline_failure);
-    try std.testing.expectEqual(@as(?u32, wire.STATUS_CALLBACK_FAILED), before.last_status);
-    session.recordCause(.timeout);
-    try std.testing.expectEqual(before.cause, session.snapshot().cause);
+    var terminal = takeTestTerminal(session, run_id);
+    defer terminal.deinit();
+    const signal = terminal.termination_signal.?;
+    try std.testing.expect(switch (signal) {
+        .interrupted => |value| value == .user_cancel,
+        .event_pump_failure => |value| value == .consumer_rejected,
+        else => false,
+    });
+    try std.testing.expectEqual(@as(?u32, wire.STATUS_CALLBACK_FAILED), terminal.raw_status_code);
+    session.recordTerminationSignal(.{ .interrupted = .timeout });
     try closeSession(session, .session_close);
     fake_core.lock();
     const abort_calls = fake_core.abort_calls;
@@ -1036,11 +1103,13 @@ test "malformed Core events fail the Run instead of entering the bounded sink" {
     const session = try openSession(host);
     const run_id = try submitSession(session, "emit malformed event");
     try session.waitRun(run_id);
+    var terminal = takeTestTerminal(session, run_id);
+    defer terminal.deinit();
     const snapshot = session.snapshot();
-    try std.testing.expectEqual(@as(?u32, wire.STATUS_CALLBACK_FAILED), snapshot.last_status);
+    try std.testing.expectEqual(@as(?u32, wire.STATUS_CALLBACK_FAILED), terminal.raw_status_code);
     try std.testing.expectEqual(
-        @as(?lifecycle.HostCause, .event_pipeline_failure),
-        snapshot.cause,
+        lifecycle.TerminationSignal{ .event_pump_failure = .invalid_event },
+        terminal.termination_signal.?,
     );
     try std.testing.expectEqual(lifecycle.SessionState.poisoned, snapshot.state);
     try std.testing.expectError(error.SessionPoisoned, submitSession(session, "must not continue"));
@@ -1071,9 +1140,11 @@ test "valid unknown observations are ignored without consuming pump capacity" {
     const session = try openSession(host);
     const run_id = try submitSession(session, "emit a future observation");
     try session.waitRun(run_id);
+    var terminal = takeTestTerminal(session, run_id);
+    defer terminal.deinit();
     const snapshot = session.snapshot();
-    try std.testing.expectEqual(@as(?u32, wire.STATUS_OK), snapshot.last_status);
-    try std.testing.expectEqual(@as(?lifecycle.RunOutcome, .completed), snapshot.last_outcome);
+    try std.testing.expectEqual(@as(?u32, wire.STATUS_OK), terminal.raw_status_code);
+    try std.testing.expectEqual(@as(?sdk.StopReason, .end_turn), terminal.stop_reason);
     try std.testing.expectEqual(lifecycle.SessionState.idle, snapshot.state);
     try std.testing.expect(host.takeEvent() == null);
     try closeSession(session, .session_close);
@@ -1098,15 +1169,17 @@ test "typed Core events are deep-copied into a bounded routed sink" {
     const session = try openSession(host);
     const first_run = try submitSession(session, "emit typed event");
     try session.waitRun(first_run);
-    const first_snapshot = session.snapshot();
-    try std.testing.expectEqual(@as(?u32, wire.STATUS_OK), first_snapshot.last_status);
-    try std.testing.expectEqual(@as(?u32, wire.STOP_END_TURN), first_snapshot.last_stop_reason_code);
-    try std.testing.expectEqual(@as(?lifecycle.RunOutcome, .completed), first_snapshot.last_outcome);
+    var first_terminal = takeTestTerminal(session, first_run);
+    defer first_terminal.deinit();
+    try std.testing.expectEqual(@as(?u32, wire.STATUS_OK), first_terminal.raw_status_code);
+    try std.testing.expectEqual(@as(?u32, wire.STOP_END_TURN), first_terminal.raw_stop_reason_code);
+    try std.testing.expectEqual(@as(?sdk.StopReason, .end_turn), first_terminal.stop_reason);
 
     const second_run = try submitSession(session, "preserve FIFO order");
     try session.waitRun(second_run);
-    const second_snapshot = session.snapshot();
-    try std.testing.expectEqual(@as(?lifecycle.RunOutcome, .completed), second_snapshot.last_outcome);
+    var second_terminal = takeTestTerminal(session, second_run);
+    defer second_terminal.deinit();
+    try std.testing.expectEqual(@as(?sdk.StopReason, .end_turn), second_terminal.stop_reason);
 
     var envelope = host.takeEvent().?;
     defer envelope.deinit();
@@ -1120,7 +1193,7 @@ test "typed Core events are deep-copied into a bounded routed sink" {
     try closeSession(session, .session_close);
 }
 
-test "bounded event sink overflow returns callback fatal and preserves HostCause" {
+test "bounded event sink overflow returns callback fatal and preserves the pump failure" {
     fake_core.reset();
     fake_core.setNextPlan(.event_callback);
     const host = try createHost(.{
@@ -1141,10 +1214,13 @@ test "bounded event sink overflow returns callback fatal and preserves HostCause
     try session.waitRun(first_run);
     const second_run = try submitSession(session, "overflow sink");
     try session.waitRun(second_run);
-    const snapshot = session.snapshot();
-    try std.testing.expectEqual(@as(?u32, wire.STATUS_CALLBACK_FAILED), snapshot.last_status);
-    try std.testing.expectEqual(@as(?lifecycle.HostCause, .queue_capacity_failure), snapshot.cause);
-    try std.testing.expectEqual(@as(?lifecycle.RunOutcome, .failed), snapshot.last_outcome);
+    var terminal = takeTestTerminal(session, second_run);
+    defer terminal.deinit();
+    try std.testing.expectEqual(@as(?u32, wire.STATUS_CALLBACK_FAILED), terminal.raw_status_code);
+    try std.testing.expectEqual(
+        lifecycle.TerminationSignal{ .event_pump_failure = .capacity },
+        terminal.termination_signal.?,
+    );
     var retained = host.takeEvent().?;
     retained.deinit();
     try closeSession(session, .session_close);
@@ -1185,11 +1261,17 @@ test "UI request validates identity and close wakes a suspended callback" {
     fake_core.setNextPlan(.ui_wait);
     const closing = try openSession(host);
     _ = try submitSession(closing, "close while UI waits");
+    const closing_run = closing.snapshot().active_run_id;
     try closing.waitForState(.waiting_ui);
     try closeSession(closing, .session_close);
+    var closing_terminal = takeTestTerminal(closing, closing_run);
+    defer closing_terminal.deinit();
     const snapshot = closing.snapshot();
     try std.testing.expectEqual(lifecycle.SessionState.closed, snapshot.state);
-    try std.testing.expectEqual(@as(?lifecycle.HostCause, .session_close), snapshot.cause);
+    try std.testing.expectEqual(
+        lifecycle.TerminationSignal{ .interrupted = .session_close },
+        closing_terminal.termination_signal.?,
+    );
 
     fake_core.setNextPlan(.ui_wait);
     const cancelled = try openSession(host);
@@ -1197,9 +1279,11 @@ test "UI request validates identity and close wakes a suspended callback" {
     try cancelled.waitForState(.waiting_ui);
     try cancelSession(cancelled, cancelled_run, .user_cancel);
     try cancelled.waitRun(cancelled_run);
+    var cancelled_terminal = takeTestTerminal(cancelled, cancelled_run);
+    defer cancelled_terminal.deinit();
     try std.testing.expectEqual(
-        @as(?lifecycle.HostCause, .user_cancel),
-        cancelled.snapshot().cause,
+        lifecycle.TerminationSignal{ .interrupted = .user_cancel },
+        cancelled_terminal.termination_signal.?,
     );
     try closeSession(cancelled, .session_close);
 }
@@ -1224,21 +1308,54 @@ test "UI deadline returns unavailable and malformed UI fails the Run" {
     try std.testing.expect(timed_out.pendingUiRequest() == null);
     fake_core.releaseControlled();
     try timed_out.waitRun(timeout_run);
-    try std.testing.expectEqual(
-        @as(?lifecycle.RunOutcome, .completed),
-        timed_out.snapshot().last_outcome,
-    );
+    var timeout_terminal = takeTestTerminal(timed_out, timeout_run);
+    defer timeout_terminal.deinit();
+    try std.testing.expectEqual(@as(?sdk.StopReason, .end_turn), timeout_terminal.stop_reason);
     try closeSession(timed_out, .session_close);
 
     fake_core.setNextPlan(.malformed_ui_callback);
     const malformed = try openSession(host);
     const malformed_run = try submitSession(malformed, "malformed UI request");
     try malformed.waitRun(malformed_run);
-    const malformed_snapshot = malformed.snapshot();
-    try std.testing.expectEqual(@as(?u32, wire.STATUS_CALLBACK_FAILED), malformed_snapshot.last_status);
-    try std.testing.expectEqual(@as(?lifecycle.HostCause, .ui_pipeline_failure), malformed_snapshot.cause);
-    try std.testing.expectEqual(@as(?lifecycle.RunOutcome, .failed), malformed_snapshot.last_outcome);
+    var malformed_terminal = takeTestTerminal(malformed, malformed_run);
+    defer malformed_terminal.deinit();
+    try std.testing.expectEqual(@as(?u32, wire.STATUS_CALLBACK_FAILED), malformed_terminal.raw_status_code);
+    try std.testing.expectEqual(
+        lifecycle.TerminationSignal{ .callback_failure = .ui },
+        malformed_terminal.termination_signal.?,
+    );
     try closeSession(malformed, .session_close);
+}
+
+test "UI notification failure is a typed fatal terminal signal" {
+    fake_core.reset();
+    fake_core.setNextPlan(.ui_wait);
+    const host = try createHost(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 1,
+        .event_ready_notifier = .{
+            .context = null,
+            .notify_fn = unavailableEventConsumer,
+        },
+    });
+    defer {
+        shutdownHost(host) catch unreachable;
+        deinitHost(host);
+    }
+    const session = try openSession(host);
+    const run_id = try submitSession(session, "notification cannot reach canonical consumer");
+    try session.waitRun(run_id);
+    var terminal = takeTestTerminal(session, run_id);
+    defer terminal.deinit();
+    try std.testing.expectEqual(@as(?u32, wire.STATUS_CALLBACK_FAILED), terminal.raw_status_code);
+    try std.testing.expectEqual(
+        lifecycle.TerminationSignal{
+            .event_consumer_notification_failure = .unavailable,
+        },
+        terminal.termination_signal.?,
+    );
+    try closeSession(session, .session_close);
 }
 
 test "Gate 6 all executor workers waiting on UI remain controllable" {
@@ -1298,9 +1415,11 @@ test "UI response encoding is bounded before ownership transfer" {
     try std.testing.expectEqual(request_id, session.pendingUiRequest().?);
     try cancelSession(session, run_id, .user_cancel);
     try session.waitRun(run_id);
+    var terminal = takeTestTerminal(session, run_id);
+    defer terminal.deinit();
     try std.testing.expectEqual(
-        @as(?lifecycle.RunOutcome, .cancelled),
-        session.snapshot().last_outcome,
+        lifecycle.TerminationSignal{ .interrupted = .user_cancel },
+        terminal.termination_signal.?,
     );
     try closeSession(session, .session_close);
 }
@@ -1327,16 +1446,14 @@ test "status is validated before RunResult and invalid results poison the Sessio
         const session = try openSession(host);
         const run_id = try submitSession(session, "validate result boundary");
         try session.waitRun(run_id);
+        var terminal = takeTestTerminal(session, run_id);
+        defer terminal.deinit();
         const snapshot = session.snapshot();
-        try std.testing.expectEqual(@as(?u32, case.expected_status), snapshot.last_status);
-        try std.testing.expectEqual(case.expected_stop, snapshot.last_stop_reason_code);
+        try std.testing.expectEqual(@as(?u32, case.expected_status), terminal.raw_status_code);
+        try std.testing.expectEqual(case.expected_stop, terminal.raw_stop_reason_code);
         try std.testing.expectEqual(
-            @as(?lifecycle.HostCause, .dependency_contract_failure),
-            snapshot.cause,
-        );
-        try std.testing.expectEqual(
-            @as(?lifecycle.RunOutcome, .dependency_contract_failure),
-            snapshot.last_outcome,
+            @as(?lifecycle.TerminalFailure, .dependency_contract),
+            terminal.failure,
         );
         try std.testing.expectEqual(lifecycle.SessionState.poisoned, snapshot.state);
         try std.testing.expectError(error.SessionPoisoned, submitSession(session, "must not continue"));
@@ -1600,7 +1717,9 @@ test "abort stale and too-late statuses remain observable without losing diagnos
     try cancelSession(session, first, .user_cancel);
     fake_core.releaseControlled();
     try session.waitRun(first);
-    try std.testing.expectEqual(@as(?u32, wire.STATUS_TOO_LATE), session.snapshot().last_abort_status);
+    var first_terminal = takeTestTerminal(session, first);
+    defer first_terminal.deinit();
+    try std.testing.expectEqual(@as(?u32, wire.STATUS_TOO_LATE), first_terminal.raw_abort_status_code);
 
     fake_core.rearmControlled();
     const second = try submitSession(session, "stale");
@@ -1610,16 +1729,22 @@ test "abort stale and too-late statuses remain observable without losing diagnos
     try cancelSession(session, second, .user_cancel);
     fake_core.releaseControlled();
     try session.waitRun(second);
-    try std.testing.expectEqual(@as(?u32, wire.STATUS_STALE_RUN), session.snapshot().last_abort_status);
+    var second_terminal = takeTestTerminal(session, second);
+    defer second_terminal.deinit();
+    try std.testing.expectEqual(@as(?u32, wire.STATUS_STALE_RUN), second_terminal.raw_abort_status_code);
 
     fake_core.rearmControlled();
     const third = try submitSession(session, "timeout");
     try session.waitForState(.running);
     try cancelSession(session, third, .timeout);
     try session.waitRun(third);
-    const timeout_snapshot = session.snapshot();
-    try std.testing.expectEqual(@as(?u32, wire.STATUS_OK), timeout_snapshot.last_abort_status);
-    try std.testing.expectEqual(@as(?lifecycle.HostCause, .timeout), timeout_snapshot.cause);
+    var timeout_terminal = takeTestTerminal(session, third);
+    defer timeout_terminal.deinit();
+    try std.testing.expectEqual(@as(?u32, wire.STATUS_OK), timeout_terminal.raw_abort_status_code);
+    try std.testing.expectEqual(
+        lifecycle.TerminationSignal{ .interrupted = .timeout },
+        timeout_terminal.termination_signal.?,
+    );
     try closeSession(session, .session_close);
 
     fake_core.lock();
@@ -1640,7 +1765,7 @@ test "concurrent Host shutdown serializes executor and Runtime destruction" {
     try std.testing.expect(session.retainReference());
     const first = try std.Thread.spawn(.{}, shutdownOnThread, .{host});
     try session.waitForState(.closing);
-    try std.testing.expectError(error.HostShuttingDown, submitSession(not_yet_closed, "too late"));
+    try std.testing.expectError(error.RuntimeShuttingDown, submitSession(not_yet_closed, "too late"));
     const second = try std.Thread.spawn(.{}, shutdownOnThread, .{host});
     std.Thread.yield() catch {};
     session.releaseReference();
@@ -2135,14 +2260,18 @@ test "post-callback canonical pipeline failure aborts the routed Run as failed" 
     const run_id = try submitSession(session, "fail after callback returned");
     try session.waitForState(.running);
     const session_id = session.snapshot().session_id;
-    try host.failRun(session_id, run_id, .event_pipeline_failure);
-    try session.waitRun(run_id);
-    const snapshot = session.snapshot();
-    try std.testing.expectEqual(
-        @as(?lifecycle.HostCause, .event_pipeline_failure),
-        snapshot.cause,
+    try host.requestRunTermination(
+        session_id,
+        run_id,
+        .{ .event_pump_failure = .consumer_rejected },
     );
-    try std.testing.expectEqual(@as(?lifecycle.RunOutcome, .failed), snapshot.last_outcome);
-    try std.testing.expectEqual(@as(?u32, wire.STATUS_OK), snapshot.last_abort_status);
+    try session.waitRun(run_id);
+    var terminal = takeTestTerminal(session, run_id);
+    defer terminal.deinit();
+    try std.testing.expectEqual(
+        lifecycle.TerminationSignal{ .event_pump_failure = .consumer_rejected },
+        terminal.termination_signal.?,
+    );
+    try std.testing.expectEqual(@as(?u32, wire.STATUS_OK), terminal.raw_abort_status_code);
     try closeSession(session, .session_close);
 }

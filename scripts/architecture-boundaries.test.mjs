@@ -172,3 +172,18 @@ test("Workbench hands running cancellation through generation-checked control", 
   const stoppingWrite = cancel.indexOf("setActivePhase(run, .stopping);");
   assert.ok(terminalNoOp >= 0 && terminalNoOp < stoppingWrite);
 });
+
+test("Agent terminal facts have one immutable handoff and no legacy history latch", () => {
+  const agent = read("src/agent/session.zig");
+  assert.match(agent, /pub const TerminationSignal = union\(enum\)/);
+  assert.match(agent, /pub const TerminalResult = struct/);
+  assert.match(agent, /pub fn execute\(self: \*Run\) TerminalResult/);
+  assert.doesNotMatch(
+    agent,
+    /HostCause|RunOutcome|executePreparedRun|last_outcome|last_status|last_abort_status|last_stop_reason_code/,
+  );
+
+  const workbench = read("src/workbench/projection.zig");
+  assert.match(workbench, /commitAgentTerminal\(run, &terminal\)/);
+  assert.doesNotMatch(workbench, /snapshot\.last_outcome|snapshot\.cause/);
+});

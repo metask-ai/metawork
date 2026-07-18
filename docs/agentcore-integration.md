@@ -61,7 +61,7 @@ AgentCore bundle
 - `src/agent/` 直接消费 `metacodes_agentcore`，不得 import Workbench、Bridge 或 App；
 - Workbench 只通过 `metawork_agent` 公共表面协调 Session/Run；
 - `src/main.zig` 只进入 `metawork_app`，不能绕过 App 组装低层模块；
-- 当前 `HostCause` 仍是待迁移现状；Executor、queue 与 workers 已归 Workbench 独占，Agent Runtime 不再接收 Scheduler capability。最终 terminal model 以 [架构调整实施方案](architecture-adjustment-plan.md) 为准。
+- Executor、queue 与 workers 归 Workbench 独占，Agent Runtime 不接收 Scheduler capability。Agent active Run 只保留 first-writer-wins `TerminationSignal`，并通过 immutable `TerminalResult` 向 Workbench 提交 terminal facts；Session snapshot 不保存历史结果。
 
 ## 3. 当前协议表面
 
@@ -191,9 +191,9 @@ Gate 2 的 raw lifecycle foundation 使用 bundle SDK 提供的精确 `ApiV1` ta
 
 Gate 4 在同一状态机上直接加入 bundle typed SDK，不另建 Adapter：event callback 先校验并形成 SDK-owned parse owner，再以单调 Host Session ID 和 Run ID 进入 FIFO bounded sink；UI callback 保留校验后的 request owner，response 只由 request-aware SDK encoder 生成。同步 UI deadline 使用 Host `std.Io` future，response、cancel、close、shutdown 或 deadline 都在 callback 返回前收敛并回收 timer。
 
-当前迁移阶段由 Workbench 预留 durable Run record、generation、tool slots 与 terminal diagnostic buffer，再调用 `Session.prepareRun()` 并把 Workbench-owned job 放入自身 bounded Executor。worker claim 后以原子 `starting` 状态调用 `Session.beginRun()`；成功后先发布 generation-bound `RunControl` 和 `running`，再调用唯一 latch-aware `Run.execute()`。cancel/close/shutdown 在 `starting` 时只发布 first-writer pending termination，在 `running` 时取得 `RunControlLease` 后于锁外请求终止。Agent Runtime 不 enqueue、不停止、也不销毁 Executor。
+当前实现由 Workbench 预留 durable Run record、generation、tool slots 与 terminal diagnostic buffer，再调用 `Session.prepareRun()` 并把 Workbench-owned job 放入自身 bounded Executor。worker claim 后以原子 `starting` 状态调用 `Session.beginRun()`；成功后先发布 generation-bound `RunControl` 和 `running`，再调用唯一 latch-aware `Run.execute()`。cancel/close/shutdown 在 `starting` 时只发布 first-writer pending termination，在 `running` 时取得 `RunControlLease` 后于锁外请求终止。Agent Runtime 不 enqueue、不停止、也不销毁 Executor。
 
-每个 Session 拥有独立分配、存活到 Session release 的 `SessionControlBlock`。`RunControlLease` 用 closed-bit + atomic reference count 保活该 control block，并携带单调 `run_generation`；旧 lease 在下一 Run 复用执行槽后返回 `stale_run`，Run 自然完成后返回 `already_terminal`。Session close 先关闭 lease acquisition gate，再等待 Run、callback 和全部 control lease 归零；该 quiescence wait 不持有 Session/Workbench lock。当前 terminal facts 仍从 Session snapshot 进入 Workbench write-once publication，下一 terminal-model 切片将改为 immutable `TerminalResult` 直接提交。`RunRef` 引用归零前，所属 Task 即使已关闭并请求删除也只进入 `delete_pending`。
+每个 Session 拥有独立分配、存活到 Session release 的 `SessionControlBlock`。`RunControlLease` 用 closed-bit + atomic reference count 保活该 control block，并携带单调 `run_generation`；旧 lease 在下一 Run 复用执行槽后返回 `stale_run`，Run 自然完成后返回 `already_terminal`。Session close 先关闭 lease acquisition gate，再等待 Run、callback 和全部 control lease 归零；该 quiescence wait 不持有 Session/Workbench lock。`Run.execute()` 返回 immutable `TerminalResult`，worker 在释放 execution base lease 前将它提交到 Workbench admission 时预留的 write-once terminal payload。`RunRef` 引用归零前，所属 Task 即使已关闭并请求删除也只进入 `delete_pending`。
 
 ### Close 顺序
 
@@ -202,7 +202,7 @@ Gate 4 在同一状态机上直接加入 bundle typed SDK，不另建 Adapter：
 2. reject new Run and UI response
 3. remove/cancel queued Run
 4. wake active synchronous UI wait
-5. set first-writer-wins HostCause if absent
+5. set first-writer-wins TerminationSignal if absent
 6. request abort for active Run
 7. join Run job
 8. wait callback refcount == 0
@@ -236,7 +236,7 @@ Gate 4 在同一状态机上直接加入 bundle typed SDK，不另建 Adapter：
 - runtime destroy while Session alive；
 - diagnostic/release callback 恰好一次。
 
-## 7. HostCause 与错误传播
+## 7. TerminationSignal、TerminalResult 与错误传播
 
 每个 Run 持有：
 
@@ -252,23 +252,16 @@ RunControl / RunControlLease
 └── requestTermination() → requested / already_requested / already_terminal / stale_run / session_closing
 ```
 
-HostCause 至少区分：
+`TerminationSignal` 是 active Run 唯一可变的 first-writer-wins latch，并按 execution failure domain 分型：external interruption、callback failure、event-pump failure、event-consumer-notification failure。dependency contract failure、ABI status 与 validated StopReason 是 terminal facts，不伪装成 abort cause。
 
-- user cancel；
-- timeout；
-- Session close；
-- Host shutdown；
-- event validation/copy failure；
-- queue/control capacity failure。
-
-当前 wire abort reason 只作为 AgentCore 中断机制，产品最终状态由 HostCause 与 ABI status/StopReason 共同决定。`bridge_pipeline_failure` 已从该 interim enum 删除；Renderer transport 不是 active Run cause，不得写入 Agent 中断状态。HostCause 中剩余的可变控制状态与 Workbench immutable terminal history 仍在 Executor/terminal-model 迁移阶段拆分。
+wire abort reason 只作为 AgentCore 中断机制。`TerminalResult` 同时保留 typed/raw ABI status、typed/raw StopReason、typed/raw abort status、最终 termination latch、completion-time Session disposition，以及 bounded owned diagnostic。产品 `RunOutcome` 与 durable cause 只由 Workbench 映射。Renderer transport 不是 active Run cause，不得写入 Agent termination latch。
 
 ### callback 内失败
 
 event validation、copy 或同步入队失败：
 
 ```text
-set HostCause if absent
+set typed TerminationSignal if absent
 → return CALLBACK_FATAL
 → session_run returns non-OK callback status
 → Host releases diagnostic
@@ -279,9 +272,9 @@ set HostCause if absent
 
 ### notification、projection 与 Renderer transport
 
-event 入泵后 ownership 已经转移给 Agent event pump。`EventReadyNotifier` 只返回 `scheduled`、`already_pending` 或 `unavailable`；App 当前将 Native `services.wake()` 映射为 `scheduled/unavailable`。`unavailable` 表示 canonical consumer 无法被通知，callback 返回 fatal 并记录 interim `event_pipeline_failure`；已 owned event 仍由 pump 负责释放，不得泄漏。
+event 入泵后 ownership 已经转移给 Agent event pump。`EventReadyNotifier` 只返回 `scheduled`、`already_pending` 或 `unavailable`；App 当前将 Native `services.wake()` 映射为 `scheduled/unavailable`。`unavailable` 表示 canonical consumer 无法被通知，callback 返回 fatal 并记录 typed `event_consumer_notification_failure`；已 owned event 仍由 pump 负责释放，不得泄漏。
 
-callback 返回后的 Workbench canonical projection failure 仍可以按 Run identity 请求 Agent 终止，当前迁移期使用 `event_pipeline_failure`；这不是 Bridge failure。Renderer event delivery、revision、snapshot、connection/generation 和 detached retention expiry 则形成 typed transport report，由 Workbench policy 决定 reject/retry/detach/discard。当前所有 Renderer transport stage 都明确不返回 `request_run_termination`；Renderer detach/reload 或 retention expiry 不得杀死后台 Run。
+callback 返回后的 Workbench canonical projection failure 仍可以按 Run identity 请求 Agent 终止，并使用不含 Workbench 名称的 `event_pump_failure.consumer_rejected`；这不是 Bridge failure。Renderer event delivery、revision、snapshot、connection/generation 和 detached retention expiry 则形成 typed transport report，由 Workbench policy 决定 reject/retry/detach/discard。当前所有 Renderer transport stage 都明确不返回 `request_run_termination`；Renderer detach/reload 或 retention expiry 不得杀死后台 Run。
 
 Bridge 异步 payload 必须是 owned copy 或显式 ownership transfer。Native SDK 在 platform loop 上串行执行同步 Bridge handler 与 `app.stop`；App 先关闭 ingress，用 callback lease 计数断言 quiescence，再 detach Workbench。Bridge retained JSON/batch 不借用 Workbench memory，因此在 Workbench deinit 后独立释放。
 
@@ -390,7 +383,7 @@ call ABI
 | -------------- | ---------------------------------------------------------------------- |
 | `end_turn`     | completed                                                              |
 | `max_turns`    | stopped / awaiting_user                                                |
-| `aborted`      | 迁移期 HostCause 决定 cancelled / interrupted / failed                  |
+| `aborted`      | `TerminalResult.termination_signal` 由 Workbench 映射为 cancelled / interrupted / failed |
 | `tool_error`   | failed                                                                 |
 | `api_error`    | failed                                                                 |
 | `tool_loop`    | stopped / awaiting_user                                                |
@@ -438,7 +431,7 @@ ABI status 新增 `resource_limit`。它与 pre-admission `invalid_argument`、`
 React stop command
 → Native SDK main thread handler
 → validate Session/Run
-→ set HostCause=user_cancel
+→ set TerminationSignal.interrupted=user_cancel
 → session_abort(run_id)
 → join synchronous run
 → publish terminal state

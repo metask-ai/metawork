@@ -188,7 +188,7 @@ SessionRuntime
 
 RunJob
 ├── run_id
-├── HostCause（迁移期 first writer wins，不包含 Renderer transport）
+├── pending external interruption（Workbench admission/handoff 窗口）
 ├── executor slot
 └── run-scoped Host scratch
 ```
@@ -226,7 +226,7 @@ RunJob
 - Run 的 running/waiting/stopped/completed/cancelled/failed/interrupted 状态；
 - WebView reload 所需的当前 Host view snapshot。
 
-Workbench 在 admission 时为每个 Run 建立稳定 record slot、单调 generation 和 bounded terminal diagnostic storage。执行方持有 `RunRef` 时，Task record 不得物理释放；删除已关闭 Task 只能进入 `delete_pending`，并在引用归零后收口。terminal publication 是无分配、write-once 的产品事实；当前迁移期仍可从 Session snapshot 取得 terminal facts，但一旦提交，后续 snapshot 只读 Workbench record，不接受 Session close 对历史 cause 的迟到改写。
+Workbench 在 admission 时为每个 Run 建立稳定 record slot、单调 generation 和 bounded terminal diagnostic storage。执行方持有 `RunRef` 时，Task record 不得物理释放；删除已关闭 Task 只能进入 `delete_pending`，并在引用归零后收口。Agent 对已开始的 Run 返回自包含、不可变的 `TerminalResult`；Workbench 将其无分配、write-once 地提交进 Run record。queued-before-execute 由 Workbench 直接生成 pre-execution 产品结果。Session snapshot 只描述 live lifecycle，不再承载历史 terminal facts。
 
 Renderer reload 只重建仍存活 Host 的视图。Host/AgentCore crash 后当前 Run 必须标记 interrupted，危险工具不得自动重放。Conversation/checkpoint 跨进程恢复只有在未来 AgentCore capability 明确提供后才能设计。
 

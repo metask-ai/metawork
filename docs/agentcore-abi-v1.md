@@ -73,7 +73,7 @@ Session close 的规范顺序是：
 mark Closing
 → reject new Run / cancel queued Run
 → wake synchronous UI wait
-→ set first-writer-wins HostCause
+→ set first-writer-wins TerminationSignal
 → request abort for active Run
 → join Run job
 → wait callback refcount == 0
@@ -200,11 +200,11 @@ status == OK
 | --- | --- |
 | `end_turn` | `completed` |
 | `max_turns` | `stopped` + `awaiting_user` |
-| `aborted` | 根据 first-writer-wins `HostCause` 映射 `cancelled` / `interrupted` / `failed` |
+| `aborted` | Workbench 根据 immutable `TerminalResult.termination_signal` 映射 `cancelled` / `interrupted` / `failed` |
 | `tool_error` | `failed` |
 | `api_error` | `failed` |
 | `tool_loop` | `stopped` + `awaiting_user` |
-wire abort reason 只提供当前 v1 的中断机制；用户取消、timeout、Host fatal 和 shutdown 的产品分类由迁移期 per-Run `HostCause` 记录。callback 内失败优先直接返回 callback fatal；callback 返回后只有 canonical event/projection failure 可以按 Run identity 请求 abort。Renderer/Bridge transport failure 由 Workbench policy 处理，不进入 `HostCause`。
+wire abort reason 只提供当前 v1 的中断机制；用户取消、timeout、Session close 和 application shutdown 进入 active Run 的 typed `TerminationSignal`。callback 内失败优先直接返回 callback fatal；callback 返回后只有 canonical event/projection failure 可以按 Run identity 请求 abort。`Run.execute()` 在 ABI 返回后产出同时包含 typed/raw status、StopReason、abort status 和最终 latch 的 immutable `TerminalResult`。Renderer/Bridge transport failure 由 Workbench policy 处理，不进入 Agent termination state。
 
 Status 还包括 `resource_limit`。pre-admission validation/resource-limit/busy/stale-run failure 保持 Session 可复用；admission 后的 `out_of_memory`、`core_error`、`callback_failed` 或 `internal_error` poison Session，之后的 Run/abort 返回 `invalid_state`，仅 destroy 仍有效。
 

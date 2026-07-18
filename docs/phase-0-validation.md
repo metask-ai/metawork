@@ -157,7 +157,7 @@ Gate 未通过时不得用 source dependency、MetaWork 自制协议、无界队
 reject new work
 → cancel queued Run
 → wake UI wait
-→ set first-writer-wins HostCause
+→ set first-writer-wins TerminationSignal
 → abort active Run
 → join
 → callback refcount == 0
@@ -194,7 +194,7 @@ AGENTCORE_BUNDLE_ROOT=/absolute/path/to/validated/bundle \
 
 需要同时执行仓库常规测试时使用同一个显式 bundle 环境运行 `npm run test:phase0a`；该命令不会在缺少 artifact 时静默跳过 Gate 2。
 
-当前 deterministic function-table fake 覆盖 bounded executor、每 Session 单 Run、queued/active/UI-wait close、并发 close/shutdown、callback quiescence、generation-checked RunControl lease、close lease quiescence、pre-Core termination、first-writer HostCause、stale/too-late abort status、Session/Runtime destroy retry、OOM、diagnostic release、credential snapshot 隔离和临时/trusted Workspace 的词法边界。测试进程有 30 秒上限，避免回归变成无限 CI hang。
+当前 deterministic function-table fake 覆盖 bounded executor、每 Session 单 Run、queued/active/UI-wait close、并发 close/shutdown、callback quiescence、generation-checked RunControl lease、close lease quiescence、pre-Core termination、first-writer typed TerminationSignal、immutable TerminalResult、stale/too-late abort status、Session/Runtime destroy retry、OOM、diagnostic release、credential snapshot 隔离和临时/trusted Workspace 的词法边界。测试进程有 30 秒上限，避免回归变成无限 CI hang。
 
 这仍是 Gate 2 raw lifecycle foundation，不是正式 AgentCore Host：UI response 只验证 identity、唤醒和 close/shutdown 路径，固定返回 `UI_UNAVAILABLE`；事件和 UI JSON 不在 MetaWork 复制或解析。Gate 3 已在后续 clean bundle 上独立完成 typed SDK 验收。executor 容量仍尚未根据真实 trace 定标。
 
@@ -248,7 +248,7 @@ Host tool 内部 session ID 到 MetaWork Session/Run 的合同仍未定义时，
 - 六个 StopReason 使用无 `else` switch；
 - unknown code 在 SDK 层失败并保留 raw code；
 - `resource_limit` 与 admitted fatal Session poisoning 语义经过测试；
-- `aborted` 结合 HostCause 映射 cancelled/interrupted/failed。
+- `aborted` 结合 `TerminalResult.termination_signal` 由 Workbench 映射 cancelled/interrupted/failed。
 
 ### 同步 UI
 
@@ -264,7 +264,7 @@ Host tool 内部 session ID 到 MetaWork Session/Run 的合同仍未定义时，
 
 - validation/copy/test-sink capacity failure 返回 callback fatal；
 - session_run 返回 non-OK callback status；
-- HostCause 保留具体原因；
+- typed TerminationSignal 保留具体 execution failure domain；
 - 不误报用户取消，不读取 zeroed RunResult。
 
 ### 当前实现与复现
@@ -336,7 +336,7 @@ Gate 4 通过时的 sink 只提供全局 event count 和单 event bytes 硬上�
 - event decode/copy OOM；
 - control queue deadline；
 - canonical Workbench projection failure 按 Session/Run identity 请求 Agent 终止；
-- 迁移期 HostCause first-writer-wins，但不包含 Renderer transport；
+- TerminationSignal first-writer-wins，且不包含 Renderer transport；
 - in-flight Run 被要求停止；
 - 最终状态 failed，不误报 cancelled。
 

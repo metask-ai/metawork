@@ -19,6 +19,7 @@ const agent_event_name = "metawork:agent-events";
 const workbench_event_name = renderer_bridge.revision_delivery.event_name;
 const workspace_path_capacity = renderer_bridge.workspace_grant.max_path_bytes;
 const pending_ui_json_capacity = 256 * 1024;
+const terminal_diagnostic_capacity = 512;
 const host_worker_count = 4;
 const workbench_snapshot_capacity = renderer_bridge.snapshot_delivery.max_bytes;
 const workbench_snapshot_chunk_bytes = renderer_bridge.snapshot_delivery.chunk_bytes;
@@ -794,7 +795,11 @@ const App = struct {
             if (self.workbench) |workbench| workbench.applyEvent(&envelope) catch {
                 const session_id = envelope.session_id;
                 const run_id = envelope.run_id;
-                agent_runtime.failRun(session_id, run_id, .event_pipeline_failure) catch {};
+                agent_runtime.requestRunTermination(
+                    session_id,
+                    run_id,
+                    .{ .event_pump_failure = .consumer_rejected },
+                ) catch {};
                 continue;
             };
         }
@@ -953,6 +958,7 @@ fn createAgentRuntime(
     return agent.Runtime.init(io, std.heap.c_allocator, raw_api, .{
         .max_sessions = 8,
         .max_ui_request_bytes = pending_ui_json_capacity,
+        .max_terminal_diagnostic_bytes = terminal_diagnostic_capacity,
         .event_ready_notifier = notifier,
     });
 }
@@ -991,6 +997,7 @@ pub fn run(init: std.process.Init) !void {
             .queue_capacity = 8,
             .max_pending_ui_json_bytes = pending_ui_json_capacity,
             .max_pending_ui_requests = host_worker_count,
+            .max_terminal_diagnostic_bytes = terminal_diagnostic_capacity,
             .max_snapshot_bytes = workbench_snapshot_capacity,
         },
         .{ .context = &app, .wake = App.notifyMainLoop },

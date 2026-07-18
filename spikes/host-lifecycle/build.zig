@@ -70,6 +70,13 @@ pub fn build(b: *std.Build) void {
     workbench.addImport("metacodes_agentcore", sdk);
     workbench.addImport("metawork_agent", agent);
     workbench.addImport("workbench_executor", executor);
+    const workbench_contract_fixture = b.addOptions();
+    workbench_contract_fixture.addOption(
+        []const u8,
+        "snapshot",
+        "",
+    );
+    workbench.addOptions("workbench_contract_fixture", workbench_contract_fixture);
     const bridge_delivery = b.createModule(.{
         .root_source_file = b.path("../../src/bridge/delivery.zig"),
         .target = target,
@@ -93,6 +100,12 @@ pub fn build(b: *std.Build) void {
         .filters = if (test_filter) |filter| &.{filter} else &.{},
     });
     const run = b.addRunArtifact(test_artifact);
+    const workbench_test_artifact = b.addTest(.{
+        .root_module = workbench,
+        .filters = &.{ "terminal publication", "Workbench outcomes", "Agent terminal facts" },
+    });
+    const run_workbench_tests = b.addRunArtifact(workbench_test_artifact);
     const step = b.step("test", "Run deterministic Host lifecycle and security tests");
     step.dependOn(&run.step);
+    step.dependOn(&run_workbench_tests.step);
 }

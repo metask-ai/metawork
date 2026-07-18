@@ -315,21 +315,35 @@ fn verifyFormalHost(io: std.Io, raw_api: *const wire.ApiV1, root: []const u8) !v
             .trust = .{ .temporary = "/tmp" },
         },
     });
+    const RunContext = struct {
+        session: *lifecycle.Session,
+        run_id: u64,
+        io: std.Io,
+        mutex: std.Io.Mutex = .init,
+        condition: std.Io.Condition = .init,
+        terminal: ?lifecycle.TerminalResult = null,
+    };
     const RunJob = struct {
         fn execute(context: *anyopaque) void {
-            const value: *lifecycle.Session = @ptrCast(@alignCast(context));
-            value.executePreparedRun();
+            const value: *RunContext = @ptrCast(@alignCast(context));
+            var run = value.session.beginRun(value.run_id) catch return;
+            const terminal = run.execute();
+            run.deinit();
+            value.mutex.lockUncancelable(value.io);
+            value.terminal = terminal;
+            value.condition.broadcast(value.io);
+            value.mutex.unlock(value.io);
         }
 
         fn cancel(context: *anyopaque) void {
-            const value: *lifecycle.Session = @ptrCast(@alignCast(context));
-            const active_run_id = value.snapshot().active_run_id;
-            value.cancelPreparedRun(active_run_id, .host_shutdown) catch {};
+            const value: *RunContext = @ptrCast(@alignCast(context));
+            value.session.cancelPreparedRun(value.run_id) catch {};
         }
     };
     const run_id = try session.prepareRun("exercise formal Host synchronous UI and events");
+    var run_context = RunContext{ .session = session, .run_id = run_id, .io = io };
     try executor.enqueue(.{
-        .context = session,
+        .context = &run_context,
         .execute_fn = RunJob.execute,
         .cancel_fn = RunJob.cancel,
     });
@@ -338,6 +352,13 @@ fn verifyFormalHost(io: std.Io, raw_api: *const wire.ApiV1, root: []const u8) !v
     const answers = [_][]const u8{"Yes"};
     try session.respondUi(run_id, request_id, .{ .answers = &answers });
     try session.waitRun(run_id);
+    run_context.mutex.lockUncancelable(io);
+    while (run_context.terminal == null)
+        run_context.condition.waitUncancelable(io, &run_context.mutex);
+    var terminal = run_context.terminal.?;
+    run_context.terminal = null;
+    run_context.mutex.unlock(io);
+    defer terminal.deinit();
 
     var saw_ui_tool = false;
     var saw_final = false;
@@ -360,10 +381,9 @@ fn verifyFormalHost(io: std.Io, raw_api: *const wire.ApiV1, root: []const u8) !v
             .unknown => {},
         }
     }
-    const snapshot = session.snapshot();
-    if (snapshot.last_status != wire.STATUS_OK or
-        snapshot.last_stop_reason_code != wire.STOP_END_TURN or
-        snapshot.last_outcome != .completed or !saw_ui_tool or !saw_final)
+    if (terminal.raw_status_code != wire.STATUS_OK or
+        terminal.raw_stop_reason_code != wire.STOP_END_TURN or
+        terminal.stop_reason != .end_turn or !saw_ui_tool or !saw_final)
         return error.UnexpectedFormalHostRun;
     try session.close(.session_close);
 }
