@@ -182,6 +182,7 @@ reject new work
 
 - credential 仅从 Host environment/受控配置进入 Session config；
 - Renderer、Bridge、event、log、snapshot 和测试 golden 不出现 key；
+- Workbench canonical prompt、title、assistant、tool、UI 和 terminal diagnostic buffer 不保留 key；raw AgentCore tool ID 只形成不可逆 correlation digest；
 - 当前只允许临时或明确 trusted Workspace；
 - UI/文档不宣称 strict Workspace security。
 
@@ -392,7 +393,7 @@ Gate 4 通过时的 sink 只提供全局 event count 和单 event bytes 硬上�
 
 > 状态：已通过。可复现证据见 [Phase 0 Gate 6 验证报告](phase-0-gate-6-report.md)。
 
-该状态只记录历史 Gate 6 原型的验收事实，不证明当前收口批次的新 Native test graph、Phase 0A formal adapter probe 或 release scanner 已通过。它们必须在 Apple Silicon macOS 上使用精确 bundle 和本次 checkout 重新执行；旧报告与旧 `zig-out` 产物都不能替代本轮证据。
+该状态首先记录历史 Gate 6 原型的验收事实。架构收口批次 A 至 D 已在 Apple Silicon macOS 使用仓库锁定 bundle 与本次 checkout 重新通过正式 Native test graph、Phase 0A formal adapter probe、release scanner、debug/release、macOS package 和 automation Gate 5/6；旧报告与旧 `zig-out` 产物仍不能替代本轮结果。
 
 Gate 6 验收当时只能称“同进程 macOS 同步原型”；完成下述 Gate 7 后才达到完整 Phase 0A。
 

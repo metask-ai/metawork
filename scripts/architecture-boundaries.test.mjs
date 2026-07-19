@@ -192,19 +192,20 @@ test("canonical notification and Renderer transport failures stay isolated", () 
 
   const app = read("src/app.zig");
   assert.doesNotMatch(app, /bridge_pipeline_failure/);
-  assert.match(app, /decideTransportFailure/);
   assert.match(app, /agent_event_wake_pending\.swap\(true, \.acq_rel\)/);
   const clearWake = app.indexOf(
     "self.agent_event_wake_pending.store(false, .release);",
   );
   const drainEvents = app.indexOf("while (agent_runtime.takeEvent())");
   assert.ok(clearWake >= 0 && clearWake < drainEvents);
-  const stopIngress = app.indexOf("self.stopBridgeIngress();");
-  const quiesceCallbacks = app.indexOf("self.quiesceBridgeCallbacks();");
-  const detachWorkbench = app.indexOf("self.detachWorkbench();");
+  const stopIngress = app.indexOf("dispatcher.stopIngress();");
+  const quiesceCallbacks = app.indexOf("dispatcher.assertQuiescent();");
+  const detachWorkbench = app.indexOf("dispatcher.detachWorkbench();");
   assert.ok(stopIngress >= 0 && stopIngress < quiesceCallbacks);
   assert.ok(quiesceCallbacks < detachWorkbench);
 
+  const dispatcher = read("src/bridge/dispatcher.zig");
+  assert.match(dispatcher, /decideTransportFailure/);
   const delivery = read("src/automation/delivery.zig");
   assert.match(delivery, /pub fn deinitOwnedBuffers/);
 });
@@ -231,7 +232,7 @@ test("Bridge owns product delivery state while automation transport stays explic
   );
 
   const app = read("src/app.zig");
-  assert.match(app, /product_delivery: renderer_bridge\.ProductDelivery/);
+  assert.match(app, /dispatcher: \?\*bridge_api\.Dispatcher/);
   assert.match(app, /automation: automation_api\.Runtime/);
   assert.doesNotMatch(
     app,
@@ -241,6 +242,12 @@ test("Bridge owns product delivery state while automation transport stays explic
     app,
     /renderer_bridge\.(?:revision_delivery|snapshot_delivery)/,
   );
+
+  const dispatcher = read("src/bridge/dispatcher.zig");
+  assert.match(dispatcher, /delivery: product_delivery\.Delivery/);
+  assert.match(dispatcher, /callbacks: callback_gate\.State/);
+  assert.match(dispatcher, /grants: workspace_grant\.State/);
+  assert.match(dispatcher, /workbench: \?\*workbench_api\.Workbench/);
 
   const automationDelivery = read("src/automation/delivery.zig");
   assert.match(automationDelivery, /Automation-only raw Agent event transport/);
@@ -324,7 +331,7 @@ test("Workbench hands running cancellation through generation-checked control", 
 
   const workbench = read("src/workbench/projection.zig");
   assert.match(workbench, /AgentHandoffState/);
-  assert.match(workbench, /\.beginRun\(/);
+  assert.match(workbench, /\.beginRunOutcome\(/);
   assert.match(workbench, /\.tryAcquireLease\(/);
   assert.doesNotMatch(workbench, /\.executePreparedRun\(/);
   assert.doesNotMatch(workbench, /\.requestCancel\(/);
@@ -348,12 +355,62 @@ test("Agent terminal facts have one immutable handoff and no legacy history latc
   assert.match(agent, /pub fn execute\(self: \*Run\) TerminalResult/);
   assert.doesNotMatch(
     agent,
-    /HostCause|RunOutcome|executePreparedRun|last_outcome|last_status|last_abort_status|last_stop_reason_code/,
+    /\bHostCause\b|pub const RunOutcome|executePreparedRun|last_outcome|last_status|last_abort_status|last_stop_reason_code/,
   );
 
   const workbench = read("src/workbench/projection.zig");
   assert.match(workbench, /commitAgentTerminal\(run, &terminal\)/);
   assert.doesNotMatch(workbench, /snapshot\.last_outcome|snapshot\.cause/);
+});
+
+test("Workbench owns Task lifecycle, continuation, and canonical redaction", () => {
+  const workbench = read("src/workbench/projection.zig");
+  const taskRecord = workbench.slice(
+    workbench.indexOf("const TaskView = struct"),
+    workbench.indexOf("pub const RunRef = struct"),
+  );
+  assert.match(taskRecord, /lifecycle: TaskLifecycle/);
+  assert.match(taskRecord, /continuation: ContinuationCapability/);
+  assert.doesNotMatch(taskRecord, /SessionState/);
+  assert.doesNotMatch(workbench, /session\.snapshot\(/);
+  assert.match(workbench, /session_disposition_at_completion/);
+  assert.match(workbench, /foldTerminalDisposition/);
+  assert.match(workbench, /sanitizeInto\(\s*run\.terminal_diagnostic/);
+  assert.match(workbench, /copyProjected\(prompt/);
+  assert.match(workbench, /replaceTrackedProjected\(\s*&view\.title/);
+
+  const agent = read("src/agent/session.zig");
+  assert.match(agent, /pub const SessionRoute = struct/);
+  assert.match(agent, /pub const BeginRunOutcome = union\(enum\)/);
+  assert.match(agent, /pub const CloseOutcome = union\(enum\)/);
+});
+
+test("Bridge Dispatcher owns product command decisions and App only composes it", () => {
+  const build = read("build.zig");
+  assert.match(build, /bridge\.addImport\("metawork_workbench", workbench\)/);
+
+  const dispatcher = read("src/bridge/dispatcher.zig");
+  for (const boundary of [
+    "callback_gate.State",
+    "product_delivery.Delivery",
+    "workspace_grant.State",
+    "parsePayload",
+    "parseWireId",
+    "requireWorkbench",
+  ]) {
+    assert.match(dispatcher, new RegExp(boundary));
+  }
+  assert.match(dispatcher, /registered_handlers:/);
+  assert.match(dispatcher, /self\.requireWorkbench/);
+
+  const app = read("src/app.zig");
+  assert.match(app, /bridge_api\.Dispatcher\.init/);
+  assert.match(app, /\.register\(/);
+  assert.doesNotMatch(
+    app,
+    /fn (?:createTask|runTask|cancelTask|respondUi|closeTask|renameTask|archiveTask|deleteTask)\(/,
+  );
+  assert.doesNotMatch(app, /parsePayload|parseWireId|workspaceGrant/);
 });
 
 test("product wire contract is atomically on Task schema v5", () => {

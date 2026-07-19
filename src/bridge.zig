@@ -5,9 +5,16 @@ const callback_gate_impl = @import("bridge/callback_gate.zig");
 const handlers_impl = @import("bridge/handlers.zig");
 const policy_impl = @import("bridge/policy.zig");
 const product_delivery_impl = @import("bridge/product_delivery.zig");
+const revision_delivery_impl = @import("bridge/revision_delivery.zig");
+const snapshot_delivery_impl = @import("bridge/snapshot_delivery.zig");
 const workspace_grant_impl = @import("bridge/workspace_grant.zig");
+const dispatcher_impl = @import("bridge/dispatcher.zig");
 
 pub const CallbackGate = callback_gate_impl.State;
+pub const Dispatcher = dispatcher_impl.Dispatcher;
+pub const DispatcherPlatform = dispatcher_impl.Platform;
+pub const DispatcherAutomationHooks = dispatcher_impl.AutomationHooks;
+pub const dispatcher_max_extra_handlers = dispatcher_impl.max_extra_handlers;
 
 pub const ProductDelivery = product_delivery_impl.Delivery;
 pub const ProductDeliveryTransport = product_delivery_impl.Transport;
@@ -67,3 +74,12 @@ pub const workspace_grant = struct {
     pub const max_path_bytes = workspace_grant_impl.max_path_bytes;
     pub const State = workspace_grant_impl.State;
 };
+
+test {
+    const std = @import("std");
+    std.testing.refAllDecls(callback_gate_impl);
+    std.testing.refAllDecls(product_delivery_impl);
+    std.testing.refAllDecls(revision_delivery_impl);
+    std.testing.refAllDecls(snapshot_delivery_impl);
+    std.testing.refAllDecls(dispatcher_impl);
+}

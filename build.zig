@@ -22,6 +22,9 @@ pub fn build(b: *std.Build) void {
         wireAgentCore(b, artifacts.tests.root_module, bundle)
     else
         modules;
+    const lifecycle_fixture = createLifecycleFixture(b, test_modules);
+    test_modules.app.addImport("lifecycle_fixture", lifecycle_fixture);
+    test_modules.bridge.addImport("lifecycle_fixture", lifecycle_fixture);
     const module_tests = [_]struct {
         name: []const u8,
         root_module: *std.Build.Module,
@@ -40,10 +43,31 @@ pub fn build(b: *std.Build) void {
 
 const WiredModules = struct {
     app: *std.Build.Module,
+    agent: *std.Build.Module,
     bridge: *std.Build.Module,
+    event_pump: *std.Build.Module,
+    automation_delivery: *std.Build.Module,
+    sdk: *std.Build.Module,
+    workbench: *std.Build.Module,
     workbench_projection: *std.Build.Module,
     workbench_executor: *std.Build.Module,
 };
+
+fn createLifecycleFixture(b: *std.Build, modules: WiredModules) *std.Build.Module {
+    const fixture = b.createModule(.{
+        .root_source_file = b.path("tests/support/lifecycle_fixture.zig"),
+        .target = modules.app.resolved_target,
+        .optimize = modules.app.optimize,
+        .link_libc = true,
+    });
+    fixture.addImport("metawork_agent", modules.agent);
+    fixture.addImport("metawork_workbench", modules.workbench);
+    fixture.addImport("event_pump", modules.event_pump);
+    fixture.addImport("automation_delivery", modules.automation_delivery);
+    fixture.addImport("metacodes_agentcore", modules.sdk);
+    fixture.addImport("workbench_executor", modules.workbench_executor);
+    return fixture;
+}
 
 fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcore_bundle.Bundle) WiredModules {
     var query = (root_module.resolved_target orelse @panic("Native SDK app target is unresolved")).query;
@@ -126,6 +150,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .optimize = root_module.optimize,
     });
     bridge.addImport("native_sdk", existingImport(root_module, "native_sdk"));
+    bridge.addImport("metawork_workbench", workbench);
 
     const automation_disabled = b.createModule(.{
         .root_source_file = b.path("src/automation/disabled.zig"),
@@ -174,7 +199,12 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     root_module.link_libc = bundle.link_libc;
     return .{
         .app = app,
+        .agent = agent,
         .bridge = bridge,
+        .event_pump = event_pump,
+        .automation_delivery = automation_delivery,
+        .sdk = sdk,
+        .workbench = workbench,
         .workbench_projection = projection,
         .workbench_executor = executor,
     };

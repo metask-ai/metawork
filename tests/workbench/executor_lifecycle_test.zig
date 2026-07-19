@@ -9,7 +9,8 @@ const closeSession = fixture.closeSession;
 const shutdownTestComposition = fixture.shutdownTestComposition;
 const deinitTestComposition = fixture.deinitTestComposition;
 const createTestComposition = fixture.createTestComposition;
-const workbenchSessionOptions = fixture.workbenchSessionOptions;
+const workbenchConfiguration = fixture.workbenchConfiguration;
+const workbenchTaskInput = fixture.workbenchTaskInput;
 const waitWorkbenchSnapshot = fixture.waitWorkbenchSnapshot;
 
 test "bounded executor rejects overflow and close cancels a queued Run" {
@@ -56,10 +57,10 @@ test "Gate 6 Workbench closes off-thread and exposes retryable close failure" {
         .max_tasks = 2,
         .max_runs_per_task = 2,
         .max_tools_per_run = 2,
-    });
+    }, workbenchConfiguration());
     defer workbench.deinit();
 
-    const task_id = try workbench.createTask(workbenchSessionOptions());
+    const task_id = try workbench.createTask(workbenchTaskInput());
     fake_core.failNextSessionDestroy();
     try workbench.closeTask(task_id);
     try waitWorkbenchSnapshot(&workbench, "\"closeFailed\":true");
@@ -84,10 +85,10 @@ test "Gate 6 Workbench close cancels a queued Run without blocking the caller" {
         .max_tasks = 1,
         .max_runs_per_task = 1,
         .max_tools_per_run = 1,
-    });
+    }, workbenchConfiguration());
     defer workbench.deinit();
 
-    const task_id = try workbench.createTask(workbenchSessionOptions());
+    const task_id = try workbench.createTask(workbenchTaskInput());
     _ = try workbench.runTask(task_id, "close this run");
     try workbench.closeTask(task_id);
     try waitWorkbenchSnapshot(&workbench, "\"lifecycle\":\"closed\"");
@@ -112,10 +113,10 @@ test "Workbench cancel of a completed Run is an idempotent no-op" {
         .max_tasks = 1,
         .max_runs_per_task = 1,
         .max_tools_per_run = 1,
-    });
+    }, workbenchConfiguration());
     defer workbench.deinit();
 
-    const task_id = try workbench.createTask(workbenchSessionOptions());
+    const task_id = try workbench.createTask(workbenchTaskInput());
     const run_id = try workbench.runTask(task_id, "finish before cancel arrives");
     try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
     const revision = workbench.currentRevision();
@@ -141,12 +142,13 @@ test "Workbench shutdown terminates a waiting UI Run before joining workers" {
         .max_tasks = 1,
         .max_runs_per_task = 1,
         .max_tools_per_run = 1,
-    });
+    }, workbenchConfiguration());
     defer workbench.deinit();
 
-    const task_id = try workbench.createTask(workbenchSessionOptions());
+    const task_id = try workbench.createTask(workbenchTaskInput());
     _ = try workbench.runTask(task_id, "wait for shutdown");
     try waitWorkbenchSnapshot(&workbench, "\"currentRunPhase\":\"waiting_ui\"");
     workbench.shutdownExecutor();
     try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"interrupted\"");
+    try waitWorkbenchSnapshot(&workbench, "\"continuationAvailable\":false");
 }

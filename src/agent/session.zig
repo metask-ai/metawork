@@ -111,6 +111,29 @@ pub const SessionDisposition = enum {
     closing,
 };
 
+pub const SessionRoute = struct {
+    id: u64,
+    session: *Session,
+};
+
+pub const BeginRunFailure = struct {
+    err: Error,
+    session_disposition: SessionDisposition,
+};
+
+pub const BeginRunOutcome = union(enum) {
+    run: Run,
+    failure: BeginRunFailure,
+};
+
+pub const CloseOutcome = union(enum) {
+    closed,
+    failure: struct {
+        err: Error,
+        session_disposition: SessionDisposition,
+    },
+};
+
 /// Immutable Agent-owned facts for exactly one begun Run. Workbench must copy
 /// the bounded diagnostic into its admission-reserved Run record, then deinit
 /// this value. `session_disposition_at_completion` is a completion-time
@@ -614,6 +637,16 @@ pub const Runtime = struct {
         self: *Runtime,
         options: SessionOpenOptions,
     ) (Error || std.mem.Allocator.Error)!*Session {
+        return (try self.createSessionRoute(options)).session;
+    }
+
+    /// Creates one Agent Session and returns its canonical routing identity in
+    /// the same operation. Product owners must not reconstruct this identity
+    /// from a live Session snapshot.
+    pub fn createSessionRoute(
+        self: *Runtime,
+        options: SessionOpenOptions,
+    ) (Error || std.mem.Allocator.Error)!SessionRoute {
         try validateWorkspace(options.workspace);
         if (options.credential.len == 0 or options.model.len == 0)
             return error.CoreCallFailed;
@@ -691,7 +724,7 @@ pub const Runtime = struct {
         }
         session.raw = raw_session;
         self.sessions[session_slot] = session;
-        return session;
+        return .{ .id = session_id, .session = session };
     }
 
     pub fn shutdown(self: *Runtime) Error!void {
@@ -955,10 +988,23 @@ pub const Session = struct {
     /// execution ownership from Workbench to Agent. A successful call must be
     /// followed by exactly one `Run.execute` and `Run.deinit`.
     pub fn beginRun(self: *Session, run_id: u64) Error!Run {
+        return switch (self.beginRunOutcome(run_id)) {
+            .run => |run| run,
+            .failure => |failure| failure.err,
+        };
+    }
+
+    /// Typed worker handoff. Failure and disposition are captured under the
+    /// same Session lock, before a concurrent close can destroy the Session.
+    pub fn beginRunOutcome(self: *Session, run_id: u64) BeginRunOutcome {
         self.lock();
         if (run_id == 0 or run_id != self.active_run_id) {
+            const failure = BeginRunFailure{
+                .err = error.NoSuchRun,
+                .session_disposition = self.dispositionLocked(),
+            };
             self.unlock();
-            return error.NoSuchRun;
+            return .{ .failure = failure };
         }
         if (self.state != .queued) {
             const begin_error: Error = switch (self.state) {
@@ -969,8 +1015,12 @@ pub const Session = struct {
             if ((self.state == .closing or self.state == .closed) and !self.run_done and
                 !self.run_started)
                 self.finishPreparedRunLocked();
+            const failure = BeginRunFailure{
+                .err = begin_error,
+                .session_disposition = self.dispositionLocked(),
+            };
             self.unlock();
-            return begin_error;
+            return .{ .failure = failure };
         }
         const generation = self.active_run_generation;
         std.debug.assert(generation != 0);
@@ -982,7 +1032,7 @@ pub const Session = struct {
         self.broadcast();
         self.unlock();
         _ = self.agent_runtime.notifyEventConsumer();
-        return .{
+        return .{ .run = .{
             .session = self,
             .run_id = run_id,
             .generation = generation,
@@ -991,7 +1041,7 @@ pub const Session = struct {
                 .run_id = run_id,
                 .generation = generation,
             },
-        };
+        } };
     }
 
     pub fn cancelPreparedRun(self: *Session, run_id: u64) Error!void {
@@ -1118,6 +1168,20 @@ pub const Session = struct {
         return if (self.ui_active) self.ui_request_id else null;
     }
 
+    pub const PendingUiObservation = struct {
+        run_id: u64,
+        request_id: u64,
+    };
+
+    /// Bounded execution observation used by Workbench projection. This does
+    /// not expose Session lifecycle or product identity.
+    pub fn pendingUiObservation(self: *Session) ?PendingUiObservation {
+        self.lock();
+        defer self.unlock();
+        if (!self.ui_active) return null;
+        return .{ .run_id = self.active_run_id, .request_id = self.ui_request_id };
+    }
+
     pub fn copyPendingUiRequest(
         self: *Session,
         allocator: std.mem.Allocator,
@@ -1241,6 +1305,21 @@ pub const Session = struct {
         self.control_block.waitForLeaseQuiescence();
 
         return self.destroyRawSession();
+    }
+
+    pub fn closeOutcome(
+        self: *Session,
+        interruption: ExternalInterruption,
+    ) CloseOutcome {
+        self.close(interruption) catch |err| {
+            self.lock();
+            defer self.unlock();
+            return .{ .failure = .{
+                .err = err,
+                .session_disposition = self.dispositionLocked(),
+            } };
+        };
+        return .closed;
     }
 
     fn destroyRawSession(self: *Session) Error!void {
@@ -1444,11 +1523,15 @@ pub const Session = struct {
                 .dependency_contract
             else
                 failure,
-            .session_disposition_at_completion = switch (self.state) {
-                .poisoned => .poisoned,
-                .closing, .closed => .closing,
-                .idle, .queued, .running, .waiting_ui => .reusable,
-            },
+            .session_disposition_at_completion = self.dispositionLocked(),
+        };
+    }
+
+    fn dispositionLocked(self: *const Session) SessionDisposition {
+        return switch (self.state) {
+            .poisoned => .poisoned,
+            .closing, .closed => .closing,
+            .idle, .queued, .running, .waiting_ui => .reusable,
         };
     }
 

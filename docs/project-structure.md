@@ -262,7 +262,7 @@ flowchart LR
 
 ## 7. Zig `src/` 目录
 
-当前 named module root、App、Bridge product delivery、Workspace grant、Workbench executor 与 automation compile-time boundary 已完成责任拆分；`agent/session.zig` 与 `workbench/projection.zig` 仍保留尚未形成独立不变量的代码，后续按 lifecycle 测试保护逐步提取，不为匹配目录树制造空模块。automation-only raw event transport 位于 `automation/delivery.zig`，只跟随产品 generation，不进入产品 `ProductDelivery`；release 使用 `automation/disabled.zig`，最终 Native/Renderer artifact 由 token scan 验证无 fixture 能力。
+当前 named module root、App、Bridge concrete Dispatcher、Workbench executor 与 automation compile-time boundary 已完成责任拆分。`bridge/dispatcher.zig` 统一拥有产品 handler registry、callback gate、ProductDelivery、Workspace grant 和 Workbench command 边界；App 只注入 Native platform capability 并组织生命周期。`agent/session.zig` 与 `workbench/projection.zig` 仍保留尚未形成独立不变量的代码，后续按 lifecycle 测试保护逐步提取，不为匹配目录树制造空模块。automation-only raw event transport 位于 `automation/delivery.zig`，只跟随产品 generation，不进入产品 `ProductDelivery`；release 使用 `automation/disabled.zig`，最终 Native/Renderer artifact 由 token scan 验证无 fixture 能力。
 
 Zig 目标结构采用少量顶层 module entrypoint，而不是先建立多层 `host/` 空目录：
 
@@ -273,6 +273,7 @@ src/
 │
 ├── bridge.zig
 ├── bridge/
+│   ├── dispatcher.zig
 │   ├── commands.zig
 │   ├── policy.zig
 │   ├── handlers.zig
@@ -310,9 +311,10 @@ src/
 - `main.zig`：只导入 named `metawork_app` 并调用 `app.run()`；
 - `app.zig`：composition root，定义 `native_sdk.App` callbacks，明确区分 `native_runtime` 与 `agent_runtime`；
 - `bridge.zig`：Renderer Bridge 的最小公开入口，显式导出 command/policy/handler 所需类型，不使用 `usingnamespace` 倾倒全部内部符号；
+- `bridge/dispatcher.zig`：产品 command 的具体同步边界，统一拥有 handler registry、callback gate、`ProductDelivery`、Workspace grant、`*Workbench` 和 bounded decode/encode 流程；只接收 App 注入的实际平台动作；
 - `bridge/commands.zig`：公开领域 command 名称和 payload 上限；
 - `bridge/policy.zig`：产品 release/development origin、command 和 builtin policy；
-- `bridge/handlers.zig`：payload 校验、Task/Run/request 归属校验和领域调用；
+- `bridge/handlers.zig`：只定义 bounded payload DTO、wire ID 与枚举解析；Task/Run 是否允许操作由 Dispatcher 调用 Workbench 判断；
 - `bridge/callback_gate.zig`：同步 Native Bridge callback 的 ingress stop 与 quiescence 合同；若 Native callback 改为跨线程异步，该模块必须升级为真实 wait primitive；
 - `bridge/product_delivery.zig`：产品 connection generation、revision retry/timer、snapshot identity 与 owned transport storage 的唯一 owner；只通过 capability 调用 Native emit/timer 和 Workbench snapshot writer；
 - `bridge/revision_delivery.zig`：`ProductDelivery` 的内部 revision 状态，不从 `bridge.zig` 单独公开；不传输 AgentCore raw event、batch/object/ACK；

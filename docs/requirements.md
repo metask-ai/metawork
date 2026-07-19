@@ -141,6 +141,7 @@ Turn 是用户提交的一次交互；Run 是 AgentCore 为该交互进行的一
 - Renderer 按不可信调用方处理；
 - Host 命令默认拒绝，只开放白名单；
 - 校验来源、payload、Workspace、Task/Run 归属和权限；
+- process-local provider/model/base URL/credential defaults 由 composition 一次性注入 Workbench；缺失或无效的执行配置在 Task admission 前失败，不得进入 Renderer command，也不得制造半初始化 Task；
 - Provider credential 不得进入 Renderer、Bridge、日志、事件或视图 snapshot；
 - Host 必须在形成产品 projection 前移除已知 Host-held credential 和 schema 标记的 secret 字段，并对命令与工具输出设置明确上限和 truncation 状态；不得把秘密过滤责任推给 Renderer；
 - 文件访问、进程启动和高风险工具最终必须经过能力控制；

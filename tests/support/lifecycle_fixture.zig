@@ -741,12 +741,7 @@ pub fn createTestComposition(limits: TestCompositionLimits) !*lifecycle.Runtime 
     );
     var executor_registered = false;
     errdefer if (!executor_registered) executor.deinit();
-    const runtime = try lifecycle.Runtime.initWithApi(
-        std.testing.io,
-        std.testing.allocator,
-        &fake_api,
-        limits.hostLimits(),
-    );
+    const runtime = try createTestRuntime(limits.hostLimits());
     errdefer {
         runtime.shutdown() catch {};
         runtime.deinit();
@@ -756,19 +751,29 @@ pub fn createTestComposition(limits: TestCompositionLimits) !*lifecycle.Runtime 
     return runtime;
 }
 
-pub fn workbenchSessionOptions() lifecycle.SessionOpenOptions {
-    const workspace_root = if (std.fs.path.sep == '\\') "C:\\tmp\\metawork-gate6" else "/tmp/metawork-gate6";
-    const temporary_root = if (std.fs.path.sep == '\\') "C:\\tmp" else "/tmp";
-    return .{
+pub fn createTestRuntime(limits: lifecycle.Limits) !*lifecycle.Runtime {
+    return lifecycle.Runtime.initWithApi(
+        std.testing.io,
+        std.testing.allocator,
+        &fake_api,
+        limits,
+    );
+}
+
+pub fn workbenchConfiguration() workbench_api.Configuration {
+    return .{ .execution = .{
         .provider = .anthropic,
-        .permission_mode = .default,
-        .shell_policy = .disabled,
         .credential = "fixture-secret",
         .model = "fixture-model",
-        .workspace = .{
-            .canonical_root = workspace_root,
-            .trust = .{ .temporary = temporary_root },
-        },
+    } };
+}
+
+pub fn workbenchTaskInput() workbench_api.TaskCreateInput {
+    const workspace_root = if (std.fs.path.sep == '\\') "C:\\tmp" else "/tmp";
+    const temporary_root = if (std.fs.path.sep == '\\') "C:\\tmp" else "/tmp";
+    return .{
+        .workspace_root = workspace_root,
+        .trust = .{ .temporary = temporary_root },
     };
 }
 
