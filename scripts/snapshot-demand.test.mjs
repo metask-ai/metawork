@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { SnapshotDemand } from "../frontend/src/host/snapshot/snapshot-demand.ts";
+import { SnapshotDemand } from "../frontend/src/bridge/snapshot/snapshot-demand.ts";
 
 test("a failed snapshot attempt preserves its target revision", () => {
   const demand = new SnapshotDemand();

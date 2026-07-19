@@ -1,4 +1,4 @@
-import type { TaskView, ToolView } from "../../host/contracts.ts";
+import type { TaskView, ToolView } from "../../bridge/contracts.ts";
 import { formatInteger } from "../../i18n/formatters.ts";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
 import { taskActivity } from "../../workbench/selectors.ts";

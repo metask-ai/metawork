@@ -1,5 +1,5 @@
 import type { WorkbenchSnapshot } from "./contracts.ts";
-import { HostClient, type NativeBridge } from "./client.ts";
+import { BridgeClient, type NativeBridge } from "./client.ts";
 import { RevisionNotificationQueue } from "./revision-notification.ts";
 import { SnapshotDemand } from "./snapshot/snapshot-demand.ts";
 
@@ -53,12 +53,12 @@ export class WorkbenchConnection {
   private removeHostSignal: (() => void) | null = null;
   private removeFixture: (() => void) | null = null;
   private readonly revisions: RevisionNotificationQueue;
-  private readonly client: HostClient;
+  private readonly client: BridgeClient;
   private readonly callbacks: WorkbenchConnectionCallbacks;
   private readonly options: WorkbenchConnectionOptions;
 
   constructor(
-    client: HostClient,
+    client: BridgeClient,
     callbacks: WorkbenchConnectionCallbacks,
     options: WorkbenchConnectionOptions = {},
   ) {
@@ -237,12 +237,8 @@ export class WorkbenchConnection {
     if (this.stopped) return;
     const signal = await this.client.ping();
     if (this.stopped) return;
-    if (signal.gate5Fixture && !this.didGate5Fixture) {
+    if (this.options.gate5FixtureLoader && !this.didGate5Fixture) {
       const loader = this.options.gate5FixtureLoader;
-      if (!loader)
-        throw new Error(
-          "Host requested the Gate 5 fixture, but this Renderer build does not package it",
-        );
       const { installGate5Fixture } = await loader();
       if (this.stopped) return;
       const fixture = installGate5Fixture(

@@ -92,7 +92,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     workbench_contract_fixture.addOption(
         []const u8,
         "snapshot",
-        @embedFile("frontend/src/host/__fixtures__/workbench-snapshot-v5.fixture"),
+        @embedFile("frontend/src/bridge/__fixtures__/workbench-snapshot-v5.fixture"),
     );
     projection.addOptions("workbench_contract_fixture", workbench_contract_fixture);
     const workbench = b.createModule(.{
@@ -109,16 +109,47 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     });
     bridge.addImport("native_sdk", existingImport(root_module, "native_sdk"));
 
+    const automation_disabled = b.createModule(.{
+        .root_source_file = b.path("src/automation/disabled.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    automation_disabled.addImport("native_sdk", existingImport(root_module, "native_sdk"));
+    automation_disabled.addImport("metawork_bridge", bridge);
+    const automation_delivery = b.createModule(.{
+        .root_source_file = b.path("src/automation/delivery.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    const automation_enabled = b.createModule(.{
+        .root_source_file = b.path("src/automation/enabled.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    automation_enabled.addImport("native_sdk", existingImport(root_module, "native_sdk"));
+    automation_enabled.addImport("metawork_bridge", bridge);
+    automation_enabled.addImport("automation_delivery", automation_delivery);
+    const automation = b.createModule(.{
+        .root_source_file = b.path("src/automation.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    const runner = existingImport(root_module, "runner");
+    automation.addImport("build_options", existingImport(runner, "build_options"));
+    automation.addImport("automation_enabled", automation_enabled);
+    automation.addImport("automation_disabled", automation_disabled);
+
     const app = b.createModule(.{
         .root_source_file = b.path("src/app.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
-    app.addImport("runner", existingImport(root_module, "runner"));
+    app.addImport("runner", runner);
     app.addImport("native_sdk", existingImport(root_module, "native_sdk"));
     app.addImport("metawork_agent", agent);
     app.addImport("metawork_workbench", workbench);
     app.addImport("metawork_bridge", bridge);
+    app.addImport("metawork_automation", automation);
 
     root_module.addImport("metawork_app", app);
     root_module.addObjectFile(.{ .cwd_relative = bundle.library_path });

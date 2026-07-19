@@ -1,7 +1,7 @@
 import {
   WORKBENCH_SCHEMA_VERSION,
   type WorkbenchSnapshot,
-} from "../host/contracts.ts";
+} from "../bridge/contracts.ts";
 
 export type WorkbenchState = {
   snapshot: WorkbenchSnapshot;

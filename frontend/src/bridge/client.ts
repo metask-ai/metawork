@@ -24,7 +24,7 @@ import { fetchWorkbenchSnapshot } from "./snapshot/snapshot-client.ts";
 
 export type NativeBridge = NonNullable<typeof window.zero>;
 
-export class HostClient {
+export class BridgeClient {
   private bridge() {
     const bridge = window.zero;
     if (!bridge) throw new Error("Native Host bridge is unavailable");

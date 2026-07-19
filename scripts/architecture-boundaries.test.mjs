@@ -57,6 +57,7 @@ test("App consumes named public module roots", () => {
     "metawork_agent",
     "metawork_workbench",
     "metawork_bridge",
+    "metawork_automation",
   ]) {
     assert.match(source, new RegExp(`@import\\(\\"${name}\\"\\)`));
   }
@@ -150,7 +151,7 @@ test("canonical notification and Renderer transport failures stay isolated", () 
   assert.ok(stopIngress >= 0 && stopIngress < quiesceCallbacks);
   assert.ok(quiesceCallbacks < detachWorkbench);
 
-  const delivery = read("src/bridge/delivery.zig");
+  const delivery = read("src/automation/delivery.zig");
   assert.match(delivery, /pub fn deinitOwnedBuffers/);
 });
 
@@ -177,7 +178,7 @@ test("Bridge owns product delivery state while automation transport stays explic
 
   const app = read("src/app.zig");
   assert.match(app, /product_delivery: renderer_bridge\.ProductDelivery/);
-  assert.match(app, /automation_delivery: \*automation_delivery_api\.Delivery/);
+  assert.match(app, /automation: automation_api\.Runtime/);
   assert.doesNotMatch(
     app,
     /event_window_id|bridge_callbacks_active|revision_delivery:\s|snapshot_delivery:\s/,
@@ -187,9 +188,53 @@ test("Bridge owns product delivery state while automation transport stays explic
     /renderer_bridge\.(?:revision_delivery|snapshot_delivery)/,
   );
 
-  const automationDelivery = read("src/bridge/delivery.zig");
+  const automationDelivery = read("src/automation/delivery.zig");
   assert.match(automationDelivery, /Automation-only raw Agent event transport/);
   assert.match(automationDelivery, /pub fn connectAt/);
+});
+
+test("automation code is compile-time selected and absent from product modules", () => {
+  const build = read("build.zig");
+  const selector = read("src/automation.zig");
+  assert.match(selector, /build_options\.automation/);
+  assert.match(selector, /automation_enabled/);
+  assert.match(selector, /automation_disabled/);
+  assert.match(build, /src\/automation\/enabled\.zig/);
+  assert.match(build, /src\/automation\/disabled\.zig/);
+  assert.match(build, /automation_enabled\.addImport\("automation_delivery"/);
+
+  const productSources = [
+    "src/app.zig",
+    "src/bridge.zig",
+    ...zigFiles("src/bridge/"),
+    "src/automation/disabled.zig",
+  ]
+    .map(read)
+    .join("\n");
+  for (const token of [
+    "zero://inline",
+    "metawork:agent-events",
+    "metawork.events.ack",
+    "metawork.events.fetch",
+    "metawork.gate5.emitFixture",
+  ]) {
+    assert.equal(
+      productSources.includes(token),
+      false,
+      `product source contains ${token}`,
+    );
+  }
+
+  const commands = read("src/bridge/commands.zig");
+  assert.doesNotMatch(
+    commands,
+    /fixture|automation|metawork\.events\.(?:ack|fetch)/,
+  );
+  assert.equal(existsSync(new URL("frontend/src/host/", root)), false);
+  assert.equal(
+    existsSync(new URL("frontend/src/bridge/client.ts", root)),
+    true,
+  );
 });
 
 test("Workbench owns queue and worker lifecycle", () => {
@@ -259,7 +304,7 @@ test("Agent terminal facts have one immutable handoff and no legacy history latc
 
 test("product wire contract is atomically on Task schema v5", () => {
   const zigCommands = read("src/bridge/commands.zig");
-  const rendererCommands = read("frontend/src/host/commands.ts");
+  const rendererCommands = read("frontend/src/bridge/commands.ts");
   const appManifest = read("app.zon");
   for (const command of [
     "create",
@@ -291,7 +336,7 @@ test("product wire contract is atomically on Task schema v5", () => {
     /const SessionView|pub fn submit|max_runs_per_session/,
   );
 
-  const contracts = read("frontend/src/host/contracts.ts");
+  const contracts = read("frontend/src/bridge/contracts.ts");
   assert.match(contracts, /WORKBENCH_SCHEMA_VERSION = 5/);
   assert.match(contracts, /tasks: TaskView\[\]/);
   assert.match(contracts, /"app_shutdown"/);
@@ -300,7 +345,7 @@ test("product wire contract is atomically on Task schema v5", () => {
   assert.equal(
     existsSync(
       new URL(
-        "frontend/src/host/__fixtures__/workbench-snapshot-v5.fixture",
+        "frontend/src/bridge/__fixtures__/workbench-snapshot-v5.fixture",
         root,
       ),
     ),
@@ -309,7 +354,7 @@ test("product wire contract is atomically on Task schema v5", () => {
   assert.equal(
     existsSync(
       new URL(
-        "frontend/src/host/__fixtures__/workbench-snapshot-v4.fixture",
+        "frontend/src/bridge/__fixtures__/workbench-snapshot-v4.fixture",
         root,
       ),
     ),

@@ -2,7 +2,7 @@ import type {
   RunView,
   TaskView,
   WorkbenchSnapshot,
-} from "../host/contracts.ts";
+} from "../bridge/contracts.ts";
 import type { WorkbenchState } from "./store.ts";
 
 export function selectActiveTask(state: WorkbenchState): TaskView | null {

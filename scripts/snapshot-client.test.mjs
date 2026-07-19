@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-import { fetchWorkbenchSnapshot } from "../frontend/src/host/snapshot/snapshot-client.ts";
+import { fetchWorkbenchSnapshot } from "../frontend/src/bridge/snapshot/snapshot-client.ts";
 
 const snapshotCommand = "metawork.workbench.snapshot";
 const chunkCommand = "metawork.workbench.snapshot.chunk";
@@ -15,7 +15,7 @@ test("Workbench snapshots are assembled from identity-checked chunks", async () 
   const expected = JSON.parse(
     readFileSync(
       new URL(
-        "../frontend/src/host/__fixtures__/workbench-snapshot-v5.fixture",
+        "../frontend/src/bridge/__fixtures__/workbench-snapshot-v5.fixture",
         import.meta.url,
       ),
       "utf8",

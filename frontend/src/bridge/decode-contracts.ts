@@ -513,8 +513,6 @@ function decodeSignal(value: unknown, keys: readonly string[]): HostSignal {
   booleanValue(item.onMainThread, "$.onMainThread");
   return {
     sequence,
-    automation: booleanValue(item.automation, "$.automation"),
-    gate5Fixture: booleanValue(item.gate5Fixture, "$.gate5Fixture"),
   };
 }
 
@@ -525,8 +523,6 @@ export function decodeHostSignalEvent(value: unknown): HostSignal {
     "origin",
     "onMainThread",
     "requestBytes",
-    "automation",
-    "gate5Fixture",
   ];
   const signal = decodeSignal(value, keys);
   const item = value as JsonObject;
@@ -540,8 +536,6 @@ export function decodePingResponse(value: unknown): HostSignal {
     "transport",
     "origin",
     "onMainThread",
-    "automation",
-    "gate5Fixture",
   ]);
 }
 

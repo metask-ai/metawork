@@ -10,18 +10,6 @@ pub const PermissionChoice = enum {
 };
 
 pub const EventDisconnect = struct { generation: []const u8 };
-pub const EventAck = struct {
-    generation: []const u8,
-    sessionId: []const u8,
-    runId: []const u8,
-    sequence: []const u8,
-};
-pub const EventFetch = struct {
-    generation: []const u8,
-    sessionId: []const u8,
-    runId: []const u8,
-    objectId: []const u8,
-};
 pub const WorkbenchSnapshotChunk = struct { snapshotId: []const u8, offset: []const u8 };
 pub const TaskCreate = struct {
     workspaceGrant: ?[]const u8 = null,

@@ -10,12 +10,12 @@ import {
   decodeHostSignalEvent,
   decodePingResponse,
   decodeWorkbenchSnapshot,
-} from "../frontend/src/host/decode-contracts.ts";
+} from "../frontend/src/bridge/decode-contracts.ts";
 
 const fixture = JSON.parse(
   readFileSync(
     new URL(
-      "../frontend/src/host/__fixtures__/workbench-snapshot-v5.fixture",
+      "../frontend/src/bridge/__fixtures__/workbench-snapshot-v5.fixture",
       import.meta.url,
     ),
     "utf8",
@@ -280,10 +280,8 @@ test("Host notifications and lifecycle responses require their exact payload sha
       transport: "BridgeDispatcher.response",
       origin: "zero://app",
       onMainThread: true,
-      automation: false,
-      gate5Fixture: false,
     }),
-    { sequence: 4, automation: false, gate5Fixture: false },
+    { sequence: 4 },
   );
   assert.deepEqual(
     decodeHostSignalEvent({
@@ -292,10 +290,8 @@ test("Host notifications and lifecycle responses require their exact payload sha
       origin: "zero://app",
       onMainThread: true,
       requestBytes: 2,
-      automation: false,
-      gate5Fixture: false,
     }),
-    { sequence: 4, automation: false, gate5Fixture: false },
+    { sequence: 4 },
   );
   assert.doesNotThrow(() =>
     assertSignalAcknowledged(
@@ -319,8 +315,6 @@ test("Host notifications and lifecycle responses require their exact payload sha
         origin: "zero://app",
         onMainThread: true,
         requestBytes: 2,
-        automation: false,
-        gate5Fixture: false,
       }),
     /expected keys/,
   );
@@ -335,8 +329,6 @@ test("Host notifications and lifecycle responses require their exact payload sha
         transport: "BridgeDispatcher.response",
         origin: "zero://app",
         onMainThread: true,
-        automation: false,
-        gate5Fixture: false,
       }),
     /positive safe integer/,
   );

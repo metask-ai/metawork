@@ -141,8 +141,6 @@ export type WorkbenchSnapshot = {
 
 export type HostSignal = {
   sequence: number;
-  automation: boolean;
-  gate5Fixture: boolean;
 };
 
 export type WorkspaceChoice =

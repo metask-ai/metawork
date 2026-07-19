@@ -16,7 +16,7 @@
     "build": "npm run build:release",
     "build:frontend": "npm --workspace @metawork/renderer run build && node scripts/verify-frontend-build.mjs",
     "build:debug": "npm run build:frontend && native build . --yes -Doptimize=Debug",
-    "build:release": "npm run build:frontend && native build . --yes -Doptimize=ReleaseFast",
+    "build:release": "npm run build:frontend && native build . --yes -Doptimize=ReleaseFast && node scripts/verify-native-automation-isolation.mjs",
     "test": "npm run check:frontend && npm run test:renderer-runtime && npm run test:architecture && npm run test:agentcore-bundle && native test . --yes",
     "test:phase0a": "npm test && npm run probe:agentcore && npm run test:host-lifecycle && npm run test:agentcore-sdk",
     "format": "zig fmt build.zig build_support src spikes app.zon && prettier --write frontend scripts spikes/agentcore-contract/bundle.lock.json package.json",

@@ -3,11 +3,10 @@
 const native_sdk = @import("native_sdk");
 const commands = @import("commands.zig");
 
-pub const Mode = enum { release, development, gate0_automation };
+pub const Mode = enum { release, development };
 
 const release_origins = [_][]const u8{"zero://app"};
 const development_origins = [_][]const u8{ "zero://app", "http://127.0.0.1:5173" };
-const automation_origins = [_][]const u8{ "zero://app", "zero://inline" };
 pub const window_permissions = [_][]const u8{native_sdk.security.permission_window};
 const builtin_names = [_][]const u8{
     "native-sdk.window.list",
@@ -33,10 +32,8 @@ fn builtinPolicies(allowed_origins: []const []const u8) [builtin_names.len]nativ
 
 const release_commands = commandPolicies(&commands.product, &release_origins);
 const development_commands = commandPolicies(&commands.product, &development_origins);
-const automation_commands = commandPolicies(&commands.automation, &automation_origins);
 const release_builtins = builtinPolicies(&release_origins);
 const development_builtins = builtinPolicies(&development_origins);
-const automation_builtins = builtinPolicies(&automation_origins);
 
 pub fn product(mode: Mode) native_sdk.BridgePolicy {
     return .{
@@ -44,7 +41,6 @@ pub fn product(mode: Mode) native_sdk.BridgePolicy {
         .commands = switch (mode) {
             .release => &release_commands,
             .development => &development_commands,
-            .gate0_automation => &automation_commands,
         },
     };
 }
@@ -56,7 +52,6 @@ pub fn builtin(mode: Mode) native_sdk.BridgePolicy {
         .commands = switch (mode) {
             .release => &release_builtins,
             .development => &development_builtins,
-            .gate0_automation => &automation_builtins,
         },
     };
 }
@@ -65,6 +60,5 @@ pub fn origins(mode: Mode) []const []const u8 {
     return switch (mode) {
         .release => &release_origins,
         .development => &development_origins,
-        .gate0_automation => &automation_origins,
     };
 }

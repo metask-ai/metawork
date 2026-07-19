@@ -30,12 +30,12 @@ import {
 } from "../features/composer/useTaskDrafts.ts";
 import { prepareRetryDraft } from "../features/composer/drafts.ts";
 import { submitTaskInstruction } from "../features/composer/submitTaskInstruction.ts";
-import { HostClient } from "../host/client.ts";
+import { BridgeClient } from "../bridge/client.ts";
 import {
   WorkbenchConnection,
   type WorkbenchConnectionStatus,
-} from "../host/connection.ts";
-import type { UiResponsePayload } from "../host/contracts.ts";
+} from "../bridge/connection.ts";
+import type { UiResponsePayload } from "../bridge/contracts.ts";
 import { useI18n, type MessageId } from "../i18n/context.ts";
 import {
   searchWorkbench,
@@ -51,7 +51,7 @@ import { initialWorkbenchState, workbenchReducer } from "../workbench/store.ts";
 
 const gate5FixtureLoader =
   import.meta.env.VITE_METAWORK_GATE5_FIXTURE === "1"
-    ? () => import("../host/fixtures/gate5-fixture.ts")
+    ? () => import("../bridge/fixtures/gate5-fixture.ts")
     : undefined;
 
 function errorText(error: unknown) {
@@ -110,7 +110,7 @@ export default function App() {
     failed: failUiResponse,
     observeSnapshot: observeUiResponseSnapshot,
   } = useUiResponseStates();
-  const client = useMemo(() => new HostClient(), []);
+  const client = useMemo(() => new BridgeClient(), []);
   const connection = useRef<WorkbenchConnection | null>(null);
   const pendingTaskSelection = useRef<string | null>(null);
   const pendingTaskDraftRetention = useRef(new Set<string>());

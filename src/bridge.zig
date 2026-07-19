@@ -1,23 +1,11 @@
 //! Minimal Renderer Bridge transport surface. Product truth remains in Workbench.
 
-const delivery_impl = @import("bridge/delivery.zig");
 const commands_impl = @import("bridge/commands.zig");
 const callback_gate_impl = @import("bridge/callback_gate.zig");
 const handlers_impl = @import("bridge/handlers.zig");
 const policy_impl = @import("bridge/policy.zig");
 const product_delivery_impl = @import("bridge/product_delivery.zig");
 const workspace_grant_impl = @import("bridge/workspace_grant.zig");
-
-pub const delivery = struct {
-    pub const Limits = delivery_impl.Limits;
-    pub const Error = delivery_impl.Error;
-    pub const InputEvent = delivery_impl.InputEvent;
-    pub const OwnedBatch = delivery_impl.OwnedBatch;
-    pub const ExpiredRoute = delivery_impl.ExpiredRoute;
-    pub const RouteIdentity = delivery_impl.RouteIdentity;
-    pub const Stats = delivery_impl.Stats;
-    pub const Delivery = delivery_impl.Delivery;
-};
 
 pub const CallbackGate = callback_gate_impl.State;
 
@@ -35,9 +23,6 @@ pub const commands = struct {
     pub const ping_ack = commands_impl.ping_ack;
     pub const connect = commands_impl.connect;
     pub const disconnect = commands_impl.disconnect;
-    pub const fixture_ack = commands_impl.fixture_ack;
-    pub const fixture_fetch = commands_impl.fixture_fetch;
-    pub const fixture_emit = commands_impl.fixture_emit;
     pub const choose_workspace = commands_impl.choose_workspace;
     pub const snapshot = commands_impl.snapshot;
     pub const snapshot_chunk = commands_impl.snapshot_chunk;
@@ -53,8 +38,6 @@ pub const commands = struct {
 
 pub const handlers = struct {
     pub const EventDisconnect = handlers_impl.EventDisconnect;
-    pub const EventAck = handlers_impl.EventAck;
-    pub const EventFetch = handlers_impl.EventFetch;
     pub const WorkbenchSnapshotChunk = handlers_impl.WorkbenchSnapshotChunk;
     pub const TaskCreate = handlers_impl.TaskCreate;
     pub const TaskRun = handlers_impl.TaskRun;

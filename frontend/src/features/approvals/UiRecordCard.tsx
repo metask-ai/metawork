@@ -1,4 +1,4 @@
-import type { UiRecord } from "../../host/contracts.ts";
+import type { UiRecord } from "../../bridge/contracts.ts";
 import { useI18n } from "../../i18n/context.ts";
 
 export function UiRecordCard({ record }: { record: UiRecord }) {

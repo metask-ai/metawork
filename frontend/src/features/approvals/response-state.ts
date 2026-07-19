@@ -1,4 +1,4 @@
-import type { PendingUi, WorkbenchSnapshot } from "../../host/contracts.ts";
+import type { PendingUi, WorkbenchSnapshot } from "../../bridge/contracts.ts";
 
 export type UiRequestIdentity = {
   taskId: string;

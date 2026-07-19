@@ -4,7 +4,7 @@
 > 日期：2026-07-19
 > 适用范围：Zig Native 应用、React Renderer、metacodes AgentCore 集成与自动化构建边界
 
-实施进度：阶段 1 至 7 已落地；Workbench 已独占 Executor，generation-checked RunControl、tagged termination latch、immutable Agent TerminalResult、Workbench no-fail terminal commit 和 pre-execution terminal record 已连通；Agent 是唯一 AgentCore SDK consumer，`OwnedCoreEvent` 与 bounded canonical notification retry/deadline 已连通；产品 wire contract 已原子切换到 Task schema v5；Bridge `ProductDelivery` 已独占 Renderer connection generation、revision retry/timer、snapshot identity 与 owned storage。automation-only raw event retention 仍保持显式隔离，并随阶段 8 从 release build graph 移除。
+实施进度：阶段 1 至 8 已落地；Workbench 已独占 Executor，generation-checked RunControl、tagged termination latch、immutable Agent TerminalResult、Workbench no-fail terminal commit 和 pre-execution terminal record 已连通；Agent 是唯一 AgentCore SDK consumer，`OwnedCoreEvent` 与 bounded canonical notification retry/deadline 已连通；产品 wire contract 已原子切换到 Task schema v5；Bridge `ProductDelivery` 已独占 Renderer connection generation、revision retry/timer、snapshot identity 与 owned storage；Renderer Native 合同已迁入 `frontend/src/bridge/`，automation handler、origin、raw delivery、fixture worker 与 diagnostic token 由 Native SDK `build_options.automation` 在编译期选择，release Native/Renderer 产物均有 token scan。
 
 ## 1. 目的与决策
 
@@ -76,7 +76,7 @@ src/
 │   ├── projection.zig
 │   └── snapshot_writer.zig
 ├── bridge.zig
-└── bridge/
+├── bridge/
     ├── commands.zig
     ├── handlers.zig
     ├── policy.zig
@@ -84,8 +84,12 @@ src/
     ├── product_delivery.zig
     ├── revision_delivery.zig
     ├── snapshot_delivery.zig
-    ├── delivery.zig          # automation-only raw event transport，阶段 8 隔离
     └── workspace_grant.zig
+├── automation.zig            # compile-time composition selector
+└── automation/
+    ├── disabled.zig           # release inert capability
+    ├── enabled.zig            # automation-only commands/origins/workers
+    └── delivery.zig           # automation-only raw event retention
 ```
 
 目录树表达目标责任，不要求为了“看起来完整”提前创建空文件。只有当代码已经形成独立不变量和测试边界时才拆文件。
@@ -369,12 +373,12 @@ terminal publication 必须构造上不可失败：
 
 ### 6.5 cancel、close、delete 和 shutdown
 
-| 当前状态 | cancel / Task close 行为 | terminal 来源 | delete 行为 |
-| --- | --- | --- | --- |
-| `queued` | Workbench 从队列移除 | Workbench pre-execution payload | terminal 后删除或执行 `delete_pending` |
-| `starting` | Workbench 设置 `cancel_pending` | begin 失败则 Workbench；成功则 Agent | 设置 `delete_pending`，不得释放 record |
-| `running` / `waiting_ui` | 锁内取得 `RunControlLease`，锁外请求 Agent termination | `agent.TerminalResult` | 设置 `delete_pending`，等待 worker/reference 归零 |
-| `terminal` | 幂等 no-op 或 stale request error | 已提交 payload | 满足引用条件后物理删除 |
+| 当前状态                 | cancel / Task close 行为                               | terminal 来源                        | delete 行为                                       |
+| ------------------------ | ------------------------------------------------------ | ------------------------------------ | ------------------------------------------------- |
+| `queued`                 | Workbench 从队列移除                                   | Workbench pre-execution payload      | terminal 后删除或执行 `delete_pending`            |
+| `starting`               | Workbench 设置 `cancel_pending`                        | begin 失败则 Workbench；成功则 Agent | 设置 `delete_pending`，不得释放 record            |
+| `running` / `waiting_ui` | 锁内取得 `RunControlLease`，锁外请求 Agent termination | `agent.TerminalResult`               | 设置 `delete_pending`，等待 worker/reference 归零 |
+| `terminal`               | 幂等 no-op 或 stale request error                      | 已提交 payload                       | 满足引用条件后物理删除                            |
 
 Task close 和 delete 是 Workbench 产品状态转换，不得直接 free Agent Session 或 Run memory。close 先阻止新 admission，再终止 non-terminal Run，最后关闭 Session；delete 在 close 完成后删除产品记录，或记录 `delete_pending` 并在安全点完成。
 
@@ -532,9 +536,9 @@ release、development 和 automation 可以共享 App composition 逻辑，但�
 
 `build.zig` 必须：
 
-1. 读取 `-Dautomation`；
-2. 仅在 automation target 中创建并注入 automation module；
-3. release module graph 不 import fixture source；
+1. 复用 Native SDK 已声明的 `-Dautomation` compile-time option，不能在应用 build graph 中重复声明同名 option；
+2. 通过 `src/automation.zig` 在编译期选择 enabled/disabled implementation；
+3. release generated code 不引用 fixture implementation，artifact 不包含 fixture source token；
 4. product `bridge/commands.zig` 不包含 automation-only command；
 5. automation origin、inline source、fixture worker 和 diagnostic token 只存在于 automation artifact。
 
@@ -556,14 +560,14 @@ root 应显式导出稳定消费表面，并让内部模块可以自由重构。
 
 ## 13. 当前代码与目标差异
 
-| 当前实现 | 目标 |
-| --- | --- |
-| Workbench 已独占 Executor、queue、workers 与 shutdown；worker 通过原子 `starting/running/finishing` handoff 调用 `beginRun()` + 唯一 latch-aware `Run.execute()` | 已达成 |
-| Agent 使用 tagged `TerminationSignal`，callback/event-pump/notification 与 external interruption 分型；contract failure 是 terminal fact，不伪装成 abort | 已达成 |
-| Workbench admission/durable RunRef/no-fail payload 已落地，Agent `TerminalResult` 直接提交，terminal 后不回查 Session snapshot | 已达成 |
+| 当前实现                                                                                                                                                                   | 目标   |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ |
+| Workbench 已独占 Executor、queue、workers 与 shutdown；worker 通过原子 `starting/running/finishing` handoff 调用 `beginRun()` + 唯一 latch-aware `Run.execute()`           | 已达成 |
+| Agent 使用 tagged `TerminationSignal`，callback/event-pump/notification 与 external interruption 分型；contract failure 是 terminal fact，不伪装成 abort                   | 已达成 |
+| Workbench admission/durable RunRef/no-fail payload 已落地，Agent `TerminalResult` 直接提交，terminal 后不回查 Session snapshot                                             | 已达成 |
 | 只有 `agent/` import `metacodes_agentcore`；App 通过 Agent 构造 Runtime，Workbench 通过 `agent.OwnedCoreEvent`/validated UI types 消费，Bridge DTO 使用自身 transport enum | 已达成 |
-| 产品 command、payload、snapshot 与 cause 已统一为 `tasks.*`、`taskId`、`tasks` 和 `app_shutdown`；Agent/Gate 传输继续使用内部 Session route identity | 已达成 |
-| automation handler/token 无条件编入 App source graph | `build.zig` 条件注入 automation module |
+| 产品 command、payload、snapshot 与 cause 已统一为 `tasks.*`、`taskId`、`tasks` 和 `app_shutdown`；Agent/Gate 传输继续使用内部 Session route identity                       | 已达成 |
+| automation handler/token 已移出 App/Bridge 产品源码，由 compile-time selector 选择且 release artifact scan 禁止泄漏                                                        | 已达成 |
 
 ## 14. 迁移阶段
 
@@ -665,6 +669,8 @@ root 应显式导出稳定消费表面，并让内部模块可以自由重构。
 - 保持 automation Native smoke 通过。
 
 同步更新：`project-structure.md`、Gate automation 运行说明；历史报告不改。
+
+落地说明：Native SDK `addAppArtifacts` 已拥有 `-Dautomation` option，应用不得再次调用 `b.option` 声明同名配置。`build.zig` 将 SDK 的 generated `build_options` 注入 `src/automation.zig`；selector 只公开被选 implementation 的 `Runtime`/`Hooks`/handler count。最终边界以 release Native binary 与 Renderer bundle token scan 为准，而不是以 nullable field 或运行时 mode 推断。
 
 ### 阶段 9：测试按不变量拆分
 

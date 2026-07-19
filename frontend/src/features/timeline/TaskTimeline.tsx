@@ -15,7 +15,7 @@ import type {
   ToolView,
   UiRecord,
   UiResponsePayload,
-} from "../../host/contracts.ts";
+} from "../../bridge/contracts.ts";
 import { formatInteger, formatMilliseconds } from "../../i18n/formatters.ts";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
 

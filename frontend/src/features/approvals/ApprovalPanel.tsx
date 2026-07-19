@@ -5,7 +5,7 @@ import type {
   AskOption,
   PendingUi,
   UiResponsePayload,
-} from "../../host/contracts.ts";
+} from "../../bridge/contracts.ts";
 import { useI18n } from "../../i18n/context.ts";
 import {
   optionAnswerSelected,

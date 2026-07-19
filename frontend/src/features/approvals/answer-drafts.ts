@@ -1,4 +1,4 @@
-import type { AskQuestion } from "../../host/contracts.ts";
+import type { AskQuestion } from "../../bridge/contracts.ts";
 
 export type QuestionAnswerDraft =
   { kind: "text"; value: string } | { kind: "options"; selected: number[] };

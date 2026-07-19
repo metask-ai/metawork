@@ -56,7 +56,7 @@ test("Renderer modules preserve the approved dependency direction", async () => 
         false,
         `${relative(sourceRoot, file)} must stay React-free`,
       );
-    if (!(layer === "host" && parts.join("/") === "host/client.ts"))
+    if (!(layer === "bridge" && parts.join("/") === "bridge/client.ts"))
       assert.equal(
         source.includes("window.zero"),
         false,
@@ -65,7 +65,7 @@ test("Renderer modules preserve the approved dependency direction", async () => 
 
     for (const specifier of relativeImports(source)) {
       const targetParts = sourceParts(resolve(dirname(file), specifier));
-      if (layer === "host")
+      if (layer === "bridge")
         assert.equal(
           ["app", "features", "workbench", "components", "i18n"].includes(
             targetParts[0],
@@ -81,7 +81,7 @@ test("Renderer modules preserve the approved dependency direction", async () => 
         );
       if (layer === "components")
         assert.equal(
-          ["app", "features", "host", "workbench"].includes(targetParts[0]),
+          ["app", "features", "bridge", "workbench"].includes(targetParts[0]),
           false,
           `${relative(sourceRoot, file)} is not a reusable UI primitive`,
         );
