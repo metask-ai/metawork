@@ -198,6 +198,29 @@ test("canonical notification and Renderer transport failures stay isolated", () 
   );
   const drainEvents = app.indexOf("while (agent_runtime.takeEvent())");
   assert.ok(clearWake >= 0 && clearWake < drainEvents);
+  const drainFunction = app.slice(
+    app.indexOf("fn drainAgentEvents("),
+    app.indexOf("fn drainAgentEventPass("),
+  );
+  const firstDrain = drainFunction.indexOf(
+    "self.drainAgentEventPass(agent_runtime);",
+  );
+  const markTerminal = drainFunction.indexOf(
+    "workbench.markTerminalRunsBeforeEventDrain();",
+  );
+  const secondDrain = drainFunction.indexOf(
+    "self.drainAgentEventPass(agent_runtime);",
+    firstDrain + 1,
+  );
+  const finalizeTerminal = drainFunction.indexOf(
+    "workbench.finalizeMarkedTerminalRunsAfterEventDrain();",
+  );
+  assert.ok(
+    firstDrain >= 0 &&
+      firstDrain < markTerminal &&
+      markTerminal < secondDrain &&
+      secondDrain < finalizeTerminal,
+  );
   const stopIngress = app.indexOf("dispatcher.stopIngress();");
   const quiesceCallbacks = app.indexOf("dispatcher.assertQuiescent();");
   const detachWorkbench = app.indexOf("dispatcher.detachWorkbench();");
@@ -360,6 +383,15 @@ test("Agent terminal facts have one immutable handoff and no legacy history latc
 
   const workbench = read("src/workbench/projection.zig");
   assert.match(workbench, /commitAgentTerminal\(run, &terminal\)/);
+  assert.match(
+    workbench,
+    /fn productTerminalPayload[\s\S]*if \(!run\.event_stream_finalized\) return null;/,
+  );
+  assert.match(workbench, /fn runPhase[\s\S]*productTerminalPayload\(run\)/);
+  assert.match(
+    workbench,
+    /fn writeRun[\s\S]*const terminal = productTerminalPayload\(run\)/,
+  );
   assert.doesNotMatch(workbench, /snapshot\.last_outcome|snapshot\.cause/);
 });
 
@@ -375,6 +407,12 @@ test("Workbench owns Task lifecycle, continuation, and canonical redaction", () 
   assert.doesNotMatch(workbench, /session\.snapshot\(/);
   assert.match(workbench, /session_disposition_at_completion/);
   assert.match(workbench, /foldTerminalDisposition/);
+  const closeWorker = workbench.slice(
+    workbench.indexOf("fn closeWorker("),
+    workbench.indexOf("fn executeRunJob("),
+  );
+  assert.match(closeWorker, /notifier\.notify\(\)/);
+  assert.doesNotMatch(closeWorker, /requestWake\(\)/);
   assert.match(workbench, /sanitizeInto\(\s*run\.terminal_diagnostic/);
   assert.match(workbench, /copyProjected\(prompt/);
   assert.match(workbench, /replaceTrackedProjected\(\s*&view\.title/);
@@ -484,7 +522,7 @@ test("lifecycle tests are grouped by invariant instead of a mixed spike", () => 
   const cases = [
     ["tests/agent/lifecycle_test.zig", 27],
     ["tests/agent/event_pump_test.zig", 5],
-    ["tests/workbench/executor_lifecycle_test.zig", 5],
+    ["tests/workbench/executor_lifecycle_test.zig", 7],
     ["tests/bridge/automation_delivery_test.zig", 6],
     ["tests/integration/lifecycle/lifecycle_test.zig", 5],
   ];

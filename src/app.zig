@@ -116,6 +116,22 @@ const App = struct {
     fn drainAgentEvents(self: *@This()) void {
         const agent_runtime = self.agent_runtime orelse return;
         self.agent_event_wake_pending.store(false, .release);
+        self.drainAgentEventPass(agent_runtime);
+        const workbench = self.workbench orelse return;
+        // Terminal publication happens after the synchronous AgentCore Run
+        // returns, so its acquire observes all callback event enqueues. Drain
+        // once more after that observation before exposing product terminal
+        // state and the final assistant suffix; otherwise a queued callback
+        // could lose the race to lifecycle publication or a snapshot.
+        workbench.markTerminalRunsBeforeEventDrain();
+        self.drainAgentEventPass(agent_runtime);
+        workbench.finalizeMarkedTerminalRunsAfterEventDrain();
+    }
+
+    fn drainAgentEventPass(
+        self: *@This(),
+        agent_runtime: *agent.Runtime,
+    ) void {
         while (agent_runtime.takeEvent()) |value| {
             var envelope = value;
             defer envelope.deinit();

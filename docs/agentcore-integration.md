@@ -278,7 +278,9 @@ event 入泵后 ownership 已经转移给 Agent event pump。`EventReadyNotifier
 
 callback 返回后的 Workbench canonical projection failure 仍可以按 Run identity 请求 Agent 终止，并使用不含 Workbench 名称的 `event_pump_failure.consumer_rejected`；这不是 Bridge failure。Renderer event delivery、revision、snapshot、connection/generation 和 detached retention expiry 则形成 typed transport report，由 Workbench policy 决定 reject/retry/detach/discard。当前所有 Renderer transport stage 都明确不返回 `request_run_termination`；Renderer detach/reload 或 retention expiry 不得杀死后台 Run。
 
-AgentCore tool event 的 raw `id` 只在 Workbench 消费当前 event 时用于计算固定长度 SHA-256 correlation key；raw `id` 不保存在产品历史。后续 progress/result 使用同一 digest 关联 Tool record，产品 `id`、`name`、input、progress 和 content 在进入 canonical projection 前统一清理。该 digest 不进入 Renderer wire，也不是第二个产品 tool identity。
+AgentCore tool event 的 raw `id` 只在 Workbench 消费当前 event 时用于计算固定长度 SHA-256 correlation key；raw `id` 不保存在产品历史。后续 progress/result 使用同一 digest 关联 Tool record。Workbench 以 Run 内唯一 activity order 生成稳定且不敏感的产品 tool `id`；`name`、input、progress 和 content 在进入 canonical projection 前统一清理。该 digest 不进入 Renderer wire，也不是第二个产品 tool identity。Renderer decoder 必须拒绝同一 Run 内重复的产品 tool `id` 或 activity order。
+
+assistant `text_chunk` 的 credential 清理采用流式未决尾部：已经提交的 canonical 字节不再随之后的 chunk 重扫，只有仍可能组成跨 chunk credential 的有限后缀与新字节参与下一次清理。snapshot 只发布 committed prefix，未决尾部保持 Host-only。Run terminal publication acquire 后，App 再完整排空一次 Agent event pump，Workbench 才同时发布产品可见 terminal phase/outcome/cause、折叠 completion-time Session disposition、提交最终安全 assistant 尾部并关闭该 Run 的 event ingestion；raw terminal publication 本身不能替代这次 drain barrier。barrier 完成前新 Run admission 仍以当前 Run 未结束处理，close completion 和 Task 物理删除也必须等待该 Run 的事件流完成收口。barrier 后仍到达的 event 属于合同违约；仍开放的 Task 必须关闭 owning Session 并终止可能已经开始的后续 Run，不能只对已经 terminal 的历史 Run 重发无效 termination。上述状态属于 Workbench projection，不形成第二份 terminal 或 assistant 内容。
 
 Bridge 异步 payload 必须是 owned copy 或显式 ownership transfer。Native SDK 在 platform loop 上串行执行同步 Bridge handler 与 `app.stop`；App 先关闭 ingress，用 callback lease 计数断言 quiescence，再 detach Workbench。Bridge retained JSON/batch 不借用 Workbench memory，因此在 Workbench deinit 后独立释放。
 
@@ -383,14 +385,14 @@ call ABI
 → exhaustive Host mapping
 ```
 
-| StopReason     | 当前 Host 状态                                                         |
-| -------------- | ---------------------------------------------------------------------- |
-| `end_turn`     | completed                                                              |
-| `max_turns`    | stopped / awaiting_user                                                |
-| `aborted`      | `TerminalResult.termination_signal` 由 Workbench 映射为 cancelled / interrupted / failed |
-| `tool_error`   | failed                                                                 |
-| `api_error`    | failed                                                                 |
-| `tool_loop`    | stopped / awaiting_user                                                |
+| StopReason   | 当前 Host 状态                                                                           |
+| ------------ | ---------------------------------------------------------------------------------------- |
+| `end_turn`   | completed                                                                                |
+| `max_turns`  | stopped / awaiting_user                                                                  |
+| `aborted`    | `TerminalResult.termination_signal` 由 Workbench 映射为 cancelled / interrupted / failed |
+| `tool_error` | failed                                                                                   |
+| `api_error`  | failed                                                                                   |
+| `tool_loop`  | stopped / awaiting_user                                                                  |
 
 MetaWork 对 bundle SDK 的 typed StopReason 使用无 `else` switch。unknown raw code 必须在 SDK validation 层失败，并在 diagnostic 中保留 raw value。
 

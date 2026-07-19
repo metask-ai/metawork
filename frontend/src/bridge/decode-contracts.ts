@@ -430,6 +430,8 @@ function decodeTask(value: unknown, path: string): TaskView {
     runs.map((run) => [run.id, new Set(run.tools.map((tool) => tool.order))]),
   );
   for (const run of runs) {
+    if (new Set(run.tools.map((tool) => tool.id)).size !== run.tools.length)
+      fail(path, "tool product identities must be unique within a Run");
     if (activityOrders.get(run.id)!.size !== run.tools.length)
       fail(path, "tool activity order must be unique within a Run");
   }

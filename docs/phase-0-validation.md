@@ -305,7 +305,7 @@ Gate 4 通过时的 sink 只提供全局 event count 和单 event bytes 硬上�
 - callback 内 deep copy 后才返回；
 - 同一 Session/Run 顺序稳定；
 - 多 Session 公平轮转；
-- `text_chunk` 无论是否合并都逐字节一致；当前 baseline 不在 pump 内合并；
+- `text_chunk` 无论是否合并都逐字节一致；当前 baseline 不在 pump 内合并。Workbench credential 清理必须覆盖跨 chunk credential、大量单字节 chunk、中间 snapshot 不发布未决 credential 前缀、terminal 后 drain barrier 提交普通尾部，并证明已提交 assistant 历史不会被后续 chunk 反复重扫；
 - pump 不擅自折叠 `tool_progress` 或 `usage`，保持 bundle event 顺序和原始 bytes；Gate 6 的 Renderer projection 再按 SDK 语义覆盖或累计；
 - tool/UI/run 控制事件不静默丢失；
 - AgentCore/tool 线程不直接调用 WebView；

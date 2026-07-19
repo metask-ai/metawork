@@ -63,10 +63,10 @@ test "Gate 6 Workbench closes off-thread and exposes retryable close failure" {
     const task_id = try workbench.createTask(workbenchTaskInput());
     fake_core.failNextSessionDestroy();
     try workbench.closeTask(task_id);
-    try waitWorkbenchSnapshot(&workbench, "\"closeFailed\":true");
+    try waitWorkbenchSnapshot(runtime, &workbench, "\"closeFailed\":true");
 
     try workbench.closeTask(task_id);
-    try waitWorkbenchSnapshot(&workbench, "\"lifecycle\":\"closed\"");
+    try waitWorkbenchSnapshot(runtime, &workbench, "\"lifecycle\":\"closed\"");
     fake_core.lock();
     const destroyed = fake_core.session_destroyed;
     fake_core.unlock();
@@ -91,7 +91,7 @@ test "Gate 6 Workbench close cancels a queued Run without blocking the caller" {
     const task_id = try workbench.createTask(workbenchTaskInput());
     _ = try workbench.runTask(task_id, "close this run");
     try workbench.closeTask(task_id);
-    try waitWorkbenchSnapshot(&workbench, "\"lifecycle\":\"closed\"");
+    try waitWorkbenchSnapshot(runtime, &workbench, "\"lifecycle\":\"closed\"");
     fake_core.lock();
     const abort_calls = fake_core.abort_calls;
     const destroyed = fake_core.session_destroyed;
@@ -118,14 +118,14 @@ test "Workbench cancel of a completed Run is an idempotent no-op" {
 
     const task_id = try workbench.createTask(workbenchTaskInput());
     const run_id = try workbench.runTask(task_id, "finish before cancel arrives");
-    try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
+    try waitWorkbenchSnapshot(runtime, &workbench, "\"lastRunOutcome\":\"completed\"");
     const revision = workbench.currentRevision();
     try workbench.cancel(task_id, run_id);
     try std.testing.expectEqual(revision, workbench.currentRevision());
-    try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
+    try waitWorkbenchSnapshot(runtime, &workbench, "\"lastRunOutcome\":\"completed\"");
 
     try workbench.closeTask(task_id);
-    try waitWorkbenchSnapshot(&workbench, "\"lifecycle\":\"closed\"");
+    try waitWorkbenchSnapshot(runtime, &workbench, "\"lifecycle\":\"closed\"");
 }
 
 test "Workbench shutdown terminates a waiting UI Run before joining workers" {
@@ -147,8 +147,85 @@ test "Workbench shutdown terminates a waiting UI Run before joining workers" {
 
     const task_id = try workbench.createTask(workbenchTaskInput());
     _ = try workbench.runTask(task_id, "wait for shutdown");
-    try waitWorkbenchSnapshot(&workbench, "\"currentRunPhase\":\"waiting_ui\"");
+    try waitWorkbenchSnapshot(runtime, &workbench, "\"currentRunPhase\":\"waiting_ui\"");
     workbench.shutdownExecutor();
-    try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"interrupted\"");
-    try waitWorkbenchSnapshot(&workbench, "\"continuationAvailable\":false");
+    try waitWorkbenchSnapshot(runtime, &workbench, "\"lastRunOutcome\":\"interrupted\"");
+    try waitWorkbenchSnapshot(runtime, &workbench, "\"continuationAvailable\":false");
+}
+
+test "Workbench shutdown rejects new Task admission without creating product state" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var workbench = try workbench_api.Workbench.init(std.testing.allocator, runtime, .{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_tasks = 1,
+        .max_runs_per_task = 1,
+        .max_tools_per_run = 1,
+    }, workbenchConfiguration());
+    defer workbench.deinit();
+
+    workbench.shutdownExecutor();
+    try std.testing.expectError(
+        error.ExecutorShuttingDown,
+        workbench.createTask(workbenchTaskInput()),
+    );
+    try std.testing.expectEqual(@as(u64, 0), workbench.currentRevision());
+
+    var snapshot_storage: [4096]u8 = undefined;
+    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"tasks\":[]") != null);
+}
+
+test "late event from a finalized Run closes a Task with newer active work" {
+    fake_core.reset();
+    fake_core.setNextPlan(.controlled);
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var workbench = try workbench_api.Workbench.init(std.testing.allocator, runtime, .{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_tasks = 1,
+        .max_runs_per_task = 2,
+        .max_tools_per_run = 1,
+    }, workbenchConfiguration());
+    defer workbench.deinit();
+
+    const task_id = try workbench.createTask(workbenchTaskInput());
+    const first_run_id = try workbench.runTask(task_id, "finish first");
+    try waitWorkbenchSnapshot(runtime, &workbench, "\"currentRunPhase\":\"running\"");
+    fake_core.releaseControlled();
+    try waitWorkbenchSnapshot(runtime, &workbench, "\"lastRunOutcome\":\"completed\"");
+
+    fake_core.rearmControlled();
+    _ = try workbench.runTask(task_id, "new active work");
+    try waitWorkbenchSnapshot(runtime, &workbench, "\"currentRunPhase\":\"running\"");
+
+    const encoded = "{\"text_chunk\":\"late\"}";
+    var late_event = lifecycle.OwnedCoreEvent{
+        .session_id = task_id,
+        .run_id = first_run_id,
+        .encoded_bytes = encoded.len,
+        .json = try std.testing.allocator.dupe(u8, encoded),
+        .event = try lifecycle.decodeCoreEvent(std.testing.allocator, encoded),
+        .allocator = std.testing.allocator,
+    };
+    defer late_event.deinit();
+    try std.testing.expectError(
+        error.EventAfterTerminalDrain,
+        workbench.applyEvent(&late_event),
+    );
+
+    var snapshot_storage: [128 * 1024]u8 = undefined;
+    const closing_snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(u8, closing_snapshot, "\"lifecycle\":\"closing\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, closing_snapshot, "\"continuationAvailable\":false") != null);
+    try waitWorkbenchSnapshot(runtime, &workbench, "\"lifecycle\":\"closed\"");
 }

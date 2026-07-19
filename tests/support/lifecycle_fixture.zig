@@ -778,11 +778,24 @@ pub fn workbenchTaskInput() workbench_api.TaskCreateInput {
 }
 
 pub fn waitWorkbenchSnapshot(
+    runtime: *lifecycle.Runtime,
     workbench: *workbench_api.Workbench,
     needle: []const u8,
 ) !void {
     var output: [128 * 1024]u8 = undefined;
     for (0..10_000) |_| {
+        while (runtime.takeEvent()) |value| {
+            var envelope = value;
+            defer envelope.deinit();
+            try workbench.applyEvent(&envelope);
+        }
+        workbench.markTerminalRunsBeforeEventDrain();
+        while (runtime.takeEvent()) |value| {
+            var envelope = value;
+            defer envelope.deinit();
+            try workbench.applyEvent(&envelope);
+        }
+        workbench.finalizeMarkedTerminalRunsAfterEventDrain();
         const snapshot = try workbench.writeSnapshot(&output);
         if (std.mem.indexOf(u8, snapshot, needle) != null) return;
         std.Thread.yield() catch {};

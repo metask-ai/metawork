@@ -271,6 +271,31 @@ test("Workbench decoding rejects version drift, extra fields, and invalid wire v
     () => decodeWorkbenchSnapshot(duplicateActivityOrder),
     /activity order must be unique/,
   );
+
+  const duplicateToolIdentity = clone(fixture);
+  const firstDuplicateTool = {
+    id: "tool-1",
+    order: "1",
+    name: "Read",
+    input: "",
+    progress: "",
+    content: "done",
+    state: "completed",
+    isError: false,
+    elapsedMs: "1",
+    inputTruncated: false,
+    progressTruncated: false,
+    contentTruncated: false,
+    redacted: false,
+  };
+  duplicateToolIdentity.tasks[0].runs[0].tools.push(firstDuplicateTool, {
+    ...firstDuplicateTool,
+    order: "2",
+  });
+  assert.throws(
+    () => decodeWorkbenchSnapshot(duplicateToolIdentity),
+    /tool product identities must be unique/,
+  );
 });
 
 test("Host notifications and lifecycle responses require their exact payload shapes", () => {
