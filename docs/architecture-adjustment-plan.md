@@ -844,7 +844,7 @@ root 应显式导出稳定消费表面，并让内部模块可以自由重构。
 
 批次 D 不允许通过跳过 scanner、删测试、降低 Gate 或使用旧 artifact 获得绿色结果。
 
-落地状态：已完成。Apple Silicon macOS 上的格式、静态检查、正式 Native tests、Phase 0A、lifecycle、AgentCore SDK consumer、debug/release、macOS package 和 Gate 5/6 均使用本次 checkout 与仓库锁定 bundle 通过；release scanner 与 package verifier 同时通过。代码尚未提交，因此“归档”状态留给合入后的干净工作树，不伪造完成历史。
+落地状态：已完成。Apple Silicon macOS 上的格式、静态检查、正式 Native tests、Phase 0A、lifecycle、AgentCore SDK consumer、debug/release、macOS package 和 Gate 5/6 均使用本次 checkout 与仓库锁定 bundle 通过；release scanner 与 package verifier 同时通过。分支尚未合入主线，因此“归档”状态留给合入后的干净工作树，不伪造完成历史。
 
 ## 15. 验收门槛
 

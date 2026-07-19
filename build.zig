@@ -22,7 +22,7 @@ pub fn build(b: *std.Build) void {
         wireAgentCore(b, artifacts.tests.root_module, bundle)
     else
         modules;
-    const lifecycle_fixture = createLifecycleFixture(b, test_modules);
+    const lifecycle_fixture = createLifecycleFixture(b, test_modules, bundle.link_libc);
     test_modules.app.addImport("lifecycle_fixture", lifecycle_fixture);
     test_modules.bridge.addImport("lifecycle_fixture", lifecycle_fixture);
     const module_tests = [_]struct {
@@ -53,12 +53,16 @@ const WiredModules = struct {
     workbench_executor: *std.Build.Module,
 };
 
-fn createLifecycleFixture(b: *std.Build, modules: WiredModules) *std.Build.Module {
+fn createLifecycleFixture(
+    b: *std.Build,
+    modules: WiredModules,
+    link_libc: bool,
+) *std.Build.Module {
     const fixture = b.createModule(.{
         .root_source_file = b.path("tests/support/lifecycle_fixture.zig"),
         .target = modules.app.resolved_target,
         .optimize = modules.app.optimize,
-        .link_libc = true,
+        .link_libc = link_libc,
     });
     fixture.addImport("metawork_agent", modules.agent);
     fixture.addImport("metawork_workbench", modules.workbench);

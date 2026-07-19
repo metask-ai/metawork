@@ -132,6 +132,7 @@ const TaskLifecycle = enum { open, closing, closed };
 
 const ContinuationUnavailableReason = enum {
     session_poisoned,
+    event_projection_failure,
     closing,
     closed,
 };
@@ -232,6 +233,7 @@ const UsageView = struct {
 };
 
 const TerminalPublication = enum(u8) { open, publishing, published };
+const EventProjectionFailure = enum { consumer_rejected };
 const AgentHandoffState = enum(u8) { queued, starting, running, finishing };
 const RunTerminationDispatch = enum {
     pending,
@@ -277,6 +279,7 @@ const RunRecord = struct {
     terminal_observed: bool = false,
     terminal_event_drain_marked: bool = false,
     event_stream_finalized: bool = false,
+    event_projection_failure: ?EventProjectionFailure = null,
     terminal_diagnostic: []u8,
     redaction_secret: []const u8 = &.{},
     next_activity_order: u64 = 1,
@@ -808,10 +811,12 @@ pub const Workbench = struct {
                 changed = true;
             }
             const run = findRun(view.runs, view.active_run_id) orelse continue;
-            if (productTerminalPayload(run)) |terminal| {
+            if (productTerminalFacts(run)) |terminal| {
                 view.cancel_requested = false;
                 if (!run.terminal_observed) {
                     foldTerminalDisposition(view, terminal.session_disposition_at_completion);
+                    if (run.event_projection_failure != null and view.lifecycle == .open)
+                        view.continuation = .{ .unavailable = .event_projection_failure };
                     run.terminal_observed = true;
                     changed = true;
                 }
@@ -890,6 +895,23 @@ pub const Workbench = struct {
             .retry_notice => _ = try self.replaceTrackedProjected(&run.status_text, "Retrying provider", self.limits.max_tool_field_bytes),
             .stream_done => _ = try self.replaceTrackedProjected(&run.status_text, "Finishing", self.limits.max_tool_field_bytes),
         }
+        self.bumpRevision();
+    }
+
+    /// Records canonical event loss independently of Agent execution state.
+    /// A termination request may arrive after Agent terminal publication, so
+    /// it cannot be the only owner of this product failure fact.
+    pub fn recordEventProjectionFailure(
+        self: *Workbench,
+        task_id: u64,
+        run_id: u64,
+    ) void {
+        const task = self.findTask(task_id) orelse return;
+        const run = findRun(task.runs, run_id) orelse return;
+        if (run.event_projection_failure != null) return;
+        run.event_projection_failure = .consumer_rejected;
+        if (task.lifecycle == .open)
+            task.continuation = .{ .unavailable = .event_projection_failure };
         self.bumpRevision();
     }
 
@@ -1011,7 +1033,7 @@ pub const Workbench = struct {
             if (currentRunPhase(view) == null) 0 else view.active_run_id,
         }) catch return error.SnapshotTooLarge;
         if (currentRunPhase(view)) |phase| jsonValue(writer, @tagName(phase)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
-        const last_terminal = lastTerminalPayload(view.runs);
+        const last_terminal = lastTerminalFacts(view.runs);
         writer.writeAll(",\"lastRunOutcome\":") catch return error.SnapshotTooLarge;
         if (last_terminal) |terminal| jsonValue(writer, @tagName(terminal.outcome)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.writeAll(",\"cause\":") catch return error.SnapshotTooLarge;
@@ -1396,7 +1418,7 @@ pub const Workbench = struct {
     }
 
     fn writeRun(self: *Workbench, writer: *std.Io.Writer, run: *RunRecord) Error!void {
-        const terminal = productTerminalPayload(run);
+        const terminal = productTerminalFacts(run);
         writer.print("{{\"id\":\"{d}\",\"phase\":\"{s}\",\"user\":", .{ run.id, @tagName(runPhase(run)) }) catch return error.SnapshotTooLarge;
         try self.projectedJsonValue(writer, run.user);
         writer.writeAll(",\"assistant\":") catch return error.SnapshotTooLarge;
@@ -1946,8 +1968,31 @@ fn productTerminalPayload(run: *const RunRecord) ?*const TerminalPayload {
     return terminalPayload(run);
 }
 
+const ProductTerminalFacts = struct {
+    phase: RunPhase,
+    outcome: RunOutcome,
+    cause: ?RunCause,
+    session_disposition_at_completion: lifecycle.SessionDisposition,
+};
+
+fn productTerminalFacts(run: *const RunRecord) ?ProductTerminalFacts {
+    const terminal = productTerminalPayload(run) orelse return null;
+    if (run.event_projection_failure != null) return .{
+        .phase = .failed,
+        .outcome = .failed,
+        .cause = .event_pipeline_failure,
+        .session_disposition_at_completion = terminal.session_disposition_at_completion,
+    };
+    return .{
+        .phase = terminal.phase,
+        .outcome = terminal.outcome,
+        .cause = terminal.cause,
+        .session_disposition_at_completion = terminal.session_disposition_at_completion,
+    };
+}
+
 fn runPhase(run: *const RunRecord) RunPhase {
-    return if (productTerminalPayload(run)) |terminal| terminal.phase else run.active_phase;
+    return if (productTerminalFacts(run)) |terminal| terminal.phase else run.active_phase;
 }
 
 fn setActivePhase(run: *RunRecord, phase: RunPhase) bool {
@@ -1961,13 +2006,13 @@ fn setActivePhase(run: *RunRecord, phase: RunPhase) bool {
     return run.terminal_publication.load(.acquire) == .open;
 }
 
-fn lastTerminalPayload(runs: []?RunRecord) ?*const TerminalPayload {
+fn lastTerminalFacts(runs: []?RunRecord) ?ProductTerminalFacts {
     var latest: ?*const RunRecord = null;
     for (runs) |*entry| {
         const run = &(entry.* orelse continue);
         if (latest == null or run.id > latest.?.id) latest = run;
     }
-    return if (latest) |run| productTerminalPayload(run) else null;
+    return if (latest) |run| productTerminalFacts(run) else null;
 }
 
 fn currentRunPhase(view: *const TaskView) ?RunPhase {
@@ -2903,6 +2948,55 @@ test "assistant credential redaction finalizes ordinary chunks without rescannin
     );
     try std.testing.expectEqual(revision_before_late_event + 1, workbench.revision);
     try std.testing.expect(!continuationAvailable(workbench.tasks[0].?.continuation));
+}
+
+test "projection failure after Agent terminal becomes a product failure" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    const events = [_][]const u8{
+        "{\"tool_start\":{\"id\":\"first\",\"name\":\"Read\",\"input\":\"one\"}}",
+        "{\"tool_start\":{\"id\":\"second\",\"name\":\"Bash\",\"input\":\"two\"}}",
+    };
+    for (events) |encoded| {
+        var envelope = try testEnvelope(3, 7, encoded);
+        defer envelope.deinit();
+        try workbench.applyEvent(&envelope);
+    }
+
+    const run = &workbench.tasks[0].?.runs[0].?;
+    try std.testing.expect(commitTerminal(
+        run,
+        .completed,
+        .completed,
+        null,
+        .reusable,
+        "",
+        false,
+    ));
+    var overflow = try testEnvelope(
+        3,
+        7,
+        "{\"tool_start\":{\"id\":\"third\",\"name\":\"Edit\",\"input\":\"three\"}}",
+    );
+    defer overflow.deinit();
+    try std.testing.expectError(error.ToolCapacity, workbench.applyEvent(&overflow));
+    workbench.recordEventProjectionFailure(3, 7);
+    finalizeTestTerminalEvents(&workbench);
+
+    // Agent completion remains immutable; only Workbench product facts report
+    // that the canonical event stream could not be represented completely.
+    try std.testing.expectEqual(RunOutcome.completed, terminalPayload(run).?.outcome);
+    const product = productTerminalFacts(run).?;
+    try std.testing.expectEqual(RunOutcome.failed, product.outcome);
+    try std.testing.expectEqual(RunCause.event_pipeline_failure, product.cause.?);
+    try std.testing.expect(!continuationAvailable(workbench.tasks[0].?.continuation));
+
+    var snapshot_storage: [96 * 1024]u8 = undefined;
+    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"phase\":\"failed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"lastRunOutcome\":\"failed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"cause\":\"event_pipeline_failure\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"continuationAvailable\":false") != null);
 }
 
 test "event drain barrier atomically publishes terminal product state" {

@@ -136,6 +136,10 @@ const App = struct {
             var envelope = value;
             defer envelope.deinit();
             if (self.workbench) |workbench| workbench.applyEvent(&envelope) catch {
+                workbench.recordEventProjectionFailure(
+                    envelope.session_id,
+                    envelope.run_id,
+                );
                 agent_runtime.requestRunTermination(
                     envelope.session_id,
                     envelope.run_id,

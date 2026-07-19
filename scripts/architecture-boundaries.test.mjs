@@ -387,10 +387,20 @@ test("Agent terminal facts have one immutable handoff and no legacy history latc
     workbench,
     /fn productTerminalPayload[\s\S]*if \(!run\.event_stream_finalized\) return null;/,
   );
-  assert.match(workbench, /fn runPhase[\s\S]*productTerminalPayload\(run\)/);
   assert.match(
     workbench,
-    /fn writeRun[\s\S]*const terminal = productTerminalPayload\(run\)/,
+    /fn productTerminalFacts[\s\S]*productTerminalPayload\(run\)/,
+  );
+  assert.match(workbench, /fn runPhase[\s\S]*productTerminalFacts\(run\)/);
+  assert.match(
+    workbench,
+    /fn writeRun[\s\S]*const terminal = productTerminalFacts\(run\)/,
+  );
+  assert.match(workbench, /event_projection_failure: \?EventProjectionFailure/);
+  const app = read("src/app.zig");
+  assert.match(
+    app,
+    /applyEvent\(&envelope\) catch[\s\S]*recordEventProjectionFailure/,
   );
   assert.doesNotMatch(workbench, /snapshot\.last_outcome|snapshot\.cause/);
 });
