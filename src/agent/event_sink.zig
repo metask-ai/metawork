@@ -6,7 +6,7 @@ pub const Error = error{
     SinkFull,
 };
 
-pub const EventEnvelope = struct {
+pub const OwnedCoreEvent = struct {
     session_id: u64,
     run_id: u64,
     encoded_bytes: usize,
@@ -16,7 +16,7 @@ pub const EventEnvelope = struct {
 
     /// Ownership transfers from the sink to the caller. Do not copy this
     /// value; call `deinit` exactly once after consuming the SDK parse owner.
-    pub fn deinit(self: *EventEnvelope) void {
+    pub fn deinit(self: *OwnedCoreEvent) void {
         self.allocator.free(self.json);
         self.event.deinit();
         self.* = undefined;
@@ -24,7 +24,7 @@ pub const EventEnvelope = struct {
 
     /// Drops the SDK parse owner and transfers the raw, already-validated
     /// event bytes to the transport layer without copying them again.
-    pub fn takeJson(self: *EventEnvelope) OwnedEventJson {
+    pub fn takeJson(self: *OwnedCoreEvent) OwnedEventJson {
         self.event.deinit();
         const result = OwnedEventJson{
             .session_id = self.session_id,
@@ -53,7 +53,7 @@ pub const BoundedEventSink = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
     mutex: std.Io.Mutex = .init,
-    entries: []?EventEnvelope,
+    entries: []?OwnedCoreEvent,
     max_event_bytes: usize,
     count: usize = 0,
     bytes: usize = 0,
@@ -66,7 +66,7 @@ pub const BoundedEventSink = struct {
         capacity: usize,
         max_event_bytes: usize,
     ) std.mem.Allocator.Error!BoundedEventSink {
-        const entries = try allocator.alloc(?EventEnvelope, capacity);
+        const entries = try allocator.alloc(?OwnedCoreEvent, capacity);
         @memset(entries, null);
         return .{
             .io = io,
@@ -76,7 +76,7 @@ pub const BoundedEventSink = struct {
         };
     }
 
-    pub fn push(self: *BoundedEventSink, envelope: EventEnvelope) Error!void {
+    pub fn push(self: *BoundedEventSink, envelope: OwnedCoreEvent) Error!void {
         if (envelope.encoded_bytes > self.max_event_bytes) return error.EventTooLarge;
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
@@ -88,7 +88,7 @@ pub const BoundedEventSink = struct {
         self.bytes += envelope.encoded_bytes;
     }
 
-    pub fn take(self: *BoundedEventSink) ?EventEnvelope {
+    pub fn take(self: *BoundedEventSink) ?OwnedCoreEvent {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (self.count == 0) return null;

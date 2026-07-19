@@ -3,30 +3,30 @@ import test from "node:test";
 
 import { submitTaskInstruction } from "../frontend/src/features/composer/submitTaskInstruction.ts";
 
-test("the first send creates one Session before starting its Run", async () => {
+test("the first send creates one Task before starting its Run", async () => {
   const calls = [];
   const created = [];
   const result = await submitTaskInstruction({
     client: {
-      async createSession(grant) {
+      async createTask(grant) {
         calls.push(["create", grant]);
         return "41";
       },
-      async run(sessionId, instruction) {
-        calls.push(["run", sessionId, instruction]);
+      async run(taskId, instruction) {
+        calls.push(["run", taskId, instruction]);
       },
     },
-    sessionId: null,
+    taskId: null,
     workspaceGrant: "trusted-grant",
     instruction: "Ship a working product",
-    onSessionCreated: (sessionId) => created.push(sessionId),
+    onTaskCreated: (taskId) => created.push(taskId),
   });
   assert.deepEqual(calls, [
     ["create", "trusted-grant"],
     ["run", "41", "Ship a working product"],
   ]);
   assert.deepEqual(created, ["41"]);
-  assert.deepEqual(result, { kind: "started", sessionId: "41", created: true });
+  assert.deepEqual(result, { kind: "started", taskId: "41", created: true });
 });
 
 test("a creation failure never starts a Run or invents a Task", async () => {
@@ -35,17 +35,17 @@ test("a creation failure never starts a Run or invents a Task", async () => {
   const failure = new Error("credential missing");
   const result = await submitTaskInstruction({
     client: {
-      async createSession() {
+      async createTask() {
         throw failure;
       },
       async run() {
         runCalled = true;
       },
     },
-    sessionId: null,
+    taskId: null,
     workspaceGrant: "one-time-grant",
     instruction: "Keep this text",
-    onSessionCreated: () => {
+    onTaskCreated: () => {
       createdCalled = true;
     },
   });
@@ -58,7 +58,7 @@ test("the first send cannot bypass the Host-issued workspace grant", async () =>
   let createCalled = false;
   const result = await submitTaskInstruction({
     client: {
-      async createSession() {
+      async createTask() {
         createCalled = true;
         return "unexpected";
       },
@@ -66,61 +66,61 @@ test("the first send cannot bypass the Host-issued workspace grant", async () =>
         assert.fail("a Run cannot start without a trusted workspace");
       },
     },
-    sessionId: null,
+    taskId: null,
     workspaceGrant: "",
     instruction: "Do not bypass trust",
-    onSessionCreated() {
-      assert.fail("a Session cannot exist without a trusted workspace");
+    onTaskCreated() {
+      assert.fail("a Task cannot exist without a trusted workspace");
     },
   });
   assert.equal(result.kind, "create_failed");
   assert.equal(createCalled, false);
 });
 
-test("a Run failure reports the real created Session for draft recovery", async () => {
+test("a Run failure reports the real created Task for draft recovery", async () => {
   const failure = new Error("executor full");
   const result = await submitTaskInstruction({
     client: {
-      async createSession() {
+      async createTask() {
         return "42";
       },
       async run() {
         throw failure;
       },
     },
-    sessionId: null,
+    taskId: null,
     workspaceGrant: "one-time-grant",
     instruction: "Recover me",
-    onSessionCreated() {},
+    onTaskCreated() {},
   });
   assert.deepEqual(result, {
     kind: "run_failed",
-    sessionId: "42",
+    taskId: "42",
     created: true,
     error: failure,
   });
 });
 
-test("sending on an existing Task never creates another Session", async () => {
+test("sending on an existing Task never creates another Task", async () => {
   let createCalled = false;
   const result = await submitTaskInstruction({
     client: {
-      async createSession() {
+      async createTask() {
         createCalled = true;
         return "unexpected";
       },
-      async run(sessionId, instruction) {
-        assert.equal(sessionId, "9");
+      async run(taskId, instruction) {
+        assert.equal(taskId, "9");
         assert.equal(instruction, "Continue");
       },
     },
-    sessionId: "9",
+    taskId: "9",
     workspaceGrant: "",
     instruction: "Continue",
-    onSessionCreated() {
-      assert.fail("existing Task must not create a Session");
+    onTaskCreated() {
+      assert.fail("existing Task must not create a Task");
     },
   });
   assert.equal(createCalled, false);
-  assert.deepEqual(result, { kind: "started", sessionId: "9", created: false });
+  assert.deepEqual(result, { kind: "started", taskId: "9", created: false });
 });

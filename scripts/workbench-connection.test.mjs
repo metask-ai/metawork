@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { WorkbenchConnection } from "../frontend/src/host/connection.ts";
+import { WorkbenchConnection } from "../frontend/src/bridge/connection.ts";
 
 globalThis.window ??= {
   setTimeout: globalThis.setTimeout,
@@ -9,7 +9,7 @@ globalThis.window ??= {
 };
 
 function snapshot(revision) {
-  return { schemaVersion: 4, revision, sessions: [] };
+  return { schemaVersion: 5, revision, tasks: [] };
 }
 
 test("Workbench connection publishes only synchronized snapshots", async () => {
@@ -36,7 +36,7 @@ test("Workbench connection publishes only synchronized snapshots", async () => {
     connect: async () => "1",
     disconnect: async () => undefined,
     fetchSnapshot: async () => snapshot("1"),
-    ping: async () => ({ sequence: 1, automation: false, gate5Fixture: false }),
+    ping: async () => ({ sequence: 1 }),
     acknowledgeSignal: async (sequence) => acknowledgements.push(sequence),
   };
   const connection = new WorkbenchConnection(client, {
@@ -54,7 +54,7 @@ test("Workbench connection publishes only synchronized snapshots", async () => {
   assert.equal(ready.at(-1), true);
   assert.equal(failed.at(-1), false);
 
-  signalHandler({ sequence: 3, automation: false, gate5Fixture: false });
+  signalHandler({ sequence: 3 });
   await Promise.resolve();
   assert.deepEqual(acknowledgements, [3]);
 
@@ -92,7 +92,7 @@ test("explicit recovery replaces a generation whose snapshots stay unavailable",
       snapshots.push(next);
       return next;
     },
-    ping: async () => ({ sequence: 1, automation: false, gate5Fixture: false }),
+    ping: async () => ({ sequence: 1 }),
     acknowledgeSignal: async () => undefined,
   };
   const connection = new WorkbenchConnection(client, {
@@ -132,7 +132,7 @@ test("stop during startup prevents later ping and fixture work", async () => {
     fetchSnapshot: async () => snapshot("1"),
     ping: async () => {
       pingCount += 1;
-      return { sequence: 1, automation: true, gate5Fixture: true };
+      return { sequence: 1 };
     },
     acknowledgeSignal: async () => undefined,
     nativeBridgeForAutomationFixture: () => {
@@ -171,7 +171,7 @@ test("a failed startup handshake is disconnected and repeated during recovery", 
     ping: async () => {
       pingCount += 1;
       if (pingCount === 1) throw new Error("injected ping failure");
-      return { sequence: 2, automation: false, gate5Fixture: false };
+      return { sequence: 2 };
     },
     acknowledgeSignal: async () => undefined,
   };

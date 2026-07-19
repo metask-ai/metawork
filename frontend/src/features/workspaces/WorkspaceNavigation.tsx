@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { Icon } from "../../components/ui/Icon.tsx";
-import type { SessionView } from "../../host/contracts.ts";
+import type { TaskView } from "../../bridge/contracts.ts";
 import { taskCountMessageId } from "../../i18n/formatters.ts";
 import { useI18n } from "../../i18n/context.ts";
 import {
@@ -15,7 +15,7 @@ export function WorkspaceNavigation({
   summaries,
   currentWorkspace,
   tasks,
-  activeSessionId,
+  activeTaskId,
   selectedPath,
   grantReady,
   showArchived,
@@ -30,8 +30,8 @@ export function WorkspaceNavigation({
 }: {
   summaries: WorkspaceSummary[];
   currentWorkspace: string | null;
-  tasks: SessionView[];
-  activeSessionId: string | null;
+  tasks: TaskView[];
+  activeTaskId: string | null;
   selectedPath: string;
   grantReady: boolean;
   showArchived: boolean;
@@ -143,21 +143,19 @@ export function WorkspaceNavigation({
             })}
           </span>
         </div>
-        {visibleTasks.map((session) => (
+        {visibleTasks.map((task) => (
           <button
-            key={session.id}
+            key={task.id}
             className="task-list-item focus-ring"
-            aria-current={activeSessionId === session.id ? "page" : undefined}
-            onClick={() => onSelectTask(session.id)}
+            aria-current={activeTaskId === task.id ? "page" : undefined}
+            onClick={() => onSelectTask(task.id)}
           >
             <span className="task-list-row">
-              <span>{session.title || t("task.item", { id: session.id })}</span>
-              <TaskSignals session={session} />
+              <span>{task.title || t("task.item", { id: task.id })}</span>
+              <TaskSignals task={task} />
             </span>
             <span className="task-list-meta">
-              {session.archived
-                ? t("task.archived")
-                : taskStateLabel(session, t)}
+              {task.archived ? t("task.archived") : taskStateLabel(task, t)}
             </span>
           </button>
         ))}
@@ -204,9 +202,9 @@ function WorkspaceSignals({ workspace }: { workspace: WorkspaceSummary }) {
   );
 }
 
-export function TaskSignals({ session }: { session: SessionView }) {
+export function TaskSignals({ task }: { task: TaskView }) {
   const { t } = useI18n();
-  const signals = taskSignals(session);
+  const signals = taskSignals(task);
   const signal = signals.attention
     ? "attention"
     : signals.running
@@ -222,11 +220,8 @@ export function TaskSignals({ session }: { session: SessionView }) {
   );
 }
 
-function taskStateLabel(
-  session: SessionView,
-  t: ReturnType<typeof useI18n>["t"],
-) {
-  const state = taskDisplayState(session);
+function taskStateLabel(task: TaskView, t: ReturnType<typeof useI18n>["t"]) {
+  const state = taskDisplayState(task);
   if (state.kind === "phase") return t(`task.phase.${state.value}`);
   if (state.kind === "lifecycle") return t(`task.lifecycle.${state.value}`);
   if (state.kind === "archived") return t("task.archived");

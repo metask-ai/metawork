@@ -1,7 +1,7 @@
 const std = @import("std");
 const sdk = @import("metacodes_agentcore");
 const wire = sdk.types;
-const lifecycle = @import("host_lifecycle");
+const lifecycle = @import("metawork_agent");
 const workbench_executor = @import("workbench_executor");
 const MockServer = @import("mock_server.zig").MockServer;
 
@@ -293,18 +293,20 @@ fn verifyFormalHost(io: std.Io, raw_api: *const wire.ApiV1, root: []const u8) !v
         allocator,
         .{ .worker_count = 1, .queue_capacity = 2 },
     );
-    errdefer executor.destroy();
-    const host = try lifecycle.Host.init(io, allocator, raw_api, executor.scheduler(), .{
+    errdefer executor.deinit();
+    const host = try lifecycle.Runtime.initWithApi(io, allocator, raw_api, .{
         .max_sessions = 1,
     });
     defer {
+        executor.shutdown();
         host.shutdown() catch unreachable;
         host.deinit();
+        executor.deinit();
     }
     const session = try host.createSession(.{
-        .provider_kind_code = wire.PROVIDER_ANTHROPIC,
-        .permission_mode_code = wire.PERMISSION_DEFAULT,
-        .shell_policy_code = wire.SHELL_UNRESTRICTED,
+        .provider = .anthropic,
+        .permission_mode = .default,
+        .shell_policy = .unrestricted,
         .credential = "metawork-formal-host-fixture-key",
         .model = "metawork-formal-host-fixture-model",
         .base_url = base_url,
@@ -313,12 +315,50 @@ fn verifyFormalHost(io: std.Io, raw_api: *const wire.ApiV1, root: []const u8) !v
             .trust = .{ .temporary = "/tmp" },
         },
     });
-    const run_id = try session.submit("exercise formal Host synchronous UI and events");
+    const RunContext = struct {
+        session: *lifecycle.Session,
+        run_id: u64,
+        io: std.Io,
+        mutex: std.Io.Mutex = .init,
+        condition: std.Io.Condition = .init,
+        terminal: ?lifecycle.TerminalResult = null,
+    };
+    const RunJob = struct {
+        fn execute(context: *anyopaque) void {
+            const value: *RunContext = @ptrCast(@alignCast(context));
+            var run = value.session.beginRun(value.run_id) catch return;
+            const terminal = run.execute();
+            run.deinit();
+            value.mutex.lockUncancelable(value.io);
+            value.terminal = terminal;
+            value.condition.broadcast(value.io);
+            value.mutex.unlock(value.io);
+        }
+
+        fn cancel(context: *anyopaque) void {
+            const value: *RunContext = @ptrCast(@alignCast(context));
+            value.session.cancelPreparedRun(value.run_id) catch {};
+        }
+    };
+    const run_id = try session.prepareRun("exercise formal Host synchronous UI and events");
+    var run_context = RunContext{ .session = session, .run_id = run_id, .io = io };
+    try executor.enqueue(.{
+        .context = &run_context,
+        .execute_fn = RunJob.execute,
+        .cancel_fn = RunJob.cancel,
+    });
     try session.waitForState(.waiting_ui);
     const request_id = session.pendingUiRequest() orelse return error.MissingFormalHostUiRequest;
     const answers = [_][]const u8{"Yes"};
     try session.respondUi(run_id, request_id, .{ .answers = &answers });
     try session.waitRun(run_id);
+    run_context.mutex.lockUncancelable(io);
+    while (run_context.terminal == null)
+        run_context.condition.waitUncancelable(io, &run_context.mutex);
+    var terminal = run_context.terminal.?;
+    run_context.terminal = null;
+    run_context.mutex.unlock(io);
+    defer terminal.deinit();
 
     var saw_ui_tool = false;
     var saw_final = false;
@@ -341,10 +381,9 @@ fn verifyFormalHost(io: std.Io, raw_api: *const wire.ApiV1, root: []const u8) !v
             .unknown => {},
         }
     }
-    const snapshot = session.snapshot();
-    if (snapshot.last_status != wire.STATUS_OK or
-        snapshot.last_stop_reason_code != wire.STOP_END_TURN or
-        snapshot.last_outcome != .completed or !saw_ui_tool or !saw_final)
+    if (terminal.raw_status_code != wire.STATUS_OK or
+        terminal.raw_stop_reason_code != wire.STOP_END_TURN or
+        terminal.stop_reason != .end_turn or !saw_ui_tool or !saw_final)
         return error.UnexpectedFormalHostRun;
     try session.close(.session_close);
 }

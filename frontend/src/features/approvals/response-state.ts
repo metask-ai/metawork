@@ -1,7 +1,7 @@
-import type { PendingUi, WorkbenchSnapshot } from "../../host/contracts.ts";
+import type { PendingUi, WorkbenchSnapshot } from "../../bridge/contracts.ts";
 
 export type UiRequestIdentity = {
-  sessionId: string;
+  taskId: string;
   runId: string;
   requestId: string;
 };
@@ -18,18 +18,18 @@ export type UiResponseStates = Readonly<Record<string, UiResponseEntry>>;
 export const initialUiResponseStates: UiResponseStates = Object.freeze({});
 
 export function uiRequestIdentity(
-  sessionId: string,
+  taskId: string,
   pending: PendingUi,
 ): UiRequestIdentity {
   return {
-    sessionId,
+    taskId,
     runId: pending.runId,
     requestId: pending.requestId,
   };
 }
 
 export function uiRequestKey(identity: UiRequestIdentity): string {
-  return `${identity.sessionId}/${identity.runId}/${identity.requestId}`;
+  return `${identity.taskId}/${identity.runId}/${identity.requestId}`;
 }
 
 function sameIdentity(
@@ -37,7 +37,7 @@ function sameIdentity(
   identity: UiRequestIdentity,
 ): boolean {
   return (
-    entry.sessionId === identity.sessionId &&
+    entry.taskId === identity.taskId &&
     entry.runId === identity.runId &&
     entry.requestId === identity.requestId
   );
@@ -97,8 +97,8 @@ export function snapshotHasUiRequest(
   snapshot: WorkbenchSnapshot,
   identity: UiRequestIdentity,
 ): boolean {
-  const pending = snapshot.sessions.find(
-    (session) => session.id === identity.sessionId,
+  const pending = snapshot.tasks.find(
+    (task) => task.id === identity.taskId,
   )?.pendingUi;
   return (
     pending?.runId === identity.runId &&

@@ -129,6 +129,8 @@ Gate 未通过时不得用 source dependency、MetaWork 自制协议、无界队
 - callback borrowed lifetime；
 - Host/library-owned response/diagnostic release 恰好一次。
 
+同一 probe executable 同时保留两条互补路径：raw ABI 部分直接使用 `wire.ApiV1`、`wire.SessionConfigV1` 和固定宽度 `*_code` 字段，证明 shipped binary facade；`verifyFormalHost()` 则通过 test-only `agent.Runtime.initWithApi()` 注入同一 function table，并使用 typed `SessionOpenOptions` 验证正式 Agent adapter。不得为了统一表面而删除 raw wire 覆盖，也不得让 formal adapter 继续使用已经淘汰的 raw option 字段。
+
 可以额外验证 Host tool callback mechanics，但产品 Runtime 必须保持 `host_tool_count = 0`，不能用单 Session probe 证明多 Session Host tool 路由已成立。
 
 ### 退出证据
@@ -157,7 +159,7 @@ Gate 未通过时不得用 source dependency、MetaWork 自制协议、无界队
 reject new work
 → cancel queued Run
 → wake UI wait
-→ set first-writer-wins HostCause
+→ set first-writer-wins TerminationSignal
 → abort active Run
 → join
 → callback refcount == 0
@@ -180,21 +182,22 @@ reject new work
 
 - credential 仅从 Host environment/受控配置进入 Session config；
 - Renderer、Bridge、event、log、snapshot 和测试 golden 不出现 key；
+- Workbench canonical prompt、title、assistant、tool、UI 和 terminal diagnostic buffer 不保留 key；raw AgentCore tool ID 只形成不可逆 correlation digest；
 - 当前只允许临时或明确 trusted Workspace；
 - UI/文档不宣称 strict Workspace security。
 
 ### 当前实现与复现
 
-Gate 2 基础实现当前位于 `src/agentcore/session.zig`，bounded executor 位于 `src/workbench/executor.zig`，验证工程位于 `spikes/host-lifecycle/`。验证工程只从显式 `AGENTCORE_BUNDLE_ROOT` 导入 bundle SDK，并先按 `spikes/agentcore-contract/bundle.lock.json` 校验完整 manifest、checksum、平台、Zig 版本和 discovery symbol；它不进入正式应用 build graph。
+Gate 2 基础实现当前位于 `src/agent/session.zig`，bounded executor 位于 `src/workbench/executor.zig`。生命周期验证入口位于 `tests/`，按 Agent、Workbench、Bridge/automation transport 和纵向竞态分组；它只从显式 `AGENTCORE_BUNDLE_ROOT` 导入 bundle SDK，并先按 `spikes/agentcore-contract/bundle.lock.json` 校验完整 manifest、checksum、平台、Zig 版本和 discovery symbol，不进入正式应用 build graph。
 
 ```bash
 AGENTCORE_BUNDLE_ROOT=/absolute/path/to/validated/bundle \
-  npm run test:host-lifecycle
+  npm run test:lifecycle
 ```
 
-需要同时执行仓库常规测试时使用同一个显式 bundle 环境运行 `npm run test:phase0a`；该命令不会在缺少 artifact 时静默跳过 Gate 2。
+需要同时执行仓库常规测试时使用同一个显式 bundle 环境运行 `npm run test:phase0a`；该命令不会在缺少 artifact 时静默跳过 Gate 2。正式 Native `test` step 必须显式构造并运行 App、Bridge、Workbench projection 和 Workbench executor test artifacts；named module 被产品 root import 不等于其 `test` declarations 已执行。
 
-当前 deterministic function-table fake 覆盖 bounded executor、每 Session 单 Run、queued/active/UI-wait close、并发 close/shutdown、callback quiescence、first-writer HostCause、stale/too-late abort status、Session/Runtime destroy retry、OOM、diagnostic release、credential snapshot 隔离和临时/trusted Workspace 的词法边界。测试进程有 30 秒上限，避免回归变成无限 CI hang。
+当前 deterministic function-table fake 覆盖 bounded executor、每 Session 单 Run、queued/active/UI-wait close、并发 close/shutdown、callback quiescence、generation-checked RunControl lease、close lease quiescence、pre-Core termination、first-writer typed TerminationSignal、immutable TerminalResult、stale/too-late abort status、Session/Runtime destroy retry、OOM、diagnostic release、credential snapshot 隔离和临时/trusted Workspace 的词法边界。测试进程有 30 秒上限，避免回归变成无限 CI hang。
 
 这仍是 Gate 2 raw lifecycle foundation，不是正式 AgentCore Host：UI response 只验证 identity、唤醒和 close/shutdown 路径，固定返回 `UI_UNAVAILABLE`；事件和 UI JSON 不在 MetaWork 复制或解析。Gate 3 已在后续 clean bundle 上独立完成 typed SDK 验收。executor 容量仍尚未根据真实 trace 定标。
 
@@ -248,7 +251,7 @@ Host tool 内部 session ID 到 MetaWork Session/Run 的合同仍未定义时，
 - 六个 StopReason 使用无 `else` switch；
 - unknown code 在 SDK 层失败并保留 raw code；
 - `resource_limit` 与 admitted fatal Session poisoning 语义经过测试；
-- `aborted` 结合 HostCause 映射 cancelled/interrupted/failed。
+- `aborted` 结合 `TerminalResult.termination_signal` 由 Workbench 映射 cancelled/interrupted/failed。
 
 ### 同步 UI
 
@@ -264,16 +267,16 @@ Host tool 内部 session ID 到 MetaWork Session/Run 的合同仍未定义时，
 
 - validation/copy/test-sink capacity failure 返回 callback fatal；
 - session_run 返回 non-OK callback status；
-- HostCause 保留具体原因；
+- typed TerminationSignal 保留具体 execution failure domain；
 - 不误报用户取消，不读取 zeroed RunResult。
 
 ### 当前实现与复现
 
-正式 Host 位于 `src/agentcore/session.zig`，最小 FIFO bounded sink 位于 `src/agentcore/event_sink.zig`。deterministic fake 覆盖 lifecycle/typed callback/result/UI 测试；Gate 1 artifact-only probe 还会使用真实 bundle、Mock Provider 和正式 Host 再跑同步 `AskUserQuestion`、typed event sink 与 terminal outcome。
+当前正式 Agent Runtime 实现位于 `src/agent/session.zig`，最小 FIFO bounded sink 位于 `src/agent/event_sink.zig`。deterministic fake 覆盖 lifecycle/typed callback/result/UI 测试；Gate 1 artifact-only probe 还会使用真实 bundle、Mock Provider 和正式 Agent Runtime 再跑同步 `AskUserQuestion`、typed event sink 与 terminal outcome。
 
 ```bash
 AGENTCORE_BUNDLE_ROOT=/absolute/path/to/validated/bundle \
-  npm run test:host-lifecycle
+  npm run test:lifecycle
 
 AGENTCORE_BUNDLE_ROOT=/absolute/path/to/validated/bundle \
   npm run probe:agentcore
@@ -302,7 +305,7 @@ Gate 4 通过时的 sink 只提供全局 event count 和单 event bytes 硬上�
 - callback 内 deep copy 后才返回；
 - 同一 Session/Run 顺序稳定；
 - 多 Session 公平轮转；
-- `text_chunk` 无论是否合并都逐字节一致；当前 baseline 不在 pump 内合并；
+- `text_chunk` 无论是否合并都逐字节一致；当前 baseline 不在 pump 内合并。Workbench credential 清理必须覆盖跨 chunk credential、大量单字节 chunk、中间 snapshot 不发布未决 credential 前缀、terminal 后 drain barrier 提交普通尾部，并证明已提交 assistant 历史不会被后续 chunk 反复重扫；
 - pump 不擅自折叠 `tool_progress` 或 `usage`，保持 bundle event 顺序和原始 bytes；Gate 6 的 Renderer projection 再按 SDK 语义覆盖或累计；
 - tool/UI/run 控制事件不静默丢失；
 - AgentCore/tool 线程不直接调用 WebView；
@@ -310,7 +313,7 @@ Gate 4 通过时的 sink 只提供全局 event count 和单 event bytes 硬上�
 
 ### Renderer detach/reload
 
-- 区分临时 detach 与不可恢复 pipeline failure；
+- Renderer transport failure 与 canonical event/projection failure 使用不同 typed path，不共享 Run cause；
 - 有界 retention 内允许 Host snapshot/resync；
 - 旧连接不能消费新连接事件；
 - Gate 5 transport 保留 Session/Run identity、未 ack event 和 object，并拒绝旧 generation；Gate 6 完整链路再验证 reload 后 active UI request 的原 Session/Run/request；
@@ -323,6 +326,9 @@ Gate 4 通过时的 sink 只提供全局 event count 和单 event bytes 硬上�
 - 以四个并发 pending UI request 计算 snapshot 最坏预算，并验证 512 KiB projection 可通过 8 MiB Host store 与 256 KiB 分块完整重建；
 - snapshot 不包含 credential；
 - Host/AgentCore crash 不伪装为 reload recovery。
+- event delivery 失败前两阶段 batch 不 commit，断开后在新 generation 重发，不中止 Run；
+- retention expiry 只释放 Bridge-owned transport copy，不改写 Workbench terminal history；
+- shutdown 按 stop ingress → quiesce synchronous handlers → detach Workbench → deinit owned buffers 验证无 UAF/leak。
 
 ### 大 payload
 
@@ -332,8 +338,8 @@ Gate 4 通过时的 sink 只提供全局 event count 和单 event bytes 硬上�
 
 - event decode/copy OOM；
 - control queue deadline；
-- 两阶段 batch 在 Bridge send 失败前不 commit；Gate 5 验证 `Host.failRun` 的 fatal 路由，Gate 6 再把真实 send failure 与对应 Run 自动接线；
-- HostCause first-writer-wins；
+- canonical Workbench projection failure 按 Session/Run identity 请求 Agent 终止；
+- TerminationSignal first-writer-wins，且不包含 Renderer transport；
 - in-flight Run 被要求停止；
 - 最终状态 failed，不误报 cancelled。
 
@@ -381,9 +387,13 @@ Gate 4 通过时的 sink 只提供全局 event count 和单 event bytes 硬上�
 - 全部 worker 等待 UI 时 response/cancel/shutdown 仍可执行；
 - Session close 和 Host shutdown 无 hang/UAF/leak；
 - reload 语义可信且不冒充进程恢复；
+- release Native/Renderer 产物不包含 MetaWork 独有 automation command、origin、fixture payload 或 diagnostic token；Native SDK 自身共有的 product-runtime 字符串不作为 MetaWork 泄漏判据；
+- Native automation scanner 自身的正反测试通过：SDK 共有 token 不误杀，任一 MetaWork fixture token 必须命中；
 - 可复现的 build/test/run 命令进入仓库。
 
 > 状态：已通过。可复现证据见 [Phase 0 Gate 6 验证报告](phase-0-gate-6-report.md)。
+
+该状态首先记录历史 Gate 6 原型的验收事实。架构收口批次 A 至 D 已在 Apple Silicon macOS 使用仓库锁定 bundle 与本次 checkout 重新通过正式 Native test graph、Phase 0A formal adapter probe、release scanner、debug/release、macOS package 和 automation Gate 5/6；旧报告与旧 `zig-out` 产物仍不能替代本轮结果。
 
 Gate 6 验收当时只能称“同进程 macOS 同步原型”；完成下述 Gate 7 后才达到完整 Phase 0A。
 

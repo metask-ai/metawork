@@ -139,43 +139,42 @@ pub fn build(b: *std.Build) void {
     });
     probe_module.addImport("metacodes_agentcore", sdk);
     const event_sink = b.createModule(.{
-        .root_source_file = b.path("../../src/agentcore/event_sink.zig"),
+        .root_source_file = b.path("../../src/agent/event_sink.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = link_libc,
     });
     event_sink.addImport("metacodes_agentcore", sdk);
     const event_pump = b.createModule(.{
-        .root_source_file = b.path("../../src/agentcore/event_pump.zig"),
+        .root_source_file = b.path("../../src/agent/event_pump.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = link_libc,
     });
     event_pump.addImport("metacodes_agentcore", sdk);
     event_pump.addImport("event_sink", event_sink);
-    const host_lifecycle = b.createModule(.{
-        .root_source_file = b.path("../../src/agentcore/session.zig"),
+    const agent_session = b.createModule(.{
+        .root_source_file = b.path("../../src/agent/session.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = link_libc,
     });
-    host_lifecycle.addImport("metacodes_agentcore", sdk);
-    host_lifecycle.addImport("event_pump", event_pump);
-    const agentcore = b.createModule(.{
-        .root_source_file = b.path("../../src/agentcore.zig"),
+    agent_session.addImport("metacodes_agentcore", sdk);
+    agent_session.addImport("event_pump", event_pump);
+    const agent = b.createModule(.{
+        .root_source_file = b.path("../../src/agent.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = link_libc,
     });
-    agentcore.addImport("agentcore_session", host_lifecycle);
+    agent.addImport("agent_session", agent_session);
     const executor = b.createModule(.{
         .root_source_file = b.path("../../src/workbench/executor.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = link_libc,
     });
-    executor.addImport("metawork_agentcore", agentcore);
-    probe_module.addImport("host_lifecycle", host_lifecycle);
+    probe_module.addImport("metawork_agent", agent);
     probe_module.addImport("workbench_executor", executor);
     probe_module.addObjectFile(.{ .cwd_relative = lib_path });
     const probe = b.addExecutable(.{

@@ -92,8 +92,10 @@ const Route = struct {
 
 const ObjectUsage = struct { count: usize = 0, bytes: usize = 0 };
 
-/// Transport-only state. All methods are called on the Native SDK loop thread;
-/// AgentCore types and credentials are deliberately absent from this module.
+/// Automation-only raw Agent event transport. Product connection, revision,
+/// and snapshot delivery live in product_delivery.zig. All methods are called
+/// on the Native SDK loop thread; AgentCore types and credentials are
+/// deliberately absent from this module.
 pub const Delivery = struct {
     allocator: std.mem.Allocator,
     limits: Limits,
@@ -121,10 +123,19 @@ pub const Delivery = struct {
 
     pub fn connect(self: *Delivery) Error!u64 {
         if (self.generation == std.math.maxInt(u64)) return error.ConnectionExhausted;
-        self.generation += 1;
+        const generation = self.generation + 1;
+        try self.connectAt(generation);
+        return generation;
+    }
+
+    /// Automation transport follows the product Bridge connection identity.
+    /// It does not own generation allocation.
+    pub fn connectAt(self: *Delivery, generation: u64) Error!void {
+        if (generation == 0 or generation <= self.generation)
+            return error.StaleConnection;
+        self.generation = generation;
         self.attached = true;
         self.detached_ns = null;
-        return self.generation;
     }
 
     pub fn connectedGeneration(self: *const Delivery) ?u64 {
@@ -342,6 +353,10 @@ pub const Delivery = struct {
     }
 
     pub fn deinit(self: *Delivery) void {
+        self.deinitOwnedBuffers();
+    }
+
+    pub fn deinitOwnedBuffers(self: *Delivery) void {
         for (self.retained) |entry| {
             const item = entry orelse continue;
             item.allocator.free(item.json);

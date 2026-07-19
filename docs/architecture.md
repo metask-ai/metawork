@@ -1,7 +1,7 @@
 # MetaWork 高层架构
 
 > 状态：Phase 0A 已完成；当前实现基线迁移到 stable AgentCore ABI v1，后续正式方向选择单 AgentCore Worker
-> 日期：2026-07-17
+> 日期：2026-07-19
 
 产品范围见 [产品需求](requirements.md)，metacodes（原 cc-zig）的具体接入约束见 [AgentCore 集成契约](agentcore-integration.md)，当前 bundle 能力见 [AgentCore ABI v1 消费基线](agentcore-abi-v1.md)。历史报告中的 cc-zig 名称保留当时仓库身份。
 
@@ -11,7 +11,7 @@
 | ----------------- | ---------------------------------- | --------------------------------------------------------------------- |
 | Renderer          | React + Tailwind                   | 当前正式 UI 技术栈，适合复杂 Workbench 界面                           |
 | Desktop Framework | Native SDK                         | Zig 一等公民，负责系统 WebView、窗口、Bridge 和桌面生命周期           |
-| Workbench / Host  | Zig                                | 承担产品编排、权限边界、状态协调和 AgentCore 接入                     |
+| App / Workbench / Agent | Zig                           | 分别承担 composition、产品状态和 AgentCore 执行边界                   |
 | AgentCore         | metacodes AgentCore library bundle | metacodes 独立构建和发布；MetaWork 链接产物，不把上游源码纳入自身构建 |
 | Agent UI contract | metacodes 原生结构化协议           | React 消费 Host 产品投影，不消费终端字节流或 Provider SSE             |
 
@@ -54,24 +54,28 @@ artifact cache/remote 发布、async resume、strict Workspace security、正式
 flowchart TB
     UI["React + Tailwind Renderer<br/>Workbench UI"]
 
-    subgraph HOST["MetaWork Desktop Host / Workbench · Zig"]
-        NATIVE["Native SDK Runtime + Bridge<br/>直接使用"]
-        WB["Workbench 编排<br/>Workspace / Session / Run"]
-        BACKEND["AgentCore Host Binding<br/>callbacks + event pump"]
-        NATIVE <--> WB
-        WB <--> BACKEND
+    subgraph HOST["MetaWork Desktop Host · Zig"]
+        APP["App composition<br/>Native SDK Runtime"]
+        BRIDGE["Bridge transport"]
+        WB["Workbench 产品状态<br/>Task / Run history / queue"]
+        AGENT["Agent execution<br/>Session / active Run / callbacks"]
+        APP --> BRIDGE
+        APP --> WB
+        APP --> AGENT
+        BRIDGE --> WB
+        WB --> AGENT
     end
 
     CORE["AgentCore bundle<br/>metacodes"]
 
-    UI <-->|"领域命令 + 结构化数据"| NATIVE
-    BACKEND <-->|"bundle SDK + binary ABI"| CORE
+    UI <-->|"领域命令 + 结构化数据"| BRIDGE
+    AGENT <-->|"bundle SDK + binary ABI"| CORE
 ```
 
 这是三层职责边界，不等于三个进程：
 
 1. Renderer：产品界面；
-2. Zig Host / Workbench：桌面宿主、产品编排和安全边界；
+2. Zig Desktop Host：由 App、Bridge、Workbench、Agent 四个明确 module boundary 组成；
 3. AgentCore：Agent loop、模型、工具和结构化事件。
 
 ## 4. 组件职责
@@ -94,9 +98,11 @@ flowchart TB
 - 持有 Provider credential；
 - 作为权限或安全边界。
 
-### 4.2 MetaWork Zig Host / Workbench
+### 4.2 MetaWork Zig Desktop Host
 
-Native SDK 直接构成这一层的 Runtime、窗口和 Bridge。Host 内部可以按代码规模形成 Bridge、Workbench 和 AgentCore 模块，但不得为假想替换需求再包装一套镜像接口。
+Native SDK 直接构成桌面 Runtime 与窗口能力。MetaWork 内部固定为四个 named modules：`app` 负责 composition，`bridge` 负责验证与运输，`workbench` 拥有产品状态与队列，`agent` 执行并收口一个真实 Agent Run。`AgentCore` 只指 metacodes 外部 bundle。
+
+Bridge 的产品数据面由具体 `Dispatcher` 内部的 `ProductDelivery` 统一拥有：connection generation、revision retry/timer、snapshot identity 和 snapshot transport storage 都不再存放在 App。Dispatcher 通过明确的 `*Workbench` 同步生成 snapshot；App 只注入 Native emit/timer/dialog/main-thread capability，并按顺序组织 shutdown。automation-only raw Agent batch/object/ACK transport 不并入产品数据面；它只跟随产品 generation，由 build graph 从 release 产物裁掉。
 
 Host 负责：
 
@@ -104,8 +110,8 @@ Host 负责：
 - 暴露小而明确的领域命令；
 - 校验来源、参数、Workspace、Session 和权限；
 - 在 Renderer 之外读取并持有 Provider credential；
-- 管理 Session、Run、队列、取消、关闭和当前进程内状态；
-- 实现 AgentCore callback binding 和有界事件泵；
+- 由 Workbench 管理 Task、Run record、队列、取消协调和产品历史；
+- 由 Agent 管理 AgentCore Session、active Run、callback binding 和有界事件泵；
 - 管理跨会话产品状态；
 - 提供文件对话框、通知、更新和应用生命周期能力。
 
@@ -184,7 +190,7 @@ SessionRuntime
 
 RunJob
 ├── run_id
-├── HostCause（first writer wins）
+├── pending external interruption（Workbench admission/handoff 窗口）
 ├── executor slot
 └── run-scoped Host scratch
 ```
@@ -192,7 +198,11 @@ RunJob
 - 每个 Session 至多一个 in-flight Run；
 - Host 使用有上限的 Run executor；
 - 空闲 Session 不占 worker；同步 Run 和同步 UI wait 占用 execution slot；
+- Workbench 创建、排队、停止并销毁 bounded Executor；Agent Runtime 不接收 Scheduler capability，worker 从 Workbench queue 主动进入 Agent Run；
 - Bridge/main thread 不执行长耗时 Run，也不等待 permission；
+- 只有 `agent/` import `metacodes_agentcore`；App 让 Agent 内部完成 ABI discovery，Workbench 通过 Agent 公共 validated types 消费，Bridge DTO 不暴露 SDK enum/owner/handle；
+- Agent 通过 `EventReadyNotifier` 只报告 `scheduled` / `already_pending` / `unavailable`，不知道 Native main loop 或 Renderer；App 用原子 pending gate 合并重复 wake，Agent 对 `unavailable` 执行有界 retry/deadline；
+- Renderer delivery、revision、snapshot、connection 和 retention failure 作为 typed transport fact 进入 Workbench policy，默认只重试、断开或丢弃 transport copy，不中止后台 Agent Run；
 - Session close 必须在 join 与 callback quiescence 后才销毁 AgentCore handle；
 - Runtime 只能在全部 Session 销毁后销毁。
 
@@ -219,9 +229,11 @@ RunJob
 - Run 的 running/waiting/stopped/completed/cancelled/failed/interrupted 状态；
 - WebView reload 所需的当前 Host view snapshot。
 
+Workbench 在 admission 时为每个 Run 建立稳定 record slot、单调 generation 和 bounded terminal diagnostic storage。执行方持有 `RunRef` 时，Task record 不得物理释放；删除已关闭 Task 只能进入 `delete_pending`，并在引用归零后收口。Agent 对已开始的 Run 返回自包含、不可变的 `TerminalResult`；Workbench 将其无分配、write-once 地提交进 Run record。queued-before-execute 由 Workbench 直接生成 pre-execution 产品结果。Session snapshot 只描述 live lifecycle，不再承载历史 terminal facts。
+
 Renderer reload 只重建仍存活 Host 的视图。Host/AgentCore crash 后当前 Run 必须标记 interrupted，危险工具不得自动重放。Conversation/checkpoint 跨进程恢复只有在未来 AgentCore capability 明确提供后才能设计。
 
-Host view snapshot 使用独立的 8 MiB 有界存储，不受 Bridge 单次 1 MiB result 上限反向约束。Renderer 通过带 snapshot identity 的 256 KiB 分块读取完成 resync；begin 写入前先使旧 descriptor 失效，序列化失败后旧 identity 必须保持 stale，不能继续读取已被部分覆盖的 store。revision 通知和 snapshot 拉取分别保留 pending/retry 状态，瞬时发送或读取失败不能把旧视图标记为最新。snapshot 自动重试预算按 generation 限制，耗尽后进入显式 view-sync failure 并禁止 mutation；revision emit 与 retry timer 同时失败时当前 event connection fail closed。新 event generation 建立时若仍有旧 generation 的 snapshot Promise，必须在旧 Promise 退出后继续完成新 generation 的实际 resync，不能把等待旧 Promise 误判为同步成功。
+Host view snapshot 使用 Bridge `Dispatcher` 内部 `ProductDelivery` 独占的 8 MiB 有界存储，不受 Bridge 单次 1 MiB result 上限反向约束。Dispatcher 同时拥有 callback gate、workspace grants、handler registry 和 `*Workbench`，产品 command 的 decode、authority、domain call 与 response encode 不再经过 App。Workbench writer 只能在同步调用期间借用这块输出 buffer；返回后 Bridge 独占 encoded bytes，禁止保存 Workbench borrowed view。Renderer 通过带 snapshot identity 的 256 KiB 分块读取完成 resync；begin 写入前先使旧 descriptor 失效，序列化失败后旧 identity 必须保持 stale，不能继续读取已被部分覆盖的 store。revision 通知和 snapshot 拉取分别保留 pending/retry 状态，瞬时发送或读取失败不能把旧视图标记为最新。revision retry 同时受 attempt 和 deadline 预算约束，耗尽或 retry timer 不可用时当前 event connection fail closed，但不终止后台 Agent Run。新 event generation 建立时会使旧 snapshot descriptor 失效；Renderer 若仍持有旧 generation Promise，必须在旧 Promise 退出后继续完成新 generation 的实际 resync，不能把等待旧 Promise 误判为同步成功。Bridge 异步保留的 payload 必须自有；App shutdown 先 stop Bridge ingress、关闭 delivery connection 并取消 timer，在 Native platform loop 上确认同步 handler quiescence，然后 detach Workbench，最后才独立释放 delivery buffers。
 
 Host 与 Renderer 随同一应用包原子发布，Workbench snapshot 使用精确 schema version，不承担旧 Renderer/新 Host 或新 Renderer/旧 Host 的兼容。Renderer 必须 runtime decode Host payload；unknown version、malformed payload 或 decoder/serializer contract mismatch 一律进入 fail-closed view-sync failure，不能猜测字段或静默降级。
 
@@ -264,7 +276,8 @@ Native SDK 是当前选型，但 Phase 0A 必须验证：
 | callback/close race 造成 UAF          | abort、join、callback quiescence 后 destroy                   |
 | 同步 UI 耗尽 executor                 | bounded slots、deadline、cancel/close/shutdown 唤醒和压力测试 |
 | Bridge/event 造成无限内存             | count/byte/time 多维上限和公平调度                            |
-| Host fatal 被误报用户取消             | per-Run `HostCause` 是产品状态真相                            |
+| Run failure 被误报用户取消         | active first-writer cause 与 Workbench write-once terminal history 分层 |
+| Renderer 掉线杀死后台 Run              | typed transport policy 不向 Agent termination 反向泄漏          |
 | v1 Workspace 被误报安全               | 只允许临时/trusted 验证并显式标注限制                         |
 | 同进程 native crash 带走全部状态      | Gate 7 fault-domain spike 后再决定进程模型                    |
 | 过早建设发布系统                      | baseline 通过后再做 cache 与 remote                           |

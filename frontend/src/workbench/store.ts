@@ -1,18 +1,18 @@
 import {
   WORKBENCH_SCHEMA_VERSION,
   type WorkbenchSnapshot,
-} from "../host/contracts.ts";
+} from "../bridge/contracts.ts";
 
 export type WorkbenchState = {
   snapshot: WorkbenchSnapshot;
-  activeSessionId: string | null;
+  activeTaskId: string | null;
   activeWorkspaceRoot: string | null;
   draftWorkspaceRoot: string | null;
 };
 
 export type WorkbenchAction =
   | { type: "snapshot.accepted"; snapshot: WorkbenchSnapshot }
-  | { type: "session.selected"; sessionId: string }
+  | { type: "task.selected"; taskId: string }
   | { type: "workspace.selected"; workspaceRoot: string }
   | { type: "task.draft.opened"; workspaceRoot: string }
   | { type: "task.draft.closed" };
@@ -21,9 +21,9 @@ export const initialWorkbenchState: WorkbenchState = {
   snapshot: {
     schemaVersion: WORKBENCH_SCHEMA_VERSION,
     revision: "0",
-    sessions: [],
+    tasks: [],
   },
-  activeSessionId: null,
+  activeTaskId: null,
   activeWorkspaceRoot: null,
   draftWorkspaceRoot: null,
 };
@@ -32,40 +32,39 @@ export function workbenchReducer(
   state: WorkbenchState,
   action: WorkbenchAction,
 ): WorkbenchState {
-  if (action.type === "session.selected") {
-    const session = state.snapshot.sessions.find(
-      (candidate) => candidate.id === action.sessionId,
+  if (action.type === "task.selected") {
+    const task = state.snapshot.tasks.find(
+      (candidate) => candidate.id === action.taskId,
     );
-    if (!session) return state;
+    if (!task) return state;
     return {
       ...state,
-      activeSessionId: action.sessionId,
-      activeWorkspaceRoot: session.workspaceRoot,
+      activeTaskId: action.taskId,
+      activeWorkspaceRoot: task.workspaceRoot,
       draftWorkspaceRoot: null,
     };
   }
   if (action.type === "task.draft.opened")
     return {
       ...state,
-      activeSessionId: null,
+      activeTaskId: null,
       activeWorkspaceRoot: action.workspaceRoot,
       draftWorkspaceRoot: action.workspaceRoot,
     };
   if (action.type === "task.draft.closed")
-    return { ...state, activeSessionId: null, draftWorkspaceRoot: null };
+    return { ...state, activeTaskId: null, draftWorkspaceRoot: null };
   if (action.type === "workspace.selected")
     return action.workspaceRoot
       ? {
           ...state,
           activeWorkspaceRoot: action.workspaceRoot,
-          activeSessionId:
-            state.snapshot.sessions.find(
-              (session) =>
-                session.workspaceRoot === action.workspaceRoot &&
-                !session.archived,
+          activeTaskId:
+            state.snapshot.tasks.find(
+              (task) =>
+                task.workspaceRoot === action.workspaceRoot && !task.archived,
             )?.id ??
-            state.snapshot.sessions.find(
-              (session) => session.workspaceRoot === action.workspaceRoot,
+            state.snapshot.tasks.find(
+              (task) => task.workspaceRoot === action.workspaceRoot,
             )?.id ??
             null,
           draftWorkspaceRoot: null,
@@ -75,33 +74,32 @@ export function workbenchReducer(
     return {
       ...state,
       snapshot: action.snapshot,
-      activeSessionId: null,
+      activeTaskId: null,
       activeWorkspaceRoot: state.draftWorkspaceRoot,
     };
   const requestedWorkspace = state.activeWorkspaceRoot;
-  const activeSessionStillExists = action.snapshot.sessions.some(
-    (session) => session.id === state.activeSessionId,
+  const activeTaskStillExists = action.snapshot.tasks.some(
+    (task) => task.id === state.activeTaskId,
   );
-  const activeSessionId = activeSessionStillExists
-    ? state.activeSessionId
-    : (action.snapshot.sessions.find(
-        (session) =>
-          session.workspaceRoot === requestedWorkspace && !session.archived,
+  const activeTaskId = activeTaskStillExists
+    ? state.activeTaskId
+    : (action.snapshot.tasks.find(
+        (task) => task.workspaceRoot === requestedWorkspace && !task.archived,
       )?.id ??
-      action.snapshot.sessions.find(
-        (session) => session.workspaceRoot === requestedWorkspace,
+      action.snapshot.tasks.find(
+        (task) => task.workspaceRoot === requestedWorkspace,
       )?.id ??
-      action.snapshot.sessions.find((session) => !session.archived)?.id ??
-      action.snapshot.sessions[0]?.id ??
+      action.snapshot.tasks.find((task) => !task.archived)?.id ??
+      action.snapshot.tasks[0]?.id ??
       null);
-  const activeSession = action.snapshot.sessions.find(
-    (session) => session.id === activeSessionId,
+  const activeTask = action.snapshot.tasks.find(
+    (task) => task.id === activeTaskId,
   );
   return {
     snapshot: action.snapshot,
-    activeSessionId,
+    activeTaskId,
     activeWorkspaceRoot:
-      state.activeWorkspaceRoot ?? activeSession?.workspaceRoot ?? null,
+      state.activeWorkspaceRoot ?? activeTask?.workspaceRoot ?? null,
     draftWorkspaceRoot: null,
   };
 }

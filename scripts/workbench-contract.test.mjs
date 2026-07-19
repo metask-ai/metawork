@@ -10,12 +10,12 @@ import {
   decodeHostSignalEvent,
   decodePingResponse,
   decodeWorkbenchSnapshot,
-} from "../frontend/src/host/decode-contracts.ts";
+} from "../frontend/src/bridge/decode-contracts.ts";
 
 const fixture = JSON.parse(
   readFileSync(
     new URL(
-      "../frontend/src/host/__fixtures__/workbench-snapshot-v4.fixture",
+      "../frontend/src/bridge/__fixtures__/workbench-snapshot-v5.fixture",
       import.meta.url,
     ),
     "utf8",
@@ -26,28 +26,28 @@ function clone(value) {
   return structuredClone(value);
 }
 
-test("the canonical v4 Workbench fixture decodes without normalization", () => {
+test("the canonical v5 Workbench fixture decodes without normalization", () => {
   assert.deepEqual(decodeWorkbenchSnapshot(fixture), fixture);
 });
 
 test("Task metadata mutation acknowledgements are identity-checked and exact", () => {
   assert.doesNotThrow(() =>
-    assertTaskFlag({ sessionId: "3", renamed: true }, "3", "renamed"),
+    assertTaskFlag({ taskId: "3", renamed: true }, "3", "renamed"),
   );
   assert.doesNotThrow(() =>
-    assertTaskFlag({ sessionId: "3", deleted: true }, "3", "deleted"),
+    assertTaskFlag({ taskId: "3", deleted: true }, "3", "deleted"),
   );
   assert.doesNotThrow(() =>
-    assertTaskArchived({ sessionId: "3", archived: false }, "3", false),
+    assertTaskArchived({ taskId: "3", archived: false }, "3", false),
   );
   assert.throws(
-    () => assertTaskFlag({ sessionId: "4", renamed: true }, "3", "renamed"),
+    () => assertTaskFlag({ taskId: "4", renamed: true }, "3", "renamed"),
     /response mismatch/,
   );
   assert.throws(
     () =>
       assertTaskArchived(
-        { sessionId: "3", archived: true, compatibility: true },
+        { taskId: "3", archived: true, compatibility: true },
         "3",
         true,
       ),
@@ -68,60 +68,60 @@ test("Workbench decoding rejects version drift, extra fields, and invalid wire v
   assert.throws(() => decodeWorkbenchSnapshot(extraField), /expected keys/);
 
   const invalidId = clone(fixture);
-  invalidId.sessions[0].currentRunId = "07";
+  invalidId.tasks[0].currentRunId = "07";
   assert.throws(() => decodeWorkbenchSnapshot(invalidId), /wire integer/);
 
   const invalidState = clone(fixture);
-  invalidState.sessions[0].lifecycle = "recovering";
+  invalidState.tasks[0].lifecycle = "recovering";
   assert.throws(
     () => decodeWorkbenchSnapshot(invalidState),
     /unexpected value/,
   );
 
   const missingField = clone(fixture);
-  delete missingField.sessions[0].runs[0].usage.cacheCreation;
+  delete missingField.tasks[0].runs[0].usage.cacheCreation;
   assert.throws(() => decodeWorkbenchSnapshot(missingField), /expected keys/);
 
   const missingPrivacyFlag = clone(fixture);
-  delete missingPrivacyFlag.sessions[0].runs[0].assistantRedacted;
+  delete missingPrivacyFlag.tasks[0].runs[0].assistantRedacted;
   assert.throws(
     () => decodeWorkbenchSnapshot(missingPrivacyFlag),
     /expected keys/,
   );
 
   const mismatchedCurrentRun = clone(fixture);
-  mismatchedCurrentRun.sessions[0].currentRunPhase = "waiting_ui";
+  mismatchedCurrentRun.tasks[0].currentRunPhase = "waiting_ui";
   assert.throws(
     () => decodeWorkbenchSnapshot(mismatchedCurrentRun),
     /matching projected Run/,
   );
 
   const terminalCurrentRun = clone(fixture);
-  terminalCurrentRun.sessions[0].currentRunPhase = "completed";
-  terminalCurrentRun.sessions[0].runs[0].phase = "completed";
-  terminalCurrentRun.sessions[0].runs[0].outcome = "completed";
+  terminalCurrentRun.tasks[0].currentRunPhase = "completed";
+  terminalCurrentRun.tasks[0].runs[0].phase = "completed";
+  terminalCurrentRun.tasks[0].runs[0].outcome = "completed";
   assert.throws(
     () => decodeWorkbenchSnapshot(terminalCurrentRun),
     /unexpected value/,
   );
 
   const nonTerminalOutcome = clone(fixture);
-  nonTerminalOutcome.sessions[0].runs[0].outcome = "completed";
+  nonTerminalOutcome.tasks[0].runs[0].outcome = "completed";
   assert.throws(
     () => decodeWorkbenchSnapshot(nonTerminalOutcome),
     /non-terminal Run cannot have an outcome/,
   );
 
   const mismatchedTerminalOutcome = clone(fixture);
-  mismatchedTerminalOutcome.sessions[0].runs[0].phase = "failed";
-  mismatchedTerminalOutcome.sessions[0].runs[0].outcome = "completed";
+  mismatchedTerminalOutcome.tasks[0].runs[0].phase = "failed";
+  mismatchedTerminalOutcome.tasks[0].runs[0].outcome = "completed";
   assert.throws(
     () => decodeWorkbenchSnapshot(mismatchedTerminalOutcome),
     /failed Run phase and outcome must agree/,
   );
 
   const mismatchedToolFailure = clone(fixture);
-  mismatchedToolFailure.sessions[0].runs[0].tools.push({
+  mismatchedToolFailure.tasks[0].runs[0].tools.push({
     id: "tool-mismatch",
     order: "1",
     name: "Bash",
@@ -142,37 +142,37 @@ test("Workbench decoding rejects version drift, extra fields, and invalid wire v
   );
 
   const archivedRunning = clone(fixture);
-  archivedRunning.sessions[0].archived = true;
+  archivedRunning.tasks[0].archived = true;
   assert.throws(
     () => decodeWorkbenchSnapshot(archivedRunning),
     /archived Task/,
   );
 
   const nonContinuableRunning = clone(fixture);
-  nonContinuableRunning.sessions[0].continuationAvailable = false;
+  nonContinuableRunning.tasks[0].continuationAvailable = false;
   assert.throws(
     () => decodeWorkbenchSnapshot(nonContinuableRunning),
     /open non-continuable Task cannot have active work/,
   );
 
   const closingRun = clone(fixture);
-  closingRun.sessions[0].lifecycle = "closing";
-  closingRun.sessions[0].continuationAvailable = false;
-  closingRun.sessions[0].currentRunPhase = "stopping";
-  closingRun.sessions[0].runs[0].phase = "stopping";
+  closingRun.tasks[0].lifecycle = "closing";
+  closingRun.tasks[0].continuationAvailable = false;
+  closingRun.tasks[0].currentRunPhase = "stopping";
+  closingRun.tasks[0].runs[0].phase = "stopping";
   assert.doesNotThrow(() => decodeWorkbenchSnapshot(closingRun));
 
   const continuableClosing = clone(closingRun);
-  continuableClosing.sessions[0].continuationAvailable = true;
+  continuableClosing.tasks[0].continuationAvailable = true;
   assert.throws(
     () => decodeWorkbenchSnapshot(continuableClosing),
     /non-open Task cannot accept future work/,
   );
 
   const closingWithRequest = clone(closingRun);
-  closingWithRequest.sessions[0].currentRunPhase = "waiting_ui";
-  closingWithRequest.sessions[0].runs[0].phase = "waiting_ui";
-  closingWithRequest.sessions[0].pendingUi = {
+  closingWithRequest.tasks[0].currentRunPhase = "waiting_ui";
+  closingWithRequest.tasks[0].runs[0].phase = "waiting_ui";
+  closingWithRequest.tasks[0].pendingUi = {
     requestId: "9",
     runId: "7",
     order: "1",
@@ -187,7 +187,7 @@ test("Workbench decoding rejects version drift, extra fields, and invalid wire v
   );
 
   const foreignUiHistory = clone(fixture);
-  foreignUiHistory.sessions[0].uiHistory.push({
+  foreignUiHistory.tasks[0].uiHistory.push({
     requestId: "8",
     runId: "99",
     order: "1",
@@ -215,16 +215,16 @@ test("Workbench decoding rejects version drift, extra fields, and invalid wire v
     detailTruncated: false,
     redacted: false,
   };
-  duplicateUiHistory.sessions[0].uiHistory.push(record, { ...record });
+  duplicateUiHistory.tasks[0].uiHistory.push(record, { ...record });
   assert.throws(
     () => decodeWorkbenchSnapshot(duplicateUiHistory),
     /identities must be unique/,
   );
 
   const pendingPermission = clone(fixture);
-  pendingPermission.sessions[0].currentRunPhase = "waiting_ui";
-  pendingPermission.sessions[0].runs[0].phase = "waiting_ui";
-  pendingPermission.sessions[0].pendingUi = {
+  pendingPermission.tasks[0].currentRunPhase = "waiting_ui";
+  pendingPermission.tasks[0].runs[0].phase = "waiting_ui";
+  pendingPermission.tasks[0].pendingUi = {
     requestId: "9",
     runId: "7",
     order: "1",
@@ -234,14 +234,14 @@ test("Workbench decoding rejects version drift, extra fields, and invalid wire v
     args: "***",
   };
   assert.doesNotThrow(() => decodeWorkbenchSnapshot(pendingPermission));
-  delete pendingPermission.sessions[0].pendingUi.redacted;
+  delete pendingPermission.tasks[0].pendingUi.redacted;
   assert.throws(
     () => decodeWorkbenchSnapshot(pendingPermission),
     /expected keys/,
   );
 
   const duplicateActivityOrder = clone(fixture);
-  duplicateActivityOrder.sessions[0].runs[0].tools.push({
+  duplicateActivityOrder.tasks[0].runs[0].tools.push({
     id: "tool-1",
     order: "1",
     name: "Read",
@@ -256,7 +256,7 @@ test("Workbench decoding rejects version drift, extra fields, and invalid wire v
     contentTruncated: false,
     redacted: false,
   });
-  duplicateActivityOrder.sessions[0].uiHistory.push({
+  duplicateActivityOrder.tasks[0].uiHistory.push({
     requestId: "10",
     runId: "7",
     order: "1",
@@ -271,6 +271,31 @@ test("Workbench decoding rejects version drift, extra fields, and invalid wire v
     () => decodeWorkbenchSnapshot(duplicateActivityOrder),
     /activity order must be unique/,
   );
+
+  const duplicateToolIdentity = clone(fixture);
+  const firstDuplicateTool = {
+    id: "tool-1",
+    order: "1",
+    name: "Read",
+    input: "",
+    progress: "",
+    content: "done",
+    state: "completed",
+    isError: false,
+    elapsedMs: "1",
+    inputTruncated: false,
+    progressTruncated: false,
+    contentTruncated: false,
+    redacted: false,
+  };
+  duplicateToolIdentity.tasks[0].runs[0].tools.push(firstDuplicateTool, {
+    ...firstDuplicateTool,
+    order: "2",
+  });
+  assert.throws(
+    () => decodeWorkbenchSnapshot(duplicateToolIdentity),
+    /tool product identities must be unique/,
+  );
 });
 
 test("Host notifications and lifecycle responses require their exact payload shapes", () => {
@@ -280,10 +305,8 @@ test("Host notifications and lifecycle responses require their exact payload sha
       transport: "BridgeDispatcher.response",
       origin: "zero://app",
       onMainThread: true,
-      automation: false,
-      gate5Fixture: false,
     }),
-    { sequence: 4, automation: false, gate5Fixture: false },
+    { sequence: 4 },
   );
   assert.deepEqual(
     decodeHostSignalEvent({
@@ -292,10 +315,8 @@ test("Host notifications and lifecycle responses require their exact payload sha
       origin: "zero://app",
       onMainThread: true,
       requestBytes: 2,
-      automation: false,
-      gate5Fixture: false,
     }),
-    { sequence: 4, automation: false, gate5Fixture: false },
+    { sequence: 4 },
   );
   assert.doesNotThrow(() =>
     assertSignalAcknowledged(
@@ -319,8 +340,6 @@ test("Host notifications and lifecycle responses require their exact payload sha
         origin: "zero://app",
         onMainThread: true,
         requestBytes: 2,
-        automation: false,
-        gate5Fixture: false,
       }),
     /expected keys/,
   );
@@ -335,8 +354,6 @@ test("Host notifications and lifecycle responses require their exact payload sha
         transport: "BridgeDispatcher.response",
         origin: "zero://app",
         onMainThread: true,
-        automation: false,
-        gate5Fixture: false,
       }),
     /positive safe integer/,
   );

@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 
-import type { WorkbenchSnapshot } from "../../host/contracts.ts";
+import type { WorkbenchSnapshot } from "../../bridge/contracts.ts";
 import {
   acceptUiResponse,
   beginUiResponse,

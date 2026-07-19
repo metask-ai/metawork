@@ -9,7 +9,7 @@ const Grant = struct {
     path: [max_path_bytes]u8,
     path_len: usize,
 
-    fn canonicalPath(self: *const Grant) []const u8 {
+    fn selectedPath(self: *const Grant) []const u8 {
         return self.path[0..self.path_len];
     }
 };
@@ -29,9 +29,9 @@ pub const State = struct {
         self: *State,
         generation: u64,
         window_id: native_sdk.platform.WindowId,
-        canonical: []const u8,
+        selected_path: []const u8,
     ) error{PathTooLong}!u64 {
-        if (canonical.len > max_path_bytes) return error.PathTooLong;
+        if (selected_path.len > max_path_bytes) return error.PathTooLong;
         const token = self.next_token;
         self.next_token +%= 1;
         if (self.next_token == 0) self.next_token = 1;
@@ -40,9 +40,9 @@ pub const State = struct {
             .generation = generation,
             .window_id = window_id,
             .path = undefined,
-            .path_len = canonical.len,
+            .path_len = selected_path.len,
         };
-        @memcpy(grant.path[0..canonical.len], canonical);
+        @memcpy(grant.path[0..selected_path.len], selected_path);
         self.grant = grant;
         return token;
     }
@@ -59,7 +59,7 @@ pub const State = struct {
         if (grant.token != token or grant.window_id != window_id or grant.generation != generation)
             return error.WorkspaceNotTrusted;
         if (grant.path_len > output.len) return error.NoSpaceLeft;
-        @memcpy(output[0..grant.path_len], grant.canonicalPath());
+        @memcpy(output[0..grant.path_len], grant.selectedPath());
         return output[0..grant.path_len];
     }
 };

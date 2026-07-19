@@ -75,33 +75,30 @@ const exited = new Promise((resolve, reject) => {
 try {
   await waitForBridge();
   const beforeCreate = await snapshot();
-  await invokeBridge("metawork.sessions.create", {
+  await invokeBridge("metawork.tasks.create", {
     workspaceRoot: workspace,
   });
-  const createdSession = await poll(
+  const createdTask = await poll(
     async () => {
       const current = await snapshot();
       return (
-        current.sessions.find(
-          (item) =>
-            !beforeCreate.sessions.some((prior) => prior.id === item.id),
+        current.tasks.find(
+          (item) => !beforeCreate.tasks.some((prior) => prior.id === item.id),
         ) ?? null
       );
     },
     commandTimeoutMs,
-    "Session creation",
+    "Task creation",
   );
-  const sessionId = createdSession.id;
-  await invokeBridge("metawork.sessions.run", {
-    sessionId,
+  const taskId = createdTask.id;
+  await invokeBridge("metawork.tasks.run", {
+    taskId,
     prompt: "Exercise Read, Bash, Edit, and AskUserQuestion, then finish.",
   });
   const submittedRun = await poll(
     async () => {
       const current = await snapshot();
-      return (
-        current.sessions.find((item) => item.id === sessionId)?.runs[0] ?? null
-      );
+      return current.tasks.find((item) => item.id === taskId)?.runs[0] ?? null;
     },
     commandTimeoutMs,
     "Run submission",
@@ -120,10 +117,10 @@ try {
     async () => {
       if (provider.error) throw provider.error;
       const current = await snapshot();
-      const session = current.sessions.find((item) => item.id === sessionId);
-      const run = session?.runs.find((item) => item.id === runId);
-      if (!session || !run) return null;
-      const pending = session.pendingUi;
+      const task = current.tasks.find((item) => item.id === taskId);
+      const run = task?.runs.find((item) => item.id === runId);
+      if (!task || !run) return null;
+      const pending = task.pendingUi;
       if (pending && !answered.has(pending.requestId)) {
         if (typeof pending.redacted !== "boolean")
           throw new Error("pending UI omitted its projection privacy state");
@@ -134,7 +131,7 @@ try {
         let responsePayload;
         if (pending.kind === "permission") {
           responsePayload = {
-            sessionId,
+            taskId,
             runId,
             requestId: pending.requestId,
             kind: "permission",
@@ -146,19 +143,19 @@ try {
             await automate("reload");
             await waitForBridge();
             const restored = await snapshot();
-            const restoredSession = restored.sessions.find(
-              (item) => item.id === sessionId,
+            const restoredTask = restored.tasks.find(
+              (item) => item.id === taskId,
             );
             if (
-              restoredSession?.pendingUi?.requestId !== pending.requestId ||
-              restoredSession.pendingUi.runId !== runId
+              restoredTask?.pendingUi?.requestId !== pending.requestId ||
+              restoredTask.pendingUi.runId !== runId
             )
               throw new Error(
                 "Renderer reload lost or rerouted the pending UI request",
               );
           }
           responsePayload = {
-            sessionId,
+            taskId,
             runId,
             requestId: pending.requestId,
             kind: "answers",
@@ -169,9 +166,9 @@ try {
             `unexpected Gate 6 UI request: ${JSON.stringify(pending)}`,
           );
         }
-        await invokeBridge("metawork.sessions.respondUi", responsePayload);
+        await invokeBridge("metawork.tasks.respondUi", responsePayload);
         await expectBridgeFailure(
-          "metawork.sessions.respondUi",
+          "metawork.tasks.respondUi",
           responsePayload,
           `duplicate UI response ${pending.requestId}`,
         );
@@ -184,17 +181,15 @@ try {
     "AgentCore run",
   );
 
-  const session = finalSnapshot.sessions.find((item) => item.id === sessionId);
-  const run = session.runs.find((item) => item.id === runId);
-  if (session.continuationAvailable !== true)
-    throw new Error(
-      "completed Session did not remain available for continuation",
-    );
+  const task = finalSnapshot.tasks.find((item) => item.id === taskId);
+  const run = task.runs.find((item) => item.id === runId);
+  if (task.continuationAvailable !== true)
+    throw new Error("completed Task did not remain available for continuation");
   if (run.phase !== "completed" || run.outcome !== "completed")
     throw new Error(`run did not complete truthfully: ${JSON.stringify(run)}`);
-  if (run.cause !== null || session.cause !== null)
+  if (run.cause !== null || task.cause !== null)
     throw new Error(
-      `completed run retained a Host cause: ${JSON.stringify(session)}`,
+      `completed run retained a Host cause: ${JSON.stringify(task)}`,
     );
   if (!run.assistant.includes("metawork gate6 complete"))
     throw new Error("final assistant text was not projected");
@@ -223,11 +218,11 @@ try {
   }
   if (reloadedRequest === null)
     throw new Error("AskUserQuestion did not exercise reload-safe resume");
-  if (session.pendingUi !== null)
+  if (task.pendingUi !== null)
     throw new Error("completed run retained an actionable UI request");
-  if (!Array.isArray(session.uiHistory) || session.uiHistory.length === 0)
+  if (!Array.isArray(task.uiHistory) || task.uiHistory.length === 0)
     throw new Error("resolved UI requests were not retained in Task history");
-  for (const record of session.uiHistory) {
+  for (const record of task.uiHistory) {
     if (!/^[1-9][0-9]*$/.test(record.order))
       throw new Error("resolved UI request omitted its stable activity order");
     activityOrders.push(record.order);
@@ -235,15 +230,15 @@ try {
   if (new Set(activityOrders).size !== activityOrders.length)
     throw new Error("Run activity order was not unique");
   for (const requestId of answered)
-    if (!session.uiHistory.some((item) => item.requestId === requestId))
+    if (!task.uiHistory.some((item) => item.requestId === requestId))
       throw new Error(`resolved UI request ${requestId} was lost from history`);
   if (
-    !session.uiHistory.some(
+    !task.uiHistory.some(
       (item) => item.kind === "permission" && item.state === "allowed_once",
     )
   )
     throw new Error("permission decision was not retained in Task history");
-  const restoredAnswer = session.uiHistory.find(
+  const restoredAnswer = task.uiHistory.find(
     (item) => item.requestId === reloadedRequest,
   );
   if (
@@ -263,47 +258,43 @@ try {
   if (provider.error) throw provider.error;
 
   await invokeBridge("metawork.tasks.rename", {
-    sessionId,
+    taskId,
     title: "Gate 6 release audit",
   });
   let metadataSnapshot = await snapshot();
-  let metadataSession = metadataSnapshot.sessions.find(
-    (item) => item.id === sessionId,
-  );
-  if (metadataSession?.title !== "Gate 6 release audit")
+  let metadataTask = metadataSnapshot.tasks.find((item) => item.id === taskId);
+  if (metadataTask?.title !== "Gate 6 release audit")
     throw new Error("Task rename was not projected");
   await invokeBridge("metawork.tasks.archive", {
-    sessionId,
+    taskId,
     archived: true,
   });
   metadataSnapshot = await snapshot();
-  metadataSession = metadataSnapshot.sessions.find(
-    (item) => item.id === sessionId,
-  );
-  if (metadataSession?.archived !== true)
+  metadataTask = metadataSnapshot.tasks.find((item) => item.id === taskId);
+  if (metadataTask?.archived !== true)
     throw new Error("Task archive was not projected");
   await invokeBridge("metawork.tasks.archive", {
-    sessionId,
+    taskId,
     archived: false,
   });
 
   const transport = await automate("snapshot");
   assertTransport(transport.stdout);
-  await invokeBridge("metawork.sessions.close", { sessionId });
+  await invokeBridge("metawork.tasks.close", { taskId });
   await poll(
     async () => {
       const current = await snapshot();
-      return current.sessions.find((item) => item.id === sessionId)
-        ?.lifecycle === "closed"
+      return current.tasks.find((item) => item.id === taskId)?.lifecycle ===
+        "closed"
         ? current
         : null;
     },
     commandTimeoutMs,
-    "Session close",
+    "Task close",
   );
-  await invokeBridge("metawork.tasks.delete", { sessionId });
+  await invokeBridge("metawork.tasks.delete", { taskId });
   const afterDelete = await snapshot();
-  if (afterDelete.sessions.some((item) => item.id === sessionId))
+  if (afterDelete.tasks.some((item) => item.id === taskId))
     throw new Error("Deleted Task record remained in the projection");
 
   await invokeBridge("native-sdk.window.close", { label: "main" });
@@ -418,7 +409,7 @@ async function snapshot() {
   if (encoded.includes("metawork-gate6-fixture-key"))
     throw new Error("Host provider credential reached the Renderer snapshot");
   const parsed = JSON.parse(encoded);
-  if (parsed.schemaVersion !== 4 || !Array.isArray(parsed.sessions))
+  if (parsed.schemaVersion !== 5 || !Array.isArray(parsed.tasks))
     throw new Error("invalid Workbench snapshot");
   return parsed;
 }

@@ -1,6 +1,6 @@
 const std = @import("std");
-const sdk = @import("metacodes_agentcore");
-const lifecycle = @import("metawork_agentcore");
+const lifecycle = @import("metawork_agent");
+const executor_impl = @import("workbench_executor");
 const contract_fixture = @import("workbench_contract_fixture");
 
 pub const Error = lifecycle.Error || std.mem.Allocator.Error || std.Thread.SpawnError || error{
@@ -12,11 +12,21 @@ pub const Error = lifecycle.Error || std.mem.Allocator.Error || std.Thread.Spawn
     TaskBusy,
     TaskNotClosed,
     InvalidTaskTitle,
+    RunGenerationExhausted,
+    ExecutorShuttingDown,
+    TaskCapacity,
+    UnknownTask,
+    TaskClosing,
+    InvalidExecutionDefaults,
+    InvalidWorkspace,
+    EventAfterTerminalDrain,
 };
 
 pub const Limits = struct {
-    max_sessions: usize = 8,
-    max_runs_per_session: usize = 16,
+    worker_count: usize = 4,
+    queue_capacity: usize = 16,
+    max_tasks: usize = 8,
+    max_runs_per_task: usize = 16,
     max_tools_per_run: usize = 32,
     max_projection_bytes: usize = 512 * 1024,
     max_workspace_bytes: usize = 16 * 1024,
@@ -26,20 +36,63 @@ pub const Limits = struct {
     max_tool_field_bytes: usize = 256 * 1024,
     max_pending_ui_json_bytes: usize = 256 * 1024,
     max_pending_ui_requests: usize = 4,
-    max_ui_history_per_session: usize = 8,
+    max_ui_history_per_task: usize = 8,
+    max_terminal_diagnostic_bytes: usize = 512,
     max_snapshot_bytes: usize = 8 * 1024 * 1024,
+};
+
+pub const Provider = enum {
+    anthropic,
+    openai,
+    gemini,
+};
+
+pub const ExecutionDefaults = struct {
+    provider: Provider,
+    credential: []const u8,
+    model: []const u8,
+    base_url: []const u8 = "",
+};
+
+pub const TaskWorkspaceTrust = union(enum) {
+    explicitly_trusted,
+    temporary: []const u8,
+};
+
+pub const TaskCreateInput = struct {
+    workspace_root: []const u8,
+    trust: TaskWorkspaceTrust,
+};
+
+pub const PermissionChoice = enum {
+    allow_once,
+    allow_always,
+    deny_once,
+    deny_tool_session,
+};
+
+pub const UiResponse = union(enum) {
+    answers: []const []const u8,
+    permission: PermissionChoice,
+};
+
+pub const Configuration = struct {
+    execution: ExecutionDefaults,
+    change_notifier: ChangeNotifier = .{},
 };
 
 const json_string_expansion: usize = 6;
 const pending_ui_reencode_expansion: usize = 2;
 const root_snapshot_overhead: usize = 128;
-const session_snapshot_overhead: usize = 512;
+const task_snapshot_overhead: usize = 512;
 const run_snapshot_overhead: usize = 1024;
 const tool_snapshot_overhead: usize = 512;
 const pending_ui_snapshot_overhead: usize = 8 * 1024;
 const ui_record_detail_capacity: usize = 512;
 const ui_record_snapshot_overhead: usize = 512;
-pub const snapshot_schema_version: u32 = 4;
+const tool_route_digest_bytes = std.crypto.hash.sha2.Sha256.digest_length;
+const tool_product_id_capacity = "tool-".len + 20;
+pub const snapshot_schema_version: u32 = 5;
 
 const ToolState = enum { running, completed, failed };
 const RunPhase = enum {
@@ -54,15 +107,109 @@ const RunPhase = enum {
     failed,
 };
 
+const RunOutcome = enum {
+    completed,
+    stopped,
+    cancelled,
+    interrupted,
+    failed,
+    dependency_contract_failure,
+};
+
+/// Workbench-owned durable product cause.
+const RunCause = enum {
+    user_cancel,
+    timeout,
+    session_close,
+    app_shutdown,
+    event_pipeline_failure,
+    queue_capacity_failure,
+    ui_pipeline_failure,
+    dependency_contract_failure,
+};
+
 const TaskLifecycle = enum { open, closing, closed };
 
-const CloseResult = enum(u8) { none, running, closed, failed };
+const ContinuationUnavailableReason = enum {
+    session_poisoned,
+    event_projection_failure,
+    closing,
+    closed,
+};
+
+const ContinuationCapability = union(enum) {
+    available,
+    unavailable: ContinuationUnavailableReason,
+};
+
+const CloseCompletion = enum(u8) {
+    none,
+    running,
+    closed,
+    failed_reusable,
+    failed_poisoned,
+    failed_closing,
+};
+
+pub const ChangeNotifier = struct {
+    context: ?*anyopaque = null,
+    wake: *const fn (?*anyopaque) bool = noChangeNotification,
+
+    fn notify(self: ChangeNotifier) bool {
+        return self.wake(self.context);
+    }
+};
+
+pub const TransportFailureStage = enum {
+    ingress_validation,
+    command_dispatch,
+    response_delivery,
+    revision_delivery,
+    snapshot_transport,
+    connection_generation,
+    agent_event_delivery,
+    detached_retention_expired,
+};
+
+pub const TransportFailureReport = struct {
+    stage: TransportFailureStage,
+    session_id: u64 = 0,
+    run_id: u64 = 0,
+};
+
+pub const TransportFailureDecision = enum {
+    reject_command,
+    retry,
+    detach_renderer,
+    retain_for_reconnect,
+    discard_transport_payload,
+    request_run_termination,
+};
+
+/// Workbench owns product impact policy; Bridge supplies transport facts only.
+/// Current Renderer transport failures never terminate an Agent Run.
+pub fn decideTransportFailure(report: TransportFailureReport) TransportFailureDecision {
+    std.debug.assert((report.session_id == 0) == (report.run_id == 0));
+    return switch (report.stage) {
+        .ingress_validation, .command_dispatch => .reject_command,
+        .revision_delivery, .snapshot_transport => .retry,
+        .response_delivery, .connection_generation => .detach_renderer,
+        .agent_event_delivery => .retain_for_reconnect,
+        .detached_retention_expired => .discard_transport_payload,
+    };
+}
 
 const TrackedText = struct {
     list: std.ArrayList(u8) = .empty,
+    /// Bytes before this offset are final sanitized output. Bytes at and after
+    /// it are the only suffix that can still become a cross-chunk credential.
+    committed_len: usize = 0,
 };
 
 const ToolView = struct {
+    /// One-way correlation key for SDK tool events. The raw AgentCore tool ID
+    /// is not retained in Workbench product history.
+    route_digest: [tool_route_digest_bytes]u8,
     id: []u8,
     order: u64,
     name: []u8,
@@ -85,18 +232,64 @@ const UsageView = struct {
     cache_creation_input_tokens: u64 = 0,
 };
 
-const RunView = struct {
+const TerminalPublication = enum(u8) { open, publishing, published };
+const EventProjectionFailure = enum { consumer_rejected };
+const AgentHandoffState = enum(u8) { queued, starting, running, finishing };
+const RunTerminationDispatch = enum {
+    pending,
+    requested,
+    already_requested,
+    already_finishing,
+    already_terminal,
+    stale_run,
+    session_closing,
+};
+
+const PendingInterruption = enum(u8) {
+    none,
+    user_cancel,
+    timeout,
+    session_close,
+    app_shutdown,
+};
+
+const TerminalPayload = struct {
+    phase: RunPhase,
+    outcome: RunOutcome,
+    cause: ?RunCause,
+    session_disposition_at_completion: lifecycle.SessionDisposition,
+    diagnostic_len: usize = 0,
+    diagnostic_truncated: bool = false,
+    diagnostic_redacted: bool = false,
+};
+
+const RunRecord = struct {
     id: u64,
+    generation: u64,
     user: []u8,
+    user_redacted: bool = false,
     assistant: TrackedText = .{},
     assistant_redacted: bool = false,
-    phase: RunPhase = .queued,
+    active_phase: RunPhase = .queued,
     tools: []?ToolView,
     usage: UsageView = .{},
     status_text: []u8,
-    outcome: ?lifecycle.RunOutcome = null,
-    cause: ?lifecycle.HostCause = null,
+    terminal_publication: std.atomic.Value(TerminalPublication) = .init(.open),
+    terminal_payload: TerminalPayload = undefined,
+    terminal_observed: bool = false,
+    terminal_event_drain_marked: bool = false,
+    event_stream_finalized: bool = false,
+    event_projection_failure: ?EventProjectionFailure = null,
+    terminal_diagnostic: []u8,
+    redaction_secret: []const u8 = &.{},
     next_activity_order: u64 = 1,
+    workbench: *Workbench = undefined,
+    task: *TaskView = undefined,
+    session: *lifecycle.Session = undefined,
+    worker_reference_held: std.atomic.Value(bool) = .init(false),
+    agent_handoff: std.atomic.Value(AgentHandoffState) = .init(.queued),
+    pending_termination: std.atomic.Value(PendingInterruption) = .init(.none),
+    run_control: lifecycle.RunControl = undefined,
 };
 
 const UiRecordKind = enum { ask_question, permission };
@@ -127,193 +320,363 @@ const UiRecord = struct {
     }
 };
 
-const SessionView = struct {
+const TaskView = struct {
     session: ?*lifecycle.Session,
     id: u64,
     workspace_root: []u8,
     title: []u8,
+    title_redacted: bool = false,
     archived: bool = false,
-    runs: []?RunView,
+    runs: []?RunRecord,
+    next_run_generation: u64 = 0,
+    run_references: std.atomic.Value(usize) = .init(0),
+    delete_pending: bool = false,
     ui_history: []?UiRecord,
     ui_history_count: usize = 0,
     ui_history_next: usize = 0,
     pending_ui_request_id: u64 = 0,
     pending_ui_order: u64 = 0,
-    state: lifecycle.SessionState = .idle,
+    lifecycle: TaskLifecycle = .open,
+    continuation: ContinuationCapability = .available,
     active_run_id: u64 = 0,
-    outcome: ?lifecycle.RunOutcome = null,
-    cause: ?lifecycle.HostCause = null,
     closing_session: ?*lifecycle.Session = null,
     close_thread: ?std.Thread = null,
-    close_result: std.atomic.Value(CloseResult) = .init(.none),
+    close_completion: std.atomic.Value(CloseCompletion) = .init(.none),
     close_failed: bool = false,
     cancel_requested: bool = false,
 };
 
-/// Host-owned product projection. AgentCore protocol is interpreted only
+/// Stable worker reference to an admitted Run record. This value is a lease:
+/// it must not be copied, and `release` must be called exactly once.
+pub const RunRef = struct {
+    workbench: *Workbench,
+    task: *TaskView,
+    record: *RunRecord,
+    task_id: u64,
+    run_id: u64,
+    generation: u64,
+    released: bool = false,
+
+    pub fn isCurrent(self: *const RunRef) bool {
+        return !self.released and self.task.id == self.task_id and
+            self.record.id == self.run_id and self.record.generation == self.generation;
+    }
+
+    pub fn release(self: *RunRef) void {
+        std.debug.assert(!self.released);
+        std.debug.assert(self.isCurrent());
+        self.released = true;
+        const references = &self.task.run_references;
+        const workbench = self.workbench;
+        const previous = references.fetchSub(1, .release);
+        std.debug.assert(previous != 0);
+        if (previous == 1) _ = workbench.change_notifier.notify();
+    }
+};
+
+/// Workbench-owned product projection. AgentCore protocol is interpreted only
 /// through the bundle SDK; the Renderer receives this bounded domain view.
 /// All methods currently run on the Native loop thread.
 pub const Workbench = struct {
     allocator: std.mem.Allocator,
-    host: *lifecycle.Host,
+    agent_runtime: *lifecycle.Runtime,
     limits: Limits,
-    sessions: []?SessionView,
+    tasks: []?TaskView,
+    change_notifier: ChangeNotifier,
+    executor: *executor_impl.Executor,
+    shutting_down: bool = false,
+    executor_shutdown: bool = false,
     projection_bytes: usize = 0,
     revision: u64 = 0,
-    known_secret: []u8 = &.{},
+    credential: []u8,
+    model: []u8,
+    base_url: []u8,
+    provider: Provider,
 
     pub fn init(
         allocator: std.mem.Allocator,
-        host: *lifecycle.Host,
+        agent_runtime: *lifecycle.Runtime,
         limits: Limits,
-    ) (std.mem.Allocator.Error || error{ProjectionCapacity})!Workbench {
-        if (limits.max_sessions == 0 or limits.max_runs_per_session == 0 or
+        configuration: Configuration,
+    ) Error!Workbench {
+        if (limits.worker_count == 0 or limits.queue_capacity == 0 or
+            limits.max_tasks == 0 or limits.max_runs_per_task == 0 or
             limits.max_tools_per_run == 0 or limits.max_projection_bytes == 0 or
             limits.max_workspace_bytes == 0 or
             limits.max_task_title_bytes == 0 or
             limits.max_user_message_bytes == 0 or limits.max_assistant_message_bytes == 0 or
             limits.max_tool_field_bytes == 0 or limits.max_pending_ui_json_bytes == 0 or
             limits.max_pending_ui_requests == 0 or
-            limits.max_ui_history_per_session == 0 or
+            limits.max_ui_history_per_task == 0 or
+            limits.max_terminal_diagnostic_bytes == 0 or
             limits.max_snapshot_bytes == 0 or
             (worstCaseSnapshotBytes(limits) orelse return error.ProjectionCapacity) > limits.max_snapshot_bytes)
             return error.ProjectionCapacity;
-        const sessions = try allocator.alloc(?SessionView, limits.max_sessions);
-        @memset(sessions, null);
-        return .{ .allocator = allocator, .host = host, .limits = limits, .sessions = sessions };
+        const credential = try allocator.dupe(u8, configuration.execution.credential);
+        errdefer {
+            std.crypto.secureZero(u8, credential);
+            allocator.free(credential);
+        }
+        const model = try allocator.dupe(u8, configuration.execution.model);
+        errdefer allocator.free(model);
+        const base_url = try allocator.dupe(u8, configuration.execution.base_url);
+        errdefer allocator.free(base_url);
+        const tasks = try allocator.alloc(?TaskView, limits.max_tasks);
+        errdefer allocator.free(tasks);
+        @memset(tasks, null);
+        const executor = executor_impl.Executor.create(agent_runtime.io, allocator, .{
+            .worker_count = limits.worker_count,
+            .queue_capacity = limits.queue_capacity,
+        }) catch |err| switch (err) {
+            error.InvalidLimits => unreachable,
+            else => return err,
+        };
+        return .{
+            .allocator = allocator,
+            .agent_runtime = agent_runtime,
+            .limits = limits,
+            .tasks = tasks,
+            .change_notifier = configuration.change_notifier,
+            .executor = executor,
+            .credential = credential,
+            .model = model,
+            .base_url = base_url,
+            .provider = configuration.execution.provider,
+        };
     }
 
-    /// Registers the Host-only provider credential that must never be copied
-    /// into the Renderer projection. Call this before opening any Session.
-    pub fn setKnownSecret(self: *Workbench, secret: []const u8) std.mem.Allocator.Error!void {
-        if (secret.len == 0) {
-            if (self.known_secret.len != 0) {
-                std.crypto.secureZero(u8, self.known_secret);
-                self.allocator.free(self.known_secret);
-                self.known_secret = &.{};
-            }
-            return;
-        }
-        const next = try self.allocator.dupe(u8, secret);
-        if (self.known_secret.len != 0) {
-            std.crypto.secureZero(u8, self.known_secret);
-            self.allocator.free(self.known_secret);
-        }
-        self.known_secret = next;
-    }
-
-    pub fn createSession(
+    pub fn createTask(
         self: *Workbench,
-        options: lifecycle.SessionOpenOptions,
+        input: TaskCreateInput,
     ) Error!u64 {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
-        const slot = findEmpty(SessionView, self.sessions) orelse return error.SessionCapacity;
-        const workspace = try self.copyBounded(options.workspace.canonical_root, self.limits.max_workspace_bytes);
+        if (self.credential.len == 0 or self.model.len == 0)
+            return error.InvalidExecutionDefaults;
+        const slot = findEmpty(TaskView, self.tasks) orelse return error.TaskCapacity;
+        const canonical = std.Io.Dir.realPathFileAbsoluteAlloc(
+            self.agent_runtime.io,
+            input.workspace_root,
+            self.allocator,
+        ) catch return error.InvalidWorkspace;
+        defer self.allocator.free(canonical);
+        const workspace_stat = std.Io.Dir.cwd().statFile(
+            self.agent_runtime.io,
+            canonical,
+            .{},
+        ) catch return error.InvalidWorkspace;
+        if (workspace_stat.kind != .directory) return error.InvalidWorkspace;
+        var temporary_root: ?[:0]u8 = null;
+        defer if (temporary_root) |root| self.allocator.free(root);
+        const workspace_trust: lifecycle.WorkspaceTrust = switch (input.trust) {
+            .explicitly_trusted => .explicitly_trusted,
+            .temporary => |root| temporary: {
+                const canonical_root = std.Io.Dir.realPathFileAbsoluteAlloc(
+                    self.agent_runtime.io,
+                    root,
+                    self.allocator,
+                ) catch return error.InvalidWorkspace;
+                temporary_root = canonical_root;
+                const root_stat = std.Io.Dir.cwd().statFile(
+                    self.agent_runtime.io,
+                    canonical_root,
+                    .{},
+                ) catch return error.InvalidWorkspace;
+                if (root_stat.kind != .directory) return error.InvalidWorkspace;
+                break :temporary .{ .temporary = canonical_root };
+            },
+        };
+        const workspace = try self.copyBounded(canonical, self.limits.max_workspace_bytes);
         errdefer self.freeTracked(workspace);
         const title = try self.copyBounded("", self.limits.max_task_title_bytes);
         errdefer self.freeTracked(title);
-        const runs = try self.allocator.alloc(?RunView, self.limits.max_runs_per_session);
+        const runs = try self.allocator.alloc(?RunRecord, self.limits.max_runs_per_task);
         errdefer self.allocator.free(runs);
         @memset(runs, null);
-        const ui_history = try self.allocator.alloc(?UiRecord, self.limits.max_ui_history_per_session);
+        const ui_history = try self.allocator.alloc(?UiRecord, self.limits.max_ui_history_per_task);
         errdefer self.allocator.free(ui_history);
         @memset(ui_history, null);
-        const session = self.host.createSession(options) catch |err| return err;
-        const snapshot = session.snapshot();
-        self.sessions[slot] = .{
-            .session = session,
-            .id = snapshot.session_id,
+        const route = self.agent_runtime.createSessionRoute(.{
+            .provider = agentProvider(self.provider),
+            .permission_mode = .default,
+            .shell_policy = .unrestricted,
+            .credential = self.credential,
+            .model = self.model,
+            .base_url = self.base_url,
+            .workspace = .{
+                .canonical_root = canonical,
+                .trust = workspace_trust,
+            },
+        }) catch |err| switch (err) {
+            error.SessionCapacity => return error.TaskCapacity,
+            else => return err,
+        };
+        self.tasks[slot] = .{
+            .session = route.session,
+            .id = route.id,
             .workspace_root = workspace,
             .title = title,
             .runs = runs,
             .ui_history = ui_history,
-            .state = snapshot.state,
-            .active_run_id = snapshot.active_run_id,
-            .outcome = snapshot.last_outcome,
-            .cause = snapshot.cause,
         };
         self.bumpRevision();
-        return self.sessions[slot].?.id;
+        return self.tasks[slot].?.id;
     }
 
-    pub fn submit(self: *Workbench, session_id: u64, prompt: []const u8) Error!u64 {
+    pub fn runTask(self: *Workbench, task_id: u64, prompt: []const u8) Error!u64 {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
-        const view = self.findSession(session_id) orelse return error.UnknownSession;
-        const session = view.session orelse return error.SessionClosing;
-        const slot = findEmpty(RunView, view.runs) orelse return error.RunCapacity;
-        const user = try self.copyBounded(prompt, self.limits.max_user_message_bytes);
-        errdefer self.freeTracked(user);
-        const status_text = try self.copyBounded("Queued", self.limits.max_tool_field_bytes);
-        errdefer self.freeTracked(status_text);
-        const tools = try self.allocator.alloc(?ToolView, self.limits.max_tools_per_run);
-        errdefer self.allocator.free(tools);
-        @memset(tools, null);
-        const run_id = session.submit(prompt) catch |err| return err;
-        view.runs[slot] = .{
-            .id = run_id,
-            .user = user,
-            .tools = tools,
-            .status_text = status_text,
+        const view = self.findTask(task_id) orelse return error.UnknownTask;
+        if (!self.taskContinuationAvailable(view)) return error.TaskClosing;
+        if (hasNonTerminalRun(view)) return error.TaskBusy;
+        const session = view.session orelse return error.TaskClosing;
+        const run_id = try session.prepareRun(prompt);
+        errdefer cancelPreparedRunOrPanic(session, run_id);
+        const slot = try self.reserveRunRecord(view, prompt);
+        errdefer self.discardRunRecord(view, slot);
+        const run = &view.runs[slot].?;
+        run.id = run_id;
+        run.workbench = self;
+        run.task = view;
+        run.session = session;
+        _ = view.run_references.fetchAdd(1, .acq_rel);
+        run.worker_reference_held.store(true, .release);
+        self.executor.enqueue(.{
+            .context = run,
+            .execute_fn = executeRunJob,
+            .cancel_fn = cancelRunJobForShutdown,
+        }) catch |err| {
+            releaseWorkerReference(run);
+            return err;
         };
-        view.state = .queued;
         view.active_run_id = run_id;
-        view.outcome = null;
-        view.cause = null;
         view.cancel_requested = false;
         self.bumpRevision();
         return run_id;
     }
 
-    pub fn cancel(self: *Workbench, session_id: u64, run_id: u64) Error!void {
+    pub fn acquireRunRef(self: *Workbench, task_id: u64, run_id: u64) Error!RunRef {
+        const task = self.findTask(task_id) orelse return error.UnknownTask;
+        if (task.delete_pending) return error.UnknownTask;
+        const record = findRun(task.runs, run_id) orelse return error.NoSuchRun;
+        _ = task.run_references.fetchAdd(1, .acq_rel);
+        return .{
+            .workbench = self,
+            .task = task,
+            .record = record,
+            .task_id = task_id,
+            .run_id = run_id,
+            .generation = record.generation,
+        };
+    }
+
+    pub fn cancel(self: *Workbench, task_id: u64, run_id: u64) Error!void {
         self.syncLifecycle();
-        const view = self.findSession(session_id) orelse return error.UnknownSession;
+        const view = self.findTask(task_id) orelse return error.UnknownTask;
+        const run = findRun(view.runs, run_id) orelse return error.NoSuchRun;
+        if (terminalPayload(run) != null) return;
         const session = view.session orelse
-            return error.SessionClosing;
+            return error.TaskClosing;
         const record = self.prepareCancelledUiRecord(session, run_id);
-        try session.requestCancel(run_id, .user_cancel);
+        if (self.executor.cancel(run)) {
+            cancelPreparedRunOrPanic(session, run_id);
+            releaseWorkerReference(run);
+            _ = commitTerminal(
+                run,
+                .cancelled,
+                .cancelled,
+                .user_cancel,
+                .reusable,
+                "",
+                false,
+            );
+            run.terminal_observed = true;
+            if (record) |value| self.pushUiRecord(view, value);
+            view.cancel_requested = false;
+            self.bumpRevision();
+            return;
+        }
+        const dispatch = requestRunTermination(run, .user_cancel);
+        const stopping = switch (dispatch) {
+            .pending, .requested, .already_requested => true,
+            .already_finishing, .already_terminal, .stale_run, .session_closing => false,
+        };
+        if (!stopping) {
+            self.syncLifecycle();
+            return;
+        }
         if (record) |value| self.pushUiRecord(view, value);
         view.cancel_requested = true;
-        if (findRun(view.runs, run_id)) |run| run.phase = .stopping;
+        _ = setActivePhase(run, .stopping);
         self.bumpRevision();
     }
 
     pub fn respondUi(
         self: *Workbench,
-        session_id: u64,
+        task_id: u64,
         run_id: u64,
         request_id: u64,
-        response: sdk.UiResponse,
+        response: UiResponse,
     ) Error!void {
         self.syncLifecycle();
-        const view = self.findSession(session_id) orelse return error.UnknownSession;
+        const view = self.findTask(task_id) orelse return error.UnknownTask;
         const session = view.session orelse
-            return error.SessionClosing;
-        const record = self.prepareUiRecord(session, run_id, request_id, response);
-        try session.respondUi(run_id, request_id, response);
+            return error.TaskClosing;
+        const agent_response = agentUiResponse(response);
+        const record = self.prepareUiRecord(session, run_id, request_id, agent_response);
+        try session.respondUi(run_id, request_id, agent_response);
         self.pushUiRecord(view, record);
         self.bumpRevision();
     }
 
-    pub fn closeSession(self: *Workbench, session_id: u64) Error!void {
+    pub fn closeTask(self: *Workbench, task_id: u64) Error!void {
         self.syncLifecycle();
-        const view = self.findSession(session_id) orelse return error.UnknownSession;
-        if (view.close_result.load(.acquire) == .running) return error.CloseInProgress;
+        const view = self.findTask(task_id) orelse return error.UnknownTask;
+        if (view.close_completion.load(.acquire) == .running) return error.CloseInProgress;
         const session = view.session orelse return;
+        const prior_lifecycle = view.lifecycle;
+        const prior_continuation = view.continuation;
         const cancelled_ui = self.prepareCancelledUiRecord(session, view.active_run_id);
+        if (findRun(view.runs, view.active_run_id)) |run| {
+            if (self.executor.cancel(run)) {
+                cancelPreparedRunOrPanic(session, view.active_run_id);
+                releaseWorkerReference(run);
+                _ = commitTerminal(
+                    run,
+                    .interrupted,
+                    .interrupted,
+                    .session_close,
+                    .closing,
+                    "",
+                    false,
+                );
+                run.terminal_observed = true;
+            } else consumeLifecycleTermination(
+                requestRunTermination(run, .session_close),
+                run.id,
+            );
+        }
         view.session = null;
         view.closing_session = session;
-        view.state = .closing;
+        view.lifecycle = .closing;
+        view.continuation = .{ .unavailable = .closing };
         view.cancel_requested = view.active_run_id != 0;
         if (findRun(view.runs, view.active_run_id)) |run| {
-            if (!isTerminalPhase(run.phase)) run.phase = .stopping;
+            if (!isTerminalPhase(runPhase(run))) _ = setActivePhase(run, .stopping);
         }
         view.close_failed = false;
-        view.close_result.store(.running, .release);
-        view.close_thread = std.Thread.spawn(.{}, closeWorker, .{ self.host, view, session }) catch |err| {
-            view.close_result.store(.none, .release);
+        view.close_completion.store(.running, .release);
+        view.close_thread = std.Thread.spawn(.{}, closeWorker, .{
+            self.agent_runtime,
+            view,
+            session,
+            self.change_notifier,
+        }) catch |err| {
+            view.close_completion.store(.none, .release);
             view.closing_session = null;
             view.session = session;
-            view.state = session.snapshot().state;
+            view.lifecycle = prior_lifecycle;
+            view.continuation = prior_continuation;
             return err;
         };
         if (cancelled_ui) |record|
@@ -321,35 +684,52 @@ pub const Workbench = struct {
         self.bumpRevision();
     }
 
-    pub fn renameTask(self: *Workbench, session_id: u64, title: []const u8) Error!void {
+    pub fn renameTask(self: *Workbench, task_id: u64, title: []const u8) Error!void {
         self.syncLifecycle();
-        const view = self.findSession(session_id) orelse return error.UnknownSession;
+        const view = self.findTask(task_id) orelse return error.UnknownTask;
         const trimmed = std.mem.trim(u8, title, " \t\r\n");
         if (trimmed.len == 0 or trimmed.len > self.limits.max_task_title_bytes or
             !std.unicode.utf8ValidateSlice(trimmed))
             return error.InvalidTaskTitle;
         for (trimmed) |byte| if (byte < 0x20) return error.InvalidTaskTitle;
-        try self.replaceTracked(&view.title, trimmed, self.limits.max_task_title_bytes);
+        const projected = try self.replaceTrackedProjected(
+            &view.title,
+            trimmed,
+            self.limits.max_task_title_bytes,
+        );
+        view.title_redacted = projected.redacted;
         self.bumpRevision();
     }
 
-    pub fn setTaskArchived(self: *Workbench, session_id: u64, archived: bool) Error!void {
+    pub fn setTaskArchived(self: *Workbench, task_id: u64, archived: bool) Error!void {
         self.syncLifecycle();
-        const view = self.findSession(session_id) orelse return error.UnknownSession;
-        if (view.state == .closing or hasNonTerminalRun(view)) return error.TaskBusy;
+        const view = self.findTask(task_id) orelse return error.UnknownTask;
+        if (view.lifecycle == .closing or hasNonTerminalRun(view)) return error.TaskBusy;
         if (view.archived == archived) return;
         view.archived = archived;
         self.bumpRevision();
     }
 
-    pub fn deleteTask(self: *Workbench, session_id: u64) Error!void {
+    pub fn deleteTask(self: *Workbench, task_id: u64) Error!void {
         self.syncLifecycle();
-        const index = self.findSessionIndex(session_id) orelse return error.UnknownSession;
-        const view = &(self.sessions[index] orelse unreachable);
-        if (view.state != .closed or view.close_thread != null or view.session != null)
+        const index = self.findTaskIndex(task_id) orelse return error.UnknownTask;
+        const view = &(self.tasks[index] orelse unreachable);
+        if (view.lifecycle != .closed or view.close_thread != null or view.session != null)
             return error.TaskNotClosed;
-        self.deinitSessionView(view);
-        self.sessions[index] = null;
+        // A closed Task must not release Run storage while the composition
+        // root still owes that Run its final event-pump drain. This is
+        // normally implied by close publication in `syncLifecycle`; keep the
+        // explicit guard here because deletion is the destructive boundary.
+        if (hasUnfinalizedTerminalEvents(view)) return error.TaskBusy;
+        if (view.run_references.load(.acquire) != 0) {
+            if (!view.delete_pending) {
+                view.delete_pending = true;
+                self.bumpRevision();
+            }
+            return;
+        }
+        self.deinitTaskView(view);
+        self.tasks[index] = null;
         self.bumpRevision();
     }
 
@@ -363,75 +743,115 @@ pub const Workbench = struct {
     /// while publishing a terminal state.
     pub fn syncLifecycle(self: *Workbench) void {
         var changed = false;
-        for (self.sessions) |*entry| {
+        for (self.tasks) |*entry| {
             const view = &(entry.* orelse continue);
-            const close_result = view.close_result.load(.acquire);
-            if (close_result != .none and close_result != .running) {
+            if (view.delete_pending and view.lifecycle == .closed and view.close_thread == null and
+                view.session == null and !hasUnfinalizedTerminalEvents(view) and
+                view.run_references.load(.acquire) == 0)
+            {
+                self.deinitTaskView(view);
+                entry.* = null;
+                changed = true;
+                continue;
+            }
+            const close_completion = view.close_completion.load(.acquire);
+            // Session close may finish after Agent execution but before the
+            // main thread has drained callbacks already enqueued for the Run.
+            // Keep the Task in `closing` until those events and the immutable
+            // terminal result become product-visible together.
+            if (close_completion != .none and close_completion != .running and
+                !hasUnfinalizedTerminalEvents(view))
+            {
                 view.close_thread.?.join();
                 view.close_thread = null;
                 const closing_session = view.closing_session;
                 view.closing_session = null;
-                view.close_result.store(.none, .release);
-                if (close_result == .closed) {
-                    view.state = .closed;
-                    view.session = null;
-                    view.close_failed = false;
-                    view.cancel_requested = false;
-                } else if (closing_session) |session| {
-                    view.session = session;
-                    const snapshot = session.snapshot();
-                    view.state = snapshot.state;
-                    view.active_run_id = snapshot.active_run_id;
-                    view.outcome = snapshot.last_outcome;
-                    view.cause = snapshot.cause;
-                    view.close_failed = true;
-                    view.cancel_requested = false;
+                view.close_completion.store(.none, .release);
+                switch (close_completion) {
+                    .closed => {
+                        view.lifecycle = .closed;
+                        view.continuation = .{ .unavailable = .closed };
+                        view.session = null;
+                        view.close_failed = false;
+                    },
+                    .failed_reusable, .failed_poisoned, .failed_closing => {
+                        view.session = closing_session;
+                        view.close_failed = true;
+                        switch (close_completion) {
+                            .failed_reusable => {
+                                view.lifecycle = .open;
+                                view.continuation = .available;
+                            },
+                            .failed_poisoned => {
+                                view.lifecycle = .open;
+                                view.continuation = .{ .unavailable = .session_poisoned };
+                            },
+                            .failed_closing => {
+                                view.lifecycle = .closing;
+                                view.continuation = .{ .unavailable = .closing };
+                            },
+                            else => unreachable,
+                        }
+                    },
+                    .none, .running => unreachable,
                 }
+                view.cancel_requested = false;
                 changed = true;
             }
-            const session = view.session orelse continue;
-            const snapshot = session.snapshot();
-            const pending_request_id = snapshot.pending_ui_request_id orelse 0;
+            const session = view.session;
+            const pending = if (session) |value| value.pendingUiObservation() else null;
+            const pending_request_id = if (pending) |value| value.request_id else 0;
             if (view.pending_ui_request_id != pending_request_id) {
                 view.pending_ui_request_id = pending_request_id;
                 view.pending_ui_order = 0;
-                if (pending_request_id != 0) {
-                    if (findRun(view.runs, snapshot.active_run_id)) |pending_run|
+                if (pending) |observation| {
+                    if (findRun(view.runs, observation.run_id)) |pending_run|
                         view.pending_ui_order = takeActivityOrder(pending_run);
                 }
                 changed = true;
             }
-            if (snapshot.last_outcome != null or snapshot.state == .idle or snapshot.state == .closed)
+            const run = findRun(view.runs, view.active_run_id) orelse continue;
+            if (productTerminalFacts(run)) |terminal| {
                 view.cancel_requested = false;
-            if (view.state != snapshot.state or view.active_run_id != snapshot.active_run_id or
-                view.outcome != snapshot.last_outcome or view.cause != snapshot.cause)
-            {
-                view.state = snapshot.state;
-                view.active_run_id = snapshot.active_run_id;
-                view.outcome = snapshot.last_outcome;
-                view.cause = snapshot.cause;
-                changed = true;
+                if (!run.terminal_observed) {
+                    foldTerminalDisposition(view, terminal.session_disposition_at_completion);
+                    if (run.event_projection_failure != null and view.lifecycle == .open)
+                        view.continuation = .{ .unavailable = .event_projection_failure };
+                    run.terminal_observed = true;
+                    changed = true;
+                }
+                continue;
             }
-            const run = findRun(view.runs, snapshot.active_run_id) orelse continue;
-            const next_phase: RunPhase = if (view.cancel_requested and
-                snapshot.last_outcome == null and
-                snapshot.state != .idle and snapshot.state != .closed)
+            const next_phase: RunPhase = if (view.cancel_requested)
                 .stopping
-            else
-                phaseFor(snapshot);
-            if (run.phase != next_phase or run.outcome != snapshot.last_outcome or run.cause != snapshot.cause) {
-                run.phase = next_phase;
-                run.outcome = snapshot.last_outcome;
-                run.cause = snapshot.cause;
+            else if (pending != null)
+                .waiting_ui
+            else switch (run.agent_handoff.load(.acquire)) {
+                .queued, .starting => .queued,
+                .running, .finishing => .running,
+            };
+            if (runPhase(run) != next_phase and setActivePhase(run, next_phase))
                 changed = true;
-            }
         }
         if (changed) self.bumpRevision();
     }
 
-    pub fn applyEvent(self: *Workbench, envelope: *const lifecycle.EventEnvelope) Error!void {
-        const session = self.findSession(envelope.session_id) orelse return error.UnknownSession;
-        const run = findRun(session.runs, envelope.run_id) orelse return error.NoSuchRun;
+    pub fn applyEvent(self: *Workbench, envelope: *const lifecycle.OwnedCoreEvent) Error!void {
+        const task = self.findTask(envelope.session_id) orelse return error.UnknownTask;
+        const run = findRun(task.runs, envelope.run_id) orelse return error.NoSuchRun;
+        if (run.event_stream_finalized) {
+            if (task.lifecycle == .open) {
+                const task_id = task.id;
+                try self.closeTask(task_id);
+                const current = self.findTask(task_id) orelse
+                    return error.EventAfterTerminalDrain;
+                if (current.lifecycle == .open and continuationAvailable(current.continuation)) {
+                    current.continuation = .{ .unavailable = .session_poisoned };
+                    self.bumpRevision();
+                }
+            }
+            return error.EventAfterTerminalDrain;
+        }
         const event = switch (envelope.event.value) {
             .unknown => return,
             .known => |known| known,
@@ -478,53 +898,148 @@ pub const Workbench = struct {
         self.bumpRevision();
     }
 
+    /// Records canonical event loss independently of Agent execution state.
+    /// A termination request may arrive after Agent terminal publication, so
+    /// it cannot be the only owner of this product failure fact.
+    pub fn recordEventProjectionFailure(
+        self: *Workbench,
+        task_id: u64,
+        run_id: u64,
+    ) void {
+        const task = self.findTask(task_id) orelse return;
+        const run = findRun(task.runs, run_id) orelse return;
+        if (run.event_projection_failure != null) return;
+        run.event_projection_failure = .consumer_rejected;
+        if (task.lifecycle == .open)
+            task.continuation = .{ .unavailable = .event_projection_failure };
+        self.bumpRevision();
+    }
+
+    /// Marks terminal Runs before the composition root performs one more
+    /// complete Agent event-pump drain. The acquire in `terminalPayload`
+    /// observes every callback enqueue that happened before Run completion.
+    pub fn markTerminalRunsBeforeEventDrain(self: *Workbench) void {
+        for (self.tasks) |*task_entry| {
+            const task = &(task_entry.* orelse continue);
+            for (task.runs) |*run_entry| {
+                const run = &(run_entry.* orelse continue);
+                if (run.event_stream_finalized or run.terminal_event_drain_marked)
+                    continue;
+                if (terminalPayload(run) != null)
+                    run.terminal_event_drain_marked = true;
+            }
+        }
+    }
+
+    /// Commits the final assistant suffix only after the composition root has
+    /// drained the Agent event pump following `markTerminalRunsBeforeEventDrain`.
+    /// Any later event for the Run is rejected by `applyEvent`.
+    pub fn finalizeMarkedTerminalRunsAfterEventDrain(self: *Workbench) void {
+        var changed = false;
+        for (self.tasks) |*task_entry| {
+            const task = &(task_entry.* orelse continue);
+            for (task.runs) |*run_entry| {
+                const run = &(run_entry.* orelse continue);
+                if (!run.terminal_event_drain_marked) continue;
+                std.debug.assert(terminalPayload(run) != null);
+                run.terminal_event_drain_marked = false;
+                run.event_stream_finalized = true;
+                // Product terminal visibility changes even when the assistant
+                // has no withheld suffix.
+                changed = true;
+                if (run.assistant.committed_len != run.assistant.list.items.len) {
+                    run.assistant.committed_len = run.assistant.list.items.len;
+                }
+            }
+        }
+        if (changed) self.bumpRevision();
+    }
+
     pub fn writeSnapshot(self: *Workbench, output: []u8) Error![]const u8 {
         self.syncLifecycle();
         var writer = std.Io.Writer.fixed(output);
-        writer.print("{{\"schemaVersion\":{d},\"revision\":\"{d}\",\"sessions\":[", .{ snapshot_schema_version, self.revision }) catch return error.SnapshotTooLarge;
-        var session_count: usize = 0;
-        for (self.sessions) |*entry| {
-            const session = &(entry.* orelse continue);
-            if (session_count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
-            session_count += 1;
-            try self.writeSession(&writer, session);
+        writer.print("{{\"schemaVersion\":{d},\"revision\":\"{d}\",\"tasks\":[", .{ snapshot_schema_version, self.revision }) catch return error.SnapshotTooLarge;
+        var task_count: usize = 0;
+        for (self.tasks) |*entry| {
+            const task = &(entry.* orelse continue);
+            if (task_count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+            task_count += 1;
+            try self.writeTask(&writer, task);
         }
         writer.writeAll("]}") catch return error.SnapshotTooLarge;
         return writer.buffered();
     }
 
     pub fn deinit(self: *Workbench) void {
-        for (self.sessions) |*entry| {
-            const session = &(entry.* orelse continue);
-            if (session.close_thread) |thread| thread.join();
-            self.deinitSessionView(session);
+        self.shutdownExecutor();
+        for (self.tasks) |*entry| {
+            const task = &(entry.* orelse continue);
+            if (task.close_thread) |thread| thread.join();
+            self.deinitTaskView(task);
         }
-        self.allocator.free(self.sessions);
-        if (self.known_secret.len != 0) {
-            std.crypto.secureZero(u8, self.known_secret);
-            self.allocator.free(self.known_secret);
-        }
+        self.allocator.free(self.tasks);
+        std.crypto.secureZero(u8, self.credential);
+        self.allocator.free(self.credential);
+        self.allocator.free(self.model);
+        self.allocator.free(self.base_url);
         std.debug.assert(self.projection_bytes == 0);
+        self.executor.deinit();
         self.* = undefined;
     }
 
-    fn writeSession(self: *Workbench, writer: *std.Io.Writer, view: *SessionView) Error!void {
+    pub fn shutdownExecutor(self: *Workbench) void {
+        if (self.executor_shutdown) return;
+        self.shutting_down = true;
+        for (self.tasks) |*entry| {
+            const view = &(entry.* orelse continue);
+            const session = view.session orelse continue;
+            const run = findRun(view.runs, view.active_run_id) orelse continue;
+            if (isTerminalPhase(runPhase(run))) continue;
+            if (self.executor.cancel(run)) {
+                cancelPreparedRunOrPanic(session, run.id);
+                releaseWorkerReference(run);
+                _ = commitTerminal(
+                    run,
+                    .interrupted,
+                    .interrupted,
+                    .app_shutdown,
+                    .closing,
+                    "",
+                    false,
+                );
+                run.terminal_observed = true;
+            } else {
+                consumeLifecycleTermination(
+                    requestRunTermination(run, .app_shutdown),
+                    run.id,
+                );
+            }
+        }
+        self.executor.shutdown();
+        self.executor_shutdown = true;
+        self.syncLifecycle();
+    }
+
+    fn writeTask(self: *Workbench, writer: *std.Io.Writer, view: *TaskView) Error!void {
         writer.print("{{\"id\":\"{d}\",\"title\":", .{view.id}) catch return error.SnapshotTooLarge;
         try self.projectedJsonValue(writer, view.title);
         writer.writeAll(",\"workspaceRoot\":") catch return error.SnapshotTooLarge;
         try self.projectedJsonValue(writer, view.workspace_root);
         writer.print(",\"lifecycle\":\"{s}\",\"continuationAvailable\":{},\"archived\":{},\"closeFailed\":{},\"currentRunId\":\"{d}\",\"currentRunPhase\":", .{
-            @tagName(taskLifecycle(view.state)),
-            continuationAvailable(view.state),
+            @tagName(view.lifecycle),
+            self.taskContinuationAvailable(view),
             view.archived,
             view.close_failed,
             if (currentRunPhase(view) == null) 0 else view.active_run_id,
         }) catch return error.SnapshotTooLarge;
         if (currentRunPhase(view)) |phase| jsonValue(writer, @tagName(phase)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        const last_terminal = lastTerminalFacts(view.runs);
         writer.writeAll(",\"lastRunOutcome\":") catch return error.SnapshotTooLarge;
-        if (view.outcome) |outcome| jsonValue(writer, @tagName(outcome)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        if (last_terminal) |terminal| jsonValue(writer, @tagName(terminal.outcome)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.writeAll(",\"cause\":") catch return error.SnapshotTooLarge;
-        if (view.cause) |cause| jsonValue(writer, @tagName(cause)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        if (last_terminal) |terminal| {
+            if (terminal.cause) |cause| jsonValue(writer, @tagName(cause)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        } else writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.writeAll(",\"runs\":[") catch return error.SnapshotTooLarge;
         var run_count: usize = 0;
         for (view.runs) |*entry| {
@@ -541,7 +1056,7 @@ pub const Workbench = struct {
         writer.writeByte('}') catch return error.SnapshotTooLarge;
     }
 
-    fn writePendingUi(self: *Workbench, writer: *std.Io.Writer, view: *SessionView) Error!void {
+    fn writePendingUi(self: *Workbench, writer: *std.Io.Writer, view: *TaskView) Error!void {
         const session = view.session orelse {
             writer.writeAll("null") catch return error.SnapshotTooLarge;
             return;
@@ -554,10 +1069,16 @@ pub const Workbench = struct {
             else => return err,
         };
         defer pending.deinit();
-        var parsed = sdk.decodeUiRequest(self.allocator, pending.json) catch return error.InvalidUiResponse;
+        var parsed = lifecycle.decodeUiRequest(self.allocator, pending.json) catch return error.InvalidUiResponse;
         defer parsed.deinit();
-        if (view.pending_ui_request_id != pending.request_id or view.pending_ui_order == 0)
-            return error.NoSuchRun;
+        // The synchronous callback may publish between lifecycle reconciliation
+        // and serialization. Omit that just-arrived request from this snapshot;
+        // its notification drives the next revision instead of failing the
+        // whole product snapshot on a benign observation race.
+        if (view.pending_ui_request_id != pending.request_id or view.pending_ui_order == 0) {
+            writer.writeAll("null") catch return error.SnapshotTooLarge;
+            return;
+        }
         try self.writePendingUiProjection(
             writer,
             pending.request_id,
@@ -569,16 +1090,21 @@ pub const Workbench = struct {
 
     fn findOrCreateTool(
         self: *Workbench,
-        run: *RunView,
+        run: *RunRecord,
         id: []const u8,
         name: []const u8,
         input: []const u8,
     ) Error!*ToolView {
-        if (findTool(run.tools, id)) |tool| return tool;
+        const route_digest = toolRouteDigest(id);
+        if (findToolByRouteDigest(run.tools, route_digest)) |tool| return tool;
         const slot = findEmpty(ToolView, run.tools) orelse return error.ToolCapacity;
-        const owned_id = try self.copyBounded(id, self.limits.max_tool_field_bytes);
+        const order = run.next_activity_order;
+        var product_id_storage: [tool_product_id_capacity]u8 = undefined;
+        const product_id = std.fmt.bufPrint(&product_id_storage, "tool-{d}", .{order}) catch unreachable;
+        const owned_id = try self.copyBounded(product_id, tool_product_id_capacity);
         errdefer self.freeTracked(owned_id);
-        const owned_name = try self.copyBounded(name, self.limits.max_tool_field_bytes);
+        const name_projection = try self.copyProjected(name, self.limits.max_tool_field_bytes);
+        const owned_name = name_projection.value;
         errdefer self.freeTracked(owned_name);
         const input_projection = try self.copyProjected(input, self.limits.max_tool_field_bytes);
         const owned_input = input_projection.value;
@@ -587,6 +1113,7 @@ pub const Workbench = struct {
         errdefer self.freeTracked(progress);
         const content = try self.copyBounded("", self.limits.max_tool_field_bytes);
         run.tools[slot] = .{
+            .route_digest = route_digest,
             .id = owned_id,
             .order = takeActivityOrder(run),
             .name = owned_name,
@@ -595,52 +1122,112 @@ pub const Workbench = struct {
             .content = content,
             .state = .running,
             .input_truncated = input_projection.truncated,
-            .redacted = input_projection.redacted,
+            .redacted = name_projection.redacted or
+                input_projection.redacted,
         };
         return &run.tools[slot].?;
     }
 
-    fn findSession(self: *Workbench, session_id: u64) ?*SessionView {
-        if (session_id == 0) return null;
-        for (self.sessions) |*entry| if (entry.*) |*session|
-            if (session.id == session_id) return session;
+    fn taskContinuationAvailable(self: *const Workbench, task: *const TaskView) bool {
+        return !self.shutting_down and
+            task.lifecycle == .open and
+            continuationAvailable(task.continuation);
+    }
+
+    fn findTask(self: *Workbench, task_id: u64) ?*TaskView {
+        if (task_id == 0) return null;
+        for (self.tasks) |*entry| if (entry.*) |*task|
+            if (task.id == task_id) return task;
         return null;
     }
 
-    fn findSessionIndex(self: *Workbench, session_id: u64) ?usize {
-        if (session_id == 0) return null;
-        for (self.sessions, 0..) |entry, index|
-            if (entry) |session| if (session.id == session_id) return index;
+    fn findTaskIndex(self: *Workbench, task_id: u64) ?usize {
+        if (task_id == 0) return null;
+        for (self.tasks, 0..) |entry, index|
+            if (entry) |task| if (task.id == task_id) return index;
         return null;
     }
 
-    fn deinitSessionView(self: *Workbench, session: *SessionView) void {
-        for (session.runs) |*run_entry| {
-            const run = &(run_entry.* orelse continue);
-            for (run.tools) |*tool_entry| {
-                const tool = &(tool_entry.* orelse continue);
-                self.freeTracked(tool.id);
-                self.freeTracked(tool.name);
-                self.freeTracked(tool.input);
-                self.freeTracked(tool.progress);
-                self.freeTracked(tool.content);
-            }
-            self.allocator.free(run.tools);
-            self.freeTracked(run.user);
-            self.freeTrackedText(&run.assistant);
-            self.freeTracked(run.status_text);
+    fn reserveRunRecord(self: *Workbench, task: *TaskView, prompt: []const u8) Error!usize {
+        const slot = findEmpty(RunRecord, task.runs) orelse return error.RunCapacity;
+        if (task.next_run_generation == std.math.maxInt(u64)) return error.RunGenerationExhausted;
+        if (prompt.len > self.limits.max_user_message_bytes)
+            return error.ProjectionCapacity;
+        const user_projection = try self.copyProjected(prompt, self.limits.max_user_message_bytes);
+        const user = user_projection.value;
+        errdefer self.freeTracked(user);
+        const status_text = try self.copyBounded("Queued", self.limits.max_tool_field_bytes);
+        errdefer self.freeTracked(status_text);
+        const tools = try self.allocator.alloc(?ToolView, self.limits.max_tools_per_run);
+        errdefer self.allocator.free(tools);
+        @memset(tools, null);
+        const terminal_diagnostic = try self.allocTrackedCapacity(self.limits.max_terminal_diagnostic_bytes);
+        errdefer self.freeTracked(terminal_diagnostic);
+        task.next_run_generation += 1;
+        task.runs[slot] = .{
+            .id = 0,
+            .generation = task.next_run_generation,
+            .user = user,
+            .user_redacted = user_projection.redacted,
+            .tools = tools,
+            .status_text = status_text,
+            .terminal_diagnostic = terminal_diagnostic,
+            .redaction_secret = self.credential,
+            .workbench = undefined,
+            .task = undefined,
+            .session = undefined,
+        };
+        return slot;
+    }
+
+    fn discardRunRecord(self: *Workbench, task: *TaskView, slot: usize) void {
+        const run = &(task.runs[slot] orelse return);
+        self.deinitRunRecord(run);
+        task.runs[slot] = null;
+    }
+
+    fn deinitRunRecord(self: *Workbench, run: *RunRecord) void {
+        for (run.tools) |*tool_entry| {
+            const tool = &(tool_entry.* orelse continue);
+            self.freeTracked(tool.id);
+            self.freeTracked(tool.name);
+            self.freeTracked(tool.input);
+            self.freeTracked(tool.progress);
+            self.freeTracked(tool.content);
         }
-        self.allocator.free(session.runs);
-        self.allocator.free(session.ui_history);
-        self.freeTracked(session.workspace_root);
-        self.freeTracked(session.title);
-        session.* = undefined;
+        self.allocator.free(run.tools);
+        self.freeTracked(run.user);
+        self.freeTrackedText(&run.assistant);
+        self.freeTracked(run.status_text);
+        self.freeTracked(run.terminal_diagnostic);
+        run.* = undefined;
+    }
+
+    fn deinitTaskView(self: *Workbench, task: *TaskView) void {
+        std.debug.assert(task.run_references.load(.acquire) == 0);
+        for (task.runs) |*run_entry| {
+            const run = &(run_entry.* orelse continue);
+            self.deinitRunRecord(run);
+        }
+        self.allocator.free(task.runs);
+        self.allocator.free(task.ui_history);
+        self.freeTracked(task.workspace_root);
+        self.freeTracked(task.title);
+        task.* = undefined;
     }
 
     fn copyBounded(self: *Workbench, value: []const u8, max: usize) Error![]u8 {
         if (value.len > max or value.len > self.limits.max_projection_bytes - self.projection_bytes)
             return error.ProjectionCapacity;
         const result = try self.allocator.dupe(u8, value);
+        self.projection_bytes += result.len;
+        return result;
+    }
+
+    fn allocTrackedCapacity(self: *Workbench, capacity: usize) Error![]u8 {
+        if (capacity > self.limits.max_projection_bytes - self.projection_bytes)
+            return error.ProjectionCapacity;
+        const result = try self.allocator.alloc(u8, capacity);
         self.projection_bytes += result.len;
         return result;
     }
@@ -670,7 +1257,7 @@ pub const Workbench = struct {
         const capacity = @min(value.len, max);
         const scratch = try self.allocator.alloc(u8, capacity);
         defer self.allocator.free(scratch);
-        const result = sanitizeInto(scratch, value, self.known_secret);
+        const result = sanitizeInto(scratch, value, self.credential);
         return .{
             .value = try self.copyBounded(scratch[0..result.len], max),
             .truncated = result.truncated,
@@ -682,22 +1269,39 @@ pub const Workbench = struct {
         const capacity = @min(value.len, max);
         const scratch = try self.allocator.alloc(u8, capacity);
         defer self.allocator.free(scratch);
-        const result = sanitizeInto(scratch, value, self.known_secret);
+        const result = sanitizeInto(scratch, value, self.credential);
         try self.replaceTracked(target, scratch[0..result.len], max);
         return result;
     }
 
     fn redactTrackedText(self: *Workbench, target: *TrackedText) bool {
-        if (self.known_secret.len == 0 or target.list.items.len < self.known_secret.len) return false;
-        var read: usize = 0;
-        var write: usize = 0;
+        std.debug.assert(target.committed_len <= target.list.items.len);
+        if (self.credential.len == 0) {
+            target.committed_len = target.list.items.len;
+            return false;
+        }
+        var read = target.committed_len;
+        var write = target.committed_len;
         var redacted = false;
-        const marker_len = @min(self.known_secret.len, 3);
+        const marker_len = @min(self.credential.len, 3);
         while (read < target.list.items.len) {
-            if (std.mem.startsWith(u8, target.list.items[read..], self.known_secret)) {
+            const remaining = target.list.items[read..];
+            if (remaining.len < self.credential.len and
+                std.mem.startsWith(u8, self.credential, remaining))
+            {
+                std.mem.copyForwards(
+                    u8,
+                    target.list.items[write..][0..remaining.len],
+                    remaining,
+                );
+                target.list.items.len = write + remaining.len;
+                target.committed_len = write;
+                return redacted;
+            }
+            if (std.mem.startsWith(u8, remaining, self.credential)) {
                 @memset(target.list.items[write..][0..marker_len], '*');
                 write += marker_len;
-                read += self.known_secret.len;
+                read += self.credential.len;
                 redacted = true;
             } else {
                 target.list.items[write] = target.list.items[read];
@@ -706,6 +1310,7 @@ pub const Workbench = struct {
             }
         }
         target.list.items.len = write;
+        target.committed_len = write;
         return redacted;
     }
 
@@ -714,9 +1319,9 @@ pub const Workbench = struct {
         writer.writeByte('"') catch return error.SnapshotTooLarge;
         var index: usize = 0;
         while (index < value.len) {
-            if (self.known_secret.len != 0 and std.mem.startsWith(u8, value[index..], self.known_secret)) {
-                _ = writer.splatByte('*', @min(self.known_secret.len, 3)) catch return error.SnapshotTooLarge;
-                index += self.known_secret.len;
+            if (self.credential.len != 0 and std.mem.startsWith(u8, value[index..], self.credential)) {
+                _ = writer.splatByte('*', @min(self.credential.len, 3)) catch return error.SnapshotTooLarge;
+                index += self.credential.len;
                 continue;
             }
             const byte = value[index];
@@ -746,7 +1351,7 @@ pub const Workbench = struct {
         request_id: u64,
         run_id: u64,
         order: u64,
-        request: sdk.UiRequest,
+        request: lifecycle.UiRequest,
     ) Error!void {
         writer.print("{{\"requestId\":\"{d}\",\"runId\":\"{d}\",\"order\":\"{d}\",\"redacted\":{},", .{
             request_id,
@@ -788,8 +1393,8 @@ pub const Workbench = struct {
         writer.writeByte('}') catch return error.SnapshotTooLarge;
     }
 
-    fn requestContainsSecret(self: *Workbench, request: sdk.UiRequest) bool {
-        if (self.known_secret.len == 0) return false;
+    fn requestContainsSecret(self: *Workbench, request: lifecycle.UiRequest) bool {
+        if (self.credential.len == 0) return false;
         return switch (request) {
             .ask_question => |questions| questions_block: {
                 for (questions) |question| {
@@ -809,20 +1414,26 @@ pub const Workbench = struct {
     }
 
     fn containsKnownSecret(self: *Workbench, value: []const u8) bool {
-        return self.known_secret.len != 0 and std.mem.indexOf(u8, value, self.known_secret) != null;
+        return self.credential.len != 0 and std.mem.indexOf(u8, value, self.credential) != null;
     }
 
-    fn writeRun(self: *Workbench, writer: *std.Io.Writer, run: *RunView) Error!void {
-        writer.print("{{\"id\":\"{d}\",\"phase\":\"{s}\",\"user\":", .{ run.id, @tagName(run.phase) }) catch return error.SnapshotTooLarge;
+    fn writeRun(self: *Workbench, writer: *std.Io.Writer, run: *RunRecord) Error!void {
+        const terminal = productTerminalFacts(run);
+        writer.print("{{\"id\":\"{d}\",\"phase\":\"{s}\",\"user\":", .{ run.id, @tagName(runPhase(run)) }) catch return error.SnapshotTooLarge;
         try self.projectedJsonValue(writer, run.user);
         writer.writeAll(",\"assistant\":") catch return error.SnapshotTooLarge;
-        try self.projectedJsonValue(writer, run.assistant.list.items);
+        try self.projectedJsonValue(
+            writer,
+            run.assistant.list.items[0..run.assistant.committed_len],
+        );
         writer.print(",\"assistantRedacted\":{},\"status\":", .{run.assistant_redacted}) catch return error.SnapshotTooLarge;
         try self.projectedJsonValue(writer, run.status_text);
         writer.writeAll(",\"outcome\":") catch return error.SnapshotTooLarge;
-        if (run.outcome) |outcome| jsonValue(writer, @tagName(outcome)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        if (terminal) |value| jsonValue(writer, @tagName(value.outcome)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.writeAll(",\"cause\":") catch return error.SnapshotTooLarge;
-        if (run.cause) |cause| jsonValue(writer, @tagName(cause)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        if (terminal) |value| {
+            if (value.cause) |cause| jsonValue(writer, @tagName(cause)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        } else writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.print(",\"usage\":{{\"input\":\"{d}\",\"output\":\"{d}\",\"cacheRead\":\"{d}\",\"cacheCreation\":\"{d}\"}},\"tools\":[", .{
             run.usage.input_tokens,
             run.usage.output_tokens,
@@ -863,7 +1474,7 @@ pub const Workbench = struct {
         session: *lifecycle.Session,
         run_id: u64,
         request_id: u64,
-        response: sdk.UiResponse,
+        response: lifecycle.UiResponse,
     ) UiRecord {
         var record = UiRecord{
             .request_id = request_id,
@@ -874,7 +1485,7 @@ pub const Workbench = struct {
         var pending = session.copyPendingUiRequest(self.allocator) catch return record;
         defer pending.deinit();
         if (pending.run_id != run_id or pending.request_id != request_id) return record;
-        var parsed = sdk.decodeUiRequest(self.allocator, pending.json) catch return record;
+        var parsed = lifecycle.decodeUiRequest(self.allocator, pending.json) catch return record;
         defer parsed.deinit();
         record.kind = kindForRequest(parsed.value);
         self.fillUiRecord(&record, parsed.value);
@@ -890,7 +1501,7 @@ pub const Workbench = struct {
         var pending = session.copyPendingUiRequest(self.allocator) catch return null;
         defer pending.deinit();
         if (pending.run_id != run_id) return null;
-        var parsed = sdk.decodeUiRequest(self.allocator, pending.json) catch return null;
+        var parsed = lifecycle.decodeUiRequest(self.allocator, pending.json) catch return null;
         defer parsed.deinit();
         var record = UiRecord{
             .request_id = pending.request_id,
@@ -902,7 +1513,7 @@ pub const Workbench = struct {
         return record;
     }
 
-    fn fillUiRecord(self: *Workbench, record: *UiRecord, request: sdk.UiRequest) void {
+    fn fillUiRecord(self: *Workbench, record: *UiRecord, request: lifecycle.UiRequest) void {
         const value = switch (request) {
             .ask_question => |questions| value: {
                 record.item_count = @intCast(@min(questions.len, std.math.maxInt(u32)));
@@ -910,13 +1521,13 @@ pub const Workbench = struct {
             },
             .permission => |permission| permission.args,
         };
-        const result = sanitizeInto(&record.detail, value, self.known_secret);
+        const result = sanitizeInto(&record.detail, value, self.credential);
         record.detail_len = result.len;
         record.detail_truncated = result.truncated;
         record.redacted = result.redacted;
     }
 
-    fn writeUiHistory(self: *Workbench, writer: *std.Io.Writer, view: *const SessionView) Error!void {
+    fn writeUiHistory(self: *Workbench, writer: *std.Io.Writer, view: *const TaskView) Error!void {
         const start = if (view.ui_history_count == view.ui_history.len) view.ui_history_next else 0;
         for (0..view.ui_history_count) |offset| {
             if (offset != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
@@ -938,7 +1549,7 @@ pub const Workbench = struct {
         }
     }
 
-    fn pushUiRecord(_: *Workbench, view: *SessionView, record: UiRecord) void {
+    fn pushUiRecord(_: *Workbench, view: *TaskView, record: UiRecord) void {
         for (view.ui_history) |entry| if (entry) |existing|
             if (existing.request_id == record.request_id) return;
         var stored = record;
@@ -981,30 +1592,196 @@ pub const Workbench = struct {
 };
 
 fn closeWorker(
-    host: *lifecycle.Host,
-    view: *SessionView,
+    agent_runtime: *lifecycle.Runtime,
+    view: *TaskView,
     session: *lifecycle.Session,
+    notifier: ChangeNotifier,
 ) void {
-    const result: CloseResult = close: {
-        session.close(.session_close) catch break :close .failed;
-        host.releaseClosedSession(session) catch break :close .failed;
+    const completion: CloseCompletion = close: {
+        switch (session.closeOutcome(.session_close)) {
+            .closed => {},
+            .failure => |failure| break :close closeFailureCompletion(
+                failure.session_disposition,
+            ),
+        }
+        agent_runtime.releaseClosedSession(session) catch
+            break :close .failed_closing;
         break :close .closed;
     };
-    view.close_result.store(result, .release);
-    _ = host.requestWake();
+    view.close_completion.store(completion, .release);
+    _ = notifier.notify();
 }
 
-fn phaseFor(snapshot: lifecycle.SessionSnapshot) RunPhase {
-    return switch (snapshot.state) {
-        .queued => .queued,
-        .running => .running,
-        .waiting_ui => .waiting_ui,
-        .closing => if (snapshot.last_outcome) |outcome| phaseForOutcome(outcome) else .running,
-        .idle, .poisoned, .closed => if (snapshot.last_outcome) |outcome| phaseForOutcome(outcome) else .queued,
+fn executeRunJob(context: *anyopaque) void {
+    const run: *RunRecord = @ptrCast(@alignCast(context));
+    const claimed = run.agent_handoff.cmpxchgStrong(
+        .queued,
+        .starting,
+        .acq_rel,
+        .acquire,
+    );
+    std.debug.assert(claimed == null);
+    var agent_run = switch (run.session.beginRunOutcome(run.id)) {
+        .run => |agent_run| agent_run,
+        .failure => |failure| {
+            run.agent_handoff.store(.finishing, .release);
+            commitBeginFailure(run, failure);
+            const notifier = run.workbench.change_notifier;
+            releaseWorkerReference(run);
+            _ = notifier.notify();
+            return;
+        },
+    };
+    run.run_control = agent_run.control();
+    run.agent_handoff.store(.running, .release);
+    if (run.pending_termination.load(.acquire) != .none) {
+        if (run.run_control.tryAcquireLease()) |lease_value| {
+            var lease = lease_value;
+            const result = lease.requestTermination(pendingTerminationSignal(run));
+            lease.deinit();
+            if (result == .stale_run) std.debug.panic(
+                "newly published RunControl for Run {d} was already stale",
+                .{run.id},
+            );
+        }
+    }
+    var terminal = agent_run.execute();
+    run.agent_handoff.store(.finishing, .release);
+    _ = commitAgentTerminal(run, &terminal);
+    terminal.deinit();
+    agent_run.deinit();
+    const notifier = run.workbench.change_notifier;
+    releaseWorkerReference(run);
+    _ = notifier.notify();
+}
+
+fn requestRunTermination(
+    run: *RunRecord,
+    interruption: lifecycle.ExternalInterruption,
+) RunTerminationDispatch {
+    const pending = pendingInterruption(interruption);
+    _ = run.pending_termination.cmpxchgStrong(.none, pending, .acq_rel, .acquire);
+    switch (run.agent_handoff.load(.acquire)) {
+        .queued, .starting => return .pending,
+        .finishing => return .already_finishing,
+        .running => {},
+    }
+    const lease_value = run.run_control.tryAcquireLease() orelse return .already_finishing;
+    var lease = lease_value;
+    defer lease.deinit();
+    return switch (lease.requestTermination(pendingTerminationSignal(run))) {
+        .requested => .requested,
+        .already_requested => .already_requested,
+        .already_terminal => .already_terminal,
+        .stale_run => .stale_run,
+        .session_closing => .session_closing,
     };
 }
 
-fn phaseForOutcome(outcome: lifecycle.RunOutcome) RunPhase {
+fn consumeLifecycleTermination(dispatch: RunTerminationDispatch, run_id: u64) void {
+    switch (dispatch) {
+        .pending,
+        .requested,
+        .already_requested,
+        .already_finishing,
+        .already_terminal,
+        .session_closing,
+        => {},
+        .stale_run => std.debug.panic(
+            "active lifecycle Run {d} published a stale RunControl",
+            .{run_id},
+        ),
+    }
+}
+
+fn pendingInterruption(interruption: lifecycle.ExternalInterruption) PendingInterruption {
+    return switch (interruption) {
+        .user_cancel => .user_cancel,
+        .session_close => .session_close,
+        .app_shutdown => .app_shutdown,
+        .timeout => .timeout,
+    };
+}
+
+fn pendingTerminationSignal(run: *const RunRecord) lifecycle.TerminationSignal {
+    return .{ .interrupted = switch (run.pending_termination.load(.acquire)) {
+        .none => unreachable,
+        .user_cancel => .user_cancel,
+        .timeout => .timeout,
+        .session_close => .session_close,
+        .app_shutdown => .app_shutdown,
+    } };
+}
+
+fn cancelRunJobForShutdown(context: *anyopaque) void {
+    const run: *RunRecord = @ptrCast(@alignCast(context));
+    cancelPreparedRunOrPanic(run.session, run.id);
+    _ = commitTerminal(
+        run,
+        .interrupted,
+        .interrupted,
+        .app_shutdown,
+        .closing,
+        "",
+        false,
+    );
+    const notifier = run.workbench.change_notifier;
+    releaseWorkerReference(run);
+    _ = notifier.notify();
+}
+
+fn cancelPreparedRunOrPanic(
+    session: *lifecycle.Session,
+    run_id: u64,
+) void {
+    session.cancelPreparedRun(run_id) catch |err| std.debug.panic(
+        "Executor removed queued Run {d}, but Agent rejected prepared cancellation: {s}",
+        .{ run_id, @errorName(err) },
+    );
+}
+
+fn releaseWorkerReference(run: *RunRecord) void {
+    std.debug.assert(run.worker_reference_held.swap(false, .acq_rel));
+    const references = &run.task.run_references;
+    const previous = references.fetchSub(1, .release);
+    std.debug.assert(previous != 0);
+}
+
+fn noChangeNotification(_: ?*anyopaque) bool {
+    return true;
+}
+
+fn closeFailureCompletion(
+    disposition: lifecycle.SessionDisposition,
+) CloseCompletion {
+    return switch (disposition) {
+        .reusable => .failed_reusable,
+        .poisoned => .failed_poisoned,
+        .closing => .failed_closing,
+    };
+}
+
+fn agentProvider(provider: Provider) lifecycle.ProviderKind {
+    return switch (provider) {
+        .anthropic => .anthropic,
+        .openai => .openai,
+        .gemini => .gemini,
+    };
+}
+
+fn agentUiResponse(response: UiResponse) lifecycle.UiResponse {
+    return switch (response) {
+        .answers => |answers| .{ .answers = answers },
+        .permission => |choice| .{ .permission = switch (choice) {
+            .allow_once => .allow_once,
+            .allow_always => .allow_always,
+            .deny_once => .deny_once,
+            .deny_tool_session => .deny_tool_session,
+        } },
+    };
+}
+
+fn phaseForOutcome(outcome: RunOutcome) RunPhase {
     return switch (outcome) {
         .completed => .completed,
         .stopped => .stopped,
@@ -1014,33 +1791,269 @@ fn phaseForOutcome(outcome: lifecycle.RunOutcome) RunPhase {
     };
 }
 
-fn taskLifecycle(state: lifecycle.SessionState) TaskLifecycle {
-    return switch (state) {
-        .closing => .closing,
-        .closed => .closed,
-        .idle, .queued, .running, .waiting_ui, .poisoned => .open,
+fn commitTerminal(
+    run: *RunRecord,
+    phase: RunPhase,
+    outcome: RunOutcome,
+    cause: ?RunCause,
+    session_disposition_at_completion: lifecycle.SessionDisposition,
+    diagnostic: []const u8,
+    source_diagnostic_truncated: bool,
+) bool {
+    std.debug.assert(isTerminalPhase(phase));
+    if (run.terminal_publication.cmpxchgStrong(.open, .publishing, .acq_rel, .acquire) == null) {
+        const diagnostic_projection = sanitizeInto(
+            run.terminal_diagnostic,
+            diagnostic,
+            run.redaction_secret,
+        );
+        run.terminal_payload = .{
+            .phase = phase,
+            .outcome = outcome,
+            .cause = cause,
+            .session_disposition_at_completion = session_disposition_at_completion,
+            .diagnostic_len = diagnostic_projection.len,
+            .diagnostic_truncated = source_diagnostic_truncated or diagnostic_projection.truncated,
+            .diagnostic_redacted = diagnostic_projection.redacted,
+        };
+        run.terminal_publication.store(.published, .release);
+        return true;
+    }
+    _ = terminalPayload(run).?;
+    return false;
+}
+
+const TerminalDecision = struct {
+    phase: RunPhase,
+    outcome: RunOutcome,
+    cause: ?RunCause,
+};
+
+fn commitAgentTerminal(run: *RunRecord, result: *const lifecycle.TerminalResult) bool {
+    const decision = classifyAgentTerminal(result);
+    return commitTerminal(
+        run,
+        decision.phase,
+        decision.outcome,
+        decision.cause,
+        result.session_disposition_at_completion,
+        result.diagnostic(),
+        result.diagnostic_truncated,
+    );
+}
+
+fn classifyAgentTerminal(result: *const lifecycle.TerminalResult) TerminalDecision {
+    if (result.failure == .dependency_contract) return .{
+        .phase = .failed,
+        .outcome = .dependency_contract_failure,
+        .cause = .dependency_contract_failure,
+    };
+    if (result.failure == .abi_status) return .{
+        .phase = .failed,
+        .outcome = .failed,
+        .cause = if (result.termination_signal) |signal| causeForSignal(signal) else null,
+    };
+    if (result.stop_reason) |reason| return switch (reason) {
+        .end_turn => .{ .phase = .completed, .outcome = .completed, .cause = null },
+        .max_turns, .tool_loop => .{ .phase = .stopped, .outcome = .stopped, .cause = null },
+        .aborted => decisionForSignal(result.termination_signal),
+        .tool_error, .api_error => .{
+            .phase = .failed,
+            .outcome = .failed,
+            .cause = if (result.termination_signal) |signal| causeForSignal(signal) else null,
+        },
+    };
+    if (result.termination_signal != null and result.raw_status_code == null)
+        return decisionForSignal(result.termination_signal);
+    return .{
+        .phase = .failed,
+        .outcome = .dependency_contract_failure,
+        .cause = .dependency_contract_failure,
     };
 }
 
-fn currentRunPhase(view: *const SessionView) ?RunPhase {
-    return switch (view.state) {
-        .queued, .running, .waiting_ui, .closing => if (findRun(view.runs, view.active_run_id)) |run|
-            if (isTerminalPhase(run.phase)) null else run.phase
-        else
-            null,
-        .idle, .poisoned, .closed => null,
+fn decisionForSignal(signal: ?lifecycle.TerminationSignal) TerminalDecision {
+    const value = signal orelse return .{ .phase = .failed, .outcome = .failed, .cause = null };
+    return switch (value) {
+        .interrupted => |interruption| switch (interruption) {
+            .user_cancel, .timeout => .{
+                .phase = .cancelled,
+                .outcome = .cancelled,
+                .cause = causeForSignal(value),
+            },
+            .session_close, .app_shutdown => .{
+                .phase = .interrupted,
+                .outcome = .interrupted,
+                .cause = causeForSignal(value),
+            },
+        },
+        .callback_failure,
+        .event_pump_failure,
+        .event_consumer_notification_failure,
+        => .{ .phase = .failed, .outcome = .failed, .cause = causeForSignal(value) },
     };
 }
 
-fn continuationAvailable(state: lifecycle.SessionState) bool {
-    return switch (state) {
-        .idle, .queued, .running, .waiting_ui => true,
-        .poisoned, .closing, .closed => false,
+fn causeForSignal(signal: lifecycle.TerminationSignal) RunCause {
+    return switch (signal) {
+        .interrupted => |interruption| switch (interruption) {
+            .user_cancel => .user_cancel,
+            .timeout => .timeout,
+            .session_close => .session_close,
+            .app_shutdown => .app_shutdown,
+        },
+        .callback_failure => |failure| switch (failure) {
+            .event => .event_pipeline_failure,
+            .ui => .ui_pipeline_failure,
+        },
+        .event_pump_failure => |failure| switch (failure) {
+            .event_too_large, .capacity => .queue_capacity_failure,
+            .invalid_event, .allocation, .consumer_rejected => .event_pipeline_failure,
+        },
+        .event_consumer_notification_failure => .event_pipeline_failure,
     };
 }
 
-fn hasNonTerminalRun(view: *const SessionView) bool {
+fn commitBeginFailure(run: *RunRecord, failure: lifecycle.BeginRunFailure) void {
+    const pending = run.pending_termination.load(.acquire);
+    if (pending != .none) {
+        const decision = decisionForSignal(pendingTerminationSignal(run));
+        _ = commitTerminal(
+            run,
+            decision.phase,
+            decision.outcome,
+            decision.cause,
+            failure.session_disposition,
+            "",
+            false,
+        );
+        return;
+    }
+    if (failure.err == error.SessionClosing) {
+        _ = commitTerminal(
+            run,
+            .interrupted,
+            .interrupted,
+            .session_close,
+            failure.session_disposition,
+            "",
+            false,
+        );
+        return;
+    }
+    _ = commitTerminal(
+        run,
+        .failed,
+        .dependency_contract_failure,
+        .dependency_contract_failure,
+        failure.session_disposition,
+        "",
+        false,
+    );
+}
+
+fn terminalPayload(run: *const RunRecord) ?*const TerminalPayload {
+    while (true) switch (run.terminal_publication.load(.acquire)) {
+        .open => return null,
+        .publishing => std.atomic.spinLoopHint(),
+        .published => return &run.terminal_payload,
+    };
+}
+
+/// Returns the terminal result only after the composition root has drained all
+/// Agent events that happened-before terminal publication. `terminalPayload`
+/// is the worker-to-main-thread fact; this is the product visibility gate.
+fn productTerminalPayload(run: *const RunRecord) ?*const TerminalPayload {
+    if (!run.event_stream_finalized) return null;
+    return terminalPayload(run);
+}
+
+const ProductTerminalFacts = struct {
+    phase: RunPhase,
+    outcome: RunOutcome,
+    cause: ?RunCause,
+    session_disposition_at_completion: lifecycle.SessionDisposition,
+};
+
+fn productTerminalFacts(run: *const RunRecord) ?ProductTerminalFacts {
+    const terminal = productTerminalPayload(run) orelse return null;
+    if (run.event_projection_failure != null) return .{
+        .phase = .failed,
+        .outcome = .failed,
+        .cause = .event_pipeline_failure,
+        .session_disposition_at_completion = terminal.session_disposition_at_completion,
+    };
+    return .{
+        .phase = terminal.phase,
+        .outcome = terminal.outcome,
+        .cause = terminal.cause,
+        .session_disposition_at_completion = terminal.session_disposition_at_completion,
+    };
+}
+
+fn runPhase(run: *const RunRecord) RunPhase {
+    return if (productTerminalFacts(run)) |terminal| terminal.phase else run.active_phase;
+}
+
+fn setActivePhase(run: *RunRecord, phase: RunPhase) bool {
+    std.debug.assert(!isTerminalPhase(phase));
+    // Terminal publication is owned by a worker and may win after the caller's
+    // observation. `active_phase` is irrelevant once the write-once terminal
+    // payload is published, so a late phase write is harmless; an assertion
+    // here would turn a legal completion race into a process crash.
+    if (run.terminal_publication.load(.acquire) != .open) return false;
+    run.active_phase = phase;
+    return run.terminal_publication.load(.acquire) == .open;
+}
+
+fn lastTerminalFacts(runs: []?RunRecord) ?ProductTerminalFacts {
+    var latest: ?*const RunRecord = null;
+    for (runs) |*entry| {
+        const run = &(entry.* orelse continue);
+        if (latest == null or run.id > latest.?.id) latest = run;
+    }
+    return if (latest) |run| productTerminalFacts(run) else null;
+}
+
+fn currentRunPhase(view: *const TaskView) ?RunPhase {
+    const run = findRun(view.runs, view.active_run_id) orelse return null;
+    const phase = runPhase(run);
+    return if (isTerminalPhase(phase)) null else phase;
+}
+
+fn continuationAvailable(capability: ContinuationCapability) bool {
+    return switch (capability) {
+        .available => true,
+        .unavailable => false,
+    };
+}
+
+fn foldTerminalDisposition(
+    task: *TaskView,
+    disposition: lifecycle.SessionDisposition,
+) void {
+    if (task.lifecycle != .open) return;
+    switch (disposition) {
+        .reusable => task.continuation = .available,
+        .poisoned => task.continuation = .{ .unavailable = .session_poisoned },
+        .closing => {
+            task.lifecycle = .closing;
+            task.continuation = .{ .unavailable = .closing };
+        },
+    }
+}
+
+fn hasNonTerminalRun(view: *const TaskView) bool {
     if (currentRunPhase(view)) |phase| return !isTerminalPhase(phase);
+    return false;
+}
+
+fn hasUnfinalizedTerminalEvents(view: *const TaskView) bool {
+    for (view.runs) |*entry| {
+        const run = &(entry.* orelse continue);
+        if (!run.event_stream_finalized and terminalPayload(run) != null)
+            return true;
+    }
     return false;
 }
 
@@ -1080,21 +2093,21 @@ fn sanitizeInto(destination: []u8, value: []const u8, secret: []const u8) Saniti
     return .{ .len = write, .truncated = read != value.len, .redacted = redacted };
 }
 
-fn kindForRequest(request: sdk.UiRequest) UiRecordKind {
+fn kindForRequest(request: lifecycle.UiRequest) UiRecordKind {
     return switch (request) {
         .ask_question => .ask_question,
         .permission => .permission,
     };
 }
 
-fn kindForResponse(response: sdk.UiResponse) UiRecordKind {
+fn kindForResponse(response: lifecycle.UiResponse) UiRecordKind {
     return switch (response) {
         .answers => .ask_question,
         .permission => .permission,
     };
 }
 
-fn stateForResponse(response: sdk.UiResponse) UiRecordState {
+fn stateForResponse(response: lifecycle.UiResponse) UiRecordState {
     return switch (response) {
         .answers => .answered,
         .permission => |permission| switch (permission) {
@@ -1115,15 +2128,28 @@ fn findEmpty(comptime T: type, entries: []?T) ?usize {
     return null;
 }
 
-fn findRun(entries: []?RunView, run_id: u64) ?*RunView {
+fn findRun(entries: []?RunRecord, run_id: u64) ?*RunRecord {
     if (run_id == 0) return null;
     for (entries) |*entry| if (entry.*) |*run| if (run.id == run_id) return run;
     return null;
 }
 
+fn toolRouteDigest(id: []const u8) [tool_route_digest_bytes]u8 {
+    var digest: [tool_route_digest_bytes]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(id, &digest, .{});
+    return digest;
+}
+
 fn findTool(entries: []?ToolView, id: []const u8) ?*ToolView {
+    return findToolByRouteDigest(entries, toolRouteDigest(id));
+}
+
+fn findToolByRouteDigest(
+    entries: []?ToolView,
+    route_digest: [tool_route_digest_bytes]u8,
+) ?*ToolView {
     for (entries) |*entry| if (entry.*) |*tool|
-        if (std.mem.eql(u8, tool.id, id)) return tool;
+        if (std.mem.eql(u8, &tool.route_digest, &route_digest)) return tool;
     return null;
 }
 
@@ -1131,7 +2157,7 @@ fn addU64(left: u64, right: u64) error{ProjectionCapacity}!u64 {
     return std.math.add(u64, left, right) catch error.ProjectionCapacity;
 }
 
-fn takeActivityOrder(run: *RunView) u64 {
+fn takeActivityOrder(run: *RunRecord) u64 {
     const result = run.next_activity_order;
     std.debug.assert(result != std.math.maxInt(u64));
     run.next_activity_order += 1;
@@ -1144,9 +2170,9 @@ fn worstCaseSnapshotBytes(limits: Limits) ?usize {
     total = std.math.add(
         usize,
         total,
-        std.math.mul(usize, limits.max_sessions, session_snapshot_overhead) catch return null,
+        std.math.mul(usize, limits.max_tasks, task_snapshot_overhead) catch return null,
     ) catch return null;
-    const runs = std.math.mul(usize, limits.max_sessions, limits.max_runs_per_session) catch return null;
+    const runs = std.math.mul(usize, limits.max_tasks, limits.max_runs_per_task) catch return null;
     total = std.math.add(
         usize,
         total,
@@ -1180,8 +2206,8 @@ fn worstCaseSnapshotBytes(limits: Limits) ?usize {
     ) catch return null;
     const ui_records = std.math.mul(
         usize,
-        limits.max_sessions,
-        limits.max_ui_history_per_session,
+        limits.max_tasks,
+        limits.max_ui_history_per_task,
     ) catch return null;
     total = std.math.add(
         usize,
@@ -1191,10 +2217,18 @@ fn worstCaseSnapshotBytes(limits: Limits) ?usize {
     return total;
 }
 
+var test_agent_runtime: lifecycle.Runtime = undefined;
+const test_execution_defaults = ExecutionDefaults{
+    .provider = .anthropic,
+    .credential = "SECRET-KEY",
+    .model = "fixture-model",
+};
+
 fn testWorkbench() !Workbench {
-    var workbench = try Workbench.init(std.testing.allocator, undefined, .{
-        .max_sessions = 2,
-        .max_runs_per_session = 2,
+    test_agent_runtime.io = std.testing.io;
+    var workbench = try Workbench.init(std.testing.allocator, &test_agent_runtime, .{
+        .max_tasks = 2,
+        .max_runs_per_task = 2,
         .max_tools_per_run = 2,
         .max_projection_bytes = 64 * 1024,
         .max_workspace_bytes = 1024,
@@ -1204,47 +2238,56 @@ fn testWorkbench() !Workbench {
         .max_pending_ui_json_bytes = 64 * 1024,
         .max_pending_ui_requests = 2,
         .max_snapshot_bytes = 1024 * 1024,
-    });
+    }, .{ .execution = test_execution_defaults });
     const workspace = try workbench.copyBounded("/tmp/metawork-test", workbench.limits.max_workspace_bytes);
-    const runs = try workbench.allocator.alloc(?RunView, workbench.limits.max_runs_per_session);
+    const runs = try workbench.allocator.alloc(?RunRecord, workbench.limits.max_runs_per_task);
     @memset(runs, null);
-    const ui_history = try workbench.allocator.alloc(?UiRecord, workbench.limits.max_ui_history_per_session);
+    const ui_history = try workbench.allocator.alloc(?UiRecord, workbench.limits.max_ui_history_per_task);
     @memset(ui_history, null);
     const tools = try workbench.allocator.alloc(?ToolView, workbench.limits.max_tools_per_run);
     @memset(tools, null);
     runs[0] = .{
         .id = 7,
+        .generation = 1,
         .user = try workbench.copyBounded("inspect", workbench.limits.max_user_message_bytes),
-        .phase = .running,
+        .active_phase = .running,
+        .agent_handoff = .init(.running),
         .tools = tools,
         .status_text = try workbench.copyBounded("Queued", workbench.limits.max_tool_field_bytes),
+        .terminal_diagnostic = try workbench.allocTrackedCapacity(workbench.limits.max_terminal_diagnostic_bytes),
     };
-    workbench.sessions[0] = .{
+    workbench.tasks[0] = .{
         .session = null,
         .id = 3,
         .workspace_root = workspace,
         .title = try workbench.copyBounded("", workbench.limits.max_task_title_bytes),
         .runs = runs,
+        .next_run_generation = 1,
         .ui_history = ui_history,
-        .state = .running,
         .active_run_id = 7,
     };
     return workbench;
 }
 
-fn testEnvelope(session_id: u64, run_id: u64, encoded: []const u8) !lifecycle.EventEnvelope {
+fn testEnvelope(session_id: u64, run_id: u64, encoded: []const u8) !lifecycle.OwnedCoreEvent {
     const allocator = std.testing.allocator;
     return .{
         .session_id = session_id,
         .run_id = run_id,
         .encoded_bytes = encoded.len,
         .json = try allocator.dupe(u8, encoded),
-        .event = try sdk.decodeCoreEvent(allocator, encoded),
+        .event = try lifecycle.decodeCoreEvent(allocator, encoded),
         .allocator = allocator,
     };
 }
 
-test "Workbench snapshot serializer matches the Renderer v4 contract fixture" {
+fn finalizeTestTerminalEvents(workbench: *Workbench) void {
+    workbench.markTerminalRunsBeforeEventDrain();
+    workbench.finalizeMarkedTerminalRunsAfterEventDrain();
+    workbench.syncLifecycle();
+}
+
+test "Workbench snapshot serializer matches the Renderer v5 contract fixture" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
 
@@ -1269,22 +2312,311 @@ test "Task metadata mutations preserve lifecycle guards and projection accountin
     try std.testing.expectError(error.InvalidTaskTitle, workbench.renameTask(3, &.{0xff}));
 
     try workbench.renameTask(3, "Review release readiness");
-    try std.testing.expectEqualStrings("Review release readiness", workbench.sessions[0].?.title);
+    try std.testing.expectEqualStrings("Review release readiness", workbench.tasks[0].?.title);
 
-    workbench.sessions[0].?.state = .idle;
-    workbench.sessions[0].?.active_run_id = 0;
-    workbench.sessions[0].?.runs[0].?.phase = .completed;
+    workbench.tasks[0].?.active_run_id = 0;
+    const completed = &workbench.tasks[0].?.runs[0].?;
+    _ = commitTerminal(completed, .completed, .completed, null, .reusable, "", false);
+    finalizeTestTerminalEvents(&workbench);
     try workbench.setTaskArchived(3, true);
-    try std.testing.expect(workbench.sessions[0].?.archived);
+    try std.testing.expect(workbench.tasks[0].?.archived);
 
-    workbench.sessions[0].?.state = .closing;
+    workbench.tasks[0].?.lifecycle = .closing;
+    workbench.tasks[0].?.continuation = .{ .unavailable = .closing };
     try std.testing.expectError(error.TaskBusy, workbench.setTaskArchived(3, false));
-    workbench.sessions[0].?.state = .closed;
+    workbench.tasks[0].?.lifecycle = .closed;
+    workbench.tasks[0].?.continuation = .{ .unavailable = .closed };
     const tracked_before_delete = workbench.projection_bytes;
     try workbench.deleteTask(3);
-    try std.testing.expect(workbench.sessions[0] == null);
+    try std.testing.expect(workbench.tasks[0] == null);
     try std.testing.expect(workbench.projection_bytes < tracked_before_delete);
-    try std.testing.expectError(error.UnknownSession, workbench.renameTask(3, "gone"));
+    try std.testing.expectError(error.UnknownTask, workbench.renameTask(3, "gone"));
+}
+
+test "Run admission reserves a stable generation and rolls back every fallible allocation" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    const task = &workbench.tasks[0].?;
+    const tracked_before = workbench.projection_bytes;
+    const generation_before = task.next_run_generation;
+    var oversized_prompt: [1025]u8 = undefined;
+    @memset(&oversized_prompt, 'x');
+    try std.testing.expectError(
+        error.ProjectionCapacity,
+        workbench.reserveRunRecord(task, &oversized_prompt),
+    );
+    try std.testing.expectEqual(tracked_before, workbench.projection_bytes);
+    try std.testing.expectEqual(generation_before, task.next_run_generation);
+
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    const allocator = workbench.allocator;
+    workbench.allocator = failing.allocator();
+    defer workbench.allocator = allocator;
+    try std.testing.expectError(error.OutOfMemory, workbench.reserveRunRecord(task, "will fail"));
+    workbench.allocator = allocator;
+    try std.testing.expectEqual(tracked_before, workbench.projection_bytes);
+    try std.testing.expectEqual(generation_before, task.next_run_generation);
+
+    const slot = try workbench.reserveRunRecord(task, "reserved");
+    const first_generation = task.runs[slot].?.generation;
+    workbench.discardRunRecord(task, slot);
+    const reused_slot = try workbench.reserveRunRecord(task, "reserved again");
+    try std.testing.expectEqual(slot, reused_slot);
+    try std.testing.expect(task.runs[reused_slot].?.generation > first_generation);
+    try std.testing.expectError(error.RunCapacity, workbench.reserveRunRecord(task, "overflow"));
+    workbench.discardRunRecord(task, reused_slot);
+}
+
+test "missing process defaults fail Task admission without blocking Workbench startup" {
+    test_agent_runtime.io = std.testing.io;
+    var workbench = try Workbench.init(
+        std.testing.allocator,
+        &test_agent_runtime,
+        .{
+            .max_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        .{ .execution = .{
+            .provider = .anthropic,
+            .credential = "",
+            .model = "",
+        } },
+    );
+    defer workbench.deinit();
+    try std.testing.expectError(
+        error.InvalidExecutionDefaults,
+        workbench.createTask(.{
+            .workspace_root = "/tmp",
+            .trust = .{ .temporary = "/tmp" },
+        }),
+    );
+    try std.testing.expectEqual(@as(u64, 0), workbench.currentRevision());
+}
+
+test "terminal publication is allocation-free write-once bounded history" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    const run = &workbench.tasks[0].?.runs[0].?;
+    const diagnostic = try std.testing.allocator.alloc(u8, run.terminal_diagnostic.len + 17);
+    defer std.testing.allocator.free(diagnostic);
+    @memset(diagnostic, 'x');
+
+    try std.testing.expect(commitTerminal(
+        run,
+        .failed,
+        .failed,
+        .event_pipeline_failure,
+        .poisoned,
+        diagnostic,
+        false,
+    ));
+    const terminal = terminalPayload(run).?;
+    try std.testing.expectEqual(RunPhase.failed, terminal.phase);
+    try std.testing.expectEqual(RunOutcome.failed, terminal.outcome);
+    try std.testing.expectEqual(@as(?RunCause, .event_pipeline_failure), terminal.cause);
+    try std.testing.expectEqual(run.terminal_diagnostic.len, terminal.diagnostic_len);
+    try std.testing.expect(terminal.diagnostic_truncated);
+    try std.testing.expectEqualSlices(u8, diagnostic[0..run.terminal_diagnostic.len], run.terminal_diagnostic);
+    try std.testing.expect(!commitTerminal(
+        run,
+        .failed,
+        .failed,
+        .event_pipeline_failure,
+        .reusable,
+        diagnostic,
+        false,
+    ));
+    try std.testing.expect(!commitTerminal(
+        run,
+        .interrupted,
+        .interrupted,
+        .session_close,
+        .closing,
+        "late mutation",
+        false,
+    ));
+    try std.testing.expect(!setActivePhase(run, .stopping));
+    try std.testing.expectEqual(RunOutcome.failed, terminalPayload(run).?.outcome);
+    try std.testing.expectEqual(@as(?RunCause, .event_pipeline_failure), terminalPayload(run).?.cause);
+}
+
+test "terminal disposition folds exactly once without reopening a closing Task" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    const task = &workbench.tasks[0].?;
+
+    task.continuation = .available;
+    foldTerminalDisposition(task, .poisoned);
+    try std.testing.expectEqual(TaskLifecycle.open, task.lifecycle);
+    try std.testing.expectEqual(
+        ContinuationUnavailableReason.session_poisoned,
+        task.continuation.unavailable,
+    );
+
+    task.lifecycle = .closing;
+    task.continuation = .{ .unavailable = .closing };
+    foldTerminalDisposition(task, .reusable);
+    try std.testing.expectEqual(TaskLifecycle.closing, task.lifecycle);
+    try std.testing.expectEqual(
+        ContinuationUnavailableReason.closing,
+        task.continuation.unavailable,
+    );
+
+    task.lifecycle = .closed;
+    task.continuation = .{ .unavailable = .closed };
+    foldTerminalDisposition(task, .reusable);
+    try std.testing.expectEqual(TaskLifecycle.closed, task.lifecycle);
+    try std.testing.expectEqual(
+        ContinuationUnavailableReason.closed,
+        task.continuation.unavailable,
+    );
+}
+
+test "canonical prompt title and terminal diagnostic never retain the registered credential" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    const task = &workbench.tasks[0].?;
+
+    try workbench.renameTask(task.id, "Review SECRET-KEY usage");
+    try std.testing.expect(std.mem.indexOf(u8, task.title, "SECRET-KEY") == null);
+    try std.testing.expect(task.title_redacted);
+
+    const slot = try workbench.reserveRunRecord(task, "prompt SECRET-KEY payload");
+    const run = &task.runs[slot].?;
+    try std.testing.expect(std.mem.indexOf(u8, run.user, "SECRET-KEY") == null);
+    try std.testing.expect(run.user_redacted);
+    try std.testing.expect(commitTerminal(
+        run,
+        .failed,
+        .failed,
+        .dependency_contract_failure,
+        .poisoned,
+        "diagnostic SECRET-KEY payload",
+        false,
+    ));
+    const terminal = terminalPayload(run).?;
+    try std.testing.expect(terminal.diagnostic_redacted);
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            run.terminal_diagnostic[0..terminal.diagnostic_len],
+            "SECRET-KEY",
+        ) == null,
+    );
+}
+
+test "Agent terminal facts map once into Workbench product outcomes" {
+    var terminal = lifecycle.TerminalResult{
+        .allocator = std.testing.allocator,
+        .diagnostic_storage = &.{},
+        .diagnostic_len = 0,
+        .diagnostic_truncated = false,
+        .abi_status = .ok,
+        .raw_status_code = @intFromEnum(lifecycle.Status.ok),
+        .stop_reason = .end_turn,
+        .raw_stop_reason_code = @intFromEnum(lifecycle.StopReason.end_turn),
+        .abort_status = null,
+        .raw_abort_status_code = null,
+        .termination_signal = null,
+        .failure = null,
+        .session_disposition_at_completion = .reusable,
+    };
+    try std.testing.expectEqual(
+        TerminalDecision{ .phase = .completed, .outcome = .completed, .cause = null },
+        classifyAgentTerminal(&terminal),
+    );
+
+    terminal.abi_status = null;
+    terminal.raw_status_code = null;
+    terminal.stop_reason = null;
+    terminal.raw_stop_reason_code = null;
+    terminal.termination_signal = .{ .interrupted = .user_cancel };
+    try std.testing.expectEqual(
+        TerminalDecision{ .phase = .cancelled, .outcome = .cancelled, .cause = .user_cancel },
+        classifyAgentTerminal(&terminal),
+    );
+
+    terminal.raw_status_code = @intFromEnum(lifecycle.Status.callback_failed);
+    terminal.failure = .abi_status;
+    terminal.termination_signal = .{ .callback_failure = .ui };
+    try std.testing.expectEqual(
+        TerminalDecision{ .phase = .failed, .outcome = .failed, .cause = .ui_pipeline_failure },
+        classifyAgentTerminal(&terminal),
+    );
+
+    terminal.failure = .dependency_contract;
+    try std.testing.expectEqual(
+        TerminalDecision{
+            .phase = .failed,
+            .outcome = .dependency_contract_failure,
+            .cause = .dependency_contract_failure,
+        },
+        classifyAgentTerminal(&terminal),
+    );
+}
+
+test "Renderer transport failures never own Agent Run termination" {
+    const cases = [_]struct {
+        stage: TransportFailureStage,
+        decision: TransportFailureDecision,
+    }{
+        .{ .stage = .ingress_validation, .decision = .reject_command },
+        .{ .stage = .command_dispatch, .decision = .reject_command },
+        .{ .stage = .response_delivery, .decision = .detach_renderer },
+        .{ .stage = .revision_delivery, .decision = .retry },
+        .{ .stage = .snapshot_transport, .decision = .retry },
+        .{ .stage = .connection_generation, .decision = .detach_renderer },
+        .{ .stage = .agent_event_delivery, .decision = .retain_for_reconnect },
+        .{ .stage = .detached_retention_expired, .decision = .discard_transport_payload },
+    };
+    for (cases) |case| {
+        const decision = decideTransportFailure(.{ .stage = case.stage });
+        try std.testing.expectEqual(case.decision, decision);
+        try std.testing.expect(decision != .request_run_termination);
+    }
+}
+
+test "delete waits for RunRef quiescence and stale generations fail validation" {
+    const Harness = struct {
+        fn wake(context: ?*anyopaque) bool {
+            const count: *usize = @ptrCast(@alignCast(context.?));
+            count.* += 1;
+            return true;
+        }
+    };
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    var wake_count: usize = 0;
+    workbench.change_notifier = .{ .context = &wake_count, .wake = Harness.wake };
+    const task = &workbench.tasks[0].?;
+    task.lifecycle = .closed;
+    task.continuation = .{ .unavailable = .closed };
+    task.active_run_id = 0;
+    _ = commitTerminal(
+        &task.runs[0].?,
+        .completed,
+        .completed,
+        null,
+        .reusable,
+        "",
+        false,
+    );
+    finalizeTestTerminalEvents(&workbench);
+
+    var run_ref = try workbench.acquireRunRef(3, 7);
+    try std.testing.expect(run_ref.isCurrent());
+    run_ref.record.generation += 1;
+    try std.testing.expect(!run_ref.isCurrent());
+    run_ref.record.generation = run_ref.generation;
+
+    try workbench.deleteTask(3);
+    try std.testing.expect(task.delete_pending);
+    try std.testing.expect(workbench.tasks[0] != null);
+    run_ref.release();
+    try std.testing.expectEqual(@as(usize, 1), wake_count);
+    workbench.syncLifecycle();
+    try std.testing.expect(workbench.tasks[0] == null);
 }
 
 test "Workbench projection preserves text bytes with bounded geometric growth" {
@@ -1297,7 +2629,7 @@ test "Workbench projection preserves text bytes with bounded geometric growth" {
         defer envelope.deinit();
         try workbench.applyEvent(&envelope);
     }
-    const run = findRun(workbench.sessions[0].?.runs, 7).?;
+    const run = findRun(workbench.tasks[0].?.runs, 7).?;
     try std.testing.expectEqual(@as(usize, chunk.len * 2048), run.assistant.list.items.len);
     for (0..2048) |index|
         try std.testing.expectEqualStrings(chunk, run.assistant.list.items[index * chunk.len ..][0..chunk.len]);
@@ -1314,13 +2646,13 @@ test "Workbench snapshot budget includes JSON escaping and structural overhead" 
     try std.testing.expect(worst_case <= limits.max_snapshot_bytes);
     try std.testing.expect(worst_case > 1024 * 1024);
     try std.testing.expectEqual(@as(usize, 512 * 1024), limits.max_projection_bytes);
-    try std.testing.expectEqual(@as(usize, 16), limits.max_runs_per_session);
+    try std.testing.expectEqual(@as(usize, 16), limits.max_runs_per_task);
     const single_pending_budget = limits.max_pending_ui_json_bytes * pending_ui_reencode_expansion + pending_ui_snapshot_overhead;
     try std.testing.expect(worst_case >= single_pending_budget * limits.max_pending_ui_requests);
 
     var workbench = try testWorkbench();
     defer workbench.deinit();
-    const run = findRun(workbench.sessions[0].?.runs, 7).?;
+    const run = findRun(workbench.tasks[0].?.runs, 7).?;
     const remaining = @min(
         workbench.limits.max_assistant_message_bytes,
         workbench.limits.max_projection_bytes - workbench.projection_bytes,
@@ -1329,6 +2661,7 @@ test "Workbench snapshot budget includes JSON escaping and structural overhead" 
     defer std.testing.allocator.free(controls);
     @memset(controls, 1);
     try workbench.appendTrackedText(&run.assistant, controls, workbench.limits.max_assistant_message_bytes);
+    _ = workbench.redactTrackedText(&run.assistant);
 
     const snapshot_storage = try std.testing.allocator.alloc(u8, workbench.limits.max_snapshot_bytes);
     defer std.testing.allocator.free(snapshot_storage);
@@ -1338,19 +2671,26 @@ test "Workbench snapshot budget includes JSON escaping and structural overhead" 
 
 test "default snapshot budget contains the maximum structural projection" {
     const limits = Limits{};
-    var workbench = try Workbench.init(std.testing.allocator, undefined, limits);
+    test_agent_runtime.io = std.testing.io;
+    var workbench = try Workbench.init(
+        std.testing.allocator,
+        &test_agent_runtime,
+        limits,
+        .{ .execution = test_execution_defaults },
+    );
     defer workbench.deinit();
 
-    for (0..limits.max_sessions) |session_index| {
-        const runs = try workbench.allocator.alloc(?RunView, limits.max_runs_per_session);
+    for (0..limits.max_tasks) |task_index| {
+        const runs = try workbench.allocator.alloc(?RunRecord, limits.max_runs_per_task);
         @memset(runs, null);
-        const ui_history = try workbench.allocator.alloc(?UiRecord, limits.max_ui_history_per_session);
+        const ui_history = try workbench.allocator.alloc(?UiRecord, limits.max_ui_history_per_task);
         @memset(ui_history, null);
-        for (0..limits.max_runs_per_session) |run_index| {
+        for (0..limits.max_runs_per_task) |run_index| {
             const tools = try workbench.allocator.alloc(?ToolView, limits.max_tools_per_run);
             @memset(tools, null);
             for (0..limits.max_tools_per_run) |tool_index| {
                 tools[tool_index] = .{
+                    .route_digest = toolRouteDigest(""),
                     .id = try workbench.copyBounded("", limits.max_tool_field_bytes),
                     .order = @intCast(tool_index + 1),
                     .name = try workbench.copyBounded("", limits.max_tool_field_bytes),
@@ -1363,20 +2703,23 @@ test "default snapshot budget contains the maximum structural projection" {
             }
             runs[run_index] = .{
                 .id = @intCast(run_index + 1),
+                .generation = @intCast(run_index + 1),
                 .user = try workbench.copyBounded("", limits.max_user_message_bytes),
                 .tools = tools,
                 .status_text = try workbench.copyBounded("", limits.max_tool_field_bytes),
+                .terminal_diagnostic = try workbench.allocTrackedCapacity(limits.max_terminal_diagnostic_bytes),
             };
         }
-        workbench.sessions[session_index] = .{
+        workbench.tasks[task_index] = .{
             .session = null,
-            .id = @intCast(session_index + 1),
+            .id = @intCast(task_index + 1),
             .workspace_root = try workbench.copyBounded("", limits.max_workspace_bytes),
             .title = try workbench.copyBounded("", limits.max_task_title_bytes),
             .runs = runs,
+            .next_run_generation = @intCast(limits.max_runs_per_task),
             .ui_history = ui_history,
         };
-        for (0..limits.max_ui_history_per_session) |record_index| {
+        for (0..limits.max_ui_history_per_task) |record_index| {
             var record = UiRecord{
                 .request_id = @intCast(record_index + 1),
                 .run_id = 1,
@@ -1387,24 +2730,29 @@ test "default snapshot budget contains the maximum structural projection" {
                 .detail_truncated = true,
             };
             @memset(&record.detail, 3);
-            workbench.sessions[session_index].?.ui_history[record_index] = record;
+            workbench.tasks[task_index].?.ui_history[record_index] = record;
         }
-        workbench.sessions[session_index].?.ui_history_count = limits.max_ui_history_per_session;
+        workbench.tasks[task_index].?.ui_history_count = limits.max_ui_history_per_task;
     }
 
     const escaped_assistant = try std.testing.allocator.alloc(u8, limits.max_assistant_message_bytes);
     defer std.testing.allocator.free(escaped_assistant);
     @memset(escaped_assistant, 1);
     try workbench.appendTrackedText(
-        &workbench.sessions[0].?.runs[0].?.assistant,
+        &workbench.tasks[0].?.runs[0].?.assistant,
         escaped_assistant,
         limits.max_assistant_message_bytes,
     );
-    const escaped_tool = try std.testing.allocator.alloc(u8, limits.max_tool_field_bytes);
+    _ = workbench.redactTrackedText(&workbench.tasks[0].?.runs[0].?.assistant);
+    const remaining_projection = limits.max_projection_bytes - workbench.projection_bytes;
+    const escaped_tool = try std.testing.allocator.alloc(
+        u8,
+        @min(limits.max_tool_field_bytes, remaining_projection),
+    );
     defer std.testing.allocator.free(escaped_tool);
     @memset(escaped_tool, 2);
     try workbench.replaceTracked(
-        &workbench.sessions[0].?.runs[0].?.tools[0].?.content,
+        &workbench.tasks[0].?.runs[0].?.tools[0].?.content,
         escaped_tool,
         limits.max_tool_field_bytes,
     );
@@ -1423,7 +2771,7 @@ test "pending UI re-encoding remains inside its concurrent snapshot allowance" {
     const payload = try std.testing.allocator.alloc(u8, payload_len);
     defer std.testing.allocator.free(payload);
     @memset(payload, 1);
-    const request = sdk.UiRequest{ .ask_question = &.{.{
+    const request = lifecycle.UiRequest{ .ask_question = &.{.{
         .question = payload,
         .header = "Large request",
         .multi = false,
@@ -1476,22 +2824,31 @@ test "Workbench projects tools and full-width usage without parsing protocol in 
 test "known Host credentials are removed from assistant, tool, and UI projections" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
-    try workbench.setKnownSecret("SECRET-KEY");
-
     const events = [_][]const u8{
         "{\"text_chunk\":\"prefix SECRET-\"}",
         "{\"text_chunk\":\"KEY suffix\"}",
-        "{\"tool_start\":{\"id\":\"tool-secret\",\"name\":\"Bash\",\"input\":\"SECRET-KEY\"}}",
-        "{\"tool_progress\":{\"id\":\"tool-secret\",\"text\":\"using SECRET-KEY\"}}",
-        "{\"tool_result\":{\"id\":\"tool-secret\",\"name\":\"Bash\",\"input\":\"SECRET-KEY\",\"content\":\"SECRET-KEY\",\"is_error\":false,\"elapsed_ms\":1}}",
+        "{\"tool_start\":{\"id\":\"tool-SECRET-KEY\",\"name\":\"Bash SECRET-KEY\",\"input\":\"SECRET-KEY\"}}",
+        "{\"tool_progress\":{\"id\":\"tool-SECRET-KEY\",\"text\":\"using SECRET-KEY\"}}",
+        "{\"tool_result\":{\"id\":\"tool-SECRET-KEY\",\"name\":\"Bash SECRET-KEY\",\"input\":\"SECRET-KEY\",\"content\":\"SECRET-KEY\",\"is_error\":false,\"elapsed_ms\":1}}",
     };
     for (events) |encoded| {
         var envelope = try testEnvelope(3, 7, encoded);
         defer envelope.deinit();
         try workbench.applyEvent(&envelope);
     }
+    const tool = &workbench.tasks[0].?.runs[0].?.tools[0].?;
+    for ([_][]const u8{
+        tool.id,
+        tool.name,
+        tool.input,
+        tool.progress,
+        tool.content,
+    }) |canonical_text|
+        try std.testing.expect(std.mem.indexOf(u8, canonical_text, "SECRET-KEY") == null);
+    try std.testing.expect(tool.redacted);
+    try std.testing.expectEqual(ToolState.completed, tool.state);
 
-    const request = sdk.UiRequest{ .permission = .{ .tool = "Bash", .args = "token=SECRET-KEY" } };
+    const request = lifecycle.UiRequest{ .permission = .{ .tool = "Bash", .args = "token=SECRET-KEY" } };
     var pending_storage: [4096]u8 = undefined;
     var pending_writer = std.Io.Writer.fixed(&pending_storage);
     try workbench.writePendingUiProjection(&pending_writer, 9, 7, 1, request);
@@ -1502,15 +2859,240 @@ test "known Host credentials are removed from assistant, tool, and UI projection
     try std.testing.expect(std.mem.indexOf(u8, pending_writer.buffered(), "SECRET-KEY") == null);
     try std.testing.expect(std.mem.indexOf(u8, pending_writer.buffered(), "\"redacted\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "prefix *** suffix") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"id\":\"tool-1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"name\":\"Bash ***\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"assistantRedacted\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"redacted\":true") != null);
+}
+
+test "Workbench product tool identities remain unique after raw ID redaction" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    const events = [_][]const u8{
+        "{\"tool_start\":{\"id\":\"SECRET-KEY\",\"name\":\"Read\",\"input\":\"first\"}}",
+        "{\"tool_start\":{\"id\":\"***\",\"name\":\"Bash\",\"input\":\"second\"}}",
+        "{\"tool_progress\":{\"id\":\"SECRET-KEY\",\"text\":\"first progress\"}}",
+        "{\"tool_progress\":{\"id\":\"***\",\"text\":\"second progress\"}}",
+    };
+    for (events) |encoded| {
+        var envelope = try testEnvelope(3, 7, encoded);
+        defer envelope.deinit();
+        try workbench.applyEvent(&envelope);
+    }
+
+    const first = &workbench.tasks[0].?.runs[0].?.tools[0].?;
+    const second = &workbench.tasks[0].?.runs[0].?.tools[1].?;
+    try std.testing.expectEqualStrings("tool-1", first.id);
+    try std.testing.expectEqualStrings("tool-2", second.id);
+    try std.testing.expectEqualStrings("first progress", first.progress);
+    try std.testing.expectEqualStrings("second progress", second.progress);
+    try std.testing.expect(!std.mem.eql(u8, &first.route_digest, &second.route_digest));
+}
+
+test "assistant credential redaction finalizes ordinary chunks without rescanning history" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    const assistant = &workbench.tasks[0].?.runs[0].?.assistant;
+
+    for (0..4096) |_| {
+        try workbench.appendTrackedText(assistant, "x", workbench.limits.max_assistant_message_bytes);
+        try std.testing.expect(!workbench.redactTrackedText(assistant));
+        try std.testing.expectEqual(assistant.list.items.len, assistant.committed_len);
+    }
+    try std.testing.expectEqual(@as(usize, 4096), assistant.list.items.len);
+
+    try workbench.appendTrackedText(assistant, "SECRET-", workbench.limits.max_assistant_message_bytes);
+    try std.testing.expect(!workbench.redactTrackedText(assistant));
+    try std.testing.expectEqual(assistant.list.items.len - "SECRET-".len, assistant.committed_len);
+
+    var pending_snapshot_storage: [96 * 1024]u8 = undefined;
+    const pending_snapshot = try workbench.writeSnapshot(&pending_snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(u8, pending_snapshot, "SECRET-") == null);
+
+    try workbench.appendTrackedText(assistant, "KEY", workbench.limits.max_assistant_message_bytes);
+    try std.testing.expect(workbench.redactTrackedText(assistant));
+    try std.testing.expectEqual(assistant.list.items.len, assistant.committed_len);
+    try std.testing.expect(std.mem.endsWith(u8, assistant.list.items, "***"));
+
+    try workbench.appendTrackedText(assistant, " tail SECRET-", workbench.limits.max_assistant_message_bytes);
+    try std.testing.expect(!workbench.redactTrackedText(assistant));
+    const run = &workbench.tasks[0].?.runs[0].?;
+    try std.testing.expect(commitTerminal(
+        run,
+        .completed,
+        .completed,
+        null,
+        .reusable,
+        "",
+        false,
+    ));
+    workbench.markTerminalRunsBeforeEventDrain();
+    var terminal_pending_storage: [96 * 1024]u8 = undefined;
+    const terminal_pending = try workbench.writeSnapshot(&terminal_pending_storage);
+    try std.testing.expect(std.mem.indexOf(u8, terminal_pending, "tail SECRET-") == null);
+    const revision_before_finalization = workbench.revision;
+    workbench.finalizeMarkedTerminalRunsAfterEventDrain();
+    try std.testing.expectEqual(assistant.list.items.len, assistant.committed_len);
+    try std.testing.expectEqual(revision_before_finalization + 1, workbench.revision);
+
+    var terminal_snapshot_storage: [96 * 1024]u8 = undefined;
+    const terminal_snapshot = try workbench.writeSnapshot(&terminal_snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(u8, terminal_snapshot, "tail SECRET-") != null);
+
+    var late_event = try testEnvelope(3, 7, "{\"text_chunk\":\"late\"}");
+    defer late_event.deinit();
+    const revision_before_late_event = workbench.revision;
+    try std.testing.expectError(
+        error.EventAfterTerminalDrain,
+        workbench.applyEvent(&late_event),
+    );
+    try std.testing.expectEqual(revision_before_late_event + 1, workbench.revision);
+    try std.testing.expect(!continuationAvailable(workbench.tasks[0].?.continuation));
+}
+
+test "projection failure after Agent terminal becomes a product failure" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    const events = [_][]const u8{
+        "{\"tool_start\":{\"id\":\"first\",\"name\":\"Read\",\"input\":\"one\"}}",
+        "{\"tool_start\":{\"id\":\"second\",\"name\":\"Bash\",\"input\":\"two\"}}",
+    };
+    for (events) |encoded| {
+        var envelope = try testEnvelope(3, 7, encoded);
+        defer envelope.deinit();
+        try workbench.applyEvent(&envelope);
+    }
+
+    const run = &workbench.tasks[0].?.runs[0].?;
+    try std.testing.expect(commitTerminal(
+        run,
+        .completed,
+        .completed,
+        null,
+        .reusable,
+        "",
+        false,
+    ));
+    var overflow = try testEnvelope(
+        3,
+        7,
+        "{\"tool_start\":{\"id\":\"third\",\"name\":\"Edit\",\"input\":\"three\"}}",
+    );
+    defer overflow.deinit();
+    try std.testing.expectError(error.ToolCapacity, workbench.applyEvent(&overflow));
+    workbench.recordEventProjectionFailure(3, 7);
+    finalizeTestTerminalEvents(&workbench);
+
+    // Agent completion remains immutable; only Workbench product facts report
+    // that the canonical event stream could not be represented completely.
+    try std.testing.expectEqual(RunOutcome.completed, terminalPayload(run).?.outcome);
+    const product = productTerminalFacts(run).?;
+    try std.testing.expectEqual(RunOutcome.failed, product.outcome);
+    try std.testing.expectEqual(RunCause.event_pipeline_failure, product.cause.?);
+    try std.testing.expect(!continuationAvailable(workbench.tasks[0].?.continuation));
+
+    var snapshot_storage: [96 * 1024]u8 = undefined;
+    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"phase\":\"failed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"lastRunOutcome\":\"failed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"cause\":\"event_pipeline_failure\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"continuationAvailable\":false") != null);
+}
+
+test "event drain barrier atomically publishes terminal product state" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    const run = &workbench.tasks[0].?.runs[0].?;
+
+    try workbench.appendTrackedText(
+        &run.assistant,
+        "final assistant suffix",
+        workbench.limits.max_assistant_message_bytes,
+    );
+    try std.testing.expect(commitTerminal(
+        run,
+        .failed,
+        .failed,
+        .timeout,
+        .poisoned,
+        "",
+        false,
+    ));
+
+    try std.testing.expectError(error.TaskBusy, workbench.setTaskArchived(3, true));
+    var pending_storage: [96 * 1024]u8 = undefined;
+    const pending = try workbench.writeSnapshot(&pending_storage);
+    try std.testing.expect(std.mem.indexOf(u8, pending, "\"phase\":\"running\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pending, "\"lastRunOutcome\":null") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pending, "\"outcome\":null") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pending, "\"cause\":null") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pending, "\"continuationAvailable\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pending, "final assistant suffix") == null);
+
+    const revision_before_finalization = workbench.revision;
+    finalizeTestTerminalEvents(&workbench);
+    try std.testing.expect(workbench.revision > revision_before_finalization);
+
+    var terminal_storage: [96 * 1024]u8 = undefined;
+    const terminal = try workbench.writeSnapshot(&terminal_storage);
+    try std.testing.expect(std.mem.indexOf(u8, terminal, "\"phase\":\"failed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, terminal, "\"lastRunOutcome\":\"failed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, terminal, "\"outcome\":\"failed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, terminal, "\"cause\":\"timeout\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, terminal, "\"continuationAvailable\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, terminal, "final assistant suffix") != null);
+}
+
+test "close and delete wait for terminal event drain" {
+    const Harness = struct {
+        fn complete() void {}
+    };
+
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    const task = &workbench.tasks[0].?;
+    const run = &task.runs[0].?;
+    task.session = null;
+    task.lifecycle = .closing;
+    task.continuation = .{ .unavailable = .closing };
+    task.close_thread = try std.Thread.spawn(.{}, Harness.complete, .{});
+    task.close_completion.store(.closed, .release);
+    try std.testing.expect(commitTerminal(
+        run,
+        .interrupted,
+        .interrupted,
+        .session_close,
+        .closing,
+        "",
+        false,
+    ));
+
+    workbench.syncLifecycle();
+    try std.testing.expectEqual(TaskLifecycle.closing, task.lifecycle);
+    try std.testing.expect(task.close_thread != null);
+    try std.testing.expectError(error.TaskNotClosed, workbench.deleteTask(3));
+
+    var queued_event = try testEnvelope(3, 7, "{\"text_chunk\":\"queued before terminal\"}");
+    defer queued_event.deinit();
+    try workbench.applyEvent(&queued_event);
+
+    finalizeTestTerminalEvents(&workbench);
+    try std.testing.expectEqual(TaskLifecycle.closed, task.lifecycle);
+    try std.testing.expect(task.close_thread == null);
+
+    var late_event = try testEnvelope(3, 7, "{\"text_chunk\":\"late\"}");
+    defer late_event.deinit();
+    try std.testing.expectError(
+        error.EventAfterTerminalDrain,
+        workbench.applyEvent(&late_event),
+    );
+    try workbench.deleteTask(3);
+    try std.testing.expect(workbench.tasks[0] == null);
 }
 
 test "streaming projection escaping is allocation-free JSON with redaction" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
-    try workbench.setKnownSecret("SECRET-KEY");
-
     var storage: [256]u8 = undefined;
     var writer = std.Io.Writer.fixed(&storage);
     try workbench.projectedJsonValue(&writer, "quote\" slash\\ control\x01 line\n 界 SECRET-KEY");
@@ -1533,7 +3115,7 @@ test "tool projection truncates on UTF-8 boundaries and records bounded UI histo
     try std.testing.expect(projected.truncated);
     try std.testing.expect(std.unicode.utf8ValidateSlice(projected.value));
 
-    const view = &workbench.sessions[0].?;
+    const view = &workbench.tasks[0].?;
     for (1..11) |request_id| {
         var record = UiRecord{
             .request_id = request_id,
@@ -1545,7 +3127,7 @@ test "tool projection truncates on UTF-8 boundaries and records bounded UI histo
         record.detail_len = detail.len;
         workbench.pushUiRecord(view, record);
     }
-    try std.testing.expectEqual(workbench.limits.max_ui_history_per_session, view.ui_history_count);
+    try std.testing.expectEqual(workbench.limits.max_ui_history_per_task, view.ui_history_count);
     var storage: [96 * 1024]u8 = undefined;
     const snapshot = try workbench.writeSnapshot(&storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"requestId\":\"1\"") == null);
@@ -1559,7 +3141,7 @@ test "Workbench rejects cross-session routes and usage overflow" {
 
     var foreign_session = try testEnvelope(4, 7, "{\"text_chunk\":\"wrong\"}");
     defer foreign_session.deinit();
-    try std.testing.expectError(error.UnknownSession, workbench.applyEvent(&foreign_session));
+    try std.testing.expectError(error.UnknownTask, workbench.applyEvent(&foreign_session));
 
     var foreign_run = try testEnvelope(3, 8, "{\"text_chunk\":\"wrong\"}");
     defer foreign_run.deinit();
@@ -1573,27 +3155,10 @@ test "Workbench rejects cross-session routes and usage overflow" {
     try std.testing.expectError(error.ProjectionCapacity, workbench.applyEvent(&overflow));
 }
 
-test "lifecycle outcomes map to truthful terminal product phases" {
-    const base = lifecycle.SessionSnapshot{
-        .session_id = 1,
-        .state = .idle,
-        .workspace_root = "/tmp",
-        .active_run_id = 1,
-        .pending_ui_request_id = null,
-        .cause = null,
-        .last_status = null,
-        .last_abort_status = null,
-        .last_stop_reason_code = null,
-        .last_outcome = .completed,
-    };
-    try std.testing.expectEqual(RunPhase.completed, phaseFor(base));
-    var value = base;
-    value.last_outcome = .stopped;
-    try std.testing.expectEqual(RunPhase.stopped, phaseFor(value));
-    value.last_outcome = .cancelled;
-    try std.testing.expectEqual(RunPhase.cancelled, phaseFor(value));
-    value.last_outcome = .interrupted;
-    try std.testing.expectEqual(RunPhase.interrupted, phaseFor(value));
-    value.last_outcome = .dependency_contract_failure;
-    try std.testing.expectEqual(RunPhase.failed, phaseFor(value));
+test "Workbench outcomes map to truthful terminal product phases" {
+    try std.testing.expectEqual(RunPhase.completed, phaseForOutcome(.completed));
+    try std.testing.expectEqual(RunPhase.stopped, phaseForOutcome(.stopped));
+    try std.testing.expectEqual(RunPhase.cancelled, phaseForOutcome(.cancelled));
+    try std.testing.expectEqual(RunPhase.interrupted, phaseForOutcome(.interrupted));
+    try std.testing.expectEqual(RunPhase.failed, phaseForOutcome(.dependency_contract_failure));
 }

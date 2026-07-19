@@ -1,20 +1,18 @@
 import type {
   RunView,
-  SessionView,
+  TaskView,
   WorkbenchSnapshot,
-} from "../host/contracts.ts";
+} from "../bridge/contracts.ts";
 import type { WorkbenchState } from "./store.ts";
 
-export function selectActiveSession(state: WorkbenchState): SessionView | null {
+export function selectActiveTask(state: WorkbenchState): TaskView | null {
   return (
-    state.snapshot.sessions.find(
-      (session) => session.id === state.activeSessionId,
-    ) ?? null
+    state.snapshot.tasks.find((task) => task.id === state.activeTaskId) ?? null
   );
 }
 
-export function isRunInFlight(session: SessionView | null): boolean {
-  return session?.currentRunPhase != null;
+export function isRunInFlight(task: TaskView | null): boolean {
+  return task?.currentRunPhase != null;
 }
 
 export type WorkspaceSummary = {
@@ -35,38 +33,38 @@ export type TaskSignals = {
 export type TaskDisplayState =
   | {
       kind: "phase";
-      value: NonNullable<SessionView["currentRunPhase"]>;
+      value: NonNullable<TaskView["currentRunPhase"]>;
     }
-  | { kind: "lifecycle"; value: Exclude<SessionView["lifecycle"], "open"> }
+  | { kind: "lifecycle"; value: Exclude<TaskView["lifecycle"], "open"> }
   | { kind: "archived" }
-  | { kind: "outcome"; value: NonNullable<SessionView["lastRunOutcome"]> }
+  | { kind: "outcome"; value: NonNullable<TaskView["lastRunOutcome"]> }
   | { kind: "ready" };
 
-export function taskDisplayState(session: SessionView): TaskDisplayState {
-  if (session.currentRunPhase)
-    return { kind: "phase", value: session.currentRunPhase };
-  if (session.lifecycle !== "open")
-    return { kind: "lifecycle", value: session.lifecycle };
-  if (session.archived) return { kind: "archived" };
-  if (session.lastRunOutcome)
-    return { kind: "outcome", value: session.lastRunOutcome };
+export function taskDisplayState(task: TaskView): TaskDisplayState {
+  if (task.currentRunPhase)
+    return { kind: "phase", value: task.currentRunPhase };
+  if (task.lifecycle !== "open")
+    return { kind: "lifecycle", value: task.lifecycle };
+  if (task.archived) return { kind: "archived" };
+  if (task.lastRunOutcome)
+    return { kind: "outcome", value: task.lastRunOutcome };
   return { kind: "ready" };
 }
 
-export function taskSignals(session: SessionView): TaskSignals {
+export function taskSignals(task: TaskView): TaskSignals {
   return {
     running:
-      session.currentRunPhase === "queued" ||
-      session.currentRunPhase === "running" ||
-      session.currentRunPhase === "stopping",
-    attention: session.currentRunPhase === "waiting_ui",
+      task.currentRunPhase === "queued" ||
+      task.currentRunPhase === "running" ||
+      task.currentRunPhase === "stopping",
+    attention: task.currentRunPhase === "waiting_ui",
     failed:
-      session.lastRunOutcome === "failed" ||
-      session.lastRunOutcome === "dependency_contract_failure" ||
-      session.lastRunOutcome === "interrupted" ||
-      (session.cause !== null &&
-        session.cause !== "user_cancel" &&
-        session.cause !== "session_close"),
+      task.lastRunOutcome === "failed" ||
+      task.lastRunOutcome === "dependency_contract_failure" ||
+      task.lastRunOutcome === "interrupted" ||
+      (task.cause !== null &&
+        task.cause !== "user_cancel" &&
+        task.cause !== "session_close"),
   };
 }
 
@@ -79,21 +77,21 @@ export function workspaceSummaries(
   snapshot: WorkbenchSnapshot,
 ): WorkspaceSummary[] {
   const summaries = new Map<string, WorkspaceSummary>();
-  for (const session of snapshot.sessions) {
-    let summary = summaries.get(session.workspaceRoot);
+  for (const task of snapshot.tasks) {
+    let summary = summaries.get(task.workspaceRoot);
     if (!summary) {
       summary = {
-        root: session.workspaceRoot,
-        label: workspaceLabel(session.workspaceRoot),
+        root: task.workspaceRoot,
+        label: workspaceLabel(task.workspaceRoot),
         taskCount: 0,
         running: 0,
         attention: 0,
         failed: 0,
       };
-      summaries.set(session.workspaceRoot, summary);
+      summaries.set(task.workspaceRoot, summary);
     }
-    if (session.archived) continue;
-    const signals = taskSignals(session);
+    if (task.archived) continue;
+    const signals = taskSignals(task);
     summary.taskCount += 1;
     if (signals.running) summary.running += 1;
     if (signals.attention) summary.attention += 1;
@@ -105,8 +103,8 @@ export function workspaceSummaries(
 export function selectCurrentWorkspace(state: WorkbenchState): string | null {
   return (
     state.activeWorkspaceRoot ??
-    selectActiveSession(state)?.workspaceRoot ??
-    state.snapshot.sessions[0]?.workspaceRoot ??
+    selectActiveTask(state)?.workspaceRoot ??
+    state.snapshot.tasks[0]?.workspaceRoot ??
     null
   );
 }
@@ -116,10 +114,10 @@ export type TaskActivity = {
   tokenTotal: bigint;
 };
 
-export function taskActivity(session: SessionView | null): TaskActivity {
-  if (!session) return { currentRun: null, tokenTotal: 0n };
+export function taskActivity(task: TaskView | null): TaskActivity {
+  if (!task) return { currentRun: null, tokenTotal: 0n };
   let tokenTotal = 0n;
-  for (const run of session.runs) {
+  for (const run of task.runs) {
     try {
       tokenTotal += BigInt(run.usage.input) + BigInt(run.usage.output);
     } catch {
@@ -128,8 +126,7 @@ export function taskActivity(session: SessionView | null): TaskActivity {
     }
   }
   return {
-    currentRun:
-      session.runs.find((run) => run.id === session.currentRunId) ?? null,
+    currentRun: task.runs.find((run) => run.id === task.currentRunId) ?? null,
     tokenTotal,
   };
 }
@@ -137,7 +134,7 @@ export function taskActivity(session: SessionView | null): TaskActivity {
 export type SearchResult = {
   key: string;
   kind: "workspace" | "task" | "instruction" | "completion";
-  sessionId: string | null;
+  taskId: string | null;
   workspaceRoot: string;
   title: string;
   detail: string;
@@ -152,39 +149,39 @@ export function searchWorkbench(
   const results: SearchResult[] = [];
   const seenWorkspaces = new Set<string>();
   const matches = (value: string) => value.toLocaleLowerCase().includes(needle);
-  for (const session of snapshot.sessions) {
+  for (const task of snapshot.tasks) {
     if (
-      !seenWorkspaces.has(session.workspaceRoot) &&
-      (matches(session.workspaceRoot) ||
-        matches(workspaceLabel(session.workspaceRoot)))
+      !seenWorkspaces.has(task.workspaceRoot) &&
+      (matches(task.workspaceRoot) ||
+        matches(workspaceLabel(task.workspaceRoot)))
     ) {
-      seenWorkspaces.add(session.workspaceRoot);
+      seenWorkspaces.add(task.workspaceRoot);
       results.push({
-        key: `workspace:${session.workspaceRoot}`,
+        key: `workspace:${task.workspaceRoot}`,
         kind: "workspace",
-        sessionId: null,
-        workspaceRoot: session.workspaceRoot,
-        title: workspaceLabel(session.workspaceRoot),
-        detail: session.workspaceRoot,
+        taskId: null,
+        workspaceRoot: task.workspaceRoot,
+        title: workspaceLabel(task.workspaceRoot),
+        detail: task.workspaceRoot,
       });
     }
-    const title = session.title;
+    const title = task.title;
     if (title && matches(title))
       results.push({
-        key: `task:${session.id}`,
+        key: `task:${task.id}`,
         kind: "task",
-        sessionId: session.id,
-        workspaceRoot: session.workspaceRoot,
+        taskId: task.id,
+        workspaceRoot: task.workspaceRoot,
         title,
-        detail: session.workspaceRoot,
+        detail: task.workspaceRoot,
       });
-    for (const run of session.runs) {
+    for (const run of task.runs) {
       if (matches(run.user))
         results.push({
-          key: `instruction:${session.id}:${run.id}`,
+          key: `instruction:${task.id}:${run.id}`,
           kind: "instruction",
-          sessionId: session.id,
-          workspaceRoot: session.workspaceRoot,
+          taskId: task.id,
+          workspaceRoot: task.workspaceRoot,
           title,
           detail: run.user,
         });
@@ -194,10 +191,10 @@ export function searchWorkbench(
         matches(run.assistant)
       )
         results.push({
-          key: `completion:${session.id}:${run.id}`,
+          key: `completion:${task.id}:${run.id}`,
           kind: "completion",
-          sessionId: session.id,
-          workspaceRoot: session.workspaceRoot,
+          taskId: task.id,
+          workspaceRoot: task.workspaceRoot,
           title,
           detail: run.assistant,
         });

@@ -37,7 +37,8 @@
 - `CoreEvent` 中需要异步保留的 borrowed slice 必须在 callback 返回前深拷贝。
 - AgentCore/tool 线程不得直接调用 WebView；所有事件必须经过有界、线程安全的 Host 事件泵。
 - `text_chunk` 可以合并，但在没有完整消息快照前不得丢失字节；控制事件不得静默丢弃。
-- callback 内 event copy 或入队失败时返回 callback fatal。callback 返回后的不可恢复 Bridge pipeline failure 必须设置 per-Run `HostCause` 并中止 in-flight Run；不得只改 Host 状态后让 Core 继续运行。
+- callback 内 event validation/copy/入队失败，或 canonical consumer 无法被通知时，返回 callback fatal；已经 owned 的 event 不得因 notification failure 被泄漏或静默丢弃。Renderer/Bridge delivery、revision、snapshot、reload 或 retention failure 必须以 typed transport fact 交给 Workbench policy，Bridge 不得直接设置 Run cause 或 abort Agent Run。
+- 跨越同步 Bridge handler 返回的 payload 必须是 Bridge-owned copy 或显式 ownership transfer；shutdown 先 stop ingress 和 quiesce callbacks，再断开 Workbench，owned delivery buffers 最后独立释放。
 - ABI function status 必须先于 `RunResult` 处理；status 非 OK 时禁止读取 `RunResult`，并精确释放 diagnostic buffer。
 - `StopReason` 必须先由 metacodes bundle SDK 校验 raw wire code，再对 SDK 类型做无 `else` 的穷尽 switch，并在 Host envelope 中保留原始 code/reason。unknown code fail closed，不伪造恢复或预算状态。
 - stable ABI v1 的 observation decoder 必须显式处理 `known` / `unknown`；当前 Host 在 SDK 完成结构、ownership 和 byte-bound 校验后立即忽略 valid unknown observation，不让其占用产品事件泵，也不得传给 Renderer 或猜测为产品状态。`resource_limit` 和 admission 后 Session poisoning 必须按 SDK contract 处理。
@@ -46,6 +47,7 @@
 - 当前 UI request 是同步 callback。等待用户期间占用 Run executor slot，但不得阻塞 WebView 主线程；deadline、cancel、Session close 和 Host shutdown 都必须唤醒等待。
 - 每个 Session 至多一个 in-flight Run；同步 `run()` 通过有上限的 executor 调度，不为任意数量 Session 无上限创建线程。
 - Session close 必须遵循：拒绝新任务、取消 queued Run、唤醒 UI wait、设置 first-writer-wins `HostCause`、abort、join、等待 callback quiescence、destroy。Runtime 只能在全部 Session 销毁后销毁。
+- Workbench 独占 Executor、queue 与 workers 的创建、admission、shutdown 和释放；Agent Runtime 不接收 Scheduler capability，也不得反向 enqueue 或销毁 Workbench 执行资源。
 - `Conversation` 和跨 Run 状态属于 Session 生命周期；不得让它们引用已释放的 run-scoped arena。
 - Renderer 不是安全边界。Host 必须执行命令白名单、来源、payload、会话归属、工作区和权限校验。
 - 不以 PTY、xterm 或终端字符流作为默认 Agent 通信协议。普通 Bash 工具使用非交互 shell 子进程和 stdout/stderr capture。

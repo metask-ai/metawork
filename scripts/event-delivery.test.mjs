@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { EventDelivery } from "../frontend/src/host/fixtures/event-delivery.ts";
+import { EventDelivery } from "../frontend/src/bridge/fixtures/event-delivery.ts";
 
 test("a failed batch reconnects with a new generation and invalidates old batches", async () => {
   const generations = ["1", "2"];

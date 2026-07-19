@@ -17,14 +17,14 @@ import {
   decodeHostSignalEvent,
   decodePingResponse,
   decodeRevisionNotification,
-  decodeSessionId,
+  decodeTaskId,
   decodeWorkspaceChoice,
 } from "./decode-contracts.ts";
 import { fetchWorkbenchSnapshot } from "./snapshot/snapshot-client.ts";
 
 export type NativeBridge = NonNullable<typeof window.zero>;
 
-export class HostClient {
+export class BridgeClient {
   private bridge() {
     const bridge = window.zero;
     if (!bridge) throw new Error("Native Host bridge is unavailable");
@@ -103,76 +103,76 @@ export class HostClient {
     );
   }
 
-  async createSession(workspaceGrant: string) {
-    return decodeSessionId(
-      await this.bridge().invoke(commands.createSession, { workspaceGrant }),
+  async createTask(workspaceGrant: string) {
+    return decodeTaskId(
+      await this.bridge().invoke(commands.createTask, { workspaceGrant }),
     );
   }
 
-  async run(sessionId: string, prompt: string) {
+  async run(taskId: string, prompt: string) {
     return assertRunAccepted(
-      await this.bridge().invoke(commands.run, { sessionId, prompt }),
-      sessionId,
+      await this.bridge().invoke(commands.run, { taskId, prompt }),
+      taskId,
     );
   }
 
-  async cancel(sessionId: string, runId: string) {
+  async cancel(taskId: string, runId: string) {
     assertCancelAccepted(
-      await this.bridge().invoke(commands.cancel, { sessionId, runId }),
-      sessionId,
+      await this.bridge().invoke(commands.cancel, { taskId, runId }),
+      taskId,
       runId,
     );
   }
 
   async respondUi(
-    sessionId: string,
+    taskId: string,
     runId: string,
     requestId: string,
     response: UiResponsePayload,
   ) {
     assertUiResponseAccepted(
       await this.bridge().invoke(commands.respondUi, {
-        sessionId,
+        taskId,
         runId,
         requestId,
         ...response,
       }),
-      sessionId,
+      taskId,
       runId,
       requestId,
     );
   }
 
-  async closeSession(sessionId: string) {
+  async closeTask(taskId: string) {
     assertCloseAccepted(
-      await this.bridge().invoke(commands.closeSession, { sessionId }),
-      sessionId,
+      await this.bridge().invoke(commands.closeTask, { taskId }),
+      taskId,
     );
   }
 
-  async renameTask(sessionId: string, title: string) {
+  async renameTask(taskId: string, title: string) {
     assertTaskFlag(
-      await this.bridge().invoke(commands.renameTask, { sessionId, title }),
-      sessionId,
+      await this.bridge().invoke(commands.renameTask, { taskId, title }),
+      taskId,
       "renamed",
     );
   }
 
-  async setTaskArchived(sessionId: string, archived: boolean) {
+  async setTaskArchived(taskId: string, archived: boolean) {
     assertTaskArchived(
       await this.bridge().invoke(commands.archiveTask, {
-        sessionId,
+        taskId,
         archived,
       }),
-      sessionId,
+      taskId,
       archived,
     );
   }
 
-  async deleteTask(sessionId: string) {
+  async deleteTask(taskId: string) {
     assertTaskFlag(
-      await this.bridge().invoke(commands.deleteTask, { sessionId }),
-      sessionId,
+      await this.bridge().invoke(commands.deleteTask, { taskId }),
+      taskId,
       "deleted",
     );
   }

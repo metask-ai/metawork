@@ -1,52 +1,52 @@
 export type TaskSubmissionClient = {
-  createSession: (workspaceGrant: string) => Promise<string>;
-  run: (sessionId: string, instruction: string) => Promise<unknown>;
+  createTask: (workspaceGrant: string) => Promise<string>;
+  run: (taskId: string, instruction: string) => Promise<unknown>;
 };
 
 export type TaskSubmissionResult =
-  | { kind: "started"; sessionId: string; created: boolean }
+  | { kind: "started"; taskId: string; created: boolean }
   | { kind: "create_failed"; error: unknown }
-  | { kind: "run_failed"; sessionId: string; created: boolean; error: unknown };
+  | { kind: "run_failed"; taskId: string; created: boolean; error: unknown };
 
 export async function submitTaskInstruction({
   client,
-  sessionId,
+  taskId,
   workspaceGrant,
   instruction,
-  onSessionCreated,
+  onTaskCreated,
 }: {
   client: TaskSubmissionClient;
-  sessionId: string | null;
+  taskId: string | null;
   workspaceGrant: string;
   instruction: string;
-  onSessionCreated: (sessionId: string) => void;
+  onTaskCreated: (taskId: string) => void;
 }): Promise<TaskSubmissionResult> {
-  let targetSessionId = sessionId;
+  let targetTaskId = taskId;
   let created = false;
-  if (!targetSessionId) {
+  if (!targetTaskId) {
     if (!workspaceGrant)
       return {
         kind: "create_failed",
         error: new Error("Workspace access is required"),
       };
     try {
-      targetSessionId = await client.createSession(workspaceGrant);
+      targetTaskId = await client.createTask(workspaceGrant);
     } catch (error) {
       return { kind: "create_failed", error };
     }
     created = true;
-    onSessionCreated(targetSessionId);
+    onTaskCreated(targetTaskId);
   }
 
   try {
-    await client.run(targetSessionId, instruction);
+    await client.run(targetTaskId, instruction);
   } catch (error) {
     return {
       kind: "run_failed",
-      sessionId: targetSessionId,
+      taskId: targetTaskId,
       created,
       error,
     };
   }
-  return { kind: "started", sessionId: targetSessionId, created };
+  return { kind: "started", taskId: targetTaskId, created };
 }

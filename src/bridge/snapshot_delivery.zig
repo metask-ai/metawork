@@ -1,7 +1,9 @@
 //! Snapshot identity and bounded chunk transport state.
 //! Workbench remains the only owner of snapshot serialization.
 
-const native_sdk = @import("native_sdk");
+const std = @import("std");
+
+pub const WindowId = u64;
 
 pub const max_bytes: usize = 8 * 1024 * 1024;
 pub const chunk_bytes: usize = 256 * 1024;
@@ -10,14 +12,27 @@ pub const Error = error{ StaleSnapshot, InvalidOffset, InvalidStorage };
 
 pub const State = struct {
     storage: []u8 = @constCast(&.{}),
+    allocator: ?std.mem.Allocator = null,
     len: usize = 0,
     id: u64 = 0,
     generation: u64 = 0,
-    window_id: native_sdk.platform.WindowId = 0,
+    window_id: WindowId = 0,
 
     pub fn init(storage: []u8) Error!State {
         if (storage.len != max_bytes) return error.InvalidStorage;
         return .{ .storage = storage };
+    }
+
+    pub fn initOwned(allocator: std.mem.Allocator) std.mem.Allocator.Error!State {
+        return .{
+            .storage = try allocator.alloc(u8, max_bytes),
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinitOwnedBuffers(self: *State) void {
+        if (self.allocator) |allocator| allocator.free(self.storage);
+        self.* = .{};
     }
 
     pub fn invalidate(self: *State) void {
@@ -30,7 +45,7 @@ pub const State = struct {
         self: *State,
         len: usize,
         generation: u64,
-        window_id: native_sdk.platform.WindowId,
+        window_id: WindowId,
     ) Error!void {
         if (len == 0 or len > self.storage.len) return error.InvalidStorage;
         self.id +%= 1;
@@ -44,7 +59,7 @@ pub const State = struct {
         self: *const State,
         snapshot_id: u64,
         generation: u64,
-        window_id: native_sdk.platform.WindowId,
+        window_id: WindowId,
         offset: usize,
     ) Error![]const u8 {
         if (snapshot_id != self.id or generation != self.generation or window_id != self.window_id)
@@ -62,4 +77,11 @@ test "snapshot transport binds chunks to identity generation and window" {
     try @import("std").testing.expectError(error.StaleSnapshot, state.chunk(1, 5, 7, 0));
     state.invalidate();
     try @import("std").testing.expectEqual(@as(usize, 0), state.len);
+}
+
+test "owned snapshot storage has one explicit lifetime" {
+    var state = try State.initOwned(std.testing.allocator);
+    try std.testing.expectEqual(max_bytes, state.storage.len);
+    state.deinitOwnedBuffers();
+    try std.testing.expectEqual(@as(usize, 0), state.storage.len);
 }

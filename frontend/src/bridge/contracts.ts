@@ -1,4 +1,4 @@
-export const WORKBENCH_SCHEMA_VERSION = 4 as const;
+export const WORKBENCH_SCHEMA_VERSION = 5 as const;
 
 export type ToolView = {
   id: string;
@@ -51,10 +51,9 @@ export type RunView = {
     | "user_cancel"
     | "timeout"
     | "session_close"
-    | "host_shutdown"
+    | "app_shutdown"
     | "event_pipeline_failure"
     | "queue_capacity_failure"
-    | "bridge_pipeline_failure"
     | "ui_pipeline_failure"
     | "dependency_contract_failure"
     | null;
@@ -117,7 +116,7 @@ export type UiRecord = {
   redacted: boolean;
 };
 
-export type SessionView = {
+export type TaskView = {
   id: string;
   title: string;
   workspaceRoot: string;
@@ -137,13 +136,11 @@ export type SessionView = {
 export type WorkbenchSnapshot = {
   schemaVersion: typeof WORKBENCH_SCHEMA_VERSION;
   revision: string;
-  sessions: SessionView[];
+  tasks: TaskView[];
 };
 
 export type HostSignal = {
   sequence: number;
-  automation: boolean;
-  gate5Fixture: boolean;
 };
 
 export type WorkspaceChoice =

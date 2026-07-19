@@ -17,97 +17,204 @@ pub fn build(b: *std.Build) void {
     const root = b.option([]const u8, "agentcore-bundle-root", "Validated source-free AgentCore bundle root") orelse
         b.pathFromRoot(".agentcore/bundle");
     const bundle = agentcore_bundle.verify(b, root);
-    const workbench = wireAgentCore(b, artifacts.exe.root_module, bundle);
-    const test_workbench = if (artifacts.tests.root_module != artifacts.exe.root_module)
+    const modules = wireAgentCore(b, artifacts.exe.root_module, bundle);
+    const test_modules = if (artifacts.tests.root_module != artifacts.exe.root_module)
         wireAgentCore(b, artifacts.tests.root_module, bundle)
     else
-        workbench;
-    test_workbench.link_libc = true;
-    const workbench_tests = b.addTest(.{ .name = "metawork-workbench", .root_module = test_workbench });
-    artifacts.tests.step.dependOn(&b.addRunArtifact(workbench_tests).step);
+        modules;
+    const lifecycle_fixture = createLifecycleFixture(b, test_modules, bundle.link_libc);
+    test_modules.app.addImport("lifecycle_fixture", lifecycle_fixture);
+    test_modules.bridge.addImport("lifecycle_fixture", lifecycle_fixture);
+    const module_tests = [_]struct {
+        name: []const u8,
+        root_module: *std.Build.Module,
+    }{
+        .{ .name = "metawork-app", .root_module = test_modules.app },
+        .{ .name = "metawork-bridge", .root_module = test_modules.bridge },
+        .{ .name = "metawork-workbench", .root_module = test_modules.workbench_projection },
+        .{ .name = "metawork-workbench-executor", .root_module = test_modules.workbench_executor },
+    };
+    for (module_tests) |spec| {
+        spec.root_module.link_libc = bundle.link_libc;
+        const tests = b.addTest(.{ .name = spec.name, .root_module = spec.root_module });
+        artifacts.tests.step.dependOn(&b.addRunArtifact(tests).step);
+    }
 }
 
-fn wireAgentCore(b: *std.Build, app: *std.Build.Module, bundle: agentcore_bundle.Bundle) *std.Build.Module {
-    var query = (app.resolved_target orelse @panic("Native SDK app target is unresolved")).query;
+const WiredModules = struct {
+    app: *std.Build.Module,
+    agent: *std.Build.Module,
+    bridge: *std.Build.Module,
+    event_pump: *std.Build.Module,
+    automation_delivery: *std.Build.Module,
+    sdk: *std.Build.Module,
+    workbench: *std.Build.Module,
+    workbench_projection: *std.Build.Module,
+    workbench_executor: *std.Build.Module,
+};
+
+fn createLifecycleFixture(
+    b: *std.Build,
+    modules: WiredModules,
+    link_libc: bool,
+) *std.Build.Module {
+    const fixture = b.createModule(.{
+        .root_source_file = b.path("tests/support/lifecycle_fixture.zig"),
+        .target = modules.app.resolved_target,
+        .optimize = modules.app.optimize,
+        .link_libc = link_libc,
+    });
+    fixture.addImport("metawork_agent", modules.agent);
+    fixture.addImport("metawork_workbench", modules.workbench);
+    fixture.addImport("event_pump", modules.event_pump);
+    fixture.addImport("automation_delivery", modules.automation_delivery);
+    fixture.addImport("metacodes_agentcore", modules.sdk);
+    fixture.addImport("workbench_executor", modules.workbench_executor);
+    return fixture;
+}
+
+fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcore_bundle.Bundle) WiredModules {
+    var query = (root_module.resolved_target orelse @panic("Native SDK app target is unresolved")).query;
     query.os_version_min = .{ .semver = bundle.deployment_target };
     const target = b.resolveTargetQuery(query);
-    app.resolved_target = target;
+    root_module.resolved_target = target;
 
     const types = b.createModule(.{
         .root_source_file = .{ .cwd_relative = bundle.types_path },
         .target = target,
-        .optimize = app.optimize,
+        .optimize = root_module.optimize,
     });
     const protocol = b.createModule(.{
         .root_source_file = .{ .cwd_relative = bundle.protocol_path },
         .target = target,
-        .optimize = app.optimize,
+        .optimize = root_module.optimize,
     });
     const sdk = b.createModule(.{
         .root_source_file = .{ .cwd_relative = bundle.sdk_path },
         .target = target,
-        .optimize = app.optimize,
+        .optimize = root_module.optimize,
     });
     sdk.addImport("metacodes_agentcore_types", types);
     sdk.addImport("metacodes_agentcore_protocol", protocol);
     const event_sink = b.createModule(.{
-        .root_source_file = b.path("src/agentcore/event_sink.zig"),
+        .root_source_file = b.path("src/agent/event_sink.zig"),
         .target = target,
-        .optimize = app.optimize,
+        .optimize = root_module.optimize,
     });
     event_sink.addImport("metacodes_agentcore", sdk);
     const event_pump = b.createModule(.{
-        .root_source_file = b.path("src/agentcore/event_pump.zig"),
+        .root_source_file = b.path("src/agent/event_pump.zig"),
         .target = target,
-        .optimize = app.optimize,
+        .optimize = root_module.optimize,
     });
     event_pump.addImport("metacodes_agentcore", sdk);
     event_pump.addImport("event_sink", event_sink);
     const session = b.createModule(.{
-        .root_source_file = b.path("src/agentcore/session.zig"),
+        .root_source_file = b.path("src/agent/session.zig"),
         .target = target,
-        .optimize = app.optimize,
+        .optimize = root_module.optimize,
     });
     session.addImport("metacodes_agentcore", sdk);
     session.addImport("event_pump", event_pump);
-    const agentcore = b.createModule(.{
-        .root_source_file = b.path("src/agentcore.zig"),
+    const agent = b.createModule(.{
+        .root_source_file = b.path("src/agent.zig"),
         .target = target,
-        .optimize = app.optimize,
+        .optimize = root_module.optimize,
     });
-    agentcore.addImport("agentcore_session", session);
+    agent.addImport("agent_session", session);
     const executor = b.createModule(.{
         .root_source_file = b.path("src/workbench/executor.zig"),
         .target = target,
-        .optimize = app.optimize,
+        .optimize = root_module.optimize,
     });
-    executor.addImport("metawork_agentcore", agentcore);
     const projection = b.createModule(.{
         .root_source_file = b.path("src/workbench/projection.zig"),
         .target = target,
-        .optimize = app.optimize,
+        .optimize = root_module.optimize,
     });
-    projection.addImport("metacodes_agentcore", sdk);
-    projection.addImport("metawork_agentcore", agentcore);
+    projection.addImport("metawork_agent", agent);
+    projection.addImport("workbench_executor", executor);
     const workbench_contract_fixture = b.addOptions();
     workbench_contract_fixture.addOption(
         []const u8,
         "snapshot",
-        @embedFile("frontend/src/host/__fixtures__/workbench-snapshot-v4.fixture"),
+        @embedFile("frontend/src/bridge/__fixtures__/workbench-snapshot-v5.fixture"),
     );
     projection.addOptions("workbench_contract_fixture", workbench_contract_fixture);
     const workbench = b.createModule(.{
         .root_source_file = b.path("src/workbench.zig"),
         .target = target,
-        .optimize = app.optimize,
+        .optimize = root_module.optimize,
     });
     workbench.addImport("workbench_projection", projection);
-    workbench.addImport("workbench_executor", executor);
 
-    app.addImport("metacodes_agentcore", sdk);
-    app.addImport("metawork_agentcore", agentcore);
+    const bridge = b.createModule(.{
+        .root_source_file = b.path("src/bridge.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    bridge.addImport("native_sdk", existingImport(root_module, "native_sdk"));
+    bridge.addImport("metawork_workbench", workbench);
+
+    const automation_disabled = b.createModule(.{
+        .root_source_file = b.path("src/automation/disabled.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    automation_disabled.addImport("native_sdk", existingImport(root_module, "native_sdk"));
+    automation_disabled.addImport("metawork_bridge", bridge);
+    const automation_delivery = b.createModule(.{
+        .root_source_file = b.path("src/automation/delivery.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    const automation_enabled = b.createModule(.{
+        .root_source_file = b.path("src/automation/enabled.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    automation_enabled.addImport("native_sdk", existingImport(root_module, "native_sdk"));
+    automation_enabled.addImport("metawork_bridge", bridge);
+    automation_enabled.addImport("automation_delivery", automation_delivery);
+    const automation = b.createModule(.{
+        .root_source_file = b.path("src/automation.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    const runner = existingImport(root_module, "runner");
+    automation.addImport("build_options", existingImport(runner, "build_options"));
+    automation.addImport("automation_enabled", automation_enabled);
+    automation.addImport("automation_disabled", automation_disabled);
+
+    const app = b.createModule(.{
+        .root_source_file = b.path("src/app.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    app.addImport("runner", runner);
+    app.addImport("native_sdk", existingImport(root_module, "native_sdk"));
+    app.addImport("metawork_agent", agent);
     app.addImport("metawork_workbench", workbench);
-    app.addObjectFile(.{ .cwd_relative = bundle.library_path });
-    app.link_libc = bundle.link_libc;
-    return projection;
+    app.addImport("metawork_bridge", bridge);
+    app.addImport("metawork_automation", automation);
+
+    root_module.addImport("metawork_app", app);
+    root_module.addObjectFile(.{ .cwd_relative = bundle.library_path });
+    root_module.link_libc = bundle.link_libc;
+    return .{
+        .app = app,
+        .agent = agent,
+        .bridge = bridge,
+        .event_pump = event_pump,
+        .automation_delivery = automation_delivery,
+        .sdk = sdk,
+        .workbench = workbench,
+        .workbench_projection = projection,
+        .workbench_executor = executor,
+    };
+}
+
+fn existingImport(module: *std.Build.Module, name: []const u8) *std.Build.Module {
+    return module.import_table.get(name) orelse
+        std.debug.panic("Native SDK root module does not expose required import '{s}'", .{name});
 }
