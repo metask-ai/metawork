@@ -185,11 +185,11 @@ reject new work
 
 ### 当前实现与复现
 
-Gate 2 基础实现当前位于 `src/agent/session.zig`，bounded executor 位于 `src/workbench/executor.zig`，验证工程位于 `spikes/host-lifecycle/`。验证工程只从显式 `AGENTCORE_BUNDLE_ROOT` 导入 bundle SDK，并先按 `spikes/agentcore-contract/bundle.lock.json` 校验完整 manifest、checksum、平台、Zig 版本和 discovery symbol；它不进入正式应用 build graph。
+Gate 2 基础实现当前位于 `src/agent/session.zig`，bounded executor 位于 `src/workbench/executor.zig`。生命周期验证入口位于 `tests/`，按 Agent、Workbench、Bridge/automation transport 和纵向竞态分组；它只从显式 `AGENTCORE_BUNDLE_ROOT` 导入 bundle SDK，并先按 `spikes/agentcore-contract/bundle.lock.json` 校验完整 manifest、checksum、平台、Zig 版本和 discovery symbol，不进入正式应用 build graph。
 
 ```bash
 AGENTCORE_BUNDLE_ROOT=/absolute/path/to/validated/bundle \
-  npm run test:host-lifecycle
+  npm run test:lifecycle
 ```
 
 需要同时执行仓库常规测试时使用同一个显式 bundle 环境运行 `npm run test:phase0a`；该命令不会在缺少 artifact 时静默跳过 Gate 2。
@@ -273,7 +273,7 @@ Host tool 内部 session ID 到 MetaWork Session/Run 的合同仍未定义时，
 
 ```bash
 AGENTCORE_BUNDLE_ROOT=/absolute/path/to/validated/bundle \
-  npm run test:host-lifecycle
+  npm run test:lifecycle
 
 AGENTCORE_BUNDLE_ROOT=/absolute/path/to/validated/bundle \
   npm run probe:agentcore

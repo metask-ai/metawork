@@ -19,8 +19,8 @@ const lockPath = path.join(
 );
 const expectedManifest = JSON.parse(await readFile(lockPath, "utf8"));
 const bundle = await validateAgentCoreBundle(bundleRoot, { expectedManifest });
-const testRoot = path.join(repositoryRoot, "spikes", "host-lifecycle");
-const testFilter = process.env.HOST_LIFECYCLE_TEST_FILTER;
+const testRoot = path.join(repositoryRoot, "tests");
+const testFilter = process.env.LIFECYCLE_TEST_FILTER;
 
 const zigArguments = [
   "build",
@@ -54,6 +54,6 @@ try {
 } finally {
   clearTimeout(timeout);
 }
-if (timedOut) throw new Error("Host lifecycle tests exceeded 30 seconds");
+if (timedOut) throw new Error("Lifecycle tests exceeded 30 seconds");
 if (exitCode !== 0)
-  throw new Error(`Host lifecycle tests failed with exit code ${exitCode}`);
+  throw new Error(`Lifecycle tests failed with exit code ${exitCode}`);

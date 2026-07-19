@@ -1,6 +1,6 @@
 # MetaWork 工程目录结构设计草案
 
-> 状态：Approved v0.5；Zig module boundary、Bridge product delivery ownership 与 automation build boundary 已落地
+> 状态：Approved v0.6；Zig module boundary、Bridge product delivery ownership、automation build boundary 与 invariant-grouped lifecycle tests 已落地
 > 日期：2026-07-19
 > 范围：仓库外层、React Renderer、Zig `src/`、依赖方向、状态所有权、测试布局与渐进迁移
 
@@ -381,6 +381,8 @@ flowchart TB
 | 国际化文案                 | Renderer i18n         | 根据 structured code 和参数生成          |
 
 ## 10. 测试目录与命名
+
+Zig lifecycle 测试已从 mixed spike 拆为正式的 invariant-grouped suite：`tests/agent/` 验证 Session、callback 与 quiescence，`tests/workbench/` 验证 Executor、admission 与 shutdown，`tests/bridge/` 验证 automation transport 的 delivery/generation/ACK，`tests/integration/lifecycle/` 只保留跨边界竞态。确定性 Fake AgentCore 和组合 fixture 统一位于 `tests/support/`，不得把共享 fixture 当成新的产品模块。入口命令为 `npm run test:lifecycle`，并继续要求显式校验过的 AgentCore bundle。
 
 - React component、selector 和 formatter 测试与源文件相邻；
 - Host connection、revision notification、snapshot 和 decoder 保持纯模块测试；

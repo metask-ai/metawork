@@ -4,7 +4,7 @@
 > 日期：2026-07-19
 > 适用范围：Zig Native 应用、React Renderer、metacodes AgentCore 集成与自动化构建边界
 
-实施进度：阶段 1 至 8 已落地；Workbench 已独占 Executor，generation-checked RunControl、tagged termination latch、immutable Agent TerminalResult、Workbench no-fail terminal commit 和 pre-execution terminal record 已连通；Agent 是唯一 AgentCore SDK consumer，`OwnedCoreEvent` 与 bounded canonical notification retry/deadline 已连通；产品 wire contract 已原子切换到 Task schema v5；Bridge `ProductDelivery` 已独占 Renderer connection generation、revision retry/timer、snapshot identity 与 owned storage；Renderer Native 合同已迁入 `frontend/src/bridge/`，automation handler、origin、raw delivery、fixture worker 与 diagnostic token 由 Native SDK `build_options.automation` 在编译期选择，release Native/Renderer 产物均有 token scan。
+实施进度：阶段 1 至 9 已落地；Workbench 已独占 Executor，generation-checked RunControl、tagged termination latch、immutable Agent TerminalResult、Workbench no-fail terminal commit 和 pre-execution terminal record 已连通；Agent 是唯一 AgentCore SDK consumer，`OwnedCoreEvent` 与 bounded canonical notification retry/deadline 已连通；产品 wire contract 已原子切换到 Task schema v5；Bridge `ProductDelivery` 已独占 Renderer connection generation、revision retry/timer、snapshot identity 与 owned storage；Renderer Native 合同已迁入 `frontend/src/bridge/`，automation handler、origin、raw delivery、fixture worker 与 diagnostic token 由 Native SDK `build_options.automation` 在编译期选择，release Native/Renderer 产物均有 token scan；原 mixed lifecycle spike 已按 Agent、Workbench、Bridge/automation transport 和纵向竞态四类不变量拆入 `tests/`，共享确定性 fixture 位于 `tests/support/`。
 
 ## 1. 目的与决策
 
@@ -122,12 +122,13 @@ tests/
 ├── agent/
 ├── workbench/
 ├── bridge/
+├── support/
 ├── architecture/
 └── integration/
     └── lifecycle/
 ```
 
-现有 `spikes/host-lifecycle` 不能机械改名后整体搬入 `tests/agent/`。它同时覆盖 Agent lifecycle、Workbench Executor、Bridge delivery 和纵向集成，必须按被验证的不变量拆分；在新测试覆盖等价行为前保留原集成套件。
+原 `spikes/host-lifecycle` 没有机械改名后整体搬入单一目录。其中 47 个 mixed cases 已按不变量重组为 Agent Session/lifecycle 27 个、Agent event pump 5 个、Workbench 5 个、automation delivery 6 个和纵向集成 5 个用例；原先同时验证 event pump 与 delivery 的 zero-identity case 被拆成两个单一所有权用例，因此得到 48 个目录测试。再加 3 个 Workbench 源内不变量测试，新入口共运行 51 个测试。共享的确定性 Fake AgentCore 与组合 fixture 位于 `tests/support/`；新套件通过后，旧 mixed spike 已删除。
 
 ## 4. 模块语义与公开表面
 
@@ -679,6 +680,8 @@ root 应显式导出稳定消费表面，并让内部模块可以自由重构。
 - delivery/generation/ACK/snapshot → `tests/bridge/`；
 - 完整纵向竞态 → `tests/integration/lifecycle/`；
 - 新套件覆盖等价行为后再删除旧 mixed spike。
+
+落地说明：`tests/build.zig` 按上述所有权分组分别构造 test artifact，并保留 Workbench 源内 write-once terminal publication 测试；纯 Agent event-pump case 不允许留在 Bridge/automation delivery suite。`scripts/run-lifecycle-tests.mjs` 继续要求显式、已校验的 AgentCore bundle。旧 `spikes/host-lifecycle` 只在 51 个新入口测试全部通过后删除，仓库脚本名统一为 `test:lifecycle`。
 
 ## 15. 验收门槛
 

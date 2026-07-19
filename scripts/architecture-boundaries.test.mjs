@@ -361,3 +361,57 @@ test("product wire contract is atomically on Task schema v5", () => {
     false,
   );
 });
+
+test("lifecycle tests are grouped by invariant instead of a mixed spike", () => {
+  for (const legacy of [
+    "spikes/host-lifecycle/build.zig",
+    "spikes/host-lifecycle/lifecycle_test.zig",
+  ]) {
+    assert.equal(existsSync(new URL(legacy, root)), false);
+  }
+
+  const cases = [
+    ["tests/agent/lifecycle_test.zig", 27],
+    ["tests/agent/event_pump_test.zig", 5],
+    ["tests/workbench/executor_lifecycle_test.zig", 5],
+    ["tests/bridge/automation_delivery_test.zig", 6],
+    ["tests/integration/lifecycle/lifecycle_test.zig", 5],
+  ];
+  for (const [path, expectedCount] of cases) {
+    assert.equal(existsSync(new URL(path, root)), true, `${path} must exist`);
+    assert.equal(
+      [...read(path).matchAll(/^test "/gm)].length,
+      expectedCount,
+      `${path} must retain its invariant coverage`,
+    );
+  }
+
+  assert.doesNotMatch(
+    read("tests/bridge/automation_delivery_test.zig"),
+    /fixture\.event_pump/,
+  );
+
+  assert.equal(
+    existsSync(new URL("tests/support/lifecycle_fixture.zig", root)),
+    true,
+  );
+  const build = read("tests/build.zig");
+  for (const [path] of cases) assert.ok(build.includes(`"${path.slice(6)}"`));
+  for (const filter of [
+    "terminal publication",
+    "Workbench outcomes",
+    "Agent terminal facts",
+  ]) {
+    assert.ok(build.includes(`"${filter}"`));
+  }
+
+  const packageManifest = read("package.json");
+  assert.match(
+    packageManifest,
+    /"test:lifecycle": "node scripts\/run-lifecycle-tests\.mjs"/,
+  );
+  assert.doesNotMatch(packageManifest, /test:host-lifecycle/);
+  const runner = read("scripts/run-lifecycle-tests.mjs");
+  assert.match(runner, /path\.join\(repositoryRoot, "tests"\)/);
+  assert.doesNotMatch(runner, /host-lifecycle|HOST_LIFECYCLE_TEST_FILTER/);
+});
