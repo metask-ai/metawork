@@ -1,10 +1,10 @@
 # MetaWork 架构与目录调整方案
 
-> 状态：正式迁移基线；阶段 1 至 9 已落地，收口批次 A 至 D 尚未完成
+> 状态：正式迁移基线；阶段 1 至 9 已落地，收口批次 A 已实现并等待 macOS 验收，批次 B 至 D 尚未完成
 > 日期：2026-07-19
 > 适用范围：Zig Native 应用、React Renderer、metacodes AgentCore 集成与自动化构建边界
 
-实施进度：阶段 1 至 9 已落地；Workbench 已独占 Executor，generation-checked RunControl、tagged termination latch、immutable Agent TerminalResult、Workbench no-fail Run terminal publication 和 pre-execution terminal record 已连通；Agent 是唯一 AgentCore SDK consumer，`OwnedCoreEvent` 与 bounded canonical notification retry/deadline 已连通；产品 wire contract 已原子切换到 Task schema v5；Bridge `ProductDelivery` 已独占 Renderer connection generation、revision retry/timer、snapshot identity 与 owned storage；Renderer Native 合同已迁入 `frontend/src/bridge/`，automation handler、origin、raw delivery、fixture worker 与 diagnostic token 由 Native SDK `build_options.automation` 在编译期选择；原 mixed lifecycle spike 已按 Agent、Workbench、Bridge/automation transport 和纵向竞态四类不变量拆入 `tests/`，共享确定性 fixture 位于 `tests/support/`。macOS 总验收发现四类尚未收口的合同：正式验证图、Workbench Task 产品状态、Bridge command dispatcher 和 canonical credential boundary；它们按批次 A 至 D 完成，在此之前不得将本方案标记为完成。
+实施进度：阶段 1 至 9 已落地；Workbench 已独占 Executor，generation-checked RunControl、tagged termination latch、immutable Agent TerminalResult、Workbench no-fail Run terminal publication 和 pre-execution terminal record 已连通；Agent 是唯一 AgentCore SDK consumer，`OwnedCoreEvent` 与 bounded canonical notification retry/deadline 已连通；产品 wire contract 已原子切换到 Task schema v5；Bridge `ProductDelivery` 已独占 Renderer connection generation、revision retry/timer、snapshot identity 与 owned storage；Renderer Native 合同已迁入 `frontend/src/bridge/`，automation handler、origin、raw delivery、fixture worker 与 diagnostic token 由 Native SDK `build_options.automation` 在编译期选择；原 mixed lifecycle spike 已按 Agent、Workbench、Bridge/automation transport 和纵向竞态四类不变量拆入 `tests/`，共享确定性 fixture 位于 `tests/support/`。macOS 总验收发现四类尚未收口的合同：正式验证图、Workbench Task 产品状态、Bridge command dispatcher 和 canonical credential boundary。批次 A 的 probe、scanner 和正式 Native test graph 已在代码中修复，平台无关检查已通过，但仍须由 Apple Silicon macOS 使用精确 AgentCore bundle 和本次构建产物完成验收；批次 B/C 在该门槛通过前不得启动，批次 D 负责最终证据收口。
 
 ## 1. 目的与决策
 
@@ -648,19 +648,19 @@ root 应显式导出稳定消费表面，并让内部模块可以自由重构。
 
 ## 13. 当前代码与目标差异
 
-| 当前实现                                                                                                                                                                     | 目标状态 |
-| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
-| Workbench 已独占 Executor、queue、workers 与 shutdown；worker 通过原子 `starting/running/finishing` handoff 调用 `beginRun()` + 唯一 latch-aware `Run.execute()`             | 已达成   |
-| Agent 使用 tagged `TerminationSignal`，callback/event-pump/notification 与 external interruption 分型；contract failure 是 terminal fact，不伪装成 abort                     | 已达成   |
-| Workbench admission/durable RunRef/no-fail Run payload 已落地，Agent `TerminalResult` 直接提交；Run terminal history 不再从 Session snapshot 提交                            | 已达成   |
-| `TaskView.state` 仍保存 Agent `SessionState`，`syncLifecycle()` 仍用 Session snapshot 覆盖 Task lifecycle/active Run；`session_disposition_at_completion` 尚未折叠进产品状态 | 批次 B   |
-| prompt、title 和 terminal diagnostic 仍有 raw canonical 写入路径；serializer 过滤仍承担兜底                                                                                  | 批次 B   |
-| 只有 `agent/` import `metacodes_agentcore`；App 通过 Agent 构造 Runtime，Workbench 通过 `agent.OwnedCoreEvent`/validated UI types 消费，Bridge DTO 使用自身 transport enum   | 已达成   |
-| 产品 command、payload、snapshot 与 cause 已统一为 `tasks.*`、`taskId`、`tasks` 和 `app_shutdown`；Agent/Gate 传输继续使用内部 Session route identity                         | 已达成   |
-| `bridge/handlers.zig` 仍主要是 DTO/parser，产品 handler、Workspace grant 协调、Agent UI 类型构造和 Workbench 调用仍集中在 App；Bridge module 尚未依赖 Workbench              | 批次 C   |
-| automation handler/token 已移出 App/Bridge 产品源码，由 compile-time selector 选择；但 Native release scanner 仍错误禁止 Native SDK 共有 `zero://inline`                     | 批次 A   |
-| Phase 0A contract probe 仍调用旧 Runtime/Session options API                                                                                                                 | 批次 A   |
-| 正式 Native test graph 只显式追加 Workbench tests，App 与 Bridge source tests 未被 `npm test` 执行                                                                           | 批次 A   |
+| 当前实现                                                                                                                                                                     | 目标状态               |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- |
+| Workbench 已独占 Executor、queue、workers 与 shutdown；worker 通过原子 `starting/running/finishing` handoff 调用 `beginRun()` + 唯一 latch-aware `Run.execute()`             | 已达成                 |
+| Agent 使用 tagged `TerminationSignal`，callback/event-pump/notification 与 external interruption 分型；contract failure 是 terminal fact，不伪装成 abort                     | 已达成                 |
+| Workbench admission/durable RunRef/no-fail Run payload 已落地，Agent `TerminalResult` 直接提交；Run terminal history 不再从 Session snapshot 提交                            | 已达成                 |
+| `TaskView.state` 仍保存 Agent `SessionState`，`syncLifecycle()` 仍用 Session snapshot 覆盖 Task lifecycle/active Run；`session_disposition_at_completion` 尚未折叠进产品状态 | 批次 B                 |
+| prompt、title 和 terminal diagnostic 仍有 raw canonical 写入路径；serializer 过滤仍承担兜底                                                                                  | 批次 B                 |
+| 只有 `agent/` import `metacodes_agentcore`；App 通过 Agent 构造 Runtime，Workbench 通过 `agent.OwnedCoreEvent`/validated UI types 消费，Bridge DTO 使用自身 transport enum   | 已达成                 |
+| 产品 command、payload、snapshot 与 cause 已统一为 `tasks.*`、`taskId`、`tasks` 和 `app_shutdown`；Agent/Gate 传输继续使用内部 Session route identity                         | 已达成                 |
+| `bridge/handlers.zig` 仍主要是 DTO/parser，产品 handler、Workspace grant 协调、Agent UI 类型构造和 Workbench 调用仍集中在 App；Bridge module 尚未依赖 Workbench              | 批次 C                 |
+| automation handler/token 已移出 App/Bridge 产品源码；scanner 已改为只禁止 MetaWork 独有 token，并有 SDK 共有 token 正例与 fixture token 反例测试；待 macOS 新产物验收        | 批次 A：已实现，待验收 |
+| Phase 0A formal adapter probe 已迁移到 `initWithApi()` 和 typed options；raw ABI probe 保留固定宽度 `*_code` 合同；待精确 macOS bundle 执行                                  | 批次 A：已实现，待验收 |
+| 正式 Native test graph 已显式构造并运行 App、Bridge、Workbench projection 和 Executor artifacts；静态接线检查已通过，待 macOS 实际编译执行                                   | 批次 A：已实现，待验收 |
 
 ## 14. 迁移阶段
 
@@ -790,6 +790,8 @@ root 应显式导出稳定消费表面，并让内部模块可以自由重构。
 - architecture check 验证每个 test artifact 已接入正式 `test` step。固定测试数量只记录本次迁移无丢失证据，不作为 CI 长期断言。
 
 批次 A 只修复验收尺子和已经失效的 contract probe，不借机改变产品状态语义。完成后 `npm test` 必须真实执行 App/Bridge/Workbench source tests，`test:phase0a` 必须进入并通过独立 probe graph，release scanner 的通过结果才具有意义。
+
+落地状态：上述代码与平台无关自测已实现；Windows 开发机因缺少精确 macOS AgentCore bundle，不能把 configure 阶段之前的绿色结果冒充批次完成。批次 A 只有在 Apple Silicon macOS 上以本次 checkout 依次通过正式 Native tests、`test:phase0a` 和 fresh `build:release` 后才关闭。
 
 同步更新：`phase-0-validation.md`、构建/测试说明和 architecture checks；历史 Gate 报告不追溯改写。
 

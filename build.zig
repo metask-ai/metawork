@@ -17,17 +17,35 @@ pub fn build(b: *std.Build) void {
     const root = b.option([]const u8, "agentcore-bundle-root", "Validated source-free AgentCore bundle root") orelse
         b.pathFromRoot(".agentcore/bundle");
     const bundle = agentcore_bundle.verify(b, root);
-    const workbench = wireAgentCore(b, artifacts.exe.root_module, bundle);
-    const test_workbench = if (artifacts.tests.root_module != artifacts.exe.root_module)
+    const modules = wireAgentCore(b, artifacts.exe.root_module, bundle);
+    const test_modules = if (artifacts.tests.root_module != artifacts.exe.root_module)
         wireAgentCore(b, artifacts.tests.root_module, bundle)
     else
-        workbench;
-    test_workbench.link_libc = true;
-    const workbench_tests = b.addTest(.{ .name = "metawork-workbench", .root_module = test_workbench });
-    artifacts.tests.step.dependOn(&b.addRunArtifact(workbench_tests).step);
+        modules;
+    const module_tests = [_]struct {
+        name: []const u8,
+        root_module: *std.Build.Module,
+    }{
+        .{ .name = "metawork-app", .root_module = test_modules.app },
+        .{ .name = "metawork-bridge", .root_module = test_modules.bridge },
+        .{ .name = "metawork-workbench", .root_module = test_modules.workbench_projection },
+        .{ .name = "metawork-workbench-executor", .root_module = test_modules.workbench_executor },
+    };
+    for (module_tests) |spec| {
+        spec.root_module.link_libc = bundle.link_libc;
+        const tests = b.addTest(.{ .name = spec.name, .root_module = spec.root_module });
+        artifacts.tests.step.dependOn(&b.addRunArtifact(tests).step);
+    }
 }
 
-fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcore_bundle.Bundle) *std.Build.Module {
+const WiredModules = struct {
+    app: *std.Build.Module,
+    bridge: *std.Build.Module,
+    workbench_projection: *std.Build.Module,
+    workbench_executor: *std.Build.Module,
+};
+
+fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcore_bundle.Bundle) WiredModules {
     var query = (root_module.resolved_target orelse @panic("Native SDK app target is unresolved")).query;
     query.os_version_min = .{ .semver = bundle.deployment_target };
     const target = b.resolveTargetQuery(query);
@@ -154,7 +172,12 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     root_module.addImport("metawork_app", app);
     root_module.addObjectFile(.{ .cwd_relative = bundle.library_path });
     root_module.link_libc = bundle.link_libc;
-    return projection;
+    return .{
+        .app = app,
+        .bridge = bridge,
+        .workbench_projection = projection,
+        .workbench_executor = executor,
+    };
 }
 
 fn existingImport(module: *std.Build.Module, name: []const u8) *std.Build.Module {

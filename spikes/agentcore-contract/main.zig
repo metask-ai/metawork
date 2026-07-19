@@ -294,7 +294,7 @@ fn verifyFormalHost(io: std.Io, raw_api: *const wire.ApiV1, root: []const u8) !v
         .{ .worker_count = 1, .queue_capacity = 2 },
     );
     errdefer executor.deinit();
-    const host = try lifecycle.Runtime.init(io, allocator, raw_api, .{
+    const host = try lifecycle.Runtime.initWithApi(io, allocator, raw_api, .{
         .max_sessions = 1,
     });
     defer {
@@ -304,9 +304,9 @@ fn verifyFormalHost(io: std.Io, raw_api: *const wire.ApiV1, root: []const u8) !v
         executor.deinit();
     }
     const session = try host.createSession(.{
-        .provider_kind_code = wire.PROVIDER_ANTHROPIC,
-        .permission_mode_code = wire.PERMISSION_DEFAULT,
-        .shell_policy_code = wire.SHELL_UNRESTRICTED,
+        .provider = .anthropic,
+        .permission_mode = .default,
+        .shell_policy = .unrestricted,
         .credential = "metawork-formal-host-fixture-key",
         .model = "metawork-formal-host-fixture-model",
         .base_url = base_url,

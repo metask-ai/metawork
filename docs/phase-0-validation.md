@@ -129,6 +129,8 @@ Gate 未通过时不得用 source dependency、MetaWork 自制协议、无界队
 - callback borrowed lifetime；
 - Host/library-owned response/diagnostic release 恰好一次。
 
+同一 probe executable 同时保留两条互补路径：raw ABI 部分直接使用 `wire.ApiV1`、`wire.SessionConfigV1` 和固定宽度 `*_code` 字段，证明 shipped binary facade；`verifyFormalHost()` 则通过 test-only `agent.Runtime.initWithApi()` 注入同一 function table，并使用 typed `SessionOpenOptions` 验证正式 Agent adapter。不得为了统一表面而删除 raw wire 覆盖，也不得让 formal adapter 继续使用已经淘汰的 raw option 字段。
+
 可以额外验证 Host tool callback mechanics，但产品 Runtime 必须保持 `host_tool_count = 0`，不能用单 Session probe 证明多 Session Host tool 路由已成立。
 
 ### 退出证据
@@ -192,7 +194,7 @@ AGENTCORE_BUNDLE_ROOT=/absolute/path/to/validated/bundle \
   npm run test:lifecycle
 ```
 
-需要同时执行仓库常规测试时使用同一个显式 bundle 环境运行 `npm run test:phase0a`；该命令不会在缺少 artifact 时静默跳过 Gate 2。
+需要同时执行仓库常规测试时使用同一个显式 bundle 环境运行 `npm run test:phase0a`；该命令不会在缺少 artifact 时静默跳过 Gate 2。正式 Native `test` step 必须显式构造并运行 App、Bridge、Workbench projection 和 Workbench executor test artifacts；named module 被产品 root import 不等于其 `test` declarations 已执行。
 
 当前 deterministic function-table fake 覆盖 bounded executor、每 Session 单 Run、queued/active/UI-wait close、并发 close/shutdown、callback quiescence、generation-checked RunControl lease、close lease quiescence、pre-Core termination、first-writer typed TerminationSignal、immutable TerminalResult、stale/too-late abort status、Session/Runtime destroy retry、OOM、diagnostic release、credential snapshot 隔离和临时/trusted Workspace 的词法边界。测试进程有 30 秒上限，避免回归变成无限 CI hang。
 
@@ -384,9 +386,13 @@ Gate 4 通过时的 sink 只提供全局 event count 和单 event bytes 硬上�
 - 全部 worker 等待 UI 时 response/cancel/shutdown 仍可执行；
 - Session close 和 Host shutdown 无 hang/UAF/leak；
 - reload 语义可信且不冒充进程恢复；
+- release Native/Renderer 产物不包含 MetaWork 独有 automation command、origin、fixture payload 或 diagnostic token；Native SDK 自身共有的 product-runtime 字符串不作为 MetaWork 泄漏判据；
+- Native automation scanner 自身的正反测试通过：SDK 共有 token 不误杀，任一 MetaWork fixture token 必须命中；
 - 可复现的 build/test/run 命令进入仓库。
 
 > 状态：已通过。可复现证据见 [Phase 0 Gate 6 验证报告](phase-0-gate-6-report.md)。
+
+该状态只记录历史 Gate 6 原型的验收事实，不证明当前收口批次的新 Native test graph、Phase 0A formal adapter probe 或 release scanner 已通过。它们必须在 Apple Silicon macOS 上使用精确 bundle 和本次 checkout 重新执行；旧报告与旧 `zig-out` 产物都不能替代本轮证据。
 
 Gate 6 验收当时只能称“同进程 macOS 同步原型”；完成下述 Gate 7 后才达到完整 Phase 0A。
 

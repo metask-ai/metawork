@@ -109,6 +109,37 @@ test("only Agent implementation imports the AgentCore SDK", () => {
   assert.match(bridgeHandlers, /pub const PermissionChoice = enum/);
 });
 
+test("Phase 0A keeps the raw ABI probe distinct from the typed Agent adapter", () => {
+  const probe = read("spikes/agentcore-contract/main.zig");
+  const formalStart = probe.indexOf("fn verifyFormalHost(");
+  const formalEnd = probe.indexOf("fn verifyUiOutcome(");
+  assert.ok(formalStart >= 0 && formalEnd > formalStart);
+
+  const rawProbe = probe.slice(0, formalStart);
+  const formalHost = probe.slice(formalStart, formalEnd);
+  for (const field of [
+    "provider_kind_code",
+    "permission_mode_code",
+    "shell_policy_code",
+  ]) {
+    assert.match(
+      rawProbe,
+      new RegExp(`session_config\\.${field}`),
+      `raw ABI coverage must retain ${field}`,
+    );
+    assert.doesNotMatch(
+      formalHost,
+      new RegExp(`\\.${field}\\s*=`),
+      `typed Agent adapter must not use raw ${field}`,
+    );
+  }
+  assert.match(formalHost, /lifecycle\.Runtime\.initWithApi\(/);
+  assert.doesNotMatch(formalHost, /lifecycle\.Runtime\.init\(/);
+  assert.match(formalHost, /\.provider = \.anthropic/);
+  assert.match(formalHost, /\.permission_mode = \.default/);
+  assert.match(formalHost, /\.shell_policy = \.unrestricted/);
+});
+
 test("build graph registers the four named module boundaries", () => {
   const source = read("build.zig");
   for (const name of [
@@ -120,6 +151,29 @@ test("build graph registers the four named module boundaries", () => {
     assert.match(source, new RegExp(`addImport\\(\\"${name}\\"`));
   }
   assert.doesNotMatch(source, /src\/agentcore(?:\/|\.zig)/);
+});
+
+test("formal Native test graph runs every product module test root", () => {
+  const source = read("build.zig");
+  for (const [name, rootModule] of [
+    ["metawork-app", "test_modules.app"],
+    ["metawork-bridge", "test_modules.bridge"],
+    ["metawork-workbench", "test_modules.workbench_projection"],
+    ["metawork-workbench-executor", "test_modules.workbench_executor"],
+  ]) {
+    assert.match(
+      source,
+      new RegExp(
+        `\\.name = \\"${name}\\", \\.root_module = ${rootModule.replaceAll(".", "\\.")}`,
+      ),
+      `${name} must be an explicit Native test artifact`,
+    );
+  }
+  assert.match(source, /for \(module_tests\) \|spec\|/);
+  assert.match(
+    source,
+    /artifacts\.tests\.step\.dependOn\(&b\.addRunArtifact\(tests\)\.step\)/,
+  );
 });
 
 test("canonical notification and Renderer transport failures stay isolated", () => {
