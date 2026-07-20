@@ -1,9 +1,9 @@
 # MetaWork AgentCore ABI v1 revision 3 消费合同
 
-> 状态：revision 3 hard-cut 目标已批准；当前 checkout 尚待完成迁移 Gate，不声明 stable support policy
+> 状态：revision 3 hard-cut implementation 已完成基础 build/test；完整 migration Gate、Gate 5/6、package 和报告尚待完成，不声明 stable support policy
 > 所有者：metacodes 负责 facade、bindings、bundle 和兼容政策；MetaWork 负责精确消费验证
 
-本文记录 MetaWork 对 AgentCore binary ABI version 1 revision 3 的目标消费边界。线程、事件泵和 Host 生命周期见 [AgentCore 集成契约](agentcore-integration.md)，迁移验收顺序见 [Phase 0 验证计划](phase-0-validation.md)。当前实现仍处于 revision 2 到 revision 3 的 hard-cut 迁移前状态；只有迁移 Gate 通过后，本文合同才成为已验证实现事实。
+本文记录 MetaWork 对 AgentCore binary ABI version 1 revision 3 的消费边界。线程、事件泵和 Host 生命周期见 [AgentCore 集成契约](agentcore-integration.md)，迁移验收顺序见 [Phase 0 验证计划](phase-0-validation.md)。当前实现已完成 artifact、build graph、SDK namespace 和正式 Host 的 hard cut，但只有完整 migration Gate 通过后，本文合同才成为已验证产品基线。
 
 ## 1. 版本含义
 
@@ -251,16 +251,16 @@ manifest schema 1 必须精确记录：
 ### raw candidate contract probe
 
 - macOS arm64 artifact-only consumer 只访问 candidate bundle，不访问 metacodes 实现源码；
-- manifest、checksum、target、toolchain 和 API table 校验；
-- Runtime/Session/run/abort/destroy；
-- real agent loop、CoreEvent、同步 UI；
-- built-in Read/Bash/Edit 在临时 Workspace 中运行；
-- callback borrowed/release mechanics；
-- busy/stale/too-late/invalid argument 等基本错误。
+- exact manifest bytes、payload checksum、target、toolchain、layout 和唯一 discovery symbol 校验；
+- 隔离 raw C consumer 从新 header 完成 source-free discover/link/run，并拒绝错误 ABI version；
+- 隔离 Zig consumer 通过 candidate 官方 `bindings/zig` package 完成 source-free `Api.discover()`、link 和运行；
+- probe 结束后再次校验 candidate，证明消费过程没有改写 bundle。
+
+candidate probe 不导入 MetaWork Agent，也不承担 Runtime/Session、真实 agent loop 或产品语义验收；这些必须在 candidate stage 后由正式 Host gate 完成。
 
 ### staged 正式 Host gate
 
-> revision 2 的 Gate 4 正式 Host 消费已通过；证据见 [Phase 0 Gate 4 验证报告](phase-0-gate-4-report.md)。revision 3 staged Host 尚待 migration Gate 重跑；历史结果不包含 Gate 5 Bridge/event-pump 完整容量语义。
+> revision 2 的 Gate 4 正式 Host 消费已通过；证据见 [Phase 0 Gate 4 验证报告](phase-0-gate-4-report.md)。当前 revision 3 staged Host 已完成基础 typed SDK、lifecycle、check/test 和 Debug/Release build；完整 migration Gate、Gate 5/6、package 与报告尚待收口。历史结果和基础回归都不能替代剩余 Gate。
 
 - typed SDK 完成并通过 source-free consumer；
 - status-before-result 和 diagnostic release 测试；

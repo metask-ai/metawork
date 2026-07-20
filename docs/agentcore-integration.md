@@ -1,6 +1,6 @@
 # MetaWork AgentCore 集成契约
 
-> 状态：Phase 0A revision 2 历史链路与 Gate 7 fault-domain 对照均已通过；revision 3 hard-cut 目标已批准、当前 checkout 尚待完成迁移 Gate；后续正式方向选择单 AgentCore Worker
+> 状态：Phase 0A revision 2 历史链路与 Gate 7 fault-domain 对照均已通过；当前 checkout 已完成 revision 3 artifact/build/Host hard cut 与基础 build/test，完整 migration Gate、Gate 5/6、package 和报告尚待完成；后续正式方向选择单 AgentCore Worker
 > 目标依赖：metask AgentCore ABI v1 revision 3；精确 artifact identity 见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)
 
 本文定义 MetaWork `agent/` 执行子系统与 metacodes AgentCore 之间的规范边界。Desktop Host 的 composition、Workbench 产品状态和 Bridge transport 见 [高层架构](architecture.md)，revision 3 目标能力见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。

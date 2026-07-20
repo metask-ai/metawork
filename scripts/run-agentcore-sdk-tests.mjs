@@ -1,36 +1,23 @@
 import { spawn } from "node:child_process";
-import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { validateAgentCoreBundle } from "./agentcore-bundle.mjs";
-
-const bundleRoot = process.env.AGENTCORE_BUNDLE_ROOT;
-if (!bundleRoot) throw new Error("AGENTCORE_BUNDLE_ROOT is required");
+import process from "node:process";
+import { verifyStagedAgentCoreBundle } from "./verify-staged-agentcore-bundle.mjs";
 
 const repositoryRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
 );
-const lockPath = path.join(
-  repositoryRoot,
-  "spikes",
-  "agentcore-contract",
-  "bundle.lock.json",
-);
-const expectedManifest = JSON.parse(await readFile(lockPath, "utf8"));
-const bundle = await validateAgentCoreBundle(bundleRoot, { expectedManifest });
-const testRoot = path.join(repositoryRoot, "spikes", "agentcore-sdk-contract");
-
+const bundle = await verifyStagedAgentCoreBundle(repositoryRoot);
 const child = spawn(
   "zig",
   [
     "build",
-    "test",
-    `-Dbundle-root=${bundle.root}`,
+    "test-agentcore-sdk",
     `-Dtarget=${bundle.target}`,
     "-Doptimize=Debug",
   ],
-  { cwd: testRoot, stdio: "inherit", detached: true },
+  { cwd: repositoryRoot, stdio: "inherit", detached: true },
 );
 let timedOut = false;
 const timeout = setTimeout(() => {

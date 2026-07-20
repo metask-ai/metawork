@@ -14,8 +14,7 @@ const agentcore_bundle = @import("build_support/agentcore_bundle.zig");
 
 pub fn build(b: *std.Build) void {
     const artifacts = native_sdk.addAppArtifacts(b, b.dependency("native_sdk", .{}), .{ .name = "metawork" });
-    const root = b.option([]const u8, "agentcore-bundle-root", "Validated source-free AgentCore bundle root") orelse
-        b.pathFromRoot(".agentcore/bundle");
+    const root = b.pathFromRoot(".agentcore/bundle");
     const bundle = agentcore_bundle.verify(b, root);
     const modules = wireAgentCore(b, artifacts.exe.root_module, bundle);
     const test_modules = if (artifacts.tests.root_module != artifacts.exe.root_module)
@@ -25,6 +24,8 @@ pub fn build(b: *std.Build) void {
     const lifecycle_fixture = createLifecycleFixture(b, test_modules, bundle.link_libc);
     test_modules.app.addImport("lifecycle_fixture", lifecycle_fixture);
     test_modules.bridge.addImport("lifecycle_fixture", lifecycle_fixture);
+    addLifecycleTests(b, test_modules, lifecycle_fixture, bundle.link_libc);
+    addSdkContractTests(b, test_modules, bundle.link_libc);
     const module_tests = [_]struct {
         name: []const u8,
         root_module: *std.Build.Module,
@@ -51,6 +52,63 @@ pub fn build(b: *std.Build) void {
         const tests = b.addTest(.{ .name = spec.name, .root_module = spec.root_module });
         artifacts.tests.step.dependOn(&b.addRunArtifact(tests).step);
     }
+}
+
+fn addLifecycleTests(
+    b: *std.Build,
+    modules: WiredModules,
+    fixture: *std.Build.Module,
+    link_libc: bool,
+) void {
+    const test_filter = b.option([]const u8, "tfilter", "Lifecycle test name filter");
+    const step = b.step("test-lifecycle", "Run invariant-grouped lifecycle tests");
+    const roots = [_][]const u8{
+        "tests/agent/lifecycle_test.zig",
+        "tests/agent/event_pump_test.zig",
+        "tests/workbench/executor_lifecycle_test.zig",
+        "tests/bridge/automation_delivery_test.zig",
+        "tests/integration/lifecycle/lifecycle_test.zig",
+    };
+    for (roots) |root| {
+        const cases = b.createModule(.{
+            .root_source_file = b.path(root),
+            .target = modules.app.resolved_target,
+            .optimize = modules.app.optimize,
+            .link_libc = link_libc,
+        });
+        cases.addImport("lifecycle_fixture", fixture);
+        const artifact = b.addTest(.{
+            .root_module = cases,
+            .filters = if (test_filter) |filter| &.{filter} else &.{},
+        });
+        step.dependOn(&b.addRunArtifact(artifact).step);
+    }
+
+    const source_tests = b.addTest(.{
+        .root_module = modules.workbench_projection,
+        .filters = if (test_filter) |filter|
+            &.{filter}
+        else
+            &.{ "terminal publication", "Workbench outcomes", "Agent terminal facts" },
+    });
+    step.dependOn(&b.addRunArtifact(source_tests).step);
+}
+
+fn addSdkContractTests(
+    b: *std.Build,
+    modules: WiredModules,
+    link_libc: bool,
+) void {
+    const tests = b.createModule(.{
+        .root_source_file = b.path("spikes/agentcore-sdk-contract/sdk_contract_test.zig"),
+        .target = modules.app.resolved_target,
+        .optimize = modules.app.optimize,
+        .link_libc = link_libc,
+    });
+    tests.addImport("metask_agentcore", modules.sdk);
+    const artifact = b.addTest(.{ .root_module = tests });
+    const step = b.step("test-agentcore-sdk", "Run source-free AgentCore typed SDK contract tests");
+    step.dependOn(&b.addRunArtifact(artifact).step);
 }
 
 const WiredModules = struct {
@@ -93,7 +151,7 @@ fn createLifecycleFixture(
     fixture.addImport("metawork_account_contract", modules.account_contract);
     fixture.addImport("event_pump", modules.event_pump);
     fixture.addImport("automation_delivery", modules.automation_delivery);
-    fixture.addImport("metacodes_agentcore", modules.sdk);
+    fixture.addImport("metask_agentcore", modules.sdk);
     fixture.addImport("workbench_executor", modules.workbench_executor);
     return fixture;
 }
@@ -104,42 +162,29 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     const target = b.resolveTargetQuery(query);
     root_module.resolved_target = target;
 
-    const types = b.createModule(.{
-        .root_source_file = .{ .cwd_relative = bundle.types_path },
+    const sdk = b.dependency("agentcore", .{
         .target = target,
         .optimize = root_module.optimize,
-    });
-    const protocol = b.createModule(.{
-        .root_source_file = .{ .cwd_relative = bundle.protocol_path },
-        .target = target,
-        .optimize = root_module.optimize,
-    });
-    const sdk = b.createModule(.{
-        .root_source_file = .{ .cwd_relative = bundle.sdk_path },
-        .target = target,
-        .optimize = root_module.optimize,
-    });
-    sdk.addImport("metacodes_agentcore_types", types);
-    sdk.addImport("metacodes_agentcore_protocol", protocol);
+    }).module("metask_agentcore");
     const event_sink = b.createModule(.{
         .root_source_file = b.path("src/agent/event_sink.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
-    event_sink.addImport("metacodes_agentcore", sdk);
+    event_sink.addImport("metask_agentcore", sdk);
     const event_pump = b.createModule(.{
         .root_source_file = b.path("src/agent/event_pump.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
-    event_pump.addImport("metacodes_agentcore", sdk);
+    event_pump.addImport("metask_agentcore", sdk);
     event_pump.addImport("event_sink", event_sink);
     const session = b.createModule(.{
         .root_source_file = b.path("src/agent/session.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
-    session.addImport("metacodes_agentcore", sdk);
+    session.addImport("metask_agentcore", sdk);
     session.addImport("event_pump", event_pump);
     const agent = b.createModule(.{
         .root_source_file = b.path("src/agent.zig"),
@@ -337,7 +382,6 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     app.addImport("metawork_account", account);
 
     root_module.addImport("metawork_app", app);
-    root_module.addObjectFile(.{ .cwd_relative = bundle.library_path });
     root_module.link_libc = bundle.link_libc;
     return .{
         .account = account,

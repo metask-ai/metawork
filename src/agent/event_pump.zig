@@ -1,5 +1,5 @@
 const std = @import("std");
-const sdk = @import("metacodes_agentcore");
+const sdk = @import("metask_agentcore");
 const event_sink = @import("event_sink");
 
 pub const OwnedCoreEvent = event_sink.OwnedCoreEvent;

@@ -106,7 +106,7 @@ test("lower layers cannot reach composition or transport internals", () => {
       "metawork_workbench",
       "metawork_bridge",
       "metawork_agent",
-      "metacodes_agentcore",
+      "metask_agentcore",
     ],
   );
   assertNoImports(zigFiles("src/account/"), [
@@ -114,7 +114,7 @@ test("lower layers cannot reach composition or transport internals", () => {
     "metawork_workbench",
     "metawork_bridge",
     "metawork_agent",
-    "metacodes_agentcore",
+    "metask_agentcore",
   ]);
   assertNoImports(
     zigFiles("src/account/").filter(
@@ -129,13 +129,23 @@ test("only Agent implementation imports the AgentCore SDK", () => {
   const forbidden = zigFiles("src/").filter(
     (file) => file !== "src/agent.zig" && !file.startsWith("src/agent/"),
   );
-  assertNoImports(forbidden, ["metacodes_agentcore"]);
+  assertNoImports(forbidden, ["metask_agentcore"]);
 
   const build = read("build.zig");
   assert.equal(
-    [...build.matchAll(/\.addImport\("metacodes_agentcore", sdk\)/g)].length,
+    [...build.matchAll(/\.addImport\("metask_agentcore", sdk\)/g)].length,
     3,
     "only event_sink, event_pump, and session may receive the SDK module",
+  );
+  assert.match(
+    build,
+    /b\.dependency\("agentcore",[\s\S]*?\.module\("metask_agentcore"\)/,
+  );
+  assert.doesNotMatch(build, /\.addObjectFile\(/);
+  assert.match(
+    read("build.zig.zon"),
+    /\.agentcore\/bundle\/bindings\/zig/,
+    "the formal build must consume the staged official Zig package",
   );
 
   const agentRoot = read("src/agent.zig");
@@ -147,35 +157,24 @@ test("only Agent implementation imports the AgentCore SDK", () => {
   assert.match(bridgeHandlers, /pub const PermissionChoice = enum/);
 });
 
-test("Phase 0A keeps the raw ABI probe distinct from the typed Agent adapter", () => {
-  const probe = read("spikes/agentcore-contract/main.zig");
-  const formalStart = probe.indexOf("fn verifyFormalHost(");
-  const formalEnd = probe.indexOf("fn verifyUiOutcome(");
-  assert.ok(formalStart >= 0 && formalEnd > formalStart);
+test("candidate raw probe stays isolated from the staged typed consumer", () => {
+  const rawBuild = read("spikes/agentcore-contract/build.zig");
+  assert.match(rawBuild, /header_smoke\.c/);
+  assert.match(rawBuild, /libmetask_agentcore\.a/);
+  assert.doesNotMatch(rawBuild, /src\/agent|metawork_agent|metask_agentcore"/);
 
-  const rawProbe = probe.slice(0, formalStart);
-  const formalHost = probe.slice(formalStart, formalEnd);
-  for (const field of [
-    "provider_kind_code",
-    "permission_mode_code",
-    "shell_policy_code",
-  ]) {
-    assert.match(
-      rawProbe,
-      new RegExp(`session_config\\.${field}`),
-      `raw ABI coverage must retain ${field}`,
-    );
-    assert.doesNotMatch(
-      formalHost,
-      new RegExp(`\\.${field}\\s*=`),
-      `typed Agent adapter must not use raw ${field}`,
-    );
-  }
-  assert.match(formalHost, /lifecycle\.Runtime\.initWithApi\(/);
-  assert.doesNotMatch(formalHost, /lifecycle\.Runtime\.init\(/);
-  assert.match(formalHost, /\.provider = \.anthropic/);
-  assert.match(formalHost, /\.permission_mode = \.default/);
-  assert.match(formalHost, /\.shell_policy = \.unrestricted/);
+  const typedConsumer = read(
+    "spikes/agentcore-sdk-contract/sdk_contract_test.zig",
+  );
+  assert.match(typedConsumer, /@import\("metask_agentcore"\)/);
+  assert.match(typedConsumer, /sdk\.Api\.discover\(\)/);
+
+  const probeRunner = read("scripts/run-agentcore-probe.mjs");
+  assert.match(probeRunner, /bundle\/bindings\/zig/);
+  assert.match(probeRunner, /agentcore\.Api\.discover\(\)/);
+  assert.match(probeRunner, /addRunArtifact/);
+  assert.match(probeRunner, /source-free AgentCore Zig package consumer/);
+  assert.match(probeRunner, /raw AgentCore C contract probe/);
 });
 
 test("build graph registers Account product and pure contract modules", () => {
@@ -689,8 +688,8 @@ test("lifecycle tests are grouped by invariant instead of a mixed spike", () => 
     existsSync(new URL("tests/support/lifecycle_fixture.zig", root)),
     true,
   );
-  const build = read("tests/build.zig");
-  for (const [path] of cases) assert.ok(build.includes(`"${path.slice(6)}"`));
+  const build = read("build.zig");
+  for (const [path] of cases) assert.ok(build.includes(`"${path}"`));
   for (const filter of [
     "terminal publication",
     "Workbench outcomes",
@@ -706,6 +705,7 @@ test("lifecycle tests are grouped by invariant instead of a mixed spike", () => 
   );
   assert.doesNotMatch(packageManifest, /test:host-lifecycle/);
   const runner = read("scripts/run-lifecycle-tests.mjs");
-  assert.match(runner, /path\.join\(repositoryRoot, "tests"\)/);
+  assert.match(runner, /"test-lifecycle"/);
+  assert.match(runner, /cwd: repositoryRoot/);
   assert.doesNotMatch(runner, /host-lifecycle|HOST_LIFECYCLE_TEST_FILTER/);
 });

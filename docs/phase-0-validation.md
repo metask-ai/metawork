@@ -285,18 +285,18 @@ reject new work
 
 ### 当前实现与复现
 
-Gate 2 基础实现当前位于 `src/agent/session.zig`，bounded executor 位于 `src/workbench/executor.zig`。生命周期验证入口位于 `tests/`，按 Agent、Workbench、Bridge/automation transport 和纵向竞态分组；它只从显式 `AGENTCORE_BUNDLE_ROOT` 导入 bundle SDK，并先按 `spikes/agentcore-contract/bundle.lock.json` 校验完整 manifest、checksum、平台、Zig 版本和 discovery symbol，不进入正式应用 build graph。
+Gate 2 基础实现当前位于 `src/agent/session.zig`，bounded executor 位于 `src/workbench/executor.zig`。生命周期验证入口位于 `tests/`，按 Agent、Workbench、Bridge/automation transport 和纵向竞态分组；revision 3 hard cut 后它通过正式 root build 从 canonical staged package 导入 bundle SDK。`agentcore:verify-staged` 在 Zig 解析 path dependency 前按 `spikes/agentcore-contract/bundle.lock.json` 校验完整 manifest、checksum、平台、Zig 版本和 discovery symbol。
 
 ```bash
-AGENTCORE_BUNDLE_ROOT=/absolute/path/to/validated/bundle \
-  npm run test:lifecycle
+npm run agentcore:verify-staged
+npm run test:lifecycle
 ```
 
-需要同时执行仓库常规测试时使用同一个显式 bundle 环境运行 `npm run test:phase0a`；该命令不会在缺少 artifact 时静默跳过 Gate 2。正式 Native `test` step 必须显式构造并运行 App、Bridge、Workbench projection 和 Workbench executor test artifacts；named module 被产品 root import 不等于其 `test` declarations 已执行。
+需要同时执行仓库常规测试时运行 `npm run test:phase0a`；该命令只消费 canonical staged bundle，并且不会在缺少 artifact 时静默跳过 Gate 2。正式 Native `test` step 必须显式构造并运行 App、Bridge、Workbench projection 和 Workbench executor test artifacts；named module 被产品 root import 不等于其 `test` declarations 已执行。
 
 当前 deterministic function-table fake 覆盖 bounded executor、每 Session 单 Run、queued/active/UI-wait close、并发 close/shutdown、callback quiescence、generation-checked RunControl lease、close lease quiescence、pre-Core termination、first-writer typed TerminationSignal、immutable TerminalResult、stale/too-late abort status、Session/Runtime destroy retry、OOM、diagnostic release、credential snapshot 隔离和临时/trusted Workspace 的词法边界。测试进程有 30 秒上限，避免回归变成无限 CI hang。
 
-这仍是 Gate 2 raw lifecycle foundation，不是正式 AgentCore Host：UI response 只验证 identity、唤醒和 close/shutdown 路径，固定返回 `UI_UNAVAILABLE`；事件和 UI JSON 不在 MetaWork 复制或解析。Gate 3 后来在 revision 2 clean bundle 上独立完成 typed SDK 验收；该历史结论必须在 revision 3 migration Gate 中使用新 SDK 重跑。executor 容量仍尚未根据真实 trace 定标。
+这仍是 Gate 2 deterministic lifecycle foundation，不是完整真实 AgentCore Host：UI response 只验证 identity、唤醒和 close/shutdown 路径，固定返回 `UI_UNAVAILABLE`；事件和 UI JSON 不在 MetaWork 复制或解析。Gate 3 后来在 revision 2 clean bundle 上独立完成 typed SDK 验收；当前 revision 3 migration 已使用 staged 官方 SDK 重跑 typed consumer 和 lifecycle，真实 AgentCore 产品链路仍必须由本 Gate 的 Gate 5/6 回归收口。executor 容量仍尚未根据真实 trace 定标。
 
 ## 8. Gate 3：AgentCore typed SDK completion
 
@@ -317,11 +317,13 @@ AGENTCORE_BUNDLE_ROOT=/absolute/path/to/validated/bundle \
 
 MetaWork 不在本仓库复制类型或 JSON schema。Gate 3 consumer 只构造 bundle SDK 类型并调用其 validator/codec；未知和 malformed JSON 字面量仅作为负向输入，不构成协议实现。
 
-Gate 3 当时精确锁定 metacodes `36637f314c0f1c41bb1a2267ced7ad6a46100003`（ABI v1 revision 2）。source-free consumer 位于 `spikes/agentcore-sdk-contract/`；revision 3 migration 必须更新同一 consumer，使其从新 `bindings/zig` package 编译并调用 `sdk.Api.discover()`。候选包复现命令为：
+Gate 3 当时精确锁定 metacodes `36637f314c0f1c41bb1a2267ced7ad6a46100003`（ABI v1 revision 2）。revision 3 source-free consumer 位于 `spikes/agentcore-sdk-contract/`，从 staged `bindings/zig` package 编译并调用 `sdk.Api.discover()`。candidate acceptance 则由隔离 probe 从 candidate 的官方 package 完成 discover/link/run；两个入口分别为：
 
 ```bash
 AGENTCORE_BUNDLE_ROOT=/absolute/path/to/validated/bundle \
-  npm run test:agentcore-sdk
+  npm run probe:agentcore
+
+npm run test:agentcore-sdk
 ```
 
 revision 2 实现中的 `npm run test:phase0a` 使用同一个显式 bundle，依次重跑仓库测试、Gate 1 raw probe、Gate 2 lifecycle 和 Gate 3 typed SDK consumer；revision 3 hard cut 后该命令改为只消费 canonical staged bundle，candidate 只由独立 probe/stage 命令处理。两种状态都不得在 artifact 缺失或 identity 漂移时跳过或回退源码。

@@ -3,7 +3,7 @@
 //! feed a bounded sink. No callback calls WebView or registers desktop tools.
 
 const std = @import("std");
-const sdk = @import("metacodes_agentcore");
+const sdk = @import("metask_agentcore");
 const wire = sdk.types;
 const event_pump = @import("event_pump");
 
