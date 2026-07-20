@@ -25,6 +25,35 @@ const createTestComposition = fixture.createTestComposition;
 const closeOnThread = fixture.closeOnThread;
 const cancelOnThread = fixture.cancelOnThread;
 const failPipelineOnThread = fixture.failPipelineOnThread;
+const CallbackSignal = fixture.CallbackSignal;
+
+const UiAnswerThenIdentityMismatch = struct {
+    session: ?*lifecycle.Session = null,
+    invoked: bool = false,
+    failed: bool = false,
+    mismatch_status: ?u32 = null,
+
+    fn notify(context: ?*anyopaque) lifecycle.EventReadyNotification {
+        const self: *UiAnswerThenIdentityMismatch = @ptrCast(@alignCast(context orelse
+            return .unavailable));
+        if (self.invoked) return .already_pending;
+        const session = self.session orelse return .already_pending;
+        const request_id = session.pendingUiRequest() orelse return .already_pending;
+        self.invoked = true;
+        const run_id = session.snapshot().active_run_id;
+        session.respondUi(
+            run_id,
+            request_id,
+            .{ .permission = .allow_once },
+        ) catch {
+            self.failed = true;
+            return .unavailable;
+        };
+        self.mismatch_status = fake_core.invokeRunningIdentityMismatch();
+        if (self.mismatch_status == null) self.failed = true;
+        return .scheduled;
+    }
+};
 
 test "RunControlLease remains safe after natural completion" {
     fake_core.reset();
@@ -576,6 +605,52 @@ test "UI request validates identity and close wakes a suspended callback" {
     try closeSession(cancelled, .session_close);
 }
 
+test "Core identity failure discards an accepted UI permission response" {
+    fake_core.reset();
+    fake_core.setNextPlan(.ui_wait);
+    var notifier = UiAnswerThenIdentityMismatch{};
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 1,
+        .event_ready_notifier = .{
+            .context = &notifier,
+            .notify_fn = UiAnswerThenIdentityMismatch.notify,
+        },
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    const session = try openSession(runtime);
+    notifier.session = session;
+
+    const run_id = try submitSession(session, "reject permission after identity failure");
+    try session.waitRun(run_id);
+    var terminal = takeTestTerminal(session, run_id);
+    defer terminal.deinit();
+
+    try std.testing.expect(notifier.invoked);
+    try std.testing.expect(!notifier.failed);
+    try std.testing.expectEqual(@as(?u32, wire.EVENT_FATAL), notifier.mismatch_status);
+    try std.testing.expectEqual(@as(?u32, wire.STATUS_CALLBACK_FAILED), terminal.raw_status_code);
+    try std.testing.expectEqual(
+        @as(?lifecycle.TerminalFailure, .dependency_contract),
+        terminal.failure,
+    );
+    try std.testing.expectEqual(lifecycle.SessionState.poisoned, session.snapshot().state);
+    try std.testing.expect(session.pendingUiRequest() == null);
+
+    fake_core.lock();
+    const answered_callbacks = fake_core.ui_answered_callbacks;
+    const fatal_callbacks = fake_core.ui_fatal_callbacks;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 0), answered_callbacks);
+    try std.testing.expectEqual(@as(usize, 1), fatal_callbacks);
+    try std.testing.expectError(error.SessionPoisoned, submitSession(session, "must remain poisoned"));
+    try closeSession(session, .session_close);
+}
+
 test "UI deadline returns unavailable and malformed UI fails the Run" {
     fake_core.reset();
     fake_core.setNextPlan(.ui_wait);
@@ -752,7 +827,50 @@ test "status is validated before RunResult and invalid results poison the Sessio
     }
 }
 
-test "concurrent close waits for callback quiescence and destroys once" {
+test "run epilogue waits for an active Core callback before poisoning" {
+    fake_core.reset();
+    var signal = CallbackSignal{};
+    fake_core.setCallbackSignal(&signal);
+    defer fake_core.setCallbackSignal(null);
+    fake_core.setNextPlan(.ui_callback_outlives_run);
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 1,
+        .event_ready_notifier = .{
+            .context = &signal,
+            .notify_fn = CallbackSignal.notify,
+        },
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    const session = try openSession(runtime);
+    const run_id = try submitSession(session, "wait for callback quiescence");
+    try session.waitRun(run_id);
+    signal.waitUntilFinished();
+    var terminal = takeTestTerminal(session, run_id);
+    defer terminal.deinit();
+    try std.testing.expectEqual(@as(?u32, wire.STATUS_OK), terminal.raw_status_code);
+    try std.testing.expectEqual(
+        @as(?lifecycle.TerminalFailure, .dependency_contract),
+        terminal.failure,
+    );
+    try std.testing.expectEqual(lifecycle.SessionState.poisoned, session.snapshot().state);
+    try closeSession(session, .session_close);
+
+    fake_core.lock();
+    const destroys = fake_core.session_destroyed;
+    const answered_callbacks = fake_core.ui_answered_callbacks;
+    const fatal_callbacks = fake_core.ui_fatal_callbacks;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 1), destroys);
+    try std.testing.expectEqual(@as(usize, 0), answered_callbacks);
+    try std.testing.expectEqual(@as(usize, 1), fatal_callbacks);
+}
+
+test "concurrent close waits for retained Session references and destroys once" {
     fake_core.reset();
     const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
     defer {

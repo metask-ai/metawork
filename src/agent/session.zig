@@ -1665,6 +1665,11 @@ pub const Session = struct {
         };
 
         self.lock();
+        if (!self.coreIdentityHealthyLocked()) {
+            self.unlock();
+            self.agent_runtime.allocator.free(owned_request);
+            return wire.UI_FATAL;
+        }
         if (self.state != .running or self.ui_active) {
             setTerminationSignalLocked(self, .{ .callback_failure = .ui });
             self.unlock();
@@ -1707,7 +1712,9 @@ pub const Session = struct {
         while (self.ui_active and self.state == .waiting_ui)
             self.wait();
         if (self.state == .waiting_ui) self.state = .running;
-        const answered = self.ui_answered and self.termination_signal == null and self.state != .closing;
+        const identity_healthy = self.coreIdentityHealthyLocked();
+        const answered = self.ui_answered and identity_healthy and
+            self.termination_signal == null and self.state != .closing;
         const response = self.ui_response_json;
         self.ui_response_json = null;
         const request_copy = self.ui_request_json.?;
@@ -1731,7 +1738,10 @@ pub const Session = struct {
             return wire.UI_ANSWERED;
         }
         if (response) |bytes| self.agent_runtime.allocator.free(bytes);
-        return if (notification_failed) wire.UI_FATAL else wire.UI_UNAVAILABLE;
+        return if (notification_failed or !identity_healthy)
+            wire.UI_FATAL
+        else
+            wire.UI_UNAVAILABLE;
     }
 
     fn expireUiRequest(self: *Session, request_id: u64) std.Io.Cancelable!void {
@@ -1815,6 +1825,14 @@ pub const Session = struct {
         self.active_refs -= 1;
         self.active_callback_refs -= 1;
         if (self.active_refs == 0 or self.active_callback_refs == 0) self.broadcast();
+    }
+
+    fn coreIdentityHealthyLocked(self: *const Session) bool {
+        if (self.dependency_contract_failure) return false;
+        return switch (self.core_session_identity) {
+            .bound => true,
+            .unbound, .failed => false,
+        };
     }
 
     fn rejectInvalidCoreIdentity(self: *Session) void {
