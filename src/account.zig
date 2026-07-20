@@ -6,6 +6,7 @@ const credential_store_impl = @import("account_credential_store");
 const platform_impl = @import("account_platform");
 const loopback_impl = @import("account_loopback");
 const login_attempt_impl = @import("account_login_attempt");
+const catalog_impl = @import("account_catalog");
 
 pub const Account = state_impl.Account;
 pub const AccountIdentity = state_impl.AccountIdentity;
@@ -28,6 +29,7 @@ pub const CredentialStore = credential_store_impl;
 pub const Platform = platform_impl;
 pub const Loopback = loopback_impl;
 pub const LoginAttempt = login_attempt_impl;
+pub const Catalog = catalog_impl;
 
 test {
     _ = state_impl;
@@ -38,4 +40,5 @@ test {
     _ = platform_impl;
     _ = loopback_impl;
     _ = login_attempt_impl;
+    _ = catalog_impl;
 }

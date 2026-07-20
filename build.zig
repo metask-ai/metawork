@@ -36,6 +36,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-account-platform", .root_module = test_modules.account_platform },
         .{ .name = "metawork-account-loopback", .root_module = test_modules.account_loopback },
         .{ .name = "metawork-account-login-attempt", .root_module = test_modules.account_login_attempt },
+        .{ .name = "metawork-account-catalog", .root_module = test_modules.account_catalog },
         .{ .name = "metawork-account-state", .root_module = test_modules.account_state },
         .{ .name = "metawork-account-completion-inbox", .root_module = test_modules.account_completion_inbox },
         .{ .name = "metawork-account", .root_module = test_modules.account },
@@ -54,6 +55,7 @@ pub fn build(b: *std.Build) void {
 const WiredModules = struct {
     account: *std.Build.Module,
     account_completion_inbox: *std.Build.Module,
+    account_catalog: *std.Build.Module,
     account_contract: *std.Build.Module,
     account_credential_store: *std.Build.Module,
     account_loopback: *std.Build.Module,
@@ -183,6 +185,13 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     account_login_attempt.addImport("account_oauth", account_oauth);
     account_login_attempt.addImport("account_loopback", account_loopback);
     account_login_attempt.addImport("metask_client", metask_client);
+    const account_catalog = b.createModule(.{
+        .root_source_file = b.path("src/account/catalog.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    account_catalog.addImport("metawork_account_contract", account_contract);
+    account_catalog.addImport("metask_client", metask_client);
     const account_credential_store = b.createModule(.{
         .root_source_file = b.path("src/account/credential_store.zig"),
         .target = target,
@@ -197,6 +206,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .optimize = root_module.optimize,
     });
     account_platform.addImport("native_sdk", existingImport(root_module, "native_sdk"));
+    account_platform.addImport("metawork_account_contract", account_contract);
     account_platform.addImport("account_state", account_state);
     account_platform.addImport("account_oauth", account_oauth);
     account_platform.addImport("account_credential_store", account_credential_store);
@@ -220,6 +230,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     account.addImport("account_platform", account_platform);
     account.addImport("account_loopback", account_loopback);
     account.addImport("account_login_attempt", account_login_attempt);
+    account.addImport("account_catalog", account_catalog);
     const executor = b.createModule(.{
         .root_source_file = b.path("src/workbench/executor.zig"),
         .target = target,
@@ -304,6 +315,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     return .{
         .account = account,
         .account_completion_inbox = account_completion_inbox,
+        .account_catalog = account_catalog,
         .account_contract = account_contract,
         .account_credential_store = account_credential_store,
         .account_loopback = account_loopback,

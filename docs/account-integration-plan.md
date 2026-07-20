@@ -52,7 +52,7 @@ Account 负责 Metask 账号登录和执行资格配置，最终向 Workbench �
 ### 3.2 非目标
 
 - 不修改 `cc-t2z/metacodes` 或 AgentCore。
-- 不复制 metacodes 的源码、宽松配置解析器或 `~/.metacodes/auth.json`。
+- 不复制 metacodes 的源码、宽松配置解析器或 `~/.metacode/auth.json`。
 - 不把 Account 扩张为通用权限中心。
 - 不管理 Agent 工具授权、Workspace trust、Bridge ACL 或操作系统权限。
 - 不支持多账号、多 profile 并行或每 Task 独立模型配置。
@@ -349,13 +349,15 @@ Workbench 只有在以下条件同时满足时才允许创建 Task：
 
 Metask 产品 owner 已锁定 C1：MetaWork 作为 Metask 第一方客户端使用 Authorization Code + PKCE S256、`https://napi.metask-ai.com`、`client_id=metacode-cli`、`scope=metacode:use`、动态 `127.0.0.1` loopback `/auth/callback`，并通过 bearer `GET /v1/profiles` 取得 identity。精确值、schema 和生命周期见 [Metask Account API 合同](metask-account-contract.md)。
 
-C1 登录成功提交 `account_only`，不自动加载 API Key/model，也不打开 Task admission。C2 独立锁定：
+C1 登录成功提交 `account_only`，不自动加载 API Key/model，也不打开 Task admission。C2 已锁定为：
 
-- API Key catalog endpoint 和严格 response schema；
-- 模型 catalog 对应的 `ExecutionTarget { provider_kind, base_url, model }`；
-- API Key revoke/disable、credential probe 与确定性鉴权失败语义。
+- OAuth bearer + `X-Metacode-Profile-ID` 请求固定 `GET /api/v1/keys?page=1&page_size=100`；
+- 选中 API Key bearer + 同一 profile header 请求固定 `GET /v1/models`；
+- `provider_kind` 只从 API Key 的精确 `group.platform` 映射；
+- `anthropic` 固定使用 `/v1/messages`，`openai` 固定使用 `/v1/chat/completions`，其他 platform fail closed；
+- response、分页、条目、字段和集合全部有 strict bound；不完整分页不发布。
 
-MetaWork 只消费这个公开合同，不要求修改 `cc-t2z/metacodes`。如果 Metask 当前模型目录没有 typed `provider_kind/base_url`，产品必须选择并锁定一个固定的 Metask gateway protocol/endpoint；不得复制 metacodes 根据 model 名称猜 provider 的逻辑。
+MetaWork 只消费这个公开合同，不要求修改 `cc-t2z/metacodes`，也不复制其宽松 catalog 解析或根据 model 名称猜 provider 的逻辑。
 
 生产 ExecutionTarget 只能来自编译期锁定的 Metask origin 和严格解析后的 typed catalog。至少执行以下校验：
 
@@ -365,7 +367,7 @@ MetaWork 只消费这个公开合同，不要求修改 `cc-t2z/metacodes`。如�
 - 禁止 userinfo、fragment 和 IP literal；
 - 模型请求默认禁止 redirect；确需 redirect 时只允许同 scheme、同 host、同 port。
 
-C2 未确认时只阻塞 catalog/ExecutionTarget 与 Task admission，不阻塞 C1 OAuth 登录、恢复、刷新和退出。测试 endpoint 只能由 test build module 注入。
+C2 不改变 C1 边界：登录、恢复、刷新和退出仍可独立停在 `account_only`。测试 endpoint 只能由 test build module 注入。
 
 ### 10.2 OAuth
 
@@ -442,18 +444,18 @@ Account 同时区分：
 
 ### 12.1 代际存储
 
-MetaWork 使用自己的系统安全凭据命名空间，不读取或共享 `~/.metacodes/auth.json`。
+MetaWork 使用自己的系统安全凭据命名空间，不读取或共享 `~/.metacode/auth.json`。
 
 macOS Phase 0A 固定使用两个存储面：
 
-- 非秘密 manifest：`~/Library/Application Support/MetaWork/account/manifest.v1`。
+- 非秘密 manifest：`~/Library/Application Support/MetaWork/account/manifest.v2`。
 - Keychain：
   - OAuth slot family `oauth/A|B`，保存 access token、refresh token 和 commit marker；
   - Execution slot family `execution/A|B`，保存完整 API Key 和 commit marker。
 
 Account 的 macOS platform implementation 直接负责该固定路径，不增加通用 Desktop Interface。account 目录必须由 Host 创建并验证为当前用户所有、权限 `0700`，拒绝 symlink；manifest 权限为 `0600`。
 
-manifest 是唯一 committed pointer，使用有界 strict JSON v1；超过 byte limit、缺字段、重复字段或出现 unknown field 都拒绝。它包含：
+manifest 是唯一 committed pointer，使用有界 strict JSON v2；超过 byte limit、缺字段、重复字段或出现 unknown field 都拒绝。它包含：
 
 - schema version；
 - `state = signed_out | account_only | execution_ready`；
@@ -462,7 +464,7 @@ manifest 是唯一 committed pointer，使用有界 strict JSON v1；超过 byte
 - 持久化的 `execution_generation` high-watermark；
 - 账号安全标识、API Key 服务端 ID；
 - 不含 secret 的 provider、model 和 allowlist 校验后的 base URL；
-- 各 slot family 必须存在的 Keychain record bitmap。
+- OAuth 与 execution 各自的随机 128-bit generation marker。
 
 manifest 不包含 token、完整 API Key、authorization code 或 verifier。
 
@@ -470,7 +472,7 @@ manifest 提交协议固定为：
 
 1. 在同目录以 `O_CREAT | O_EXCL` 和 `0600` 创建随机临时文件，拒绝 symlink。
 2. 完整写入并 `fsync` 临时文件。
-3. 使用同目录原子 rename 替换 `manifest.v1`。
+3. 使用同目录原子 rename 替换 `manifest.v2`。
 4. `fsync` account 目录。
 5. rename 前失败时旧 manifest 保持 canonical，并删除临时文件；rename 成功但 directory fsync 失败时结果视为 `persistence_outcome_unknown`，保留两个 slot family 的新旧 records、关闭 Task admission，并要求通过重新读取/重启恢复，绝不继续内存提交。
 
@@ -479,8 +481,8 @@ Native SDK credential API 不提供枚举，因此禁止用不可发现的随机
 1. 选择该 family 非 active 的固定 slot；signed out/首次登录固定从 `A` 开始。
 2. 删除 inactive slot 的全部已知 record；NotFound 视为成功，其他失败中止 staging。
 3. 生成不复用的随机 128-bit generation ID。
-4. 每个 secret record 都封装 `{generation_id, record_kind, secret}`，commit marker 最后写入并包含 generation ID 与 required-record bitmap。
-5. 逐项读回并验证存在性、长度、record kind、generation 和原值；比较不写日志，读回 buffer 随即清零。
+4. secret 写入固定 record path，generation marker 最后写入。
+5. 逐项读回并验证存在性、generation marker 和原值；比较不写日志，读回 buffer 随即清零。
 6. 原子提交指向该 family 新 slot/generation 的 committed manifest。
 7. 通过第 9 节提交到 Workbench/Account。
 8. 最后删除该 family 旧 active slot 的全部 records；删除失败不会回滚新 committed state，下次 restore 仍能通过固定 slot 名称清理。

@@ -1,6 +1,6 @@
 # MetaWork Phase 0 验证计划
 
-> 状态：Phase 0A Gate 0 至 Gate 7 已通过；Account Gate A1/B 已完成，Gate A2/C 等待外部合同
+> 状态：Phase 0A Gate 0 至 Gate 7 已通过；Account Gate A1/B/C1 已完成，Gate C2 实现完成、等待审核
 > 平台：Phase 0A macOS-first；Phase 0B 后续验证 Windows
 
 Phase 0 用最小真实原型验证技术栈和关键风险，不交付完整产品。当前 AgentCore development bundle 使用 ABI v1 revision 2；这是精确开发基线，不是 stable support policy。同步 baseline 不包含 async suspend/resume、跨进程恢复、strict Workspace security、正式 Host tools、typed Output/FileChange/plan-progress 或 plan/custom UI control。
@@ -78,7 +78,7 @@ Account DAG 的唯一规范任务状态由 TinyKG root 160 管理；本文档只
 外部合同拆成两个独立门槛：
 
 - C1 OAuth/login 已由 Metask 产品 owner 锁定：第一方 public client `metacode-cli`、`metacode:use`、固定 authority/endpoints、动态 IPv4 loopback callback 和 `/v1/profiles` identity。
-- C2 API Key catalog schema 与 typed/fixed ExecutionTarget 仍需完成；它只阻塞目录、执行配置和 Task admission，不阻塞 C1。
+- C2 API Key catalog schema、profile-aware 请求、typed/fixed ExecutionTarget 与双 family crash recovery 已锁定并实现；它不改变 C1 登录独立提交 `account_only` 的边界。
 - test endpoint 只能通过 test build module 显式注入；生产 build 不接受 endpoint/client/scope override。
 - 不复制宽松 catalog 解析器，不根据模型名猜 provider。
 

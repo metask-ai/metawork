@@ -4,6 +4,7 @@ const std = @import("std");
 /// clients may use tighter limits, but may never widen these product bounds.
 pub const Limits = struct {
     pub const account_id_bytes: usize = 256;
+    pub const profile_id_bytes: usize = 256;
     pub const display_name_bytes: usize = 256;
     pub const api_key_id_bytes: usize = 128;
     pub const api_key_name_bytes: usize = 256;
@@ -11,7 +12,8 @@ pub const Limits = struct {
     pub const model_id_bytes: usize = 256;
     pub const model_display_name_bytes: usize = 256;
     pub const base_url_bytes: usize = 2048;
-    pub const api_key_bytes: usize = 8192;
+    // Native SDK Keychain values are currently capped at 4096 bytes.
+    pub const api_key_bytes: usize = 4096;
     pub const safe_diagnostic_bytes: usize = 512;
     pub const api_key_entries: usize = 256;
     pub const model_entries: usize = 512;
@@ -50,8 +52,12 @@ pub const OperationKind = enum {
 pub const ProviderKind = enum {
     anthropic,
     openai,
-    gemini,
 };
+
+pub const metask_anthropic_messages_url =
+    "https://napi.metask-ai.com/v1/messages";
+pub const metask_openai_chat_completions_url =
+    "https://napi.metask-ai.com/v1/chat/completions";
 
 /// Stable product error identity. The Renderer localizes these codes and may
 /// display the accompanying bounded diagnostic; it never receives raw network
@@ -86,6 +92,7 @@ pub const ErrorCode = enum {
     credential_store_delete_failed,
     generation_mismatch,
     recovery_state_invalid,
+    local_resource_exhausted,
     completion_queue_overflow,
     main_loop_wake_failed,
     dependency_contract_invalid,
@@ -360,7 +367,11 @@ pub fn validateCommand(command: AccountCommand) ValidationError!void {
 pub fn validateExecutionConfig(input: ExecutionConfigInput) ValidationError!void {
     try validateRequired(input.target.model, Limits.model_id_bytes);
     try validateRequired(input.target.base_url, Limits.base_url_bytes);
-    if (!std.mem.startsWith(u8, input.target.base_url, "https://"))
+    const expected_base_url: []const u8 = switch (input.target.provider_kind) {
+        .anthropic => metask_anthropic_messages_url,
+        .openai => metask_openai_chat_completions_url,
+    };
+    if (!std.mem.eql(u8, input.target.base_url, expected_base_url))
         return error.InvalidBaseUrl;
     try validateOpaqueRequired(input.api_key, Limits.api_key_bytes);
     if (input.execution_generation == 0) return error.InvalidGeneration;
@@ -463,7 +474,7 @@ test "execution config treats credential as bounded opaque bytes" {
         .target = .{
             .provider_kind = .anthropic,
             .model = "metask-model",
-            .base_url = "https://napi.metask-ai.com/v1",
+            .base_url = metask_anthropic_messages_url,
         },
         .api_key = &.{ 0xff, 0x00, 0x7f },
         .execution_generation = 1,
@@ -473,7 +484,10 @@ test "execution config treats credential as bounded opaque bytes" {
 test "OwnedExecutionConfig moves one secret owner and securely releases it" {
     const allocator = std.testing.allocator;
     const model = try allocator.dupe(u8, "metask-model");
-    const base_url = try allocator.dupe(u8, "https://napi.metask-ai.com/v1");
+    const base_url = try allocator.dupe(
+        u8,
+        metask_anthropic_messages_url,
+    );
     const secret = try allocator.dupe(u8, "test-secret");
     var source = try OwnedExecutionConfig.initOwned(
         allocator,
@@ -585,7 +599,10 @@ test "OwnedExecutionConfig preserves zeroing through allocator release" {
     };
     const allocator = observing.allocator();
     const model = try allocator.dupe(u8, "metask-model");
-    const base_url = try allocator.dupe(u8, "https://napi.metask-ai.com/v1");
+    const base_url = try allocator.dupe(
+        u8,
+        metask_anthropic_messages_url,
+    );
     const secret = try allocator.dupe(u8, "test-secret");
     observing.secret_ptr = secret.ptr;
     observing.secret_len = secret.len;

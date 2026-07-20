@@ -138,7 +138,7 @@ Account.prepare(command | completion)
 
 整条链在 App 主线程同一 turn 内完成。任何校验或内部不变量失败都保留旧 committed state，并清零 staged secret；Bridge 不参与 prepare/commit，也不接触 credential。
 
-production 网络接入受 [Metask Account API 合同](metask-account-contract.md)约束。C1 OAuth/login 合同已由 Metask 产品 owner 锁定，允许实现登录、profile identity、恢复、刷新和退出；登录只提交 `account_only`，不打开 Task admission。严格 API Key schema 和 typed/fixed ExecutionTarget 属于 C2，未完成前只阻塞目录、执行配置和 Task admission。mCode/metacodes 只作为 Metask 自有实现证据，MetaWork 不修改其代码。
+production 网络接入受 [Metask Account API 合同](metask-account-contract.md)约束。C1 OAuth/login 独立提交 `account_only`，不打开 Task admission；C2 使用 profile-aware API Key/model catalog，从精确 `group.platform` 生成固定 Metask AgentCore target，并通过 OAuth/execution 双 family A/B slot 与单一 `manifest.v2` 提交 `execution_ready`。只有 Workbench 安装同一 execution generation 后才开放 Task admission。mCode/metacodes 只作为 Metask 自有实现证据，MetaWork 不修改其代码。
 
 ### 4.4 AgentCore
 

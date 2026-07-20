@@ -3,8 +3,11 @@ const native_sdk = @import("native_sdk");
 const oauth = @import("account_oauth");
 const store = @import("account_credential_store");
 
-const manifest_name = "manifest.v1";
-const manifest_bytes = 4096;
+const manifest_name = "manifest.v2";
+// The contract bounds UTF-8 source bytes, while JSON may expand one byte into
+// a six-byte escape. Keep the persisted envelope large enough for every
+// contract-valid manifest, not only ordinary production identifiers.
+const manifest_bytes = 16 * 1024;
 
 pub const PlatformError = error{
     WrongThread,
@@ -219,7 +222,15 @@ const ManifestWire = struct {
     expires_at: i64,
     scope: ?[]const u8,
     account_id: ?[]const u8,
+    profile_id: ?[]const u8,
     display_name: ?[]const u8,
+    execution_slot: ?[]const u8,
+    execution_credential_generation: ?[]const u8,
+    api_key_id: ?[]const u8,
+    provider_kind: ?[]const u8,
+    model: ?[]const u8,
+    base_url: ?[]const u8,
+    execution_generation: u64,
     execution_high_watermark: u64,
 };
 
@@ -229,6 +240,10 @@ pub fn encodeManifest(
 ) ![]const u8 {
     try manifest.validate();
     const generation_hex = std.fmt.bytesToHex(manifest.generation, .lower);
+    const execution_generation_hex = std.fmt.bytesToHex(
+        manifest.execution_credential_generation,
+        .lower,
+    );
     const wire: ManifestWire = .{
         .version = manifest.version,
         .state = @tagName(manifest.state),
@@ -237,10 +252,33 @@ pub fn encodeManifest(
         .expires_at = manifest.expires_at,
         .scope = if (manifest.scope_len > 0) manifest.scopeView() else null,
         .account_id = if (manifest.account_id_len > 0) manifest.accountId() else null,
+        .profile_id = if (manifest.profile_id_len > 0) manifest.profileId() else null,
         .display_name = if (manifest.display_name_len > 0)
             manifest.displayName()
         else
             null,
+        .execution_slot = if (manifest.execution_slot) |slot|
+            @tagName(slot)
+        else
+            null,
+        .execution_credential_generation = if (manifest.execution_slot != null)
+            &execution_generation_hex
+        else
+            null,
+        .api_key_id = if (manifest.api_key_id_len > 0)
+            manifest.apiKeyId()
+        else
+            null,
+        .provider_kind = if (manifest.provider_kind) |provider|
+            @tagName(provider)
+        else
+            null,
+        .model = if (manifest.model_len > 0) manifest.modelView() else null,
+        .base_url = if (manifest.base_url_len > 0)
+            manifest.baseUrl()
+        else
+            null,
+        .execution_generation = manifest.execution_generation,
         .execution_high_watermark = manifest.execution_high_watermark,
     };
     var writer = std.Io.Writer.fixed(output);
@@ -270,14 +308,19 @@ pub fn decodeManifest(input: []const u8) store.StoreError!store.Manifest {
         store.Manifest.signedOut(wire.execution_high_watermark)
     else
         store.Manifest{
-            .state = .account_only,
+            .state = manifest_state,
             .execution_high_watermark = wire.execution_high_watermark,
         };
     result.version = wire.version;
     if (manifest_state == .signed_out) {
         if (wire.active_slot != null or wire.generation != null or
             wire.scope != null or wire.account_id != null or
-            wire.display_name != null or wire.expires_at != 0)
+            wire.profile_id != null or wire.display_name != null or
+            wire.execution_slot != null or
+            wire.execution_credential_generation != null or
+            wire.api_key_id != null or wire.provider_kind != null or
+            wire.model != null or wire.base_url != null or
+            wire.expires_at != 0 or wire.execution_generation != 0)
             return error.ManifestCorrupt;
         try result.validate();
         return result;
@@ -298,17 +341,61 @@ pub fn decodeManifest(input: []const u8) store.StoreError!store.Manifest {
     result.expires_at = wire.expires_at;
     const stored_scope = wire.scope orelse return error.ManifestCorrupt;
     const account_id = wire.account_id orelse return error.ManifestCorrupt;
+    const profile_id = wire.profile_id orelse return error.ManifestCorrupt;
     const display_name = wire.display_name orelse return error.ManifestCorrupt;
     if (stored_scope.len > result.scope_value.len or
         account_id.len > result.account_id.len or
+        profile_id.len > result.profile_id.len or
         display_name.len > result.display_name.len)
         return error.ManifestCorrupt;
     @memcpy(result.scope_value[0..stored_scope.len], stored_scope);
     result.scope_len = stored_scope.len;
     @memcpy(result.account_id[0..account_id.len], account_id);
     result.account_id_len = account_id.len;
+    @memcpy(result.profile_id[0..profile_id.len], profile_id);
+    result.profile_id_len = profile_id.len;
     @memcpy(result.display_name[0..display_name.len], display_name);
     result.display_name_len = display_name.len;
+    if (manifest_state == .execution_ready) {
+        result.execution_slot = std.meta.stringToEnum(
+            store.Slot,
+            wire.execution_slot orelse return error.ManifestCorrupt,
+        ) orelse return error.ManifestCorrupt;
+        const execution_generation_text =
+            wire.execution_credential_generation orelse
+            return error.ManifestCorrupt;
+        if (execution_generation_text.len !=
+            result.execution_credential_generation.len * 2)
+            return error.ManifestCorrupt;
+        _ = std.fmt.hexToBytes(
+            &result.execution_credential_generation,
+            execution_generation_text,
+        ) catch return error.ManifestCorrupt;
+        const api_key_id = wire.api_key_id orelse
+            return error.ManifestCorrupt;
+        const model = wire.model orelse return error.ManifestCorrupt;
+        const base_url = wire.base_url orelse return error.ManifestCorrupt;
+        if (api_key_id.len > result.api_key_id.len or
+            model.len > result.model.len or
+            base_url.len > result.base_url.len)
+            return error.ManifestCorrupt;
+        result.provider_kind = std.meta.stringToEnum(
+            store.ProviderKind,
+            wire.provider_kind orelse return error.ManifestCorrupt,
+        ) orelse return error.ManifestCorrupt;
+        @memcpy(result.api_key_id[0..api_key_id.len], api_key_id);
+        result.api_key_id_len = api_key_id.len;
+        @memcpy(result.model[0..model.len], model);
+        result.model_len = model.len;
+        @memcpy(result.base_url[0..base_url.len], base_url);
+        result.base_url_len = base_url.len;
+        result.execution_generation = wire.execution_generation;
+    } else if (wire.execution_slot != null or
+        wire.execution_credential_generation != null or
+        wire.api_key_id != null or wire.provider_kind != null or
+        wire.model != null or wire.base_url != null or
+        wire.execution_generation != 0)
+        return error.ManifestCorrupt;
     try result.validate();
     return result;
 }
@@ -324,7 +411,11 @@ test "manifest codec is strict and round trips account-only state" {
         "acct-1",
     );
     defer tokens.deinit();
-    const identity = try state.AccountIdentity.init("acct-1", "Metask User");
+    const identity = try state.AccountIdentity.init(
+        "acct-1",
+        "profile-1",
+        "Metask User",
+    );
     const manifest = try store.Manifest.accountOnly(
         .B,
         @splat(0x55),
@@ -344,4 +435,128 @@ test "manifest codec is strict and round trips account-only state" {
             \\{"version":1,"state":"signed_out","active_slot":null,"generation":null,"expires_at":0,"scope":null,"account_id":null,"display_name":null,"execution_high_watermark":0,"unknown":true}
         ),
     );
+}
+
+test "manifest codec round trips one atomic execution-ready pointer" {
+    const state = @import("account_state");
+    const contract = @import("metawork_account_contract");
+    var tokens = try oauth.TokenSet.fromStored(
+        std.testing.allocator,
+        "access",
+        "refresh",
+        1234,
+        oauth.scope,
+        "acct-1",
+    );
+    defer tokens.deinit();
+    const identity = try state.AccountIdentity.init(
+        "acct-1",
+        "profile-1",
+        "Metask User",
+    );
+    const account_manifest = try store.Manifest.accountOnly(
+        .A,
+        @splat(0x11),
+        &tokens,
+        &identity,
+        0,
+    );
+    var execution = try contract.OwnedExecutionConfig.initOwned(
+        std.testing.allocator,
+        .openai,
+        try std.testing.allocator.dupe(u8, "model-1"),
+        try std.testing.allocator.dupe(
+            u8,
+            contract.metask_openai_chat_completions_url,
+        ),
+        1,
+        try std.testing.allocator.dupe(u8, "execution-api-key"),
+    );
+    defer execution.deinit();
+    const manifest = try store.Manifest.executionReady(
+        account_manifest,
+        .B,
+        @splat(0x22),
+        "325",
+        &execution,
+    );
+    var encoded_storage: [manifest_bytes]u8 = undefined;
+    const encoded = try encodeManifest(&encoded_storage, manifest);
+    const decoded = try decodeManifest(encoded);
+    try std.testing.expectEqual(
+        store.ManifestState.execution_ready,
+        decoded.state,
+    );
+    try std.testing.expectEqual(store.Slot.A, decoded.active_slot.?);
+    try std.testing.expectEqual(store.Slot.B, decoded.execution_slot.?);
+    try std.testing.expectEqualStrings("profile-1", decoded.profileId());
+    try std.testing.expectEqualStrings("325", decoded.apiKeyId());
+    try std.testing.expectEqual(
+        contract.ProviderKind.openai,
+        decoded.provider_kind.?,
+    );
+    try std.testing.expectEqualStrings("model-1", decoded.modelView());
+    try std.testing.expectEqualStrings(
+        contract.metask_openai_chat_completions_url,
+        decoded.baseUrl(),
+    );
+    try std.testing.expectEqual(@as(u64, 1), decoded.execution_generation);
+}
+
+test "manifest codec accepts worst-case JSON escaping within contract bounds" {
+    const state = @import("account_state");
+    const contract = @import("metawork_account_contract");
+    const account_id: [contract.Limits.account_id_bytes]u8 = @splat(0x01);
+    const profile_id: [contract.Limits.profile_id_bytes]u8 = @splat(0x02);
+    const display_name: [contract.Limits.display_name_bytes]u8 = @splat(0x03);
+    const api_key_id: [contract.Limits.api_key_id_bytes]u8 = @splat(0x04);
+    const model: [contract.Limits.model_id_bytes]u8 = @splat(0x05);
+    var tokens = try oauth.TokenSet.fromStored(
+        std.testing.allocator,
+        "access",
+        "refresh",
+        1234,
+        oauth.scope,
+        &account_id,
+    );
+    defer tokens.deinit();
+    const identity = try state.AccountIdentity.init(
+        &account_id,
+        &profile_id,
+        &display_name,
+    );
+    const account_manifest = try store.Manifest.accountOnly(
+        .A,
+        @splat(0x11),
+        &tokens,
+        &identity,
+        0,
+    );
+    var execution = try contract.OwnedExecutionConfig.initOwned(
+        std.testing.allocator,
+        .anthropic,
+        try std.testing.allocator.dupe(u8, &model),
+        try std.testing.allocator.dupe(
+            u8,
+            contract.metask_anthropic_messages_url,
+        ),
+        1,
+        try std.testing.allocator.dupe(u8, "execution-api-key"),
+    );
+    defer execution.deinit();
+    const manifest = try store.Manifest.executionReady(
+        account_manifest,
+        .B,
+        @splat(0x22),
+        &api_key_id,
+        &execution,
+    );
+    var encoded_storage: [manifest_bytes]u8 = undefined;
+    const encoded = try encodeManifest(&encoded_storage, manifest);
+    const decoded = try decodeManifest(encoded);
+    try std.testing.expectEqualStrings(&account_id, decoded.accountId());
+    try std.testing.expectEqualStrings(&profile_id, decoded.profileId());
+    try std.testing.expectEqualStrings(&display_name, decoded.displayName());
+    try std.testing.expectEqualStrings(&api_key_id, decoded.apiKeyId());
+    try std.testing.expectEqualStrings(&model, decoded.modelView());
 }

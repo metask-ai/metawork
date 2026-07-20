@@ -3,16 +3,23 @@ const contract = @import("metawork_account_contract");
 const state = @import("account_state");
 const oauth = @import("account_oauth");
 
+pub const api_keys_url =
+    "https://napi.metask-ai.com/api/v1/keys?page=1&page_size=100";
+pub const models_url = "https://napi.metask-ai.com/v1/models";
+
 pub const RequestKind = enum {
     exchange_code,
     refresh_token,
     profiles,
+    keys,
+    models,
 };
 
 pub const Request = struct {
     kind: RequestKind,
     body: []const u8 = "",
     bearer: ?[]const u8 = null,
+    profile_id: ?[]const u8 = null,
     control: ?RequestControl = null,
 };
 
@@ -213,12 +220,13 @@ fn fetchIdentity(
         return classifyStatus(response.status, false);
     const profile = oauth.parseFirstProfile(response.body) catch
         return error.ProtocolInvalid;
-    const stable_id = if (tokens.accountId().len > 0)
+    const account_id = if (tokens.accountId().len > 0)
         tokens.accountId()
     else
         profile.idView();
     return state.AccountIdentity.init(
-        stable_id,
+        account_id,
+        profile.idView(),
         profile.displayName(),
     ) catch return error.ProtocolInvalid;
 }
@@ -378,22 +386,24 @@ pub const StdHttpTransport = struct {
         const endpoint, const method: std.http.Method = switch (request.kind) {
             .exchange_code, .refresh_token => .{ oauth.token_url, .POST },
             .profiles => .{ oauth.profiles_url, .GET },
+            .keys => .{ api_keys_url, .GET },
+            .models => .{ models_url, .GET },
         };
-        var headers: [3]std.http.Header = undefined;
+        var headers: [4]std.http.Header = undefined;
         var header_count: usize = 0;
         headers[header_count] = .{
             .name = "Accept",
             .value = "application/json",
         };
         header_count += 1;
-        if (request.kind != .profiles) {
+        if (method == .POST) {
             headers[header_count] = .{
                 .name = "Content-Type",
                 .value = "application/x-www-form-urlencoded",
             };
             header_count += 1;
         }
-        if (request.kind == .profiles) {
+        if (method == .GET) {
             if (authorization.len == 0) return .protocol_failed;
             headers[header_count] = .{
                 .name = "Authorization",
@@ -402,6 +412,23 @@ pub const StdHttpTransport = struct {
             header_count += 1;
         } else if (request.bearer != null) {
             return .protocol_failed;
+        }
+        switch (request.kind) {
+            .keys, .models => {
+                const profile_id = request.profile_id orelse
+                    return .protocol_failed;
+                if (profile_id.len == 0 or
+                    profile_id.len > contract.Limits.profile_id_bytes or
+                    std.mem.indexOfAny(u8, profile_id, "\r\n") != null)
+                    return .protocol_failed;
+                headers[header_count] = .{
+                    .name = "X-Metacode-Profile-ID",
+                    .value = profile_id,
+                };
+                header_count += 1;
+            },
+            else => if (request.profile_id != null)
+                return .protocol_failed,
         }
 
         const result = client.fetch(.{
@@ -497,6 +524,10 @@ test "login exchanges the code then resolves a secret-free identity" {
     try std.testing.expectEqualStrings(
         "acct-1",
         result.identity.accountId(),
+    );
+    try std.testing.expectEqualStrings(
+        "profile-1",
+        result.identity.profileId(),
     );
     try std.testing.expectEqualStrings(
         "Main",

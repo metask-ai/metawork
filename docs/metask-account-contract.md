@@ -1,6 +1,6 @@
 # MetaWork 消费的 Metask Account API 合同状态
 
-> 状态：**C1 OAuth 登录合同已确认；C2 执行目录合同待完成**
+> 状态：**C1 OAuth 登录与 C2 执行目录合同均已确认**
 > 日期：2026-07-20
 > 范围：MetaWork Account 的 OAuth/account lifecycle，以及后续 API Key/model/ExecutionTarget
 
@@ -9,7 +9,7 @@
 登录与执行配置是两个独立门槛：
 
 - **C1 登录**：OAuth、profile identity、token 恢复/刷新、退出和本地安全存储。当前信息已经足够实现，不依赖模型、API Key 或 AgentCore。
-- **C2 执行配置**：API Key catalog、model catalog 和 typed/fixed `ExecutionTarget { provider_kind, base_url, model }`。C2 未完成时可以登录，但不能创建 Agent Task。
+- **C2 执行配置**：API Key catalog、model catalog 和 typed/fixed `ExecutionTarget { provider_kind, base_url, model }`。只有 execution credential 与原子 manifest 提交完成后，Account 才能发布 `execution_ready`；Workbench 安装同一 generation 后才能创建 Agent Task。
 
 MetaWork 只作为 Metask Account API 和 AgentCore bundle 的消费方。本文档不要求、也不授权修改 `cc-t2z/metacodes`。
 
@@ -43,23 +43,53 @@ Metask 产品 owner 已确认 MetaWork 作为 Metask 第一方客户端复用当
 
 macOS 使用 MetaWork 自己的命名空间，不读取或共享 `~/.metacode/auth.json`：
 
-- Keychain service：`dev.metawork.account.oauth.v1`；
+- Keychain service：`dev.metawork.account.v2`；
 - 固定 OAuth slot：`oauth/A/*` 与 `oauth/B/*`；
 - 每个 slot 分别保存 access、refresh 和最后写入的 generation marker；
-- 非秘密 `manifest.v1` 是唯一 committed pointer，使用 `account_only` 或 `signed_out` 状态；
+- 非秘密 `manifest.v2` 是 OAuth 与 execution 两个 credential family 的唯一 committed pointer，使用 `signed_out`、`account_only` 或 `execution_ready` 状态；
 - 写新 inactive slot、读回校验、原子提交 manifest 后，才清理旧 slot；
 - logout 先原子提交 `signed_out` tombstone，再清理 Keychain；清理失败不能复活旧账号；
 - Keychain/open-browser 操作只能在 Native SDK 主线程执行；网络与 loopback wait 在有界 Account worker 上执行；
 - cancel、deadline、superseding attempt 和 shutdown 必须关闭 listener、停止网络操作并 join worker。
 
-## 4. C2 尚未锁定的合同
+## 4. C2 已锁定的目录合同
 
-C2 继续锁定：
+API Key catalog：
 
-- API Key catalog 的 endpoint、分页、strict response schema、状态和 revoke/disable 语义；
-- model catalog 如何得到 typed `provider_kind + base_url + model`；
-- 选定 API Key 与 profile/account 的稳定归属；
-- credential probe 和确定性鉴权失败语义；
-- production base URL/origin/path allowlist。
+- 使用 OAuth access token 作为 Bearer，并携带当前 `profile.id` 的 `X-Metacode-Profile-ID`；
+- 固定请求 `GET https://napi.metask-ai.com/api/v1/keys?page=1&page_size=100`；
+- 成功响应严格为 `code = 0`、`message = "success"` 和 `data { items, total, page, page_size, pages }`；
+- 当前只接受 `page = 1`、`page_size = 100`、`pages = 1` 且 `total == items.len`，不发布不完整分页；
+- item 必须包含数值 `id`、`name`、完整 secret `key`、`status`、`group_id` 和完整 group；只发布 item 与 group 均为精确 `active` 的条目；
+- API Key secret 只由 Account catalog、execution staging 和 Keychain ownership 链持有；Renderer 只能看到十进制 id、name 和最后四位。
 
-C2 不得根据模型名称猜 provider，不得从 Renderer 或环境变量接受生产 `base_url/provider/model/api_key`。C2 完成前 Account 状态可以是 `authenticated/account_only`，但 `ExecutionState` 保持 `none`，Workbench 必须拒绝 Task admission。
+Model catalog：
+
+- 选中 API Key 后，以该 Key 作为 Bearer，并携带同一 `X-Metacode-Profile-ID`；
+- 固定请求 `GET https://napi.metask-ai.com/v1/models`；
+- 成功响应严格读取 list 根字段和 `data[]`；拒绝 unknown field、重复 model id、`has_more = true`、超限字段和超限集合；
+- model 只向产品投影有界 `id` 与可选 `display_name`；capability 只做有界结构校验，不自行发明 AgentCore 配置。
+
+## 5. Provider 与 ExecutionTarget
+
+`provider_kind` 只来自选中 API Key 的精确 `group.platform`，绝不根据模型名推断：
+
+| `group.platform` | Account provider | AgentCore `base_url` |
+| --- | --- | --- |
+| `anthropic` | `anthropic` | `https://napi.metask-ai.com/v1/messages` |
+| `openai` | `openai` | `https://napi.metask-ai.com/v1/chat/completions` |
+
+其他 platform 当前 fail closed。production 不接受 Renderer、环境变量或任意 URL 覆盖。
+
+Account 同时持久化 token 的 `account_id` 与当前 `profile.id`。后者用于请求 header、catalog ownership 和 execution credential 归属；重认证身份不一致时不得沿用旧 execution。
+
+## 6. 双 family 崩溃一致性
+
+- OAuth family 使用 `oauth/{A,B}/{access,refresh,marker}`；
+- execution family 使用 `execution/{A,B}/{api-key,marker}`；
+- 每个 family 都先写 inactive slot、最后写 marker、读回校验，再通过一次 `manifest.v2` 原子提交；
+- `execution_ready` manifest 同时指向 OAuth slot 与 execution slot，并记录 account/profile、API Key id、typed provider、model、固定 base URL、execution generation 和 high watermark；
+- OAuth refresh 只轮换 OAuth slot，必须保留已提交 execution family；
+- execution 重配置只轮换 execution slot，必须保留已提交 OAuth family；
+- rename 后目录 fsync 结果不确定时保留 staged slot，重启后以 manifest 为唯一 committed pointer；
+- logout 先提交 `signed_out` tombstone，再清理两个 family；清理失败不能复活账号或 execution。

@@ -2,6 +2,7 @@ const std = @import("std");
 const contract = @import("metawork_account_contract");
 
 const AccountId = BoundedString(contract.Limits.account_id_bytes);
+const ProfileId = BoundedString(contract.Limits.profile_id_bytes);
 const DisplayName = BoundedString(contract.Limits.display_name_bytes);
 const ApiKeyId = BoundedString(contract.Limits.api_key_id_bytes);
 const ModelId = BoundedString(contract.Limits.model_id_bytes);
@@ -84,6 +85,7 @@ const CommittedState = struct {
     execution_state: contract.ExecutionState = .none,
     operation: contract.OperationKind = .none,
     account_id: AccountId = .{},
+    profile_id: ProfileId = .{},
     display_name: DisplayName = .{},
     selected_api_key_id: ApiKeyId = .{},
     selected_model: ModelId = .{},
@@ -143,6 +145,17 @@ pub const Account = struct {
         return self.state.active_attempt_id;
     }
 
+    pub fn currentIdentity(self: *const Account) ?AccountIdentity {
+        if (self.state.account_id.len == 0 or
+            self.state.profile_id.len == 0)
+            return null;
+        return .{
+            .account_id = self.state.account_id,
+            .profile_id = self.state.profile_id,
+            .display_name = self.state.display_name,
+        };
+    }
+
     pub fn prepareCommand(
         self: *const Account,
         command: contract.AccountCommand,
@@ -184,6 +197,7 @@ pub const Account = struct {
                 var next = self.state;
                 next.session_state = .authenticated;
                 next.account_id = account_only.identity.account_id;
+                next.profile_id = account_only.identity.profile_id;
                 next.display_name = account_only.identity.display_name;
                 next.execution_high_watermark =
                     account_only.execution_high_watermark;
@@ -420,6 +434,7 @@ pub const Account = struct {
                 next.active_attempt_id = null;
                 next.attempt_kind = .none;
                 next.account_id = identity.account_id;
+                next.profile_id = identity.profile_id;
                 next.display_name = identity.display_name;
                 next.clearError();
                 return transitionNoEffect(
@@ -433,6 +448,10 @@ pub const Account = struct {
                     u8,
                     next.account_id.view(),
                     identity.account_id.view(),
+                ) or !std.mem.eql(
+                    u8,
+                    next.profile_id.view(),
+                    identity.profile_id.view(),
                 )) {
                     next.session_state = .reauth_required;
                     next.operation = .none;
@@ -561,6 +580,7 @@ pub const Account = struct {
         next.execution_state = .none;
         next.operation = .none;
         next.account_id.clear();
+        next.profile_id.clear();
         next.display_name.clear();
         next.selected_api_key_id.clear();
         next.selected_model.clear();
@@ -630,6 +650,7 @@ pub const Account = struct {
         next.session_state = .authenticated;
         next.execution_state = .ready;
         next.account_id = ready.identity.account_id;
+        next.profile_id = ready.identity.profile_id;
         next.display_name = ready.identity.display_name;
         next.selected_api_key_id = ready.api_key_id;
         next.selected_model.set(input.target.model) catch {
@@ -831,15 +852,19 @@ pub const PreparedTransition = struct {
 
 pub const AccountIdentity = struct {
     account_id: AccountId,
+    profile_id: ProfileId,
     display_name: DisplayName,
 
     pub fn init(
         account_id: []const u8,
+        profile_id: []const u8,
         display_name: []const u8,
     ) contract.ValidationError!AccountIdentity {
-        if (account_id.len == 0) return error.FieldEmpty;
+        if (account_id.len == 0 or profile_id.len == 0)
+            return error.FieldEmpty;
         return .{
             .account_id = try .init(account_id),
+            .profile_id = try .init(profile_id),
             .display_name = try .init(display_name),
         };
     }
@@ -850,6 +875,10 @@ pub const AccountIdentity = struct {
 
     pub fn displayName(self: *const AccountIdentity) []const u8 {
         return self.display_name.view();
+    }
+
+    pub fn profileId(self: *const AccountIdentity) []const u8 {
+        return self.profile_id.view();
     }
 };
 
@@ -1070,14 +1099,14 @@ test "RestoreReady validation does not consume execution on failure" {
         allocator,
         .anthropic,
         try allocator.dupe(u8, "model-1"),
-        try allocator.dupe(u8, "https://gateway.metask.example/v1"),
+        try allocator.dupe(u8, contract.metask_anthropic_messages_url),
         1,
         try allocator.dupe(u8, "secret"),
     );
     defer execution.deinit();
 
     try std.testing.expectError(error.FieldEmpty, RestoreReady.init(
-        try .init("account-1", "Metask User"),
+        try .init("account-1", "profile-1", "Metask User"),
         "",
         &execution,
     ));
@@ -1091,13 +1120,13 @@ test "restore ready and reauthentication preserve execution identity" {
         allocator,
         .anthropic,
         try allocator.dupe(u8, "model-1"),
-        try allocator.dupe(u8, "https://gateway.metask.example/v1"),
+        try allocator.dupe(u8, contract.metask_anthropic_messages_url),
         9,
         try allocator.dupe(u8, "secret"),
     );
     defer restored_execution.deinit();
     var restore: RestoreResult = .{ .execution_ready = try .init(
-        try .init("account-1", "Metask User"),
+        try .init("account-1", "profile-1", "Metask User"),
         "key-1",
         &restored_execution,
     ) };
@@ -1139,7 +1168,13 @@ test "restore ready and reauthentication preserve execution identity" {
     commitPrepared(&account, &reauth);
     var mismatch: WorkerCompletion = .{
         .attempt_id = account.activeAttempt().?,
-        .payload = .{ .authenticated = try .init("account-2", "Other User") },
+        .payload = .{
+            .authenticated = try .init(
+                "account-2",
+                "profile-2",
+                "Other User",
+            ),
+        },
     };
     var mismatch_transition = switch (account.prepareCompletion(&mismatch)) {
         .transition => |value| value,
@@ -1158,13 +1193,13 @@ test "failed reconfiguration preserves committed selection and generation high w
         allocator,
         .anthropic,
         try allocator.dupe(u8, "model-old"),
-        try allocator.dupe(u8, "https://gateway.metask.example/v1"),
+        try allocator.dupe(u8, contract.metask_anthropic_messages_url),
         9,
         try allocator.dupe(u8, "secret"),
     );
     defer restored_execution.deinit();
     var restore: RestoreResult = .{ .execution_ready = try .init(
-        try .init("account-1", "Metask User"),
+        try .init("account-1", "profile-1", "Metask User"),
         "key-old",
         &restored_execution,
     ) };
@@ -1312,7 +1347,13 @@ test "login commits account-only before a separate catalog generation" {
 
     var authenticated: WorkerCompletion = .{
         .attempt_id = account.activeAttempt().?,
-        .payload = .{ .authenticated = try .init("account-1", "Metask User") },
+        .payload = .{
+            .authenticated = try .init(
+                "account-1",
+                "profile-1",
+                "Metask User",
+            ),
+        },
     };
     var auth_transition = switch (account.prepareCompletion(&authenticated)) {
         .transition => |value| value,
@@ -1321,6 +1362,10 @@ test "login commits account-only before a separate catalog generation" {
     commitPrepared(&account, &auth_transition);
     try std.testing.expectEqual(contract.OperationKind.none, account.view().operation);
     try std.testing.expectEqual(@as(?u64, null), account.activeAttempt());
+    try std.testing.expectEqualStrings(
+        "profile-1",
+        account.currentIdentity().?.profileId(),
+    );
 
     var begin_catalog = switch (account.prepareCommand(.refresh_catalog)) {
         .transition => |value| value,
@@ -1364,7 +1409,10 @@ test "login commits account-only before a separate catalog generation" {
     commitPrepared(&account, &select_model);
 
     const model = try allocator.dupe(u8, "model-1");
-    const base_url = try allocator.dupe(u8, "https://gateway.metask.example/v1");
+    const base_url = try allocator.dupe(
+        u8,
+        contract.metask_anthropic_messages_url,
+    );
     const secret = try allocator.dupe(u8, "secret");
     var ready: WorkerCompletion = .{
         .attempt_id = account.activeAttempt().?,
@@ -1488,7 +1536,10 @@ test "cancel invalidates attempt and stale secret completion is destroyed" {
     commitPrepared(&account, &cancel);
 
     const model = try allocator.dupe(u8, "model");
-    const base_url = try allocator.dupe(u8, "https://gateway.metask.example/v1");
+    const base_url = try allocator.dupe(
+        u8,
+        contract.metask_anthropic_messages_url,
+    );
     const secret = try allocator.dupe(u8, "secret-that-must-be-zero");
     observing.secret_ptr = secret.ptr;
     observing.secret_len = secret.len;
