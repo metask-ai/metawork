@@ -25,6 +25,7 @@ const Manifest = struct {
     },
     contract: struct {
         binary_abi_version: u32,
+        binary_abi_revision: u32,
         required_system_link_inputs: []const []const u8,
         ui_request_mode: []const u8,
     },
@@ -86,6 +87,7 @@ pub fn build(b: *std.Build) void {
     if (!std.mem.eql(u8, manifest.toolchain.zig_version, builtin.zig_version_string))
         @panic("AgentCore bundle and consumer Zig versions differ");
     if (manifest.contract.binary_abi_version != 1 or
+        manifest.contract.binary_abi_revision != 2 or
         !std.mem.eql(u8, manifest.contract.ui_request_mode, "synchronous"))
         @panic("unsupported AgentCore contract");
     if (!std.mem.eql(u8, manifest.build.os, "macos") or

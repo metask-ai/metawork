@@ -3,7 +3,7 @@
 > 状态：Phase 0A Gate 0 至 Gate 7 已通过；下一阶段为分发与后续 capability
 > 平台：Phase 0A macOS-first；Phase 0B 后续验证 Windows
 
-Phase 0 用最小真实原型验证技术栈和关键风险，不交付完整产品。当前 AgentCore bundle 使用 stable ABI v1，同步 baseline 不包含 async suspend/resume、跨进程恢复、strict Workspace security、正式 Host tools、typed Output/FileChange/plan-progress 或 plan/custom UI control。
+Phase 0 用最小真实原型验证技术栈和关键风险，不交付完整产品。当前 AgentCore development bundle 使用 ABI v1 revision 2；这是精确开发基线，不是 stable support policy。同步 baseline 不包含 async suspend/resume、跨进程恢复、strict Workspace security、正式 Host tools、typed Output/FileChange/plan-progress 或 plan/custom UI control。
 
 ## 1. 里程碑定义
 
@@ -60,7 +60,7 @@ Gate 未通过时不得用 source dependency、MetaWork 自制协议、无界队
 
 ### 验收
 
-- 明确 stable ABI v1 与精确 bundle identity、发布支持政策的区别；
+- 明确 development ABI identity、精确 bundle identity 与未来 stable support policy 的区别；
 - 当前 v1 只声明同步能力；
 - async pending/resume、持久化、strict Workspace security 和正式 Host tools 移入后续 capability；
 - Renderer reload 与进程恢复明确分离；
@@ -220,7 +220,7 @@ AGENTCORE_BUNDLE_ROOT=/absolute/path/to/validated/bundle \
 
 MetaWork 不在本仓库复制类型或 JSON schema。Gate 3 consumer 只构造 bundle SDK 类型并调用其 validator/codec；未知和 malformed JSON 字面量仅作为负向输入，不构成协议实现。
 
-当前 clean bundle 精确锁定在 cc-zig `ab75314a3dcb595509862a9b54b3bf3b4d3a44c0`。source-free consumer 位于 `spikes/agentcore-sdk-contract/`，可复现命令为：
+当前 clean bundle 精确锁定在 metacodes `36637f314c0f1c41bb1a2267ced7ad6a46100003`（ABI v1 revision 2）。source-free consumer 位于 `spikes/agentcore-sdk-contract/`，可复现命令为：
 
 ```bash
 AGENTCORE_BUNDLE_ROOT=/absolute/path/to/validated/bundle \
@@ -229,7 +229,7 @@ AGENTCORE_BUNDLE_ROOT=/absolute/path/to/validated/bundle \
 
 `npm run test:phase0a` 使用同一个显式 bundle，依次重跑仓库测试、Gate 1 raw probe、Gate 2 lifecycle 和 Gate 3 typed SDK consumer；任何 artifact 缺失或 identity 漂移都会失败，不会跳过或回退源码。
 
-Host tool 内部 session ID 到 MetaWork Session/Run 的合同仍未定义时，Host tools 继续禁用；这不阻塞 built-in Read/Bash/Edit。
+revision 2 已提供 callback `RunContext` wire identity；Host tools 仍保持禁用，直到独立 capability Gate 定义产品工具、安全和路由政策。这不阻塞 built-in Read/Bash/Edit。
 
 ## 9. Gate 4：正式 AgentCore Host + bounded test sink
 
@@ -347,7 +347,9 @@ Gate 4 通过时的 sink 只提供全局 event count 和单 event bytes 硬上�
 
 ### 依赖前置条件
 
-当前产品基线迁移到 clean bundle `0.0.0-dev+db052085b197`。迁移只接受 stable ABI v1 的现行 manifest 和 SDK 表面，不保留旧格式或旧协议兼容；bundle 先通过 manifest/checksum identity、artifact-only link/run、完整 typed SDK contract 和独立 clean consumer，再进入正式应用 build graph。历史 Gate 6 报告保留当时 `5fe198c` 的验收事实，本次迁移必须重新运行完整 Gate 6 macOS 链路。
+当前产品基线迁移到 clean bundle `0.0.0-dev+36637f314c0f`、ABI v1 revision 2、112-byte API table。迁移只接受现行 manifest 和 SDK 表面，不保留旧格式、旧 revision 或旧协议兼容；bundle 先通过 manifest/checksum identity、artifact-only link/run、完整 typed SDK contract 和独立 clean consumer，再进入正式应用 build graph。历史 Gate 6 报告保留当时 `5fe198c` 的验收事实，本次迁移必须重新运行完整 Gate 6 macOS 链路。
+
+本次迁移的完整复验命令、产物 hash 和边界见 [AgentCore ABI v1 revision 2 迁移验证报告](agentcore-revision-2-migration-report.md)。
 
 ### 最小 UI
 

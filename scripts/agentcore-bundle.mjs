@@ -141,7 +141,12 @@ export async function validateAgentCoreBundle(bundleRoot, options = {}) {
   );
   requireExactKeys(
     manifest.contract,
-    ["binary_abi_version", "required_system_link_inputs", "ui_request_mode"],
+    [
+      "binary_abi_version",
+      "binary_abi_revision",
+      "required_system_link_inputs",
+      "ui_request_mode",
+    ],
     "contract",
   );
   if (options.expectedManifest) {
@@ -231,6 +236,10 @@ export async function validateAgentCoreBundle(bundleRoot, options = {}) {
   requireValue(
     manifest.contract?.binary_abi_version === 1,
     "unsupported AgentCore binary ABI",
+  );
+  requireValue(
+    manifest.contract?.binary_abi_revision === 2,
+    "unsupported AgentCore binary ABI revision",
   );
   requireValue(
     manifest.contract?.ui_request_mode === "synchronous",

@@ -604,12 +604,51 @@ fn decodeUiResponse(request: handlers.UiResponseRequest) !workbench_api.UiRespon
             return error.InvalidUiResponse;
         return .{ .permission = switch (choice) {
             .allow_once => .allow_once,
-            .allow_always => .allow_always,
             .deny_once => .deny_once,
-            .deny_tool_session => .deny_tool_session,
         } };
     }
     return error.InvalidUiResponse;
+}
+
+test "permission command ingress rejects unsupported persistent choices" {
+    const allow_once = try decodeUiResponse(.{
+        .taskId = "1",
+        .runId = "2",
+        .requestId = "3",
+        .kind = "permission",
+        .permission = "allow_once",
+    });
+    try std.testing.expectEqual(
+        workbench_api.PermissionChoice.allow_once,
+        allow_once.permission,
+    );
+
+    const deny_once = try decodeUiResponse(.{
+        .taskId = "1",
+        .runId = "2",
+        .requestId = "3",
+        .kind = "permission",
+        .permission = "deny_once",
+    });
+    try std.testing.expectEqual(
+        workbench_api.PermissionChoice.deny_once,
+        deny_once.permission,
+    );
+
+    for ([_][]const u8{
+        "allow_always",
+        "deny_tool_session",
+        "deny_session",
+        "full_access",
+    }) |permission| {
+        try std.testing.expectError(error.InvalidUiResponse, decodeUiResponse(.{
+            .taskId = "1",
+            .runId = "2",
+            .requestId = "3",
+            .kind = "permission",
+            .permission = permission,
+        }));
+    }
 }
 
 fn inactive(_: ?*anyopaque) bool {

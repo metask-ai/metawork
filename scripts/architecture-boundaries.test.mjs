@@ -530,7 +530,7 @@ test("lifecycle tests are grouped by invariant instead of a mixed spike", () => 
   }
 
   const cases = [
-    ["tests/agent/lifecycle_test.zig", 27],
+    ["tests/agent/lifecycle_test.zig", 31],
     ["tests/agent/event_pump_test.zig", 5],
     ["tests/workbench/executor_lifecycle_test.zig", 7],
     ["tests/bridge/automation_delivery_test.zig", 6],

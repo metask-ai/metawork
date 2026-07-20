@@ -50,13 +50,27 @@ const Probe = struct {
     saw_edit: bool = false,
     saw_final: bool = false,
     ui_mode: UiMode = .answered,
+    expected_session: ?*wire.SessionHandle = null,
+    session_id: [wire.MAX_SESSION_ID_BYTES_V1]u8 = [_]u8{0} ** wire.MAX_SESSION_ID_BYTES_V1,
+    session_id_len: usize = 0,
     sleep_started: std.atomic.Value(bool) = .init(false),
 
-    fn onEvent(raw: ?*anyopaque, session: ?*wire.SessionHandle, run_id: u64, view: wire.BytesViewV1) callconv(.c) u32 {
-        const self: *Probe = @ptrCast(@alignCast(raw orelse return wire.CALLBACK_FATAL));
-        if (session == null or run_id != 1) return wire.CALLBACK_FATAL;
-        const json = sdk.borrowedBytes(view) catch return wire.CALLBACK_FATAL;
-        var parsed = sdk.decodeCoreEvent(std.heap.c_allocator, json) catch return wire.CALLBACK_FATAL;
+    fn validateIdentity(self: *Probe, raw_run: ?*const wire.RunContextV1) bool {
+        const run = sdk.validateRunContext(raw_run) catch return false;
+        if (run.session != self.expected_session or run.run_id != 1) return false;
+        if (self.session_id_len == 0) {
+            @memcpy(self.session_id[0..run.session_id.len], run.session_id);
+            self.session_id_len = run.session_id.len;
+            return true;
+        }
+        return std.mem.eql(u8, self.session_id[0..self.session_id_len], run.session_id);
+    }
+
+    fn onEvent(raw: ?*anyopaque, raw_run: ?*const wire.RunContextV1, view: wire.BytesViewV1) callconv(.c) u32 {
+        const self: *Probe = @ptrCast(@alignCast(raw orelse return wire.EVENT_FATAL));
+        if (!self.validateIdentity(raw_run)) return wire.EVENT_FATAL;
+        const json = sdk.borrowedBytes(view) catch return wire.EVENT_FATAL;
+        var parsed = sdk.decodeCoreEvent(std.heap.c_allocator, json) catch return wire.EVENT_FATAL;
         defer parsed.deinit();
         self.event_calls += 1;
         self.event_bytes += json.len;
@@ -85,12 +99,12 @@ const Probe = struct {
             },
             .unknown => {},
         }
-        return wire.CALLBACK_CONTINUE;
+        return wire.EVENT_CONTINUE;
     }
 
-    fn onUiRequest(raw: ?*anyopaque, session: ?*wire.SessionHandle, request: wire.BytesViewV1, out: ?*wire.OwnedBytesV1) callconv(.c) u32 {
+    fn onUiRequest(raw: ?*anyopaque, raw_run: ?*const wire.RunContextV1, request: wire.BytesViewV1, out: ?*wire.OwnedBytesV1) callconv(.c) u32 {
         const self: *Probe = @ptrCast(@alignCast(raw orelse return wire.UI_FATAL));
-        if (session == null) return wire.UI_FATAL;
+        if (!self.validateIdentity(raw_run)) return wire.UI_FATAL;
         const output = out orelse return wire.UI_FATAL;
         const json = sdk.borrowedBytes(request) catch return wire.UI_FATAL;
         var parsed = sdk.decodeUiRequest(std.heap.c_allocator, json) catch return wire.UI_FATAL;
@@ -211,6 +225,7 @@ pub fn main(init: std.process.Init) !void {
         api.sessionCreate()(runtime, &session_config, &callbacks, &session, &diagnostic),
         diagnostic,
     );
+    probe.expected_session = session;
     defer {
         if (session) |handle| _ = api.sessionDestroy()(handle, &diagnostic);
     }
@@ -432,6 +447,7 @@ fn verifyUiOutcome(
         api.sessionCreate()(runtime, &config, &callbacks, &session, &diagnostic),
         diagnostic,
     );
+    probe.expected_session = session;
     defer {
         if (session) |handle| _ = api.sessionDestroy()(handle, &diagnostic);
     }
@@ -545,6 +561,7 @@ fn verifyActiveAbort(
         api.sessionCreate()(runtime, &config, &callbacks, &session, &diagnostic),
         diagnostic,
     );
+    probe.expected_session = session;
     defer {
         if (session) |handle| _ = api.sessionDestroy()(handle, &diagnostic);
     }

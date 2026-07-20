@@ -1,19 +1,19 @@
 # MetaWork 高层架构
 
-> 状态：Phase 0A 已完成；当前实现基线迁移到 stable AgentCore ABI v1，后续正式方向选择单 AgentCore Worker
-> 日期：2026-07-19
+> 状态：Phase 0A 已完成；当前实现基线迁移到 development AgentCore ABI v1 revision 2，后续正式方向选择单 AgentCore Worker
+> 日期：2026-07-20
 
 产品范围见 [产品需求](requirements.md)，metacodes（原 cc-zig）的具体接入约束见 [AgentCore 集成契约](agentcore-integration.md)，当前 bundle 能力见 [AgentCore ABI v1 消费基线](agentcore-abi-v1.md)。历史报告中的 cc-zig 名称保留当时仓库身份。
 
 ## 1. 已确认的技术选型
 
-| 层级              | 选择                               | 决策说明                                                              |
-| ----------------- | ---------------------------------- | --------------------------------------------------------------------- |
-| Renderer          | React + Tailwind                   | 当前正式 UI 技术栈，适合复杂 Workbench 界面                           |
-| Desktop Framework | Native SDK                         | Zig 一等公民，负责系统 WebView、窗口、Bridge 和桌面生命周期           |
-| App / Workbench / Agent | Zig                           | 分别承担 composition、产品状态和 AgentCore 执行边界                   |
-| AgentCore         | metacodes AgentCore library bundle | metacodes 独立构建和发布；MetaWork 链接产物，不把上游源码纳入自身构建 |
-| Agent UI contract | metacodes 原生结构化协议           | React 消费 Host 产品投影，不消费终端字节流或 Provider SSE             |
+| 层级                    | 选择                               | 决策说明                                                              |
+| ----------------------- | ---------------------------------- | --------------------------------------------------------------------- |
+| Renderer                | React + Tailwind                   | 当前正式 UI 技术栈，适合复杂 Workbench 界面                           |
+| Desktop Framework       | Native SDK                         | Zig 一等公民，负责系统 WebView、窗口、Bridge 和桌面生命周期           |
+| App / Workbench / Agent | Zig                                | 分别承担 composition、产品状态和 AgentCore 执行边界                   |
+| AgentCore               | metacodes AgentCore library bundle | metacodes 独立构建和发布；MetaWork 链接产物，不把上游源码纳入自身构建 |
+| Agent UI contract       | metacodes 原生结构化协议           | React 消费 Host 产品投影，不消费终端字节流或 Provider SSE             |
 
 由此排除以下正式主路径：
 
@@ -28,7 +28,7 @@
 
 ### 同步 macOS baseline
 
-当前锁定 metacodes bundle `0.0.0-dev+db052085b197`（commit `db052085b1970675b54426cfea7d71222bf174af`）提供 stable AgentCore ABI v1。同步 Run、built-in tools、结构化 observation events、同步 question/permission、abort、生命周期和同进程 macOS 垂直链路沿用 Gate 6 的产品边界，并在本次精确 bundle 迁移中重新验收。
+当前锁定 metacodes development bundle `0.0.0-dev+36637f314c0f`（commit `36637f314c0f1c41bb1a2267ced7ad6a46100003`）提供 AgentCore ABI v1 revision 2。同步 Run、built-in tools、结构化 observation events、同步 question/permission、abort、生命周期和同进程 macOS 垂直链路沿用 Gate 6 的产品边界，并在本次精确 bundle 迁移中重新验收。MetaWork 只接受 112-byte revision 2 API table，不兼容旧 revision，也不保留 fallback；这项精确开发基线不构成 stable ABI support policy。
 
 该 baseline 不包含：
 
@@ -149,14 +149,14 @@ AgentCore bundle
 
 - metacodes 单一维护 binary facade、C header、Zig SDK 和内部映射；
 - MetaWork 的 probe 从显式 bundle root 消费，正式 build 使用经 lock 校验并 staged 的同布局 bundle；两者都不访问上游 source tree；
-- manifest 锁定 commit/build identity、Zig toolchain、target、architecture、构建模式、ABI version、系统链接输入和 checksum；
+- manifest 锁定 commit/build identity、Zig toolchain、target、architecture、构建模式、ABI version/revision、系统链接输入和 checksum；
 - artifact 缺失、target 不匹配或 checksum 错误时明确失败；
 - 不使用 `latest`、版本范围、可变 tag 或 source fallback；
 - 当前 raw contract probe 与正式 Host 分离。probe 可以记录 raw SDK 缺口，正式 Host 必须只使用 typed SDK contract；
 - 同步 baseline 通过后，再建设内容寻址 cache 和远程 artifact source；切换来源不能改变 bundle layout 或链接方式；
 - 当前产品 Runtime 配置不注册 Host tools，Read/Bash/Edit 使用 AgentCore built-in tools。
 
-ABI v1 使用刚性 struct size 和 reserved-zero 规则。新增 layout、function table 或 UI/control tag 必须发布新 ABI version；新增 observation tag 可以使用新的 bundle identity 兼容发布，旧 SDK 将其解码为 owned unknown observation。MetaWork 在 SDK 校验后立即释放并忽略 unknown observation，不让它占用产品事件泵，也不传给 Renderer 或猜测为产品状态。
+ABI v1 revision 2 使用刚性 struct size、revision 和 reserved-zero 规则。API layout 或 callback contract 的变化必须由 metacodes 发布新的 revision/version 和 bundle identity；MetaWork 对三者做精确匹配，不承担旧 revision 兼容。新增 observation tag 可以使用新的 bundle identity 兼容发布，旧 SDK 将其解码为 owned unknown observation。MetaWork 在 SDK 校验后立即释放并忽略 unknown observation，不让它占用产品事件泵，也不传给 Renderer 或猜测为产品状态。
 
 ## 6. 实施 Gate
 
@@ -268,16 +268,17 @@ Native SDK 是当前选型，但 Phase 0A 必须验证：
 
 ## 11. 主要风险
 
-| 风险                                  | 当前控制方式                                                  |
-| ------------------------------------- | ------------------------------------------------------------- |
-| Native SDK Zig → React 路径不符合预期 | Gate 0 先做真实 dev/prod smoke                                |
-| typed SDK 与真实 producer wire 漂移   | Gate 3 source-free corpus + Gate 4 真实 Host link/run 回归    |
-| callback 数据返回后失效               | callback 内验证并深拷贝                                       |
-| callback/close race 造成 UAF          | abort、join、callback quiescence 后 destroy                   |
-| 同步 UI 耗尽 executor                 | bounded slots、deadline、cancel/close/shutdown 唤醒和压力测试 |
-| Bridge/event 造成无限内存             | count/byte/time 多维上限和公平调度                            |
-| Run failure 被误报用户取消         | active first-writer cause 与 Workbench write-once terminal history 分层 |
-| Renderer 掉线杀死后台 Run              | typed transport policy 不向 Agent termination 反向泄漏          |
-| v1 Workspace 被误报安全               | 只允许临时/trusted 验证并显式标注限制                         |
-| 同进程 native crash 带走全部状态      | Gate 7 fault-domain spike 后再决定进程模型                    |
-| 过早建设发布系统                      | baseline 通过后再做 cache 与 remote                           |
+| 风险                                   | 当前控制方式                                                            |
+| -------------------------------------- | ----------------------------------------------------------------------- |
+| Native SDK Zig → React 路径不符合预期  | Gate 0 先做真实 dev/prod smoke                                          |
+| typed SDK 与真实 producer wire 漂移    | Gate 3 source-free corpus + Gate 4 真实 Host link/run 回归              |
+| callback 数据返回后失效                | callback 内验证并深拷贝                                                 |
+| callback/close race 造成 UAF           | abort、join、callback quiescence 后 destroy                             |
+| callback identity race 泄漏 permission | UI request publication 与 response extraction 均在 Session lock 下复检  |
+| 同步 UI 耗尽 executor                  | bounded slots、deadline、cancel/close/shutdown 唤醒和压力测试           |
+| Bridge/event 造成无限内存              | count/byte/time 多维上限和公平调度                                      |
+| Run failure 被误报用户取消             | active first-writer cause 与 Workbench write-once terminal history 分层 |
+| Renderer 掉线杀死后台 Run              | typed transport policy 不向 Agent termination 反向泄漏                  |
+| v1 Workspace 被误报安全                | 只允许临时/trusted 验证并显式标注限制                                   |
+| 同进程 native crash 带走全部状态       | Gate 7 已选后续单 Worker；当前同进程应用仍是 prototype                  |
+| 过早建设发布系统                       | baseline 通过后再做 cache 与 remote                                     |

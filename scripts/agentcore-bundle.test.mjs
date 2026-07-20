@@ -42,6 +42,7 @@ async function fixture(t, mutateManifest = () => {}) {
     },
     contract: {
       binary_abi_version: 1,
+      binary_abi_revision: 2,
       required_system_link_inputs: ["libc"],
       ui_request_mode: "synchronous",
     },
@@ -83,6 +84,24 @@ test("rejects a self-consistent bundle that differs from the repository lock", a
   await assert.rejects(
     validateAgentCoreBundle(root, { ...injectedChecks, expectedManifest }),
     /repository lock/,
+  );
+});
+
+test("rejects a missing or unsupported binary ABI revision", async (t) => {
+  const missing = await fixture(t, (manifest) => {
+    delete manifest.contract.binary_abi_revision;
+  });
+  await assert.rejects(
+    validateAgentCoreBundle(missing, injectedChecks),
+    /contract fields do not match/,
+  );
+
+  const unsupported = await fixture(t, (manifest) => {
+    manifest.contract.binary_abi_revision = 1;
+  });
+  await assert.rejects(
+    validateAgentCoreBundle(unsupported, injectedChecks),
+    /binary ABI revision/,
   );
 });
 
