@@ -715,6 +715,8 @@ test "Dispatcher validates authority before domain calls and preserves committed
         .{ .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 },
         fixture.workbenchConfiguration(),
     );
+    try fixture.installWorkbenchExecution(&workbench);
+    const initial_revision = workbench.currentRevision();
     var harness = Harness{};
     var dispatcher = try Dispatcher.init(
         std.testing.allocator,
@@ -755,7 +757,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
         &response,
     );
     try std.testing.expect(std.mem.indexOf(u8, invalid, "\"handler_failed\"") != null);
-    try std.testing.expectEqual(@as(u64, 0), workbench.currentRevision());
+    try std.testing.expectEqual(initial_revision, workbench.currentRevision());
 
     _ = native_dispatcher.dispatch(
         "{\"id\":\"connect\",\"command\":\"metawork.events.connect\",\"payload\":{}}",

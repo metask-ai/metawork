@@ -156,6 +156,10 @@ pub const Account = struct {
         };
     }
 
+    pub fn executionHighWatermark(self: *const Account) u64 {
+        return self.state.execution_high_watermark;
+    }
+
     pub fn prepareCommand(
         self: *const Account,
         command: contract.AccountCommand,
@@ -206,6 +210,54 @@ pub const Account = struct {
             },
             .execution_ready => |*ready| self.prepareRestoreReady(restore, ready),
         };
+    }
+
+    pub fn prepareRestoreFailure(
+        self: *const Account,
+        failure: WorkerFailure,
+    ) PrepareResult {
+        if (self.state.session_state != .restoring)
+            return .{ .rejected = .invalid_state };
+        var next = self.state;
+        next.error_code = if (failure.error_code == .none)
+            .recovery_state_invalid
+        else
+            failure.error_code;
+        next.safe_diagnostic = failure.safe_diagnostic;
+        return transitionNoAttempt(next, .operation_failed);
+    }
+
+    /// A logout manifest rename may have committed even when the filesystem
+    /// cannot report the outcome. Continuing with the old in-memory execution
+    /// would violate the tombstone boundary, so this state is deliberately
+    /// non-recoverable in-process. Startup restore is the only authority that
+    /// may decide which manifest won.
+    pub fn prepareLogoutPersistenceUnknown(
+        self: *const Account,
+    ) PrepareResult {
+        if (self.state.attempt_kind != .logout or
+            self.state.operation != .logging_out or
+            self.state.active_attempt_id == null)
+            return .{ .rejected = .invalid_state };
+        const attempt_id = self.state.active_attempt_id.?;
+        var next = self.state;
+        next.session_state = .shutting_down;
+        next.execution_state = .none;
+        next.operation = .none;
+        next.active_attempt_id = null;
+        next.attempt_kind = .none;
+        next.selected_api_key_id.clear();
+        next.selected_model.clear();
+        next.pending_api_key_id.clear();
+        next.pending_model.clear();
+        next.execution_generation = 0;
+        next.error_code = .recovery_state_invalid;
+        next.safe_diagnostic.clear();
+        return transitionNoEffect(
+            next,
+            .operation_failed,
+            attempt_id,
+        );
     }
 
     pub fn prepareTokenRefresh(self: *const Account) PrepareResult {
@@ -1333,6 +1385,46 @@ test "shutdown invalidates active attempt and requires effect consumption" {
         contract.ErrorCode.shutting_down,
         account.prepareCommand(.begin_login).rejected,
     );
+}
+
+test "unknown logout persistence outcome cannot reopen ready execution" {
+    var account = Account{ .state = .{
+        .session_state = .authenticated,
+        .execution_state = .ready,
+        .account_id = try .init("account-1"),
+        .profile_id = try .init("profile-1"),
+        .display_name = try .init("Metask User"),
+        .selected_api_key_id = try .init("key-1"),
+        .selected_model = try .init("model-1"),
+        .execution_generation = 1,
+        .execution_high_watermark = 1,
+    } };
+    var logout = switch (account.prepareCommand(.logout)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    _ = logout.takeEffect();
+    commitPrepared(&account, &logout);
+    var unknown = switch (account.prepareLogoutPersistenceUnknown()) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    commitPrepared(&account, &unknown);
+
+    const view = account.view();
+    try std.testing.expectEqual(
+        contract.AccountSessionState.shutting_down,
+        view.session_state,
+    );
+    try std.testing.expectEqual(
+        contract.ExecutionState.none,
+        view.execution_state,
+    );
+    try std.testing.expectEqual(
+        contract.ErrorCode.recovery_state_invalid,
+        view.error_code,
+    );
+    try std.testing.expect(!view.can_create_task);
 }
 
 test "login commits account-only before a separate catalog generation" {

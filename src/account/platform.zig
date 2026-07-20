@@ -153,7 +153,10 @@ pub const MacosBackend = struct {
             0,
         ) catch return error.ReadFailed;
         if (read != length) return error.ReadFailed;
-        return decodeManifest(bytes[0..read]);
+        return @as(
+            ?store.Manifest,
+            try decodeManifest(bytes[0..read]),
+        );
     }
 
     fn commitManifest(

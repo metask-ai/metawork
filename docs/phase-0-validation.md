@@ -1,6 +1,6 @@
 # MetaWork Phase 0 验证计划
 
-> 状态：Phase 0A Gate 0 至 Gate 7 已通过；Account Gate A1/B/C1 已完成，Gate C2 实现完成、等待审核
+> 状态：Phase 0A Gate 0 至 Gate 7 已通过；Account Gate A1/B/C1/C2/D 已完成
 > 平台：Phase 0A macOS-first；Phase 0B 后续验证 Windows
 
 Phase 0 用最小真实原型验证技术栈和关键风险，不交付完整产品。当前 AgentCore development bundle 使用 ABI v1 revision 2；这是精确开发基线，不是 stable support policy。同步 baseline 不包含 async suspend/resume、跨进程恢复、strict Workspace security、正式 Host tools、typed Output/FileChange/plan-progress 或 plan/custom UI control。
@@ -120,6 +120,17 @@ Gate B 不等于 C1/C2 完成。C1 production OAuth client、profile decoder 和
 - typed/fixed provider、base URL、model 与 account/profile 归属；
 - production origin/path allowlist，不从 Renderer、环境变量或模型名推断；
 - 只有验证并提交 ExecutionConfig 后才打开 Workbench Task admission。
+
+#### Gate D：App 与 Workbench 集成
+
+- App 分为 compose 与 platform-ready 两阶段；只有后者读取 MetaWork 自己的 Keychain/manifest、打开浏览器或启动 OAuth worker；
+- `begin_login` 使用已经锁定的 C1 信息即可执行，成功先持久化 OAuth generation 并提交 `account_only`；API Key/model catalog 不是登录前置条件；
+- effect 先 admission，Account/Workbench committed state 在 App 主线程同一 turn 提交，随后才启动 OAuth 或持久化 side effect；worker completion 只能唤醒主循环，不能直接写产品状态；
+- Workbench 预分配 Account projection 与 active ExecutionConfig storage；生产启动不读取 `METAWORK_PROVIDER_*` 默认值；
+- execution replacement gate 同 Task admission 线性化，并检查 live/closing Task、Session、Run、executor job、`RunRef` 与 callback quiescence；
+- Task 与 Run 固定记录创建时的 execution generation/provider/model，后续重配置不改变历史身份；
+- logout 的 manifest outcome unknown 必须清除 runtime execution 并进入 fail-closed restart boundary，不能重新开放旧配置；
+- Gate 6 的本地 provider 只通过 `-Dautomation=true` 模块和 `METAWORK_GATE6_PROVIDER_BASE_URL` 注入；release artifact 扫描必须证明 fixture endpoint、credential、model 和 account 标识不存在。
 
 ## 4. Gate -1：规范对齐
 

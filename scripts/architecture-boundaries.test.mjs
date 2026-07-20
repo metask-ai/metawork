@@ -216,6 +216,34 @@ test("build graph registers Account product and pure contract modules", () => {
   assert.doesNotMatch(source, /src\/agentcore(?:\/|\.zig)/);
 });
 
+test("Account execution is installed explicitly without process defaults", () => {
+  const app = read("src/app.zig");
+  const workbench = read("src/workbench/projection.zig");
+  for (const variable of [
+    "METAWORK_PROVIDER_API_KEY",
+    "METAWORK_PROVIDER_MODEL",
+    "METAWORK_PROVIDER_KIND",
+    "METAWORK_PROVIDER_BASE_URL",
+  ]) {
+    assert.doesNotMatch(
+      app,
+      new RegExp(variable),
+      `${variable} must not configure production execution`,
+    );
+  }
+  assert.match(workbench, /@import\("metawork_account_contract"\)/);
+  assert.doesNotMatch(workbench, /@import\("metawork_account"\)/);
+  assert.match(
+    workbench,
+    /pub const Configuration = struct \{\s*change_notifier:/,
+  );
+  assert.doesNotMatch(workbench, /ExecutionDefaults/);
+  assert.match(app, /effect_commit_hook\.dispatch\(\)/);
+  assert.match(app, /commitAccountOnly\(/);
+  assert.match(app, /account_api\.CredentialOwner/);
+  assert.doesNotMatch(app, /account_api\.OAuth\.TokenSet/);
+});
+
 test("formal Native test graph runs every product module test root", () => {
   const source = read("build.zig");
   for (const [name, rootModule] of [

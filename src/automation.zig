@@ -11,5 +11,6 @@ else
 
 pub const enabled = implementation.enabled;
 pub const handler_count = implementation.handler_count;
+pub const ExecutionFixture = implementation.ExecutionFixture;
 pub const Hooks = implementation.Hooks;
 pub const Runtime = implementation.Runtime;

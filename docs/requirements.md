@@ -208,7 +208,7 @@ Metask 登录 → 选择 API Key/模型 → ready ExecutionConfig
 → Workbench Task admission → 既有同步 macOS baseline
 ```
 
-production 网络接入只有在 Metask Account API 合同解除 blocked 后才能进入验收；纯状态机与 fake client 验证可以先行。
+Metask C1 OAuth/login 与 C2 catalog/ExecutionTarget 合同均已锁定。登录可独立提交 `account_only`；API Key/model 选择只决定何时形成 `execution_ready`，不得反向成为登录前置条件。
 
 ### 7.3 完整 Phase 0A
 

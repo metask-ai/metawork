@@ -49,10 +49,7 @@ const app = spawn(binary, [], {
   env: {
     ...process.env,
     METAWORK_GATE0_AUTOMATION: "1",
-    METAWORK_PROVIDER_API_KEY: "metawork-gate6-fixture-key",
-    METAWORK_PROVIDER_MODEL: "metawork-gate6-fixture-model",
-    METAWORK_PROVIDER_KIND: "anthropic",
-    METAWORK_PROVIDER_BASE_URL: baseUrl,
+    METAWORK_GATE6_PROVIDER_BASE_URL: baseUrl,
   },
   stdio: ["ignore", "pipe", "pipe"],
 });

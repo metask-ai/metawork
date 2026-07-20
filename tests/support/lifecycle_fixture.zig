@@ -1,6 +1,7 @@
 pub const std = @import("std");
 pub const lifecycle = @import("metawork_agent");
 pub const workbench_api = @import("metawork_workbench");
+pub const account_contract = @import("metawork_account_contract");
 pub const event_pump = @import("event_pump");
 pub const automation_delivery = @import("automation_delivery");
 pub const workbench_executor = @import("workbench_executor");
@@ -1033,11 +1034,42 @@ pub fn createTestRuntime(limits: lifecycle.Limits) !*lifecycle.Runtime {
 }
 
 pub fn workbenchConfiguration() workbench_api.Configuration {
-    return .{ .execution = .{
-        .provider = .anthropic,
-        .credential = "fixture-secret",
-        .model = "fixture-model",
-    } };
+    return .{};
+}
+
+pub fn installWorkbenchExecution(
+    workbench: *workbench_api.Workbench,
+) !void {
+    var execution = try account_contract.OwnedExecutionConfig.initOwned(
+        std.testing.allocator,
+        .anthropic,
+        try std.testing.allocator.dupe(u8, "fixture-model"),
+        try std.testing.allocator.dupe(
+            u8,
+            account_contract.metask_anthropic_messages_url,
+        ),
+        1,
+        try std.testing.allocator.dupe(u8, "fixture-secret"),
+    );
+    errdefer execution.deinit();
+    try workbench.beginExecutionReplacement();
+    workbench.commitAccountFactNoFail(.{
+        .kind = .execution_changed,
+        .view = .{
+            .session_state = .authenticated,
+            .execution_state = .ready,
+            .operation = .none,
+            .account_id = "account-1",
+            .display_name = "Fixture User",
+            .selected_api_key_id = "key-1",
+            .selected_model = "fixture-model",
+            .can_create_task = true,
+            .execution_generation = 1,
+        },
+    });
+    workbench.installExecutionNoFail(&execution);
+    workbench.endExecutionReplacementNoFail();
+    workbench.finishAccountCommitNoFail();
 }
 
 pub fn workbenchTaskInput() workbench_api.TaskCreateInput {

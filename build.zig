@@ -88,6 +88,7 @@ fn createLifecycleFixture(
     });
     fixture.addImport("metawork_agent", modules.agent);
     fixture.addImport("metawork_workbench", modules.workbench);
+    fixture.addImport("metawork_account_contract", modules.account_contract);
     fixture.addImport("event_pump", modules.event_pump);
     fixture.addImport("automation_delivery", modules.automation_delivery);
     fixture.addImport("metacodes_agentcore", modules.sdk);
@@ -242,7 +243,15 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .optimize = root_module.optimize,
     });
     projection.addImport("metawork_agent", agent);
+    projection.addImport("metawork_account_contract", account_contract);
     projection.addImport("workbench_executor", executor);
+    projection.addImport(
+        "build_options",
+        existingImport(
+            existingImport(root_module, "runner"),
+            "build_options",
+        ),
+    );
     const workbench_contract_fixture = b.addOptions();
     workbench_contract_fixture.addOption(
         []const u8,
@@ -272,6 +281,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     });
     automation_disabled.addImport("native_sdk", existingImport(root_module, "native_sdk"));
     automation_disabled.addImport("metawork_bridge", bridge);
+    automation_disabled.addImport("metawork_account_contract", account_contract);
     const automation_delivery = b.createModule(.{
         .root_source_file = b.path("src/automation/delivery.zig"),
         .target = target,
@@ -284,6 +294,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     });
     automation_enabled.addImport("native_sdk", existingImport(root_module, "native_sdk"));
     automation_enabled.addImport("metawork_bridge", bridge);
+    automation_enabled.addImport("metawork_account_contract", account_contract);
     automation_enabled.addImport("automation_delivery", automation_delivery);
     const automation = b.createModule(.{
         .root_source_file = b.path("src/automation.zig"),

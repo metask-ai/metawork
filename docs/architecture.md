@@ -131,12 +131,14 @@ Account 使用 `AccountSessionState` 与 `ExecutionState` 两个正交状态。O
 
 ```text
 Account.prepare(command | completion)
+→ Account effect admission
 → Workbench.commitAccountFactNoFail(...)
 → Workbench.installExecutionNoFail(...)  [可选]
 → Account.commit(prepared)
+→ dispatch committed Account effect
 ```
 
-整条链在 App 主线程同一 turn 内完成。任何校验或内部不变量失败都保留旧 committed state，并清零 staged secret；Bridge 不参与 prepare/commit，也不接触 credential。
+前五步在 App 主线程同一 turn 内完成，effect 只有在 committed swap 后才能启动；worker completion 再经主循环进入同一条链。任何校验或内部不变量失败都保留旧 committed state，并清零 staged secret；Bridge 不参与 prepare/commit，也不接触 credential。C1 登录只依赖锁定的 OAuth client/scope/loopback/profile 合同，成功先提交 `account_only`，不等待 API Key 或模型目录。
 
 production 网络接入受 [Metask Account API 合同](metask-account-contract.md)约束。C1 OAuth/login 独立提交 `account_only`，不打开 Task admission；C2 使用 profile-aware API Key/model catalog，从精确 `group.platform` 生成固定 Metask AgentCore target，并通过 OAuth/execution 双 family A/B slot 与单一 `manifest.v2` 提交 `execution_ready`。只有 Workbench 安装同一 execution generation 后才开放 Task admission。mCode/metacodes 只作为 Metask 自有实现证据，MetaWork 不修改其代码。
 

@@ -748,6 +748,46 @@ pub fn commitSignedOut(
     return clearAll(backend);
 }
 
+/// Retries only deletion work that is provably retired by the committed
+/// manifest. The active OAuth and Execution slots are never touched.
+pub fn cleanupRetiredCredentials(
+    backend: Backend,
+) StoreError!bool {
+    const loaded = try backend.loadManifest();
+    if (loaded == null) return clearAll(backend);
+    const manifest = loaded.?;
+    try manifest.validate();
+    if (manifest.state == .signed_out) return clearAll(backend);
+
+    var cleanup_pending = false;
+    clearSlot(
+        backend,
+        .oauth,
+        Slot.inactive(manifest.active_slot.?),
+    ) catch {
+        cleanup_pending = true;
+    };
+    switch (manifest.state) {
+        .signed_out => unreachable,
+        .account_only => {
+            clearSlot(backend, .execution, .A) catch {
+                cleanup_pending = true;
+            };
+            clearSlot(backend, .execution, .B) catch {
+                cleanup_pending = true;
+            };
+        },
+        .execution_ready => clearSlot(
+            backend,
+            .execution,
+            Slot.inactive(manifest.execution_slot.?),
+        ) catch {
+            cleanup_pending = true;
+        },
+    }
+    return cleanup_pending;
+}
+
 fn verifySlot(
     backend: Backend,
     slot: Slot,
@@ -1453,4 +1493,69 @@ test "logout tombstone retires both committed credential families" {
         @as(u64, 1),
         restored.signed_out.execution_high_watermark,
     );
+}
+
+test "retired cleanup never deletes the committed OAuth slot" {
+    var fake: FakeBackend = .{};
+    var tokens = try testTokens("access", "refresh");
+    defer tokens.deinit();
+    const identity = try state.AccountIdentity.init(
+        "acct-1",
+        "profile-1",
+        "Metask User",
+    );
+    _ = try commitAccountOnly(
+        fake.backend(),
+        @splat(0x11),
+        &tokens,
+        &identity,
+        0,
+    );
+    const active = fake.manifest.?.active_slot.?;
+    const retired = Slot.inactive(active);
+    try fake.backend().set(.{
+        .family = .oauth,
+        .slot = retired,
+        .kind = .access,
+    }, "retired-access");
+    try fake.backend().set(.{
+        .family = .oauth,
+        .slot = retired,
+        .kind = .refresh,
+    }, "retired-refresh");
+    try fake.backend().set(.{
+        .family = .oauth,
+        .slot = retired,
+        .kind = .marker,
+    }, &@as(Generation, @splat(0x44)));
+    try fake.backend().set(.{
+        .family = .execution,
+        .slot = .A,
+        .kind = .api_key,
+    }, "retired-api-key");
+    try fake.backend().set(.{
+        .family = .execution,
+        .slot = .A,
+        .kind = .marker,
+    }, &@as(Generation, @splat(0x55)));
+
+    try std.testing.expect(
+        !try cleanupRetiredCredentials(fake.backend()),
+    );
+    var buffer: [contract.Limits.api_key_bytes]u8 = undefined;
+    try std.testing.expect((try fake.backend().get(.{
+        .family = .oauth,
+        .slot = active,
+        .kind = .access,
+    }, &buffer)) != null);
+    try std.testing.expect((try fake.backend().get(.{
+        .family = .oauth,
+        .slot = retired,
+        .kind = .access,
+    }, &buffer)) == null);
+    try std.testing.expect((try fake.backend().get(.{
+        .family = .execution,
+        .slot = .A,
+        .kind = .api_key,
+    }, &buffer)) == null);
 }
