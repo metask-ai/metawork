@@ -42,7 +42,7 @@ MetaWork 的视觉记忆点不是装饰性的暖色或衬线字体，而是：
 
 ### 2.1 当前 ABI v1 capability profile
 
-当前锁定的 stable ABI v1 只为以下界面提供可验证数据：
+当前锁定的 development ABI v1 revision 2 只为以下界面提供可验证数据：
 
 - 文本流、工具开始/进度/结果、Run progress、usage、context warning、auto compact、retry 和 stream done；
 - Ask question 与 permission 两类同步用户请求；

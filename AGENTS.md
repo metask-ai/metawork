@@ -17,7 +17,7 @@
 ## 当前阶段
 
 - macOS 是当前唯一优先实现和真实验收平台；Windows 属于后续 Phase 0B。
-- 当前 metacodes bundle 是精确锁定的 stable AgentCore ABI v1 clean artifact；稳定 ABI 不替代精确 commit、target、toolchain 和 checksum 锁定。
+- 当前 metacodes bundle 是精确锁定的 development AgentCore ABI v1 revision 2 clean artifact；开发期 ABI identity 不等于 stable support policy，且不替代精确 commit、target、toolchain 和 checksum 锁定。
 - 同步 baseline、完整 Phase 0A 和后续 AgentCore capability 是三个不同门槛。Renderer reload 可以恢复仍存活 Host 的视图，不等于 AgentCore 进程恢复。
 - async pending、suspend/resume、Session 持久化恢复、strict Workspace security 和可路由产品 Host tools 不属于当前 ABI v1 baseline。
 
@@ -41,8 +41,8 @@
 - 跨越同步 Bridge handler 返回的 payload 必须是 Bridge-owned copy 或显式 ownership transfer；shutdown 先 stop ingress 和 quiesce callbacks，再断开 Workbench，owned delivery buffers 最后独立释放。
 - ABI function status 必须先于 `RunResult` 处理；status 非 OK 时禁止读取 `RunResult`，并精确释放 diagnostic buffer。
 - `StopReason` 必须先由 metacodes bundle SDK 校验 raw wire code，再对 SDK 类型做无 `else` 的穷尽 switch，并在 Host envelope 中保留原始 code/reason。unknown code fail closed，不伪造恢复或预算状态。
-- stable ABI v1 的 observation decoder 必须显式处理 `known` / `unknown`；当前 Host 在 SDK 完成结构、ownership 和 byte-bound 校验后立即忽略 valid unknown observation，不让其占用产品事件泵，也不得传给 Renderer 或猜测为产品状态。`resource_limit` 和 admission 后 Session poisoning 必须按 SDK contract 处理。
-- stable ABI v1 只提供 question 与 permission UI control。未提供的 plan approval、custom UI、Output、FileChange 和 plan-progress 必须隐藏并延期，不得复制旧 experimental 协议。
+- 当前 ABI v1 revision 2 的 observation decoder 必须显式处理 `known` / `unknown`；当前 Host 在 SDK 完成结构、ownership 和 byte-bound 校验后立即忽略 valid unknown observation，不让其占用产品事件泵，也不得传给 Renderer 或猜测为产品状态。`resource_limit` 和 admission 后 Session poisoning 必须按 SDK contract 处理。
+- 当前 ABI v1 revision 2 只提供 question 与 permission UI control。未提供的 plan approval、custom UI、Output、FileChange 和 plan-progress 必须隐藏并延期，不得复制旧 experimental 协议。
 - 不假设 `UiBackend.poll()` 已接通。当前 stop/cancel 直接使用 per-Run abort；生成期消息进入 Host 有界 Session 队列，直到 cc-zig 生产调用链被验证。
 - 当前 UI request 是同步 callback。等待用户期间占用 Run executor slot，但不得阻塞 WebView 主线程；deadline、cancel、Session close 和 Host shutdown 都必须唤醒等待。
 - 每个 Session 至多一个 in-flight Run；同步 `run()` 通过有上限的 executor 调度，不为任意数量 Session 无上限创建线程。

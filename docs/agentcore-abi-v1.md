@@ -1,13 +1,13 @@
 # MetaWork AgentCore ABI v1 消费基线
 
-> 状态：stable ABI v1；同步 macOS baseline 锁定精确 clean bundle
+> 状态：development ABI v1 revision 2；同步 macOS baseline 锁定精确 clean bundle，不声明 stable support policy
 > 所有者：metacodes（原 cc-zig）负责 facade、SDK、bundle 和兼容政策；MetaWork 负责消费验证
 
 本文记录 MetaWork 对当前 AgentCore binary ABI version 1 的真实消费边界。线程、事件泵和 Host 生命周期见 [AgentCore 集成契约](agentcore-integration.md)，验收顺序见 [Phase 0 验证计划](phase-0-validation.md)。
 
 ## 1. 版本含义
 
-当前锁定的 metacodes bundle `0.0.0-dev+36637f314c0f`（commit `36637f314c0f1c41bb1a2267ced7ad6a46100003`）发布 stable ABI v1 revision 2 的固定布局 header、Zig SDK、静态库和 manifest。API table 为 112 bytes。它是 macOS arm64、最低 macOS 13.0、Zig 0.16.0、ReleaseSafe、strip=true、链接 libc 的 clean artifact。MetaWork 对它采用以下规则：
+当前锁定的 metacodes development bundle `0.0.0-dev+36637f314c0f`（commit `36637f314c0f1c41bb1a2267ced7ad6a46100003`）发布 ABI v1 revision 2 的固定布局 header、Zig SDK、静态库和 manifest。API table 为 112 bytes。它是 macOS arm64、最低 macOS 13.0、Zig 0.16.0、ReleaseSafe、strip=true、链接 libc 的 clean artifact。这个精确开发基线不等于 stable ABI support policy。MetaWork 对它采用以下规则：
 
 - 每次消费锁定精确 bundle identity、metacodes commit、target、toolchain 和 checksum；
 - 对一个固定 bundle，ABI version/revision、layout、整数 code、callback 签名和语义不得漂移；
@@ -21,20 +21,20 @@
 
 ## 2. 当前 v1 baseline 必须具备的能力
 
-| 能力 | 当前合同 |
-| --- | --- |
-| API discovery | 从唯一 discovery symbol 获取并校验 ABI v1 revision 2 function table、112-byte size 和 required capabilities |
-| Runtime | 创建/销毁共享 Runtime；Runtime 持有内置工具目录和 callback 引用所需基础设施 |
-| Session | 创建/销毁 Session；Session 持有 Provider、Conversation、permission memory、Workspace 输入和 Run 状态 |
-| 同步 Run | 文本输入进入真实 agent loop；一次 `session_run` 同步返回；每 Session 至多一个 active Run |
-| built-in tools | Session 可按 allowlist 使用 cc-zig built-in Read/Bash/Edit 等工具 |
+| 能力              | 当前合同                                                                                                         |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------- |
+| API discovery     | 从唯一 discovery symbol 获取并校验 ABI v1 revision 2 function table、112-byte size 和 required capabilities      |
+| Runtime           | 创建/销毁共享 Runtime；Runtime 持有内置工具目录和 callback 引用所需基础设施                                      |
+| Session           | 创建/销毁 Session；Session 持有 Provider、Conversation、permission memory、Workspace 输入和 Run 状态             |
+| 同步 Run          | 文本输入进入真实 agent loop；一次 `session_run` 同步返回；每 Session 至多一个 active Run                         |
+| built-in tools    | Session 可按 allowlist 使用 cc-zig built-in Read/Bash/Edit 等工具                                                |
 | callback identity | Event、UI 和 Host tool callback 共享 validated `RunContext`：Session handle、run ID、Session-lifetime session ID |
-| 结构化事件 | callback 输出现有 tagged `CoreEvent` JSON，并绑定 `RunContext` |
-| 同步 Host UI | callback 接收 `RunContext` + `UiRequest` JSON，并同步返回 answered/unavailable/fatal 与 response JSON |
-| abort | 其他线程可以按 Session/Run 请求 user/timeout abort |
-| 结果 | 成功 ABI 调用返回 stop reason code、turn count 和 tool count |
-| 错误 | ABI function status 与 diagnostic buffer 独立于有效 `RunResult` |
-| 所有权 | borrowed callback views 和 Host/library-owned buffer 的生命周期与 release 责任明确 |
+| 结构化事件        | callback 输出现有 tagged `CoreEvent` JSON，并绑定 `RunContext`                                                   |
+| 同步 Host UI      | callback 接收 `RunContext` + `UiRequest` JSON，并同步返回 answered/unavailable/fatal 与 response JSON            |
+| abort             | 其他线程可以按 Session/Run 请求 user/timeout abort                                                               |
+| 结果              | 成功 ABI 调用返回 stop reason code、turn count 和 tool count                                                     |
+| 错误              | ABI function status 与 diagnostic buffer 独立于有效 `RunResult`                                                  |
+| 所有权            | borrowed callback views 和 Host/library-owned buffer 的生命周期与 release 责任明确                               |
 
 当前 bundle 也声明 synchronous Host tool capability，但 MetaWork 产品路径暂不使用，原因见第 6 节。
 
@@ -123,15 +123,15 @@ abort 返回 stale/too-late 时仍必须 join 已有 Run job，再决定最终�
 
 ### 从 experimental revision 的直接迁移
 
-| 旧表面 | stable v1 处理 |
-| --- | --- |
-| direct `ParsedCoreEvent.value` | 必须先处理 `DecodedCoreEvent.known/unknown` |
-| `stream_begin`、current-tool 与 diagnostic events | 从公开 observation contract 删除，MetaWork 不复制 |
-| `plan_approval`、`custom` UI | 从 v1 control contract 删除，产品路径隐藏 |
-| `suspended`、`backgrounded`、`budget` StopReason | 从 v1 删除，unknown code fail closed |
-| `resource_limit` Status | 新增；pre-admission failure，Session 可复用 |
-| admitted fatal status | `out_of_memory`、`core_error`、`callback_failed`、`internal_error` poison Session |
-| permission mode codes | 只使用 SDK 常量；不保留旧数值映射 |
+| 旧表面                                            | 当前 revision 2 处理                                                              |
+| ------------------------------------------------- | --------------------------------------------------------------------------------- |
+| direct `ParsedCoreEvent.value`                    | 必须先处理 `DecodedCoreEvent.known/unknown`                                       |
+| `stream_begin`、current-tool 与 diagnostic events | 从公开 observation contract 删除，MetaWork 不复制                                 |
+| `plan_approval`、`custom` UI                      | 从 v1 control contract 删除，产品路径隐藏                                         |
+| `suspended`、`backgrounded`、`budget` StopReason  | 从 v1 删除，unknown code fail closed                                              |
+| `resource_limit` Status                           | 新增；pre-admission failure，Session 可复用                                       |
+| admitted fatal status                             | `out_of_memory`、`core_error`、`callback_failed`、`internal_error` poison Session |
+| permission mode codes                             | 只使用 SDK 常量；不保留旧数值映射                                                 |
 
 ## 6. 工具与 Workspace
 
@@ -200,14 +200,15 @@ status == OK
 
 六个 StopReason code 必须被 SDK 接受并由 Host 无 `else` 穷尽处理：
 
-| StopReason | 当前同步 baseline 映射 |
-| --- | --- |
-| `end_turn` | `completed` |
-| `max_turns` | `stopped` + `awaiting_user` |
-| `aborted` | Workbench 根据 immutable `TerminalResult.termination_signal` 映射 `cancelled` / `interrupted` / `failed` |
-| `tool_error` | `failed` |
-| `api_error` | `failed` |
-| `tool_loop` | `stopped` + `awaiting_user` |
+| StopReason   | 当前同步 baseline 映射                                                                                   |
+| ------------ | -------------------------------------------------------------------------------------------------------- |
+| `end_turn`   | `completed`                                                                                              |
+| `max_turns`  | `stopped` + `awaiting_user`                                                                              |
+| `aborted`    | Workbench 根据 immutable `TerminalResult.termination_signal` 映射 `cancelled` / `interrupted` / `failed` |
+| `tool_error` | `failed`                                                                                                 |
+| `api_error`  | `failed`                                                                                                 |
+| `tool_loop`  | `stopped` + `awaiting_user`                                                                              |
+
 wire abort reason 只提供当前 v1 的中断机制；用户取消、timeout、Session close 和 application shutdown 进入 active Run 的 typed `TerminationSignal`。callback 内失败优先直接返回 callback fatal；callback 返回后只有 canonical event/projection failure 可以按 Run identity 请求 abort。`Run.execute()` 在 ABI 返回后产出同时包含 typed/raw status、StopReason、abort status 和最终 latch 的 immutable `TerminalResult`。Renderer/Bridge transport failure 由 Workbench policy 处理，不进入 Agent termination state。
 
 Status 还包括 `resource_limit`。pre-admission validation/resource-limit/busy/stale-run failure 保持 Session 可复用；admission 后的 `out_of_memory`、`core_error`、`callback_failed` 或 `internal_error` poison Session，之后的 Run/abort 返回 `invalid_state`，仅 destroy 仍有效。
@@ -225,7 +226,7 @@ cc-zig-owned ABI types module
 manifest
 ```
 
-manifest 必须记录精确 metacodes commit/build identity、binary ABI version、AgentCore API identity、Zig toolchain、resolved target、architecture、OS/ABI、构建模式、系统链接输入和每个文件 checksum。当前 stable v1 字段布局只按精确 lock 消费；MetaWork 不兼容旧字段名或旧 `files` 形状。
+manifest 必须记录精确 metacodes commit/build identity、binary ABI version/revision、AgentCore API identity、Zig toolchain、resolved target、architecture、OS/ABI、构建模式、系统链接输入和每个文件 checksum。当前 revision 2 字段布局只按精确 lock 消费；MetaWork 不兼容旧字段名或旧 `files` 形状。
 
 当前 MetaWork 从显式 bundle root 消费。同步 baseline 通过后，本地 content-addressed cache 和远程 artifact repository 必须继续使用相同 layout、identity 和 checksum 规则。artifact 缺失或校验失败时构建明确失败，禁止 source fallback。
 

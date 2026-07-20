@@ -1,19 +1,19 @@
 # MetaWork 高层架构
 
-> 状态：Phase 0A 已完成；当前实现基线迁移到 stable AgentCore ABI v1，后续正式方向选择单 AgentCore Worker
+> 状态：Phase 0A 已完成；当前实现基线迁移到 development AgentCore ABI v1 revision 2，后续正式方向选择单 AgentCore Worker
 > 日期：2026-07-20
 
 产品范围见 [产品需求](requirements.md)，metacodes（原 cc-zig）的具体接入约束见 [AgentCore 集成契约](agentcore-integration.md)，当前 bundle 能力见 [AgentCore ABI v1 消费基线](agentcore-abi-v1.md)。历史报告中的 cc-zig 名称保留当时仓库身份。
 
 ## 1. 已确认的技术选型
 
-| 层级              | 选择                               | 决策说明                                                              |
-| ----------------- | ---------------------------------- | --------------------------------------------------------------------- |
-| Renderer          | React + Tailwind                   | 当前正式 UI 技术栈，适合复杂 Workbench 界面                           |
-| Desktop Framework | Native SDK                         | Zig 一等公民，负责系统 WebView、窗口、Bridge 和桌面生命周期           |
-| App / Workbench / Agent | Zig                           | 分别承担 composition、产品状态和 AgentCore 执行边界                   |
-| AgentCore         | metacodes AgentCore library bundle | metacodes 独立构建和发布；MetaWork 链接产物，不把上游源码纳入自身构建 |
-| Agent UI contract | metacodes 原生结构化协议           | React 消费 Host 产品投影，不消费终端字节流或 Provider SSE             |
+| 层级                    | 选择                               | 决策说明                                                              |
+| ----------------------- | ---------------------------------- | --------------------------------------------------------------------- |
+| Renderer                | React + Tailwind                   | 当前正式 UI 技术栈，适合复杂 Workbench 界面                           |
+| Desktop Framework       | Native SDK                         | Zig 一等公民，负责系统 WebView、窗口、Bridge 和桌面生命周期           |
+| App / Workbench / Agent | Zig                                | 分别承担 composition、产品状态和 AgentCore 执行边界                   |
+| AgentCore               | metacodes AgentCore library bundle | metacodes 独立构建和发布；MetaWork 链接产物，不把上游源码纳入自身构建 |
+| Agent UI contract       | metacodes 原生结构化协议           | React 消费 Host 产品投影，不消费终端字节流或 Provider SSE             |
 
 由此排除以下正式主路径：
 
@@ -28,7 +28,7 @@
 
 ### 同步 macOS baseline
 
-当前锁定 metacodes bundle `0.0.0-dev+36637f314c0f`（commit `36637f314c0f1c41bb1a2267ced7ad6a46100003`）提供 stable AgentCore ABI v1 revision 2。同步 Run、built-in tools、结构化 observation events、同步 question/permission、abort、生命周期和同进程 macOS 垂直链路沿用 Gate 6 的产品边界，并在本次精确 bundle 迁移中重新验收。MetaWork 只接受 112-byte revision 2 API table，不兼容旧 revision，也不保留 fallback。
+当前锁定 metacodes development bundle `0.0.0-dev+36637f314c0f`（commit `36637f314c0f1c41bb1a2267ced7ad6a46100003`）提供 AgentCore ABI v1 revision 2。同步 Run、built-in tools、结构化 observation events、同步 question/permission、abort、生命周期和同进程 macOS 垂直链路沿用 Gate 6 的产品边界，并在本次精确 bundle 迁移中重新验收。MetaWork 只接受 112-byte revision 2 API table，不兼容旧 revision，也不保留 fallback；这项精确开发基线不构成 stable ABI support policy。
 
 该 baseline 不包含：
 
@@ -268,16 +268,16 @@ Native SDK 是当前选型，但 Phase 0A 必须验证：
 
 ## 11. 主要风险
 
-| 风险                                  | 当前控制方式                                                  |
-| ------------------------------------- | ------------------------------------------------------------- |
-| Native SDK Zig → React 路径不符合预期 | Gate 0 先做真实 dev/prod smoke                                |
-| typed SDK 与真实 producer wire 漂移   | Gate 3 source-free corpus + Gate 4 真实 Host link/run 回归    |
-| callback 数据返回后失效               | callback 内验证并深拷贝                                       |
-| callback/close race 造成 UAF          | abort、join、callback quiescence 后 destroy                   |
-| 同步 UI 耗尽 executor                 | bounded slots、deadline、cancel/close/shutdown 唤醒和压力测试 |
-| Bridge/event 造成无限内存             | count/byte/time 多维上限和公平调度                            |
-| Run failure 被误报用户取消         | active first-writer cause 与 Workbench write-once terminal history 分层 |
-| Renderer 掉线杀死后台 Run              | typed transport policy 不向 Agent termination 反向泄漏          |
-| v1 Workspace 被误报安全               | 只允许临时/trusted 验证并显式标注限制                         |
-| 同进程 native crash 带走全部状态      | Gate 7 fault-domain spike 后再决定进程模型                    |
-| 过早建设发布系统                      | baseline 通过后再做 cache 与 remote                           |
+| 风险                                  | 当前控制方式                                                            |
+| ------------------------------------- | ----------------------------------------------------------------------- |
+| Native SDK Zig → React 路径不符合预期 | Gate 0 先做真实 dev/prod smoke                                          |
+| typed SDK 与真实 producer wire 漂移   | Gate 3 source-free corpus + Gate 4 真实 Host link/run 回归              |
+| callback 数据返回后失效               | callback 内验证并深拷贝                                                 |
+| callback/close race 造成 UAF          | abort、join、callback quiescence 后 destroy                             |
+| 同步 UI 耗尽 executor                 | bounded slots、deadline、cancel/close/shutdown 唤醒和压力测试           |
+| Bridge/event 造成无限内存             | count/byte/time 多维上限和公平调度                                      |
+| Run failure 被误报用户取消            | active first-writer cause 与 Workbench write-once terminal history 分层 |
+| Renderer 掉线杀死后台 Run             | typed transport policy 不向 Agent termination 反向泄漏                  |
+| v1 Workspace 被误报安全               | 只允许临时/trusted 验证并显式标注限制                                   |
+| 同进程 native crash 带走全部状态      | Gate 7 fault-domain spike 后再决定进程模型                              |
+| 过早建设发布系统                      | baseline 通过后再做 cache 与 remote                                     |

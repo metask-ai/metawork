@@ -40,7 +40,7 @@ AgentCore bundle
 - artifact 缺失、target 不匹配或 checksum 错误时明确失败；
 - 禁止 path/Git source dependency、源码复制、`latest`、版本范围、可变 tag 和 source fallback。
 
-当前 stable ABI v1 revision 2 manifest 只消费锁定 bundle 的现行字段布局：`source.commit`、带 `abi` 的 build identity、`contract.binary_abi_version = 1`、`contract.binary_abi_revision = 2`，以及 `{path, sha256}` 组成的 `files` 数组。MetaWork 不保留旧字段名、旧 object-shaped `files`、旧 ABI revision 或双格式 fallback；上游协议变化与 lock、validator、stager 和 build graph 原子升级。
+当前 development ABI v1 revision 2 manifest 只消费锁定 bundle 的现行字段布局：`source.commit`、带 `abi` 的 build identity、`contract.binary_abi_version = 1`、`contract.binary_abi_revision = 2`，以及 `{path, sha256}` 组成的 `files` 数组。MetaWork 不保留旧字段名、旧 object-shaped `files`、旧 ABI revision 或双格式 fallback；上游协议变化与 lock、validator、stager 和 build graph 原子升级。
 
 当前不先实现 dependency resolver 或 content-addressed cache。同步 baseline 通过后，本地 cache 与远程 artifact repository 必须复用同一 bundle layout 和校验规则，不能改变 AgentCore 链接方式。
 
@@ -67,15 +67,15 @@ AgentCore bundle
 
 ## 3. 当前协议表面
 
-| 类型              | 方向        | 当前 ABI v1 语义                                                       |
-| ----------------- | ----------- | ---------------------------------------------------------------------- |
+| 类型              | 方向        | 当前 ABI v1 语义                                                                 |
+| ----------------- | ----------- | -------------------------------------------------------------------------------- |
 | `RunContext`      | Core → Host | callback-scoped borrowed identity；包含 Session handle、run ID 和稳定 session ID |
-| `CoreEvent` JSON  | Core → Host | callback-scoped borrowed bytes；与同次 callback 的 `RunContext` 绑定    |
-| `UiRequest` JSON  | Core → Host | 同步 callback 请求；与同次 callback 的 `RunContext` 绑定                |
-| `UiResponse` JSON | Host → Core | 同一 callback 内 answered response；或 unavailable/fatal               |
-| ABI status        | Core → Host | function 调用层错误，独立于有效 Run 结果                               |
-| `RunResult`       | Core → Host | status OK 后才有效；包含 stop reason code、turn/tool count             |
-| abort             | Host → Core | 按 Session/Run 的 user/timeout 中断机制                                |
+| `CoreEvent` JSON  | Core → Host | callback-scoped borrowed bytes；与同次 callback 的 `RunContext` 绑定             |
+| `UiRequest` JSON  | Core → Host | 同步 callback 请求；与同次 callback 的 `RunContext` 绑定                         |
+| `UiResponse` JSON | Host → Core | 同一 callback 内 answered response；或 unavailable/fatal                         |
+| ABI status        | Core → Host | function 调用层错误，独立于有效 Run 结果                                         |
+| `RunResult`       | Core → Host | status OK 后才有效；包含 stop reason code、turn/tool count                       |
+| abort             | Host → Core | 按 Session/Run 的 user/timeout 中断机制                                          |
 
 `UiEvent` / `UiBackend.poll()` 虽然存在于 cc-zig native 协议中，但当前生产 agent loop 未证明消费。MetaWork 不依赖它完成 stop、生成期 queue message 或 steering。
 
@@ -128,7 +128,7 @@ Core calls synchronous UI callback
 
 Bridge handler 只写入 response channel，不同步等待 AgentCore。callback wait 仍占用 Run executor slot。
 
-当前 stable ABI v1 的 `UiRequest` / `UiResponse` 只有 `ask_question`/`answers` 与 `permission`。旧 experimental bundle 的 `plan_approval` 和 `custom` 已从 Host、Bridge、Renderer 与测试移除；未来控制消息扩展需要新的 ABI version。
+当前 ABI v1 revision 2 的 `UiRequest` / `UiResponse` 只有 `ask_question`/`answers` 与 `permission`。旧 experimental bundle 的 `plan_approval` 和 `custom` 已从 Host、Bridge、Renderer 与测试移除；未来控制消息扩展需要新的 ABI revision/version。
 
 ### Host tools
 
