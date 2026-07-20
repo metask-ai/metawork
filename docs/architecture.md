@@ -268,16 +268,17 @@ Native SDK 是当前选型，但 Phase 0A 必须验证：
 
 ## 11. 主要风险
 
-| 风险                                  | 当前控制方式                                                            |
-| ------------------------------------- | ----------------------------------------------------------------------- |
-| Native SDK Zig → React 路径不符合预期 | Gate 0 先做真实 dev/prod smoke                                          |
-| typed SDK 与真实 producer wire 漂移   | Gate 3 source-free corpus + Gate 4 真实 Host link/run 回归              |
-| callback 数据返回后失效               | callback 内验证并深拷贝                                                 |
-| callback/close race 造成 UAF          | abort、join、callback quiescence 后 destroy                             |
-| 同步 UI 耗尽 executor                 | bounded slots、deadline、cancel/close/shutdown 唤醒和压力测试           |
-| Bridge/event 造成无限内存             | count/byte/time 多维上限和公平调度                                      |
-| Run failure 被误报用户取消            | active first-writer cause 与 Workbench write-once terminal history 分层 |
-| Renderer 掉线杀死后台 Run             | typed transport policy 不向 Agent termination 反向泄漏                  |
-| v1 Workspace 被误报安全               | 只允许临时/trusted 验证并显式标注限制                                   |
-| 同进程 native crash 带走全部状态      | Gate 7 fault-domain spike 后再决定进程模型                              |
-| 过早建设发布系统                      | baseline 通过后再做 cache 与 remote                                     |
+| 风险                                   | 当前控制方式                                                            |
+| -------------------------------------- | ----------------------------------------------------------------------- |
+| Native SDK Zig → React 路径不符合预期  | Gate 0 先做真实 dev/prod smoke                                          |
+| typed SDK 与真实 producer wire 漂移    | Gate 3 source-free corpus + Gate 4 真实 Host link/run 回归              |
+| callback 数据返回后失效                | callback 内验证并深拷贝                                                 |
+| callback/close race 造成 UAF           | abort、join、callback quiescence 后 destroy                             |
+| callback identity race 泄漏 permission | UI request publication 与 response extraction 均在 Session lock 下复检  |
+| 同步 UI 耗尽 executor                  | bounded slots、deadline、cancel/close/shutdown 唤醒和压力测试           |
+| Bridge/event 造成无限内存              | count/byte/time 多维上限和公平调度                                      |
+| Run failure 被误报用户取消             | active first-writer cause 与 Workbench write-once terminal history 分层 |
+| Renderer 掉线杀死后台 Run              | typed transport policy 不向 Agent termination 反向泄漏                  |
+| v1 Workspace 被误报安全                | 只允许临时/trusted 验证并显式标注限制                                   |
+| 同进程 native crash 带走全部状态       | Gate 7 已选后续单 Worker；当前同进程应用仍是 prototype                  |
+| 过早建设发布系统                       | baseline 通过后再做 cache 与 remote                                     |

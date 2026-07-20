@@ -123,10 +123,14 @@ Core calls synchronous UI callback
 → enqueue control item
 → callback waits on Host-owned condition/channel
 → response / deadline / cancel / close / shutdown
-→ SDK encodes response or returns unavailable/fatal
+→ SDK encodes a response into Host-owned bytes when one was supplied
+→ under the Session lock, recheck identity/dependency-contract health
+→ transfer answered bytes, or free them and return unavailable/fatal
 ```
 
 Bridge handler 只写入 response channel，不同步等待 AgentCore。callback wait 仍占用 Run executor slot。
+
+callback admission 只建立 lifetime 与当时的 identity 事实，不保证等待期间不会有另一个并发 callback 发现 identity 漂移。因此 Host 在发布 UI request 前和最终提取 response 的线性化点都必须在同一 Session lock 下重新检查现有 Core identity 与 dependency-contract 状态。检查失败时返回 UI fatal；如果 Renderer response 已完成编码但 ownership 尚未转移给 Core，Host 必须自行释放，禁止返回 answered。
 
 当前 ABI v1 revision 2 的 `UiRequest` / `UiResponse` 只有 `ask_question`/`answers` 与 `permission`。旧 experimental bundle 的 `plan_approval` 和 `custom` 已从 Host、Bridge、Renderer 与测试移除；未来控制消息扩展需要新的 ABI revision/version。
 

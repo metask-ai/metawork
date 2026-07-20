@@ -93,6 +93,7 @@ abort 返回 stale/too-late 时仍必须 join 已有 Run job，再决定最终�
 - 先用 bundle SDK 校验 callback `RunContext` 的布局、reserved 字段、length、pointer 和 UTF-8；
 - 在同一 Session lock 内比较原始 Session handle 与 active run ID，并原子首次绑定或比较 Session-lifetime session ID；
 - 在上述完整 identity 成功后才取得 callback lifetime ref；错误 handle/run/session ID 或 identity 漂移必须返回 fatal 并 poison Session；
+- UI callback 在发布 request 和最终提取 response 时必须在 Session lock 下重新确认现有 identity/dependency-contract 状态健康；并发 identity failure 后禁止返回 answered，已编码但尚未转移的 response 由 Host 释放；
 - 先用 cc-zig bundle SDK 校验 bytes view、JSON tag、payload shape 和嵌套字段；
 - 在 callback 返回前深拷贝所有需要异步保留的 bytes；
 - 携带正确 Session handle 与 run ID 进入 Host envelope；
