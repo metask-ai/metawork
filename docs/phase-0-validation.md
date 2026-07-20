@@ -1,6 +1,6 @@
 # MetaWork Phase 0 验证计划
 
-> 状态：Phase 0A Gate 0 至 Gate 7 已通过；下一阶段为分发与后续 capability
+> 状态：Phase 0A Gate 0 至 Gate 7 已通过；Account integration Gate A 进行中
 > 平台：Phase 0A macOS-first；Phase 0B 后续验证 Windows
 
 Phase 0 用最小真实原型验证技术栈和关键风险，不交付完整产品。当前 AgentCore development bundle 使用 ABI v1 revision 2；这是精确开发基线，不是 stable support policy。同步 baseline 不包含 async suspend/resume、跨进程恢复、strict Workspace security、正式 Host tools、typed Output/FileChange/plan-progress 或 plan/custom UI control。
@@ -17,7 +17,7 @@ Gate -1 至 Gate 6 通过后，得到一个同进程 macOS 同步原型。它证
 
 ### 后续发布与能力演进
 
-content-addressed cache、remote/empty-cache/offline 发布、stable ABI support policy、async resume、strict Workspace security、正式 Host tools 和 Windows Phase 0B 在 Phase 0A 同步验证之后推进。
+Account/Metask 登录集成、content-addressed cache、remote/empty-cache/offline 发布、stable ABI support policy、async resume、strict Workspace security、正式 Host tools 和 Windows Phase 0B 在 Phase 0A 同步验证之后推进。Account 集成不能削弱已经通过的 Gate 0–7。
 
 ## 2. 最小垂直链路
 
@@ -50,6 +50,45 @@ Gate -1 specs
 ```
 
 Gate 未通过时不得用 source dependency、MetaWork 自制协议、无界队列或放宽安全语义绕过。
+
+### Account integration DAG
+
+```text
+Account A contract/spec
+→ Account B pure state machine
+→ Account C platform/Metask integration
+→ Account D App/Workbench integration
+→ Account E Bridge/schema
+→ Account F Renderer
+→ Account G end-to-end validation
+```
+
+Account DAG 的唯一规范任务状态由 TinyKG root 160 管理；本文档只定义仓库内可复现的验收条件。每个子任务完成真实验证后必须进行 Linus review，合理修正到通过或无可采纳意见；只有形成独立、完整、可回滚边界时才创建本地 Conventional Commit。
+
+#### Gate A1：本地合同与规范
+
+- 产品、架构、工程目录和验证文档统一为五个产品 module responsibilities；
+- 独立纯 `metawork_account_contract`，不导入 Native SDK、AgentCore 或产品 runtime；
+- compile-time limits、Account 双状态、command sink、脱敏 view/fact、typed ExecutionTarget、owned secret transfer 和稳定 ErrorCode；
+- production 配置不以环境变量、Renderer 或 Bridge 为合同来源；
+- [Metask Account API 合同](metask-account-contract.md)明确记录外部确认状态。
+
+#### Gate A2：外部合同确认
+
+MetaWork 独立 OAuth client registration、严格 API Key catalog schema 和 typed/fixed ExecutionTarget 尚未获得 Metask 服务端 owner 正式确认。其确认前：
+
+- Task B 只依赖 A1，可以使用 fake client/credential store 完成纯状态机；
+- Task C 的 production OAuth/API client 保持 blocked；
+- test endpoint 只能通过 test build module 显式注入；
+- 不复用 `metacode-cli` identity，不复制宽松解析器，不根据模型名猜 provider。
+
+#### Gate A1 退出证据
+
+- Account contract 单元测试、architecture boundary test 和正式 Native build 通过；
+- 所有 Renderer-facing view/result/snapshot 都无法承载 secret；
+- owned execution transfer 的 live owner、move 和 secure-zero 释放路径有测试；
+- 文档间没有“环境默认值”“Bridge credential”或“Account/Workbench runtime 互相导入”等冲突；
+- Linus review 通过或没有需要采纳的建议。
 
 ## 4. Gate -1：规范对齐
 

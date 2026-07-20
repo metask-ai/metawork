@@ -1,7 +1,7 @@
 # MetaWork 产品需求
 
-> 状态：v0.2，产品目标保留；当前实现范围收敛为同步 macOS baseline
-> 日期：2026-07-17
+> 状态：v0.3，加入 Metask Account 与唯一执行配置边界
+> 日期：2026-07-20
 
 ## 1. 产品定义
 
@@ -55,6 +55,10 @@ Turn 是用户提交的一次交互；Run 是 AgentCore 为该交互进行的一
 
 代表 Agent 继续工作前需要用户作出的选择。当前 ABI v1 只提供工具 permission 和问题回答，并使用同步 request/response；等待期间 Run 仍占用 executor slot，不形成可持久化挂起点。计划审批和自定义结构化交互只有在 AgentCore 发布相应控制协议后才进入产品范围。
 
+### Account 与 ExecutionConfig
+
+Account 是 MetaWork 的 Metask 账号控制面，负责 OAuth 登录、账号/API Key/模型目录、凭据安全存储和执行配置代际。产品只允许一个 active `ExecutionConfig`，包含 typed `provider_kind + model + base_url`、API Key 和 `execution_generation`。Workbench 只消费 Account 已验证并安装的配置，不读取 Renderer 输入、环境默认值或账号存储。
+
 ## 5. 产品功能需求
 
 以下是目标产品需求，不代表当前 ABI v1 baseline 已全部实现。
@@ -67,7 +71,17 @@ Turn 是用户提交的一次交互；Run 是 AgentCore 为该交互进行的一
 - UI 能显示当前 Task 所属 Workspace；
 - strict Workspace security 未验证前，产品必须明确限制使用范围，不能制造虚假的安全承诺。
 
-### 5.2 Task
+### 5.2 Metask 账号与执行配置
+
+- 普通用户通过 Metask OAuth 登录，不需要手工填写 Provider、model、base URL 或 API Key；
+- OAuth token 只访问 Metask 账号 API；选定 API Key 才作为 AgentCore 模型调用凭据；
+- Renderer 只能看到脱敏账号、Key 尾号、模型、稳定错误码和状态，不得接触 OAuth token、完整 API Key、Authorization header、临时 OAuth URL 或凭据存储 locator；
+- 当前只允许一个 active ExecutionConfig；切换账号、API Key、模型或退出登录必须先取得 Workbench execution replacement gate，并证明没有 live/closing Task、Agent Session、Run、executor job 或 `RunRef`；
+- OAuth refresh 失败只进入 `reauth_required`，不自动判定现有 API Key 失效；只有 Metask 明确撤销/禁用或锁定 credential probe 返回确定鉴权拒绝，才关闭既有执行配置；
+- Task admission 必须同时满足 Account execution state 为 ready、Workbench 安装的 generation 一致且 replacement gate 未开启；
+- production OAuth、API Key catalog 和 typed ExecutionTarget 必须符合 [Metask Account API 合同](metask-account-contract.md)；合同未确认时 production 网络接入保持 blocked，不能复用其他客户端身份或猜测 Provider。
+
+### 5.3 Task
 
 - 用户可以在 Workspace 中创建、切换和关闭 Task；
 - 多个 Task 可以同时存在；
@@ -77,7 +91,7 @@ Turn 是用户提交的一次交互；Run 是 AgentCore 为该交互进行的一
 - Renderer 产品合同使用 schema v5：命令统一为 `metawork.tasks.*`，payload/result 使用 `taskId`，snapshot 根集合使用 `tasks`，应用关停 cause 使用 `app_shutdown`；不接受或双写 schema v4 的 `sessions.*`、`sessionId`、`sessions`、`host_shutdown` 别名；
 - 内部 Agent/Gate 原始事件可以使用 Session route identity，但该身份不得进入产品 snapshot，也不与 Task 建立双 ID 体系。
 
-### 5.3 Agent 交互
+### 5.4 Agent 交互
 
 - 用户可以提交文本输入并启动真实 Agent Run；
 - UI 流式显示 assistant 文本；
@@ -86,7 +100,7 @@ Turn 是用户提交的一次交互；Run 是 AgentCore 为该交互进行的一
 - 用户可以取消当前 Run；
 - 取消必须等待 AgentCore 给出真实终止结果，不能只在 UI 中停止渲染。
 
-### 5.4 审批与输入
+### 5.5 审批与输入
 
 - 工具 permission 默认拒绝，只有明确授权才允许执行；
 - 用户可以回答 Agent 问题；计划批准或拒绝只有在 AgentCore 发布 typed control capability 后才显示；
@@ -98,14 +112,14 @@ Turn 是用户提交的一次交互；Run 是 AgentCore 为该交互进行的一
 - strict Workspace security 和对应规则匹配/审计能力未通过验证前，不得开放 Workspace 级文件规则；受控进程、process tree、network 和 environment 边界未通过独立验证前，不得开放项目脚本、Bash、Network 或 `Full access` 持久授权；
 - async pending、跨重启恢复和 subagent suspend 只有在 AgentCore 发布明确 capability 后才能进入产品范围。
 
-### 5.5 命令执行
+### 5.6 命令执行
 
 - 普通 shell 命令以非交互子进程执行；
 - UI 展示命令、stdout、stderr、exit code、耗时和错误；
 - 普通命令不弹出 Terminal 窗口，也不依赖 PTY/ConPTY；
 - 当前阶段明确拒绝或限制需要 TTY 的交互式程序。
 
-### 5.6 状态与恢复
+### 5.7 状态与恢复
 
 - 用户消息、已完成 assistant 消息、工具结果、审批决策和关键 Run 状态应形成可靠状态边界；Run admission 必须先建立稳定、带 generation 的 Workbench Run record，terminal payload 一经发布不可变，内部 Agent Session 关闭或销毁后 Task 历史仍可独立生成 snapshot；
 - 当前 baseline 的 Renderer reload 只能从仍存活的 Host 恢复视图；
@@ -114,14 +128,14 @@ Turn 是用户提交的一次交互；Run 是 AgentCore 为该交互进行的一
 - 可 checkpoint 的 AgentCore suspend/resume 和跨进程 Conversation 恢复属于后续 capability；
 - 成本预算、轮数上限或工具循环熔断后，Task 进入等待用户状态，只有用户明确继续后才创建新 Run。
 
-### 5.7 桌面能力
+### 5.8 桌面能力
 
 - 提供窗口与应用生命周期管理；
 - 提供受控的文件/目录选择；
 - 为通知、更新和系统集成保留明确入口；
 - Renderer 只能调用 Host 显式开放的领域命令。
 
-### 5.8 Workbench 界面与任务组织
+### 5.9 Workbench 界面与任务组织
 
 - 首个正式版本采用单主窗口；多个 Task 可以后台运行，切换 Workspace 或 Task 不停止执行；
 - Renderer reload、断开连接以及 Bridge revision/snapshot/event delivery failure 默认只影响视图同步和重连，不得终止后台 Agent Run；只有 Workbench 根据 canonical 产品状态作出的显式 termination 决策才能请求结束 Run；
@@ -141,8 +155,9 @@ Turn 是用户提交的一次交互；Run 是 AgentCore 为该交互进行的一
 - Renderer 按不可信调用方处理；
 - Host 命令默认拒绝，只开放白名单；
 - 校验来源、payload、Workspace、Task/Run 归属和权限；
-- process-local provider/model/base URL/credential defaults 由 composition 一次性注入 Workbench；缺失或无效的执行配置在 Task admission 前失败，不得进入 Renderer command，也不得制造半初始化 Task；
+- production 执行配置只由 Account 生成并在 App 主线程的一致性提交链中安装到 Workbench；禁止环境默认值、Renderer 字段或 Bridge payload 注入 provider/model/base URL/credential；
 - Provider credential 不得进入 Renderer、Bridge、日志、事件或视图 snapshot；
+- OAuth token、PKCE verifier、authorization code、完整 API Key 和 Authorization header 必须使用单 owner secret buffer，所有失败、取消、过期 completion、replacement 和 shutdown 路径都先不可消除地清零再释放；
 - Host 必须在形成产品 projection 前移除已知 Host-held credential 和 schema 标记的 secret 字段，并对命令与工具输出设置明确上限和 truncation 状态；不得把秘密过滤责任推给 Renderer；
 - 文件访问、进程启动和高风险工具最终必须经过能力控制；
 - 不向 Renderer 暴露通用任意执行或任意文件接口。
@@ -184,11 +199,22 @@ Turn 是用户提交的一次交互；Run 是 AgentCore 为该交互进行的一
 
 它不包含进程恢复、async suspend/resume、strict Workspace security 或产品 Host tools。
 
-### 7.2 完整 Phase 0A
+### 7.2 Account-integrated macOS 目标
+
+下一阶段在不改写既有 baseline 证据的前提下增加：
+
+```text
+Metask 登录 → 选择 API Key/模型 → ready ExecutionConfig
+→ Workbench Task admission → 既有同步 macOS baseline
+```
+
+production 网络接入只有在 Metask Account API 合同解除 blocked 后才能进入验收；纯状态机与 fake client 验证可以先行。
+
+### 7.3 完整 Phase 0A
 
 事件泵数据、生命周期压力测试和同进程/最小 Worker fault-domain spike 已通过，Phase 0A 完成。Gate 7 选择单 AgentCore Worker 作为后续正式故障域；当前应用仍是同进程 prototype，正式 Worker、跨进程恢复和危险工具重放策略不属于当前交付。
 
-### 7.3 后续产品能力
+### 7.4 后续产品能力
 
 async pending、持久化恢复、strict Workspace security、正式 Host tools、远程 artifact 发布和 Windows 交付按独立 capability 与阶段推进，不能反向伪装成当前 v1 已具备。
 

@@ -31,6 +31,8 @@ MetaWork 不直接编译 metacodes source tree。隔离 probe 从显式 bundle r
 - [AgentCore 集成契约](docs/agentcore-integration.md)
 - [AgentCore ABI v1 消费基线](docs/agentcore-abi-v1.md)
 - [Phase 0 验证计划](docs/phase-0-validation.md)
+- [Account 集成方案（TinyKG canonical 的仓库导出）](docs/account-integration-plan.md)
+- [Metask Account API 合同状态](docs/metask-account-contract.md)
 - [Phase 0 Gate 0 验证报告](docs/phase-0-gate-0-report.md)
 - [Phase 0 Gate 1 验证报告](docs/phase-0-gate-1-report.md)
 - [Phase 0 Gate 6 验证报告](docs/phase-0-gate-6-report.md)

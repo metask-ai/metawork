@@ -29,6 +29,7 @@ pub fn build(b: *std.Build) void {
         name: []const u8,
         root_module: *std.Build.Module,
     }{
+        .{ .name = "metawork-account-contract", .root_module = test_modules.account_contract },
         .{ .name = "metawork-app", .root_module = test_modules.app },
         .{ .name = "metawork-bridge", .root_module = test_modules.bridge },
         .{ .name = "metawork-workbench", .root_module = test_modules.workbench_projection },
@@ -42,6 +43,7 @@ pub fn build(b: *std.Build) void {
 }
 
 const WiredModules = struct {
+    account_contract: *std.Build.Module,
     app: *std.Build.Module,
     agent: *std.Build.Module,
     bridge: *std.Build.Module,
@@ -122,6 +124,11 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .optimize = root_module.optimize,
     });
     agent.addImport("agent_session", session);
+    const account_contract = b.createModule(.{
+        .root_source_file = b.path("src/account/contract.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
     const executor = b.createModule(.{
         .root_source_file = b.path("src/workbench/executor.zig"),
         .target = target,
@@ -197,11 +204,13 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     app.addImport("metawork_workbench", workbench);
     app.addImport("metawork_bridge", bridge);
     app.addImport("metawork_automation", automation);
+    app.addImport("metawork_account_contract", account_contract);
 
     root_module.addImport("metawork_app", app);
     root_module.addObjectFile(.{ .cwd_relative = bundle.library_path });
     root_module.link_libc = bundle.link_libc;
     return .{
+        .account_contract = account_contract,
         .app = app,
         .agent = agent,
         .bridge = bridge,

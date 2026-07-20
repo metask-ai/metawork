@@ -38,6 +38,11 @@ test("module roots and Agent directory use product semantics", () => {
   ]) {
     assert.equal(existsSync(new URL(path, root)), true, `${path} must exist`);
   }
+  assert.equal(
+    existsSync(new URL("src/account/contract.zig", root)),
+    true,
+    "the pure Account contract must have an explicit source root",
+  );
   assert.equal(existsSync(new URL("src/agentcore.zig", root)), false);
   assert.equal(existsSync(new URL("src/agentcore/", root)), false);
 });
@@ -84,7 +89,20 @@ test("lower layers cannot reach composition or transport internals", () => {
   assertNoImports(zigFiles("src/workbench/"), [
     "metawork_app",
     "metawork_bridge",
+    "metawork_account",
   ]);
+  assertNoImports(
+    ["src/account/contract.zig"],
+    [
+      "native_sdk",
+      "metawork_app",
+      "metawork_account",
+      "metawork_workbench",
+      "metawork_bridge",
+      "metawork_agent",
+      "metacodes_agentcore",
+    ],
+  );
 });
 
 test("only Agent implementation imports the AgentCore SDK", () => {
@@ -140,7 +158,7 @@ test("Phase 0A keeps the raw ABI probe distinct from the typed Agent adapter", (
   assert.match(formalHost, /\.shell_policy = \.unrestricted/);
 });
 
-test("build graph registers the four named module boundaries", () => {
+test("build graph registers product modules and the pure Account contract", () => {
   const source = read("build.zig");
   for (const name of [
     "metawork_app",
@@ -150,12 +168,22 @@ test("build graph registers the four named module boundaries", () => {
   ]) {
     assert.match(source, new RegExp(`addImport\\(\\"${name}\\"`));
   }
+  assert.match(
+    source,
+    /root_source_file = b\.path\("src\/account\/contract\.zig"\)/,
+  );
+  assert.match(source, /account_contract: \*std\.Build\.Module/);
+  assert.match(
+    source,
+    /app\.addImport\("metawork_account_contract", account_contract\)/,
+  );
   assert.doesNotMatch(source, /src\/agentcore(?:\/|\.zig)/);
 });
 
 test("formal Native test graph runs every product module test root", () => {
   const source = read("build.zig");
   for (const [name, rootModule] of [
+    ["metawork-account-contract", "test_modules.account_contract"],
     ["metawork-app", "test_modules.app"],
     ["metawork-bridge", "test_modules.bridge"],
     ["metawork-workbench", "test_modules.workbench_projection"],
