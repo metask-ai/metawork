@@ -86,6 +86,11 @@ pub const Plan = enum {
     event_callback,
     unknown_event_callback,
     malformed_event_callback,
+    wrong_event_session_handle,
+    wrong_event_run_id,
+    same_run_session_id_mismatch,
+    concurrent_session_id_mismatch,
+    cross_run_session_id_mismatch,
     malformed_ui_callback,
     resource_limit,
     unknown_stop_result,
@@ -101,6 +106,8 @@ pub const FakeSession = struct {
     destroyed: bool = false,
     plan: Plan = .immediate,
     callbacks: wire.SessionCallbacksV1 = std.mem.zeroes(wire.SessionCallbacksV1),
+    session_id: [wire.MAX_SESSION_ID_BYTES_V1]u8 = [_]u8{0} ** wire.MAX_SESSION_ID_BYTES_V1,
+    session_id_len: usize = 0,
     run_id: u64 = 0,
     abort_requested: bool = false,
     allow_finish: bool = false,
@@ -286,10 +293,21 @@ pub fn sessionCreate(
     }
     for (&fake_core.sessions) |*session| {
         if (!session.in_use) {
+            var session_id = [_]u8{0} ** wire.MAX_SESSION_ID_BYTES_V1;
+            const id = std.fmt.bufPrint(
+                &session_id,
+                "fake-session-{d}",
+                .{fake_core.session_created + 1},
+            ) catch {
+                diagnostic(out_error);
+                return wire.STATUS_OUT_OF_MEMORY;
+            };
             session.* = .{
                 .in_use = true,
                 .plan = fake_core.next_plan,
                 .callbacks = callbacks.?.*,
+                .session_id = session_id,
+                .session_id_len = id.len,
             };
             fake_core.next_plan = .immediate;
             fake_core.session_created += 1;
@@ -361,7 +379,9 @@ pub fn sessionRun(
     session.unlock();
 
     if (plan == .event_callback or plan == .unknown_event_callback or
-        plan == .malformed_event_callback)
+        plan == .malformed_event_callback or plan == .wrong_event_session_handle or
+        plan == .wrong_event_run_id or plan == .same_run_session_id_mismatch or
+        plan == .concurrent_session_id_mismatch or plan == .cross_run_session_id_mismatch)
     {
         const callback = session.callbacks.on_event orelse {
             diagnostic(out_error);
@@ -372,11 +392,36 @@ pub fn sessionRun(
             .event_callback => &event_buffer,
             .unknown_event_callback => "{\"future_observation\":{\"answer\":42}}",
             .malformed_event_callback => "{}",
-            else => unreachable,
+            else => &event_buffer,
         };
-        const callback_status = callback(session.callbacks.ctx, handle, run_id, sdk.bytesView(event_json));
+        var run = std.mem.zeroes(wire.RunContextV1);
+        run.struct_size = @sizeOf(wire.RunContextV1);
+        run.session = if (plan == .wrong_event_session_handle)
+            @ptrCast(&fake_core.runtime)
+        else
+            handle;
+        run.run_id = if (plan == .wrong_event_run_id) run_id + 1 else run_id;
+        run.session_id = sdk.bytesView(session.session_id[0..session.session_id_len]);
+        if (plan == .cross_run_session_id_mismatch and run_id > 1)
+            run.session_id = sdk.bytesView("changed-cross-run-id");
+
+        var callback_status: u32 = wire.EVENT_CONTINUE;
+        if (plan == .concurrent_session_id_mismatch) {
+            callback_status = invokeConcurrentIdentityCallbacks(
+                callback,
+                session.callbacks.ctx,
+                &run,
+                event_json,
+            ) catch wire.EVENT_FATAL;
+        } else {
+            callback_status = callback(session.callbacks.ctx, &run, sdk.bytesView(event_json));
+            if (callback_status == wire.EVENT_CONTINUE and plan == .same_run_session_id_mismatch) {
+                run.session_id = sdk.bytesView("changed-same-run-id");
+                callback_status = callback(session.callbacks.ctx, &run, sdk.bytesView(event_json));
+            }
+        }
         @memset(&event_buffer, 'x');
-        if (callback_status != wire.CALLBACK_CONTINUE) {
+        if (callback_status != wire.EVENT_CONTINUE) {
             session.lock();
             session.running = false;
             session.broadcast();
@@ -398,7 +443,14 @@ pub fn sessionRun(
             "{}";
         const callback_status = callback(
             session.callbacks.ctx,
-            handle,
+            &wire.RunContextV1{
+                .struct_size = @sizeOf(wire.RunContextV1),
+                .reserved0 = 0,
+                .session = handle,
+                .run_id = run_id,
+                .session_id = sdk.bytesView(session.session_id[0..session.session_id_len]),
+                .reserved = [_]u64{0} ** 2,
+            },
             sdk.bytesView(request_json),
             &response,
         );
@@ -507,6 +559,8 @@ pub fn bufferRelease(out: ?*wire.OwnedBytesV1) callconv(.c) void {
 pub const fake_api = wire.ApiV1{
     .struct_size = @sizeOf(wire.ApiV1),
     .abi_version = wire.ABI_VERSION_V1,
+    .abi_revision = wire.ABI_REVISION,
+    .reserved0 = 0,
     .capabilities = wire.REQUIRED_CAPABILITIES_V1,
     .runtime_create = runtimeCreate,
     .runtime_destroy = runtimeDestroy,
@@ -517,6 +571,66 @@ pub const fake_api = wire.ApiV1{
     .buffer_release = bufferRelease,
     .reserved = [_]u64{0} ** 4,
 };
+
+const ConcurrentEventInvocation = struct {
+    callback: wire.OnEventFnV1,
+    callback_context: ?*anyopaque,
+    run: wire.RunContextV1,
+    event_json: wire.BytesViewV1,
+    ready: *std.Io.Semaphore,
+    start: *std.Io.Semaphore,
+    result: u32 = wire.EVENT_FATAL,
+
+    fn invoke(self: *ConcurrentEventInvocation) void {
+        self.ready.post(std.testing.io);
+        self.start.waitUncancelable(std.testing.io);
+        self.result = self.callback(
+            self.callback_context,
+            &self.run,
+            self.event_json,
+        );
+    }
+};
+
+fn invokeConcurrentIdentityCallbacks(
+    callback: wire.OnEventFnV1,
+    callback_context: ?*anyopaque,
+    run: *const wire.RunContextV1,
+    event_json: []const u8,
+) !u32 {
+    var ready: std.Io.Semaphore = .{};
+    var start: std.Io.Semaphore = .{};
+    var first = ConcurrentEventInvocation{
+        .callback = callback,
+        .callback_context = callback_context,
+        .run = run.*,
+        .event_json = sdk.bytesView(event_json),
+        .ready = &ready,
+        .start = &start,
+    };
+    var second = first;
+    second.run.session_id = sdk.bytesView("concurrent-other-id");
+    const first_thread = try std.Thread.spawn(.{}, ConcurrentEventInvocation.invoke, .{&first});
+    const second_thread = std.Thread.spawn(
+        .{},
+        ConcurrentEventInvocation.invoke,
+        .{&second},
+    ) catch |err| {
+        start.post(std.testing.io);
+        first_thread.join();
+        return err;
+    };
+    ready.waitUncancelable(std.testing.io);
+    ready.waitUncancelable(std.testing.io);
+    start.post(std.testing.io);
+    start.post(std.testing.io);
+    first_thread.join();
+    second_thread.join();
+    return if (first.result == wire.EVENT_CONTINUE and second.result == wire.EVENT_CONTINUE)
+        wire.EVENT_CONTINUE
+    else
+        wire.EVENT_FATAL;
+}
 
 pub fn openSession(runtime: *lifecycle.Runtime) !*lifecycle.Session {
     const workspace_root = if (std.fs.path.sep == '\\') "C:\\tmp\\metawork-gate2" else "/tmp/metawork-gate2";

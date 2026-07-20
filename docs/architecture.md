@@ -1,7 +1,7 @@
 # MetaWork 高层架构
 
 > 状态：Phase 0A 已完成；当前实现基线迁移到 stable AgentCore ABI v1，后续正式方向选择单 AgentCore Worker
-> 日期：2026-07-19
+> 日期：2026-07-20
 
 产品范围见 [产品需求](requirements.md)，metacodes（原 cc-zig）的具体接入约束见 [AgentCore 集成契约](agentcore-integration.md)，当前 bundle 能力见 [AgentCore ABI v1 消费基线](agentcore-abi-v1.md)。历史报告中的 cc-zig 名称保留当时仓库身份。
 
@@ -28,7 +28,7 @@
 
 ### 同步 macOS baseline
 
-当前锁定 metacodes bundle `0.0.0-dev+db052085b197`（commit `db052085b1970675b54426cfea7d71222bf174af`）提供 stable AgentCore ABI v1。同步 Run、built-in tools、结构化 observation events、同步 question/permission、abort、生命周期和同进程 macOS 垂直链路沿用 Gate 6 的产品边界，并在本次精确 bundle 迁移中重新验收。
+当前锁定 metacodes bundle `0.0.0-dev+36637f314c0f`（commit `36637f314c0f1c41bb1a2267ced7ad6a46100003`）提供 stable AgentCore ABI v1 revision 2。同步 Run、built-in tools、结构化 observation events、同步 question/permission、abort、生命周期和同进程 macOS 垂直链路沿用 Gate 6 的产品边界，并在本次精确 bundle 迁移中重新验收。MetaWork 只接受 112-byte revision 2 API table，不兼容旧 revision，也不保留 fallback。
 
 该 baseline 不包含：
 
@@ -149,14 +149,14 @@ AgentCore bundle
 
 - metacodes 单一维护 binary facade、C header、Zig SDK 和内部映射；
 - MetaWork 的 probe 从显式 bundle root 消费，正式 build 使用经 lock 校验并 staged 的同布局 bundle；两者都不访问上游 source tree；
-- manifest 锁定 commit/build identity、Zig toolchain、target、architecture、构建模式、ABI version、系统链接输入和 checksum；
+- manifest 锁定 commit/build identity、Zig toolchain、target、architecture、构建模式、ABI version/revision、系统链接输入和 checksum；
 - artifact 缺失、target 不匹配或 checksum 错误时明确失败；
 - 不使用 `latest`、版本范围、可变 tag 或 source fallback；
 - 当前 raw contract probe 与正式 Host 分离。probe 可以记录 raw SDK 缺口，正式 Host 必须只使用 typed SDK contract；
 - 同步 baseline 通过后，再建设内容寻址 cache 和远程 artifact source；切换来源不能改变 bundle layout 或链接方式；
 - 当前产品 Runtime 配置不注册 Host tools，Read/Bash/Edit 使用 AgentCore built-in tools。
 
-ABI v1 使用刚性 struct size 和 reserved-zero 规则。新增 layout、function table 或 UI/control tag 必须发布新 ABI version；新增 observation tag 可以使用新的 bundle identity 兼容发布，旧 SDK 将其解码为 owned unknown observation。MetaWork 在 SDK 校验后立即释放并忽略 unknown observation，不让它占用产品事件泵，也不传给 Renderer 或猜测为产品状态。
+ABI v1 revision 2 使用刚性 struct size、revision 和 reserved-zero 规则。API layout 或 callback contract 的变化必须由 metacodes 发布新的 revision/version 和 bundle identity；MetaWork 对三者做精确匹配，不承担旧 revision 兼容。新增 observation tag 可以使用新的 bundle identity 兼容发布，旧 SDK 将其解码为 owned unknown observation。MetaWork 在 SDK 校验后立即释放并忽略 unknown observation，不让它占用产品事件泵，也不传给 Renderer 或猜测为产品状态。
 
 ## 6. 实施 Gate
 

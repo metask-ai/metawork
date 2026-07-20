@@ -1,7 +1,7 @@
 # MetaWork AgentCore 集成契约
 
 > 状态：Phase 0A Gate 6 同进程垂直链路与 Gate 7 fault-domain 对照均已通过；后续正式方向选择单 AgentCore Worker
-> 依赖：metacodes AgentCore bundle `0.0.0-dev+db052085b197`
+> 依赖：metacodes AgentCore bundle `0.0.0-dev+36637f314c0f`，ABI v1 revision 2
 
 本文定义 MetaWork `agent/` 执行子系统与 cc-zig 之间的规范边界。Desktop Host 的 composition、Workbench 产品状态和 Bridge transport 见 [高层架构](architecture.md)，当前预编译库能力见 [AgentCore ABI v1 消费基线](agentcore-abi-v1.md)。
 
@@ -35,12 +35,12 @@ AgentCore bundle
 
 - cc-zig 独立构建并测试 bundle；
 - MetaWork 通过显式绝对 bundle root 消费；
-- 依赖配置锁定 build identity、commit、target、toolchain、ABI version 和 checksum；
+- 依赖配置锁定 build identity、commit、target、toolchain、ABI version/revision 和 checksum；
 - 常规 build/test/package 不访问 cc-zig source tree；
 - artifact 缺失、target 不匹配或 checksum 错误时明确失败；
 - 禁止 path/Git source dependency、源码复制、`latest`、版本范围、可变 tag 和 source fallback。
 
-当前 stable ABI v1 manifest 只消费锁定 bundle 的现行字段布局：`source.commit`、带 `abi` 的 build identity，以及 `{path, sha256}` 组成的 `files` 数组。MetaWork 不保留旧字段名、旧 object-shaped `files` 或双格式 fallback；上游协议变化与 lock、validator、stager 和 build graph 原子升级。
+当前 stable ABI v1 revision 2 manifest 只消费锁定 bundle 的现行字段布局：`source.commit`、带 `abi` 的 build identity、`contract.binary_abi_version = 1`、`contract.binary_abi_revision = 2`，以及 `{path, sha256}` 组成的 `files` 数组。MetaWork 不保留旧字段名、旧 object-shaped `files`、旧 ABI revision 或双格式 fallback；上游协议变化与 lock、validator、stager 和 build graph 原子升级。
 
 当前不先实现 dependency resolver 或 content-addressed cache。同步 baseline 通过后，本地 cache 与远程 artifact repository 必须复用同一 bundle layout 和校验规则，不能改变 AgentCore 链接方式。
 
@@ -53,7 +53,7 @@ AgentCore bundle
 - 不能成为产品状态映射或 UI JSON 解析实现；
 - 不能注册到 React/Native SDK 正式链路。
 
-当前 clean bundle `db052085b1970675b54426cfea7d71222bf174af` 提供 typed status、六个 StopReason、known/unknown observation decoder、`UiRequest` decoder 和 request-aware `UiResponse` encoder，并固定 built-in file/shell tools 相对 `workspace_root` 的执行合同。正式 `agent/` 直接使用这些表面；MetaWork 不手写 raw enum、tag switch 或 JSON schema。
+当前 clean bundle `36637f314c0f1c41bb1a2267ced7ad6a46100003` 提供 typed status、六个 StopReason、known/unknown observation decoder、`UiRequest` decoder、request-aware `UiResponse` encoder，以及 callback-scoped validated `RunContext`。正式 `agent/` 直接使用这些表面；MetaWork 不手写 raw enum、tag switch、identity layout 或 JSON schema。
 
 ### MetaWork module boundary
 
@@ -69,8 +69,9 @@ AgentCore bundle
 
 | 类型              | 方向        | 当前 ABI v1 语义                                                       |
 | ----------------- | ----------- | ---------------------------------------------------------------------- |
-| `CoreEvent` JSON  | Core → Host | callback-scoped borrowed bytes；携带 callback Session handle 和 run ID |
-| `UiRequest` JSON  | Core → Host | 同步 callback 请求                                                     |
+| `RunContext`      | Core → Host | callback-scoped borrowed identity；包含 Session handle、run ID 和稳定 session ID |
+| `CoreEvent` JSON  | Core → Host | callback-scoped borrowed bytes；与同次 callback 的 `RunContext` 绑定    |
+| `UiRequest` JSON  | Core → Host | 同步 callback 请求；与同次 callback 的 `RunContext` 绑定                |
 | `UiResponse` JSON | Host → Core | 同一 callback 内 answered response；或 unavailable/fatal               |
 | ABI status        | Core → Host | function 调用层错误，独立于有效 Run 结果                               |
 | `RunResult`       | Core → Host | status OK 后才有效；包含 stop reason code、turn/tool count             |
@@ -88,6 +89,8 @@ Agent binding 是 cc-zig backend 的 ABI 消费者，不是 Native SDK Adapter�
 
 ```text
 AgentCore/tool thread
+→ SDK validates RunContext layout and borrowed session ID
+→ Host atomically binds/compares Session handle + active run ID + stable session ID
 → SDK validates bytes/tag/payload as known or owned unknown observation
 → unknown observation: Host releases the SDK owner and returns continue
 → known observation: Host deep-copies escaping bytes
@@ -99,6 +102,9 @@ AgentCore/tool thread
 约束：
 
 - callback bytes 默认只在返回前有效；
+- `RunContext` 及其 session ID 也只在 callback 内借用，禁止保存 slice；
+- Session handle、active run ID、Session-lifetime session ID 的首次绑定/比较与 callback ref admission 必须在同一 Session lock 内完成；
+- invalid layout、错误 handle/run ID、同 Run 或跨 Run session ID 漂移均为 dependency contract failure，返回 fatal 并 poison Session；
 - 校验和深拷贝必须在 callback 内完成；
 - callback 可能来自不同 Session 的并发线程；
 - 同一 Run 的事件顺序必须保留；
@@ -112,9 +118,8 @@ Gate 4 把正式 Host 连接到 FIFO bounded test sink，并通过 typed callbac
 
 ```text
 Core calls synchronous UI callback
-→ SDK validates UiRequest
-→ Host resolves callback Session handle
-→ bind to Session current_run
+→ SDK validates RunContext and UiRequest
+→ Host atomically validates the same full Session/Run identity tuple
 → enqueue control item
 → callback waits on Host-owned condition/channel
 → response / deadline / cancel / close / shutdown
@@ -127,9 +132,7 @@ Bridge handler 只写入 response channel，不同步等待 AgentCore。callback
 
 ### Host tools
 
-当前 v1 Host tool callback 的 public contract 尚未给出可验证的 MetaWork Session/Run 映射。MetaWork 不使用全局 current-session、TLS 或每 Session 一个 Runtime 绕过这一缺口。
-
-因此产品 Runtime 配置必须保持 `host_tool_count = 0`。Read/Bash/Edit 使用 built-in tool catalog。Host tool 只允许在隔离 contract probe 中测试 callback/release mechanics。
+revision 2 的 Host tool callback 同样携带 validated `RunContext`，但这只补齐 wire identity，不自动建立 MetaWork 的产品工具、安全与路由政策。当前产品 Runtime 配置仍必须保持 `host_tool_count = 0`，Read/Bash/Edit 使用 built-in tool catalog；启用正式 Host tools 属于独立 capability Gate，不在本次 ABI 迁移中顺带开放。
 
 ## 5. Host envelope 与产品状态
 
@@ -264,7 +267,7 @@ event validation、copy 或同步入队失败：
 
 ```text
 set typed TerminationSignal if absent
-→ return CALLBACK_FATAL
+→ return EVENT_FATAL
 → session_run returns non-OK callback status
 → Host releases diagnostic
 → Run = failed

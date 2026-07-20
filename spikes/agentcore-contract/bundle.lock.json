@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
   "name": "metacodes-agentcore",
-  "version": "0.0.0-dev+db052085b197",
+  "version": "0.0.0-dev+36637f314c0f",
   "source": {
-    "commit": "db052085b1970675b54426cfea7d71222bf174af",
+    "commit": "36637f314c0f1c41bb1a2267ced7ad6a46100003",
     "dirty": false,
     "dirty_source_sha256": ""
   },
@@ -18,21 +18,22 @@
   },
   "contract": {
     "binary_abi_version": 1,
+    "binary_abi_revision": 2,
     "required_system_link_inputs": ["libc"],
     "ui_request_mode": "synchronous"
   },
   "files": [
     {
       "path": "lib/libmetacodes_agentcore.a",
-      "sha256": "476031a56abfdcc7282b0145b3e123f5f283e69d3721373315caf1d44b33ca21"
+      "sha256": "f285e4974d678a4a0aaa95dbd2f5087dd39404535263d619cb03f43fe3533d6c"
     },
     {
       "path": "include/metacodes_agentcore.h",
-      "sha256": "7e29f6e531fa8734b3bead98093ac6da507c1a642682afc5a2a20c5214bd04fe"
+      "sha256": "1a3a0c696612bbbbb0bac1bb144d36b5d70c842b29bf4b2849f394fb2c0c9f5f"
     },
     {
       "path": "sdk/metacodes_agentcore.zig",
-      "sha256": "e5105d4aa27387ff46cfe9cb0f34cf14bfb10408cd5f3586126bcbdc42f7777c"
+      "sha256": "44c2f5bb8d79b0714d794696e8e079d9a748611cd2ef8cf1ed89eed211a09be0"
     },
     {
       "path": "sdk/metacodes_agentcore_protocol.zig",
@@ -40,7 +41,7 @@
     },
     {
       "path": "sdk/metacodes_agentcore_types.zig",
-      "sha256": "0ed5758853a03b977b04ae986bbf30220ecff61b70f3ca2c50b87e9bf425a669"
+      "sha256": "65d0a9d31fb2323461b636fe1d518c5fba7a1a34e174529591c908e96405564b"
     }
   ]
 }

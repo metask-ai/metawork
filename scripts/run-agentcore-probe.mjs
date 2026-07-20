@@ -20,7 +20,7 @@ const lockPath = path.join(
 const expectedManifest = JSON.parse(await readFile(lockPath, "utf8"));
 const bundle = await validateAgentCoreBundle(bundleRoot, { expectedManifest });
 console.log(
-  `verified AgentCore ${bundle.manifest.version} ABI ${bundle.manifest.contract.binary_abi_version}`,
+  `verified AgentCore ${bundle.manifest.version} ABI ${bundle.manifest.contract.binary_abi_version} revision ${bundle.manifest.contract.binary_abi_revision}`,
 );
 
 const spikeRoot = path.join(repositoryRoot, "spikes", "agentcore-contract");

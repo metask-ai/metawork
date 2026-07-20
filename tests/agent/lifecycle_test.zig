@@ -317,6 +317,98 @@ test "malformed Core events fail the Run instead of entering the bounded sink" {
     try std.testing.expectEqual(@as(usize, 1), releases);
 }
 
+test "RunContext identity violations fail closed and poison the Session" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 4,
+        .event_capacity = 8,
+        .per_session_event_capacity = 2,
+        .control_reserved_capacity = 0,
+        .per_session_control_reserved_capacity = 0,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+
+    const plans = [_]Plan{
+        .wrong_event_session_handle,
+        .wrong_event_run_id,
+        .same_run_session_id_mismatch,
+        .concurrent_session_id_mismatch,
+    };
+    for (plans) |plan| {
+        fake_core.setNextPlan(plan);
+        const session = try openSession(runtime);
+        const run_id = try submitSession(session, "reject invalid callback identity");
+        try session.waitRun(run_id);
+        var terminal = takeTestTerminal(session, run_id);
+        defer terminal.deinit();
+        try std.testing.expectEqual(
+            @as(?u32, wire.STATUS_CALLBACK_FAILED),
+            terminal.raw_status_code,
+        );
+        try std.testing.expectEqual(
+            @as(?lifecycle.TerminalFailure, .dependency_contract),
+            terminal.failure,
+        );
+        try std.testing.expectEqual(lifecycle.SessionState.poisoned, session.snapshot().state);
+        try std.testing.expectError(
+            error.SessionPoisoned,
+            submitSession(session, "identity failure is permanent"),
+        );
+        try closeSession(session, .session_close);
+    }
+    while (runtime.takeEvent()) |event| {
+        var owned = event;
+        owned.deinit();
+    }
+}
+
+test "RunContext session identity remains stable across Runs" {
+    fake_core.reset();
+    fake_core.setNextPlan(.cross_run_session_id_mismatch);
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 1,
+        .event_capacity = 2,
+        .per_session_event_capacity = 2,
+        .control_reserved_capacity = 0,
+        .per_session_control_reserved_capacity = 0,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    const session = try openSession(runtime);
+
+    const first_run = try submitSession(session, "bind Core session identity");
+    try session.waitRun(first_run);
+    var first_terminal = takeTestTerminal(session, first_run);
+    defer first_terminal.deinit();
+    try std.testing.expectEqual(@as(?u32, wire.STATUS_OK), first_terminal.raw_status_code);
+    var first_event = runtime.takeEvent().?;
+    first_event.deinit();
+
+    const second_run = try submitSession(session, "reject changed Core session identity");
+    try session.waitRun(second_run);
+    var second_terminal = takeTestTerminal(session, second_run);
+    defer second_terminal.deinit();
+    try std.testing.expectEqual(
+        @as(?u32, wire.STATUS_CALLBACK_FAILED),
+        second_terminal.raw_status_code,
+    );
+    try std.testing.expectEqual(
+        @as(?lifecycle.TerminalFailure, .dependency_contract),
+        second_terminal.failure,
+    );
+    try std.testing.expectEqual(lifecycle.SessionState.poisoned, session.snapshot().state);
+    try closeSession(session, .session_close);
+}
+
 test "valid unknown observations are ignored without consuming pump capacity" {
     fake_core.reset();
     fake_core.setNextPlan(.unknown_event_callback);

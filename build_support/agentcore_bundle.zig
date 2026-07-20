@@ -25,6 +25,7 @@ const Manifest = struct {
     },
     contract: struct {
         binary_abi_version: u32,
+        binary_abi_revision: u32,
         required_system_link_inputs: []const []const u8,
         ui_request_mode: []const u8,
     },
@@ -60,6 +61,7 @@ pub fn verify(b: *std.Build, root: []const u8) Bundle {
 
     if (lock.schema_version != 1 or !std.mem.eql(u8, lock.name, "metacodes-agentcore") or
         lock.source.dirty or lock.contract.binary_abi_version != 1 or
+        lock.contract.binary_abi_revision != 2 or
         !std.mem.eql(u8, lock.contract.ui_request_mode, "synchronous") or
         !std.mem.eql(u8, lock.toolchain.zig_version, @import("builtin").zig_version_string))
         @panic("unsupported locked AgentCore bundle contract");
@@ -167,6 +169,7 @@ fn requireSameManifest(expected: Manifest, actual: Manifest) void {
         !std.mem.eql(u8, expected.build.optimize, actual.build.optimize) or
         expected.build.strip != actual.build.strip or
         expected.contract.binary_abi_version != actual.contract.binary_abi_version or
+        expected.contract.binary_abi_revision != actual.contract.binary_abi_revision or
         !stringListsEqual(expected.contract.required_system_link_inputs, actual.contract.required_system_link_inputs) or
         !std.mem.eql(u8, expected.contract.ui_request_mode, actual.contract.ui_request_mode) or
         !manifestFilesEqual(expected.files, actual.files))

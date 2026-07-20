@@ -867,6 +867,17 @@ pub const Runtime = struct {
     }
 };
 
+const max_core_session_id_bytes: usize = @intCast(wire.MAX_SESSION_ID_BYTES_V1);
+
+const CoreSessionIdentity = union(enum) {
+    unbound,
+    bound: struct {
+        len: usize,
+        bytes: [max_core_session_id_bytes]u8,
+    },
+    failed,
+};
+
 pub const Session = struct {
     agent_runtime: *Runtime,
     id: u64,
@@ -892,8 +903,10 @@ pub const Session = struct {
     abort_status: ?sdk.Status = null,
     raw_abort_status_code: ?u32 = null,
     dependency_contract_failure: bool = false,
+    core_session_identity: CoreSessionIdentity = .unbound,
     cancel_requested: bool = false,
     active_refs: usize = 0,
+    active_callback_refs: usize = 0,
     ui_active: bool = false,
     ui_request_id: u64 = 0,
     ui_answered: bool = false,
@@ -1379,6 +1392,10 @@ pub const Session = struct {
 
         self.lock();
         self.core_call_in_progress = false;
+        if (self.active_callback_refs != 0) {
+            self.failCoreIdentityLocked();
+            while (self.active_callback_refs != 0) self.wait();
+        }
         while (self.abort_calls_in_progress != 0) self.wait();
         self.agent_runtime.allocator.free(prompt);
         self.prompt = null;
@@ -1538,6 +1555,7 @@ pub const Session = struct {
     fn deinit(self: *Session) void {
         std.debug.assert(self.state == .closed);
         std.debug.assert(self.active_refs == 0);
+        std.debug.assert(self.active_callback_refs == 0);
         self.control_block.deinit();
         self.agent_runtime.allocator.destroy(self.control_block);
         if (self.prompt) |prompt| self.agent_runtime.allocator.free(prompt);
@@ -1549,36 +1567,35 @@ pub const Session = struct {
 
     fn onEvent(
         context: ?*anyopaque,
-        handle: ?*wire.SessionHandle,
-        run_id: u64,
+        raw_run: ?*const wire.RunContextV1,
         event_json: wire.BytesViewV1,
     ) callconv(.c) u32 {
-        const self: *Session = @ptrCast(@alignCast(context orelse return wire.CALLBACK_FATAL));
-        if (!self.retainCoreCallback(handle, run_id)) return wire.CALLBACK_FATAL;
-        defer self.releaseReference();
+        const self: *Session = @ptrCast(@alignCast(context orelse return wire.EVENT_FATAL));
+        const run_id = self.retainCoreCallback(raw_run) orelse return wire.EVENT_FATAL;
+        defer self.releaseCoreCallback();
         const encoded = sdk.borrowedBytes(event_json) catch {
             self.recordTerminationSignal(.{ .event_pump_failure = .invalid_event });
-            return wire.CALLBACK_FATAL;
+            return wire.EVENT_FATAL;
         };
         if (encoded.len > self.agent_runtime.max_event_bytes) {
             self.recordTerminationSignal(.{ .event_pump_failure = .event_too_large });
-            return wire.CALLBACK_FATAL;
+            return wire.EVENT_FATAL;
         }
         var parsed = sdk.decodeCoreEvent(self.agent_runtime.allocator, encoded) catch {
             self.recordTerminationSignal(.{ .event_pump_failure = .invalid_event });
-            return wire.CALLBACK_FATAL;
+            return wire.EVENT_FATAL;
         };
         switch (parsed.value) {
             .known => {},
             .unknown => {
                 parsed.deinit();
-                return wire.CALLBACK_CONTINUE;
+                return wire.EVENT_CONTINUE;
             },
         }
         const owned_json = self.agent_runtime.allocator.dupe(u8, encoded) catch {
             parsed.deinit();
             self.recordTerminationSignal(.{ .event_pump_failure = .allocation });
-            return wire.CALLBACK_FATAL;
+            return wire.EVENT_FATAL;
         };
         var envelope = OwnedCoreEvent{
             .session_id = self.id,
@@ -1602,21 +1619,21 @@ pub const Session = struct {
                 error.DeadlineExceeded,
                 => .capacity,
             } });
-            return wire.CALLBACK_FATAL;
+            return wire.EVENT_FATAL;
         };
         const notification_failed = self.agent_runtime.notifyEventConsumer() == .unavailable;
         if (notification_failed) {
             self.recordTerminationSignal(.{
                 .event_consumer_notification_failure = .unavailable,
             });
-            return wire.CALLBACK_FATAL;
+            return wire.EVENT_FATAL;
         }
-        return wire.CALLBACK_CONTINUE;
+        return wire.EVENT_CONTINUE;
     }
 
     fn onUiRequest(
         context: ?*anyopaque,
-        handle: ?*wire.SessionHandle,
+        raw_run: ?*const wire.RunContextV1,
         request_json: wire.BytesViewV1,
         out_response: ?*wire.OwnedBytesV1,
     ) callconv(.c) u32 {
@@ -1626,8 +1643,8 @@ pub const Session = struct {
             self.recordTerminationSignal(.{ .callback_failure = .ui });
             return wire.UI_FATAL;
         };
-        if (!self.retainCoreCallback(handle, null)) return wire.UI_FATAL;
-        defer self.releaseReference();
+        _ = self.retainCoreCallback(raw_run) orelse return wire.UI_FATAL;
+        defer self.releaseCoreCallback();
 
         const encoded_request = sdk.borrowedBytes(request_json) catch {
             self.recordTerminationSignal(.{ .callback_failure = .ui });
@@ -1745,18 +1762,87 @@ pub const Session = struct {
 
     fn retainCoreCallback(
         self: *Session,
-        handle: ?*wire.SessionHandle,
-        run_id: ?u64,
-    ) bool {
+        raw_run: ?*const wire.RunContextV1,
+    ) ?u64 {
+        const run = sdk.validateRunContext(raw_run) catch {
+            self.rejectInvalidCoreIdentity();
+            return null;
+        };
         self.lock();
         defer self.unlock();
-        if (self.state == .closing or self.state == .closed or handle != self.raw)
-            return false;
-        if (run_id) |id| {
-            if (!self.run_started or id != self.active_run_id) return false;
+        if (self.state == .closing or self.state == .closed) return null;
+        if (self.raw == null or run.session != self.raw.? or
+            !self.run_started or !self.core_call_in_progress or
+            run.run_id != self.active_run_id)
+        {
+            self.failCoreIdentityLocked();
+            return null;
+        }
+        switch (self.core_session_identity) {
+            .unbound => {
+                var binding = CoreSessionIdentity{ .bound = .{
+                    .len = run.session_id.len,
+                    .bytes = [_]u8{0} ** max_core_session_id_bytes,
+                } };
+                @memcpy(
+                    binding.bound.bytes[0..run.session_id.len],
+                    run.session_id,
+                );
+                self.core_session_identity = binding;
+            },
+            .bound => |binding| {
+                if (!std.mem.eql(
+                    u8,
+                    binding.bytes[0..binding.len],
+                    run.session_id,
+                )) {
+                    self.failCoreIdentityLocked();
+                    return null;
+                }
+            },
+            .failed => return null,
         }
         self.active_refs += 1;
-        return true;
+        self.active_callback_refs += 1;
+        return run.run_id;
+    }
+
+    fn releaseCoreCallback(self: *Session) void {
+        self.lock();
+        defer self.unlock();
+        std.debug.assert(self.active_refs > 0);
+        std.debug.assert(self.active_callback_refs > 0);
+        self.active_refs -= 1;
+        self.active_callback_refs -= 1;
+        if (self.active_refs == 0 or self.active_callback_refs == 0) self.broadcast();
+    }
+
+    fn rejectInvalidCoreIdentity(self: *Session) void {
+        self.lock();
+        defer self.unlock();
+        if (self.state == .closing or self.state == .closed) return;
+        self.failCoreIdentityLocked();
+    }
+
+    fn failCoreIdentityLocked(self: *Session) void {
+        self.core_session_identity = .failed;
+        self.dependency_contract_failure = true;
+        if (!self.run_started) {
+            switch (self.state) {
+                .idle => self.state = .poisoned,
+                .queued => {
+                    self.state = .poisoned;
+                    self.finishPreparedRunLocked();
+                },
+                .poisoned, .closing, .closed => {},
+                .running, .waiting_ui => unreachable,
+            }
+        }
+        if (self.ui_active) {
+            self.ui_active = false;
+            if (self.state == .waiting_ui) self.state = .running;
+        }
+        self.broadcast();
     }
 };
 
