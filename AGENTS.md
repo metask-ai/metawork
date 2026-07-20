@@ -18,7 +18,7 @@
 ## 当前阶段
 
 - macOS 是当前唯一优先实现和真实验收平台；Windows 属于后续 Phase 0B。
-- 当前实现已 hard cut 到精确锁定的 development AgentCore ABI v1 revision 3 dirty artifact；candidate/staged、正式 build/test 和 Debug/Release 已接通，完整 Gate 5/6、package 与迁移报告仍待 migration Gate 收口。开发期 ABI identity 不等于 stable support policy；`source.dirty = true` 只提供 provenance，不能从 commit 重建同一源码状态。
+- 当前已验证基线 hard cut 到精确锁定的 development AgentCore ABI v1 revision 3 dirty artifact；candidate/staged、正式 build/test、Debug/Release、Gate 5/6 和 macOS package 已通过，证据见 `docs/agentcore-revision-3-migration-report.md`。开发期 ABI identity 不等于 stable support policy；`source.dirty = true` 只提供 provenance，不能从 commit 重建同一源码状态。
 - 同步 baseline、完整 Phase 0A 和后续 AgentCore capability 是三个不同门槛。Renderer reload 可以恢复仍存活 Host 的视图，不等于 AgentCore 进程恢复。
 - async pending、suspend/resume、Session 持久化恢复、strict Workspace security 和可路由产品 Host tools 不属于当前 ABI v1 baseline。
 

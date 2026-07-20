@@ -1,9 +1,9 @@
 # MetaWork AgentCore ABI v1 revision 3 消费合同
 
-> 状态：revision 3 hard-cut implementation 已完成基础 build/test；完整 migration Gate、Gate 5/6、package 和报告尚待完成，不声明 stable support policy
+> 状态：revision 3 hard-cut migration Gate 已通过，是当前已验证 macOS 消费基线；不声明 stable support policy
 > 所有者：metacodes 负责 facade、bindings、bundle 和兼容政策；MetaWork 负责精确消费验证
 
-本文记录 MetaWork 对 AgentCore binary ABI version 1 revision 3 的消费边界。线程、事件泵和 Host 生命周期见 [AgentCore 集成契约](agentcore-integration.md)，迁移验收顺序见 [Phase 0 验证计划](phase-0-validation.md)。当前实现已完成 artifact、build graph、SDK namespace 和正式 Host 的 hard cut，但只有完整 migration Gate 通过后，本文合同才成为已验证产品基线。
+本文记录 MetaWork 对 AgentCore binary ABI version 1 revision 3 的消费边界。线程、事件泵和 Host 生命周期见 [AgentCore 集成契约](agentcore-integration.md)，迁移验收顺序见 [Phase 0 验证计划](phase-0-validation.md)。当前实现已完成 artifact、build graph、SDK namespace 和正式 Host 的 hard cut，并通过完整 macOS migration Gate；证据见 [revision 3 迁移验证报告](agentcore-revision-3-migration-report.md)。
 
 ## 1. 版本含义
 
@@ -260,7 +260,7 @@ candidate probe 不导入 MetaWork Agent，也不承担 Runtime/Session、真实
 
 ### staged 正式 Host gate
 
-> revision 2 的 Gate 4 正式 Host 消费已通过；证据见 [Phase 0 Gate 4 验证报告](phase-0-gate-4-report.md)。当前 revision 3 staged Host 已完成基础 typed SDK、lifecycle、check/test 和 Debug/Release build；完整 migration Gate、Gate 5/6、package 与报告尚待收口。历史结果和基础回归都不能替代剩余 Gate。
+> revision 3 staged Host 的 typed SDK、lifecycle、check/test/Phase 0A、Debug/Release、Gate 5/6 和 package 已全部通过；证据见 [revision 3 迁移验证报告](agentcore-revision-3-migration-report.md)。revision 2 的 Gate 4 报告只保留历史事实，不构成兼容要求。
 
 - typed SDK 完成并通过 source-free consumer；
 - status-before-result 和 diagnostic release 测试；

@@ -1,9 +1,9 @@
 # MetaWork Phase 0 验证计划
 
-> 状态：Phase 0A Gate 0 至 Gate 7 已在历史 revision 2 基线上通过；Account Gate A1/B/C1/C2/D/E/F/G 已完成；AgentCore revision 3 hard-cut migration Gate 待执行
+> 状态：Phase 0A Gate 0 至 Gate 7、Account Gate A1/B/C1/C2/D/E/F/G 和 AgentCore revision 3 hard-cut migration Gate 已通过
 > 平台：Phase 0A macOS-first；Phase 0B 后续验证 Windows
 
-Phase 0 用最小真实原型验证技术栈和关键风险，不交付完整产品。历史 Phase 0A 使用 ABI v1 revision 2 完成；已批准的目标基线是 development AgentCore ABI v1 revision 3，但当前 checkout 必须先通过本文的 hard-cut migration Gate，才能把 revision 3 写成已验证当前态。这两个 development artifact 都不构成 stable support policy。同步 baseline 不包含 async suspend/resume、跨进程恢复、strict Workspace security、正式 Host tools、typed Output/FileChange/plan-progress 或 plan/custom UI control。
+Phase 0 用最小真实原型验证技术栈和关键风险，不交付完整产品。历史 Phase 0A 使用 ABI v1 revision 2 完成；当前已验证基线已 hard cut 到 development AgentCore ABI v1 revision 3，并通过本文 migration Gate。这些 development artifact 都不构成 stable support policy。同步 baseline 不包含 async suspend/resume、跨进程恢复、strict Workspace security、正式 Host tools、typed Output/FileChange/plan-progress 或 plan/custom UI control。
 
 ## 1. 里程碑定义
 
@@ -296,7 +296,7 @@ npm run test:lifecycle
 
 当前 deterministic function-table fake 覆盖 bounded executor、每 Session 单 Run、queued/active/UI-wait close、并发 close/shutdown、callback quiescence、generation-checked RunControl lease、close lease quiescence、pre-Core termination、first-writer typed TerminationSignal、immutable TerminalResult、stale/too-late abort status、Session/Runtime destroy retry、OOM、diagnostic release、credential snapshot 隔离和临时/trusted Workspace 的词法边界。测试进程有 30 秒上限，避免回归变成无限 CI hang。
 
-这仍是 Gate 2 deterministic lifecycle foundation，不是完整真实 AgentCore Host：UI response 只验证 identity、唤醒和 close/shutdown 路径，固定返回 `UI_UNAVAILABLE`；事件和 UI JSON 不在 MetaWork 复制或解析。Gate 3 后来在 revision 2 clean bundle 上独立完成 typed SDK 验收；当前 revision 3 migration 已使用 staged 官方 SDK 重跑 typed consumer 和 lifecycle，真实 AgentCore 产品链路仍必须由本 Gate 的 Gate 5/6 回归收口。executor 容量仍尚未根据真实 trace 定标。
+这仍是 Gate 2 deterministic lifecycle foundation，不是完整真实 AgentCore Host：UI response 只验证 identity、唤醒和 close/shutdown 路径，固定返回 `UI_UNAVAILABLE`；事件和 UI JSON 不在 MetaWork 复制或解析。Gate 3 后来在 revision 2 clean bundle 上独立完成 typed SDK 验收；当前 revision 3 migration 已使用 staged 官方 SDK 重跑 typed consumer 和 lifecycle，真实 AgentCore 产品链路也已由本 Gate 的 Gate 5/6 回归收口。executor 容量仍尚未根据真实 trace 定标。
 
 ## 8. Gate 3：AgentCore typed SDK completion
 
@@ -446,7 +446,7 @@ Gate 4 通过时的 sink 只提供全局 event count 和单 event bytes 硬上�
 
 ### 依赖前置条件
 
-Gate 6 最近一次已通过产品基线使用 clean bundle `0.0.0-dev+36637f314c0f`、ABI v1 revision 2、112-byte API table。该结果是历史验收事实，不是 revision 3 兼容要求。revision 3 hard cut 必须在独立 migration Gate 中重新运行完整 Gate 6 macOS 链路，未通过前不得把新 bundle 写成已验证产品基线。
+Gate 6 的历史通过结果使用 clean bundle `0.0.0-dev+36637f314c0f`、ABI v1 revision 2、112-byte API table；它只保留历史验收事实，不构成 revision 3 兼容要求。revision 3 hard cut 已在独立 migration Gate 中重新运行完整 Gate 6 macOS 链路并通过，当前证据见 [revision 3 迁移验证报告](agentcore-revision-3-migration-report.md)。
 
 历史 revision 2 迁移的命令、产物 hash 和边界见 [AgentCore ABI v1 revision 2 迁移验证报告](agentcore-revision-2-migration-report.md)。revision 3 通过后必须生成独立报告，不修改旧报告伪造连续性。
 
@@ -565,7 +565,7 @@ Phase 0A 完成时必须产出：
 
 ## 14. AgentCore revision 3 hard-cut migration Gate
 
-> 状态：待执行。精确目标 bundle identity 由 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)定义，并由 repository `bundle.lock.json` 机器校验。
+> 状态：已通过。精确 identity、命令和产物证据见 [revision 3 迁移验证报告](agentcore-revision-3-migration-report.md)。
 
 本 Gate 只迁移 AgentCore artifact、namespace、官方 Zig package 和 build boundary，不顺带改变 Workbench/Renderer 产品协议、permission 选择、多选问题语义或进程模型。当前公司内部初步开发直接从本机 metacodes `zig-out/agentcore/aarch64-macos` 获取 candidate；不建设下载器、resolver、artifact repository、content-addressed cache 或跨机器自动分发。
 
@@ -640,7 +640,7 @@ npm run package:macos
 
 ### 14.5 Hard-cut exit
 
-只有上述 Gate 全部通过后，规范文档才可把 revision 3 从“批准目标”更新为“当前已验证基线”。最终 active tree 不提供 revision 2 兼容。permission 产品表面收紧、多选问题 fail-closed 和正式单 Worker 分别属于后续独立变更，不与本 Gate 混合。
+上述 Gate 已全部通过，revision 3 已更新为当前已验证基线；精确证据见 [revision 3 迁移验证报告](agentcore-revision-3-migration-report.md)。最终 active tree 不提供 revision 2 兼容。permission 产品表面收紧、多选问题 fail-closed 和正式单 Worker 分别属于后续独立变更，不与本 Gate 混合。
 
 ## 15. Phase 0A 当前非目标
 

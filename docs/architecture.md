@@ -1,6 +1,6 @@
 # MetaWork 高层架构
 
-> 状态：Phase 0A 已在历史 revision 2 基线上完成；当前 checkout 已完成 revision 3 artifact/build/Host hard cut 与基础 build/test，完整 migration Gate、Gate 5/6、package 和报告尚待完成；后续正式方向选择单 AgentCore Worker
+> 状态：AgentCore ABI v1 revision 3 hard-cut migration Gate 已通过，是当前已验证 macOS 基线；后续正式方向选择单 AgentCore Worker
 > 日期：2026-07-21
 
 产品范围见 [产品需求](requirements.md)，metacodes AgentCore 的具体接入约束见 [AgentCore 集成契约](agentcore-integration.md)，revision 3 目标能力见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。历史报告中的 cc-zig 名称只保留当时仓库身份。
@@ -30,7 +30,7 @@
 
 已批准的新基线是 metask AgentCore ABI v1 revision 3。它保持 112-byte API table、RunContext、typed status/StopReason、CoreEvent/UI codec 和同步 Run 语义，但把公共 C/Zig namespace、discovery symbol、bundle layout、manifest 和语言 package 统一到 `metask_agentcore`。精确 artifact identity、payload layout 和 manifest schema 只由 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)定义。MetaWork 对它执行 hard cut：最终 active build、Host、probe 和规范文档只接受 revision 3，不保留 revision 2 parser、路径、symbol、module alias 或 fallback。
 
-当前 checkout 的 active code、build graph 和 staged bundle 已切到 revision 3，基础 candidate/stage、typed SDK、正式 Host、check/test 和 Debug/Release build 已通过；完整 Gate 5/6、最终 package 和迁移报告尚未完成。只有 [Phase 0 验证计划](phase-0-validation.md)中的 revision 3 migration Gate 全部通过后，revision 3 才成为当前已验证产品基线。历史 revision 2 Gate 报告继续保留当时证据，但不构成兼容要求。
+当前 checkout 的 active code、build graph 和 staged bundle 已切到 revision 3；candidate/stage、typed SDK、正式 Host、check/test/Phase 0A、Debug/Release、Gate 5/6 和最终 macOS package 全部通过。revision 3 是当前已验证产品基线，证据见 [revision 3 迁移验证报告](agentcore-revision-3-migration-report.md)。历史 revision 2 Gate 报告继续保留当时证据，但不构成兼容要求。
 
 该 baseline 不包含：
 

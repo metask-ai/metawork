@@ -6,7 +6,7 @@ MetaWork 是一款桌面端 Agent Workbench，面向工作区、会话、Agent �
 
 技术选型与三层职责边界已经确认，macOS-first Phase 0A Gate 0 至 Gate 7 已通过。当前有一条真实的同进程同步垂直原型，完成 Native SDK Bridge、React Workbench、锁定 AgentCore bundle、built-in Read/Bash/Edit、同步权限、取消、reload 视图恢复、bounded event/lifecycle 和 fault-domain 对照。
 
-当前实现已 hard cut 到 metask AgentCore ABI v1 revision 3，正式 build graph 只消费 `.agentcore/bundle/bindings/zig` 官方 package，不保留旧 namespace、路径、symbol、module alias 或 fallback。精确 development artifact identity 见 [AgentCore ABI v1 revision 3 消费合同](docs/agentcore-abi-v1.md)；当前 full migration Gate、Gate 5/6、最终 package 与报告仍待完成，因此不能把它描述成已验证产品基线。同步链路不包含 async pending、suspend/resume、进程重建恢复、strict Workspace security 或正式 Host tools。
+当前已验证基线 hard cut 到 metask AgentCore ABI v1 revision 3，正式 build graph 只消费 `.agentcore/bundle/bindings/zig` 官方 package，不保留旧 namespace、路径、symbol、module alias 或 fallback。candidate/staged 信任链、完整 test/Phase 0A、Debug/Release、Gate 5/6 和 macOS package 均已通过；精确 development artifact identity 与证据分别见 [AgentCore ABI v1 revision 3 消费合同](docs/agentcore-abi-v1.md)和 [revision 3 迁移验证报告](docs/agentcore-revision-3-migration-report.md)。同步链路不包含 async pending、suspend/resume、进程重建恢复、strict Workspace security 或正式 Host tools。
 
 Gate 7 已证明当前同进程路径是零进程级隔离，并选择单 AgentCore Worker 作为后续正式方向。Worker 尚未实现，当前应用不得宣称具备 crash recovery。Windows 作为 Phase 0B 后续验证，不阻塞 macOS baseline。
 
@@ -37,6 +37,7 @@ MetaWork 不直接编译 metacodes source tree。隔离 candidate probe 从显�
 - [Phase 0 Gate 1 验证报告](docs/phase-0-gate-1-report.md)
 - [Phase 0 Gate 6 验证报告](docs/phase-0-gate-6-report.md)
 - [Phase 0 Gate 7 验证报告](docs/phase-0-gate-7-report.md)
+- [AgentCore ABI v1 revision 3 迁移验证报告](docs/agentcore-revision-3-migration-report.md)
 - [Agent 工作约束](AGENTS.md)
 
 ## macOS 开发命令
