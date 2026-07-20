@@ -49,10 +49,7 @@ const app = spawn(binary, [], {
   env: {
     ...process.env,
     METAWORK_GATE0_AUTOMATION: "1",
-    METAWORK_PROVIDER_API_KEY: "metawork-gate6-fixture-key",
-    METAWORK_PROVIDER_MODEL: "metawork-gate6-fixture-model",
-    METAWORK_PROVIDER_KIND: "anthropic",
-    METAWORK_PROVIDER_BASE_URL: baseUrl,
+    METAWORK_GATE6_PROVIDER_BASE_URL: baseUrl,
   },
   stdio: ["ignore", "pipe", "pipe"],
 });
@@ -372,7 +369,7 @@ async function snapshot() {
     !/^[1-9][0-9]*$/.test(descriptor.snapshotId) ||
     !Number.isSafeInteger(descriptor.bytes) ||
     descriptor.bytes <= 0 ||
-    descriptor.bytes > 8 * 1024 * 1024 ||
+    descriptor.bytes > 12 * 1024 * 1024 ||
     !Number.isSafeInteger(descriptor.chunkBytes) ||
     descriptor.chunkBytes <= 0 ||
     descriptor.chunkBytes > 256 * 1024
@@ -409,7 +406,13 @@ async function snapshot() {
   if (encoded.includes("metawork-gate6-fixture-key"))
     throw new Error("Host provider credential reached the Renderer snapshot");
   const parsed = JSON.parse(encoded);
-  if (parsed.schemaVersion !== 5 || !Array.isArray(parsed.tasks))
+  if (
+    parsed.schemaVersion !== 6 ||
+    typeof parsed.account !== "object" ||
+    parsed.account === null ||
+    Array.isArray(parsed.account) ||
+    !Array.isArray(parsed.tasks)
+  )
     throw new Error("invalid Workbench snapshot");
   return parsed;
 }

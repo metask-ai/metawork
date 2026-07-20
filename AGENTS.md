@@ -11,6 +11,7 @@
 3. cc-zig、事件泵、所有权和生命周期：[docs/agentcore-integration.md](docs/agentcore-integration.md)
 4. 当前 AgentCore 预编译库能力：[docs/agentcore-abi-v1.md](docs/agentcore-abi-v1.md)
 5. 原型范围与验收：[docs/phase-0-validation.md](docs/phase-0-validation.md)
+6. Metask Account production API 确认状态：[docs/metask-account-contract.md](docs/metask-account-contract.md)
 
 `README.md` 只作为项目入口；不要把它当作完整需求或架构规范。
 
@@ -31,7 +32,8 @@
 - AgentCore binary ABI facade 由 cc-zig 单一维护；MetaWork 只使用 bundle SDK。ABI 禁止 native Zig slice、Zig enum、allocator、error union 和 tagged union，wire 层使用固定宽度整数 code、pointer+length、opaque handle、固定布局 struct 和 callback context。
 - 隔离的 raw contract probe 可以使用 bundle 当前 raw SDK 表面记录依赖缺口，但不得进入正式 Host。正式 Host 必须等待 bundle SDK 提供 typed `Status` / `StopReason`、校验后的 `CoreEvent` / `UiRequest` decoder 和 `UiResponse` encoder；MetaWork 不自行复制 code、tag 或 JSON schema。
 - 当前产品路径不得注册 ABI v1 Host tools。revision 2 Host tool callback 的 `RunContext` wire identity 已可验证，但 MetaWork 尚未定义产品级 tool catalog、权限、Workspace 与多 Session 路由政策；Read/Bash/Edit 使用 cc-zig built-in tools。
-- Provider credential 只由 Host 读取并传给 AgentCore；不得进入 Renderer、Bridge、日志、事件、snapshot 或持久化视图。
+- Provider credential 只由 Host Account 读取并经 Workbench owned runtime config 传给 AgentCore；不得进入 Renderer、Bridge、日志、事件、snapshot 或持久化视图。
+- production provider/model/base URL/API Key 只来自 Account 已锁定并验证的 Metask contract；禁止环境默认值、Renderer 字段或 Bridge payload 注入。Metask contract blocked 时可以实现纯状态机和 test-only fake，不得猜测或发布 production OAuth/API client。
 - 当前 v1 只允许临时或用户明确 trusted 的 Workspace 做验证，不得宣称已经具备 strict Workspace security。
 - MetaWork 通过 cc-zig `UiBackend` / `UiRequester` / `agent_loop` library contract 接入 AgentCore，不解析 Provider SSE。
 - `CoreEvent` 中需要异步保留的 borrowed slice 必须在 callback 返回前深拷贝。
@@ -63,6 +65,7 @@
 - cc-zig 契约、线程、所有权、生命周期、恢复和 Shell 行为变化更新 `docs/agentcore-integration.md`。
 - AgentCore ABI required capabilities、函数职责、wire 所有权或兼容门槛变化更新 `docs/agentcore-abi-v1.md`。
 - 验收矩阵、spike 和退出判据变化更新 `docs/phase-0-validation.md`。
+- Metask OAuth、API Key catalog、ExecutionTarget 或错误 schema 的外部确认状态更新 `docs/metask-account-contract.md`。
 - 如果同一事实出现在多份文档，保留一个规范性定义，其他位置使用链接或简短摘要。
 
 ## 验证

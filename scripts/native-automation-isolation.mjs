@@ -4,6 +4,10 @@ export const nativeAutomationTokens = Object.freeze([
   "metawork.events.fetch",
   "metawork.gate5.emitFixture",
   "metawork.gate5.worker_wake",
+  "METAWORK_GATE6_PROVIDER_BASE_URL",
+  "metawork-gate6-fixture-key",
+  "metawork-gate6-fixture-model",
+  "automation-account",
   '"fixture":"inline"',
   '"fixture":"object"',
 ]);

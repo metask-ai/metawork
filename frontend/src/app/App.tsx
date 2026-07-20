@@ -9,6 +9,7 @@ import {
 
 import { AppShell } from "./AppShell.tsx";
 import { Icon } from "../components/ui/Icon.tsx";
+import { AccountPanel } from "../features/account/AccountPanel.tsx";
 import { ComposerFooter } from "../features/composer/ComposerFooter.tsx";
 import { ApprovalPanel } from "../features/approvals/ApprovalPanel.tsx";
 import { UiRecordCard } from "../features/approvals/UiRecordCard.tsx";
@@ -139,10 +140,11 @@ export default function App() {
     : taskDrafts.updateDraft;
   const mutationDisabled = viewSyncFailed || !bridgeReady || busy !== null;
   const taskCanCompose =
-    Boolean(workbench.draftWorkspaceRoot) ||
-    (activeTask?.lifecycle === "open" &&
-      activeTask.continuationAvailable &&
-      !activeTask.archived);
+    snapshot.account.canCreateTask &&
+    (Boolean(workbench.draftWorkspaceRoot) ||
+      (activeTask?.lifecycle === "open" &&
+        activeTask.continuationAvailable &&
+        !activeTask.archived));
   const runInFlight = isRunInFlight(activeTask);
   const canSubmit =
     taskCanCompose &&
@@ -294,6 +296,34 @@ export default function App() {
     }
   }
 
+  async function runAccountCommand(
+    invoke: () => Promise<{
+      accepted: boolean;
+      errorCode: string;
+    }>,
+  ) {
+    if (mutationDisabled) return;
+    setBusy("account");
+    try {
+      const result = await invoke();
+      if (!result.accepted) {
+        setStatus({
+          id: "account.command_rejected",
+          values: { code: result.errorCode },
+        });
+        return;
+      }
+      await refreshAfterCommit("account.updated", "operation.account");
+    } catch (error) {
+      setStatus({
+        id: "account.command_failed",
+        values: { error: errorText(error) },
+      });
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function chooseWorkspace(openDraft = false) {
     if (viewSyncFailed || !bridgeReady) return;
     setBusy(openDraft ? "new-task" : "workspace");
@@ -331,7 +361,7 @@ export default function App() {
   }
 
   async function beginNewTask() {
-    if (mutationDisabled) return;
+    if (mutationDisabled || !snapshot.account.canCreateTask) return;
     pendingTaskSelection.current = null;
     if (workspacePath && workspaceGrant) {
       dispatchWorkbench({
@@ -627,6 +657,35 @@ export default function App() {
             </div>
           </div>
 
+          {(snapshot.account.canCreateTask ||
+            activeTask ||
+            workbench.draftWorkspaceRoot) && (
+            <AccountPanel
+              compact
+              account={snapshot.account}
+              disabled={mutationDisabled}
+              onBeginLogin={() =>
+                void runAccountCommand(() => client.beginLogin())
+              }
+              onReauthenticate={() =>
+                void runAccountCommand(() => client.reauthenticate())
+              }
+              onCancel={() =>
+                void runAccountCommand(() => client.cancelAccountOperation())
+              }
+              onRefresh={() =>
+                void runAccountCommand(() => client.refreshAccountCatalog())
+              }
+              onSelectApiKey={(id) =>
+                void runAccountCommand(() => client.selectApiKey(id))
+              }
+              onSelectModel={(id) =>
+                void runAccountCommand(() => client.selectModel(id))
+              }
+              onLogout={() => void runAccountCommand(() => client.logout())}
+            />
+          )}
+
           <WorkspaceNavigation
             summaries={summaries}
             currentWorkspace={currentWorkspace}
@@ -636,6 +695,7 @@ export default function App() {
             grantReady={Boolean(workspacePath && workspaceGrant)}
             showArchived={showArchived}
             disabled={mutationDisabled}
+            createDisabled={!snapshot.account.canCreateTask}
             creating={busy === "new-task"}
             onSearch={() => setSearchOpen(true)}
             onChooseWorkspace={() => void chooseWorkspace(false)}
@@ -894,53 +954,85 @@ export default function App() {
         </section>
       )}
 
-      <TaskTimeline
-        task={activeTask}
-        draft={Boolean(workbench.draftWorkspaceRoot)}
-        revision={snapshot.revision}
-        composerHasDraft={prompt.trim().length > 0}
-        retryAvailable={taskCanCompose && !runInFlight}
-        responseDisabled={busy !== null || viewSyncFailed || !bridgeReady}
-        onPrepareRetry={prepareRetry}
-        onRespond={(payload) => void respondUi(payload)}
-        renderPendingUi={(props) => {
-          const { taskId, ...panelProps } = props;
-          const identity = uiRequestIdentity(taskId, props.pending);
-          return (
-            <ApprovalPanel
-              {...panelProps}
-              responsePhase={uiResponsePhase(uiResponseStates, identity)}
-            />
-          );
-        }}
-        renderUiRecord={(record) => <UiRecordCard record={record} />}
-      />
+      {!activeTask &&
+      !workbench.draftWorkspaceRoot &&
+      !snapshot.account.canCreateTask ? (
+        <div className="account-onboarding">
+          <AccountPanel
+            account={snapshot.account}
+            disabled={mutationDisabled}
+            onBeginLogin={() =>
+              void runAccountCommand(() => client.beginLogin())
+            }
+            onReauthenticate={() =>
+              void runAccountCommand(() => client.reauthenticate())
+            }
+            onCancel={() =>
+              void runAccountCommand(() => client.cancelAccountOperation())
+            }
+            onRefresh={() =>
+              void runAccountCommand(() => client.refreshAccountCatalog())
+            }
+            onSelectApiKey={(id) =>
+              void runAccountCommand(() => client.selectApiKey(id))
+            }
+            onSelectModel={(id) =>
+              void runAccountCommand(() => client.selectModel(id))
+            }
+            onLogout={() => void runAccountCommand(() => client.logout())}
+          />
+        </div>
+      ) : (
+        <TaskTimeline
+          task={activeTask}
+          draft={Boolean(workbench.draftWorkspaceRoot)}
+          revision={snapshot.revision}
+          composerHasDraft={prompt.trim().length > 0}
+          retryAvailable={taskCanCompose && !runInFlight}
+          responseDisabled={busy !== null || viewSyncFailed || !bridgeReady}
+          onPrepareRetry={prepareRetry}
+          onRespond={(payload) => void respondUi(payload)}
+          renderPendingUi={(props) => {
+            const { taskId, ...panelProps } = props;
+            const identity = uiRequestIdentity(taskId, props.pending);
+            return (
+              <ApprovalPanel
+                {...panelProps}
+                responsePhase={uiResponsePhase(uiResponseStates, identity)}
+              />
+            );
+          }}
+          renderUiRecord={(record) => <UiRecordCard record={record} />}
+        />
+      )}
 
-      <ComposerFooter
-        textareaRef={composer}
-        hasTask={Boolean(activeTask)}
-        draft={Boolean(workbench.draftWorkspaceRoot)}
-        archived={Boolean(activeTask?.archived)}
-        closing={activeTask?.lifecycle === "closing"}
-        closed={activeTask?.lifecycle === "closed"}
-        unavailable={Boolean(
-          activeTask &&
-          activeTask.lifecycle === "open" &&
-          !activeTask.continuationAvailable,
-        )}
-        prompt={prompt}
-        composeDisabled={!taskCanCompose || mutationDisabled}
-        canSubmit={canSubmit}
-        runInFlight={Boolean(taskCanCompose && runInFlight)}
-        accessRequired={Boolean(
-          workbench.draftWorkspaceRoot && !workspaceGrant,
-        )}
-        actionDisabled={mutationDisabled}
-        onStart={() => void beginNewTask()}
-        onPromptChange={updatePrompt}
-        onSubmit={() => void submitRun()}
-        onConfirmAccess={() => void chooseWorkspace(true)}
-      />
+      {snapshot.account.canCreateTask && (
+        <ComposerFooter
+          textareaRef={composer}
+          hasTask={Boolean(activeTask)}
+          draft={Boolean(workbench.draftWorkspaceRoot)}
+          archived={Boolean(activeTask?.archived)}
+          closing={activeTask?.lifecycle === "closing"}
+          closed={activeTask?.lifecycle === "closed"}
+          unavailable={Boolean(
+            activeTask &&
+            activeTask.lifecycle === "open" &&
+            !activeTask.continuationAvailable,
+          )}
+          prompt={prompt}
+          composeDisabled={!taskCanCompose || mutationDisabled}
+          canSubmit={canSubmit}
+          runInFlight={Boolean(taskCanCompose && runInFlight)}
+          accessRequired={Boolean(
+            workbench.draftWorkspaceRoot && !workspaceGrant,
+          )}
+          actionDisabled={mutationDisabled}
+          onStart={() => void beginNewTask()}
+          onPromptChange={updatePrompt}
+          onSubmit={() => void submitRun()}
+          onConfirmAccess={() => void chooseWorkspace(true)}
+        />
+      )}
       <GlobalSearch
         open={searchOpen}
         query={searchQuery}

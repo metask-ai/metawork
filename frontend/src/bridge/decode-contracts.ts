@@ -1,5 +1,7 @@
 import {
   WORKBENCH_SCHEMA_VERSION,
+  type AccountCommandResult,
+  type AccountView,
   type AskOption,
   type AskQuestion,
   type HostSignal,
@@ -58,6 +60,67 @@ const uiRecordStates = [
   "denied",
   "denied_session",
   "cancelled",
+] as const;
+const accountSessionStates = [
+  "restoring",
+  "signed_out",
+  "authorizing",
+  "authenticated",
+  "refreshing",
+  "reauth_required",
+  "shutting_down",
+] as const;
+const executionStates = [
+  "none",
+  "preparing",
+  "ready",
+  "reconfiguring",
+  "invalid",
+] as const;
+const accountOperations = [
+  "none",
+  "oauth_callback",
+  "token_exchange",
+  "loading_keys",
+  "selecting_key",
+  "loading_models",
+  "selecting_model",
+  "persisting",
+  "logging_out",
+] as const;
+const accountErrorCodes = [
+  "none",
+  "invalid_command",
+  "invalid_state",
+  "operation_in_progress",
+  "execution_in_use",
+  "oauth_bind_failed",
+  "oauth_browser_open_failed",
+  "oauth_callback_rejected",
+  "oauth_state_mismatch",
+  "oauth_exchange_failed",
+  "user_cancelled",
+  "deadline_exceeded",
+  "token_refresh_failed",
+  "account_mismatch",
+  "metask_unauthorized",
+  "metask_rate_limited",
+  "metask_service_unavailable",
+  "metask_protocol_invalid",
+  "catalog_too_large",
+  "catalog_field_too_large",
+  "no_api_keys",
+  "no_models",
+  "execution_target_invalid",
+  "execution_config_invalid",
+  "credential_store_read_failed",
+  "credential_store_write_failed",
+  "credential_store_delete_failed",
+  "generation_mismatch",
+  "recovery_state_invalid",
+  "local_resource_exhausted",
+  "dependency_contract_invalid",
+  "shutting_down",
 ] as const;
 
 function fail(path: string, message: string): never {
@@ -144,6 +207,132 @@ function nullableEnum<const T extends readonly string[]>(
   values: T,
 ): T[number] | null {
   return value === null ? null : enumValue(value, path, values);
+}
+
+function decodeAccount(value: unknown, path: string): AccountView {
+  const item = object(value, path, [
+    "sessionState",
+    "executionState",
+    "operation",
+    "accountId",
+    "displayName",
+    "apiKeys",
+    "models",
+    "selectedApiKeyId",
+    "selectedModel",
+    "canCreateTask",
+    "errorCode",
+    "safeDiagnostic",
+    "catalogGeneration",
+    "executionGeneration",
+  ]);
+  const apiKeys = arrayValue(
+    item.apiKeys,
+    `${path}.apiKeys`,
+    (value, itemPath) => {
+      const key = object(value, itemPath, ["id", "name", "suffix"]);
+      return {
+        id: stringValue(key.id, `${itemPath}.id`),
+        name: stringValue(key.name, `${itemPath}.name`),
+        suffix: stringValue(key.suffix, `${itemPath}.suffix`),
+      };
+    },
+  );
+  const models = arrayValue(
+    item.models,
+    `${path}.models`,
+    (value, itemPath) => {
+      const model = object(value, itemPath, ["id", "displayName"]);
+      return {
+        id: stringValue(model.id, `${itemPath}.id`),
+        displayName: stringValue(model.displayName, `${itemPath}.displayName`),
+      };
+    },
+  );
+  if (new Set(apiKeys.map((key) => key.id)).size !== apiKeys.length)
+    fail(`${path}.apiKeys`, "API Key identities must be unique");
+  if (new Set(models.map((model) => model.id)).size !== models.length)
+    fail(`${path}.models`, "model identities must be unique");
+  const sessionState = enumValue(
+    item.sessionState,
+    `${path}.sessionState`,
+    accountSessionStates,
+  );
+  const executionState = enumValue(
+    item.executionState,
+    `${path}.executionState`,
+    executionStates,
+  );
+  const operation = enumValue(
+    item.operation,
+    `${path}.operation`,
+    accountOperations,
+  );
+  const accountId = stringValue(item.accountId, `${path}.accountId`);
+  const displayName = stringValue(item.displayName, `${path}.displayName`);
+  const selectedApiKeyId = stringValue(
+    item.selectedApiKeyId,
+    `${path}.selectedApiKeyId`,
+  );
+  const selectedModel = stringValue(
+    item.selectedModel,
+    `${path}.selectedModel`,
+  );
+  const canCreateTask = booleanValue(
+    item.canCreateTask,
+    `${path}.canCreateTask`,
+  );
+  const catalogGeneration = wireId(
+    item.catalogGeneration,
+    `${path}.catalogGeneration`,
+  );
+  const executionGeneration = wireId(
+    item.executionGeneration,
+    `${path}.executionGeneration`,
+  );
+  if (executionState !== "ready" && canCreateTask)
+    fail(path, "a non-ready execution cannot admit Tasks");
+  if (
+    executionState === "ready" &&
+    (selectedApiKeyId.length === 0 ||
+      selectedModel.length === 0 ||
+      executionGeneration === "0")
+  )
+    fail(path, "a ready execution requires selected identities and generation");
+  if (
+    sessionState === "signed_out" &&
+    (executionState !== "none" ||
+      operation !== "none" ||
+      accountId.length !== 0 ||
+      displayName.length !== 0 ||
+      apiKeys.length !== 0 ||
+      models.length !== 0 ||
+      selectedApiKeyId.length !== 0 ||
+      selectedModel.length !== 0 ||
+      executionGeneration !== "0" ||
+      canCreateTask)
+  )
+    fail(path, "signed-out Account state must be empty and fail closed");
+  return {
+    sessionState,
+    executionState,
+    operation,
+    accountId,
+    displayName,
+    apiKeys,
+    models,
+    selectedApiKeyId,
+    selectedModel,
+    canCreateTask,
+    errorCode: enumValue(
+      item.errorCode,
+      `${path}.errorCode`,
+      accountErrorCodes,
+    ),
+    safeDiagnostic: stringValue(item.safeDiagnostic, `${path}.safeDiagnostic`),
+    catalogGeneration,
+    executionGeneration,
+  };
 }
 
 function decodeTool(value: unknown, path: string): ToolView {
@@ -486,15 +675,38 @@ function decodeTask(value: unknown, path: string): TaskView {
 }
 
 export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
-  const root = object(value, "$", ["schemaVersion", "revision", "tasks"]);
+  const root = object(value, "$", [
+    "schemaVersion",
+    "revision",
+    "account",
+    "tasks",
+  ]);
   const schemaVersion = numberValue(root.schemaVersion, "$.schemaVersion");
   if (schemaVersion !== WORKBENCH_SCHEMA_VERSION)
     fail("$.schemaVersion", `unsupported version ${schemaVersion}`);
   return {
     schemaVersion,
     revision: wireId(root.revision, "$.revision"),
+    account: decodeAccount(root.account, "$.account"),
     tasks: arrayValue(root.tasks, "$.tasks", decodeTask),
   };
+}
+
+export function decodeAccountCommandResult(
+  value: unknown,
+): AccountCommandResult {
+  const item = object(value, "$", ["accepted", "errorCode", "attemptId"]);
+  const accepted = booleanValue(item.accepted, "$.accepted");
+  const errorCode = enumValue(item.errorCode, "$.errorCode", accountErrorCodes);
+  const attemptId =
+    item.attemptId === null
+      ? null
+      : positiveWireId(item.attemptId, "$.attemptId");
+  if (accepted !== (errorCode === "none"))
+    fail("$", "accepted and errorCode must agree");
+  if (!accepted && attemptId !== null)
+    fail("$", "a rejected command cannot expose an attempt");
+  return { accepted, errorCode, attemptId };
 }
 
 export function decodeGeneration(value: unknown) {

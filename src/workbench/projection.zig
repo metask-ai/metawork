@@ -1,7 +1,9 @@
 const std = @import("std");
 const lifecycle = @import("metawork_agent");
+const account_contract = @import("metawork_account_contract");
 const executor_impl = @import("workbench_executor");
 const contract_fixture = @import("workbench_contract_fixture");
+const build_options = @import("build_options");
 
 pub const Error = lifecycle.Error || std.mem.Allocator.Error || std.Thread.SpawnError || error{
     ProjectionCapacity,
@@ -17,7 +19,10 @@ pub const Error = lifecycle.Error || std.mem.Allocator.Error || std.Thread.Spawn
     TaskCapacity,
     UnknownTask,
     TaskClosing,
-    InvalidExecutionDefaults,
+    ExecutionUnavailable,
+    ExecutionInUse,
+    ExecutionGenerationMismatch,
+    InvalidAutomationExecution,
     InvalidWorkspace,
     EventAfterTerminalDrain,
 };
@@ -38,20 +43,13 @@ pub const Limits = struct {
     max_pending_ui_requests: usize = 4,
     max_ui_history_per_task: usize = 8,
     max_terminal_diagnostic_bytes: usize = 512,
-    max_snapshot_bytes: usize = 8 * 1024 * 1024,
+    max_snapshot_bytes: usize = 12 * 1024 * 1024,
 };
 
 pub const Provider = enum {
     anthropic,
     openai,
     gemini,
-};
-
-pub const ExecutionDefaults = struct {
-    provider: Provider,
-    credential: []const u8,
-    model: []const u8,
-    base_url: []const u8 = "",
 };
 
 pub const TaskWorkspaceTrust = union(enum) {
@@ -62,6 +60,19 @@ pub const TaskWorkspaceTrust = union(enum) {
 pub const TaskCreateInput = struct {
     workspace_root: []const u8,
     trust: TaskWorkspaceTrust,
+};
+
+pub const ExecutionIdentity = struct {
+    generation: u64,
+    provider: Provider,
+    model: []const u8,
+};
+
+pub const AutomationExecutionInput = struct {
+    provider: account_contract.ProviderKind,
+    credential: []const u8,
+    model: []const u8,
+    base_url: []const u8,
 };
 
 pub const PermissionChoice = enum {
@@ -77,13 +88,28 @@ pub const UiResponse = union(enum) {
 };
 
 pub const Configuration = struct {
-    execution: ExecutionDefaults,
     change_notifier: ChangeNotifier = .{},
 };
 
 const json_string_expansion: usize = 6;
 const pending_ui_reencode_expansion: usize = 2;
 const root_snapshot_overhead: usize = 128;
+const account_snapshot_text_bytes: usize =
+    account_contract.Limits.account_id_bytes +
+    account_contract.Limits.display_name_bytes +
+    account_contract.Limits.api_key_id_bytes +
+    account_contract.Limits.model_id_bytes +
+    account_contract.Limits.safe_diagnostic_bytes +
+    account_contract.Limits.api_key_entries *
+        (account_contract.Limits.api_key_id_bytes +
+            account_contract.Limits.api_key_name_bytes +
+            account_contract.Limits.api_key_suffix_bytes) +
+    account_contract.Limits.model_entries *
+        (account_contract.Limits.model_id_bytes +
+            account_contract.Limits.model_display_name_bytes);
+const account_snapshot_overhead: usize = 1024 +
+    account_contract.Limits.api_key_entries * 128 +
+    account_contract.Limits.model_entries * 128;
 const task_snapshot_overhead: usize = 512;
 const run_snapshot_overhead: usize = 1024;
 const tool_snapshot_overhead: usize = 512;
@@ -92,7 +118,7 @@ const ui_record_detail_capacity: usize = 512;
 const ui_record_snapshot_overhead: usize = 512;
 const tool_route_digest_bytes = std.crypto.hash.sha2.Sha256.digest_length;
 const tool_product_id_capacity = "tool-".len + 20;
-pub const snapshot_schema_version: u32 = 5;
+pub const snapshot_schema_version: u32 = 6;
 
 const ToolState = enum { running, completed, failed };
 const RunPhase = enum {
@@ -266,6 +292,9 @@ const TerminalPayload = struct {
 const RunRecord = struct {
     id: u64,
     generation: u64,
+    execution_generation: u64,
+    execution_provider: Provider,
+    execution_model: []const u8,
     user: []u8,
     user_redacted: bool = false,
     assistant: TrackedText = .{},
@@ -323,6 +352,9 @@ const UiRecord = struct {
 const TaskView = struct {
     session: ?*lifecycle.Session,
     id: u64,
+    execution_generation: u64,
+    execution_provider: Provider,
+    execution_model: []u8,
     workspace_root: []u8,
     title: []u8,
     title_redacted: bool = false,
@@ -374,6 +406,314 @@ pub const RunRef = struct {
     }
 };
 
+fn FixedText(comptime capacity: usize) type {
+    return struct {
+        bytes: [capacity]u8 = undefined,
+        len: usize = 0,
+
+        const Self = @This();
+
+        fn setNoFail(self: *Self, value: []const u8) void {
+            std.debug.assert(value.len <= capacity);
+            std.debug.assert(std.unicode.utf8ValidateSlice(value));
+            @memcpy(self.bytes[0..value.len], value);
+            self.len = value.len;
+        }
+
+        fn clear(self: *Self) void {
+            self.len = 0;
+        }
+
+        fn view(self: *const Self) []const u8 {
+            return self.bytes[0..self.len];
+        }
+    };
+}
+
+const ApiKeyProjection = struct {
+    id: FixedText(account_contract.Limits.api_key_id_bytes) = .{},
+    name: FixedText(account_contract.Limits.api_key_name_bytes) = .{},
+    suffix: FixedText(account_contract.Limits.api_key_suffix_bytes) = .{},
+};
+
+const ModelProjection = struct {
+    id: FixedText(account_contract.Limits.model_id_bytes) = .{},
+    display_name: FixedText(account_contract.Limits.model_display_name_bytes) = .{},
+};
+
+const AccountProjection = struct {
+    allocator: std.mem.Allocator,
+    session_state: account_contract.AccountSessionState = .restoring,
+    execution_state: account_contract.ExecutionState = .none,
+    operation: account_contract.OperationKind = .none,
+    account_id: FixedText(account_contract.Limits.account_id_bytes) = .{},
+    display_name: FixedText(account_contract.Limits.display_name_bytes) = .{},
+    selected_api_key_id: FixedText(account_contract.Limits.api_key_id_bytes) = .{},
+    selected_model: FixedText(account_contract.Limits.model_id_bytes) = .{},
+    safe_diagnostic: FixedText(account_contract.Limits.safe_diagnostic_bytes) = .{},
+    api_keys: []ApiKeyProjection,
+    api_key_views: []account_contract.ApiKeyView,
+    api_key_count: usize = 0,
+    models: []ModelProjection,
+    model_views: []account_contract.ModelView,
+    model_count: usize = 0,
+    account_can_create_task: bool = false,
+    error_code: account_contract.ErrorCode = .none,
+    catalog_generation: u64 = 0,
+    execution_generation: u64 = 0,
+
+    fn init(allocator: std.mem.Allocator) std.mem.Allocator.Error!AccountProjection {
+        const api_keys = try allocator.alloc(
+            ApiKeyProjection,
+            account_contract.Limits.api_key_entries,
+        );
+        errdefer allocator.free(api_keys);
+        @memset(api_keys, .{});
+        const api_key_views = try allocator.alloc(
+            account_contract.ApiKeyView,
+            account_contract.Limits.api_key_entries,
+        );
+        errdefer allocator.free(api_key_views);
+        const models = try allocator.alloc(
+            ModelProjection,
+            account_contract.Limits.model_entries,
+        );
+        errdefer allocator.free(models);
+        @memset(models, .{});
+        const model_views = try allocator.alloc(
+            account_contract.ModelView,
+            account_contract.Limits.model_entries,
+        );
+        errdefer allocator.free(model_views);
+        return .{
+            .allocator = allocator,
+            .api_keys = api_keys,
+            .api_key_views = api_key_views,
+            .models = models,
+            .model_views = model_views,
+        };
+    }
+
+    fn deinit(self: *AccountProjection) void {
+        self.allocator.free(self.model_views);
+        self.allocator.free(self.models);
+        self.allocator.free(self.api_key_views);
+        self.allocator.free(self.api_keys);
+        self.* = undefined;
+    }
+
+    fn commitNoFail(
+        self: *AccountProjection,
+        source_view: account_contract.AccountView,
+    ) void {
+        account_contract.validateView(source_view) catch
+            @panic("Account published an invalid AccountView");
+        std.debug.assert(source_view.api_keys.len <= self.api_keys.len);
+        std.debug.assert(source_view.models.len <= self.models.len);
+        self.session_state = source_view.session_state;
+        self.execution_state = source_view.execution_state;
+        self.operation = source_view.operation;
+        self.account_id.setNoFail(source_view.account_id);
+        self.display_name.setNoFail(source_view.display_name);
+        self.selected_api_key_id.setNoFail(source_view.selected_api_key_id);
+        self.selected_model.setNoFail(source_view.selected_model);
+        self.safe_diagnostic.setNoFail(source_view.safe_diagnostic);
+        self.api_key_count = source_view.api_keys.len;
+        for (
+            source_view.api_keys,
+            self.api_keys[0..source_view.api_keys.len],
+            self.api_key_views[0..source_view.api_keys.len],
+        ) |source, *target, *target_view| {
+            target.id.setNoFail(source.id);
+            target.name.setNoFail(source.name);
+            target.suffix.setNoFail(source.suffix);
+            target_view.* = .{
+                .id = target.id.view(),
+                .name = target.name.view(),
+                .suffix = target.suffix.view(),
+            };
+        }
+        self.model_count = source_view.models.len;
+        for (
+            source_view.models,
+            self.models[0..source_view.models.len],
+            self.model_views[0..source_view.models.len],
+        ) |source, *target, *target_view| {
+            target.id.setNoFail(source.id);
+            target.display_name.setNoFail(source.display_name);
+            target_view.* = .{
+                .id = target.id.view(),
+                .display_name = target.display_name.view(),
+            };
+        }
+        self.account_can_create_task = source_view.can_create_task;
+        self.error_code = source_view.error_code;
+        self.catalog_generation = source_view.catalog_generation;
+        self.execution_generation = source_view.execution_generation;
+    }
+
+    fn view(
+        self: *const AccountProjection,
+        can_create_task: bool,
+    ) account_contract.AccountView {
+        return .{
+            .session_state = self.session_state,
+            .execution_state = self.execution_state,
+            .operation = self.operation,
+            .account_id = self.account_id.view(),
+            .display_name = self.display_name.view(),
+            .api_keys = self.api_key_views[0..self.api_key_count],
+            .models = self.model_views[0..self.model_count],
+            .selected_api_key_id = self.selected_api_key_id.view(),
+            .selected_model = self.selected_model.view(),
+            .can_create_task = can_create_task,
+            .error_code = self.error_code,
+            .safe_diagnostic = self.safe_diagnostic.view(),
+            .catalog_generation = self.catalog_generation,
+            .execution_generation = self.execution_generation,
+        };
+    }
+};
+
+const ActiveExecution = struct {
+    allocator: std.mem.Allocator,
+    credential_storage: []u8,
+    model_storage: []u8,
+    base_url_storage: []u8,
+    credential_len: usize = 0,
+    model_len: usize = 0,
+    base_url_len: usize = 0,
+    provider: ?Provider = null,
+    generation: u64 = 0,
+
+    fn init(allocator: std.mem.Allocator) std.mem.Allocator.Error!ActiveExecution {
+        const credential_storage = try allocator.alloc(
+            u8,
+            account_contract.Limits.api_key_bytes,
+        );
+        errdefer allocator.free(credential_storage);
+        const model_storage = try allocator.alloc(
+            u8,
+            account_contract.Limits.model_id_bytes,
+        );
+        errdefer allocator.free(model_storage);
+        const base_url_storage = try allocator.alloc(
+            u8,
+            account_contract.Limits.base_url_bytes,
+        );
+        errdefer allocator.free(base_url_storage);
+        return .{
+            .allocator = allocator,
+            .credential_storage = credential_storage,
+            .model_storage = model_storage,
+            .base_url_storage = base_url_storage,
+        };
+    }
+
+    fn deinit(self: *ActiveExecution) void {
+        std.crypto.secureZero(u8, self.credential_storage);
+        self.allocator.free(self.base_url_storage);
+        self.allocator.free(self.model_storage);
+        self.allocator.free(self.credential_storage);
+        self.* = undefined;
+    }
+
+    fn installNoFail(
+        self: *ActiveExecution,
+        execution: *account_contract.OwnedExecutionConfig,
+    ) void {
+        const input = execution.input();
+        account_contract.validateExecutionConfig(input) catch
+            @panic("Account published an invalid ExecutionConfig");
+        std.debug.assert(input.api_key.len <= self.credential_storage.len);
+        std.debug.assert(input.target.model.len <= self.model_storage.len);
+        std.debug.assert(input.target.base_url.len <= self.base_url_storage.len);
+        self.installBytesNoFail(
+            accountProvider(input.target.provider_kind),
+            input.api_key,
+            input.target.model,
+            input.target.base_url,
+            input.execution_generation,
+        );
+        execution.deinit();
+    }
+
+    fn installAutomationNoFail(
+        self: *ActiveExecution,
+        input: AutomationExecutionInput,
+    ) void {
+        std.debug.assert(build_options.automation);
+        self.installBytesNoFail(
+            accountProvider(input.provider),
+            input.credential,
+            input.model,
+            input.base_url,
+            1,
+        );
+    }
+
+    fn installBytesNoFail(
+        self: *ActiveExecution,
+        provider: Provider,
+        credential_bytes: []const u8,
+        model_bytes: []const u8,
+        base_url_bytes: []const u8,
+        generation: u64,
+    ) void {
+        std.debug.assert(
+            credential_bytes.len <= self.credential_storage.len,
+        );
+        std.debug.assert(model_bytes.len <= self.model_storage.len);
+        std.debug.assert(
+            base_url_bytes.len <= self.base_url_storage.len,
+        );
+        std.crypto.secureZero(u8, self.credential_storage);
+        @memcpy(
+            self.credential_storage[0..credential_bytes.len],
+            credential_bytes,
+        );
+        @memcpy(
+            self.model_storage[0..model_bytes.len],
+            model_bytes,
+        );
+        @memcpy(
+            self.base_url_storage[0..base_url_bytes.len],
+            base_url_bytes,
+        );
+        self.credential_len = credential_bytes.len;
+        self.model_len = model_bytes.len;
+        self.base_url_len = base_url_bytes.len;
+        self.provider = provider;
+        self.generation = generation;
+    }
+
+    fn clearNoFail(self: *ActiveExecution) void {
+        std.crypto.secureZero(u8, self.credential_storage);
+        self.credential_len = 0;
+        self.model_len = 0;
+        self.base_url_len = 0;
+        self.provider = null;
+        self.generation = 0;
+    }
+
+    fn credential(self: *const ActiveExecution) []const u8 {
+        return self.credential_storage[0..self.credential_len];
+    }
+
+    fn model(self: *const ActiveExecution) []const u8 {
+        return self.model_storage[0..self.model_len];
+    }
+
+    fn baseUrl(self: *const ActiveExecution) []const u8 {
+        return self.base_url_storage[0..self.base_url_len];
+    }
+
+    fn ready(self: *const ActiveExecution) bool {
+        return self.generation != 0 and self.provider != null and
+            self.credential_len != 0 and self.model_len != 0;
+    }
+};
+
 /// Workbench-owned product projection. AgentCore protocol is interpreted only
 /// through the bundle SDK; the Renderer receives this bounded domain view.
 /// All methods currently run on the Native loop thread.
@@ -388,10 +728,9 @@ pub const Workbench = struct {
     executor_shutdown: bool = false,
     projection_bytes: usize = 0,
     revision: u64 = 0,
-    credential: []u8,
-    model: []u8,
-    base_url: []u8,
-    provider: Provider,
+    account: AccountProjection,
+    execution: ActiveExecution,
+    execution_replacement_pending: bool = false,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -412,15 +751,10 @@ pub const Workbench = struct {
             limits.max_snapshot_bytes == 0 or
             (worstCaseSnapshotBytes(limits) orelse return error.ProjectionCapacity) > limits.max_snapshot_bytes)
             return error.ProjectionCapacity;
-        const credential = try allocator.dupe(u8, configuration.execution.credential);
-        errdefer {
-            std.crypto.secureZero(u8, credential);
-            allocator.free(credential);
-        }
-        const model = try allocator.dupe(u8, configuration.execution.model);
-        errdefer allocator.free(model);
-        const base_url = try allocator.dupe(u8, configuration.execution.base_url);
-        errdefer allocator.free(base_url);
+        var account = try AccountProjection.init(allocator);
+        errdefer account.deinit();
+        var execution = try ActiveExecution.init(allocator);
+        errdefer execution.deinit();
         const tasks = try allocator.alloc(?TaskView, limits.max_tasks);
         errdefer allocator.free(tasks);
         @memset(tasks, null);
@@ -438,11 +772,109 @@ pub const Workbench = struct {
             .tasks = tasks,
             .change_notifier = configuration.change_notifier,
             .executor = executor,
-            .credential = credential,
-            .model = model,
-            .base_url = base_url,
-            .provider = configuration.execution.provider,
+            .account = account,
+            .execution = execution,
         };
+    }
+
+    pub fn commitAccountFactNoFail(
+        self: *Workbench,
+        fact: account_contract.AccountFact,
+    ) void {
+        self.account.commitNoFail(fact.view);
+    }
+
+    pub fn installExecutionNoFail(
+        self: *Workbench,
+        execution: *account_contract.OwnedExecutionConfig,
+    ) void {
+        std.debug.assert(self.execution_replacement_pending);
+        const input = execution.input();
+        std.debug.assert(self.account.execution_state == .ready);
+        std.debug.assert(
+            self.account.execution_generation == input.execution_generation,
+        );
+        std.debug.assert(std.mem.eql(
+            u8,
+            self.account.selected_model.view(),
+            input.target.model,
+        ));
+        self.execution.installNoFail(execution);
+    }
+
+    pub fn clearExecutionNoFail(self: *Workbench) void {
+        std.debug.assert(self.execution_replacement_pending);
+        std.debug.assert(self.account.execution_state != .ready);
+        self.execution.clearNoFail();
+    }
+
+    pub fn finishAccountCommitNoFail(self: *Workbench) void {
+        self.bumpRevision();
+    }
+
+    pub fn accountView(self: *const Workbench) account_contract.AccountView {
+        return self.account.view(self.canCreateTask());
+    }
+
+    /// Gate 6 keeps its local provider outside the production Account
+    /// contract. This path is compiled only into `-Dautomation=true` builds;
+    /// release builds reject it before observing any input.
+    pub fn installAutomationExecution(
+        self: *Workbench,
+        input: AutomationExecutionInput,
+    ) Error!void {
+        if (!build_options.automation)
+            return error.InvalidAutomationExecution;
+        if (input.credential.len == 0 or
+            input.credential.len > account_contract.Limits.api_key_bytes or
+            input.model.len == 0 or
+            input.model.len > account_contract.Limits.model_id_bytes or
+            input.base_url.len == 0 or
+            input.base_url.len > account_contract.Limits.base_url_bytes or
+            !std.unicode.utf8ValidateSlice(input.model) or
+            !std.unicode.utf8ValidateSlice(input.base_url) or
+            std.mem.indexOfAny(u8, input.base_url, "\r\n") != null)
+            return error.InvalidAutomationExecution;
+        try self.beginExecutionReplacement();
+        errdefer self.endExecutionReplacementNoFail();
+        self.commitAccountFactNoFail(.{
+            .kind = .execution_changed,
+            .view = .{
+                .session_state = .authenticated,
+                .execution_state = .ready,
+                .operation = .none,
+                .account_id = "automation-account",
+                .display_name = "Automation",
+                .selected_api_key_id = "automation-key",
+                .selected_model = input.model,
+                .can_create_task = true,
+                .execution_generation = 1,
+            },
+        });
+        self.execution.installAutomationNoFail(input);
+        self.endExecutionReplacementNoFail();
+        self.finishAccountCommitNoFail();
+    }
+
+    pub fn beginExecutionReplacement(self: *Workbench) Error!void {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        self.syncLifecycle();
+        if (self.execution_replacement_pending)
+            return error.ExecutionInUse;
+        self.execution_replacement_pending = true;
+        if (!self.executionQuiescent()) {
+            self.execution_replacement_pending = false;
+            return error.ExecutionInUse;
+        }
+    }
+
+    pub fn endExecutionReplacementNoFail(self: *Workbench) void {
+        std.debug.assert(self.execution_replacement_pending);
+        self.execution_replacement_pending = false;
+    }
+
+    pub fn executionReplacementPending(self: *const Workbench) bool {
+        return self.execution_replacement_pending;
     }
 
     pub fn createTask(
@@ -451,8 +883,10 @@ pub const Workbench = struct {
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
-        if (self.credential.len == 0 or self.model.len == 0)
-            return error.InvalidExecutionDefaults;
+        if (self.execution_replacement_pending)
+            return error.ExecutionInUse;
+        if (!self.canCreateTask())
+            return error.ExecutionUnavailable;
         const slot = findEmpty(TaskView, self.tasks) orelse return error.TaskCapacity;
         const canonical = std.Io.Dir.realPathFileAbsoluteAlloc(
             self.agent_runtime.io,
@@ -490,6 +924,11 @@ pub const Workbench = struct {
         errdefer self.freeTracked(workspace);
         const title = try self.copyBounded("", self.limits.max_task_title_bytes);
         errdefer self.freeTracked(title);
+        const execution_model = try self.copyBounded(
+            self.execution.model(),
+            account_contract.Limits.model_id_bytes,
+        );
+        errdefer self.freeTracked(execution_model);
         const runs = try self.allocator.alloc(?RunRecord, self.limits.max_runs_per_task);
         errdefer self.allocator.free(runs);
         @memset(runs, null);
@@ -497,12 +936,12 @@ pub const Workbench = struct {
         errdefer self.allocator.free(ui_history);
         @memset(ui_history, null);
         const route = self.agent_runtime.createSessionRoute(.{
-            .provider = agentProvider(self.provider),
+            .provider = agentProvider(self.execution.provider.?),
             .permission_mode = .default,
             .shell_policy = .unrestricted,
-            .credential = self.credential,
-            .model = self.model,
-            .base_url = self.base_url,
+            .credential = self.execution.credential(),
+            .model = self.execution.model(),
+            .base_url = self.execution.baseUrl(),
             .workspace = .{
                 .canonical_root = canonical,
                 .trust = workspace_trust,
@@ -514,6 +953,9 @@ pub const Workbench = struct {
         self.tasks[slot] = .{
             .session = route.session,
             .id = route.id,
+            .execution_generation = self.execution.generation,
+            .execution_provider = self.execution.provider.?,
+            .execution_model = execution_model,
             .workspace_root = workspace,
             .title = title,
             .runs = runs,
@@ -553,6 +995,33 @@ pub const Workbench = struct {
         view.cancel_requested = false;
         self.bumpRevision();
         return run_id;
+    }
+
+    pub fn taskExecutionIdentity(
+        self: *Workbench,
+        task_id: u64,
+    ) Error!ExecutionIdentity {
+        const task = self.findTask(task_id) orelse return error.UnknownTask;
+        return .{
+            .generation = task.execution_generation,
+            .provider = task.execution_provider,
+            .model = task.execution_model,
+        };
+    }
+
+    pub fn runExecutionIdentity(
+        self: *Workbench,
+        task_id: u64,
+        run_id: u64,
+    ) Error!ExecutionIdentity {
+        const task = self.findTask(task_id) orelse return error.UnknownTask;
+        const run = findRun(task.runs, run_id) orelse
+            return error.NoSuchRun;
+        return .{
+            .generation = run.execution_generation,
+            .provider = run.execution_provider,
+            .model = run.execution_model,
+        };
     }
 
     pub fn acquireRunRef(self: *Workbench, task_id: u64, run_id: u64) Error!RunRef {
@@ -958,7 +1427,13 @@ pub const Workbench = struct {
     pub fn writeSnapshot(self: *Workbench, output: []u8) Error![]const u8 {
         self.syncLifecycle();
         var writer = std.Io.Writer.fixed(output);
-        writer.print("{{\"schemaVersion\":{d},\"revision\":\"{d}\",\"tasks\":[", .{ snapshot_schema_version, self.revision }) catch return error.SnapshotTooLarge;
+        writer.print(
+            "{{\"schemaVersion\":{d},\"revision\":\"{d}\",\"account\":",
+            .{ snapshot_schema_version, self.revision },
+        ) catch return error.SnapshotTooLarge;
+        try self.writeAccount(&writer);
+        writer.writeAll(",\"tasks\":[") catch
+            return error.SnapshotTooLarge;
         var task_count: usize = 0;
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
@@ -970,6 +1445,69 @@ pub const Workbench = struct {
         return writer.buffered();
     }
 
+    fn writeAccount(
+        self: *Workbench,
+        writer: *std.Io.Writer,
+    ) Error!void {
+        const view = self.accountView();
+        writer.print(
+            "{{\"sessionState\":\"{s}\",\"executionState\":\"{s}\",\"operation\":\"{s}\",\"accountId\":",
+            .{
+                @tagName(view.session_state),
+                @tagName(view.execution_state),
+                @tagName(view.operation),
+            },
+        ) catch return error.SnapshotTooLarge;
+        try self.projectedJsonValue(writer, view.account_id);
+        writer.writeAll(",\"displayName\":") catch
+            return error.SnapshotTooLarge;
+        try self.projectedJsonValue(writer, view.display_name);
+        writer.writeAll(",\"apiKeys\":[") catch
+            return error.SnapshotTooLarge;
+        for (view.api_keys, 0..) |api_key, index| {
+            if (index != 0) writer.writeByte(',') catch
+                return error.SnapshotTooLarge;
+            writer.writeAll("{\"id\":") catch
+                return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, api_key.id);
+            writer.writeAll(",\"name\":") catch
+                return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, api_key.name);
+            writer.writeAll(",\"suffix\":") catch
+                return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, api_key.suffix);
+            writer.writeByte('}') catch return error.SnapshotTooLarge;
+        }
+        writer.writeAll("],\"models\":[") catch
+            return error.SnapshotTooLarge;
+        for (view.models, 0..) |model, index| {
+            if (index != 0) writer.writeByte(',') catch
+                return error.SnapshotTooLarge;
+            writer.writeAll("{\"id\":") catch
+                return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, model.id);
+            writer.writeAll(",\"displayName\":") catch
+                return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, model.display_name);
+            writer.writeByte('}') catch return error.SnapshotTooLarge;
+        }
+        writer.writeAll("],\"selectedApiKeyId\":") catch
+            return error.SnapshotTooLarge;
+        try self.projectedJsonValue(writer, view.selected_api_key_id);
+        writer.writeAll(",\"selectedModel\":") catch
+            return error.SnapshotTooLarge;
+        try self.projectedJsonValue(writer, view.selected_model);
+        writer.print(
+            ",\"canCreateTask\":{},\"errorCode\":\"{s}\",\"safeDiagnostic\":",
+            .{ view.can_create_task, @tagName(view.error_code) },
+        ) catch return error.SnapshotTooLarge;
+        try self.projectedJsonValue(writer, view.safe_diagnostic);
+        writer.print(
+            ",\"catalogGeneration\":\"{d}\",\"executionGeneration\":\"{d}\"}}",
+            .{ view.catalog_generation, view.execution_generation },
+        ) catch return error.SnapshotTooLarge;
+    }
+
     pub fn deinit(self: *Workbench) void {
         self.shutdownExecutor();
         for (self.tasks) |*entry| {
@@ -978,10 +1516,8 @@ pub const Workbench = struct {
             self.deinitTaskView(task);
         }
         self.allocator.free(self.tasks);
-        std.crypto.secureZero(u8, self.credential);
-        self.allocator.free(self.credential);
-        self.allocator.free(self.model);
-        self.allocator.free(self.base_url);
+        self.execution.deinit();
+        self.account.deinit();
         std.debug.assert(self.projection_bytes == 0);
         self.executor.deinit();
         self.* = undefined;
@@ -1134,6 +1670,29 @@ pub const Workbench = struct {
             continuationAvailable(task.continuation);
     }
 
+    fn canCreateTask(self: *const Workbench) bool {
+        return !self.shutting_down and
+            !self.execution_replacement_pending and
+            self.account.account_can_create_task and
+            self.account.execution_state == .ready and
+            self.execution.ready() and
+            self.account.execution_generation == self.execution.generation;
+    }
+
+    fn executionQuiescent(self: *const Workbench) bool {
+        for (self.tasks) |*entry| {
+            const task = &(entry.* orelse continue);
+            if (task.lifecycle != .closed or
+                task.session != null or
+                task.closing_session != null or
+                task.close_thread != null or
+                task.run_references.load(.acquire) != 0 or
+                hasNonTerminalRun(task))
+                return false;
+        }
+        return true;
+    }
+
     fn findTask(self: *Workbench, task_id: u64) ?*TaskView {
         if (task_id == 0) return null;
         for (self.tasks) |*entry| if (entry.*) |*task|
@@ -1167,12 +1726,15 @@ pub const Workbench = struct {
         task.runs[slot] = .{
             .id = 0,
             .generation = task.next_run_generation,
+            .execution_generation = task.execution_generation,
+            .execution_provider = task.execution_provider,
+            .execution_model = task.execution_model,
             .user = user,
             .user_redacted = user_projection.redacted,
             .tools = tools,
             .status_text = status_text,
             .terminal_diagnostic = terminal_diagnostic,
-            .redaction_secret = self.credential,
+            .redaction_secret = self.execution.credential(),
             .workbench = undefined,
             .task = undefined,
             .session = undefined,
@@ -1211,6 +1773,7 @@ pub const Workbench = struct {
         }
         self.allocator.free(task.runs);
         self.allocator.free(task.ui_history);
+        self.freeTracked(task.execution_model);
         self.freeTracked(task.workspace_root);
         self.freeTracked(task.title);
         task.* = undefined;
@@ -1257,7 +1820,11 @@ pub const Workbench = struct {
         const capacity = @min(value.len, max);
         const scratch = try self.allocator.alloc(u8, capacity);
         defer self.allocator.free(scratch);
-        const result = sanitizeInto(scratch, value, self.credential);
+        const result = sanitizeInto(
+            scratch,
+            value,
+            self.execution.credential(),
+        );
         return .{
             .value = try self.copyBounded(scratch[0..result.len], max),
             .truncated = result.truncated,
@@ -1269,25 +1836,30 @@ pub const Workbench = struct {
         const capacity = @min(value.len, max);
         const scratch = try self.allocator.alloc(u8, capacity);
         defer self.allocator.free(scratch);
-        const result = sanitizeInto(scratch, value, self.credential);
+        const result = sanitizeInto(
+            scratch,
+            value,
+            self.execution.credential(),
+        );
         try self.replaceTracked(target, scratch[0..result.len], max);
         return result;
     }
 
     fn redactTrackedText(self: *Workbench, target: *TrackedText) bool {
         std.debug.assert(target.committed_len <= target.list.items.len);
-        if (self.credential.len == 0) {
+        const credential = self.execution.credential();
+        if (credential.len == 0) {
             target.committed_len = target.list.items.len;
             return false;
         }
         var read = target.committed_len;
         var write = target.committed_len;
         var redacted = false;
-        const marker_len = @min(self.credential.len, 3);
+        const marker_len = @min(credential.len, 3);
         while (read < target.list.items.len) {
             const remaining = target.list.items[read..];
-            if (remaining.len < self.credential.len and
-                std.mem.startsWith(u8, self.credential, remaining))
+            if (remaining.len < credential.len and
+                std.mem.startsWith(u8, credential, remaining))
             {
                 std.mem.copyForwards(
                     u8,
@@ -1298,10 +1870,10 @@ pub const Workbench = struct {
                 target.committed_len = write;
                 return redacted;
             }
-            if (std.mem.startsWith(u8, remaining, self.credential)) {
+            if (std.mem.startsWith(u8, remaining, credential)) {
                 @memset(target.list.items[write..][0..marker_len], '*');
                 write += marker_len;
-                read += self.credential.len;
+                read += credential.len;
                 redacted = true;
             } else {
                 target.list.items[write] = target.list.items[read];
@@ -1316,12 +1888,16 @@ pub const Workbench = struct {
 
     fn projectedJsonValue(self: *Workbench, writer: *std.Io.Writer, value: []const u8) Error!void {
         const hex = "0123456789abcdef";
+        const credential = self.execution.credential();
         writer.writeByte('"') catch return error.SnapshotTooLarge;
         var index: usize = 0;
         while (index < value.len) {
-            if (self.credential.len != 0 and std.mem.startsWith(u8, value[index..], self.credential)) {
-                _ = writer.splatByte('*', @min(self.credential.len, 3)) catch return error.SnapshotTooLarge;
-                index += self.credential.len;
+            if (credential.len != 0 and
+                std.mem.startsWith(u8, value[index..], credential))
+            {
+                _ = writer.splatByte('*', @min(credential.len, 3)) catch
+                    return error.SnapshotTooLarge;
+                index += credential.len;
                 continue;
             }
             const byte = value[index];
@@ -1394,7 +1970,7 @@ pub const Workbench = struct {
     }
 
     fn requestContainsSecret(self: *Workbench, request: lifecycle.UiRequest) bool {
-        if (self.credential.len == 0) return false;
+        if (self.execution.credential().len == 0) return false;
         return switch (request) {
             .ask_question => |questions| questions_block: {
                 for (questions) |question| {
@@ -1414,7 +1990,9 @@ pub const Workbench = struct {
     }
 
     fn containsKnownSecret(self: *Workbench, value: []const u8) bool {
-        return self.credential.len != 0 and std.mem.indexOf(u8, value, self.credential) != null;
+        const credential = self.execution.credential();
+        return credential.len != 0 and
+            std.mem.indexOf(u8, value, credential) != null;
     }
 
     fn writeRun(self: *Workbench, writer: *std.Io.Writer, run: *RunRecord) Error!void {
@@ -1521,7 +2099,11 @@ pub const Workbench = struct {
             },
             .permission => |permission| permission.args,
         };
-        const result = sanitizeInto(&record.detail, value, self.credential);
+        const result = sanitizeInto(
+            &record.detail,
+            value,
+            self.execution.credential(),
+        );
         record.detail_len = result.len;
         record.detail_truncated = result.truncated;
         record.redacted = result.redacted;
@@ -1766,6 +2348,15 @@ fn agentProvider(provider: Provider) lifecycle.ProviderKind {
         .anthropic => .anthropic,
         .openai => .openai,
         .gemini => .gemini,
+    };
+}
+
+fn accountProvider(
+    provider: account_contract.ProviderKind,
+) Provider {
+    return switch (provider) {
+        .anthropic => .anthropic,
+        .openai => .openai,
     };
 }
 
@@ -2170,6 +2761,17 @@ fn worstCaseSnapshotBytes(limits: Limits) ?usize {
     total = std.math.add(
         usize,
         total,
+        std.math.mul(
+            usize,
+            account_snapshot_text_bytes,
+            json_string_expansion,
+        ) catch return null,
+    ) catch return null;
+    total = std.math.add(usize, total, account_snapshot_overhead) catch
+        return null;
+    total = std.math.add(
+        usize,
+        total,
         std.math.mul(usize, limits.max_tasks, task_snapshot_overhead) catch return null,
     ) catch return null;
     const runs = std.math.mul(usize, limits.max_tasks, limits.max_runs_per_task) catch return null;
@@ -2218,11 +2820,39 @@ fn worstCaseSnapshotBytes(limits: Limits) ?usize {
 }
 
 var test_agent_runtime: lifecycle.Runtime = undefined;
-const test_execution_defaults = ExecutionDefaults{
-    .provider = .anthropic,
-    .credential = "SECRET-KEY",
-    .model = "fixture-model",
-};
+
+fn installTestExecution(workbench: *Workbench) !void {
+    var execution = try account_contract.OwnedExecutionConfig.initOwned(
+        std.testing.allocator,
+        .anthropic,
+        try std.testing.allocator.dupe(u8, "fixture-model"),
+        try std.testing.allocator.dupe(
+            u8,
+            account_contract.metask_anthropic_messages_url,
+        ),
+        1,
+        try std.testing.allocator.dupe(u8, "SECRET-KEY"),
+    );
+    errdefer execution.deinit();
+    try workbench.beginExecutionReplacement();
+    workbench.commitAccountFactNoFail(.{
+        .kind = .execution_changed,
+        .view = .{
+            .session_state = .authenticated,
+            .execution_state = .ready,
+            .operation = .none,
+            .account_id = "account-1",
+            .display_name = "Metask User",
+            .selected_api_key_id = "key-1",
+            .selected_model = "fixture-model",
+            .can_create_task = true,
+            .execution_generation = 1,
+        },
+    });
+    workbench.installExecutionNoFail(&execution);
+    workbench.endExecutionReplacementNoFail();
+    workbench.finishAccountCommitNoFail();
+}
 
 fn testWorkbench() !Workbench {
     test_agent_runtime.io = std.testing.io;
@@ -2237,9 +2867,15 @@ fn testWorkbench() !Workbench {
         .max_tool_field_bytes = 8 * 1024,
         .max_pending_ui_json_bytes = 64 * 1024,
         .max_pending_ui_requests = 2,
-        .max_snapshot_bytes = 1024 * 1024,
-    }, .{ .execution = test_execution_defaults });
+        .max_snapshot_bytes = 4 * 1024 * 1024,
+    }, .{});
+    try installTestExecution(&workbench);
+    workbench.revision = 0;
     const workspace = try workbench.copyBounded("/tmp/metawork-test", workbench.limits.max_workspace_bytes);
+    const execution_model = try workbench.copyBounded(
+        workbench.execution.model(),
+        account_contract.Limits.model_id_bytes,
+    );
     const runs = try workbench.allocator.alloc(?RunRecord, workbench.limits.max_runs_per_task);
     @memset(runs, null);
     const ui_history = try workbench.allocator.alloc(?UiRecord, workbench.limits.max_ui_history_per_task);
@@ -2249,16 +2885,23 @@ fn testWorkbench() !Workbench {
     runs[0] = .{
         .id = 7,
         .generation = 1,
+        .execution_generation = 1,
+        .execution_provider = .anthropic,
+        .execution_model = execution_model,
         .user = try workbench.copyBounded("inspect", workbench.limits.max_user_message_bytes),
         .active_phase = .running,
         .agent_handoff = .init(.running),
         .tools = tools,
         .status_text = try workbench.copyBounded("Queued", workbench.limits.max_tool_field_bytes),
         .terminal_diagnostic = try workbench.allocTrackedCapacity(workbench.limits.max_terminal_diagnostic_bytes),
+        .redaction_secret = workbench.execution.credential(),
     };
     workbench.tasks[0] = .{
         .session = null,
         .id = 3,
+        .execution_generation = 1,
+        .execution_provider = .anthropic,
+        .execution_model = execution_model,
         .workspace_root = workspace,
         .title = try workbench.copyBounded("", workbench.limits.max_task_title_bytes),
         .runs = runs,
@@ -2287,7 +2930,7 @@ fn finalizeTestTerminalEvents(workbench: *Workbench) void {
     workbench.syncLifecycle();
 }
 
-test "Workbench snapshot serializer matches the Renderer v5 contract fixture" {
+test "Workbench snapshot serializer matches the Renderer v6 contract fixture" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
 
@@ -2299,6 +2942,15 @@ test "Workbench snapshot serializer matches the Renderer v5 contract fixture" {
         "\r\n",
     );
     try std.testing.expectEqualStrings(fixture, snapshot);
+    try std.testing.expect(
+        std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(u8, snapshot, "\"apiKey\"") == null,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(u8, snapshot, "\"baseUrl\"") == null,
+    );
 }
 
 test "Task metadata mutations preserve lifecycle guards and projection accounting" {
@@ -2359,6 +3011,18 @@ test "Run admission reserves a stable generation and rolls back every fallible a
 
     const slot = try workbench.reserveRunRecord(task, "reserved");
     const first_generation = task.runs[slot].?.generation;
+    try std.testing.expectEqual(
+        task.execution_generation,
+        task.runs[slot].?.execution_generation,
+    );
+    try std.testing.expectEqual(
+        task.execution_provider,
+        task.runs[slot].?.execution_provider,
+    );
+    try std.testing.expectEqualStrings(
+        task.execution_model,
+        task.runs[slot].?.execution_model,
+    );
     workbench.discardRunRecord(task, slot);
     const reused_slot = try workbench.reserveRunRecord(task, "reserved again");
     try std.testing.expectEqual(slot, reused_slot);
@@ -2367,7 +3031,7 @@ test "Run admission reserves a stable generation and rolls back every fallible a
     workbench.discardRunRecord(task, reused_slot);
 }
 
-test "missing process defaults fail Task admission without blocking Workbench startup" {
+test "Workbench starts without execution and fails Task admission closed" {
     test_agent_runtime.io = std.testing.io;
     var workbench = try Workbench.init(
         std.testing.allocator,
@@ -2377,21 +3041,100 @@ test "missing process defaults fail Task admission without blocking Workbench st
             .max_runs_per_task = 1,
             .max_tools_per_run = 1,
         },
-        .{ .execution = .{
-            .provider = .anthropic,
-            .credential = "",
-            .model = "",
-        } },
+        .{},
     );
     defer workbench.deinit();
     try std.testing.expectError(
-        error.InvalidExecutionDefaults,
+        error.ExecutionUnavailable,
         workbench.createTask(.{
             .workspace_root = "/tmp",
             .trust = .{ .temporary = "/tmp" },
         }),
     );
     try std.testing.expectEqual(@as(u64, 0), workbench.currentRevision());
+}
+
+test "Account projection and execution install use preallocated no-fail storage" {
+    test_agent_runtime.io = std.testing.io;
+    var workbench = try Workbench.init(
+        std.testing.allocator,
+        &test_agent_runtime,
+        .{
+            .max_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        .{},
+    );
+    defer workbench.deinit();
+    var execution = try account_contract.OwnedExecutionConfig.initOwned(
+        std.testing.allocator,
+        .openai,
+        try std.testing.allocator.dupe(u8, "model-1"),
+        try std.testing.allocator.dupe(
+            u8,
+            account_contract.metask_openai_chat_completions_url,
+        ),
+        1,
+        try std.testing.allocator.dupe(u8, "secret-key"),
+    );
+    errdefer execution.deinit();
+    const api_keys = [_]account_contract.ApiKeyView{.{
+        .id = "key-1",
+        .name = "Primary",
+        .suffix = "1234",
+    }};
+    const models = [_]account_contract.ModelView{.{
+        .id = "model-1",
+        .display_name = "Model One",
+    }};
+    try workbench.beginExecutionReplacement();
+    workbench.commitAccountFactNoFail(.{
+        .kind = .execution_changed,
+        .view = .{
+            .session_state = .authenticated,
+            .execution_state = .ready,
+            .operation = .none,
+            .account_id = "account-1",
+            .display_name = "Metask User",
+            .api_keys = &api_keys,
+            .models = &models,
+            .selected_api_key_id = "key-1",
+            .selected_model = "model-1",
+            .can_create_task = true,
+            .catalog_generation = 2,
+            .execution_generation = 1,
+        },
+    });
+    workbench.installExecutionNoFail(&execution);
+    try std.testing.expect(!workbench.accountView().can_create_task);
+    workbench.endExecutionReplacementNoFail();
+    workbench.finishAccountCommitNoFail();
+    const view = workbench.accountView();
+    try std.testing.expect(view.can_create_task);
+    try std.testing.expectEqualStrings("Primary", view.api_keys[0].name);
+    try std.testing.expectEqualStrings("Model One", view.models[0].display_name);
+    try std.testing.expectEqual(@as(u64, 1), workbench.currentRevision());
+}
+
+test "execution replacement gate rejects live Task state and admits closed history" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    try std.testing.expectError(
+        error.ExecutionInUse,
+        workbench.beginExecutionReplacement(),
+    );
+    try std.testing.expect(!workbench.executionReplacementPending());
+    const task = &workbench.tasks[0].?;
+    task.runs[0].?.active_phase = .completed;
+    task.lifecycle = .closed;
+    task.continuation = .{ .unavailable = .closed };
+    task.active_run_id = 0;
+    try workbench.beginExecutionReplacement();
+    try std.testing.expect(workbench.executionReplacementPending());
+    try std.testing.expect(!workbench.accountView().can_create_task);
+    workbench.endExecutionReplacementNoFail();
+    try std.testing.expect(workbench.accountView().can_create_task);
 }
 
 test "terminal publication is allocation-free write-once bounded history" {
@@ -2669,6 +3412,64 @@ test "Workbench snapshot budget includes JSON escaping and structural overhead" 
     try std.testing.expect(snapshot.len > controls.len * 5);
 }
 
+fn installMaximumAccountProjection(workbench: *Workbench) !void {
+    const account_id: [account_contract.Limits.account_id_bytes]u8 =
+        @splat('a');
+    const display_name: [account_contract.Limits.display_name_bytes]u8 =
+        @splat('d');
+    const api_key_id: [account_contract.Limits.api_key_id_bytes]u8 =
+        @splat('k');
+    const api_key_name: [account_contract.Limits.api_key_name_bytes]u8 =
+        @splat('n');
+    const api_key_suffix: [account_contract.Limits.api_key_suffix_bytes]u8 =
+        @splat('s');
+    const model_id: [account_contract.Limits.model_id_bytes]u8 =
+        @splat('m');
+    const model_name: [account_contract.Limits.model_display_name_bytes]u8 =
+        @splat('v');
+    const diagnostic: [account_contract.Limits.safe_diagnostic_bytes]u8 =
+        @splat('x');
+    const api_keys = try std.testing.allocator.alloc(
+        account_contract.ApiKeyView,
+        account_contract.Limits.api_key_entries,
+    );
+    defer std.testing.allocator.free(api_keys);
+    for (api_keys) |*api_key| api_key.* = .{
+        .id = &api_key_id,
+        .name = &api_key_name,
+        .suffix = &api_key_suffix,
+    };
+    const models = try std.testing.allocator.alloc(
+        account_contract.ModelView,
+        account_contract.Limits.model_entries,
+    );
+    defer std.testing.allocator.free(models);
+    for (models) |*model| model.* = .{
+        .id = &model_id,
+        .display_name = &model_name,
+    };
+    workbench.commitAccountFactNoFail(.{
+        .kind = .catalog_changed,
+        .view = .{
+            .session_state = .authenticated,
+            .execution_state = .ready,
+            .operation = .none,
+            .account_id = &account_id,
+            .display_name = &display_name,
+            .api_keys = api_keys,
+            .models = models,
+            .selected_api_key_id = &api_key_id,
+            .selected_model = &model_id,
+            .can_create_task = false,
+            .error_code = .invalid_state,
+            .safe_diagnostic = &diagnostic,
+            .catalog_generation = std.math.maxInt(u64),
+            .execution_generation = std.math.maxInt(u64),
+        },
+    });
+    workbench.finishAccountCommitNoFail();
+}
+
 test "default snapshot budget contains the maximum structural projection" {
     const limits = Limits{};
     test_agent_runtime.io = std.testing.io;
@@ -2676,11 +3477,16 @@ test "default snapshot budget contains the maximum structural projection" {
         std.testing.allocator,
         &test_agent_runtime,
         limits,
-        .{ .execution = test_execution_defaults },
+        .{},
     );
     defer workbench.deinit();
+    try installMaximumAccountProjection(&workbench);
 
     for (0..limits.max_tasks) |task_index| {
+        const execution_model = try workbench.copyBounded(
+            "fixture-model",
+            account_contract.Limits.model_id_bytes,
+        );
         const runs = try workbench.allocator.alloc(?RunRecord, limits.max_runs_per_task);
         @memset(runs, null);
         const ui_history = try workbench.allocator.alloc(?UiRecord, limits.max_ui_history_per_task);
@@ -2704,6 +3510,9 @@ test "default snapshot budget contains the maximum structural projection" {
             runs[run_index] = .{
                 .id = @intCast(run_index + 1),
                 .generation = @intCast(run_index + 1),
+                .execution_generation = 1,
+                .execution_provider = .anthropic,
+                .execution_model = execution_model,
                 .user = try workbench.copyBounded("", limits.max_user_message_bytes),
                 .tools = tools,
                 .status_text = try workbench.copyBounded("", limits.max_tool_field_bytes),
@@ -2713,6 +3522,9 @@ test "default snapshot budget contains the maximum structural projection" {
         workbench.tasks[task_index] = .{
             .session = null,
             .id = @intCast(task_index + 1),
+            .execution_generation = 1,
+            .execution_provider = .anthropic,
+            .execution_model = execution_model,
             .workspace_root = try workbench.copyBounded("", limits.max_workspace_bytes),
             .title = try workbench.copyBounded("", limits.max_task_title_bytes),
             .runs = runs,

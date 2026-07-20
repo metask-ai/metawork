@@ -13,6 +13,7 @@ import {
   assertTaskArchived,
   assertTaskFlag,
   assertUiResponseAccepted,
+  decodeAccountCommandResult,
   decodeGeneration,
   decodeHostSignalEvent,
   decodePingResponse,
@@ -100,6 +101,48 @@ export class BridgeClient {
   async chooseWorkspace(): Promise<WorkspaceChoice> {
     return decodeWorkspaceChoice(
       await this.bridge().invoke(commands.chooseWorkspace, {}),
+    );
+  }
+
+  async beginLogin() {
+    return decodeAccountCommandResult(
+      await this.bridge().invoke(commands.accountBeginLogin, {}),
+    );
+  }
+
+  async reauthenticate() {
+    return decodeAccountCommandResult(
+      await this.bridge().invoke(commands.accountReauthenticate, {}),
+    );
+  }
+
+  async cancelAccountOperation() {
+    return decodeAccountCommandResult(
+      await this.bridge().invoke(commands.accountCancelOperation, {}),
+    );
+  }
+
+  async refreshAccountCatalog() {
+    return decodeAccountCommandResult(
+      await this.bridge().invoke(commands.accountRefreshCatalog, {}),
+    );
+  }
+
+  async selectApiKey(apiKeyId: string) {
+    return decodeAccountCommandResult(
+      await this.bridge().invoke(commands.accountSelectApiKey, { apiKeyId }),
+    );
+  }
+
+  async selectModel(modelId: string) {
+    return decodeAccountCommandResult(
+      await this.bridge().invoke(commands.accountSelectModel, { modelId }),
+    );
+  }
+
+  async logout() {
+    return decodeAccountCommandResult(
+      await this.bridge().invoke(commands.accountLogout, {}),
     );
   }
 

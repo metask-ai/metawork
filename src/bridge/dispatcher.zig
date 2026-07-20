@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const native_sdk = @import("native_sdk");
+const account_contract = @import("metawork_account_contract");
 const workbench_api = @import("metawork_workbench");
 const commands = @import("commands.zig");
 const handlers = @import("handlers.zig");
@@ -54,6 +55,7 @@ pub const AutomationHooks = struct {
 
 pub const Dispatcher = struct {
     workbench: ?*workbench_api.Workbench,
+    account_commands: account_contract.AccountCommandSink,
     platform: Platform,
     automation: AutomationHooks,
     delivery: product_delivery.Delivery,
@@ -67,11 +69,13 @@ pub const Dispatcher = struct {
     pub fn init(
         allocator: std.mem.Allocator,
         workbench: *workbench_api.Workbench,
+        account_commands: account_contract.AccountCommandSink,
         platform: Platform,
         automation: AutomationHooks,
     ) std.mem.Allocator.Error!Dispatcher {
         return .{
             .workbench = workbench,
+            .account_commands = account_commands,
             .platform = platform,
             .automation = automation,
             .delivery = try product_delivery.Delivery.init(allocator),
@@ -107,6 +111,13 @@ pub const Dispatcher = struct {
             .{ .name = commands.choose_workspace, .function = chooseWorkspace },
             .{ .name = commands.snapshot, .function = beginSnapshot },
             .{ .name = commands.snapshot_chunk, .function = fetchSnapshotChunk },
+            .{ .name = commands.account_begin_login, .function = accountBeginLogin },
+            .{ .name = commands.account_reauthenticate, .function = accountReauthenticate },
+            .{ .name = commands.account_cancel_operation, .function = accountCancelOperation },
+            .{ .name = commands.account_refresh_catalog, .function = accountRefreshCatalog },
+            .{ .name = commands.account_select_api_key, .function = accountSelectApiKey },
+            .{ .name = commands.account_select_model, .function = accountSelectModel },
+            .{ .name = commands.account_logout, .function = accountLogout },
             .{ .name = commands.create_task, .function = createTask },
             .{ .name = commands.run, .function = runTask },
             .{ .name = commands.cancel, .function = cancelTask },
@@ -322,6 +333,144 @@ pub const Dispatcher = struct {
         return writer.buffered();
     }
 
+    fn accountBeginLogin(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        return submitEmptyAccountCommand(
+            context,
+            invocation,
+            output,
+            .begin_login,
+        );
+    }
+
+    fn accountReauthenticate(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        return submitEmptyAccountCommand(
+            context,
+            invocation,
+            output,
+            .reauthenticate,
+        );
+    }
+
+    fn accountCancelOperation(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        return submitEmptyAccountCommand(
+            context,
+            invocation,
+            output,
+            .cancel_operation,
+        );
+    }
+
+    fn accountRefreshCatalog(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        return submitEmptyAccountCommand(
+            context,
+            invocation,
+            output,
+            .refresh_catalog,
+        );
+    }
+
+    fn accountLogout(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        return submitEmptyAccountCommand(
+            context,
+            invocation,
+            output,
+            .logout,
+        );
+    }
+
+    fn submitEmptyAccountCommand(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+        command: account_contract.AccountCommand,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireAccountAuthority(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(
+            handlers.Empty,
+            invocation.request.payload,
+        );
+        defer parsed.deinit();
+        return encodeAccountResult(
+            output,
+            self.account_commands.submit(command),
+        );
+    }
+
+    fn accountSelectApiKey(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireAccountAuthority(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(
+            handlers.AccountSelectApiKey,
+            invocation.request.payload,
+        );
+        defer parsed.deinit();
+        if (parsed.value.apiKeyId.len == 0 or
+            parsed.value.apiKeyId.len >
+                account_contract.Limits.api_key_id_bytes)
+            return error.InvalidBridgePayload;
+        return encodeAccountResult(
+            output,
+            self.account_commands.submit(.{
+                .select_api_key = parsed.value.apiKeyId,
+            }),
+        );
+    }
+
+    fn accountSelectModel(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireAccountAuthority(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(
+            handlers.AccountSelectModel,
+            invocation.request.payload,
+        );
+        defer parsed.deinit();
+        if (parsed.value.modelId.len == 0 or
+            parsed.value.modelId.len >
+                account_contract.Limits.model_id_bytes)
+            return error.InvalidBridgePayload;
+        return encodeAccountResult(
+            output,
+            self.account_commands.submit(.{
+                .select_model = parsed.value.modelId,
+            }),
+        );
+    }
+
     fn chooseWorkspace(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         var callback = try self.callbacks.enter();
@@ -531,6 +680,15 @@ pub const Dispatcher = struct {
         _ = try self.delivery.requireWindow(window_id);
     }
 
+    fn requireAccountAuthority(
+        self: *const Dispatcher,
+        window_id: native_sdk.platform.WindowId,
+    ) !void {
+        try self.requireWindow(window_id);
+        if (!self.platform.on_main_thread_fn(self.platform.context))
+            return error.InvalidBridgeThread;
+    }
+
     fn requireWorkbench(self: *Dispatcher) !*workbench_api.Workbench {
         return self.workbench orelse error.RuntimeUnavailable;
     }
@@ -590,6 +748,28 @@ pub const Dispatcher = struct {
         return (try self.requireWorkbench()).writeSnapshot(output);
     }
 };
+
+fn encodeAccountResult(
+    output: []u8,
+    result: account_contract.AccountCommandResult,
+) ![]const u8 {
+    if (result.accepted != (result.error_code == .none) or
+        (!result.accepted and result.attempt_id != null) or
+        result.attempt_id == 0)
+        return error.InvalidAccountCommandResult;
+    var writer = std.Io.Writer.fixed(output);
+    writer.print(
+        "{{\"accepted\":{},\"errorCode\":\"{s}\",\"attemptId\":",
+        .{ result.accepted, @tagName(result.error_code) },
+    ) catch return error.NoSpaceLeft;
+    if (result.attempt_id) |attempt_id|
+        writer.print("\"{d}\"", .{attempt_id}) catch
+            return error.NoSpaceLeft
+    else
+        writer.writeAll("null") catch return error.NoSpaceLeft;
+    writer.writeByte('}') catch return error.NoSpaceLeft;
+    return writer.buffered();
+}
 
 fn decodeUiResponse(request: handlers.UiResponseRequest) !workbench_api.UiResponse {
     if (std.mem.eql(u8, request.kind, "answers")) {
@@ -651,6 +831,33 @@ test "permission command ingress rejects unsupported persistent choices" {
     }
 }
 
+test "Account command response encoding rejects inconsistent attempt metadata" {
+    var output: [256]u8 = undefined;
+    try std.testing.expectError(
+        error.InvalidAccountCommandResult,
+        encodeAccountResult(&output, .{
+            .accepted = true,
+            .error_code = .invalid_state,
+        }),
+    );
+    try std.testing.expectError(
+        error.InvalidAccountCommandResult,
+        encodeAccountResult(&output, .{
+            .accepted = false,
+            .error_code = .invalid_state,
+            .attempt_id = 7,
+        }),
+    );
+    try std.testing.expectError(
+        error.InvalidAccountCommandResult,
+        encodeAccountResult(&output, .{
+            .accepted = true,
+            .error_code = .none,
+            .attempt_id = 0,
+        }),
+    );
+}
+
 fn inactive(_: ?*anyopaque) bool {
     return false;
 }
@@ -664,7 +871,11 @@ test "Dispatcher validates authority before domain calls and preserves committed
     const Harness = struct {
         wake_calls: usize = 0,
         detach_calls: usize = 0,
+        account_calls: usize = 0,
         fail_detach: bool = false,
+        on_main_thread: bool = true,
+        account_result: account_contract.AccountCommandResult =
+            .acceptedAttempt(41),
 
         fn wake(context: ?*anyopaque) anyerror!void {
             const self: *@This() = @ptrCast(@alignCast(context.?));
@@ -696,8 +907,28 @@ test "Dispatcher validates authority before domain calls and preserves committed
             return 7;
         }
 
-        fn onMainThread(_: ?*anyopaque) bool {
-            return true;
+        fn onMainThread(context: ?*anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            return self.on_main_thread;
+        }
+
+        fn submitAccount(
+            context: *anyopaque,
+            command: account_contract.AccountCommand,
+        ) account_contract.AccountCommandResult {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.account_calls += 1;
+            switch (command) {
+                .begin_login,
+                .reauthenticate,
+                .cancel_operation,
+                .refresh_catalog,
+                .logout,
+                => {},
+                .select_api_key => |id| std.debug.assert(id.len != 0),
+                .select_model => |id| std.debug.assert(id.len != 0),
+            }
+            return self.account_result;
         }
 
         fn detach(context: ?*anyopaque, _: u64, _: u64) anyerror!void {
@@ -715,10 +946,16 @@ test "Dispatcher validates authority before domain calls and preserves committed
         .{ .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 },
         fixture.workbenchConfiguration(),
     );
+    try fixture.installWorkbenchExecution(&workbench);
+    const initial_revision = workbench.currentRevision();
     var harness = Harness{};
     var dispatcher = try Dispatcher.init(
         std.testing.allocator,
         &workbench,
+        .{
+            .context = &harness,
+            .submit_fn = Harness.submitAccount,
+        },
         .{
             .context = &harness,
             .wake_fn = Harness.wake,
@@ -755,12 +992,92 @@ test "Dispatcher validates authority before domain calls and preserves committed
         &response,
     );
     try std.testing.expect(std.mem.indexOf(u8, invalid, "\"handler_failed\"") != null);
-    try std.testing.expectEqual(@as(u64, 0), workbench.currentRevision());
+    try std.testing.expectEqual(initial_revision, workbench.currentRevision());
 
     _ = native_dispatcher.dispatch(
         "{\"id\":\"connect\",\"command\":\"metawork.events.connect\",\"payload\":{}}",
         source,
         &response,
+    );
+    const login = native_dispatcher.dispatch(
+        "{\"id\":\"login\",\"command\":\"metawork.account.beginLogin\",\"payload\":{}}",
+        source,
+        &response,
+    );
+    try std.testing.expectEqual(@as(usize, 1), harness.account_calls);
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            login,
+            "\"accepted\":true,\"errorCode\":\"none\",\"attemptId\":\"41\"",
+        ) != null,
+    );
+    const foreign_origin = native_sdk.bridge.Source{
+        .origin = "https://attacker.invalid",
+        .window_id = source.window_id,
+    };
+    const denied_origin = native_dispatcher.dispatch(
+        "{\"id\":\"foreign\",\"command\":\"metawork.account.logout\",\"payload\":{}}",
+        foreign_origin,
+        &response,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(u8, denied_origin, "\"result\"") == null,
+    );
+    try std.testing.expectEqual(@as(usize, 1), harness.account_calls);
+    const wrong_window = native_sdk.bridge.Source{
+        .origin = source.origin,
+        .window_id = source.window_id + 1,
+    };
+    const denied_window = native_dispatcher.dispatch(
+        "{\"id\":\"wrong-window\",\"command\":\"metawork.account.logout\",\"payload\":{}}",
+        wrong_window,
+        &response,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(u8, denied_window, "\"handler_failed\"") != null,
+    );
+    try std.testing.expectEqual(@as(usize, 1), harness.account_calls);
+    const invalid_account_payload = native_dispatcher.dispatch(
+        "{\"id\":\"bad-login\",\"command\":\"metawork.account.beginLogin\",\"payload\":{\"extra\":true}}",
+        source,
+        &response,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(u8, invalid_account_payload, "\"handler_failed\"") !=
+            null,
+    );
+    try std.testing.expectEqual(@as(usize, 1), harness.account_calls);
+    const empty_model = native_dispatcher.dispatch(
+        "{\"id\":\"empty-model\",\"command\":\"metawork.account.selectModel\",\"payload\":{\"modelId\":\"\"}}",
+        source,
+        &response,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(u8, empty_model, "\"handler_failed\"") != null,
+    );
+    try std.testing.expectEqual(@as(usize, 1), harness.account_calls);
+    harness.on_main_thread = false;
+    _ = native_dispatcher.dispatch(
+        "{\"id\":\"wrong-thread\",\"command\":\"metawork.account.logout\",\"payload\":{}}",
+        source,
+        &response,
+    );
+    try std.testing.expectEqual(@as(usize, 1), harness.account_calls);
+    harness.on_main_thread = true;
+    harness.account_result = .rejected(.invalid_state);
+    const rejected = native_dispatcher.dispatch(
+        "{\"id\":\"state-rejected\",\"command\":\"metawork.account.refreshCatalog\",\"payload\":{}}",
+        source,
+        &response,
+    );
+    try std.testing.expectEqual(@as(usize, 2), harness.account_calls);
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            rejected,
+            "\"accepted\":false,\"errorCode\":\"invalid_state\",\"attemptId\":null",
+        ) != null,
     );
     const chosen = native_dispatcher.dispatch(
         "{\"id\":\"choose\",\"command\":\"metawork.workspace.choose\",\"payload\":{}}",

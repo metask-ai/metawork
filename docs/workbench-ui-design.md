@@ -69,7 +69,7 @@ Workspace
 - `Turn` 和 `Run` 通常不直接命名，用当前活动、排队、停止和结果表达。
 - 一项 Task 可以包含多次用户补充和多次执行；停止一次执行不会删除 Task。
 
-Renderer 产品合同固定为 schema v5：命令使用 `metawork.tasks.*`，产品 ID 字段使用 `taskId`，snapshot 根集合使用 `tasks`。该切换不提供 `sessions.*`、`sessionId` 或 `sessions` 的兼容别名；Agent 原始事件传输中的 Session route identity 不属于 Renderer 产品模型。
+Renderer 产品合同固定为 schema v6：snapshot 根节点包含无 secret `account` 与 `tasks`；账号命令使用 `metawork.account.*`，Task 命令使用 `metawork.tasks.*`，产品 Task ID 字段使用 `taskId`。该切换不提供旧 schema 兼容别名；Agent 原始事件传输中的 Session route identity 不属于 Renderer 产品模型。
 
 ### 3.2 规范术语
 

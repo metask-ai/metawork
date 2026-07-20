@@ -1,6 +1,6 @@
 # MetaWork Phase 0 验证计划
 
-> 状态：Phase 0A Gate 0 至 Gate 7 已通过；下一阶段为分发与后续 capability
+> 状态：Phase 0A Gate 0 至 Gate 7 已通过；Account Gate A1/B/C1/C2/D/E/F/G 已完成
 > 平台：Phase 0A macOS-first；Phase 0B 后续验证 Windows
 
 Phase 0 用最小真实原型验证技术栈和关键风险，不交付完整产品。当前 AgentCore development bundle 使用 ABI v1 revision 2；这是精确开发基线，不是 stable support policy。同步 baseline 不包含 async suspend/resume、跨进程恢复、strict Workspace security、正式 Host tools、typed Output/FileChange/plan-progress 或 plan/custom UI control。
@@ -17,7 +17,7 @@ Gate -1 至 Gate 6 通过后，得到一个同进程 macOS 同步原型。它证
 
 ### 后续发布与能力演进
 
-content-addressed cache、remote/empty-cache/offline 发布、stable ABI support policy、async resume、strict Workspace security、正式 Host tools 和 Windows Phase 0B 在 Phase 0A 同步验证之后推进。
+Account/Metask 登录集成、content-addressed cache、remote/empty-cache/offline 发布、stable ABI support policy、async resume、strict Workspace security、正式 Host tools 和 Windows Phase 0B 在 Phase 0A 同步验证之后推进。Account 集成不能削弱已经通过的 Gate 0–7。
 
 ## 2. 最小垂直链路
 
@@ -50,6 +50,103 @@ Gate -1 specs
 ```
 
 Gate 未通过时不得用 source dependency、MetaWork 自制协议、无界队列或放宽安全语义绕过。
+
+### Account integration DAG
+
+```text
+Account A contract/spec
+→ Account B pure state machine
+→ Account C platform/Metask integration
+→ Account D App/Workbench integration
+→ Account E Bridge/schema
+→ Account F Renderer
+→ Account G end-to-end validation
+```
+
+Account DAG 的唯一规范任务状态由 TinyKG root 160 管理；本文档只定义仓库内可复现的验收条件。每个子任务完成真实验证后必须进行 Linus review，合理修正到通过或无可采纳意见；只有形成独立、完整、可回滚边界时才创建本地 Conventional Commit。
+
+#### Gate A1：本地合同与规范
+
+- 产品、架构、工程目录和验证文档统一为五个产品 module responsibilities；
+- 独立纯 `metawork_account_contract`，不导入 Native SDK、AgentCore 或产品 runtime；
+- compile-time limits、Account 双状态、command sink、脱敏 view/fact、typed ExecutionTarget、owned secret transfer 和稳定 ErrorCode；
+- production 配置不以环境变量、Renderer 或 Bridge 为合同来源；
+- [Metask Account API 合同](metask-account-contract.md)明确记录外部确认状态。
+
+#### Gate A2：外部合同确认
+
+外部合同拆成两个独立门槛：
+
+- C1 OAuth/login 已由 Metask 产品 owner 锁定：第一方 public client `metacode-cli`、`metacode:use`、固定 authority/endpoints、动态 IPv4 loopback callback 和 `/v1/profiles` identity。
+- C2 API Key catalog schema、profile-aware 请求、typed/fixed ExecutionTarget 与双 family crash recovery 已锁定并实现；它不改变 C1 登录独立提交 `account_only` 的边界。
+- test endpoint 只能通过 test build module 显式注入；生产 build 不接受 endpoint/client/scope override。
+- 不复制宽松 catalog 解析器，不根据模型名猜 provider。
+
+#### Gate A1 退出证据
+
+- Account contract 单元测试、architecture boundary test 和正式 Native build 通过；
+- 所有 Renderer-facing view/result/snapshot 都无法承载 secret；
+- owned execution transfer 的 live owner、move 和 secure-zero 释放路径有测试；
+- 文档间没有“环境默认值”“Bridge credential”或“Account/Workbench runtime 互相导入”等冲突；
+- Linus review 通过或没有需要采纳的建议。
+
+#### Gate B：纯 Account 状态机
+
+- 生产入口只能从 `restoring` 开始，不能绕过 credential restore 直接构造 signed-out；
+- restore 读取、清理或完整性校验失败必须离开 `restoring`，进入禁止 Task admission 且明确要求重启的终态；
+- Account session、execution 与 operation 使用正交状态；attempt、catalog 和 execution generation 都有有界、fail-closed 的推进规则；
+- command 和 worker completion 只生成 prepared transition，effect 先进入有界 worker queue，随后才执行 no-fail committed swap；
+- matching 但非法的 completion 必须结束当前 attempt 并产生 typed failure，不能让状态永久停在 in-progress；
+- 重配置失败保留旧 execution generation，OAuth refresh/reauth 失败不销毁仍可用的 committed execution；
+- logout 必须先持久化 signed-out tombstone；只有 tombstone completion 成功后才提交内存 signed-out 并异步删除 retired credential generation；
+- Account 只允许一个 active attempt 和一个 single terminal mailbox；first-writer ownership、重复 publish collision、stale completion 和 shutdown 都有确定的 fail-closed cleanup；macOS main-loop wake 作为 Host 必备无失败合同验证，正常 shutdown 必须先 cancel/join worker 再释放平台服务；
+- RestoreReady 在校验失败时不能接管或泄漏 owned execution，所有 stale/rejected secret completion 在释放时 secure-zero。
+
+Gate B 不等于 C1/C2 完成。C1 production OAuth client、profile decoder 和平台 credential store 由 Gate C1 验证；API Key/model decoder 与 ExecutionTarget 由 Gate C2 验证。
+
+#### Gate C1：Metask OAuth 登录与账号生命周期
+
+- 固定 authority/client/scope/redirect，PKCE S256 和 CSPRNG state/verifier；
+- callback 只绑定动态 `127.0.0.1`，严格 request/query 上限，重复/unknown 参数 fail closed；
+- token/profile 有界 decoder 严格校验 MetaWork 消费字段，同时允许公开 API 增加未消费 metadata；固定 response body 上限、HTTP status mapping 和 production origin；
+- 单 attempt worker，cancel/deadline/shutdown 关闭 listener 并 join；
+- Native SDK open URL 与 Keychain 操作只在主线程；
+- OAuth A/B slot、marker-last、read-back、原子 account-only manifest、refresh rotation；
+- logout 先提交 signed-out tombstone，credential cleanup failure 不复活账号；
+- 登录成功停在 authenticated/account-only，ExecutionState none，Task admission 仍关闭。
+
+#### Gate C2：执行目录与 ExecutionTarget
+
+- 严格 API Key/model schema 和有界 catalog；
+- typed/fixed provider、base URL、model 与 account/profile 归属；
+- production origin/path allowlist，不从 Renderer、环境变量或模型名推断；
+- 只有验证并提交 ExecutionConfig 后才打开 Workbench Task admission。
+
+#### Gate D：App 与 Workbench 集成
+
+- App 分为 compose 与 platform-ready 两阶段；只有后者读取 MetaWork 自己的 Keychain/manifest、打开浏览器或启动 OAuth worker；
+- `begin_login` 使用已经锁定的 C1 信息即可执行，成功先持久化 OAuth generation 并提交 `account_only`；API Key/model catalog 不是登录前置条件；
+- effect 先 admission，Account/Workbench committed state 在 App 主线程同一 turn 提交，随后才启动 OAuth 或持久化 side effect；worker completion 只能唤醒主循环，不能直接写产品状态；
+- Workbench 预分配 Account projection 与 active ExecutionConfig storage；生产启动不读取 `METAWORK_PROVIDER_*` 默认值；
+- execution replacement gate 同 Task admission 线性化，并检查 live/closing Task、Session、Run、executor job、`RunRef` 与 callback quiescence；
+- Task 与 Run 固定记录创建时的 execution generation/provider/model，后续重配置不改变历史身份；
+- logout 的 manifest outcome unknown 必须清除 runtime execution 并进入 fail-closed restart boundary，不能重新开放旧配置；
+- Gate 6 的本地 provider 只通过 `-Dautomation=true` 模块和 `METAWORK_GATE6_PROVIDER_BASE_URL` 注入；release artifact 扫描必须证明 fixture endpoint、credential、model 和 account 标识不存在。
+
+#### Gate E/F：Bridge 合同与 Renderer
+
+- schema v6 只发布无秘密 Account view；账号命令仅携带 API Key id 或 model id；
+- Renderer 只在 Host 的精确选择 phase 开放对应控件，登录、加载目录、选择、取消、退出与失败状态均有明确反馈；
+- Task admission 只读 Host 发布的 `canCreateTask`，Renderer 不推断 provider、base URL 或 credential readiness。
+
+#### Gate G：真实端到端验收
+
+- 2026-07-20 使用打包后的 `.app` 完成真实 Metask OAuth、profile 选择、API Key/model catalog 和 execution persistence；
+- 真实 `/v1/profiles` 证明公开响应含可演进 metadata；decoder 改为严格校验实际消费字段并允许新增未消费字段，不复制服务端完整 schema；
+- 真实 Metask 目录选择 `gpt / gpt-5.5`，AgentCore 使用 typed `openai`、固定 chat-completions URL 与 Account-owned API Key，返回 `METAWORK_AGENTCORE_OK`（527 tokens）；
+- 真实 `deepseek / deepseek-v4-pro` 路径也完成 AgentCore Run；目录中可列出但账号不支持的 `gpt-5.1` 由 Provider 返回失败，不被 MetaWork 猜测或伪装为成功；
+- 重启后 `execution_ready` 与 Task admission 恢复；API Key/model 公共目录不持久化，按需重新加载；
+- `npm ci`、format/check/test、Debug/Release build、macOS package、Gate 6、Gate 7 通过；release `.app` 的 automation/fixture 与本机 OAuth credential 扫描通过。
 
 ## 4. Gate -1：规范对齐
 
@@ -323,7 +420,7 @@ Gate 4 通过时的 sink 只提供全局 event count 和单 event bytes 硬上�
 - 注入 snapshot serializer 中途失败，验证此前 descriptor 已 stale，不能读取被部分覆盖的 store；
 - 同时注入 revision emit 和 retry timer 失败，验证当前 generation fail closed；
 - snapshot 自动重试预算耗尽后不得继续产生 Bridge 请求，恢复必须由新 generation 或用户显式操作触发；
-- 以四个并发 pending UI request 计算 snapshot 最坏预算，并验证 512 KiB projection 可通过 8 MiB Host store 与 256 KiB 分块完整重建；
+- 以最大 Account catalog、512 KiB Task projection 和四个并发 pending UI request 计算 snapshot 最坏预算，并验证它们可通过 12 MiB Host store 与 256 KiB 分块完整重建；
 - snapshot 不包含 credential；
 - Host/AgentCore crash 不伪装为 reload recovery。
 - event delivery 失败前两阶段 batch 不 commit，断开后在新 generation 重发，不中止 Run；

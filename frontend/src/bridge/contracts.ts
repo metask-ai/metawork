@@ -1,4 +1,84 @@
-export const WORKBENCH_SCHEMA_VERSION = 5 as const;
+export const WORKBENCH_SCHEMA_VERSION = 6 as const;
+
+export type AccountSessionState =
+  | "restoring"
+  | "signed_out"
+  | "authorizing"
+  | "authenticated"
+  | "refreshing"
+  | "reauth_required"
+  | "shutting_down";
+
+export type ExecutionState =
+  "none" | "preparing" | "ready" | "reconfiguring" | "invalid";
+
+export type AccountOperation =
+  | "none"
+  | "oauth_callback"
+  | "token_exchange"
+  | "loading_keys"
+  | "selecting_key"
+  | "loading_models"
+  | "selecting_model"
+  | "persisting"
+  | "logging_out";
+
+export type AccountErrorCode =
+  | "none"
+  | "invalid_command"
+  | "invalid_state"
+  | "operation_in_progress"
+  | "execution_in_use"
+  | "oauth_bind_failed"
+  | "oauth_browser_open_failed"
+  | "oauth_callback_rejected"
+  | "oauth_state_mismatch"
+  | "oauth_exchange_failed"
+  | "user_cancelled"
+  | "deadline_exceeded"
+  | "token_refresh_failed"
+  | "account_mismatch"
+  | "metask_unauthorized"
+  | "metask_rate_limited"
+  | "metask_service_unavailable"
+  | "metask_protocol_invalid"
+  | "catalog_too_large"
+  | "catalog_field_too_large"
+  | "no_api_keys"
+  | "no_models"
+  | "execution_target_invalid"
+  | "execution_config_invalid"
+  | "credential_store_read_failed"
+  | "credential_store_write_failed"
+  | "credential_store_delete_failed"
+  | "generation_mismatch"
+  | "recovery_state_invalid"
+  | "local_resource_exhausted"
+  | "dependency_contract_invalid"
+  | "shutting_down";
+
+export type AccountView = {
+  sessionState: AccountSessionState;
+  executionState: ExecutionState;
+  operation: AccountOperation;
+  accountId: string;
+  displayName: string;
+  apiKeys: { id: string; name: string; suffix: string }[];
+  models: { id: string; displayName: string }[];
+  selectedApiKeyId: string;
+  selectedModel: string;
+  canCreateTask: boolean;
+  errorCode: AccountErrorCode;
+  safeDiagnostic: string;
+  catalogGeneration: string;
+  executionGeneration: string;
+};
+
+export type AccountCommandResult = {
+  accepted: boolean;
+  errorCode: AccountErrorCode;
+  attemptId: string | null;
+};
 
 export type ToolView = {
   id: string;
@@ -136,6 +216,7 @@ export type TaskView = {
 export type WorkbenchSnapshot = {
   schemaVersion: typeof WORKBENCH_SCHEMA_VERSION;
   revision: string;
+  account: AccountView;
   tasks: TaskView[];
 };
 

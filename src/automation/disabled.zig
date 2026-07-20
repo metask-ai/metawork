@@ -5,6 +5,7 @@
 const std = @import("std");
 const native_sdk = @import("native_sdk");
 const renderer_bridge = @import("metawork_bridge");
+const account_contract = @import("metawork_account_contract");
 
 pub const enabled = false;
 pub const handler_count: usize = 0;
@@ -12,6 +13,13 @@ pub const handler_count: usize = 0;
 pub const Hooks = struct {
     context: ?*anyopaque = null,
     break_product_connection_fn: *const fn (?*anyopaque) void,
+};
+
+pub const ExecutionFixture = struct {
+    provider: account_contract.ProviderKind,
+    credential: []const u8,
+    model: []const u8,
+    base_url: []const u8,
 };
 
 pub const Runtime = struct {
@@ -32,6 +40,10 @@ pub const Runtime = struct {
     pub fn stop(_: *Runtime) void {}
     pub fn active(_: *const Runtime) bool {
         return false;
+    }
+
+    pub fn executionFixture(_: *const Runtime) ?ExecutionFixture {
+        return null;
     }
 
     pub fn productPolicy(_: *Runtime, base: native_sdk.BridgePolicy) native_sdk.BridgePolicy {

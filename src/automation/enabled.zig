@@ -5,6 +5,7 @@ const std = @import("std");
 const native_sdk = @import("native_sdk");
 const renderer_bridge = @import("metawork_bridge");
 const delivery_api = @import("automation_delivery");
+const account_contract = @import("metawork_account_contract");
 
 pub const enabled = true;
 pub const handler_count: usize = 3;
@@ -17,6 +18,10 @@ const allowed_origins = [_][]const u8{ "zero://app", inline_origin };
 const acknowledge_command = "metawork.events.ack";
 const fetch_command = "metawork.events.fetch";
 const emit_command = "metawork.gate5.emitFixture";
+const gate6_provider_base_url_env =
+    "METAWORK_GATE6_PROVIDER_BASE_URL";
+const gate6_credential = "metawork-gate6-fixture-key";
+const gate6_model = "metawork-gate6-fixture-model";
 
 const EventAck = struct {
     generation: []const u8,
@@ -39,6 +44,13 @@ pub const Hooks = struct {
     fn breakProductConnection(self: Hooks) void {
         self.break_product_connection_fn(self.context);
     }
+};
+
+pub const ExecutionFixture = struct {
+    provider: account_contract.ProviderKind,
+    credential: []const u8,
+    model: []const u8,
+    base_url: []const u8,
 };
 
 pub const Runtime = struct {
@@ -105,6 +117,22 @@ pub const Runtime = struct {
         const env_map = self.env_map orelse return false;
         const value = env_map.get(activation_env) orelse return false;
         return std.mem.eql(u8, value, "1");
+    }
+
+    pub fn executionFixture(
+        self: *const Runtime,
+    ) ?ExecutionFixture {
+        if (!self.active()) return null;
+        const env_map = self.env_map orelse return null;
+        const base_url = env_map.get(
+            gate6_provider_base_url_env,
+        ) orelse return null;
+        return .{
+            .provider = .anthropic,
+            .credential = gate6_credential,
+            .model = gate6_model,
+            .base_url = base_url,
+        };
     }
 
     pub fn productPolicy(self: *Runtime, base: native_sdk.BridgePolicy) native_sdk.BridgePolicy {

@@ -25,7 +25,12 @@ function task(id, workspaceRoot, archived = false) {
 }
 
 function snapshot(revision, tasks) {
-  return { schemaVersion: 5, revision, tasks };
+  return {
+    schemaVersion: 6,
+    revision,
+    account: initialWorkbenchState.snapshot.account,
+    tasks,
+  };
 }
 
 test("the Workbench store selects the first Task and preserves a valid choice", () => {

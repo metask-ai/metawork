@@ -11,7 +11,7 @@
 | ----------------------- | ---------------------------------- | --------------------------------------------------------------------- |
 | Renderer                | React + Tailwind                   | 当前正式 UI 技术栈，适合复杂 Workbench 界面                           |
 | Desktop Framework       | Native SDK                         | Zig 一等公民，负责系统 WebView、窗口、Bridge 和桌面生命周期           |
-| App / Workbench / Agent | Zig                                | 分别承担 composition、产品状态和 AgentCore 执行边界                   |
+| App / Account / Workbench / Agent | Zig                         | 分别承担 composition、账号控制面、产品状态和 AgentCore 执行边界       |
 | AgentCore               | metacodes AgentCore library bundle | metacodes 独立构建和发布；MetaWork 链接产物，不把上游源码纳入自身构建 |
 | Agent UI contract       | metacodes 原生结构化协议           | React 消费 Host 产品投影，不消费终端字节流或 Provider SSE             |
 
@@ -56,13 +56,16 @@ flowchart TB
 
     subgraph HOST["MetaWork Desktop Host · Zig"]
         APP["App composition<br/>Native SDK Runtime"]
+        ACCOUNT["Account<br/>Metask login / catalog / ExecutionConfig"]
         BRIDGE["Bridge transport"]
         WB["Workbench 产品状态<br/>Task / Run history / queue"]
         AGENT["Agent execution<br/>Session / active Run / callbacks"]
         APP --> BRIDGE
+        APP --> ACCOUNT
         APP --> WB
         APP --> AGENT
         BRIDGE --> WB
+        ACCOUNT -. "AccountFact + owned config<br/>经 App 一致性提交" .-> WB
         WB --> AGENT
     end
 
@@ -75,7 +78,7 @@ flowchart TB
 这是三层职责边界，不等于三个进程：
 
 1. Renderer：产品界面；
-2. Zig Desktop Host：由 App、Bridge、Workbench、Agent 四个明确 module boundary 组成；
+2. Zig Desktop Host：由 App、Account、Bridge、Workbench、Agent 五个明确产品 module boundary 组成，另有不承担产品职责的纯 `account_contract` 构建模块；
 3. AgentCore：Agent loop、模型、工具和结构化事件。
 
 ## 4. 组件职责
@@ -100,7 +103,7 @@ flowchart TB
 
 ### 4.2 MetaWork Zig Desktop Host
 
-Native SDK 直接构成桌面 Runtime 与窗口能力。MetaWork 内部固定为四个 named modules：`app` 负责 composition，`bridge` 负责验证与运输，`workbench` 拥有产品状态与队列，`agent` 执行并收口一个真实 Agent Run。`AgentCore` 只指 metacodes 外部 bundle。
+Native SDK 直接构成桌面 Runtime 与窗口能力。MetaWork 内部目标为五个 named product modules：`app` 负责 composition 和主线程提交协调，`account` 负责 Metask 登录、catalog 与凭据代际，`bridge` 负责验证与运输，`workbench` 拥有产品状态与队列，`agent` 执行并收口一个真实 Agent Run。`AgentCore` 只指 metacodes 外部 bundle。`metawork_account_contract` 只承载 Account 发布给 App/Bridge/Workbench 的有界纯合同，不是第六个产品模块。
 
 Bridge 的产品数据面由具体 `Dispatcher` 内部的 `ProductDelivery` 统一拥有：connection generation、revision retry/timer、snapshot identity 和 snapshot transport storage 都不再存放在 App。Dispatcher 通过明确的 `*Workbench` 同步生成 snapshot；App 只注入 Native emit/timer/dialog/main-thread capability，并按顺序组织 shutdown。automation-only raw Agent batch/object/ACK transport 不并入产品数据面；它只跟随产品 generation，由 build graph 从 release 产物裁掉。
 
@@ -109,7 +112,8 @@ Host 负责：
 - 创建窗口并托管系统 WebView；
 - 暴露小而明确的领域命令；
 - 校验来源、参数、Workspace、Session 和权限；
-- 在 Renderer 之外读取并持有 Provider credential；
+- 由 Account 在 Renderer 之外完成 Metask OAuth、目录查询、凭据持久化与 ExecutionConfig 生成；
+- 由 App 在同一主线程 turn 内协调 Account prepare、Workbench no-fail install 和 Account commit；
 - 由 Workbench 管理 Task、Run record、队列、取消协调和产品历史；
 - 由 Agent 管理 AgentCore Session、active Run、callback binding 和有界事件泵；
 - 管理跨会话产品状态；
@@ -117,7 +121,28 @@ Host 负责：
 
 当前 v1 Host 只在临时或用户明确 trusted 的 Workspace 中运行。它不能因为传入了 `workspace_root` 就宣称 strict Workspace security 已成立。
 
-### 4.3 AgentCore
+### 4.3 Account 与执行配置
+
+Account 和 Workbench 是同级 owner，彼此不导入 runtime。Account 独占 OAuth token、PKCE、完整 API Key、平台凭据 locator、catalog attempt 和 credential generation；Workbench 独占 active runtime ExecutionConfig、Task admission、Task/Run history 与 execution replacement gate。Bridge 只提交无 secret 的 `AccountCommand` 并读取 Workbench 的脱敏 `AccountView`。
+
+Account 使用 `AccountSessionState` 与 `ExecutionState` 两个正交状态。OAuth refresh 失败可以进入 `reauth_required` 并保留 ready ExecutionConfig；API Key/模型/base URL 变化才递增 `execution_generation`。每个 Task/Run 记录不含 secret 的 generation、provider 和 model，已创建 Agent Session 继续消费其创建时的 owned config。
+
+唯一 committed-state 写路径为：
+
+```text
+Account.prepare(command | completion)
+→ Account effect admission
+→ Workbench.commitAccountFactNoFail(...)
+→ Workbench.installExecutionNoFail(...)  [可选]
+→ Account.commit(prepared)
+→ dispatch committed Account effect
+```
+
+前五步在 App 主线程同一 turn 内完成，effect 只有在 committed swap 后才能启动；worker completion 再经主循环进入同一条链。任何校验或内部不变量失败都保留旧 committed state，并清零 staged secret；Bridge 不参与 prepare/commit，也不接触 credential。C1 登录只依赖锁定的 OAuth client/scope/loopback/profile 合同，成功先提交 `account_only`，不等待 API Key 或模型目录。
+
+production 网络接入受 [Metask Account API 合同](metask-account-contract.md)约束。C1 OAuth/login 独立提交 `account_only`，不打开 Task admission；C2 使用 profile-aware API Key/model catalog，从精确 `group.platform` 生成固定 Metask AgentCore target，并通过 OAuth/execution 双 family A/B slot 与单一 `manifest.v2` 提交 `execution_ready`。只有 Workbench 安装同一 execution generation 后才开放 Task admission。mCode/metacodes 只作为 Metask 自有实现证据，MetaWork 不修改其代码。
+
+### 4.4 AgentCore
 
 负责：
 
@@ -201,6 +226,7 @@ RunJob
 - Workbench 创建、排队、停止并销毁 bounded Executor；Agent Runtime 不接收 Scheduler capability，worker 从 Workbench queue 主动进入 Agent Run；
 - Bridge/main thread 不执行长耗时 Run，也不等待 permission；
 - 只有 `agent/` import `metacodes_agentcore`；App 让 Agent 内部完成 ABI discovery，Workbench 通过 Agent 公共 validated types 消费，Bridge DTO 不暴露 SDK enum/owner/handle；
+- `account/contract.zig` 不导入 Native SDK、Agent、Workbench、Bridge 或 AgentCore；Account runtime 可以导入 Native SDK，Workbench/Bridge 只导入纯 contract，不导入 Account runtime；
 - Agent 通过 `EventReadyNotifier` 只报告 `scheduled` / `already_pending` / `unavailable`，不知道 Native main loop 或 Renderer；App 用原子 pending gate 合并重复 wake，Agent 对 `unavailable` 执行有界 retry/deadline；
 - Renderer delivery、revision、snapshot、connection 和 retention failure 作为 typed transport fact 进入 Workbench policy，默认只重试、断开或丢弃 transport copy，不中止后台 Agent Run；
 - Session close 必须在 join 与 callback quiescence 后才销毁 AgentCore handle；
@@ -233,7 +259,7 @@ Workbench 在 admission 时为每个 Run 建立稳定 record slot、单调 gener
 
 Renderer reload 只重建仍存活 Host 的视图。Host/AgentCore crash 后当前 Run 必须标记 interrupted，危险工具不得自动重放。Conversation/checkpoint 跨进程恢复只有在未来 AgentCore capability 明确提供后才能设计。
 
-Host view snapshot 使用 Bridge `Dispatcher` 内部 `ProductDelivery` 独占的 8 MiB 有界存储，不受 Bridge 单次 1 MiB result 上限反向约束。Dispatcher 同时拥有 callback gate、workspace grants、handler registry 和 `*Workbench`，产品 command 的 decode、authority、domain call 与 response encode 不再经过 App。Workbench writer 只能在同步调用期间借用这块输出 buffer；返回后 Bridge 独占 encoded bytes，禁止保存 Workbench borrowed view。Renderer 通过带 snapshot identity 的 256 KiB 分块读取完成 resync；begin 写入前先使旧 descriptor 失效，序列化失败后旧 identity 必须保持 stale，不能继续读取已被部分覆盖的 store。revision 通知和 snapshot 拉取分别保留 pending/retry 状态，瞬时发送或读取失败不能把旧视图标记为最新。revision retry 同时受 attempt 和 deadline 预算约束，耗尽或 retry timer 不可用时当前 event connection fail closed，但不终止后台 Agent Run。新 event generation 建立时会使旧 snapshot descriptor 失效；Renderer 若仍持有旧 generation Promise，必须在旧 Promise 退出后继续完成新 generation 的实际 resync，不能把等待旧 Promise 误判为同步成功。Bridge 异步保留的 payload 必须自有；App shutdown 先 stop Bridge ingress、关闭 delivery connection 并取消 timer，在 Native platform loop 上确认同步 handler quiescence，然后 detach Workbench，最后才独立释放 delivery buffers。
+Host view snapshot 使用 Bridge `Dispatcher` 内部 `ProductDelivery` 独占的 12 MiB 有界存储，不受 Bridge 单次 1 MiB result 上限反向约束。该容量覆盖 512 KiB Task projection、最大 Account API Key/model catalog、JSON 最坏转义和全部结构上界。Dispatcher 同时拥有 callback gate、workspace grants、handler registry 和 `*Workbench`，产品 command 的 decode、authority、domain call 与 response encode 不再经过 App。Workbench writer 只能在同步调用期间借用这块 output buffer；返回后 Bridge 独占 encoded bytes，禁止保存 Workbench borrowed view。Renderer 通过带 snapshot identity 的 256 KiB 分块读取完成 resync；begin 写入前先使旧 descriptor 失效，序列化失败后旧 identity 必须保持 stale，不能继续读取已被部分覆盖的 store。revision 通知和 snapshot 拉取分别保留 pending/retry 状态，瞬时发送或读取失败不能把旧视图标记为最新。revision retry 同时受 attempt 和 deadline 预算约束，耗尽或 retry timer 不可用时当前 event connection fail closed，但不终止后台 Agent Run。新 event generation 建立时会使旧 snapshot descriptor 失效；Renderer 若仍持有旧 generation Promise，必须在旧 Promise 退出后继续完成新 generation 的实际 resync，不能把等待旧 Promise 误判为同步成功。Bridge 异步保留的 payload 必须自有；App shutdown 先 stop Bridge ingress、关闭 delivery connection 并取消 timer，在 Native platform loop 上确认同步 handler quiescence，然后 detach Workbench，最后才独立释放 delivery buffers。
 
 Host 与 Renderer 随同一应用包原子发布，Workbench snapshot 使用精确 schema version，不承担旧 Renderer/新 Host 或新 Renderer/旧 Host 的兼容。Renderer 必须 runtime decode Host payload；unknown version、malformed payload 或 decoder/serializer contract mismatch 一律进入 fail-closed view-sync failure，不能猜测字段或静默降级。
 
@@ -246,6 +272,8 @@ Renderer 按不可信调用方处理：
 - Host 校验 payload、Session/Run 归属和请求时效；
 - trusted Workspace 只能由 Host 原生目录选择与原生确认生成一次性 grant；Renderer 不能提交路径加 boolean 自行授信；
 - Provider credential 不进入 Bridge、事件、日志或 snapshot；
+- OAuth token、PKCE verifier、authorization code、完整 API Key 和 Authorization header 只能存在于 Account secret owner、系统凭据存储和 Workbench runtime copy；所有 owner 在释放前 secure-zero；
+- production provider/model/base URL/API Key 不从环境变量或 Renderer 注入，只能来自 Account 已锁定并验证的 Metask contract；
 - Host 在形成产品 projection 前移除已知 Host-held credential 和 schema 标记的 secret 字段，并对命令与工具输出设置 byte 上限和 truncation 状态；Renderer 不是秘密过滤边界；
 - 当前不暴露通用 Host tool 或任意执行接口；
 - built-in Bash 使用非交互子进程；

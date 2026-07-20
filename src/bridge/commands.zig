@@ -7,6 +7,13 @@ pub const disconnect = "metawork.events.disconnect";
 pub const choose_workspace = "metawork.workspace.choose";
 pub const snapshot = "metawork.workbench.snapshot";
 pub const snapshot_chunk = "metawork.workbench.snapshot.chunk";
+pub const account_begin_login = "metawork.account.beginLogin";
+pub const account_reauthenticate = "metawork.account.reauthenticate";
+pub const account_cancel_operation = "metawork.account.cancelOperation";
+pub const account_refresh_catalog = "metawork.account.refreshCatalog";
+pub const account_select_api_key = "metawork.account.selectApiKey";
+pub const account_select_model = "metawork.account.selectModel";
+pub const account_logout = "metawork.account.logout";
 pub const create_task = "metawork.tasks.create";
 pub const run = "metawork.tasks.run";
 pub const cancel = "metawork.tasks.cancel";
@@ -24,6 +31,13 @@ pub const product = [_][]const u8{
     choose_workspace,
     snapshot,
     snapshot_chunk,
+    account_begin_login,
+    account_reauthenticate,
+    account_cancel_operation,
+    account_refresh_catalog,
+    account_select_api_key,
+    account_select_model,
+    account_logout,
     create_task,
     run,
     cancel,

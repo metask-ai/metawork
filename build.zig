@@ -29,6 +29,18 @@ pub fn build(b: *std.Build) void {
         name: []const u8,
         root_module: *std.Build.Module,
     }{
+        .{ .name = "metawork-account-contract", .root_module = test_modules.account_contract },
+        .{ .name = "metawork-account-oauth", .root_module = test_modules.account_oauth },
+        .{ .name = "metawork-metask-client", .root_module = test_modules.metask_client },
+        .{ .name = "metawork-account-credential-store", .root_module = test_modules.account_credential_store },
+        .{ .name = "metawork-account-platform", .root_module = test_modules.account_platform },
+        .{ .name = "metawork-account-loopback", .root_module = test_modules.account_loopback },
+        .{ .name = "metawork-account-login-attempt", .root_module = test_modules.account_login_attempt },
+        .{ .name = "metawork-account-catalog", .root_module = test_modules.account_catalog },
+        .{ .name = "metawork-account-credentials-runtime", .root_module = test_modules.account_credentials_runtime },
+        .{ .name = "metawork-account-network-attempt", .root_module = test_modules.account_network_attempt },
+        .{ .name = "metawork-account-state", .root_module = test_modules.account_state },
+        .{ .name = "metawork-account", .root_module = test_modules.account },
         .{ .name = "metawork-app", .root_module = test_modules.app },
         .{ .name = "metawork-bridge", .root_module = test_modules.bridge },
         .{ .name = "metawork-workbench", .root_module = test_modules.workbench_projection },
@@ -42,6 +54,18 @@ pub fn build(b: *std.Build) void {
 }
 
 const WiredModules = struct {
+    account: *std.Build.Module,
+    account_catalog: *std.Build.Module,
+    account_credentials_runtime: *std.Build.Module,
+    account_contract: *std.Build.Module,
+    account_credential_store: *std.Build.Module,
+    account_loopback: *std.Build.Module,
+    account_login_attempt: *std.Build.Module,
+    account_network_attempt: *std.Build.Module,
+    account_oauth: *std.Build.Module,
+    account_platform: *std.Build.Module,
+    account_state: *std.Build.Module,
+    metask_client: *std.Build.Module,
     app: *std.Build.Module,
     agent: *std.Build.Module,
     bridge: *std.Build.Module,
@@ -66,6 +90,7 @@ fn createLifecycleFixture(
     });
     fixture.addImport("metawork_agent", modules.agent);
     fixture.addImport("metawork_workbench", modules.workbench);
+    fixture.addImport("metawork_account_contract", modules.account_contract);
     fixture.addImport("event_pump", modules.event_pump);
     fixture.addImport("automation_delivery", modules.automation_delivery);
     fixture.addImport("metacodes_agentcore", modules.sdk);
@@ -122,6 +147,106 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .optimize = root_module.optimize,
     });
     agent.addImport("agent_session", session);
+    const account_contract = b.createModule(.{
+        .root_source_file = b.path("src/account/contract.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    const account_state = b.createModule(.{
+        .root_source_file = b.path("src/account/state.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    account_state.addImport("metawork_account_contract", account_contract);
+    const account_oauth = b.createModule(.{
+        .root_source_file = b.path("src/account/oauth.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    account_oauth.addImport("metawork_account_contract", account_contract);
+    const account_loopback = b.createModule(.{
+        .root_source_file = b.path("src/account/loopback.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    account_loopback.addImport("account_oauth", account_oauth);
+    const metask_client = b.createModule(.{
+        .root_source_file = b.path("src/account/metask_client.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    metask_client.addImport("metawork_account_contract", account_contract);
+    metask_client.addImport("account_state", account_state);
+    metask_client.addImport("account_oauth", account_oauth);
+    const account_login_attempt = b.createModule(.{
+        .root_source_file = b.path("src/account/login_attempt.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    account_login_attempt.addImport("metawork_account_contract", account_contract);
+    account_login_attempt.addImport("account_state", account_state);
+    account_login_attempt.addImport("account_oauth", account_oauth);
+    account_login_attempt.addImport("account_loopback", account_loopback);
+    account_login_attempt.addImport("metask_client", metask_client);
+    const account_catalog = b.createModule(.{
+        .root_source_file = b.path("src/account/catalog.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    account_catalog.addImport("metawork_account_contract", account_contract);
+    account_catalog.addImport("metask_client", metask_client);
+    const account_credentials_runtime = b.createModule(.{
+        .root_source_file = b.path("src/account/credentials.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    account_credentials_runtime.addImport("account_state", account_state);
+    account_credentials_runtime.addImport("account_oauth", account_oauth);
+    account_credentials_runtime.addImport("metask_client", metask_client);
+    account_credentials_runtime.addImport("account_catalog", account_catalog);
+    const account_network_attempt = b.createModule(.{
+        .root_source_file = b.path("src/account/network_attempt.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    account_network_attempt.addImport("metawork_account_contract", account_contract);
+    account_network_attempt.addImport("account_state", account_state);
+    account_network_attempt.addImport("metask_client", metask_client);
+    account_network_attempt.addImport("account_catalog", account_catalog);
+    account_network_attempt.addImport("account_credentials_runtime", account_credentials_runtime);
+    const account_credential_store = b.createModule(.{
+        .root_source_file = b.path("src/account/credential_store.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    account_credential_store.addImport("metawork_account_contract", account_contract);
+    account_credential_store.addImport("account_state", account_state);
+    account_credential_store.addImport("account_oauth", account_oauth);
+    const account_platform = b.createModule(.{
+        .root_source_file = b.path("src/account/platform.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    account_platform.addImport("native_sdk", existingImport(root_module, "native_sdk"));
+    account_platform.addImport("metawork_account_contract", account_contract);
+    account_platform.addImport("account_state", account_state);
+    account_platform.addImport("account_oauth", account_oauth);
+    account_platform.addImport("account_credential_store", account_credential_store);
+    const account = b.createModule(.{
+        .root_source_file = b.path("src/account.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    account.addImport("account_state", account_state);
+    account.addImport("account_oauth", account_oauth);
+    account.addImport("metask_client", metask_client);
+    account.addImport("account_credential_store", account_credential_store);
+    account.addImport("account_platform", account_platform);
+    account.addImport("account_loopback", account_loopback);
+    account.addImport("account_login_attempt", account_login_attempt);
+    account.addImport("account_catalog", account_catalog);
+    account.addImport("account_credentials_runtime", account_credentials_runtime);
+    account.addImport("account_network_attempt", account_network_attempt);
     const executor = b.createModule(.{
         .root_source_file = b.path("src/workbench/executor.zig"),
         .target = target,
@@ -133,12 +258,20 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .optimize = root_module.optimize,
     });
     projection.addImport("metawork_agent", agent);
+    projection.addImport("metawork_account_contract", account_contract);
     projection.addImport("workbench_executor", executor);
+    projection.addImport(
+        "build_options",
+        existingImport(
+            existingImport(root_module, "runner"),
+            "build_options",
+        ),
+    );
     const workbench_contract_fixture = b.addOptions();
     workbench_contract_fixture.addOption(
         []const u8,
         "snapshot",
-        @embedFile("frontend/src/bridge/__fixtures__/workbench-snapshot-v5.fixture"),
+        @embedFile("frontend/src/bridge/__fixtures__/workbench-snapshot-v6.fixture"),
     );
     projection.addOptions("workbench_contract_fixture", workbench_contract_fixture);
     const workbench = b.createModule(.{
@@ -154,6 +287,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .optimize = root_module.optimize,
     });
     bridge.addImport("native_sdk", existingImport(root_module, "native_sdk"));
+    bridge.addImport("metawork_account_contract", account_contract);
     bridge.addImport("metawork_workbench", workbench);
 
     const automation_disabled = b.createModule(.{
@@ -163,6 +297,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     });
     automation_disabled.addImport("native_sdk", existingImport(root_module, "native_sdk"));
     automation_disabled.addImport("metawork_bridge", bridge);
+    automation_disabled.addImport("metawork_account_contract", account_contract);
     const automation_delivery = b.createModule(.{
         .root_source_file = b.path("src/automation/delivery.zig"),
         .target = target,
@@ -175,6 +310,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     });
     automation_enabled.addImport("native_sdk", existingImport(root_module, "native_sdk"));
     automation_enabled.addImport("metawork_bridge", bridge);
+    automation_enabled.addImport("metawork_account_contract", account_contract);
     automation_enabled.addImport("automation_delivery", automation_delivery);
     const automation = b.createModule(.{
         .root_source_file = b.path("src/automation.zig"),
@@ -197,11 +333,25 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     app.addImport("metawork_workbench", workbench);
     app.addImport("metawork_bridge", bridge);
     app.addImport("metawork_automation", automation);
+    app.addImport("metawork_account_contract", account_contract);
+    app.addImport("metawork_account", account);
 
     root_module.addImport("metawork_app", app);
     root_module.addObjectFile(.{ .cwd_relative = bundle.library_path });
     root_module.link_libc = bundle.link_libc;
     return .{
+        .account = account,
+        .account_catalog = account_catalog,
+        .account_credentials_runtime = account_credentials_runtime,
+        .account_contract = account_contract,
+        .account_credential_store = account_credential_store,
+        .account_loopback = account_loopback,
+        .account_login_attempt = account_login_attempt,
+        .account_network_attempt = account_network_attempt,
+        .account_oauth = account_oauth,
+        .account_platform = account_platform,
+        .account_state = account_state,
+        .metask_client = metask_client,
         .app = app,
         .agent = agent,
         .bridge = bridge,

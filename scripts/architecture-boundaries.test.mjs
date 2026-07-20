@@ -32,12 +32,18 @@ function assertNoImports(files, forbidden) {
 test("module roots and Agent directory use product semantics", () => {
   for (const path of [
     "src/app.zig",
+    "src/account.zig",
     "src/agent.zig",
     "src/workbench.zig",
     "src/bridge.zig",
   ]) {
     assert.equal(existsSync(new URL(path, root)), true, `${path} must exist`);
   }
+  assert.equal(
+    existsSync(new URL("src/account/contract.zig", root)),
+    true,
+    "the pure Account contract must have an explicit source root",
+  );
   assert.equal(existsSync(new URL("src/agentcore.zig", root)), false);
   assert.equal(existsSync(new URL("src/agentcore/", root)), false);
 });
@@ -66,7 +72,12 @@ test("App consumes named public module roots", () => {
 });
 
 test("public module roots do not re-export implementation modules wholesale", () => {
-  for (const file of ["src/agent.zig", "src/workbench.zig", "src/bridge.zig"]) {
+  for (const file of [
+    "src/account.zig",
+    "src/agent.zig",
+    "src/workbench.zig",
+    "src/bridge.zig",
+  ]) {
     assert.doesNotMatch(
       read(file),
       /pub const \w+\s*=\s*@import\(/,
@@ -84,7 +95,34 @@ test("lower layers cannot reach composition or transport internals", () => {
   assertNoImports(zigFiles("src/workbench/"), [
     "metawork_app",
     "metawork_bridge",
+    "metawork_account",
   ]);
+  assertNoImports(
+    ["src/account/contract.zig"],
+    [
+      "native_sdk",
+      "metawork_app",
+      "metawork_account",
+      "metawork_workbench",
+      "metawork_bridge",
+      "metawork_agent",
+      "metacodes_agentcore",
+    ],
+  );
+  assertNoImports(zigFiles("src/account/"), [
+    "metawork_app",
+    "metawork_workbench",
+    "metawork_bridge",
+    "metawork_agent",
+    "metacodes_agentcore",
+  ]);
+  assertNoImports(
+    zigFiles("src/account/").filter(
+      (file) => file !== "src/account/platform.zig",
+    ),
+    ["native_sdk"],
+  );
+  assert.match(read("src/account/platform.zig"), /@import\("native_sdk"\)/);
 });
 
 test("only Agent implementation imports the AgentCore SDK", () => {
@@ -140,22 +178,103 @@ test("Phase 0A keeps the raw ABI probe distinct from the typed Agent adapter", (
   assert.match(formalHost, /\.shell_policy = \.unrestricted/);
 });
 
-test("build graph registers the four named module boundaries", () => {
+test("build graph registers Account product and pure contract modules", () => {
   const source = read("build.zig");
   for (const name of [
     "metawork_app",
     "metawork_agent",
     "metawork_workbench",
     "metawork_bridge",
+    "metawork_account",
   ]) {
     assert.match(source, new RegExp(`addImport\\(\\"${name}\\"`));
   }
+  assert.match(
+    source,
+    /root_source_file = b\.path\("src\/account\/contract\.zig"\)/,
+  );
+  assert.match(source, /account_contract: \*std\.Build\.Module/);
+  for (const moduleName of [
+    "account_oauth",
+    "metask_client",
+    "account_credential_store",
+    "account_platform",
+    "account_loopback",
+    "account_login_attempt",
+  ]) {
+    assert.match(
+      source,
+      new RegExp(`${moduleName}: \\*std\\.Build\\.Module`),
+      `${moduleName} must be a named build module`,
+    );
+  }
+  assert.match(source, /account: \*std\.Build\.Module/);
+  assert.match(
+    source,
+    /app\.addImport\("metawork_account_contract", account_contract\)/,
+  );
+  assert.match(
+    source,
+    /bridge\.addImport\("metawork_account_contract", account_contract\)/,
+  );
+  const dispatcher = read("src/bridge/dispatcher.zig");
+  assert.match(dispatcher, /@import\("metawork_account_contract"\)/);
+  assert.doesNotMatch(dispatcher, /@import\("metawork_account"\)/);
+  assert.match(dispatcher, /account_contract\.AccountCommandSink/);
   assert.doesNotMatch(source, /src\/agentcore(?:\/|\.zig)/);
+});
+
+test("Account execution is installed explicitly without process defaults", () => {
+  const app = read("src/app.zig");
+  const workbench = read("src/workbench/projection.zig");
+  for (const variable of [
+    "METAWORK_PROVIDER_API_KEY",
+    "METAWORK_PROVIDER_MODEL",
+    "METAWORK_PROVIDER_KIND",
+    "METAWORK_PROVIDER_BASE_URL",
+  ]) {
+    assert.doesNotMatch(
+      app,
+      new RegExp(variable),
+      `${variable} must not configure production execution`,
+    );
+  }
+  assert.match(workbench, /@import\("metawork_account_contract"\)/);
+  assert.doesNotMatch(workbench, /@import\("metawork_account"\)/);
+  assert.match(
+    workbench,
+    /pub const Configuration = struct \{\s*change_notifier:/,
+  );
+  assert.doesNotMatch(workbench, /ExecutionDefaults/);
+  assert.match(app, /effect_commit_hook\.dispatch\(\)/);
+  assert.match(app, /commitAccountOnly\(/);
+  assert.match(app, /account_api\.CredentialOwner/);
+  assert.doesNotMatch(app, /account_api\.OAuth\.TokenSet/);
 });
 
 test("formal Native test graph runs every product module test root", () => {
   const source = read("build.zig");
   for (const [name, rootModule] of [
+    ["metawork-account-contract", "test_modules.account_contract"],
+    ["metawork-account-oauth", "test_modules.account_oauth"],
+    ["metawork-metask-client", "test_modules.metask_client"],
+    [
+      "metawork-account-credential-store",
+      "test_modules.account_credential_store",
+    ],
+    ["metawork-account-platform", "test_modules.account_platform"],
+    ["metawork-account-loopback", "test_modules.account_loopback"],
+    ["metawork-account-login-attempt", "test_modules.account_login_attempt"],
+    [
+      "metawork-account-credentials-runtime",
+      "test_modules.account_credentials_runtime",
+    ],
+    [
+      "metawork-account-network-attempt",
+      "test_modules.account_network_attempt",
+    ],
+    ["metawork-account-state", "test_modules.account_state"],
+    ["metawork-account", "test_modules.account"],
     ["metawork-app", "test_modules.app"],
     ["metawork-bridge", "test_modules.bridge"],
     ["metawork-workbench", "test_modules.workbench_projection"],
@@ -461,7 +580,7 @@ test("Bridge Dispatcher owns product command decisions and App only composes it"
   assert.doesNotMatch(app, /parsePayload|parseWireId|workspaceGrant/);
 });
 
-test("product wire contract is atomically on Task schema v5", () => {
+test("product wire contract is atomically on Account plus Task schema v6", () => {
   const zigCommands = read("src/bridge/commands.zig");
   const rendererCommands = read("frontend/src/bridge/commands.ts");
   const appManifest = read("app.zon");
@@ -480,12 +599,27 @@ test("product wire contract is atomically on Task schema v5", () => {
     assert.ok(rendererCommands.includes(wireName));
     assert.ok(appManifest.includes(wireName));
   }
+  for (const command of [
+    "beginLogin",
+    "reauthenticate",
+    "cancelOperation",
+    "refreshCatalog",
+    "selectApiKey",
+    "selectModel",
+    "logout",
+  ]) {
+    const wireName = `metawork.account.${command}`;
+    assert.ok(zigCommands.includes(wireName));
+    assert.ok(rendererCommands.includes(wireName));
+    assert.ok(appManifest.includes(wireName));
+  }
   assert.doesNotMatch(zigCommands, /metawork\.sessions\./);
   assert.doesNotMatch(rendererCommands, /metawork\.sessions\./);
   assert.doesNotMatch(appManifest, /metawork\.sessions\./);
 
   const projection = read("src/workbench/projection.zig");
-  assert.match(projection, /snapshot_schema_version: u32 = 5/);
+  assert.match(projection, /snapshot_schema_version: u32 = 6/);
+  assert.match(projection, /\\"account\\":/);
   assert.match(projection, /\\"tasks\\":\[/);
   assert.match(projection, /pub fn createTask/);
   assert.match(projection, /pub fn runTask/);
@@ -496,7 +630,8 @@ test("product wire contract is atomically on Task schema v5", () => {
   );
 
   const contracts = read("frontend/src/bridge/contracts.ts");
-  assert.match(contracts, /WORKBENCH_SCHEMA_VERSION = 5/);
+  assert.match(contracts, /WORKBENCH_SCHEMA_VERSION = 6/);
+  assert.match(contracts, /account: AccountView/);
   assert.match(contracts, /tasks: TaskView\[\]/);
   assert.match(contracts, /"app_shutdown"/);
   assert.doesNotMatch(contracts, /host_shutdown|sessions: SessionView/);
@@ -504,7 +639,7 @@ test("product wire contract is atomically on Task schema v5", () => {
   assert.equal(
     existsSync(
       new URL(
-        "frontend/src/bridge/__fixtures__/workbench-snapshot-v5.fixture",
+        "frontend/src/bridge/__fixtures__/workbench-snapshot-v6.fixture",
         root,
       ),
     ),
@@ -513,7 +648,7 @@ test("product wire contract is atomically on Task schema v5", () => {
   assert.equal(
     existsSync(
       new URL(
-        "frontend/src/bridge/__fixtures__/workbench-snapshot-v4.fixture",
+        "frontend/src/bridge/__fixtures__/workbench-snapshot-v5.fixture",
         root,
       ),
     ),

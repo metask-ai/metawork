@@ -9,7 +9,27 @@ globalThis.window ??= {
 };
 
 function snapshot(revision) {
-  return { schemaVersion: 5, revision, tasks: [] };
+  return {
+    schemaVersion: 6,
+    revision,
+    account: {
+      sessionState: "signed_out",
+      executionState: "none",
+      operation: "none",
+      accountId: "",
+      displayName: "",
+      apiKeys: [],
+      models: [],
+      selectedApiKeyId: "",
+      selectedModel: "",
+      canCreateTask: false,
+      errorCode: "none",
+      safeDiagnostic: "",
+      catalogGeneration: "0",
+      executionGeneration: "0",
+    },
+    tasks: [],
+  };
 }
 
 test("Workbench connection publishes only synchronized snapshots", async () => {
