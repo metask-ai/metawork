@@ -221,11 +221,16 @@ const SecretBuffer = struct {
 
     fn deinit(self: *SecretBuffer) void {
         if (!self.owned) return;
-        std.crypto.secureZero(u8, self.bytes);
-        self.allocator.free(self.bytes);
+        secureFree(self.allocator, self.bytes);
         self.* = .{};
     }
 };
+
+fn secureFree(allocator: std.mem.Allocator, bytes: []u8) void {
+    if (bytes.len == 0) return;
+    std.crypto.secureZero(u8, bytes);
+    allocator.rawFree(bytes, .of(u8), @returnAddress());
+}
 
 const OwnedBuffer = struct {
     allocator: std.mem.Allocator = undefined,
@@ -290,8 +295,7 @@ pub const OwnedExecutionConfig = struct {
         validateExecutionConfig(config_input) catch {
             allocator.free(owned_model);
             allocator.free(owned_base_url);
-            std.crypto.secureZero(u8, owned_api_key);
-            allocator.free(owned_api_key);
+            secureFree(allocator, owned_api_key);
             return error.InvalidExecutionConfig;
         };
         return .{
@@ -502,4 +506,100 @@ test "OwnedExecutionConfig consumes invalid owned secret on rejection" {
             secret,
         ),
     );
+}
+
+test "OwnedExecutionConfig preserves zeroing through allocator release" {
+    const ObservingAllocator = struct {
+        backing: std.mem.Allocator,
+        secret_ptr: ?[*]u8 = null,
+        secret_len: usize = 0,
+        saw_secret_free: bool = false,
+        secret_was_zero: bool = false,
+
+        const Self = @This();
+        const vtable: std.mem.Allocator.VTable = .{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        };
+
+        fn allocator(self: *Self) std.mem.Allocator {
+            return .{ .ptr = self, .vtable = &vtable };
+        }
+
+        fn alloc(
+            raw: *anyopaque,
+            len: usize,
+            alignment: std.mem.Alignment,
+            ret_addr: usize,
+        ) ?[*]u8 {
+            const self: *Self = @ptrCast(@alignCast(raw));
+            return self.backing.rawAlloc(len, alignment, ret_addr);
+        }
+
+        fn resize(
+            raw: *anyopaque,
+            memory: []u8,
+            alignment: std.mem.Alignment,
+            new_len: usize,
+            ret_addr: usize,
+        ) bool {
+            const self: *Self = @ptrCast(@alignCast(raw));
+            return self.backing.rawResize(memory, alignment, new_len, ret_addr);
+        }
+
+        fn remap(
+            raw: *anyopaque,
+            memory: []u8,
+            alignment: std.mem.Alignment,
+            new_len: usize,
+            ret_addr: usize,
+        ) ?[*]u8 {
+            const self: *Self = @ptrCast(@alignCast(raw));
+            return self.backing.rawRemap(memory, alignment, new_len, ret_addr);
+        }
+
+        fn free(
+            raw: *anyopaque,
+            memory: []u8,
+            alignment: std.mem.Alignment,
+            ret_addr: usize,
+        ) void {
+            const self: *Self = @ptrCast(@alignCast(raw));
+            if (self.secret_ptr) |secret_ptr| {
+                if (memory.ptr == secret_ptr and memory.len == self.secret_len) {
+                    self.saw_secret_free = true;
+                    self.secret_was_zero = true;
+                    for (memory) |byte| {
+                        if (byte != 0) self.secret_was_zero = false;
+                    }
+                }
+            }
+            self.backing.rawFree(memory, alignment, ret_addr);
+        }
+    };
+
+    var observing: ObservingAllocator = .{
+        .backing = std.testing.allocator,
+    };
+    const allocator = observing.allocator();
+    const model = try allocator.dupe(u8, "metask-model");
+    const base_url = try allocator.dupe(u8, "https://napi.metask-ai.com/v1");
+    const secret = try allocator.dupe(u8, "test-secret");
+    observing.secret_ptr = secret.ptr;
+    observing.secret_len = secret.len;
+
+    var config = try OwnedExecutionConfig.initOwned(
+        allocator,
+        .anthropic,
+        model,
+        base_url,
+        1,
+        secret,
+    );
+    config.deinit();
+
+    try std.testing.expect(observing.saw_secret_free);
+    try std.testing.expect(observing.secret_was_zero);
 }
