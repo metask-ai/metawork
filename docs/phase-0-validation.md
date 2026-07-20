@@ -93,12 +93,13 @@ Account DAG 的唯一规范任务状态由 TinyKG root 160 管理；本文档只
 #### Gate B：纯 Account 状态机
 
 - 生产入口只能从 `restoring` 开始，不能绕过 credential restore 直接构造 signed-out；
+- restore 读取、清理或完整性校验失败必须离开 `restoring`，进入禁止 Task admission 且明确要求重启的终态；
 - Account session、execution 与 operation 使用正交状态；attempt、catalog 和 execution generation 都有有界、fail-closed 的推进规则；
 - command 和 worker completion 只生成 prepared transition，effect 先进入有界 worker queue，随后才执行 no-fail committed swap；
 - matching 但非法的 completion 必须结束当前 attempt 并产生 typed failure，不能让状态永久停在 in-progress；
 - 重配置失败保留旧 execution generation，OAuth refresh/reauth 失败不销毁仍可用的 committed execution；
 - logout 必须先持久化 signed-out tombstone；只有 tombstone completion 成功后才提交内存 signed-out 并异步删除 retired credential generation；
-- 每 attempt completion inbox 独占有界 MPSC queue 和 first-writer terminal mailbox；overflow、guaranteed wake failure、stale completion 和 shutdown 都有确定的 cleanup；
+- Account 只允许一个 active attempt 和一个 single terminal mailbox；first-writer ownership、重复 publish collision、stale completion 和 shutdown 都有确定的 fail-closed cleanup；macOS main-loop wake 作为 Host 必备无失败合同验证，正常 shutdown 必须先 cancel/join worker 再释放平台服务；
 - RestoreReady 在校验失败时不能接管或泄漏 owned execution，所有 stale/rejected secret completion 在释放时 secure-zero。
 
 Gate B 不等于 C1/C2 完成。C1 production OAuth client、profile decoder 和平台 credential store 由 Gate C1 验证；API Key/model decoder 与 ExecutionTarget 由 Gate C2 验证。

@@ -219,6 +219,7 @@ pub const Account = struct {
         if (self.state.session_state != .restoring)
             return .{ .rejected = .invalid_state };
         var next = self.state;
+        next.session_state = .shutting_down;
         next.error_code = if (failure.error_code == .none)
             .recovery_state_invalid
         else
@@ -1415,6 +1416,36 @@ test "shutdown invalidates active attempt and requires effect consumption" {
     shutdown.deinit();
     try std.testing.expectEqual(contract.AccountSessionState.shutting_down, account.view().session_state);
     try std.testing.expectEqual(@as(?u64, null), account.activeAttempt());
+    try std.testing.expectEqual(
+        contract.ErrorCode.shutting_down,
+        account.prepareCommand(.begin_login).rejected,
+    );
+}
+
+test "restore failure enters a terminal restart-required state" {
+    var account: Account = .{};
+    var failure = WorkerFailure.fromCode(.credential_store_read_failed);
+    failure.safe_diagnostic = try .init("Keychain read failed");
+    var prepared = switch (account.prepareRestoreFailure(failure)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    commitPrepared(&account, &prepared);
+
+    const view = account.view();
+    try std.testing.expectEqual(
+        contract.AccountSessionState.shutting_down,
+        view.session_state,
+    );
+    try std.testing.expectEqual(
+        contract.ErrorCode.credential_store_read_failed,
+        view.error_code,
+    );
+    try std.testing.expectEqualStrings(
+        "Keychain read failed",
+        view.safe_diagnostic,
+    );
+    try std.testing.expect(!view.can_create_task);
     try std.testing.expectEqual(
         contract.ErrorCode.shutting_down,
         account.prepareCommand(.begin_login).rejected,

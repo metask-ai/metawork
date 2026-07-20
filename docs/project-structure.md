@@ -31,7 +31,7 @@
 - Workbench admission 已在 `workbench/projection.zig` 建立 stable Run record、generation、`RunRef`、write-once terminal publication 与 `delete_pending`，并独占 Executor/queue/workers；已开始执行的 Run 由 Agent immutable `TerminalResult` 收口，queued-before-execute 由 Workbench 生成产品结果；
 - Renderer Native Bridge 合同已集中到 `frontend/src/bridge/`，只有 `bridge/client.ts` 访问 `window.zero`；应用 composition 已进入 `frontend/src/app/`，已落地的 Workspace navigation、Search、Timeline、question/permission Approvals、Composer draft 和 Task activity进入各自 `frontend/src/features/`，`workbench/` 只保留 projection store 与 selector。尚未形成真实产品能力的 Outputs、持久权限管理和 Settings 不创建空模块。
 
-当前已落地 `main.zig + app.zig + account.zig + agent.zig + workbench.zig + bridge.zig`。Task A 提供纯 `src/account/contract.zig`；Task B 提供不接触 production 网络或平台存储的纯 Account 状态机和 bounded completion inbox。产品边界为 App、Account、Bridge、Workbench、Agent 五个 modules；`account_contract` 只是 Account owner 发布的纯合同，不是第六个产品职责。`agent/` 表达 MetaWork 自己拥有的执行子系统；`AgentCore` 只指 metacodes 构建的外部 bundle。
+当前已落地 `main.zig + app.zig + account.zig + agent.zig + workbench.zig + bridge.zig`。Task A 提供纯 `src/account/contract.zig`；Task B 提供不接触 production 网络或平台存储的纯 Account 状态机。产品边界为 App、Account、Bridge、Workbench、Agent 五个 modules；`account_contract` 只是 Account owner 发布的纯合同，不是第六个产品职责。`agent/` 表达 MetaWork 自己拥有的执行子系统；`AgentCore` 只指 metacodes 构建的外部 bundle。
 
 采纳时做六项收敛：
 
@@ -95,8 +95,7 @@ metawork/
 │   ├── account.zig
 │   ├── account/
 │   │   ├── contract.zig
-│   │   ├── state.zig
-│   │   └── completion_inbox.zig
+│   │   └── state.zig
 │   ├── bridge.zig
 │   ├── bridge/
 │   ├── workbench.zig
@@ -281,7 +280,6 @@ src/
 ├── account/
 │   ├── contract.zig
 │   ├── state.zig
-│   ├── completion_inbox.zig
 │   ├── metask_client.zig
 │   └── credential_store.zig
 │
@@ -327,7 +325,7 @@ src/
 - `account.zig`：Metask Account runtime 的最小公开入口；拥有登录 attempt、catalog、credential generation、具体 credential owner 和 prepared transition，不拥有 Workbench；
 - `account/contract.zig`：不依赖 Native SDK 或任何产品 runtime 的有界纯合同；包含脱敏 view/fact、command sink、ExecutionConfig transfer、稳定 error code 与 compile-time limits；
 - `account/state.zig`：双状态、operation、attempt/generation 与唯一 prepare/commit 状态机；effect 只允许先进入有界 worker queue，再执行 no-fail commit；
-- `account/completion_inbox.zig`：每 attempt 的 bounded MPSC completion queue、first-writer terminal mailbox、guaranteed-wake fatal latch 与过期 completion ownership cleanup；
+- `app.zig` 内的 Account terminal mailbox：组合根持有的 single-slot worker-to-main ownership transfer；只允许一个 active attempt 和一次 terminal publish，collision fail closed；
 - `account/oauth.zig`：已锁定 C1 OAuth 常量、PKCE、callback、token/profile strict decoder 和有界 secret；
 - `account/loopback.zig`：动态 IPv4 loopback listener、严格 HTTP callback、cancel/shutdown wake；
 - `account/login_attempt.zig`：单 attempt worker、Metask exchange/profile 编排与 owned terminal result；
@@ -399,7 +397,7 @@ flowchart TB
 - app 层不复制 Workbench 产品状态；
 - 不建立通用 adapter 只为让 Native SDK 或 AgentCore 看起来可替换。
 
-`app.zig`、`account.zig`、`bridge.zig`、`workbench.zig` 和 `agent.zig` 由 `build.zig` 注册为 named product modules；`metawork_account_contract`、Account state 和 completion inbox 也有独立正式测试 root。边界由 build graph 与 `scripts/architecture-boundaries.test.mjs` 共同检查，不能只靠目录文档。
+`app.zig`、`account.zig`、`bridge.zig`、`workbench.zig` 和 `agent.zig` 由 `build.zig` 注册为 named product modules；`metawork_account_contract` 和 Account state 也有独立正式测试 root，terminal mailbox 则通过 App 正式测试 root 验证。边界由 build graph 与 `scripts/architecture-boundaries.test.mjs` 共同检查，不能只靠目录文档。
 
 ## 9. 状态与类型所有权
 

@@ -54,8 +54,6 @@ export type AccountErrorCode =
   | "generation_mismatch"
   | "recovery_state_invalid"
   | "local_resource_exhausted"
-  | "completion_queue_overflow"
-  | "main_loop_wake_failed"
   | "dependency_contract_invalid"
   | "shutting_down";
 

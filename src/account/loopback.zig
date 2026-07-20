@@ -24,7 +24,8 @@ pub const Server = struct {
     io: std.Io,
     listener: std.Io.net.Server,
     port_value: u16,
-    closed: std.atomic.Value(bool) = .init(false),
+    stop_requested: std.atomic.Value(u32) = .init(0),
+    listener_closed: std.atomic.Value(bool) = .init(false),
 
     pub fn init(io: std.Io) ServerError!Server {
         const address: std.Io.net.IpAddress = .{
@@ -60,7 +61,7 @@ pub const Server = struct {
     ) ServerError!oauth.Callback {
         var invalid_count: usize = 0;
         while (invalid_count < Limits.invalid_requests) {
-            if (self.closed.load(.acquire)) return error.Cancelled;
+            if (self.isStopRequested()) return error.Cancelled;
             const stream = try self.acceptUntil(deadline);
             var connection = stream;
             defer connection.close(self.io);
@@ -72,9 +73,15 @@ pub const Server = struct {
                 &reader.interface,
                 &writer.interface,
             );
-            var request = http_server.receiveHead() catch {
-                invalid_count += 1;
-                continue;
+            var request = self.receiveHeadUntil(
+                &http_server,
+                deadline,
+            ) catch |err| switch (err) {
+                error.RequestInvalid => {
+                    invalid_count += 1;
+                    continue;
+                },
+                else => return err,
             };
             if (request.head.method != .GET or
                 request.head.content_length != null or
@@ -111,25 +118,44 @@ pub const Server = struct {
                     return error.IoFailed;
                 },
             }
-            self.closeListener();
+            self.finish();
             return callback;
         }
-        self.closeListener();
+        self.finish();
         return error.TooManyInvalidRequests;
     }
 
     pub fn cancel(self: *Server) void {
-        self.closeListener();
+        self.requestStop();
     }
 
     pub fn deinit(self: *Server) void {
-        self.closeListener();
+        self.finish();
         self.* = undefined;
     }
 
+    fn requestStop(self: *Server) void {
+        if (self.stop_requested.swap(1, .acq_rel) == 0) {
+            self.io.futexWake(
+                u32,
+                &self.stop_requested.raw,
+                std.math.maxInt(u32),
+            );
+        }
+    }
+
     fn closeListener(self: *Server) void {
-        if (!self.closed.swap(true, .acq_rel))
+        if (!self.listener_closed.swap(true, .acq_rel))
             self.listener.socket.close(self.io);
+    }
+
+    fn finish(self: *Server) void {
+        self.requestStop();
+        self.closeListener();
+    }
+
+    fn isStopRequested(self: *const Server) bool {
+        return self.stop_requested.load(.acquire) != 0;
     }
 
     const AcceptResult = union(enum) {
@@ -141,13 +167,14 @@ pub const Server = struct {
     const AcceptOutcome = union(enum) {
         accepted: AcceptResult,
         deadline,
+        cancelled,
     };
 
     fn acceptUntil(
         self: *Server,
         deadline: std.Io.Clock.Timestamp,
     ) ServerError!std.Io.net.Stream {
-        var outcome_storage: [2]AcceptOutcome = undefined;
+        var outcome_storage: [3]AcceptOutcome = undefined;
         var selection = std.Io.Select(AcceptOutcome).init(
             self.io,
             &outcome_storage,
@@ -158,13 +185,38 @@ pub const Server = struct {
             waitDeadline,
             .{ self.io, deadline },
         );
+        selection.async(
+            .cancelled,
+            waitStop,
+            .{self},
+        );
         const outcome = selection.await() catch {
-            selection.cancelDiscard();
+            while (selection.cancel()) |remaining| {
+                switch (remaining) {
+                    .accepted => |accepted| switch (accepted) {
+                        .stream => |stream| stream.close(self.io),
+                        .cancelled, .failed => {},
+                    },
+                    .deadline, .cancelled => {},
+                }
+            }
+            if (self.isStopRequested()) {
+                self.closeListener();
+                return error.Cancelled;
+            }
             return error.IoFailed;
         };
         return switch (outcome) {
             .accepted => |accepted| blk: {
                 selection.cancelDiscard();
+                if (self.isStopRequested()) {
+                    switch (accepted) {
+                        .stream => |stream| stream.close(self.io),
+                        .cancelled, .failed => {},
+                    }
+                    self.closeListener();
+                    return error.Cancelled;
+                }
                 break :blk switch (accepted) {
                     .stream => |stream| stream,
                     .cancelled => error.Cancelled,
@@ -178,11 +230,24 @@ pub const Server = struct {
                             .stream => |stream| stream.close(self.io),
                             .cancelled, .failed => {},
                         },
-                        .deadline => {},
+                        .deadline, .cancelled => {},
+                    }
+                }
+                self.finish();
+                return error.DeadlineExceeded;
+            },
+            .cancelled => {
+                while (selection.cancel()) |remaining| {
+                    switch (remaining) {
+                        .accepted => |accepted| switch (accepted) {
+                            .stream => |stream| stream.close(self.io),
+                            .cancelled, .failed => {},
+                        },
+                        .deadline, .cancelled => {},
                     }
                 }
                 self.closeListener();
-                return error.DeadlineExceeded;
+                return error.Cancelled;
             },
         };
     }
@@ -200,6 +265,82 @@ pub const Server = struct {
         deadline: std.Io.Clock.Timestamp,
     ) void {
         deadline.wait(io) catch {};
+    }
+
+    const ReceiveResult = union(enum) {
+        request: std.http.Server.Request,
+        invalid,
+    };
+
+    const ReceiveOutcome = union(enum) {
+        received: ReceiveResult,
+        deadline,
+        cancelled,
+    };
+
+    fn receiveHeadUntil(
+        self: *Server,
+        http_server: *std.http.Server,
+        deadline: std.Io.Clock.Timestamp,
+    ) ServerError!std.http.Server.Request {
+        var outcome_storage: [3]ReceiveOutcome = undefined;
+        var selection = std.Io.Select(ReceiveOutcome).init(
+            self.io,
+            &outcome_storage,
+        );
+        selection.async(
+            .received,
+            receiveHead,
+            .{http_server},
+        );
+        selection.async(
+            .deadline,
+            waitDeadline,
+            .{ self.io, deadline },
+        );
+        selection.async(
+            .cancelled,
+            waitStop,
+            .{self},
+        );
+        const outcome = selection.await() catch {
+            selection.cancelDiscard();
+            return error.IoFailed;
+        };
+        return switch (outcome) {
+            .received => |received| blk: {
+                selection.cancelDiscard();
+                if (self.isStopRequested()) return error.Cancelled;
+                break :blk switch (received) {
+                    .request => |request| request,
+                    .invalid => error.RequestInvalid,
+                };
+            },
+            .deadline => {
+                selection.cancelDiscard();
+                self.finish();
+                return error.DeadlineExceeded;
+            },
+            .cancelled => {
+                selection.cancelDiscard();
+                self.closeListener();
+                return error.Cancelled;
+            },
+        };
+    }
+
+    fn receiveHead(http_server: *std.http.Server) ReceiveResult {
+        return .{ .request = http_server.receiveHead() catch return .invalid };
+    }
+
+    fn waitStop(self: *const Server) void {
+        while (!self.isStopRequested()) {
+            self.io.futexWait(
+                u32,
+                &self.stop_requested.raw,
+                0,
+            ) catch return;
+        }
     }
 };
 
@@ -252,9 +393,54 @@ const WaitContext = struct {
     }
 };
 
+const ReceiveContext = struct {
+    server: *Server,
+    connection: std.Io.net.Stream,
+    deadline: std.Io.Clock.Timestamp,
+    started: std.atomic.Value(u32) = .init(0),
+    failure: ?ServerError = null,
+    unexpected_success: bool = false,
+
+    fn run(self: *ReceiveContext) void {
+        defer self.connection.close(self.server.io);
+        var read_buffer: [Limits.request_head_bytes]u8 = undefined;
+        var write_buffer: [Limits.response_bytes]u8 = undefined;
+        var reader = self.connection.reader(self.server.io, &read_buffer);
+        var writer = self.connection.writer(self.server.io, &write_buffer);
+        var http_server: std.http.Server = .init(
+            &reader.interface,
+            &writer.interface,
+        );
+        self.started.store(1, .release);
+        self.server.io.futexWake(
+            u32,
+            &self.started.raw,
+            std.math.maxInt(u32),
+        );
+        _ = self.server.receiveHeadUntil(
+            &http_server,
+            self.deadline,
+        ) catch |err| {
+            self.failure = err;
+            return;
+        };
+        self.unexpected_success = true;
+    }
+
+    fn waitStarted(self: *ReceiveContext) void {
+        while (self.started.load(.acquire) == 0) {
+            self.server.io.futexWait(
+                u32,
+                &self.started.raw,
+                0,
+            ) catch {};
+        }
+    }
+};
+
 test "loopback listener binds dynamic IPv4 and accepts one exact callback" {
     var server = try Server.init(std.testing.io);
-    defer if (!server.closed.load(.acquire)) server.deinit();
+    defer server.deinit();
     const expected_state = "0123456789012345678901234567890123456789012";
     var context: WaitContext = .{
         .server = &server,
@@ -329,4 +515,67 @@ test "attempt deadline closes the listener and wakes a blocked accept" {
             ),
         ),
     );
+}
+
+test "cancel interrupts receiveHeadUntil on an accepted partial request" {
+    var server = try Server.init(std.testing.io);
+    defer server.deinit();
+    const address: std.Io.net.IpAddress = .{
+        .ip4 = .loopback(server.port()),
+    };
+    var stream = try address.connect(std.testing.io, .{
+        .mode = .stream,
+        .protocol = .tcp,
+    });
+    defer stream.close(std.testing.io);
+    var write_buffer: [128]u8 = undefined;
+    var writer = stream.writer(std.testing.io, &write_buffer);
+    try writer.interface.writeAll("GET /auth/callback HTTP/1.1\r\n");
+    try writer.interface.flush();
+
+    var context: ReceiveContext = .{
+        .server = &server,
+        .connection = try server.listener.accept(std.testing.io),
+        .deadline = std.Io.Clock.Timestamp.fromNow(
+            std.testing.io,
+            .{ .raw = .fromSeconds(30), .clock = .boot },
+        ),
+    };
+    const thread = try std.Thread.spawn(.{}, ReceiveContext.run, .{&context});
+    context.waitStarted();
+    server.cancel();
+    thread.join();
+    try std.testing.expect(!context.unexpected_success);
+    try std.testing.expectEqual(error.Cancelled, context.failure.?);
+}
+
+test "deadline interrupts receiveHeadUntil on an accepted partial request" {
+    var server = try Server.init(std.testing.io);
+    defer server.deinit();
+    const address: std.Io.net.IpAddress = .{
+        .ip4 = .loopback(server.port()),
+    };
+    var stream = try address.connect(std.testing.io, .{
+        .mode = .stream,
+        .protocol = .tcp,
+    });
+    defer stream.close(std.testing.io);
+    var write_buffer: [128]u8 = undefined;
+    var writer = stream.writer(std.testing.io, &write_buffer);
+    try writer.interface.writeAll("GET /auth/callback HTTP/1.1\r\n");
+    try writer.interface.flush();
+
+    var context: ReceiveContext = .{
+        .server = &server,
+        .connection = try server.listener.accept(std.testing.io),
+        .deadline = std.Io.Clock.Timestamp.fromNow(
+            std.testing.io,
+            .{ .raw = .fromMilliseconds(100), .clock = .boot },
+        ),
+    };
+    const thread = try std.Thread.spawn(.{}, ReceiveContext.run, .{&context});
+    context.waitStarted();
+    thread.join();
+    try std.testing.expect(!context.unexpected_success);
+    try std.testing.expectEqual(error.DeadlineExceeded, context.failure.?);
 }

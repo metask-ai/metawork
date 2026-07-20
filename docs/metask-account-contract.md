@@ -61,14 +61,15 @@ API Key catalog：
 - 成功响应严格为 `code = 0`、`message = "success"` 和 `data { items, total, page, page_size, pages }`；
 - 当前只接受 `page = 1`、`page_size = 100`、`pages = 1` 且 `total == items.len`，不发布不完整分页；
 - item 必须包含数值 `id`、`name`、完整 secret `key`、`status`、`group_id` 和完整 group；只发布 item 与 group 均为精确 `active` 的条目；
+- decoder 严格校验上述消费字段、类型、语义和 byte/entry bound；服务端新增的未消费 metadata 不属于产品合同，不得破坏客户端；
 - API Key secret 只由 Account catalog、execution staging 和 Keychain ownership 链持有；Renderer 只能看到十进制 id、name 和最后四位。
 
 Model catalog：
 
 - 选中 API Key 后，以该 Key 作为 Bearer，并携带同一 `X-Metacode-Profile-ID`；
 - 固定请求 `GET https://napi.metask-ai.com/v1/models`；
-- 成功响应严格读取 list 根字段和 `data[]`；拒绝 unknown field、重复 model id、`has_more = true`、超限字段和超限集合；
-- model 只向产品投影有界 `id` 与可选 `display_name`；未消费的 capability 字段只做有界类型/结构校验。服务端缺省或以 `0` 表达 unknown/placeholder 的 token capability 不阻止模型进入目录，也不得被 MetaWork 推断为真实能力或 AgentCore 配置。
+- 成功响应严格读取消费的 list 根字段和 `data[]`；拒绝缺失/非法消费字段、重复 model id、`has_more = true`、超限字段和超限集合，但允许服务端增加未消费 metadata；
+- model 只向产品投影有界 `id` 与可选 `display_name`；未消费的 capability 字段不进入客户端 typed contract。服务端增删这类 metadata，或以 `0` 表达 unknown/placeholder token capability，都不阻止模型进入目录，也不得被 MetaWork 推断为真实能力或 AgentCore 配置。
 
 ## 5. Provider 与 ExecutionTarget
 

@@ -63,6 +63,15 @@ const AccountEffectCommitHook = struct {
     fn noDispatch(_: ?*anyopaque) void {}
 };
 
+const AccountWakeSink = struct {
+    context: *anyopaque,
+    notify_fn: *const fn (context: *anyopaque) void,
+
+    fn notify(self: AccountWakeSink) void {
+        self.notify_fn(self.context);
+    }
+};
+
 const AccountEffects = struct {
     const MailboxResult = union(enum) {
         login: struct {
@@ -94,7 +103,7 @@ const AccountEffects = struct {
 
     allocator: std.mem.Allocator,
     io: std.Io,
-    wake: account_api.WakeSink,
+    wake: AccountWakeSink,
     transport: account_api.MetaskClient.StdHttpTransport,
     queue: AccountEffectQueue = .{},
     catalog: account_api.Catalog.CatalogSession,
@@ -104,12 +113,12 @@ const AccountEffects = struct {
     login_attempt: account_api.LoginAttempt.LoginAttempt = .{},
     login_active: bool = false,
     network_attempt: account_api.NetworkAttempt.NetworkAttempt = .{},
-    fatal_wake_failure: bool = false,
+    mailbox_collision: bool = false,
 
     fn init(
         allocator: std.mem.Allocator,
         io: std.Io,
-        wake: account_api.WakeSink,
+        wake: AccountWakeSink,
     ) AccountEffects {
         return .{
             .allocator = allocator,
@@ -144,6 +153,7 @@ const AccountEffects = struct {
         const self: *AccountEffects = @ptrCast(@alignCast(context));
         self.lockMailbox();
         if (self.mailbox != null) {
+            self.mailbox_collision = true;
             self.unlockMailbox();
             return false;
         }
@@ -152,7 +162,7 @@ const AccountEffects = struct {
             .result = result.take(),
         } };
         self.unlockMailbox();
-        self.notifyOrLatchFatal();
+        self.notify();
         return true;
     }
 
@@ -164,13 +174,13 @@ const AccountEffects = struct {
         self.lockMailbox();
         if (self.mailbox != null) {
             completion.deinit();
-            self.fatal_wake_failure = true;
+            self.mailbox_collision = true;
             self.unlockMailbox();
             return;
         }
         self.mailbox = .{ .completion = completion };
         self.unlockMailbox();
-        self.notifyOrLatchFatal();
+        self.notify();
     }
 
     fn networkSink(
@@ -187,6 +197,7 @@ const AccountEffects = struct {
         const self: *AccountEffects = @ptrCast(@alignCast(context));
         self.lockMailbox();
         if (self.mailbox != null) {
+            self.mailbox_collision = true;
             self.unlockMailbox();
             return false;
         }
@@ -202,7 +213,7 @@ const AccountEffects = struct {
             },
         };
         self.unlockMailbox();
-        self.notifyOrLatchFatal();
+        self.notify();
         return true;
     }
 
@@ -364,7 +375,7 @@ const AccountEffects = struct {
                 @panic("Account cancel discarded another attempt");
             stale.deinit();
         }
-        _ = self.takeFatal();
+        _ = self.takeCollision();
         if (clear_private_catalog) self.catalog.reset();
     }
 
@@ -395,7 +406,7 @@ const AccountEffects = struct {
             var discarded = value;
             discarded.deinit();
         }
-        _ = self.takeFatal();
+        _ = self.takeCollision();
         self.catalog.reset();
         self.public_catalog.clear();
     }
@@ -416,19 +427,16 @@ const AccountEffects = struct {
         self.public_catalog.clear();
     }
 
-    fn notifyOrLatchFatal(self: *AccountEffects) void {
-        if (self.wake.notify()) return;
-        self.lockMailbox();
-        self.fatal_wake_failure = true;
-        self.unlockMailbox();
+    fn notify(self: *AccountEffects) void {
+        self.wake.notify();
     }
 
-    fn takeFatal(self: *AccountEffects) bool {
+    fn takeCollision(self: *AccountEffects) bool {
         self.lockMailbox();
         defer self.unlockMailbox();
-        const fatal = self.fatal_wake_failure;
-        self.fatal_wake_failure = false;
-        return fatal;
+        const collision = self.mailbox_collision;
+        self.mailbox_collision = false;
+        return collision;
     }
 
     fn lockMailbox(self: *AccountEffects) void {
@@ -1230,18 +1238,18 @@ const App = struct {
         while (effects.takeMailbox()) |mailbox_value| {
             var mailbox = mailbox_value;
             defer mailbox.deinit();
-            const fatal_wake = effects.takeFatal();
+            const mailbox_collision = effects.takeCollision();
             switch (mailbox) {
                 .login => |*entry| {
                     effects.joinLogin();
                     if (coordinator.account.activeAttempt() !=
                         entry.attempt_id)
                         continue;
-                    if (fatal_wake) {
+                    if (mailbox_collision) {
                         var completion: account_api.WorkerCompletion = .{
                             .attempt_id = entry.attempt_id,
                             .payload = .{ .failed = .fromCode(
-                                .main_loop_wake_failed,
+                                .dependency_contract_invalid,
                             ) },
                         };
                         defer completion.deinit();
@@ -1273,10 +1281,10 @@ const App = struct {
                     if (coordinator.account.activeAttempt() !=
                         entry.attempt_id)
                         continue;
-                    if (fatal_wake) {
+                    if (mailbox_collision) {
                         self.completeAccountFailure(
                             entry.attempt_id,
-                            .main_loop_wake_failed,
+                            .dependency_contract_invalid,
                         );
                         continue;
                     }
@@ -1292,7 +1300,7 @@ const App = struct {
                         account_operation == .loading_keys or
                         account_operation == .loading_models;
                     effects.joinNetwork(completion.attempt_id);
-                    if (fatal_wake and
+                    if (mailbox_collision and
                         coordinator.account.activeAttempt() ==
                             completion.attempt_id)
                     {
@@ -1300,7 +1308,7 @@ const App = struct {
                         completion.* = .{
                             .attempt_id = completion.attempt_id,
                             .payload = .{ .failed = .fromCode(
-                                .main_loop_wake_failed,
+                                .dependency_contract_invalid,
                             ) },
                         };
                     }
@@ -1506,8 +1514,9 @@ const App = struct {
         return true;
     }
 
-    fn notifyAccountEffects(context: *anyopaque) bool {
-        return notifyMainLoop(context);
+    fn notifyAccountEffects(context: *anyopaque) void {
+        if (!notifyMainLoop(context))
+            @panic("Account completion lost its required main-loop wake");
     }
 
     fn notifyAgentEventConsumer(context: ?*anyopaque) agent.EventReadyNotification {
@@ -2079,15 +2088,13 @@ test "Account committed effects are dispatched only after state commit" {
     try std.testing.expect(queue.entry == null);
 }
 
-test "Account login mailbox transfers ownership and latches wake failure" {
+test "Account mailbox transfers ownership, wakes, and reports collision" {
     const Wake = struct {
-        available: bool = true,
         count: usize = 0,
 
-        fn notify(context: *anyopaque) bool {
+        fn notify(context: *anyopaque) void {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.count += 1;
-            return self.available;
         }
     };
 
@@ -2117,18 +2124,22 @@ test "Account login mailbox transfers ownership and latches wake failure" {
             .oauth_callback_rejected,
     );
 
-    wake.available = false;
     effects.publishCompletion(.{
         .attempt_id = 8,
         .payload = .{ .failed = .fromCode(.token_refresh_failed) },
     });
-    try std.testing.expect(effects.takeFatal());
-    var failed_wake = effects.takeMailbox() orelse
+    try std.testing.expectEqual(@as(usize, 2), wake.count);
+    effects.publishCompletion(.{
+        .attempt_id = 8,
+        .payload = .{ .failed = .fromCode(.metask_service_unavailable) },
+    });
+    try std.testing.expect(effects.takeCollision());
+    var queued = effects.takeMailbox() orelse
         return error.TestUnexpectedResult;
-    defer failed_wake.deinit();
+    defer queued.deinit();
     try std.testing.expectEqual(
         account_contract.ErrorCode.token_refresh_failed,
-        failed_wake.completion.payload.failed.error_code,
+        queued.completion.payload.failed.error_code,
     );
 }
 

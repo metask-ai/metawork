@@ -543,78 +543,30 @@ const ApiKeysResponse = struct {
 
 const ApiKeyWire = struct {
     id: u64,
-    user_id: u64,
     key: []const u8,
     name: []const u8,
     group_id: u64,
     status: []const u8,
-    ip_whitelist: ?std.json.Value,
-    ip_blacklist: ?std.json.Value,
-    last_used_at: ?[]const u8,
-    quota: std.json.Value,
-    quota_used: std.json.Value,
-    expires_at: ?[]const u8,
-    created_at: []const u8,
-    updated_at: []const u8,
-    rate_limit_5h: std.json.Value,
-    rate_limit_1d: std.json.Value,
-    rate_limit_7d: std.json.Value,
-    usage_5h: std.json.Value,
-    usage_1d: std.json.Value,
-    usage_7d: std.json.Value,
-    window_5h_start: ?[]const u8,
-    window_1d_start: ?[]const u8,
-    window_7d_start: ?[]const u8,
     group: GroupWire,
 };
 
 const GroupWire = struct {
     id: u64,
-    name: []const u8,
-    description: []const u8,
     platform: []const u8,
-    rate_multiplier: std.json.Value,
-    visibility: []const u8,
-    is_exclusive: bool,
     status: []const u8,
-    image_price_1k: ?std.json.Value,
-    image_price_2k: ?std.json.Value,
-    image_price_4k: ?std.json.Value,
-    sora_image_price_360: ?std.json.Value,
-    sora_image_price_540: ?std.json.Value,
-    sora_video_price_per_request: ?std.json.Value,
-    sora_video_price_per_request_hd: ?std.json.Value,
-    claude_code_only: bool,
-    fallback_group_id: ?u64,
-    fallback_group_id_on_invalid_request: ?u64,
-    sora_storage_quota_bytes: std.json.Value,
-    allow_messages_dispatch: bool,
-    created_at: []const u8,
-    updated_at: []const u8,
 };
 
 const ModelsResponse = struct {
     object: []const u8,
     data: []const ModelWire,
-    first_id: ?[]const u8,
-    last_id: ?[]const u8,
     has_more: bool,
-    remaining: std.json.Value,
-    unit: []const u8,
 };
 
 const ModelWire = struct {
     id: []const u8,
     object: []const u8,
-    created: std.json.Value,
-    owned_by: []const u8,
     type: []const u8,
     display_name: ?[]const u8 = null,
-    created_at: []const u8,
-    max_input_tokens: ?u64 = null,
-    max_tokens: ?u64 = null,
-    anthropic_family_tier: ?std.json.Value = null,
-    capabilities: ?std.json.Value = null,
 };
 
 fn parseApiKeys(
@@ -637,7 +589,7 @@ fn parseApiKeys(
         fba.allocator(),
         body,
         .{
-            .ignore_unknown_fields = false,
+            .ignore_unknown_fields = true,
             .max_value_len = contract.Limits.api_key_bytes,
             .allocate = .alloc_if_needed,
         },
@@ -708,7 +660,7 @@ fn parseModels(
         fba.allocator(),
         body,
         .{
-            .ignore_unknown_fields = false,
+            .ignore_unknown_fields = true,
             .max_value_len = contract.Limits.model_display_name_bytes,
             .allocate = .alloc_if_needed,
         },
@@ -725,9 +677,6 @@ fn parseModels(
         if (!std.mem.eql(u8, model.object, "model") or
             !std.mem.eql(u8, model.type, "model"))
             return error.ProtocolInvalid;
-        // Metask may use zero or omit these optional capability values. The
-        // Account product does not consume them, so their typed JSON shape is
-        // validated above but they cannot reject an otherwise usable model.
         const id = try ModelId.init(model.id);
         for (result.entries.items) |*existing| {
             if (std.mem.eql(u8, existing.id.view(), id.view()))
@@ -898,7 +847,7 @@ test "live-shape catalogs expose only masked views and move one key owner" {
     try std.testing.expectEqualStrings("model-1", public_view.models[0].id);
 }
 
-test "catalog rejects duplicate ids, unknown fields, pagination, and platforms" {
+test "catalog accepts additive metadata and rejects duplicate ids, pagination, and platforms" {
     const items_marker = "\"items\":[";
     const item_start =
         (std.mem.indexOf(u8, key_fixture, items_marker) orelse
@@ -935,9 +884,40 @@ test "catalog rejects duplicate ids, unknown fields, pagination, and platforms" 
         "\"code\":0,\"unknown\":true",
     ) catch return error.SkipZigTest;
     defer std.testing.allocator.free(unknown);
+    var additive_keys = try parseApiKeys(std.testing.allocator, unknown);
+    defer additive_keys.deinit();
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        additive_keys.entries.items.len,
+    );
+    const model_unknown = std.mem.replaceOwned(
+        u8,
+        std.testing.allocator,
+        model_fixture,
+        "\"object\":\"list\"",
+        "\"object\":\"list\",\"metadata\":{\"revision\":2}",
+    ) catch return error.SkipZigTest;
+    defer std.testing.allocator.free(model_unknown);
+    var additive_models = try parseModels(
+        std.testing.allocator,
+        model_unknown,
+    );
+    defer additive_models.deinit();
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        additive_models.entries.items.len,
+    );
+    const missing_consumed = std.mem.replaceOwned(
+        u8,
+        std.testing.allocator,
+        key_fixture,
+        "\"group_id\":11",
+        "\"group_identifier\":11",
+    ) catch return error.SkipZigTest;
+    defer std.testing.allocator.free(missing_consumed);
     try std.testing.expectError(
         error.ProtocolInvalid,
-        parseApiKeys(std.testing.allocator, unknown),
+        parseApiKeys(std.testing.allocator, missing_consumed),
     );
     const paged = std.mem.replaceOwned(
         u8,

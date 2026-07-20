@@ -77,7 +77,7 @@ Account 负责 Metask 账号登录和执行资格配置，最终向 Workbench �
 | metadata pointer 与 tombstone 的“原子”没有存储合同           | 正确                   | 固定 macOS manifest 路径和 fsync/rename crash protocol               |
 | ExecutionConfig 的 provider/base URL 没有权威来源            | 正确                   | 增加 Metask ExecutionTarget 前置合同和生产 endpoint allowlist        |
 | “没有 live Task”不是可执行的 quiescence 判定                 | 正确                   | 由 Workbench 提供线性化 replacement gate 和精确 quiescence predicate |
-| completion queue 满后无法再投递 typed failure                | 正确                   | 每 attempt 使用 terminal mailbox，并以原子 overflow latch 保底       |
+| 重复 terminal completion 会破坏结果 ownership               | 正确                   | 单 active attempt 只允许一次 terminal publish；collision fail closed |
 | 单一 phase 混合账号与执行配置状态                            | 正确                   | 拆成 `AccountSessionState` 与 `ExecutionState` 两个正交状态          |
 
 以下方向没有采纳：
@@ -355,7 +355,7 @@ C1 登录成功提交 `account_only`，不自动加载 API Key/model，也不打
 - 选中 API Key bearer + 同一 profile header 请求固定 `GET /v1/models`；
 - `provider_kind` 只从 API Key 的精确 `group.platform` 映射；
 - `anthropic` 固定使用 `/v1/messages`，`openai` 固定使用 `/v1/chat/completions`，其他 platform fail closed；
-- response、分页、条目、字段和集合全部有 strict bound；不完整分页不发布。
+- response、分页、消费字段和集合全部有 strict bound；不完整分页不发布，未消费的 additive metadata 允许服务端演进。
 
 MetaWork 只消费这个公开合同，不要求修改 `cc-t2z/metacodes`，也不复制其宽松 catalog 解析或根据 model 名称猜 provider 的逻辑。
 
@@ -493,7 +493,7 @@ OAuth exchange/refresh 只轮换 OAuth slot 和 `oauth_generation_id`，不改�
 
 如果 refresh token 已由服务器轮换但新 OAuth slot 无法提交，Account 进入 `reauth_required`，保留仍有效的 ExecutionConfig，不声称 refresh 成功。
 
-restore 分别验证 manifest 指向的 OAuth 和 Execution active slot：commit marker、required records、record kinds 和 generation 必须全部匹配，ExecutionTarget 还必须通过生产 allowlist。每个 family 的另一个固定 slot、临时 manifest 和不完整 slot 都直接清理、不自动采用；因为 slot 名称固定，不依赖 Keychain enumeration。manifest 不存在表示首次 signed out，并清理两个 family；manifest malformed/corrupt 则进入 typed recovery failure，禁止 Task admission，不猜测为 signed out。OAuth slot 失效可以进入 `reauth_required` 并保留有效 Execution slot；Execution slot 失效必须关闭 Task admission。C1 必须证明 OAuth A/B slot、manifest rename/fsync 和 Native SDK credential 的 set/get/delete；C2 在此基础上增加 Execution slot 和 ExecutionTarget 校验。
+restore 分别验证 manifest 指向的 OAuth 和 Execution active slot：commit marker、required records、record kinds 和 generation 必须全部匹配，ExecutionTarget 还必须通过生产 allowlist。每个 family 的另一个固定 slot、临时 manifest 和不完整 slot 都直接清理、不自动采用；因为 slot 名称固定，不依赖 Keychain enumeration。manifest 不存在表示首次 signed out，并清理两个 family；manifest malformed/corrupt 或 credential store 无法完成读取/清理时进入 `shutting_down` typed recovery failure，禁止 Task admission 并明确要求重启，不得停留在 `restoring` 或猜测为 signed out。OAuth slot 经完整读取后判定失效可以进入 `reauth_required` 并保留有效 Execution slot；Execution slot 失效必须关闭 Task admission。C1 必须证明 OAuth A/B slot、manifest rename/fsync 和 Native SDK credential 的 set/get/delete；C2 在此基础上增加 Execution slot 和 ExecutionTarget 校验。
 
 manifest corrupt 或 `persistence_outcome_unknown` 时只开放 `resetLocalState` 恢复动作。它必须经过 Host 原生确认，在持有 execution replacement gate 时写入新的 signed-out tombstone、清除两个固定 slot family，再重新进入正常登录；Renderer 不能直接要求忽略 manifest 或采用任意 Keychain record。
 
@@ -560,22 +560,19 @@ Account contract 使用稳定 ErrorCode，至少覆盖：
 - credential store 读写删失败；
 - generation/tombstone 不一致；
 - execution replacement quiescence 阻止操作；
-- completion queue overflow 与 guaranteed wake failure；
+- terminal mailbox collision 与 Native SDK main-loop wake 合同；
 - dependency/account-contract 内部不变量失败；
 - shutdown。
 
 所有队列、字符串、目录、HTTP body、callback 请求和 worker 数量必须有硬上限。
 
-每个 active attempt 独占一个预分配 terminal mailbox，普通 progress/catalog completion 使用有界 MPSC queue：
+Account 当前不发布 progress completion。状态机只允许一个 active attempt，LoginAttempt 与 NetworkAttempt 互斥，每个 worker 只发布一个 owned terminal result。App 因此只拥有一个预分配的 single terminal mailbox：
 
-- worker 先尝试普通 queue；
-- queue 满时，worker 清理尚未 transfer 的 secret，把稳定错误写入该 attempt 的 terminal mailbox，并设置 atomic overflow latch；
-- terminal mailbox 每 attempt 只能 first-writer-wins 写入一次，不与普通 queue 共享容量；
-- worker 通过 guaranteed main-loop wake/pending gate 通知 App；
-- App 先消费 terminal mailbox，再丢弃该 attempt 的过期普通 completion；
-- 如果 guaranteed wake 不可用，Account 进入 shutdown/fatal path，并由 App 的既有主循环 quiescence 合同收口，不能假装仍在等待。
-
-因此 queue overflow 不依赖再次向已经满的 queue 投递 failure。
+- first writer 把 terminal result ownership 转移给 App，并通过 Native SDK main-loop wake 通知主线程；
+- 第二次 publish 是 attempt 生命周期合同冲突，不是正常容量压力；被拒绝的 owned result 立即释放并清零，已进入 mailbox 的结果在消费时转换为 `dependency_contract_invalid`；
+- 浏览器打开失败只有在对应 login worker 已 cancel/join、attempt id 仍匹配后，才能替换其尚未消费的 terminal result；
+- stale、cancel 和 shutdown 路径必须确定释放 owned result；正常 shutdown 先 cancel/join worker，再释放平台服务；
+- wake 是当前 macOS Host 的必备无失败合同，不建模成可恢复业务错误；活跃 Account worker 无法 wake 表示 Host 组合或 shutdown 次序已被破坏，必须 fail stop。
 
 ## 15. 验证方案
 
@@ -590,7 +587,7 @@ Account contract 使用稳定 ErrorCode，至少覆盖：
 - 重配置失败保留旧 generation。
 - tombstone 优先于残留 Keychain record。
 - SecretBuffer move/copy 次数、owner、释放和不可消除清零路径。
-- 普通 completion queue 满时 terminal mailbox 仍能发布一次 typed failure。
+- terminal completion first-writer ownership、重复 publish collision fail closed，以及 stale/cancel/shutdown cleanup。
 
 ### 15.2 OAuth 和 API
 
@@ -668,7 +665,7 @@ npm run package:macos
 
 ### C2. Metask 执行目录
 
-- 锁定并实现 API Key/model strict catalog decoder。
+- 锁定并实现 API Key/model consumed-field-strict、additive-metadata-compatible catalog decoder。
 - 形成 typed/fixed ExecutionTarget，验证 provider/base URL/model 与 credential 归属。
 - 只有 C2 committed 后才允许 D 安装 ready ExecutionConfig。
 - 完成后进行 Linus 审核。

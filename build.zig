@@ -40,7 +40,6 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-account-credentials-runtime", .root_module = test_modules.account_credentials_runtime },
         .{ .name = "metawork-account-network-attempt", .root_module = test_modules.account_network_attempt },
         .{ .name = "metawork-account-state", .root_module = test_modules.account_state },
-        .{ .name = "metawork-account-completion-inbox", .root_module = test_modules.account_completion_inbox },
         .{ .name = "metawork-account", .root_module = test_modules.account },
         .{ .name = "metawork-app", .root_module = test_modules.app },
         .{ .name = "metawork-bridge", .root_module = test_modules.bridge },
@@ -56,7 +55,6 @@ pub fn build(b: *std.Build) void {
 
 const WiredModules = struct {
     account: *std.Build.Module,
-    account_completion_inbox: *std.Build.Module,
     account_catalog: *std.Build.Module,
     account_credentials_runtime: *std.Build.Module,
     account_contract: *std.Build.Module,
@@ -234,20 +232,12 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     account_platform.addImport("account_state", account_state);
     account_platform.addImport("account_oauth", account_oauth);
     account_platform.addImport("account_credential_store", account_credential_store);
-    const account_completion_inbox = b.createModule(.{
-        .root_source_file = b.path("src/account/completion_inbox.zig"),
-        .target = target,
-        .optimize = root_module.optimize,
-    });
-    account_completion_inbox.addImport("metawork_account_contract", account_contract);
-    account_completion_inbox.addImport("account_state", account_state);
     const account = b.createModule(.{
         .root_source_file = b.path("src/account.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     account.addImport("account_state", account_state);
-    account.addImport("account_completion_inbox", account_completion_inbox);
     account.addImport("account_oauth", account_oauth);
     account.addImport("metask_client", metask_client);
     account.addImport("account_credential_store", account_credential_store);
@@ -351,7 +341,6 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     root_module.link_libc = bundle.link_libc;
     return .{
         .account = account,
-        .account_completion_inbox = account_completion_inbox,
         .account_catalog = account_catalog,
         .account_credentials_runtime = account_credentials_runtime,
         .account_contract = account_contract,

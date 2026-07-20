@@ -1,6 +1,5 @@
 const std = @import("std");
 const state_impl = @import("account_state");
-const inbox_impl = @import("account_completion_inbox");
 const oauth_impl = @import("account_oauth");
 const metask_client_impl = @import("metask_client");
 const credential_store_impl = @import("account_credential_store");
@@ -13,17 +12,14 @@ const network_attempt_impl = @import("account_network_attempt");
 
 pub const Account = state_impl.Account;
 pub const AccountIdentity = state_impl.AccountIdentity;
-pub const CompletionInbox = inbox_impl.CompletionInbox;
 pub const Effect = state_impl.Effect;
 pub const EffectSink = state_impl.EffectSink;
 pub const PrepareResult = state_impl.PrepareResult;
 pub const PreparedTransition = state_impl.PreparedTransition;
-pub const PublishResult = inbox_impl.PublishResult;
 pub const RestoreReady = state_impl.RestoreReady;
 pub const RestoreAccountOnly = state_impl.RestoreAccountOnly;
 pub const RestoreResult = state_impl.RestoreResult;
 pub const RestoreSignedOut = state_impl.RestoreSignedOut;
-pub const WakeSink = inbox_impl.WakeSink;
 pub const WorkerCompletion = state_impl.WorkerCompletion;
 pub const WorkerFailure = state_impl.WorkerFailure;
 pub const OAuth = oauth_impl;
@@ -39,7 +35,6 @@ pub const NetworkAttempt = network_attempt_impl;
 
 test {
     _ = state_impl;
-    _ = inbox_impl;
     _ = oauth_impl;
     _ = metask_client_impl;
     _ = credential_store_impl;
