@@ -116,6 +116,13 @@ test("lower layers cannot reach composition or transport internals", () => {
     "metawork_agent",
     "metacodes_agentcore",
   ]);
+  assertNoImports(
+    zigFiles("src/account/").filter(
+      (file) => file !== "src/account/platform.zig",
+    ),
+    ["native_sdk"],
+  );
+  assert.match(read("src/account/platform.zig"), /@import\("native_sdk"\)/);
 });
 
 test("only Agent implementation imports the AgentCore SDK", () => {
@@ -187,6 +194,20 @@ test("build graph registers Account product and pure contract modules", () => {
     /root_source_file = b\.path\("src\/account\/contract\.zig"\)/,
   );
   assert.match(source, /account_contract: \*std\.Build\.Module/);
+  for (const moduleName of [
+    "account_oauth",
+    "metask_client",
+    "account_credential_store",
+    "account_platform",
+    "account_loopback",
+    "account_login_attempt",
+  ]) {
+    assert.match(
+      source,
+      new RegExp(`${moduleName}: \\*std\\.Build\\.Module`),
+      `${moduleName} must be a named build module`,
+    );
+  }
   assert.match(source, /account: \*std\.Build\.Module/);
   assert.match(
     source,
@@ -199,6 +220,15 @@ test("formal Native test graph runs every product module test root", () => {
   const source = read("build.zig");
   for (const [name, rootModule] of [
     ["metawork-account-contract", "test_modules.account_contract"],
+    ["metawork-account-oauth", "test_modules.account_oauth"],
+    ["metawork-metask-client", "test_modules.metask_client"],
+    [
+      "metawork-account-credential-store",
+      "test_modules.account_credential_store",
+    ],
+    ["metawork-account-platform", "test_modules.account_platform"],
+    ["metawork-account-loopback", "test_modules.account_loopback"],
+    ["metawork-account-login-attempt", "test_modules.account_login_attempt"],
     ["metawork-account-state", "test_modules.account_state"],
     [
       "metawork-account-completion-inbox",

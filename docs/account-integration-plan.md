@@ -345,17 +345,15 @@ Workbench 只有在以下条件同时满足时才允许创建 Task：
 
 ## 10. 登录与 Metask API
 
-### 10.1 必须先锁定的 Metask 合同
+### 10.1 C1 登录合同与 C2 执行合同
 
-实现网络 client 前必须由 Metask 公开合同明确并固定：
+Metask 产品 owner 已锁定 C1：MetaWork 作为 Metask 第一方客户端使用 Authorization Code + PKCE S256、`https://napi.metask-ai.com`、`client_id=metacode-cli`、`scope=metacode:use`、动态 `127.0.0.1` loopback `/auth/callback`，并通过 bearer `GET /v1/profiles` 取得 identity。精确值、schema 和生命周期见 [Metask Account API 合同](metask-account-contract.md)。
 
-- MetaWork 独立 OAuth `client_id`，不得默认复用 `metacode-cli`；
-- authorize/token endpoint；
-- 允许的 loopback host、端口策略和完整 redirect URI；
-- scopes、token expiry、refresh-token rotation 与错误响应；
+C1 登录成功提交 `account_only`，不自动加载 API Key/model，也不打开 Task admission。C2 独立锁定：
+
 - API Key catalog endpoint 和严格 response schema；
 - 模型 catalog 对应的 `ExecutionTarget { provider_kind, base_url, model }`；
-- API Key revoke/disable 与 OAuth revoke 是否存在，以及各自语义。
+- API Key revoke/disable、credential probe 与确定性鉴权失败语义。
 
 MetaWork 只消费这个公开合同，不要求修改 `cc-t2z/metacodes`。如果 Metask 当前模型目录没有 typed `provider_kind/base_url`，产品必须选择并锁定一个固定的 Metask gateway protocol/endpoint；不得复制 metacodes 根据 model 名称猜 provider 的逻辑。
 
@@ -367,7 +365,7 @@ MetaWork 只消费这个公开合同，不要求修改 `cc-t2z/metacodes`。如�
 - 禁止 userinfo、fragment 和 IP literal；
 - 模型请求默认禁止 redirect；确需 redirect 时只允许同 scheme、同 host、同 port。
 
-该合同未确认时，DAG A 保持 blocked，不进入 OAuth/API 实现。测试 endpoint 只能由 test build module 注入。
+C2 未确认时只阻塞 catalog/ExecutionTarget 与 Task admission，不阻塞 C1 OAuth 登录、恢复、刷新和退出。测试 endpoint 只能由 test build module 注入。
 
 ### 10.2 OAuth
 
@@ -377,9 +375,9 @@ MetaWork 只消费这个公开合同，不要求修改 `cc-t2z/metacodes`。如�
 2. 使用 CSPRNG 生成一次性 `state` 和满足 RFC 7636 长度/字符集要求的 PKCE verifier，只允许 `code_challenge_method=S256`，禁止 `plain`。
 3. 由 Host 打开 Metask authorize URL。
 4. 校验 callback state 并交换 OAuth token。
-5. 使用 OAuth bearer token 查询账号 API Key。
-6. 用户选择 API Key 后，使用该 key 查询可用模型。
-7. 用户选择模型，Account 验证组合并形成 staged ExecutionConfig。
+5. 使用 OAuth bearer token查询 `/v1/profiles`，提交 `account_only` manifest 并结束登录 attempt。
+6. C2 通过独立命令加载 API Key/model catalog。
+7. 用户选择模型后，Account 验证组合并形成 staged ExecutionConfig。
 
 生产 endpoint、client id、scope 和 redirect 规则来自第 10.1 节合同，并以固定生产配置编译。
 
@@ -411,7 +409,7 @@ Account 的 Metask client 必须定义：
 - 单字段最大 bytes；
 - 严格 JSON schema 读取和 unknown-field 策略；
 - token refresh 的单飞与 attempt 失效规则；
-- 429、5xx 和网络错误的有界重试；
+- 429、5xx 和网络错误映射为稳定错误；authorization-code exchange 和可能轮换 refresh token 的请求禁止盲目自动重试，避免把服务端已提交、本地未知的结果伪装成安全重试；
 - secret-safe diagnostics。
 
 本方案参考 metacodes 已验证的业务流程，但不复制其内部解析器或本地凭据文件格式。
@@ -493,7 +491,7 @@ OAuth exchange/refresh 只轮换 OAuth slot 和 `oauth_generation_id`，不改�
 
 如果 refresh token 已由服务器轮换但新 OAuth slot 无法提交，Account 进入 `reauth_required`，保留仍有效的 ExecutionConfig，不声称 refresh 成功。
 
-restore 分别验证 manifest 指向的 OAuth 和 Execution active slot：commit marker、required records、record kinds 和 generation 必须全部匹配，ExecutionTarget 还必须通过生产 allowlist。每个 family 的另一个固定 slot、临时 manifest 和不完整 slot 都直接清理、不自动采用；因为 slot 名称固定，不依赖 Keychain enumeration。manifest 不存在表示首次 signed out，并清理两个 family；manifest malformed/corrupt 则进入 typed recovery failure，禁止 Task admission，不猜测为 signed out。OAuth slot 失效可以进入 `reauth_required` 并保留有效 Execution slot；Execution slot 失效必须关闭 Task admission。平台 spike 必须先证明上述 rename/fsync 语义和 Native SDK credential 的 set/get/delete 行为；未证明前 DAG C 保持 blocked。
+restore 分别验证 manifest 指向的 OAuth 和 Execution active slot：commit marker、required records、record kinds 和 generation 必须全部匹配，ExecutionTarget 还必须通过生产 allowlist。每个 family 的另一个固定 slot、临时 manifest 和不完整 slot 都直接清理、不自动采用；因为 slot 名称固定，不依赖 Keychain enumeration。manifest 不存在表示首次 signed out，并清理两个 family；manifest malformed/corrupt 则进入 typed recovery failure，禁止 Task admission，不猜测为 signed out。OAuth slot 失效可以进入 `reauth_required` 并保留有效 Execution slot；Execution slot 失效必须关闭 Task admission。C1 必须证明 OAuth A/B slot、manifest rename/fsync 和 Native SDK credential 的 set/get/delete；C2 在此基础上增加 Execution slot 和 ExecutionTarget 校验。
 
 manifest corrupt 或 `persistence_outcome_unknown` 时只开放 `resetLocalState` 恢复动作。它必须经过 Host 原生确认，在持有 execution replacement gate 时写入新的 signed-out tombstone、清除两个固定 slot family，再重新进入正常登录；Renderer 不能直接要求忽略 manifest 或采用任意 Keychain record。
 
@@ -646,7 +644,7 @@ npm run package:macos
 ### A. 合同与规范
 
 - 更新 requirements、architecture、project-structure 和 validation。
-- 与 Metask 锁定 OAuth client/redirect/scope、API Key schema 和 typed ExecutionTarget；未完成时后续网络实现 blocked。
+- C1 锁定 Metask OAuth client/redirect/scope 后即可实现登录网络路径；API Key schema 和 typed ExecutionTarget 由 C2 独立锁定，只阻塞执行目录与 Task admission。
 - 新增 `account_contract`、AccountCommandSink 和 compile-time limits。
 - 固定 AccountFact、AccountView、ExecutionConfig、SecretBuffer ownership 与 ErrorCode。
 - 通过 Linus 审核后再进入后续任务。
@@ -658,11 +656,19 @@ npm run package:macos
 - 证明 no partial commit、terminal mailbox、过期 completion 清理和 shutdown。
 - 完成后进行 Linus 审核。
 
-### C. 平台与 Metask 接入
+### C1. Metask OAuth 登录与账号生命周期
 
-- 实现 OAuth loopback、PKCE、Metask client 和 credential generations。
-- 完成 Native SDK 主线程合同与 macOS manifest rename/fsync spike。
-- 实现 manifest、tombstone、restore、refresh rotation 和 crash injection tests。
+- 实现 OAuth loopback、PKCE、token/profile client 和 account-only credential generations。
+- 完成 Native SDK 主线程合同与 macOS manifest rename/fsync。
+- 实现 account-only manifest、tombstone、restore、refresh rotation、cancel/join 和 crash injection tests。
+- 登录完成后保持 ExecutionState none，不自动进入 catalog。
+- 完成后进行 Linus 审核。
+
+### C2. Metask 执行目录
+
+- 锁定并实现 API Key/model strict catalog decoder。
+- 形成 typed/fixed ExecutionTarget，验证 provider/base URL/model 与 credential 归属。
+- 只有 C2 committed 后才允许 D 安装 ready ExecutionConfig。
 - 完成后进行 Linus 审核。
 
 ### D. App 与 Workbench 集成

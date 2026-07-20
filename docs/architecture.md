@@ -138,7 +138,7 @@ Account.prepare(command | completion)
 
 整条链在 App 主线程同一 turn 内完成。任何校验或内部不变量失败都保留旧 committed state，并清零 staged secret；Bridge 不参与 prepare/commit，也不接触 credential。
 
-production 网络接入受 [Metask Account API 合同](metask-account-contract.md)约束。当前 MetaWork 独立 OAuth registration、严格 API Key schema 和 typed/fixed ExecutionTarget 尚未获得 Metask 服务端 owner 正式确认，因此 DAG C 明确 blocked。mCode/metacodes 代码只能作为一手实现证据，不能被 MetaWork 升格为合同或修改。
+production 网络接入受 [Metask Account API 合同](metask-account-contract.md)约束。C1 OAuth/login 合同已由 Metask 产品 owner 锁定，允许实现登录、profile identity、恢复、刷新和退出；登录只提交 `account_only`，不打开 Task admission。严格 API Key schema 和 typed/fixed ExecutionTarget 属于 C2，未完成前只阻塞目录、执行配置和 Task admission。mCode/metacodes 只作为 Metask 自有实现证据，MetaWork 不修改其代码。
 
 ### 4.4 AgentCore
 

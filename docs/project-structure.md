@@ -328,8 +328,12 @@ src/
 - `account/contract.zig`：不依赖 Native SDK 或任何产品 runtime 的有界纯合同；包含脱敏 view/fact、command sink、ExecutionConfig transfer、稳定 error code 与 compile-time limits；
 - `account/state.zig`：双状态、operation、attempt/generation 与唯一 prepare/commit 状态机；effect 只允许先进入有界 worker queue，再执行 no-fail commit；
 - `account/completion_inbox.zig`：每 attempt 的 bounded MPSC completion queue、first-writer terminal mailbox、guaranteed-wake fatal latch 与过期 completion ownership cleanup；
-- `account/metask_client.zig`：只消费已锁定的 Metask public contract；合同 blocked 时不得创建 production 实现；
-- `account/credential_store.zig`：固定 slot、generation、manifest/tombstone 和 secret cleanup；平台合同通过 spike 后才落地；
+- `account/oauth.zig`：已锁定 C1 OAuth 常量、PKCE、callback、token/profile strict decoder 和有界 secret；
+- `account/loopback.zig`：动态 IPv4 loopback listener、严格 HTTP callback、cancel/shutdown wake；
+- `account/login_attempt.zig`：单 attempt worker、Metask exchange/profile 编排与 owned terminal result；
+- `account/metask_client.zig`：只消费已锁定的 Metask C1 production contract；C2 catalog 不在这里猜测；
+- `account/credential_store.zig`：固定 OAuth A/B slot、generation marker、account-only manifest/tombstone、restore 与 cleanup；
+- `account/platform.zig`：Account 专用 Native SDK 主线程 open URL/Keychain 和 macOS atomic manifest，不是通用 Desktop Interface；
 - `bridge.zig`：Renderer Bridge 的最小公开入口，显式导出 command/policy/handler 所需类型，不使用 `usingnamespace` 倾倒全部内部符号；
 - `bridge/dispatcher.zig`：产品 command 的具体同步边界，统一拥有 handler registry、callback gate、`ProductDelivery`、Workspace grant、`*Workbench` 和 bounded decode/encode 流程；只接收 App 注入的实际平台动作；
 - `bridge/commands.zig`：公开领域 command 名称和 payload 上限；

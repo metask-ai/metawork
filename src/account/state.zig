@@ -416,16 +416,16 @@ pub const Account = struct {
         switch (next.attempt_kind) {
             .login => {
                 next.session_state = .authenticated;
-                next.operation = .loading_keys;
-                next.attempt_kind = .catalog;
+                next.operation = .none;
+                next.active_attempt_id = null;
+                next.attempt_kind = .none;
                 next.account_id = identity.account_id;
                 next.display_name = identity.display_name;
                 next.clearError();
-                return transition(
+                return transitionNoEffect(
                     next,
                     .session_changed,
-                    next.active_attempt_id.?,
-                    .load_api_keys,
+                    self.state.active_attempt_id.?,
                 );
             },
             .reauthenticate => {
@@ -842,6 +842,14 @@ pub const AccountIdentity = struct {
             .account_id = try .init(account_id),
             .display_name = try .init(display_name),
         };
+    }
+
+    pub fn accountId(self: *const AccountIdentity) []const u8 {
+        return self.account_id.view();
+    }
+
+    pub fn displayName(self: *const AccountIdentity) []const u8 {
+        return self.display_name.view();
     }
 };
 
@@ -1292,7 +1300,7 @@ test "shutdown invalidates active attempt and requires effect consumption" {
     );
 }
 
-test "login catalog and execution completion form one generation chain" {
+test "login commits account-only before a separate catalog generation" {
     const allocator = std.testing.allocator;
     var account = Account.initSignedOutForTest();
     var begin = switch (account.prepareCommand(.begin_login)) {
@@ -1310,8 +1318,16 @@ test "login catalog and execution completion form one generation chain" {
         .transition => |value| value,
         else => return error.TestUnexpectedResult,
     };
-    _ = auth_transition.takeEffect();
     commitPrepared(&account, &auth_transition);
+    try std.testing.expectEqual(contract.OperationKind.none, account.view().operation);
+    try std.testing.expectEqual(@as(?u64, null), account.activeAttempt());
+
+    var begin_catalog = switch (account.prepareCommand(.refresh_catalog)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    _ = begin_catalog.takeEffect();
+    commitPrepared(&account, &begin_catalog);
 
     var keys: WorkerCompletion = .{
         .attempt_id = account.activeAttempt().?,

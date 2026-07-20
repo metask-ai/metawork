@@ -1,5 +1,11 @@
 const state_impl = @import("account_state");
 const inbox_impl = @import("account_completion_inbox");
+const oauth_impl = @import("account_oauth");
+const metask_client_impl = @import("metask_client");
+const credential_store_impl = @import("account_credential_store");
+const platform_impl = @import("account_platform");
+const loopback_impl = @import("account_loopback");
+const login_attempt_impl = @import("account_login_attempt");
 
 pub const Account = state_impl.Account;
 pub const AccountIdentity = state_impl.AccountIdentity;
@@ -16,8 +22,20 @@ pub const RestoreSignedOut = state_impl.RestoreSignedOut;
 pub const WakeSink = inbox_impl.WakeSink;
 pub const WorkerCompletion = state_impl.WorkerCompletion;
 pub const WorkerFailure = state_impl.WorkerFailure;
+pub const OAuth = oauth_impl;
+pub const MetaskClient = metask_client_impl;
+pub const CredentialStore = credential_store_impl;
+pub const Platform = platform_impl;
+pub const Loopback = loopback_impl;
+pub const LoginAttempt = login_attempt_impl;
 
 test {
     _ = state_impl;
     _ = inbox_impl;
+    _ = oauth_impl;
+    _ = metask_client_impl;
+    _ = credential_store_impl;
+    _ = platform_impl;
+    _ = loopback_impl;
+    _ = login_attempt_impl;
 }

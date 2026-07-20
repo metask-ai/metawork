@@ -75,12 +75,12 @@ Account DAG 的唯一规范任务状态由 TinyKG root 160 管理；本文档只
 
 #### Gate A2：外部合同确认
 
-MetaWork 独立 OAuth client registration、严格 API Key catalog schema 和 typed/fixed ExecutionTarget 尚未获得 Metask 服务端 owner 正式确认。其确认前：
+外部合同拆成两个独立门槛：
 
-- Task B 只依赖 A1，可以使用 fake client/credential store 完成纯状态机；
-- Task C 的 production OAuth/API client 保持 blocked；
-- test endpoint 只能通过 test build module 显式注入；
-- 不复用 `metacode-cli` identity，不复制宽松解析器，不根据模型名猜 provider。
+- C1 OAuth/login 已由 Metask 产品 owner 锁定：第一方 public client `metacode-cli`、`metacode:use`、固定 authority/endpoints、动态 IPv4 loopback callback 和 `/v1/profiles` identity。
+- C2 API Key catalog schema 与 typed/fixed ExecutionTarget 仍需完成；它只阻塞目录、执行配置和 Task admission，不阻塞 C1。
+- test endpoint 只能通过 test build module 显式注入；生产 build 不接受 endpoint/client/scope override。
+- 不复制宽松 catalog 解析器，不根据模型名猜 provider。
 
 #### Gate A1 退出证据
 
@@ -101,7 +101,25 @@ MetaWork 独立 OAuth client registration、严格 API Key catalog schema 和 ty
 - 每 attempt completion inbox 独占有界 MPSC queue 和 first-writer terminal mailbox；overflow、guaranteed wake failure、stale completion 和 shutdown 都有确定的 cleanup；
 - RestoreReady 在校验失败时不能接管或泄漏 owned execution，所有 stale/rejected secret completion 在释放时 secure-zero。
 
-Gate B 的 production Metask client、真实 catalog decoder 和平台 credential store 仍属于 Gate C，不得因纯状态机完成而宣称外部合同已解除 blocked。
+Gate B 不等于 C1/C2 完成。C1 production OAuth client、profile decoder 和平台 credential store 由 Gate C1 验证；API Key/model decoder 与 ExecutionTarget 由 Gate C2 验证。
+
+#### Gate C1：Metask OAuth 登录与账号生命周期
+
+- 固定 authority/client/scope/redirect，PKCE S256 和 CSPRNG state/verifier；
+- callback 只绑定动态 `127.0.0.1`，严格 request/query 上限，重复/unknown 参数 fail closed；
+- token/profile strict decoder、response body 上限、HTTP status mapping 和固定 production origin；
+- 单 attempt worker，cancel/deadline/shutdown 关闭 listener 并 join；
+- Native SDK open URL 与 Keychain 操作只在主线程；
+- OAuth A/B slot、marker-last、read-back、原子 account-only manifest、refresh rotation；
+- logout 先提交 signed-out tombstone，credential cleanup failure 不复活账号；
+- 登录成功停在 authenticated/account-only，ExecutionState none，Task admission 仍关闭。
+
+#### Gate C2：执行目录与 ExecutionTarget
+
+- 严格 API Key/model schema 和有界 catalog；
+- typed/fixed provider、base URL、model 与 account/profile 归属；
+- production origin/path allowlist，不从 Renderer、环境变量或模型名推断；
+- 只有验证并提交 ExecutionConfig 后才打开 Workbench Task admission。
 
 ## 4. Gate -1：规范对齐
 

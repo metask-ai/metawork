@@ -79,7 +79,7 @@ Account 是 MetaWork 的 Metask 账号控制面，负责 OAuth 登录、账号/A
 - 当前只允许一个 active ExecutionConfig；切换账号、API Key、模型或退出登录必须先取得 Workbench execution replacement gate，并证明没有 live/closing Task、Agent Session、Run、executor job 或 `RunRef`；
 - OAuth refresh 失败只进入 `reauth_required`，不自动判定现有 API Key 失效；只有 Metask 明确撤销/禁用或锁定 credential probe 返回确定鉴权拒绝，才关闭既有执行配置；
 - Task admission 必须同时满足 Account execution state 为 ready、Workbench 安装的 generation 一致且 replacement gate 未开启；
-- production OAuth、API Key catalog 和 typed ExecutionTarget 必须符合 [Metask Account API 合同](metask-account-contract.md)；合同未确认时 production 网络接入保持 blocked，不能复用其他客户端身份或猜测 Provider。
+- production Account 接入必须符合 [Metask Account API 合同](metask-account-contract.md)。已锁定的 C1 OAuth/login 可以独立交付 `account_only`；C2 API Key catalog 与 typed ExecutionTarget 未完成时禁止 Task admission，且不得根据模型名猜 Provider。
 
 ### 5.3 Task
 
