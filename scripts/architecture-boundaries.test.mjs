@@ -213,6 +213,14 @@ test("build graph registers Account product and pure contract modules", () => {
     source,
     /app\.addImport\("metawork_account_contract", account_contract\)/,
   );
+  assert.match(
+    source,
+    /bridge\.addImport\("metawork_account_contract", account_contract\)/,
+  );
+  const dispatcher = read("src/bridge/dispatcher.zig");
+  assert.match(dispatcher, /@import\("metawork_account_contract"\)/);
+  assert.doesNotMatch(dispatcher, /@import\("metawork_account"\)/);
+  assert.match(dispatcher, /account_contract\.AccountCommandSink/);
   assert.doesNotMatch(source, /src\/agentcore(?:\/|\.zig)/);
 });
 
@@ -568,7 +576,7 @@ test("Bridge Dispatcher owns product command decisions and App only composes it"
   assert.doesNotMatch(app, /parsePayload|parseWireId|workspaceGrant/);
 });
 
-test("product wire contract is atomically on Task schema v5", () => {
+test("product wire contract is atomically on Account plus Task schema v6", () => {
   const zigCommands = read("src/bridge/commands.zig");
   const rendererCommands = read("frontend/src/bridge/commands.ts");
   const appManifest = read("app.zon");
@@ -587,12 +595,27 @@ test("product wire contract is atomically on Task schema v5", () => {
     assert.ok(rendererCommands.includes(wireName));
     assert.ok(appManifest.includes(wireName));
   }
+  for (const command of [
+    "beginLogin",
+    "reauthenticate",
+    "cancelOperation",
+    "refreshCatalog",
+    "selectApiKey",
+    "selectModel",
+    "logout",
+  ]) {
+    const wireName = `metawork.account.${command}`;
+    assert.ok(zigCommands.includes(wireName));
+    assert.ok(rendererCommands.includes(wireName));
+    assert.ok(appManifest.includes(wireName));
+  }
   assert.doesNotMatch(zigCommands, /metawork\.sessions\./);
   assert.doesNotMatch(rendererCommands, /metawork\.sessions\./);
   assert.doesNotMatch(appManifest, /metawork\.sessions\./);
 
   const projection = read("src/workbench/projection.zig");
-  assert.match(projection, /snapshot_schema_version: u32 = 5/);
+  assert.match(projection, /snapshot_schema_version: u32 = 6/);
+  assert.match(projection, /\\"account\\":/);
   assert.match(projection, /\\"tasks\\":\[/);
   assert.match(projection, /pub fn createTask/);
   assert.match(projection, /pub fn runTask/);
@@ -603,7 +626,8 @@ test("product wire contract is atomically on Task schema v5", () => {
   );
 
   const contracts = read("frontend/src/bridge/contracts.ts");
-  assert.match(contracts, /WORKBENCH_SCHEMA_VERSION = 5/);
+  assert.match(contracts, /WORKBENCH_SCHEMA_VERSION = 6/);
+  assert.match(contracts, /account: AccountView/);
   assert.match(contracts, /tasks: TaskView\[\]/);
   assert.match(contracts, /"app_shutdown"/);
   assert.doesNotMatch(contracts, /host_shutdown|sessions: SessionView/);
@@ -611,7 +635,7 @@ test("product wire contract is atomically on Task schema v5", () => {
   assert.equal(
     existsSync(
       new URL(
-        "frontend/src/bridge/__fixtures__/workbench-snapshot-v5.fixture",
+        "frontend/src/bridge/__fixtures__/workbench-snapshot-v6.fixture",
         root,
       ),
     ),
@@ -620,7 +644,7 @@ test("product wire contract is atomically on Task schema v5", () => {
   assert.equal(
     existsSync(
       new URL(
-        "frontend/src/bridge/__fixtures__/workbench-snapshot-v4.fixture",
+        "frontend/src/bridge/__fixtures__/workbench-snapshot-v5.fixture",
         root,
       ),
     ),

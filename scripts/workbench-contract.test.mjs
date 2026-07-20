@@ -4,6 +4,7 @@ import test from "node:test";
 
 import {
   assertDisconnected,
+  decodeAccountCommandResult,
   assertSignalAcknowledged,
   assertTaskArchived,
   assertTaskFlag,
@@ -15,7 +16,7 @@ import {
 const fixture = JSON.parse(
   readFileSync(
     new URL(
-      "../frontend/src/bridge/__fixtures__/workbench-snapshot-v5.fixture",
+      "../frontend/src/bridge/__fixtures__/workbench-snapshot-v6.fixture",
       import.meta.url,
     ),
     "utf8",
@@ -26,8 +27,45 @@ function clone(value) {
   return structuredClone(value);
 }
 
-test("the canonical v5 Workbench fixture decodes without normalization", () => {
+test("the canonical v6 Workbench fixture decodes without normalization", () => {
   assert.deepEqual(decodeWorkbenchSnapshot(fixture), fixture);
+});
+
+test("Account command acknowledgements preserve state-machine and attempt identity", () => {
+  assert.deepEqual(
+    decodeAccountCommandResult({
+      accepted: true,
+      errorCode: "none",
+      attemptId: "41",
+    }),
+    { accepted: true, errorCode: "none", attemptId: "41" },
+  );
+  assert.deepEqual(
+    decodeAccountCommandResult({
+      accepted: false,
+      errorCode: "invalid_state",
+      attemptId: null,
+    }),
+    { accepted: false, errorCode: "invalid_state", attemptId: null },
+  );
+  assert.throws(
+    () =>
+      decodeAccountCommandResult({
+        accepted: true,
+        errorCode: "invalid_state",
+        attemptId: null,
+      }),
+    /must agree/,
+  );
+  assert.throws(
+    () =>
+      decodeAccountCommandResult({
+        accepted: false,
+        errorCode: "invalid_state",
+        attemptId: "41",
+      }),
+    /cannot expose an attempt/,
+  );
 });
 
 test("Task metadata mutation acknowledgements are identity-checked and exact", () => {
@@ -76,6 +114,31 @@ test("Workbench decoding rejects version drift, extra fields, and invalid wire v
   assert.throws(
     () => decodeWorkbenchSnapshot(invalidState),
     /unexpected value/,
+  );
+
+  const secretField = clone(fixture);
+  secretField.account.apiKey = "must-never-cross-Bridge";
+  assert.throws(() => decodeWorkbenchSnapshot(secretField), /expected keys/);
+
+  const invalidReadyAccount = clone(fixture);
+  invalidReadyAccount.account.executionGeneration = "0";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(invalidReadyAccount),
+    /ready execution requires/,
+  );
+
+  const refreshingReadyAccount = clone(fixture);
+  refreshingReadyAccount.account.sessionState = "refreshing";
+  assert.doesNotThrow(() => decodeWorkbenchSnapshot(refreshingReadyAccount));
+
+  const duplicateModel = clone(fixture);
+  duplicateModel.account.models = [
+    { id: "model-1", displayName: "One" },
+    { id: "model-1", displayName: "Two" },
+  ];
+  assert.throws(
+    () => decodeWorkbenchSnapshot(duplicateModel),
+    /identities must be unique/,
   );
 
   const missingField = clone(fixture);

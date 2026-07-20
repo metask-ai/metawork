@@ -9,6 +9,9 @@ pub const PermissionChoice = enum {
 
 pub const EventDisconnect = struct { generation: []const u8 };
 pub const WorkbenchSnapshotChunk = struct { snapshotId: []const u8, offset: []const u8 };
+pub const Empty = struct {};
+pub const AccountSelectApiKey = struct { apiKeyId: []const u8 };
+pub const AccountSelectModel = struct { modelId: []const u8 };
 pub const TaskCreate = struct {
     workspaceGrant: ?[]const u8 = null,
     workspaceRoot: ?[]const u8 = null,

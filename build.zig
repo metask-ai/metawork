@@ -256,7 +256,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     workbench_contract_fixture.addOption(
         []const u8,
         "snapshot",
-        @embedFile("frontend/src/bridge/__fixtures__/workbench-snapshot-v5.fixture"),
+        @embedFile("frontend/src/bridge/__fixtures__/workbench-snapshot-v6.fixture"),
     );
     projection.addOptions("workbench_contract_fixture", workbench_contract_fixture);
     const workbench = b.createModule(.{
@@ -272,6 +272,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .optimize = root_module.optimize,
     });
     bridge.addImport("native_sdk", existingImport(root_module, "native_sdk"));
+    bridge.addImport("metawork_account_contract", account_contract);
     bridge.addImport("metawork_workbench", workbench);
 
     const automation_disabled = b.createModule(.{

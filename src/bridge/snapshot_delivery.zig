@@ -5,7 +5,7 @@ const std = @import("std");
 
 pub const WindowId = u64;
 
-pub const max_bytes: usize = 8 * 1024 * 1024;
+pub const max_bytes: usize = 12 * 1024 * 1024;
 pub const chunk_bytes: usize = 256 * 1024;
 
 pub const Error = error{ StaleSnapshot, InvalidOffset, InvalidStorage };

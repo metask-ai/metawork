@@ -19,6 +19,22 @@ import {
 
 const requestA = { taskId: "3", runId: "7", requestId: "11" };
 const requestB = { taskId: "4", runId: "8", requestId: "12" };
+const account = {
+  sessionState: "signed_out",
+  executionState: "none",
+  operation: "none",
+  accountId: "",
+  displayName: "",
+  apiKeys: [],
+  models: [],
+  selectedApiKeyId: "",
+  selectedModel: "",
+  canCreateTask: false,
+  errorCode: "none",
+  safeDiagnostic: "",
+  catalogGeneration: "0",
+  executionGeneration: "0",
+};
 
 function pending(identity) {
   return {
@@ -52,7 +68,7 @@ function task(identity, pendingUi = pending(identity)) {
 }
 
 function snapshot(tasks) {
-  return { schemaVersion: 5, revision: "1", tasks };
+  return { schemaVersion: 6, revision: "1", account, tasks };
 }
 
 test("UI response state waits for the authoritative snapshot and never reopens an accepted request", () => {

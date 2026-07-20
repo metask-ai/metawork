@@ -43,7 +43,7 @@ pub const Limits = struct {
     max_pending_ui_requests: usize = 4,
     max_ui_history_per_task: usize = 8,
     max_terminal_diagnostic_bytes: usize = 512,
-    max_snapshot_bytes: usize = 8 * 1024 * 1024,
+    max_snapshot_bytes: usize = 12 * 1024 * 1024,
 };
 
 pub const Provider = enum {
@@ -94,6 +94,22 @@ pub const Configuration = struct {
 const json_string_expansion: usize = 6;
 const pending_ui_reencode_expansion: usize = 2;
 const root_snapshot_overhead: usize = 128;
+const account_snapshot_text_bytes: usize =
+    account_contract.Limits.account_id_bytes +
+    account_contract.Limits.display_name_bytes +
+    account_contract.Limits.api_key_id_bytes +
+    account_contract.Limits.model_id_bytes +
+    account_contract.Limits.safe_diagnostic_bytes +
+    account_contract.Limits.api_key_entries *
+        (account_contract.Limits.api_key_id_bytes +
+            account_contract.Limits.api_key_name_bytes +
+            account_contract.Limits.api_key_suffix_bytes) +
+    account_contract.Limits.model_entries *
+        (account_contract.Limits.model_id_bytes +
+            account_contract.Limits.model_display_name_bytes);
+const account_snapshot_overhead: usize = 1024 +
+    account_contract.Limits.api_key_entries * 128 +
+    account_contract.Limits.model_entries * 128;
 const task_snapshot_overhead: usize = 512;
 const run_snapshot_overhead: usize = 1024;
 const tool_snapshot_overhead: usize = 512;
@@ -102,7 +118,7 @@ const ui_record_detail_capacity: usize = 512;
 const ui_record_snapshot_overhead: usize = 512;
 const tool_route_digest_bytes = std.crypto.hash.sha2.Sha256.digest_length;
 const tool_product_id_capacity = "tool-".len + 20;
-pub const snapshot_schema_version: u32 = 5;
+pub const snapshot_schema_version: u32 = 6;
 
 const ToolState = enum { running, completed, failed };
 const RunPhase = enum {
@@ -1411,7 +1427,13 @@ pub const Workbench = struct {
     pub fn writeSnapshot(self: *Workbench, output: []u8) Error![]const u8 {
         self.syncLifecycle();
         var writer = std.Io.Writer.fixed(output);
-        writer.print("{{\"schemaVersion\":{d},\"revision\":\"{d}\",\"tasks\":[", .{ snapshot_schema_version, self.revision }) catch return error.SnapshotTooLarge;
+        writer.print(
+            "{{\"schemaVersion\":{d},\"revision\":\"{d}\",\"account\":",
+            .{ snapshot_schema_version, self.revision },
+        ) catch return error.SnapshotTooLarge;
+        try self.writeAccount(&writer);
+        writer.writeAll(",\"tasks\":[") catch
+            return error.SnapshotTooLarge;
         var task_count: usize = 0;
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
@@ -1421,6 +1443,69 @@ pub const Workbench = struct {
         }
         writer.writeAll("]}") catch return error.SnapshotTooLarge;
         return writer.buffered();
+    }
+
+    fn writeAccount(
+        self: *Workbench,
+        writer: *std.Io.Writer,
+    ) Error!void {
+        const view = self.accountView();
+        writer.print(
+            "{{\"sessionState\":\"{s}\",\"executionState\":\"{s}\",\"operation\":\"{s}\",\"accountId\":",
+            .{
+                @tagName(view.session_state),
+                @tagName(view.execution_state),
+                @tagName(view.operation),
+            },
+        ) catch return error.SnapshotTooLarge;
+        try self.projectedJsonValue(writer, view.account_id);
+        writer.writeAll(",\"displayName\":") catch
+            return error.SnapshotTooLarge;
+        try self.projectedJsonValue(writer, view.display_name);
+        writer.writeAll(",\"apiKeys\":[") catch
+            return error.SnapshotTooLarge;
+        for (view.api_keys, 0..) |api_key, index| {
+            if (index != 0) writer.writeByte(',') catch
+                return error.SnapshotTooLarge;
+            writer.writeAll("{\"id\":") catch
+                return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, api_key.id);
+            writer.writeAll(",\"name\":") catch
+                return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, api_key.name);
+            writer.writeAll(",\"suffix\":") catch
+                return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, api_key.suffix);
+            writer.writeByte('}') catch return error.SnapshotTooLarge;
+        }
+        writer.writeAll("],\"models\":[") catch
+            return error.SnapshotTooLarge;
+        for (view.models, 0..) |model, index| {
+            if (index != 0) writer.writeByte(',') catch
+                return error.SnapshotTooLarge;
+            writer.writeAll("{\"id\":") catch
+                return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, model.id);
+            writer.writeAll(",\"displayName\":") catch
+                return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, model.display_name);
+            writer.writeByte('}') catch return error.SnapshotTooLarge;
+        }
+        writer.writeAll("],\"selectedApiKeyId\":") catch
+            return error.SnapshotTooLarge;
+        try self.projectedJsonValue(writer, view.selected_api_key_id);
+        writer.writeAll(",\"selectedModel\":") catch
+            return error.SnapshotTooLarge;
+        try self.projectedJsonValue(writer, view.selected_model);
+        writer.print(
+            ",\"canCreateTask\":{},\"errorCode\":\"{s}\",\"safeDiagnostic\":",
+            .{ view.can_create_task, @tagName(view.error_code) },
+        ) catch return error.SnapshotTooLarge;
+        try self.projectedJsonValue(writer, view.safe_diagnostic);
+        writer.print(
+            ",\"catalogGeneration\":\"{d}\",\"executionGeneration\":\"{d}\"}}",
+            .{ view.catalog_generation, view.execution_generation },
+        ) catch return error.SnapshotTooLarge;
     }
 
     pub fn deinit(self: *Workbench) void {
@@ -2676,6 +2761,17 @@ fn worstCaseSnapshotBytes(limits: Limits) ?usize {
     total = std.math.add(
         usize,
         total,
+        std.math.mul(
+            usize,
+            account_snapshot_text_bytes,
+            json_string_expansion,
+        ) catch return null,
+    ) catch return null;
+    total = std.math.add(usize, total, account_snapshot_overhead) catch
+        return null;
+    total = std.math.add(
+        usize,
+        total,
         std.math.mul(usize, limits.max_tasks, task_snapshot_overhead) catch return null,
     ) catch return null;
     const runs = std.math.mul(usize, limits.max_tasks, limits.max_runs_per_task) catch return null;
@@ -2771,7 +2867,7 @@ fn testWorkbench() !Workbench {
         .max_tool_field_bytes = 8 * 1024,
         .max_pending_ui_json_bytes = 64 * 1024,
         .max_pending_ui_requests = 2,
-        .max_snapshot_bytes = 1024 * 1024,
+        .max_snapshot_bytes = 4 * 1024 * 1024,
     }, .{});
     try installTestExecution(&workbench);
     workbench.revision = 0;
@@ -2834,7 +2930,7 @@ fn finalizeTestTerminalEvents(workbench: *Workbench) void {
     workbench.syncLifecycle();
 }
 
-test "Workbench snapshot serializer matches the Renderer v5 contract fixture" {
+test "Workbench snapshot serializer matches the Renderer v6 contract fixture" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
 
@@ -2846,6 +2942,15 @@ test "Workbench snapshot serializer matches the Renderer v5 contract fixture" {
         "\r\n",
     );
     try std.testing.expectEqualStrings(fixture, snapshot);
+    try std.testing.expect(
+        std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(u8, snapshot, "\"apiKey\"") == null,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(u8, snapshot, "\"baseUrl\"") == null,
+    );
 }
 
 test "Task metadata mutations preserve lifecycle guards and projection accounting" {
@@ -3307,6 +3412,64 @@ test "Workbench snapshot budget includes JSON escaping and structural overhead" 
     try std.testing.expect(snapshot.len > controls.len * 5);
 }
 
+fn installMaximumAccountProjection(workbench: *Workbench) !void {
+    const account_id: [account_contract.Limits.account_id_bytes]u8 =
+        @splat('a');
+    const display_name: [account_contract.Limits.display_name_bytes]u8 =
+        @splat('d');
+    const api_key_id: [account_contract.Limits.api_key_id_bytes]u8 =
+        @splat('k');
+    const api_key_name: [account_contract.Limits.api_key_name_bytes]u8 =
+        @splat('n');
+    const api_key_suffix: [account_contract.Limits.api_key_suffix_bytes]u8 =
+        @splat('s');
+    const model_id: [account_contract.Limits.model_id_bytes]u8 =
+        @splat('m');
+    const model_name: [account_contract.Limits.model_display_name_bytes]u8 =
+        @splat('v');
+    const diagnostic: [account_contract.Limits.safe_diagnostic_bytes]u8 =
+        @splat('x');
+    const api_keys = try std.testing.allocator.alloc(
+        account_contract.ApiKeyView,
+        account_contract.Limits.api_key_entries,
+    );
+    defer std.testing.allocator.free(api_keys);
+    for (api_keys) |*api_key| api_key.* = .{
+        .id = &api_key_id,
+        .name = &api_key_name,
+        .suffix = &api_key_suffix,
+    };
+    const models = try std.testing.allocator.alloc(
+        account_contract.ModelView,
+        account_contract.Limits.model_entries,
+    );
+    defer std.testing.allocator.free(models);
+    for (models) |*model| model.* = .{
+        .id = &model_id,
+        .display_name = &model_name,
+    };
+    workbench.commitAccountFactNoFail(.{
+        .kind = .catalog_changed,
+        .view = .{
+            .session_state = .authenticated,
+            .execution_state = .ready,
+            .operation = .none,
+            .account_id = &account_id,
+            .display_name = &display_name,
+            .api_keys = api_keys,
+            .models = models,
+            .selected_api_key_id = &api_key_id,
+            .selected_model = &model_id,
+            .can_create_task = false,
+            .error_code = .invalid_state,
+            .safe_diagnostic = &diagnostic,
+            .catalog_generation = std.math.maxInt(u64),
+            .execution_generation = std.math.maxInt(u64),
+        },
+    });
+    workbench.finishAccountCommitNoFail();
+}
+
 test "default snapshot budget contains the maximum structural projection" {
     const limits = Limits{};
     test_agent_runtime.io = std.testing.io;
@@ -3317,6 +3480,7 @@ test "default snapshot budget contains the maximum structural projection" {
         .{},
     );
     defer workbench.deinit();
+    try installMaximumAccountProjection(&workbench);
 
     for (0..limits.max_tasks) |task_index| {
         const execution_model = try workbench.copyBounded(

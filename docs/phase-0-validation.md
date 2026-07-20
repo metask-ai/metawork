@@ -1,6 +1,6 @@
 # MetaWork Phase 0 验证计划
 
-> 状态：Phase 0A Gate 0 至 Gate 7 已通过；Account Gate A1/B/C1/C2/D 已完成
+> 状态：Phase 0A Gate 0 至 Gate 7 已通过；Account Gate A1/B/C1/C2/D/E 已完成
 > 平台：Phase 0A macOS-first；Phase 0B 后续验证 Windows
 
 Phase 0 用最小真实原型验证技术栈和关键风险，不交付完整产品。当前 AgentCore development bundle 使用 ABI v1 revision 2；这是精确开发基线，不是 stable support policy。同步 baseline 不包含 async suspend/resume、跨进程恢复、strict Workspace security、正式 Host tools、typed Output/FileChange/plan-progress 或 plan/custom UI control。
@@ -404,7 +404,7 @@ Gate 4 通过时的 sink 只提供全局 event count 和单 event bytes 硬上�
 - 注入 snapshot serializer 中途失败，验证此前 descriptor 已 stale，不能读取被部分覆盖的 store；
 - 同时注入 revision emit 和 retry timer 失败，验证当前 generation fail closed；
 - snapshot 自动重试预算耗尽后不得继续产生 Bridge 请求，恢复必须由新 generation 或用户显式操作触发；
-- 以四个并发 pending UI request 计算 snapshot 最坏预算，并验证 512 KiB projection 可通过 8 MiB Host store 与 256 KiB 分块完整重建；
+- 以最大 Account catalog、512 KiB Task projection 和四个并发 pending UI request 计算 snapshot 最坏预算，并验证它们可通过 12 MiB Host store 与 256 KiB 分块完整重建；
 - snapshot 不包含 credential；
 - Host/AgentCore crash 不伪装为 reload recovery。
 - event delivery 失败前两阶段 batch 不 commit，断开后在新 generation 重发，不中止 Run；

@@ -42,7 +42,7 @@
 5. bounded executor 和排队策略属于 Workbench lifecycle，不下沉到 AgentCore 集成层；
 6. 产品 Task 与 bundle Session handle 使用不同命名，不靠注释解释两个 `session` 模块为什么没有重复所有权。
 
-产品边界已统一为 schema v5：Bridge/Renderer command 使用 `metawork.tasks.*`，产品 payload/result 使用 `taskId`，snapshot 根集合使用 `tasks`。内部 Agent Session route identity 只存在于 Agent 与隔离 transport fixture，不建立第二套可持久化产品 ID，也不提供 schema v4 兼容别名。
+产品边界已统一为 schema v6：snapshot 根节点由无 secret 的 `account` 与 `tasks` 构成；Account command 使用 `metawork.account.*` 并只提交给 App 注入的 `AccountCommandSink`，Task command 使用 `metawork.tasks.*`，产品 Task payload/result 使用 `taskId`。内部 Agent Session route identity 只存在于 Agent 与隔离 transport fixture，不建立第二套可持久化产品 ID，也不提供旧 schema 兼容别名。
 
 `app.zig` 定义 Native SDK App 与 callback，但 Native SDK runner 仍然拥有 Runtime 的构造和驱动，MetaWork 不再包一层替代 Runtime。
 

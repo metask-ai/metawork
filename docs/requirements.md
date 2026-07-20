@@ -88,7 +88,7 @@ Account 是 MetaWork 的 Metask 账号控制面，负责 OAuth 登录、账号/A
 - 后台 Task 的运行状态不能因 UI 切换而丢失；
 - 每条事件、审批和工具结果必须路由到正确 Task/Run；
 - 每个 Task 至多一个 non-terminal Run，包括 executor 中的 `queued` Run；当前 Run 结束前 Workbench 拒绝第二次提交，Renderer 只能保留未提交草稿；
-- Renderer 产品合同使用 schema v5：命令统一为 `metawork.tasks.*`，payload/result 使用 `taskId`，snapshot 根集合使用 `tasks`，应用关停 cause 使用 `app_shutdown`；不接受或双写 schema v4 的 `sessions.*`、`sessionId`、`sessions`、`host_shutdown` 别名；
+- Renderer 产品合同使用 schema v6：snapshot 根节点由严格的无 secret `account` 与 `tasks` 组成；Account 命令统一为 `metawork.account.*` 并只进入 App 注入的 `AccountCommandSink`，Task 命令统一为 `metawork.tasks.*`，payload/result 使用 `taskId`，应用关停 cause 使用 `app_shutdown`；不接受或双写 schema v5 及更早版本；
 - 内部 Agent/Gate 原始事件可以使用 Session route identity，但该身份不得进入产品 snapshot，也不与 Task 建立双 ID 体系。
 
 ### 5.4 Agent 交互

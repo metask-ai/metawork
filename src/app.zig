@@ -1243,6 +1243,7 @@ pub fn run(init: std.process.Init) !void {
     var dispatcher = try bridge_api.Dispatcher.init(
         std.heap.c_allocator,
         &workbench,
+        account_coordinator.commandSink(),
         app.dispatcherPlatform(),
         app.dispatcherAutomation(),
     );
