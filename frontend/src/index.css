@@ -260,6 +260,232 @@ summary::-webkit-details-marker {
   font-size: 10px;
 }
 
+.account-onboarding {
+  display: grid;
+  min-height: 0;
+  flex: 1;
+  padding: clamp(28px, 6vw, 72px);
+  overflow: auto;
+  place-items: center;
+  background:
+    linear-gradient(90deg, transparent 49.9%, rgba(216, 223, 223, 0.42) 50%),
+    var(--color-canvas);
+  background-size:
+    100% 100%,
+    auto;
+}
+
+.account-panel {
+  width: min(700px, 100%);
+  padding: clamp(24px, 4vw, 42px);
+  border: 1px solid var(--color-rule);
+  border-radius: 18px 18px 18px 5px;
+  background: rgba(251, 252, 252, 0.98);
+  box-shadow: 0 24px 70px rgba(24, 50, 71, 0.08);
+}
+
+.account-panel.is-compact {
+  width: auto;
+  margin-top: 22px;
+  padding: 13px 12px;
+  border-radius: 11px 11px 11px 4px;
+  background: rgba(255, 255, 255, 0.62);
+  box-shadow: none;
+}
+
+.account-panel-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.account-panel h2 {
+  margin: 6px 0 0;
+  font-family: var(--font-display);
+  font-size: clamp(27px, 4vw, 43px);
+  font-weight: 500;
+  letter-spacing: -0.035em;
+  line-height: 1.02;
+}
+
+.account-panel.is-compact h2 {
+  margin-top: 3px;
+  overflow: hidden;
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-readiness {
+  flex: 0 0 auto;
+  padding: 3px 7px;
+  border: 1px solid var(--color-amber);
+  border-radius: 999px;
+  color: var(--color-amber-ink);
+  font-family: var(--font-mono);
+  font-size: 9px;
+}
+
+.account-readiness[data-ready="true"] {
+  border-color: var(--color-live);
+  color: var(--color-live);
+}
+
+.account-intro {
+  max-width: 570px;
+  margin: 18px 0 0;
+  color: var(--color-muted);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.account-track {
+  display: grid;
+  margin: 30px 0 26px;
+  padding: 0;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  list-style: none;
+}
+
+.account-track li {
+  position: relative;
+  display: grid;
+  gap: 8px;
+  color: var(--color-muted);
+  font-size: 10px;
+}
+
+.account-track li::before {
+  position: absolute;
+  top: 5px;
+  right: 50%;
+  left: -50%;
+  height: 1px;
+  background: var(--color-rule);
+  content: "";
+}
+
+.account-track li:first-child::before {
+  display: none;
+}
+
+.account-step-mark {
+  z-index: 1;
+  display: grid;
+  width: 11px;
+  height: 11px;
+  border: 2px solid var(--color-rule);
+  border-radius: 50%;
+  background: var(--color-paper);
+  font-family: var(--font-mono);
+  font-size: 7px;
+  font-weight: 700;
+  line-height: 1;
+  place-items: center;
+}
+
+.account-track li[data-state="done"] > .account-step-mark {
+  border-color: var(--color-live);
+  color: var(--color-canvas);
+  background: var(--color-live);
+}
+
+.account-track li[data-state="current"] > .account-step-mark,
+.account-track li[data-state="working"] > .account-step-mark {
+  border-color: var(--color-cobalt);
+  box-shadow: 0 0 0 4px rgba(47, 116, 130, 0.12);
+}
+
+.account-track li[data-state="done"],
+.account-track li[data-state="current"],
+.account-track li[data-state="working"] {
+  color: var(--color-graphite);
+}
+
+.account-fields {
+  display: grid;
+  margin-top: 16px;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.account-panel.is-compact .account-fields {
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
+
+.account-fields label {
+  display: grid;
+  gap: 5px;
+  color: var(--color-muted);
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.account-fields select {
+  width: 100%;
+  min-width: 0;
+  height: 36px;
+  padding: 0 30px 0 9px;
+  border: 1px solid var(--color-rule);
+  border-radius: 8px;
+  color: var(--color-graphite);
+  background: var(--color-canvas);
+  font-size: 11px;
+}
+
+.account-error,
+.account-restart,
+.account-working {
+  margin: 16px 0 0;
+  color: var(--color-muted);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.account-error {
+  display: grid;
+  padding: 10px 11px;
+  gap: 3px;
+  border-left: 3px solid var(--color-danger);
+  background: #faf2f2;
+}
+
+.account-error strong {
+  color: var(--color-danger);
+}
+
+.account-actions {
+  display: flex;
+  margin-top: 14px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.account-panel.is-compact .primary-button {
+  margin-top: 12px;
+}
+
+@media (max-width: 720px) {
+  .account-onboarding {
+    padding: 18px;
+    place-items: start stretch;
+  }
+
+  .account-panel {
+    padding: 22px;
+  }
+
+  .account-fields {
+    grid-template-columns: 1fr;
+  }
+}
+
 .section-label {
   margin: 0;
   color: var(--color-muted);

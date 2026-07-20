@@ -24,7 +24,7 @@
     "package:macos": "npm run build:release && node scripts/clean-macos-package.mjs && native package --target macos --assets frontend/dist && node scripts/verify-macos-package.mjs",
     "test:agentcore-bundle": "node --test scripts/agentcore-bundle.test.mjs",
     "test:architecture": "node --test scripts/architecture-boundaries.test.mjs scripts/native-automation-isolation.test.mjs",
-    "test:renderer-runtime": "node --experimental-strip-types --test scripts/approval-state.test.mjs scripts/composer-render.test.mjs scripts/event-delivery.test.mjs scripts/first-task-flow.test.mjs scripts/frontend-boundaries.test.mjs scripts/i18n.test.mjs scripts/snapshot-client.test.mjs scripts/snapshot-demand.test.mjs scripts/workbench-connection.test.mjs scripts/workbench-contract.test.mjs scripts/workbench-navigation.test.mjs scripts/workbench-store.test.mjs",
+    "test:renderer-runtime": "node --experimental-strip-types --test scripts/account-panel.test.mjs scripts/approval-state.test.mjs scripts/composer-render.test.mjs scripts/event-delivery.test.mjs scripts/first-task-flow.test.mjs scripts/frontend-boundaries.test.mjs scripts/i18n.test.mjs scripts/snapshot-client.test.mjs scripts/snapshot-demand.test.mjs scripts/workbench-connection.test.mjs scripts/workbench-contract.test.mjs scripts/workbench-navigation.test.mjs scripts/workbench-store.test.mjs",
     "probe:agentcore": "node scripts/run-agentcore-probe.mjs",
     "test:lifecycle": "node scripts/run-lifecycle-tests.mjs",
     "test:agentcore-sdk": "node scripts/run-agentcore-sdk-tests.mjs",
