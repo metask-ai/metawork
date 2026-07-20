@@ -1,48 +1,41 @@
 # MetaWork AgentCore 集成契约
 
-> 状态：Phase 0A Gate 6 同进程垂直链路与 Gate 7 fault-domain 对照均已通过；后续正式方向选择单 AgentCore Worker
-> 依赖：metacodes AgentCore bundle `0.0.0-dev+36637f314c0f`，ABI v1 revision 2
+> 状态：Phase 0A revision 2 历史链路与 Gate 7 fault-domain 对照均已通过；revision 3 hard-cut 目标已批准、当前 checkout 尚待完成迁移 Gate；后续正式方向选择单 AgentCore Worker
+> 目标依赖：metask AgentCore ABI v1 revision 3；精确 artifact identity 见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)
 
-本文定义 MetaWork `agent/` 执行子系统与 cc-zig 之间的规范边界。Desktop Host 的 composition、Workbench 产品状态和 Bridge transport 见 [高层架构](architecture.md)，当前预编译库能力见 [AgentCore ABI v1 消费基线](agentcore-abi-v1.md)。
+本文定义 MetaWork `agent/` 执行子系统与 metacodes AgentCore 之间的规范边界。Desktop Host 的 composition、Workbench 产品状态和 Bridge transport 见 [高层架构](architecture.md)，revision 3 目标能力见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。
 
 ## 1. 集成原则
 
-1. cc-zig 是 Agent 结构化协议的唯一来源；
+1. metacodes AgentCore bundle SDK 是 Agent 结构化协议的唯一来源；
 2. MetaWork 不解析模型 Provider SSE；
 3. MetaWork 不建立平行的 `AgentEvent` / `WorkbenchEvent` 体系；
 4. MetaWork 正式 Agent module 只使用 bundle typed SDK 和 binary ABI；
 5. AgentCore/tool callback 不直接调用 WebView；
 6. MetaWork 只补充产品路由、生命周期、所有权、传输 envelope 和安全校验；
-7. 当前产品路径只使用 cc-zig built-in tools，不注册 v1 Host tools；
+7. 当前产品路径只使用 AgentCore built-in tools，不注册 v1 Host tools；
 8. 当前 UI request 是同步调用，不伪装成 async suspend/resume；
 9. 进程模型变化不得改变 Renderer 看到的产品边界。
 
 ## 2. Bundle 消费合同
 
-MetaWork 的依赖输入是一个完整 bundle，而不是 cc-zig source tree：
+MetaWork 的依赖输入是一个完整 bundle，而不是 metacodes source tree。精确 artifact identity、payload whitelist 和 manifest schema 只由 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)定义；本文只定义 candidate、staging、build graph 和 Host 生命周期。
 
-```text
-AgentCore bundle
-├── lib/libmetacodes_agentcore.a
-├── include/metacodes_agentcore.h
-├── sdk/metacodes_agentcore.zig
-├── sdk/metacodes_agentcore_protocol.zig
-├── sdk/metacodes_agentcore_types.zig
-└── manifest
-```
+### revision 3 开发期 bootstrap
 
-### 当前 bootstrap
-
-- cc-zig 独立构建并测试 bundle；
-- MetaWork 通过显式绝对 bundle root 消费；
-- 依赖配置锁定 build identity、commit、target、toolchain、ABI version/revision 和 checksum；
-- 常规 build/test/package 不访问 cc-zig source tree；
+- metacodes 独立构建并测试 bundle，candidate 直接取自本机 `metacodes/zig-out/agentcore/aarch64-macos`；
+- candidate probe 与 `agentcore:stage` 使用显式绝对 bundle root；正式 build/test/package 只消费 `.agentcore/bundle`；
+- repository lock 保存完整 revision 3 manifest，并锁定 package/source、target、toolchain、ABI version/revision、link inputs 和所有 payload checksum；
+- stager 只复制 manifest whitelist；捕获到的复制/rename 错误必须恢复旧 canonical bundle。当前内部开发不承诺跨进程 crash transaction 或并发 build/stage，强制中断后的残留由再次执行 stage 清理；
+- staged bundle 在正式 build 前由 MetaWork verifier 再校验；官方 Zig package 只负责 module/link graph，不承担 repository lock 和 checksum 信任政策；
+- 由于 Zig 会在执行 root build verification 前解析 staged path dependency，正式 `dev/check/test/build/package` 必须先运行轻量 `agentcore:verify-staged` preflight，给出明确的缺包或 lock mismatch 错误；Zig build-time verifier 仍负责最终 build correctness；
+- 常规 build/test/package 不访问 metacodes source tree 或 `zig-out`；
 - artifact 缺失、target 不匹配或 checksum 错误时明确失败；
 - 禁止 path/Git source dependency、源码复制、`latest`、版本范围、可变 tag 和 source fallback。
 
-当前 development ABI v1 revision 2 manifest 只消费锁定 bundle 的现行字段布局：`source.commit`、带 `abi` 的 build identity、`contract.binary_abi_version = 1`、`contract.binary_abi_revision = 2`，以及 `{path, sha256}` 组成的 `files` 数组。MetaWork 不保留旧字段名、旧 object-shaped `files`、旧 ABI revision 或双格式 fallback；上游协议变化与 lock、validator、stager 和 build graph 原子升级。
+stager 与 verifier 只接受 ABI 消费合同定义的 schema 1 revision 3 manifest。MetaWork 不保留 revision 2 字段、目录、symbol、module alias 或双格式 parser。
 
-当前不先实现 dependency resolver 或 content-addressed cache。同步 baseline 通过后，本地 cache 与远程 artifact repository 必须复用同一 bundle layout 和校验规则，不能改变 AgentCore 链接方式。
+当前内部初步开发不实现 dependency resolver、content-addressed cache、artifact repository 或跨机器自动分发。这个限制意味着开发 checkout 需要本机 metacodes 构建输出；它是明确的开发期前提，不得伪装成公司发布方案。
 
 ### raw probe 与正式 Agent module
 
@@ -53,12 +46,12 @@ AgentCore bundle
 - 不能成为产品状态映射或 UI JSON 解析实现；
 - 不能注册到 React/Native SDK 正式链路。
 
-当前 clean bundle `36637f314c0f1c41bb1a2267ced7ad6a46100003` 提供 typed status、六个 StopReason、known/unknown observation decoder、`UiRequest` decoder、request-aware `UiResponse` encoder，以及 callback-scoped validated `RunContext`。正式 `agent/` 直接使用这些表面；MetaWork 不手写 raw enum、tag switch、identity layout 或 JSON schema。
+revision 3 bundle 保持 typed status、六个 StopReason、known/unknown observation decoder、`UiRequest` decoder、request-aware `UiResponse` encoder，以及 callback-scoped validated `RunContext`。正式 `agent/` 直接使用官方 `bindings/zig` package 暴露的表面；MetaWork 不手写 raw enum、tag switch、identity layout、JSON schema 或 SDK module/link graph。
 
 ### MetaWork module boundary
 
 - `src/agent.zig` 是 Agent 执行层的 named module root；
-- `src/agent/` 直接消费 `metacodes_agentcore`，不得 import Workbench、Bridge 或 App；
+- `src/agent/` 直接消费唯一 `metask_agentcore` module，不得 import Workbench、Bridge 或 App；
 - App 不再直接 discover AgentCore ABI；`agent.Runtime.init()` 在 Agent 边界内完成 bundle SDK discovery，raw function-table injection 只保留给隔离测试；
 - Workbench 只通过 `metawork_agent` 公共表面协调 Session/Run，并消费 SDK-validated `OwnedCoreEvent`/UI types；这不是复制一套 `AgentEvent`/UI schema；
 - Bridge DTO 使用 Bridge-owned transport enum，由 App 显式映射到 Agent UI response，不返回 SDK enum、owner 或 handle；
@@ -77,13 +70,13 @@ AgentCore bundle
 | `RunResult`       | Core → Host | status OK 后才有效；包含 stop reason code、turn/tool count                       |
 | abort             | Host → Core | 按 Session/Run 的 user/timeout 中断机制                                          |
 
-`UiEvent` / `UiBackend.poll()` 虽然存在于 cc-zig native 协议中，但当前生产 agent loop 未证明消费。MetaWork 不依赖它完成 stop、生成期 queue message 或 steering。
+`UiEvent` / `UiBackend.poll()` 虽然存在于 metacodes native 协议中，但当前生产 agent loop 未证明消费。MetaWork 不依赖它完成 stop、生成期 queue message 或 steering。
 
 当前 ABI `RunResult` 不包含 `SuspendInfo`、resume token、background handle 或 budget stop。unknown stop code 在 SDK validation 层失败；Host 不能制造这些产品状态。
 
 ## 4. Agent binding
 
-Agent binding 是 cc-zig backend 的 ABI 消费者，不是 Native SDK Adapter。它直接持有 bundle SDK API table 和 opaque handles。
+Agent binding 是 metacodes AgentCore 的 ABI 消费者，不是 Native SDK Adapter。它直接持有 bundle SDK API table 和 opaque handles。
 
 ### Event callback
 
@@ -132,15 +125,15 @@ Bridge handler 只写入 response channel，不同步等待 AgentCore。callback
 
 callback admission 只建立 lifetime 与当时的 identity 事实，不保证等待期间不会有另一个并发 callback 发现 identity 漂移。因此 Host 在发布 UI request 前和最终提取 response 的线性化点都必须在同一 Session lock 下重新检查现有 Core identity 与 dependency-contract 状态。检查失败时返回 UI fatal；如果 Renderer response 已完成编码但 ownership 尚未转移给 Core，Host 必须自行释放，禁止返回 answered。
 
-当前 ABI v1 revision 2 的 `UiRequest` / `UiResponse` 只有 `ask_question`/`answers` 与 `permission`。旧 experimental bundle 的 `plan_approval` 和 `custom` 已从 Host、Bridge、Renderer 与测试移除；未来控制消息扩展需要新的 ABI revision/version。
+目标 ABI v1 revision 3 的 `UiRequest` / `UiResponse` 只有 `ask_question`/`answers` 与 `permission`。更早 experimental bundle 的 `plan_approval` 和 `custom` 已从 Host、Bridge、Renderer 与测试移除；未来控制消息扩展需要新的 ABI revision/version。
 
 ### Host tools
 
-revision 2 的 Host tool callback 同样携带 validated `RunContext`，但这只补齐 wire identity，不自动建立 MetaWork 的产品工具、安全与路由政策。当前产品 Runtime 配置仍必须保持 `host_tool_count = 0`，Read/Bash/Edit 使用 built-in tool catalog；启用正式 Host tools 属于独立 capability Gate，不在本次 ABI 迁移中顺带开放。
+目标 revision 3 的 Host tool callback 同样携带 validated `RunContext`，但这只补齐 wire identity，不自动建立 MetaWork 的产品工具、安全与路由政策。当前产品 Runtime 配置仍必须保持 `host_tool_count = 0`，Read/Bash/Edit 使用 built-in tool catalog；启用正式 Host tools 属于独立 capability Gate，不在本次 ABI 迁移中顺带开放。
 
 ## 5. Host envelope 与产品状态
 
-Host 可以在 cc-zig event 外增加产品路由 envelope：
+Host 可以在 AgentCore event 外增加产品路由 envelope：
 
 ```json
 {
@@ -160,7 +153,7 @@ Host 可以在 cc-zig event 外增加产品路由 envelope：
 
 其中：
 
-- `event` 保持 cc-zig 语义，不复制为另一套 Agent event；
+- `event` 保持 AgentCore 语义，不复制为另一套 Agent event；
 - workspace/session/run ID 属于 MetaWork 产品路由；
 - `sequence` 是 Host 的单 Session/Run 传输序列；
 - Host 可以维护 `run.started/completed/stopped/failed/cancelled/interrupted/waiting_ui` 等产品生命周期状态；
@@ -196,7 +189,7 @@ Open.*
 - callback context 与 Session handle 具有独立 lifetime guard；
 - Run 返回不等于可以立刻 free callback context，必须确认 callback refcount 为零。
 
-Gate 2 的 raw lifecycle foundation 使用 bundle SDK 提供的精确 `ApiV1` table 作为可注入依赖，并显式接收 Zig `std.Io` 来实现 mutex/condition；它不导入 cc-zig source tree，也不建立 Adapter。`submit` 在持有 Session lock 时完成 bounded executor enqueue，避免 enqueue 与 close 之间出现未入队的悬空 `Queued` 状态。Core callback 在 `Closing` 后不得再取得新的 lifetime reference；已经进入的 callback 必须在 destroy 前归零。
+Gate 2 的 raw lifecycle foundation 使用 bundle SDK 提供的精确 `ApiV1` table 作为可注入依赖，并显式接收 Zig `std.Io` 来实现 mutex/condition；它不导入 metacodes source tree，也不建立 Adapter。`submit` 在持有 Session lock 时完成 bounded executor enqueue，避免 enqueue 与 close 之间出现未入队的悬空 `Queued` 状态。Core callback 在 `Closing` 后不得再取得新的 lifetime reference；已经进入的 callback 必须在 destroy 前归零。
 
 Gate 4 在同一状态机上直接加入 bundle typed SDK，不另建 Adapter：event callback 先校验并形成 SDK-owned parse owner，再以单调 Host Session ID 和 Run ID 进入 FIFO bounded sink；UI callback 保留校验后的 request owner，response 只由 request-aware SDK encoder 生成。同步 UI deadline 使用 Host `std.Io` future，response、cancel、close、shutdown 或 deadline 都在 callback 返回前收敛并回收 timer。
 
@@ -320,15 +313,15 @@ flowchart LR
 
 ### 过载语义
 
-| 数据                            | 允许策略                                                          |
-| ------------------------------- | ----------------------------------------------------------------- |
-| `text_chunk`                    | 当前逐项保留；若后续按 Session/Run 合并，最终字节必须一致         |
-| `tool_progress`                 | pump 逐项保留；Renderer projection 按同一 tool 覆盖旧进度         |
-| `usage`                         | pump 逐项保留；Renderer projection 根据 cc-zig 事件语义累计或替换 |
-| diagnostics                     | 按明确配置采样                                                    |
-| tool start/result               | 不得静默丢失                                                      |
-| UI request/response state       | 不得静默丢失                                                      |
-| run/error/cancel/terminal state | 不得静默丢失                                                      |
+| 数据                            | 允许策略                                                             |
+| ------------------------------- | -------------------------------------------------------------------- |
+| `text_chunk`                    | 当前逐项保留；若后续按 Session/Run 合并，最终字节必须一致            |
+| `tool_progress`                 | pump 逐项保留；Renderer projection 按同一 tool 覆盖旧进度            |
+| `usage`                         | pump 逐项保留；Renderer projection 根据 AgentCore 事件语义累计或替换 |
+| diagnostics                     | 按明确配置采样                                                       |
+| tool start/result               | 不得静默丢失                                                         |
+| UI request/response state       | 不得静默丢失                                                         |
+| run/error/cancel/terminal state | 不得静默丢失                                                         |
 
 当前没有完整最终 assistant snapshot 时，`text_chunk` 不能丢。队列不能接收关键事件时，可以有限阻塞 callback；达到 deadline 后返回 fatal，而不是无限等待。
 
@@ -417,7 +410,7 @@ ABI status 新增 `resource_limit`。它与 pre-admission `invalid_argument`、`
 - 不从 Renderer command 接收 key；
 - 不写日志、event、snapshot、crash diagnostic 或持久化 view；
 - Host 临时 buffer 在不再需要时及时清理；
-- cc-zig 是否复制并如何清理 Session credential 以锁定 bundle contract 为准。
+- AgentCore 是否复制并如何清理 Session credential 以锁定 bundle contract 为准。
 
 ### Workspace
 
