@@ -17,6 +17,9 @@ const agent_event_retry_interval: std.Io.Duration = .fromMilliseconds(5);
 const agent_event_notification_timeout: std.Io.Duration = .fromMilliseconds(50);
 const host_worker_count = 4;
 const workbench_snapshot_capacity = bridge_api.snapshot_max_bytes;
+const account_refresh_timer_id: u64 = 0x4d57_4143_4354_5246;
+const account_refresh_skew_seconds: i64 = 60;
+const account_refresh_retry_ns: u64 = 30 * std.time.ns_per_s;
 const FrontendMode = bridge_api.policy.Mode;
 
 const AccountEffectQueue = struct {
@@ -66,13 +69,26 @@ const AccountEffects = struct {
             attempt_id: u64,
             result: account_api.LoginAttempt.WorkerResult,
         },
+        refresh: struct {
+            attempt_id: u64,
+            rotation: account_api.CredentialRotation,
+        },
         completion: account_api.WorkerCompletion,
 
         fn deinit(self: *MailboxResult) void {
             switch (self.*) {
                 .login => |*entry| entry.result.deinit(),
+                .refresh => |*entry| entry.rotation.deinit(),
                 .completion => |*completion| completion.deinit(),
             }
+        }
+
+        fn attemptId(self: *const MailboxResult) u64 {
+            return switch (self.*) {
+                .login => |entry| entry.attempt_id,
+                .refresh => |entry| entry.attempt_id,
+                .completion => |completion| completion.attempt_id,
+            };
         }
     };
 
@@ -81,10 +97,13 @@ const AccountEffects = struct {
     wake: account_api.WakeSink,
     transport: account_api.MetaskClient.StdHttpTransport,
     queue: AccountEffectQueue = .{},
+    catalog: account_api.Catalog.CatalogSession,
+    public_catalog: account_api.Catalog.PublicCatalog = .{},
     mailbox_mutex: std.Io.Mutex = .init,
     mailbox: ?MailboxResult = null,
     login_attempt: account_api.LoginAttempt.LoginAttempt = .{},
     login_active: bool = false,
+    network_attempt: account_api.NetworkAttempt.NetworkAttempt = .{},
     fatal_wake_failure: bool = false,
 
     fn init(
@@ -97,11 +116,18 @@ const AccountEffects = struct {
             .io = io,
             .wake = wake,
             .transport = .{ .allocator = allocator, .io = io },
+            .catalog = .init(allocator),
         };
     }
 
     fn sink(self: *AccountEffects) account_api.EffectSink {
         return self.queue.sink();
+    }
+
+    fn clientTransport(
+        self: *AccountEffects,
+    ) account_api.MetaskClient.Transport {
+        return self.transport.transport();
     }
 
     fn loginSink(
@@ -145,6 +171,39 @@ const AccountEffects = struct {
         self.mailbox = .{ .completion = completion };
         self.unlockMailbox();
         self.notifyOrLatchFatal();
+    }
+
+    fn networkSink(
+        self: *AccountEffects,
+    ) account_api.NetworkAttempt.ResultSink {
+        return .{ .context = self, .publish_fn = publishNetworkResult };
+    }
+
+    fn publishNetworkResult(
+        context: *anyopaque,
+        attempt_id: u64,
+        result: *account_api.NetworkAttempt.Result,
+    ) bool {
+        const self: *AccountEffects = @ptrCast(@alignCast(context));
+        self.lockMailbox();
+        if (self.mailbox != null) {
+            self.unlockMailbox();
+            return false;
+        }
+        self.mailbox = switch (result.take()) {
+            .refresh => |rotation| .{ .refresh = .{
+                .attempt_id = attempt_id,
+                .rotation = rotation,
+            } },
+            .completion => |completion| .{ .completion = completion },
+            .consumed => {
+                self.unlockMailbox();
+                return false;
+            },
+        };
+        self.unlockMailbox();
+        self.notifyOrLatchFatal();
+        return true;
     }
 
     fn replaceWithFailure(
@@ -208,11 +267,105 @@ const AccountEffects = struct {
         };
     }
 
-    fn cancelLogin(self: *AccountEffects, attempt_id: u64) void {
+    fn startRefresh(
+        self: *AccountEffects,
+        attempt_id: u64,
+        credentials: *const account_api.CredentialOwner,
+        now_unix_seconds: i64,
+    ) void {
+        self.network_attempt.startRefresh(
+            self.allocator,
+            self.io,
+            attempt_id,
+            self.clientTransport(),
+            credentials,
+            self.networkSink(),
+            now_unix_seconds,
+        ) catch {
+            self.publishCompletion(.{
+                .attempt_id = attempt_id,
+                .payload = .{ .failed = .fromCode(
+                    .local_resource_exhausted,
+                ) },
+            });
+        };
+    }
+
+    fn startLoadApiKeys(
+        self: *AccountEffects,
+        attempt_id: u64,
+        credentials: *const account_api.CredentialOwner,
+        identity: account_api.AccountIdentity,
+    ) void {
+        self.network_attempt.startLoadApiKeys(
+            self.allocator,
+            self.io,
+            attempt_id,
+            self.clientTransport(),
+            credentials,
+            identity,
+            &self.catalog,
+            self.networkSink(),
+        ) catch {
+            self.publishCompletion(.{
+                .attempt_id = attempt_id,
+                .payload = .{ .failed = .fromCode(
+                    .local_resource_exhausted,
+                ) },
+            });
+        };
+    }
+
+    fn startLoadModels(
+        self: *AccountEffects,
+        attempt_id: u64,
+        api_key_id: []const u8,
+    ) void {
+        self.network_attempt.startLoadModels(
+            self.allocator,
+            self.io,
+            attempt_id,
+            self.clientTransport(),
+            &self.catalog,
+            api_key_id,
+            self.networkSink(),
+        ) catch {
+            self.publishCompletion(.{
+                .attempt_id = attempt_id,
+                .payload = .{ .failed = .fromCode(
+                    .local_resource_exhausted,
+                ) },
+            });
+        };
+    }
+
+    fn cancelAttemptAndDiscard(
+        self: *AccountEffects,
+        attempt_id: u64,
+    ) void {
+        const clear_private_catalog =
+            self.network_attempt.matches(attempt_id) and
+            self.network_attempt.isCatalog();
         if (!self.login_active or
             self.login_attempt.attempt_id != attempt_id)
-            return;
-        self.login_attempt.cancel();
+        {
+            if (self.network_attempt.matches(attempt_id)) {
+                self.network_attempt.cancel();
+                self.network_attempt.join();
+                self.network_attempt.deinit();
+            }
+        } else {
+            self.login_attempt.cancel();
+            self.joinLogin();
+        }
+        if (self.takeMailbox()) |value| {
+            var stale = value;
+            if (stale.attemptId() != attempt_id)
+                @panic("Account cancel discarded another attempt");
+            stale.deinit();
+        }
+        _ = self.takeFatal();
+        if (clear_private_catalog) self.catalog.reset();
     }
 
     fn joinLogin(self: *AccountEffects) void {
@@ -222,21 +375,45 @@ const AccountEffects = struct {
         self.login_active = false;
     }
 
+    fn joinNetwork(self: *AccountEffects, attempt_id: u64) void {
+        if (!self.network_attempt.matches(attempt_id)) return;
+        self.network_attempt.join();
+        self.network_attempt.deinit();
+    }
+
     fn cancelJoinAndDiscard(self: *AccountEffects) void {
         if (self.login_active) {
             self.login_attempt.cancel();
             self.joinLogin();
         }
+        if (self.network_attempt.started) {
+            self.network_attempt.cancel();
+            self.network_attempt.join();
+            self.network_attempt.deinit();
+        }
         if (self.takeMailbox()) |value| {
             var discarded = value;
             discarded.deinit();
         }
+        _ = self.takeFatal();
+        self.catalog.reset();
+        self.public_catalog.clear();
     }
 
     fn deinit(self: *AccountEffects) void {
         self.cancelJoinAndDiscard();
         std.debug.assert(self.queue.entry == null);
+        self.catalog.deinit();
         self.* = undefined;
+    }
+
+    fn publishCatalogNoFail(self: *AccountEffects) void {
+        self.public_catalog.replaceFromSession(&self.catalog);
+    }
+
+    fn clearCatalog(self: *AccountEffects) void {
+        self.catalog.reset();
+        self.public_catalog.clear();
     }
 
     fn notifyOrLatchFatal(self: *AccountEffects) void {
@@ -266,18 +443,21 @@ const AccountEffects = struct {
 const AccountCoordinator = struct {
     account: account_api.Account = .initRestoring(),
     workbench: *workbench_api.Workbench,
+    public_catalog: *account_api.Catalog.PublicCatalog,
     effects: account_api.EffectSink,
     effect_commit_hook: AccountEffectCommitHook,
     main_thread_id: std.Thread.Id,
 
     fn init(
         workbench: *workbench_api.Workbench,
+        public_catalog: *account_api.Catalog.PublicCatalog,
         effects: account_api.EffectSink,
         effect_commit_hook: AccountEffectCommitHook,
         main_thread_id: std.Thread.Id,
     ) AccountCoordinator {
         return .{
             .workbench = workbench,
+            .public_catalog = public_catalog,
             .effects = effects,
             .effect_commit_hook = effect_commit_hook,
             .main_thread_id = main_thread_id,
@@ -382,6 +562,30 @@ const AccountCoordinator = struct {
         }
     }
 
+    fn executionPersistenceUnknown(self: *AccountCoordinator) void {
+        self.assertMainThread();
+        std.debug.assert(self.workbench.executionReplacementPending());
+        const prepared = self.account.prepareExecutionPersistenceUnknown();
+        switch (prepared) {
+            .transition => |value| {
+                const committed = self.commitTransition(value);
+                std.debug.assert(committed.accepted);
+            },
+            .rejected, .ignored_stale => @panic(
+                "execution persistence outcome lost its active attempt",
+            ),
+        }
+    }
+
+    fn refreshToken(self: *AccountCoordinator) bool {
+        self.assertMainThread();
+        const prepared = self.account.prepareTokenRefresh();
+        return switch (prepared) {
+            .transition => |value| self.commitTransition(value).accepted,
+            .rejected, .ignored_stale => false,
+        };
+    }
+
     fn commitTransition(
         self: *AccountCoordinator,
         prepared_value: account_api.PreparedTransition,
@@ -396,7 +600,8 @@ const AccountCoordinator = struct {
             }
         }
 
-        const fact = prepared.fact();
+        var fact = prepared.fact();
+        self.public_catalog.decorate(&fact.view);
         self.workbench.commitAccountFactNoFail(fact);
         if (prepared.takeExecution()) |execution_value| {
             var execution = execution_value;
@@ -591,6 +796,7 @@ const App = struct {
             },
         }
         self.retryAccountCleanup();
+        self.scheduleAccountRefresh();
     }
 
     fn startAutomationAccount(
@@ -617,7 +823,57 @@ const App = struct {
         }
     }
 
+    fn scheduleAccountRefresh(self: *@This()) void {
+        const services = self.platform_services orelse return;
+        const expires_at = self.account_credentials.expiresAt() orelse {
+            services.cancelTimer(account_refresh_timer_id) catch {};
+            return;
+        };
+        const now = wallUnixSeconds(self.io) orelse return;
+        const refresh_at = expires_at -|
+            account_refresh_skew_seconds;
+        if (refresh_at <= now) {
+            if (self.account_coordinator) |coordinator|
+                if (coordinator.refreshToken()) return;
+            services.startTimer(
+                account_refresh_timer_id,
+                account_refresh_retry_ns,
+                false,
+            ) catch {};
+            return;
+        }
+        const seconds: u64 = @intCast(refresh_at - now);
+        const interval_ns = std.math.mul(
+            u64,
+            seconds,
+            std.time.ns_per_s,
+        ) catch std.math.maxInt(u64);
+        services.startTimer(
+            account_refresh_timer_id,
+            @max(interval_ns, 1),
+            false,
+        ) catch {};
+    }
+
+    fn onAccountRefreshTimer(self: *@This()) void {
+        const coordinator = self.account_coordinator orelse return;
+        if (coordinator.refreshToken()) return;
+        if (!self.account_credentials.available()) return;
+        if (self.platform_services) |services|
+            services.startTimer(
+                account_refresh_timer_id,
+                account_refresh_retry_ns,
+                false,
+            ) catch {};
+    }
+
+    fn cancelAccountRefreshTimer(self: *@This()) void {
+        if (self.platform_services) |services|
+            services.cancelTimer(account_refresh_timer_id) catch {};
+    }
+
     fn deinitAccountPlatform(self: *@This()) void {
+        self.cancelAccountRefreshTimer();
         self.account_credentials.deinit();
         if (self.account_platform) |*platform| platform.deinit();
         self.account_platform = null;
@@ -635,6 +891,7 @@ const App = struct {
         const coordinator = self.account_coordinator orelse
             @panic("Account coordinator is not composed");
         const entry = effects.queue.take() orelse return;
+        const effect_argument = entry.effect.argument();
         switch (entry.effect) {
             .begin_oauth => {
                 const attempt_id = entry.attempt_id orelse
@@ -665,7 +922,7 @@ const App = struct {
                     now_unix_seconds,
                 );
             },
-            .cancel_attempt => |attempt_id| effects.cancelLogin(attempt_id),
+            .cancel_attempt => |attempt_id| effects.cancelAttemptAndDiscard(attempt_id),
             .persist_signed_out_tombstone => {
                 const attempt_id = entry.attempt_id orelse
                     @panic("logout effect has no attempt");
@@ -703,6 +960,8 @@ const App = struct {
                         return;
                     };
                 self.account_credentials.clear();
+                self.cancelAccountRefreshTimer();
+                effects.clearCatalog();
                 self.account_credentials.setCleanupPending(
                     cleanup_pending,
                 );
@@ -715,21 +974,254 @@ const App = struct {
             .shutdown => {
                 effects.cancelJoinAndDiscard();
             },
-            .refresh_token,
-            .load_api_keys,
-            .load_models,
-            .prepare_execution,
-            => {
+            .refresh_token => {
                 const attempt_id = entry.attempt_id orelse
-                    @panic("Account worker effect has no attempt");
-                effects.publishCompletion(.{
-                    .attempt_id = attempt_id,
-                    .payload = .{ .failed = .fromCode(
-                        .dependency_contract_invalid,
-                    ) },
-                });
+                    @panic("token refresh effect has no attempt");
+                if (!self.account_credentials.available()) {
+                    effects.publishCompletion(.{
+                        .attempt_id = attempt_id,
+                        .payload = .{ .failed = .fromCode(
+                            .credential_store_read_failed,
+                        ) },
+                    });
+                    return;
+                }
+                const now_unix_seconds = wallUnixSeconds(self.io) orelse {
+                    effects.publishCompletion(.{
+                        .attempt_id = attempt_id,
+                        .payload = .{ .failed = .fromCode(
+                            .dependency_contract_invalid,
+                        ) },
+                    });
+                    return;
+                };
+                effects.startRefresh(
+                    attempt_id,
+                    &self.account_credentials,
+                    now_unix_seconds,
+                );
+            },
+            .load_api_keys => {
+                const attempt_id = entry.attempt_id orelse
+                    @panic("API Key effect has no attempt");
+                if (!self.account_credentials.available()) {
+                    effects.publishCompletion(.{
+                        .attempt_id = attempt_id,
+                        .payload = .{ .failed = .fromCode(
+                            .credential_store_read_failed,
+                        ) },
+                    });
+                    return;
+                }
+                const identity = coordinator.account.currentIdentity() orelse {
+                    effects.publishCompletion(.{
+                        .attempt_id = attempt_id,
+                        .payload = .{ .failed = .fromCode(
+                            .dependency_contract_invalid,
+                        ) },
+                    });
+                    return;
+                };
+                effects.startLoadApiKeys(
+                    attempt_id,
+                    &self.account_credentials,
+                    identity,
+                );
+            },
+            .load_models => {
+                const attempt_id = entry.attempt_id orelse
+                    @panic("model catalog effect has no attempt");
+                effects.startLoadModels(
+                    attempt_id,
+                    effect_argument orelse
+                        @panic("model catalog effect has no API Key"),
+                );
+            },
+            .prepare_execution => {
+                const attempt_id = entry.attempt_id orelse
+                    @panic("execution persistence effect has no attempt");
+                self.prepareAndPersistExecution(
+                    attempt_id,
+                    effect_argument orelse
+                        @panic("execution effect has no model"),
+                );
             },
         }
+    }
+
+    fn prepareAndPersistExecution(
+        self: *@This(),
+        attempt_id: u64,
+        model: []const u8,
+    ) void {
+        const effects = self.account_effects orelse
+            @panic("Account effects are not composed");
+        const coordinator = self.account_coordinator orelse
+            @panic("Account coordinator is not composed");
+        const platform = if (self.account_platform) |*value|
+            value
+        else {
+            self.completeAccountFailure(
+                attempt_id,
+                .credential_store_write_failed,
+            );
+            return;
+        };
+        const identity = coordinator.account.currentIdentity() orelse {
+            self.completeAccountFailure(
+                attempt_id,
+                .dependency_contract_invalid,
+            );
+            return;
+        };
+        if (!std.mem.eql(
+            u8,
+            effects.catalog.ownerAccountId(),
+            identity.accountId(),
+        ) or !std.mem.eql(
+            u8,
+            effects.catalog.ownerProfileId(),
+            identity.profileId(),
+        )) {
+            effects.catalog.reset();
+            self.completeAccountFailure(
+                attempt_id,
+                .account_mismatch,
+            );
+            return;
+        }
+        defer effects.catalog.reset();
+        const execution_generation = std.math.add(
+            u64,
+            coordinator.account.executionHighWatermark(),
+            1,
+        ) catch {
+            self.completeAccountFailure(
+                attempt_id,
+                .generation_mismatch,
+            );
+            return;
+        };
+        var execution = effects.catalog.prepareExecution(
+            model,
+            execution_generation,
+        ) catch |err| {
+            self.completeAccountFailure(
+                attempt_id,
+                account_api.Catalog.errorCode(err),
+            );
+            return;
+        };
+        defer execution.deinit();
+        var credential_generation: account_api.CredentialStore.Generation = undefined;
+        std.Io.randomSecure(self.io, &credential_generation) catch {
+            self.completeAccountFailure(
+                attempt_id,
+                .local_resource_exhausted,
+            );
+            return;
+        };
+        const committed = account_api.CredentialStore.commitExecutionReady(
+            platform.backend(),
+            credential_generation,
+            identity.accountId(),
+            identity.profileId(),
+            effects.catalog.selectedApiKeyId(),
+            &execution,
+        ) catch |err| {
+            if (err == error.PersistenceOutcomeUnknown) {
+                effects.public_catalog.clear();
+                coordinator.executionPersistenceUnknown();
+                return;
+            }
+            self.completeAccountFailure(
+                attempt_id,
+                accountStoreError(err),
+            );
+            return;
+        };
+        self.account_credentials.setCleanupPending(
+            self.account_credentials.cleanupPending() or
+                committed.retired_cleanup_pending,
+        );
+        effects.publishCompletion(.{
+            .attempt_id = attempt_id,
+            .payload = .{ .execution_ready = execution.take() },
+        });
+        self.retryAccountCleanup();
+    }
+
+    fn commitRefreshedTokens(
+        self: *@This(),
+        attempt_id: u64,
+        rotation: *account_api.CredentialRotation,
+    ) void {
+        const coordinator = self.account_coordinator orelse
+            @panic("Account coordinator is not composed");
+        const identity = coordinator.account.currentIdentity() orelse {
+            self.completeAccountFailure(
+                attempt_id,
+                .dependency_contract_invalid,
+            );
+            return;
+        };
+        if (rotation.accountId().len > 0 and
+            !std.mem.eql(
+                u8,
+                rotation.accountId(),
+                identity.accountId(),
+            ))
+        {
+            self.completeAccountFailure(
+                attempt_id,
+                .account_mismatch,
+            );
+            return;
+        }
+        const platform = if (self.account_platform) |*value|
+            value
+        else {
+            self.completeAccountFailure(
+                attempt_id,
+                .credential_store_write_failed,
+            );
+            return;
+        };
+        var generation: account_api.CredentialStore.Generation = undefined;
+        std.Io.randomSecure(self.io, &generation) catch {
+            self.completeAccountFailure(
+                attempt_id,
+                .local_resource_exhausted,
+            );
+            return;
+        };
+        const committed = account_api.CredentialStore.commitAccountOnly(
+            platform.backend(),
+            generation,
+            rotation.persistenceInput(),
+            &identity,
+            coordinator.account.executionHighWatermark(),
+        ) catch |err| {
+            self.completeAccountFailure(
+                attempt_id,
+                accountStoreError(err),
+            );
+            return;
+        };
+        self.account_credentials.replaceRotation(rotation);
+        self.account_credentials.setCleanupPending(
+            self.account_credentials.cleanupPending() or
+                committed.retired_cleanup_pending,
+        );
+        var completion: account_api.WorkerCompletion = .{
+            .attempt_id = attempt_id,
+            .payload = .token_refreshed,
+        };
+        defer completion.deinit();
+        if (!coordinator.complete(&completion))
+            @panic("persisted Account refresh could not commit");
+        self.retryAccountCleanup();
+        self.scheduleAccountRefresh();
     }
 
     fn drainAccountEffects(self: *@This()) void {
@@ -776,7 +1268,30 @@ const App = struct {
                         ),
                     }
                 },
+                .refresh => |*entry| {
+                    effects.joinNetwork(entry.attempt_id);
+                    if (coordinator.account.activeAttempt() !=
+                        entry.attempt_id)
+                        continue;
+                    if (fatal_wake) {
+                        self.completeAccountFailure(
+                            entry.attempt_id,
+                            .main_loop_wake_failed,
+                        );
+                        continue;
+                    }
+                    self.commitRefreshedTokens(
+                        entry.attempt_id,
+                        &entry.rotation,
+                    );
+                },
                 .completion => |*completion| {
+                    const account_operation =
+                        coordinator.account.view().operation;
+                    const catalog_attempt =
+                        account_operation == .loading_keys or
+                        account_operation == .loading_models;
+                    effects.joinNetwork(completion.attempt_id);
                     if (fatal_wake and
                         coordinator.account.activeAttempt() ==
                             completion.attempt_id)
@@ -788,6 +1303,16 @@ const App = struct {
                                 .main_loop_wake_failed,
                             ) },
                         };
+                    }
+                    if (catalog_attempt and completion.payload == .failed)
+                        effects.catalog.reset();
+                    if (coordinator.account.activeAttempt() ==
+                        completion.attempt_id)
+                    {
+                        switch (completion.payload) {
+                            .api_keys_loaded, .models_loaded => effects.publishCatalogNoFail(),
+                            else => {},
+                        }
                     }
                     _ = coordinator.complete(completion);
                 },
@@ -802,6 +1327,23 @@ const App = struct {
     ) void {
         const coordinator = self.account_coordinator orelse
             @panic("Account coordinator is not composed");
+        if (coordinator.account.currentIdentity()) |committed_identity| {
+            if (!std.mem.eql(
+                u8,
+                committed_identity.accountId(),
+                login.identity.accountId(),
+            ) or !std.mem.eql(
+                u8,
+                committed_identity.profileId(),
+                login.identity.profileId(),
+            )) {
+                self.completeAccountFailure(
+                    attempt_id,
+                    .account_mismatch,
+                );
+                return;
+            }
+        }
         const platform = if (self.account_platform) |*value|
             value
         else {
@@ -844,6 +1386,7 @@ const App = struct {
         if (!coordinator.complete(&completion))
             @panic("persisted Account login could not commit");
         self.retryAccountCleanup();
+        self.scheduleAccountRefresh();
     }
 
     fn completeAccountFailure(
@@ -890,13 +1433,22 @@ const App = struct {
                     try dispatcher.emitWorkbenchChanged();
                 };
             },
-            .timer => |timer| if (self.automation.onTimer(
-                timer.id,
-                native_sdk.monotonicNanoseconds(),
-            )) {
-                return;
-            } else if (self.dispatcher != null and self.dispatcher.?.onTimer(timer.id)) {
-                try self.dispatcher.?.emitWorkbenchChanged();
+            .timer => |timer| {
+                if (timer.id == account_refresh_timer_id) {
+                    self.onAccountRefreshTimer();
+                    return;
+                }
+                if (self.automation.onTimer(
+                    timer.id,
+                    native_sdk.monotonicNanoseconds(),
+                )) {
+                    return;
+                }
+                if (self.dispatcher != null and
+                    self.dispatcher.?.onTimer(timer.id))
+                {
+                    try self.dispatcher.?.emitWorkbenchChanged();
+                }
             },
             else => {},
         }
@@ -1225,6 +1777,7 @@ pub fn run(init: std.process.Init) !void {
     app.account_effects = &account_effects;
     var account_coordinator = AccountCoordinator.init(
         &workbench,
+        &account_effects.public_catalog,
         account_effects.sink(),
         .{
             .context = &app,
@@ -1294,8 +1847,10 @@ test "Account coordinator commits login and execution as separate gates" {
     );
     defer workbench.deinit();
     var effects: AccountEffectQueue = .{};
+    var public_catalog: account_api.Catalog.PublicCatalog = .{};
     var coordinator = AccountCoordinator.init(
         &workbench,
+        &public_catalog,
         effects.sink(),
         .{},
         std.Thread.getCurrentId(),
@@ -1428,8 +1983,10 @@ test "Account effect admission failure preserves both committed owners" {
     var effects: AccountEffectQueue = .{
         .entry = .{ .attempt_id = 99, .effect = .begin_oauth },
     };
+    var public_catalog: account_api.Catalog.PublicCatalog = .{};
     var coordinator = AccountCoordinator.init(
         &workbench,
+        &public_catalog,
         effects.sink(),
         .{},
         std.Thread.getCurrentId(),
@@ -1494,8 +2051,10 @@ test "Account committed effects are dispatched only after state commit" {
     defer workbench.deinit();
     var queue: AccountEffectQueue = .{};
     var hook = Hook{ .queue = &queue };
+    var public_catalog: account_api.Catalog.PublicCatalog = .{};
     var coordinator = AccountCoordinator.init(
         &workbench,
+        &public_catalog,
         queue.sink(),
         .{ .context = &hook, .dispatch_fn = Hook.dispatch },
         std.Thread.getCurrentId(),
@@ -1590,8 +2149,10 @@ test "unknown logout persistence clears Workbench execution fail closed" {
     );
     defer workbench.deinit();
     var queue: AccountEffectQueue = .{};
+    var public_catalog: account_api.Catalog.PublicCatalog = .{};
     var coordinator = AccountCoordinator.init(
         &workbench,
+        &public_catalog,
         queue.sink(),
         .{},
         std.Thread.getCurrentId(),

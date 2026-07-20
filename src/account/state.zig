@@ -260,6 +260,40 @@ pub const Account = struct {
         );
     }
 
+    /// The execution manifest rename may have committed even when directory
+    /// fsync could not report the result. The Host cannot safely choose either
+    /// the old runtime generation or the staged one in-process, so it clears
+    /// admission and requires startup restore to resolve the manifest.
+    pub fn prepareExecutionPersistenceUnknown(
+        self: *const Account,
+    ) PrepareResult {
+        if (self.state.attempt_kind != .catalog or
+            self.state.operation != .persisting or
+            self.state.active_attempt_id == null or
+            (self.state.execution_state != .preparing and
+                self.state.execution_state != .reconfiguring))
+            return .{ .rejected = .invalid_state };
+        const attempt_id = self.state.active_attempt_id.?;
+        var next = self.state;
+        next.session_state = .shutting_down;
+        next.execution_state = .none;
+        next.operation = .none;
+        next.selected_api_key_id.clear();
+        next.selected_model.clear();
+        next.pending_api_key_id.clear();
+        next.pending_model.clear();
+        next.execution_generation = 0;
+        next.active_attempt_id = null;
+        next.attempt_kind = .none;
+        next.error_code = .recovery_state_invalid;
+        next.safe_diagnostic.clear();
+        return transitionNoEffect(
+            next,
+            .operation_failed,
+            attempt_id,
+        );
+    }
+
     pub fn prepareTokenRefresh(self: *const Account) PrepareResult {
         if ((self.state.session_state != .authenticated and
             self.state.session_state != .reauth_required) or
@@ -1424,6 +1458,79 @@ test "unknown logout persistence outcome cannot reopen ready execution" {
         contract.ErrorCode.recovery_state_invalid,
         view.error_code,
     );
+    try std.testing.expect(!view.can_create_task);
+}
+
+test "unknown execution persistence outcome clears old runtime identity" {
+    var account = Account{ .state = .{
+        .session_state = .authenticated,
+        .execution_state = .ready,
+        .account_id = try .init("account-1"),
+        .profile_id = try .init("profile-1"),
+        .display_name = try .init("Metask User"),
+        .selected_api_key_id = try .init("key-old"),
+        .selected_model = try .init("model-old"),
+        .execution_generation = 1,
+        .execution_high_watermark = 1,
+    } };
+    var refresh = switch (account.prepareCommand(.refresh_catalog)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    _ = refresh.takeEffect();
+    commitPrepared(&account, &refresh);
+    var keys: WorkerCompletion = .{
+        .attempt_id = account.activeAttempt().?,
+        .payload = .api_keys_loaded,
+    };
+    var keys_ready = switch (account.prepareCompletion(&keys)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    commitPrepared(&account, &keys_ready);
+    var select_key = switch (account.prepareCommand(.{
+        .select_api_key = "key-new",
+    })) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    _ = select_key.takeEffect();
+    commitPrepared(&account, &select_key);
+    var models: WorkerCompletion = .{
+        .attempt_id = account.activeAttempt().?,
+        .payload = .models_loaded,
+    };
+    var models_ready = switch (account.prepareCompletion(&models)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    commitPrepared(&account, &models_ready);
+    var select_model = switch (account.prepareCommand(.{
+        .select_model = "model-new",
+    })) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    _ = select_model.takeEffect();
+    commitPrepared(&account, &select_model);
+    var unknown = switch (account.prepareExecutionPersistenceUnknown()) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    commitPrepared(&account, &unknown);
+
+    const view = account.view();
+    try std.testing.expectEqual(
+        contract.AccountSessionState.shutting_down,
+        view.session_state,
+    );
+    try std.testing.expectEqual(
+        contract.ExecutionState.none,
+        view.execution_state,
+    );
+    try std.testing.expectEqualStrings("", view.selected_api_key_id);
+    try std.testing.expectEqualStrings("", view.selected_model);
+    try std.testing.expectEqual(@as(u64, 1), account.executionHighWatermark());
     try std.testing.expect(!view.can_create_task);
 }
 

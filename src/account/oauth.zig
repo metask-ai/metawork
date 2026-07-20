@@ -358,7 +358,7 @@ pub fn parseTokenResponse(
         TokenResponse,
         fba.allocator(),
         body,
-        .{ .ignore_unknown_fields = false },
+        .{ .ignore_unknown_fields = true },
     ) catch return error.InvalidTokenResponse;
     defer parsed.deinit();
     const raw = parsed.value;
@@ -409,7 +409,7 @@ pub fn parseTokenResponse(
 }
 
 pub const Profile = struct {
-    id: [contract.Limits.account_id_bytes]u8 = undefined,
+    id: [contract.Limits.profile_id_bytes]u8 = undefined,
     id_len: usize = 0,
     display_name: [contract.Limits.display_name_bytes]u8 = undefined,
     display_name_len: usize = 0,
@@ -431,6 +431,8 @@ const ProfileResponse = struct {
     id: []const u8,
     name: ?[]const u8 = null,
     display_name: ?[]const u8 = null,
+    status: []const u8,
+    is_default: bool,
 };
 
 pub fn parseFirstProfile(body: []const u8) ProtocolError!Profile {
@@ -443,28 +445,40 @@ pub fn parseFirstProfile(body: []const u8) ProtocolError!Profile {
         ProfilesResponse,
         fba.allocator(),
         body,
-        .{ .ignore_unknown_fields = false },
+        .{ .ignore_unknown_fields = true },
     ) catch return error.InvalidProfileResponse;
     defer parsed.deinit();
     if (parsed.value.data.len > Limits.profile_entries)
         return error.TooManyProfiles;
+    var first_active: ?ProfileResponse = null;
+    var default_active: ?ProfileResponse = null;
     for (parsed.value.data) |entry| {
-        if (entry.id.len == 0) continue;
-        const display = entry.display_name orelse entry.name orelse entry.id;
-        if (entry.id.len > contract.Limits.account_id_bytes or
-            display.len > contract.Limits.display_name_bytes)
-            return error.FieldTooLarge;
-        if (!std.unicode.utf8ValidateSlice(entry.id) or
-            !std.unicode.utf8ValidateSlice(display))
-            return error.InvalidEncoding;
-        var result: Profile = .{};
-        @memcpy(result.id[0..entry.id.len], entry.id);
-        result.id_len = entry.id.len;
-        @memcpy(result.display_name[0..display.len], display);
-        result.display_name_len = display.len;
-        return result;
+        if (entry.id.len == 0 or
+            !std.mem.eql(u8, entry.status, "active"))
+            continue;
+        if (first_active == null) first_active = entry;
+        if (entry.is_default) {
+            if (default_active != null)
+                return error.InvalidProfileResponse;
+            default_active = entry;
+        }
     }
-    return error.NoProfiles;
+    const selected = default_active orelse first_active orelse
+        return error.NoProfiles;
+    const display =
+        selected.display_name orelse selected.name orelse selected.id;
+    if (selected.id.len > contract.Limits.profile_id_bytes or
+        display.len > contract.Limits.display_name_bytes)
+        return error.FieldTooLarge;
+    if (!std.unicode.utf8ValidateSlice(selected.id) or
+        !std.unicode.utf8ValidateSlice(display))
+        return error.InvalidEncoding;
+    var result: Profile = .{};
+    @memcpy(result.id[0..selected.id.len], selected.id);
+    result.id_len = selected.id.len;
+    @memcpy(result.display_name[0..display.len], display);
+    result.display_name_len = display.len;
+    return result;
 }
 
 pub fn buildAuthorizationCodeBody(
@@ -636,7 +650,7 @@ test "callback parser rejects wrong path duplicates and state mismatch" {
     );
 }
 
-test "token decoder is strict bounded and retains refresh token on rotation omission" {
+test "token decoder validates consumed fields and tolerates additive metadata" {
     var old_refresh = try Secret.init(std.testing.allocator, "old-refresh");
     defer old_refresh.deinit();
     var tokens = try parseTokenResponse(
@@ -651,16 +665,14 @@ test "token decoder is strict bounded and retains refresh token on rotation omis
     try std.testing.expectEqualStrings("old-refresh", tokens.refresh_token.view());
     try std.testing.expectEqual(@as(i64, 3700), tokens.expires_at);
     try std.testing.expectEqualStrings("acct-1", tokens.accountId());
-    try std.testing.expectError(
-        error.InvalidTokenResponse,
-        parseTokenResponse(
-            std.testing.allocator,
-            \\{"access_token":"a","token_type":"Bearer","expires_in":1,"unknown":true}
-        ,
-            0,
-            .{ .retain_previous = &old_refresh },
-        ),
+    var extended = try parseTokenResponse(
+        std.testing.allocator,
+        \\{"access_token":"a","token_type":"Bearer","expires_in":1,"unknown":true}
+    ,
+        0,
+        .{ .retain_previous = &old_refresh },
     );
+    extended.deinit();
     try std.testing.expectError(
         error.InvalidTokenResponse,
         parseTokenResponse(
@@ -673,18 +685,25 @@ test "token decoder is strict bounded and retains refresh token on rotation omis
     );
 }
 
-test "profile decoder selects first non-empty profile without widening schema" {
+test "profile decoder selects one active default and tolerates additive metadata" {
     const profile = try parseFirstProfile(
-        \\{"data":[{"id":"profile-1","name":"main","display_name":"Main"}]}
+        \\{"data":[
+        \\{"id":"profile-1","name":"first","display_name":"First",
+        \\"status":"active","platform":"anthropic","group_id":1,
+        \\"group_name":"First","expires_at":null,"is_default":false},
+        \\{"id":"profile-2","name":"main","display_name":"Main",
+        \\"status":"active","platform":"anthropic","group_id":2,
+        \\"group_name":"Main","expires_at":null,"is_default":true}]}
     );
-    try std.testing.expectEqualStrings("profile-1", profile.idView());
+    try std.testing.expectEqualStrings("profile-2", profile.idView());
     try std.testing.expectEqualStrings("Main", profile.displayName());
-    try std.testing.expectError(
-        error.InvalidProfileResponse,
-        parseFirstProfile(
-            \\{"data":[{"id":"profile-1","extra":"not allowed"}]}
-        ),
+    const extended = try parseFirstProfile(
+        \\{"data":[{"id":"profile-1","name":"main",
+        \\"display_name":"Main","status":"active",
+        \\"platform":"anthropic","group_id":1,"group_name":"Main",
+        \\"expires_at":null,"is_default":true,"extra":"allowed"}]}
     );
+    try std.testing.expectEqualStrings("profile-1", extended.idView());
 }
 
 test "authorization code and refresh bodies do not widen client contract" {

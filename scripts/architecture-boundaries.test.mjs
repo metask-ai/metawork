@@ -265,6 +265,14 @@ test("formal Native test graph runs every product module test root", () => {
     ["metawork-account-platform", "test_modules.account_platform"],
     ["metawork-account-loopback", "test_modules.account_loopback"],
     ["metawork-account-login-attempt", "test_modules.account_login_attempt"],
+    [
+      "metawork-account-credentials-runtime",
+      "test_modules.account_credentials_runtime",
+    ],
+    [
+      "metawork-account-network-attempt",
+      "test_modules.account_network_attempt",
+    ],
     ["metawork-account-state", "test_modules.account_state"],
     [
       "metawork-account-completion-inbox",

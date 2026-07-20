@@ -290,7 +290,7 @@ const FakeTransport = struct {
                 if (request.kind != .profiles)
                     return error.ProtocolFailed;
                 break :blk
-                \\{"data":[{"id":"profile-1","display_name":"Metask User"}]}
+                \\{"data":[{"id":"profile-1","name":"main","display_name":"Metask User","status":"active","platform":"anthropic","group_id":1,"group_name":"Main","expires_at":null,"is_default":true}]}
                 ;
             },
             else => return error.ProtocolFailed,

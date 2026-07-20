@@ -91,10 +91,71 @@ test("authenticated Account exposes bounded Key and model choices", () => {
   });
   assert.match(markup, />Primary · 1234</);
   assert.match(markup, />Model One</);
-  assert.match(markup, /<option value="" disabled=""[^>]*>Choose an API Key</);
-  assert.match(markup, /<option value="" disabled=""[^>]*>Choose a model</);
+  assert.equal(
+    (markup.match(/<select class="focus-ring" disabled="">/g) ?? []).length,
+    2,
+  );
+  assert.match(markup, /<option value="" selected="">Choose an API Key</);
+  assert.match(markup, /<option value="" selected="">Choose a model</);
   assert.match(markup, />Refresh account options</);
   assert.match(markup, />Sign out and clear this Mac</);
+});
+
+test("catalog selectors follow the exact Host selection phase", () => {
+  const selectingKey = render({
+    ...signedOut,
+    sessionState: "authenticated",
+    operation: "selecting_key",
+    accountId: "account-1",
+    apiKeys: [{ id: "key-1", name: "Primary", suffix: "1234" }],
+    models: [{ id: "model-1", displayName: "Model One" }],
+  });
+  assert.match(selectingKey, /<select class="focus-ring">/);
+  assert.equal(
+    (selectingKey.match(/<select class="focus-ring" disabled="">/g) ?? [])
+      .length,
+    1,
+  );
+  assert.match(selectingKey, />Cancel current action</);
+  assert.doesNotMatch(selectingKey, />Refresh account options</);
+  assert.doesNotMatch(selectingKey, />Sign out and clear this Mac</);
+
+  const selectingModel = render({
+    ...signedOut,
+    sessionState: "authenticated",
+    operation: "selecting_model",
+    accountId: "account-1",
+    apiKeys: [{ id: "key-1", name: "Primary", suffix: "1234" }],
+    models: [{ id: "model-1", displayName: "Model One" }],
+    selectedApiKeyId: "key-1",
+  });
+  assert.equal(
+    (selectingModel.match(/<select class="focus-ring" disabled="">/g) ?? [])
+      .length,
+    1,
+  );
+  assert.match(
+    selectingModel,
+    /<select class="focus-ring"><option value="" selected="">Choose a model</,
+  );
+  assert.match(selectingModel, />Cancel current action</);
+});
+
+test("restart keeps committed execution labels without persisting catalogs", () => {
+  const markup = render({
+    ...signedOut,
+    sessionState: "authenticated",
+    executionState: "ready",
+    accountId: "account-1",
+    displayName: "Metask User",
+    selectedApiKeyId: "445",
+    selectedModel: "gpt-5.5",
+    canCreateTask: true,
+    executionGeneration: "7",
+  });
+  assert.match(markup, />Saved API Key</);
+  assert.match(markup, />gpt-5.5</);
+  assert.match(markup, />Ready</);
 });
 
 test("logout progress and user cancellation are reported truthfully", () => {

@@ -34,9 +34,9 @@ Metask 产品 owner 已确认 MetaWork 作为 Metask 第一方客户端复用当
 - 只生成 CSPRNG `state` 与 PKCE verifier，只接受 `code_challenge_method=S256`；
 - callback 只绑定 IPv4 loopback 动态端口，不依赖 `localhost` DNS，不绑定 wildcard；
 - callback 只接受单次 `GET /auth/callback`，严格解析 query、拒绝重复/unknown 参数，并对 `state` 做 constant-time 比较；
-- token response 只接受有界、严格 JSON：`access_token`、可选/轮换的 `refresh_token`、Bearer `token_type`、正整数 `expires_in`、可选 `scope` 和 `account_id`；
+- token response 有界解码并严格校验 MetaWork 实际消费的字段：`access_token`、可选/轮换的 `refresh_token`、Bearer `token_type`、正整数 `expires_in`、可选 `scope` 和 `account_id`；OAuth 服务允许增加未消费的 metadata，新增字段不得破坏客户端；
 - refresh response 未返回新 refresh token 时保留旧 token；如果服务端已轮换但新本地 generation 未提交，则进入 `reauth_required`，不声称 refresh 成功；
-- profile response 为严格 `{ "data": [{ "id", "name"?, "display_name"? }] }`；使用第一个非空 profile 作为当前 profile identity；
+- profile response 有界解码并校验 MetaWork 消费的 `id/name/display_name/status/is_default`；`platform/group/group_name/expires_at` 等未消费 metadata 允许服务端演进。从 `status = active` 中选择唯一 `is_default = true` 的 profile，没有默认项时才回退第一个 active profile，多个 active default 则 fail closed；
 - token、verifier、authorization code、完整 authorize URL 和 Authorization header 不进入 Renderer、Bridge、日志、snapshot 或持久化产品视图。
 
 ## 3. C1 本地持久化合同
@@ -68,7 +68,7 @@ Model catalog：
 - 选中 API Key 后，以该 Key 作为 Bearer，并携带同一 `X-Metacode-Profile-ID`；
 - 固定请求 `GET https://napi.metask-ai.com/v1/models`；
 - 成功响应严格读取 list 根字段和 `data[]`；拒绝 unknown field、重复 model id、`has_more = true`、超限字段和超限集合；
-- model 只向产品投影有界 `id` 与可选 `display_name`；capability 只做有界结构校验，不自行发明 AgentCore 配置。
+- model 只向产品投影有界 `id` 与可选 `display_name`；未消费的 capability 字段只做有界类型/结构校验。服务端缺省或以 `0` 表达 unknown/placeholder 的 token capability 不阻止模型进入目录，也不得被 MetaWork 推断为真实能力或 AgentCore 配置。
 
 ## 5. Provider 与 ExecutionTarget
 

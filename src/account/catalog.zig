@@ -167,6 +167,10 @@ pub const CatalogSession = struct {
         self.* = undefined;
     }
 
+    pub fn reset(self: *CatalogSession) void {
+        self.clearApiKeys();
+    }
+
     pub fn loadApiKeys(
         self: *CatalogSession,
         transport: metask.Transport,
@@ -343,6 +347,114 @@ pub const CatalogSession = struct {
         self.selected_key_index = null;
         self.owner_account_id = .{};
         self.owner_profile_id = .{};
+    }
+};
+
+fn PublicText(comptime capacity: usize) type {
+    return struct {
+        bytes: [capacity]u8 = undefined,
+        len: usize = 0,
+
+        fn set(self: *@This(), value: []const u8) void {
+            std.debug.assert(value.len <= capacity);
+            @memcpy(self.bytes[0..value.len], value);
+            self.len = value.len;
+        }
+
+        fn view(self: *const @This()) []const u8 {
+            return self.bytes[0..self.len];
+        }
+    };
+}
+
+const PublicApiKey = struct {
+    id: PublicText(contract.Limits.api_key_id_bytes) = .{},
+    name: PublicText(contract.Limits.api_key_name_bytes) = .{},
+    suffix: PublicText(contract.Limits.api_key_suffix_bytes) = .{},
+};
+
+const PublicModel = struct {
+    id: PublicText(contract.Limits.model_id_bytes) = .{},
+    display_name: PublicText(contract.Limits.model_display_name_bytes) = .{},
+};
+
+/// Secret-free, fixed-capacity Account projection. Network workers mutate the
+/// private CatalogSession, then the App main thread snapshots a successful
+/// result here before publishing the matching AccountFact. Other state changes
+/// read only this cache, so cancel and shutdown never race worker-owned secrets.
+pub const PublicCatalog = struct {
+    api_keys: [contract.Limits.api_key_entries]PublicApiKey =
+        @splat(.{}),
+    api_key_views: [contract.Limits.api_key_entries]contract.ApiKeyView =
+        undefined,
+    api_key_count: usize = 0,
+    models: [contract.Limits.model_entries]PublicModel = @splat(.{}),
+    model_views: [contract.Limits.model_entries]contract.ModelView =
+        undefined,
+    model_count: usize = 0,
+
+    pub fn replaceFromSession(
+        self: *PublicCatalog,
+        session: *const CatalogSession,
+    ) void {
+        var api_key_views: [contract.Limits.api_key_entries]contract.ApiKeyView =
+            undefined;
+        const source_api_keys = session.writeApiKeyViews(&api_key_views);
+        std.debug.assert(source_api_keys.len <= self.api_keys.len);
+        self.api_key_count = source_api_keys.len;
+        for (
+            source_api_keys,
+            self.api_keys[0..source_api_keys.len],
+        ) |source, *storage| {
+            storage.id.set(source.id);
+            storage.name.set(source.name);
+            storage.suffix.set(source.suffix);
+        }
+
+        var model_views: [contract.Limits.model_entries]contract.ModelView =
+            undefined;
+        const source_models = session.writeModelViews(&model_views);
+        std.debug.assert(source_models.len <= self.models.len);
+        self.model_count = source_models.len;
+        for (
+            source_models,
+            self.models[0..source_models.len],
+        ) |source, *storage| {
+            storage.id.set(source.id);
+            storage.display_name.set(source.display_name);
+        }
+    }
+
+    pub fn clear(self: *PublicCatalog) void {
+        self.api_key_count = 0;
+        self.model_count = 0;
+    }
+
+    pub fn decorate(
+        self: *PublicCatalog,
+        view: *contract.AccountView,
+    ) void {
+        for (
+            self.api_keys[0..self.api_key_count],
+            self.api_key_views[0..self.api_key_count],
+        ) |*storage, *api_key_view| {
+            api_key_view.* = .{
+                .id = storage.id.view(),
+                .name = storage.name.view(),
+                .suffix = storage.suffix.view(),
+            };
+        }
+        for (
+            self.models[0..self.model_count],
+            self.model_views[0..self.model_count],
+        ) |*storage, *model_view| {
+            model_view.* = .{
+                .id = storage.id.view(),
+                .display_name = storage.display_name.view(),
+            };
+        }
+        view.api_keys = self.api_key_views[0..self.api_key_count];
+        view.models = self.model_views[0..self.model_count];
     }
 };
 
@@ -611,9 +723,11 @@ fn parseModels(
     errdefer result.deinit();
     for (response.data) |model| {
         if (!std.mem.eql(u8, model.object, "model") or
-            !std.mem.eql(u8, model.type, "model") or
-            model.max_input_tokens == 0 or model.max_tokens == 0)
+            !std.mem.eql(u8, model.type, "model"))
             return error.ProtocolInvalid;
+        // Metask may use zero or omit these optional capability values. The
+        // Account product does not consume them, so their typed JSON shape is
+        // validated above but they cannot reject an otherwise usable model.
         const id = try ModelId.init(model.id);
         for (result.entries.items) |*existing| {
             if (std.mem.eql(u8, existing.id.view(), id.view()))
@@ -724,8 +838,7 @@ const model_fixture =
     \\{"object":"list","data":[{"id":"model-1","object":"model",
     \\"created":1,"owned_by":"Metask","type":"model",
     \\"display_name":"Model 1","created_at":"2026-07-20T00:00:00Z",
-    \\"max_input_tokens":200000,"max_tokens":32000,
-    \\"anthropic_family_tier":"pro","capabilities":{"thinking":{"supported":true}}}],
+    \\"max_input_tokens":0,"max_tokens":0}],
     \\"first_id":"model-1","last_id":"model-1","has_more":false,
     \\"remaining":0,"unit":"model"}
 ;
@@ -751,6 +864,8 @@ test "live-shape catalogs expose only masked views and move one key owner" {
         visible_keys[0].name,
         "test-api-key",
     ) == null);
+    var public_catalog: PublicCatalog = .{};
+    public_catalog.replaceFromSession(&session);
 
     var execution = try session.prepareExecution("model-1", 1);
     defer execution.deinit();
@@ -770,6 +885,17 @@ test "live-shape catalogs expose only masked views and move one key owner" {
         error.ApiKeyNotFound,
         session.prepareExecution("model-1", 2),
     );
+    session.reset();
+    var public_view: contract.AccountView = .{
+        .session_state = .authenticated,
+        .execution_state = .ready,
+        .operation = .none,
+    };
+    public_catalog.decorate(&public_view);
+    try std.testing.expectEqual(@as(usize, 1), public_view.api_keys.len);
+    try std.testing.expectEqualStrings("325", public_view.api_keys[0].id);
+    try std.testing.expectEqual(@as(usize, 1), public_view.models.len);
+    try std.testing.expectEqualStrings("model-1", public_view.models[0].id);
 }
 
 test "catalog rejects duplicate ids, unknown fields, pagination, and platforms" {

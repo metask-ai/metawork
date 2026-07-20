@@ -491,7 +491,7 @@ const FakeTransport = struct {
                     !std.mem.eql(u8, request.bearer orelse "", "access"))
                     return error.ProtocolFailed;
                 break :blk
-                \\{"data":[{"id":"profile-1","name":"main","display_name":"Main"}]}
+                \\{"data":[{"id":"profile-1","name":"main","display_name":"Main","status":"active","platform":"anthropic","group_id":1,"group_name":"Main","expires_at":null,"is_default":true}]}
                 ;
             },
             else => return error.ProtocolFailed,

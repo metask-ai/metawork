@@ -1,6 +1,6 @@
 # MetaWork Phase 0 验证计划
 
-> 状态：Phase 0A Gate 0 至 Gate 7 已通过；Account Gate A1/B/C1/C2/D/E 已完成
+> 状态：Phase 0A Gate 0 至 Gate 7 已通过；Account Gate A1/B/C1/C2/D/E/F/G 已完成
 > 平台：Phase 0A macOS-first；Phase 0B 后续验证 Windows
 
 Phase 0 用最小真实原型验证技术栈和关键风险，不交付完整产品。当前 AgentCore development bundle 使用 ABI v1 revision 2；这是精确开发基线，不是 stable support policy。同步 baseline 不包含 async suspend/resume、跨进程恢复、strict Workspace security、正式 Host tools、typed Output/FileChange/plan-progress 或 plan/custom UI control。
@@ -107,7 +107,7 @@ Gate B 不等于 C1/C2 完成。C1 production OAuth client、profile decoder 和
 
 - 固定 authority/client/scope/redirect，PKCE S256 和 CSPRNG state/verifier；
 - callback 只绑定动态 `127.0.0.1`，严格 request/query 上限，重复/unknown 参数 fail closed；
-- token/profile strict decoder、response body 上限、HTTP status mapping 和固定 production origin；
+- token/profile 有界 decoder 严格校验 MetaWork 消费字段，同时允许公开 API 增加未消费 metadata；固定 response body 上限、HTTP status mapping 和 production origin；
 - 单 attempt worker，cancel/deadline/shutdown 关闭 listener 并 join；
 - Native SDK open URL 与 Keychain 操作只在主线程；
 - OAuth A/B slot、marker-last、read-back、原子 account-only manifest、refresh rotation；
@@ -131,6 +131,21 @@ Gate B 不等于 C1/C2 完成。C1 production OAuth client、profile decoder 和
 - Task 与 Run 固定记录创建时的 execution generation/provider/model，后续重配置不改变历史身份；
 - logout 的 manifest outcome unknown 必须清除 runtime execution 并进入 fail-closed restart boundary，不能重新开放旧配置；
 - Gate 6 的本地 provider 只通过 `-Dautomation=true` 模块和 `METAWORK_GATE6_PROVIDER_BASE_URL` 注入；release artifact 扫描必须证明 fixture endpoint、credential、model 和 account 标识不存在。
+
+#### Gate E/F：Bridge 合同与 Renderer
+
+- schema v6 只发布无秘密 Account view；账号命令仅携带 API Key id 或 model id；
+- Renderer 只在 Host 的精确选择 phase 开放对应控件，登录、加载目录、选择、取消、退出与失败状态均有明确反馈；
+- Task admission 只读 Host 发布的 `canCreateTask`，Renderer 不推断 provider、base URL 或 credential readiness。
+
+#### Gate G：真实端到端验收
+
+- 2026-07-20 使用打包后的 `.app` 完成真实 Metask OAuth、profile 选择、API Key/model catalog 和 execution persistence；
+- 真实 `/v1/profiles` 证明公开响应含可演进 metadata；decoder 改为严格校验实际消费字段并允许新增未消费字段，不复制服务端完整 schema；
+- 真实 Metask 目录选择 `gpt / gpt-5.5`，AgentCore 使用 typed `openai`、固定 chat-completions URL 与 Account-owned API Key，返回 `METAWORK_AGENTCORE_OK`（527 tokens）；
+- 真实 `deepseek / deepseek-v4-pro` 路径也完成 AgentCore Run；目录中可列出但账号不支持的 `gpt-5.1` 由 Provider 返回失败，不被 MetaWork 猜测或伪装为成功；
+- 重启后 `execution_ready` 与 Task admission 恢复；API Key/model 公共目录不持久化，按需重新加载；
+- `npm ci`、format/check/test、Debug/Release build、macOS package、Gate 6、Gate 7 通过；release `.app` 的 automation/fixture 与本机 OAuth credential 扫描通过。
 
 ## 4. Gate -1：规范对齐
 

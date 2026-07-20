@@ -32,10 +32,20 @@ export function AccountPanel({
     account.sessionState === "refreshing" ||
     account.sessionState === "reauth_required";
   const canConfigureCatalog = account.sessionState === "authenticated";
-  const working =
-    account.operation !== "none" ||
-    account.sessionState === "authorizing" ||
-    account.sessionState === "refreshing";
+  const canSelectApiKey =
+    canConfigureCatalog && account.operation === "selecting_key";
+  const canSelectModel =
+    canConfigureCatalog && account.operation === "selecting_model";
+  const selectedApiKeyPresent = account.apiKeys.some(
+    (key) => key.id === account.selectedApiKeyId,
+  );
+  const selectedModelPresent = account.models.some(
+    (model) => model.id === account.selectedModel,
+  );
+  const apiKeyValue = canSelectApiKey ? "" : account.selectedApiKeyId;
+  const modelValue = canSelectModel ? "" : account.selectedModel;
+  const operationActive = account.operation !== "none";
+  const cancellable = operationActive && account.operation !== "logging_out";
   const ready = account.executionState === "ready";
   const operationStatus =
     account.operation === "none"
@@ -194,18 +204,22 @@ export function AccountPanel({
                 <span>{t("account.api_key")}</span>
                 <select
                   className="focus-ring"
-                  value={account.selectedApiKeyId}
+                  value={apiKeyValue}
                   disabled={
-                    disabled ||
-                    working ||
-                    !canConfigureCatalog ||
-                    account.apiKeys.length === 0
+                    disabled || !canSelectApiKey || account.apiKeys.length === 0
                   }
-                  onChange={(event) => onSelectApiKey(event.target.value)}
+                  onChange={(event) => {
+                    if (event.target.value) onSelectApiKey(event.target.value);
+                  }}
                 >
-                  <option value="" disabled>
-                    {t("account.choose_key")}
-                  </option>
+                  <option value="">{t("account.choose_key")}</option>
+                  {!canSelectApiKey &&
+                    account.selectedApiKeyId &&
+                    !selectedApiKeyPresent && (
+                      <option value={account.selectedApiKeyId}>
+                        {t("account.saved_key")}
+                      </option>
+                    )}
                   {account.apiKeys.map((key) => (
                     <option key={key.id} value={key.id}>
                       {key.name || key.id}
@@ -218,18 +232,22 @@ export function AccountPanel({
                 <span>{t("account.model")}</span>
                 <select
                   className="focus-ring"
-                  value={account.selectedModel}
+                  value={modelValue}
                   disabled={
-                    disabled ||
-                    working ||
-                    !canConfigureCatalog ||
-                    account.models.length === 0
+                    disabled || !canSelectModel || account.models.length === 0
                   }
-                  onChange={(event) => onSelectModel(event.target.value)}
+                  onChange={(event) => {
+                    if (event.target.value) onSelectModel(event.target.value);
+                  }}
                 >
-                  <option value="" disabled>
-                    {t("account.choose_model")}
-                  </option>
+                  <option value="">{t("account.choose_model")}</option>
+                  {!canSelectModel &&
+                    account.selectedModel &&
+                    !selectedModelPresent && (
+                      <option value={account.selectedModel}>
+                        {account.selectedModel}
+                      </option>
+                    )}
                   {account.models.map((model) => (
                     <option key={model.id} value={model.id}>
                       {model.displayName || model.id}
@@ -241,7 +259,7 @@ export function AccountPanel({
           )}
 
           <div className="account-actions">
-            {working && account.operation !== "logging_out" ? (
+            {cancellable ? (
               <button
                 className="secondary-button focus-ring"
                 disabled={disabled}
@@ -250,7 +268,8 @@ export function AccountPanel({
                 {t("account.cancel")}
               </button>
             ) : (
-              canConfigureCatalog && (
+              canConfigureCatalog &&
+              !operationActive && (
                 <button
                   className="secondary-button focus-ring"
                   disabled={disabled}
@@ -262,7 +281,7 @@ export function AccountPanel({
                 </button>
               )
             )}
-            {hasAccount && !working && (
+            {hasAccount && !operationActive && (
               <button
                 className="text-button focus-ring"
                 disabled={disabled}
