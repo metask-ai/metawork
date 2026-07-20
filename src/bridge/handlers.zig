@@ -4,9 +4,7 @@ const std = @import("std");
 
 pub const PermissionChoice = enum {
     allow_once,
-    allow_always,
     deny_once,
-    deny_tool_session,
 };
 
 pub const EventDisconnect = struct { generation: []const u8 };
@@ -57,8 +55,6 @@ pub fn acknowledgementSequence(payload: []const u8) !u64 {
 
 pub fn permissionChoice(value: []const u8) ?PermissionChoice {
     if (std.mem.eql(u8, value, "allow_once")) return .allow_once;
-    if (std.mem.eql(u8, value, "allow_always")) return .allow_always;
     if (std.mem.eql(u8, value, "deny_once")) return .deny_once;
-    if (std.mem.eql(u8, value, "deny_tool_session")) return .deny_tool_session;
     return null;
 }
