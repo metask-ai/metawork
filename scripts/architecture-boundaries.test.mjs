@@ -32,6 +32,7 @@ function assertNoImports(files, forbidden) {
 test("module roots and Agent directory use product semantics", () => {
   for (const path of [
     "src/app.zig",
+    "src/account.zig",
     "src/agent.zig",
     "src/workbench.zig",
     "src/bridge.zig",
@@ -71,7 +72,12 @@ test("App consumes named public module roots", () => {
 });
 
 test("public module roots do not re-export implementation modules wholesale", () => {
-  for (const file of ["src/agent.zig", "src/workbench.zig", "src/bridge.zig"]) {
+  for (const file of [
+    "src/account.zig",
+    "src/agent.zig",
+    "src/workbench.zig",
+    "src/bridge.zig",
+  ]) {
     assert.doesNotMatch(
       read(file),
       /pub const \w+\s*=\s*@import\(/,
@@ -103,6 +109,13 @@ test("lower layers cannot reach composition or transport internals", () => {
       "metacodes_agentcore",
     ],
   );
+  assertNoImports(zigFiles("src/account/"), [
+    "metawork_app",
+    "metawork_workbench",
+    "metawork_bridge",
+    "metawork_agent",
+    "metacodes_agentcore",
+  ]);
 });
 
 test("only Agent implementation imports the AgentCore SDK", () => {
@@ -158,13 +171,14 @@ test("Phase 0A keeps the raw ABI probe distinct from the typed Agent adapter", (
   assert.match(formalHost, /\.shell_policy = \.unrestricted/);
 });
 
-test("build graph registers product modules and the pure Account contract", () => {
+test("build graph registers Account product and pure contract modules", () => {
   const source = read("build.zig");
   for (const name of [
     "metawork_app",
     "metawork_agent",
     "metawork_workbench",
     "metawork_bridge",
+    "metawork_account",
   ]) {
     assert.match(source, new RegExp(`addImport\\(\\"${name}\\"`));
   }
@@ -173,6 +187,7 @@ test("build graph registers product modules and the pure Account contract", () =
     /root_source_file = b\.path\("src\/account\/contract\.zig"\)/,
   );
   assert.match(source, /account_contract: \*std\.Build\.Module/);
+  assert.match(source, /account: \*std\.Build\.Module/);
   assert.match(
     source,
     /app\.addImport\("metawork_account_contract", account_contract\)/,
@@ -184,6 +199,12 @@ test("formal Native test graph runs every product module test root", () => {
   const source = read("build.zig");
   for (const [name, rootModule] of [
     ["metawork-account-contract", "test_modules.account_contract"],
+    ["metawork-account-state", "test_modules.account_state"],
+    [
+      "metawork-account-completion-inbox",
+      "test_modules.account_completion_inbox",
+    ],
+    ["metawork-account", "test_modules.account"],
     ["metawork-app", "test_modules.app"],
     ["metawork-bridge", "test_modules.bridge"],
     ["metawork-workbench", "test_modules.workbench_projection"],

@@ -30,6 +30,9 @@ pub fn build(b: *std.Build) void {
         root_module: *std.Build.Module,
     }{
         .{ .name = "metawork-account-contract", .root_module = test_modules.account_contract },
+        .{ .name = "metawork-account-state", .root_module = test_modules.account_state },
+        .{ .name = "metawork-account-completion-inbox", .root_module = test_modules.account_completion_inbox },
+        .{ .name = "metawork-account", .root_module = test_modules.account },
         .{ .name = "metawork-app", .root_module = test_modules.app },
         .{ .name = "metawork-bridge", .root_module = test_modules.bridge },
         .{ .name = "metawork-workbench", .root_module = test_modules.workbench_projection },
@@ -43,7 +46,10 @@ pub fn build(b: *std.Build) void {
 }
 
 const WiredModules = struct {
+    account: *std.Build.Module,
+    account_completion_inbox: *std.Build.Module,
     account_contract: *std.Build.Module,
+    account_state: *std.Build.Module,
     app: *std.Build.Module,
     agent: *std.Build.Module,
     bridge: *std.Build.Module,
@@ -129,6 +135,26 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .target = target,
         .optimize = root_module.optimize,
     });
+    const account_state = b.createModule(.{
+        .root_source_file = b.path("src/account/state.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    account_state.addImport("metawork_account_contract", account_contract);
+    const account_completion_inbox = b.createModule(.{
+        .root_source_file = b.path("src/account/completion_inbox.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    account_completion_inbox.addImport("metawork_account_contract", account_contract);
+    account_completion_inbox.addImport("account_state", account_state);
+    const account = b.createModule(.{
+        .root_source_file = b.path("src/account.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    account.addImport("account_state", account_state);
+    account.addImport("account_completion_inbox", account_completion_inbox);
     const executor = b.createModule(.{
         .root_source_file = b.path("src/workbench/executor.zig"),
         .target = target,
@@ -205,12 +231,16 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     app.addImport("metawork_bridge", bridge);
     app.addImport("metawork_automation", automation);
     app.addImport("metawork_account_contract", account_contract);
+    app.addImport("metawork_account", account);
 
     root_module.addImport("metawork_app", app);
     root_module.addObjectFile(.{ .cwd_relative = bundle.library_path });
     root_module.link_libc = bundle.link_libc;
     return .{
+        .account = account,
+        .account_completion_inbox = account_completion_inbox,
         .account_contract = account_contract,
+        .account_state = account_state,
         .app = app,
         .agent = agent,
         .bridge = bridge,

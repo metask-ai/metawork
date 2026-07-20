@@ -31,7 +31,7 @@
 - Workbench admission 已在 `workbench/projection.zig` 建立 stable Run record、generation、`RunRef`、write-once terminal publication 与 `delete_pending`，并独占 Executor/queue/workers；已开始执行的 Run 由 Agent immutable `TerminalResult` 收口，queued-before-execute 由 Workbench 生成产品结果；
 - Renderer Native Bridge 合同已集中到 `frontend/src/bridge/`，只有 `bridge/client.ts` 访问 `window.zero`；应用 composition 已进入 `frontend/src/app/`，已落地的 Workspace navigation、Search、Timeline、question/permission Approvals、Composer draft 和 Task activity进入各自 `frontend/src/features/`，`workbench/` 只保留 projection store 与 selector。尚未形成真实产品能力的 Outputs、持久权限管理和 Settings 不创建空模块。
 
-当前已落地 `main.zig + app.zig + agent.zig + workbench.zig + bridge.zig`，Task A 新增纯 `src/account/contract.zig` 和独立测试 root；后续 Task B 才增加 `account.zig` runtime，不创建空壳。目标产品边界为 App、Account、Bridge、Workbench、Agent 五个 modules；`account_contract` 只是 Account owner 发布的纯合同，不是第六个产品职责。`agent/` 表达 MetaWork 自己拥有的执行子系统；`AgentCore` 只指 metacodes 构建的外部 bundle。
+当前已落地 `main.zig + app.zig + account.zig + agent.zig + workbench.zig + bridge.zig`。Task A 提供纯 `src/account/contract.zig`；Task B 提供不接触 production 网络或平台存储的纯 Account 状态机和 bounded completion inbox。产品边界为 App、Account、Bridge、Workbench、Agent 五个 modules；`account_contract` 只是 Account owner 发布的纯合同，不是第六个产品职责。`agent/` 表达 MetaWork 自己拥有的执行子系统；`AgentCore` 只指 metacodes 构建的外部 bundle。
 
 采纳时做六项收敛：
 
@@ -94,7 +94,9 @@ metawork/
 │   ├── app.zig
 │   ├── account.zig
 │   ├── account/
-│   │   └── contract.zig
+│   │   ├── contract.zig
+│   │   ├── state.zig
+│   │   └── completion_inbox.zig
 │   ├── bridge.zig
 │   ├── bridge/
 │   ├── workbench.zig
@@ -279,6 +281,7 @@ src/
 ├── account/
 │   ├── contract.zig
 │   ├── state.zig
+│   ├── completion_inbox.zig
 │   ├── metask_client.zig
 │   └── credential_store.zig
 │
@@ -323,7 +326,8 @@ src/
 - `app.zig`：composition root，定义 `native_sdk.App` callbacks，明确区分 `native_runtime` 与 `agent_runtime`；
 - `account.zig`：Metask Account runtime 的最小公开入口；拥有登录 attempt、catalog、credential generation 和 prepared transition，不拥有 Workbench；
 - `account/contract.zig`：不依赖 Native SDK 或任何产品 runtime 的有界纯合同；包含脱敏 view/fact、command sink、ExecutionConfig transfer、稳定 error code 与 compile-time limits；
-- `account/state.zig`：双状态、operation、attempt/generation 与唯一 prepare/commit 状态机；只有形成独立不变量后才从 `account.zig` 提取；
+- `account/state.zig`：双状态、operation、attempt/generation 与唯一 prepare/commit 状态机；effect 只允许先进入有界 worker queue，再执行 no-fail commit；
+- `account/completion_inbox.zig`：每 attempt 的 bounded MPSC completion queue、first-writer terminal mailbox、guaranteed-wake fatal latch 与过期 completion ownership cleanup；
 - `account/metask_client.zig`：只消费已锁定的 Metask public contract；合同 blocked 时不得创建 production 实现；
 - `account/credential_store.zig`：固定 slot、generation、manifest/tombstone 和 secret cleanup；平台合同通过 spike 后才落地；
 - `bridge.zig`：Renderer Bridge 的最小公开入口，显式导出 command/policy/handler 所需类型，不使用 `usingnamespace` 倾倒全部内部符号；
@@ -390,14 +394,14 @@ flowchart TB
 - app 层不复制 Workbench 产品状态；
 - 不建立通用 adapter 只为让 Native SDK 或 AgentCore 看起来可替换。
 
-目标 `app.zig`、`account.zig`、`bridge.zig`、`workbench.zig` 和 `agent.zig` 由 `build.zig` 注册为 named product modules；当前 Task A 已先注册 `metawork_account_contract` 独立测试 root，Task B 在 runtime 实现存在时再注册 `metawork_account`。边界由 build graph 与 `scripts/architecture-boundaries.test.mjs` 共同检查，不能只靠目录文档。
+`app.zig`、`account.zig`、`bridge.zig`、`workbench.zig` 和 `agent.zig` 由 `build.zig` 注册为 named product modules；`metawork_account_contract`、Account state 和 completion inbox 也有独立正式测试 root。边界由 build graph 与 `scripts/architecture-boundaries.test.mjs` 共同检查，不能只靠目录文档。
 
 ## 9. 状态与类型所有权
 
 | 数据                       | 唯一所有者         | Renderer 行为                        |
 | -------------------------- | ------------------ | ------------------------------------ |
 | OAuth/session/catalog 状态 | Account            | 只观察脱敏 AccountView               |
-| OAuth token/完整 API Key   | Account/凭据存储   | 永不接收                              |
+| OAuth token/完整 API Key   | Account/凭据存储   | 永不接收                             |
 | active ExecutionConfig     | Workbench          | 只观察 generation/provider/model     |
 | Agent Session/active Run   | Agent              | 通过 snapshot 展示，不重建状态机     |
 | Task/Run 产品历史          | Workbench          | 只消费不可变 terminal product record |
