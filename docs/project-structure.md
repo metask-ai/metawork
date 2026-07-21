@@ -17,7 +17,7 @@
 
 系统职责仍以 [高层架构](architecture.md) 为准，AgentCore 生命周期与协议边界仍以 [AgentCore 集成契约](agentcore-integration.md) 为准，界面 feature 以 [Workbench UI 设计草案](workbench-ui-design.md) 为准。
 
-本文档是目标结构设计，不授权一次性搬迁文件。任何迁移都必须保持现有 build、test、package 和 Phase 0A Gate 行为。
+本文档是目标结构设计，不授权一次性搬迁文件。任何迁移都必须保持现有 build、test、package 和验证行为。
 
 ## 2. 当前结构与评审结论
 
@@ -31,7 +31,7 @@
 - Workbench admission 已在 `workbench/projection.zig` 建立 stable Run record、generation、`RunRef`、write-once terminal publication 与 `delete_pending`，并独占 Executor/queue/workers；已开始执行的 Run 由 Agent immutable `TerminalResult` 收口，queued-before-execute 由 Workbench 生成产品结果；
 - Renderer Native Bridge 合同已集中到 `frontend/src/bridge/`，只有 `bridge/client.ts` 访问 `window.zero`；应用 composition 已进入 `frontend/src/app/`，已落地的 Workspace navigation、Search、Timeline、question/permission Approvals、Composer draft 和 Task activity进入各自 `frontend/src/features/`，`workbench/` 只保留 projection store 与 selector。尚未形成真实产品能力的 Outputs、持久权限管理和 Settings 不创建空模块。
 
-当前已落地 `main.zig + app.zig + account.zig + agent.zig + workbench.zig + bridge.zig`。Task A 提供纯 `src/account/contract.zig`；Task B 提供不接触 production 网络或平台存储的纯 Account 状态机。产品边界为 App、Account、Bridge、Workbench、Agent 五个 modules；`account_contract` 只是 Account owner 发布的纯合同，不是第六个产品职责。`agent/` 表达 MetaWork 自己拥有的执行子系统；`AgentCore` 只指 metacodes 构建的外部 bundle。
+当前已落地 `main.zig + app.zig + account.zig + agent.zig + workbench.zig + bridge.zig`。Task A 提供纯 `src/account/contract.zig`；Task B 提供不接触 production 网络或平台存储的纯 Account 状态机。产品边界为 App、Account、Bridge、Workbench、Agent 五个 modules；`account_contract` 只是 Account owner 发布的纯合同，不是第六个产品职责。`agent/` 表达 MetaWork 自己拥有的执行子系统；`AgentCore` 只指 Metask AgentCore 构建的外部 bundle。
 
 采纳时做六项收敛：
 
@@ -70,7 +70,7 @@ metawork/
 │   ├── architecture.md
 │   ├── agentcore-integration.md
 │   ├── agentcore-abi-v1.md
-│   ├── phase-0-validation.md
+│   ├── validation.md
 │   ├── metask-account-contract.md
 │   ├── workbench-ui-design.md
 │   └── project-structure.md
@@ -381,7 +381,7 @@ flowchart TB
     BRIDGE --> NATIVE
     BRIDGE --> WB
     WB --> AGENT
-    AGENT --> SDK["metacodes bundle SDK"]
+    AGENT --> SDK["Metask AgentCore bundle SDK"]
     AGENT --> PUMP["callbacks / event pump"]
 ```
 
@@ -467,5 +467,5 @@ Zig 文件和符号遵循现有 `snake_case` 与 Zig 风格。
 - snapshot writer 与 snapshot delivery 没有重复序列化或 identity 所有权；
 - Workspace grant、Workspace registry 和持久 permission 没有混成一个 boolean trust；
 - 现有 lifecycle、event pump、snapshot、revision delivery、隔离 raw transport fixture 和 GUI 测试全部保持通过；
-- 正式 build graph 不导入 spikes，也不访问 metacodes source tree；
+- 正式 build graph 不导入 spikes，也不访问 AgentCore 实现源码；
 - 不新增 Native SDK adapter、AgentCore ABI facade 或平行协议。

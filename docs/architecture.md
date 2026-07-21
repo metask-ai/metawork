@@ -1,9 +1,9 @@
 # MetaWork 高层架构
 
-> 状态：AgentCore ABI v1 revision 3 macOS 基线与 Windows Phase 0B 接入 baseline 已通过；后续正式方向选择单 AgentCore Worker
+> 状态：AgentCore ABI v1 revision 3 macOS 与 Windows development baseline 已通过；后续正式方向选择单 AgentCore Worker
 > 日期：2026-07-21
 
-产品范围见 [产品需求](requirements.md)，metacodes AgentCore 的具体接入约束见 [AgentCore 集成契约](agentcore-integration.md)，revision 3 目标能力见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。历史报告中的 cc-zig 名称只保留当时仓库身份。
+产品范围见 [产品需求](requirements.md)，Metask AgentCore 的具体接入约束见 [AgentCore 集成契约](agentcore-integration.md)，revision 3 目标能力见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。精确源码路径、binary 和 symbol identifier 只作为机器合同保留。
 
 ## 1. 已确认的技术选型
 
@@ -12,14 +12,14 @@
 | Renderer                          | React + Tailwind                   | 当前正式 UI 技术栈，适合复杂 Workbench 界面                           |
 | Desktop Framework                 | Native SDK                         | Zig 一等公民，负责系统 WebView、窗口、Bridge 和桌面生命周期           |
 | App / Account / Workbench / Agent | Zig                                | 分别承担 composition、账号控制面、产品状态和 AgentCore 执行边界       |
-| AgentCore                         | metacodes AgentCore library bundle | metacodes 独立构建和发布；MetaWork 链接产物，不把上游源码纳入自身构建 |
-| Agent UI contract                 | metacodes 原生结构化协议           | React 消费 Host 产品投影，不消费终端字节流或 Provider SSE             |
+| AgentCore                         | Metask AgentCore library bundle    | Metask AgentCore 独立构建和发布；MetaWork 链接产物，不把上游源码纳入自身构建 |
+| Agent UI contract                 | AgentCore 原生结构化协议           | React 消费 Host 产品投影，不消费终端字节流或 Provider SSE             |
 
 由此排除以下正式主路径：
 
 - 不采用 Tauri + Rust；
 - 不由 MetaWork 维护 AgentCore ABI 或复制协议；
-- 不通过 metacodes source-tree path dependency、Git source dependency 或源码复制把 AgentCore 实现编进 MetaWork；staged bundle 内官方 source-free Zig package 不属于上游实现源码依赖；
+- 不通过 AgentCore implementation source-tree path dependency、Git source dependency 或源码复制把 AgentCore 实现编进 MetaWork；staged bundle 内官方 source-free Zig package 不属于上游实现源码依赖；
 - 不以 PTY、xterm 或模拟终端作为默认 Agent 架构；
 - 当前不使用 `.native` 取代 React；
 - 不建立 Native SDK Adapter、通用 Desktop Interface 或可替换框架抽象。
@@ -28,9 +28,9 @@
 
 ### 同步 macOS baseline
 
-已批准的新基线是 metask AgentCore ABI v1 revision 3。它保持 112-byte API table、RunContext、typed status/StopReason、CoreEvent/UI codec 和同步 Run 语义，但把公共 C/Zig namespace、discovery symbol、bundle layout、manifest 和语言 package 统一到 `metask_agentcore`。精确 artifact identity、payload layout 和 manifest schema 只由 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)定义。MetaWork 对它执行 hard cut：最终 active build、Host、probe 和规范文档只接受 revision 3，不保留 revision 2 parser、路径、symbol、module alias 或 fallback。
+已批准的新基线是 Metask AgentCore ABI v1 revision 3。它保持 112-byte API table、RunContext、typed status/StopReason、CoreEvent/UI codec 和同步 Run 语义，但把公共 C/Zig namespace、discovery symbol、bundle layout、manifest 和语言 package 统一到 `metask_agentcore`。精确 artifact identity、payload layout 和 manifest schema 只由 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)定义。MetaWork 对它执行 hard cut：最终 active build、Host、probe 和规范文档只接受 revision 3，不保留 revision 2 parser、路径、symbol、module alias 或 fallback。
 
-当前 checkout 的 active code、build graph 和 staged bundle 已切到 revision 3；candidate/stage、typed SDK、正式 Host、check/test/Phase 0A、Debug/Release、Gate 5/6 和最终 macOS package 全部通过。revision 3 是当前已验证产品基线，证据见 [revision 3 迁移验证报告](agentcore-revision-3-migration-report.md)。历史 revision 2 Gate 报告继续保留当时证据，但不构成兼容要求。
+当前 checkout 的 active code、build graph 和 staged bundle 已切到 revision 3；candidate/stage、typed SDK、正式 Host、完整测试、Debug/Release、桌面自动化和最终 macOS package 全部通过。revision 3 是当前已验证产品基线，证据见 [revision 3 迁移验证报告](agentcore-revision-3-migration-report.md)。历史 revision 2 迁移事实不构成兼容要求。
 
 该 baseline 不包含：
 
@@ -42,13 +42,13 @@
 - plan approval 或 custom UI control；
 - Windows 安装、签名与更新产物。
 
-### 完整 Phase 0A
+### Fault-domain 结论
 
-事件泵容量、shutdown race、同进程 crash baseline 和最小 Worker fault-domain spike 均已通过，Phase 0A 完成。Gate 7 选择单 AgentCore Worker 作为后续正式故障域；当前应用仍是同进程 prototype，不能宣称已经具备进程隔离或 crash recovery。
+事件泵容量、shutdown race、同进程 crash baseline 和最小 Worker fault-domain spike 均已完成。结论是选择单 AgentCore Worker 作为后续正式故障域；当前应用仍是同进程 prototype，不能宣称已经具备进程隔离或 crash recovery。
 
 ### 后续能力
 
-Windows Phase 0B 接入 baseline 使用独立 target lock、系统链接输入和自动化 Gate，已验证 x86_64 Windows GNU artifact、Native Debug/Release、Renderer 生产资源与 Gate 5/6。MSI/签名/更新仍属分发层。Linux 后续复用同一 target-policy 入口，但必须新增精确 lock、link policy、probe 和平台 Gate，不能落入 generic fallback。
+Windows development baseline 使用独立 target lock、系统链接输入和桌面自动化，已验证 x86_64 Windows GNU artifact、Native Debug/Release、Renderer 生产资源与 event-delivery/vertical path。MSI/签名/更新仍属分发层。Linux 后续复用同一 target-policy 入口，但必须新增精确 lock、link policy、probe 和平台验证，不能落入 generic fallback。
 
 ## 3. 高层结构
 
@@ -71,7 +71,7 @@ flowchart TB
         WB --> AGENT
     end
 
-    CORE["AgentCore bundle<br/>metacodes"]
+    CORE["Metask AgentCore bundle"]
 
     UI <-->|"领域命令 + 结构化数据"| BRIDGE
     AGENT <-->|"bundle SDK + binary ABI"| CORE
@@ -105,7 +105,7 @@ flowchart TB
 
 ### 4.2 MetaWork Zig Desktop Host
 
-Native SDK 直接构成桌面 Runtime 与窗口能力。MetaWork 内部目标为五个 named product modules：`app` 负责 composition 和主线程提交协调，`account` 负责 Metask 登录、catalog 与凭据代际，`bridge` 负责验证与运输，`workbench` 拥有产品状态与队列，`agent` 执行并收口一个真实 Agent Run。`AgentCore` 只指 metacodes 外部 bundle。`metawork_account_contract` 只承载 Account 发布给 App/Bridge/Workbench 的有界纯合同，不是第六个产品模块。
+Native SDK 直接构成桌面 Runtime 与窗口能力。MetaWork 内部目标为五个 named product modules：`app` 负责 composition 和主线程提交协调，`account` 负责 Metask 登录、catalog 与凭据代际，`bridge` 负责验证与运输，`workbench` 拥有产品状态与队列，`agent` 执行并收口一个真实 Agent Run。`AgentCore` 只指 Metask 提供的外部 bundle。`metawork_account_contract` 只承载 Account 发布给 App/Bridge/Workbench 的有界纯合同，不是第六个产品模块。
 
 Bridge 的产品数据面由具体 `Dispatcher` 内部的 `ProductDelivery` 统一拥有：connection generation、revision retry/timer、snapshot identity 和 snapshot transport storage 都不再存放在 App。Dispatcher 通过明确的 `*Workbench` 同步生成 snapshot；App 只注入 Native emit/timer/dialog/main-thread capability，并按顺序组织 shutdown。automation-only raw Agent batch/object/ACK transport 不并入产品数据面；它只跟随产品 generation，由 build graph 从 release 产物裁掉。
 
@@ -147,7 +147,7 @@ Account.prepare(command | completion)
 
 每个 Account attempt 都有 Host-owned deadline、attempt identity 和唯一 terminal completion。浏览器未回调、网络悬挂、effect 启动失败和取消都必须收口到可恢复 committed state。幂等 catalog read 可以有限重试；OAuth code exchange、凭据持久化和结果不确定 mutation 不得自动重放。Renderer command timeout 只释放本地交互并触发 snapshot resync，不能代表 Host mutation 失败。
 
-production 网络接入受 [Metask Account API 合同](metask-account-contract.md)约束。C1 OAuth/login 独立提交 `account_only`，不打开 Task admission；C2 使用 profile-aware API Key/model catalog，从精确 `group.platform` 生成固定 Metask AgentCore target，并通过 OAuth/execution 双 family A/B slot 与单一 `manifest.v2` 提交 `execution_ready`。只有 Workbench 安装同一 execution generation 后才开放 Task admission。mCode/metacodes 只作为 Metask 自有实现证据，MetaWork 不修改其代码。
+production 网络接入受 [Metask Account API 合同](metask-account-contract.md)约束。C1 OAuth/login 独立提交 `account_only`，不打开 Task admission；C2 使用 profile-aware API Key/model catalog，从精确 `group.platform` 生成固定 Metask AgentCore target，并通过 OAuth/execution 双 family A/B slot 与单一 `manifest.v2` 提交 `execution_ready`。只有 Workbench 安装同一 execution generation 后才开放 Task admission。Metask 内部实现只作为外部合同确认的证据，MetaWork 不修改其代码。
 
 ### 4.4 AgentCore
 
@@ -165,13 +165,13 @@ async suspend/resume、持久化恢复和后台转换属于后续 AgentCore capa
 
 ## 5. AgentCore bundle 边界
 
-metacodes 与 MetaWork 是两个独立构建单元。revision 3 正式接入物是 metacodes 构建的 target-specific bundle，包含 binary、C header、官方语言 bindings、README 和 manifest；精确 payload whitelist 只在 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)定义。
+Metask AgentCore 与 MetaWork 是两个独立构建单元。revision 3 正式接入物是 Metask AgentCore 构建的 target-specific bundle，包含 binary、C header、官方语言 bindings、README 和 manifest；精确 payload whitelist 只在 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)定义。
 
 规范要求：
 
-- metacodes 单一维护 binary facade、C header、官方 Zig/Rust bindings、内部映射和 link metadata；
-- 公司内部初步开发期直接从 `<metacodes>/zig-out/agentcore/aarch64-macos` 取得 candidate bundle；当前不建设下载器、resolver、artifact repository、content-addressed cache 或跨机器自动分发；
-- candidate probe 使用显式绝对 bundle root；`agentcore:stage` 校验 candidate 后只复制 manifest whitelist 到 `.agentcore/bundle`；正式 build/test/package 只消费这个 canonical staged root，不直接链接 `metacodes/zig-out`；
+- Metask AgentCore 单一维护 binary facade、C header、官方 Zig/Rust bindings、内部映射和 link metadata；
+- 公司内部初步开发期直接从精确本机路径 `<metacodes>/zig-out/agentcore/aarch64-macos` 取得 candidate bundle；当前不建设下载器、resolver、artifact repository、content-addressed cache 或跨机器自动分发；
+- candidate probe 使用显式绝对 bundle root；`agentcore:stage` 校验 candidate 后只复制 manifest whitelist 到 `.agentcore/bundle`；正式 build/test/package 只消费这个 canonical staged root，不直接链接精确本机路径 `metacodes/zig-out`；
 - MetaWork verifier 决定 artifact 是否可信，官方 Zig package 只负责 module/link graph；精确 identity、schema、checksum、target、ABI 和 symbol 规则见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)；
 - artifact 缺失或校验失败时明确失败；不使用 `latest`、版本范围、可变 tag 或 source fallback；
 - raw candidate probe 与 staged 正式 Host 分离，具体 staging/build/lifecycle 规则见 [AgentCore 集成契约](agentcore-integration.md)；
@@ -189,13 +189,13 @@ revision 3 是硬切换，不提供 revision 2 active compatibility path。新�
 2. 验证 Native SDK React dev/prod 和真实双向 Bridge；
 3. 用显式 bundle root 完成隔离的 artifact-only raw contract probe；
 4. 建立 Host 生命周期、安全边界和 deterministic ABI function-table 测试；
-5. metacodes bundle SDK 补齐 typed status、事件与 UI request/response codec；
+5. Metask AgentCore bundle SDK 补齐 typed status、事件与 UI request/response codec；
 6. 正式 Host 直接接入 typed SDK，并先连接有界测试 sink；
 7. 根据真实 trace 实现事件泵和 Bridge；
 8. 完成同进程 macOS 同步原型；
 9. 完成 fault-domain spike 并决定进程模型；
 10. 对 revision 3 bundle 执行 hard-cut migration Gate，证明 candidate、staged dependency、正式 Host 和最终 package 是同一精确 identity；
-11. 完成 Windows Phase 0B 接入 baseline；
+11. 完成 Windows development baseline；
 12. 再建设 cache、remote、后续 capability、Windows 分发与 Linux 接入。
 
 任何 Gate 未满足退出条件时，不得用 MetaWork 自己复制协议、放宽安全语义或引入 source dependency 绕过。
@@ -239,10 +239,10 @@ RunJob
 | 模型                      | 故障隔离               | 作用                       |
 | ------------------------- | ---------------------- | -------------------------- |
 | 同进程 + bounded executor | 零进程级隔离           | 当前最小真实 baseline      |
-| 单 AgentCore Worker       | Host 与 AgentCore 隔离 | Gate 7 选定的后续正式方向  |
+| 单 AgentCore Worker       | Host 与 AgentCore 隔离 | fault-domain 验证选定的后续正式方向 |
 | 每活跃 Session Worker     | 会话级隔离             | 只有前两者数据不足时再验证 |
 
-统一 Zig 不提供隔离。Gate 7 的独立 crash 对照证明同进程是零进程级隔离，并选择单 AgentCore Worker 作为后续正式方向。该决定不把 spike IPC 升格为产品协议；版本化 transport、backpressure、shutdown、credential 和真实 bundle 资源数据在后续 Gate 定义。当前同进程应用仍只是 prototype。
+统一 Zig 不提供隔离。独立 crash 对照证明同进程是零进程级隔离，并选择单 AgentCore Worker 作为后续正式方向。该决定不把 spike IPC 升格为产品协议；版本化 transport、backpressure、shutdown、credential 和真实 bundle 资源数据必须在后续能力验收中定义。当前同进程应用仍只是 prototype。
 
 ## 8. 状态与恢复边界
 
@@ -263,7 +263,15 @@ Account attempt 与 Renderer 生命周期解耦：Renderer reload、短暂断连
 
 Host view snapshot 使用 Bridge `Dispatcher` 内部 `ProductDelivery` 独占的 12 MiB 有界存储，不受 Bridge 单次 1 MiB result 上限反向约束。该容量覆盖 512 KiB Task projection、最大 Account API Key/model catalog、JSON 最坏转义和全部结构上界。Dispatcher 同时拥有 callback gate、workspace grants、handler registry 和 `*Workbench`，产品 command 的 decode、authority、domain call 与 response encode 不再经过 App。Workbench writer 只能在同步调用期间借用这块 output buffer；返回后 Bridge 独占 encoded bytes，禁止保存 Workbench borrowed view。Renderer 通过带 snapshot identity 的 256 KiB 分块读取完成 resync；begin 写入前先使旧 descriptor 失效，序列化失败后旧 identity 必须保持 stale，不能继续读取已被部分覆盖的 store。revision 通知和 snapshot 拉取分别保留 pending/retry 状态，瞬时发送或读取失败不能把旧视图标记为最新。revision retry 同时受 attempt 和 deadline 预算约束，耗尽或 retry timer 不可用时当前 event connection fail closed，但不终止后台 Agent Run。新 event generation 建立时会使旧 snapshot descriptor 失效；Renderer 若仍持有旧 generation Promise，必须在旧 Promise 退出后继续完成新 generation 的实际 resync，不能把等待旧 Promise 误判为同步成功。Bridge 异步保留的 payload 必须自有；App shutdown 先 stop Bridge ingress、关闭 delivery connection 并取消 timer，在 Native platform loop 上确认同步 handler quiescence，然后 detach Workbench，最后才独立释放 delivery buffers。
 
-Host 与 Renderer 随同一应用包原子发布，Workbench snapshot 使用精确 schema version，不承担旧 Renderer/新 Host 或新 Renderer/旧 Host 的兼容。Renderer 必须 runtime decode Host payload；unknown version、malformed payload 或 decoder/serializer contract mismatch 一律进入 fail-closed view-sync failure，不能猜测字段或静默降级。
+### 8.1 Renderer Bridge wire contract
+
+Host 与 Renderer 随同一应用包原子发布，不承担旧 Renderer/新 Host 或新 Renderer/旧 Host 的兼容，但仍必须在 bootstrap 时检测开发产物、缓存资源或安装状态造成的版本错配。Renderer Bridge contract 覆盖全部 product command、event 和 snapshot wire surface；它与产品版本、AgentCore ABI、bundle manifest schema 分别演进。
+
+当前实现仍以 Workbench snapshot schema v7 作为已验证防线。引入完整协商时使用独立合同身份 `metawork.renderer-bridge`，首次 revision 为 `1`。`contractRevision` 精确匹配，不使用 semver：任何可序列化 command、event、payload 字段或线上语义变化都升级 revision，包括新增“可选”命令。当前 pre-1.0 开发阶段不维护旧 revision 兼容层。
+
+`connect` 是 product delivery 的 bootstrap 边界。Host 必须在合同身份与 revision 校验成功后才建立 `ProductDelivery` connection；既有 `requireWindow()` 门禁随后统一保护 Account、Task、event 和 snapshot 产品路径。协商前只允许显式列出的无状态 bootstrap/smoke 命令，不得读取或修改产品状态。合同不匹配返回 typed terminal bootstrap error，Renderer 不把它当作瞬时断线重试。
+
+完整协商及其跨语言测试落地前保留 snapshot schema v7。只有证明未协商和 mismatch 均无法进入任何产品路径、Zig/TypeScript revision 与 command catalog 一致、双向 payload fixture 通过后，才能在独立变更中移除 snapshot 局部版本。Renderer 始终 runtime decode Host payload；unknown version、malformed payload 或 decoder/serializer contract mismatch 一律进入 fail-closed view-sync failure，不能猜测字段或静默降级。
 
 ## 9. 安全边界
 
@@ -285,7 +293,7 @@ Renderer 按不可信调用方处理：
 
 ## 10. Native SDK 边界
 
-Native SDK 是当前选型，但 Phase 0A 必须验证：
+Native SDK 是当前选型，当前 baseline 已验证：
 
 - React development server 与 production assets；
 - JavaScript → Zig command；
@@ -294,14 +302,14 @@ Native SDK 是当前选型，但 Phase 0A 必须验证：
 - origin policy、文件对话框、窗口关闭和正常退出；
 - Debug/Release macOS 构建。
 
-在验证前不预设 push、poll 或自制 `events.drain` 协议。Windows WebView、打包、签名和更新在 Phase 0B 单独验证。
+在验证前不预设 push、poll 或自制 `events.drain` 协议。Windows WebView、打包、签名和更新必须独立验证。
 
 ## 11. 主要风险
 
 | 风险                                   | 当前控制方式                                                            |
 | -------------------------------------- | ----------------------------------------------------------------------- |
-| Native SDK Zig → React 路径不符合预期  | Gate 0 先做真实 dev/prod smoke                                          |
-| typed SDK 与真实 producer wire 漂移    | Gate 3 source-free corpus + Gate 4 真实 Host link/run 回归              |
+| Native SDK Zig → React 路径不符合预期  | 真实 dev/prod smoke                                                     |
+| typed SDK 与真实 producer wire 漂移    | source-free corpus + 真实 Host link/run 回归                            |
 | callback 数据返回后失效                | callback 内验证并深拷贝                                                 |
 | callback/close race 造成 UAF           | abort、join、callback quiescence 后 destroy                             |
 | callback identity race 泄漏 permission | UI request publication 与 response extraction 均在 Session lock 下复检  |
@@ -310,5 +318,5 @@ Native SDK 是当前选型，但 Phase 0A 必须验证：
 | Run failure 被误报用户取消             | active first-writer cause 与 Workbench write-once terminal history 分层 |
 | Renderer 掉线杀死后台 Run              | typed transport policy 不向 Agent termination 反向泄漏                  |
 | v1 Workspace 被误报安全                | 只允许临时/trusted 验证并显式标注限制                                   |
-| 同进程 native crash 带走全部状态       | Gate 7 已选后续单 Worker；当前同进程应用仍是 prototype                  |
+| 同进程 native crash 带走全部状态       | fault-domain 验证已选后续单 Worker；当前同进程应用仍是 prototype        |
 | 过早建设发布系统                       | baseline 通过后再做 cache 与 remote                                     |

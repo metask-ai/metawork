@@ -1,13 +1,13 @@
 # MetaWork AgentCore 集成契约
 
-> 状态：AgentCore ABI v1 revision 3 macOS 与 Windows x86_64 GNU 接入 baseline 已通过；Gate 7 仍选择单 AgentCore Worker 作为后续正式方向
-> 目标依赖：metask AgentCore ABI v1 revision 3；精确 artifact identity 见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)
+> 状态：AgentCore ABI v1 revision 3 macOS 与 Windows x86_64 GNU development baseline 已通过；fault-domain 验证选择单 AgentCore Worker 作为后续正式方向
+> 目标依赖：Metask AgentCore ABI v1 revision 3；精确 artifact identity 见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)
 
-本文定义 MetaWork `agent/` 执行子系统与 metacodes AgentCore 之间的规范边界。Desktop Host 的 composition、Workbench 产品状态和 Bridge transport 见 [高层架构](architecture.md)，revision 3 目标能力见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。
+本文定义 MetaWork `agent/` 执行子系统与 Metask AgentCore 之间的规范边界。Desktop Host 的 composition、Workbench 产品状态和 Bridge transport 见 [高层架构](architecture.md)，revision 3 目标能力见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。
 
 ## 1. 集成原则
 
-1. metacodes AgentCore bundle SDK 是 Agent 结构化协议的唯一来源；
+1. Metask AgentCore bundle SDK 是 Agent 结构化协议的唯一来源；
 2. MetaWork 不解析模型 Provider SSE；
 3. MetaWork 不建立平行的 `AgentEvent` / `WorkbenchEvent` 体系；
 4. MetaWork 正式 Agent module 只使用 bundle typed SDK 和 binary ABI；
@@ -19,23 +19,23 @@
 
 ## 2. Bundle 消费合同
 
-MetaWork 的依赖输入是一个完整 bundle，而不是 metacodes source tree。精确 artifact identity、payload whitelist 和 manifest schema 只由 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)定义；本文只定义 candidate、staging、build graph 和 Host 生命周期。
+MetaWork 的依赖输入是一个完整 bundle，而不是 AgentCore 实现源码。精确 artifact identity、payload whitelist 和 manifest schema 只由 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)定义；本文只定义 candidate、staging、build graph 和 Host 生命周期。
 
 ### revision 3 开发期 bootstrap
 
-- metacodes 独立构建并测试 target-specific bundle，candidate 直接取自本机 `metacodes/zig-out/agentcore/<target>`；
+- Metask AgentCore 独立构建并测试 target-specific bundle，candidate 直接取自本机精确路径 `metacodes/zig-out/agentcore/<target>`；
 - candidate probe 与 `agentcore:stage` 使用显式绝对 bundle root；正式 build/test/package 只消费 `.agentcore/bundle`；
 - 每个已接入 target 的 repository lock 保存完整 revision 3 manifest，并锁定 package/source、target、toolchain、ABI version/revision、link inputs 和所有 payload checksum；macOS 与 Windows lock 不互相替代；
 - stager 只复制 manifest whitelist；捕获到的复制/rename 错误必须恢复旧 canonical bundle。当前内部开发不承诺跨进程 crash transaction 或并发 build/stage，强制中断后的残留由再次执行 stage 清理；
 - staged bundle 在正式 build 前由 MetaWork verifier 再校验；官方 Zig package 只负责 module/link graph，不承担 repository lock 和 checksum 信任政策；
 - 由于 Zig 会在执行 root build verification 前解析 staged path dependency，正式 `dev/check/test/build/package` 必须先运行轻量 `agentcore:verify-staged` preflight，给出明确的缺包或 lock mismatch 错误；Zig build-time verifier 仍负责最终 build correctness；
-- 常规 build/test/package 不访问 metacodes source tree 或 `zig-out`；
+- 常规 build/test/package 不访问 AgentCore 实现源码或外部 `zig-out`；
 - artifact 缺失、target 不匹配或 checksum 错误时明确失败；
 - 禁止 path/Git source dependency、源码复制、`latest`、版本范围、可变 tag 和 source fallback。
 
 stager 与 verifier 根据 manifest target 选择显式 target policy 和 exact lock，只接受 ABI 消费合同定义的 schema 1 revision 3 manifest。未知 target 必须失败；Linux 后续通过新增独立 policy/lock 接入，不提供 generic fallback。MetaWork 不保留 revision 2 字段、目录、symbol、module alias 或双格式 parser。
 
-当前内部初步开发不实现 dependency resolver、content-addressed cache、artifact repository 或跨机器自动分发。这个限制意味着开发 checkout 需要本机 metacodes 构建输出；它是明确的开发期前提，不得伪装成公司发布方案。
+当前内部初步开发不实现 dependency resolver、content-addressed cache、artifact repository 或跨机器自动分发。这个限制意味着开发 checkout 需要本机 Metask AgentCore 构建输出；它是明确的开发期前提，不得伪装成公司发布方案。
 
 ### raw probe 与正式 Agent module
 
@@ -70,13 +70,13 @@ revision 3 bundle 保持 typed status、六个 StopReason、known/unknown observ
 | `RunResult`       | Core → Host | status OK 后才有效；包含 stop reason code、turn/tool count                       |
 | abort             | Host → Core | 按 Session/Run 的 user/timeout 中断机制                                          |
 
-`UiEvent` / `UiBackend.poll()` 虽然存在于 metacodes native 协议中，但当前生产 agent loop 未证明消费。MetaWork 不依赖它完成 stop、生成期 queue message 或 steering。
+`UiEvent` / `UiBackend.poll()` 虽然存在于 Metask AgentCore native 协议中，但当前生产 agent loop 未证明消费。MetaWork 不依赖它完成 stop、生成期 queue message 或 steering。
 
 当前 ABI `RunResult` 不包含 `SuspendInfo`、resume token、background handle 或 budget stop。unknown stop code 在 SDK validation 层失败；Host 不能制造这些产品状态。
 
 ## 4. Agent binding
 
-Agent binding 是 metacodes AgentCore 的 ABI 消费者，不是 Native SDK Adapter。它直接持有 bundle SDK API table 和 opaque handles。
+Agent binding 是 Metask AgentCore 的 ABI 消费者，不是 Native SDK Adapter。它直接持有 bundle SDK API table 和 opaque handles。
 
 ### Event callback
 
@@ -105,7 +105,7 @@ AgentCore/tool thread
 - valid unknown observation 在 SDK 完成结构、ownership 和 byte-bound 校验后立即释放并忽略，不占用产品事件泵，不得传给 Renderer 或猜测为产品状态；
 - callback 不等待 WebView，也不调用 Session destroy 或 re-enter Run。
 
-Gate 4 把正式 Host 连接到 FIFO bounded test sink，并通过 typed callback、生命周期、同步 UI 和真实 bundle link/run 验证。Gate 5 将它替换为 per-Session/global count+bytes、control reserve 和 deadline 受限的 Event pump。Gate 6 已完成正式 AgentCore→Workbench projection→Native SDK Bridge→React 垂直接线，并验证同步权限、AskUserQuestion、Renderer reload、终态和异步 Session close；详见 [Gate 6 报告](phase-0-gate-6-report.md)。
+初始验证先把正式 Host 连接到 FIFO bounded test sink，再替换为 per-Session/global count+bytes、control reserve 和 deadline 受限的 Event pump。当前正式 AgentCore→Workbench projection→Native SDK Bridge→React 垂直链路已经验证同步权限、AskUserQuestion、Renderer reload、终态和异步 Session close；持续回归要求见 [验证规范](validation.md)。
 
 ### UI request callback
 
@@ -189,9 +189,9 @@ Open.*
 - callback context 与 Session handle 具有独立 lifetime guard；
 - Run 返回不等于可以立刻 free callback context，必须确认 callback refcount 为零。
 
-Gate 2 的 raw lifecycle foundation 使用 bundle SDK 提供的精确 `ApiV1` table 作为可注入依赖，并显式接收 Zig `std.Io` 来实现 mutex/condition；它不导入 metacodes source tree，也不建立 Adapter。`submit` 在持有 Session lock 时完成 bounded executor enqueue，避免 enqueue 与 close 之间出现未入队的悬空 `Queued` 状态。Core callback 在 `Closing` 后不得再取得新的 lifetime reference；已经进入的 callback 必须在 destroy 前归零。
+初始 raw lifecycle foundation 使用 bundle SDK 提供的精确 `ApiV1` table 作为可注入依赖，并显式接收 Zig `std.Io` 来实现 mutex/condition；它不导入 AgentCore 实现源码，也不建立 Adapter。`submit` 在持有 Session lock 时完成 bounded executor enqueue，避免 enqueue 与 close 之间出现未入队的悬空 `Queued` 状态。Core callback 在 `Closing` 后不得再取得新的 lifetime reference；已经进入的 callback 必须在 destroy 前归零。
 
-Gate 4 在同一状态机上直接加入 bundle typed SDK，不另建 Adapter：event callback 先校验并形成 SDK-owned parse owner，再以单调 Host Session ID 和 Run ID 进入 FIFO bounded sink；UI callback 保留校验后的 request owner，response 只由 request-aware SDK encoder 生成。同步 UI deadline 使用 Host `std.Io` future，response、cancel、close、shutdown 或 deadline 都在 callback 返回前收敛并回收 timer。
+正式 Host 在同一状态机上直接加入 bundle typed SDK，不另建 Adapter：event callback 先校验并形成 SDK-owned parse owner，再以单调 Host Session ID 和 Run ID 进入 FIFO bounded sink；UI callback 保留校验后的 request owner，response 只由 request-aware SDK encoder 生成。同步 UI deadline 使用 Host `std.Io` future，response、cancel、close、shutdown 或 deadline 都在 callback 返回前收敛并回收 timer。
 
 当前实现由 Workbench 预留 durable Run record、generation、tool slots 与 terminal diagnostic buffer，再调用 `Session.prepareRun()` 并把 Workbench-owned job 放入自身 bounded Executor。worker claim 后以原子 `starting` 状态调用 `Session.beginRun()`；成功后先发布 generation-bound `RunControl` 和 `running`，再调用唯一 latch-aware `Run.execute()`。`beginRun()` 失败会在同一 Session lock 下返回 typed completion disposition，Workbench 据此生成 pre-execution terminal payload，不再额外读取 Session snapshot。cancel/close/shutdown 在 `starting` 时只发布 first-writer pending termination，在 `running` 时取得 `RunControlLease` 后于锁外请求终止。Agent Runtime 不 enqueue、不停止、也不销毁 Executor。
 
@@ -343,7 +343,7 @@ Native SDK 和真实事件大小已经测量；49,703-byte 真实 event 超过�
 
 当前 baseline 只保证 WebView/Renderer reload 后从仍存活 Host 重建视图：
 
-- Native SDK 的真实 push/poll 机制由 Gate 0 先验证；
+- Native SDK 的真实 push/poll 机制由 dev/prod smoke 验证；
 - Host 维护可生成当前 view snapshot 的产品状态；
 - 重连策略必须定义 snapshot/event 的大小上限、旧连接隔离和清理；
 - reload 期间仍 active 的同步 UI request 可以重新展示，但响应仍须绑定原 Session/Run/request；
@@ -352,7 +352,7 @@ Native SDK 和真实事件大小已经测量；49,703-byte 真实 event 超过�
 
 当前 event delivery 的 batch fetch/ACK 任一步失败时，Renderer 必须停止消费旧 generation，显式 disconnect 后以有上限的退避序列重新 connect；Host 只在新 generation 重发未 ACK 项。旧 batch 在重连后直接失效，不能吞掉错误后继续 ACK 后续 sequence。Workbench revision 通知只在 revision 变化时发送，Renderer 合并并发 refresh；Host 发送失败时保留最新 revision 并由一次性 timer 重试，若 timer 也无法建立则立即使当前 event connection 失效，不能只记录日志后继续宣称可用。Renderer snapshot 拉取失败时保留目标 revision；每个 generation 的自动重试预算耗尽后停止请求、禁止产品 mutation 并等待用户显式恢复，不得把失败误记成已同步，也不得永久循环重试。raw transport batch 只负责完整 ACK，不再额外触发一次全量 snapshot。
 
-正式 AgentCore 产品事件在 Host event pump 中完成 typed projection 后即释放，不再把同一 raw `CoreEvent` 复制到 Renderer 再丢弃。`metawork:agent-events` raw batch/object/ACK 路径只保留为隔离的 Gate 5 transport fixture；产品 Renderer 的数据面是 Host-owned Workbench revision + bounded snapshot。
+正式 AgentCore 产品事件在 Host event pump 中完成 typed projection 后即释放，不再把同一 raw `CoreEvent` 复制到 Renderer 再丢弃。`metawork:agent-events` raw batch/object/ACK 路径只保留为隔离的 transport fixture；产品 Renderer 的数据面是 Host-owned Workbench revision + bounded snapshot。
 
 当前 Bridge 单次 result 上限为 1 MiB，但它不是 Workbench 产品状态容量。Host 在固定 12 MiB snapshot store 中生成一致的完整 JSON，再由 Renderer 以绑定 snapshot ID、generation、window、offset 和长度的 256 KiB 原始分块拉取；分块使用 base64 后仍低于单次 result 上限。新的 begin 在写入 store 前必须先使旧 descriptor 失效；写入失败不能让旧 identity 继续读取被部分覆盖的 buffer。Workbench 以 JSON 字符串最坏六倍 escaping、最大 Account catalog、Task/Run/Tool 最大结构数量，以及“同步 UI 最多占满四个 executor slot”的并发 pending UI 最坏值，在初始化时验证完整 snapshot 预算，并以最大 Account projection 和最大 Task 结构的真实 serializer 测试校验估算上界。当前 Task projection 上限保持 512 KiB；不得为了适配 Bridge 缩小产品状态，也不得允许合法 projection 进入永久 `SnapshotTooLarge` 状态。
 
@@ -416,7 +416,7 @@ ABI status 新增 `resource_limit`。它与 pre-admission `invalid_argument`、`
 
 - Host 直接发起原生目录选择与原生 trust 确认，Bridge 签发绑定 window、event delivery generation 和该次 Native picker 结果的一次性 grant；
 - Renderer 创建 Task 时只回传 grant，不得回传任意路径加 `trusted` boolean；Workbench 消费 grant 后使用标准 I/O 规范化并验证目录，再建立 Task/Agent Session。grant 在 disconnect、拒绝、替换或首次消费后失效；
-- Gate 2 的 lifecycle API 只接收 Workbench 已规范化的绝对路径，并再次拒绝空 component、`.`、`..`、尾随分隔符和临时根的词法逃逸；symlink/TOCTOU 仍不在此保证内；
+- lifecycle API 只接收 Workbench 已规范化的绝对路径，并再次拒绝空 component、`.`、`..`、尾随分隔符和临时根的词法逃逸；symlink/TOCTOU 仍不在此保证内；
 - 当前 v1 只运行临时 fixture 或用户明确 trusted 的 Workspace；
 - 不以 `workspace_root` 字段存在为 strict security 证据；
 - symlink、路径逃逸、不存在写入目标、sandbox、process tree 和 TOCTOU 矩阵属于后续安全 Gate；
@@ -463,7 +463,7 @@ stop 不进入普通 FIFO，不能被文本或 queue message 阻塞。abort 只�
 
 ## 15. 进程模型
 
-Gate 7 已在独立测试进程完成同进程 fatal baseline 和最小 Worker harness。结果是同进程 fatal 会带走 Host 与全部进程内 Session；Worker crash 时 Host 与已有产品 snapshot 可继续存活，归属 active Run 进入 `interrupted/worker_disconnected`，危险工具不自动重放。因此后续正式方向选择单 AgentCore Worker。
+独立测试进程已经完成同进程 fatal baseline 和最小 Worker harness。结果是同进程 fatal 会带走 Host 与全部进程内 Session；Worker crash 时 Host 与已有产品 snapshot 可继续存活，归属 active Run 进入 `interrupted/worker_disconnected`，危险工具不自动重放。因此后续正式方向选择单 AgentCore Worker。
 
 当前应用仍是同进程 bounded-executor prototype。正式 Worker 尚未实现，spike IPC 不是产品协议。后续必须单独定义版本化 transport、容量/backpressure、ownership、correlation、credential、disconnect 和 shutdown；在 AgentCore 没有 checkpoint capability 时，Worker restart 不等于 Run 或 Conversation 恢复。
 

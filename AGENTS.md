@@ -10,26 +10,26 @@
 2. 技术选型与系统边界：[docs/architecture.md](docs/architecture.md)
 3. AgentCore、事件泵、所有权和生命周期：[docs/agentcore-integration.md](docs/agentcore-integration.md)
 4. 当前 AgentCore 预编译库能力：[docs/agentcore-abi-v1.md](docs/agentcore-abi-v1.md)
-5. 原型范围与验收：[docs/phase-0-validation.md](docs/phase-0-validation.md)
+5. 当前验证矩阵与退出条件：[docs/validation.md](docs/validation.md)
 6. Metask Account production API 确认状态：[docs/metask-account-contract.md](docs/metask-account-contract.md)
 
 `README.md` 只作为项目入口；不要把它当作完整需求或架构规范。
 
 ## 当前阶段
 
-- macOS 仍是优先真实验收平台；Windows Phase 0B 接入 baseline（artifact、raw probe、Native Debug/Release、Gate 5/6 automation）已通过。Windows 分发、签名、更新和完整安全矩阵仍属后续交付；Linux 只做架构预留，尚未接入。
-- 当前已验证基线 hard cut 到精确锁定的 development AgentCore ABI v1 revision 3 target-specific artifacts。macOS artifact 为 dirty provenance，Windows x86_64 GNU artifact 为同 commit 的 clean build；二者分别以完整 manifest bytes 和 payload checksum 锁定，不推导为同一可重建源码状态。证据见 `docs/agentcore-revision-3-migration-report.md` 与 `docs/windows-phase-0b-report.md`。
-- 同步 baseline、完整 Phase 0A 和后续 AgentCore capability 是三个不同门槛。Renderer reload 可以恢复仍存活 Host 的视图，不等于 AgentCore 进程恢复。
+- macOS 仍是优先真实验收平台；Windows development baseline（artifact、raw probe、Native Debug/Release 和桌面自动化）已通过。Windows 分发、签名、更新和完整安全矩阵仍属后续交付；Linux 只做架构预留，尚未接入。
+- 当前已验证基线 hard cut 到精确锁定的 development AgentCore ABI v1 revision 3 target-specific artifacts。macOS artifact 为 dirty provenance，Windows x86_64 GNU artifact 为同 commit 的 clean build；二者分别以完整 manifest bytes 和 payload checksum 锁定，不推导为同一可重建源码状态。证据见 `docs/agentcore-revision-3-migration-report.md`、当前 repository locks 与 `docs/validation.md`。
+- 当前同步 baseline 与后续 AgentCore capability 是不同门槛。Renderer reload 可以恢复仍存活 Host 的视图，不等于 AgentCore 进程恢复。
 - async pending、suspend/resume、Session 持久化恢复、strict Workspace security 和可路由产品 Host tools 不属于当前 ABI v1 baseline。
 
 ## 不可违反的边界
 
 - React + Tailwind 是当前正式 Renderer。
 - Native SDK 直接构成 Zig Host；不要增加 `NativeSdkAdapter`、通用 Desktop Interface 或框架替换层。
-- metacodes AgentCore bundle SDK 是 Agent 结构化协议的唯一来源；不要再定义平行的 `AgentEvent` / `WorkbenchEvent` 体系。
-- MetaWork 正式应用只消费 canonical `.agentcore/bundle` 和其中的官方 `bindings/zig` package；显式外部 bundle root 只属于 candidate probe/stage。不得把 metacodes source tree 纳入 build graph。禁止 path/Git implementation source dependency、源码复制、`latest`、可变 tag 和静默 source fallback。
-- 公司内部初步开发直接从本机 `metacodes/zig-out/agentcore/<target>` 获取 target-specific candidate；当前不实现 artifact resolver、内容寻址 cache、artifact repository 或跨机器自动分发。
-- AgentCore binary ABI facade 由 metacodes 单一维护；MetaWork 只使用 bundle SDK。ABI 禁止 native Zig slice、Zig enum、allocator、error union 和 tagged union，wire 层使用固定宽度整数 code、pointer+length、opaque handle、固定布局 struct 和 callback context。
+- Metask AgentCore bundle SDK 是 Agent 结构化协议的唯一来源；不要再定义平行的 `AgentEvent` / `WorkbenchEvent` 体系。
+- MetaWork 正式应用只消费 canonical `.agentcore/bundle` 和其中的官方 `bindings/zig` package；显式外部 bundle root 只属于 candidate probe/stage。不得把 AgentCore 实现源码纳入 build graph。禁止 path/Git implementation source dependency、源码复制、`latest`、可变 tag 和静默 source fallback。
+- 公司内部初步开发直接从本机精确路径 `metacodes/zig-out/agentcore/<target>` 获取 target-specific candidate；当前不实现 artifact resolver、内容寻址 cache、artifact repository 或跨机器自动分发。
+- AgentCore binary ABI facade 由 Metask AgentCore 单一维护；MetaWork 只使用 bundle SDK。ABI 禁止 native Zig slice、Zig enum、allocator、error union 和 tagged union，wire 层使用固定宽度整数 code、pointer+length、opaque handle、固定布局 struct 和 callback context。
 - 隔离的 raw C contract probe 只验证 candidate facade，不进入正式 Host。正式 Host 只使用 bundle SDK 提供的 typed `Status` / `StopReason`、校验后的 `CoreEvent` / `UiRequest` decoder 和 `UiResponse` encoder；MetaWork 不自行复制 code、tag 或 JSON schema。
 - 当前产品路径不得注册 ABI v1 Host tools。revision 3 Host tool callback 的 `RunContext` wire identity 已可验证，但 MetaWork 尚未定义产品级 tool catalog、权限、Workspace 与多 Session 路由政策；Read/Bash/Edit 使用 AgentCore built-in tools。
 - Provider credential 只由 Host Account 读取并经 Workbench owned runtime config 传给 AgentCore；不得进入 Renderer、Bridge、日志、事件、snapshot 或持久化视图。
@@ -42,7 +42,7 @@
 - callback 内 event validation/copy/入队失败，或 canonical consumer 无法被通知时，返回 callback fatal；已经 owned 的 event 不得因 notification failure 被泄漏或静默丢弃。Renderer/Bridge delivery、revision、snapshot、reload 或 retention failure 必须以 typed transport fact 交给 Workbench policy，Bridge 不得直接设置 Run cause 或 abort Agent Run。
 - 跨越同步 Bridge handler 返回的 payload 必须是 Bridge-owned copy 或显式 ownership transfer；shutdown 先 stop ingress 和 quiesce callbacks，再断开 Workbench，owned delivery buffers 最后独立释放。
 - ABI function status 必须先于 `RunResult` 处理；status 非 OK 时禁止读取 `RunResult`，并精确释放 diagnostic buffer。
-- `StopReason` 必须先由 metacodes bundle SDK 校验 raw wire code，再对 SDK 类型做无 `else` 的穷尽 switch，并在 Host envelope 中保留原始 code/reason。unknown code fail closed，不伪造恢复或预算状态。
+- `StopReason` 必须先由 Metask AgentCore bundle SDK 校验 raw wire code，再对 SDK 类型做无 `else` 的穷尽 switch，并在 Host envelope 中保留原始 code/reason。unknown code fail closed，不伪造恢复或预算状态。
 - 当前 ABI v1 revision 3 的 observation decoder 必须显式处理 `known` / `unknown`；当前 Host 在 SDK 完成结构、ownership 和 byte-bound 校验后立即忽略 valid unknown observation，不让其占用产品事件泵，也不得传给 Renderer 或猜测为产品状态。`resource_limit` 和 admission 后 Session poisoning 必须按 SDK contract 处理。
 - 当前 ABI v1 revision 3 只提供 question 与 permission UI control。未提供的 plan approval、custom UI、Output、FileChange 和 plan-progress 必须隐藏并延期，不得复制旧 experimental 协议。
 - 不假设 `UiBackend.poll()` 已接通。当前 stop/cancel 直接使用 per-Run abort；生成期消息进入 Host 有界 Session 队列，直到 AgentCore 生产调用链被验证。
@@ -54,7 +54,7 @@
 - `Conversation` 和跨 Run 状态属于 Session 生命周期；不得让它们引用已释放的 run-scoped arena。
 - Renderer 不是安全边界。Host 必须执行命令白名单、来源、payload、会话归属、工作区和权限校验。
 - 不以 PTY、xterm 或终端字符流作为默认 Agent 通信协议。普通 Bash 工具使用非交互 shell 子进程和 stdout/stderr capture。
-- 不因统一使用 Zig 而默认单进程；Gate 7 必须用故障注入比较同进程和最小 Worker fault domain。在该 Gate 前只能称同进程 prototype，不能称完整 Phase 0A。
+- 不因统一使用 Zig 而默认单进程；fault-domain 故障注入已经比较同进程和最小 Worker，并选择单 AgentCore Worker 作为后续正式方向。Worker 实现前只能称当前路径为同进程 prototype。
 - 不建立 React 到 `.native` 的迁移层或第二套 Renderer。
 - 固定 AgentCore bundle identity、commit、target、toolchain 和 checksum；其 Markdown 与 bundle SDK/manifest 冲突时，以锁定 artifact 的机器可读合同为准并记录依赖缺陷。
 
@@ -64,7 +64,7 @@
 - 技术决策变化更新 `docs/architecture.md`，不要在 README 或 AGENTS 中复制完整论证。
 - AgentCore 契约、线程、所有权、生命周期、恢复和 Shell 行为变化更新 `docs/agentcore-integration.md`。
 - AgentCore ABI required capabilities、函数职责、wire 所有权或兼容门槛变化更新 `docs/agentcore-abi-v1.md`。
-- 验收矩阵、spike 和退出判据变化更新 `docs/phase-0-validation.md`。
+- 当前验证矩阵、持续回归和退出判据变化更新 `docs/validation.md`。
 - Metask OAuth、API Key catalog、ExecutionTarget 或错误 schema 的外部确认状态更新 `docs/metask-account-contract.md`。
 - 如果同一事实出现在多份文档，保留一个规范性定义，其他位置使用链接或简短摘要。
 
@@ -91,10 +91,10 @@ npm run test:windows:bringup
 
 `npm run dev` 启动 React development server 和 Native SDK shell。Native SDK 由根 `package.json` 与 `package-lock.json` 精确锁定；不要改用全局 `native` 或提交 `.native/` 生成目录。禁止让验证流程只存在于个人环境或聊天记录中。
 
-Gate 1 artifact-only probe 使用独立 build graph，必须显式指定绝对 bundle root：
+artifact-only candidate probe 使用独立 build graph，必须显式指定绝对 bundle root：
 
 ```bash
 AGENTCORE_BUNDLE_ROOT=/absolute/path/to/bundle npm run probe:agentcore
 ```
 
-该变量不得进入正式应用 build/test/package，probe 也不得导入 metacodes 实现源码。
+该变量不得进入正式应用 build/test/package，probe 也不得导入 AgentCore 实现源码。

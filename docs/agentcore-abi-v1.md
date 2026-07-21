@@ -1,9 +1,9 @@
 # MetaWork AgentCore ABI v1 revision 3 消费合同
 
-> 状态：revision 3 hard-cut migration Gate 与 Windows Phase 0B 接入 baseline 已通过；不声明 stable support policy
-> 所有者：metacodes 负责 facade、bindings、bundle 和兼容政策；MetaWork 负责精确消费验证
+> 状态：revision 3 hard-cut migration 与 Windows development baseline 已通过；不声明 stable support policy
+> 所有者：Metask AgentCore 负责 facade、bindings、bundle 和兼容政策；MetaWork 负责精确消费验证
 
-本文记录 MetaWork 对 AgentCore binary ABI version 1 revision 3 的消费边界。线程、事件泵和 Host 生命周期见 [AgentCore 集成契约](agentcore-integration.md)，迁移验收顺序见 [Phase 0 验证计划](phase-0-validation.md)。当前实现已完成 artifact、build graph、SDK namespace 和正式 Host 的 hard cut，并通过完整 macOS migration Gate 与 Windows 接入 baseline；证据见 [revision 3 迁移验证报告](agentcore-revision-3-migration-report.md)和 [Windows Phase 0B 报告](windows-phase-0b-report.md)。
+本文记录 MetaWork 对 AgentCore binary ABI version 1 revision 3 的消费边界。线程、事件泵和 Host 生命周期见 [AgentCore 集成契约](agentcore-integration.md)，当前验收要求见 [验证规范](validation.md)。当前实现已完成 artifact、build graph、SDK namespace 和正式 Host 的 hard cut，并通过 macOS 与 Windows development baseline；精确 artifact 证据见 [revision 3 迁移验证报告](agentcore-revision-3-migration-report.md)与 repository locks。
 
 ## 1. 版本含义
 
@@ -103,7 +103,7 @@ abort 返回 stale/too-late 时仍必须 join 已有 Run job，再决定最终�
 - 在同一 Session lock 内比较原始 Session handle 与 active run ID，并原子首次绑定或比较 Session-lifetime session ID；
 - 在上述完整 identity 成功后才取得 callback lifetime ref；错误 handle/run/session ID 或 identity 漂移必须返回 fatal 并 poison Session；
 - UI callback 在发布 request 和最终提取 response 时必须在 Session lock 下重新确认现有 identity/dependency-contract 状态健康；并发 identity failure 后禁止返回 answered，已编码但尚未转移的 response 由 Host 释放；
-- 先用 metacodes bundle SDK 校验 bytes view、JSON tag、payload shape 和嵌套字段；
+- 先用 Metask AgentCore bundle SDK 校验 bytes view、JSON tag、payload shape 和嵌套字段；
 - 在 callback 返回前深拷贝所有需要异步保留的 bytes；
 - 携带正确 Session handle 与 run ID 进入 Host envelope；
 - 不重新定义平行的 Agent event 类型体系；
@@ -113,7 +113,7 @@ abort 返回 stale/too-late 时仍必须 join 已有 Run job，再决定最终�
 
 隔离的 artifact-only raw contract probe 可以使用 bundle 现有 raw SDK 表面证明 artifact 能调用，并记录 SDK 缺口；该代码不得进入正式 Host。
 
-正式 Host 的硬门槛是 metacodes bundle SDK 至少提供：
+正式 Host 的硬门槛是 Metask AgentCore bundle SDK 至少提供：
 
 - typed ABI function `Status` validator；
 - typed `StopReason` validator；
@@ -123,7 +123,7 @@ abort 返回 stale/too-late 时仍必须 join 已有 Run job，再决定最终�
 - unknown code/tag、非法 length/null、payload mismatch 的明确错误；
 - callback 参数语义、线程和 ownership 文档。
 
-上述 SDK 是随 bundle 编译进消费者的 metacodes-owned source layer，不要求改变 C ABI layout，也不允许 MetaWork 自己补一份协议副本。
+上述 SDK 是随 bundle 编译进消费者的 Metask AgentCore-owned source layer，不要求改变 C ABI layout，也不允许 MetaWork 自己补一份协议副本。
 
 生产 build graph 只把 SDK 注入 `agent/` 的 event sink、event pump 和 Session 实现。App 通过 Agent Runtime 完成 ABI discovery；Workbench 只消费 Agent module root 暴露的 SDK-validated owned/typed 表面；Bridge wire DTO 不引用 SDK enum、owner 或 handle。该边界避免复制协议，同时阻止 transport 与产品层直接依赖 bundle module。
 
@@ -250,7 +250,7 @@ manifest schema 1 必须精确记录：
 - `contract { binary_abi_status, binary_abi_version = 1, binary_abi_revision = 3 }`；
 - 除 manifest 自身外的完整 `{path, sha256}` payload whitelist。
 
-公司内部初步开发期，candidate bundle 直接来自本机 metacodes `zig-out/agentcore/<target>`。MetaWork 根据 manifest target 选择显式 target policy 与 exact repository lock，对 candidate 做 artifact-only probe，并经 `agentcore:stage` 复制到 `.agentcore/bundle`；正式 build/test/package 只消费 staged root。当前不建设 resolver、cache、artifact repository 或跨机器分发。未知 target、artifact 缺失或校验失败时明确失败，禁止 generic/source fallback。
+公司内部初步开发期，candidate bundle 直接来自本机精确路径 `metacodes/zig-out/agentcore/<target>`。MetaWork 根据 manifest target 选择显式 target policy 与 exact repository lock，对 candidate 做 artifact-only probe，并经 `agentcore:stage` 复制到 `.agentcore/bundle`；正式 build/test/package 只消费 staged root。当前不建设 resolver、cache、artifact repository 或跨机器分发。未知 target、artifact 缺失或校验失败时明确失败，禁止 generic/source fallback。
 
 正式 Zig build 必须通过 staged `bindings/zig` package 获取 `metask_agentcore` module。MetaWork verifier 负责 exact lock/checksum/target/ABI 信任；官方 package 负责 module 和 link graph。任何 active build 中的 revision 2 parser、旧文件路径、旧 discovery symbol、module alias、手工 SDK module graph 或 archive 直链都属于迁移失败。
 
@@ -258,7 +258,7 @@ manifest schema 1 必须精确记录：
 
 ### raw candidate contract probe
 
-- macOS arm64 与 Windows x86_64 GNU artifact-only consumer 只访问各自 candidate bundle，不访问 metacodes 实现源码；
+- macOS arm64 与 Windows x86_64 GNU artifact-only consumer 只访问各自 candidate bundle，不访问 AgentCore 实现源码；
 - exact manifest bytes、payload checksum、target、toolchain、layout 和唯一 discovery symbol 校验；
 - 隔离 raw C consumer 从新 header 完成 source-free discover/link/run，并拒绝错误 ABI version；
 - 隔离 Zig consumer 通过 candidate 官方 `bindings/zig` package 完成 source-free `Api.discover()`、link 和运行；
@@ -268,7 +268,7 @@ candidate probe 不导入 MetaWork Agent，也不承担 Runtime/Session、真实
 
 ### staged 正式 Host gate
 
-> revision 3 staged Host 的 typed SDK、lifecycle、check/test/Phase 0A、Debug/Release、Gate 5/6 和 package 已全部通过；证据见 [revision 3 迁移验证报告](agentcore-revision-3-migration-report.md)。revision 2 的 Gate 4 报告只保留历史事实，不构成兼容要求。
+> revision 3 staged Host 的 typed SDK、lifecycle、check/test、Debug/Release、桌面自动化和 package 已全部通过；证据见 [revision 3 迁移验证报告](agentcore-revision-3-migration-report.md)。revision 2 不构成兼容要求。
 
 - typed SDK 完成并通过 source-free consumer；
 - status-before-result 和 diagnostic release 测试；
@@ -289,4 +289,4 @@ candidate probe 不导入 MetaWork Agent，也不承担 Runtime/Session、真实
 - MetaWork 每次仍锁定精确 bundle identity 和 checksum，不把 ABI stability 等同于自动升级；
 - 支持周期、远程分发、Windows 正式分发与后续 Linux target 仍按独立发布政策推进。
 
-Windows 已在 Phase 0B 单独验证目标产物、系统链接输入、Debug/Release 和 Gate 5/6，但未完成安装、签名和更新。Linux 后续必须新增独立 lock、target policy、probe 和平台 Gate，不反向阻塞现有 macOS/Windows baseline。
+Windows development baseline 已单独验证目标产物、系统链接输入、Debug/Release 和桌面自动化，但未完成安装、签名和更新。Linux 后续必须新增独立 lock、target policy、probe 和平台验证，不反向阻塞现有 macOS/Windows baseline。

@@ -1,22 +1,21 @@
 # MetaWork Account 集成方案
 
-> 状态：最终设计稿，待按 DAG 实施
-> 复审：2026-07-20 Linus 文档复审通过
-> 适用阶段：Phase 0A，macOS 优先
+> 状态：历史实施计划；Account 集成已经落地，本文不再作为当前任务或 source of truth
+> 原复审：2026-07-20 Linus 文档复审通过
+> 历史适用阶段：Phase 0A，macOS 优先；这是旧阶段标签，当前验收见 `docs/validation.md`
 > 公司与账号体系：Metask
-> 实现状态：本文档不代表功能已经完成
-> 执行真源：TinyKG document 140 与其任务 DAG；本文档只是便于仓库审阅的导出副本
+> 原执行真源：TinyKG document 140 与其任务 DAG；本文档是当时便于仓库审阅的导出副本
 
 ## 1. 文档职责
 
-本文档收敛 MetaWork 接入 Metask 账号体系的整体方案，并记录严格架构复审后采纳的修正。
+本文档记录 MetaWork 接入 Metask 账号体系时采用的整体方案，以及严格架构复审后采纳的修正。正文保留当时的未来时态和阶段术语，不表示当前实现状态。
 
-它是实施计划，不静默覆盖仓库现有的规范性文档。实施的第一个任务必须把已批准的变化同步到对应 source of truth：
+它曾是实施计划，不覆盖当前规范性文档。落地后的产品、架构、目录和验收状态已经分别收敛到：
 
 - 产品范围与行为：`docs/requirements.md`
 - 系统边界与模块职责：`docs/architecture.md`
 - 模块和目录结构：`docs/project-structure.md`
-- 验收门槛：`docs/phase-0-validation.md`
+- 当前验收要求：`docs/validation.md`
 
 涉及 AgentCore 的既有边界继续以 `docs/agentcore-integration.md` 和 `docs/agentcore-abi-v1.md` 为准。本方案不要求修改 AgentCore，也不修改 `cc-t2z/metacodes`。
 

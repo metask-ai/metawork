@@ -11,7 +11,7 @@
 - **C1 登录**：OAuth、profile identity、token 恢复/刷新、退出和本地安全存储。当前信息已经足够实现，不依赖模型、API Key 或 AgentCore。
 - **C2 执行配置**：API Key catalog、model catalog 和 typed/fixed `ExecutionTarget { provider_kind, base_url, model }`。只有 execution credential 与原子 manifest 提交完成后，Account 才能发布 `execution_ready`；Workbench 安装同一 generation 后才能创建 Agent Task。
 
-MetaWork 只作为 Metask Account API 和 AgentCore bundle 的消费方。本文档不要求、也不授权修改 `cc-t2z/metacodes`。
+MetaWork 只作为 Metask Account API 和 AgentCore bundle 的消费方。本文档不要求、也不授权修改 Metask 内部实现仓库（精确路径标识为 `cc-t2z/metacodes`）。
 
 ## 2. C1 已锁定的生产合同
 

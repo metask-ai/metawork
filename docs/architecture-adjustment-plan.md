@@ -2,7 +2,9 @@
 
 > 状态：已完成并归档；阶段 1 至 9 与收口批次 A 至 D 已落地并通过总验收
 > 日期：2026-07-19
-> 适用范围：Zig Native 应用、React Renderer、metacodes AgentCore 集成与自动化构建边界
+> 文档属性：历史完成记录，不再作为当前架构或验收 source of truth；正文中的 Phase/Gate 和 metacodes 均为当时术语
+> 当前规范：`docs/architecture.md`、`docs/project-structure.md`、`docs/agentcore-integration.md` 与 `docs/validation.md`
+> 历史适用范围：Zig Native 应用、React Renderer、AgentCore 集成与自动化构建边界
 
 实施进度：阶段 1 至 9 已落地；Workbench 已独占 Executor，generation-checked RunControl、tagged termination latch、immutable Agent TerminalResult、Workbench no-fail Run terminal publication 和 pre-execution terminal record 已连通；Agent 是唯一 AgentCore SDK consumer，`OwnedCoreEvent` 与 bounded canonical notification retry/deadline 已连通；产品 wire contract 保持 Task schema v5。收口批次 A 已在 Apple Silicon macOS 通过正式 Native tests、`test:phase0a` 和 fresh release scanner。批次 B 已将 Task lifecycle、continuation、active Run identity 和 terminal disposition fold 收回 Workbench，并把 prompt、title、terminal diagnostic 的 credential 清理前移到 canonical write boundary；process-local execution defaults 在初始化时固定并由 Workbench 映射为 Agent options。批次 C 已建立具体 Bridge `Dispatcher`，统一拥有 callback gate、ProductDelivery、workspace grants、handler registry 和 `*Workbench`，App 只保留 composition、Agent event drain、平台 capability 与启动/关停。批次 D 已使用锁定 bundle 完成完整 macOS build/package、Gate 5/6 与 artifact isolation 验收；迁移分支现已通过 `--no-ff` 合入主线，本文转为完成记录。
 
@@ -10,7 +12,7 @@
 
 本方案收口 MetaWork 当前目录、所有权和生命周期模型。调整的目标不是把文件换个名字，而是让执行、产品状态、传输和 composition 四种责任具有唯一所有者，并让代码依赖与文档描述一致。
 
-本文是目标架构和迁移顺序的规范，不宣称当前代码已经满足目标。在每个阶段落地前，当前代码及对应 source-of-truth 文档仍描述现状；阶段合入时必须同步消除相关冲突。若本文与历史 Gate 报告冲突，历史报告只代表当时实现，不覆盖新的目标决策。
+本文曾定义目标架构和迁移顺序；相关阶段现已落地，当前代码与 active source of truth 才描述现状。本文保留原始决策过程和验收叙事，不再接收新的规范性决策；发生冲突时以当前 source of truth 为准。
 
 以下决策不再作为开放问题：
 
@@ -794,7 +796,7 @@ root 应显式导出稳定消费表面，并让内部模块可以自由重构。
 
 落地状态：已在 Apple Silicon macOS 使用仓库锁定 `.agentcore/bundle` 依次通过正式 Native tests、`test:phase0a` 和 fresh `build:release`，批次 A 关闭。
 
-同步更新：`phase-0-validation.md`、构建/测试说明和 architecture checks；历史 Gate 报告不追溯改写。
+落地时同步更新了当时的验证计划、构建/测试说明和 architecture checks；当前验收要求已经收敛到 `validation.md`。
 
 ### 收口批次 B：Workbench 产品状态与 canonical boundary
 

@@ -4,25 +4,25 @@ MetaWork 是一款桌面端 Agent Workbench，面向工作区、会话、Agent �
 
 ## 当前状态
 
-技术选型与三层职责边界已经确认，macOS-first Phase 0A Gate 0 至 Gate 7 已通过。当前有一条真实的同进程同步垂直原型，完成 Native SDK Bridge、React Workbench、锁定 AgentCore bundle、built-in Read/Bash/Edit、同步权限、取消、reload 视图恢复、bounded event/lifecycle 和 fault-domain 对照。
+技术选型与三层职责边界已经确认，macOS-first 初始技术验证已经完成。当前有一条真实的同进程同步垂直原型，完成 Native SDK Bridge、React Workbench、锁定 AgentCore bundle、built-in Read/Bash/Edit、同步权限、取消、reload 视图恢复、bounded event/lifecycle 和 fault-domain 对照。
 
-当前已验证基线 hard cut 到 metask AgentCore ABI v1 revision 3，正式 build graph 只消费 `.agentcore/bundle/bindings/zig` 官方 package，不保留旧 namespace、路径、symbol、module alias 或 fallback。candidate/staged 信任链、完整 test/Phase 0A、Debug/Release、Gate 5/6 和 macOS package 均已通过；精确 development artifact identity 与证据分别见 [AgentCore ABI v1 revision 3 消费合同](docs/agentcore-abi-v1.md)和 [revision 3 迁移验证报告](docs/agentcore-revision-3-migration-report.md)。同步链路不包含 async pending、suspend/resume、进程重建恢复、strict Workspace security 或正式 Host tools。
+当前已验证基线 hard cut 到 Metask AgentCore ABI v1 revision 3，正式 build graph 只消费 `.agentcore/bundle/bindings/zig` 官方 package，不保留旧 namespace、路径、symbol、module alias 或 fallback。candidate/staged 信任链、完整测试、Debug/Release、桌面自动化和 macOS package 均已通过；精确 development artifact identity 与证据分别见 [AgentCore ABI v1 revision 3 消费合同](docs/agentcore-abi-v1.md)和 [revision 3 迁移验证报告](docs/agentcore-revision-3-migration-report.md)。同步链路不包含 async pending、suspend/resume、进程重建恢复、strict Workspace security 或正式 Host tools。
 
-Gate 7 已证明当前同进程路径是零进程级隔离，并选择单 AgentCore Worker 作为后续正式方向。Worker 尚未实现，当前应用不得宣称具备 crash recovery。Windows Phase 0B 接入 baseline 已通过 artifact/probe、Native Debug/Release 和 Gate 5/6；这不等于 MSI、签名、更新或完整跨平台交付已经完成。证据见 [Windows Phase 0B baseline 报告](docs/windows-phase-0b-report.md)。Linux 是后续计划，目前只有 target-policy 架构预留。
+fault-domain 对照已经证明当前同进程路径是零进程级隔离，并选择单 AgentCore Worker 作为后续正式方向。Worker 尚未实现，当前应用不得宣称具备 crash recovery。Windows development baseline 已通过 artifact/probe、Native Debug/Release 和桌面自动化；这不等于 MSI、签名、更新或完整跨平台交付已经完成。当前证据边界见 [验证规范](docs/validation.md)。Linux 是后续计划，目前只有 target-policy 架构预留。
 
 | 层级              | 选择                                              |
 | ----------------- | ------------------------------------------------- |
 | Renderer          | React + Tailwind                                  |
 | Desktop Framework | Native SDK                                        |
 | Host / Workbench  | Zig                                               |
-| AgentCore         | metacodes / 版本化 AgentCore library bundle       |
-| Agent UI contract | metacodes `CoreEvent`、`UiRequest` / `UiResponse` |
+| AgentCore         | 版本化 Metask AgentCore library bundle             |
+| Agent UI contract | AgentCore `CoreEvent`、`UiRequest` / `UiResponse`  |
 
-Native SDK 直接构成 Zig Host，不设置额外 Adapter。模型 Provider SSE 由 metacodes 内部处理，MetaWork 接收并渲染 Host 产品投影。
+Native SDK 直接构成 Zig Host，不设置额外 Adapter。模型 Provider SSE 由 Metask AgentCore 内部处理，MetaWork 接收并渲染 Host 产品投影。
 
-MetaWork 不直接编译 metacodes source tree。隔离 candidate probe 从显式 bundle root 校验精确 artifact、官方 Zig package 和 raw C facade；正式 build 使用与 lock 字节完全一致并 staged 的 bundle。公司内部初步开发直接使用本机 `metacodes/zig-out`，当前不建设 resolver、content-addressed cache、artifact repository 或跨机器分发。正式 Host 只使用 bundle typed SDK，不复制 ABI code、事件 tag 或 UI JSON schema。
+MetaWork 不直接编译 AgentCore 实现源码。隔离 candidate probe 从显式 bundle root 校验精确 artifact、官方 Zig package 和 raw C facade；正式 build 使用与 lock 字节完全一致并 staged 的 bundle。公司内部初步开发直接使用本机精确路径 `metacodes/zig-out`，当前不建设 resolver、content-addressed cache、artifact repository 或跨机器分发。正式 Host 只使用 bundle typed SDK，不复制 ABI code、事件 tag 或 UI JSON schema。
 
-`UiEvent` 当前是 metacodes 已定义但尚未由 `agent_loop` 生产路径消费的协议类型。当前 stop/cancel 使用 per-Run abort，不把 `UiBackend.poll()` 当作已完成能力。
+`UiEvent` 当前是 Metask AgentCore 已定义但尚未由 `agent_loop` 生产路径消费的协议类型。当前 stop/cancel 使用 per-Run abort，不把 `UiBackend.poll()` 当作已完成能力。
 
 ## 文档
 
@@ -30,15 +30,10 @@ MetaWork 不直接编译 metacodes source tree。隔离 candidate probe 从显�
 - [高层架构](docs/architecture.md)
 - [AgentCore 集成契约](docs/agentcore-integration.md)
 - [AgentCore ABI v1 revision 3 消费合同](docs/agentcore-abi-v1.md)
-- [Phase 0 验证计划](docs/phase-0-validation.md)
-- [Account 集成方案（TinyKG canonical 的仓库导出）](docs/account-integration-plan.md)
+- [当前验证规范](docs/validation.md)
+- [Account 集成历史实施记录](docs/account-integration-plan.md)
 - [Metask Account API 合同状态](docs/metask-account-contract.md)
-- [Phase 0 Gate 0 验证报告](docs/phase-0-gate-0-report.md)
-- [Phase 0 Gate 1 验证报告](docs/phase-0-gate-1-report.md)
-- [Phase 0 Gate 6 验证报告](docs/phase-0-gate-6-report.md)
-- [Phase 0 Gate 7 验证报告](docs/phase-0-gate-7-report.md)
 - [AgentCore ABI v1 revision 3 迁移验证报告](docs/agentcore-revision-3-migration-report.md)
-- [Windows Phase 0B baseline 报告](docs/windows-phase-0b-report.md)
 - [Agent 工作约束](AGENTS.md)
 
 ## macOS 开发命令
@@ -70,7 +65,7 @@ npm run test:windows:bringup
 
 Debug/Release 可执行文件及 Renderer 资源位于 `zig-out/bin`，可直接运行 `zig-out/bin/metawork.exe`。当前不生成 MSI，也不要求签名；分发、签名和更新是后续交付。
 
-Gate 1 的隔离 probe 需要显式绝对 bundle root：
+candidate 隔离 probe 需要显式绝对 bundle root：
 
 ```bash
 AGENTCORE_BUNDLE_ROOT=/absolute/path/to/bundle npm run probe:agentcore
