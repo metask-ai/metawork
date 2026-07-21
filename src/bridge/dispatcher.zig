@@ -534,7 +534,10 @@ pub const Dispatcher = struct {
                 return error.InvalidBridgePayload;
             break :automation .{
                 .workspace_root = parsed.value.workspaceRoot.?,
-                .trust = .{ .temporary = "/tmp" },
+                // Automation is compiled only into controlled smoke builds.
+                // Trust exactly the requested temporary directory instead of
+                // hard-coding the POSIX-only /tmp parent.
+                .trust = .{ .temporary = parsed.value.workspaceRoot.? },
             };
         } else trusted: {
             if (parsed.value.workspaceRoot != null or parsed.value.workspaceGrant == null)
@@ -1104,8 +1107,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
 
     var snapshot_storage: [128 * 1024]u8 = undefined;
     const snapshot = try workbench.writeSnapshot(&snapshot_storage);
-    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"workspaceRoot\":\"/private/tmp\"") != null or
-        std.mem.indexOf(u8, snapshot, "\"workspaceRoot\":\"/tmp\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"workspaceRoot\":\"") != null);
 
     const generation = dispatcher.productDelivery().connectedGeneration().?;
     const unused_grant = try dispatcher.grants.issue(generation, source.window_id, "/tmp");

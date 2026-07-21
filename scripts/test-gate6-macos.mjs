@@ -1,25 +1,42 @@
 import { execFile, spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 const root = fileURLToPath(new URL("../", import.meta.url));
-const native = `${root}node_modules/.bin/native`;
-const binary = `${root}zig-out/bin/metawork`;
-const automationDir = `${root}.zig-cache/native-sdk-automation`;
+const native = path.join(
+  root,
+  "node_modules",
+  "@native-sdk",
+  "cli",
+  "bin",
+  "native.js",
+);
+const binary = path.join(
+  root,
+  "zig-out",
+  "bin",
+  process.platform === "win32" ? "metawork.exe" : "metawork",
+);
+const appCwd = process.env.METAWORK_TEST_APP_CWD
+  ? path.resolve(root, process.env.METAWORK_TEST_APP_CWD)
+  : root;
+const automationDir = path.join(appCwd, ".zig-cache", "native-sdk-automation");
 const commandTimeoutMs = 20_000;
 const runTimeoutMs = 60_000;
-const workspace = await mkdtemp("/tmp/metawork-gate6-");
+const workspace = await mkdtemp(join(tmpdir(), "metawork-gate6-"));
 const fixturePath = join(workspace, "fixture.txt");
 await writeFile(fixturePath, "gate6-before\n", { mode: 0o600 });
 await rm(automationDir, { recursive: true, force: true });
 
 const responses = [
   toolSse("m1", "read-1", "Read", { file_path: fixturePath }),
-  toolSse("m2", "bash-1", "Bash", { command: "printf gate6-bash-ok" }),
+  toolSse("m2", "bash-1", "Bash", { command: "echo gate6-bash-ok" }),
   toolSse("m3", "edit-1", "Edit", {
     file_path: fixturePath,
     old_string: "gate6-before",
@@ -45,7 +62,7 @@ const baseUrl = await provider.listen();
 let output = "";
 let exitState = null;
 const app = spawn(binary, [], {
-  cwd: root,
+  cwd: appCwd,
   env: {
     ...process.env,
     METAWORK_GATE0_AUTOMATION: "1",
@@ -302,7 +319,7 @@ try {
     throw new Error("normal runtime stop was not observed");
 
   process.stdout.write(
-    "Gate 6 macOS vertical passed: real bundle, Read/Bash/Edit, permission UI, duplicate UI-response rejection, reload-safe AskUserQuestion resume, Task metadata lifecycle, async close.\n",
+    "Gate 6 desktop vertical passed: real bundle, Read/Bash/Edit, permission UI, duplicate UI-response rejection, reload-safe AskUserQuestion resume, Task metadata lifecycle, async close.\n",
   );
 } catch (error) {
   process.stderr.write(`${output}\n`);
@@ -418,8 +435,8 @@ async function snapshot() {
 }
 
 async function automate(...args) {
-  return execFileAsync(native, ["automate", ...args], {
-    cwd: root,
+  return execFileAsync(process.execPath, [native, "automate", ...args], {
+    cwd: appCwd,
     timeout: commandTimeoutMs,
     maxBuffer: 1024 * 1024,
   });

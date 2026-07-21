@@ -11,6 +11,8 @@ const account_api = @import("metawork_account");
 pub const panic = std.debug.FullPanic(native_sdk.debug.capturePanic);
 
 const frontend_url_env = "NATIVE_SDK_FRONTEND_URL";
+const frontend_dist = "frontend/dist";
+const frontend_entry = "index.html";
 const pending_ui_json_capacity = 256 * 1024;
 const terminal_diagnostic_capacity = 512;
 const agent_event_retry_interval: std.Io.Duration = .fromMilliseconds(5);
@@ -646,6 +648,7 @@ const AccountCoordinator = struct {
 const App = struct {
     env_map: *std.process.Environ.Map,
     io: std.Io,
+    frontend_asset_root: []const u8,
     main_thread_id: std.Thread.Id,
     automation: automation_api.Runtime = .{},
     dispatcher: ?*bridge_api.Dispatcher = null,
@@ -666,7 +669,10 @@ const App = struct {
         return .{
             .context = self,
             .name = "metawork",
-            .source = native_sdk.frontend.productionSource(.{ .dist = "frontend/dist" }),
+            .source = native_sdk.frontend.productionSource(.{
+                .dist = self.frontend_asset_root,
+                .entry = frontend_entry,
+            }),
             .source_fn = source,
             .start_fn = start,
             .event_fn = event,
@@ -677,8 +683,8 @@ const App = struct {
     fn source(context: *anyopaque) anyerror!native_sdk.WebViewSource {
         const self: *@This() = @ptrCast(@alignCast(context));
         return native_sdk.frontend.sourceFromEnv(self.env_map, .{
-            .dist = "frontend/dist",
-            .entry = "index.html",
+            .dist = self.frontend_asset_root,
+            .entry = frontend_entry,
         });
     }
 
@@ -1705,6 +1711,36 @@ fn frontendMode(env_map: *std.process.Environ.Map) FrontendMode {
     return if (env_map.get(frontend_url_env) != null) .development else .release;
 }
 
+fn resolveFrontendAssetRoot(io: std.Io, allocator: std.mem.Allocator) ![]u8 {
+    const executable_dir = try std.process.executableDirPathAlloc(io, allocator);
+    defer allocator.free(executable_dir);
+
+    const candidates = [_][]const []const u8{
+        &.{ executable_dir, "frontend", "dist" },
+        &.{ executable_dir, "..", "resources", "frontend", "dist" },
+        &.{ executable_dir, "..", "Resources", "frontend", "dist" },
+        &.{ executable_dir, "..", "..", "frontend", "dist" },
+    };
+    for (candidates) |segments| {
+        const candidate = try std.fs.path.resolve(allocator, segments);
+        if (frontendEntryExists(io, allocator, candidate)) return candidate;
+        allocator.free(candidate);
+    }
+    return error.FrontendAssetsNotFound;
+}
+
+fn frontendEntryExists(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    root: []const u8,
+) bool {
+    const entry_path = std.fs.path.join(allocator, &.{ root, frontend_entry }) catch return false;
+    defer allocator.free(entry_path);
+    var file = std.Io.Dir.cwd().openFile(io, entry_path, .{}) catch return false;
+    file.close(io);
+    return true;
+}
+
 fn createAgentRuntime(io: std.Io, notifier: agent.EventReadyNotifier) !*agent.Runtime {
     return agent.Runtime.init(io, std.heap.c_allocator, .{
         .max_sessions = 8,
@@ -1717,9 +1753,16 @@ fn createAgentRuntime(io: std.Io, notifier: agent.EventReadyNotifier) !*agent.Ru
 }
 
 pub fn run(init: std.process.Init) !void {
+    const frontend_asset_root = if (init.environ_map.get(frontend_url_env) == null)
+        try resolveFrontendAssetRoot(init.io, std.heap.c_allocator)
+    else
+        try std.heap.c_allocator.dupe(u8, frontend_dist);
+    defer std.heap.c_allocator.free(frontend_asset_root);
+
     var app = App{
         .env_map = init.environ_map,
         .io = init.io,
+        .frontend_asset_root = frontend_asset_root,
         .main_thread_id = std.Thread.getCurrentId(),
         .automation = try automation_api.Runtime.init(
             std.heap.c_allocator,

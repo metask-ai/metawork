@@ -33,7 +33,10 @@
     "test:agentcore-sdk": "node scripts/run-agentcore-sdk-tests.mjs",
     "test:gate5:macos": "npm run agentcore:verify-staged && VITE_METAWORK_GATE5_FIXTURE=1 npm run build:frontend && native build . --yes -Doptimize=Debug -Dautomation=true && node scripts/test-gate5-macos.mjs",
     "test:gate6:macos": "npm run agentcore:verify-staged && npm run build:frontend && native build . --yes -Doptimize=Debug -Dautomation=true && node scripts/test-gate6-macos.mjs",
-    "test:gate7:macos": "node scripts/test-gate7-macos.mjs"
+    "test:gate7:macos": "node scripts/test-gate7-macos.mjs",
+    "test:gate5:windows": "npm run agentcore:verify-staged && node scripts/run-gate5-windows.mjs",
+    "test:gate6:windows": "npm run agentcore:verify-staged && node scripts/run-gate6-windows.mjs",
+    "test:windows:bringup": "node scripts/run-windows-bringup.mjs"
   },
   "devDependencies": {
     "@native-sdk/cli": "0.5.1",

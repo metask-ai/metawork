@@ -8,7 +8,7 @@ MetaWork 是一款桌面端 Agent Workbench，面向工作区、会话、Agent �
 
 当前已验证基线 hard cut 到 metask AgentCore ABI v1 revision 3，正式 build graph 只消费 `.agentcore/bundle/bindings/zig` 官方 package，不保留旧 namespace、路径、symbol、module alias 或 fallback。candidate/staged 信任链、完整 test/Phase 0A、Debug/Release、Gate 5/6 和 macOS package 均已通过；精确 development artifact identity 与证据分别见 [AgentCore ABI v1 revision 3 消费合同](docs/agentcore-abi-v1.md)和 [revision 3 迁移验证报告](docs/agentcore-revision-3-migration-report.md)。同步链路不包含 async pending、suspend/resume、进程重建恢复、strict Workspace security 或正式 Host tools。
 
-Gate 7 已证明当前同进程路径是零进程级隔离，并选择单 AgentCore Worker 作为后续正式方向。Worker 尚未实现，当前应用不得宣称具备 crash recovery。Windows 作为 Phase 0B 后续验证，不阻塞 macOS baseline。
+Gate 7 已证明当前同进程路径是零进程级隔离，并选择单 AgentCore Worker 作为后续正式方向。Worker 尚未实现，当前应用不得宣称具备 crash recovery。Windows Phase 0B 接入 baseline 已通过 artifact/probe、Native Debug/Release 和 Gate 5/6；这不等于 MSI、签名、更新或完整跨平台交付已经完成。证据见 [Windows Phase 0B baseline 报告](docs/windows-phase-0b-report.md)。Linux 是后续计划，目前只有 target-policy 架构预留。
 
 | 层级              | 选择                                              |
 | ----------------- | ------------------------------------------------- |
@@ -38,6 +38,7 @@ MetaWork 不直接编译 metacodes source tree。隔离 candidate probe 从显�
 - [Phase 0 Gate 6 验证报告](docs/phase-0-gate-6-report.md)
 - [Phase 0 Gate 7 验证报告](docs/phase-0-gate-7-report.md)
 - [AgentCore ABI v1 revision 3 迁移验证报告](docs/agentcore-revision-3-migration-report.md)
+- [Windows Phase 0B baseline 报告](docs/windows-phase-0b-report.md)
 - [Agent 工作约束](AGENTS.md)
 
 ## macOS 开发命令
@@ -56,6 +57,18 @@ npm run package:macos
 ```
 
 项目使用本地锁定的 `@native-sdk/cli`，不依赖全局 `native`。`npm run build:*` 先构建 React production assets，再生成 macOS binary；打包产物位于 `zig-out/package/metawork.app`。
+
+## Windows baseline 命令
+
+要求 Node.js 22.15+、Zig 0.16.0 和精确锁定的 x86_64 Windows GNU revision 3 bundle：
+
+```powershell
+npm ci
+npm run agentcore:stage -- C:\absolute\path\to\x86_64-windows.win10...win11_dt-gnu
+npm run test:windows:bringup
+```
+
+Debug/Release 可执行文件及 Renderer 资源位于 `zig-out/bin`，可直接运行 `zig-out/bin/metawork.exe`。当前不生成 MSI，也不要求签名；分发、签名和更新是后续交付。
 
 Gate 1 的隔离 probe 需要显式绝对 bundle root：
 

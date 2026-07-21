@@ -14,6 +14,12 @@ const agentcore_bundle = @import("build_support/agentcore_bundle.zig");
 
 pub fn build(b: *std.Build) void {
     const artifacts = native_sdk.addAppArtifacts(b, b.dependency("native_sdk", .{}), .{ .name = "metawork" });
+    const frontend_assets = b.addInstallDirectory(.{
+        .source_dir = b.path("frontend/dist"),
+        .install_dir = .bin,
+        .install_subdir = "frontend/dist",
+    });
+    b.getInstallStep().dependOn(&frontend_assets.step);
     const root = b.pathFromRoot(".agentcore/bundle");
     const bundle = agentcore_bundle.verify(b, root);
     const modules = wireAgentCore(b, artifacts.exe.root_module, bundle);
@@ -158,7 +164,8 @@ fn createLifecycleFixture(
 
 fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcore_bundle.Bundle) WiredModules {
     var query = (root_module.resolved_target orelse @panic("Native SDK app target is unresolved")).query;
-    query.os_version_min = .{ .semver = bundle.deployment_target };
+    if (bundle.deployment_target) |deployment_target|
+        query.os_version_min = .{ .semver = deployment_target };
     const target = b.resolveTargetQuery(query);
     root_module.resolved_target = target;
 

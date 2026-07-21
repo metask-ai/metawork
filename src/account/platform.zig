@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const native_sdk = @import("native_sdk");
 const oauth = @import("account_oauth");
 const store = @import("account_credential_store");
@@ -36,7 +37,7 @@ pub const MacosBackend = struct {
             absolute_account_dir,
             .{
                 .open_options = .{ .follow_symlinks = false },
-                .permissions = .fromMode(0o700),
+                .permissions = directoryPermissions(),
             },
         ) catch return error.AccountDirectoryUnavailable;
         return .{
@@ -187,7 +188,7 @@ pub const MacosBackend = struct {
             temp_name,
             .{
                 .exclusive = true,
-                .permissions = .fromMode(0o600),
+                .permissions = privateFilePermissions(),
                 .resolve_beneath = true,
             },
         ) catch return error.WriteFailed;
@@ -212,10 +213,49 @@ pub const MacosBackend = struct {
             self.io,
         ) catch return error.WriteFailed;
         temp_exists = false;
-        if (std.c.fsync(self.account_dir.handle) != 0)
+        if (!self.syncManifestCommit())
             return error.PersistenceOutcomeUnknown;
     }
+
+    fn syncManifestCommit(self: *MacosBackend) bool {
+        if (builtin.os.tag == .windows) {
+            const manifest = self.account_dir.openFile(
+                self.io,
+                manifest_name,
+                .{
+                    .mode = .read_write,
+                    .allow_directory = false,
+                    .follow_symlinks = false,
+                    .resolve_beneath = true,
+                },
+            ) catch return false;
+            defer manifest.close(self.io);
+            manifest.sync(self.io) catch return false;
+            return true;
+        }
+
+        const directory_file: std.Io.File = .{
+            .handle = self.account_dir.handle,
+            .flags = .{ .nonblocking = false },
+        };
+        directory_file.sync(self.io) catch return false;
+        return true;
+    }
 };
+
+fn directoryPermissions() std.Io.File.Permissions {
+    return if (builtin.os.tag == .windows)
+        .default_dir
+    else
+        .fromMode(0o700);
+}
+
+fn privateFilePermissions() std.Io.File.Permissions {
+    return if (builtin.os.tag == .windows)
+        .default_file
+    else
+        .fromMode(0o600);
+}
 
 const ManifestWire = struct {
     version: u8,

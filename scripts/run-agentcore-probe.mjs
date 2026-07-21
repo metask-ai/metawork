@@ -1,16 +1,13 @@
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  rm,
-  symlink,
-  writeFile,
-} from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import process from "node:process";
-import { validateAgentCoreBundle } from "./agentcore-bundle.mjs";
+import {
+  loadLockedAgentCoreManifest,
+  readAgentCoreBundleTargetId,
+  validateAgentCoreBundle,
+} from "./agentcore-bundle.mjs";
 import { runChild } from "./run-child-process.mjs";
 
 const repositoryRoot = path.resolve(
@@ -27,17 +24,11 @@ const bundleRoot =
 if (!bundleRoot)
   throw new Error("AGENTCORE_BUNDLE_ROOT is required for the candidate probe");
 
-const lockPath = path.join(
-  repositoryRoot,
-  "spikes",
-  "agentcore-contract",
-  "bundle.lock.json",
-);
-const lockBytes = await readFile(lockPath, "utf8");
-const expectedManifest = JSON.parse(lockBytes);
+const targetId = await readAgentCoreBundleTargetId(bundleRoot);
+const lock = await loadLockedAgentCoreManifest(repositoryRoot, targetId);
 const bundle = await validateAgentCoreBundle(bundleRoot, {
-  expectedManifest,
-  expectedManifestBytes: lockBytes,
+  expectedManifest: lock.manifest,
+  expectedManifestBytes: lock.bytes,
 });
 console.log(
   `verified AgentCore ${bundle.manifest.version} ABI ${bundle.manifest.contract.binary_abi_version} revision ${bundle.manifest.contract.binary_abi_revision}`,
@@ -47,7 +38,11 @@ const scratch = await mkdtemp(path.join(tmpdir(), "metawork-agentcore-probe-"));
 try {
   const zigConsumerRoot = path.join(scratch, "zig-consumer");
   await mkdir(zigConsumerRoot);
-  await symlink(bundle.root, path.join(zigConsumerRoot, "bundle"), "dir");
+  await symlink(
+    bundle.root,
+    path.join(zigConsumerRoot, "bundle"),
+    process.platform === "win32" ? "junction" : "dir",
+  );
   await writeFile(
     path.join(zigConsumerRoot, "build.zig.zon"),
     `.{
@@ -133,8 +128,8 @@ pub fn main() !void {
     },
   );
   await validateAgentCoreBundle(bundle.root, {
-    expectedManifest,
-    expectedManifestBytes: lockBytes,
+    expectedManifest: lock.manifest,
+    expectedManifestBytes: lock.bytes,
   });
 } finally {
   await rm(scratch, { recursive: true, force: true });

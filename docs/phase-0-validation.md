@@ -1,7 +1,7 @@
 # MetaWork Phase 0 验证计划
 
-> 状态：Phase 0A Gate 0 至 Gate 7、Account Gate A1/B/C1/C2/D/E/F/G 和 AgentCore revision 3 hard-cut migration Gate 已通过
-> 平台：Phase 0A macOS-first；Phase 0B 后续验证 Windows
+> 状态：Phase 0A Gate 0 至 Gate 7、Account Gate A1/B/C1/C2/D/E/F/G、AgentCore revision 3 hard-cut migration Gate 和 Windows Phase 0B 接入 baseline 已通过
+> 平台：Phase 0A macOS-first；Phase 0B Windows 接入 baseline 已验证，分发交付后续推进
 
 Phase 0 用最小真实原型验证技术栈和关键风险，不交付完整产品。历史 Phase 0A 使用 ABI v1 revision 2 完成；当前已验证基线已 hard cut 到 development AgentCore ABI v1 revision 3，并通过本文 migration Gate。这些 development artifact 都不构成 stable support policy。同步 baseline 不包含 async suspend/resume、跨进程恢复、strict Workspace security、正式 Host tools、typed Output/FileChange/plan-progress 或 plan/custom UI control。
 
@@ -17,7 +17,7 @@ Gate -1 至 Gate 6 通过后，得到一个同进程 macOS 同步原型。它证
 
 ### 后续发布与能力演进
 
-Account/Metask 登录集成、content-addressed cache、remote/empty-cache/offline 发布、stable ABI support policy、async resume、strict Workspace security、正式 Host tools 和 Windows Phase 0B 在 Phase 0A 同步验证之后推进。Account 集成不能削弱已经通过的 Gate 0–7。
+Account/Metask 登录集成、content-addressed cache、remote/empty-cache/offline 发布、stable ABI support policy、async resume、strict Workspace security、正式 Host tools、Windows 分发和 Linux 接入在 Phase 0A 同步验证之后推进。Account 与平台接入不能削弱已经通过的 Gate 0–7。
 
 ## 2. 最小垂直链路
 
@@ -660,15 +660,16 @@ npm run package:macos
 
 ## 16. Phase 0B：Windows
 
-macOS Phase 0A 完成后单独验证：
+> 接入 baseline 状态：已通过。证据见 [Windows Phase 0B baseline 报告](windows-phase-0b-report.md)。
 
-- Native SDK Windows WebView dev/prod；
+接入 baseline 已验证：
+
+- Native SDK Windows production WebView 与 executable-relative Renderer assets；
 - JS↔Zig Bridge；
 - AgentCore Windows target bundle；
-- hidden non-interactive shell、stdout/stderr、timeout 和 process tree；
-- window lifecycle、file dialog 和正常退出；
-- Debug/Release 构建与可复现分发包；
-- 签名和更新路径；
+- built-in non-interactive shell 与 stdout/stderr；
+- window lifecycle、Renderer reload 和正常退出；
+- Debug/Release 构建与生产 Renderer 资源定位；
 - 与 macOS 相同语义 code/capability 的兼容性。
 
-Windows 失败不反向否定已通过的 macOS baseline，但阻止项目宣称跨平台交付完成。
+上述接入 baseline 已在 x86_64 Windows GNU revision 3 clean artifact 上通过。尚未完成的独立交付项包括 Native dev mode、MSI/安装器、签名、更新、完整 file dialog/timeout/process-tree/security 矩阵和可复现远程分发；因此仍不得宣称 Windows 正式发布或完整跨平台交付完成。Linux 接入是后续计划，不属于本 Gate。

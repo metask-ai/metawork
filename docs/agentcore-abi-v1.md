@@ -1,13 +1,20 @@
 # MetaWork AgentCore ABI v1 revision 3 消费合同
 
-> 状态：revision 3 hard-cut migration Gate 已通过，是当前已验证 macOS 消费基线；不声明 stable support policy
+> 状态：revision 3 hard-cut migration Gate 与 Windows Phase 0B 接入 baseline 已通过；不声明 stable support policy
 > 所有者：metacodes 负责 facade、bindings、bundle 和兼容政策；MetaWork 负责精确消费验证
 
-本文记录 MetaWork 对 AgentCore binary ABI version 1 revision 3 的消费边界。线程、事件泵和 Host 生命周期见 [AgentCore 集成契约](agentcore-integration.md)，迁移验收顺序见 [Phase 0 验证计划](phase-0-validation.md)。当前实现已完成 artifact、build graph、SDK namespace 和正式 Host 的 hard cut，并通过完整 macOS migration Gate；证据见 [revision 3 迁移验证报告](agentcore-revision-3-migration-report.md)。
+本文记录 MetaWork 对 AgentCore binary ABI version 1 revision 3 的消费边界。线程、事件泵和 Host 生命周期见 [AgentCore 集成契约](agentcore-integration.md)，迁移验收顺序见 [Phase 0 验证计划](phase-0-validation.md)。当前实现已完成 artifact、build graph、SDK namespace 和正式 Host 的 hard cut，并通过完整 macOS migration Gate 与 Windows 接入 baseline；证据见 [revision 3 迁移验证报告](agentcore-revision-3-migration-report.md)和 [Windows Phase 0B 报告](windows-phase-0b-report.md)。
 
 ## 1. 版本含义
 
-目标 bundle 是 `0.1.0-dev+1ec7e4902727.dirty`，source commit `1ec7e4902727ff894c50452d6417fb6fc3d8bb2c`、`source.dirty = true`、ABI v1 revision 3。API table 仍为 112 bytes，target 为 macOS arm64、最低 macOS 13.0、Zig 0.16.0、ReleaseSafe、strip=true、需要 C runtime。revision 3 是从 revision 2 进行的 breaking namespace 与 native SDK distribution hard cut；RunContext、typed protocol 和同步执行语义保持不变。这个精确开发 artifact 不等于 stable ABI support policy。
+当前锁定两个 target-specific development bundles，均为 source commit `1ec7e4902727ff894c50452d6417fb6fc3d8bb2c`、ABI v1 revision 3、112-byte API table、Zig 0.16.0、ReleaseSafe、strip=true，并需要 C runtime：
+
+| Target                         | Version                        | Provenance             | Link input                               |
+| ------------------------------ | ------------------------------ | ---------------------- | ---------------------------------------- |
+| macOS arm64（最低 macOS 13.0） | `0.1.0-dev+1ec7e4902727.dirty` | `source.dirty = true`  | system frameworks 由 macOS lock 精确记录 |
+| Windows x86_64 GNU             | `0.1.0-dev+1ec7e4902727`       | `source.dirty = false` | `advapi32`、`crypt32`                    |
+
+revision 3 是从 revision 2 进行的 breaking namespace 与 native SDK distribution hard cut；RunContext、typed protocol 和同步执行语义保持不变。两个 bundle 分别由完整 manifest bytes/checksum 锁定，不能仅凭相同 commit 推断为同一可重建源码状态，也不等于 stable ABI support policy。
 
 - repository lock 保存完整 manifest，并精确锁定 package/source、target、toolchain、link contract、ABI 和所有 payload checksum；
 - `source.dirty = true` 是 provenance；完整 manifest/checksum 使当前 artifact 可被精确识别，但 source commit 不能重建同一未提交源码状态；
@@ -19,7 +26,7 @@
 - 新 observation tag 可以由新 bundle identity 兼容增加，旧 SDK 将其保存为 owned unknown observation；
 - MetaWork 不复制 facade、header、code、event tag 或 UI JSON schema。
 
-目标 v1 baseline 先证明同步 macOS 垂直链路，不把后续产品需求塞进一个并不存在的 ABI。
+目标 v1 baseline 证明同步桌面垂直链路，不把后续产品需求塞进一个并不存在的 ABI。
 
 ## 2. 目标 v1 baseline 必须具备的能力
 
@@ -50,7 +57,7 @@
 - MetaWork Session/Run 可验证映射的正式 Host tools；
 - `UiBackend.poll()` 生产消费链路或生成期实时 steering；
 - Worker IPC；
-- Windows 或其他 target bundle；
+- Linux 或其他尚未锁定的 target bundle；
 - MetaWork 数据库、产品事件 envelope、Renderer view model 或 WebView API。
 - typed Workbench `Output`、`FileChange` 或 plan-progress；
 - plan approval 或 custom UI control。
@@ -218,10 +225,11 @@ Status 还包括 `resource_limit`。pre-admission validation/resource-limit/busy
 
 ## 9. Bundle 交付
 
-revision 3 bundle 精确包含：
+revision 3 bundle 精确包含 target-specific library 与共同 SDK payload：
 
 ```text
-lib/libmetask_agentcore.a
+lib/libmetask_agentcore.a          # macOS
+lib/metask_agentcore.lib           # Windows；与上一项互斥
 include/metask/agentcore.h
 bindings/zig/build.zig
 bindings/zig/build.zig.zon
@@ -242,7 +250,7 @@ manifest schema 1 必须精确记录：
 - `contract { binary_abi_status, binary_abi_version = 1, binary_abi_revision = 3 }`；
 - 除 manifest 自身外的完整 `{path, sha256}` payload whitelist。
 
-公司内部初步开发期，candidate bundle 直接来自本机 metacodes `zig-out/agentcore/aarch64-macos`。MetaWork 对 candidate 做 artifact-only probe，并经 `agentcore:stage` 复制到 `.agentcore/bundle`；正式 build/test/package 只消费 staged root。当前不建设 resolver、cache、artifact repository 或跨机器分发。artifact 缺失或校验失败时明确失败，禁止 source fallback。
+公司内部初步开发期，candidate bundle 直接来自本机 metacodes `zig-out/agentcore/<target>`。MetaWork 根据 manifest target 选择显式 target policy 与 exact repository lock，对 candidate 做 artifact-only probe，并经 `agentcore:stage` 复制到 `.agentcore/bundle`；正式 build/test/package 只消费 staged root。当前不建设 resolver、cache、artifact repository 或跨机器分发。未知 target、artifact 缺失或校验失败时明确失败，禁止 generic/source fallback。
 
 正式 Zig build 必须通过 staged `bindings/zig` package 获取 `metask_agentcore` module。MetaWork verifier 负责 exact lock/checksum/target/ABI 信任；官方 package 负责 module 和 link graph。任何 active build 中的 revision 2 parser、旧文件路径、旧 discovery symbol、module alias、手工 SDK module graph 或 archive 直链都属于迁移失败。
 
@@ -250,7 +258,7 @@ manifest schema 1 必须精确记录：
 
 ### raw candidate contract probe
 
-- macOS arm64 artifact-only consumer 只访问 candidate bundle，不访问 metacodes 实现源码；
+- macOS arm64 与 Windows x86_64 GNU artifact-only consumer 只访问各自 candidate bundle，不访问 metacodes 实现源码；
 - exact manifest bytes、payload checksum、target、toolchain、layout 和唯一 discovery symbol 校验；
 - 隔离 raw C consumer 从新 header 完成 source-free discover/link/run，并拒绝错误 ABI version；
 - 隔离 Zig consumer 通过 candidate 官方 `bindings/zig` package 完成 source-free `Api.discover()`、link 和运行；
@@ -270,7 +278,7 @@ candidate probe 不导入 MetaWork Agent，也不承担 Runtime/Session、真实
 - 同步 UI deadline/cancel/close/shutdown 测试；
 - event pump fatal 能停止 in-flight Run；
 - MetaWork 从真实 bundle 完成 link/run 集成。
-- Debug/Release executable、module tests 和最终 macOS package 均使用 staged identity；
+- macOS Debug/Release/package 与 Windows Debug/Release executable、module tests 均使用各自 staged identity；
 - `.app` 不携带 AgentCore archive、header、Zig/Rust binding 源文件或 `.agentcore` staging 内容；
 - architecture tests 证明正式 build 只从官方 dependency module 获取 SDK，且只有 `agent/` import `metask_agentcore`。
 
@@ -279,6 +287,6 @@ candidate probe 不导入 MetaWork Agent，也不承担 Runtime/Session、真实
 - v1 layout、function table 和 UI/control tags 不原地扩展；
 - observation tags 可以兼容增加，旧 SDK 以 owned unknown observation 保留；
 - MetaWork 每次仍锁定精确 bundle identity 和 checksum，不把 ABI stability 等同于自动升级；
-- 支持周期、远程分发与 Windows target 仍按独立发布政策推进。
+- 支持周期、远程分发、Windows 正式分发与后续 Linux target 仍按独立发布政策推进。
 
-Windows 在 Phase 0B 单独验证目标产物和系统链接输入，不反向阻塞 macOS baseline。
+Windows 已在 Phase 0B 单独验证目标产物、系统链接输入、Debug/Release 和 Gate 5/6，但未完成安装、签名和更新。Linux 后续必须新增独立 lock、target policy、probe 和平台 Gate，不反向阻塞现有 macOS/Windows baseline。

@@ -1,6 +1,6 @@
 # MetaWork 高层架构
 
-> 状态：AgentCore ABI v1 revision 3 hard-cut migration Gate 已通过，是当前已验证 macOS 基线；后续正式方向选择单 AgentCore Worker
+> 状态：AgentCore ABI v1 revision 3 macOS 基线与 Windows Phase 0B 接入 baseline 已通过；后续正式方向选择单 AgentCore Worker
 > 日期：2026-07-21
 
 产品范围见 [产品需求](requirements.md)，metacodes AgentCore 的具体接入约束见 [AgentCore 集成契约](agentcore-integration.md)，revision 3 目标能力见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。历史报告中的 cc-zig 名称只保留当时仓库身份。
@@ -40,7 +40,7 @@
 - 可映射到 MetaWork Session/Run 的正式 Host tools；
 - typed `Output`、`FileChange` 和 plan-progress observation；
 - plan approval 或 custom UI control；
-- Windows 产物。
+- Windows 安装、签名与更新产物。
 
 ### 完整 Phase 0A
 
@@ -48,7 +48,7 @@
 
 ### 后续能力
 
-artifact cache/remote 发布、async resume、strict Workspace security、正式 Host tools 和 Windows Phase 0B 使用独立 Gate 推进，不阻塞同步 macOS baseline。
+Windows Phase 0B 接入 baseline 使用独立 target lock、系统链接输入和自动化 Gate，已验证 x86_64 Windows GNU artifact、Native Debug/Release、Renderer 生产资源与 Gate 5/6。MSI/签名/更新仍属分发层。Linux 后续复用同一 target-policy 入口，但必须新增精确 lock、link policy、probe 和平台 Gate，不能落入 generic fallback。
 
 ## 3. 高层结构
 
@@ -190,7 +190,8 @@ revision 3 是硬切换，不提供 revision 2 active compatibility path。新�
 8. 完成同进程 macOS 同步原型；
 9. 完成 fault-domain spike 并决定进程模型；
 10. 对 revision 3 bundle 执行 hard-cut migration Gate，证明 candidate、staged dependency、正式 Host 和最终 package 是同一精确 identity；
-11. 再建设 cache、remote、后续 capability 和 Windows Phase 0B。
+11. 完成 Windows Phase 0B 接入 baseline；
+12. 再建设 cache、remote、后续 capability、Windows 分发与 Linux 接入。
 
 任何 Gate 未满足退出条件时，不得用 MetaWork 自己复制协议、放宽安全语义或引入 source dependency 绕过。
 
