@@ -25,9 +25,10 @@
 | Metask Account 与真实 AgentCore Run | [产品需求](requirements.md)、[Metask Account API 合同](metask-account-contract.md) | `git show dbaaf81b0217d4016944960ee8621e9a23274f05:docs/phase-0-validation.md` 中 2026-07-20 的真实链路记录 | 打包 `.app` 完成 OAuth、profile、API Key/model catalog、execution persistence，以及 `gpt-5.5`、`deepseek-v4-pro` AgentCore Run；不证明 Task-first 人工交互矩阵完成 |
 | Windows development baseline | [高层架构](architecture.md)、[ABI v1 消费合同](agentcore-abi-v1.md) | `git show dbaaf81b0217d4016944960ee8621e9a23274f05:docs/windows-phase-0b-report.md`；`build_support/agentcore-bundle.windows.lock.json` | 2026-07-21 在 clean x86_64 GNU bundle 上通过 candidate SDK probe、Native Debug/Release 和桌面自动化；不包含安装、签名、更新或完整安全矩阵 |
 | fault-domain 方向 | [高层架构](architecture.md) | `git show dbaaf81b0217d4016944960ee8621e9a23274f05:docs/phase-0-gate-7-report.md` | 独立 crash 对照证明同进程为零进程级隔离，并选择单 AgentCore Worker；该一次性 harness 不进入 active tree，产品 Worker 尚未实现 |
-| 当前自动化回归 | 本文第 3、4 节及各 source of truth | 2026-07-21，代码基线 `dbaaf81b0217d4016944960ee8621e9a23274f05`，执行 `npm test` | TypeScript check、Renderer `65/65`、architecture `23/23`、bundle `22 passed + 1 Windows symlink capability skip`、child runner `1/1`、Zig `107/107` 全部通过；不替代 macOS/Windows 真实窗口验收 |
 
 Git object 只保存一次性执行事实；当前行为与边界始终以 active source of truth 为准。若规范与旧证据冲突，旧证据不得覆盖当前规范，也不得被当作新代码已经回归的证明。
+
+普通自动化结果可由当前 test graph 重现，不进入长期证据账本，也不冠以会在下一次代码提交后立即失真的“当前回归”状态。提交是否通过由对应 commit 的真实执行结果负责；只有稳定发布、artifact migration 或无法由普通自动化重现的平台/外部服务事实保留在上表。
 
 ## 3. 持续回归入口
 

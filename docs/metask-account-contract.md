@@ -52,6 +52,15 @@ macOS 使用 MetaWork 自己的命名空间，不读取或共享 `~/.metacode/au
 - Keychain/open-browser 操作只能在 Native SDK 主线程执行；网络与 loopback wait 在有界 Account worker 上执行；
 - cancel、deadline、superseding attempt 和 shutdown 必须关闭 listener、停止网络操作并 join worker。
 
+### 3.1 持久化 revision 策略
+
+Account persistence revision 与 Renderer Bridge revision、AgentCore ABI 和 bundle manifest schema 相互独立。当前 revision `2` 是一次真实的 hard cut：revision 1 只保存 OAuth family，revision 2 增加 execution credential family、统一 committed manifest 和 execution high watermark，因此不能把 revision 1 数据解释为当前状态。
+
+- revision 只在持久化布局、原子提交语义或安全解释发生不兼容变化时升级；增加内存字段、UI 字段或未持久化能力不升级；
+- Keychain service、manifest 文件名和 manifest body revision 分别隔离 secret namespace、非秘密元数据文件和内容校验，三者由 `account/credential_store.zig` 统一拥有，平台适配层不得另行定义版本；
+- pre-1.0 不维护多版本 parser 或静默迁移。hard cut 必须显式决定旧 secret 与 manifest 的删除方式；不得读取旧数据后猜测补字段，也不得让不可达 credential 永久遗留；
+- 当前代码只接受 revision 2。未来若没有真实不兼容的持久化变化，不得因为产品版本、Bridge revision 或 AgentCore ABI 变化联动升级。
+
 ## 4. C2 已锁定的目录合同
 
 API Key catalog：

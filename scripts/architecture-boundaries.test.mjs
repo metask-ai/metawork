@@ -252,6 +252,22 @@ test("Account execution is installed explicitly without process defaults", () =>
   assert.doesNotMatch(app, /account_api\.OAuth\.TokenSet/);
 });
 
+test("Account persistence revision has one code owner", () => {
+  const store = read("src/account/credential_store.zig");
+  const platform = read("src/account/platform.zig");
+  assert.match(store, /pub const persistence_revision: u8 = 2/);
+  assert.match(store, /"dev\.metawork\.account\.v\{d\}"/);
+  assert.match(store, /"manifest\.v\{d\}"/);
+  assert.equal(
+    [...store.matchAll(/\.\{persistence_revision\}/g)].length,
+    2,
+  );
+  assert.match(store, /version: u8 = persistence_revision/);
+  assert.match(store, /self\.version != persistence_revision/);
+  assert.match(platform, /const manifest_name = store\.manifest_name/);
+  assert.doesNotMatch(platform, /"manifest\.v[0-9]+"/);
+});
+
 test("formal Native test graph runs every product module test root", () => {
   const source = read("build.zig");
   for (const [name, rootModule] of [

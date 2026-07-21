@@ -1,7 +1,6 @@
-# MetaWork Workbench UI 设计草案
+# MetaWork Workbench UI 设计
 
-> 状态：Draft v0.2，供产品与交互评审，不代表当前实现已经具备全部能力  
-> 日期：2026-07-17
+> 状态：维护当前交互规则与 capability-gated 的目标行为；未通过对应能力验收的界面不得出现
 > 设计基线：设计师提供的 Agent Workbench Windows 视觉稿；macOS 共用内容布局，仅适配原生窗口壳与平台语义
 
 ## 1. 文档职责
@@ -754,22 +753,6 @@ Account 错误还必须保留 Workspace 和 New task 草稿，并提供与失败
 
 ## 20. 工程目录结构
 
-Workbench 的仓库外层、Renderer、Zig `src/`、依赖方向、测试布局和渐进迁移单独维护在 [工程目录结构设计草案](project-structure.md)。
+Workbench 的仓库外层、Renderer、Zig `src/`、依赖方向和测试布局单独维护在 [工程结构与所有权](project-structure.md)。
 
 本文档只定义 UI feature 和产品交互；目录方案不得反向改变 Renderer/Host/AgentCore 的产品边界。
-
-## 21. 实施顺序建议
-
-本文档不授权立即实现。进入实现阶段后建议按以下顺序：
-
-1. 建立 MetaWork token、三栏响应式骨架和平台标题栏；
-2. 完成 New task、Task 列表和 Workspace 切换；
-3. 建立状态驱动的 Task timeline 与 Composer；
-4. 接入真实文本流和工具活动；
-5. 接入同步 UI request；
-6. 完成当前 ABI v1 可验证的右栏 Task activity；typed capability 到位后再增加 Output 和文件变更；
-7. strict Workspace security 和规则 capability 通过独立验证后，增加持久权限规则及管理入口；
-8. 增加国际化、pseudo-locale 和完整 UI 测试；
-9. 最后再开放搜索、通知和后续 capability 入口。
-
-任何界面状态都必须由真实 Host/AgentCore 产品投影驱动；不得为了贴合设计稿在 Renderer 内制造第二套协议或猜测 Agent 状态。
