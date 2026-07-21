@@ -24,7 +24,10 @@
   },
   "link": {
     "requires_c_runtime": true,
-    "system_libraries": ["advapi32", "crypt32"],
+    "system_libraries": [
+      "advapi32",
+      "crypt32"
+    ],
     "system_frameworks": []
   },
   "contract": {
