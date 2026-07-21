@@ -17,8 +17,8 @@
 
 ## 当前阶段
 
-- macOS 是当前唯一优先实现和真实验收平台；Windows 属于后续 Phase 0B。
-- 当前已验证基线 hard cut 到精确锁定的 development AgentCore ABI v1 revision 3 dirty artifact；candidate/staged、正式 build/test、Debug/Release、Gate 5/6 和 macOS package 已通过，证据见 `docs/agentcore-revision-3-migration-report.md`。开发期 ABI identity 不等于 stable support policy；`source.dirty = true` 只提供 provenance，不能从 commit 重建同一源码状态。
+- macOS 仍是优先真实验收平台；Windows Phase 0B 接入 baseline（artifact、raw probe、Native Debug/Release、Gate 5/6 automation）已通过。Windows 分发、签名、更新和完整安全矩阵仍属后续交付；Linux 只做架构预留，尚未接入。
+- 当前已验证基线 hard cut 到精确锁定的 development AgentCore ABI v1 revision 3 target-specific artifacts。macOS artifact 为 dirty provenance，Windows x86_64 GNU artifact 为同 commit 的 clean build；二者分别以完整 manifest bytes 和 payload checksum 锁定，不推导为同一可重建源码状态。证据见 `docs/agentcore-revision-3-migration-report.md` 与 `docs/windows-phase-0b-report.md`。
 - 同步 baseline、完整 Phase 0A 和后续 AgentCore capability 是三个不同门槛。Renderer reload 可以恢复仍存活 Host 的视图，不等于 AgentCore 进程恢复。
 - async pending、suspend/resume、Session 持久化恢复、strict Workspace security 和可路由产品 Host tools 不属于当前 ABI v1 baseline。
 
@@ -28,7 +28,7 @@
 - Native SDK 直接构成 Zig Host；不要增加 `NativeSdkAdapter`、通用 Desktop Interface 或框架替换层。
 - metacodes AgentCore bundle SDK 是 Agent 结构化协议的唯一来源；不要再定义平行的 `AgentEvent` / `WorkbenchEvent` 体系。
 - MetaWork 正式应用只消费 canonical `.agentcore/bundle` 和其中的官方 `bindings/zig` package；显式外部 bundle root 只属于 candidate probe/stage。不得把 metacodes source tree 纳入 build graph。禁止 path/Git implementation source dependency、源码复制、`latest`、可变 tag 和静默 source fallback。
-- 公司内部初步开发直接从本机 `metacodes/zig-out/agentcore/aarch64-macos` 获取 candidate；当前不实现 artifact resolver、内容寻址 cache、artifact repository 或跨机器自动分发。
+- 公司内部初步开发直接从本机 `metacodes/zig-out/agentcore/<target>` 获取 target-specific candidate；当前不实现 artifact resolver、内容寻址 cache、artifact repository 或跨机器自动分发。
 - AgentCore binary ABI facade 由 metacodes 单一维护；MetaWork 只使用 bundle SDK。ABI 禁止 native Zig slice、Zig enum、allocator、error union 和 tagged union，wire 层使用固定宽度整数 code、pointer+length、opaque handle、固定布局 struct 和 callback context。
 - 隔离的 raw C contract probe 只验证 candidate facade，不进入正式 Host。正式 Host 只使用 bundle SDK 提供的 typed `Status` / `StopReason`、校验后的 `CoreEvent` / `UiRequest` decoder 和 `UiResponse` encoder；MetaWork 不自行复制 code、tag 或 JSON schema。
 - 当前产品路径不得注册 ABI v1 Host tools。revision 3 Host tool callback 的 `RunContext` wire identity 已可验证，但 MetaWork 尚未定义产品级 tool catalog、权限、Workspace 与多 Session 路由政策；Read/Bash/Edit 使用 AgentCore built-in tools。
@@ -70,7 +70,7 @@
 
 ## 验证
 
-当前 macOS 工程命令：
+macOS 工程命令：
 
 ```bash
 npm ci
@@ -82,7 +82,14 @@ npm run build:release
 npm run package:macos
 ```
 
-`npm run dev` 启动 React development server 和 Native SDK shell。Native SDK 由根 `package.json` 与 `package-lock.json` 精确锁定；不要改用全局 `native` 或提交 `.native/` 生成目录。Windows 命令进入 Phase 0B 后再补充。禁止让验证流程只存在于个人环境或聊天记录中。
+Windows baseline 命令：
+
+```powershell
+npm run agentcore:stage -- C:\absolute\path\to\x86_64-windows.win10...win11_dt-gnu
+npm run test:windows:bringup
+```
+
+`npm run dev` 启动 React development server 和 Native SDK shell。Native SDK 由根 `package.json` 与 `package-lock.json` 精确锁定；不要改用全局 `native` 或提交 `.native/` 生成目录。禁止让验证流程只存在于个人环境或聊天记录中。
 
 Gate 1 artifact-only probe 使用独立 build graph，必须显式指定绝对 bundle root：
 

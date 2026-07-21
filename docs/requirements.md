@@ -181,9 +181,10 @@ Account 是 MetaWork 的 Metask 账号控制面，负责 OAuth 登录、账号/A
 ### 平台
 
 - macOS 是当前 Phase 0A 的优先真实验证平台；
-- Windows 是后续 Phase 0B 目标平台，不阻塞 macOS baseline；
-- cc-zig Windows 兼容与 Native SDK Windows 可行性分别验证，不能用 macOS 结果替代；
-- 对进入验证范围的平台形成可复现的开发构建与可分发包路径。
+- Windows Phase 0B 接入 baseline 已完成独立 artifact、Native SDK、Bridge、AgentCore 和 Gate 5/6 验证，不能用 macOS 结果替代；
+- Windows MSI/签名/更新和完整安全矩阵仍是后续分发交付；
+- Linux 是后续目标平台；当前 bundle target-policy 和系统链接输入按 target 隔离，但不宣称已完成 Linux 构建或验收；
+- 对进入验证范围的平台形成可复现的开发构建与可运行产物路径；进入分发阶段后再要求可分发包路径。
 
 ## 7. 当前交付层级
 
@@ -214,9 +215,13 @@ Metask C1 OAuth/login 与 C2 catalog/ExecutionTarget 合同均已锁定。登录
 
 事件泵数据、生命周期压力测试和同进程/最小 Worker fault-domain spike 已通过，Phase 0A 完成。Gate 7 选择单 AgentCore Worker 作为后续正式故障域；当前应用仍是同进程 prototype，正式 Worker、跨进程恢复和危险工具重放策略不属于当前交付。
 
-### 7.4 后续产品能力
+### 7.4 Windows 接入 baseline
 
-async pending、持久化恢复、strict Workspace security、正式 Host tools、远程 artifact 发布和 Windows 交付按独立 capability 与阶段推进，不能反向伪装成当前 v1 已具备。
+Windows x86_64 GNU 当前提供与 macOS 同一产品语义的开发可执行 baseline：精确 bundle、source-free probe、Native Debug/Release、Renderer 生产资源、Gate 5/6 和干净退出均已验证。它不是安装器或正式发布承诺。
+
+### 7.5 后续产品能力
+
+async pending、持久化恢复、strict Workspace security、正式 Host tools、远程 artifact 发布、Windows 分发交付和 Linux 接入按独立 capability 与阶段推进，不能反向伪装成当前 v1 已具备。
 
 具体验证矩阵见 [Phase 0 验证计划](phase-0-validation.md)。
 
