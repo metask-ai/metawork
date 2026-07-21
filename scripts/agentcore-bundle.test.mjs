@@ -4,6 +4,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   readdir,
   rename,
   rm,
@@ -158,7 +159,7 @@ test("accepts a complete pinned Windows x64 GNU revision 3 bundle", async (t) =>
     expectedManifest: manifest,
   });
   assert.equal(result.target, "x86_64-windows.win10...win11_dt-gnu");
-  assert.equal(result.libraryPath, path.join(root, newLibrary));
+  assert.equal(result.libraryPath, path.join(await realpath(root), newLibrary));
 });
 
 test("rejects a checksum mismatch", async (t) => {

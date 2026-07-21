@@ -79,10 +79,20 @@ export const zhCN: Record<MessageId, string> = {
   "account.cancel": "取消当前操作",
   "account.refresh_catalog": "刷新账号选项",
   "account.logout": "退出并清除这台设备上的信息",
-  "account.command_rejected": "Metask 账号操作被拒绝：{code}",
-  "account.command_failed": "Metask 账号操作失败：{error}",
+  "account.command_rejected":
+    "该账号操作已不可用，MetaWork 已保留最新账号状态。",
+  "account.command_failed":
+    "MetaWork 无法完成该账号操作，请使用草稿旁显示的恢复操作。",
+  "account.cancel_rejected": "该账号操作已经结束，MetaWork 已检查最新状态。",
+  "account.cancel_failed":
+    "MetaWork 无法取消该账号操作；Host 仍会在截止时间到达时自动收口。",
   "account.updated": "Metask 账号已更新。",
   "operation.account": "更新 Metask 账号",
+  "operation.account_cancel": "取消 Metask 账号操作",
+  "command.timeout_reconciled":
+    "{operation}等待时间超出预期。MetaWork 已核对 Host 当前状态，且没有重复执行该操作。",
+  "command.timeout_sync_failed":
+    "{operation}等待时间超出预期，且无法确认最新状态。请重新连接后再继续。",
   "workspace.label": "工作区",
   "workspace.add": "添加",
   "workspace.switch": "切换工作区",

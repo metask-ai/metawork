@@ -1,4 +1,5 @@
 import { commands, events } from "./commands.ts";
+import type { NativeSdkJson } from "@native-sdk/cli";
 import type {
   HostSignal,
   UiResponsePayload,
@@ -25,15 +26,59 @@ import { fetchWorkbenchSnapshot } from "./snapshot/snapshot-client.ts";
 
 export type NativeBridge = NonNullable<typeof window.zero>;
 
+const defaultCommandTimeoutMs = 10_000;
+
+export class BridgeCommandTimeoutError extends Error {
+  readonly command: string;
+  readonly timeoutMs: number;
+
+  constructor(command: string, timeoutMs: number) {
+    super(`Native Host command timed out after ${timeoutMs} ms: ${command}`);
+    this.name = "BridgeCommandTimeoutError";
+    this.command = command;
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+export type BridgeClientOptions = {
+  bridge?: NativeBridge;
+  commandTimeoutMs?: number;
+};
+
 export class BridgeClient {
+  private readonly bridgeOverride?: NativeBridge;
+  private readonly commandTimeoutMs: number;
+
+  constructor(options: BridgeClientOptions = {}) {
+    this.bridgeOverride = options.bridge;
+    this.commandTimeoutMs = options.commandTimeoutMs ?? defaultCommandTimeoutMs;
+  }
+
   private bridge() {
-    const bridge = window.zero;
+    const bridge = this.bridgeOverride ?? window.zero;
     if (!bridge) throw new Error("Native Host bridge is unavailable");
     return bridge;
   }
 
+  private invoke(command: string, payload: NativeSdkJson) {
+    const pending = this.bridge().invoke(command, payload);
+    if (this.commandTimeoutMs <= 0) return pending;
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () =>
+          reject(new BridgeCommandTimeoutError(command, this.commandTimeoutMs)),
+        this.commandTimeoutMs,
+      );
+    });
+    return Promise.race([pending, timeout]).finally(() => {
+      if (timer !== undefined) clearTimeout(timer);
+    });
+  }
+
   available() {
-    return window.zero !== undefined;
+    return this.bridgeOverride !== undefined || window.zero !== undefined;
   }
 
   nativeBridgeForAutomationFixture() {
@@ -67,25 +112,25 @@ export class BridgeClient {
   }
 
   async connect() {
-    return decodeGeneration(await this.bridge().invoke(commands.connect, {}));
+    return decodeGeneration(await this.invoke(commands.connect, {}));
   }
 
   async disconnect(generation: string) {
     assertDisconnected(
-      await this.bridge().invoke(commands.disconnect, { generation }),
+      await this.invoke(commands.disconnect, { generation }),
       generation,
     );
   }
 
   fetchSnapshot() {
     return fetchWorkbenchSnapshot((command, payload) =>
-      this.bridge().invoke(command, payload),
+      this.invoke(command, payload),
     );
   }
 
   async ping() {
     return decodePingResponse(
-      await this.bridge().invoke(commands.ping, {
+      await this.invoke(commands.ping, {
         source: "workbench-renderer",
       }),
     );
@@ -93,12 +138,14 @@ export class BridgeClient {
 
   async acknowledgeSignal(sequence: number) {
     assertSignalAcknowledged(
-      await this.bridge().invoke(commands.pingAck, { sequence }),
+      await this.invoke(commands.pingAck, { sequence }),
       sequence,
     );
   }
 
   async chooseWorkspace(): Promise<WorkspaceChoice> {
+    // Native file dialogs are user-controlled modal interactions, not bounded
+    // Host work. Their lifetime must not be confused with a wedged command.
     return decodeWorkspaceChoice(
       await this.bridge().invoke(commands.chooseWorkspace, {}),
     );
@@ -106,68 +153,68 @@ export class BridgeClient {
 
   async beginLogin() {
     return decodeAccountCommandResult(
-      await this.bridge().invoke(commands.accountBeginLogin, {}),
+      await this.invoke(commands.accountBeginLogin, {}),
     );
   }
 
   async reopenLogin() {
     return decodeAccountCommandResult(
-      await this.bridge().invoke(commands.accountReopenLogin, {}),
+      await this.invoke(commands.accountReopenLogin, {}),
     );
   }
 
   async reauthenticate() {
     return decodeAccountCommandResult(
-      await this.bridge().invoke(commands.accountReauthenticate, {}),
+      await this.invoke(commands.accountReauthenticate, {}),
     );
   }
 
   async cancelAccountOperation() {
     return decodeAccountCommandResult(
-      await this.bridge().invoke(commands.accountCancelOperation, {}),
+      await this.invoke(commands.accountCancelOperation, {}),
     );
   }
 
   async refreshAccountCatalog() {
     return decodeAccountCommandResult(
-      await this.bridge().invoke(commands.accountRefreshCatalog, {}),
+      await this.invoke(commands.accountRefreshCatalog, {}),
     );
   }
 
   async selectApiKey(apiKeyId: string) {
     return decodeAccountCommandResult(
-      await this.bridge().invoke(commands.accountSelectApiKey, { apiKeyId }),
+      await this.invoke(commands.accountSelectApiKey, { apiKeyId }),
     );
   }
 
   async selectModel(modelId: string) {
     return decodeAccountCommandResult(
-      await this.bridge().invoke(commands.accountSelectModel, { modelId }),
+      await this.invoke(commands.accountSelectModel, { modelId }),
     );
   }
 
   async logout() {
     return decodeAccountCommandResult(
-      await this.bridge().invoke(commands.accountLogout, {}),
+      await this.invoke(commands.accountLogout, {}),
     );
   }
 
   async createTask(workspaceGrant: string) {
     return decodeTaskId(
-      await this.bridge().invoke(commands.createTask, { workspaceGrant }),
+      await this.invoke(commands.createTask, { workspaceGrant }),
     );
   }
 
   async run(taskId: string, prompt: string) {
     return assertRunAccepted(
-      await this.bridge().invoke(commands.run, { taskId, prompt }),
+      await this.invoke(commands.run, { taskId, prompt }),
       taskId,
     );
   }
 
   async cancel(taskId: string, runId: string) {
     assertCancelAccepted(
-      await this.bridge().invoke(commands.cancel, { taskId, runId }),
+      await this.invoke(commands.cancel, { taskId, runId }),
       taskId,
       runId,
     );
@@ -180,7 +227,7 @@ export class BridgeClient {
     response: UiResponsePayload,
   ) {
     assertUiResponseAccepted(
-      await this.bridge().invoke(commands.respondUi, {
+      await this.invoke(commands.respondUi, {
         taskId,
         runId,
         requestId,
@@ -194,14 +241,14 @@ export class BridgeClient {
 
   async closeTask(taskId: string) {
     assertCloseAccepted(
-      await this.bridge().invoke(commands.closeTask, { taskId }),
+      await this.invoke(commands.closeTask, { taskId }),
       taskId,
     );
   }
 
   async renameTask(taskId: string, title: string) {
     assertTaskFlag(
-      await this.bridge().invoke(commands.renameTask, { taskId, title }),
+      await this.invoke(commands.renameTask, { taskId, title }),
       taskId,
       "renamed",
     );
@@ -209,7 +256,7 @@ export class BridgeClient {
 
   async setTaskArchived(taskId: string, archived: boolean) {
     assertTaskArchived(
-      await this.bridge().invoke(commands.archiveTask, {
+      await this.invoke(commands.archiveTask, {
         taskId,
         archived,
       }),
@@ -220,7 +267,7 @@ export class BridgeClient {
 
   async deleteTask(taskId: string) {
     assertTaskFlag(
-      await this.bridge().invoke(commands.deleteTask, { taskId }),
+      await this.invoke(commands.deleteTask, { taskId }),
       taskId,
       "deleted",
     );

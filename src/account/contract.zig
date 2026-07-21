@@ -425,7 +425,9 @@ pub fn validateView(view: AccountView) ValidationError!void {
     }
 
     if (view.execution_state == .ready) {
-        if (view.execution_generation == 0 or view.selected_model.len == 0)
+        if (view.execution_generation == 0 or
+            view.selected_api_key_id.len == 0 or
+            view.selected_model.len == 0)
             return error.InconsistentState;
     } else if (view.can_create_task) {
         return error.InconsistentState;
@@ -451,9 +453,11 @@ pub fn validateView(view: AccountView) ValidationError!void {
             view.operation == .selecting_model)
             return error.InconsistentState,
         .choice_required => switch (view.primary_action) {
-            .choose_api_key => if (view.operation != .selecting_key)
+            .choose_api_key => if (view.operation != .selecting_key or
+                view.api_keys.len == 0)
                 return error.InconsistentState,
-            .choose_model => if (view.operation != .selecting_model)
+            .choose_model => if (view.operation != .selecting_model or
+                view.models.len == 0)
                 return error.InconsistentState,
             else => return error.InconsistentState,
         },
@@ -529,6 +533,25 @@ test "AccountView rejects ready execution without committed generation" {
         .primary_action = .none,
         .selected_model = "metask-model",
         .can_create_task = true,
+    }));
+}
+
+test "AccountView rejects an actionless catalog choice" {
+    try std.testing.expectError(error.InconsistentState, validateView(.{
+        .session_state = .authenticated,
+        .execution_state = .preparing,
+        .operation = .selecting_key,
+        .readiness = .choice_required,
+        .primary_action = .choose_api_key,
+        .can_cancel = true,
+    }));
+    try std.testing.expectError(error.InconsistentState, validateView(.{
+        .session_state = .authenticated,
+        .execution_state = .preparing,
+        .operation = .selecting_model,
+        .readiness = .choice_required,
+        .primary_action = .choose_model,
+        .can_cancel = true,
     }));
 }
 

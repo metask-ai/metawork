@@ -334,6 +334,10 @@ function decodeAccount(value: unknown, path: string): AccountView {
       executionGeneration === "0")
   )
     fail(path, "a ready execution requires selected identities and generation");
+  if (primaryAction === "choose_api_key" && apiKeys.length === 0)
+    fail(path, "API Key choice requires at least one candidate");
+  if (primaryAction === "choose_model" && models.length === 0)
+    fail(path, "model choice requires at least one candidate");
   if (
     sessionState === "signed_out" &&
     (executionState !== "none" ||

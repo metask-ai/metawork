@@ -145,6 +145,29 @@ test("Workbench decoding rejects version drift, extra fields, and invalid wire v
     /cancellation availability disagrees/,
   );
 
+  const emptyKeyChoice = clone(fixture);
+  emptyKeyChoice.account.executionState = "reconfiguring";
+  emptyKeyChoice.account.operation = "selecting_key";
+  emptyKeyChoice.account.readiness = "choice_required";
+  emptyKeyChoice.account.primaryAction = "choose_api_key";
+  emptyKeyChoice.account.canCancel = true;
+  emptyKeyChoice.account.canCreateTask = false;
+  emptyKeyChoice.account.apiKeys = [];
+  assert.throws(
+    () => decodeWorkbenchSnapshot(emptyKeyChoice),
+    /choice requires at least one candidate/,
+  );
+
+  const emptyModelChoice = clone(emptyKeyChoice);
+  emptyModelChoice.account.operation = "selecting_model";
+  emptyModelChoice.account.primaryAction = "choose_model";
+  emptyModelChoice.account.apiKeys = fixture.account.apiKeys;
+  emptyModelChoice.account.models = [];
+  assert.throws(
+    () => decodeWorkbenchSnapshot(emptyModelChoice),
+    /choice requires at least one candidate/,
+  );
+
   const duplicateModel = clone(fixture);
   duplicateModel.account.models = [
     { id: "model-1", displayName: "One" },

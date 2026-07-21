@@ -71,9 +71,7 @@ export function AccountPanel({
         account.errorCode !== "user_cancelled" && (
           <div className="account-error" role="alert">
             <strong>{t("account.action_failed")}</strong>
-            <span>
-              {account.safeDiagnostic || accountErrorText(account.errorCode, t)}
-            </span>
+            <span>{accountErrorText(account.errorCode, t)}</span>
           </div>
         )}
 

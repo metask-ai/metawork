@@ -32,7 +32,7 @@ import {
 } from "../features/composer/useTaskDrafts.ts";
 import { prepareRetryDraft } from "../features/composer/drafts.ts";
 import { submitTaskInstruction } from "../features/composer/submitTaskInstruction.ts";
-import { BridgeClient } from "../bridge/client.ts";
+import { BridgeClient, BridgeCommandTimeoutError } from "../bridge/client.ts";
 import {
   WorkbenchConnection,
   type WorkbenchConnectionStatus,
@@ -103,6 +103,7 @@ export default function App() {
     id: "connection.connecting",
   });
   const [busy, setBusy] = useState<string | null>(null);
+  const [accountCancelBusy, setAccountCancelBusy] = useState(false);
   const [bridgeReady, setBridgeReady] = useState(false);
   const [viewSyncFailed, setViewSyncFailed] = useState(false);
   const {
@@ -308,20 +309,44 @@ export default function App() {
     try {
       const result = await invoke();
       if (!result.accepted) {
-        setStatus({
-          id: "account.command_rejected",
-          values: { code: result.errorCode },
-        });
+        await refreshSnapshot().catch(() => undefined);
+        setStatus({ id: "account.command_rejected" });
         return;
       }
       await refreshAfterCommit("account.updated", "operation.account");
     } catch (error) {
-      setStatus({
-        id: "account.command_failed",
-        values: { error: errorText(error) },
-      });
+      if (await reconcileCommandTimeout(error, "operation.account")) return;
+      await refreshSnapshot().catch(() => undefined);
+      setStatus({ id: "account.command_failed" });
     } finally {
       setBusy(null);
+    }
+  }
+
+  async function cancelAccountOperation() {
+    if (
+      viewSyncFailed ||
+      !bridgeReady ||
+      accountCancelBusy ||
+      !snapshot.account.canCancel
+    )
+      return;
+    setAccountCancelBusy(true);
+    try {
+      const result = await client.cancelAccountOperation();
+      if (!result.accepted) {
+        await refreshSnapshot().catch(() => undefined);
+        setStatus({ id: "account.cancel_rejected" });
+        return;
+      }
+      await refreshAfterCommit("account.cancelled", "operation.account_cancel");
+    } catch (error) {
+      if (await reconcileCommandTimeout(error, "operation.account_cancel"))
+        return;
+      await refreshSnapshot().catch(() => undefined);
+      setStatus({ id: "account.cancel_failed" });
+    } finally {
+      setAccountCancelBusy(false);
     }
   }
 
@@ -402,6 +427,11 @@ export default function App() {
       if (result.kind === "create_failed") {
         setWorkspaceGrant("");
         newTaskDrafts.updateDraft(submitted);
+        if (
+          await reconcileCommandTimeout(result.error, "operation.task_create")
+        )
+          return;
+        await refreshSnapshot().catch(() => undefined);
         setStatus({
           id: "task.create_failed",
           values: { error: errorText(result.error) },
@@ -410,11 +440,13 @@ export default function App() {
       }
       if (result.kind === "run_failed") {
         taskDrafts.setDraft(result.taskId, submitted);
+        if (await reconcileCommandTimeout(result.error, "operation.run_submit"))
+          return;
         setStatus({
           id: "run.start_failed",
           values: { error: errorText(result.error) },
         });
-        if (result.created) await refreshSnapshot().catch(() => undefined);
+        await refreshSnapshot().catch(() => undefined);
         return;
       }
       taskDrafts.clearDraft(result.taskId);
@@ -438,6 +470,8 @@ export default function App() {
       try {
         await client.cancel(activeTask.id, activeTask.currentRunId);
       } catch (error) {
+        if (await reconcileCommandTimeout(error, "operation.run_stop")) return;
+        await refreshSnapshot().catch(() => undefined);
         setStatus({
           id: "run.stop_failed",
           values: { error: errorText(error) },
@@ -464,6 +498,9 @@ export default function App() {
       try {
         await client.closeTask(activeTask.id);
       } catch (error) {
+        if (await reconcileCommandTimeout(error, "operation.task_close"))
+          return;
+        await refreshSnapshot().catch(() => undefined);
         setStatus({
           id: "task.close_failed",
           values: { error: errorText(error) },
@@ -483,6 +520,9 @@ export default function App() {
       try {
         await client.renameTask(activeTask.id, titleDraft.trim());
       } catch (error) {
+        if (await reconcileCommandTimeout(error, "operation.task_rename"))
+          return;
+        await refreshSnapshot().catch(() => undefined);
         setStatus({
           id: "task.rename_failed",
           values: { error: errorText(error) },
@@ -504,6 +544,14 @@ export default function App() {
       try {
         await client.setTaskArchived(activeTask.id, archived);
       } catch (error) {
+        if (
+          await reconcileCommandTimeout(
+            error,
+            archived ? "operation.task_archive" : "operation.task_restore",
+          )
+        )
+          return;
+        await refreshSnapshot().catch(() => undefined);
         setStatus({
           id: archived ? "task.archive_failed" : "task.restore_failed",
           values: { error: errorText(error) },
@@ -528,6 +576,9 @@ export default function App() {
       try {
         await client.deleteTask(activeTask.id);
       } catch (error) {
+        if (await reconcileCommandTimeout(error, "operation.task_delete"))
+          return;
+        await refreshSnapshot().catch(() => undefined);
         setStatus({
           id: "task.delete_failed",
           values: { error: errorText(error) },
@@ -577,6 +628,8 @@ export default function App() {
         );
       } catch (error) {
         failUiResponse(identity);
+        if (await reconcileCommandTimeout(error, "operation.ui_response"))
+          return;
         setStatus({
           id: "approval.response_failed",
           values: { error: errorText(error) },
@@ -627,6 +680,23 @@ export default function App() {
     }
   }
 
+  async function reconcileCommandTimeout(error: unknown, operation: MessageId) {
+    if (!(error instanceof BridgeCommandTimeoutError)) return false;
+    try {
+      await refreshSnapshot();
+      setStatus({
+        id: "command.timeout_reconciled",
+        values: { operation: t(operation) },
+      });
+    } catch {
+      setStatus({
+        id: "command.timeout_sync_failed",
+        values: { operation: t(operation) },
+      });
+    }
+    return true;
+  }
+
   const currentTaskState = activeTask ? taskDisplayState(activeTask) : null;
   const currentTaskStatus = !currentTaskState
     ? t(workbench.draftWorkspaceRoot ? "task.new" : "task.open")
@@ -667,9 +737,7 @@ export default function App() {
               onReauthenticate={() =>
                 void runAccountCommand(() => client.reauthenticate())
               }
-              onCancel={() =>
-                void runAccountCommand(() => client.cancelAccountOperation())
-              }
+              onCancel={() => void cancelAccountOperation()}
               onRefresh={() =>
                 void runAccountCommand(() => client.refreshAccountCatalog())
               }
@@ -1000,6 +1068,9 @@ export default function App() {
             <AccountPrerequisite
               account={snapshot.account}
               disabled={mutationDisabled}
+              cancelDisabled={
+                viewSyncFailed || !bridgeReady || accountCancelBusy
+              }
               onBeginLogin={() =>
                 void runAccountCommand(() => client.beginLogin())
               }
@@ -1009,9 +1080,7 @@ export default function App() {
               onReauthenticate={() =>
                 void runAccountCommand(() => client.reauthenticate())
               }
-              onCancel={() =>
-                void runAccountCommand(() => client.cancelAccountOperation())
-              }
+              onCancel={() => void cancelAccountOperation()}
               onRetry={() =>
                 void runAccountCommand(() => client.refreshAccountCatalog())
               }

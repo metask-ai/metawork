@@ -81,6 +81,17 @@ function renderPrerequisite(account) {
   );
 }
 
+function renderPrerequisiteWith(account, props) {
+  return withI18n(
+    createElement(AccountPrerequisite, {
+      account,
+      disabled: false,
+      ...callbacks,
+      ...props,
+    }),
+  );
+}
+
 test("signed-out readiness stays beside the task draft with one primary action", () => {
   const markup = renderPrerequisite(signedOut);
   assert.match(markup, /Connect Metask to send/);
@@ -117,6 +128,22 @@ test("background catalog preparation does not ask for a manual load step", () =>
   assert.match(markup, /Loading API Keys/);
   assert.match(markup, />Cancel current action</);
   assert.doesNotMatch(markup, /Load API Keys|Try again|<select/);
+});
+
+test("Account cancel stays available while an ordinary command is locally busy", () => {
+  const markup = renderPrerequisiteWith(
+    {
+      ...signedOut,
+      sessionState: "authorizing",
+      operation: "oauth_callback",
+      readiness: "preparing",
+      primaryAction: "reopen_login",
+      canCancel: true,
+    },
+    { disabled: true, cancelDisabled: false },
+  );
+  assert.match(markup, /<button[^>]*disabled=""[^>]*>Open sign-in page again</);
+  assert.match(markup, /<button[^>]*>Cancel current action</);
 });
 
 test("only a real catalog ambiguity asks for the matching choice", () => {
@@ -163,11 +190,13 @@ test("retryable and restart-required failures never leave an actionless spinner"
     primaryAction: "retry_catalog",
     accountId: "account-1",
     errorCode: "metask_service_unavailable",
+    safeDiagnostic: "upstream service returned internal status E_METASK_503",
   });
   assert.match(retry, /Finish preparing this task/);
   assert.match(retry, />Try again</);
   assert.match(retry, /temporarily unavailable/);
   assert.doesNotMatch(retry, /metask_service_unavailable/);
+  assert.doesNotMatch(retry, /E_METASK_503/);
 
   const noKeys = renderPrerequisite({
     ...signedOut,

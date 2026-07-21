@@ -2043,6 +2043,11 @@ test "Account coordinator commits login and execution as separate gates" {
         .payload = .api_keys_loaded,
     };
     defer keys_loaded.deinit();
+    account_api.Catalog.TestSupport.replacePublic(
+        &public_catalog,
+        &.{.{ .id = "key-1", .name = "Primary", .suffix = "1234" }},
+        &.{},
+    );
     try std.testing.expect(coordinator.complete(&keys_loaded));
     const key = coordinator.commandSink().submit(.{
         .select_api_key = "key-1",
@@ -2057,6 +2062,11 @@ test "Account coordinator commits login and execution as separate gates" {
         .payload = .models_loaded,
     };
     defer models_loaded.deinit();
+    account_api.Catalog.TestSupport.replacePublic(
+        &public_catalog,
+        &.{.{ .id = "key-1", .name = "Primary", .suffix = "1234" }},
+        &.{.{ .id = "model-1", .display_name = "Model One" }},
+    );
     try std.testing.expect(coordinator.complete(&models_loaded));
     const model = coordinator.commandSink().submit(.{
         .select_model = "model-1",

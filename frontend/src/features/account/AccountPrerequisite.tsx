@@ -59,7 +59,7 @@ export function AccountPrerequisite({
             role={error ? "alert" : "status"}
           >
             {error
-              ? account.safeDiagnostic || accountErrorText(account.errorCode, t)
+              ? accountErrorText(account.errorCode, t)
               : operation ||
                 (account.errorCode === "user_cancelled"
                   ? t("account.cancelled")

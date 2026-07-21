@@ -86,10 +86,21 @@ export const enUS = {
   "account.cancel": "Cancel current action",
   "account.refresh_catalog": "Refresh account options",
   "account.logout": "Sign out and clear this device",
-  "account.command_rejected": "Metask account action was rejected: {code}",
-  "account.command_failed": "Metask account action failed: {error}",
+  "account.command_rejected":
+    "That account action is no longer available. MetaWork kept the latest account state.",
+  "account.command_failed":
+    "MetaWork could not complete that account action. Use the recovery action shown beside your draft.",
+  "account.cancel_rejected":
+    "That account action has already finished. MetaWork checked the latest state.",
+  "account.cancel_failed":
+    "MetaWork could not cancel the account action. It will still stop at its Host deadline.",
   "account.updated": "Metask account updated.",
   "operation.account": "Updating the Metask account",
+  "operation.account_cancel": "Cancelling the Metask account action",
+  "command.timeout_reconciled":
+    "{operation} took longer than expected. MetaWork checked the current Host state and did not repeat the action.",
+  "command.timeout_sync_failed":
+    "{operation} took longer than expected, and the latest state could not be confirmed. Reconnect before trying again.",
   "workspace.label": "Workspace",
   "workspace.add": "Add",
   "workspace.switch": "Switch workspace",

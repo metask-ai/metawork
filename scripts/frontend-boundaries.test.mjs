@@ -109,3 +109,24 @@ test("Task-first composition keeps Account readiness at the Composer boundary", 
   assert.ok(beginNewTask);
   assert.doesNotMatch(beginNewTask, /canCreateTask/);
 });
+
+test("timed-out mutations resync from Host state without automatic replay", async () => {
+  const app = await readFile(resolve(sourceRoot, "app", "App.tsx"), "utf8");
+  const client = await readFile(
+    resolve(sourceRoot, "bridge", "client.ts"),
+    "utf8",
+  );
+
+  assert.match(client, /Promise\.race\(\[pending, timeout\]\)/);
+  assert.match(client, /BridgeCommandTimeoutError/);
+  assert.doesNotMatch(client, /retry.*this\.invoke/s);
+  assert.match(
+    app,
+    /instanceof BridgeCommandTimeoutError[\s\S]*await refreshSnapshot\(\)/,
+  );
+  assert.match(app, /async function cancelAccountOperation\(\)/);
+  assert.doesNotMatch(
+    app,
+    /runAccountCommand\(\(\) => client\.cancelAccountOperation\(\)\)/,
+  );
+});
