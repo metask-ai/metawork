@@ -34,7 +34,7 @@
     "test:windows:bringup": "node scripts/run-windows-bringup.mjs"
   },
   "devDependencies": {
-    "@native-sdk/cli": "0.5.1",
+    "@native-sdk/cli": "0.5.4",
     "prettier": "3.9.5"
   }
 }
