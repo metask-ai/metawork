@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import {
   mkdir,
   mkdtemp,
@@ -12,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import process from "node:process";
 import { validateAgentCoreBundle } from "./agentcore-bundle.mjs";
+import { runChild } from "./run-child-process.mjs";
 
 const repositoryRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -42,35 +42,6 @@ const bundle = await validateAgentCoreBundle(bundleRoot, {
 console.log(
   `verified AgentCore ${bundle.manifest.version} ABI ${bundle.manifest.contract.binary_abi_version} revision ${bundle.manifest.contract.binary_abi_revision}`,
 );
-
-async function runZig(arguments_, cwd, label) {
-  const child = spawn("zig", arguments_, {
-    cwd,
-    stdio: "inherit",
-    detached: true,
-  });
-  let timedOut = false;
-  const timeout = setTimeout(() => {
-    timedOut = true;
-    try {
-      if (child.pid) process.kill(-child.pid, "SIGKILL");
-    } catch {
-      child.kill("SIGKILL");
-    }
-  }, 30_000);
-  let exitCode;
-  try {
-    exitCode = await new Promise((resolve, reject) => {
-      child.once("error", reject);
-      child.once("exit", resolve);
-    });
-  } finally {
-    clearTimeout(timeout);
-  }
-  if (timedOut) throw new Error(`${label} exceeded 30 seconds`);
-  if (exitCode !== 0)
-    throw new Error(`${label} failed with exit code ${exitCode}`);
-}
 
 const scratch = await mkdtemp(path.join(tmpdir(), "metawork-agentcore-probe-"));
 try {
@@ -126,7 +97,8 @@ pub fn main() !void {
 }
 `,
   );
-  await runZig(
+  await runChild(
+    "zig",
     [
       "build",
       "--cache-dir",
@@ -137,10 +109,13 @@ pub fn main() !void {
       `-Dtarget=${bundle.target}`,
       "-Doptimize=Debug",
     ],
-    zigConsumerRoot,
-    "source-free AgentCore Zig package consumer",
+    {
+      cwd: zigConsumerRoot,
+      label: "source-free AgentCore Zig package consumer",
+    },
   );
-  await runZig(
+  await runChild(
+    "zig",
     [
       "build",
       "--cache-dir",
@@ -152,8 +127,10 @@ pub fn main() !void {
       `-Dtarget=${bundle.target}`,
       "-Doptimize=Debug",
     ],
-    path.join(repositoryRoot, "spikes", "agentcore-contract"),
-    "raw AgentCore C contract probe",
+    {
+      cwd: path.join(repositoryRoot, "spikes", "agentcore-contract"),
+      label: "raw AgentCore C contract probe",
+    },
   );
   await validateAgentCoreBundle(bundle.root, {
     expectedManifest,

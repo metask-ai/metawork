@@ -132,10 +132,17 @@ test("only Agent implementation imports the AgentCore SDK", () => {
   assertNoImports(forbidden, ["metask_agentcore"]);
 
   const build = read("build.zig");
-  assert.equal(
-    [...build.matchAll(/\.addImport\("metask_agentcore", sdk\)/g)].length,
-    3,
-    "only event_sink, event_pump, and session may receive the SDK module",
+  const sdkImportReceivers = [
+    ...build.matchAll(
+      /\b([A-Za-z_]\w*)\s*\.\s*addImport\s*\(\s*"metask_agentcore"\s*,/g,
+    ),
+  ]
+    .map((match) => match[1])
+    .sort();
+  assert.deepEqual(
+    sdkImportReceivers,
+    ["event_pump", "event_sink", "fixture", "session", "tests"].sort(),
+    "only the three Agent modules and two isolated SDK test roots may receive the SDK module",
   );
   assert.match(
     build,

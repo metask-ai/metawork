@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
 import {
+  copyFile,
   mkdir,
   mkdtemp,
   readFile,
   readdir,
+  rename,
   rm,
   symlink,
   writeFile,
@@ -109,6 +111,18 @@ const injectedChecks = {
   zigVersion: "0.16.0",
   symbols: "0000000000000000 T _metask_agentcore_get_api\n",
 };
+
+function injectedFileOperations(overrides = {}) {
+  return { copyFile, rename, rm, ...overrides };
+}
+
+async function seedCanonicalBundle(repositoryRoot) {
+  const storageRoot = path.join(repositoryRoot, ".agentcore");
+  const target = path.join(storageRoot, "bundle");
+  await mkdir(target, { recursive: true });
+  await writeFile(path.join(target, "old"), "old-canonical");
+  return { storageRoot, target };
+}
 
 test("accepts a complete pinned macOS arm64 revision 3 bundle", async (t) => {
   const { root, manifest } = await fixture(t);
@@ -360,6 +374,163 @@ test("stages and verifies only the locked manifest payload", async (t) => {
   assert.deepEqual(await readdir(path.join(repositoryRoot, ".agentcore")), [
     "bundle",
   ]);
+});
+
+test("copy failure preserves the canonical bundle", async (t) => {
+  const { root: source, manifest } = await fixture(t);
+  const repositoryRoot = await repository(t, manifest);
+  const { storageRoot, target } = await seedCanonicalBundle(repositoryRoot);
+
+  await assert.rejects(
+    stageAgentCoreBundle({
+      repositoryRoot,
+      source,
+      validationOptions: injectedChecks,
+      fileOperations: injectedFileOperations({
+        copyFile: async () => {
+          throw new Error("injected copy failure");
+        },
+      }),
+    }),
+    /injected copy failure/,
+  );
+  assert.equal(
+    await readFile(path.join(target, "old"), "utf8"),
+    "old-canonical",
+  );
+  assert.deepEqual(await readdir(storageRoot), ["bundle"]);
+});
+
+test("target rename failure preserves the canonical bundle", async (t) => {
+  const { root: source, manifest } = await fixture(t);
+  const repositoryRoot = await repository(t, manifest);
+  const { storageRoot, target } = await seedCanonicalBundle(repositoryRoot);
+
+  await assert.rejects(
+    stageAgentCoreBundle({
+      repositoryRoot,
+      source,
+      validationOptions: injectedChecks,
+      fileOperations: injectedFileOperations({
+        rename: async (from, to) => {
+          if (from === target)
+            throw new Error("injected target rename failure");
+          await rename(from, to);
+        },
+      }),
+    }),
+    /injected target rename failure/,
+  );
+  assert.equal(
+    await readFile(path.join(target, "old"), "utf8"),
+    "old-canonical",
+  );
+  assert.deepEqual(await readdir(storageRoot), ["bundle"]);
+});
+
+test("install rename failure restores the previous canonical bundle", async (t) => {
+  const { root: source, manifest } = await fixture(t);
+  const repositoryRoot = await repository(t, manifest);
+  const { storageRoot, target } = await seedCanonicalBundle(repositoryRoot);
+
+  await assert.rejects(
+    stageAgentCoreBundle({
+      repositoryRoot,
+      source,
+      validationOptions: injectedChecks,
+      fileOperations: injectedFileOperations({
+        rename: async (from, to) => {
+          if (
+            path.basename(from).startsWith(".bundle-staging-") &&
+            to === target
+          )
+            throw new Error("injected install rename failure");
+          await rename(from, to);
+        },
+      }),
+    }),
+    /injected install rename failure/,
+  );
+  assert.equal(
+    await readFile(path.join(target, "old"), "utf8"),
+    "old-canonical",
+  );
+  assert.deepEqual(await readdir(storageRoot), ["bundle"]);
+});
+
+test("failed install and restore leave one recoverable backup", async (t) => {
+  const { root: source, manifest } = await fixture(t);
+  const repositoryRoot = await repository(t, manifest);
+  const { storageRoot, target } = await seedCanonicalBundle(repositoryRoot);
+
+  await assert.rejects(
+    stageAgentCoreBundle({
+      repositoryRoot,
+      source,
+      validationOptions: injectedChecks,
+      fileOperations: injectedFileOperations({
+        rename: async (from, to) => {
+          if (to === target && from !== target)
+            throw new Error("injected destination failure");
+          await rename(from, to);
+        },
+      }),
+    }),
+    /install and canonical restore both failed/,
+  );
+  const residues = await readdir(storageRoot);
+  assert.equal(residues.length, 1);
+  assert.match(residues[0], /^\.bundle-backup-/);
+
+  await stageAgentCoreBundle({
+    repositoryRoot,
+    source,
+    validationOptions: injectedChecks,
+  });
+  assert.deepEqual(await readdir(storageRoot), ["bundle"]);
+  await verifyStagedAgentCoreBundle(repositoryRoot, injectedChecks);
+});
+
+test("backup cleanup failure reports installed state and is recovered next run", async (t) => {
+  const { root: source, manifest } = await fixture(t);
+  const repositoryRoot = await repository(t, manifest);
+  const { storageRoot } = await seedCanonicalBundle(repositoryRoot);
+  let injected = false;
+
+  await assert.rejects(
+    stageAgentCoreBundle({
+      repositoryRoot,
+      source,
+      validationOptions: injectedChecks,
+      fileOperations: injectedFileOperations({
+        rm: async (target, options) => {
+          if (
+            !injected &&
+            path.basename(target).startsWith(".bundle-backup-")
+          ) {
+            injected = true;
+            throw new Error("injected backup cleanup failure");
+          }
+          await rm(target, options);
+        },
+      }),
+    }),
+    /installed but backup cleanup failed/,
+  );
+  await verifyStagedAgentCoreBundle(repositoryRoot, injectedChecks);
+  assert.equal(
+    (await readdir(storageRoot)).filter((entry) =>
+      entry.startsWith(".bundle-backup-"),
+    ).length,
+    1,
+  );
+
+  await stageAgentCoreBundle({
+    repositoryRoot,
+    source,
+    validationOptions: injectedChecks,
+  });
+  assert.deepEqual(await readdir(storageRoot), ["bundle"]);
 });
 
 test("cleans stale staging and backup residues when canonical exists", async (t) => {

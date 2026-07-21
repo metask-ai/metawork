@@ -37,7 +37,9 @@ async function loadLock(repositoryRoot) {
   return { bytes, manifest: JSON.parse(bytes) };
 }
 
-async function recoverStagingResidues(storageRoot, target) {
+const defaultFileOperations = { copyFile, rename, rm };
+
+async function recoverStagingResidues(storageRoot, target, fileOperations) {
   const entries = await readdir(storageRoot, { withFileTypes: true });
   const stagingPaths = entries
     .filter((entry) => entry.name.startsWith(".bundle-staging-"))
@@ -46,7 +48,9 @@ async function recoverStagingResidues(storageRoot, target) {
     .filter((entry) => entry.name.startsWith(".bundle-backup-"))
     .map((entry) => path.join(storageRoot, entry.name));
   await Promise.all(
-    stagingPaths.map((entry) => rm(entry, { recursive: true, force: true })),
+    stagingPaths.map((entry) =>
+      fileOperations.rm(entry, { recursive: true, force: true }),
+    ),
   );
 
   if (await exists(target)) {
@@ -57,7 +61,7 @@ async function recoverStagingResidues(storageRoot, target) {
       "multiple AgentCore backup residues exist without a canonical bundle",
     );
   if (backupPaths.length === 1) {
-    await rename(backupPaths[0], target);
+    await fileOperations.rename(backupPaths[0], target);
     return [];
   }
   return backupPaths;
@@ -67,6 +71,7 @@ export async function stageAgentCoreBundle({
   repositoryRoot,
   source,
   validationOptions = {},
+  fileOperations = defaultFileOperations,
 }) {
   if (!path.isAbsolute(source))
     throw new Error("AgentCore candidate path must be absolute");
@@ -80,7 +85,11 @@ export async function stageAgentCoreBundle({
   const storageRoot = path.join(repositoryRoot, ".agentcore");
   const target = path.join(storageRoot, "bundle");
   await mkdir(storageRoot, { recursive: true });
-  const staleBackups = await recoverStagingResidues(storageRoot, target);
+  const staleBackups = await recoverStagingResidues(
+    storageRoot,
+    target,
+    fileOperations,
+  );
 
   const staging = await mkdtemp(path.join(storageRoot, ".bundle-staging-"));
   const backup = path.join(
@@ -88,12 +97,16 @@ export async function stageAgentCoreBundle({
     `.bundle-backup-${process.pid}-${Date.now()}`,
   );
   let movedTarget = false;
+  let operationError;
 
   try {
     for (const relativePath of ["manifest.json", ...validated.payloadFiles]) {
       const destination = path.join(staging, relativePath);
       await mkdir(path.dirname(destination), { recursive: true });
-      await copyFile(path.join(validated.root, relativePath), destination);
+      await fileOperations.copyFile(
+        path.join(validated.root, relativePath),
+        destination,
+      );
     }
     await validateAgentCoreBundle(staging, {
       ...validationOptions,
@@ -102,24 +115,54 @@ export async function stageAgentCoreBundle({
     });
 
     try {
-      await rename(target, backup);
+      await fileOperations.rename(target, backup);
       movedTarget = true;
     } catch (error) {
       if (error?.code !== "ENOENT") throw error;
     }
     try {
-      await rename(staging, target);
+      await fileOperations.rename(staging, target);
     } catch (error) {
-      if (movedTarget) await rename(backup, target);
+      if (movedTarget) {
+        try {
+          await fileOperations.rename(backup, target);
+        } catch (restoreError) {
+          throw new AggregateError(
+            [error, restoreError],
+            "AgentCore install and canonical restore both failed",
+          );
+        }
+      }
       throw error;
     }
-    if (movedTarget) await rm(backup, { recursive: true, force: true });
-    await Promise.all(
-      staleBackups.map((entry) => rm(entry, { recursive: true, force: true })),
-    );
-  } finally {
-    await rm(staging, { recursive: true, force: true });
+    try {
+      if (movedTarget)
+        await fileOperations.rm(backup, { recursive: true, force: true });
+      await Promise.all(
+        staleBackups.map((entry) =>
+          fileOperations.rm(entry, { recursive: true, force: true }),
+        ),
+      );
+    } catch (error) {
+      throw new Error(
+        "AgentCore bundle was installed but backup cleanup failed",
+        { cause: error },
+      );
+    }
+  } catch (error) {
+    operationError = error;
   }
+  try {
+    await fileOperations.rm(staging, { recursive: true, force: true });
+  } catch (cleanupError) {
+    if (operationError)
+      throw new AggregateError(
+        [operationError, cleanupError],
+        "AgentCore staging failed and temporary cleanup also failed",
+      );
+    throw cleanupError;
+  }
+  if (operationError) throw operationError;
 
   return { target, manifest: lock.manifest };
 }

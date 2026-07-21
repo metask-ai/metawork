@@ -57,19 +57,21 @@ npm run package:macos
 
 关键结果：
 
-- Renderer runtime `60/60`、architecture `23/23`、bundle contract `17/17`、Native aggregate `105/105`；
+- Renderer runtime `60/60`、architecture `23/23`、bundle contract `22/22`、child runner `1/1`、Native aggregate `105/105`；
 - bundle negative corpus 覆盖 exact lock drift、ABI revision、target、dirty identity、revision 2 schema、duplicate/case-colliding/unsafe paths、额外或缺失 payload、symlink、checksum 和新旧 discovery symbol；
+- stager fault injection 覆盖 copy、canonical-to-backup rename、staging-to-canonical rename、restore rename 和 backup cleanup；失败时分别证明旧 canonical 保持、原地恢复或留下唯一可恢复 backup，后续 staging 可收敛到唯一 canonical bundle；
 - Phase 0A 重跑 staged raw C probe、官方 Zig consumer、typed SDK consumer 和 lifecycle suites；
 - Gate 5 通过 worker wake、main-thread emit/fetch/ack、reload generation 和 clean stop；
 - Gate 6 通过真实 revision 3 bundle 的 Read/Bash/Edit、permission UI、重复 UI-response 拒绝、reload-safe AskUserQuestion、Task metadata lifecycle 和 async close，并确认 Host credential 到达 AgentCore但不进入 Renderer snapshot；
-- Debug、Release、Gate 5/6 和 package 都消费同一 staged manifest identity。
+- Debug、Release、Gate 5/6 和 package 都消费同一 staged manifest identity；Gate 5/6 自身先执行 staged preflight；
+- Zig child runner 统一使用可配置的有界 timeout，默认 `120000ms`，仅在诊断慢机时通过 `METAWORK_CHILD_TIMEOUT_MS` 显式调整。
 
 ## 4. Hard-cut 边界
 
 - `build.zig.zon` 只从 staged 官方 `bindings/zig` package 获取唯一 `metask_agentcore` module；
 - 只有 `src/agent/` 导入 SDK；Account、Workbench、Bridge、Renderer 和 App 不导入；
 - 正式 build 不手工创建 AgentCore root/types/protocol modules，不直接 `addObjectFile` archive，也不复制 link inputs；
-- 外部 `AGENTCORE_BUNDLE_ROOT` 只属于 candidate probe/stage；正式入口先运行 staged preflight；
+- 外部 `AGENTCORE_BUNDLE_ROOT` 只属于 candidate probe/stage；正式入口与 Gate 5/6 都先运行 staged preflight；
 - active code/build/规范文档没有 revision 2 parser、路径、symbol、module alias、feature flag 或 fallback；
 - 旧 token 只保留在明确的 rejection test、历史验证报告和 hard-cut 验收规则中，不构成可执行兼容路径。
 
