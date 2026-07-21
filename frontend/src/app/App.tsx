@@ -51,11 +51,6 @@ import {
 } from "../workbench/selectors.ts";
 import { initialWorkbenchState, workbenchReducer } from "../workbench/store.ts";
 
-const gate5FixtureLoader =
-  import.meta.env.VITE_METAWORK_GATE5_FIXTURE === "1"
-    ? () => import("../bridge/fixtures/gate5-fixture.ts")
-    : undefined;
-
 function errorText(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
@@ -162,45 +157,41 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
-    const current = new WorkbenchConnection(
-      client,
-      {
-        onSnapshot: (next) => {
-          if (!cancelled) {
-            observeUiResponseSnapshot(next);
-            const projectedTaskIds = next.tasks.map((task) => task.id);
-            taskDrafts.pruneDrafts([
-              ...projectedTaskIds,
-              ...pendingTaskDraftRetention.current,
-            ]);
-            for (const taskId of projectedTaskIds)
-              pendingTaskDraftRetention.current.delete(taskId);
-            dispatchWorkbench({ type: "snapshot.accepted", snapshot: next });
-            const pendingTaskId = pendingTaskSelection.current;
-            if (
-              pendingTaskId &&
-              next.tasks.some((task) => task.id === pendingTaskId)
-            ) {
-              pendingTaskSelection.current = null;
-              dispatchWorkbench({
-                type: "task.selected",
-                taskId: pendingTaskId,
-              });
-            }
+    const current = new WorkbenchConnection(client, {
+      onSnapshot: (next) => {
+        if (!cancelled) {
+          observeUiResponseSnapshot(next);
+          const projectedTaskIds = next.tasks.map((task) => task.id);
+          taskDrafts.pruneDrafts([
+            ...projectedTaskIds,
+            ...pendingTaskDraftRetention.current,
+          ]);
+          for (const taskId of projectedTaskIds)
+            pendingTaskDraftRetention.current.delete(taskId);
+          dispatchWorkbench({ type: "snapshot.accepted", snapshot: next });
+          const pendingTaskId = pendingTaskSelection.current;
+          if (
+            pendingTaskId &&
+            next.tasks.some((task) => task.id === pendingTaskId)
+          ) {
+            pendingTaskSelection.current = null;
+            dispatchWorkbench({
+              type: "task.selected",
+              taskId: pendingTaskId,
+            });
           }
-        },
-        onStatus: (next) => {
-          if (!cancelled) setStatus(connectionStatus(next));
-        },
-        onReady: (ready) => {
-          if (!cancelled) setBridgeReady(ready);
-        },
-        onViewSyncFailed: (failed) => {
-          if (!cancelled) setViewSyncFailed(failed);
-        },
+        }
       },
-      { gate5FixtureLoader },
-    );
+      onStatus: (next) => {
+        if (!cancelled) setStatus(connectionStatus(next));
+      },
+      onReady: (ready) => {
+        if (!cancelled) setBridgeReady(ready);
+      },
+      onViewSyncFailed: (failed) => {
+        if (!cancelled) setViewSyncFailed(failed);
+      },
+    });
     connection.current = current;
     void current.start().catch((error) => {
       if (!cancelled) {

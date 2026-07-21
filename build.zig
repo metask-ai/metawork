@@ -71,7 +71,6 @@ fn addLifecycleTests(
         "tests/agent/lifecycle_test.zig",
         "tests/agent/event_pump_test.zig",
         "tests/workbench/executor_lifecycle_test.zig",
-        "tests/bridge/automation_delivery_test.zig",
         "tests/integration/lifecycle/lifecycle_test.zig",
     };
     for (roots) |root| {
@@ -116,7 +115,6 @@ const WiredModules = struct {
     agent: *std.Build.Module,
     bridge: *std.Build.Module,
     event_pump: *std.Build.Module,
-    automation_delivery: *std.Build.Module,
     sdk: *std.Build.Module,
     workbench: *std.Build.Module,
     workbench_projection: *std.Build.Module,
@@ -138,7 +136,6 @@ fn createLifecycleFixture(
     fixture.addImport("metawork_workbench", modules.workbench);
     fixture.addImport("metawork_account_contract", modules.account_contract);
     fixture.addImport("event_pump", modules.event_pump);
-    fixture.addImport("automation_delivery", modules.automation_delivery);
     fixture.addImport("metask_agentcore", modules.sdk);
     fixture.addImport("workbench_executor", modules.workbench_executor);
     return fixture;
@@ -332,11 +329,6 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     automation_disabled.addImport("native_sdk", existingImport(root_module, "native_sdk"));
     automation_disabled.addImport("metawork_bridge", bridge);
     automation_disabled.addImport("metawork_account_contract", account_contract);
-    const automation_delivery = b.createModule(.{
-        .root_source_file = b.path("src/automation/delivery.zig"),
-        .target = target,
-        .optimize = root_module.optimize,
-    });
     const automation_enabled = b.createModule(.{
         .root_source_file = b.path("src/automation/enabled.zig"),
         .target = target,
@@ -345,7 +337,6 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     automation_enabled.addImport("native_sdk", existingImport(root_module, "native_sdk"));
     automation_enabled.addImport("metawork_bridge", bridge);
     automation_enabled.addImport("metawork_account_contract", account_contract);
-    automation_enabled.addImport("automation_delivery", automation_delivery);
     const automation = b.createModule(.{
         .root_source_file = b.path("src/automation.zig"),
         .target = target,
@@ -389,7 +380,6 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .agent = agent,
         .bridge = bridge,
         .event_pump = event_pump,
-        .automation_delivery = automation_delivery,
         .sdk = sdk,
         .workbench = workbench,
         .workbench_projection = projection,

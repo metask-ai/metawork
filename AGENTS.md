@@ -39,7 +39,7 @@
 - `CoreEvent` 中需要异步保留的 borrowed slice 必须在 callback 返回前深拷贝。
 - AgentCore/tool 线程不得直接调用 WebView；所有事件必须经过有界、线程安全的 Host 事件泵。
 - `text_chunk` 可以合并，但在没有完整消息快照前不得丢失字节；控制事件不得静默丢弃。
-- callback 内 event validation/copy/入队失败，或 canonical consumer 无法被通知时，返回 callback fatal；已经 owned 的 event 不得因 notification failure 被泄漏或静默丢弃。Renderer/Bridge delivery、revision、snapshot、reload 或 retention failure 必须以 typed transport fact 交给 Workbench policy，Bridge 不得直接设置 Run cause 或 abort Agent Run。
+- callback 内 event validation/copy/入队失败，或 canonical consumer 无法被通知时，返回 callback fatal；已经 owned 的 event 不得因 notification failure 被泄漏或静默丢弃。Renderer/Bridge response、revision、snapshot、reload 或 connection failure 必须以 typed transport fact 交给 Workbench policy，Bridge 不得直接设置 Run cause 或 abort Agent Run。
 - 跨越同步 Bridge handler 返回的 payload 必须是 Bridge-owned copy 或显式 ownership transfer；shutdown 先 stop ingress 和 quiesce callbacks，再断开 Workbench，owned delivery buffers 最后独立释放。
 - ABI function status 必须先于 `RunResult` 处理；status 非 OK 时禁止读取 `RunResult`，并精确释放 diagnostic buffer。
 - `StopReason` 必须先由 Metask AgentCore bundle SDK 校验 raw wire code，再对 SDK 类型做无 `else` 的穷尽 switch，并在 Host envelope 中保留原始 code/reason。unknown code fail closed，不伪造恢复或预算状态。

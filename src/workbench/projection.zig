@@ -193,8 +193,6 @@ pub const TransportFailureStage = enum {
     revision_delivery,
     snapshot_transport,
     connection_generation,
-    agent_event_delivery,
-    detached_retention_expired,
 };
 
 pub const TransportFailureReport = struct {
@@ -207,8 +205,6 @@ pub const TransportFailureDecision = enum {
     reject_command,
     retry,
     detach_renderer,
-    retain_for_reconnect,
-    discard_transport_payload,
     request_run_termination,
 };
 
@@ -220,8 +216,6 @@ pub fn decideTransportFailure(report: TransportFailureReport) TransportFailureDe
         .ingress_validation, .command_dispatch => .reject_command,
         .revision_delivery, .snapshot_transport => .retry,
         .response_delivery, .connection_generation => .detach_renderer,
-        .agent_event_delivery => .retain_for_reconnect,
-        .detached_retention_expired => .discard_transport_payload,
     };
 }
 
@@ -825,7 +819,7 @@ pub const Workbench = struct {
         return self.account.view(self.canCreateTask());
     }
 
-    /// Gate 6 keeps its local provider outside the production Account
+    /// The AgentCore vertical fixture keeps its local provider outside the production Account
     /// contract. This path is compiled only into `-Dautomation=true` builds;
     /// release builds reject it before observing any input.
     pub fn installAutomationExecution(
@@ -3328,8 +3322,6 @@ test "Renderer transport failures never own Agent Run termination" {
         .{ .stage = .revision_delivery, .decision = .retry },
         .{ .stage = .snapshot_transport, .decision = .retry },
         .{ .stage = .connection_generation, .decision = .detach_renderer },
-        .{ .stage = .agent_event_delivery, .decision = .retain_for_reconnect },
-        .{ .stage = .detached_retention_expired, .decision = .discard_transport_payload },
     };
     for (cases) |case| {
         const decision = decideTransportFailure(.{ .stage = case.stage });

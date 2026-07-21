@@ -29,23 +29,25 @@ const appCwd = process.env.METAWORK_TEST_APP_CWD
 const automationDir = path.join(appCwd, ".zig-cache", "native-sdk-automation");
 const commandTimeoutMs = 20_000;
 const runTimeoutMs = 60_000;
-const workspace = await mkdtemp(join(tmpdir(), "metawork-gate6-"));
+const workspace = await mkdtemp(join(tmpdir(), "metawork-agentcore-vertical-"));
 const fixturePath = join(workspace, "fixture.txt");
-await writeFile(fixturePath, "gate6-before\n", { mode: 0o600 });
+await writeFile(fixturePath, "agentcore-vertical-before\n", { mode: 0o600 });
 await rm(automationDir, { recursive: true, force: true });
 
 const responses = [
   toolSse("m1", "read-1", "Read", { file_path: fixturePath }),
-  toolSse("m2", "bash-1", "Bash", { command: "echo gate6-bash-ok" }),
+  toolSse("m2", "bash-1", "Bash", {
+    command: "echo agentcore-vertical-bash-ok",
+  }),
   toolSse("m3", "edit-1", "Edit", {
     file_path: fixturePath,
-    old_string: "gate6-before",
-    new_string: "gate6-after",
+    old_string: "agentcore-vertical-before",
+    new_string: "agentcore-vertical-after",
   }),
   toolSse("m4", "ask-1", "AskUserQuestion", {
     questions: [
       {
-        question: "Continue the Gate 6 run?",
+        question: "Continue the AgentCore vertical run?",
         header: "Continue",
         options: [
           { label: "Yes", description: "Finish the run" },
@@ -54,7 +56,7 @@ const responses = [
       },
     ],
   }),
-  textSse("m5", "metawork gate6 complete"),
+  textSse("m5", "metawork agentcore vertical complete"),
 ];
 const provider = createProvider(responses);
 const baseUrl = await provider.listen();
@@ -65,8 +67,8 @@ const app = spawn(binary, [], {
   cwd: appCwd,
   env: {
     ...process.env,
-    METAWORK_GATE0_AUTOMATION: "1",
-    METAWORK_GATE6_PROVIDER_BASE_URL: baseUrl,
+    METAWORK_AUTOMATION: "1",
+    METAWORK_AGENTCORE_VERTICAL_PROVIDER_BASE_URL: baseUrl,
   },
   stdio: ["ignore", "pipe", "pipe"],
 });
@@ -119,6 +121,7 @@ try {
   );
   const runId = submittedRun.id;
   let reloadedRequest = null;
+  let deliveryEmitsBeforeReload = null;
   const answered = new Set();
   const terminal = new Set([
     "completed",
@@ -154,6 +157,7 @@ try {
         } else if (pending.kind === "ask_question") {
           if (reloadedRequest === null) {
             reloadedRequest = pending.requestId;
+            deliveryEmitsBeforeReload = productDeliveryEmitCount();
             await automate("reload");
             await waitForBridge();
             const restored = await snapshot();
@@ -177,7 +181,7 @@ try {
           };
         } else {
           throw new Error(
-            `unexpected Gate 6 UI request: ${JSON.stringify(pending)}`,
+            `unexpected AgentCore vertical UI request: ${JSON.stringify(pending)}`,
           );
         }
         await invokeBridge("metawork.tasks.respondUi", responsePayload);
@@ -205,12 +209,12 @@ try {
     throw new Error(
       `completed run retained a Host cause: ${JSON.stringify(task)}`,
     );
-  if (!run.assistant.includes("metawork gate6 complete"))
+  if (!run.assistant.includes("metawork agentcore vertical complete"))
     throw new Error("final assistant text was not projected");
   const activityOrders = [];
   for (const [name, evidence] of [
-    ["Read", "gate6-before"],
-    ["Bash", "gate6-bash-ok"],
+    ["Read", "agentcore-vertical-before"],
+    ["Bash", "agentcore-vertical-bash-ok"],
     ["Edit", ""],
   ]) {
     const tool = run.tools.find((item) => item.name === name);
@@ -232,6 +236,17 @@ try {
   }
   if (reloadedRequest === null)
     throw new Error("AskUserQuestion did not exercise reload-safe resume");
+  if (
+    deliveryEmitsBeforeReload === null ||
+    productDeliveryEmitCount() <= deliveryEmitsBeforeReload
+  )
+    throw new Error(
+      "the real ProductDelivery path did not publish a revision after Renderer reload",
+    );
+  if (/metawork\.product_delivery\.emit.*main_thread=false/.test(output))
+    throw new Error(
+      "ProductDelivery emitted a Renderer revision off the main thread",
+    );
   if (task.pendingUi !== null)
     throw new Error("completed run retained an actionable UI request");
   if (!Array.isArray(task.uiHistory) || task.uiHistory.length === 0)
@@ -261,7 +276,7 @@ try {
   )
     throw new Error("reload-safe question did not resolve into UI history");
   const edited = await readFile(fixturePath, "utf8");
-  if (edited !== "gate6-after\n")
+  if (edited !== "agentcore-vertical-after\n")
     throw new Error(
       `Edit did not update the workspace: ${JSON.stringify(edited)}`,
     );
@@ -273,11 +288,11 @@ try {
 
   await invokeBridge("metawork.tasks.rename", {
     taskId,
-    title: "Gate 6 release audit",
+    title: "AgentCore vertical release audit",
   });
   let metadataSnapshot = await snapshot();
   let metadataTask = metadataSnapshot.tasks.find((item) => item.id === taskId);
-  if (metadataTask?.title !== "Gate 6 release audit")
+  if (metadataTask?.title !== "AgentCore vertical release audit")
     throw new Error("Task rename was not projected");
   await invokeBridge("metawork.tasks.archive", {
     taskId,
@@ -319,7 +334,7 @@ try {
     throw new Error("normal runtime stop was not observed");
 
   process.stdout.write(
-    "Gate 6 desktop vertical passed: real bundle, Read/Bash/Edit, permission UI, duplicate UI-response rejection, reload-safe AskUserQuestion resume, Task metadata lifecycle, async close.\n",
+    "AgentCore desktop vertical passed: real bundle, main-thread ProductDelivery, Read/Bash/Edit, permission UI, duplicate UI-response rejection, reload-safe AskUserQuestion resume, Task metadata lifecycle, async close.\n",
   );
 } catch (error) {
   process.stderr.write(`${output}\n`);
@@ -337,7 +352,7 @@ try {
 }
 
 async function invokeBridge(command, payload) {
-  const id = `gate6-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const id = `agentcore-vertical-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const result = await automate(
     "bridge",
     JSON.stringify({ id, command, payload }),
@@ -368,6 +383,14 @@ async function invokeBridge(command, payload) {
   if (response && !response.ok)
     throw new Error(`${command} failed: ${JSON.stringify(response.error)}`);
   return response?.result ?? null;
+}
+
+function productDeliveryEmitCount() {
+  return (
+    output.match(
+      /metawork\.product_delivery\.emit event=metawork:workbench-changed main_thread=true/g,
+    ) ?? []
+  ).length;
 }
 
 async function expectBridgeFailure(command, payload, context) {
@@ -420,7 +443,7 @@ async function snapshot() {
     decoded.copy(assembled, offset);
   }
   const encoded = assembled.toString("utf8");
-  if (encoded.includes("metawork-gate6-fixture-key"))
+  if (encoded.includes("metawork-agentcore-vertical-fixture-key"))
     throw new Error("Host provider credential reached the Renderer snapshot");
   const parsed = JSON.parse(encoded);
   if (
@@ -491,15 +514,18 @@ function createProvider(queue) {
     request.on("end", () => {
       try {
         if (bytes > 2 * 1024 * 1024)
-          throw new Error("provider request exceeded the Gate 6 fixture bound");
+          throw new Error(
+            "provider request exceeded the AgentCore vertical fixture bound",
+          );
         if (request.method !== "POST" || request.url !== "/v1/messages")
           throw new Error("AgentCore used an unexpected provider endpoint");
         if (
-          request.headers.authorization !== "Bearer metawork-gate6-fixture-key"
+          request.headers.authorization !==
+          "Bearer metawork-agentcore-vertical-fixture-key"
         )
           throw new Error("Host credential did not reach AgentCore correctly");
         const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-        if (payload.model !== "metawork-gate6-fixture-model")
+        if (payload.model !== "metawork-agentcore-vertical-fixture-model")
           throw new Error("Host model did not reach AgentCore correctly");
         const body = queue[served];
         if (!body) throw new Error("unexpected extra provider request");

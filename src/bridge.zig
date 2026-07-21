@@ -13,8 +13,7 @@ const dispatcher_impl = @import("bridge/dispatcher.zig");
 pub const CallbackGate = callback_gate_impl.State;
 pub const Dispatcher = dispatcher_impl.Dispatcher;
 pub const DispatcherPlatform = dispatcher_impl.Platform;
-pub const DispatcherAutomationHooks = dispatcher_impl.AutomationHooks;
-pub const dispatcher_max_extra_handlers = dispatcher_impl.max_extra_handlers;
+pub const DispatcherAutomationAuthority = dispatcher_impl.AutomationAuthority;
 
 pub const ProductDelivery = product_delivery_impl.Delivery;
 pub const ProductDeliveryTransport = product_delivery_impl.Transport;

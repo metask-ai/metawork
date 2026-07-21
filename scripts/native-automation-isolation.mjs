@@ -1,15 +1,9 @@
 export const nativeAutomationTokens = Object.freeze([
-  "metawork:agent-events",
-  "metawork.events.ack",
-  "metawork.events.fetch",
-  "metawork.gate5.emitFixture",
-  "metawork.gate5.worker_wake",
-  "METAWORK_GATE6_PROVIDER_BASE_URL",
-  "metawork-gate6-fixture-key",
-  "metawork-gate6-fixture-model",
+  "metawork.product_delivery.emit",
+  "METAWORK_AGENTCORE_VERTICAL_PROVIDER_BASE_URL",
+  "metawork-agentcore-vertical-fixture-key",
+  "metawork-agentcore-vertical-fixture-model",
   "automation-account",
-  '"fixture":"inline"',
-  '"fixture":"object"',
 ]);
 
 export function findNativeAutomationToken(bytes) {

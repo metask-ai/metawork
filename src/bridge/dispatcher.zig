@@ -13,7 +13,6 @@ const product_delivery = @import("product_delivery.zig");
 const workspace_grant = @import("workspace_grant.zig");
 
 const product_handler_count = commands.product.len;
-pub const max_extra_handlers: usize = 32;
 const workspace_path_capacity = workspace_grant.max_path_bytes;
 const event_name = "metawork:host-signal";
 
@@ -41,14 +40,11 @@ pub const Platform = struct {
     on_main_thread_fn: *const fn (?*anyopaque) bool,
 };
 
-pub const AutomationHooks = struct {
+pub const AutomationAuthority = struct {
     context: ?*anyopaque = null,
     active_fn: *const fn (?*anyopaque) bool = inactive,
-    before_connect_fn: *const fn (?*anyopaque, u64) anyerror!void = noAutomationAction,
-    connect_fn: *const fn (?*anyopaque, u64) anyerror!void = noAutomationAction,
-    detach_fn: *const fn (?*anyopaque, u64, u64) anyerror!void = noAutomationDetach,
 
-    fn active(self: AutomationHooks) bool {
+    fn active(self: AutomationAuthority) bool {
         return self.active_fn(self.context);
     }
 };
@@ -57,21 +53,20 @@ pub const Dispatcher = struct {
     workbench: ?*workbench_api.Workbench,
     account_commands: account_contract.AccountCommandSink,
     platform: Platform,
-    automation: AutomationHooks,
+    automation: AutomationAuthority,
     delivery: product_delivery.Delivery,
     callbacks: callback_gate.State = .{},
     grants: workspace_grant.State = .{},
     sequence: u64 = 0,
     acknowledged_sequence: u64 = 0,
-    handler_count: usize = 0,
-    registered_handlers: [product_handler_count + max_extra_handlers]native_sdk.bridge.Handler = undefined,
+    registered_handlers: [product_handler_count]native_sdk.bridge.Handler = undefined,
 
     pub fn init(
         allocator: std.mem.Allocator,
         workbench: *workbench_api.Workbench,
         account_commands: account_contract.AccountCommandSink,
         platform: Platform,
-        automation: AutomationHooks,
+        automation: AutomationAuthority,
     ) std.mem.Allocator.Error!Dispatcher {
         return .{
             .workbench = workbench,
@@ -92,14 +87,12 @@ pub const Dispatcher = struct {
         self.* = undefined;
     }
 
-    /// Registers the complete product table and appends compile-time-selected
-    /// automation handlers into Bridge-owned registry storage.
+    /// Registers the complete product command table. Automation may change
+    /// authority in controlled builds, but it does not add a parallel protocol.
     pub fn register(
         self: *Dispatcher,
         policy: native_sdk.BridgePolicy,
-        extra_handlers: []const native_sdk.bridge.Handler,
-    ) !native_sdk.BridgeDispatcher {
-        if (extra_handlers.len > max_extra_handlers) return error.HandlerCapacity;
+    ) native_sdk.BridgeDispatcher {
         const product_specs = [_]struct {
             name: []const u8,
             function: native_sdk.bridge.HandlerFn,
@@ -133,14 +126,9 @@ pub const Dispatcher = struct {
             .context = self,
             .invoke_fn = spec.function,
         };
-        @memcpy(
-            self.registered_handlers[product_handler_count..][0..extra_handlers.len],
-            extra_handlers,
-        );
-        self.handler_count = product_handler_count + extra_handlers.len;
         return .{
             .policy = policy,
-            .registry = .{ .handlers = self.registered_handlers[0..self.handler_count] },
+            .registry = .{ .handlers = &self.registered_handlers },
         };
     }
 
@@ -157,18 +145,12 @@ pub const Dispatcher = struct {
     }
 
     pub fn breakConnection(self: *Dispatcher) void {
-        if (self.delivery.connectedGeneration()) |generation|
-            self.automation.detach_fn(self.automation.context, generation, self.now()) catch {};
         self.delivery.breakConnection(self.transport());
         self.grants.invalidate();
     }
 
     pub fn connectedWindow(self: *const Dispatcher) ?native_sdk.platform.WindowId {
         return self.delivery.connectedWindow();
-    }
-
-    pub fn callbackGate(self: *Dispatcher) *callback_gate.State {
-        return &self.callbacks;
     }
 
     pub fn productDelivery(self: *Dispatcher) *product_delivery.Delivery {
@@ -258,12 +240,8 @@ pub const Dispatcher = struct {
         defer callback.deinit();
         if (self.delivery.connectedWindow()) |window_id|
             if (window_id != invocation.source.window_id) return error.EventWindowMismatch;
-        const now_ns = self.now();
-        try self.automation.before_connect_fn(self.automation.context, now_ns);
         const generation = try self.delivery.connect(invocation.source.window_id, self.transport());
         errdefer self.delivery.breakConnection(self.transport());
-        try self.automation.connect_fn(self.automation.context, generation);
-        errdefer self.automation.detach_fn(self.automation.context, generation, now_ns) catch {};
         try self.platform.wake_fn(self.platform.context);
         return std.fmt.bufPrint(output, "{{\"generation\":\"{d}\"}}", .{generation});
     }
@@ -278,7 +256,6 @@ pub const Dispatcher = struct {
         try self.delivery.validateConnection(generation, invocation.source.window_id);
         defer self.grants.invalidate();
         defer self.delivery.breakConnection(self.transport());
-        try self.automation.detach_fn(self.automation.context, generation, self.now());
         return std.fmt.bufPrint(output, "{{\"generation\":\"{d}\",\"detached\":true}}", .{generation});
     }
 
@@ -879,17 +856,11 @@ fn inactive(_: ?*anyopaque) bool {
     return false;
 }
 
-fn noAutomationAction(_: ?*anyopaque, _: u64) anyerror!void {}
-
-fn noAutomationDetach(_: ?*anyopaque, _: u64, _: u64) anyerror!void {}
-
 test "Dispatcher validates authority before domain calls and preserves committed state on response loss" {
     const fixture = @import("lifecycle_fixture");
     const Harness = struct {
         wake_calls: usize = 0,
-        detach_calls: usize = 0,
         account_calls: usize = 0,
-        fail_detach: bool = false,
         on_main_thread: bool = true,
         account_result: account_contract.AccountCommandResult =
             .acceptedAttempt(41),
@@ -948,12 +919,6 @@ test "Dispatcher validates authority before domain calls and preserves committed
             }
             return self.account_result;
         }
-
-        fn detach(context: ?*anyopaque, _: u64, _: u64) anyerror!void {
-            const self: *@This() = @ptrCast(@alignCast(context.?));
-            self.detach_calls += 1;
-            if (self.fail_detach) return error.InjectedDetachFailure;
-        }
     };
 
     fixture.fake_core.reset();
@@ -985,10 +950,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
             .now_fn = Harness.now,
             .on_main_thread_fn = Harness.onMainThread,
         },
-        .{
-            .context = &harness,
-            .detach_fn = Harness.detach,
-        },
+        .{},
     );
     defer {
         dispatcher.deinit();
@@ -997,9 +959,8 @@ test "Dispatcher validates authority before domain calls and preserves committed
         workbench.deinit();
         runtime.deinit();
     }
-    const native_dispatcher = try dispatcher.register(
+    const native_dispatcher = dispatcher.register(
         @import("policy.zig").product(.release),
-        &.{},
     );
     const source = native_sdk.bridge.Source{ .origin = "zero://app", .window_id = 3 };
     var response: [4096]u8 = undefined;
@@ -1126,16 +1087,14 @@ test "Dispatcher validates authority before domain calls and preserves committed
 
     const generation = dispatcher.productDelivery().connectedGeneration().?;
     const unused_grant = try dispatcher.grants.issue(generation, source.window_id, "/tmp");
-    harness.fail_detach = true;
     var disconnect_storage: [256]u8 = undefined;
     const disconnect = try std.fmt.bufPrint(
         &disconnect_storage,
         "{{\"id\":\"disconnect\",\"command\":\"metawork.events.disconnect\",\"payload\":{{\"generation\":\"{d}\"}}}}",
         .{generation},
     );
-    const failed_disconnect = native_dispatcher.dispatch(disconnect, source, &response);
-    try std.testing.expect(std.mem.indexOf(u8, failed_disconnect, "\"handler_failed\"") != null);
-    try std.testing.expectEqual(@as(usize, 1), harness.detach_calls);
+    const disconnected = native_dispatcher.dispatch(disconnect, source, &response);
+    try std.testing.expect(std.mem.indexOf(u8, disconnected, "\"detached\":true") != null);
     try std.testing.expect(dispatcher.connectedWindow() == null);
     var grant_output: [workspace_path_capacity]u8 = undefined;
     try std.testing.expectError(

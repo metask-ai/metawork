@@ -277,7 +277,7 @@ set typed TerminationSignal if absent
 
 event 入泵后 ownership 已经转移给 Agent event pump。`EventReadyNotifier` 只返回 `scheduled`、`already_pending` 或 `unavailable`；App 使用原子 pending gate 将重复 Native `services.wake()` 合并为 `already_pending`，并在 drain 前清 gate，避免 producer 与 consumer 交错时丢 wake。Agent 对 `unavailable` 按 composition 提供的 retry interval 和 deadline 同步重试；deadline 耗尽后 callback 才返回 fatal 并记录 typed `event_consumer_notification_failure`。失败不会撤销已经完成的 pump ownership transfer，事件仍由 pump 负责释放或交给 canonical consumer。
 
-callback 返回后的 Workbench canonical projection failure 仍可以按 Run identity 请求 Agent 终止，并使用不含 Workbench 名称的 `event_pump_failure.consumer_rejected`；这不是 Bridge failure。如果 Agent terminal 已先发布，Workbench 还必须独立保存 projection failure 产品事实，在 event drain 后把 Run 暴露为 `event_pipeline_failure` 并禁止 continuation，不能把已经太晚的 termination request 当作唯一收口。Renderer event delivery、revision、snapshot、connection/generation 和 detached retention expiry 则形成 typed transport report，由 Workbench policy 决定 reject/retry/detach/discard。当前所有 Renderer transport stage 都明确不返回 `request_run_termination`；Renderer detach/reload 或 retention expiry 不得杀死后台 Run。
+callback 返回后的 Workbench canonical projection failure 仍可以按 Run identity 请求 Agent 终止，并使用不含 Workbench 名称的 `event_pump_failure.consumer_rejected`；这不是 Bridge failure。如果 Agent terminal 已先发布，Workbench 还必须独立保存 projection failure 产品事实，在 event drain 后把 Run 暴露为 `event_pipeline_failure` 并禁止 continuation，不能把已经太晚的 termination request 当作唯一收口。Renderer response、revision、snapshot 和 connection/generation failure 则形成 typed transport report，由 Workbench policy 决定 reject/retry/detach。当前所有 Renderer transport stage 都明确不返回 `request_run_termination`；Renderer detach/reload 不得杀死后台 Run。
 
 AgentCore tool event 的 raw `id` 只在 Workbench 消费当前 event 时用于计算固定长度 SHA-256 correlation key；raw `id` 不保存在产品历史。后续 progress/result 使用同一 digest 关联 Tool record。Workbench 以 Run 内唯一 activity order 生成稳定且不敏感的产品 tool `id`；`name`、input、progress 和 content 在进入 canonical projection 前统一清理。该 digest 不进入 Renderer wire，也不是第二个产品 tool identity。Renderer decoder 必须拒绝同一 Run 内重复的产品 tool `id` 或 activity order。
 
@@ -295,10 +295,11 @@ flowchart LR
     COPY["callback validate + deep copy"]
     QUEUE["bounded per-Session queues"]
     PUMP["Host main-loop pump"]
-    BRIDGE["Native SDK Bridge"]
+    PROJECT["Workbench projection"]
+    DELIVERY["ProductDelivery revision + snapshot"]
     UI["React"]
 
-    CORE --> COPY --> QUEUE --> PUMP --> BRIDGE --> UI
+    CORE --> COPY --> QUEUE --> PUMP --> PROJECT --> DELIVERY --> UI
 ```
 
 ### 当前已测量并固定的维度
@@ -307,10 +308,8 @@ flowchart LR
 - per-Session queue count/bytes；
 - maximum single event bytes；
 - control reserved capacity；
-- Bridge batch count/bytes/time window；
 - per-pump Session/event budget；
-- temporary detach retention count/bytes/time；
-- large object store byte/count/TTL（如果最终需要）。
+- Workbench snapshot capacity/chunk bytes 与 revision retry budget。
 
 ### 过载语义
 
@@ -351,9 +350,9 @@ Native SDK 和真实事件大小已经测量；49,703-byte 真实 event 超过�
 - Host/AgentCore 进程退出后不恢复 active Run；
 - snapshot 不包含 Provider credential。
 
-当前 event delivery 的 batch fetch/ACK 任一步失败时，Renderer 必须停止消费旧 generation，显式 disconnect 后以有上限的退避序列重新 connect；Host 只在新 generation 重发未 ACK 项。旧 batch 在重连后直接失效，不能吞掉错误后继续 ACK 后续 sequence。Workbench revision 通知只在 revision 变化时发送，Renderer 合并并发 refresh；Host 发送失败时保留最新 revision 并由一次性 timer 重试，若 timer 也无法建立则立即使当前 event connection 失效，不能只记录日志后继续宣称可用。Renderer snapshot 拉取失败时保留目标 revision；每个 generation 的自动重试预算耗尽后停止请求、禁止产品 mutation 并等待用户显式恢复，不得把失败误记成已同步，也不得永久循环重试。raw transport batch 只负责完整 ACK，不再额外触发一次全量 snapshot。
+Workbench revision 通知只在 revision 变化时发送，Renderer 合并并发 refresh；Host 发送失败时保留最新 revision 并由一次性 timer 重试，若 timer 也无法建立则立即使当前 event connection 失效，不能只记录日志后继续宣称可用。Renderer snapshot 拉取失败时保留目标 revision；每个 generation 的自动重试预算耗尽后停止请求、禁止产品 mutation 并等待用户显式恢复，不得把失败误记成已同步，也不得永久循环重试。
 
-正式 AgentCore 产品事件在 Host event pump 中完成 typed projection 后即释放，不再把同一 raw `CoreEvent` 复制到 Renderer 再丢弃。`metawork:agent-events` raw batch/object/ACK 路径只保留为隔离的 transport fixture；产品 Renderer 的数据面是 Host-owned Workbench revision + bounded snapshot。
+正式 AgentCore 产品事件在 Host event pump 中完成 typed projection 后即释放，不把同一 raw `CoreEvent` 复制到 Renderer。产品 Renderer 的唯一数据面是 Host-owned Workbench revision + bounded snapshot；automation 只观察和驱动这条真实路径，不定义独立 Renderer transport。
 
 当前 Bridge 单次 result 上限为 1 MiB，但它不是 Workbench 产品状态容量。Host 在固定 12 MiB snapshot store 中生成一致的完整 JSON，再由 Renderer 以绑定 snapshot ID、generation、window、offset 和长度的 256 KiB 原始分块拉取；分块使用 base64 后仍低于单次 result 上限。新的 begin 在写入 store 前必须先使旧 descriptor 失效；写入失败不能让旧 identity 继续读取被部分覆盖的 buffer。Workbench 以 JSON 字符串最坏六倍 escaping、最大 Account catalog、Task/Run/Tool 最大结构数量，以及“同步 UI 最多占满四个 executor slot”的并发 pending UI 最坏值，在初始化时验证完整 snapshot 预算，并以最大 Account projection 和最大 Task 结构的真实 serializer 测试校验估算上界。当前 Task projection 上限保持 512 KiB；不得为了适配 Bridge 缩小产品状态，也不得允许合法 projection 进入永久 `SnapshotTooLarge` 状态。
 
@@ -415,7 +414,7 @@ ABI status 新增 `resource_limit`。它与 pre-admission `invalid_argument`、`
 
 ### Workspace
 
-- Host 直接发起原生目录选择与原生 trust 确认，Bridge 签发绑定 window、event delivery generation 和该次 Native picker 结果的一次性 grant；
+- Host 直接发起原生目录选择与原生 trust 确认，Bridge 签发绑定 window、`ProductDelivery` connection generation 和该次 Native picker 结果的一次性 grant；
 - Renderer 创建 Task 时只回传 grant，不得回传任意路径加 `trusted` boolean；Workbench 消费 grant 后使用标准 I/O 规范化并验证目录，再建立 Task/Agent Session。grant 在 disconnect、拒绝、替换或首次消费后失效；
 - lifecycle API 只接收 Workbench 已规范化的绝对路径，并再次拒绝空 component、`.`、`..`、尾随分隔符和临时根的词法逃逸；symlink/TOCTOU 仍不在此保证内；
 - 当前 v1 只运行临时 fixture 或用户明确 trusted 的 Workspace；

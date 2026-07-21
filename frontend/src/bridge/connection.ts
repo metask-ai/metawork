@@ -1,5 +1,5 @@
 import type { WorkbenchSnapshot } from "./contracts.ts";
-import { BridgeClient, type NativeBridge } from "./client.ts";
+import { BridgeClient } from "./client.ts";
 import { RevisionNotificationQueue } from "./revision-notification.ts";
 import { SnapshotDemand } from "./snapshot/snapshot-demand.ts";
 
@@ -15,21 +15,9 @@ export type WorkbenchConnectionStatus =
   | { kind: "refresh_failed"; diagnostic: string }
   | {
       kind: "contract_failed";
-      source: "revision" | "host_signal_ack" | "host_signal" | "fixture";
+      source: "revision" | "host_signal_ack" | "host_signal";
       diagnostic: string;
     };
-
-type Gate5FixtureModule = {
-  installGate5Fixture: (
-    bridge: NativeBridge,
-    generation: () => string,
-    onFailure: (error: unknown) => void,
-  ) => { emit: () => Promise<unknown>; remove: () => void };
-};
-
-export type WorkbenchConnectionOptions = {
-  gate5FixtureLoader?: () => Promise<Gate5FixtureModule>;
-};
 
 function errorText(error: unknown) {
   return error instanceof Error ? error.message : String(error);
@@ -48,23 +36,15 @@ export class WorkbenchConnection {
   private readonly demand = new SnapshotDemand();
   private snapshotInFlight: Promise<void> | null = null;
   private stopped = false;
-  private didGate5Fixture = false;
   private removeWorkbench: (() => void) | null = null;
   private removeHostSignal: (() => void) | null = null;
-  private removeFixture: (() => void) | null = null;
   private readonly revisions: RevisionNotificationQueue;
   private readonly client: BridgeClient;
   private readonly callbacks: WorkbenchConnectionCallbacks;
-  private readonly options: WorkbenchConnectionOptions;
 
-  constructor(
-    client: BridgeClient,
-    callbacks: WorkbenchConnectionCallbacks,
-    options: WorkbenchConnectionOptions = {},
-  ) {
+  constructor(client: BridgeClient, callbacks: WorkbenchConnectionCallbacks) {
     this.client = client;
     this.callbacks = callbacks;
-    this.options = options;
     this.revisions = new RevisionNotificationQueue((revision) => {
       void this.refresh(revision).catch((error) =>
         this.callbacks.onStatus({
@@ -189,10 +169,8 @@ export class WorkbenchConnection {
     this.revisions.stop();
     this.removeWorkbench?.();
     this.removeHostSignal?.();
-    this.removeFixture?.();
     this.removeWorkbench = null;
     this.removeHostSignal = null;
-    this.removeFixture = null;
     const active = this.generation;
     this.markDisconnected();
     if (active !== "0")
@@ -237,31 +215,6 @@ export class WorkbenchConnection {
     if (this.stopped) return;
     const signal = await this.client.ping();
     if (this.stopped) return;
-    if (this.options.gate5FixtureLoader && !this.didGate5Fixture) {
-      const loader = this.options.gate5FixtureLoader;
-      const { installGate5Fixture } = await loader();
-      if (this.stopped) return;
-      const fixture = installGate5Fixture(
-        this.client.nativeBridgeForAutomationFixture(),
-        () => this.generation,
-        (error) => this.failNotification("fixture", error),
-      );
-      this.removeFixture = fixture.remove;
-      if (this.stopped) {
-        fixture.remove();
-        this.removeFixture = null;
-        return;
-      }
-      try {
-        await fixture.emit();
-        if (this.stopped) return;
-        this.didGate5Fixture = true;
-      } catch (error) {
-        fixture.remove();
-        if (this.removeFixture === fixture.remove) this.removeFixture = null;
-        throw error;
-      }
-    }
     this.callbacks.onStatus({ kind: "connected", recovered });
   }
 

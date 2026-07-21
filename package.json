@@ -25,14 +25,12 @@
     "test:agentcore-bundle": "node --test scripts/agentcore-bundle.test.mjs",
     "test:child-process": "node --test scripts/run-child-process.test.mjs",
     "test:architecture": "node --test scripts/architecture-boundaries.test.mjs scripts/native-automation-isolation.test.mjs",
-    "test:renderer-runtime": "node --experimental-strip-types --test scripts/account-panel.test.mjs scripts/approval-state.test.mjs scripts/bridge-client.test.mjs scripts/composer-render.test.mjs scripts/event-delivery.test.mjs scripts/first-task-flow.test.mjs scripts/frontend-boundaries.test.mjs scripts/i18n.test.mjs scripts/snapshot-client.test.mjs scripts/snapshot-demand.test.mjs scripts/workbench-connection.test.mjs scripts/workbench-contract.test.mjs scripts/workbench-navigation.test.mjs scripts/workbench-store.test.mjs",
+    "test:renderer-runtime": "node --experimental-strip-types --test scripts/account-panel.test.mjs scripts/approval-state.test.mjs scripts/bridge-client.test.mjs scripts/composer-render.test.mjs scripts/first-task-flow.test.mjs scripts/frontend-boundaries.test.mjs scripts/i18n.test.mjs scripts/snapshot-client.test.mjs scripts/snapshot-demand.test.mjs scripts/workbench-connection.test.mjs scripts/workbench-contract.test.mjs scripts/workbench-navigation.test.mjs scripts/workbench-store.test.mjs",
     "probe:agentcore": "node scripts/run-agentcore-probe.mjs",
     "probe:agentcore:staged": "node scripts/run-agentcore-probe.mjs --staged",
     "test:lifecycle": "node scripts/run-lifecycle-tests.mjs",
-    "test:gate5:macos": "npm run agentcore:verify-staged && VITE_METAWORK_GATE5_FIXTURE=1 npm run build:frontend && native build . --yes -Doptimize=Debug -Dautomation=true && node scripts/test-gate5-macos.mjs",
-    "test:gate6:macos": "npm run agentcore:verify-staged && npm run build:frontend && native build . --yes -Doptimize=Debug -Dautomation=true && node scripts/test-gate6-macos.mjs",
-    "test:gate5:windows": "npm run agentcore:verify-staged && node scripts/run-gate5-windows.mjs",
-    "test:gate6:windows": "npm run agentcore:verify-staged && node scripts/run-gate6-windows.mjs",
+    "test:agentcore-vertical:macos": "npm run agentcore:verify-staged && npm run build:frontend && native build . --yes -Doptimize=Debug -Dautomation=true && node scripts/test-agentcore-vertical-macos.mjs",
+    "test:agentcore-vertical:windows": "npm run agentcore:verify-staged && node scripts/run-agentcore-vertical-windows.mjs",
     "test:windows:bringup": "node scripts/run-windows-bringup.mjs"
   },
   "devDependencies": {

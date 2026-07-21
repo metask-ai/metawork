@@ -50,16 +50,15 @@ npm run build:release
 npm run package:macos
 ```
 
-涉及 AgentCore candidate、正式 Host、event delivery、Renderer reload 或生命周期时，按变更范围增加：
+涉及 AgentCore candidate、正式 Host、Renderer reload、产品数据面或生命周期时，按变更范围增加：
 
 ```bash
 AGENTCORE_BUNDLE_ROOT=/absolute/path/to/bundle npm run probe:agentcore
 npm run test:lifecycle
-npm run test:gate5:macos
-npm run test:gate6:macos
+npm run test:agentcore-vertical:macos
 ```
 
-Gate 5/6 仍是当前真实桌面自动化入口；一次性阶段聚合脚本和 fault-domain harness 不再保留。
+AgentCore vertical 是当前真实桌面自动化入口，同时验证真实 `ProductDelivery` 主线程 revision emit、Renderer reload、snapshot 恢复和 AgentCore Run；automation 不建立第二套 Renderer 数据面。一次性阶段聚合脚本和 fault-domain harness 不再保留。
 
 ### Windows development baseline
 

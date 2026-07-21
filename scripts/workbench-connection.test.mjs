@@ -138,14 +138,13 @@ test("explicit recovery replaces a generation whose snapshots stay unavailable",
   assert.deepEqual(disconnected, ["1", "2"]);
 });
 
-test("stop during startup prevents later ping and fixture work", async () => {
+test("stop during startup prevents a later handshake", async () => {
   let releaseConnect;
   const connectStarted = new Promise((resolve) => {
     releaseConnect = resolve;
   });
   const disconnected = [];
   let pingCount = 0;
-  let fixtureBridgeCount = 0;
   const client = {
     available: () => true,
     onWorkbenchRevision: () => () => undefined,
@@ -158,10 +157,6 @@ test("stop during startup prevents later ping and fixture work", async () => {
       return { sequence: 1 };
     },
     acknowledgeSignal: async () => undefined,
-    nativeBridgeForAutomationFixture: () => {
-      fixtureBridgeCount += 1;
-      return {};
-    },
   };
   const connection = new WorkbenchConnection(client, {
     onSnapshot: () => undefined,
@@ -175,7 +170,6 @@ test("stop during startup prevents later ping and fixture work", async () => {
   releaseConnect();
   await Promise.all([starting, stopping]);
   assert.equal(pingCount, 0);
-  assert.equal(fixtureBridgeCount, 0);
   assert.deepEqual(disconnected, ["7"]);
 });
 

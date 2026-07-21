@@ -21,7 +21,6 @@ export const enUS = {
   "connection.source.revision": "Workbench update",
   "connection.source.host_signal_ack": "Host acknowledgement",
   "connection.source.host_signal": "Host signal",
-  "connection.source.fixture": "Automation fixture",
   "connection.refresh_failed": "The latest Workbench view could not be loaded.",
   "account.label": "Metask account",
   "account.signed_in": "Signed in",

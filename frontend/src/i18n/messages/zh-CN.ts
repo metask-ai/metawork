@@ -23,7 +23,6 @@ export const zhCN: Record<MessageId, string> = {
   "connection.source.revision": "工作台更新",
   "connection.source.host_signal_ack": "Host 确认",
   "connection.source.host_signal": "Host 信号",
-  "connection.source.fixture": "自动化夹具",
   "connection.refresh_failed": "无法加载最新的工作台视图。",
   "account.label": "Metask 账号",
   "account.signed_in": "已登录",

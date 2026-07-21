@@ -81,10 +81,6 @@ export class BridgeClient {
     return this.bridgeOverride !== undefined || window.zero !== undefined;
   }
 
-  nativeBridgeForAutomationFixture() {
-    return this.bridge();
-  }
-
   onWorkbenchRevision(
     consume: (revision: string) => void,
     reject: (error: unknown) => void,

@@ -1,6 +1,6 @@
 //! Bridge-owned Renderer connection, revision, and snapshot delivery state.
 //! It owns transport bytes and policy-neutral retry facts, never Workbench
-//! product truth or automation-only raw Agent event delivery.
+//! product truth or any automation-specific transport.
 
 const std = @import("std");
 const revision_impl = @import("revision_delivery.zig");

@@ -13,16 +13,15 @@ for (const script of [
   "test",
   "test:lifecycle",
   "build:debug",
-  "test:gate5:windows",
   "probe:agentcore:staged",
-  "test:gate6:windows",
+  "test:agentcore-vertical:windows",
   "build:release",
 ]) {
   await runNpm(script);
 }
 
 console.log(
-  "Windows integration baseline passed: staged revision 3 bundle, SDK candidate probe, lifecycle, Native Debug/Release, and Gate 5/6 automation.",
+  "Windows integration baseline passed: staged revision 3 bundle, SDK candidate probe, lifecycle, Native Debug/Release, and AgentCore vertical automation.",
 );
 
 function runNpm(script) {

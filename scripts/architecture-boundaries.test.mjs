@@ -348,11 +348,9 @@ test("canonical notification and Renderer transport failures stay isolated", () 
 
   const dispatcher = read("src/bridge/dispatcher.zig");
   assert.match(dispatcher, /decideTransportFailure/);
-  const delivery = read("src/automation/delivery.zig");
-  assert.match(delivery, /pub fn deinitOwnedBuffers/);
 });
 
-test("Bridge owns product delivery state while automation transport stays explicit", () => {
+test("Bridge owns the only Renderer product delivery state", () => {
   const bridgeRoot = read("src/bridge.zig");
   assert.match(bridgeRoot, /pub const ProductDelivery =/);
   assert.match(bridgeRoot, /pub const ProductDeliveryTransport =/);
@@ -391,9 +389,7 @@ test("Bridge owns product delivery state while automation transport stays explic
   assert.match(dispatcher, /grants: workspace_grant\.State/);
   assert.match(dispatcher, /workbench: \?\*workbench_api\.Workbench/);
 
-  const automationDelivery = read("src/automation/delivery.zig");
-  assert.match(automationDelivery, /Automation-only raw Agent event transport/);
-  assert.match(automationDelivery, /pub fn connectAt/);
+  assert.equal(existsSync(new URL("src/automation/delivery.zig", root)), false);
 });
 
 test("automation code is compile-time selected and absent from product modules", () => {
@@ -404,22 +400,22 @@ test("automation code is compile-time selected and absent from product modules",
   assert.match(selector, /automation_disabled/);
   assert.match(build, /src\/automation\/enabled\.zig/);
   assert.match(build, /src\/automation\/disabled\.zig/);
-  assert.match(build, /automation_enabled\.addImport\("automation_delivery"/);
+  assert.doesNotMatch(build, /automation_delivery/);
 
   const productSources = [
     "src/app.zig",
     "src/bridge.zig",
     ...zigFiles("src/bridge/"),
     "src/automation/disabled.zig",
+    "src/automation/enabled.zig",
   ]
     .map(read)
     .join("\n");
   for (const token of [
-    "zero://inline",
     "metawork:agent-events",
     "metawork.events.ack",
     "metawork.events.fetch",
-    "metawork.gate5.emitFixture",
+    "metawork.event_delivery.emit_fixture",
   ]) {
     assert.equal(
       productSources.includes(token),
@@ -663,8 +659,7 @@ test("lifecycle tests are grouped by invariant", () => {
     ["tests/agent/lifecycle_test.zig", 31],
     ["tests/agent/event_pump_test.zig", 5],
     ["tests/workbench/executor_lifecycle_test.zig", 7],
-    ["tests/bridge/automation_delivery_test.zig", 6],
-    ["tests/integration/lifecycle/lifecycle_test.zig", 5],
+    ["tests/integration/lifecycle/lifecycle_test.zig", 4],
   ];
   for (const [path, expectedCount] of cases) {
     assert.equal(existsSync(new URL(path, root)), true, `${path} must exist`);
@@ -674,11 +669,6 @@ test("lifecycle tests are grouped by invariant", () => {
       `${path} must retain its invariant coverage`,
     );
   }
-
-  assert.doesNotMatch(
-    read("tests/bridge/automation_delivery_test.zig"),
-    /fixture\.event_pump/,
-  );
 
   assert.equal(
     existsSync(new URL("tests/support/lifecycle_fixture.zig", root)),

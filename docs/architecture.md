@@ -48,7 +48,7 @@
 
 ### 后续能力
 
-Windows development baseline 使用独立 target lock、系统链接输入和桌面自动化，已验证 x86_64 Windows GNU artifact、Native Debug/Release、Renderer 生产资源与 event-delivery/vertical path。MSI/签名/更新仍属分发层。Linux 后续复用同一 target-policy 入口，但必须新增精确 lock、link policy、probe 和平台验证，不能落入 generic fallback。
+Windows development baseline 使用独立 target lock、系统链接输入和桌面自动化，已验证 x86_64 Windows GNU artifact、Native Debug/Release、Renderer 生产资源与 AgentCore vertical path。MSI/签名/更新仍属分发层。Linux 后续复用同一 target-policy 入口，但必须新增精确 lock、link policy、probe 和平台验证，不能落入 generic fallback。
 
 ## 3. 高层结构
 
@@ -107,7 +107,7 @@ flowchart TB
 
 Native SDK 直接构成桌面 Runtime 与窗口能力。MetaWork 内部目标为五个 named product modules：`app` 负责 composition 和主线程提交协调，`account` 负责 Metask 登录、catalog 与凭据代际，`bridge` 负责验证与运输，`workbench` 拥有产品状态与队列，`agent` 执行并收口一个真实 Agent Run。`AgentCore` 只指 Metask 提供的外部 bundle。`metawork_account_contract` 只承载 Account 发布给 App/Bridge/Workbench 的有界纯合同，不是第六个产品模块。
 
-Bridge 的产品数据面由具体 `Dispatcher` 内部的 `ProductDelivery` 统一拥有：connection generation、revision retry/timer、snapshot identity 和 snapshot transport storage 都不再存放在 App。Dispatcher 通过明确的 `*Workbench` 同步生成 snapshot；App 只注入 Native emit/timer/dialog/main-thread capability，并按顺序组织 shutdown。automation-only raw Agent batch/object/ACK transport 不并入产品数据面；它只跟随产品 generation，由 build graph 从 release 产物裁掉。
+Bridge 的唯一产品数据面由具体 `Dispatcher` 内部的 `ProductDelivery` 统一拥有：connection generation、revision retry/timer、snapshot identity 和 snapshot transport storage 都不再存放在 App。Dispatcher 通过明确的 `*Workbench` 同步生成 snapshot；App 只注入 Native emit/timer/dialog/main-thread capability，并按顺序组织 shutdown。automation 只能提供受控账号、临时 Workspace authority 和桌面驱动，不注册 Renderer command/event、不跟踪产品 generation，也不建立平行传输协议。
 
 Host 负责：
 
@@ -209,7 +209,7 @@ RunJob
 - 只有 `agent/` import `metask_agentcore`；App 让 Agent 内部完成 ABI discovery，Workbench 通过 Agent 公共 validated types 消费，Bridge DTO 不暴露 SDK enum/owner/handle；
 - `account/contract.zig` 不导入 Native SDK、Agent、Workbench、Bridge 或 AgentCore；Account runtime 可以导入 Native SDK，Workbench/Bridge 只导入纯 contract，不导入 Account runtime；
 - Agent 通过 `EventReadyNotifier` 只报告 `scheduled` / `already_pending` / `unavailable`，不知道 Native main loop 或 Renderer；App 用原子 pending gate 合并重复 wake，Agent 对 `unavailable` 执行有界 retry/deadline；
-- Renderer delivery、revision、snapshot、connection 和 retention failure 作为 typed transport fact 进入 Workbench policy，默认只重试、断开或丢弃 transport copy，不中止后台 Agent Run；
+- Renderer response、revision、snapshot 和 connection failure 作为 typed transport fact 进入 Workbench policy，默认只拒绝、重试或断开，不中止后台 Agent Run；
 - Session close 必须在 join 与 callback quiescence 后才销毁 AgentCore handle；
 - Runtime 只能在全部 Session 销毁后销毁。
 

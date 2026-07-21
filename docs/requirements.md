@@ -153,7 +153,7 @@ Account 是 MetaWork 的 Metask 账号控制面，负责 OAuth 登录、账号/A
 - 界面在任一时刻只突出一个下一步：登录、完成浏览器授权、选择真正有歧义的 Key/模型、处理失败或开始任务。后台 operation 使用低权重状态，不把内部步骤伪装成用户待办；
 - 没有 Workspace 时 `选择 Workspace` 是唯一主动作；确定 Workspace 后草稿才获得归属，若 Account 尚未 ready，登录或处理 Account 是下一主动作；其余未满足条件只作为可理解的次级状态展示；
 - 首个正式版本采用单主窗口；多个 Task 可以后台运行，切换 Workspace 或 Task 不停止执行；
-- Renderer reload、断开连接以及 Bridge revision/snapshot/event delivery failure 默认只影响视图同步和重连，不得终止后台 Agent Run；只有 Workbench 根据 canonical 产品状态作出的显式 termination 决策才能请求结束 Run；
+- Renderer reload、断开连接以及 Bridge revision/snapshot failure 默认只影响视图同步和重连，不得终止后台 Agent Run；只有 Workbench 根据 canonical 产品状态作出的显式 termination 决策才能请求结束 Run；
 - 左栏只展开当前 Workspace 的 Task，Workspace 切换器必须汇总其他 Workspace 的运行、待处理和失败状态，不能让后台请求只依赖系统通知；
 - Task 是可持续补充、归档和删除的产品对象；Task lifecycle、当前 Run phase 和最近一次 Run outcome 是三类独立状态，Renderer 只能从 Workbench projection 派生展示标签；
 - 中间区域以用户指令、Agent 回复、工具活动、可用审批和结果构成可追溯时间线，不展示 raw AgentCore event 或 chain-of-thought；
@@ -234,7 +234,7 @@ Metask C1 OAuth/login 与 C2 catalog/ExecutionTarget 合同均已锁定。登录
 
 ### 7.4 Windows 接入 baseline
 
-Windows x86_64 GNU 当前提供与 macOS 同一产品语义的开发可执行 baseline：精确 bundle、source-free probe、Native Debug/Release、Renderer 生产资源、event-delivery/vertical automation 和干净退出均已验证。它不是安装器或正式发布承诺。
+Windows x86_64 GNU 当前提供与 macOS 同一产品语义的开发可执行 baseline：精确 bundle、source-free probe、Native Debug/Release、Renderer 生产资源、AgentCore vertical automation 和干净退出均已验证。它不是安装器或正式发布承诺。
 
 ### 7.5 后续产品能力
 
