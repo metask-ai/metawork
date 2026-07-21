@@ -37,6 +37,7 @@ const base = {
   runInFlight: false,
   accessRequired: false,
   actionDisabled: false,
+  prerequisite: null,
   onStart() {},
   onPromptChange() {},
   onSubmit() {},
@@ -82,6 +83,18 @@ test("a new Task draft is editable before its first send", () => {
   assert.match(markup, />Ship the release</);
   assert.doesNotMatch(markup.match(/<textarea[^>]*>/)?.[0] ?? "", /disabled/);
   assert.doesNotMatch(tag(markup, "composer-send") ?? "", /disabled/);
+});
+
+test("an Account prerequisite blocks sending without blocking the Workspace draft", () => {
+  const markup = render({
+    draft: true,
+    prompt: "Keep writing while signing in",
+    prerequisite: createElement("section", null, "Connect Metask to send"),
+  });
+  assert.match(markup, /Connect Metask to send/);
+  assert.match(markup, />Keep writing while signing in</);
+  assert.doesNotMatch(markup.match(/<textarea[^>]*>/)?.[0] ?? "", /disabled/);
+  assert.match(tag(markup, "composer-send") ?? "", /disabled/);
 });
 
 test("an expired workspace grant preserves editable text and exposes recovery", () => {

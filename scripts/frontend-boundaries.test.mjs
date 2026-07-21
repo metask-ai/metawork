@@ -96,3 +96,16 @@ test("Renderer modules preserve the approved dependency direction", async () => 
     }
   }
 });
+
+test("Task-first composition keeps Account readiness at the Composer boundary", async () => {
+  const app = await readFile(resolve(sourceRoot, "app", "App.tsx"), "utf8");
+  assert.match(app, /<AccountPrerequisite/);
+  assert.match(app, /prerequisite=\{/);
+  assert.doesNotMatch(app, /account-onboarding/);
+  assert.doesNotMatch(app, /\{snapshot\.account\.canCreateTask && \(/);
+  const beginNewTask = app.match(
+    /async function beginNewTask\(\) \{[\s\S]*?\n  \}/,
+  )?.[0];
+  assert.ok(beginNewTask);
+  assert.doesNotMatch(beginNewTask, /canCreateTask/);
+});

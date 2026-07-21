@@ -20,7 +20,6 @@ export function WorkspaceNavigation({
   grantReady,
   showArchived,
   disabled,
-  createDisabled,
   creating,
   onSearch,
   onChooseWorkspace,
@@ -37,7 +36,6 @@ export function WorkspaceNavigation({
   grantReady: boolean;
   showArchived: boolean;
   disabled: boolean;
-  createDisabled: boolean;
   creating: boolean;
   onSearch: () => void;
   onChooseWorkspace: () => void;
@@ -129,7 +127,7 @@ export function WorkspaceNavigation({
         )}
         <button
           className="primary-button focus-ring"
-          disabled={disabled || createDisabled}
+          disabled={disabled}
           onClick={onCreateTask}
         >
           {creating ? t("workspace.starting_task") : t("task.new")}
