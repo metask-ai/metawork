@@ -1,5 +1,5 @@
 const std = @import("std");
-const sdk = @import("metacodes_agentcore");
+const sdk = @import("metask_agentcore");
 
 pub const Error = error{
     EventTooLarge,

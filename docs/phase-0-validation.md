@@ -1,9 +1,9 @@
 # MetaWork Phase 0 验证计划
 
-> 状态：Phase 0A Gate 0 至 Gate 7 已通过；Account Gate A1/B/C1/C2/D/E/F/G 已完成
+> 状态：Phase 0A Gate 0 至 Gate 7、Account Gate A1/B/C1/C2/D/E/F/G 和 AgentCore revision 3 hard-cut migration Gate 已通过
 > 平台：Phase 0A macOS-first；Phase 0B 后续验证 Windows
 
-Phase 0 用最小真实原型验证技术栈和关键风险，不交付完整产品。当前 AgentCore development bundle 使用 ABI v1 revision 2；这是精确开发基线，不是 stable support policy。同步 baseline 不包含 async suspend/resume、跨进程恢复、strict Workspace security、正式 Host tools、typed Output/FileChange/plan-progress 或 plan/custom UI control。
+Phase 0 用最小真实原型验证技术栈和关键风险，不交付完整产品。历史 Phase 0A 使用 ABI v1 revision 2 完成；当前已验证基线已 hard cut 到 development AgentCore ABI v1 revision 3，并通过本文 migration Gate。这些 development artifact 都不构成 stable support policy。同步 baseline 不包含 async suspend/resume、跨进程恢复、strict Workspace security、正式 Host tools、typed Output/FileChange/plan-progress 或 plan/custom UI control。
 
 ## 1. 里程碑定义
 
@@ -33,7 +33,7 @@ React input
 → React structured UI
 ```
 
-模型 Provider SSE 必须止于 cc-zig。React 不接触原始 SSE，也不从终端字符推断 Agent 状态。
+模型 Provider SSE 必须止于 AgentCore。React 不接触原始 SSE，也不从终端字符推断 Agent 状态。
 
 ## 3. Gate 顺序
 
@@ -42,7 +42,7 @@ Gate -1 specs
 → Gate 0 Native SDK smoke
 → Gate 1 artifact-only raw contract probe
 → Gate 2 Host lifecycle/security foundation
-→ Gate 3 cc-zig typed SDK completion
+→ Gate 3 AgentCore typed SDK completion
 → Gate 4 formal AgentCore Host + bounded test sink
 → Gate 5 event pump/Bridge
 → Gate 6 in-process macOS prototype
@@ -152,7 +152,7 @@ Gate B 不等于 C1/C2 完成。C1 production OAuth client、profile decoder 和
 
 ### 输入
 
-- 当前 cc-zig bundle header、SDK、manifest 和 artifact-only consumer；
+- 当前 AgentCore bundle header、SDK、manifest 和 artifact-only consumer；
 - MetaWork 产品、架构、集成和 ABI 文档。
 
 ### 验收
@@ -204,7 +204,7 @@ Gate B 不等于 C1/C2 完成。C1 production OAuth client、profile decoder 和
 
 ### Bundle 校验
 
-- 从显式绝对 bundle root 读取，不访问 cc-zig source tree；
+- 从显式绝对 bundle root 读取，不访问 metacodes source tree；
 - 校验 manifest schema、commit/build identity、ABI version、toolchain、target、architecture、deployment baseline 和 checksum；
 - 校验静态库、C header、三个 Zig SDK 文件和系统链接输入；
 - discovery symbol 存在；
@@ -233,7 +233,7 @@ Gate B 不等于 C1/C2 完成。C1 production OAuth client、profile decoder 和
 ### 退出证据
 
 - probe 不进入正式 build target；
-- 不复制 cc-zig source 或协议定义；
+- 不复制 metacodes source 或协议定义；
 - 记录当前 raw SDK 缺失的 typed validators/codecs，作为 Gate 3 输入。
 
 ## 7. Gate 2：Host 生命周期与安全基础
@@ -285,20 +285,20 @@ reject new work
 
 ### 当前实现与复现
 
-Gate 2 基础实现当前位于 `src/agent/session.zig`，bounded executor 位于 `src/workbench/executor.zig`。生命周期验证入口位于 `tests/`，按 Agent、Workbench、Bridge/automation transport 和纵向竞态分组；它只从显式 `AGENTCORE_BUNDLE_ROOT` 导入 bundle SDK，并先按 `spikes/agentcore-contract/bundle.lock.json` 校验完整 manifest、checksum、平台、Zig 版本和 discovery symbol，不进入正式应用 build graph。
+Gate 2 基础实现当前位于 `src/agent/session.zig`，bounded executor 位于 `src/workbench/executor.zig`。生命周期验证入口位于 `tests/`，按 Agent、Workbench、Bridge/automation transport 和纵向竞态分组；revision 3 hard cut 后它通过正式 root build 从 canonical staged package 导入 bundle SDK。`agentcore:verify-staged` 在 Zig 解析 path dependency 前按 `spikes/agentcore-contract/bundle.lock.json` 校验完整 manifest、checksum、平台、Zig 版本和 discovery symbol。
 
 ```bash
-AGENTCORE_BUNDLE_ROOT=/absolute/path/to/validated/bundle \
-  npm run test:lifecycle
+npm run agentcore:verify-staged
+npm run test:lifecycle
 ```
 
-需要同时执行仓库常规测试时使用同一个显式 bundle 环境运行 `npm run test:phase0a`；该命令不会在缺少 artifact 时静默跳过 Gate 2。正式 Native `test` step 必须显式构造并运行 App、Bridge、Workbench projection 和 Workbench executor test artifacts；named module 被产品 root import 不等于其 `test` declarations 已执行。
+需要同时执行仓库常规测试时运行 `npm run test:phase0a`；该命令只消费 canonical staged bundle，并且不会在缺少 artifact 时静默跳过 Gate 2。正式 Native `test` step 必须显式构造并运行 App、Bridge、Workbench projection 和 Workbench executor test artifacts；named module 被产品 root import 不等于其 `test` declarations 已执行。
 
 当前 deterministic function-table fake 覆盖 bounded executor、每 Session 单 Run、queued/active/UI-wait close、并发 close/shutdown、callback quiescence、generation-checked RunControl lease、close lease quiescence、pre-Core termination、first-writer typed TerminationSignal、immutable TerminalResult、stale/too-late abort status、Session/Runtime destroy retry、OOM、diagnostic release、credential snapshot 隔离和临时/trusted Workspace 的词法边界。测试进程有 30 秒上限，避免回归变成无限 CI hang。
 
-这仍是 Gate 2 raw lifecycle foundation，不是正式 AgentCore Host：UI response 只验证 identity、唤醒和 close/shutdown 路径，固定返回 `UI_UNAVAILABLE`；事件和 UI JSON 不在 MetaWork 复制或解析。Gate 3 已在后续 clean bundle 上独立完成 typed SDK 验收。executor 容量仍尚未根据真实 trace 定标。
+这仍是 Gate 2 deterministic lifecycle foundation，不是完整真实 AgentCore Host：UI response 只验证 identity、唤醒和 close/shutdown 路径，固定返回 `UI_UNAVAILABLE`；事件和 UI JSON 不在 MetaWork 复制或解析。Gate 3 后来在 revision 2 clean bundle 上独立完成 typed SDK 验收；当前 revision 3 migration 已使用 staged 官方 SDK 重跑 typed consumer 和 lifecycle，真实 AgentCore 产品链路也已由本 Gate 的 Gate 5/6 回归收口。executor 容量仍尚未根据真实 trace 定标。
 
-## 8. Gate 3：cc-zig typed SDK completion
+## 8. Gate 3：AgentCore typed SDK completion
 
 > 状态：已通过。实现与实测证据见 [Phase 0 Gate 3 验证报告](phase-0-gate-3-report.md)。
 
@@ -317,16 +317,18 @@ AGENTCORE_BUNDLE_ROOT=/absolute/path/to/validated/bundle \
 
 MetaWork 不在本仓库复制类型或 JSON schema。Gate 3 consumer 只构造 bundle SDK 类型并调用其 validator/codec；未知和 malformed JSON 字面量仅作为负向输入，不构成协议实现。
 
-当前 clean bundle 精确锁定在 metacodes `36637f314c0f1c41bb1a2267ced7ad6a46100003`（ABI v1 revision 2）。source-free consumer 位于 `spikes/agentcore-sdk-contract/`，可复现命令为：
+Gate 3 当时精确锁定 metacodes `36637f314c0f1c41bb1a2267ced7ad6a46100003`（ABI v1 revision 2）。revision 3 source-free consumer 位于 `spikes/agentcore-sdk-contract/`，从 staged `bindings/zig` package 编译并调用 `sdk.Api.discover()`。candidate acceptance 则由隔离 probe 从 candidate 的官方 package 完成 discover/link/run；两个入口分别为：
 
 ```bash
 AGENTCORE_BUNDLE_ROOT=/absolute/path/to/validated/bundle \
-  npm run test:agentcore-sdk
+  npm run probe:agentcore
+
+npm run test:agentcore-sdk
 ```
 
-`npm run test:phase0a` 使用同一个显式 bundle，依次重跑仓库测试、Gate 1 raw probe、Gate 2 lifecycle 和 Gate 3 typed SDK consumer；任何 artifact 缺失或 identity 漂移都会失败，不会跳过或回退源码。
+revision 2 实现中的 `npm run test:phase0a` 使用同一个显式 bundle，依次重跑仓库测试、Gate 1 raw probe、Gate 2 lifecycle 和 Gate 3 typed SDK consumer；revision 3 hard cut 后该命令改为只消费 canonical staged bundle，candidate 只由独立 probe/stage 命令处理。两种状态都不得在 artifact 缺失或 identity 漂移时跳过或回退源码。
 
-revision 2 已提供 callback `RunContext` wire identity；Host tools 仍保持禁用，直到独立 capability Gate 定义产品工具、安全和路由政策。这不阻塞 built-in Read/Bash/Edit。
+revision 2 已提供且 revision 3 保持 callback `RunContext` wire identity；Host tools 仍保持禁用，直到独立 capability Gate 定义产品工具、安全和路由政策。这不阻塞 built-in Read/Bash/Edit。
 
 ## 9. Gate 4：正式 AgentCore Host + bounded test sink
 
@@ -444,9 +446,9 @@ Gate 4 通过时的 sink 只提供全局 event count 和单 event bytes 硬上�
 
 ### 依赖前置条件
 
-当前产品基线迁移到 clean bundle `0.0.0-dev+36637f314c0f`、ABI v1 revision 2、112-byte API table。迁移只接受现行 manifest 和 SDK 表面，不保留旧格式、旧 revision 或旧协议兼容；bundle 先通过 manifest/checksum identity、artifact-only link/run、完整 typed SDK contract 和独立 clean consumer，再进入正式应用 build graph。历史 Gate 6 报告保留当时 `5fe198c` 的验收事实，本次迁移必须重新运行完整 Gate 6 macOS 链路。
+Gate 6 的历史通过结果使用 clean bundle `0.0.0-dev+36637f314c0f`、ABI v1 revision 2、112-byte API table；它只保留历史验收事实，不构成 revision 3 兼容要求。revision 3 hard cut 已在独立 migration Gate 中重新运行完整 Gate 6 macOS 链路并通过，当前证据见 [revision 3 迁移验证报告](agentcore-revision-3-migration-report.md)。
 
-本次迁移的完整复验命令、产物 hash 和边界见 [AgentCore ABI v1 revision 2 迁移验证报告](agentcore-revision-2-migration-report.md)。
+历史 revision 2 迁移的命令、产物 hash 和边界见 [AgentCore ABI v1 revision 2 迁移验证报告](agentcore-revision-2-migration-report.md)。revision 3 通过后必须生成独立报告，不修改旧报告伪造连续性。
 
 ### 最小 UI
 
@@ -545,9 +547,9 @@ Phase 0A 完成时必须产出：
 
 - 可运行的 macOS 同步垂直原型；
 - Native SDK dev/prod/Bridge/size/origin 记录；
-- cc-zig 精确 bundle identity、manifest 和 checksum；
+- AgentCore 精确 bundle identity、manifest 和 checksum；
 - MetaWork artifact-only raw probe；
-- cc-zig typed SDK source-free consumer；
+- AgentCore typed SDK source-free consumer；
 - MetaWork typed SDK link/run 集成；
 - Host lifecycle/race/diagnostic release 测试；
 - event pump 容量、批量窗口、公平性和 workload matrix 数据；
@@ -561,7 +563,86 @@ Phase 0A 完成时必须产出：
 
 原型“能跑起来”不是完成；内存边界、失败语义、shutdown 和 fault domain 必须有数据。
 
-## 14. Phase 0A 当前非目标
+## 14. AgentCore revision 3 hard-cut migration Gate
+
+> 状态：已通过。精确 identity、命令和产物证据见 [revision 3 迁移验证报告](agentcore-revision-3-migration-report.md)。
+
+本 Gate 只迁移 AgentCore artifact、namespace、官方 Zig package 和 build boundary，不顺带改变 Workbench/Renderer 产品协议、permission 选择、多选问题语义或进程模型。当前公司内部初步开发直接从本机 metacodes `zig-out/agentcore/aarch64-macos` 获取 candidate；不建设下载器、resolver、artifact repository、content-addressed cache 或跨机器自动分发。
+
+### 14.1 Candidate acceptance
+
+candidate 使用显式绝对 `AGENTCORE_BUNDLE_ROOT`，不得访问 metacodes 实现源码。validator 必须：
+
+- 与 repository `bundle.lock.json` 精确比较 schema 1 manifest；
+- 接受且只接受 `vendor = "metask"`、`name = "agentcore"`、ABI v1 revision 3；
+- 校验 `aarch64-macos`、macOS 13、Zig 0.16.0、ReleaseSafe、strip=true 和 link inputs；
+- 校验 manifest whitelist、普通文件类型、路径安全、重复/大小写冲突和全部 SHA-256；
+- 证明新 `metask_agentcore_get_api` discovery symbol 唯一存在，并拒绝旧 symbol；
+- 使用 raw C probe 和隔离的官方 Zig package consumer 分别完成 source-free discover/link/run；
+- Zig consumer 必须从 candidate 的 `bindings/zig` package 编译并调用 `sdk.Api.discover()`，不能只做 `nm` 或 raw symbol smoke；正式 Agent adapter 只在 candidate stage 完成后进入 14.4 的 staged full gate。
+
+当前 `source.dirty = true` 只提供 provenance。完整 manifest 和 payload hash 精确识别 candidate artifact，但 source commit 本身不构成可重建源码身份；报告不得使用 `clean` 或 source-reproducible 描述。
+
+### 14.2 Staged replacement
+
+```bash
+AGENTCORE_BUNDLE_ROOT=/absolute/metacodes/zig-out/agentcore/aarch64-macos \
+  npm run probe:agentcore
+
+npm run agentcore:stage -- \
+  /absolute/metacodes/zig-out/agentcore/aarch64-macos
+```
+
+stager 只复制 manifest whitelist 到临时目录，复验后替换 `.agentcore/bundle`。捕获到的 copy/rename 错误必须恢复旧 canonical bundle；当前内部开发不承诺并发 build/stage 或跨进程 crash transaction，强制中断后的 staging/backup residue 允许由下次 stage 显式清理。文档和日志不得把这个两次 rename 流程称为文件系统原子事务。
+
+正式 build/test/package 只消费 `.agentcore/bundle`。candidate probe 与 staged full gate 是两个不同证据：前者不能代替后者，最终报告必须记录 staged manifest identity。
+
+### 14.3 Build graph hard cut
+
+- `build.zig.zon` 只把 `.agentcore/bundle/bindings/zig` 声明为 source-free AgentCore package dependency；
+- `package.json` 的正式 `dev/check/test/build/package` 入口必须先运行轻量 `agentcore:verify-staged`，在 Zig 解析 path dependency 前给出明确的缺包或 lock mismatch 错误；
+- 正式 build 从该 dependency 获取唯一 `metask_agentcore` module；
+- MetaWork build-time verifier 在链接前再次校验 staged manifest、checksum、target 和 ABI；
+- 删除正式 build 手工创建的 AgentCore root/types/protocol modules、archive `addObjectFile` 和 link-input 复制；
+- 删除 production `agentcore-bundle-root` 双路径；外部 root 只属于 candidate probe/stage；
+- active code 只允许 `agent/` import `metask_agentcore`；Account、Workbench、Bridge、Renderer 和 App 不得 import SDK；
+- revision 2 parser、路径、symbol、module alias 和 fallback 必须从 active code/build/规范文档删除；
+- 历史报告和明确的 rejection test 可以出现旧 token，但不构成可执行兼容路径。
+
+architecture tests 必须检查上述 build/module 结构，不能只用旧字符串 token scan 冒充边界证明。
+
+### 14.4 Runtime and package regression
+
+使用 staged bundle 依次执行：
+
+```bash
+npm run agentcore:verify-staged
+npm run format:check
+npm run check
+npm test
+npm run test:phase0a
+npm run build:debug
+npm run build:release
+npm run test:gate5:macos
+npm run test:gate6:macos
+npm run package:macos
+```
+
+必须证明：
+
+- deterministic fake 的 lifecycle、RunContext identity、callback quiescence、close/abort/UI wait、diagnostic/response release 和 Session poisoning 覆盖保持通过；
+- 真实 revision 3 bundle 的 typed event、同步 UI、StopReason、terminal mapping、built-in Read/Bash/Edit 和 cancel 链路通过；
+- Debug、Release 和 module tests 使用同一 staged identity；
+- 最终 Mach-O 是 arm64 且 deployment baseline 与 bundle 一致；
+- `.app` 不携带 AgentCore archive、C header、Zig/Rust binding 源码或 `.agentcore` staging 内容；
+- credential、automation fixture 和旧 AgentCore active token 不泄漏到 release Native/Renderer artifact；
+- migration report 记录 staged manifest、实际命令、最终 package 路径和失败边界。
+
+### 14.5 Hard-cut exit
+
+上述 Gate 已全部通过，revision 3 已更新为当前已验证基线；精确证据见 [revision 3 迁移验证报告](agentcore-revision-3-migration-report.md)。最终 active tree 不提供 revision 2 兼容。permission 产品表面收紧、多选问题 fail-closed 和正式单 Worker 分别属于后续独立变更，不与本 Gate 混合。
+
+## 15. Phase 0A 当前非目标
 
 - 完整产品视觉系统；
 - `.native` Renderer；
@@ -577,13 +658,13 @@ Phase 0A 完成时必须产出：
 - 完整 IDE、PTY 或 Terminal Emulator；
 - Windows 交付。
 
-## 15. Phase 0B：Windows
+## 16. Phase 0B：Windows
 
 macOS Phase 0A 完成后单独验证：
 
 - Native SDK Windows WebView dev/prod；
 - JS↔Zig Bridge；
-- cc-zig Windows target bundle；
+- AgentCore Windows target bundle；
 - hidden non-interactive shell、stdout/stderr、timeout 和 process tree；
 - window lifecycle、file dialog 和正常退出；
 - Debug/Release 构建与可复现分发包；

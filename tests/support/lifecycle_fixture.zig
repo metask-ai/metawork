@@ -5,7 +5,7 @@ pub const account_contract = @import("metawork_account_contract");
 pub const event_pump = @import("event_pump");
 pub const automation_delivery = @import("automation_delivery");
 pub const workbench_executor = @import("workbench_executor");
-pub const sdk = @import("metacodes_agentcore");
+pub const sdk = @import("metask_agentcore");
 pub const wire = sdk.types;
 
 pub fn pumpEnvelope(session_id: u64, run_id: u64, json: []const u8) !event_pump.OwnedCoreEvent {

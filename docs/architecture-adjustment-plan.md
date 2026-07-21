@@ -37,7 +37,7 @@
 
 - **Agent**：MetaWork 拥有的执行领域，负责 Runtime、Session、真实 Run、termination、callback 和 event pump；
 - **AgentCore**：metacodes 提供的外部 bundle、typed Zig SDK 和 binary ABI；
-- MetaWork 的 Agent 内部直接消费 `metacodes_agentcore`，但不复制它的 ABI facade 或发明平行协议。
+- MetaWork 的 Agent 内部直接消费 `metask_agentcore`，但不复制它的 ABI facade 或发明平行协议。
 
 ### 2.2 Task、Session 与 Run
 
@@ -247,7 +247,7 @@ Bridge 负责：
 - generation、ACK/fetch、retention、revision 和 snapshot transport；
 - 把 typed transport failure 报告给 Workbench。
 
-Bridge 不保存 Task/Run 真相，不读取 Agent Session，不 import `metacodes_agentcore`，也不直接请求 Agent abort。
+Bridge 不保存 Task/Run 真相，不读取 Agent Session，不 import `metask_agentcore`，也不直接请求 Agent abort。
 
 Bridge 只校验自己拥有权威的事实：wire schema/size、origin、window、connection generation、route identity 的 wire 格式和 workspace grant。Task/Run 是否存在、是否允许当前产品操作由 Workbench 判断；真实路径、目录存在性等产品 admission 也由 Workbench 使用标准 I/O 校验。Native 文件选择和 event emission 由 App 注入的 platform operations 实现。Bridge 不读取 provider credential，也不把 Agent types 放进 wire DTO。这里禁止引入泛化的 `Service`/`Interface`/`common` 层；使用具体 `Dispatcher`、`*Workbench` 和按实际平台动作定义的最小 capability。
 
@@ -267,7 +267,7 @@ main
         └── workbench
 
 agent
-└── metacodes_agentcore
+└── metask_agentcore
 ```
 
 Native SDK 只由 App 和确实需要 transport/platform 类型的 Bridge 模块消费。Workbench 不依赖 Native SDK；Agent 不依赖 Native SDK、Workbench、Bridge 或 Renderer。
@@ -282,7 +282,7 @@ App 对 Workbench/Agent 的 import 是 composition dependency，不是产品 com
 2. 跨模块只能使用 named import；
 3. module root 只导出消费方需要的类型和函数，不得 `pub const projection = projection_impl` 或整包 re-export；
 4. `tests/architecture/` 或等价脚本拒绝跨目录相对 import；
-5. 只有 `agent/` 和 Agent module root 可以 import `metacodes_agentcore`；
+5. 只有 `agent/` 和 Agent module root 可以 import `metask_agentcore`；
 6. Bridge wire DTO 不得返回 AgentCore SDK enum、owner 或 handle；
 7. Bridge module 必须显式依赖 Workbench module root；App 不得定义产品 handler body、解析产品 command payload 或直接调用 Workbench 产品命令；
 8. Workbench canonical Task record 不得保存 `agent.SessionState`；
@@ -649,19 +649,19 @@ root 应显式导出稳定消费表面，并让内部模块可以自由重构。
 
 ## 13. 当前代码与目标差异
 
-| 当前实现                                                                                                                                                                     | 目标状态               |
-| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- |
-| Workbench 已独占 Executor、queue、workers 与 shutdown；worker 通过原子 `starting/running/finishing` handoff 调用 `beginRun()` + 唯一 latch-aware `Run.execute()`             | 已达成                 |
-| Agent 使用 tagged `TerminationSignal`，callback/event-pump/notification 与 external interruption 分型；contract failure 是 terminal fact，不伪装成 abort                     | 已达成                 |
-| Workbench admission/durable RunRef/no-fail Run payload 已落地，Agent `TerminalResult` 直接提交；Run terminal history 不再从 Session snapshot 提交                            | 已达成                 |
-| Workbench-owned Task lifecycle、continuation、active Run identity 与 terminal disposition fold 已落地；Session snapshot 不再重建产品状态                                   | 已达成                 |
-| prompt、title 和 terminal diagnostic 在 canonical 写入前使用固定 init-time credential policy 清理；serializer 过滤保留为第二道防线                                         | 已达成                 |
-| 只有 `agent/` import `metacodes_agentcore`；App 通过 Agent 构造 Runtime，Workbench 通过 `agent.OwnedCoreEvent`/validated UI types 消费，Bridge DTO 使用自身 transport enum   | 已达成                 |
-| 产品 command、payload、snapshot 与 cause 已统一为 `tasks.*`、`taskId`、`tasks` 和 `app_shutdown`；Agent/Gate 传输继续使用内部 Session route identity                         | 已达成                 |
-| Bridge concrete Dispatcher 已拥有产品 handler、decode/authority/grant/response、ProductDelivery 和 Workbench 调用；App 不再保存产品 handler body                            | 已达成                 |
-| automation handler/token 已移出 App/Bridge 产品源码；scanner 只禁止 MetaWork 独有 token，并已在 macOS fresh release 产物通过                                                | 已达成                 |
-| Phase 0A formal adapter probe 已迁移到 `initWithApi()` 和 typed options；raw ABI probe 保留固定宽度 `*_code` 合同；精确 macOS bundle 已执行通过                               | 已达成                 |
-| 正式 Native test graph 已显式构造并运行 App、Bridge、Workbench projection 和 Executor artifacts，并在 macOS 实际执行                                                       | 已达成                 |
+| 当前实现                                                                                                                                                                | 目标状态 |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
+| Workbench 已独占 Executor、queue、workers 与 shutdown；worker 通过原子 `starting/running/finishing` handoff 调用 `beginRun()` + 唯一 latch-aware `Run.execute()`        | 已达成   |
+| Agent 使用 tagged `TerminationSignal`，callback/event-pump/notification 与 external interruption 分型；contract failure 是 terminal fact，不伪装成 abort                | 已达成   |
+| Workbench admission/durable RunRef/no-fail Run payload 已落地，Agent `TerminalResult` 直接提交；Run terminal history 不再从 Session snapshot 提交                       | 已达成   |
+| Workbench-owned Task lifecycle、continuation、active Run identity 与 terminal disposition fold 已落地；Session snapshot 不再重建产品状态                                | 已达成   |
+| prompt、title 和 terminal diagnostic 在 canonical 写入前使用固定 init-time credential policy 清理；serializer 过滤保留为第二道防线                                      | 已达成   |
+| 只有 `agent/` import `metask_agentcore`；App 通过 Agent 构造 Runtime，Workbench 通过 `agent.OwnedCoreEvent`/validated UI types 消费，Bridge DTO 使用自身 transport enum | 已达成   |
+| 产品 command、payload、snapshot 与 cause 已统一为 `tasks.*`、`taskId`、`tasks` 和 `app_shutdown`；Agent/Gate 传输继续使用内部 Session route identity                    | 已达成   |
+| Bridge concrete Dispatcher 已拥有产品 handler、decode/authority/grant/response、ProductDelivery 和 Workbench 调用；App 不再保存产品 handler body                        | 已达成   |
+| automation handler/token 已移出 App/Bridge 产品源码；scanner 只禁止 MetaWork 独有 token，并已在 macOS fresh release 产物通过                                            | 已达成   |
+| Phase 0A formal adapter probe 已迁移到 `initWithApi()` 和 typed options；raw ABI probe 保留固定宽度 `*_code` 合同；精确 macOS bundle 已执行通过                         | 已达成   |
+| 正式 Native test graph 已显式构造并运行 App、Bridge、Workbench projection 和 Executor artifacts，并在 macOS 实际执行                                                    | 已达成   |
 
 ## 14. 迁移阶段
 
@@ -724,7 +724,7 @@ root 应显式导出稳定消费表面，并让内部模块可以自由重构。
 
 ### 阶段 5：CoreEvent 与 SDK dependency boundary
 
-- 只有 Agent import `metacodes_agentcore`；
+- 只有 Agent import `metask_agentcore`；
 - Workbench 通过 `agent.OwnedCoreEvent` 消费 canonical event；
 - Bridge DTO 不暴露 AgentCore SDK types；
 - 完成 `EventReadyNotifier` 的 scheduled/already_pending/unavailable、retry/deadline 和 owned-event tests；
@@ -851,7 +851,7 @@ root 应显式导出稳定消费表面，并让内部模块可以自由重构。
 ### 15.1 架构静态检查
 
 - `agent/` 不 import Workbench、Bridge、App 或 Native SDK；
-- Workbench/Bridge 不 import `metacodes_agentcore`；
+- Workbench/Bridge 不 import `metask_agentcore`；
 - App 不相对 import 三个领域目录的内部文件；
 - Bridge module 显式依赖 Workbench module root，App 不保留产品 command handler body；
 - Workbench Task canonical record 不保存 `agent.SessionState`；

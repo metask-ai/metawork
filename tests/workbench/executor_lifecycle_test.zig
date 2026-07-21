@@ -12,6 +12,7 @@ const createTestComposition = fixture.createTestComposition;
 const workbenchConfiguration = fixture.workbenchConfiguration;
 const workbenchTaskInput = fixture.workbenchTaskInput;
 const waitWorkbenchSnapshot = fixture.waitWorkbenchSnapshot;
+const installWorkbenchExecution = fixture.installWorkbenchExecution;
 
 test "bounded executor rejects overflow and close cancels a queued Run" {
     fake_core.reset();
@@ -59,6 +60,7 @@ test "Gate 6 Workbench closes off-thread and exposes retryable close failure" {
         .max_tools_per_run = 2,
     }, workbenchConfiguration());
     defer workbench.deinit();
+    try installWorkbenchExecution(&workbench);
 
     const task_id = try workbench.createTask(workbenchTaskInput());
     fake_core.failNextSessionDestroy();
@@ -87,6 +89,7 @@ test "Gate 6 Workbench close cancels a queued Run without blocking the caller" {
         .max_tools_per_run = 1,
     }, workbenchConfiguration());
     defer workbench.deinit();
+    try installWorkbenchExecution(&workbench);
 
     const task_id = try workbench.createTask(workbenchTaskInput());
     _ = try workbench.runTask(task_id, "close this run");
@@ -115,6 +118,7 @@ test "Workbench cancel of a completed Run is an idempotent no-op" {
         .max_tools_per_run = 1,
     }, workbenchConfiguration());
     defer workbench.deinit();
+    try installWorkbenchExecution(&workbench);
 
     const task_id = try workbench.createTask(workbenchTaskInput());
     const run_id = try workbench.runTask(task_id, "finish before cancel arrives");
@@ -144,6 +148,7 @@ test "Workbench shutdown terminates a waiting UI Run before joining workers" {
         .max_tools_per_run = 1,
     }, workbenchConfiguration());
     defer workbench.deinit();
+    try installWorkbenchExecution(&workbench);
 
     const task_id = try workbench.createTask(workbenchTaskInput());
     _ = try workbench.runTask(task_id, "wait for shutdown");
@@ -197,6 +202,7 @@ test "late event from a finalized Run closes a Task with newer active work" {
         .max_tools_per_run = 1,
     }, workbenchConfiguration());
     defer workbench.deinit();
+    try installWorkbenchExecution(&workbench);
 
     const task_id = try workbench.createTask(workbenchTaskInput());
     const first_run_id = try workbench.runTask(task_id, "finish first");

@@ -5,21 +5,9 @@ import path from "node:path";
 import { isDeepStrictEqual, promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-
-export const bundleFiles = [
-  "lib/libmetacodes_agentcore.a",
-  "include/metacodes_agentcore.h",
-  "sdk/metacodes_agentcore.zig",
-  "sdk/metacodes_agentcore_protocol.zig",
-  "sdk/metacodes_agentcore_types.zig",
-];
-
-const bundleDirectories = ["include/", "lib/", "sdk/"];
-const bundleEntries = [
-  ...bundleDirectories,
-  "manifest.json",
-  ...bundleFiles,
-].sort();
+const maxManifestBytes = 1024 * 1024;
+const maxPayloadBytes = 128 * 1024 * 1024;
+const maxPayloadFiles = 256;
 
 function requireValue(condition, message) {
   if (!condition) throw new Error(message);
@@ -44,6 +32,54 @@ function requireExactKeys(value, keys, field) {
   );
 }
 
+function requireStringArray(value, field) {
+  requireValue(Array.isArray(value), `${field} must be an array`);
+  for (const [index, item] of value.entries())
+    requireString(item, `${field}[${index}]`);
+}
+
+function requireSafePayloadPath(value, field) {
+  const relativePath = requireString(value, field);
+  requireValue(
+    Buffer.byteLength(relativePath) <= 1024,
+    `${field} exceeds 1024 bytes`,
+  );
+  requireValue(
+    !relativePath.includes("\0") && !relativePath.includes("\\"),
+    `${field} contains an unsafe separator`,
+  );
+  requireValue(
+    /^[A-Za-z0-9._/-]+$/.test(relativePath),
+    `${field} contains unsupported path characters`,
+  );
+  requireValue(
+    !path.posix.isAbsolute(relativePath) &&
+      path.posix.normalize(relativePath) === relativePath &&
+      !relativePath.endsWith("/") &&
+      relativePath
+        .split("/")
+        .every(
+          (segment) => segment !== "" && segment !== "." && segment !== "..",
+        ),
+    `${field} must be a normalized relative file path`,
+  );
+  requireValue(
+    relativePath !== "manifest.json",
+    "manifest.json cannot list itself as a payload",
+  );
+  return relativePath;
+}
+
+function expectedBundleEntries(payloadPaths) {
+  const entries = new Set(["manifest.json", ...payloadPaths]);
+  for (const relativePath of payloadPaths) {
+    const segments = relativePath.split("/");
+    for (let index = 1; index < segments.length; index += 1)
+      entries.add(`${segments.slice(0, index).join("/")}/`);
+  }
+  return [...entries].sort();
+}
+
 function expectedBundlePlatform(platform) {
   if (platform === "darwin") return "macos";
   throw new Error(`unsupported AgentCore host platform: ${platform}`);
@@ -54,9 +90,18 @@ function expectedBundleArchitecture(architecture) {
   throw new Error(`unsupported AgentCore host architecture: ${architecture}`);
 }
 
+function expectedRustTarget(architecture, platform) {
+  if (architecture === "aarch64" && platform === "macos")
+    return "aarch64-apple-darwin";
+  throw new Error(
+    `unsupported AgentCore Rust target: ${architecture}-${platform}`,
+  );
+}
+
 async function sha256(filePath) {
+  const metadata = await stat(filePath);
   requireValue(
-    (await stat(filePath)).size <= 128 * 1024 * 1024,
+    metadata.size <= maxPayloadBytes,
     `AgentCore artifact exceeds 128 MiB: ${filePath}`,
   );
   const bytes = await readFile(filePath);
@@ -94,21 +139,22 @@ export async function validateAgentCoreBundle(bundleRoot, options = {}) {
     path.isAbsolute(bundleRoot),
     "AGENTCORE_BUNDLE_ROOT must be absolute",
   );
-  const root = await realpath(bundleRoot);
-  const actualEntries = (await listBundleEntries(root)).sort();
   requireValue(
-    isDeepStrictEqual(actualEntries, bundleEntries),
-    "AgentCore bundle filesystem contains missing or unknown entries",
+    !(await lstat(bundleRoot)).isSymbolicLink(),
+    "AgentCore bundle root must not be a symbolic link",
   );
+  const root = await realpath(bundleRoot);
   const manifestPath = path.join(root, "manifest.json");
   requireValue(
-    (await stat(manifestPath)).size <= 1024 * 1024,
+    (await stat(manifestPath)).size <= maxManifestBytes,
     "AgentCore manifest exceeds 1 MiB",
   );
 
   let manifest;
+  let manifestBytes;
   try {
-    manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    manifestBytes = await readFile(manifestPath, "utf8");
+    manifest = JSON.parse(manifestBytes);
   } catch (error) {
     throw new Error(`invalid AgentCore manifest: ${error.message}`, {
       cause: error,
@@ -118,35 +164,35 @@ export async function validateAgentCoreBundle(bundleRoot, options = {}) {
     manifest,
     [
       "schema_version",
+      "vendor",
       "name",
       "version",
       "source",
       "toolchain",
+      "target",
       "build",
+      "link",
       "contract",
       "files",
     ],
     "manifest",
   );
-  requireExactKeys(
-    manifest.source,
-    ["commit", "dirty", "dirty_source_sha256"],
-    "source",
-  );
+  requireExactKeys(manifest.source, ["commit", "dirty"], "source");
   requireExactKeys(manifest.toolchain, ["zig_version"], "toolchain");
   requireExactKeys(
-    manifest.build,
-    ["resolved_target", "architecture", "os", "abi", "optimize", "strip"],
-    "build",
+    manifest.target,
+    ["id", "architecture", "os", "abi", "zig_target", "rust_target"],
+    "target",
+  );
+  requireExactKeys(manifest.build, ["optimize", "strip"], "build");
+  requireExactKeys(
+    manifest.link,
+    ["requires_c_runtime", "system_libraries", "system_frameworks"],
+    "link",
   );
   requireExactKeys(
     manifest.contract,
-    [
-      "binary_abi_version",
-      "binary_abi_revision",
-      "required_system_link_inputs",
-      "ui_request_mode",
-    ],
+    ["binary_abi_status", "binary_abi_version", "binary_abi_revision"],
     "contract",
   );
   if (options.expectedManifest) {
@@ -155,14 +201,20 @@ export async function validateAgentCoreBundle(bundleRoot, options = {}) {
       "AgentCore manifest does not match the repository lock",
     );
   }
+  if (options.expectedManifestBytes !== undefined) {
+    requireValue(
+      manifestBytes === options.expectedManifestBytes,
+      "AgentCore manifest bytes do not match the repository lock",
+    );
+  }
 
   requireValue(
     manifest.schema_version === 1,
     "unsupported AgentCore manifest schema",
   );
   requireValue(
-    manifest.name === "metacodes-agentcore",
-    "unexpected AgentCore bundle name",
+    manifest.vendor === "metask" && manifest.name === "agentcore",
+    "unexpected AgentCore bundle identity",
   );
   const version = requireString(manifest.version, "version");
   const commit = requireString(manifest.source.commit, "source.commit");
@@ -171,31 +223,22 @@ export async function validateAgentCoreBundle(bundleRoot, options = {}) {
     "source.commit must be a full lowercase SHA",
   );
   requireValue(
-    typeof manifest.source?.dirty === "boolean",
+    typeof manifest.source.dirty === "boolean",
     "source.dirty must be boolean",
   );
-  const dirtySourceDigest = manifest.source.dirty_source_sha256;
-  if (manifest.source.dirty) {
-    requireValue(
-      /^[0-9a-f]{64}$/.test(dirtySourceDigest),
-      "dirty bundle must include dirty_source_sha256",
-    );
-  } else {
-    requireValue(
-      dirtySourceDigest === "",
-      "clean bundle must use an empty dirty_source_sha256",
-    );
-  }
-  const expectedVersion = `0.0.0-dev+${commit.slice(0, 12)}${
-    manifest.source.dirty ? `-dirty.${dirtySourceDigest.slice(0, 12)}` : ""
-  }`;
+  const escapedCommitPrefix = commit.slice(0, 12);
+  const versionPattern = new RegExp(
+    `^[0-9]+\\.[0-9]+\\.[0-9]+-dev\\+${escapedCommitPrefix}${
+      manifest.source.dirty ? "\\.dirty" : ""
+    }$`,
+  );
   requireValue(
-    version === expectedVersion,
+    versionPattern.test(version),
     "AgentCore version does not match source identity",
   );
 
   const zigVersion = requireString(
-    manifest.toolchain?.zig_version,
+    manifest.toolchain.zig_version,
     "toolchain.zig_version",
   );
   const platform = expectedBundlePlatform(options.platform ?? process.platform);
@@ -203,61 +246,79 @@ export async function validateAgentCoreBundle(bundleRoot, options = {}) {
     options.architecture ?? process.arch,
   );
   requireValue(
-    manifest.build?.os === platform,
-    `bundle OS ${manifest.build?.os} does not match ${platform}`,
+    manifest.target.id === `${architecture}-${platform}`,
+    "bundle target id does not match its architecture and OS",
   );
   requireValue(
-    manifest.build?.architecture === architecture,
-    `bundle architecture ${manifest.build?.architecture} does not match ${architecture}`,
+    manifest.target.os === platform,
+    `bundle OS ${manifest.target.os} does not match ${platform}`,
+  );
+  requireValue(
+    manifest.target.architecture === architecture,
+    `bundle architecture ${manifest.target.architecture} does not match ${architecture}`,
+  );
+  requireValue(
+    manifest.target.abi === "none",
+    "unsupported AgentCore target ABI",
   );
   const deploymentTarget = requireString(
-    requireString(
-      manifest.build.resolved_target,
-      "build.resolved_target",
-    ).match(
+    requireString(manifest.target.zig_target, "target.zig_target").match(
       new RegExp(
         `^${architecture}-macos\\.(\\d+\\.\\d+(?:\\.\\d+)?)(?:\\.\\.\\.[^-]+)?-none$`,
       ),
     )?.[1],
-    "build.resolved_target macOS deployment target",
+    "target.zig_target macOS deployment target",
   );
   requireValue(
-    manifest.build.abi === "none",
-    "unsupported AgentCore target ABI",
+    manifest.target.rust_target === expectedRustTarget(architecture, platform),
+    "unsupported AgentCore Rust target",
   );
   requireValue(
-    manifest.build?.optimize === "ReleaseSafe",
+    manifest.build.optimize === "ReleaseSafe",
     "unsupported AgentCore optimize mode",
   );
   requireValue(
-    manifest.build?.strip === true,
+    manifest.build.strip === true,
     "AgentCore bundle must be stripped",
   );
   requireValue(
-    manifest.contract?.binary_abi_version === 1,
+    manifest.link.requires_c_runtime === true,
+    "AgentCore bundle must require the C runtime",
+  );
+  requireStringArray(manifest.link.system_libraries, "link.system_libraries");
+  requireStringArray(manifest.link.system_frameworks, "link.system_frameworks");
+  requireValue(
+    manifest.link.system_libraries.length === 0 &&
+      manifest.link.system_frameworks.length === 0,
+    "unsupported AgentCore system link inputs",
+  );
+  requireValue(
+    manifest.contract.binary_abi_status === "experimental",
+    "unsupported AgentCore binary ABI status",
+  );
+  requireValue(
+    manifest.contract.binary_abi_version === 1,
     "unsupported AgentCore binary ABI",
   );
   requireValue(
-    manifest.contract?.binary_abi_revision === 2,
+    manifest.contract.binary_abi_revision === 3,
     "unsupported AgentCore binary ABI revision",
-  );
-  requireValue(
-    manifest.contract?.ui_request_mode === "synchronous",
-    "unsupported UI request mode",
-  );
-  requireValue(
-    JSON.stringify(manifest.contract?.required_system_link_inputs) ===
-      JSON.stringify(["libc"]),
-    "unsupported AgentCore system link inputs",
   );
 
   requireValue(
     Array.isArray(manifest.files),
     "AgentCore manifest files must be an array",
   );
+  requireValue(
+    manifest.files.length > 0 && manifest.files.length <= maxPayloadFiles,
+    "AgentCore manifest file count is out of bounds",
+  );
   const declaredFiles = manifest.files.map((file, index) => {
     requireExactKeys(file, ["path", "sha256"], `files[${index}]`);
-    const relativePath = requireString(file.path, `files[${index}].path`);
+    const relativePath = requireSafePayloadPath(
+      file.path,
+      `files[${index}].path`,
+    );
     requireValue(
       /^[0-9a-f]{64}$/.test(file.sha256),
       `invalid checksum for ${relativePath}`,
@@ -265,17 +326,25 @@ export async function validateAgentCoreBundle(bundleRoot, options = {}) {
     return relativePath;
   });
   requireValue(
-    isDeepStrictEqual([...declaredFiles].sort(), [...bundleFiles].sort()),
-    "AgentCore manifest file set is incomplete or contains unknown files",
+    new Set(declaredFiles).size === declaredFiles.length,
+    "AgentCore manifest contains a duplicate payload path",
   );
-  for (const relativePath of bundleFiles) {
-    const expected = manifest.files.find(
-      (file) => file.path === relativePath,
-    ).sha256;
-    const actual = await sha256(path.join(root, relativePath));
+  requireValue(
+    new Set(declaredFiles.map((relativePath) => relativePath.toLowerCase()))
+      .size === declaredFiles.length,
+    "AgentCore manifest contains a case-colliding payload path",
+  );
+
+  const actualEntries = (await listBundleEntries(root)).sort();
+  requireValue(
+    isDeepStrictEqual(actualEntries, expectedBundleEntries(declaredFiles)),
+    "AgentCore bundle filesystem contains missing or unknown entries",
+  );
+  for (const file of manifest.files) {
+    const actual = await sha256(path.join(root, file.path));
     requireValue(
-      actual === expected,
-      `AgentCore checksum mismatch: ${relativePath}`,
+      actual === file.sha256,
+      `AgentCore checksum mismatch: ${file.path}`,
     );
   }
 
@@ -294,7 +363,7 @@ export async function validateAgentCoreBundle(bundleRoot, options = {}) {
     (
       await execFileAsync(
         "nm",
-        ["-gU", path.join(root, "lib/libmetacodes_agentcore.a")],
+        ["-gU", path.join(root, "lib/libmetask_agentcore.a")],
         {
           encoding: "utf8",
           maxBuffer: 16 * 1024 * 1024,
@@ -302,15 +371,20 @@ export async function validateAgentCoreBundle(bundleRoot, options = {}) {
       )
     ).stdout;
   const discoveryMatches =
-    symbols.match(/\b_?metacodes_agentcore_get_api\b/g) ?? [];
+    symbols.match(/\b_?metask_agentcore_get_api\b/g) ?? [];
   requireValue(
     discoveryMatches.length === 1,
-    "AgentCore bundle must expose exactly one discovery symbol",
+    "AgentCore bundle must expose exactly one revision 3 discovery symbol",
+  );
+  requireValue(
+    !/\b_?metacodes_agentcore_get_api\b/.test(symbols),
+    "AgentCore bundle exposes the obsolete revision 2 discovery symbol",
   );
 
   return {
     root,
     manifest,
+    payloadFiles: declaredFiles,
     target: `${architecture}-macos.${deploymentTarget}`,
   };
 }
