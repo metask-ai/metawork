@@ -9,6 +9,35 @@ const maxManifestBytes = 1024 * 1024;
 const maxPayloadBytes = 128 * 1024 * 1024;
 const maxPayloadFiles = 256;
 
+const targetPolicies = [
+  {
+    hostPlatform: "darwin",
+    hostArchitecture: "arm64",
+    id: "aarch64-macos",
+    architecture: "aarch64",
+    os: "macos",
+    abi: "none",
+    rustTarget: "aarch64-apple-darwin",
+    zigTarget: /^aarch64-macos\.(\d+\.\d+(?:\.\d+)?)\.\.\.[^-]+-none$/,
+    library: "lib/libmetask_agentcore.a",
+    systemLibraries: [],
+    lock: path.join("spikes", "agentcore-contract", "bundle.lock.json"),
+  },
+  {
+    hostPlatform: "win32",
+    hostArchitecture: "x64",
+    id: "x86_64-windows-gnu",
+    architecture: "x86_64",
+    os: "windows",
+    abi: "gnu",
+    rustTarget: "x86_64-pc-windows-gnu",
+    zigTarget: /^x86_64-windows\.[a-z0-9_]+\.\.\.[a-z0-9_]+-gnu$/,
+    library: "lib/metask_agentcore.lib",
+    systemLibraries: ["advapi32", "crypt32"],
+    lock: path.join("spikes", "agentcore-contract", "bundle.windows.lock.json"),
+  },
+];
+
 function requireValue(condition, message) {
   if (!condition) throw new Error(message);
 }
@@ -80,22 +109,36 @@ function expectedBundleEntries(payloadPaths) {
   return [...entries].sort();
 }
 
-function expectedBundlePlatform(platform) {
-  if (platform === "darwin") return "macos";
-  throw new Error(`unsupported AgentCore host platform: ${platform}`);
-}
-
-function expectedBundleArchitecture(architecture) {
-  if (architecture === "arm64") return "aarch64";
-  throw new Error(`unsupported AgentCore host architecture: ${architecture}`);
-}
-
-function expectedRustTarget(architecture, platform) {
-  if (architecture === "aarch64" && platform === "macos")
-    return "aarch64-apple-darwin";
-  throw new Error(
-    `unsupported AgentCore Rust target: ${architecture}-${platform}`,
+function policyForHost(platform, architecture) {
+  const policy = targetPolicies.find(
+    (candidate) =>
+      candidate.hostPlatform === platform &&
+      candidate.hostArchitecture === architecture,
   );
+  if (!policy)
+    throw new Error(
+      `unsupported AgentCore host target: ${architecture}-${platform}`,
+    );
+  return policy;
+}
+
+function policyForTargetId(targetId) {
+  const policy = targetPolicies.find((candidate) => candidate.id === targetId);
+  if (!policy)
+    throw new Error(`unsupported AgentCore bundle target: ${targetId}`);
+  return policy;
+}
+
+export async function loadLockedAgentCoreManifest(repositoryRoot, targetId) {
+  const policy = policyForTargetId(targetId);
+  const bytes = await readFile(path.join(repositoryRoot, policy.lock), "utf8");
+  return { bytes, manifest: JSON.parse(bytes), policy };
+}
+
+export async function readAgentCoreBundleTargetId(bundleRoot) {
+  const bytes = await readFile(path.join(bundleRoot, "manifest.json"), "utf8");
+  const manifest = JSON.parse(bytes);
+  return requireString(manifest?.target?.id, "target.id");
 }
 
 async function sha256(filePath) {
@@ -241,36 +284,34 @@ export async function validateAgentCoreBundle(bundleRoot, options = {}) {
     manifest.toolchain.zig_version,
     "toolchain.zig_version",
   );
-  const platform = expectedBundlePlatform(options.platform ?? process.platform);
-  const architecture = expectedBundleArchitecture(
+  const policy = policyForHost(
+    options.platform ?? process.platform,
     options.architecture ?? process.arch,
   );
   requireValue(
-    manifest.target.id === `${architecture}-${platform}`,
+    manifest.target.id === policy.id,
     "bundle target id does not match its architecture and OS",
   );
   requireValue(
-    manifest.target.os === platform,
-    `bundle OS ${manifest.target.os} does not match ${platform}`,
+    manifest.target.os === policy.os,
+    `bundle OS ${manifest.target.os} does not match ${policy.os}`,
   );
   requireValue(
-    manifest.target.architecture === architecture,
-    `bundle architecture ${manifest.target.architecture} does not match ${architecture}`,
+    manifest.target.architecture === policy.architecture,
+    `bundle architecture ${manifest.target.architecture} does not match ${policy.architecture}`,
   );
   requireValue(
-    manifest.target.abi === "none",
+    manifest.target.abi === policy.abi,
     "unsupported AgentCore target ABI",
   );
-  const deploymentTarget = requireString(
-    requireString(manifest.target.zig_target, "target.zig_target").match(
-      new RegExp(
-        `^${architecture}-macos\\.(\\d+\\.\\d+(?:\\.\\d+)?)(?:\\.\\.\\.[^-]+)?-none$`,
-      ),
-    )?.[1],
-    "target.zig_target macOS deployment target",
+  const zigTarget = requireString(
+    manifest.target.zig_target,
+    "target.zig_target",
   );
+  const zigTargetMatch = zigTarget.match(policy.zigTarget);
+  requireValue(zigTargetMatch, "unsupported AgentCore resolved target");
   requireValue(
-    manifest.target.rust_target === expectedRustTarget(architecture, platform),
+    manifest.target.rust_target === policy.rustTarget,
     "unsupported AgentCore Rust target",
   );
   requireValue(
@@ -288,7 +329,7 @@ export async function validateAgentCoreBundle(bundleRoot, options = {}) {
   requireStringArray(manifest.link.system_libraries, "link.system_libraries");
   requireStringArray(manifest.link.system_frameworks, "link.system_frameworks");
   requireValue(
-    manifest.link.system_libraries.length === 0 &&
+    isDeepStrictEqual(manifest.link.system_libraries, policy.systemLibraries) &&
       manifest.link.system_frameworks.length === 0,
     "unsupported AgentCore system link inputs",
   );
@@ -358,33 +399,34 @@ export async function validateAgentCoreBundle(bundleRoot, options = {}) {
     `bundle Zig ${zigVersion} does not match host Zig ${actualZigVersion}`,
   );
 
-  const symbols =
-    options.symbols ??
-    (
-      await execFileAsync(
-        "nm",
-        ["-gU", path.join(root, "lib/libmetask_agentcore.a")],
-        {
-          encoding: "utf8",
-          maxBuffer: 16 * 1024 * 1024,
-        },
-      )
+  let symbols = options.symbols;
+  if (symbols === undefined && policy.os === "macos") {
+    symbols = (
+      await execFileAsync("nm", ["-gU", path.join(root, policy.library)], {
+        encoding: "utf8",
+        maxBuffer: 16 * 1024 * 1024,
+      })
     ).stdout;
-  const discoveryMatches =
-    symbols.match(/\b_?metask_agentcore_get_api\b/g) ?? [];
-  requireValue(
-    discoveryMatches.length === 1,
-    "AgentCore bundle must expose exactly one revision 3 discovery symbol",
-  );
-  requireValue(
-    !/\b_?metacodes_agentcore_get_api\b/.test(symbols),
-    "AgentCore bundle exposes the obsolete revision 2 discovery symbol",
-  );
+  }
+  if (symbols !== undefined) {
+    const discoveryMatches =
+      symbols.match(/\b_?metask_agentcore_get_api\b/g) ?? [];
+    requireValue(
+      discoveryMatches.length === 1,
+      "AgentCore bundle must expose exactly one revision 3 discovery symbol",
+    );
+    requireValue(
+      !/\b_?metacodes_agentcore_get_api\b/.test(symbols),
+      "AgentCore bundle exposes the obsolete revision 2 discovery symbol",
+    );
+  }
 
   return {
     root,
     manifest,
     payloadFiles: declaredFiles,
-    target: `${architecture}-macos.${deploymentTarget}`,
+    target: zigTarget,
+    deploymentTarget: zigTargetMatch[1] ?? null,
+    libraryPath: path.join(root, policy.library),
   };
 }

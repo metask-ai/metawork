@@ -17,9 +17,17 @@ pub fn build(b: *std.Build) void {
         .flags = &.{"-std=c11"},
     });
     module.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ bundle_root, "include" }) });
+    const library_file = if (target.result.os.tag == .windows)
+        "metask_agentcore.lib"
+    else
+        "libmetask_agentcore.a";
     module.addObjectFile(.{
-        .cwd_relative = b.pathJoin(&.{ bundle_root, "lib", "libmetask_agentcore.a" }),
+        .cwd_relative = b.pathJoin(&.{ bundle_root, "lib", library_file }),
     });
+    if (target.result.os.tag == .windows) {
+        module.linkSystemLibrary("advapi32", .{ .use_pkg_config = .no });
+        module.linkSystemLibrary("crypt32", .{ .use_pkg_config = .no });
+    }
     const probe = b.addExecutable(.{
         .name = "metawork-agentcore-header-probe",
         .root_module = module,

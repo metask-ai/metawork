@@ -15,6 +15,7 @@
         "assets",
         "app.zon",
         "spikes/agentcore-contract/bundle.lock.json",
+        "spikes/agentcore-contract/bundle.windows.lock.json",
         ".agentcore/bundle/bindings/zig",
     },
 }

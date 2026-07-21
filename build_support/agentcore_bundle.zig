@@ -41,16 +41,17 @@ const Manifest = struct {
 };
 
 pub const Bundle = struct {
-    deployment_target: std.SemanticVersion,
+    deployment_target: ?std.SemanticVersion,
     link_libc: bool,
 };
 
 pub fn verify(b: *std.Build, root: []const u8) Bundle {
     if (!std.fs.path.isAbsolute(root)) @panic("AgentCore bundle root must be absolute");
-    const lock_path = "spikes/agentcore-contract/bundle.lock.json";
-    const lock_bytes = readFile(b, lock_path, 1024 * 1024, "cannot read AgentCore bundle lock");
     const manifest_path = b.pathJoin(&.{ root, "manifest.json" });
     const manifest_bytes = readFile(b, manifest_path, 1024 * 1024, "cannot read AgentCore bundle manifest");
+    const manifest = parseManifest(b, manifest_bytes);
+    const lock_path = lockPathForTarget(manifest.target.id);
+    const lock_bytes = readFile(b, lock_path, 1024 * 1024, "cannot read AgentCore bundle lock");
     if (!std.mem.eql(u8, lock_bytes, manifest_bytes))
         @panic("AgentCore manifest bytes do not match the repository lock");
     const lock = parseManifest(b, lock_bytes);
@@ -59,24 +60,14 @@ pub fn verify(b: *std.Build, root: []const u8) Bundle {
         !std.mem.eql(u8, lock.vendor, "metask") or
         !std.mem.eql(u8, lock.name, "agentcore") or
         lock.source.commit.len != 40 or
-        !lock.source.dirty or
         !std.mem.eql(u8, lock.toolchain.zig_version, @import("builtin").zig_version_string) or
         lock.contract.binary_abi_version != 1 or
         lock.contract.binary_abi_revision != 3 or
         !std.mem.eql(u8, lock.contract.binary_abi_status, "experimental"))
         @panic("unsupported locked AgentCore bundle contract");
-    if (!std.mem.eql(u8, lock.target.id, "aarch64-macos") or
-        !std.mem.eql(u8, lock.target.os, "macos") or
-        !std.mem.eql(u8, lock.target.architecture, "aarch64") or
-        !std.mem.eql(u8, lock.target.abi, "none") or
-        !std.mem.eql(u8, lock.target.rust_target, "aarch64-apple-darwin") or
-        !std.mem.eql(u8, lock.build.optimize, "ReleaseSafe") or
-        !lock.build.strip)
+    if (!std.mem.eql(u8, lock.build.optimize, "ReleaseSafe") or !lock.build.strip)
         @panic("unsupported locked AgentCore build identity");
-    if (!lock.link.requires_c_runtime or
-        lock.link.system_libraries.len != 0 or
-        lock.link.system_frameworks.len != 0)
-        @panic("unsupported AgentCore system link inputs");
+    const deployment_target = validateTarget(lock);
     if (lock.files.len == 0 or lock.files.len > 256)
         @panic("AgentCore manifest file count is out of bounds");
 
@@ -86,13 +77,45 @@ pub fn verify(b: *std.Build, root: []const u8) Bundle {
     }
 
     return .{
-        .deployment_target = deploymentTargetFromZigTarget(
-            b,
-            lock.target.zig_target,
-            lock.target.architecture,
-        ),
+        .deployment_target = deployment_target,
         .link_libc = lock.link.requires_c_runtime,
     };
+}
+
+fn lockPathForTarget(target_id: []const u8) []const u8 {
+    if (std.mem.eql(u8, target_id, "aarch64-macos"))
+        return "spikes/agentcore-contract/bundle.lock.json";
+    if (std.mem.eql(u8, target_id, "x86_64-windows-gnu"))
+        return "spikes/agentcore-contract/bundle.windows.lock.json";
+    @panic("unsupported AgentCore bundle target");
+}
+
+fn validateTarget(manifest: Manifest) ?std.SemanticVersion {
+    if (!manifest.link.requires_c_runtime or manifest.link.system_frameworks.len != 0)
+        @panic("unsupported AgentCore system link inputs");
+    if (std.mem.eql(u8, manifest.target.id, "aarch64-macos") and
+        std.mem.eql(u8, manifest.target.os, "macos") and
+        std.mem.eql(u8, manifest.target.architecture, "aarch64") and
+        std.mem.eql(u8, manifest.target.abi, "none") and
+        std.mem.eql(u8, manifest.target.rust_target, "aarch64-apple-darwin") and
+        manifest.link.system_libraries.len == 0)
+    {
+        return deploymentTargetFromZigTarget(
+            manifest.target.zig_target,
+            manifest.target.architecture,
+        );
+    }
+    if (std.mem.eql(u8, manifest.target.id, "x86_64-windows-gnu") and
+        std.mem.eql(u8, manifest.target.os, "windows") and
+        std.mem.eql(u8, manifest.target.architecture, "x86_64") and
+        std.mem.eql(u8, manifest.target.abi, "gnu") and
+        std.mem.eql(u8, manifest.target.rust_target, "x86_64-pc-windows-gnu") and
+        std.mem.eql(u8, manifest.target.zig_target, "x86_64-windows.win10...win11_dt-gnu") and
+        stringListsEqual(manifest.link.system_libraries, &.{ "advapi32", "crypt32" }))
+    {
+        return null;
+    }
+    @panic("unsupported locked AgentCore target identity");
 }
 
 fn readFile(
@@ -143,23 +166,32 @@ fn verifyPayloadPath(path: []const u8) void {
 }
 
 fn deploymentTargetFromZigTarget(
-    b: *std.Build,
     zig_target: []const u8,
     architecture: []const u8,
 ) std.SemanticVersion {
-    const prefix = b.fmt("{s}-macos.", .{architecture});
+    var prefix_storage: [64]u8 = undefined;
+    const prefix = std.fmt.bufPrint(&prefix_storage, "{s}-macos.", .{architecture}) catch
+        @panic("AgentCore architecture is too long");
     if (!std.mem.startsWith(u8, zig_target, prefix) or
         !std.mem.endsWith(u8, zig_target, "-none"))
         @panic("invalid AgentCore resolved macOS target");
     const range_start = std.mem.indexOfPos(u8, zig_target, prefix.len, "...") orelse
         @panic("AgentCore resolved target is missing its supported OS range");
     const minimum = zig_target[prefix.len..range_start];
+    var semantic_storage: [32]u8 = undefined;
     const semantic = if (std.mem.count(u8, minimum, ".") == 1)
-        b.fmt("{s}.0", .{minimum})
+        std.fmt.bufPrint(&semantic_storage, "{s}.0", .{minimum}) catch
+            @panic("AgentCore deployment target is too long")
     else
         minimum;
     return std.SemanticVersion.parse(semantic) catch
         @panic("invalid AgentCore resolved macOS deployment target");
+}
+
+fn stringListsEqual(left: []const []const u8, right: []const []const u8) bool {
+    if (left.len != right.len) return false;
+    for (left, right) |a, b| if (!std.mem.eql(u8, a, b)) return false;
+    return true;
 }
 
 fn verifySha256(b: *std.Build, path: []const u8, expected: []const u8) void {

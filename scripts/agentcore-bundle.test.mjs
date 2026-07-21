@@ -130,8 +130,35 @@ test("accepts a complete pinned macOS arm64 revision 3 bundle", async (t) => {
     ...injectedChecks,
     expectedManifest: manifest,
   });
-  assert.equal(result.target, "aarch64-macos.13.0");
+  assert.equal(result.target, "aarch64-macos.13.0...15.6-none");
   assert.deepEqual(result.payloadFiles, fixtureFiles);
+});
+
+test("accepts a complete pinned Windows x64 GNU revision 3 bundle", async (t) => {
+  const { root, manifest } = await fixture(t);
+  const oldLibrary = fixtureFiles[0];
+  const newLibrary = "lib/metask_agentcore.lib";
+  await rename(path.join(root, oldLibrary), path.join(root, newLibrary));
+  manifest.files.find((file) => file.path === oldLibrary).path = newLibrary;
+  manifest.target = {
+    id: "x86_64-windows-gnu",
+    architecture: "x86_64",
+    os: "windows",
+    abi: "gnu",
+    zig_target: "x86_64-windows.win10...win11_dt-gnu",
+    rust_target: "x86_64-pc-windows-gnu",
+  };
+  manifest.link.system_libraries = ["advapi32", "crypt32"];
+  await writeFile(path.join(root, "manifest.json"), JSON.stringify(manifest));
+  const result = await validateAgentCoreBundle(root, {
+    platform: "win32",
+    architecture: "x64",
+    zigVersion: "0.16.0",
+    symbols: "00000000 T metask_agentcore_get_api\n",
+    expectedManifest: manifest,
+  });
+  assert.equal(result.target, "x86_64-windows.win10...win11_dt-gnu");
+  assert.equal(result.libraryPath, path.join(root, newLibrary));
 });
 
 test("rejects a checksum mismatch", async (t) => {
@@ -197,7 +224,7 @@ test("rejects a bundle for another target", async (t) => {
       ...injectedChecks,
       architecture: "x64",
     }),
-    /unsupported AgentCore host architecture/,
+    /unsupported AgentCore host target/,
   );
 });
 
@@ -312,7 +339,15 @@ test("rejects payload and root symbolic links", async (t) => {
   const payloadLink = await fixture(t);
   const libraryPath = path.join(payloadLink.root, fixtureFiles[0]);
   await rm(libraryPath);
-  await symlink("../README.md", libraryPath);
+  try {
+    await symlink("../README.md", libraryPath);
+  } catch (error) {
+    if (error?.code === "EPERM") {
+      t.skip("Windows symlink creation requires Developer Mode or elevation");
+      return;
+    }
+    throw error;
+  }
   await assert.rejects(
     validateAgentCoreBundle(payloadLink.root, injectedChecks),
     /symbolic link/,

@@ -3,7 +3,6 @@ import {
   lstat,
   mkdir,
   mkdtemp,
-  readFile,
   readdir,
   rename,
   rm,
@@ -11,13 +10,11 @@ import {
 import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
 import process from "node:process";
-import { validateAgentCoreBundle } from "./agentcore-bundle.mjs";
-
-const lockRelativePath = path.join(
-  "spikes",
-  "agentcore-contract",
-  "bundle.lock.json",
-);
+import {
+  loadLockedAgentCoreManifest,
+  readAgentCoreBundleTargetId,
+  validateAgentCoreBundle,
+} from "./agentcore-bundle.mjs";
 
 async function exists(filePath) {
   try {
@@ -29,12 +26,9 @@ async function exists(filePath) {
   }
 }
 
-async function loadLock(repositoryRoot) {
-  const bytes = await readFile(
-    path.join(repositoryRoot, lockRelativePath),
-    "utf8",
-  );
-  return { bytes, manifest: JSON.parse(bytes) };
+async function loadLock(repositoryRoot, source) {
+  const targetId = await readAgentCoreBundleTargetId(source);
+  return loadLockedAgentCoreManifest(repositoryRoot, targetId);
 }
 
 const defaultFileOperations = { copyFile, rename, rm };
@@ -75,7 +69,7 @@ export async function stageAgentCoreBundle({
 }) {
   if (!path.isAbsolute(source))
     throw new Error("AgentCore candidate path must be absolute");
-  const lock = await loadLock(repositoryRoot);
+  const lock = await loadLock(repositoryRoot, source);
   const validated = await validateAgentCoreBundle(source, {
     ...validationOptions,
     expectedManifest: lock.manifest,

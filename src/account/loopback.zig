@@ -39,8 +39,7 @@ pub const Server = struct {
             var cleanup = listener;
             cleanup.deinit(io);
         }
-        const assigned_port = assignedPort(listener.socket.handle) orelse
-            return error.PortUnavailable;
+        const assigned_port = listener.socket.address.getPort();
         if (assigned_port == 0) return error.PortUnavailable;
         return .{
             .io = io,
@@ -359,18 +358,6 @@ fn respond(
             .{ .name = "X-Content-Type-Options", .value = "nosniff" },
         },
     });
-}
-
-fn assignedPort(socket: std.Io.net.Socket.Handle) ?u16 {
-    var address: std.posix.sockaddr.in = undefined;
-    var length: std.c.socklen_t = @sizeOf(@TypeOf(address));
-    if (std.c.getsockname(
-        socket,
-        @ptrCast(&address),
-        &length,
-    ) != 0) return null;
-    if (length < @sizeOf(@TypeOf(address))) return null;
-    return std.mem.bigToNative(u16, address.port);
 }
 
 const WaitContext = struct {

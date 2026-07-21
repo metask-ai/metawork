@@ -1,32 +1,25 @@
-import { readFile } from "node:fs/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
 import process from "node:process";
-import { validateAgentCoreBundle } from "./agentcore-bundle.mjs";
+import {
+  loadLockedAgentCoreManifest,
+  readAgentCoreBundleTargetId,
+  validateAgentCoreBundle,
+} from "./agentcore-bundle.mjs";
 
 export async function verifyStagedAgentCoreBundle(
   repositoryRoot,
   validationOptions = {},
 ) {
-  const lockBytes = await readFile(
-    path.join(
-      repositoryRoot,
-      "spikes",
-      "agentcore-contract",
-      "bundle.lock.json",
-    ),
-    "utf8",
-  );
-  const lock = JSON.parse(lockBytes);
+  const stagedRoot = path.join(repositoryRoot, ".agentcore", "bundle");
   try {
-    return await validateAgentCoreBundle(
-      path.join(repositoryRoot, ".agentcore", "bundle"),
-      {
-        ...validationOptions,
-        expectedManifest: lock,
-        expectedManifestBytes: lockBytes,
-      },
-    );
+    const targetId = await readAgentCoreBundleTargetId(stagedRoot);
+    const lock = await loadLockedAgentCoreManifest(repositoryRoot, targetId);
+    return await validateAgentCoreBundle(stagedRoot, {
+      ...validationOptions,
+      expectedManifest: lock.manifest,
+      expectedManifestBytes: lock.bytes,
+    });
   } catch (error) {
     if (error?.code === "ENOENT")
       throw new Error(

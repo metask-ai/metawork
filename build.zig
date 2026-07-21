@@ -158,7 +158,8 @@ fn createLifecycleFixture(
 
 fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcore_bundle.Bundle) WiredModules {
     var query = (root_module.resolved_target orelse @panic("Native SDK app target is unresolved")).query;
-    query.os_version_min = .{ .semver = bundle.deployment_target };
+    if (bundle.deployment_target) |deployment_target|
+        query.os_version_min = .{ .semver = deployment_target };
     const target = b.resolveTargetQuery(query);
     root_module.resolved_target = target;
 
