@@ -97,9 +97,8 @@ async function repository(t, manifest) {
   t.after(() => rm(root, { recursive: true, force: true }));
   const lockPath = path.join(
     root,
-    "spikes",
-    "agentcore-contract",
-    "bundle.lock.json",
+    "build_support",
+    "agentcore-bundle.macos.lock.json",
   );
   await mkdir(path.dirname(lockPath), { recursive: true });
   await writeFile(lockPath, JSON.stringify(manifest));

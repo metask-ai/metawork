@@ -111,7 +111,7 @@ abort 返回 stale/too-late 时仍必须 join 已有 Run job，再决定最终�
 - 无法验证、复制或入队关键事件时返回 callback fatal；canonical consumer notification 暂时 unavailable 时先执行有界 retry/deadline，耗尽后才返回 callback fatal，且不得撤销 pump 对 owned event 的所有权；
 - callback 返回后的 Renderer/Bridge transport failure 不属于 ABI callback failure，不得直接 abort Run。
 
-隔离的 artifact-only raw contract probe 可以使用 bundle 现有 raw SDK 表面证明 artifact 能调用，并记录 SDK 缺口；该代码不得进入正式 Host。
+candidate acceptance 通过 exact artifact 校验和官方 Zig package 的 source-free discover/link/run 证明 bundle 可消费；该代码不得进入正式 Host，也不复测上游 ABI facade。
 
 正式 Host 的硬门槛是 Metask AgentCore bundle SDK 至少提供：
 
@@ -256,11 +256,10 @@ manifest schema 1 必须精确记录：
 
 ## 10. revision 3 接收门槛
 
-### raw candidate contract probe
+### candidate bundle acceptance
 
 - macOS arm64 与 Windows x86_64 GNU artifact-only consumer 只访问各自 candidate bundle，不访问 AgentCore 实现源码；
 - exact manifest bytes、payload checksum、target、toolchain、layout 和唯一 discovery symbol 校验；
-- 隔离 raw C consumer 从新 header 完成 source-free discover/link/run，并拒绝错误 ABI version；
 - 隔离 Zig consumer 通过 candidate 官方 `bindings/zig` package 完成 source-free `Api.discover()`、link 和运行；
 - probe 结束后再次校验 candidate，证明消费过程没有改写 bundle。
 

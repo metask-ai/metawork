@@ -109,24 +109,6 @@ pub fn main() !void {
       label: "source-free AgentCore Zig package consumer",
     },
   );
-  await runChild(
-    "zig",
-    [
-      "build",
-      "--cache-dir",
-      path.join(scratch, "raw-cache"),
-      "--prefix",
-      path.join(scratch, "raw-out"),
-      "test",
-      `-Dbundle-root=${bundle.root}`,
-      `-Dtarget=${bundle.target}`,
-      "-Doptimize=Debug",
-    ],
-    {
-      cwd: path.join(repositoryRoot, "spikes", "agentcore-contract"),
-      label: "raw AgentCore C contract probe",
-    },
-  );
   await validateAgentCoreBundle(bundle.root, {
     expectedManifest: lock.manifest,
     expectedManifestBytes: lock.bytes,

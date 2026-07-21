@@ -20,7 +20,7 @@ fault-domain 对照已经证明当前同进程路径是零进程级隔离，并�
 
 Native SDK 直接构成 Zig Host，不设置额外 Adapter。模型 Provider SSE 由 Metask AgentCore 内部处理，MetaWork 接收并渲染 Host 产品投影。
 
-MetaWork 不直接编译 AgentCore 实现源码。隔离 candidate probe 从显式 bundle root 校验精确 artifact、官方 Zig package 和 raw C facade；正式 build 使用与 lock 字节完全一致并 staged 的 bundle。公司内部初步开发直接使用本机精确路径 `metacodes/zig-out`，当前不建设 resolver、content-addressed cache、artifact repository 或跨机器分发。正式 Host 只使用 bundle typed SDK，不复制 ABI code、事件 tag 或 UI JSON schema。
+MetaWork 不直接编译 AgentCore 实现源码。candidate probe 从显式 bundle root 校验精确 artifact，并通过官方 Zig package 完成 source-free discover/link/run；正式 build 使用与 lock 字节完全一致并 staged 的 bundle。公司内部初步开发直接使用本机精确路径 `metacodes/zig-out`，当前不建设 resolver、content-addressed cache、artifact repository 或跨机器分发。正式 Host 只使用 bundle typed SDK，不复制 ABI code、事件 tag 或 UI JSON schema。
 
 `UiEvent` 当前是 Metask AgentCore 已定义但尚未由 `agent_loop` 生产路径消费的协议类型。当前 stop/cancel 使用 per-Run abort，不把 `UiBackend.poll()` 当作已完成能力。
 
@@ -71,7 +71,7 @@ candidate 隔离 probe 需要显式绝对 bundle root：
 AGENTCORE_BUNDLE_ROOT=/absolute/path/to/bundle npm run probe:agentcore
 ```
 
-该命令先执行 exact lock/checksum/target/symbol 校验，再在 bundle 外部 cache 中编译官方 Zig package，并运行 `spikes/agentcore-contract` 的隔离 raw C probe。正式应用 build/test/package 不读取该环境变量，只读取 `.agentcore/bundle` 中由 `agentcore:stage` 校验和可恢复替换的精确 bundle；stager 不承诺并发 stage/build 或跨进程 crash transaction。
+该命令先执行 exact lock/checksum/target/symbol 校验，再在 bundle 外部临时目录中编译并运行官方 Zig package consumer。正式应用 build/test/package 不读取该环境变量，只读取 `.agentcore/bundle` 中由 `agentcore:stage` 校验和可恢复替换的精确 bundle；stager 不承诺并发 stage/build 或跨进程 crash transaction。
 
 ## 当前非目标
 

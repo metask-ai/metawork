@@ -13,7 +13,7 @@
 - Workbench 产品编排与 AgentCore bundle 调用；
 - snapshot 序列化与 Bridge snapshot transport；
 - Workspace grant、持久权限和状态所有权；
-- 单元测试、真实 GUI 验证与历史 spikes。
+- 单元测试、真实 GUI 验证与持续验证资产。
 
 系统职责仍以 [高层架构](architecture.md) 为准，AgentCore 生命周期与协议边界仍以 [AgentCore 集成契约](agentcore-integration.md) 为准，界面 feature 以 [Workbench UI 设计草案](workbench-ui-design.md) 为准。
 
@@ -57,7 +57,7 @@
 - 不增加 Native SDK adapter、通用 Desktop Interface 或 AgentCore mirror；
 - 已通过验证的 lifecycle/event pump 模块不为追求目录美观进行无价值重写；
 - 测试与对应 feature 或 runtime 相邻，端到端编排保留在 scripts；
-- spikes 只保留隔离验证和历史 Gate 证据，不承载正式产品实现。
+- 一次性 candidate、SDK 和 fault-domain 实验不进入 active tree；可复现结论由正式回归或精确 Git 证据承担。
 
 避免使用缺少产品含义的顶层目录，例如 `services/`、`managers/`、`helpers/`、`common/` 和 `interfaces/`。只有存在多个明确消费者时，代码才进入共享层。
 
@@ -103,8 +103,16 @@ metawork/
 │   ├── agent.zig
 │   └── agent/
 ├── build_support/
+│   ├── agentcore_bundle.zig
+│   ├── agentcore-bundle.macos.lock.json
+│   └── agentcore-bundle.windows.lock.json
+├── tests/
+│   ├── agent/
+│   ├── bridge/
+│   ├── workbench/
+│   ├── integration/
+│   └── support/
 ├── scripts/
-├── spikes/
 ├── build.zig
 ├── app.zon
 └── package.json
@@ -421,11 +429,13 @@ flowchart TB
 
 Zig lifecycle 测试已从 mixed spike 拆为正式的 invariant-grouped suite：`tests/agent/` 验证 Session、callback 与 quiescence，`tests/workbench/` 验证 Executor、admission 与 shutdown，`tests/bridge/` 验证 automation transport 的 delivery/generation/ACK，`tests/integration/lifecycle/` 只保留跨边界竞态。确定性 Fake AgentCore 和组合 fixture 统一位于 `tests/support/`，不得把共享 fixture 当成新的产品模块。入口命令为 `npm run test:lifecycle`，并继续要求显式校验过的 AgentCore bundle。
 
+AgentCore repository locks 与正式 build verifier 相邻放在 `build_support/`。candidate probe 在临时目录生成最小官方 SDK consumer，不把一次性实验夹具留在仓库中。
+
 - React component、selector 和 formatter 测试与源文件相邻；
 - Bridge connection、revision notification、snapshot 和 decoder 保持纯模块测试；
 - Zig serializer fixture 与 TypeScript decoder 必须形成跨语言 contract test，unknown schema version 和 malformed payload 默认拒绝；
 - 跨 Renderer/Native 的场景测试由 `scripts/` 编排真实应用；
-- `spikes/` 保留实验 build graph 和故障注入，不被正式 target 导入；
+- `build_support/` 只保留正式 build verifier 和 target locks，不接纳一次性实验夹具；
 - GUI screenshot/automation fixture 使用稳定的 structured automation fixture，不在生产组件中硬编码演示数据；
 - 测试名称使用用户可见结果或不变量，不使用 `works`、`basic` 等无信息名称。
 
@@ -451,7 +461,7 @@ Zig 文件和符号遵循现有 `snake_case` 与 Zig 风格。
 8. 按现有 `lifecycle.zig` 的真实责任拆出 Workbench executor/Task policy 与 AgentCore session handle/callback，保持所有 lifecycle 测试不变；
 9. 从现有 Workbench 投影中提取 tasks、projection 和 snapshot writer；
 10. permission 和 Workspace registry 形成真实能力后再创建对应模块；
-11. 每一步保持现有 Gate、build、package 和 GUI 验证通过。
+11. 每一步保持现有 build、package、GUI 和能力验证通过。
 
 ## 12. 目录迁移验收
 
@@ -467,5 +477,5 @@ Zig 文件和符号遵循现有 `snake_case` 与 Zig 风格。
 - snapshot writer 与 snapshot delivery 没有重复序列化或 identity 所有权；
 - Workspace grant、Workspace registry 和持久 permission 没有混成一个 boolean trust；
 - 现有 lifecycle、event pump、snapshot、revision delivery、隔离 raw transport fixture 和 GUI 测试全部保持通过；
-- 正式 build graph 不导入 spikes，也不访问 AgentCore 实现源码；
+- 正式产品 target 不导入 candidate probe，也不访问 AgentCore 实现源码；
 - 不新增 Native SDK adapter、AgentCore ABI facade 或平行协议。

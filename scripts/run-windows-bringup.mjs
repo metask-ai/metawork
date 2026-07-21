@@ -11,7 +11,6 @@ const environment = { ...process.env };
 
 for (const script of [
   "test",
-  "test:agentcore-sdk",
   "test:lifecycle",
   "build:debug",
   "test:gate5:windows",
@@ -23,7 +22,7 @@ for (const script of [
 }
 
 console.log(
-  "Windows integration baseline passed: staged revision 3 bundle, raw AgentCore probe, lifecycle, Native Debug/Release, and Gate 5/6 automation.",
+  "Windows integration baseline passed: staged revision 3 bundle, SDK candidate probe, lifecycle, Native Debug/Release, and Gate 5/6 automation.",
 );
 
 function runNpm(script) {

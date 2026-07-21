@@ -84,9 +84,9 @@ pub fn verify(b: *std.Build, root: []const u8) Bundle {
 
 fn lockPathForTarget(target_id: []const u8) []const u8 {
     if (std.mem.eql(u8, target_id, "aarch64-macos"))
-        return "spikes/agentcore-contract/bundle.lock.json";
+        return "build_support/agentcore-bundle.macos.lock.json";
     if (std.mem.eql(u8, target_id, "x86_64-windows-gnu"))
-        return "spikes/agentcore-contract/bundle.windows.lock.json";
+        return "build_support/agentcore-bundle.windows.lock.json";
     @panic("unsupported AgentCore bundle target");
 }
 

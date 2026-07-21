@@ -37,14 +37,15 @@ stager 与 verifier 根据 manifest target 选择显式 target policy 和 exact 
 
 当前内部初步开发不实现 dependency resolver、content-addressed cache、artifact repository 或跨机器自动分发。这个限制意味着开发 checkout 需要本机 Metask AgentCore 构建输出；它是明确的开发期前提，不得伪装成公司发布方案。
 
-### raw probe 与正式 Agent module
+### candidate validation 与正式 Agent module
 
-隔离的 artifact-only raw contract probe 只用于证明产物可以 source-free discover/link/run，并保留 raw ABI 回归覆盖。该 probe：
+candidate probe 只用于证明锁定 artifact 与官方 Zig package 可以 source-free discover/link/run。该 probe：
 
-- 可以直接使用 bundle 当前 raw SDK 类型和常量；
+- 只通过 bundle 的官方 `bindings/zig` package 消费 AgentCore；
 - 不能进入正式 Host target；
 - 不能成为产品状态映射或 UI JSON 解析实现；
-- 不能注册到 React/Native SDK 正式链路。
+- 不能注册到 React/Native SDK 正式链路；
+- 不维护上游 ABI facade 或 SDK 行为的平行测试套件。
 
 revision 3 bundle 保持 typed status、六个 StopReason、known/unknown observation decoder、`UiRequest` decoder、request-aware `UiResponse` encoder，以及 callback-scoped validated `RunContext`。正式 `agent/` 直接使用官方 `bindings/zig` package 暴露的表面；MetaWork 不手写 raw enum、tag switch、identity layout、JSON schema 或 SDK module/link graph。
 

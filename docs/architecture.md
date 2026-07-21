@@ -174,7 +174,7 @@ Metask AgentCore 与 MetaWork 是两个独立构建单元。revision 3 正式接
 - candidate probe 使用显式绝对 bundle root；`agentcore:stage` 校验 candidate 后只复制 manifest whitelist 到 `.agentcore/bundle`；正式 build/test/package 只消费这个 canonical staged root，不直接链接精确本机路径 `metacodes/zig-out`；
 - MetaWork verifier 决定 artifact 是否可信，官方 Zig package 只负责 module/link graph；精确 identity、schema、checksum、target、ABI 和 symbol 规则见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)；
 - artifact 缺失或校验失败时明确失败；不使用 `latest`、版本范围、可变 tag 或 source fallback；
-- raw candidate probe 与 staged 正式 Host 分离，具体 staging/build/lifecycle 规则见 [AgentCore 集成契约](agentcore-integration.md)；
+- candidate SDK consumer 与 staged 正式 Host 分离，具体 staging/build/lifecycle 规则见 [AgentCore 集成契约](agentcore-integration.md)；
 - 正式 build 通过 staged `bindings/zig` package 获取唯一 `metask_agentcore` module；不得继续手工创建 SDK root/types/protocol modules、直接 `addObjectFile` AgentCore archive 或复制 link-input 逻辑；
 - 只有 `agent/` 可以 import `metask_agentcore`；Workbench、Bridge、Renderer 和 Account 只消费 MetaWork-owned 产品类型；
 - 当前产品 Runtime 配置不注册 Host tools，Read/Bash/Edit 使用 AgentCore built-in tools。
@@ -187,18 +187,18 @@ revision 3 是硬切换，不提供 revision 2 active compatibility path。新�
 
 1. 统一同步 v1 baseline 的规范；
 2. 验证 Native SDK React dev/prod 和真实双向 Bridge；
-3. 用显式 bundle root 完成隔离的 artifact-only raw contract probe；
+3. 用显式 bundle root 完成 exact artifact 校验和官方 SDK source-free discover/link/run；
 4. 建立 Host 生命周期、安全边界和 deterministic ABI function-table 测试；
 5. Metask AgentCore bundle SDK 补齐 typed status、事件与 UI request/response codec；
 6. 正式 Host 直接接入 typed SDK，并先连接有界测试 sink；
 7. 根据真实 trace 实现事件泵和 Bridge；
 8. 完成同进程 macOS 同步原型；
-9. 完成 fault-domain spike 并决定进程模型；
+9. 在实现单 AgentCore Worker 时验证 supervisor、transport 和 crash semantics；
 10. 对 revision 3 bundle 执行 hard-cut migration Gate，证明 candidate、staged dependency、正式 Host 和最终 package 是同一精确 identity；
 11. 完成 Windows development baseline；
 12. 再建设 cache、remote、后续 capability、Windows 分发与 Linux 接入。
 
-任何 Gate 未满足退出条件时，不得用 MetaWork 自己复制协议、放宽安全语义或引入 source dependency 绕过。
+任何交付门槛未满足退出条件时，不得用 MetaWork 自己复制协议、放宽安全语义或引入 source dependency 绕过。
 
 ## 7. 并发、生命周期与故障边界
 

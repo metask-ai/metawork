@@ -31,7 +31,6 @@ pub fn build(b: *std.Build) void {
     test_modules.app.addImport("lifecycle_fixture", lifecycle_fixture);
     test_modules.bridge.addImport("lifecycle_fixture", lifecycle_fixture);
     addLifecycleTests(b, test_modules, lifecycle_fixture, bundle.link_libc);
-    addSdkContractTests(b, test_modules, bundle.link_libc);
     const module_tests = [_]struct {
         name: []const u8,
         root_module: *std.Build.Module,
@@ -98,23 +97,6 @@ fn addLifecycleTests(
             &.{ "terminal publication", "Workbench outcomes", "Agent terminal facts" },
     });
     step.dependOn(&b.addRunArtifact(source_tests).step);
-}
-
-fn addSdkContractTests(
-    b: *std.Build,
-    modules: WiredModules,
-    link_libc: bool,
-) void {
-    const tests = b.createModule(.{
-        .root_source_file = b.path("spikes/agentcore-sdk-contract/sdk_contract_test.zig"),
-        .target = modules.app.resolved_target,
-        .optimize = modules.app.optimize,
-        .link_libc = link_libc,
-    });
-    tests.addImport("metask_agentcore", modules.sdk);
-    const artifact = b.addTest(.{ .root_module = tests });
-    const step = b.step("test-agentcore-sdk", "Run source-free AgentCore typed SDK contract tests");
-    step.dependOn(&b.addRunArtifact(artifact).step);
 }
 
 const WiredModules = struct {

@@ -141,8 +141,8 @@ test("only Agent implementation imports the AgentCore SDK", () => {
     .sort();
   assert.deepEqual(
     sdkImportReceivers,
-    ["event_pump", "event_sink", "fixture", "session", "tests"].sort(),
-    "only the three Agent modules and two isolated SDK test roots may receive the SDK module",
+    ["event_pump", "event_sink", "fixture", "session"].sort(),
+    "only the Agent runtime modules and lifecycle fixture may receive the SDK module",
   );
   assert.match(
     build,
@@ -164,24 +164,18 @@ test("only Agent implementation imports the AgentCore SDK", () => {
   assert.match(bridgeHandlers, /pub const PermissionChoice = enum/);
 });
 
-test("candidate raw probe stays isolated from the staged typed consumer", () => {
-  const rawBuild = read("spikes/agentcore-contract/build.zig");
-  assert.match(rawBuild, /header_smoke\.c/);
-  assert.match(rawBuild, /libmetask_agentcore\.a/);
-  assert.doesNotMatch(rawBuild, /src\/agent|metawork_agent|metask_agentcore"/);
-
-  const typedConsumer = read(
-    "spikes/agentcore-sdk-contract/sdk_contract_test.zig",
-  );
-  assert.match(typedConsumer, /@import\("metask_agentcore"\)/);
-  assert.match(typedConsumer, /sdk\.Api\.discover\(\)/);
-
+test("candidate validation keeps only repository locks and the official SDK consumer", () => {
+  for (const lock of [
+    "build_support/agentcore-bundle.macos.lock.json",
+    "build_support/agentcore-bundle.windows.lock.json",
+  ]) {
+    assert.equal(existsSync(new URL(lock, root)), true);
+  }
   const probeRunner = read("scripts/run-agentcore-probe.mjs");
   assert.match(probeRunner, /bundle\/bindings\/zig/);
   assert.match(probeRunner, /agentcore\.Api\.discover\(\)/);
   assert.match(probeRunner, /addRunArtifact/);
   assert.match(probeRunner, /source-free AgentCore Zig package consumer/);
-  assert.match(probeRunner, /raw AgentCore C contract probe/);
 });
 
 test("build graph registers Account product and pure contract modules", () => {
@@ -664,14 +658,7 @@ test("product wire contract is atomically on Account plus Task schema v7", () =>
   );
 });
 
-test("lifecycle tests are grouped by invariant instead of a mixed spike", () => {
-  for (const legacy of [
-    "spikes/host-lifecycle/build.zig",
-    "spikes/host-lifecycle/lifecycle_test.zig",
-  ]) {
-    assert.equal(existsSync(new URL(legacy, root)), false);
-  }
-
+test("lifecycle tests are grouped by invariant", () => {
   const cases = [
     ["tests/agent/lifecycle_test.zig", 31],
     ["tests/agent/event_pump_test.zig", 5],

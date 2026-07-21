@@ -21,10 +21,10 @@
 
 | 验证对象 | 规范来源 | 可定位证据 | 已验证结论与限制 |
 | --- | --- | --- | --- |
-| AgentCore ABI v1 revision 3 macOS baseline | [ABI v1 消费合同](agentcore-abi-v1.md) | [revision 3 migration 报告](agentcore-revision-3-migration-report.md)；MetaWork commit `f0e39f43b520ce97b4c390d590d2807019b9c4a3`；`spikes/agentcore-contract/bundle.lock.json` | 2026-07-21 在精确 dirty-provenance arm64 macOS bundle 上通过 candidate/stage、typed SDK、正式 Host、Debug/Release、桌面自动化和 package；不声明 stable ABI |
+| AgentCore ABI v1 revision 3 macOS baseline | [ABI v1 消费合同](agentcore-abi-v1.md) | [revision 3 migration 报告](agentcore-revision-3-migration-report.md)；MetaWork commit `f0e39f43b520ce97b4c390d590d2807019b9c4a3`；`build_support/agentcore-bundle.macos.lock.json` | 2026-07-21 在精确 dirty-provenance arm64 macOS bundle 上通过 candidate/stage、typed SDK、正式 Host、Debug/Release、桌面自动化和 package；不声明 stable ABI |
 | Metask Account 与真实 AgentCore Run | [产品需求](requirements.md)、[Metask Account API 合同](metask-account-contract.md) | `git show dbaaf81b0217d4016944960ee8621e9a23274f05:docs/phase-0-validation.md` 中 2026-07-20 的真实链路记录 | 打包 `.app` 完成 OAuth、profile、API Key/model catalog、execution persistence，以及 `gpt-5.5`、`deepseek-v4-pro` AgentCore Run；不证明 Task-first 人工交互矩阵完成 |
-| Windows development baseline | [高层架构](architecture.md)、[ABI v1 消费合同](agentcore-abi-v1.md) | `git show dbaaf81b0217d4016944960ee8621e9a23274f05:docs/windows-phase-0b-report.md`；`spikes/agentcore-contract/bundle.windows.lock.json` | 2026-07-21 在 clean x86_64 GNU bundle 上通过 raw/typed probe、Native Debug/Release 和桌面自动化；不包含安装、签名、更新或完整安全矩阵 |
-| fault-domain 方向 | [高层架构](architecture.md) | `git show dbaaf81b0217d4016944960ee8621e9a23274f05:docs/phase-0-gate-7-report.md`；`npm run test:gate7:macos` | 独立 crash 对照证明同进程为零进程级隔离，并选择单 AgentCore Worker；产品 Worker 尚未实现 |
+| Windows development baseline | [高层架构](architecture.md)、[ABI v1 消费合同](agentcore-abi-v1.md) | `git show dbaaf81b0217d4016944960ee8621e9a23274f05:docs/windows-phase-0b-report.md`；`build_support/agentcore-bundle.windows.lock.json` | 2026-07-21 在 clean x86_64 GNU bundle 上通过 candidate SDK probe、Native Debug/Release 和桌面自动化；不包含安装、签名、更新或完整安全矩阵 |
+| fault-domain 方向 | [高层架构](architecture.md) | `git show dbaaf81b0217d4016944960ee8621e9a23274f05:docs/phase-0-gate-7-report.md` | 独立 crash 对照证明同进程为零进程级隔离，并选择单 AgentCore Worker；该一次性 harness 不进入 active tree，产品 Worker 尚未实现 |
 | 当前自动化回归 | 本文第 3、4 节及各 source of truth | 2026-07-21，代码基线 `dbaaf81b0217d4016944960ee8621e9a23274f05`，执行 `npm test` | TypeScript check、Renderer `65/65`、architecture `23/23`、bundle `22 passed + 1 Windows symlink capability skip`、child runner `1/1`、Zig `107/107` 全部通过；不替代 macOS/Windows 真实窗口验收 |
 
 Git object 只保存一次性执行事实；当前行为与边界始终以 active source of truth 为准。若规范与旧证据冲突，旧证据不得覆盖当前规范，也不得被当作新代码已经回归的证明。
@@ -50,17 +50,16 @@ npm run build:release
 npm run package:macos
 ```
 
-涉及 AgentCore candidate、正式 Host、event delivery、Renderer reload、生命周期或 fault domain 时，按变更范围增加：
+涉及 AgentCore candidate、正式 Host、event delivery、Renderer reload 或生命周期时，按变更范围增加：
 
 ```bash
 AGENTCORE_BUNDLE_ROOT=/absolute/path/to/bundle npm run probe:agentcore
-npm run test:phase0a
+npm run test:lifecycle
 npm run test:gate5:macos
 npm run test:gate6:macos
-npm run test:gate7:macos
 ```
 
-这些 package scripts 暂时保留历史名称；入口重命名属于独立的 build/automation 变更。
+Gate 5/6 仍是当前真实桌面自动化入口；一次性阶段聚合脚本和 fault-domain harness 不再保留。
 
 ### Windows development baseline
 
