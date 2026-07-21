@@ -18,4 +18,3 @@ pub const TransportFailureStage = projection_impl.TransportFailureStage;
 pub const TransportFailureReport = projection_impl.TransportFailureReport;
 pub const TransportFailureDecision = projection_impl.TransportFailureDecision;
 pub const decideTransportFailure = projection_impl.decideTransportFailure;
-pub const snapshot_schema_version = projection_impl.snapshot_schema_version;

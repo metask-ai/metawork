@@ -16,7 +16,7 @@ import {
 const fixture = JSON.parse(
   readFileSync(
     new URL(
-      "../frontend/src/bridge/__fixtures__/workbench-snapshot-v7.fixture",
+      "../frontend/src/bridge/__fixtures__/workbench-snapshot.fixture",
       import.meta.url,
     ),
     "utf8",
@@ -27,7 +27,7 @@ function clone(value) {
   return structuredClone(value);
 }
 
-test("the canonical v7 Workbench fixture decodes without normalization", () => {
+test("the canonical Workbench fixture decodes without normalization", () => {
   assert.deepEqual(decodeWorkbenchSnapshot(fixture), fixture);
 });
 
@@ -93,14 +93,7 @@ test("Task metadata mutation acknowledgements are identity-checked and exact", (
   );
 });
 
-test("Workbench decoding rejects version drift, extra fields, and invalid wire values", () => {
-  const oldVersion = clone(fixture);
-  oldVersion.schemaVersion = 0;
-  assert.throws(
-    () => decodeWorkbenchSnapshot(oldVersion),
-    /unsupported version/,
-  );
-
+test("Workbench decoding rejects extra fields and invalid wire values", () => {
   const extraField = clone(fixture);
   extraField.compatibility = true;
   assert.throws(() => decodeWorkbenchSnapshot(extraField), /expected keys/);

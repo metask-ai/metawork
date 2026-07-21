@@ -1,5 +1,3 @@
-export const WORKBENCH_SCHEMA_VERSION = 7 as const;
-
 export type AccountSessionState =
   | "restoring"
   | "signed_out"
@@ -236,7 +234,6 @@ export type TaskView = {
 };
 
 export type WorkbenchSnapshot = {
-  schemaVersion: typeof WORKBENCH_SCHEMA_VERSION;
   revision: string;
   account: AccountView;
   tasks: TaskView[];

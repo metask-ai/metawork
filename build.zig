@@ -31,7 +31,6 @@ pub fn build(b: *std.Build) void {
     test_modules.app.addImport("lifecycle_fixture", lifecycle_fixture);
     test_modules.bridge.addImport("lifecycle_fixture", lifecycle_fixture);
     addLifecycleTests(b, test_modules, lifecycle_fixture, bundle.link_libc);
-    addSdkContractTests(b, test_modules, bundle.link_libc);
     const module_tests = [_]struct {
         name: []const u8,
         root_module: *std.Build.Module,
@@ -72,7 +71,6 @@ fn addLifecycleTests(
         "tests/agent/lifecycle_test.zig",
         "tests/agent/event_pump_test.zig",
         "tests/workbench/executor_lifecycle_test.zig",
-        "tests/bridge/automation_delivery_test.zig",
         "tests/integration/lifecycle/lifecycle_test.zig",
     };
     for (roots) |root| {
@@ -100,23 +98,6 @@ fn addLifecycleTests(
     step.dependOn(&b.addRunArtifact(source_tests).step);
 }
 
-fn addSdkContractTests(
-    b: *std.Build,
-    modules: WiredModules,
-    link_libc: bool,
-) void {
-    const tests = b.createModule(.{
-        .root_source_file = b.path("spikes/agentcore-sdk-contract/sdk_contract_test.zig"),
-        .target = modules.app.resolved_target,
-        .optimize = modules.app.optimize,
-        .link_libc = link_libc,
-    });
-    tests.addImport("metask_agentcore", modules.sdk);
-    const artifact = b.addTest(.{ .root_module = tests });
-    const step = b.step("test-agentcore-sdk", "Run source-free AgentCore typed SDK contract tests");
-    step.dependOn(&b.addRunArtifact(artifact).step);
-}
-
 const WiredModules = struct {
     account: *std.Build.Module,
     account_catalog: *std.Build.Module,
@@ -134,7 +115,6 @@ const WiredModules = struct {
     agent: *std.Build.Module,
     bridge: *std.Build.Module,
     event_pump: *std.Build.Module,
-    automation_delivery: *std.Build.Module,
     sdk: *std.Build.Module,
     workbench: *std.Build.Module,
     workbench_projection: *std.Build.Module,
@@ -156,7 +136,6 @@ fn createLifecycleFixture(
     fixture.addImport("metawork_workbench", modules.workbench);
     fixture.addImport("metawork_account_contract", modules.account_contract);
     fixture.addImport("event_pump", modules.event_pump);
-    fixture.addImport("automation_delivery", modules.automation_delivery);
     fixture.addImport("metask_agentcore", modules.sdk);
     fixture.addImport("workbench_executor", modules.workbench_executor);
     return fixture;
@@ -323,7 +302,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     workbench_contract_fixture.addOption(
         []const u8,
         "snapshot",
-        @embedFile("frontend/src/bridge/__fixtures__/workbench-snapshot-v7.fixture"),
+        @embedFile("frontend/src/bridge/__fixtures__/workbench-snapshot.fixture"),
     );
     projection.addOptions("workbench_contract_fixture", workbench_contract_fixture);
     const workbench = b.createModule(.{
@@ -350,11 +329,6 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     automation_disabled.addImport("native_sdk", existingImport(root_module, "native_sdk"));
     automation_disabled.addImport("metawork_bridge", bridge);
     automation_disabled.addImport("metawork_account_contract", account_contract);
-    const automation_delivery = b.createModule(.{
-        .root_source_file = b.path("src/automation/delivery.zig"),
-        .target = target,
-        .optimize = root_module.optimize,
-    });
     const automation_enabled = b.createModule(.{
         .root_source_file = b.path("src/automation/enabled.zig"),
         .target = target,
@@ -363,7 +337,6 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     automation_enabled.addImport("native_sdk", existingImport(root_module, "native_sdk"));
     automation_enabled.addImport("metawork_bridge", bridge);
     automation_enabled.addImport("metawork_account_contract", account_contract);
-    automation_enabled.addImport("automation_delivery", automation_delivery);
     const automation = b.createModule(.{
         .root_source_file = b.path("src/automation.zig"),
         .target = target,
@@ -407,7 +380,6 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .agent = agent,
         .bridge = bridge,
         .event_pump = event_pump,
-        .automation_delivery = automation_delivery,
         .sdk = sdk,
         .workbench = workbench,
         .workbench_projection = projection,

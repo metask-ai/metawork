@@ -47,7 +47,7 @@ test "bounded executor rejects overflow and close cancels a queued Run" {
     try closeSession(rejected, .session_close);
 }
 
-test "Gate 6 Workbench closes off-thread and exposes retryable close failure" {
+test "Workbench closes off-thread and exposes retryable close failure" {
     fake_core.reset();
     const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 2 });
     defer {
@@ -75,7 +75,7 @@ test "Gate 6 Workbench closes off-thread and exposes retryable close failure" {
     try std.testing.expectEqual(@as(usize, 1), destroyed);
 }
 
-test "Gate 6 Workbench close cancels a queued Run without blocking the caller" {
+test "Workbench close cancels a queued Run without blocking the caller" {
     fake_core.reset();
     fake_core.setNextPlan(.controlled);
     const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 1 });

@@ -4,7 +4,7 @@ const native_sdk = @import("native_sdk");
 const oauth = @import("account_oauth");
 const store = @import("account_credential_store");
 
-const manifest_name = "manifest.v2";
+const manifest_name = store.manifest_name;
 // The contract bounds UTF-8 source bytes, while JSON may expand one byte into
 // a six-byte escape. Keep the persisted envelope large enough for every
 // contract-valid manifest, not only ordinary production identifiers.

@@ -740,7 +740,6 @@ const App = struct {
         const self: *@This() = @ptrCast(@alignCast(context));
         self.native_runtime = native_runtime;
         self.platform_services = native_runtime.options.platform.services;
-        self.automation.start(native_runtime);
         if (self.automation.active()) {
             self.startAutomationAccount(
                 self.automation.executionFixture(),
@@ -753,7 +752,6 @@ const App = struct {
     fn stop(context: *anyopaque, native_runtime: *native_sdk.Runtime) anyerror!void {
         const self: *@This() = @ptrCast(@alignCast(context));
         if (self.dispatcher) |dispatcher| dispatcher.stopIngress();
-        self.automation.stop();
         if (self.account_coordinator) |coordinator| {
             coordinator.shutdown();
             self.drainAccountEffects();
@@ -1535,20 +1533,13 @@ const App = struct {
             .effects_wake => {
                 self.drainAccountEffects();
                 self.drainAgentEvents();
-                if (self.dispatcher) |dispatcher| if (dispatcher.connectedWindow()) |window_id| {
-                    try self.automation.onEffectsWake(window_id);
+                if (self.dispatcher) |dispatcher| if (dispatcher.connectedWindow() != null) {
                     try dispatcher.emitWorkbenchChanged();
                 };
             },
             .timer => |timer| {
                 if (timer.id == account_refresh_timer_id) {
                     self.onAccountRefreshTimer();
-                    return;
-                }
-                if (self.automation.onTimer(
-                    timer.id,
-                    native_sdk.monotonicNanoseconds(),
-                )) {
                     return;
                 }
                 if (self.dispatcher != null and
@@ -1562,12 +1553,9 @@ const App = struct {
     }
 
     fn bridge(self: *@This(), mode: FrontendMode) native_sdk.BridgeDispatcher {
-        var automation_handlers: [automation_api.handler_count]native_sdk.bridge.Handler = undefined;
-        self.automation.fillHandlers(&automation_handlers);
         return (self.dispatcher orelse @panic("Bridge Dispatcher is not composed")).register(
             self.automation.productPolicy(bridge_api.policy.product(mode)),
-            &automation_handlers,
-        ) catch @panic("Bridge handler registry capacity is invalid");
+        );
     }
 
     fn drainAgentEvents(self: *@This()) void {
@@ -1640,13 +1628,10 @@ const App = struct {
         };
     }
 
-    fn dispatcherAutomation(self: *@This()) bridge_api.DispatcherAutomationHooks {
+    fn dispatcherAutomationAuthority(self: *@This()) bridge_api.DispatcherAutomationAuthority {
         return .{
             .context = self,
             .active_fn = automationActive,
-            .before_connect_fn = automationBeforeConnect,
-            .connect_fn = automationConnect,
-            .detach_fn = automationDetach,
         };
     }
 
@@ -1662,6 +1647,12 @@ const App = struct {
         detail: []const u8,
     ) anyerror!void {
         const self: *@This() = @ptrCast(@alignCast(context.?));
+        if (self.automation.active() and std.mem.eql(u8, name, bridge_api.product_event_name)) {
+            std.debug.print("metawork.product_delivery.emit event={s} main_thread={}\n", .{
+                name,
+                std.Thread.getCurrentId() == self.main_thread_id,
+            });
+        }
         try (self.native_runtime orelse return error.RuntimeUnavailable).emitWindowEvent(
             window_id,
             name,
@@ -1722,26 +1713,6 @@ const App = struct {
     fn automationActive(context: ?*anyopaque) bool {
         const self: *@This() = @ptrCast(@alignCast(context.?));
         return self.automation.active();
-    }
-
-    fn automationBeforeConnect(context: ?*anyopaque, now_ns: u64) anyerror!void {
-        const self: *@This() = @ptrCast(@alignCast(context.?));
-        try self.automation.beforeConnect(now_ns);
-    }
-
-    fn automationConnect(context: ?*anyopaque, generation: u64) anyerror!void {
-        const self: *@This() = @ptrCast(@alignCast(context.?));
-        try self.automation.connectAt(generation);
-    }
-
-    fn automationDetach(context: ?*anyopaque, generation: u64, now_ns: u64) anyerror!void {
-        const self: *@This() = @ptrCast(@alignCast(context.?));
-        try self.automation.detach(generation, now_ns);
-    }
-
-    fn breakProductConnectionForAutomation(context: ?*anyopaque) void {
-        const self: *@This() = @ptrCast(@alignCast(context orelse return));
-        if (self.dispatcher) |dispatcher| dispatcher.breakConnection();
     }
 };
 
@@ -1857,11 +1828,7 @@ pub fn run(init: std.process.Init) !void {
         .io = init.io,
         .frontend_asset_root = frontend_asset_root,
         .main_thread_id = std.Thread.getCurrentId(),
-        .automation = try automation_api.Runtime.init(
-            std.heap.c_allocator,
-            init.environ_map,
-            std.Thread.getCurrentId(),
-        ),
+        .automation = automation_api.Runtime.init(init.environ_map),
     };
     defer app.automation.deinit();
     var data_dir_storage: [4096]u8 = undefined;
@@ -1943,14 +1910,10 @@ pub fn run(init: std.process.Init) !void {
         &workbench,
         account_coordinator.commandSink(),
         app.dispatcherPlatform(),
-        app.dispatcherAutomation(),
+        app.dispatcherAutomationAuthority(),
     );
     defer dispatcher.deinit();
     app.dispatcher = &dispatcher;
-    app.automation.bind(dispatcher.callbackGate(), dispatcher.productDelivery(), .{
-        .context = &app,
-        .break_product_connection_fn = App.breakProductConnectionForAutomation,
-    });
     const mode = frontendMode(init.environ_map);
 
     try runner.runWithOptions(app.app(), .{

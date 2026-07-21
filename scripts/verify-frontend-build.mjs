@@ -34,12 +34,6 @@ for (const token of forbiddenTokens) {
 
 const assetsPath = path.join(repositoryRoot, "frontend", "dist", "assets");
 const assets = await readdir(assetsPath);
-const scripts = assets.filter((name) => name.endsWith(".js"));
-const scriptText = (
-  await Promise.all(
-    scripts.map((name) => readFile(path.join(assetsPath, name), "utf8")),
-  )
-).join("\n");
 const styleText = (
   await Promise.all(
     assets
@@ -57,25 +51,4 @@ for (const query of [1099, 819, 560]) {
       `production CSS is missing the ${query}px responsive query`,
     );
 }
-const rawFixtureTokens = [
-  "metawork:agent-events",
-  "metawork.events.ack",
-  "metawork.events.fetch",
-  "metawork.gate5.emitFixture",
-];
-const fixtureExpected = process.env.VITE_METAWORK_GATE5_FIXTURE === "1";
-for (const token of rawFixtureTokens) {
-  const present = scriptText.includes(token);
-  if (present !== fixtureExpected)
-    throw new Error(
-      fixtureExpected
-        ? `Gate 5 Renderer build is missing fixture token ${token}`
-        : `production Renderer contains raw Gate 5 fixture token ${token}`,
-    );
-}
-
-console.log(
-  fixtureExpected
-    ? "verified Gate 5 Renderer fixture and production CSP"
-    : "verified production Renderer CSP and raw fixture isolation",
-);
+console.log("verified production Renderer CSP");

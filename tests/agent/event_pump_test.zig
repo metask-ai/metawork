@@ -6,7 +6,7 @@ const textChunk = fixture.textChunk;
 const PumpEnqueueContext = fixture.PumpEnqueueContext;
 const enqueuePumpOnThread = fixture.enqueuePumpOnThread;
 
-test "Gate 5 event pump preserves per-Session order with round-robin fairness" {
+test "event pump preserves per-Session order with round-robin fairness" {
     var pump = try event_pump.EventPump.init(std.testing.io, std.testing.allocator, .{
         .global_count = 8,
         .global_bytes = 4096,
@@ -39,7 +39,7 @@ test "Gate 5 event pump preserves per-Session order with round-robin fairness" {
     try std.testing.expectEqual(@as(usize, 0), pump.stats().count);
 }
 
-test "Gate 5 event pump data cannot consume reserved control capacity" {
+test "event pump data cannot consume reserved control capacity" {
     var pump = try event_pump.EventPump.init(std.testing.io, std.testing.allocator, .{
         .global_count = 4,
         .global_bytes = 1024,
@@ -65,7 +65,7 @@ test "Gate 5 event pump data cannot consume reserved control capacity" {
     try std.testing.expectEqual(@as(usize, 3), stats.data_count);
 }
 
-test "Gate 5 event pump rejects zero sentinel identities" {
+test "event pump rejects zero sentinel identities" {
     var pump = try event_pump.EventPump.init(std.testing.io, std.testing.allocator, .{
         .global_count = 2,
         .global_bytes = 512,
@@ -83,7 +83,7 @@ test "Gate 5 event pump rejects zero sentinel identities" {
     invalid.deinit();
 }
 
-test "Gate 5 text chunks remain byte lossless through the event pump" {
+test "text chunks remain byte lossless through the event pump" {
     var pump = try event_pump.EventPump.init(std.testing.io, std.testing.allocator, .{
         .global_count = 4,
         .global_bytes = 1024,
@@ -109,7 +109,7 @@ test "Gate 5 text chunks remain byte lossless through the event pump" {
     try std.testing.expectEqualStrings("hello 世界!", writer.buffered());
 }
 
-test "Gate 5 event pump waits for a slow consumer and fails at the hard deadline" {
+test "event pump waits for a slow consumer and fails at the hard deadline" {
     var pump = try event_pump.EventPump.init(std.testing.io, std.testing.allocator, .{
         .global_count = 1,
         .global_bytes = 1024,

@@ -1,11 +1,7 @@
 const fixture = @import("lifecycle_fixture");
 const std = fixture.std;
 const lifecycle = fixture.lifecycle;
-const event_pump = fixture.event_pump;
-const automation_delivery = fixture.automation_delivery;
 const wire = fixture.wire;
-const pumpEnvelope = fixture.pumpEnvelope;
-const ingestPumpEvent = fixture.ingestPumpEvent;
 const fake_core = &fixture.fake_core;
 const openSession = fixture.openSession;
 const submitSession = fixture.submitSession;
@@ -17,97 +13,7 @@ const deinitTestComposition = fixture.deinitTestComposition;
 const createTestComposition = fixture.createTestComposition;
 const shutdownOnThread = fixture.shutdownOnThread;
 
-test "Agent event pump transfers inline and retained objects into automation delivery" {
-    var pump = try event_pump.EventPump.init(std.testing.io, std.testing.allocator, .{
-        .global_count = 8,
-        .global_bytes = 4096,
-        .global_control_reserved_count = 2,
-        .global_control_reserved_bytes = 512,
-        .per_session_count = 8,
-        .per_session_bytes = 4096,
-        .per_session_control_reserved_count = 2,
-        .per_session_control_reserved_bytes = 512,
-        .session_slots = 1,
-    });
-    defer pump.deinit();
-    var delivery = try automation_delivery.Delivery.init(std.testing.allocator, .{
-        .inline_event_bytes = 64,
-        .batch_count = 4,
-        .batch_bytes = 512,
-        .batch_sessions = 1,
-        .batch_per_session = 4,
-        .retention_count = 8,
-        .retention_bytes = 4096,
-        .retention_ns = 100,
-        .object_count = 2,
-        .object_bytes = 2048,
-        .per_session_object_count = 2,
-        .per_session_object_bytes = 2048,
-        .max_object_bytes = 1024,
-        .route_slots = 1,
-    });
-    defer delivery.deinit();
-
-    try pump.enqueue(try pumpEnvelope(1, 7, "{\"text_chunk\":\"small\"}"));
-    const large =
-        "{\"text_chunk\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"}";
-    try pump.enqueue(try pumpEnvelope(1, 7, large));
-    try ingestPumpEvent(&delivery, &pump);
-    try ingestPumpEvent(&delivery, &pump);
-    const first_generation = try delivery.connect();
-    var first_batch = (try delivery.buildBatch(first_generation)).?;
-    defer first_batch.deinit();
-    try std.testing.expectEqual(@as(usize, 2), first_batch.item_count);
-    try std.testing.expect(std.mem.indexOf(u8, first_batch.json, "\"generation\":\"1\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, first_batch.json, "\"event\":") != null);
-    try std.testing.expect(std.mem.indexOf(u8, first_batch.json, "\"object\":{\"id\":\"1\"") != null);
-    var fetch_buffer: [2048]u8 = undefined;
-    try std.testing.expectError(
-        error.UnknownObject,
-        delivery.fetchObject(first_generation, 1, 7, 1, &fetch_buffer),
-    );
-    var uncommitted_retry = (try delivery.buildBatch(first_generation)).?;
-    defer uncommitted_retry.deinit();
-    try std.testing.expectEqual(@as(usize, 2), uncommitted_retry.item_count);
-    try delivery.commitBatch(&first_batch);
-
-    const fetched = try delivery.fetchObject(first_generation, 1, 7, 1, &fetch_buffer);
-    try std.testing.expect(std.mem.indexOf(u8, fetched, large) != null);
-    try delivery.acknowledge(first_generation, 1, 7, 1);
-    try delivery.acknowledge(first_generation, 1, 7, 1);
-    try std.testing.expectEqual(@as(usize, 1), delivery.stats().retained_count);
-    try std.testing.expectError(
-        error.OutOfOrderAcknowledgement,
-        delivery.acknowledge(first_generation, 1, 7, 3),
-    );
-    try delivery.detach(first_generation, 10);
-    const second_generation = try delivery.connect();
-    try std.testing.expectError(
-        error.StaleConnection,
-        delivery.fetchObject(first_generation, 1, 7, 1, &fetch_buffer),
-    );
-    var replay = (try delivery.buildBatch(second_generation)).?;
-    defer replay.deinit();
-    try std.testing.expectEqual(@as(usize, 1), replay.item_count);
-    try delivery.commitBatch(&replay);
-    try std.testing.expect(delivery.firstExpired(100) == null);
-    try delivery.detach(second_generation, 100);
-    try std.testing.expect(delivery.firstExpired(199) == null);
-    const expired = delivery.firstExpired(200).?;
-    try std.testing.expectEqual(@as(u64, 1), expired.session_id);
-    try std.testing.expectEqual(@as(u64, 7), expired.run_id);
-    const third_generation = try delivery.connect();
-    var final_replay = (try delivery.buildBatch(third_generation)).?;
-    defer final_replay.deinit();
-    try delivery.commitBatch(&final_replay);
-    delivery.cleanupRun(1, 7);
-    try std.testing.expectError(
-        error.UnknownObject,
-        delivery.fetchObject(third_generation, 1, 7, 1, &fetch_buffer),
-    );
-}
-
-test "Gate 6 all executor workers waiting on UI remain controllable" {
+test "all executor workers waiting on UI remain controllable" {
     fake_core.reset();
     const runtime = try createTestComposition(.{ .worker_count = 4, .queue_capacity = 4, .max_sessions = 4 });
     defer {

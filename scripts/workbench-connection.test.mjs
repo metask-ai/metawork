@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { WorkbenchConnection } from "../frontend/src/bridge/connection.ts";
+import { RendererBridgeContractError } from "../frontend/src/bridge/client.ts";
 
 globalThis.window ??= {
   setTimeout: globalThis.setTimeout,
@@ -10,7 +11,6 @@ globalThis.window ??= {
 
 function snapshot(revision) {
   return {
-    schemaVersion: 7,
     revision,
     account: {
       sessionState: "signed_out",
@@ -34,6 +34,36 @@ function snapshot(revision) {
     tasks: [],
   };
 }
+
+test("contract mismatch is terminal and never enters connection retry backoff", async () => {
+  let connectCalls = 0;
+  const statuses = [];
+  const client = {
+    available: () => true,
+    onWorkbenchRevision: () => () => undefined,
+    onHostSignal: () => () => undefined,
+    connect: async () => {
+      connectCalls += 1;
+      throw new RendererBridgeContractError(
+        "revision_mismatch",
+        "Host requires metawork.renderer-bridge revision 2",
+      );
+    },
+    disconnect: async () => assert.fail("no generation was established"),
+  };
+  const connection = new WorkbenchConnection(client, {
+    onSnapshot: () => undefined,
+    onStatus: (status) => statuses.push(status),
+    onReady: () => undefined,
+    onViewSyncFailed: () => undefined,
+  });
+
+  await assert.rejects(connection.start(), RendererBridgeContractError);
+  await assert.rejects(connection.retry(), RendererBridgeContractError);
+  assert.equal(connectCalls, 2);
+  assert.equal(statuses.at(-1)?.kind, "contract_failed");
+  assert.equal(statuses.at(-1)?.source, "bootstrap");
+});
 
 test("Workbench connection publishes only synchronized snapshots", async () => {
   let revisionHandler;
@@ -138,14 +168,13 @@ test("explicit recovery replaces a generation whose snapshots stay unavailable",
   assert.deepEqual(disconnected, ["1", "2"]);
 });
 
-test("stop during startup prevents later ping and fixture work", async () => {
+test("stop during startup prevents a later handshake", async () => {
   let releaseConnect;
   const connectStarted = new Promise((resolve) => {
     releaseConnect = resolve;
   });
   const disconnected = [];
   let pingCount = 0;
-  let fixtureBridgeCount = 0;
   const client = {
     available: () => true,
     onWorkbenchRevision: () => () => undefined,
@@ -158,10 +187,6 @@ test("stop during startup prevents later ping and fixture work", async () => {
       return { sequence: 1 };
     },
     acknowledgeSignal: async () => undefined,
-    nativeBridgeForAutomationFixture: () => {
-      fixtureBridgeCount += 1;
-      return {};
-    },
   };
   const connection = new WorkbenchConnection(client, {
     onSnapshot: () => undefined,
@@ -175,11 +200,10 @@ test("stop during startup prevents later ping and fixture work", async () => {
   releaseConnect();
   await Promise.all([starting, stopping]);
   assert.equal(pingCount, 0);
-  assert.equal(fixtureBridgeCount, 0);
   assert.deepEqual(disconnected, ["7"]);
 });
 
-test("a failed startup handshake is disconnected and repeated during recovery", async () => {
+test("a failed startup confirmation is disconnected and repeated during recovery", async () => {
   const generations = ["1", "2"];
   const disconnected = [];
   let pingCount = 0;

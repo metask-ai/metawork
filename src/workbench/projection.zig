@@ -118,7 +118,6 @@ const ui_record_detail_capacity: usize = 512;
 const ui_record_snapshot_overhead: usize = 512;
 const tool_route_digest_bytes = std.crypto.hash.sha2.Sha256.digest_length;
 const tool_product_id_capacity = "tool-".len + 20;
-pub const snapshot_schema_version: u32 = 7;
 
 const ToolState = enum { running, completed, failed };
 const RunPhase = enum {
@@ -193,8 +192,6 @@ pub const TransportFailureStage = enum {
     revision_delivery,
     snapshot_transport,
     connection_generation,
-    agent_event_delivery,
-    detached_retention_expired,
 };
 
 pub const TransportFailureReport = struct {
@@ -207,8 +204,6 @@ pub const TransportFailureDecision = enum {
     reject_command,
     retry,
     detach_renderer,
-    retain_for_reconnect,
-    discard_transport_payload,
     request_run_termination,
 };
 
@@ -220,8 +215,6 @@ pub fn decideTransportFailure(report: TransportFailureReport) TransportFailureDe
         .ingress_validation, .command_dispatch => .reject_command,
         .revision_delivery, .snapshot_transport => .retry,
         .response_delivery, .connection_generation => .detach_renderer,
-        .agent_event_delivery => .retain_for_reconnect,
-        .detached_retention_expired => .discard_transport_payload,
     };
 }
 
@@ -825,7 +818,7 @@ pub const Workbench = struct {
         return self.account.view(self.canCreateTask());
     }
 
-    /// Gate 6 keeps its local provider outside the production Account
+    /// The AgentCore vertical fixture keeps its local provider outside the production Account
     /// contract. This path is compiled only into `-Dautomation=true` builds;
     /// release builds reject it before observing any input.
     pub fn installAutomationExecution(
@@ -1438,10 +1431,8 @@ pub const Workbench = struct {
     pub fn writeSnapshot(self: *Workbench, output: []u8) Error![]const u8 {
         self.syncLifecycle();
         var writer = std.Io.Writer.fixed(output);
-        writer.print(
-            "{{\"schemaVersion\":{d},\"revision\":\"{d}\",\"account\":",
-            .{ snapshot_schema_version, self.revision },
-        ) catch return error.SnapshotTooLarge;
+        writer.print("{{\"revision\":\"{d}\",\"account\":", .{self.revision}) catch
+            return error.SnapshotTooLarge;
         try self.writeAccount(&writer);
         writer.writeAll(",\"tasks\":[") catch
             return error.SnapshotTooLarge;
@@ -2946,7 +2937,7 @@ fn finalizeTestTerminalEvents(workbench: *Workbench) void {
     workbench.syncLifecycle();
 }
 
-test "Workbench snapshot serializer matches the Renderer v7 contract fixture" {
+test "Workbench snapshot serializer matches the Renderer contract fixture" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
 
@@ -3328,8 +3319,6 @@ test "Renderer transport failures never own Agent Run termination" {
         .{ .stage = .revision_delivery, .decision = .retry },
         .{ .stage = .snapshot_transport, .decision = .retry },
         .{ .stage = .connection_generation, .decision = .detach_renderer },
-        .{ .stage = .agent_event_delivery, .decision = .retain_for_reconnect },
-        .{ .stage = .detached_retention_expired, .decision = .discard_transport_payload },
     };
     for (cases) |case| {
         const decision = decideTransportFailure(.{ .stage = case.stage });

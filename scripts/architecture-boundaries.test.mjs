@@ -29,6 +29,22 @@ function assertNoImports(files, forbidden) {
   }
 }
 
+test("MetaWork product and package manifests share one release version", () => {
+  const appVersion = read("app.zon").match(/\.version = "([^"]+)"/)?.[1];
+  const zigVersion = read("build.zig.zon").match(/\.version = "([^"]+)"/)?.[1];
+  const rootPackage = JSON.parse(read("package.json"));
+  const rendererPackage = JSON.parse(read("frontend/package.json"));
+  const lock = JSON.parse(read("package-lock.json"));
+
+  assert.match(appVersion ?? "", /^0\.\d+\.\d+$/);
+  assert.equal(rootPackage.version, appVersion);
+  assert.equal(rendererPackage.version, appVersion);
+  assert.equal(zigVersion, appVersion);
+  assert.equal(lock.version, appVersion);
+  assert.equal(lock.packages[""].version, appVersion);
+  assert.equal(lock.packages.frontend.version, appVersion);
+});
+
 test("module roots and Agent directory use product semantics", () => {
   for (const path of [
     "src/app.zig",
@@ -141,8 +157,8 @@ test("only Agent implementation imports the AgentCore SDK", () => {
     .sort();
   assert.deepEqual(
     sdkImportReceivers,
-    ["event_pump", "event_sink", "fixture", "session", "tests"].sort(),
-    "only the three Agent modules and two isolated SDK test roots may receive the SDK module",
+    ["event_pump", "event_sink", "fixture", "session"].sort(),
+    "only the Agent runtime modules and lifecycle fixture may receive the SDK module",
   );
   assert.match(
     build,
@@ -164,24 +180,18 @@ test("only Agent implementation imports the AgentCore SDK", () => {
   assert.match(bridgeHandlers, /pub const PermissionChoice = enum/);
 });
 
-test("candidate raw probe stays isolated from the staged typed consumer", () => {
-  const rawBuild = read("spikes/agentcore-contract/build.zig");
-  assert.match(rawBuild, /header_smoke\.c/);
-  assert.match(rawBuild, /libmetask_agentcore\.a/);
-  assert.doesNotMatch(rawBuild, /src\/agent|metawork_agent|metask_agentcore"/);
-
-  const typedConsumer = read(
-    "spikes/agentcore-sdk-contract/sdk_contract_test.zig",
-  );
-  assert.match(typedConsumer, /@import\("metask_agentcore"\)/);
-  assert.match(typedConsumer, /sdk\.Api\.discover\(\)/);
-
+test("candidate validation keeps only repository locks and the official SDK consumer", () => {
+  for (const lock of [
+    "build_support/agentcore-bundle.macos.lock.json",
+    "build_support/agentcore-bundle.windows.lock.json",
+  ]) {
+    assert.equal(existsSync(new URL(lock, root)), true);
+  }
   const probeRunner = read("scripts/run-agentcore-probe.mjs");
   assert.match(probeRunner, /bundle\/bindings\/zig/);
   assert.match(probeRunner, /agentcore\.Api\.discover\(\)/);
   assert.match(probeRunner, /addRunArtifact/);
   assert.match(probeRunner, /source-free AgentCore Zig package consumer/);
-  assert.match(probeRunner, /raw AgentCore C contract probe/);
 });
 
 test("build graph registers Account product and pure contract modules", () => {
@@ -256,6 +266,19 @@ test("Account execution is installed explicitly without process defaults", () =>
   assert.match(app, /commitAccountOnly\(/);
   assert.match(app, /account_api\.CredentialOwner/);
   assert.doesNotMatch(app, /account_api\.OAuth\.TokenSet/);
+});
+
+test("Account persistence revision has one code owner", () => {
+  const store = read("src/account/credential_store.zig");
+  const platform = read("src/account/platform.zig");
+  assert.match(store, /pub const persistence_revision: u8 = 2/);
+  assert.match(store, /"dev\.metawork\.account\.v\{d\}"/);
+  assert.match(store, /"manifest\.v\{d\}"/);
+  assert.equal([...store.matchAll(/\.\{persistence_revision\}/g)].length, 2);
+  assert.match(store, /version: u8 = persistence_revision/);
+  assert.match(store, /self\.version != persistence_revision/);
+  assert.match(platform, /const manifest_name = store\.manifest_name/);
+  assert.doesNotMatch(platform, /"manifest\.v[0-9]+"/);
 });
 
 test("formal Native test graph runs every product module test root", () => {
@@ -354,11 +377,9 @@ test("canonical notification and Renderer transport failures stay isolated", () 
 
   const dispatcher = read("src/bridge/dispatcher.zig");
   assert.match(dispatcher, /decideTransportFailure/);
-  const delivery = read("src/automation/delivery.zig");
-  assert.match(delivery, /pub fn deinitOwnedBuffers/);
 });
 
-test("Bridge owns product delivery state while automation transport stays explicit", () => {
+test("Bridge owns the only Renderer product delivery state", () => {
   const bridgeRoot = read("src/bridge.zig");
   assert.match(bridgeRoot, /pub const ProductDelivery =/);
   assert.match(bridgeRoot, /pub const ProductDeliveryTransport =/);
@@ -397,9 +418,7 @@ test("Bridge owns product delivery state while automation transport stays explic
   assert.match(dispatcher, /grants: workspace_grant\.State/);
   assert.match(dispatcher, /workbench: \?\*workbench_api\.Workbench/);
 
-  const automationDelivery = read("src/automation/delivery.zig");
-  assert.match(automationDelivery, /Automation-only raw Agent event transport/);
-  assert.match(automationDelivery, /pub fn connectAt/);
+  assert.equal(existsSync(new URL("src/automation/delivery.zig", root)), false);
 });
 
 test("automation code is compile-time selected and absent from product modules", () => {
@@ -410,22 +429,22 @@ test("automation code is compile-time selected and absent from product modules",
   assert.match(selector, /automation_disabled/);
   assert.match(build, /src\/automation\/enabled\.zig/);
   assert.match(build, /src\/automation\/disabled\.zig/);
-  assert.match(build, /automation_enabled\.addImport\("automation_delivery"/);
+  assert.doesNotMatch(build, /automation_delivery/);
 
   const productSources = [
     "src/app.zig",
     "src/bridge.zig",
     ...zigFiles("src/bridge/"),
     "src/automation/disabled.zig",
+    "src/automation/enabled.zig",
   ]
     .map(read)
     .join("\n");
   for (const token of [
-    "zero://inline",
     "metawork:agent-events",
     "metawork.events.ack",
     "metawork.events.fetch",
-    "metawork.gate5.emitFixture",
+    "metawork.event_delivery.emit_fixture",
   ]) {
     assert.equal(
       productSources.includes(token),
@@ -586,45 +605,37 @@ test("Bridge Dispatcher owns product command decisions and App only composes it"
   assert.doesNotMatch(app, /parsePayload|parseWireId|workspaceGrant/);
 });
 
-test("product wire contract is atomically on Account plus Task schema v7", () => {
+test("Renderer Bridge revision 1 owns the exact product wire catalog", () => {
   const zigCommands = read("src/bridge/commands.zig");
   const rendererCommands = read("frontend/src/bridge/commands.ts");
   const appManifest = read("app.zon");
-  for (const command of [
-    "create",
-    "run",
-    "cancel",
-    "respondUi",
-    "close",
-    "rename",
-    "archive",
-    "delete",
-  ]) {
-    const wireName = `metawork.tasks.${command}`;
-    assert.ok(zigCommands.includes(wireName));
-    assert.ok(rendererCommands.includes(wireName));
-    assert.ok(appManifest.includes(wireName));
-  }
-  for (const command of [
-    "beginLogin",
-    "reauthenticate",
-    "cancelOperation",
-    "refreshCatalog",
-    "selectApiKey",
-    "selectModel",
-    "logout",
-  ]) {
-    const wireName = `metawork.account.${command}`;
-    assert.ok(zigCommands.includes(wireName));
-    assert.ok(rendererCommands.includes(wireName));
-    assert.ok(appManifest.includes(wireName));
-  }
+  const productCommand =
+    /"(metawork\.(?:smoke|events|workspace|workbench|account|tasks)\.[A-Za-z.]+)"/g;
+  const catalog = (source) =>
+    [
+      ...new Set([...source.matchAll(productCommand)].map((match) => match[1])),
+    ].sort();
+  assert.deepEqual(catalog(rendererCommands), catalog(zigCommands));
+  assert.deepEqual(catalog(appManifest), catalog(zigCommands));
+  assert.ok(catalog(zigCommands).includes("metawork.account.reopenLogin"));
+  assert.match(zigCommands, /contract_id = "metawork\.renderer-bridge"/);
+  assert.match(zigCommands, /contract_revision: u32 = 1/);
+  assert.match(
+    rendererCommands,
+    /RENDERER_BRIDGE_CONTRACT_ID = "metawork\.renderer-bridge"/,
+  );
+  assert.match(rendererCommands, /RENDERER_BRIDGE_CONTRACT_REVISION = 1/);
+
+  const dispatcher = read("src/bridge/dispatcher.zig");
+  assert.match(dispatcher, /handlers\.RendererBridgeConnect/);
+  assert.match(dispatcher, /identity_mismatch/);
+  assert.match(dispatcher, /revision_mismatch/);
   assert.doesNotMatch(zigCommands, /metawork\.sessions\./);
   assert.doesNotMatch(rendererCommands, /metawork\.sessions\./);
   assert.doesNotMatch(appManifest, /metawork\.sessions\./);
 
   const projection = read("src/workbench/projection.zig");
-  assert.match(projection, /snapshot_schema_version: u32 = 7/);
+  assert.doesNotMatch(projection, /schemaVersion|snapshot_schema_version/);
   assert.match(projection, /\\"account\\":/);
   assert.match(projection, /\\"tasks\\":\[/);
   assert.match(projection, /pub fn createTask/);
@@ -636,7 +647,7 @@ test("product wire contract is atomically on Account plus Task schema v7", () =>
   );
 
   const contracts = read("frontend/src/bridge/contracts.ts");
-  assert.match(contracts, /WORKBENCH_SCHEMA_VERSION = 7/);
+  assert.doesNotMatch(contracts, /schemaVersion|WORKBENCH_SCHEMA_VERSION/);
   assert.match(contracts, /readiness: AccountReadiness/);
   assert.match(contracts, /primaryAction: AccountPrimaryAction/);
   assert.match(contracts, /account: AccountView/);
@@ -647,37 +658,24 @@ test("product wire contract is atomically on Account plus Task schema v7", () =>
   assert.equal(
     existsSync(
       new URL(
-        "frontend/src/bridge/__fixtures__/workbench-snapshot-v7.fixture",
+        "frontend/src/bridge/__fixtures__/workbench-snapshot.fixture",
         root,
       ),
     ),
     true,
   );
-  assert.equal(
-    existsSync(
-      new URL(
-        "frontend/src/bridge/__fixtures__/workbench-snapshot-v6.fixture",
-        root,
-      ),
-    ),
-    false,
+  assert.deepEqual(
+    readdirSync(new URL("frontend/src/bridge/__fixtures__/", root)),
+    ["workbench-snapshot.fixture"],
   );
 });
 
-test("lifecycle tests are grouped by invariant instead of a mixed spike", () => {
-  for (const legacy of [
-    "spikes/host-lifecycle/build.zig",
-    "spikes/host-lifecycle/lifecycle_test.zig",
-  ]) {
-    assert.equal(existsSync(new URL(legacy, root)), false);
-  }
-
+test("lifecycle tests are grouped by invariant", () => {
   const cases = [
     ["tests/agent/lifecycle_test.zig", 31],
     ["tests/agent/event_pump_test.zig", 5],
     ["tests/workbench/executor_lifecycle_test.zig", 7],
-    ["tests/bridge/automation_delivery_test.zig", 6],
-    ["tests/integration/lifecycle/lifecycle_test.zig", 5],
+    ["tests/integration/lifecycle/lifecycle_test.zig", 4],
   ];
   for (const [path, expectedCount] of cases) {
     assert.equal(existsSync(new URL(path, root)), true, `${path} must exist`);
@@ -687,11 +685,6 @@ test("lifecycle tests are grouped by invariant instead of a mixed spike", () => 
       `${path} must retain its invariant coverage`,
     );
   }
-
-  assert.doesNotMatch(
-    read("tests/bridge/automation_delivery_test.zig"),
-    /fixture\.event_pump/,
-  );
 
   assert.equal(
     existsSync(new URL("tests/support/lifecycle_fixture.zig", root)),

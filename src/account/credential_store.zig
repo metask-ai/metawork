@@ -3,7 +3,15 @@ const contract = @import("metawork_account_contract");
 const state = @import("account_state");
 const oauth = @import("account_oauth");
 
-pub const service = "dev.metawork.account.v2";
+pub const persistence_revision: u8 = 2;
+pub const service = std.fmt.comptimePrint(
+    "dev.metawork.account.v{d}",
+    .{persistence_revision},
+);
+pub const manifest_name = std.fmt.comptimePrint(
+    "manifest.v{d}",
+    .{persistence_revision},
+);
 pub const ProviderKind = contract.ProviderKind;
 
 pub const Family = enum {
@@ -76,7 +84,7 @@ pub const ManifestState = enum {
 };
 
 pub const Manifest = struct {
-    version: u8 = 2,
+    version: u8 = persistence_revision,
     state: ManifestState,
     active_slot: ?Slot = null,
     generation: Generation = @splat(0),
@@ -249,7 +257,7 @@ pub const Manifest = struct {
     }
 
     pub fn validate(self: *const Manifest) StoreError!void {
-        if (self.version != 2) return error.ManifestCorrupt;
+        if (self.version != persistence_revision) return error.ManifestCorrupt;
         switch (self.state) {
             .signed_out => {
                 if (self.active_slot != null or

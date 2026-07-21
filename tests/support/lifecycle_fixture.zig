@@ -3,7 +3,6 @@ pub const lifecycle = @import("metawork_agent");
 pub const workbench_api = @import("metawork_workbench");
 pub const account_contract = @import("metawork_account_contract");
 pub const event_pump = @import("event_pump");
-pub const automation_delivery = @import("automation_delivery");
 pub const workbench_executor = @import("workbench_executor");
 pub const sdk = @import("metask_agentcore");
 pub const wire = sdk.types;
@@ -45,37 +44,6 @@ pub fn enqueuePumpOnThread(context: *PumpEnqueueContext) void {
         return;
     };
     context.succeeded = true;
-}
-
-pub fn ingestPumpEvent(delivery: *automation_delivery.Delivery, pump: *event_pump.EventPump) !void {
-    var envelope = pump.takeFair().?;
-    const input = automation_delivery.InputEvent{
-        .session_id = envelope.session_id,
-        .run_id = envelope.run_id,
-        .json = envelope.json,
-        .allocator = envelope.allocator,
-    };
-    envelope.event.deinit();
-    envelope = undefined;
-    delivery.ingest(input) catch |err| {
-        var owned = input;
-        owned.deinit();
-        return err;
-    };
-}
-
-pub fn deliveryInput(
-    allocator: std.mem.Allocator,
-    session_id: u64,
-    run_id: u64,
-    json: []const u8,
-) !automation_delivery.InputEvent {
-    return .{
-        .session_id = session_id,
-        .run_id = run_id,
-        .json = try allocator.dupe(u8, json),
-        .allocator = allocator,
-    };
 }
 
 pub const Plan = enum {

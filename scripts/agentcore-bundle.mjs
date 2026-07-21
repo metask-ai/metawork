@@ -21,7 +21,7 @@ const targetPolicies = [
     zigTarget: /^aarch64-macos\.(\d+\.\d+(?:\.\d+)?)\.\.\.[^-]+-none$/,
     library: "lib/libmetask_agentcore.a",
     systemLibraries: [],
-    lock: path.join("spikes", "agentcore-contract", "bundle.lock.json"),
+    lock: path.join("build_support", "agentcore-bundle.macos.lock.json"),
   },
   {
     hostPlatform: "win32",
@@ -34,7 +34,7 @@ const targetPolicies = [
     zigTarget: /^x86_64-windows\.[a-z0-9_]+\.\.\.[a-z0-9_]+-gnu$/,
     library: "lib/metask_agentcore.lib",
     systemLibraries: ["advapi32", "crypt32"],
-    lock: path.join("spikes", "agentcore-contract", "bundle.windows.lock.json"),
+    lock: path.join("build_support", "agentcore-bundle.windows.lock.json"),
   },
 ];
 

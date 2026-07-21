@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 if (process.platform !== "win32") {
-  throw new Error("test:gate5:windows requires Windows");
+  throw new Error("test:agentcore-vertical:windows requires Windows");
 }
 
 const execFileAsync = promisify(execFile);
@@ -21,7 +21,6 @@ const native = path.join(
 
 await execFileAsync(command, ["/d", "/s", "/c", "npm run build:frontend"], {
   cwd: root,
-  env: { ...process.env, VITE_METAWORK_GATE5_FIXTURE: "1" },
   maxBuffer: 16 * 1024 * 1024,
 });
 await execFileAsync(
@@ -30,4 +29,4 @@ await execFileAsync(
   { cwd: root, maxBuffer: 16 * 1024 * 1024 },
 );
 process.env.METAWORK_TEST_APP_CWD = path.join("zig-out", "bin");
-await import("./test-gate5-macos.mjs");
+await import("./test-agentcore-vertical-macos.mjs");

@@ -25,7 +25,7 @@ MetaWork 当前不定义为：
 
 - 完整 IDE；
 - Terminal Emulator；
-- cc-zig CLI 的图形化字符镜像；
+- 旧 AgentCore CLI 的图形化字符镜像；
 - 远程 Agent 托管平台；
 - `.native` UI 迁移项目；
 - 同时维护 React 和 `.native` 两套 Renderer 的产品。
@@ -96,7 +96,7 @@ Account 是 MetaWork 的 Metask 账号控制面，负责 OAuth 登录、账号/A
 - 后台 Task 的运行状态不能因 UI 切换而丢失；
 - 每条事件、审批和工具结果必须路由到正确 Task/Run；
 - 每个 Task 至多一个 non-terminal Run，包括 executor 中的 `queued` Run；当前 Run 结束前 Workbench 拒绝第二次提交，Renderer 只能保留未提交草稿；
-- Renderer 产品合同使用 schema v7：snapshot 根节点由严格的无 secret `account` 与 `tasks` 组成；Account 额外发布 Host-owned `readiness`、唯一 `primaryAction` 与 `canCancel`，Renderer 不从内部状态重建产品流程；Account 命令统一为 `metawork.account.*` 并只进入 App 注入的 `AccountCommandSink`，Task 命令统一为 `metawork.tasks.*`，payload/result 使用 `taskId`，应用关停 cause 使用 `app_shutdown`；不接受或双写 schema v6 及更早版本；
+- Renderer 产品合同为 `metawork.renderer-bridge` revision 1：`connect` 精确协商后才开放产品路径，snapshot 根节点由严格的无 secret `account` 与 `tasks` 组成且不维护第二个局部版本；Account 额外发布 Host-owned `readiness`、唯一 `primaryAction` 与 `canCancel`，Renderer 不从内部状态重建产品流程；Account 命令统一为 `metawork.account.*` 并只进入 App 注入的 `AccountCommandSink`，Task 命令统一为 `metawork.tasks.*`，payload/result 使用 `taskId`，应用关停 cause 使用 `app_shutdown`；当前不接受或双写旧 contract revision；
 - 内部 Agent/Gate 原始事件可以使用 Session route identity，但该身份不得进入产品 snapshot，也不与 Task 建立双 ID 体系。
 
 ### 5.4 Agent 交互
@@ -153,7 +153,7 @@ Account 是 MetaWork 的 Metask 账号控制面，负责 OAuth 登录、账号/A
 - 界面在任一时刻只突出一个下一步：登录、完成浏览器授权、选择真正有歧义的 Key/模型、处理失败或开始任务。后台 operation 使用低权重状态，不把内部步骤伪装成用户待办；
 - 没有 Workspace 时 `选择 Workspace` 是唯一主动作；确定 Workspace 后草稿才获得归属，若 Account 尚未 ready，登录或处理 Account 是下一主动作；其余未满足条件只作为可理解的次级状态展示；
 - 首个正式版本采用单主窗口；多个 Task 可以后台运行，切换 Workspace 或 Task 不停止执行；
-- Renderer reload、断开连接以及 Bridge revision/snapshot/event delivery failure 默认只影响视图同步和重连，不得终止后台 Agent Run；只有 Workbench 根据 canonical 产品状态作出的显式 termination 决策才能请求结束 Run；
+- Renderer reload、断开连接以及 Bridge revision/snapshot failure 默认只影响视图同步和重连，不得终止后台 Agent Run；只有 Workbench 根据 canonical 产品状态作出的显式 termination 决策才能请求结束 Run；
 - 左栏只展开当前 Workspace 的 Task，Workspace 切换器必须汇总其他 Workspace 的运行、待处理和失败状态，不能让后台请求只依赖系统通知；
 - Task 是可持续补充、归档和删除的产品对象；Task lifecycle、当前 Run phase 和最近一次 Run outcome 是三类独立状态，Renderer 只能从 Workbench projection 派生展示标签；
 - 中间区域以用户指令、Agent 回复、工具活动、可用审批和结果构成可追溯时间线，不展示 raw AgentCore event 或 chain-of-thought；
@@ -195,8 +195,8 @@ Account 是 MetaWork 的 Metask 账号控制面，负责 OAuth 登录、账号/A
 
 ### 平台
 
-- macOS 是当前 Phase 0A 的优先真实验证平台；
-- Windows Phase 0B 接入 baseline 已完成独立 artifact、Native SDK、Bridge、AgentCore 和 Gate 5/6 验证，不能用 macOS 结果替代；
+- macOS 是当前优先真实验证平台；
+- Windows development baseline 已完成独立 artifact、Native SDK、Bridge、AgentCore 和桌面自动化验证，不能用 macOS 结果替代；
 - Windows MSI/签名/更新和完整安全矩阵仍是后续分发交付；
 - Linux 是后续目标平台；当前 bundle target-policy 和系统链接输入按 target 隔离，但不宣称已完成 Linux 构建或验收；
 - 对进入验证范围的平台形成可复现的开发构建与可运行产物路径；进入分发阶段后再要求可分发包路径。
@@ -228,19 +228,19 @@ Account 是 MetaWork 的 Metask 账号控制面，负责 OAuth 登录、账号/A
 
 Metask C1 OAuth/login 与 C2 catalog/ExecutionTarget 合同均已锁定。登录先独立提交 `account_only`；产品编排随后启动独立 C2 continuation。API Key/model 选择只决定何时形成 `execution_ready`，不得反向成为登录前置条件或让 C2 失败抹除已完成登录。
 
-### 7.3 完整 Phase 0A
+### 7.3 Fault-domain 结论
 
-事件泵数据、生命周期压力测试和同进程/最小 Worker fault-domain spike 已通过，Phase 0A 完成。Gate 7 选择单 AgentCore Worker 作为后续正式故障域；当前应用仍是同进程 prototype，正式 Worker、跨进程恢复和危险工具重放策略不属于当前交付。
+事件泵数据、生命周期压力测试和同进程/最小 Worker fault-domain spike 已完成。结论是选择单 AgentCore Worker 作为后续正式故障域；当前应用仍是同进程 prototype，正式 Worker、跨进程恢复和危险工具重放策略不属于当前交付。
 
 ### 7.4 Windows 接入 baseline
 
-Windows x86_64 GNU 当前提供与 macOS 同一产品语义的开发可执行 baseline：精确 bundle、source-free probe、Native Debug/Release、Renderer 生产资源、Gate 5/6 和干净退出均已验证。它不是安装器或正式发布承诺。
+Windows x86_64 GNU 当前提供与 macOS 同一产品语义的开发可执行 baseline：精确 bundle、source-free probe、Native Debug/Release、Renderer 生产资源、AgentCore vertical automation 和干净退出均已验证。它不是安装器或正式发布承诺。
 
 ### 7.5 后续产品能力
 
 async pending、持久化恢复、strict Workspace security、正式 Host tools、远程 artifact 发布、Windows 分发交付和 Linux 接入按独立 capability 与阶段推进，不能反向伪装成当前 v1 已具备。
 
-具体验证矩阵见 [Phase 0 验证计划](phase-0-validation.md)。
+具体验证矩阵见 [当前验证规范](validation.md)。
 
 ## 8. 待细化的产品问题
 
