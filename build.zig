@@ -14,6 +14,12 @@ const agentcore_bundle = @import("build_support/agentcore_bundle.zig");
 
 pub fn build(b: *std.Build) void {
     const artifacts = native_sdk.addAppArtifacts(b, b.dependency("native_sdk", .{}), .{ .name = "metawork" });
+    const frontend_assets = b.addInstallDirectory(.{
+        .source_dir = b.path("frontend/dist"),
+        .install_dir = .bin,
+        .install_subdir = "frontend/dist",
+    });
+    b.getInstallStep().dependOn(&frontend_assets.step);
     const root = b.pathFromRoot(".agentcore/bundle");
     const bundle = agentcore_bundle.verify(b, root);
     const modules = wireAgentCore(b, artifacts.exe.root_module, bundle);
