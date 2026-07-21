@@ -143,6 +143,11 @@ pub const LoginAttempt = struct {
         return self.authorization_url_storage[0..self.authorization_url_len];
     }
 
+    pub fn matches(self: *const LoginAttempt, attempt_id: u64) bool {
+        return self.started and !self.joined and
+            self.attempt_id == attempt_id;
+    }
+
     pub fn callbackPort(self: *const LoginAttempt) u16 {
         std.debug.assert(self.started);
         return self.server.port();

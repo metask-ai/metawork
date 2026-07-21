@@ -27,6 +27,8 @@
 
 MetaWork 是面向本地工作区的桌面 Agent Workbench，不是终端模拟器、聊天应用或完整 IDE。
 
+首次启动也遵循同一命题：用户先选择工作目标并编辑 Task 草稿，账号和执行配置是围绕 Task 自动准备的条件，不形成独立技术配置产品。
+
 界面只需要持续回答四个问题：
 
 1. 当前任务是否仍在工作；
@@ -69,7 +71,7 @@ Workspace
 - `Turn` 和 `Run` 通常不直接命名，用当前活动、排队、停止和结果表达。
 - 一项 Task 可以包含多次用户补充和多次执行；停止一次执行不会删除 Task。
 
-Renderer 产品合同固定为 schema v6：snapshot 根节点包含无 secret `account` 与 `tasks`；账号命令使用 `metawork.account.*`，Task 命令使用 `metawork.tasks.*`，产品 Task ID 字段使用 `taskId`。该切换不提供旧 schema 兼容别名；Agent 原始事件传输中的 Session route identity 不属于 Renderer 产品模型。
+Renderer 产品合同固定为 schema v7：snapshot 根节点包含无 secret `account` 与 `tasks`，Account 直接发布 `readiness`、唯一 `primaryAction` 与 `canCancel`；账号命令使用 `metawork.account.*`，Task 命令使用 `metawork.tasks.*`，产品 Task ID 字段使用 `taskId`。该切换不提供旧 schema 兼容别名；Agent 原始事件传输中的 Session route identity 不属于 Renderer 产品模型。
 
 ### 3.2 规范术语
 
@@ -517,12 +519,17 @@ Output 至少显示：
 首次启动流程保持短且可恢复：
 
 1. 按系统语言显示界面；
-2. Host 检查 Provider 配置状态；
-3. 用户选择 Workspace；
-4. 原生确认是否信任该目录；
-5. 进入 New task 空状态。
+2. 立即进入 Workbench shell 与 New task；没有 Workspace 时，`选择 Workspace` 是唯一主动作；
+3. 用户选择并确认 trusted Workspace 后，Composer 获得该 Workspace 的本地草稿；
+4. Workspace 已确定但缺少执行配置时，在任务输入附近显示唯一主动作 `使用 Metask 登录`；
+5. 浏览器授权后，Host 后台恢复或加载 Key/模型并形成 ExecutionConfig；
+6. 只有真实多选歧义才在原位置请求选择，ready 后直接启用开始任务。
 
-Provider credential 只由 Host 读取和持有。Renderer 只显示 `Configured / Missing / Invalid` 等产品状态，不显示或回传秘密值。
+Workspace 选择、草稿和 Account 准备可以并行；没有 ready ExecutionConfig 时不得创建 Task 或发送 Run。Provider credential 只由 Host 读取和持有。Renderer 只显示 `需要登录 / 正在准备 / 需要选择 / 可执行 / 需要处理` 等产品状态，不显示或回传秘密值。
+
+并行不表示多个同等级 CTA：当前缺失 Workspace 时先突出 Workspace；Workspace 已确定后再突出 Account；后台已经进行的另一个条件只显示状态。没有 Key/模型时不显示永久 disabled select，而是说明缺少的对象并提供重试；只有 Host 提供固定管理入口时才显示 `在 Metask 中管理`。
+
+不显示四步 Account 进度条，不要求用户点击“加载 API Key”。等待浏览器期间提供 `重新打开登录页面` 和 `取消登录`；后台准备超过正常感知时长时说明正在等待什么，但不伪造百分比。
 
 ### 14.2 设置结构
 
@@ -533,8 +540,11 @@ General
 ├── Notifications
 └── Default detail level
 
-Providers
-└── Connection status and Host-owned setup actions
+Account
+├── Metask identity and connection status
+├── Current API Key suffix and model
+├── Change execution settings
+└── Refresh / reauthenticate / sign out
 
 Workspaces
 ├── Trusted folders
@@ -630,6 +640,7 @@ Host/Core 传递状态 code 和结构化参数，Renderer 负责本地化。用�
 - 3–4 个真实任务示例；
 - 当前 Workspace；
 - 必要的 trusted Workspace 限制提示。
+- 紧邻 Composer 的 Account readiness；它只显示当前唯一动作或后台状态，不抢占 Task 标题和输入。
 
 示例必须与本地工作任务相关，不使用空泛的营销文案。
 
@@ -641,6 +652,8 @@ Host/Core 传递状态 code 和结构化参数，Renderer 负责本地化。用�
 2. 哪些结果可能不完整；
 3. 用户可以采取什么动作；
 4. 技术详情入口。
+
+Account 错误还必须保留 Workspace 和 New task 草稿，并提供与失败语义匹配的 `重试`、`重新登录`、`重新打开登录页面`、`取消` 或 `重启应用`。普通异常不能留下无动作 spinner；只有持久化结果不确定等明确 fail-closed 边界可以要求重启。
 
 工具失败但 Agent 已恢复时不能把整个 Task 标记为失败。任务级失败才进入左栏 Failed 状态。
 
@@ -692,7 +705,18 @@ Host/Core 传递状态 code 和结构化参数，Renderer 负责本地化。用�
 - Interrupted；
 - View unavailable。
 
-### 19.4 内容状态
+### 19.4 Account 与首次启动
+
+- 首次 signed out：可选择 Workspace、可编辑草稿、不能启动 Run；
+- OAuth 正常完成、浏览器未回调、重新打开、取消和 hard deadline；
+- 历史选择命中、唯一 Key/模型自动推进；
+- 多 Key、多模型真实选择以及选择期间 reload；
+- catalog timeout/有限重试、OAuth exchange 失败、持久化确定失败与结果不确定；
+- 无 API Key、无模型以及 Host 未提供管理入口时的可理解恢复文案；
+- Bridge invoke timeout 后释放 busy、snapshot resync 后恢复 Host 动作；
+- ready 后 Account 降为轻量入口，切换/退出受 execution replacement gate 约束。
+
+### 19.5 内容状态
 
 - 短文本和长文本流；
 - 多个成功工具归并；
@@ -706,7 +730,7 @@ Host/Core 传递状态 code 和结构化参数，Renderer 负责本地化。用�
 - 后台 Task 通知；
 - Renderer reload 和视图重新同步。
 
-### 19.5 权限规则与失效
+### 19.6 权限规则与失效
 
 - Host 未声明可持久化 capability 时不显示 `Always allow`；
 - Workspace identity 改变、移除后重新授权和目录被替换；
@@ -718,7 +742,7 @@ Host/Core 传递状态 code 和结构化参数，Renderer 负责本地化。用�
 - stale、duplicate、expired 和错误 Task/Run/request 响应；
 - Renderer reload 后规则命中记录与请求状态从 Host 恢复。
 
-### 19.5 交互与可访问性
+### 19.7 交互与可访问性
 
 - 键盘完整操作；
 - focus 不丢失；

@@ -88,6 +88,25 @@ const accountOperations = [
   "persisting",
   "logging_out",
 ] as const;
+const accountReadiness = [
+  "checking",
+  "sign_in_required",
+  "preparing",
+  "choice_required",
+  "ready",
+  "needs_attention",
+  "restart_required",
+] as const;
+const accountPrimaryActions = [
+  "none",
+  "sign_in",
+  "reopen_login",
+  "choose_api_key",
+  "choose_model",
+  "retry_catalog",
+  "reauthenticate",
+  "restart",
+] as const;
 const accountErrorCodes = [
   "none",
   "invalid_command",
@@ -214,6 +233,9 @@ function decodeAccount(value: unknown, path: string): AccountView {
     "sessionState",
     "executionState",
     "operation",
+    "readiness",
+    "primaryAction",
+    "canCancel",
     "accountId",
     "displayName",
     "apiKeys",
@@ -268,6 +290,17 @@ function decodeAccount(value: unknown, path: string): AccountView {
     `${path}.operation`,
     accountOperations,
   );
+  const readiness = enumValue(
+    item.readiness,
+    `${path}.readiness`,
+    accountReadiness,
+  );
+  const primaryAction = enumValue(
+    item.primaryAction,
+    `${path}.primaryAction`,
+    accountPrimaryActions,
+  );
+  const canCancel = booleanValue(item.canCancel, `${path}.canCancel`);
   const accountId = stringValue(item.accountId, `${path}.accountId`);
   const displayName = stringValue(item.displayName, `${path}.displayName`);
   const selectedApiKeyId = stringValue(
@@ -292,6 +325,8 @@ function decodeAccount(value: unknown, path: string): AccountView {
   );
   if (executionState !== "ready" && canCreateTask)
     fail(path, "a non-ready execution cannot admit Tasks");
+  if (canCancel !== (operation !== "none" && operation !== "logging_out"))
+    fail(path, "cancellation availability disagrees with the active operation");
   if (
     executionState === "ready" &&
     (selectedApiKeyId.length === 0 ||
@@ -299,6 +334,10 @@ function decodeAccount(value: unknown, path: string): AccountView {
       executionGeneration === "0")
   )
     fail(path, "a ready execution requires selected identities and generation");
+  if (primaryAction === "choose_api_key" && apiKeys.length === 0)
+    fail(path, "API Key choice requires at least one candidate");
+  if (primaryAction === "choose_model" && models.length === 0)
+    fail(path, "model choice requires at least one candidate");
   if (
     sessionState === "signed_out" &&
     (executionState !== "none" ||
@@ -313,10 +352,46 @@ function decodeAccount(value: unknown, path: string): AccountView {
       canCreateTask)
   )
     fail(path, "signed-out Account state must be empty and fail closed");
+  const actionMatchesReadiness =
+    (readiness === "checking" &&
+      primaryAction === "none" &&
+      sessionState === "restoring") ||
+    (readiness === "sign_in_required" &&
+      primaryAction === "sign_in" &&
+      sessionState === "signed_out") ||
+    (readiness === "preparing" &&
+      operation !== "none" &&
+      operation !== "selecting_key" &&
+      operation !== "selecting_model" &&
+      (primaryAction === "none" ||
+        (primaryAction === "reopen_login" &&
+          sessionState === "authorizing" &&
+          operation === "oauth_callback"))) ||
+    (readiness === "choice_required" &&
+      ((primaryAction === "choose_api_key" && operation === "selecting_key") ||
+        (primaryAction === "choose_model" &&
+          operation === "selecting_model"))) ||
+    (readiness === "ready" &&
+      primaryAction === "none" &&
+      executionState === "ready") ||
+    (readiness === "needs_attention" &&
+      operation === "none" &&
+      ((primaryAction === "retry_catalog" &&
+        sessionState === "authenticated") ||
+        (primaryAction === "reauthenticate" &&
+          sessionState === "reauth_required"))) ||
+    (readiness === "restart_required" &&
+      primaryAction === "restart" &&
+      sessionState === "shutting_down");
+  if (!actionMatchesReadiness)
+    fail(path, "Account readiness and primary action disagree");
   return {
     sessionState,
     executionState,
     operation,
+    readiness,
+    primaryAction,
+    canCancel,
     accountId,
     displayName,
     apiKeys,

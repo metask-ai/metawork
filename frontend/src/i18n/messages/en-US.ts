@@ -25,28 +25,46 @@ export const enUS = {
   "connection.refresh_failed": "The latest Workbench view could not be loaded.",
   "account.label": "Metask account",
   "account.signed_in": "Signed in",
-  "account.prepare_title": "Connect Metask to start working.",
-  "account.prepare_body":
-    "Sign in with your Metask account, then choose the API Key and model MetaWork will use for new tasks.",
-  "account.progress": "Account setup progress",
-  "account.step.account": "Account",
-  "account.step.key": "API Key",
-  "account.step.model": "Model",
-  "account.step.ready": "Ready",
-  "account.step_state.waiting": "Waiting",
-  "account.step_state.current": "Current step",
-  "account.step_state.working": "In progress",
-  "account.step_state.done": "Complete",
   "account.ready": "Ready",
-  "account.session.restoring": "Restoring",
-  "account.session.signed_out": "Signed out",
-  "account.session.authorizing": "Authorizing",
-  "account.session.authenticated": "Signed in",
-  "account.session.refreshing": "Refreshing",
-  "account.session.reauth_required": "Sign-in required",
-  "account.session.shutting_down": "Restart required",
+  "account.readiness.checking.title": "Checking your work setup",
+  "account.readiness.checking.body":
+    "Your draft is safe while MetaWork checks this device.",
+  "account.readiness.sign_in_required.title": "Connect Metask to send",
+  "account.readiness.sign_in_required.body":
+    "Keep writing your draft. Sign in when you are ready to start the task.",
+  "account.readiness.preparing.title": "Preparing this task",
+  "account.readiness.preparing.body":
+    "MetaWork is getting the execution setup ready in the background.",
+  "account.readiness.choice_required.title": "Choose how this task will run",
+  "account.readiness.choice_required.body":
+    "MetaWork needs one choice before it can start the task.",
+  "account.readiness.ready.title": "Ready to work",
+  "account.readiness.ready.body": "This task can be sent.",
+  "account.readiness.needs_attention.title": "Finish preparing this task",
+  "account.readiness.needs_attention.body":
+    "Your draft is safe. Try the account preparation again.",
+  "account.readiness.restart_required.title": "Restart MetaWork to continue",
+  "account.readiness.restart_required.body":
+    "Your draft is safe. Close and reopen MetaWork before sending it.",
   "account.action_failed": "Account action needs attention",
-  "account.error_code": "Metask returned {code}.",
+  "account.error.no_api_keys":
+    "No API Keys are available for this Metask account. Add one in Metask, then try again.",
+  "account.error.no_models":
+    "No supported models are available for the selected API Key. Check it in Metask, then try again.",
+  "account.error.deadline":
+    "Metask did not respond in time. Check your connection and try again.",
+  "account.error.browser":
+    "MetaWork could not open the sign-in page. Try opening it again.",
+  "account.error.authorization":
+    "The Metask sign-in could not be completed. Start sign-in again.",
+  "account.error.service":
+    "Metask is temporarily unavailable. Your draft is safe; try again shortly.",
+  "account.error.credentials":
+    "MetaWork could not safely update the account saved on this device.",
+  "account.error.local":
+    "MetaWork could not finish preparing this task on this device. Try again.",
+  "account.error.generic":
+    "MetaWork could not finish preparing this task. Your draft is safe.",
   "account.cancelled": "The account action was cancelled.",
   "account.operation.oauth_callback": "Waiting for Metask authorization",
   "account.operation.token_exchange": "Completing Metask sign-in",
@@ -55,11 +73,10 @@ export const enUS = {
   "account.operation.loading_models": "Loading available models",
   "account.operation.selecting_model": "Choose a model",
   "account.operation.persisting": "Saving execution settings",
-  "account.operation.logging_out": "Signing out and clearing this Mac",
-  "account.restart_required":
-    "Close and reopen MetaWork before making another account change.",
+  "account.operation.logging_out": "Signing out and clearing this device",
   "account.login": "Sign in with Metask",
-  "account.restoring": "Restoring the account saved on this Mac…",
+  "account.reopen_login": "Open sign-in page again",
+  "account.retry_preparation": "Try again",
   "account.reauthenticate": "Sign in again",
   "account.api_key": "API Key",
   "account.saved_key": "Saved API Key",
@@ -67,13 +84,23 @@ export const enUS = {
   "account.choose_key": "Choose an API Key",
   "account.choose_model": "Choose a model",
   "account.cancel": "Cancel current action",
-  "account.load_catalog": "Load API Keys",
   "account.refresh_catalog": "Refresh account options",
-  "account.logout": "Sign out and clear this Mac",
-  "account.command_rejected": "Metask account action was rejected: {code}",
-  "account.command_failed": "Metask account action failed: {error}",
+  "account.logout": "Sign out and clear this device",
+  "account.command_rejected":
+    "That account action is no longer available. MetaWork kept the latest account state.",
+  "account.command_failed":
+    "MetaWork could not complete that account action. Use the recovery action shown beside your draft.",
+  "account.cancel_rejected":
+    "That account action has already finished. MetaWork checked the latest state.",
+  "account.cancel_failed":
+    "MetaWork could not cancel the account action. It will still stop at its Host deadline.",
   "account.updated": "Metask account updated.",
   "operation.account": "Updating the Metask account",
+  "operation.account_cancel": "Cancelling the Metask account action",
+  "command.timeout_reconciled":
+    "{operation} took longer than expected. MetaWork checked the current Host state and did not repeat the action.",
+  "command.timeout_sync_failed":
+    "{operation} took longer than expected, and the latest state could not be confirmed. Reconnect before trying again.",
   "workspace.label": "Workspace",
   "workspace.add": "Add",
   "workspace.switch": "Switch workspace",

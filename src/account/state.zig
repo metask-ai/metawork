@@ -40,6 +40,7 @@ fn BoundedString(comptime capacity: usize) type {
 
 pub const Effect = union(enum) {
     begin_oauth,
+    reopen_oauth,
     refresh_token,
     load_api_keys,
     load_models: ApiKeyId,
@@ -105,6 +106,10 @@ const CommittedState = struct {
             .session_state = self.session_state,
             .execution_state = self.execution_state,
             .operation = self.operation,
+            .readiness = self.readiness(),
+            .primary_action = self.primaryAction(),
+            .can_cancel = self.operation != .none and
+                self.operation != .logging_out,
             .account_id = self.account_id.view(),
             .display_name = self.display_name.view(),
             .selected_api_key_id = self.selected_api_key_id.view(),
@@ -115,6 +120,43 @@ const CommittedState = struct {
             .safe_diagnostic = self.safe_diagnostic.view(),
             .catalog_generation = self.catalog_generation,
             .execution_generation = self.execution_generation,
+        };
+    }
+
+    fn readiness(self: *const CommittedState) contract.AccountReadiness {
+        if (self.session_state == .shutting_down) return .restart_required;
+        if (self.execution_state == .ready) return .ready;
+        if (self.session_state == .restoring) return .checking;
+        if (self.session_state == .signed_out) return .sign_in_required;
+        if (self.session_state == .reauth_required) return .needs_attention;
+        return switch (self.operation) {
+            .selecting_key, .selecting_model => .choice_required,
+            .none => .needs_attention,
+            else => .preparing,
+        };
+    }
+
+    fn primaryAction(
+        self: *const CommittedState,
+    ) contract.AccountPrimaryAction {
+        return switch (self.readiness()) {
+            .checking, .ready => .none,
+            .sign_in_required => .sign_in,
+            .restart_required => .restart,
+            .preparing => if (self.session_state == .authorizing and
+                self.operation == .oauth_callback)
+                .reopen_login
+            else
+                .none,
+            .choice_required => switch (self.operation) {
+                .selecting_key => .choose_api_key,
+                .selecting_model => .choose_model,
+                else => unreachable,
+            },
+            .needs_attention => if (self.session_state == .reauth_required)
+                .reauthenticate
+            else
+                .retry_catalog,
         };
     }
 
@@ -171,6 +213,7 @@ pub const Account = struct {
 
         return switch (command) {
             .begin_login => self.prepareBeginLogin(),
+            .reopen_login => self.prepareReopenLogin(),
             .reauthenticate => self.prepareReauthenticate(),
             .cancel_operation => self.prepareCancel(),
             .refresh_catalog => self.prepareRefreshCatalog(),
@@ -365,6 +408,25 @@ pub const Account = struct {
         };
     }
 
+    /// Records failure to admit an automatic background continuation. This
+    /// converts an otherwise invisible idle state into a retryable product
+    /// state without inventing or replaying an external attempt.
+    pub fn prepareIdleFailure(
+        self: *const Account,
+        error_code: contract.ErrorCode,
+    ) PrepareResult {
+        if (error_code == .none or
+            self.state.session_state != .authenticated or
+            self.state.execution_state != .none or
+            self.state.operation != .none or
+            self.state.active_attempt_id != null)
+            return .{ .rejected = .invalid_state };
+        var next = self.state;
+        next.error_code = error_code;
+        next.safe_diagnostic.clear();
+        return transitionNoAttempt(next, .operation_failed);
+    }
+
     fn prepareBeginLogin(self: *const Account) PrepareResult {
         if (self.state.session_state != .signed_out or
             self.state.operation != .none)
@@ -395,6 +457,21 @@ pub const Account = struct {
         next.next_attempt_id = attempt.next;
         next.clearError();
         return transition(next, .session_changed, attempt.current, .begin_oauth);
+    }
+
+    fn prepareReopenLogin(self: *const Account) PrepareResult {
+        if (self.state.session_state != .authorizing or
+            self.state.operation != .oauth_callback or
+            self.state.active_attempt_id == null or
+            (self.state.attempt_kind != .login and
+                self.state.attempt_kind != .reauthenticate))
+            return .{ .rejected = .invalid_state };
+        return transition(
+            self.state,
+            .session_changed,
+            self.state.active_attempt_id.?,
+            .reopen_oauth,
+        );
     }
 
     fn prepareCancel(self: *const Account) PrepareResult {
@@ -1086,6 +1163,53 @@ test "command prepare does not mutate committed state before commit" {
     try std.testing.expectEqual(@as(?u64, 1), account.activeAttempt());
 }
 
+test "Host product readiness exposes login recovery without Renderer inference" {
+    var account = Account.initSignedOutForTest();
+    try std.testing.expectEqual(
+        contract.AccountReadiness.sign_in_required,
+        account.view().readiness,
+    );
+    try std.testing.expectEqual(
+        contract.AccountPrimaryAction.sign_in,
+        account.view().primary_action,
+    );
+
+    var begin = switch (account.prepareCommand(.begin_login)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    _ = begin.takeEffect();
+    commitPrepared(&account, &begin);
+    try std.testing.expectEqual(
+        contract.AccountReadiness.preparing,
+        account.view().readiness,
+    );
+    try std.testing.expectEqual(
+        contract.AccountPrimaryAction.reopen_login,
+        account.view().primary_action,
+    );
+    try std.testing.expect(account.view().can_cancel);
+
+    var reopen = switch (account.prepareCommand(.reopen_login)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(reopen.takeEffect().? == .reopen_oauth);
+    commitPrepared(&account, &reopen);
+
+    var cancel = switch (account.prepareCommand(.cancel_operation)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    _ = cancel.takeEffect();
+    commitPrepared(&account, &cancel);
+    try std.testing.expectEqual(
+        contract.AccountReadiness.sign_in_required,
+        account.view().readiness,
+    );
+    try std.testing.expect(!account.view().can_cancel);
+}
+
 test "matching malformed completion fails the attempt instead of wedging it" {
     var account = Account.initSignedOutForTest();
     var begin = switch (account.prepareCommand(.begin_login)) {
@@ -1127,7 +1251,7 @@ test "fake browser client and store observe only committed effects" {
             const self: *@This() = @ptrCast(@alignCast(raw));
             if (!self.accept) return false;
             switch (effect) {
-                .begin_oauth => self.browser_calls += 1,
+                .begin_oauth, .reopen_oauth => self.browser_calls += 1,
                 .refresh_token => self.client_calls += 1,
                 .load_api_keys, .load_models => self.client_calls += 1,
                 .prepare_execution,

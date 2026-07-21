@@ -1059,6 +1059,8 @@ pub fn installWorkbenchExecution(
             .session_state = .authenticated,
             .execution_state = .ready,
             .operation = .none,
+            .readiness = .ready,
+            .primary_action = .none,
             .account_id = "account-1",
             .display_name = "Fixture User",
             .selected_api_key_id = "key-1",

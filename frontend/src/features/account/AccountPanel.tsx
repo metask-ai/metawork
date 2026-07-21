@@ -1,11 +1,10 @@
 import type { AccountView } from "../../bridge/contracts.ts";
 import { useI18n } from "../../i18n/context.ts";
+import { accountErrorText } from "./AccountPrerequisite.tsx";
 
 type Props = {
   account: AccountView;
-  compact?: boolean;
   disabled: boolean;
-  onBeginLogin: () => void;
   onReauthenticate: () => void;
   onCancel: () => void;
   onRefresh: () => void;
@@ -14,11 +13,11 @@ type Props = {
   onLogout: () => void;
 };
 
+/// Secondary account controls for an already usable Workbench. First-run
+/// readiness belongs beside the Composer in AccountPrerequisite.
 export function AccountPanel({
   account,
-  compact = false,
   disabled,
-  onBeginLogin,
   onReauthenticate,
   onCancel,
   onRefresh,
@@ -27,299 +26,143 @@ export function AccountPanel({
   onLogout,
 }: Props) {
   const { t } = useI18n();
-  const hasAccount =
-    account.sessionState === "authenticated" ||
-    account.sessionState === "refreshing" ||
-    account.sessionState === "reauth_required";
-  const canConfigureCatalog = account.sessionState === "authenticated";
-  const canSelectApiKey =
-    canConfigureCatalog && account.operation === "selecting_key";
-  const canSelectModel =
-    canConfigureCatalog && account.operation === "selecting_model";
-  const selectedApiKeyPresent = account.apiKeys.some(
-    (key) => key.id === account.selectedApiKeyId,
-  );
-  const selectedModelPresent = account.models.some(
-    (model) => model.id === account.selectedModel,
-  );
-  const apiKeyValue = canSelectApiKey ? "" : account.selectedApiKeyId;
-  const modelValue = canSelectModel ? "" : account.selectedModel;
-  const operationActive = account.operation !== "none";
-  const cancellable = operationActive && account.operation !== "logging_out";
-  const ready = account.executionState === "ready";
   const operationStatus =
     account.operation === "none"
       ? null
       : t(`account.operation.${account.operation}`);
-  const restartRequired =
-    account.sessionState === "shutting_down" ||
-    account.errorCode === "recovery_state_invalid";
+  const selectedKey = account.apiKeys.find(
+    (key) => key.id === account.selectedApiKeyId,
+  );
+  const selectedKeyLabel = selectedKey
+    ? `${selectedKey.name || selectedKey.id}${
+        selectedKey.suffix ? ` · ${selectedKey.suffix}` : ""
+      }`
+    : t("account.saved_key");
 
   return (
     <section
-      className={compact ? "account-panel is-compact" : "account-panel"}
-      aria-labelledby={compact ? "account-title-compact" : "account-title"}
+      className="account-panel is-compact"
+      aria-labelledby="account-title"
     >
       <div className="account-panel-heading">
-        <div>
+        <div className="min-w-0">
           <p className="section-label">{t("account.label")}</p>
-          <h2 id={compact ? "account-title-compact" : "account-title"}>
-            {ready
-              ? account.displayName || t("account.signed_in")
-              : t("account.prepare_title")}
+          <h2 id="account-title">
+            {account.displayName || t("account.signed_in")}
           </h2>
         </div>
-        <span
-          className="account-readiness"
-          data-ready={ready && account.canCreateTask}
-        >
-          {operationStatus ??
-            (ready && account.canCreateTask
-              ? t("account.ready")
-              : t(`account.session.${account.sessionState}`))}
+        <span className="account-readiness" data-ready="true">
+          {t("account.ready")}
         </span>
       </div>
 
-      {!compact && (
-        <>
-          <p className="account-intro">{t("account.prepare_body")}</p>
-          <ol className="account-track" aria-label={t("account.progress")}>
-            <Step
-              index={1}
-              label={t("account.step.account")}
-              statusLabels={{
-                waiting: t("account.step_state.waiting"),
-                current: t("account.step_state.current"),
-                working: t("account.step_state.working"),
-                done: t("account.step_state.done"),
-              }}
-              state={
-                hasAccount
-                  ? "done"
-                  : account.sessionState === "signed_out"
-                    ? "current"
-                    : "working"
-              }
-            />
-            <Step
-              index={2}
-              label={t("account.step.key")}
-              statusLabels={{
-                waiting: t("account.step_state.waiting"),
-                current: t("account.step_state.current"),
-                working: t("account.step_state.working"),
-                done: t("account.step_state.done"),
-              }}
-              state={
-                account.selectedApiKeyId
-                  ? "done"
-                  : hasAccount
-                    ? "current"
-                    : "waiting"
-              }
-            />
-            <Step
-              index={3}
-              label={t("account.step.model")}
-              statusLabels={{
-                waiting: t("account.step_state.waiting"),
-                current: t("account.step_state.current"),
-                working: t("account.step_state.working"),
-                done: t("account.step_state.done"),
-              }}
-              state={
-                account.selectedModel
-                  ? "done"
-                  : account.selectedApiKeyId
-                    ? "current"
-                    : "waiting"
-              }
-            />
-            <Step
-              index={4}
-              label={t("account.step.ready")}
-              statusLabels={{
-                waiting: t("account.step_state.waiting"),
-                current: t("account.step_state.current"),
-                working: t("account.step_state.working"),
-                done: t("account.step_state.done"),
-              }}
-              state={ready ? "done" : "waiting"}
-            />
-          </ol>
-        </>
-      )}
+      <dl className="account-summary">
+        <div>
+          <dt>{t("account.api_key")}</dt>
+          <dd>{selectedKeyLabel}</dd>
+        </div>
+        <div>
+          <dt>{t("account.model")}</dt>
+          <dd>{account.selectedModel}</dd>
+        </div>
+      </dl>
 
-      {account.errorCode === "user_cancelled" ? (
-        <p className="account-working" role="status">
-          {t("account.cancelled")}
-        </p>
-      ) : (
-        account.errorCode !== "none" && (
+      {account.errorCode !== "none" &&
+        account.errorCode !== "user_cancelled" && (
           <div className="account-error" role="alert">
             <strong>{t("account.action_failed")}</strong>
-            <span>
-              {account.safeDiagnostic ||
-                t("account.error_code", { code: account.errorCode })}
-            </span>
+            <span>{accountErrorText(account.errorCode, t)}</span>
           </div>
-        )
-      )}
+        )}
 
-      {restartRequired ? (
-        <p className="account-restart">{t("account.restart_required")}</p>
-      ) : account.sessionState === "signed_out" ? (
-        <button
-          className="primary-button focus-ring"
-          disabled={disabled}
-          onClick={onBeginLogin}
-        >
-          {t("account.login")}
-        </button>
-      ) : account.sessionState === "restoring" ? (
+      {operationStatus && (
         <p className="account-working" role="status">
-          {t("account.restoring")}
+          {operationStatus}
         </p>
-      ) : (
-        <>
-          {operationStatus && (
-            <p className="account-working" role="status">
-              {operationStatus}
-            </p>
-          )}
-
-          {account.sessionState === "reauth_required" && (
-            <button
-              className="primary-button focus-ring"
-              disabled={disabled}
-              onClick={onReauthenticate}
-            >
-              {t("account.reauthenticate")}
-            </button>
-          )}
-
-          {hasAccount && (
-            <div className="account-fields">
-              <label>
-                <span>{t("account.api_key")}</span>
-                <select
-                  className="focus-ring"
-                  value={apiKeyValue}
-                  disabled={
-                    disabled || !canSelectApiKey || account.apiKeys.length === 0
-                  }
-                  onChange={(event) => {
-                    if (event.target.value) onSelectApiKey(event.target.value);
-                  }}
-                >
-                  <option value="">{t("account.choose_key")}</option>
-                  {!canSelectApiKey &&
-                    account.selectedApiKeyId &&
-                    !selectedApiKeyPresent && (
-                      <option value={account.selectedApiKeyId}>
-                        {t("account.saved_key")}
-                      </option>
-                    )}
-                  {account.apiKeys.map((key) => (
-                    <option key={key.id} value={key.id}>
-                      {key.name || key.id}
-                      {key.suffix ? ` · ${key.suffix}` : ""}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                <span>{t("account.model")}</span>
-                <select
-                  className="focus-ring"
-                  value={modelValue}
-                  disabled={
-                    disabled || !canSelectModel || account.models.length === 0
-                  }
-                  onChange={(event) => {
-                    if (event.target.value) onSelectModel(event.target.value);
-                  }}
-                >
-                  <option value="">{t("account.choose_model")}</option>
-                  {!canSelectModel &&
-                    account.selectedModel &&
-                    !selectedModelPresent && (
-                      <option value={account.selectedModel}>
-                        {account.selectedModel}
-                      </option>
-                    )}
-                  {account.models.map((model) => (
-                    <option key={model.id} value={model.id}>
-                      {model.displayName || model.id}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
-          )}
-
-          <div className="account-actions">
-            {cancellable ? (
-              <button
-                className="secondary-button focus-ring"
-                disabled={disabled}
-                onClick={onCancel}
-              >
-                {t("account.cancel")}
-              </button>
-            ) : (
-              canConfigureCatalog &&
-              !operationActive && (
-                <button
-                  className="secondary-button focus-ring"
-                  disabled={disabled}
-                  onClick={onRefresh}
-                >
-                  {account.apiKeys.length === 0
-                    ? t("account.load_catalog")
-                    : t("account.refresh_catalog")}
-                </button>
-              )
-            )}
-            {hasAccount && !operationActive && (
-              <button
-                className="text-button focus-ring"
-                disabled={disabled}
-                onClick={onLogout}
-              >
-                {t("account.logout")}
-              </button>
-            )}
-          </div>
-        </>
       )}
-    </section>
-  );
-}
 
-function Step({
-  index,
-  label,
-  state,
-  statusLabels,
-}: {
-  index: number;
-  label: string;
-  state: "waiting" | "current" | "working" | "done";
-  statusLabels: Record<"waiting" | "current" | "working" | "done", string>;
-}) {
-  return (
-    <li
-      data-state={state}
-      aria-current={
-        state === "current" || state === "working" ? "step" : undefined
-      }
-    >
-      <span className="account-step-mark" aria-hidden="true">
-        {state === "done" ? "✓" : index}
-      </span>
-      <strong>{label}</strong>
-      <span className="sr-only">{statusLabels[state]}</span>
-    </li>
+      {account.operation === "selecting_key" && (
+        <label className="account-settings-choice">
+          <span>{t("account.api_key")}</span>
+          <select
+            className="focus-ring"
+            value=""
+            disabled={disabled}
+            onChange={(event) => {
+              if (event.target.value) onSelectApiKey(event.target.value);
+            }}
+          >
+            <option value="">{t("account.choose_key")}</option>
+            {account.apiKeys.map((key) => (
+              <option key={key.id} value={key.id}>
+                {key.name || key.id}
+                {key.suffix ? ` · ${key.suffix}` : ""}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+
+      {account.operation === "selecting_model" && (
+        <label className="account-settings-choice">
+          <span>{t("account.model")}</span>
+          <select
+            className="focus-ring"
+            value=""
+            disabled={disabled}
+            onChange={(event) => {
+              if (event.target.value) onSelectModel(event.target.value);
+            }}
+          >
+            <option value="">{t("account.choose_model")}</option>
+            {account.models.map((model) => (
+              <option key={model.id} value={model.id}>
+                {model.displayName || model.id}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+
+      <div className="account-actions">
+        {account.sessionState === "reauth_required" && (
+          <button
+            className="secondary-button focus-ring"
+            disabled={disabled}
+            onClick={onReauthenticate}
+          >
+            {t("account.reauthenticate")}
+          </button>
+        )}
+        {account.canCancel ? (
+          <button
+            className="secondary-button focus-ring"
+            disabled={disabled}
+            onClick={onCancel}
+          >
+            {t("account.cancel")}
+          </button>
+        ) : (
+          account.operation === "none" && (
+            <button
+              className="secondary-button focus-ring"
+              disabled={disabled}
+              onClick={onRefresh}
+            >
+              {t("account.refresh_catalog")}
+            </button>
+          )
+        )}
+        {account.operation === "none" && (
+          <button
+            className="text-button focus-ring"
+            disabled={disabled}
+            onClick={onLogout}
+          >
+            {t("account.logout")}
+          </button>
+        )}
+      </div>
+    </section>
   );
 }

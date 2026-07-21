@@ -112,6 +112,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.snapshot, .function = beginSnapshot },
             .{ .name = commands.snapshot_chunk, .function = fetchSnapshotChunk },
             .{ .name = commands.account_begin_login, .function = accountBeginLogin },
+            .{ .name = commands.account_reopen_login, .function = accountReopenLogin },
             .{ .name = commands.account_reauthenticate, .function = accountReauthenticate },
             .{ .name = commands.account_cancel_operation, .function = accountCancelOperation },
             .{ .name = commands.account_refresh_catalog, .function = accountRefreshCatalog },
@@ -356,6 +357,19 @@ pub const Dispatcher = struct {
             invocation,
             output,
             .reauthenticate,
+        );
+    }
+
+    fn accountReopenLogin(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        return submitEmptyAccountCommand(
+            context,
+            invocation,
+            output,
+            .reopen_login,
         );
     }
 
@@ -923,6 +937,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
             self.account_calls += 1;
             switch (command) {
                 .begin_login,
+                .reopen_login,
                 .reauthenticate,
                 .cancel_operation,
                 .refresh_catalog,

@@ -35,6 +35,9 @@ Account 负责 Metask 账号登录和执行资格配置，最终向 Workbench �
 5. Renderer 命令与 worker completion 都由 App 主线程执行同一条 Account prepared/no-fail 提交链；Bridge 和 worker 都不能直接修改 Account committed state。
 6. 当前只允许一个 active ExecutionConfig；Workbench 未达到 execution quiescence 时禁止账号、API Key 或模型切换，也禁止退出账号。
 7. 不保留旧 Renderer schema、旧环境变量配置路径或旧 AgentCore 消费路径的兼容层。
+8. `account_only` 提交后由 Host 启动独立、有界的 catalog continuation；历史选择或唯一候选可以自动推进，真实歧义才请求用户选择。
+9. Renderer 可以在 Account 未 ready 时选择 Workspace 和保存 New task 草稿，但不能提前创建 Task 或启动 Run。
+10. 每个 attempt 必须收口；没有 callback、网络悬挂、取消、Bridge 超时或 reload 都不能形成永久 busy。
 
 ## 3. 目标与非目标
 
@@ -46,6 +49,7 @@ Account 负责 Metask 账号登录和执行资格配置，最终向 Workbench �
 - 选择 API Key 与模型，验证后生成唯一 active ExecutionConfig。
 - 使用系统安全凭据存储保存敏感信息。
 - 在 Renderer 展示脱敏 Account 状态，并提供登录、选择、重试和退出交互。
+- 让 Renderer 以 Task-first readiness 和 Host 允许的动作呈现流程，不暴露内部 operation 作为用户步骤。
 - 保持现有 AgentCore ABI 和正式 Host 边界不变。
 - 给失败、取消、崩溃恢复和 shutdown 定义可验证的语义。
 
@@ -77,7 +81,7 @@ Account 负责 Metask 账号登录和执行资格配置，最终向 Workbench �
 | metadata pointer 与 tombstone 的“原子”没有存储合同           | 正确                   | 固定 macOS manifest 路径和 fsync/rename crash protocol               |
 | ExecutionConfig 的 provider/base URL 没有权威来源            | 正确                   | 增加 Metask ExecutionTarget 前置合同和生产 endpoint allowlist        |
 | “没有 live Task”不是可执行的 quiescence 判定                 | 正确                   | 由 Workbench 提供线性化 replacement gate 和精确 quiescence predicate |
-| 重复 terminal completion 会破坏结果 ownership               | 正确                   | 单 active attempt 只允许一次 terminal publish；collision fail closed |
+| 重复 terminal completion 会破坏结果 ownership                | 正确                   | 单 active attempt 只允许一次 terminal publish；collision fail closed |
 | 单一 phase 混合账号与执行配置状态                            | 正确                   | 拆成 `AccountSessionState` 与 `ExecutionState` 两个正交状态          |
 
 以下方向没有采纳：
@@ -253,6 +257,17 @@ Task admission 只依赖 committed ExecutionConfig 是否 ready、generation 是
 
 错误事实必须携带所属 state/operation，并保留可恢复上下文：是登录失败、刷新失败、目录失败、验证失败还是安全存储失败。Renderer 只能得到稳定错误码和安全诊断。
 
+内部 `AccountSessionState` / `ExecutionState` / `OperationKind` 继续用于正确性和 ownership；Workbench 对 Renderer 的产品投影还必须明确区分：后台准备、等待浏览器、需要选择 Key、需要选择模型、ready、需要重新登录、可重试失败和 restart-required，并发布当前允许的主动作与 `can_cancel`。Renderer 不根据内部组合自行推导下一条命令。
+
+attempt liveness 规则：
+
+- OAuth callback wait 与每个网络 attempt 都有 Host deadline；soft wait 只影响提示，不改变 hard deadline；
+- cancel 对 active attempt 始终幂等，且与普通 Renderer busy 解耦；
+- catalog GET 可以使用有界 retry budget；OAuth code exchange 和结果不确定 mutation 不能自动重放；
+- `no_api_keys` / `no_models` 保留 authenticated，清除 active attempt 并发布可重试动作；只有 Host 固定管理入口存在时才允许 Renderer 请求 Host 打开；
+- terminal completion 必须先清除 active attempt，再发布新的产品动作；
+- Renderer command timeout 后只 resync snapshot，不重复 mutation；reload 后从 Host 投影恢复等待、取消或重试。
+
 ## 8. 两阶段启动与线程模型
 
 当前 Native SDK `PlatformServices` 只在 App start 后可用，因此启动分为两阶段：
@@ -349,7 +364,7 @@ Workbench 只有在以下条件同时满足时才允许创建 Task：
 
 Metask 产品 owner 已锁定 C1：MetaWork 作为 Metask 第一方客户端使用 Authorization Code + PKCE S256、`https://napi.metask-ai.com`、`client_id=metacode-cli`、`scope=metacode:use`、动态 `127.0.0.1` loopback `/auth/callback`，并通过 bearer `GET /v1/profiles` 取得 identity。精确值、schema 和生命周期见 [Metask Account API 合同](metask-account-contract.md)。
 
-C1 登录成功提交 `account_only`，不自动加载 API Key/model，也不打开 Task admission。C2 已锁定为：
+C1 登录成功独立提交 `account_only`，不在同一事务中加载 API Key/model，也不打开 Task admission。commit 后产品编排自动启动一个新的 C2 catalog attempt；C2 已锁定为：
 
 - OAuth bearer + `X-Metacode-Profile-ID` 请求固定 `GET /api/v1/keys?page=1&page_size=100`；
 - 选中 API Key bearer + 同一 profile header 请求固定 `GET /v1/models`；
@@ -367,7 +382,7 @@ MetaWork 只消费这个公开合同，不要求修改 `cc-t2z/metacodes`，也�
 - 禁止 userinfo、fragment 和 IP literal；
 - 模型请求默认禁止 redirect；确需 redirect 时只允许同 scheme、同 host、同 port。
 
-C2 不改变 C1 边界：登录、恢复、刷新和退出仍可独立停在 `account_only`。测试 endpoint 只能由 test build module 注入。
+C2 不改变 C1 边界：登录、恢复、刷新和退出仍可独立停在 `account_only`，C2 失败也不回滚登录；“可以停在”不是要求用户手动启动目录加载。测试 endpoint 只能由 test build module 注入。
 
 ### 10.2 OAuth
 
@@ -378,8 +393,10 @@ C2 不改变 C1 边界：登录、恢复、刷新和退出仍可独立停在 `ac
 3. 由 Host 打开 Metask authorize URL。
 4. 校验 callback state 并交换 OAuth token。
 5. 使用 OAuth bearer token查询 `/v1/profiles`，提交 `account_only` manifest 并结束登录 attempt。
-6. C2 通过独立命令加载 API Key/model catalog。
-7. 用户选择模型后，Account 验证组合并形成 staged ExecutionConfig。
+6. C1 commit 后由 Host 创建独立 C2 attempt，自动加载 API Key catalog。
+7. 仍有效的历史 Key 优先恢复；没有历史选择时唯一 Key 自动采用；多 Key 且无明确默认时发布一次用户选择。
+8. 选定 Key 后自动加载 model catalog，并按相同规则恢复、自动采用唯一模型或请求真实选择。
+9. 模型确定后，Account 验证组合并形成 staged ExecutionConfig。
 
 生产 endpoint、client id、scope 和 redirect 规则来自第 10.1 节合同，并以固定生产配置编译。
 
@@ -534,9 +551,10 @@ Bridge 从 Workbench snapshot 读取 AccountView。Account 命令只能调用 Ap
 
 Renderer 根据 account session state、execution state 和 operation 显示：
 
-- 首次使用登录引导；
-- 浏览器授权进度和取消；
-- API Key 与模型选择；
+- New task 内的轻量登录/readiness 引导，不阻塞 Workspace 选择和草稿编辑；
+- 浏览器授权进度、重新打开登录页和独立取消；
+- 只在真实歧义时出现的 API Key 或模型选择；
+- 无可用 Key/模型时说明缺失项并提供重试，不把用户留在 disabled select；
 - 恢复、刷新、验证和重试状态；
 - ready 状态的脱敏账号与当前模型；
 - execution quiescence 未满足时的切换/退出阻止原因；
@@ -566,13 +584,15 @@ Account contract 使用稳定 ErrorCode，至少覆盖：
 
 所有队列、字符串、目录、HTTP body、callback 请求和 worker 数量必须有硬上限。
 
-Account 当前不发布 progress completion。状态机只允许一个 active attempt，LoginAttempt 与 NetworkAttempt 互斥，每个 worker 只发布一个 owned terminal result。App 因此只拥有一个预分配的 single terminal mailbox：
+Account 当前不发布逐百分比 progress。状态机只允许一个 active attempt，LoginAttempt 与 NetworkAttempt 互斥，每个 worker 只发布一个 owned terminal result。App 因此只拥有一个预分配的 single terminal mailbox：
 
 - first writer 把 terminal result ownership 转移给 App，并通过 Native SDK main-loop wake 通知主线程；
 - 第二次 publish 是 attempt 生命周期合同冲突，不是正常容量压力；被拒绝的 owned result 立即释放并清零，已进入 mailbox 的结果在消费时转换为 `dependency_contract_invalid`；
 - 浏览器打开失败只有在对应 login worker 已 cancel/join、attempt id 仍匹配后，才能替换其尚未消费的 terminal result；
 - stale、cancel 和 shutdown 路径必须确定释放 owned result；正常 shutdown 先 cancel/join worker，再释放平台服务；
 - wake 是当前 macOS Host 的必备无失败合同，不建模成可恢复业务错误；活跃 Account worker 无法 wake 表示 Host 组合或 shutdown 次序已被破坏，必须 fail stop。
+
+single mailbox 不提供无限等待许可：所有 worker 和 callback wait 都必须受 Host deadline 约束。Renderer 还必须为 Bridge invoke 设置本地时限；本地时限只解除 busy 并请求 canonical snapshot，不能凭空生成失败 completion 或自动重复 Host mutation。
 
 ## 15. 验证方案
 
@@ -660,7 +680,7 @@ npm run package:macos
 - 实现 OAuth loopback、PKCE、token/profile client 和 account-only credential generations。
 - 完成 Native SDK 主线程合同与 macOS manifest rename/fsync。
 - 实现 account-only manifest、tombstone、restore、refresh rotation、cancel/join 和 crash injection tests。
-- 登录完成后保持 ExecutionState none，不自动进入 catalog。
+- 登录事务完成后先保持 ExecutionState none；commit 后由产品编排创建独立 C2 catalog attempt，C1 本身不把目录加载并入登录事务。
 - 完成后进行 Linus 审核。
 
 ### C2. Metask 执行目录
@@ -689,6 +709,7 @@ npm run package:macos
 ### F. Renderer
 
 - 实现登录、选择、ready、失败、重配置和退出 UX。
+- 实现 Task-first shell、后台 readiness、只在歧义时选择以及可恢复 OAuth 等待；移除手动加载目录的首次使用步骤。
 - 自动化覆盖完整首次使用与恢复流程。
 - 完成后进行 Linus 审核。
 

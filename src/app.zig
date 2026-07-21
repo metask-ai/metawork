@@ -269,11 +269,43 @@ const AccountEffects = struct {
         platform.openAuthorizationUrl(
             self.login_attempt.authorizationUrl(),
         ) catch {
+            self.failLoginAttempt(
+                attempt_id,
+                .oauth_browser_open_failed,
+            );
+        };
+    }
+
+    fn failLoginAttempt(
+        self: *AccountEffects,
+        attempt_id: u64,
+        error_code: account_contract.ErrorCode,
+    ) void {
+        if (self.login_active) {
             self.login_attempt.cancel();
-            self.login_attempt.join();
-            self.login_attempt.deinit();
-            self.login_active = false;
-            self.replaceWithFailure(
+            self.joinLogin();
+        }
+        self.replaceWithFailure(attempt_id, error_code);
+    }
+
+    fn reopenLogin(
+        self: *AccountEffects,
+        attempt_id: u64,
+        platform: *account_api.Platform.MacosBackend,
+    ) void {
+        if (!self.login_active or
+            !self.login_attempt.matches(attempt_id))
+        {
+            self.failLoginAttempt(
+                attempt_id,
+                .dependency_contract_invalid,
+            );
+            return;
+        }
+        platform.openAuthorizationUrl(
+            self.login_attempt.authorizationUrl(),
+        ) catch {
+            self.failLoginAttempt(
                 attempt_id,
                 .oauth_browser_open_failed,
             );
@@ -596,6 +628,22 @@ const AccountCoordinator = struct {
         };
     }
 
+    fn startCatalogContinuation(self: *AccountCoordinator) void {
+        self.assertMainThread();
+        const result = submitCommand(self, .refresh_catalog);
+        if (result.accepted) return;
+        const prepared = self.account.prepareIdleFailure(result.error_code);
+        switch (prepared) {
+            .transition => |value| {
+                const committed = self.commitTransition(value);
+                std.debug.assert(committed.accepted);
+            },
+            .rejected, .ignored_stale => @panic(
+                "Account catalog continuation failed without a recoverable state",
+            ),
+        }
+    }
+
     fn commitTransition(
         self: *AccountCoordinator,
         prepared_value: account_api.PreparedTransition,
@@ -783,6 +831,7 @@ const App = struct {
                 };
                 account_only.deinit();
                 std.debug.assert(coordinator.restore(&state_restore) == .none);
+                coordinator.startCatalogContinuation();
             },
             .execution_ready => |*execution_ready| {
                 self.account_credentials.setCleanupPending(
@@ -935,6 +984,20 @@ const App = struct {
                     platform,
                     now_unix_seconds,
                 );
+            },
+            .reopen_oauth => {
+                const attempt_id = entry.attempt_id orelse
+                    @panic("OAuth reopen effect has no attempt");
+                const platform = if (self.account_platform) |*value|
+                    value
+                else {
+                    effects.failLoginAttempt(
+                        attempt_id,
+                        .credential_store_read_failed,
+                    );
+                    return;
+                };
+                effects.reopenLogin(attempt_id, platform);
             },
             .cancel_attempt => |attempt_id| effects.cancelAttemptAndDiscard(attempt_id),
             .persist_signed_out_tombstone => {
@@ -1319,7 +1382,24 @@ const App = struct {
                         };
                     }
                     if (catalog_attempt and completion.payload == .failed)
-                        effects.catalog.reset();
+                        effects.clearCatalog();
+                    const automatic_selection: union(enum) {
+                        none,
+                        api_key: []const u8,
+                        model: []const u8,
+                    } = if (coordinator.account.view().execution_state != .none)
+                        .none
+                    else switch (completion.payload) {
+                        .api_keys_loaded => if (effects.catalog.uniqueApiKeyId()) |id|
+                            .{ .api_key = id }
+                        else
+                            .none,
+                        .models_loaded => if (effects.catalog.uniqueModelId()) |id|
+                            .{ .model = id }
+                        else
+                            .none,
+                        else => .none,
+                    };
                     if (coordinator.account.activeAttempt() ==
                         completion.attempt_id)
                     {
@@ -1328,7 +1408,19 @@ const App = struct {
                             else => {},
                         }
                     }
-                    _ = coordinator.complete(completion);
+                    if (coordinator.complete(completion)) {
+                        switch (automatic_selection) {
+                            .none => {},
+                            .api_key => |id| _ = AccountCoordinator.submitCommand(
+                                coordinator,
+                                .{ .select_api_key = id },
+                            ),
+                            .model => |id| _ = AccountCoordinator.submitCommand(
+                                coordinator,
+                                .{ .select_model = id },
+                            ),
+                        }
+                    }
                 },
             }
         }
@@ -1399,6 +1491,7 @@ const App = struct {
         defer completion.deinit();
         if (!coordinator.complete(&completion))
             @panic("persisted Account login could not commit");
+        coordinator.startCatalogContinuation();
         self.retryAccountCleanup();
         self.scheduleAccountRefresh();
     }
@@ -1942,14 +2035,19 @@ test "Account coordinator commits login and execution as separate gates" {
     );
     try std.testing.expect(!workbench.accountView().can_create_task);
 
-    const catalog = coordinator.commandSink().submit(.refresh_catalog);
-    try std.testing.expect(catalog.accepted);
-    try std.testing.expect(effects.take().?.effect == .load_api_keys);
+    coordinator.startCatalogContinuation();
+    const catalog_effect = effects.take().?;
+    try std.testing.expect(catalog_effect.effect == .load_api_keys);
     var keys_loaded: account_api.WorkerCompletion = .{
-        .attempt_id = catalog.attempt_id.?,
+        .attempt_id = catalog_effect.attempt_id.?,
         .payload = .api_keys_loaded,
     };
     defer keys_loaded.deinit();
+    account_api.Catalog.TestSupport.replacePublic(
+        &public_catalog,
+        &.{.{ .id = "key-1", .name = "Primary", .suffix = "1234" }},
+        &.{},
+    );
     try std.testing.expect(coordinator.complete(&keys_loaded));
     const key = coordinator.commandSink().submit(.{
         .select_api_key = "key-1",
@@ -1960,10 +2058,15 @@ test "Account coordinator commits login and execution as separate gates" {
         effects.take().?.effect.argument().?,
     );
     var models_loaded: account_api.WorkerCompletion = .{
-        .attempt_id = catalog.attempt_id.?,
+        .attempt_id = catalog_effect.attempt_id.?,
         .payload = .models_loaded,
     };
     defer models_loaded.deinit();
+    account_api.Catalog.TestSupport.replacePublic(
+        &public_catalog,
+        &.{.{ .id = "key-1", .name = "Primary", .suffix = "1234" }},
+        &.{.{ .id = "model-1", .display_name = "Model One" }},
+    );
     try std.testing.expect(coordinator.complete(&models_loaded));
     const model = coordinator.commandSink().submit(.{
         .select_model = "model-1",

@@ -118,7 +118,7 @@ const ui_record_detail_capacity: usize = 512;
 const ui_record_snapshot_overhead: usize = 512;
 const tool_route_digest_bytes = std.crypto.hash.sha2.Sha256.digest_length;
 const tool_product_id_capacity = "tool-".len + 20;
-pub const snapshot_schema_version: u32 = 6;
+pub const snapshot_schema_version: u32 = 7;
 
 const ToolState = enum { running, completed, failed };
 const RunPhase = enum {
@@ -446,6 +446,9 @@ const AccountProjection = struct {
     session_state: account_contract.AccountSessionState = .restoring,
     execution_state: account_contract.ExecutionState = .none,
     operation: account_contract.OperationKind = .none,
+    readiness: account_contract.AccountReadiness = .checking,
+    primary_action: account_contract.AccountPrimaryAction = .none,
+    can_cancel: bool = false,
     account_id: FixedText(account_contract.Limits.account_id_bytes) = .{},
     display_name: FixedText(account_contract.Limits.display_name_bytes) = .{},
     selected_api_key_id: FixedText(account_contract.Limits.api_key_id_bytes) = .{},
@@ -513,6 +516,9 @@ const AccountProjection = struct {
         self.session_state = source_view.session_state;
         self.execution_state = source_view.execution_state;
         self.operation = source_view.operation;
+        self.readiness = source_view.readiness;
+        self.primary_action = source_view.primary_action;
+        self.can_cancel = source_view.can_cancel;
         self.account_id.setNoFail(source_view.account_id);
         self.display_name.setNoFail(source_view.display_name);
         self.selected_api_key_id.setNoFail(source_view.selected_api_key_id);
@@ -560,6 +566,9 @@ const AccountProjection = struct {
             .session_state = self.session_state,
             .execution_state = self.execution_state,
             .operation = self.operation,
+            .readiness = self.readiness,
+            .primary_action = self.primary_action,
+            .can_cancel = self.can_cancel,
             .account_id = self.account_id.view(),
             .display_name = self.display_name.view(),
             .api_keys = self.api_key_views[0..self.api_key_count],
@@ -843,6 +852,8 @@ pub const Workbench = struct {
                 .session_state = .authenticated,
                 .execution_state = .ready,
                 .operation = .none,
+                .readiness = .ready,
+                .primary_action = .none,
                 .account_id = "automation-account",
                 .display_name = "Automation",
                 .selected_api_key_id = "automation-key",
@@ -1451,11 +1462,14 @@ pub const Workbench = struct {
     ) Error!void {
         const view = self.accountView();
         writer.print(
-            "{{\"sessionState\":\"{s}\",\"executionState\":\"{s}\",\"operation\":\"{s}\",\"accountId\":",
+            "{{\"sessionState\":\"{s}\",\"executionState\":\"{s}\",\"operation\":\"{s}\",\"readiness\":\"{s}\",\"primaryAction\":\"{s}\",\"canCancel\":{},\"accountId\":",
             .{
                 @tagName(view.session_state),
                 @tagName(view.execution_state),
                 @tagName(view.operation),
+                @tagName(view.readiness),
+                @tagName(view.primary_action),
+                view.can_cancel,
             },
         ) catch return error.SnapshotTooLarge;
         try self.projectedJsonValue(writer, view.account_id);
@@ -2841,6 +2855,8 @@ fn installTestExecution(workbench: *Workbench) !void {
             .session_state = .authenticated,
             .execution_state = .ready,
             .operation = .none,
+            .readiness = .ready,
+            .primary_action = .none,
             .account_id = "account-1",
             .display_name = "Metask User",
             .selected_api_key_id = "key-1",
@@ -2930,7 +2946,7 @@ fn finalizeTestTerminalEvents(workbench: *Workbench) void {
     workbench.syncLifecycle();
 }
 
-test "Workbench snapshot serializer matches the Renderer v6 contract fixture" {
+test "Workbench snapshot serializer matches the Renderer v7 contract fixture" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
 
@@ -3095,6 +3111,8 @@ test "Account projection and execution install use preallocated no-fail storage"
             .session_state = .authenticated,
             .execution_state = .ready,
             .operation = .none,
+            .readiness = .ready,
+            .primary_action = .none,
             .account_id = "account-1",
             .display_name = "Metask User",
             .api_keys = &api_keys,
@@ -3454,6 +3472,8 @@ fn installMaximumAccountProjection(workbench: *Workbench) !void {
             .session_state = .authenticated,
             .execution_state = .ready,
             .operation = .none,
+            .readiness = .ready,
+            .primary_action = .none,
             .account_id = &account_id,
             .display_name = &display_name,
             .api_keys = api_keys,

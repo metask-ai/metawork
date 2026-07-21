@@ -260,34 +260,11 @@ summary::-webkit-details-marker {
   font-size: 10px;
 }
 
-.account-onboarding {
-  display: grid;
-  min-height: 0;
-  flex: 1;
-  padding: clamp(28px, 6vw, 72px);
-  overflow: auto;
-  place-items: center;
-  background:
-    linear-gradient(90deg, transparent 49.9%, rgba(216, 223, 223, 0.42) 50%),
-    var(--color-canvas);
-  background-size:
-    100% 100%,
-    auto;
-}
-
 .account-panel {
-  width: min(700px, 100%);
-  padding: clamp(24px, 4vw, 42px);
-  border: 1px solid var(--color-rule);
-  border-radius: 18px 18px 18px 5px;
-  background: rgba(251, 252, 252, 0.98);
-  box-shadow: 0 24px 70px rgba(24, 50, 71, 0.08);
-}
-
-.account-panel.is-compact {
   width: auto;
   margin-top: 22px;
   padding: 13px 12px;
+  border: 1px solid var(--color-rule);
   border-radius: 11px 11px 11px 4px;
   background: rgba(255, 255, 255, 0.62);
   box-shadow: none;
@@ -301,15 +278,6 @@ summary::-webkit-details-marker {
 }
 
 .account-panel h2 {
-  margin: 6px 0 0;
-  font-family: var(--font-display);
-  font-size: clamp(27px, 4vw, 43px);
-  font-weight: 500;
-  letter-spacing: -0.035em;
-  line-height: 1.02;
-}
-
-.account-panel.is-compact h2 {
   margin-top: 3px;
   overflow: hidden;
   font-family: var(--font-sans);
@@ -335,98 +303,39 @@ summary::-webkit-details-marker {
   color: var(--color-live);
 }
 
-.account-intro {
-  max-width: 570px;
-  margin: 18px 0 0;
-  color: var(--color-muted);
-  font-size: 13px;
-  line-height: 1.7;
-}
-
-.account-track {
+.account-summary {
   display: grid;
-  margin: 30px 0 26px;
-  padding: 0;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  list-style: none;
-}
-
-.account-track li {
-  position: relative;
-  display: grid;
+  margin: 12px 0 0;
   gap: 8px;
-  color: var(--color-muted);
-  font-size: 10px;
-}
-
-.account-track li::before {
-  position: absolute;
-  top: 5px;
-  right: 50%;
-  left: -50%;
-  height: 1px;
-  background: var(--color-rule);
-  content: "";
-}
-
-.account-track li:first-child::before {
-  display: none;
-}
-
-.account-step-mark {
-  z-index: 1;
-  display: grid;
-  width: 11px;
-  height: 11px;
-  border: 2px solid var(--color-rule);
-  border-radius: 50%;
-  background: var(--color-paper);
-  font-family: var(--font-mono);
-  font-size: 7px;
-  font-weight: 700;
-  line-height: 1;
-  place-items: center;
-}
-
-.account-track li[data-state="done"] > .account-step-mark {
-  border-color: var(--color-live);
-  color: var(--color-canvas);
-  background: var(--color-live);
-}
-
-.account-track li[data-state="current"] > .account-step-mark,
-.account-track li[data-state="working"] > .account-step-mark {
-  border-color: var(--color-cobalt);
-  box-shadow: 0 0 0 4px rgba(47, 116, 130, 0.12);
-}
-
-.account-track li[data-state="done"],
-.account-track li[data-state="current"],
-.account-track li[data-state="working"] {
-  color: var(--color-graphite);
-}
-
-.account-fields {
-  display: grid;
-  margin-top: 16px;
-  gap: 12px;
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-.account-panel.is-compact .account-fields {
-  grid-template-columns: 1fr;
-  gap: 8px;
+.account-summary div {
+  min-width: 0;
 }
 
-.account-fields label {
-  display: grid;
-  gap: 5px;
+.account-summary dt,
+.account-settings-choice > span {
   color: var(--color-muted);
-  font-size: 10px;
+  font-size: 9px;
   font-weight: 650;
 }
 
-.account-fields select {
+.account-summary dd {
+  margin: 2px 0 0;
+  overflow: hidden;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-settings-choice {
+  display: grid;
+  margin-top: 10px;
+  gap: 5px;
+}
+
+.account-settings-choice select {
   width: 100%;
   min-width: 0;
   height: 36px;
@@ -467,21 +376,8 @@ summary::-webkit-details-marker {
   gap: 8px;
 }
 
-.account-panel.is-compact .primary-button {
-  margin-top: 12px;
-}
-
 @media (max-width: 720px) {
-  .account-onboarding {
-    padding: 18px;
-    place-items: start stretch;
-  }
-
-  .account-panel {
-    padding: 22px;
-  }
-
-  .account-fields {
+  .account-summary {
     grid-template-columns: 1fr;
   }
 }
@@ -1341,6 +1237,99 @@ summary::-webkit-details-marker {
   padding: 12px 24px 16px;
   border-top: 1px solid var(--color-rule);
   background: rgba(255, 255, 255, 0.96);
+}
+
+.account-prerequisite {
+  display: flex;
+  width: min(760px, 100%);
+  min-height: 58px;
+  margin: 0 auto 10px;
+  padding: 10px 12px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid #ccdadd;
+  border-left: 3px solid var(--color-cobalt);
+  border-radius: 10px;
+  background: #f5f9f9;
+}
+
+.account-prerequisite[data-readiness="needs_attention"],
+.account-prerequisite[data-readiness="restart_required"] {
+  border-left-color: var(--color-danger);
+  background: #faf4f3;
+}
+
+.account-prerequisite-copy {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.account-prerequisite-mark {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 8px 8px 8px 3px;
+  color: white;
+  background: var(--color-cobalt);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.account-prerequisite strong {
+  display: block;
+  font-size: 11px;
+}
+
+.account-prerequisite p {
+  margin: 2px 0 0;
+  color: var(--color-muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.account-prerequisite-choice {
+  display: grid;
+  min-width: min(240px, 100%);
+  gap: 4px;
+  color: var(--color-muted);
+  font-size: 9px;
+  font-weight: 650;
+}
+
+.account-prerequisite-choice select {
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  padding: 0 28px 0 9px;
+  border: 1px solid var(--color-rule);
+  border-radius: 8px;
+  color: var(--color-graphite);
+  background: var(--color-canvas);
+  font-size: 11px;
+}
+
+.account-prerequisite-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+}
+
+@media (max-width: 720px) {
+  .account-prerequisite {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .account-prerequisite-actions {
+    justify-content: flex-end;
+  }
 }
 
 .composer-start {

@@ -49,6 +49,32 @@ pub const OperationKind = enum {
     logging_out,
 };
 
+/// User-facing readiness is published by the Host. The Renderer must not
+/// reconstruct it from AccountSessionState, ExecutionState, or OperationKind.
+pub const AccountReadiness = enum {
+    checking,
+    sign_in_required,
+    preparing,
+    choice_required,
+    ready,
+    needs_attention,
+    restart_required,
+};
+
+/// The one product action that may be visually primary for the current
+/// readiness state. Settings actions such as logout are intentionally outside
+/// this onboarding projection.
+pub const AccountPrimaryAction = enum {
+    none,
+    sign_in,
+    reopen_login,
+    choose_api_key,
+    choose_model,
+    retry_catalog,
+    reauthenticate,
+    restart,
+};
+
 pub const ProviderKind = enum {
     anthropic,
     openai,
@@ -120,6 +146,9 @@ pub const AccountView = struct {
     session_state: AccountSessionState,
     execution_state: ExecutionState,
     operation: OperationKind,
+    readiness: AccountReadiness,
+    primary_action: AccountPrimaryAction,
+    can_cancel: bool = false,
     account_id: []const u8 = "",
     display_name: []const u8 = "",
     api_keys: []const ApiKeyView = &.{},
@@ -151,6 +180,7 @@ pub const AccountFact = struct {
 
 pub const AccountCommand = union(enum) {
     begin_login,
+    reopen_login,
     reauthenticate,
     cancel_operation,
     refresh_catalog,
@@ -395,12 +425,61 @@ pub fn validateView(view: AccountView) ValidationError!void {
     }
 
     if (view.execution_state == .ready) {
-        if (view.execution_generation == 0 or view.selected_model.len == 0)
+        if (view.execution_generation == 0 or
+            view.selected_api_key_id.len == 0 or
+            view.selected_model.len == 0)
             return error.InconsistentState;
     } else if (view.can_create_task) {
         return error.InconsistentState;
     }
     if (view.error_code == .none and view.safe_diagnostic.len != 0)
+        return error.InconsistentState;
+    const expected_can_cancel = view.operation != .none and
+        view.operation != .logging_out;
+    if (view.can_cancel != expected_can_cancel)
+        return error.InconsistentState;
+    switch (view.readiness) {
+        .checking => if (view.primary_action != .none or
+            view.session_state != .restoring)
+            return error.InconsistentState,
+        .sign_in_required => if (view.primary_action != .sign_in or
+            view.session_state != .signed_out or
+            view.operation != .none)
+            return error.InconsistentState,
+        .preparing => if ((view.primary_action != .none and
+            view.primary_action != .reopen_login) or
+            view.operation == .none or
+            view.operation == .selecting_key or
+            view.operation == .selecting_model)
+            return error.InconsistentState,
+        .choice_required => switch (view.primary_action) {
+            .choose_api_key => if (view.operation != .selecting_key or
+                view.api_keys.len == 0)
+                return error.InconsistentState,
+            .choose_model => if (view.operation != .selecting_model or
+                view.models.len == 0)
+                return error.InconsistentState,
+            else => return error.InconsistentState,
+        },
+        .ready => if (view.primary_action != .none or
+            view.execution_state != .ready)
+            return error.InconsistentState,
+        .needs_attention => switch (view.primary_action) {
+            .retry_catalog => if (view.session_state != .authenticated or
+                view.operation != .none)
+                return error.InconsistentState,
+            .reauthenticate => if (view.session_state != .reauth_required or
+                view.operation != .none)
+                return error.InconsistentState,
+            else => return error.InconsistentState,
+        },
+        .restart_required => if (view.primary_action != .restart or
+            view.session_state != .shutting_down)
+            return error.InconsistentState,
+    }
+    if (view.primary_action == .reopen_login and
+        (view.session_state != .authorizing or
+            view.operation != .oauth_callback))
         return error.InconsistentState;
 }
 
@@ -450,8 +529,29 @@ test "AccountView rejects ready execution without committed generation" {
         .session_state = .authenticated,
         .execution_state = .ready,
         .operation = .none,
+        .readiness = .ready,
+        .primary_action = .none,
         .selected_model = "metask-model",
         .can_create_task = true,
+    }));
+}
+
+test "AccountView rejects an actionless catalog choice" {
+    try std.testing.expectError(error.InconsistentState, validateView(.{
+        .session_state = .authenticated,
+        .execution_state = .preparing,
+        .operation = .selecting_key,
+        .readiness = .choice_required,
+        .primary_action = .choose_api_key,
+        .can_cancel = true,
+    }));
+    try std.testing.expectError(error.InconsistentState, validateView(.{
+        .session_state = .authenticated,
+        .execution_state = .preparing,
+        .operation = .selecting_model,
+        .readiness = .choice_required,
+        .primary_action = .choose_model,
+        .can_cancel = true,
     }));
 }
 

@@ -8,6 +8,7 @@ pub const choose_workspace = "metawork.workspace.choose";
 pub const snapshot = "metawork.workbench.snapshot";
 pub const snapshot_chunk = "metawork.workbench.snapshot.chunk";
 pub const account_begin_login = "metawork.account.beginLogin";
+pub const account_reopen_login = "metawork.account.reopenLogin";
 pub const account_reauthenticate = "metawork.account.reauthenticate";
 pub const account_cancel_operation = "metawork.account.cancelOperation";
 pub const account_refresh_catalog = "metawork.account.refreshCatalog";
@@ -32,6 +33,7 @@ pub const product = [_][]const u8{
     snapshot,
     snapshot_chunk,
     account_begin_login,
+    account_reopen_login,
     account_reauthenticate,
     account_cancel_operation,
     account_refresh_catalog,

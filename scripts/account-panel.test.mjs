@@ -12,6 +12,9 @@ const vite = await createServer({
   logLevel: "silent",
   server: { middlewareMode: true },
 });
+const { AccountPrerequisite } = await vite.ssrLoadModule(
+  "/src/features/account/AccountPrerequisite.tsx",
+);
 const { AccountPanel } = await vite.ssrLoadModule(
   "/src/features/account/AccountPanel.tsx",
 );
@@ -24,6 +27,9 @@ const signedOut = {
   sessionState: "signed_out",
   executionState: "none",
   operation: "none",
+  readiness: "sign_in_required",
+  primaryAction: "sign_in",
+  canCancel: false,
   accountId: "",
   displayName: "",
   apiKeys: [],
@@ -37,7 +43,19 @@ const signedOut = {
   executionGeneration: "0",
 };
 
-function render(account, compact = false) {
+const callbacks = {
+  onBeginLogin() {},
+  onReopenLogin() {},
+  onReauthenticate() {},
+  onCancel() {},
+  onRetry() {},
+  onRefresh() {},
+  onSelectApiKey() {},
+  onSelectModel() {},
+  onLogout() {},
+};
+
+function withI18n(child) {
   return renderToStaticMarkup(
     createElement(
       I18nContext.Provider,
@@ -48,153 +66,186 @@ function render(account, compact = false) {
           t: (id, values) => translate("en-US", id, values),
         },
       },
-      createElement(AccountPanel, {
-        account,
-        compact,
-        disabled: false,
-        onBeginLogin() {},
-        onReauthenticate() {},
-        onCancel() {},
-        onRefresh() {},
-        onSelectApiKey() {},
-        onSelectModel() {},
-        onLogout() {},
-      }),
+      child,
     ),
   );
 }
 
-test("signed-out Account exposes one concrete Metask login action", () => {
-  const markup = render(signedOut);
+function renderPrerequisite(account) {
+  return withI18n(
+    createElement(AccountPrerequisite, {
+      account,
+      disabled: false,
+      ...callbacks,
+    }),
+  );
+}
+
+function renderPrerequisiteWith(account, props) {
+  return withI18n(
+    createElement(AccountPrerequisite, {
+      account,
+      disabled: false,
+      ...callbacks,
+      ...props,
+    }),
+  );
+}
+
+test("signed-out readiness stays beside the task draft with one primary action", () => {
+  const markup = renderPrerequisite(signedOut);
+  assert.match(markup, /Connect Metask to send/);
+  assert.match(markup, /Keep writing your draft/);
   assert.match(markup, />Sign in with Metask</);
-  assert.doesNotMatch(markup, /<select/);
+  assert.doesNotMatch(markup, /setup progress|Load API Keys|<select/);
 });
 
-test("authorization progress is visible and cancellable", () => {
-  const markup = render({
+test("authorization wait can reopen or cancel without exposing the OAuth URL", () => {
+  const markup = renderPrerequisite({
     ...signedOut,
     sessionState: "authorizing",
     operation: "oauth_callback",
+    readiness: "preparing",
+    primaryAction: "reopen_login",
+    canCancel: true,
   });
-  assert.match(markup, />Waiting for Metask authorization</);
+  assert.match(markup, /Waiting for Metask authorization/);
+  assert.match(markup, />Open sign-in page again</);
   assert.match(markup, />Cancel current action</);
+  assert.doesNotMatch(markup, /https?:\/\//);
 });
 
-test("authenticated Account exposes bounded Key and model choices", () => {
-  const markup = render({
+test("background catalog preparation does not ask for a manual load step", () => {
+  const markup = renderPrerequisite({
     ...signedOut,
     sessionState: "authenticated",
+    operation: "loading_keys",
+    readiness: "preparing",
+    primaryAction: "none",
+    canCancel: true,
     accountId: "account-1",
-    displayName: "Metask User",
-    apiKeys: [{ id: "key-1", name: "Primary", suffix: "1234" }],
-    models: [{ id: "model-1", displayName: "Model One" }],
   });
-  assert.match(markup, />Primary · 1234</);
-  assert.match(markup, />Model One</);
-  assert.equal(
-    (markup.match(/<select class="focus-ring" disabled="">/g) ?? []).length,
-    2,
-  );
-  assert.match(markup, /<option value="" selected="">Choose an API Key</);
-  assert.match(markup, /<option value="" selected="">Choose a model</);
-  assert.match(markup, />Refresh account options</);
-  assert.match(markup, />Sign out and clear this Mac</);
+  assert.match(markup, /Loading API Keys/);
+  assert.match(markup, />Cancel current action</);
+  assert.doesNotMatch(markup, /Load API Keys|Try again|<select/);
 });
 
-test("catalog selectors follow the exact Host selection phase", () => {
-  const selectingKey = render({
+test("Account cancel stays available while an ordinary command is locally busy", () => {
+  const markup = renderPrerequisiteWith(
+    {
+      ...signedOut,
+      sessionState: "authorizing",
+      operation: "oauth_callback",
+      readiness: "preparing",
+      primaryAction: "reopen_login",
+      canCancel: true,
+    },
+    { disabled: true, cancelDisabled: false },
+  );
+  assert.match(markup, /<button[^>]*disabled=""[^>]*>Open sign-in page again</);
+  assert.match(markup, /<button[^>]*>Cancel current action</);
+});
+
+test("only a real catalog ambiguity asks for the matching choice", () => {
+  const keyChoice = renderPrerequisite({
     ...signedOut,
     sessionState: "authenticated",
     operation: "selecting_key",
+    readiness: "choice_required",
+    primaryAction: "choose_api_key",
+    canCancel: true,
     accountId: "account-1",
-    apiKeys: [{ id: "key-1", name: "Primary", suffix: "1234" }],
-    models: [{ id: "model-1", displayName: "Model One" }],
+    apiKeys: [
+      { id: "key-1", name: "Primary", suffix: "1234" },
+      { id: "key-2", name: "Backup", suffix: "5678" },
+    ],
   });
-  assert.match(selectingKey, /<select class="focus-ring">/);
-  assert.equal(
-    (selectingKey.match(/<select class="focus-ring" disabled="">/g) ?? [])
-      .length,
-    1,
-  );
-  assert.match(selectingKey, />Cancel current action</);
-  assert.doesNotMatch(selectingKey, />Refresh account options</);
-  assert.doesNotMatch(selectingKey, />Sign out and clear this Mac</);
+  assert.match(keyChoice, />Primary · 1234</);
+  assert.match(keyChoice, />Backup · 5678</);
+  assert.doesNotMatch(keyChoice, />Choose a model</);
 
-  const selectingModel = render({
+  const modelChoice = renderPrerequisite({
     ...signedOut,
     sessionState: "authenticated",
     operation: "selecting_model",
+    readiness: "choice_required",
+    primaryAction: "choose_model",
+    canCancel: true,
     accountId: "account-1",
-    apiKeys: [{ id: "key-1", name: "Primary", suffix: "1234" }],
-    models: [{ id: "model-1", displayName: "Model One" }],
-    selectedApiKeyId: "key-1",
+    models: [
+      { id: "model-1", displayName: "Model One" },
+      { id: "model-2", displayName: "Model Two" },
+    ],
   });
-  assert.equal(
-    (selectingModel.match(/<select class="focus-ring" disabled="">/g) ?? [])
-      .length,
-    1,
-  );
-  assert.match(
-    selectingModel,
-    /<select class="focus-ring"><option value="" selected="">Choose a model</,
-  );
-  assert.match(selectingModel, />Cancel current action</);
+  assert.match(modelChoice, />Model One</);
+  assert.match(modelChoice, />Model Two</);
+  assert.doesNotMatch(modelChoice, />Choose an API Key</);
 });
 
-test("restart keeps committed execution labels without persisting catalogs", () => {
-  const markup = render({
+test("retryable and restart-required failures never leave an actionless spinner", () => {
+  const retry = renderPrerequisite({
+    ...signedOut,
+    sessionState: "authenticated",
+    readiness: "needs_attention",
+    primaryAction: "retry_catalog",
+    accountId: "account-1",
+    errorCode: "metask_service_unavailable",
+    safeDiagnostic: "upstream service returned internal status E_METASK_503",
+  });
+  assert.match(retry, /Finish preparing this task/);
+  assert.match(retry, />Try again</);
+  assert.match(retry, /temporarily unavailable/);
+  assert.doesNotMatch(retry, /metask_service_unavailable/);
+  assert.doesNotMatch(retry, /E_METASK_503/);
+
+  const noKeys = renderPrerequisite({
+    ...signedOut,
+    sessionState: "authenticated",
+    readiness: "needs_attention",
+    primaryAction: "retry_catalog",
+    accountId: "account-1",
+    errorCode: "no_api_keys",
+  });
+  assert.match(noKeys, /No API Keys are available/);
+  assert.match(noKeys, />Try again</);
+
+  const restart = renderPrerequisite({
+    ...signedOut,
+    sessionState: "shutting_down",
+    readiness: "restart_required",
+    primaryAction: "restart",
+    errorCode: "recovery_state_invalid",
+  });
+  assert.match(restart, /Restart MetaWork to continue/);
+  assert.match(restart, /Close and reopen MetaWork/);
+  assert.doesNotMatch(restart, /Try again|Sign in with Metask/);
+});
+
+test("ready Account is a secondary status and settings surface", () => {
+  const ready = {
     ...signedOut,
     sessionState: "authenticated",
     executionState: "ready",
+    readiness: "ready",
+    primaryAction: "none",
     accountId: "account-1",
     displayName: "Metask User",
-    selectedApiKeyId: "445",
-    selectedModel: "gpt-5.5",
+    selectedApiKeyId: "key-1",
+    selectedModel: "model-1",
     canCreateTask: true,
-    executionGeneration: "7",
-  });
-  assert.match(markup, />Saved API Key</);
-  assert.match(markup, />gpt-5.5</);
-  assert.match(markup, />Ready</);
-});
-
-test("logout progress and user cancellation are reported truthfully", () => {
-  const loggingOut = render({
-    ...signedOut,
-    sessionState: "authenticated",
-    operation: "logging_out",
-    accountId: "account-1",
-    displayName: "Metask User",
-  });
-  assert.match(loggingOut, /Signing out and clearing this Mac/);
-  assert.doesNotMatch(loggingOut, />Cancel current action</);
-
-  const cancelled = render({
-    ...signedOut,
-    errorCode: "user_cancelled",
-  });
-  assert.match(cancelled, /The account action was cancelled/);
-  assert.doesNotMatch(cancelled, /Account action needs attention/);
-});
-
-test("reauth and restart states expose their actual recovery boundary", () => {
-  const reauth = render({
-    ...signedOut,
-    sessionState: "reauth_required",
-    accountId: "account-1",
-    displayName: "Metask User",
-    apiKeys: [{ id: "key-1", name: "Primary", suffix: "1234" }],
-    models: [{ id: "model-1", displayName: "Model One" }],
-  });
-  assert.match(reauth, />Sign in again</);
-  assert.match(reauth, /<select class="focus-ring" disabled="">/);
-  assert.doesNotMatch(reauth, />Refresh account options</);
-
-  const restart = render({
-    ...signedOut,
-    sessionState: "shutting_down",
-    errorCode: "recovery_state_invalid",
-  });
-  assert.match(restart, /Close and reopen MetaWork/);
-  assert.doesNotMatch(restart, />Sign in with Metask</);
+    executionGeneration: "1",
+  };
+  assert.equal(renderPrerequisite(ready), "");
+  const panel = withI18n(
+    createElement(AccountPanel, {
+      account: ready,
+      disabled: false,
+      ...callbacks,
+    }),
+  );
+  assert.match(panel, /Metask User/);
+  assert.match(panel, /model-1/);
+  assert.match(panel, />Refresh account options</);
+  assert.match(panel, />Sign out and clear this device</);
+  assert.doesNotMatch(panel, /setup progress/);
 });

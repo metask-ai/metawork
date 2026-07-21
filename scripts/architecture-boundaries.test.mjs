@@ -586,7 +586,7 @@ test("Bridge Dispatcher owns product command decisions and App only composes it"
   assert.doesNotMatch(app, /parsePayload|parseWireId|workspaceGrant/);
 });
 
-test("product wire contract is atomically on Account plus Task schema v6", () => {
+test("product wire contract is atomically on Account plus Task schema v7", () => {
   const zigCommands = read("src/bridge/commands.zig");
   const rendererCommands = read("frontend/src/bridge/commands.ts");
   const appManifest = read("app.zon");
@@ -624,7 +624,7 @@ test("product wire contract is atomically on Account plus Task schema v6", () =>
   assert.doesNotMatch(appManifest, /metawork\.sessions\./);
 
   const projection = read("src/workbench/projection.zig");
-  assert.match(projection, /snapshot_schema_version: u32 = 6/);
+  assert.match(projection, /snapshot_schema_version: u32 = 7/);
   assert.match(projection, /\\"account\\":/);
   assert.match(projection, /\\"tasks\\":\[/);
   assert.match(projection, /pub fn createTask/);
@@ -636,7 +636,9 @@ test("product wire contract is atomically on Account plus Task schema v6", () =>
   );
 
   const contracts = read("frontend/src/bridge/contracts.ts");
-  assert.match(contracts, /WORKBENCH_SCHEMA_VERSION = 6/);
+  assert.match(contracts, /WORKBENCH_SCHEMA_VERSION = 7/);
+  assert.match(contracts, /readiness: AccountReadiness/);
+  assert.match(contracts, /primaryAction: AccountPrimaryAction/);
   assert.match(contracts, /account: AccountView/);
   assert.match(contracts, /tasks: TaskView\[\]/);
   assert.match(contracts, /"app_shutdown"/);
@@ -645,7 +647,7 @@ test("product wire contract is atomically on Account plus Task schema v6", () =>
   assert.equal(
     existsSync(
       new URL(
-        "frontend/src/bridge/__fixtures__/workbench-snapshot-v6.fixture",
+        "frontend/src/bridge/__fixtures__/workbench-snapshot-v7.fixture",
         root,
       ),
     ),
@@ -654,7 +656,7 @@ test("product wire contract is atomically on Account plus Task schema v6", () =>
   assert.equal(
     existsSync(
       new URL(
-        "frontend/src/bridge/__fixtures__/workbench-snapshot-v5.fixture",
+        "frontend/src/bridge/__fixtures__/workbench-snapshot-v6.fixture",
         root,
       ),
     ),

@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const contract = @import("metawork_account_contract");
 const metask = @import("metask_client");
 
@@ -318,6 +319,18 @@ pub const CatalogSession = struct {
         return self.api_keys.items[index].id.view();
     }
 
+    /// Returns a candidate only when the Host can proceed without making a
+    /// user preference decision.
+    pub fn uniqueApiKeyId(self: *const CatalogSession) ?[]const u8 {
+        if (self.api_keys.items.len != 1) return null;
+        return self.api_keys.items[0].id.view();
+    }
+
+    pub fn uniqueModelId(self: *const CatalogSession) ?[]const u8 {
+        if (self.models.items.len != 1) return null;
+        return self.models.items[0].id.view();
+    }
+
     pub fn ownerAccountId(self: *const CatalogSession) []const u8 {
         return self.owner_account_id.view();
     }
@@ -457,6 +470,28 @@ pub const PublicCatalog = struct {
         view.models = self.model_views[0..self.model_count];
     }
 };
+
+pub const TestSupport = if (builtin.is_test) struct {
+    pub fn replacePublic(
+        catalog: *PublicCatalog,
+        api_keys: []const contract.ApiKeyView,
+        models: []const contract.ModelView,
+    ) void {
+        std.debug.assert(api_keys.len <= catalog.api_keys.len);
+        std.debug.assert(models.len <= catalog.models.len);
+        catalog.api_key_count = api_keys.len;
+        for (api_keys, catalog.api_keys[0..api_keys.len]) |source, *target| {
+            target.id.set(source.id);
+            target.name.set(source.name);
+            target.suffix.set(source.suffix);
+        }
+        catalog.model_count = models.len;
+        for (models, catalog.models[0..models.len]) |source, *target| {
+            target.id.set(source.id);
+            target.display_name.set(source.display_name);
+        }
+    }
+} else struct {};
 
 const ParsedApiKeys = struct {
     allocator: std.mem.Allocator,
@@ -802,6 +837,8 @@ test "live-shape catalogs expose only masked views and move one key owner" {
     var models = try parseModels(std.testing.allocator, model_fixture);
     session.models = models.entries;
     models.entries = .empty;
+    try std.testing.expectEqualStrings("325", session.uniqueApiKeyId().?);
+    try std.testing.expectEqualStrings("model-1", session.uniqueModelId().?);
 
     var key_views: [contract.Limits.api_key_entries]contract.ApiKeyView =
         undefined;
@@ -839,6 +876,8 @@ test "live-shape catalogs expose only masked views and move one key owner" {
         .session_state = .authenticated,
         .execution_state = .ready,
         .operation = .none,
+        .readiness = .ready,
+        .primary_action = .none,
     };
     public_catalog.decorate(&public_view);
     try std.testing.expectEqual(@as(usize, 1), public_view.api_keys.len);
