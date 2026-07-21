@@ -576,45 +576,37 @@ test("Bridge Dispatcher owns product command decisions and App only composes it"
   assert.doesNotMatch(app, /parsePayload|parseWireId|workspaceGrant/);
 });
 
-test("product wire contract is atomically on Account plus Task schema v7", () => {
+test("Renderer Bridge revision 1 owns the exact product wire catalog", () => {
   const zigCommands = read("src/bridge/commands.zig");
   const rendererCommands = read("frontend/src/bridge/commands.ts");
   const appManifest = read("app.zon");
-  for (const command of [
-    "create",
-    "run",
-    "cancel",
-    "respondUi",
-    "close",
-    "rename",
-    "archive",
-    "delete",
-  ]) {
-    const wireName = `metawork.tasks.${command}`;
-    assert.ok(zigCommands.includes(wireName));
-    assert.ok(rendererCommands.includes(wireName));
-    assert.ok(appManifest.includes(wireName));
-  }
-  for (const command of [
-    "beginLogin",
-    "reauthenticate",
-    "cancelOperation",
-    "refreshCatalog",
-    "selectApiKey",
-    "selectModel",
-    "logout",
-  ]) {
-    const wireName = `metawork.account.${command}`;
-    assert.ok(zigCommands.includes(wireName));
-    assert.ok(rendererCommands.includes(wireName));
-    assert.ok(appManifest.includes(wireName));
-  }
+  const productCommand =
+    /"(metawork\.(?:smoke|events|workspace|workbench|account|tasks)\.[A-Za-z.]+)"/g;
+  const catalog = (source) =>
+    [
+      ...new Set([...source.matchAll(productCommand)].map((match) => match[1])),
+    ].sort();
+  assert.deepEqual(catalog(rendererCommands), catalog(zigCommands));
+  assert.deepEqual(catalog(appManifest), catalog(zigCommands));
+  assert.ok(catalog(zigCommands).includes("metawork.account.reopenLogin"));
+  assert.match(zigCommands, /contract_id = "metawork\.renderer-bridge"/);
+  assert.match(zigCommands, /contract_revision: u32 = 1/);
+  assert.match(
+    rendererCommands,
+    /RENDERER_BRIDGE_CONTRACT_ID = "metawork\.renderer-bridge"/,
+  );
+  assert.match(rendererCommands, /RENDERER_BRIDGE_CONTRACT_REVISION = 1/);
+
+  const dispatcher = read("src/bridge/dispatcher.zig");
+  assert.match(dispatcher, /handlers\.RendererBridgeConnect/);
+  assert.match(dispatcher, /identity_mismatch/);
+  assert.match(dispatcher, /revision_mismatch/);
   assert.doesNotMatch(zigCommands, /metawork\.sessions\./);
   assert.doesNotMatch(rendererCommands, /metawork\.sessions\./);
   assert.doesNotMatch(appManifest, /metawork\.sessions\./);
 
   const projection = read("src/workbench/projection.zig");
-  assert.match(projection, /snapshot_schema_version: u32 = 7/);
+  assert.doesNotMatch(projection, /schemaVersion|snapshot_schema_version/);
   assert.match(projection, /\\"account\\":/);
   assert.match(projection, /\\"tasks\\":\[/);
   assert.match(projection, /pub fn createTask/);
@@ -626,7 +618,7 @@ test("product wire contract is atomically on Account plus Task schema v7", () =>
   );
 
   const contracts = read("frontend/src/bridge/contracts.ts");
-  assert.match(contracts, /WORKBENCH_SCHEMA_VERSION = 7/);
+  assert.doesNotMatch(contracts, /schemaVersion|WORKBENCH_SCHEMA_VERSION/);
   assert.match(contracts, /readiness: AccountReadiness/);
   assert.match(contracts, /primaryAction: AccountPrimaryAction/);
   assert.match(contracts, /account: AccountView/);
@@ -637,20 +629,15 @@ test("product wire contract is atomically on Account plus Task schema v7", () =>
   assert.equal(
     existsSync(
       new URL(
-        "frontend/src/bridge/__fixtures__/workbench-snapshot-v7.fixture",
+        "frontend/src/bridge/__fixtures__/workbench-snapshot.fixture",
         root,
       ),
     ),
     true,
   );
-  assert.equal(
-    existsSync(
-      new URL(
-        "frontend/src/bridge/__fixtures__/workbench-snapshot-v6.fixture",
-        root,
-      ),
-    ),
-    false,
+  assert.deepEqual(
+    readdirSync(new URL("frontend/src/bridge/__fixtures__/", root)),
+    ["workbench-snapshot.fixture"],
   );
 });
 

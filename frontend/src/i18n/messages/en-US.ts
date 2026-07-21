@@ -18,6 +18,7 @@ export const enUS = {
   "connection.retry": "Reconnect",
   "connection.retrying": "Reconnecting…",
   "connection.details": "Technical details",
+  "connection.source.bootstrap": "Renderer contract",
   "connection.source.revision": "Workbench update",
   "connection.source.host_signal_ack": "Host acknowledgement",
   "connection.source.host_signal": "Host signal",

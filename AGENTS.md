@@ -25,6 +25,7 @@
 ## 不可违反的边界
 
 - React + Tailwind 是当前正式 Renderer。
+- Renderer Bridge 产品合同为 `metawork.renderer-bridge` revision 1；`connect` 必须精确匹配 identity/revision 后才建立产品 delivery connection。当前不维护旧 revision 兼容层，也不在 snapshot 内建立第二个局部版本。
 - Native SDK 直接构成 Zig Host；不要增加 `NativeSdkAdapter`、通用 Desktop Interface 或框架替换层。
 - Metask AgentCore bundle SDK 是 Agent 结构化协议的唯一来源；不要再定义平行的 `AgentEvent` / `WorkbenchEvent` 体系。
 - MetaWork 正式应用只消费 canonical `.agentcore/bundle` 和其中的官方 `bindings/zig` package；显式外部 bundle root 只属于 candidate probe/stage。不得把 AgentCore 实现源码纳入 build graph。禁止 path/Git implementation source dependency、源码复制、`latest`、可变 tag 和静默 source fallback。

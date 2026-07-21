@@ -26,7 +26,6 @@ function task(id, workspaceRoot, archived = false) {
 
 function snapshot(revision, tasks) {
   return {
-    schemaVersion: 7,
     revision,
     account: initialWorkbenchState.snapshot.account,
     tasks,

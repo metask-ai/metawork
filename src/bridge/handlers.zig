@@ -7,6 +7,10 @@ pub const PermissionChoice = enum {
     deny_once,
 };
 
+pub const RendererBridgeConnect = struct {
+    contractId: []const u8,
+    contractRevision: u32,
+};
 pub const EventDisconnect = struct { generation: []const u8 };
 pub const WorkbenchSnapshotChunk = struct { snapshotId: []const u8, offset: []const u8 };
 pub const Empty = struct {};

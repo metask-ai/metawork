@@ -15,7 +15,7 @@ test("Workbench snapshots are assembled from identity-checked chunks", async () 
   const expected = JSON.parse(
     readFileSync(
       new URL(
-        "../frontend/src/bridge/__fixtures__/workbench-snapshot-v7.fixture",
+        "../frontend/src/bridge/__fixtures__/workbench-snapshot.fixture",
         import.meta.url,
       ),
       "utf8",
@@ -42,7 +42,7 @@ test("Workbench snapshots are assembled from identity-checked chunks", async () 
 
 test("Workbench snapshot assembly rejects a stale chunk", async () => {
   const source = Buffer.from(
-    '{"schemaVersion":7,"revision":"1","account":{"sessionState":"signed_out","executionState":"none","operation":"none","readiness":"sign_in_required","primaryAction":"sign_in","canCancel":false,"accountId":"","displayName":"","apiKeys":[],"models":[],"selectedApiKeyId":"","selectedModel":"","canCreateTask":false,"errorCode":"none","safeDiagnostic":"","catalogGeneration":"0","executionGeneration":"0"},"tasks":[]}',
+    '{"revision":"1","account":{"sessionState":"signed_out","executionState":"none","operation":"none","readiness":"sign_in_required","primaryAction":"sign_in","canCancel":false,"accountId":"","displayName":"","apiKeys":[],"models":[],"selectedApiKeyId":"","selectedModel":"","canCreateTask":false,"errorCode":"none","safeDiagnostic":"","catalogGeneration":"0","executionGeneration":"0"},"tasks":[]}',
   );
   const invoke = async (command) =>
     command === snapshotCommand

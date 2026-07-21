@@ -1,7 +1,4 @@
-import {
-  WORKBENCH_SCHEMA_VERSION,
-  type WorkbenchSnapshot,
-} from "../bridge/contracts.ts";
+import type { WorkbenchSnapshot } from "../bridge/contracts.ts";
 
 export type WorkbenchState = {
   snapshot: WorkbenchSnapshot;
@@ -19,7 +16,6 @@ export type WorkbenchAction =
 
 export const initialWorkbenchState: WorkbenchState = {
   snapshot: {
-    schemaVersion: WORKBENCH_SCHEMA_VERSION,
     revision: "0",
     account: {
       sessionState: "restoring",

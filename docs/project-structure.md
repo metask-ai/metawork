@@ -42,7 +42,7 @@
 5. bounded executor 和排队策略属于 Workbench lifecycle，不下沉到 AgentCore 集成层；
 6. 产品 Task 与 bundle Session handle 使用不同命名，不靠注释解释两个 `session` 模块为什么没有重复所有权。
 
-产品边界已统一为 schema v7：snapshot 根节点由无 secret 的 `account` 与 `tasks` 构成；Account 直接发布 Host-owned `readiness`、唯一 `primaryAction` 与 `canCancel`，Account command 使用 `metawork.account.*` 并只提交给 App 注入的 `AccountCommandSink`，Task command 使用 `metawork.tasks.*`，产品 Task payload/result 使用 `taskId`。内部 Agent Session route identity 只存在于 Agent，不建立第二套可持久化产品 ID，也不提供旧 schema 兼容别名。
+产品边界已统一为 `metawork.renderer-bridge` revision 1：`connect` 精确协商后才建立产品 delivery connection，snapshot 根节点由无 secret 的 `account` 与 `tasks` 构成且不维护局部版本；Account 直接发布 Host-owned `readiness`、唯一 `primaryAction` 与 `canCancel`，Account command 使用 `metawork.account.*` 并只提交给 App 注入的 `AccountCommandSink`，Task command 使用 `metawork.tasks.*`，产品 Task payload/result 使用 `taskId`。内部 Agent Session route identity 只存在于 Agent，不建立第二套可持久化产品 ID，也不提供旧 revision 兼容别名。
 
 `app.zig` 定义 Native SDK App 与 callback，但 Native SDK runner 仍然拥有 Runtime 的构造和驱动，MetaWork 不再包一层替代 Runtime。
 
@@ -194,7 +194,7 @@ frontend/src/
 Renderer 与 Zig Native 应用的唯一 Bridge 边界：
 
 - `commands.ts` 集中定义公开领域命令名称；
-- `contracts.ts` 定义带 schema version 的 Workbench 产品投影 DTO，不定义 AgentCore raw wire；
+- `contracts.ts` 定义由 Renderer Bridge contract revision 整体覆盖的 Workbench 产品投影 DTO，不定义局部版本或 AgentCore raw wire；
 - `decode-contracts.ts` 在运行时校验 snapshot、command result 和 revision notification，禁止用 type assertion 把任意 JSON 当成 DTO；
 - `contracts.test.ts` 消费真实 Zig serializer 生成的 source-free fixture corpus，验证字段、边界值、unknown version 和 malformed payload；
 - `client.ts` 提供小而明确的 typed method；
@@ -432,7 +432,7 @@ AgentCore repository locks 与正式 build verifier 相邻放在 `build_support/
 
 - React component、selector 和 formatter 测试与源文件相邻；
 - Bridge connection、revision notification、snapshot 和 decoder 保持纯模块测试；
-- Zig serializer fixture 与 TypeScript decoder 必须形成跨语言 contract test，unknown schema version 和 malformed payload 默认拒绝；
+- Zig serializer fixture 与 TypeScript decoder 必须形成跨语言 contract test，unknown contract revision 和 malformed payload 默认拒绝；
 - 跨 Renderer/Native 的场景测试由 `scripts/` 编排真实应用；
 - `build_support/` 只保留正式 build verifier 和 target locks，不接纳一次性实验夹具；
 - GUI screenshot/automation fixture 使用稳定的 structured automation fixture，不在生产组件中硬编码演示数据；

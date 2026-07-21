@@ -1,5 +1,5 @@
 import type { WorkbenchSnapshot } from "./contracts.ts";
-import { BridgeClient } from "./client.ts";
+import { BridgeClient, RendererBridgeContractError } from "./client.ts";
 import { RevisionNotificationQueue } from "./revision-notification.ts";
 import { SnapshotDemand } from "./snapshot/snapshot-demand.ts";
 
@@ -15,7 +15,7 @@ export type WorkbenchConnectionStatus =
   | { kind: "refresh_failed"; diagnostic: string }
   | {
       kind: "contract_failed";
-      source: "revision" | "host_signal_ack" | "host_signal";
+      source: "bootstrap" | "revision" | "host_signal_ack" | "host_signal";
       diagnostic: string;
     };
 
@@ -72,7 +72,7 @@ export class WorkbenchConnection {
     await this.connect();
     if (this.stopped) return;
     try {
-      await this.handshake(false);
+      await this.confirmConnection(false);
     } catch (error) {
       await this.disconnectCurrent();
       throw error;
@@ -99,10 +99,11 @@ export class WorkbenchConnection {
       try {
         await this.connect();
         if (this.stopped) throw new Error("Workbench connection is stopped");
-        await this.handshake(true);
+        await this.confirmConnection(true);
         return;
       } catch (error) {
         await this.disconnectCurrent();
+        if (error instanceof RendererBridgeContractError) throw error;
         errors.push(error);
       }
     }
@@ -178,7 +179,14 @@ export class WorkbenchConnection {
   }
 
   private async connect() {
-    const next = await this.client.connect();
+    let next: string;
+    try {
+      next = await this.client.connect();
+    } catch (error) {
+      if (error instanceof RendererBridgeContractError)
+        this.failNotification("bootstrap", error);
+      throw error;
+    }
     if (this.stopped) {
       await this.client.disconnect(next).catch(() => undefined);
       return;
@@ -211,7 +219,7 @@ export class WorkbenchConnection {
       await this.client.disconnect(active).catch(() => undefined);
   }
 
-  private async handshake(recovered: boolean) {
+  private async confirmConnection(recovered: boolean) {
     if (this.stopped) return;
     const signal = await this.client.ping();
     if (this.stopped) return;

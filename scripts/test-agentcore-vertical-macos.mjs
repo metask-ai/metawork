@@ -447,7 +447,6 @@ async function snapshot() {
     throw new Error("Host provider credential reached the Renderer snapshot");
   const parsed = JSON.parse(encoded);
   if (
-    parsed.schemaVersion !== 7 ||
     typeof parsed.account !== "object" ||
     parsed.account === null ||
     Array.isArray(parsed.account) ||

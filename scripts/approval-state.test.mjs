@@ -71,7 +71,7 @@ function task(identity, pendingUi = pending(identity)) {
 }
 
 function snapshot(tasks) {
-  return { schemaVersion: 7, revision: "1", account, tasks };
+  return { revision: "1", account, tasks };
 }
 
 test("UI response state waits for the authoritative snapshot and never reopens an accepted request", () => {

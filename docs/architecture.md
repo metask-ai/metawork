@@ -248,11 +248,11 @@ Host view snapshot 使用 Bridge `Dispatcher` 内部 `ProductDelivery` 独占的
 
 Host 与 Renderer 随同一应用包原子发布，不承担旧 Renderer/新 Host 或新 Renderer/旧 Host 的兼容，但仍必须在 bootstrap 时检测开发产物、缓存资源或安装状态造成的版本错配。Renderer Bridge contract 覆盖全部 product command、event 和 snapshot wire surface；它与产品版本、AgentCore ABI、bundle manifest schema 分别演进。
 
-当前实现仍以 Workbench snapshot schema v7 作为已验证防线。引入完整协商时使用独立合同身份 `metawork.renderer-bridge`，首次 revision 为 `1`。`contractRevision` 精确匹配，不使用 semver：任何可序列化 command、event、payload 字段或线上语义变化都升级 revision，包括新增“可选”命令。当前 pre-1.0 开发阶段不维护旧 revision 兼容层。
+Renderer Bridge 使用独立合同身份 `metawork.renderer-bridge`，当前 revision 为 `1`。`contractRevision` 精确匹配，不使用 semver：任何可序列化 command、event、payload 字段或线上语义变化都升级 revision，包括新增“可选”命令。当前 pre-1.0 开发阶段不维护旧 revision 兼容层，也不在 snapshot 内维护第二个局部版本。
 
 `connect` 是 product delivery 的 bootstrap 边界。Host 必须在合同身份与 revision 校验成功后才建立 `ProductDelivery` connection；既有 `requireWindow()` 门禁随后统一保护 Account、Task、event 和 snapshot 产品路径。协商前只允许显式列出的无状态 bootstrap/smoke 命令，不得读取或修改产品状态。合同不匹配返回 typed terminal bootstrap error，Renderer 不把它当作瞬时断线重试。
 
-完整协商及其跨语言测试落地前保留 snapshot schema v7。只有证明未协商和 mismatch 均无法进入任何产品路径、Zig/TypeScript revision 与 command catalog 一致、双向 payload fixture 通过后，才能在独立变更中移除 snapshot 局部版本。Renderer 始终 runtime decode Host payload；unknown version、malformed payload 或 decoder/serializer contract mismatch 一律进入 fail-closed view-sync failure，不能猜测字段或静默降级。
+Zig/TypeScript 的 identity、revision 和完整 command catalog 必须精确一致，`app.zon` allowlist 不得缺项或多项；Host serializer → TypeScript decoder 与 TypeScript bootstrap payload → Host decoder 必须有跨语言 fixture/行为测试。Renderer 始终 runtime decode Host payload；malformed payload 或 decoder/serializer contract mismatch 一律进入 fail-closed view-sync failure，不能猜测字段或静默降级。
 
 ## 8. 安全边界
 

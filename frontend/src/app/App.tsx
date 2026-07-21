@@ -32,7 +32,11 @@ import {
 } from "../features/composer/useTaskDrafts.ts";
 import { prepareRetryDraft } from "../features/composer/drafts.ts";
 import { submitTaskInstruction } from "../features/composer/submitTaskInstruction.ts";
-import { BridgeClient, BridgeCommandTimeoutError } from "../bridge/client.ts";
+import {
+  BridgeClient,
+  BridgeCommandTimeoutError,
+  RendererBridgeContractError,
+} from "../bridge/client.ts";
 import {
   WorkbenchConnection,
   type WorkbenchConnectionStatus,
@@ -196,10 +200,11 @@ export default function App() {
     void current.start().catch((error) => {
       if (!cancelled) {
         setViewSyncFailed(true);
-        setStatus({
-          id: "connection.failed",
-          diagnostic: errorText(error),
-        });
+        if (!(error instanceof RendererBridgeContractError))
+          setStatus({
+            id: "connection.failed",
+            diagnostic: errorText(error),
+          });
       }
     });
 

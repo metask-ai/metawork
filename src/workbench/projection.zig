@@ -118,7 +118,6 @@ const ui_record_detail_capacity: usize = 512;
 const ui_record_snapshot_overhead: usize = 512;
 const tool_route_digest_bytes = std.crypto.hash.sha2.Sha256.digest_length;
 const tool_product_id_capacity = "tool-".len + 20;
-pub const snapshot_schema_version: u32 = 7;
 
 const ToolState = enum { running, completed, failed };
 const RunPhase = enum {
@@ -1432,10 +1431,8 @@ pub const Workbench = struct {
     pub fn writeSnapshot(self: *Workbench, output: []u8) Error![]const u8 {
         self.syncLifecycle();
         var writer = std.Io.Writer.fixed(output);
-        writer.print(
-            "{{\"schemaVersion\":{d},\"revision\":\"{d}\",\"account\":",
-            .{ snapshot_schema_version, self.revision },
-        ) catch return error.SnapshotTooLarge;
+        writer.print("{{\"revision\":\"{d}\",\"account\":", .{self.revision}) catch
+            return error.SnapshotTooLarge;
         try self.writeAccount(&writer);
         writer.writeAll(",\"tasks\":[") catch
             return error.SnapshotTooLarge;
@@ -2940,7 +2937,7 @@ fn finalizeTestTerminalEvents(workbench: *Workbench) void {
     workbench.syncLifecycle();
 }
 
-test "Workbench snapshot serializer matches the Renderer v7 contract fixture" {
+test "Workbench snapshot serializer matches the Renderer contract fixture" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
 

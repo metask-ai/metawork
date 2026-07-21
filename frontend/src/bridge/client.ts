@@ -1,4 +1,9 @@
-import { commands, events } from "./commands.ts";
+import {
+  commands,
+  events,
+  RENDERER_BRIDGE_CONTRACT_ID,
+  RENDERER_BRIDGE_CONTRACT_REVISION,
+} from "./commands.ts";
 import type { NativeSdkJson } from "@native-sdk/cli";
 import type {
   HostSignal,
@@ -15,9 +20,9 @@ import {
   assertTaskFlag,
   assertUiResponseAccepted,
   decodeAccountCommandResult,
-  decodeGeneration,
   decodeHostSignalEvent,
   decodePingResponse,
+  decodeRendererBridgeConnect,
   decodeRevisionNotification,
   decodeTaskId,
   decodeWorkspaceChoice,
@@ -37,6 +42,19 @@ export class BridgeCommandTimeoutError extends Error {
     this.name = "BridgeCommandTimeoutError";
     this.command = command;
     this.timeoutMs = timeoutMs;
+  }
+}
+
+export type RendererBridgeContractErrorCode =
+  "identity_mismatch" | "revision_mismatch" | "invalid_response";
+
+export class RendererBridgeContractError extends Error {
+  readonly code: RendererBridgeContractErrorCode;
+
+  constructor(code: RendererBridgeContractErrorCode, diagnostic: string) {
+    super(`Renderer Bridge contract failed: ${diagnostic}`);
+    this.name = "RendererBridgeContractError";
+    this.code = code;
   }
 }
 
@@ -108,7 +126,33 @@ export class BridgeClient {
   }
 
   async connect() {
-    return decodeGeneration(await this.invoke(commands.connect, {}));
+    const value = await this.invoke(commands.connect, {
+      contractId: RENDERER_BRIDGE_CONTRACT_ID,
+      contractRevision: RENDERER_BRIDGE_CONTRACT_REVISION,
+    });
+    let result: ReturnType<typeof decodeRendererBridgeConnect>;
+    try {
+      result = decodeRendererBridgeConnect(value);
+    } catch (error) {
+      throw new RendererBridgeContractError(
+        "invalid_response",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    if (!result.accepted)
+      throw new RendererBridgeContractError(
+        result.error,
+        `Host requires ${result.contractId} revision ${result.contractRevision}`,
+      );
+    if (
+      result.contractId !== RENDERER_BRIDGE_CONTRACT_ID ||
+      result.contractRevision !== RENDERER_BRIDGE_CONTRACT_REVISION
+    )
+      throw new RendererBridgeContractError(
+        "invalid_response",
+        `Host accepted ${result.contractId} revision ${result.contractRevision}`,
+      );
+    return result.generation;
   }
 
   async disconnect(generation: string) {

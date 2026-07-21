@@ -17,6 +17,7 @@
             .{ .name = "metawork.workbench.snapshot", .origins = .{"zero://app"} },
             .{ .name = "metawork.workbench.snapshot.chunk", .origins = .{"zero://app"} },
             .{ .name = "metawork.account.beginLogin", .origins = .{"zero://app"} },
+            .{ .name = "metawork.account.reopenLogin", .origins = .{"zero://app"} },
             .{ .name = "metawork.account.reauthenticate", .origins = .{"zero://app"} },
             .{ .name = "metawork.account.cancelOperation", .origins = .{"zero://app"} },
             .{ .name = "metawork.account.refreshCatalog", .origins = .{"zero://app"} },
@@ -54,7 +55,7 @@
     .windows = .{
         .{
             .label = "main",
-            .title = "MetaWork · Phase 0",
+            .title = "MetaWork",
             .width = 1180,
             .height = 760,
             .restore_state = true,

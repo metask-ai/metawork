@@ -1,5 +1,4 @@
 import {
-  WORKBENCH_SCHEMA_VERSION,
   type AccountCommandResult,
   type AccountView,
   type AskOption,
@@ -140,6 +139,10 @@ const accountErrorCodes = [
   "local_resource_exhausted",
   "dependency_contract_invalid",
   "shutting_down",
+] as const;
+const rendererBridgeConnectErrors = [
+  "identity_mismatch",
+  "revision_mismatch",
 ] as const;
 
 function fail(path: string, message: string): never {
@@ -750,17 +753,8 @@ function decodeTask(value: unknown, path: string): TaskView {
 }
 
 export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
-  const root = object(value, "$", [
-    "schemaVersion",
-    "revision",
-    "account",
-    "tasks",
-  ]);
-  const schemaVersion = numberValue(root.schemaVersion, "$.schemaVersion");
-  if (schemaVersion !== WORKBENCH_SCHEMA_VERSION)
-    fail("$.schemaVersion", `unsupported version ${schemaVersion}`);
+  const root = object(value, "$", ["revision", "account", "tasks"]);
   return {
-    schemaVersion,
     revision: wireId(root.revision, "$.revision"),
     account: decodeAccount(root.account, "$.account"),
     tasks: arrayValue(root.tasks, "$.tasks", decodeTask),
@@ -784,9 +778,38 @@ export function decodeAccountCommandResult(
   return { accepted, errorCode, attemptId };
 }
 
-export function decodeGeneration(value: unknown) {
-  const item = object(value, "$", ["generation"]);
-  return positiveWireId(item.generation, "$.generation");
+export function decodeRendererBridgeConnect(value: unknown) {
+  const item = object(value, "$", [
+    "accepted",
+    "contractId",
+    "contractRevision",
+    "generation",
+    "error",
+  ]);
+  const accepted = booleanValue(item.accepted, "$.accepted");
+  const contractId = stringValue(item.contractId, "$.contractId");
+  const contractRevision = positiveNumber(
+    item.contractRevision,
+    "$.contractRevision",
+  );
+  if (accepted) {
+    if (item.error !== null) fail("$.error", "expected null");
+    return {
+      accepted: true as const,
+      contractId,
+      contractRevision,
+      generation: positiveWireId(item.generation, "$.generation"),
+      error: null,
+    };
+  }
+  if (item.generation !== null) fail("$.generation", "expected null");
+  return {
+    accepted: false as const,
+    contractId,
+    contractRevision,
+    generation: null,
+    error: enumValue(item.error, "$.error", rendererBridgeConnectErrors),
+  };
 }
 
 export function decodeRevisionNotification(value: unknown) {

@@ -240,10 +240,35 @@ pub const Dispatcher = struct {
         defer callback.deinit();
         if (self.delivery.connectedWindow()) |window_id|
             if (window_id != invocation.source.window_id) return error.EventWindowMismatch;
+        errdefer self.breakConnection();
+        var parsed = try handlers.parsePayload(
+            handlers.RendererBridgeConnect,
+            invocation.request.payload,
+        );
+        defer parsed.deinit();
+        if (!std.mem.eql(u8, parsed.value.contractId, commands.contract_id)) {
+            self.breakConnection();
+            return std.fmt.bufPrint(
+                output,
+                "{{\"accepted\":false,\"contractId\":\"{s}\",\"contractRevision\":{d},\"generation\":null,\"error\":\"identity_mismatch\"}}",
+                .{ commands.contract_id, commands.contract_revision },
+            );
+        }
+        if (parsed.value.contractRevision != commands.contract_revision) {
+            self.breakConnection();
+            return std.fmt.bufPrint(
+                output,
+                "{{\"accepted\":false,\"contractId\":\"{s}\",\"contractRevision\":{d},\"generation\":null,\"error\":\"revision_mismatch\"}}",
+                .{ commands.contract_id, commands.contract_revision },
+            );
+        }
         const generation = try self.delivery.connect(invocation.source.window_id, self.transport());
-        errdefer self.delivery.breakConnection(self.transport());
         try self.platform.wake_fn(self.platform.context);
-        return std.fmt.bufPrint(output, "{{\"generation\":\"{d}\"}}", .{generation});
+        return std.fmt.bufPrint(
+            output,
+            "{{\"accepted\":true,\"contractId\":\"{s}\",\"contractRevision\":{d},\"generation\":\"{d}\",\"error\":null}}",
+            .{ commands.contract_id, commands.contract_revision, generation },
+        );
     }
 
     fn disconnectEvents(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
@@ -965,6 +990,33 @@ test "Dispatcher validates authority before domain calls and preserves committed
     const source = native_sdk.bridge.Source{ .origin = "zero://app", .window_id = 3 };
     var response: [4096]u8 = undefined;
 
+    for ([_][]const u8{
+        "{\"id\":\"snapshot-before-contract\",\"command\":\"metawork.workbench.snapshot\",\"payload\":{}}",
+        "{\"id\":\"account-before-contract\",\"command\":\"metawork.account.beginLogin\",\"payload\":{}}",
+        "{\"id\":\"task-before-contract\",\"command\":\"metawork.tasks.create\",\"payload\":{\"workspaceGrant\":\"1\"}}",
+    }) |request| {
+        const before_contract = native_dispatcher.dispatch(request, source, &response);
+        try std.testing.expect(std.mem.indexOf(u8, before_contract, "\"handler_failed\"") != null);
+    }
+    try std.testing.expectEqual(@as(usize, 0), harness.account_calls);
+    try std.testing.expectEqual(initial_revision, workbench.currentRevision());
+
+    const mismatch = native_dispatcher.dispatch(
+        "{\"id\":\"mismatch\",\"command\":\"metawork.events.connect\",\"payload\":{\"contractId\":\"metawork.renderer-bridge\",\"contractRevision\":2}}",
+        source,
+        &response,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, mismatch, "\"accepted\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mismatch, "\"revision_mismatch\"") != null);
+    try std.testing.expect(dispatcher.connectedWindow() == null);
+    const identity_mismatch = native_dispatcher.dispatch(
+        "{\"id\":\"identity-mismatch\",\"command\":\"metawork.events.connect\",\"payload\":{\"contractId\":\"other.renderer-bridge\",\"contractRevision\":1}}",
+        source,
+        &response,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, identity_mismatch, "\"identity_mismatch\"") != null);
+    try std.testing.expect(dispatcher.connectedWindow() == null);
+
     const invalid = native_dispatcher.dispatch(
         "{\"id\":\"bad\",\"command\":\"metawork.tasks.create\",\"payload\":{\"workspaceGrant\":\"1\",\"extra\":true}}",
         source,
@@ -974,7 +1026,26 @@ test "Dispatcher validates authority before domain calls and preserves committed
     try std.testing.expectEqual(initial_revision, workbench.currentRevision());
 
     _ = native_dispatcher.dispatch(
-        "{\"id\":\"connect\",\"command\":\"metawork.events.connect\",\"payload\":{}}",
+        "{\"id\":\"connect\",\"command\":\"metawork.events.connect\",\"payload\":{\"contractId\":\"metawork.renderer-bridge\",\"contractRevision\":1}}",
+        source,
+        &response,
+    );
+    try std.testing.expect(dispatcher.connectedWindow() == source.window_id);
+    _ = native_dispatcher.dispatch(
+        "{\"id\":\"reload-mismatch\",\"command\":\"metawork.events.connect\",\"payload\":{\"contractId\":\"metawork.renderer-bridge\",\"contractRevision\":2}}",
+        source,
+        &response,
+    );
+    try std.testing.expect(dispatcher.connectedWindow() == null);
+    const gated_after_mismatch = native_dispatcher.dispatch(
+        "{\"id\":\"account-after-mismatch\",\"command\":\"metawork.account.beginLogin\",\"payload\":{}}",
+        source,
+        &response,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, gated_after_mismatch, "\"handler_failed\"") != null);
+    try std.testing.expectEqual(@as(usize, 0), harness.account_calls);
+    _ = native_dispatcher.dispatch(
+        "{\"id\":\"reconnect\",\"command\":\"metawork.events.connect\",\"payload\":{\"contractId\":\"metawork.renderer-bridge\",\"contractRevision\":1}}",
         source,
         &response,
     );

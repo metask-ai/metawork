@@ -87,18 +87,18 @@ macOS 与 Windows 结果不能互相替代。安装器、签名、更新、file 
 
 人工证据未完成时，本矩阵不得整体标记为“已验证”。静态 boundary test 只能证明代码结构，不替代对应行为测试。
 
-## 5. Renderer Bridge contract 迁移验收
+## 5. Renderer Bridge contract 验收
 
-规范性策略见 [高层架构的 Renderer Bridge wire contract](architecture.md#71-renderer-bridge-wire-contract)。当前实现仍使用 snapshot schema v7；完整协商尚未实现。
+规范性策略见 [高层架构的 Renderer Bridge wire contract](architecture.md#71-renderer-bridge-wire-contract)。当前合同身份为 `metawork.renderer-bridge`，revision 为 `1`；snapshot 不再维护局部版本。
 
-移除 snapshot 局部版本前，独立变更必须证明：
+持续回归必须证明：
 
 - connect identity/revision 匹配时才建立 product delivery connection；
 - 未协商或 mismatch 时，Account、Task、event 和 snapshot 产品路径全部被现有门禁拒绝；
 - 不兼容是 terminal bootstrap error，Renderer 不执行瞬时重试；
 - Zig/TypeScript revision 与 command catalog 精确一致；
 - Host serializer → TypeScript decoder、TypeScript command payload → Host decoder 均有跨语言 fixture/行为测试；
-- snapshot schema v7 的移除发生在上述测试通过之后，并作为独立可回滚变更。
+- snapshot 只由完整 Bridge contract revision 覆盖，不重新引入局部 schema version。
 
 ## 6. 尚未验证的能力
 

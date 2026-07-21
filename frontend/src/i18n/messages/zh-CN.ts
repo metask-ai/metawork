@@ -20,6 +20,7 @@ export const zhCN: Record<MessageId, string> = {
   "connection.retry": "重新连接",
   "connection.retrying": "正在重新连接…",
   "connection.details": "技术详情",
+  "connection.source.bootstrap": "Renderer 合同",
   "connection.source.revision": "工作台更新",
   "connection.source.host_signal_ack": "Host 确认",
   "connection.source.host_signal": "Host 信号",

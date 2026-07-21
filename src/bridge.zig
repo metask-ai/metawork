@@ -25,6 +25,8 @@ pub const snapshot_max_bytes = product_delivery_impl.snapshot_max_bytes;
 pub const snapshot_chunk_bytes = product_delivery_impl.snapshot_chunk_bytes;
 
 pub const commands = struct {
+    pub const contract_id = commands_impl.contract_id;
+    pub const contract_revision = commands_impl.contract_revision;
     pub const ping = commands_impl.ping;
     pub const ping_ack = commands_impl.ping_ack;
     pub const connect = commands_impl.connect;
@@ -50,6 +52,7 @@ pub const commands = struct {
 };
 
 pub const handlers = struct {
+    pub const RendererBridgeConnect = handlers_impl.RendererBridgeConnect;
     pub const EventDisconnect = handlers_impl.EventDisconnect;
     pub const WorkbenchSnapshotChunk = handlers_impl.WorkbenchSnapshotChunk;
     pub const AccountSelectApiKey = handlers_impl.AccountSelectApiKey;
