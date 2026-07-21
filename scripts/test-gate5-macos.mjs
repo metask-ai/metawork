@@ -1,13 +1,29 @@
 import { execFile, spawn } from "node:child_process";
 import { rm } from "node:fs/promises";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 const root = fileURLToPath(new URL("../", import.meta.url));
-const native = `${root}node_modules/.bin/native`;
-const binary = `${root}zig-out/bin/metawork`;
-const automationDir = `${root}.zig-cache/native-sdk-automation`;
+const native = path.join(
+  root,
+  "node_modules",
+  "@native-sdk",
+  "cli",
+  "bin",
+  "native.js",
+);
+const binary = path.join(
+  root,
+  "zig-out",
+  "bin",
+  process.platform === "win32" ? "metawork.exe" : "metawork",
+);
+const appCwd = process.env.METAWORK_TEST_APP_CWD
+  ? path.resolve(root, process.env.METAWORK_TEST_APP_CWD)
+  : root;
+const automationDir = path.join(appCwd, ".zig-cache", "native-sdk-automation");
 const timeoutMs = 20_000;
 
 await rm(automationDir, { recursive: true, force: true });
@@ -15,7 +31,7 @@ await rm(automationDir, { recursive: true, force: true });
 let output = "";
 let exitState = null;
 const app = spawn(binary, [], {
-  cwd: root,
+  cwd: appCwd,
   env: {
     ...process.env,
     METAWORK_GATE0_AUTOMATION: "1",
@@ -77,7 +93,7 @@ try {
     throw new Error("normal runtime stop was not observed");
 
   process.stdout.write(
-    "Gate 5 macOS automation passed: worker wake, main-thread emit/fetch/ack, reload generation, clean stop.\n",
+    "Gate 5 desktop automation passed: worker wake, main-thread emit/fetch/ack, reload generation, clean stop.\n",
   );
 } catch (error) {
   process.stderr.write(`${output}\n`);
@@ -93,8 +109,8 @@ try {
 }
 
 async function automate(...args) {
-  return execFileAsync(native, ["automate", ...args], {
-    cwd: root,
+  return execFileAsync(process.execPath, [native, "automate", ...args], {
+    cwd: appCwd,
     timeout: timeoutMs,
     maxBuffer: 1024 * 1024,
   });
