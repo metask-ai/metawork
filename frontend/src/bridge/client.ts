@@ -110,6 +110,12 @@ export class BridgeClient {
     );
   }
 
+  async reopenLogin() {
+    return decodeAccountCommandResult(
+      await this.bridge().invoke(commands.accountReopenLogin, {}),
+    );
+  }
+
   async reauthenticate() {
     return decodeAccountCommandResult(
       await this.bridge().invoke(commands.accountReauthenticate, {}),

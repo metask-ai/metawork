@@ -135,7 +135,7 @@ Gate B 不等于 C1/C2 完成。C1 production OAuth client、profile decoder 和
 
 #### Gate E/F：Bridge 合同与 Renderer
 
-- schema v6 只发布无秘密 Account view；账号命令仅携带 API Key id 或 model id；
+- schema v7 只发布无秘密 Account view，并由 Host 投影 `readiness`、唯一 `primaryAction` 与 `canCancel`；账号命令仅携带 API Key id 或 model id；
 - Renderer 只在 Host 的精确选择 phase 开放对应控件，登录、加载目录、选择、取消、退出与失败状态均有明确反馈；
 - Task admission 只读 Host 发布的 `canCreateTask`，Renderer 不推断 provider、base URL 或 credential readiness。
 

@@ -16,7 +16,7 @@ import {
 const fixture = JSON.parse(
   readFileSync(
     new URL(
-      "../frontend/src/bridge/__fixtures__/workbench-snapshot-v6.fixture",
+      "../frontend/src/bridge/__fixtures__/workbench-snapshot-v7.fixture",
       import.meta.url,
     ),
     "utf8",
@@ -27,7 +27,7 @@ function clone(value) {
   return structuredClone(value);
 }
 
-test("the canonical v6 Workbench fixture decodes without normalization", () => {
+test("the canonical v7 Workbench fixture decodes without normalization", () => {
   assert.deepEqual(decodeWorkbenchSnapshot(fixture), fixture);
 });
 
@@ -130,6 +130,20 @@ test("Workbench decoding rejects version drift, extra fields, and invalid wire v
   const refreshingReadyAccount = clone(fixture);
   refreshingReadyAccount.account.sessionState = "refreshing";
   assert.doesNotThrow(() => decodeWorkbenchSnapshot(refreshingReadyAccount));
+
+  const mismatchedPrimaryAction = clone(fixture);
+  mismatchedPrimaryAction.account.primaryAction = "sign_in";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(mismatchedPrimaryAction),
+    /readiness and primary action disagree/,
+  );
+
+  const mismatchedCancellation = clone(fixture);
+  mismatchedCancellation.account.canCancel = true;
+  assert.throws(
+    () => decodeWorkbenchSnapshot(mismatchedCancellation),
+    /cancellation availability disagrees/,
+  );
 
   const duplicateModel = clone(fixture);
   duplicateModel.account.models = [

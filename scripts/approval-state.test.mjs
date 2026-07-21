@@ -23,6 +23,9 @@ const account = {
   sessionState: "signed_out",
   executionState: "none",
   operation: "none",
+  readiness: "sign_in_required",
+  primaryAction: "sign_in",
+  canCancel: false,
   accountId: "",
   displayName: "",
   apiKeys: [],
@@ -68,7 +71,7 @@ function task(identity, pendingUi = pending(identity)) {
 }
 
 function snapshot(tasks) {
-  return { schemaVersion: 6, revision: "1", account, tasks };
+  return { schemaVersion: 7, revision: "1", account, tasks };
 }
 
 test("UI response state waits for the authoritative snapshot and never reopens an accepted request", () => {

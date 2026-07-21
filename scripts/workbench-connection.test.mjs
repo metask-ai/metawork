@@ -10,12 +10,15 @@ globalThis.window ??= {
 
 function snapshot(revision) {
   return {
-    schemaVersion: 6,
+    schemaVersion: 7,
     revision,
     account: {
       sessionState: "signed_out",
       executionState: "none",
       operation: "none",
+      readiness: "sign_in_required",
+      primaryAction: "sign_in",
+      canCancel: false,
       accountId: "",
       displayName: "",
       apiKeys: [],

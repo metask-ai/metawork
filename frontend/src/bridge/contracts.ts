@@ -1,4 +1,4 @@
-export const WORKBENCH_SCHEMA_VERSION = 6 as const;
+export const WORKBENCH_SCHEMA_VERSION = 7 as const;
 
 export type AccountSessionState =
   | "restoring"
@@ -22,6 +22,25 @@ export type AccountOperation =
   | "selecting_model"
   | "persisting"
   | "logging_out";
+
+export type AccountReadiness =
+  | "checking"
+  | "sign_in_required"
+  | "preparing"
+  | "choice_required"
+  | "ready"
+  | "needs_attention"
+  | "restart_required";
+
+export type AccountPrimaryAction =
+  | "none"
+  | "sign_in"
+  | "reopen_login"
+  | "choose_api_key"
+  | "choose_model"
+  | "retry_catalog"
+  | "reauthenticate"
+  | "restart";
 
 export type AccountErrorCode =
   | "none"
@@ -61,6 +80,9 @@ export type AccountView = {
   sessionState: AccountSessionState;
   executionState: ExecutionState;
   operation: AccountOperation;
+  readiness: AccountReadiness;
+  primaryAction: AccountPrimaryAction;
+  canCancel: boolean;
   accountId: string;
   displayName: string;
   apiKeys: { id: string; name: string; suffix: string }[];
