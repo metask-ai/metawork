@@ -31,7 +31,6 @@ MetaWork 不直接编译 AgentCore 实现源码。candidate probe 从显式 bund
 - [AgentCore 集成契约](docs/agentcore-integration.md)
 - [AgentCore ABI v1 revision 3 消费合同](docs/agentcore-abi-v1.md)
 - [当前验证规范](docs/validation.md)
-- [Account 集成历史实施记录](docs/account-integration-plan.md)
 - [Metask Account API 合同状态](docs/metask-account-contract.md)
 - [AgentCore ABI v1 revision 3 迁移验证报告](docs/agentcore-revision-3-migration-report.md)
 - [Agent 工作约束](AGENTS.md)
