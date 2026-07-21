@@ -181,28 +181,9 @@ Metask AgentCore 与 MetaWork 是两个独立构建单元。revision 3 正式接
 
 revision 3 是硬切换，不提供 revision 2 active compatibility path。新增 observation tag 仍由 bundle SDK 解码为 owned unknown observation；MetaWork 在 SDK 校验后立即释放并忽略，不让它占用产品事件泵，也不传给 Renderer 或猜测为产品状态。
 
-## 6. 实施 Gate
+## 6. 并发、生命周期与故障边界
 
-实施顺序固定为：
-
-1. 统一同步 v1 baseline 的规范；
-2. 验证 Native SDK React dev/prod 和真实双向 Bridge；
-3. 用显式 bundle root 完成 exact artifact 校验和官方 SDK source-free discover/link/run；
-4. 建立 Host 生命周期、安全边界和 deterministic ABI function-table 测试；
-5. Metask AgentCore bundle SDK 补齐 typed status、事件与 UI request/response codec；
-6. 正式 Host 直接接入 typed SDK，并先连接有界测试 sink；
-7. 根据真实 trace 实现事件泵和 Bridge；
-8. 完成同进程 macOS 同步原型；
-9. 在实现单 AgentCore Worker 时验证 supervisor、transport 和 crash semantics；
-10. 对 revision 3 bundle 执行 hard-cut migration Gate，证明 candidate、staged dependency、正式 Host 和最终 package 是同一精确 identity；
-11. 完成 Windows development baseline；
-12. 再建设 cache、remote、后续 capability、Windows 分发与 Linux 接入。
-
-任何交付门槛未满足退出条件时，不得用 MetaWork 自己复制协议、放宽安全语义或引入 source dependency 绕过。
-
-## 7. 并发、生命周期与故障边界
-
-### 7.1 逻辑并发单元
+### 6.1 逻辑并发单元
 
 ```text
 SessionRuntime
@@ -234,7 +215,7 @@ RunJob
 
 完整状态机、错误映射和 callback 所有权见 [AgentCore 集成契约](agentcore-integration.md)。
 
-### 7.2 进程模型
+### 6.2 进程模型
 
 | 模型                      | 故障隔离               | 作用                       |
 | ------------------------- | ---------------------- | -------------------------- |
@@ -244,7 +225,7 @@ RunJob
 
 统一 Zig 不提供隔离。独立 crash 对照证明同进程是零进程级隔离，并选择单 AgentCore Worker 作为后续正式方向。该决定不把 spike IPC 升格为产品协议；版本化 transport、backpressure、shutdown、credential 和真实 bundle 资源数据必须在后续能力验收中定义。当前同进程应用仍只是 prototype。
 
-## 8. 状态与恢复边界
+## 7. 状态与恢复边界
 
 当前同步 baseline 应形成以下可靠 Host 状态：
 
@@ -263,7 +244,7 @@ Account attempt 与 Renderer 生命周期解耦：Renderer reload、短暂断连
 
 Host view snapshot 使用 Bridge `Dispatcher` 内部 `ProductDelivery` 独占的 12 MiB 有界存储，不受 Bridge 单次 1 MiB result 上限反向约束。该容量覆盖 512 KiB Task projection、最大 Account API Key/model catalog、JSON 最坏转义和全部结构上界。Dispatcher 同时拥有 callback gate、workspace grants、handler registry 和 `*Workbench`，产品 command 的 decode、authority、domain call 与 response encode 不再经过 App。Workbench writer 只能在同步调用期间借用这块 output buffer；返回后 Bridge 独占 encoded bytes，禁止保存 Workbench borrowed view。Renderer 通过带 snapshot identity 的 256 KiB 分块读取完成 resync；begin 写入前先使旧 descriptor 失效，序列化失败后旧 identity 必须保持 stale，不能继续读取已被部分覆盖的 store。revision 通知和 snapshot 拉取分别保留 pending/retry 状态，瞬时发送或读取失败不能把旧视图标记为最新。revision retry 同时受 attempt 和 deadline 预算约束，耗尽或 retry timer 不可用时当前 event connection fail closed，但不终止后台 Agent Run。新 event generation 建立时会使旧 snapshot descriptor 失效；Renderer 若仍持有旧 generation Promise，必须在旧 Promise 退出后继续完成新 generation 的实际 resync，不能把等待旧 Promise 误判为同步成功。Bridge 异步保留的 payload 必须自有；App shutdown 先 stop Bridge ingress、关闭 delivery connection 并取消 timer，在 Native platform loop 上确认同步 handler quiescence，然后 detach Workbench，最后才独立释放 delivery buffers。
 
-### 8.1 Renderer Bridge wire contract
+### 7.1 Renderer Bridge wire contract
 
 Host 与 Renderer 随同一应用包原子发布，不承担旧 Renderer/新 Host 或新 Renderer/旧 Host 的兼容，但仍必须在 bootstrap 时检测开发产物、缓存资源或安装状态造成的版本错配。Renderer Bridge contract 覆盖全部 product command、event 和 snapshot wire surface；它与产品版本、AgentCore ABI、bundle manifest schema 分别演进。
 
@@ -273,7 +254,7 @@ Host 与 Renderer 随同一应用包原子发布，不承担旧 Renderer/新 Hos
 
 完整协商及其跨语言测试落地前保留 snapshot schema v7。只有证明未协商和 mismatch 均无法进入任何产品路径、Zig/TypeScript revision 与 command catalog 一致、双向 payload fixture 通过后，才能在独立变更中移除 snapshot 局部版本。Renderer 始终 runtime decode Host payload；unknown version、malformed payload 或 decoder/serializer contract mismatch 一律进入 fail-closed view-sync failure，不能猜测字段或静默降级。
 
-## 9. 安全边界
+## 8. 安全边界
 
 Renderer 按不可信调用方处理：
 
@@ -291,7 +272,7 @@ Renderer 按不可信调用方处理：
 
 持久 permission 是 Host-owned 产品状态，不是 Renderer preference 或 AgentCore parallel protocol。规则必须绑定 stable Workspace identity、tool identity/version、operation、canonical resource constraint 和 rule schema version；canonical path 字符串本身不能充当 stable identity。Workspace、tool、script 或 capability 变化时规则 fail closed。Workspace 文件边界、process tree、network、environment、审计和撤销分别通过对应安全 Gate 前，UI 不得为相关能力提供 `Always allow` 或 `Full access`。
 
-## 10. Native SDK 边界
+## 9. Native SDK 边界
 
 Native SDK 是当前选型，当前 baseline 已验证：
 
@@ -304,7 +285,7 @@ Native SDK 是当前选型，当前 baseline 已验证：
 
 在验证前不预设 push、poll 或自制 `events.drain` 协议。Windows WebView、打包、签名和更新必须独立验证。
 
-## 11. 主要风险
+## 10. 主要风险
 
 | 风险                                   | 当前控制方式                                                            |
 | -------------------------------------- | ----------------------------------------------------------------------- |

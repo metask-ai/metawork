@@ -90,7 +90,7 @@ macOS 与 Windows 结果不能互相替代。安装器、签名、更新、file 
 
 ## 5. Renderer Bridge contract 迁移验收
 
-规范性策略见 [高层架构的 Renderer Bridge wire contract](architecture.md#81-renderer-bridge-wire-contract)。当前实现仍使用 snapshot schema v7；完整协商尚未实现。
+规范性策略见 [高层架构的 Renderer Bridge wire contract](architecture.md#71-renderer-bridge-wire-contract)。当前实现仍使用 snapshot schema v7；完整协商尚未实现。
 
 移除 snapshot 局部版本前，独立变更必须证明：
 
