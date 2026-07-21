@@ -163,6 +163,12 @@ production 网络接入受 [Metask Account API 合同](metask-account-contract.m
 
 async suspend/resume、持久化恢复和后台转换属于后续 AgentCore capability，不是当前 bundle 的隐藏能力。
 
+### 4.5 MetaWork release identity
+
+MetaWork 桌面产品、根 npm workspace、Renderer workspace 和 Zig package 随同一仓库原子发布，共用一个 release version。`app.zon` 是产品版本真源；根 `package.json`、`frontend/package.json` 与 `build.zig.zon` 必须精确镜像，`package-lock.json` 只保存 npm 派生结果。当前统一版本为 `0.1.0`。
+
+Renderer Bridge revision、Account persistence revision、AgentCore artifact version、AgentCore ABI version/revision 和 bundle manifest schema 各自保护不同合同，不得随 MetaWork release version 自动升降。release version 变化必须原子更新全部镜像并通过跨 manifest 一致性守卫。
+
 ## 5. AgentCore bundle 边界
 
 Metask AgentCore 与 MetaWork 是两个独立构建单元。revision 3 正式接入物是 Metask AgentCore 构建的 target-specific bundle，包含 binary、C header、官方语言 bindings、README 和 manifest；精确 payload whitelist 只在 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)定义。

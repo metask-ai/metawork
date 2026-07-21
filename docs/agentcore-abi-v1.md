@@ -239,6 +239,8 @@ README.md
 manifest.json
 ```
 
+若 bundle 内的 Markdown 说明与 repository lock 锁定的 manifest 或官方 bundle SDK 冲突，以机器可读合同为准，并将冲突记录为 Metask AgentCore 依赖缺陷；不得据散文说明放宽或改写 MetaWork 的消费行为。
+
 manifest schema 1 必须精确记录：
 
 - `vendor = "metask"`、`name = "agentcore"`、package version；

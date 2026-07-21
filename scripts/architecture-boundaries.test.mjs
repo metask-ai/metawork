@@ -29,6 +29,22 @@ function assertNoImports(files, forbidden) {
   }
 }
 
+test("MetaWork product and package manifests share one release version", () => {
+  const appVersion = read("app.zon").match(/\.version = "([^"]+)"/)?.[1];
+  const zigVersion = read("build.zig.zon").match(/\.version = "([^"]+)"/)?.[1];
+  const rootPackage = JSON.parse(read("package.json"));
+  const rendererPackage = JSON.parse(read("frontend/package.json"));
+  const lock = JSON.parse(read("package-lock.json"));
+
+  assert.match(appVersion ?? "", /^0\.\d+\.\d+$/);
+  assert.equal(rootPackage.version, appVersion);
+  assert.equal(rendererPackage.version, appVersion);
+  assert.equal(zigVersion, appVersion);
+  assert.equal(lock.version, appVersion);
+  assert.equal(lock.packages[""].version, appVersion);
+  assert.equal(lock.packages.frontend.version, appVersion);
+});
+
 test("module roots and Agent directory use product semantics", () => {
   for (const path of [
     "src/app.zig",
@@ -258,10 +274,7 @@ test("Account persistence revision has one code owner", () => {
   assert.match(store, /pub const persistence_revision: u8 = 2/);
   assert.match(store, /"dev\.metawork\.account\.v\{d\}"/);
   assert.match(store, /"manifest\.v\{d\}"/);
-  assert.equal(
-    [...store.matchAll(/\.\{persistence_revision\}/g)].length,
-    2,
-  );
+  assert.equal([...store.matchAll(/\.\{persistence_revision\}/g)].length, 2);
   assert.match(store, /version: u8 = persistence_revision/);
   assert.match(store, /self\.version != persistence_revision/);
   assert.match(platform, /const manifest_name = store\.manifest_name/);
