@@ -1,6 +1,6 @@
 # MetaWork Phase 0 验证计划
 
-> 状态：Phase 0A Gate 0 至 Gate 7、Account Gate A1/B/C1/C2/D/E/F/G、AgentCore revision 3 hard-cut migration Gate 和 Windows Phase 0B 接入 baseline 已通过
+> 状态：Phase 0A Gate 0 至 Gate 7、Account Gate A1/B/C1/C2/D/E/F/G、AgentCore revision 3 hard-cut migration Gate 和 Windows Phase 0B 接入 baseline 已通过；Account interaction Gate H 待完成
 > 平台：Phase 0A macOS-first；Phase 0B Windows 接入 baseline 已验证，分发交付后续推进
 
 Phase 0 用最小真实原型验证技术栈和关键风险，不交付完整产品。历史 Phase 0A 使用 ABI v1 revision 2 完成；当前已验证基线已 hard cut 到 development AgentCore ABI v1 revision 3，并通过本文 migration Gate。这些 development artifact 都不构成 stable support policy。同步 baseline 不包含 async suspend/resume、跨进程恢复、strict Workspace security、正式 Host tools、typed Output/FileChange/plan-progress 或 plan/custom UI control。
@@ -147,6 +147,16 @@ Gate B 不等于 C1/C2 完成。C1 production OAuth client、profile decoder 和
 - 真实 `deepseek / deepseek-v4-pro` 路径也完成 AgentCore Run；目录中可列出但账号不支持的 `gpt-5.1` 由 Provider 返回失败，不被 MetaWork 猜测或伪装为成功；
 - 重启后 `execution_ready` 与 Task admission 恢复；API Key/model 公共目录不持久化，按需重新加载；
 - `npm ci`、format/check/test、Debug/Release build、macOS package、Gate 6、Gate 7 通过；release `.app` 的 automation/fixture 与本机 OAuth credential 扫描通过。
+
+#### Gate H：Task-first Account 交互与恢复
+
+- signed out、restoring、authorizing 和 catalog 准备期间，Workbench shell、Workspace 选择与 New task 草稿保持可用；Task/Run admission 仍由 Host fail closed；
+- C1 `account_only` commit 后自动启动独立 C2 continuation；历史选择或唯一候选自动推进，多候选且无明确默认时才发布用户选择；
+- 无 Workspace 时只突出 Workspace，Workspace 已确定后才突出 Account；无 Key/模型保留登录并提供重试，不留下 disabled selector；
+- OAuth 无 callback、重新打开、取消、hard deadline，catalog timeout/有限重试、Bridge invoke timeout、Renderer reload 和 snapshot resync 均有确定终态与恢复动作；
+- Renderer 不通过隐藏 command、候选数量或 error code 推导 continuation，不自动重复结果不确定 mutation；
+- `en-US` / `zh-CN`、键盘、focus、960×680 至 1440×900、200% text 与 Windows 平台文案通过成熟产品经理审核；
+- 每个实现子任务在独立验证后完成成熟产品经理审核并形成可回滚的本地 Conventional Commit。
 
 ## 4. Gate -1：规范对齐
 

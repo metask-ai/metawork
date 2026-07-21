@@ -115,6 +115,7 @@ Host 负责：
 - 暴露小而明确的领域命令；
 - 校验来源、参数、Workspace、Session 和权限；
 - 由 Account 在 Renderer 之外完成 Metask OAuth、目录查询、凭据持久化与 ExecutionConfig 生成；
+- 由 App/Account 在 committed transition 之后启动有界 continuation，把登录后的确定性目录准备留在后台，并只把真实歧义投影成用户动作；
 - 由 App 在同一主线程 turn 内协调 Account prepare、Workbench no-fail install 和 Account commit；
 - 由 Workbench 管理 Task、Run record、队列、取消协调和产品历史；
 - 由 Agent 管理 AgentCore Session、active Run、callback binding 和有界事件泵；
@@ -141,6 +142,10 @@ Account.prepare(command | completion)
 ```
 
 前五步在 App 主线程同一 turn 内完成，effect 只有在 committed swap 后才能启动；worker completion 再经主循环进入同一条链。任何校验或内部不变量失败都保留旧 committed state，并清零 staged secret；Bridge 不参与 prepare/commit，也不接触 credential。C1 登录只依赖锁定的 OAuth client/scope/loopback/profile 合同，成功先提交 `account_only`，不等待 API Key 或模型目录。
+
+`account_only` 是安全与持久化提交边界，不是要求用户手动启动 C2 的产品边界。C1 commit 完成后，App/Account 可以创建新的 catalog attempt 自动继续；历史选择仍存在且匹配当前 catalog 时优先恢复，单一候选自动采用，只有无法由锁定合同确定的多候选才进入 waiting-for-user。这个 continuation 必须通过相同 prepare/admit/commit 链，不得由 Renderer 观察状态后发送隐藏命令。
+
+每个 Account attempt 都有 Host-owned deadline、attempt identity 和唯一 terminal completion。浏览器未回调、网络悬挂、effect 启动失败和取消都必须收口到可恢复 committed state。幂等 catalog read 可以有限重试；OAuth code exchange、凭据持久化和结果不确定 mutation 不得自动重放。Renderer command timeout 只释放本地交互并触发 snapshot resync，不能代表 Host mutation 失败。
 
 production 网络接入受 [Metask Account API 合同](metask-account-contract.md)约束。C1 OAuth/login 独立提交 `account_only`，不打开 Task admission；C2 使用 profile-aware API Key/model catalog，从精确 `group.platform` 生成固定 Metask AgentCore target，并通过 OAuth/execution 双 family A/B slot 与单一 `manifest.v2` 提交 `execution_ready`。只有 Workbench 安装同一 execution generation 后才开放 Task admission。mCode/metacodes 只作为 Metask 自有实现证据，MetaWork 不修改其代码。
 
@@ -253,6 +258,8 @@ RunJob
 Workbench 在 admission 时为每个 Run 建立稳定 record slot、单调 generation 和 bounded terminal diagnostic storage。执行方持有 `RunRef` 时，Task record 不得物理释放；删除已关闭 Task 只能进入 `delete_pending`，并在引用归零后收口。Agent 对已开始的 Run 返回自包含、不可变的 `TerminalResult`；Workbench 将其无分配、write-once 地提交进 Run record。queued-before-execute 由 Workbench 直接生成 pre-execution 产品结果。Session snapshot 只描述 live lifecycle，不再承载历史 terminal facts。
 
 Renderer reload 只重建仍存活 Host 的视图。Host/AgentCore crash 后当前 Run 必须标记 interrupted，危险工具不得自动重放。Conversation/checkpoint 跨进程恢复只有在未来 AgentCore capability 明确提供后才能设计。
+
+Account attempt 与 Renderer 生命周期解耦：Renderer reload、短暂断连或视图同步失败不能遗失 Host 中的 deadline、取消能力或 terminal result。Workbench Account projection 必须发布产品 readiness 和 Host 允许的用户动作；Renderer 不从内部 operation、error code 或候选数量自行发明 continuation。
 
 Host view snapshot 使用 Bridge `Dispatcher` 内部 `ProductDelivery` 独占的 12 MiB 有界存储，不受 Bridge 单次 1 MiB result 上限反向约束。该容量覆盖 512 KiB Task projection、最大 Account API Key/model catalog、JSON 最坏转义和全部结构上界。Dispatcher 同时拥有 callback gate、workspace grants、handler registry 和 `*Workbench`，产品 command 的 decode、authority、domain call 与 response encode 不再经过 App。Workbench writer 只能在同步调用期间借用这块 output buffer；返回后 Bridge 独占 encoded bytes，禁止保存 Workbench borrowed view。Renderer 通过带 snapshot identity 的 256 KiB 分块读取完成 resync；begin 写入前先使旧 descriptor 失效，序列化失败后旧 identity 必须保持 stale，不能继续读取已被部分覆盖的 store。revision 通知和 snapshot 拉取分别保留 pending/retry 状态，瞬时发送或读取失败不能把旧视图标记为最新。revision retry 同时受 attempt 和 deadline 预算约束，耗尽或 retry timer 不可用时当前 event connection fail closed，但不终止后台 Agent Run。新 event generation 建立时会使旧 snapshot descriptor 失效；Renderer 若仍持有旧 generation Promise，必须在旧 Promise 退出后继续完成新 generation 的实际 resync，不能把等待旧 Promise 误判为同步成功。Bridge 异步保留的 payload 必须自有；App shutdown 先 stop Bridge ingress、关闭 delivery connection 并取消 timer，在 Native platform loop 上确认同步 handler quiescence，然后 detach Workbench，最后才独立释放 delivery buffers。
 

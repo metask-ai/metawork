@@ -1,7 +1,7 @@
 # MetaWork 产品需求
 
-> 状态：v0.3，加入 Metask Account 与唯一执行配置边界
-> 日期：2026-07-20
+> 状态：v0.4，加入 Task-first 交互、Account 后台编排与恢复边界
+> 日期：2026-07-21
 
 ## 1. 产品定义
 
@@ -16,6 +16,7 @@ MetaWork 的核心不是模拟终端，而是把 Agent 工作表达为结构化�
 - 以结构化 UI 展示 Agent 文本、工具调用、进度、审批和结果；
 - 允许多个 Task 独立运行和切换；
 - 在取消、刷新、关闭和异常后给出明确且可信的状态；
+- 让用户先表达工作目标，把账号、目录和执行配置准备降为后台条件；
 - 为未来的后台任务、持久化恢复、通知和多 Agent 协作保留合理产品边界。
 
 ## 3. 非目标
@@ -74,6 +75,12 @@ Account 是 MetaWork 的 Metask 账号控制面，负责 OAuth 登录、账号/A
 ### 5.2 Metask 账号与执行配置
 
 - 普通用户通过 Metask OAuth 登录，不需要手工填写 Provider、model、base URL 或 API Key；
+- 首次启动不得把 Account 内部 operation 暴露为逐步配置向导。用户登录前即可选择 Workspace、编辑并保留 New task 草稿；只有 Task admission 和 Run 启动必须等待 ready ExecutionConfig；
+- OAuth 成功提交 `account_only` 后，Host 必须以独立、有界的 continuation 自动加载 API Key 和模型目录。仍有效的历史选择优先恢复；没有历史选择时，唯一候选自动采用；只有多个候选且没有合同明确的默认项时才请求用户选择；
+- 自动 continuation 不能把 C2 失败回滚成未登录，也不能根据显示名称、列表顺序或模型名猜测默认值、Provider 或 target；
+- 没有可用 API Key 或模型时必须保持已登录状态，说明缺少什么并提供 `重试`；只有 Host 拥有固定、安全的 Metask 管理入口时才显示 `在 Metask 中管理`，Renderer 不拼接外部 URL；
+- 登录、目录加载、模型加载和持久化是 Host-owned 操作。Renderer 只渲染 Host 发布的 readiness、当前可用动作和脱敏候选，不通过 `useEffect`、隐藏点击或本地定时器推进产品状态；
+- 首次 readiness 完成后，账号入口降为 Workbench 中的轻量状态与设置入口；刷新目录、切换 Key/模型和退出不再占据 New task 主流程；
 - OAuth token 只访问 Metask 账号 API；选定 API Key 才作为 AgentCore 模型调用凭据；
 - Renderer 只能看到脱敏账号、Key 尾号、模型、稳定错误码和状态，不得接触 OAuth token、完整 API Key、Authorization header、临时 OAuth URL 或凭据存储 locator；
 - 当前只允许一个 active ExecutionConfig；切换账号、API Key、模型或退出登录必须先取得 Workbench execution replacement gate，并证明没有 live/closing Task、Agent Session、Run、executor job 或 `RunRef`；
@@ -83,6 +90,7 @@ Account 是 MetaWork 的 Metask 账号控制面，负责 OAuth 登录、账号/A
 
 ### 5.3 Task
 
+- New task 草稿是 Renderer-owned、按 Workspace 隔离的可恢复输入；Account 尚未 ready 时仍允许选择 Workspace 和编辑草稿，但不得伪装成已创建 Task、已排队或已提交 Run；
 - 用户可以在 Workspace 中创建、切换和关闭 Task；
 - 多个 Task 可以同时存在；
 - 后台 Task 的运行状态不能因 UI 切换而丢失；
@@ -121,6 +129,10 @@ Account 是 MetaWork 的 Metask 账号控制面，负责 OAuth 登录、账号/A
 
 ### 5.7 状态与恢复
 
+- 每个 Account attempt 必须拥有 Host deadline，并最终进入成功、可重试失败、用户取消或明确的 restart-required 边界；浏览器未回调、网络悬挂、worker 启动失败和 completion/notification 异常不得永久保留 active operation；
+- OAuth 等待超过正常感知时长时，界面必须提供 Host-owned `重新打开登录页面` 与 `取消登录`；Renderer 不接触授权 URL。目录等幂读取可以有限自动重试，OAuth code exchange、持久化 mutation 和其他结果不确定操作不得盲目重放；
+- Bridge command 或 view refresh 超时必须释放 Renderer 本地 busy 状态并进入 snapshot resync；结果不确定的 mutation 只能依据 Host snapshot 决定后续动作，不能由 Renderer 自动重复；
+- Account cancel 是独立逃生动作，不能因普通 mutation busy 被禁用；Bridge 暂不可用时 Host deadline 仍必须收口 attempt，Renderer reload 后从 snapshot 恢复可用动作；
 - 用户消息、已完成 assistant 消息、工具结果、审批决策和关键 Run 状态应形成可靠状态边界；Run admission 必须先建立稳定、带 generation 的 Workbench Run record，terminal payload 一经发布不可变，内部 Agent Session 关闭或销毁后 Task 历史仍可独立生成 snapshot；
 - 当前 baseline 的 Renderer reload 只能从仍存活的 Host 恢复视图；
 - Host 或 AgentCore 进程退出时，当前同步 Run 标记 `interrupted`，不得伪装完成；
@@ -137,6 +149,9 @@ Account 是 MetaWork 的 Metask 账号控制面，负责 OAuth 登录、账号/A
 
 ### 5.9 Workbench 界面与任务组织
 
+- Workbench shell、Workspace 选择和 New task 输入是首次启动的主界面；Account readiness 作为启动条件显示在任务输入附近，不使用阻塞全窗口的技术配置墙；
+- 界面在任一时刻只突出一个下一步：登录、完成浏览器授权、选择真正有歧义的 Key/模型、处理失败或开始任务。后台 operation 使用低权重状态，不把内部步骤伪装成用户待办；
+- 没有 Workspace 时 `选择 Workspace` 是唯一主动作；确定 Workspace 后草稿才获得归属，若 Account 尚未 ready，登录或处理 Account 是下一主动作；其余未满足条件只作为可理解的次级状态展示；
 - 首个正式版本采用单主窗口；多个 Task 可以后台运行，切换 Workspace 或 Task 不停止执行；
 - Renderer reload、断开连接以及 Bridge revision/snapshot/event delivery failure 默认只影响视图同步和重连，不得终止后台 Agent Run；只有 Workbench 根据 canonical 产品状态作出的显式 termination 决策才能请求结束 Run；
 - 左栏只展开当前 Workspace 的 Task，Workspace 切换器必须汇总其他 Workspace 的运行、待处理和失败状态，不能让后台请求只依赖系统通知；
@@ -205,11 +220,13 @@ Account 是 MetaWork 的 Metask 账号控制面，负责 OAuth 登录、账号/A
 下一阶段在不改写既有 baseline 证据的前提下增加：
 
 ```text
-Metask 登录 → 选择 API Key/模型 → ready ExecutionConfig
+选择 Workspace / 编辑 New task 草稿 ↔ Metask 登录
+→ Host 后台恢复或加载 API Key/模型
+→ 仅在真实歧义时请求选择 → ready ExecutionConfig
 → Workbench Task admission → 既有同步 macOS baseline
 ```
 
-Metask C1 OAuth/login 与 C2 catalog/ExecutionTarget 合同均已锁定。登录可独立提交 `account_only`；API Key/model 选择只决定何时形成 `execution_ready`，不得反向成为登录前置条件。
+Metask C1 OAuth/login 与 C2 catalog/ExecutionTarget 合同均已锁定。登录先独立提交 `account_only`；产品编排随后启动独立 C2 continuation。API Key/model 选择只决定何时形成 `execution_ready`，不得反向成为登录前置条件或让 C2 失败抹除已完成登录。
 
 ### 7.3 完整 Phase 0A
 
