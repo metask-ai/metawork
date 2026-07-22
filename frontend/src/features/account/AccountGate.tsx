@@ -1,6 +1,6 @@
 import type { AccountView } from "../../bridge/contracts.ts";
 import { useI18n, type Locale } from "../../i18n/context.ts";
-import { accountErrorText } from "./account-copy.ts";
+import { accountErrorText } from "../../i18n/account-error.ts";
 
 type Props = {
   account: AccountView;

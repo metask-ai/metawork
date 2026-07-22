@@ -51,7 +51,7 @@ MetaWork 的视觉记忆点不是装饰性的暖色、通用衬线大标题、�
 - Ask question 与 permission 两类同步用户请求；
 - Run 状态、六种终止原因，以及 Session 是否仍可继续。
 
-因此当前产品只显示时间线、工具活动、问题/权限卡片、Current activity 和真实 usage。Plan、plan approval、Outputs、Files changed、持久权限管理和 custom UI 均保持隐藏；它们在本文档中的设计是后续 capability 到位后的产品规范，不是当前实现承诺。Renderer 不解析工具参数、stdout 或普通文本来猜测这些状态。revision 2 已提供独立 Workspace projection 与 Task-bound ExecutionConfig facts；设置路由与 rebind 等仍须等对应 capability 落地后才能宣称可用，差距由 [验证规范](validation.md)明确记录。
+因此当前产品只显示时间线、工具活动、问题/权限卡片、Current activity 和真实 usage。Plan、plan approval、Outputs、Files changed、持久权限管理和 custom UI 均保持隐藏；它们在本文档中的设计是后续 capability 到位后的产品规范，不是当前实现承诺。Renderer 不解析工具参数、stdout 或普通文本来猜测这些状态。revision 2 已提供独立 Workspace projection、Task-bound ExecutionConfig facts、正式设置 route，以及设置与 New task 共享的默认 API/模型选择；跨重启 rebind 等仍须等对应 capability 落地后才能宣称可用，差距由 [验证规范](validation.md)明确记录。
 
 ### 2.2 Capability 标记
 
@@ -121,7 +121,7 @@ Workspace
 
 ## 4. 主窗口信息架构
 
-> Capability：**目标**。本章描述新版 Workbench shell；未完成登录优先 gate、独立 Workspace projection 和 Inspector 验收前，不得把局部布局当作已交付界面。
+> Capability：**混合**。登录优先 gate、独立 Workspace projection、左栏、New task 与设置 route 属于当前 shell；按需 Inspector 仍是目标能力，其未完成部分不得从当前常驻 `TaskActivity` 推断为已交付。
 
 ### 4.1 总体布局
 
@@ -174,7 +174,7 @@ Windows 和 macOS 使用同一内容布局，只调整窗口壳：
 
 ## 5. 左栏：Workspace 与 Task
 
-> Capability：**混合**。revision 2 已提供独立 Workspace projection；Task persistence 和新版 Workbench shell 仍是目标能力。
+> Capability：**混合**。revision 2 已提供独立 Workspace projection，当前 shell 已提供稳定 New task、Workspace/Task 导航、行动优先分组和左下角账号入口；跨 Host Task persistence 仍是目标能力。
 
 ### 5.1 Workspace 切换
 
@@ -399,7 +399,7 @@ Read 详情显示真实文件范围；Bash 详情显示实际执行命令、工�
 
 ## 8. Composer 与执行控制
 
-> Capability：**混合**。当前 Run gate、停止和本地草稿规则可由现有合同表达；登录后 New task 主视觉、模型选择和 execution binding 提示属于新版 Workbench/Bridge 目标。
+> Capability：**混合**。当前 Run gate、停止、本地草稿、New task 主视觉、默认模型选择和既有 Task execution binding 提示已经由 revision 2 合同表达；跨重启恢复与显式 rebind 仍是目标能力。
 
 Composer 固定在中间区域底部，但必须为滚动内容预留空间。
 
@@ -637,7 +637,7 @@ Inspector 同步更新 Outputs，但不重复整段完成说明。
 
 ## 14. 首次启动与设置
 
-> Capability：**混合**。revision 2 已提供登录优先所需的 Account/catalog selection 与 generation 合同；正式 settings route、完整模型切换体验和 execution rebind 仍按各自 capability gate 验收。
+> Capability：**混合**。revision 2 已提供登录优先、正式 settings route，以及设置与 New task 共用的 Host-owned 默认 API/模型选择；跨重启 execution rebind 仍按独立 capability gate 验收。
 
 ### 14.1 首次启动
 
@@ -667,22 +667,14 @@ MetaWork
 
 ```text
 General
-├── Language
-└── Notifications
+└── Language
 
 Account & models
 ├── Metask identity and connection status
 ├── API catalog and default API
 ├── Default model
-├── Refresh / manage in Metask / reauthenticate
+├── Refresh / reauthenticate
 └── Sign out and clear this device
-
-Workspaces
-├── Trusted folders
-└── Permissions
-
-Advanced
-└── Diagnostics
 ```
 
 设置是正式的单一页面或应用内 route，不用狭窄 popover 承载目录选择、错误恢复和危险退出。左下角用户菜单只负责打开对应页面和少量直接动作。
@@ -696,7 +688,7 @@ Advanced
 - 默认模型选择与 New task Composer 使用同一 Host-owned selection，不维护两份互相漂移的 Renderer preference；
 - 既有 Task 显示当前 binding epoch 的 API/Provider/模型，旧 epoch 历史不被设置变化或 rebind 改写；
 - 跨重启历史 Task 的绑定不可恢复时，设置变化也不能使其静默采用当前默认值；只按 §6.4 提供显式 rebind 或从历史新建 Task；
-- `在 Metask 中管理` 只消费 Host 发布的固定安全入口；
+- `在 Metask 中管理` 只有在 Host 发布固定安全入口后才显示；当前没有该 capability 时不放置链接或假入口；
 - 退出登录必须说明 live Task 阻塞、设备凭据清理和历史保留语义。
 
 技能、连接器、定时任务和 IM 频道只有在真实接通并形成清晰产品 owner 后才进入导航；未接通时不放置假入口，也不照搬其他 Agent 产品的信息架构。
@@ -736,7 +728,7 @@ Host/Core 传递状态 code 和结构化参数，Renderer 负责本地化。用�
 
 ## 16. 视觉系统
 
-> Capability：**目标**。本章定义新版 Workbench 的正式视觉验收基线，不授权显示尚未通过 capability gate 的数据或控件。
+> Capability：**当前**。本章定义已显示登录、Workbench 与设置界面的视觉验收基线；它不授权显示尚未通过 capability gate 的数据或控件，具体人工证据仍由验证矩阵记录。
 
 ### 16.1 视觉方向
 
@@ -783,7 +775,7 @@ MetaWork 采用安静、精确、长时间可读的桌面工具方向。视觉�
 
 ## 17. 空状态与异常状态
 
-> Capability：**混合**。错误表达、Host/Core 中断和无伪 Resume 属于当前约束；登录优先、独立 Workspace、execution rebind 与完整历史恢复按各自目标 capability 显示。
+> Capability：**混合**。错误表达、Host/Core 中断、登录优先、独立 Workspace 和无伪 Resume 属于当前约束；execution rebind 与完整历史恢复按各自目标 capability 显示。
 
 ### 17.1 未登录
 

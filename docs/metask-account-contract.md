@@ -78,7 +78,9 @@ Model catalog：
 - 选中 API Key 后，以该 Key 作为 Bearer，并携带同一 `X-Metacode-Profile-ID`；
 - 固定请求 `GET https://napi.metask-ai.com/v1/models`；
 - 成功响应严格读取消费的 list 根字段和 `data[]`；拒绝缺失/非法消费字段、重复 model id、`has_more = true`、超限字段和超限集合，但允许服务端增加未消费 metadata；
-- model 只向产品投影有界 `id` 与可选 `display_name`；未消费的 capability 字段不进入客户端 typed contract。服务端增删这类 metadata，或以 `0` 表达 unknown/placeholder token capability，都不阻止模型进入目录，也不得被 MetaWork 推断为真实能力或 AgentCore 配置。
+- model 只向产品投影有界 `id` 与可选 `display_name`；投影同时发布该目录所属的脱敏 API Key selection identity，Renderer 不得把候选 API 的 model id 与已提交默认 API 混用；
+- 已有 ready execution 上切换 API 或模型时，Account 先保留已提交 execution，并用当前 OAuth/profile 重新加载完整 API catalog，再校验请求的 API、加载其模型并校验模型；secure-zero 后的旧 private catalog 不得被假定仍持有 credential。候选 private/public catalog 与 committed public catalog 分槽，只有 ownership 校验和 persistence 全部成功后才原子安装新的默认 generation 并提交候选目录。加载、选择或持久化确定失败必须完整丢弃候选，不得破坏旧默认配置，也不得把既有 Task 改绑；用户只可在进入 credential persistence 前取消，持久化 effect 开始后必须等待 completion 被 main thread 消费，不得用取消制造内存/磁盘 generation 分叉；
+- 未消费的 capability 字段不进入客户端 typed contract。服务端增删这类 metadata，或以 `0` 表达 unknown/placeholder token capability，都不阻止模型进入目录，也不得被 MetaWork 推断为真实能力或 AgentCore 配置。
 
 ## 5. Provider 与 ExecutionTarget
 

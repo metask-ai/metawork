@@ -218,6 +218,26 @@ pub const CatalogSession = struct {
     ) Error!void {
         const index = self.selected_key_index orelse
             return error.ApiKeyNotFound;
+        try self.loadModelsForApiKeyIndex(index, transport, control);
+    }
+
+    pub fn loadModelsForApiKey(
+        self: *CatalogSession,
+        id: []const u8,
+        transport: metask.Transport,
+        control: ?metask.RequestControl,
+    ) Error!void {
+        const index = self.findApiKey(id) orelse
+            return error.ApiKeyNotFound;
+        try self.loadModelsForApiKeyIndex(index, transport, control);
+    }
+
+    fn loadModelsForApiKeyIndex(
+        self: *CatalogSession,
+        index: usize,
+        transport: metask.Transport,
+        control: ?metask.RequestControl,
+    ) Error!void {
         const credential = self.api_keys.items[index].secret.view();
         if (credential.len == 0) return error.ApiKeyNotFound;
         const profile_id = self.owner_profile_id.view();
@@ -233,6 +253,7 @@ pub const CatalogSession = struct {
         self.models.deinit(self.allocator);
         self.models = replacement.entries;
         replacement.entries = .empty;
+        self.selected_key_index = index;
     }
 
     pub fn prepareExecution(
@@ -320,6 +341,22 @@ pub const CatalogSession = struct {
         return self.api_keys.items[index].id.view();
     }
 
+    pub fn ownsExecutionSelection(
+        self: *const CatalogSession,
+        account_id: []const u8,
+        profile_id: []const u8,
+        api_key_id: []const u8,
+        model_id: []const u8,
+    ) bool {
+        if (!std.mem.eql(u8, self.ownerAccountId(), account_id) or
+            !std.mem.eql(u8, self.ownerProfileId(), profile_id) or
+            !std.mem.eql(u8, self.selectedApiKeyId(), api_key_id) or
+            self.findModel(model_id) == null)
+            return false;
+        const index = self.selected_key_index orelse return false;
+        return self.api_keys.items[index].secret.view().len > 0;
+    }
+
     /// Returns a candidate only when the Host can proceed without making a
     /// user preference decision.
     pub fn uniqueApiKeyId(self: *const CatalogSession) ?[]const u8 {
@@ -394,9 +431,11 @@ const PublicModel = struct {
 };
 
 /// Secret-free, fixed-capacity Account projection. Network workers mutate the
-/// private CatalogSession, then the App main thread snapshots a successful
-/// result here before publishing the matching AccountFact. Other state changes
-/// read only this cache, so cancel and shutdown never race worker-owned secrets.
+/// private candidate CatalogSession, then the App main thread snapshots a
+/// successful stage here. The composition root keeps committed and candidate
+/// PublicCatalog slots separate until execution persistence succeeds. Other
+/// state changes read only those secret-free caches, so cancel and shutdown
+/// never race worker-owned secrets.
 pub const PublicCatalog = struct {
     api_keys: [contract.Limits.api_key_entries]PublicApiKey =
         @splat(.{}),
@@ -439,6 +478,18 @@ pub const PublicCatalog = struct {
             storage.id.set(source.id);
             storage.display_name.set(source.display_name);
         }
+    }
+
+    pub fn replaceFromPublic(
+        self: *PublicCatalog,
+        source: *const PublicCatalog,
+    ) void {
+        for (source.api_keys[0..source.api_key_count], 0..) |key, index|
+            self.api_keys[index] = key;
+        for (source.models[0..source.model_count], 0..) |model, index|
+            self.models[index] = model;
+        self.api_key_count = source.api_key_count;
+        self.model_count = source.model_count;
     }
 
     /// Restored execution persistence contains the selected catalog identities
@@ -493,11 +544,44 @@ pub const PublicCatalog = struct {
             };
         }
         view.api_keys = self.api_key_views[0..self.api_key_count];
-        view.models = self.model_views[0..self.model_count];
+        view.models = if (view.operation == .loading_models)
+            &.{}
+        else
+            self.model_views[0..self.model_count];
     }
 };
 
 pub const TestSupport = if (builtin.is_test) struct {
+    pub fn replaceOwnedSelection(
+        session: *CatalogSession,
+        account_id: []const u8,
+        profile_id: []const u8,
+        api_key: contract.ApiKeyView,
+        secret_value: []const u8,
+        models: []const contract.ModelView,
+    ) Error!void {
+        session.reset();
+        session.owner_account_id = try .init(account_id);
+        session.owner_profile_id = try .init(profile_id);
+        var secret = try Secret.init(session.allocator, secret_value);
+        errdefer secret.deinit();
+        session.api_keys.append(session.allocator, .{
+            .id = try .init(api_key.id),
+            .name = try .init(api_key.name),
+            .suffix = try .init(api_key.suffix),
+            .provider_kind = api_key.provider_kind,
+            .secret = secret,
+        }) catch return error.OutOfMemory;
+        secret = .{};
+        session.selected_key_index = 0;
+        for (models) |model| {
+            session.models.append(session.allocator, .{
+                .id = try .init(model.id),
+                .display_name = try .optional(model.display_name),
+            }) catch return error.OutOfMemory;
+        }
+    }
+
     pub fn replacePublic(
         catalog: *PublicCatalog,
         api_keys: []const contract.ApiKeyView,
@@ -911,6 +995,12 @@ test "live-shape catalogs expose only masked views and move one key owner" {
     try std.testing.expectEqualStrings("325", public_view.api_keys[0].id);
     try std.testing.expectEqual(@as(usize, 1), public_view.models.len);
     try std.testing.expectEqualStrings("model-1", public_view.models[0].id);
+    public_view.operation = .loading_models;
+    public_catalog.decorate(&public_view);
+    try std.testing.expectEqual(@as(usize, 0), public_view.models.len);
+    public_view.operation = .none;
+    public_catalog.decorate(&public_view);
+    try std.testing.expectEqual(@as(usize, 1), public_view.models.len);
 }
 
 test "catalog accepts additive metadata and rejects duplicate ids, pagination, and platforms" {
@@ -1090,6 +1180,51 @@ test "catalog request flow binds OAuth and API key credentials to profile" {
         session.ownerProfileId(),
     );
     try std.testing.expectEqual(@as(usize, 2), fake.step);
+}
+
+test "failed model reload preserves the committed private catalog" {
+    const Fake = struct {
+        step: usize = 0,
+
+        fn perform(
+            context: *anyopaque,
+            request: metask.Request,
+            response_buffer: []u8,
+        ) metask.TransportError!metask.Response {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (request.kind != .models) return error.ProtocolFailed;
+            if (self.step != 0) return error.NetworkFailed;
+            self.step += 1;
+            if (model_fixture.len > response_buffer.len)
+                return error.ResponseTooLarge;
+            @memcpy(response_buffer[0..model_fixture.len], model_fixture);
+            return .{
+                .status = 200,
+                .body = response_buffer[0..model_fixture.len],
+            };
+        }
+    };
+
+    var keys = try parseApiKeys(std.testing.allocator, key_fixture);
+    var session = CatalogSession.init(std.testing.allocator);
+    defer session.deinit();
+    session.api_keys = keys.entries;
+    keys.entries = .empty;
+    session.owner_account_id = try .init("account-1");
+    session.owner_profile_id = try .init("profile-1");
+    var fake: Fake = .{};
+    const transport: metask.Transport = .{
+        .context = &fake,
+        .perform_fn = Fake.perform,
+    };
+
+    try session.loadModelsForApiKey("325", transport, null);
+    try std.testing.expectEqualStrings("model-1", session.uniqueModelId().?);
+    try std.testing.expectError(
+        error.ServiceUnavailable,
+        session.loadModelsForApiKey("325", transport, null),
+    );
+    try std.testing.expectEqualStrings("model-1", session.uniqueModelId().?);
 }
 
 test "catalog enforces response and field bounds before publication" {

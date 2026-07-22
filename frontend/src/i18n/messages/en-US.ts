@@ -139,8 +139,12 @@ export const enUS = {
   "task.new": "New task",
   "task.open": "Open a task",
   "task.empty_title": "Start with the outcome you want.",
-  "task.empty_body":
-    "Describe a clear outcome and choose a workspace on first send. MetaWork keeps the work, decisions, and result together.",
+  "task.empty_body_with_workspace":
+    "Describe a clear outcome. The new task will use the current workspace, and MetaWork will keep the work, decisions, and result together.",
+  "task.empty_body_without_workspace":
+    "Describe a clear outcome and choose a workspace on first send. Cancelling the picker keeps your draft.",
+  "task.created_empty_body":
+    "This task is ready. Enter its first instruction to begin.",
   "task.examples": "Local task examples",
   "task.example.review":
     "Review this project and identify the risks worth fixing first",
@@ -155,6 +159,11 @@ export const enUS = {
   "task.hide_archived": "Hide archived",
   "task.archived": "Archived",
   "task.ready": "Ready",
+  "task.group.attention": "Needs your attention",
+  "task.group.running": "Running",
+  "task.group.queued": "Queued",
+  "task.group.recent": "Recent",
+  "task.group.archived": "Archived",
   "task.last_result": "Last result: {result}",
   "task.lifecycle.open": "Open",
   "task.lifecycle.closing": "Ending",
@@ -305,6 +314,40 @@ export const enUS = {
   "search.kind.task": "Task",
   "search.kind.instruction": "Instruction",
   "search.kind.completion": "Completion",
+  "account.menu": "Metask account menu",
+  "account.connected": "Metask connected",
+  "account.connection_attention": "Sign-in needs attention",
+  "account.logout_short": "Sign out…",
+  "account.api_fallback": "Metask API",
+  "account.model_fallback": "Available model",
+  "provider.anthropic": "Anthropic",
+  "provider.openai": "OpenAI",
+  "settings.title": "Settings",
+  "settings.back": "Back to workbench",
+  "settings.intro":
+    "Manage the defaults MetaWork uses when you start new work.",
+  "settings.sections": "Settings sections",
+  "settings.section_label": "Settings",
+  "settings.general": "General",
+  "settings.account_models": "Account & models",
+  "settings.language_help": "Changes apply immediately on this device.",
+  "settings.default_api": "Default API",
+  "settings.default_api_help":
+    "Changing API loads the model catalog owned by that Metask API.",
+  "settings.default_model": "Default model",
+  "settings.default_model_help":
+    "Used when you create a new task. Existing tasks keep their own model.",
+  "settings.loading_models_for": "Loading models available to {api}…",
+  "settings.existing_tasks_unchanged":
+    "Default changes apply only to new tasks. Existing task bindings and history remain unchanged.",
+  "settings.signout_title": "Sign out on this device",
+  "settings.signout_help":
+    "This clears Metask credentials from this device. Task records and workspace files are preserved; live work may need to finish first.",
+  "settings.signout_confirm":
+    "MetaWork will ask the Host to clear this device. Continue?",
+  "settings.open_account_models": "Open account and model settings",
+  "settings.task_binding_model":
+    "This task keeps the model bound when it was created.",
   "outcome.completed": "Completed",
   "outcome.stopped": "Stopped",
   "outcome.cancelled": "Stopped",

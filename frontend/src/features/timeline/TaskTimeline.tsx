@@ -125,6 +125,7 @@ function orderedActivity(run: RunView, task: TaskView): RunActivity[] {
 export function TaskTimeline({
   task,
   draft,
+  draftHasWorkspace,
   revision,
   composerHasDraft,
   retryAvailable,
@@ -137,6 +138,7 @@ export function TaskTimeline({
 }: {
   task: TaskView | null;
   draft: boolean;
+  draftHasWorkspace: boolean;
   revision: string;
   composerHasDraft: boolean;
   retryAvailable: boolean;
@@ -287,13 +289,21 @@ export function TaskTimeline({
           {task && task.runs.length === 0 && (
             <div className="task-empty-state">
               <h2>{t("task.empty_title")}</h2>
-              <p>{t("task.empty_body")}</p>
+              <p>{t("task.created_empty_body")}</p>
             </div>
           )}
           {!task && (
             <div className="task-empty-state is-new-task">
               <h2>{t(draft ? "task.empty_title" : "task.new")}</h2>
-              <p>{t(draft ? "task.empty_body" : "task.no_tasks")}</p>
+              <p>
+                {t(
+                  draft
+                    ? draftHasWorkspace
+                      ? "task.empty_body_with_workspace"
+                      : "task.empty_body_without_workspace"
+                    : "task.no_tasks",
+                )}
+              </p>
               {draft && !composerHasDraft && (
                 <div className="task-examples" aria-label={t("task.examples")}>
                   {newTaskExampleIds.map((id) => (

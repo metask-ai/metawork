@@ -194,11 +194,6 @@ pub const NetworkAttempt = struct {
         return self.started and self.attempt_id == attempt_id;
     }
 
-    pub fn isCatalog(self: *const NetworkAttempt) bool {
-        if (!self.started) return false;
-        return self.kind == .load_api_keys or self.kind == .load_models;
-    }
-
     fn start(
         self: *NetworkAttempt,
         allocator: std.mem.Allocator,
@@ -272,13 +267,11 @@ pub const NetworkAttempt = struct {
             },
             .load_models => {
                 const session = self.catalog_session.?;
-                session.selectApiKey(
+                session.loadModelsForApiKey(
                     self.api_key_storage[0..self.api_key_len],
+                    self.transport,
+                    control,
                 ) catch |err| {
-                    self.publishFailure(catalog.errorCode(err));
-                    return;
-                };
-                session.loadModels(self.transport, control) catch |err| {
                     self.publishFailure(catalog.errorCode(err));
                     return;
                 };

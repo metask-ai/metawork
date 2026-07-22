@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -17,6 +18,9 @@ const { ComposerFooter } = await vite.ssrLoadModule(
   "/src/features/composer/ComposerFooter.tsx",
 );
 const { AppShell } = await vite.ssrLoadModule("/src/app/AppShell.tsx");
+const { primaryShortcutModifier } = await vite.ssrLoadModule(
+  "/src/platform/keyboard.ts",
+);
 const { TaskTimeline } = await vite.ssrLoadModule(
   "/src/features/timeline/TaskTimeline.tsx",
 );
@@ -45,10 +49,19 @@ const base = {
   workspaceLabel: "No workspace",
   workspaceTitle: "No workspace",
   modelLabel: "Claude Sonnet 4",
+  modelOptions: [
+    { selectionId: "claude-sonnet-4", displayName: "Claude Sonnet 4" },
+  ],
+  selectedModelId: "claude-sonnet-4",
+  modelEditable: true,
+  modelSelectionDisabled: false,
+  modelContextTitle: "Default model",
   actionDisabled: false,
   onPromptChange() {},
   onSubmit() {},
   onConfirmAccess() {},
+  onSelectModel() {},
+  onOpenModelSettings() {},
 };
 
 function render(props = {}) {
@@ -84,6 +97,7 @@ function renderShell(activity) {
           taskTitle: "New task",
           workspaceLabel: "No workspace",
           status: "Connected",
+          onSearch() {},
           left: createElement("p", null, "Navigation"),
           activity,
         },
@@ -107,6 +121,7 @@ function renderNewTaskTimeline(composerHasDraft) {
       createElement(TaskTimeline, {
         task: null,
         draft: true,
+        draftHasWorkspace: true,
         revision: "1",
         composerHasDraft,
         retryAvailable: true,
@@ -161,12 +176,10 @@ function renderWorkspaceNavigation(
         activeTaskId: null,
         showArchived: false,
         disabled: false,
-        onSearch() {},
         onChooseWorkspace() {},
         onRemoveWorkspace() {},
         onRetryRemoval() {},
         onSelectWorkspace() {},
-        onCreateTask() {},
         onSelectTask() {},
         onToggleArchived() {},
       }),
@@ -187,6 +200,37 @@ test("New task opens as an editable Composer with its execution context", () => 
   assert.match(markup, />Choose on send</);
   assert.doesNotMatch(markup.match(/<textarea[^>]*>/)?.[0] ?? "", /disabled/);
   assert.doesNotMatch(markup, /composer-start/);
+});
+
+test("candidate model catalogs never imply a committed default", () => {
+  const markup = render({
+    modelLabel: "Choose a model",
+    modelOptions: [
+      { selectionId: "candidate-model", displayName: "Candidate model" },
+    ],
+    selectedModelId: "",
+    modelSelectionDisabled: true,
+  });
+  assert.match(markup, /<option value="" selected="">Choose a model<\/option>/);
+  assert.match(markup, /<select[^>]*disabled=""/);
+  assert.doesNotMatch(markup, /value="candidate-model" selected=""/);
+});
+
+test("desktop shortcut labels follow the host platform", () => {
+  assert.equal(primaryShortcutModifier("Win32"), "Ctrl+");
+  assert.equal(primaryShortcutModifier("MacIntel"), "⌘");
+  assert.match(renderShell(null), /<kbd>Ctrl\+K<\/kbd>/);
+});
+
+test("Account catalog work blocks New task admission but not bound Tasks", async () => {
+  const source = await readFile(
+    join(process.cwd(), "frontend/src/app/App.tsx"),
+    "utf8",
+  );
+  assert.match(
+    source,
+    /\(!newTaskDraftActive \|\| snapshot\.account\.canCreateTask\)/,
+  );
 });
 
 test("New task does not render or reserve an empty activity panel", () => {
@@ -272,7 +316,7 @@ test("Workspace removal failure survives refresh with an honest retry surface", 
   assert.doesNotMatch(renderWorkspaceNavigation(null), /Retry removal/);
 });
 
-test("an available Workspace exposes removal while a removing Workspace blocks new work", () => {
+test("Workspace removal state remains explicit without owning the global New task action", () => {
   const available = renderWorkspaceNavigation(null);
   assert.match(available, />Remove</);
   assert.doesNotMatch(available, /Removal in progress/);
@@ -280,10 +324,7 @@ test("an available Workspace exposes removal while a removing Workspace blocks n
   const removing = renderWorkspaceNavigation(null, "removing");
   assert.match(removing, /Removing this workspace/);
   assert.match(removing, /can’t start or continue tasks/);
-  const newTask = removing.match(
-    /<button[^>]*class="[^"]*primary-button[^"]*"[^>]*>/,
-  )?.[0];
-  assert.match(newTask ?? "", /disabled/);
+  assert.doesNotMatch(removing, />New task</);
 });
 
 test("removing the final empty Workspace leaves a stable focus destination", () => {

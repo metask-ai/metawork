@@ -213,6 +213,20 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     /cancellation availability disagrees/,
   );
 
+  const persistenceCommitted = clone(fixture);
+  persistenceCommitted.account.executionState = "reconfiguring";
+  persistenceCommitted.account.operation = "persisting";
+  persistenceCommitted.account.readiness = "preparing";
+  persistenceCommitted.account.canCreateTask = false;
+  assert.doesNotThrow(() => decodeWorkbenchSnapshot(persistenceCommitted));
+
+  const cancellablePersistence = clone(persistenceCommitted);
+  cancellablePersistence.account.canCancel = true;
+  assert.throws(
+    () => decodeWorkbenchSnapshot(cancellablePersistence),
+    /cancellation availability disagrees/,
+  );
+
   const emptyKeyChoice = clone(fixture);
   emptyKeyChoice.account.executionState = "reconfiguring";
   emptyKeyChoice.account.operation = "selecting_key";
@@ -221,6 +235,8 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   emptyKeyChoice.account.canCancel = true;
   emptyKeyChoice.account.canCreateTask = false;
   emptyKeyChoice.account.apiKeys = [];
+  emptyKeyChoice.account.models = [];
+  emptyKeyChoice.account.modelCatalogApiKeySelectionId = "";
   assert.throws(
     () => decodeWorkbenchSnapshot(emptyKeyChoice),
     /choice requires at least one candidate/,

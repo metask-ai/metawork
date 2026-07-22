@@ -1,5 +1,5 @@
-import type { AccountErrorCode } from "../../bridge/contracts.ts";
-import type { useI18n } from "../../i18n/context.ts";
+import type { AccountErrorCode } from "../bridge/contracts.ts";
+import type { useI18n } from "./context.ts";
 
 export function accountErrorText(
   code: AccountErrorCode,

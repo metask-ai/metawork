@@ -19,6 +19,7 @@ import {
   searchWorkbench,
   taskActivity,
   taskDisplayState,
+  taskGroups,
   taskSignals,
   workspaceLabel,
   workspaceSummaries,
@@ -68,6 +69,7 @@ function task(overrides) {
     closeFailed: false,
     currentRunId: "0",
     currentRunPhase: null,
+    recentOrder: "1",
     lastRunOutcome: null,
     cause: null,
     runs: [],
@@ -76,6 +78,40 @@ function task(overrides) {
     ...overrides,
   };
 }
+
+test("Task navigation groups action before recency and keeps Host order exact", () => {
+  const groups = taskGroups(
+    [
+      task({ id: "recent-old", recentOrder: "9007199254740993" }),
+      task({ id: "queued", currentRunPhase: "queued", recentOrder: "8" }),
+      task({ id: "running", currentRunPhase: "running", recentOrder: "9" }),
+      task({
+        id: "attention-old",
+        currentRunPhase: "waiting_ui",
+        recentOrder: "10",
+      }),
+      task({
+        id: "attention-new",
+        currentRunPhase: "waiting_ui",
+        recentOrder: "11",
+      }),
+      task({ id: "recent-new", recentOrder: "9007199254740994" }),
+      task({ id: "archived", archived: true, recentOrder: "12" }),
+    ],
+    true,
+  );
+
+  assert.deepEqual(
+    groups.map((group) => [group.kind, group.tasks.map((item) => item.id)]),
+    [
+      ["attention", ["attention-new", "attention-old"]],
+      ["running", ["running"]],
+      ["queued", ["queued"]],
+      ["recent", ["recent-new", "recent-old"]],
+      ["archived", ["archived"]],
+    ],
+  );
+});
 
 test("workspace navigation aggregates actionable cross-workspace signals without conflating axes", () => {
   const tasks = [

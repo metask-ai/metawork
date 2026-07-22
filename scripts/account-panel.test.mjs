@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -15,8 +16,11 @@ const vite = await createServer({
 const { AccountGate } = await vite.ssrLoadModule(
   "/src/features/account/AccountGate.tsx",
 );
-const { AccountPanel } = await vite.ssrLoadModule(
-  "/src/features/account/AccountPanel.tsx",
+const { SettingsPage } = await vite.ssrLoadModule(
+  "/src/features/settings/SettingsPage.tsx",
+);
+const { requiresAccountGate } = await vite.ssrLoadModule(
+  "/src/features/account/gating.ts",
 );
 const { I18nContext } = await vite.ssrLoadModule("/src/i18n/context.ts");
 const { translate } = await vite.ssrLoadModule("/src/i18n/runtime.ts");
@@ -36,6 +40,7 @@ const signedOut = {
   models: [],
   selectedApiKeySelectionId: "",
   selectedModelSelectionId: "",
+  modelCatalogApiKeySelectionId: "",
   canCreateTask: false,
   errorCode: "none",
   safeDiagnostic: "",
@@ -54,6 +59,7 @@ const callbacks = {
   onSelectApiKey() {},
   onSelectModel() {},
   onLogout() {},
+  onBack() {},
 };
 
 function withI18n(child) {
@@ -109,6 +115,61 @@ test("signed-out readiness is an independent surface with one primary action", (
   assert.match(markup, />Sign in with Metask</);
   assert.doesNotMatch(markup, /Workspace|Task activity|composer-start/);
   assert.equal((markup.match(/primary-button/g) ?? []).length, 1);
+});
+
+test("Account gate is sticky only until the first successful Workbench entry", () => {
+  const reconfiguring = {
+    ...signedOut,
+    sessionState: "authenticated",
+    readiness: "preparing",
+    executionState: "reconfiguring",
+    executionGeneration: "4",
+  };
+  assert.equal(requiresAccountGate(false, reconfiguring), false);
+  assert.equal(requiresAccountGate(true, reconfiguring), false);
+  assert.equal(
+    requiresAccountGate(false, {
+      ...reconfiguring,
+      executionGeneration: "0",
+    }),
+    true,
+  );
+  assert.equal(
+    requiresAccountGate(true, {
+      ...reconfiguring,
+      sessionState: "signed_out",
+    }),
+    true,
+  );
+  assert.equal(
+    requiresAccountGate(true, {
+      ...reconfiguring,
+      sessionState: "shutting_down",
+      readiness: "restart_required",
+    }),
+    true,
+  );
+});
+
+test("sign-out confirmation owns focus, Escape, and its description", async () => {
+  const source = await readFile(
+    join(process.cwd(), "frontend/src/features/settings/SettingsPage.tsx"),
+    "utf8",
+  );
+  assert.match(source, /signOutCancel\.current\?\.focus\(\)/);
+  assert.match(source, /event\.key !== "Escape"/);
+  assert.match(source, /signOut\.current\?\.focus\(\)/);
+  assert.match(source, /aria-describedby="settings-signout-confirmation-copy"/);
+});
+
+test("account disclosure implements complete menu keyboard movement", async () => {
+  const source = await readFile(
+    join(process.cwd(), "frontend/src/features/account/AccountIdentity.tsx"),
+    "utf8",
+  );
+  for (const key of ["ArrowDown", "ArrowUp", "Home", "End", "Escape", "Tab"])
+    assert.match(source, new RegExp(`event\\.key === "${key}"|"${key}"`));
+  assert.match(source, /\[role="menuitem"\]:not\(:disabled\)/);
 });
 
 test("authorization wait can reopen or cancel without exposing the OAuth URL", () => {
@@ -243,7 +304,7 @@ test("retryable and restart-required failures never leave an actionless spinner"
   assert.doesNotMatch(restart, /Try again|Sign in with Metask/);
 });
 
-test("ready Account is a secondary status and settings surface", () => {
+test("ready Account uses a formal settings route with truthful defaults", () => {
   const ready = {
     ...signedOut,
     sessionState: "authenticated",
@@ -252,24 +313,77 @@ test("ready Account is a secondary status and settings surface", () => {
     primaryAction: "none",
     accountId: "account-1",
     displayName: "Metask User",
+    apiKeys: [
+      {
+        selectionId: "key-1",
+        name: "Primary",
+        suffix: "1234",
+        provider: "anthropic",
+      },
+    ],
+    models: [{ selectionId: "model-1", displayName: "Model One" }],
     selectedApiKeySelectionId: "key-1",
     selectedModelSelectionId: "model-1",
+    modelCatalogApiKeySelectionId: "key-1",
     canCreateTask: true,
     executionGeneration: "1",
   };
   assert.equal(renderGate(ready), "");
   const panel = withI18n(
-    createElement(AccountPanel, {
+    createElement(SettingsPage, {
       account: ready,
+      focusTarget: "title",
       disabled: false,
+      cancelDisabled: false,
       ...callbacks,
     }),
   );
+  assert.match(panel, /<h1[^>]*tabindex="-1">Settings</);
   assert.match(panel, /Metask User/);
-  assert.match(panel, /model-1/);
+  assert.match(panel, />Model One</);
+  assert.match(panel, /Primary · Anthropic •••• 1234/);
   assert.match(panel, />Refresh account options</);
-  assert.match(panel, />Sign out and clear this device</);
-  assert.doesNotMatch(panel, /setup progress/);
+  assert.match(panel, />Sign out…</);
+  assert.match(panel, /Existing task bindings and history remain unchanged/);
+  assert.doesNotMatch(panel, /Appearance|Notifications|Permissions|Plugins/);
+});
+
+test("reauth-required settings disable stale catalog mutations", () => {
+  const account = {
+    ...signedOut,
+    sessionState: "reauth_required",
+    executionState: "ready",
+    readiness: "needs_attention",
+    primaryAction: "reauthenticate",
+    displayName: "Metask User",
+    apiKeys: [
+      {
+        selectionId: "key-1",
+        name: "Primary",
+        suffix: "1234",
+        provider: "anthropic",
+      },
+    ],
+    models: [{ selectionId: "model-1", displayName: "Model One" }],
+    selectedApiKeySelectionId: "key-1",
+    selectedModelSelectionId: "model-1",
+    modelCatalogApiKeySelectionId: "key-1",
+    executionGeneration: "1",
+  };
+  const panel = withI18n(
+    createElement(SettingsPage, {
+      account,
+      focusTarget: "title",
+      disabled: false,
+      cancelDisabled: false,
+      ...callbacks,
+    }),
+  );
+  assert.match(panel, />Sign in again</);
+  assert.match(panel, /id="settings-api"[^>]*disabled=""/);
+  assert.match(panel, /id="settings-model"[^>]*disabled=""/);
+  assert.match(panel, /<button[^>]*disabled=""[^>]*>Refresh account options/);
+  assert.match(panel, />Sign out…</);
 });
 
 test("cold connection failure exposes only reconnect and technical details", () => {

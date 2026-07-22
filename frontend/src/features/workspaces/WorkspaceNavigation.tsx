@@ -5,6 +5,7 @@ import type { TaskView } from "../../bridge/contracts.ts";
 import { taskCountMessageId } from "../../i18n/formatters.ts";
 import { useI18n } from "../../i18n/context.ts";
 import {
+  taskGroups,
   taskDisplayState,
   taskSignals,
   type WorkspaceSummary,
@@ -17,12 +18,10 @@ export function WorkspaceNavigation({
   activeTaskId,
   showArchived,
   disabled,
-  onSearch,
   onChooseWorkspace,
   onRemoveWorkspace,
   onRetryRemoval,
   onSelectWorkspace,
-  onCreateTask,
   onSelectTask,
   onToggleArchived,
 }: {
@@ -32,12 +31,10 @@ export function WorkspaceNavigation({
   activeTaskId: string | null;
   showArchived: boolean;
   disabled: boolean;
-  onSearch: () => void;
   onChooseWorkspace: () => void;
   onRemoveWorkspace: (workspaceId: string) => void;
   onRetryRemoval: (workspaceId: string) => void;
   onSelectWorkspace: (workspaceId: string) => void;
-  onCreateTask: () => void;
   onSelectTask: (id: string) => void;
   onToggleArchived: () => void;
 }) {
@@ -45,10 +42,16 @@ export function WorkspaceNavigation({
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [removalConfirmId, setRemovalConfirmId] = useState<string | null>(null);
   const switcher = useRef<HTMLDivElement>(null);
+  const switcherTrigger = useRef<HTMLButtonElement>(null);
+  const switcherMenu = useRef<HTMLDivElement>(null);
   const workspaceSectionHeading = useRef<HTMLDivElement>(null);
   const removalTrigger = useRef<HTMLButtonElement>(null);
   const removalCancel = useRef<HTMLButtonElement>(null);
-  const visibleTasks = tasks.filter((task) => showArchived || !task.archived);
+  const groupedTasks = taskGroups(tasks, showArchived);
+  const visibleTaskCount = groupedTasks.reduce(
+    (count, group) => count + group.tasks.length,
+    0,
+  );
   const archivedCount = tasks.filter((task) => task.archived).length;
   const current = summaries.find((item) => item.id === currentWorkspaceId);
 
@@ -61,6 +64,27 @@ export function WorkspaceNavigation({
     document.addEventListener("mousedown", dismiss);
     return () => document.removeEventListener("mousedown", dismiss);
   }, [switcherOpen]);
+
+  useEffect(() => {
+    if (!switcherOpen) return;
+    window.requestAnimationFrame(() => {
+      const options = [
+        ...(switcherMenu.current?.querySelectorAll<HTMLButtonElement>(
+          '[role="menuitemradio"]:not([disabled])',
+        ) ?? []),
+      ];
+      const selected = options.find(
+        (option) => option.getAttribute("aria-checked") === "true",
+      );
+      (selected ?? options[0])?.focus();
+    });
+  }, [switcherOpen]);
+
+  function closeSwitcher(restoreFocus: boolean) {
+    setSwitcherOpen(false);
+    if (restoreFocus)
+      window.requestAnimationFrame(() => switcherTrigger.current?.focus());
+  }
 
   useEffect(() => {
     if (
@@ -88,11 +112,6 @@ export function WorkspaceNavigation({
 
   return (
     <>
-      <button className="global-search focus-ring" onClick={onSearch}>
-        <span>{t("search.open")}</span>
-        <kbd>⌘K</kbd>
-      </button>
-
       <section className="workspace-card">
         <div
           ref={workspaceSectionHeading}
@@ -123,9 +142,11 @@ export function WorkspaceNavigation({
         </div>
         <div className="workspace-switcher" ref={switcher}>
           <button
+            ref={switcherTrigger}
             className="workspace-picker focus-ring"
             aria-expanded={switcherOpen}
-            aria-haspopup="listbox"
+            aria-haspopup="menu"
+            aria-controls="workspace-switcher-menu"
             disabled={summaries.length === 0}
             onClick={() => setSwitcherOpen((open) => !open)}
           >
@@ -137,20 +158,55 @@ export function WorkspaceNavigation({
           </button>
           {switcherOpen && summaries.length > 0 && (
             <div
+              id="workspace-switcher-menu"
+              ref={switcherMenu}
               className="workspace-menu"
-              role="listbox"
+              role="menu"
               aria-label={t("workspace.switch")}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  closeSwitcher(true);
+                  return;
+                }
+                if (
+                  event.key !== "ArrowDown" &&
+                  event.key !== "ArrowUp" &&
+                  event.key !== "Home" &&
+                  event.key !== "End"
+                )
+                  return;
+                const options = [
+                  ...event.currentTarget.querySelectorAll<HTMLButtonElement>(
+                    '[role="menuitemradio"]:not([disabled])',
+                  ),
+                ];
+                if (options.length === 0) return;
+                event.preventDefault();
+                const currentIndex = options.indexOf(
+                  document.activeElement as HTMLButtonElement,
+                );
+                const nextIndex =
+                  event.key === "Home"
+                    ? 0
+                    : event.key === "End"
+                      ? options.length - 1
+                      : event.key === "ArrowDown"
+                        ? (currentIndex + 1 + options.length) % options.length
+                        : (currentIndex - 1 + options.length) % options.length;
+                options[nextIndex].focus();
+              }}
             >
               {summaries.map((workspace) => (
                 <button
                   key={workspace.id}
                   className="workspace-option focus-ring"
-                  role="option"
-                  aria-selected={workspace.id === currentWorkspaceId}
+                  role="menuitemradio"
+                  aria-checked={workspace.id === currentWorkspaceId}
                   disabled={workspace.authorization === "removing"}
                   onClick={() => {
                     onSelectWorkspace(workspace.id);
-                    setSwitcherOpen(false);
+                    closeSwitcher(true);
                   }}
                 >
                   <span className="workspace-option-copy">
@@ -219,43 +275,39 @@ export function WorkspaceNavigation({
             </span>
           </div>
         )}
-        <button
-          className="primary-button focus-ring"
-          disabled={
-            disabled || !current || current.authorization !== "available"
-          }
-          onClick={onCreateTask}
-        >
-          {t("task.new")}
-        </button>
       </section>
 
       <nav className="task-list" aria-label={t("task.list")}>
         <div className="task-list-heading">
           <p className="section-label">{t("task.list")}</p>
           <span>
-            {t(taskCountMessageId(locale, visibleTasks.length), {
-              count: visibleTasks.length,
+            {t(taskCountMessageId(locale, visibleTaskCount), {
+              count: visibleTaskCount,
             })}
           </span>
         </div>
-        {visibleTasks.map((task) => (
-          <button
-            key={task.id}
-            className="task-list-item focus-ring"
-            aria-current={activeTaskId === task.id ? "page" : undefined}
-            onClick={() => onSelectTask(task.id)}
-          >
-            <span className="task-list-row">
-              <span>{task.title || t("task.item", { id: task.id })}</span>
-              <TaskSignals task={task} />
-            </span>
-            <span className="task-list-meta">
-              {task.archived ? t("task.archived") : taskStateLabel(task, t)}
-            </span>
-          </button>
+        {groupedTasks.map((group) => (
+          <section className="task-group" key={group.kind}>
+            <h3>{t(`task.group.${group.kind}`)}</h3>
+            {group.tasks.map((task) => (
+              <button
+                key={task.id}
+                className="task-list-item focus-ring"
+                aria-current={activeTaskId === task.id ? "page" : undefined}
+                onClick={() => onSelectTask(task.id)}
+              >
+                <span className="task-list-row">
+                  <span>{task.title || t("task.item", { id: task.id })}</span>
+                  <TaskSignals task={task} />
+                </span>
+                <span className="task-list-meta">
+                  {task.archived ? t("task.archived") : taskStateLabel(task, t)}
+                </span>
+              </button>
+            ))}
+          </section>
         ))}
-        {visibleTasks.length === 0 && (
+        {visibleTaskCount === 0 && (
           <p className="task-list-empty">
             {tasks.length > 0 ? t("task.archived_hidden") : t("task.no_tasks")}
           </p>

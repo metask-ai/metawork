@@ -41,6 +41,7 @@ export const initialWorkbenchState: WorkbenchState = {
       models: [],
       selectedApiKeySelectionId: "",
       selectedModelSelectionId: "",
+      modelCatalogApiKeySelectionId: "",
       canCreateTask: false,
       errorCode: "none",
       safeDiagnostic: "",

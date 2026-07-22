@@ -1,11 +1,12 @@
 import { useEffect, useState, type ReactNode } from "react";
 
 import { Icon } from "../components/ui/Icon.tsx";
-import { useI18n, type Locale } from "../i18n/context.ts";
+import { useI18n } from "../i18n/context.ts";
 import {
   readLocalPreference,
   writeLocalPreference,
 } from "../platform/local-preferences.ts";
+import { primaryShortcutModifier } from "../platform/keyboard.ts";
 
 const leftPreference = "metawork.panel.workspaces";
 const rightPreference = "metawork.panel.activity";
@@ -20,6 +21,7 @@ export function AppShell({
   taskTitle,
   workspaceLabel,
   status,
+  onSearch,
   left,
   activity,
   children,
@@ -27,11 +29,13 @@ export function AppShell({
   taskTitle: string;
   workspaceLabel: string;
   status: string;
+  onSearch: () => void;
   left: ReactNode;
   activity: ReactNode | null;
   children: ReactNode;
 }) {
-  const { locale, setLocale, t } = useI18n();
+  const { t } = useI18n();
+  const shortcutModifier = primaryShortcutModifier();
   const [leftOpen, setLeftOpen] = useState(() =>
     initialPanel(leftPreference, 820),
   );
@@ -98,21 +102,16 @@ export function AppShell({
         <p className="titlebar-status" aria-live="polite">
           {status}
         </p>
-        <label className="locale-control">
-          <span className="sr-only">{t("app.language")}</span>
-          <select
-            className="focus-ring"
-            aria-label={t("app.language")}
-            value={locale}
-            onChange={(event) => setLocale(event.target.value as Locale)}
-          >
-            <option value="en-US">{t("app.language.en-US")}</option>
-            <option value="zh-CN">{t("app.language.zh-CN")}</option>
-            {import.meta.env.DEV && (
-              <option value="pseudo">{t("app.language.pseudo")}</option>
-            )}
-          </select>
-        </label>
+        <button
+          className="titlebar-search focus-ring"
+          aria-label={t("search.open")}
+          title={t("search.open")}
+          onClick={onSearch}
+        >
+          <Icon name="search" />
+          <span>{t("search.open")}</span>
+          <kbd>{shortcutModifier}K</kbd>
+        </button>
         {rightAvailable && (
           <button
             className="icon-button focus-ring"

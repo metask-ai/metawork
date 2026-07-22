@@ -33,6 +33,62 @@ export type TaskSignals = {
   failed: boolean;
 };
 
+export type TaskGroupKind =
+  "attention" | "running" | "queued" | "recent" | "archived";
+
+export type TaskGroup = {
+  kind: TaskGroupKind;
+  tasks: TaskView[];
+};
+
+export function taskGroups(
+  tasks: TaskView[],
+  showArchived: boolean,
+): TaskGroup[] {
+  const byRecent = (left: TaskView, right: TaskView) => {
+    const leftOrder = BigInt(left.recentOrder);
+    const rightOrder = BigInt(right.recentOrder);
+    return rightOrder > leftOrder ? 1 : rightOrder < leftOrder ? -1 : 0;
+  };
+  const active = tasks.filter((task) => !task.archived);
+  const orderedGroups: TaskGroup[] = [
+    {
+      kind: "attention",
+      tasks: active
+        .filter((task) => task.currentRunPhase === "waiting_ui")
+        .sort(byRecent),
+    },
+    {
+      kind: "running",
+      tasks: active
+        .filter(
+          (task) =>
+            task.currentRunPhase === "running" ||
+            task.currentRunPhase === "stopping",
+        )
+        .sort(byRecent),
+    },
+    {
+      kind: "queued",
+      tasks: active
+        .filter((task) => task.currentRunPhase === "queued")
+        .sort(byRecent),
+    },
+    {
+      kind: "recent",
+      tasks: active
+        .filter((task) => task.currentRunPhase === null)
+        .sort(byRecent),
+    },
+  ];
+  const groups = orderedGroups.filter((group) => group.tasks.length > 0);
+  if (showArchived) {
+    const archived = tasks.filter((task) => task.archived).sort(byRecent);
+    if (archived.length > 0) groups.push({ kind: "archived", tasks: archived });
+  }
+  return groups;
+}
+
 export type TaskDisplayState =
   | {
       kind: "phase";

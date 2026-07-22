@@ -1,5 +1,15 @@
 type IconName =
-  "sidebar" | "activity" | "chevron" | "stop" | "send" | "workspace";
+  | "sidebar"
+  | "activity"
+  | "chevron"
+  | "stop"
+  | "send"
+  | "workspace"
+  | "search"
+  | "plus"
+  | "settings"
+  | "arrow-left"
+  | "account";
 
 const paths: Record<IconName, React.ReactNode> = {
   sidebar: <path d="M3.5 5.5h17v13h-17zM8.5 5.5v13" />,
@@ -8,6 +18,13 @@ const paths: Record<IconName, React.ReactNode> = {
   stop: <rect x="7" y="7" width="10" height="10" rx="1.5" />,
   send: <path d="m4 12 16-8-6 16-2.5-6.5L4 12Zm7.5 1.5L20 4" />,
   workspace: <path d="M3.5 7.5h7l2 2h8v9h-17zM3.5 7.5v-2h6l2 2" />,
+  search: <path d="m19 19-4.2-4.2m1.7-4.3a6 6 0 1 1-12 0 6 6 0 0 1 12 0Z" />,
+  plus: <path d="M12 5v14M5 12h14" />,
+  settings: (
+    <path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Zm7 3.5 1.3-2.1-2-3.4-2.5.1-1.2-.7L13.5 3h-4L8.4 5.9l-1.2.7-2.5-.1-2 3.4L4 12l-1.3 2.1 2 3.4 2.5-.1 1.2.7 1.1 2.9h4l1.1-2.9 1.2-.7 2.5.1 2-3.4L19 12Z" />
+  ),
+  "arrow-left": <path d="m14.5 6-6 6 6 6" />,
+  account: <path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm7 8a7 7 0 0 0-14 0" />,
 };
 
 export function Icon({ name }: { name: IconName }) {

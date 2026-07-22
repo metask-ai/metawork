@@ -283,6 +283,7 @@ function decodeAccount(value: unknown, path: string): AccountView {
     "models",
     "selectedApiKeySelectionId",
     "selectedModelSelectionId",
+    "modelCatalogApiKeySelectionId",
     "canCreateTask",
     "errorCode",
     "safeDiagnostic",
@@ -359,6 +360,10 @@ function decodeAccount(value: unknown, path: string): AccountView {
     item.selectedModelSelectionId,
     `${path}.selectedModelSelectionId`,
   );
+  const modelCatalogApiKeySelectionId = stringValue(
+    item.modelCatalogApiKeySelectionId,
+    `${path}.modelCatalogApiKeySelectionId`,
+  );
   const canCreateTask = booleanValue(
     item.canCreateTask,
     `${path}.canCreateTask`,
@@ -373,7 +378,12 @@ function decodeAccount(value: unknown, path: string): AccountView {
   );
   if (executionState !== "ready" && canCreateTask)
     fail(path, "a non-ready execution cannot admit Tasks");
-  if (canCancel !== (operation !== "none" && operation !== "logging_out"))
+  if (
+    canCancel !==
+    (operation !== "none" &&
+      operation !== "logging_out" &&
+      operation !== "persisting")
+  )
     fail(path, "cancellation availability disagrees with the active operation");
   if (
     executionState === "ready" &&
@@ -384,12 +394,35 @@ function decodeAccount(value: unknown, path: string): AccountView {
       executionGeneration === "0")
   )
     fail(path, "a ready execution requires selected identities and generation");
+  const catalogReconfiguration = [
+    "loading_keys",
+    "selecting_key",
+    "loading_models",
+    "selecting_model",
+    "persisting",
+  ].includes(operation);
+  if (catalogReconfiguration && canCreateTask)
+    fail(path, "catalog reconfiguration cannot admit a new Task");
   if (
     executionState === "ready" &&
+    !catalogReconfiguration &&
     (!apiKeys.some((key) => key.selectionId === selectedApiKeySelectionId) ||
       !models.some((model) => model.selectionId === selectedModelSelectionId))
   )
     fail(path, "a ready execution requires selected catalog membership");
+  if (
+    models.length === 0 &&
+    modelCatalogApiKeySelectionId.length > 0 &&
+    operation !== "loading_models"
+  )
+    fail(path, "an empty model catalog can only name its owner while loading");
+  if (models.length > 0 && modelCatalogApiKeySelectionId.length === 0)
+    fail(path, "an available model catalog requires its API owner");
+  if (
+    modelCatalogApiKeySelectionId.length > 0 &&
+    !apiKeys.some((key) => key.selectionId === modelCatalogApiKeySelectionId)
+  )
+    fail(path, "model catalog owner must belong to the API catalog");
   if (primaryAction === "choose_api_key" && apiKeys.length === 0)
     fail(path, "API Key choice requires at least one candidate");
   if (primaryAction === "choose_model" && models.length === 0)
@@ -405,6 +438,7 @@ function decodeAccount(value: unknown, path: string): AccountView {
       models.length !== 0 ||
       selectedApiKeySelectionId.length !== 0 ||
       selectedModelSelectionId.length !== 0 ||
+      modelCatalogApiKeySelectionId.length !== 0 ||
       executionGeneration !== "0" ||
       canCreateTask)
   )
@@ -456,6 +490,7 @@ function decodeAccount(value: unknown, path: string): AccountView {
     models,
     selectedApiKeySelectionId,
     selectedModelSelectionId,
+    modelCatalogApiKeySelectionId,
     canCreateTask,
     errorCode: enumValue(
       item.errorCode,
@@ -694,6 +729,7 @@ function decodePendingUi(value: unknown, path: string): PendingUi | null {
 function decodeTask(value: unknown, path: string): TaskView {
   const item = object(value, path, [
     "id",
+    "recentOrder",
     "title",
     "workspaceId",
     "binding",
@@ -860,6 +896,7 @@ function decodeTask(value: unknown, path: string): TaskView {
     fail(path, "a Task without an available binding cannot accept future work");
   return {
     id: positiveWireId(item.id, `${path}.id`),
+    recentOrder: positiveWireId(item.recentOrder, `${path}.recentOrder`),
     title: stringValue(item.title, `${path}.title`),
     workspaceId: positiveWireId(item.workspaceId, `${path}.workspaceId`),
     binding,

@@ -9,8 +9,13 @@ import {
 
 import { AppShell } from "./AppShell.tsx";
 import { Icon } from "../components/ui/Icon.tsx";
-import { AccountPanel } from "../features/account/AccountPanel.tsx";
+import { AccountIdentity } from "../features/account/AccountIdentity.tsx";
 import { AccountGate } from "../features/account/AccountGate.tsx";
+import { requiresAccountGate } from "../features/account/gating.ts";
+import {
+  SettingsPage,
+  type SettingsFocusTarget,
+} from "../features/settings/SettingsPage.tsx";
 import { ComposerFooter } from "../features/composer/ComposerFooter.tsx";
 import { ApprovalPanel } from "../features/approvals/ApprovalPanel.tsx";
 import { UiRecordCard } from "../features/approvals/UiRecordCard.tsx";
@@ -52,6 +57,7 @@ import type {
   WorkspaceMutationReason,
 } from "../bridge/contracts.ts";
 import { useI18n, type MessageId } from "../i18n/context.ts";
+import { primaryShortcutModifier } from "../platform/keyboard.ts";
 import {
   searchWorkbench,
   isRunInFlight,
@@ -106,11 +112,16 @@ function connectionStatus(status: WorkbenchConnectionStatus): StatusState {
 
 export default function App() {
   const { t } = useI18n();
+  const shortcutModifier = primaryShortcutModifier();
   const [workbench, dispatchWorkbench] = useReducer(
     workbenchReducer,
     initialWorkbenchState,
   );
   const [showArchived, setShowArchived] = useState(false);
+  const [route, setRoute] = useState<"workbench" | "settings">("workbench");
+  const [settingsFocus, setSettingsFocus] =
+    useState<SettingsFocusTarget>("title");
+  const [workbenchEntered, setWorkbenchEntered] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [editingTitle, setEditingTitle] = useState(false);
@@ -186,17 +197,20 @@ export default function App() {
   const runInFlight = isRunInFlight(activeTask);
   const canSubmit =
     taskCanCompose &&
-    snapshot.account.canCreateTask &&
+    (!newTaskDraftActive || snapshot.account.canCreateTask) &&
     !accountMutationBlocksTaskAdmission(newTaskDraftActive, accountBusy) &&
     !runInFlight &&
     prompt.trim().length > 0 &&
     !taskMutationDisabled &&
     !workspaceBusy;
+  const selectedModel = snapshot.account.models.find(
+    (model) => model.selectionId === snapshot.account.selectedModelSelectionId,
+  );
   const selectedModelLabel =
-    snapshot.account.models.find(
-      (model) =>
-        model.selectionId === snapshot.account.selectedModelSelectionId,
-    )?.displayName || snapshot.account.selectedModelSelectionId;
+    selectedModel?.displayName ||
+    selectedModel?.selectionId ||
+    t("account.choose_model");
+  const selectedModelId = selectedModel?.selectionId ?? "";
   const composerWorkspaceId =
     activeTask?.workspaceId || workbench.draftWorkspaceId || currentWorkspaceId;
   const composerWorkspace = snapshot.workspaces.find(
@@ -271,15 +285,28 @@ export default function App() {
   }, [client, observeUiResponseSnapshot, taskDrafts.pruneDrafts]);
 
   useEffect(() => {
+    if (snapshot.account.readiness === "ready") setWorkbenchEntered(true);
+    if (snapshot.account.sessionState === "signed_out") {
+      setWorkbenchEntered(false);
+      setRoute("workbench");
+    }
+  }, [snapshot.account.readiness, snapshot.account.sessionState]);
+
+  useEffect(() => {
     const openSearch = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
         setSearchOpen(true);
       }
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "n") {
+        event.preventDefault();
+        setRoute("workbench");
+        beginNewTask();
+      }
     };
     window.addEventListener("keydown", openSearch);
     return () => window.removeEventListener("keydown", openSearch);
-  }, []);
+  }, [currentWorkspaceId]);
 
   useEffect(() => {
     setEditingTitle(false);
@@ -600,11 +627,17 @@ export default function App() {
 
   function beginNewTask() {
     pendingTaskSelection.current = null;
+    setRoute("workbench");
     dispatchWorkbench({
       type: "task.draft.opened",
       workspaceId: currentWorkspaceId,
     });
     window.requestAnimationFrame(() => composer.current?.focus());
+  }
+
+  function openSettings(target: SettingsFocusTarget = "title") {
+    setSettingsFocus(target);
+    setRoute("settings");
   }
 
   async function submitRun() {
@@ -955,7 +988,11 @@ export default function App() {
     return true;
   }
 
-  if (snapshot.account.readiness !== "ready")
+  const accountGateRequired = requiresAccountGate(
+    workbenchEntered,
+    snapshot.account,
+  );
+  if (accountGateRequired)
     return (
       <AccountGate
         account={snapshot.account}
@@ -1014,88 +1051,84 @@ export default function App() {
 
   return (
     <AppShell
-      taskTitle={activeTaskTitle}
+      taskTitle={route === "settings" ? t("settings.title") : activeTaskTitle}
+      onSearch={() => setSearchOpen(true)}
       workspaceLabel={
-        currentWorkspace?.displayName ||
-        currentWorkspace?.canonicalRoot ||
-        t("workspace.none")
+        route === "settings"
+          ? t("settings.account_models")
+          : currentWorkspace?.displayName ||
+            currentWorkspace?.canonicalRoot ||
+            t("workspace.none")
       }
       status={t(status.id, status.values)}
       left={
-        <>
-          <div className="brand-lockup">
-            <span className="brand-mark" aria-hidden="true">
-              M
-            </span>
-            <div>
-              <p className="brand-name">{t("app.name")}</p>
-              <p className="brand-subtitle">{t("app.window_label")}</p>
+        <div className="sidebar-frame">
+          <div className="sidebar-primary">
+            <div className="brand-lockup">
+              <span className="brand-mark" aria-hidden="true">
+                M
+              </span>
+              <div>
+                <p className="brand-name">{t("app.name")}</p>
+                <p className="brand-subtitle">{t("app.window_label")}</p>
+              </div>
+            </div>
+            <button
+              className="new-task-button focus-ring"
+              data-active={route === "workbench" && newTaskDraftActive}
+              disabled={bridgeUnavailable}
+              onClick={beginNewTask}
+            >
+              <Icon name="plus" />
+              <span>{t("task.new")}</span>
+              <kbd>{shortcutModifier}N</kbd>
+            </button>
+
+            <div className="sidebar-navigation">
+              <WorkspaceNavigation
+                summaries={summaries}
+                currentWorkspaceId={currentWorkspaceId}
+                tasks={currentTasks}
+                activeTaskId={
+                  route === "workbench" ? (activeTask?.id ?? null) : null
+                }
+                showArchived={showArchived}
+                disabled={bridgeUnavailable || workspaceBusy}
+                onChooseWorkspace={() => void chooseWorkspace(false)}
+                onRemoveWorkspace={(workspaceId) =>
+                  void removeWorkspaceById(workspaceId)
+                }
+                onRetryRemoval={(workspaceId) =>
+                  void removeWorkspaceById(workspaceId)
+                }
+                onSelectWorkspace={(workspaceId) => {
+                  pendingTaskSelection.current = null;
+                  setRoute("workbench");
+                  void selectWorkspaceById(workspaceId);
+                }}
+                onSelectTask={(taskId) => {
+                  pendingTaskSelection.current = null;
+                  setRoute("workbench");
+                  dispatchWorkbench({ type: "task.selected", taskId });
+                }}
+                onToggleArchived={() => setShowArchived((shown) => !shown)}
+              />
             </div>
           </div>
 
-          {snapshot.account.readiness === "ready" && (
-            <AccountPanel
-              account={snapshot.account}
-              disabled={bridgeUnavailable || accountBusy}
-              onReauthenticate={() =>
-                void runAccountCommand(() => client.reauthenticate())
-              }
-              onCancel={() => void cancelAccountOperation()}
-              onRefresh={() =>
-                void runAccountCommand(() => client.refreshAccountCatalog())
-              }
-              onSelectApiKey={(id) =>
-                void runAccountCommand(() =>
-                  client.selectApiKey(
-                    id,
-                    snapshot.account.catalogGeneration,
-                    snapshot.account.executionGeneration,
-                  ),
-                )
-              }
-              onSelectModel={(id) =>
-                void runAccountCommand(() =>
-                  client.selectModel(
-                    id,
-                    snapshot.account.catalogGeneration,
-                    snapshot.account.executionGeneration,
-                  ),
-                )
-              }
-              onLogout={() => void runAccountCommand(() => client.logout())}
-            />
-          )}
-
-          <WorkspaceNavigation
-            summaries={summaries}
-            currentWorkspaceId={currentWorkspaceId}
-            tasks={currentTasks}
-            activeTaskId={activeTask?.id ?? null}
-            showArchived={showArchived}
-            disabled={bridgeUnavailable || workspaceBusy}
-            onSearch={() => setSearchOpen(true)}
-            onChooseWorkspace={() => void chooseWorkspace(false)}
-            onRemoveWorkspace={(workspaceId) =>
-              void removeWorkspaceById(workspaceId)
+          <AccountIdentity
+            account={snapshot.account}
+            active={route === "settings"}
+            disabled={bridgeUnavailable || accountBusy}
+            onOpenSettings={openSettings}
+            onReauthenticate={() =>
+              void runAccountCommand(() => client.reauthenticate())
             }
-            onRetryRemoval={(workspaceId) =>
-              void removeWorkspaceById(workspaceId)
-            }
-            onSelectWorkspace={(workspaceId) => {
-              pendingTaskSelection.current = null;
-              void selectWorkspaceById(workspaceId);
-            }}
-            onCreateTask={beginNewTask}
-            onSelectTask={(taskId) => {
-              pendingTaskSelection.current = null;
-              dispatchWorkbench({ type: "task.selected", taskId });
-            }}
-            onToggleArchived={() => setShowArchived((shown) => !shown)}
           />
-        </>
+        </div>
       }
       activity={
-        activeTask ? (
+        route === "workbench" && activeTask ? (
           <>
             <h2 className="activity-title">{t("activity.title")}</h2>
             {viewSyncFailed && (
@@ -1133,273 +1166,344 @@ export default function App() {
         ) : null
       }
     >
-      <header className="task-header">
-        <div className="min-w-0">
-          <p className="task-header-workspace">
-            {composerWorkspace?.canonicalRoot || t("workspace.none")}
-          </p>
-          {activeTask && editingTitle ? (
-            <form
-              className="task-title-editor"
-              onSubmit={(event) => {
-                event.preventDefault();
-                void renameTask();
-              }}
-            >
-              <input
-                autoFocus
-                maxLength={120}
-                value={titleDraft}
-                aria-label={t("task.rename")}
-                placeholder={t("task.item", { id: activeTask.id })}
-                onChange={(event) => setTitleDraft(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Escape") setEditingTitle(false);
-                }}
-              />
-              <button
-                className="secondary-button focus-ring"
-                disabled={!titleDraft.trim() || taskMutationDisabled}
-              >
-                {t("common.save")}
-              </button>
-              <button
-                type="button"
-                className="text-button focus-ring"
-                onClick={() => setEditingTitle(false)}
-              >
-                {t("common.cancel")}
-              </button>
-            </form>
-          ) : (
-            <div className="task-title-row">
-              <h1>
-                {activeTask
-                  ? activeTaskTitle
-                  : newTaskDraftActive
-                    ? t("task.new")
-                    : t("task.open")}
-              </h1>
-              {activeTask && <TaskSignals task={activeTask} />}
-            </div>
-          )}
-        </div>
-        <div className="task-actions">
-          {activeTask &&
-            activeTask.currentRunId !== "0" &&
-            activeTask.currentRunPhase !== null &&
-            activeTask.currentRunPhase !== "stopping" && (
-              <button
-                className="danger-button focus-ring"
-                disabled={bridgeUnavailable || activeTask.id in cancelPending}
-                onClick={() => void cancelRun()}
-              >
-                <Icon name="stop" />
-                {t("task.stop")}
-              </button>
-            )}
-          {activeTask && (
-            <div className="task-menu" ref={taskMenu}>
-              <button
-                className="secondary-button focus-ring"
-                aria-expanded={taskMenuOpen}
-                aria-haspopup="menu"
-                onClick={() => setTaskMenuOpen((open) => !open)}
-              >
-                {t("task.actions")}
-              </button>
-              {taskMenuOpen && (
-                <div
-                  className="task-menu-popover"
-                  role="menu"
-                  onKeyDown={(event) => {
-                    if (event.key !== "ArrowDown" && event.key !== "ArrowUp")
-                      return;
-                    const items = [
-                      ...event.currentTarget.querySelectorAll<HTMLButtonElement>(
-                        "button:not([disabled])",
-                      ),
-                    ];
-                    if (items.length === 0) return;
+      {route === "settings" ? (
+        <SettingsPage
+          account={snapshot.account}
+          focusTarget={settingsFocus}
+          disabled={bridgeUnavailable || accountBusy}
+          cancelDisabled={viewSyncFailed || !bridgeReady || accountCancelBusy}
+          onBack={() => setRoute("workbench")}
+          onRefresh={() =>
+            void runAccountCommand(() => client.refreshAccountCatalog())
+          }
+          onCancel={() => void cancelAccountOperation()}
+          onSelectApiKey={(id) =>
+            void runAccountCommand(() =>
+              client.selectApiKey(
+                id,
+                snapshot.account.catalogGeneration,
+                snapshot.account.executionGeneration,
+              ),
+            )
+          }
+          onSelectModel={(id) =>
+            void runAccountCommand(() =>
+              client.selectModel(
+                id,
+                snapshot.account.catalogGeneration,
+                snapshot.account.executionGeneration,
+              ),
+            )
+          }
+          onReauthenticate={() =>
+            void runAccountCommand(() => client.reauthenticate())
+          }
+          onLogout={() => void runAccountCommand(() => client.logout())}
+        />
+      ) : (
+        <>
+          <header className="task-header">
+            <div className="min-w-0">
+              <p className="task-header-workspace">
+                {composerWorkspace?.canonicalRoot || t("workspace.none")}
+              </p>
+              {activeTask && editingTitle ? (
+                <form
+                  className="task-title-editor"
+                  onSubmit={(event) => {
                     event.preventDefault();
-                    const index = items.indexOf(
-                      document.activeElement as HTMLButtonElement,
-                    );
-                    const offset = event.key === "ArrowDown" ? 1 : -1;
-                    const next =
-                      index < 0
-                        ? event.key === "ArrowDown"
-                          ? 0
-                          : items.length - 1
-                        : (index + offset + items.length) % items.length;
-                    items[next].focus();
+                    void renameTask();
                   }}
                 >
-                  <button
-                    role="menuitem"
-                    disabled={taskMutationDisabled}
-                    onClick={() => {
-                      setTitleDraft(activeTask.title);
-                      setEditingTitle(true);
-                      setTaskMenuOpen(false);
+                  <input
+                    autoFocus
+                    maxLength={120}
+                    value={titleDraft}
+                    aria-label={t("task.rename")}
+                    placeholder={t("task.item", { id: activeTask.id })}
+                    onChange={(event) => setTitleDraft(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Escape") setEditingTitle(false);
                     }}
+                  />
+                  <button
+                    className="secondary-button focus-ring"
+                    disabled={!titleDraft.trim() || taskMutationDisabled}
                   >
-                    {t("task.rename")}
+                    {t("common.save")}
                   </button>
                   <button
-                    role="menuitem"
-                    disabled={
-                      taskMutationDisabled ||
-                      runInFlight ||
-                      activeTask.lifecycle === "closing"
-                    }
-                    onClick={() => {
-                      closeTaskMenuAndRestoreFocus();
-                      void setArchived(!activeTask.archived);
-                    }}
+                    type="button"
+                    className="text-button focus-ring"
+                    onClick={() => setEditingTitle(false)}
                   >
-                    {activeTask.archived
-                      ? t("task.restore")
-                      : t("task.archive")}
+                    {t("common.cancel")}
                   </button>
-                  <button
-                    role="menuitem"
-                    disabled={
-                      (activeTask.lifecycle === "closing" &&
-                        !activeTask.closeFailed) ||
-                      activeTask.lifecycle === "closed" ||
-                      taskMutationDisabled
-                    }
-                    onClick={() => {
-                      closeTaskMenuAndRestoreFocus();
-                      void closeTask();
-                    }}
-                  >
-                    {activeTask.closeFailed
-                      ? t("task.end_retry")
-                      : activeTask.lifecycle === "closing"
-                        ? t("task.ending")
-                        : t("task.end")}
-                  </button>
-                  <button
-                    role="menuitem"
-                    className="is-danger"
-                    disabled={
-                      activeTask.lifecycle !== "closed" || taskMutationDisabled
-                    }
-                    onClick={() => {
-                      setTaskMenuOpen(false);
-                      setConfirmDelete(true);
-                    }}
-                  >
-                    {t("task.delete")}
-                  </button>
+                </form>
+              ) : (
+                <div className="task-title-row">
+                  <h1>
+                    {activeTask
+                      ? activeTaskTitle
+                      : newTaskDraftActive
+                        ? t("task.new")
+                        : t("task.open")}
+                  </h1>
+                  {activeTask && <TaskSignals task={activeTask} />}
                 </div>
               )}
             </div>
+            <div className="task-actions">
+              {activeTask &&
+                activeTask.currentRunId !== "0" &&
+                activeTask.currentRunPhase !== null &&
+                activeTask.currentRunPhase !== "stopping" && (
+                  <button
+                    className="danger-button focus-ring"
+                    disabled={
+                      bridgeUnavailable || activeTask.id in cancelPending
+                    }
+                    onClick={() => void cancelRun()}
+                  >
+                    <Icon name="stop" />
+                    {t("task.stop")}
+                  </button>
+                )}
+              {activeTask && (
+                <div className="task-menu" ref={taskMenu}>
+                  <button
+                    className="secondary-button focus-ring"
+                    aria-expanded={taskMenuOpen}
+                    aria-haspopup="menu"
+                    onClick={() => setTaskMenuOpen((open) => !open)}
+                  >
+                    {t("task.actions")}
+                  </button>
+                  {taskMenuOpen && (
+                    <div
+                      className="task-menu-popover"
+                      role="menu"
+                      onKeyDown={(event) => {
+                        if (
+                          event.key !== "ArrowDown" &&
+                          event.key !== "ArrowUp"
+                        )
+                          return;
+                        const items = [
+                          ...event.currentTarget.querySelectorAll<HTMLButtonElement>(
+                            "button:not([disabled])",
+                          ),
+                        ];
+                        if (items.length === 0) return;
+                        event.preventDefault();
+                        const index = items.indexOf(
+                          document.activeElement as HTMLButtonElement,
+                        );
+                        const offset = event.key === "ArrowDown" ? 1 : -1;
+                        const next =
+                          index < 0
+                            ? event.key === "ArrowDown"
+                              ? 0
+                              : items.length - 1
+                            : (index + offset + items.length) % items.length;
+                        items[next].focus();
+                      }}
+                    >
+                      <button
+                        role="menuitem"
+                        disabled={taskMutationDisabled}
+                        onClick={() => {
+                          setTitleDraft(activeTask.title);
+                          setEditingTitle(true);
+                          setTaskMenuOpen(false);
+                        }}
+                      >
+                        {t("task.rename")}
+                      </button>
+                      <button
+                        role="menuitem"
+                        disabled={
+                          taskMutationDisabled ||
+                          runInFlight ||
+                          activeTask.lifecycle === "closing"
+                        }
+                        onClick={() => {
+                          closeTaskMenuAndRestoreFocus();
+                          void setArchived(!activeTask.archived);
+                        }}
+                      >
+                        {activeTask.archived
+                          ? t("task.restore")
+                          : t("task.archive")}
+                      </button>
+                      <button
+                        role="menuitem"
+                        disabled={
+                          (activeTask.lifecycle === "closing" &&
+                            !activeTask.closeFailed) ||
+                          activeTask.lifecycle === "closed" ||
+                          taskMutationDisabled
+                        }
+                        onClick={() => {
+                          closeTaskMenuAndRestoreFocus();
+                          void closeTask();
+                        }}
+                      >
+                        {activeTask.closeFailed
+                          ? t("task.end_retry")
+                          : activeTask.lifecycle === "closing"
+                            ? t("task.ending")
+                            : t("task.end")}
+                      </button>
+                      <button
+                        role="menuitem"
+                        className="is-danger"
+                        disabled={
+                          activeTask.lifecycle !== "closed" ||
+                          taskMutationDisabled
+                        }
+                        onClick={() => {
+                          setTaskMenuOpen(false);
+                          setConfirmDelete(true);
+                        }}
+                      >
+                        {t("task.delete")}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </header>
+
+          {activeTask && confirmDelete && (
+            <section
+              className="delete-confirmation"
+              role="alertdialog"
+              aria-labelledby="task-delete-title"
+              aria-describedby="task-delete-description"
+            >
+              <div>
+                <strong id="task-delete-title">
+                  {t("task.delete_confirm_title")}
+                </strong>
+                <span id="task-delete-description">
+                  {t("task.delete_confirm_body")}
+                </span>
+              </div>
+              <button
+                autoFocus
+                className="secondary-button focus-ring"
+                onClick={() => setConfirmDelete(false)}
+              >
+                {t("common.cancel")}
+              </button>
+              <button
+                className="danger-button focus-ring"
+                disabled={taskMutationDisabled}
+                onClick={() => void deleteTask()}
+              >
+                {t("task.delete")}
+              </button>
+            </section>
           )}
-        </div>
-      </header>
 
-      {activeTask && confirmDelete && (
-        <section
-          className="delete-confirmation"
-          role="alertdialog"
-          aria-labelledby="task-delete-title"
-          aria-describedby="task-delete-description"
-        >
-          <div>
-            <strong id="task-delete-title">
-              {t("task.delete_confirm_title")}
-            </strong>
-            <span id="task-delete-description">
-              {t("task.delete_confirm_body")}
-            </span>
-          </div>
-          <button
-            autoFocus
-            className="secondary-button focus-ring"
-            onClick={() => setConfirmDelete(false)}
-          >
-            {t("common.cancel")}
-          </button>
-          <button
-            className="danger-button focus-ring"
-            disabled={taskMutationDisabled}
-            onClick={() => void deleteTask()}
-          >
-            {t("task.delete")}
-          </button>
-        </section>
+          <TaskTimeline
+            task={activeTask}
+            draft={newTaskDraftActive}
+            draftHasWorkspace={Boolean(composerWorkspace)}
+            revision={snapshot.revision}
+            composerHasDraft={prompt.trim().length > 0}
+            retryAvailable={taskCanCompose && !runInFlight}
+            responseDisabled={bridgeUnavailable}
+            onUseExample={(instruction) => {
+              const prepared = prepareRetryDraft(prompt, instruction);
+              if (prepared.kind === "prepared") updatePrompt(prepared.draft);
+              else setStatus({ id: "run.draft_preserved" });
+              window.requestAnimationFrame(() => composer.current?.focus());
+            }}
+            onPrepareRetry={prepareRetry}
+            onRespond={(payload) => void respondUi(payload)}
+            renderPendingUi={(props) => {
+              const { taskId, ...panelProps } = props;
+              const identity = uiRequestIdentity(taskId, props.pending);
+              return (
+                <ApprovalPanel
+                  {...panelProps}
+                  responsePhase={uiResponsePhase(uiResponseStates, identity)}
+                />
+              );
+            }}
+            renderUiRecord={(record) => <UiRecordCard record={record} />}
+          />
+
+          <ComposerFooter
+            textareaRef={composer}
+            archived={Boolean(activeTask?.archived)}
+            closing={activeTask?.lifecycle === "closing"}
+            closed={activeTask?.lifecycle === "closed"}
+            unavailable={Boolean(
+              activeTask &&
+              activeTask.lifecycle === "open" &&
+              !activeTask.continuationAvailable,
+            )}
+            prompt={prompt}
+            composeDisabled={!taskCanCompose || taskMutationDisabled}
+            canSubmit={canSubmit}
+            runInFlight={Boolean(taskCanCompose && runInFlight)}
+            accessRequired={Boolean(
+              newTaskDraftActive &&
+              composerWorkspace &&
+              composerWorkspace.authorization !== "available",
+            )}
+            workspaceMissing={Boolean(newTaskDraftActive && !composerWorkspace)}
+            workspaceLabel={
+              composerWorkspace
+                ? composerWorkspace.displayName ||
+                  workspaceLabel(composerWorkspace.canonicalRoot)
+                : t("workspace.none")
+            }
+            workspaceTitle={
+              composerWorkspace?.canonicalRoot || t("workspace.none")
+            }
+            modelLabel={
+              newTaskDraftActive
+                ? selectedModelLabel
+                : activeTask?.binding.modelDisplayName ||
+                  activeTask?.binding.modelSelectionId ||
+                  null
+            }
+            modelOptions={snapshot.account.models}
+            selectedModelId={selectedModelId}
+            modelEditable={newTaskDraftActive}
+            modelSelectionDisabled={
+              bridgeUnavailable ||
+              accountBusy ||
+              snapshot.account.operation !== "none" ||
+              snapshot.account.models.length === 0
+            }
+            modelContextTitle={
+              newTaskDraftActive
+                ? t("settings.default_model_help")
+                : t("settings.task_binding_model")
+            }
+            actionDisabled={bridgeUnavailable || workspaceBusy}
+            onPromptChange={updatePrompt}
+            onSubmit={() => void submitRun()}
+            onConfirmAccess={() => void chooseWorkspace(true)}
+            onSelectModel={(id) =>
+              void runAccountCommand(() =>
+                client.selectModel(
+                  id,
+                  snapshot.account.catalogGeneration,
+                  snapshot.account.executionGeneration,
+                ),
+              )
+            }
+            onOpenModelSettings={() => openSettings("title")}
+          />
+        </>
       )}
-
-      <TaskTimeline
-        task={activeTask}
-        draft={newTaskDraftActive}
-        revision={snapshot.revision}
-        composerHasDraft={prompt.trim().length > 0}
-        retryAvailable={taskCanCompose && !runInFlight}
-        responseDisabled={bridgeUnavailable}
-        onUseExample={(instruction) => {
-          const prepared = prepareRetryDraft(prompt, instruction);
-          if (prepared.kind === "prepared") updatePrompt(prepared.draft);
-          else setStatus({ id: "run.draft_preserved" });
-          window.requestAnimationFrame(() => composer.current?.focus());
-        }}
-        onPrepareRetry={prepareRetry}
-        onRespond={(payload) => void respondUi(payload)}
-        renderPendingUi={(props) => {
-          const { taskId, ...panelProps } = props;
-          const identity = uiRequestIdentity(taskId, props.pending);
-          return (
-            <ApprovalPanel
-              {...panelProps}
-              responsePhase={uiResponsePhase(uiResponseStates, identity)}
-            />
-          );
-        }}
-        renderUiRecord={(record) => <UiRecordCard record={record} />}
-      />
-
-      <ComposerFooter
-        textareaRef={composer}
-        archived={Boolean(activeTask?.archived)}
-        closing={activeTask?.lifecycle === "closing"}
-        closed={activeTask?.lifecycle === "closed"}
-        unavailable={Boolean(
-          activeTask &&
-          activeTask.lifecycle === "open" &&
-          !activeTask.continuationAvailable,
-        )}
-        prompt={prompt}
-        composeDisabled={!taskCanCompose || taskMutationDisabled}
-        canSubmit={canSubmit}
-        runInFlight={Boolean(taskCanCompose && runInFlight)}
-        accessRequired={Boolean(
-          newTaskDraftActive &&
-          composerWorkspace &&
-          composerWorkspace.authorization !== "available",
-        )}
-        workspaceMissing={Boolean(newTaskDraftActive && !composerWorkspace)}
-        workspaceLabel={
-          composerWorkspace
-            ? composerWorkspace.displayName ||
-              workspaceLabel(composerWorkspace.canonicalRoot)
-            : t("workspace.none")
-        }
-        workspaceTitle={composerWorkspace?.canonicalRoot || t("workspace.none")}
-        modelLabel={
-          newTaskDraftActive
-            ? selectedModelLabel
-            : activeTask?.binding.modelDisplayName ||
-              activeTask?.binding.modelSelectionId ||
-              null
-        }
-        actionDisabled={bridgeUnavailable || workspaceBusy}
-        onPromptChange={updatePrompt}
-        onSubmit={() => void submitRun()}
-        onConfirmAccess={() => void chooseWorkspace(true)}
-      />
       <GlobalSearch
         open={searchOpen}
         query={searchQuery}

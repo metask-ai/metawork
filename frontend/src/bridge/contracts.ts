@@ -95,6 +95,7 @@ export type AccountView = {
   models: { selectionId: string; displayName: string }[];
   selectedApiKeySelectionId: string;
   selectedModelSelectionId: string;
+  modelCatalogApiKeySelectionId: string;
   canCreateTask: boolean;
   errorCode: AccountErrorCode;
   safeDiagnostic: string;
@@ -226,6 +227,7 @@ export type UiRecord = {
 
 export type TaskView = {
   id: string;
+  recentOrder: string;
   title: string;
   workspaceId: string;
   binding: {

@@ -157,6 +157,7 @@ pub const AccountView = struct {
     models: []const ModelView = &.{},
     selected_api_key_id: []const u8 = "",
     selected_model: []const u8 = "",
+    model_catalog_api_key_id: []const u8 = "",
     can_create_task: bool = false,
     error_code: ErrorCode = .none,
     safe_diagnostic: []const u8 = "",
@@ -413,6 +414,10 @@ pub fn validateView(view: AccountView) ValidationError!void {
     try validateOptional(view.display_name, Limits.display_name_bytes);
     try validateOptional(view.selected_api_key_id, Limits.api_key_id_bytes);
     try validateOptional(view.selected_model, Limits.model_id_bytes);
+    try validateOptional(
+        view.model_catalog_api_key_id,
+        Limits.api_key_id_bytes,
+    );
     try validateOptional(view.safe_diagnostic, Limits.safe_diagnostic_bytes);
     if (view.api_keys.len > Limits.api_key_entries or view.models.len > Limits.model_entries)
         return error.CollectionTooLarge;
@@ -450,15 +455,42 @@ pub fn validateView(view: AccountView) ValidationError!void {
             if (std.mem.eql(u8, model.id, view.selected_model))
                 model_matches += 1;
         }
-        if (api_key_matches != 1 or model_matches != 1)
+        const catalog_reconfiguration = switch (view.operation) {
+            .loading_keys,
+            .selecting_key,
+            .loading_models,
+            .selecting_model,
+            .persisting,
+            => true,
+            else => false,
+        };
+        if (!catalog_reconfiguration and
+            (api_key_matches != 1 or model_matches != 1))
+            return error.InconsistentState;
+        if (catalog_reconfiguration and view.can_create_task)
             return error.InconsistentState;
     } else if (view.can_create_task) {
         return error.InconsistentState;
     }
+    if (view.models.len == 0) {
+        if (view.model_catalog_api_key_id.len != 0 and
+            view.operation != .loading_models)
+            return error.InconsistentState;
+    } else {
+        if (view.model_catalog_api_key_id.len == 0)
+            return error.InconsistentState;
+        var catalog_owner_matches: usize = 0;
+        for (view.api_keys) |key| {
+            if (std.mem.eql(u8, key.id, view.model_catalog_api_key_id))
+                catalog_owner_matches += 1;
+        }
+        if (catalog_owner_matches != 1) return error.InconsistentState;
+    }
     if (view.error_code == .none and view.safe_diagnostic.len != 0)
         return error.InconsistentState;
     const expected_can_cancel = view.operation != .none and
-        view.operation != .logging_out;
+        view.operation != .logging_out and
+        view.operation != .persisting;
     if (view.can_cancel != expected_can_cancel)
         return error.InconsistentState;
     switch (view.readiness) {

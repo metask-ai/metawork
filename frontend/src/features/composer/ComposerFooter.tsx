@@ -19,10 +19,17 @@ export function ComposerFooter({
   workspaceLabel,
   workspaceTitle,
   modelLabel,
+  modelOptions,
+  selectedModelId,
+  modelEditable,
+  modelSelectionDisabled,
+  modelContextTitle,
   actionDisabled,
   onPromptChange,
   onSubmit,
   onConfirmAccess,
+  onSelectModel,
+  onOpenModelSettings,
 }: {
   textareaRef: RefObject<HTMLTextAreaElement | null>;
   archived: boolean;
@@ -38,10 +45,17 @@ export function ComposerFooter({
   workspaceLabel: string;
   workspaceTitle: string;
   modelLabel: string | null;
+  modelOptions: { selectionId: string; displayName: string }[];
+  selectedModelId: string;
+  modelEditable: boolean;
+  modelSelectionDisabled: boolean;
+  modelContextTitle: string;
   actionDisabled: boolean;
   onPromptChange: (value: string) => void;
   onSubmit: () => void;
   onConfirmAccess: () => void;
+  onSelectModel: (id: string) => void;
+  onOpenModelSettings: () => void;
 }) {
   const { t } = useI18n();
   return (
@@ -49,9 +63,39 @@ export function ComposerFooter({
       <div className="composer-context" aria-label={t("run.context")}>
         {modelLabel && (
           <>
-            <span className="composer-context-item">
+            <span className="composer-context-item composer-model-context">
               <small>{t("account.model")}</small>
-              <strong>{modelLabel}</strong>
+              {modelEditable ? (
+                <span className="composer-model-controls">
+                  <select
+                    className="composer-model-select focus-ring"
+                    aria-label={t("settings.default_model")}
+                    title={modelContextTitle}
+                    value={selectedModelId}
+                    disabled={modelSelectionDisabled}
+                    onChange={(event) => onSelectModel(event.target.value)}
+                  >
+                    {!modelOptions.some(
+                      (model) => model.selectionId === selectedModelId,
+                    ) && <option value="">{t("account.choose_model")}</option>}
+                    {modelOptions.map((model) => (
+                      <option key={model.selectionId} value={model.selectionId}>
+                        {model.displayName || t("account.model_fallback")}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    className="composer-settings-link focus-ring"
+                    aria-label={t("settings.open_account_models")}
+                    title={t("settings.open_account_models")}
+                    onClick={onOpenModelSettings}
+                  >
+                    <Icon name="settings" />
+                  </button>
+                </span>
+              ) : (
+                <strong title={modelContextTitle}>{modelLabel}</strong>
+              )}
             </span>
             <span className="composer-context-divider" aria-hidden="true" />
           </>

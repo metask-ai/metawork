@@ -390,6 +390,7 @@ const TaskView = struct {
     session: ?*lifecycle.Session,
     execution: ?account_contract.OwnedExecutionConfig = null,
     id: u64,
+    recent_order: u64,
     route_id: u64,
     execution_generation: u64,
     execution_provider: Provider,
@@ -528,6 +529,7 @@ const AccountProjection = struct {
     display_name: FixedText(account_contract.Limits.display_name_bytes) = .{},
     selected_api_key_id: FixedText(account_contract.Limits.api_key_id_bytes) = .{},
     selected_model: FixedText(account_contract.Limits.model_id_bytes) = .{},
+    model_catalog_api_key_id: FixedText(account_contract.Limits.api_key_id_bytes) = .{},
     safe_diagnostic: FixedText(account_contract.Limits.safe_diagnostic_bytes) = .{},
     api_keys: []ApiKeyProjection,
     api_key_views: []account_contract.ApiKeyView,
@@ -599,6 +601,9 @@ const AccountProjection = struct {
         self.display_name.setNoFail(source_view.display_name);
         self.selected_api_key_id.setNoFail(source_view.selected_api_key_id);
         self.selected_model.setNoFail(source_view.selected_model);
+        self.model_catalog_api_key_id.setNoFail(
+            source_view.model_catalog_api_key_id,
+        );
         self.safe_diagnostic.setNoFail(source_view.safe_diagnostic);
         self.api_key_count = source_view.api_keys.len;
         for (
@@ -654,6 +659,7 @@ const AccountProjection = struct {
             .models = self.model_views[0..self.model_count],
             .selected_api_key_id = self.selected_api_key_id.view(),
             .selected_model = self.selected_model.view(),
+            .model_catalog_api_key_id = self.model_catalog_api_key_id.view(),
             .can_create_task = can_create_task,
             .error_code = self.error_code,
             .safe_diagnostic = self.safe_diagnostic.view(),
@@ -862,6 +868,7 @@ pub const Workbench = struct {
     next_workspace_id: u64 = 1,
     next_workspace_recent_order: u64 = 1,
     next_task_id: u64 = 1,
+    next_task_recent_order: u64 = 1,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -1001,6 +1008,7 @@ pub const Workbench = struct {
                 .models = &models,
                 .selected_api_key_id = "automation-key",
                 .selected_model = input.model,
+                .model_catalog_api_key_id = "automation-key",
                 .can_create_task = true,
                 .execution_generation = 1,
             },
@@ -1319,6 +1327,7 @@ pub const Workbench = struct {
             .session = route.session,
             .execution = task_execution.take(),
             .id = task_id,
+            .recent_order = self.takeTaskRecentOrder(),
             .route_id = route.id,
             .execution_generation = task_execution_input.execution_generation,
             .execution_provider = accountProvider(task_execution_input.target.provider_kind),
@@ -1398,6 +1407,7 @@ pub const Workbench = struct {
         };
         view.active_run_id = run_id;
         view.cancel_requested = false;
+        self.touchTask(view);
         workspace.recent_order = recent_order;
         self.bumpRevision();
         return run_id;
@@ -1473,6 +1483,7 @@ pub const Workbench = struct {
             run.terminal_observed = true;
             if (record) |value| self.pushUiRecord(view, value);
             view.cancel_requested = false;
+            self.touchTask(view);
             self.bumpRevision();
             return;
         }
@@ -1488,6 +1499,7 @@ pub const Workbench = struct {
         if (record) |value| self.pushUiRecord(view, value);
         view.cancel_requested = true;
         _ = setActivePhase(run, .stopping);
+        self.touchTask(view);
         self.bumpRevision();
     }
 
@@ -1513,6 +1525,7 @@ pub const Workbench = struct {
         );
         try session.respondUi(run_id, request_id, agent_response);
         self.pushUiRecord(view, record);
+        self.touchTask(view);
         self.bumpRevision();
     }
 
@@ -1577,6 +1590,7 @@ pub const Workbench = struct {
         };
         if (cancelled_ui) |record|
             self.pushUiRecord(view, record);
+        self.touchTask(view);
         self.bumpRevision();
     }
 
@@ -1595,6 +1609,7 @@ pub const Workbench = struct {
             if (view.execution) |*execution| execution.input().api_key else &.{},
         );
         view.title_redacted = projected.redacted;
+        self.touchTask(view);
         self.bumpRevision();
     }
 
@@ -1604,6 +1619,7 @@ pub const Workbench = struct {
         if (view.lifecycle == .closing or hasNonTerminalRun(view)) return error.TaskBusy;
         if (view.archived == archived) return;
         view.archived = archived;
+        self.touchTask(view);
         self.bumpRevision();
     }
 
@@ -1811,6 +1827,7 @@ pub const Workbench = struct {
         run.event_projection_failure = .consumer_rejected;
         if (task.lifecycle == .open)
             task.continuation = .{ .unavailable = .event_projection_failure };
+        self.touchTask(task);
         self.bumpRevision();
     }
 
@@ -1846,6 +1863,7 @@ pub const Workbench = struct {
                 // Product terminal visibility changes even when the assistant
                 // has no withheld suffix.
                 changed = true;
+                self.touchTask(task);
                 if (run.assistant.committed_len != run.assistant.list.items.len) {
                     run.assistant.committed_len = run.assistant.list.items.len;
                 }
@@ -1950,6 +1968,9 @@ pub const Workbench = struct {
         writer.writeAll(",\"selectedModelSelectionId\":") catch
             return error.SnapshotTooLarge;
         try self.projectedJsonValue(writer, view.selected_model);
+        writer.writeAll(",\"modelCatalogApiKeySelectionId\":") catch
+            return error.SnapshotTooLarge;
+        try self.projectedJsonValue(writer, view.model_catalog_api_key_id);
         writer.print(
             ",\"canCreateTask\":{},\"errorCode\":\"{s}\",\"safeDiagnostic\":",
             .{ view.can_create_task, @tagName(view.error_code) },
@@ -2050,7 +2071,10 @@ pub const Workbench = struct {
     }
 
     fn writeTask(self: *Workbench, writer: *std.Io.Writer, view: *TaskView) Error!void {
-        writer.print("{{\"id\":\"{d}\",\"title\":", .{view.id}) catch return error.SnapshotTooLarge;
+        writer.print("{{\"id\":\"{d}\",\"recentOrder\":\"{d}\",\"title\":", .{
+            view.id,
+            view.recent_order,
+        }) catch return error.SnapshotTooLarge;
         try self.projectedJsonValueWithKnownCredentials(writer, view.title);
         writer.print(",\"workspaceId\":\"{d}\",\"binding\":{{\"epoch\":\"{d}\",\"availability\":\"{s}\",\"accountId\":", .{
             view.workspace_id,
@@ -2383,6 +2407,17 @@ pub const Workbench = struct {
         const recent_order = self.next_workspace_recent_order;
         self.next_workspace_recent_order +%= 1;
         return recent_order;
+    }
+
+    fn takeTaskRecentOrder(self: *Workbench) u64 {
+        const recent_order = self.next_task_recent_order;
+        if (self.next_task_recent_order != std.math.maxInt(u64))
+            self.next_task_recent_order += 1;
+        return recent_order;
+    }
+
+    fn touchTask(self: *Workbench, task: *TaskView) void {
+        task.recent_order = self.takeTaskRecentOrder();
     }
 
     fn findWorkspace(self: *Workbench, workspace_id: u64) ?*WorkspaceView {
@@ -4012,6 +4047,7 @@ fn installTestExecution(workbench: *Workbench) !void {
             .models = &models,
             .selected_api_key_id = "key-1",
             .selected_model = "fixture-model",
+            .model_catalog_api_key_id = "key-1",
             .can_create_task = true,
             .catalog_generation = 1,
             .execution_generation = 1,
@@ -4093,6 +4129,7 @@ fn testWorkbench() !Workbench {
         .session = null,
         .execution = task_execution.take(),
         .id = 3,
+        .recent_order = 1,
         .route_id = 3,
         .execution_generation = 1,
         .execution_provider = .anthropic,
@@ -4519,6 +4556,7 @@ test "Account projection and execution install use preallocated no-fail storage"
             .models = &models,
             .selected_api_key_id = "key-1",
             .selected_model = "model-1",
+            .model_catalog_api_key_id = "key-1",
             .can_create_task = true,
             .catalog_generation = 2,
             .execution_generation = 1,
@@ -4624,6 +4662,7 @@ test "default replacement preserves Task generation and installs the next admiss
             .models = &replacement_models,
             .selected_api_key_id = "key-2",
             .selected_model = "fixture-model-2",
+            .model_catalog_api_key_id = "key-2",
             .can_create_task = true,
             .execution_generation = 2,
         },
@@ -4922,6 +4961,26 @@ test "product Task identity is independent from Agent Session route identity" {
     );
 }
 
+test "streaming Run events do not reorder Task navigation" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    const before = workbench.tasks[0].?.recent_order;
+
+    var text = try testEnvelope(3, 7, "{\"text_chunk\":\"streaming\"}");
+    defer text.deinit();
+    try workbench.applyEvent(&text);
+    try std.testing.expectEqual(before, workbench.tasks[0].?.recent_order);
+
+    var usage = try testEnvelope(
+        3,
+        7,
+        "{\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0}}",
+    );
+    defer usage.deinit();
+    try workbench.applyEvent(&usage);
+    try std.testing.expectEqual(before, workbench.tasks[0].?.recent_order);
+}
+
 test "event projection failure routes by Agent Session identity not product Task identity" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
@@ -4980,6 +5039,7 @@ test "Workbench shutdown releases current and Task-owned execution generations" 
             .models = &replacement_models,
             .selected_api_key_id = "key-2",
             .selected_model = "fixture-model-2",
+            .model_catalog_api_key_id = "key-2",
             .can_create_task = true,
             .execution_generation = 2,
         },
@@ -5341,6 +5401,7 @@ fn installMaximumAccountProjection(workbench: *Workbench) !void {
             .models = models,
             .selected_api_key_id = &api_key_ids[0],
             .selected_model = &model_ids[0],
+            .model_catalog_api_key_id = &api_key_ids[0],
             .can_create_task = false,
             .error_code = .invalid_state,
             .safe_diagnostic = &diagnostic,
@@ -5403,6 +5464,7 @@ test "default snapshot budget contains the maximum structural projection" {
         workbench.tasks[task_index] = .{
             .session = null,
             .id = @intCast(task_index + 1),
+            .recent_order = @intCast(task_index + 1),
             .route_id = @intCast(task_index + 1),
             .execution_generation = 1,
             .execution_provider = .anthropic,
