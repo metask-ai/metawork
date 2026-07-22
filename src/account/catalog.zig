@@ -369,6 +369,14 @@ pub const CatalogSession = struct {
         return self.models.items[0].id.view();
     }
 
+    pub fn hasApiKey(self: *const CatalogSession, id: []const u8) bool {
+        return self.findApiKey(id) != null;
+    }
+
+    pub fn hasModel(self: *const CatalogSession, id: []const u8) bool {
+        return self.findModel(id) != null;
+    }
+
     pub fn ownerAccountId(self: *const CatalogSession) []const u8 {
         return self.owner_account_id.view();
     }

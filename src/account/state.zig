@@ -284,6 +284,26 @@ pub const Account = struct {
         return transitionNoAttempt(next, .operation_failed);
     }
 
+    /// Windows has no multi-record commit whose outcome requires a process
+    /// restart to adjudicate. A local read/codec failure therefore returns to
+    /// the login surface with an explicit error instead of manufacturing the
+    /// macOS manifest recovery state.
+    pub fn prepareSignedOutRestoreFailure(
+        self: *const Account,
+        failure: WorkerFailure,
+    ) PrepareResult {
+        if (self.state.session_state != .restoring)
+            return .{ .rejected = .invalid_state };
+        var next = self.state;
+        next.session_state = .signed_out;
+        next.error_code = if (failure.error_code == .none)
+            .credential_store_read_failed
+        else
+            failure.error_code;
+        next.safe_diagnostic = failure.safe_diagnostic;
+        return transitionNoAttempt(next, .operation_failed);
+    }
+
     /// A logout manifest rename may have committed even when the filesystem
     /// cannot report the outcome. Continuing with the old in-memory execution
     /// would violate the tombstone boundary, so this state is deliberately
@@ -435,6 +455,23 @@ pub const Account = struct {
             self.state.active_attempt_id != null)
             return .{ .rejected = .invalid_state };
         var next = self.state;
+        next.error_code = error_code;
+        next.safe_diagnostic.clear();
+        return transitionNoAttempt(next, .operation_failed);
+    }
+
+    pub fn prepareRestoredRefreshAdmissionFailure(
+        self: *const Account,
+        error_code: contract.ErrorCode,
+    ) PrepareResult {
+        if (error_code == .none or
+            self.state.session_state != .authenticated or
+            self.state.execution_state != .none or
+            self.state.operation != .none or
+            self.state.active_attempt_id != null)
+            return .{ .rejected = .invalid_state };
+        var next = self.state;
+        next.session_state = .reauth_required;
         next.error_code = error_code;
         next.safe_diagnostic.clear();
         return transitionNoAttempt(next, .operation_failed);
@@ -1759,6 +1796,67 @@ test "restore failure enters a terminal restart-required state" {
     try std.testing.expectEqual(
         contract.ErrorCode.shutting_down,
         account.prepareCommand(.begin_login).rejected,
+    );
+}
+
+test "Windows restore failure returns to sign-in without restart semantics" {
+    var account: Account = .{};
+    var prepared = switch (account.prepareSignedOutRestoreFailure(
+        WorkerFailure.fromCode(.credential_store_read_failed),
+    )) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    commitPrepared(&account, &prepared);
+    const view = account.view();
+    try std.testing.expectEqual(
+        contract.AccountSessionState.signed_out,
+        view.session_state,
+    );
+    try std.testing.expectEqual(
+        contract.AccountReadiness.sign_in_required,
+        view.readiness,
+    );
+    try std.testing.expectEqual(
+        contract.AccountPrimaryAction.sign_in,
+        view.primary_action,
+    );
+    try std.testing.expectEqual(
+        contract.ErrorCode.credential_store_read_failed,
+        view.error_code,
+    );
+}
+
+test "restored refresh admission failure requires reauthentication" {
+    const identity = try AccountIdentity.init(
+        "account-1",
+        "profile-1",
+        "MetaWork User",
+    );
+    var account: Account = .{};
+    var restored: RestoreResult = .{
+        .account_only = .{ .identity = identity },
+    };
+    var restore = switch (account.prepareRestore(&restored)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    commitPrepared(&account, &restore);
+    var failed = switch (account.prepareRestoredRefreshAdmissionFailure(
+        .local_resource_exhausted,
+    )) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    commitPrepared(&account, &failed);
+    const view = account.view();
+    try std.testing.expectEqual(
+        contract.AccountSessionState.reauth_required,
+        view.session_state,
+    );
+    try std.testing.expectEqual(
+        contract.AccountPrimaryAction.reauthenticate,
+        view.primary_action,
     );
 }
 

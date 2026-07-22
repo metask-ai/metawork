@@ -1,6 +1,7 @@
 const std = @import("std");
 const contract = @import("metawork_account_contract");
 const state = @import("account_state");
+const oauth = @import("account_oauth");
 const metask = @import("metask_client");
 const catalog = @import("account_catalog");
 const credentials = @import("account_credentials_runtime");
@@ -94,6 +95,7 @@ pub const NetworkAttempt = struct {
         attempt_id: u64,
         transport: metask.Transport,
         credential_owner: *const credentials.CredentialOwner,
+        expected_identity: ?state.AccountIdentity,
         sink: ResultSink,
         now_unix_seconds: i64,
     ) !void {
@@ -104,7 +106,7 @@ pub const NetworkAttempt = struct {
             .refresh,
             transport,
             credential_owner,
-            null,
+            expected_identity,
             null,
             "",
             sink,
@@ -245,6 +247,7 @@ pub const NetworkAttempt = struct {
                     self.transport,
                     self.now_unix_seconds,
                     control,
+                    self.identity,
                 ) catch |err| {
                     self.publishFailure(metask.errorCode(err));
                     return;
@@ -334,8 +337,14 @@ const RefreshTransport = struct {
         output: []u8,
     ) metask.TransportError!metask.Response {
         const self: *RefreshTransport = @ptrCast(@alignCast(context));
-        if (request.kind != .refresh_token)
-            return error.ProtocolFailed;
+        if (request.kind == .profiles) {
+            const body =
+                \\{"data":[{"id":"profile-1","display_name":"MetaWork User","status":"active","is_default":true}]}
+            ;
+            @memcpy(output[0..body.len], body);
+            return .{ .status = 200, .body = output[0..body.len] };
+        }
+        if (request.kind != .refresh_token) return error.ProtocolFailed;
         if (self.blocking) {
             const control = request.control orelse
                 return error.ProtocolFailed;
@@ -381,6 +390,7 @@ test "refresh attempt transfers one opaque generation and cancels cleanly" {
         9,
         transport.transport(),
         &credential_owner,
+        null,
         capture.sink(),
         100,
     );
@@ -404,6 +414,7 @@ test "refresh attempt transfers one opaque generation and cancels cleanly" {
         10,
         blocking.transport(),
         &credential_owner,
+        null,
         cancelled_capture.sink(),
         100,
     );
@@ -418,4 +429,41 @@ test "refresh attempt transfers one opaque generation and cancels cleanly" {
         contract.ErrorCode.user_cancelled,
         cancelled.completion.payload.failed.error_code,
     );
+}
+
+test "refresh-only Windows restore revalidates account and profile identity" {
+    var refresh = try oauth.Secret.init(
+        std.testing.allocator,
+        "old-refresh",
+    );
+    defer refresh.deinit();
+    var credential_owner: credentials.CredentialOwner = .{};
+    defer credential_owner.deinit();
+    credential_owner.installRefreshToken(&refresh);
+    var transport: RefreshTransport = .{};
+    var capture: CaptureSink = .{};
+    var attempt: NetworkAttempt = .{};
+    try attempt.startRefresh(
+        std.testing.allocator,
+        std.testing.io,
+        11,
+        transport.transport(),
+        &credential_owner,
+        try state.AccountIdentity.init(
+            "acct-1",
+            "profile-1",
+            "Stored User",
+        ),
+        capture.sink(),
+        100,
+    );
+    attempt.join();
+    attempt.deinit();
+    var refreshed = capture.result orelse
+        return error.TestUnexpectedResult;
+    defer refreshed.deinit();
+    const identity = refreshed.refresh.refreshedIdentity() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("acct-1", identity.accountId());
+    try std.testing.expectEqualStrings("profile-1", identity.profileId());
 }

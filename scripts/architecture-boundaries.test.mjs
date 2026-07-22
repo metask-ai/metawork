@@ -268,7 +268,7 @@ test("Account execution is installed explicitly without process defaults", () =>
   assert.doesNotMatch(app, /account_api\.OAuth\.TokenSet/);
 });
 
-test("Account persistence revision has one code owner", () => {
+test("macOS Account persistence revision has one code owner", () => {
   const store = read("src/account/credential_store.zig");
   const platform = read("src/account/platform.zig");
   assert.match(store, /pub const persistence_revision: u8 = 2/);
@@ -281,6 +281,23 @@ test("Account persistence revision has one code owner", () => {
   assert.doesNotMatch(platform, /"manifest\.v[0-9]+"/);
 });
 
+test("Windows Account persistence is refresh-only and unversioned", () => {
+  const store = read("src/account/windows_store.zig");
+  const app = read("src/app.zig");
+  assert.match(store, /pub const service = "dev\.metawork\.account"/);
+  assert.match(
+    store,
+    /pub const refresh_token_account = "metask-refresh-token"/,
+  );
+  assert.match(store, /pub const public_state_name = "account\.json"/);
+  assert.doesNotMatch(
+    store,
+    /manifest\.v[0-9]+|persistence_revision|CredentialStore|OwnedExecutionConfig|TokenSet/,
+  );
+  assert.match(app, /builtin\.os\.tag == \.windows/);
+  assert.match(app, /WindowsStore\.restore/);
+});
+
 test("formal Native test graph runs every product module test root", () => {
   const source = read("build.zig");
   for (const [name, rootModule] of [
@@ -291,6 +308,7 @@ test("formal Native test graph runs every product module test root", () => {
       "metawork-account-credential-store",
       "test_modules.account_credential_store",
     ],
+    ["metawork-account-windows-store", "test_modules.account_windows_store"],
     ["metawork-account-platform", "test_modules.account_platform"],
     ["metawork-account-loopback", "test_modules.account_loopback"],
     ["metawork-account-login-attempt", "test_modules.account_login_attempt"],

@@ -179,11 +179,27 @@ pub fn refresh(
     now_unix_seconds: i64,
     control: ?RequestControl,
 ) ClientError!oauth.TokenSet {
+    return refreshWithToken(
+        allocator,
+        transport,
+        &previous.refresh_token,
+        now_unix_seconds,
+        control,
+    );
+}
+
+pub fn refreshWithToken(
+    allocator: std.mem.Allocator,
+    transport: Transport,
+    refresh_token: *const oauth.Secret,
+    now_unix_seconds: i64,
+    control: ?RequestControl,
+) ClientError!oauth.TokenSet {
     var request_body: [oauth.Limits.token_body_bytes]u8 = undefined;
     defer std.crypto.secureZero(u8, &request_body);
     const body = oauth.buildRefreshBody(
         &request_body,
-        &previous.refresh_token,
+        refresh_token,
     ) catch return error.TokenRefreshFailed;
     var response_storage: [oauth.Limits.token_body_bytes]u8 = undefined;
     defer std.crypto.secureZero(u8, &response_storage);
@@ -197,11 +213,11 @@ pub fn refresh(
         allocator,
         response.body,
         now_unix_seconds,
-        .{ .retain_previous = &previous.refresh_token },
+        .{ .retain_previous = refresh_token },
     ) catch return error.ProtocolInvalid;
 }
 
-fn fetchIdentity(
+pub fn fetchIdentity(
     transport: Transport,
     tokens: *const oauth.TokenSet,
     control: ?RequestControl,

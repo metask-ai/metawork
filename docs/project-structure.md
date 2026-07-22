@@ -105,8 +105,9 @@ Renderer Bridge `metawork.renderer-bridge` 覆盖完整 command、event 和 snap
 - `state.zig` 拥有 Account 状态机、attempt/generation 与 prepare/admit/commit；
 - `oauth.zig`、`loopback.zig`、`login_attempt.zig` 和 `network_attempt.zig` 拥有登录网络链路；
 - `metask_client.zig` 与 `catalog.zig` 消费锁定的 Metask production contract；
-- `credential_store.zig` 拥有持久化 revision、Keychain namespace、双 family slot 与 manifest 原子提交；
-- `platform.zig` 只适配 Account 所需的 Native 主线程能力，不形成通用 Desktop Interface；
+- `credential_store.zig` 只拥有 macOS persistence revision、Keychain namespace、双 family slot 与 `manifest.v2` 原子提交；
+- `windows_store.zig` 拥有 Windows 单 refresh token 与无版本、无 secret `account.json` 状态；不读取 macOS manifest，也不持久化 access token 或 Provider API Key；
+- `platform.zig` 分别适配 macOS 与 Windows 的 Account Native 主线程能力，不形成通用 Desktop Interface；
 - `credentials.zig` 管理 execution credential ownership/rotation。
 
 Account 与 Workbench 是同级 owner，只通过纯 `account/contract.zig` 和 App 主线程提交链协作。Bridge 只消费脱敏 view/command contract，不导入 Account runtime。
