@@ -1,3 +1,4 @@
+const std = @import("std");
 const native_sdk = @import("native_sdk");
 
 pub const max_path_bytes = 16 * 1024;
@@ -63,3 +64,24 @@ pub const State = struct {
         return output[0..grant.path_len];
     }
 };
+
+test "Workspace picker capability is one-shot and connection-bound" {
+    var state: State = .{};
+    const window_id: native_sdk.platform.WindowId = 7;
+    var output: [max_path_bytes]u8 = undefined;
+    const accepted = try state.issue(3, window_id, "/tmp/workspace");
+    try std.testing.expectEqualStrings(
+        "/tmp/workspace",
+        try state.consume(accepted, window_id, 3, &output),
+    );
+    try std.testing.expectError(
+        error.WorkspaceNotTrusted,
+        state.consume(accepted, window_id, 3, &output),
+    );
+
+    const stale = try state.issue(3, window_id, "/tmp/stale-workspace");
+    try std.testing.expectError(
+        error.WorkspaceNotTrusted,
+        state.consume(stale, window_id, 4, &output),
+    );
+}

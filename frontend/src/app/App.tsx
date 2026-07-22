@@ -8,9 +8,24 @@ import {
 } from "react";
 
 import { AppShell } from "./AppShell.tsx";
+import {
+  attentionStatus,
+  publishStatus,
+  quietStatus,
+  selectAccountGateStatus,
+  selectCommandBarStatus,
+  type ShellStatus,
+  type ShellStatusState,
+  type StatusAudience,
+} from "./command-bar-status.ts";
 import { Icon } from "../components/ui/Icon.tsx";
-import { AccountPanel } from "../features/account/AccountPanel.tsx";
-import { AccountPrerequisite } from "../features/account/AccountPrerequisite.tsx";
+import { AccountIdentity } from "../features/account/AccountIdentity.tsx";
+import { AccountGate } from "../features/account/AccountGate.tsx";
+import { requiresAccountGate } from "../features/account/gating.ts";
+import {
+  SettingsPage,
+  type SettingsFocusTarget,
+} from "../features/settings/SettingsPage.tsx";
 import { ComposerFooter } from "../features/composer/ComposerFooter.tsx";
 import { ApprovalPanel } from "../features/approvals/ApprovalPanel.tsx";
 import { UiRecordCard } from "../features/approvals/UiRecordCard.tsx";
@@ -20,7 +35,13 @@ import {
 } from "../features/approvals/response-state.ts";
 import { useUiResponseStates } from "../features/approvals/useUiResponseStates.ts";
 import { GlobalSearch } from "../features/search/GlobalSearch.tsx";
-import { TaskActivity } from "../features/task-activity/TaskActivity.tsx";
+import {
+  TaskInspector,
+  type InspectorFocusRequest,
+} from "../features/inspector/TaskInspector.tsx";
+import { inspectorFocusReturnTarget } from "../features/inspector/inspector-interaction.ts";
+import type { InspectorSection } from "../features/inspector/inspector-state.ts";
+import { useInspectorSession } from "../features/inspector/useInspectorSession.ts";
 import { TaskTimeline } from "../features/timeline/TaskTimeline.tsx";
 import {
   TaskSignals,
@@ -30,8 +51,12 @@ import {
   useNewTaskDrafts,
   useTaskDrafts,
 } from "../features/composer/useTaskDrafts.ts";
-import { prepareRetryDraft } from "../features/composer/drafts.ts";
+import {
+  newTaskDraftStorageId,
+  prepareRetryDraft,
+} from "../features/composer/drafts.ts";
 import { submitTaskInstruction } from "../features/composer/submitTaskInstruction.ts";
+import { resolveFirstSendWorkspace } from "../features/composer/firstSendWorkspace.ts";
 import {
   BridgeClient,
   BridgeCommandTimeoutError,
@@ -41,8 +66,14 @@ import {
   WorkbenchConnection,
   type WorkbenchConnectionStatus,
 } from "../bridge/connection.ts";
-import type { UiResponsePayload } from "../bridge/contracts.ts";
+import type {
+  TaskCreateReason,
+  TaskRunReason,
+  UiResponsePayload,
+  WorkspaceMutationReason,
+} from "../bridge/contracts.ts";
 import { useI18n, type MessageId } from "../i18n/context.ts";
+import { primaryShortcutModifier } from "../platform/keyboard.ts";
 import {
   searchWorkbench,
   isRunInFlight,
@@ -53,56 +84,80 @@ import {
   workspaceSummaries,
   type SearchResult,
 } from "../workbench/selectors.ts";
+import { chooseWorkspaceWithDraft } from "../features/workspaces/chooseWorkspace.ts";
 import { initialWorkbenchState, workbenchReducer } from "../workbench/store.ts";
+import {
+  accountMutationBlocksTaskAdmission,
+  PendingScopes,
+} from "../workbench/pendingScopes.ts";
 
 function errorText(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
-type StatusState = {
-  id: MessageId;
-  values?: Record<string, string>;
-  diagnostic?: string;
-  sourceId?: MessageId;
-};
+type MutationReason =
+  TaskCreateReason | TaskRunReason | WorkspaceMutationReason;
 
-function connectionStatus(status: WorkbenchConnectionStatus): StatusState {
+function mutationReasonMessageId(reason: MutationReason): MessageId {
+  return `mutation.reason.${reason}`;
+}
+
+function connectionStatus(status: WorkbenchConnectionStatus): ShellStatus {
   if (status.kind === "connected")
-    return {
-      id: status.recovered ? "connection.recovered" : "connection.connected",
-    };
+    return quietStatus(
+      status.recovered ? "connection.recovered" : "connection.connected",
+      { scope: "connection" },
+    );
   if (status.kind === "refresh_failed")
-    return {
-      id: "connection.refresh_failed",
+    return attentionStatus(
+      "connection.refresh_failed",
+      { scope: "connection" },
+      {
+        diagnostic: status.diagnostic,
+      },
+    );
+  return attentionStatus(
+    "connection.contract_failed",
+    { scope: "connection" },
+    {
       diagnostic: status.diagnostic,
-    };
-  return {
-    id: "connection.failed",
-    diagnostic: status.diagnostic,
-    sourceId: `connection.source.${status.source}`,
-  };
+      sourceId: `connection.source.${status.source}`,
+    },
+  );
 }
 
 export default function App() {
   const { t } = useI18n();
+  const shortcutModifier = primaryShortcutModifier();
   const [workbench, dispatchWorkbench] = useReducer(
     workbenchReducer,
     initialWorkbenchState,
   );
-  const [workspacePath, setWorkspacePath] = useState("");
-  const [workspaceGrant, setWorkspaceGrant] = useState("");
   const [showArchived, setShowArchived] = useState(false);
+  const [route, setRoute] = useState<"workbench" | "settings">("workbench");
+  const [settingsFocus, setSettingsFocus] =
+    useState<SettingsFocusTarget>("title");
+  const [workbenchEntered, setWorkbenchEntered] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [taskMenuOpen, setTaskMenuOpen] = useState(false);
-  const [status, setStatus] = useState<StatusState>({
-    id: "connection.connecting",
-  });
-  const [busy, setBusy] = useState<string | null>(null);
+  const [statuses, setStatuses] = useState<ShellStatusState>(() =>
+    publishStatus(
+      {},
+      quietStatus("connection.connecting", { scope: "connection" }),
+    ),
+  );
+  const [accountBusy, setAccountBusy] = useState(false);
+  const [workspaceBusy, setWorkspaceBusy] = useState(false);
+  const [taskPending, setTaskPending] = useState<Record<string, string>>({});
+  const [cancelPending, setCancelPending] = useState<Record<string, true>>({});
+  const [connectionBusy, setConnectionBusy] = useState(false);
   const [accountCancelBusy, setAccountCancelBusy] = useState(false);
+  const [inspectorFocusRequest, setInspectorFocusRequest] =
+    useState<InspectorFocusRequest>(null);
   const [bridgeReady, setBridgeReady] = useState(false);
   const [viewSyncFailed, setViewSyncFailed] = useState(false);
   const {
@@ -116,43 +171,85 @@ export default function App() {
   const connection = useRef<WorkbenchConnection | null>(null);
   const pendingTaskSelection = useRef<string | null>(null);
   const pendingTaskDraftRetention = useRef(new Set<string>());
+  const taskPendingScopes = useRef(new PendingScopes());
+  const cancelPendingTasks = useRef(new PendingScopes());
+  const accountBusyRef = useRef(false);
+  const accountCancelBusyRef = useRef(false);
+  const workspaceBusyRef = useRef(false);
+  const connectionBusyRef = useRef(false);
   const taskMenu = useRef<HTMLDivElement>(null);
+  const inspectorToggle = useRef<HTMLButtonElement>(null);
+  const inspectorOpener = useRef<HTMLButtonElement | null>(null);
+  const inspectorFocusSequence = useRef(0);
   const composer = useRef<HTMLTextAreaElement>(null);
+
+  function setStatus(status: ShellStatus) {
+    setStatuses((current) => publishStatus(current, status));
+  }
+
   const snapshot = workbench.snapshot;
   const activeTask = useMemo(() => selectActiveTask(workbench), [workbench]);
-  const currentWorkspace = selectCurrentWorkspace(workbench);
+  const inspector = useInspectorSession(activeTask);
+  const currentWorkspaceId = selectCurrentWorkspace(workbench);
+  const currentWorkspace = snapshot.workspaces.find(
+    (workspace) => workspace.id === currentWorkspaceId,
+  );
   const summaries = useMemo(() => workspaceSummaries(snapshot), [snapshot]);
   const currentTasks = useMemo(
     () =>
-      snapshot.tasks.filter((task) => task.workspaceRoot === currentWorkspace),
-    [currentWorkspace, snapshot],
+      snapshot.tasks.filter((task) => task.workspaceId === currentWorkspaceId),
+    [currentWorkspaceId, snapshot],
   );
   const searchResults = useMemo(
     () => searchWorkbench(snapshot, searchQuery),
     [searchQuery, snapshot],
   );
   const taskDrafts = useTaskDrafts(activeTask?.id ?? null);
-  const newTaskDrafts = useNewTaskDrafts(workbench.draftWorkspaceRoot);
-  const prompt = workbench.draftWorkspaceRoot
-    ? newTaskDrafts.draft
-    : taskDrafts.draft;
-  const updatePrompt = workbench.draftWorkspaceRoot
+  const newTaskDraftActive = workbench.draftOpen || activeTask === null;
+  const newTaskDraftId = newTaskDraftStorageId(
+    newTaskDraftActive,
+    workbench.draftWorkspaceId,
+  );
+  const newTaskDrafts = useNewTaskDrafts(newTaskDraftId);
+  const prompt = newTaskDraftActive ? newTaskDrafts.draft : taskDrafts.draft;
+  const updatePrompt = newTaskDraftActive
     ? newTaskDrafts.updateDraft
     : taskDrafts.updateDraft;
-  const mutationDisabled = viewSyncFailed || !bridgeReady || busy !== null;
+  const bridgeUnavailable = viewSyncFailed || !bridgeReady;
+  const accountGateRequired = requiresAccountGate(
+    workbenchEntered,
+    snapshot.account,
+  );
+  const currentTaskScope = activeTask ? `task:${activeTask.id}` : "new-task";
+  const taskMutationDisabled =
+    bridgeUnavailable || currentTaskScope in taskPending;
   const taskCanCompose =
-    Boolean(workbench.draftWorkspaceRoot) ||
+    newTaskDraftActive ||
     (activeTask?.lifecycle === "open" &&
       activeTask.continuationAvailable &&
       !activeTask.archived);
   const runInFlight = isRunInFlight(activeTask);
   const canSubmit =
     taskCanCompose &&
-    snapshot.account.canCreateTask &&
-    (!workbench.draftWorkspaceRoot || Boolean(workspaceGrant)) &&
+    (!newTaskDraftActive || snapshot.account.canCreateTask) &&
+    !accountMutationBlocksTaskAdmission(newTaskDraftActive, accountBusy) &&
     !runInFlight &&
     prompt.trim().length > 0 &&
-    !mutationDisabled;
+    !taskMutationDisabled &&
+    !workspaceBusy;
+  const selectedModel = snapshot.account.models.find(
+    (model) => model.selectionId === snapshot.account.selectedModelSelectionId,
+  );
+  const selectedModelLabel =
+    selectedModel?.displayName ||
+    selectedModel?.selectionId ||
+    t("account.choose_model");
+  const selectedModelId = selectedModel?.selectionId ?? "";
+  const composerWorkspaceId =
+    activeTask?.workspaceId || workbench.draftWorkspaceId || currentWorkspaceId;
+  const composerWorkspace = snapshot.workspaces.find(
+    (workspace) => workspace.id === composerWorkspaceId,
+  );
 
   const refreshSnapshot = useCallback(() => {
     const current = connection.current;
@@ -201,10 +298,15 @@ export default function App() {
       if (!cancelled) {
         setViewSyncFailed(true);
         if (!(error instanceof RendererBridgeContractError))
-          setStatus({
-            id: "connection.failed",
-            diagnostic: errorText(error),
-          });
+          setStatus(
+            attentionStatus(
+              "connection.failed",
+              { scope: "connection" },
+              {
+                diagnostic: errorText(error),
+              },
+            ),
+          );
       }
     });
 
@@ -222,21 +324,57 @@ export default function App() {
   }, [client, observeUiResponseSnapshot, taskDrafts.pruneDrafts]);
 
   useEffect(() => {
+    if (snapshot.account.readiness === "ready") setWorkbenchEntered(true);
+    if (snapshot.account.sessionState === "signed_out") {
+      setWorkbenchEntered(false);
+      setRoute("workbench");
+    }
+  }, [snapshot.account.readiness, snapshot.account.sessionState]);
+
+  useEffect(() => {
     const openSearch = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
-        event.preventDefault();
+      if (!event.metaKey && !event.ctrlKey) return;
+      const key = event.key.toLowerCase();
+      if (key !== "k" && key !== "n") return;
+      event.preventDefault();
+      if (accountGateRequired || bridgeUnavailable) return;
+      if (key === "k") {
         setSearchOpen(true);
+      } else {
+        setRoute("workbench");
+        beginNewTask();
       }
     };
     window.addEventListener("keydown", openSearch);
     return () => window.removeEventListener("keydown", openSearch);
-  }, []);
+  }, [accountGateRequired, bridgeUnavailable, currentWorkspaceId]);
 
   useEffect(() => {
     setEditingTitle(false);
     setConfirmDelete(false);
     setTaskMenuOpen(false);
+    setInspectorFocusRequest(null);
+    inspectorOpener.current = null;
   }, [activeTask?.id]);
+
+  useEffect(() => {
+    if (
+      snapshot.account.readiness !== "ready" ||
+      activeTask !== null ||
+      workbench.draftOpen
+    )
+      return;
+    dispatchWorkbench({
+      type: "task.draft.opened",
+      workspaceId: currentWorkspaceId,
+    });
+    window.requestAnimationFrame(() => composer.current?.focus());
+  }, [
+    activeTask,
+    currentWorkspaceId,
+    snapshot.account.readiness,
+    workbench.draftOpen,
+  ]);
 
   function focusPendingRequest() {
     const requestId = activeTask?.pendingUi?.requestId;
@@ -244,6 +382,40 @@ export default function App() {
     const target = document.getElementById(`ui-request-${requestId}`);
     target?.scrollIntoView({ block: "center", behavior: "smooth" });
     window.requestAnimationFrame(() => target?.focus());
+  }
+
+  function openInspectorSection(
+    section: InspectorSection,
+    opener: HTMLButtonElement,
+  ) {
+    if (!activeTask || !inspector.available) return;
+    inspectorOpener.current = opener;
+    inspector.show();
+    inspectorFocusSequence.current += 1;
+    setInspectorFocusRequest({
+      taskId: activeTask.id,
+      section,
+      nonce: inspectorFocusSequence.current,
+    });
+  }
+
+  function dismissInspector(restoreFocus = true) {
+    const panel = document.getElementById("task-inspector");
+    const focusWasInside = panel?.contains(document.activeElement) === true;
+    const focusTarget = inspectorFocusReturnTarget(
+      inspectorOpener.current,
+      inspectorToggle.current,
+    );
+    inspectorOpener.current = null;
+    inspector.hide();
+    setInspectorFocusRequest(null);
+    if (restoreFocus && focusWasInside && focusTarget)
+      window.requestAnimationFrame(() => focusTarget.focus());
+  }
+
+  function focusPendingFromInspector() {
+    if (window.innerWidth <= 1100) dismissInspector(false);
+    window.requestAnimationFrame(focusPendingRequest);
   }
 
   useEffect(() => {
@@ -272,25 +444,82 @@ export default function App() {
     );
   }
 
+  function closeDeleteConfirmation() {
+    setConfirmDelete(false);
+    window.requestAnimationFrame(() =>
+      taskMenu.current?.querySelector<HTMLButtonElement>("button")?.focus(),
+    );
+  }
+
+  function beginTaskPendingOperation(scope: string, operation: string) {
+    if (taskPendingScopes.current.has(scope)) return false;
+    if (!taskPendingScopes.current.begin(scope)) return false;
+    setTaskPending((current) => {
+      return { ...current, [scope]: operation };
+    });
+    return true;
+  }
+
+  function endTaskPendingOperation(scope: string) {
+    taskPendingScopes.current.end(scope);
+    setTaskPending((current) => {
+      if (!(scope in current)) return current;
+      const next = { ...current };
+      delete next[scope];
+      return next;
+    });
+  }
+
+  function moveTaskPendingOperation(from: string, to: string) {
+    if (!taskPendingScopes.current.move(from, to)) return false;
+    setTaskPending((current) => {
+      const operation = current[from];
+      if (!operation) return current;
+      const next = { ...current };
+      delete next[from];
+      next[to] = operation;
+      return next;
+    });
+    return true;
+  }
+
+  function setCancelPendingForTask(taskId: string, pending: boolean) {
+    if (pending) cancelPendingTasks.current.begin(taskId);
+    else cancelPendingTasks.current.end(taskId);
+    setCancelPending((current) => {
+      const next = { ...current };
+      if (pending) next[taskId] = true;
+      else delete next[taskId];
+      return next;
+    });
+  }
+
   async function retryViewSynchronization() {
-    if (busy !== null) return;
-    setBusy("reconnect");
+    if (connectionBusyRef.current) return;
+    connectionBusyRef.current = true;
+    setConnectionBusy(true);
     setViewSyncFailed(false);
     try {
       const current = connection.current;
       if (!current) throw new Error("Workbench connection is not available");
       await current.retry();
       setBridgeReady(true);
-      setStatus({ id: "connection.recovered" });
+      setStatus(quietStatus("connection.recovered", { scope: "connection" }));
     } catch (error) {
       setViewSyncFailed(true);
       setBridgeReady(false);
-      setStatus({
-        id: "connection.failed",
-        diagnostic: errorText(error),
-      });
+      setStatus(
+        attentionStatus(
+          "connection.failed",
+          { scope: "connection" },
+          {
+            diagnostic: errorText(error),
+          },
+        ),
+      );
     } finally {
-      setBusy(null);
+      connectionBusyRef.current = false;
+      setConnectionBusy(false);
     }
   }
 
@@ -300,22 +529,40 @@ export default function App() {
       errorCode: string;
     }>,
   ) {
-    if (mutationDisabled) return;
-    setBusy("account");
+    if (bridgeUnavailable || accountBusyRef.current) return;
+    accountBusyRef.current = true;
+    setAccountBusy(true);
     try {
       const result = await invoke();
       if (!result.accepted) {
         await refreshSnapshot().catch(() => undefined);
-        setStatus({ id: "account.command_rejected" });
+        setStatus(
+          attentionStatus(
+            result.errorCode === "generation_mismatch"
+              ? "account.options_updated"
+              : "account.command_rejected",
+            { scope: "account" },
+          ),
+        );
         return;
       }
-      await refreshAfterCommit("account.updated", "operation.account");
+      await refreshAfterCommit("account.updated", "operation.account", {
+        scope: "account",
+      });
     } catch (error) {
-      if (await reconcileCommandTimeout(error, "operation.account")) return;
+      if (
+        await reconcileCommandTimeout(error, "operation.account", {
+          scope: "account",
+        })
+      )
+        return;
       await refreshSnapshot().catch(() => undefined);
-      setStatus({ id: "account.command_failed" });
+      setStatus(
+        attentionStatus("account.command_failed", { scope: "account" }),
+      );
     } finally {
-      setBusy(null);
+      accountBusyRef.current = false;
+      setAccountBusy(false);
     }
   }
 
@@ -323,132 +570,379 @@ export default function App() {
     if (
       viewSyncFailed ||
       !bridgeReady ||
-      accountCancelBusy ||
+      accountCancelBusyRef.current ||
       !snapshot.account.canCancel
     )
       return;
+    accountCancelBusyRef.current = true;
     setAccountCancelBusy(true);
     try {
       const result = await client.cancelAccountOperation();
       if (!result.accepted) {
         await refreshSnapshot().catch(() => undefined);
-        setStatus({ id: "account.cancel_rejected" });
+        setStatus(quietStatus("account.cancel_rejected", { scope: "account" }));
         return;
       }
-      await refreshAfterCommit("account.cancelled", "operation.account_cancel");
+      await refreshAfterCommit(
+        "account.cancelled",
+        "operation.account_cancel",
+        { scope: "account" },
+      );
     } catch (error) {
-      if (await reconcileCommandTimeout(error, "operation.account_cancel"))
+      if (
+        await reconcileCommandTimeout(error, "operation.account_cancel", {
+          scope: "account",
+        })
+      )
         return;
       await refreshSnapshot().catch(() => undefined);
-      setStatus({ id: "account.cancel_failed" });
+      setStatus(attentionStatus("account.cancel_failed", { scope: "account" }));
     } finally {
+      accountCancelBusyRef.current = false;
       setAccountCancelBusy(false);
     }
   }
 
   async function chooseWorkspace(openDraft = false) {
-    if (viewSyncFailed || !bridgeReady) return;
-    setBusy(openDraft ? "new-task" : "workspace");
-    setWorkspaceGrant("");
+    if (bridgeUnavailable || workspaceBusyRef.current) return null;
+    workspaceBusyRef.current = true;
+    setWorkspaceBusy(true);
     try {
-      const result = await client.chooseWorkspace();
-      if (result.selected) {
-        setWorkspacePath(result.workspaceRoot);
-        setWorkspaceGrant(result.grant);
+      const outcome = await chooseWorkspaceWithDraft({
+        choose: () => client.chooseWorkspace(),
+        refresh: refreshSnapshot,
+        openDraft,
+        sourceDraftId: newTaskDraftId,
+        moveDraft: (sourceId, targetId) =>
+          newTaskDrafts.moveDraft(sourceId, targetId),
+      });
+      if (outcome.kind === "selected") {
+        const { result } = outcome;
         dispatchWorkbench(
           openDraft
             ? {
                 type: "task.draft.opened",
-                workspaceRoot: result.workspaceRoot,
+                workspaceId: result.workspaceId,
               }
             : {
                 type: "workspace.selected",
-                workspaceRoot: result.workspaceRoot,
+                workspaceId: result.workspaceId,
               },
         );
-        setStatus({ id: "workspace.grant_confirmed" });
+        setStatus(
+          quietStatus("workspace.grant_confirmed", {
+            scope: "workspace",
+            workspaceId: result.workspaceId,
+          }),
+        );
         if (openDraft)
           window.requestAnimationFrame(() => composer.current?.focus());
-      } else {
-        setStatus({ id: "workspace.selection_cancelled" });
+        return result;
       }
+      if (outcome.kind === "conflict") {
+        dispatchWorkbench({
+          type: "task.draft.opened",
+          workspaceId: outcome.workspaceId,
+        });
+        setStatus(
+          attentionStatus("workspace.draft_conflict", {
+            scope: "workspace",
+            workspaceId: outcome.workspaceId,
+          }),
+        );
+        window.requestAnimationFrame(() => composer.current?.focus());
+        return null;
+      }
+      setStatus(
+        quietStatus("workspace.selection_cancelled", {
+          scope: "workspace",
+          workspaceId: currentWorkspaceId,
+        }),
+      );
+      if (openDraft)
+        window.requestAnimationFrame(() => composer.current?.focus());
+      return null;
     } catch (error) {
-      setStatus({
-        id: "workspace.selection_failed",
-        values: { error: errorText(error) },
-      });
+      setStatus(
+        attentionStatus(
+          "workspace.selection_failed",
+          { scope: "workspace", workspaceId: null },
+          {
+            diagnostic: errorText(error),
+          },
+        ),
+      );
+      if (openDraft)
+        window.requestAnimationFrame(() => composer.current?.focus());
+      return null;
     } finally {
-      setBusy(null);
+      workspaceBusyRef.current = false;
+      setWorkspaceBusy(false);
     }
   }
 
-  async function beginNewTask() {
-    if (mutationDisabled) return;
-    pendingTaskSelection.current = null;
-    const draftRoot = currentWorkspace || workspacePath;
-    if (draftRoot) {
-      setWorkspacePath(draftRoot);
-      dispatchWorkbench({
-        type: "task.draft.opened",
-        workspaceRoot: draftRoot,
-      });
-      window.requestAnimationFrame(() => composer.current?.focus());
-      return;
+  async function selectWorkspaceById(
+    workspaceId: string,
+    taskId: string | null = null,
+  ) {
+    if (bridgeUnavailable || workspaceBusyRef.current) return;
+    workspaceBusyRef.current = true;
+    setWorkspaceBusy(true);
+    try {
+      const workspace = snapshot.workspaces.find(
+        (candidate) => candidate.id === workspaceId,
+      );
+      if (!workspace) {
+        setStatus(
+          attentionStatus("workspace.selection_unavailable", {
+            scope: "workspace",
+            workspaceId: null,
+          }),
+        );
+        return;
+      }
+      const result = await client.selectWorkspace(workspaceId, workspace.epoch);
+      if (!result.accepted) {
+        await refreshSnapshot().catch(() => undefined);
+        setStatus(
+          attentionStatus(mutationReasonMessageId(result.reason), {
+            scope: "workspace",
+            workspaceId: null,
+          }),
+        );
+        return;
+      }
+      await refreshSnapshot();
+      dispatchWorkbench({ type: "workspace.selected", workspaceId });
+      if (taskId !== null) dispatchWorkbench({ type: "task.selected", taskId });
+      setStatus(
+        quietStatus("workspace.grant_confirmed", {
+          scope: "workspace",
+          workspaceId,
+        }),
+      );
+    } catch (error) {
+      await refreshSnapshot().catch(() => undefined);
+      setStatus(
+        attentionStatus(
+          "workspace.selection_failed",
+          { scope: "workspace", workspaceId: null },
+          {
+            diagnostic: errorText(error),
+          },
+        ),
+      );
+    } finally {
+      workspaceBusyRef.current = false;
+      setWorkspaceBusy(false);
     }
-    await chooseWorkspace(true);
+  }
+
+  async function removeWorkspaceById(workspaceId: string) {
+    if (bridgeUnavailable || workspaceBusyRef.current) return;
+    workspaceBusyRef.current = true;
+    setWorkspaceBusy(true);
+    try {
+      const workspace = snapshot.workspaces.find(
+        (candidate) => candidate.id === workspaceId,
+      );
+      if (!workspace) {
+        setStatus(
+          attentionStatus("workspace.selection_unavailable", {
+            scope: "workspace",
+            workspaceId,
+          }),
+        );
+        return;
+      }
+      const result = await client.removeWorkspace(workspaceId, workspace.epoch);
+      if (!result.accepted) {
+        await refreshSnapshot().catch(() => undefined);
+        setStatus(
+          attentionStatus(mutationReasonMessageId(result.reason), {
+            scope: "workspace",
+            workspaceId,
+          }),
+        );
+        return;
+      }
+      await refreshAfterCommit(
+        "workspace.removal_started",
+        "operation.workspace_remove",
+        { scope: "workspace", workspaceId },
+      );
+    } catch (error) {
+      await refreshSnapshot().catch(() => undefined);
+      setStatus(
+        attentionStatus(
+          "mutation.transport_failed",
+          { scope: "workspace", workspaceId },
+          { diagnostic: errorText(error) },
+        ),
+      );
+    } finally {
+      workspaceBusyRef.current = false;
+      setWorkspaceBusy(false);
+    }
+  }
+
+  function beginNewTask() {
+    pendingTaskSelection.current = null;
+    setRoute("workbench");
+    dispatchWorkbench({
+      type: "task.draft.opened",
+      workspaceId: currentWorkspaceId,
+    });
+    window.requestAnimationFrame(() => composer.current?.focus());
+  }
+
+  function openSettings(target: SettingsFocusTarget = "title") {
+    setSettingsFocus(target);
+    setRoute("settings");
   }
 
   async function submitRun() {
     if (!canSubmit) return;
     const submitted = prompt;
-    const draftWorkspaceRoot = workbench.draftWorkspaceRoot;
     const existingTaskId = activeTask?.id ?? null;
-    updatePrompt("");
-    setBusy("run");
+    let submittedDraftId = newTaskDraftId;
+    const workspace = await resolveFirstSendWorkspace({
+      taskId: existingTaskId,
+      workspace:
+        existingTaskId !== null ||
+        composerWorkspace?.authorization === "available"
+          ? composerWorkspace && composerWorkspaceId
+            ? {
+                workspaceId: composerWorkspaceId,
+                workspaceEpoch: composerWorkspace.epoch,
+              }
+            : null
+          : null,
+      chooseWorkspace: async () => {
+        const selected = await chooseWorkspace(true);
+        if (selected) submittedDraftId = selected.workspaceId;
+        if (!selected) return null;
+        try {
+          const latest = await client.fetchSnapshot();
+          const chosenWorkspace = latest.workspaces.find(
+            (candidate) => candidate.id === selected.workspaceId,
+          );
+          return chosenWorkspace
+            ? {
+                workspaceId: chosenWorkspace.id,
+                workspaceEpoch: chosenWorkspace.epoch,
+              }
+            : null;
+        } catch (error) {
+          setStatus(
+            attentionStatus(
+              "connection.refresh_failed",
+              { scope: "connection" },
+              { diagnostic: errorText(error) },
+            ),
+          );
+          return null;
+        }
+      },
+    });
+    if (workspace.kind === "cancelled") return;
+    let pendingScope = currentTaskScope;
+    if (!beginTaskPendingOperation(pendingScope, "run")) return;
+    if (newTaskDraftActive && submittedDraftId)
+      newTaskDrafts.clearDraft(submittedDraftId);
+    else updatePrompt("");
     try {
       const result = await submitTaskInstruction({
         client,
         taskId: existingTaskId,
-        workspaceGrant,
+        workspaceId: workspace.workspaceId,
+        expectedWorkspaceEpoch: workspace.workspaceEpoch,
+        expectedExecutionGeneration: snapshot.account.executionGeneration,
+        expectedBindingEpoch: activeTask?.binding.epoch ?? null,
         instruction: submitted,
         onTaskCreated: (taskId) => {
-          setWorkspaceGrant("");
           pendingTaskSelection.current = taskId;
           pendingTaskDraftRetention.current.add(taskId);
-          if (draftWorkspaceRoot) newTaskDrafts.clearDraft(draftWorkspaceRoot);
           taskDrafts.setDraft(taskId, submitted);
           dispatchWorkbench({ type: "task.draft.closed" });
+          const taskScope = `task:${taskId}`;
+          if (moveTaskPendingOperation(pendingScope, taskScope))
+            pendingScope = taskScope;
         },
       });
       if (result.kind === "create_failed") {
-        setWorkspaceGrant("");
-        newTaskDrafts.updateDraft(submitted);
+        if (submittedDraftId)
+          newTaskDrafts.setDraft(submittedDraftId, submitted);
         if (
-          await reconcileCommandTimeout(result.error, "operation.task_create")
+          await reconcileCommandTimeout(result.error, "operation.task_create", {
+            scope: "workspace",
+            workspaceId: workspace.workspaceId,
+          })
         )
           return;
         await refreshSnapshot().catch(() => undefined);
-        setStatus({
-          id: "task.create_failed",
-          values: { error: errorText(result.error) },
-        });
+        setStatus(
+          attentionStatus(
+            "task.create_failed",
+            { scope: "workspace", workspaceId: workspace.workspaceId },
+            {
+              diagnostic: errorText(result.error),
+            },
+          ),
+        );
+        return;
+      }
+      if (result.kind === "create_rejected") {
+        if (submittedDraftId)
+          newTaskDrafts.setDraft(submittedDraftId, submitted);
+        await refreshSnapshot().catch(() => undefined);
+        setStatus(
+          attentionStatus(mutationReasonMessageId(result.reason), {
+            scope: "workspace",
+            workspaceId: workspace.workspaceId,
+          }),
+        );
         return;
       }
       if (result.kind === "run_failed") {
         taskDrafts.setDraft(result.taskId, submitted);
-        if (await reconcileCommandTimeout(result.error, "operation.run_submit"))
+        if (
+          await reconcileCommandTimeout(result.error, "operation.run_submit", {
+            scope: "task",
+            taskId: result.taskId,
+          })
+        )
           return;
-        setStatus({
-          id: "run.start_failed",
-          values: { error: errorText(result.error) },
-        });
+        setStatus(
+          attentionStatus(
+            "run.start_failed",
+            { scope: "task", taskId: result.taskId },
+            {
+              diagnostic: errorText(result.error),
+            },
+          ),
+        );
         await refreshSnapshot().catch(() => undefined);
         return;
       }
+      if (result.kind === "run_rejected") {
+        taskDrafts.setDraft(result.taskId, submitted);
+        await refreshSnapshot().catch(() => undefined);
+        setStatus(
+          attentionStatus(mutationReasonMessageId(result.reason), {
+            scope: "task",
+            taskId: result.taskId,
+          }),
+        );
+        return;
+      }
       taskDrafts.clearDraft(result.taskId);
-      await refreshAfterCommit("run.started", "operation.run_submit");
+      await refreshAfterCommit("run.started", "operation.run_submit", {
+        scope: "task",
+        taskId: result.taskId,
+      });
     } finally {
-      setBusy(null);
+      endTaskPendingOperation(pendingScope);
     }
   }
 
@@ -457,26 +951,40 @@ export default function App() {
       viewSyncFailed ||
       !bridgeReady ||
       !activeTask ||
+      cancelPendingTasks.current.has(activeTask.id) ||
       activeTask.currentRunId === "0" ||
       activeTask.currentRunPhase === null
     )
       return;
-    setBusy("cancel");
+    const taskId = activeTask.id;
+    setCancelPendingForTask(taskId, true);
     try {
       try {
         await client.cancel(activeTask.id, activeTask.currentRunId);
       } catch (error) {
-        if (await reconcileCommandTimeout(error, "operation.run_stop")) return;
+        if (
+          await reconcileCommandTimeout(error, "operation.run_stop", {
+            scope: "task",
+            taskId,
+          })
+        )
+          return;
         await refreshSnapshot().catch(() => undefined);
-        setStatus({
-          id: "run.stop_failed",
-          values: { error: errorText(error) },
-        });
+        setStatus(
+          attentionStatus(
+            "run.stop_failed",
+            { scope: "task", taskId },
+            { diagnostic: errorText(error) },
+          ),
+        );
         return;
       }
-      await refreshAfterCommit("run.stop_requested", "operation.run_stop");
+      await refreshAfterCommit("run.stop_requested", "operation.run_stop", {
+        scope: "task",
+        taskId,
+      });
     } finally {
-      setBusy(null);
+      setCancelPendingForTask(taskId, false);
     }
   }
 
@@ -484,58 +992,91 @@ export default function App() {
     if (
       viewSyncFailed ||
       !bridgeReady ||
+      taskMutationDisabled ||
       !activeTask ||
       (activeTask.lifecycle === "closing" && !activeTask.closeFailed) ||
       activeTask.lifecycle === "closed"
     )
       return;
-    setBusy("close");
+    const taskId = activeTask.id;
+    const scope = `task:${taskId}`;
+    if (!beginTaskPendingOperation(scope, "close")) return;
     try {
       try {
         await client.closeTask(activeTask.id);
       } catch (error) {
-        if (await reconcileCommandTimeout(error, "operation.task_close"))
+        if (
+          await reconcileCommandTimeout(error, "operation.task_close", {
+            scope: "task",
+            taskId,
+          })
+        )
           return;
         await refreshSnapshot().catch(() => undefined);
-        setStatus({
-          id: "task.close_failed",
-          values: { error: errorText(error) },
-        });
+        setStatus(
+          attentionStatus(
+            "task.close_failed",
+            { scope: "task", taskId },
+            { diagnostic: errorText(error) },
+          ),
+        );
         return;
       }
-      await refreshAfterCommit("task.close_requested", "operation.task_close");
+      await refreshAfterCommit("task.close_requested", "operation.task_close", {
+        scope: "task",
+        taskId,
+      });
     } finally {
-      setBusy(null);
+      endTaskPendingOperation(scope);
     }
   }
 
   async function renameTask() {
-    if (!activeTask || mutationDisabled || !titleDraft.trim()) return;
-    setBusy("rename");
+    if (!activeTask || taskMutationDisabled || !titleDraft.trim()) return;
+    const taskId = activeTask.id;
+    const scope = `task:${taskId}`;
+    if (!beginTaskPendingOperation(scope, "rename")) return;
     try {
       try {
         await client.renameTask(activeTask.id, titleDraft.trim());
       } catch (error) {
-        if (await reconcileCommandTimeout(error, "operation.task_rename"))
+        if (
+          await reconcileCommandTimeout(error, "operation.task_rename", {
+            scope: "task",
+            taskId,
+          })
+        )
           return;
         await refreshSnapshot().catch(() => undefined);
-        setStatus({
-          id: "task.rename_failed",
-          values: { error: errorText(error) },
-        });
+        setStatus(
+          attentionStatus(
+            "task.rename_failed",
+            { scope: "task", taskId },
+            { diagnostic: errorText(error) },
+          ),
+        );
         return;
       }
       setEditingTitle(false);
-      await refreshAfterCommit("task.renamed", "operation.task_rename");
+      await refreshAfterCommit("task.renamed", "operation.task_rename", {
+        scope: "task",
+        taskId,
+      });
     } finally {
-      setBusy(null);
+      endTaskPendingOperation(scope);
     }
   }
 
   async function setArchived(archived: boolean) {
-    if (!activeTask || mutationDisabled || activeTask.currentRunPhase !== null)
+    if (
+      !activeTask ||
+      taskMutationDisabled ||
+      activeTask.currentRunPhase !== null
+    )
       return;
-    setBusy("archive");
+    const taskId = activeTask.id;
+    const scope = `task:${taskId}`;
+    if (!beginTaskPendingOperation(scope, "archive")) return;
     try {
       try {
         await client.setTaskArchived(activeTask.id, archived);
@@ -544,66 +1085,76 @@ export default function App() {
           await reconcileCommandTimeout(
             error,
             archived ? "operation.task_archive" : "operation.task_restore",
+            { scope: "task", taskId },
           )
         )
           return;
         await refreshSnapshot().catch(() => undefined);
-        setStatus({
-          id: archived ? "task.archive_failed" : "task.restore_failed",
-          values: { error: errorText(error) },
-        });
+        setStatus(
+          attentionStatus(
+            archived ? "task.archive_failed" : "task.restore_failed",
+            { scope: "task", taskId },
+            { diagnostic: errorText(error) },
+          ),
+        );
         return;
       }
       if (archived) setShowArchived(true);
       await refreshAfterCommit(
         archived ? "task.archived_status" : "task.restored",
         archived ? "operation.task_archive" : "operation.task_restore",
+        { scope: "task", taskId },
       );
     } finally {
-      setBusy(null);
+      endTaskPendingOperation(scope);
     }
   }
 
   async function deleteTask() {
-    if (!activeTask || mutationDisabled || activeTask.lifecycle !== "closed")
+    if (
+      !activeTask ||
+      taskMutationDisabled ||
+      activeTask.lifecycle !== "closed"
+    )
       return;
-    setBusy("delete");
+    const taskId = activeTask.id;
+    const scope = `task:${taskId}`;
+    if (!beginTaskPendingOperation(scope, "delete")) return;
     try {
       try {
         await client.deleteTask(activeTask.id);
       } catch (error) {
-        if (await reconcileCommandTimeout(error, "operation.task_delete"))
+        if (
+          await reconcileCommandTimeout(error, "operation.task_delete", {
+            scope: "task",
+            taskId,
+          })
+        )
           return;
         await refreshSnapshot().catch(() => undefined);
-        setStatus({
-          id: "task.delete_failed",
-          values: { error: errorText(error) },
-        });
+        setStatus(
+          attentionStatus(
+            "task.delete_failed",
+            { scope: "task", taskId },
+            { diagnostic: errorText(error) },
+          ),
+        );
         return;
       }
       taskDrafts.clearDraft(activeTask.id);
       setConfirmDelete(false);
-      await refreshAfterCommit("task.deleted", "operation.task_delete");
+      await refreshAfterCommit("task.deleted", "operation.task_delete", {
+        scope: "task",
+        taskId,
+      });
     } finally {
-      setBusy(null);
+      endTaskPendingOperation(scope);
     }
   }
 
   function selectSearchResult(result: SearchResult) {
     pendingTaskSelection.current = null;
-    setWorkspacePath(result.workspaceRoot);
-    setWorkspaceGrant("");
-    dispatchWorkbench({
-      type: "workspace.selected",
-      workspaceRoot: result.workspaceRoot,
-    });
-    if (result.taskId)
-      dispatchWorkbench({
-        type: "task.selected",
-        taskId: result.taskId,
-      });
-    setWorkspacePath(result.workspaceRoot);
-    setWorkspaceGrant("");
+    void selectWorkspaceById(result.workspaceId, result.taskId);
     setSearchOpen(false);
     setSearchQuery("");
   }
@@ -612,35 +1163,40 @@ export default function App() {
     const pending = activeTask?.pendingUi;
     if (viewSyncFailed || !bridgeReady || !activeTask || !pending) return;
     const identity = uiRequestIdentity(activeTask.id, pending);
+    const taskId = activeTask.id;
     if (!beginUiResponse(identity)) return;
-    setBusy("respond");
     try {
-      try {
-        await client.respondUi(
-          activeTask.id,
-          pending.runId,
-          pending.requestId,
-          payload,
-        );
-      } catch (error) {
-        failUiResponse(identity);
-        if (await reconcileCommandTimeout(error, "operation.ui_response"))
-          return;
-        setStatus({
-          id: "approval.response_failed",
-          values: { error: errorText(error) },
-        });
-        await refreshSnapshot().catch(() => undefined);
-        return;
-      }
-      acceptUiResponse(identity);
-      await refreshAfterCommit(
-        "approval.response_sent",
-        "operation.ui_response",
+      await client.respondUi(
+        activeTask.id,
+        pending.runId,
+        pending.requestId,
+        payload,
       );
-    } finally {
-      setBusy(null);
+    } catch (error) {
+      failUiResponse(identity);
+      if (
+        await reconcileCommandTimeout(error, "operation.ui_response", {
+          scope: "task",
+          taskId,
+        })
+      )
+        return;
+      setStatus(
+        attentionStatus(
+          "approval.response_failed",
+          { scope: "task", taskId },
+          { diagnostic: errorText(error) },
+        ),
+      );
+      await refreshSnapshot().catch(() => undefined);
+      return;
     }
+    acceptUiResponse(identity);
+    await refreshAfterCommit(
+      "approval.response_sent",
+      "operation.ui_response",
+      { scope: "task", taskId },
+    );
   }
 
   function prepareRetry(instruction: string) {
@@ -649,53 +1205,133 @@ export default function App() {
     switch (prepared.kind) {
       case "prepared":
         updatePrompt(prepared.draft);
-        setStatus({ id: "run.retry_prepared" });
+        setStatus(
+          quietStatus("run.retry_prepared", {
+            scope: "task",
+            taskId: activeTask.id,
+          }),
+        );
         break;
       case "preserved":
-        setStatus({ id: "run.draft_preserved" });
+        setStatus(
+          quietStatus("run.draft_preserved", {
+            scope: "task",
+            taskId: activeTask.id,
+          }),
+        );
         break;
       case "too_long":
-        setStatus({ id: "run.retry_too_long" });
+        setStatus(
+          attentionStatus("run.retry_too_long", {
+            scope: "task",
+            taskId: activeTask.id,
+          }),
+        );
         break;
     }
     window.requestAnimationFrame(() => composer.current?.focus());
   }
 
-  async function refreshAfterCommit(success: MessageId, operation: MessageId) {
+  async function refreshAfterCommit(
+    success: MessageId,
+    operation: MessageId,
+    audience: StatusAudience,
+  ) {
     try {
       await refreshSnapshot();
-      setStatus({ id: success });
+      setStatus(quietStatus(success, audience));
     } catch (error) {
-      setStatus({
-        id: "view.refresh_after_commit_failed",
-        values: {
-          operation: t(operation),
-          error: errorText(error),
-        },
-      });
+      setStatus(
+        attentionStatus("view.refresh_after_commit_failed", audience, {
+          values: { operation: t(operation) },
+          diagnostic: errorText(error),
+        }),
+      );
     }
   }
 
-  async function reconcileCommandTimeout(error: unknown, operation: MessageId) {
+  async function reconcileCommandTimeout(
+    error: unknown,
+    operation: MessageId,
+    audience: StatusAudience,
+  ) {
     if (!(error instanceof BridgeCommandTimeoutError)) return false;
     try {
       await refreshSnapshot();
-      setStatus({
-        id: "command.timeout_reconciled",
-        values: { operation: t(operation) },
-      });
+      setStatus(
+        quietStatus("command.timeout_reconciled", audience, {
+          values: { operation: t(operation) },
+        }),
+      );
     } catch {
-      setStatus({
-        id: "command.timeout_sync_failed",
-        values: { operation: t(operation) },
-      });
+      setStatus(
+        attentionStatus("command.timeout_sync_failed", audience, {
+          values: { operation: t(operation) },
+        }),
+      );
     }
     return true;
   }
 
+  const connectionShellStatus = statuses.connection;
+  const connectionRetryable =
+    connectionShellStatus?.id !== "connection.contract_failed";
+  const accountGateStatus = selectAccountGateStatus(statuses);
+  if (accountGateRequired)
+    return (
+      <AccountGate
+        account={snapshot.account}
+        disabled={bridgeUnavailable || accountBusy}
+        cancelDisabled={viewSyncFailed || !bridgeReady || accountCancelBusy}
+        connectionFailed={viewSyncFailed}
+        connectionRetryable={connectionRetryable}
+        connectionDiagnostic={connectionShellStatus?.diagnostic}
+        reconnecting={connectionBusy}
+        notice={
+          accountGateStatus
+            ? t(accountGateStatus.id, accountGateStatus.values)
+            : ""
+        }
+        onBeginWindowDrag={() => {
+          void client.beginWindowDrag(1).catch(() => undefined);
+        }}
+        onWindowControl={(action) => {
+          void client.controlWindow(action).catch(() => undefined);
+        }}
+        onReconnect={() => void retryViewSynchronization()}
+        onBeginLogin={() => void runAccountCommand(() => client.beginLogin())}
+        onReopenLogin={() => void runAccountCommand(() => client.reopenLogin())}
+        onReauthenticate={() =>
+          void runAccountCommand(() => client.reauthenticate())
+        }
+        onCancel={() => void cancelAccountOperation()}
+        onRetry={() =>
+          void runAccountCommand(() => client.refreshAccountCatalog())
+        }
+        onSelectApiKey={(id) =>
+          void runAccountCommand(() =>
+            client.selectApiKey(
+              id,
+              snapshot.account.catalogGeneration,
+              snapshot.account.executionGeneration,
+            ),
+          )
+        }
+        onSelectModel={(id) =>
+          void runAccountCommand(() =>
+            client.selectModel(
+              id,
+              snapshot.account.catalogGeneration,
+              snapshot.account.executionGeneration,
+            ),
+          )
+        }
+      />
+    );
+
   const currentTaskState = activeTask ? taskDisplayState(activeTask) : null;
   const currentTaskStatus = !currentTaskState
-    ? t(workbench.draftWorkspaceRoot ? "task.new" : "task.open")
+    ? t(newTaskDraftActive ? "task.new" : "task.open")
     : currentTaskState.kind === "phase"
       ? t(`task.phase.${currentTaskState.value}`)
       : currentTaskState.kind === "lifecycle"
@@ -707,393 +1343,545 @@ export default function App() {
             : t("task.ready");
   const activeTaskTitle = activeTask
     ? activeTask.title || t("task.item", { id: activeTask.id })
-    : t(workbench.draftWorkspaceRoot ? "task.new" : "task.open");
+    : t(newTaskDraftActive ? "task.new" : "task.open");
+  const commandBarStatus = selectCommandBarStatus(statuses, {
+    route,
+    workspaceId: currentWorkspaceId,
+    taskId: activeTask?.id ?? null,
+  });
 
   return (
     <AppShell
-      taskTitle={activeTaskTitle}
-      workspaceLabel={currentWorkspace || workspacePath || t("workspace.none")}
-      status={t(status.id, status.values)}
+      taskTitle={route === "settings" ? t("settings.title") : activeTaskTitle}
+      onSearch={() => setSearchOpen(true)}
+      onBeginWindowDrag={() => {
+        void client.beginWindowDrag(1).catch(() => undefined);
+      }}
+      onWindowControl={(action) => {
+        void client.controlWindow(action).catch(() => undefined);
+      }}
+      workspaceLabel={
+        route === "settings"
+          ? t("settings.account_models")
+          : currentWorkspace?.displayName ||
+            currentWorkspace?.canonicalRoot ||
+            t("workspace.none")
+      }
+      attentionNotice={
+        commandBarStatus
+          ? t(commandBarStatus.id, commandBarStatus.values)
+          : null
+      }
       left={
-        <>
-          <div className="brand-lockup">
-            <span className="brand-mark" aria-hidden="true">
-              M
-            </span>
-            <div>
-              <p className="brand-name">{t("app.name")}</p>
-              <p className="brand-subtitle">{t("app.window_label")}</p>
-            </div>
-          </div>
+        route === "settings" ? null : (
+          <div className="sidebar-frame">
+            <div className="sidebar-primary">
+              <div className="brand-lockup">
+                <span className="brand-mark" aria-hidden="true">
+                  M
+                </span>
+                <div>
+                  <p className="brand-name">{t("app.name")}</p>
+                  <p className="brand-subtitle">{t("app.window_label")}</p>
+                </div>
+              </div>
+              <button
+                className="new-task-button focus-ring"
+                data-active={route === "workbench" && newTaskDraftActive}
+                disabled={bridgeUnavailable}
+                onClick={beginNewTask}
+              >
+                <Icon name="plus" />
+                <span>{t("task.new")}</span>
+                <kbd>{shortcutModifier}N</kbd>
+              </button>
 
-          {snapshot.account.readiness === "ready" && (
-            <AccountPanel
+              <div className="sidebar-navigation">
+                <WorkspaceNavigation
+                  summaries={summaries}
+                  currentWorkspaceId={currentWorkspaceId}
+                  tasks={currentTasks}
+                  activeTaskId={
+                    route === "workbench" ? (activeTask?.id ?? null) : null
+                  }
+                  showArchived={showArchived}
+                  disabled={bridgeUnavailable || workspaceBusy}
+                  onChooseWorkspace={() => void chooseWorkspace(false)}
+                  onRemoveWorkspace={(workspaceId) =>
+                    void removeWorkspaceById(workspaceId)
+                  }
+                  onRetryRemoval={(workspaceId) =>
+                    void removeWorkspaceById(workspaceId)
+                  }
+                  onSelectWorkspace={(workspaceId) => {
+                    pendingTaskSelection.current = null;
+                    setRoute("workbench");
+                    void selectWorkspaceById(workspaceId);
+                  }}
+                  onSelectTask={(taskId) => {
+                    pendingTaskSelection.current = null;
+                    setRoute("workbench");
+                    dispatchWorkbench({ type: "task.selected", taskId });
+                  }}
+                  onToggleArchived={() => setShowArchived((shown) => !shown)}
+                />
+              </div>
+            </div>
+
+            <AccountIdentity
               account={snapshot.account}
-              disabled={mutationDisabled}
+              active={false}
+              disabled={bridgeUnavailable || accountBusy}
+              onOpenSettings={openSettings}
               onReauthenticate={() =>
                 void runAccountCommand(() => client.reauthenticate())
               }
-              onCancel={() => void cancelAccountOperation()}
-              onRefresh={() =>
-                void runAccountCommand(() => client.refreshAccountCatalog())
-              }
-              onSelectApiKey={(id) =>
-                void runAccountCommand(() => client.selectApiKey(id))
-              }
-              onSelectModel={(id) =>
-                void runAccountCommand(() => client.selectModel(id))
-              }
-              onLogout={() => void runAccountCommand(() => client.logout())}
             />
+          </div>
+        )
+      }
+      inspectorOpen={route === "workbench" && inspector.open}
+      onDismissInspector={dismissInspector}
+      inspector={
+        route === "workbench" && activeTask && inspector.available ? (
+          <TaskInspector
+            task={activeTask}
+            focusRequest={inspectorFocusRequest}
+            onClose={() => dismissInspector()}
+            onFocusPending={focusPendingFromInspector}
+          />
+        ) : null
+      }
+    >
+      {route === "settings" ? (
+        <SettingsPage
+          account={snapshot.account}
+          focusTarget={settingsFocus}
+          disabled={bridgeUnavailable || accountBusy}
+          cancelDisabled={viewSyncFailed || !bridgeReady || accountCancelBusy}
+          onBack={() => setRoute("workbench")}
+          onRefresh={() =>
+            void runAccountCommand(() => client.refreshAccountCatalog())
+          }
+          onCancel={() => void cancelAccountOperation()}
+          onSelectApiKey={(id) =>
+            void runAccountCommand(() =>
+              client.selectApiKey(
+                id,
+                snapshot.account.catalogGeneration,
+                snapshot.account.executionGeneration,
+              ),
+            )
+          }
+          onSelectModel={(id) =>
+            void runAccountCommand(() =>
+              client.selectModel(
+                id,
+                snapshot.account.catalogGeneration,
+                snapshot.account.executionGeneration,
+              ),
+            )
+          }
+          onReauthenticate={() =>
+            void runAccountCommand(() => client.reauthenticate())
+          }
+          onLogout={() => void runAccountCommand(() => client.logout())}
+        />
+      ) : (
+        <>
+          <header className="task-header">
+            <div className="min-w-0">
+              <p className="task-header-workspace">
+                {composerWorkspace?.canonicalRoot || t("workspace.none")}
+              </p>
+              {activeTask && editingTitle ? (
+                <form
+                  className="task-title-editor"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void renameTask();
+                  }}
+                >
+                  <input
+                    autoFocus
+                    maxLength={120}
+                    value={titleDraft}
+                    aria-label={t("task.rename")}
+                    placeholder={t("task.item", { id: activeTask.id })}
+                    onChange={(event) => setTitleDraft(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key !== "Escape") return;
+                      event.preventDefault();
+                      setEditingTitle(false);
+                    }}
+                  />
+                  <button
+                    className="secondary-button focus-ring"
+                    disabled={!titleDraft.trim() || taskMutationDisabled}
+                  >
+                    {t("common.save")}
+                  </button>
+                  <button
+                    type="button"
+                    className="text-button focus-ring"
+                    onClick={() => setEditingTitle(false)}
+                  >
+                    {t("common.cancel")}
+                  </button>
+                </form>
+              ) : (
+                <div className="task-title-row">
+                  <h1>
+                    {activeTask
+                      ? activeTaskTitle
+                      : newTaskDraftActive
+                        ? t("task.new")
+                        : t("task.open")}
+                  </h1>
+                  {activeTask && <TaskSignals task={activeTask} />}
+                </div>
+              )}
+            </div>
+            <div className="task-actions">
+              {activeTask &&
+                activeTask.currentRunId !== "0" &&
+                activeTask.currentRunPhase !== null &&
+                activeTask.currentRunPhase !== "stopping" && (
+                  <button
+                    className="danger-button focus-ring"
+                    disabled={
+                      bridgeUnavailable || activeTask.id in cancelPending
+                    }
+                    onClick={() => void cancelRun()}
+                  >
+                    <Icon name="stop" />
+                    {t("task.stop")}
+                  </button>
+                )}
+              {activeTask && inspector.available && (
+                <button
+                  ref={inspectorToggle}
+                  className="inspector-toggle icon-button focus-ring"
+                  data-active={inspector.open}
+                  aria-controls="task-inspector"
+                  aria-expanded={inspector.open}
+                  aria-label={t(
+                    inspector.open ? "inspector.close" : "inspector.open",
+                  )}
+                  title={t(
+                    inspector.open ? "inspector.close" : "inspector.open",
+                  )}
+                  onClick={(event) => {
+                    setInspectorFocusRequest(null);
+                    if (inspector.open) {
+                      dismissInspector(false);
+                      return;
+                    }
+                    inspectorOpener.current = event.currentTarget;
+                    inspector.show();
+                  }}
+                >
+                  <Icon name="activity" />
+                </button>
+              )}
+              {activeTask && (
+                <div className="task-menu" ref={taskMenu}>
+                  <button
+                    className="secondary-button focus-ring"
+                    aria-expanded={taskMenuOpen}
+                    aria-haspopup="menu"
+                    onClick={() => setTaskMenuOpen((open) => !open)}
+                  >
+                    {t("task.actions")}
+                  </button>
+                  {taskMenuOpen && (
+                    <div
+                      className="task-menu-popover"
+                      role="menu"
+                      onKeyDown={(event) => {
+                        if (
+                          event.key !== "ArrowDown" &&
+                          event.key !== "ArrowUp"
+                        )
+                          return;
+                        const items = [
+                          ...event.currentTarget.querySelectorAll<HTMLButtonElement>(
+                            "button:not([disabled])",
+                          ),
+                        ];
+                        if (items.length === 0) return;
+                        event.preventDefault();
+                        const index = items.indexOf(
+                          document.activeElement as HTMLButtonElement,
+                        );
+                        const offset = event.key === "ArrowDown" ? 1 : -1;
+                        const next =
+                          index < 0
+                            ? event.key === "ArrowDown"
+                              ? 0
+                              : items.length - 1
+                            : (index + offset + items.length) % items.length;
+                        items[next].focus();
+                      }}
+                    >
+                      <button
+                        role="menuitem"
+                        disabled={taskMutationDisabled}
+                        onClick={() => {
+                          setTitleDraft(activeTask.title);
+                          setEditingTitle(true);
+                          setTaskMenuOpen(false);
+                        }}
+                      >
+                        {t("task.rename")}
+                      </button>
+                      <button
+                        role="menuitem"
+                        disabled={
+                          taskMutationDisabled ||
+                          runInFlight ||
+                          activeTask.lifecycle === "closing"
+                        }
+                        onClick={() => {
+                          closeTaskMenuAndRestoreFocus();
+                          void setArchived(!activeTask.archived);
+                        }}
+                      >
+                        {activeTask.archived
+                          ? t("task.restore")
+                          : t("task.archive")}
+                      </button>
+                      <button
+                        role="menuitem"
+                        disabled={
+                          (activeTask.lifecycle === "closing" &&
+                            !activeTask.closeFailed) ||
+                          activeTask.lifecycle === "closed" ||
+                          taskMutationDisabled
+                        }
+                        onClick={() => {
+                          closeTaskMenuAndRestoreFocus();
+                          void closeTask();
+                        }}
+                      >
+                        {activeTask.closeFailed
+                          ? t("task.end_retry")
+                          : activeTask.lifecycle === "closing"
+                            ? t("task.ending")
+                            : t("task.end")}
+                      </button>
+                      <button
+                        role="menuitem"
+                        className="is-danger"
+                        disabled={
+                          activeTask.lifecycle !== "closed" ||
+                          taskMutationDisabled
+                        }
+                        onClick={() => {
+                          setTaskMenuOpen(false);
+                          setConfirmDelete(true);
+                        }}
+                      >
+                        {t("task.delete")}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </header>
+
+          {activeTask && confirmDelete && (
+            <section
+              className="delete-confirmation"
+              role="alertdialog"
+              aria-labelledby="task-delete-title"
+              aria-describedby="task-delete-description"
+              onKeyDown={(event) => {
+                if (event.key !== "Escape") return;
+                event.preventDefault();
+                event.stopPropagation();
+                closeDeleteConfirmation();
+              }}
+            >
+              <div>
+                <strong id="task-delete-title">
+                  {t("task.delete_confirm_title")}
+                </strong>
+                <span id="task-delete-description">
+                  {t("task.delete_confirm_body")}
+                </span>
+              </div>
+              <button
+                autoFocus
+                className="secondary-button focus-ring"
+                onClick={closeDeleteConfirmation}
+              >
+                {t("common.cancel")}
+              </button>
+              <button
+                className="danger-button focus-ring"
+                disabled={taskMutationDisabled}
+                onClick={() => void deleteTask()}
+              >
+                {t("task.delete")}
+              </button>
+            </section>
           )}
 
-          <WorkspaceNavigation
-            summaries={summaries}
-            currentWorkspace={currentWorkspace}
-            tasks={currentTasks}
-            activeTaskId={activeTask?.id ?? null}
-            selectedPath={workspacePath || currentWorkspace || ""}
-            grantReady={Boolean(workspacePath && workspaceGrant)}
-            showArchived={showArchived}
-            disabled={mutationDisabled}
-            creating={busy === "new-task"}
-            onSearch={() => setSearchOpen(true)}
-            onChooseWorkspace={() => void chooseWorkspace(false)}
-            onSelectWorkspace={(root) => {
-              pendingTaskSelection.current = null;
-              setWorkspacePath(root);
-              setWorkspaceGrant("");
-              dispatchWorkbench({
-                type: "workspace.selected",
-                workspaceRoot: root,
-              });
-            }}
-            onCreateTask={() => void beginNewTask()}
-            onSelectTask={(taskId) => {
-              pendingTaskSelection.current = null;
-              dispatchWorkbench({ type: "task.selected", taskId });
-            }}
-            onToggleArchived={() => setShowArchived((shown) => !shown)}
-          />
-        </>
-      }
-      activity={
-        <>
-          <h2 className="activity-title">{t("activity.title")}</h2>
           {viewSyncFailed && (
-            <section className="sync-failure" role="alert">
-              <h3>{t("connection.failed")}</h3>
-              <p>{t("connection.failed_help")}</p>
-              <button
-                className="secondary-button focus-ring"
-                disabled={busy !== null}
-                onClick={() => void retryViewSynchronization()}
-              >
-                {busy === "reconnect"
-                  ? t("connection.retrying")
-                  : t("connection.retry")}
-              </button>
-              {status.diagnostic && (
+            <section className="sync-failure task-sync-failure" role="alert">
+              <h3>
+                {t(
+                  connectionRetryable
+                    ? "connection.failed"
+                    : "connection.contract_failed",
+                )}
+              </h3>
+              <p>
+                {t(
+                  connectionRetryable
+                    ? "connection.failed_help"
+                    : "connection.contract_failed_help",
+                )}
+              </p>
+              {connectionRetryable ? (
+                <button
+                  className="secondary-button focus-ring"
+                  disabled={connectionBusy}
+                  onClick={() => void retryViewSynchronization()}
+                >
+                  {connectionBusy
+                    ? t("connection.retrying")
+                    : t("connection.retry")}
+                </button>
+              ) : (
+                <button
+                  className="secondary-button focus-ring"
+                  onClick={() =>
+                    void client.controlWindow("close").catch(() => undefined)
+                  }
+                >
+                  {t("window.close")}
+                </button>
+              )}
+              {connectionShellStatus?.diagnostic && (
                 <details>
                   <summary>{t("connection.details")}</summary>
                   <p>
-                    {status.sourceId ? `${t(status.sourceId)}: ` : ""}
-                    {status.diagnostic}
+                    {connectionShellStatus.sourceId
+                      ? `${t(connectionShellStatus.sourceId)}: `
+                      : ""}
+                    {connectionShellStatus.diagnostic}
                   </p>
                 </details>
               )}
             </section>
           )}
 
-          <TaskActivity
+          <TaskTimeline
             task={activeTask}
-            draft={Boolean(workbench.draftWorkspaceRoot)}
-            currentStatus={currentTaskStatus}
-            onFocusPending={focusPendingRequest}
+            draft={newTaskDraftActive}
+            draftHasWorkspace={Boolean(composerWorkspace)}
+            revision={snapshot.revision}
+            composerHasDraft={prompt.trim().length > 0}
+            retryAvailable={taskCanCompose && !runInFlight}
+            responseDisabled={bridgeUnavailable}
+            onUseExample={(instruction) => {
+              const prepared = prepareRetryDraft(prompt, instruction);
+              if (prepared.kind === "prepared") updatePrompt(prepared.draft);
+              else if (activeTask)
+                setStatus(
+                  quietStatus("run.draft_preserved", {
+                    scope: "task",
+                    taskId: activeTask.id,
+                  }),
+                );
+              window.requestAnimationFrame(() => composer.current?.focus());
+            }}
+            onPrepareRetry={prepareRetry}
+            onInspect={openInspectorSection}
+            onRespond={(payload) => void respondUi(payload)}
+            renderPendingUi={(props) => {
+              const { taskId, ...panelProps } = props;
+              const identity = uiRequestIdentity(taskId, props.pending);
+              return (
+                <ApprovalPanel
+                  {...panelProps}
+                  responsePhase={uiResponsePhase(uiResponseStates, identity)}
+                />
+              );
+            }}
+            renderUiRecord={(record) => <UiRecordCard record={record} />}
+          />
+
+          <ComposerFooter
+            textareaRef={composer}
+            archived={Boolean(activeTask?.archived)}
+            closing={activeTask?.lifecycle === "closing"}
+            closed={activeTask?.lifecycle === "closed"}
+            unavailable={Boolean(
+              activeTask &&
+              activeTask.lifecycle === "open" &&
+              !activeTask.continuationAvailable,
+            )}
+            prompt={prompt}
+            composeDisabled={!taskCanCompose || taskMutationDisabled}
+            canSubmit={canSubmit}
+            runInFlight={Boolean(taskCanCompose && runInFlight)}
+            accessRequired={Boolean(
+              newTaskDraftActive &&
+              composerWorkspace &&
+              composerWorkspace.authorization !== "available",
+            )}
+            workspaceMissing={Boolean(newTaskDraftActive && !composerWorkspace)}
+            workspaceLabel={
+              composerWorkspace
+                ? composerWorkspace.displayName ||
+                  workspaceLabel(composerWorkspace.canonicalRoot)
+                : t("workspace.none")
+            }
+            workspaceTitle={
+              composerWorkspace?.canonicalRoot || t("workspace.none")
+            }
+            modelLabel={
+              newTaskDraftActive
+                ? selectedModelLabel
+                : activeTask?.binding.modelDisplayName ||
+                  activeTask?.binding.modelSelectionId ||
+                  null
+            }
+            modelOptions={snapshot.account.models}
+            selectedModelId={selectedModelId}
+            modelEditable={newTaskDraftActive}
+            modelSelectionDisabled={
+              bridgeUnavailable ||
+              accountBusy ||
+              snapshot.account.operation !== "none" ||
+              snapshot.account.models.length === 0
+            }
+            modelContextTitle={
+              newTaskDraftActive
+                ? t("settings.default_model_help")
+                : t("settings.task_binding_model")
+            }
+            actionDisabled={bridgeUnavailable || workspaceBusy}
+            onPromptChange={updatePrompt}
+            onSubmit={() => void submitRun()}
+            onConfirmAccess={() => void chooseWorkspace(true)}
+            onSelectModel={(id) =>
+              void runAccountCommand(() =>
+                client.selectModel(
+                  id,
+                  snapshot.account.catalogGeneration,
+                  snapshot.account.executionGeneration,
+                ),
+              )
+            }
+            onOpenModelSettings={() => openSettings("title")}
           />
         </>
-      }
-    >
-      <header className="task-header">
-        <div className="min-w-0">
-          <p className="task-header-workspace">
-            {activeTask?.workspaceRoot ||
-              workbench.draftWorkspaceRoot ||
-              workspacePath ||
-              t("workspace.none")}
-          </p>
-          {activeTask && editingTitle ? (
-            <form
-              className="task-title-editor"
-              onSubmit={(event) => {
-                event.preventDefault();
-                void renameTask();
-              }}
-            >
-              <input
-                autoFocus
-                maxLength={120}
-                value={titleDraft}
-                aria-label={t("task.rename")}
-                placeholder={t("task.item", { id: activeTask.id })}
-                onChange={(event) => setTitleDraft(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Escape") setEditingTitle(false);
-                }}
-              />
-              <button
-                className="secondary-button focus-ring"
-                disabled={!titleDraft.trim() || mutationDisabled}
-              >
-                {t("common.save")}
-              </button>
-              <button
-                type="button"
-                className="text-button focus-ring"
-                onClick={() => setEditingTitle(false)}
-              >
-                {t("common.cancel")}
-              </button>
-            </form>
-          ) : (
-            <div className="task-title-row">
-              <h1>
-                {activeTask
-                  ? activeTaskTitle
-                  : workbench.draftWorkspaceRoot
-                    ? t("task.new")
-                    : t("task.open")}
-              </h1>
-              {activeTask && <TaskSignals task={activeTask} />}
-            </div>
-          )}
-        </div>
-        <div className="task-actions">
-          {activeTask &&
-            activeTask.currentRunId !== "0" &&
-            activeTask.currentRunPhase !== null &&
-            activeTask.currentRunPhase !== "stopping" && (
-              <button
-                className="danger-button focus-ring"
-                disabled={mutationDisabled}
-                onClick={() => void cancelRun()}
-              >
-                <Icon name="stop" />
-                {t("task.stop")}
-              </button>
-            )}
-          {activeTask && (
-            <div className="task-menu" ref={taskMenu}>
-              <button
-                className="secondary-button focus-ring"
-                aria-expanded={taskMenuOpen}
-                aria-haspopup="menu"
-                onClick={() => setTaskMenuOpen((open) => !open)}
-              >
-                {t("task.actions")}
-              </button>
-              {taskMenuOpen && (
-                <div
-                  className="task-menu-popover"
-                  role="menu"
-                  onKeyDown={(event) => {
-                    if (event.key !== "ArrowDown" && event.key !== "ArrowUp")
-                      return;
-                    const items = [
-                      ...event.currentTarget.querySelectorAll<HTMLButtonElement>(
-                        "button:not([disabled])",
-                      ),
-                    ];
-                    if (items.length === 0) return;
-                    event.preventDefault();
-                    const index = items.indexOf(
-                      document.activeElement as HTMLButtonElement,
-                    );
-                    const offset = event.key === "ArrowDown" ? 1 : -1;
-                    const next =
-                      index < 0
-                        ? event.key === "ArrowDown"
-                          ? 0
-                          : items.length - 1
-                        : (index + offset + items.length) % items.length;
-                    items[next].focus();
-                  }}
-                >
-                  <button
-                    role="menuitem"
-                    disabled={mutationDisabled}
-                    onClick={() => {
-                      setTitleDraft(activeTask.title);
-                      setEditingTitle(true);
-                      setTaskMenuOpen(false);
-                    }}
-                  >
-                    {t("task.rename")}
-                  </button>
-                  <button
-                    role="menuitem"
-                    disabled={
-                      mutationDisabled ||
-                      runInFlight ||
-                      activeTask.lifecycle === "closing"
-                    }
-                    onClick={() => {
-                      closeTaskMenuAndRestoreFocus();
-                      void setArchived(!activeTask.archived);
-                    }}
-                  >
-                    {activeTask.archived
-                      ? t("task.restore")
-                      : t("task.archive")}
-                  </button>
-                  <button
-                    role="menuitem"
-                    disabled={
-                      (activeTask.lifecycle === "closing" &&
-                        !activeTask.closeFailed) ||
-                      activeTask.lifecycle === "closed" ||
-                      mutationDisabled
-                    }
-                    onClick={() => {
-                      closeTaskMenuAndRestoreFocus();
-                      void closeTask();
-                    }}
-                  >
-                    {activeTask.closeFailed
-                      ? t("task.end_retry")
-                      : activeTask.lifecycle === "closing"
-                        ? t("task.ending")
-                        : t("task.end")}
-                  </button>
-                  <button
-                    role="menuitem"
-                    className="is-danger"
-                    disabled={
-                      activeTask.lifecycle !== "closed" || mutationDisabled
-                    }
-                    onClick={() => {
-                      setTaskMenuOpen(false);
-                      setConfirmDelete(true);
-                    }}
-                  >
-                    {t("task.delete")}
-                  </button>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      </header>
-
-      {activeTask && confirmDelete && (
-        <section
-          className="delete-confirmation"
-          role="alertdialog"
-          aria-labelledby="task-delete-title"
-          aria-describedby="task-delete-description"
-        >
-          <div>
-            <strong id="task-delete-title">
-              {t("task.delete_confirm_title")}
-            </strong>
-            <span id="task-delete-description">
-              {t("task.delete_confirm_body")}
-            </span>
-          </div>
-          <button
-            autoFocus
-            className="secondary-button focus-ring"
-            onClick={() => setConfirmDelete(false)}
-          >
-            {t("common.cancel")}
-          </button>
-          <button
-            className="danger-button focus-ring"
-            disabled={mutationDisabled}
-            onClick={() => void deleteTask()}
-          >
-            {t("task.delete")}
-          </button>
-        </section>
       )}
-
-      <TaskTimeline
-        task={activeTask}
-        draft={Boolean(workbench.draftWorkspaceRoot)}
-        revision={snapshot.revision}
-        composerHasDraft={prompt.trim().length > 0}
-        retryAvailable={taskCanCompose && !runInFlight}
-        responseDisabled={busy !== null || viewSyncFailed || !bridgeReady}
-        onPrepareRetry={prepareRetry}
-        onRespond={(payload) => void respondUi(payload)}
-        renderPendingUi={(props) => {
-          const { taskId, ...panelProps } = props;
-          const identity = uiRequestIdentity(taskId, props.pending);
-          return (
-            <ApprovalPanel
-              {...panelProps}
-              responsePhase={uiResponsePhase(uiResponseStates, identity)}
-            />
-          );
-        }}
-        renderUiRecord={(record) => <UiRecordCard record={record} />}
-      />
-
-      <ComposerFooter
-        textareaRef={composer}
-        hasTask={Boolean(activeTask)}
-        draft={Boolean(workbench.draftWorkspaceRoot)}
-        archived={Boolean(activeTask?.archived)}
-        closing={activeTask?.lifecycle === "closing"}
-        closed={activeTask?.lifecycle === "closed"}
-        unavailable={Boolean(
-          activeTask &&
-          activeTask.lifecycle === "open" &&
-          !activeTask.continuationAvailable,
-        )}
-        prompt={prompt}
-        composeDisabled={!taskCanCompose || mutationDisabled}
-        canSubmit={canSubmit}
-        runInFlight={Boolean(taskCanCompose && runInFlight)}
-        accessRequired={Boolean(
-          workbench.draftWorkspaceRoot && !workspaceGrant,
-        )}
-        actionDisabled={mutationDisabled}
-        prerequisite={
-          taskCanCompose ? (
-            <AccountPrerequisite
-              account={snapshot.account}
-              disabled={mutationDisabled}
-              cancelDisabled={
-                viewSyncFailed || !bridgeReady || accountCancelBusy
-              }
-              onBeginLogin={() =>
-                void runAccountCommand(() => client.beginLogin())
-              }
-              onReopenLogin={() =>
-                void runAccountCommand(() => client.reopenLogin())
-              }
-              onReauthenticate={() =>
-                void runAccountCommand(() => client.reauthenticate())
-              }
-              onCancel={() => void cancelAccountOperation()}
-              onRetry={() =>
-                void runAccountCommand(() => client.refreshAccountCatalog())
-              }
-              onSelectApiKey={(id) =>
-                void runAccountCommand(() => client.selectApiKey(id))
-              }
-              onSelectModel={(id) =>
-                void runAccountCommand(() => client.selectModel(id))
-              }
-            />
-          ) : null
-        }
-        onStart={() => void beginNewTask()}
-        onPromptChange={updatePrompt}
-        onSubmit={() => void submitRun()}
-        onConfirmAccess={() => void chooseWorkspace(true)}
-      />
       <GlobalSearch
         open={searchOpen}
         query={searchQuery}

@@ -16,6 +16,9 @@ const product_handler_count = commands.product.len;
 const workspace_path_capacity = workspace_grant.max_path_bytes;
 const event_name = "metawork:host-signal";
 
+const AccountSelectionKind = enum { api_key, model };
+pub const WindowControl = enum { minimize, toggle_maximize, close };
+
 pub const Platform = struct {
     context: ?*anyopaque,
     wake_fn: *const fn (?*anyopaque) anyerror!void,
@@ -36,6 +39,16 @@ pub const Platform = struct {
         ?*anyopaque,
         native_sdk.platform.MessageDialogOptions,
     ) anyerror!native_sdk.platform.MessageDialogResult,
+    begin_window_drag_fn: *const fn (
+        ?*anyopaque,
+        native_sdk.platform.WindowId,
+        u8,
+    ) anyerror!void,
+    window_control_fn: *const fn (
+        ?*anyopaque,
+        native_sdk.platform.WindowId,
+        WindowControl,
+    ) anyerror!void,
     now_fn: *const fn (?*anyopaque) u64,
     on_main_thread_fn: *const fn (?*anyopaque) bool,
 };
@@ -43,9 +56,14 @@ pub const Platform = struct {
 pub const AutomationAuthority = struct {
     context: ?*anyopaque = null,
     active_fn: *const fn (?*anyopaque) bool = inactive,
+    workspace_root_fn: *const fn (?*anyopaque) ?[]const u8 = noAutomationWorkspace,
 
     fn active(self: AutomationAuthority) bool {
         return self.active_fn(self.context);
+    }
+
+    fn workspaceRoot(self: AutomationAuthority) ?[]const u8 {
+        return self.workspace_root_fn(self.context);
     }
 };
 
@@ -54,6 +72,7 @@ pub const Dispatcher = struct {
     account_commands: account_contract.AccountCommandSink,
     platform: Platform,
     automation: AutomationAuthority,
+    bootstrap_window_id: native_sdk.platform.WindowId,
     delivery: product_delivery.Delivery,
     callbacks: callback_gate.State = .{},
     grants: workspace_grant.State = .{},
@@ -67,12 +86,15 @@ pub const Dispatcher = struct {
         account_commands: account_contract.AccountCommandSink,
         platform: Platform,
         automation: AutomationAuthority,
+        bootstrap_window_id: native_sdk.platform.WindowId,
     ) std.mem.Allocator.Error!Dispatcher {
+        std.debug.assert(bootstrap_window_id != 0);
         return .{
             .workbench = workbench,
             .account_commands = account_commands,
             .platform = platform,
             .automation = automation,
+            .bootstrap_window_id = bootstrap_window_id,
             .delivery = try product_delivery.Delivery.init(allocator),
         };
     }
@@ -101,7 +123,11 @@ pub const Dispatcher = struct {
             .{ .name = commands.ping_ack, .function = acknowledgeEvent },
             .{ .name = commands.connect, .function = connectEvents },
             .{ .name = commands.disconnect, .function = disconnectEvents },
+            .{ .name = commands.window_begin_drag, .function = beginWindowDrag },
+            .{ .name = commands.window_control, .function = controlWindow },
             .{ .name = commands.choose_workspace, .function = chooseWorkspace },
+            .{ .name = commands.select_workspace, .function = selectWorkspace },
+            .{ .name = commands.remove_workspace, .function = removeWorkspace },
             .{ .name = commands.snapshot, .function = beginSnapshot },
             .{ .name = commands.snapshot_chunk, .function = fetchSnapshotChunk },
             .{ .name = commands.account_begin_login, .function = accountBeginLogin },
@@ -238,6 +264,7 @@ pub const Dispatcher = struct {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         var callback = try self.callbacks.enter();
         defer callback.deinit();
+        try self.requireBootstrapWindow(invocation.source.window_id);
         if (self.delivery.connectedWindow()) |window_id|
             if (window_id != invocation.source.window_id) return error.EventWindowMismatch;
         errdefer self.breakConnection();
@@ -282,6 +309,56 @@ pub const Dispatcher = struct {
         defer self.grants.invalidate();
         defer self.delivery.breakConnection(self.transport());
         return std.fmt.bufPrint(output, "{{\"generation\":\"{d}\",\"detached\":true}}", .{generation});
+    }
+
+    fn beginWindowDrag(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireBootstrapWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(
+            handlers.WindowDragStart,
+            invocation.request.payload,
+        );
+        defer parsed.deinit();
+        if (parsed.value.clicks != 1)
+            return error.InvalidBridgePayload;
+        if (!self.platform.on_main_thread_fn(self.platform.context))
+            return error.InvalidBridgeThread;
+        try self.platform.begin_window_drag_fn(
+            self.platform.context,
+            invocation.source.window_id,
+            parsed.value.clicks,
+        );
+        return std.fmt.bufPrint(output, "{{\"started\":true}}", .{});
+    }
+
+    fn controlWindow(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireBootstrapWindow(invocation.source.window_id);
+        if (!self.platform.on_main_thread_fn(self.platform.context))
+            return error.InvalidBridgeThread;
+        var parsed = try handlers.parsePayload(
+            handlers.WindowControl,
+            invocation.request.payload,
+        );
+        defer parsed.deinit();
+        const action: WindowControl = if (std.mem.eql(u8, parsed.value.action, "minimize"))
+            .minimize
+        else if (std.mem.eql(u8, parsed.value.action, "toggle_maximize"))
+            .toggle_maximize
+        else if (std.mem.eql(u8, parsed.value.action, "close"))
+            .close
+        else
+            return error.InvalidBridgePayload;
+        try self.platform.window_control_fn(
+            self.platform.context,
+            invocation.source.window_id,
+            action,
+        );
+        return std.fmt.bufPrint(output, "{{\"completed\":true}}", .{});
     }
 
     fn beginSnapshot(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
@@ -445,18 +522,20 @@ pub const Dispatcher = struct {
         defer callback.deinit();
         try self.requireAccountAuthority(invocation.source.window_id);
         var parsed = try handlers.parsePayload(
-            handlers.AccountSelectApiKey,
+            handlers.AccountSelection,
             invocation.request.payload,
         );
         defer parsed.deinit();
-        if (parsed.value.apiKeyId.len == 0 or
-            parsed.value.apiKeyId.len >
-                account_contract.Limits.api_key_id_bytes)
-            return error.InvalidBridgePayload;
+        const admission = try self.validateAccountSelection(
+            parsed.value,
+            .api_key,
+        );
+        if (admission != .none)
+            return encodeAccountResult(output, .rejected(admission));
         return encodeAccountResult(
             output,
             self.account_commands.submit(.{
-                .select_api_key = parsed.value.apiKeyId,
+                .select_api_key = parsed.value.selectionId,
             }),
         );
     }
@@ -471,18 +550,20 @@ pub const Dispatcher = struct {
         defer callback.deinit();
         try self.requireAccountAuthority(invocation.source.window_id);
         var parsed = try handlers.parsePayload(
-            handlers.AccountSelectModel,
+            handlers.AccountSelection,
             invocation.request.payload,
         );
         defer parsed.deinit();
-        if (parsed.value.modelId.len == 0 or
-            parsed.value.modelId.len >
-                account_contract.Limits.model_id_bytes)
-            return error.InvalidBridgePayload;
+        const admission = try self.validateAccountSelection(
+            parsed.value,
+            .model,
+        );
+        if (admission != .none)
+            return encodeAccountResult(output, .rejected(admission));
         return encodeAccountResult(
             output,
             self.account_commands.submit(.{
-                .select_model = parsed.value.modelId,
+                .select_model = parsed.value.selectionId,
             }),
         );
     }
@@ -492,49 +573,138 @@ pub const Dispatcher = struct {
         var callback = try self.callbacks.enter();
         defer callback.deinit();
         try self.requireWindow(invocation.source.window_id);
-        if (self.automation.active()) return error.AutomationOnly;
         const generation = self.delivery.connectedGeneration() orelse return error.NoConnection;
         self.grants.invalidate();
         var dialog_storage: [native_sdk.platform.max_dialog_paths_bytes]u8 = undefined;
-        const selected = try self.platform.show_open_dialog_fn(
-            self.platform.context,
-            .{
-                .title = "Choose a workspace for this Agent session",
-                .allow_directories = true,
-                .allow_multiple = false,
-            },
-            &dialog_storage,
-        );
-        if (selected.count == 0) return "{\"selected\":false}";
-        if (selected.count != 1 or selected.paths.len == 0 or
-            selected.paths.len > workspace_path_capacity)
+        const selected_path: []const u8 = if (self.automation.active()) automation: {
+            break :automation self.automation.workspaceRoot() orelse
+                return error.AutomationWorkspaceUnavailable;
+        } else user: {
+            const selected = try self.platform.show_open_dialog_fn(
+                self.platform.context,
+                .{
+                    .title = "Choose a workspace",
+                    .allow_directories = true,
+                    .allow_multiple = false,
+                },
+                &dialog_storage,
+            );
+            if (selected.count == 0) return "{\"selected\":false}";
+            if (selected.count != 1 or selected.paths.len == 0 or
+                selected.paths.len > workspace_path_capacity)
+                return error.InvalidWorkspace;
+            const visible_path = selected.paths[0..@min(
+                selected.paths.len,
+                native_sdk.platform.max_dialog_message_bytes,
+            )];
+            const decision = try self.platform.show_message_dialog_fn(
+                self.platform.context,
+                .{
+                    .style = .warning,
+                    .title = "Trust this workspace?",
+                    .message = "MetaWork can read and change files in this folder while you use it. Only choose a folder you trust.",
+                    .informative_text = visible_path,
+                    .primary_button = "Use this folder",
+                    .secondary_button = "Cancel",
+                },
+            );
+            if (decision != .primary) return "{\"selected\":false}";
+            break :user selected.paths;
+        };
+        if (selected_path.len == 0 or selected_path.len > workspace_path_capacity)
             return error.InvalidWorkspace;
-        const visible_path = selected.paths[0..@min(
-            selected.paths.len,
-            native_sdk.platform.max_dialog_message_bytes,
-        )];
-        const decision = try self.platform.show_message_dialog_fn(
-            self.platform.context,
-            .{
-                .style = .warning,
-                .title = "Trust this workspace?",
-                .message = "AgentCore tools will be allowed to work in this directory.",
-                .informative_text = visible_path,
-                .primary_button = "Trust workspace",
-                .secondary_button = "Cancel",
-            },
-        );
-        if (decision != .primary) return "{\"selected\":false}";
         const token = try self.grants.issue(
             generation,
             invocation.source.window_id,
-            selected.paths,
+            selected_path,
         );
-        var writer = std.Io.Writer.fixed(output);
-        writer.writeAll("{\"selected\":true,\"workspaceRoot\":") catch return error.NoSpaceLeft;
-        std.json.Stringify.value(selected.paths, .{}, &writer) catch return error.NoSpaceLeft;
-        writer.print(",\"grant\":\"{d}\"}}", .{token}) catch return error.NoSpaceLeft;
-        return writer.buffered();
+        var path_storage: [workspace_path_capacity]u8 = undefined;
+        const consumed_path = try self.grants.consume(
+            token,
+            invocation.source.window_id,
+            self.delivery.connectedGeneration() orelse return error.NoConnection,
+            &path_storage,
+        );
+        const workspace_id = try (try self.requireWorkbench()).openWorkspace(.{
+            .workspace_root = consumed_path,
+            .trust = if (self.automation.active())
+                .{ .temporary = consumed_path }
+            else
+                .explicitly_trusted,
+        });
+        self.notifyCommitted();
+        return std.fmt.bufPrint(
+            output,
+            "{{\"selected\":true,\"workspaceId\":\"{d}\"}}",
+            .{workspace_id},
+        );
+    }
+
+    fn selectWorkspace(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(handlers.WorkspaceIdentity, invocation.request.payload);
+        defer parsed.deinit();
+        const workspace_id = try handlers.parseWireId(parsed.value.workspaceId);
+        const expected_epoch = try handlers.parseWireId(parsed.value.expectedWorkspaceEpoch);
+        const workbench = try self.requireWorkbench();
+        workbench.selectWorkspaceAtEpoch(workspace_id, expected_epoch) catch |err| {
+            if (workspaceSelectionRejection(err)) |reason|
+                return encodeWorkspaceMutationResult(
+                    output,
+                    false,
+                    workspace_id,
+                    null,
+                    reason,
+                );
+            return err;
+        };
+        const workspace_epoch = try workbench.workspaceEpoch(workspace_id);
+        self.notifyCommitted();
+        return encodeWorkspaceMutationResult(
+            output,
+            true,
+            workspace_id,
+            workspace_epoch,
+            null,
+        );
+    }
+
+    fn removeWorkspace(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(handlers.WorkspaceIdentity, invocation.request.payload);
+        defer parsed.deinit();
+        const workspace_id = try handlers.parseWireId(parsed.value.workspaceId);
+        const expected_epoch = try handlers.parseWireId(parsed.value.expectedWorkspaceEpoch);
+        const workbench = try self.requireWorkbench();
+        workbench.removeWorkspaceAtEpoch(workspace_id, expected_epoch) catch |err| {
+            if (workspaceRemovalRejection(err)) |reason| {
+                if (std.mem.eql(u8, reason, "removal_failed"))
+                    self.notifyCommitted();
+                return encodeWorkspaceMutationResult(
+                    output,
+                    false,
+                    workspace_id,
+                    null,
+                    reason,
+                );
+            }
+            return err;
+        };
+        const workspace_epoch = try workbench.workspaceEpoch(workspace_id);
+        self.notifyCommitted();
+        return encodeWorkspaceMutationResult(
+            output,
+            true,
+            workspace_id,
+            workspace_epoch,
+            null,
+        );
     }
 
     fn createTask(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
@@ -544,34 +714,32 @@ pub const Dispatcher = struct {
         try self.requireWindow(invocation.source.window_id);
         var parsed = try handlers.parsePayload(handlers.TaskCreate, invocation.request.payload);
         defer parsed.deinit();
-        var path_storage: [workspace_path_capacity]u8 = undefined;
-        const input: workbench_api.TaskCreateInput = if (self.automation.active()) automation: {
-            if (parsed.value.workspaceRoot == null or parsed.value.workspaceGrant != null)
-                return error.InvalidBridgePayload;
-            break :automation .{
-                .workspace_root = parsed.value.workspaceRoot.?,
-                // Automation is compiled only into controlled smoke builds.
-                // Trust exactly the requested temporary directory instead of
-                // hard-coding the POSIX-only /tmp parent.
-                .trust = .{ .temporary = parsed.value.workspaceRoot.? },
-            };
-        } else trusted: {
-            if (parsed.value.workspaceRoot != null or parsed.value.workspaceGrant == null)
-                return error.InvalidBridgePayload;
-            const token = try handlers.parseWireId(parsed.value.workspaceGrant.?);
-            break :trusted .{
-                .workspace_root = try self.grants.consume(
-                    token,
-                    invocation.source.window_id,
-                    self.delivery.connectedGeneration() orelse return error.NoConnection,
-                    &path_storage,
-                ),
-                .trust = .explicitly_trusted,
-            };
+        const workspace_id = try handlers.parseWireId(parsed.value.workspaceId);
+        const workspace_epoch = try handlers.parseWireId(
+            parsed.value.expectedWorkspaceEpoch,
+        );
+        const execution_generation = try handlers.parseWireId(
+            parsed.value.expectedExecutionGeneration,
+        );
+        const workbench = try self.requireWorkbench();
+        const task_id = workbench.createTaskInWorkspace(
+            workspace_id,
+            workspace_epoch,
+            execution_generation,
+        ) catch |err| {
+            if (taskCreateRejection(err)) |reason|
+                return encodeTaskCreateResult(output, false, null, null, reason);
+            return err;
         };
-        const task_id = try (try self.requireWorkbench()).createTask(input);
+        const binding_epoch = try workbench.taskBindingEpoch(task_id);
         self.notifyCommitted();
-        return std.fmt.bufPrint(output, "{{\"taskId\":\"{d}\"}}", .{task_id});
+        return encodeTaskCreateResult(
+            output,
+            true,
+            task_id,
+            binding_epoch,
+            null,
+        );
     }
 
     fn runTask(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
@@ -586,13 +754,24 @@ pub const Dispatcher = struct {
         );
         defer parsed.deinit();
         const task_id = try handlers.parseWireId(parsed.value.taskId);
+        const binding_epoch = try handlers.parseWireId(parsed.value.expectedBindingEpoch);
         if (parsed.value.prompt.len == 0) return error.EmptyPrompt;
-        const run_id = try (try self.requireWorkbench()).runTask(task_id, parsed.value.prompt);
+        const run_id = (try self.requireWorkbench()).runTaskAtBinding(
+            task_id,
+            binding_epoch,
+            parsed.value.prompt,
+        ) catch |err| {
+            if (taskRunRejection(err)) |reason|
+                return encodeTaskRunResult(output, false, task_id, null, reason);
+            return err;
+        };
         self.notifyCommitted();
-        return std.fmt.bufPrint(
+        return encodeTaskRunResult(
             output,
-            "{{\"taskId\":\"{d}\",\"runId\":\"{d}\"}}",
-            .{ task_id, run_id },
+            true,
+            task_id,
+            run_id,
+            null,
         );
     }
 
@@ -699,6 +878,14 @@ pub const Dispatcher = struct {
         _ = try self.delivery.requireWindow(window_id);
     }
 
+    fn requireBootstrapWindow(
+        self: *const Dispatcher,
+        window_id: native_sdk.platform.WindowId,
+    ) !void {
+        if (window_id == 0 or window_id != self.bootstrap_window_id)
+            return error.EventWindowMismatch;
+    }
+
     fn requireAccountAuthority(
         self: *const Dispatcher,
         window_id: native_sdk.platform.WindowId,
@@ -706,6 +893,36 @@ pub const Dispatcher = struct {
         try self.requireWindow(window_id);
         if (!self.platform.on_main_thread_fn(self.platform.context))
             return error.InvalidBridgeThread;
+    }
+
+    fn validateAccountSelection(
+        self: *Dispatcher,
+        selection: handlers.AccountSelection,
+        kind: AccountSelectionKind,
+    ) !account_contract.ErrorCode {
+        const expected_catalog_generation = try handlers.parseWireId(
+            selection.expectedCatalogGeneration,
+        );
+        const expected_execution_generation = try handlers.parseWireId(
+            selection.expectedExecutionGeneration,
+        );
+        if (selection.selectionId.len == 0 or selection.selectionId.len > switch (kind) {
+            .api_key => account_contract.Limits.api_key_id_bytes,
+            .model => account_contract.Limits.model_id_bytes,
+        }) return error.InvalidBridgePayload;
+        const view = (try self.requireWorkbench()).accountView();
+        if (expected_catalog_generation != view.catalog_generation or
+            expected_execution_generation != view.execution_generation)
+            return .generation_mismatch;
+        const member = switch (kind) {
+            .api_key => for (view.api_keys) |candidate| {
+                if (std.mem.eql(u8, candidate.id, selection.selectionId)) break true;
+            } else false,
+            .model => for (view.models) |candidate| {
+                if (std.mem.eql(u8, candidate.id, selection.selectionId)) break true;
+            } else false,
+        };
+        return if (member) .none else .invalid_command;
     }
 
     fn requireWorkbench(self: *Dispatcher) !*workbench_api.Workbench {
@@ -784,6 +1001,153 @@ fn encodeAccountResult(
     if (result.attempt_id) |attempt_id|
         writer.print("\"{d}\"", .{attempt_id}) catch
             return error.NoSpaceLeft
+    else
+        writer.writeAll("null") catch return error.NoSpaceLeft;
+    writer.writeByte('}') catch return error.NoSpaceLeft;
+    return writer.buffered();
+}
+
+fn taskCreateRejection(err: anyerror) ?[]const u8 {
+    return switch (err) {
+        error.ExecutionGenerationMismatch => "execution_changed",
+        error.ExecutionUnavailable, error.ExecutionInUse => "execution_unavailable",
+        error.WorkspaceEpochMismatch => "workspace_changed",
+        error.UnknownWorkspace, error.WorkspaceUnavailable => "workspace_unavailable",
+        error.WorkspaceRemovalInProgress => "workspace_removing",
+        error.TaskCapacity => "capacity_reached",
+        error.ExecutorShuttingDown => "shutting_down",
+        else => null,
+    };
+}
+
+fn taskRunRejection(err: anyerror) ?[]const u8 {
+    return switch (err) {
+        error.BindingEpochMismatch => "binding_changed",
+        error.ExecutionUnavailable, error.ExecutionGenerationMismatch => "binding_unavailable",
+        error.UnknownTask, error.TaskClosing => "task_unavailable",
+        error.TaskBusy => "task_busy",
+        error.UnknownWorkspace, error.WorkspaceUnavailable => "workspace_unavailable",
+        error.WorkspaceRemovalInProgress => "workspace_removing",
+        error.RunCapacity, error.QueueFull => "capacity_reached",
+        error.ExecutorShuttingDown => "shutting_down",
+        else => null,
+    };
+}
+
+fn workspaceSelectionRejection(err: anyerror) ?[]const u8 {
+    return switch (err) {
+        error.WorkspaceEpochMismatch => "workspace_changed",
+        error.UnknownWorkspace => "workspace_unavailable",
+        error.WorkspaceRemovalInProgress => "workspace_removing",
+        error.WorkspaceOrderExhausted => "capacity_reached",
+        else => null,
+    };
+}
+
+fn workspaceRemovalRejection(err: anyerror) ?[]const u8 {
+    return switch (err) {
+        error.WorkspaceEpochMismatch => "workspace_changed",
+        error.UnknownWorkspace => "workspace_unavailable",
+        error.WorkspaceRemovalInProgress => "workspace_removing",
+        error.WorkspaceEpochExhausted => "capacity_reached",
+        // Every other error here is produced after removal admission while
+        // starting Task shutdown. Workbench has already restored the
+        // Workspace and published `lastRemovalFailure` for snapshot recovery.
+        else => "removal_failed",
+    };
+}
+
+fn encodeTaskCreateResult(
+    output: []u8,
+    accepted: bool,
+    task_id: ?u64,
+    binding_epoch: ?u64,
+    reason: ?[]const u8,
+) ![]const u8 {
+    const valid = if (accepted)
+        task_id != null and task_id.? != 0 and
+            binding_epoch != null and binding_epoch.? != 0 and reason == null
+    else
+        task_id == null and binding_epoch == null and reason != null;
+    if (!valid)
+        return error.InvalidTaskCreateResult;
+    var writer = std.Io.Writer.fixed(output);
+    writer.print("{{\"accepted\":{},\"taskId\":", .{accepted}) catch
+        return error.NoSpaceLeft;
+    if (task_id) |value|
+        writer.print("\"{d}\"", .{value}) catch return error.NoSpaceLeft
+    else
+        writer.writeAll("null") catch return error.NoSpaceLeft;
+    writer.writeAll(",\"bindingEpoch\":") catch return error.NoSpaceLeft;
+    if (binding_epoch) |value|
+        writer.print("\"{d}\"", .{value}) catch return error.NoSpaceLeft
+    else
+        writer.writeAll("null") catch return error.NoSpaceLeft;
+    writer.writeAll(",\"reason\":") catch return error.NoSpaceLeft;
+    if (reason) |value|
+        std.json.Stringify.value(value, .{}, &writer) catch return error.NoSpaceLeft
+    else
+        writer.writeAll("null") catch return error.NoSpaceLeft;
+    writer.writeByte('}') catch return error.NoSpaceLeft;
+    return writer.buffered();
+}
+
+fn encodeTaskRunResult(
+    output: []u8,
+    accepted: bool,
+    task_id: u64,
+    run_id: ?u64,
+    reason: ?[]const u8,
+) ![]const u8 {
+    const valid = task_id != 0 and if (accepted)
+        run_id != null and run_id.? != 0 and reason == null
+    else
+        run_id == null and reason != null;
+    if (!valid)
+        return error.InvalidTaskRunResult;
+    var writer = std.Io.Writer.fixed(output);
+    writer.print("{{\"accepted\":{},\"taskId\":\"{d}\",\"runId\":", .{
+        accepted,
+        task_id,
+    }) catch return error.NoSpaceLeft;
+    if (run_id) |value|
+        writer.print("\"{d}\"", .{value}) catch return error.NoSpaceLeft
+    else
+        writer.writeAll("null") catch return error.NoSpaceLeft;
+    writer.writeAll(",\"reason\":") catch return error.NoSpaceLeft;
+    if (reason) |value|
+        std.json.Stringify.value(value, .{}, &writer) catch return error.NoSpaceLeft
+    else
+        writer.writeAll("null") catch return error.NoSpaceLeft;
+    writer.writeByte('}') catch return error.NoSpaceLeft;
+    return writer.buffered();
+}
+
+fn encodeWorkspaceMutationResult(
+    output: []u8,
+    accepted: bool,
+    workspace_id: u64,
+    workspace_epoch: ?u64,
+    reason: ?[]const u8,
+) ![]const u8 {
+    const valid = workspace_id != 0 and if (accepted)
+        workspace_epoch != null and workspace_epoch.? != 0 and reason == null
+    else
+        workspace_epoch == null and reason != null;
+    if (!valid)
+        return error.InvalidWorkspaceMutationResult;
+    var writer = std.Io.Writer.fixed(output);
+    writer.print("{{\"accepted\":{},\"workspaceId\":\"{d}\",\"workspaceEpoch\":", .{
+        accepted,
+        workspace_id,
+    }) catch return error.NoSpaceLeft;
+    if (workspace_epoch) |value|
+        writer.print("\"{d}\"", .{value}) catch return error.NoSpaceLeft
+    else
+        writer.writeAll("null") catch return error.NoSpaceLeft;
+    writer.writeAll(",\"reason\":") catch return error.NoSpaceLeft;
+    if (reason) |value|
+        std.json.Stringify.value(value, .{}, &writer) catch return error.NoSpaceLeft
     else
         writer.writeAll("null") catch return error.NoSpaceLeft;
     writer.writeByte('}') catch return error.NoSpaceLeft;
@@ -877,8 +1241,68 @@ test "Account command response encoding rejects inconsistent attempt metadata" {
     );
 }
 
+test "mutation response encoders reject every inconsistent success and rejection shape" {
+    var output: [256]u8 = undefined;
+    try std.testing.expectError(
+        error.InvalidTaskCreateResult,
+        encodeTaskCreateResult(&output, false, 1, null, "task_unavailable"),
+    );
+    try std.testing.expectError(
+        error.InvalidTaskCreateResult,
+        encodeTaskCreateResult(&output, false, null, null, null),
+    );
+    try std.testing.expectError(
+        error.InvalidTaskCreateResult,
+        encodeTaskCreateResult(&output, true, 1, 1, "unexpected"),
+    );
+    try std.testing.expectError(
+        error.InvalidTaskCreateResult,
+        encodeTaskCreateResult(&output, true, 0, 1, null),
+    );
+    try std.testing.expectError(
+        error.InvalidTaskCreateResult,
+        encodeTaskCreateResult(&output, true, 1, 0, null),
+    );
+    try std.testing.expectError(
+        error.InvalidTaskRunResult,
+        encodeTaskRunResult(&output, false, 1, 9, "task_busy"),
+    );
+    try std.testing.expectError(
+        error.InvalidTaskRunResult,
+        encodeTaskRunResult(&output, false, 1, null, null),
+    );
+    try std.testing.expectError(
+        error.InvalidTaskRunResult,
+        encodeTaskRunResult(&output, true, 0, 9, null),
+    );
+    try std.testing.expectError(
+        error.InvalidTaskRunResult,
+        encodeTaskRunResult(&output, true, 1, 0, null),
+    );
+    try std.testing.expectError(
+        error.InvalidWorkspaceMutationResult,
+        encodeWorkspaceMutationResult(&output, false, 1, 2, "workspace_changed"),
+    );
+    try std.testing.expectError(
+        error.InvalidWorkspaceMutationResult,
+        encodeWorkspaceMutationResult(&output, false, 1, null, null),
+    );
+    try std.testing.expectError(
+        error.InvalidWorkspaceMutationResult,
+        encodeWorkspaceMutationResult(&output, true, 0, 2, null),
+    );
+    try std.testing.expectError(
+        error.InvalidWorkspaceMutationResult,
+        encodeWorkspaceMutationResult(&output, true, 1, 0, null),
+    );
+}
+
 fn inactive(_: ?*anyopaque) bool {
     return false;
+}
+
+fn noAutomationWorkspace(_: ?*anyopaque) ?[]const u8 {
+    return null;
 }
 
 test "Dispatcher validates authority before domain calls and preserves committed state on response loss" {
@@ -886,6 +1310,8 @@ test "Dispatcher validates authority before domain calls and preserves committed
     const Harness = struct {
         wake_calls: usize = 0,
         account_calls: usize = 0,
+        drag_calls: usize = 0,
+        window_control_calls: usize = 0,
         on_main_thread: bool = true,
         account_result: account_contract.AccountCommandResult =
             .acceptedAttempt(41),
@@ -914,6 +1340,28 @@ test "Dispatcher validates authority before domain calls and preserves committed
             _: native_sdk.platform.MessageDialogOptions,
         ) anyerror!native_sdk.platform.MessageDialogResult {
             return .primary;
+        }
+
+        fn beginWindowDrag(
+            context: ?*anyopaque,
+            window_id: native_sdk.platform.WindowId,
+            clicks: u8,
+        ) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            try std.testing.expectEqual(@as(native_sdk.platform.WindowId, 3), window_id);
+            try std.testing.expect(clicks == 1 or clicks == 2);
+            self.drag_calls += 1;
+        }
+
+        fn controlWindow(
+            context: ?*anyopaque,
+            window_id: native_sdk.platform.WindowId,
+            action: WindowControl,
+        ) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            try std.testing.expectEqual(@as(native_sdk.platform.WindowId, 3), window_id);
+            try std.testing.expectEqual(WindowControl.minimize, action);
+            self.window_control_calls += 1;
         }
 
         fn now(_: ?*anyopaque) u64 {
@@ -972,10 +1420,13 @@ test "Dispatcher validates authority before domain calls and preserves committed
             .cancel_timer_fn = Harness.cancelTimer,
             .show_open_dialog_fn = Harness.open,
             .show_message_dialog_fn = Harness.confirm,
+            .begin_window_drag_fn = Harness.beginWindowDrag,
+            .window_control_fn = Harness.controlWindow,
             .now_fn = Harness.now,
             .on_main_thread_fn = Harness.onMainThread,
         },
         .{},
+        3,
     );
     defer {
         dispatcher.deinit();
@@ -1000,6 +1451,48 @@ test "Dispatcher validates authority before domain calls and preserves committed
     }
     try std.testing.expectEqual(@as(usize, 0), harness.account_calls);
     try std.testing.expectEqual(initial_revision, workbench.currentRevision());
+
+    const bootstrap_drag = native_dispatcher.dispatch(
+        "{\"id\":\"drag-before-contract\",\"command\":\"metawork.window.beginDrag\",\"payload\":{\"clicks\":1}}",
+        source,
+        &response,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, bootstrap_drag, "\"started\":true") != null);
+    try std.testing.expectEqual(@as(usize, 1), harness.drag_calls);
+    const bootstrap_minimize = native_dispatcher.dispatch(
+        "{\"id\":\"minimize-before-contract\",\"command\":\"metawork.window.control\",\"payload\":{\"action\":\"minimize\"}}",
+        source,
+        &response,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, bootstrap_minimize, "\"completed\":true") != null);
+    try std.testing.expectEqual(@as(usize, 1), harness.window_control_calls);
+    const foreign_bootstrap_window = native_sdk.bridge.Source{
+        .origin = source.origin,
+        .window_id = source.window_id + 1,
+    };
+    const denied_bootstrap_control = native_dispatcher.dispatch(
+        "{\"id\":\"wrong-bootstrap-window\",\"command\":\"metawork.window.control\",\"payload\":{\"action\":\"minimize\"}}",
+        foreign_bootstrap_window,
+        &response,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, denied_bootstrap_control, "\"handler_failed\"") != null);
+    try std.testing.expectEqual(@as(usize, 1), harness.window_control_calls);
+    harness.on_main_thread = false;
+    const off_thread_drag = native_dispatcher.dispatch(
+        "{\"id\":\"off-thread-drag\",\"command\":\"metawork.window.beginDrag\",\"payload\":{\"clicks\":1}}",
+        source,
+        &response,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, off_thread_drag, "\"handler_failed\"") != null);
+    try std.testing.expectEqual(@as(usize, 1), harness.drag_calls);
+    harness.on_main_thread = true;
+    const invalid_control = native_dispatcher.dispatch(
+        "{\"id\":\"invalid-window-control\",\"command\":\"metawork.window.control\",\"payload\":{\"action\":\"resize\"}}",
+        source,
+        &response,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, invalid_control, "\"handler_failed\"") != null);
+    try std.testing.expectEqual(@as(usize, 1), harness.window_control_calls);
 
     const mismatch = native_dispatcher.dispatch(
         "{\"id\":\"mismatch\",\"command\":\"metawork.events.connect\",\"payload\":{\"contractId\":\"metawork.renderer-bridge\",\"contractRevision\":2}}",
@@ -1049,6 +1542,20 @@ test "Dispatcher validates authority before domain calls and preserves committed
         source,
         &response,
     );
+    const drag = native_dispatcher.dispatch(
+        "{\"id\":\"drag\",\"command\":\"metawork.window.beginDrag\",\"payload\":{\"clicks\":1}}",
+        source,
+        &response,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, drag, "\"started\":true") != null);
+    try std.testing.expectEqual(@as(usize, 2), harness.drag_calls);
+    const minimize = native_dispatcher.dispatch(
+        "{\"id\":\"minimize\",\"command\":\"metawork.window.control\",\"payload\":{\"action\":\"minimize\"}}",
+        source,
+        &response,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, minimize, "\"completed\":true") != null);
+    try std.testing.expectEqual(@as(usize, 2), harness.window_control_calls);
     const login = native_dispatcher.dispatch(
         "{\"id\":\"login\",\"command\":\"metawork.account.beginLogin\",\"payload\":{}}",
         source,
@@ -1099,7 +1606,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
     );
     try std.testing.expectEqual(@as(usize, 1), harness.account_calls);
     const empty_model = native_dispatcher.dispatch(
-        "{\"id\":\"empty-model\",\"command\":\"metawork.account.selectModel\",\"payload\":{\"modelId\":\"\"}}",
+        "{\"id\":\"empty-model\",\"command\":\"metawork.account.selectModel\",\"payload\":{\"selectionId\":\"\",\"expectedCatalogGeneration\":\"0\",\"expectedExecutionGeneration\":\"1\"}}",
         source,
         &response,
     );
@@ -1107,13 +1614,35 @@ test "Dispatcher validates authority before domain calls and preserves committed
         std.mem.indexOf(u8, empty_model, "\"handler_failed\"") != null,
     );
     try std.testing.expectEqual(@as(usize, 1), harness.account_calls);
+    const stale_selection = native_dispatcher.dispatch(
+        "{\"id\":\"stale-key\",\"command\":\"metawork.account.selectApiKey\",\"payload\":{\"selectionId\":\"key-1\",\"expectedCatalogGeneration\":\"0\",\"expectedExecutionGeneration\":\"1\"}}",
+        source,
+        &response,
+    );
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        stale_selection,
+        "\"errorCode\":\"generation_mismatch\"",
+    ) != null);
+    try std.testing.expectEqual(@as(usize, 1), harness.account_calls);
+    const valid_selection = native_dispatcher.dispatch(
+        "{\"id\":\"select-key\",\"command\":\"metawork.account.selectApiKey\",\"payload\":{\"selectionId\":\"key-1\",\"expectedCatalogGeneration\":\"1\",\"expectedExecutionGeneration\":\"1\"}}",
+        source,
+        &response,
+    );
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        valid_selection,
+        "\"accepted\":true",
+    ) != null);
+    try std.testing.expectEqual(@as(usize, 2), harness.account_calls);
     harness.on_main_thread = false;
     _ = native_dispatcher.dispatch(
         "{\"id\":\"wrong-thread\",\"command\":\"metawork.account.logout\",\"payload\":{}}",
         source,
         &response,
     );
-    try std.testing.expectEqual(@as(usize, 1), harness.account_calls);
+    try std.testing.expectEqual(@as(usize, 2), harness.account_calls);
     harness.on_main_thread = true;
     harness.account_result = .rejected(.invalid_state);
     const rejected = native_dispatcher.dispatch(
@@ -1121,7 +1650,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
         source,
         &response,
     );
-    try std.testing.expectEqual(@as(usize, 2), harness.account_calls);
+    try std.testing.expectEqual(@as(usize, 3), harness.account_calls);
     try std.testing.expect(
         std.mem.indexOf(
             u8,
@@ -1130,22 +1659,55 @@ test "Dispatcher validates authority before domain calls and preserves committed
         ) != null,
     );
     const chosen = native_dispatcher.dispatch(
-        "{\"id\":\"choose\",\"command\":\"metawork.workspace.choose\",\"payload\":{}}",
+        "{\"id\":\"choose\",\"command\":\"metawork.workspaces.choose\",\"payload\":{}}",
         source,
         &response,
     );
-    const grant_start = std.mem.indexOf(u8, chosen, "\"grant\":\"") orelse
+    const workspace_start = std.mem.indexOf(u8, chosen, "\"workspaceId\":\"") orelse
         return error.TestUnexpectedResult;
-    const digits_start = grant_start + "\"grant\":\"".len;
+    const digits_start = workspace_start + "\"workspaceId\":\"".len;
     const digits_end = std.mem.indexOfPos(u8, chosen, digits_start, "\"") orelse
         return error.TestUnexpectedResult;
-    const grant = chosen[digits_start..digits_end];
+    const workspace_id = try handlers.parseWireId(chosen[digits_start..digits_end]);
+
+    var workspace_request_storage: [512]u8 = undefined;
+    const stale_workspace_request = try std.fmt.bufPrint(
+        &workspace_request_storage,
+        "{{\"id\":\"stale-workspace\",\"command\":\"metawork.workspaces.select\",\"payload\":{{\"workspaceId\":\"{d}\",\"expectedWorkspaceEpoch\":\"99\"}}}}",
+        .{workspace_id},
+    );
+    const stale_workspace = native_dispatcher.dispatch(
+        stale_workspace_request,
+        source,
+        &response,
+    );
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        stale_workspace,
+        "\"reason\":\"workspace_changed\"",
+    ) != null);
+
+    const stale_create = try std.fmt.bufPrint(
+        &workspace_request_storage,
+        "{{\"id\":\"stale-create\",\"command\":\"metawork.tasks.create\",\"payload\":{{\"workspaceId\":\"{d}\",\"expectedWorkspaceEpoch\":\"1\",\"expectedExecutionGeneration\":\"99\"}}}}",
+        .{workspace_id},
+    );
+    const rejected_create = native_dispatcher.dispatch(
+        stale_create,
+        source,
+        &response,
+    );
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        rejected_create,
+        "\"reason\":\"execution_changed\"",
+    ) != null);
 
     var request_storage: [256]u8 = undefined;
     const request = try std.fmt.bufPrint(
         &request_storage,
-        "{{\"id\":\"create\",\"command\":\"metawork.tasks.create\",\"payload\":{{\"workspaceGrant\":\"{s}\"}}}}",
-        .{grant},
+        "{{\"id\":\"create\",\"command\":\"metawork.tasks.create\",\"payload\":{{\"workspaceId\":\"{d}\",\"expectedWorkspaceEpoch\":\"1\",\"expectedExecutionGeneration\":\"1\"}}}}",
+        .{workspace_id},
     );
     var lost_response: [32]u8 = undefined;
     _ = native_dispatcher.dispatch(request, source, &lost_response);
@@ -1154,7 +1716,8 @@ test "Dispatcher validates authority before domain calls and preserves committed
 
     var snapshot_storage: [128 * 1024]u8 = undefined;
     const snapshot = try workbench.writeSnapshot(&snapshot_storage);
-    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"workspaceRoot\":\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"workspaceRoot\":\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"workspaces\":[{") != null);
 
     const generation = dispatcher.productDelivery().connectedGeneration().?;
     const unused_grant = try dispatcher.grants.issue(generation, source.window_id, "/tmp");

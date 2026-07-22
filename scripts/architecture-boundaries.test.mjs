@@ -268,7 +268,7 @@ test("Account execution is installed explicitly without process defaults", () =>
   assert.doesNotMatch(app, /account_api\.OAuth\.TokenSet/);
 });
 
-test("Account persistence revision has one code owner", () => {
+test("macOS Account persistence revision has one code owner", () => {
   const store = read("src/account/credential_store.zig");
   const platform = read("src/account/platform.zig");
   assert.match(store, /pub const persistence_revision: u8 = 2/);
@@ -281,6 +281,23 @@ test("Account persistence revision has one code owner", () => {
   assert.doesNotMatch(platform, /"manifest\.v[0-9]+"/);
 });
 
+test("Windows Account persistence is refresh-only and unversioned", () => {
+  const store = read("src/account/windows_store.zig");
+  const app = read("src/app.zig");
+  assert.match(store, /pub const service = "dev\.metawork\.account"/);
+  assert.match(
+    store,
+    /pub const refresh_token_account = "metask-refresh-token"/,
+  );
+  assert.match(store, /pub const public_state_name = "account\.json"/);
+  assert.doesNotMatch(
+    store,
+    /manifest\.v[0-9]+|persistence_revision|CredentialStore|OwnedExecutionConfig|TokenSet/,
+  );
+  assert.match(app, /builtin\.os\.tag == \.windows/);
+  assert.match(app, /WindowsStore\.restore/);
+});
+
 test("formal Native test graph runs every product module test root", () => {
   const source = read("build.zig");
   for (const [name, rootModule] of [
@@ -291,6 +308,7 @@ test("formal Native test graph runs every product module test root", () => {
       "metawork-account-credential-store",
       "test_modules.account_credential_store",
     ],
+    ["metawork-account-windows-store", "test_modules.account_windows_store"],
     ["metawork-account-platform", "test_modules.account_platform"],
     ["metawork-account-loopback", "test_modules.account_loopback"],
     ["metawork-account-login-attempt", "test_modules.account_login_attempt"],
@@ -553,7 +571,7 @@ test("Workbench owns Task lifecycle, continuation, and canonical redaction", () 
   const workbench = read("src/workbench/projection.zig");
   const taskRecord = workbench.slice(
     workbench.indexOf("const TaskView = struct"),
-    workbench.indexOf("pub const RunRef = struct"),
+    workbench.indexOf("fn FixedText"),
   );
   assert.match(taskRecord, /lifecycle: TaskLifecycle/);
   assert.match(taskRecord, /continuation: ContinuationCapability/);
@@ -568,8 +586,15 @@ test("Workbench owns Task lifecycle, continuation, and canonical redaction", () 
   assert.match(closeWorker, /notifier\.notify\(\)/);
   assert.doesNotMatch(closeWorker, /requestWake\(\)/);
   assert.match(workbench, /sanitizeInto\(\s*run\.terminal_diagnostic/);
-  assert.match(workbench, /copyProjected\(prompt/);
+  assert.match(workbench, /copyProjected\(\s*prompt/);
   assert.match(workbench, /replaceTrackedProjected\(\s*&view\.title/);
+  assert.match(taskRecord, /execution: \?OwnedTaskExecution/);
+  assert.match(workbench, /const OwnedTaskExecution = struct/);
+  assert.match(workbench, /account_contract\.validateExecutionConfig\(input\)/);
+  assert.match(workbench, /redaction_secret = execution\.api_key/);
+  assert.match(workbench, /releaseQuiescentTaskExecutions/);
+  assert.match(workbench, /fn releaseTaskExecutionNoFail/);
+  assert.doesNotMatch(workbench, /pub const RunRef|acquireRunRef/);
 
   const agent = read("src/agent/session.zig");
   assert.match(agent, /pub const SessionRoute = struct/);
@@ -605,12 +630,12 @@ test("Bridge Dispatcher owns product command decisions and App only composes it"
   assert.doesNotMatch(app, /parsePayload|parseWireId|workspaceGrant/);
 });
 
-test("Renderer Bridge revision 1 owns the exact product wire catalog", () => {
+test("Renderer Bridge fixed revision 1 owns the exact product wire catalog", () => {
   const zigCommands = read("src/bridge/commands.zig");
   const rendererCommands = read("frontend/src/bridge/commands.ts");
   const appManifest = read("app.zon");
   const productCommand =
-    /"(metawork\.(?:smoke|events|workspace|workbench|account|tasks)\.[A-Za-z.]+)"/g;
+    /"(metawork\.(?:smoke|events|workspaces|workbench|account|tasks)\.[A-Za-z.]+)"/g;
   const catalog = (source) =>
     [
       ...new Set([...source.matchAll(productCommand)].map((match) => match[1])),
@@ -625,6 +650,31 @@ test("Renderer Bridge revision 1 owns the exact product wire catalog", () => {
     /RENDERER_BRIDGE_CONTRACT_ID = "metawork\.renderer-bridge"/,
   );
   assert.match(rendererCommands, /RENDERER_BRIDGE_CONTRACT_REVISION = 1/);
+  const agents = read("AGENTS.md");
+  const architecture = read("docs/architecture.md");
+  assert.match(agents, /任何合同类版本标识的变更都必须先得到用户显式同意/);
+  assert.match(
+    architecture,
+    /任何合同类版本标识的变更都必须先得到用户显式同意/,
+  );
+  assert.match(architecture, /快速开发阶段固定 revision 为 `1`/);
+  assert.match(
+    architecture,
+    /`connect` 无法通过 revision 数字识别同 revision 的陈旧开发产物/,
+  );
+  assert.match(architecture, /不能检测纯 wire 语义错配/);
+  assert.match(architecture, /不构成 runtime compatibility guarantee/);
+  assert.doesNotMatch(zigCommands, /metawork\.workspace\.choose/);
+  assert.doesNotMatch(rendererCommands, /metawork\.workspace\.choose/);
+
+  const handlers = read("src/bridge/handlers.zig");
+  assert.match(handlers, /expectedWorkspaceEpoch/);
+  assert.match(handlers, /expectedExecutionGeneration/);
+  assert.match(handlers, /expectedBindingEpoch/);
+  assert.doesNotMatch(
+    handlers,
+    /workspaceGrant|workspaceRoot|apiKeyId|modelId/,
+  );
 
   const dispatcher = read("src/bridge/dispatcher.zig");
   assert.match(dispatcher, /handlers\.RendererBridgeConnect/);
@@ -637,6 +687,7 @@ test("Renderer Bridge revision 1 owns the exact product wire catalog", () => {
   const projection = read("src/workbench/projection.zig");
   assert.doesNotMatch(projection, /schemaVersion|snapshot_schema_version/);
   assert.match(projection, /\\"account\\":/);
+  assert.match(projection, /\\"workspaces\\":\[/);
   assert.match(projection, /\\"tasks\\":\[/);
   assert.match(projection, /pub fn createTask/);
   assert.match(projection, /pub fn runTask/);
@@ -651,9 +702,11 @@ test("Renderer Bridge revision 1 owns the exact product wire catalog", () => {
   assert.match(contracts, /readiness: AccountReadiness/);
   assert.match(contracts, /primaryAction: AccountPrimaryAction/);
   assert.match(contracts, /account: AccountView/);
+  assert.match(contracts, /workspaces: WorkspaceView\[\]/);
   assert.match(contracts, /tasks: TaskView\[\]/);
   assert.match(contracts, /"app_shutdown"/);
   assert.doesNotMatch(contracts, /host_shutdown|sessions: SessionView/);
+  assert.doesNotMatch(contracts, /workspaceGrant|workspaceRoot/);
 
   assert.equal(
     existsSync(
@@ -674,7 +727,7 @@ test("lifecycle tests are grouped by invariant", () => {
   const cases = [
     ["tests/agent/lifecycle_test.zig", 31],
     ["tests/agent/event_pump_test.zig", 5],
-    ["tests/workbench/executor_lifecycle_test.zig", 7],
+    ["tests/workbench/executor_lifecycle_test.zig", 9],
     ["tests/integration/lifecycle/lifecycle_test.zig", 4],
   ];
   for (const [path, expectedCount] of cases) {

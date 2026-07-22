@@ -1,36 +1,73 @@
+import type {
+  TaskCreateReason,
+  TaskCreateResult,
+  TaskRunReason,
+  TaskRunResult,
+} from "../../bridge/contracts.ts";
+
 export type TaskSubmissionClient = {
-  createTask: (workspaceGrant: string) => Promise<string>;
-  run: (taskId: string, instruction: string) => Promise<unknown>;
+  createTask: (
+    workspaceId: string,
+    expectedWorkspaceEpoch: string,
+    expectedExecutionGeneration: string,
+  ) => Promise<TaskCreateResult>;
+  run: (
+    taskId: string,
+    expectedBindingEpoch: string,
+    instruction: string,
+  ) => Promise<TaskRunResult>;
 };
 
 export type TaskSubmissionResult =
   | { kind: "started"; taskId: string; created: boolean }
+  | { kind: "create_rejected"; reason: TaskCreateReason }
   | { kind: "create_failed"; error: unknown }
+  | {
+      kind: "run_rejected";
+      taskId: string;
+      created: boolean;
+      reason: TaskRunReason;
+    }
   | { kind: "run_failed"; taskId: string; created: boolean; error: unknown };
 
 export async function submitTaskInstruction({
   client,
   taskId,
-  workspaceGrant,
+  workspaceId,
+  expectedWorkspaceEpoch,
+  expectedExecutionGeneration,
+  expectedBindingEpoch,
   instruction,
   onTaskCreated,
 }: {
   client: TaskSubmissionClient;
   taskId: string | null;
-  workspaceGrant: string;
+  workspaceId: string;
+  expectedWorkspaceEpoch: string;
+  expectedExecutionGeneration: string;
+  expectedBindingEpoch: string | null;
   instruction: string;
   onTaskCreated: (taskId: string) => void;
 }): Promise<TaskSubmissionResult> {
   let targetTaskId = taskId;
+  let targetBindingEpoch = expectedBindingEpoch;
   let created = false;
   if (!targetTaskId) {
-    if (!workspaceGrant)
+    if (!workspaceId || !expectedWorkspaceEpoch)
       return {
         kind: "create_failed",
         error: new Error("Workspace access is required"),
       };
     try {
-      targetTaskId = await client.createTask(workspaceGrant);
+      const createdTask = await client.createTask(
+        workspaceId,
+        expectedWorkspaceEpoch,
+        expectedExecutionGeneration,
+      );
+      if (!createdTask.accepted)
+        return { kind: "create_rejected", reason: createdTask.reason };
+      targetTaskId = createdTask.taskId;
+      targetBindingEpoch = createdTask.bindingEpoch;
     } catch (error) {
       return { kind: "create_failed", error };
     }
@@ -38,8 +75,22 @@ export async function submitTaskInstruction({
     onTaskCreated(targetTaskId);
   }
 
+  if (!targetBindingEpoch)
+    return {
+      kind: "run_failed",
+      taskId: targetTaskId,
+      created,
+      error: new Error("Task execution binding is unavailable"),
+    };
   try {
-    await client.run(targetTaskId, instruction);
+    const run = await client.run(targetTaskId, targetBindingEpoch, instruction);
+    if (!run.accepted)
+      return {
+        kind: "run_rejected",
+        taskId: targetTaskId,
+        created,
+        reason: run.reason,
+      };
   } catch (error) {
     return {
       kind: "run_failed",

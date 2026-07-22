@@ -49,7 +49,7 @@ test("Renderer Bridge mismatch and malformed acceptance are terminal contract fa
       {
         accepted: false,
         contractId: "metawork.renderer-bridge",
-        contractRevision: 2,
+        contractRevision: 1,
         generation: null,
         error: "revision_mismatch",
       },
@@ -108,4 +108,113 @@ test("a native Workspace picker remains user-controlled instead of command-timed
   });
 
   assert.deepEqual(await client.chooseWorkspace(), { selected: false });
+});
+
+test("the hidden-inset titlebar delegates drag to the connected Host window", async () => {
+  const calls = [];
+  const client = new BridgeClient({
+    bridge: bridgeWith(async (command, payload) => {
+      calls.push({ command, payload });
+      return { started: true };
+    }),
+  });
+
+  await client.beginWindowDrag(1);
+  assert.deepEqual(calls, [
+    { command: "metawork.window.beginDrag", payload: { clicks: 1 } },
+  ]);
+});
+
+test("visible window controls delegate their exact action to the Host", async () => {
+  const calls = [];
+  const client = new BridgeClient({
+    bridge: bridgeWith(async (command, payload) => {
+      calls.push({ command, payload });
+      return { completed: true };
+    }),
+  });
+
+  await client.controlWindow("minimize");
+  assert.deepEqual(calls, [
+    { command: "metawork.window.control", payload: { action: "minimize" } },
+  ]);
+});
+
+test("the fixed revision 1 contract carries Host-owned Workspace and generation identities", async () => {
+  const calls = [];
+  const client = new BridgeClient({
+    bridge: bridgeWith(async (command, payload) => {
+      calls.push({ command, payload });
+      if (command === "metawork.account.selectModel")
+        return { accepted: true, errorCode: "none", attemptId: "5" };
+      if (command === "metawork.workspaces.select")
+        return {
+          accepted: true,
+          workspaceId: "7",
+          workspaceEpoch: "29",
+          reason: null,
+        };
+      if (command === "metawork.tasks.create")
+        return {
+          accepted: true,
+          taskId: "11",
+          bindingEpoch: "13",
+          reason: null,
+        };
+      if (command === "metawork.tasks.run")
+        return {
+          accepted: true,
+          taskId: "11",
+          runId: "17",
+          reason: null,
+        };
+      assert.fail(`unexpected command ${command}`);
+    }),
+  });
+
+  await client.selectModel("model-3", "19", "23");
+  assert.deepEqual(await client.selectWorkspace("7", "29"), {
+    accepted: true,
+    workspaceId: "7",
+    workspaceEpoch: "29",
+    reason: null,
+  });
+  assert.deepEqual(await client.createTask("7", "29", "23"), {
+    accepted: true,
+    taskId: "11",
+    bindingEpoch: "13",
+    reason: null,
+  });
+  assert.deepEqual(await client.run("11", "13", "Inspect"), {
+    accepted: true,
+    taskId: "11",
+    runId: "17",
+    reason: null,
+  });
+  assert.deepEqual(calls, [
+    {
+      command: "metawork.account.selectModel",
+      payload: {
+        selectionId: "model-3",
+        expectedCatalogGeneration: "19",
+        expectedExecutionGeneration: "23",
+      },
+    },
+    {
+      command: "metawork.workspaces.select",
+      payload: { workspaceId: "7", expectedWorkspaceEpoch: "29" },
+    },
+    {
+      command: "metawork.tasks.create",
+      payload: {
+        workspaceId: "7",
+        expectedWorkspaceEpoch: "29",
+        expectedExecutionGeneration: "23",
+      },
+    },
+    {
+      command: "metawork.tasks.run",
+      payload: { taskId: "11", expectedBindingEpoch: "13", prompt: "Inspect" },
+    },
+  ]);
 });

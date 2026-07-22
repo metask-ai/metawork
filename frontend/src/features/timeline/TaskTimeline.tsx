@@ -19,6 +19,14 @@ import type {
 import { formatInteger, formatMilliseconds } from "../../i18n/formatters.ts";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
 
+type TimelineDetailSection = "tools" | "usage";
+
+const newTaskExampleIds: MessageId[] = [
+  "task.example.review",
+  "task.example.test_failure",
+  "task.example.todo",
+];
+
 function tokenTotal(run: RunView): bigint | null {
   try {
     return BigInt(run.usage.input) + BigInt(run.usage.output);
@@ -119,22 +127,31 @@ function orderedActivity(run: RunView, task: TaskView): RunActivity[] {
 export function TaskTimeline({
   task,
   draft,
+  draftHasWorkspace,
   revision,
   composerHasDraft,
   retryAvailable,
   responseDisabled,
+  onUseExample,
   onPrepareRetry,
+  onInspect,
   onRespond,
   renderPendingUi,
   renderUiRecord,
 }: {
   task: TaskView | null;
   draft: boolean;
+  draftHasWorkspace: boolean;
   revision: string;
   composerHasDraft: boolean;
   retryAvailable: boolean;
   responseDisabled: boolean;
+  onUseExample: (instruction: string) => void;
   onPrepareRetry: (instruction: string) => void;
+  onInspect: (
+    section: TimelineDetailSection,
+    opener: HTMLButtonElement,
+  ) => void;
   onRespond: (payload: UiResponsePayload) => void;
   renderPendingUi: (props: {
     taskId: string;
@@ -203,40 +220,40 @@ export function TaskTimeline({
               >
                 <div className="workline-node" aria-hidden="true" />
                 <header className="run-heading">
-                  <p>
-                    {t("run.label", { id: run.id })} ·{" "}
-                    {runPhaseLabel(t, run.phase)}
-                  </p>
-                  {total !== null && (
-                    <span>
-                      {t("run.tokens", {
-                        count: formatInteger(locale, total),
-                      })}
-                    </span>
-                  )}
+                  <p>{runPhaseLabel(t, run.phase)}</p>
+                  <div className="run-heading-meta">
+                    {total !== null && (
+                      <span>
+                        {t("run.tokens", {
+                          count: formatInteger(locale, total),
+                        })}
+                      </span>
+                    )}
+                    {run.id === latestRunId && total !== null && total > 0n && (
+                      <button
+                        className="run-inspector-link focus-ring"
+                        onClick={(event) =>
+                          onInspect("usage", event.currentTarget)
+                        }
+                      >
+                        {t("inspector.view_details")}
+                      </button>
+                    )}
+                  </div>
                 </header>
                 <div className="run-content">
                   <Message role={t("message.you")} text={run.user} />
-                  {run.assistant && (
-                    <div>
-                      <Message
-                        role={t("message.agent")}
-                        text={run.assistant}
-                        agent
-                      />
-                      {run.assistantRedacted && (
-                        <p className="projection-note">
-                          {t("privacy.sensitive_hidden")}
-                        </p>
-                      )}
-                    </div>
-                  )}
                   {activities.map((activity) => {
                     if (activity.kind === "tool")
                       return (
                         <ToolCard
                           key={`tool:${activity.value.id}`}
                           tool={activity.value}
+                          onInspect={
+                            run.id === latestRunId
+                              ? (opener) => onInspect("tools", opener)
+                              : null
+                          }
                         />
                       );
                     if (activity.kind === "resolved_ui")
@@ -257,6 +274,23 @@ export function TaskTimeline({
                       </Fragment>
                     );
                   })}
+                  {run.assistant && (
+                    <div className="run-delivery">
+                      <Message
+                        role={t("message.agent")}
+                        text={run.assistant}
+                        agent
+                      />
+                      {run.assistantRedacted && (
+                        <p className="projection-note">
+                          {t("privacy.sensitive_hidden")}
+                        </p>
+                      )}
+                    </div>
+                  )}
+                  {!run.assistant && !isNonTerminalRun(run.phase) && (
+                    <p className="run-no-final">{t("run.no_final_response")}</p>
+                  )}
                   {!run.assistant &&
                     run.tools.length === 0 &&
                     isNonTerminalRun(run.phase) && (
@@ -279,13 +313,34 @@ export function TaskTimeline({
           {task && task.runs.length === 0 && (
             <div className="task-empty-state">
               <h2>{t("task.empty_title")}</h2>
-              <p>{t("task.empty_body")}</p>
+              <p>{t("task.created_empty_body")}</p>
             </div>
           )}
           {!task && (
-            <div className="task-empty-state">
+            <div className="task-empty-state is-new-task">
               <h2>{t(draft ? "task.empty_title" : "task.new")}</h2>
-              <p>{t(draft ? "task.empty_body" : "task.no_tasks")}</p>
+              <p>
+                {t(
+                  draft
+                    ? draftHasWorkspace
+                      ? "task.empty_body_with_workspace"
+                      : "task.empty_body_without_workspace"
+                    : "task.no_tasks",
+                )}
+              </p>
+              {draft && !composerHasDraft && (
+                <div className="task-examples" aria-label={t("task.examples")}>
+                  {newTaskExampleIds.map((id) => (
+                    <button
+                      key={id}
+                      className="task-example focus-ring"
+                      onClick={() => onUseExample(t(id))}
+                    >
+                      {t(id)}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -358,7 +413,13 @@ function Message({
   );
 }
 
-function ToolCard({ tool }: { tool: ToolView }) {
+function ToolCard({
+  tool,
+  onInspect,
+}: {
+  tool: ToolView;
+  onInspect: ((opener: HTMLButtonElement) => void) | null;
+}) {
   const { locale, t } = useI18n();
   let duration: bigint | null = null;
   try {
@@ -417,6 +478,14 @@ function ToolCard({ tool }: { tool: ToolView }) {
             label={tool.isError ? t("tool.error") : t("tool.result")}
             value={tool.content}
           />
+        )}
+        {onInspect && (
+          <button
+            className="tool-inspector-link focus-ring"
+            onClick={(event) => onInspect(event.currentTarget)}
+          >
+            {t("inspector.view_details")}
+          </button>
         )}
       </div>
     </details>

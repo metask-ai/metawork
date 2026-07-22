@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const runner = @import("runner");
 const native_sdk = @import("native_sdk");
 const bridge_api = @import("metawork_bridge");
@@ -7,6 +8,7 @@ const agent = @import("metawork_agent");
 const workbench_api = @import("metawork_workbench");
 const account_contract = @import("metawork_account_contract");
 const account_api = @import("metawork_account");
+const window_chrome = @import("window_chrome.zig");
 
 pub const panic = std.debug.FullPanic(native_sdk.debug.capturePanic);
 
@@ -23,6 +25,7 @@ const account_refresh_timer_id: u64 = 0x4d57_4143_4354_5246;
 const account_refresh_skew_seconds: i64 = 60;
 const account_refresh_retry_ns: u64 = 30 * std.time.ns_per_s;
 const FrontendMode = bridge_api.policy.Mode;
+const main_window_id: native_sdk.platform.WindowId = 1;
 
 const AccountEffectQueue = struct {
     entry: ?Entry = null,
@@ -245,7 +248,7 @@ const AccountEffects = struct {
     fn startLogin(
         self: *AccountEffects,
         attempt_id: u64,
-        platform: *account_api.Platform.MacosBackend,
+        platform: *account_api.Platform.NativeBackend,
         now_unix_seconds: i64,
     ) void {
         std.debug.assert(!self.login_active);
@@ -291,7 +294,7 @@ const AccountEffects = struct {
     fn reopenLogin(
         self: *AccountEffects,
         attempt_id: u64,
-        platform: *account_api.Platform.MacosBackend,
+        platform: *account_api.Platform.NativeBackend,
     ) void {
         if (!self.login_active or
             !self.login_attempt.matches(attempt_id))
@@ -317,6 +320,7 @@ const AccountEffects = struct {
         attempt_id: u64,
         credentials: *const account_api.CredentialOwner,
         now_unix_seconds: i64,
+        expected_identity: ?account_api.AccountIdentity,
     ) void {
         self.network_attempt.startRefresh(
             self.allocator,
@@ -324,6 +328,7 @@ const AccountEffects = struct {
             attempt_id,
             self.clientTransport(),
             credentials,
+            expected_identity,
             self.networkSink(),
             now_unix_seconds,
         ) catch {
@@ -388,9 +393,6 @@ const AccountEffects = struct {
         self: *AccountEffects,
         attempt_id: u64,
     ) void {
-        const clear_private_catalog =
-            self.network_attempt.matches(attempt_id) and
-            self.network_attempt.isCatalog();
         if (!self.login_active or
             self.login_attempt.attempt_id != attempt_id)
         {
@@ -410,7 +412,11 @@ const AccountEffects = struct {
             stale.deinit();
         }
         _ = self.takeCollision();
-        if (clear_private_catalog) self.catalog.reset();
+        // A private catalog is always attempt-scoped. After its network worker
+        // has already completed, `NetworkAttempt` no longer identifies the
+        // catalog attempt, but cancellation must still secure-zero the staged
+        // API credential and models.
+        self.catalog.reset();
     }
 
     fn joinLogin(self: *AccountEffects) void {
@@ -452,10 +458,6 @@ const AccountEffects = struct {
         self.* = undefined;
     }
 
-    fn publishCatalogNoFail(self: *AccountEffects) void {
-        self.public_catalog.replaceFromSession(&self.catalog);
-    }
-
     fn clearCatalog(self: *AccountEffects) void {
         self.catalog.reset();
         self.public_catalog.clear();
@@ -482,10 +484,13 @@ const AccountEffects = struct {
     }
 };
 
+const ExecutionReplacement = enum { none, default, identity };
+
 const AccountCoordinator = struct {
     account: account_api.Account = .initRestoring(),
     workbench: *workbench_api.Workbench,
     public_catalog: *account_api.Catalog.PublicCatalog,
+    candidate_public_catalog: account_api.Catalog.PublicCatalog = .{},
     effects: account_api.EffectSink,
     effect_commit_hook: AccountEffectCommitHook,
     main_thread_id: std.Thread.Id,
@@ -516,19 +521,23 @@ const AccountCoordinator = struct {
     ) account_contract.AccountCommandResult {
         const self: *AccountCoordinator = @ptrCast(@alignCast(context));
         self.assertMainThread();
-        const needs_replacement = switch (command) {
-            .select_model, .logout => true,
-            else => false,
+        const replacement: ExecutionReplacement = switch (command) {
+            .select_model => .default,
+            .logout => .identity,
+            else => .none,
         };
-        if (needs_replacement) {
-            self.workbench.beginExecutionReplacement() catch
-                return .rejected(.execution_in_use);
+        switch (replacement) {
+            .none => {},
+            .default => self.workbench.beginDefaultExecutionReplacement() catch
+                return .rejected(.execution_in_use),
+            .identity => self.workbench.beginExecutionReplacement() catch
+                return .rejected(.execution_in_use),
         }
         const prepared = self.account.prepareCommand(command);
         return switch (prepared) {
             .transition => |value| self.commitTransition(value),
             .rejected => |error_code| result: {
-                if (needs_replacement)
+                if (replacement != .none)
                     self.workbench.endExecutionReplacementNoFail();
                 break :result .rejected(error_code);
             },
@@ -541,10 +550,22 @@ const AccountCoordinator = struct {
         restore_result: *account_api.RestoreResult,
     ) account_contract.ErrorCode {
         self.assertMainThread();
+        self.candidate_public_catalog.clear();
         self.workbench.beginExecutionReplacement() catch {
             restore_result.deinit();
             return .execution_in_use;
         };
+        switch (restore_result.*) {
+            .execution_ready => |*ready| {
+                const input = ready.execution.input();
+                self.public_catalog.replaceRestoredSelection(
+                    ready.apiKeyId(),
+                    input.target.provider_kind,
+                    input.target.model,
+                );
+            },
+            .signed_out, .account_only => self.public_catalog.clear(),
+        }
         const prepared = self.account.prepareRestore(restore_result);
         return switch (prepared) {
             .transition => |value| if (self.commitTransition(value).accepted)
@@ -552,6 +573,7 @@ const AccountCoordinator = struct {
             else
                 .local_resource_exhausted,
             .rejected => |error_code| result: {
+                self.public_catalog.clear();
                 self.workbench.endExecutionReplacementNoFail();
                 break :result error_code;
             },
@@ -566,10 +588,27 @@ const AccountCoordinator = struct {
         self.assertMainThread();
         const prepared = self.account.prepareCompletion(completion);
         return switch (prepared) {
-            .transition => |value| self.commitTransition(value).accepted,
+            .transition => |value| result: {
+                const commits_candidate = value.execution != null;
+                if (commits_candidate)
+                    self.public_catalog.replaceFromPublic(
+                        &self.candidate_public_catalog,
+                    );
+                const committed = self.commitTransition(value).accepted;
+                if (committed and commits_candidate)
+                    self.candidate_public_catalog.clear();
+                break :result committed;
+            },
             .rejected => false,
             .ignored_stale => false,
         };
+    }
+
+    fn publishCandidateCatalogNoFail(
+        self: *AccountCoordinator,
+        catalog: *const account_api.Catalog.CatalogSession,
+    ) void {
+        self.candidate_public_catalog.replaceFromSession(catalog);
     }
 
     fn restoreFailure(
@@ -585,6 +624,23 @@ const AccountCoordinator = struct {
             },
             .rejected, .ignored_stale => @panic(
                 "Account restore failure was published outside restoring",
+            ),
+        }
+    }
+
+    fn restoreSignedOutFailure(
+        self: *AccountCoordinator,
+        failure: account_api.WorkerFailure,
+    ) void {
+        self.assertMainThread();
+        const prepared = self.account.prepareSignedOutRestoreFailure(failure);
+        switch (prepared) {
+            .transition => |value| {
+                const committed = self.commitTransition(value);
+                std.debug.assert(committed.accepted);
+            },
+            .rejected, .ignored_stale => @panic(
+                "recoverable Account restore failure was published outside restoring",
             ),
         }
     }
@@ -644,6 +700,25 @@ const AccountCoordinator = struct {
         }
     }
 
+    fn restoredRefreshAdmissionFailure(
+        self: *AccountCoordinator,
+        error_code: account_contract.ErrorCode,
+    ) void {
+        self.assertMainThread();
+        const prepared = self.account.prepareRestoredRefreshAdmissionFailure(
+            error_code,
+        );
+        switch (prepared) {
+            .transition => |value| {
+                const committed = self.commitTransition(value);
+                std.debug.assert(committed.accepted);
+            },
+            .rejected, .ignored_stale => @panic(
+                "restored refresh admission failure lost its account-only state",
+            ),
+        }
+    }
+
     fn commitTransition(
         self: *AccountCoordinator,
         prepared_value: account_api.PreparedTransition,
@@ -659,7 +734,17 @@ const AccountCoordinator = struct {
         }
 
         var fact = prepared.fact();
-        self.public_catalog.decorate(&fact.view);
+        if (fact.view.session_state == .signed_out or
+            fact.view.session_state == .shutting_down)
+        {
+            self.public_catalog.clear();
+            self.candidate_public_catalog.clear();
+        }
+        const projection_catalog = switch (fact.view.operation) {
+            .selecting_key, .loading_models, .selecting_model, .persisting => &self.candidate_public_catalog,
+            else => self.public_catalog,
+        };
+        projection_catalog.decorate(&fact.view);
         self.workbench.commitAccountFactNoFail(fact);
         if (prepared.takeExecution()) |execution_value| {
             var execution = execution_value;
@@ -671,6 +756,8 @@ const AccountCoordinator = struct {
             self.workbench.clearExecutionNoFail();
         }
         prepared.commit(&self.account);
+        if (fact.kind == .operation_failed)
+            self.candidate_public_catalog.clear();
         if (self.workbench.executionReplacementPending() and
             fact.view.operation == .none)
         {
@@ -708,8 +795,10 @@ const App = struct {
     platform_services: ?native_sdk.platform.PlatformServices = null,
     account_coordinator: ?*AccountCoordinator = null,
     account_effects: ?*AccountEffects = null,
-    account_platform: ?account_api.Platform.MacosBackend = null,
+    account_platform: ?account_api.Platform.NativeBackend = null,
     account_credentials: account_api.CredentialOwner = .{},
+    windows_public_state: ?account_api.WindowsStore.PublicState = null,
+    catalog_after_refresh: bool = false,
     account_dir_storage: [4096]u8 = undefined,
     account_dir_len: usize = 0,
 
@@ -783,7 +872,7 @@ const App = struct {
             ));
             return;
         };
-        self.account_platform = account_api.Platform.MacosBackend.init(
+        self.account_platform = account_api.Platform.NativeBackend.init(
             services,
             self.io,
             self.main_thread_id,
@@ -794,6 +883,71 @@ const App = struct {
             ));
             return;
         };
+        if (builtin.os.tag == .windows) {
+            self.restoreWindowsAccount(coordinator);
+        } else {
+            self.restoreMacosAccount(coordinator);
+        }
+    }
+
+    fn restoreWindowsAccount(
+        self: *@This(),
+        coordinator: *AccountCoordinator,
+    ) void {
+        var restored = account_api.WindowsStore.restore(
+            std.heap.c_allocator,
+            self.account_platform.?.backend(),
+        ) catch |err| {
+            self.account_credentials.clear();
+            self.windows_public_state = null;
+            coordinator.restoreSignedOutFailure(.fromCode(
+                accountRestoreError(err),
+            ));
+            return;
+        };
+        defer restored.deinit();
+        switch (restored) {
+            .signed_out => {
+                self.account_credentials.clear();
+                self.windows_public_state = null;
+                var signed_out: account_api.RestoreResult = .{
+                    .signed_out = .{},
+                };
+                std.debug.assert(coordinator.restore(&signed_out) == .none);
+            },
+            .account => |*account| {
+                const identity = account.public_state.identity() catch {
+                    self.account_credentials.clear();
+                    self.windows_public_state = null;
+                    var signed_out: account_api.RestoreResult = .{
+                        .signed_out = .{},
+                    };
+                    std.debug.assert(coordinator.restore(&signed_out) == .none);
+                    return;
+                };
+                self.windows_public_state = account.public_state;
+                self.account_credentials.installRefreshToken(
+                    &account.refresh_token,
+                );
+                var state_restore: account_api.RestoreResult = .{
+                    .account_only = .{ .identity = identity },
+                };
+                std.debug.assert(coordinator.restore(&state_restore) == .none);
+                self.catalog_after_refresh = true;
+                if (!coordinator.refreshToken()) {
+                    self.catalog_after_refresh = false;
+                    coordinator.restoredRefreshAdmissionFailure(
+                        .local_resource_exhausted,
+                    );
+                }
+            },
+        }
+    }
+
+    fn restoreMacosAccount(
+        self: *@This(),
+        coordinator: *AccountCoordinator,
+    ) void {
         var restored = account_api.CredentialStore.restore(
             std.heap.c_allocator,
             self.account_platform.?.backend(),
@@ -936,6 +1090,8 @@ const App = struct {
     fn deinitAccountPlatform(self: *@This()) void {
         self.cancelAccountRefreshTimer();
         self.account_credentials.deinit();
+        self.windows_public_state = null;
+        self.catalog_after_refresh = false;
         if (self.account_platform) |*platform| platform.deinit();
         self.account_platform = null;
     }
@@ -1012,20 +1168,10 @@ const App = struct {
                     });
                     return;
                 };
-                const cleanup_pending =
-                    account_api.CredentialStore.commitSignedOut(
+                const cleanup_pending = if (builtin.os.tag == .windows) blk: {
+                    account_api.WindowsStore.commitSignedOut(
                         platform.backend(),
-                        coordinator.account.executionHighWatermark(),
                     ) catch |err| {
-                        if (err == error.PersistenceOutcomeUnknown) {
-                            self.account_credentials.clear();
-                            self.account_credentials.setCleanupPending(
-                                true,
-                            );
-                            coordinator.logoutPersistenceUnknown();
-                            self.retryAccountCleanup();
-                            return;
-                        }
                         effects.publishCompletion(.{
                             .attempt_id = attempt_id,
                             .payload = .{ .failed = .fromCode(
@@ -1034,6 +1180,27 @@ const App = struct {
                         });
                         return;
                     };
+                    self.windows_public_state = null;
+                    break :blk false;
+                } else account_api.CredentialStore.commitSignedOut(
+                    platform.backend(),
+                    coordinator.account.executionHighWatermark(),
+                ) catch |err| {
+                    if (err == error.PersistenceOutcomeUnknown) {
+                        self.account_credentials.clear();
+                        self.account_credentials.setCleanupPending(true);
+                        coordinator.logoutPersistenceUnknown();
+                        self.retryAccountCleanup();
+                        return;
+                    }
+                    effects.publishCompletion(.{
+                        .attempt_id = attempt_id,
+                        .payload = .{ .failed = .fromCode(
+                            accountStoreError(err),
+                        ) },
+                    });
+                    return;
+                };
                 self.account_credentials.clear();
                 self.cancelAccountRefreshTimer();
                 effects.clearCatalog();
@@ -1052,7 +1219,7 @@ const App = struct {
             .refresh_token => {
                 const attempt_id = entry.attempt_id orelse
                     @panic("token refresh effect has no attempt");
-                if (!self.account_credentials.available()) {
+                if (!self.account_credentials.refreshAvailable()) {
                     effects.publishCompletion(.{
                         .attempt_id = attempt_id,
                         .payload = .{ .failed = .fromCode(
@@ -1074,6 +1241,10 @@ const App = struct {
                     attempt_id,
                     &self.account_credentials,
                     now_unix_seconds,
+                    if (self.catalog_after_refresh)
+                        coordinator.account.currentIdentity()
+                    else
+                        null,
                 );
             },
             .load_api_keys => {
@@ -1149,22 +1320,7 @@ const App = struct {
             );
             return;
         };
-        if (!std.mem.eql(
-            u8,
-            effects.catalog.ownerAccountId(),
-            identity.accountId(),
-        ) or !std.mem.eql(
-            u8,
-            effects.catalog.ownerProfileId(),
-            identity.profileId(),
-        )) {
-            effects.catalog.reset();
-            self.completeAccountFailure(
-                attempt_id,
-                .account_mismatch,
-            );
-            return;
-        }
+        const account_view = coordinator.account.view();
         defer effects.catalog.reset();
         const execution_generation = std.math.add(
             u64,
@@ -1177,53 +1333,71 @@ const App = struct {
             );
             return;
         };
-        var execution = effects.catalog.prepareExecution(
+        var execution = switch (prepareCatalogExecution(
+            &effects.catalog,
+            &identity,
+            account_view.model_catalog_api_key_id,
             model,
             execution_generation,
-        ) catch |err| {
-            self.completeAccountFailure(
-                attempt_id,
-                account_api.Catalog.errorCode(err),
-            );
-            return;
+        )) {
+            .ready => |owned| owned,
+            .rejected => |error_code| {
+                self.completeAccountFailure(attempt_id, error_code);
+                return;
+            },
         };
         defer execution.deinit();
-        var credential_generation: account_api.CredentialStore.Generation = undefined;
-        std.Io.randomSecure(self.io, &credential_generation) catch {
-            self.completeAccountFailure(
-                attempt_id,
-                .local_resource_exhausted,
-            );
-            return;
-        };
-        const committed = account_api.CredentialStore.commitExecutionReady(
-            platform.backend(),
-            credential_generation,
-            identity.accountId(),
-            identity.profileId(),
-            effects.catalog.selectedApiKeyId(),
-            &execution,
-        ) catch |err| {
-            if (err == error.PersistenceOutcomeUnknown) {
-                effects.public_catalog.clear();
-                coordinator.executionPersistenceUnknown();
+        if (builtin.os.tag == .windows) {
+            self.windows_public_state = account_api.WindowsStore.commitSelection(
+                platform.backend(),
+                identity,
+                effects.catalog.selectedApiKeyId(),
+                model,
+            ) catch |err| {
+                self.completeAccountFailure(
+                    attempt_id,
+                    accountStoreError(err),
+                );
                 return;
-            }
-            self.completeAccountFailure(
-                attempt_id,
-                accountStoreError(err),
+            };
+        } else {
+            var credential_generation: account_api.CredentialStore.Generation = undefined;
+            std.Io.randomSecure(self.io, &credential_generation) catch {
+                self.completeAccountFailure(
+                    attempt_id,
+                    .local_resource_exhausted,
+                );
+                return;
+            };
+            const committed = account_api.CredentialStore.commitExecutionReady(
+                platform.backend(),
+                credential_generation,
+                identity.accountId(),
+                identity.profileId(),
+                effects.catalog.selectedApiKeyId(),
+                &execution,
+            ) catch |err| {
+                if (err == error.PersistenceOutcomeUnknown) {
+                    effects.public_catalog.clear();
+                    coordinator.executionPersistenceUnknown();
+                    return;
+                }
+                self.completeAccountFailure(
+                    attempt_id,
+                    accountStoreError(err),
+                );
+                return;
+            };
+            self.account_credentials.setCleanupPending(
+                self.account_credentials.cleanupPending() or
+                    committed.retired_cleanup_pending,
             );
-            return;
-        };
-        self.account_credentials.setCleanupPending(
-            self.account_credentials.cleanupPending() or
-                committed.retired_cleanup_pending,
-        );
+        }
         effects.publishCompletion(.{
             .attempt_id = attempt_id,
             .payload = .{ .execution_ready = execution.take() },
         });
-        self.retryAccountCleanup();
+        if (builtin.os.tag != .windows) self.retryAccountCleanup();
     }
 
     fn commitRefreshedTokens(
@@ -1233,6 +1407,8 @@ const App = struct {
     ) void {
         const coordinator = self.account_coordinator orelse
             @panic("Account coordinator is not composed");
+        const continue_catalog = self.catalog_after_refresh;
+        self.catalog_after_refresh = false;
         const identity = coordinator.account.currentIdentity() orelse {
             self.completeAccountFailure(
                 attempt_id,
@@ -1240,6 +1416,30 @@ const App = struct {
             );
             return;
         };
+        if (continue_catalog) {
+            const refreshed_identity = rotation.refreshedIdentity() orelse {
+                self.completeAccountFailure(
+                    attempt_id,
+                    .dependency_contract_invalid,
+                );
+                return;
+            };
+            if (!std.mem.eql(
+                u8,
+                refreshed_identity.accountId(),
+                identity.accountId(),
+            ) or !std.mem.eql(
+                u8,
+                refreshed_identity.profileId(),
+                identity.profileId(),
+            )) {
+                self.completeAccountFailure(
+                    attempt_id,
+                    .account_mismatch,
+                );
+                return;
+            }
+        }
         if (rotation.accountId().len > 0 and
             !std.mem.eql(
                 u8,
@@ -1262,31 +1462,46 @@ const App = struct {
             );
             return;
         };
-        var generation: account_api.CredentialStore.Generation = undefined;
-        std.Io.randomSecure(self.io, &generation) catch {
-            self.completeAccountFailure(
-                attempt_id,
-                .local_resource_exhausted,
-            );
-            return;
-        };
-        const committed = account_api.CredentialStore.commitAccountOnly(
-            platform.backend(),
-            generation,
-            rotation.persistenceInput(),
-            &identity,
-            coordinator.account.executionHighWatermark(),
-        ) catch |err| {
-            self.completeAccountFailure(
-                attempt_id,
-                accountStoreError(err),
-            );
-            return;
-        };
+        var cleanup_pending = false;
+        if (builtin.os.tag == .windows) {
+            account_api.WindowsStore.commitRefresh(
+                platform.backend(),
+                &rotation.persistenceInput().refresh_token,
+            ) catch |err| {
+                self.completeAccountFailure(
+                    attempt_id,
+                    accountStoreError(err),
+                );
+                return;
+            };
+        } else {
+            var generation: account_api.CredentialStore.Generation = undefined;
+            std.Io.randomSecure(self.io, &generation) catch {
+                self.completeAccountFailure(
+                    attempt_id,
+                    .local_resource_exhausted,
+                );
+                return;
+            };
+            const committed = account_api.CredentialStore.commitAccountOnly(
+                platform.backend(),
+                generation,
+                rotation.persistenceInput(),
+                &identity,
+                coordinator.account.executionHighWatermark(),
+            ) catch |err| {
+                self.completeAccountFailure(
+                    attempt_id,
+                    accountStoreError(err),
+                );
+                return;
+            };
+            cleanup_pending = committed.retired_cleanup_pending;
+        }
         self.account_credentials.replaceRotation(rotation);
         self.account_credentials.setCleanupPending(
             self.account_credentials.cleanupPending() or
-                committed.retired_cleanup_pending,
+                cleanup_pending,
         );
         var completion: account_api.WorkerCompletion = .{
             .attempt_id = attempt_id,
@@ -1295,8 +1510,11 @@ const App = struct {
         defer completion.deinit();
         if (!coordinator.complete(&completion))
             @panic("persisted Account refresh could not commit");
-        self.retryAccountCleanup();
+        if (builtin.os.tag != .windows) self.retryAccountCleanup();
         self.scheduleAccountRefresh();
+        if (continue_catalog) {
+            coordinator.startCatalogContinuation();
+        }
     }
 
     fn drainAccountEffects(self: *@This()) void {
@@ -1363,6 +1581,10 @@ const App = struct {
                 .completion => |*completion| {
                     const account_operation =
                         coordinator.account.view().operation;
+                    if (self.catalog_after_refresh and
+                        account_operation == .token_exchange and
+                        completion.payload == .failed)
+                        self.catalog_after_refresh = false;
                     const catalog_attempt =
                         account_operation == .loading_keys or
                         account_operation == .loading_models;
@@ -1380,7 +1602,7 @@ const App = struct {
                         };
                     }
                     if (catalog_attempt and completion.payload == .failed)
-                        effects.clearCatalog();
+                        effects.catalog.reset();
                     const automatic_selection: union(enum) {
                         none,
                         api_key: []const u8,
@@ -1388,21 +1610,21 @@ const App = struct {
                     } = if (coordinator.account.view().execution_state != .none)
                         .none
                     else switch (completion.payload) {
-                        .api_keys_loaded => if (effects.catalog.uniqueApiKeyId()) |id|
-                            .{ .api_key = id }
-                        else
-                            .none,
-                        .models_loaded => if (effects.catalog.uniqueModelId()) |id|
-                            .{ .model = id }
-                        else
-                            .none,
+                        .api_keys_loaded => if (self.automaticApiSelection(
+                            &effects.catalog,
+                        )) |id| .{ .api_key = id } else .none,
+                        .models_loaded => if (self.automaticModelSelection(
+                            &effects.catalog,
+                        )) |id| .{ .model = id } else .none,
                         else => .none,
                     };
                     if (coordinator.account.activeAttempt() ==
                         completion.attempt_id)
                     {
                         switch (completion.payload) {
-                            .api_keys_loaded, .models_loaded => effects.publishCatalogNoFail(),
+                            .api_keys_loaded, .models_loaded => coordinator.publishCandidateCatalogNoFail(
+                                &effects.catalog,
+                            ),
                             else => {},
                         }
                     }
@@ -1422,6 +1644,33 @@ const App = struct {
                 },
             }
         }
+    }
+
+    fn automaticApiSelection(
+        self: *const @This(),
+        catalog: *const account_api.Catalog.CatalogSession,
+    ) ?[]const u8 {
+        if (builtin.os.tag == .windows) if (self.windows_public_state) |*saved| {
+            const id = saved.apiKeyId();
+            if (id.len > 0 and catalog.hasApiKey(id)) return id;
+        };
+        return catalog.uniqueApiKeyId();
+    }
+
+    fn automaticModelSelection(
+        self: *const @This(),
+        catalog: *const account_api.Catalog.CatalogSession,
+    ) ?[]const u8 {
+        if (builtin.os.tag == .windows) if (self.windows_public_state) |*saved| {
+            const id = saved.modelId();
+            if (id.len > 0 and
+                std.mem.eql(
+                    u8,
+                    catalog.selectedApiKeyId(),
+                    saved.apiKeyId(),
+                ) and catalog.hasModel(id)) return id;
+        };
+        return catalog.uniqueModelId();
     }
 
     fn commitAuthenticatedLogin(
@@ -1457,31 +1706,45 @@ const App = struct {
             );
             return;
         };
-        var generation: account_api.CredentialStore.Generation = undefined;
-        std.Io.randomSecure(self.io, &generation) catch {
-            self.completeAccountFailure(
-                attempt_id,
-                .local_resource_exhausted,
-            );
-            return;
-        };
-        const committed = account_api.CredentialStore.commitAccountOnly(
-            platform.backend(),
-            generation,
-            &login.tokens,
-            &login.identity,
-            coordinator.account.executionHighWatermark(),
-        ) catch |err| {
-            self.completeAccountFailure(
-                attempt_id,
-                accountStoreError(err),
-            );
-            return;
-        };
+        var cleanup_pending = false;
+        if (builtin.os.tag == .windows) {
+            self.windows_public_state = account_api.WindowsStore.commitAuthenticated(
+                platform.backend(),
+                &login.tokens.refresh_token,
+                login.identity,
+            ) catch |err| {
+                self.completeAccountFailure(
+                    attempt_id,
+                    accountStoreError(err),
+                );
+                return;
+            };
+        } else {
+            var generation: account_api.CredentialStore.Generation = undefined;
+            std.Io.randomSecure(self.io, &generation) catch {
+                self.completeAccountFailure(
+                    attempt_id,
+                    .local_resource_exhausted,
+                );
+                return;
+            };
+            const committed = account_api.CredentialStore.commitAccountOnly(
+                platform.backend(),
+                generation,
+                &login.tokens,
+                &login.identity,
+                coordinator.account.executionHighWatermark(),
+            ) catch |err| {
+                self.completeAccountFailure(
+                    attempt_id,
+                    accountStoreError(err),
+                );
+                return;
+            };
+            cleanup_pending = committed.retired_cleanup_pending;
+        }
         self.account_credentials.replace(&login.tokens);
-        self.account_credentials.setCleanupPending(
-            committed.retired_cleanup_pending,
-        );
+        self.account_credentials.setCleanupPending(cleanup_pending);
         var completion: account_api.WorkerCompletion = .{
             .attempt_id = attempt_id,
             .payload = .{ .authenticated = login.identity },
@@ -1490,7 +1753,7 @@ const App = struct {
         if (!coordinator.complete(&completion))
             @panic("persisted Account login could not commit");
         coordinator.startCatalogContinuation();
-        self.retryAccountCleanup();
+        if (builtin.os.tag != .windows) self.retryAccountCleanup();
         self.scheduleAccountRefresh();
     }
 
@@ -1510,6 +1773,7 @@ const App = struct {
     }
 
     fn retryAccountCleanup(self: *@This()) void {
+        if (builtin.os.tag == .windows) return;
         if (!self.account_credentials.cleanupPending()) return;
         const platform = if (self.account_platform) |*value|
             value
@@ -1623,6 +1887,8 @@ const App = struct {
             .cancel_timer_fn = platformCancelTimer,
             .show_open_dialog_fn = platformShowOpenDialog,
             .show_message_dialog_fn = platformShowMessageDialog,
+            .begin_window_drag_fn = platformBeginWindowDrag,
+            .window_control_fn = platformWindowControl,
             .now_fn = platformNow,
             .on_main_thread_fn = platformOnMainThread,
         };
@@ -1632,6 +1898,7 @@ const App = struct {
         return .{
             .context = self,
             .active_fn = automationActive,
+            .workspace_root_fn = automationWorkspaceRoot,
         };
     }
 
@@ -1701,6 +1968,36 @@ const App = struct {
         );
     }
 
+    fn platformBeginWindowDrag(
+        context: ?*anyopaque,
+        window_id: native_sdk.platform.WindowId,
+        clicks: u8,
+    ) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        return window_chrome.beginDrag(
+            self.platform_services orelse return error.RuntimeUnavailable,
+            window_id,
+            clicks,
+        );
+    }
+
+    fn platformWindowControl(
+        context: ?*anyopaque,
+        window_id: native_sdk.platform.WindowId,
+        action: bridge_api.WindowControl,
+    ) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        return window_chrome.control(
+            self.platform_services orelse return error.RuntimeUnavailable,
+            window_id,
+            switch (action) {
+                .minimize => .minimize,
+                .toggle_maximize => .toggle_maximize,
+                .close => .close,
+            },
+        );
+    }
+
     fn platformNow(_: ?*anyopaque) u64 {
         return native_sdk.monotonicNanoseconds();
     }
@@ -1714,7 +2011,41 @@ const App = struct {
         const self: *@This() = @ptrCast(@alignCast(context.?));
         return self.automation.active();
     }
+
+    fn automationWorkspaceRoot(context: ?*anyopaque) ?[]const u8 {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        return self.automation.workspaceRoot();
+    }
 };
+
+const CatalogExecutionPreparation = union(enum) {
+    ready: account_contract.OwnedExecutionConfig,
+    rejected: account_contract.ErrorCode,
+};
+
+fn prepareCatalogExecution(
+    catalog: *account_api.Catalog.CatalogSession,
+    identity: *const account_api.AccountIdentity,
+    model_catalog_api_key_id: []const u8,
+    model: []const u8,
+    execution_generation: u64,
+) CatalogExecutionPreparation {
+    if (!std.mem.eql(u8, catalog.ownerAccountId(), identity.accountId()) or
+        !std.mem.eql(u8, catalog.ownerProfileId(), identity.profileId()))
+        return .{ .rejected = .account_mismatch };
+    if (!catalog.ownsExecutionSelection(
+        identity.accountId(),
+        identity.profileId(),
+        model_catalog_api_key_id,
+        model,
+    )) return .{ .rejected = .dependency_contract_invalid };
+    return .{ .ready = catalog.prepareExecution(
+        model,
+        execution_generation,
+    ) catch |err| return .{
+        .rejected = account_api.Catalog.errorCode(err),
+    } };
+}
 
 fn accountRestoreError(err: anyerror) account_contract.ErrorCode {
     return switch (err) {
@@ -1911,6 +2242,7 @@ pub fn run(init: std.process.Init) !void {
         account_coordinator.commandSink(),
         app.dispatcherPlatform(),
         app.dispatcherAutomationAuthority(),
+        main_window_id,
     );
     defer dispatcher.deinit();
     app.dispatcher = &dispatcher;
@@ -1938,7 +2270,7 @@ test "App remains a composition root with explicit platform limits" {
     try std.testing.expectEqual(@as(usize, 1), bridge_api.policy.origins(.release).len);
 }
 
-test "Account coordinator commits login and execution as separate gates" {
+test "Account coordinator commits login and transactional reconfiguration gates" {
     var runtime: agent.Runtime = undefined;
     runtime.io = std.testing.io;
     var workbench = try workbench_api.Workbench.init(
@@ -2007,8 +2339,8 @@ test "Account coordinator commits login and execution as separate gates" {
     };
     defer keys_loaded.deinit();
     account_api.Catalog.TestSupport.replacePublic(
-        &public_catalog,
-        &.{.{ .id = "key-1", .name = "Primary", .suffix = "1234" }},
+        &coordinator.candidate_public_catalog,
+        &.{.{ .id = "key-1", .name = "Primary", .suffix = "1234", .provider_kind = .anthropic }},
         &.{},
     );
     try std.testing.expect(coordinator.complete(&keys_loaded));
@@ -2026,8 +2358,8 @@ test "Account coordinator commits login and execution as separate gates" {
     };
     defer models_loaded.deinit();
     account_api.Catalog.TestSupport.replacePublic(
-        &public_catalog,
-        &.{.{ .id = "key-1", .name = "Primary", .suffix = "1234" }},
+        &coordinator.candidate_public_catalog,
+        &.{.{ .id = "key-1", .name = "Primary", .suffix = "1234", .provider_kind = .anthropic }},
         &.{.{ .id = "model-1", .display_name = "Model One" }},
     );
     try std.testing.expect(coordinator.complete(&models_loaded));
@@ -2039,6 +2371,22 @@ test "Account coordinator commits login and execution as separate gates" {
     try std.testing.expectEqualStrings(
         "model-1",
         effects.take().?.effect.argument().?,
+    );
+    try std.testing.expectEqual(
+        account_contract.OperationKind.persisting,
+        workbench.accountView().operation,
+    );
+    try std.testing.expect(!workbench.accountView().can_cancel);
+
+    // Persistence has committed before execution_ready reaches the main
+    // thread. A cancel in that window must not roll memory back behind disk.
+    const cancel_after_persistence = coordinator.commandSink().submit(
+        .cancel_operation,
+    );
+    try std.testing.expect(!cancel_after_persistence.accepted);
+    try std.testing.expectEqual(
+        account_contract.ErrorCode.invalid_state,
+        cancel_after_persistence.error_code,
     );
 
     var execution = try account_contract.OwnedExecutionConfig.initOwned(
@@ -2061,6 +2409,171 @@ test "Account coordinator commits login and execution as separate gates" {
     try std.testing.expect(coordinator.complete(&ready));
     try std.testing.expect(!workbench.executionReplacementPending());
     try std.testing.expect(workbench.accountView().can_create_task);
+
+    const failed_switch = coordinator.commandSink().submit(.{
+        .select_model = "model-failed",
+    });
+    try std.testing.expect(failed_switch.accepted);
+    try std.testing.expect(workbench.executionReplacementPending());
+    try std.testing.expect(effects.take().?.effect == .load_api_keys);
+    account_api.Catalog.TestSupport.replacePublic(
+        &coordinator.candidate_public_catalog,
+        &.{.{ .id = "key-1", .name = "Primary", .suffix = "1234", .provider_kind = .anthropic }},
+        &.{},
+    );
+    var failed_keys: account_api.WorkerCompletion = .{
+        .attempt_id = failed_switch.attempt_id.?,
+        .payload = .api_keys_loaded,
+    };
+    defer failed_keys.deinit();
+    try std.testing.expect(coordinator.complete(&failed_keys));
+    const failed_models_effect = effects.take().?;
+    try std.testing.expectEqualStrings(
+        "key-1",
+        failed_models_effect.effect.argument().?,
+    );
+    account_api.Catalog.TestSupport.replacePublic(
+        &coordinator.candidate_public_catalog,
+        &.{.{ .id = "key-1", .name = "Primary", .suffix = "1234", .provider_kind = .anthropic }},
+        &.{.{ .id = "model-failed", .display_name = "Failed model" }},
+    );
+    var failed_models: account_api.WorkerCompletion = .{
+        .attempt_id = failed_switch.attempt_id.?,
+        .payload = .models_loaded,
+    };
+    defer failed_models.deinit();
+    try std.testing.expect(coordinator.complete(&failed_models));
+    try std.testing.expectEqualStrings(
+        "model-failed",
+        effects.take().?.effect.argument().?,
+    );
+    var persistence_failed: account_api.WorkerCompletion = .{
+        .attempt_id = failed_switch.attempt_id.?,
+        .payload = .{ .failed = .fromCode(
+            .credential_store_write_failed,
+        ) },
+    };
+    defer persistence_failed.deinit();
+    try std.testing.expect(coordinator.complete(&persistence_failed));
+    try std.testing.expect(!workbench.executionReplacementPending());
+    try std.testing.expectEqualStrings(
+        "model-1",
+        workbench.accountView().selected_model,
+    );
+    try std.testing.expectEqualStrings(
+        "model-1",
+        workbench.accountView().models[0].id,
+    );
+
+    const cancelled_api = coordinator.commandSink().submit(.{
+        .select_api_key = "key-cancelled",
+    });
+    try std.testing.expect(cancelled_api.accepted);
+    try std.testing.expect(effects.take().?.effect == .load_api_keys);
+    account_api.Catalog.TestSupport.replacePublic(
+        &coordinator.candidate_public_catalog,
+        &.{.{ .id = "key-cancelled", .name = "Cancelled", .suffix = "9999", .provider_kind = .anthropic }},
+        &.{},
+    );
+    var cancelled_keys: account_api.WorkerCompletion = .{
+        .attempt_id = cancelled_api.attempt_id.?,
+        .payload = .api_keys_loaded,
+    };
+    defer cancelled_keys.deinit();
+    try std.testing.expect(coordinator.complete(&cancelled_keys));
+    _ = effects.take().?;
+    account_api.Catalog.TestSupport.replacePublic(
+        &coordinator.candidate_public_catalog,
+        &.{.{ .id = "key-cancelled", .name = "Cancelled", .suffix = "9999", .provider_kind = .anthropic }},
+        &.{.{ .id = "model-1", .display_name = "Same model id" }},
+    );
+    var cancelled_models: account_api.WorkerCompletion = .{
+        .attempt_id = cancelled_api.attempt_id.?,
+        .payload = .models_loaded,
+    };
+    defer cancelled_models.deinit();
+    try std.testing.expect(coordinator.complete(&cancelled_models));
+    const cancelled = coordinator.commandSink().submit(.cancel_operation);
+    try std.testing.expect(cancelled.accepted);
+    const cancel_effect = effects.take().?.effect;
+    try std.testing.expectEqual(
+        cancelled_api.attempt_id.?,
+        cancel_effect.cancel_attempt,
+    );
+    try std.testing.expectEqualStrings(
+        "key-1",
+        workbench.accountView().selected_api_key_id,
+    );
+    try std.testing.expectEqualStrings(
+        "model-1",
+        workbench.accountView().models[0].id,
+    );
+
+    const api_switch = coordinator.commandSink().submit(.{
+        .select_api_key = "key-2",
+    });
+    try std.testing.expect(api_switch.accepted);
+    try std.testing.expect(effects.take().?.effect == .load_api_keys);
+    account_api.Catalog.TestSupport.replacePublic(
+        &coordinator.candidate_public_catalog,
+        &.{.{ .id = "key-2", .name = "Secondary", .suffix = "5678", .provider_kind = .anthropic }},
+        &.{},
+    );
+    var switched_keys: account_api.WorkerCompletion = .{
+        .attempt_id = api_switch.attempt_id.?,
+        .payload = .api_keys_loaded,
+    };
+    defer switched_keys.deinit();
+    try std.testing.expect(coordinator.complete(&switched_keys));
+    try std.testing.expectEqualStrings(
+        "key-2",
+        effects.take().?.effect.argument().?,
+    );
+    account_api.Catalog.TestSupport.replacePublic(
+        &coordinator.candidate_public_catalog,
+        &.{.{ .id = "key-2", .name = "Secondary", .suffix = "5678", .provider_kind = .anthropic }},
+        &.{.{ .id = "model-1", .display_name = "Model One" }},
+    );
+    var switched_models: account_api.WorkerCompletion = .{
+        .attempt_id = api_switch.attempt_id.?,
+        .payload = .models_loaded,
+    };
+    defer switched_models.deinit();
+    try std.testing.expect(coordinator.complete(&switched_models));
+    const switched_model = coordinator.commandSink().submit(.{
+        .select_model = "model-1",
+    });
+    try std.testing.expect(switched_model.accepted);
+    try std.testing.expectEqualStrings(
+        "model-1",
+        effects.take().?.effect.argument().?,
+    );
+    var replacement = try account_contract.OwnedExecutionConfig.initOwned(
+        std.testing.allocator,
+        .anthropic,
+        try std.testing.allocator.dupe(u8, "model-1"),
+        try std.testing.allocator.dupe(
+            u8,
+            account_contract.metask_anthropic_messages_url,
+        ),
+        2,
+        try std.testing.allocator.dupe(u8, "secret-key-2"),
+    );
+    var replacement_ready: account_api.WorkerCompletion = .{
+        .attempt_id = switched_model.attempt_id.?,
+        .payload = .{ .execution_ready = replacement.take() },
+    };
+    defer replacement_ready.deinit();
+    replacement.deinit();
+    try std.testing.expect(coordinator.complete(&replacement_ready));
+    try std.testing.expectEqualStrings(
+        "key-2",
+        workbench.accountView().selected_api_key_id,
+    );
+    try std.testing.expectEqualStrings(
+        "key-2",
+        workbench.accountView().model_catalog_api_key_id,
+    );
 
     const logout = coordinator.commandSink().submit(.logout);
     try std.testing.expect(logout.accepted);
@@ -2249,6 +2762,76 @@ test "Account mailbox transfers ownership, wakes, and reports collision" {
     try std.testing.expectEqual(
         account_contract.ErrorCode.token_refresh_failed,
         queued.completion.payload.failed.error_code,
+    );
+}
+
+test "cross-API same-model selection is rejected before persistence" {
+    var candidate = account_api.Catalog.CatalogSession.init(
+        std.testing.allocator,
+    );
+    defer candidate.deinit();
+    try account_api.Catalog.TestSupport.replaceOwnedSelection(
+        &candidate,
+        "account-1",
+        "profile-1",
+        .{
+            .id = "key-b",
+            .name = "Secondary",
+            .suffix = "5678",
+            .provider_kind = .anthropic,
+        },
+        "secret-key-b",
+        &.{.{
+            .id = "same-model",
+            .display_name = "Same model id",
+        }},
+    );
+    const identity = try account_api.AccountIdentity.init(
+        "account-1",
+        "profile-1",
+        "Metask User",
+    );
+
+    switch (prepareCatalogExecution(
+        &candidate,
+        &identity,
+        "key-a",
+        "same-model",
+        2,
+    )) {
+        .rejected => |error_code| try std.testing.expectEqual(
+            account_contract.ErrorCode.dependency_contract_invalid,
+            error_code,
+        ),
+        .ready => |unexpected_value| {
+            var unexpected = unexpected_value;
+            unexpected.deinit();
+            return error.TestUnexpectedResult;
+        },
+    }
+
+    // Rejection must leave the private candidate intact. A matching Host
+    // owner can still consume the same selection afterwards.
+    try std.testing.expect(candidate.ownsExecutionSelection(
+        "account-1",
+        "profile-1",
+        "key-b",
+        "same-model",
+    ));
+    var execution = switch (prepareCatalogExecution(
+        &candidate,
+        &identity,
+        "key-b",
+        "same-model",
+        2,
+    )) {
+        .ready => |owned| owned,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    defer execution.deinit();
+    try std.testing.expectEqualStrings(
+        "secret-key-b",
+        execution.input().api_key,
     );
 }
 

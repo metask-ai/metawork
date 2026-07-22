@@ -31,6 +31,7 @@ metawork/
 ├── src/
 │   ├── main.zig           # 进程入口
 │   ├── app.zig            # Native composition root
+│   ├── window_chrome.zig  # WebView hidden-inset drag 的平台 seam
 │   ├── account.zig        # Account module entrypoint
 │   ├── account/           # OAuth、catalog、credential 与 Account 状态机
 │   ├── bridge.zig         # Renderer Bridge module entrypoint
@@ -83,7 +84,7 @@ metawork/
 - `snapshot/` 负责 bounded descriptor、分块读取和 retry，不拥有产品状态；
 - `__fixtures__/workbench-snapshot.fixture` 是 Zig serializer 与 TypeScript decoder 共用的 canonical bytes。
 
-Renderer Bridge `metawork.renderer-bridge` revision 1 覆盖完整 command、event 和 snapshot surface；snapshot 不维护局部 schema version。React component 不得直接访问 `window.zero`、拼 wire payload 或解析 AgentCore raw JSON。
+Renderer Bridge `metawork.renderer-bridge` 覆盖完整 command、event 和 snapshot surface；快速开发阶段的合同变化在固定 revision 1 内原地 hard cut，snapshot 不维护局部 schema version，任何 revision 变更必须先得到用户显式同意。React component 不得直接访问 `window.zero`、拼 wire payload 或解析 AgentCore raw JSON。
 
 ### `workbench/` 与 `features/`
 
@@ -95,7 +96,7 @@ Renderer Bridge `metawork.renderer-bridge` revision 1 覆盖完整 command、eve
 
 ### `app.zig` 与 module entrypoint
 
-`main.zig` 只调用 `metawork_app`。`app.zig` 注入 Native platform capability 并按顺序组织 Account、Workbench、Agent、Bridge 与 automation 生命周期，不复制这些 owner 的状态。
+`main.zig` 只调用 `metawork_app`。`app.zig` 注入 Native platform capability 并按顺序组织 Account、Workbench、Agent、Bridge 与 automation 生命周期，不复制这些 owner 的状态。`window_chrome.zig` 只补齐 App-owned 单一启动窗口的 WebView `hidden_inset_tall` 真实拖拽与 Windows maximize/restore seam；Windows 必须先由精确 SDK window id 定位并验证同一 Host window，minimize/close 继续调用 Native SDK 的 window-id API。它不形成通用 Desktop Interface，也不拥有产品状态。
 
 `account.zig`、`bridge.zig`、`workbench.zig` 和 `agent.zig` 是小型公开入口，只显式暴露实际消费者需要的类型、函数或窄 namespace。内部文件不通过 `usingnamespace` 或无边界 barrel 重新泄漏。
 
@@ -104,8 +105,9 @@ Renderer Bridge `metawork.renderer-bridge` revision 1 覆盖完整 command、eve
 - `state.zig` 拥有 Account 状态机、attempt/generation 与 prepare/admit/commit；
 - `oauth.zig`、`loopback.zig`、`login_attempt.zig` 和 `network_attempt.zig` 拥有登录网络链路；
 - `metask_client.zig` 与 `catalog.zig` 消费锁定的 Metask production contract；
-- `credential_store.zig` 拥有持久化 revision、Keychain namespace、双 family slot 与 manifest 原子提交；
-- `platform.zig` 只适配 Account 所需的 Native 主线程能力，不形成通用 Desktop Interface；
+- `credential_store.zig` 只拥有 macOS persistence revision、Keychain namespace、双 family slot 与 `manifest.v2` 原子提交；
+- `windows_store.zig` 拥有 Windows 单 refresh token 与无版本、无 secret `account.json` 状态；不读取 macOS manifest，也不持久化 access token 或 Provider API Key；
+- `platform.zig` 分别适配 macOS 与 Windows 的 Account Native 主线程能力，不形成通用 Desktop Interface；
 - `credentials.zig` 管理 execution credential ownership/rotation。
 
 Account 与 Workbench 是同级 owner，只通过纯 `account/contract.zig` 和 App 主线程提交链协作。Bridge 只消费脱敏 view/command contract，不导入 Account runtime。
@@ -125,7 +127,7 @@ Bridge handler 不能绕过 Workbench 操作 AgentCore handle。automation 只�
 
 ### `workbench/` 与 `agent/`
 
-`workbench/projection.zig` 当前拥有 Workspace/Task/Run 产品状态、stable Run record、`RunRef`、write-once terminal publication 和 bounded snapshot writer。`workbench/executor.zig` 独占队列、workers、admission 和 shutdown。只有这些职责形成可独立测试的不变量时才拆文件；本文不预先指定未来文件名。
+`workbench/projection.zig` 当前拥有 Workspace/Task/Run 产品状态、stable Run record、executor worker reference、write-once terminal publication 和 bounded snapshot writer。`workbench/executor.zig` 独占队列、workers、admission 和 shutdown。只有这些职责形成可独立测试的不变量时才拆文件；本文不预先指定未来文件名。
 
 `agent/session.zig` 当前拥有 AgentCore Runtime/Session、Conversation、Run、callback quiescence、UI wait、cancel/close/shutdown 和 immutable `TerminalResult`。`event_sink.zig` 与 `event_pump.zig` 管理 borrowed event 深拷贝、容量和通知。Agent 不接收 Scheduler capability，也不反向 enqueue Workbench。
 

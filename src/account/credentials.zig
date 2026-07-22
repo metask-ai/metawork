@@ -8,6 +8,7 @@ const catalog = @import("account_catalog");
 /// it, but token bytes remain owned and interpreted by Account.
 pub const CredentialRotation = struct {
     tokens: oauth.TokenSet,
+    identity: ?state.AccountIdentity = null,
     owned: bool = true,
 
     pub fn deinit(self: *CredentialRotation) void {
@@ -32,6 +33,7 @@ pub const CredentialRotation = struct {
         std.debug.assert(self.owned);
         const result: CredentialRotation = .{
             .tokens = self.tokens.take(),
+            .identity = self.identity,
         };
         self.owned = false;
         return result;
@@ -43,6 +45,13 @@ pub const CredentialRotation = struct {
         self.owned = false;
         return result;
     }
+
+    pub fn refreshedIdentity(
+        self: *const CredentialRotation,
+    ) ?state.AccountIdentity {
+        std.debug.assert(self.owned);
+        return self.identity;
+    }
 };
 
 /// Concrete Account-owned secret lifetime. App may compose this owner and
@@ -50,7 +59,16 @@ pub const CredentialRotation = struct {
 /// over the underlying allocations.
 pub const CredentialOwner = struct {
     tokens: ?oauth.TokenSet = null,
+    stored_refresh_token: ?oauth.Secret = null,
     cleanup_pending: bool = false,
+
+    pub fn installRefreshToken(
+        self: *CredentialOwner,
+        refresh_token: *oauth.Secret,
+    ) void {
+        self.clear();
+        self.stored_refresh_token = refresh_token.take();
+    }
 
     pub fn installStored(
         self: *CredentialOwner,
@@ -91,6 +109,10 @@ pub const CredentialOwner = struct {
         return self.tokens != null;
     }
 
+    pub fn refreshAvailable(self: *const CredentialOwner) bool {
+        return self.tokens != null or self.stored_refresh_token != null;
+    }
+
     pub fn expiresAt(self: *const CredentialOwner) ?i64 {
         return if (self.tokens) |*tokens| tokens.expires_at else null;
     }
@@ -101,18 +123,47 @@ pub const CredentialOwner = struct {
         transport: metask.Transport,
         now_unix_seconds: i64,
         control: ?metask.RequestControl,
+        expected_identity: ?state.AccountIdentity,
     ) metask.ClientError!CredentialRotation {
-        const current = if (self.tokens) |*value|
-            value
-        else
-            return error.TokenRefreshFailed;
-        return .{ .tokens = try metask.refresh(
+        var refreshed = if (self.tokens) |*current| try metask.refresh(
             allocator,
             transport,
             current,
             now_unix_seconds,
             control,
-        ) };
+        ) else blk: {
+            const refresh_token = if (self.stored_refresh_token) |*value|
+                value
+            else
+                return error.TokenRefreshFailed;
+            break :blk try metask.refreshWithToken(
+                allocator,
+                transport,
+                refresh_token,
+                now_unix_seconds,
+                control,
+            );
+        };
+        errdefer refreshed.deinit();
+        const identity = if (expected_identity) |expected| identity: {
+            const remote = try metask.fetchIdentity(
+                transport,
+                &refreshed,
+                control,
+            );
+            break :identity state.AccountIdentity.init(
+                if (refreshed.accountId().len > 0)
+                    remote.accountId()
+                else
+                    expected.accountId(),
+                remote.profileId(),
+                remote.displayName(),
+            ) catch return error.ProtocolInvalid;
+        } else null;
+        return .{
+            .tokens = refreshed.take(),
+            .identity = identity,
+        };
     }
 
     pub fn loadApiKeys(
@@ -138,6 +189,8 @@ pub const CredentialOwner = struct {
     pub fn clear(self: *CredentialOwner) void {
         if (self.tokens) |*current| current.deinit();
         self.tokens = null;
+        if (self.stored_refresh_token) |*current| current.deinit();
+        self.stored_refresh_token = null;
     }
 
     pub fn setCleanupPending(
@@ -187,4 +240,19 @@ test "CredentialOwner replaces and clears OAuth secret ownership" {
     try std.testing.expect(owner.cleanupPending());
     owner.clear();
     try std.testing.expect(!owner.available());
+}
+
+test "CredentialOwner can restore a refresh-only Windows session" {
+    var refresh = try oauth.Secret.init(
+        std.testing.allocator,
+        "refresh-only",
+    );
+    defer refresh.deinit();
+    var owner: CredentialOwner = .{};
+    defer owner.deinit();
+    owner.installRefreshToken(&refresh);
+    try std.testing.expect(owner.refreshAvailable());
+    try std.testing.expect(!owner.available());
+    owner.clear();
+    try std.testing.expect(!owner.refreshAvailable());
 }

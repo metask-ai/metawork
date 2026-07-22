@@ -1,6 +1,13 @@
 import { execFile, spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { join } from "node:path";
@@ -27,9 +34,23 @@ const appCwd = process.env.METAWORK_TEST_APP_CWD
   ? path.resolve(root, process.env.METAWORK_TEST_APP_CWD)
   : root;
 const automationDir = path.join(appCwd, ".zig-cache", "native-sdk-automation");
+const visualCaptureDir = process.env.METAWORK_VISUAL_CAPTURE_DIR
+  ? path.resolve(process.env.METAWORK_VISUAL_CAPTURE_DIR)
+  : null;
+const visualCaptureScript = path.join(
+  root,
+  "scripts",
+  "capture-windows-window.ps1",
+);
+const windowsChromeProbeScript = path.join(
+  root,
+  "scripts",
+  "probe-windows-window-chrome.ps1",
+);
 const commandTimeoutMs = 20_000;
 const runTimeoutMs = 60_000;
 const workspace = await mkdtemp(join(tmpdir(), "metawork-agentcore-vertical-"));
+const canonicalWorkspace = await realpath(workspace);
 const fixturePath = join(workspace, "fixture.txt");
 await writeFile(fixturePath, "agentcore-vertical-before\n", { mode: 0o600 });
 await rm(automationDir, { recursive: true, force: true });
@@ -58,7 +79,7 @@ const responses = [
   }),
   textSse("m5", "metawork agentcore vertical complete"),
 ];
-const provider = createProvider(responses);
+const provider = createProvider(responses, visualCaptureDir ? 1_500 : 0);
 const baseUrl = await provider.listen();
 
 let output = "";
@@ -68,6 +89,7 @@ const app = spawn(binary, [], {
   env: {
     ...process.env,
     METAWORK_AUTOMATION: "1",
+    METAWORK_AUTOMATION_WORKSPACE: workspace,
     METAWORK_AGENTCORE_VERTICAL_PROVIDER_BASE_URL: baseUrl,
   },
   stdio: ["ignore", "pipe", "pipe"],
@@ -90,16 +112,83 @@ const exited = new Promise((resolve, reject) => {
 
 try {
   await waitForBridge();
-  const beforeCreate = await snapshot();
-  await invokeBridge("metawork.tasks.create", {
-    workspaceRoot: workspace,
+  await captureVisual("new-task-1320x812", 1320, 812);
+  await captureVisual(
+    "search-keyboard-1320x812",
+    1320,
+    812,
+    false,
+    false,
+    true,
+  );
+  await probeWindowsChrome("exercise");
+  const chosenWorkspace = await invokeBridge("metawork.workspaces.choose", {});
+  let workspaceId;
+  if (chosenWorkspace === null) {
+    // Native SDK exposes one latest-response artifact for automation and the
+    // live WebView. A product notification can replace that artifact before
+    // the harness reads it, so never replay a mutation: reconcile from the
+    // authoritative snapshot instead.
+    const reconciled = await snapshot();
+    const selected = reconciled.workspaces.find(
+      (item) => item.id === reconciled.selectedWorkspaceId,
+    );
+    if (!selected)
+      throw new Error("Workspace choice had no response or committed state");
+    workspaceId = selected.id;
+  } else if (
+    chosenWorkspace?.selected !== true ||
+    !isWireId(chosenWorkspace.workspaceId)
+  ) {
+    throw new Error(
+      `automation Workspace choice returned an invalid identity: ${JSON.stringify(chosenWorkspace)}`,
+    );
+  } else {
+    workspaceId = chosenWorkspace.workspaceId;
+  }
+  const afterChoose = await snapshot();
+  const selectedWorkspace = afterChoose.workspaces.find(
+    (item) => item.id === workspaceId,
+  );
+  if (
+    afterChoose.selectedWorkspaceId !== workspaceId ||
+    selectedWorkspace?.authorization !== "available" ||
+    selectedWorkspace.canonicalRoot !== canonicalWorkspace ||
+    !isWireId(selectedWorkspace.epoch) ||
+    selectedWorkspace.lastRemovalFailure !== null
+  )
+    throw new Error(
+      `Workspace choice was not committed to the product snapshot: ${JSON.stringify(afterChoose.workspaces)}`,
+    );
+  const expectedWorkspaceEpoch = selectedWorkspace.epoch;
+  const expectedExecutionGeneration = afterChoose.account.executionGeneration;
+  if (!isWireId(expectedExecutionGeneration))
+    throw new Error("snapshot omitted the current execution generation");
+  const createResult = await invokeBridge("metawork.tasks.create", {
+    workspaceId,
+    expectedWorkspaceEpoch,
+    expectedExecutionGeneration,
   });
+  if (
+    createResult !== null &&
+    (createResult.accepted !== true ||
+      createResult.reason !== null ||
+      !isWireId(createResult.taskId) ||
+      !isWireId(createResult.bindingEpoch))
+  ) {
+    throw new Error(
+      `Task creation was not accepted truthfully: ${JSON.stringify(createResult)}`,
+    );
+  }
+  const acceptedTaskId = createResult?.taskId ?? null;
   const createdTask = await poll(
     async () => {
       const current = await snapshot();
       return (
-        current.tasks.find(
-          (item) => !beforeCreate.tasks.some((prior) => prior.id === item.id),
+        current.tasks.find((item) =>
+          acceptedTaskId
+            ? item.id === acceptedTaskId
+            : item.workspaceId === workspaceId,
         ) ?? null
       );
     },
@@ -107,21 +196,53 @@ try {
     "Task creation",
   );
   const taskId = createdTask.id;
-  await invokeBridge("metawork.tasks.run", {
+  const expectedBindingEpoch =
+    createResult?.bindingEpoch ?? createdTask.binding?.epoch;
+  if (!isWireId(taskId) || !isWireId(expectedBindingEpoch))
+    throw new Error("Task creation omitted its authoritative identity");
+  if (createdTask.binding?.epoch !== expectedBindingEpoch)
+    throw new Error(
+      `Task snapshot disagrees with the accepted binding epoch: ${JSON.stringify(createdTask.binding)}`,
+    );
+  const runResult = await invokeBridge("metawork.tasks.run", {
     taskId,
+    expectedBindingEpoch,
     prompt: "Exercise Read, Bash, Edit, and AskUserQuestion, then finish.",
   });
+  if (
+    runResult !== null &&
+    (runResult.accepted !== true ||
+      runResult.reason !== null ||
+      runResult.taskId !== taskId ||
+      !isWireId(runResult.runId))
+  ) {
+    throw new Error(
+      `Run submission was not accepted truthfully: ${JSON.stringify(runResult)}`,
+    );
+  }
+  const acceptedRunId = runResult?.runId ?? null;
   const submittedRun = await poll(
     async () => {
       const current = await snapshot();
-      return current.tasks.find((item) => item.id === taskId)?.runs[0] ?? null;
+      return (
+        current.tasks
+          .find((item) => item.id === taskId)
+          ?.runs.find((item) =>
+            acceptedRunId ? item.id === acceptedRunId : true,
+          ) ?? null
+      );
     },
     commandTimeoutMs,
     "Run submission",
   );
   const runId = submittedRun.id;
+  if (!isWireId(runId)) throw new Error("Run submission omitted its identity");
+  if (acceptedRunId !== null && submittedRun.id !== acceptedRunId)
+    throw new Error("Run snapshot disagrees with the accepted Run identity");
+  await captureVisual("running-1320x812", 1320, 812, false, true);
   let reloadedRequest = null;
   let deliveryEmitsBeforeReload = null;
+  let visualAttentionCaptured = false;
   const answered = new Set();
   const terminal = new Set([
     "completed",
@@ -139,6 +260,11 @@ try {
       if (!task || !run) return null;
       const pending = task.pendingUi;
       if (pending && !answered.has(pending.requestId)) {
+        if (!visualAttentionCaptured) {
+          await captureVisual("attention-1320x812", 1320, 812);
+          await captureVisual("attention-inspector-960x680", 960, 680);
+          visualAttentionCaptured = true;
+        }
         if (typeof pending.redacted !== "boolean")
           throw new Error("pending UI omitted its projection privacy state");
         if (pending.runId !== runId)
@@ -205,6 +331,8 @@ try {
     throw new Error("completed Task did not remain available for continuation");
   if (run.phase !== "completed" || run.outcome !== "completed")
     throw new Error(`run did not complete truthfully: ${JSON.stringify(run)}`);
+  await captureVisual("terminal-1320x812", 1320, 812);
+  await captureVisual("settings-1320x812", 1320, 812, true);
   if (run.cause !== null || task.cause !== null)
     throw new Error(
       `completed run retained a Host cause: ${JSON.stringify(task)}`,
@@ -326,7 +454,8 @@ try {
   if (afterDelete.tasks.some((item) => item.id === taskId))
     throw new Error("Deleted Task record remained in the projection");
 
-  await invokeBridge("native-sdk.window.close", { label: "main" });
+  if (process.platform === "win32") await probeWindowsChrome("close");
+  else await invokeBridge("native-sdk.window.close", { label: "main" });
   const final = await withTimeout(exited, commandTimeoutMs, "app stop");
   if (final.code !== 0 || final.signal !== null)
     throw new Error(`app exited abnormally: ${JSON.stringify(final)}`);
@@ -450,10 +579,15 @@ async function snapshot() {
     typeof parsed.account !== "object" ||
     parsed.account === null ||
     Array.isArray(parsed.account) ||
+    !Array.isArray(parsed.workspaces) ||
     !Array.isArray(parsed.tasks)
   )
     throw new Error("invalid Workbench snapshot");
   return parsed;
+}
+
+function isWireId(value) {
+  return typeof value === "string" && /^[1-9][0-9]*$/.test(value);
 }
 
 async function automate(...args) {
@@ -462,6 +596,62 @@ async function automate(...args) {
     timeout: commandTimeoutMs,
     maxBuffer: 1024 * 1024,
   });
+}
+
+async function captureVisual(
+  name,
+  width,
+  height,
+  openSettings = false,
+  selectFirstTask = false,
+  openSearch = false,
+) {
+  if (visualCaptureDir === null || process.platform !== "win32") return;
+  await mkdir(visualCaptureDir, { recursive: true });
+  await automate("resize", String(width), String(height));
+  await new Promise((resolve) => setTimeout(resolve, 350));
+  const args = [
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    visualCaptureScript,
+    "-ProcessId",
+    String(app.pid),
+    "-OutputPath",
+    path.join(visualCaptureDir, `${name}.png`),
+    "-Width",
+    String(width),
+    "-Height",
+    String(height),
+  ];
+  if (openSettings) args.push("-OpenSettings");
+  if (selectFirstTask) args.push("-SelectFirstTask");
+  if (openSearch) args.push("-OpenSearch");
+  await execFileAsync(
+    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    args,
+    { timeout: commandTimeoutMs, maxBuffer: 1024 * 1024 },
+  );
+}
+
+async function probeWindowsChrome(mode) {
+  if (process.platform !== "win32") return;
+  await execFileAsync(
+    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    [
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      windowsChromeProbeScript,
+      "-ProcessId",
+      String(app.pid),
+      "-Mode",
+      mode,
+    ],
+    { timeout: commandTimeoutMs, maxBuffer: 1024 * 1024 },
+  );
 }
 
 async function waitForBridge() {
@@ -500,7 +690,7 @@ async function poll(operation, milliseconds, label) {
   );
 }
 
-function createProvider(queue) {
+function createProvider(queue, responseDelayMs = 0) {
   let served = 0;
   let providerError = null;
   const server = createServer((request, response) => {
@@ -534,7 +724,9 @@ function createProvider(queue) {
           "cache-control": "no-cache",
           connection: "close",
         });
-        response.end(body);
+        if (responseDelayMs > 0)
+          setTimeout(() => response.end(body), responseDelayMs);
+        else response.end(body);
       } catch (error) {
         providerError ??= error;
         response.writeHead(400, { "content-type": "application/json" });

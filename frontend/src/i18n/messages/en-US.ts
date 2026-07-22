@@ -2,12 +2,15 @@ export const enUS = {
   "app.name": "MetaWork",
   "app.window_label": "Local agent workbench",
   "app.toggle_workspaces": "Toggle workspace and task sidebar",
-  "app.toggle_activity": "Toggle task activity",
   "app.dismiss_panels": "Dismiss panels",
   "app.language": "Language",
   "app.language.en-US": "English",
   "app.language.zh-CN": "简体中文",
   "app.language.pseudo": "Pseudo-locale",
+  "window.controls": "Window controls",
+  "window.minimize": "Minimize",
+  "window.maximize": "Maximize or restore",
+  "window.close": "Close MetaWork",
   "common.save": "Save",
   "common.cancel": "Cancel",
   "connection.connecting": "Connecting to the Workbench…",
@@ -15,10 +18,14 @@ export const enUS = {
   "connection.recovered": "Workbench connection recovered.",
   "connection.failed": "The Workbench view is unavailable.",
   "connection.failed_help": "Reconnect before making changes.",
+  "connection.contract_failed": "MetaWork components do not match",
+  "connection.contract_failed_help":
+    "Close MetaWork, then rebuild or reinstall the matching application components before reopening it.",
   "connection.retry": "Reconnect",
   "connection.retrying": "Reconnecting…",
   "connection.details": "Technical details",
   "connection.source.bootstrap": "Renderer contract",
+  "connection.source.snapshot": "Workbench snapshot contract",
   "connection.source.revision": "Workbench update",
   "connection.source.host_signal_ack": "Host acknowledgement",
   "connection.source.host_signal": "Host signal",
@@ -26,26 +33,29 @@ export const enUS = {
   "account.label": "Metask account",
   "account.signed_in": "Signed in",
   "account.ready": "Ready",
-  "account.readiness.checking.title": "Checking your work setup",
+  "account.gate.path": "Metask\nLocal workbench",
+  "account.gate.eyebrow": "Metask access",
+  "account.gate.privacy": "Your API credentials are kept off this screen.",
+  "account.readiness.checking.title": "Restoring your account",
   "account.readiness.checking.body":
-    "Your draft is safe while MetaWork checks this device.",
-  "account.readiness.sign_in_required.title": "Connect Metask to send",
+    "MetaWork is checking the account saved on this device.",
+  "account.readiness.sign_in_required.title": "Sign in to MetaWork",
   "account.readiness.sign_in_required.body":
-    "Keep writing your draft. Sign in when you are ready to start the task.",
-  "account.readiness.preparing.title": "Preparing this task",
+    "Use your Metask account to load the APIs and models available to you.",
+  "account.readiness.preparing.title": "Preparing your models",
   "account.readiness.preparing.body":
-    "MetaWork is getting the execution setup ready in the background.",
-  "account.readiness.choice_required.title": "Choose how this task will run",
+    "Your Metask account is connected. MetaWork is loading your available APIs and models.",
+  "account.readiness.choice_required.title": "Choose your default setup",
   "account.readiness.choice_required.body":
-    "MetaWork needs one choice before it can start the task.",
+    "Choose the API or model new tasks should use.",
   "account.readiness.ready.title": "Ready to work",
   "account.readiness.ready.body": "This task can be sent.",
-  "account.readiness.needs_attention.title": "Finish preparing this task",
+  "account.readiness.needs_attention.title": "Account setup needs attention",
   "account.readiness.needs_attention.body":
-    "Your draft is safe. Try the account preparation again.",
+    "Your Metask account is still connected. Use the action below to continue.",
   "account.readiness.restart_required.title": "Restart MetaWork to continue",
   "account.readiness.restart_required.body":
-    "Your draft is safe. Close and reopen MetaWork before sending it.",
+    "Close and reopen MetaWork. No account action will be retried automatically.",
   "account.action_failed": "Account action needs attention",
   "account.error.no_api_keys":
     "No API Keys are available for this Metask account. Add one in Metask, then try again.",
@@ -58,13 +68,12 @@ export const enUS = {
   "account.error.authorization":
     "The Metask sign-in could not be completed. Start sign-in again.",
   "account.error.service":
-    "Metask is temporarily unavailable. Your draft is safe; try again shortly.",
+    "Metask is temporarily unavailable. Try again shortly.",
   "account.error.credentials":
     "MetaWork could not safely update the account saved on this device.",
   "account.error.local":
     "MetaWork could not finish preparing this task on this device. Try again.",
-  "account.error.generic":
-    "MetaWork could not finish preparing this task. Your draft is safe.",
+  "account.error.generic": "MetaWork could not finish preparing this account.",
   "account.cancelled": "The account action was cancelled.",
   "account.operation.oauth_callback": "Waiting for Metask authorization",
   "account.operation.token_exchange": "Completing Metask sign-in",
@@ -77,6 +86,7 @@ export const enUS = {
   "account.login": "Sign in with Metask",
   "account.reopen_login": "Open sign-in page again",
   "account.retry_preparation": "Try again",
+  "account.restart_close": "Close MetaWork",
   "account.reauthenticate": "Sign in again",
   "account.api_key": "API Key",
   "account.saved_key": "Saved API Key",
@@ -89,7 +99,7 @@ export const enUS = {
   "account.command_rejected":
     "That account action is no longer available. MetaWork kept the latest account state.",
   "account.command_failed":
-    "MetaWork could not complete that account action. Use the recovery action shown beside your draft.",
+    "MetaWork could not complete that account action. Use the recovery action shown here.",
   "account.cancel_rejected":
     "That account action has already finished. MetaWork checked the latest state.",
   "account.cancel_failed":
@@ -102,7 +112,9 @@ export const enUS = {
   "command.timeout_sync_failed":
     "{operation} took longer than expected, and the latest state could not be confirmed. Reconnect before trying again.",
   "workspace.label": "Workspace",
+  "workspace.choose_on_send": "Choose on send",
   "workspace.add": "Add",
+  "workspace.remove": "Remove",
   "workspace.switch": "Switch workspace",
   "workspace.activity": "Workspace activity",
   "workspace.attention_count": "{count} need attention",
@@ -111,30 +123,56 @@ export const enUS = {
   "workspace.none": "No workspace selected",
   "workspace.grant_ready": "Ready to start a task in this trusted workspace.",
   "workspace.selection_cancelled": "Workspace selection cancelled.",
-  "workspace.selection_failed": "Workspace selection failed: {error}",
+  "workspace.draft_conflict":
+    "That folder already has an unsent draft, so nothing was switched or overwritten. Choose another folder, or copy and clear this draft before trying again.",
+  "workspace.selection_failed":
+    "The workspace could not be opened. Choose it again.",
   "workspace.grant_confirmed": "Workspace access confirmed.",
   "workspace.access_required":
     "Confirm workspace access again before sending this draft.",
   "workspace.confirm_access": "Confirm access",
-  "workspace.starting_task": "Choosing workspace…",
+  "workspace.retry_removal": "Retry removal",
+  "workspace.removal_failed_short": "Removal failed",
+  "workspace.removal_started": "Workspace removal started.",
+  "workspace.removing_short": "Removing",
+  "workspace.removing_notice":
+    "Removing this workspace. You can’t start or continue tasks while removal is in progress.",
+  "workspace.remove_confirm_title": "Remove this workspace?",
+  "workspace.remove_confirm_body":
+    "Running tasks will stop. Local files and task records will not be deleted.",
+  "workspace.remove_confirm_action": "Remove workspace",
   "task.list": "Tasks",
   "task.count.one": "{count} task",
   "task.count.other": "{count} tasks",
   "task.item": "Task {id}",
   "task.new": "New task",
-  "task.start_new": "Start a new task",
-  "task.start_new_help":
-    "Choose or confirm a trusted workspace, then describe the outcome you need.",
   "task.open": "Open a task",
-  "task.empty_title": "Put this workspace to work.",
-  "task.empty_body":
-    "Describe a concrete outcome. MetaWork will keep the work, decisions, and results together.",
-  "task.no_tasks": "Choose a workspace, then start the first task.",
+  "task.empty_title": "Start with the outcome you want.",
+  "task.empty_body_with_workspace":
+    "Describe a clear outcome. The new task will use the current workspace, and MetaWork will keep the work, decisions, and result together.",
+  "task.empty_body_without_workspace":
+    "Describe a clear outcome and choose a workspace on first send. Cancelling the picker keeps your draft.",
+  "task.created_empty_body":
+    "This task is ready. Enter its first instruction to begin.",
+  "task.examples": "Local task examples",
+  "task.example.review":
+    "Review this project and identify the risks worth fixing first",
+  "task.example.test_failure":
+    "Find the root cause of the latest test failure and propose a fix",
+  "task.example.todo":
+    "Implement the highest-priority TODO in this repository and add tests",
+  "task.no_tasks":
+    "Start a new task; choose a folder before sending when one is needed.",
   "task.archived_hidden": "Archived tasks are hidden.",
   "task.show_archived": "Show archived ({count})",
   "task.hide_archived": "Hide archived",
   "task.archived": "Archived",
   "task.ready": "Ready",
+  "task.group.attention": "Needs your attention",
+  "task.group.running": "Running",
+  "task.group.queued": "Queued",
+  "task.group.recent": "Recent",
+  "task.group.archived": "Archived",
   "task.last_result": "Last result: {result}",
   "task.lifecycle.open": "Open",
   "task.lifecycle.closing": "Ending",
@@ -163,23 +201,24 @@ export const enUS = {
   "task.delete_confirm_body":
     "The conversation and activity will be removed from MetaWork. Files in the workspace stay untouched.",
   "task.stop": "Stop task",
-  "task.create_failed": "Task creation failed: {error}",
+  "task.create_failed":
+    "The task could not be created. Check your connection and try again.",
   "task.created": "Task created.",
-  "task.close_failed": "Task could not end: {error}",
+  "task.close_failed": "The task could not be ended. Refresh and try again.",
   "task.close_requested": "Task is ending.",
-  "task.rename_failed": "Task could not be renamed: {error}",
-  "task.archive_failed": "Task could not be archived: {error}",
-  "task.restore_failed": "Task could not be restored: {error}",
-  "task.delete_failed": "Task record could not be deleted: {error}",
+  "task.rename_failed": "The task could not be renamed. Try again.",
+  "task.archive_failed": "The task could not be archived. Try again.",
+  "task.restore_failed": "The task could not be restored. Try again.",
+  "task.delete_failed": "The task record could not be deleted. Try again.",
   "task.renamed": "Task renamed.",
   "task.archived_status": "Task archived.",
   "task.restored": "Task restored.",
   "task.deleted": "Task record deleted.",
-  "run.label": "Work item {id}",
   "run.tokens": "{count} tokens",
   "run.preparing": "Preparing the work…",
   "run.submit": "Send",
   "run.placeholder": "Describe the outcome you need…",
+  "run.context": "Current execution context",
   "run.placeholder_no_task": "Start a task first",
   "run.placeholder_archived": "Restore this task to continue",
   "run.placeholder_closing": "This task is ending",
@@ -189,10 +228,14 @@ export const enUS = {
   "run.draft_only":
     "Saved locally as a draft. You can send it after the current work finishes.",
   "run.started": "Work started.",
-  "run.start_failed": "Work could not start: {error}",
-  "run.stop_failed": "Task could not be stopped: {error}",
+  "run.start_failed":
+    "Work could not start. Check your connection and try again.",
+  "run.stop_failed":
+    "The stop request could not be confirmed. Refresh and try again.",
   "run.stop_requested": "Stopping the current work…",
   "run.terminal.completed": "Work completed",
+  "run.no_final_response":
+    "The work ended, but the Agent did not return a final response.",
   "run.terminal.stopped": "Work stopped",
   "run.terminal.interrupted": "Work interrupted",
   "run.terminal.failed": "Work failed",
@@ -217,29 +260,24 @@ export const enUS = {
   "tool.output_shortened": "Long details were shortened",
   "privacy.sensitive_hidden": "Sensitive values were hidden",
   "timeline.jump_latest": "Jump to latest",
-  "activity.title": "Task activity",
-  "activity.needs_attention": "Needs your attention",
-  "activity.current": "Current activity",
-  "activity.current_empty": "No task is active.",
-  "activity.current_draft": "Ready for the first instruction.",
-  "activity.current_ready": "Ready for your next instruction.",
-  "activity.current_working": "The task is working in the background.",
-  "activity.current_waiting": "A response is required to continue.",
-  "activity.current_recover":
-    "Review what happened, then prepare a new instruction when you're ready.",
-  "activity.current_archived": "Restore this task before continuing.",
-  "activity.current_closed": "This task no longer accepts instructions.",
-  "activity.current_unavailable":
-    "This task cannot continue safely. End it and start a new task.",
-  "activity.no_decision": "Nothing needs your attention.",
-  "activity.no_decision_help":
-    "Questions and approvals will appear here and remain attached to their task.",
-  "activity.response_required": "Work is waiting for your response.",
-  "activity.view_request": "View request",
-  "activity.tools": "Tools",
-  "activity.context": "Context and usage",
-  "activity.tokens_used": "Input and output tokens used by this task",
-  "approval.response_required": "Response required for work item {id}",
+  "inspector.eyebrow": "Task details",
+  "inspector.title": "Inspector",
+  "inspector.open": "Open Inspector",
+  "inspector.close": "Close Inspector",
+  "inspector.needs_attention": "Needs your attention",
+  "inspector.response_required": "Work is waiting for your response.",
+  "inspector.view_request": "View request",
+  "inspector.current_activity": "Current activity",
+  "inspector.last_run": "Last run",
+  "inspector.tools": "Tools and connections",
+  "inspector.context_usage": "Context and usage",
+  "inspector.tokens_this_run": "Input and output tokens for this run",
+  "inspector.input_tokens": "Input",
+  "inspector.output_tokens": "Output",
+  "inspector.cache_read_tokens": "Cache read",
+  "inspector.cache_creation_tokens": "Cache creation",
+  "inspector.view_details": "View details",
+  "approval.response_required": "Response required",
   "approval.allow_tool": "Allow {tool}?",
   "approval.arguments": "Arguments",
   "approval.deny": "Deny",
@@ -247,7 +285,7 @@ export const enUS = {
   "approval.choose": "Choose…",
   "approval.send_answers": "Continue",
   "approval.submit_shortcut": "Press ⌘/Ctrl + Enter to continue",
-  "approval.response_failed": "Couldn't send the response: {error}",
+  "approval.response_failed": "The response could not be sent. Try again.",
   "approval.response_sent": "Response sent.",
   "approval.sending": "Sending your response…",
   "approval.awaiting_snapshot":
@@ -263,7 +301,7 @@ export const enUS = {
   "ui.state.denied_session": "Denied for this task",
   "ui.state.cancelled": "Cancelled",
   "view.refresh_after_commit_failed":
-    "{operation} succeeded, but the latest view could not be loaded: {error}",
+    "{operation} succeeded, but the latest state has not loaded. Refresh to confirm it.",
   "operation.task_create": "Task creation",
   "operation.run_submit": "Starting work",
   "operation.run_stop": "Stopping work",
@@ -273,6 +311,7 @@ export const enUS = {
   "operation.task_archive": "Archiving the task",
   "operation.task_restore": "Restoring the task",
   "operation.task_delete": "Deleting the task record",
+  "operation.workspace_remove": "Removing the workspace",
   "search.open": "Search",
   "search.title": "Search MetaWork",
   "search.placeholder": "Search workspaces, tasks, and completed work…",
@@ -283,6 +322,40 @@ export const enUS = {
   "search.kind.task": "Task",
   "search.kind.instruction": "Instruction",
   "search.kind.completion": "Completion",
+  "account.menu": "Metask account menu",
+  "account.connected": "Metask connected",
+  "account.connection_attention": "Sign-in needs attention",
+  "account.logout_short": "Sign out…",
+  "account.api_fallback": "Metask API",
+  "account.model_fallback": "Available model",
+  "provider.anthropic": "Anthropic",
+  "provider.openai": "OpenAI",
+  "settings.title": "Settings",
+  "settings.back": "Back to workbench",
+  "settings.intro":
+    "Manage the defaults MetaWork uses when you start new work.",
+  "settings.sections": "Settings sections",
+  "settings.section_label": "Settings",
+  "settings.general": "General",
+  "settings.account_models": "Account & models",
+  "settings.language_help": "Changes apply immediately on this device.",
+  "settings.default_api": "Default API",
+  "settings.default_api_help":
+    "Changing API loads the model catalog owned by that Metask API.",
+  "settings.default_model": "Default model",
+  "settings.default_model_help":
+    "Used when you create a new task. Existing tasks keep their own model.",
+  "settings.loading_models_for": "Loading models available to {api}…",
+  "settings.existing_tasks_unchanged":
+    "Default changes apply only to new tasks. Existing task bindings and history remain unchanged.",
+  "settings.signout_title": "Sign out on this device",
+  "settings.signout_help":
+    "This clears Metask credentials from this device. Task records and workspace files are preserved; live work may need to finish first.",
+  "settings.signout_confirm":
+    "MetaWork will ask the Host to clear this device. Continue?",
+  "settings.open_account_models": "Open account and model settings",
+  "settings.task_binding_model":
+    "This task keeps the model bound when it was created.",
   "outcome.completed": "Completed",
   "outcome.stopped": "Stopped",
   "outcome.cancelled": "Stopped",
@@ -297,6 +370,33 @@ export const enUS = {
   "cause.queue_capacity_failure": "Workbench capacity reached",
   "cause.ui_pipeline_failure": "Response delivery failed",
   "cause.dependency_contract_failure": "Task runtime became incompatible",
+  "workspace.selection_unavailable":
+    "That workspace is no longer available. Refresh and choose another one.",
+  "account.options_updated":
+    "Available options were updated. Review them and choose again.",
+  "mutation.transport_failed": "MetaWork could not confirm the change.",
+  "mutation.reason.execution_changed":
+    "Your execution settings changed. Review them and try again.",
+  "mutation.reason.execution_unavailable":
+    "The selected execution setup is not available right now.",
+  "mutation.reason.workspace_changed":
+    "This workspace changed. Review its latest state and try again.",
+  "mutation.reason.workspace_unavailable":
+    "This workspace is no longer available.",
+  "mutation.reason.workspace_removing":
+    "This workspace is being removed. Wait for it to finish.",
+  "mutation.reason.removal_failed":
+    "This workspace could not be removed. Some tasks may have stopped. Local files and task records are still preserved.",
+  "mutation.reason.binding_changed":
+    "This task's execution setup changed. Review it before continuing.",
+  "mutation.reason.binding_unavailable":
+    "This task's execution setup is no longer available.",
+  "mutation.reason.task_unavailable": "This task is no longer available.",
+  "mutation.reason.task_busy": "This task is already working.",
+  "mutation.reason.capacity_reached":
+    "MetaWork is at capacity. Finish or close some work, then try again.",
+  "mutation.reason.shutting_down":
+    "MetaWork is closing. Try again after restart.",
 } as const;
 
 export type MessageId = keyof typeof enUS;

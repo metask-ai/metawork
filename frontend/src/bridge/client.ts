@@ -14,20 +14,29 @@ import {
   assertCancelAccepted,
   assertCloseAccepted,
   assertDisconnected,
-  assertRunAccepted,
   assertSignalAcknowledged,
   assertTaskArchived,
   assertTaskFlag,
   assertUiResponseAccepted,
+  assertWindowDragStarted,
+  assertWindowControlCompleted,
   decodeAccountCommandResult,
   decodeHostSignalEvent,
   decodePingResponse,
   decodeRendererBridgeConnect,
   decodeRevisionNotification,
-  decodeTaskId,
+  decodeTaskCreateResult,
+  decodeTaskRunResult,
+  decodeWorkspaceMutationResult,
   decodeWorkspaceChoice,
 } from "./decode-contracts.ts";
+import { RendererBridgeContractError } from "./contract-error.ts";
 import { fetchWorkbenchSnapshot } from "./snapshot/snapshot-client.ts";
+
+export {
+  RendererBridgeContractError,
+  type RendererBridgeContractErrorCode,
+} from "./contract-error.ts";
 
 export type NativeBridge = NonNullable<typeof window.zero>;
 
@@ -42,19 +51,6 @@ export class BridgeCommandTimeoutError extends Error {
     this.name = "BridgeCommandTimeoutError";
     this.command = command;
     this.timeoutMs = timeoutMs;
-  }
-}
-
-export type RendererBridgeContractErrorCode =
-  "identity_mismatch" | "revision_mismatch" | "invalid_response";
-
-export class RendererBridgeContractError extends Error {
-  readonly code: RendererBridgeContractErrorCode;
-
-  constructor(code: RendererBridgeContractErrorCode, diagnostic: string) {
-    super(`Renderer Bridge contract failed: ${diagnostic}`);
-    this.name = "RendererBridgeContractError";
-    this.code = code;
   }
 }
 
@@ -162,6 +158,18 @@ export class BridgeClient {
     );
   }
 
+  async beginWindowDrag(clicks: 1) {
+    assertWindowDragStarted(
+      await this.invoke(commands.windowBeginDrag, { clicks }),
+    );
+  }
+
+  async controlWindow(action: "minimize" | "toggle_maximize" | "close") {
+    assertWindowControlCompleted(
+      await this.invoke(commands.windowControl, { action }),
+    );
+  }
+
   fetchSnapshot() {
     return fetchWorkbenchSnapshot((command, payload) =>
       this.invoke(command, payload),
@@ -188,6 +196,26 @@ export class BridgeClient {
     // Host work. Their lifetime must not be confused with a wedged command.
     return decodeWorkspaceChoice(
       await this.bridge().invoke(commands.chooseWorkspace, {}),
+    );
+  }
+
+  async selectWorkspace(workspaceId: string, expectedWorkspaceEpoch: string) {
+    return decodeWorkspaceMutationResult(
+      await this.invoke(commands.selectWorkspace, {
+        workspaceId,
+        expectedWorkspaceEpoch,
+      }),
+      workspaceId,
+    );
+  }
+
+  async removeWorkspace(workspaceId: string, expectedWorkspaceEpoch: string) {
+    return decodeWorkspaceMutationResult(
+      await this.invoke(commands.removeWorkspace, {
+        workspaceId,
+        expectedWorkspaceEpoch,
+      }),
+      workspaceId,
     );
   }
 
@@ -221,15 +249,31 @@ export class BridgeClient {
     );
   }
 
-  async selectApiKey(apiKeyId: string) {
+  async selectApiKey(
+    selectionId: string,
+    expectedCatalogGeneration: string,
+    expectedExecutionGeneration: string,
+  ) {
     return decodeAccountCommandResult(
-      await this.invoke(commands.accountSelectApiKey, { apiKeyId }),
+      await this.invoke(commands.accountSelectApiKey, {
+        selectionId,
+        expectedCatalogGeneration,
+        expectedExecutionGeneration,
+      }),
     );
   }
 
-  async selectModel(modelId: string) {
+  async selectModel(
+    selectionId: string,
+    expectedCatalogGeneration: string,
+    expectedExecutionGeneration: string,
+  ) {
     return decodeAccountCommandResult(
-      await this.invoke(commands.accountSelectModel, { modelId }),
+      await this.invoke(commands.accountSelectModel, {
+        selectionId,
+        expectedCatalogGeneration,
+        expectedExecutionGeneration,
+      }),
     );
   }
 
@@ -239,15 +283,23 @@ export class BridgeClient {
     );
   }
 
-  async createTask(workspaceGrant: string) {
-    return decodeTaskId(
-      await this.invoke(commands.createTask, { workspaceGrant }),
+  async createTask(
+    workspaceId: string,
+    expectedWorkspaceEpoch: string,
+    expectedExecutionGeneration: string,
+  ) {
+    return decodeTaskCreateResult(
+      await this.invoke(commands.createTask, {
+        workspaceId,
+        expectedWorkspaceEpoch,
+        expectedExecutionGeneration,
+      }),
     );
   }
 
-  async run(taskId: string, prompt: string) {
-    return assertRunAccepted(
-      await this.invoke(commands.run, { taskId, prompt }),
+  async run(taskId: string, expectedBindingEpoch: string, prompt: string) {
+    return decodeTaskRunResult(
+      await this.invoke(commands.run, { taskId, expectedBindingEpoch, prompt }),
       taskId,
     );
   }

@@ -1,5 +1,6 @@
 import type { WorkbenchSnapshot } from "./contracts.ts";
-import { BridgeClient, RendererBridgeContractError } from "./client.ts";
+import { BridgeClient } from "./client.ts";
+import { RendererBridgeContractError } from "./contract-error.ts";
 import { RevisionNotificationQueue } from "./revision-notification.ts";
 import { SnapshotDemand } from "./snapshot/snapshot-demand.ts";
 
@@ -15,7 +16,12 @@ export type WorkbenchConnectionStatus =
   | { kind: "refresh_failed"; diagnostic: string }
   | {
       kind: "contract_failed";
-      source: "bootstrap" | "revision" | "host_signal_ack" | "host_signal";
+      source:
+        | "bootstrap"
+        | "snapshot"
+        | "revision"
+        | "host_signal_ack"
+        | "host_signal";
       diagnostic: string;
     };
 
@@ -46,12 +52,13 @@ export class WorkbenchConnection {
     this.client = client;
     this.callbacks = callbacks;
     this.revisions = new RevisionNotificationQueue((revision) => {
-      void this.refresh(revision).catch((error) =>
+      void this.refresh(revision).catch((error) => {
+        if (error instanceof RendererBridgeContractError) return;
         this.callbacks.onStatus({
           kind: "refresh_failed",
           diagnostic: errorText(error),
-        }),
-      );
+        });
+      });
     });
   }
 
@@ -88,7 +95,8 @@ export class WorkbenchConnection {
       try {
         await this.refresh();
         return;
-      } catch {
+      } catch (error) {
+        if (error instanceof RendererBridgeContractError) throw error;
         this.markDisconnected();
         await this.client.disconnect(stale).catch(() => undefined);
       }
@@ -147,6 +155,10 @@ export class WorkbenchConnection {
           } catch (error) {
             if (this.generation !== attemptGeneration || this.stopped) return;
             this.callbacks.onReady(false);
+            if (error instanceof RendererBridgeContractError) {
+              this.failNotification("snapshot", error);
+              throw error;
+            }
             const delay = this.demand.failAttempt();
             if (delay === null) {
               this.callbacks.onViewSyncFailed(true);

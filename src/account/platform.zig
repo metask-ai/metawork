@@ -2,13 +2,16 @@ const std = @import("std");
 const builtin = @import("builtin");
 const native_sdk = @import("native_sdk");
 const oauth = @import("account_oauth");
+const account_state = @import("account_state");
 const store = @import("account_credential_store");
+const windows_store = @import("account_windows_store");
 
 const manifest_name = store.manifest_name;
 // The contract bounds UTF-8 source bytes, while JSON may expand one byte into
 // a six-byte escape. Keep the persisted envelope large enough for every
 // contract-valid manifest, not only ordinary production identifiers.
 const manifest_bytes = 16 * 1024;
+const public_state_bytes = 8 * 1024;
 
 pub const PlatformError = error{
     WrongThread,
@@ -242,6 +245,291 @@ pub const MacosBackend = struct {
         return true;
     }
 };
+
+/// Windows intentionally does not share the macOS manifest/A-B persistence
+/// protocol. Credential Manager owns one refresh token; account.json contains
+/// only secret-free identity and catalog selection.
+pub const WindowsBackend = struct {
+    services: native_sdk.platform.PlatformServices,
+    io: std.Io,
+    main_thread_id: std.Thread.Id,
+    account_dir: std.Io.Dir,
+
+    pub fn init(
+        services: native_sdk.platform.PlatformServices,
+        io: std.Io,
+        main_thread_id: std.Thread.Id,
+        absolute_account_dir: []const u8,
+    ) (PlatformError || windows_store.StoreError)!WindowsBackend {
+        if (std.Thread.getCurrentId() != main_thread_id)
+            return error.WrongThread;
+        if (!std.fs.path.isAbsolute(absolute_account_dir))
+            return error.AccountDirectoryUnavailable;
+        const dir = std.Io.Dir.cwd().createDirPathOpen(
+            io,
+            absolute_account_dir,
+            .{
+                .open_options = .{ .follow_symlinks = false },
+                .permissions = directoryPermissions(),
+            },
+        ) catch return error.AccountDirectoryUnavailable;
+        return .{
+            .services = services,
+            .io = io,
+            .main_thread_id = main_thread_id,
+            .account_dir = dir,
+        };
+    }
+
+    pub fn deinit(self: *WindowsBackend) void {
+        self.assertMainThread() catch @panic(
+            "Account platform released off main thread",
+        );
+        self.account_dir.close(self.io);
+        self.* = undefined;
+    }
+
+    pub fn backend(self: *WindowsBackend) windows_store.Backend {
+        return .{
+            .context = self,
+            .set_refresh_token_fn = setRefreshToken,
+            .get_refresh_token_fn = getRefreshToken,
+            .delete_refresh_token_fn = deleteRefreshToken,
+            .load_public_state_fn = loadPublicState,
+            .commit_public_state_fn = commitPublicState,
+            .delete_public_state_fn = deletePublicState,
+        };
+    }
+
+    pub fn openAuthorizationUrl(
+        self: *WindowsBackend,
+        url: []const u8,
+    ) PlatformError!void {
+        try self.assertMainThread();
+        if (url.len == 0 or
+            url.len > oauth.Limits.authorization_url_bytes or
+            !std.mem.startsWith(u8, url, oauth.authorize_url ++ "?"))
+            return error.InvalidAuthorizationUrl;
+        self.services.openExternalUrl(url) catch
+            return error.InvalidAuthorizationUrl;
+    }
+
+    fn assertMainThread(self: *const WindowsBackend) PlatformError!void {
+        if (std.Thread.getCurrentId() != self.main_thread_id)
+            return error.WrongThread;
+    }
+
+    fn setRefreshToken(
+        context: *anyopaque,
+        secret_value: []const u8,
+    ) windows_store.StoreError!void {
+        const self: *WindowsBackend = @ptrCast(@alignCast(context));
+        self.assertMainThread() catch return error.WriteFailed;
+        if (secret_value.len == 0 or
+            secret_value.len > native_sdk.platform.max_credential_secret_bytes)
+            return error.WriteFailed;
+        self.services.setCredential(.{
+            .service = windows_store.service,
+            .account = windows_store.refresh_token_account,
+            .secret = secret_value,
+        }) catch return error.WriteFailed;
+    }
+
+    fn getRefreshToken(
+        context: *anyopaque,
+        output: []u8,
+    ) windows_store.StoreError!?[]const u8 {
+        const self: *WindowsBackend = @ptrCast(@alignCast(context));
+        self.assertMainThread() catch return error.ReadFailed;
+        return self.services.getCredential(.{
+            .service = windows_store.service,
+            .account = windows_store.refresh_token_account,
+        }, output) catch |err| switch (err) {
+            error.CredentialNotFound => null,
+            else => error.ReadFailed,
+        };
+    }
+
+    fn deleteRefreshToken(
+        context: *anyopaque,
+    ) windows_store.StoreError!void {
+        const self: *WindowsBackend = @ptrCast(@alignCast(context));
+        self.assertMainThread() catch return error.DeleteFailed;
+        self.services.deleteCredential(.{
+            .service = windows_store.service,
+            .account = windows_store.refresh_token_account,
+        }) catch |err| switch (err) {
+            error.CredentialNotFound => {},
+            else => return error.DeleteFailed,
+        };
+    }
+
+    fn loadPublicState(
+        context: *anyopaque,
+    ) windows_store.StoreError!?windows_store.PublicState {
+        const self: *WindowsBackend = @ptrCast(@alignCast(context));
+        self.assertMainThread() catch return error.ReadFailed;
+        var file = self.account_dir.openFile(
+            self.io,
+            windows_store.public_state_name,
+            .{ .follow_symlinks = false },
+        ) catch |err| switch (err) {
+            error.FileNotFound => return null,
+            else => return error.ReadFailed,
+        };
+        // Zig 0.16 opens a no-follow Windows file asynchronously but currently
+        // mislabels the returned handle as synchronous. Correct the flag so
+        // std.Io uses its APC path instead of treating STATUS_PENDING as an
+        // impossible state.
+        file.flags.nonblocking = true;
+        defer file.close(self.io);
+        const length = file.length(self.io) catch return error.ReadFailed;
+        if (length == 0 or length > public_state_bytes)
+            return error.InvalidData;
+        var bytes: [public_state_bytes]u8 = undefined;
+        const read = file.readPositionalAll(
+            self.io,
+            bytes[0..@intCast(length)],
+            0,
+        ) catch return error.ReadFailed;
+        if (read != length) return error.ReadFailed;
+        return try decodeWindowsPublicState(bytes[0..read]);
+    }
+
+    fn commitPublicState(
+        context: *anyopaque,
+        value: windows_store.PublicState,
+    ) windows_store.StoreError!void {
+        const self: *WindowsBackend = @ptrCast(@alignCast(context));
+        self.assertMainThread() catch return error.WriteFailed;
+        var encoded_storage: [public_state_bytes]u8 = undefined;
+        const encoded = encodeWindowsPublicState(
+            &encoded_storage,
+            value,
+        ) catch return error.InvalidData;
+        var random: [8]u8 = undefined;
+        defer std.crypto.secureZero(u8, &random);
+        std.Io.randomSecure(self.io, &random) catch return error.WriteFailed;
+        const random_hex = std.fmt.bytesToHex(random, .lower);
+        var temp_name_storage: [64]u8 = undefined;
+        var name_writer = std.Io.Writer.fixed(&temp_name_storage);
+        name_writer.print(
+            ".account.{s}.tmp",
+            .{random_hex},
+        ) catch return error.WriteFailed;
+        const temp_name = name_writer.buffered();
+        const file = self.account_dir.createFile(
+            self.io,
+            temp_name,
+            .{
+                .exclusive = true,
+                .permissions = privateFilePermissions(),
+                .resolve_beneath = true,
+            },
+        ) catch return error.WriteFailed;
+        var file_open = true;
+        var temp_exists = true;
+        defer {
+            if (file_open) file.close(self.io);
+            if (temp_exists) self.account_dir.deleteFile(
+                self.io,
+                temp_name,
+            ) catch {};
+        }
+        file.writeStreamingAll(self.io, encoded) catch
+            return error.WriteFailed;
+        file.sync(self.io) catch return error.WriteFailed;
+        file.close(self.io);
+        file_open = false;
+        self.account_dir.rename(
+            temp_name,
+            self.account_dir,
+            windows_store.public_state_name,
+            self.io,
+        ) catch return error.WriteFailed;
+        temp_exists = false;
+    }
+
+    fn deletePublicState(
+        context: *anyopaque,
+    ) windows_store.StoreError!void {
+        const self: *WindowsBackend = @ptrCast(@alignCast(context));
+        self.assertMainThread() catch return error.DeleteFailed;
+        self.account_dir.deleteFile(
+            self.io,
+            windows_store.public_state_name,
+        ) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return error.DeleteFailed,
+        };
+    }
+};
+
+pub const NativeBackend = if (builtin.os.tag == .windows)
+    WindowsBackend
+else
+    MacosBackend;
+
+const WindowsPublicStateWire = struct {
+    account_id: []const u8,
+    profile_id: []const u8,
+    display_name: []const u8,
+    api_key_id: ?[]const u8,
+    model_id: ?[]const u8,
+};
+
+pub fn encodeWindowsPublicState(
+    output: []u8,
+    value: windows_store.PublicState,
+) ![]const u8 {
+    _ = try value.identity();
+    if ((value.apiKeyId().len == 0) != (value.modelId().len == 0))
+        return error.InvalidData;
+    const wire: WindowsPublicStateWire = .{
+        .account_id = value.account_id.view(),
+        .profile_id = value.profile_id.view(),
+        .display_name = value.display_name.view(),
+        .api_key_id = if (value.apiKeyId().len == 0)
+            null
+        else
+            value.apiKeyId(),
+        .model_id = if (value.modelId().len == 0)
+            null
+        else
+            value.modelId(),
+    };
+    var writer = std.Io.Writer.fixed(output);
+    try std.json.Stringify.value(wire, .{}, &writer);
+    return writer.buffered();
+}
+
+pub fn decodeWindowsPublicState(
+    input: []const u8,
+) windows_store.StoreError!windows_store.PublicState {
+    if (input.len == 0 or input.len > public_state_bytes)
+        return error.InvalidData;
+    var scratch: [public_state_bytes * 2]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&scratch);
+    var parsed = std.json.parseFromSlice(
+        WindowsPublicStateWire,
+        fba.allocator(),
+        input,
+        .{ .ignore_unknown_fields = false },
+    ) catch return error.InvalidData;
+    defer parsed.deinit();
+    if ((parsed.value.api_key_id == null) !=
+        (parsed.value.model_id == null)) return error.InvalidData;
+    const identity = account_state.AccountIdentity.init(
+        parsed.value.account_id,
+        parsed.value.profile_id,
+        parsed.value.display_name,
+    ) catch return error.InvalidData;
+    return windows_store.PublicState.init(
+        identity,
+        parsed.value.api_key_id orelse "",
+        parsed.value.model_id orelse "",
+    );
+}
 
 fn directoryPermissions() std.Io.File.Permissions {
     return if (builtin.os.tag == .windows)
@@ -602,4 +890,87 @@ test "manifest codec accepts worst-case JSON escaping within contract bounds" {
     try std.testing.expectEqualStrings(&display_name, decoded.displayName());
     try std.testing.expectEqualStrings(&api_key_id, decoded.apiKeyId());
     try std.testing.expectEqualStrings(&model, decoded.modelView());
+}
+
+test "Windows public state codec is unversioned and secret-free" {
+    const identity = try account_state.AccountIdentity.init(
+        "account-1",
+        "profile-1",
+        "MetaWork User",
+    );
+    const public_state = try windows_store.PublicState.init(
+        identity,
+        "api-42",
+        "model-7",
+    );
+    var encoded_storage: [public_state_bytes]u8 = undefined;
+    const encoded = try encodeWindowsPublicState(
+        &encoded_storage,
+        public_state,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "version") == null);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "token") == null);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "credential") == null);
+    const decoded = try decodeWindowsPublicState(encoded);
+    try std.testing.expectEqualStrings("account-1", decoded.account_id.view());
+    try std.testing.expectEqualStrings("api-42", decoded.apiKeyId());
+    try std.testing.expectEqualStrings("model-7", decoded.modelId());
+}
+
+test "Windows public state codec rejects versions and partial selections" {
+    try std.testing.expectError(
+        error.InvalidData,
+        decodeWindowsPublicState(
+            \\{"version":2,"account_id":"account-1","profile_id":"profile-1","display_name":"User","api_key_id":null,"model_id":null}
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidData,
+        decodeWindowsPublicState(
+            \\{"account_id":"account-1","profile_id":"profile-1","display_name":"User","api_key_id":"api-1","model_id":null}
+        ),
+    );
+}
+
+test "Windows public state cold-start read ignores manifest.v2" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var backend: WindowsBackend = .{
+        .services = .{},
+        .io = std.testing.io,
+        .main_thread_id = std.Thread.getCurrentId(),
+        .account_dir = tmp.dir,
+    };
+    const identity = try account_state.AccountIdentity.init(
+        "account-1",
+        "profile-1",
+        "MetaWork User",
+    );
+    const first = try windows_store.PublicState.init(
+        identity,
+        "api-1",
+        "model-1",
+    );
+    try backend.backend().commitPublicState(first);
+    const second = try windows_store.PublicState.init(
+        identity,
+        "api-2",
+        "model-2",
+    );
+    try backend.backend().commitPublicState(second);
+
+    const legacy = try tmp.dir.createFile(
+        std.testing.io,
+        store.manifest_name,
+        .{},
+    );
+    try legacy.writeStreamingAll(
+        std.testing.io,
+        "not-a-valid-macos-manifest",
+    );
+    legacy.close(std.testing.io);
+
+    const restored = (try backend.backend().loadPublicState()).?;
+    try std.testing.expectEqualStrings("api-2", restored.apiKeyId());
+    try std.testing.expectEqualStrings("model-2", restored.modelId());
 }

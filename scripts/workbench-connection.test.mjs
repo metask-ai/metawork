@@ -23,14 +23,25 @@ function snapshot(revision) {
       displayName: "",
       apiKeys: [],
       models: [],
-      selectedApiKeyId: "",
-      selectedModel: "",
+      selectedApiKeySelectionId: "",
+      selectedModelSelectionId: "",
       canCreateTask: false,
       errorCode: "none",
       safeDiagnostic: "",
       catalogGeneration: "0",
       executionGeneration: "0",
     },
+    capabilities: {
+      taskHistoryPersistence: false,
+      conversationRecovery: false,
+      executionRebind: false,
+      structuredPlan: false,
+      typedOutputs: false,
+      typedFileChanges: false,
+      persistentWorkspacePermissions: false,
+    },
+    selectedWorkspaceId: null,
+    workspaces: [],
     tasks: [],
   };
 }
@@ -46,7 +57,7 @@ test("contract mismatch is terminal and never enters connection retry backoff", 
       connectCalls += 1;
       throw new RendererBridgeContractError(
         "revision_mismatch",
-        "Host requires metawork.renderer-bridge revision 2",
+        "Host requires metawork.renderer-bridge revision 1",
       );
     },
     disconnect: async () => assert.fail("no generation was established"),
@@ -63,6 +74,38 @@ test("contract mismatch is terminal and never enters connection retry backoff", 
   assert.equal(connectCalls, 2);
   assert.equal(statuses.at(-1)?.kind, "contract_failed");
   assert.equal(statuses.at(-1)?.source, "bootstrap");
+});
+
+test("snapshot contract failure is terminal and never enters refresh retry backoff", async () => {
+  let fetchCalls = 0;
+  const statuses = [];
+  const failed = [];
+  const client = {
+    available: () => true,
+    onWorkbenchRevision: () => () => undefined,
+    onHostSignal: () => () => undefined,
+    connect: async () => "1",
+    disconnect: async () => undefined,
+    fetchSnapshot: async () => {
+      fetchCalls += 1;
+      throw new RendererBridgeContractError(
+        "invalid_response",
+        "snapshot shape is stale",
+      );
+    },
+  };
+  const connection = new WorkbenchConnection(client, {
+    onSnapshot: () => assert.fail("invalid snapshot must not publish"),
+    onStatus: (status) => statuses.push(status),
+    onReady: () => undefined,
+    onViewSyncFailed: (value) => failed.push(value),
+  });
+
+  await assert.rejects(connection.start(), RendererBridgeContractError);
+  assert.equal(fetchCalls, 1);
+  assert.equal(statuses.at(-1)?.kind, "contract_failed");
+  assert.equal(statuses.at(-1)?.source, "snapshot");
+  assert.equal(failed.at(-1), true);
 });
 
 test("Workbench connection publishes only synchronized snapshots", async () => {

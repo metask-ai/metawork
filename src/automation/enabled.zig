@@ -10,6 +10,7 @@ const account_contract = @import("metawork_account_contract");
 pub const enabled = true;
 
 const activation_env = "METAWORK_AUTOMATION";
+const workspace_env = "METAWORK_AUTOMATION_WORKSPACE";
 const inline_origin = "zero://inline";
 const allowed_origins = [_][]const u8{ "zero://app", inline_origin };
 const agentcore_vertical_provider_base_url_env =
@@ -57,6 +58,16 @@ pub const Runtime = struct {
         };
     }
 
+    /// Returns the temporary Workspace capability injected by the vertical
+    /// harness. The Dispatcher consumes it through the ordinary
+    /// `workspaces.choose` command; it is never a Task-create escape hatch.
+    pub fn workspaceRoot(self: *const Runtime) ?[]const u8 {
+        if (!self.active()) return null;
+        const env_map = self.env_map orelse return null;
+        const root = env_map.get(workspace_env) orelse return null;
+        return if (root.len == 0) null else root;
+    }
+
     pub fn productPolicy(self: *Runtime, base: native_sdk.BridgePolicy) native_sdk.BridgePolicy {
         if (!self.active()) return base;
         std.debug.assert(base.commands.len <= self.policy_commands.len);
@@ -102,4 +113,22 @@ test "automation policy changes authority without adding a data plane" {
     const policy = runtime.productPolicy(base);
     try std.testing.expectEqual(base.commands.len, policy.commands.len);
     try std.testing.expectEqualStrings(inline_origin, policy.commands[0].origins[1]);
+}
+
+test "automation workspace is an explicit activation-scoped capability" {
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    var runtime = Runtime.init(&env);
+    defer runtime.deinit();
+
+    try std.testing.expectEqual(@as(?[]const u8, null), runtime.workspaceRoot());
+    try env.put(activation_env, "1");
+    try std.testing.expectEqual(@as(?[]const u8, null), runtime.workspaceRoot());
+    try env.put(workspace_env, "");
+    try std.testing.expectEqual(@as(?[]const u8, null), runtime.workspaceRoot());
+    try env.put(workspace_env, "/tmp/metawork-automation");
+    try std.testing.expectEqualStrings(
+        "/tmp/metawork-automation",
+        runtime.workspaceRoot().?,
+    );
 }

@@ -53,7 +53,7 @@ export function ApprovalPanel({
       aria-busy={responseInFlight}
     >
       <p className="font-mono text-[10px] tracking-[0.14em] text-amber-ink uppercase">
-        {t("approval.response_required", { id: pending.runId })}
+        {t("approval.response_required")}
       </p>
       {pending.redacted && (
         <p className="projection-note" role="note">

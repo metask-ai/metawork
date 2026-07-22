@@ -9,7 +9,7 @@
 登录与执行配置是两个独立门槛：
 
 - **C1 登录**：OAuth、profile identity、token 恢复/刷新、退出和本地安全存储。当前信息已经足够实现，不依赖模型、API Key 或 AgentCore。
-- **C2 执行配置**：API Key catalog、model catalog 和 typed/fixed `ExecutionTarget { provider_kind, base_url, model }`。只有 execution credential 与原子 manifest 提交完成后，Account 才能发布 `execution_ready`；Workbench 安装同一 generation 后才能创建 Agent Task。
+- **C2 执行配置**：API Key catalog、model catalog 和 typed/fixed `ExecutionTarget { provider_kind, base_url, model }`。只有平台对应的持久化边界完成后，Account 才能发布 `execution_ready`；Workbench 安装同一 generation 后才能创建 Agent Task。macOS 的边界是 execution credential 与 `manifest.v2` 原子提交；Windows 的边界只提交无 secret 的 API/model 选择，execution credential 保持进程内。
 
 MetaWork 只作为 Metask Account API 和 AgentCore bundle 的消费方。本文档不要求、也不授权修改 Metask 内部实现仓库（精确路径标识为 `cc-t2z/metacodes`）。
 
@@ -41,6 +41,10 @@ Metask 产品 owner 已确认 MetaWork 作为 Metask 第一方客户端复用当
 
 ## 3. C1 本地持久化合同
 
+两条平台路径独立拥有自己的存储语义。`manifest.v2`、双 slot、marker 和 persistence revision 只属于 macOS；Windows 不读取、迁移、删除或解释这些数据。
+
+### 3.1 macOS
+
 macOS 使用 MetaWork 自己的命名空间，不读取或共享 `~/.metacode/auth.json`：
 
 - Keychain service：`dev.metawork.account.v2`；
@@ -52,14 +56,28 @@ macOS 使用 MetaWork 自己的命名空间，不读取或共享 `~/.metacode/au
 - Keychain/open-browser 操作只能在 Native SDK 主线程执行；网络与 loopback wait 在有界 Account worker 上执行；
 - cancel、deadline、superseding attempt 和 shutdown 必须关闭 listener、停止网络操作并 join worker。
 
-### 3.1 持久化 revision 策略
+#### macOS persistence revision 策略
 
 Account persistence revision 与 Renderer Bridge revision、AgentCore ABI 和 bundle manifest schema 相互独立。当前 revision `2` 是一次真实的 hard cut：revision 1 只保存 OAuth family，revision 2 增加 execution credential family、统一 committed manifest 和 execution high watermark，因此不能把 revision 1 数据解释为当前状态。
 
 - revision 只在持久化布局、原子提交语义或安全解释发生不兼容变化时升级；增加内存字段、UI 字段或未持久化能力不升级；
 - Keychain service、manifest 文件名和 manifest body revision 分别隔离 secret namespace、非秘密元数据文件和内容校验，三者由 `account/credential_store.zig` 统一拥有，平台适配层不得另行定义版本；
 - pre-1.0 不维护多版本 parser 或静默迁移。hard cut 必须显式决定旧 secret 与 manifest 的删除方式；不得读取旧数据后猜测补字段，也不得让不可达 credential 永久遗留；
-- 当前代码只接受 revision 2。未来若没有真实不兼容的持久化变化，不得因为产品版本、Bridge revision 或 AgentCore ABI 变化联动升级。
+- macOS 代码只接受 revision 2。未来若没有真实不兼容的 macOS 持久化变化，不得因为产品版本、Bridge revision、Windows 存储布局或 AgentCore ABI 变化联动升级。
+
+### 3.2 Windows
+
+Windows 使用一条直接、无版本的恢复路径：
+
+- Windows Credential Manager 的 service 为 `dev.metawork.account`，只保存一个 `metask-refresh-token`；
+- `account.json` 只保存 account/profile/display name 与最近一次已提交的 API/model selection identifier，不含 schema/revision 字段；
+- access token、Provider API Key、base URL、provider、execution generation 和完整 execution config 都不跨进程持久化；
+- 冷启动只有同时取得 refresh token 与合法 `account.json` 才恢复 `account_only`，随后先刷新 OAuth 并重新读取 Metask profile identity；profile 必须与公共状态精确一致，refresh response 提供 `account_id` 时也必须精确一致。response 省略可选 `account_id` 时沿用已保存 account id 仅用于组成 identity，仍必须完成远端 profile 验证，不能直接信任磁盘。验证通过后再拉取 API/model catalog，并在历史选择仍属于当前 catalog 时于内存重建 execution；
+- 历史选择失效时保持登录并请求用户重新选择，不从文件重建 Provider、base URL 或 credential；refresh 无效进入 `reauth_required`，网络失败保留可重试状态；
+- 登录先原子替换 `account.json`，再写单个 refresh token；任一步失败都不提交内存登录事实。刷新只替换 refresh token，选择变更只替换 `account.json`；
+- logout 先删除 refresh token，再删除 `account.json`，任一步失败都不声称退出成功；
+- 旧 `manifest.v2` 与 `dev.metawork.account.v2` 条目保持原样但完全忽略，不做兼容读取、迁移或静默清理。用户在 Windows hard cut 后只需重新登录一次；
+- 快速开发阶段若 Windows 布局需要改变，直接原地 hard cut；不得自行增加版本号。任何合同类版本标识变更仍必须先得到用户显式同意。
 
 ## 4. C2 已锁定的目录合同
 
@@ -71,14 +89,16 @@ API Key catalog：
 - 当前只接受 `page = 1`、`page_size = 100`、`pages = 1` 且 `total == items.len`，不发布不完整分页；
 - item 必须包含数值 `id`、`name`、完整 secret `key`、`status`、`group_id` 和完整 group；只发布 item 与 group 均为精确 `active` 的条目；
 - decoder 严格校验上述消费字段、类型、语义和 byte/entry bound；服务端新增的未消费 metadata 不属于产品合同，不得破坏客户端；
-- API Key secret 只由 Account catalog、execution staging 和 Keychain ownership 链持有；Renderer 只能看到十进制 id、name 和最后四位。
+- API Key secret 只由 Account catalog 与 execution staging/runtime ownership 链持有；macOS 可按本合同进入 Keychain execution family，Windows 始终只在当前进程持有。Renderer 只能看到十进制 id、name 和最后四位。
 
 Model catalog：
 
 - 选中 API Key 后，以该 Key 作为 Bearer，并携带同一 `X-Metacode-Profile-ID`；
 - 固定请求 `GET https://napi.metask-ai.com/v1/models`；
 - 成功响应严格读取消费的 list 根字段和 `data[]`；拒绝缺失/非法消费字段、重复 model id、`has_more = true`、超限字段和超限集合，但允许服务端增加未消费 metadata；
-- model 只向产品投影有界 `id` 与可选 `display_name`；未消费的 capability 字段不进入客户端 typed contract。服务端增删这类 metadata，或以 `0` 表达 unknown/placeholder token capability，都不阻止模型进入目录，也不得被 MetaWork 推断为真实能力或 AgentCore 配置。
+- model 只向产品投影有界 `id` 与可选 `display_name`；投影同时发布该目录所属的脱敏 API Key selection identity，Renderer 不得把候选 API 的 model id 与已提交默认 API 混用；
+- 已有 ready execution 上切换 API 或模型时，Account 先保留已提交 execution，并用当前 OAuth/profile 重新加载完整 API catalog，再校验请求的 API、加载其模型并校验模型；secure-zero 后的旧 private catalog 不得被假定仍持有 credential。候选 private/public catalog 与 committed public catalog 分槽，只有 ownership 校验和 persistence 全部成功后才原子安装新的默认 generation 并提交候选目录。加载、选择或持久化确定失败必须完整丢弃候选，不得破坏旧默认配置，也不得把既有 Task 改绑；用户只可在进入 credential persistence 前取消，持久化 effect 开始后必须等待 completion 被 main thread 消费，不得用取消制造内存/磁盘 generation 分叉；
+- 未消费的 capability 字段不进入客户端 typed contract。服务端增删这类 metadata，或以 `0` 表达 unknown/placeholder token capability，都不阻止模型进入目录，也不得被 MetaWork 推断为真实能力或 AgentCore 配置。
 
 ## 5. Provider 与 ExecutionTarget
 
@@ -91,9 +111,9 @@ Model catalog：
 
 其他 platform 当前 fail closed。production 不接受 Renderer、环境变量或任意 URL 覆盖。
 
-Account 同时持久化 token 的 `account_id` 与当前 `profile.id`。后者用于请求 header、catalog ownership 和 execution credential 归属；重认证身份不一致时不得沿用旧 execution。
+Account 同时保存 token 的 `account_id` 与当前 `profile.id`。macOS 将其写入 committed manifest；Windows 只将无 secret identity 写入 `account.json`。后者用于请求 header、catalog ownership 和 execution credential 归属；重认证身份不一致时不得沿用旧 execution。
 
-## 6. 双 family 崩溃一致性
+## 6. macOS 双 family 崩溃一致性
 
 - OAuth family 使用 `oauth/{A,B}/{access,refresh,marker}`；
 - execution family 使用 `execution/{A,B}/{api-key,marker}`；

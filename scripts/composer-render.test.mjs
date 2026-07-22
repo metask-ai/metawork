@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -16,6 +17,16 @@ const vite = await createServer({
 const { ComposerFooter } = await vite.ssrLoadModule(
   "/src/features/composer/ComposerFooter.tsx",
 );
+const { AppShell } = await vite.ssrLoadModule("/src/app/AppShell.tsx");
+const { primaryShortcutModifier } = await vite.ssrLoadModule(
+  "/src/platform/keyboard.ts",
+);
+const { TaskTimeline } = await vite.ssrLoadModule(
+  "/src/features/timeline/TaskTimeline.tsx",
+);
+const { WorkspaceNavigation } = await vite.ssrLoadModule(
+  "/src/features/workspaces/WorkspaceNavigation.tsx",
+);
 const { I18nContext } = await vite.ssrLoadModule("/src/i18n/context.ts");
 const { translate } = await vite.ssrLoadModule("/src/i18n/runtime.ts");
 
@@ -25,8 +36,6 @@ test.after(async () => {
 
 const base = {
   textareaRef: { current: null },
-  hasTask: false,
-  draft: false,
   archived: false,
   closing: false,
   closed: false,
@@ -36,12 +45,23 @@ const base = {
   canSubmit: false,
   runInFlight: false,
   accessRequired: false,
+  workspaceMissing: true,
+  workspaceLabel: "No workspace",
+  workspaceTitle: "No workspace",
+  modelLabel: "Claude Sonnet 4",
+  modelOptions: [
+    { selectionId: "claude-sonnet-4", displayName: "Claude Sonnet 4" },
+  ],
+  selectedModelId: "claude-sonnet-4",
+  modelEditable: true,
+  modelSelectionDisabled: false,
+  modelContextTitle: "Default model",
   actionDisabled: false,
-  prerequisite: null,
-  onStart() {},
   onPromptChange() {},
   onSubmit() {},
   onConfirmAccess() {},
+  onSelectModel() {},
+  onOpenModelSettings() {},
 };
 
 function render(props = {}) {
@@ -60,22 +80,262 @@ function render(props = {}) {
   );
 }
 
+function renderShell(inspector, inspectorOpen = false, left = undefined) {
+  return renderToStaticMarkup(
+    createElement(
+      I18nContext.Provider,
+      {
+        value: {
+          locale: "en-US",
+          setLocale() {},
+          t: (id, values) => translate("en-US", id, values),
+        },
+      },
+      createElement(
+        AppShell,
+        {
+          taskTitle: "New task",
+          workspaceLabel: "No workspace",
+          status: "Connected",
+          onSearch() {},
+          left:
+            left === undefined ? createElement("p", null, "Navigation") : left,
+          inspector,
+          inspectorOpen,
+          onDismissInspector() {},
+        },
+        createElement("p", null, "Composer stage"),
+      ),
+    ),
+  );
+}
+
+function renderCompletedTimeline(assistant = "Release is ready") {
+  const task = {
+    id: "3",
+    runs: [
+      {
+        id: "9",
+        phase: "completed",
+        user: "Inspect the release",
+        assistant,
+        assistantRedacted: false,
+        outcome: "completed",
+        cause: null,
+        usage: { input: "12", output: "5" },
+        tools: [
+          {
+            id: "tool-1",
+            order: "1",
+            name: "Read",
+            state: "completed",
+            elapsedMs: "4",
+            input: "fixture.txt",
+            progress: "",
+            content: "ready",
+            isError: false,
+            redacted: false,
+            inputTruncated: false,
+            progressTruncated: false,
+            contentTruncated: false,
+          },
+        ],
+      },
+    ],
+    pendingUi: null,
+    uiHistory: [],
+  };
+  return renderToStaticMarkup(
+    createElement(
+      I18nContext.Provider,
+      {
+        value: {
+          locale: "en-US",
+          setLocale() {},
+          t: (id, values) => translate("en-US", id, values),
+        },
+      },
+      createElement(TaskTimeline, {
+        task,
+        draft: false,
+        draftHasWorkspace: true,
+        revision: "1",
+        composerHasDraft: false,
+        retryAvailable: true,
+        responseDisabled: false,
+        onUseExample() {},
+        onPrepareRetry() {},
+        onInspect() {},
+        onRespond() {},
+        renderPendingUi() {
+          return null;
+        },
+        renderUiRecord() {
+          return null;
+        },
+      }),
+    ),
+  );
+}
+
+function renderNewTaskTimeline(composerHasDraft) {
+  return renderToStaticMarkup(
+    createElement(
+      I18nContext.Provider,
+      {
+        value: {
+          locale: "en-US",
+          setLocale() {},
+          t: (id, values) => translate("en-US", id, values),
+        },
+      },
+      createElement(TaskTimeline, {
+        task: null,
+        draft: true,
+        draftHasWorkspace: true,
+        revision: "1",
+        composerHasDraft,
+        retryAvailable: true,
+        responseDisabled: false,
+        onUseExample() {},
+        onPrepareRetry() {},
+        onInspect() {},
+        onRespond() {},
+        renderPendingUi() {
+          return null;
+        },
+        renderUiRecord() {
+          return null;
+        },
+      }),
+    ),
+  );
+}
+
+function renderWorkspaceNavigation(
+  lastRemovalFailure,
+  authorization = "available",
+  includeWorkspace = true,
+  disabled = false,
+) {
+  return renderToStaticMarkup(
+    createElement(
+      I18nContext.Provider,
+      {
+        value: {
+          locale: "en-US",
+          setLocale() {},
+          t: (id, values) => translate("en-US", id, values),
+        },
+      },
+      createElement(WorkspaceNavigation, {
+        summaries: includeWorkspace
+          ? [
+              {
+                id: "1",
+                canonicalRoot: "/repo/alpha",
+                label: "alpha",
+                authorization,
+                lastRemovalFailure,
+                taskCount: 0,
+                running: 0,
+                attention: 0,
+                failed: 0,
+              },
+            ]
+          : [],
+        currentWorkspaceId: includeWorkspace ? "1" : null,
+        tasks: [],
+        activeTaskId: null,
+        showArchived: false,
+        disabled,
+        onChooseWorkspace() {},
+        onRemoveWorkspace() {},
+        onRetryRemoval() {},
+        onSelectWorkspace() {},
+        onSelectTask() {},
+        onToggleArchived() {},
+      }),
+    ),
+  );
+}
+
 function tag(markup, className) {
   return markup.match(
     new RegExp(`<(?:button|textarea)[^>]*class="[^"]*${className}[^"]*"[^>]*>`),
   )?.[0];
 }
 
-test("cold start presents a clear enabled action instead of a fake disabled Composer", () => {
+test("New task opens as an editable Composer with its execution context", () => {
   const markup = render();
-  assert.match(markup, />Start a new task</);
-  assert.doesNotMatch(markup, /<textarea/);
-  assert.doesNotMatch(tag(markup, "composer-start") ?? "", /disabled/);
+  assert.match(markup, /<textarea/);
+  assert.match(markup, />Claude Sonnet 4</);
+  assert.match(markup, />Choose on send</);
+  assert.doesNotMatch(markup.match(/<textarea[^>]*>/)?.[0] ?? "", /disabled/);
+  assert.doesNotMatch(markup, /composer-start/);
+});
+
+test("candidate model catalogs never imply a committed default", () => {
+  const markup = render({
+    modelLabel: "Choose a model",
+    modelOptions: [
+      { selectionId: "candidate-model", displayName: "Candidate model" },
+    ],
+    selectedModelId: "",
+    modelSelectionDisabled: true,
+  });
+  assert.match(markup, /<option value="" selected="">Choose a model<\/option>/);
+  assert.match(markup, /<select[^>]*disabled=""/);
+  assert.doesNotMatch(markup, /value="candidate-model" selected=""/);
+});
+
+test("desktop shortcut labels follow the host platform", () => {
+  assert.equal(primaryShortcutModifier("Win32"), "Ctrl+");
+  assert.equal(primaryShortcutModifier("MacIntel"), "⌘");
+  assert.match(renderShell(null), /<kbd>Ctrl\+K<\/kbd>/);
+});
+
+test("Account catalog work blocks New task admission but not bound Tasks", async () => {
+  const source = await readFile(
+    join(process.cwd(), "frontend/src/app/App.tsx"),
+    "utf8",
+  );
+  assert.match(
+    source,
+    /\(!newTaskDraftActive \|\| snapshot\.account\.canCreateTask\)/,
+  );
+});
+
+test("New task does not render or reserve an empty Inspector", () => {
+  const markup = renderShell(null);
+  assert.doesNotMatch(markup, /id="task-inspector"/);
+  assert.doesNotMatch(markup, /aria-controls="task-inspector"/);
+  assert.match(markup, /data-inspector-open="false"/);
+});
+
+test("Settings uses the global stage without retaining Task navigation", () => {
+  const markup = renderShell(null, false, null);
+  assert.doesNotMatch(markup, /id="workspace-sidebar"/);
+  assert.doesNotMatch(markup, /aria-controls="workspace-sidebar"/);
+  assert.match(markup, /data-left-open="false"/);
+});
+
+test("terminal delivery follows tool activity and precedes the outcome", () => {
+  const markup = renderCompletedTimeline();
+  assert.ok(markup.indexOf("Read") < markup.indexOf("Release is ready"));
+  assert.ok(
+    markup.indexOf("Release is ready") < markup.indexOf("Work completed"),
+  );
+  assert.match(renderCompletedTimeline(""), /did not return a final response/);
+});
+
+test("task examples disappear before they can overwrite an existing draft", () => {
+  assert.match(renderNewTaskTimeline(false), /Review this project/);
+  assert.doesNotMatch(renderNewTaskTimeline(true), /Review this project/);
 });
 
 test("a new Task draft is editable before its first send", () => {
   const markup = render({
-    draft: true,
     prompt: "Ship the release",
     canSubmit: true,
   });
@@ -85,23 +345,13 @@ test("a new Task draft is editable before its first send", () => {
   assert.doesNotMatch(tag(markup, "composer-send") ?? "", /disabled/);
 });
 
-test("an Account prerequisite blocks sending without blocking the Workspace draft", () => {
-  const markup = render({
-    draft: true,
-    prompt: "Keep writing while signing in",
-    prerequisite: createElement("section", null, "Connect Metask to send"),
-  });
-  assert.match(markup, /Connect Metask to send/);
-  assert.match(markup, />Keep writing while signing in</);
-  assert.doesNotMatch(markup.match(/<textarea[^>]*>/)?.[0] ?? "", /disabled/);
-  assert.match(tag(markup, "composer-send") ?? "", /disabled/);
-});
-
 test("an expired workspace grant preserves editable text and exposes recovery", () => {
   const markup = render({
-    draft: true,
     prompt: "Keep this draft",
     accessRequired: true,
+    workspaceMissing: false,
+    workspaceLabel: "/repo/alpha",
+    workspaceTitle: "/repo/alpha",
   });
   assert.match(markup, />Keep this draft</);
   assert.match(markup, />Confirm access</);
@@ -111,17 +361,17 @@ test("an expired workspace grant preserves editable text and exposes recovery", 
 
 test("only non-composable Task states disable the Composer", () => {
   const markup = render({
-    hasTask: true,
     archived: true,
     composeDisabled: true,
+    modelLabel: null,
   });
   assert.match(markup.match(/<textarea[^>]*>/)?.[0] ?? "", /disabled/);
   assert.match(markup, /Restore this task to continue/);
+  assert.doesNotMatch(markup, />Claude Sonnet 4</);
 });
 
 test("a poisoned Task explains why continuation is unavailable", () => {
   const markup = render({
-    hasTask: true,
     unavailable: true,
     composeDisabled: true,
   });
@@ -132,7 +382,6 @@ test("a poisoned Task explains why continuation is unavailable", () => {
 test("terminal state takes precedence over archive state in Composer guidance", () => {
   assert.match(
     render({
-      hasTask: true,
       archived: true,
       closing: true,
       composeDisabled: true,
@@ -141,11 +390,98 @@ test("terminal state takes precedence over archive state in Composer guidance", 
   );
   assert.match(
     render({
-      hasTask: true,
       archived: true,
       closed: true,
       composeDisabled: true,
     }),
     /This task has ended/,
   );
+});
+
+test("Workspace removal failure survives refresh with an honest retry surface", () => {
+  const failed = renderWorkspaceNavigation("task_close_failed");
+  assert.match(failed, /Some tasks may have stopped/);
+  assert.match(failed, />Retry removal</);
+  assert.doesNotMatch(renderWorkspaceNavigation(null), /Retry removal/);
+});
+
+test("Workspace removal state remains explicit without owning the global New task action", () => {
+  const available = renderWorkspaceNavigation(null);
+  assert.match(available, />Remove</);
+  assert.doesNotMatch(available, /Removal in progress/);
+
+  const removing = renderWorkspaceNavigation(null, "removing");
+  assert.match(removing, /Removing this workspace/);
+  assert.match(removing, /can’t start or continue tasks/);
+  assert.doesNotMatch(removing, />New task</);
+});
+
+test("Workspace busy state disables real Workspace actions instead of swallowing clicks", async () => {
+  const busy = renderWorkspaceNavigation(null, "available", true, true);
+  assert.match(tag(busy, "workspace-picker") ?? "", /disabled/);
+
+  const source = await readFile(
+    join(
+      process.cwd(),
+      "frontend/src/features/workspaces/WorkspaceNavigation.tsx",
+    ),
+    "utf8",
+  );
+  const option = source.slice(source.indexOf('className="workspace-option'));
+  assert.match(
+    option,
+    /disabled=\{disabled \|\| workspace\.authorization === "removing"\}/,
+  );
+});
+
+test("global shortcuts obey Account and Bridge gates", async () => {
+  const source = await readFile(
+    join(process.cwd(), "frontend/src/app/App.tsx"),
+    "utf8",
+  );
+  assert.match(
+    source,
+    /if \(accountGateRequired \|\| bridgeUnavailable\) return;[\s\S]*setSearchOpen\(true\)[\s\S]*beginNewTask\(\)/,
+  );
+});
+
+test("Task deletion confirmation handles Escape and restores its opener", async () => {
+  const source = await readFile(
+    join(process.cwd(), "frontend/src/app/App.tsx"),
+    "utf8",
+  );
+  const confirmation = source.slice(
+    source.indexOf('className="delete-confirmation"'),
+    source.indexOf("{viewSyncFailed &&"),
+  );
+  assert.match(confirmation, /role="alertdialog"/);
+  assert.match(confirmation, /event\.key !== "Escape"/);
+  assert.match(confirmation, /closeDeleteConfirmation\(\)/);
+});
+
+test("draft moves read authoritative storage instead of a render-time closure", async () => {
+  const source = await readFile(
+    join(process.cwd(), "frontend/src/features/composer/useTaskDrafts.ts"),
+    "utf8",
+  );
+  assert.match(source, /const source = readDraft\(from\)/);
+  assert.match(source, /const target = readDraft\(to\)/);
+  assert.doesNotMatch(source, /drafts\[from\]|drafts\[to\]/);
+});
+
+test("removing the final empty Workspace leaves a stable focus destination", () => {
+  const empty = renderWorkspaceNavigation(null, "available", false);
+  assert.match(
+    empty,
+    /class="workspace-section-heading focus-ring" tabindex="-1" aria-label="Workspace"/,
+  );
+  const picker = empty.match(
+    /<button[^>]*class="[^"]*workspace-picker[^"]*"[^>]*>/,
+  )?.[0];
+  assert.match(picker ?? "", /disabled/);
+  const add = empty.match(
+    /<button[^>]*class="text-button focus-ring"[^>]*>Add/,
+  );
+  assert.ok(add);
+  assert.doesNotMatch(empty, />Remove</);
 });

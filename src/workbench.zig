@@ -12,7 +12,6 @@ pub const PermissionChoice = projection_impl.PermissionChoice;
 pub const UiResponse = projection_impl.UiResponse;
 pub const Configuration = projection_impl.Configuration;
 pub const Workbench = projection_impl.Workbench;
-pub const RunRef = projection_impl.RunRef;
 pub const ChangeNotifier = projection_impl.ChangeNotifier;
 pub const TransportFailureStage = projection_impl.TransportFailureStage;
 pub const TransportFailureReport = projection_impl.TransportFailureReport;

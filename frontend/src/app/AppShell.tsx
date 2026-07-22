@@ -1,15 +1,23 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { Icon } from "../components/ui/Icon.tsx";
-import { useI18n, type Locale } from "../i18n/context.ts";
+import {
+  WindowControls,
+  type WindowControlAction,
+} from "../components/ui/WindowControls.tsx";
+import { shouldDismissInspectorForEscape } from "../features/inspector/inspector-interaction.ts";
+import { useI18n } from "../i18n/context.ts";
 import {
   readLocalPreference,
   writeLocalPreference,
 } from "../platform/local-preferences.ts";
+import {
+  desktopPlatform,
+  primaryShortcutModifier,
+} from "../platform/keyboard.ts";
+import { WindowTitlebarGesture } from "../platform/window-titlebar-gesture.ts";
 
 const leftPreference = "metawork.panel.workspaces";
-const rightPreference = "metawork.panel.activity";
-
 function initialPanel(key: string, minimumWidth: number) {
   if (typeof window === "undefined") return true;
   const stored = readLocalPreference(key);
@@ -19,137 +27,199 @@ function initialPanel(key: string, minimumWidth: number) {
 export function AppShell({
   taskTitle,
   workspaceLabel,
-  status,
+  attentionNotice,
+  onBeginWindowDrag,
+  onWindowControl,
+  onSearch,
   left,
-  activity,
+  inspector,
+  inspectorOpen,
+  onDismissInspector,
   children,
 }: {
   taskTitle: string;
   workspaceLabel: string;
-  status: string;
-  left: ReactNode;
-  activity: ReactNode;
+  attentionNotice: string | null;
+  onBeginWindowDrag: () => void;
+  onWindowControl: (action: WindowControlAction) => void;
+  onSearch: () => void;
+  left: ReactNode | null;
+  inspector: ReactNode | null;
+  inspectorOpen: boolean;
+  onDismissInspector: (restoreFocus?: boolean) => void;
   children: ReactNode;
 }) {
-  const { locale, setLocale, t } = useI18n();
+  const { t } = useI18n();
+  const shortcutModifier = primaryShortcutModifier();
   const [leftOpen, setLeftOpen] = useState(() =>
     initialPanel(leftPreference, 820),
   );
-  const [rightOpen, setRightOpen] = useState(() =>
-    initialPanel(rightPreference, 1100),
-  );
+  const leftAvailable = left !== null;
+  const effectiveLeftOpen = leftAvailable && leftOpen;
+  const inspectorAvailable = inspector !== null;
+  const effectiveInspectorOpen = inspectorAvailable && inspectorOpen;
+  const titlebarGesture = useRef(new WindowTitlebarGesture()).current;
 
   useEffect(() => {
     const narrow = window.matchMedia("(max-width: 819px)");
-    const medium = window.matchMedia("(max-width: 1099px)");
     const closeForViewport = () => {
       if (narrow.matches) setLeftOpen(false);
-      if (medium.matches) setRightOpen(false);
     };
     narrow.addEventListener("change", closeForViewport);
-    medium.addEventListener("change", closeForViewport);
     return () => {
       narrow.removeEventListener("change", closeForViewport);
-      medium.removeEventListener("change", closeForViewport);
     };
   }, []);
 
-  function toggleLeft() {
-    setLeftOpen((open) => {
-      const next = !open;
-      if (next && window.innerWidth < 820) setRightOpen(false);
-      writeLocalPreference(leftPreference, next ? "open" : "closed");
-      return next;
-    });
-  }
+  useEffect(() => {
+    if (effectiveInspectorOpen && window.innerWidth < 820) setLeftOpen(false);
+  }, [effectiveInspectorOpen]);
 
-  function toggleRight() {
-    setRightOpen((open) => {
-      const next = !open;
-      if (next && window.innerWidth < 820) setLeftOpen(false);
-      writeLocalPreference(rightPreference, next ? "open" : "closed");
-      return next;
-    });
+  function toggleLeft() {
+    const next = !leftOpen;
+    if (next && window.innerWidth < 820) onDismissInspector(false);
+    writeLocalPreference(leftPreference, next ? "open" : "closed");
+    setLeftOpen(next);
   }
 
   return (
     <main
       className="app-window"
-      data-left-open={leftOpen}
-      data-right-open={rightOpen}
+      data-platform={desktopPlatform()}
+      data-left-open={effectiveLeftOpen}
+      data-inspector-open={effectiveInspectorOpen}
+      onKeyDown={(event) => {
+        const target = event.target as HTMLElement;
+        if (
+          target.closest('[role="dialog"], [role="menu"], [role="alertdialog"]')
+        )
+          return;
+        if (
+          !shouldDismissInspectorForEscape(
+            effectiveInspectorOpen,
+            event.key,
+            event.defaultPrevented,
+          )
+        )
+          return;
+        event.preventDefault();
+        onDismissInspector();
+      }}
     >
-      <header className="app-titlebar">
-        <button
-          className="icon-button focus-ring"
-          aria-controls="workspace-sidebar"
-          aria-expanded={leftOpen}
-          aria-label={t("app.toggle_workspaces")}
-          title={t("app.toggle_workspaces")}
-          onClick={toggleLeft}
-        >
-          <Icon name="sidebar" />
-        </button>
-        <div className="titlebar-identity">
-          <span className="titlebar-task">{taskTitle}</span>
-          <span className="titlebar-workspace">{workspaceLabel}</span>
-        </div>
-        <p className="titlebar-status" aria-live="polite">
-          {status}
-        </p>
-        <label className="locale-control">
-          <span className="sr-only">{t("app.language")}</span>
-          <select
-            className="focus-ring"
-            aria-label={t("app.language")}
-            value={locale}
-            onChange={(event) => setLocale(event.target.value as Locale)}
+      <header
+        className="workbench-commandbar"
+        onPointerDown={(event) => {
+          if (
+            event.button !== 0 ||
+            (event.target as HTMLElement).closest(
+              "button, input, select, textarea, details, a",
+            )
+          )
+            return;
+          event.currentTarget.setPointerCapture(event.pointerId);
+          titlebarGesture.begin(event.pointerId, event.clientX, event.clientY);
+        }}
+        onPointerMove={(event) => {
+          const gesture = titlebarGesture.move(
+            event.pointerId,
+            event.clientX,
+            event.clientY,
+            event.buttons,
+          );
+          if (gesture) onBeginWindowDrag();
+        }}
+        onPointerUp={(event) => titlebarGesture.end(event.pointerId)}
+        onPointerCancel={(event) => titlebarGesture.cancel(event.pointerId)}
+      >
+        {leftAvailable ? (
+          <button
+            className="icon-button focus-ring"
+            aria-controls="workspace-sidebar"
+            aria-expanded={leftOpen}
+            aria-label={t("app.toggle_workspaces")}
+            title={t("app.toggle_workspaces")}
+            onClick={toggleLeft}
           >
-            <option value="en-US">{t("app.language.en-US")}</option>
-            <option value="zh-CN">{t("app.language.zh-CN")}</option>
-            {import.meta.env.DEV && (
-              <option value="pseudo">{t("app.language.pseudo")}</option>
-            )}
-          </select>
-        </label>
+            <Icon name="sidebar" />
+          </button>
+        ) : (
+          <span className="commandbar-leading-spacer" aria-hidden="true" />
+        )}
+        <div className="commandbar-context">
+          <span className="commandbar-task">{taskTitle}</span>
+          <span className="commandbar-workspace">{workspaceLabel}</span>
+        </div>
+        <div className="commandbar-alert-slot">
+          <span
+            className="sr-only"
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+          >
+            {attentionNotice ?? ""}
+          </span>
+          {attentionNotice && (
+            <details className="commandbar-alert">
+              <summary aria-label={attentionNotice}>
+                <Icon name="warning" />
+                <span>{attentionNotice}</span>
+              </summary>
+              <p>{attentionNotice}</p>
+            </details>
+          )}
+        </div>
         <button
-          className="icon-button focus-ring"
-          aria-controls="task-activity"
-          aria-expanded={rightOpen}
-          aria-label={t("app.toggle_activity")}
-          title={t("app.toggle_activity")}
-          onClick={toggleRight}
+          className="commandbar-search focus-ring"
+          aria-label={t("search.open")}
+          title={t("search.open")}
+          onClick={onSearch}
         >
-          <Icon name="activity" />
+          <Icon name="search" />
+          <span>{t("search.open")}</span>
+          <kbd>{shortcutModifier}K</kbd>
         </button>
+        <WindowControls
+          labels={{
+            controls: t("window.controls"),
+            minimize: t("window.minimize"),
+            maximize: t("window.maximize"),
+            close: t("window.close"),
+          }}
+          onAction={onWindowControl}
+        />
       </header>
 
       <div className="app-columns">
-        <aside
-          id="workspace-sidebar"
-          className="workspace-sidebar"
-          aria-hidden={!leftOpen}
-          inert={!leftOpen}
-        >
-          {left}
-        </aside>
+        {leftAvailable && (
+          <aside
+            id="workspace-sidebar"
+            className="workspace-sidebar"
+            aria-hidden={!leftOpen}
+            inert={!leftOpen}
+          >
+            {left}
+          </aside>
+        )}
         <section className="task-stage">{children}</section>
-        <aside
-          id="task-activity"
-          className="task-activity"
-          aria-hidden={!rightOpen}
-          inert={!rightOpen}
-        >
-          {activity}
-        </aside>
+        {inspectorAvailable && (
+          <aside
+            id="task-inspector"
+            className="task-inspector"
+            aria-labelledby="task-inspector-title"
+            aria-hidden={!effectiveInspectorOpen}
+            inert={!effectiveInspectorOpen}
+          >
+            {inspector}
+          </aside>
+        )}
       </div>
 
-      {(leftOpen || rightOpen) && (
+      {effectiveLeftOpen && (
         <button
           className="panel-scrim"
           aria-label={t("app.dismiss_panels")}
           onClick={() => {
             if (window.innerWidth < 820) setLeftOpen(false);
-            if (window.innerWidth < 1100) setRightOpen(false);
           }}
         />
       )}
