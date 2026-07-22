@@ -25,6 +25,7 @@ macOS：
 ```bash
 npm ci
 npm run agentcore:stage -- /absolute/path/to/metacodes/zig-out/agentcore/aarch64-macos
+npm run setup:macos-signing
 npm run dev
 ```
 
@@ -46,7 +47,7 @@ npm run build:debug
 npm run build:release
 ```
 
-macOS package 使用 `npm run package:macos`；Windows development baseline 使用 `npm run test:windows:bringup`。完整验证范围与按变更选择的命令见 [验证规范](docs/validation.md)。
+macOS 的 Apple Development identity 只需在每台开发机选择一次，具体要求见 [macOS 本地开发签名](docs/macos-local-development.md)。macOS package 使用 `npm run package:macos`；Windows development baseline 使用 `npm run test:windows:bringup`。完整验证范围与按变更选择的命令见 [验证规范](docs/validation.md)。
 
 ## AgentCore 输入边界
 
@@ -69,6 +70,7 @@ probe 使用临时 source-free SDK consumer，不进入正式产品 build graph�
 - [AgentCore 集成契约](docs/agentcore-integration.md)：线程、事件、所有权和生命周期
 - [AgentCore ABI v1 revision 3 消费合同](docs/agentcore-abi-v1.md)：锁定 bundle 的机器合同与能力边界
 - [Metask Account API 合同](docs/metask-account-contract.md)：OAuth、catalog、ExecutionTarget 与持久化
+- [macOS 本地开发签名](docs/macos-local-development.md)：Apple Development identity 与 Keychain 稳定性
 - [验证规范](docs/validation.md)：证据、持续回归和未验证能力
 - [revision 3 migration 报告](docs/agentcore-revision-3-migration-report.md)：保留的 artifact migration 证据
 - [Agent 工作约束](AGENTS.md)：仓库内执行规则

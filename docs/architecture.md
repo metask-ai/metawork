@@ -1,7 +1,7 @@
 # MetaWork 高层架构
 
 > 状态：AgentCore ABI v1 revision 3 macOS 与 Windows development baseline 已通过；后续正式方向选择单 AgentCore Worker
-> 日期：2026-07-21
+> 日期：2026-07-22
 
 产品范围见 [产品需求](requirements.md)，Metask AgentCore 的具体接入约束见 [AgentCore 集成契约](agentcore-integration.md)，revision 3 目标能力见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。精确源码路径、binary 和 symbol identifier 只作为机器合同保留。
 
@@ -189,6 +189,8 @@ async suspend/resume、持久化恢复和后台转换属于后续 AgentCore capa
 ### 4.5 MetaWork release identity
 
 MetaWork 桌面产品、根 npm workspace、Renderer workspace 和 Zig package 随同一仓库原子发布，共用一个 release version。`app.zon` 是产品版本真源；根 `package.json`、`frontend/package.json` 与 `build.zig.zon` 必须精确镜像，`package-lock.json` 只保存 npm 派生结果。当前统一版本为 `0.1.0`。
+
+macOS 本地 Account development 与 package 使用 Apple 签发的 `Apple Development` identity，并验证实际 `TeamIdentifier`、`app.zon` 中既有的 CodeDirectory identifier 与 Apple-anchored designated requirement。签名层只消费产品 identity，不拥有或改写 Bundle ID、Account persistence、Windows credential 或 Renderer 行为；普通 check、test、Debug/Release build 和 Windows baseline 不依赖个人证书。具体操作见 [macOS 本地开发签名](macos-local-development.md)。
 
 Renderer Bridge revision、Account persistence revision、AgentCore artifact version、AgentCore ABI version/revision 和 bundle manifest schema 各自保护不同合同，不得随 MetaWork release version 自动升降。任何合同类版本标识的变更都必须先得到用户显式同意；release version 变化必须原子更新全部镜像并通过跨 manifest 一致性守卫。
 

@@ -45,11 +45,19 @@ npm test
 
 ### macOS
 
+首次使用真实 Account 前，按 [macOS 本地开发签名](macos-local-development.md)选择 Apple Development identity：
+
+```bash
+npm run setup:macos-signing
+```
+
 ```bash
 npm run build:debug
 npm run build:release
 npm run package:macos
 ```
+
+`package:macos` 必须验证精确 Bundle ID、产品版本、Apple-issued `TeamIdentifier` 和不依赖 CDHash 的 Apple-anchored designated requirement。普通 check/test/build 不访问个人证书；`npm run dev` 和 `package:macos` 才使用本机选择。
 
 涉及 AgentCore candidate、正式 Host、Renderer reload、产品数据面或生命周期时，按变更范围增加：
 

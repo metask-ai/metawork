@@ -1,7 +1,7 @@
 # MetaWork 产品需求
 
 > 状态：v0.5，确立登录优先的成熟 Workbench、Task 执行配置与设置边界
-> 日期：2026-07-21
+> 日期：2026-07-22
 
 ## 1. 产品定义
 
@@ -215,6 +215,7 @@ Account 是 MetaWork 的 Metask 账号控制面，负责 OAuth 登录、账号/A
 ### 平台
 
 - macOS 是当前优先真实验证平台；
+- macOS 真实 Account 本地开发必须使用 Apple 签发、带稳定 `TeamIdentifier` 的 `Apple Development` identity；自签名或 ad-hoc 签名不能作为 Keychain 跨构建授权稳定性的验收结果；
 - Windows development baseline 已完成独立 artifact、Native SDK、Bridge、AgentCore 和桌面自动化验证，不能用 macOS 结果替代；
 - Windows MSI/签名/更新和完整安全矩阵仍是后续分发交付；
 - Linux 是后续目标平台；当前 bundle target-policy 和系统链接输入按 target 隔离，但不宣称已完成 Linux 构建或验收；

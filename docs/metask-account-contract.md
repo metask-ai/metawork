@@ -1,7 +1,7 @@
 # MetaWork 消费的 Metask Account API 合同状态
 
 > 状态：**C1 OAuth 登录与 C2 执行目录合同均已确认**
-> 日期：2026-07-20
+> 日期：2026-07-22
 > 范围：MetaWork Account 的 OAuth/account lifecycle，以及后续 API Key/model/ExecutionTarget
 
 ## 1. 边界
@@ -48,6 +48,7 @@ Metask 产品 owner 已确认 MetaWork 作为 Metask 第一方客户端复用当
 macOS 使用 MetaWork 自己的命名空间，不读取或共享 `~/.metacode/auth.json`：
 
 - Keychain service：`dev.metawork.account.v2`；
+- 真实 macOS Account development/package 使用 Apple-signed development identity，使 Keychain authorization 绑定稳定 Team 与 designated requirement；签名流程不改变本节的 service、slot 或 manifest 合同；
 - 固定 OAuth slot：`oauth/A/*` 与 `oauth/B/*`；
 - 每个 slot 分别保存 access、refresh 和最后写入的 generation marker；
 - 非秘密 `manifest.v2` 是 OAuth 与 execution 两个 credential family 的唯一 committed pointer，使用 `signed_out`、`account_only` 或 `execution_ready` 状态；

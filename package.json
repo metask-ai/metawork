@@ -9,7 +9,7 @@
     "frontend"
   ],
   "scripts": {
-    "dev": "npm run agentcore:verify-staged && native dev . --yes",
+    "dev": "npm run agentcore:verify-staged && node scripts/macos-local-signing.mjs dev",
     "agentcore:stage": "node scripts/stage-agentcore-bundle.mjs",
     "agentcore:verify-staged": "node scripts/verify-staged-agentcore-bundle.mjs",
     "check": "npm run agentcore:verify-staged && npm run check:frontend && native check . --strict",
@@ -21,10 +21,12 @@
     "test": "npm run agentcore:verify-staged && npm run check:frontend && npm run test:renderer-runtime && npm run test:architecture && npm run test:agentcore-bundle && npm run test:child-process && native test . --yes",
     "format": "zig fmt build.zig build_support src tests app.zon && prettier --write frontend scripts package.json",
     "format:check": "zig fmt --check build.zig build_support src tests app.zon && prettier --check frontend scripts package.json",
-    "package:macos": "npm run build:release && node scripts/clean-macos-package.mjs && native package --target macos --assets frontend/dist && node scripts/verify-macos-package.mjs",
+    "setup:macos-signing": "node scripts/setup-macos-local-signing.mjs setup",
+    "setup:macos-signing:clear": "node scripts/setup-macos-local-signing.mjs clear",
+    "package:macos": "node scripts/macos-local-signing.mjs package",
     "test:agentcore-bundle": "node --test scripts/agentcore-bundle.test.mjs",
     "test:child-process": "node --test scripts/run-child-process.test.mjs",
-    "test:architecture": "node --test scripts/architecture-boundaries.test.mjs scripts/native-automation-isolation.test.mjs",
+    "test:architecture": "node --test scripts/architecture-boundaries.test.mjs scripts/macos-local-signing.test.mjs scripts/native-automation-isolation.test.mjs",
     "test:renderer-runtime": "node --experimental-strip-types --test scripts/account-panel.test.mjs scripts/approval-state.test.mjs scripts/bridge-client.test.mjs scripts/composer-render.test.mjs scripts/first-task-flow.test.mjs scripts/frontend-boundaries.test.mjs scripts/i18n.test.mjs scripts/inspector.test.mjs scripts/snapshot-client.test.mjs scripts/snapshot-demand.test.mjs scripts/window-titlebar-gesture.test.mjs scripts/workbench-connection.test.mjs scripts/workbench-contract.test.mjs scripts/workbench-navigation.test.mjs scripts/workbench-store.test.mjs",
     "probe:agentcore": "node scripts/run-agentcore-probe.mjs",
     "probe:agentcore:staged": "node scripts/run-agentcore-probe.mjs --staged",

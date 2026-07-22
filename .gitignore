@@ -1,6 +1,7 @@
 node_modules/
 .native/
 .agentcore/
+.metawork-local-signing.json
 frontend/dist/
 zig-cache/
 .zig-cache/

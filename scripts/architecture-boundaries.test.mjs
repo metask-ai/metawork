@@ -298,6 +298,59 @@ test("Windows Account persistence is refresh-only and unversioned", () => {
   assert.match(app, /WindowsStore\.restore/);
 });
 
+test("macOS Apple Development signing is explicit and isolated", () => {
+  const packageJson = JSON.parse(read("package.json"));
+  assert.equal(
+    packageJson.scripts.dev,
+    "npm run agentcore:verify-staged && node scripts/macos-local-signing.mjs dev",
+  );
+  assert.equal(
+    packageJson.scripts["package:macos"],
+    "node scripts/macos-local-signing.mjs package",
+  );
+  assert.equal(
+    packageJson.scripts["setup:macos-signing"],
+    "node scripts/setup-macos-local-signing.mjs setup",
+  );
+  assert.equal(
+    packageJson.scripts["setup:macos-signing:clear"],
+    "node scripts/setup-macos-local-signing.mjs clear",
+  );
+  for (const script of ["check", "test", "build:debug", "build:release"]) {
+    assert.doesNotMatch(
+      packageJson.scripts[script],
+      /codesign|macos-local-signing/u,
+      `${script} must not depend on a developer's local certificate`,
+    );
+  }
+
+  const signing = read("scripts/macos-local-signing.mjs");
+  assert.match(
+    signing,
+    /readFileSync\(path\.join\(repositoryRoot, "app\.zon"\)/u,
+  );
+  assert.doesNotMatch(signing, /bundleId:\s*"/u);
+  assert.match(signing, /Apple Development/u);
+  assert.match(signing, /TeamIdentifier/u);
+  assert.match(signing, /"--team-id",\s*identity\.teamId/u);
+  assert.match(signing, /\.metawork-local-signing\.json/u);
+
+  const setup = read("scripts/setup-macos-local-signing.mjs");
+  assert.match(setup, /verifyPrivateKeyAccess/u);
+  assert.match(setup, /add-certificates/u);
+  for (const forbidden of ["openssl", "add-trusted-cert", "delete-identity"]) {
+    assert.doesNotMatch(
+      setup,
+      new RegExp(forbidden, "u"),
+      `local setup must not generate, override trust for, or delete a signing identity: ${forbidden}`,
+    );
+  }
+
+  const verifier = read("scripts/verify-macos-package.mjs");
+  assert.match(verifier, /localProductIdentity\.bundleId/u);
+  assert.match(verifier, /verifyStableSignature/u);
+});
+
 test("formal Native test graph runs every product module test root", () => {
   const source = read("build.zig");
   for (const [name, rootModule] of [
