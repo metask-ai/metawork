@@ -31,6 +31,7 @@ metawork/
 ├── src/
 │   ├── main.zig           # 进程入口
 │   ├── app.zig            # Native composition root
+│   ├── product_identity.zig # 从 app.zon 派生 development identity 与 macOS namespace
 │   ├── window_chrome.zig  # WebView hidden-inset drag 的平台 seam
 │   ├── account.zig        # Account module entrypoint
 │   ├── account/           # OAuth、catalog、credential 与 Account 状态机
@@ -105,7 +106,9 @@ Renderer Bridge `metawork.renderer-bridge` 覆盖完整 command、event 和 snap
 - `state.zig` 拥有 Account 状态机、attempt/generation 与 prepare/admit/commit；
 - `oauth.zig`、`loopback.zig`、`login_attempt.zig` 和 `network_attempt.zig` 拥有登录网络链路；
 - `metask_client.zig` 与 `catalog.zig` 消费锁定的 Metask production contract；
-- `credential_store.zig` 只拥有 macOS persistence revision、Keychain namespace、双 family slot 与 `manifest.v2` 原子提交；
+- `app.zon` 单一拥有 development 产品 Bundle ID；`product_identity.zig` 派生该值及 macOS 数据目录与 Keychain service，不定义或统一 Windows storage；
+- `credential_store.zig` 独立拥有 macOS 双 family slot、固定 `manifest.json` schema 与原子提交语义；
+- `scripts/cleanup-legacy-macos-account.mjs` 是 Account-owned、只由开发者显式执行的一次性 legacy maintenance 入口；签名 setup 不拥有或删除 Account credential；
 - `windows_store.zig` 拥有 Windows 单 refresh token 与无版本、无 secret `account.json` 状态；不读取 macOS manifest，也不持久化 access token 或 Provider API Key；
 - `platform.zig` 分别适配 macOS 与 Windows 的 Account Native 主线程能力，不形成通用 Desktop Interface；
 - `credentials.zig` 管理 execution credential ownership/rotation。

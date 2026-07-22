@@ -2,16 +2,11 @@ const std = @import("std");
 const contract = @import("metawork_account_contract");
 const state = @import("account_state");
 const oauth = @import("account_oauth");
+const product_identity = @import("metawork_product_identity");
 
-pub const persistence_revision: u8 = 2;
-pub const service = std.fmt.comptimePrint(
-    "dev.metawork.account.v{d}",
-    .{persistence_revision},
-);
-pub const manifest_name = std.fmt.comptimePrint(
-    "manifest.v{d}",
-    .{persistence_revision},
-);
+pub const service = product_identity.macos_account_keychain_service;
+pub const manifest_name = "manifest.json";
+pub const manifest_schema_version: u8 = 1;
 pub const ProviderKind = contract.ProviderKind;
 
 pub const Family = enum {
@@ -84,7 +79,7 @@ pub const ManifestState = enum {
 };
 
 pub const Manifest = struct {
-    version: u8 = persistence_revision,
+    schema_version: u8 = manifest_schema_version,
     state: ManifestState,
     active_slot: ?Slot = null,
     generation: Generation = @splat(0),
@@ -257,7 +252,8 @@ pub const Manifest = struct {
     }
 
     pub fn validate(self: *const Manifest) StoreError!void {
-        if (self.version != persistence_revision) return error.ManifestCorrupt;
+        if (self.schema_version != manifest_schema_version)
+            return error.ManifestCorrupt;
         switch (self.state) {
             .signed_out => {
                 if (self.active_slot != null or

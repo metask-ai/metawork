@@ -9,7 +9,7 @@
 登录与执行配置是两个独立门槛：
 
 - **C1 登录**：OAuth、profile identity、token 恢复/刷新、退出和本地安全存储。当前信息已经足够实现，不依赖模型、API Key 或 AgentCore。
-- **C2 执行配置**：API Key catalog、model catalog 和 typed/fixed `ExecutionTarget { provider_kind, base_url, model }`。只有平台对应的持久化边界完成后，Account 才能发布 `execution_ready`；Workbench 安装同一 generation 后才能创建 Agent Task。macOS 的边界是 execution credential 与 `manifest.v2` 原子提交；Windows 的边界只提交无 secret 的 API/model 选择，execution credential 保持进程内。
+- **C2 执行配置**：API Key catalog、model catalog 和 typed/fixed `ExecutionTarget { provider_kind, base_url, model }`。只有平台对应的持久化边界完成后，Account 才能发布 `execution_ready`；Workbench 安装同一 generation 后才能创建 Agent Task。macOS 的边界是 execution credential 与 `manifest.json` schema 1 原子提交；Windows 的边界只提交无 secret 的 API/model 选择，execution credential 保持进程内。
 
 MetaWork 只作为 Metask Account API 和 AgentCore bundle 的消费方。本文档不要求、也不授权修改 Metask 内部实现仓库（精确路径标识为 `cc-t2z/metacodes`）。
 
@@ -41,30 +41,32 @@ Metask 产品 owner 已确认 MetaWork 作为 Metask 第一方客户端复用当
 
 ## 3. C1 本地持久化合同
 
-两条平台路径独立拥有自己的存储语义。`manifest.v2`、双 slot、marker 和 persistence revision 只属于 macOS；Windows 不读取、迁移、删除或解释这些数据。
+两条平台路径独立拥有自己的存储语义。`manifest.json`、双 slot、marker 和 manifest schema 只属于 macOS；Windows 不读取、迁移、删除或解释这些数据。
 
 ### 3.1 macOS
 
 macOS 使用 MetaWork 自己的命名空间，不读取或共享 `~/.metacode/auth.json`：
 
-- Keychain service：`dev.metawork.account.v2`；
-- 真实 macOS Account development/package 使用 Apple-signed development identity，使 Keychain authorization 绑定稳定 Team 与 designated requirement；签名流程不改变本节的 service、slot 或 manifest 合同；
+- development Bundle/runtime identity：`com.metask.metawork.dev`；
+- 非秘密 Account 文件：`~/Library/Application Support/MetaWork Dev/account/manifest.json`；
+- Keychain service：`com.metask.metawork.dev.account`；
+- 真实 macOS Account development/package 使用 Apple-signed development identity，使 Keychain authorization 绑定稳定 Team 与 designated requirement；签名流程本身不改变本节的 service、slot 或 manifest 合同；
 - 固定 OAuth slot：`oauth/A/*` 与 `oauth/B/*`；
 - 每个 slot 分别保存 access、refresh 和最后写入的 generation marker；
-- 非秘密 `manifest.v2` 是 OAuth 与 execution 两个 credential family 的唯一 committed pointer，使用 `signed_out`、`account_only` 或 `execution_ready` 状态；
+- 非秘密 `manifest.json` schema 1 是 OAuth 与 execution 两个 credential family 的唯一 committed pointer，使用 `signed_out`、`account_only` 或 `execution_ready` 状态；
 - 写新 inactive slot、读回校验、原子提交 manifest 后，才清理旧 slot；
 - logout 先原子提交 `signed_out` tombstone，再清理 Keychain；清理失败不能复活旧账号；
 - Keychain/open-browser 操作只能在 Native SDK 主线程执行；网络与 loopback wait 在有界 Account worker 上执行；
 - cancel、deadline、superseding attempt 和 shutdown 必须关闭 listener、停止网络操作并 join worker。
 
-#### macOS persistence revision 策略
+#### macOS manifest schema 策略
 
-Account persistence revision 与 Renderer Bridge revision、AgentCore ABI 和 bundle manifest schema 相互独立。当前 revision `2` 是一次真实的 hard cut：revision 1 只保存 OAuth family，revision 2 增加 execution credential family、统一 committed manifest 和 execution high watermark，因此不能把 revision 1 数据解释为当前状态。
+Account manifest schema 与 Renderer Bridge revision、AgentCore ABI 和 bundle manifest schema 相互独立。当前固定文件名 `manifest.json` 与 body schema 1 是一次 pre-release hard cut；旧 `manifest.v2` 不构成兼容输入，也不能被解释为当前 committed state。
 
-- revision 只在持久化布局、原子提交语义或安全解释发生不兼容变化时升级；增加内存字段、UI 字段或未持久化能力不升级；
-- Keychain service、manifest 文件名和 manifest body revision 分别隔离 secret namespace、非秘密元数据文件和内容校验，三者由 `account/credential_store.zig` 统一拥有，平台适配层不得另行定义版本；
-- pre-1.0 不维护多版本 parser 或静默迁移。hard cut 必须显式决定旧 secret 与 manifest 的删除方式；不得读取旧数据后猜测补字段，也不得让不可达 credential 永久遗留；
-- macOS 代码只接受 revision 2。未来若没有真实不兼容的 macOS 持久化变化，不得因为产品版本、Bridge revision、Windows 存储布局或 AgentCore ABI 变化联动升级。
+- `app.zon` 单一拥有 development 产品 Bundle ID；`src/product_identity.zig` 从该 manifest 派生 Bundle ID 及 macOS 数据目录与 Keychain service；`account/credential_store.zig` 独立拥有固定 manifest 文件名、body schema 与原子提交语义；
+- schema 只在 manifest 布局、原子提交语义或安全解释发生不兼容变化时升级；增加内存字段、UI 字段或未持久化能力不升级；
+- pre-1.0 不维护多版本 parser、静默迁移或 fallback。旧 `dev.metawork.desktop`、`dev.metawork.account.v2`、`MetaWork/account/manifest.v2` 均不作为输入；开发环境重新登录后可显式执行 Account-owned `npm run account:cleanup-legacy:macos`，幂等删除精确的旧 Keychain slot 与旧 manifest，不触碰当前 macOS namespace、Apple Development identity 或 Windows storage；
+- macOS 代码只接受 schema 1。未来若没有真实不兼容的 macOS manifest 变化，不得因为产品版本、Bridge revision、Windows 存储布局或 AgentCore ABI 变化联动升级。
 
 ### 3.2 Windows
 
@@ -77,7 +79,7 @@ Windows 使用一条直接、无版本的恢复路径：
 - 历史选择失效时保持登录并请求用户重新选择，不从文件重建 Provider、base URL 或 credential；refresh 无效进入 `reauth_required`，网络失败保留可重试状态；
 - 登录先原子替换 `account.json`，再写单个 refresh token；任一步失败都不提交内存登录事实。刷新只替换 refresh token，选择变更只替换 `account.json`；
 - logout 先删除 refresh token，再删除 `account.json`，任一步失败都不声称退出成功；
-- 旧 `manifest.v2` 与 `dev.metawork.account.v2` 条目保持原样但完全忽略，不做兼容读取、迁移或静默清理。用户在 Windows hard cut 后只需重新登录一次；
+- macOS 当前 `com.metask.metawork.dev.account`、`MetaWork Dev/account/manifest.json` 以及旧 `dev.metawork.account.v2`、`MetaWork/account/manifest.v2` 条目都由 Windows 完全忽略，不做兼容读取、迁移或静默清理。用户在 Windows hard cut 后只需重新登录一次；
 - 快速开发阶段若 Windows 布局需要改变，直接原地 hard cut；不得自行增加版本号。任何合同类版本标识变更仍必须先得到用户显式同意。
 
 ## 4. C2 已锁定的目录合同
@@ -118,7 +120,7 @@ Account 同时保存 token 的 `account_id` 与当前 `profile.id`。macOS 将�
 
 - OAuth family 使用 `oauth/{A,B}/{access,refresh,marker}`；
 - execution family 使用 `execution/{A,B}/{api-key,marker}`；
-- 每个 family 都先写 inactive slot、最后写 marker、读回校验，再通过一次 `manifest.v2` 原子提交；
+- 每个 family 都先写 inactive slot、最后写 marker、读回校验，再通过一次 `manifest.json` 原子提交；
 - `execution_ready` manifest 同时指向 OAuth slot 与 execution slot，并记录 account/profile、API Key id、typed provider、model、固定 base URL、execution generation 和 high watermark；
 - OAuth refresh 只轮换 OAuth slot，必须保留已提交 execution family；
 - execution 重配置只轮换 execution slot，必须保留已提交 OAuth family；

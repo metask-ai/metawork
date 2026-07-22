@@ -546,7 +546,7 @@ fn privateFilePermissions() std.Io.File.Permissions {
 }
 
 const ManifestWire = struct {
-    version: u8,
+    schema_version: u8,
     state: []const u8,
     active_slot: ?[]const u8,
     generation: ?[]const u8,
@@ -576,7 +576,7 @@ pub fn encodeManifest(
         .lower,
     );
     const wire: ManifestWire = .{
-        .version = manifest.version,
+        .schema_version = manifest.schema_version,
         .state = @tagName(manifest.state),
         .active_slot = if (manifest.active_slot) |slot| @tagName(slot) else null,
         .generation = if (manifest.active_slot != null) &generation_hex else null,
@@ -642,7 +642,7 @@ pub fn decodeManifest(input: []const u8) store.StoreError!store.Manifest {
             .state = manifest_state,
             .execution_high_watermark = wire.execution_high_watermark,
         };
-    result.version = wire.version;
+    result.schema_version = wire.schema_version;
     if (manifest_state == .signed_out) {
         if (wire.active_slot != null or wire.generation != null or
             wire.scope != null or wire.account_id != null or
@@ -756,6 +756,8 @@ test "manifest codec is strict and round trips account-only state" {
     );
     var encoded_storage: [manifest_bytes]u8 = undefined;
     const encoded = try encodeManifest(&encoded_storage, manifest);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "\"schema_version\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "\"version\"") == null);
     const decoded = try decodeManifest(encoded);
     try std.testing.expectEqual(store.ManifestState.account_only, decoded.state);
     try std.testing.expectEqual(store.Slot.B, decoded.active_slot.?);
@@ -763,7 +765,13 @@ test "manifest codec is strict and round trips account-only state" {
     try std.testing.expectError(
         error.ManifestCorrupt,
         decodeManifest(
-            \\{"version":1,"state":"signed_out","active_slot":null,"generation":null,"expires_at":0,"scope":null,"account_id":null,"display_name":null,"execution_high_watermark":0,"unknown":true}
+            \\{"schema_version":1,"state":"signed_out","active_slot":null,"generation":null,"expires_at":0,"scope":null,"account_id":null,"profile_id":null,"display_name":null,"execution_slot":null,"execution_credential_generation":null,"api_key_id":null,"provider_kind":null,"model":null,"base_url":null,"execution_generation":0,"execution_high_watermark":0,"unknown":true}
+        ),
+    );
+    try std.testing.expectError(
+        error.ManifestCorrupt,
+        decodeManifest(
+            \\{"version":2,"state":"signed_out"}
         ),
     );
 }
@@ -932,7 +940,7 @@ test "Windows public state codec rejects versions and partial selections" {
     );
 }
 
-test "Windows public state cold-start read ignores manifest.v2" {
+test "Windows public state cold-start read ignores the macOS manifest" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var backend: WindowsBackend = .{

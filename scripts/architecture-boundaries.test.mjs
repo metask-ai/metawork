@@ -268,17 +268,52 @@ test("Account execution is installed explicitly without process defaults", () =>
   assert.doesNotMatch(app, /account_api\.OAuth\.TokenSet/);
 });
 
-test("macOS Account persistence revision has one code owner", () => {
+test("macOS development identity and Account manifest hard cut have one code owner", () => {
+  const appZon = read("app.zon");
+  const build = read("build.zig");
+  const identity = read("src/product_identity.zig");
+  const app = read("src/app.zig");
   const store = read("src/account/credential_store.zig");
   const platform = read("src/account/platform.zig");
-  assert.match(store, /pub const persistence_revision: u8 = 2/);
-  assert.match(store, /"dev\.metawork\.account\.v\{d\}"/);
-  assert.match(store, /"manifest\.v\{d\}"/);
-  assert.equal([...store.matchAll(/\.\{persistence_revision\}/g)].length, 2);
-  assert.match(store, /version: u8 = persistence_revision/);
-  assert.match(store, /self\.version != persistence_revision/);
+  assert.match(appZon, /\.id = "com\.metask\.metawork\.dev"/);
+  assert.match(identity, /const app_manifest = @import\("app_manifest_zon"\)/);
+  assert.match(identity, /pub const bundle_id = app_manifest\.id/);
+  assert.doesNotMatch(identity, /com\.metask\.metawork\.dev/);
+  assert.match(
+    identity,
+    /pub const macos_data_directory_name = "MetaWork Dev"/,
+  );
+  assert.match(
+    identity,
+    /pub const macos_account_keychain_service = bundle_id \+\+ "\.account"/,
+  );
+  assert.doesNotMatch(identity, /manifest_name|manifest_schema_version/);
+  assert.match(build, /existingImport\(runner, "app_manifest_zon"\)/);
+  assert.equal(
+    (
+      build.match(
+        /addImport\("metawork_product_identity", product_identity\)/g,
+      ) ?? []
+    ).length,
+    2,
+  );
+  assert.match(app, /\.name = platformDataDirectoryName\(builtin\.os\.tag\)/);
+  assert.match(app, /\.bundle_id = product_identity\.bundle_id/);
+  assert.match(
+    store,
+    /pub const service = product_identity\.macos_account_keychain_service/,
+  );
+  assert.match(store, /pub const manifest_name = "manifest\.json"/);
+  assert.match(store, /pub const manifest_schema_version: u8 = 1/);
+  assert.match(store, /schema_version: u8 = manifest_schema_version/);
+  assert.match(store, /self\.schema_version != manifest_schema_version/);
   assert.match(platform, /const manifest_name = store\.manifest_name/);
-  assert.doesNotMatch(platform, /"manifest\.v[0-9]+"/);
+  assert.match(platform, /schema_version: u8/);
+  assert.doesNotMatch(
+    `${identity}\n${store}\n${platform}`,
+    /dev\.metawork\.account\.v2|manifest\.v[0-9]+/,
+  );
+  assert.doesNotMatch(store, /persistence_revision/);
 });
 
 test("Windows Account persistence is refresh-only and unversioned", () => {
@@ -296,6 +331,12 @@ test("Windows Account persistence is refresh-only and unversioned", () => {
   );
   assert.match(app, /builtin\.os\.tag == \.windows/);
   assert.match(app, /WindowsStore\.restore/);
+  assert.doesNotMatch(app, /dev\.metawork\.desktop/);
+  assert.match(app, /const windows_data_directory_name = "MetaWork"/);
+  assert.match(
+    app,
+    /test "product identity does not unify macOS and Windows Account storage"/,
+  );
 });
 
 test("macOS Apple Development signing is explicit and isolated", () => {
@@ -316,6 +357,10 @@ test("macOS Apple Development signing is explicit and isolated", () => {
     packageJson.scripts["setup:macos-signing:clear"],
     "node scripts/setup-macos-local-signing.mjs clear",
   );
+  assert.equal(
+    packageJson.scripts["account:cleanup-legacy:macos"],
+    "node scripts/cleanup-legacy-macos-account.mjs",
+  );
   for (const script of ["check", "test", "build:debug", "build:release"]) {
     assert.doesNotMatch(
       packageJson.scripts[script],
@@ -332,15 +377,26 @@ test("macOS Apple Development signing is explicit and isolated", () => {
   assert.doesNotMatch(signing, /bundleId:\s*"/u);
   assert.match(signing, /Apple Development/u);
   assert.match(signing, /TeamIdentifier/u);
+  assert.match(signing, /buildAppleDevelopmentRequirement/u);
+  assert.match(signing, /buildCanonicalDesignatedRequirement/u);
+  assert.match(signing, /validateCanonicalDesignatedRequirement/u);
+  assert.match(signing, /"--requirements"/u);
+  assert.match(signing, /`-R=\$\{policy\}`/u);
   assert.match(signing, /"--team-id",\s*identity\.teamId/u);
   assert.match(signing, /\.metawork-local-signing\.json/u);
 
   const setup = read("scripts/setup-macos-local-signing.mjs");
   assert.match(setup, /verifyPrivateKeyAccess/u);
   assert.match(setup, /add-certificates/u);
+  assert.doesNotMatch(setup, /delete-generic-password|cleanup-legacy/u);
+
+  const cleanup = read("scripts/cleanup-legacy-macos-account.mjs");
+  assert.match(cleanup, /delete-generic-password/u);
+  assert.match(cleanup, /dev\.metawork\.account\.v2/u);
+  assert.match(cleanup, /manifest\.v2/u);
   for (const forbidden of ["openssl", "add-trusted-cert", "delete-identity"]) {
     assert.doesNotMatch(
-      setup,
+      `${setup}\n${cleanup}`,
       new RegExp(forbidden, "u"),
       `local setup must not generate, override trust for, or delete a signing identity: ${forbidden}`,
     );

@@ -37,6 +37,12 @@ const executablePath = path.join(
   "bin",
   localProductIdentity.executableName,
 );
+const packagedAppPath = path.join(
+  repositoryRoot,
+  "zig-out",
+  "package",
+  `${localProductIdentity.executableName}.app`,
+);
 const nativeDispatcher = path.join(
   repositoryRoot,
   "node_modules",
@@ -167,29 +173,59 @@ export function parseTeamIdentifier(output) {
   return teamId;
 }
 
-export function validateDesignatedRequirement(output, expectedIdentifier) {
-  const requirement = output
+export function buildAppleDevelopmentRequirement(
+  identifier,
+  teamId,
+  identityName,
+) {
+  if (
+    !/^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/u.test(identifier) ||
+    !/^[A-Z0-9]{10}$/u.test(teamId) ||
+    !isAppleDevelopmentIdentityName(identityName) ||
+    /["\\]/u.test(identityName)
+  ) {
+    throw new Error(
+      "cannot build an Apple Development requirement from invalid identity metadata",
+    );
+  }
+  return `identifier "${identifier}" and anchor apple generic and certificate leaf[subject.OU] = ${teamId} and certificate leaf[subject.CN] = "${identityName}"`;
+}
+
+export function buildCanonicalDesignatedRequirement(
+  identifier,
+  teamId,
+  identityName,
+) {
+  return `designated => ${buildAppleDevelopmentRequirement(identifier, teamId, identityName)}`;
+}
+
+export function parseDesignatedRequirement(output) {
+  const requirements = output
     .split(/\r?\n/u)
-    .find((line) => line.startsWith("designated =>"));
-  if (!requirement) {
-    throw new Error("codesign output did not contain a designated requirement");
-  }
-  if (requirement.includes("cdhash")) {
+    .filter((line) => line.startsWith("designated =>"));
+  if (requirements.length !== 1) {
     throw new Error(
-      "designated requirement is still tied to a changing CDHash",
+      `codesign output contained ${requirements.length} designated requirements, expected 1`,
     );
   }
-  if (!requirement.includes(`identifier "${expectedIdentifier}"`)) {
-    throw new Error(
-      `designated requirement does not bind identifier ${expectedIdentifier}`,
-    );
-  }
-  if (!requirement.includes("anchor apple generic")) {
-    throw new Error(
-      "designated requirement is not anchored to the Apple signing chain",
-    );
+  const [requirement] = requirements;
+  if (/\bcdhash\b/iu.test(requirement)) {
+    throw new Error("designated requirement is tied to an unstable CDHash");
   }
   return requirement;
+}
+
+export function validateCanonicalDesignatedRequirement(
+  output,
+  expectedRequirement,
+) {
+  const actual = parseDesignatedRequirement(output);
+  if (actual !== expectedRequirement) {
+    throw new Error(
+      `designated requirement is not the canonical MetaWork requirement\nactual: ${actual}\nexpected: ${expectedRequirement}`,
+    );
+  }
+  return actual;
 }
 
 function requireMacos() {
@@ -240,7 +276,7 @@ function signatureReport(targetPath) {
   return combinedOutput(result);
 }
 
-export function verifyStableSignature(
+export function verifyAppleSignature(
   targetPath,
   expectedIdentifier = localProductIdentity.bundleId,
   options = {},
@@ -249,8 +285,7 @@ export function verifyStableSignature(
   requireTarget(targetPath);
   const verifyArgs = ["--verify", "--strict", "--verbose=2"];
   if (options.deep) verifyArgs.push("--deep");
-  verifyArgs.push(targetPath);
-  run("/usr/bin/codesign", verifyArgs, { capture: true });
+  run("/usr/bin/codesign", [...verifyArgs, targetPath], { capture: true });
   const report = signatureReport(targetPath);
   const identifier = parseCodeDirectoryIdentifier(report);
   if (identifier !== expectedIdentifier) {
@@ -264,24 +299,77 @@ export function verifyStableSignature(
       `TeamIdentifier is ${teamId}, expected ${options.expectedTeamId}`,
     );
   }
-  const requirement = validateDesignatedRequirement(report, expectedIdentifier);
-  return { identifier, requirement, teamId };
+  if (!options.expectedIdentityName) {
+    throw new Error(
+      "signature verification requires the selected Apple Development identity name",
+    );
+  }
+  const policy = buildAppleDevelopmentRequirement(
+    expectedIdentifier,
+    teamId,
+    options.expectedIdentityName,
+  );
+  run("/usr/bin/codesign", [...verifyArgs, `-R=${policy}`, targetPath], {
+    capture: true,
+  });
+  return { identifier, policy, report, teamId };
 }
 
-function signExecutable(identity) {
-  requireTarget(executablePath);
-  run("/usr/bin/codesign", [
+export function verifyStableSignature(
+  targetPath,
+  expectedIdentifier = localProductIdentity.bundleId,
+  options = {},
+) {
+  const signature = verifyAppleSignature(
+    targetPath,
+    expectedIdentifier,
+    options,
+  );
+  const expectedRequirement = buildCanonicalDesignatedRequirement(
+    expectedIdentifier,
+    signature.teamId,
+    options.expectedIdentityName,
+  );
+  const requirement = validateCanonicalDesignatedRequirement(
+    signature.report,
+    expectedRequirement,
+  );
+  return { ...signature, requirement };
+}
+
+export function signWithStableRequirement(targetPath, identity, options = {}) {
+  requireMacos();
+  requireTarget(targetPath);
+  const identifier = options.identifier ?? localProductIdentity.bundleId;
+  const requirement = buildCanonicalDesignatedRequirement(
+    identifier,
+    identity.teamId,
+    identity.name,
+  );
+  const args = [
     "--force",
     "--sign",
     identity.fingerprint,
     "--identifier",
-    localProductIdentity.bundleId,
+    identifier,
+    "--requirements",
+    `=${requirement}`,
     "--timestamp=none",
-    executablePath,
-  ]);
-  return verifyStableSignature(executablePath, localProductIdentity.bundleId, {
+  ];
+  if (options.preserveMetadata) {
+    args.push("--preserve-metadata=entitlements,flags");
+  }
+  args.push(targetPath);
+  run("/usr/bin/codesign", args);
+  return verifyStableSignature(targetPath, identifier, {
+    deep: options.deep,
+    expectedIdentityName: identity.name,
     expectedTeamId: identity.teamId,
   });
+}
+
+function signExecutable(identity) {
+  return signWithStableRequirement(executablePath, identity);
 }
 
 function runNative(args) {
@@ -329,6 +417,10 @@ function packageMacos() {
     "--team-id",
     identity.teamId,
   ]);
+  signWithStableRequirement(packagedAppPath, identity, {
+    deep: true,
+    preserveMetadata: true,
+  });
   runNode("scripts/verify-macos-package.mjs");
 }
 

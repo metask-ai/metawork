@@ -103,6 +103,7 @@ const signature = verifyStableSignature(
   localProductIdentity.bundleId,
   {
     deep: true,
+    expectedIdentityName: identity.name,
     expectedTeamId: identity.teamId,
   },
 );

@@ -20,7 +20,8 @@ import {
   localSigningKeychainPath,
   parseCodeSigningIdentities,
   selectLocalCodeSigningIdentity,
-  verifyStableSignature,
+  signWithStableRequirement,
+  verifyAppleSignature,
 } from "./macos-local-signing.mjs";
 
 const setupProbeIdentifier = `${localProductIdentity.bundleId}.setup`;
@@ -28,10 +29,7 @@ const repositoryRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
 );
-const bundledWwdrG3Path = path.join(
-  "/Applications",
-  "Xcode.app",
-  "Contents",
+const bundledWwdrG3RelativePath = path.join(
   "SharedFrameworks",
   "DVTFoundation.framework",
   "Versions",
@@ -39,7 +37,11 @@ const bundledWwdrG3Path = path.join(
   "Resources",
   "AppleWWDRCA-2030.cer",
 );
-
+const standardXcodeContentsPath = path.join(
+  "/Applications",
+  "Xcode.app",
+  "Contents",
+);
 function combinedOutput(result) {
   return `${result.stdout ?? ""}${result.stderr ?? ""}`;
 }
@@ -58,6 +60,40 @@ function run(command, args, options = {}) {
     );
   }
   return result;
+}
+
+export function xcodeContentsForDeveloperDirectory(developerDirectory) {
+  const normalized = path.resolve(developerDirectory);
+  const contents = path.dirname(normalized);
+  const application = path.dirname(contents);
+  if (
+    path.basename(normalized) !== "Developer" ||
+    path.basename(contents) !== "Contents" ||
+    !path.basename(application).endsWith(".app")
+  ) {
+    return null;
+  }
+  return contents;
+}
+
+function selectedXcodeContentsPath() {
+  const result = spawnSync("/usr/bin/xcode-select", ["-p"], {
+    cwd: repositoryRoot,
+    encoding: "utf8",
+    stdio: "pipe",
+  });
+  if (result.error || result.status !== 0) return null;
+  const developerDirectory = result.stdout.trim();
+  return developerDirectory
+    ? xcodeContentsForDeveloperDirectory(developerDirectory)
+    : null;
+}
+
+function resolveBundledWwdrG3Path() {
+  const candidates = [selectedXcodeContentsPath(), standardXcodeContentsPath]
+    .filter((candidate) => candidate !== null)
+    .map((contents) => path.join(contents, bundledWwdrG3RelativePath));
+  return candidates.find((candidate) => existsSync(candidate)) ?? null;
 }
 
 function requireMacos() {
@@ -133,7 +169,8 @@ function resolveRequestedIdentity(fingerprint) {
   }
   selectLocalCodeSigningIdentity(basicOutput, normalizedFingerprint);
 
-  if (!existsSync(bundledWwdrG3Path)) {
+  const bundledWwdrG3Path = resolveBundledWwdrG3Path();
+  if (!bundledWwdrG3Path) {
     throw new Error(
       "An Apple Development certificate and private key exist, but the Apple WWDR G3 intermediate certificate is missing. Install Worldwide Developer Relations G3 from https://www.apple.com/certificateauthority/ and retry.",
     );
@@ -167,7 +204,14 @@ function verifyPrivateKeyAccess(identity, directory) {
     "--timestamp=none",
     probePath,
   ]);
-  return verifyStableSignature(probePath, setupProbeIdentifier);
+  const discovered = verifyAppleSignature(probePath, setupProbeIdentifier, {
+    expectedIdentityName: identity.name,
+  });
+  return signWithStableRequirement(
+    probePath,
+    { ...identity, teamId: discovered.teamId },
+    { identifier: setupProbeIdentifier },
+  );
 }
 
 function writeSelection(identity, teamId) {

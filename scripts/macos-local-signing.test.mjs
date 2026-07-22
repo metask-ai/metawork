@@ -2,16 +2,20 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  buildAppleDevelopmentRequirement,
+  buildCanonicalDesignatedRequirement,
   isAppleDevelopmentIdentityName,
   localProductIdentity,
   parseCodeDirectoryIdentifier,
   parseCodeSigningIdentities,
+  parseDesignatedRequirement,
   parseLocalSigningConfig,
   parseNativeProductIdentity,
   parseTeamIdentifier,
   selectLocalCodeSigningIdentity,
-  validateDesignatedRequirement,
+  validateCanonicalDesignatedRequirement,
 } from "./macos-local-signing.mjs";
+import { xcodeContentsForDeveloperDirectory } from "./setup-macos-local-signing.mjs";
 
 const fingerprint = "0123456789ABCDEF0123456789ABCDEF01234567";
 const secondFingerprint = "FEDCBA9876543210FEDCBA9876543210FEDCBA98";
@@ -21,7 +25,7 @@ const identityName = `Apple Development: developer@example.com (${certificateSuf
 
 test("local signing reads the existing Native product identity", () => {
   assert.deepEqual(localProductIdentity, {
-    bundleId: "dev.metawork.desktop",
+    bundleId: "com.metask.metawork.dev",
     executableName: "metawork",
   });
   assert.deepEqual(
@@ -124,7 +128,7 @@ test("signature report requires an Apple-issued TeamIdentifier", () => {
   );
 });
 
-test("stable signature validation rejects ad-hoc CDHash identity", () => {
+test("designated requirement parser rejects unstable CDHash identity", () => {
   const report = `
 Identifier=${localProductIdentity.bundleId}
 designated => cdhash H"0123456789abcdef"
@@ -133,29 +137,98 @@ designated => cdhash H"0123456789abcdef"
     parseCodeDirectoryIdentifier(report),
     localProductIdentity.bundleId,
   );
-  assert.throws(
-    () => validateDesignatedRequirement(report, localProductIdentity.bundleId),
-    /changing CDHash/u,
-  );
+  assert.throws(() => parseDesignatedRequirement(report), /unstable CDHash/u);
 });
 
-test("stable signature validation accepts Apple chain and exact identifier", () => {
-  const requirement = `designated => identifier "${localProductIdentity.bundleId}" and anchor apple generic`;
+test("designated requirement parsing does not depend on Apple's textual certificate chain", () => {
+  const requirement = `designated => identifier "${localProductIdentity.bundleId}" and anchor apple generic and certificate leaf[subject.CN] = "${identityName}" and certificate 1[field.1.2.840.113635.100.6.2.1] /* exists */`;
   const report = `Identifier=${localProductIdentity.bundleId}\n${requirement}\n`;
+  assert.equal(parseDesignatedRequirement(report), requirement);
   assert.equal(
-    validateDesignatedRequirement(report, localProductIdentity.bundleId),
-    requirement,
+    parseDesignatedRequirement(
+      `${requirement} and certificate 1[subject.OU] = "Apple Worldwide Developer Relations"`,
+    ),
+    `${requirement} and certificate 1[subject.OU] = "Apple Worldwide Developer Relations"`,
   );
   assert.throws(
-    () => validateDesignatedRequirement(report, "com.metask.metawork.beta"),
-    /does not bind identifier/u,
+    () => parseDesignatedRequirement("Identifier=missing"),
+    /contained 0 designated requirements/u,
   );
   assert.throws(
     () =>
-      validateDesignatedRequirement(
-        `designated => identifier "${localProductIdentity.bundleId}" and certificate leaf = H"0123"`,
-        localProductIdentity.bundleId,
+      parseDesignatedRequirement(
+        `${requirement}\ndesignated => identifier "duplicate"`,
       ),
-    /not anchored to the Apple signing chain/u,
+    /contained 2 designated requirements/u,
+  );
+});
+
+test("canonical designated requirement validation rejects every other embedded policy", () => {
+  const canonical = buildCanonicalDesignatedRequirement(
+    localProductIdentity.bundleId,
+    teamId,
+    identityName,
+  );
+  assert.equal(
+    validateCanonicalDesignatedRequirement(
+      `Identifier=${localProductIdentity.bundleId}\n${canonical}\n`,
+      canonical,
+    ),
+    canonical,
+  );
+  for (const weak of [
+    "designated => true",
+    `designated => identifier "${localProductIdentity.bundleId}" or true`,
+    `designated => identifier "${localProductIdentity.bundleId}"`,
+  ]) {
+    assert.throws(
+      () => validateCanonicalDesignatedRequirement(weak, canonical),
+      /not the canonical MetaWork requirement/u,
+    );
+  }
+});
+
+test("Apple Development verification policy binds identifier, Apple anchor, Team, and certificate", () => {
+  assert.equal(
+    buildAppleDevelopmentRequirement(
+      localProductIdentity.bundleId,
+      teamId,
+      identityName,
+    ),
+    `identifier "${localProductIdentity.bundleId}" and anchor apple generic and certificate leaf[subject.OU] = ${teamId} and certificate leaf[subject.CN] = "${identityName}"`,
+  );
+  assert.throws(
+    () => buildAppleDevelopmentRequirement("invalid", teamId, identityName),
+    /invalid identity metadata/u,
+  );
+  assert.throws(
+    () =>
+      buildAppleDevelopmentRequirement(
+        localProductIdentity.bundleId,
+        teamId,
+        'Apple Development: invalid "name"',
+      ),
+    /invalid identity metadata/u,
+  );
+  assert.equal(
+    buildCanonicalDesignatedRequirement(
+      localProductIdentity.bundleId,
+      teamId,
+      identityName,
+    ),
+    `designated => identifier "${localProductIdentity.bundleId}" and anchor apple generic and certificate leaf[subject.OU] = ${teamId} and certificate leaf[subject.CN] = "${identityName}"`,
+  );
+});
+
+test("Xcode WWDR lookup follows the selected developer directory", () => {
+  assert.equal(
+    xcodeContentsForDeveloperDirectory(
+      "/Applications/Xcode-beta.app/Contents/Developer",
+    ),
+    "/Applications/Xcode-beta.app/Contents",
+  );
+  assert.equal(
+    xcodeContentsForDeveloperDirectory("/Library/Developer/CommandLineTools"),
+    null,
   );
 });
