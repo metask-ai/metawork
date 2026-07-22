@@ -26,7 +26,7 @@
 - 删除已经失去职责的实现、fixture 和阶段文档；Git 历史负责恢复，不建立 active archive、第二份规范或“以防万一”的平行路径。
 - 只有形成独立 owner 或可测试不变量时才拆模块；不为行数、目标目录树或未来 capability 创建空层。
 - 机器 identifier、外部路径、symbol 和 wire name 保持精确；产品与说明文字使用 MetaWork、Metask 和 Metask AgentCore。
-- `app.zon` 是 MetaWork release version 真源；根 npm、Renderer 和 Zig package 版本必须精确镜像。Bridge、persistence、AgentCore ABI 与 bundle schema 不随产品版本联动。
+- `app.zon` 是 MetaWork release version 真源；根 npm、Renderer 和 Zig package 版本必须精确镜像。Bridge、persistence、AgentCore ABI 与 bundle schema 不随产品版本联动。任何合同类版本标识的变更都必须先得到用户显式同意。
 - 变更规范时同步检查实现和验证影响；变更实现时检查对应 source of truth 是否仍准确。
 
 ## 架构护栏
@@ -35,7 +35,7 @@
 
 - React + Tailwind 是唯一正式 Renderer；不建立 `.native` 替代层、第二套 Renderer 或通用 Desktop Interface。
 - Native SDK 直接构成 Zig Host，不增加 `NativeSdkAdapter` 或框架替换层。
-- Renderer Bridge 产品合同是 `metawork.renderer-bridge` revision 2。`connect` 精确匹配 identity/revision 后才开放产品路径；不维护旧 revision 兼容层，也不在 snapshot 内建立局部 schema version。
+- Renderer Bridge 产品合同是 `metawork.renderer-bridge` 固定 revision 1。快速开发阶段直接原地 hard cut command、event、payload 与 wire 语义；不得为临时合同形态递增 revision、保留兼容层或在 snapshot 内建立局部 schema version。`connect` 精确匹配 identity/revision 后才开放产品路径；任何 revision 变更必须先得到用户显式同意。
 - `app.zon`、Zig 和 TypeScript command catalog 必须完全一致。Renderer 对 Host payload 做 runtime decode；Host 执行 origin、command、payload、Workspace、Task 和权限校验。
 - Bridge 只拥有 command ingress 与 `ProductDelivery` transport；产品状态和 Run policy 归 Workbench。automation 只能驱动真实产品路径，不注册测试专用协议或第二数据面。
 

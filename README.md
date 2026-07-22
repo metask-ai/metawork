@@ -6,7 +6,7 @@ MetaWork 是一款面向本地工作区的桌面 Agent Workbench。产品围绕 
 
 ```text
 React + Tailwind Renderer
-        ↓ Renderer Bridge revision 2
+        ↓ Renderer Bridge
 Native SDK + Zig Host / Workbench
         ↓ official bundle SDK
 Metask AgentCore ABI v1 revision 3

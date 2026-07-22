@@ -57,7 +57,7 @@ test("contract mismatch is terminal and never enters connection retry backoff", 
       connectCalls += 1;
       throw new RendererBridgeContractError(
         "revision_mismatch",
-        "Host requires metawork.renderer-bridge revision 2",
+        "Host requires metawork.renderer-bridge revision 1",
       );
     },
     disconnect: async () => assert.fail("no generation was established"),

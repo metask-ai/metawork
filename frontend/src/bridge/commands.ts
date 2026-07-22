@@ -1,5 +1,5 @@
 export const RENDERER_BRIDGE_CONTRACT_ID = "metawork.renderer-bridge";
-export const RENDERER_BRIDGE_CONTRACT_REVISION = 2 as const;
+export const RENDERER_BRIDGE_CONTRACT_REVISION = 1 as const;
 
 export const commands = {
   ping: "metawork.smoke.ping",

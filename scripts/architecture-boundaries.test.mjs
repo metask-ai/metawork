@@ -611,7 +611,7 @@ test("Bridge Dispatcher owns product command decisions and App only composes it"
   assert.doesNotMatch(app, /parsePayload|parseWireId|workspaceGrant/);
 });
 
-test("Renderer Bridge revision 2 owns the exact product wire catalog", () => {
+test("Renderer Bridge fixed revision 1 owns the exact product wire catalog", () => {
   const zigCommands = read("src/bridge/commands.zig");
   const rendererCommands = read("frontend/src/bridge/commands.ts");
   const appManifest = read("app.zon");
@@ -625,12 +625,26 @@ test("Renderer Bridge revision 2 owns the exact product wire catalog", () => {
   assert.deepEqual(catalog(appManifest), catalog(zigCommands));
   assert.ok(catalog(zigCommands).includes("metawork.account.reopenLogin"));
   assert.match(zigCommands, /contract_id = "metawork\.renderer-bridge"/);
-  assert.match(zigCommands, /contract_revision: u32 = 2/);
+  assert.match(zigCommands, /contract_revision: u32 = 1/);
   assert.match(
     rendererCommands,
     /RENDERER_BRIDGE_CONTRACT_ID = "metawork\.renderer-bridge"/,
   );
-  assert.match(rendererCommands, /RENDERER_BRIDGE_CONTRACT_REVISION = 2/);
+  assert.match(rendererCommands, /RENDERER_BRIDGE_CONTRACT_REVISION = 1/);
+  const agents = read("AGENTS.md");
+  const architecture = read("docs/architecture.md");
+  assert.match(agents, /任何合同类版本标识的变更都必须先得到用户显式同意/);
+  assert.match(
+    architecture,
+    /任何合同类版本标识的变更都必须先得到用户显式同意/,
+  );
+  assert.match(architecture, /快速开发阶段固定 revision 为 `1`/);
+  assert.match(
+    architecture,
+    /`connect` 无法通过 revision 数字识别同 revision 的陈旧开发产物/,
+  );
+  assert.match(architecture, /不能检测纯 wire 语义错配/);
+  assert.match(architecture, /不构成 runtime compatibility guarantee/);
   assert.doesNotMatch(zigCommands, /metawork\.workspace\.choose/);
   assert.doesNotMatch(rendererCommands, /metawork\.workspace\.choose/);
 

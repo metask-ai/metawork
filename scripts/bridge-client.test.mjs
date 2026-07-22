@@ -24,7 +24,7 @@ test("Renderer Bridge connect negotiates the exact contract before returning a g
       return {
         accepted: true,
         contractId: "metawork.renderer-bridge",
-        contractRevision: 2,
+        contractRevision: 1,
         generation: "3",
         error: null,
       };
@@ -37,7 +37,7 @@ test("Renderer Bridge connect negotiates the exact contract before returning a g
       command: "metawork.events.connect",
       payload: {
         contractId: "metawork.renderer-bridge",
-        contractRevision: 2,
+        contractRevision: 1,
       },
     },
   ]);
@@ -49,7 +49,7 @@ test("Renderer Bridge mismatch and malformed acceptance are terminal contract fa
       {
         accepted: false,
         contractId: "metawork.renderer-bridge",
-        contractRevision: 2,
+        contractRevision: 1,
         generation: null,
         error: "revision_mismatch",
       },
@@ -59,7 +59,7 @@ test("Renderer Bridge mismatch and malformed acceptance are terminal contract fa
       {
         accepted: true,
         contractId: "other.renderer-bridge",
-        contractRevision: 2,
+        contractRevision: 1,
         generation: "1",
         error: null,
       },
@@ -110,7 +110,7 @@ test("a native Workspace picker remains user-controlled instead of command-timed
   assert.deepEqual(await client.chooseWorkspace(), { selected: false });
 });
 
-test("revision 2 mutations carry Host-owned Workspace and generation identities", async () => {
+test("the fixed revision 1 contract carries Host-owned Workspace and generation identities", async () => {
   const calls = [];
   const client = new BridgeClient({
     bridge: bridgeWith(async (command, payload) => {

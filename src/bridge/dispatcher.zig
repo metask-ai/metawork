@@ -1350,7 +1350,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
     try std.testing.expectEqual(initial_revision, workbench.currentRevision());
 
     const mismatch = native_dispatcher.dispatch(
-        "{\"id\":\"mismatch\",\"command\":\"metawork.events.connect\",\"payload\":{\"contractId\":\"metawork.renderer-bridge\",\"contractRevision\":1}}",
+        "{\"id\":\"mismatch\",\"command\":\"metawork.events.connect\",\"payload\":{\"contractId\":\"metawork.renderer-bridge\",\"contractRevision\":2}}",
         source,
         &response,
     );
@@ -1358,7 +1358,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
     try std.testing.expect(std.mem.indexOf(u8, mismatch, "\"revision_mismatch\"") != null);
     try std.testing.expect(dispatcher.connectedWindow() == null);
     const identity_mismatch = native_dispatcher.dispatch(
-        "{\"id\":\"identity-mismatch\",\"command\":\"metawork.events.connect\",\"payload\":{\"contractId\":\"other.renderer-bridge\",\"contractRevision\":2}}",
+        "{\"id\":\"identity-mismatch\",\"command\":\"metawork.events.connect\",\"payload\":{\"contractId\":\"other.renderer-bridge\",\"contractRevision\":1}}",
         source,
         &response,
     );
@@ -1374,13 +1374,13 @@ test "Dispatcher validates authority before domain calls and preserves committed
     try std.testing.expectEqual(initial_revision, workbench.currentRevision());
 
     _ = native_dispatcher.dispatch(
-        "{\"id\":\"connect\",\"command\":\"metawork.events.connect\",\"payload\":{\"contractId\":\"metawork.renderer-bridge\",\"contractRevision\":2}}",
+        "{\"id\":\"connect\",\"command\":\"metawork.events.connect\",\"payload\":{\"contractId\":\"metawork.renderer-bridge\",\"contractRevision\":1}}",
         source,
         &response,
     );
     try std.testing.expect(dispatcher.connectedWindow() == source.window_id);
     _ = native_dispatcher.dispatch(
-        "{\"id\":\"reload-mismatch\",\"command\":\"metawork.events.connect\",\"payload\":{\"contractId\":\"metawork.renderer-bridge\",\"contractRevision\":1}}",
+        "{\"id\":\"reload-mismatch\",\"command\":\"metawork.events.connect\",\"payload\":{\"contractId\":\"metawork.renderer-bridge\",\"contractRevision\":2}}",
         source,
         &response,
     );
@@ -1393,7 +1393,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
     try std.testing.expect(std.mem.indexOf(u8, gated_after_mismatch, "\"handler_failed\"") != null);
     try std.testing.expectEqual(@as(usize, 0), harness.account_calls);
     _ = native_dispatcher.dispatch(
-        "{\"id\":\"reconnect\",\"command\":\"metawork.events.connect\",\"payload\":{\"contractId\":\"metawork.renderer-bridge\",\"contractRevision\":2}}",
+        "{\"id\":\"reconnect\",\"command\":\"metawork.events.connect\",\"payload\":{\"contractId\":\"metawork.renderer-bridge\",\"contractRevision\":1}}",
         source,
         &response,
     );

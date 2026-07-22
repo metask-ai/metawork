@@ -51,7 +51,7 @@ MetaWork 的视觉记忆点不是装饰性的暖色、通用衬线大标题、�
 - Ask question 与 permission 两类同步用户请求；
 - Run 状态、六种终止原因，以及 Session 是否仍可继续。
 
-因此当前产品只显示时间线、工具活动、问题/权限卡片、Current activity 和真实 usage。Plan、plan approval、Outputs、Files changed、持久权限管理和 custom UI 均保持隐藏；它们在本文档中的设计是后续 capability 到位后的产品规范，不是当前实现承诺。Renderer 不解析工具参数、stdout 或普通文本来猜测这些状态。revision 2 已提供独立 Workspace projection、Task-bound ExecutionConfig facts、正式设置 route，以及设置与 New task 共享的默认 API/模型选择；跨重启 rebind 等仍须等对应 capability 落地后才能宣称可用，差距由 [验证规范](validation.md)明确记录。
+因此当前产品只显示时间线、工具活动、问题/权限卡片、Current activity 和真实 usage。Plan、plan approval、Outputs、Files changed、持久权限管理和 custom UI 均保持隐藏；它们在本文档中的设计是后续 capability 到位后的产品规范，不是当前实现承诺。Renderer 不解析工具参数、stdout 或普通文本来猜测这些状态。当前 Renderer 合同已提供独立 Workspace projection、Task-bound ExecutionConfig facts、正式设置 route，以及设置与 New task 共享的默认 API/模型选择；跨重启 rebind 等仍须等对应 capability 落地后才能宣称可用，差距由 [验证规范](validation.md)明确记录。
 
 ### 2.2 Capability 标记
 
@@ -93,7 +93,7 @@ Workspace
 - `Turn` 和 `Run` 通常不直接命名，用当前活动、排队、停止和结果表达。
 - 一项 Task 可以包含多次用户补充和多次执行；停止一次执行不会删除 Task。
 
-当前 Renderer 产品合同固定为 `metawork.renderer-bridge` revision 2：`connect` 精确协商后才开放产品路径，snapshot 根节点包含无 secret `capabilities`、`account`、`selectedWorkspaceId`、`workspaces` 与 `tasks` 且不维护局部版本；Account 直接发布 `readiness`、唯一 `primaryAction`、脱敏 catalog selection 与 generation，Workspace 独立于 Task 发布，Task 固化 binding epoch 与显示事实。当前不提供旧 revision 兼容层或可选字段退路；Agent 内部 Session route identity 不属于 Renderer 产品模型。
+当前 Renderer 产品合同为 `metawork.renderer-bridge` 固定 revision 1：`connect` 精确协商后才开放产品路径，snapshot 根节点包含无 secret `capabilities`、`account`、`selectedWorkspaceId`、`workspaces` 与 `tasks` 且不维护局部版本；Account 直接发布 `readiness`、唯一 `primaryAction`、脱敏 catalog selection 与 generation，Workspace 独立于 Task 发布，Task 固化 binding epoch 与显示事实。快速开发阶段直接原地 hard cut 合同内容，不提供临时形态兼容层或可选字段退路；任何合同类版本标识变更必须先得到用户显式同意。Agent 内部 Session route identity 不属于 Renderer 产品模型。
 
 ### 3.2 规范术语
 
@@ -104,8 +104,8 @@ Workspace
 | Workspace            | 工作区       | 本地目录和任务归属范围             |
 | Task                 | 任务         | 用户可持续补充的工作上下文         |
 | New task             | 新建任务     | 不使用 New session                 |
-| Account & models     | 账号与模型   | API、默认模型、刷新与重新认证       |
-| Model                | 模型         | 新 Task 的执行模型，不称模式         |
+| Account & models     | 账号与模型   | API、默认模型、刷新与重新认证      |
+| Model                | 模型         | 新 Task 的执行模型，不称模式       |
 | Inspector            | 检查器       | 按需活动摘要与详情，不称 Monitor   |
 | Current activity     | 当前活动     | Agent 此刻正在进行的可观察动作     |
 | Plan                 | 计划         | 只在有真实结构化计划时显示         |
@@ -174,7 +174,7 @@ Windows 和 macOS 使用同一内容布局，只调整窗口壳：
 
 ## 5. 左栏：Workspace 与 Task
 
-> Capability：**混合**。revision 2 已提供独立 Workspace projection，当前 shell 已提供稳定 New task、Workspace/Task 导航、行动优先分组和左下角账号入口；跨 Host Task persistence 仍是目标能力。
+> Capability：**混合**。当前 Renderer 合同已提供独立 Workspace projection，当前 shell 已提供稳定 New task、Workspace/Task 导航、行动优先分组和左下角账号入口；跨 Host Task persistence 仍是目标能力。
 
 ### 5.1 Workspace 切换
 
@@ -399,7 +399,7 @@ Read 详情显示真实文件范围；Bash 详情显示实际执行命令、工�
 
 ## 8. Composer 与执行控制
 
-> Capability：**混合**。当前 Run gate、停止、本地草稿、New task 主视觉、默认模型选择和既有 Task execution binding 提示已经由 revision 2 合同表达；跨重启恢复与显式 rebind 仍是目标能力。
+> Capability：**混合**。当前 Run gate、停止、本地草稿、New task 主视觉、默认模型选择和既有 Task execution binding 提示已经由当前 Renderer 合同表达；跨重启恢复与显式 rebind 仍是目标能力。
 
 Composer 固定在中间区域底部，但必须为滚动内容预留空间。
 
@@ -637,7 +637,7 @@ Inspector 同步更新 Outputs，但不重复整段完成说明。
 
 ## 14. 首次启动与设置
 
-> Capability：**混合**。revision 2 已提供登录优先、正式 settings route，以及设置与 New task 共用的 Host-owned 默认 API/模型选择；跨重启 execution rebind 仍按独立 capability gate 验收。
+> Capability：**混合**。当前 Renderer 合同已提供登录优先、正式 settings route，以及设置与 New task 共用的 Host-owned 默认 API/模型选择；跨重启 execution rebind 仍按独立 capability gate 验收。
 
 ### 14.1 首次启动
 
@@ -736,16 +736,16 @@ MetaWork 采用安静、精确、长时间可读的桌面工具方向。视觉�
 
 初始核心色板如下；状态图标、焦点、文字和控件组合在实现前必须完成 WCAG 对比度校验，必要时调整：
 
-| Token               | Value     | Role                         |
-| ------------------- | --------- | ---------------------------- |
-| `ink-primary`       | `#17212B` | 主文字与标题                 |
-| `ink-secondary`     | `#52606D` | 次级文字                     |
-| `surface-app`       | `#F3F5F7` | 应用背景                     |
-| `surface-work`      | `#FFFFFF` | 中央工作面与浮层             |
-| `action-primary`    | `#176C7A` | 主操作、选择与键盘焦点       |
-| `status-success`    | `#2C7651` | 明确成功                     |
-| `status-attention`  | `#A85D00` | 等待用户或警告               |
-| `status-danger`     | `#B34444` | 失败、危险和删除             |
+| Token              | Value     | Role                   |
+| ------------------ | --------- | ---------------------- |
+| `ink-primary`      | `#17212B` | 主文字与标题           |
+| `ink-secondary`    | `#52606D` | 次级文字               |
+| `surface-app`      | `#F3F5F7` | 应用背景               |
+| `surface-work`     | `#FFFFFF` | 中央工作面与浮层       |
+| `action-primary`   | `#176C7A` | 主操作、选择与键盘焦点 |
+| `status-success`   | `#2C7651` | 明确成功               |
+| `status-attention` | `#A85D00` | 等待用户或警告         |
+| `status-danger`    | `#B34444` | 失败、危险和删除       |
 
 主操作色不能同时代表运行、成功或选中；成功、等待和危险使用独立语义，并始终配合文字或图标。正常完成不需要大面积绿色庆祝。
 

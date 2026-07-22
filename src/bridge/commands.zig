@@ -1,7 +1,7 @@
 //! Exact Renderer Bridge command identities.
 
 pub const contract_id = "metawork.renderer-bridge";
-pub const contract_revision: u32 = 2;
+pub const contract_revision: u32 = 1;
 
 pub const ping = "metawork.smoke.ping";
 pub const ping_ack = "metawork.smoke.eventAck";

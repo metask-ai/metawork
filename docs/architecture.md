@@ -7,13 +7,13 @@
 
 ## 1. 已确认的技术选型
 
-| 层级                              | 选择                               | 决策说明                                                              |
-| --------------------------------- | ---------------------------------- | --------------------------------------------------------------------- |
-| Renderer                          | React + Tailwind                   | 当前正式 UI 技术栈，适合复杂 Workbench 界面                           |
-| Desktop Framework                 | Native SDK                         | Zig 一等公民，负责系统 WebView、窗口、Bridge 和桌面生命周期           |
-| App / Account / Workbench / Agent | Zig                                | 分别承担 composition、账号控制面、产品状态和 AgentCore 执行边界       |
-| AgentCore                         | Metask AgentCore library bundle    | Metask AgentCore 独立构建和发布；MetaWork 链接产物，不把上游源码纳入自身构建 |
-| Agent UI contract                 | AgentCore 原生结构化协议           | React 消费 Host 产品投影，不消费终端字节流或 Provider SSE             |
+| 层级                              | 选择                            | 决策说明                                                                     |
+| --------------------------------- | ------------------------------- | ---------------------------------------------------------------------------- |
+| Renderer                          | React + Tailwind                | 当前正式 UI 技术栈，适合复杂 Workbench 界面                                  |
+| Desktop Framework                 | Native SDK                      | Zig 一等公民，负责系统 WebView、窗口、Bridge 和桌面生命周期                  |
+| App / Account / Workbench / Agent | Zig                             | 分别承担 composition、账号控制面、产品状态和 AgentCore 执行边界              |
+| AgentCore                         | Metask AgentCore library bundle | Metask AgentCore 独立构建和发布；MetaWork 链接产物，不把上游源码纳入自身构建 |
+| Agent UI contract                 | AgentCore 原生结构化协议        | React 消费 Host 产品投影，不消费终端字节流或 Provider SSE                    |
 
 由此排除以下正式主路径：
 
@@ -166,7 +166,7 @@ production 网络接入受 [Metask Account API 合同](metask-account-contract.m
 
 因此“默认配置切换”和“历史 Task rebind”是两种不同 mutation：前者不触碰既有 Task，后者只由用户对单个只读 Task 明确发起，并受 optimistic epoch 与 admission 校验保护。
 
-Workspace 是 Workbench-owned 产品对象，而不是 Renderer 从 Task 路径派生的 convenience view。Renderer Bridge revision 2 发布 stable identity、optimistic epoch、canonical root、display label、authorization/removal outcome 与聚合 Task signals；一次性目录能力由 Bridge/Native capability 生成并在同一 `workspaces.choose` Host 命令内消费，Renderer 只得到 Workspace identity。Task 创建绑定 expected execution generation，后续 Run 绑定 expected binding epoch，Workspace mutation 绑定 expected Workspace epoch；Host 对 window、ownership、catalog membership 与 admission 重新校验。预期业务拒绝编码为严格 typed result，非法 payload 与 authority failure 仍走 Bridge failure；合同不接受 revision 1 payload 或兼容字段。
+Workspace 是 Workbench-owned 产品对象，而不是 Renderer 从 Task 路径派生的 convenience view。Renderer Bridge 固定 revision 1 发布 stable identity、optimistic epoch、canonical root、display label、authorization/removal outcome 与聚合 Task signals；一次性目录能力由 Bridge/Native capability 生成并在同一 `workspaces.choose` Host 命令内消费，Renderer 只得到 Workspace identity。Task 创建绑定 expected execution generation，后续 Run 绑定 expected binding epoch，Workspace mutation 绑定 expected Workspace epoch；Host 对 window、ownership、catalog membership 与 admission 重新校验。预期业务拒绝编码为严格 typed result，非法 payload 与 authority failure 仍走 Bridge failure；合同不接受被当前形态取代的临时 payload 或兼容字段。
 
 Workbench 单独分配稳定的产品 Task identity，并在 Task owner 内保存 Agent Session route identity；AgentCore event 与 event-projection failure 都只按 route identity 回到 owner，Bridge snapshot 与 mutation 只使用产品 Task identity，二者不共享生成器也不依赖数值相等。Task binding descriptor 包含无 secret 的 account/profile、API、Provider、model、generation 与 binding epoch；内部执行使用的 raw model 与 Renderer projection 的 selection identity 分开持有。
 
@@ -190,7 +190,7 @@ async suspend/resume、持久化恢复和后台转换属于后续 AgentCore capa
 
 MetaWork 桌面产品、根 npm workspace、Renderer workspace 和 Zig package 随同一仓库原子发布，共用一个 release version。`app.zon` 是产品版本真源；根 `package.json`、`frontend/package.json` 与 `build.zig.zon` 必须精确镜像，`package-lock.json` 只保存 npm 派生结果。当前统一版本为 `0.1.0`。
 
-Renderer Bridge revision、Account persistence revision、AgentCore artifact version、AgentCore ABI version/revision 和 bundle manifest schema 各自保护不同合同，不得随 MetaWork release version 自动升降。release version 变化必须原子更新全部镜像并通过跨 manifest 一致性守卫。
+Renderer Bridge revision、Account persistence revision、AgentCore artifact version、AgentCore ABI version/revision 和 bundle manifest schema 各自保护不同合同，不得随 MetaWork release version 自动升降。任何合同类版本标识的变更都必须先得到用户显式同意；release version 变化必须原子更新全部镜像并通过跨 manifest 一致性守卫。
 
 ## 5. AgentCore bundle 边界
 
@@ -248,11 +248,11 @@ RunJob
 
 ### 6.2 进程模型
 
-| 模型                      | 故障隔离               | 作用                       |
-| ------------------------- | ---------------------- | -------------------------- |
-| 同进程 + bounded executor | 零进程级隔离           | 当前最小真实 baseline      |
+| 模型                      | 故障隔离               | 作用                                |
+| ------------------------- | ---------------------- | ----------------------------------- |
+| 同进程 + bounded executor | 零进程级隔离           | 当前最小真实 baseline               |
 | 单 AgentCore Worker       | Host 与 AgentCore 隔离 | fault-domain 验证选定的后续正式方向 |
-| 每活跃 Session Worker     | 会话级隔离             | 只有前两者数据不足时再验证 |
+| 每活跃 Session Worker     | 会话级隔离             | 只有前两者数据不足时再验证          |
 
 统一 Zig 不提供隔离。独立 crash 对照证明同进程是零进程级隔离，并选择单 AgentCore Worker 作为后续正式方向。该决定不把 spike IPC 升格为产品协议；版本化 transport、backpressure、shutdown、credential 和真实 bundle 资源数据必须在后续能力验收中定义。当前同进程应用仍只是 prototype。
 
@@ -277,9 +277,9 @@ Host view snapshot 使用 Bridge `Dispatcher` 内部 `ProductDelivery` 独占的
 
 ### 7.1 Renderer Bridge wire contract
 
-Host 与 Renderer 随同一应用包原子发布，不承担旧 Renderer/新 Host 或新 Renderer/旧 Host 的兼容，但仍必须在 bootstrap 时检测开发产物、缓存资源或安装状态造成的版本错配。Renderer Bridge contract 覆盖全部 product command、event 和 snapshot wire surface；它与产品版本、AgentCore ABI、bundle manifest schema 分别演进。
+Host 与 Renderer 随同一应用包原子发布，不承担旧 Renderer/新 Host 或新 Renderer/旧 Host 的兼容。bootstrap 必须拒绝合同 identity 或经用户批准后出现的 revision 错配；固定 revision 策略下，`connect` 无法通过 revision 数字识别同 revision 的陈旧开发产物。严格 command catalog 和 payload decoder 只能在实际命令或结构差异被触及时失败，不能检测纯 wire 语义错配。此类错配属于 unsupported development state，必须通过 clean rebuild、清理缓存或重新安装恢复；原子打包用于降低发生概率，不构成 runtime compatibility guarantee。Renderer Bridge contract 覆盖全部 product command、event 和 snapshot wire surface；它与产品版本、AgentCore ABI、bundle manifest schema 相互独立。
 
-Renderer Bridge 使用独立合同身份 `metawork.renderer-bridge`，当前 revision 为 `2`。`contractRevision` 精确匹配，不使用 semver：任何可序列化 command、event、payload 字段或线上语义变化都升级 revision，包括新增“可选”命令。当前 pre-1.0 开发阶段不维护旧 revision 兼容层，也不在 snapshot 内维护第二个局部版本。
+Renderer Bridge 使用独立合同身份 `metawork.renderer-bridge`，快速开发阶段固定 revision 为 `1`。Host 与 Renderer 随同一应用包原子发布，任何 command、event、payload 字段或 wire 语义变化都直接原地 hard cut，不为临时合同形态递增 revision、不维护兼容层，也不在 snapshot 内维护第二个局部版本。`contractRevision` 仍精确匹配，用于拒绝非当前固定标识，但不承诺识别同 revision 的开发产物错配。任何 Renderer Bridge revision 变更都必须先得到用户显式同意。
 
 `connect` 是 product delivery 的 bootstrap 边界。Host 必须在合同身份与 revision 校验成功后才建立 `ProductDelivery` connection；既有 `requireWindow()` 门禁随后统一保护 Account、Task、event 和 snapshot 产品路径。协商前只允许显式列出的无状态 bootstrap/smoke 命令，不得读取或修改产品状态。合同不匹配返回 typed terminal bootstrap error，Renderer 不把它当作瞬时断线重试。
 
