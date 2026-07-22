@@ -8,6 +8,16 @@ import {
 } from "react";
 
 import { AppShell } from "./AppShell.tsx";
+import {
+  attentionStatus,
+  publishStatus,
+  quietStatus,
+  selectAccountGateStatus,
+  selectCommandBarStatus,
+  type ShellStatus,
+  type ShellStatusState,
+  type StatusAudience,
+} from "./command-bar-status.ts";
 import { Icon } from "../components/ui/Icon.tsx";
 import { AccountIdentity } from "../features/account/AccountIdentity.tsx";
 import { AccountGate } from "../features/account/AccountGate.tsx";
@@ -92,28 +102,28 @@ function mutationReasonMessageId(reason: MutationReason): MessageId {
   return `mutation.reason.${reason}`;
 }
 
-type StatusState = {
-  id: MessageId;
-  values?: Record<string, string>;
-  diagnostic?: string;
-  sourceId?: MessageId;
-};
-
-function connectionStatus(status: WorkbenchConnectionStatus): StatusState {
+function connectionStatus(status: WorkbenchConnectionStatus): ShellStatus {
   if (status.kind === "connected")
-    return {
-      id: status.recovered ? "connection.recovered" : "connection.connected",
-    };
+    return quietStatus(
+      status.recovered ? "connection.recovered" : "connection.connected",
+      { scope: "connection" },
+    );
   if (status.kind === "refresh_failed")
-    return {
-      id: "connection.refresh_failed",
+    return attentionStatus(
+      "connection.refresh_failed",
+      { scope: "connection" },
+      {
+        diagnostic: status.diagnostic,
+      },
+    );
+  return attentionStatus(
+    "connection.failed",
+    { scope: "connection" },
+    {
       diagnostic: status.diagnostic,
-    };
-  return {
-    id: "connection.failed",
-    diagnostic: status.diagnostic,
-    sourceId: `connection.source.${status.source}`,
-  };
+      sourceId: `connection.source.${status.source}`,
+    },
+  );
 }
 
 export default function App() {
@@ -134,9 +144,12 @@ export default function App() {
   const [titleDraft, setTitleDraft] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [taskMenuOpen, setTaskMenuOpen] = useState(false);
-  const [status, setStatus] = useState<StatusState>({
-    id: "connection.connecting",
-  });
+  const [statuses, setStatuses] = useState<ShellStatusState>(() =>
+    publishStatus(
+      {},
+      quietStatus("connection.connecting", { scope: "connection" }),
+    ),
+  );
   const [accountBusy, setAccountBusy] = useState(false);
   const [workspaceBusy, setWorkspaceBusy] = useState(false);
   const [taskPending, setTaskPending] = useState<Record<string, string>>({});
@@ -169,6 +182,11 @@ export default function App() {
   const inspectorOpener = useRef<HTMLButtonElement | null>(null);
   const inspectorFocusSequence = useRef(0);
   const composer = useRef<HTMLTextAreaElement>(null);
+
+  function setStatus(status: ShellStatus) {
+    setStatuses((current) => publishStatus(current, status));
+  }
+
   const snapshot = workbench.snapshot;
   const activeTask = useMemo(() => selectActiveTask(workbench), [workbench]);
   const inspector = useInspectorSession(activeTask);
@@ -276,10 +294,15 @@ export default function App() {
       if (!cancelled) {
         setViewSyncFailed(true);
         if (!(error instanceof RendererBridgeContractError))
-          setStatus({
-            id: "connection.failed",
-            diagnostic: errorText(error),
-          });
+          setStatus(
+            attentionStatus(
+              "connection.failed",
+              { scope: "connection" },
+              {
+                diagnostic: errorText(error),
+              },
+            ),
+          );
       }
     });
 
@@ -468,14 +491,19 @@ export default function App() {
       if (!current) throw new Error("Workbench connection is not available");
       await current.retry();
       setBridgeReady(true);
-      setStatus({ id: "connection.recovered" });
+      setStatus(quietStatus("connection.recovered", { scope: "connection" }));
     } catch (error) {
       setViewSyncFailed(true);
       setBridgeReady(false);
-      setStatus({
-        id: "connection.failed",
-        diagnostic: errorText(error),
-      });
+      setStatus(
+        attentionStatus(
+          "connection.failed",
+          { scope: "connection" },
+          {
+            diagnostic: errorText(error),
+          },
+        ),
+      );
     } finally {
       connectionBusyRef.current = false;
       setConnectionBusy(false);
@@ -495,19 +523,30 @@ export default function App() {
       const result = await invoke();
       if (!result.accepted) {
         await refreshSnapshot().catch(() => undefined);
-        setStatus({
-          id:
+        setStatus(
+          attentionStatus(
             result.errorCode === "generation_mismatch"
               ? "account.options_updated"
               : "account.command_rejected",
-        });
+            { scope: "account" },
+          ),
+        );
         return;
       }
-      await refreshAfterCommit("account.updated", "operation.account");
+      await refreshAfterCommit("account.updated", "operation.account", {
+        scope: "account",
+      });
     } catch (error) {
-      if (await reconcileCommandTimeout(error, "operation.account")) return;
+      if (
+        await reconcileCommandTimeout(error, "operation.account", {
+          scope: "account",
+        })
+      )
+        return;
       await refreshSnapshot().catch(() => undefined);
-      setStatus({ id: "account.command_failed" });
+      setStatus(
+        attentionStatus("account.command_failed", { scope: "account" }),
+      );
     } finally {
       accountBusyRef.current = false;
       setAccountBusy(false);
@@ -528,15 +567,23 @@ export default function App() {
       const result = await client.cancelAccountOperation();
       if (!result.accepted) {
         await refreshSnapshot().catch(() => undefined);
-        setStatus({ id: "account.cancel_rejected" });
+        setStatus(quietStatus("account.cancel_rejected", { scope: "account" }));
         return;
       }
-      await refreshAfterCommit("account.cancelled", "operation.account_cancel");
+      await refreshAfterCommit(
+        "account.cancelled",
+        "operation.account_cancel",
+        { scope: "account" },
+      );
     } catch (error) {
-      if (await reconcileCommandTimeout(error, "operation.account_cancel"))
+      if (
+        await reconcileCommandTimeout(error, "operation.account_cancel", {
+          scope: "account",
+        })
+      )
         return;
       await refreshSnapshot().catch(() => undefined);
-      setStatus({ id: "account.cancel_failed" });
+      setStatus(attentionStatus("account.cancel_failed", { scope: "account" }));
     } finally {
       accountCancelBusyRef.current = false;
       setAccountCancelBusy(false);
@@ -569,7 +616,12 @@ export default function App() {
                 workspaceId: result.workspaceId,
               },
         );
-        setStatus({ id: "workspace.grant_confirmed" });
+        setStatus(
+          quietStatus("workspace.grant_confirmed", {
+            scope: "workspace",
+            workspaceId: result.workspaceId,
+          }),
+        );
         if (openDraft)
           window.requestAnimationFrame(() => composer.current?.focus());
         return result;
@@ -579,20 +631,34 @@ export default function App() {
           type: "task.draft.opened",
           workspaceId: outcome.workspaceId,
         });
-        setStatus({ id: "workspace.draft_conflict" });
+        setStatus(
+          attentionStatus("workspace.draft_conflict", {
+            scope: "workspace",
+            workspaceId: outcome.workspaceId,
+          }),
+        );
         window.requestAnimationFrame(() => composer.current?.focus());
         return null;
       }
-      setStatus({ id: "workspace.selection_cancelled" });
+      setStatus(
+        quietStatus("workspace.selection_cancelled", {
+          scope: "workspace",
+          workspaceId: currentWorkspaceId,
+        }),
+      );
       if (openDraft)
         window.requestAnimationFrame(() => composer.current?.focus());
       return null;
     } catch (error) {
-      setStatus({
-        id: "workspace.selection_failed",
-        values: { error: t("mutation.transport_failed") },
-        diagnostic: errorText(error),
-      });
+      setStatus(
+        attentionStatus(
+          "workspace.selection_failed",
+          { scope: "workspace", workspaceId: null },
+          {
+            diagnostic: errorText(error),
+          },
+        ),
+      );
       if (openDraft)
         window.requestAnimationFrame(() => composer.current?.focus());
       return null;
@@ -614,25 +680,45 @@ export default function App() {
         (candidate) => candidate.id === workspaceId,
       );
       if (!workspace) {
-        setStatus({ id: "workspace.selection_unavailable" });
+        setStatus(
+          attentionStatus("workspace.selection_unavailable", {
+            scope: "workspace",
+            workspaceId: null,
+          }),
+        );
         return;
       }
       const result = await client.selectWorkspace(workspaceId, workspace.epoch);
       if (!result.accepted) {
         await refreshSnapshot().catch(() => undefined);
-        setStatus({ id: mutationReasonMessageId(result.reason) });
+        setStatus(
+          attentionStatus(mutationReasonMessageId(result.reason), {
+            scope: "workspace",
+            workspaceId: null,
+          }),
+        );
         return;
       }
       await refreshSnapshot();
       dispatchWorkbench({ type: "workspace.selected", workspaceId });
       if (taskId !== null) dispatchWorkbench({ type: "task.selected", taskId });
+      setStatus(
+        quietStatus("workspace.grant_confirmed", {
+          scope: "workspace",
+          workspaceId,
+        }),
+      );
     } catch (error) {
       await refreshSnapshot().catch(() => undefined);
-      setStatus({
-        id: "workspace.selection_failed",
-        values: { error: t("mutation.transport_failed") },
-        diagnostic: errorText(error),
-      });
+      setStatus(
+        attentionStatus(
+          "workspace.selection_failed",
+          { scope: "workspace", workspaceId: null },
+          {
+            diagnostic: errorText(error),
+          },
+        ),
+      );
     } finally {
       workspaceBusyRef.current = false;
       setWorkspaceBusy(false);
@@ -648,25 +734,39 @@ export default function App() {
         (candidate) => candidate.id === workspaceId,
       );
       if (!workspace) {
-        setStatus({ id: "workspace.selection_unavailable" });
+        setStatus(
+          attentionStatus("workspace.selection_unavailable", {
+            scope: "workspace",
+            workspaceId,
+          }),
+        );
         return;
       }
       const result = await client.removeWorkspace(workspaceId, workspace.epoch);
       if (!result.accepted) {
         await refreshSnapshot().catch(() => undefined);
-        setStatus({ id: mutationReasonMessageId(result.reason) });
+        setStatus(
+          attentionStatus(mutationReasonMessageId(result.reason), {
+            scope: "workspace",
+            workspaceId,
+          }),
+        );
         return;
       }
       await refreshAfterCommit(
         "workspace.removal_started",
         "operation.workspace_remove",
+        { scope: "workspace", workspaceId },
       );
     } catch (error) {
       await refreshSnapshot().catch(() => undefined);
-      setStatus({
-        id: "mutation.transport_failed",
-        diagnostic: errorText(error),
-      });
+      setStatus(
+        attentionStatus(
+          "mutation.transport_failed",
+          { scope: "workspace", workspaceId },
+          { diagnostic: errorText(error) },
+        ),
+      );
     } finally {
       workspaceBusyRef.current = false;
       setWorkspaceBusy(false);
@@ -721,10 +821,13 @@ export default function App() {
               }
             : null;
         } catch (error) {
-          setStatus({
-            id: "connection.refresh_failed",
-            diagnostic: errorText(error),
-          });
+          setStatus(
+            attentionStatus(
+              "connection.refresh_failed",
+              { scope: "connection" },
+              { diagnostic: errorText(error) },
+            ),
+          );
           return null;
         }
       },
@@ -758,44 +861,73 @@ export default function App() {
         if (submittedDraftId)
           newTaskDrafts.setDraft(submittedDraftId, submitted);
         if (
-          await reconcileCommandTimeout(result.error, "operation.task_create")
+          await reconcileCommandTimeout(result.error, "operation.task_create", {
+            scope: "workspace",
+            workspaceId: workspace.workspaceId,
+          })
         )
           return;
         await refreshSnapshot().catch(() => undefined);
-        setStatus({
-          id: "task.create_failed",
-          values: { error: t("mutation.transport_failed") },
-          diagnostic: errorText(result.error),
-        });
+        setStatus(
+          attentionStatus(
+            "task.create_failed",
+            { scope: "workspace", workspaceId: workspace.workspaceId },
+            {
+              diagnostic: errorText(result.error),
+            },
+          ),
+        );
         return;
       }
       if (result.kind === "create_rejected") {
         if (submittedDraftId)
           newTaskDrafts.setDraft(submittedDraftId, submitted);
         await refreshSnapshot().catch(() => undefined);
-        setStatus({ id: mutationReasonMessageId(result.reason) });
+        setStatus(
+          attentionStatus(mutationReasonMessageId(result.reason), {
+            scope: "workspace",
+            workspaceId: workspace.workspaceId,
+          }),
+        );
         return;
       }
       if (result.kind === "run_failed") {
         taskDrafts.setDraft(result.taskId, submitted);
-        if (await reconcileCommandTimeout(result.error, "operation.run_submit"))
+        if (
+          await reconcileCommandTimeout(result.error, "operation.run_submit", {
+            scope: "task",
+            taskId: result.taskId,
+          })
+        )
           return;
-        setStatus({
-          id: "run.start_failed",
-          values: { error: t("mutation.transport_failed") },
-          diagnostic: errorText(result.error),
-        });
+        setStatus(
+          attentionStatus(
+            "run.start_failed",
+            { scope: "task", taskId: result.taskId },
+            {
+              diagnostic: errorText(result.error),
+            },
+          ),
+        );
         await refreshSnapshot().catch(() => undefined);
         return;
       }
       if (result.kind === "run_rejected") {
         taskDrafts.setDraft(result.taskId, submitted);
         await refreshSnapshot().catch(() => undefined);
-        setStatus({ id: mutationReasonMessageId(result.reason) });
+        setStatus(
+          attentionStatus(mutationReasonMessageId(result.reason), {
+            scope: "task",
+            taskId: result.taskId,
+          }),
+        );
         return;
       }
       taskDrafts.clearDraft(result.taskId);
-      await refreshAfterCommit("run.started", "operation.run_submit");
+      await refreshAfterCommit("run.started", "operation.run_submit", {
+        scope: "task",
+        taskId: result.taskId,
+      });
     } finally {
       endTaskPendingOperation(pendingScope);
     }
@@ -817,15 +949,27 @@ export default function App() {
       try {
         await client.cancel(activeTask.id, activeTask.currentRunId);
       } catch (error) {
-        if (await reconcileCommandTimeout(error, "operation.run_stop")) return;
+        if (
+          await reconcileCommandTimeout(error, "operation.run_stop", {
+            scope: "task",
+            taskId,
+          })
+        )
+          return;
         await refreshSnapshot().catch(() => undefined);
-        setStatus({
-          id: "run.stop_failed",
-          values: { error: errorText(error) },
-        });
+        setStatus(
+          attentionStatus(
+            "run.stop_failed",
+            { scope: "task", taskId },
+            { diagnostic: errorText(error) },
+          ),
+        );
         return;
       }
-      await refreshAfterCommit("run.stop_requested", "operation.run_stop");
+      await refreshAfterCommit("run.stop_requested", "operation.run_stop", {
+        scope: "task",
+        taskId,
+      });
     } finally {
       setCancelPendingForTask(taskId, false);
     }
@@ -841,22 +985,34 @@ export default function App() {
       activeTask.lifecycle === "closed"
     )
       return;
-    const scope = `task:${activeTask.id}`;
+    const taskId = activeTask.id;
+    const scope = `task:${taskId}`;
     if (!beginTaskPendingOperation(scope, "close")) return;
     try {
       try {
         await client.closeTask(activeTask.id);
       } catch (error) {
-        if (await reconcileCommandTimeout(error, "operation.task_close"))
+        if (
+          await reconcileCommandTimeout(error, "operation.task_close", {
+            scope: "task",
+            taskId,
+          })
+        )
           return;
         await refreshSnapshot().catch(() => undefined);
-        setStatus({
-          id: "task.close_failed",
-          values: { error: errorText(error) },
-        });
+        setStatus(
+          attentionStatus(
+            "task.close_failed",
+            { scope: "task", taskId },
+            { diagnostic: errorText(error) },
+          ),
+        );
         return;
       }
-      await refreshAfterCommit("task.close_requested", "operation.task_close");
+      await refreshAfterCommit("task.close_requested", "operation.task_close", {
+        scope: "task",
+        taskId,
+      });
     } finally {
       endTaskPendingOperation(scope);
     }
@@ -864,23 +1020,35 @@ export default function App() {
 
   async function renameTask() {
     if (!activeTask || taskMutationDisabled || !titleDraft.trim()) return;
-    const scope = `task:${activeTask.id}`;
+    const taskId = activeTask.id;
+    const scope = `task:${taskId}`;
     if (!beginTaskPendingOperation(scope, "rename")) return;
     try {
       try {
         await client.renameTask(activeTask.id, titleDraft.trim());
       } catch (error) {
-        if (await reconcileCommandTimeout(error, "operation.task_rename"))
+        if (
+          await reconcileCommandTimeout(error, "operation.task_rename", {
+            scope: "task",
+            taskId,
+          })
+        )
           return;
         await refreshSnapshot().catch(() => undefined);
-        setStatus({
-          id: "task.rename_failed",
-          values: { error: errorText(error) },
-        });
+        setStatus(
+          attentionStatus(
+            "task.rename_failed",
+            { scope: "task", taskId },
+            { diagnostic: errorText(error) },
+          ),
+        );
         return;
       }
       setEditingTitle(false);
-      await refreshAfterCommit("task.renamed", "operation.task_rename");
+      await refreshAfterCommit("task.renamed", "operation.task_rename", {
+        scope: "task",
+        taskId,
+      });
     } finally {
       endTaskPendingOperation(scope);
     }
@@ -893,7 +1061,8 @@ export default function App() {
       activeTask.currentRunPhase !== null
     )
       return;
-    const scope = `task:${activeTask.id}`;
+    const taskId = activeTask.id;
+    const scope = `task:${taskId}`;
     if (!beginTaskPendingOperation(scope, "archive")) return;
     try {
       try {
@@ -903,20 +1072,25 @@ export default function App() {
           await reconcileCommandTimeout(
             error,
             archived ? "operation.task_archive" : "operation.task_restore",
+            { scope: "task", taskId },
           )
         )
           return;
         await refreshSnapshot().catch(() => undefined);
-        setStatus({
-          id: archived ? "task.archive_failed" : "task.restore_failed",
-          values: { error: errorText(error) },
-        });
+        setStatus(
+          attentionStatus(
+            archived ? "task.archive_failed" : "task.restore_failed",
+            { scope: "task", taskId },
+            { diagnostic: errorText(error) },
+          ),
+        );
         return;
       }
       if (archived) setShowArchived(true);
       await refreshAfterCommit(
         archived ? "task.archived_status" : "task.restored",
         archived ? "operation.task_archive" : "operation.task_restore",
+        { scope: "task", taskId },
       );
     } finally {
       endTaskPendingOperation(scope);
@@ -930,24 +1104,36 @@ export default function App() {
       activeTask.lifecycle !== "closed"
     )
       return;
-    const scope = `task:${activeTask.id}`;
+    const taskId = activeTask.id;
+    const scope = `task:${taskId}`;
     if (!beginTaskPendingOperation(scope, "delete")) return;
     try {
       try {
         await client.deleteTask(activeTask.id);
       } catch (error) {
-        if (await reconcileCommandTimeout(error, "operation.task_delete"))
+        if (
+          await reconcileCommandTimeout(error, "operation.task_delete", {
+            scope: "task",
+            taskId,
+          })
+        )
           return;
         await refreshSnapshot().catch(() => undefined);
-        setStatus({
-          id: "task.delete_failed",
-          values: { error: errorText(error) },
-        });
+        setStatus(
+          attentionStatus(
+            "task.delete_failed",
+            { scope: "task", taskId },
+            { diagnostic: errorText(error) },
+          ),
+        );
         return;
       }
       taskDrafts.clearDraft(activeTask.id);
       setConfirmDelete(false);
-      await refreshAfterCommit("task.deleted", "operation.task_delete");
+      await refreshAfterCommit("task.deleted", "operation.task_delete", {
+        scope: "task",
+        taskId,
+      });
     } finally {
       endTaskPendingOperation(scope);
     }
@@ -964,6 +1150,7 @@ export default function App() {
     const pending = activeTask?.pendingUi;
     if (viewSyncFailed || !bridgeReady || !activeTask || !pending) return;
     const identity = uiRequestIdentity(activeTask.id, pending);
+    const taskId = activeTask.id;
     if (!beginUiResponse(identity)) return;
     try {
       await client.respondUi(
@@ -974,16 +1161,29 @@ export default function App() {
       );
     } catch (error) {
       failUiResponse(identity);
-      if (await reconcileCommandTimeout(error, "operation.ui_response")) return;
-      setStatus({
-        id: "approval.response_failed",
-        values: { error: errorText(error) },
-      });
+      if (
+        await reconcileCommandTimeout(error, "operation.ui_response", {
+          scope: "task",
+          taskId,
+        })
+      )
+        return;
+      setStatus(
+        attentionStatus(
+          "approval.response_failed",
+          { scope: "task", taskId },
+          { diagnostic: errorText(error) },
+        ),
+      );
       await refreshSnapshot().catch(() => undefined);
       return;
     }
     acceptUiResponse(identity);
-    await refreshAfterCommit("approval.response_sent", "operation.ui_response");
+    await refreshAfterCommit(
+      "approval.response_sent",
+      "operation.ui_response",
+      { scope: "task", taskId },
+    );
   }
 
   function prepareRetry(instruction: string) {
@@ -992,46 +1192,70 @@ export default function App() {
     switch (prepared.kind) {
       case "prepared":
         updatePrompt(prepared.draft);
-        setStatus({ id: "run.retry_prepared" });
+        setStatus(
+          quietStatus("run.retry_prepared", {
+            scope: "task",
+            taskId: activeTask.id,
+          }),
+        );
         break;
       case "preserved":
-        setStatus({ id: "run.draft_preserved" });
+        setStatus(
+          quietStatus("run.draft_preserved", {
+            scope: "task",
+            taskId: activeTask.id,
+          }),
+        );
         break;
       case "too_long":
-        setStatus({ id: "run.retry_too_long" });
+        setStatus(
+          attentionStatus("run.retry_too_long", {
+            scope: "task",
+            taskId: activeTask.id,
+          }),
+        );
         break;
     }
     window.requestAnimationFrame(() => composer.current?.focus());
   }
 
-  async function refreshAfterCommit(success: MessageId, operation: MessageId) {
+  async function refreshAfterCommit(
+    success: MessageId,
+    operation: MessageId,
+    audience: StatusAudience,
+  ) {
     try {
       await refreshSnapshot();
-      setStatus({ id: success });
+      setStatus(quietStatus(success, audience));
     } catch (error) {
-      setStatus({
-        id: "view.refresh_after_commit_failed",
-        values: {
-          operation: t(operation),
-          error: errorText(error),
-        },
-      });
+      setStatus(
+        attentionStatus("view.refresh_after_commit_failed", audience, {
+          values: { operation: t(operation) },
+          diagnostic: errorText(error),
+        }),
+      );
     }
   }
 
-  async function reconcileCommandTimeout(error: unknown, operation: MessageId) {
+  async function reconcileCommandTimeout(
+    error: unknown,
+    operation: MessageId,
+    audience: StatusAudience,
+  ) {
     if (!(error instanceof BridgeCommandTimeoutError)) return false;
     try {
       await refreshSnapshot();
-      setStatus({
-        id: "command.timeout_reconciled",
-        values: { operation: t(operation) },
-      });
+      setStatus(
+        quietStatus("command.timeout_reconciled", audience, {
+          values: { operation: t(operation) },
+        }),
+      );
     } catch {
-      setStatus({
-        id: "command.timeout_sync_failed",
-        values: { operation: t(operation) },
-      });
+      setStatus(
+        attentionStatus("command.timeout_sync_failed", audience, {
+          values: { operation: t(operation) },
+        }),
+      );
     }
     return true;
   }
@@ -1040,6 +1264,8 @@ export default function App() {
     workbenchEntered,
     snapshot.account,
   );
+  const connectionShellStatus = statuses.connection;
+  const accountGateStatus = selectAccountGateStatus(statuses);
   if (accountGateRequired)
     return (
       <AccountGate
@@ -1047,9 +1273,19 @@ export default function App() {
         disabled={bridgeUnavailable || accountBusy}
         cancelDisabled={viewSyncFailed || !bridgeReady || accountCancelBusy}
         connectionFailed={viewSyncFailed}
-        connectionDiagnostic={status.diagnostic}
+        connectionDiagnostic={connectionShellStatus?.diagnostic}
         reconnecting={connectionBusy}
-        notice={t(status.id, status.values)}
+        notice={
+          accountGateStatus
+            ? t(accountGateStatus.id, accountGateStatus.values)
+            : ""
+        }
+        onBeginWindowDrag={() => {
+          void client.beginWindowDrag(1).catch(() => undefined);
+        }}
+        onWindowControl={(action) => {
+          void client.controlWindow(action).catch(() => undefined);
+        }}
         onReconnect={() => void retryViewSynchronization()}
         onBeginLogin={() => void runAccountCommand(() => client.beginLogin())}
         onReopenLogin={() => void runAccountCommand(() => client.reopenLogin())}
@@ -1096,11 +1332,22 @@ export default function App() {
   const activeTaskTitle = activeTask
     ? activeTask.title || t("task.item", { id: activeTask.id })
     : t(newTaskDraftActive ? "task.new" : "task.open");
+  const commandBarStatus = selectCommandBarStatus(statuses, {
+    route,
+    workspaceId: currentWorkspaceId,
+    taskId: activeTask?.id ?? null,
+  });
 
   return (
     <AppShell
       taskTitle={route === "settings" ? t("settings.title") : activeTaskTitle}
       onSearch={() => setSearchOpen(true)}
+      onBeginWindowDrag={() => {
+        void client.beginWindowDrag(1).catch(() => undefined);
+      }}
+      onWindowControl={(action) => {
+        void client.controlWindow(action).catch(() => undefined);
+      }}
       workspaceLabel={
         route === "settings"
           ? t("settings.account_models")
@@ -1108,7 +1355,11 @@ export default function App() {
             currentWorkspace?.canonicalRoot ||
             t("workspace.none")
       }
-      status={t(status.id, status.values)}
+      attentionNotice={
+        commandBarStatus
+          ? t(commandBarStatus.id, commandBarStatus.values)
+          : null
+      }
       left={
         <div className="sidebar-frame">
           <div className="sidebar-primary">
@@ -1471,12 +1722,14 @@ export default function App() {
                   ? t("connection.retrying")
                   : t("connection.retry")}
               </button>
-              {status.diagnostic && (
+              {connectionShellStatus?.diagnostic && (
                 <details>
                   <summary>{t("connection.details")}</summary>
                   <p>
-                    {status.sourceId ? `${t(status.sourceId)}: ` : ""}
-                    {status.diagnostic}
+                    {connectionShellStatus.sourceId
+                      ? `${t(connectionShellStatus.sourceId)}: `
+                      : ""}
+                    {connectionShellStatus.diagnostic}
                   </p>
                 </details>
               )}
@@ -1494,7 +1747,13 @@ export default function App() {
             onUseExample={(instruction) => {
               const prepared = prepareRetryDraft(prompt, instruction);
               if (prepared.kind === "prepared") updatePrompt(prepared.draft);
-              else setStatus({ id: "run.draft_preserved" });
+              else if (activeTask)
+                setStatus(
+                  quietStatus("run.draft_preserved", {
+                    scope: "task",
+                    taskId: activeTask.id,
+                  }),
+                );
               window.requestAnimationFrame(() => composer.current?.focus());
             }}
             onPrepareRetry={prepareRetry}

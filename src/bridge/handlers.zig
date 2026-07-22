@@ -14,6 +14,8 @@ pub const RendererBridgeConnect = struct {
 pub const EventDisconnect = struct { generation: []const u8 };
 pub const WorkbenchSnapshotChunk = struct { snapshotId: []const u8, offset: []const u8 };
 pub const Empty = struct {};
+pub const WindowDragStart = struct { clicks: u8 };
+pub const WindowControl = struct { action: []const u8 };
 pub const AccountSelection = struct {
     selectionId: []const u8,
     expectedCatalogGeneration: []const u8,

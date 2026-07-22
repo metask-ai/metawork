@@ -2,6 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  attentionStatus,
+  publishStatus,
+  quietStatus,
+  selectAccountGateStatus,
+  selectCommandBarStatus,
+  statusVisibleInAccountGate,
+  statusVisibleInCommandBar,
+} from "../frontend/src/app/command-bar-status.ts";
+
+import {
   clearNewTaskDraft,
   clearTaskDraft,
   newTaskDraftMoveDecision,
@@ -224,6 +234,113 @@ test("a new Task draft is not mistaken for an in-flight Run", () => {
   assert.equal(isRunInFlight(null), false);
   assert.equal(isRunInFlight(task({ currentRunPhase: null })), false);
   assert.equal(isRunInFlight(task({ currentRunPhase: "queued" })), true);
+});
+
+test("command bar attention is explicit and cannot leak across product identity", () => {
+  const taskA = { route: "workbench", workspaceId: "ws-1", taskId: "task-a" };
+  const taskB = { route: "workbench", workspaceId: "ws-1", taskId: "task-b" };
+  const otherWorkspace = {
+    route: "workbench",
+    workspaceId: "ws-2",
+    taskId: null,
+  };
+  const settings = { route: "settings", workspaceId: "ws-1", taskId: null };
+
+  assert.equal(
+    statusVisibleInCommandBar(
+      quietStatus("connection.connected", { scope: "connection" }),
+      taskA,
+    ),
+    false,
+  );
+  assert.equal(
+    statusVisibleInCommandBar(
+      attentionStatus("account.options_updated", { scope: "account" }),
+      settings,
+    ),
+    true,
+  );
+  assert.equal(
+    statusVisibleInAccountGate(
+      attentionStatus("account.options_updated", { scope: "account" }),
+    ),
+    true,
+  );
+  assert.equal(
+    statusVisibleInAccountGate(
+      quietStatus("account.cancel_rejected", { scope: "account" }),
+    ),
+    false,
+  );
+
+  const workspaceFailure = attentionStatus("mutation.transport_failed", {
+    scope: "workspace",
+    workspaceId: "ws-1",
+  });
+  assert.equal(statusVisibleInCommandBar(workspaceFailure, taskA), true);
+  assert.equal(
+    statusVisibleInCommandBar(workspaceFailure, otherWorkspace),
+    false,
+  );
+  assert.equal(statusVisibleInCommandBar(workspaceFailure, settings), false);
+  assert.equal(statusVisibleInAccountGate(workspaceFailure), false);
+
+  const taskFailure = attentionStatus("task.rename_failed", {
+    scope: "task",
+    taskId: "task-a",
+  });
+  assert.equal(statusVisibleInCommandBar(taskFailure, taskA), true);
+  assert.equal(statusVisibleInCommandBar(taskFailure, taskB), false);
+  assert.equal(statusVisibleInAccountGate(taskFailure), false);
+
+  const concurrent = [
+    attentionStatus("task.rename_failed", {
+      scope: "task",
+      taskId: "task-a",
+    }),
+    quietStatus("task.renamed", { scope: "task", taskId: "task-b" }),
+  ].reduce(publishStatus, {});
+  assert.equal(
+    selectCommandBarStatus(concurrent, taskA)?.id,
+    "task.rename_failed",
+  );
+  assert.equal(selectCommandBarStatus(concurrent, taskB), null);
+  assert.equal(selectAccountGateStatus(concurrent), null);
+
+  const recoveredWorkspace = publishStatus(
+    publishStatus(
+      {},
+      attentionStatus("workspace.selection_failed", {
+        scope: "workspace",
+        workspaceId: null,
+      }),
+    ),
+    quietStatus("workspace.grant_confirmed", {
+      scope: "workspace",
+      workspaceId: "ws-1",
+    }),
+  );
+  assert.equal(selectCommandBarStatus(recoveredWorkspace, taskA), null);
+  assert.equal(
+    selectCommandBarStatus(recoveredWorkspace, otherWorkspace),
+    null,
+  );
+
+  const mixedScope = [
+    attentionStatus("account.command_failed", { scope: "account" }),
+    attentionStatus("run.stop_failed", {
+      scope: "task",
+      taskId: "task-a",
+    }),
+  ].reduce(publishStatus, {});
+  assert.equal(
+    selectCommandBarStatus(mixedScope, taskA)?.id,
+    "run.stop_failed",
+  );
+  assert.equal(
+    selectCommandBarStatus(mixedScope, settings)?.id,
+    "account.command_failed",
+  );
 });
 
 test("global search finds product content and deliberately excludes raw tool output", () => {

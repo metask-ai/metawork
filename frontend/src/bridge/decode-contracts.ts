@@ -1157,6 +1157,18 @@ export function assertDisconnected(value: unknown, generation: string) {
     fail("$", "disconnect response mismatch");
 }
 
+export function assertWindowDragStarted(value: unknown) {
+  const item = object(value, "$", ["started"]);
+  if (booleanValue(item.started, "$.started") !== true)
+    fail("$.started", "window drag did not start");
+}
+
+export function assertWindowControlCompleted(value: unknown) {
+  const item = object(value, "$", ["completed"]);
+  if (booleanValue(item.completed, "$.completed") !== true)
+    fail("$.completed", "window control did not complete");
+}
+
 export function decodeWorkspaceChoice(value: unknown): WorkspaceChoice {
   if (typeof value !== "object" || value === null || Array.isArray(value))
     fail("$", "expected workspace choice object");

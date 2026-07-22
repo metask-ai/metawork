@@ -25,7 +25,7 @@
     "test:agentcore-bundle": "node --test scripts/agentcore-bundle.test.mjs",
     "test:child-process": "node --test scripts/run-child-process.test.mjs",
     "test:architecture": "node --test scripts/architecture-boundaries.test.mjs scripts/native-automation-isolation.test.mjs",
-    "test:renderer-runtime": "node --experimental-strip-types --test scripts/account-panel.test.mjs scripts/approval-state.test.mjs scripts/bridge-client.test.mjs scripts/composer-render.test.mjs scripts/first-task-flow.test.mjs scripts/frontend-boundaries.test.mjs scripts/i18n.test.mjs scripts/inspector.test.mjs scripts/snapshot-client.test.mjs scripts/snapshot-demand.test.mjs scripts/workbench-connection.test.mjs scripts/workbench-contract.test.mjs scripts/workbench-navigation.test.mjs scripts/workbench-store.test.mjs",
+    "test:renderer-runtime": "node --experimental-strip-types --test scripts/account-panel.test.mjs scripts/approval-state.test.mjs scripts/bridge-client.test.mjs scripts/composer-render.test.mjs scripts/first-task-flow.test.mjs scripts/frontend-boundaries.test.mjs scripts/i18n.test.mjs scripts/inspector.test.mjs scripts/snapshot-client.test.mjs scripts/snapshot-demand.test.mjs scripts/window-titlebar-gesture.test.mjs scripts/workbench-connection.test.mjs scripts/workbench-contract.test.mjs scripts/workbench-navigation.test.mjs scripts/workbench-store.test.mjs",
     "probe:agentcore": "node scripts/run-agentcore-probe.mjs",
     "probe:agentcore:staged": "node scripts/run-agentcore-probe.mjs --staged",
     "test:lifecycle": "node scripts/run-lifecycle-tests.mjs",

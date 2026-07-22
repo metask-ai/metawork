@@ -103,6 +103,8 @@ test("login-first composition gates every Workbench surface on Host readiness", 
   const shell = app.indexOf("<AppShell");
   assert.ok(gate >= 0 && shell > gate);
   assert.match(app, /<AccountGate/);
+  assert.match(app, /selectAccountGateStatus\(statuses\)/);
+  assert.doesNotMatch(app, /setStatus\(\s*\{/);
   assert.doesNotMatch(app, /AccountPrerequisite|prerequisite=\{/);
   assert.doesNotMatch(
     await readFile(
@@ -110,6 +112,46 @@ test("login-first composition gates every Workbench surface on Host readiness", 
       "utf8",
     ),
     /Account|prerequisite/,
+  );
+});
+
+test("Renderer command bars own the hidden-inset titlebar without stealing control input", async () => {
+  const shell = await readFile(
+    resolve(sourceRoot, "app", "AppShell.tsx"),
+    "utf8",
+  );
+  const gate = await readFile(
+    resolve(sourceRoot, "features", "account", "AccountGate.tsx"),
+    "utf8",
+  );
+  const css = await readFile(resolve(sourceRoot, "index.css"), "utf8");
+  const manifest = await readFile(
+    new URL("../app.zon", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(shell, /workbench-commandbar/);
+  assert.match(shell, /attentionNotice/);
+  assert.match(shell, /commandbar-alert-slot/);
+  assert.match(shell, /aria-live="polite"/);
+  assert.match(shell, /onBeginWindowDrag/);
+  assert.match(gate, /account-gate-toolbar/);
+  assert.match(gate, /onBeginWindowDrag/);
+  assert.match(manifest, /\.titlebar = "hidden_inset_tall"/);
+  assert.match(css, /-webkit-app-region: drag/);
+  assert.match(css, /-webkit-app-region: no-drag/);
+  assert.match(shell, /WindowControls/);
+  assert.match(gate, /WindowControls/);
+  assert.match(css, /\[data-platform="windows"\] \.window-controls/);
+  assert.match(css, /--window-bar-height: 52px/);
+  assert.match(
+    css,
+    /top: calc\(var\(--window-bar-height\) \+ env\(safe-area-inset-top, 0px\)\)/,
+  );
+  assert.doesNotMatch(css, /top: calc\(48px \+ env\(safe-area-inset-top/);
+  assert.doesNotMatch(
+    `${shell}\n${gate}`,
+    /app-titlebar|account-gate-titlebar/,
   );
 });
 

@@ -6,6 +6,8 @@ export const commands = {
   pingAck: "metawork.smoke.eventAck",
   connect: "metawork.events.connect",
   disconnect: "metawork.events.disconnect",
+  windowBeginDrag: "metawork.window.beginDrag",
+  windowControl: "metawork.window.control",
   chooseWorkspace: "metawork.workspaces.choose",
   selectWorkspace: "metawork.workspaces.select",
   removeWorkspace: "metawork.workspaces.remove",

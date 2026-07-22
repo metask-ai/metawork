@@ -18,6 +18,8 @@ import {
   assertTaskArchived,
   assertTaskFlag,
   assertUiResponseAccepted,
+  assertWindowDragStarted,
+  assertWindowControlCompleted,
   decodeAccountCommandResult,
   decodeHostSignalEvent,
   decodePingResponse,
@@ -160,6 +162,18 @@ export class BridgeClient {
     assertDisconnected(
       await this.invoke(commands.disconnect, { generation }),
       generation,
+    );
+  }
+
+  async beginWindowDrag(clicks: 1) {
+    assertWindowDragStarted(
+      await this.invoke(commands.windowBeginDrag, { clicks }),
+    );
+  }
+
+  async controlWindow(action: "minimize" | "toggle_maximize" | "close") {
+    assertWindowControlCompleted(
+      await this.invoke(commands.windowControl, { action }),
     );
   }
 

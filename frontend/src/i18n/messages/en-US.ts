@@ -7,6 +7,10 @@ export const enUS = {
   "app.language.en-US": "English",
   "app.language.zh-CN": "简体中文",
   "app.language.pseudo": "Pseudo-locale",
+  "window.controls": "Window controls",
+  "window.minimize": "Minimize",
+  "window.maximize": "Maximize or restore",
+  "window.close": "Close MetaWork",
   "common.save": "Save",
   "common.cancel": "Cancel",
   "connection.connecting": "Connecting to the Workbench…",
@@ -78,6 +82,7 @@ export const enUS = {
   "account.login": "Sign in with Metask",
   "account.reopen_login": "Open sign-in page again",
   "account.retry_preparation": "Try again",
+  "account.restart_close": "Close MetaWork",
   "account.reauthenticate": "Sign in again",
   "account.api_key": "API Key",
   "account.saved_key": "Saved API Key",
@@ -116,7 +121,8 @@ export const enUS = {
   "workspace.selection_cancelled": "Workspace selection cancelled.",
   "workspace.draft_conflict":
     "That folder already has an unsent draft, so nothing was switched or overwritten. Choose another folder, or copy and clear this draft before trying again.",
-  "workspace.selection_failed": "Workspace selection failed: {error}",
+  "workspace.selection_failed":
+    "The workspace could not be opened. Choose it again.",
   "workspace.grant_confirmed": "Workspace access confirmed.",
   "workspace.access_required":
     "Confirm workspace access again before sending this draft.",
@@ -191,14 +197,15 @@ export const enUS = {
   "task.delete_confirm_body":
     "The conversation and activity will be removed from MetaWork. Files in the workspace stay untouched.",
   "task.stop": "Stop task",
-  "task.create_failed": "Task creation failed: {error}",
+  "task.create_failed":
+    "The task could not be created. Check your connection and try again.",
   "task.created": "Task created.",
-  "task.close_failed": "Task could not end: {error}",
+  "task.close_failed": "The task could not be ended. Refresh and try again.",
   "task.close_requested": "Task is ending.",
-  "task.rename_failed": "Task could not be renamed: {error}",
-  "task.archive_failed": "Task could not be archived: {error}",
-  "task.restore_failed": "Task could not be restored: {error}",
-  "task.delete_failed": "Task record could not be deleted: {error}",
+  "task.rename_failed": "The task could not be renamed. Try again.",
+  "task.archive_failed": "The task could not be archived. Try again.",
+  "task.restore_failed": "The task could not be restored. Try again.",
+  "task.delete_failed": "The task record could not be deleted. Try again.",
   "task.renamed": "Task renamed.",
   "task.archived_status": "Task archived.",
   "task.restored": "Task restored.",
@@ -217,8 +224,10 @@ export const enUS = {
   "run.draft_only":
     "Saved locally as a draft. You can send it after the current work finishes.",
   "run.started": "Work started.",
-  "run.start_failed": "Work could not start: {error}",
-  "run.stop_failed": "Task could not be stopped: {error}",
+  "run.start_failed":
+    "Work could not start. Check your connection and try again.",
+  "run.stop_failed":
+    "The stop request could not be confirmed. Refresh and try again.",
   "run.stop_requested": "Stopping the current work…",
   "run.terminal.completed": "Work completed",
   "run.terminal.stopped": "Work stopped",
@@ -270,7 +279,7 @@ export const enUS = {
   "approval.choose": "Choose…",
   "approval.send_answers": "Continue",
   "approval.submit_shortcut": "Press ⌘/Ctrl + Enter to continue",
-  "approval.response_failed": "Couldn't send the response: {error}",
+  "approval.response_failed": "The response could not be sent. Try again.",
   "approval.response_sent": "Response sent.",
   "approval.sending": "Sending your response…",
   "approval.awaiting_snapshot":
@@ -286,7 +295,7 @@ export const enUS = {
   "ui.state.denied_session": "Denied for this task",
   "ui.state.cancelled": "Cancelled",
   "view.refresh_after_commit_failed":
-    "{operation} succeeded, but the latest view could not be loaded: {error}",
+    "{operation} succeeded, but the latest state has not loaded. Refresh to confirm it.",
   "operation.task_create": "Task creation",
   "operation.run_submit": "Starting work",
   "operation.run_stop": "Stopping work",

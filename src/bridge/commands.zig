@@ -7,6 +7,8 @@ pub const ping = "metawork.smoke.ping";
 pub const ping_ack = "metawork.smoke.eventAck";
 pub const connect = "metawork.events.connect";
 pub const disconnect = "metawork.events.disconnect";
+pub const window_begin_drag = "metawork.window.beginDrag";
+pub const window_control = "metawork.window.control";
 pub const choose_workspace = "metawork.workspaces.choose";
 pub const select_workspace = "metawork.workspaces.select";
 pub const remove_workspace = "metawork.workspaces.remove";
@@ -34,6 +36,8 @@ pub const product = [_][]const u8{
     ping_ack,
     connect,
     disconnect,
+    window_begin_drag,
+    window_control,
     choose_workspace,
     select_workspace,
     remove_workspace,

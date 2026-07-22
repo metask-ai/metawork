@@ -40,6 +40,26 @@ test("English is the complete source catalog and zh-CN has exact key parity", ()
   }
 });
 
+test("command bar product copy never interpolates raw diagnostics", () => {
+  const attentionMessages = [
+    "workspace.selection_failed",
+    "task.create_failed",
+    "task.close_failed",
+    "task.rename_failed",
+    "task.archive_failed",
+    "task.restore_failed",
+    "task.delete_failed",
+    "run.start_failed",
+    "run.stop_failed",
+    "approval.response_failed",
+    "view.refresh_after_commit_failed",
+  ];
+  for (const id of attentionMessages) {
+    assert.equal(enUS[id].includes("{error}"), false, id);
+    assert.equal(zhCN[id].includes("{error}"), false, id);
+  }
+});
+
 test("task counts follow locale plural rules", () => {
   assert.equal(taskCountMessageId("en-US", 1), "task.count.one");
   assert.equal(taskCountMessageId("en-US", 0), "task.count.other");

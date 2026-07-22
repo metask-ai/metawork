@@ -107,7 +107,7 @@ flowchart TB
 
 Native SDK 直接构成桌面 Runtime 与窗口能力。MetaWork 内部目标为五个 named product modules：`app` 负责 composition 和主线程提交协调，`account` 负责 Metask 登录、catalog 与凭据代际，`bridge` 负责验证与运输，`workbench` 拥有产品状态与队列，`agent` 执行并收口一个真实 Agent Run。`AgentCore` 只指 Metask 提供的外部 bundle。`metawork_account_contract` 只承载 Account 发布给 App/Bridge/Workbench 的有界纯合同，不是第六个产品模块。
 
-Bridge 的唯一产品数据面由具体 `Dispatcher` 内部的 `ProductDelivery` 统一拥有：connection generation、revision retry/timer、snapshot identity 和 snapshot transport storage 都不再存放在 App。Dispatcher 通过明确的 `*Workbench` 同步生成 snapshot；App 只注入 Native emit/timer/dialog/main-thread capability，并按顺序组织 shutdown。automation 只能提供受控账号、临时 Workspace authority 和桌面驱动，不注册 Renderer command/event、不跟踪产品 generation，也不建立平行传输协议。
+Bridge 的唯一产品数据面由具体 `Dispatcher` 内部的 `ProductDelivery` 统一拥有：connection generation、revision retry/timer、snapshot identity 和 snapshot transport storage 都不再存放在 App。Dispatcher 通过明确的 `*Workbench` 同步生成 snapshot；App 只注入 Native emit/timer/dialog/window-control/main-thread capability，并按顺序组织 shutdown。`hidden_inset_tall` 的 WebView 标题栏只提交 drag、minimize、toggle-maximize 或 close 意图；这些逃生能力属于受限 bootstrap chrome capability，不依赖 ProductDelivery 是否连接。Bridge policy 先约束 origin，Dispatcher 再精确匹配 App-owned 单一启动窗口 identity、payload 与主线程；Windows platform seam 仅在 manifest 仍声明该唯一启动窗口时解析对应 native window，不能用当前活动窗口代替 identity mapping。它不建立第二数据面，也不让 Renderer 提交 HWND 等原生身份。automation 只能提供受控账号、临时 Workspace authority 和桌面驱动，不注册 Renderer command/event、不跟踪产品 generation，也不建立平行传输协议。
 
 Host 负责：
 

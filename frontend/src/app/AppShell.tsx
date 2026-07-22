@@ -1,13 +1,21 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { Icon } from "../components/ui/Icon.tsx";
+import {
+  WindowControls,
+  type WindowControlAction,
+} from "../components/ui/WindowControls.tsx";
 import { shouldDismissInspectorForEscape } from "../features/inspector/inspector-interaction.ts";
 import { useI18n } from "../i18n/context.ts";
 import {
   readLocalPreference,
   writeLocalPreference,
 } from "../platform/local-preferences.ts";
-import { primaryShortcutModifier } from "../platform/keyboard.ts";
+import {
+  desktopPlatform,
+  primaryShortcutModifier,
+} from "../platform/keyboard.ts";
+import { WindowTitlebarGesture } from "../platform/window-titlebar-gesture.ts";
 
 const leftPreference = "metawork.panel.workspaces";
 function initialPanel(key: string, minimumWidth: number) {
@@ -19,7 +27,9 @@ function initialPanel(key: string, minimumWidth: number) {
 export function AppShell({
   taskTitle,
   workspaceLabel,
-  status,
+  attentionNotice,
+  onBeginWindowDrag,
+  onWindowControl,
   onSearch,
   left,
   inspector,
@@ -29,7 +39,9 @@ export function AppShell({
 }: {
   taskTitle: string;
   workspaceLabel: string;
-  status: string;
+  attentionNotice: string | null;
+  onBeginWindowDrag: () => void;
+  onWindowControl: (action: WindowControlAction) => void;
   onSearch: () => void;
   left: ReactNode;
   inspector: ReactNode | null;
@@ -44,6 +56,7 @@ export function AppShell({
   );
   const inspectorAvailable = inspector !== null;
   const effectiveInspectorOpen = inspectorAvailable && inspectorOpen;
+  const titlebarGesture = useRef(new WindowTitlebarGesture()).current;
 
   useEffect(() => {
     const narrow = window.matchMedia("(max-width: 819px)");
@@ -70,6 +83,7 @@ export function AppShell({
   return (
     <main
       className="app-window"
+      data-platform={desktopPlatform()}
       data-left-open={leftOpen}
       data-inspector-open={effectiveInspectorOpen}
       onKeyDown={(event) => {
@@ -90,7 +104,31 @@ export function AppShell({
         onDismissInspector();
       }}
     >
-      <header className="app-titlebar">
+      <header
+        className="workbench-commandbar"
+        onPointerDown={(event) => {
+          if (
+            event.button !== 0 ||
+            (event.target as HTMLElement).closest(
+              "button, input, select, textarea, details, a",
+            )
+          )
+            return;
+          event.currentTarget.setPointerCapture(event.pointerId);
+          titlebarGesture.begin(event.pointerId, event.clientX, event.clientY);
+        }}
+        onPointerMove={(event) => {
+          const gesture = titlebarGesture.move(
+            event.pointerId,
+            event.clientX,
+            event.clientY,
+            event.buttons,
+          );
+          if (gesture) onBeginWindowDrag();
+        }}
+        onPointerUp={(event) => titlebarGesture.end(event.pointerId)}
+        onPointerCancel={(event) => titlebarGesture.cancel(event.pointerId)}
+      >
         <button
           className="icon-button focus-ring"
           aria-controls="workspace-sidebar"
@@ -101,15 +139,31 @@ export function AppShell({
         >
           <Icon name="sidebar" />
         </button>
-        <div className="titlebar-identity">
-          <span className="titlebar-task">{taskTitle}</span>
-          <span className="titlebar-workspace">{workspaceLabel}</span>
+        <div className="commandbar-context">
+          <span className="commandbar-task">{taskTitle}</span>
+          <span className="commandbar-workspace">{workspaceLabel}</span>
         </div>
-        <p className="titlebar-status" aria-live="polite">
-          {status}
-        </p>
+        <div className="commandbar-alert-slot">
+          <span
+            className="sr-only"
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+          >
+            {attentionNotice ?? ""}
+          </span>
+          {attentionNotice && (
+            <details className="commandbar-alert">
+              <summary aria-label={attentionNotice}>
+                <Icon name="warning" />
+                <span>{attentionNotice}</span>
+              </summary>
+              <p>{attentionNotice}</p>
+            </details>
+          )}
+        </div>
         <button
-          className="titlebar-search focus-ring"
+          className="commandbar-search focus-ring"
           aria-label={t("search.open")}
           title={t("search.open")}
           onClick={onSearch}
@@ -118,6 +172,15 @@ export function AppShell({
           <span>{t("search.open")}</span>
           <kbd>{shortcutModifier}K</kbd>
         </button>
+        <WindowControls
+          labels={{
+            controls: t("window.controls"),
+            minimize: t("window.minimize"),
+            maximize: t("window.maximize"),
+            close: t("window.close"),
+          }}
+          onAction={onWindowControl}
+        />
       </header>
 
       <div className="app-columns">

@@ -110,6 +110,36 @@ test("a native Workspace picker remains user-controlled instead of command-timed
   assert.deepEqual(await client.chooseWorkspace(), { selected: false });
 });
 
+test("the hidden-inset titlebar delegates drag to the connected Host window", async () => {
+  const calls = [];
+  const client = new BridgeClient({
+    bridge: bridgeWith(async (command, payload) => {
+      calls.push({ command, payload });
+      return { started: true };
+    }),
+  });
+
+  await client.beginWindowDrag(1);
+  assert.deepEqual(calls, [
+    { command: "metawork.window.beginDrag", payload: { clicks: 1 } },
+  ]);
+});
+
+test("visible window controls delegate their exact action to the Host", async () => {
+  const calls = [];
+  const client = new BridgeClient({
+    bridge: bridgeWith(async (command, payload) => {
+      calls.push({ command, payload });
+      return { completed: true };
+    }),
+  });
+
+  await client.controlWindow("minimize");
+  assert.deepEqual(calls, [
+    { command: "metawork.window.control", payload: { action: "minimize" } },
+  ]);
+});
+
 test("the fixed revision 1 contract carries Host-owned Workspace and generation identities", async () => {
   const calls = [];
   const client = new BridgeClient({

@@ -127,7 +127,7 @@ Workspace
 
 ```text
 ┌───────────────────────────────────────────────────────────────┐
-│ Native title bar · Task / Workspace · Search · exceptional UI │
+│ Integrated title/command bar · context · search · OS controls │
 ├──────────────┬────────────────────────────────┬───────────────┤
 │ New task     │ New task Composer              │ Inspector     │
 │ Workspaces   │ or Task work trace             │ when useful   │
@@ -157,18 +157,20 @@ Workspace
 - 系统通知用于提醒后台 Task 等待用户、完成、失败或中断；
 - 多窗口属于后续能力，不进入当前设计范围。
 
-### 4.3 标题栏
+### 4.3 一体化窗口栏
 
-Windows 和 macOS 使用同一内容布局，只调整窗口壳：
+主窗口使用 `hidden_inset_tall`：Renderer 命令栏同时承担窗口标题栏的视觉角色，不再叠加独立的标准系统标题行。窗口效果仍由 Native Host 执行，不允许 Renderer 直接操作原生窗口身份。
 
-- macOS 使用系统交通灯并保留左上角安全区域；
-- Windows 使用系统或 Native SDK 提供的窗口控制；
-- 标题栏包含左栏切换、当前 Task/Workspace、搜索和少量全局入口；`左栏切换` 只控制 Workspace/Task 导航，不兼任 Inspector 开关；
-- 每个已有 Task 的标题栏右侧提供稳定的 Inspector 图标按钮，accessible name 随状态使用 `打开检查器 / 关闭检查器` 并发布 `aria-expanded`；New task、无 Task 或没有任何可检查事实时不显示该按钮；
-- 正常连接状态不持续占据标题栏；只在同步失败、重认证或其他需要行动的异常出现状态入口；
-- 语言、API、模型和诊断进入设置或对应任务上下文，不常驻标题栏；
-- 可点击控件必须排除在窗口拖拽区域之外；
-- 不在标题栏放 ABI、Provider、Host mode 等工程状态。
+- macOS 为系统交通灯保留左侧安全区；Windows system WebView 无法可靠显露 DWM glyph 时，命令栏提供唯一可见的最小化、最大化/还原与关闭 affordance，Host 在重新校验来源窗口后执行真实 native action；不得同时显示两套窗口按钮；
+- 命令栏只包含左栏开关、当前 Task/Workspace 上下文、全局搜索和按需异常入口；`左栏开关` 只控制 Workspace/Task 导航，不兼任 Inspector 开关；
+- 命令栏空白背景在越过移动阈值后请求窗口拖拽；按钮、输入、选择框、链接、disclosure 和展开内容必须排除。Renderer 只提交 drag/control 意图；Host 以 App-owned 单一启动窗口 identity 和主线程校验受限 bootstrap chrome capability，使连接失败页仍能移动或关闭窗口，而不依赖 ProductDelivery 已连接。Windows 平台操作必须继续使用同一精确窗口身份，不能猜测当前活动窗口；当前不伪造跨平台双击标题栏语义；
+- 正常连接、恢复成功和普通操作成功不持续占据命令栏；只有同步失败、命令失败或其他确实需要用户行动的异常才显示状态入口；
+- 异常状态按 connection、account、Workspace identity 或 Task identity 分域保存；并行 Task 的结果不得互相覆盖，命令栏只选择当前上下文中优先级最高的一项显示；
+- 每个已有 Task 的内容标题区右侧提供稳定的 Inspector 图标按钮，accessible name 随状态使用 `打开检查器 / 关闭检查器` 并发布 `aria-expanded`；New task、无 Task 或没有任何可检查事实时不显示该按钮；
+- 未登录界面的应用工具栏只保留产品 identity 与语言入口；语言不能藏进尚不可进入的设置；
+- `chromeless` 仍被禁止；Windows 可见按钮只是 hidden-inset WebView 的控制 affordance，不能据此宣称自绘窗口系统已经覆盖 resize、Snap、系统菜单、DPI 或高对比；
+- 语言、API、模型和诊断进入设置或对应任务上下文，不常驻命令栏；
+- 不在命令栏放 ABI、Provider、Host mode 等工程状态。
 
 平台文案、路径、快捷键和文件管理器动作按 OS 切换。
 
@@ -541,7 +543,7 @@ Full access
 
 Inspector 是当前 Task 的按需结构化摘要与详情面板，不是固定存在的第三栏、第二份聊天记录或日志面板。New task、无 Task 和没有有效模块的普通 idle Task 默认不占用右侧列宽。模块变为可用不等于自动打开面板：普通 Current activity、usage 和工具活动只更新入口或已打开面板，不能在 Run 开始时挤压正文。
 
-用户通过已有 Task 标题栏右侧的 Inspector 按钮稳定打开或关闭面板；工具卡、diff、结果和 usage 的 `查看详情` 是直接打开并定位具体模块的上下文入口。两类入口控制同一个 Inspector 状态，不建立第二套详情面板。
+用户通过已有 Task 内容标题区右侧的 Inspector 按钮稳定打开或关闭面板；工具卡、diff、结果和 usage 的 `查看详情` 是直接打开并定位具体模块的上下文入口。两类入口控制同一个 Inspector 状态，不建立第二套详情面板。
 
 出现内容时模块优先级为：
 
@@ -918,7 +920,7 @@ MetaWork 采用安静、精确、长时间可读的桌面工具方向。视觉�
 - reduced motion；
 - 状态在无颜色条件下仍可识别；
 - 长英文、中文和 pseudo-locale 不溢出；
-- 已有 Task 的标题栏 Inspector 按钮可由键盘操作，`打开检查器 / 关闭检查器` 与 `aria-expanded` 始终匹配真实面板状态；
+- 已有 Task 的内容标题区 Inspector 按钮可由键盘操作，`打开检查器 / 关闭检查器` 与 `aria-expanded` 始终匹配真实面板状态；
 - 普通 Run start/terminal 不改变 Inspector 列宽；新的待处理请求只自动打开一次，terminal 后保留 Last run summary，切换 Task 不泄漏旧详情；
 - 左栏折叠、Inspector 关闭或覆盖显示后功能不丢失。
 

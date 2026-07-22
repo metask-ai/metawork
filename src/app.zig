@@ -7,6 +7,7 @@ const agent = @import("metawork_agent");
 const workbench_api = @import("metawork_workbench");
 const account_contract = @import("metawork_account_contract");
 const account_api = @import("metawork_account");
+const window_chrome = @import("window_chrome.zig");
 
 pub const panic = std.debug.FullPanic(native_sdk.debug.capturePanic);
 
@@ -23,6 +24,7 @@ const account_refresh_timer_id: u64 = 0x4d57_4143_4354_5246;
 const account_refresh_skew_seconds: i64 = 60;
 const account_refresh_retry_ns: u64 = 30 * std.time.ns_per_s;
 const FrontendMode = bridge_api.policy.Mode;
+const main_window_id: native_sdk.platform.WindowId = 1;
 
 const AccountEffectQueue = struct {
     entry: ?Entry = null,
@@ -1659,6 +1661,8 @@ const App = struct {
             .cancel_timer_fn = platformCancelTimer,
             .show_open_dialog_fn = platformShowOpenDialog,
             .show_message_dialog_fn = platformShowMessageDialog,
+            .begin_window_drag_fn = platformBeginWindowDrag,
+            .window_control_fn = platformWindowControl,
             .now_fn = platformNow,
             .on_main_thread_fn = platformOnMainThread,
         };
@@ -1735,6 +1739,36 @@ const App = struct {
         const self: *@This() = @ptrCast(@alignCast(context.?));
         return (self.platform_services orelse return error.RuntimeUnavailable).showMessageDialog(
             options,
+        );
+    }
+
+    fn platformBeginWindowDrag(
+        context: ?*anyopaque,
+        window_id: native_sdk.platform.WindowId,
+        clicks: u8,
+    ) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        return window_chrome.beginDrag(
+            self.platform_services orelse return error.RuntimeUnavailable,
+            window_id,
+            clicks,
+        );
+    }
+
+    fn platformWindowControl(
+        context: ?*anyopaque,
+        window_id: native_sdk.platform.WindowId,
+        action: bridge_api.WindowControl,
+    ) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        return window_chrome.control(
+            self.platform_services orelse return error.RuntimeUnavailable,
+            window_id,
+            switch (action) {
+                .minimize => .minimize,
+                .toggle_maximize => .toggle_maximize,
+                .close => .close,
+            },
         );
     }
 
@@ -1982,6 +2016,7 @@ pub fn run(init: std.process.Init) !void {
         account_coordinator.commandSink(),
         app.dispatcherPlatform(),
         app.dispatcherAutomationAuthority(),
+        main_window_id,
     );
     defer dispatcher.deinit();
     app.dispatcher = &dispatcher;
