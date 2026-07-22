@@ -9,6 +9,7 @@ type IconName =
   | "plus"
   | "settings"
   | "arrow-left"
+  | "close"
   | "account";
 
 const paths: Record<IconName, React.ReactNode> = {
@@ -24,6 +25,7 @@ const paths: Record<IconName, React.ReactNode> = {
     <path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Zm7 3.5 1.3-2.1-2-3.4-2.5.1-1.2-.7L13.5 3h-4L8.4 5.9l-1.2.7-2.5-.1-2 3.4L4 12l-1.3 2.1 2 3.4 2.5-.1 1.2.7 1.1 2.9h4l1.1-2.9 1.2-.7 2.5.1 2-3.4L19 12Z" />
   ),
   "arrow-left": <path d="m14.5 6-6 6 6 6" />,
+  close: <path d="m6.5 6.5 11 11m0-11-11 11" />,
   account: <path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm7 8a7 7 0 0 0-14 0" />,
 };
 

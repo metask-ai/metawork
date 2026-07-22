@@ -17,7 +17,6 @@ import {
 import {
   isRunInFlight,
   searchWorkbench,
-  taskActivity,
   taskDisplayState,
   taskGroups,
   taskSignals,
@@ -219,26 +218,6 @@ test("Task display state preserves Run, lifecycle, archive, and outcome preceden
     value: "failed",
   });
   assert.deepEqual(taskDisplayState(task({})), { kind: "ready" });
-});
-
-test("Task activity hides empty modules and derives only Host-projected content", () => {
-  assert.deepEqual(taskActivity(null), {
-    currentRun: null,
-    tokenTotal: 0n,
-  });
-
-  const current = run("9", "Audit", "Working", null, "tool detail");
-  current.usage.input = "12";
-  current.usage.output = "5";
-  const summary = taskActivity(
-    task({
-      currentRunId: "9",
-      currentRunPhase: "running",
-      runs: [current],
-    }),
-  );
-  assert.equal(summary.currentRun, current);
-  assert.equal(summary.tokenTotal, 17n);
 });
 
 test("a new Task draft is not mistaken for an in-flight Run", () => {

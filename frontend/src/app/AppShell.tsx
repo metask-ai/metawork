@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 
 import { Icon } from "../components/ui/Icon.tsx";
+import { shouldDismissInspectorForEscape } from "../features/inspector/inspector-interaction.ts";
 import { useI18n } from "../i18n/context.ts";
 import {
   readLocalPreference,
@@ -9,8 +10,6 @@ import {
 import { primaryShortcutModifier } from "../platform/keyboard.ts";
 
 const leftPreference = "metawork.panel.workspaces";
-const rightPreference = "metawork.panel.activity";
-
 function initialPanel(key: string, minimumWidth: number) {
   if (typeof window === "undefined") return true;
   const stored = readLocalPreference(key);
@@ -23,7 +22,9 @@ export function AppShell({
   status,
   onSearch,
   left,
-  activity,
+  inspector,
+  inspectorOpen,
+  onDismissInspector,
   children,
 }: {
   taskTitle: string;
@@ -31,7 +32,9 @@ export function AppShell({
   status: string;
   onSearch: () => void;
   left: ReactNode;
-  activity: ReactNode | null;
+  inspector: ReactNode | null;
+  inspectorOpen: boolean;
+  onDismissInspector: (restoreFocus?: boolean) => void;
   children: ReactNode;
 }) {
   const { t } = useI18n();
@@ -39,50 +42,53 @@ export function AppShell({
   const [leftOpen, setLeftOpen] = useState(() =>
     initialPanel(leftPreference, 820),
   );
-  const [rightOpen, setRightOpen] = useState(() =>
-    initialPanel(rightPreference, 1101),
-  );
-  const rightAvailable = activity !== null;
-  const effectiveRightOpen = rightAvailable && rightOpen;
+  const inspectorAvailable = inspector !== null;
+  const effectiveInspectorOpen = inspectorAvailable && inspectorOpen;
 
   useEffect(() => {
     const narrow = window.matchMedia("(max-width: 819px)");
-    const medium = window.matchMedia("(max-width: 1100px)");
     const closeForViewport = () => {
       if (narrow.matches) setLeftOpen(false);
-      if (medium.matches) setRightOpen(false);
     };
     narrow.addEventListener("change", closeForViewport);
-    medium.addEventListener("change", closeForViewport);
     return () => {
       narrow.removeEventListener("change", closeForViewport);
-      medium.removeEventListener("change", closeForViewport);
     };
   }, []);
 
-  function toggleLeft() {
-    setLeftOpen((open) => {
-      const next = !open;
-      if (next && window.innerWidth < 820) setRightOpen(false);
-      writeLocalPreference(leftPreference, next ? "open" : "closed");
-      return next;
-    });
-  }
+  useEffect(() => {
+    if (effectiveInspectorOpen && window.innerWidth < 820) setLeftOpen(false);
+  }, [effectiveInspectorOpen]);
 
-  function toggleRight() {
-    setRightOpen((open) => {
-      const next = !open;
-      if (next && window.innerWidth < 820) setLeftOpen(false);
-      writeLocalPreference(rightPreference, next ? "open" : "closed");
-      return next;
-    });
+  function toggleLeft() {
+    const next = !leftOpen;
+    if (next && window.innerWidth < 820) onDismissInspector(false);
+    writeLocalPreference(leftPreference, next ? "open" : "closed");
+    setLeftOpen(next);
   }
 
   return (
     <main
       className="app-window"
       data-left-open={leftOpen}
-      data-right-open={effectiveRightOpen}
+      data-inspector-open={effectiveInspectorOpen}
+      onKeyDown={(event) => {
+        const target = event.target as HTMLElement;
+        if (
+          target.closest('[role="dialog"], [role="menu"], [role="alertdialog"]')
+        )
+          return;
+        if (
+          !shouldDismissInspectorForEscape(
+            effectiveInspectorOpen,
+            event.key,
+            event.defaultPrevented,
+          )
+        )
+          return;
+        event.preventDefault();
+        onDismissInspector();
+      }}
     >
       <header className="app-titlebar">
         <button
@@ -112,18 +118,6 @@ export function AppShell({
           <span>{t("search.open")}</span>
           <kbd>{shortcutModifier}K</kbd>
         </button>
-        {rightAvailable && (
-          <button
-            className="icon-button focus-ring"
-            aria-controls="task-activity"
-            aria-expanded={effectiveRightOpen}
-            aria-label={t("app.toggle_activity")}
-            title={t("app.toggle_activity")}
-            onClick={toggleRight}
-          >
-            <Icon name="activity" />
-          </button>
-        )}
       </header>
 
       <div className="app-columns">
@@ -136,25 +130,25 @@ export function AppShell({
           {left}
         </aside>
         <section className="task-stage">{children}</section>
-        {rightAvailable && (
+        {inspectorAvailable && (
           <aside
-            id="task-activity"
-            className="task-activity"
-            aria-hidden={!effectiveRightOpen}
-            inert={!effectiveRightOpen}
+            id="task-inspector"
+            className="task-inspector"
+            aria-labelledby="task-inspector-title"
+            aria-hidden={!effectiveInspectorOpen}
+            inert={!effectiveInspectorOpen}
           >
-            {activity}
+            {inspector}
           </aside>
         )}
       </div>
 
-      {(leftOpen || effectiveRightOpen) && (
+      {leftOpen && (
         <button
           className="panel-scrim"
           aria-label={t("app.dismiss_panels")}
           onClick={() => {
             if (window.innerWidth < 820) setLeftOpen(false);
-            if (window.innerWidth <= 1100) setRightOpen(false);
           }}
         />
       )}

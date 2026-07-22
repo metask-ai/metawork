@@ -19,6 +19,8 @@ import type {
 import { formatInteger, formatMilliseconds } from "../../i18n/formatters.ts";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
 
+type TimelineDetailSection = "tools" | "usage";
+
 const newTaskExampleIds: MessageId[] = [
   "task.example.review",
   "task.example.test_failure",
@@ -132,6 +134,7 @@ export function TaskTimeline({
   responseDisabled,
   onUseExample,
   onPrepareRetry,
+  onInspect,
   onRespond,
   renderPendingUi,
   renderUiRecord,
@@ -145,6 +148,10 @@ export function TaskTimeline({
   responseDisabled: boolean;
   onUseExample: (instruction: string) => void;
   onPrepareRetry: (instruction: string) => void;
+  onInspect: (
+    section: TimelineDetailSection,
+    opener: HTMLButtonElement,
+  ) => void;
   onRespond: (payload: UiResponsePayload) => void;
   renderPendingUi: (props: {
     taskId: string;
@@ -213,17 +220,26 @@ export function TaskTimeline({
               >
                 <div className="workline-node" aria-hidden="true" />
                 <header className="run-heading">
-                  <p>
-                    {t("run.label", { id: run.id })} ·{" "}
-                    {runPhaseLabel(t, run.phase)}
-                  </p>
-                  {total !== null && (
-                    <span>
-                      {t("run.tokens", {
-                        count: formatInteger(locale, total),
-                      })}
-                    </span>
-                  )}
+                  <p>{runPhaseLabel(t, run.phase)}</p>
+                  <div className="run-heading-meta">
+                    {total !== null && (
+                      <span>
+                        {t("run.tokens", {
+                          count: formatInteger(locale, total),
+                        })}
+                      </span>
+                    )}
+                    {run.id === latestRunId && total !== null && total > 0n && (
+                      <button
+                        className="run-inspector-link focus-ring"
+                        onClick={(event) =>
+                          onInspect("usage", event.currentTarget)
+                        }
+                      >
+                        {t("inspector.view_details")}
+                      </button>
+                    )}
+                  </div>
                 </header>
                 <div className="run-content">
                   <Message role={t("message.you")} text={run.user} />
@@ -247,6 +263,11 @@ export function TaskTimeline({
                         <ToolCard
                           key={`tool:${activity.value.id}`}
                           tool={activity.value}
+                          onInspect={
+                            run.id === latestRunId
+                              ? (opener) => onInspect("tools", opener)
+                              : null
+                          }
                         />
                       );
                     if (activity.kind === "resolved_ui")
@@ -389,7 +410,13 @@ function Message({
   );
 }
 
-function ToolCard({ tool }: { tool: ToolView }) {
+function ToolCard({
+  tool,
+  onInspect,
+}: {
+  tool: ToolView;
+  onInspect: ((opener: HTMLButtonElement) => void) | null;
+}) {
   const { locale, t } = useI18n();
   let duration: bigint | null = null;
   try {
@@ -448,6 +475,14 @@ function ToolCard({ tool }: { tool: ToolView }) {
             label={tool.isError ? t("tool.error") : t("tool.result")}
             value={tool.content}
           />
+        )}
+        {onInspect && (
+          <button
+            className="tool-inspector-link focus-ring"
+            onClick={(event) => onInspect(event.currentTarget)}
+          >
+            {t("inspector.view_details")}
+          </button>
         )}
       </div>
     </details>

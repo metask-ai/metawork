@@ -121,7 +121,7 @@ Workspace
 
 ## 4. 主窗口信息架构
 
-> Capability：**混合**。登录优先 gate、独立 Workspace projection、左栏、New task 与设置 route 属于当前 shell；按需 Inspector 仍是目标能力，其未完成部分不得从当前常驻 `TaskActivity` 推断为已交付。
+> Capability：**当前**。登录优先 gate、独立 Workspace projection、左栏、New task、设置 route、工作轨迹与按需 Inspector 已进入当前 shell；未通过 capability gate 的 Inspector 模块仍必须隐藏。
 
 ### 4.1 总体布局
 
@@ -537,7 +537,7 @@ Full access
 
 ## 11. 按需 Inspector
 
-> Capability：**目标**。Inspector shell 属于新版 Workbench；其中只有 Needs your attention、Current activity、Tools and connections 与真实 usage 可消费当前 ABI 数据，Plan 与 Outputs 仍是未来项。
+> Capability：**混合**。按需 Inspector shell，以及 Needs your attention、Current activity / Last run、Tools and connections 与真实 usage 已进入当前实现；Plan 与 Outputs 仍是未来项。
 
 Inspector 是当前 Task 的按需结构化摘要与详情面板，不是固定存在的第三栏、第二份聊天记录或日志面板。New task、无 Task 和没有有效模块的普通 idle Task 默认不占用右侧列宽。模块变为可用不等于自动打开面板：普通 Current activity、usage 和工具活动只更新入口或已打开面板，不能在 Run 开始时挤压正文。
 
@@ -557,12 +557,12 @@ Inspector 是当前 Task 的按需结构化摘要与详情面板，不是固定�
 - 空模块隐藏；
 - 需要用户处理始终置顶；
 - Current activity 显示此刻可观察动作，不复制完整工具输出；
-- Run terminal 后，已经打开的 Inspector 用真实 outcome、耗时和 usage 转为 Last run summary；不得因为 Current activity 消失而清空内容；
+- Run terminal 后，已经打开的 Inspector 用真实 outcome、状态和 usage 转为 Last run summary；只有 Host 发布 typed Run duration 时才显示总耗时，当前不得从 Renderer 时钟猜测；不得因为 Current activity 消失而清空内容；
 - Plan 只消费真实结构化计划；
 - Outputs 只显示用户关心的交付结果；
 - Tools and connections 只显示本次实际使用的能力；
 - Context and usage 显示真实 usage、预算、压缩或警告，不显示伪百分比；
-- 用户从工具卡、diff、结果或 usage 主动打开详情后，Inspector 在当前 Task 内保持打开，直到用户主动关闭或切换 Task；Run 进入 terminal 不自动收起，也不回收 304 px 列宽；
+- 用户从工具卡、diff、结果或 usage 主动打开详情后，Inspector 在当前 Task 内保持打开，直到用户主动关闭；切换 Task 时显示目标 Task 自己的会话内状态，返回原 Task 时恢复其状态；Run 进入 terminal 不自动收起，也不回收 304 px 列宽；
 - 只有新的 `Needs your attention` 请求可以对当前 Task 自动打开 Inspector 一次，且不能抢走时间线审批卡的键盘焦点；普通运行开始、usage 更新、工具开始或 terminal 都不得自动切换显隐；
 - 切换 Task 是允许重新决定布局的显式边界：新 Task 使用自己的会话内显隐状态和内容，绝不能短暂显示前一个 Task 的详情；窄窗口自动打开时使用覆盖层，不触发中栏重排；
 - Inspector 折叠不影响通知、审批或 Task 状态；

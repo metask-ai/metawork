@@ -25,7 +25,13 @@ import {
 } from "../features/approvals/response-state.ts";
 import { useUiResponseStates } from "../features/approvals/useUiResponseStates.ts";
 import { GlobalSearch } from "../features/search/GlobalSearch.tsx";
-import { TaskActivity } from "../features/task-activity/TaskActivity.tsx";
+import {
+  TaskInspector,
+  type InspectorFocusRequest,
+} from "../features/inspector/TaskInspector.tsx";
+import { inspectorFocusReturnTarget } from "../features/inspector/inspector-interaction.ts";
+import type { InspectorSection } from "../features/inspector/inspector-state.ts";
+import { useInspectorSession } from "../features/inspector/useInspectorSession.ts";
 import { TaskTimeline } from "../features/timeline/TaskTimeline.tsx";
 import {
   TaskSignals,
@@ -137,6 +143,8 @@ export default function App() {
   const [cancelPending, setCancelPending] = useState<Record<string, true>>({});
   const [connectionBusy, setConnectionBusy] = useState(false);
   const [accountCancelBusy, setAccountCancelBusy] = useState(false);
+  const [inspectorFocusRequest, setInspectorFocusRequest] =
+    useState<InspectorFocusRequest>(null);
   const [bridgeReady, setBridgeReady] = useState(false);
   const [viewSyncFailed, setViewSyncFailed] = useState(false);
   const {
@@ -157,9 +165,13 @@ export default function App() {
   const workspaceBusyRef = useRef(false);
   const connectionBusyRef = useRef(false);
   const taskMenu = useRef<HTMLDivElement>(null);
+  const inspectorToggle = useRef<HTMLButtonElement>(null);
+  const inspectorOpener = useRef<HTMLButtonElement | null>(null);
+  const inspectorFocusSequence = useRef(0);
   const composer = useRef<HTMLTextAreaElement>(null);
   const snapshot = workbench.snapshot;
   const activeTask = useMemo(() => selectActiveTask(workbench), [workbench]);
+  const inspector = useInspectorSession(activeTask);
   const currentWorkspaceId = selectCurrentWorkspace(workbench);
   const currentWorkspace = snapshot.workspaces.find(
     (workspace) => workspace.id === currentWorkspaceId,
@@ -312,6 +324,8 @@ export default function App() {
     setEditingTitle(false);
     setConfirmDelete(false);
     setTaskMenuOpen(false);
+    setInspectorFocusRequest(null);
+    inspectorOpener.current = null;
   }, [activeTask?.id]);
 
   useEffect(() => {
@@ -339,6 +353,40 @@ export default function App() {
     const target = document.getElementById(`ui-request-${requestId}`);
     target?.scrollIntoView({ block: "center", behavior: "smooth" });
     window.requestAnimationFrame(() => target?.focus());
+  }
+
+  function openInspectorSection(
+    section: InspectorSection,
+    opener: HTMLButtonElement,
+  ) {
+    if (!activeTask || !inspector.available) return;
+    inspectorOpener.current = opener;
+    inspector.show();
+    inspectorFocusSequence.current += 1;
+    setInspectorFocusRequest({
+      taskId: activeTask.id,
+      section,
+      nonce: inspectorFocusSequence.current,
+    });
+  }
+
+  function dismissInspector(restoreFocus = true) {
+    const panel = document.getElementById("task-inspector");
+    const focusWasInside = panel?.contains(document.activeElement) === true;
+    const focusTarget = inspectorFocusReturnTarget(
+      inspectorOpener.current,
+      inspectorToggle.current,
+    );
+    inspectorOpener.current = null;
+    inspector.hide();
+    setInspectorFocusRequest(null);
+    if (restoreFocus && focusWasInside && focusTarget)
+      window.requestAnimationFrame(() => focusTarget.focus());
+  }
+
+  function focusPendingFromInspector() {
+    if (window.innerWidth <= 1100) dismissInspector(false);
+    window.requestAnimationFrame(focusPendingRequest);
   }
 
   useEffect(() => {
@@ -1127,42 +1175,16 @@ export default function App() {
           />
         </div>
       }
-      activity={
-        route === "workbench" && activeTask ? (
-          <>
-            <h2 className="activity-title">{t("activity.title")}</h2>
-            {viewSyncFailed && (
-              <section className="sync-failure" role="alert">
-                <h3>{t("connection.failed")}</h3>
-                <p>{t("connection.failed_help")}</p>
-                <button
-                  className="secondary-button focus-ring"
-                  disabled={connectionBusy}
-                  onClick={() => void retryViewSynchronization()}
-                >
-                  {connectionBusy
-                    ? t("connection.retrying")
-                    : t("connection.retry")}
-                </button>
-                {status.diagnostic && (
-                  <details>
-                    <summary>{t("connection.details")}</summary>
-                    <p>
-                      {status.sourceId ? `${t(status.sourceId)}: ` : ""}
-                      {status.diagnostic}
-                    </p>
-                  </details>
-                )}
-              </section>
-            )}
-
-            <TaskActivity
-              task={activeTask}
-              draft={newTaskDraftActive}
-              currentStatus={currentTaskStatus}
-              onFocusPending={focusPendingRequest}
-            />
-          </>
+      inspectorOpen={route === "workbench" && inspector.open}
+      onDismissInspector={dismissInspector}
+      inspector={
+        route === "workbench" && activeTask && inspector.available ? (
+          <TaskInspector
+            task={activeTask}
+            focusRequest={inspectorFocusRequest}
+            onClose={() => dismissInspector()}
+            onFocusPending={focusPendingFromInspector}
+          />
         ) : null
       }
     >
@@ -1223,7 +1245,9 @@ export default function App() {
                     placeholder={t("task.item", { id: activeTask.id })}
                     onChange={(event) => setTitleDraft(event.target.value)}
                     onKeyDown={(event) => {
-                      if (event.key === "Escape") setEditingTitle(false);
+                      if (event.key !== "Escape") return;
+                      event.preventDefault();
+                      setEditingTitle(false);
                     }}
                   />
                   <button
@@ -1269,6 +1293,32 @@ export default function App() {
                     {t("task.stop")}
                   </button>
                 )}
+              {activeTask && inspector.available && (
+                <button
+                  ref={inspectorToggle}
+                  className="inspector-toggle icon-button focus-ring"
+                  data-active={inspector.open}
+                  aria-controls="task-inspector"
+                  aria-expanded={inspector.open}
+                  aria-label={t(
+                    inspector.open ? "inspector.close" : "inspector.open",
+                  )}
+                  title={t(
+                    inspector.open ? "inspector.close" : "inspector.open",
+                  )}
+                  onClick={(event) => {
+                    setInspectorFocusRequest(null);
+                    if (inspector.open) {
+                      dismissInspector(false);
+                      return;
+                    }
+                    inspectorOpener.current = event.currentTarget;
+                    inspector.show();
+                  }}
+                >
+                  <Icon name="activity" />
+                </button>
+              )}
               {activeTask && (
                 <div className="task-menu" ref={taskMenu}>
                   <button
@@ -1408,6 +1458,31 @@ export default function App() {
             </section>
           )}
 
+          {viewSyncFailed && (
+            <section className="sync-failure task-sync-failure" role="alert">
+              <h3>{t("connection.failed")}</h3>
+              <p>{t("connection.failed_help")}</p>
+              <button
+                className="secondary-button focus-ring"
+                disabled={connectionBusy}
+                onClick={() => void retryViewSynchronization()}
+              >
+                {connectionBusy
+                  ? t("connection.retrying")
+                  : t("connection.retry")}
+              </button>
+              {status.diagnostic && (
+                <details>
+                  <summary>{t("connection.details")}</summary>
+                  <p>
+                    {status.sourceId ? `${t(status.sourceId)}: ` : ""}
+                    {status.diagnostic}
+                  </p>
+                </details>
+              )}
+            </section>
+          )}
+
           <TaskTimeline
             task={activeTask}
             draft={newTaskDraftActive}
@@ -1423,6 +1498,7 @@ export default function App() {
               window.requestAnimationFrame(() => composer.current?.focus());
             }}
             onPrepareRetry={prepareRetry}
+            onInspect={openInspectorSection}
             onRespond={(payload) => void respondUi(payload)}
             renderPendingUi={(props) => {
               const { taskId, ...panelProps } = props;

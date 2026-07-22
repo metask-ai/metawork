@@ -80,7 +80,7 @@ function render(props = {}) {
   );
 }
 
-function renderShell(activity) {
+function renderShell(inspector, inspectorOpen = false) {
   return renderToStaticMarkup(
     createElement(
       I18nContext.Provider,
@@ -99,7 +99,9 @@ function renderShell(activity) {
           status: "Connected",
           onSearch() {},
           left: createElement("p", null, "Navigation"),
-          activity,
+          inspector,
+          inspectorOpen,
+          onDismissInspector() {},
         },
         createElement("p", null, "Composer stage"),
       ),
@@ -128,6 +130,7 @@ function renderNewTaskTimeline(composerHasDraft) {
         responseDisabled: false,
         onUseExample() {},
         onPrepareRetry() {},
+        onInspect() {},
         onRespond() {},
         renderPendingUi() {
           return null;
@@ -233,11 +236,11 @@ test("Account catalog work blocks New task admission but not bound Tasks", async
   );
 });
 
-test("New task does not render or reserve an empty activity panel", () => {
+test("New task does not render or reserve an empty Inspector", () => {
   const markup = renderShell(null);
-  assert.doesNotMatch(markup, /id="task-activity"/);
-  assert.doesNotMatch(markup, /aria-controls="task-activity"/);
-  assert.match(markup, /data-right-open="false"/);
+  assert.doesNotMatch(markup, /id="task-inspector"/);
+  assert.doesNotMatch(markup, /aria-controls="task-inspector"/);
+  assert.match(markup, /data-inspector-open="false"/);
 });
 
 test("task examples disappear before they can overwrite an existing draft", () => {

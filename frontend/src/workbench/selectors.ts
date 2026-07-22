@@ -165,28 +165,6 @@ export function selectCurrentWorkspace(state: WorkbenchState): string | null {
   );
 }
 
-export type TaskActivity = {
-  currentRun: RunView | null;
-  tokenTotal: bigint;
-};
-
-export function taskActivity(task: TaskView | null): TaskActivity {
-  if (!task) return { currentRun: null, tokenTotal: 0n };
-  let tokenTotal = 0n;
-  for (const run of task.runs) {
-    try {
-      tokenTotal += BigInt(run.usage.input) + BigInt(run.usage.output);
-    } catch {
-      // Exact decoding already validates wire integers; keep this selector
-      // fail-safe for isolated fixtures and future call sites.
-    }
-  }
-  return {
-    currentRun: task.runs.find((run) => run.id === task.currentRunId) ?? null,
-    tokenTotal,
-  };
-}
-
 export type SearchResult = {
   key: string;
   kind: "workspace" | "task" | "instruction" | "completion";
