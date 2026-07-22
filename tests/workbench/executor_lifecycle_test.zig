@@ -103,6 +103,40 @@ test "Workbench close cancels a queued Run without blocking the caller" {
     try std.testing.expectEqual(@as(usize, 1), destroyed);
 }
 
+test "Workspace removal interrupts live Runs without deleting Task history" {
+    fake_core.reset();
+    fake_core.setNextPlan(.controlled);
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 1 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var workbench = try workbench_api.Workbench.init(std.testing.allocator, runtime, .{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_workspaces = 1,
+        .max_tasks = 1,
+        .max_runs_per_task = 1,
+        .max_tools_per_run = 1,
+    }, workbenchConfiguration());
+    defer workbench.deinit();
+    try installWorkbenchExecution(&workbench);
+
+    const task_id = try workbench.createTask(workbenchTaskInput());
+    const workspace_id = workbench.selectedWorkspaceId();
+    _ = try workbench.runTask(task_id, "stop when the workspace is removed");
+    try waitWorkbenchSnapshot(runtime, &workbench, "\"currentRunPhase\":\"running\"");
+
+    try workbench.removeWorkspace(workspace_id);
+    try waitWorkbenchSnapshot(runtime, &workbench, "\"lastRunOutcome\":\"interrupted\"");
+    try waitWorkbenchSnapshot(runtime, &workbench, "\"lifecycle\":\"closed\"");
+
+    var snapshot_storage: [128 * 1024]u8 = undefined;
+    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"tasks\":[{") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"workspaceRoot\":") != null);
+}
+
 test "Workbench cancel of a completed Run is an idempotent no-op" {
     fake_core.reset();
     const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });

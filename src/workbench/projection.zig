@@ -17,13 +17,18 @@ pub const Error = lifecycle.Error || std.mem.Allocator.Error || std.Thread.Spawn
     RunGenerationExhausted,
     ExecutorShuttingDown,
     TaskCapacity,
+    WorkspaceCapacity,
+    WorkspaceIdentityExhausted,
+    WorkspaceOrderExhausted,
     UnknownTask,
+    UnknownWorkspace,
     TaskClosing,
     ExecutionUnavailable,
     ExecutionInUse,
     ExecutionGenerationMismatch,
     InvalidAutomationExecution,
     InvalidWorkspace,
+    WorkspaceUnavailable,
     EventAfterTerminalDrain,
 };
 
@@ -31,6 +36,7 @@ pub const Limits = struct {
     worker_count: usize = 4,
     queue_capacity: usize = 16,
     max_tasks: usize = 8,
+    max_workspaces: usize = 16,
     max_runs_per_task: usize = 16,
     max_tools_per_run: usize = 32,
     max_projection_bytes: usize = 512 * 1024,
@@ -60,6 +66,29 @@ pub const TaskWorkspaceTrust = union(enum) {
 pub const TaskCreateInput = struct {
     workspace_root: []const u8,
     trust: TaskWorkspaceTrust,
+};
+
+pub const WorkspaceAuthorization = enum {
+    available,
+    reauthorization_required,
+};
+
+pub const WorkspaceSignals = struct {
+    running: u32 = 0,
+    attention: u32 = 0,
+    failed_or_interrupted: u32 = 0,
+};
+
+/// Borrowed, bounded Workbench projection. The Renderer wire does not consume
+/// this until the next atomic Bridge revision hard cut.
+pub const WorkspaceProjection = struct {
+    id: u64,
+    canonical_root: []const u8,
+    display_name: []const u8,
+    authorization: WorkspaceAuthorization,
+    selected: bool,
+    recent_order: u64,
+    signals: WorkspaceSignals,
 };
 
 pub const ExecutionIdentity = struct {
@@ -349,6 +378,7 @@ const TaskView = struct {
     execution_generation: u64,
     execution_provider: Provider,
     execution_model: []u8,
+    workspace_id: u64,
     workspace_root: []u8,
     title: []u8,
     title_redacted: bool = false,
@@ -370,6 +400,21 @@ const TaskView = struct {
     close_completion: std.atomic.Value(CloseCompletion) = .init(.none),
     close_failed: bool = false,
     cancel_requested: bool = false,
+};
+
+const WorkspaceTrust = union(enum) {
+    explicitly_trusted,
+    temporary: []u8,
+};
+
+const WorkspaceView = struct {
+    id: u64,
+    canonical_root: []u8,
+    display_name: []u8,
+    trust: WorkspaceTrust,
+    authorization: WorkspaceAuthorization = .available,
+    visible: bool = true,
+    recent_order: u64,
 };
 
 /// Stable worker reference to an admitted Run record. This value is a lease:
@@ -751,6 +796,7 @@ pub const Workbench = struct {
     allocator: std.mem.Allocator,
     agent_runtime: *lifecycle.Runtime,
     limits: Limits,
+    workspaces: []?WorkspaceView,
     tasks: []?TaskView,
     change_notifier: ChangeNotifier,
     executor: *executor_impl.Executor,
@@ -761,6 +807,9 @@ pub const Workbench = struct {
     account: AccountProjection,
     execution: ActiveExecution,
     execution_replacement_pending: bool = false,
+    selected_workspace_id: u64 = 0,
+    next_workspace_id: u64 = 1,
+    next_workspace_recent_order: u64 = 1,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -769,7 +818,8 @@ pub const Workbench = struct {
         configuration: Configuration,
     ) Error!Workbench {
         if (limits.worker_count == 0 or limits.queue_capacity == 0 or
-            limits.max_tasks == 0 or limits.max_runs_per_task == 0 or
+            limits.max_tasks == 0 or limits.max_workspaces == 0 or
+            limits.max_runs_per_task == 0 or
             limits.max_tools_per_run == 0 or limits.max_projection_bytes == 0 or
             limits.max_workspace_bytes == 0 or
             limits.max_task_title_bytes == 0 or
@@ -785,6 +835,9 @@ pub const Workbench = struct {
         errdefer account.deinit();
         var execution = try ActiveExecution.init(allocator);
         errdefer execution.deinit();
+        const workspaces = try allocator.alloc(?WorkspaceView, limits.max_workspaces);
+        errdefer allocator.free(workspaces);
+        @memset(workspaces, null);
         const tasks = try allocator.alloc(?TaskView, limits.max_tasks);
         errdefer allocator.free(tasks);
         @memset(tasks, null);
@@ -799,6 +852,7 @@ pub const Workbench = struct {
             .allocator = allocator,
             .agent_runtime = agent_runtime,
             .limits = limits,
+            .workspaces = workspaces,
             .tasks = tasks,
             .change_notifier = configuration.change_notifier,
             .executor = executor,
@@ -918,6 +972,100 @@ pub const Workbench = struct {
         return self.execution_replacement_pending;
     }
 
+    /// Validates and selects a Host-owned Workspace independently of Task
+    /// creation. A successful selection is therefore visible even when the
+    /// user has not sent the New task draft yet.
+    pub fn openWorkspace(
+        self: *Workbench,
+        input: TaskCreateInput,
+    ) Error!u64 {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        self.syncLifecycle();
+        const recent_order = try self.takeWorkspaceRecentOrder();
+        const workspace = try self.upsertWorkspace(input);
+        self.selected_workspace_id = workspace.id;
+        workspace.recent_order = recent_order;
+        self.bumpRevision();
+        return workspace.id;
+    }
+
+    pub fn selectWorkspace(self: *Workbench, workspace_id: u64) Error!void {
+        self.syncLifecycle();
+        const workspace = self.findWorkspace(workspace_id) orelse
+            return error.UnknownWorkspace;
+        if (!workspace.visible) return error.UnknownWorkspace;
+        const recent_order = try self.takeWorkspaceRecentOrder();
+        self.selected_workspace_id = workspace.id;
+        workspace.recent_order = recent_order;
+        self.bumpRevision();
+    }
+
+    pub fn selectedWorkspaceId(self: *const Workbench) u64 {
+        return self.selected_workspace_id;
+    }
+
+    /// Copies the visible Workspace projection in recent-use order without
+    /// allocating. Aggregate signals are computed from canonical Task state.
+    pub fn copyWorkspaceProjections(
+        self: *Workbench,
+        output: []WorkspaceProjection,
+    ) Error![]const WorkspaceProjection {
+        self.syncLifecycle();
+        var count: usize = 0;
+        for (self.workspaces) |*entry| {
+            const workspace = &(entry.* orelse continue);
+            if (!workspace.visible) continue;
+            if (count == output.len) return error.WorkspaceCapacity;
+            output[count] = .{
+                .id = workspace.id,
+                .canonical_root = workspace.canonical_root,
+                .display_name = workspace.display_name,
+                .authorization = workspace.authorization,
+                .selected = workspace.id == self.selected_workspace_id,
+                .recent_order = workspace.recent_order,
+                .signals = self.workspaceSignals(workspace.id),
+            };
+            count += 1;
+        }
+        std.mem.sort(
+            WorkspaceProjection,
+            output[0..count],
+            {},
+            struct {
+                fn lessThan(_: void, left: WorkspaceProjection, right: WorkspaceProjection) bool {
+                    return left.recent_order > right.recent_order;
+                }
+            }.lessThan,
+        );
+        return output[0..count];
+    }
+
+    /// Removes a Workspace from navigation, makes future Run admission fail
+    /// closed, and starts closing every live Task Session in that Workspace.
+    /// Task history and files remain owned by their original systems.
+    pub fn removeWorkspace(
+        self: *Workbench,
+        workspace_id: u64,
+    ) Error!void {
+        self.syncLifecycle();
+        const workspace = self.findWorkspace(workspace_id) orelse
+            return error.UnknownWorkspace;
+        if (!workspace.visible) return error.UnknownWorkspace;
+        for (self.tasks) |*entry| {
+            const task = &(entry.* orelse continue);
+            if (task.workspace_id != workspace_id or task.session == null) continue;
+            self.closeTask(task.id) catch |err| switch (err) {
+                error.CloseInProgress => {},
+                else => return err,
+            };
+        }
+        workspace.visible = false;
+        workspace.authorization = .reauthorization_required;
+        if (self.selected_workspace_id == workspace_id)
+            self.selected_workspace_id = 0;
+        self.bumpRevision();
+    }
+
     pub fn createTask(
         self: *Workbench,
         input: TaskCreateInput,
@@ -932,40 +1080,13 @@ pub const Workbench = struct {
         errdefer task_execution.deinit();
         const task_execution_input = task_execution.input();
         const slot = findEmpty(TaskView, self.tasks) orelse return error.TaskCapacity;
-        const canonical = std.Io.Dir.realPathFileAbsoluteAlloc(
-            self.agent_runtime.io,
-            input.workspace_root,
-            self.allocator,
-        ) catch return error.InvalidWorkspace;
-        defer self.allocator.free(canonical);
-        const workspace_stat = std.Io.Dir.cwd().statFile(
-            self.agent_runtime.io,
-            canonical,
-            .{},
-        ) catch return error.InvalidWorkspace;
-        if (workspace_stat.kind != .directory) return error.InvalidWorkspace;
-        var temporary_root: ?[:0]u8 = null;
-        defer if (temporary_root) |root| self.allocator.free(root);
-        const workspace_trust: lifecycle.WorkspaceTrust = switch (input.trust) {
+        const workspace_id = try self.openWorkspace(input);
+        const workspace_view = self.findWorkspace(workspace_id) orelse unreachable;
+        const canonical = workspace_view.canonical_root;
+        const workspace_trust: lifecycle.WorkspaceTrust = switch (workspace_view.trust) {
             .explicitly_trusted => .explicitly_trusted,
-            .temporary => |root| temporary: {
-                const canonical_root = std.Io.Dir.realPathFileAbsoluteAlloc(
-                    self.agent_runtime.io,
-                    root,
-                    self.allocator,
-                ) catch return error.InvalidWorkspace;
-                temporary_root = canonical_root;
-                const root_stat = std.Io.Dir.cwd().statFile(
-                    self.agent_runtime.io,
-                    canonical_root,
-                    .{},
-                ) catch return error.InvalidWorkspace;
-                if (root_stat.kind != .directory) return error.InvalidWorkspace;
-                break :temporary .{ .temporary = canonical_root };
-            },
+            .temporary => |root| .{ .temporary = root },
         };
-        if (canonical.len > self.limits.max_workspace_bytes)
-            return error.ProjectionCapacity;
         const workspace_projection = try self.copyProjected(
             canonical,
             self.limits.max_workspace_bytes,
@@ -1009,6 +1130,7 @@ pub const Workbench = struct {
             .execution_generation = task_execution_input.execution_generation,
             .execution_provider = accountProvider(task_execution_input.target.provider_kind),
             .execution_model = execution_model,
+            .workspace_id = workspace_id,
             .workspace_root = workspace,
             .title = title,
             .runs = runs,
@@ -1023,9 +1145,14 @@ pub const Workbench = struct {
         self.syncLifecycle();
         const view = self.findTask(task_id) orelse return error.UnknownTask;
         if (!self.taskContinuationAvailable(view)) return error.TaskClosing;
+        const workspace = self.findWorkspace(view.workspace_id) orelse
+            return error.WorkspaceUnavailable;
+        if (!workspace.visible or workspace.authorization != .available)
+            return error.WorkspaceUnavailable;
         _ = try taskExecutionInput(view);
         if (hasNonTerminalRun(view)) return error.TaskBusy;
         const session = view.session orelse return error.TaskClosing;
+        const recent_order = try self.takeWorkspaceRecentOrder();
         const run_id = try session.prepareRun(prompt);
         errdefer cancelPreparedRunOrPanic(session, run_id);
         const slot = try self.reserveRunRecord(view, prompt);
@@ -1047,6 +1174,7 @@ pub const Workbench = struct {
         };
         view.active_run_id = run_id;
         view.cancel_requested = false;
+        workspace.recent_order = recent_order;
         self.bumpRevision();
         return run_id;
     }
@@ -1594,6 +1722,11 @@ pub const Workbench = struct {
             self.deinitTaskView(task);
         }
         self.allocator.free(self.tasks);
+        for (self.workspaces) |*entry| {
+            const workspace = &(entry.* orelse continue);
+            self.deinitWorkspaceView(workspace);
+        }
+        self.allocator.free(self.workspaces);
         self.execution.deinit();
         self.account.deinit();
         std.debug.assert(self.projection_bytes == 0);
@@ -1809,6 +1942,168 @@ pub const Workbench = struct {
             task.execution.?.deinit();
             task.execution = null;
         }
+    }
+
+    fn upsertWorkspace(
+        self: *Workbench,
+        input: TaskCreateInput,
+    ) Error!*WorkspaceView {
+        if (!std.fs.path.isAbsolute(input.workspace_root))
+            return error.InvalidWorkspace;
+        const canonical = std.Io.Dir.realPathFileAbsoluteAlloc(
+            self.agent_runtime.io,
+            input.workspace_root,
+            self.allocator,
+        ) catch return error.InvalidWorkspace;
+        defer self.allocator.free(canonical);
+        if (canonical.len > self.limits.max_workspace_bytes)
+            return error.ProjectionCapacity;
+        const workspace_stat = std.Io.Dir.cwd().statFile(
+            self.agent_runtime.io,
+            canonical,
+            .{},
+        ) catch return error.InvalidWorkspace;
+        if (workspace_stat.kind != .directory) return error.InvalidWorkspace;
+
+        var canonical_temporary: ?[:0]u8 = null;
+        defer if (canonical_temporary) |root| self.allocator.free(root);
+        switch (input.trust) {
+            .explicitly_trusted => {},
+            .temporary => |root| {
+                if (!std.fs.path.isAbsolute(root))
+                    return error.InvalidWorkspace;
+                const temporary = std.Io.Dir.realPathFileAbsoluteAlloc(
+                    self.agent_runtime.io,
+                    root,
+                    self.allocator,
+                ) catch return error.InvalidWorkspace;
+                canonical_temporary = temporary;
+                if (temporary.len > self.limits.max_workspace_bytes)
+                    return error.ProjectionCapacity;
+                const root_stat = std.Io.Dir.cwd().statFile(
+                    self.agent_runtime.io,
+                    temporary,
+                    .{},
+                ) catch return error.InvalidWorkspace;
+                if (root_stat.kind != .directory) return error.InvalidWorkspace;
+                if (!workspacePathWithin(temporary, canonical))
+                    return error.WorkspaceNotTrusted;
+            },
+        }
+
+        if (self.findWorkspaceByRoot(canonical)) |workspace| {
+            const next_temporary = if (canonical_temporary) |root|
+                try self.copyBounded(root, self.limits.max_workspace_bytes)
+            else
+                null;
+            if (workspace.trust == .temporary)
+                self.freeTracked(workspace.trust.temporary);
+            workspace.trust = if (next_temporary) |root|
+                .{ .temporary = root }
+            else
+                .explicitly_trusted;
+            workspace.authorization = .available;
+            workspace.visible = true;
+            return workspace;
+        }
+
+        var slot = findEmpty(WorkspaceView, self.workspaces);
+        if (slot == null) {
+            for (self.workspaces, 0..) |*entry, index| {
+                const workspace = &(entry.* orelse continue);
+                if (workspace.visible or self.workspaceHasTasks(workspace.id)) continue;
+                self.deinitWorkspaceView(workspace);
+                entry.* = null;
+                slot = index;
+                break;
+            }
+        }
+        const target = slot orelse return error.WorkspaceCapacity;
+        if (self.next_workspace_id == 0) return error.WorkspaceIdentityExhausted;
+
+        const owned_root = try self.copyBounded(canonical, self.limits.max_workspace_bytes);
+        errdefer self.freeTracked(owned_root);
+        const base_name = std.fs.path.basename(canonical);
+        const display_name = try self.copyBounded(
+            if (base_name.len == 0) canonical else base_name,
+            self.limits.max_workspace_bytes,
+        );
+        errdefer self.freeTracked(display_name);
+        const owned_temporary = if (canonical_temporary) |root|
+            try self.copyBounded(root, self.limits.max_workspace_bytes)
+        else
+            null;
+        errdefer if (owned_temporary) |root| self.freeTracked(root);
+
+        const workspace_id = self.next_workspace_id;
+        self.next_workspace_id +%= 1;
+        self.workspaces[target] = .{
+            .id = workspace_id,
+            .canonical_root = owned_root,
+            .display_name = display_name,
+            .trust = if (owned_temporary) |root|
+                .{ .temporary = root }
+            else
+                .explicitly_trusted,
+            .recent_order = 0,
+        };
+        return &self.workspaces[target].?;
+    }
+
+    fn takeWorkspaceRecentOrder(self: *Workbench) Error!u64 {
+        if (self.next_workspace_recent_order == 0)
+            return error.WorkspaceOrderExhausted;
+        const recent_order = self.next_workspace_recent_order;
+        self.next_workspace_recent_order +%= 1;
+        return recent_order;
+    }
+
+    fn findWorkspace(self: *Workbench, workspace_id: u64) ?*WorkspaceView {
+        if (workspace_id == 0) return null;
+        for (self.workspaces) |*entry| if (entry.*) |*workspace|
+            if (workspace.id == workspace_id) return workspace;
+        return null;
+    }
+
+    fn findWorkspaceByRoot(self: *Workbench, canonical_root: []const u8) ?*WorkspaceView {
+        for (self.workspaces) |*entry| if (entry.*) |*workspace|
+            if (std.mem.eql(u8, workspace.canonical_root, canonical_root)) return workspace;
+        return null;
+    }
+
+    fn workspaceHasTasks(self: *const Workbench, workspace_id: u64) bool {
+        for (self.tasks) |entry| if (entry) |task|
+            if (task.workspace_id == workspace_id) return true;
+        return false;
+    }
+
+    fn workspaceSignals(self: *const Workbench, workspace_id: u64) WorkspaceSignals {
+        var signals: WorkspaceSignals = .{};
+        for (self.tasks) |*entry| {
+            const task = &(entry.* orelse continue);
+            if (task.workspace_id != workspace_id or task.archived) continue;
+            if (currentRunPhase(task)) |phase| {
+                switch (phase) {
+                    .waiting_ui => signals.attention +|= 1,
+                    .queued, .running, .stopping => signals.running +|= 1,
+                    else => unreachable,
+                }
+                continue;
+            }
+            if (lastTerminalFacts(task.runs)) |terminal| switch (terminal.outcome) {
+                .failed, .interrupted, .dependency_contract_failure => signals.failed_or_interrupted +|= 1,
+                .completed, .stopped, .cancelled => {},
+            };
+        }
+        return signals;
+    }
+
+    fn deinitWorkspaceView(self: *Workbench, workspace: *WorkspaceView) void {
+        self.freeTracked(workspace.canonical_root);
+        self.freeTracked(workspace.display_name);
+        if (workspace.trust == .temporary)
+            self.freeTracked(workspace.trust.temporary);
+        workspace.* = undefined;
     }
 
     fn findTask(self: *Workbench, task_id: u64) ?*TaskView {
@@ -2826,6 +3121,13 @@ fn isTerminalPhase(phase: RunPhase) bool {
     };
 }
 
+fn workspacePathWithin(parent: []const u8, child: []const u8) bool {
+    if (std.mem.eql(u8, parent, child)) return true;
+    if (!std.mem.startsWith(u8, child, parent)) return false;
+    if (parent.len != 0 and std.fs.path.isSep(parent[parent.len - 1])) return true;
+    return child.len > parent.len and std.fs.path.isSep(child[parent.len]);
+}
+
 const SanitizeResult = struct {
     len: usize,
     truncated: bool,
@@ -3047,6 +3349,22 @@ fn testWorkbench() !Workbench {
     errdefer task_execution.deinit();
     workbench.revision = 0;
     const workspace = try workbench.copyBounded("/tmp/metawork-test", workbench.limits.max_workspace_bytes);
+    workbench.workspaces[0] = .{
+        .id = 1,
+        .canonical_root = try workbench.copyBounded(
+            "/tmp/metawork-test",
+            workbench.limits.max_workspace_bytes,
+        ),
+        .display_name = try workbench.copyBounded(
+            "metawork-test",
+            workbench.limits.max_workspace_bytes,
+        ),
+        .trust = .explicitly_trusted,
+        .recent_order = 1,
+    };
+    workbench.selected_workspace_id = 1;
+    workbench.next_workspace_id = 2;
+    workbench.next_workspace_recent_order = 2;
     const execution_model = try workbench.copyBounded(
         workbench.execution.model(),
         account_contract.Limits.model_id_bytes,
@@ -3078,6 +3396,7 @@ fn testWorkbench() !Workbench {
         .execution_generation = 1,
         .execution_provider = .anthropic,
         .execution_model = execution_model,
+        .workspace_id = 1,
         .workspace_root = workspace,
         .title = try workbench.copyBounded("", workbench.limits.max_task_title_bytes),
         .runs = runs,
@@ -3104,6 +3423,145 @@ fn finalizeTestTerminalEvents(workbench: *Workbench) void {
     workbench.markTerminalRunsBeforeEventDrain();
     workbench.finalizeMarkedTerminalRunsAfterEventDrain();
     workbench.syncLifecycle();
+}
+
+test "Workspace containment accepts platform roots and rejects path prefixes" {
+    const root = if (std.fs.path.sep == '\\') "C:\\" else "/";
+    const child = if (std.fs.path.sep == '\\') "C:\\project" else "/project";
+    const sibling_prefix = if (std.fs.path.sep == '\\')
+        workspacePathWithin("C:\\project", "C:\\project-other")
+    else
+        workspacePathWithin("/project", "/project-other");
+    try std.testing.expect(workspacePathWithin(root, child));
+    try std.testing.expect(!sibling_prefix);
+}
+
+test "Workspace registry owns empty selection recent use authorization and capacity" {
+    test_agent_runtime.io = std.testing.io;
+    const root_path = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        ".",
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(root_path);
+    const source_path = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        "src",
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(source_path);
+    const tests_path = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        "tests",
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(tests_path);
+    var workbench = try Workbench.init(
+        std.testing.allocator,
+        &test_agent_runtime,
+        .{
+            .max_workspaces = 2,
+            .max_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        .{},
+    );
+    defer workbench.deinit();
+
+    try std.testing.expectError(
+        error.InvalidWorkspace,
+        workbench.openWorkspace(.{
+            .workspace_root = ".",
+            .trust = .explicitly_trusted,
+        }),
+    );
+    try std.testing.expectEqual(@as(u64, 0), workbench.selectedWorkspaceId());
+
+    const root_id = try workbench.openWorkspace(.{
+        .workspace_root = root_path,
+        .trust = .explicitly_trusted,
+    });
+    try std.testing.expect(root_id != 0);
+    try std.testing.expectEqual(root_id, workbench.selectedWorkspaceId());
+    try std.testing.expect(workbench.tasks[0] == null);
+
+    const source_id = try workbench.openWorkspace(.{
+        .workspace_root = source_path,
+        .trust = .{ .temporary = root_path },
+    });
+    try std.testing.expect(source_id != root_id);
+
+    var storage: [2]WorkspaceProjection = undefined;
+    const projections = try workbench.copyWorkspaceProjections(&storage);
+    try std.testing.expectEqual(@as(usize, 2), projections.len);
+    try std.testing.expectEqual(source_id, projections[0].id);
+    try std.testing.expect(projections[0].selected);
+    try std.testing.expectEqual(WorkspaceAuthorization.available, projections[0].authorization);
+    try std.testing.expectEqualStrings("src", projections[0].display_name);
+    try std.testing.expect(std.fs.path.isAbsolute(projections[0].canonical_root));
+
+    try workbench.selectWorkspace(root_id);
+    const reordered = try workbench.copyWorkspaceProjections(&storage);
+    try std.testing.expectEqual(root_id, reordered[0].id);
+    try std.testing.expect(reordered[0].recent_order > reordered[1].recent_order);
+
+    try workbench.removeWorkspace(root_id);
+    try std.testing.expectEqual(@as(u64, 0), workbench.selectedWorkspaceId());
+    const remaining = try workbench.copyWorkspaceProjections(&storage);
+    try std.testing.expectEqual(@as(usize, 1), remaining.len);
+    try std.testing.expectError(error.UnknownWorkspace, workbench.selectWorkspace(root_id));
+
+    const restored_id = try workbench.openWorkspace(.{
+        .workspace_root = root_path,
+        .trust = .explicitly_trusted,
+    });
+    try std.testing.expectEqual(root_id, restored_id);
+    const restored = try workbench.copyWorkspaceProjections(&storage);
+    try std.testing.expectEqual(root_id, restored[0].id);
+    try std.testing.expectEqual(WorkspaceAuthorization.available, restored[0].authorization);
+
+    var no_space: [0]WorkspaceProjection = .{};
+    try std.testing.expectError(
+        error.WorkspaceCapacity,
+        workbench.copyWorkspaceProjections(&no_space),
+    );
+    try std.testing.expectError(
+        error.WorkspaceCapacity,
+        workbench.openWorkspace(.{
+            .workspace_root = tests_path,
+            .trust = .{ .temporary = root_path },
+        }),
+    );
+}
+
+test "Workspace projection derives aggregate Task signals and removal preserves history" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    var storage: [2]WorkspaceProjection = undefined;
+
+    const running = try workbench.copyWorkspaceProjections(&storage);
+    try std.testing.expectEqual(@as(u32, 1), running[0].signals.running);
+    try std.testing.expectEqual(@as(u32, 0), running[0].signals.attention);
+
+    workbench.tasks[0].?.runs[0].?.active_phase = .waiting_ui;
+    const attention = workbench.workspaceSignals(1);
+    try std.testing.expectEqual(@as(u32, 0), attention.running);
+    try std.testing.expectEqual(@as(u32, 1), attention.attention);
+
+    const run = &workbench.tasks[0].?.runs[0].?;
+    _ = commitTerminal(run, .failed, .failed, null, .reusable, "", false);
+    finalizeTestTerminalEvents(&workbench);
+    const failed = try workbench.copyWorkspaceProjections(&storage);
+    try std.testing.expectEqual(@as(u32, 1), failed[0].signals.failed_or_interrupted);
+
+    const task_root = workbench.tasks[0].?.workspace_root;
+    try workbench.removeWorkspace(1);
+    try std.testing.expect(workbench.tasks[0] != null);
+    try std.testing.expectEqualStrings(task_root, workbench.tasks[0].?.workspace_root);
+    const removed = try workbench.copyWorkspaceProjections(&storage);
+    try std.testing.expectEqual(@as(usize, 0), removed.len);
+    try std.testing.expectError(error.WorkspaceUnavailable, workbench.runTask(3, "continue"));
 }
 
 test "Workbench snapshot serializer matches the Renderer contract fixture" {
@@ -3828,6 +4286,7 @@ test "default snapshot budget contains the maximum structural projection" {
             .execution_generation = 1,
             .execution_provider = .anthropic,
             .execution_model = execution_model,
+            .workspace_id = 0,
             .workspace_root = try workbench.copyBounded("", limits.max_workspace_bytes),
             .title = try workbench.copyBounded("", limits.max_task_title_bytes),
             .runs = runs,

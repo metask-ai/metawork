@@ -1,3 +1,4 @@
+const std = @import("std");
 const native_sdk = @import("native_sdk");
 
 pub const max_path_bytes = 16 * 1024;
@@ -23,6 +24,15 @@ pub const State = struct {
 
     pub fn invalidate(self: *State) void {
         self.grant = null;
+    }
+
+    /// Workspace removal invalidates the one outstanding capability
+    /// conservatively. The chooser path is not a canonical identity: aliases,
+    /// symlinks and platform case rules make path-string matching unsafe.
+    pub fn revokeForWorkspaceRemoval(self: *State) bool {
+        if (self.grant == null) return false;
+        self.grant = null;
+        return true;
     }
 
     pub fn issue(
@@ -63,3 +73,16 @@ pub const State = struct {
         return output[0..grant.path_len];
     }
 };
+
+test "Workspace removal revokes the sole outstanding grant fail closed" {
+    var state: State = .{};
+    const window_id: native_sdk.platform.WindowId = 7;
+    var output: [max_path_bytes]u8 = undefined;
+    const revoked = try state.issue(3, window_id, "/tmp/aliased-workspace");
+    try std.testing.expect(state.revokeForWorkspaceRemoval());
+    try std.testing.expect(!state.revokeForWorkspaceRemoval());
+    try std.testing.expectError(
+        error.WorkspaceNotTrusted,
+        state.consume(revoked, window_id, 3, &output),
+    );
+}
