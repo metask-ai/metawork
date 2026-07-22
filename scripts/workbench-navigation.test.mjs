@@ -4,6 +4,9 @@ import test from "node:test";
 import {
   clearNewTaskDraft,
   clearTaskDraft,
+  newTaskDraftMoveDecision,
+  newTaskDraftStorageId,
+  unscopedNewTaskDraftId,
   prepareRetryDraft,
   pruneTaskDrafts,
   readNewTaskDraft,
@@ -215,16 +218,22 @@ test("Composer drafts survive a WebView reload scope and fail safely when storag
   };
   writeTaskDraft("7", "Follow up after this run");
   writeTaskDraft("8", "Stale draft");
-  writeNewTaskDraft("/repo/alpha", "First instruction");
+  writeNewTaskDraft(unscopedNewTaskDraftId, "First instruction");
+  writeNewTaskDraft("/repo/alpha", "Alpha draft");
+  writeNewTaskDraft("/repo/beta", "Beta draft");
   assert.equal(readTaskDraft("7"), "Follow up after this run");
   pruneTaskDrafts(new Set(["7"]));
   assert.equal(readTaskDraft("7"), "Follow up after this run");
   assert.equal(readTaskDraft("8"), "");
-  assert.equal(readNewTaskDraft("/repo/alpha"), "First instruction");
+  assert.equal(readNewTaskDraft(unscopedNewTaskDraftId), "First instruction");
+  assert.equal(readNewTaskDraft("/repo/alpha"), "Alpha draft");
+  assert.equal(readNewTaskDraft("/repo/beta"), "Beta draft");
   clearTaskDraft("7");
+  clearNewTaskDraft(unscopedNewTaskDraftId);
   clearNewTaskDraft("/repo/alpha");
+  clearNewTaskDraft("/repo/beta");
   assert.equal(readTaskDraft("7"), "");
-  assert.equal(readNewTaskDraft("/repo/alpha"), "");
+  assert.equal(readNewTaskDraft(unscopedNewTaskDraftId), "");
 
   Object.defineProperty(globalThis.window, "sessionStorage", {
     get() {
@@ -232,9 +241,11 @@ test("Composer drafts survive a WebView reload scope and fail safely when storag
     },
   });
   assert.doesNotThrow(() => writeTaskDraft("7", "still typeable"));
-  assert.doesNotThrow(() => writeNewTaskDraft("/repo/alpha", "still typeable"));
+  assert.doesNotThrow(() =>
+    writeNewTaskDraft(unscopedNewTaskDraftId, "still typeable"),
+  );
   assert.equal(readTaskDraft("7"), "");
-  assert.equal(readNewTaskDraft("/repo/alpha"), "");
+  assert.equal(readNewTaskDraft(unscopedNewTaskDraftId), "");
   delete globalThis.window;
 });
 
@@ -251,4 +262,20 @@ test("preparing a retry never overwrites an existing Composer draft", () => {
     draft: "",
     kind: "too_long",
   });
+});
+
+test("New task draft identities are isolated by Workspace", () => {
+  assert.equal(newTaskDraftStorageId(true, null), unscopedNewTaskDraftId);
+  assert.equal(newTaskDraftStorageId(true, "/repo/alpha"), "/repo/alpha");
+  assert.equal(newTaskDraftStorageId(true, "/repo/beta"), "/repo/beta");
+  assert.equal(newTaskDraftStorageId(false, "/repo/alpha"), null);
+});
+
+test("New task draft migration never overwrites an existing Workspace draft", () => {
+  assert.equal(newTaskDraftMoveDecision("", "Alpha draft"), "preserve_target");
+  assert.equal(newTaskDraftMoveDecision("Current draft", ""), "move");
+  assert.equal(
+    newTaskDraftMoveDecision("Current draft", "Alpha draft"),
+    "conflict",
+  );
 });

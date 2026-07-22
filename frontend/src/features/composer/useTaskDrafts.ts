@@ -3,6 +3,7 @@ import { useCallback, useState } from "react";
 import {
   clearNewTaskDraft,
   clearTaskDraft,
+  newTaskDraftMoveDecision,
   pruneTaskDrafts,
   readNewTaskDraft,
   readTaskDraft,
@@ -49,6 +50,26 @@ function useDrafts(
     [clearStoredDraft],
   );
 
+  const moveDraft = useCallback(
+    (from: string, to: string) => {
+      if (from === to) return "same" as const;
+      const source = drafts[from] ?? readDraft(from);
+      const target = drafts[to] ?? readDraft(to);
+      const decision = newTaskDraftMoveDecision(source, target);
+      if (decision === "conflict") return decision;
+      setDrafts((current) => {
+        const next = { ...current };
+        delete next[from];
+        if (decision === "move") next[to] = source;
+        return next;
+      });
+      clearStoredDraft(from);
+      if (decision === "move") writeDraft(to, source);
+      return decision;
+    },
+    [clearStoredDraft, drafts, readDraft, writeDraft],
+  );
+
   const pruneDraftCache = useCallback((validIds: ReadonlySet<string>) => {
     setDrafts((current) =>
       Object.fromEntries(
@@ -57,7 +78,14 @@ function useDrafts(
     );
   }, []);
 
-  return { draft, updateDraft, setDraft, clearDraft, pruneDraftCache };
+  return {
+    draft,
+    updateDraft,
+    setDraft,
+    clearDraft,
+    moveDraft,
+    pruneDraftCache,
+  };
 }
 
 export function useTaskDrafts(activeTaskId: string | null) {
@@ -80,9 +108,9 @@ export function useTaskDrafts(activeTaskId: string | null) {
   return { ...drafts, pruneDrafts };
 }
 
-export function useNewTaskDrafts(workspaceRoot: string | null) {
+export function useNewTaskDrafts(activeDraftId: string | null) {
   return useDrafts(
-    workspaceRoot,
+    activeDraftId,
     readNewTaskDraft,
     writeNewTaskDraft,
     clearNewTaskDraft,

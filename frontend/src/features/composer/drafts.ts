@@ -1,7 +1,21 @@
 // Drafts are local Composer state, never part of the Host projection.
 const prefix = "metawork.task-draft.";
 const newTaskPrefix = "metawork.new-task-draft.";
+export const unscopedNewTaskDraftId = "unscoped";
 export const maxComposerCharacters = 16 * 1024;
+
+export function newTaskDraftStorageId(
+  active: boolean,
+  workspaceRoot: string | null,
+) {
+  return active ? workspaceRoot || unscopedNewTaskDraftId : null;
+}
+
+export function newTaskDraftMoveDecision(source: string, target: string) {
+  if (!source) return "preserve_target" as const;
+  if (target) return "conflict" as const;
+  return "move" as const;
+}
 
 export function prepareRetryDraft(
   currentDraft: string,

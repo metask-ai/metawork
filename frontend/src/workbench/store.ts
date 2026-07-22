@@ -4,6 +4,7 @@ export type WorkbenchState = {
   snapshot: WorkbenchSnapshot;
   activeTaskId: string | null;
   activeWorkspaceRoot: string | null;
+  draftOpen: boolean;
   draftWorkspaceRoot: string | null;
 };
 
@@ -11,7 +12,7 @@ export type WorkbenchAction =
   | { type: "snapshot.accepted"; snapshot: WorkbenchSnapshot }
   | { type: "task.selected"; taskId: string }
   | { type: "workspace.selected"; workspaceRoot: string }
-  | { type: "task.draft.opened"; workspaceRoot: string }
+  | { type: "task.draft.opened"; workspaceRoot: string | null }
   | { type: "task.draft.closed" };
 
 export const initialWorkbenchState: WorkbenchState = {
@@ -40,6 +41,7 @@ export const initialWorkbenchState: WorkbenchState = {
   },
   activeTaskId: null,
   activeWorkspaceRoot: null,
+  draftOpen: false,
   draftWorkspaceRoot: null,
 };
 
@@ -56,6 +58,7 @@ export function workbenchReducer(
       ...state,
       activeTaskId: action.taskId,
       activeWorkspaceRoot: task.workspaceRoot,
+      draftOpen: false,
       draftWorkspaceRoot: null,
     };
   }
@@ -63,34 +66,42 @@ export function workbenchReducer(
     return {
       ...state,
       activeTaskId: null,
-      activeWorkspaceRoot: action.workspaceRoot,
+      activeWorkspaceRoot: action.workspaceRoot ?? state.activeWorkspaceRoot,
+      draftOpen: true,
       draftWorkspaceRoot: action.workspaceRoot,
     };
   if (action.type === "task.draft.closed")
-    return { ...state, activeTaskId: null, draftWorkspaceRoot: null };
-  if (action.type === "workspace.selected")
-    return action.workspaceRoot
-      ? {
-          ...state,
-          activeWorkspaceRoot: action.workspaceRoot,
-          activeTaskId:
-            state.snapshot.tasks.find(
-              (task) =>
-                task.workspaceRoot === action.workspaceRoot && !task.archived,
-            )?.id ??
-            state.snapshot.tasks.find(
-              (task) => task.workspaceRoot === action.workspaceRoot,
-            )?.id ??
-            null,
-          draftWorkspaceRoot: null,
-        }
-      : state;
-  if (state.draftWorkspaceRoot)
+    return {
+      ...state,
+      activeTaskId: null,
+      draftOpen: false,
+      draftWorkspaceRoot: null,
+    };
+  if (action.type === "workspace.selected") {
+    if (!action.workspaceRoot) return state;
+    const activeTaskId =
+      state.snapshot.tasks.find(
+        (task) => task.workspaceRoot === action.workspaceRoot && !task.archived,
+      )?.id ??
+      state.snapshot.tasks.find(
+        (task) => task.workspaceRoot === action.workspaceRoot,
+      )?.id ??
+      null;
+    return {
+      ...state,
+      activeWorkspaceRoot: action.workspaceRoot,
+      activeTaskId,
+      draftOpen: activeTaskId === null,
+      draftWorkspaceRoot: activeTaskId === null ? action.workspaceRoot : null,
+    };
+  }
+  if (state.draftOpen)
     return {
       ...state,
       snapshot: action.snapshot,
       activeTaskId: null,
-      activeWorkspaceRoot: state.draftWorkspaceRoot,
+      activeWorkspaceRoot:
+        state.draftWorkspaceRoot ?? state.activeWorkspaceRoot,
     };
   const requestedWorkspace = state.activeWorkspaceRoot;
   const activeTaskStillExists = action.snapshot.tasks.some(
@@ -115,6 +126,7 @@ export function workbenchReducer(
     activeTaskId,
     activeWorkspaceRoot:
       state.activeWorkspaceRoot ?? activeTask?.workspaceRoot ?? null,
+    draftOpen: false,
     draftWorkspaceRoot: null,
   };
 }

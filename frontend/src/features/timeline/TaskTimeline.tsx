@@ -19,6 +19,12 @@ import type {
 import { formatInteger, formatMilliseconds } from "../../i18n/formatters.ts";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
 
+const newTaskExampleIds: MessageId[] = [
+  "task.example.review",
+  "task.example.test_failure",
+  "task.example.todo",
+];
+
 function tokenTotal(run: RunView): bigint | null {
   try {
     return BigInt(run.usage.input) + BigInt(run.usage.output);
@@ -123,6 +129,7 @@ export function TaskTimeline({
   composerHasDraft,
   retryAvailable,
   responseDisabled,
+  onUseExample,
   onPrepareRetry,
   onRespond,
   renderPendingUi,
@@ -134,6 +141,7 @@ export function TaskTimeline({
   composerHasDraft: boolean;
   retryAvailable: boolean;
   responseDisabled: boolean;
+  onUseExample: (instruction: string) => void;
   onPrepareRetry: (instruction: string) => void;
   onRespond: (payload: UiResponsePayload) => void;
   renderPendingUi: (props: {
@@ -283,9 +291,22 @@ export function TaskTimeline({
             </div>
           )}
           {!task && (
-            <div className="task-empty-state">
+            <div className="task-empty-state is-new-task">
               <h2>{t(draft ? "task.empty_title" : "task.new")}</h2>
               <p>{t(draft ? "task.empty_body" : "task.no_tasks")}</p>
+              {draft && !composerHasDraft && (
+                <div className="task-examples" aria-label={t("task.examples")}>
+                  {newTaskExampleIds.map((id) => (
+                    <button
+                      key={id}
+                      className="task-example focus-ring"
+                      onClick={() => onUseExample(t(id))}
+                    >
+                      {t(id)}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </div>

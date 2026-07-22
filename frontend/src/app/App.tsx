@@ -30,8 +30,15 @@ import {
   useNewTaskDrafts,
   useTaskDrafts,
 } from "../features/composer/useTaskDrafts.ts";
-import { prepareRetryDraft } from "../features/composer/drafts.ts";
+import {
+  newTaskDraftStorageId,
+  prepareRetryDraft,
+} from "../features/composer/drafts.ts";
 import { submitTaskInstruction } from "../features/composer/submitTaskInstruction.ts";
+import {
+  resolveFirstSendWorkspace,
+  workspaceGrantForRoot,
+} from "../features/composer/firstSendWorkspace.ts";
 import {
   BridgeClient,
   BridgeCommandTimeoutError,
@@ -54,6 +61,10 @@ import {
   type SearchResult,
 } from "../workbench/selectors.ts";
 import { initialWorkbenchState, workbenchReducer } from "../workbench/store.ts";
+import {
+  accountMutationBlocksTaskAdmission,
+  PendingScopes,
+} from "../workbench/pendingScopes.ts";
 
 function errorText(error: unknown) {
   return error instanceof Error ? error.message : String(error);
@@ -91,6 +102,9 @@ export default function App() {
   );
   const [workspacePath, setWorkspacePath] = useState("");
   const [workspaceGrant, setWorkspaceGrant] = useState("");
+  const [workspaceGrantRoot, setWorkspaceGrantRoot] = useState<string | null>(
+    null,
+  );
   const [showArchived, setShowArchived] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -101,7 +115,11 @@ export default function App() {
   const [status, setStatus] = useState<StatusState>({
     id: "connection.connecting",
   });
-  const [busy, setBusy] = useState<string | null>(null);
+  const [accountBusy, setAccountBusy] = useState(false);
+  const [workspaceBusy, setWorkspaceBusy] = useState(false);
+  const [taskPending, setTaskPending] = useState<Record<string, string>>({});
+  const [cancelPending, setCancelPending] = useState<Record<string, true>>({});
+  const [connectionBusy, setConnectionBusy] = useState(false);
   const [accountCancelBusy, setAccountCancelBusy] = useState(false);
   const [bridgeReady, setBridgeReady] = useState(false);
   const [viewSyncFailed, setViewSyncFailed] = useState(false);
@@ -116,6 +134,12 @@ export default function App() {
   const connection = useRef<WorkbenchConnection | null>(null);
   const pendingTaskSelection = useRef<string | null>(null);
   const pendingTaskDraftRetention = useRef(new Set<string>());
+  const taskPendingScopes = useRef(new PendingScopes());
+  const cancelPendingTasks = useRef(new PendingScopes());
+  const accountBusyRef = useRef(false);
+  const accountCancelBusyRef = useRef(false);
+  const workspaceBusyRef = useRef(false);
+  const connectionBusyRef = useRef(false);
   const taskMenu = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
   const snapshot = workbench.snapshot;
@@ -132,16 +156,22 @@ export default function App() {
     [searchQuery, snapshot],
   );
   const taskDrafts = useTaskDrafts(activeTask?.id ?? null);
-  const newTaskDrafts = useNewTaskDrafts(workbench.draftWorkspaceRoot);
-  const prompt = workbench.draftWorkspaceRoot
-    ? newTaskDrafts.draft
-    : taskDrafts.draft;
-  const updatePrompt = workbench.draftWorkspaceRoot
+  const newTaskDraftActive = workbench.draftOpen || activeTask === null;
+  const newTaskDraftId = newTaskDraftStorageId(
+    newTaskDraftActive,
+    workbench.draftWorkspaceRoot,
+  );
+  const newTaskDrafts = useNewTaskDrafts(newTaskDraftId);
+  const prompt = newTaskDraftActive ? newTaskDrafts.draft : taskDrafts.draft;
+  const updatePrompt = newTaskDraftActive
     ? newTaskDrafts.updateDraft
     : taskDrafts.updateDraft;
-  const mutationDisabled = viewSyncFailed || !bridgeReady || busy !== null;
+  const bridgeUnavailable = viewSyncFailed || !bridgeReady;
+  const currentTaskScope = activeTask ? `task:${activeTask.id}` : "new-task";
+  const taskMutationDisabled =
+    bridgeUnavailable || currentTaskScope in taskPending;
   const taskCanCompose =
-    Boolean(workbench.draftWorkspaceRoot) ||
+    newTaskDraftActive ||
     (activeTask?.lifecycle === "open" &&
       activeTask.continuationAvailable &&
       !activeTask.archived);
@@ -149,10 +179,26 @@ export default function App() {
   const canSubmit =
     taskCanCompose &&
     snapshot.account.canCreateTask &&
-    (!workbench.draftWorkspaceRoot || Boolean(workspaceGrant)) &&
+    !accountMutationBlocksTaskAdmission(newTaskDraftActive, accountBusy) &&
     !runInFlight &&
     prompt.trim().length > 0 &&
-    !mutationDisabled;
+    !taskMutationDisabled &&
+    !workspaceBusy;
+  const selectedModelLabel =
+    snapshot.account.models.find(
+      (model) => model.id === snapshot.account.selectedModel,
+    )?.displayName || snapshot.account.selectedModel;
+  const composerWorkspace =
+    activeTask?.workspaceRoot ||
+    workbench.draftWorkspaceRoot ||
+    workspacePath ||
+    currentWorkspace;
+  const scopedWorkspaceGrant = workspaceGrantForRoot({
+    draftActive: newTaskDraftActive,
+    workspaceRoot: composerWorkspace,
+    grantRoot: workspaceGrantRoot,
+    grant: workspaceGrant,
+  });
 
   const refreshSnapshot = useCallback(() => {
     const current = connection.current;
@@ -238,6 +284,26 @@ export default function App() {
     setTaskMenuOpen(false);
   }, [activeTask?.id]);
 
+  useEffect(() => {
+    if (
+      snapshot.account.readiness !== "ready" ||
+      activeTask !== null ||
+      workbench.draftOpen
+    )
+      return;
+    dispatchWorkbench({
+      type: "task.draft.opened",
+      workspaceRoot: currentWorkspace || workspacePath || null,
+    });
+    window.requestAnimationFrame(() => composer.current?.focus());
+  }, [
+    activeTask,
+    currentWorkspace,
+    snapshot.account.readiness,
+    workbench.draftOpen,
+    workspacePath,
+  ]);
+
   function focusPendingRequest() {
     const requestId = activeTask?.pendingUi?.requestId;
     if (!requestId) return;
@@ -272,9 +338,53 @@ export default function App() {
     );
   }
 
+  function beginTaskPendingOperation(scope: string, operation: string) {
+    if (taskPendingScopes.current.has(scope)) return false;
+    if (!taskPendingScopes.current.begin(scope)) return false;
+    setTaskPending((current) => {
+      return { ...current, [scope]: operation };
+    });
+    return true;
+  }
+
+  function endTaskPendingOperation(scope: string) {
+    taskPendingScopes.current.end(scope);
+    setTaskPending((current) => {
+      if (!(scope in current)) return current;
+      const next = { ...current };
+      delete next[scope];
+      return next;
+    });
+  }
+
+  function moveTaskPendingOperation(from: string, to: string) {
+    if (!taskPendingScopes.current.move(from, to)) return false;
+    setTaskPending((current) => {
+      const operation = current[from];
+      if (!operation) return current;
+      const next = { ...current };
+      delete next[from];
+      next[to] = operation;
+      return next;
+    });
+    return true;
+  }
+
+  function setCancelPendingForTask(taskId: string, pending: boolean) {
+    if (pending) cancelPendingTasks.current.begin(taskId);
+    else cancelPendingTasks.current.end(taskId);
+    setCancelPending((current) => {
+      const next = { ...current };
+      if (pending) next[taskId] = true;
+      else delete next[taskId];
+      return next;
+    });
+  }
+
   async function retryViewSynchronization() {
-    if (busy !== null) return;
-    setBusy("reconnect");
+    if (connectionBusyRef.current) return;
+    connectionBusyRef.current = true;
+    setConnectionBusy(true);
     setViewSyncFailed(false);
     try {
       const current = connection.current;
@@ -290,7 +400,8 @@ export default function App() {
         diagnostic: errorText(error),
       });
     } finally {
-      setBusy(null);
+      connectionBusyRef.current = false;
+      setConnectionBusy(false);
     }
   }
 
@@ -300,8 +411,9 @@ export default function App() {
       errorCode: string;
     }>,
   ) {
-    if (mutationDisabled) return;
-    setBusy("account");
+    if (bridgeUnavailable || accountBusyRef.current) return;
+    accountBusyRef.current = true;
+    setAccountBusy(true);
     try {
       const result = await invoke();
       if (!result.accepted) {
@@ -315,7 +427,8 @@ export default function App() {
       await refreshSnapshot().catch(() => undefined);
       setStatus({ id: "account.command_failed" });
     } finally {
-      setBusy(null);
+      accountBusyRef.current = false;
+      setAccountBusy(false);
     }
   }
 
@@ -323,10 +436,11 @@ export default function App() {
     if (
       viewSyncFailed ||
       !bridgeReady ||
-      accountCancelBusy ||
+      accountCancelBusyRef.current ||
       !snapshot.account.canCancel
     )
       return;
+    accountCancelBusyRef.current = true;
     setAccountCancelBusy(true);
     try {
       const result = await client.cancelAccountOperation();
@@ -342,19 +456,36 @@ export default function App() {
       await refreshSnapshot().catch(() => undefined);
       setStatus({ id: "account.cancel_failed" });
     } finally {
+      accountCancelBusyRef.current = false;
       setAccountCancelBusy(false);
     }
   }
 
   async function chooseWorkspace(openDraft = false) {
-    if (viewSyncFailed || !bridgeReady) return;
-    setBusy(openDraft ? "new-task" : "workspace");
-    setWorkspaceGrant("");
+    if (bridgeUnavailable || workspaceBusyRef.current) return null;
+    workspaceBusyRef.current = true;
+    setWorkspaceBusy(true);
     try {
       const result = await client.chooseWorkspace();
       if (result.selected) {
+        let draftMove: ReturnType<typeof newTaskDrafts.moveDraft> = "same";
+        if (
+          openDraft &&
+          newTaskDraftId &&
+          newTaskDraftId !== result.workspaceRoot
+        )
+          draftMove = newTaskDrafts.moveDraft(
+            newTaskDraftId,
+            result.workspaceRoot,
+          );
+        if (draftMove === "conflict") {
+          setStatus({ id: "workspace.draft_conflict" });
+          window.requestAnimationFrame(() => composer.current?.focus());
+          return null;
+        }
         setWorkspacePath(result.workspaceRoot);
         setWorkspaceGrant(result.grant);
+        setWorkspaceGrantRoot(result.workspaceRoot);
         dispatchWorkbench(
           openDraft
             ? {
@@ -369,60 +500,85 @@ export default function App() {
         setStatus({ id: "workspace.grant_confirmed" });
         if (openDraft)
           window.requestAnimationFrame(() => composer.current?.focus());
+        return result;
       } else {
         setStatus({ id: "workspace.selection_cancelled" });
+        if (openDraft)
+          window.requestAnimationFrame(() => composer.current?.focus());
+        return null;
       }
     } catch (error) {
       setStatus({
         id: "workspace.selection_failed",
         values: { error: errorText(error) },
       });
+      if (openDraft)
+        window.requestAnimationFrame(() => composer.current?.focus());
+      return null;
     } finally {
-      setBusy(null);
+      workspaceBusyRef.current = false;
+      setWorkspaceBusy(false);
     }
   }
 
-  async function beginNewTask() {
-    if (mutationDisabled) return;
+  function beginNewTask() {
     pendingTaskSelection.current = null;
-    const draftRoot = currentWorkspace || workspacePath;
-    if (draftRoot) {
-      setWorkspacePath(draftRoot);
-      dispatchWorkbench({
-        type: "task.draft.opened",
-        workspaceRoot: draftRoot,
-      });
-      window.requestAnimationFrame(() => composer.current?.focus());
-      return;
+    const draftRoot = currentWorkspace || workspacePath || null;
+    if (draftRoot) setWorkspacePath(draftRoot);
+    if (workspaceGrantRoot !== draftRoot) {
+      setWorkspaceGrant("");
+      setWorkspaceGrantRoot(null);
     }
-    await chooseWorkspace(true);
+    dispatchWorkbench({
+      type: "task.draft.opened",
+      workspaceRoot: draftRoot,
+    });
+    window.requestAnimationFrame(() => composer.current?.focus());
   }
 
   async function submitRun() {
     if (!canSubmit) return;
     const submitted = prompt;
-    const draftWorkspaceRoot = workbench.draftWorkspaceRoot;
     const existingTaskId = activeTask?.id ?? null;
-    updatePrompt("");
-    setBusy("run");
+    let submittedDraftId = newTaskDraftId;
+    const workspace = await resolveFirstSendWorkspace({
+      taskId: existingTaskId,
+      workspaceGrant: scopedWorkspaceGrant,
+      chooseWorkspace: async () => {
+        const selected = await chooseWorkspace(true);
+        if (selected) submittedDraftId = selected.workspaceRoot;
+        return selected?.grant ?? null;
+      },
+    });
+    if (workspace.kind === "cancelled") return;
+    let pendingScope = currentTaskScope;
+    if (!beginTaskPendingOperation(pendingScope, "run")) return;
+    if (newTaskDraftActive && submittedDraftId)
+      newTaskDrafts.clearDraft(submittedDraftId);
+    else updatePrompt("");
     try {
       const result = await submitTaskInstruction({
         client,
         taskId: existingTaskId,
-        workspaceGrant,
+        workspaceGrant: workspace.grant,
         instruction: submitted,
         onTaskCreated: (taskId) => {
           setWorkspaceGrant("");
+          setWorkspaceGrantRoot(null);
           pendingTaskSelection.current = taskId;
           pendingTaskDraftRetention.current.add(taskId);
-          if (draftWorkspaceRoot) newTaskDrafts.clearDraft(draftWorkspaceRoot);
           taskDrafts.setDraft(taskId, submitted);
           dispatchWorkbench({ type: "task.draft.closed" });
+          const taskScope = `task:${taskId}`;
+          if (moveTaskPendingOperation(pendingScope, taskScope))
+            pendingScope = taskScope;
         },
       });
       if (result.kind === "create_failed") {
         setWorkspaceGrant("");
-        newTaskDrafts.updateDraft(submitted);
+        setWorkspaceGrantRoot(null);
+        if (submittedDraftId)
+          newTaskDrafts.setDraft(submittedDraftId, submitted);
         if (
           await reconcileCommandTimeout(result.error, "operation.task_create")
         )
@@ -448,7 +604,7 @@ export default function App() {
       taskDrafts.clearDraft(result.taskId);
       await refreshAfterCommit("run.started", "operation.run_submit");
     } finally {
-      setBusy(null);
+      endTaskPendingOperation(pendingScope);
     }
   }
 
@@ -457,11 +613,13 @@ export default function App() {
       viewSyncFailed ||
       !bridgeReady ||
       !activeTask ||
+      cancelPendingTasks.current.has(activeTask.id) ||
       activeTask.currentRunId === "0" ||
       activeTask.currentRunPhase === null
     )
       return;
-    setBusy("cancel");
+    const taskId = activeTask.id;
+    setCancelPendingForTask(taskId, true);
     try {
       try {
         await client.cancel(activeTask.id, activeTask.currentRunId);
@@ -476,7 +634,7 @@ export default function App() {
       }
       await refreshAfterCommit("run.stop_requested", "operation.run_stop");
     } finally {
-      setBusy(null);
+      setCancelPendingForTask(taskId, false);
     }
   }
 
@@ -484,12 +642,14 @@ export default function App() {
     if (
       viewSyncFailed ||
       !bridgeReady ||
+      taskMutationDisabled ||
       !activeTask ||
       (activeTask.lifecycle === "closing" && !activeTask.closeFailed) ||
       activeTask.lifecycle === "closed"
     )
       return;
-    setBusy("close");
+    const scope = `task:${activeTask.id}`;
+    if (!beginTaskPendingOperation(scope, "close")) return;
     try {
       try {
         await client.closeTask(activeTask.id);
@@ -505,13 +665,14 @@ export default function App() {
       }
       await refreshAfterCommit("task.close_requested", "operation.task_close");
     } finally {
-      setBusy(null);
+      endTaskPendingOperation(scope);
     }
   }
 
   async function renameTask() {
-    if (!activeTask || mutationDisabled || !titleDraft.trim()) return;
-    setBusy("rename");
+    if (!activeTask || taskMutationDisabled || !titleDraft.trim()) return;
+    const scope = `task:${activeTask.id}`;
+    if (!beginTaskPendingOperation(scope, "rename")) return;
     try {
       try {
         await client.renameTask(activeTask.id, titleDraft.trim());
@@ -528,14 +689,19 @@ export default function App() {
       setEditingTitle(false);
       await refreshAfterCommit("task.renamed", "operation.task_rename");
     } finally {
-      setBusy(null);
+      endTaskPendingOperation(scope);
     }
   }
 
   async function setArchived(archived: boolean) {
-    if (!activeTask || mutationDisabled || activeTask.currentRunPhase !== null)
+    if (
+      !activeTask ||
+      taskMutationDisabled ||
+      activeTask.currentRunPhase !== null
+    )
       return;
-    setBusy("archive");
+    const scope = `task:${activeTask.id}`;
+    if (!beginTaskPendingOperation(scope, "archive")) return;
     try {
       try {
         await client.setTaskArchived(activeTask.id, archived);
@@ -560,14 +726,19 @@ export default function App() {
         archived ? "operation.task_archive" : "operation.task_restore",
       );
     } finally {
-      setBusy(null);
+      endTaskPendingOperation(scope);
     }
   }
 
   async function deleteTask() {
-    if (!activeTask || mutationDisabled || activeTask.lifecycle !== "closed")
+    if (
+      !activeTask ||
+      taskMutationDisabled ||
+      activeTask.lifecycle !== "closed"
+    )
       return;
-    setBusy("delete");
+    const scope = `task:${activeTask.id}`;
+    if (!beginTaskPendingOperation(scope, "delete")) return;
     try {
       try {
         await client.deleteTask(activeTask.id);
@@ -585,7 +756,7 @@ export default function App() {
       setConfirmDelete(false);
       await refreshAfterCommit("task.deleted", "operation.task_delete");
     } finally {
-      setBusy(null);
+      endTaskPendingOperation(scope);
     }
   }
 
@@ -593,6 +764,7 @@ export default function App() {
     pendingTaskSelection.current = null;
     setWorkspacePath(result.workspaceRoot);
     setWorkspaceGrant("");
+    setWorkspaceGrantRoot(null);
     dispatchWorkbench({
       type: "workspace.selected",
       workspaceRoot: result.workspaceRoot,
@@ -602,8 +774,6 @@ export default function App() {
         type: "task.selected",
         taskId: result.taskId,
       });
-    setWorkspacePath(result.workspaceRoot);
-    setWorkspaceGrant("");
     setSearchOpen(false);
     setSearchQuery("");
   }
@@ -613,34 +783,25 @@ export default function App() {
     if (viewSyncFailed || !bridgeReady || !activeTask || !pending) return;
     const identity = uiRequestIdentity(activeTask.id, pending);
     if (!beginUiResponse(identity)) return;
-    setBusy("respond");
     try {
-      try {
-        await client.respondUi(
-          activeTask.id,
-          pending.runId,
-          pending.requestId,
-          payload,
-        );
-      } catch (error) {
-        failUiResponse(identity);
-        if (await reconcileCommandTimeout(error, "operation.ui_response"))
-          return;
-        setStatus({
-          id: "approval.response_failed",
-          values: { error: errorText(error) },
-        });
-        await refreshSnapshot().catch(() => undefined);
-        return;
-      }
-      acceptUiResponse(identity);
-      await refreshAfterCommit(
-        "approval.response_sent",
-        "operation.ui_response",
+      await client.respondUi(
+        activeTask.id,
+        pending.runId,
+        pending.requestId,
+        payload,
       );
-    } finally {
-      setBusy(null);
+    } catch (error) {
+      failUiResponse(identity);
+      if (await reconcileCommandTimeout(error, "operation.ui_response")) return;
+      setStatus({
+        id: "approval.response_failed",
+        values: { error: errorText(error) },
+      });
+      await refreshSnapshot().catch(() => undefined);
+      return;
     }
+    acceptUiResponse(identity);
+    await refreshAfterCommit("approval.response_sent", "operation.ui_response");
   }
 
   function prepareRetry(instruction: string) {
@@ -697,11 +858,11 @@ export default function App() {
     return (
       <AccountGate
         account={snapshot.account}
-        disabled={viewSyncFailed || !bridgeReady || busy !== null}
+        disabled={bridgeUnavailable || accountBusy}
         cancelDisabled={viewSyncFailed || !bridgeReady || accountCancelBusy}
         connectionFailed={viewSyncFailed}
         connectionDiagnostic={status.diagnostic}
-        reconnecting={busy === "reconnect"}
+        reconnecting={connectionBusy}
         notice={t(status.id, status.values)}
         onReconnect={() => void retryViewSynchronization()}
         onBeginLogin={() => void runAccountCommand(() => client.beginLogin())}
@@ -724,7 +885,7 @@ export default function App() {
 
   const currentTaskState = activeTask ? taskDisplayState(activeTask) : null;
   const currentTaskStatus = !currentTaskState
-    ? t(workbench.draftWorkspaceRoot ? "task.new" : "task.open")
+    ? t(newTaskDraftActive ? "task.new" : "task.open")
     : currentTaskState.kind === "phase"
       ? t(`task.phase.${currentTaskState.value}`)
       : currentTaskState.kind === "lifecycle"
@@ -736,7 +897,7 @@ export default function App() {
             : t("task.ready");
   const activeTaskTitle = activeTask
     ? activeTask.title || t("task.item", { id: activeTask.id })
-    : t(workbench.draftWorkspaceRoot ? "task.new" : "task.open");
+    : t(newTaskDraftActive ? "task.new" : "task.open");
 
   return (
     <AppShell
@@ -758,7 +919,7 @@ export default function App() {
           {snapshot.account.readiness === "ready" && (
             <AccountPanel
               account={snapshot.account}
-              disabled={mutationDisabled}
+              disabled={bridgeUnavailable || accountBusy}
               onReauthenticate={() =>
                 void runAccountCommand(() => client.reauthenticate())
               }
@@ -782,24 +943,30 @@ export default function App() {
             tasks={currentTasks}
             activeTaskId={activeTask?.id ?? null}
             selectedPath={workspacePath || currentWorkspace || ""}
-            grantReady={Boolean(workspacePath && workspaceGrant)}
+            grantReady={Boolean(
+              workspacePath &&
+              workspaceGrant &&
+              workspaceGrantRoot === workspacePath,
+            )}
             showArchived={showArchived}
-            disabled={mutationDisabled}
-            creating={busy === "new-task"}
+            disabled={bridgeUnavailable || workspaceBusy}
             onSearch={() => setSearchOpen(true)}
             onChooseWorkspace={() => void chooseWorkspace(false)}
             onSelectWorkspace={(root) => {
               pendingTaskSelection.current = null;
               setWorkspacePath(root);
               setWorkspaceGrant("");
+              setWorkspaceGrantRoot(null);
               dispatchWorkbench({
                 type: "workspace.selected",
                 workspaceRoot: root,
               });
             }}
-            onCreateTask={() => void beginNewTask()}
+            onCreateTask={beginNewTask}
             onSelectTask={(taskId) => {
               pendingTaskSelection.current = null;
+              setWorkspaceGrant("");
+              setWorkspaceGrantRoot(null);
               dispatchWorkbench({ type: "task.selected", taskId });
             }}
             onToggleArchived={() => setShowArchived((shown) => !shown)}
@@ -807,40 +974,42 @@ export default function App() {
         </>
       }
       activity={
-        <>
-          <h2 className="activity-title">{t("activity.title")}</h2>
-          {viewSyncFailed && (
-            <section className="sync-failure" role="alert">
-              <h3>{t("connection.failed")}</h3>
-              <p>{t("connection.failed_help")}</p>
-              <button
-                className="secondary-button focus-ring"
-                disabled={busy !== null}
-                onClick={() => void retryViewSynchronization()}
-              >
-                {busy === "reconnect"
-                  ? t("connection.retrying")
-                  : t("connection.retry")}
-              </button>
-              {status.diagnostic && (
-                <details>
-                  <summary>{t("connection.details")}</summary>
-                  <p>
-                    {status.sourceId ? `${t(status.sourceId)}: ` : ""}
-                    {status.diagnostic}
-                  </p>
-                </details>
-              )}
-            </section>
-          )}
+        activeTask ? (
+          <>
+            <h2 className="activity-title">{t("activity.title")}</h2>
+            {viewSyncFailed && (
+              <section className="sync-failure" role="alert">
+                <h3>{t("connection.failed")}</h3>
+                <p>{t("connection.failed_help")}</p>
+                <button
+                  className="secondary-button focus-ring"
+                  disabled={connectionBusy}
+                  onClick={() => void retryViewSynchronization()}
+                >
+                  {connectionBusy
+                    ? t("connection.retrying")
+                    : t("connection.retry")}
+                </button>
+                {status.diagnostic && (
+                  <details>
+                    <summary>{t("connection.details")}</summary>
+                    <p>
+                      {status.sourceId ? `${t(status.sourceId)}: ` : ""}
+                      {status.diagnostic}
+                    </p>
+                  </details>
+                )}
+              </section>
+            )}
 
-          <TaskActivity
-            task={activeTask}
-            draft={Boolean(workbench.draftWorkspaceRoot)}
-            currentStatus={currentTaskStatus}
-            onFocusPending={focusPendingRequest}
-          />
-        </>
+            <TaskActivity
+              task={activeTask}
+              draft={newTaskDraftActive}
+              currentStatus={currentTaskStatus}
+              onFocusPending={focusPendingRequest}
+            />
+          </>
+        ) : null
       }
     >
       <header className="task-header">
@@ -872,7 +1041,7 @@ export default function App() {
               />
               <button
                 className="secondary-button focus-ring"
-                disabled={!titleDraft.trim() || mutationDisabled}
+                disabled={!titleDraft.trim() || taskMutationDisabled}
               >
                 {t("common.save")}
               </button>
@@ -889,7 +1058,7 @@ export default function App() {
               <h1>
                 {activeTask
                   ? activeTaskTitle
-                  : workbench.draftWorkspaceRoot
+                  : newTaskDraftActive
                     ? t("task.new")
                     : t("task.open")}
               </h1>
@@ -904,7 +1073,7 @@ export default function App() {
             activeTask.currentRunPhase !== "stopping" && (
               <button
                 className="danger-button focus-ring"
-                disabled={mutationDisabled}
+                disabled={bridgeUnavailable || activeTask.id in cancelPending}
                 onClick={() => void cancelRun()}
               >
                 <Icon name="stop" />
@@ -950,7 +1119,7 @@ export default function App() {
                 >
                   <button
                     role="menuitem"
-                    disabled={mutationDisabled}
+                    disabled={taskMutationDisabled}
                     onClick={() => {
                       setTitleDraft(activeTask.title);
                       setEditingTitle(true);
@@ -962,7 +1131,7 @@ export default function App() {
                   <button
                     role="menuitem"
                     disabled={
-                      mutationDisabled ||
+                      taskMutationDisabled ||
                       runInFlight ||
                       activeTask.lifecycle === "closing"
                     }
@@ -981,7 +1150,7 @@ export default function App() {
                       (activeTask.lifecycle === "closing" &&
                         !activeTask.closeFailed) ||
                       activeTask.lifecycle === "closed" ||
-                      mutationDisabled
+                      taskMutationDisabled
                     }
                     onClick={() => {
                       closeTaskMenuAndRestoreFocus();
@@ -998,7 +1167,7 @@ export default function App() {
                     role="menuitem"
                     className="is-danger"
                     disabled={
-                      activeTask.lifecycle !== "closed" || mutationDisabled
+                      activeTask.lifecycle !== "closed" || taskMutationDisabled
                     }
                     onClick={() => {
                       setTaskMenuOpen(false);
@@ -1038,7 +1207,7 @@ export default function App() {
           </button>
           <button
             className="danger-button focus-ring"
-            disabled={mutationDisabled}
+            disabled={taskMutationDisabled}
             onClick={() => void deleteTask()}
           >
             {t("task.delete")}
@@ -1048,11 +1217,17 @@ export default function App() {
 
       <TaskTimeline
         task={activeTask}
-        draft={Boolean(workbench.draftWorkspaceRoot)}
+        draft={newTaskDraftActive}
         revision={snapshot.revision}
         composerHasDraft={prompt.trim().length > 0}
         retryAvailable={taskCanCompose && !runInFlight}
-        responseDisabled={busy !== null || viewSyncFailed || !bridgeReady}
+        responseDisabled={bridgeUnavailable}
+        onUseExample={(instruction) => {
+          const prepared = prepareRetryDraft(prompt, instruction);
+          if (prepared.kind === "prepared") updatePrompt(prepared.draft);
+          else setStatus({ id: "run.draft_preserved" });
+          window.requestAnimationFrame(() => composer.current?.focus());
+        }}
         onPrepareRetry={prepareRetry}
         onRespond={(payload) => void respondUi(payload)}
         renderPendingUi={(props) => {
@@ -1070,8 +1245,6 @@ export default function App() {
 
       <ComposerFooter
         textareaRef={composer}
-        hasTask={Boolean(activeTask)}
-        draft={Boolean(workbench.draftWorkspaceRoot)}
         archived={Boolean(activeTask?.archived)}
         closing={activeTask?.lifecycle === "closing"}
         closed={activeTask?.lifecycle === "closed"}
@@ -1081,14 +1254,23 @@ export default function App() {
           !activeTask.continuationAvailable,
         )}
         prompt={prompt}
-        composeDisabled={!taskCanCompose || mutationDisabled}
+        composeDisabled={!taskCanCompose || taskMutationDisabled}
         canSubmit={canSubmit}
         runInFlight={Boolean(taskCanCompose && runInFlight)}
         accessRequired={Boolean(
-          workbench.draftWorkspaceRoot && !workspaceGrant,
+          newTaskDraftActive &&
+          workbench.draftWorkspaceRoot &&
+          !scopedWorkspaceGrant,
         )}
-        actionDisabled={mutationDisabled}
-        onStart={() => void beginNewTask()}
+        workspaceMissing={Boolean(newTaskDraftActive && !composerWorkspace)}
+        workspaceLabel={
+          composerWorkspace
+            ? workspaceLabel(composerWorkspace)
+            : t("workspace.none")
+        }
+        workspaceTitle={composerWorkspace || t("workspace.none")}
+        modelLabel={newTaskDraftActive ? selectedModelLabel : null}
+        actionDisabled={bridgeUnavailable || workspaceBusy}
         onPromptChange={updatePrompt}
         onSubmit={() => void submitRun()}
         onConfirmAccess={() => void chooseWorkspace(true)}

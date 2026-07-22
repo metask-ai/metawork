@@ -2,6 +2,80 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { submitTaskInstruction } from "../frontend/src/features/composer/submitTaskInstruction.ts";
+import {
+  resolveFirstSendWorkspace,
+  workspaceGrantForRoot,
+} from "../frontend/src/features/composer/firstSendWorkspace.ts";
+
+test("a Workspace grant is never reused for a different draft root", () => {
+  assert.equal(
+    workspaceGrantForRoot({
+      draftActive: true,
+      workspaceRoot: "/repo/beta",
+      grantRoot: "/repo/alpha",
+      grant: "alpha-grant",
+    }),
+    "",
+  );
+  assert.equal(
+    workspaceGrantForRoot({
+      draftActive: true,
+      workspaceRoot: "/repo/alpha",
+      grantRoot: "/repo/alpha",
+      grant: "alpha-grant",
+    }),
+    "alpha-grant",
+  );
+});
+
+test("cancelling first-send Workspace selection preserves the draft boundary", async () => {
+  let draft = "Keep this instruction";
+  let chooseCalls = 0;
+  let createCalls = 0;
+  const workspace = await resolveFirstSendWorkspace({
+    taskId: null,
+    workspaceGrant: "",
+    chooseWorkspace: async () => {
+      chooseCalls += 1;
+      return null;
+    },
+  });
+  if (workspace.kind === "ready") {
+    const submitted = draft;
+    draft = "";
+    await submitTaskInstruction({
+      client: {
+        async createTask() {
+          createCalls += 1;
+          return "unexpected";
+        },
+        async run() {},
+      },
+      taskId: null,
+      workspaceGrant: workspace.grant,
+      instruction: submitted,
+      onTaskCreated() {},
+    });
+  }
+  assert.deepEqual(workspace, { kind: "cancelled" });
+  assert.equal(chooseCalls, 1);
+  assert.equal(createCalls, 0);
+  assert.equal(draft, "Keep this instruction");
+});
+
+test("an existing Task never asks for a new Workspace grant", async () => {
+  let chooseCalled = false;
+  const result = await resolveFirstSendWorkspace({
+    taskId: "9",
+    workspaceGrant: "",
+    chooseWorkspace: async () => {
+      chooseCalled = true;
+      return "unexpected";
+    },
+  });
+  assert.deepEqual(result, { kind: "ready", grant: "" });
+  assert.equal(chooseCalled, false);
+});
 
 test("the first send creates one Task before starting its Run", async () => {
   const calls = [];

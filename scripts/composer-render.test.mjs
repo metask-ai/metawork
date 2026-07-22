@@ -16,6 +16,10 @@ const vite = await createServer({
 const { ComposerFooter } = await vite.ssrLoadModule(
   "/src/features/composer/ComposerFooter.tsx",
 );
+const { AppShell } = await vite.ssrLoadModule("/src/app/AppShell.tsx");
+const { TaskTimeline } = await vite.ssrLoadModule(
+  "/src/features/timeline/TaskTimeline.tsx",
+);
 const { I18nContext } = await vite.ssrLoadModule("/src/i18n/context.ts");
 const { translate } = await vite.ssrLoadModule("/src/i18n/runtime.ts");
 
@@ -25,8 +29,6 @@ test.after(async () => {
 
 const base = {
   textareaRef: { current: null },
-  hasTask: false,
-  draft: false,
   archived: false,
   closing: false,
   closed: false,
@@ -36,8 +38,11 @@ const base = {
   canSubmit: false,
   runInFlight: false,
   accessRequired: false,
+  workspaceMissing: true,
+  workspaceLabel: "No workspace",
+  workspaceTitle: "No workspace",
+  modelLabel: "Claude Sonnet 4",
   actionDisabled: false,
-  onStart() {},
   onPromptChange() {},
   onSubmit() {},
   onConfirmAccess() {},
@@ -59,22 +64,93 @@ function render(props = {}) {
   );
 }
 
+function renderShell(activity) {
+  return renderToStaticMarkup(
+    createElement(
+      I18nContext.Provider,
+      {
+        value: {
+          locale: "en-US",
+          setLocale() {},
+          t: (id, values) => translate("en-US", id, values),
+        },
+      },
+      createElement(
+        AppShell,
+        {
+          taskTitle: "New task",
+          workspaceLabel: "No workspace",
+          status: "Connected",
+          left: createElement("p", null, "Navigation"),
+          activity,
+        },
+        createElement("p", null, "Composer stage"),
+      ),
+    ),
+  );
+}
+
+function renderNewTaskTimeline(composerHasDraft) {
+  return renderToStaticMarkup(
+    createElement(
+      I18nContext.Provider,
+      {
+        value: {
+          locale: "en-US",
+          setLocale() {},
+          t: (id, values) => translate("en-US", id, values),
+        },
+      },
+      createElement(TaskTimeline, {
+        task: null,
+        draft: true,
+        revision: "1",
+        composerHasDraft,
+        retryAvailable: true,
+        responseDisabled: false,
+        onUseExample() {},
+        onPrepareRetry() {},
+        onRespond() {},
+        renderPendingUi() {
+          return null;
+        },
+        renderUiRecord() {
+          return null;
+        },
+      }),
+    ),
+  );
+}
+
 function tag(markup, className) {
   return markup.match(
     new RegExp(`<(?:button|textarea)[^>]*class="[^"]*${className}[^"]*"[^>]*>`),
   )?.[0];
 }
 
-test("cold start presents a clear enabled action instead of a fake disabled Composer", () => {
+test("New task opens as an editable Composer with its execution context", () => {
   const markup = render();
-  assert.match(markup, />Start a new task</);
-  assert.doesNotMatch(markup, /<textarea/);
-  assert.doesNotMatch(tag(markup, "composer-start") ?? "", /disabled/);
+  assert.match(markup, /<textarea/);
+  assert.match(markup, />Claude Sonnet 4</);
+  assert.match(markup, />Choose on send</);
+  assert.doesNotMatch(markup.match(/<textarea[^>]*>/)?.[0] ?? "", /disabled/);
+  assert.doesNotMatch(markup, /composer-start/);
+});
+
+test("New task does not render or reserve an empty activity panel", () => {
+  const markup = renderShell(null);
+  assert.doesNotMatch(markup, /id="task-activity"/);
+  assert.doesNotMatch(markup, /aria-controls="task-activity"/);
+  assert.match(markup, /data-right-open="false"/);
+});
+
+test("task examples disappear before they can overwrite an existing draft", () => {
+  assert.match(renderNewTaskTimeline(false), /Review this project/);
+  assert.doesNotMatch(renderNewTaskTimeline(true), /Review this project/);
 });
 
 test("a new Task draft is editable before its first send", () => {
   const markup = render({
-    draft: true,
     prompt: "Ship the release",
     canSubmit: true,
   });
@@ -86,9 +162,11 @@ test("a new Task draft is editable before its first send", () => {
 
 test("an expired workspace grant preserves editable text and exposes recovery", () => {
   const markup = render({
-    draft: true,
     prompt: "Keep this draft",
     accessRequired: true,
+    workspaceMissing: false,
+    workspaceLabel: "/repo/alpha",
+    workspaceTitle: "/repo/alpha",
   });
   assert.match(markup, />Keep this draft</);
   assert.match(markup, />Confirm access</);
@@ -98,17 +176,17 @@ test("an expired workspace grant preserves editable text and exposes recovery", 
 
 test("only non-composable Task states disable the Composer", () => {
   const markup = render({
-    hasTask: true,
     archived: true,
     composeDisabled: true,
+    modelLabel: null,
   });
   assert.match(markup.match(/<textarea[^>]*>/)?.[0] ?? "", /disabled/);
   assert.match(markup, /Restore this task to continue/);
+  assert.doesNotMatch(markup, />Claude Sonnet 4</);
 });
 
 test("a poisoned Task explains why continuation is unavailable", () => {
   const markup = render({
-    hasTask: true,
     unavailable: true,
     composeDisabled: true,
   });
@@ -119,7 +197,6 @@ test("a poisoned Task explains why continuation is unavailable", () => {
 test("terminal state takes precedence over archive state in Composer guidance", () => {
   assert.match(
     render({
-      hasTask: true,
       archived: true,
       closing: true,
       composeDisabled: true,
@@ -128,7 +205,6 @@ test("terminal state takes precedence over archive state in Composer guidance", 
   );
   assert.match(
     render({
-      hasTask: true,
       archived: true,
       closed: true,
       composeDisabled: true,

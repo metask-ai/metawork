@@ -38,6 +38,9 @@ export function AccountPanel({
         selectedKey.suffix ? ` · ${selectedKey.suffix}` : ""
       }`
     : t("account.saved_key");
+  const selectedModelLabel =
+    account.models.find((model) => model.id === account.selectedModel)
+      ?.displayName || account.selectedModel;
 
   return (
     <section
@@ -63,7 +66,7 @@ export function AccountPanel({
         </div>
         <div>
           <dt>{t("account.model")}</dt>
-          <dd>{account.selectedModel}</dd>
+          <dd title={selectedModelLabel}>{selectedModelLabel}</dd>
         </div>
       </dl>
 

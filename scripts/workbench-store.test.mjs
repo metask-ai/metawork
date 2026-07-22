@@ -5,6 +5,10 @@ import {
   initialWorkbenchState,
   workbenchReducer,
 } from "../frontend/src/workbench/store.ts";
+import {
+  accountMutationBlocksTaskAdmission,
+  PendingScopes,
+} from "../frontend/src/workbench/pendingScopes.ts";
 
 function task(id, workspaceRoot, archived = false) {
   return {
@@ -31,6 +35,31 @@ function snapshot(revision, tasks) {
     tasks,
   };
 }
+
+test("pending scopes isolate unrelated mutations and reject duplicate admission", () => {
+  const pending = new PendingScopes();
+  assert.equal(pending.begin("task:2"), true);
+  assert.equal(pending.begin("task:2"), false);
+  assert.equal(pending.begin("task:3"), true);
+  assert.equal(pending.has("task:2"), true);
+  assert.equal(pending.has("task:3"), true);
+
+  assert.equal(pending.move("task:2", "task:4"), true);
+  assert.equal(pending.has("task:2"), false);
+  assert.equal(pending.has("task:4"), true);
+  assert.equal(pending.move("task:4", "task:3"), false);
+  assert.equal(pending.has("task:4"), true);
+
+  assert.equal(pending.end("task:3"), true);
+  assert.equal(pending.has("task:4"), true);
+  assert.equal(pending.end("task:4"), true);
+});
+
+test("account mutations block only New task admission", () => {
+  assert.equal(accountMutationBlocksTaskAdmission(true, true), true);
+  assert.equal(accountMutationBlocksTaskAdmission(false, true), false);
+  assert.equal(accountMutationBlocksTaskAdmission(true, false), false);
+});
 
 test("the Workbench store selects the first Task and preserves a valid choice", () => {
   const accepted = workbenchReducer(initialWorkbenchState, {
@@ -82,6 +111,8 @@ test("workspace selection chooses a visible local Task and never leaks another w
   });
   assert.equal(newWorkspace.activeWorkspaceRoot, "/repo/new");
   assert.equal(newWorkspace.activeTaskId, null);
+  assert.equal(newWorkspace.draftOpen, true);
+  assert.equal(newWorkspace.draftWorkspaceRoot, "/repo/new");
 });
 
 test("the Workbench store rejects unknown Tasks and falls back within the current workspace", () => {
@@ -121,6 +152,7 @@ test("a new Task stays a Renderer draft until first send creates an authoritativ
   });
   assert.equal(draft.activeTaskId, null);
   assert.equal(draft.activeWorkspaceRoot, "/repo/alpha");
+  assert.equal(draft.draftOpen, true);
   assert.equal(draft.draftWorkspaceRoot, "/repo/alpha");
 
   const refreshed = workbenchReducer(draft, {
@@ -131,6 +163,7 @@ test("a new Task stays a Renderer draft until first send creates an authoritativ
     ]),
   });
   assert.equal(refreshed.activeTaskId, null);
+  assert.equal(refreshed.draftOpen, true);
   assert.equal(refreshed.draftWorkspaceRoot, "/repo/alpha");
 
   const selected = workbenchReducer(refreshed, {
@@ -138,5 +171,26 @@ test("a new Task stays a Renderer draft until first send creates an authoritativ
     taskId: "2",
   });
   assert.equal(selected.activeTaskId, "2");
+  assert.equal(selected.draftOpen, false);
   assert.equal(selected.draftWorkspaceRoot, null);
+});
+
+test("an unscoped New task survives snapshots without inventing a Workspace", () => {
+  const draft = workbenchReducer(initialWorkbenchState, {
+    type: "task.draft.opened",
+    workspaceRoot: null,
+  });
+  assert.equal(draft.activeTaskId, null);
+  assert.equal(draft.activeWorkspaceRoot, null);
+  assert.equal(draft.draftOpen, true);
+  assert.equal(draft.draftWorkspaceRoot, null);
+
+  const refreshed = workbenchReducer(draft, {
+    type: "snapshot.accepted",
+    snapshot: snapshot("1", [task("2", "/repo/alpha")]),
+  });
+  assert.equal(refreshed.activeTaskId, null);
+  assert.equal(refreshed.activeWorkspaceRoot, null);
+  assert.equal(refreshed.draftOpen, true);
+  assert.equal(refreshed.draftWorkspaceRoot, null);
 });

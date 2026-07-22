@@ -20,7 +20,6 @@ export function WorkspaceNavigation({
   grantReady,
   showArchived,
   disabled,
-  creating,
   onSearch,
   onChooseWorkspace,
   onSelectWorkspace,
@@ -36,7 +35,6 @@ export function WorkspaceNavigation({
   grantReady: boolean;
   showArchived: boolean;
   disabled: boolean;
-  creating: boolean;
   onSearch: () => void;
   onChooseWorkspace: () => void;
   onSelectWorkspace: (root: string) => void;
@@ -130,7 +128,7 @@ export function WorkspaceNavigation({
           disabled={disabled}
           onClick={onCreateTask}
         >
-          {creating ? t("workspace.starting_task") : t("task.new")}
+          {t("task.new")}
         </button>
       </section>
 

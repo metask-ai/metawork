@@ -28,7 +28,7 @@ export function AppShell({
   workspaceLabel: string;
   status: string;
   left: ReactNode;
-  activity: ReactNode;
+  activity: ReactNode | null;
   children: ReactNode;
 }) {
   const { locale, setLocale, t } = useI18n();
@@ -36,12 +36,14 @@ export function AppShell({
     initialPanel(leftPreference, 820),
   );
   const [rightOpen, setRightOpen] = useState(() =>
-    initialPanel(rightPreference, 1100),
+    initialPanel(rightPreference, 1101),
   );
+  const rightAvailable = activity !== null;
+  const effectiveRightOpen = rightAvailable && rightOpen;
 
   useEffect(() => {
     const narrow = window.matchMedia("(max-width: 819px)");
-    const medium = window.matchMedia("(max-width: 1099px)");
+    const medium = window.matchMedia("(max-width: 1100px)");
     const closeForViewport = () => {
       if (narrow.matches) setLeftOpen(false);
       if (medium.matches) setRightOpen(false);
@@ -76,7 +78,7 @@ export function AppShell({
     <main
       className="app-window"
       data-left-open={leftOpen}
-      data-right-open={rightOpen}
+      data-right-open={effectiveRightOpen}
     >
       <header className="app-titlebar">
         <button
@@ -111,16 +113,18 @@ export function AppShell({
             )}
           </select>
         </label>
-        <button
-          className="icon-button focus-ring"
-          aria-controls="task-activity"
-          aria-expanded={rightOpen}
-          aria-label={t("app.toggle_activity")}
-          title={t("app.toggle_activity")}
-          onClick={toggleRight}
-        >
-          <Icon name="activity" />
-        </button>
+        {rightAvailable && (
+          <button
+            className="icon-button focus-ring"
+            aria-controls="task-activity"
+            aria-expanded={effectiveRightOpen}
+            aria-label={t("app.toggle_activity")}
+            title={t("app.toggle_activity")}
+            onClick={toggleRight}
+          >
+            <Icon name="activity" />
+          </button>
+        )}
       </header>
 
       <div className="app-columns">
@@ -133,23 +137,25 @@ export function AppShell({
           {left}
         </aside>
         <section className="task-stage">{children}</section>
-        <aside
-          id="task-activity"
-          className="task-activity"
-          aria-hidden={!rightOpen}
-          inert={!rightOpen}
-        >
-          {activity}
-        </aside>
+        {rightAvailable && (
+          <aside
+            id="task-activity"
+            className="task-activity"
+            aria-hidden={!effectiveRightOpen}
+            inert={!effectiveRightOpen}
+          >
+            {activity}
+          </aside>
+        )}
       </div>
 
-      {(leftOpen || rightOpen) && (
+      {(leftOpen || effectiveRightOpen) && (
         <button
           className="panel-scrim"
           aria-label={t("app.dismiss_panels")}
           onClick={() => {
             if (window.innerWidth < 820) setLeftOpen(false);
-            if (window.innerWidth < 1100) setRightOpen(false);
+            if (window.innerWidth <= 1100) setRightOpen(false);
           }}
         />
       )}

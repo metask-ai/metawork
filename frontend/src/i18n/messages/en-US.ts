@@ -104,6 +104,7 @@ export const enUS = {
   "command.timeout_sync_failed":
     "{operation} took longer than expected, and the latest state could not be confirmed. Reconnect before trying again.",
   "workspace.label": "Workspace",
+  "workspace.choose_on_send": "Choose on send",
   "workspace.add": "Add",
   "workspace.switch": "Switch workspace",
   "workspace.activity": "Workspace activity",
@@ -113,25 +114,31 @@ export const enUS = {
   "workspace.none": "No workspace selected",
   "workspace.grant_ready": "Ready to start a task in this trusted workspace.",
   "workspace.selection_cancelled": "Workspace selection cancelled.",
+  "workspace.draft_conflict":
+    "That folder already has an unsent draft, so nothing was switched or overwritten. Choose another folder, or copy and clear this draft before trying again.",
   "workspace.selection_failed": "Workspace selection failed: {error}",
   "workspace.grant_confirmed": "Workspace access confirmed.",
   "workspace.access_required":
     "Confirm workspace access again before sending this draft.",
   "workspace.confirm_access": "Confirm access",
-  "workspace.starting_task": "Choosing workspace…",
   "task.list": "Tasks",
   "task.count.one": "{count} task",
   "task.count.other": "{count} tasks",
   "task.item": "Task {id}",
   "task.new": "New task",
-  "task.start_new": "Start a new task",
-  "task.start_new_help":
-    "Choose or confirm a trusted workspace, then describe the outcome you need.",
   "task.open": "Open a task",
-  "task.empty_title": "Put this workspace to work.",
+  "task.empty_title": "Start with the outcome you want.",
   "task.empty_body":
-    "Describe a concrete outcome. MetaWork will keep the work, decisions, and results together.",
-  "task.no_tasks": "Choose a workspace, then start the first task.",
+    "Describe a clear outcome and choose a workspace on first send. MetaWork keeps the work, decisions, and result together.",
+  "task.examples": "Local task examples",
+  "task.example.review":
+    "Review this project and identify the risks worth fixing first",
+  "task.example.test_failure":
+    "Find the root cause of the latest test failure and propose a fix",
+  "task.example.todo":
+    "Implement the highest-priority TODO in this repository and add tests",
+  "task.no_tasks":
+    "Start a new task; choose a folder before sending when one is needed.",
   "task.archived_hidden": "Archived tasks are hidden.",
   "task.show_archived": "Show archived ({count})",
   "task.hide_archived": "Hide archived",
@@ -182,6 +189,7 @@ export const enUS = {
   "run.preparing": "Preparing the work…",
   "run.submit": "Send",
   "run.placeholder": "Describe the outcome you need…",
+  "run.context": "Current execution context",
   "run.placeholder_no_task": "Start a task first",
   "run.placeholder_archived": "Restore this task to continue",
   "run.placeholder_closing": "This task is ending",
