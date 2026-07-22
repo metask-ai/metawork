@@ -22,7 +22,7 @@
 | 验证对象 | 规范来源 | 可定位证据 | 已验证结论与限制 |
 | --- | --- | --- | --- |
 | AgentCore ABI v1 revision 3 macOS baseline | [ABI v1 消费合同](agentcore-abi-v1.md) | [revision 3 migration 报告](agentcore-revision-3-migration-report.md)；MetaWork commit `f0e39f43b520ce97b4c390d590d2807019b9c4a3`；`build_support/agentcore-bundle.macos.lock.json` | 2026-07-21 在精确 dirty-provenance arm64 macOS bundle 上通过 candidate/stage、typed SDK、正式 Host、Debug/Release、桌面自动化和 package；不声明 stable ABI |
-| Metask Account 与真实 AgentCore Run | [产品需求](requirements.md)、[Metask Account API 合同](metask-account-contract.md) | `git show dbaaf81b0217d4016944960ee8621e9a23274f05:docs/phase-0-validation.md` 中 2026-07-20 的真实链路记录 | 打包 `.app` 完成 OAuth、profile、API Key/model catalog、execution persistence，以及 `gpt-5.5`、`deepseek-v4-pro` AgentCore Run；不证明 Task-first 人工交互矩阵完成 |
+| Metask Account 与真实 AgentCore Run | [产品需求](requirements.md)、[Metask Account API 合同](metask-account-contract.md) | `git show dbaaf81b0217d4016944960ee8621e9a23274f05:docs/phase-0-validation.md` 中 2026-07-20 的真实链路记录 | 打包 `.app` 完成 OAuth、profile、API Key/model catalog、execution persistence，以及 `gpt-5.5`、`deepseek-v4-pro` AgentCore Run；不证明登录优先、设置、模型选择或成熟 Workbench 人工交互完成 |
 | Windows development baseline | [高层架构](architecture.md)、[ABI v1 消费合同](agentcore-abi-v1.md) | `git show dbaaf81b0217d4016944960ee8621e9a23274f05:docs/windows-phase-0b-report.md`；`build_support/agentcore-bundle.windows.lock.json` | 2026-07-21 在 clean x86_64 GNU bundle 上通过 candidate SDK probe、Native Debug/Release 和桌面自动化；不包含安装、签名、更新或完整安全矩阵 |
 | fault-domain 方向 | [高层架构](architecture.md) | `git show dbaaf81b0217d4016944960ee8621e9a23274f05:docs/phase-0-gate-7-report.md` | 独立 crash 对照证明同进程为零进程级隔离，并选择单 AgentCore Worker；该一次性 harness 不进入 active tree，产品 Worker 尚未实现 |
 
@@ -70,21 +70,28 @@ npm run test:windows:bringup
 
 macOS 与 Windows 结果不能互相替代。安装器、签名、更新、file dialog、process tree、timeout 和完整 security matrix 需要独立证据。
 
-## 4. Task-first Account 验收矩阵
+## 4. 登录优先与成熟 Workbench 验收矩阵
 
 产品行为由 [产品需求的 Metask Account、恢复与 Workbench 章节](requirements.md)定义；下表只记录覆盖状态和证据。
 
-| 验证项 | 自动化证据 | 状态与缺口 |
+| 验证项 | 当前证据 | 状态与缺口 |
 | --- | --- | --- |
-| 未登录或后台准备期间保留 Workbench、Workspace 选择和 New task 草稿 | `scripts/composer-render.test.mjs`: `an Account prerequisite blocks sending without blocking the Workspace draft`；`scripts/workbench-navigation.test.mjs`: `Composer drafts survive a WebView reload scope and fail safely when storage is unavailable` | 自动化已覆盖；macOS/Windows 真实窗口待复核 |
-| Task/Run admission 只服从 Host 状态和 Workspace grant | `src/workbench/projection.zig`: `Workbench starts without execution and fails Task admission closed`；`scripts/first-task-flow.test.mjs`: `the first send cannot bypass the Host-issued workspace grant` | 自动化已覆盖 |
-| 登录先提交 account-only，再进入独立 catalog generation | `src/account/state.zig`: `login commits account-only before a separate catalog generation`；`src/app.zig`: `Account coordinator commits login and execution as separate gates` | 自动化已覆盖 |
-| 历史选择、单候选自动推进，只有真实歧义要求用户选择 | `scripts/account-panel.test.mjs`: `background catalog preparation does not ask for a manual load step`、`only a real catalog ambiguity asks for the matching choice` | Renderer 表面已覆盖；Host automatic-selection branch 缺少专门行为测试，整体仍为部分覆盖 |
-| OAuth 等待可重新打开或取消，callback/deadline 能唤醒 | `src/account/state.zig`: `Host product readiness exposes login recovery without Renderer inference`；`scripts/account-panel.test.mjs`: `authorization wait can reopen or cancel without exposing the OAuth URL`；`src/account/loopback.zig`: `attempt deadline closes the listener and wakes a blocked accept` | 自动化已覆盖；系统浏览器启动失败仍需真实平台记录 |
-| catalog failure、retry 和 restart-required 均有恢复动作 | `src/account/catalog.zig`: `catalog status mapping is fail closed`；`src/account/state.zig`: `restore failure enters a terminal restart-required state`；`scripts/account-panel.test.mjs`: `retryable and restart-required failures never leave an actionless spinner` | 主要状态已覆盖；网络切换、离线和服务端慢响应待平台验证 |
-| Bridge mutation timeout 后 resync，结果不确定时不重放 | `scripts/bridge-client.test.mjs`: `a wedged mutation times out once and is never replayed by the Bridge client`；`scripts/frontend-boundaries.test.mjs`: `timed-out mutations resync from Host state without automatic replay` | 自动化已覆盖 |
+| cold restore 不闪现 disabled Workbench；signed out 只显示独立登录界面和唯一主动作 | 现有 `scripts/composer-render.test.mjs` 与 `scripts/account-panel.test.mjs` 仍断言 Account prerequisite 位于 Workspace 草稿旁 | **尚未实现**；旧测试编码了已废弃流程，Renderer 重构时必须替换而不是继续作为通过证据 |
+| 登录先提交 account-only，再自动进入独立 catalog generation；`execution_ready` 前不开放 Workbench | `src/account/state.zig`: `login commits account-only before a separate catalog generation`；`src/app.zig`: `Account coordinator commits login and execution as separate gates` | Host 提交链已覆盖；登录界面与 `execution_ready` Workbench gate 尚未实现 |
+| OAuth 等待可重新打开或取消，callback/deadline 能唤醒 | `src/account/state.zig`: `Host product readiness exposes login recovery without Renderer inference`；`scripts/account-panel.test.mjs`: `authorization wait can reopen or cancel without exposing the OAuth URL`；`src/account/loopback.zig`: `attempt deadline closes the listener and wakes a blocked accept` | Host 行为与旧 Renderer 组件有证据；新首次启动表面、系统浏览器失败和真实窗口仍待验证 |
+| 历史选择、单候选自动推进，只有真实 API/模型歧义要求用户选择 | `scripts/account-panel.test.mjs`: `background catalog preparation does not ask for a manual load step`、`only a real catalog ambiguity asks for the matching choice` | Renderer 旧表面部分覆盖；Host automatic-selection branch 与新首次启动选择 UI 缺少完整行为测试 |
+| OAuth identity 成功后 catalog failure、retry、no keys/models 和 restart-required 不退回未登录 | `src/account/catalog.zig`: `catalog status mapping is fail closed`；`src/account/state.zig`: `restore failure enters a terminal restart-required state`；`scripts/account-panel.test.mjs`: `retryable and restart-required failures never leave an actionless spinner` | 状态内核主要覆盖；新文案、Metask 管理入口、离线/慢响应和真实平台待验证 |
+| Workspace 是独立 projection，空 Workspace、最近使用、重新授权、移除与聚合 Task signal 可恢复 | 当前 revision 1 snapshot 只有 `account + tasks`；`frontend/src/workbench/selectors.ts` 仍从 Task 路径派生 Workspace | **尚未实现**；需要 Renderer Bridge hard cut、Host owner、跨语言 fixture 和迁移后的导航测试 |
+| API 在设置页切换，模型在 New task Composer 显示；设置与 Composer 默认值一致 | 当前只有紧凑 `AccountPanel` 与 Account prerequisite；没有正式 settings route | **尚未实现**；必须覆盖脱敏目录、模型 pending/error、管理入口和键盘交互 |
+| 默认 API/模型变化不自动改绑已有 Task；已有 Task 保留当前 execution binding epoch，只有显式 rebind 可创建新 epoch | 当前 Account/Workbench 只有单 active runtime config 与全局 replacement gate | **尚未实现**；需要 task-bound owned config lifetime、generation/epoch 引用与 secure-zero 行为测试 |
+| Host 重启后历史 Task 不静默采用当前默认配置；精确恢复或显式 rebind 均保留旧 Run 事实 | 当前 persistence revision 2 只恢复一个默认 execution family；当前不承诺跨 Host Task history，AgentCore 也不提供跨进程 Conversation 恢复 | **尚未实现**；目标先恢复只读 history，再按能力提供从历史新建 Task、exact-match restore 或 `rebind_required`；需要 binding descriptor/epoch persistence、optimistic epoch、原子新 Session 和配置边界事件测试 |
+| New task 以 Composer 为主；运行后转为工作轨迹；Inspector 没有内容时不占固定列宽 | 当前首屏用 `composer-start` 替代 Composer，`TaskActivity` 在无 Task 时仍常驻 | **尚未实现**；需要登录后 New task、idle/running/waiting/terminal 和 960–1440 px 视觉验收 |
+| Inspector 有稳定的 Task 标题栏开关，不因普通 Run start/terminal、usage 或工具活动自动开合；打开后保持到用户关闭或切换 Task | 当前 `TaskActivity` 是常驻右栏，不具备按 Task 显隐状态 | **尚未实现**；需覆盖标题栏开关与 `aria-expanded`、上下文详情入口、Needs your attention 单次自动打开、terminal Last run summary、Task 切换、窄窗口覆盖层和正文宽度稳定性 |
+| mutation pending 按账号、Workspace、Task 和请求作用域隔离，不因单一 busy 冻结整个界面 | 当前 `frontend/src/app/App.tsx` 使用全局 `busy !== null` 形成 `mutationDisabled` | **尚未实现**；需并发交互行为测试与真实窗口验证 |
+| New Task admission 使用已安装默认 generation；既有 Task 的后续 Run 使用当前 binding epoch，两者都服从 Workspace grant 和相应 gate | `src/workbench/projection.zig`: `Workbench starts without execution and fails Task admission closed`；`scripts/first-task-flow.test.mjs`: `the first send cannot bypass the Host-issued workspace grant` | 当前单配置 admission 已覆盖；必须新增默认切换后旧 Task 继续、错误 generation 拒绝、rebind epoch race 和 secure-zero 行为测试 |
+| Bridge mutation timeout 后 resync，结果不确定时不重放 | `scripts/bridge-client.test.mjs`: `a wedged mutation times out once and is never replayed by the Bridge client`；`scripts/frontend-boundaries.test.mjs`: `timed-out mutations resync from Host state without automatic replay` | 自动化已覆盖；新 scoped pending 不得破坏该边界 |
 | Renderer reload、snapshot generation 和 stale chunk fail closed | `scripts/snapshot-client.test.mjs`: `Workbench snapshot assembly rejects a stale chunk`；`scripts/snapshot-demand.test.mjs`: `snapshot retry is exhausted once per generation and requires an explicit reset`；`scripts/workbench-connection.test.mjs`: `explicit recovery replaces a generation whose snapshots stay unavailable` | 自动化已覆盖；长时间 detach 与真实窗口重建压力待完成 |
-| `en-US` / `zh-CN`、键盘、focus、窗口尺寸和 200% text | `scripts/i18n.test.mjs`: `English is the complete source catalog and zh-CN has exact key parity`、`application product copy is catalog-backed` | 仅文案 catalog 自动化；真实 macOS/Windows UI、可访问性和产品审核待完成 |
+| `en-US` / `zh-CN`、键盘、focus、窗口尺寸和 200% text | `scripts/i18n.test.mjs`: `English is the complete source catalog and zh-CN has exact key parity`、`application product copy is catalog-backed` | 仅文案 catalog 自动化；登录、设置、模型选择、Inspector 和真实 macOS/Windows 可访问性待完成 |
 
 人工证据未完成时，本矩阵不得整体标记为“已验证”。静态 boundary test 只能证明代码结构，不替代对应行为测试。
 
@@ -111,6 +118,7 @@ macOS 与 Windows 结果不能互相替代。安装器、签名、更新、file 
 | async pending、suspend/resume 和跨进程 Conversation 恢复 | [产品需求](requirements.md)、[AgentCore 集成契约](agentcore-integration.md) | 当前 ABI 不提供，不得宣称可用 |
 | strict Workspace security、正式 Host tools 和持久权限规则 | [产品需求](requirements.md)、[高层架构](architecture.md) | 尚未完成独立安全验收 |
 | typed Output、FileChange、plan progress/approval 和 custom UI | [产品需求](requirements.md)、[ABI v1 消费合同](agentcore-abi-v1.md) | 当前 ABI 不提供，对应 UI 必须隐藏 |
+| 登录优先 Renderer、独立 Workspace projection、Task-bound ExecutionConfig/rebind、设置页与稳定 Inspector | [产品需求](requirements.md)、[Workbench UI 设计](workbench-ui-design.md)、[高层架构](architecture.md) | 目标已定义，当前 Renderer/Bridge/Workbench 尚未完成；旧 Task-first UI 测试不得作为验收证据 |
 | Windows distribution 与 Linux target | [产品需求](requirements.md)、[高层架构](architecture.md) | Windows 仅 development baseline；Linux 尚未接入 |
 
 ## 7. 证据维护规则

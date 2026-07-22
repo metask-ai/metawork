@@ -60,7 +60,7 @@ flowchart TB
         APP["App composition<br/>Native SDK Runtime"]
         ACCOUNT["Account<br/>Metask login / catalog / ExecutionConfig"]
         BRIDGE["Bridge transport"]
-        WB["Workbench 产品状态<br/>Task / Run history / queue"]
+        WB["Workbench 产品状态<br/>Workspace / Task / execution generations / queue"]
         AGENT["Agent execution<br/>Session / active Run / callbacks"]
         APP --> BRIDGE
         APP --> ACCOUNT
@@ -126,9 +126,14 @@ Host 负责：
 
 ### 4.3 Account 与执行配置
 
-Account 和 Workbench 是同级 owner，彼此不导入 runtime。Account 独占 OAuth token、PKCE、完整 API Key、平台凭据 locator、catalog attempt 和 credential generation；Workbench 独占 active runtime ExecutionConfig、Task admission、Task/Run history 与 execution replacement gate。Bridge 只提交无 secret 的 `AccountCommand` 并读取 Workbench 的脱敏 `AccountView`。
+Account 和 Workbench 是同级 owner，彼此不导入 runtime。Account 独占 OAuth token、PKCE、完整 API Key、平台凭据 locator、catalog attempt、当前默认选择和 credential generation；Workbench 独占已安装的默认 runtime ExecutionConfig、被 Task 引用的 generation owned copy、不含 secret 的 Task execution binding descriptor/epoch history、Task admission、Workspace/Task/Run history 与 execution replacement gate。Bridge 只提交无 secret 的 catalog selection identifier 或 `AccountCommand`，并读取 Workbench 的脱敏 `AccountView`；Renderer 不能提交 provider、base URL、完整 credential 或未被 Host catalog 验证的模型配置。
 
-Account 使用 `AccountSessionState` 与 `ExecutionState` 两个正交状态。OAuth refresh 失败可以进入 `reauth_required` 并保留 ready ExecutionConfig；API Key/模型/base URL 变化才递增 `execution_generation`。每个 Task/Run 记录不含 secret 的 generation、provider 和 model，已创建 Agent Session 继续消费其创建时的 owned config。
+Account 使用 `AccountSessionState` 与 `ExecutionState` 两个正交状态。OAuth refresh 失败可以进入 `reauth_required` 并保留 ready ExecutionConfig；默认 API Key/模型/base URL 变化递增 `execution_generation`。Workbench 安装新 generation 后把它作为后续 New Task admission 的默认配置；创建 Task 时建立第一个 binding epoch，为 Agent Session 固化对应 owned config，并在 Task/Run 记录不含 secret 的 account/profile、generation、API/Provider identity 和 model。既有 Task 的后续 Run 校验当前 binding epoch，不要求等于 Account 当前默认 generation。后续默认值变化不修改或停止既有 Task 的当前 epoch；旧 generation 在最后一个 Task、Session、Run、executor job 与 `RunRef` 释放后 secure-zero。
+
+`execution replacement gate` 区分两类操作：
+
+- 默认 API/模型切换可以安装新 generation，既有 Task 继续引用旧 generation，且其 admission 不被无关的默认切换冻结；默认安装只在新配置无法安全安装、目标 catalog 已失效或同一 generation 提交仍未收口时拒绝；
+- 账号 identity 切换、退出登录和设备 credential 清理必须等待所有引用该账号 credential 的 Task/Session/Run/job/`RunRef` 归零，不能借默认切换绕过 secret lifetime。
 
 唯一 committed-state 写路径为：
 
@@ -136,18 +141,30 @@ Account 使用 `AccountSessionState` 与 `ExecutionState` 两个正交状态。O
 Account.prepare(command | completion)
 → Account effect admission
 → Workbench.commitAccountFactNoFail(...)
-→ Workbench.installExecutionNoFail(...)  [可选]
+→ Workbench.installDefaultExecutionNoFail(...)  [可选]
 → Account.commit(prepared)
 → dispatch committed Account effect
 ```
 
 前五步在 App 主线程同一 turn 内完成，effect 只有在 committed swap 后才能启动；worker completion 再经主循环进入同一条链。任何校验或内部不变量失败都保留旧 committed state，并清零 staged secret；Bridge 不参与 prepare/commit，也不接触 credential。C1 登录只依赖锁定的 OAuth client/scope/loopback/profile 合同，成功先提交 `account_only`，不等待 API Key 或模型目录。
 
-`account_only` 是安全与持久化提交边界，不是要求用户手动启动 C2 的产品边界。C1 commit 完成后，App/Account 可以创建新的 catalog attempt 自动继续；历史选择仍存在且匹配当前 catalog 时优先恢复，单一候选自动采用，只有无法由锁定合同确定的多候选才进入 waiting-for-user。这个 continuation 必须通过相同 prepare/admit/commit 链，不得由 Renderer 观察状态后发送隐藏命令。
+`account_only` 是安全与持久化提交边界，不是可进入 Workbench 的产品 readiness，也不是要求用户手动启动 C2 的边界。C1 commit 完成后，App/Account 创建新的 catalog attempt 自动继续；历史选择仍存在且匹配当前 catalog 时优先恢复，单一候选自动采用，只有无法由锁定合同确定的多候选才进入 waiting-for-user。这个 continuation 必须通过相同 prepare/admit/commit 链，不得由 Renderer 观察状态后发送隐藏命令。
 
 每个 Account attempt 都有 Host-owned deadline、attempt identity 和唯一 terminal completion。浏览器未回调、网络悬挂、effect 启动失败和取消都必须收口到可恢复 committed state。幂等 catalog read 可以有限重试；OAuth code exchange、凭据持久化和结果不确定 mutation 不得自动重放。Renderer command timeout 只释放本地交互并触发 snapshot resync，不能代表 Host mutation 失败。
 
-production 网络接入受 [Metask Account API 合同](metask-account-contract.md)约束。C1 OAuth/login 独立提交 `account_only`，不打开 Task admission；C2 使用 profile-aware API Key/model catalog，从精确 `group.platform` 生成固定 Metask AgentCore target，并通过 OAuth/execution 双 family A/B slot 与单一 `manifest.v2` 提交 `execution_ready`。只有 Workbench 安装同一 execution generation 后才开放 Task admission。Metask 内部实现只作为外部合同确认的证据，MetaWork 不修改其代码。
+production 网络接入受 [Metask Account API 合同](metask-account-contract.md)约束。C1 OAuth/login 独立提交 `account_only`，不打开 Workbench 或 Task admission；C2 使用 profile-aware API Key/model catalog，从精确 `group.platform` 生成固定 Metask AgentCore target，并通过 OAuth/execution 双 family A/B slot 与单一 `manifest.v2` 提交 `execution_ready`。只有 Workbench 安装同一默认 execution generation 后才进入 Workbench。当前 persistence revision 2 仍只持久化一个默认 execution family；被既有 Task 引用的旧 generation secret 仅在当前进程由 Workbench/Agent Session own。Task persistence 只能另存不含 secret 的 binding descriptor/epoch history，不改变 Metask Account persistence revision，也不能据此重建 credential。Metask 内部实现只作为外部合同确认的证据，MetaWork 不修改其代码。
+
+跨 Host 重启的 execution binding 恢复必须 fail closed：
+
+1. Workbench 先把历史 Task、Run 与 binding descriptor 恢复成只读 projection；
+2. Account 恢复默认 execution family 后，Host 才能比较 account/profile、API、model 和 generation。全部精确匹配也只证明 credential binding 可恢复，不证明 AgentCore Conversation 可恢复；
+3. binding 或 Conversation 任一不可恢复时，Task admission 保持关闭。当前 baseline 不承诺跨 Host Task history；若只读 history persistence 先行落地，只发布 `从此历史新建任务`，不注册伪 `resume` 或 `rebind` 产品路径；
+4. 未来 Conversation 恢复或重建通过独立能力验收后，无法精确恢复旧 binding 的 Task 发布 `rebind_required`。用户确认只提交 Task identity、expected binding epoch 和当前 catalog selection identifier；Host 重新校验 Workspace、account/profile、API→model 归属和无 non-terminal Run；
+5. rebind commit 原子关闭旧 Session owner、创建新 binding epoch 与新 Agent Session，并追加不可改写的配置边界事件。它不修改旧 Run 记录，也绝不热替换 live Session。
+
+因此“默认配置切换”和“历史 Task rebind”是两种不同 mutation：前者不触碰既有 Task，后者只由用户对单个只读 Task 明确发起，并受 optimistic epoch 与 admission 校验保护。
+
+Workspace 是 Workbench-owned 产品对象，而不是 Renderer 从 Task 路径派生的 convenience view。成熟 UI 所需的 Workspace projection 至少发布 stable identity、canonical root、display label、grant/re-auth state 与聚合 Task signals；一次性 grant 仍由 Bridge/Native capability 生成并由 Host 校验。当前 Renderer Bridge revision 1 只发布 `account + tasks`，因此独立 Workspace projection、Task execution selection 和对应命令必须在实现时通过完整 hard cut、跨语言 fixture 与 revision 升级原子落地，不能向 revision 1 偷加“可选”字段。
 
 ### 4.4 AgentCore
 
@@ -195,6 +212,7 @@ revision 3 是硬切换，不提供 revision 2 active compatibility path。新�
 SessionRuntime
 ├── AgentCore Session handle
 ├── Conversation 所在 AgentCore Session 生命周期
+├── task binding epoch 对应的 owned ExecutionConfig generation
 ├── current_run: optional RunJob
 ├── bounded input/event state
 ├── synchronous UI wait state
@@ -208,6 +226,7 @@ RunJob
 ```
 
 - 每个 Session 至多一个 in-flight Run；
+- 每个 Session 在创建时绑定一个 immutable ExecutionConfig generation；默认 Account 配置变化不热替换 live Session，显式 Task rebind 也必须创建新 Session；
 - Host 使用有上限的 Run executor；
 - 空闲 Session 不占 worker；同步 Run 和同步 UI wait 占用 execution slot；
 - Workbench 创建、排队、停止并销毁 bounded Executor；Agent Runtime 不接收 Scheduler capability，worker 从 Workbench queue 主动进入 Agent Run；
@@ -270,7 +289,7 @@ Renderer 按不可信调用方处理：
 - trusted Workspace 只能由 Host 原生目录选择与原生确认生成一次性 grant；Renderer 不能提交路径加 boolean 自行授信；
 - Provider credential 不进入 Bridge、事件、日志或 snapshot；
 - OAuth token、PKCE verifier、authorization code、完整 API Key 和 Authorization header 只能存在于 Account secret owner、系统凭据存储和 Workbench runtime copy；所有 owner 在释放前 secure-zero；
-- production provider/model/base URL/API Key 不从环境变量或 Renderer 注入，只能来自 Account 已锁定并验证的 Metask contract；
+- production provider/base URL/API Key 不从环境变量或 Renderer 注入，只能来自 Account 已锁定并验证的 Metask contract；Renderer 只能提交 Host 当前脱敏 catalog 中的稳定 API/model selection identifier，Host 必须重新校验 ownership、active 状态、API→model 归属并从锁定合同推导 typed provider/base URL；
 - Host 在形成产品 projection 前移除已知 Host-held credential 和 schema 标记的 secret 字段，并对命令与工具输出设置 byte 上限和 truncation 状态；Renderer 不是秘密过滤边界；
 - 当前不暴露通用 Host tool 或任意执行接口；
 - built-in Bash 使用非交互子进程；
