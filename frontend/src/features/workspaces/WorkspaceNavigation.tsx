@@ -121,16 +121,16 @@ export function WorkspaceNavigation({
         >
           <p className="section-label">{t("workspace.label")}</p>
           <span className="workspace-heading-actions">
-            <button
-              ref={removalTrigger}
-              className="text-button focus-ring"
-              disabled={
-                disabled || !current || current.authorization !== "available"
-              }
-              onClick={() => setRemovalConfirmId(current?.id ?? null)}
-            >
-              {t("workspace.remove")}
-            </button>
+            {current && (
+              <button
+                ref={removalTrigger}
+                className="text-button focus-ring"
+                disabled={disabled || current.authorization !== "available"}
+                onClick={() => setRemovalConfirmId(current.id)}
+              >
+                {t("workspace.remove")}
+              </button>
+            )}
             <button
               className="text-button focus-ring"
               disabled={disabled}

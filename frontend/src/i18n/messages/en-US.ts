@@ -230,6 +230,8 @@ export const enUS = {
     "The stop request could not be confirmed. Refresh and try again.",
   "run.stop_requested": "Stopping the current work…",
   "run.terminal.completed": "Work completed",
+  "run.no_final_response":
+    "The work ended, but the Agent did not return a final response.",
   "run.terminal.stopped": "Work stopped",
   "run.terminal.interrupted": "Work interrupted",
   "run.terminal.failed": "Work failed",

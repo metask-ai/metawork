@@ -43,7 +43,7 @@ export function AppShell({
   onBeginWindowDrag: () => void;
   onWindowControl: (action: WindowControlAction) => void;
   onSearch: () => void;
-  left: ReactNode;
+  left: ReactNode | null;
   inspector: ReactNode | null;
   inspectorOpen: boolean;
   onDismissInspector: (restoreFocus?: boolean) => void;
@@ -54,6 +54,8 @@ export function AppShell({
   const [leftOpen, setLeftOpen] = useState(() =>
     initialPanel(leftPreference, 820),
   );
+  const leftAvailable = left !== null;
+  const effectiveLeftOpen = leftAvailable && leftOpen;
   const inspectorAvailable = inspector !== null;
   const effectiveInspectorOpen = inspectorAvailable && inspectorOpen;
   const titlebarGesture = useRef(new WindowTitlebarGesture()).current;
@@ -84,7 +86,7 @@ export function AppShell({
     <main
       className="app-window"
       data-platform={desktopPlatform()}
-      data-left-open={leftOpen}
+      data-left-open={effectiveLeftOpen}
       data-inspector-open={effectiveInspectorOpen}
       onKeyDown={(event) => {
         const target = event.target as HTMLElement;
@@ -129,16 +131,20 @@ export function AppShell({
         onPointerUp={(event) => titlebarGesture.end(event.pointerId)}
         onPointerCancel={(event) => titlebarGesture.cancel(event.pointerId)}
       >
-        <button
-          className="icon-button focus-ring"
-          aria-controls="workspace-sidebar"
-          aria-expanded={leftOpen}
-          aria-label={t("app.toggle_workspaces")}
-          title={t("app.toggle_workspaces")}
-          onClick={toggleLeft}
-        >
-          <Icon name="sidebar" />
-        </button>
+        {leftAvailable ? (
+          <button
+            className="icon-button focus-ring"
+            aria-controls="workspace-sidebar"
+            aria-expanded={leftOpen}
+            aria-label={t("app.toggle_workspaces")}
+            title={t("app.toggle_workspaces")}
+            onClick={toggleLeft}
+          >
+            <Icon name="sidebar" />
+          </button>
+        ) : (
+          <span className="commandbar-leading-spacer" aria-hidden="true" />
+        )}
         <div className="commandbar-context">
           <span className="commandbar-task">{taskTitle}</span>
           <span className="commandbar-workspace">{workspaceLabel}</span>
@@ -184,14 +190,16 @@ export function AppShell({
       </header>
 
       <div className="app-columns">
-        <aside
-          id="workspace-sidebar"
-          className="workspace-sidebar"
-          aria-hidden={!leftOpen}
-          inert={!leftOpen}
-        >
-          {left}
-        </aside>
+        {leftAvailable && (
+          <aside
+            id="workspace-sidebar"
+            className="workspace-sidebar"
+            aria-hidden={!leftOpen}
+            inert={!leftOpen}
+          >
+            {left}
+          </aside>
+        )}
         <section className="task-stage">{children}</section>
         {inspectorAvailable && (
           <aside
@@ -206,7 +214,7 @@ export function AppShell({
         )}
       </div>
 
-      {leftOpen && (
+      {effectiveLeftOpen && (
         <button
           className="panel-scrim"
           aria-label={t("app.dismiss_panels")}

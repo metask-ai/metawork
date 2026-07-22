@@ -570,10 +570,9 @@ test("Workbench owns Task lifecycle, continuation, and canonical redaction", () 
   assert.match(workbench, /sanitizeInto\(\s*run\.terminal_diagnostic/);
   assert.match(workbench, /copyProjected\(\s*prompt/);
   assert.match(workbench, /replaceTrackedProjected\(\s*&view\.title/);
-  assert.match(
-    taskRecord,
-    /execution: \?account_contract\.OwnedExecutionConfig/,
-  );
+  assert.match(taskRecord, /execution: \?OwnedTaskExecution/);
+  assert.match(workbench, /const OwnedTaskExecution = struct/);
+  assert.match(workbench, /account_contract\.validateExecutionConfig\(input\)/);
   assert.match(workbench, /redaction_secret = execution\.api_key/);
   assert.match(workbench, /releaseQuiescentTaskExecutions/);
 

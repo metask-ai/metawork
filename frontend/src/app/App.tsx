@@ -1361,70 +1361,72 @@ export default function App() {
           : null
       }
       left={
-        <div className="sidebar-frame">
-          <div className="sidebar-primary">
-            <div className="brand-lockup">
-              <span className="brand-mark" aria-hidden="true">
-                M
-              </span>
-              <div>
-                <p className="brand-name">{t("app.name")}</p>
-                <p className="brand-subtitle">{t("app.window_label")}</p>
+        route === "settings" ? null : (
+          <div className="sidebar-frame">
+            <div className="sidebar-primary">
+              <div className="brand-lockup">
+                <span className="brand-mark" aria-hidden="true">
+                  M
+                </span>
+                <div>
+                  <p className="brand-name">{t("app.name")}</p>
+                  <p className="brand-subtitle">{t("app.window_label")}</p>
+                </div>
+              </div>
+              <button
+                className="new-task-button focus-ring"
+                data-active={route === "workbench" && newTaskDraftActive}
+                disabled={bridgeUnavailable}
+                onClick={beginNewTask}
+              >
+                <Icon name="plus" />
+                <span>{t("task.new")}</span>
+                <kbd>{shortcutModifier}N</kbd>
+              </button>
+
+              <div className="sidebar-navigation">
+                <WorkspaceNavigation
+                  summaries={summaries}
+                  currentWorkspaceId={currentWorkspaceId}
+                  tasks={currentTasks}
+                  activeTaskId={
+                    route === "workbench" ? (activeTask?.id ?? null) : null
+                  }
+                  showArchived={showArchived}
+                  disabled={bridgeUnavailable || workspaceBusy}
+                  onChooseWorkspace={() => void chooseWorkspace(false)}
+                  onRemoveWorkspace={(workspaceId) =>
+                    void removeWorkspaceById(workspaceId)
+                  }
+                  onRetryRemoval={(workspaceId) =>
+                    void removeWorkspaceById(workspaceId)
+                  }
+                  onSelectWorkspace={(workspaceId) => {
+                    pendingTaskSelection.current = null;
+                    setRoute("workbench");
+                    void selectWorkspaceById(workspaceId);
+                  }}
+                  onSelectTask={(taskId) => {
+                    pendingTaskSelection.current = null;
+                    setRoute("workbench");
+                    dispatchWorkbench({ type: "task.selected", taskId });
+                  }}
+                  onToggleArchived={() => setShowArchived((shown) => !shown)}
+                />
               </div>
             </div>
-            <button
-              className="new-task-button focus-ring"
-              data-active={route === "workbench" && newTaskDraftActive}
-              disabled={bridgeUnavailable}
-              onClick={beginNewTask}
-            >
-              <Icon name="plus" />
-              <span>{t("task.new")}</span>
-              <kbd>{shortcutModifier}N</kbd>
-            </button>
 
-            <div className="sidebar-navigation">
-              <WorkspaceNavigation
-                summaries={summaries}
-                currentWorkspaceId={currentWorkspaceId}
-                tasks={currentTasks}
-                activeTaskId={
-                  route === "workbench" ? (activeTask?.id ?? null) : null
-                }
-                showArchived={showArchived}
-                disabled={bridgeUnavailable || workspaceBusy}
-                onChooseWorkspace={() => void chooseWorkspace(false)}
-                onRemoveWorkspace={(workspaceId) =>
-                  void removeWorkspaceById(workspaceId)
-                }
-                onRetryRemoval={(workspaceId) =>
-                  void removeWorkspaceById(workspaceId)
-                }
-                onSelectWorkspace={(workspaceId) => {
-                  pendingTaskSelection.current = null;
-                  setRoute("workbench");
-                  void selectWorkspaceById(workspaceId);
-                }}
-                onSelectTask={(taskId) => {
-                  pendingTaskSelection.current = null;
-                  setRoute("workbench");
-                  dispatchWorkbench({ type: "task.selected", taskId });
-                }}
-                onToggleArchived={() => setShowArchived((shown) => !shown)}
-              />
-            </div>
+            <AccountIdentity
+              account={snapshot.account}
+              active={false}
+              disabled={bridgeUnavailable || accountBusy}
+              onOpenSettings={openSettings}
+              onReauthenticate={() =>
+                void runAccountCommand(() => client.reauthenticate())
+              }
+            />
           </div>
-
-          <AccountIdentity
-            account={snapshot.account}
-            active={route === "settings"}
-            disabled={bridgeUnavailable || accountBusy}
-            onOpenSettings={openSettings}
-            onReauthenticate={() =>
-              void runAccountCommand(() => client.reauthenticate())
-            }
-          />
-        </div>
+        )
       }
       inspectorOpen={route === "workbench" && inspector.open}
       onDismissInspector={dismissInspector}

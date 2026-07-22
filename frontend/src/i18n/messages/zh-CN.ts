@@ -212,6 +212,7 @@ export const zhCN: Record<MessageId, string> = {
   "run.stop_failed": "未能确认停止请求，请刷新后重试。",
   "run.stop_requested": "正在停止当前工作…",
   "run.terminal.completed": "工作已完成",
+  "run.no_final_response": "工作已经结束，但 Agent 没有返回最终说明。",
   "run.terminal.stopped": "工作已停止",
   "run.terminal.interrupted": "工作意外中断",
   "run.terminal.failed": "工作失败",

@@ -243,20 +243,6 @@ export function TaskTimeline({
                 </header>
                 <div className="run-content">
                   <Message role={t("message.you")} text={run.user} />
-                  {run.assistant && (
-                    <div>
-                      <Message
-                        role={t("message.agent")}
-                        text={run.assistant}
-                        agent
-                      />
-                      {run.assistantRedacted && (
-                        <p className="projection-note">
-                          {t("privacy.sensitive_hidden")}
-                        </p>
-                      )}
-                    </div>
-                  )}
                   {activities.map((activity) => {
                     if (activity.kind === "tool")
                       return (
@@ -288,6 +274,23 @@ export function TaskTimeline({
                       </Fragment>
                     );
                   })}
+                  {run.assistant && (
+                    <div className="run-delivery">
+                      <Message
+                        role={t("message.agent")}
+                        text={run.assistant}
+                        agent
+                      />
+                      {run.assistantRedacted && (
+                        <p className="projection-note">
+                          {t("privacy.sensitive_hidden")}
+                        </p>
+                      )}
+                    </div>
+                  )}
+                  {!run.assistant && !isNonTerminalRun(run.phase) && (
+                    <p className="run-no-final">{t("run.no_final_response")}</p>
+                  )}
                   {!run.assistant &&
                     run.tools.length === 0 &&
                     isNonTerminalRun(run.phase) && (

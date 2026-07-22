@@ -2053,8 +2053,21 @@ summary::-webkit-details-marker {
 }
 
 .timeline-message.is-agent {
-  padding-left: 13px;
-  border-left: 2px solid var(--color-cobalt);
+  padding: 16px 18px;
+  border: 1px solid rgba(47, 116, 130, 0.24);
+  border-left: 3px solid var(--color-cobalt);
+  border-radius: 10px;
+  background: rgba(47, 116, 130, 0.045);
+}
+
+.run-no-final {
+  margin: 0;
+  padding: 12px 14px;
+  border-left: 3px solid var(--color-muted);
+  color: var(--color-muted);
+  background: rgba(216, 223, 223, 0.2);
+  font-size: 12px;
+  line-height: 1.55;
 }
 
 .message-role,

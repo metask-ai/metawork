@@ -388,7 +388,7 @@ const UiRecord = struct {
 
 const TaskView = struct {
     session: ?*lifecycle.Session,
-    execution: ?account_contract.OwnedExecutionConfig = null,
+    execution: ?OwnedTaskExecution = null,
     id: u64,
     recent_order: u64,
     route_id: u64,
@@ -426,6 +426,89 @@ const TaskView = struct {
     close_completion: std.atomic.Value(CloseCompletion) = .init(.none),
     close_failed: bool = false,
     cancel_requested: bool = false,
+};
+
+/// Process-local execution material owned by a Task after Workbench admission.
+/// Production values have already crossed the strict Account contract before
+/// they reach ActiveExecution. Automation builds may instead bind a loopback
+/// fixture endpoint, so Task continuation must validate its stable identity,
+/// not reinterpret this owned runtime copy as fresh Account input.
+const OwnedTaskExecution = struct {
+    allocator: std.mem.Allocator,
+    provider_kind: account_contract.ProviderKind,
+    model: []u8,
+    base_url: []u8,
+    execution_generation: u64,
+    secret: []u8,
+    owned: bool = true,
+
+    fn clone(
+        allocator: std.mem.Allocator,
+        provider_kind: account_contract.ProviderKind,
+        model: []const u8,
+        base_url: []const u8,
+        execution_generation: u64,
+        api_key: []const u8,
+    ) std.mem.Allocator.Error!OwnedTaskExecution {
+        std.debug.assert(model.len != 0);
+        std.debug.assert(base_url.len != 0);
+        std.debug.assert(execution_generation != 0);
+        std.debug.assert(api_key.len != 0);
+        const owned_model = try allocator.dupe(u8, model);
+        errdefer allocator.free(owned_model);
+        const owned_base_url = try allocator.dupe(u8, base_url);
+        errdefer allocator.free(owned_base_url);
+        const owned_secret = try allocator.dupe(u8, api_key);
+        errdefer {
+            std.crypto.secureZero(u8, owned_secret);
+            allocator.free(owned_secret);
+        }
+        return .{
+            .allocator = allocator,
+            .provider_kind = provider_kind,
+            .model = owned_model,
+            .base_url = owned_base_url,
+            .execution_generation = execution_generation,
+            .secret = owned_secret,
+        };
+    }
+
+    fn take(self: *OwnedTaskExecution) OwnedTaskExecution {
+        std.debug.assert(self.owned);
+        const result = self.*;
+        self.owned = false;
+        self.model = &.{};
+        self.base_url = &.{};
+        self.secret = &.{};
+        self.execution_generation = 0;
+        return result;
+    }
+
+    fn input(self: *const OwnedTaskExecution) account_contract.ExecutionConfigInput {
+        std.debug.assert(self.owned);
+        return .{
+            .target = .{
+                .provider_kind = self.provider_kind,
+                .model = self.model,
+                .base_url = self.base_url,
+            },
+            .api_key = self.secret,
+            .execution_generation = self.execution_generation,
+        };
+    }
+
+    fn deinit(self: *OwnedTaskExecution) void {
+        if (!self.owned) return;
+        std.crypto.secureZero(u8, self.secret);
+        self.allocator.free(self.secret);
+        self.allocator.free(self.base_url);
+        self.allocator.free(self.model);
+        self.owned = false;
+        self.model = &.{};
+        self.base_url = &.{};
+        self.secret = &.{};
+        self.execution_generation = 0;
+    }
 };
 
 const WorkspaceTrust = union(enum) {
@@ -824,25 +907,16 @@ const ActiveExecution = struct {
     fn cloneOwned(
         self: *const ActiveExecution,
         allocator: std.mem.Allocator,
-    ) std.mem.Allocator.Error!account_contract.OwnedExecutionConfig {
+    ) std.mem.Allocator.Error!OwnedTaskExecution {
         std.debug.assert(self.ready());
-        const owned_model = try allocator.dupe(u8, self.model());
-        errdefer allocator.free(owned_model);
-        const base_url = try allocator.dupe(u8, self.baseUrl());
-        errdefer allocator.free(base_url);
-        const owned_credential = try allocator.dupe(u8, self.credential());
-        errdefer {
-            std.crypto.secureZero(u8, owned_credential);
-            allocator.free(owned_credential);
-        }
-        return account_contract.OwnedExecutionConfig.initOwned(
+        return OwnedTaskExecution.clone(
             allocator,
             accountProviderKind(self.provider.?),
-            owned_model,
-            base_url,
+            self.model(),
+            self.baseUrl(),
             self.generation,
-            owned_credential,
-        ) catch unreachable;
+            self.credential(),
+        );
     }
 };
 
@@ -2220,8 +2294,6 @@ pub const Workbench = struct {
     ) Error!account_contract.ExecutionConfigInput {
         const execution = &(task.execution orelse return error.ExecutionUnavailable);
         const input = execution.input();
-        account_contract.validateExecutionConfig(input) catch
-            return error.ExecutionGenerationMismatch;
         if (input.execution_generation != task.execution_generation or
             accountProvider(input.target.provider_kind) != task.execution_provider or
             !std.mem.eql(u8, input.target.model, task.execution_model))
@@ -4182,16 +4254,13 @@ fn replaceTaskCredentialForTest(
     credential: []const u8,
 ) !void {
     task.execution.?.deinit();
-    var replacement = try account_contract.OwnedExecutionConfig.initOwned(
+    var replacement = try OwnedTaskExecution.clone(
         std.testing.allocator,
         .anthropic,
-        try std.testing.allocator.dupe(u8, "fixture-model"),
-        try std.testing.allocator.dupe(
-            u8,
-            account_contract.metask_anthropic_messages_url,
-        ),
+        "fixture-model",
+        account_contract.metask_anthropic_messages_url,
         task.execution_generation,
-        try std.testing.allocator.dupe(u8, credential),
+        credential,
     );
     task.execution = replacement.take();
     const redaction_secret = task.execution.?.input().api_key;

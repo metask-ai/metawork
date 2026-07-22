@@ -80,7 +80,7 @@ function render(props = {}) {
   );
 }
 
-function renderShell(inspector, inspectorOpen = false) {
+function renderShell(inspector, inspectorOpen = false, left = undefined) {
   return renderToStaticMarkup(
     createElement(
       I18nContext.Provider,
@@ -98,13 +98,82 @@ function renderShell(inspector, inspectorOpen = false) {
           workspaceLabel: "No workspace",
           status: "Connected",
           onSearch() {},
-          left: createElement("p", null, "Navigation"),
+          left:
+            left === undefined ? createElement("p", null, "Navigation") : left,
           inspector,
           inspectorOpen,
           onDismissInspector() {},
         },
         createElement("p", null, "Composer stage"),
       ),
+    ),
+  );
+}
+
+function renderCompletedTimeline(assistant = "Release is ready") {
+  const task = {
+    id: "3",
+    runs: [
+      {
+        id: "9",
+        phase: "completed",
+        user: "Inspect the release",
+        assistant,
+        assistantRedacted: false,
+        outcome: "completed",
+        cause: null,
+        usage: { input: "12", output: "5" },
+        tools: [
+          {
+            id: "tool-1",
+            order: "1",
+            name: "Read",
+            state: "completed",
+            elapsedMs: "4",
+            input: "fixture.txt",
+            progress: "",
+            content: "ready",
+            isError: false,
+            redacted: false,
+            inputTruncated: false,
+            progressTruncated: false,
+            contentTruncated: false,
+          },
+        ],
+      },
+    ],
+    pendingUi: null,
+    uiHistory: [],
+  };
+  return renderToStaticMarkup(
+    createElement(
+      I18nContext.Provider,
+      {
+        value: {
+          locale: "en-US",
+          setLocale() {},
+          t: (id, values) => translate("en-US", id, values),
+        },
+      },
+      createElement(TaskTimeline, {
+        task,
+        draft: false,
+        draftHasWorkspace: true,
+        revision: "1",
+        composerHasDraft: false,
+        retryAvailable: true,
+        responseDisabled: false,
+        onUseExample() {},
+        onPrepareRetry() {},
+        onInspect() {},
+        onRespond() {},
+        renderPendingUi() {
+          return null;
+        },
+        renderUiRecord() {
+          return null;
+        },
+      }),
     ),
   );
 }
@@ -243,6 +312,22 @@ test("New task does not render or reserve an empty Inspector", () => {
   assert.match(markup, /data-inspector-open="false"/);
 });
 
+test("Settings uses the global stage without retaining Task navigation", () => {
+  const markup = renderShell(null, false, null);
+  assert.doesNotMatch(markup, /id="workspace-sidebar"/);
+  assert.doesNotMatch(markup, /aria-controls="workspace-sidebar"/);
+  assert.match(markup, /data-left-open="false"/);
+});
+
+test("terminal delivery follows tool activity and precedes the outcome", () => {
+  const markup = renderCompletedTimeline();
+  assert.ok(markup.indexOf("Read") < markup.indexOf("Release is ready"));
+  assert.ok(
+    markup.indexOf("Release is ready") < markup.indexOf("Work completed"),
+  );
+  assert.match(renderCompletedTimeline(""), /did not return a final response/);
+});
+
 test("task examples disappear before they can overwrite an existing draft", () => {
   assert.match(renderNewTaskTimeline(false), /Review this project/);
   assert.doesNotMatch(renderNewTaskTimeline(true), /Review this project/);
@@ -344,4 +429,5 @@ test("removing the final empty Workspace leaves a stable focus destination", () 
     /<button[^>]*class="text-button focus-ring"[^>]*>Add/,
   );
   assert.ok(add);
+  assert.doesNotMatch(empty, />Remove</);
 });
