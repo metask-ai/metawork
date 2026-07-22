@@ -482,6 +482,8 @@ const AccountEffects = struct {
     }
 };
 
+const ExecutionReplacement = enum { none, default, identity };
+
 const AccountCoordinator = struct {
     account: account_api.Account = .initRestoring(),
     workbench: *workbench_api.Workbench,
@@ -516,19 +518,23 @@ const AccountCoordinator = struct {
     ) account_contract.AccountCommandResult {
         const self: *AccountCoordinator = @ptrCast(@alignCast(context));
         self.assertMainThread();
-        const needs_replacement = switch (command) {
-            .select_model, .logout => true,
-            else => false,
+        const replacement: ExecutionReplacement = switch (command) {
+            .select_model => .default,
+            .logout => .identity,
+            else => .none,
         };
-        if (needs_replacement) {
-            self.workbench.beginExecutionReplacement() catch
-                return .rejected(.execution_in_use);
+        switch (replacement) {
+            .none => {},
+            .default => self.workbench.beginDefaultExecutionReplacement() catch
+                return .rejected(.execution_in_use),
+            .identity => self.workbench.beginExecutionReplacement() catch
+                return .rejected(.execution_in_use),
         }
         const prepared = self.account.prepareCommand(command);
         return switch (prepared) {
             .transition => |value| self.commitTransition(value),
             .rejected => |error_code| result: {
-                if (needs_replacement)
+                if (replacement != .none)
                     self.workbench.endExecutionReplacementNoFail();
                 break :result .rejected(error_code);
             },

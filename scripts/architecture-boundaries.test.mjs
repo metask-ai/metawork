@@ -568,8 +568,11 @@ test("Workbench owns Task lifecycle, continuation, and canonical redaction", () 
   assert.match(closeWorker, /notifier\.notify\(\)/);
   assert.doesNotMatch(closeWorker, /requestWake\(\)/);
   assert.match(workbench, /sanitizeInto\(\s*run\.terminal_diagnostic/);
-  assert.match(workbench, /copyProjected\(prompt/);
+  assert.match(workbench, /copyProjected\(\s*prompt/);
   assert.match(workbench, /replaceTrackedProjected\(\s*&view\.title/);
+  assert.match(taskRecord, /execution: \?account_contract\.OwnedExecutionConfig/);
+  assert.match(workbench, /redaction_secret = execution\.api_key/);
+  assert.match(workbench, /releaseQuiescentTaskExecutions/);
 
   const agent = read("src/agent/session.zig");
   assert.match(agent, /pub const SessionRoute = struct/);

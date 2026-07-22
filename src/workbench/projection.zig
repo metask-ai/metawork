@@ -344,6 +344,7 @@ const UiRecord = struct {
 
 const TaskView = struct {
     session: ?*lifecycle.Session,
+    execution: ?account_contract.OwnedExecutionConfig = null,
     id: u64,
     execution_generation: u64,
     execution_provider: Provider,
@@ -380,11 +381,14 @@ pub const RunRef = struct {
     task_id: u64,
     run_id: u64,
     generation: u64,
+    execution_generation: u64,
     released: bool = false,
 
     pub fn isCurrent(self: *const RunRef) bool {
         return !self.released and self.task.id == self.task_id and
-            self.record.id == self.run_id and self.record.generation == self.generation;
+            self.record.id == self.run_id and self.record.generation == self.generation and
+            self.record.execution_generation == self.execution_generation and
+            self.task.execution_generation == self.execution_generation;
     }
 
     pub fn release(self: *RunRef) void {
@@ -714,6 +718,30 @@ const ActiveExecution = struct {
         return self.generation != 0 and self.provider != null and
             self.credential_len != 0 and self.model_len != 0;
     }
+
+    fn cloneOwned(
+        self: *const ActiveExecution,
+        allocator: std.mem.Allocator,
+    ) std.mem.Allocator.Error!account_contract.OwnedExecutionConfig {
+        std.debug.assert(self.ready());
+        const owned_model = try allocator.dupe(u8, self.model());
+        errdefer allocator.free(owned_model);
+        const base_url = try allocator.dupe(u8, self.baseUrl());
+        errdefer allocator.free(base_url);
+        const owned_credential = try allocator.dupe(u8, self.credential());
+        errdefer {
+            std.crypto.secureZero(u8, owned_credential);
+            allocator.free(owned_credential);
+        }
+        return account_contract.OwnedExecutionConfig.initOwned(
+            allocator,
+            accountProviderKind(self.provider.?),
+            owned_model,
+            base_url,
+            self.generation,
+            owned_credential,
+        ) catch unreachable;
+    }
 };
 
 /// Workbench-owned product projection. AgentCore protocol is interpreted only
@@ -863,6 +891,7 @@ pub const Workbench = struct {
     pub fn beginExecutionReplacement(self: *Workbench) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
+        self.releaseQuiescentTaskExecutions();
         if (self.execution_replacement_pending)
             return error.ExecutionInUse;
         self.execution_replacement_pending = true;
@@ -870,6 +899,14 @@ pub const Workbench = struct {
             self.execution_replacement_pending = false;
             return error.ExecutionInUse;
         }
+    }
+
+    pub fn beginDefaultExecutionReplacement(self: *Workbench) Error!void {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        self.syncLifecycle();
+        if (self.execution_replacement_pending)
+            return error.ExecutionInUse;
+        self.execution_replacement_pending = true;
     }
 
     pub fn endExecutionReplacementNoFail(self: *Workbench) void {
@@ -891,6 +928,9 @@ pub const Workbench = struct {
             return error.ExecutionInUse;
         if (!self.canCreateTask())
             return error.ExecutionUnavailable;
+        var task_execution = try self.execution.cloneOwned(self.allocator);
+        errdefer task_execution.deinit();
+        const task_execution_input = task_execution.input();
         const slot = findEmpty(TaskView, self.tasks) orelse return error.TaskCapacity;
         const canonical = std.Io.Dir.realPathFileAbsoluteAlloc(
             self.agent_runtime.io,
@@ -924,12 +964,20 @@ pub const Workbench = struct {
                 break :temporary .{ .temporary = canonical_root };
             },
         };
-        const workspace = try self.copyBounded(canonical, self.limits.max_workspace_bytes);
+        if (canonical.len > self.limits.max_workspace_bytes)
+            return error.ProjectionCapacity;
+        const workspace_projection = try self.copyProjected(
+            canonical,
+            self.limits.max_workspace_bytes,
+            task_execution_input.api_key,
+        );
+        std.debug.assert(!workspace_projection.truncated);
+        const workspace = workspace_projection.value;
         errdefer self.freeTracked(workspace);
         const title = try self.copyBounded("", self.limits.max_task_title_bytes);
         errdefer self.freeTracked(title);
         const execution_model = try self.copyBounded(
-            self.execution.model(),
+            task_execution_input.target.model,
             account_contract.Limits.model_id_bytes,
         );
         errdefer self.freeTracked(execution_model);
@@ -940,12 +988,12 @@ pub const Workbench = struct {
         errdefer self.allocator.free(ui_history);
         @memset(ui_history, null);
         const route = self.agent_runtime.createSessionRoute(.{
-            .provider = agentProvider(self.execution.provider.?),
+            .provider = agentProvider(accountProvider(task_execution_input.target.provider_kind)),
             .permission_mode = .default,
             .shell_policy = .unrestricted,
-            .credential = self.execution.credential(),
-            .model = self.execution.model(),
-            .base_url = self.execution.baseUrl(),
+            .credential = task_execution_input.api_key,
+            .model = task_execution_input.target.model,
+            .base_url = task_execution_input.target.base_url,
             .workspace = .{
                 .canonical_root = canonical,
                 .trust = workspace_trust,
@@ -956,9 +1004,10 @@ pub const Workbench = struct {
         };
         self.tasks[slot] = .{
             .session = route.session,
+            .execution = task_execution.take(),
             .id = route.id,
-            .execution_generation = self.execution.generation,
-            .execution_provider = self.execution.provider.?,
+            .execution_generation = task_execution_input.execution_generation,
+            .execution_provider = accountProvider(task_execution_input.target.provider_kind),
             .execution_model = execution_model,
             .workspace_root = workspace,
             .title = title,
@@ -974,6 +1023,7 @@ pub const Workbench = struct {
         self.syncLifecycle();
         const view = self.findTask(task_id) orelse return error.UnknownTask;
         if (!self.taskContinuationAvailable(view)) return error.TaskClosing;
+        _ = try taskExecutionInput(view);
         if (hasNonTerminalRun(view)) return error.TaskBusy;
         const session = view.session orelse return error.TaskClosing;
         const run_id = try session.prepareRun(prompt);
@@ -1040,6 +1090,7 @@ pub const Workbench = struct {
             .task_id = task_id,
             .run_id = run_id,
             .generation = record.generation,
+            .execution_generation = record.execution_generation,
         };
     }
 
@@ -1050,7 +1101,11 @@ pub const Workbench = struct {
         if (terminalPayload(run) != null) return;
         const session = view.session orelse
             return error.TaskClosing;
-        const record = self.prepareCancelledUiRecord(session, run_id);
+        const record = self.prepareCancelledUiRecord(
+            session,
+            run_id,
+            run.redaction_secret,
+        );
         if (self.executor.cancel(run)) {
             cancelPreparedRunOrPanic(session, run_id);
             releaseWorkerReference(run);
@@ -1093,10 +1148,17 @@ pub const Workbench = struct {
     ) Error!void {
         self.syncLifecycle();
         const view = self.findTask(task_id) orelse return error.UnknownTask;
+        const run = findRun(view.runs, run_id) orelse return error.NoSuchRun;
         const session = view.session orelse
             return error.TaskClosing;
         const agent_response = agentUiResponse(response);
-        const record = self.prepareUiRecord(session, run_id, request_id, agent_response);
+        const record = self.prepareUiRecord(
+            session,
+            run_id,
+            request_id,
+            agent_response,
+            run.redaction_secret,
+        );
         try session.respondUi(run_id, request_id, agent_response);
         self.pushUiRecord(view, record);
         self.bumpRevision();
@@ -1109,7 +1171,16 @@ pub const Workbench = struct {
         const session = view.session orelse return;
         const prior_lifecycle = view.lifecycle;
         const prior_continuation = view.continuation;
-        const cancelled_ui = self.prepareCancelledUiRecord(session, view.active_run_id);
+        const cancelled_ui = self.prepareCancelledUiRecord(
+            session,
+            view.active_run_id,
+            if (findRun(view.runs, view.active_run_id)) |run|
+                run.redaction_secret
+            else if (view.execution) |*execution|
+                execution.input().api_key
+            else
+                &.{},
+        );
         if (findRun(view.runs, view.active_run_id)) |run| {
             if (self.executor.cancel(run)) {
                 cancelPreparedRunOrPanic(session, view.active_run_id);
@@ -1169,6 +1240,7 @@ pub const Workbench = struct {
             &view.title,
             trimmed,
             self.limits.max_task_title_bytes,
+            if (view.execution) |*execution| execution.input().api_key else &.{},
         );
         view.title_redacted = projected.redacted;
         self.bumpRevision();
@@ -1332,24 +1404,25 @@ pub const Workbench = struct {
         switch (event) {
             .text_chunk => |text| {
                 try self.appendTrackedText(&run.assistant, text, self.limits.max_assistant_message_bytes);
-                if (self.redactTrackedText(&run.assistant)) run.assistant_redacted = true;
+                if (self.redactTrackedText(&run.assistant, run.redaction_secret))
+                    run.assistant_redacted = true;
             },
             .tool_start => |tool| {
                 const view = try self.findOrCreateTool(run, tool.id, tool.name, tool.input);
                 view.state = .running;
-                _ = try self.replaceTrackedProjected(&run.status_text, tool.name, self.limits.max_tool_field_bytes);
+                _ = try self.replaceTrackedProjected(&run.status_text, tool.name, self.limits.max_tool_field_bytes, run.redaction_secret);
             },
             .tool_progress => |progress| {
                 const tool = findTool(run.tools, progress.id) orelse return error.ToolCapacity;
-                const projected = try self.replaceTrackedProjected(&tool.progress, progress.text, self.limits.max_tool_field_bytes);
+                const projected = try self.replaceTrackedProjected(&tool.progress, progress.text, self.limits.max_tool_field_bytes, run.redaction_secret);
                 tool.progress_truncated = projected.truncated;
                 tool.redacted = tool.redacted or projected.redacted;
             },
-            .progress => |progress| _ = try self.replaceTrackedProjected(&run.status_text, progress.tool_name, self.limits.max_tool_field_bytes),
+            .progress => |progress| _ = try self.replaceTrackedProjected(&run.status_text, progress.tool_name, self.limits.max_tool_field_bytes, run.redaction_secret),
             .tool_result => |result| {
                 const tool = try self.findOrCreateTool(run, result.id, result.name, result.input);
-                const input = try self.replaceTrackedProjected(&tool.input, result.input, self.limits.max_tool_field_bytes);
-                const content = try self.replaceTrackedProjected(&tool.content, result.content, self.limits.max_tool_field_bytes);
+                const input = try self.replaceTrackedProjected(&tool.input, result.input, self.limits.max_tool_field_bytes, run.redaction_secret);
+                const content = try self.replaceTrackedProjected(&tool.content, result.content, self.limits.max_tool_field_bytes, run.redaction_secret);
                 tool.input_truncated = input.truncated;
                 tool.content_truncated = content.truncated;
                 tool.redacted = tool.redacted or input.redacted or content.redacted;
@@ -1363,10 +1436,10 @@ pub const Workbench = struct {
                 run.usage.cache_read_input_tokens = try addU64(run.usage.cache_read_input_tokens, usage.cache_read_input_tokens);
                 run.usage.cache_creation_input_tokens = try addU64(run.usage.cache_creation_input_tokens, usage.cache_creation_input_tokens);
             },
-            .context_warning => |warning| _ = try self.replaceTrackedProjected(&run.status_text, warning.level, self.limits.max_tool_field_bytes),
-            .auto_compact => _ = try self.replaceTrackedProjected(&run.status_text, "Context compacted", self.limits.max_tool_field_bytes),
-            .retry_notice => _ = try self.replaceTrackedProjected(&run.status_text, "Retrying provider", self.limits.max_tool_field_bytes),
-            .stream_done => _ = try self.replaceTrackedProjected(&run.status_text, "Finishing", self.limits.max_tool_field_bytes),
+            .context_warning => |warning| _ = try self.replaceTrackedProjected(&run.status_text, warning.level, self.limits.max_tool_field_bytes, run.redaction_secret),
+            .auto_compact => _ = try self.replaceTrackedProjected(&run.status_text, "Context compacted", self.limits.max_tool_field_bytes, run.redaction_secret),
+            .retry_notice => _ = try self.replaceTrackedProjected(&run.status_text, "Retrying provider", self.limits.max_tool_field_bytes, run.redaction_secret),
+            .stream_done => _ = try self.replaceTrackedProjected(&run.status_text, "Finishing", self.limits.max_tool_field_bytes, run.redaction_secret),
         }
         self.bumpRevision();
     }
@@ -1562,10 +1635,14 @@ pub const Workbench = struct {
     }
 
     fn writeTask(self: *Workbench, writer: *std.Io.Writer, view: *TaskView) Error!void {
+        const credential = if (view.execution) |*execution|
+            execution.input().api_key
+        else
+            &.{};
         writer.print("{{\"id\":\"{d}\",\"title\":", .{view.id}) catch return error.SnapshotTooLarge;
-        try self.projectedJsonValue(writer, view.title);
+        try self.projectedJsonValueWithCredential(writer, view.title, credential);
         writer.writeAll(",\"workspaceRoot\":") catch return error.SnapshotTooLarge;
-        try self.projectedJsonValue(writer, view.workspace_root);
+        try self.projectedJsonValueWithCredential(writer, view.workspace_root, credential);
         writer.print(",\"lifecycle\":\"{s}\",\"continuationAvailable\":{},\"archived\":{},\"closeFailed\":{},\"currentRunId\":\"{d}\",\"currentRunPhase\":", .{
             @tagName(view.lifecycle),
             self.taskContinuationAvailable(view),
@@ -1592,7 +1669,7 @@ pub const Workbench = struct {
         writer.writeAll("],\"pendingUi\":") catch return error.SnapshotTooLarge;
         try self.writePendingUi(writer, view);
         writer.writeAll(",\"uiHistory\":[") catch return error.SnapshotTooLarge;
-        try self.writeUiHistory(writer, view);
+        try self.writeUiHistory(writer, view, credential);
         writer.writeByte(']') catch return error.SnapshotTooLarge;
         writer.writeByte('}') catch return error.SnapshotTooLarge;
     }
@@ -1620,12 +1697,15 @@ pub const Workbench = struct {
             writer.writeAll("null") catch return error.SnapshotTooLarge;
             return;
         }
+        const run = findRun(view.runs, pending.run_id) orelse
+            return error.InvalidUiResponse;
         try self.writePendingUiProjection(
             writer,
             pending.request_id,
             pending.run_id,
             view.pending_ui_order,
             parsed.value,
+            run.redaction_secret,
         );
     }
 
@@ -1644,10 +1724,10 @@ pub const Workbench = struct {
         const product_id = std.fmt.bufPrint(&product_id_storage, "tool-{d}", .{order}) catch unreachable;
         const owned_id = try self.copyBounded(product_id, tool_product_id_capacity);
         errdefer self.freeTracked(owned_id);
-        const name_projection = try self.copyProjected(name, self.limits.max_tool_field_bytes);
+        const name_projection = try self.copyProjected(name, self.limits.max_tool_field_bytes, run.redaction_secret);
         const owned_name = name_projection.value;
         errdefer self.freeTracked(owned_name);
-        const input_projection = try self.copyProjected(input, self.limits.max_tool_field_bytes);
+        const input_projection = try self.copyProjected(input, self.limits.max_tool_field_bytes, run.redaction_secret);
         const owned_input = input_projection.value;
         errdefer self.freeTracked(owned_input);
         const progress = try self.copyBounded("", self.limits.max_tool_field_bytes);
@@ -1675,6 +1755,20 @@ pub const Workbench = struct {
             continuationAvailable(task.continuation);
     }
 
+    fn taskExecutionInput(
+        task: *const TaskView,
+    ) Error!account_contract.ExecutionConfigInput {
+        const execution = &(task.execution orelse return error.ExecutionUnavailable);
+        const input = execution.input();
+        account_contract.validateExecutionConfig(input) catch
+            return error.ExecutionGenerationMismatch;
+        if (input.execution_generation != task.execution_generation or
+            accountProvider(input.target.provider_kind) != task.execution_provider or
+            !std.mem.eql(u8, input.target.model, task.execution_model))
+            return error.ExecutionGenerationMismatch;
+        return input;
+    }
+
     fn canCreateTask(self: *const Workbench) bool {
         return !self.shutting_down and
             !self.execution_replacement_pending and
@@ -1688,6 +1782,7 @@ pub const Workbench = struct {
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
             if (task.lifecycle != .closed or
+                task.execution != null or
                 task.session != null or
                 task.closing_session != null or
                 task.close_thread != null or
@@ -1696,6 +1791,24 @@ pub const Workbench = struct {
                 return false;
         }
         return true;
+    }
+
+    fn releaseQuiescentTaskExecutions(self: *Workbench) void {
+        for (self.tasks) |*entry| {
+            const task = &(entry.* orelse continue);
+            if (task.lifecycle != .closed or task.execution == null or
+                task.session != null or task.closing_session != null or
+                task.close_thread != null or
+                task.run_references.load(.acquire) != 0 or
+                hasNonTerminalRun(task))
+                continue;
+            for (task.runs) |*run_entry| {
+                const run = &(run_entry.* orelse continue);
+                run.redaction_secret = &.{};
+            }
+            task.execution.?.deinit();
+            task.execution = null;
+        }
     }
 
     fn findTask(self: *Workbench, task_id: u64) ?*TaskView {
@@ -1713,11 +1826,16 @@ pub const Workbench = struct {
     }
 
     fn reserveRunRecord(self: *Workbench, task: *TaskView, prompt: []const u8) Error!usize {
+        const execution = try taskExecutionInput(task);
         const slot = findEmpty(RunRecord, task.runs) orelse return error.RunCapacity;
         if (task.next_run_generation == std.math.maxInt(u64)) return error.RunGenerationExhausted;
         if (prompt.len > self.limits.max_user_message_bytes)
             return error.ProjectionCapacity;
-        const user_projection = try self.copyProjected(prompt, self.limits.max_user_message_bytes);
+        const user_projection = try self.copyProjected(
+            prompt,
+            self.limits.max_user_message_bytes,
+            execution.api_key,
+        );
         const user = user_projection.value;
         errdefer self.freeTracked(user);
         const status_text = try self.copyBounded("Queued", self.limits.max_tool_field_bytes);
@@ -1739,7 +1857,7 @@ pub const Workbench = struct {
             .tools = tools,
             .status_text = status_text,
             .terminal_diagnostic = terminal_diagnostic,
-            .redaction_secret = self.execution.credential(),
+            .redaction_secret = execution.api_key,
             .workbench = undefined,
             .task = undefined,
             .session = undefined,
@@ -1781,6 +1899,7 @@ pub const Workbench = struct {
         self.freeTracked(task.execution_model);
         self.freeTracked(task.workspace_root);
         self.freeTracked(task.title);
+        if (task.execution) |*execution| execution.deinit();
         task.* = undefined;
     }
 
@@ -1821,14 +1940,19 @@ pub const Workbench = struct {
         redacted: bool,
     };
 
-    fn copyProjected(self: *Workbench, value: []const u8, max: usize) Error!ProjectedCopy {
+    fn copyProjected(
+        self: *Workbench,
+        value: []const u8,
+        max: usize,
+        credential: []const u8,
+    ) Error!ProjectedCopy {
         const capacity = @min(value.len, max);
         const scratch = try self.allocator.alloc(u8, capacity);
         defer self.allocator.free(scratch);
         const result = sanitizeInto(
             scratch,
             value,
-            self.execution.credential(),
+            credential,
         );
         return .{
             .value = try self.copyBounded(scratch[0..result.len], max),
@@ -1837,22 +1961,31 @@ pub const Workbench = struct {
         };
     }
 
-    fn replaceTrackedProjected(self: *Workbench, target: *[]u8, value: []const u8, max: usize) Error!SanitizeResult {
+    fn replaceTrackedProjected(
+        self: *Workbench,
+        target: *[]u8,
+        value: []const u8,
+        max: usize,
+        credential: []const u8,
+    ) Error!SanitizeResult {
         const capacity = @min(value.len, max);
         const scratch = try self.allocator.alloc(u8, capacity);
         defer self.allocator.free(scratch);
         const result = sanitizeInto(
             scratch,
             value,
-            self.execution.credential(),
+            credential,
         );
         try self.replaceTracked(target, scratch[0..result.len], max);
         return result;
     }
 
-    fn redactTrackedText(self: *Workbench, target: *TrackedText) bool {
+    fn redactTrackedText(
+        _: *Workbench,
+        target: *TrackedText,
+        credential: []const u8,
+    ) bool {
         std.debug.assert(target.committed_len <= target.list.items.len);
-        const credential = self.execution.credential();
         if (credential.len == 0) {
             target.committed_len = target.list.items.len;
             return false;
@@ -1892,8 +2025,20 @@ pub const Workbench = struct {
     }
 
     fn projectedJsonValue(self: *Workbench, writer: *std.Io.Writer, value: []const u8) Error!void {
+        return self.projectedJsonValueWithCredential(
+            writer,
+            value,
+            self.execution.credential(),
+        );
+    }
+
+    fn projectedJsonValueWithCredential(
+        _: *Workbench,
+        writer: *std.Io.Writer,
+        value: []const u8,
+        credential: []const u8,
+    ) Error!void {
         const hex = "0123456789abcdef";
-        const credential = self.execution.credential();
         writer.writeByte('"') catch return error.SnapshotTooLarge;
         var index: usize = 0;
         while (index < value.len) {
@@ -1933,12 +2078,13 @@ pub const Workbench = struct {
         run_id: u64,
         order: u64,
         request: lifecycle.UiRequest,
+        credential: []const u8,
     ) Error!void {
         writer.print("{{\"requestId\":\"{d}\",\"runId\":\"{d}\",\"order\":\"{d}\",\"redacted\":{},", .{
             request_id,
             run_id,
             order,
-            self.requestContainsSecret(request),
+            requestContainsSecret(request, credential),
         }) catch return error.SnapshotTooLarge;
         switch (request) {
             .ask_question => |questions| {
@@ -1946,18 +2092,18 @@ pub const Workbench = struct {
                 for (questions, 0..) |question, question_index| {
                     if (question_index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
                     writer.writeAll("{\"question\":") catch return error.SnapshotTooLarge;
-                    try self.projectedJsonValue(writer, question.question);
+                    try self.projectedJsonValueWithCredential(writer, question.question, credential);
                     writer.writeAll(",\"header\":") catch return error.SnapshotTooLarge;
-                    try self.projectedJsonValue(writer, question.header);
+                    try self.projectedJsonValueWithCredential(writer, question.header, credential);
                     writer.print(",\"multi\":{},\"options\":[", .{question.multi}) catch return error.SnapshotTooLarge;
                     for (question.options, 0..) |option, option_index| {
                         if (option_index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
                         writer.writeAll("{\"label\":") catch return error.SnapshotTooLarge;
-                        try self.projectedJsonValue(writer, option.label);
+                        try self.projectedJsonValueWithCredential(writer, option.label, credential);
                         writer.writeAll(",\"description\":") catch return error.SnapshotTooLarge;
-                        try self.projectedJsonValue(writer, option.description);
+                        try self.projectedJsonValueWithCredential(writer, option.description, credential);
                         writer.writeAll(",\"preview\":") catch return error.SnapshotTooLarge;
-                        try self.projectedJsonValue(writer, option.preview);
+                        try self.projectedJsonValueWithCredential(writer, option.preview, credential);
                         writer.writeByte('}') catch return error.SnapshotTooLarge;
                     }
                     writer.writeAll("]}") catch return error.SnapshotTooLarge;
@@ -1966,36 +2112,35 @@ pub const Workbench = struct {
             },
             .permission => |permission| {
                 writer.writeAll("\"kind\":\"permission\",\"tool\":") catch return error.SnapshotTooLarge;
-                try self.projectedJsonValue(writer, permission.tool);
+                try self.projectedJsonValueWithCredential(writer, permission.tool, credential);
                 writer.writeAll(",\"args\":") catch return error.SnapshotTooLarge;
-                try self.projectedJsonValue(writer, permission.args);
+                try self.projectedJsonValueWithCredential(writer, permission.args, credential);
             },
         }
         writer.writeByte('}') catch return error.SnapshotTooLarge;
     }
 
-    fn requestContainsSecret(self: *Workbench, request: lifecycle.UiRequest) bool {
-        if (self.execution.credential().len == 0) return false;
+    fn requestContainsSecret(request: lifecycle.UiRequest, credential: []const u8) bool {
+        if (credential.len == 0) return false;
         return switch (request) {
             .ask_question => |questions| questions_block: {
                 for (questions) |question| {
-                    if (self.containsKnownSecret(question.question) or self.containsKnownSecret(question.header))
+                    if (containsKnownSecret(question.question, credential) or containsKnownSecret(question.header, credential))
                         break :questions_block true;
                     for (question.options) |option|
-                        if (self.containsKnownSecret(option.label) or
-                            self.containsKnownSecret(option.description) or
-                            self.containsKnownSecret(option.preview))
+                        if (containsKnownSecret(option.label, credential) or
+                            containsKnownSecret(option.description, credential) or
+                            containsKnownSecret(option.preview, credential))
                             break :questions_block true;
                 }
                 break :questions_block false;
             },
-            .permission => |permission| self.containsKnownSecret(permission.tool) or
-                self.containsKnownSecret(permission.args),
+            .permission => |permission| containsKnownSecret(permission.tool, credential) or
+                containsKnownSecret(permission.args, credential),
         };
     }
 
-    fn containsKnownSecret(self: *Workbench, value: []const u8) bool {
-        const credential = self.execution.credential();
+    fn containsKnownSecret(value: []const u8, credential: []const u8) bool {
         return credential.len != 0 and
             std.mem.indexOf(u8, value, credential) != null;
     }
@@ -2003,14 +2148,15 @@ pub const Workbench = struct {
     fn writeRun(self: *Workbench, writer: *std.Io.Writer, run: *RunRecord) Error!void {
         const terminal = productTerminalFacts(run);
         writer.print("{{\"id\":\"{d}\",\"phase\":\"{s}\",\"user\":", .{ run.id, @tagName(runPhase(run)) }) catch return error.SnapshotTooLarge;
-        try self.projectedJsonValue(writer, run.user);
+        try self.projectedJsonValueWithCredential(writer, run.user, run.redaction_secret);
         writer.writeAll(",\"assistant\":") catch return error.SnapshotTooLarge;
-        try self.projectedJsonValue(
+        try self.projectedJsonValueWithCredential(
             writer,
             run.assistant.list.items[0..run.assistant.committed_len],
+            run.redaction_secret,
         );
         writer.print(",\"assistantRedacted\":{},\"status\":", .{run.assistant_redacted}) catch return error.SnapshotTooLarge;
-        try self.projectedJsonValue(writer, run.status_text);
+        try self.projectedJsonValueWithCredential(writer, run.status_text, run.redaction_secret);
         writer.writeAll(",\"outcome\":") catch return error.SnapshotTooLarge;
         if (terminal) |value| jsonValue(writer, @tagName(value.outcome)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.writeAll(",\"cause\":") catch return error.SnapshotTooLarge;
@@ -2029,16 +2175,16 @@ pub const Workbench = struct {
             if (tool_count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
             tool_count += 1;
             writer.writeAll("{\"id\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, tool.id);
+            try self.projectedJsonValueWithCredential(writer, tool.id, run.redaction_secret);
             writer.print(",\"order\":\"{d}\"", .{tool.order}) catch return error.SnapshotTooLarge;
             writer.writeAll(",\"name\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, tool.name);
+            try self.projectedJsonValueWithCredential(writer, tool.name, run.redaction_secret);
             writer.writeAll(",\"input\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, tool.input);
+            try self.projectedJsonValueWithCredential(writer, tool.input, run.redaction_secret);
             writer.writeAll(",\"progress\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, tool.progress);
+            try self.projectedJsonValueWithCredential(writer, tool.progress, run.redaction_secret);
             writer.writeAll(",\"content\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, tool.content);
+            try self.projectedJsonValueWithCredential(writer, tool.content, run.redaction_secret);
             writer.print(",\"state\":\"{s}\",\"isError\":{},\"elapsedMs\":\"{d}\",\"inputTruncated\":{},\"progressTruncated\":{},\"contentTruncated\":{},\"redacted\":{}}}", .{
                 @tagName(tool.state),
                 tool.is_error,
@@ -2058,6 +2204,7 @@ pub const Workbench = struct {
         run_id: u64,
         request_id: u64,
         response: lifecycle.UiResponse,
+        credential: []const u8,
     ) UiRecord {
         var record = UiRecord{
             .request_id = request_id,
@@ -2071,7 +2218,7 @@ pub const Workbench = struct {
         var parsed = lifecycle.decodeUiRequest(self.allocator, pending.json) catch return record;
         defer parsed.deinit();
         record.kind = kindForRequest(parsed.value);
-        self.fillUiRecord(&record, parsed.value);
+        self.fillUiRecord(&record, parsed.value, credential);
         return record;
     }
 
@@ -2079,6 +2226,7 @@ pub const Workbench = struct {
         self: *Workbench,
         session: *lifecycle.Session,
         run_id: u64,
+        credential: []const u8,
     ) ?UiRecord {
         if (run_id == 0) return null;
         var pending = session.copyPendingUiRequest(self.allocator) catch return null;
@@ -2092,11 +2240,16 @@ pub const Workbench = struct {
             .kind = kindForRequest(parsed.value),
             .state = .cancelled,
         };
-        self.fillUiRecord(&record, parsed.value);
+        self.fillUiRecord(&record, parsed.value, credential);
         return record;
     }
 
-    fn fillUiRecord(self: *Workbench, record: *UiRecord, request: lifecycle.UiRequest) void {
+    fn fillUiRecord(
+        _: *Workbench,
+        record: *UiRecord,
+        request: lifecycle.UiRequest,
+        credential: []const u8,
+    ) void {
         const value = switch (request) {
             .ask_question => |questions| value: {
                 record.item_count = @intCast(@min(questions.len, std.math.maxInt(u32)));
@@ -2107,14 +2260,19 @@ pub const Workbench = struct {
         const result = sanitizeInto(
             &record.detail,
             value,
-            self.execution.credential(),
+            credential,
         );
         record.detail_len = result.len;
         record.detail_truncated = result.truncated;
         record.redacted = result.redacted;
     }
 
-    fn writeUiHistory(self: *Workbench, writer: *std.Io.Writer, view: *const TaskView) Error!void {
+    fn writeUiHistory(
+        self: *Workbench,
+        writer: *std.Io.Writer,
+        view: *const TaskView,
+        credential: []const u8,
+    ) Error!void {
         const start = if (view.ui_history_count == view.ui_history.len) view.ui_history_next else 0;
         for (0..view.ui_history_count) |offset| {
             if (offset != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
@@ -2127,7 +2285,7 @@ pub const Workbench = struct {
                 @tagName(record.kind),
                 @tagName(record.state),
             }) catch return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, record.detailSlice());
+            try self.projectedJsonValueWithCredential(writer, record.detailSlice(), credential);
             writer.print(",\"itemCount\":{d},\"detailTruncated\":{},\"redacted\":{}}}", .{
                 record.item_count,
                 record.detail_truncated,
@@ -2353,6 +2511,14 @@ fn agentProvider(provider: Provider) lifecycle.ProviderKind {
         .anthropic => .anthropic,
         .openai => .openai,
         .gemini => .gemini,
+    };
+}
+
+fn accountProviderKind(provider: Provider) account_contract.ProviderKind {
+    return switch (provider) {
+        .anthropic => .anthropic,
+        .openai => .openai,
+        .gemini => unreachable,
     };
 }
 
@@ -2877,6 +3043,8 @@ fn testWorkbench() !Workbench {
         .max_snapshot_bytes = 4 * 1024 * 1024,
     }, .{});
     try installTestExecution(&workbench);
+    var task_execution = try workbench.execution.cloneOwned(workbench.allocator);
+    errdefer task_execution.deinit();
     workbench.revision = 0;
     const workspace = try workbench.copyBounded("/tmp/metawork-test", workbench.limits.max_workspace_bytes);
     const execution_model = try workbench.copyBounded(
@@ -2905,6 +3073,7 @@ fn testWorkbench() !Workbench {
     };
     workbench.tasks[0] = .{
         .session = null,
+        .execution = task_execution.take(),
         .id = 3,
         .execution_generation = 1,
         .execution_provider = .anthropic,
@@ -3129,6 +3298,10 @@ test "Account projection and execution install use preallocated no-fail storage"
 test "execution replacement gate rejects live Task state and admits closed history" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
+    try workbench.beginDefaultExecutionReplacement();
+    try std.testing.expect(workbench.executionReplacementPending());
+    try std.testing.expect(!workbench.accountView().can_create_task);
+    workbench.endExecutionReplacementNoFail();
     try std.testing.expectError(
         error.ExecutionInUse,
         workbench.beginExecutionReplacement(),
@@ -3141,9 +3314,127 @@ test "execution replacement gate rejects live Task state and admits closed histo
     task.active_run_id = 0;
     try workbench.beginExecutionReplacement();
     try std.testing.expect(workbench.executionReplacementPending());
+    try std.testing.expect(task.execution == null);
+    try std.testing.expectEqualStrings("fixture-model", task.execution_model);
     try std.testing.expect(!workbench.accountView().can_create_task);
     workbench.endExecutionReplacementNoFail();
     try std.testing.expect(workbench.accountView().can_create_task);
+}
+
+test "default replacement preserves Task generation and installs the next admission default" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+
+    const task = &workbench.tasks[0].?;
+    const old_input = try Workbench.taskExecutionInput(task);
+    try std.testing.expectEqual(@as(u64, 1), old_input.execution_generation);
+    try std.testing.expectEqualStrings("SECRET-KEY", old_input.api_key);
+
+    var replacement = try account_contract.OwnedExecutionConfig.initOwned(
+        std.testing.allocator,
+        .openai,
+        try std.testing.allocator.dupe(u8, "fixture-model-2"),
+        try std.testing.allocator.dupe(
+            u8,
+            account_contract.metask_openai_chat_completions_url,
+        ),
+        2,
+        try std.testing.allocator.dupe(u8, "SECRET-KEY-2"),
+    );
+    errdefer replacement.deinit();
+    try workbench.beginDefaultExecutionReplacement();
+    try std.testing.expect(workbench.taskContinuationAvailable(task));
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        (try Workbench.taskExecutionInput(task)).execution_generation,
+    );
+    try std.testing.expect(!workbench.accountView().can_create_task);
+    workbench.commitAccountFactNoFail(.{
+        .kind = .execution_changed,
+        .view = .{
+            .session_state = .authenticated,
+            .execution_state = .ready,
+            .operation = .none,
+            .readiness = .ready,
+            .primary_action = .none,
+            .account_id = "account-1",
+            .display_name = "Metask User",
+            .selected_api_key_id = "key-2",
+            .selected_model = "fixture-model-2",
+            .can_create_task = true,
+            .execution_generation = 2,
+        },
+    });
+    workbench.installExecutionNoFail(&replacement);
+    workbench.endExecutionReplacementNoFail();
+    workbench.finishAccountCommitNoFail();
+
+    const preserved = try Workbench.taskExecutionInput(task);
+    try std.testing.expectEqual(@as(u64, 1), preserved.execution_generation);
+    try std.testing.expectEqualStrings("fixture-model", preserved.target.model);
+    try std.testing.expectEqualStrings("SECRET-KEY", preserved.api_key);
+    try std.testing.expectEqual(@as(u64, 2), workbench.execution.generation);
+    try std.testing.expectEqualStrings("fixture-model-2", workbench.execution.model());
+
+    var next_task_execution = try workbench.execution.cloneOwned(std.testing.allocator);
+    defer next_task_execution.deinit();
+    try std.testing.expectEqual(
+        @as(u64, 2),
+        next_task_execution.input().execution_generation,
+    );
+
+    const slot = try workbench.reserveRunRecord(task, "old SECRET-KEY remains private");
+    defer workbench.discardRunRecord(task, slot);
+    try std.testing.expectEqual(@as(u64, 1), task.runs[slot].?.execution_generation);
+    try std.testing.expectEqualStrings("old *** remains private", task.runs[slot].?.user);
+    try std.testing.expectEqualStrings("SECRET-KEY", task.runs[slot].?.redaction_secret);
+
+    task.execution_generation = 2;
+    try std.testing.expectError(
+        error.ExecutionGenerationMismatch,
+        Workbench.taskExecutionInput(task),
+    );
+    try std.testing.expectError(
+        error.ExecutionGenerationMismatch,
+        workbench.runTask(task.id, "must reject a mismatched binding"),
+    );
+    task.execution_generation = 1;
+}
+
+test "Workbench shutdown releases current and Task-owned execution generations" {
+    var workbench = try testWorkbench();
+    try workbench.beginDefaultExecutionReplacement();
+    var replacement = try account_contract.OwnedExecutionConfig.initOwned(
+        std.testing.allocator,
+        .anthropic,
+        try std.testing.allocator.dupe(u8, "fixture-model-2"),
+        try std.testing.allocator.dupe(
+            u8,
+            account_contract.metask_anthropic_messages_url,
+        ),
+        2,
+        try std.testing.allocator.dupe(u8, "SECRET-KEY-2"),
+    );
+    errdefer replacement.deinit();
+    workbench.commitAccountFactNoFail(.{
+        .kind = .execution_changed,
+        .view = .{
+            .session_state = .authenticated,
+            .execution_state = .ready,
+            .operation = .none,
+            .readiness = .ready,
+            .primary_action = .none,
+            .account_id = "account-1",
+            .display_name = "Metask User",
+            .selected_api_key_id = "key-2",
+            .selected_model = "fixture-model-2",
+            .can_create_task = true,
+            .execution_generation = 2,
+        },
+    });
+    workbench.installExecutionNoFail(&replacement);
+    workbench.endExecutionReplacementNoFail();
+    workbench.deinit();
 }
 
 test "terminal publication is allocation-free write-once bounded history" {
@@ -3359,6 +3650,9 @@ test "delete waits for RunRef quiescence and stale generations fail validation" 
     run_ref.record.generation += 1;
     try std.testing.expect(!run_ref.isCurrent());
     run_ref.record.generation = run_ref.generation;
+    run_ref.record.execution_generation += 1;
+    try std.testing.expect(!run_ref.isCurrent());
+    run_ref.record.execution_generation = run_ref.execution_generation;
 
     try workbench.deleteTask(3);
     try std.testing.expect(task.delete_pending);
@@ -3411,7 +3705,7 @@ test "Workbench snapshot budget includes JSON escaping and structural overhead" 
     defer std.testing.allocator.free(controls);
     @memset(controls, 1);
     try workbench.appendTrackedText(&run.assistant, controls, workbench.limits.max_assistant_message_bytes);
-    _ = workbench.redactTrackedText(&run.assistant);
+    _ = workbench.redactTrackedText(&run.assistant, run.redaction_secret);
 
     const snapshot_storage = try std.testing.allocator.alloc(u8, workbench.limits.max_snapshot_bytes);
     defer std.testing.allocator.free(snapshot_storage);
@@ -3564,7 +3858,10 @@ test "default snapshot budget contains the maximum structural projection" {
         escaped_assistant,
         limits.max_assistant_message_bytes,
     );
-    _ = workbench.redactTrackedText(&workbench.tasks[0].?.runs[0].?.assistant);
+    _ = workbench.redactTrackedText(
+        &workbench.tasks[0].?.runs[0].?.assistant,
+        workbench.tasks[0].?.runs[0].?.redaction_secret,
+    );
     const remaining_projection = limits.max_projection_bytes - workbench.projection_bytes;
     const escaped_tool = try std.testing.allocator.alloc(
         u8,
@@ -3614,6 +3911,7 @@ test "pending UI re-encoding remains inside its concurrent snapshot allowance" {
         std.math.maxInt(u64),
         std.math.maxInt(u64),
         request,
+        workbench.execution.credential(),
     );
     try std.testing.expect(writer.buffered().len <= allowance);
 }
@@ -3672,7 +3970,14 @@ test "known Host credentials are removed from assistant, tool, and UI projection
     const request = lifecycle.UiRequest{ .permission = .{ .tool = "Bash", .args = "token=SECRET-KEY" } };
     var pending_storage: [4096]u8 = undefined;
     var pending_writer = std.Io.Writer.fixed(&pending_storage);
-    try workbench.writePendingUiProjection(&pending_writer, 9, 7, 1, request);
+    try workbench.writePendingUiProjection(
+        &pending_writer,
+        9,
+        7,
+        1,
+        request,
+        workbench.tasks[0].?.runs[0].?.redaction_secret,
+    );
 
     var snapshot_storage: [96 * 1024]u8 = undefined;
     const snapshot = try workbench.writeSnapshot(&snapshot_storage);
@@ -3717,13 +4022,13 @@ test "assistant credential redaction finalizes ordinary chunks without rescannin
 
     for (0..4096) |_| {
         try workbench.appendTrackedText(assistant, "x", workbench.limits.max_assistant_message_bytes);
-        try std.testing.expect(!workbench.redactTrackedText(assistant));
+        try std.testing.expect(!workbench.redactTrackedText(assistant, workbench.execution.credential()));
         try std.testing.expectEqual(assistant.list.items.len, assistant.committed_len);
     }
     try std.testing.expectEqual(@as(usize, 4096), assistant.list.items.len);
 
     try workbench.appendTrackedText(assistant, "SECRET-", workbench.limits.max_assistant_message_bytes);
-    try std.testing.expect(!workbench.redactTrackedText(assistant));
+    try std.testing.expect(!workbench.redactTrackedText(assistant, workbench.execution.credential()));
     try std.testing.expectEqual(assistant.list.items.len - "SECRET-".len, assistant.committed_len);
 
     var pending_snapshot_storage: [96 * 1024]u8 = undefined;
@@ -3731,12 +4036,12 @@ test "assistant credential redaction finalizes ordinary chunks without rescannin
     try std.testing.expect(std.mem.indexOf(u8, pending_snapshot, "SECRET-") == null);
 
     try workbench.appendTrackedText(assistant, "KEY", workbench.limits.max_assistant_message_bytes);
-    try std.testing.expect(workbench.redactTrackedText(assistant));
+    try std.testing.expect(workbench.redactTrackedText(assistant, workbench.execution.credential()));
     try std.testing.expectEqual(assistant.list.items.len, assistant.committed_len);
     try std.testing.expect(std.mem.endsWith(u8, assistant.list.items, "***"));
 
     try workbench.appendTrackedText(assistant, " tail SECRET-", workbench.limits.max_assistant_message_bytes);
-    try std.testing.expect(!workbench.redactTrackedText(assistant));
+    try std.testing.expect(!workbench.redactTrackedText(assistant, workbench.execution.credential()));
     const run = &workbench.tasks[0].?.runs[0].?;
     try std.testing.expect(commitTerminal(
         run,
@@ -3931,7 +4236,11 @@ test "tool projection truncates on UTF-8 boundaries and records bounded UI histo
     defer std.testing.allocator.free(long);
     @memset(long, 'x');
     @memcpy(long[long.len - 3 ..], "界");
-    const projected = try workbench.copyProjected(long, workbench.limits.max_tool_field_bytes);
+    const projected = try workbench.copyProjected(
+        long,
+        workbench.limits.max_tool_field_bytes,
+        workbench.execution.credential(),
+    );
     defer workbench.freeTracked(projected.value);
     try std.testing.expect(projected.truncated);
     try std.testing.expect(std.unicode.utf8ValidateSlice(projected.value));
