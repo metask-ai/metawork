@@ -10,7 +10,7 @@ import {
 import { AppShell } from "./AppShell.tsx";
 import { Icon } from "../components/ui/Icon.tsx";
 import { AccountPanel } from "../features/account/AccountPanel.tsx";
-import { AccountPrerequisite } from "../features/account/AccountPrerequisite.tsx";
+import { AccountGate } from "../features/account/AccountGate.tsx";
 import { ComposerFooter } from "../features/composer/ComposerFooter.tsx";
 import { ApprovalPanel } from "../features/approvals/ApprovalPanel.tsx";
 import { UiRecordCard } from "../features/approvals/UiRecordCard.tsx";
@@ -693,6 +693,35 @@ export default function App() {
     return true;
   }
 
+  if (snapshot.account.readiness !== "ready")
+    return (
+      <AccountGate
+        account={snapshot.account}
+        disabled={viewSyncFailed || !bridgeReady || busy !== null}
+        cancelDisabled={viewSyncFailed || !bridgeReady || accountCancelBusy}
+        connectionFailed={viewSyncFailed}
+        connectionDiagnostic={status.diagnostic}
+        reconnecting={busy === "reconnect"}
+        notice={t(status.id, status.values)}
+        onReconnect={() => void retryViewSynchronization()}
+        onBeginLogin={() => void runAccountCommand(() => client.beginLogin())}
+        onReopenLogin={() => void runAccountCommand(() => client.reopenLogin())}
+        onReauthenticate={() =>
+          void runAccountCommand(() => client.reauthenticate())
+        }
+        onCancel={() => void cancelAccountOperation()}
+        onRetry={() =>
+          void runAccountCommand(() => client.refreshAccountCatalog())
+        }
+        onSelectApiKey={(id) =>
+          void runAccountCommand(() => client.selectApiKey(id))
+        }
+        onSelectModel={(id) =>
+          void runAccountCommand(() => client.selectModel(id))
+        }
+      />
+    );
+
   const currentTaskState = activeTask ? taskDisplayState(activeTask) : null;
   const currentTaskStatus = !currentTaskState
     ? t(workbench.draftWorkspaceRoot ? "task.new" : "task.open")
@@ -1059,36 +1088,6 @@ export default function App() {
           workbench.draftWorkspaceRoot && !workspaceGrant,
         )}
         actionDisabled={mutationDisabled}
-        prerequisite={
-          taskCanCompose ? (
-            <AccountPrerequisite
-              account={snapshot.account}
-              disabled={mutationDisabled}
-              cancelDisabled={
-                viewSyncFailed || !bridgeReady || accountCancelBusy
-              }
-              onBeginLogin={() =>
-                void runAccountCommand(() => client.beginLogin())
-              }
-              onReopenLogin={() =>
-                void runAccountCommand(() => client.reopenLogin())
-              }
-              onReauthenticate={() =>
-                void runAccountCommand(() => client.reauthenticate())
-              }
-              onCancel={() => void cancelAccountOperation()}
-              onRetry={() =>
-                void runAccountCommand(() => client.refreshAccountCatalog())
-              }
-              onSelectApiKey={(id) =>
-                void runAccountCommand(() => client.selectApiKey(id))
-              }
-              onSelectModel={(id) =>
-                void runAccountCommand(() => client.selectModel(id))
-              }
-            />
-          ) : null
-        }
         onStart={() => void beginNewTask()}
         onPromptChange={updatePrompt}
         onSubmit={() => void submitRun()}

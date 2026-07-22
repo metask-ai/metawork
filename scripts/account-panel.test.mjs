@@ -12,8 +12,8 @@ const vite = await createServer({
   logLevel: "silent",
   server: { middlewareMode: true },
 });
-const { AccountPrerequisite } = await vite.ssrLoadModule(
-  "/src/features/account/AccountPrerequisite.tsx",
+const { AccountGate } = await vite.ssrLoadModule(
+  "/src/features/account/AccountGate.tsx",
 );
 const { AccountPanel } = await vite.ssrLoadModule(
   "/src/features/account/AccountPanel.tsx",
@@ -44,6 +44,7 @@ const signedOut = {
 };
 
 const callbacks = {
+  onReconnect() {},
   onBeginLogin() {},
   onReopenLogin() {},
   onReauthenticate() {},
@@ -71,37 +72,47 @@ function withI18n(child) {
   );
 }
 
-function renderPrerequisite(account) {
+function renderGate(account) {
   return withI18n(
-    createElement(AccountPrerequisite, {
+    createElement(AccountGate, {
       account,
       disabled: false,
+      cancelDisabled: false,
+      connectionFailed: false,
+      reconnecting: false,
+      notice: "Workbench connected.",
       ...callbacks,
     }),
   );
 }
 
-function renderPrerequisiteWith(account, props) {
+function renderGateWith(account, props) {
   return withI18n(
-    createElement(AccountPrerequisite, {
+    createElement(AccountGate, {
       account,
       disabled: false,
+      cancelDisabled: false,
+      connectionFailed: false,
+      reconnecting: false,
+      notice: "Workbench connected.",
       ...callbacks,
       ...props,
     }),
   );
 }
 
-test("signed-out readiness stays beside the task draft with one primary action", () => {
-  const markup = renderPrerequisite(signedOut);
-  assert.match(markup, /Connect Metask to send/);
-  assert.match(markup, /Keep writing your draft/);
+test("signed-out readiness is an independent surface with one primary action", () => {
+  const markup = renderGate(signedOut);
+  assert.match(markup, /<main[^>]*account-gate/);
+  assert.match(markup, /Sign in to MetaWork/);
+  assert.match(markup, /load the APIs and models available to you/);
   assert.match(markup, />Sign in with Metask</);
-  assert.doesNotMatch(markup, /setup progress|Load API Keys|<select/);
+  assert.doesNotMatch(markup, /Workspace|Task activity|composer-start/);
+  assert.equal((markup.match(/primary-button/g) ?? []).length, 1);
 });
 
 test("authorization wait can reopen or cancel without exposing the OAuth URL", () => {
-  const markup = renderPrerequisite({
+  const markup = renderGate({
     ...signedOut,
     sessionState: "authorizing",
     operation: "oauth_callback",
@@ -116,7 +127,7 @@ test("authorization wait can reopen or cancel without exposing the OAuth URL", (
 });
 
 test("background catalog preparation does not ask for a manual load step", () => {
-  const markup = renderPrerequisite({
+  const markup = renderGate({
     ...signedOut,
     sessionState: "authenticated",
     operation: "loading_keys",
@@ -127,11 +138,11 @@ test("background catalog preparation does not ask for a manual load step", () =>
   });
   assert.match(markup, /Loading API Keys/);
   assert.match(markup, />Cancel current action</);
-  assert.doesNotMatch(markup, /Load API Keys|Try again|<select/);
+  assert.doesNotMatch(markup, /Load API Keys|Try again|account-gate-choice/);
 });
 
 test("Account cancel stays available while an ordinary command is locally busy", () => {
-  const markup = renderPrerequisiteWith(
+  const markup = renderGateWith(
     {
       ...signedOut,
       sessionState: "authorizing",
@@ -147,7 +158,7 @@ test("Account cancel stays available while an ordinary command is locally busy",
 });
 
 test("only a real catalog ambiguity asks for the matching choice", () => {
-  const keyChoice = renderPrerequisite({
+  const keyChoice = renderGate({
     ...signedOut,
     sessionState: "authenticated",
     operation: "selecting_key",
@@ -164,7 +175,7 @@ test("only a real catalog ambiguity asks for the matching choice", () => {
   assert.match(keyChoice, />Backup · 5678</);
   assert.doesNotMatch(keyChoice, />Choose a model</);
 
-  const modelChoice = renderPrerequisite({
+  const modelChoice = renderGate({
     ...signedOut,
     sessionState: "authenticated",
     operation: "selecting_model",
@@ -183,7 +194,7 @@ test("only a real catalog ambiguity asks for the matching choice", () => {
 });
 
 test("retryable and restart-required failures never leave an actionless spinner", () => {
-  const retry = renderPrerequisite({
+  const retry = renderGate({
     ...signedOut,
     sessionState: "authenticated",
     readiness: "needs_attention",
@@ -192,13 +203,14 @@ test("retryable and restart-required failures never leave an actionless spinner"
     errorCode: "metask_service_unavailable",
     safeDiagnostic: "upstream service returned internal status E_METASK_503",
   });
-  assert.match(retry, /Finish preparing this task/);
+  assert.match(retry, /Account setup needs attention/);
   assert.match(retry, />Try again</);
   assert.match(retry, /temporarily unavailable/);
   assert.doesNotMatch(retry, /metask_service_unavailable/);
-  assert.doesNotMatch(retry, /E_METASK_503/);
+  assert.match(retry, /Technical details/);
+  assert.match(retry, /E_METASK_503/);
 
-  const noKeys = renderPrerequisite({
+  const noKeys = renderGate({
     ...signedOut,
     sessionState: "authenticated",
     readiness: "needs_attention",
@@ -209,7 +221,7 @@ test("retryable and restart-required failures never leave an actionless spinner"
   assert.match(noKeys, /No API Keys are available/);
   assert.match(noKeys, />Try again</);
 
-  const restart = renderPrerequisite({
+  const restart = renderGate({
     ...signedOut,
     sessionState: "shutting_down",
     readiness: "restart_required",
@@ -235,7 +247,7 @@ test("ready Account is a secondary status and settings surface", () => {
     canCreateTask: true,
     executionGeneration: "1",
   };
-  assert.equal(renderPrerequisite(ready), "");
+  assert.equal(renderGate(ready), "");
   const panel = withI18n(
     createElement(AccountPanel, {
       account: ready,
@@ -248,4 +260,23 @@ test("ready Account is a secondary status and settings surface", () => {
   assert.match(panel, />Refresh account options</);
   assert.match(panel, />Sign out and clear this device</);
   assert.doesNotMatch(panel, /setup progress/);
+});
+
+test("cold connection failure exposes only reconnect and technical details", () => {
+  const markup = renderGateWith(
+    {
+      ...signedOut,
+      sessionState: "restoring",
+      readiness: "checking",
+      primaryAction: "none",
+    },
+    {
+      connectionFailed: true,
+      connectionDiagnostic: "revision mismatch",
+    },
+  );
+  assert.match(markup, /The Workbench view is unavailable/);
+  assert.match(markup, />Reconnect</);
+  assert.match(markup, /revision mismatch/);
+  assert.doesNotMatch(markup, />Sign in with Metask|Workspace|Task activity/);
 });

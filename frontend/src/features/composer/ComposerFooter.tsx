@@ -1,4 +1,4 @@
-import type { ReactNode, RefObject } from "react";
+import type { RefObject } from "react";
 
 import { Icon } from "../../components/ui/Icon.tsx";
 import { useI18n } from "../../i18n/context.ts";
@@ -18,7 +18,6 @@ export function ComposerFooter({
   runInFlight,
   accessRequired,
   actionDisabled,
-  prerequisite,
   onStart,
   onPromptChange,
   onSubmit,
@@ -37,7 +36,6 @@ export function ComposerFooter({
   runInFlight: boolean;
   accessRequired: boolean;
   actionDisabled: boolean;
-  prerequisite: ReactNode;
   onStart: () => void;
   onPromptChange: (value: string) => void;
   onSubmit: () => void;
@@ -60,7 +58,6 @@ export function ComposerFooter({
         </button>
       ) : (
         <>
-          {prerequisite}
           <div className="composer">
             <textarea
               ref={textareaRef}

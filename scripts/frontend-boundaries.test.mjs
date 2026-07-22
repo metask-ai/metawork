@@ -97,17 +97,20 @@ test("Renderer modules preserve the approved dependency direction", async () => 
   }
 });
 
-test("Task-first composition keeps Account readiness at the Composer boundary", async () => {
+test("login-first composition gates every Workbench surface on Host readiness", async () => {
   const app = await readFile(resolve(sourceRoot, "app", "App.tsx"), "utf8");
-  assert.match(app, /<AccountPrerequisite/);
-  assert.match(app, /prerequisite=\{/);
-  assert.doesNotMatch(app, /account-onboarding/);
-  assert.doesNotMatch(app, /\{snapshot\.account\.canCreateTask && \(/);
-  const beginNewTask = app.match(
-    /async function beginNewTask\(\) \{[\s\S]*?\n  \}/,
-  )?.[0];
-  assert.ok(beginNewTask);
-  assert.doesNotMatch(beginNewTask, /canCreateTask/);
+  const gate = app.indexOf('snapshot.account.readiness !== "ready"');
+  const shell = app.indexOf("<AppShell");
+  assert.ok(gate >= 0 && shell > gate);
+  assert.match(app, /<AccountGate/);
+  assert.doesNotMatch(app, /AccountPrerequisite|prerequisite=\{/);
+  assert.doesNotMatch(
+    await readFile(
+      resolve(sourceRoot, "features", "composer", "ComposerFooter.tsx"),
+      "utf8",
+    ),
+    /Account|prerequisite/,
+  );
 });
 
 test("timed-out mutations resync from Host state without automatic replay", async () => {

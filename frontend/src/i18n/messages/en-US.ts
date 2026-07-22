@@ -26,26 +26,29 @@ export const enUS = {
   "account.label": "Metask account",
   "account.signed_in": "Signed in",
   "account.ready": "Ready",
-  "account.readiness.checking.title": "Checking your work setup",
+  "account.gate.path": "Metask\nLocal workbench",
+  "account.gate.eyebrow": "Metask access",
+  "account.gate.privacy": "Your API credentials are kept off this screen.",
+  "account.readiness.checking.title": "Restoring your account",
   "account.readiness.checking.body":
-    "Your draft is safe while MetaWork checks this device.",
-  "account.readiness.sign_in_required.title": "Connect Metask to send",
+    "MetaWork is checking the account saved on this device.",
+  "account.readiness.sign_in_required.title": "Sign in to MetaWork",
   "account.readiness.sign_in_required.body":
-    "Keep writing your draft. Sign in when you are ready to start the task.",
-  "account.readiness.preparing.title": "Preparing this task",
+    "Use your Metask account to load the APIs and models available to you.",
+  "account.readiness.preparing.title": "Preparing your models",
   "account.readiness.preparing.body":
-    "MetaWork is getting the execution setup ready in the background.",
-  "account.readiness.choice_required.title": "Choose how this task will run",
+    "Your Metask account is connected. MetaWork is loading your available APIs and models.",
+  "account.readiness.choice_required.title": "Choose your default setup",
   "account.readiness.choice_required.body":
-    "MetaWork needs one choice before it can start the task.",
+    "Choose the API or model new tasks should use.",
   "account.readiness.ready.title": "Ready to work",
   "account.readiness.ready.body": "This task can be sent.",
-  "account.readiness.needs_attention.title": "Finish preparing this task",
+  "account.readiness.needs_attention.title": "Account setup needs attention",
   "account.readiness.needs_attention.body":
-    "Your draft is safe. Try the account preparation again.",
+    "Your Metask account is still connected. Use the action below to continue.",
   "account.readiness.restart_required.title": "Restart MetaWork to continue",
   "account.readiness.restart_required.body":
-    "Your draft is safe. Close and reopen MetaWork before sending it.",
+    "Close and reopen MetaWork. No account action will be retried automatically.",
   "account.action_failed": "Account action needs attention",
   "account.error.no_api_keys":
     "No API Keys are available for this Metask account. Add one in Metask, then try again.",
@@ -58,13 +61,12 @@ export const enUS = {
   "account.error.authorization":
     "The Metask sign-in could not be completed. Start sign-in again.",
   "account.error.service":
-    "Metask is temporarily unavailable. Your draft is safe; try again shortly.",
+    "Metask is temporarily unavailable. Try again shortly.",
   "account.error.credentials":
     "MetaWork could not safely update the account saved on this device.",
   "account.error.local":
     "MetaWork could not finish preparing this task on this device. Try again.",
-  "account.error.generic":
-    "MetaWork could not finish preparing this task. Your draft is safe.",
+  "account.error.generic": "MetaWork could not finish preparing this account.",
   "account.cancelled": "The account action was cancelled.",
   "account.operation.oauth_callback": "Waiting for Metask authorization",
   "account.operation.token_exchange": "Completing Metask sign-in",
@@ -89,7 +91,7 @@ export const enUS = {
   "account.command_rejected":
     "That account action is no longer available. MetaWork kept the latest account state.",
   "account.command_failed":
-    "MetaWork could not complete that account action. Use the recovery action shown beside your draft.",
+    "MetaWork could not complete that account action. Use the recovery action shown here.",
   "account.cancel_rejected":
     "That account action has already finished. MetaWork checked the latest state.",
   "account.cancel_failed":

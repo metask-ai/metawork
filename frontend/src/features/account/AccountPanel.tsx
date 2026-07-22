@@ -1,6 +1,6 @@
 import type { AccountView } from "../../bridge/contracts.ts";
 import { useI18n } from "../../i18n/context.ts";
-import { accountErrorText } from "./AccountPrerequisite.tsx";
+import { accountErrorText } from "./account-copy.ts";
 
 type Props = {
   account: AccountView;
@@ -14,7 +14,7 @@ type Props = {
 };
 
 /// Secondary account controls for an already usable Workbench. First-run
-/// readiness belongs beside the Composer in AccountPrerequisite.
+/// readiness is handled by the independent AccountGate.
 export function AccountPanel({
   account,
   disabled,

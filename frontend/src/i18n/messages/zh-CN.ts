@@ -28,23 +28,27 @@ export const zhCN: Record<MessageId, string> = {
   "account.label": "Metask 账号",
   "account.signed_in": "已登录",
   "account.ready": "可执行",
-  "account.readiness.checking.title": "正在检查任务运行条件",
-  "account.readiness.checking.body": "检查这台设备时，你的草稿会保留。",
-  "account.readiness.sign_in_required.title": "连接 Metask 后即可发送",
+  "account.gate.path": "Metask\n本地工作台",
+  "account.gate.eyebrow": "Metask 访问",
+  "account.gate.privacy": "API 凭据不会显示在此界面中。",
+  "account.readiness.checking.title": "正在恢复账号",
+  "account.readiness.checking.body": "MetaWork 正在检查这台设备上保存的账号。",
+  "account.readiness.sign_in_required.title": "登录 MetaWork",
   "account.readiness.sign_in_required.body":
-    "可以继续编辑草稿；准备开始任务时再登录。",
-  "account.readiness.preparing.title": "正在准备这个任务",
-  "account.readiness.preparing.body": "MetaWork 正在后台准备运行条件。",
-  "account.readiness.choice_required.title": "选择这个任务的运行方式",
-  "account.readiness.choice_required.body":
-    "开始任务前，MetaWork 还需要你确认一个选项。",
+    "使用 Metask 账号加载你可用的 API 和模型。",
+  "account.readiness.preparing.title": "正在准备模型",
+  "account.readiness.preparing.body":
+    "Metask 账号已连接，MetaWork 正在加载可用的 API 和模型。",
+  "account.readiness.choice_required.title": "选择默认运行配置",
+  "account.readiness.choice_required.body": "选择新任务默认使用的 API 或模型。",
   "account.readiness.ready.title": "可以开始工作",
   "account.readiness.ready.body": "现在可以发送这个任务。",
-  "account.readiness.needs_attention.title": "完成任务准备",
-  "account.readiness.needs_attention.body": "你的草稿已保留，请重试账号准备。",
+  "account.readiness.needs_attention.title": "账号设置需要处理",
+  "account.readiness.needs_attention.body":
+    "Metask 账号仍保持连接，请使用下方操作继续。",
   "account.readiness.restart_required.title": "重启 MetaWork 后继续",
   "account.readiness.restart_required.body":
-    "你的草稿已保留，请关闭并重新打开 MetaWork 后再发送。",
+    "请关闭并重新打开 MetaWork；账号操作不会被自动重试。",
   "account.action_failed": "账号操作需要处理",
   "account.error.no_api_keys":
     "这个 Metask 账号还没有可用的 API Key。请在 Metask 中添加后重试。",
@@ -53,11 +57,11 @@ export const zhCN: Record<MessageId, string> = {
   "account.error.deadline": "Metask 未能及时响应。请检查网络后重试。",
   "account.error.browser": "MetaWork 无法打开登录页面，请重新打开。",
   "account.error.authorization": "未能完成 Metask 登录，请重新登录。",
-  "account.error.service": "Metask 暂时不可用。你的草稿已保留，请稍后重试。",
+  "account.error.service": "Metask 暂时不可用，请稍后重试。",
   "account.error.credentials":
     "MetaWork 无法安全更新这台设备上保存的账号信息。",
   "account.error.local": "MetaWork 无法在这台设备上完成任务准备，请重试。",
-  "account.error.generic": "MetaWork 无法完成任务准备，你的草稿已保留。",
+  "account.error.generic": "MetaWork 无法完成账号准备。",
   "account.cancelled": "账号操作已取消。",
   "account.operation.oauth_callback": "等待 Metask 授权",
   "account.operation.token_exchange": "正在完成 Metask 登录",
@@ -82,7 +86,7 @@ export const zhCN: Record<MessageId, string> = {
   "account.command_rejected":
     "该账号操作已不可用，MetaWork 已保留最新账号状态。",
   "account.command_failed":
-    "MetaWork 无法完成该账号操作，请使用草稿旁显示的恢复操作。",
+    "MetaWork 无法完成该账号操作，请使用此处显示的恢复操作。",
   "account.cancel_rejected": "该账号操作已经结束，MetaWork 已检查最新状态。",
   "account.cancel_failed":
     "MetaWork 无法取消该账号操作；Host 仍会在截止时间到达时自动收口。",
