@@ -6,9 +6,9 @@ export const maxComposerCharacters = 16 * 1024;
 
 export function newTaskDraftStorageId(
   active: boolean,
-  workspaceRoot: string | null,
+  workspaceId: string | null,
 ) {
-  return active ? workspaceRoot || unscopedNewTaskDraftId : null;
+  return active ? workspaceId || unscopedNewTaskDraftId : null;
 }
 
 export function newTaskDraftMoveDecision(source: string, target: string) {
@@ -63,27 +63,27 @@ export function clearTaskDraft(taskId: string): void {
   writeTaskDraft(taskId, "");
 }
 
-export function readNewTaskDraft(workspaceRoot: string): string {
+export function readNewTaskDraft(workspaceId: string): string {
   try {
-    return storage()?.getItem(`${newTaskPrefix}${workspaceRoot}`) ?? "";
+    return storage()?.getItem(`${newTaskPrefix}${workspaceId}`) ?? "";
   } catch {
     return "";
   }
 }
 
-export function writeNewTaskDraft(workspaceRoot: string, value: string): void {
+export function writeNewTaskDraft(workspaceId: string, value: string): void {
   try {
     const target = storage();
     if (!target) return;
-    if (value) target.setItem(`${newTaskPrefix}${workspaceRoot}`, value);
-    else target.removeItem(`${newTaskPrefix}${workspaceRoot}`);
+    if (value) target.setItem(`${newTaskPrefix}${workspaceId}`, value);
+    else target.removeItem(`${newTaskPrefix}${workspaceId}`);
   } catch {
     // Draft persistence is helpful, but never a prerequisite for composing.
   }
 }
 
-export function clearNewTaskDraft(workspaceRoot: string): void {
-  writeNewTaskDraft(workspaceRoot, "");
+export function clearNewTaskDraft(workspaceId: string): void {
+  writeNewTaskDraft(workspaceId, "");
 }
 
 export function pruneTaskDrafts(validTaskIds: ReadonlySet<string>): void {

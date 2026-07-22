@@ -14,13 +14,25 @@ pub const RendererBridgeConnect = struct {
 pub const EventDisconnect = struct { generation: []const u8 };
 pub const WorkbenchSnapshotChunk = struct { snapshotId: []const u8, offset: []const u8 };
 pub const Empty = struct {};
-pub const AccountSelectApiKey = struct { apiKeyId: []const u8 };
-pub const AccountSelectModel = struct { modelId: []const u8 };
-pub const TaskCreate = struct {
-    workspaceGrant: ?[]const u8 = null,
-    workspaceRoot: ?[]const u8 = null,
+pub const AccountSelection = struct {
+    selectionId: []const u8,
+    expectedCatalogGeneration: []const u8,
+    expectedExecutionGeneration: []const u8,
 };
-pub const TaskRun = struct { taskId: []const u8, prompt: []const u8 };
+pub const WorkspaceIdentity = struct {
+    workspaceId: []const u8,
+    expectedWorkspaceEpoch: []const u8,
+};
+pub const TaskCreate = struct {
+    workspaceId: []const u8,
+    expectedWorkspaceEpoch: []const u8,
+    expectedExecutionGeneration: []const u8,
+};
+pub const TaskRun = struct {
+    taskId: []const u8,
+    expectedBindingEpoch: []const u8,
+    prompt: []const u8,
+};
 pub const TaskIdentity = struct { taskId: []const u8, runId: []const u8 };
 pub const TaskClose = struct { taskId: []const u8 };
 pub const TaskRename = struct { taskId: []const u8, title: []const u8 };

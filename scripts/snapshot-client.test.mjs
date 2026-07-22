@@ -41,9 +41,7 @@ test("Workbench snapshots are assembled from identity-checked chunks", async () 
 });
 
 test("Workbench snapshot assembly rejects a stale chunk", async () => {
-  const source = Buffer.from(
-    '{"revision":"1","account":{"sessionState":"signed_out","executionState":"none","operation":"none","readiness":"sign_in_required","primaryAction":"sign_in","canCancel":false,"accountId":"","displayName":"","apiKeys":[],"models":[],"selectedApiKeyId":"","selectedModel":"","canCreateTask":false,"errorCode":"none","safeDiagnostic":"","catalogGeneration":"0","executionGeneration":"0"},"tasks":[]}',
-  );
+  const source = Buffer.from('{"revision":"1"}');
   const invoke = async (command) =>
     command === snapshotCommand
       ? { snapshotId: "2", bytes: source.length, chunkBytes: source.length }

@@ -17,6 +17,7 @@ pub const Error = lifecycle.Error || std.mem.Allocator.Error || std.Thread.Spawn
     RunGenerationExhausted,
     ExecutorShuttingDown,
     TaskCapacity,
+    TaskIdentityExhausted,
     WorkspaceCapacity,
     WorkspaceIdentityExhausted,
     WorkspaceOrderExhausted,
@@ -26,9 +27,13 @@ pub const Error = lifecycle.Error || std.mem.Allocator.Error || std.Thread.Spawn
     ExecutionUnavailable,
     ExecutionInUse,
     ExecutionGenerationMismatch,
+    BindingEpochMismatch,
     InvalidAutomationExecution,
     InvalidWorkspace,
     WorkspaceUnavailable,
+    WorkspaceRemovalInProgress,
+    WorkspaceEpochMismatch,
+    WorkspaceEpochExhausted,
     EventAfterTerminalDrain,
 };
 
@@ -55,7 +60,6 @@ pub const Limits = struct {
 pub const Provider = enum {
     anthropic,
     openai,
-    gemini,
 };
 
 pub const TaskWorkspaceTrust = union(enum) {
@@ -70,7 +74,13 @@ pub const TaskCreateInput = struct {
 
 pub const WorkspaceAuthorization = enum {
     available,
+    removing,
     reauthorization_required,
+};
+
+pub const WorkspaceRemovalFailure = enum {
+    none,
+    task_close_failed,
 };
 
 pub const WorkspaceSignals = struct {
@@ -79,14 +89,14 @@ pub const WorkspaceSignals = struct {
     failed_or_interrupted: u32 = 0,
 };
 
-/// Borrowed, bounded Workbench projection. The Renderer wire does not consume
-/// this until the next atomic Bridge revision hard cut.
+/// Borrowed, bounded Host-owned Workspace projection.
 pub const WorkspaceProjection = struct {
     id: u64,
+    epoch: u64,
     canonical_root: []const u8,
     display_name: []const u8,
     authorization: WorkspaceAuthorization,
-    selected: bool,
+    last_removal_failure: WorkspaceRemovalFailure,
     recent_order: u64,
     signals: WorkspaceSignals,
 };
@@ -122,7 +132,7 @@ pub const Configuration = struct {
 
 const json_string_expansion: usize = 6;
 const pending_ui_reencode_expansion: usize = 2;
-const root_snapshot_overhead: usize = 128;
+const root_snapshot_overhead: usize = 1024;
 const account_snapshot_text_bytes: usize =
     account_contract.Limits.account_id_bytes +
     account_contract.Limits.display_name_bytes +
@@ -139,7 +149,8 @@ const account_snapshot_text_bytes: usize =
 const account_snapshot_overhead: usize = 1024 +
     account_contract.Limits.api_key_entries * 128 +
     account_contract.Limits.model_entries * 128;
-const task_snapshot_overhead: usize = 512;
+const workspace_snapshot_overhead: usize = 512;
+const task_snapshot_overhead: usize = 1024;
 const run_snapshot_overhead: usize = 1024;
 const tool_snapshot_overhead: usize = 512;
 const pending_ui_snapshot_overhead: usize = 8 * 1024;
@@ -147,6 +158,10 @@ const ui_record_detail_capacity: usize = 512;
 const ui_record_snapshot_overhead: usize = 512;
 const tool_route_digest_bytes = std.crypto.hash.sha2.Sha256.digest_length;
 const tool_product_id_capacity = "tool-".len + 20;
+const binding_model_display_bytes = @max(
+    account_contract.Limits.model_id_bytes,
+    account_contract.Limits.model_display_name_bytes,
+);
 
 const ToolState = enum { running, completed, failed };
 const RunPhase = enum {
@@ -375,9 +390,19 @@ const TaskView = struct {
     session: ?*lifecycle.Session,
     execution: ?account_contract.OwnedExecutionConfig = null,
     id: u64,
+    route_id: u64,
     execution_generation: u64,
     execution_provider: Provider,
     execution_model: []u8,
+    binding_epoch: u64 = 1,
+    binding_account_id: []u8,
+    binding_profile_id: []u8,
+    binding_account_name: []u8,
+    binding_api_key_id: []u8,
+    binding_api_key_name: []u8,
+    binding_api_key_suffix: []u8,
+    binding_model_id: []u8,
+    binding_model_display_name: []u8,
     workspace_id: u64,
     workspace_root: []u8,
     title: []u8,
@@ -409,10 +434,16 @@ const WorkspaceTrust = union(enum) {
 
 const WorkspaceView = struct {
     id: u64,
+    epoch: u64 = 1,
     canonical_root: []u8,
-    display_name: []u8,
+    projected_root_storage: []u8,
+    projected_root_len: usize,
+    display_name_storage: []u8,
+    display_name_len: usize,
+    projection_redacted: bool = false,
     trust: WorkspaceTrust,
     authorization: WorkspaceAuthorization = .available,
+    last_removal_failure: WorkspaceRemovalFailure = .none,
     visible: bool = true,
     recent_order: u64,
 };
@@ -476,6 +507,7 @@ const ApiKeyProjection = struct {
     id: FixedText(account_contract.Limits.api_key_id_bytes) = .{},
     name: FixedText(account_contract.Limits.api_key_name_bytes) = .{},
     suffix: FixedText(account_contract.Limits.api_key_suffix_bytes) = .{},
+    provider_kind: account_contract.ProviderKind = .anthropic,
 };
 
 const ModelProjection = struct {
@@ -492,6 +524,7 @@ const AccountProjection = struct {
     primary_action: account_contract.AccountPrimaryAction = .none,
     can_cancel: bool = false,
     account_id: FixedText(account_contract.Limits.account_id_bytes) = .{},
+    profile_id: FixedText(account_contract.Limits.profile_id_bytes) = .{},
     display_name: FixedText(account_contract.Limits.display_name_bytes) = .{},
     selected_api_key_id: FixedText(account_contract.Limits.api_key_id_bytes) = .{},
     selected_model: FixedText(account_contract.Limits.model_id_bytes) = .{},
@@ -562,6 +595,7 @@ const AccountProjection = struct {
         self.primary_action = source_view.primary_action;
         self.can_cancel = source_view.can_cancel;
         self.account_id.setNoFail(source_view.account_id);
+        self.profile_id.setNoFail(source_view.profile_id);
         self.display_name.setNoFail(source_view.display_name);
         self.selected_api_key_id.setNoFail(source_view.selected_api_key_id);
         self.selected_model.setNoFail(source_view.selected_model);
@@ -575,10 +609,12 @@ const AccountProjection = struct {
             target.id.setNoFail(source.id);
             target.name.setNoFail(source.name);
             target.suffix.setNoFail(source.suffix);
+            target.provider_kind = source.provider_kind;
             target_view.* = .{
                 .id = target.id.view(),
                 .name = target.name.view(),
                 .suffix = target.suffix.view(),
+                .provider_kind = target.provider_kind,
             };
         }
         self.model_count = source_view.models.len;
@@ -612,6 +648,7 @@ const AccountProjection = struct {
             .primary_action = self.primary_action,
             .can_cancel = self.can_cancel,
             .account_id = self.account_id.view(),
+            .profile_id = self.profile_id.view(),
             .display_name = self.display_name.view(),
             .api_keys = self.api_key_views[0..self.api_key_count],
             .models = self.model_views[0..self.model_count],
@@ -623,6 +660,20 @@ const AccountProjection = struct {
             .catalog_generation = self.catalog_generation,
             .execution_generation = self.execution_generation,
         };
+    }
+
+    fn selectedApiKey(self: *const AccountProjection) ?account_contract.ApiKeyView {
+        for (self.api_key_views[0..self.api_key_count]) |candidate|
+            if (std.mem.eql(u8, candidate.id, self.selected_api_key_id.view()))
+                return candidate;
+        return null;
+    }
+
+    fn selectedModel(self: *const AccountProjection) ?account_contract.ModelView {
+        for (self.model_views[0..self.model_count]) |candidate|
+            if (std.mem.eql(u8, candidate.id, self.selected_model.view()))
+                return candidate;
+        return null;
     }
 };
 
@@ -810,6 +861,7 @@ pub const Workbench = struct {
     selected_workspace_id: u64 = 0,
     next_workspace_id: u64 = 1,
     next_workspace_recent_order: u64 = 1,
+    next_task_id: u64 = 1,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -883,12 +935,15 @@ pub const Workbench = struct {
             self.account.selected_model.view(),
             input.target.model,
         ));
+        self.redactAllProductProjectionsNoFail(self.execution.credential());
+        self.redactAllProductProjectionsNoFail(input.api_key);
         self.execution.installNoFail(execution);
     }
 
     pub fn clearExecutionNoFail(self: *Workbench) void {
         std.debug.assert(self.execution_replacement_pending);
         std.debug.assert(self.account.execution_state != .ready);
+        self.redactAllProductProjectionsNoFail(self.execution.credential());
         self.execution.clearNoFail();
     }
 
@@ -921,6 +976,16 @@ pub const Workbench = struct {
             return error.InvalidAutomationExecution;
         try self.beginExecutionReplacement();
         errdefer self.endExecutionReplacementNoFail();
+        const api_keys = [_]account_contract.ApiKeyView{.{
+            .id = "automation-key",
+            .name = "Automation",
+            .suffix = "",
+            .provider_kind = input.provider,
+        }};
+        const models = [_]account_contract.ModelView{.{
+            .id = input.model,
+            .display_name = input.model,
+        }};
         self.commitAccountFactNoFail(.{
             .kind = .execution_changed,
             .view = .{
@@ -930,13 +995,18 @@ pub const Workbench = struct {
                 .readiness = .ready,
                 .primary_action = .none,
                 .account_id = "automation-account",
+                .profile_id = "automation-profile",
                 .display_name = "Automation",
+                .api_keys = &api_keys,
+                .models = &models,
                 .selected_api_key_id = "automation-key",
                 .selected_model = input.model,
                 .can_create_task = true,
                 .execution_generation = 1,
             },
         });
+        self.redactAllProductProjectionsNoFail(self.execution.credential());
+        self.redactAllProductProjectionsNoFail(input.credential);
         self.execution.installAutomationNoFail(input);
         self.endExecutionReplacementNoFail();
         self.finishAccountCommitNoFail();
@@ -990,10 +1060,24 @@ pub const Workbench = struct {
     }
 
     pub fn selectWorkspace(self: *Workbench, workspace_id: u64) Error!void {
+        const workspace = self.findWorkspace(workspace_id) orelse
+            return error.UnknownWorkspace;
+        return self.selectWorkspaceAtEpoch(workspace_id, workspace.epoch);
+    }
+
+    pub fn selectWorkspaceAtEpoch(
+        self: *Workbench,
+        workspace_id: u64,
+        expected_workspace_epoch: u64,
+    ) Error!void {
         self.syncLifecycle();
         const workspace = self.findWorkspace(workspace_id) orelse
             return error.UnknownWorkspace;
         if (!workspace.visible) return error.UnknownWorkspace;
+        if (expected_workspace_epoch == 0 or workspace.epoch != expected_workspace_epoch)
+            return error.WorkspaceEpochMismatch;
+        if (workspace.authorization == .removing)
+            return error.WorkspaceRemovalInProgress;
         const recent_order = try self.takeWorkspaceRecentOrder();
         self.selected_workspace_id = workspace.id;
         workspace.recent_order = recent_order;
@@ -1002,6 +1086,13 @@ pub const Workbench = struct {
 
     pub fn selectedWorkspaceId(self: *const Workbench) u64 {
         return self.selected_workspace_id;
+    }
+
+    pub fn workspaceEpoch(self: *Workbench, workspace_id: u64) Error!u64 {
+        self.syncLifecycle();
+        const workspace = self.findWorkspace(workspace_id) orelse
+            return error.UnknownWorkspace;
+        return workspace.epoch;
     }
 
     /// Copies the visible Workspace projection in recent-use order without
@@ -1018,10 +1109,11 @@ pub const Workbench = struct {
             if (count == output.len) return error.WorkspaceCapacity;
             output[count] = .{
                 .id = workspace.id,
-                .canonical_root = workspace.canonical_root,
-                .display_name = workspace.display_name,
+                .epoch = workspace.epoch,
+                .canonical_root = workspace.projected_root_storage[0..workspace.projected_root_len],
+                .display_name = workspace.display_name_storage[0..workspace.display_name_len],
                 .authorization = workspace.authorization,
-                .selected = workspace.id == self.selected_workspace_id,
+                .last_removal_failure = workspace.last_removal_failure,
                 .recent_order = workspace.recent_order,
                 .signals = self.workspaceSignals(workspace.id),
             };
@@ -1047,23 +1139,44 @@ pub const Workbench = struct {
         self: *Workbench,
         workspace_id: u64,
     ) Error!void {
+        const workspace = self.findWorkspace(workspace_id) orelse
+            return error.UnknownWorkspace;
+        return self.removeWorkspaceAtEpoch(workspace_id, workspace.epoch);
+    }
+
+    pub fn removeWorkspaceAtEpoch(
+        self: *Workbench,
+        workspace_id: u64,
+        expected_workspace_epoch: u64,
+    ) Error!void {
         self.syncLifecycle();
         const workspace = self.findWorkspace(workspace_id) orelse
             return error.UnknownWorkspace;
         if (!workspace.visible) return error.UnknownWorkspace;
+        if (expected_workspace_epoch == 0 or workspace.epoch != expected_workspace_epoch)
+            return error.WorkspaceEpochMismatch;
+        if (workspace.authorization == .removing)
+            return error.WorkspaceRemovalInProgress;
+        if (workspace.epoch == std.math.maxInt(u64))
+            return error.WorkspaceEpochExhausted;
+        workspace.epoch += 1;
+        workspace.authorization = .removing;
+        workspace.last_removal_failure = .none;
+        self.bumpRevision();
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
             if (task.workspace_id != workspace_id or task.session == null) continue;
             self.closeTask(task.id) catch |err| switch (err) {
                 error.CloseInProgress => {},
-                else => return err,
+                else => {
+                    workspace.authorization = .available;
+                    workspace.last_removal_failure = .task_close_failed;
+                    self.bumpRevision();
+                    return err;
+                },
             };
         }
-        workspace.visible = false;
-        workspace.authorization = .reauthorization_required;
-        if (self.selected_workspace_id == workspace_id)
-            self.selected_workspace_id = 0;
-        self.bumpRevision();
+        if (self.finalizeWorkspaceRemovalsNoFail()) self.bumpRevision();
     }
 
     pub fn createTask(
@@ -1076,12 +1189,46 @@ pub const Workbench = struct {
             return error.ExecutionInUse;
         if (!self.canCreateTask())
             return error.ExecutionUnavailable;
+        if (findEmpty(TaskView, self.tasks) == null) return error.TaskCapacity;
+        const workspace_id = try self.openWorkspace(input);
+        return self.createTaskInWorkspace(
+            workspace_id,
+            (self.findWorkspace(workspace_id) orelse return error.UnknownWorkspace).epoch,
+            self.execution.generation,
+        );
+    }
+
+    pub fn createTaskInWorkspace(
+        self: *Workbench,
+        workspace_id: u64,
+        expected_workspace_epoch: u64,
+        expected_execution_generation: u64,
+    ) Error!u64 {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        self.syncLifecycle();
+        if (self.execution_replacement_pending)
+            return error.ExecutionInUse;
+        if (!self.canCreateTask())
+            return error.ExecutionUnavailable;
+        if (expected_execution_generation == 0 or
+            expected_execution_generation != self.execution.generation or
+            expected_execution_generation != self.account.execution_generation)
+            return error.ExecutionGenerationMismatch;
+        const workspace_view = self.findWorkspace(workspace_id) orelse
+            return error.UnknownWorkspace;
+        if (expected_workspace_epoch == 0 or
+            expected_workspace_epoch != workspace_view.epoch)
+            return error.WorkspaceEpochMismatch;
+        if (!workspace_view.visible)
+            return error.WorkspaceUnavailable;
+        if (workspace_view.authorization == .removing)
+            return error.WorkspaceRemovalInProgress;
+        if (workspace_view.authorization != .available)
+            return error.WorkspaceUnavailable;
         var task_execution = try self.execution.cloneOwned(self.allocator);
         errdefer task_execution.deinit();
         const task_execution_input = task_execution.input();
         const slot = findEmpty(TaskView, self.tasks) orelse return error.TaskCapacity;
-        const workspace_id = try self.openWorkspace(input);
-        const workspace_view = self.findWorkspace(workspace_id) orelse unreachable;
         const canonical = workspace_view.canonical_root;
         const workspace_trust: lifecycle.WorkspaceTrust = switch (workspace_view.trust) {
             .explicitly_trusted => .explicitly_trusted,
@@ -1102,12 +1249,56 @@ pub const Workbench = struct {
             account_contract.Limits.model_id_bytes,
         );
         errdefer self.freeTracked(execution_model);
+        const binding_account_id = try self.copyBounded(
+            self.account.account_id.view(),
+            account_contract.Limits.account_id_bytes,
+        );
+        errdefer self.freeTracked(binding_account_id);
+        const binding_profile_id = try self.copyBounded(
+            self.account.profile_id.view(),
+            account_contract.Limits.profile_id_bytes,
+        );
+        errdefer self.freeTracked(binding_profile_id);
+        const binding_account_name = try self.copyBounded(
+            self.account.display_name.view(),
+            account_contract.Limits.display_name_bytes,
+        );
+        errdefer self.freeTracked(binding_account_name);
+        const binding_api_key_id = try self.copyBounded(
+            self.account.selected_api_key_id.view(),
+            account_contract.Limits.api_key_id_bytes,
+        );
+        errdefer self.freeTracked(binding_api_key_id);
+        const selected_api_key = self.account.selectedApiKey();
+        const binding_api_key_name = try self.copyBounded(
+            if (selected_api_key) |key| key.name else "",
+            account_contract.Limits.api_key_name_bytes,
+        );
+        errdefer self.freeTracked(binding_api_key_name);
+        const binding_api_key_suffix = try self.copyBounded(
+            if (selected_api_key) |key| key.suffix else "",
+            account_contract.Limits.api_key_suffix_bytes,
+        );
+        errdefer self.freeTracked(binding_api_key_suffix);
+        const selected_model = self.account.selectedModel();
+        const binding_model_id = try self.copyBounded(
+            task_execution_input.target.model,
+            account_contract.Limits.model_id_bytes,
+        );
+        errdefer self.freeTracked(binding_model_id);
+        const binding_model_display_name = try self.copyBounded(
+            if (selected_model) |model| model.display_name else task_execution_input.target.model,
+            binding_model_display_bytes,
+        );
+        errdefer self.freeTracked(binding_model_display_name);
         const runs = try self.allocator.alloc(?RunRecord, self.limits.max_runs_per_task);
         errdefer self.allocator.free(runs);
         @memset(runs, null);
         const ui_history = try self.allocator.alloc(?UiRecord, self.limits.max_ui_history_per_task);
         errdefer self.allocator.free(ui_history);
         @memset(ui_history, null);
+        if (self.next_task_id == 0) return error.TaskIdentityExhausted;
+        const task_id = self.next_task_id;
         const route = self.agent_runtime.createSessionRoute(.{
             .provider = agentProvider(accountProvider(task_execution_input.target.provider_kind)),
             .permission_mode = .default,
@@ -1123,13 +1314,23 @@ pub const Workbench = struct {
             error.SessionCapacity => return error.TaskCapacity,
             else => return err,
         };
+        self.next_task_id +%= 1;
         self.tasks[slot] = .{
             .session = route.session,
             .execution = task_execution.take(),
-            .id = route.id,
+            .id = task_id,
+            .route_id = route.id,
             .execution_generation = task_execution_input.execution_generation,
             .execution_provider = accountProvider(task_execution_input.target.provider_kind),
             .execution_model = execution_model,
+            .binding_account_id = binding_account_id,
+            .binding_profile_id = binding_profile_id,
+            .binding_account_name = binding_account_name,
+            .binding_api_key_id = binding_api_key_id,
+            .binding_api_key_name = binding_api_key_name,
+            .binding_api_key_suffix = binding_api_key_suffix,
+            .binding_model_id = binding_model_id,
+            .binding_model_display_name = binding_model_display_name,
             .workspace_id = workspace_id,
             .workspace_root = workspace,
             .title = title,
@@ -1137,17 +1338,40 @@ pub const Workbench = struct {
             .ui_history = ui_history,
         };
         self.bumpRevision();
-        return self.tasks[slot].?.id;
+        return task_id;
     }
 
     pub fn runTask(self: *Workbench, task_id: u64, prompt: []const u8) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
+        const task = self.findTask(task_id) orelse return error.UnknownTask;
+        return self.runTaskAtBinding(task_id, task.binding_epoch, prompt);
+    }
+
+    pub fn taskBindingEpoch(self: *Workbench, task_id: u64) Error!u64 {
+        self.syncLifecycle();
+        return (self.findTask(task_id) orelse return error.UnknownTask).binding_epoch;
+    }
+
+    pub fn runTaskAtBinding(
+        self: *Workbench,
+        task_id: u64,
+        expected_binding_epoch: u64,
+        prompt: []const u8,
+    ) Error!u64 {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        self.syncLifecycle();
         const view = self.findTask(task_id) orelse return error.UnknownTask;
+        if (expected_binding_epoch == 0 or expected_binding_epoch != view.binding_epoch)
+            return error.BindingEpochMismatch;
         if (!self.taskContinuationAvailable(view)) return error.TaskClosing;
         const workspace = self.findWorkspace(view.workspace_id) orelse
             return error.WorkspaceUnavailable;
-        if (!workspace.visible or workspace.authorization != .available)
+        if (!workspace.visible)
+            return error.WorkspaceUnavailable;
+        if (workspace.authorization == .removing)
+            return error.WorkspaceRemovalInProgress;
+        if (workspace.authorization != .available)
             return error.WorkspaceUnavailable;
         _ = try taskExecutionInput(view);
         if (hasNonTerminalRun(view)) return error.TaskBusy;
@@ -1506,11 +1730,12 @@ pub const Workbench = struct {
             if (runPhase(run) != next_phase and setActivePhase(run, next_phase))
                 changed = true;
         }
+        if (self.finalizeWorkspaceRemovalsNoFail()) changed = true;
         if (changed) self.bumpRevision();
     }
 
     pub fn applyEvent(self: *Workbench, envelope: *const lifecycle.OwnedCoreEvent) Error!void {
-        const task = self.findTask(envelope.session_id) orelse return error.UnknownTask;
+        const task = self.findTaskByRouteId(envelope.session_id) orelse return error.UnknownTask;
         const run = findRun(task.runs, envelope.run_id) orelse return error.NoSuchRun;
         if (run.event_stream_finalized) {
             if (task.lifecycle == .open) {
@@ -1577,10 +1802,10 @@ pub const Workbench = struct {
     /// it cannot be the only owner of this product failure fact.
     pub fn recordEventProjectionFailure(
         self: *Workbench,
-        task_id: u64,
+        route_id: u64,
         run_id: u64,
     ) void {
-        const task = self.findTask(task_id) orelse return;
+        const task = self.findTaskByRouteId(route_id) orelse return;
         const run = findRun(task.runs, run_id) orelse return;
         if (run.event_projection_failure != null) return;
         run.event_projection_failure = .consumer_rejected;
@@ -1632,10 +1857,27 @@ pub const Workbench = struct {
     pub fn writeSnapshot(self: *Workbench, output: []u8) Error![]const u8 {
         self.syncLifecycle();
         var writer = std.Io.Writer.fixed(output);
-        writer.print("{{\"revision\":\"{d}\",\"account\":", .{self.revision}) catch
+        writer.print("{{\"revision\":\"{d}\",\"capabilities\":{{\"taskHistoryPersistence\":false,\"conversationRecovery\":false,\"executionRebind\":false,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":false,\"persistentWorkspacePermissions\":false}},\"account\":", .{self.revision}) catch
             return error.SnapshotTooLarge;
         try self.writeAccount(&writer);
-        writer.writeAll(",\"tasks\":[") catch
+        writer.writeAll(",\"selectedWorkspaceId\":") catch
+            return error.SnapshotTooLarge;
+        if (self.selected_workspace_id == 0)
+            writer.writeAll("null") catch return error.SnapshotTooLarge
+        else
+            writer.print("\"{d}\"", .{self.selected_workspace_id}) catch
+                return error.SnapshotTooLarge;
+        writer.writeAll(",\"workspaces\":[") catch return error.SnapshotTooLarge;
+        var workspace_count: usize = 0;
+        for (self.workspaces) |*entry| {
+            const workspace = &(entry.* orelse continue);
+            if (!workspace.visible) continue;
+            if (workspace_count != 0) writer.writeByte(',') catch
+                return error.SnapshotTooLarge;
+            workspace_count += 1;
+            try self.writeWorkspace(&writer, workspace);
+        }
+        writer.writeAll("],\"tasks\":[") catch
             return error.SnapshotTooLarge;
         var task_count: usize = 0;
         for (self.tasks) |*entry| {
@@ -1665,6 +1907,9 @@ pub const Workbench = struct {
             },
         ) catch return error.SnapshotTooLarge;
         try self.projectedJsonValue(writer, view.account_id);
+        writer.writeAll(",\"profileId\":") catch
+            return error.SnapshotTooLarge;
+        try self.projectedJsonValue(writer, view.profile_id);
         writer.writeAll(",\"displayName\":") catch
             return error.SnapshotTooLarge;
         try self.projectedJsonValue(writer, view.display_name);
@@ -1673,7 +1918,7 @@ pub const Workbench = struct {
         for (view.api_keys, 0..) |api_key, index| {
             if (index != 0) writer.writeByte(',') catch
                 return error.SnapshotTooLarge;
-            writer.writeAll("{\"id\":") catch
+            writer.writeAll("{\"selectionId\":") catch
                 return error.SnapshotTooLarge;
             try self.projectedJsonValue(writer, api_key.id);
             writer.writeAll(",\"name\":") catch
@@ -1682,6 +1927,8 @@ pub const Workbench = struct {
             writer.writeAll(",\"suffix\":") catch
                 return error.SnapshotTooLarge;
             try self.projectedJsonValue(writer, api_key.suffix);
+            writer.print(",\"provider\":\"{s}\"", .{@tagName(api_key.provider_kind)}) catch
+                return error.SnapshotTooLarge;
             writer.writeByte('}') catch return error.SnapshotTooLarge;
         }
         writer.writeAll("],\"models\":[") catch
@@ -1689,7 +1936,7 @@ pub const Workbench = struct {
         for (view.models, 0..) |model, index| {
             if (index != 0) writer.writeByte(',') catch
                 return error.SnapshotTooLarge;
-            writer.writeAll("{\"id\":") catch
+            writer.writeAll("{\"selectionId\":") catch
                 return error.SnapshotTooLarge;
             try self.projectedJsonValue(writer, model.id);
             writer.writeAll(",\"displayName\":") catch
@@ -1697,10 +1944,10 @@ pub const Workbench = struct {
             try self.projectedJsonValue(writer, model.display_name);
             writer.writeByte('}') catch return error.SnapshotTooLarge;
         }
-        writer.writeAll("],\"selectedApiKeyId\":") catch
+        writer.writeAll("],\"selectedApiKeySelectionId\":") catch
             return error.SnapshotTooLarge;
         try self.projectedJsonValue(writer, view.selected_api_key_id);
-        writer.writeAll(",\"selectedModel\":") catch
+        writer.writeAll(",\"selectedModelSelectionId\":") catch
             return error.SnapshotTooLarge;
         try self.projectedJsonValue(writer, view.selected_model);
         writer.print(
@@ -1712,6 +1959,41 @@ pub const Workbench = struct {
             ",\"catalogGeneration\":\"{d}\",\"executionGeneration\":\"{d}\"}}",
             .{ view.catalog_generation, view.execution_generation },
         ) catch return error.SnapshotTooLarge;
+    }
+
+    fn writeWorkspace(
+        self: *Workbench,
+        writer: *std.Io.Writer,
+        workspace: *const WorkspaceView,
+    ) Error!void {
+        const signals = self.workspaceSignals(workspace.id);
+        writer.print("{{\"id\":\"{d}\",\"epoch\":\"{d}\",\"displayName\":", .{
+            workspace.id,
+            workspace.epoch,
+        }) catch
+            return error.SnapshotTooLarge;
+        const display_name = workspace.display_name_storage[0..workspace.display_name_len];
+        const projected_root = workspace.projected_root_storage[0..workspace.projected_root_len];
+        try self.projectedJsonValueWithKnownCredentials(writer, display_name);
+        writer.writeAll(",\"canonicalRoot\":") catch return error.SnapshotTooLarge;
+        try self.projectedJsonValueWithKnownCredentials(writer, projected_root);
+        writer.print(",\"redacted\":{},\"authorization\":\"{s}\",\"lastRemovalFailure\":", .{
+            workspace.projection_redacted or
+                self.containsKnownCredential(display_name) or
+                self.containsKnownCredential(projected_root),
+            @tagName(workspace.authorization),
+        }) catch return error.SnapshotTooLarge;
+        if (workspace.last_removal_failure == .none)
+            writer.writeAll("null") catch return error.SnapshotTooLarge
+        else
+            writer.print("\"{s}\"", .{@tagName(workspace.last_removal_failure)}) catch
+                return error.SnapshotTooLarge;
+        writer.print(",\"recentOrder\":\"{d}\",\"signals\":{{\"running\":{},\"attention\":{},\"failedOrInterrupted\":{}}}}}", .{
+            workspace.recent_order,
+            signals.running,
+            signals.attention,
+            signals.failed_or_interrupted,
+        }) catch return error.SnapshotTooLarge;
     }
 
     pub fn deinit(self: *Workbench) void {
@@ -1768,14 +2050,36 @@ pub const Workbench = struct {
     }
 
     fn writeTask(self: *Workbench, writer: *std.Io.Writer, view: *TaskView) Error!void {
-        const credential = if (view.execution) |*execution|
-            execution.input().api_key
-        else
-            &.{};
         writer.print("{{\"id\":\"{d}\",\"title\":", .{view.id}) catch return error.SnapshotTooLarge;
-        try self.projectedJsonValueWithCredential(writer, view.title, credential);
-        writer.writeAll(",\"workspaceRoot\":") catch return error.SnapshotTooLarge;
-        try self.projectedJsonValueWithCredential(writer, view.workspace_root, credential);
+        try self.projectedJsonValueWithKnownCredentials(writer, view.title);
+        writer.print(",\"workspaceId\":\"{d}\",\"binding\":{{\"epoch\":\"{d}\",\"availability\":\"{s}\",\"accountId\":", .{
+            view.workspace_id,
+            view.binding_epoch,
+            if (view.execution == null) "unavailable" else "available",
+        }) catch return error.SnapshotTooLarge;
+        try self.projectedJsonValueWithKnownCredentials(writer, view.binding_account_id);
+        writer.writeAll(",\"profileId\":") catch return error.SnapshotTooLarge;
+        try self.projectedJsonValueWithKnownCredentials(writer, view.binding_profile_id);
+        writer.writeAll(",\"accountDisplayName\":") catch return error.SnapshotTooLarge;
+        try self.projectedJsonValueWithKnownCredentials(writer, view.binding_account_name);
+        writer.writeAll(",\"apiKeySelectionId\":") catch return error.SnapshotTooLarge;
+        try self.projectedJsonValueWithKnownCredentials(writer, view.binding_api_key_id);
+        writer.writeAll(",\"apiKeyName\":") catch return error.SnapshotTooLarge;
+        try self.projectedJsonValueWithKnownCredentials(writer, view.binding_api_key_name);
+        writer.writeAll(",\"apiKeySuffix\":") catch return error.SnapshotTooLarge;
+        try self.projectedJsonValueWithKnownCredentials(writer, view.binding_api_key_suffix);
+        writer.print(",\"provider\":\"{s}\",\"modelSelectionId\":", .{@tagName(view.execution_provider)}) catch
+            return error.SnapshotTooLarge;
+        try self.projectedJsonValueWithKnownCredentials(writer, view.binding_model_id);
+        writer.writeAll(",\"modelDisplayName\":") catch return error.SnapshotTooLarge;
+        try self.projectedJsonValueWithKnownCredentials(writer, view.binding_model_display_name);
+        writer.print(",\"executionGeneration\":\"{d}\",\"unavailableReason\":", .{view.execution_generation}) catch
+            return error.SnapshotTooLarge;
+        if (view.execution == null)
+            writer.writeAll("\"credential_released\"") catch return error.SnapshotTooLarge
+        else
+            writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeByte('}') catch return error.SnapshotTooLarge;
         writer.print(",\"lifecycle\":\"{s}\",\"continuationAvailable\":{},\"archived\":{},\"closeFailed\":{},\"currentRunId\":\"{d}\",\"currentRunPhase\":", .{
             @tagName(view.lifecycle),
             self.taskContinuationAvailable(view),
@@ -1802,7 +2106,7 @@ pub const Workbench = struct {
         writer.writeAll("],\"pendingUi\":") catch return error.SnapshotTooLarge;
         try self.writePendingUi(writer, view);
         writer.writeAll(",\"uiHistory\":[") catch return error.SnapshotTooLarge;
-        try self.writeUiHistory(writer, view, credential);
+        try self.writeUiHistory(writer, view);
         writer.writeByte(']') catch return error.SnapshotTooLarge;
         writer.writeByte('}') catch return error.SnapshotTooLarge;
     }
@@ -1830,7 +2134,7 @@ pub const Workbench = struct {
             writer.writeAll("null") catch return error.SnapshotTooLarge;
             return;
         }
-        const run = findRun(view.runs, pending.run_id) orelse
+        if (findRun(view.runs, pending.run_id) == null)
             return error.InvalidUiResponse;
         try self.writePendingUiProjection(
             writer,
@@ -1838,7 +2142,6 @@ pub const Workbench = struct {
             pending.run_id,
             view.pending_ui_order,
             parsed.value,
-            run.redaction_secret,
         );
     }
 
@@ -1935,6 +2238,8 @@ pub const Workbench = struct {
                 task.run_references.load(.acquire) != 0 or
                 hasNonTerminalRun(task))
                 continue;
+            const credential = task.execution.?.input().api_key;
+            self.redactAllProductProjectionsNoFail(credential);
             for (task.runs) |*run_entry| {
                 const run = &(run_entry.* orelse continue);
                 run.redaction_secret = &.{};
@@ -1992,6 +2297,12 @@ pub const Workbench = struct {
         }
 
         if (self.findWorkspaceByRoot(canonical)) |workspace| {
+            if (workspace.authorization == .removing)
+                return error.WorkspaceRemovalInProgress;
+            const reauthorizing = !workspace.visible or
+                workspace.authorization == .reauthorization_required;
+            if (reauthorizing and workspace.epoch == std.math.maxInt(u64))
+                return error.WorkspaceEpochExhausted;
             const next_temporary = if (canonical_temporary) |root|
                 try self.copyBounded(root, self.limits.max_workspace_bytes)
             else
@@ -2004,6 +2315,11 @@ pub const Workbench = struct {
                 .explicitly_trusted;
             workspace.authorization = .available;
             workspace.visible = true;
+            if (reauthorizing) workspace.epoch += 1;
+            self.redactWorkspaceProjectionNoFail(
+                workspace,
+                self.execution.credential(),
+            );
             return workspace;
         }
 
@@ -2024,11 +2340,18 @@ pub const Workbench = struct {
         const owned_root = try self.copyBounded(canonical, self.limits.max_workspace_bytes);
         errdefer self.freeTracked(owned_root);
         const base_name = std.fs.path.basename(canonical);
-        const display_name = try self.copyBounded(
+        const projected_root = try self.copyProjected(
+            canonical,
+            self.limits.max_workspace_bytes,
+            self.execution.credential(),
+        );
+        errdefer self.freeTracked(projected_root.value);
+        const display_name = try self.copyProjected(
             if (base_name.len == 0) canonical else base_name,
             self.limits.max_workspace_bytes,
+            self.execution.credential(),
         );
-        errdefer self.freeTracked(display_name);
+        errdefer self.freeTracked(display_name.value);
         const owned_temporary = if (canonical_temporary) |root|
             try self.copyBounded(root, self.limits.max_workspace_bytes)
         else
@@ -2040,7 +2363,11 @@ pub const Workbench = struct {
         self.workspaces[target] = .{
             .id = workspace_id,
             .canonical_root = owned_root,
-            .display_name = display_name,
+            .projected_root_storage = projected_root.value,
+            .projected_root_len = projected_root.value.len,
+            .display_name_storage = display_name.value,
+            .display_name_len = display_name.value.len,
+            .projection_redacted = projected_root.redacted or display_name.redacted,
             .trust = if (owned_temporary) |root|
                 .{ .temporary = root }
             else
@@ -2077,6 +2404,47 @@ pub const Workbench = struct {
         return false;
     }
 
+    /// Completes the second phase of Workspace removal only after every Task
+    /// Session in that Workspace has reached a stable terminal owner state.
+    /// A close failure restores admission so the user can retry explicitly.
+    fn finalizeWorkspaceRemovalsNoFail(self: *Workbench) bool {
+        var changed = false;
+        for (self.workspaces) |*entry| {
+            const workspace = &(entry.* orelse continue);
+            if (!workspace.visible or workspace.authorization != .removing) continue;
+            var pending = false;
+            var failed = false;
+            for (self.tasks) |*task_entry| {
+                const task = &(task_entry.* orelse continue);
+                if (task.workspace_id != workspace.id) continue;
+                if (task.close_failed) {
+                    failed = true;
+                    break;
+                }
+                if (task.session != null or task.closing_session != null or
+                    task.close_thread != null or
+                    task.run_references.load(.acquire) != 0 or
+                    hasNonTerminalRun(task))
+                {
+                    pending = true;
+                }
+            }
+            if (failed) {
+                workspace.authorization = .available;
+                workspace.last_removal_failure = .task_close_failed;
+                changed = true;
+                continue;
+            }
+            if (pending) continue;
+            workspace.authorization = .reauthorization_required;
+            workspace.visible = false;
+            if (self.selected_workspace_id == workspace.id)
+                self.selected_workspace_id = 0;
+            changed = true;
+        }
+        return changed;
+    }
+
     fn workspaceSignals(self: *const Workbench, workspace_id: u64) WorkspaceSignals {
         var signals: WorkspaceSignals = .{};
         for (self.tasks) |*entry| {
@@ -2100,16 +2468,116 @@ pub const Workbench = struct {
 
     fn deinitWorkspaceView(self: *Workbench, workspace: *WorkspaceView) void {
         self.freeTracked(workspace.canonical_root);
-        self.freeTracked(workspace.display_name);
+        self.freeTracked(workspace.projected_root_storage);
+        self.freeTracked(workspace.display_name_storage);
         if (workspace.trust == .temporary)
             self.freeTracked(workspace.trust.temporary);
         workspace.* = undefined;
+    }
+
+    fn redactWorkspaceProjectionsNoFail(
+        self: *Workbench,
+        credential: []const u8,
+    ) void {
+        if (credential.len == 0) return;
+        for (self.workspaces) |*entry| {
+            const workspace = &(entry.* orelse continue);
+            self.redactWorkspaceProjectionNoFail(workspace, credential);
+        }
+    }
+
+    /// A credential may become known after older product facts were stored,
+    /// or may be about to leave the set scanned by snapshot serialization.
+    /// Permanently scrub every Renderer-facing projection before either edge.
+    fn redactAllProductProjectionsNoFail(
+        self: *Workbench,
+        credential: []const u8,
+    ) void {
+        if (credential.len == 0) return;
+        self.redactWorkspaceProjectionsNoFail(credential);
+        for (self.tasks) |*entry| {
+            const task = &(entry.* orelse continue);
+            self.redactTaskProjectionNoFail(task, credential);
+        }
+    }
+
+    fn redactTaskProjectionNoFail(
+        _: *Workbench,
+        task: *TaskView,
+        credential: []const u8,
+    ) void {
+        if (credential.len == 0) return;
+        task.title_redacted = redactFixedWidthNoFail(task.title, credential) or
+            task.title_redacted;
+        _ = redactFixedWidthNoFail(task.workspace_root, credential);
+        _ = redactFixedWidthNoFail(task.binding_account_id, credential);
+        _ = redactFixedWidthNoFail(task.binding_profile_id, credential);
+        _ = redactFixedWidthNoFail(task.binding_account_name, credential);
+        _ = redactFixedWidthNoFail(task.binding_api_key_id, credential);
+        _ = redactFixedWidthNoFail(task.binding_api_key_name, credential);
+        _ = redactFixedWidthNoFail(task.binding_api_key_suffix, credential);
+        _ = redactFixedWidthNoFail(task.binding_model_id, credential);
+        _ = redactFixedWidthNoFail(task.binding_model_display_name, credential);
+        for (task.runs) |*run_entry| {
+            const run = &(run_entry.* orelse continue);
+            run.user_redacted = redactFixedWidthNoFail(run.user, credential) or
+                run.user_redacted;
+            run.assistant_redacted = redactFixedWidthNoFail(
+                run.assistant.list.items,
+                credential,
+            ) or run.assistant_redacted;
+            _ = redactFixedWidthNoFail(run.status_text, credential);
+            for (run.tools) |*tool_entry| {
+                const tool = &(tool_entry.* orelse continue);
+                const id_redacted = redactFixedWidthNoFail(tool.id, credential);
+                const name_redacted = redactFixedWidthNoFail(tool.name, credential);
+                const input_redacted = redactFixedWidthNoFail(tool.input, credential);
+                const progress_redacted = redactFixedWidthNoFail(tool.progress, credential);
+                const content_redacted = redactFixedWidthNoFail(tool.content, credential);
+                tool.redacted = id_redacted or name_redacted or input_redacted or
+                    progress_redacted or content_redacted or tool.redacted;
+            }
+        }
+        for (task.ui_history) |*record_entry| {
+            const record = &(record_entry.* orelse continue);
+            record.redacted = redactFixedWidthNoFail(
+                record.detail[0..record.detail_len],
+                credential,
+            ) or record.redacted;
+        }
+    }
+
+    fn redactWorkspaceProjectionNoFail(
+        _: *Workbench,
+        workspace: *WorkspaceView,
+        credential: []const u8,
+    ) void {
+        if (credential.len == 0) return;
+        const root_redacted = redactWorkspaceBytesNoFail(
+            workspace.projected_root_storage,
+            &workspace.projected_root_len,
+            credential,
+        );
+        const name_redacted = redactWorkspaceBytesNoFail(
+            workspace.display_name_storage,
+            &workspace.display_name_len,
+            credential,
+        );
+        workspace.projection_redacted = root_redacted or name_redacted or
+            workspace.projection_redacted;
     }
 
     fn findTask(self: *Workbench, task_id: u64) ?*TaskView {
         if (task_id == 0) return null;
         for (self.tasks) |*entry| if (entry.*) |*task|
             if (task.id == task_id) return task;
+        return null;
+    }
+
+    fn findTaskByRouteId(self: *Workbench, route_id: u64) ?*TaskView {
+        if (route_id == 0) return null;
+        for (self.tasks) |*entry| if (entry.*) |*task|
+            if (task.route_id == route_id) return task;
         return null;
     }
 
@@ -2192,6 +2660,14 @@ pub const Workbench = struct {
         self.allocator.free(task.runs);
         self.allocator.free(task.ui_history);
         self.freeTracked(task.execution_model);
+        self.freeTracked(task.binding_account_id);
+        self.freeTracked(task.binding_profile_id);
+        self.freeTracked(task.binding_account_name);
+        self.freeTracked(task.binding_api_key_id);
+        self.freeTracked(task.binding_api_key_name);
+        self.freeTracked(task.binding_api_key_suffix);
+        self.freeTracked(task.binding_model_id);
+        self.freeTracked(task.binding_model_display_name);
         self.freeTracked(task.workspace_root);
         self.freeTracked(task.title);
         if (task.execution) |*execution| execution.deinit();
@@ -2288,12 +2764,18 @@ pub const Workbench = struct {
         var read = target.committed_len;
         var write = target.committed_len;
         var redacted = false;
-        const marker_len = @min(credential.len, 3);
         while (read < target.list.items.len) {
-            const remaining = target.list.items[read..];
-            if (remaining.len < credential.len and
-                std.mem.startsWith(u8, credential, remaining))
-            {
+            const value = target.list.items;
+            if (credentialEndAtCodepoint(value, read, credential)) |redaction_end| {
+                const marker_len = @min(redaction_end - read, 3);
+                @memset(target.list.items[write..][0..marker_len], '*');
+                write += marker_len;
+                read = redaction_end;
+                redacted = true;
+                continue;
+            }
+            if (credentialMayContinueAtCodepoint(value, read, credential)) {
+                const remaining = value[read..];
                 std.mem.copyForwards(
                     u8,
                     target.list.items[write..][0..remaining.len],
@@ -2303,16 +2785,14 @@ pub const Workbench = struct {
                 target.committed_len = write;
                 return redacted;
             }
-            if (std.mem.startsWith(u8, remaining, credential)) {
-                @memset(target.list.items[write..][0..marker_len], '*');
-                write += marker_len;
-                read += credential.len;
-                redacted = true;
-            } else {
-                target.list.items[write] = target.list.items[read];
-                write += 1;
-                read += 1;
-            }
+            const codepoint_len = utf8CodepointLen(value, read);
+            std.mem.copyForwards(
+                u8,
+                target.list.items[write..][0..codepoint_len],
+                value[read..][0..codepoint_len],
+            );
+            write += codepoint_len;
+            read += codepoint_len;
         }
         target.list.items.len = write;
         target.committed_len = write;
@@ -2320,11 +2800,98 @@ pub const Workbench = struct {
     }
 
     fn projectedJsonValue(self: *Workbench, writer: *std.Io.Writer, value: []const u8) Error!void {
-        return self.projectedJsonValueWithCredential(
-            writer,
+        return self.projectedJsonValueWithKnownCredentials(writer, value);
+    }
+
+    fn containsKnownCredential(self: *const Workbench, value: []const u8) bool {
+        const current = self.execution.credential();
+        if (containsKnownSecret(value, current)) return true;
+        for (self.tasks) |*entry| {
+            const task = &(entry.* orelse continue);
+            if (task.execution) |*execution|
+                if (containsKnownSecret(value, execution.input().api_key)) return true;
+        }
+        return false;
+    }
+
+    fn matchedKnownCredentialLen(
+        self: *const Workbench,
+        value: []const u8,
+    ) usize {
+        var longest: usize = 0;
+        const current = self.execution.credential();
+        if (current.len != 0 and std.mem.startsWith(u8, value, current))
+            longest = current.len;
+        for (self.tasks) |*entry| {
+            const task = &(entry.* orelse continue);
+            if (task.execution) |*execution| {
+                const credential = execution.input().api_key;
+                if (credential.len > longest and std.mem.startsWith(u8, value, credential))
+                    longest = credential.len;
+            }
+        }
+        return longest;
+    }
+
+    fn projectedJsonValueWithKnownCredentials(
+        self: *Workbench,
+        writer: *std.Io.Writer,
+        value: []const u8,
+    ) Error!void {
+        const hex = "0123456789abcdef";
+        writer.writeByte('"') catch return error.SnapshotTooLarge;
+        var index: usize = 0;
+        while (index < value.len) {
+            if (self.knownCredentialEndAtCodepoint(value, index)) |redaction_end| {
+                _ = writer.splatByte('*', @min(redaction_end - index, 3)) catch
+                    return error.SnapshotTooLarge;
+                index = redaction_end;
+                continue;
+            }
+            const byte = value[index];
+            switch (byte) {
+                '"' => writer.writeAll("\\\"") catch return error.SnapshotTooLarge,
+                '\\' => writer.writeAll("\\\\") catch return error.SnapshotTooLarge,
+                0x08 => writer.writeAll("\\b") catch return error.SnapshotTooLarge,
+                0x0c => writer.writeAll("\\f") catch return error.SnapshotTooLarge,
+                '\n' => writer.writeAll("\\n") catch return error.SnapshotTooLarge,
+                '\r' => writer.writeAll("\\r") catch return error.SnapshotTooLarge,
+                '\t' => writer.writeAll("\\t") catch return error.SnapshotTooLarge,
+                0x00...0x07, 0x0b, 0x0e...0x1f => {
+                    writer.writeAll("\\u00") catch return error.SnapshotTooLarge;
+                    writer.writeByte(hex[byte >> 4]) catch return error.SnapshotTooLarge;
+                    writer.writeByte(hex[byte & 0x0f]) catch return error.SnapshotTooLarge;
+                },
+                else => writer.writeByte(byte) catch return error.SnapshotTooLarge,
+            }
+            index += 1;
+        }
+        writer.writeByte('"') catch return error.SnapshotTooLarge;
+    }
+
+    fn knownCredentialEndAtCodepoint(
+        self: *const Workbench,
+        value: []const u8,
+        codepoint_start: usize,
+    ) ?usize {
+        const codepoint_len = utf8CodepointLen(value, codepoint_start);
+        var match_end: usize = 0;
+        for (0..codepoint_len) |offset| {
+            const credential_len = self.matchedKnownCredentialLen(
+                value[codepoint_start + offset ..],
+            );
+            if (credential_len != 0)
+                match_end = @max(
+                    match_end,
+                    codepoint_start + offset + credential_len,
+                );
+        }
+        if (match_end == 0) return null;
+        return utf8RedactionBounds(
             value,
-            self.execution.credential(),
-        );
+            codepoint_start,
+            match_end - codepoint_start,
+        ).end;
     }
 
     fn projectedJsonValueWithCredential(
@@ -2337,12 +2904,10 @@ pub const Workbench = struct {
         writer.writeByte('"') catch return error.SnapshotTooLarge;
         var index: usize = 0;
         while (index < value.len) {
-            if (credential.len != 0 and
-                std.mem.startsWith(u8, value[index..], credential))
-            {
-                _ = writer.splatByte('*', @min(credential.len, 3)) catch
+            if (credentialEndAtCodepoint(value, index, credential)) |redaction_end| {
+                _ = writer.splatByte('*', @min(redaction_end - index, 3)) catch
                     return error.SnapshotTooLarge;
-                index += credential.len;
+                index = redaction_end;
                 continue;
             }
             const byte = value[index];
@@ -2373,13 +2938,12 @@ pub const Workbench = struct {
         run_id: u64,
         order: u64,
         request: lifecycle.UiRequest,
-        credential: []const u8,
     ) Error!void {
         writer.print("{{\"requestId\":\"{d}\",\"runId\":\"{d}\",\"order\":\"{d}\",\"redacted\":{},", .{
             request_id,
             run_id,
             order,
-            requestContainsSecret(request, credential),
+            self.requestContainsKnownCredential(request),
         }) catch return error.SnapshotTooLarge;
         switch (request) {
             .ask_question => |questions| {
@@ -2387,18 +2951,18 @@ pub const Workbench = struct {
                 for (questions, 0..) |question, question_index| {
                     if (question_index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
                     writer.writeAll("{\"question\":") catch return error.SnapshotTooLarge;
-                    try self.projectedJsonValueWithCredential(writer, question.question, credential);
+                    try self.projectedJsonValueWithKnownCredentials(writer, question.question);
                     writer.writeAll(",\"header\":") catch return error.SnapshotTooLarge;
-                    try self.projectedJsonValueWithCredential(writer, question.header, credential);
+                    try self.projectedJsonValueWithKnownCredentials(writer, question.header);
                     writer.print(",\"multi\":{},\"options\":[", .{question.multi}) catch return error.SnapshotTooLarge;
                     for (question.options, 0..) |option, option_index| {
                         if (option_index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
                         writer.writeAll("{\"label\":") catch return error.SnapshotTooLarge;
-                        try self.projectedJsonValueWithCredential(writer, option.label, credential);
+                        try self.projectedJsonValueWithKnownCredentials(writer, option.label);
                         writer.writeAll(",\"description\":") catch return error.SnapshotTooLarge;
-                        try self.projectedJsonValueWithCredential(writer, option.description, credential);
+                        try self.projectedJsonValueWithKnownCredentials(writer, option.description);
                         writer.writeAll(",\"preview\":") catch return error.SnapshotTooLarge;
-                        try self.projectedJsonValueWithCredential(writer, option.preview, credential);
+                        try self.projectedJsonValueWithKnownCredentials(writer, option.preview);
                         writer.writeByte('}') catch return error.SnapshotTooLarge;
                     }
                     writer.writeAll("]}") catch return error.SnapshotTooLarge;
@@ -2407,31 +2971,30 @@ pub const Workbench = struct {
             },
             .permission => |permission| {
                 writer.writeAll("\"kind\":\"permission\",\"tool\":") catch return error.SnapshotTooLarge;
-                try self.projectedJsonValueWithCredential(writer, permission.tool, credential);
+                try self.projectedJsonValueWithKnownCredentials(writer, permission.tool);
                 writer.writeAll(",\"args\":") catch return error.SnapshotTooLarge;
-                try self.projectedJsonValueWithCredential(writer, permission.args, credential);
+                try self.projectedJsonValueWithKnownCredentials(writer, permission.args);
             },
         }
         writer.writeByte('}') catch return error.SnapshotTooLarge;
     }
 
-    fn requestContainsSecret(request: lifecycle.UiRequest, credential: []const u8) bool {
-        if (credential.len == 0) return false;
+    fn requestContainsKnownCredential(self: *const Workbench, request: lifecycle.UiRequest) bool {
         return switch (request) {
             .ask_question => |questions| questions_block: {
                 for (questions) |question| {
-                    if (containsKnownSecret(question.question, credential) or containsKnownSecret(question.header, credential))
+                    if (self.containsKnownCredential(question.question) or self.containsKnownCredential(question.header))
                         break :questions_block true;
                     for (question.options) |option|
-                        if (containsKnownSecret(option.label, credential) or
-                            containsKnownSecret(option.description, credential) or
-                            containsKnownSecret(option.preview, credential))
+                        if (self.containsKnownCredential(option.label) or
+                            self.containsKnownCredential(option.description) or
+                            self.containsKnownCredential(option.preview))
                             break :questions_block true;
                 }
                 break :questions_block false;
             },
-            .permission => |permission| containsKnownSecret(permission.tool, credential) or
-                containsKnownSecret(permission.args, credential),
+            .permission => |permission| self.containsKnownCredential(permission.tool) or
+                self.containsKnownCredential(permission.args),
         };
     }
 
@@ -2443,15 +3006,14 @@ pub const Workbench = struct {
     fn writeRun(self: *Workbench, writer: *std.Io.Writer, run: *RunRecord) Error!void {
         const terminal = productTerminalFacts(run);
         writer.print("{{\"id\":\"{d}\",\"phase\":\"{s}\",\"user\":", .{ run.id, @tagName(runPhase(run)) }) catch return error.SnapshotTooLarge;
-        try self.projectedJsonValueWithCredential(writer, run.user, run.redaction_secret);
+        try self.projectedJsonValueWithKnownCredentials(writer, run.user);
         writer.writeAll(",\"assistant\":") catch return error.SnapshotTooLarge;
-        try self.projectedJsonValueWithCredential(
+        try self.projectedJsonValueWithKnownCredentials(
             writer,
             run.assistant.list.items[0..run.assistant.committed_len],
-            run.redaction_secret,
         );
         writer.print(",\"assistantRedacted\":{},\"status\":", .{run.assistant_redacted}) catch return error.SnapshotTooLarge;
-        try self.projectedJsonValueWithCredential(writer, run.status_text, run.redaction_secret);
+        try self.projectedJsonValueWithKnownCredentials(writer, run.status_text);
         writer.writeAll(",\"outcome\":") catch return error.SnapshotTooLarge;
         if (terminal) |value| jsonValue(writer, @tagName(value.outcome)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.writeAll(",\"cause\":") catch return error.SnapshotTooLarge;
@@ -2470,16 +3032,16 @@ pub const Workbench = struct {
             if (tool_count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
             tool_count += 1;
             writer.writeAll("{\"id\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValueWithCredential(writer, tool.id, run.redaction_secret);
+            try self.projectedJsonValueWithKnownCredentials(writer, tool.id);
             writer.print(",\"order\":\"{d}\"", .{tool.order}) catch return error.SnapshotTooLarge;
             writer.writeAll(",\"name\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValueWithCredential(writer, tool.name, run.redaction_secret);
+            try self.projectedJsonValueWithKnownCredentials(writer, tool.name);
             writer.writeAll(",\"input\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValueWithCredential(writer, tool.input, run.redaction_secret);
+            try self.projectedJsonValueWithKnownCredentials(writer, tool.input);
             writer.writeAll(",\"progress\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValueWithCredential(writer, tool.progress, run.redaction_secret);
+            try self.projectedJsonValueWithKnownCredentials(writer, tool.progress);
             writer.writeAll(",\"content\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValueWithCredential(writer, tool.content, run.redaction_secret);
+            try self.projectedJsonValueWithKnownCredentials(writer, tool.content);
             writer.print(",\"state\":\"{s}\",\"isError\":{},\"elapsedMs\":\"{d}\",\"inputTruncated\":{},\"progressTruncated\":{},\"contentTruncated\":{},\"redacted\":{}}}", .{
                 @tagName(tool.state),
                 tool.is_error,
@@ -2566,7 +3128,6 @@ pub const Workbench = struct {
         self: *Workbench,
         writer: *std.Io.Writer,
         view: *const TaskView,
-        credential: []const u8,
     ) Error!void {
         const start = if (view.ui_history_count == view.ui_history.len) view.ui_history_next else 0;
         for (0..view.ui_history_count) |offset| {
@@ -2580,7 +3141,7 @@ pub const Workbench = struct {
                 @tagName(record.kind),
                 @tagName(record.state),
             }) catch return error.SnapshotTooLarge;
-            try self.projectedJsonValueWithCredential(writer, record.detailSlice(), credential);
+            try self.projectedJsonValueWithKnownCredentials(writer, record.detailSlice());
             writer.print(",\"itemCount\":{d},\"detailTruncated\":{},\"redacted\":{}}}", .{
                 record.item_count,
                 record.detail_truncated,
@@ -2805,7 +3366,6 @@ fn agentProvider(provider: Provider) lifecycle.ProviderKind {
     return switch (provider) {
         .anthropic => .anthropic,
         .openai => .openai,
-        .gemini => .gemini,
     };
 }
 
@@ -2813,7 +3373,6 @@ fn accountProviderKind(provider: Provider) account_contract.ProviderKind {
     return switch (provider) {
         .anthropic => .anthropic,
         .openai => .openai,
-        .gemini => unreachable,
     };
 }
 
@@ -3139,22 +3698,133 @@ fn sanitizeInto(destination: []u8, value: []const u8, secret: []const u8) Saniti
     var write: usize = 0;
     var redacted = false;
     while (read < value.len) {
-        if (secret.len != 0 and std.mem.startsWith(u8, value[read..], secret)) {
-            const marker_len = @min(secret.len, 3);
+        if (credentialEndAtCodepoint(value, read, secret)) |redaction_end| {
+            const marker_len = @min(redaction_end - read, 3);
             if (marker_len > destination.len - write) break;
             @memset(destination[write..][0..marker_len], '*');
             write += marker_len;
-            read += secret.len;
+            read = redaction_end;
             redacted = true;
             continue;
         }
-        const sequence_len: usize = std.unicode.utf8ByteSequenceLength(value[read]) catch 1;
+        const sequence_len = utf8CodepointLen(value, read);
         if (sequence_len > value.len - read or sequence_len > destination.len - write) break;
         @memcpy(destination[write..][0..sequence_len], value[read..][0..sequence_len]);
         write += sequence_len;
         read += sequence_len;
     }
     return .{ .len = write, .truncated = read != value.len, .redacted = redacted };
+}
+
+fn redactWorkspaceBytesNoFail(
+    storage: []u8,
+    projected_len: *usize,
+    credential: []const u8,
+) bool {
+    if (credential.len == 0) return false;
+    var read: usize = 0;
+    var write: usize = 0;
+    var redacted = false;
+    while (read < projected_len.*) {
+        const projected = storage[0..projected_len.*];
+        if (credentialEndAtCodepoint(projected, read, credential)) |redaction_end| {
+            const marker_len = @min(redaction_end - read, 3);
+            @memset(storage[write..][0..marker_len], '*');
+            write += marker_len;
+            read = redaction_end;
+            redacted = true;
+            continue;
+        }
+        const codepoint_len = utf8CodepointLen(projected, read);
+        std.mem.copyForwards(
+            u8,
+            storage[write..][0..codepoint_len],
+            projected[read..][0..codepoint_len],
+        );
+        write += codepoint_len;
+        read += codepoint_len;
+    }
+    projected_len.* = write;
+    return redacted;
+}
+
+fn redactFixedWidthNoFail(storage: []u8, credential: []const u8) bool {
+    if (credential.len == 0 or storage.len < credential.len) return false;
+    var cursor: usize = 0;
+    var redacted = false;
+    while (cursor <= storage.len - credential.len) {
+        const relative = std.mem.indexOf(u8, storage[cursor..], credential) orelse break;
+        const match_start = cursor + relative;
+        const bounds = utf8RedactionBounds(storage, match_start, credential.len);
+        @memset(storage[bounds.start..bounds.end], '*');
+        cursor = bounds.end;
+        redacted = true;
+    }
+    return redacted;
+}
+
+const RedactionBounds = struct { start: usize, end: usize };
+
+fn utf8CodepointLen(value: []const u8, start: usize) usize {
+    return @min(
+        std.unicode.utf8ByteSequenceLength(value[start]) catch 1,
+        value.len - start,
+    );
+}
+
+fn utf8RedactionBounds(
+    value: []const u8,
+    match_start: usize,
+    match_len: usize,
+) RedactionBounds {
+    var start = match_start;
+    while (start > 0 and value[start] & 0xc0 == 0x80) start -= 1;
+    var end = @min(value.len, match_start + match_len);
+    while (end < value.len and value[end] & 0xc0 == 0x80) end += 1;
+    return .{ .start = start, .end = end };
+}
+
+fn credentialEndAtCodepoint(
+    value: []const u8,
+    codepoint_start: usize,
+    credential: []const u8,
+) ?usize {
+    if (credential.len == 0) return null;
+    const codepoint_len = utf8CodepointLen(value, codepoint_start);
+    var match_end: usize = 0;
+    for (0..codepoint_len) |offset| {
+        if (std.mem.startsWith(
+            u8,
+            value[codepoint_start + offset ..],
+            credential,
+        ))
+            match_end = @max(
+                match_end,
+                codepoint_start + offset + credential.len,
+            );
+    }
+    if (match_end == 0) return null;
+    return utf8RedactionBounds(
+        value,
+        codepoint_start,
+        match_end - codepoint_start,
+    ).end;
+}
+
+fn credentialMayContinueAtCodepoint(
+    value: []const u8,
+    codepoint_start: usize,
+    credential: []const u8,
+) bool {
+    if (credential.len == 0) return false;
+    const codepoint_len = utf8CodepointLen(value, codepoint_start);
+    for (0..codepoint_len) |offset| {
+        const remaining = value[codepoint_start + offset ..];
+        if (remaining.len < credential.len and
+            std.mem.startsWith(u8, credential, remaining))
+            return true;
+    }
+    return false;
 }
 
 fn kindForRequest(request: lifecycle.UiRequest) UiRecordKind {
@@ -3245,6 +3915,15 @@ fn worstCaseSnapshotBytes(limits: Limits) ?usize {
     total = std.math.add(
         usize,
         total,
+        std.math.mul(
+            usize,
+            limits.max_workspaces,
+            workspace_snapshot_overhead,
+        ) catch return null,
+    ) catch return null;
+    total = std.math.add(
+        usize,
+        total,
         std.math.mul(usize, limits.max_tasks, task_snapshot_overhead) catch return null,
     ) catch return null;
     const runs = std.math.mul(usize, limits.max_tasks, limits.max_runs_per_task) catch return null;
@@ -3308,6 +3987,16 @@ fn installTestExecution(workbench: *Workbench) !void {
     );
     errdefer execution.deinit();
     try workbench.beginExecutionReplacement();
+    const api_keys = [_]account_contract.ApiKeyView{.{
+        .id = "key-1",
+        .name = "Primary",
+        .suffix = "1234",
+        .provider_kind = .anthropic,
+    }};
+    const models = [_]account_contract.ModelView{.{
+        .id = "fixture-model",
+        .display_name = "Fixture model",
+    }};
     workbench.commitAccountFactNoFail(.{
         .kind = .execution_changed,
         .view = .{
@@ -3317,10 +4006,14 @@ fn installTestExecution(workbench: *Workbench) !void {
             .readiness = .ready,
             .primary_action = .none,
             .account_id = "account-1",
+            .profile_id = "profile-1",
             .display_name = "Metask User",
+            .api_keys = &api_keys,
+            .models = &models,
             .selected_api_key_id = "key-1",
             .selected_model = "fixture-model",
             .can_create_task = true,
+            .catalog_generation = 1,
             .execution_generation = 1,
         },
     });
@@ -3355,16 +4048,23 @@ fn testWorkbench() !Workbench {
             "/tmp/metawork-test",
             workbench.limits.max_workspace_bytes,
         ),
-        .display_name = try workbench.copyBounded(
+        .projected_root_storage = try workbench.copyBounded(
+            "/tmp/metawork-test",
+            workbench.limits.max_workspace_bytes,
+        ),
+        .projected_root_len = "/tmp/metawork-test".len,
+        .display_name_storage = try workbench.copyBounded(
             "metawork-test",
             workbench.limits.max_workspace_bytes,
         ),
+        .display_name_len = "metawork-test".len,
         .trust = .explicitly_trusted,
         .recent_order = 1,
     };
     workbench.selected_workspace_id = 1;
     workbench.next_workspace_id = 2;
     workbench.next_workspace_recent_order = 2;
+    workbench.next_task_id = 4;
     const execution_model = try workbench.copyBounded(
         workbench.execution.model(),
         account_contract.Limits.model_id_bytes,
@@ -3393,9 +4093,42 @@ fn testWorkbench() !Workbench {
         .session = null,
         .execution = task_execution.take(),
         .id = 3,
+        .route_id = 3,
         .execution_generation = 1,
         .execution_provider = .anthropic,
         .execution_model = execution_model,
+        .binding_account_id = try workbench.copyBounded(
+            "account-1",
+            account_contract.Limits.account_id_bytes,
+        ),
+        .binding_profile_id = try workbench.copyBounded(
+            "profile-1",
+            account_contract.Limits.profile_id_bytes,
+        ),
+        .binding_account_name = try workbench.copyBounded(
+            "Metask User",
+            account_contract.Limits.display_name_bytes,
+        ),
+        .binding_api_key_id = try workbench.copyBounded(
+            "key-1",
+            account_contract.Limits.api_key_id_bytes,
+        ),
+        .binding_api_key_name = try workbench.copyBounded(
+            "Primary",
+            account_contract.Limits.api_key_name_bytes,
+        ),
+        .binding_api_key_suffix = try workbench.copyBounded(
+            "1234",
+            account_contract.Limits.api_key_suffix_bytes,
+        ),
+        .binding_model_id = try workbench.copyBounded(
+            "fixture-model",
+            account_contract.Limits.model_id_bytes,
+        ),
+        .binding_model_display_name = try workbench.copyBounded(
+            "Fixture model",
+            binding_model_display_bytes,
+        ),
         .workspace_id = 1,
         .workspace_root = workspace,
         .title = try workbench.copyBounded("", workbench.limits.max_task_title_bytes),
@@ -3405,6 +4138,29 @@ fn testWorkbench() !Workbench {
         .active_run_id = 7,
     };
     return workbench;
+}
+
+fn replaceTaskCredentialForTest(
+    task: *TaskView,
+    credential: []const u8,
+) !void {
+    task.execution.?.deinit();
+    var replacement = try account_contract.OwnedExecutionConfig.initOwned(
+        std.testing.allocator,
+        .anthropic,
+        try std.testing.allocator.dupe(u8, "fixture-model"),
+        try std.testing.allocator.dupe(
+            u8,
+            account_contract.metask_anthropic_messages_url,
+        ),
+        task.execution_generation,
+        try std.testing.allocator.dupe(u8, credential),
+    );
+    task.execution = replacement.take();
+    const redaction_secret = task.execution.?.input().api_key;
+    for (task.runs) |*run_entry| {
+        if (run_entry.*) |*run| run.redaction_secret = redaction_secret;
+    }
 }
 
 fn testEnvelope(session_id: u64, run_id: u64, encoded: []const u8) !lifecycle.OwnedCoreEvent {
@@ -3496,7 +4252,7 @@ test "Workspace registry owns empty selection recent use authorization and capac
     const projections = try workbench.copyWorkspaceProjections(&storage);
     try std.testing.expectEqual(@as(usize, 2), projections.len);
     try std.testing.expectEqual(source_id, projections[0].id);
-    try std.testing.expect(projections[0].selected);
+    try std.testing.expectEqual(source_id, workbench.selectedWorkspaceId());
     try std.testing.expectEqual(WorkspaceAuthorization.available, projections[0].authorization);
     try std.testing.expectEqualStrings("src", projections[0].display_name);
     try std.testing.expect(std.fs.path.isAbsolute(projections[0].canonical_root));
@@ -3507,6 +4263,7 @@ test "Workspace registry owns empty selection recent use authorization and capac
     try std.testing.expect(reordered[0].recent_order > reordered[1].recent_order);
 
     try workbench.removeWorkspace(root_id);
+    try std.testing.expectEqual(@as(u64, 2), try workbench.workspaceEpoch(root_id));
     try std.testing.expectEqual(@as(u64, 0), workbench.selectedWorkspaceId());
     const remaining = try workbench.copyWorkspaceProjections(&storage);
     try std.testing.expectEqual(@as(usize, 1), remaining.len);
@@ -3519,6 +4276,7 @@ test "Workspace registry owns empty selection recent use authorization and capac
     try std.testing.expectEqual(root_id, restored_id);
     const restored = try workbench.copyWorkspaceProjections(&storage);
     try std.testing.expectEqual(root_id, restored[0].id);
+    try std.testing.expectEqual(@as(u64, 3), restored[0].epoch);
     try std.testing.expectEqual(WorkspaceAuthorization.available, restored[0].authorization);
 
     var no_space: [0]WorkspaceProjection = .{};
@@ -3584,6 +4342,28 @@ test "Workbench snapshot serializer matches the Renderer contract fixture" {
     );
     try std.testing.expect(
         std.mem.indexOf(u8, snapshot, "\"baseUrl\"") == null,
+    );
+}
+
+test "revision two mutation admission rejects stale execution and binding facts" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+
+    try std.testing.expectError(
+        error.ExecutionGenerationMismatch,
+        workbench.createTaskInWorkspace(1, 1, 0),
+    );
+    try std.testing.expectError(
+        error.ExecutionGenerationMismatch,
+        workbench.createTaskInWorkspace(1, 1, 2),
+    );
+    try std.testing.expectError(
+        error.WorkspaceEpochMismatch,
+        workbench.createTaskInWorkspace(1, 2, 1),
+    );
+    try std.testing.expectError(
+        error.BindingEpochMismatch,
+        workbench.runTaskAtBinding(3, 2, "stale continuation"),
     );
 }
 
@@ -3717,6 +4497,7 @@ test "Account projection and execution install use preallocated no-fail storage"
         .id = "key-1",
         .name = "Primary",
         .suffix = "1234",
+        .provider_kind = .openai,
     }};
     const models = [_]account_contract.ModelView{.{
         .id = "model-1",
@@ -3732,6 +4513,7 @@ test "Account projection and execution install use preallocated no-fail storage"
             .readiness = .ready,
             .primary_action = .none,
             .account_id = "account-1",
+            .profile_id = "profile-1",
             .display_name = "Metask User",
             .api_keys = &api_keys,
             .models = &models,
@@ -3784,6 +4566,16 @@ test "default replacement preserves Task generation and installs the next admiss
     defer workbench.deinit();
 
     const task = &workbench.tasks[0].?;
+    try workbench.replaceTracked(
+        &task.title,
+        "review future metawork credential",
+        workbench.limits.max_task_title_bytes,
+    );
+    try workbench.replaceTracked(
+        &task.runs[0].?.status_text,
+        "future metawork status",
+        workbench.limits.max_tool_field_bytes,
+    );
     const old_input = try Workbench.taskExecutionInput(task);
     try std.testing.expectEqual(@as(u64, 1), old_input.execution_generation);
     try std.testing.expectEqualStrings("SECRET-KEY", old_input.api_key);
@@ -3797,9 +4589,19 @@ test "default replacement preserves Task generation and installs the next admiss
             account_contract.metask_openai_chat_completions_url,
         ),
         2,
-        try std.testing.allocator.dupe(u8, "SECRET-KEY-2"),
+        try std.testing.allocator.dupe(u8, "metawork"),
     );
     errdefer replacement.deinit();
+    const replacement_api_keys = [_]account_contract.ApiKeyView{.{
+        .id = "key-2",
+        .name = "Secondary",
+        .suffix = "5678",
+        .provider_kind = .openai,
+    }};
+    const replacement_models = [_]account_contract.ModelView{.{
+        .id = "fixture-model-2",
+        .display_name = "Fixture model 2",
+    }};
     try workbench.beginDefaultExecutionReplacement();
     try std.testing.expect(workbench.taskContinuationAvailable(task));
     try std.testing.expectEqual(
@@ -3816,7 +4618,10 @@ test "default replacement preserves Task generation and installs the next admiss
             .readiness = .ready,
             .primary_action = .none,
             .account_id = "account-1",
+            .profile_id = "profile-1",
             .display_name = "Metask User",
+            .api_keys = &replacement_api_keys,
+            .models = &replacement_models,
             .selected_api_key_id = "key-2",
             .selected_model = "fixture-model-2",
             .can_create_task = true,
@@ -3833,6 +4638,20 @@ test "default replacement preserves Task generation and installs the next admiss
     try std.testing.expectEqualStrings("SECRET-KEY", preserved.api_key);
     try std.testing.expectEqual(@as(u64, 2), workbench.execution.generation);
     try std.testing.expectEqualStrings("fixture-model-2", workbench.execution.model());
+    try std.testing.expectEqualStrings("fixture-model", task.execution_model);
+    try std.testing.expect(std.mem.indexOf(u8, task.title, "metawork") == null);
+    try std.testing.expect(std.mem.indexOf(u8, task.runs[0].?.status_text, "metawork") == null);
+    var scrubbed_snapshot_storage: [96 * 1024]u8 = undefined;
+    const scrubbed_snapshot = try workbench.writeSnapshot(&scrubbed_snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(u8, scrubbed_snapshot, "metawork") == null);
+    var workspace_storage: [2]WorkspaceProjection = undefined;
+    const workspace_projection = try workbench.copyWorkspaceProjections(&workspace_storage);
+    try std.testing.expect(workspace_projection[0].canonical_root.len != 0);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        workspace_projection[0].canonical_root,
+        "metawork",
+    ) == null);
 
     var next_task_execution = try workbench.execution.cloneOwned(std.testing.allocator);
     defer next_task_execution.deinit();
@@ -3859,6 +4678,268 @@ test "default replacement preserves Task generation and installs the next admiss
     task.execution_generation = 1;
 }
 
+test "released Task credential is permanently scrubbed from every product projection" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    const task = &workbench.tasks[0].?;
+    const run = &task.runs[0].?;
+
+    try workbench.replaceTracked(
+        &task.title,
+        "title SECRET-KEY",
+        workbench.limits.max_task_title_bytes,
+    );
+    try workbench.replaceTracked(
+        &task.binding_model_id,
+        "model-SECRET-KEY",
+        account_contract.Limits.model_id_bytes,
+    );
+    try workbench.replaceTracked(
+        &run.user,
+        "prompt SECRET-KEY",
+        workbench.limits.max_user_message_bytes,
+    );
+    try workbench.appendTrackedText(
+        &run.assistant,
+        "answer SECRET-KEY",
+        workbench.limits.max_assistant_message_bytes,
+    );
+    try workbench.replaceTracked(
+        &run.status_text,
+        "status SECRET-KEY",
+        workbench.limits.max_tool_field_bytes,
+    );
+    run.tools[0] = .{
+        .route_digest = toolRouteDigest("SECRET-KEY"),
+        .id = try workbench.copyBounded("id SECRET-KEY", workbench.limits.max_tool_field_bytes),
+        .order = 1,
+        .name = try workbench.copyBounded("name SECRET-KEY", workbench.limits.max_tool_field_bytes),
+        .input = try workbench.copyBounded("input SECRET-KEY", workbench.limits.max_tool_field_bytes),
+        .progress = try workbench.copyBounded("progress SECRET-KEY", workbench.limits.max_tool_field_bytes),
+        .content = try workbench.copyBounded("content SECRET-KEY", workbench.limits.max_tool_field_bytes),
+        .state = .completed,
+    };
+    const workspace = &workbench.workspaces[0].?;
+    @memcpy(workspace.projected_root_storage[0.."SECRET-KEY".len], "SECRET-KEY");
+    workspace.projected_root_len = "SECRET-KEY".len;
+    task.ui_history[0] = .{
+        .request_id = 8,
+        .run_id = run.id,
+        .kind = .permission,
+        .state = .denied,
+    };
+    @memcpy(task.ui_history[0].?.detail[0.."SECRET-KEY".len], "SECRET-KEY");
+    task.ui_history[0].?.detail_len = "SECRET-KEY".len;
+    task.ui_history_count = 1;
+
+    run.active_phase = .completed;
+    task.lifecycle = .closed;
+    task.continuation = .{ .unavailable = .closed };
+    task.active_run_id = 0;
+    try workbench.beginExecutionReplacement();
+    try std.testing.expect(task.execution == null);
+    try std.testing.expectEqualStrings("fixture-model", task.execution_model);
+    try std.testing.expect(std.mem.indexOf(u8, task.binding_model_id, "SECRET-KEY") == null);
+    var snapshot_storage: [96 * 1024]u8 = undefined;
+    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null);
+    workbench.endExecutionReplacementNoFail();
+}
+
+test "clearing the last default execution scrubs its credential before secure zero" {
+    test_agent_runtime.io = std.testing.io;
+    var workbench = try Workbench.init(
+        std.testing.allocator,
+        &test_agent_runtime,
+        .{
+            .max_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        .{},
+    );
+    defer workbench.deinit();
+    try installTestExecution(&workbench);
+    workbench.workspaces[0] = .{
+        .id = 1,
+        .canonical_root = try workbench.copyBounded("/tmp", workbench.limits.max_workspace_bytes),
+        .projected_root_storage = try workbench.copyBounded(
+            "path-SECRET-KEY",
+            workbench.limits.max_workspace_bytes,
+        ),
+        .projected_root_len = "path-SECRET-KEY".len,
+        .display_name_storage = try workbench.copyBounded(
+            "SECRET-KEY",
+            workbench.limits.max_workspace_bytes,
+        ),
+        .display_name_len = "SECRET-KEY".len,
+        .trust = .explicitly_trusted,
+        .recent_order = 1,
+    };
+    workbench.selected_workspace_id = 1;
+
+    try workbench.beginDefaultExecutionReplacement();
+    workbench.commitAccountFactNoFail(.{
+        .kind = .signed_out,
+        .view = .{
+            .session_state = .signed_out,
+            .execution_state = .none,
+            .operation = .none,
+            .readiness = .sign_in_required,
+            .primary_action = .sign_in,
+        },
+    });
+    workbench.clearExecutionNoFail();
+    workbench.endExecutionReplacementNoFail();
+    workbench.finishAccountCommitNoFail();
+
+    try std.testing.expectEqual(@as(usize, 0), workbench.execution.credential().len);
+    var snapshot_storage: [96 * 1024]u8 = undefined;
+    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null);
+}
+
+test "known credential matching chooses the longest overlapping secret" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    std.crypto.secureZero(u8, workbench.execution.credential_storage);
+    @memcpy(workbench.execution.credential_storage[0.."SECRET".len], "SECRET");
+    workbench.execution.credential_len = "SECRET".len;
+
+    try std.testing.expectEqual(
+        @as(usize, "SECRET-KEY".len),
+        workbench.matchedKnownCredentialLen("SECRET-KEY suffix"),
+    );
+    try workbench.replaceTracked(
+        &workbench.tasks[0].?.runs[0].?.status_text,
+        "SECRET-KEY suffix",
+        workbench.limits.max_tool_field_bytes,
+    );
+    var snapshot_storage: [96 * 1024]u8 = undefined;
+    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "***-KEY") == null);
+}
+
+test "opaque credential redaction preserves UTF-8 projection validity" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    std.crypto.secureZero(u8, workbench.execution.credential_storage);
+    workbench.execution.credential_storage[0] = 0xa9;
+    workbench.execution.credential_len = 1;
+
+    var output: [64]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&output);
+    try workbench.projectedJsonValueWithKnownCredentials(&writer, "café");
+    try std.testing.expectEqualStrings("\"caf**\"", writer.buffered());
+    try std.testing.expect(std.unicode.utf8ValidateSlice(writer.buffered()));
+
+    var fixed = "café".*;
+    try std.testing.expect(redactFixedWidthNoFail(&fixed, &.{0xa9}));
+    try std.testing.expectEqualStrings("caf**", &fixed);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(&fixed));
+}
+
+test "opaque credential redaction is UTF-8 safe across product inputs and assistant chunks" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    const task = &workbench.tasks[0].?;
+    try replaceTaskCredentialForTest(task, &.{0xa9});
+
+    const slot = try workbench.reserveRunRecord(task, "café");
+    defer workbench.discardRunRecord(task, slot);
+    try std.testing.expectEqualStrings("caf**", task.runs[slot].?.user);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(task.runs[slot].?.user));
+
+    var tool_event = try testEnvelope(
+        task.route_id,
+        7,
+        "{\"tool_start\":{\"id\":\"tool-1\",\"name\":\"café\",\"input\":\"café\"}}",
+    );
+    defer tool_event.deinit();
+    try workbench.applyEvent(&tool_event);
+    const tool = &task.runs[0].?.tools[0].?;
+    try std.testing.expectEqualStrings("caf**", tool.name);
+    try std.testing.expectEqualStrings("caf**", tool.input);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(tool.name));
+    try std.testing.expect(std.unicode.utf8ValidateSlice(tool.input));
+
+    const request = lifecycle.UiRequest{
+        .permission = .{ .tool = "café", .args = "café" },
+    };
+    var pending_storage: [4096]u8 = undefined;
+    var pending_writer = std.Io.Writer.fixed(&pending_storage);
+    try workbench.writePendingUiProjection(&pending_writer, 9, 7, 1, request);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(pending_writer.buffered()));
+    try std.testing.expect(std.mem.indexOf(u8, pending_writer.buffered(), &.{0xa9}) == null);
+
+    var assistant = TrackedText{};
+    defer assistant.list.deinit(std.testing.allocator);
+    try assistant.list.appendSlice(std.testing.allocator, "café");
+    try std.testing.expect(workbench.redactTrackedText(&assistant, &.{0xa9}));
+    try std.testing.expectEqualStrings("caf**", assistant.list.items);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(assistant.list.items));
+}
+
+test "assistant redaction withholds a UTF-8 codepoint across credential chunks" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    var assistant = TrackedText{};
+    defer assistant.list.deinit(std.testing.allocator);
+    const credential = [_]u8{ 0xa9, 'X' };
+
+    try assistant.list.appendSlice(std.testing.allocator, "é");
+    try std.testing.expect(!workbench.redactTrackedText(&assistant, &credential));
+    try std.testing.expectEqual(@as(usize, 0), assistant.committed_len);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(assistant.list.items));
+
+    try assistant.list.appendSlice(std.testing.allocator, "X tail");
+    try std.testing.expect(workbench.redactTrackedText(&assistant, &credential));
+    try std.testing.expectEqualStrings("*** tail", assistant.list.items);
+    try std.testing.expectEqual(assistant.list.items.len, assistant.committed_len);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(assistant.list.items));
+}
+
+test "product Task identity is independent from Agent Session route identity" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    workbench.tasks[0].?.route_id = 99;
+
+    var routed = try testEnvelope(99, 7, "{\"text_chunk\":\"routed\"}");
+    defer routed.deinit();
+    try workbench.applyEvent(&routed);
+    try std.testing.expectEqual(@as(u64, 3), workbench.tasks[0].?.id);
+    try std.testing.expectEqualStrings(
+        "routed",
+        workbench.tasks[0].?.runs[0].?.assistant.list.items,
+    );
+
+    var product_id_is_not_route = try testEnvelope(3, 7, "{\"text_chunk\":\"wrong\"}");
+    defer product_id_is_not_route.deinit();
+    try std.testing.expectError(
+        error.UnknownTask,
+        workbench.applyEvent(&product_id_is_not_route),
+    );
+}
+
+test "event projection failure routes by Agent Session identity not product Task identity" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    const task = &workbench.tasks[0].?;
+    task.route_id = 99;
+
+    workbench.recordEventProjectionFailure(task.id, 7);
+    try std.testing.expect(task.runs[0].?.event_projection_failure == null);
+    try std.testing.expect(workbench.taskContinuationAvailable(task));
+
+    workbench.recordEventProjectionFailure(task.route_id, 7);
+    try std.testing.expectEqual(
+        EventProjectionFailure.consumer_rejected,
+        task.runs[0].?.event_projection_failure.?,
+    );
+    try std.testing.expect(!workbench.taskContinuationAvailable(task));
+}
+
 test "Workbench shutdown releases current and Task-owned execution generations" {
     var workbench = try testWorkbench();
     try workbench.beginDefaultExecutionReplacement();
@@ -3874,6 +4955,16 @@ test "Workbench shutdown releases current and Task-owned execution generations" 
         try std.testing.allocator.dupe(u8, "SECRET-KEY-2"),
     );
     errdefer replacement.deinit();
+    const replacement_api_keys = [_]account_contract.ApiKeyView{.{
+        .id = "key-2",
+        .name = "Secondary",
+        .suffix = "5678",
+        .provider_kind = .anthropic,
+    }};
+    const replacement_models = [_]account_contract.ModelView{.{
+        .id = "fixture-model-2",
+        .display_name = "Fixture model 2",
+    }};
     workbench.commitAccountFactNoFail(.{
         .kind = .execution_changed,
         .view = .{
@@ -3883,7 +4974,10 @@ test "Workbench shutdown releases current and Task-owned execution generations" 
             .readiness = .ready,
             .primary_action = .none,
             .account_id = "account-1",
+            .profile_id = "profile-1",
             .display_name = "Metask User",
+            .api_keys = &replacement_api_keys,
+            .models = &replacement_models,
             .selected_api_key_id = "key-2",
             .selected_model = "fixture-model-2",
             .can_create_task = true,
@@ -4174,16 +5268,14 @@ test "Workbench snapshot budget includes JSON escaping and structural overhead" 
 fn installMaximumAccountProjection(workbench: *Workbench) !void {
     const account_id: [account_contract.Limits.account_id_bytes]u8 =
         @splat('a');
+    const profile_id: [account_contract.Limits.profile_id_bytes]u8 =
+        @splat('p');
     const display_name: [account_contract.Limits.display_name_bytes]u8 =
         @splat('d');
-    const api_key_id: [account_contract.Limits.api_key_id_bytes]u8 =
-        @splat('k');
     const api_key_name: [account_contract.Limits.api_key_name_bytes]u8 =
         @splat('n');
     const api_key_suffix: [account_contract.Limits.api_key_suffix_bytes]u8 =
         @splat('s');
-    const model_id: [account_contract.Limits.model_id_bytes]u8 =
-        @splat('m');
     const model_name: [account_contract.Limits.model_display_name_bytes]u8 =
         @splat('v');
     const diagnostic: [account_contract.Limits.safe_diagnostic_bytes]u8 =
@@ -4193,20 +5285,47 @@ fn installMaximumAccountProjection(workbench: *Workbench) !void {
         account_contract.Limits.api_key_entries,
     );
     defer std.testing.allocator.free(api_keys);
-    for (api_keys) |*api_key| api_key.* = .{
-        .id = &api_key_id,
-        .name = &api_key_name,
-        .suffix = &api_key_suffix,
-    };
+    const api_key_ids = try std.testing.allocator.alloc(
+        [account_contract.Limits.api_key_id_bytes]u8,
+        account_contract.Limits.api_key_entries,
+    );
+    defer std.testing.allocator.free(api_key_ids);
+    for (api_keys, api_key_ids, 0..) |*api_key, *id, index| {
+        id.* = @splat('k');
+        var value = index;
+        for (0..20) |offset| {
+            id[id.len - 1 - offset] = @intCast('0' + value % 10);
+            value /= 10;
+        }
+        api_key.* = .{
+            .id = id,
+            .name = &api_key_name,
+            .suffix = &api_key_suffix,
+            .provider_kind = .anthropic,
+        };
+    }
     const models = try std.testing.allocator.alloc(
         account_contract.ModelView,
         account_contract.Limits.model_entries,
     );
     defer std.testing.allocator.free(models);
-    for (models) |*model| model.* = .{
-        .id = &model_id,
-        .display_name = &model_name,
-    };
+    const model_ids = try std.testing.allocator.alloc(
+        [account_contract.Limits.model_id_bytes]u8,
+        account_contract.Limits.model_entries,
+    );
+    defer std.testing.allocator.free(model_ids);
+    for (models, model_ids, 0..) |*model, *id, index| {
+        id.* = @splat('m');
+        var value = index;
+        for (0..20) |offset| {
+            id[id.len - 1 - offset] = @intCast('0' + value % 10);
+            value /= 10;
+        }
+        model.* = .{
+            .id = id,
+            .display_name = &model_name,
+        };
+    }
     workbench.commitAccountFactNoFail(.{
         .kind = .catalog_changed,
         .view = .{
@@ -4216,11 +5335,12 @@ fn installMaximumAccountProjection(workbench: *Workbench) !void {
             .readiness = .ready,
             .primary_action = .none,
             .account_id = &account_id,
+            .profile_id = &profile_id,
             .display_name = &display_name,
             .api_keys = api_keys,
             .models = models,
-            .selected_api_key_id = &api_key_id,
-            .selected_model = &model_id,
+            .selected_api_key_id = &api_key_ids[0],
+            .selected_model = &model_ids[0],
             .can_create_task = false,
             .error_code = .invalid_state,
             .safe_diagnostic = &diagnostic,
@@ -4283,9 +5403,42 @@ test "default snapshot budget contains the maximum structural projection" {
         workbench.tasks[task_index] = .{
             .session = null,
             .id = @intCast(task_index + 1),
+            .route_id = @intCast(task_index + 1),
             .execution_generation = 1,
             .execution_provider = .anthropic,
             .execution_model = execution_model,
+            .binding_account_id = try workbench.copyBounded(
+                "",
+                account_contract.Limits.account_id_bytes,
+            ),
+            .binding_profile_id = try workbench.copyBounded(
+                "",
+                account_contract.Limits.profile_id_bytes,
+            ),
+            .binding_account_name = try workbench.copyBounded(
+                "",
+                account_contract.Limits.display_name_bytes,
+            ),
+            .binding_api_key_id = try workbench.copyBounded(
+                "",
+                account_contract.Limits.api_key_id_bytes,
+            ),
+            .binding_api_key_name = try workbench.copyBounded(
+                "",
+                account_contract.Limits.api_key_name_bytes,
+            ),
+            .binding_api_key_suffix = try workbench.copyBounded(
+                "",
+                account_contract.Limits.api_key_suffix_bytes,
+            ),
+            .binding_model_id = try workbench.copyBounded(
+                "",
+                account_contract.Limits.model_id_bytes,
+            ),
+            .binding_model_display_name = try workbench.copyBounded(
+                "",
+                binding_model_display_bytes,
+            ),
             .workspace_id = 0,
             .workspace_root = try workbench.copyBounded("", limits.max_workspace_bytes),
             .title = try workbench.copyBounded("", limits.max_task_title_bytes),
@@ -4370,7 +5523,6 @@ test "pending UI re-encoding remains inside its concurrent snapshot allowance" {
         std.math.maxInt(u64),
         std.math.maxInt(u64),
         request,
-        workbench.execution.credential(),
     );
     try std.testing.expect(writer.buffered().len <= allowance);
 }
@@ -4435,7 +5587,6 @@ test "known Host credentials are removed from assistant, tool, and UI projection
         7,
         1,
         request,
-        workbench.tasks[0].?.runs[0].?.redaction_secret,
     );
 
     var snapshot_storage: [96 * 1024]u8 = undefined;

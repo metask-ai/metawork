@@ -1020,6 +1020,16 @@ pub fn installWorkbenchExecution(
         try std.testing.allocator.dupe(u8, "fixture-secret"),
     );
     errdefer execution.deinit();
+    const api_keys = [_]account_contract.ApiKeyView{.{
+        .id = "key-1",
+        .name = "Fixture API",
+        .suffix = "ture",
+        .provider_kind = .anthropic,
+    }};
+    const models = [_]account_contract.ModelView{.{
+        .id = "fixture-model",
+        .display_name = "Fixture model",
+    }};
     try workbench.beginExecutionReplacement();
     workbench.commitAccountFactNoFail(.{
         .kind = .execution_changed,
@@ -1030,10 +1040,14 @@ pub fn installWorkbenchExecution(
             .readiness = .ready,
             .primary_action = .none,
             .account_id = "account-1",
+            .profile_id = "profile-1",
             .display_name = "Fixture User",
+            .api_keys = &api_keys,
+            .models = &models,
             .selected_api_key_id = "key-1",
             .selected_model = "fixture-model",
             .can_create_task = true,
+            .catalog_generation = 1,
             .execution_generation = 1,
         },
     });

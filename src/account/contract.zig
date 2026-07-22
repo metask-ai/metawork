@@ -127,6 +127,7 @@ pub const ApiKeyView = struct {
     id: []const u8,
     name: []const u8,
     suffix: []const u8,
+    provider_kind: ProviderKind,
 };
 
 pub const ModelView = struct {
@@ -150,6 +151,7 @@ pub const AccountView = struct {
     primary_action: AccountPrimaryAction,
     can_cancel: bool = false,
     account_id: []const u8 = "",
+    profile_id: []const u8 = "",
     display_name: []const u8 = "",
     api_keys: []const ApiKeyView = &.{},
     models: []const ModelView = &.{},
@@ -407,6 +409,7 @@ pub fn validateExecutionConfig(input: ExecutionConfigInput) ValidationError!void
 
 pub fn validateView(view: AccountView) ValidationError!void {
     try validateOptional(view.account_id, Limits.account_id_bytes);
+    try validateOptional(view.profile_id, Limits.profile_id_bytes);
     try validateOptional(view.display_name, Limits.display_name_bytes);
     try validateOptional(view.selected_api_key_id, Limits.api_key_id_bytes);
     try validateOptional(view.selected_model, Limits.model_id_bytes);
@@ -414,20 +417,40 @@ pub fn validateView(view: AccountView) ValidationError!void {
     if (view.api_keys.len > Limits.api_key_entries or view.models.len > Limits.model_entries)
         return error.CollectionTooLarge;
 
-    for (view.api_keys) |key| {
+    for (view.api_keys, 0..) |key, key_index| {
         try validateRequired(key.id, Limits.api_key_id_bytes);
         try validateOptional(key.name, Limits.api_key_name_bytes);
         try validateOptional(key.suffix, Limits.api_key_suffix_bytes);
+        for (view.api_keys[0..key_index]) |prior|
+            if (std.mem.eql(u8, prior.id, key.id))
+                return error.InconsistentState;
     }
-    for (view.models) |model| {
+    for (view.models, 0..) |model, model_index| {
         try validateRequired(model.id, Limits.model_id_bytes);
         try validateOptional(model.display_name, Limits.model_display_name_bytes);
+        for (view.models[0..model_index]) |prior|
+            if (std.mem.eql(u8, prior.id, model.id))
+                return error.InconsistentState;
     }
 
     if (view.execution_state == .ready) {
         if (view.execution_generation == 0 or
+            view.account_id.len == 0 or
+            view.profile_id.len == 0 or
             view.selected_api_key_id.len == 0 or
             view.selected_model.len == 0)
+            return error.InconsistentState;
+        var api_key_matches: usize = 0;
+        for (view.api_keys) |key| {
+            if (std.mem.eql(u8, key.id, view.selected_api_key_id))
+                api_key_matches += 1;
+        }
+        var model_matches: usize = 0;
+        for (view.models) |model| {
+            if (std.mem.eql(u8, model.id, view.selected_model))
+                model_matches += 1;
+        }
+        if (api_key_matches != 1 or model_matches != 1)
             return error.InconsistentState;
     } else if (view.can_create_task) {
         return error.InconsistentState;

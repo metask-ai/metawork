@@ -706,6 +706,12 @@ summary::-webkit-details-marker {
   justify-content: space-between;
 }
 
+.workspace-heading-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
 .text-button {
   padding: 3px 4px;
   border: 0;
@@ -722,6 +728,67 @@ summary::-webkit-details-marker {
 
 .workspace-switcher {
   position: relative;
+}
+
+.workspace-removal-warning {
+  margin-top: 8px;
+  padding: 9px 10px;
+  border: 1px solid rgba(163, 75, 60, 0.28);
+  border-radius: 9px;
+  color: var(--color-danger);
+  background: rgba(163, 75, 60, 0.07);
+}
+
+.workspace-removal-warning p {
+  margin: 0;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.workspace-removal-warning .text-button {
+  margin-top: 5px;
+  padding-left: 0;
+  color: var(--color-danger);
+}
+
+.workspace-removing {
+  margin: 8px 2px 0;
+  color: var(--color-amber-ink);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.workspace-removal-confirmation {
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid rgba(163, 75, 60, 0.28);
+  border-radius: 9px;
+  color: var(--color-graphite);
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.workspace-removal-confirmation strong,
+.workspace-removal-confirmation p {
+  display: block;
+  margin: 0;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.workspace-removal-confirmation p {
+  margin-top: 3px;
+  color: var(--color-muted);
+}
+
+.workspace-removal-confirmation > span {
+  display: flex;
+  margin-top: 6px;
+  justify-content: flex-end;
+  gap: 5px;
+}
+
+.workspace-removal-confirmation .is-danger {
+  color: var(--color-danger);
 }
 
 .workspace-picker {

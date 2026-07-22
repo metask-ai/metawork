@@ -29,6 +29,10 @@ pub const Runtime = struct {
         return null;
     }
 
+    pub fn workspaceRoot(_: *const Runtime) ?[]const u8 {
+        return null;
+    }
+
     pub fn productPolicy(_: *Runtime, base: native_sdk.BridgePolicy) native_sdk.BridgePolicy {
         return base;
     }
@@ -48,4 +52,5 @@ test "release automation boundary is inert" {
     var runtime = Runtime.init(&env);
     defer runtime.deinit();
     try std.testing.expect(!runtime.active());
+    try std.testing.expectEqual(@as(?[]const u8, null), runtime.workspaceRoot());
 }

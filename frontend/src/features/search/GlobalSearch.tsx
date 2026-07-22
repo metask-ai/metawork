@@ -128,7 +128,7 @@ export function GlobalSearch({
                   {result.title ||
                     (result.taskId
                       ? t("task.item", { id: result.taskId })
-                      : result.workspaceRoot)}
+                      : result.workspaceId)}
                 </strong>
                 <small>{result.detail}</small>
               </span>

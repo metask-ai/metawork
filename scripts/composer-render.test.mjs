@@ -20,6 +20,9 @@ const { AppShell } = await vite.ssrLoadModule("/src/app/AppShell.tsx");
 const { TaskTimeline } = await vite.ssrLoadModule(
   "/src/features/timeline/TaskTimeline.tsx",
 );
+const { WorkspaceNavigation } = await vite.ssrLoadModule(
+  "/src/features/workspaces/WorkspaceNavigation.tsx",
+);
 const { I18nContext } = await vite.ssrLoadModule("/src/i18n/context.ts");
 const { translate } = await vite.ssrLoadModule("/src/i18n/runtime.ts");
 
@@ -122,6 +125,55 @@ function renderNewTaskTimeline(composerHasDraft) {
   );
 }
 
+function renderWorkspaceNavigation(
+  lastRemovalFailure,
+  authorization = "available",
+  includeWorkspace = true,
+) {
+  return renderToStaticMarkup(
+    createElement(
+      I18nContext.Provider,
+      {
+        value: {
+          locale: "en-US",
+          setLocale() {},
+          t: (id, values) => translate("en-US", id, values),
+        },
+      },
+      createElement(WorkspaceNavigation, {
+        summaries: includeWorkspace
+          ? [
+              {
+                id: "1",
+                canonicalRoot: "/repo/alpha",
+                label: "alpha",
+                authorization,
+                lastRemovalFailure,
+                taskCount: 0,
+                running: 0,
+                attention: 0,
+                failed: 0,
+              },
+            ]
+          : [],
+        currentWorkspaceId: includeWorkspace ? "1" : null,
+        tasks: [],
+        activeTaskId: null,
+        showArchived: false,
+        disabled: false,
+        onSearch() {},
+        onChooseWorkspace() {},
+        onRemoveWorkspace() {},
+        onRetryRemoval() {},
+        onSelectWorkspace() {},
+        onCreateTask() {},
+        onSelectTask() {},
+        onToggleArchived() {},
+      }),
+    ),
+  );
+}
+
 function tag(markup, className) {
   return markup.match(
     new RegExp(`<(?:button|textarea)[^>]*class="[^"]*${className}[^"]*"[^>]*>`),
@@ -211,4 +263,41 @@ test("terminal state takes precedence over archive state in Composer guidance", 
     }),
     /This task has ended/,
   );
+});
+
+test("Workspace removal failure survives refresh with an honest retry surface", () => {
+  const failed = renderWorkspaceNavigation("task_close_failed");
+  assert.match(failed, /Some tasks may have stopped/);
+  assert.match(failed, />Retry removal</);
+  assert.doesNotMatch(renderWorkspaceNavigation(null), /Retry removal/);
+});
+
+test("an available Workspace exposes removal while a removing Workspace blocks new work", () => {
+  const available = renderWorkspaceNavigation(null);
+  assert.match(available, />Remove</);
+  assert.doesNotMatch(available, /Removal in progress/);
+
+  const removing = renderWorkspaceNavigation(null, "removing");
+  assert.match(removing, /Removing this workspace/);
+  assert.match(removing, /can’t start or continue tasks/);
+  const newTask = removing.match(
+    /<button[^>]*class="[^"]*primary-button[^"]*"[^>]*>/,
+  )?.[0];
+  assert.match(newTask ?? "", /disabled/);
+});
+
+test("removing the final empty Workspace leaves a stable focus destination", () => {
+  const empty = renderWorkspaceNavigation(null, "available", false);
+  assert.match(
+    empty,
+    /class="workspace-section-heading focus-ring" tabindex="-1" aria-label="Workspace"/,
+  );
+  const picker = empty.match(
+    /<button[^>]*class="[^"]*workspace-picker[^"]*"[^>]*>/,
+  )?.[0];
+  assert.match(picker ?? "", /disabled/);
+  const add = empty.match(
+    /<button[^>]*class="text-button focus-ring"[^>]*>Add/,
+  );
+  assert.ok(add);
 });

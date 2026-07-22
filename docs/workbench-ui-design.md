@@ -51,7 +51,7 @@ MetaWork 的视觉记忆点不是装饰性的暖色、通用衬线大标题、�
 - Ask question 与 permission 两类同步用户请求；
 - Run 状态、六种终止原因，以及 Session 是否仍可继续。
 
-因此当前产品只显示时间线、工具活动、问题/权限卡片、Current activity 和真实 usage。Plan、plan approval、Outputs、Files changed、持久权限管理和 custom UI 均保持隐藏；它们在本文档中的设计是后续 capability 到位后的产品规范，不是当前实现承诺。Renderer 不解析工具参数、stdout 或普通文本来猜测这些状态。独立 Workspace projection、Task-bound ExecutionConfig 与设置框架同样必须在对应 Host/Bridge 合同落地后才能宣称可用；当前 revision 1 的实现差距由 [验证规范](validation.md)明确记录。
+因此当前产品只显示时间线、工具活动、问题/权限卡片、Current activity 和真实 usage。Plan、plan approval、Outputs、Files changed、持久权限管理和 custom UI 均保持隐藏；它们在本文档中的设计是后续 capability 到位后的产品规范，不是当前实现承诺。Renderer 不解析工具参数、stdout 或普通文本来猜测这些状态。revision 2 已提供独立 Workspace projection 与 Task-bound ExecutionConfig facts；设置路由与 rebind 等仍须等对应 capability 落地后才能宣称可用，差距由 [验证规范](validation.md)明确记录。
 
 ### 2.2 Capability 标记
 
@@ -93,7 +93,7 @@ Workspace
 - `Turn` 和 `Run` 通常不直接命名，用当前活动、排队、停止和结果表达。
 - 一项 Task 可以包含多次用户补充和多次执行；停止一次执行不会删除 Task。
 
-当前 Renderer 产品合同固定为 `metawork.renderer-bridge` revision 1：`connect` 精确协商后才开放产品路径，snapshot 根节点包含无 secret `account` 与 `tasks` 且不维护局部版本；Account 直接发布 `readiness`、唯一 `primaryAction` 与 `canCancel`；账号命令使用 `metawork.account.*`，Task 命令使用 `metawork.tasks.*`，产品 Task ID 字段使用 `taskId`。成熟 Workbench 所需的独立 Workspace projection 与 Task execution selection 必须通过下一次原子 hard cut 加入完整合同；在实现、decoder、fixture 和 revision 同步落地前，本文档不把它们描述为 revision 1 已有字段。当前不提供旧 revision 兼容层；Agent 内部 Session route identity 不属于 Renderer 产品模型。
+当前 Renderer 产品合同固定为 `metawork.renderer-bridge` revision 2：`connect` 精确协商后才开放产品路径，snapshot 根节点包含无 secret `capabilities`、`account`、`selectedWorkspaceId`、`workspaces` 与 `tasks` 且不维护局部版本；Account 直接发布 `readiness`、唯一 `primaryAction`、脱敏 catalog selection 与 generation，Workspace 独立于 Task 发布，Task 固化 binding epoch 与显示事实。当前不提供旧 revision 兼容层或可选字段退路；Agent 内部 Session route identity 不属于 Renderer 产品模型。
 
 ### 3.2 规范术语
 
@@ -143,7 +143,7 @@ Workspace
 - Inspector：打开时 304 px；审批、活动详情、usage 或真实结果只决定模块是否可用，不触发普通 Run 的自动开合。除新的 `Needs your attention` 可自动打开一次外，显隐由用户控制并在 Run terminal 后保持稳定；
 - 中间正文推荐最大宽度：760 px；
 - 表格、diff、日志和文件预览可以使用中间区域的可用宽度；
-- 推荐最小窗口：960 × 680；
+- 960 × 680 仅作为窄窗口回归样本，不定义产品最小窗口；实际下限由内容可达性、Composer 可用性、系统窗口约束和 200% 文本验收共同决定；
 - 低于约 1100 px 时 Inspector 使用覆盖层或保持关闭，更窄时允许折叠左栏。
 
 左栏折叠状态按用户偏好保存。Inspector 内容只决定模块和入口是否可用；显隐只由用户动作、Task 切换或新的 `Needs your attention` 单次自动打开改变，并按 Task 保留当前应用会话内状态，不持久化为空面板偏好。折叠只改变视图，不改变 Task、审批或运行状态。
@@ -174,7 +174,7 @@ Windows 和 macOS 使用同一内容布局，只调整窗口壳：
 
 ## 5. 左栏：Workspace 与 Task
 
-> Capability：**目标**。依赖独立 Workspace projection、Task persistence 和新版 Workbench shell；当前 Renderer Bridge revision 1 不提供这些完整字段。
+> Capability：**混合**。revision 2 已提供独立 Workspace projection；Task persistence 和新版 Workbench shell 仍是目标能力。
 
 ### 5.1 Workspace 切换
 
@@ -194,7 +194,7 @@ Invoices
 - Workspace 切换器消费 Host 发布的独立 Workspace projection，支持最近使用、打开新目录、重新授权和移除入口；没有 Task 的 Workspace 仍然可见；
 - 每个 Workspace 入口汇总 `Running`、`Needs your attention` 和 `Failed/Interrupted` 数量；当前 Workspace 之外的待处理状态不能只依赖系统通知；
 - 点击 Workspace 状态徽标切换到该 Workspace，并优先定位对应分组；系统通知点击后直接定位原 Task 和请求；
-- 移除 Workspace 不删除历史 Task 或真实文件，但必须先停止其中所有 non-terminal Run；移除动作撤销未消费 grant，并立即使该 Workspace 的持久权限失效；
+- 移除 Workspace 不删除历史 Task 或真实文件。入口只在当前 Workspace 可用时出现，并先用就地非模态确认说明“运行中的 Task 会停止、不会删除本地文件和历史记录”；确认打开时聚焦安全的取消动作，`Escape` 取消并把焦点还给触发入口，确认后把焦点移到不会随最后一个 Workspace 消失的稳定区标题。随后 Host 把 Workspace 标记为 `removing`、推进 epoch 并拒绝新 Task/Run，导航持续显示进行中状态；全部收口后才撤销当前 Host authorization 并退出活动导航。失败时 Workspace 保持可用、显示“移除未完成，部分任务可能已经停止”并允许重试，不能静默恢复得像什么都没发生；
 - 再次打开历史 Task 只保证可浏览记录；需要访问原目录时重新选择或授权，能否继续执行还必须服从 §6.4 的 Conversation 与 execution binding 规则。
 
 ### 5.2 Task 分组与排序
@@ -637,7 +637,7 @@ Inspector 同步更新 Outputs，但不重复整段完成说明。
 
 ## 14. 首次启动与设置
 
-> Capability：**目标**。登录优先表面、正式 settings route、API/模型选择和 execution rebind 需要新版 Workbench/Bridge 合同；当前 revision 1 的紧凑 Account prerequisite 不是验收目标。
+> Capability：**混合**。revision 2 已提供登录优先所需的 Account/catalog selection 与 generation 合同；正式 settings route、完整模型切换体验和 execution rebind 仍按各自 capability gate 验收。
 
 ### 14.1 首次启动
 
@@ -843,9 +843,11 @@ MetaWork 采用安静、精确、长时间可读的桌面工具方向。视觉�
 ### 19.1 视图尺寸
 
 - 1440 × 900；
-- 1320 × 812（设计基线）；
+- 1320 × 812（常规桌面回归样本）；
 - 1100 × 720（Inspector 不占固定列宽的边界）；
-- 960 × 680（推荐最小窗口）。
+- 960 × 680（窄窗口回归样本）。
+
+这些尺寸用于稳定复现布局问题，不是产品最小尺寸、固定设计画布或断点来源；断点应由内容拥挤、可达性与平台窗口行为验证得出。
 
 ### 19.2 Locale
 

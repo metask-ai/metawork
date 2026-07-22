@@ -10,6 +10,9 @@ import {
   assertTaskFlag,
   decodeHostSignalEvent,
   decodePingResponse,
+  decodeTaskCreateResult,
+  decodeTaskRunResult,
+  decodeWorkspaceMutationResult,
   decodeWorkbenchSnapshot,
 } from "../frontend/src/bridge/decode-contracts.ts";
 
@@ -69,6 +72,50 @@ test("Account command acknowledgements preserve state-machine and attempt identi
 });
 
 test("Task metadata mutation acknowledgements are identity-checked and exact", () => {
+  assert.deepEqual(
+    decodeTaskCreateResult({
+      accepted: true,
+      taskId: "3",
+      bindingEpoch: "7",
+      reason: null,
+    }),
+    { accepted: true, taskId: "3", bindingEpoch: "7", reason: null },
+  );
+  assert.throws(() => decodeTaskCreateResult({ taskId: "3" }), /expected keys/);
+  assert.deepEqual(
+    decodeTaskRunResult(
+      {
+        accepted: false,
+        taskId: "3",
+        runId: null,
+        reason: "binding_changed",
+      },
+      "3",
+    ),
+    {
+      accepted: false,
+      taskId: "3",
+      runId: null,
+      reason: "binding_changed",
+    },
+  );
+  assert.deepEqual(
+    decodeWorkspaceMutationResult(
+      {
+        accepted: false,
+        workspaceId: "5",
+        workspaceEpoch: null,
+        reason: "workspace_changed",
+      },
+      "5",
+    ),
+    {
+      accepted: false,
+      workspaceId: "5",
+      workspaceEpoch: null,
+      reason: "workspace_changed",
+    },
+  );
   assert.doesNotThrow(() =>
     assertTaskFlag({ taskId: "3", renamed: true }, "3", "renamed"),
   );
@@ -120,6 +167,34 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     /ready execution requires/,
   );
 
+  const missingReadyProfile = clone(fixture);
+  missingReadyProfile.account.profileId = "";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(missingReadyProfile),
+    /ready execution requires/,
+  );
+
+  const keyOutsideCatalog = clone(fixture);
+  keyOutsideCatalog.account.selectedApiKeySelectionId = "missing-key";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(keyOutsideCatalog),
+    /selected catalog membership/,
+  );
+
+  const modelOutsideCatalog = clone(fixture);
+  modelOutsideCatalog.account.selectedModelSelectionId = "missing-model";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(modelOutsideCatalog),
+    /selected catalog membership/,
+  );
+
+  const missingBindingProfile = clone(fixture);
+  delete missingBindingProfile.tasks[0].binding.profileId;
+  assert.throws(
+    () => decodeWorkbenchSnapshot(missingBindingProfile),
+    /expected keys/,
+  );
+
   const refreshingReadyAccount = clone(fixture);
   refreshingReadyAccount.account.sessionState = "refreshing";
   assert.doesNotThrow(() => decodeWorkbenchSnapshot(refreshingReadyAccount));
@@ -163,13 +238,35 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
 
   const duplicateModel = clone(fixture);
   duplicateModel.account.models = [
-    { id: "model-1", displayName: "One" },
-    { id: "model-1", displayName: "Two" },
+    { selectionId: "model-1", displayName: "One" },
+    { selectionId: "model-1", displayName: "Two" },
   ];
   assert.throws(
     () => decodeWorkbenchSnapshot(duplicateModel),
     /identities must be unique/,
   );
+
+  const revisionOneTask = clone(fixture);
+  revisionOneTask.tasks[0].workspaceRoot = "/repo/legacy";
+  delete revisionOneTask.tasks[0].workspaceId;
+  assert.throws(
+    () => decodeWorkbenchSnapshot(revisionOneTask),
+    /expected keys/,
+  );
+
+  const unavailableContinuable = clone(fixture);
+  unavailableContinuable.tasks[0].binding.availability = "unavailable";
+  unavailableContinuable.tasks[0].binding.unavailableReason =
+    "credential_released";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(unavailableContinuable),
+    /cannot accept future work/,
+  );
+
+  const orphanHistory = clone(fixture);
+  orphanHistory.selectedWorkspaceId = null;
+  orphanHistory.workspaces = [];
+  assert.doesNotThrow(() => decodeWorkbenchSnapshot(orphanHistory));
 
   const missingField = clone(fixture);
   delete missingField.tasks[0].runs[0].usage.cacheCreation;

@@ -1,13 +1,15 @@
 //! Exact Renderer Bridge command identities.
 
 pub const contract_id = "metawork.renderer-bridge";
-pub const contract_revision: u32 = 1;
+pub const contract_revision: u32 = 2;
 
 pub const ping = "metawork.smoke.ping";
 pub const ping_ack = "metawork.smoke.eventAck";
 pub const connect = "metawork.events.connect";
 pub const disconnect = "metawork.events.disconnect";
-pub const choose_workspace = "metawork.workspace.choose";
+pub const choose_workspace = "metawork.workspaces.choose";
+pub const select_workspace = "metawork.workspaces.select";
+pub const remove_workspace = "metawork.workspaces.remove";
 pub const snapshot = "metawork.workbench.snapshot";
 pub const snapshot_chunk = "metawork.workbench.snapshot.chunk";
 pub const account_begin_login = "metawork.account.beginLogin";
@@ -33,6 +35,8 @@ pub const product = [_][]const u8{
     connect,
     disconnect,
     choose_workspace,
+    select_workspace,
+    remove_workspace,
     snapshot,
     snapshot_chunk,
     account_begin_login,

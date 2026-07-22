@@ -14,7 +14,6 @@ import {
   assertCancelAccepted,
   assertCloseAccepted,
   assertDisconnected,
-  assertRunAccepted,
   assertSignalAcknowledged,
   assertTaskArchived,
   assertTaskFlag,
@@ -24,7 +23,9 @@ import {
   decodePingResponse,
   decodeRendererBridgeConnect,
   decodeRevisionNotification,
-  decodeTaskId,
+  decodeTaskCreateResult,
+  decodeTaskRunResult,
+  decodeWorkspaceMutationResult,
   decodeWorkspaceChoice,
 } from "./decode-contracts.ts";
 import { fetchWorkbenchSnapshot } from "./snapshot/snapshot-client.ts";
@@ -191,6 +192,26 @@ export class BridgeClient {
     );
   }
 
+  async selectWorkspace(workspaceId: string, expectedWorkspaceEpoch: string) {
+    return decodeWorkspaceMutationResult(
+      await this.invoke(commands.selectWorkspace, {
+        workspaceId,
+        expectedWorkspaceEpoch,
+      }),
+      workspaceId,
+    );
+  }
+
+  async removeWorkspace(workspaceId: string, expectedWorkspaceEpoch: string) {
+    return decodeWorkspaceMutationResult(
+      await this.invoke(commands.removeWorkspace, {
+        workspaceId,
+        expectedWorkspaceEpoch,
+      }),
+      workspaceId,
+    );
+  }
+
   async beginLogin() {
     return decodeAccountCommandResult(
       await this.invoke(commands.accountBeginLogin, {}),
@@ -221,15 +242,31 @@ export class BridgeClient {
     );
   }
 
-  async selectApiKey(apiKeyId: string) {
+  async selectApiKey(
+    selectionId: string,
+    expectedCatalogGeneration: string,
+    expectedExecutionGeneration: string,
+  ) {
     return decodeAccountCommandResult(
-      await this.invoke(commands.accountSelectApiKey, { apiKeyId }),
+      await this.invoke(commands.accountSelectApiKey, {
+        selectionId,
+        expectedCatalogGeneration,
+        expectedExecutionGeneration,
+      }),
     );
   }
 
-  async selectModel(modelId: string) {
+  async selectModel(
+    selectionId: string,
+    expectedCatalogGeneration: string,
+    expectedExecutionGeneration: string,
+  ) {
     return decodeAccountCommandResult(
-      await this.invoke(commands.accountSelectModel, { modelId }),
+      await this.invoke(commands.accountSelectModel, {
+        selectionId,
+        expectedCatalogGeneration,
+        expectedExecutionGeneration,
+      }),
     );
   }
 
@@ -239,15 +276,23 @@ export class BridgeClient {
     );
   }
 
-  async createTask(workspaceGrant: string) {
-    return decodeTaskId(
-      await this.invoke(commands.createTask, { workspaceGrant }),
+  async createTask(
+    workspaceId: string,
+    expectedWorkspaceEpoch: string,
+    expectedExecutionGeneration: string,
+  ) {
+    return decodeTaskCreateResult(
+      await this.invoke(commands.createTask, {
+        workspaceId,
+        expectedWorkspaceEpoch,
+        expectedExecutionGeneration,
+      }),
     );
   }
 
-  async run(taskId: string, prompt: string) {
-    return assertRunAccepted(
-      await this.invoke(commands.run, { taskId, prompt }),
+  async run(taskId: string, expectedBindingEpoch: string, prompt: string) {
+    return decodeTaskRunResult(
+      await this.invoke(commands.run, { taskId, expectedBindingEpoch, prompt }),
       taskId,
     );
   }

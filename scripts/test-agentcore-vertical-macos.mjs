@@ -1,6 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { join } from "node:path";
@@ -30,6 +30,7 @@ const automationDir = path.join(appCwd, ".zig-cache", "native-sdk-automation");
 const commandTimeoutMs = 20_000;
 const runTimeoutMs = 60_000;
 const workspace = await mkdtemp(join(tmpdir(), "metawork-agentcore-vertical-"));
+const canonicalWorkspace = await realpath(workspace);
 const fixturePath = join(workspace, "fixture.txt");
 await writeFile(fixturePath, "agentcore-vertical-before\n", { mode: 0o600 });
 await rm(automationDir, { recursive: true, force: true });
@@ -68,6 +69,7 @@ const app = spawn(binary, [], {
   env: {
     ...process.env,
     METAWORK_AUTOMATION: "1",
+    METAWORK_AUTOMATION_WORKSPACE: workspace,
     METAWORK_AGENTCORE_VERTICAL_PROVIDER_BASE_URL: baseUrl,
   },
   stdio: ["ignore", "pipe", "pipe"],
@@ -90,36 +92,90 @@ const exited = new Promise((resolve, reject) => {
 
 try {
   await waitForBridge();
-  const beforeCreate = await snapshot();
-  await invokeBridge("metawork.tasks.create", {
-    workspaceRoot: workspace,
+  const chosenWorkspace = await invokeBridge("metawork.workspaces.choose", {});
+  if (
+    chosenWorkspace?.selected !== true ||
+    !isWireId(chosenWorkspace.workspaceId)
+  )
+    throw new Error(
+      `automation Workspace choice returned an invalid identity: ${JSON.stringify(chosenWorkspace)}`,
+    );
+  const workspaceId = chosenWorkspace.workspaceId;
+  const afterChoose = await snapshot();
+  const selectedWorkspace = afterChoose.workspaces.find(
+    (item) => item.id === workspaceId,
+  );
+  if (
+    afterChoose.selectedWorkspaceId !== workspaceId ||
+    selectedWorkspace?.authorization !== "available" ||
+    selectedWorkspace.canonicalRoot !== canonicalWorkspace ||
+    !isWireId(selectedWorkspace.epoch) ||
+    selectedWorkspace.lastRemovalFailure !== null
+  )
+    throw new Error(
+      `Workspace choice was not committed to the product snapshot: ${JSON.stringify(afterChoose.workspaces)}`,
+    );
+  const expectedWorkspaceEpoch = selectedWorkspace.epoch;
+  const expectedExecutionGeneration = afterChoose.account.executionGeneration;
+  if (!isWireId(expectedExecutionGeneration))
+    throw new Error("snapshot omitted the current execution generation");
+  const createResult = await invokeBridge("metawork.tasks.create", {
+    workspaceId,
+    expectedWorkspaceEpoch,
+    expectedExecutionGeneration,
   });
+  if (
+    createResult?.accepted !== true ||
+    createResult.reason !== null ||
+    !isWireId(createResult.taskId) ||
+    !isWireId(createResult.bindingEpoch)
+  )
+    throw new Error(
+      `Task creation was not accepted truthfully: ${JSON.stringify(createResult)}`,
+    );
+  const taskId = createResult.taskId;
+  const expectedBindingEpoch = createResult.bindingEpoch;
   const createdTask = await poll(
     async () => {
       const current = await snapshot();
-      return (
-        current.tasks.find(
-          (item) => !beforeCreate.tasks.some((prior) => prior.id === item.id),
-        ) ?? null
-      );
+      return current.tasks.find((item) => item.id === taskId) ?? null;
     },
     commandTimeoutMs,
     "Task creation",
   );
-  const taskId = createdTask.id;
-  await invokeBridge("metawork.tasks.run", {
+  if (createdTask.binding?.epoch !== expectedBindingEpoch)
+    throw new Error(
+      `Task snapshot disagrees with the accepted binding epoch: ${JSON.stringify(createdTask.binding)}`,
+    );
+  const runResult = await invokeBridge("metawork.tasks.run", {
     taskId,
+    expectedBindingEpoch,
     prompt: "Exercise Read, Bash, Edit, and AskUserQuestion, then finish.",
   });
+  if (
+    runResult?.accepted !== true ||
+    runResult.reason !== null ||
+    runResult.taskId !== taskId ||
+    !isWireId(runResult.runId)
+  )
+    throw new Error(
+      `Run submission was not accepted truthfully: ${JSON.stringify(runResult)}`,
+    );
+  const runId = runResult.runId;
   const submittedRun = await poll(
     async () => {
       const current = await snapshot();
-      return current.tasks.find((item) => item.id === taskId)?.runs[0] ?? null;
+      return (
+        current.tasks
+          .find((item) => item.id === taskId)
+          ?.runs.find((item) => item.id === runId) ?? null
+      );
     },
     commandTimeoutMs,
     "Run submission",
   );
-  const runId = submittedRun.id;
+  if (submittedRun.id !== runId)
+    throw new Error("Run snapshot disagrees with the accepted Run identity");
   let reloadedRequest = null;
   let deliveryEmitsBeforeReload = null;
   const answered = new Set();
@@ -450,10 +506,15 @@ async function snapshot() {
     typeof parsed.account !== "object" ||
     parsed.account === null ||
     Array.isArray(parsed.account) ||
+    !Array.isArray(parsed.workspaces) ||
     !Array.isArray(parsed.tasks)
   )
     throw new Error("invalid Workbench snapshot");
   return parsed;
+}
+
+function isWireId(value) {
+  return typeof value === "string" && /^[1-9][0-9]*$/.test(value);
 }
 
 async function automate(...args) {

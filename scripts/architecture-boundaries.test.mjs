@@ -570,7 +570,10 @@ test("Workbench owns Task lifecycle, continuation, and canonical redaction", () 
   assert.match(workbench, /sanitizeInto\(\s*run\.terminal_diagnostic/);
   assert.match(workbench, /copyProjected\(\s*prompt/);
   assert.match(workbench, /replaceTrackedProjected\(\s*&view\.title/);
-  assert.match(taskRecord, /execution: \?account_contract\.OwnedExecutionConfig/);
+  assert.match(
+    taskRecord,
+    /execution: \?account_contract\.OwnedExecutionConfig/,
+  );
   assert.match(workbench, /redaction_secret = execution\.api_key/);
   assert.match(workbench, /releaseQuiescentTaskExecutions/);
 
@@ -608,12 +611,12 @@ test("Bridge Dispatcher owns product command decisions and App only composes it"
   assert.doesNotMatch(app, /parsePayload|parseWireId|workspaceGrant/);
 });
 
-test("Renderer Bridge revision 1 owns the exact product wire catalog", () => {
+test("Renderer Bridge revision 2 owns the exact product wire catalog", () => {
   const zigCommands = read("src/bridge/commands.zig");
   const rendererCommands = read("frontend/src/bridge/commands.ts");
   const appManifest = read("app.zon");
   const productCommand =
-    /"(metawork\.(?:smoke|events|workspace|workbench|account|tasks)\.[A-Za-z.]+)"/g;
+    /"(metawork\.(?:smoke|events|workspaces|workbench|account|tasks)\.[A-Za-z.]+)"/g;
   const catalog = (source) =>
     [
       ...new Set([...source.matchAll(productCommand)].map((match) => match[1])),
@@ -622,12 +625,23 @@ test("Renderer Bridge revision 1 owns the exact product wire catalog", () => {
   assert.deepEqual(catalog(appManifest), catalog(zigCommands));
   assert.ok(catalog(zigCommands).includes("metawork.account.reopenLogin"));
   assert.match(zigCommands, /contract_id = "metawork\.renderer-bridge"/);
-  assert.match(zigCommands, /contract_revision: u32 = 1/);
+  assert.match(zigCommands, /contract_revision: u32 = 2/);
   assert.match(
     rendererCommands,
     /RENDERER_BRIDGE_CONTRACT_ID = "metawork\.renderer-bridge"/,
   );
-  assert.match(rendererCommands, /RENDERER_BRIDGE_CONTRACT_REVISION = 1/);
+  assert.match(rendererCommands, /RENDERER_BRIDGE_CONTRACT_REVISION = 2/);
+  assert.doesNotMatch(zigCommands, /metawork\.workspace\.choose/);
+  assert.doesNotMatch(rendererCommands, /metawork\.workspace\.choose/);
+
+  const handlers = read("src/bridge/handlers.zig");
+  assert.match(handlers, /expectedWorkspaceEpoch/);
+  assert.match(handlers, /expectedExecutionGeneration/);
+  assert.match(handlers, /expectedBindingEpoch/);
+  assert.doesNotMatch(
+    handlers,
+    /workspaceGrant|workspaceRoot|apiKeyId|modelId/,
+  );
 
   const dispatcher = read("src/bridge/dispatcher.zig");
   assert.match(dispatcher, /handlers\.RendererBridgeConnect/);
@@ -640,6 +654,7 @@ test("Renderer Bridge revision 1 owns the exact product wire catalog", () => {
   const projection = read("src/workbench/projection.zig");
   assert.doesNotMatch(projection, /schemaVersion|snapshot_schema_version/);
   assert.match(projection, /\\"account\\":/);
+  assert.match(projection, /\\"workspaces\\":\[/);
   assert.match(projection, /\\"tasks\\":\[/);
   assert.match(projection, /pub fn createTask/);
   assert.match(projection, /pub fn runTask/);
@@ -654,9 +669,11 @@ test("Renderer Bridge revision 1 owns the exact product wire catalog", () => {
   assert.match(contracts, /readiness: AccountReadiness/);
   assert.match(contracts, /primaryAction: AccountPrimaryAction/);
   assert.match(contracts, /account: AccountView/);
+  assert.match(contracts, /workspaces: WorkspaceView\[\]/);
   assert.match(contracts, /tasks: TaskView\[\]/);
   assert.match(contracts, /"app_shutdown"/);
   assert.doesNotMatch(contracts, /host_shutdown|sessions: SessionView/);
+  assert.doesNotMatch(contracts, /workspaceGrant|workspaceRoot/);
 
   assert.equal(
     existsSync(
@@ -677,7 +694,7 @@ test("lifecycle tests are grouped by invariant", () => {
   const cases = [
     ["tests/agent/lifecycle_test.zig", 31],
     ["tests/agent/event_pump_test.zig", 5],
-    ["tests/workbench/executor_lifecycle_test.zig", 8],
+    ["tests/workbench/executor_lifecycle_test.zig", 9],
     ["tests/integration/lifecycle/lifecycle_test.zig", 4],
   ];
   for (const [path, expectedCount] of cases) {

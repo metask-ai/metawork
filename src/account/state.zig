@@ -111,6 +111,7 @@ const CommittedState = struct {
             .can_cancel = self.operation != .none and
                 self.operation != .logging_out,
             .account_id = self.account_id.view(),
+            .profile_id = self.profile_id.view(),
             .display_name = self.display_name.view(),
             .selected_api_key_id = self.selected_api_key_id.view(),
             .selected_model = self.selected_model.view(),
@@ -1111,6 +1112,10 @@ pub const RestoreReady = struct {
             .api_key_id = validated_api_key_id,
             .execution = execution.take(),
         };
+    }
+
+    pub fn apiKeyId(self: *const RestoreReady) []const u8 {
+        return self.api_key_id.view();
     }
 };
 

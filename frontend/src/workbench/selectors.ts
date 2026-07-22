@@ -16,8 +16,11 @@ export function isRunInFlight(task: TaskView | null): boolean {
 }
 
 export type WorkspaceSummary = {
-  root: string;
+  id: string;
+  canonicalRoot: string;
   label: string;
+  authorization: "available" | "removing" | "reauthorization_required";
+  lastRemovalFailure: "task_close_failed" | null;
   taskCount: number;
   running: number;
   attention: number;
@@ -76,35 +79,32 @@ export function workspaceLabel(root: string): string {
 export function workspaceSummaries(
   snapshot: WorkbenchSnapshot,
 ): WorkspaceSummary[] {
-  const summaries = new Map<string, WorkspaceSummary>();
-  for (const task of snapshot.tasks) {
-    let summary = summaries.get(task.workspaceRoot);
-    if (!summary) {
-      summary = {
-        root: task.workspaceRoot,
-        label: workspaceLabel(task.workspaceRoot),
-        taskCount: 0,
-        running: 0,
-        attention: 0,
-        failed: 0,
-      };
-      summaries.set(task.workspaceRoot, summary);
-    }
-    if (task.archived) continue;
-    const signals = taskSignals(task);
-    summary.taskCount += 1;
-    if (signals.running) summary.running += 1;
-    if (signals.attention) summary.attention += 1;
-    if (signals.failed) summary.failed += 1;
-  }
-  return [...summaries.values()];
+  return [...snapshot.workspaces]
+    .sort((left, right) => {
+      const leftOrder = BigInt(left.recentOrder);
+      const rightOrder = BigInt(right.recentOrder);
+      return rightOrder > leftOrder ? 1 : rightOrder < leftOrder ? -1 : 0;
+    })
+    .map((workspace) => ({
+      id: workspace.id,
+      canonicalRoot: workspace.canonicalRoot,
+      label: workspace.displayName || workspaceLabel(workspace.canonicalRoot),
+      authorization: workspace.authorization,
+      lastRemovalFailure: workspace.lastRemovalFailure,
+      taskCount: snapshot.tasks.filter(
+        (task) => task.workspaceId === workspace.id && !task.archived,
+      ).length,
+      running: workspace.signals.running,
+      attention: workspace.signals.attention,
+      failed: workspace.signals.failedOrInterrupted,
+    }));
 }
 
 export function selectCurrentWorkspace(state: WorkbenchState): string | null {
   return (
-    state.activeWorkspaceRoot ??
-    selectActiveTask(state)?.workspaceRoot ??
-    state.snapshot.tasks[0]?.workspaceRoot ??
+    state.activeWorkspaceId ??
+    selectActiveTask(state)?.workspaceId ??
+    state.snapshot.selectedWorkspaceId ??
     null
   );
 }
@@ -135,7 +135,7 @@ export type SearchResult = {
   key: string;
   kind: "workspace" | "task" | "instruction" | "completion";
   taskId: string | null;
-  workspaceRoot: string;
+  workspaceId: string;
   title: string;
   detail: string;
 };
@@ -147,33 +147,33 @@ export function searchWorkbench(
   const needle = query.trim().toLocaleLowerCase();
   if (!needle) return [];
   const results: SearchResult[] = [];
-  const seenWorkspaces = new Set<string>();
   const matches = (value: string) => value.toLocaleLowerCase().includes(needle);
-  for (const task of snapshot.tasks) {
-    if (
-      !seenWorkspaces.has(task.workspaceRoot) &&
-      (matches(task.workspaceRoot) ||
-        matches(workspaceLabel(task.workspaceRoot)))
-    ) {
-      seenWorkspaces.add(task.workspaceRoot);
+  const workspaces = new Map(
+    snapshot.workspaces.map((workspace) => [workspace.id, workspace]),
+  );
+  for (const workspace of snapshot.workspaces) {
+    if (matches(workspace.canonicalRoot) || matches(workspace.displayName))
       results.push({
-        key: `workspace:${task.workspaceRoot}`,
+        key: `workspace:${workspace.id}`,
         kind: "workspace",
         taskId: null,
-        workspaceRoot: task.workspaceRoot,
-        title: workspaceLabel(task.workspaceRoot),
-        detail: task.workspaceRoot,
+        workspaceId: workspace.id,
+        title: workspace.displayName || workspaceLabel(workspace.canonicalRoot),
+        detail: workspace.canonicalRoot,
       });
-    }
+  }
+  for (const task of snapshot.tasks) {
+    const workspace = workspaces.get(task.workspaceId);
+    if (!workspace) continue;
     const title = task.title;
     if (title && matches(title))
       results.push({
         key: `task:${task.id}`,
         kind: "task",
         taskId: task.id,
-        workspaceRoot: task.workspaceRoot,
+        workspaceId: task.workspaceId,
         title,
-        detail: task.workspaceRoot,
+        detail: workspace.canonicalRoot,
       });
     for (const run of task.runs) {
       if (matches(run.user))
@@ -181,7 +181,7 @@ export function searchWorkbench(
           key: `instruction:${task.id}:${run.id}`,
           kind: "instruction",
           taskId: task.id,
-          workspaceRoot: task.workspaceRoot,
+          workspaceId: task.workspaceId,
           title,
           detail: run.user,
         });
@@ -194,7 +194,7 @@ export function searchWorkbench(
           key: `completion:${task.id}:${run.id}`,
           kind: "completion",
           taskId: task.id,
-          workspaceRoot: task.workspaceRoot,
+          workspaceId: task.workspaceId,
           title,
           detail: run.assistant,
         });

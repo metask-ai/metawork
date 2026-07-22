@@ -30,8 +30,8 @@ const account = {
   displayName: "",
   apiKeys: [],
   models: [],
-  selectedApiKeyId: "",
-  selectedModel: "",
+  selectedApiKeySelectionId: "",
+  selectedModelSelectionId: "",
   canCreateTask: false,
   errorCode: "none",
   safeDiagnostic: "",
@@ -55,7 +55,21 @@ function task(identity, pendingUi = pending(identity)) {
   return {
     id: identity.taskId,
     title: "",
-    workspaceRoot: "/repo",
+    workspaceId: "1",
+    binding: {
+      epoch: "1",
+      availability: "available",
+      accountId: "account-1",
+      accountDisplayName: "Metask User",
+      apiKeySelectionId: "key-1",
+      apiKeyName: "Primary",
+      apiKeySuffix: "1234",
+      provider: "anthropic",
+      modelSelectionId: "model-1",
+      modelDisplayName: "Model One",
+      executionGeneration: "1",
+      unavailableReason: null,
+    },
     lifecycle: "open",
     continuationAvailable: true,
     archived: false,
@@ -71,7 +85,32 @@ function task(identity, pendingUi = pending(identity)) {
 }
 
 function snapshot(tasks) {
-  return { revision: "1", account, tasks };
+  return {
+    revision: "1",
+    capabilities: {
+      taskHistoryPersistence: false,
+      conversationRecovery: false,
+      executionRebind: false,
+      structuredPlan: false,
+      typedOutputs: false,
+      typedFileChanges: false,
+      persistentWorkspacePermissions: false,
+    },
+    account,
+    selectedWorkspaceId: "1",
+    workspaces: [
+      {
+        id: "1",
+        displayName: "repo",
+        canonicalRoot: "/repo",
+        redacted: false,
+        authorization: "available",
+        recentOrder: "1",
+        signals: { running: 0, attention: 1, failedOrInterrupted: 0 },
+      },
+    ],
+    tasks,
+  };
 }
 
 test("UI response state waits for the authoritative snapshot and never reopens an accepted request", () => {

@@ -134,7 +134,47 @@ test "Workspace removal interrupts live Runs without deleting Task history" {
     var snapshot_storage: [128 * 1024]u8 = undefined;
     const snapshot = try workbench.writeSnapshot(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"tasks\":[{") != null);
-    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"workspaceRoot\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"workspaceRoot\":") == null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"workspaces\":[]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"workspaceId\":") != null);
+}
+
+test "Workspace removal failure remains a retryable Workspace fact" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var workbench = try workbench_api.Workbench.init(std.testing.allocator, runtime, .{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_workspaces = 1,
+        .max_tasks = 1,
+        .max_runs_per_task = 1,
+        .max_tools_per_run = 1,
+    }, workbenchConfiguration());
+    defer workbench.deinit();
+    try installWorkbenchExecution(&workbench);
+
+    _ = try workbench.createTask(workbenchTaskInput());
+    const workspace_id = workbench.selectedWorkspaceId();
+    fake_core.failNextSessionDestroy();
+    try workbench.removeWorkspace(workspace_id);
+    try waitWorkbenchSnapshot(
+        runtime,
+        &workbench,
+        "\"lastRemovalFailure\":\"task_close_failed\"",
+    );
+
+    var snapshot_storage: [128 * 1024]u8 = undefined;
+    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"authorization\":\"available\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"workspaces\":[{") != null);
 }
 
 test "Workbench cancel of a completed Run is an idempotent no-op" {

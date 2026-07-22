@@ -34,8 +34,8 @@ const signedOut = {
   displayName: "",
   apiKeys: [],
   models: [],
-  selectedApiKeyId: "",
-  selectedModel: "",
+  selectedApiKeySelectionId: "",
+  selectedModelSelectionId: "",
   canCreateTask: false,
   errorCode: "none",
   safeDiagnostic: "",
@@ -167,8 +167,18 @@ test("only a real catalog ambiguity asks for the matching choice", () => {
     canCancel: true,
     accountId: "account-1",
     apiKeys: [
-      { id: "key-1", name: "Primary", suffix: "1234" },
-      { id: "key-2", name: "Backup", suffix: "5678" },
+      {
+        selectionId: "key-1",
+        name: "Primary",
+        suffix: "1234",
+        provider: "anthropic",
+      },
+      {
+        selectionId: "key-2",
+        name: "Backup",
+        suffix: "5678",
+        provider: "anthropic",
+      },
     ],
   });
   assert.match(keyChoice, />Primary · 1234</);
@@ -184,8 +194,8 @@ test("only a real catalog ambiguity asks for the matching choice", () => {
     canCancel: true,
     accountId: "account-1",
     models: [
-      { id: "model-1", displayName: "Model One" },
-      { id: "model-2", displayName: "Model Two" },
+      { selectionId: "model-1", displayName: "Model One" },
+      { selectionId: "model-2", displayName: "Model Two" },
     ],
   });
   assert.match(modelChoice, />Model One</);
@@ -242,8 +252,8 @@ test("ready Account is a secondary status and settings surface", () => {
     primaryAction: "none",
     accountId: "account-1",
     displayName: "Metask User",
-    selectedApiKeyId: "key-1",
-    selectedModel: "model-1",
+    selectedApiKeySelectionId: "key-1",
+    selectedModelSelectionId: "model-1",
     canCreateTask: true,
     executionGeneration: "1",
   };

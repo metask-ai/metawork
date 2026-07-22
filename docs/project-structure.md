@@ -83,7 +83,7 @@ metawork/
 - `snapshot/` 负责 bounded descriptor、分块读取和 retry，不拥有产品状态；
 - `__fixtures__/workbench-snapshot.fixture` 是 Zig serializer 与 TypeScript decoder 共用的 canonical bytes。
 
-Renderer Bridge `metawork.renderer-bridge` revision 1 覆盖完整 command、event 和 snapshot surface；snapshot 不维护局部 schema version。React component 不得直接访问 `window.zero`、拼 wire payload 或解析 AgentCore raw JSON。
+Renderer Bridge `metawork.renderer-bridge` revision 2 覆盖完整 command、event 和 snapshot surface；snapshot 不维护局部 schema version。React component 不得直接访问 `window.zero`、拼 wire payload 或解析 AgentCore raw JSON。
 
 ### `workbench/` 与 `features/`
 

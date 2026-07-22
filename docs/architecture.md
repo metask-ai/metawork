@@ -164,7 +164,11 @@ production 网络接入受 [Metask Account API 合同](metask-account-contract.m
 
 因此“默认配置切换”和“历史 Task rebind”是两种不同 mutation：前者不触碰既有 Task，后者只由用户对单个只读 Task 明确发起，并受 optimistic epoch 与 admission 校验保护。
 
-Workspace 是 Workbench-owned 产品对象，而不是 Renderer 从 Task 路径派生的 convenience view。成熟 UI 所需的 Workspace projection 至少发布 stable identity、canonical root、display label、grant/re-auth state 与聚合 Task signals；一次性 grant 仍由 Bridge/Native capability 生成并由 Host 校验。当前 Renderer Bridge revision 1 只发布 `account + tasks`，因此独立 Workspace projection、Task execution selection 和对应命令必须在实现时通过完整 hard cut、跨语言 fixture 与 revision 升级原子落地，不能向 revision 1 偷加“可选”字段。
+Workspace 是 Workbench-owned 产品对象，而不是 Renderer 从 Task 路径派生的 convenience view。Renderer Bridge revision 2 发布 stable identity、optimistic epoch、canonical root、display label、authorization/removal outcome 与聚合 Task signals；一次性目录能力由 Bridge/Native capability 生成并在同一 `workspaces.choose` Host 命令内消费，Renderer 只得到 Workspace identity。Task 创建绑定 expected execution generation，后续 Run 绑定 expected binding epoch，Workspace mutation 绑定 expected Workspace epoch；Host 对 window、ownership、catalog membership 与 admission 重新校验。预期业务拒绝编码为严格 typed result，非法 payload 与 authority failure 仍走 Bridge failure；合同不接受 revision 1 payload 或兼容字段。
+
+Workbench 单独分配稳定的产品 Task identity，并在 Task owner 内保存 Agent Session route identity；AgentCore event 与 event-projection failure 都只按 route identity 回到 owner，Bridge snapshot 与 mutation 只使用产品 Task identity，二者不共享生成器也不依赖数值相等。Task binding descriptor 包含无 secret 的 account/profile、API、Provider、model、generation 与 binding epoch；内部执行使用的 raw model 与 Renderer projection 的 selection identity 分开持有。
+
+credential redaction 是 owner 释放协议的一部分，而不是 snapshot 时的偶然过滤。安装新 credential 前先永久清洗所有既有产品投影；替换或清空默认 execution、释放 quiescent Task-owned execution 前再次使用即将释放的 credential 清洗 Workspace、Task、Run、tool 与 UI history，然后才 secure-zero。序列化仍扫描所有 live credential，并在前缀重叠时采用最长匹配，作为释放前的第二道防线。credential 是 opaque bytes；若匹配发生在 UTF-8 codepoint 内部，所有 ingestion、流式跨 chunk 清洗与序列化路径都必须扩大到完整 codepoint，禁止为了替换 secret 产生非法 UTF-8 产品事实或 JSON。
 
 ### 4.4 AgentCore
 
@@ -273,7 +277,7 @@ Host view snapshot 使用 Bridge `Dispatcher` 内部 `ProductDelivery` 独占的
 
 Host 与 Renderer 随同一应用包原子发布，不承担旧 Renderer/新 Host 或新 Renderer/旧 Host 的兼容，但仍必须在 bootstrap 时检测开发产物、缓存资源或安装状态造成的版本错配。Renderer Bridge contract 覆盖全部 product command、event 和 snapshot wire surface；它与产品版本、AgentCore ABI、bundle manifest schema 分别演进。
 
-Renderer Bridge 使用独立合同身份 `metawork.renderer-bridge`，当前 revision 为 `1`。`contractRevision` 精确匹配，不使用 semver：任何可序列化 command、event、payload 字段或线上语义变化都升级 revision，包括新增“可选”命令。当前 pre-1.0 开发阶段不维护旧 revision 兼容层，也不在 snapshot 内维护第二个局部版本。
+Renderer Bridge 使用独立合同身份 `metawork.renderer-bridge`，当前 revision 为 `2`。`contractRevision` 精确匹配，不使用 semver：任何可序列化 command、event、payload 字段或线上语义变化都升级 revision，包括新增“可选”命令。当前 pre-1.0 开发阶段不维护旧 revision 兼容层，也不在 snapshot 内维护第二个局部版本。
 
 `connect` 是 product delivery 的 bootstrap 边界。Host 必须在合同身份与 revision 校验成功后才建立 `ProductDelivery` connection；既有 `requireWindow()` 门禁随后统一保护 Account、Task、event 和 snapshot 产品路径。协商前只允许显式列出的无状态 bootstrap/smoke 命令，不得读取或修改产品状态。合同不匹配返回 typed terminal bootstrap error，Renderer 不把它当作瞬时断线重试。
 

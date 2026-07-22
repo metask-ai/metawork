@@ -35,7 +35,7 @@
 
 - React + Tailwind 是唯一正式 Renderer；不建立 `.native` 替代层、第二套 Renderer 或通用 Desktop Interface。
 - Native SDK 直接构成 Zig Host，不增加 `NativeSdkAdapter` 或框架替换层。
-- Renderer Bridge 产品合同是 `metawork.renderer-bridge` revision 1。`connect` 精确匹配 identity/revision 后才开放产品路径；不维护旧 revision 兼容层，也不在 snapshot 内建立局部 schema version。
+- Renderer Bridge 产品合同是 `metawork.renderer-bridge` revision 2。`connect` 精确匹配 identity/revision 后才开放产品路径；不维护旧 revision 兼容层，也不在 snapshot 内建立局部 schema version。
 - `app.zon`、Zig 和 TypeScript command catalog 必须完全一致。Renderer 对 Host payload 做 runtime decode；Host 执行 origin、command、payload、Workspace、Task 和权限校验。
 - Bridge 只拥有 command ingress 与 `ProductDelivery` transport；产品状态和 Run policy 归 Workbench。automation 只能驱动真实产品路径，不注册测试专用协议或第二数据面。
 

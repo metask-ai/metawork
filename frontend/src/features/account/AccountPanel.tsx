@@ -31,16 +31,17 @@ export function AccountPanel({
       ? null
       : t(`account.operation.${account.operation}`);
   const selectedKey = account.apiKeys.find(
-    (key) => key.id === account.selectedApiKeyId,
+    (key) => key.selectionId === account.selectedApiKeySelectionId,
   );
   const selectedKeyLabel = selectedKey
-    ? `${selectedKey.name || selectedKey.id}${
+    ? `${selectedKey.name || selectedKey.selectionId}${
         selectedKey.suffix ? ` · ${selectedKey.suffix}` : ""
       }`
     : t("account.saved_key");
   const selectedModelLabel =
-    account.models.find((model) => model.id === account.selectedModel)
-      ?.displayName || account.selectedModel;
+    account.models.find(
+      (model) => model.selectionId === account.selectedModelSelectionId,
+    )?.displayName || account.selectedModelSelectionId;
 
   return (
     <section
@@ -97,8 +98,8 @@ export function AccountPanel({
           >
             <option value="">{t("account.choose_key")}</option>
             {account.apiKeys.map((key) => (
-              <option key={key.id} value={key.id}>
-                {key.name || key.id}
+              <option key={key.selectionId} value={key.selectionId}>
+                {key.name || key.selectionId}
                 {key.suffix ? ` · ${key.suffix}` : ""}
               </option>
             ))}
@@ -119,8 +120,8 @@ export function AccountPanel({
           >
             <option value="">{t("account.choose_model")}</option>
             {account.models.map((model) => (
-              <option key={model.id} value={model.id}>
-                {model.displayName || model.id}
+              <option key={model.selectionId} value={model.selectionId}>
+                {model.displayName || model.selectionId}
               </option>
             ))}
           </select>

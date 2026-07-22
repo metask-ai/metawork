@@ -551,6 +551,17 @@ const AccountCoordinator = struct {
             restore_result.deinit();
             return .execution_in_use;
         };
+        switch (restore_result.*) {
+            .execution_ready => |*ready| {
+                const input = ready.execution.input();
+                self.public_catalog.replaceRestoredSelection(
+                    ready.apiKeyId(),
+                    input.target.provider_kind,
+                    input.target.model,
+                );
+            },
+            .signed_out, .account_only => self.public_catalog.clear(),
+        }
         const prepared = self.account.prepareRestore(restore_result);
         return switch (prepared) {
             .transition => |value| if (self.commitTransition(value).accepted)
@@ -558,6 +569,7 @@ const AccountCoordinator = struct {
             else
                 .local_resource_exhausted,
             .rejected => |error_code| result: {
+                self.public_catalog.clear();
                 self.workbench.endExecutionReplacementNoFail();
                 break :result error_code;
             },
@@ -1638,6 +1650,7 @@ const App = struct {
         return .{
             .context = self,
             .active_fn = automationActive,
+            .workspace_root_fn = automationWorkspaceRoot,
         };
     }
 
@@ -1719,6 +1732,11 @@ const App = struct {
     fn automationActive(context: ?*anyopaque) bool {
         const self: *@This() = @ptrCast(@alignCast(context.?));
         return self.automation.active();
+    }
+
+    fn automationWorkspaceRoot(context: ?*anyopaque) ?[]const u8 {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        return self.automation.workspaceRoot();
     }
 };
 
@@ -2014,7 +2032,7 @@ test "Account coordinator commits login and execution as separate gates" {
     defer keys_loaded.deinit();
     account_api.Catalog.TestSupport.replacePublic(
         &public_catalog,
-        &.{.{ .id = "key-1", .name = "Primary", .suffix = "1234" }},
+        &.{.{ .id = "key-1", .name = "Primary", .suffix = "1234", .provider_kind = .anthropic }},
         &.{},
     );
     try std.testing.expect(coordinator.complete(&keys_loaded));
@@ -2033,7 +2051,7 @@ test "Account coordinator commits login and execution as separate gates" {
     defer models_loaded.deinit();
     account_api.Catalog.TestSupport.replacePublic(
         &public_catalog,
-        &.{.{ .id = "key-1", .name = "Primary", .suffix = "1234" }},
+        &.{.{ .id = "key-1", .name = "Primary", .suffix = "1234", .provider_kind = .anthropic }},
         &.{.{ .id = "model-1", .display_name = "Model One" }},
     );
     try std.testing.expect(coordinator.complete(&models_loaded));

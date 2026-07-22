@@ -61,7 +61,7 @@ function task(overrides) {
   return {
     id: "1",
     title: "Release audit",
-    workspaceRoot: "/repo/alpha",
+    workspaceId: "1",
     lifecycle: "open",
     continuationAvailable: true,
     archived: false,
@@ -87,34 +87,65 @@ test("workspace navigation aggregates actionable cross-workspace signals without
     }),
     task({
       id: "3",
-      workspaceRoot: "/repo/beta",
+      workspaceId: "2",
       lastRunOutcome: "failed",
     }),
     task({
       id: "4",
-      workspaceRoot: "/repo/beta",
+      workspaceId: "2",
       archived: true,
       lastRunOutcome: "failed",
     }),
   ];
-  assert.deepEqual(workspaceSummaries({ tasks: tasks }), [
-    {
-      root: "/repo/alpha",
-      label: "alpha",
-      taskCount: 2,
-      running: 1,
-      attention: 1,
-      failed: 0,
-    },
-    {
-      root: "/repo/beta",
-      label: "beta",
-      taskCount: 1,
-      running: 0,
-      attention: 0,
-      failed: 1,
-    },
-  ]);
+  assert.deepEqual(
+    workspaceSummaries({
+      workspaces: [
+        {
+          id: "1",
+          displayName: "alpha",
+          canonicalRoot: "/repo/alpha",
+          authorization: "available",
+          lastRemovalFailure: null,
+          recentOrder: "2",
+          signals: { running: 1, attention: 1, failedOrInterrupted: 0 },
+        },
+        {
+          id: "2",
+          displayName: "beta",
+          canonicalRoot: "/repo/beta",
+          authorization: "removing",
+          lastRemovalFailure: "task_close_failed",
+          recentOrder: "1",
+          signals: { running: 0, attention: 0, failedOrInterrupted: 1 },
+        },
+      ],
+      tasks,
+    }),
+    [
+      {
+        id: "1",
+        canonicalRoot: "/repo/alpha",
+        label: "alpha",
+        authorization: "available",
+        lastRemovalFailure: null,
+        taskCount: 2,
+        running: 1,
+        attention: 1,
+        failed: 0,
+      },
+      {
+        id: "2",
+        canonicalRoot: "/repo/beta",
+        label: "beta",
+        authorization: "removing",
+        lastRemovalFailure: "task_close_failed",
+        taskCount: 1,
+        running: 0,
+        attention: 0,
+        failed: 1,
+      },
+    ],
+  );
   assert.deepEqual(taskSignals(tasks[2]), {
     running: false,
     attention: false,
@@ -182,6 +213,13 @@ test("a new Task draft is not mistaken for an in-flight Run", () => {
 
 test("global search finds product content and deliberately excludes raw tool output", () => {
   const snapshot = {
+    workspaces: [
+      {
+        id: "1",
+        displayName: "alpha",
+        canonicalRoot: "/repo/alpha",
+      },
+    ],
     tasks: [
       task({
         runs: [

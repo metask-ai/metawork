@@ -126,8 +126,8 @@ export function AccountGate({
               >
                 <option value="">{t("account.choose_key")}</option>
                 {account.apiKeys.map((key) => (
-                  <option key={key.id} value={key.id}>
-                    {key.name || key.id}
+                  <option key={key.selectionId} value={key.selectionId}>
+                    {key.name || key.selectionId}
                     {key.suffix ? ` · ${key.suffix}` : ""}
                   </option>
                 ))}
@@ -149,8 +149,8 @@ export function AccountGate({
               >
                 <option value="">{t("account.choose_model")}</option>
                 {account.models.map((model) => (
-                  <option key={model.id} value={model.id}>
-                    {model.displayName || model.id}
+                  <option key={model.selectionId} value={model.selectionId}>
+                    {model.displayName || model.selectionId}
                   </option>
                 ))}
               </select>

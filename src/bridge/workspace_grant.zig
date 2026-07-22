@@ -26,15 +26,6 @@ pub const State = struct {
         self.grant = null;
     }
 
-    /// Workspace removal invalidates the one outstanding capability
-    /// conservatively. The chooser path is not a canonical identity: aliases,
-    /// symlinks and platform case rules make path-string matching unsafe.
-    pub fn revokeForWorkspaceRemoval(self: *State) bool {
-        if (self.grant == null) return false;
-        self.grant = null;
-        return true;
-    }
-
     pub fn issue(
         self: *State,
         generation: u64,
@@ -74,15 +65,23 @@ pub const State = struct {
     }
 };
 
-test "Workspace removal revokes the sole outstanding grant fail closed" {
+test "Workspace picker capability is one-shot and connection-bound" {
     var state: State = .{};
     const window_id: native_sdk.platform.WindowId = 7;
     var output: [max_path_bytes]u8 = undefined;
-    const revoked = try state.issue(3, window_id, "/tmp/aliased-workspace");
-    try std.testing.expect(state.revokeForWorkspaceRemoval());
-    try std.testing.expect(!state.revokeForWorkspaceRemoval());
+    const accepted = try state.issue(3, window_id, "/tmp/workspace");
+    try std.testing.expectEqualStrings(
+        "/tmp/workspace",
+        try state.consume(accepted, window_id, 3, &output),
+    );
     try std.testing.expectError(
         error.WorkspaceNotTrusted,
-        state.consume(revoked, window_id, 3, &output),
+        state.consume(accepted, window_id, 3, &output),
+    );
+
+    const stale = try state.issue(3, window_id, "/tmp/stale-workspace");
+    try std.testing.expectError(
+        error.WorkspaceNotTrusted,
+        state.consume(stale, window_id, 4, &output),
     );
 }

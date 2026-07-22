@@ -290,6 +290,7 @@ pub const CatalogSession = struct {
                 .id = entry.id.view(),
                 .name = entry.name.view(),
                 .suffix = entry.suffix.view(),
+                .provider_kind = entry.provider_kind,
             };
         }
         return output[0..self.api_keys.items.len];
@@ -384,6 +385,7 @@ const PublicApiKey = struct {
     id: PublicText(contract.Limits.api_key_id_bytes) = .{},
     name: PublicText(contract.Limits.api_key_name_bytes) = .{},
     suffix: PublicText(contract.Limits.api_key_suffix_bytes) = .{},
+    provider_kind: contract.ProviderKind = .anthropic,
 };
 
 const PublicModel = struct {
@@ -422,6 +424,7 @@ pub const PublicCatalog = struct {
             storage.id.set(source.id);
             storage.name.set(source.name);
             storage.suffix.set(source.suffix);
+            storage.provider_kind = source.provider_kind;
         }
 
         var model_views: [contract.Limits.model_entries]contract.ModelView =
@@ -436,6 +439,28 @@ pub const PublicCatalog = struct {
             storage.id.set(source.id);
             storage.display_name.set(source.display_name);
         }
+    }
+
+    /// Restored execution persistence contains the selected catalog identities
+    /// but no complete Metask catalog. Publish the smallest truthful catalog
+    /// until the authenticated catalog refresh replaces it. This keeps a ready
+    /// AccountView internally consistent without inventing display metadata.
+    pub fn replaceRestoredSelection(
+        self: *PublicCatalog,
+        api_key_id: []const u8,
+        provider_kind: contract.ProviderKind,
+        model_id: []const u8,
+    ) void {
+        std.debug.assert(api_key_id.len > 0);
+        std.debug.assert(model_id.len > 0);
+        self.api_key_count = 1;
+        self.api_keys[0].id.set(api_key_id);
+        self.api_keys[0].name.set("");
+        self.api_keys[0].suffix.set("");
+        self.api_keys[0].provider_kind = provider_kind;
+        self.model_count = 1;
+        self.models[0].id.set(model_id);
+        self.models[0].display_name.set("");
     }
 
     pub fn clear(self: *PublicCatalog) void {
@@ -455,6 +480,7 @@ pub const PublicCatalog = struct {
                 .id = storage.id.view(),
                 .name = storage.name.view(),
                 .suffix = storage.suffix.view(),
+                .provider_kind = storage.provider_kind,
             };
         }
         for (
@@ -484,6 +510,7 @@ pub const TestSupport = if (builtin.is_test) struct {
             target.id.set(source.id);
             target.name.set(source.name);
             target.suffix.set(source.suffix);
+            target.provider_kind = source.provider_kind;
         }
         catalog.model_count = models.len;
         for (models, catalog.models[0..models.len]) |source, *target| {

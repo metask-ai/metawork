@@ -74,6 +74,8 @@ export type AccountErrorCode =
   | "dependency_contract_invalid"
   | "shutting_down";
 
+export type Provider = "anthropic" | "openai";
+
 export type AccountView = {
   sessionState: AccountSessionState;
   executionState: ExecutionState;
@@ -82,11 +84,17 @@ export type AccountView = {
   primaryAction: AccountPrimaryAction;
   canCancel: boolean;
   accountId: string;
+  profileId: string;
   displayName: string;
-  apiKeys: { id: string; name: string; suffix: string }[];
-  models: { id: string; displayName: string }[];
-  selectedApiKeyId: string;
-  selectedModel: string;
+  apiKeys: {
+    selectionId: string;
+    name: string;
+    suffix: string;
+    provider: Provider;
+  }[];
+  models: { selectionId: string; displayName: string }[];
+  selectedApiKeySelectionId: string;
+  selectedModelSelectionId: string;
   canCreateTask: boolean;
   errorCode: AccountErrorCode;
   safeDiagnostic: string;
@@ -219,7 +227,22 @@ export type UiRecord = {
 export type TaskView = {
   id: string;
   title: string;
-  workspaceRoot: string;
+  workspaceId: string;
+  binding: {
+    epoch: string;
+    availability: "available" | "unavailable";
+    accountId: string;
+    profileId: string;
+    accountDisplayName: string;
+    apiKeySelectionId: string;
+    apiKeyName: string;
+    apiKeySuffix: string;
+    provider: Provider;
+    modelSelectionId: string;
+    modelDisplayName: string;
+    executionGeneration: string;
+    unavailableReason: "credential_released" | null;
+  };
   lifecycle: "open" | "closing" | "closed";
   continuationAvailable: boolean;
   archived: boolean;
@@ -235,17 +258,111 @@ export type TaskView = {
 
 export type WorkbenchSnapshot = {
   revision: string;
+  capabilities: {
+    taskHistoryPersistence: boolean;
+    conversationRecovery: boolean;
+    executionRebind: boolean;
+    structuredPlan: boolean;
+    typedOutputs: boolean;
+    typedFileChanges: boolean;
+    persistentWorkspacePermissions: boolean;
+  };
   account: AccountView;
+  selectedWorkspaceId: string | null;
+  workspaces: WorkspaceView[];
   tasks: TaskView[];
 };
+
+export type WorkspaceView = {
+  id: string;
+  epoch: string;
+  displayName: string;
+  canonicalRoot: string;
+  redacted: boolean;
+  authorization: "available" | "removing" | "reauthorization_required";
+  lastRemovalFailure: "task_close_failed" | null;
+  recentOrder: string;
+  signals: {
+    running: number;
+    attention: number;
+    failedOrInterrupted: number;
+  };
+};
+
+export type WorkspaceMutationReason =
+  | "workspace_changed"
+  | "workspace_unavailable"
+  | "workspace_removing"
+  | "capacity_reached"
+  | "removal_failed";
+
+export type WorkspaceMutationResult =
+  | {
+      accepted: true;
+      workspaceId: string;
+      workspaceEpoch: string;
+      reason: null;
+    }
+  | {
+      accepted: false;
+      workspaceId: string;
+      workspaceEpoch: null;
+      reason: WorkspaceMutationReason;
+    };
+
+export type TaskCreateReason =
+  | "execution_changed"
+  | "execution_unavailable"
+  | "workspace_changed"
+  | "workspace_unavailable"
+  | "workspace_removing"
+  | "capacity_reached"
+  | "shutting_down";
+
+export type TaskCreateResult =
+  | {
+      accepted: true;
+      taskId: string;
+      bindingEpoch: string;
+      reason: null;
+    }
+  | {
+      accepted: false;
+      taskId: null;
+      bindingEpoch: null;
+      reason: TaskCreateReason;
+    };
+
+export type TaskRunReason =
+  | "binding_changed"
+  | "binding_unavailable"
+  | "task_unavailable"
+  | "task_busy"
+  | "workspace_unavailable"
+  | "workspace_removing"
+  | "capacity_reached"
+  | "shutting_down";
+
+export type TaskRunResult =
+  | {
+      accepted: true;
+      taskId: string;
+      runId: string;
+      reason: null;
+    }
+  | {
+      accepted: false;
+      taskId: string;
+      runId: null;
+      reason: TaskRunReason;
+    };
 
 export type HostSignal = {
   sequence: number;
 };
 
 export type WorkspaceChoice =
-  | { selected: false }
-  | { selected: true; workspaceRoot: string; grant: string };
+  { selected: false } | { selected: true; workspaceId: string };
 
 export type UiResponsePayload =
   | { kind: "permission"; permission: "deny_once" | "allow_once" }

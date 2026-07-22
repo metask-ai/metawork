@@ -106,6 +106,7 @@ export const enUS = {
   "workspace.label": "Workspace",
   "workspace.choose_on_send": "Choose on send",
   "workspace.add": "Add",
+  "workspace.remove": "Remove",
   "workspace.switch": "Switch workspace",
   "workspace.activity": "Workspace activity",
   "workspace.attention_count": "{count} need attention",
@@ -121,6 +122,16 @@ export const enUS = {
   "workspace.access_required":
     "Confirm workspace access again before sending this draft.",
   "workspace.confirm_access": "Confirm access",
+  "workspace.retry_removal": "Retry removal",
+  "workspace.removal_failed_short": "Removal failed",
+  "workspace.removal_started": "Workspace removal started.",
+  "workspace.removing_short": "Removing",
+  "workspace.removing_notice":
+    "Removing this workspace. You can’t start or continue tasks while removal is in progress.",
+  "workspace.remove_confirm_title": "Remove this workspace?",
+  "workspace.remove_confirm_body":
+    "Running tasks will stop. Local files and task records will not be deleted.",
+  "workspace.remove_confirm_action": "Remove workspace",
   "task.list": "Tasks",
   "task.count.one": "{count} task",
   "task.count.other": "{count} tasks",
@@ -283,6 +294,7 @@ export const enUS = {
   "operation.task_archive": "Archiving the task",
   "operation.task_restore": "Restoring the task",
   "operation.task_delete": "Deleting the task record",
+  "operation.workspace_remove": "Removing the workspace",
   "search.open": "Search",
   "search.title": "Search MetaWork",
   "search.placeholder": "Search workspaces, tasks, and completed work…",
@@ -307,6 +319,33 @@ export const enUS = {
   "cause.queue_capacity_failure": "Workbench capacity reached",
   "cause.ui_pipeline_failure": "Response delivery failed",
   "cause.dependency_contract_failure": "Task runtime became incompatible",
+  "workspace.selection_unavailable":
+    "That workspace is no longer available. Refresh and choose another one.",
+  "account.options_updated":
+    "Available options were updated. Review them and choose again.",
+  "mutation.transport_failed": "MetaWork could not confirm the change.",
+  "mutation.reason.execution_changed":
+    "Your execution settings changed. Review them and try again.",
+  "mutation.reason.execution_unavailable":
+    "The selected execution setup is not available right now.",
+  "mutation.reason.workspace_changed":
+    "This workspace changed. Review its latest state and try again.",
+  "mutation.reason.workspace_unavailable":
+    "This workspace is no longer available.",
+  "mutation.reason.workspace_removing":
+    "This workspace is being removed. Wait for it to finish.",
+  "mutation.reason.removal_failed":
+    "This workspace could not be removed. Some tasks may have stopped. Local files and task records are still preserved.",
+  "mutation.reason.binding_changed":
+    "This task's execution setup changed. Review it before continuing.",
+  "mutation.reason.binding_unavailable":
+    "This task's execution setup is no longer available.",
+  "mutation.reason.task_unavailable": "This task is no longer available.",
+  "mutation.reason.task_busy": "This task is already working.",
+  "mutation.reason.capacity_reached":
+    "MetaWork is at capacity. Finish or close some work, then try again.",
+  "mutation.reason.shutting_down":
+    "MetaWork is closing. Try again after restart.",
 } as const;
 
 export type MessageId = keyof typeof enUS;

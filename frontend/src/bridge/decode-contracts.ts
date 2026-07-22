@@ -7,10 +7,14 @@ import {
   type PendingUi,
   type RunView,
   type TaskView,
+  type TaskCreateResult,
+  type TaskRunResult,
   type ToolView,
   type UiRecord,
   type WorkbenchSnapshot,
   type WorkspaceChoice,
+  type WorkspaceMutationResult,
+  type WorkspaceView,
 } from "./contracts.ts";
 
 type JsonObject = Record<string, unknown>;
@@ -144,6 +148,39 @@ const rendererBridgeConnectErrors = [
   "identity_mismatch",
   "revision_mismatch",
 ] as const;
+const providers = ["anthropic", "openai"] as const;
+const workspaceAuthorizations = [
+  "available",
+  "removing",
+  "reauthorization_required",
+] as const;
+const bindingAvailabilities = ["available", "unavailable"] as const;
+const workspaceMutationReasons = [
+  "workspace_changed",
+  "workspace_unavailable",
+  "workspace_removing",
+  "capacity_reached",
+  "removal_failed",
+] as const;
+const taskCreateReasons = [
+  "execution_changed",
+  "execution_unavailable",
+  "workspace_changed",
+  "workspace_unavailable",
+  "workspace_removing",
+  "capacity_reached",
+  "shutting_down",
+] as const;
+const taskRunReasons = [
+  "binding_changed",
+  "binding_unavailable",
+  "task_unavailable",
+  "task_busy",
+  "workspace_unavailable",
+  "workspace_removing",
+  "capacity_reached",
+  "shutting_down",
+] as const;
 
 function fail(path: string, message: string): never {
   throw new Error(`Invalid Host contract at ${path}: ${message}`);
@@ -240,11 +277,12 @@ function decodeAccount(value: unknown, path: string): AccountView {
     "primaryAction",
     "canCancel",
     "accountId",
+    "profileId",
     "displayName",
     "apiKeys",
     "models",
-    "selectedApiKeyId",
-    "selectedModel",
+    "selectedApiKeySelectionId",
+    "selectedModelSelectionId",
     "canCreateTask",
     "errorCode",
     "safeDiagnostic",
@@ -255,11 +293,17 @@ function decodeAccount(value: unknown, path: string): AccountView {
     item.apiKeys,
     `${path}.apiKeys`,
     (value, itemPath) => {
-      const key = object(value, itemPath, ["id", "name", "suffix"]);
+      const key = object(value, itemPath, [
+        "selectionId",
+        "name",
+        "suffix",
+        "provider",
+      ]);
       return {
-        id: stringValue(key.id, `${itemPath}.id`),
+        selectionId: stringValue(key.selectionId, `${itemPath}.selectionId`),
         name: stringValue(key.name, `${itemPath}.name`),
         suffix: stringValue(key.suffix, `${itemPath}.suffix`),
+        provider: enumValue(key.provider, `${itemPath}.provider`, providers),
       };
     },
   );
@@ -267,16 +311,16 @@ function decodeAccount(value: unknown, path: string): AccountView {
     item.models,
     `${path}.models`,
     (value, itemPath) => {
-      const model = object(value, itemPath, ["id", "displayName"]);
+      const model = object(value, itemPath, ["selectionId", "displayName"]);
       return {
-        id: stringValue(model.id, `${itemPath}.id`),
+        selectionId: stringValue(model.selectionId, `${itemPath}.selectionId`),
         displayName: stringValue(model.displayName, `${itemPath}.displayName`),
       };
     },
   );
-  if (new Set(apiKeys.map((key) => key.id)).size !== apiKeys.length)
+  if (new Set(apiKeys.map((key) => key.selectionId)).size !== apiKeys.length)
     fail(`${path}.apiKeys`, "API Key identities must be unique");
-  if (new Set(models.map((model) => model.id)).size !== models.length)
+  if (new Set(models.map((model) => model.selectionId)).size !== models.length)
     fail(`${path}.models`, "model identities must be unique");
   const sessionState = enumValue(
     item.sessionState,
@@ -305,14 +349,15 @@ function decodeAccount(value: unknown, path: string): AccountView {
   );
   const canCancel = booleanValue(item.canCancel, `${path}.canCancel`);
   const accountId = stringValue(item.accountId, `${path}.accountId`);
+  const profileId = stringValue(item.profileId, `${path}.profileId`);
   const displayName = stringValue(item.displayName, `${path}.displayName`);
-  const selectedApiKeyId = stringValue(
-    item.selectedApiKeyId,
-    `${path}.selectedApiKeyId`,
+  const selectedApiKeySelectionId = stringValue(
+    item.selectedApiKeySelectionId,
+    `${path}.selectedApiKeySelectionId`,
   );
-  const selectedModel = stringValue(
-    item.selectedModel,
-    `${path}.selectedModel`,
+  const selectedModelSelectionId = stringValue(
+    item.selectedModelSelectionId,
+    `${path}.selectedModelSelectionId`,
   );
   const canCreateTask = booleanValue(
     item.canCreateTask,
@@ -332,11 +377,19 @@ function decodeAccount(value: unknown, path: string): AccountView {
     fail(path, "cancellation availability disagrees with the active operation");
   if (
     executionState === "ready" &&
-    (selectedApiKeyId.length === 0 ||
-      selectedModel.length === 0 ||
+    (accountId.length === 0 ||
+      profileId.length === 0 ||
+      selectedApiKeySelectionId.length === 0 ||
+      selectedModelSelectionId.length === 0 ||
       executionGeneration === "0")
   )
     fail(path, "a ready execution requires selected identities and generation");
+  if (
+    executionState === "ready" &&
+    (!apiKeys.some((key) => key.selectionId === selectedApiKeySelectionId) ||
+      !models.some((model) => model.selectionId === selectedModelSelectionId))
+  )
+    fail(path, "a ready execution requires selected catalog membership");
   if (primaryAction === "choose_api_key" && apiKeys.length === 0)
     fail(path, "API Key choice requires at least one candidate");
   if (primaryAction === "choose_model" && models.length === 0)
@@ -346,11 +399,12 @@ function decodeAccount(value: unknown, path: string): AccountView {
     (executionState !== "none" ||
       operation !== "none" ||
       accountId.length !== 0 ||
+      profileId.length !== 0 ||
       displayName.length !== 0 ||
       apiKeys.length !== 0 ||
       models.length !== 0 ||
-      selectedApiKeyId.length !== 0 ||
-      selectedModel.length !== 0 ||
+      selectedApiKeySelectionId.length !== 0 ||
+      selectedModelSelectionId.length !== 0 ||
       executionGeneration !== "0" ||
       canCreateTask)
   )
@@ -396,11 +450,12 @@ function decodeAccount(value: unknown, path: string): AccountView {
     primaryAction,
     canCancel,
     accountId,
+    profileId,
     displayName,
     apiKeys,
     models,
-    selectedApiKeyId,
-    selectedModel,
+    selectedApiKeySelectionId,
+    selectedModelSelectionId,
     canCreateTask,
     errorCode: enumValue(
       item.errorCode,
@@ -640,7 +695,8 @@ function decodeTask(value: unknown, path: string): TaskView {
   const item = object(value, path, [
     "id",
     "title",
-    "workspaceRoot",
+    "workspaceId",
+    "binding",
     "lifecycle",
     "continuationAvailable",
     "archived",
@@ -653,6 +709,76 @@ function decodeTask(value: unknown, path: string): TaskView {
     "pendingUi",
     "uiHistory",
   ]);
+  const bindingItem = object(item.binding, `${path}.binding`, [
+    "epoch",
+    "availability",
+    "accountId",
+    "profileId",
+    "accountDisplayName",
+    "apiKeySelectionId",
+    "apiKeyName",
+    "apiKeySuffix",
+    "provider",
+    "modelSelectionId",
+    "modelDisplayName",
+    "executionGeneration",
+    "unavailableReason",
+  ]);
+  const availability = enumValue(
+    bindingItem.availability,
+    `${path}.binding.availability`,
+    bindingAvailabilities,
+  );
+  const unavailableReason = nullableEnum(
+    bindingItem.unavailableReason,
+    `${path}.binding.unavailableReason`,
+    ["credential_released"] as const,
+  );
+  if ((availability === "available") !== (unavailableReason === null))
+    fail(
+      `${path}.binding`,
+      "availability and unavailable reason must describe the same binding state",
+    );
+  const binding = {
+    epoch: positiveWireId(bindingItem.epoch, `${path}.binding.epoch`),
+    availability,
+    accountId: stringValue(bindingItem.accountId, `${path}.binding.accountId`),
+    profileId: stringValue(bindingItem.profileId, `${path}.binding.profileId`),
+    accountDisplayName: stringValue(
+      bindingItem.accountDisplayName,
+      `${path}.binding.accountDisplayName`,
+    ),
+    apiKeySelectionId: stringValue(
+      bindingItem.apiKeySelectionId,
+      `${path}.binding.apiKeySelectionId`,
+    ),
+    apiKeyName: stringValue(
+      bindingItem.apiKeyName,
+      `${path}.binding.apiKeyName`,
+    ),
+    apiKeySuffix: stringValue(
+      bindingItem.apiKeySuffix,
+      `${path}.binding.apiKeySuffix`,
+    ),
+    provider: enumValue(
+      bindingItem.provider,
+      `${path}.binding.provider`,
+      providers,
+    ),
+    modelSelectionId: stringValue(
+      bindingItem.modelSelectionId,
+      `${path}.binding.modelSelectionId`,
+    ),
+    modelDisplayName: stringValue(
+      bindingItem.modelDisplayName,
+      `${path}.binding.modelDisplayName`,
+    ),
+    executionGeneration: positiveWireId(
+      bindingItem.executionGeneration,
+      `${path}.binding.executionGeneration`,
+    ),
+    unavailableReason,
+  };
   const runs = arrayValue(item.runs, `${path}.runs`, decodeRun);
   const lifecycle = enumValue(
     item.lifecycle,
@@ -730,10 +856,13 @@ function decodeTask(value: unknown, path: string): TaskView {
     fail(path, "an open non-continuable Task cannot have active work");
   if (lifecycle !== "open" && continuationAvailable)
     fail(path, "a non-open Task cannot accept future work");
+  if (continuationAvailable && binding.availability !== "available")
+    fail(path, "a Task without an available binding cannot accept future work");
   return {
     id: positiveWireId(item.id, `${path}.id`),
     title: stringValue(item.title, `${path}.title`),
-    workspaceRoot: stringValue(item.workspaceRoot, `${path}.workspaceRoot`),
+    workspaceId: positiveWireId(item.workspaceId, `${path}.workspaceId`),
+    binding,
     lifecycle,
     continuationAvailable,
     archived,
@@ -752,12 +881,129 @@ function decodeTask(value: unknown, path: string): TaskView {
   };
 }
 
+function decodeWorkspace(value: unknown, path: string): WorkspaceView {
+  const item = object(value, path, [
+    "id",
+    "epoch",
+    "displayName",
+    "canonicalRoot",
+    "redacted",
+    "authorization",
+    "lastRemovalFailure",
+    "recentOrder",
+    "signals",
+  ]);
+  const signals = object(item.signals, `${path}.signals`, [
+    "running",
+    "attention",
+    "failedOrInterrupted",
+  ]);
+  return {
+    id: positiveWireId(item.id, `${path}.id`),
+    epoch: positiveWireId(item.epoch, `${path}.epoch`),
+    displayName: stringValue(item.displayName, `${path}.displayName`),
+    canonicalRoot: stringValue(item.canonicalRoot, `${path}.canonicalRoot`),
+    redacted: booleanValue(item.redacted, `${path}.redacted`),
+    authorization: enumValue(
+      item.authorization,
+      `${path}.authorization`,
+      workspaceAuthorizations,
+    ),
+    lastRemovalFailure: nullableEnum(
+      item.lastRemovalFailure,
+      `${path}.lastRemovalFailure`,
+      ["task_close_failed"] as const,
+    ),
+    recentOrder: positiveWireId(item.recentOrder, `${path}.recentOrder`),
+    signals: {
+      running: nonNegativeNumber(signals.running, `${path}.signals.running`),
+      attention: nonNegativeNumber(
+        signals.attention,
+        `${path}.signals.attention`,
+      ),
+      failedOrInterrupted: nonNegativeNumber(
+        signals.failedOrInterrupted,
+        `${path}.signals.failedOrInterrupted`,
+      ),
+    },
+  };
+}
+
 export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
-  const root = object(value, "$", ["revision", "account", "tasks"]);
+  const root = object(value, "$", [
+    "revision",
+    "capabilities",
+    "account",
+    "selectedWorkspaceId",
+    "workspaces",
+    "tasks",
+  ]);
+  const capabilityItem = object(root.capabilities, "$.capabilities", [
+    "taskHistoryPersistence",
+    "conversationRecovery",
+    "executionRebind",
+    "structuredPlan",
+    "typedOutputs",
+    "typedFileChanges",
+    "persistentWorkspacePermissions",
+  ]);
+  const capabilities = {
+    taskHistoryPersistence: booleanValue(
+      capabilityItem.taskHistoryPersistence,
+      "$.capabilities.taskHistoryPersistence",
+    ),
+    conversationRecovery: booleanValue(
+      capabilityItem.conversationRecovery,
+      "$.capabilities.conversationRecovery",
+    ),
+    executionRebind: booleanValue(
+      capabilityItem.executionRebind,
+      "$.capabilities.executionRebind",
+    ),
+    structuredPlan: booleanValue(
+      capabilityItem.structuredPlan,
+      "$.capabilities.structuredPlan",
+    ),
+    typedOutputs: booleanValue(
+      capabilityItem.typedOutputs,
+      "$.capabilities.typedOutputs",
+    ),
+    typedFileChanges: booleanValue(
+      capabilityItem.typedFileChanges,
+      "$.capabilities.typedFileChanges",
+    ),
+    persistentWorkspacePermissions: booleanValue(
+      capabilityItem.persistentWorkspacePermissions,
+      "$.capabilities.persistentWorkspacePermissions",
+    ),
+  };
+  const workspaces = arrayValue(
+    root.workspaces,
+    "$.workspaces",
+    decodeWorkspace,
+  );
+  const tasks = arrayValue(root.tasks, "$.tasks", decodeTask);
+  const selectedWorkspaceId =
+    root.selectedWorkspaceId === null
+      ? null
+      : positiveWireId(root.selectedWorkspaceId, "$.selectedWorkspaceId");
+  if (
+    new Set(workspaces.map((workspace) => workspace.id)).size !==
+    workspaces.length
+  )
+    fail("$.workspaces", "Workspace identities must be unique");
+  const workspaceIds = new Set(workspaces.map((workspace) => workspace.id));
+  if (new Set(tasks.map((task) => task.id)).size !== tasks.length)
+    fail("$.tasks", "Task identities must be unique");
+  if (selectedWorkspaceId !== null && !workspaceIds.has(selectedWorkspaceId))
+    fail("$.selectedWorkspaceId", "selected Workspace must be projected");
   return {
     revision: wireId(root.revision, "$.revision"),
+    capabilities,
     account: decodeAccount(root.account, "$.account"),
-    tasks: arrayValue(root.tasks, "$.tasks", decodeTask),
+    selectedWorkspaceId,
+    workspaces,
+    tasks,
   };
 }
 
@@ -882,24 +1128,96 @@ export function decodeWorkspaceChoice(value: unknown): WorkspaceChoice {
     object(value, "$", ["selected"]);
     return { selected: false };
   }
-  const item = object(value, "$", ["selected", "workspaceRoot", "grant"]);
+  const item = object(value, "$", ["selected", "workspaceId"]);
   return {
     selected: true,
-    workspaceRoot: stringValue(item.workspaceRoot, "$.workspaceRoot"),
-    grant: positiveWireId(item.grant, "$.grant"),
+    workspaceId: positiveWireId(item.workspaceId, "$.workspaceId"),
   };
 }
 
-export function decodeTaskId(value: unknown) {
-  const item = object(value, "$", ["taskId"]);
-  return positiveWireId(item.taskId, "$.taskId");
+export function decodeWorkspaceMutationResult(
+  value: unknown,
+  expectedWorkspaceId: string,
+): WorkspaceMutationResult {
+  const item = object(value, "$", [
+    "accepted",
+    "workspaceId",
+    "workspaceEpoch",
+    "reason",
+  ]);
+  const accepted = booleanValue(item.accepted, "$.accepted");
+  const workspaceId = positiveWireId(item.workspaceId, "$.workspaceId");
+  if (workspaceId !== expectedWorkspaceId)
+    fail("$.workspaceId", "response identity mismatch");
+  if (accepted) {
+    if (item.reason !== null) fail("$.reason", "expected null");
+    return {
+      accepted: true,
+      workspaceId,
+      workspaceEpoch: positiveWireId(item.workspaceEpoch, "$.workspaceEpoch"),
+      reason: null,
+    };
+  }
+  if (item.workspaceEpoch !== null) fail("$.workspaceEpoch", "expected null");
+  return {
+    accepted: false,
+    workspaceId,
+    workspaceEpoch: null,
+    reason: enumValue(item.reason, "$.reason", workspaceMutationReasons),
+  };
 }
 
-export function assertRunAccepted(value: unknown, taskId: string) {
-  const item = object(value, "$", ["taskId", "runId"]);
-  if (positiveWireId(item.taskId, "$.taskId") !== taskId)
-    fail("$.taskId", "response identity mismatch");
-  return positiveWireId(item.runId, "$.runId");
+export function decodeTaskCreateResult(value: unknown): TaskCreateResult {
+  const item = object(value, "$", [
+    "accepted",
+    "taskId",
+    "bindingEpoch",
+    "reason",
+  ]);
+  const accepted = booleanValue(item.accepted, "$.accepted");
+  if (accepted) {
+    if (item.reason !== null) fail("$.reason", "expected null");
+    return {
+      accepted: true,
+      taskId: positiveWireId(item.taskId, "$.taskId"),
+      bindingEpoch: positiveWireId(item.bindingEpoch, "$.bindingEpoch"),
+      reason: null,
+    };
+  }
+  if (item.taskId !== null || item.bindingEpoch !== null)
+    fail("$", "a rejected Task creation cannot expose identities");
+  return {
+    accepted: false,
+    taskId: null,
+    bindingEpoch: null,
+    reason: enumValue(item.reason, "$.reason", taskCreateReasons),
+  };
+}
+
+export function decodeTaskRunResult(
+  value: unknown,
+  expectedTaskId: string,
+): TaskRunResult {
+  const item = object(value, "$", ["accepted", "taskId", "runId", "reason"]);
+  const accepted = booleanValue(item.accepted, "$.accepted");
+  const taskId = positiveWireId(item.taskId, "$.taskId");
+  if (taskId !== expectedTaskId) fail("$.taskId", "response identity mismatch");
+  if (accepted) {
+    if (item.reason !== null) fail("$.reason", "expected null");
+    return {
+      accepted: true,
+      taskId,
+      runId: positiveWireId(item.runId, "$.runId"),
+      reason: null,
+    };
+  }
+  if (item.runId !== null) fail("$.runId", "expected null");
+  return {
+    accepted: false,
+    taskId,
+    runId: null,
+    reason: enumValue(item.reason, "$.reason", taskRunReasons),
+  };
 }
 
 export function assertCancelAccepted(

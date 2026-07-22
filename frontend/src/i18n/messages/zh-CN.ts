@@ -100,6 +100,7 @@ export const zhCN: Record<MessageId, string> = {
   "workspace.label": "工作区",
   "workspace.choose_on_send": "发送时选择",
   "workspace.add": "添加",
+  "workspace.remove": "移除",
   "workspace.switch": "切换工作区",
   "workspace.activity": "工作区动态",
   "workspace.attention_count": "{count} 项待处理",
@@ -114,6 +115,16 @@ export const zhCN: Record<MessageId, string> = {
   "workspace.grant_confirmed": "工作区访问已确认。",
   "workspace.access_required": "发送此草稿前，请重新确认工作区访问权限。",
   "workspace.confirm_access": "确认访问权限",
+  "workspace.retry_removal": "重试移除",
+  "workspace.removal_failed_short": "移除失败",
+  "workspace.removal_started": "已开始移除工作区。",
+  "workspace.removing_short": "正在移除",
+  "workspace.removing_notice":
+    "正在移除该工作区。完成前不能在其中创建任务或继续运行。",
+  "workspace.remove_confirm_title": "移除这个工作区？",
+  "workspace.remove_confirm_body":
+    "正在运行的任务将停止。本地文件和任务记录不会被删除。",
+  "workspace.remove_confirm_action": "移除工作区",
   "task.list": "任务",
   "task.count.one": "{count} 个任务",
   "task.count.other": "{count} 个任务",
@@ -264,6 +275,7 @@ export const zhCN: Record<MessageId, string> = {
   "operation.task_archive": "归档任务",
   "operation.task_restore": "恢复任务",
   "operation.task_delete": "删除任务记录",
+  "operation.workspace_remove": "移除工作区",
   "search.open": "搜索",
   "search.title": "搜索 MetaWork",
   "search.placeholder": "搜索工作区、任务和已完成内容…",
@@ -287,4 +299,24 @@ export const zhCN: Record<MessageId, string> = {
   "cause.queue_capacity_failure": "工作台容量已满",
   "cause.ui_pipeline_failure": "回复传递失败",
   "cause.dependency_contract_failure": "任务运行环境已不兼容",
+  "account.options_updated":
+    "\u53ef\u7528\u9009\u9879\u5df2\u66f4\u65b0\uff0c\u8bf7\u91cd\u65b0\u9009\u62e9\u3002",
+  "workspace.selection_unavailable":
+    "该工作区已不可用，请刷新后选择其他工作区。",
+  "mutation.transport_failed": "MetaWork 无法确认这次操作。",
+  "mutation.reason.execution_changed": "执行配置已变化，请确认最新配置后重试。",
+  "mutation.reason.execution_unavailable": "当前选择的执行配置暂时不可用。",
+  "mutation.reason.workspace_changed":
+    "工作区状态已变化，请确认最新状态后重试。",
+  "mutation.reason.workspace_unavailable": "该工作区已不可用。",
+  "mutation.reason.workspace_removing": "该工作区正在移除，请等待操作完成。",
+  "mutation.reason.removal_failed":
+    "未能移除该工作区，部分任务可能已经停止。本地文件和任务记录仍然保留。",
+  "mutation.reason.binding_changed": "任务的执行配置已变化，请确认后继续。",
+  "mutation.reason.binding_unavailable": "任务的执行配置已不可用。",
+  "mutation.reason.task_unavailable": "该任务已不可用。",
+  "mutation.reason.task_busy": "该任务正在执行中。",
+  "mutation.reason.capacity_reached":
+    "MetaWork 当前容量已满，请结束部分工作后重试。",
+  "mutation.reason.shutting_down": "MetaWork 正在关闭，请重启后重试。",
 };

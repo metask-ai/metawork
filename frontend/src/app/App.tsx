@@ -35,10 +35,7 @@ import {
   prepareRetryDraft,
 } from "../features/composer/drafts.ts";
 import { submitTaskInstruction } from "../features/composer/submitTaskInstruction.ts";
-import {
-  resolveFirstSendWorkspace,
-  workspaceGrantForRoot,
-} from "../features/composer/firstSendWorkspace.ts";
+import { resolveFirstSendWorkspace } from "../features/composer/firstSendWorkspace.ts";
 import {
   BridgeClient,
   BridgeCommandTimeoutError,
@@ -48,7 +45,12 @@ import {
   WorkbenchConnection,
   type WorkbenchConnectionStatus,
 } from "../bridge/connection.ts";
-import type { UiResponsePayload } from "../bridge/contracts.ts";
+import type {
+  TaskCreateReason,
+  TaskRunReason,
+  UiResponsePayload,
+  WorkspaceMutationReason,
+} from "../bridge/contracts.ts";
 import { useI18n, type MessageId } from "../i18n/context.ts";
 import {
   searchWorkbench,
@@ -60,6 +62,7 @@ import {
   workspaceSummaries,
   type SearchResult,
 } from "../workbench/selectors.ts";
+import { chooseWorkspaceWithDraft } from "../features/workspaces/chooseWorkspace.ts";
 import { initialWorkbenchState, workbenchReducer } from "../workbench/store.ts";
 import {
   accountMutationBlocksTaskAdmission,
@@ -68,6 +71,13 @@ import {
 
 function errorText(error: unknown) {
   return error instanceof Error ? error.message : String(error);
+}
+
+type MutationReason =
+  TaskCreateReason | TaskRunReason | WorkspaceMutationReason;
+
+function mutationReasonMessageId(reason: MutationReason): MessageId {
+  return `mutation.reason.${reason}`;
 }
 
 type StatusState = {
@@ -99,11 +109,6 @@ export default function App() {
   const [workbench, dispatchWorkbench] = useReducer(
     workbenchReducer,
     initialWorkbenchState,
-  );
-  const [workspacePath, setWorkspacePath] = useState("");
-  const [workspaceGrant, setWorkspaceGrant] = useState("");
-  const [workspaceGrantRoot, setWorkspaceGrantRoot] = useState<string | null>(
-    null,
   );
   const [showArchived, setShowArchived] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -144,12 +149,15 @@ export default function App() {
   const composer = useRef<HTMLTextAreaElement>(null);
   const snapshot = workbench.snapshot;
   const activeTask = useMemo(() => selectActiveTask(workbench), [workbench]);
-  const currentWorkspace = selectCurrentWorkspace(workbench);
+  const currentWorkspaceId = selectCurrentWorkspace(workbench);
+  const currentWorkspace = snapshot.workspaces.find(
+    (workspace) => workspace.id === currentWorkspaceId,
+  );
   const summaries = useMemo(() => workspaceSummaries(snapshot), [snapshot]);
   const currentTasks = useMemo(
     () =>
-      snapshot.tasks.filter((task) => task.workspaceRoot === currentWorkspace),
-    [currentWorkspace, snapshot],
+      snapshot.tasks.filter((task) => task.workspaceId === currentWorkspaceId),
+    [currentWorkspaceId, snapshot],
   );
   const searchResults = useMemo(
     () => searchWorkbench(snapshot, searchQuery),
@@ -159,7 +167,7 @@ export default function App() {
   const newTaskDraftActive = workbench.draftOpen || activeTask === null;
   const newTaskDraftId = newTaskDraftStorageId(
     newTaskDraftActive,
-    workbench.draftWorkspaceRoot,
+    workbench.draftWorkspaceId,
   );
   const newTaskDrafts = useNewTaskDrafts(newTaskDraftId);
   const prompt = newTaskDraftActive ? newTaskDrafts.draft : taskDrafts.draft;
@@ -186,19 +194,14 @@ export default function App() {
     !workspaceBusy;
   const selectedModelLabel =
     snapshot.account.models.find(
-      (model) => model.id === snapshot.account.selectedModel,
-    )?.displayName || snapshot.account.selectedModel;
-  const composerWorkspace =
-    activeTask?.workspaceRoot ||
-    workbench.draftWorkspaceRoot ||
-    workspacePath ||
-    currentWorkspace;
-  const scopedWorkspaceGrant = workspaceGrantForRoot({
-    draftActive: newTaskDraftActive,
-    workspaceRoot: composerWorkspace,
-    grantRoot: workspaceGrantRoot,
-    grant: workspaceGrant,
-  });
+      (model) =>
+        model.selectionId === snapshot.account.selectedModelSelectionId,
+    )?.displayName || snapshot.account.selectedModelSelectionId;
+  const composerWorkspaceId =
+    activeTask?.workspaceId || workbench.draftWorkspaceId || currentWorkspaceId;
+  const composerWorkspace = snapshot.workspaces.find(
+    (workspace) => workspace.id === composerWorkspaceId,
+  );
 
   const refreshSnapshot = useCallback(() => {
     const current = connection.current;
@@ -293,15 +296,14 @@ export default function App() {
       return;
     dispatchWorkbench({
       type: "task.draft.opened",
-      workspaceRoot: currentWorkspace || workspacePath || null,
+      workspaceId: currentWorkspaceId,
     });
     window.requestAnimationFrame(() => composer.current?.focus());
   }, [
     activeTask,
-    currentWorkspace,
+    currentWorkspaceId,
     snapshot.account.readiness,
     workbench.draftOpen,
-    workspacePath,
   ]);
 
   function focusPendingRequest() {
@@ -418,7 +420,12 @@ export default function App() {
       const result = await invoke();
       if (!result.accepted) {
         await refreshSnapshot().catch(() => undefined);
-        setStatus({ id: "account.command_rejected" });
+        setStatus({
+          id:
+            result.errorCode === "generation_mismatch"
+              ? "account.options_updated"
+              : "account.command_rejected",
+        });
         return;
       }
       await refreshAfterCommit("account.updated", "operation.account");
@@ -466,51 +473,50 @@ export default function App() {
     workspaceBusyRef.current = true;
     setWorkspaceBusy(true);
     try {
-      const result = await client.chooseWorkspace();
-      if (result.selected) {
-        let draftMove: ReturnType<typeof newTaskDrafts.moveDraft> = "same";
-        if (
-          openDraft &&
-          newTaskDraftId &&
-          newTaskDraftId !== result.workspaceRoot
-        )
-          draftMove = newTaskDrafts.moveDraft(
-            newTaskDraftId,
-            result.workspaceRoot,
-          );
-        if (draftMove === "conflict") {
-          setStatus({ id: "workspace.draft_conflict" });
-          window.requestAnimationFrame(() => composer.current?.focus());
-          return null;
-        }
-        setWorkspacePath(result.workspaceRoot);
-        setWorkspaceGrant(result.grant);
-        setWorkspaceGrantRoot(result.workspaceRoot);
+      const outcome = await chooseWorkspaceWithDraft({
+        choose: () => client.chooseWorkspace(),
+        refresh: refreshSnapshot,
+        openDraft,
+        sourceDraftId: newTaskDraftId,
+        moveDraft: (sourceId, targetId) =>
+          newTaskDrafts.moveDraft(sourceId, targetId),
+      });
+      if (outcome.kind === "selected") {
+        const { result } = outcome;
         dispatchWorkbench(
           openDraft
             ? {
                 type: "task.draft.opened",
-                workspaceRoot: result.workspaceRoot,
+                workspaceId: result.workspaceId,
               }
             : {
                 type: "workspace.selected",
-                workspaceRoot: result.workspaceRoot,
+                workspaceId: result.workspaceId,
               },
         );
         setStatus({ id: "workspace.grant_confirmed" });
         if (openDraft)
           window.requestAnimationFrame(() => composer.current?.focus());
         return result;
-      } else {
-        setStatus({ id: "workspace.selection_cancelled" });
-        if (openDraft)
-          window.requestAnimationFrame(() => composer.current?.focus());
+      }
+      if (outcome.kind === "conflict") {
+        dispatchWorkbench({
+          type: "task.draft.opened",
+          workspaceId: outcome.workspaceId,
+        });
+        setStatus({ id: "workspace.draft_conflict" });
+        window.requestAnimationFrame(() => composer.current?.focus());
         return null;
       }
+      setStatus({ id: "workspace.selection_cancelled" });
+      if (openDraft)
+        window.requestAnimationFrame(() => composer.current?.focus());
+      return null;
     } catch (error) {
       setStatus({
         id: "workspace.selection_failed",
-        values: { error: errorText(error) },
+        values: { error: t("mutation.transport_failed") },
+        diagnostic: errorText(error),
       });
       if (openDraft)
         window.requestAnimationFrame(() => composer.current?.focus());
@@ -521,17 +527,82 @@ export default function App() {
     }
   }
 
+  async function selectWorkspaceById(
+    workspaceId: string,
+    taskId: string | null = null,
+  ) {
+    if (bridgeUnavailable || workspaceBusyRef.current) return;
+    workspaceBusyRef.current = true;
+    setWorkspaceBusy(true);
+    try {
+      const workspace = snapshot.workspaces.find(
+        (candidate) => candidate.id === workspaceId,
+      );
+      if (!workspace) {
+        setStatus({ id: "workspace.selection_unavailable" });
+        return;
+      }
+      const result = await client.selectWorkspace(workspaceId, workspace.epoch);
+      if (!result.accepted) {
+        await refreshSnapshot().catch(() => undefined);
+        setStatus({ id: mutationReasonMessageId(result.reason) });
+        return;
+      }
+      await refreshSnapshot();
+      dispatchWorkbench({ type: "workspace.selected", workspaceId });
+      if (taskId !== null) dispatchWorkbench({ type: "task.selected", taskId });
+    } catch (error) {
+      await refreshSnapshot().catch(() => undefined);
+      setStatus({
+        id: "workspace.selection_failed",
+        values: { error: t("mutation.transport_failed") },
+        diagnostic: errorText(error),
+      });
+    } finally {
+      workspaceBusyRef.current = false;
+      setWorkspaceBusy(false);
+    }
+  }
+
+  async function removeWorkspaceById(workspaceId: string) {
+    if (bridgeUnavailable || workspaceBusyRef.current) return;
+    workspaceBusyRef.current = true;
+    setWorkspaceBusy(true);
+    try {
+      const workspace = snapshot.workspaces.find(
+        (candidate) => candidate.id === workspaceId,
+      );
+      if (!workspace) {
+        setStatus({ id: "workspace.selection_unavailable" });
+        return;
+      }
+      const result = await client.removeWorkspace(workspaceId, workspace.epoch);
+      if (!result.accepted) {
+        await refreshSnapshot().catch(() => undefined);
+        setStatus({ id: mutationReasonMessageId(result.reason) });
+        return;
+      }
+      await refreshAfterCommit(
+        "workspace.removal_started",
+        "operation.workspace_remove",
+      );
+    } catch (error) {
+      await refreshSnapshot().catch(() => undefined);
+      setStatus({
+        id: "mutation.transport_failed",
+        diagnostic: errorText(error),
+      });
+    } finally {
+      workspaceBusyRef.current = false;
+      setWorkspaceBusy(false);
+    }
+  }
+
   function beginNewTask() {
     pendingTaskSelection.current = null;
-    const draftRoot = currentWorkspace || workspacePath || null;
-    if (draftRoot) setWorkspacePath(draftRoot);
-    if (workspaceGrantRoot !== draftRoot) {
-      setWorkspaceGrant("");
-      setWorkspaceGrantRoot(null);
-    }
     dispatchWorkbench({
       type: "task.draft.opened",
-      workspaceRoot: draftRoot,
+      workspaceId: currentWorkspaceId,
     });
     window.requestAnimationFrame(() => composer.current?.focus());
   }
@@ -543,11 +614,38 @@ export default function App() {
     let submittedDraftId = newTaskDraftId;
     const workspace = await resolveFirstSendWorkspace({
       taskId: existingTaskId,
-      workspaceGrant: scopedWorkspaceGrant,
+      workspace:
+        existingTaskId !== null ||
+        composerWorkspace?.authorization === "available"
+          ? composerWorkspace && composerWorkspaceId
+            ? {
+                workspaceId: composerWorkspaceId,
+                workspaceEpoch: composerWorkspace.epoch,
+              }
+            : null
+          : null,
       chooseWorkspace: async () => {
         const selected = await chooseWorkspace(true);
-        if (selected) submittedDraftId = selected.workspaceRoot;
-        return selected?.grant ?? null;
+        if (selected) submittedDraftId = selected.workspaceId;
+        if (!selected) return null;
+        try {
+          const latest = await client.fetchSnapshot();
+          const chosenWorkspace = latest.workspaces.find(
+            (candidate) => candidate.id === selected.workspaceId,
+          );
+          return chosenWorkspace
+            ? {
+                workspaceId: chosenWorkspace.id,
+                workspaceEpoch: chosenWorkspace.epoch,
+              }
+            : null;
+        } catch (error) {
+          setStatus({
+            id: "connection.refresh_failed",
+            diagnostic: errorText(error),
+          });
+          return null;
+        }
       },
     });
     if (workspace.kind === "cancelled") return;
@@ -560,11 +658,12 @@ export default function App() {
       const result = await submitTaskInstruction({
         client,
         taskId: existingTaskId,
-        workspaceGrant: workspace.grant,
+        workspaceId: workspace.workspaceId,
+        expectedWorkspaceEpoch: workspace.workspaceEpoch,
+        expectedExecutionGeneration: snapshot.account.executionGeneration,
+        expectedBindingEpoch: activeTask?.binding.epoch ?? null,
         instruction: submitted,
         onTaskCreated: (taskId) => {
-          setWorkspaceGrant("");
-          setWorkspaceGrantRoot(null);
           pendingTaskSelection.current = taskId;
           pendingTaskDraftRetention.current.add(taskId);
           taskDrafts.setDraft(taskId, submitted);
@@ -575,8 +674,6 @@ export default function App() {
         },
       });
       if (result.kind === "create_failed") {
-        setWorkspaceGrant("");
-        setWorkspaceGrantRoot(null);
         if (submittedDraftId)
           newTaskDrafts.setDraft(submittedDraftId, submitted);
         if (
@@ -586,8 +683,16 @@ export default function App() {
         await refreshSnapshot().catch(() => undefined);
         setStatus({
           id: "task.create_failed",
-          values: { error: errorText(result.error) },
+          values: { error: t("mutation.transport_failed") },
+          diagnostic: errorText(result.error),
         });
+        return;
+      }
+      if (result.kind === "create_rejected") {
+        if (submittedDraftId)
+          newTaskDrafts.setDraft(submittedDraftId, submitted);
+        await refreshSnapshot().catch(() => undefined);
+        setStatus({ id: mutationReasonMessageId(result.reason) });
         return;
       }
       if (result.kind === "run_failed") {
@@ -596,9 +701,16 @@ export default function App() {
           return;
         setStatus({
           id: "run.start_failed",
-          values: { error: errorText(result.error) },
+          values: { error: t("mutation.transport_failed") },
+          diagnostic: errorText(result.error),
         });
         await refreshSnapshot().catch(() => undefined);
+        return;
+      }
+      if (result.kind === "run_rejected") {
+        taskDrafts.setDraft(result.taskId, submitted);
+        await refreshSnapshot().catch(() => undefined);
+        setStatus({ id: mutationReasonMessageId(result.reason) });
         return;
       }
       taskDrafts.clearDraft(result.taskId);
@@ -762,18 +874,7 @@ export default function App() {
 
   function selectSearchResult(result: SearchResult) {
     pendingTaskSelection.current = null;
-    setWorkspacePath(result.workspaceRoot);
-    setWorkspaceGrant("");
-    setWorkspaceGrantRoot(null);
-    dispatchWorkbench({
-      type: "workspace.selected",
-      workspaceRoot: result.workspaceRoot,
-    });
-    if (result.taskId)
-      dispatchWorkbench({
-        type: "task.selected",
-        taskId: result.taskId,
-      });
+    void selectWorkspaceById(result.workspaceId, result.taskId);
     setSearchOpen(false);
     setSearchQuery("");
   }
@@ -875,10 +976,22 @@ export default function App() {
           void runAccountCommand(() => client.refreshAccountCatalog())
         }
         onSelectApiKey={(id) =>
-          void runAccountCommand(() => client.selectApiKey(id))
+          void runAccountCommand(() =>
+            client.selectApiKey(
+              id,
+              snapshot.account.catalogGeneration,
+              snapshot.account.executionGeneration,
+            ),
+          )
         }
         onSelectModel={(id) =>
-          void runAccountCommand(() => client.selectModel(id))
+          void runAccountCommand(() =>
+            client.selectModel(
+              id,
+              snapshot.account.catalogGeneration,
+              snapshot.account.executionGeneration,
+            ),
+          )
         }
       />
     );
@@ -902,7 +1015,11 @@ export default function App() {
   return (
     <AppShell
       taskTitle={activeTaskTitle}
-      workspaceLabel={currentWorkspace || workspacePath || t("workspace.none")}
+      workspaceLabel={
+        currentWorkspace?.displayName ||
+        currentWorkspace?.canonicalRoot ||
+        t("workspace.none")
+      }
       status={t(status.id, status.values)}
       left={
         <>
@@ -928,10 +1045,22 @@ export default function App() {
                 void runAccountCommand(() => client.refreshAccountCatalog())
               }
               onSelectApiKey={(id) =>
-                void runAccountCommand(() => client.selectApiKey(id))
+                void runAccountCommand(() =>
+                  client.selectApiKey(
+                    id,
+                    snapshot.account.catalogGeneration,
+                    snapshot.account.executionGeneration,
+                  ),
+                )
               }
               onSelectModel={(id) =>
-                void runAccountCommand(() => client.selectModel(id))
+                void runAccountCommand(() =>
+                  client.selectModel(
+                    id,
+                    snapshot.account.catalogGeneration,
+                    snapshot.account.executionGeneration,
+                  ),
+                )
               }
               onLogout={() => void runAccountCommand(() => client.logout())}
             />
@@ -939,34 +1068,26 @@ export default function App() {
 
           <WorkspaceNavigation
             summaries={summaries}
-            currentWorkspace={currentWorkspace}
+            currentWorkspaceId={currentWorkspaceId}
             tasks={currentTasks}
             activeTaskId={activeTask?.id ?? null}
-            selectedPath={workspacePath || currentWorkspace || ""}
-            grantReady={Boolean(
-              workspacePath &&
-              workspaceGrant &&
-              workspaceGrantRoot === workspacePath,
-            )}
             showArchived={showArchived}
             disabled={bridgeUnavailable || workspaceBusy}
             onSearch={() => setSearchOpen(true)}
             onChooseWorkspace={() => void chooseWorkspace(false)}
-            onSelectWorkspace={(root) => {
+            onRemoveWorkspace={(workspaceId) =>
+              void removeWorkspaceById(workspaceId)
+            }
+            onRetryRemoval={(workspaceId) =>
+              void removeWorkspaceById(workspaceId)
+            }
+            onSelectWorkspace={(workspaceId) => {
               pendingTaskSelection.current = null;
-              setWorkspacePath(root);
-              setWorkspaceGrant("");
-              setWorkspaceGrantRoot(null);
-              dispatchWorkbench({
-                type: "workspace.selected",
-                workspaceRoot: root,
-              });
+              void selectWorkspaceById(workspaceId);
             }}
             onCreateTask={beginNewTask}
             onSelectTask={(taskId) => {
               pendingTaskSelection.current = null;
-              setWorkspaceGrant("");
-              setWorkspaceGrantRoot(null);
               dispatchWorkbench({ type: "task.selected", taskId });
             }}
             onToggleArchived={() => setShowArchived((shown) => !shown)}
@@ -1015,10 +1136,7 @@ export default function App() {
       <header className="task-header">
         <div className="min-w-0">
           <p className="task-header-workspace">
-            {activeTask?.workspaceRoot ||
-              workbench.draftWorkspaceRoot ||
-              workspacePath ||
-              t("workspace.none")}
+            {composerWorkspace?.canonicalRoot || t("workspace.none")}
           </p>
           {activeTask && editingTitle ? (
             <form
@@ -1259,17 +1377,24 @@ export default function App() {
         runInFlight={Boolean(taskCanCompose && runInFlight)}
         accessRequired={Boolean(
           newTaskDraftActive &&
-          workbench.draftWorkspaceRoot &&
-          !scopedWorkspaceGrant,
+          composerWorkspace &&
+          composerWorkspace.authorization !== "available",
         )}
         workspaceMissing={Boolean(newTaskDraftActive && !composerWorkspace)}
         workspaceLabel={
           composerWorkspace
-            ? workspaceLabel(composerWorkspace)
+            ? composerWorkspace.displayName ||
+              workspaceLabel(composerWorkspace.canonicalRoot)
             : t("workspace.none")
         }
-        workspaceTitle={composerWorkspace || t("workspace.none")}
-        modelLabel={newTaskDraftActive ? selectedModelLabel : null}
+        workspaceTitle={composerWorkspace?.canonicalRoot || t("workspace.none")}
+        modelLabel={
+          newTaskDraftActive
+            ? selectedModelLabel
+            : activeTask?.binding.modelDisplayName ||
+              activeTask?.binding.modelSelectionId ||
+              null
+        }
         actionDisabled={bridgeUnavailable || workspaceBusy}
         onPromptChange={updatePrompt}
         onSubmit={() => void submitRun()}
