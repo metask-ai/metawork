@@ -571,7 +571,7 @@ test("Workbench owns Task lifecycle, continuation, and canonical redaction", () 
   const workbench = read("src/workbench/projection.zig");
   const taskRecord = workbench.slice(
     workbench.indexOf("const TaskView = struct"),
-    workbench.indexOf("pub const RunRef = struct"),
+    workbench.indexOf("fn FixedText"),
   );
   assert.match(taskRecord, /lifecycle: TaskLifecycle/);
   assert.match(taskRecord, /continuation: ContinuationCapability/);
@@ -593,6 +593,8 @@ test("Workbench owns Task lifecycle, continuation, and canonical redaction", () 
   assert.match(workbench, /account_contract\.validateExecutionConfig\(input\)/);
   assert.match(workbench, /redaction_secret = execution\.api_key/);
   assert.match(workbench, /releaseQuiescentTaskExecutions/);
+  assert.match(workbench, /fn releaseTaskExecutionNoFail/);
+  assert.doesNotMatch(workbench, /pub const RunRef|acquireRunRef/);
 
   const agent = read("src/agent/session.zig");
   assert.match(agent, /pub const SessionRoute = struct/);

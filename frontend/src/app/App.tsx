@@ -117,7 +117,7 @@ function connectionStatus(status: WorkbenchConnectionStatus): ShellStatus {
       },
     );
   return attentionStatus(
-    "connection.failed",
+    "connection.contract_failed",
     { scope: "connection" },
     {
       diagnostic: status.diagnostic,
@@ -216,6 +216,10 @@ export default function App() {
     ? newTaskDrafts.updateDraft
     : taskDrafts.updateDraft;
   const bridgeUnavailable = viewSyncFailed || !bridgeReady;
+  const accountGateRequired = requiresAccountGate(
+    workbenchEntered,
+    snapshot.account,
+  );
   const currentTaskScope = activeTask ? `task:${activeTask.id}` : "new-task";
   const taskMutationDisabled =
     bridgeUnavailable || currentTaskScope in taskPending;
@@ -329,19 +333,21 @@ export default function App() {
 
   useEffect(() => {
     const openSearch = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
-        event.preventDefault();
+      if (!event.metaKey && !event.ctrlKey) return;
+      const key = event.key.toLowerCase();
+      if (key !== "k" && key !== "n") return;
+      event.preventDefault();
+      if (accountGateRequired || bridgeUnavailable) return;
+      if (key === "k") {
         setSearchOpen(true);
-      }
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "n") {
-        event.preventDefault();
+      } else {
         setRoute("workbench");
         beginNewTask();
       }
     };
     window.addEventListener("keydown", openSearch);
     return () => window.removeEventListener("keydown", openSearch);
-  }, [currentWorkspaceId]);
+  }, [accountGateRequired, bridgeUnavailable, currentWorkspaceId]);
 
   useEffect(() => {
     setEditingTitle(false);
@@ -433,6 +439,13 @@ export default function App() {
 
   function closeTaskMenuAndRestoreFocus() {
     setTaskMenuOpen(false);
+    window.requestAnimationFrame(() =>
+      taskMenu.current?.querySelector<HTMLButtonElement>("button")?.focus(),
+    );
+  }
+
+  function closeDeleteConfirmation() {
+    setConfirmDelete(false);
     window.requestAnimationFrame(() =>
       taskMenu.current?.querySelector<HTMLButtonElement>("button")?.focus(),
     );
@@ -1260,11 +1273,9 @@ export default function App() {
     return true;
   }
 
-  const accountGateRequired = requiresAccountGate(
-    workbenchEntered,
-    snapshot.account,
-  );
   const connectionShellStatus = statuses.connection;
+  const connectionRetryable =
+    connectionShellStatus?.id !== "connection.contract_failed";
   const accountGateStatus = selectAccountGateStatus(statuses);
   if (accountGateRequired)
     return (
@@ -1273,6 +1284,7 @@ export default function App() {
         disabled={bridgeUnavailable || accountBusy}
         cancelDisabled={viewSyncFailed || !bridgeReady || accountCancelBusy}
         connectionFailed={viewSyncFailed}
+        connectionRetryable={connectionRetryable}
         connectionDiagnostic={connectionShellStatus?.diagnostic}
         reconnecting={connectionBusy}
         notice={
@@ -1685,6 +1697,12 @@ export default function App() {
               role="alertdialog"
               aria-labelledby="task-delete-title"
               aria-describedby="task-delete-description"
+              onKeyDown={(event) => {
+                if (event.key !== "Escape") return;
+                event.preventDefault();
+                event.stopPropagation();
+                closeDeleteConfirmation();
+              }}
             >
               <div>
                 <strong id="task-delete-title">
@@ -1697,7 +1715,7 @@ export default function App() {
               <button
                 autoFocus
                 className="secondary-button focus-ring"
-                onClick={() => setConfirmDelete(false)}
+                onClick={closeDeleteConfirmation}
               >
                 {t("common.cancel")}
               </button>
@@ -1713,17 +1731,40 @@ export default function App() {
 
           {viewSyncFailed && (
             <section className="sync-failure task-sync-failure" role="alert">
-              <h3>{t("connection.failed")}</h3>
-              <p>{t("connection.failed_help")}</p>
-              <button
-                className="secondary-button focus-ring"
-                disabled={connectionBusy}
-                onClick={() => void retryViewSynchronization()}
-              >
-                {connectionBusy
-                  ? t("connection.retrying")
-                  : t("connection.retry")}
-              </button>
+              <h3>
+                {t(
+                  connectionRetryable
+                    ? "connection.failed"
+                    : "connection.contract_failed",
+                )}
+              </h3>
+              <p>
+                {t(
+                  connectionRetryable
+                    ? "connection.failed_help"
+                    : "connection.contract_failed_help",
+                )}
+              </p>
+              {connectionRetryable ? (
+                <button
+                  className="secondary-button focus-ring"
+                  disabled={connectionBusy}
+                  onClick={() => void retryViewSynchronization()}
+                >
+                  {connectionBusy
+                    ? t("connection.retrying")
+                    : t("connection.retry")}
+                </button>
+              ) : (
+                <button
+                  className="secondary-button focus-ring"
+                  onClick={() =>
+                    void client.controlWindow("close").catch(() => undefined)
+                  }
+                >
+                  {t("window.close")}
+                </button>
+              )}
               {connectionShellStatus?.diagnostic && (
                 <details>
                   <summary>{t("connection.details")}</summary>

@@ -1,4 +1,5 @@
 import { commands } from "../commands.ts";
+import { RendererBridgeContractError } from "../contract-error.ts";
 import type { WorkbenchSnapshot } from "../contracts.ts";
 import { decodeWorkbenchSnapshot } from "../decode-contracts.ts";
 
@@ -31,32 +32,36 @@ type SnapshotChunk = {
 const maxSnapshotBytes = 8 * 1024 * 1024;
 const maxSnapshotChunkBytes = 256 * 1024;
 
+function invalidSnapshot(diagnostic: string): never {
+  throw new RendererBridgeContractError("invalid_response", diagnostic);
+}
+
 function positiveInteger(value: unknown, name: string) {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0)
-    throw new Error(`Invalid Workbench snapshot ${name}`);
+    invalidSnapshot(`Invalid Workbench snapshot ${name}`);
   return value;
 }
 
 function nonNegativeInteger(value: unknown, name: string) {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)
-    throw new Error(`Invalid Workbench snapshot ${name}`);
+    invalidSnapshot(`Invalid Workbench snapshot ${name}`);
   return value;
 }
 
 function descriptor(value: unknown): SnapshotDescriptor {
   if (typeof value !== "object" || value === null || Array.isArray(value))
-    throw new Error("Invalid Workbench snapshot descriptor");
+    invalidSnapshot("Invalid Workbench snapshot descriptor");
   const item = value as Record<string, unknown>;
   if (
     Object.keys(item).sort().join(",") !==
     ["bytes", "chunkBytes", "snapshotId"].sort().join(",")
   )
-    throw new Error("Invalid Workbench snapshot descriptor fields");
+    invalidSnapshot("Invalid Workbench snapshot descriptor fields");
   if (
     typeof item.snapshotId !== "string" ||
     !/^[1-9][0-9]*$/.test(item.snapshotId)
   )
-    throw new Error("Invalid Workbench snapshot identity");
+    invalidSnapshot("Invalid Workbench snapshot identity");
   return {
     snapshotId: item.snapshotId,
     bytes: positiveInteger(item.bytes, "size"),
@@ -66,15 +71,15 @@ function descriptor(value: unknown): SnapshotDescriptor {
 
 function chunk(value: unknown): SnapshotChunk {
   if (typeof value !== "object" || value === null || Array.isArray(value))
-    throw new Error("Invalid Workbench snapshot chunk");
+    invalidSnapshot("Invalid Workbench snapshot chunk");
   const item = value as Record<string, unknown>;
   if (
     Object.keys(item).sort().join(",") !==
     ["snapshotId", "offset", "bytes", "data"].sort().join(",")
   )
-    throw new Error("Invalid Workbench snapshot chunk fields");
+    invalidSnapshot("Invalid Workbench snapshot chunk fields");
   if (typeof item.snapshotId !== "string" || typeof item.data !== "string")
-    throw new Error("Invalid Workbench snapshot chunk value");
+    invalidSnapshot("Invalid Workbench snapshot chunk value");
   return {
     snapshotId: item.snapshotId,
     offset: nonNegativeInteger(item.offset, "chunk offset"),
@@ -88,7 +93,7 @@ function decodeBase64(value: string) {
   try {
     binary = atob(value);
   } catch {
-    throw new Error("Invalid Workbench snapshot chunk encoding");
+    invalidSnapshot("Invalid Workbench snapshot chunk encoding");
   }
   const bytes = new Uint8Array(binary.length);
   for (let index = 0; index < binary.length; index += 1)
@@ -104,7 +109,7 @@ export async function fetchWorkbenchSnapshot(
     current.bytes > maxSnapshotBytes ||
     current.chunkBytes > maxSnapshotChunkBytes
   )
-    throw new Error("Workbench snapshot exceeds the negotiated bounds");
+    invalidSnapshot("Workbench snapshot exceeds the negotiated bounds");
 
   const assembled = new Uint8Array(current.bytes);
   for (let offset = 0; offset < current.bytes; offset += current.chunkBytes) {
@@ -120,10 +125,10 @@ export async function fetchWorkbenchSnapshot(
       next.offset !== offset ||
       next.bytes !== expectedBytes
     )
-      throw new Error("Workbench snapshot chunk identity mismatch");
+      invalidSnapshot("Workbench snapshot chunk identity mismatch");
     const decoded = decodeBase64(next.data);
     if (decoded.length !== expectedBytes)
-      throw new Error("Workbench snapshot chunk length mismatch");
+      invalidSnapshot("Workbench snapshot chunk length mismatch");
     assembled.set(decoded, offset);
   }
 
@@ -131,13 +136,18 @@ export async function fetchWorkbenchSnapshot(
   try {
     text = new TextDecoder("utf-8", { fatal: true }).decode(assembled);
   } catch {
-    throw new Error("Workbench snapshot is not valid UTF-8");
+    invalidSnapshot("Workbench snapshot is not valid UTF-8");
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch {
-    throw new Error("Workbench snapshot is not valid JSON");
+    invalidSnapshot("Workbench snapshot is not valid JSON");
   }
-  return decodeWorkbenchSnapshot(parsed);
+  try {
+    return decodeWorkbenchSnapshot(parsed);
+  } catch (error) {
+    if (error instanceof RendererBridgeContractError) throw error;
+    invalidSnapshot(error instanceof Error ? error.message : String(error));
+  }
 }

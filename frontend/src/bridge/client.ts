@@ -30,7 +30,13 @@ import {
   decodeWorkspaceMutationResult,
   decodeWorkspaceChoice,
 } from "./decode-contracts.ts";
+import { RendererBridgeContractError } from "./contract-error.ts";
 import { fetchWorkbenchSnapshot } from "./snapshot/snapshot-client.ts";
+
+export {
+  RendererBridgeContractError,
+  type RendererBridgeContractErrorCode,
+} from "./contract-error.ts";
 
 export type NativeBridge = NonNullable<typeof window.zero>;
 
@@ -45,19 +51,6 @@ export class BridgeCommandTimeoutError extends Error {
     this.name = "BridgeCommandTimeoutError";
     this.command = command;
     this.timeoutMs = timeoutMs;
-  }
-}
-
-export type RendererBridgeContractErrorCode =
-  "identity_mismatch" | "revision_mismatch" | "invalid_response";
-
-export class RendererBridgeContractError extends Error {
-  readonly code: RendererBridgeContractErrorCode;
-
-  constructor(code: RendererBridgeContractErrorCode, diagnostic: string) {
-    super(`Renderer Bridge contract failed: ${diagnostic}`);
-    this.name = "RendererBridgeContractError";
-    this.code = code;
   }
 }
 

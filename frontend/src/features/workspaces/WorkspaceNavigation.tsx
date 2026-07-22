@@ -147,7 +147,7 @@ export function WorkspaceNavigation({
             aria-expanded={switcherOpen}
             aria-haspopup="menu"
             aria-controls="workspace-switcher-menu"
-            disabled={summaries.length === 0}
+            disabled={disabled || summaries.length === 0}
             onClick={() => setSwitcherOpen((open) => !open)}
           >
             <Icon name="workspace" />
@@ -203,7 +203,7 @@ export function WorkspaceNavigation({
                   className="workspace-option focus-ring"
                   role="menuitemradio"
                   aria-checked={workspace.id === currentWorkspaceId}
-                  disabled={workspace.authorization === "removing"}
+                  disabled={disabled || workspace.authorization === "removing"}
                   onClick={() => {
                     onSelectWorkspace(workspace.id);
                     closeSwitcher(true);

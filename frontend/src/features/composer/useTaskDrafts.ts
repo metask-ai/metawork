@@ -53,8 +53,8 @@ function useDrafts(
   const moveDraft = useCallback(
     (from: string, to: string) => {
       if (from === to) return "same" as const;
-      const source = drafts[from] ?? readDraft(from);
-      const target = drafts[to] ?? readDraft(to);
+      const source = readDraft(from);
+      const target = readDraft(to);
       const decision = newTaskDraftMoveDecision(source, target);
       if (decision === "conflict") return decision;
       setDrafts((current) => {
@@ -67,7 +67,7 @@ function useDrafts(
       if (decision === "move") writeDraft(to, source);
       return decision;
     },
-    [clearStoredDraft, drafts, readDraft, writeDraft],
+    [clearStoredDraft, readDraft, writeDraft],
   );
 
   const pruneDraftCache = useCallback((validIds: ReadonlySet<string>) => {

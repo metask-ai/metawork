@@ -216,6 +216,7 @@ function renderWorkspaceNavigation(
   lastRemovalFailure,
   authorization = "available",
   includeWorkspace = true,
+  disabled = false,
 ) {
   return renderToStaticMarkup(
     createElement(
@@ -247,7 +248,7 @@ function renderWorkspaceNavigation(
         tasks: [],
         activeTaskId: null,
         showArchived: false,
-        disabled: false,
+        disabled,
         onChooseWorkspace() {},
         onRemoveWorkspace() {},
         onRetryRemoval() {},
@@ -413,6 +414,59 @@ test("Workspace removal state remains explicit without owning the global New tas
   assert.match(removing, /Removing this workspace/);
   assert.match(removing, /can’t start or continue tasks/);
   assert.doesNotMatch(removing, />New task</);
+});
+
+test("Workspace busy state disables real Workspace actions instead of swallowing clicks", async () => {
+  const busy = renderWorkspaceNavigation(null, "available", true, true);
+  assert.match(tag(busy, "workspace-picker") ?? "", /disabled/);
+
+  const source = await readFile(
+    join(
+      process.cwd(),
+      "frontend/src/features/workspaces/WorkspaceNavigation.tsx",
+    ),
+    "utf8",
+  );
+  const option = source.slice(source.indexOf('className="workspace-option'));
+  assert.match(
+    option,
+    /disabled=\{disabled \|\| workspace\.authorization === "removing"\}/,
+  );
+});
+
+test("global shortcuts obey Account and Bridge gates", async () => {
+  const source = await readFile(
+    join(process.cwd(), "frontend/src/app/App.tsx"),
+    "utf8",
+  );
+  assert.match(
+    source,
+    /if \(accountGateRequired \|\| bridgeUnavailable\) return;[\s\S]*setSearchOpen\(true\)[\s\S]*beginNewTask\(\)/,
+  );
+});
+
+test("Task deletion confirmation handles Escape and restores its opener", async () => {
+  const source = await readFile(
+    join(process.cwd(), "frontend/src/app/App.tsx"),
+    "utf8",
+  );
+  const confirmation = source.slice(
+    source.indexOf('className="delete-confirmation"'),
+    source.indexOf("{viewSyncFailed &&"),
+  );
+  assert.match(confirmation, /role="alertdialog"/);
+  assert.match(confirmation, /event\.key !== "Escape"/);
+  assert.match(confirmation, /closeDeleteConfirmation\(\)/);
+});
+
+test("draft moves read authoritative storage instead of a render-time closure", async () => {
+  const source = await readFile(
+    join(process.cwd(), "frontend/src/features/composer/useTaskDrafts.ts"),
+    "utf8",
+  );
+  assert.match(source, /const source = readDraft\(from\)/);
+  assert.match(source, /const target = readDraft\(to\)/);
+  assert.doesNotMatch(source, /drafts\[from\]|drafts\[to\]/);
 });
 
 test("removing the final empty Workspace leaves a stable focus destination", () => {

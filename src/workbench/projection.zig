@@ -411,7 +411,7 @@ const TaskView = struct {
     archived: bool = false,
     runs: []?RunRecord,
     next_run_generation: u64 = 0,
-    run_references: std.atomic.Value(usize) = .init(0),
+    worker_references: std.atomic.Value(usize) = .init(0),
     delete_pending: bool = false,
     ui_history: []?UiRecord,
     ui_history_count: usize = 0,
@@ -530,37 +530,6 @@ const WorkspaceView = struct {
     last_removal_failure: WorkspaceRemovalFailure = .none,
     visible: bool = true,
     recent_order: u64,
-};
-
-/// Stable worker reference to an admitted Run record. This value is a lease:
-/// it must not be copied, and `release` must be called exactly once.
-pub const RunRef = struct {
-    workbench: *Workbench,
-    task: *TaskView,
-    record: *RunRecord,
-    task_id: u64,
-    run_id: u64,
-    generation: u64,
-    execution_generation: u64,
-    released: bool = false,
-
-    pub fn isCurrent(self: *const RunRef) bool {
-        return !self.released and self.task.id == self.task_id and
-            self.record.id == self.run_id and self.record.generation == self.generation and
-            self.record.execution_generation == self.execution_generation and
-            self.task.execution_generation == self.execution_generation;
-    }
-
-    pub fn release(self: *RunRef) void {
-        std.debug.assert(!self.released);
-        std.debug.assert(self.isCurrent());
-        self.released = true;
-        const references = &self.task.run_references;
-        const workbench = self.workbench;
-        const previous = references.fetchSub(1, .release);
-        std.debug.assert(previous != 0);
-        if (previous == 1) _ = workbench.change_notifier.notify();
-    }
 };
 
 fn FixedText(comptime capacity: usize) type {
@@ -1469,7 +1438,7 @@ pub const Workbench = struct {
         run.workbench = self;
         run.task = view;
         run.session = session;
-        _ = view.run_references.fetchAdd(1, .acq_rel);
+        _ = view.worker_references.fetchAdd(1, .acq_rel);
         run.worker_reference_held.store(true, .release);
         self.executor.enqueue(.{
             .context = run,
@@ -1511,22 +1480,6 @@ pub const Workbench = struct {
             .generation = run.execution_generation,
             .provider = run.execution_provider,
             .model = run.execution_model,
-        };
-    }
-
-    pub fn acquireRunRef(self: *Workbench, task_id: u64, run_id: u64) Error!RunRef {
-        const task = self.findTask(task_id) orelse return error.UnknownTask;
-        if (task.delete_pending) return error.UnknownTask;
-        const record = findRun(task.runs, run_id) orelse return error.NoSuchRun;
-        _ = task.run_references.fetchAdd(1, .acq_rel);
-        return .{
-            .workbench = self,
-            .task = task,
-            .record = record,
-            .task_id = task_id,
-            .run_id = run_id,
-            .generation = record.generation,
-            .execution_generation = record.execution_generation,
         };
     }
 
@@ -1708,7 +1661,7 @@ pub const Workbench = struct {
         // normally implied by close publication in `syncLifecycle`; keep the
         // explicit guard here because deletion is the destructive boundary.
         if (hasUnfinalizedTerminalEvents(view)) return error.TaskBusy;
-        if (view.run_references.load(.acquire) != 0) {
+        if (view.worker_references.load(.acquire) != 0) {
             if (!view.delete_pending) {
                 view.delete_pending = true;
                 self.bumpRevision();
@@ -1734,7 +1687,7 @@ pub const Workbench = struct {
             const view = &(entry.* orelse continue);
             if (view.delete_pending and view.lifecycle == .closed and view.close_thread == null and
                 view.session == null and !hasUnfinalizedTerminalEvents(view) and
-                view.run_references.load(.acquire) == 0)
+                view.worker_references.load(.acquire) == 0)
             {
                 self.deinitTaskView(view);
                 entry.* = null;
@@ -2318,7 +2271,7 @@ pub const Workbench = struct {
                 task.session != null or
                 task.closing_session != null or
                 task.close_thread != null or
-                task.run_references.load(.acquire) != 0 or
+                task.worker_references.load(.acquire) != 0 or
                 hasNonTerminalRun(task))
                 return false;
         }
@@ -2331,18 +2284,27 @@ pub const Workbench = struct {
             if (task.lifecycle != .closed or task.execution == null or
                 task.session != null or task.closing_session != null or
                 task.close_thread != null or
-                task.run_references.load(.acquire) != 0 or
+                task.worker_references.load(.acquire) != 0 or
                 hasNonTerminalRun(task))
                 continue;
-            const credential = task.execution.?.input().api_key;
-            self.redactAllProductProjectionsNoFail(credential);
-            for (task.runs) |*run_entry| {
-                const run = &(run_entry.* orelse continue);
-                run.redaction_secret = &.{};
-            }
-            task.execution.?.deinit();
-            task.execution = null;
+            self.releaseTaskExecutionNoFail(task);
         }
+    }
+
+    /// Product projections may contain a credential that became known only
+    /// after those facts were recorded. Every Task-owned secret release must
+    /// pass through this function so the final live copy scrubs all retained
+    /// projections before secure-zero makes the credential unavailable.
+    fn releaseTaskExecutionNoFail(self: *Workbench, task: *TaskView) void {
+        const execution = if (task.execution) |*value| value else return;
+        const credential = execution.input().api_key;
+        self.redactAllProductProjectionsNoFail(credential);
+        for (task.runs) |*run_entry| {
+            const run = &(run_entry.* orelse continue);
+            run.redaction_secret = &.{};
+        }
+        execution.deinit();
+        task.execution = null;
     }
 
     fn upsertWorkspace(
@@ -2530,7 +2492,7 @@ pub const Workbench = struct {
                 }
                 if (task.session != null or task.closing_session != null or
                     task.close_thread != null or
-                    task.run_references.load(.acquire) != 0 or
+                    task.worker_references.load(.acquire) != 0 or
                     hasNonTerminalRun(task))
                 {
                     pending = true;
@@ -2759,7 +2721,8 @@ pub const Workbench = struct {
     }
 
     fn deinitTaskView(self: *Workbench, task: *TaskView) void {
-        std.debug.assert(task.run_references.load(.acquire) == 0);
+        std.debug.assert(task.worker_references.load(.acquire) == 0);
+        self.releaseTaskExecutionNoFail(task);
         for (task.runs) |*run_entry| {
             const run = &(run_entry.* orelse continue);
             self.deinitRunRecord(run);
@@ -2777,7 +2740,6 @@ pub const Workbench = struct {
         self.freeTracked(task.binding_model_display_name);
         self.freeTracked(task.workspace_root);
         self.freeTracked(task.title);
-        if (task.execution) |*execution| execution.deinit();
         task.* = undefined;
     }
 
@@ -3450,7 +3412,7 @@ fn cancelPreparedRunOrPanic(
 
 fn releaseWorkerReference(run: *RunRecord) void {
     std.debug.assert(run.worker_reference_held.swap(false, .acq_rel));
-    const references = &run.task.run_references;
+    const references = &run.task.worker_references;
     const previous = references.fetchSub(1, .release);
     std.debug.assert(previous != 0);
 }
@@ -4451,7 +4413,7 @@ test "Workbench snapshot serializer matches the Renderer contract fixture" {
     );
 }
 
-test "revision two mutation admission rejects stale execution and binding facts" {
+test "mutation admission rejects stale execution and binding facts" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
 
@@ -5299,19 +5261,14 @@ test "Renderer transport failures never own Agent Run termination" {
     }
 }
 
-test "delete waits for RunRef quiescence and stale generations fail validation" {
-    const Harness = struct {
-        fn wake(context: ?*anyopaque) bool {
-            const count: *usize = @ptrCast(@alignCast(context.?));
-            count.* += 1;
-            return true;
-        }
-    };
+test "Task deletion scrubs retained projections before releasing its credential" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
-    var wake_count: usize = 0;
-    workbench.change_notifier = .{ .context = &wake_count, .wake = Harness.wake };
     const task = &workbench.tasks[0].?;
+    const workspace = &workbench.workspaces[0].?;
+    @memcpy(workspace.projected_root_storage[0.."SECRET-KEY".len], "SECRET-KEY");
+    workspace.projected_root_len = "SECRET-KEY".len;
+    workspace.projection_redacted = false;
     task.lifecycle = .closed;
     task.continuation = .{ .unavailable = .closed };
     task.active_run_id = 0;
@@ -5326,22 +5283,16 @@ test "delete waits for RunRef quiescence and stale generations fail validation" 
     );
     finalizeTestTerminalEvents(&workbench);
 
-    var run_ref = try workbench.acquireRunRef(3, 7);
-    try std.testing.expect(run_ref.isCurrent());
-    run_ref.record.generation += 1;
-    try std.testing.expect(!run_ref.isCurrent());
-    run_ref.record.generation = run_ref.generation;
-    run_ref.record.execution_generation += 1;
-    try std.testing.expect(!run_ref.isCurrent());
-    run_ref.record.execution_generation = run_ref.execution_generation;
-
     try workbench.deleteTask(3);
-    try std.testing.expect(task.delete_pending);
-    try std.testing.expect(workbench.tasks[0] != null);
-    run_ref.release();
-    try std.testing.expectEqual(@as(usize, 1), wake_count);
-    workbench.syncLifecycle();
     try std.testing.expect(workbench.tasks[0] == null);
+    try std.testing.expect(workspace.projection_redacted);
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            workspace.projected_root_storage[0..workspace.projected_root_len],
+            "SECRET-KEY",
+        ) == null,
+    );
 }
 
 test "Workbench projection preserves text bytes with bounded geometric growth" {

@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { fetchWorkbenchSnapshot } from "../frontend/src/bridge/snapshot/snapshot-client.ts";
+import { RendererBridgeContractError } from "../frontend/src/bridge/contract-error.ts";
 
 const snapshotCommand = "metawork.workbench.snapshot";
 const chunkCommand = "metawork.workbench.snapshot.chunk";
@@ -53,4 +54,24 @@ test("Workbench snapshot assembly rejects a stale chunk", async () => {
         };
 
   await assert.rejects(fetchWorkbenchSnapshot(invoke), /identity mismatch/);
+});
+
+test("a malformed snapshot is a typed terminal contract failure", async () => {
+  const source = Buffer.from('{"revision":"1"}');
+  const invoke = async (command, payload) =>
+    command === snapshotCommand
+      ? { snapshotId: "3", bytes: source.length, chunkBytes: source.length }
+      : {
+          snapshotId: payload.snapshotId,
+          offset: 0,
+          bytes: source.length,
+          data: encoded(source),
+        };
+
+  await assert.rejects(
+    fetchWorkbenchSnapshot(invoke),
+    (error) =>
+      error instanceof RendererBridgeContractError &&
+      error.code === "invalid_response",
+  );
 });

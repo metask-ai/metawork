@@ -15,6 +15,7 @@ type Props = {
   disabled: boolean;
   cancelDisabled: boolean;
   connectionFailed: boolean;
+  connectionRetryable: boolean;
   connectionDiagnostic?: string;
   reconnecting: boolean;
   notice: string;
@@ -35,6 +36,7 @@ export function AccountGate({
   disabled,
   cancelDisabled,
   connectionFailed,
+  connectionRetryable,
   connectionDiagnostic,
   reconnecting,
   notice,
@@ -142,7 +144,11 @@ export function AccountGate({
           <p className="account-gate-eyebrow">{t("account.gate.eyebrow")}</p>
           <h1 id="account-gate-title">
             {connectionFailed
-              ? t("connection.failed")
+              ? t(
+                  connectionRetryable
+                    ? "connection.failed"
+                    : "connection.contract_failed",
+                )
               : t(`account.readiness.${account.readiness}.title`)}
           </h1>
           <p
@@ -150,7 +156,13 @@ export function AccountGate({
             aria-live={hasError || connectionFailed ? "assertive" : "polite"}
             role={hasError || connectionFailed ? "alert" : "status"}
           >
-            {connectionFailed ? t("connection.failed_help") : body}
+            {connectionFailed
+              ? t(
+                  connectionRetryable
+                    ? "connection.failed_help"
+                    : "connection.contract_failed_help",
+                )
+              : body}
           </p>
 
           {!connectionFailed && account.displayName && (
@@ -206,7 +218,7 @@ export function AccountGate({
           )}
 
           <div className="account-gate-actions">
-            {connectionFailed ? (
+            {connectionFailed && connectionRetryable ? (
               <button
                 autoFocus
                 className="primary-button focus-ring"
@@ -216,6 +228,14 @@ export function AccountGate({
                 {reconnecting
                   ? t("connection.retrying")
                   : t("connection.retry")}
+              </button>
+            ) : connectionFailed ? (
+              <button
+                autoFocus
+                className="primary-button focus-ring"
+                onClick={() => onWindowControl("close")}
+              >
+                {t("window.close")}
               </button>
             ) : (
               <>

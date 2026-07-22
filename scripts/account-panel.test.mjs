@@ -85,6 +85,7 @@ function renderGate(account) {
       disabled: false,
       cancelDisabled: false,
       connectionFailed: false,
+      connectionRetryable: true,
       reconnecting: false,
       notice: "Workbench connected.",
       ...callbacks,
@@ -99,6 +100,7 @@ function renderGateWith(account, props) {
       disabled: false,
       cancelDisabled: false,
       connectionFailed: false,
+      connectionRetryable: true,
       reconnecting: false,
       notice: "Workbench connected.",
       ...callbacks,
@@ -403,4 +405,28 @@ test("cold connection failure exposes only reconnect and technical details", () 
   assert.match(markup, />Reconnect</);
   assert.match(markup, /revision mismatch/);
   assert.doesNotMatch(markup, />Sign in with Metask|Workspace|Task activity/);
+});
+
+test("stale application components expose terminal recovery instead of reconnect", () => {
+  const markup = renderGateWith(
+    {
+      ...signedOut,
+      sessionState: "restoring",
+      readiness: "checking",
+      primaryAction: "none",
+    },
+    {
+      connectionFailed: true,
+      connectionRetryable: false,
+      connectionDiagnostic: "snapshot contract mismatch",
+    },
+  );
+  assert.match(markup, /MetaWork components do not match/);
+  assert.match(
+    markup,
+    /rebuild or reinstall the matching application components/,
+  );
+  assert.match(markup, />Close MetaWork</);
+  assert.match(markup, /snapshot contract mismatch/);
+  assert.doesNotMatch(markup, />Reconnect</);
 });
