@@ -163,7 +163,7 @@ export function ComposerFooter({
           </div>
         </div>
         <div
-          className="composer-workspace-rail"
+          className="composer-workspace-context"
           data-state={
             workspaceMissing
               ? "missing"
@@ -174,10 +174,9 @@ export function ComposerFooter({
           role="group"
           aria-label={t("workspace.label")}
         >
-          <Icon name="workspace" />
-          {workspaceEditable ? (
-            <>
-              <span className="sr-only">{t("workspace.label")}</span>
+          <span className="composer-workspace-identity">
+            <Icon name="workspace" />
+            {workspaceEditable ? (
               <select
                 className="composer-workspace-select focus-ring"
                 aria-label={t("workspace.switch")}
@@ -199,24 +198,33 @@ export function ComposerFooter({
                   </option>
                 ))}
               </select>
-              <button
-                className="composer-workspace-action focus-ring"
-                disabled={actionDisabled}
-                onClick={onConfirmAccess}
-              >
-                {accessRequired
+            ) : (
+              <strong title={workspaceTitle}>{workspaceLabel}</strong>
+            )}
+          </span>
+          {workspaceEditable && (
+            <button
+              className="composer-workspace-action focus-ring"
+              data-emphasis={accessRequired}
+              aria-label={
+                accessRequired
                   ? t("workspace.confirm_access")
-                  : t("workspace.add")}
-              </button>
-            </>
-          ) : (
-            <strong title={workspaceTitle}>{workspaceLabel}</strong>
+                  : t("workspace.add")
+              }
+              title={
+                accessRequired
+                  ? t("workspace.confirm_access")
+                  : t("workspace.add")
+              }
+              disabled={actionDisabled}
+              onClick={onConfirmAccess}
+            >
+              <Icon name={accessRequired ? "warning" : "plus"} />
+              {accessRequired && <span>{t("workspace.confirm_access")}</span>}
+            </button>
           )}
         </div>
       </div>
-      {accessRequired && (
-        <p className="composer-access-note">{t("workspace.access_required")}</p>
-      )}
       {runInFlight && (
         <p className="composer-draft-note">{t("run.draft_only")}</p>
       )}

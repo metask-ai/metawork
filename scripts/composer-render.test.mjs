@@ -274,7 +274,7 @@ test("New task opens as an editable Composer with its execution context", () => 
   assert.match(markup, /<textarea/);
   assert.match(markup, />Claude Sonnet 4</);
   assert.match(markup, />Select a workspace</);
-  assert.match(markup, /composer-workspace-rail/);
+  assert.match(markup, /composer-workspace-context/);
   assert.doesNotMatch(markup.match(/<textarea[^>]*>/)?.[0] ?? "", /disabled/);
   assert.doesNotMatch(markup, /composer-start/);
 });
@@ -393,20 +393,28 @@ test("an expired workspace grant preserves editable text and exposes recovery", 
   assert.match(tag(markup, "composer-send") ?? "", /disabled/);
 });
 
-test("Composer owns its height and keeps model selection inside the input shell", async () => {
+test("Composer is one input shell with lightweight Workspace context below", async () => {
   const css = await readFile(
     join(process.cwd(), "frontend/src/index.css"),
     "utf8",
   );
   assert.match(css, /\.composer textarea \{[\s\S]*?resize: none;/);
   assert.match(css, /max-height: min\(180px, 28vh\)/);
+  assert.match(css, /\.composer \{[\s\S]*?border-radius: 18px;/);
+  assert.match(css, /\.composer-send \{[\s\S]*?border-radius: 50%;/);
+  const workspaceContextRule = css.slice(
+    css.indexOf(".composer-workspace-context {"),
+    css.indexOf("\n}", css.indexOf(".composer-workspace-context {")),
+  );
+  assert.doesNotMatch(workspaceContextRule, /border:/);
+  assert.doesNotMatch(workspaceContextRule, /background:/);
   const markup = render();
   const composerStart = markup.indexOf('class="composer"');
-  const workspaceRail = markup.indexOf('class="composer-workspace-rail"');
-  assert.ok(composerStart >= 0 && workspaceRail > composerStart);
+  const workspaceContext = markup.indexOf('class="composer-workspace-context"');
+  assert.ok(composerStart >= 0 && workspaceContext > composerStart);
   assert.ok(
     markup.indexOf('class="composer-model-select', composerStart) <
-      workspaceRail,
+      workspaceContext,
   );
 });
 

@@ -971,19 +971,19 @@ summary::-webkit-details-marker {
 
 .composer-model-select {
   max-width: min(220px, 30vw);
-  height: 28px;
-  padding: 0 25px 0 8px;
+  height: 30px;
+  padding: 0 24px 0 7px;
   border: 1px solid transparent;
-  border-radius: 7px;
-  color: var(--color-graphite);
-  background: rgba(47, 116, 130, 0.07);
-  font-size: 10px;
-  font-weight: 680;
+  border-radius: 8px;
+  color: #44535a;
+  background: transparent;
+  font-size: 12px;
+  font-weight: 620;
 }
 
 .composer-model-select:hover:not(:disabled) {
-  border-color: #9bb5b9;
-  background: rgba(255, 255, 255, 0.9);
+  border-color: #d9e0e1;
+  background: #f5f7f7;
 }
 
 @media (max-width: 1000px) {
@@ -2243,29 +2243,16 @@ summary::-webkit-details-marker {
 
 .composer {
   display: flex;
-  min-height: 94px;
-  padding: 9px;
+  min-height: 108px;
+  padding: 10px;
   flex-direction: column;
-  gap: 4px;
-  border: 1px solid #9bb5b9;
-  border-radius: 16px 16px 0 0;
-  background: rgba(250, 252, 251, 0.98);
+  gap: 6px;
+  border: 1px solid #d9e0e1;
+  border-radius: 18px;
+  background: #fff;
   box-shadow:
-    0 1px 0 rgba(255, 255, 255, 0.86) inset,
-    0 10px 30px rgba(24, 50, 71, 0.08);
-}
-
-.composer-access-note {
-  width: min(760px, 100%);
-  margin: 7px auto 0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 12px;
-  color: var(--color-muted);
-  font-size: 11px;
-  line-height: 1.45;
+    0 1px 2px rgba(24, 50, 71, 0.04),
+    0 8px 24px rgba(24, 50, 71, 0.055);
 }
 
 .jump-latest {
@@ -2284,10 +2271,10 @@ summary::-webkit-details-marker {
 }
 
 .composer:focus-within {
-  border-color: var(--color-cobalt);
+  border-color: #a9bec1;
   box-shadow:
-    0 12px 34px rgba(24, 50, 71, 0.1),
-    0 0 0 3px rgba(47, 116, 130, 0.1);
+    0 10px 28px rgba(24, 50, 71, 0.075),
+    0 0 0 3px rgba(47, 116, 130, 0.07);
 }
 
 .composer textarea {
@@ -2296,27 +2283,27 @@ summary::-webkit-details-marker {
   min-width: 0;
   min-height: 46px;
   max-height: min(180px, 28vh);
-  padding: 9px 10px;
+  padding: 10px 12px 4px;
   resize: none;
   border: 0;
   outline: 0;
   color: var(--color-graphite);
   background: transparent;
-  font-size: 13px;
-  line-height: 1.55;
+  font-size: 13.5px;
+  line-height: 1.5;
 }
 
 .composer textarea::placeholder {
-  color: #7c8b93;
+  color: #939da2;
 }
 
 .composer-toolbar {
   display: flex;
-  min-height: 38px;
-  padding-left: 2px;
+  min-height: 34px;
+  padding: 0 2px 0 5px;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 14px;
 }
 
 .composer-model-context {
@@ -2328,43 +2315,48 @@ summary::-webkit-details-marker {
 .composer-model-context strong {
   max-width: min(260px, 46vw);
   overflow: hidden;
-  color: var(--color-graphite);
-  font-size: 10px;
-  font-weight: 680;
+  padding: 0 7px;
+  color: #56646a;
+  font-size: 12px;
+  font-weight: 620;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.composer-workspace-rail {
+.composer-workspace-context {
   display: flex;
-  min-height: 35px;
-  padding: 0 8px 0 10px;
+  min-height: 30px;
+  margin-top: 6px;
+  padding: 0 7px;
   align-items: center;
-  gap: 7px;
-  border: 1px solid #b9c9cb;
-  border-top: 0;
-  border-radius: 0 0 12px 12px;
+  justify-content: flex-start;
+  gap: 10px;
   color: var(--color-muted);
-  background: #f3f7f6;
-  font-size: 10px;
+  font-size: 11.5px;
 }
 
-.composer-workspace-rail[data-state="missing"],
-.composer-workspace-rail[data-state="reauthorization-required"] {
+.composer-workspace-context[data-state="missing"],
+.composer-workspace-context[data-state="reauthorization-required"] {
   color: var(--color-amber-ink);
-  background: #fbf7ee;
 }
 
-.composer-workspace-rail > svg {
+.composer-workspace-identity {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.composer-workspace-identity > svg {
   flex: 0 0 auto;
-  font-size: 14px;
+  font-size: 13px;
 }
 
-.composer-workspace-rail strong {
+.composer-workspace-identity strong {
   overflow: hidden;
-  color: var(--color-graphite);
-  font-size: 10px;
-  font-weight: 650;
+  color: #657279;
+  font-size: 11.5px;
+  font-weight: 560;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2372,47 +2364,76 @@ summary::-webkit-details-marker {
 .composer-workspace-select {
   min-width: 0;
   max-width: min(360px, 58vw);
-  height: 28px;
-  padding: 0 24px 0 4px;
+  height: 26px;
+  padding: 0 22px 0 1px;
   flex: 0 1 auto;
   border: 0;
-  border-radius: 6px;
-  color: var(--color-graphite);
+  border-radius: 5px;
+  color: #657279;
   background: transparent;
-  font-size: 10px;
-  font-weight: 650;
+  font-size: 11.5px;
+  font-weight: 560;
 }
 
 .composer-workspace-select:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.76);
+  color: var(--color-graphite);
+  background: #f3f5f5;
 }
 
 .composer-workspace-action {
-  margin-left: auto;
-  padding: 4px 6px;
+  display: inline-flex;
+  min-width: 26px;
+  height: 26px;
+  padding: 0 6px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
   border: 0;
-  border-radius: 6px;
-  color: var(--color-cobalt);
+  border-radius: 7px;
+  color: #6f7c82;
   background: transparent;
-  font-size: 10px;
-  font-weight: 700;
+  font-size: 11px;
+  font-weight: 650;
 }
 
 .composer-workspace-action:hover:not(:disabled) {
-  background: rgba(47, 116, 130, 0.08);
+  color: var(--color-cobalt);
+  background: rgba(47, 116, 130, 0.07);
+}
+
+.composer-workspace-action[data-emphasis="true"] {
+  color: var(--color-amber-ink);
+  background: rgba(201, 131, 34, 0.08);
 }
 
 .composer-send {
   display: grid;
-  width: 38px;
-  height: 38px;
+  width: 34px;
+  height: 34px;
   padding: 0;
   place-items: center;
   border: 0;
-  border-radius: 10px;
+  border-radius: 50%;
   color: white;
   background: var(--color-cobalt);
-  font-size: 19px;
+  font-size: 17px;
+  transition:
+    background-color 120ms ease,
+    transform 120ms ease;
+}
+
+.composer-send:hover:not(:disabled) {
+  background: #235f68;
+}
+
+.composer-send:active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+.composer-send:disabled {
+  color: #fff;
+  background: #c8cdcf;
+  opacity: 1;
 }
 
 .composer-draft-note {
