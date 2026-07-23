@@ -150,6 +150,16 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     const target = b.resolveTargetQuery(query);
     root_module.resolved_target = target;
 
+    const runner = existingImport(root_module, "runner");
+    const product_identity = b.createModule(.{
+        .root_source_file = b.path("src/product_identity.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    product_identity.addImport(
+        "app_manifest_zon",
+        existingImport(runner, "app_manifest_zon"),
+    );
     const sdk = b.dependency("agentcore", .{
         .target = target,
         .optimize = root_module.optimize,
@@ -256,6 +266,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     account_credential_store.addImport("metawork_account_contract", account_contract);
     account_credential_store.addImport("account_state", account_state);
     account_credential_store.addImport("account_oauth", account_oauth);
+    account_credential_store.addImport("metawork_product_identity", product_identity);
     const account_windows_store = b.createModule(.{
         .root_source_file = b.path("src/account/windows_store.zig"),
         .target = root_module.resolved_target,
@@ -355,7 +366,6 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .target = target,
         .optimize = root_module.optimize,
     });
-    const runner = existingImport(root_module, "runner");
     automation.addImport("build_options", existingImport(runner, "build_options"));
     automation.addImport("automation_enabled", automation_enabled);
     automation.addImport("automation_disabled", automation_disabled);
@@ -373,6 +383,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     app.addImport("metawork_automation", automation);
     app.addImport("metawork_account_contract", account_contract);
     app.addImport("metawork_account", account);
+    app.addImport("metawork_product_identity", product_identity);
 
     root_module.addImport("metawork_app", app);
     root_module.link_libc = bundle.link_libc;

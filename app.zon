@@ -1,5 +1,5 @@
 .{
-    .id = "dev.metawork.desktop",
+    .id = "com.metask.metawork.dev",
     .name = "metawork",
     .display_name = "MetaWork",
     .description = "A native workbench for structured agent sessions.",

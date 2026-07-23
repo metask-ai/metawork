@@ -1,7 +1,7 @@
 # MetaWork 高层架构
 
 > 状态：AgentCore ABI v1 revision 3 macOS 与 Windows development baseline 已通过；后续正式方向选择单 AgentCore Worker
-> 日期：2026-07-21
+> 日期：2026-07-22
 
 产品范围见 [产品需求](requirements.md)，Metask AgentCore 的具体接入约束见 [AgentCore 集成契约](agentcore-integration.md)，revision 3 目标能力见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。精确源码路径、binary 和 symbol identifier 只作为机器合同保留。
 
@@ -152,7 +152,7 @@ Account.prepare(command | completion)
 
 每个 Account attempt 都有 Host-owned deadline、attempt identity 和唯一 terminal completion。浏览器未回调、网络悬挂、effect 启动失败和取消都必须收口到可恢复 committed state。幂等 catalog read 可以有限重试；OAuth code exchange、凭据持久化和结果不确定 mutation 不得自动重放。进入 credential persistence 前允许取消；持久化 effect 开始后撤销 cancel admission，直到 main thread 原子消费 completion，避免磁盘已提交而内存被取消回滚。Renderer command timeout 只释放本地交互并触发 snapshot resync，不能代表 Host mutation 失败。
 
-production 网络接入受 [Metask Account API 合同](metask-account-contract.md)约束。C1 OAuth/login 独立提交 `account_only`，不打开 Workbench 或 Task admission；C2 使用 profile-aware API Key/model catalog，从精确 `group.platform` 生成固定 Metask AgentCore target。macOS 通过 OAuth/execution 双 family A/B slot 与单一 `manifest.v2` 提交 `execution_ready`；Windows 只在 Credential Manager 保存一个 refresh token，在无版本 `account.json` 保存无 secret identity/API/model 选择，access token 与 Provider API Key 不跨进程。Windows 冷启动恢复 `account_only` 后必须先刷新 OAuth、重新读取 profile 并精确核对 profile；refresh response 提供 `account_id` 时也必须精确核对，省略时只能沿用已保存 account id 组成 identity，不能跳过远端 profile 验证。identity 验证通过后才重新加载 catalog，并只在历史选择仍受当前 catalog ownership 证明时于内存重建 execution。只有 Workbench 安装同一默认 execution generation 后才进入 Workbench。macOS persistence revision 2 仍只持久化一个默认 execution family；Windows 不消费该 revision。被既有 Task 引用的旧 generation secret 仅在当前进程由 Workbench/Agent Session own。Task persistence 只能另存不含 secret 的 binding descriptor/epoch history，不能据此重建 credential。Metask 内部实现只作为外部合同确认的证据，MetaWork 不修改其代码。
+production 网络接入受 [Metask Account API 合同](metask-account-contract.md)约束。C1 OAuth/login 独立提交 `account_only`，不打开 Workbench 或 Task admission；C2 使用 profile-aware API Key/model catalog，从精确 `group.platform` 生成固定 Metask AgentCore target。macOS 通过 OAuth/execution 双 family A/B slot 与单一 `manifest.json` schema 1 提交 `execution_ready`；Windows 只在 Credential Manager 保存一个 refresh token，在无版本 `account.json` 保存无 secret identity/API/model 选择，access token 与 Provider API Key 不跨进程。Windows 冷启动恢复 `account_only` 后必须先刷新 OAuth、重新读取 profile 并精确核对 profile；refresh response 提供 `account_id` 时也必须精确核对，省略时只能沿用已保存 account id 组成 identity，不能跳过远端 profile 验证。identity 验证通过后才重新加载 catalog，并只在历史选择仍受当前 catalog ownership 证明时于内存重建 execution。只有 Workbench 安装同一默认 execution generation 后才进入 Workbench。macOS manifest 仍只持久化一个默认 execution family；Windows 不消费该 schema。被既有 Task 引用的旧 generation secret 仅在当前进程由 Workbench/Agent Session own。Task persistence 只能另存不含 secret 的 binding descriptor/epoch history，不能据此重建 credential。Metask 内部实现只作为外部合同确认的证据，MetaWork 不修改其代码。
 
 进入 Workbench 后的 API/模型切换仍由 Account owner 执行，不是 Renderer preference。每次 steady selection 都用当前 OAuth/profile 重新加载 authenticated API catalog，不能复用已 secure-zero 的旧 private catalog。candidate private/public catalog 与 committed public catalog 分槽；Account projection 发布候选目录所属的脱敏 API selection identity，Renderer 只能从该 owned catalog 选择模型。加载、取消、选择或持久化期间继续保留已提交 execution，成功后才原子安装新的默认 generation 并提交候选目录；其他 terminal outcome 丢弃候选并回到旧默认配置。Workbench 只用新 generation 接纳之后创建的 Task，既有 Task 继续使用自身 binding epoch。
 
@@ -190,7 +190,11 @@ async suspend/resume、持久化恢复和后台转换属于后续 AgentCore capa
 
 MetaWork 桌面产品、根 npm workspace、Renderer workspace 和 Zig package 随同一仓库原子发布，共用一个 release version。`app.zon` 是产品版本真源；根 `package.json`、`frontend/package.json` 与 `build.zig.zon` 必须精确镜像，`package-lock.json` 只保存 npm 派生结果。当前统一版本为 `0.1.0`。
 
-Renderer Bridge revision、Account persistence revision、AgentCore artifact version、AgentCore ABI version/revision 和 bundle manifest schema 各自保护不同合同，不得随 MetaWork release version 自动升降。任何合同类版本标识的变更都必须先得到用户显式同意；release version 变化必须原子更新全部镜像并通过跨 manifest 一致性守卫。
+当前 development 产品身份做一次 pre-release 原子 hard cut：各平台 Native runtime 与 macOS CodeDirectory identifier 统一使用 Bundle ID `com.metask.metawork.dev`。`app.zon` 是 Bundle ID 唯一真源，`src/product_identity.zig` 从 Native SDK 的 manifest module 派生该值，并只额外定义 macOS 的 `MetaWork Dev` 数据目录与 `com.metask.metawork.dev.account` Keychain service；Account store 独立拥有 `manifest.json` 文件名与 schema 1。旧 macOS namespace 不读取、不迁移、不 fallback；Account-owned maintenance command 可显式删除精确的旧 Keychain slot 与 `manifest.v2`。Windows 只采用统一产品 Bundle ID，账号存储仍使用原有 `MetaWork` 数据根目录、Credential Manager 单 refresh token 和无版本 `account.json`，不得复用 macOS Keychain/manifest/A-B slot 协议。
+
+macOS 本地 Account development 与 package 使用 Apple 签发的 `Apple Development` identity，并验证实际 `TeamIdentifier`、`app.zon` 中既有的 CodeDirectory identifier 与 Apple-anchored designated requirement。签名层只消费产品 identity，不拥有或改写 Bundle ID、Account persistence、Windows credential 或 Renderer 行为；普通 check、test、Debug/Release build 和 Windows baseline 不依赖个人证书。具体操作见 [macOS 本地开发签名](macos-local-development.md)。
+
+Renderer Bridge revision、Account manifest schema、AgentCore artifact version、AgentCore ABI version/revision 和 bundle manifest schema 各自保护不同合同，不得随 MetaWork release version 自动升降。任何合同类版本标识的变更都必须先得到用户显式同意；release version 变化必须原子更新全部镜像并通过跨 manifest 一致性守卫。
 
 ## 5. AgentCore bundle 边界
 

@@ -8,6 +8,7 @@ const agent = @import("metawork_agent");
 const workbench_api = @import("metawork_workbench");
 const account_contract = @import("metawork_account_contract");
 const account_api = @import("metawork_account");
+const product_identity = @import("metawork_product_identity");
 const window_chrome = @import("window_chrome.zig");
 
 pub const panic = std.debug.FullPanic(native_sdk.debug.capturePanic);
@@ -26,6 +27,14 @@ const account_refresh_skew_seconds: i64 = 60;
 const account_refresh_retry_ns: u64 = 30 * std.time.ns_per_s;
 const FrontendMode = bridge_api.policy.Mode;
 const main_window_id: native_sdk.platform.WindowId = 1;
+const windows_data_directory_name = "MetaWork";
+
+fn platformDataDirectoryName(os_tag: @TypeOf(builtin.os.tag)) []const u8 {
+    return if (os_tag == .macos)
+        product_identity.macos_data_directory_name
+    else
+        windows_data_directory_name;
+}
 
 const AccountEffectQueue = struct {
     entry: ?Entry = null,
@@ -2164,7 +2173,7 @@ pub fn run(init: std.process.Init) !void {
     defer app.automation.deinit();
     var data_dir_storage: [4096]u8 = undefined;
     const data_dir = try native_sdk.app_dirs.resolveOne(
-        .{ .name = "MetaWork" },
+        .{ .name = platformDataDirectoryName(builtin.os.tag) },
         native_sdk.app_dirs.currentPlatform(),
         native_sdk.debug.envFromMap(init.environ_map),
         .data,
@@ -2251,7 +2260,7 @@ pub fn run(init: std.process.Init) !void {
     try runner.runWithOptions(app.app(), .{
         .app_name = "MetaWork",
         .window_title = "MetaWork",
-        .bundle_id = "dev.metawork.desktop",
+        .bundle_id = product_identity.bundle_id,
         .bridge = app.bridge(mode),
         .builtin_bridge = app.automation.builtinPolicy(bridge_api.policy.builtin(mode)),
         .js_window_api = true,
@@ -2268,6 +2277,21 @@ test "App remains a composition root with explicit platform limits" {
     try std.testing.expectEqual(@as(usize, 1024 * 1024), native_sdk.bridge.max_message_bytes);
     try std.testing.expectEqual(@as(usize, 8192), native_sdk.platform.max_window_event_detail_bytes);
     try std.testing.expectEqual(@as(usize, 1), bridge_api.policy.origins(.release).len);
+}
+
+test "product identity does not unify macOS and Windows Account storage" {
+    try std.testing.expectEqualStrings(
+        "com.metask.metawork.dev",
+        product_identity.bundle_id,
+    );
+    try std.testing.expectEqualStrings(
+        product_identity.macos_data_directory_name,
+        platformDataDirectoryName(.macos),
+    );
+    try std.testing.expectEqualStrings(
+        windows_data_directory_name,
+        platformDataDirectoryName(.windows),
+    );
 }
 
 test "Account coordinator commits login and transactional reconfiguration gates" {

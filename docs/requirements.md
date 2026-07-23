@@ -1,7 +1,7 @@
 # MetaWork 产品需求
 
 > 状态：v0.5，确立登录优先的成熟 Workbench、Task 执行配置与设置边界
-> 日期：2026-07-21
+> 日期：2026-07-22
 
 ## 1. 产品定义
 
@@ -91,7 +91,7 @@ Account 是 MetaWork 的 Metask 账号控制面，负责 OAuth 登录、账号/A
 - OAuth token 只访问 Metask 账号 API；选定 API Key 才作为 AgentCore 模型调用凭据；
 - Renderer 只能看到脱敏账号、Key 尾号、模型、稳定错误码和状态，不得接触 OAuth token、完整 API Key、Authorization header、临时 OAuth URL 或凭据存储 locator；
 - Account 只维护一个当前默认 ExecutionConfig，但 Workbench 可以保留被既有 Task 引用的旧 generation owned copy。切换默认 API 或模型不得篡改、停止或重新配置既有 Task；旧 generation 只有在对应 Task、Agent Session、Run、executor job 与真实 worker reference 全部释放后才能清零；
-- Workbench 必须为 Task persistence 保存不含 secret 的 execution binding descriptor 和 epoch history；macOS Account persistence revision 2 仍只保存一个默认 execution family，不为每个 Task 复制 credential。Windows 只持久化一个 Metask refresh token 与无 secret 的 account/API/model 选择，access token、Provider API Key 和 execution config 不跨进程；
+- Workbench 必须为 Task persistence 保存不含 secret 的 execution binding descriptor 和 epoch history；macOS Account `manifest.json` schema 1 仍只保存一个默认 execution family，不为每个 Task 复制 credential。Windows 只持久化一个 Metask refresh token 与无 secret 的 account/API/model 选择，access token、Provider API Key 和 execution config 不跨进程；
 - 跨 Host 重启恢复历史 Task 时，只有 Host 证明 restored account/profile、API、model 与 generation 精确匹配且 Conversation 可以安全恢复，才能把 binding 标记为 available；否则 Task 只读并进入 `rebind_required` 或 `unavailable`，不得静默采用当前默认配置；
 - 目标 rebind 流程必须展示旧配置与当前候选的脱敏差异，并在用户明确确认后由 Host 原子创建新 binding epoch 和新 Agent Session；旧 Run 历史、usage 和模型归属保持不可改写。如果只读 Task history persistence 先于跨进程 Conversation 恢复落地，该阶段只提供 `从此历史新建任务`；
 - 切换账号、退出登录或清除设备凭据必须取得 Workbench execution replacement gate，并证明所有引用该账号 credential 的 Task、Agent Session、Run、executor job 与真实 worker reference 已安全终止；
@@ -215,6 +215,7 @@ Account 是 MetaWork 的 Metask 账号控制面，负责 OAuth 登录、账号/A
 ### 平台
 
 - macOS 是当前优先真实验证平台；
+- macOS 真实 Account 本地开发必须使用 Apple 签发、带稳定 `TeamIdentifier` 的 `Apple Development` identity；自签名或 ad-hoc 签名不能作为 Keychain 跨构建授权稳定性的验收结果；
 - Windows development baseline 已完成独立 artifact、Native SDK、Bridge、AgentCore 和桌面自动化验证，不能用 macOS 结果替代；
 - Windows MSI/签名/更新和完整安全矩阵仍是后续分发交付；
 - Linux 是后续目标平台；当前 bundle target-policy 和系统链接输入按 target 隔离，但不宣称已完成 Linux 构建或验收；
