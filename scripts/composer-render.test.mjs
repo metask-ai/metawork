@@ -58,6 +58,7 @@ const base = {
   selectedModelId: "claude-sonnet-4",
   modelEditable: true,
   modelSelectionDisabled: false,
+  modelSelectionPending: false,
   modelContextTitle: "Default model",
   actionDisabled: false,
   onPromptChange() {},
@@ -287,10 +288,37 @@ test("candidate model catalogs never imply a committed default", () => {
     ],
     selectedModelId: "",
     modelSelectionDisabled: true,
+    modelSelectionPending: true,
   });
-  assert.match(markup, /<option value="" selected="">Choose a model<\/option>/);
-  assert.match(markup, /<select[^>]*disabled=""/);
-  assert.doesNotMatch(markup, /value="candidate-model" selected=""/);
+  assert.match(
+    markup,
+    /role="combobox"[^>]*disabled=""[^>]*data-placeholder=""[^>]*aria-busy="true"/,
+  );
+  assert.match(markup, />Choose a model</);
+  assert.doesNotMatch(markup, />Candidate model</);
+});
+
+test("disabled model selection does not invent a pending state", () => {
+  const markup = render({
+    modelSelectionDisabled: true,
+    modelSelectionPending: false,
+  });
+  const trigger =
+    markup.match(
+      /<button[^>]*class="[^"]*composer-model-trigger[^"]*"[^>]*>/,
+    )?.[0] ?? "";
+  assert.match(trigger, /disabled=""/);
+  assert.doesNotMatch(trigger, /aria-busy/);
+});
+
+test("model selection keeps its exact identity when display metadata is absent", () => {
+  const markup = render({
+    modelLabel: "deepseek-v4",
+    modelOptions: [{ selectionId: "deepseek-v4", displayName: "" }],
+    selectedModelId: "deepseek-v4",
+  });
+  assert.match(markup, />deepseek-v4</);
+  assert.doesNotMatch(markup, />Available model</);
 });
 
 test("desktop shortcut labels follow the host platform", () => {
@@ -413,8 +441,10 @@ test("Composer is one input shell with lightweight Workspace context below", asy
   const workspaceContext = markup.indexOf('class="composer-workspace-context"');
   assert.ok(composerStart >= 0 && workspaceContext > composerStart);
   assert.ok(
-    markup.indexOf('class="composer-model-select', composerStart) <
-      workspaceContext,
+    markup.indexOf(
+      'class="selection-trigger focus-ring composer-model-trigger',
+      composerStart,
+    ) < workspaceContext,
   );
 });
 
@@ -486,11 +516,7 @@ test("Workspace busy state disables real Workspace actions instead of swallowing
     ),
     "utf8",
   );
-  const option = source.slice(source.indexOf('className="workspace-option'));
-  assert.match(
-    option,
-    /disabled=\{disabled \|\| workspace\.authorization === "removing"\}/,
-  );
+  assert.match(source, /disabled: workspace\.authorization === "removing"/);
 });
 
 test("global shortcuts obey Account and Bridge gates", async () => {

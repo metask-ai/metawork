@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { Icon } from "../../components/ui/Icon.tsx";
+import { SelectionMenu } from "../../components/ui/SelectionMenu.tsx";
 import type { TaskView } from "../../bridge/contracts.ts";
 import { taskCountMessageId } from "../../i18n/formatters.ts";
 import { useI18n } from "../../i18n/context.ts";
@@ -39,11 +40,7 @@ export function WorkspaceNavigation({
   onToggleArchived: () => void;
 }) {
   const { locale, t } = useI18n();
-  const [switcherOpen, setSwitcherOpen] = useState(false);
   const [removalConfirmId, setRemovalConfirmId] = useState<string | null>(null);
-  const switcher = useRef<HTMLDivElement>(null);
-  const switcherTrigger = useRef<HTMLButtonElement>(null);
-  const switcherMenu = useRef<HTMLDivElement>(null);
   const workspaceSectionHeading = useRef<HTMLDivElement>(null);
   const removalTrigger = useRef<HTMLButtonElement>(null);
   const removalCancel = useRef<HTMLButtonElement>(null);
@@ -54,37 +51,6 @@ export function WorkspaceNavigation({
   );
   const archivedCount = tasks.filter((task) => task.archived).length;
   const current = summaries.find((item) => item.id === currentWorkspaceId);
-
-  useEffect(() => {
-    if (!switcherOpen) return;
-    const dismiss = (event: MouseEvent) => {
-      if (!switcher.current?.contains(event.target as Node))
-        setSwitcherOpen(false);
-    };
-    document.addEventListener("mousedown", dismiss);
-    return () => document.removeEventListener("mousedown", dismiss);
-  }, [switcherOpen]);
-
-  useEffect(() => {
-    if (!switcherOpen) return;
-    window.requestAnimationFrame(() => {
-      const options = [
-        ...(switcherMenu.current?.querySelectorAll<HTMLButtonElement>(
-          '[role="menuitemradio"]:not([disabled])',
-        ) ?? []),
-      ];
-      const selected = options.find(
-        (option) => option.getAttribute("aria-checked") === "true",
-      );
-      (selected ?? options[0])?.focus();
-    });
-  }, [switcherOpen]);
-
-  function closeSwitcher(restoreFocus: boolean) {
-    setSwitcherOpen(false);
-    if (restoreFocus)
-      window.requestAnimationFrame(() => switcherTrigger.current?.focus());
-  }
 
   useEffect(() => {
     if (
@@ -140,84 +106,24 @@ export function WorkspaceNavigation({
             </button>
           </span>
         </div>
-        <div className="workspace-switcher" ref={switcher}>
-          <button
-            ref={switcherTrigger}
-            className="workspace-picker focus-ring"
-            aria-expanded={switcherOpen}
-            aria-haspopup="menu"
-            aria-controls="workspace-switcher-menu"
+        <div className="workspace-switcher">
+          <SelectionMenu
+            value={currentWorkspaceId ?? ""}
+            options={summaries.map((workspace) => ({
+              value: workspace.id,
+              label: workspace.label,
+              description: workspace.canonicalRoot,
+              disabled: workspace.authorization === "removing",
+              trailing: <WorkspaceSignals workspace={workspace} />,
+            }))}
+            placeholder={t("workspace.none")}
+            ariaLabel={t("workspace.switch")}
             disabled={disabled || summaries.length === 0}
-            onClick={() => setSwitcherOpen((open) => !open)}
-          >
-            <Icon name="workspace" />
-            <span className="truncate">
-              {current?.label || t("workspace.none")}
-            </span>
-            <Icon name="chevron" />
-          </button>
-          {switcherOpen && summaries.length > 0 && (
-            <div
-              id="workspace-switcher-menu"
-              ref={switcherMenu}
-              className="workspace-menu"
-              role="menu"
-              aria-label={t("workspace.switch")}
-              onKeyDown={(event) => {
-                if (event.key === "Escape") {
-                  event.preventDefault();
-                  closeSwitcher(true);
-                  return;
-                }
-                if (
-                  event.key !== "ArrowDown" &&
-                  event.key !== "ArrowUp" &&
-                  event.key !== "Home" &&
-                  event.key !== "End"
-                )
-                  return;
-                const options = [
-                  ...event.currentTarget.querySelectorAll<HTMLButtonElement>(
-                    '[role="menuitemradio"]:not([disabled])',
-                  ),
-                ];
-                if (options.length === 0) return;
-                event.preventDefault();
-                const currentIndex = options.indexOf(
-                  document.activeElement as HTMLButtonElement,
-                );
-                const nextIndex =
-                  event.key === "Home"
-                    ? 0
-                    : event.key === "End"
-                      ? options.length - 1
-                      : event.key === "ArrowDown"
-                        ? (currentIndex + 1 + options.length) % options.length
-                        : (currentIndex - 1 + options.length) % options.length;
-                options[nextIndex].focus();
-              }}
-            >
-              {summaries.map((workspace) => (
-                <button
-                  key={workspace.id}
-                  className="workspace-option focus-ring"
-                  role="menuitemradio"
-                  aria-checked={workspace.id === currentWorkspaceId}
-                  disabled={disabled || workspace.authorization === "removing"}
-                  onClick={() => {
-                    onSelectWorkspace(workspace.id);
-                    closeSwitcher(true);
-                  }}
-                >
-                  <span className="workspace-option-copy">
-                    <strong>{workspace.label}</strong>
-                    <small>{workspace.canonicalRoot}</small>
-                  </span>
-                  <WorkspaceSignals workspace={workspace} />
-                </button>
-              ))}
-            </div>
-          )}
+            leading={<Icon name="workspace" />}
+            triggerClassName="workspace-picker"
+            contentClassName="workspace-menu"
+            onValueChange={onSelectWorkspace}
+          />
         </div>
         {current?.authorization === "removing" && (
           <p className="workspace-removing" role="status">

@@ -128,6 +128,7 @@ export const enUS = {
   "workspace.grant_confirmed": "Workspace access confirmed.",
   "workspace.access_required":
     "Confirm workspace access again before sending this draft.",
+  "workspace.access_required_short": "Access required",
   "workspace.confirm_access": "Confirm access",
   "workspace.retry_removal": "Retry removal",
   "workspace.removal_failed_short": "Removal failed",

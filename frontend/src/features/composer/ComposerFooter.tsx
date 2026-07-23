@@ -3,6 +3,8 @@ import { useEffect, type RefObject } from "react";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { useI18n } from "../../i18n/context.ts";
 import { maxComposerCharacters } from "./drafts.ts";
+import { ModelSelector } from "./ModelSelector.tsx";
+import { WorkspaceContextSelector } from "./WorkspaceContextSelector.tsx";
 
 function resizeComposerTextarea(textarea: HTMLTextAreaElement) {
   const maxHeight = Math.min(180, window.innerHeight * 0.28);
@@ -34,6 +36,7 @@ export function ComposerFooter({
   selectedModelId,
   modelEditable,
   modelSelectionDisabled,
+  modelSelectionPending,
   modelContextTitle,
   actionDisabled,
   onPromptChange,
@@ -68,6 +71,7 @@ export function ComposerFooter({
   selectedModelId: string;
   modelEditable: boolean;
   modelSelectionDisabled: boolean;
+  modelSelectionPending: boolean;
   modelContextTitle: string;
   actionDisabled: boolean;
   onPromptChange: (value: string) => void;
@@ -128,27 +132,16 @@ export function ComposerFooter({
             {modelLabel && (
               <span className="composer-model-context">
                 <span className="sr-only">{t("account.model")}</span>
-                {modelEditable ? (
-                  <select
-                    className="composer-model-select focus-ring"
-                    aria-label={t("settings.default_model")}
-                    title={modelContextTitle}
-                    value={selectedModelId}
-                    disabled={modelSelectionDisabled}
-                    onChange={(event) => onSelectModel(event.target.value)}
-                  >
-                    {!modelOptions.some(
-                      (model) => model.selectionId === selectedModelId,
-                    ) && <option value="">{t("account.choose_model")}</option>}
-                    {modelOptions.map((model) => (
-                      <option key={model.selectionId} value={model.selectionId}>
-                        {model.displayName || t("account.model_fallback")}
-                      </option>
-                    ))}
-                  </select>
-                ) : (
-                  <strong title={modelContextTitle}>{modelLabel}</strong>
-                )}
+                <ModelSelector
+                  label={modelLabel}
+                  options={modelOptions}
+                  selectedId={selectedModelId}
+                  editable={modelEditable}
+                  disabled={modelSelectionDisabled}
+                  pending={modelSelectionPending}
+                  contextTitle={modelContextTitle}
+                  onSelect={onSelectModel}
+                />
               </span>
             )}
             <button
@@ -162,68 +155,18 @@ export function ComposerFooter({
             </button>
           </div>
         </div>
-        <div
-          className="composer-workspace-context"
-          data-state={
-            workspaceMissing
-              ? "missing"
-              : accessRequired
-                ? "reauthorization-required"
-                : "ready"
-          }
-          role="group"
-          aria-label={t("workspace.label")}
-        >
-          <span className="composer-workspace-identity">
-            <Icon name="workspace" />
-            {workspaceEditable ? (
-              <select
-                className="composer-workspace-select focus-ring"
-                aria-label={t("workspace.switch")}
-                value={selectedWorkspaceId}
-                disabled={actionDisabled || workspaceOptions.length === 0}
-                onChange={(event) => onSelectWorkspace(event.target.value)}
-              >
-                <option value="" disabled>
-                  {t("workspace.select")}
-                </option>
-                {workspaceOptions.map((workspace) => (
-                  <option
-                    key={workspace.id}
-                    value={workspace.id}
-                    disabled={workspace.authorization !== "available"}
-                    title={workspace.canonicalRoot}
-                  >
-                    {workspace.label}
-                  </option>
-                ))}
-              </select>
-            ) : (
-              <strong title={workspaceTitle}>{workspaceLabel}</strong>
-            )}
-          </span>
-          {workspaceEditable && (
-            <button
-              className="composer-workspace-action focus-ring"
-              data-emphasis={accessRequired}
-              aria-label={
-                accessRequired
-                  ? t("workspace.confirm_access")
-                  : t("workspace.add")
-              }
-              title={
-                accessRequired
-                  ? t("workspace.confirm_access")
-                  : t("workspace.add")
-              }
-              disabled={actionDisabled}
-              onClick={onConfirmAccess}
-            >
-              <Icon name={accessRequired ? "warning" : "plus"} />
-              {accessRequired && <span>{t("workspace.confirm_access")}</span>}
-            </button>
-          )}
-        </div>
+        <WorkspaceContextSelector
+          accessRequired={accessRequired}
+          missing={workspaceMissing}
+          label={workspaceLabel}
+          title={workspaceTitle}
+          options={workspaceOptions}
+          selectedId={selectedWorkspaceId}
+          editable={workspaceEditable}
+          disabled={actionDisabled}
+          onConfirmAccess={onConfirmAccess}
+          onSelect={onSelectWorkspace}
+        />
       </div>
       {runInFlight && (
         <p className="composer-draft-note">{t("run.draft_only")}</p>

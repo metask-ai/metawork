@@ -13,7 +13,9 @@ type IconName =
   | "minimize"
   | "maximize"
   | "warning"
-  | "account";
+  | "account"
+  | "model"
+  | "check";
 
 const paths: Record<IconName, React.ReactNode> = {
   sidebar: <path d="M3.5 5.5h17v13h-17zM8.5 5.5v13" />,
@@ -33,6 +35,10 @@ const paths: Record<IconName, React.ReactNode> = {
   maximize: <rect x="6.5" y="6.5" width="11" height="11" rx="0.5" />,
   warning: <path d="M12 4 21 20H3L12 4Zm0 5.5v4.5m0 3h.01" />,
   account: <path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm7 8a7 7 0 0 0-14 0" />,
+  model: (
+    <path d="m12 3 8 4.5-8 4.5-8-4.5L12 3Zm-8 9 8 4.5 8-4.5M4 16.5 12 21l8-4.5" />
+  ),
+  check: <path d="m5 12.5 4.2 4.2L19 7" />,
 };
 
 export function Icon({ name }: { name: IconName }) {

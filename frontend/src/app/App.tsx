@@ -1841,6 +1841,9 @@ export default function App() {
               snapshot.account.operation !== "none" ||
               snapshot.account.models.length === 0
             }
+            modelSelectionPending={
+              accountBusy || snapshot.account.operation !== "none"
+            }
             modelContextTitle={
               newTaskDraftActive
                 ? t("settings.default_model_help")

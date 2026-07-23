@@ -120,6 +120,7 @@ export const zhCN: Record<MessageId, string> = {
   "workspace.selection_failed": "未能打开工作区，请重新选择。",
   "workspace.grant_confirmed": "工作区访问已确认。",
   "workspace.access_required": "发送此草稿前，请重新确认工作区访问权限。",
+  "workspace.access_required_short": "需要访问权限",
   "workspace.confirm_access": "确认访问权限",
   "workspace.retry_removal": "重试移除",
   "workspace.removal_failed_short": "移除失败",
