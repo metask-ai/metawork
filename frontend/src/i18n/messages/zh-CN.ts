@@ -106,7 +106,7 @@ export const zhCN: Record<MessageId, string> = {
   "command.timeout_sync_failed":
     "{operation}等待时间超出预期，且无法确认最新状态。请重新连接后再继续。",
   "workspace.label": "工作区",
-  "workspace.choose_on_send": "发送时选择",
+  "workspace.select": "选择工作区",
   "workspace.add": "添加",
   "workspace.remove": "移除",
   "workspace.switch": "切换工作区",
@@ -117,8 +117,6 @@ export const zhCN: Record<MessageId, string> = {
   "workspace.none": "尚未选择工作区",
   "workspace.grant_ready": "可以在这个已信任的工作区中开始任务。",
   "workspace.selection_cancelled": "已取消选择工作区。",
-  "workspace.draft_conflict":
-    "该目录已有未发送的草稿。为避免覆盖，本次未切换；请选择其他目录，或先复制当前内容并清空输入后再重新选择。",
   "workspace.selection_failed": "未能打开工作区，请重新选择。",
   "workspace.grant_confirmed": "工作区访问已确认。",
   "workspace.access_required": "发送此草稿前，请重新确认工作区访问权限。",

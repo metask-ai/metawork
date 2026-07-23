@@ -112,7 +112,7 @@ export const enUS = {
   "command.timeout_sync_failed":
     "{operation} took longer than expected, and the latest state could not be confirmed. Reconnect before trying again.",
   "workspace.label": "Workspace",
-  "workspace.choose_on_send": "Choose on send",
+  "workspace.select": "Select a workspace",
   "workspace.add": "Add",
   "workspace.remove": "Remove",
   "workspace.switch": "Switch workspace",
@@ -123,8 +123,6 @@ export const enUS = {
   "workspace.none": "No workspace selected",
   "workspace.grant_ready": "Ready to start a task in this trusted workspace.",
   "workspace.selection_cancelled": "Workspace selection cancelled.",
-  "workspace.draft_conflict":
-    "That folder already has an unsent draft, so nothing was switched or overwritten. Choose another folder, or copy and clear this draft before trying again.",
   "workspace.selection_failed":
     "The workspace could not be opened. Choose it again.",
   "workspace.grant_confirmed": "Workspace access confirmed.",

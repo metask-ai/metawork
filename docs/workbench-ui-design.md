@@ -192,7 +192,8 @@ Invoices
 点击后打开 Workspace 切换器。左栏主体只列出当前 Workspace 的 Task，不同时展开所有 Workspace。
 
 - `New task` 默认使用当前 Workspace；
-- 当前没有 Workspace 时仍先打开空白 New task 页面并允许暂存草稿；第一次发送时再打开原生目录选择器，取消选择必须保留草稿且不得创建 Task；
+- 当前没有 Workspace 时仍先打开空白 New task 页面并允许暂存草稿；发送保持禁用，由 Composer 下方的 Workspace 控件显式选择已有 Workspace 或打开原生目录选择器。选择完成后只更新草稿上下文，不得自动创建 Task 或发送已有内容；
+- New task 草稿按 Workspace 隔离。未绑定 Workspace 的临时草稿只在目标 Workspace 没有草稿时迁移；目标已有草稿时保留两边内容并打开目标草稿，不能覆盖或丢弃任一份；
 - Workspace 切换器消费 Host 发布的独立 Workspace projection，支持最近使用、打开新目录、重新授权和移除入口；没有 Task 的 Workspace 仍然可见；
 - 每个 Workspace 入口汇总 `Running`、`Needs your attention` 和 `Failed/Interrupted` 数量；当前 Workspace 之外的待处理状态不能只依赖系统通知；
 - 点击 Workspace 状态徽标切换到该 Workspace，并优先定位对应分组；系统通知点击后直接定位原 Task 和请求；
@@ -424,6 +425,13 @@ New task 页面以 Composer 为绝对主视觉。输入框附近只放与“这�
 - 已有 Task 的 Composer 显示当前 binding epoch 的模型事实，历史按 epoch 保留原模型；第一版不提供 live Session 热切换；
 - 正在更新默认模型时只禁用相关选择和发送 admission，不冻结导航、历史阅读或其他 Task；
 - 模型不可用时说明原因并给出刷新或设置入口，不能留下永久 disabled selector。
+
+Composer 布局与输入规则：
+
+- 模型控件位于输入框内部左下角，发送位于右下角；Workspace 是紧贴输入框下方的独立全宽 rail，不能再放回输入框上方形成第二条上下文栏；
+- New task 的 Workspace rail 可以切换已授权 Workspace，也可以打开原生目录选择器添加或重新授权；已有 Task 只显示其绑定 Workspace 事实，不提供虚假的切换；
+- 输入框不允许用户拖拽改变大小。它随内容自动增高，达到约 7–8 行或视口高度的 28% 后改为内部滚动；
+- Workspace 缺失或授权失效时文本仍可编辑、草稿仍保存，但发送保持禁用并在 rail 中提供明确恢复动作；Workspace 选择和发送是两个独立动作。
 
 | Task state           | Composer behavior                                                         |
 | -------------------- | ------------------------------------------------------------------------- |

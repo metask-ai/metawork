@@ -446,6 +446,6 @@ test("New task draft migration never overwrites an existing Workspace draft", ()
   assert.equal(newTaskDraftMoveDecision("Current draft", ""), "move");
   assert.equal(
     newTaskDraftMoveDecision("Current draft", "Alpha draft"),
-    "conflict",
+    "preserve_both",
   );
 });
