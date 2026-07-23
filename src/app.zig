@@ -2926,3 +2926,71 @@ test "unknown logout persistence clears Workbench execution fail closed" {
     try std.testing.expect(!view.can_create_task);
     try std.testing.expect(!workbench.executionReplacementPending());
 }
+
+test "Account coordinator shutdown publishes a valid terminal view from ready" {
+    var runtime: agent.Runtime = undefined;
+    runtime.io = std.testing.io;
+    var workbench = try workbench_api.Workbench.init(
+        std.testing.allocator,
+        &runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 1,
+            .max_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        .{},
+    );
+    defer workbench.deinit();
+    var queue: AccountEffectQueue = .{};
+    var public_catalog: account_api.Catalog.PublicCatalog = .{};
+    var coordinator = AccountCoordinator.init(
+        &workbench,
+        &public_catalog,
+        queue.sink(),
+        .{},
+        std.Thread.getCurrentId(),
+    );
+    var execution = try account_contract.OwnedExecutionConfig.initOwned(
+        std.testing.allocator,
+        .anthropic,
+        try std.testing.allocator.dupe(u8, "model-1"),
+        try std.testing.allocator.dupe(
+            u8,
+            account_contract.metask_anthropic_messages_url,
+        ),
+        1,
+        try std.testing.allocator.dupe(u8, "secret-key"),
+    );
+    var restore_result: account_api.RestoreResult = .{
+        .execution_ready = try .init(
+            try .init("account-1", "profile-1", "Metask User"),
+            "key-1",
+            &execution,
+        ),
+    };
+    execution.deinit();
+    try std.testing.expectEqual(
+        account_contract.ErrorCode.none,
+        coordinator.restore(&restore_result),
+    );
+    try std.testing.expect(workbench.accountView().can_create_task);
+
+    coordinator.shutdown();
+
+    const shutdown_effect = queue.take().?;
+    try std.testing.expect(shutdown_effect.effect == .shutdown);
+    const view = workbench.accountView();
+    try std.testing.expectEqual(
+        account_contract.AccountSessionState.shutting_down,
+        view.session_state,
+    );
+    try std.testing.expectEqual(
+        account_contract.ExecutionState.none,
+        view.execution_state,
+    );
+    try std.testing.expectEqual(@as(usize, 0), view.api_keys.len);
+    try std.testing.expectEqual(@as(usize, 0), view.models.len);
+    try std.testing.expect(!view.can_create_task);
+}

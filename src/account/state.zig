@@ -428,7 +428,13 @@ pub const Account = struct {
     pub fn prepareShutdown(self: *const Account) PreparedTransition {
         var next = self.state;
         next.session_state = .shutting_down;
+        next.execution_state = .none;
         next.operation = .none;
+        next.selected_api_key_id.clear();
+        next.selected_model.clear();
+        next.pending_api_key_id.clear();
+        next.pending_model.clear();
+        next.execution_generation = 0;
         next.clearError();
         const active_attempt = next.active_attempt_id;
         next.active_attempt_id = null;
@@ -1767,6 +1773,36 @@ test "shutdown invalidates active attempt and requires effect consumption" {
         contract.ErrorCode.shutting_down,
         account.prepareCommand(.begin_login).rejected,
     );
+}
+
+test "shutdown revokes ready execution before publishing the terminal view" {
+    var account = Account{ .state = .{
+        .session_state = .authenticated,
+        .execution_state = .ready,
+        .account_id = try .init("account-1"),
+        .profile_id = try .init("profile-1"),
+        .display_name = try .init("Metask User"),
+        .selected_api_key_id = try .init("key-1"),
+        .selected_model = try .init("model-1"),
+        .execution_generation = 3,
+        .execution_high_watermark = 3,
+    } };
+
+    var shutdown = account.prepareShutdown();
+    _ = shutdown.takeEffect();
+    shutdown.commit(&account);
+    shutdown.deinit();
+
+    const view = account.view();
+    try std.testing.expectEqual(
+        contract.AccountSessionState.shutting_down,
+        view.session_state,
+    );
+    try std.testing.expectEqual(contract.ExecutionState.none, view.execution_state);
+    try std.testing.expectEqualStrings("", view.selected_api_key_id);
+    try std.testing.expectEqualStrings("", view.selected_model);
+    try std.testing.expectEqual(@as(u64, 0), view.execution_generation);
+    try std.testing.expect(!view.can_create_task);
 }
 
 test "restore failure enters a terminal restart-required state" {
