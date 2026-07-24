@@ -581,6 +581,8 @@ const AccountProjection = struct {
     display_name: FixedText(account_contract.Limits.display_name_bytes) = .{},
     selected_api_key_id: FixedText(account_contract.Limits.api_key_id_bytes) = .{},
     selected_model: FixedText(account_contract.Limits.model_id_bytes) = .{},
+    candidate_api_key_id: FixedText(account_contract.Limits.api_key_id_bytes) = .{},
+    candidate_model: FixedText(account_contract.Limits.model_id_bytes) = .{},
     model_catalog_api_key_id: FixedText(account_contract.Limits.api_key_id_bytes) = .{},
     safe_diagnostic: FixedText(account_contract.Limits.safe_diagnostic_bytes) = .{},
     api_keys: []ApiKeyProjection,
@@ -653,6 +655,8 @@ const AccountProjection = struct {
         self.display_name.setNoFail(source_view.display_name);
         self.selected_api_key_id.setNoFail(source_view.selected_api_key_id);
         self.selected_model.setNoFail(source_view.selected_model);
+        self.candidate_api_key_id.setNoFail(source_view.candidate_api_key_id);
+        self.candidate_model.setNoFail(source_view.candidate_model);
         self.model_catalog_api_key_id.setNoFail(
             source_view.model_catalog_api_key_id,
         );
@@ -711,6 +715,8 @@ const AccountProjection = struct {
             .models = self.model_views[0..self.model_count],
             .selected_api_key_id = self.selected_api_key_id.view(),
             .selected_model = self.selected_model.view(),
+            .candidate_api_key_id = self.candidate_api_key_id.view(),
+            .candidate_model = self.candidate_model.view(),
             .model_catalog_api_key_id = self.model_catalog_api_key_id.view(),
             .can_create_task = can_create_task,
             .error_code = self.error_code,
@@ -1995,6 +2001,12 @@ pub const Workbench = struct {
         writer.writeAll(",\"selectedModelSelectionId\":") catch
             return error.SnapshotTooLarge;
         try self.projectedJsonValue(writer, view.selected_model);
+        writer.writeAll(",\"candidateApiKeySelectionId\":") catch
+            return error.SnapshotTooLarge;
+        try self.projectedJsonValue(writer, view.candidate_api_key_id);
+        writer.writeAll(",\"candidateModelSelectionId\":") catch
+            return error.SnapshotTooLarge;
+        try self.projectedJsonValue(writer, view.candidate_model);
         writer.writeAll(",\"modelCatalogApiKeySelectionId\":") catch
             return error.SnapshotTooLarge;
         try self.projectedJsonValue(writer, view.model_catalog_api_key_id);

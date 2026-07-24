@@ -116,6 +116,8 @@ const CommittedState = struct {
             .display_name = self.display_name.view(),
             .selected_api_key_id = self.selected_api_key_id.view(),
             .selected_model = self.selected_model.view(),
+            .candidate_api_key_id = self.pending_api_key_id.view(),
+            .candidate_model = self.pending_model.view(),
             .model_catalog_api_key_id = switch (self.operation) {
                 .selecting_model, .persisting => self.pending_api_key_id.view(),
                 .loading_models => self.pending_api_key_id.view(),
@@ -1601,6 +1603,8 @@ test "failed reconfiguration preserves committed selection and generation high w
     try std.testing.expectEqual(contract.ExecutionState.reconfiguring, account.view().execution_state);
     try std.testing.expectEqualStrings("model-old", account.view().selected_model);
     try std.testing.expectEqualStrings("key-old", account.view().selected_api_key_id);
+    try std.testing.expectEqualStrings("key-new", account.view().candidate_api_key_id);
+    try std.testing.expectEqualStrings("model-new", account.view().candidate_model);
 
     var failed_completion: WorkerCompletion = .{
         .attempt_id = account.activeAttempt().?,
@@ -1617,6 +1621,8 @@ test "failed reconfiguration preserves committed selection and generation high w
     try std.testing.expectEqual(contract.ExecutionState.ready, account.view().execution_state);
     try std.testing.expectEqualStrings("model-old", account.view().selected_model);
     try std.testing.expectEqualStrings("key-old", account.view().selected_api_key_id);
+    try std.testing.expectEqualStrings("", account.view().candidate_api_key_id);
+    try std.testing.expectEqualStrings("", account.view().candidate_model);
     try std.testing.expectEqual(@as(u64, 9), account.view().execution_generation);
 
     var logout = switch (account.prepareCommand(.logout)) {
@@ -1687,6 +1693,8 @@ test "ready execution reloads authenticated catalog before reconfiguration" {
     try std.testing.expectEqual(contract.ExecutionState.ready, view.execution_state);
     try std.testing.expectEqualStrings("key-old", view.selected_api_key_id);
     try std.testing.expectEqualStrings("model-old", view.selected_model);
+    try std.testing.expectEqualStrings("key-new", view.candidate_api_key_id);
+    try std.testing.expectEqualStrings("", view.candidate_model);
     try std.testing.expectEqualStrings("key-old", view.model_catalog_api_key_id);
     try std.testing.expect(!view.can_create_task);
 
@@ -1705,6 +1713,9 @@ test "ready execution reloads authenticated catalog before reconfiguration" {
     };
     try std.testing.expect(select_model.takeEffect().? == .load_api_keys);
     commitPrepared(&account, &select_model);
+    view = account.view();
+    try std.testing.expectEqualStrings("key-old", view.candidate_api_key_id);
+    try std.testing.expectEqualStrings("model-new", view.candidate_model);
 
     var keys_loaded: WorkerCompletion = .{
         .attempt_id = account.activeAttempt().?,
@@ -1741,6 +1752,8 @@ test "ready execution reloads authenticated catalog before reconfiguration" {
     try std.testing.expectEqual(contract.ExecutionState.reconfiguring, view.execution_state);
     try std.testing.expectEqualStrings("key-old", view.selected_api_key_id);
     try std.testing.expectEqualStrings("model-old", view.selected_model);
+    try std.testing.expectEqualStrings("key-old", view.candidate_api_key_id);
+    try std.testing.expectEqualStrings("model-new", view.candidate_model);
     try std.testing.expectEqualStrings("key-old", view.model_catalog_api_key_id);
     try std.testing.expect(!view.can_create_task);
     try std.testing.expect(!view.can_cancel);

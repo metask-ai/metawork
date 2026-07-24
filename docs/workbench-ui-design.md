@@ -711,6 +711,7 @@ Account & models
 - 语言、API 和模型统一使用经过键盘、焦点、碰撞和长列表验证的同一 headless Select primitive；正式设置页禁止依赖 WebView 平台主题的原生 `<select>`，也不建立另一套自绘菜单；
 - compact 选择器只显示一个短值；API 使用 detailed 选择器，以 API 名称为主信息，以 Provider 为次级说明，以脱敏尾号为尾部数据。Provider 和尾号不得表现成可编辑字段；
 - API 与模型控件保持明确的上下游顺序。API 切换开始后只冻结相关配置组；模型目录加载、选择和持久化不得冻结语言、导航、历史阅读或取消仍被 Host 接受的操作；
+- 设置页把默认配置切换表现为一笔 Host-owned 事务：已提交 API/模型始终是当前真值，候选 API/模型只显示为“待应用更改”或“正在保存”。Renderer 可在命令 acknowledgement 前短暂回显用户刚发出的请求，但收到 snapshot 后必须以 Host 的 candidate projection 为准；页面重建、取消、失败和成功都不得依赖 Renderer 临时状态恢复事务；
 - 浮层只在打开时使用克制的透明度与位置过渡；loading 指示只出现在真实运行的配置项，`prefers-reduced-motion` 下移除非必要动画；
 - 当前分区导航必须有持续可见的选中态和 `aria-current`，不能只在 hover 时出现；focus ring、菜单选中勾选、状态色和文字共同表达状态。
 
@@ -719,12 +720,12 @@ Account operation 在设置中的投影如下：
 | Host operation    | API 控件                                   | 模型控件                             | 状态与恢复                                                                   |
 | ----------------- | ------------------------------------------ | ------------------------------------ | ---------------------------------------------------------------------------- |
 | `none`            | 显示当前默认 API，可选择                   | 显示当前默认模型，可选择             | 不常驻成功提示                                                               |
-| `loading_keys`    | 局部 busy，保留已提交默认事实              | 保留已提交默认事实                   | 显示正在刷新账号选项；Host 允许时保留取消                                    |
+| `loading_keys`    | 有切换意图时显示 Host 候选 API 和 busy；普通刷新保留已提交默认 API | 模型切换时显示候选模型，否则保留已提交默认模型 | 明确候选仍在准备、当前默认仍有效；Host 允许时保留取消                         |
 | `loading_models`  | 显示候选 API 和 busy，不接收重复切换       | 显示该 API 的模型加载状态            | 明确旧默认配置仍然有效；Host 允许时保留取消                                  |
 | `selecting_model` | 显示模型目录所属的候选 API                 | 请求用户从 Host-validated 目录中选择 | 说明选择模型将完成新的默认配置；不得由 Renderer 自动选择                     |
 | `selecting_key`   | 显示真实 API 歧义并请求选择                | 不伪造模型入口                       | 只在 Host 明确请求 API 选择时出现                                            |
 | `persisting`      | 保持候选 API 可读并锁定相关 mutation       | 保持候选模型可读并显示正在保存       | credential persistence 已越过取消边界时不显示假取消，等待唯一 completion     |
-| terminal failure  | 恢复已提交默认配置或 Host 发布的可恢复候选 | 不保留失效候选                       | 说明失败原因与下一步；旧默认仍有效时必须直说，不能留下永久 disabled selector |
+| cancel / terminal failure | 恢复已提交默认配置，不保留失效候选       | 恢复已提交默认配置，不保留失效候选   | 取消明确说明未应用更改；失败说明原因与旧默认仍有效，不能留下永久 disabled selector |
 | `reauth_required` | 保留脱敏事实但禁用 catalog mutation        | 保留脱敏事实但禁用 catalog mutation  | 把重新认证作为当前恢复动作，不能清空 Workspace、Task 或已有 execution 事实   |
 
 技能、连接器、定时任务和 IM 频道只有在真实接通并形成清晰产品 owner 后才进入导航；未接通时不放置假入口，也不照搬其他 Agent 产品的信息架构。

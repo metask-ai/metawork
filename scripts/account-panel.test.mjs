@@ -40,6 +40,8 @@ const signedOut = {
   models: [],
   selectedApiKeySelectionId: "",
   selectedModelSelectionId: "",
+  candidateApiKeySelectionId: "",
+  candidateModelSelectionId: "",
   modelCatalogApiKeySelectionId: "",
   canCreateTask: false,
   errorCode: "none",
@@ -396,7 +398,7 @@ test("reauth-required settings disable stale catalog mutations", () => {
   assert.match(panel, />Sign out…</);
 });
 
-test("settings project every Account operation without inventing config truth", () => {
+test("settings project the full API transaction without replacing committed truth", () => {
   const base = {
     ...signedOut,
     sessionState: "authenticated",
@@ -437,11 +439,26 @@ test("settings project every Account operation without inventing config truth", 
       }),
     );
 
+  const preparing = renderSettings({
+    ...base,
+    operation: "loading_keys",
+    candidateApiKeySelectionId: "key-2",
+    canCreateTask: false,
+    canCancel: true,
+  });
+  assert.match(preparing, /selection-trigger-value">Backup</);
+  assert.match(preparing, /Pending change/);
+  assert.match(preparing, /Preparing Backup/);
+  assert.match(preparing, /current default.*stays active/i);
+  assert.match(preparing, /selection-trigger-value">Model One</);
+
   const loading = renderSettings({
     ...base,
     operation: "loading_models",
+    candidateApiKeySelectionId: "key-2",
     modelCatalogApiKeySelectionId: "key-2",
     models: [],
+    canCreateTask: false,
     canCancel: true,
   });
   assert.match(
@@ -456,10 +473,12 @@ test("settings project every Account operation without inventing config truth", 
   const choosing = renderSettings({
     ...base,
     operation: "selecting_model",
+    candidateApiKeySelectionId: "key-2",
     modelCatalogApiKeySelectionId: "key-2",
     primaryAction: "choose_model",
     readiness: "choice_required",
     models: [{ selectionId: "model-2", displayName: "Model Two" }],
+    canCreateTask: false,
     canCancel: true,
   });
   assert.match(choosing, /<button[^>]*disabled=""[^>]*id="settings-api"/);
@@ -471,16 +490,22 @@ test("settings project every Account operation without inventing config truth", 
 
   const persisting = renderSettings({
     ...base,
+    executionState: "reconfiguring",
     operation: "persisting",
+    candidateApiKeySelectionId: "key-2",
+    candidateModelSelectionId: "model-2",
     modelCatalogApiKeySelectionId: "key-2",
     models: [{ selectionId: "model-2", displayName: "Model Two" }],
+    canCreateTask: false,
     canCancel: false,
   });
   assert.match(
     persisting,
     /id="settings-model"[^>]*aria-busy="true"[^>]*data-busy="true"/,
   );
-  assert.match(persisting, /Saving execution settings/);
+  assert.match(persisting, /Saving the new default/);
+  assert.match(persisting, /Backup · Model Two/);
+  assert.match(persisting, /Saving/);
   assert.doesNotMatch(persisting, />Cancel</);
 
   const failed = renderSettings({
@@ -489,7 +514,15 @@ test("settings project every Account operation without inventing config truth", 
   });
   assert.match(failed, /role="alert"/);
   assert.match(failed, /Account action needs attention/);
+  assert.match(failed, /No default was changed/);
   assert.match(failed, />Refresh account options</);
+
+  const cancelled = renderSettings({
+    ...base,
+    errorCode: "user_cancelled",
+  });
+  assert.match(cancelled, /Change cancelled/);
+  assert.match(cancelled, /Primary · Model One remains your default/);
 });
 
 test("cold connection failure exposes only reconnect and technical details", () => {

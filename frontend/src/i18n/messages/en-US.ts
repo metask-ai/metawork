@@ -352,6 +352,29 @@ export const enUS = {
   "settings.model_loading": "Loading models…",
   "settings.model_waiting_api": "Choose an API first",
   "settings.loading_models_for": "Loading models available to {api}…",
+  "settings.switch.pending_label": "Pending change",
+  "settings.switch.saving_label": "Saving",
+  "settings.switch.preparing_api": "Preparing {api}",
+  "settings.switch.preparing_model": "Preparing {model}",
+  "settings.switch.loading_models": "Loading models for {api}",
+  "settings.switch.choose_model": "Choose a model for {api}",
+  "settings.switch.choose_model_help":
+    "The new default is not saved until you choose a model.",
+  "settings.switch.choose_api_help":
+    "Choose the API that should supply models for new tasks.",
+  "settings.switch.saving": "Saving the new default",
+  "settings.switch.saving_detail":
+    "{api} · {model} will be used for new tasks when saving finishes.",
+  "settings.switch.current_preserved":
+    "Your current default stays active until this finishes.",
+  "settings.switch.refreshing":
+    "Your current default stays active while account options refresh.",
+  "settings.switch.working":
+    "Account changes remain locked until this action finishes.",
+  "settings.switch.cancelled":
+    "Change cancelled. {api} · {model} remains your default.",
+  "settings.switch.failure_preserved":
+    "No default was changed. {api} · {model} remains active.",
   "settings.existing_tasks_unchanged":
     "Default changes apply only to new tasks. Existing task bindings and history remain unchanged.",
   "settings.signout_title": "Sign out on this device",

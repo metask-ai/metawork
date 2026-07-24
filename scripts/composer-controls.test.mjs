@@ -239,6 +239,8 @@ const readySettingsAccount = {
   ],
   selectedApiKeySelectionId: "key-1",
   selectedModelSelectionId: "model-1",
+  candidateApiKeySelectionId: "",
+  candidateModelSelectionId: "",
   modelCatalogApiKeySelectionId: "key-1",
   canCreateTask: true,
   errorCode: "none",
@@ -247,80 +249,93 @@ const readySettingsAccount = {
   executionGeneration: "1",
 };
 
-function renderSettings(account, overrides = {}) {
-  const selections = { api: [], model: [] };
-  const view = render(
-    createElement(
-      I18nContext.Provider,
-      {
-        value: {
-          locale: "en-US",
-          setLocale() {},
-          t: (id, values) => translate("en-US", id, values),
-        },
+function settingsElement(account, overrides = {}) {
+  return createElement(
+    I18nContext.Provider,
+    {
+      value: {
+        locale: "en-US",
+        setLocale() {},
+        t: (id, values) => translate("en-US", id, values),
       },
-      createElement(SettingsPage, {
-        account,
-        focusTarget: "title",
-        disabled: false,
-        cancelDisabled: false,
-        onBack() {},
-        onRefresh() {},
-        onCancel() {},
-        onSelectApiKey(value) {
-          selections.api.push(value);
-        },
-        onSelectModel(value) {
-          selections.model.push(value);
-        },
-        onReauthenticate() {},
-        onLogout() {},
-        ...overrides,
-      }),
-    ),
+    },
+    createElement(SettingsPage, {
+      account,
+      focusTarget: "title",
+      disabled: false,
+      cancelDisabled: false,
+      onBack() {},
+      onRefresh() {},
+      onCancel() {},
+      onSelectApiKey() {},
+      onSelectModel() {},
+      onReauthenticate() {},
+      onLogout() {},
+      ...overrides,
+    }),
   );
-  return { ...view, selections };
 }
 
-test("Settings API choice follows Host catalog state before enabling models", async () => {
+function renderSettings(account, overrides = {}) {
+  const selections = { api: [], model: [] };
+  const callbacks = {
+    onSelectApiKey(value) {
+      selections.api.push(value);
+    },
+    onSelectModel(value) {
+      selections.model.push(value);
+    },
+    ...overrides,
+  };
+  const view = render(settingsElement(account, callbacks));
+  return {
+    ...view,
+    selections,
+    rerenderAccount(nextAccount) {
+      view.rerender(settingsElement(nextAccount, callbacks));
+    },
+  };
+}
+
+test("Settings completes the API transaction before replacing committed defaults", async () => {
   const user = userEvent.setup({ document: dom.window.document });
   const view = renderSettings(readySettingsAccount);
 
   await user.click(screen.getByRole("combobox", { name: "Default API" }));
   await user.click(screen.getByRole("option", { name: "Backup" }));
   assert.deepEqual(view.selections.api, ["key-2"]);
-
-  view.rerender(
-    createElement(
-      I18nContext.Provider,
-      {
-        value: {
-          locale: "en-US",
-          setLocale() {},
-          t: (id, values) => translate("en-US", id, values),
-        },
-      },
-      createElement(SettingsPage, {
-        account: {
-          ...readySettingsAccount,
-          operation: "loading_models",
-          modelCatalogApiKeySelectionId: "key-2",
-          models: [],
-          canCancel: true,
-        },
-        focusTarget: "title",
-        disabled: false,
-        cancelDisabled: false,
-        onBack() {},
-        onRefresh() {},
-        onCancel() {},
-        onSelectApiKey() {},
-        onSelectModel() {},
-        onReauthenticate() {},
-        onLogout() {},
-      }),
-    ),
+  assert.match(
+    screen.getByRole("combobox", { name: "Default API" }).textContent,
+    /Backup.*OpenAI.*5678/,
   );
+  assert.match(screen.getByText("Pending change").textContent, /Pending/);
+
+  view.rerenderAccount({
+    ...readySettingsAccount,
+    operation: "loading_keys",
+    candidateApiKeySelectionId: "key-2",
+    canCreateTask: false,
+    canCancel: true,
+  });
+  assert.match(screen.getByRole("status").textContent, /Preparing Backup/);
+  assert.match(
+    screen.getByRole("status").textContent,
+    /current default stays active/i,
+  );
+  assert.match(
+    screen.getByRole("combobox", { name: "Default model" }).textContent,
+    /Model One/,
+  );
+
+  view.rerenderAccount({
+    ...readySettingsAccount,
+    operation: "loading_models",
+    candidateApiKeySelectionId: "key-2",
+    modelCatalogApiKeySelectionId: "key-2",
+    models: [],
+    canCreateTask: false,
+    canCancel: true,
+  });
 
   const api = screen.getByRole("combobox", { name: "Default API" });
   const model = screen.getByRole("combobox", { name: "Default model" });
@@ -328,6 +343,69 @@ test("Settings API choice follows Host catalog state before enabling models", as
   assert.equal(api.getAttribute("aria-busy"), "true");
   assert.match(model.textContent, /Loading models/);
   assert.equal(model.hasAttribute("disabled"), true);
+
+  view.rerenderAccount({
+    ...readySettingsAccount,
+    operation: "selecting_model",
+    readiness: "choice_required",
+    primaryAction: "choose_model",
+    candidateApiKeySelectionId: "key-2",
+    modelCatalogApiKeySelectionId: "key-2",
+    models: [{ selectionId: "model-2", displayName: "Model Two" }],
+    canCreateTask: false,
+    canCancel: true,
+  });
+  assert.match(
+    screen.getByRole("status").textContent,
+    /Choose a model for Backup/,
+  );
+  assert.equal(
+    screen
+      .getByRole("combobox", { name: "Default model" })
+      .hasAttribute("disabled"),
+    false,
+  );
+  await user.click(screen.getByRole("combobox", { name: "Default model" }));
+  await user.click(screen.getByRole("option", { name: "Model Two" }));
+  assert.deepEqual(view.selections.model, ["model-2"]);
+
+  view.rerenderAccount({
+    ...readySettingsAccount,
+    executionState: "reconfiguring",
+    operation: "persisting",
+    readiness: "preparing",
+    candidateApiKeySelectionId: "key-2",
+    candidateModelSelectionId: "model-2",
+    modelCatalogApiKeySelectionId: "key-2",
+    models: [{ selectionId: "model-2", displayName: "Model Two" }],
+    canCreateTask: false,
+    canCancel: false,
+  });
+  assert.match(
+    screen.getByRole("status").textContent,
+    /Saving the new default/,
+  );
+  assert.match(screen.getByRole("status").textContent, /Backup · Model Two/);
+  assert.equal(screen.queryByRole("button", { name: "Cancel" }), null);
+
+  view.rerenderAccount({
+    ...readySettingsAccount,
+    models: [{ selectionId: "model-2", displayName: "Model Two" }],
+    selectedApiKeySelectionId: "key-2",
+    selectedModelSelectionId: "model-2",
+    modelCatalogApiKeySelectionId: "key-2",
+    executionGeneration: "2",
+  });
+  assert.match(
+    screen.getByRole("combobox", { name: "Default API" }).textContent,
+    /Backup/,
+  );
+  assert.match(
+    screen.getByRole("combobox", { name: "Default model" }).textContent,
+    /Model Two/,
+  );
+  assert.equal(screen.queryByText("Pending change"), null);
+  assert.equal(screen.queryByRole("status"), null);
 });
 
 test("Settings keeps a model choice visibly pending without declaring it committed", async () => {
