@@ -343,7 +343,15 @@ test("ready Account uses a formal settings route with truthful defaults", () => 
   assert.match(panel, /<h1[^>]*tabindex="-1">Settings</);
   assert.match(panel, /Metask User/);
   assert.match(panel, />Model One</);
-  assert.match(panel, /Primary · Anthropic •••• 1234/);
+  assert.equal((panel.match(/role="combobox"/g) ?? []).length, 3);
+  assert.match(panel, /selection-trigger-value">Primary</);
+  assert.match(
+    panel,
+    /selection-trigger-detail" data-kind="text" title="Anthropic">Anthropic</,
+  );
+  assert.match(panel, /selection-trigger-trailing">•••• 1234</);
+  assert.doesNotMatch(panel, /<select(?![^>]*aria-hidden="true")/);
+  assert.match(panel, /aria-current="location">General</);
   assert.match(panel, />Refresh account options</);
   assert.match(panel, />Sign out…</);
   assert.match(panel, /Existing task bindings and history remain unchanged/);
@@ -382,10 +390,106 @@ test("reauth-required settings disable stale catalog mutations", () => {
     }),
   );
   assert.match(panel, />Sign in again</);
-  assert.match(panel, /id="settings-api"[^>]*disabled=""/);
-  assert.match(panel, /id="settings-model"[^>]*disabled=""/);
+  assert.match(panel, /<button[^>]*disabled=""[^>]*id="settings-api"/);
+  assert.match(panel, /<button[^>]*disabled=""[^>]*id="settings-model"/);
   assert.match(panel, /<button[^>]*disabled=""[^>]*>Refresh account options/);
   assert.match(panel, />Sign out…</);
+});
+
+test("settings project every Account operation without inventing config truth", () => {
+  const base = {
+    ...signedOut,
+    sessionState: "authenticated",
+    executionState: "ready",
+    readiness: "ready",
+    primaryAction: "none",
+    accountId: "account-1",
+    displayName: "Metask User",
+    apiKeys: [
+      {
+        selectionId: "key-1",
+        name: "Primary",
+        suffix: "1234",
+        provider: "anthropic",
+      },
+      {
+        selectionId: "key-2",
+        name: "Backup",
+        suffix: "5678",
+        provider: "openai",
+      },
+    ],
+    models: [{ selectionId: "model-1", displayName: "Model One" }],
+    selectedApiKeySelectionId: "key-1",
+    selectedModelSelectionId: "model-1",
+    modelCatalogApiKeySelectionId: "key-1",
+    canCreateTask: true,
+    executionGeneration: "1",
+  };
+  const renderSettings = (account) =>
+    withI18n(
+      createElement(SettingsPage, {
+        account,
+        focusTarget: "title",
+        disabled: false,
+        cancelDisabled: false,
+        ...callbacks,
+      }),
+    );
+
+  const loading = renderSettings({
+    ...base,
+    operation: "loading_models",
+    modelCatalogApiKeySelectionId: "key-2",
+    models: [],
+    canCancel: true,
+  });
+  assert.match(
+    loading,
+    /id="settings-api"[^>]*aria-busy="true"[^>]*data-busy="true"/,
+  );
+  assert.match(loading, /selection-trigger-value">Backup</);
+  assert.match(loading, /Loading models available to Backup/);
+  assert.match(loading, />Loading models…</);
+  assert.match(loading, />Cancel</);
+
+  const choosing = renderSettings({
+    ...base,
+    operation: "selecting_model",
+    modelCatalogApiKeySelectionId: "key-2",
+    primaryAction: "choose_model",
+    readiness: "choice_required",
+    models: [{ selectionId: "model-2", displayName: "Model Two" }],
+    canCancel: true,
+  });
+  assert.match(choosing, /<button[^>]*disabled=""[^>]*id="settings-api"/);
+  assert.doesNotMatch(
+    choosing,
+    /<button[^>]*disabled=""[^>]*id="settings-model"/,
+  );
+  assert.match(choosing, />Choose a model</);
+
+  const persisting = renderSettings({
+    ...base,
+    operation: "persisting",
+    modelCatalogApiKeySelectionId: "key-2",
+    models: [{ selectionId: "model-2", displayName: "Model Two" }],
+    canCancel: false,
+  });
+  assert.match(
+    persisting,
+    /id="settings-model"[^>]*aria-busy="true"[^>]*data-busy="true"/,
+  );
+  assert.match(persisting, /Saving execution settings/);
+  assert.doesNotMatch(persisting, />Cancel</);
+
+  const failed = renderSettings({
+    ...base,
+    errorCode: "metask_service_unavailable",
+  });
+  assert.match(failed, /role="alert"/);
+  assert.match(failed, /Account action needs attention/);
+  assert.match(failed, />Refresh account options</);
 });
 
 test("cold connection failure exposes only reconnect and technical details", () => {

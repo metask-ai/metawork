@@ -20,6 +20,7 @@ Object.assign(globalThis, {
   Element: dom.window.Element,
   HTMLElement: dom.window.HTMLElement,
   HTMLButtonElement: dom.window.HTMLButtonElement,
+  HTMLInputElement: dom.window.HTMLInputElement,
   MutationObserver: dom.window.MutationObserver,
   CustomEvent: dom.window.CustomEvent,
   getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
@@ -82,6 +83,9 @@ const { SelectionMenu } = await vite.ssrLoadModule(
 );
 const { ComposerFooter } = await vite.ssrLoadModule(
   "/src/features/composer/ComposerFooter.tsx",
+);
+const { SettingsPage } = await vite.ssrLoadModule(
+  "/src/features/settings/SettingsPage.tsx",
 );
 const { I18nContext } = await vite.ssrLoadModule("/src/i18n/context.ts");
 const { translate } = await vite.ssrLoadModule("/src/i18n/runtime.ts");
@@ -203,6 +207,142 @@ test("SelectionMenu exposes a visible busy state without a false chevron", () =>
   assert.equal(trigger.getAttribute("aria-busy"), "true");
   assert.ok(trigger.querySelector(".selection-trigger-busy"));
   assert.equal(trigger.querySelector(".selection-trigger-chevron"), null);
+});
+
+const readySettingsAccount = {
+  sessionState: "authenticated",
+  executionState: "ready",
+  operation: "none",
+  readiness: "ready",
+  primaryAction: "none",
+  canCancel: false,
+  accountId: "account-1",
+  profileId: "profile-1",
+  displayName: "Metask User",
+  apiKeys: [
+    {
+      selectionId: "key-1",
+      name: "Primary",
+      suffix: "1234",
+      provider: "anthropic",
+    },
+    {
+      selectionId: "key-2",
+      name: "Backup",
+      suffix: "5678",
+      provider: "openai",
+    },
+  ],
+  models: [
+    { selectionId: "model-1", displayName: "Model One" },
+    { selectionId: "model-2", displayName: "Model Two" },
+  ],
+  selectedApiKeySelectionId: "key-1",
+  selectedModelSelectionId: "model-1",
+  modelCatalogApiKeySelectionId: "key-1",
+  canCreateTask: true,
+  errorCode: "none",
+  safeDiagnostic: "",
+  catalogGeneration: "1",
+  executionGeneration: "1",
+};
+
+function renderSettings(account, overrides = {}) {
+  const selections = { api: [], model: [] };
+  const view = render(
+    createElement(
+      I18nContext.Provider,
+      {
+        value: {
+          locale: "en-US",
+          setLocale() {},
+          t: (id, values) => translate("en-US", id, values),
+        },
+      },
+      createElement(SettingsPage, {
+        account,
+        focusTarget: "title",
+        disabled: false,
+        cancelDisabled: false,
+        onBack() {},
+        onRefresh() {},
+        onCancel() {},
+        onSelectApiKey(value) {
+          selections.api.push(value);
+        },
+        onSelectModel(value) {
+          selections.model.push(value);
+        },
+        onReauthenticate() {},
+        onLogout() {},
+        ...overrides,
+      }),
+    ),
+  );
+  return { ...view, selections };
+}
+
+test("Settings API choice follows Host catalog state before enabling models", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  const view = renderSettings(readySettingsAccount);
+
+  await user.click(screen.getByRole("combobox", { name: "Default API" }));
+  await user.click(screen.getByRole("option", { name: "Backup" }));
+  assert.deepEqual(view.selections.api, ["key-2"]);
+
+  view.rerender(
+    createElement(
+      I18nContext.Provider,
+      {
+        value: {
+          locale: "en-US",
+          setLocale() {},
+          t: (id, values) => translate("en-US", id, values),
+        },
+      },
+      createElement(SettingsPage, {
+        account: {
+          ...readySettingsAccount,
+          operation: "loading_models",
+          modelCatalogApiKeySelectionId: "key-2",
+          models: [],
+          canCancel: true,
+        },
+        focusTarget: "title",
+        disabled: false,
+        cancelDisabled: false,
+        onBack() {},
+        onRefresh() {},
+        onCancel() {},
+        onSelectApiKey() {},
+        onSelectModel() {},
+        onReauthenticate() {},
+        onLogout() {},
+      }),
+    ),
+  );
+
+  const api = screen.getByRole("combobox", { name: "Default API" });
+  const model = screen.getByRole("combobox", { name: "Default model" });
+  assert.match(api.textContent, /Backup.*OpenAI.*5678/);
+  assert.equal(api.getAttribute("aria-busy"), "true");
+  assert.match(model.textContent, /Loading models/);
+  assert.equal(model.hasAttribute("disabled"), true);
+});
+
+test("Settings keeps a model choice visibly pending without declaring it committed", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  const view = renderSettings(readySettingsAccount);
+
+  await user.click(screen.getByRole("combobox", { name: "Default model" }));
+  await user.click(screen.getByRole("option", { name: "Model Two" }));
+
+  assert.deepEqual(view.selections.model, ["model-2"]);
+  assert.match(
+    screen.getByRole("combobox", { name: "Default model" }).textContent,
+    /Model Two/,
+  );
+  assert.equal(readySettingsAccount.selectedModelSelectionId, "model-1");
 });
 
 function renderComposer(overrides = {}) {

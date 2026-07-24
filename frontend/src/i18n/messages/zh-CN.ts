@@ -312,13 +312,18 @@ export const zhCN: Record<MessageId, string> = {
   "settings.section_label": "设置",
   "settings.general": "通用",
   "settings.account_models": "账号与模型",
+  "settings.execution_defaults": "执行默认配置",
   "settings.language_help": "更改会立即应用到这台设备。",
   "settings.default_api": "默认 API",
   "settings.default_api_help":
     "切换 API 后会加载由该 Metask API 提供的模型目录。",
+  "settings.api_menu_help": "Provider 由 Metask 提供，此处仅用于识别。",
   "settings.default_model": "默认模型",
   "settings.default_model_help":
     "用于新建任务；已有任务继续使用创建时绑定的模型。",
+  "settings.model_menu_help": "从所选 API 提供的模型中选择。",
+  "settings.model_loading": "正在加载模型…",
+  "settings.model_waiting_api": "请先选择 API",
   "settings.loading_models_for": "正在加载 {api} 可用的模型…",
   "settings.existing_tasks_unchanged":
     "默认配置只影响新任务。已有任务的绑定和历史不会被改写。",

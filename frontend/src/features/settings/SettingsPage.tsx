@@ -2,10 +2,15 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { AccountView } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
+import {
+  SelectionMenu,
+  type SelectionMenuOption,
+} from "../../components/ui/SelectionMenu.tsx";
 import { useI18n, type Locale } from "../../i18n/context.ts";
 import { accountErrorText } from "../../i18n/account-error.ts";
 
 export type SettingsFocusTarget = "title" | "signout";
+type SettingsSection = "general" | "account";
 
 function providerLabel(
   provider: AccountView["apiKeys"][number]["provider"],
@@ -41,7 +46,16 @@ export function SettingsPage({
 }) {
   const { locale, setLocale, t } = useI18n();
   const [confirmSignOut, setConfirmSignOut] = useState(false);
+  const [activeSection, setActiveSection] =
+    useState<SettingsSection>("general");
+  const [pendingModel, setPendingModel] = useState<{
+    selectionId: string;
+    displayName: string;
+  } | null>(null);
+  const page = useRef<HTMLDivElement>(null);
   const title = useRef<HTMLHeadingElement>(null);
+  const generalSection = useRef<HTMLElement>(null);
+  const accountSection = useRef<HTMLElement>(null);
   const signOut = useRef<HTMLButtonElement>(null);
   const signOutCancel = useRef<HTMLButtonElement>(null);
   const modelCatalogApi = useMemo(
@@ -54,7 +68,15 @@ export function SettingsPage({
   const selectedApi = account.apiKeys.find(
     (key) => key.selectionId === account.selectedApiKeySelectionId,
   );
-  const modelCatalogLoading = account.operation === "loading_models";
+  const modelCatalogLoading = ["loading_keys", "loading_models"].includes(
+    account.operation,
+  );
+  const apiBusy = ["loading_keys", "loading_models"].includes(
+    account.operation,
+  );
+  const modelBusy = ["loading_models", "persisting"].includes(
+    account.operation,
+  );
   const authenticated = account.sessionState === "authenticated";
   const canChooseApi =
     authenticated && ["none", "selecting_key"].includes(account.operation);
@@ -64,6 +86,57 @@ export function SettingsPage({
     account.operation === "none"
       ? null
       : t(`account.operation.${account.operation}`);
+  const languageOptions = useMemo<SelectionMenuOption[]>(
+    () => [
+      { value: "en-US", label: t("app.language.en-US") },
+      { value: "zh-CN", label: t("app.language.zh-CN") },
+      ...(import.meta.env.DEV
+        ? [{ value: "pseudo", label: t("app.language.pseudo") }]
+        : []),
+    ],
+    [t],
+  );
+  const apiOptions = useMemo<SelectionMenuOption[]>(
+    () =>
+      account.apiKeys.map((key) => ({
+        value: key.selectionId,
+        label: key.name || t("account.api_fallback"),
+        description: providerLabel(key.provider, t),
+        descriptionKind: "text",
+        trailing: key.suffix ? `•••• ${key.suffix}` : undefined,
+      })),
+    [account.apiKeys, t],
+  );
+  const modelOptions = useMemo<SelectionMenuOption[]>(() => {
+    const options = account.models.map((model) => ({
+      value: model.selectionId,
+      label: model.displayName || t("account.model_fallback"),
+    }));
+    if (
+      pendingModel &&
+      !options.some((option) => option.value === pendingModel.selectionId)
+    ) {
+      options.unshift({
+        value: pendingModel.selectionId,
+        label: pendingModel.displayName,
+      });
+    }
+    return options;
+  }, [account.models, pendingModel, t]);
+  const selectedApiId =
+    modelCatalogApi?.selectionId || selectedApi?.selectionId || "";
+  const selectedModelId = pendingModel
+    ? pendingModel.selectionId
+    : account.models.some(
+          (model) => model.selectionId === account.selectedModelSelectionId,
+        )
+      ? account.selectedModelSelectionId
+      : "";
+  const modelPlaceholder = modelCatalogLoading
+    ? t("settings.model_loading")
+    : account.operation === "selecting_key"
+      ? t("settings.model_waiting_api")
+      : t("account.choose_model");
 
   useEffect(() => {
     window.requestAnimationFrame(() => {
@@ -79,19 +152,59 @@ export function SettingsPage({
     return () => window.cancelAnimationFrame(frame);
   }, [confirmSignOut]);
 
+  useEffect(() => {
+    if (
+      account.errorCode !== "none" ||
+      account.sessionState === "reauth_required" ||
+      (account.operation === "none" && !disabled)
+    ) {
+      setPendingModel(null);
+    }
+  }, [
+    account.errorCode,
+    account.operation,
+    account.selectedModelSelectionId,
+    account.sessionState,
+    disabled,
+  ]);
+
+  useEffect(() => {
+    if (!page.current || typeof IntersectionObserver === "undefined") return;
+    const sections = [generalSection.current, accountSection.current].filter(
+      (section): section is HTMLElement => section !== null,
+    );
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const visible = entries
+          .filter((entry) => entry.isIntersecting)
+          .sort(
+            (left, right) =>
+              Math.abs(left.boundingClientRect.top) -
+              Math.abs(right.boundingClientRect.top),
+          )[0];
+        if (visible?.target.id === "settings-general") {
+          setActiveSection("general");
+        } else if (visible?.target.id === "settings-account") {
+          setActiveSection("account");
+        }
+      },
+      {
+        root: page.current,
+        rootMargin: "-18% 0px -62% 0px",
+        threshold: [0, 0.1, 0.5],
+      },
+    );
+    sections.forEach((section) => observer.observe(section));
+    return () => observer.disconnect();
+  }, []);
+
   function closeSignOutConfirmation() {
     setConfirmSignOut(false);
     window.requestAnimationFrame(() => signOut.current?.focus());
   }
 
-  function apiLabel(key: AccountView["apiKeys"][number]) {
-    const name = key.name || t("account.api_fallback");
-    const suffix = key.suffix ? ` •••• ${key.suffix}` : "";
-    return `${name} · ${providerLabel(key.provider, t)}${suffix}`;
-  }
-
   return (
-    <div className="settings-page">
+    <div ref={page} className="settings-page">
       <header className="settings-hero">
         <button className="settings-back focus-ring" onClick={onBack}>
           <Icon name="arrow-left" />
@@ -106,41 +219,59 @@ export function SettingsPage({
 
       <div className="settings-layout">
         <nav className="settings-nav" aria-label={t("settings.sections")}>
-          <a className="focus-ring" href="#settings-general">
+          <a
+            className="focus-ring"
+            href="#settings-general"
+            aria-current={activeSection === "general" ? "location" : undefined}
+            onClick={() => setActiveSection("general")}
+          >
             {t("settings.general")}
           </a>
-          <a className="focus-ring" href="#settings-account">
+          <a
+            className="focus-ring"
+            href="#settings-account"
+            aria-current={activeSection === "account" ? "location" : undefined}
+            onClick={() => setActiveSection("account")}
+          >
             {t("settings.account_models")}
           </a>
         </nav>
 
         <div className="settings-content">
-          <section id="settings-general" className="settings-section">
+          <section
+            ref={generalSection}
+            id="settings-general"
+            className="settings-section"
+          >
             <div className="settings-section-heading">
               <p>{t("settings.section_label")}</p>
               <h2>{t("settings.general")}</h2>
             </div>
-            <div className="settings-row">
-              <div>
-                <label htmlFor="settings-language">{t("app.language")}</label>
-                <p>{t("settings.language_help")}</p>
+            <div className="settings-preference-list">
+              <div className="settings-row">
+                <div>
+                  <label htmlFor="settings-language">{t("app.language")}</label>
+                  <p>{t("settings.language_help")}</p>
+                </div>
+                <SelectionMenu
+                  triggerId="settings-language"
+                  value={locale}
+                  options={languageOptions}
+                  placeholder={t("app.language")}
+                  ariaLabel={t("app.language")}
+                  disabled={false}
+                  triggerClassName="settings-control settings-control-compact"
+                  onValueChange={(value) => setLocale(value as Locale)}
+                />
               </div>
-              <select
-                id="settings-language"
-                className="settings-select focus-ring"
-                value={locale}
-                onChange={(event) => setLocale(event.target.value as Locale)}
-              >
-                <option value="en-US">{t("app.language.en-US")}</option>
-                <option value="zh-CN">{t("app.language.zh-CN")}</option>
-                {import.meta.env.DEV && (
-                  <option value="pseudo">{t("app.language.pseudo")}</option>
-                )}
-              </select>
             </div>
           </section>
 
-          <section id="settings-account" className="settings-section">
+          <section
+            ref={accountSection}
+            id="settings-account"
+            className="settings-section"
+          >
             <div className="settings-section-heading">
               <p>{t("settings.section_label")}</p>
               <h2>{t("settings.account_models")}</h2>
@@ -150,7 +281,7 @@ export function SettingsPage({
               <span className="settings-avatar" aria-hidden="true">
                 {[...(account.displayName || "M")][0]?.toLocaleUpperCase()}
               </span>
-              <div>
+              <div className="settings-identity-copy">
                 <strong title={account.displayName}>
                   {account.displayName || t("account.signed_in")}
                 </strong>
@@ -171,100 +302,109 @@ export function SettingsPage({
               )}
             </div>
 
-            <div className="settings-row settings-row-stack">
-              <div>
-                <label htmlFor="settings-api">
-                  {t("settings.default_api")}
-                </label>
-                <p>{t("settings.default_api_help")}</p>
+            <div
+              className="settings-execution-group"
+              aria-label={t("settings.execution_defaults")}
+            >
+              <div className="settings-field">
+                <div className="settings-field-copy">
+                  <label htmlFor="settings-api">
+                    {t("settings.default_api")}
+                  </label>
+                  <p>{t("settings.default_api_help")}</p>
+                </div>
+                <SelectionMenu
+                  triggerId="settings-api"
+                  value={selectedApiId}
+                  options={apiOptions}
+                  placeholder={t("account.choose_key")}
+                  ariaLabel={t("settings.default_api")}
+                  helper={t("settings.api_menu_help")}
+                  disabled={
+                    disabled || !canChooseApi || account.apiKeys.length === 0
+                  }
+                  busy={apiBusy}
+                  valueLayout="detailed"
+                  leading={<Icon name="account" />}
+                  triggerClassName="settings-control settings-control-detailed"
+                  contentClassName="settings-selection-menu"
+                  onValueChange={onSelectApiKey}
+                />
               </div>
-              <select
-                id="settings-api"
-                className="settings-select settings-select-wide focus-ring"
-                value={
-                  modelCatalogApi?.selectionId || selectedApi?.selectionId || ""
-                }
-                disabled={
-                  disabled || !canChooseApi || account.apiKeys.length === 0
-                }
-                onChange={(event) => onSelectApiKey(event.target.value)}
-              >
-                {account.apiKeys.map((key) => (
-                  <option key={key.selectionId} value={key.selectionId}>
-                    {apiLabel(key)}
-                  </option>
-                ))}
-              </select>
-            </div>
 
-            <div className="settings-row settings-row-stack">
-              <div>
-                <label htmlFor="settings-model">
-                  {t("settings.default_model")}
-                </label>
-                <p>
-                  {modelCatalogLoading && modelCatalogApi
-                    ? t("settings.loading_models_for", {
-                        api: modelCatalogApi.name || t("account.api_fallback"),
-                      })
-                    : t("settings.default_model_help")}
-                </p>
+              <div className="settings-field">
+                <div className="settings-field-copy">
+                  <label htmlFor="settings-model">
+                    {t("settings.default_model")}
+                  </label>
+                  <p>
+                    {modelCatalogLoading && modelCatalogApi
+                      ? t("settings.loading_models_for", {
+                          api:
+                            modelCatalogApi.name || t("account.api_fallback"),
+                        })
+                      : t("settings.default_model_help")}
+                  </p>
+                </div>
+                <SelectionMenu
+                  triggerId="settings-model"
+                  value={selectedModelId}
+                  options={modelOptions}
+                  placeholder={modelPlaceholder}
+                  ariaLabel={t("settings.default_model")}
+                  helper={t("settings.model_menu_help")}
+                  disabled={
+                    disabled || !canChooseModel || account.models.length === 0
+                  }
+                  busy={modelBusy}
+                  leading={<Icon name="model" />}
+                  triggerClassName="settings-control"
+                  contentClassName="settings-selection-menu"
+                  onValueChange={(value) => {
+                    const model = account.models.find(
+                      (candidate) => candidate.selectionId === value,
+                    );
+                    if (!model) return;
+                    setPendingModel({
+                      selectionId: value,
+                      displayName:
+                        model.displayName || t("account.model_fallback"),
+                    });
+                    onSelectModel(value);
+                  }}
+                />
               </div>
-              <select
-                id="settings-model"
-                className="settings-select settings-select-wide focus-ring"
-                value={
-                  account.models.some(
-                    (model) =>
-                      model.selectionId === account.selectedModelSelectionId,
-                  )
-                    ? account.selectedModelSelectionId
-                    : ""
-                }
-                disabled={
-                  disabled || !canChooseModel || account.models.length === 0
-                }
-                onChange={(event) => {
-                  if (event.target.value) onSelectModel(event.target.value);
-                }}
-              >
-                {!account.models.some(
-                  (model) =>
-                    model.selectionId === account.selectedModelSelectionId,
-                ) && <option value="">{t("account.choose_model")}</option>}
-                {account.models.map((model) => (
-                  <option key={model.selectionId} value={model.selectionId}>
-                    {model.displayName || t("account.model_fallback")}
-                  </option>
-                ))}
-              </select>
+
+              {operationStatus && (
+                <div className="settings-operation" role="status">
+                  <span className="settings-operation-dot" aria-hidden="true" />
+                  <span>{operationStatus}</span>
+                  {account.canCancel && (
+                    <button
+                      className="text-button focus-ring"
+                      disabled={cancelDisabled}
+                      onClick={onCancel}
+                    >
+                      {t("common.cancel")}
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
 
             <p className="settings-binding-note">
+              <Icon name="check" />
               {t("settings.existing_tasks_unchanged")}
             </p>
-
-            {operationStatus && (
-              <div className="settings-operation" role="status">
-                <span className="settings-operation-dot" aria-hidden="true" />
-                <span>{operationStatus}</span>
-                {account.canCancel && (
-                  <button
-                    className="text-button focus-ring"
-                    disabled={cancelDisabled}
-                    onClick={onCancel}
-                  >
-                    {t("common.cancel")}
-                  </button>
-                )}
-              </div>
-            )}
 
             {account.errorCode !== "none" &&
               account.errorCode !== "user_cancelled" && (
                 <div className="settings-error" role="alert">
-                  <strong>{t("account.action_failed")}</strong>
-                  <span>{accountErrorText(account.errorCode, t)}</span>
+                  <Icon name="warning" />
+                  <span className="settings-error-copy">
+                    <strong>{t("account.action_failed")}</strong>
+                    <span>{accountErrorText(account.errorCode, t)}</span>
+                  </span>
                 </div>
               )}
 

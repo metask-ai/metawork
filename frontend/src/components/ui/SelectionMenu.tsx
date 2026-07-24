@@ -15,6 +15,7 @@ export type SelectionMenuOption = {
 export function SelectionMenu({
   value,
   options,
+  triggerId,
   placeholder,
   ariaLabel,
   title,
@@ -29,6 +30,7 @@ export function SelectionMenu({
 }: {
   value: string;
   options: SelectionMenuOption[];
+  triggerId?: string;
   placeholder: string;
   ariaLabel: string;
   title?: string;
@@ -50,6 +52,7 @@ export function SelectionMenu({
       onValueChange={onValueChange}
     >
       <Select.Trigger
+        id={triggerId}
         className={`selection-trigger focus-ring ${triggerClassName}`.trim()}
         aria-label={ariaLabel}
         aria-busy={busy || undefined}
@@ -60,25 +63,28 @@ export function SelectionMenu({
         {leading && (
           <span className="selection-trigger-leading">{leading}</span>
         )}
-        <Select.Value
-          className="selection-trigger-value-slot"
-          placeholder={placeholder}
-        >
-          <span className="selection-trigger-copy">
-            <span className="selection-trigger-value">
-              {selected?.label || placeholder}
+        <span className="selection-trigger-value-slot">
+          <Select.Value
+            placeholder={
+              <span className="selection-trigger-value">{placeholder}</span>
+            }
+          >
+            <span className="selection-trigger-copy">
+              <span className="selection-trigger-value">
+                {selected?.label || placeholder}
+              </span>
+              {valueLayout === "detailed" && selected?.description && (
+                <small
+                  className="selection-trigger-detail"
+                  data-kind={selected.descriptionKind ?? "code"}
+                  title={selected.description}
+                >
+                  {selected.description}
+                </small>
+              )}
             </span>
-            {valueLayout === "detailed" && selected?.description && (
-              <small
-                className="selection-trigger-detail"
-                data-kind={selected.descriptionKind ?? "code"}
-                title={selected.description}
-              >
-                {selected.description}
-              </small>
-            )}
-          </span>
-        </Select.Value>
+          </Select.Value>
+        </span>
         {valueLayout === "detailed" && selected?.trailing && (
           <span className="selection-trigger-trailing">
             {selected.trailing}

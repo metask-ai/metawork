@@ -337,13 +337,20 @@ export const enUS = {
   "settings.section_label": "Settings",
   "settings.general": "General",
   "settings.account_models": "Account & models",
+  "settings.execution_defaults": "Execution defaults",
   "settings.language_help": "Changes apply immediately on this device.",
   "settings.default_api": "Default API",
   "settings.default_api_help":
     "Changing API loads the model catalog owned by that Metask API.",
+  "settings.api_menu_help":
+    "Provider is supplied by Metask and shown for reference.",
   "settings.default_model": "Default model",
   "settings.default_model_help":
     "Used when you create a new task. Existing tasks keep their own model.",
+  "settings.model_menu_help":
+    "Choose from the models available to the selected API.",
+  "settings.model_loading": "Loading models…",
+  "settings.model_waiting_api": "Choose an API first",
   "settings.loading_models_for": "Loading models available to {api}…",
   "settings.existing_tasks_unchanged":
     "Default changes apply only to new tasks. Existing task bindings and history remain unchanged.",
