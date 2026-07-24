@@ -92,7 +92,7 @@ test.after(async () => {
   dom.window.close();
 });
 
-function renderMenu(onValueChange, value = "alpha") {
+function renderMenu(onValueChange, value = "alpha", overrides = {}) {
   return render(
     createElement(SelectionMenu, {
       value,
@@ -105,6 +105,7 @@ function renderMenu(onValueChange, value = "alpha") {
       ariaLabel: "Switch workspace",
       disabled: false,
       onValueChange,
+      ...overrides,
     }),
   );
 }
@@ -168,6 +169,40 @@ test("SelectionMenu stays controlled while the Host selection is empty", async (
   await user.click(screen.getByRole("option", { name: /Bravo/ }));
   assert.deepEqual(selected, ["bravo", "bravo"]);
   assert.match(trigger.textContent, /Choose workspace/);
+});
+
+test("SelectionMenu detailed values expose metadata without making it a field", () => {
+  renderMenu(() => undefined, "alpha", {
+    valueLayout: "detailed",
+    options: [
+      {
+        value: "alpha",
+        label: "Primary API",
+        description: "OpenAI",
+        descriptionKind: "text",
+        trailing: "•••• 1234",
+      },
+    ],
+  });
+
+  const trigger = screen.getByRole("combobox", { name: "Switch workspace" });
+  assert.equal(trigger.dataset.layout, "detailed");
+  assert.match(trigger.textContent, /Primary API/);
+  assert.match(trigger.textContent, /OpenAI/);
+  assert.match(trigger.textContent, /•••• 1234/);
+  assert.equal(
+    trigger.querySelector(".selection-trigger-detail")?.dataset.kind,
+    "text",
+  );
+});
+
+test("SelectionMenu exposes a visible busy state without a false chevron", () => {
+  renderMenu(() => undefined, "alpha", { busy: true });
+
+  const trigger = screen.getByRole("combobox", { name: "Switch workspace" });
+  assert.equal(trigger.getAttribute("aria-busy"), "true");
+  assert.ok(trigger.querySelector(".selection-trigger-busy"));
+  assert.equal(trigger.querySelector(".selection-trigger-chevron"), null);
 });
 
 function renderComposer(overrides = {}) {

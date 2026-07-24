@@ -7,6 +7,7 @@ export type SelectionMenuOption = {
   value: string;
   label: string;
   description?: string;
+  descriptionKind?: "text" | "code";
   disabled?: boolean;
   trailing?: ReactNode;
 };
@@ -20,6 +21,7 @@ export function SelectionMenu({
   helper,
   disabled,
   busy = false,
+  valueLayout = "compact",
   leading,
   triggerClassName = "",
   contentClassName = "",
@@ -33,6 +35,7 @@ export function SelectionMenu({
   helper?: string;
   disabled: boolean;
   busy?: boolean;
+  valueLayout?: "compact" | "detailed";
   leading?: ReactNode;
   triggerClassName?: string;
   contentClassName?: string;
@@ -50,19 +53,44 @@ export function SelectionMenu({
         className={`selection-trigger focus-ring ${triggerClassName}`.trim()}
         aria-label={ariaLabel}
         aria-busy={busy || undefined}
+        data-busy={busy || undefined}
+        data-layout={valueLayout}
         title={title}
       >
         {leading && (
           <span className="selection-trigger-leading">{leading}</span>
         )}
-        <Select.Value placeholder={placeholder}>
-          <span className="selection-trigger-value">
-            {selected?.label || placeholder}
+        <Select.Value
+          className="selection-trigger-value-slot"
+          placeholder={placeholder}
+        >
+          <span className="selection-trigger-copy">
+            <span className="selection-trigger-value">
+              {selected?.label || placeholder}
+            </span>
+            {valueLayout === "detailed" && selected?.description && (
+              <small
+                className="selection-trigger-detail"
+                data-kind={selected.descriptionKind ?? "code"}
+                title={selected.description}
+              >
+                {selected.description}
+              </small>
+            )}
           </span>
         </Select.Value>
-        <Select.Icon className="selection-trigger-chevron">
-          <Icon name="chevron" />
-        </Select.Icon>
+        {valueLayout === "detailed" && selected?.trailing && (
+          <span className="selection-trigger-trailing">
+            {selected.trailing}
+          </span>
+        )}
+        {busy ? (
+          <span className="selection-trigger-busy" aria-hidden="true" />
+        ) : (
+          <Select.Icon className="selection-trigger-chevron">
+            <Icon name="chevron" />
+          </Select.Icon>
+        )}
       </Select.Trigger>
       <Select.Portal>
         <Select.Content
@@ -97,7 +125,10 @@ export function SelectionMenu({
                   <span className="selection-menu-item-copy">
                     <Select.ItemText>{option.label}</Select.ItemText>
                     {option.description && (
-                      <small title={option.description}>
+                      <small
+                        data-kind={option.descriptionKind ?? "code"}
+                        title={option.description}
+                      >
                         {option.description}
                       </small>
                     )}
