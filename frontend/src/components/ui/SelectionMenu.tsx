@@ -42,7 +42,7 @@ export function SelectionMenu({
 
   return (
     <Select.Root
-      value={value || undefined}
+      value={value}
       disabled={disabled}
       onValueChange={onValueChange}
     >

@@ -92,8 +92,14 @@ export function ComposerFooter({
     const textarea = textareaRef.current;
     if (!textarea || typeof window === "undefined") return;
     const resize = () => resizeComposerTextarea(textarea);
+    const observer =
+      typeof ResizeObserver === "undefined" ? null : new ResizeObserver(resize);
+    observer?.observe(textarea);
     window.addEventListener("resize", resize);
-    return () => window.removeEventListener("resize", resize);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", resize);
+    };
   }, [textareaRef]);
 
   return (
@@ -118,7 +124,12 @@ export function ComposerFooter({
             }
             onChange={(event) => onPromptChange(event.target.value)}
             onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey && canSubmit) {
+              if (
+                event.key === "Enter" &&
+                !event.shiftKey &&
+                !event.nativeEvent.isComposing &&
+                canSubmit
+              ) {
                 event.preventDefault();
                 onSubmit();
               }

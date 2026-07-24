@@ -3,7 +3,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { JSDOM } from "jsdom";
-import { createElement } from "react";
+import { createElement, createRef } from "react";
 import { createServer } from "vite";
 
 const dom = new JSDOM("<!doctype html><html><body></body></html>", {
@@ -26,12 +26,32 @@ Object.assign(globalThis, {
   requestAnimationFrame: dom.window.requestAnimationFrame.bind(dom.window),
   cancelAnimationFrame: dom.window.cancelAnimationFrame.bind(dom.window),
   PointerEvent: dom.window.MouseEvent,
-  ResizeObserver: class {
-    observe() {}
-    unobserve() {}
-    disconnect() {}
-  },
 });
+const resizeObservers = [];
+globalThis.ResizeObserver = class {
+  constructor(callback) {
+    this.callback = callback;
+    this.target = null;
+    resizeObservers.push(this);
+  }
+
+  observe(target) {
+    this.target = target;
+  }
+
+  disconnect() {
+    this.target = null;
+  }
+
+  notify(width = 320) {
+    this.callback([
+      {
+        target: this.target,
+        contentRect: { width },
+      },
+    ]);
+  }
+};
 Object.defineProperty(globalThis, "navigator", {
   configurable: true,
   value: dom.window.navigator,
@@ -46,7 +66,8 @@ if (!HTMLElement.prototype.releasePointerCapture)
 if (!HTMLElement.prototype.scrollIntoView)
   HTMLElement.prototype.scrollIntoView = () => undefined;
 
-const { cleanup, render, screen } = await import("@testing-library/react");
+const { cleanup, fireEvent, render, screen } =
+  await import("@testing-library/react");
 const { default: userEvent } = await import("@testing-library/user-event");
 
 const vite = await createServer({
@@ -59,6 +80,11 @@ const vite = await createServer({
 const { SelectionMenu } = await vite.ssrLoadModule(
   "/src/components/ui/SelectionMenu.tsx",
 );
+const { ComposerFooter } = await vite.ssrLoadModule(
+  "/src/features/composer/ComposerFooter.tsx",
+);
+const { I18nContext } = await vite.ssrLoadModule("/src/i18n/context.ts");
+const { translate } = await vite.ssrLoadModule("/src/i18n/runtime.ts");
 
 test.afterEach(() => cleanup());
 test.after(async () => {
@@ -125,4 +151,109 @@ test("SelectionMenu exposes disabled options without admitting them", async () =
 
   await user.click(blocked);
   assert.deepEqual(selected, []);
+});
+
+test("SelectionMenu stays controlled while the Host selection is empty", async () => {
+  const selected = [];
+  const user = userEvent.setup({ document: dom.window.document });
+  renderMenu((value) => selected.push(value), "");
+
+  const trigger = screen.getByRole("combobox", { name: "Switch workspace" });
+  await user.click(trigger);
+  await user.click(screen.getByRole("option", { name: /Bravo/ }));
+  assert.deepEqual(selected, ["bravo"]);
+  assert.match(trigger.textContent, /Choose workspace/);
+
+  await user.click(trigger);
+  await user.click(screen.getByRole("option", { name: /Bravo/ }));
+  assert.deepEqual(selected, ["bravo", "bravo"]);
+  assert.match(trigger.textContent, /Choose workspace/);
+});
+
+function renderComposer(overrides = {}) {
+  const textareaRef = createRef();
+  let submissions = 0;
+  render(
+    createElement(
+      I18nContext.Provider,
+      {
+        value: {
+          locale: "en-US",
+          setLocale() {},
+          t: (id, values) => translate("en-US", id, values),
+        },
+      },
+      createElement(ComposerFooter, {
+        textareaRef,
+        archived: false,
+        closing: false,
+        closed: false,
+        unavailable: false,
+        prompt: "请检查当前实现",
+        composeDisabled: false,
+        canSubmit: true,
+        runInFlight: false,
+        accessRequired: false,
+        workspaceMissing: false,
+        workspaceLabel: "metawork",
+        workspaceTitle: "/repo/metawork",
+        workspaceOptions: [],
+        selectedWorkspaceId: "1",
+        workspaceEditable: false,
+        modelLabel: null,
+        modelOptions: [],
+        selectedModelId: "",
+        modelEditable: false,
+        modelSelectionDisabled: false,
+        modelSelectionPending: false,
+        modelContextTitle: "",
+        actionDisabled: false,
+        onPromptChange() {},
+        onSubmit() {
+          submissions += 1;
+        },
+        onConfirmAccess() {},
+        onSelectWorkspace() {},
+        onSelectModel() {},
+        ...overrides,
+      }),
+    ),
+  );
+  return {
+    textarea: textareaRef.current,
+    submissions: () => submissions,
+  };
+}
+
+test("Composer Enter handling does not submit an active IME composition", () => {
+  const composer = renderComposer();
+  fireEvent.keyDown(composer.textarea, {
+    key: "Enter",
+    shiftKey: false,
+    isComposing: true,
+  });
+  assert.equal(composer.submissions(), 0);
+
+  fireEvent.keyDown(composer.textarea, {
+    key: "Enter",
+    shiftKey: false,
+    isComposing: false,
+  });
+  assert.equal(composer.submissions(), 1);
+});
+
+test("Composer recalculates its height when its rendered width changes", () => {
+  const observerCount = resizeObservers.length;
+  const composer = renderComposer();
+  const observer = resizeObservers.at(-1);
+  assert.equal(resizeObservers.length, observerCount + 1);
+  assert.equal(observer.target, composer.textarea);
+
+  Object.defineProperty(composer.textarea, "scrollHeight", {
+    configurable: true,
+    value: 126,
+  });
+  observer.notify(420);
+  assert.equal(composer.textarea.style.height, "126px");
+  assert.equal(composer.textarea.style.overflowY, "hidden");
 });

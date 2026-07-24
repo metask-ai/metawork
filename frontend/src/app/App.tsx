@@ -87,6 +87,10 @@ import {
 import { chooseWorkspaceWithDraft } from "../features/workspaces/chooseWorkspace.ts";
 import { initialWorkbenchState, workbenchReducer } from "../workbench/store.ts";
 import {
+  WorkspaceNavigationIntents,
+  type WorkspaceNavigationRequest,
+} from "../workbench/workspace-navigation-intents.ts";
+import {
   accountMutationBlocksTaskAdmission,
   PendingScopes,
 } from "../workbench/pendingScopes.ts";
@@ -176,6 +180,8 @@ export default function App() {
   const accountBusyRef = useRef(false);
   const accountCancelBusyRef = useRef(false);
   const workspaceBusyRef = useRef(false);
+  const workspaceNavigationRunningRef = useRef(false);
+  const workspaceNavigationIntents = useRef(new WorkspaceNavigationIntents());
   const connectionBusyRef = useRef(false);
   const taskMenu = useRef<HTMLDivElement>(null);
   const inspectorToggle = useRef<HTMLButtonElement>(null);
@@ -671,7 +677,78 @@ export default function App() {
     }
   }
 
-  async function selectWorkspaceById(
+  async function executeWorkspaceNavigation(
+    request: WorkspaceNavigationRequest,
+  ) {
+    workspaceBusyRef.current = true;
+    workspaceNavigationRunningRef.current = true;
+    setWorkspaceBusy(true);
+    try {
+      const result = await client.selectWorkspace(
+        request.workspaceId,
+        request.workspaceEpoch,
+      );
+      if (!result.accepted) {
+        await refreshSnapshot().catch(() => undefined);
+        if (workspaceNavigationIntents.current.isCurrent(request))
+          setStatus(
+            attentionStatus(mutationReasonMessageId(result.reason), {
+              scope: "workspace",
+              workspaceId: null,
+            }),
+          );
+        return;
+      }
+      await refreshSnapshot();
+      if (!workspaceNavigationIntents.current.isCurrent(request)) return;
+      if (request.target.kind === "draft") {
+        const sourceDraftId = request.target.migratableDraftId;
+        if (sourceDraftId && sourceDraftId !== request.workspaceId)
+          newTaskDrafts.moveDraft(sourceDraftId, request.workspaceId);
+        dispatchWorkbench({
+          type: "task.draft.opened",
+          workspaceId: request.workspaceId,
+        });
+        window.requestAnimationFrame(() => composer.current?.focus());
+      } else {
+        dispatchWorkbench({
+          type: "workspace.selected",
+          workspaceId: request.workspaceId,
+        });
+        if (request.target.taskId !== null)
+          dispatchWorkbench({
+            type: "task.selected",
+            taskId: request.target.taskId,
+          });
+      }
+      setStatus(
+        quietStatus("workspace.grant_confirmed", {
+          scope: "workspace",
+          workspaceId: request.workspaceId,
+        }),
+      );
+    } catch (error) {
+      await refreshSnapshot().catch(() => undefined);
+      if (workspaceNavigationIntents.current.isCurrent(request))
+        setStatus(
+          attentionStatus(
+            "workspace.selection_failed",
+            { scope: "workspace", workspaceId: null },
+            {
+              diagnostic: errorText(error),
+            },
+          ),
+        );
+    } finally {
+      workspaceNavigationRunningRef.current = false;
+      workspaceBusyRef.current = false;
+      setWorkspaceBusy(false);
+      const queued = workspaceNavigationIntents.current.takeQueued();
+      if (queued) void executeWorkspaceNavigation(queued);
+    }
+  }
+
+  function selectWorkspaceById(
     workspaceId: string,
     target:
       { kind: "navigation"; taskId: string | null } | { kind: "draft" } = {
@@ -679,68 +756,40 @@ export default function App() {
       taskId: null,
     },
   ) {
-    if (bridgeUnavailable || workspaceBusyRef.current) return;
-    workspaceBusyRef.current = true;
-    setWorkspaceBusy(true);
-    try {
-      const workspace = snapshot.workspaces.find(
-        (candidate) => candidate.id === workspaceId,
-      );
-      if (!workspace) {
-        setStatus(
-          attentionStatus("workspace.selection_unavailable", {
-            scope: "workspace",
-            workspaceId: null,
-          }),
-        );
-        return;
-      }
-      const result = await client.selectWorkspace(workspaceId, workspace.epoch);
-      if (!result.accepted) {
-        await refreshSnapshot().catch(() => undefined);
-        setStatus(
-          attentionStatus(mutationReasonMessageId(result.reason), {
-            scope: "workspace",
-            workspaceId: null,
-          }),
-        );
-        return;
-      }
-      await refreshSnapshot();
-      if (target.kind === "draft") {
-        if (
-          newTaskDraftId === unscopedNewTaskDraftId &&
-          newTaskDraftId !== workspaceId
-        )
-          newTaskDrafts.moveDraft(newTaskDraftId, workspaceId);
-        dispatchWorkbench({ type: "task.draft.opened", workspaceId });
-        window.requestAnimationFrame(() => composer.current?.focus());
-      } else {
-        dispatchWorkbench({ type: "workspace.selected", workspaceId });
-        if (target.taskId !== null)
-          dispatchWorkbench({ type: "task.selected", taskId: target.taskId });
-      }
+    if (bridgeUnavailable) return;
+    const workspace = snapshot.workspaces.find(
+      (candidate) => candidate.id === workspaceId,
+    );
+    if (!workspace) {
       setStatus(
-        quietStatus("workspace.grant_confirmed", {
+        attentionStatus("workspace.selection_unavailable", {
           scope: "workspace",
-          workspaceId,
+          workspaceId: null,
         }),
       );
-    } catch (error) {
-      await refreshSnapshot().catch(() => undefined);
-      setStatus(
-        attentionStatus(
-          "workspace.selection_failed",
-          { scope: "workspace", workspaceId: null },
-          {
-            diagnostic: errorText(error),
-          },
-        ),
-      );
-    } finally {
-      workspaceBusyRef.current = false;
-      setWorkspaceBusy(false);
+      return;
     }
+    const input = {
+      workspaceId,
+      workspaceEpoch: workspace.epoch,
+      target:
+        target.kind === "draft"
+          ? {
+              kind: "draft" as const,
+              migratableDraftId:
+                newTaskDraftId === unscopedNewTaskDraftId
+                  ? newTaskDraftId
+                  : null,
+            }
+          : target,
+    };
+    if (workspaceNavigationRunningRef.current) {
+      workspaceNavigationIntents.current.queue(input);
+      return;
+    }
+    if (workspaceBusyRef.current) return;
+    const request = workspaceNavigationIntents.current.begin(input);
+    void executeWorkspaceNavigation(request);
   }
 
   async function removeWorkspaceById(workspaceId: string) {
@@ -794,6 +843,11 @@ export default function App() {
   function beginNewTask() {
     pendingTaskSelection.current = null;
     setRoute("workbench");
+    if (workspaceNavigationRunningRef.current) {
+      if (currentWorkspaceId)
+        selectWorkspaceById(currentWorkspaceId, { kind: "draft" });
+      else workspaceNavigationIntents.current.invalidate();
+    }
     dispatchWorkbench({
       type: "task.draft.opened",
       workspaceId: currentWorkspaceId,
@@ -1390,6 +1444,14 @@ export default function App() {
                   onSelectTask={(taskId) => {
                     pendingTaskSelection.current = null;
                     setRoute("workbench");
+                    const task = snapshot.tasks.find(
+                      (candidate) => candidate.id === taskId,
+                    );
+                    if (workspaceNavigationRunningRef.current && task)
+                      selectWorkspaceById(task.workspaceId, {
+                        kind: "navigation",
+                        taskId,
+                      });
                     dispatchWorkbench({ type: "task.selected", taskId });
                   }}
                   onToggleArchived={() => setShowArchived((shown) => !shown)}
