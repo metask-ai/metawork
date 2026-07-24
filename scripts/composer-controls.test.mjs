@@ -423,28 +423,109 @@ test("Settings keeps a model choice visibly pending without declaring it committ
   assert.equal(readySettingsAccount.selectedModelSelectionId, "model-1");
 });
 
-test("Settings section navigation follows its own scroll position", () => {
+test("Settings limits API transaction locking and keeps a real cancel path", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  let cancellations = 0;
+  renderSettings(
+    {
+      ...readySettingsAccount,
+      operation: "loading_models",
+      candidateApiKeySelectionId: "key-2",
+      modelCatalogApiKeySelectionId: "key-2",
+      models: [],
+      canCreateTask: false,
+      canCancel: true,
+    },
+    {
+      onCancel() {
+        cancellations += 1;
+      },
+    },
+  );
+
+  assert.equal(
+    screen
+      .getByRole("combobox", { name: "Default API" })
+      .hasAttribute("disabled"),
+    true,
+  );
+  assert.equal(
+    screen
+      .getByRole("combobox", { name: "Default model" })
+      .hasAttribute("disabled"),
+    true,
+  );
+  assert.equal(
+    screen.getByRole("combobox", { name: "Language" }).hasAttribute("disabled"),
+    false,
+  );
+  assert.equal(
+    screen
+      .getByRole("link", { name: "Account & models" })
+      .hasAttribute("aria-disabled"),
+    false,
+  );
+
+  await user.click(screen.getByRole("button", { name: "Cancel" }));
+  assert.equal(cancellations, 1);
+});
+
+test("Settings reports failed and cancelled switches without replacing committed defaults", () => {
+  const view = renderSettings({
+    ...readySettingsAccount,
+    errorCode: "metask_service_unavailable",
+  });
+
+  assert.match(
+    screen.getByRole("combobox", { name: "Default API" }).textContent,
+    /Primary/,
+  );
+  assert.match(
+    screen.getByRole("combobox", { name: "Default model" }).textContent,
+    /Model One/,
+  );
+  assert.match(screen.getByRole("alert").textContent, /No default was changed/);
+  assert.match(screen.getByRole("alert").textContent, /Primary · Model One/);
+
+  view.rerenderAccount({
+    ...readySettingsAccount,
+    errorCode: "user_cancelled",
+  });
+  assert.equal(screen.queryByRole("alert"), null);
+  assert.match(screen.getByRole("status").textContent, /Change cancelled/);
+  assert.match(screen.getByRole("status").textContent, /Primary · Model One/);
+});
+
+test("Settings keeps section navigation fixed while content scrolls independently", () => {
   renderSettings(readySettingsAccount);
   const page = document.querySelector(".settings-page");
+  const content = document.querySelector(".settings-content");
   const accountSection = document.querySelector("#settings-account");
-  Object.defineProperty(page, "clientHeight", {
+  Object.defineProperty(content, "clientHeight", {
     configurable: true,
     value: 680,
   });
-  Object.defineProperty(accountSection, "offsetTop", {
-    configurable: true,
-    value: 420,
+  content.getBoundingClientRect = () => ({ top: 100 });
+  accountSection.getBoundingClientRect = () => ({
+    top: 520 - content.scrollTop,
   });
 
-  page.scrollTop = 0;
+  page.scrollTop = 300;
   fireEvent.scroll(page);
   assert.equal(
     screen.getByRole("link", { name: "General" }).getAttribute("aria-current"),
     "location",
   );
 
-  page.scrollTop = 300;
-  fireEvent.scroll(page);
+  content.scrollTop = 0;
+  fireEvent.scroll(content);
+  assert.equal(
+    screen.getByRole("link", { name: "General" }).getAttribute("aria-current"),
+    "location",
+  );
+
+  content.scrollTop = 300;
+  fireEvent.scroll(content);
   assert.equal(
     screen
       .getByRole("link", { name: "Account & models" })

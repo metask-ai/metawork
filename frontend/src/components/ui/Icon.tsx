@@ -15,6 +15,7 @@ type IconName =
   | "warning"
   | "account"
   | "model"
+  | "refresh"
   | "check";
 
 const paths: Record<IconName, React.ReactNode> = {
@@ -38,6 +39,7 @@ const paths: Record<IconName, React.ReactNode> = {
   model: (
     <path d="m12 3 8 4.5-8 4.5-8-4.5L12 3Zm-8 9 8 4.5 8-4.5M4 16.5 12 21l8-4.5" />
   ),
+  refresh: <path d="M19 7v5h-5m4.2-4a7.5 7.5 0 1 0 .7 7" />,
   check: <path d="m5 12.5 4.2 4.2L19 7" />,
 };
 

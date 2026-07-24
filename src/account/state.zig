@@ -648,6 +648,26 @@ pub const Account = struct {
             self.state.active_attempt_id == null)
             return .{ .rejected = .invalid_state };
         var next = self.state;
+        if (next.execution_state == .ready and
+            std.mem.eql(
+                u8,
+                next.pending_api_key_id.view(),
+                next.selected_api_key_id.view(),
+            ) and
+            std.mem.eql(u8, model, next.selected_model.view()))
+        {
+            next.operation = .none;
+            next.active_attempt_id = null;
+            next.attempt_kind = .none;
+            next.pending_api_key_id.clear();
+            next.pending_model.clear();
+            next.clearError();
+            return transitionNoEffect(
+                next,
+                .catalog_changed,
+                self.state.active_attempt_id.?,
+            );
+        }
         next.pending_model.set(model) catch
             return .{ .rejected = .invalid_command };
         next.execution_state = if (next.execution_state == .ready)

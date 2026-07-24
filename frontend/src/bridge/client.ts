@@ -4,7 +4,7 @@ import {
   RENDERER_BRIDGE_CONTRACT_ID,
   RENDERER_BRIDGE_CONTRACT_REVISION,
 } from "./commands.ts";
-import type { NativeSdkJson } from "@native-sdk/cli";
+import type { NativeSdkJson, NativeSdkShortcutDetail } from "@native-sdk/cli";
 import type {
   HostSignal,
   UiResponsePayload,
@@ -93,6 +93,10 @@ export class BridgeClient {
 
   available() {
     return this.bridgeOverride !== undefined || window.zero !== undefined;
+  }
+
+  onShortcut(consume: (shortcut: NativeSdkShortcutDetail) => void) {
+    return this.bridge().on("shortcut", consume);
   }
 
   onWorkbenchRevision(

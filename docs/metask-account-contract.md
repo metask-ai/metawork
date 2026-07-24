@@ -101,6 +101,7 @@ Model catalog：
 - 成功响应严格读取消费的 list 根字段和 `data[]`；拒绝缺失/非法消费字段、重复 model id、`has_more = true`、超限字段和超限集合，但允许服务端增加未消费 metadata；
 - model 只向产品投影有界 `id` 与可选 `display_name`；投影同时发布已提交的 API/model identity、当前模型目录所属的脱敏 API Key selection identity，以及仅在重配置期间存在的 `candidateApiKeySelectionId` / `candidateModelSelectionId`。候选字段只表示 Host 已接收的进行中意图，不表示已通过目录校验或已经提交：`loading_keys` 时候选可能尚未属于刚刷新的目录，`loading_models` 后候选 API 才可作为模型目录 owner，`persisting` 时才形成完整且已验证的候选 execution target；成功后候选原子成为已提交默认值，取消或失败时候选必须清空。Renderer 不得把候选 API 的 model id 与已提交默认 API 混用，也不得以本地状态冒充提交结果；
 - 已有 ready execution 上切换 API 或模型时，Account 先保留已提交 execution，并用当前 OAuth/profile 重新加载完整 API catalog，再校验请求的 API、加载其模型并校验模型；secure-zero 后的旧 private catalog 不得被假定仍持有 credential。候选 private/public catalog 与 committed public catalog 分槽，只有 ownership 校验和 persistence 全部成功后才原子安装新的默认 generation 并提交候选目录。加载、选择或持久化确定失败必须完整丢弃候选，不得破坏旧默认配置，也不得把既有 Task 改绑；用户只可在进入 credential persistence 前取消，持久化 effect 开始后必须等待 completion 被 main thread 消费，不得用取消制造内存/磁盘 generation 分叉；
+- 已有 ready execution 上执行普通 catalog refresh 时，Account 在完整 API catalog 中优先验证已提交 API，并在其仍有效时自动加载对应模型目录；已提交模型也仍属于该目录时，Host 直接提交新的脱敏目录而不递增 execution generation、不重写 credential persistence，也不要求用户重新确认同一选择。只有已提交 API 或模型确实离开最新目录时才进入对应的 `selecting_key` 或 `selecting_model`；
 - 未消费的 capability 字段不进入客户端 typed contract。服务端增删这类 metadata，或以 `0` 表达 unknown/placeholder token capability，都不阻止模型进入目录，也不得被 MetaWork 推断为真实能力或 AgentCore 配置。
 
 ## 5. Provider 与 ExecutionTarget

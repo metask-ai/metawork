@@ -352,12 +352,84 @@ test("ready Account uses a formal settings route with truthful defaults", () => 
     /selection-trigger-detail" data-kind="text" title="Anthropic">Anthropic</,
   );
   assert.match(panel, /selection-trigger-trailing">•••• 1234</);
+  assert.equal((panel.match(/selection-trigger-action/g) ?? []).length, 2);
+  assert.equal((panel.match(/>View options</g) ?? []).length, 2);
+  assert.match(panel, />APIs 1 · Models 1</);
+  assert.match(panel, /Metask currently returns only this API/);
+  assert.match(panel, /This API currently provides only one available model/);
+  assert.doesNotMatch(panel, /<button[^>]*disabled=""[^>]*id="settings-api"/);
+  assert.doesNotMatch(panel, /<button[^>]*disabled=""[^>]*id="settings-model"/);
   assert.doesNotMatch(panel, /<select(?![^>]*aria-hidden="true")/);
   assert.match(panel, /aria-current="location">General</);
-  assert.match(panel, />Refresh account options</);
+  assert.match(
+    panel,
+    /class="settings-execution-group" role="group" aria-labelledby="settings-execution-title"/,
+  );
+  assert.match(panel, />Sync again</);
   assert.match(panel, />Sign out…</);
   assert.match(panel, /Existing task bindings and history remain unchanged/);
   assert.doesNotMatch(panel, /Appearance|Notifications|Permissions|Plugins/);
+});
+
+test("settings keep APIs and models identifiable when display names are absent", () => {
+  const account = {
+    ...signedOut,
+    sessionState: "authenticated",
+    executionState: "ready",
+    readiness: "ready",
+    primaryAction: "none",
+    accountId: "account-1",
+    profileId: "profile-1",
+    displayName: "Metask User",
+    apiKeys: [
+      {
+        selectionId: "42",
+        name: "",
+        suffix: "1234",
+        provider: "openai",
+      },
+    ],
+    models: [{ selectionId: "minimax-m2.5", displayName: "" }],
+    selectedApiKeySelectionId: "42",
+    selectedModelSelectionId: "minimax-m2.5",
+    modelCatalogApiKeySelectionId: "42",
+    canCreateTask: true,
+    catalogGeneration: "1",
+    executionGeneration: "1",
+  };
+  const panel = withI18n(
+    createElement(SettingsPage, {
+      account,
+      focusTarget: "title",
+      disabled: false,
+      cancelDisabled: false,
+      ...callbacks,
+    }),
+  );
+
+  assert.match(panel, /selection-trigger-value">Metask API 42</);
+  assert.match(panel, /selection-trigger-value">minimax-m2\.5</);
+  assert.doesNotMatch(panel, /selection-trigger-value">Available models</);
+});
+
+test("desktop settings shortcut opens the formal route through the native event", async () => {
+  const [app, manifest] = await Promise.all([
+    readFile(join(process.cwd(), "frontend/src/app/App.tsx"), "utf8"),
+    readFile(join(process.cwd(), "app.zon"), "utf8"),
+  ]);
+
+  assert.match(
+    manifest,
+    /\.id = "settings\.open", \.key = ",", \.modifiers = \.\{"primary"\}/,
+  );
+  assert.match(app, /client\.onShortcut\(\(detail\) => \{/);
+  assert.match(app, /detail\.id !== "settings\.open"/);
+  assert.match(app, /accountGateRequired \|\| bridgeUnavailable/);
+  assert.match(app, /openSettings\(\)/);
+  assert.match(
+    app,
+    /function openSettings[\s\S]*?snapshot\.account\.sessionState !==\s*"authenticated"[\s\S]*?snapshot\.account\.operation !== "none"[\s\S]*?client\.refreshAccountCatalog\(\)/,
+  );
 });
 
 test("reauth-required settings disable stale catalog mutations", () => {
@@ -392,9 +464,16 @@ test("reauth-required settings disable stale catalog mutations", () => {
     }),
   );
   assert.match(panel, />Sign in again</);
+  assert.match(
+    panel,
+    /class="settings-identity-row" data-session-state="reauth_required"/,
+  );
   assert.match(panel, /<button[^>]*disabled=""[^>]*id="settings-api"/);
   assert.match(panel, /<button[^>]*disabled=""[^>]*id="settings-model"/);
-  assert.match(panel, /<button[^>]*disabled=""[^>]*>Refresh account options/);
+  assert.match(
+    panel,
+    /<button[^>]*disabled=""[^>]*>[\s\S]*?Sync again<\/button>/,
+  );
   assert.match(panel, />Sign out…</);
 });
 
@@ -515,7 +594,7 @@ test("settings project the full API transaction without replacing committed trut
   assert.match(failed, /role="alert"/);
   assert.match(failed, /Account action needs attention/);
   assert.match(failed, /No default was changed/);
-  assert.match(failed, />Refresh account options</);
+  assert.match(failed, />Sync again</);
 
   const cancelled = renderSettings({
     ...base,

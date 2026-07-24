@@ -23,6 +23,20 @@ function providerLabel(
   return t(`provider.${provider}`);
 }
 
+function apiLabel(
+  api: AccountView["apiKeys"][number],
+  t: ReturnType<typeof useI18n>["t"],
+) {
+  return api.name.trim() || `${t("account.api_fallback")} ${api.selectionId}`;
+}
+
+function modelLabel(
+  model: AccountView["models"][number],
+  t: ReturnType<typeof useI18n>["t"],
+) {
+  return model.displayName.trim() || model.selectionId;
+}
+
 export function SettingsPage({
   account,
   focusTarget,
@@ -57,9 +71,10 @@ export function SettingsPage({
   );
   const [requestedModel, setRequestedModel] =
     useState<RequestedSelection | null>(null);
-  const page = useRef<HTMLDivElement>(null);
+  const content = useRef<HTMLDivElement>(null);
   const title = useRef<HTMLHeadingElement>(null);
   const accountSection = useRef<HTMLElement>(null);
+  const accountHeading = useRef<HTMLDivElement>(null);
   const signOut = useRef<HTMLButtonElement>(null);
   const signOutCancel = useRef<HTMLButtonElement>(null);
   const modelCatalogApi = useMemo(
@@ -119,7 +134,7 @@ export function SettingsPage({
     () =>
       account.apiKeys.map((key) => ({
         value: key.selectionId,
-        label: key.name || t("account.api_fallback"),
+        label: apiLabel(key, t),
         description: providerLabel(key.provider, t),
         descriptionKind: "text",
         trailing: key.suffix ? `•••• ${key.suffix}` : undefined,
@@ -129,7 +144,7 @@ export function SettingsPage({
   const modelOptions = useMemo<SelectionMenuOption[]>(() => {
     const options = account.models.map((model) => ({
       value: model.selectionId,
-      label: model.displayName || t("account.model_fallback"),
+      label: modelLabel(model, t),
     }));
     if (
       requestedModel &&
@@ -154,24 +169,38 @@ export function SettingsPage({
         )
       ? account.selectedModelSelectionId
       : "";
+  const apiHasAlternative = apiOptions.some(
+    (option) => option.value !== selectedApiId,
+  );
+  const modelHasAlternative = modelOptions.some(
+    (option) => option.value !== selectedModelId,
+  );
+  const apiIsOnlyOption =
+    selectedApiId.length > 0 && apiOptions.length === 1 && !apiHasAlternative;
+  const modelIsOnlyOption =
+    selectedModelId.length > 0 &&
+    modelOptions.length === 1 &&
+    !modelHasAlternative;
   const modelPlaceholder = modelCatalogLoading
     ? t("settings.model_loading")
     : account.operation === "selecting_key"
       ? t("settings.model_waiting_api")
       : t("account.choose_model");
-  const committedApiName = committedApi?.name || t("account.api_fallback");
+  const committedApiName = committedApi
+    ? apiLabel(committedApi, t)
+    : t("account.api_fallback");
   const committedModelName =
-    committedModel?.displayName ||
+    (committedModel ? modelLabel(committedModel, t) : "") ||
     account.selectedModelSelectionId ||
     t("account.model_fallback");
   const candidateApiName =
-    candidateApi?.name ||
+    (candidateApi ? apiLabel(candidateApi, t) : "") ||
     (requestedApi?.selectionId === candidateApiId
       ? requestedApi.label
       : candidateApiId) ||
     t("account.api_fallback");
   const candidateModelName =
-    candidateModel?.displayName ||
+    (candidateModel ? modelLabel(candidateModel, t) : "") ||
     (requestedModel?.selectionId === candidateModelId
       ? requestedModel.label
       : candidateModelId) ||
@@ -287,27 +316,38 @@ export function SettingsPage({
     window.requestAnimationFrame(() => signOut.current?.focus());
   }
 
+  function contentTop(element: HTMLElement | null) {
+    if (!content.current || !element) return 0;
+    return (
+      element.getBoundingClientRect().top -
+      content.current.getBoundingClientRect().top +
+      content.current.scrollTop
+    );
+  }
+
   function updateActiveSection() {
-    if (!page.current || !accountSection.current) return;
+    if (!content.current || !accountSection.current) return;
     const readingLine =
-      page.current.scrollTop + Math.min(160, page.current.clientHeight * 0.3);
+      content.current.scrollTop +
+      Math.min(160, content.current.clientHeight * 0.3);
     setActiveSection(
-      accountSection.current.offsetTop <= readingLine ? "account" : "general",
+      contentTop(accountSection.current) <= readingLine ? "account" : "general",
     );
   }
 
   return (
-    <div ref={page} className="settings-page" onScroll={updateActiveSection}>
-      <header className="settings-hero">
+    <div className="settings-page">
+      <header className="settings-header">
         <button className="settings-back focus-ring" onClick={onBack}>
           <Icon name="arrow-left" />
           {t("settings.back")}
         </button>
-        <p className="settings-eyebrow">{t("app.name")}</p>
-        <h1 ref={title} tabIndex={-1}>
-          {t("settings.title")}
-        </h1>
-        <p>{t("settings.intro")}</p>
+        <div className="settings-header-copy">
+          <h1 ref={title} tabIndex={-1}>
+            {t("settings.title")}
+          </h1>
+          <p>{t("settings.intro")}</p>
+        </div>
       </header>
 
       <div className="settings-layout">
@@ -316,7 +356,11 @@ export function SettingsPage({
             className="focus-ring"
             href="#settings-general"
             aria-current={activeSection === "general" ? "location" : undefined}
-            onClick={() => setActiveSection("general")}
+            onClick={(event) => {
+              event.preventDefault();
+              setActiveSection("general");
+              content.current?.scrollTo({ top: 0, behavior: "smooth" });
+            }}
           >
             {t("settings.general")}
           </a>
@@ -324,13 +368,25 @@ export function SettingsPage({
             className="focus-ring"
             href="#settings-account"
             aria-current={activeSection === "account" ? "location" : undefined}
-            onClick={() => setActiveSection("account")}
+            onClick={(event) => {
+              event.preventDefault();
+              setActiveSection("account");
+              if (!content.current || !accountHeading.current) return;
+              content.current.scrollTo({
+                top: contentTop(accountHeading.current) - 18,
+                behavior: "smooth",
+              });
+            }}
           >
             {t("settings.account_models")}
           </a>
         </nav>
 
-        <div className="settings-content">
+        <div
+          ref={content}
+          className="settings-content"
+          onScroll={updateActiveSection}
+        >
           <section id="settings-general" className="settings-section">
             <div className="settings-section-heading">
               <p>{t("settings.section_label")}</p>
@@ -361,12 +417,15 @@ export function SettingsPage({
             id="settings-account"
             className="settings-section"
           >
-            <div className="settings-section-heading">
+            <div ref={accountHeading} className="settings-section-heading">
               <p>{t("settings.section_label")}</p>
               <h2>{t("settings.account_models")}</h2>
             </div>
 
-            <div className="settings-identity-row">
+            <div
+              className="settings-identity-row"
+              data-session-state={account.sessionState}
+            >
               <span className="settings-avatar" aria-hidden="true">
                 {[...(account.displayName || "M")][0]?.toLocaleUpperCase()}
               </span>
@@ -393,14 +452,48 @@ export function SettingsPage({
 
             <div
               className="settings-execution-group"
-              aria-label={t("settings.execution_defaults")}
+              role="group"
+              aria-labelledby="settings-execution-title"
             >
-              <div className="settings-field">
+              <div className="settings-execution-header">
+                <h3 id="settings-execution-title">
+                  {t("settings.execution_defaults")}
+                </h3>
+                <div className="settings-execution-actions">
+                  <span className="settings-catalog-count">
+                    {t("settings.catalog_count", {
+                      apis: account.apiKeys.length,
+                      models: account.models.length,
+                    })}
+                  </span>
+                  <button
+                    className="settings-refresh-button focus-ring"
+                    disabled={
+                      disabled || !authenticated || account.operation !== "none"
+                    }
+                    onClick={onRefresh}
+                  >
+                    <Icon name="refresh" />
+                    {t("account.refresh_catalog")}
+                  </button>
+                </div>
+              </div>
+
+              <div className="settings-field settings-field-api">
+                <span className="settings-field-step" aria-hidden="true">
+                  01
+                </span>
                 <div className="settings-field-copy">
                   <label htmlFor="settings-api">
                     {t("settings.default_api")}
                   </label>
-                  <p>{t("settings.default_api_help")}</p>
+                  <p>
+                    {t(
+                      apiIsOnlyOption
+                        ? "settings.only_api_help"
+                        : "settings.default_api_help",
+                    )}
+                  </p>
                 </div>
                 <div className="settings-control-stack">
                   <SelectionMenu
@@ -410,6 +503,13 @@ export function SettingsPage({
                     placeholder={t("account.choose_key")}
                     ariaLabel={t("settings.default_api")}
                     helper={t("settings.api_menu_help")}
+                    actionLabel={t(
+                      apiIsOnlyOption
+                        ? "settings.view_selection"
+                        : selectedApiId
+                          ? "settings.change_selection"
+                          : "settings.choose_selection",
+                    )}
                     disabled={
                       disabled || !canChooseApi || account.apiKeys.length === 0
                     }
@@ -425,7 +525,7 @@ export function SettingsPage({
                       if (!api) return;
                       setRequestedApi({
                         selectionId: value,
-                        label: api.name || t("account.api_fallback"),
+                        label: apiLabel(api, t),
                       });
                       setRequestedModel(null);
                       onSelectApiKey(value);
@@ -445,6 +545,9 @@ export function SettingsPage({
               </div>
 
               <div className="settings-field">
+                <span className="settings-field-step" aria-hidden="true">
+                  02
+                </span>
                 <div className="settings-field-copy">
                   <label htmlFor="settings-model">
                     {t("settings.default_model")}
@@ -457,7 +560,11 @@ export function SettingsPage({
                             modelCatalogApi?.name ||
                             t("account.api_fallback"),
                         })
-                      : t("settings.default_model_help")}
+                      : t(
+                          modelIsOnlyOption
+                            ? "settings.only_model_help"
+                            : "settings.default_model_help",
+                        )}
                   </p>
                 </div>
                 <div className="settings-control-stack">
@@ -468,6 +575,13 @@ export function SettingsPage({
                     placeholder={modelPlaceholder}
                     ariaLabel={t("settings.default_model")}
                     helper={t("settings.model_menu_help")}
+                    actionLabel={t(
+                      modelIsOnlyOption
+                        ? "settings.view_selection"
+                        : selectedModelId
+                          ? "settings.change_selection"
+                          : "settings.choose_selection",
+                    )}
                     disabled={
                       disabled || !canChooseModel || account.models.length === 0
                     }
@@ -482,7 +596,7 @@ export function SettingsPage({
                       if (!model) return;
                       setRequestedModel({
                         selectionId: value,
-                        label: model.displayName || t("account.model_fallback"),
+                        label: modelLabel(model, t),
                       });
                       onSelectModel(value);
                     }}
@@ -558,18 +672,6 @@ export function SettingsPage({
                   </span>
                 </div>
               )}
-
-            <div className="settings-actions">
-              <button
-                className="secondary-button focus-ring"
-                disabled={
-                  disabled || !authenticated || account.operation !== "none"
-                }
-                onClick={onRefresh}
-              >
-                {t("account.refresh_catalog")}
-              </button>
-            </div>
 
             <div className="settings-danger-zone">
               <div>

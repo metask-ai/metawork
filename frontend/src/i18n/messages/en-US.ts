@@ -94,7 +94,7 @@ export const enUS = {
   "account.choose_key": "Choose an API Key",
   "account.choose_model": "Choose a model",
   "account.cancel": "Cancel current action",
-  "account.refresh_catalog": "Refresh account options",
+  "account.refresh_catalog": "Sync again",
   "account.logout": "Sign out and clear this device",
   "account.command_rejected":
     "That account action is no longer available. MetaWork kept the latest account state.",
@@ -338,17 +338,25 @@ export const enUS = {
   "settings.general": "General",
   "settings.account_models": "Account & models",
   "settings.execution_defaults": "Execution defaults",
+  "settings.catalog_count": "APIs {apis} · Models {models}",
   "settings.language_help": "Changes apply immediately on this device.",
   "settings.default_api": "Default API",
   "settings.default_api_help":
     "Changing API loads the model catalog owned by that Metask API.",
+  "settings.only_api_help":
+    "Metask currently returns only this API. Other APIs appear after the next sync.",
   "settings.api_menu_help":
     "Provider is supplied by Metask and shown for reference.",
   "settings.default_model": "Default model",
   "settings.default_model_help":
     "Used when you create a new task. Existing tasks keep their own model.",
+  "settings.only_model_help":
+    "This API currently provides only one available model.",
   "settings.model_menu_help":
     "Choose from the models available to the selected API.",
+  "settings.choose_selection": "Choose",
+  "settings.change_selection": "Change",
+  "settings.view_selection": "View options",
   "settings.model_loading": "Loading models…",
   "settings.model_waiting_api": "Choose an API first",
   "settings.loading_models_for": "Loading models available to {api}…",

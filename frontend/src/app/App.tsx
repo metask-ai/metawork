@@ -359,6 +359,15 @@ export default function App() {
   }, [accountGateRequired, bridgeUnavailable, currentWorkspaceId]);
 
   useEffect(() => {
+    if (!client.available()) return;
+    return client.onShortcut((detail) => {
+      if (detail.id !== "settings.open") return;
+      if (accountGateRequired || bridgeUnavailable) return;
+      openSettings();
+    });
+  }, [accountGateRequired, bridgeUnavailable, client]);
+
+  useEffect(() => {
     setEditingTitle(false);
     setConfirmDelete(false);
     setTaskMenuOpen(false);
@@ -858,6 +867,14 @@ export default function App() {
   function openSettings(target: SettingsFocusTarget = "title") {
     setSettingsFocus(target);
     setRoute("settings");
+    if (
+      bridgeUnavailable ||
+      accountBusyRef.current ||
+      snapshot.account.sessionState !== "authenticated" ||
+      snapshot.account.operation !== "none"
+    )
+      return;
+    void runAccountCommand(() => client.refreshAccountCatalog());
   }
 
   async function submitRun() {

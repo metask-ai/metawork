@@ -89,7 +89,7 @@ export const zhCN: Record<MessageId, string> = {
   "account.choose_key": "选择 API Key",
   "account.choose_model": "选择模型",
   "account.cancel": "取消当前操作",
-  "account.refresh_catalog": "刷新账号选项",
+  "account.refresh_catalog": "重新同步",
   "account.logout": "退出并清除这台设备上的信息",
   "account.command_rejected":
     "该账号操作已不可用，MetaWork 已保留最新账号状态。",
@@ -313,15 +313,22 @@ export const zhCN: Record<MessageId, string> = {
   "settings.general": "通用",
   "settings.account_models": "账号与模型",
   "settings.execution_defaults": "执行默认配置",
+  "settings.catalog_count": "API {apis} · 模型 {models}",
   "settings.language_help": "更改会立即应用到这台设备。",
   "settings.default_api": "默认 API",
   "settings.default_api_help":
     "切换 API 后会加载由该 Metask API 提供的模型目录。",
+  "settings.only_api_help":
+    "Metask 当前只返回这一个可用 API；其他 API 会在下次同步后出现。",
   "settings.api_menu_help": "Provider 由 Metask 提供，此处仅用于识别。",
   "settings.default_model": "默认模型",
   "settings.default_model_help":
     "用于新建任务；已有任务继续使用创建时绑定的模型。",
+  "settings.only_model_help": "当前 API 只提供这一个可用模型。",
   "settings.model_menu_help": "从所选 API 提供的模型中选择。",
+  "settings.choose_selection": "选择",
+  "settings.change_selection": "更改",
+  "settings.view_selection": "查看选项",
   "settings.model_loading": "正在加载模型…",
   "settings.model_waiting_api": "请先选择 API",
   "settings.loading_models_for": "正在加载 {api} 可用的模型…",
@@ -336,7 +343,7 @@ export const zhCN: Record<MessageId, string> = {
   "settings.switch.saving": "正在保存新的默认配置",
   "settings.switch.saving_detail": "保存完成后，新任务将使用 {api} · {model}。",
   "settings.switch.current_preserved": "完成前，当前默认配置仍然有效。",
-  "settings.switch.refreshing": "刷新账号选项期间，当前默认配置仍然有效。",
+  "settings.switch.refreshing": "同步账号选项期间，当前默认配置仍然有效。",
   "settings.switch.working": "此操作完成前，相关账号设置会保持锁定。",
   "settings.switch.cancelled": "已取消更改，{api} · {model} 仍为默认配置。",
   "settings.switch.failure_preserved":

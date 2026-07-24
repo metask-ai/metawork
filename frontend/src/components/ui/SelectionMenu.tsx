@@ -20,6 +20,7 @@ export function SelectionMenu({
   ariaLabel,
   title,
   helper,
+  actionLabel,
   disabled,
   busy = false,
   valueLayout = "compact",
@@ -35,6 +36,7 @@ export function SelectionMenu({
   ariaLabel: string;
   title?: string;
   helper?: string;
+  actionLabel?: string;
   disabled: boolean;
   busy?: boolean;
   valueLayout?: "compact" | "detailed";
@@ -88,6 +90,11 @@ export function SelectionMenu({
         {valueLayout === "detailed" && selected?.trailing && (
           <span className="selection-trigger-trailing">
             {selected.trailing}
+          </span>
+        )}
+        {actionLabel && !busy && (
+          <span className="selection-trigger-action" aria-hidden="true">
+            {actionLabel}
           </span>
         )}
         {busy ? (

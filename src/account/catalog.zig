@@ -527,6 +527,18 @@ pub const PublicCatalog = struct {
         self.model_count = 0;
     }
 
+    pub fn hasApiKey(self: *const PublicCatalog, id: []const u8) bool {
+        for (self.api_keys[0..self.api_key_count]) |*entry|
+            if (std.mem.eql(u8, entry.id.view(), id)) return true;
+        return false;
+    }
+
+    pub fn hasModel(self: *const PublicCatalog, id: []const u8) bool {
+        for (self.models[0..self.model_count]) |*entry|
+            if (std.mem.eql(u8, entry.id.view(), id)) return true;
+        return false;
+    }
+
     pub fn decorate(
         self: *PublicCatalog,
         view: *contract.AccountView,
@@ -588,6 +600,23 @@ pub const TestSupport = if (builtin.is_test) struct {
                 .display_name = try .optional(model.display_name),
             }) catch return error.OutOfMemory;
         }
+    }
+
+    pub fn appendOwnedApiKey(
+        session: *CatalogSession,
+        api_key: contract.ApiKeyView,
+        secret_value: []const u8,
+    ) Error!void {
+        var secret = try Secret.init(session.allocator, secret_value);
+        errdefer secret.deinit();
+        session.api_keys.append(session.allocator, .{
+            .id = try .init(api_key.id),
+            .name = try .init(api_key.name),
+            .suffix = try .init(api_key.suffix),
+            .provider_kind = api_key.provider_kind,
+            .secret = secret,
+        }) catch return error.OutOfMemory;
+        secret = .{};
     }
 
     pub fn replacePublic(

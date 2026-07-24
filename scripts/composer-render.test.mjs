@@ -430,6 +430,11 @@ test("Composer is one input shell with lightweight Workspace context below", asy
   assert.match(css, /max-height: min\(180px, 28vh\)/);
   assert.match(css, /\.composer \{[\s\S]*?border-radius: 18px;/);
   assert.match(css, /\.composer-send \{[\s\S]*?border-radius: 50%;/);
+  const composerBarRule = css.slice(
+    css.indexOf(".composer-bar {"),
+    css.indexOf("\n}", css.indexOf(".composer-bar {")),
+  );
+  assert.doesNotMatch(composerBarRule, /border(?:-top)?:/);
   const workspaceContextRule = css.slice(
     css.indexOf(".composer-workspace-context {"),
     css.indexOf("\n}", css.indexOf(".composer-workspace-context {")),
