@@ -694,12 +694,38 @@ Account & models
 `Account & models` 规则：
 
 - API 列表显示 Metask 名称、Provider、尾号和可用/需要处理状态；不显示完整 secret；
+- Provider 是 Host 从 API catalog 确定的只读技术事实，只作为 API 名称下的次级元数据展示；Renderer 不提供 Provider、base URL 或 credential 编辑入口；
 - 切换默认 API 后加载其模型目录，并明确它只更新默认选择、不自动改绑已有 Task；符合 §6.4 条件的历史 Task 仍需单独确认 rebind；
 - 默认模型选择与 New task Composer 使用同一 Host-owned selection，不维护两份互相漂移的 Renderer preference；
 - 既有 Task 显示当前 binding epoch 的 API/Provider/模型，旧 epoch 历史不被设置变化或 rebind 改写；
 - 跨重启历史 Task 的绑定不可恢复时，设置变化也不能使其静默采用当前默认值；只按 §6.4 提供显式 rebind 或从历史新建 Task；
 - `在 Metask 中管理` 只有在 Host 发布固定安全入口后才显示；当前没有该 capability 时不放置链接或假入口；
 - 退出登录必须说明 live Task 阻塞、设备凭据清理和历史保留语义。
+
+设置页保留左侧分区导航与右侧内容的双栏布局。它是桌面控制面，不使用营销页式巨型 Hero，也不为视觉饱满度增加无产品语义的卡片、渐变、玻璃材质或装饰性图表。标准窗口下标题、简介、当前分区和第一组设置必须在首屏形成紧凑、稳定的阅读起点；窄窗口可把分区导航收成横向行，但不得改变设置 owner 或复制页面状态。
+
+设置视觉与控件遵循以下规则：
+
+- 页面背景、工作面、交互组和浮层使用视觉系统中的 `surface-app` / `surface-work`、分隔线与真实抬升关系建立层级；普通设置行不逐项卡片化，只有 API 与模型这种依赖型配置形成一个连续交互组；
+- 页面标题约 28–32 px，设置主文案 13–15 px，辅助文案不小于 12 px；disabled 状态只改变语义色和对比度，不缩小字号；
+- 语言、API 和模型统一使用经过键盘、焦点、碰撞和长列表验证的同一 headless Select primitive；正式设置页禁止依赖 WebView 平台主题的原生 `<select>`，也不建立另一套自绘菜单；
+- compact 选择器只显示一个短值；API 使用 detailed 选择器，以 API 名称为主信息，以 Provider 为次级说明，以脱敏尾号为尾部数据。Provider 和尾号不得表现成可编辑字段；
+- API 与模型控件保持明确的上下游顺序。API 切换开始后只冻结相关配置组；模型目录加载、选择和持久化不得冻结语言、导航、历史阅读或取消仍被 Host 接受的操作；
+- 浮层只在打开时使用克制的透明度与位置过渡；loading 指示只出现在真实运行的配置项，`prefers-reduced-motion` 下移除非必要动画；
+- 当前分区导航必须有持续可见的选中态和 `aria-current`，不能只在 hover 时出现；focus ring、菜单选中勾选、状态色和文字共同表达状态。
+
+Account operation 在设置中的投影如下：
+
+| Host operation    | API 控件                                   | 模型控件                             | 状态与恢复                                                                   |
+| ----------------- | ------------------------------------------ | ------------------------------------ | ---------------------------------------------------------------------------- |
+| `none`            | 显示当前默认 API，可选择                   | 显示当前默认模型，可选择             | 不常驻成功提示                                                               |
+| `loading_keys`    | 局部 busy，保留已提交默认事实              | 保留已提交默认事实                   | 显示正在刷新账号选项；Host 允许时保留取消                                    |
+| `loading_models`  | 显示候选 API 和 busy，不接收重复切换       | 显示该 API 的模型加载状态            | 明确旧默认配置仍然有效；Host 允许时保留取消                                  |
+| `selecting_model` | 显示模型目录所属的候选 API                 | 请求用户从 Host-validated 目录中选择 | 说明选择模型将完成新的默认配置；不得由 Renderer 自动选择                     |
+| `selecting_key`   | 显示真实 API 歧义并请求选择                | 不伪造模型入口                       | 只在 Host 明确请求 API 选择时出现                                            |
+| `persisting`      | 保持候选 API 可读并锁定相关 mutation       | 保持候选模型可读并显示正在保存       | credential persistence 已越过取消边界时不显示假取消，等待唯一 completion     |
+| terminal failure  | 恢复已提交默认配置或 Host 发布的可恢复候选 | 不保留失效候选                       | 说明失败原因与下一步；旧默认仍有效时必须直说，不能留下永久 disabled selector |
+| `reauth_required` | 保留脱敏事实但禁用 catalog mutation        | 保留脱敏事实但禁用 catalog mutation  | 把重新认证作为当前恢复动作，不能清空 Workspace、Task 或已有 execution 事实   |
 
 技能、连接器、定时任务和 IM 频道只有在真实接通并形成清晰产品 owner 后才进入导航；未接通时不放置假入口，也不照搬其他 Agent 产品的信息架构。
 
