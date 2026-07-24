@@ -87,7 +87,7 @@ Account 是 MetaWork 的 Metask 账号控制面，负责 OAuth 登录、账号/A
 - 首次 readiness 完成后才进入 Workbench；账号身份固定显示在左栏底部，点击后进入账号与模型设置、重新认证或退出，不能再次隐藏到 Composer prerequisite；
 - API Key 切换属于 `账号与模型` 设置。Renderer 只显示 Metask 返回的脱敏名称、Provider 与尾号；API 创建、秘密查看和管理仍由 Metask 完成；
 - 当前模型必须显示在 New task Composer 附近，并可从当前 API 的已验证模型目录快速选择。该选择更新后续新 Task 的默认执行配置；已有 Task 显示当前 binding epoch 的模型，历史按 epoch 保留原事实，不提供虚假的 live Session 热切换；
-- 设置页同时提供默认 API、默认模型、目录刷新和与错误语义匹配的恢复动作；后续通用、Workspace、通知、外观和高级设置共享同一设置框架；
+- 进入账号与模型设置时，显式导航动作自动请求 Host 同步一次最新 API/模型目录；已有默认配置时 Host 必须优先复用并验证当前 API，再自动加载它的模型目录，不能要求用户先重新选择或切换 API 才能修改默认模型。页面直接使用 Host 已发布的脱敏目录和提交态，手动重新同步只作为网络失败、页面持续打开期间 Metask 外部目录变化等恢复动作。设置页同时提供可独立修改的默认 API、默认模型和与错误语义匹配的恢复动作；后续通用、Workspace、通知、外观和高级设置共享同一设置框架；
 - OAuth token 只访问 Metask 账号 API；选定 API Key 才作为 AgentCore 模型调用凭据；
 - Renderer 只能看到脱敏账号、Key 尾号、模型、稳定错误码和状态，不得接触 OAuth token、完整 API Key、Authorization header、临时 OAuth URL 或凭据存储 locator；
 - Account 只维护一个当前默认 ExecutionConfig，但 Workbench 可以保留被既有 Task 引用的旧 generation owned copy。切换默认 API 或模型不得篡改、停止或重新配置既有 Task；旧 generation 只有在对应 Task、Agent Session、Run、executor job 与真实 worker reference 全部释放后才能清零；

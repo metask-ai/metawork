@@ -218,6 +218,8 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   persistenceCommitted.account.operation = "persisting";
   persistenceCommitted.account.readiness = "preparing";
   persistenceCommitted.account.canCreateTask = false;
+  persistenceCommitted.account.candidateApiKeySelectionId = "key-1";
+  persistenceCommitted.account.candidateModelSelectionId = "fixture-model";
   assert.doesNotThrow(() => decodeWorkbenchSnapshot(persistenceCommitted));
 
   const cancellablePersistence = clone(persistenceCommitted);
@@ -225,6 +227,28 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   assert.throws(
     () => decodeWorkbenchSnapshot(cancellablePersistence),
     /cancellation availability disagrees/,
+  );
+
+  const candidateAtRest = clone(fixture);
+  candidateAtRest.account.candidateApiKeySelectionId = "key-1";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(candidateAtRest),
+    /candidate execution identities require reconfiguration/,
+  );
+
+  const unresolvedCandidate = clone(fixture);
+  unresolvedCandidate.account.operation = "loading_keys";
+  unresolvedCandidate.account.readiness = "preparing";
+  unresolvedCandidate.account.canCancel = true;
+  unresolvedCandidate.account.canCreateTask = false;
+  unresolvedCandidate.account.candidateApiKeySelectionId = "key-pending";
+  assert.doesNotThrow(() => decodeWorkbenchSnapshot(unresolvedCandidate));
+
+  const incompletePersistence = clone(persistenceCommitted);
+  incompletePersistence.account.candidateModelSelectionId = "";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(incompletePersistence),
+    /persistence requires a complete candidate execution target/,
   );
 
   const emptyKeyChoice = clone(fixture);
@@ -247,6 +271,7 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   emptyModelChoice.account.primaryAction = "choose_model";
   emptyModelChoice.account.apiKeys = fixture.account.apiKeys;
   emptyModelChoice.account.models = [];
+  emptyModelChoice.account.candidateApiKeySelectionId = "key-1";
   assert.throws(
     () => decodeWorkbenchSnapshot(emptyModelChoice),
     /choice requires at least one candidate/,

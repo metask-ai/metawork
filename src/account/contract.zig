@@ -157,6 +157,8 @@ pub const AccountView = struct {
     models: []const ModelView = &.{},
     selected_api_key_id: []const u8 = "",
     selected_model: []const u8 = "",
+    candidate_api_key_id: []const u8 = "",
+    candidate_model: []const u8 = "",
     model_catalog_api_key_id: []const u8 = "",
     can_create_task: bool = false,
     error_code: ErrorCode = .none,
@@ -414,6 +416,8 @@ pub fn validateView(view: AccountView) ValidationError!void {
     try validateOptional(view.display_name, Limits.display_name_bytes);
     try validateOptional(view.selected_api_key_id, Limits.api_key_id_bytes);
     try validateOptional(view.selected_model, Limits.model_id_bytes);
+    try validateOptional(view.candidate_api_key_id, Limits.api_key_id_bytes);
+    try validateOptional(view.candidate_model, Limits.model_id_bytes);
     try validateOptional(
         view.model_catalog_api_key_id,
         Limits.api_key_id_bytes,
@@ -436,6 +440,38 @@ pub fn validateView(view: AccountView) ValidationError!void {
         for (view.models[0..model_index]) |prior|
             if (std.mem.eql(u8, prior.id, model.id))
                 return error.InconsistentState;
+    }
+    const candidate_allowed = switch (view.operation) {
+        .loading_keys, .loading_models, .selecting_model, .persisting => true,
+        else => false,
+    };
+    if (!candidate_allowed and
+        (view.candidate_api_key_id.len != 0 or view.candidate_model.len != 0))
+        return error.InconsistentState;
+    if (view.candidate_model.len != 0 and view.candidate_api_key_id.len == 0)
+        return error.InconsistentState;
+    if ((view.operation == .loading_models or
+        view.operation == .selecting_model or
+        view.operation == .persisting) and
+        view.candidate_api_key_id.len == 0)
+        return error.InconsistentState;
+    if (view.operation == .persisting and view.candidate_model.len == 0)
+        return error.InconsistentState;
+    if (view.candidate_api_key_id.len != 0 and view.operation != .loading_keys) {
+        var candidate_api_matches: usize = 0;
+        for (view.api_keys) |key| {
+            if (std.mem.eql(u8, key.id, view.candidate_api_key_id))
+                candidate_api_matches += 1;
+        }
+        if (candidate_api_matches != 1) return error.InconsistentState;
+    }
+    if (view.candidate_model.len != 0 and view.operation == .persisting) {
+        var candidate_model_matches: usize = 0;
+        for (view.models) |model| {
+            if (std.mem.eql(u8, model.id, view.candidate_model))
+                candidate_model_matches += 1;
+        }
+        if (candidate_model_matches != 1) return error.InconsistentState;
     }
 
     if (view.execution_state == .ready) {

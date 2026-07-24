@@ -94,7 +94,7 @@ export const enUS = {
   "account.choose_key": "Choose an API Key",
   "account.choose_model": "Choose a model",
   "account.cancel": "Cancel current action",
-  "account.refresh_catalog": "Refresh account options",
+  "account.refresh_catalog": "Sync again",
   "account.logout": "Sign out and clear this device",
   "account.command_rejected":
     "That account action is no longer available. MetaWork kept the latest account state.",
@@ -112,7 +112,7 @@ export const enUS = {
   "command.timeout_sync_failed":
     "{operation} took longer than expected, and the latest state could not be confirmed. Reconnect before trying again.",
   "workspace.label": "Workspace",
-  "workspace.choose_on_send": "Choose on send",
+  "workspace.select": "Select a workspace",
   "workspace.add": "Add",
   "workspace.remove": "Remove",
   "workspace.switch": "Switch workspace",
@@ -123,13 +123,12 @@ export const enUS = {
   "workspace.none": "No workspace selected",
   "workspace.grant_ready": "Ready to start a task in this trusted workspace.",
   "workspace.selection_cancelled": "Workspace selection cancelled.",
-  "workspace.draft_conflict":
-    "That folder already has an unsent draft, so nothing was switched or overwritten. Choose another folder, or copy and clear this draft before trying again.",
   "workspace.selection_failed":
     "The workspace could not be opened. Choose it again.",
   "workspace.grant_confirmed": "Workspace access confirmed.",
   "workspace.access_required":
     "Confirm workspace access again before sending this draft.",
+  "workspace.access_required_short": "Access required",
   "workspace.confirm_access": "Confirm access",
   "workspace.retry_removal": "Retry removal",
   "workspace.removal_failed_short": "Removal failed",
@@ -338,14 +337,52 @@ export const enUS = {
   "settings.section_label": "Settings",
   "settings.general": "General",
   "settings.account_models": "Account & models",
+  "settings.execution_defaults": "Execution defaults",
+  "settings.catalog_count": "APIs {apis} · Models {models}",
   "settings.language_help": "Changes apply immediately on this device.",
   "settings.default_api": "Default API",
   "settings.default_api_help":
     "Changing API loads the model catalog owned by that Metask API.",
+  "settings.only_api_help":
+    "Metask currently returns only this API. Other APIs appear after the next sync.",
+  "settings.api_menu_help":
+    "Provider is supplied by Metask and shown for reference.",
   "settings.default_model": "Default model",
   "settings.default_model_help":
     "Used when you create a new task. Existing tasks keep their own model.",
+  "settings.only_model_help":
+    "This API currently provides only one available model.",
+  "settings.model_menu_help":
+    "Choose from the models available to the selected API.",
+  "settings.choose_selection": "Choose",
+  "settings.change_selection": "Change",
+  "settings.view_selection": "View options",
+  "settings.model_loading": "Loading models…",
+  "settings.model_waiting_api": "Choose an API first",
   "settings.loading_models_for": "Loading models available to {api}…",
+  "settings.switch.pending_label": "Pending change",
+  "settings.switch.saving_label": "Saving",
+  "settings.switch.preparing_api": "Preparing {api}",
+  "settings.switch.preparing_model": "Preparing {model}",
+  "settings.switch.loading_models": "Loading models for {api}",
+  "settings.switch.choose_model": "Choose a model for {api}",
+  "settings.switch.choose_model_help":
+    "The new default is not saved until you choose a model.",
+  "settings.switch.choose_api_help":
+    "Choose the API that should supply models for new tasks.",
+  "settings.switch.saving": "Saving the new default",
+  "settings.switch.saving_detail":
+    "{api} · {model} will be used for new tasks when saving finishes.",
+  "settings.switch.current_preserved":
+    "Your current default stays active until this finishes.",
+  "settings.switch.refreshing":
+    "Your current default stays active while account options refresh.",
+  "settings.switch.working":
+    "Account changes remain locked until this action finishes.",
+  "settings.switch.cancelled":
+    "Change cancelled. {api} · {model} remains your default.",
+  "settings.switch.failure_preserved":
+    "No default was changed. {api} · {model} remains active.",
   "settings.existing_tasks_unchanged":
     "Default changes apply only to new tasks. Existing task bindings and history remain unchanged.",
   "settings.signout_title": "Sign out on this device",

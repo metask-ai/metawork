@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { submitTaskInstruction } from "../frontend/src/features/composer/submitTaskInstruction.ts";
-import { resolveFirstSendWorkspace } from "../frontend/src/features/composer/firstSendWorkspace.ts";
 import { chooseWorkspaceWithDraft } from "../frontend/src/features/workspaces/chooseWorkspace.ts";
 
 test("a failed authoritative refresh cannot move or lose the source draft", async () => {
@@ -19,7 +18,7 @@ test("a failed authoritative refresh cannot move or lose the source draft", asyn
         throw failure;
       },
       openDraft: true,
-      sourceDraftId: "unscoped",
+      migratableDraftId: "unscoped",
       moveDraft() {
         calls.push("move");
         return "moved";
@@ -30,53 +29,25 @@ test("a failed authoritative refresh cannot move or lose the source draft", asyn
   assert.deepEqual(calls, ["choose", "refresh"]);
 });
 
-test("cancelling first-send Workspace selection preserves the draft boundary", async () => {
-  let draft = "Keep this instruction";
-  let chooseCalls = 0;
-  const workspace = await resolveFirstSendWorkspace({
-    taskId: null,
-    workspace: null,
-    chooseWorkspace: async () => {
-      chooseCalls += 1;
-      return null;
+test("choosing a Workspace without a migratable draft only changes context", async () => {
+  const calls = [];
+  const result = await chooseWorkspaceWithDraft({
+    choose: async () => {
+      calls.push("choose");
+      return { selected: true, workspaceId: "7" };
     },
-  });
-  if (workspace.kind === "ready") draft = "";
-  assert.deepEqual(workspace, { kind: "cancelled" });
-  assert.equal(chooseCalls, 1);
-  assert.equal(draft, "Keep this instruction");
-});
-
-test("an existing Task never asks for another Workspace", async () => {
-  let chooseCalled = false;
-  const result = await resolveFirstSendWorkspace({
-    taskId: "9",
-    workspace: { workspaceId: "2", workspaceEpoch: "5" },
-    chooseWorkspace: async () => {
-      chooseCalled = true;
-      return "unexpected";
+    refresh: async () => calls.push("refresh"),
+    openDraft: true,
+    migratableDraftId: null,
+    moveDraft() {
+      calls.push("move");
     },
   });
   assert.deepEqual(result, {
-    kind: "ready",
-    workspaceId: "2",
-    workspaceEpoch: "5",
+    kind: "selected",
+    result: { selected: true, workspaceId: "7" },
   });
-  assert.equal(chooseCalled, false);
-});
-
-test("an existing Task with missing Workspace identity fails closed", async () => {
-  let chooseCalled = false;
-  const result = await resolveFirstSendWorkspace({
-    taskId: "9",
-    workspace: null,
-    chooseWorkspace: async () => {
-      chooseCalled = true;
-      return { workspaceId: "unrelated-workspace", workspaceEpoch: "1" };
-    },
-  });
-  assert.deepEqual(result, { kind: "cancelled" });
-  assert.equal(chooseCalled, false);
+  assert.deepEqual(calls, ["choose", "refresh"]);
 });
 
 test("the first send uses Host generations and creates one Task before its Run", async () => {

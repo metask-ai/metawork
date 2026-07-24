@@ -283,6 +283,8 @@ function decodeAccount(value: unknown, path: string): AccountView {
     "models",
     "selectedApiKeySelectionId",
     "selectedModelSelectionId",
+    "candidateApiKeySelectionId",
+    "candidateModelSelectionId",
     "modelCatalogApiKeySelectionId",
     "canCreateTask",
     "errorCode",
@@ -360,6 +362,14 @@ function decodeAccount(value: unknown, path: string): AccountView {
     item.selectedModelSelectionId,
     `${path}.selectedModelSelectionId`,
   );
+  const candidateApiKeySelectionId = stringValue(
+    item.candidateApiKeySelectionId,
+    `${path}.candidateApiKeySelectionId`,
+  );
+  const candidateModelSelectionId = stringValue(
+    item.candidateModelSelectionId,
+    `${path}.candidateModelSelectionId`,
+  );
   const modelCatalogApiKeySelectionId = stringValue(
     item.modelCatalogApiKeySelectionId,
     `${path}.modelCatalogApiKeySelectionId`,
@@ -394,6 +404,42 @@ function decodeAccount(value: unknown, path: string): AccountView {
       executionGeneration === "0")
   )
     fail(path, "a ready execution requires selected identities and generation");
+  const candidateAllowed = [
+    "loading_keys",
+    "loading_models",
+    "selecting_model",
+    "persisting",
+  ].includes(operation);
+  if (
+    !candidateAllowed &&
+    (candidateApiKeySelectionId.length > 0 ||
+      candidateModelSelectionId.length > 0)
+  )
+    fail(path, "candidate execution identities require reconfiguration");
+  if (
+    candidateModelSelectionId.length > 0 &&
+    candidateApiKeySelectionId.length === 0
+  )
+    fail(path, "a candidate model requires its candidate API");
+  if (
+    ["loading_models", "selecting_model", "persisting"].includes(operation) &&
+    candidateApiKeySelectionId.length === 0
+  )
+    fail(path, "the active model flow requires a candidate API");
+  if (operation === "persisting" && candidateModelSelectionId.length === 0)
+    fail(path, "persistence requires a complete candidate execution target");
+  if (
+    candidateApiKeySelectionId.length > 0 &&
+    operation !== "loading_keys" &&
+    !apiKeys.some((key) => key.selectionId === candidateApiKeySelectionId)
+  )
+    fail(path, "candidate API must belong to the API catalog");
+  if (
+    candidateModelSelectionId.length > 0 &&
+    operation === "persisting" &&
+    !models.some((model) => model.selectionId === candidateModelSelectionId)
+  )
+    fail(path, "candidate model must belong to the model catalog");
   const catalogReconfiguration = [
     "loading_keys",
     "selecting_key",
@@ -438,6 +484,8 @@ function decodeAccount(value: unknown, path: string): AccountView {
       models.length !== 0 ||
       selectedApiKeySelectionId.length !== 0 ||
       selectedModelSelectionId.length !== 0 ||
+      candidateApiKeySelectionId.length !== 0 ||
+      candidateModelSelectionId.length !== 0 ||
       modelCatalogApiKeySelectionId.length !== 0 ||
       executionGeneration !== "0" ||
       canCreateTask)
@@ -490,6 +538,8 @@ function decodeAccount(value: unknown, path: string): AccountView {
     models,
     selectedApiKeySelectionId,
     selectedModelSelectionId,
+    candidateApiKeySelectionId,
+    candidateModelSelectionId,
     modelCatalogApiKeySelectionId,
     canCreateTask,
     errorCode: enumValue(

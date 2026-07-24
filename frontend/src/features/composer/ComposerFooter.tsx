@@ -1,8 +1,18 @@
-import type { RefObject } from "react";
+import { useEffect, type RefObject } from "react";
 
 import { Icon } from "../../components/ui/Icon.tsx";
 import { useI18n } from "../../i18n/context.ts";
 import { maxComposerCharacters } from "./drafts.ts";
+import { ModelSelector } from "./ModelSelector.tsx";
+import { WorkspaceContextSelector } from "./WorkspaceContextSelector.tsx";
+
+function resizeComposerTextarea(textarea: HTMLTextAreaElement) {
+  const maxHeight = Math.min(180, window.innerHeight * 0.28);
+  textarea.style.height = "auto";
+  textarea.style.height = `${Math.min(textarea.scrollHeight, maxHeight)}px`;
+  textarea.style.overflowY =
+    textarea.scrollHeight > maxHeight ? "auto" : "hidden";
+}
 
 export function ComposerFooter({
   textareaRef,
@@ -18,18 +28,22 @@ export function ComposerFooter({
   workspaceMissing,
   workspaceLabel,
   workspaceTitle,
+  workspaceOptions,
+  selectedWorkspaceId,
+  workspaceEditable,
   modelLabel,
   modelOptions,
   selectedModelId,
   modelEditable,
   modelSelectionDisabled,
+  modelSelectionPending,
   modelContextTitle,
   actionDisabled,
   onPromptChange,
   onSubmit,
   onConfirmAccess,
+  onSelectWorkspace,
   onSelectModel,
-  onOpenModelSettings,
 }: {
   textareaRef: RefObject<HTMLTextAreaElement | null>;
   archived: boolean;
@@ -44,124 +58,127 @@ export function ComposerFooter({
   workspaceMissing: boolean;
   workspaceLabel: string;
   workspaceTitle: string;
+  workspaceOptions: {
+    id: string;
+    label: string;
+    canonicalRoot: string;
+    authorization: "available" | "removing" | "reauthorization_required";
+  }[];
+  selectedWorkspaceId: string;
+  workspaceEditable: boolean;
   modelLabel: string | null;
   modelOptions: { selectionId: string; displayName: string }[];
   selectedModelId: string;
   modelEditable: boolean;
   modelSelectionDisabled: boolean;
+  modelSelectionPending: boolean;
   modelContextTitle: string;
   actionDisabled: boolean;
   onPromptChange: (value: string) => void;
   onSubmit: () => void;
   onConfirmAccess: () => void;
+  onSelectWorkspace: (workspaceId: string) => void;
   onSelectModel: (id: string) => void;
-  onOpenModelSettings: () => void;
 }) {
   const { t } = useI18n();
+
+  useEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea || typeof window === "undefined") return;
+    resizeComposerTextarea(textarea);
+  }, [prompt, textareaRef]);
+
+  useEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea || typeof window === "undefined") return;
+    const resize = () => resizeComposerTextarea(textarea);
+    const observer =
+      typeof ResizeObserver === "undefined" ? null : new ResizeObserver(resize);
+    observer?.observe(textarea);
+    window.addEventListener("resize", resize);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", resize);
+    };
+  }, [textareaRef]);
+
   return (
     <footer className="composer-bar">
-      <div className="composer-context" aria-label={t("run.context")}>
-        {modelLabel && (
-          <>
-            <span className="composer-context-item composer-model-context">
-              <small>{t("account.model")}</small>
-              {modelEditable ? (
-                <span className="composer-model-controls">
-                  <select
-                    className="composer-model-select focus-ring"
-                    aria-label={t("settings.default_model")}
-                    title={modelContextTitle}
-                    value={selectedModelId}
-                    disabled={modelSelectionDisabled}
-                    onChange={(event) => onSelectModel(event.target.value)}
-                  >
-                    {!modelOptions.some(
-                      (model) => model.selectionId === selectedModelId,
-                    ) && <option value="">{t("account.choose_model")}</option>}
-                    {modelOptions.map((model) => (
-                      <option key={model.selectionId} value={model.selectionId}>
-                        {model.displayName || t("account.model_fallback")}
-                      </option>
-                    ))}
-                  </select>
-                  <button
-                    className="composer-settings-link focus-ring"
-                    aria-label={t("settings.open_account_models")}
-                    title={t("settings.open_account_models")}
-                    onClick={onOpenModelSettings}
-                  >
-                    <Icon name="settings" />
-                  </button>
-                </span>
-              ) : (
-                <strong title={modelContextTitle}>{modelLabel}</strong>
-              )}
-            </span>
-            <span className="composer-context-divider" aria-hidden="true" />
-          </>
-        )}
-        <span className="composer-context-item">
-          <small>{t("workspace.label")}</small>
-          {workspaceMissing ? (
-            <button
-              className="composer-context-action focus-ring"
-              disabled={actionDisabled}
-              onClick={onConfirmAccess}
-            >
-              {t("workspace.choose_on_send")}
-            </button>
-          ) : (
-            <strong title={workspaceTitle}>{workspaceLabel}</strong>
-          )}
-        </span>
-      </div>
-      <div className="composer">
-        <textarea
-          ref={textareaRef}
-          value={prompt}
-          maxLength={maxComposerCharacters}
-          disabled={composeDisabled}
-          placeholder={
-            closed
-              ? t("run.placeholder_closed")
-              : closing
-                ? t("run.placeholder_closing")
-                : unavailable
-                  ? t("run.placeholder_unavailable")
-                  : archived
-                    ? t("run.placeholder_archived")
-                    : t("run.placeholder")
-          }
-          onChange={(event) => onPromptChange(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey && canSubmit) {
-              event.preventDefault();
-              onSubmit();
+      <div className="composer-shell">
+        <div className="composer">
+          <textarea
+            ref={textareaRef}
+            value={prompt}
+            maxLength={maxComposerCharacters}
+            disabled={composeDisabled}
+            placeholder={
+              closed
+                ? t("run.placeholder_closed")
+                : closing
+                  ? t("run.placeholder_closing")
+                  : unavailable
+                    ? t("run.placeholder_unavailable")
+                    : archived
+                      ? t("run.placeholder_archived")
+                      : t("run.placeholder")
             }
-          }}
-        />
-        <button
-          className="composer-send focus-ring"
-          aria-label={t("run.submit")}
-          title={t("run.submit")}
-          disabled={!canSubmit}
-          onClick={onSubmit}
-        >
-          <Icon name="send" />
-        </button>
-      </div>
-      {accessRequired && (
-        <p className="composer-access-note">
-          <span>{t("workspace.access_required")}</span>
-          <button
-            className="text-button focus-ring"
-            disabled={actionDisabled}
-            onClick={onConfirmAccess}
+            onChange={(event) => onPromptChange(event.target.value)}
+            onKeyDown={(event) => {
+              if (
+                event.key === "Enter" &&
+                !event.shiftKey &&
+                !event.nativeEvent.isComposing &&
+                canSubmit
+              ) {
+                event.preventDefault();
+                onSubmit();
+              }
+            }}
+          />
+          <div
+            className="composer-toolbar"
+            role="group"
+            aria-label={t("run.context")}
           >
-            {t("workspace.confirm_access")}
-          </button>
-        </p>
-      )}
+            {modelLabel && (
+              <span className="composer-model-context">
+                <span className="sr-only">{t("account.model")}</span>
+                <ModelSelector
+                  label={modelLabel}
+                  options={modelOptions}
+                  selectedId={selectedModelId}
+                  editable={modelEditable}
+                  disabled={modelSelectionDisabled}
+                  pending={modelSelectionPending}
+                  contextTitle={modelContextTitle}
+                  onSelect={onSelectModel}
+                />
+              </span>
+            )}
+            <button
+              className="composer-send focus-ring"
+              aria-label={t("run.submit")}
+              title={t("run.submit")}
+              disabled={!canSubmit}
+              onClick={onSubmit}
+            >
+              <Icon name="send" />
+            </button>
+          </div>
+        </div>
+        <WorkspaceContextSelector
+          accessRequired={accessRequired}
+          missing={workspaceMissing}
+          label={workspaceLabel}
+          title={workspaceTitle}
+          options={workspaceOptions}
+          selectedId={selectedWorkspaceId}
+          editable={workspaceEditable}
+          disabled={actionDisabled}
+          onConfirmAccess={onConfirmAccess}
+          onSelect={onSelectWorkspace}
+        />
+      </div>
       {runInFlight && (
         <p className="composer-draft-note">{t("run.draft_only")}</p>
       )}

@@ -3,21 +3,20 @@ export type WorkspaceChoice =
 
 export type WorkspaceChoiceOutcome =
   | { kind: "cancelled" }
-  | { kind: "conflict"; workspaceId: string }
   | { kind: "selected"; result: Extract<WorkspaceChoice, { selected: true }> };
 
 export async function chooseWorkspaceWithDraft({
   choose,
   refresh,
   openDraft,
-  sourceDraftId,
+  migratableDraftId,
   moveDraft,
 }: {
   choose: () => Promise<WorkspaceChoice>;
   refresh: () => Promise<void>;
   openDraft: boolean;
-  sourceDraftId: string | null;
-  moveDraft: (sourceId: string, targetId: string) => string;
+  migratableDraftId: string | null;
+  moveDraft: (sourceId: string, targetId: string) => unknown;
 }): Promise<WorkspaceChoiceOutcome> {
   const result = await choose();
   if (!result.selected) return { kind: "cancelled" };
@@ -27,11 +26,10 @@ export async function chooseWorkspaceWithDraft({
   await refresh();
   if (
     openDraft &&
-    sourceDraftId !== null &&
-    sourceDraftId !== result.workspaceId &&
-    moveDraft(sourceDraftId, result.workspaceId) === "conflict"
+    migratableDraftId !== null &&
+    migratableDraftId !== result.workspaceId
   )
-    return { kind: "conflict", workspaceId: result.workspaceId };
+    moveDraft(migratableDraftId, result.workspaceId);
 
   return { kind: "selected", result };
 }

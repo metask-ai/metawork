@@ -95,6 +95,8 @@ export type AccountView = {
   models: { selectionId: string; displayName: string }[];
   selectedApiKeySelectionId: string;
   selectedModelSelectionId: string;
+  candidateApiKeySelectionId: string;
+  candidateModelSelectionId: string;
   modelCatalogApiKeySelectionId: string;
   canCreateTask: boolean;
   errorCode: AccountErrorCode;

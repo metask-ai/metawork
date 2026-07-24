@@ -116,6 +116,8 @@ const CommittedState = struct {
             .display_name = self.display_name.view(),
             .selected_api_key_id = self.selected_api_key_id.view(),
             .selected_model = self.selected_model.view(),
+            .candidate_api_key_id = self.pending_api_key_id.view(),
+            .candidate_model = self.pending_model.view(),
             .model_catalog_api_key_id = switch (self.operation) {
                 .selecting_model, .persisting => self.pending_api_key_id.view(),
                 .loading_models => self.pending_api_key_id.view(),
@@ -428,7 +430,13 @@ pub const Account = struct {
     pub fn prepareShutdown(self: *const Account) PreparedTransition {
         var next = self.state;
         next.session_state = .shutting_down;
+        next.execution_state = .none;
         next.operation = .none;
+        next.selected_api_key_id.clear();
+        next.selected_model.clear();
+        next.pending_api_key_id.clear();
+        next.pending_model.clear();
+        next.execution_generation = 0;
         next.clearError();
         const active_attempt = next.active_attempt_id;
         next.active_attempt_id = null;
@@ -640,6 +648,26 @@ pub const Account = struct {
             self.state.active_attempt_id == null)
             return .{ .rejected = .invalid_state };
         var next = self.state;
+        if (next.execution_state == .ready and
+            std.mem.eql(
+                u8,
+                next.pending_api_key_id.view(),
+                next.selected_api_key_id.view(),
+            ) and
+            std.mem.eql(u8, model, next.selected_model.view()))
+        {
+            next.operation = .none;
+            next.active_attempt_id = null;
+            next.attempt_kind = .none;
+            next.pending_api_key_id.clear();
+            next.pending_model.clear();
+            next.clearError();
+            return transitionNoEffect(
+                next,
+                .catalog_changed,
+                self.state.active_attempt_id.?,
+            );
+        }
         next.pending_model.set(model) catch
             return .{ .rejected = .invalid_command };
         next.execution_state = if (next.execution_state == .ready)
@@ -1595,6 +1623,8 @@ test "failed reconfiguration preserves committed selection and generation high w
     try std.testing.expectEqual(contract.ExecutionState.reconfiguring, account.view().execution_state);
     try std.testing.expectEqualStrings("model-old", account.view().selected_model);
     try std.testing.expectEqualStrings("key-old", account.view().selected_api_key_id);
+    try std.testing.expectEqualStrings("key-new", account.view().candidate_api_key_id);
+    try std.testing.expectEqualStrings("model-new", account.view().candidate_model);
 
     var failed_completion: WorkerCompletion = .{
         .attempt_id = account.activeAttempt().?,
@@ -1611,6 +1641,8 @@ test "failed reconfiguration preserves committed selection and generation high w
     try std.testing.expectEqual(contract.ExecutionState.ready, account.view().execution_state);
     try std.testing.expectEqualStrings("model-old", account.view().selected_model);
     try std.testing.expectEqualStrings("key-old", account.view().selected_api_key_id);
+    try std.testing.expectEqualStrings("", account.view().candidate_api_key_id);
+    try std.testing.expectEqualStrings("", account.view().candidate_model);
     try std.testing.expectEqual(@as(u64, 9), account.view().execution_generation);
 
     var logout = switch (account.prepareCommand(.logout)) {
@@ -1681,6 +1713,8 @@ test "ready execution reloads authenticated catalog before reconfiguration" {
     try std.testing.expectEqual(contract.ExecutionState.ready, view.execution_state);
     try std.testing.expectEqualStrings("key-old", view.selected_api_key_id);
     try std.testing.expectEqualStrings("model-old", view.selected_model);
+    try std.testing.expectEqualStrings("key-new", view.candidate_api_key_id);
+    try std.testing.expectEqualStrings("", view.candidate_model);
     try std.testing.expectEqualStrings("key-old", view.model_catalog_api_key_id);
     try std.testing.expect(!view.can_create_task);
 
@@ -1699,6 +1733,9 @@ test "ready execution reloads authenticated catalog before reconfiguration" {
     };
     try std.testing.expect(select_model.takeEffect().? == .load_api_keys);
     commitPrepared(&account, &select_model);
+    view = account.view();
+    try std.testing.expectEqualStrings("key-old", view.candidate_api_key_id);
+    try std.testing.expectEqualStrings("model-new", view.candidate_model);
 
     var keys_loaded: WorkerCompletion = .{
         .attempt_id = account.activeAttempt().?,
@@ -1735,6 +1772,8 @@ test "ready execution reloads authenticated catalog before reconfiguration" {
     try std.testing.expectEqual(contract.ExecutionState.reconfiguring, view.execution_state);
     try std.testing.expectEqualStrings("key-old", view.selected_api_key_id);
     try std.testing.expectEqualStrings("model-old", view.selected_model);
+    try std.testing.expectEqualStrings("key-old", view.candidate_api_key_id);
+    try std.testing.expectEqualStrings("model-new", view.candidate_model);
     try std.testing.expectEqualStrings("key-old", view.model_catalog_api_key_id);
     try std.testing.expect(!view.can_create_task);
     try std.testing.expect(!view.can_cancel);
@@ -1767,6 +1806,36 @@ test "shutdown invalidates active attempt and requires effect consumption" {
         contract.ErrorCode.shutting_down,
         account.prepareCommand(.begin_login).rejected,
     );
+}
+
+test "shutdown revokes ready execution before publishing the terminal view" {
+    var account = Account{ .state = .{
+        .session_state = .authenticated,
+        .execution_state = .ready,
+        .account_id = try .init("account-1"),
+        .profile_id = try .init("profile-1"),
+        .display_name = try .init("Metask User"),
+        .selected_api_key_id = try .init("key-1"),
+        .selected_model = try .init("model-1"),
+        .execution_generation = 3,
+        .execution_high_watermark = 3,
+    } };
+
+    var shutdown = account.prepareShutdown();
+    _ = shutdown.takeEffect();
+    shutdown.commit(&account);
+    shutdown.deinit();
+
+    const view = account.view();
+    try std.testing.expectEqual(
+        contract.AccountSessionState.shutting_down,
+        view.session_state,
+    );
+    try std.testing.expectEqual(contract.ExecutionState.none, view.execution_state);
+    try std.testing.expectEqualStrings("", view.selected_api_key_id);
+    try std.testing.expectEqualStrings("", view.selected_model);
+    try std.testing.expectEqual(@as(u64, 0), view.execution_generation);
+    try std.testing.expect(!view.can_create_task);
 }
 
 test "restore failure enters a terminal restart-required state" {

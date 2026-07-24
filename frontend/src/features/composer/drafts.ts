@@ -13,7 +13,7 @@ export function newTaskDraftStorageId(
 
 export function newTaskDraftMoveDecision(source: string, target: string) {
   if (!source) return "preserve_target" as const;
-  if (target) return "conflict" as const;
+  if (target) return "preserve_both" as const;
   return "move" as const;
 }
 

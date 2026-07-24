@@ -40,6 +40,8 @@ const signedOut = {
   models: [],
   selectedApiKeySelectionId: "",
   selectedModelSelectionId: "",
+  candidateApiKeySelectionId: "",
+  candidateModelSelectionId: "",
   modelCatalogApiKeySelectionId: "",
   canCreateTask: false,
   errorCode: "none",
@@ -343,11 +345,91 @@ test("ready Account uses a formal settings route with truthful defaults", () => 
   assert.match(panel, /<h1[^>]*tabindex="-1">Settings</);
   assert.match(panel, /Metask User/);
   assert.match(panel, />Model One</);
-  assert.match(panel, /Primary · Anthropic •••• 1234/);
-  assert.match(panel, />Refresh account options</);
+  assert.equal((panel.match(/role="combobox"/g) ?? []).length, 3);
+  assert.match(panel, /selection-trigger-value">Primary</);
+  assert.match(
+    panel,
+    /selection-trigger-detail" data-kind="text" title="Anthropic">Anthropic</,
+  );
+  assert.match(panel, /selection-trigger-trailing">•••• 1234</);
+  assert.equal((panel.match(/selection-trigger-action/g) ?? []).length, 2);
+  assert.equal((panel.match(/>View options</g) ?? []).length, 2);
+  assert.match(panel, />APIs 1 · Models 1</);
+  assert.match(panel, /Metask currently returns only this API/);
+  assert.match(panel, /This API currently provides only one available model/);
+  assert.doesNotMatch(panel, /<button[^>]*disabled=""[^>]*id="settings-api"/);
+  assert.doesNotMatch(panel, /<button[^>]*disabled=""[^>]*id="settings-model"/);
+  assert.doesNotMatch(panel, /<select(?![^>]*aria-hidden="true")/);
+  assert.match(panel, /aria-current="location">General</);
+  assert.match(
+    panel,
+    /class="settings-execution-group" role="group" aria-labelledby="settings-execution-title"/,
+  );
+  assert.match(panel, />Sync again</);
   assert.match(panel, />Sign out…</);
   assert.match(panel, /Existing task bindings and history remain unchanged/);
   assert.doesNotMatch(panel, /Appearance|Notifications|Permissions|Plugins/);
+});
+
+test("settings keep APIs and models identifiable when display names are absent", () => {
+  const account = {
+    ...signedOut,
+    sessionState: "authenticated",
+    executionState: "ready",
+    readiness: "ready",
+    primaryAction: "none",
+    accountId: "account-1",
+    profileId: "profile-1",
+    displayName: "Metask User",
+    apiKeys: [
+      {
+        selectionId: "42",
+        name: "",
+        suffix: "1234",
+        provider: "openai",
+      },
+    ],
+    models: [{ selectionId: "minimax-m2.5", displayName: "" }],
+    selectedApiKeySelectionId: "42",
+    selectedModelSelectionId: "minimax-m2.5",
+    modelCatalogApiKeySelectionId: "42",
+    canCreateTask: true,
+    catalogGeneration: "1",
+    executionGeneration: "1",
+  };
+  const panel = withI18n(
+    createElement(SettingsPage, {
+      account,
+      focusTarget: "title",
+      disabled: false,
+      cancelDisabled: false,
+      ...callbacks,
+    }),
+  );
+
+  assert.match(panel, /selection-trigger-value">Metask API 42</);
+  assert.match(panel, /selection-trigger-value">minimax-m2\.5</);
+  assert.doesNotMatch(panel, /selection-trigger-value">Available models</);
+});
+
+test("desktop settings shortcut opens the formal route through the native event", async () => {
+  const [app, manifest] = await Promise.all([
+    readFile(join(process.cwd(), "frontend/src/app/App.tsx"), "utf8"),
+    readFile(join(process.cwd(), "app.zon"), "utf8"),
+  ]);
+
+  assert.match(
+    manifest,
+    /\.id = "settings\.open", \.key = ",", \.modifiers = \.\{"primary"\}/,
+  );
+  assert.match(app, /client\.onShortcut\(\(detail\) => \{/);
+  assert.match(app, /detail\.id !== "settings\.open"/);
+  assert.match(app, /accountGateRequired \|\| bridgeUnavailable/);
+  assert.match(app, /openSettings\(\)/);
+  assert.match(
+    app,
+    /function openSettings[\s\S]*?snapshot\.account\.sessionState !==\s*"authenticated"[\s\S]*?snapshot\.account\.operation !== "none"[\s\S]*?client\.refreshAccountCatalog\(\)/,
+  );
 });
 
 test("reauth-required settings disable stale catalog mutations", () => {
@@ -382,10 +464,144 @@ test("reauth-required settings disable stale catalog mutations", () => {
     }),
   );
   assert.match(panel, />Sign in again</);
-  assert.match(panel, /id="settings-api"[^>]*disabled=""/);
-  assert.match(panel, /id="settings-model"[^>]*disabled=""/);
-  assert.match(panel, /<button[^>]*disabled=""[^>]*>Refresh account options/);
+  assert.match(
+    panel,
+    /class="settings-identity-row" data-session-state="reauth_required"/,
+  );
+  assert.match(panel, /<button[^>]*disabled=""[^>]*id="settings-api"/);
+  assert.match(panel, /<button[^>]*disabled=""[^>]*id="settings-model"/);
+  assert.match(
+    panel,
+    /<button[^>]*disabled=""[^>]*>[\s\S]*?Sync again<\/button>/,
+  );
   assert.match(panel, />Sign out…</);
+});
+
+test("settings project the full API transaction without replacing committed truth", () => {
+  const base = {
+    ...signedOut,
+    sessionState: "authenticated",
+    executionState: "ready",
+    readiness: "ready",
+    primaryAction: "none",
+    accountId: "account-1",
+    displayName: "Metask User",
+    apiKeys: [
+      {
+        selectionId: "key-1",
+        name: "Primary",
+        suffix: "1234",
+        provider: "anthropic",
+      },
+      {
+        selectionId: "key-2",
+        name: "Backup",
+        suffix: "5678",
+        provider: "openai",
+      },
+    ],
+    models: [{ selectionId: "model-1", displayName: "Model One" }],
+    selectedApiKeySelectionId: "key-1",
+    selectedModelSelectionId: "model-1",
+    modelCatalogApiKeySelectionId: "key-1",
+    canCreateTask: true,
+    executionGeneration: "1",
+  };
+  const renderSettings = (account) =>
+    withI18n(
+      createElement(SettingsPage, {
+        account,
+        focusTarget: "title",
+        disabled: false,
+        cancelDisabled: false,
+        ...callbacks,
+      }),
+    );
+
+  const preparing = renderSettings({
+    ...base,
+    operation: "loading_keys",
+    candidateApiKeySelectionId: "key-2",
+    canCreateTask: false,
+    canCancel: true,
+  });
+  assert.match(preparing, /selection-trigger-value">Backup</);
+  assert.match(preparing, /Pending change/);
+  assert.match(preparing, /Preparing Backup/);
+  assert.match(preparing, /current default.*stays active/i);
+  assert.match(preparing, /selection-trigger-value">Model One</);
+
+  const loading = renderSettings({
+    ...base,
+    operation: "loading_models",
+    candidateApiKeySelectionId: "key-2",
+    modelCatalogApiKeySelectionId: "key-2",
+    models: [],
+    canCreateTask: false,
+    canCancel: true,
+  });
+  assert.match(
+    loading,
+    /id="settings-api"[^>]*aria-busy="true"[^>]*data-busy="true"/,
+  );
+  assert.match(loading, /selection-trigger-value">Backup</);
+  assert.match(loading, /Loading models available to Backup/);
+  assert.match(loading, />Loading models…</);
+  assert.match(loading, />Cancel</);
+
+  const choosing = renderSettings({
+    ...base,
+    operation: "selecting_model",
+    candidateApiKeySelectionId: "key-2",
+    modelCatalogApiKeySelectionId: "key-2",
+    primaryAction: "choose_model",
+    readiness: "choice_required",
+    models: [{ selectionId: "model-2", displayName: "Model Two" }],
+    canCreateTask: false,
+    canCancel: true,
+  });
+  assert.match(choosing, /<button[^>]*disabled=""[^>]*id="settings-api"/);
+  assert.doesNotMatch(
+    choosing,
+    /<button[^>]*disabled=""[^>]*id="settings-model"/,
+  );
+  assert.match(choosing, />Choose a model</);
+
+  const persisting = renderSettings({
+    ...base,
+    executionState: "reconfiguring",
+    operation: "persisting",
+    candidateApiKeySelectionId: "key-2",
+    candidateModelSelectionId: "model-2",
+    modelCatalogApiKeySelectionId: "key-2",
+    models: [{ selectionId: "model-2", displayName: "Model Two" }],
+    canCreateTask: false,
+    canCancel: false,
+  });
+  assert.match(
+    persisting,
+    /id="settings-model"[^>]*aria-busy="true"[^>]*data-busy="true"/,
+  );
+  assert.match(persisting, /Saving the new default/);
+  assert.match(persisting, /Backup · Model Two/);
+  assert.match(persisting, /Saving/);
+  assert.doesNotMatch(persisting, />Cancel</);
+
+  const failed = renderSettings({
+    ...base,
+    errorCode: "metask_service_unavailable",
+  });
+  assert.match(failed, /role="alert"/);
+  assert.match(failed, /Account action needs attention/);
+  assert.match(failed, /No default was changed/);
+  assert.match(failed, />Sync again</);
+
+  const cancelled = renderSettings({
+    ...base,
+    errorCode: "user_cancelled",
+  });
+  assert.match(cancelled, /Change cancelled/);
+  assert.match(cancelled, /Primary · Model One remains your default/);
 });
 
 test("cold connection failure exposes only reconnect and technical details", () => {

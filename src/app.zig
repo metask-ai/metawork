@@ -530,6 +530,16 @@ const AccountCoordinator = struct {
     ) account_contract.AccountCommandResult {
         const self: *AccountCoordinator = @ptrCast(@alignCast(context));
         self.assertMainThread();
+        const before = self.account.view();
+        switch (command) {
+            .select_api_key => |id| if (before.operation == .selecting_key and
+                !self.candidate_public_catalog.hasApiKey(id))
+                return .rejected(.invalid_command),
+            .select_model => |id| if (before.operation == .selecting_model and
+                !self.candidate_public_catalog.hasModel(id))
+                return .rejected(.invalid_command),
+            else => {},
+        }
         const replacement: ExecutionReplacement = switch (command) {
             .select_model => .default,
             .logout => .identity,
@@ -544,7 +554,21 @@ const AccountCoordinator = struct {
         }
         const prepared = self.account.prepareCommand(command);
         return switch (prepared) {
-            .transition => |value| self.commitTransition(value),
+            .transition => |value| result: {
+                const fact = value.fact();
+                const promotes_refreshed_catalog =
+                    fact.kind == .catalog_changed and
+                    fact.view.operation == .none and
+                    fact.view.execution_state == .ready;
+                if (promotes_refreshed_catalog)
+                    self.public_catalog.replaceFromPublic(
+                        &self.candidate_public_catalog,
+                    );
+                const committed = self.commitTransition(value);
+                if (committed.accepted and promotes_refreshed_catalog)
+                    self.candidate_public_catalog.clear();
+                break :result committed;
+            },
             .rejected => |error_code| result: {
                 if (replacement != .none)
                     self.workbench.endExecutionReplacementNoFail();
@@ -1612,18 +1636,19 @@ const App = struct {
                     }
                     if (catalog_attempt and completion.payload == .failed)
                         effects.catalog.reset();
+                    const account_view = coordinator.account.view();
                     const automatic_selection: union(enum) {
                         none,
                         api_key: []const u8,
                         model: []const u8,
-                    } = if (coordinator.account.view().execution_state != .none)
-                        .none
-                    else switch (completion.payload) {
+                    } = switch (completion.payload) {
                         .api_keys_loaded => if (self.automaticApiSelection(
                             &effects.catalog,
+                            account_view,
                         )) |id| .{ .api_key = id } else .none,
                         .models_loaded => if (self.automaticModelSelection(
                             &effects.catalog,
+                            account_view,
                         )) |id| .{ .model = id } else .none,
                         else => .none,
                     };
@@ -1658,7 +1683,15 @@ const App = struct {
     fn automaticApiSelection(
         self: *const @This(),
         catalog: *const account_api.Catalog.CatalogSession,
+        view: account_contract.AccountView,
     ) ?[]const u8 {
+        if (view.execution_state == .ready) {
+            if (view.candidate_api_key_id.len != 0) return null;
+            if (catalog.hasApiKey(view.selected_api_key_id))
+                return view.selected_api_key_id;
+            return null;
+        }
+        if (view.execution_state != .none) return null;
         if (builtin.os.tag == .windows) if (self.windows_public_state) |*saved| {
             const id = saved.apiKeyId();
             if (id.len > 0 and catalog.hasApiKey(id)) return id;
@@ -1669,7 +1702,21 @@ const App = struct {
     fn automaticModelSelection(
         self: *const @This(),
         catalog: *const account_api.Catalog.CatalogSession,
+        view: account_contract.AccountView,
     ) ?[]const u8 {
+        if (view.execution_state == .ready) {
+            if (view.candidate_model.len != 0 or
+                !std.mem.eql(
+                    u8,
+                    catalog.selectedApiKeyId(),
+                    view.selected_api_key_id,
+                ))
+                return null;
+            if (catalog.hasModel(view.selected_model))
+                return view.selected_model;
+            return null;
+        }
+        if (view.execution_state != .none) return null;
         if (builtin.os.tag == .windows) if (self.windows_public_state) |*saved| {
             const id = saved.modelId();
             if (id.len > 0 and
@@ -2294,6 +2341,72 @@ test "product identity does not unify macOS and Windows Account storage" {
     );
 }
 
+test "ready catalog synchronization reuses validated committed selections" {
+    var catalog = account_api.Catalog.CatalogSession.init(std.testing.allocator);
+    defer catalog.deinit();
+    try account_api.Catalog.TestSupport.replaceOwnedSelection(
+        &catalog,
+        "account-1",
+        "profile-1",
+        .{
+            .id = "key-current",
+            .name = "Current",
+            .suffix = "1234",
+            .provider_kind = .anthropic,
+        },
+        "secret",
+        &.{
+            .{ .id = "model-current", .display_name = "Current model" },
+            .{ .id = "model-other", .display_name = "Other model" },
+        },
+    );
+    try account_api.Catalog.TestSupport.appendOwnedApiKey(
+        &catalog,
+        .{
+            .id = "key-other",
+            .name = "Other",
+            .suffix = "5678",
+            .provider_kind = .openai,
+        },
+        "other-secret",
+    );
+    var app: App = undefined;
+    app.windows_public_state = null;
+    const ready_view: account_contract.AccountView = .{
+        .session_state = .authenticated,
+        .execution_state = .ready,
+        .operation = .loading_keys,
+        .readiness = .ready,
+        .primary_action = .none,
+        .selected_api_key_id = "key-current",
+        .selected_model = "model-current",
+    };
+    try std.testing.expectEqualStrings(
+        "key-current",
+        app.automaticApiSelection(&catalog, ready_view).?,
+    );
+    var first_login_view = ready_view;
+    first_login_view.execution_state = .none;
+    first_login_view.selected_api_key_id = "";
+    first_login_view.selected_model = "";
+    try std.testing.expect(
+        app.automaticApiSelection(&catalog, first_login_view) == null,
+    );
+
+    var loading_models_view = ready_view;
+    loading_models_view.operation = .loading_models;
+    loading_models_view.candidate_api_key_id = "key-current";
+    try std.testing.expectEqualStrings(
+        "model-current",
+        app.automaticModelSelection(&catalog, loading_models_view).?,
+    );
+
+    loading_models_view.candidate_model = "model-other";
+    try std.testing.expect(
+        app.automaticModelSelection(&catalog, loading_models_view) == null,
+    );
+}
+
 test "Account coordinator commits login and transactional reconfiguration gates" {
     var runtime: agent.Runtime = undefined;
     runtime.io = std.testing.io;
@@ -2433,6 +2546,73 @@ test "Account coordinator commits login and transactional reconfiguration gates"
     try std.testing.expect(coordinator.complete(&ready));
     try std.testing.expect(!workbench.executionReplacementPending());
     try std.testing.expect(workbench.accountView().can_create_task);
+
+    const refresh = coordinator.commandSink().submit(.refresh_catalog);
+    try std.testing.expect(refresh.accepted);
+    try std.testing.expect(effects.take().?.effect == .load_api_keys);
+    account_api.Catalog.TestSupport.replacePublic(
+        &coordinator.candidate_public_catalog,
+        &.{
+            .{ .id = "key-1", .name = "Primary", .suffix = "1234", .provider_kind = .anthropic },
+            .{ .id = "key-2", .name = "Secondary", .suffix = "5678", .provider_kind = .openai },
+        },
+        &.{},
+    );
+    var refreshed_keys: account_api.WorkerCompletion = .{
+        .attempt_id = refresh.attempt_id.?,
+        .payload = .api_keys_loaded,
+    };
+    defer refreshed_keys.deinit();
+    try std.testing.expect(coordinator.complete(&refreshed_keys));
+    try std.testing.expectEqual(
+        account_contract.OperationKind.selecting_key,
+        workbench.accountView().operation,
+    );
+    const keep_key = coordinator.commandSink().submit(.{
+        .select_api_key = "key-1",
+    });
+    try std.testing.expect(keep_key.accepted);
+    try std.testing.expectEqualStrings(
+        "key-1",
+        effects.take().?.effect.argument().?,
+    );
+    account_api.Catalog.TestSupport.replacePublic(
+        &coordinator.candidate_public_catalog,
+        &.{
+            .{ .id = "key-1", .name = "Primary", .suffix = "1234", .provider_kind = .anthropic },
+            .{ .id = "key-2", .name = "Secondary", .suffix = "5678", .provider_kind = .openai },
+        },
+        &.{
+            .{ .id = "model-1", .display_name = "Model One" },
+            .{ .id = "model-2", .display_name = "Model Two" },
+        },
+    );
+    var refreshed_models: account_api.WorkerCompletion = .{
+        .attempt_id = refresh.attempt_id.?,
+        .payload = .models_loaded,
+    };
+    defer refreshed_models.deinit();
+    try std.testing.expect(coordinator.complete(&refreshed_models));
+    try std.testing.expectEqual(
+        account_contract.OperationKind.selecting_model,
+        workbench.accountView().operation,
+    );
+    const keep_model = coordinator.commandSink().submit(.{
+        .select_model = "model-1",
+    });
+    try std.testing.expect(keep_model.accepted);
+    try std.testing.expect(effects.take() == null);
+    try std.testing.expect(!workbench.executionReplacementPending());
+    try std.testing.expectEqual(
+        account_contract.OperationKind.none,
+        workbench.accountView().operation,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        workbench.accountView().execution_generation,
+    );
+    try std.testing.expectEqual(@as(usize, 2), workbench.accountView().api_keys.len);
+    try std.testing.expectEqual(@as(usize, 2), workbench.accountView().models.len);
 
     const failed_switch = coordinator.commandSink().submit(.{
         .select_model = "model-failed",
@@ -2925,4 +3105,72 @@ test "unknown logout persistence clears Workbench execution fail closed" {
     );
     try std.testing.expect(!view.can_create_task);
     try std.testing.expect(!workbench.executionReplacementPending());
+}
+
+test "Account coordinator shutdown publishes a valid terminal view from ready" {
+    var runtime: agent.Runtime = undefined;
+    runtime.io = std.testing.io;
+    var workbench = try workbench_api.Workbench.init(
+        std.testing.allocator,
+        &runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 1,
+            .max_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        .{},
+    );
+    defer workbench.deinit();
+    var queue: AccountEffectQueue = .{};
+    var public_catalog: account_api.Catalog.PublicCatalog = .{};
+    var coordinator = AccountCoordinator.init(
+        &workbench,
+        &public_catalog,
+        queue.sink(),
+        .{},
+        std.Thread.getCurrentId(),
+    );
+    var execution = try account_contract.OwnedExecutionConfig.initOwned(
+        std.testing.allocator,
+        .anthropic,
+        try std.testing.allocator.dupe(u8, "model-1"),
+        try std.testing.allocator.dupe(
+            u8,
+            account_contract.metask_anthropic_messages_url,
+        ),
+        1,
+        try std.testing.allocator.dupe(u8, "secret-key"),
+    );
+    var restore_result: account_api.RestoreResult = .{
+        .execution_ready = try .init(
+            try .init("account-1", "profile-1", "Metask User"),
+            "key-1",
+            &execution,
+        ),
+    };
+    execution.deinit();
+    try std.testing.expectEqual(
+        account_contract.ErrorCode.none,
+        coordinator.restore(&restore_result),
+    );
+    try std.testing.expect(workbench.accountView().can_create_task);
+
+    coordinator.shutdown();
+
+    const shutdown_effect = queue.take().?;
+    try std.testing.expect(shutdown_effect.effect == .shutdown);
+    const view = workbench.accountView();
+    try std.testing.expectEqual(
+        account_contract.AccountSessionState.shutting_down,
+        view.session_state,
+    );
+    try std.testing.expectEqual(
+        account_contract.ExecutionState.none,
+        view.execution_state,
+    );
+    try std.testing.expectEqual(@as(usize, 0), view.api_keys.len);
+    try std.testing.expectEqual(@as(usize, 0), view.models.len);
+    try std.testing.expect(!view.can_create_task);
 }

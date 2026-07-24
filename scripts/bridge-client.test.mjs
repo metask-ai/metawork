@@ -77,6 +77,33 @@ test("Renderer Bridge mismatch and malformed acceptance are terminal contract fa
   }
 });
 
+test("native shortcut events stay behind the Bridge client boundary", () => {
+  let listener = null;
+  let removed = false;
+  const client = new BridgeClient({
+    bridge: {
+      async invoke() {
+        return null;
+      },
+      on(name, consume) {
+        assert.equal(name, "shortcut");
+        listener = consume;
+        return () => {
+          removed = true;
+        };
+      },
+    },
+  });
+  const received = [];
+
+  const unsubscribe = client.onShortcut((shortcut) => received.push(shortcut));
+  listener({ id: "settings.open" });
+  unsubscribe();
+
+  assert.deepEqual(received, [{ id: "settings.open" }]);
+  assert.equal(removed, true);
+});
+
 test("a wedged mutation times out once and is never replayed by the Bridge client", async () => {
   let calls = 0;
   const client = new BridgeClient({

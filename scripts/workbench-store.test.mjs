@@ -9,6 +9,7 @@ import {
   accountMutationBlocksTaskAdmission,
   PendingScopes,
 } from "../frontend/src/workbench/pendingScopes.ts";
+import { WorkspaceNavigationIntents } from "../frontend/src/workbench/workspace-navigation-intents.ts";
 
 function task(id, workspaceId, archived = false) {
   return {
@@ -77,6 +78,45 @@ test("account mutations block only New task admission", () => {
   assert.equal(accountMutationBlocksTaskAdmission(true, true), true);
   assert.equal(accountMutationBlocksTaskAdmission(false, true), false);
   assert.equal(accountMutationBlocksTaskAdmission(true, false), false);
+});
+
+test("Workspace navigation retains only the latest explicit user intent", () => {
+  const intents = new WorkspaceNavigationIntents();
+  const first = intents.begin({
+    workspaceId: "2",
+    workspaceEpoch: "4",
+    target: { kind: "draft", migratableDraftId: null },
+  });
+  const latest = intents.queue({
+    workspaceId: "1",
+    workspaceEpoch: "7",
+    target: { kind: "navigation", taskId: "9" },
+  });
+  const newest = intents.queue({
+    workspaceId: "3",
+    workspaceEpoch: "2",
+    target: { kind: "navigation", taskId: "11" },
+  });
+
+  assert.equal(intents.isCurrent(first), false);
+  assert.equal(intents.isCurrent(latest), false);
+  assert.equal(intents.isCurrent(newest), true);
+  assert.deepEqual(intents.takeQueued(), newest);
+  assert.equal(intents.takeQueued(), null);
+});
+
+test("an unscoped New task invalidates an in-flight Workspace destination", () => {
+  const intents = new WorkspaceNavigationIntents();
+  const navigation = intents.begin({
+    workspaceId: "2",
+    workspaceEpoch: "4",
+    target: { kind: "navigation", taskId: "9" },
+  });
+
+  intents.invalidate();
+
+  assert.equal(intents.isCurrent(navigation), false);
+  assert.equal(intents.takeQueued(), null);
 });
 
 test("the Workbench store selects the first Task and preserves a valid choice", () => {

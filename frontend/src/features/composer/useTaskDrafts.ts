@@ -56,7 +56,7 @@ function useDrafts(
       const source = readDraft(from);
       const target = readDraft(to);
       const decision = newTaskDraftMoveDecision(source, target);
-      if (decision === "conflict") return decision;
+      if (decision === "preserve_both") return decision;
       setDrafts((current) => {
         const next = { ...current };
         delete next[from];

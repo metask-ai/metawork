@@ -48,6 +48,9 @@ const base = {
   workspaceMissing: true,
   workspaceLabel: "No workspace",
   workspaceTitle: "No workspace",
+  workspaceOptions: [],
+  selectedWorkspaceId: "",
+  workspaceEditable: true,
   modelLabel: "Claude Sonnet 4",
   modelOptions: [
     { selectionId: "claude-sonnet-4", displayName: "Claude Sonnet 4" },
@@ -55,13 +58,14 @@ const base = {
   selectedModelId: "claude-sonnet-4",
   modelEditable: true,
   modelSelectionDisabled: false,
+  modelSelectionPending: false,
   modelContextTitle: "Default model",
   actionDisabled: false,
   onPromptChange() {},
   onSubmit() {},
   onConfirmAccess() {},
+  onSelectWorkspace() {},
   onSelectModel() {},
-  onOpenModelSettings() {},
 };
 
 function render(props = {}) {
@@ -270,7 +274,8 @@ test("New task opens as an editable Composer with its execution context", () => 
   const markup = render();
   assert.match(markup, /<textarea/);
   assert.match(markup, />Claude Sonnet 4</);
-  assert.match(markup, />Choose on send</);
+  assert.match(markup, />Select a workspace</);
+  assert.match(markup, /composer-workspace-context/);
   assert.doesNotMatch(markup.match(/<textarea[^>]*>/)?.[0] ?? "", /disabled/);
   assert.doesNotMatch(markup, /composer-start/);
 });
@@ -283,16 +288,45 @@ test("candidate model catalogs never imply a committed default", () => {
     ],
     selectedModelId: "",
     modelSelectionDisabled: true,
+    modelSelectionPending: true,
   });
-  assert.match(markup, /<option value="" selected="">Choose a model<\/option>/);
-  assert.match(markup, /<select[^>]*disabled=""/);
-  assert.doesNotMatch(markup, /value="candidate-model" selected=""/);
+  assert.match(
+    markup,
+    /role="combobox"[^>]*disabled=""[^>]*data-placeholder=""[^>]*aria-busy="true"/,
+  );
+  assert.match(markup, />Choose a model</);
+  assert.doesNotMatch(markup, />Candidate model</);
+});
+
+test("disabled model selection does not invent a pending state", () => {
+  const markup = render({
+    modelSelectionDisabled: true,
+    modelSelectionPending: false,
+  });
+  const trigger =
+    markup.match(
+      /<button[^>]*class="[^"]*composer-model-trigger[^"]*"[^>]*>/,
+    )?.[0] ?? "";
+  assert.match(trigger, /disabled=""/);
+  assert.doesNotMatch(trigger, /aria-busy/);
+});
+
+test("model selection keeps its exact identity when display metadata is absent", () => {
+  const markup = render({
+    modelLabel: "deepseek-v4",
+    modelOptions: [{ selectionId: "deepseek-v4", displayName: "" }],
+    selectedModelId: "deepseek-v4",
+  });
+  assert.match(markup, />deepseek-v4</);
+  assert.doesNotMatch(markup, />Available model</);
 });
 
 test("desktop shortcut labels follow the host platform", () => {
   assert.equal(primaryShortcutModifier("Win32"), "Ctrl+");
   assert.equal(primaryShortcutModifier("MacIntel"), "⌘");
-  assert.match(renderShell(null), /<kbd>Ctrl\+K<\/kbd>/);
+  assert.ok(
+    renderShell(null).includes(`<kbd>${primaryShortcutModifier()}K</kbd>`),
+  );
 });
 
 test("Account catalog work blocks New task admission but not bound Tasks", async () => {
@@ -304,6 +338,22 @@ test("Account catalog work blocks New task admission but not bound Tasks", async
     source,
     /\(!newTaskDraftActive \|\| snapshot\.account\.canCreateTask\)/,
   );
+  assert.match(source, /\(!newTaskDraftActive \|\| composerWorkspaceReady\)/);
+});
+
+test("Workspace selection is not hidden inside submit", async () => {
+  const source = await readFile(
+    join(process.cwd(), "frontend/src/app/App.tsx"),
+    "utf8",
+  );
+  const start = source.indexOf("async function submitRun()");
+  const end = source.indexOf("\n  async function", start + 1);
+  const submitRun = source.slice(start, end);
+  assert.match(
+    submitRun,
+    /if \(!composerWorkspace \|\| !composerWorkspaceId\) return/,
+  );
+  assert.doesNotMatch(submitRun, /chooseWorkspace|client\.chooseWorkspace/);
 });
 
 test("New task does not render or reserve an empty Inspector", () => {
@@ -338,6 +388,18 @@ test("a new Task draft is editable before its first send", () => {
   const markup = render({
     prompt: "Ship the release",
     canSubmit: true,
+    workspaceMissing: false,
+    workspaceLabel: "alpha",
+    workspaceTitle: "/repo/alpha",
+    workspaceOptions: [
+      {
+        id: "1",
+        label: "alpha",
+        canonicalRoot: "/repo/alpha",
+        authorization: "available",
+      },
+    ],
+    selectedWorkspaceId: "1",
   });
   assert.match(markup, /<textarea/);
   assert.match(markup, />Ship the release</);
@@ -357,6 +419,38 @@ test("an expired workspace grant preserves editable text and exposes recovery", 
   assert.match(markup, />Confirm access</);
   assert.doesNotMatch(markup.match(/<textarea[^>]*>/)?.[0] ?? "", /disabled/);
   assert.match(tag(markup, "composer-send") ?? "", /disabled/);
+});
+
+test("Composer is one input shell with lightweight Workspace context below", async () => {
+  const css = await readFile(
+    join(process.cwd(), "frontend/src/index.css"),
+    "utf8",
+  );
+  assert.match(css, /\.composer textarea \{[\s\S]*?resize: none;/);
+  assert.match(css, /max-height: min\(180px, 28vh\)/);
+  assert.match(css, /\.composer \{[\s\S]*?border-radius: 18px;/);
+  assert.match(css, /\.composer-send \{[\s\S]*?border-radius: 50%;/);
+  const composerBarRule = css.slice(
+    css.indexOf(".composer-bar {"),
+    css.indexOf("\n}", css.indexOf(".composer-bar {")),
+  );
+  assert.doesNotMatch(composerBarRule, /border(?:-top)?:/);
+  const workspaceContextRule = css.slice(
+    css.indexOf(".composer-workspace-context {"),
+    css.indexOf("\n}", css.indexOf(".composer-workspace-context {")),
+  );
+  assert.doesNotMatch(workspaceContextRule, /border:/);
+  assert.doesNotMatch(workspaceContextRule, /background:/);
+  const markup = render();
+  const composerStart = markup.indexOf('class="composer"');
+  const workspaceContext = markup.indexOf('class="composer-workspace-context"');
+  assert.ok(composerStart >= 0 && workspaceContext > composerStart);
+  assert.ok(
+    markup.indexOf(
+      'class="selection-trigger focus-ring composer-model-trigger',
+      composerStart,
+    ) < workspaceContext,
+  );
 });
 
 test("only non-composable Task states disable the Composer", () => {
@@ -427,11 +521,7 @@ test("Workspace busy state disables real Workspace actions instead of swallowing
     ),
     "utf8",
   );
-  const option = source.slice(source.indexOf('className="workspace-option'));
-  assert.match(
-    option,
-    /disabled=\{disabled \|\| workspace\.authorization === "removing"\}/,
-  );
+  assert.match(source, /disabled: workspace\.authorization === "removing"/);
 });
 
 test("global shortcuts obey Account and Bridge gates", async () => {
