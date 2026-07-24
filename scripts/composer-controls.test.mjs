@@ -345,6 +345,36 @@ test("Settings keeps a model choice visibly pending without declaring it committ
   assert.equal(readySettingsAccount.selectedModelSelectionId, "model-1");
 });
 
+test("Settings section navigation follows its own scroll position", () => {
+  renderSettings(readySettingsAccount);
+  const page = document.querySelector(".settings-page");
+  const accountSection = document.querySelector("#settings-account");
+  Object.defineProperty(page, "clientHeight", {
+    configurable: true,
+    value: 680,
+  });
+  Object.defineProperty(accountSection, "offsetTop", {
+    configurable: true,
+    value: 420,
+  });
+
+  page.scrollTop = 0;
+  fireEvent.scroll(page);
+  assert.equal(
+    screen.getByRole("link", { name: "General" }).getAttribute("aria-current"),
+    "location",
+  );
+
+  page.scrollTop = 300;
+  fireEvent.scroll(page);
+  assert.equal(
+    screen
+      .getByRole("link", { name: "Account & models" })
+      .getAttribute("aria-current"),
+    "location",
+  );
+});
+
 function renderComposer(overrides = {}) {
   const textareaRef = createRef();
   let submissions = 0;

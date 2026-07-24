@@ -54,7 +54,6 @@ export function SettingsPage({
   } | null>(null);
   const page = useRef<HTMLDivElement>(null);
   const title = useRef<HTMLHeadingElement>(null);
-  const generalSection = useRef<HTMLElement>(null);
   const accountSection = useRef<HTMLElement>(null);
   const signOut = useRef<HTMLButtonElement>(null);
   const signOutCancel = useRef<HTMLButtonElement>(null);
@@ -168,43 +167,22 @@ export function SettingsPage({
     disabled,
   ]);
 
-  useEffect(() => {
-    if (!page.current || typeof IntersectionObserver === "undefined") return;
-    const sections = [generalSection.current, accountSection.current].filter(
-      (section): section is HTMLElement => section !== null,
-    );
-    const observer = new IntersectionObserver(
-      (entries) => {
-        const visible = entries
-          .filter((entry) => entry.isIntersecting)
-          .sort(
-            (left, right) =>
-              Math.abs(left.boundingClientRect.top) -
-              Math.abs(right.boundingClientRect.top),
-          )[0];
-        if (visible?.target.id === "settings-general") {
-          setActiveSection("general");
-        } else if (visible?.target.id === "settings-account") {
-          setActiveSection("account");
-        }
-      },
-      {
-        root: page.current,
-        rootMargin: "-18% 0px -62% 0px",
-        threshold: [0, 0.1, 0.5],
-      },
-    );
-    sections.forEach((section) => observer.observe(section));
-    return () => observer.disconnect();
-  }, []);
-
   function closeSignOutConfirmation() {
     setConfirmSignOut(false);
     window.requestAnimationFrame(() => signOut.current?.focus());
   }
 
+  function updateActiveSection() {
+    if (!page.current || !accountSection.current) return;
+    const readingLine =
+      page.current.scrollTop + Math.min(160, page.current.clientHeight * 0.3);
+    setActiveSection(
+      accountSection.current.offsetTop <= readingLine ? "account" : "general",
+    );
+  }
+
   return (
-    <div ref={page} className="settings-page">
+    <div ref={page} className="settings-page" onScroll={updateActiveSection}>
       <header className="settings-hero">
         <button className="settings-back focus-ring" onClick={onBack}>
           <Icon name="arrow-left" />
@@ -238,11 +216,7 @@ export function SettingsPage({
         </nav>
 
         <div className="settings-content">
-          <section
-            ref={generalSection}
-            id="settings-general"
-            className="settings-section"
-          >
+          <section id="settings-general" className="settings-section">
             <div className="settings-section-heading">
               <p>{t("settings.section_label")}</p>
               <h2>{t("settings.general")}</h2>

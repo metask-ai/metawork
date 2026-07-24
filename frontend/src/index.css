@@ -930,8 +930,8 @@ summary::-webkit-details-marker {
   box-shadow: 0 0 0 3px rgba(35, 109, 100, 0.07);
 }
 
-.settings-control:disabled,
-.settings-control[data-disabled] {
+.selection-trigger.settings-control:disabled,
+.selection-trigger.settings-control[data-disabled] {
   border-color: #d5ddda;
   color: #6f7c81;
   background: #f1f4f3;
@@ -1339,7 +1339,7 @@ summary::-webkit-details-marker {
   }
 }
 
-@media (max-width: 1000px) {
+@media (max-width: 760px) {
   .settings-layout {
     grid-template-columns: 1fr;
     gap: 22px;
