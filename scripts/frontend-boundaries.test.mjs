@@ -138,8 +138,7 @@ test("Renderer command bars own the hidden-inset titlebar without stealing contr
   assert.match(gate, /account-gate-toolbar/);
   assert.match(gate, /onBeginWindowDrag/);
   assert.match(manifest, /\.titlebar = "hidden_inset_tall"/);
-  assert.match(css, /-webkit-app-region: drag/);
-  assert.match(css, /-webkit-app-region: no-drag/);
+  assert.doesNotMatch(css, /-webkit-app-region:/);
   assert.match(shell, /WindowControls/);
   assert.match(gate, /WindowControls/);
   assert.match(css, /\[data-platform="windows"\] \.window-controls/);

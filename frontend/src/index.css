@@ -119,12 +119,6 @@ summary::-webkit-details-marker {
   border-bottom: 1px solid rgba(210, 218, 220, 0.78);
   background: rgba(250, 251, 251, 0.9);
   user-select: none;
-  -webkit-app-region: drag;
-}
-
-.account-gate-toolbar select,
-.account-gate-toolbar button {
-  -webkit-app-region: no-drag;
 }
 
 .account-gate-toolbar-actions {
@@ -170,7 +164,6 @@ summary::-webkit-details-marker {
   display: none;
   height: var(--window-bar-height);
   align-items: stretch;
-  -webkit-app-region: no-drag;
 }
 
 [data-platform="windows"] .window-controls {
@@ -1735,17 +1728,10 @@ summary::-webkit-details-marker {
   border-bottom: 1px solid var(--color-rule);
   background: var(--color-paper);
   user-select: none;
-  -webkit-app-region: drag;
 }
 
 [data-platform="windows"] .workbench-commandbar {
   padding-right: 0;
-}
-
-.workbench-commandbar button,
-.workbench-commandbar summary,
-.commandbar-alert > p {
-  -webkit-app-region: no-drag;
 }
 
 .icon-button {
