@@ -63,12 +63,29 @@ pub const Plan = enum {
     ui_callback_outlives_run,
     malformed_ui_callback,
     resource_limit,
+    stale_catalog,
+    skill_not_found,
+    invalid_skill_arguments,
+    skill_policy_violation,
+    skill_unavailable,
     unknown_stop_result,
     invalid_result_layout,
     unknown_status,
 };
 
 pub const FakeRuntime = struct {};
+
+pub const FakeCatalog = struct {
+    in_use: bool = false,
+    released: bool = false,
+};
+
+pub const CatalogPlan = enum {
+    healthy,
+    duplicate_skill_id,
+    malformed,
+    query_failure,
+};
 
 pub const CallbackSignal = struct {
     mutex: std.Io.Mutex = .init,
@@ -130,6 +147,7 @@ pub const FakeSession = struct {
     session_id: [wire.MAX_SESSION_ID_BYTES_V1]u8 = [_]u8{0} ** wire.MAX_SESSION_ID_BYTES_V1,
     session_id_len: usize = 0,
     run_id: u64 = 0,
+    catalog: ?*FakeCatalog = null,
     abort_requested: bool = false,
     allow_finish: bool = false,
     mutex: std.Io.Mutex = .init,
@@ -155,11 +173,16 @@ pub const FakeSession = struct {
 pub const FakeCore = struct {
     mutex: std.Io.Mutex = .init,
     runtime: FakeRuntime = .{},
+    catalogs: [16]FakeCatalog = [_]FakeCatalog{.{}} ** 16,
     sessions: [16]FakeSession = [_]FakeSession{.{}} ** 16,
     next_plan: Plan = .immediate,
     runtime_created: usize = 0,
     runtime_destroyed: usize = 0,
     runtime_destroy_busy_attempts: usize = 0,
+    catalog_queries: usize = 0,
+    catalog_releases: usize = 0,
+    catalog_refreshes: usize = 0,
+    catalog_plan: CatalogPlan = .healthy,
     session_created: usize = 0,
     session_destroyed: usize = 0,
     run_calls: usize = 0,
@@ -169,6 +192,11 @@ pub const FakeCore = struct {
     credential_seen: bool = false,
     zero_host_tools_seen: bool = false,
     builtin_allowlist_seen: bool = false,
+    workspace_home_seen: bool = false,
+    workspace_epoch_seen: bool = false,
+    skill_session_bound: bool = false,
+    skill_run_seen: bool = false,
+    skill_input_matches: bool = false,
     session_destroy_failures: usize = 0,
     runtime_destroy_failures: usize = 0,
     session_create_failures: usize = 0,
@@ -192,6 +220,12 @@ pub const FakeCore = struct {
     pub fn setNextPlan(self: *FakeCore, plan: Plan) void {
         self.lock();
         self.next_plan = plan;
+        self.unlock();
+    }
+
+    pub fn setCatalogPlan(self: *FakeCore, plan: CatalogPlan) void {
+        self.lock();
+        self.catalog_plan = plan;
         self.unlock();
     }
 
@@ -276,6 +310,28 @@ pub const FakeCore = struct {
 pub var fake_core = FakeCore{};
 pub var diagnostic_byte: u8 = 0xA5;
 
+pub const fixture_catalog_revision = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+pub const fixture_skill_id = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+const fixture_catalog_scope = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const healthy_catalog_json =
+    "{\"schema\":\"metask.skill-catalog/v1\",\"catalog_scope_id\":\"" ++
+    fixture_catalog_scope ++
+    "\",\"catalog_revision\":\"" ++
+    fixture_catalog_revision ++
+    "\",\"health\":\"healthy\",\"skills\":[{\"skill_id\":\"" ++
+    fixture_skill_id ++
+    "\",\"invocation_name\":\"review\",\"display_name\":\"Review\",\"description\":\"Review one target\",\"argument_schema\":{\"schema\":\"metask.skill-arguments/v1\",\"max_values\":64,\"names\":[\"target\",\"focus\"]}}],\"issues\":[]}";
+const duplicate_catalog_json =
+    "{\"schema\":\"metask.skill-catalog/v1\",\"catalog_scope_id\":\"" ++
+    fixture_catalog_scope ++
+    "\",\"catalog_revision\":\"" ++
+    fixture_catalog_revision ++
+    "\",\"health\":\"healthy\",\"skills\":[{\"skill_id\":\"" ++
+    fixture_skill_id ++
+    "\",\"invocation_name\":\"review\",\"display_name\":\"Review\",\"description\":\"First\",\"argument_schema\":{\"schema\":\"metask.skill-arguments/v1\",\"max_values\":64,\"names\":[]}},{\"skill_id\":\"" ++
+    fixture_skill_id ++
+    "\",\"invocation_name\":\"audit\",\"display_name\":\"Audit\",\"description\":\"Duplicate id\",\"argument_schema\":{\"schema\":\"metask.skill-arguments/v1\",\"max_values\":64,\"names\":[]}}],\"issues\":[]}";
+
 pub fn diagnostic(out: ?*wire.OwnedBytesV1) void {
     if (out) |value| value.* = .{ .ptr = @ptrCast(&diagnostic_byte), .len = 1 };
 }
@@ -323,6 +379,13 @@ pub fn runtimeDestroy(
             return wire.STATUS_BUSY;
         }
     }
+    for (&fake_core.catalogs) |*catalog_entry| {
+        if (catalog_entry.in_use and !catalog_entry.released) {
+            fake_core.runtime_destroy_busy_attempts += 1;
+            diagnostic(out_error);
+            return wire.STATUS_BUSY;
+        }
+    }
     fake_core.runtime_destroyed += 1;
     return wire.STATUS_OK;
 }
@@ -343,6 +406,20 @@ pub fn sessionCreate(
         diagnostic(out_error);
         return wire.STATUS_INVALID_ARGUMENT;
     };
+    const workspace_home = sdk.borrowedBytes(config.?.workspace_home) catch {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    };
+    const bound_catalog: ?*FakeCatalog = if (config.?.skill_catalog) |handle|
+        @ptrCast(@alignCast(handle))
+    else
+        null;
+    if (bound_catalog) |catalog_entry| {
+        if (!catalog_entry.in_use or catalog_entry.released) {
+            diagnostic(out_error);
+            return wire.STATUS_SKILL_CATALOG_INVALID;
+        }
+    }
     fake_core.lock();
     defer fake_core.unlock();
     if (fake_core.session_create_failures > 0) {
@@ -367,12 +444,15 @@ pub fn sessionCreate(
                 .callbacks = callbacks.?.*,
                 .session_id = session_id,
                 .session_id_len = id.len,
+                .catalog = bound_catalog,
             };
             fake_core.next_plan = .immediate;
             fake_core.session_created += 1;
             fake_core.credential_seen = std.mem.eql(u8, key, "fixture-secret");
             fake_core.builtin_allowlist_seen = config.?.allowed_tools != null and
                 config.?.allowed_tool_count == 4;
+            fake_core.workspace_home_seen = workspace_home.len != 0;
+            fake_core.skill_session_bound = bound_catalog != null;
             out_session.?.* = @ptrCast(session);
             return wire.STATUS_OK;
         }
@@ -382,22 +462,88 @@ pub fn sessionCreate(
 }
 
 pub fn runtimeQuerySkillCatalog(
-    _: ?*wire.RuntimeHandle,
-    _: ?*const wire.SkillCatalogQueryV1,
-    _: ?*?*wire.SkillCatalogHandle,
-    _: ?*wire.OwnedBytesV1,
+    runtime: ?*wire.RuntimeHandle,
+    query: ?*const wire.SkillCatalogQueryV1,
+    out_catalog: ?*?*wire.SkillCatalogHandle,
+    out_descriptor: ?*wire.OwnedBytesV1,
     out_error: ?*wire.OwnedBytesV1,
 ) callconv(.c) u32 {
     if (out_error) |out| out.* = .{ .ptr = null, .len = 0 };
+    if (out_descriptor) |out| out.* = .{ .ptr = null, .len = 0 };
+    if (out_catalog) |out| out.* = null;
+    const input = query orelse {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    };
+    if (runtime == null or out_catalog == null or out_descriptor == null or
+        input.struct_size != @sizeOf(wire.SkillCatalogQueryV1))
+    {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    }
+    const root = sdk.borrowedBytes(input.workspace_root) catch {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    };
+    const home = sdk.borrowedBytes(input.workspace_home) catch {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    };
+    const epoch = sdk.borrowedBytes(input.workspace_epoch) catch {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    };
+    if (root.len == 0 or home.len == 0 or epoch.len == 0) {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    }
+
+    fake_core.lock();
+    defer fake_core.unlock();
+    fake_core.catalog_queries += 1;
+    fake_core.workspace_home_seen = true;
+    fake_core.workspace_epoch_seen = true;
+    if (fake_core.catalog_plan == .query_failure) {
+        diagnostic(out_error);
+        return wire.STATUS_SKILL_CATALOG_INVALID;
+    }
+    for (&fake_core.catalogs) |*catalog_entry| {
+        if (catalog_entry.in_use and !catalog_entry.released) continue;
+        catalog_entry.* = .{ .in_use = true };
+        out_catalog.?.* = @ptrCast(catalog_entry);
+        const descriptor: []const u8 = switch (fake_core.catalog_plan) {
+            .healthy => healthy_catalog_json,
+            .duplicate_skill_id => duplicate_catalog_json,
+            .malformed => "{}",
+            .query_failure => unreachable,
+        };
+        out_descriptor.?.* = .{
+            .ptr = @ptrCast(@constCast(descriptor.ptr)),
+            .len = descriptor.len,
+        };
+        return wire.STATUS_OK;
+    }
     diagnostic(out_error);
-    return wire.STATUS_SKILL_CATALOG_INVALID;
+    return wire.STATUS_OUT_OF_MEMORY;
 }
 
 pub fn skillCatalogRelease(
-    _: ?*wire.SkillCatalogHandle,
+    handle: ?*wire.SkillCatalogHandle,
     out_error: ?*wire.OwnedBytesV1,
 ) callconv(.c) u32 {
     if (out_error) |out| out.* = .{ .ptr = null, .len = 0 };
+    const catalog_entry: *FakeCatalog = @ptrCast(@alignCast(handle orelse {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    }));
+    fake_core.lock();
+    defer fake_core.unlock();
+    if (!catalog_entry.in_use or catalog_entry.released) {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    }
+    catalog_entry.released = true;
+    fake_core.catalog_releases += 1;
     return wire.STATUS_OK;
 }
 
@@ -435,13 +581,36 @@ pub fn sessionDestroy(
 }
 
 pub fn sessionRefreshSkillCatalog(
-    _: ?*wire.SessionHandle,
-    _: ?*wire.SkillCatalogHandle,
+    session_handle: ?*wire.SessionHandle,
+    catalog_handle: ?*wire.SkillCatalogHandle,
     out_error: ?*wire.OwnedBytesV1,
 ) callconv(.c) u32 {
     if (out_error) |out| out.* = .{ .ptr = null, .len = 0 };
-    diagnostic(out_error);
-    return wire.STATUS_SKILL_CATALOG_INVALID;
+    const session: *FakeSession = @ptrCast(@alignCast(session_handle orelse {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    }));
+    const catalog_entry: *FakeCatalog = @ptrCast(@alignCast(catalog_handle orelse {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    }));
+    session.lock();
+    if (session.running) {
+        session.unlock();
+        diagnostic(out_error);
+        return wire.STATUS_BUSY;
+    }
+    if (!catalog_entry.in_use or catalog_entry.released) {
+        session.unlock();
+        diagnostic(out_error);
+        return wire.STATUS_SKILL_CATALOG_INVALID;
+    }
+    session.catalog = catalog_entry;
+    session.unlock();
+    fake_core.lock();
+    fake_core.catalog_refreshes += 1;
+    fake_core.unlock();
+    return wire.STATUS_OK;
 }
 
 pub fn sessionRunInput(
@@ -457,9 +626,7 @@ pub fn sessionRunInput(
         diagnostic(out_error);
         return wire.STATUS_INVALID_ARGUMENT;
     };
-    if (typed_input.struct_size != @sizeOf(wire.RunInputV1) or
-        typed_input.kind_code != wire.RUN_INPUT_TEXT)
-    {
+    if (typed_input.struct_size != @sizeOf(wire.RunInputV1)) {
         diagnostic(out_error);
         return wire.STATUS_INVALID_ARGUMENT;
     }
@@ -467,6 +634,45 @@ pub fn sessionRunInput(
         diagnostic(out_error);
         return wire.STATUS_INVALID_ARGUMENT;
     }));
+    switch (typed_input.kind_code) {
+        wire.RUN_INPUT_TEXT => {},
+        wire.RUN_INPUT_SKILL => {
+            const skill_id = sdk.borrowedBytes(typed_input.skill_id) catch {
+                diagnostic(out_error);
+                return wire.STATUS_INVALID_ARGUMENT;
+            };
+            const revision = sdk.borrowedBytes(typed_input.catalog_revision) catch {
+                diagnostic(out_error);
+                return wire.STATUS_INVALID_ARGUMENT;
+            };
+            const arguments = sdk.borrowedBytes(typed_input.arguments_json) catch {
+                diagnostic(out_error);
+                return wire.STATUS_INVALID_ARGUMENT;
+            };
+            session.lock();
+            const has_catalog = session.catalog != null;
+            session.unlock();
+            if (!has_catalog) {
+                diagnostic(out_error);
+                return wire.STATUS_SKILL_CATALOG_INVALID;
+            }
+            fake_core.lock();
+            fake_core.skill_run_seen = true;
+            fake_core.skill_input_matches =
+                std.mem.eql(u8, skill_id, fixture_skill_id) and
+                std.mem.eql(u8, revision, fixture_catalog_revision) and
+                std.mem.eql(
+                    u8,
+                    arguments,
+                    "{\"values\":[\"src/main.zig\",\"correctness\"]}",
+                );
+            fake_core.unlock();
+        },
+        else => {
+            diagnostic(out_error);
+            return wire.STATUS_INVALID_ARGUMENT;
+        },
+    }
     fake_core.lock();
     fake_core.run_calls += 1;
     fake_core.unlock();
@@ -616,6 +822,26 @@ pub fn sessionRunInput(
     if (plan == .resource_limit) {
         diagnostic(out_error);
         return wire.STATUS_RESOURCE_LIMIT;
+    }
+    if (plan == .stale_catalog) {
+        diagnostic(out_error);
+        return wire.STATUS_STALE_CATALOG;
+    }
+    if (plan == .skill_not_found) {
+        diagnostic(out_error);
+        return wire.STATUS_SKILL_NOT_FOUND;
+    }
+    if (plan == .invalid_skill_arguments) {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_SKILL_ARGUMENTS;
+    }
+    if (plan == .skill_policy_violation) {
+        diagnostic(out_error);
+        return wire.STATUS_SKILL_POLICY_VIOLATION;
+    }
+    if (plan == .skill_unavailable) {
+        diagnostic(out_error);
+        return wire.STATUS_SKILL_UNAVAILABLE;
     }
     if (plan == .unknown_status) {
         if (out_result) |result| {
@@ -932,7 +1158,7 @@ pub fn cancelTestRunForShutdown(context: *anyopaque) void {
 }
 
 pub fn submitSession(session: *lifecycle.Session, prompt: []const u8) !u64 {
-    const run_id = try session.prepareRun(prompt);
+    const run_id = try session.prepareRun(.{ .text = prompt });
     testExecutor(session.agent_runtime).enqueue(.{
         .context = session,
         .execute_fn = executeTestRun,

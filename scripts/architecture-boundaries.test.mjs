@@ -157,7 +157,7 @@ test("only Agent implementation imports the AgentCore SDK", () => {
     .sort();
   assert.deepEqual(
     sdkImportReceivers,
-    ["event_pump", "event_sink", "fixture", "session"].sort(),
+    ["agent_catalog", "event_pump", "event_sink", "fixture", "session"].sort(),
     "only the Agent runtime modules and lifecycle fixture may receive the SDK module",
   );
   assert.match(
@@ -834,7 +834,7 @@ test("Renderer Bridge fixed revision 1 owns the exact product wire catalog", () 
 
 test("lifecycle tests are grouped by invariant", () => {
   const cases = [
-    ["tests/agent/lifecycle_test.zig", 32],
+    ["tests/agent/lifecycle_test.zig", 37],
     ["tests/agent/event_pump_test.zig", 5],
     ["tests/workbench/executor_lifecycle_test.zig", 9],
     ["tests/integration/lifecycle/lifecycle_test.zig", 4],

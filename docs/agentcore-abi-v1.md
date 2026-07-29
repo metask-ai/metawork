@@ -1,9 +1,9 @@
 # MetaWork AgentCore ABI v1 revision 4 消费合同
 
-> 状态：revision 4 exact artifacts 与纯 Text Host baseline 已通过；typed Skill 产品链正在实施，不声明 stable support policy
+> 状态：revision 4 exact artifacts、Agent catalog ownership 与 typed Text/Skill Agent surface 已通过；Workbench、Bridge 与 Renderer Slash vertical 正在实施，不声明 stable support policy
 > 所有者：Metask AgentCore 负责 facade、bindings、bundle 和兼容政策；MetaWork 负责精确消费验证
 
-本文记录 MetaWork 对 AgentCore binary ABI version 1 revision 4 的消费边界。线程、事件泵和 Host 生命周期见 [AgentCore 集成契约](agentcore-integration.md)，当前验收要求见 [验证规范](validation.md)。当前实现的 repository locks、verifier、canonical staged bundle、official SDK 与纯 Text Host 已 hard cut；Catalog、Workbench、Bridge 与 Renderer Slash vertical 仍按 [实施方案](agent-interaction-entry-decision.md)推进。
+本文记录 MetaWork 对 AgentCore binary ABI version 1 revision 4 的消费边界。线程、事件泵和 Host 生命周期见 [AgentCore 集成契约](agentcore-integration.md)，当前验收要求见 [验证规范](validation.md)。当前实现的 repository locks、verifier、canonical staged bundle、official SDK、Agent catalog lease 与 typed Text/Skill Agent surface 已 hard cut；Workbench、Bridge 与 Renderer Slash vertical 仍按 [实施方案](agent-interaction-entry-decision.md)推进。
 
 ## 1. 版本含义
 
@@ -126,7 +126,7 @@ candidate acceptance 通过 exact artifact 校验和官方 Zig package 的 sourc
 
 上述 SDK 是随 bundle 编译进消费者的 Metask AgentCore-owned source layer，不要求改变 C ABI layout，也不允许 MetaWork 自己补一份协议副本。
 
-生产 build graph 只把 SDK 注入 `agent/` 的 event sink、event pump 和 Session 实现。App 通过 Agent Runtime 完成 ABI discovery；Workbench 只消费 Agent module root 暴露的 SDK-validated owned/typed 表面；Bridge wire DTO 不引用 SDK enum、owner 或 handle。该边界避免复制协议，同时阻止 transport 与产品层直接依赖 bundle module。
+生产 build graph 只把 SDK 注入 `agent/` 的 catalog、event sink、event pump 和 Session 实现。App 通过 Agent Runtime 完成 ABI discovery；Workbench 只消费 Agent module root 暴露的 SDK-validated owned/typed 表面；Bridge wire DTO 不引用 SDK enum、owner 或 handle。该边界避免复制协议，同时阻止 transport 与产品层直接依赖 bundle module。
 
 目标 revision 4 bundle 的 `CoreEvent` 提供十个 known observation tags：`text_chunk`、`tool_start`、`tool_progress`、`progress`、`tool_result`、`usage`、`context_warning`、`auto_compact`、`retry_notice` 和 `stream_done`。有效的新 observation tag 被解码成 owned `UnknownCoreEvent`；迁移后的 Host 在 SDK 完成结构、ownership 和 byte-bound 校验后立即释放并忽略它，不让未知产品语义消耗事件泵容量，也不得把 raw tag/payload 传给 Renderer。
 
@@ -272,7 +272,7 @@ candidate probe 不导入 MetaWork Agent，也不承担 Runtime/Session、真实
 
 ### staged 正式 Host gate
 
-> revision 4 exact artifacts、candidate/stage、typed SDK discovery、纯 Text Host 与本机 Native test 已通过。Skill catalog、typed Skill Run、Composer Slash、完整 macOS/Windows vertical 和 package 仍须按实施方案完成；revision 3 不构成兼容要求。
+> revision 4 exact artifacts、candidate/stage、typed SDK discovery、Agent catalog ownership、typed Text/Skill Agent surface 与本机 Native test 已通过。Workbench catalog/admission、Composer Slash、完整 macOS/Windows vertical 和 package 仍须按实施方案完成；revision 3 不构成兼容要求。
 
 - typed SDK 完成并通过 source-free consumer；
 - status-before-result 和 diagnostic release 测试；

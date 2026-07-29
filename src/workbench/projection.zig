@@ -1435,7 +1435,7 @@ pub const Workbench = struct {
         if (hasNonTerminalRun(view)) return error.TaskBusy;
         const session = view.session orelse return error.TaskClosing;
         const recent_order = try self.takeWorkspaceRecentOrder();
-        const run_id = try session.prepareRun(prompt);
+        const run_id = try session.prepareRun(.{ .text = prompt });
         errdefer cancelPreparedRunOrPanic(session, run_id);
         const slot = try self.reserveRunRecord(view, prompt);
         errdefer self.discardRunRecord(view, slot);
