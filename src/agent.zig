@@ -8,6 +8,7 @@ pub const Status = session_impl.Status;
 pub const StopReason = session_impl.StopReason;
 pub const UiRequest = session_impl.UiRequest;
 pub const UiResponse = session_impl.UiResponse;
+pub const Answer = session_impl.Answer;
 pub const PermissionChoice = session_impl.PermissionChoice;
 pub const ParsedUiRequest = session_impl.ParsedUiRequest;
 pub const decodeUiRequest = session_impl.decodeUiRequest;

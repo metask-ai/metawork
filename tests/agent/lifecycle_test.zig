@@ -27,6 +27,32 @@ const cancelOnThread = fixture.cancelOnThread;
 const failPipelineOnThread = fixture.failPipelineOnThread;
 const CallbackSignal = fixture.CallbackSignal;
 
+test "Runtime rejects revision 4 tables without required Skill capabilities" {
+    var api = fake_api;
+    api.capabilities &= ~wire.CAP_SKILL_CATALOG;
+    try std.testing.expectError(
+        error.UnsupportedAbi,
+        lifecycle.Runtime.initWithApi(
+            std.testing.io,
+            std.testing.allocator,
+            &api,
+            .{ .max_sessions = 1 },
+        ),
+    );
+
+    api = fake_api;
+    api.capabilities &= ~wire.CAP_TYPED_RUN_INPUT;
+    try std.testing.expectError(
+        error.UnsupportedAbi,
+        lifecycle.Runtime.initWithApi(
+            std.testing.io,
+            std.testing.allocator,
+            &api,
+            .{ .max_sessions = 1 },
+        ),
+    );
+}
+
 const UiAnswerThenIdentityMismatch = struct {
     session: ?*lifecycle.Session = null,
     invoked: bool = false,
@@ -567,7 +593,9 @@ test "UI request validates identity and close wakes a suspended callback" {
     try std.testing.expectError(error.StaleUiResponse, answered.respondUi(run_id, request_id + 1, response));
     try std.testing.expectError(
         error.InvalidUiResponse,
-        answered.respondUi(run_id, request_id, .{ .answers = &.{"Yes"} }),
+        answered.respondUi(run_id, request_id, .{
+            .answers = &.{.{ .values = &.{"Yes"} }},
+        }),
     );
     try answered.respondUi(run_id, request_id, response);
     try std.testing.expectError(error.StaleUiResponse, answered.respondUi(run_id, request_id, response));

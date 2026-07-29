@@ -62,7 +62,7 @@ pub fn verify(b: *std.Build, root: []const u8) Bundle {
         lock.source.commit.len != 40 or
         !std.mem.eql(u8, lock.toolchain.zig_version, @import("builtin").zig_version_string) or
         lock.contract.binary_abi_version != 1 or
-        lock.contract.binary_abi_revision != 3 or
+        lock.contract.binary_abi_revision != 4 or
         !std.mem.eql(u8, lock.contract.binary_abi_status, "experimental"))
         @panic("unsupported locked AgentCore bundle contract");
     if (!std.mem.eql(u8, lock.build.optimize, "ReleaseSafe") or !lock.build.strip)

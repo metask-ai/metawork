@@ -76,15 +76,15 @@ export function selectedOptionIndex(
 export function serializeAnswerDrafts(
   questions: AskQuestion[],
   drafts: AnswerDrafts,
-): string[] | null {
+): string[][] | null {
   if (questions.length === 0) return null;
-  const answers: string[] = [];
+  const answers: string[][] = [];
   for (const [questionIndex, question] of questions.entries()) {
     const draft = drafts[questionIndex];
     if (question.options.length === 0) {
       if (draft?.kind !== "text" || draft.value.trim().length === 0)
         return null;
-      answers.push(draft.value);
+      answers.push([draft.value]);
       continue;
     }
     if (draft?.kind !== "options" || draft.selected.length === 0) return null;
@@ -95,7 +95,7 @@ export function serializeAnswerDrafts(
       if (label === undefined || label.trim().length === 0) return null;
       labels.push(label);
     }
-    answers.push(labels.join(", "));
+    answers.push(labels);
   }
   return answers;
 }

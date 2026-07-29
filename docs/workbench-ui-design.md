@@ -45,7 +45,7 @@ MetaWork 的视觉记忆点不是装饰性的暖色、通用衬线大标题、�
 
 ### 2.1 当前 ABI v1 capability profile
 
-当前锁定的 development ABI v1 revision 3 只为以下界面提供可验证数据：
+当前锁定的 development ABI v1 revision 4 已为以下既有界面提供可验证数据；Skill catalog 与 typed Skill Run 对应的 Composer Slash 界面仍按本文第 6 节和[实施方案](agent-interaction-entry-decision.md)实施：
 
 - 文本流、工具开始/进度/结果、Run progress、usage、context warning、auto compact、retry 和 stream done；
 - Ask question 与 permission 两类同步用户请求；

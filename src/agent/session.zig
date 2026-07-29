@@ -12,6 +12,7 @@ pub const Status = sdk.Status;
 pub const StopReason = sdk.StopReason;
 pub const UiRequest = sdk.UiRequest;
 pub const UiResponse = sdk.UiResponse;
+pub const Answer = sdk.protocol.Answer;
 pub const PermissionChoice = sdk.protocol.PermissionChoice;
 pub const ParsedUiRequest = sdk.ParsedUiRequest;
 
@@ -700,7 +701,8 @@ pub const Runtime = struct {
         config.model = sdk.bytesView(options.model);
         config.base_url = sdk.bytesView(options.base_url);
         config.workspace_root = sdk.bytesView(workspace_root);
-        config.workspace_home = sdk.bytesView(workspace_root);
+        config.workspace_home = sdk.bytesView("");
+        config.skill_catalog = null;
         const allowed_views = try self.allocator.alloc(wire.BytesViewV1, options.allowed_tools.len);
         defer self.allocator.free(allowed_views);
         for (options.allowed_tools, 0..) |name, index|
@@ -1378,7 +1380,7 @@ pub const Session = struct {
         // deterministically on `struct_size` instead of exposing undefined data.
         var result = std.mem.zeroes(wire.RunResultV1);
         var diagnostic = emptyOwnedBytes();
-        const status = self.agent_runtime.api.sessionRun()(
+        const status = self.agent_runtime.api.sessionRunText(
             self.raw,
             run_id,
             sdk.bytesView(prompt),
@@ -1917,6 +1919,12 @@ fn statusPoisonsSession(status: sdk.Status) bool {
         .stale_run,
         .too_late,
         .resource_limit,
+        .skill_catalog_invalid,
+        .stale_catalog,
+        .skill_not_found,
+        .invalid_skill_arguments,
+        .skill_policy_violation,
+        .skill_unavailable,
         => false,
     };
 }

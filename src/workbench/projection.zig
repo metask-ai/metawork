@@ -122,7 +122,7 @@ pub const PermissionChoice = enum {
 };
 
 pub const UiResponse = union(enum) {
-    answers: []const []const u8,
+    answers: []const []const []const u8,
     permission: PermissionChoice,
 };
 
@@ -1548,7 +1548,13 @@ pub const Workbench = struct {
         const run = findRun(view.runs, run_id) orelse return error.NoSuchRun;
         const session = view.session orelse
             return error.TaskClosing;
-        const agent_response = agentUiResponse(response);
+        const answer_count = switch (response) {
+            .answers => |answers| answers.len,
+            .permission => 0,
+        };
+        const answer_buffer = try self.allocator.alloc(lifecycle.Answer, answer_count);
+        defer self.allocator.free(answer_buffer);
+        const agent_response = agentUiResponse(response, answer_buffer);
         const record = self.prepareUiRecord(
             session,
             run_id,
@@ -3466,14 +3472,22 @@ fn accountProvider(
     };
 }
 
-fn agentUiResponse(response: UiResponse) lifecycle.UiResponse {
+fn agentUiResponse(
+    response: UiResponse,
+    answer_buffer: []lifecycle.Answer,
+) lifecycle.UiResponse {
     return switch (response) {
-        .answers => |answers| .{ .answers = answers },
+        .answers => |answers| answers_response: {
+            std.debug.assert(answer_buffer.len == answers.len);
+            for (answers, answer_buffer) |values, *answer|
+                answer.* = .{ .values = values };
+            break :answers_response .{ .answers = answer_buffer };
+        },
         .permission => |choice| .{ .permission = switch (choice) {
             .allow_once => .allow_once,
-            .allow_always => .allow_always,
+            .allow_always => .allow_session,
             .deny_once => .deny_once,
-            .deny_tool_session => .deny_tool_session,
+            .deny_tool_session => .deny_session,
         } },
     };
 }
@@ -3927,9 +3941,9 @@ fn stateForResponse(response: lifecycle.UiResponse) UiRecordState {
         .answers => .answered,
         .permission => |permission| switch (permission) {
             .allow_once => .allowed_once,
-            .allow_always => .allowed_always,
+            .allow_session => .allowed_always,
             .deny_once => .denied,
-            .deny_tool_session => .denied_session,
+            .deny_session => .denied_session,
         },
     };
 }

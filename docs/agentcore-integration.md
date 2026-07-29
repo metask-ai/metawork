@@ -1,9 +1,9 @@
 # MetaWork AgentCore 集成契约
 
-> 状态：AgentCore ABI v1 revision 3 macOS 与 Windows x86_64 GNU development baseline 已通过；fault-domain 验证选择单 AgentCore Worker 作为后续正式方向
-> 目标依赖：Metask AgentCore ABI v1 revision 3；精确 artifact identity 见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)
+> 状态：AgentCore ABI v1 revision 4 macOS 与 Windows exact artifacts 已锁定，typed Skill 产品链正在实施；fault-domain 验证选择单 AgentCore Worker 作为后续正式方向
+> 目标依赖：Metask AgentCore ABI v1 revision 4；精确 artifact identity 见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)
 
-本文定义 MetaWork `agent/` 执行子系统与 Metask AgentCore 之间的规范边界。Desktop Host 的 composition、Workbench 产品状态和 Bridge transport 见 [高层架构](architecture.md)，revision 3 目标能力见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。
+本文定义 MetaWork `agent/` 执行子系统与 Metask AgentCore 之间的规范边界。Desktop Host 的 composition、Workbench 产品状态和 Bridge transport 见 [高层架构](architecture.md)，revision 4 目标能力见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。
 
 ## 1. 集成原则
 
@@ -21,11 +21,11 @@
 
 MetaWork 的依赖输入是一个完整 bundle，而不是 AgentCore 实现源码。精确 artifact identity、payload whitelist 和 manifest schema 只由 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)定义；本文只定义 candidate、staging、build graph 和 Host 生命周期。
 
-### revision 3 开发期 bootstrap
+### revision 4 开发期 bootstrap
 
 - Metask AgentCore 独立构建并测试 target-specific bundle，candidate 直接取自本机精确路径 `metacodes/zig-out/agentcore/<target>`；
 - candidate probe 与 `agentcore:stage` 使用显式绝对 bundle root；正式 build/test/package 只消费 `.agentcore/bundle`；
-- 每个已接入 target 的 repository lock 保存完整 revision 3 manifest，并锁定 package/source、target、toolchain、ABI version/revision、link inputs 和所有 payload checksum；macOS 与 Windows lock 不互相替代；
+- 每个已接入 target 的 repository lock 保存完整 revision 4 manifest，并锁定 package/source、target、toolchain、ABI version/revision、link inputs 和所有 payload checksum；macOS 与 Windows lock 不互相替代；
 - stager 只复制 manifest whitelist；捕获到的复制/rename 错误必须恢复旧 canonical bundle。当前内部开发不承诺跨进程 crash transaction 或并发 build/stage，强制中断后的残留由再次执行 stage 清理；
 - staged bundle 在正式 build 前由 MetaWork verifier 再校验；官方 Zig package 只负责 module/link graph，不承担 repository lock 和 checksum 信任政策；
 - 由于 Zig 会在执行 root build verification 前解析 staged path dependency，正式 `dev/check/test/build/package` 必须先运行轻量 `agentcore:verify-staged` preflight，给出明确的缺包或 lock mismatch 错误；Zig build-time verifier 仍负责最终 build correctness；
@@ -33,7 +33,7 @@ MetaWork 的依赖输入是一个完整 bundle，而不是 AgentCore 实现源�
 - artifact 缺失、target 不匹配或 checksum 错误时明确失败；
 - 禁止 path/Git source dependency、源码复制、`latest`、版本范围、可变 tag 和 source fallback。
 
-stager 与 verifier 根据 manifest target 选择显式 target policy 和 exact lock，只接受 ABI 消费合同定义的 schema 1 revision 3 manifest。未知 target 必须失败；Linux 后续通过新增独立 policy/lock 接入，不提供 generic fallback。MetaWork 不保留 revision 2 字段、目录、symbol、module alias 或双格式 parser。
+stager 与 verifier 根据 manifest target 选择显式 target policy 和 exact lock，只接受 ABI 消费合同定义的 schema 1 revision 4 manifest。未知 target 必须失败；Linux 后续通过新增独立 policy/lock 接入，不提供 generic fallback。MetaWork 不保留 revision 3 function table、Run payload 或双格式 parser。
 
 当前内部初步开发不实现 dependency resolver、content-addressed cache、artifact repository 或跨机器自动分发。这个限制意味着开发 checkout 需要本机 Metask AgentCore 构建输出；它是明确的开发期前提，不得伪装成公司发布方案。
 
@@ -47,7 +47,7 @@ candidate probe 只用于证明锁定 artifact 与官方 Zig package 可以 sour
 - 不能注册到 React/Native SDK 正式链路；
 - 不维护上游 ABI facade 或 SDK 行为的平行测试套件。
 
-revision 3 bundle 保持 typed status、六个 StopReason、known/unknown observation decoder、`UiRequest` decoder、request-aware `UiResponse` encoder，以及 callback-scoped validated `RunContext`。正式 `agent/` 直接使用官方 `bindings/zig` package 暴露的表面；MetaWork 不手写 raw enum、tag switch、identity layout、JSON schema 或 SDK module/link graph。
+revision 4 bundle 提供完整 typed status、六个 StopReason、known/unknown observation decoder、`UiRequest` decoder、request-aware `UiResponse` encoder、Skill catalog decoder、Skill argument encoder，以及 callback-scoped validated `RunContext`。正式 `agent/` 直接使用官方 `bindings/zig` package 暴露的表面；MetaWork 不手写 raw enum、tag switch、identity layout、Skill schema 或 SDK module/link graph。
 
 ### MetaWork module boundary
 
@@ -126,11 +126,11 @@ Bridge handler 只写入 response channel，不同步等待 AgentCore。callback
 
 callback admission 只建立 lifetime 与当时的 identity 事实，不保证等待期间不会有另一个并发 callback 发现 identity 漂移。因此 Host 在发布 UI request 前和最终提取 response 的线性化点都必须在同一 Session lock 下重新检查现有 Core identity 与 dependency-contract 状态。检查失败时返回 UI fatal；如果 Renderer response 已完成编码但 ownership 尚未转移给 Core，Host 必须自行释放，禁止返回 answered。
 
-目标 ABI v1 revision 3 的 `UiRequest` / `UiResponse` 只有 `ask_question`/`answers` 与 `permission`。更早 experimental bundle 的 `plan_approval` 和 `custom` 已从 Host、Bridge、Renderer 与测试移除；未来控制消息扩展需要新的 ABI revision/version。
+目标 ABI v1 revision 4 的 `UiRequest` / `UiResponse` 只有 `ask_question`/`answers` 与 `permission`。`answers` 是按 question 排列的 `values[]`，不能再用逗号拼接多选值。更早 experimental bundle 的 `plan_approval` 和 `custom` 已从 Host、Bridge、Renderer 与测试移除；未来控制消息扩展需要新的 ABI revision/version。
 
 ### Host tools
 
-目标 revision 3 的 Host tool callback 同样携带 validated `RunContext`，但这只补齐 wire identity，不自动建立 MetaWork 的产品工具、安全与路由政策。当前产品 Runtime 配置仍必须保持 `host_tool_count = 0`，Read/Bash/Edit 使用 built-in tool catalog；启用正式 Host tools 属于独立 capability Gate，不在本次 ABI 迁移中顺带开放。
+目标 revision 4 的 Host tool callback 同样携带 validated `RunContext`，但这只补齐 wire identity，不自动建立 MetaWork 的产品工具、安全与路由政策。当前产品 Runtime 配置仍必须保持 `host_tool_count = 0`，Read/Bash/Edit 使用 built-in tool catalog；启用正式 Host tools 属于独立 capability Gate，不在本次 ABI 迁移中顺带开放。
 
 ## 5. Host envelope 与产品状态
 
@@ -266,7 +266,7 @@ event validation、copy 或同步入队失败：
 ```text
 set typed TerminationSignal if absent
 → return EVENT_FATAL
-→ session_run returns non-OK callback status
+→ session_run_input returns non-OK callback status
 → Host releases diagnostic
 → Run = failed
 ```
@@ -375,7 +375,7 @@ Workbench revision 通知只在 revision 变化时发送，Renderer 合并并发
 
 ## 11. RunResult 与 StopReason
 
-`session_run` 的处理顺序固定：
+`session_run_input` 的处理顺序固定：
 
 ```text
 call ABI

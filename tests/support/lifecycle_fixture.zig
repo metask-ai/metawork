@@ -381,6 +381,26 @@ pub fn sessionCreate(
     return wire.STATUS_OUT_OF_MEMORY;
 }
 
+pub fn runtimeQuerySkillCatalog(
+    _: ?*wire.RuntimeHandle,
+    _: ?*const wire.SkillCatalogQueryV1,
+    _: ?*?*wire.SkillCatalogHandle,
+    _: ?*wire.OwnedBytesV1,
+    out_error: ?*wire.OwnedBytesV1,
+) callconv(.c) u32 {
+    if (out_error) |out| out.* = .{ .ptr = null, .len = 0 };
+    diagnostic(out_error);
+    return wire.STATUS_SKILL_CATALOG_INVALID;
+}
+
+pub fn skillCatalogRelease(
+    _: ?*wire.SkillCatalogHandle,
+    out_error: ?*wire.OwnedBytesV1,
+) callconv(.c) u32 {
+    if (out_error) |out| out.* = .{ .ptr = null, .len = 0 };
+    return wire.STATUS_OK;
+}
+
 pub fn sessionDestroy(
     handle: ?*wire.SessionHandle,
     out_error: ?*wire.OwnedBytesV1,
@@ -414,15 +434,35 @@ pub fn sessionDestroy(
     return wire.STATUS_OK;
 }
 
-pub fn sessionRun(
+pub fn sessionRefreshSkillCatalog(
+    _: ?*wire.SessionHandle,
+    _: ?*wire.SkillCatalogHandle,
+    out_error: ?*wire.OwnedBytesV1,
+) callconv(.c) u32 {
+    if (out_error) |out| out.* = .{ .ptr = null, .len = 0 };
+    diagnostic(out_error);
+    return wire.STATUS_SKILL_CATALOG_INVALID;
+}
+
+pub fn sessionRunInput(
     handle: ?*wire.SessionHandle,
     run_id: u64,
-    _: wire.BytesViewV1,
+    input: ?*const wire.RunInputV1,
     _: ?*const wire.RunOptionsV1,
     out_result: ?*wire.RunResultV1,
     out_error: ?*wire.OwnedBytesV1,
 ) callconv(.c) u32 {
     if (out_error) |out| out.* = .{ .ptr = null, .len = 0 };
+    const typed_input = input orelse {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    };
+    if (typed_input.struct_size != @sizeOf(wire.RunInputV1) or
+        typed_input.kind_code != wire.RUN_INPUT_TEXT)
+    {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    }
     const session: *FakeSession = @ptrCast(@alignCast(handle orelse {
         diagnostic(out_error);
         return wire.STATUS_INVALID_ARGUMENT;
@@ -650,9 +690,12 @@ pub const fake_api = wire.ApiV1{
     .capabilities = wire.REQUIRED_CAPABILITIES_V1,
     .runtime_create = runtimeCreate,
     .runtime_destroy = runtimeDestroy,
+    .runtime_query_skill_catalog = runtimeQuerySkillCatalog,
+    .skill_catalog_release = skillCatalogRelease,
     .session_create = sessionCreate,
     .session_destroy = sessionDestroy,
-    .session_run = sessionRun,
+    .session_refresh_skill_catalog = sessionRefreshSkillCatalog,
+    .session_run_input = sessionRunInput,
     .session_abort = sessionAbort,
     .buffer_release = bufferRelease,
     .reserved = [_]u64{0} ** 4,

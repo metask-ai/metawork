@@ -370,4 +370,4 @@ export type WorkspaceChoice =
 
 export type UiResponsePayload =
   | { kind: "permission"; permission: "deny_once" | "allow_once" }
-  | { kind: "answers"; answers: string[] };
+  | { kind: "answers"; answers: string[][] };

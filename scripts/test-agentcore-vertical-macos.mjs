@@ -303,7 +303,7 @@ try {
             runId,
             requestId: pending.requestId,
             kind: "answers",
-            answers: ["Yes"],
+            answers: [["Yes"]],
           };
         } else {
           throw new Error(
