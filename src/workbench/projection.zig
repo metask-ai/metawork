@@ -1502,10 +1502,7 @@ pub const Workbench = struct {
     ) Error!CatalogProjection {
         self.syncLifecycle();
         const task = self.findTask(task_id) orelse return error.UnknownTask;
-        return if (task.pinned_catalog) |*snapshot|
-            snapshot.view()
-        else
-            .{ .availability = .unavailable };
+        return taskCatalogProjection(task);
     }
 
     pub fn refreshWorkspaceCatalog(
@@ -2715,10 +2712,7 @@ pub const Workbench = struct {
             return error.SnapshotTooLarge;
         try self.writeCatalogProjection(
             writer,
-            if (view.pinned_catalog) |*snapshot|
-                snapshot.view()
-            else
-                .{ .availability = .uninitialized },
+            taskCatalogProjection(view),
         );
         writer.print(",\"lifecycle\":\"{s}\",\"continuationAvailable\":{},\"archived\":{},\"closeFailed\":{},\"currentRunId\":\"{d}\",\"currentRunPhase\":", .{
             @tagName(view.lifecycle),
@@ -5102,6 +5096,13 @@ fn catalogProjection(
     };
 }
 
+fn taskCatalogProjection(task: *const TaskView) CatalogProjection {
+    return if (task.pinned_catalog) |*snapshot|
+        snapshot.view()
+    else
+        .{ .availability = .uninitialized };
+}
+
 fn takeActivityOrder(run: *RunRecord) u64 {
     const result = run.next_activity_order;
     std.debug.assert(result != std.math.maxInt(u64));
@@ -5587,6 +5588,10 @@ test "Workbench snapshot serializer matches the Renderer contract fixture" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
 
+    try std.testing.expectEqual(
+        CatalogAvailability.uninitialized,
+        (try workbench.taskCatalog(3)).availability,
+    );
     var storage: [4096]u8 = undefined;
     const snapshot = try workbench.writeSnapshot(&storage);
     const fixture = std.mem.trimEnd(
