@@ -177,6 +177,12 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     });
     event_pump.addImport("metask_agentcore", sdk);
     event_pump.addImport("event_sink", event_sink);
+    const agent_catalog = b.createModule(.{
+        .root_source_file = b.path("src/agent/catalog.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    agent_catalog.addImport("metask_agentcore", sdk);
     const session = b.createModule(.{
         .root_source_file = b.path("src/agent/session.zig"),
         .target = target,
@@ -184,6 +190,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     });
     session.addImport("metask_agentcore", sdk);
     session.addImport("event_pump", event_pump);
+    session.addImport("agent_catalog", agent_catalog);
     const agent = b.createModule(.{
         .root_source_file = b.path("src/agent.zig"),
         .target = target,

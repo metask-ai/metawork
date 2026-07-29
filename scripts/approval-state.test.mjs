@@ -194,16 +194,16 @@ test("question drafts keep option identity instead of parsing display labels", (
   assert.equal(optionAnswerSelected(drafts, 0, 0), true);
   assert.equal(selectedOptionIndex(drafts, 0), 0);
   assert.deepEqual(serializeAnswerDrafts(questions, drafts), [
-    "Alpha, Beta, Gamma",
-    "Ship both",
+    ["Alpha, Beta", "Gamma"],
+    ["Ship both"],
   ]);
 
   drafts = updateOptionAnswer(drafts, 0, 0, true, false);
   assert.equal(optionAnswerSelected(drafts, 0, 0), false);
   assert.equal(optionAnswerSelected(drafts, 0, 1), true);
   assert.deepEqual(serializeAnswerDrafts(questions, drafts), [
-    "Gamma",
-    "Ship both",
+    ["Gamma"],
+    ["Ship both"],
   ]);
   assert.equal(
     serializeAnswerDrafts(questions, updateTextAnswer(drafts, 1, "   ")),

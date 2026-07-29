@@ -45,10 +45,11 @@ MetaWork 的视觉记忆点不是装饰性的暖色、通用衬线大标题、�
 
 ### 2.1 当前 ABI v1 capability profile
 
-当前锁定的 development ABI v1 revision 3 只为以下界面提供可验证数据：
+当前锁定的 development ABI v1 revision 4 已为 Host 与 Renderer Bridge 提供 Skill catalog projection 和 typed Skill Run，但当前 Composer 尚未提供 Slash 或其他 Skill 选择入口。本轮只接通可验证的能力与唯一执行路径，不提前声明对应产品交互已经可用：
 
 - 文本流、工具开始/进度/结果、Run progress、usage、context warning、auto compact、retry 和 stream done；
 - Ask question 与 permission 两类同步用户请求；
+- Workspace current / Task pinned Skill catalog、typed Skill Run 与独立 Skill rejection；
 - Run 状态、六种终止原因，以及 Session 是否仍可继续。
 
 因此当前产品只显示时间线、工具活动、问题/权限卡片、Current activity 和真实 usage。Plan、plan approval、Outputs、Files changed、持久权限管理和 custom UI 均保持隐藏；它们在本文档中的设计是后续 capability 到位后的产品规范，不是当前实现承诺。Renderer 不解析工具参数、stdout 或普通文本来猜测这些状态。当前 Renderer 合同已提供独立 Workspace projection、Task-bound ExecutionConfig facts、正式设置 route，以及设置与 New task 共享的默认 API/模型选择；跨重启 rebind 等仍须等对应 capability 落地后才能宣称可用，差距由 [验证规范](validation.md)明确记录。

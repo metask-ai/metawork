@@ -143,10 +143,38 @@ export type NonTerminalRunPhase = Extract<
   "queued" | "running" | "waiting_ui" | "stopping"
 >;
 
+export type TaskRunInput =
+  | {
+      kind: "text";
+      text: string;
+    }
+  | {
+      kind: "skill";
+      skillId: string;
+      catalogRevision: string;
+      argumentValues: string[];
+    };
+
+export type RunInputView =
+  | {
+      kind: "text";
+      text: string;
+      redacted: boolean;
+    }
+  | {
+      kind: "skill";
+      skillId: string;
+      catalogRevision: string;
+      invocationName: string;
+      displayName: string;
+      argumentValues: string[];
+      redacted: boolean;
+    };
+
 export type RunView = {
   id: string;
   phase: RunPhase;
-  user: string;
+  input: RunInputView;
   assistant: string;
   assistantRedacted: boolean;
   status: string;
@@ -167,6 +195,11 @@ export type RunView = {
     | "queue_capacity_failure"
     | "ui_pipeline_failure"
     | "dependency_contract_failure"
+    | "stale_catalog"
+    | "skill_not_found"
+    | "invalid_skill_arguments"
+    | "skill_policy_violation"
+    | "skill_unavailable"
     | null;
   usage: {
     input: string;
@@ -247,6 +280,7 @@ export type TaskView = {
     executionGeneration: string;
     unavailableReason: "credential_released" | null;
   };
+  skillCatalog: SkillCatalogView;
   lifecycle: "open" | "closing" | "closed";
   continuationAvailable: boolean;
   archived: boolean;
@@ -285,12 +319,38 @@ export type WorkspaceView = {
   redacted: boolean;
   authorization: "available" | "removing" | "reauthorization_required";
   lastRemovalFailure: "task_close_failed" | null;
+  skillCatalog: SkillCatalogView;
   recentOrder: string;
   signals: {
     running: number;
     attention: number;
     failedOrInterrupted: number;
   };
+};
+
+export type SkillCatalogAvailability =
+  "uninitialized" | "loading" | "ready" | "degraded" | "unavailable";
+
+export type SkillCatalogView = {
+  availability: SkillCatalogAvailability;
+  redacted: boolean;
+  revision: string | null;
+  skills: {
+    skillId: string;
+    invocationName: string;
+    displayName: string;
+    description: string;
+    argumentNames: string[];
+    maxValues: number;
+  }[];
+  issues: {
+    code:
+      | "invalid_definition"
+      | "source_conflict"
+      | "invalid_resource"
+      | "invalid_invocation_name";
+    invocationName: string | null;
+  }[];
 };
 
 export type WorkspaceMutationReason =
@@ -320,6 +380,9 @@ export type TaskCreateReason =
   | "workspace_changed"
   | "workspace_unavailable"
   | "workspace_removing"
+  | "catalog_loading"
+  | "catalog_unavailable"
+  | "stale_catalog"
   | "capacity_reached"
   | "shutting_down";
 
@@ -343,7 +406,12 @@ export type TaskRunReason =
   | "task_unavailable"
   | "task_busy"
   | "workspace_unavailable"
+  | "workspace_changed"
   | "workspace_removing"
+  | "catalog_unavailable"
+  | "stale_catalog"
+  | "skill_not_found"
+  | "invalid_skill_arguments"
   | "capacity_reached"
   | "shutting_down";
 
@@ -361,6 +429,23 @@ export type TaskRunResult =
       reason: TaskRunReason;
     };
 
+export type CatalogRefreshReason =
+  | "workspace_changed"
+  | "binding_changed"
+  | "workspace_unavailable"
+  | "workspace_removing"
+  | "task_unavailable"
+  | "task_busy"
+  | "catalog_loading"
+  | "catalog_unavailable"
+  | "capacity_reached"
+  | "shutting_down";
+
+export type CatalogRefreshResult<Identity extends "workspaceId" | "taskId"> = {
+  accepted: boolean;
+  reason: CatalogRefreshReason | null;
+} & Record<Identity, string>;
+
 export type HostSignal = {
   sequence: number;
 };
@@ -370,4 +455,4 @@ export type WorkspaceChoice =
 
 export type UiResponsePayload =
   | { kind: "permission"; permission: "deny_once" | "allow_once" }
-  | { kind: "answers"; answers: string[] };
+  | { kind: "answers"; answers: string[][] };

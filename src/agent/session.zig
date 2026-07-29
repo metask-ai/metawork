@@ -6,14 +6,24 @@ const std = @import("std");
 const sdk = @import("metask_agentcore");
 const wire = sdk.types;
 const event_pump = @import("event_pump");
+const catalog = @import("agent_catalog");
 
 pub const OwnedCoreEvent = event_pump.OwnedCoreEvent;
 pub const Status = sdk.Status;
 pub const StopReason = sdk.StopReason;
 pub const UiRequest = sdk.UiRequest;
 pub const UiResponse = sdk.UiResponse;
+pub const Answer = sdk.protocol.Answer;
 pub const PermissionChoice = sdk.protocol.PermissionChoice;
 pub const ParsedUiRequest = sdk.ParsedUiRequest;
+pub const CatalogHealth = catalog.Health;
+pub const CatalogIssueCode = catalog.IssueCode;
+pub const CatalogIssue = catalog.Issue;
+pub const CatalogSkill = catalog.Skill;
+pub const CatalogProjection = catalog.Projection;
+pub const CatalogLease = catalog.Lease;
+pub const CatalogAcquisition = catalog.Acquisition;
+pub const CatalogQuery = catalog.Query;
 
 pub fn decodeUiRequest(
     allocator: std.mem.Allocator,
@@ -308,6 +318,119 @@ pub const WorkspaceInput = struct {
     trust: WorkspaceTrust,
 };
 
+pub const RunInput = union(enum) {
+    text: []const u8,
+    skill: struct {
+        skill_id: []const u8,
+        catalog_revision: []const u8,
+        argument_values: []const []const u8,
+    },
+};
+
+const OwnedRunInput = union(enum) {
+    text: []u8,
+    skill: struct {
+        skill_id: []u8,
+        catalog_revision: []u8,
+        argument_values: [][]const u8,
+        encoding_scratch: []u8,
+    },
+
+    fn init(
+        allocator: std.mem.Allocator,
+        input: RunInput,
+        max_input_bytes: usize,
+    ) (Error || std.mem.Allocator.Error)!OwnedRunInput {
+        return switch (input) {
+            .text => |text| {
+                if (text.len > max_input_bytes) return error.RunInputTooLarge;
+                if (!std.unicode.utf8ValidateSlice(text))
+                    return error.InvalidRunInput;
+                return .{ .text = try allocator.dupe(u8, text) };
+            },
+            .skill => |skill| {
+                if (skill.skill_id.len == 0 or skill.catalog_revision.len == 0 or
+                    !std.unicode.utf8ValidateSlice(skill.skill_id) or
+                    !std.unicode.utf8ValidateSlice(skill.catalog_revision) or
+                    skill.argument_values.len > sdk.protocol.MAX_SKILL_ARGUMENT_VALUES_V1)
+                    return error.InvalidRunInput;
+                var total = std.math.add(
+                    usize,
+                    skill.skill_id.len,
+                    skill.catalog_revision.len,
+                ) catch return error.RunInputTooLarge;
+                for (skill.argument_values) |value| {
+                    if (!std.unicode.utf8ValidateSlice(value))
+                        return error.InvalidRunInput;
+                    total = std.math.add(usize, total, value.len) catch
+                        return error.RunInputTooLarge;
+                    if (total > max_input_bytes) return error.RunInputTooLarge;
+                }
+
+                const skill_id = try allocator.dupe(u8, skill.skill_id);
+                errdefer allocator.free(skill_id);
+                const revision = try allocator.dupe(
+                    u8,
+                    skill.catalog_revision,
+                );
+                errdefer allocator.free(revision);
+                const values = try allocator.alloc(
+                    []const u8,
+                    skill.argument_values.len,
+                );
+                errdefer allocator.free(values);
+                var initialized: usize = 0;
+                errdefer for (values[0..initialized]) |value|
+                    allocator.free(value);
+                for (skill.argument_values, values) |value, *copy| {
+                    copy.* = try allocator.dupe(u8, value);
+                    initialized += 1;
+                }
+                const scratch = try allocator.alloc(
+                    u8,
+                    sdk.protocol.MAX_SKILL_ARGUMENT_JSON_BYTES_V1,
+                );
+                errdefer {
+                    secureZero(scratch);
+                    allocator.free(scratch);
+                }
+                var fixed = std.heap.FixedBufferAllocator.init(scratch);
+                const encoded = sdk.encodeSkillArguments(
+                    fixed.allocator(),
+                    values,
+                ) catch |err| switch (err) {
+                    error.InvalidArguments => return error.InvalidRunInput,
+                    error.ResourceLimit => return error.RunInputTooLarge,
+                    error.OutOfMemory => return error.RunInputTooLarge,
+                };
+                fixed.allocator().free(encoded);
+                secureZero(scratch);
+                return .{ .skill = .{
+                    .skill_id = skill_id,
+                    .catalog_revision = revision,
+                    .argument_values = values,
+                    .encoding_scratch = scratch,
+                } };
+            },
+        };
+    }
+
+    fn deinit(self: *OwnedRunInput, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .text => |text| allocator.free(text),
+            .skill => |skill| {
+                allocator.free(skill.skill_id);
+                allocator.free(skill.catalog_revision);
+                for (skill.argument_values) |value| allocator.free(value);
+                allocator.free(skill.argument_values);
+                secureZero(skill.encoding_scratch);
+                allocator.free(skill.encoding_scratch);
+            },
+        }
+        self.* = undefined;
+    }
+};
+
 pub const EventReadyNotification = enum {
     scheduled,
     already_pending,
@@ -434,6 +557,9 @@ pub const SessionOpenOptions = struct {
     model: []const u8,
     base_url: []const u8 = "",
     workspace: WorkspaceInput,
+    canonical_user_home: []const u8 = "",
+    workspace_epoch: []const u8 = "",
+    skill_catalog: ?*CatalogLease = null,
     allowed_tools: []const []const u8 = &default_builtin_tools,
 };
 
@@ -484,6 +610,15 @@ pub const Error = error{
     InvalidLimits,
     InvalidWorkspace,
     WorkspaceNotTrusted,
+    InvalidCatalogQuery,
+    InvalidCatalogDescriptor,
+    DuplicateCatalogIdentity,
+    SkillCatalogInvalid,
+    CatalogResourceLimit,
+    CatalogReleaseFailed,
+    CatalogLeasesOutstanding,
+    CatalogBindingMismatch,
+    CatalogRefreshFailed,
     RuntimeShuttingDown,
     SessionCapacity,
     UnknownSession,
@@ -493,7 +628,8 @@ pub const Error = error{
     SessionNotIdle,
     SessionPoisoned,
     SessionClosing,
-    PromptTooLarge,
+    InvalidRunInput,
+    RunInputTooLarge,
     RunIdExhausted,
     RunGenerationExhausted,
     SessionIdExhausted,
@@ -529,6 +665,8 @@ pub const Runtime = struct {
     shutdown_running: bool = false,
     shutdown_complete: bool = false,
     last_shutdown_error: ?Error = null,
+    active_catalog_calls: usize = 0,
+    active_catalog_leases: usize = 0,
     next_session_id: u64 = 0,
 
     pub fn init(
@@ -633,6 +771,96 @@ pub const Runtime = struct {
         return self;
     }
 
+    /// Performs one synchronous AgentCore discovery call. Workbench decides
+    /// where this blocking operation runs and owns the returned projection and
+    /// opaque lease as two independent linear values.
+    pub fn querySkillCatalog(
+        self: *Runtime,
+        input: CatalogQuery,
+    ) (Error || std.mem.Allocator.Error)!CatalogAcquisition {
+        try validateCanonicalDirectory(self.io, self.allocator, input.workspace_root);
+        try validateCanonicalDirectory(
+            self.io,
+            self.allocator,
+            input.canonical_user_home,
+        );
+
+        self.sessions_mutex.lockUncancelable(self.io);
+        if (self.shutting_down.load(.acquire)) {
+            self.sessions_mutex.unlock(self.io);
+            return error.RuntimeShuttingDown;
+        }
+        const raw_runtime = self.runtime orelse {
+            self.sessions_mutex.unlock(self.io);
+            return error.RuntimeShuttingDown;
+        };
+        self.active_catalog_calls += 1;
+        self.sessions_mutex.unlock(self.io);
+
+        var acquisition = catalog.query(
+            self.allocator,
+            self.api,
+            raw_runtime,
+            self,
+            input,
+        ) catch |err| {
+            self.finishCatalogCall();
+            return err;
+        };
+
+        self.sessions_mutex.lockUncancelable(self.io);
+        std.debug.assert(self.active_catalog_calls > 0);
+        self.active_catalog_calls -= 1;
+        self.active_catalog_leases += 1;
+        const reject = self.shutting_down.load(.acquire);
+        self.shutdown_condition.broadcast(self.io);
+        self.sessions_mutex.unlock(self.io);
+        if (reject) {
+            acquisition.projection.deinit();
+            try self.releaseSkillCatalog(acquisition.lease);
+            return error.RuntimeShuttingDown;
+        }
+        return acquisition;
+    }
+
+    /// Consumes one opaque Host catalog handle. The AgentCore release function
+    /// is called exactly once even if it reports failure.
+    pub fn releaseSkillCatalog(
+        self: *Runtime,
+        lease: *CatalogLease,
+    ) Error!void {
+        if (!catalog.belongsTo(lease, self))
+            return error.CatalogBindingMismatch;
+        self.sessions_mutex.lockUncancelable(self.io);
+        if (self.runtime == null or self.active_catalog_leases == 0) {
+            self.sessions_mutex.unlock(self.io);
+            return error.CatalogBindingMismatch;
+        }
+        self.active_catalog_calls += 1;
+        self.sessions_mutex.unlock(self.io);
+
+        var release_error: ?Error = null;
+        catalog.release(lease) catch |err| {
+            release_error = err;
+        };
+        self.sessions_mutex.lockUncancelable(self.io);
+        std.debug.assert(self.active_catalog_calls > 0);
+        std.debug.assert(self.active_catalog_leases > 0);
+        self.active_catalog_calls -= 1;
+        self.active_catalog_leases -= 1;
+        self.shutdown_condition.broadcast(self.io);
+        self.sessions_mutex.unlock(self.io);
+        if (release_error) |err| return err;
+    }
+
+    fn finishCatalogCall(self: *Runtime) void {
+        self.sessions_mutex.lockUncancelable(self.io);
+        std.debug.assert(self.active_catalog_calls > 0);
+        self.active_catalog_calls -= 1;
+        self.shutdown_condition.broadcast(self.io);
+        self.sessions_mutex.unlock(self.io);
+    }
+
     pub fn createSession(
         self: *Runtime,
         options: SessionOpenOptions,
@@ -650,6 +878,22 @@ pub const Runtime = struct {
         try validateWorkspace(options.workspace);
         if (options.credential.len == 0 or options.model.len == 0)
             return error.CoreCallFailed;
+        if (options.canonical_user_home.len != 0)
+            try validateCanonicalDirectory(
+                self.io,
+                self.allocator,
+                options.canonical_user_home,
+            );
+        if (options.skill_catalog) |lease| {
+            if (!catalog.belongsTo(lease, self) or
+                !catalog.matches(
+                    lease,
+                    options.workspace.canonical_root,
+                    options.canonical_user_home,
+                    options.workspace_epoch,
+                ))
+                return error.CatalogBindingMismatch;
+        }
 
         self.sessions_mutex.lockUncancelable(self.io);
         defer self.sessions_mutex.unlock(self.io);
@@ -672,10 +916,22 @@ pub const Runtime = struct {
         errdefer self.allocator.destroy(control_block);
         const workspace_root = try self.allocator.dupe(u8, options.workspace.canonical_root);
         errdefer self.allocator.free(workspace_root);
+        const workspace_home = try self.allocator.dupe(
+            u8,
+            options.canonical_user_home,
+        );
+        errdefer self.allocator.free(workspace_home);
+        const workspace_epoch = try self.allocator.dupe(
+            u8,
+            options.workspace_epoch,
+        );
+        errdefer self.allocator.free(workspace_epoch);
         session.* = .{
             .agent_runtime = self,
             .id = session_id,
             .workspace_root = workspace_root,
+            .workspace_home = workspace_home,
+            .workspace_epoch = workspace_epoch,
             .control_block = control_block,
         };
         control_block.* = .{ .session = session };
@@ -700,7 +956,11 @@ pub const Runtime = struct {
         config.model = sdk.bytesView(options.model);
         config.base_url = sdk.bytesView(options.base_url);
         config.workspace_root = sdk.bytesView(workspace_root);
-        config.workspace_home = sdk.bytesView(workspace_root);
+        config.workspace_home = sdk.bytesView(workspace_home);
+        config.skill_catalog = if (options.skill_catalog) |lease|
+            catalog.rawHandle(lease)
+        else
+            null;
         const allowed_views = try self.allocator.alloc(wire.BytesViewV1, options.allowed_tools.len);
         defer self.allocator.free(allowed_views);
         for (options.allowed_tools, 0..) |name, index|
@@ -747,6 +1007,11 @@ pub const Runtime = struct {
         self.shutdown_running = true;
         self.last_shutdown_error = null;
         self.shutting_down.store(true, .release);
+        while (self.active_catalog_calls != 0)
+            self.shutdown_condition.waitUncancelable(
+                self.io,
+                &self.sessions_mutex,
+            );
         const sessions = self.sessions;
         self.sessions_mutex.unlock(self.io);
 
@@ -759,6 +1024,12 @@ pub const Runtime = struct {
             }
         }
         if (first_error != null) return self.finishShutdown(first_error);
+
+        self.sessions_mutex.lockUncancelable(self.io);
+        const outstanding_catalogs = self.active_catalog_leases;
+        self.sessions_mutex.unlock(self.io);
+        if (outstanding_catalogs != 0)
+            return self.finishShutdown(error.CatalogLeasesOutstanding);
 
         if (self.runtime != null) {
             var diagnostic = emptyOwnedBytes();
@@ -854,6 +1125,8 @@ pub const Runtime = struct {
 
     pub fn deinit(self: *Runtime) void {
         std.debug.assert(self.shutdown_complete);
+        std.debug.assert(self.active_catalog_calls == 0);
+        std.debug.assert(self.active_catalog_leases == 0);
         for (self.sessions) |entry| {
             if (entry) |session| {
                 session.deinit();
@@ -883,6 +1156,8 @@ pub const Session = struct {
     id: u64,
     raw: ?*wire.SessionHandle = null,
     workspace_root: []u8,
+    workspace_home: []u8,
+    workspace_epoch: []u8,
     control_block: *SessionControlBlock,
     mutex: std.Io.Mutex = .init,
     condition: std.Io.Condition = .init,
@@ -895,7 +1170,7 @@ pub const Session = struct {
     core_call_in_progress: bool = false,
     abort_calls_in_progress: usize = 0,
     run_done: bool = true,
-    prompt: ?[]u8 = null,
+    run_input: ?OwnedRunInput = null,
     terminal_diagnostic: ?[]u8 = null,
     terminal_diagnostic_len: usize = 0,
     terminal_diagnostic_truncated: bool = false,
@@ -934,10 +1209,16 @@ pub const Session = struct {
 
     /// Prepares an Agent Run after Workbench admission. Workbench owns queueing
     /// and must call exactly one of `beginRun` or `cancelPreparedRun`.
-    pub fn prepareRun(self: *Session, prompt: []const u8) (Error || std.mem.Allocator.Error)!u64 {
-        if (prompt.len > self.agent_runtime.max_prompt_bytes) return error.PromptTooLarge;
-        const owned_prompt = try self.agent_runtime.allocator.dupe(u8, prompt);
-        errdefer self.agent_runtime.allocator.free(owned_prompt);
+    pub fn prepareRun(
+        self: *Session,
+        input: RunInput,
+    ) (Error || std.mem.Allocator.Error)!u64 {
+        var owned_input = try OwnedRunInput.init(
+            self.agent_runtime.allocator,
+            input,
+            self.agent_runtime.max_prompt_bytes,
+        );
+        errdefer owned_input.deinit(self.agent_runtime.allocator);
         const terminal_diagnostic = try self.agent_runtime.allocator.alloc(
             u8,
             self.agent_runtime.max_terminal_diagnostic_bytes,
@@ -983,7 +1264,7 @@ pub const Session = struct {
         self.run_started = false;
         self.core_call_in_progress = false;
         self.run_done = false;
-        self.prompt = owned_prompt;
+        self.run_input = owned_input;
         self.terminal_diagnostic = terminal_diagnostic;
         self.terminal_diagnostic_len = 0;
         self.terminal_diagnostic_truncated = false;
@@ -1066,6 +1347,48 @@ pub const Session = struct {
         self.finishPreparedRunLocked();
         self.unlock();
         _ = self.agent_runtime.notifyEventConsumer();
+    }
+
+    /// Rebinds the Session's internal immutable Skill snapshot. The caller
+    /// serializes lease borrowing with replacement/release and may call this
+    /// only while the Session is idle.
+    pub fn refreshSkillCatalog(
+        self: *Session,
+        lease: *CatalogLease,
+    ) Error!void {
+        if (!catalog.belongsTo(lease, self.agent_runtime) or
+            !catalog.matches(
+                lease,
+                self.workspace_root,
+                self.workspace_home,
+                self.workspace_epoch,
+            ))
+            return error.CatalogBindingMismatch;
+        self.lock();
+        defer self.unlock();
+        if (self.agent_runtime.shutting_down.load(.acquire))
+            return error.RuntimeShuttingDown;
+        switch (self.state) {
+            .idle => {},
+            .queued, .running, .waiting_ui => return error.SessionNotIdle,
+            .poisoned => return error.SessionPoisoned,
+            .closing, .closed => return error.SessionClosing,
+        }
+        var diagnostic = emptyOwnedBytes();
+        const status_code = self.agent_runtime.api.sessionRefreshSkillCatalog()(
+            self.raw,
+            catalog.rawHandle(lease),
+            &diagnostic,
+        );
+        releaseOwned(self.agent_runtime.api, &diagnostic);
+        const status = sdk.Status.fromCode(status_code) catch
+            return error.CatalogRefreshFailed;
+        return switch (status) {
+            .ok => {},
+            .busy => error.SessionNotIdle,
+            .skill_catalog_invalid => error.SkillCatalogInvalid,
+            else => error.CatalogRefreshFailed,
+        };
     }
 
     pub fn requestTermination(
@@ -1367,7 +1690,7 @@ pub const Session = struct {
             return terminal;
         }
         self.core_call_in_progress = true;
-        const prompt = self.prompt.?;
+        const input = &self.run_input.?;
         self.unlock();
 
         var options = std.mem.zeroes(wire.RunOptionsV1);
@@ -1378,14 +1701,35 @@ pub const Session = struct {
         // deterministically on `struct_size` instead of exposing undefined data.
         var result = std.mem.zeroes(wire.RunResultV1);
         var diagnostic = emptyOwnedBytes();
-        const status = self.agent_runtime.api.sessionRun()(
-            self.raw,
-            run_id,
-            sdk.bytesView(prompt),
-            &options,
-            &result,
-            &diagnostic,
-        );
+        const status = switch (input.*) {
+            .text => |text| self.agent_runtime.api.sessionRunText(
+                self.raw,
+                run_id,
+                sdk.bytesView(text),
+                &options,
+                &result,
+                &diagnostic,
+            ),
+            .skill => |skill| skill_run: {
+                var fixed = std.heap.FixedBufferAllocator.init(
+                    skill.encoding_scratch,
+                );
+                const arguments_json = sdk.encodeSkillArguments(
+                    fixed.allocator(),
+                    skill.argument_values,
+                ) catch unreachable;
+                break :skill_run self.agent_runtime.api.sessionRunSkill(
+                    self.raw,
+                    run_id,
+                    sdk.bytesView(skill.skill_id),
+                    sdk.bytesView(skill.catalog_revision),
+                    sdk.bytesView(arguments_json),
+                    &options,
+                    &result,
+                    &diagnostic,
+                );
+            },
+        };
         const typed_status = sdk.Status.fromCode(status) catch null;
         const diagnostic_valid = self.copyTerminalDiagnostic(diagnostic);
         releaseOwned(self.agent_runtime.api, &diagnostic);
@@ -1397,8 +1741,9 @@ pub const Session = struct {
             while (self.active_callback_refs != 0) self.wait();
         }
         while (self.abort_calls_in_progress != 0) self.wait();
-        self.agent_runtime.allocator.free(prompt);
-        self.prompt = null;
+        var completed_input = self.run_input.?;
+        self.run_input = null;
+        completed_input.deinit(self.agent_runtime.allocator);
         var stop_reason: ?sdk.StopReason = null;
         var raw_stop_reason_code: ?u32 = null;
         var failure: ?TerminalFailure = null;
@@ -1455,9 +1800,9 @@ pub const Session = struct {
 
     fn finishBeforeCoreCallLocked(self: *Session) TerminalResult {
         std.debug.assert(!self.core_call_in_progress);
-        if (self.prompt) |prompt| {
-            self.agent_runtime.allocator.free(prompt);
-            self.prompt = null;
+        if (self.run_input) |*input| {
+            input.deinit(self.agent_runtime.allocator);
+            self.run_input = null;
         }
         self.run_started = false;
         self.run_done = true;
@@ -1490,9 +1835,9 @@ pub const Session = struct {
 
     fn finishPreparedRunLocked(self: *Session) void {
         std.debug.assert(!self.run_started and !self.core_call_in_progress);
-        if (self.prompt) |prompt| {
-            self.agent_runtime.allocator.free(prompt);
-            self.prompt = null;
+        if (self.run_input) |*input| {
+            input.deinit(self.agent_runtime.allocator);
+            self.run_input = null;
         }
         if (self.terminal_diagnostic) |buffer| {
             self.agent_runtime.allocator.free(buffer);
@@ -1558,11 +1903,14 @@ pub const Session = struct {
         std.debug.assert(self.active_callback_refs == 0);
         self.control_block.deinit();
         self.agent_runtime.allocator.destroy(self.control_block);
-        if (self.prompt) |prompt| self.agent_runtime.allocator.free(prompt);
+        if (self.run_input) |*input|
+            input.deinit(self.agent_runtime.allocator);
         if (self.terminal_diagnostic) |buffer| self.agent_runtime.allocator.free(buffer);
         if (self.ui_request_json) |json| self.agent_runtime.allocator.free(json);
         if (self.ui_response_json) |json| self.agent_runtime.allocator.free(json);
         self.agent_runtime.allocator.free(self.workspace_root);
+        self.agent_runtime.allocator.free(self.workspace_home);
+        self.agent_runtime.allocator.free(self.workspace_epoch);
     }
 
     fn onEvent(
@@ -1876,6 +2224,27 @@ fn validateWorkspace(input: WorkspaceInput) Error!void {
     }
 }
 
+fn validateCanonicalDirectory(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    path: []const u8,
+) Error!void {
+    if (!isCanonicalAbsolutePath(path) or
+        !std.unicode.utf8ValidateSlice(path))
+        return error.InvalidCatalogQuery;
+    const canonical = std.Io.Dir.realPathFileAbsoluteAlloc(
+        io,
+        path,
+        allocator,
+    ) catch return error.InvalidCatalogQuery;
+    defer allocator.free(canonical);
+    if (!std.mem.eql(u8, canonical, path))
+        return error.InvalidCatalogQuery;
+    const stat = std.Io.Dir.cwd().statFile(io, path, .{}) catch
+        return error.InvalidCatalogQuery;
+    if (stat.kind != .directory) return error.InvalidCatalogQuery;
+}
+
 fn isCanonicalAbsolutePath(path: []const u8) bool {
     if (!std.fs.path.isAbsolute(path)) return false;
     if (path.len == 1) return path[0] == std.fs.path.sep;
@@ -1917,6 +2286,12 @@ fn statusPoisonsSession(status: sdk.Status) bool {
         .stale_run,
         .too_late,
         .resource_limit,
+        .skill_catalog_invalid,
+        .stale_catalog,
+        .skill_not_found,
+        .invalid_skill_arguments,
+        .skill_policy_violation,
+        .skill_unavailable,
         => false,
     };
 }

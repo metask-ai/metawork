@@ -14,6 +14,36 @@ const workbenchTaskInput = fixture.workbenchTaskInput;
 const waitWorkbenchSnapshot = fixture.waitWorkbenchSnapshot;
 const installWorkbenchExecution = fixture.installWorkbenchExecution;
 
+fn waitCatalogReady(
+    workbench: *workbench_api.Workbench,
+    workspace_id: u64,
+) !workbench_api.CatalogProjection {
+    for (0..10_000) |_| {
+        const projection = try workbench.workspaceCatalog(workspace_id);
+        switch (projection.availability) {
+            .ready, .degraded => return projection,
+            .unavailable => return error.TestUnexpectedResult,
+            .uninitialized, .loading => std.Thread.yield() catch {},
+        }
+    }
+    return error.TestUnexpectedResult;
+}
+
+fn waitCatalogUnavailable(
+    workbench: *workbench_api.Workbench,
+    workspace_id: u64,
+) !void {
+    for (0..10_000) |_| {
+        const projection = try workbench.workspaceCatalog(workspace_id);
+        switch (projection.availability) {
+            .unavailable => return,
+            .uninitialized, .loading => std.Thread.yield() catch {},
+            .ready, .degraded => return error.TestUnexpectedResult,
+        }
+    }
+    return error.TestUnexpectedResult;
+}
+
 test "bounded executor rejects overflow and close cancels a queued Run" {
     fake_core.reset();
     fake_core.setNextPlan(.controlled);
@@ -45,6 +75,306 @@ test "bounded executor rejects overflow and close cancels a queued Run" {
     try running.waitRun(running_id);
     try closeSession(running, .session_close);
     try closeSession(rejected, .session_close);
+}
+
+test "Workbench pins an async catalog and admits typed Skill through the existing executor" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_sessions = 1,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    const home = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        ".",
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(home);
+    var workbench = try workbench_api.Workbench.init(
+        std.testing.allocator,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 2,
+            .max_workspaces = 1,
+            .max_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        .{ .directories = .{ .canonical_user_home = home } },
+    );
+    defer workbench.deinit();
+    try installWorkbenchExecution(&workbench);
+
+    const workspace_id = try workbench.openWorkspace(workbenchTaskInput());
+    const catalog = try waitCatalogReady(&workbench, workspace_id);
+    try std.testing.expectEqualStrings(
+        fixture.fixture_catalog_revision,
+        catalog.revision,
+    );
+    try std.testing.expectEqualStrings(
+        "review",
+        catalog.skills[0].invocation_name,
+    );
+    const task_id = try workbench.createTaskInWorkspace(
+        workspace_id,
+        try workbench.workspaceEpoch(workspace_id),
+        1,
+        catalog.revision,
+    );
+    const task_catalog = try workbench.taskCatalog(task_id);
+    try std.testing.expectEqualStrings(catalog.revision, task_catalog.revision);
+    _ = try workbench.runTask(task_id, .{ .skill = .{
+        .skill_id = fixture.fixture_skill_id,
+        .catalog_revision = catalog.revision,
+        .argument_values = &.{ "src/main.zig", "correctness" },
+    } });
+    try waitWorkbenchSnapshot(
+        runtime,
+        &workbench,
+        "\"lastRunOutcome\":\"completed\"",
+    );
+    try waitWorkbenchSnapshot(
+        runtime,
+        &workbench,
+        "\"skillCatalog\":{\"availability\":\"ready\"",
+    );
+    try waitWorkbenchSnapshot(
+        runtime,
+        &workbench,
+        "\"input\":{\"kind\":\"skill\"",
+    );
+    fake_core.lock();
+    const skill_seen = fake_core.skill_run_seen;
+    const input_matches = fake_core.skill_input_matches;
+    fake_core.unlock();
+    try std.testing.expect(skill_seen);
+    try std.testing.expect(input_matches);
+}
+
+test "Workspace reauthorization reschedules the latest catalog query" {
+    fake_core.reset();
+    fake_core.setCatalogPlan(.controlled);
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_sessions = 1,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    const home = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        ".",
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(home);
+    var workbench = try workbench_api.Workbench.init(
+        std.testing.allocator,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 2,
+            .max_workspaces = 1,
+            .max_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        .{ .directories = .{ .canonical_user_home = home } },
+    );
+    defer workbench.deinit();
+    defer fake_core.releaseCatalogQuery();
+    try installWorkbenchExecution(&workbench);
+
+    const workspace_id = try workbench.openWorkspace(workbenchTaskInput());
+    fake_core.waitCatalogQueryEntered();
+    try workbench.removeWorkspace(workspace_id);
+    const reauthorized_id = try workbench.openWorkspace(workbenchTaskInput());
+    try std.testing.expectEqual(workspace_id, reauthorized_id);
+    try std.testing.expectEqual(
+        workbench_api.CatalogAvailability.loading,
+        (try workbench.workspaceCatalog(workspace_id)).availability,
+    );
+
+    fake_core.setCatalogPlan(.healthy);
+    fake_core.releaseCatalogQuery();
+    _ = try waitCatalogReady(&workbench, workspace_id);
+    fake_core.lock();
+    const catalog_queries = fake_core.catalog_queries;
+    const catalog_releases = fake_core.catalog_releases;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 2), catalog_queries);
+    try std.testing.expectEqual(@as(usize, 1), catalog_releases);
+}
+
+test "Workbench rejects stale Skill identity before Session or Run mutation and releases catalog on shutdown" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_sessions = 1,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    const home = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        ".",
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(home);
+    var workbench = try workbench_api.Workbench.init(
+        std.testing.allocator,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 2,
+            .max_workspaces = 1,
+            .max_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        .{ .directories = .{ .canonical_user_home = home } },
+    );
+    defer workbench.deinit();
+    try installWorkbenchExecution(&workbench);
+
+    const workspace_id = try workbench.openWorkspace(workbenchTaskInput());
+    const catalog = try waitCatalogReady(&workbench, workspace_id);
+    try std.testing.expectError(
+        error.StaleCatalog,
+        workbench.createTaskInWorkspace(
+            workspace_id,
+            try workbench.workspaceEpoch(workspace_id),
+            1,
+            "stale-revision",
+        ),
+    );
+    fake_core.lock();
+    const sessions_before = fake_core.session_created;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 0), sessions_before);
+
+    fake_core.setNextPlan(.stale_catalog);
+    const task_id = try workbench.createTaskInWorkspace(
+        workspace_id,
+        try workbench.workspaceEpoch(workspace_id),
+        1,
+        catalog.revision,
+    );
+    try std.testing.expectError(
+        error.StaleCatalog,
+        workbench.runTask(task_id, .{ .skill = .{
+            .skill_id = fixture.fixture_skill_id,
+            .catalog_revision = "stale-revision",
+            .argument_values = &.{},
+        } }),
+    );
+    fake_core.lock();
+    const runs_before = fake_core.run_calls;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 0), runs_before);
+
+    _ = try workbench.runTask(task_id, .{ .skill = .{
+        .skill_id = fixture.fixture_skill_id,
+        .catalog_revision = catalog.revision,
+        .argument_values = &.{},
+    } });
+    try waitWorkbenchSnapshot(
+        runtime,
+        &workbench,
+        "\"cause\":\"stale_catalog\"",
+    );
+
+    workbench.shutdownExecutor();
+    try runtime.shutdown();
+    fake_core.lock();
+    const catalog_releases = fake_core.catalog_releases;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 1), catalog_releases);
+}
+
+test "Workbench refreshes a Task only from the committed Workspace catalog while idle" {
+    fake_core.reset();
+    fake_core.setCatalogPlan(.query_failure);
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_sessions = 1,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    const home = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        ".",
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(home);
+    var workbench = try workbench_api.Workbench.init(
+        std.testing.allocator,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 2,
+            .max_workspaces = 1,
+            .max_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        .{ .directories = .{ .canonical_user_home = home } },
+    );
+    defer workbench.deinit();
+    try installWorkbenchExecution(&workbench);
+
+    const workspace_id = try workbench.openWorkspace(workbenchTaskInput());
+    try waitCatalogUnavailable(&workbench, workspace_id);
+    fake_core.setNextPlan(.controlled);
+    const task_id = try workbench.createTaskInWorkspace(
+        workspace_id,
+        try workbench.workspaceEpoch(workspace_id),
+        1,
+        null,
+    );
+    _ = try workbench.runTask(task_id, .{ .text = "hold refresh" });
+    try waitWorkbenchSnapshot(
+        runtime,
+        &workbench,
+        "\"currentRunPhase\":\"running\"",
+    );
+    try std.testing.expectError(
+        error.TaskBusy,
+        workbench.refreshTaskCatalog(
+            task_id,
+            try workbench.taskBindingEpoch(task_id),
+        ),
+    );
+    fake_core.releaseControlled();
+    try waitWorkbenchSnapshot(
+        runtime,
+        &workbench,
+        "\"lastRunOutcome\":\"completed\"",
+    );
+
+    fake_core.setCatalogPlan(.healthy);
+    const workspace_epoch = try workbench.workspaceEpoch(workspace_id);
+    try workbench.refreshWorkspaceCatalog(workspace_id, workspace_epoch);
+    _ = try waitCatalogReady(&workbench, workspace_id);
+    try workbench.refreshTaskCatalog(
+        task_id,
+        try workbench.taskBindingEpoch(task_id),
+    );
+    fake_core.lock();
+    const refreshes = fake_core.catalog_refreshes;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 1), refreshes);
 }
 
 test "Workbench closes off-thread and exposes retryable close failure" {
@@ -92,7 +422,7 @@ test "Workbench close cancels a queued Run without blocking the caller" {
     try installWorkbenchExecution(&workbench);
 
     const task_id = try workbench.createTask(workbenchTaskInput());
-    _ = try workbench.runTask(task_id, "close this run");
+    _ = try workbench.runTask(task_id, .{ .text = "close this run" });
     try workbench.closeTask(task_id);
     try waitWorkbenchSnapshot(runtime, &workbench, "\"lifecycle\":\"closed\"");
     fake_core.lock();
@@ -124,7 +454,10 @@ test "Workspace removal interrupts live Runs without deleting Task history" {
 
     const task_id = try workbench.createTask(workbenchTaskInput());
     const workspace_id = workbench.selectedWorkspaceId();
-    _ = try workbench.runTask(task_id, "stop when the workspace is removed");
+    _ = try workbench.runTask(
+        task_id,
+        .{ .text = "stop when the workspace is removed" },
+    );
     try waitWorkbenchSnapshot(runtime, &workbench, "\"currentRunPhase\":\"running\"");
 
     try workbench.removeWorkspace(workspace_id);
@@ -195,7 +528,10 @@ test "Workbench cancel of a completed Run is an idempotent no-op" {
     try installWorkbenchExecution(&workbench);
 
     const task_id = try workbench.createTask(workbenchTaskInput());
-    const run_id = try workbench.runTask(task_id, "finish before cancel arrives");
+    const run_id = try workbench.runTask(
+        task_id,
+        .{ .text = "finish before cancel arrives" },
+    );
     try waitWorkbenchSnapshot(runtime, &workbench, "\"lastRunOutcome\":\"completed\"");
     const revision = workbench.currentRevision();
     try workbench.cancel(task_id, run_id);
@@ -225,7 +561,7 @@ test "Workbench shutdown terminates a waiting UI Run before joining workers" {
     try installWorkbenchExecution(&workbench);
 
     const task_id = try workbench.createTask(workbenchTaskInput());
-    _ = try workbench.runTask(task_id, "wait for shutdown");
+    _ = try workbench.runTask(task_id, .{ .text = "wait for shutdown" });
     try waitWorkbenchSnapshot(runtime, &workbench, "\"currentRunPhase\":\"waiting_ui\"");
     workbench.shutdownExecutor();
     try waitWorkbenchSnapshot(runtime, &workbench, "\"lastRunOutcome\":\"interrupted\"");
@@ -279,13 +615,16 @@ test "late event from a finalized Run closes a Task with newer active work" {
     try installWorkbenchExecution(&workbench);
 
     const task_id = try workbench.createTask(workbenchTaskInput());
-    const first_run_id = try workbench.runTask(task_id, "finish first");
+    const first_run_id = try workbench.runTask(
+        task_id,
+        .{ .text = "finish first" },
+    );
     try waitWorkbenchSnapshot(runtime, &workbench, "\"currentRunPhase\":\"running\"");
     fake_core.releaseControlled();
     try waitWorkbenchSnapshot(runtime, &workbench, "\"lastRunOutcome\":\"completed\"");
 
     fake_core.rearmControlled();
-    _ = try workbench.runTask(task_id, "new active work");
+    _ = try workbench.runTask(task_id, .{ .text = "new active work" });
     try waitWorkbenchSnapshot(runtime, &workbench, "\"currentRunPhase\":\"running\"");
 
     const encoded = "{\"text_chunk\":\"late\"}";

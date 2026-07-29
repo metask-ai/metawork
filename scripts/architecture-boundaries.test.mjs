@@ -157,7 +157,7 @@ test("only Agent implementation imports the AgentCore SDK", () => {
     .sort();
   assert.deepEqual(
     sdkImportReceivers,
-    ["event_pump", "event_sink", "fixture", "session"].sort(),
+    ["agent_catalog", "event_pump", "event_sink", "fixture", "session"].sort(),
     "only the Agent runtime modules and lifecycle fixture may receive the SDK module",
   );
   assert.match(
@@ -695,7 +695,25 @@ test("Workbench owns Task lifecycle, continuation, and canonical redaction", () 
   assert.match(closeWorker, /notifier\.notify\(\)/);
   assert.doesNotMatch(closeWorker, /requestWake\(\)/);
   assert.match(workbench, /sanitizeInto\(\s*run\.terminal_diagnostic/);
-  assert.match(workbench, /copyProjected\(\s*prompt/);
+  assert.match(
+    workbench,
+    /fn copyRunInputRecord[\s\S]*\.text =>[\s\S]*copyProjected\(/,
+  );
+  assert.match(workbench, /const RunInputRecord = union\(enum\)/);
+  assert.match(workbench, /const CatalogJob = struct/);
+  assert.match(
+    workbench,
+    /executor\.enqueue\(\.\{[\s\S]*execute_fn = executeCatalogJob/,
+  );
+  assert.match(
+    workbench,
+    /commitCatalogJobsNoFail[\s\S]*workspace\.epoch == job\.workspace_epoch[\s\S]*catalog_request_generation == job\.request_generation/,
+  );
+  assert.match(
+    read("src/app.zig"),
+    /resolveCanonicalUserHome[\s\S]*\.canonical_user_home = canonical_user_home/,
+  );
+  assert.doesNotMatch(read("src/bridge/dispatcher.zig"), /canonical_user_home/);
   assert.match(workbench, /replaceTrackedProjected\(\s*&view\.title/);
   assert.match(taskRecord, /execution: \?OwnedTaskExecution/);
   assert.match(workbench, /const OwnedTaskExecution = struct/);
@@ -779,7 +797,10 @@ test("Renderer Bridge fixed revision 1 owns the exact product wire catalog", () 
   const handlers = read("src/bridge/handlers.zig");
   assert.match(handlers, /expectedWorkspaceEpoch/);
   assert.match(handlers, /expectedExecutionGeneration/);
+  assert.match(handlers, /expectedSkillCatalogRevision/);
   assert.match(handlers, /expectedBindingEpoch/);
+  assert.match(handlers, /parseTaskRunInput/);
+  assert.doesNotMatch(handlers, /\bprompt\s*:/);
   assert.doesNotMatch(
     handlers,
     /workspaceGrant|workspaceRoot|apiKeyId|modelId/,
@@ -798,12 +819,23 @@ test("Renderer Bridge fixed revision 1 owns the exact product wire catalog", () 
   assert.match(projection, /\\"account\\":/);
   assert.match(projection, /\\"workspaces\\":\[/);
   assert.match(projection, /\\"tasks\\":\[/);
+  assert.match(projection, /\\"skillCatalog\\":/);
+  assert.match(projection, /\\"input\\":/);
+  assert.doesNotMatch(projection, /\\"user\\":/);
   assert.match(projection, /pub fn createTask/);
   assert.match(projection, /pub fn runTask/);
   assert.doesNotMatch(projection, /host_shutdown|\\"sessions\\":\[/);
   assert.doesNotMatch(
     projection,
     /const SessionView|pub fn submit|max_runs_per_session/,
+  );
+  assert.doesNotMatch(
+    dispatcher,
+    /runSkill|sessionRunSkill|skill_catalog_release/,
+  );
+  assert.match(
+    dispatcher,
+    /commands\.refresh_workspace_skill_catalog[\s\S]*commands\.refresh_task_skill_catalog/,
   );
 
   const contracts = read("frontend/src/bridge/contracts.ts");
@@ -834,9 +866,9 @@ test("Renderer Bridge fixed revision 1 owns the exact product wire catalog", () 
 
 test("lifecycle tests are grouped by invariant", () => {
   const cases = [
-    ["tests/agent/lifecycle_test.zig", 31],
+    ["tests/agent/lifecycle_test.zig", 37],
     ["tests/agent/event_pump_test.zig", 5],
-    ["tests/workbench/executor_lifecycle_test.zig", 9],
+    ["tests/workbench/executor_lifecycle_test.zig", 13],
     ["tests/integration/lifecycle/lifecycle_test.zig", 4],
   ];
   for (const [path, expectedCount] of cases) {

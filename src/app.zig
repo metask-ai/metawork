@@ -2203,6 +2203,34 @@ fn createAgentRuntime(io: std.Io, notifier: agent.EventReadyNotifier) !*agent.Ru
     });
 }
 
+fn resolveCanonicalUserHome(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    env_map: *std.process.Environ.Map,
+) ?[]u8 {
+    const configured = switch (builtin.os.tag) {
+        .windows => env_map.get("USERPROFILE"),
+        else => env_map.get("HOME"),
+    } orelse return null;
+    if (configured.len == 0 or !std.fs.path.isAbsolute(configured) or
+        !std.unicode.utf8ValidateSlice(configured))
+        return null;
+    const canonical = std.Io.Dir.realPathFileAbsoluteAlloc(
+        io,
+        configured,
+        allocator,
+    ) catch return null;
+    const stat = std.Io.Dir.cwd().statFile(io, canonical, .{}) catch {
+        allocator.free(canonical);
+        return null;
+    };
+    if (stat.kind != .directory) {
+        allocator.free(canonical);
+        return null;
+    }
+    return canonical;
+}
+
 pub fn run(init: std.process.Init) !void {
     const frontend_asset_root = if (init.environ_map.get(frontend_url_env) == null)
         try resolveFrontendAssetRoot(init.io, std.heap.c_allocator)
@@ -2232,6 +2260,13 @@ pub fn run(init: std.process.Init) !void {
         &.{ data_dir, "account" },
     );
     app.account_dir_len = account_dir.len;
+    const canonical_user_home = resolveCanonicalUserHome(
+        init.io,
+        std.heap.c_allocator,
+        init.environ_map,
+    );
+    defer if (canonical_user_home) |home|
+        std.heap.c_allocator.free(home);
 
     const agent_runtime = try createAgentRuntime(init.io, .{
         .context = &app,
@@ -2258,10 +2293,15 @@ pub fn run(init: std.process.Init) !void {
             .max_terminal_diagnostic_bytes = terminal_diagnostic_capacity,
             .max_snapshot_bytes = workbench_snapshot_capacity,
         },
-        .{ .change_notifier = .{
-            .context = &app,
-            .wake = App.notifyMainLoop,
-        } },
+        .{
+            .change_notifier = .{
+                .context = &app,
+                .wake = App.notifyMainLoop,
+            },
+            .directories = .{
+                .canonical_user_home = canonical_user_home,
+            },
+        },
     );
     workbench_initialized = true;
     app.workbench = &workbench;

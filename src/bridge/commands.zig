@@ -12,6 +12,7 @@ pub const window_control = "metawork.window.control";
 pub const choose_workspace = "metawork.workspaces.choose";
 pub const select_workspace = "metawork.workspaces.select";
 pub const remove_workspace = "metawork.workspaces.remove";
+pub const refresh_workspace_skill_catalog = "metawork.workspaces.refreshSkillCatalog";
 pub const snapshot = "metawork.workbench.snapshot";
 pub const snapshot_chunk = "metawork.workbench.snapshot.chunk";
 pub const account_begin_login = "metawork.account.beginLogin";
@@ -24,6 +25,7 @@ pub const account_select_model = "metawork.account.selectModel";
 pub const account_logout = "metawork.account.logout";
 pub const create_task = "metawork.tasks.create";
 pub const run = "metawork.tasks.run";
+pub const refresh_task_skill_catalog = "metawork.tasks.refreshSkillCatalog";
 pub const cancel = "metawork.tasks.cancel";
 pub const respond_ui = "metawork.tasks.respondUi";
 pub const close_task = "metawork.tasks.close";
@@ -41,6 +43,7 @@ pub const product = [_][]const u8{
     choose_workspace,
     select_workspace,
     remove_workspace,
+    refresh_workspace_skill_catalog,
     snapshot,
     snapshot_chunk,
     account_begin_login,
@@ -53,6 +56,7 @@ pub const product = [_][]const u8{
     account_logout,
     create_task,
     run,
+    refresh_task_skill_catalog,
     cancel,
     respond_ui,
     close_task,

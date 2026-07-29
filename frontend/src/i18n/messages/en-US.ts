@@ -407,6 +407,16 @@ export const enUS = {
   "cause.queue_capacity_failure": "Workbench capacity reached",
   "cause.ui_pipeline_failure": "Response delivery failed",
   "cause.dependency_contract_failure": "Task runtime became incompatible",
+  "cause.stale_catalog":
+    "Skill execution did not start because the catalog is out of date",
+  "cause.skill_not_found":
+    "Skill execution did not start because the skill is no longer available",
+  "cause.invalid_skill_arguments":
+    "Skill execution did not start because its arguments were rejected",
+  "cause.skill_policy_violation":
+    "Skill execution did not start because it is not allowed in this task",
+  "cause.skill_unavailable":
+    "Skill execution did not start because it is unavailable in the current execution environment",
   "workspace.selection_unavailable":
     "That workspace is no longer available. Refresh and choose another one.",
   "account.options_updated":
@@ -430,6 +440,16 @@ export const enUS = {
     "This task's execution setup is no longer available.",
   "mutation.reason.task_unavailable": "This task is no longer available.",
   "mutation.reason.task_busy": "This task is already working.",
+  "mutation.reason.catalog_loading":
+    "Skills are still loading. You can send text or wait and try again.",
+  "mutation.reason.catalog_unavailable":
+    "Skills are unavailable for this workspace or task.",
+  "mutation.reason.stale_catalog":
+    "The skill catalog changed. Refresh it and choose the skill again.",
+  "mutation.reason.skill_not_found":
+    "The selected skill is no longer in this task's catalog.",
+  "mutation.reason.invalid_skill_arguments":
+    "Review the skill arguments and try again.",
   "mutation.reason.capacity_reached":
     "MetaWork is at capacity. Finish or close some work, then try again.",
   "mutation.reason.shutting_down":

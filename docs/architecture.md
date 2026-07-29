@@ -1,9 +1,9 @@
 # MetaWork 高层架构
 
-> 状态：AgentCore ABI v1 revision 3 macOS 与 Windows development baseline 已通过；后续正式方向选择单 AgentCore Worker
+> 状态：AgentCore ABI v1 revision 4 macOS exact artifact 与 Agent/Workbench/Bridge typed Skill 产品链已完成；Composer Slash 属于后续独立产品入口；后续正式方向选择单 AgentCore Worker
 > 日期：2026-07-22
 
-产品范围见 [产品需求](requirements.md)，Metask AgentCore 的具体接入约束见 [AgentCore 集成契约](agentcore-integration.md)，revision 3 目标能力见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。精确源码路径、binary 和 symbol identifier 只作为机器合同保留。
+产品范围见 [产品需求](requirements.md)，Metask AgentCore 的具体接入约束见 [AgentCore 集成契约](agentcore-integration.md)，revision 4 目标能力见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。精确源码路径、binary 和 symbol identifier 只作为机器合同保留。
 
 ## 1. 已确认的技术选型
 
@@ -28,9 +28,9 @@
 
 ### 同步 macOS baseline
 
-已批准的新基线是 Metask AgentCore ABI v1 revision 3。它保持 112-byte API table、RunContext、typed status/StopReason、CoreEvent/UI codec 和同步 Run 语义，但把公共 C/Zig namespace、discovery symbol、bundle layout、manifest 和语言 package 统一到 `metask_agentcore`。精确 artifact identity、payload layout 和 manifest schema 只由 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)定义。MetaWork 对它执行 hard cut：最终 active build、Host、probe 和规范文档只接受 revision 3，不保留 revision 2 parser、路径、symbol、module alias 或 fallback。
+已批准的新基线是 Metask AgentCore ABI v1 revision 4。它在既有 RunContext、typed status/StopReason、CoreEvent/UI codec 和同步 Run 语义上增加 AgentCore-owned Skill catalog snapshot、Session catalog binding/refresh 与 tagged Text/Skill Run input。精确 API layout、artifact identity、payload 和 manifest schema 只由 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)定义。MetaWork 对它执行 hard cut：active build、Host、probe 和规范文档只接受 revision 4，不保留 revision 3 parser、function table、Run payload 或 fallback。
 
-当前 checkout 的 active code、build graph 和 staged bundle 已切到 revision 3；candidate/stage、typed SDK、正式 Host、完整测试、Debug/Release、桌面自动化和最终 macOS package 全部通过。revision 3 是当前已验证产品基线，证据见 [revision 3 迁移验证报告](agentcore-revision-3-migration-report.md)。历史 revision 2 迁移事实不构成兼容要求。
+当前 checkout 的 verifier、build graph、staged bundle、Agent catalog lease/typed Run surface、Workbench catalog ownership/typed admission 与 Bridge tagged contract 均已切到 revision 4；active macOS artifact 来自 clean source commit `576b0a2791e904f01257c6f7fe17e9b43d8154d0`。其他 target 的独立历史 lock 不参与当前 macOS 依赖升级或验收门槛。Composer Slash 不属于本次升级；历史 revision 3 迁移事实不构成兼容要求。
 
 该 baseline 不包含：
 
@@ -168,6 +168,10 @@ production 网络接入受 [Metask Account API 合同](metask-account-contract.m
 
 Workspace 是 Workbench-owned 产品对象，而不是 Renderer 从 Task 路径派生的 convenience view。Renderer Bridge 固定 revision 1 发布 stable identity、optimistic epoch、canonical root、display label、authorization/removal outcome 与聚合 Task signals；一次性目录能力由 Bridge/Native capability 生成并在同一 `workspaces.choose` Host 命令内消费，Renderer 只得到 Workspace identity。Task 创建绑定 expected execution generation，后续 Run 绑定 expected binding epoch，Workspace mutation 绑定 expected Workspace epoch；Host 对 window、ownership、catalog membership 与 admission 重新校验。预期业务拒绝编码为严格 typed result，非法 payload 与 authority failure 仍走 Bridge failure；合同不接受被当前形态取代的临时 payload 或兼容字段。
 
+App 在 composition 时只解析一次 existing canonical user home，并以 immutable capability 注入 Workbench；Renderer、Bridge payload 和 Workspace selection 都不能覆盖。Workbench 把 AgentCore catalog discovery 作为现有 bounded Executor 的一种 job：worker 只产生 Agent-owned acquisition，主线程按 Workspace id、epoch 和 request generation 提交或丢弃。Workspace current catalog 持有唯一 opaque lease 与有界产品 projection；Task 创建在 Agent Session 前完成容量证明并复制独立 pinned projection，同步借用 current lease 绑定 Session。Task refresh 只从已经提交的 Workspace catalog 进行、只允许 idle Session，并在 Agent refresh 成功后替换 pinned projection。shutdown 先停止/join Executor、收口 catalog job 并释放全部 Workspace lease，再允许 Agent Runtime destroy；不建立第二 scheduler、隐式文件监听或 Renderer Skill loader。
+
+Workbench `TaskRunInput` 只有 Text/Skill 两个分支。Skill admission 在建立 Run record 前校验 Workspace/Task epoch、pinned revision、稳定 `skill_id`、参数数量、UTF-8 与产品容量；Run history 保存 admission 时的 invocation/display/arguments，不随后续 catalog 改写。AgentCore 仍负责最终参数、资源和 policy 校验；`stale_catalog`、`skill_not_found`、`invalid_skill_arguments`、`skill_policy_violation` 与 `skill_unavailable` 形成独立产品 cause，保持 Session 可复用且不自动刷新或重放。
+
 Workbench 单独分配稳定的产品 Task identity，并在 Task owner 内保存 Agent Session route identity；AgentCore event 与 event-projection failure 都只按 route identity 回到 owner，Bridge snapshot 与 mutation 只使用产品 Task identity，二者不共享生成器也不依赖数值相等。Task binding descriptor 包含无 secret 的 account/profile、API、Provider、model、generation 与 binding epoch；内部执行使用的 raw model 与 Renderer projection 的 selection identity 分开持有。
 
 credential redaction 是 owner 释放协议的一部分，而不是 snapshot 时的偶然过滤。安装新 credential 前先永久清洗所有既有产品投影；替换或清空默认 execution、释放 quiescent Task-owned execution 前再次使用即将释放的 credential 清洗 Workspace、Task、Run、tool 与 UI history，然后才 secure-zero。序列化仍扫描所有 live credential，并在前缀重叠时采用最长匹配，作为释放前的第二道防线。credential 是 opaque bytes；若匹配发生在 UTF-8 codepoint 内部，所有 ingestion、流式跨 chunk 清洗与序列化路径都必须扩大到完整 codepoint，禁止为了替换 secret 产生非法 UTF-8 产品事实或 JSON。
@@ -198,7 +202,7 @@ Renderer Bridge revision、Account manifest schema、AgentCore artifact version�
 
 ## 5. AgentCore bundle 边界
 
-Metask AgentCore 与 MetaWork 是两个独立构建单元。revision 3 正式接入物是 Metask AgentCore 构建的 target-specific bundle，包含 binary、C header、官方语言 bindings、README 和 manifest；精确 payload whitelist 只在 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)定义。
+Metask AgentCore 与 MetaWork 是两个独立构建单元。revision 4 正式接入物是 Metask AgentCore 构建的 target-specific bundle，包含 binary、C header、官方语言 bindings、README 和 manifest；精确 payload whitelist 只在 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)定义。
 
 规范要求：
 
@@ -212,7 +216,7 @@ Metask AgentCore 与 MetaWork 是两个独立构建单元。revision 3 正式接
 - 只有 `agent/` 可以 import `metask_agentcore`；Workbench、Bridge、Renderer 和 Account 只消费 MetaWork-owned 产品类型；
 - 当前产品 Runtime 配置不注册 Host tools，Read/Bash/Edit 使用 AgentCore built-in tools。
 
-revision 3 是硬切换，不提供 revision 2 active compatibility path。新增 observation tag 仍由 bundle SDK 解码为 owned unknown observation；MetaWork 在 SDK 校验后立即释放并忽略，不让它占用产品事件泵，也不传给 Renderer 或猜测为产品状态。
+revision 4 是硬切换，不提供 revision 3 active compatibility path。新增 observation tag 仍由 bundle SDK 解码为 owned unknown observation；MetaWork 在 SDK 校验后立即释放并忽略，不让它占用产品事件泵，也不传给 Renderer 或猜测为产品状态。
 
 ## 6. 并发、生命周期与故障边界
 
@@ -277,13 +281,15 @@ Renderer reload 只重建仍存活 Host 的视图。Host/AgentCore crash 后当�
 
 Account attempt 与 Renderer 生命周期解耦：Renderer reload、短暂断连或视图同步失败不能遗失 Host 中的 deadline、取消能力或 terminal result。Workbench Account projection 必须发布产品 readiness 和 Host 允许的用户动作；Renderer 不从内部 operation、error code 或候选数量自行发明 continuation。
 
-Host view snapshot 使用 Bridge `Dispatcher` 内部 `ProductDelivery` 独占的 12 MiB 有界存储，不受 Bridge 单次 1 MiB result 上限反向约束。该容量覆盖 512 KiB Task projection、最大 Account API Key/model catalog、JSON 最坏转义和全部结构上界。Dispatcher 同时拥有 callback gate、workspace grants、handler registry 和 `*Workbench`，产品 command 的 decode、authority、domain call 与 response encode 不再经过 App。Workbench writer 只能在同步调用期间借用这块 output buffer；返回后 Bridge 独占 encoded bytes，禁止保存 Workbench borrowed view。Renderer 通过带 snapshot identity 的 256 KiB 分块读取完成 resync；begin 写入前先使旧 descriptor 失效，序列化失败后旧 identity 必须保持 stale，不能继续读取已被部分覆盖的 store。revision 通知和 snapshot 拉取分别保留 pending/retry 状态，瞬时发送或读取失败不能把旧视图标记为最新。revision retry 同时受 attempt 和 deadline 预算约束，耗尽或 retry timer 不可用时当前 event connection fail closed，但不终止后台 Agent Run。新 event generation 建立时会使旧 snapshot descriptor 失效；Renderer 若仍持有旧 generation Promise，必须在旧 Promise 退出后继续完成新 generation 的实际 resync，不能把等待旧 Promise 误判为同步成功。Bridge 异步保留的 payload 必须自有；App shutdown 先 stop Bridge ingress、关闭 delivery connection 并取消 timer，在 Native platform loop 上确认同步 handler quiescence，然后 detach Workbench，最后才独立释放 delivery buffers。
+Host view snapshot 使用 Bridge `Dispatcher` 内部 `ProductDelivery` 独占的 16 MiB 有界存储，不受 Bridge 单次 1 MiB result 上限反向约束。该容量覆盖 512 KiB Task projection、最大 Account API Key/model catalog、Workspace/Task Skill catalog 结构、JSON 最坏转义和全部结构上界。Dispatcher 同时拥有 callback gate、workspace grants、handler registry 和 `*Workbench`，产品 command 的 decode、authority、domain call 与 response encode 不再经过 App。Workbench writer 只能在同步调用期间借用这块 output buffer；返回后 Bridge 独占 encoded bytes，禁止保存 Workbench borrowed view。Renderer 通过带 snapshot identity 的 256 KiB 分块读取完成 resync；begin 写入前先使旧 descriptor 失效，序列化失败后旧 identity 必须保持 stale，不能继续读取已被部分覆盖的 store。revision 通知和 snapshot 拉取分别保留 pending/retry 状态，瞬时发送或读取失败不能把旧视图标记为最新。revision retry 同时受 attempt 和 deadline 预算约束，耗尽或 retry timer 不可用时当前 event connection fail closed，但不终止后台 Agent Run。新 event generation 建立时会使旧 snapshot descriptor 失效；Renderer 若仍持有旧 generation Promise，必须在旧 Promise 退出后继续完成新 generation 的实际 resync，不能把等待旧 Promise 误判为同步成功。Bridge 异步保留的 payload 必须自有；App shutdown 先 stop Bridge ingress、关闭 delivery connection 并取消 timer，在 Native platform loop 上确认同步 handler quiescence，然后 detach Workbench，最后才独立释放 delivery buffers。
 
 ### 7.1 Renderer Bridge wire contract
 
 Host 与 Renderer 随同一应用包原子发布，不承担旧 Renderer/新 Host 或新 Renderer/旧 Host 的兼容。bootstrap 必须拒绝合同 identity 或经用户批准后出现的 revision 错配；固定 revision 策略下，`connect` 无法通过 revision 数字识别同 revision 的陈旧开发产物。严格 command catalog 和 payload decoder 只能在实际命令或结构差异被触及时失败，不能检测纯 wire 语义错配。此类错配属于 unsupported development state，必须通过 clean rebuild、清理缓存或重新安装恢复；原子打包用于降低发生概率，不构成 runtime compatibility guarantee。Renderer Bridge contract 覆盖全部 product command、event 和 snapshot wire surface；它与产品版本、AgentCore ABI、bundle manifest schema 相互独立。
 
 Renderer Bridge 使用独立合同身份 `metawork.renderer-bridge`，快速开发阶段固定 revision 为 `1`。Host 与 Renderer 随同一应用包原子发布，任何 command、event、payload 字段或 wire 语义变化都直接原地 hard cut，不为临时合同形态递增 revision、不维护兼容层，也不在 snapshot 内维护第二个局部版本。`contractRevision` 仍精确匹配，用于拒绝非当前固定标识，但不承诺识别同 revision 的开发产物错配。任何 Renderer Bridge revision 变更都必须先得到用户显式同意。
+
+当前 `metawork.tasks.run` 只有 `input.kind = text | skill` 的 tagged payload，旧 `prompt` 不兼容；`tasks.create` 必须携带 nullable `expectedSkillCatalogRevision`。Skill 没有 `runSkill` 第二入口。Workspace/Task catalog、typed Run history 和 Skill terminal cause 只从 Workbench snapshot 发布；显式 catalog refresh 也只通过 Bridge 调用 Workbench transaction，Bridge 不持有 catalog lease、不解析 slash、不读取 Skill body。
 
 `connect` 是 product delivery 的 bootstrap 边界。Host 必须在合同身份与 revision 校验成功后才建立 `ProductDelivery` connection；既有 `requireWindow()` 门禁随后统一保护 Account、Task、event 和 snapshot 产品路径。协商前只允许显式列出的无状态 bootstrap/smoke 命令，不得读取或修改产品状态。合同不匹配返回 typed terminal bootstrap error，Renderer 不把它当作瞬时断线重试。
 

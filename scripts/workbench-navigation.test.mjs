@@ -34,11 +34,11 @@ import {
   workspaceSummaries,
 } from "../frontend/src/workbench/selectors.ts";
 
-function run(id, user, assistant, outcome, toolContent = "") {
+function run(id, text, assistant, outcome, toolContent = "") {
   return {
     id,
     phase: outcome === null ? "running" : "completed",
-    user,
+    input: { kind: "text", text, redacted: false },
     assistant,
     assistantRedacted: false,
     status: "",

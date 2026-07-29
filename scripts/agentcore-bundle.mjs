@@ -342,7 +342,7 @@ export async function validateAgentCoreBundle(bundleRoot, options = {}) {
     "unsupported AgentCore binary ABI",
   );
   requireValue(
-    manifest.contract.binary_abi_revision === 3,
+    manifest.contract.binary_abi_revision === 4,
     "unsupported AgentCore binary ABI revision",
   );
 
@@ -413,7 +413,7 @@ export async function validateAgentCoreBundle(bundleRoot, options = {}) {
       symbols.match(/\b_?metask_agentcore_get_api\b/g) ?? [];
     requireValue(
       discoveryMatches.length === 1,
-      "AgentCore bundle must expose exactly one revision 3 discovery symbol",
+      "AgentCore bundle must expose exactly one revision 4 discovery symbol",
     );
     requireValue(
       !/\b_?metacodes_agentcore_get_api\b/.test(symbols),

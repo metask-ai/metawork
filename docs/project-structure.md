@@ -40,7 +40,7 @@ metawork/
 │   ├── workbench.zig      # Workbench module entrypoint
 │   ├── workbench/         # 产品 projection 与 bounded executor
 │   ├── agent.zig          # Agent execution module entrypoint
-│   ├── agent/             # Session、event pump 与 callback ownership
+│   ├── agent/             # catalog、Session、event pump 与 callback ownership
 │   ├── automation.zig     # compile-time automation selection
 │   └── automation/        # enabled/disabled authority capability
 ├── tests/
@@ -130,9 +130,9 @@ Bridge handler 不能绕过 Workbench 操作 AgentCore handle。automation 只�
 
 ### `workbench/` 与 `agent/`
 
-`workbench/projection.zig` 当前拥有 Workspace/Task/Run 产品状态、stable Run record、executor worker reference、write-once terminal publication 和 bounded snapshot writer。`workbench/executor.zig` 独占队列、workers、admission 和 shutdown。只有这些职责形成可独立测试的不变量时才拆文件；本文不预先指定未来文件名。
+`workbench/projection.zig` 当前拥有 Workspace current catalog、Task pinned catalog、typed Text/Skill admission 与 history、Workspace/Task/Run 产品状态、stable Run record、executor worker reference、write-once terminal publication 和 bounded snapshot writer。`workbench/executor.zig` 独占 catalog/Run 共用的单一队列、workers、admission 和 shutdown。只有这些职责形成可独立测试的不变量时才拆文件；本文不预先指定未来文件名。
 
-`agent/session.zig` 当前拥有 AgentCore Runtime/Session、Conversation、Run、callback quiescence、UI wait、cancel/close/shutdown 和 immutable `TerminalResult`。`event_sink.zig` 与 `event_pump.zig` 管理 borrowed event 深拷贝、容量和通知。Agent 不接收 Scheduler capability，也不反向 enqueue Workbench。
+`agent/catalog.zig` 拥有 AgentCore Skill catalog descriptor 的即时解码、MetaWork-owned 安全投影、opaque handle lease 与 root/home/epoch 绑定；raw handle、scope、物理来源和 policy 不离开 Agent。`agent/session.zig` 拥有 AgentCore Runtime/Session、Conversation、typed Text/Skill Run、catalog bind/idle refresh、callback quiescence、UI wait、cancel/close/shutdown 和 immutable `TerminalResult`。`event_sink.zig` 与 `event_pump.zig` 管理 borrowed event 深拷贝、容量和通知。Agent 不接收 Scheduler capability，也不反向 enqueue Workbench。
 
 依赖方向固定为：
 

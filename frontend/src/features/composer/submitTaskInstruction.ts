@@ -1,6 +1,7 @@
 import type {
   TaskCreateReason,
   TaskCreateResult,
+  TaskRunInput,
   TaskRunReason,
   TaskRunResult,
 } from "../../bridge/contracts.ts";
@@ -10,11 +11,12 @@ export type TaskSubmissionClient = {
     workspaceId: string,
     expectedWorkspaceEpoch: string,
     expectedExecutionGeneration: string,
+    expectedSkillCatalogRevision: string | null,
   ) => Promise<TaskCreateResult>;
   run: (
     taskId: string,
     expectedBindingEpoch: string,
-    instruction: string,
+    input: TaskRunInput,
   ) => Promise<TaskRunResult>;
 };
 
@@ -63,6 +65,7 @@ export async function submitTaskInstruction({
         workspaceId,
         expectedWorkspaceEpoch,
         expectedExecutionGeneration,
+        null,
       );
       if (!createdTask.accepted)
         return { kind: "create_rejected", reason: createdTask.reason };
@@ -83,7 +86,10 @@ export async function submitTaskInstruction({
       error: new Error("Task execution binding is unavailable"),
     };
   try {
-    const run = await client.run(targetTaskId, targetBindingEpoch, instruction);
+    const run = await client.run(targetTaskId, targetBindingEpoch, {
+      kind: "text",
+      text: instruction,
+    });
     if (!run.accepted)
       return {
         kind: "run_rejected",

@@ -83,7 +83,7 @@ async function fixture(t, mutateManifest = () => {}) {
     contract: {
       binary_abi_status: "experimental",
       binary_abi_version: 1,
-      binary_abi_revision: 3,
+      binary_abi_revision: 4,
     },
     files,
   };
@@ -124,7 +124,7 @@ async function seedCanonicalBundle(repositoryRoot) {
   return { storageRoot, target };
 }
 
-test("accepts a complete pinned macOS arm64 revision 3 bundle", async (t) => {
+test("accepts a complete pinned macOS arm64 revision 4 bundle", async (t) => {
   const { root, manifest } = await fixture(t);
   const result = await validateAgentCoreBundle(root, {
     ...injectedChecks,
@@ -134,7 +134,7 @@ test("accepts a complete pinned macOS arm64 revision 3 bundle", async (t) => {
   assert.deepEqual(result.payloadFiles, fixtureFiles);
 });
 
-test("accepts a complete pinned Windows x64 GNU revision 3 bundle", async (t) => {
+test("accepts a complete pinned Windows x64 GNU revision 4 bundle", async (t) => {
   const { root, manifest } = await fixture(t);
   const oldLibrary = fixtureFiles[0];
   const newLibrary = "lib/metask_agentcore.lib";
@@ -180,7 +180,7 @@ test("rejects a self-consistent bundle that differs from the repository lock", a
   );
 });
 
-test("rejects a missing or unsupported binary ABI revision", async (t) => {
+test("rejects a missing or legacy binary ABI revision", async (t) => {
   const missing = await fixture(t, (manifest) => {
     delete manifest.contract.binary_abi_revision;
   });
@@ -190,7 +190,7 @@ test("rejects a missing or unsupported binary ABI revision", async (t) => {
   );
 
   const unsupported = await fixture(t, (manifest) => {
-    manifest.contract.binary_abi_revision = 2;
+    manifest.contract.binary_abi_revision = 3;
   });
   await assert.rejects(
     validateAgentCoreBundle(unsupported.root, injectedChecks),
@@ -367,14 +367,14 @@ test("rejects missing, duplicated, and obsolete discovery symbols", async (t) =>
   const { root } = await fixture(t);
   await assert.rejects(
     validateAgentCoreBundle(root, { ...injectedChecks, symbols: "" }),
-    /exactly one revision 3 discovery symbol/,
+    /exactly one revision 4 discovery symbol/,
   );
   await assert.rejects(
     validateAgentCoreBundle(root, {
       ...injectedChecks,
       symbols: "T _metask_agentcore_get_api\nT _metask_agentcore_get_api\n",
     }),
-    /exactly one revision 3 discovery symbol/,
+    /exactly one revision 4 discovery symbol/,
   );
   await assert.rejects(
     validateAgentCoreBundle(root, {

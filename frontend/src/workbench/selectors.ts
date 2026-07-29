@@ -3,6 +3,7 @@ import type {
   TaskView,
   WorkbenchSnapshot,
 } from "../bridge/contracts.ts";
+import { runInputDisplay } from "./run-input.ts";
 import type { WorkbenchState } from "./store.ts";
 
 export function selectActiveTask(state: WorkbenchState): TaskView | null {
@@ -210,14 +211,15 @@ export function searchWorkbench(
         detail: workspace.canonicalRoot,
       });
     for (const run of task.runs) {
-      if (matches(run.user))
+      const input = runInputDisplay(run.input);
+      if (matches(input))
         results.push({
           key: `instruction:${task.id}:${run.id}`,
           kind: "instruction",
           taskId: task.id,
           workspaceId: task.workspaceId,
           title,
-          detail: run.user,
+          detail: input,
         });
       if (
         run.outcome === "completed" &&

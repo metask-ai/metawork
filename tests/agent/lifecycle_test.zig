@@ -22,10 +22,333 @@ const takeTestTerminal = fixture.takeTestTerminal;
 const shutdownTestComposition = fixture.shutdownTestComposition;
 const deinitTestComposition = fixture.deinitTestComposition;
 const createTestComposition = fixture.createTestComposition;
+const createTestRuntime = fixture.createTestRuntime;
 const closeOnThread = fixture.closeOnThread;
 const cancelOnThread = fixture.cancelOnThread;
 const failPipelineOnThread = fixture.failPipelineOnThread;
 const CallbackSignal = fixture.CallbackSignal;
+
+test "Runtime rejects revision 4 tables without required Skill capabilities" {
+    var api = fake_api;
+    api.capabilities &= ~wire.CAP_SKILL_CATALOG;
+    try std.testing.expectError(
+        error.UnsupportedAbi,
+        lifecycle.Runtime.initWithApi(
+            std.testing.io,
+            std.testing.allocator,
+            &api,
+            .{ .max_sessions = 1 },
+        ),
+    );
+
+    api = fake_api;
+    api.capabilities &= ~wire.CAP_TYPED_RUN_INPUT;
+    try std.testing.expectError(
+        error.UnsupportedAbi,
+        lifecycle.Runtime.initWithApi(
+            std.testing.io,
+            std.testing.allocator,
+            &api,
+            .{ .max_sessions = 1 },
+        ),
+    );
+}
+
+test "Catalog leases copy descriptors and block Runtime destroy until exactly-once release" {
+    fake_core.reset();
+    const runtime = try createTestRuntime(.{ .max_sessions = 1 });
+    var runtime_done = false;
+    var lease: ?*lifecycle.CatalogLease = null;
+    var projection: ?lifecycle.CatalogProjection = null;
+    defer {
+        if (projection) |*value| value.deinit();
+        if (lease) |value| runtime.releaseSkillCatalog(value) catch {};
+        if (!runtime_done) runtime.shutdown() catch {};
+        runtime.deinit();
+    }
+    const root = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        ".",
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(root);
+
+    const acquisition = try runtime.querySkillCatalog(.{
+        .workspace_root = root,
+        .canonical_user_home = root,
+        .workspace_epoch = "workspace-1",
+    });
+    lease = acquisition.lease;
+    projection = acquisition.projection;
+    try std.testing.expectEqualStrings(
+        fixture.fixture_catalog_revision,
+        projection.?.revision,
+    );
+    try std.testing.expectEqual(lifecycle.CatalogHealth.healthy, projection.?.health);
+    try std.testing.expectEqual(@as(usize, 1), projection.?.skills.len);
+    try std.testing.expectEqualStrings("review", projection.?.skills[0].invocation_name);
+    try std.testing.expectEqualStrings("target", projection.?.skills[0].argument_names[0]);
+
+    fake_core.lock();
+    const queried = fake_core.catalog_queries;
+    const released_before = fake_core.catalog_releases;
+    const descriptor_releases = fake_core.buffer_releases;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 1), queried);
+    try std.testing.expectEqual(@as(usize, 0), released_before);
+    try std.testing.expectEqual(@as(usize, 1), descriptor_releases);
+    try std.testing.expectError(
+        error.CatalogLeasesOutstanding,
+        runtime.shutdown(),
+    );
+
+    projection.?.deinit();
+    projection = null;
+    try runtime.releaseSkillCatalog(lease.?);
+    lease = null;
+    fake_core.lock();
+    const released_after = fake_core.catalog_releases;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 1), released_after);
+    try runtime.shutdown();
+    runtime_done = true;
+}
+
+test "invalid and duplicate catalog descriptors release every AgentCore owner" {
+    inline for (.{ fixture.CatalogPlan.malformed, fixture.CatalogPlan.duplicate_skill_id }) |plan| {
+        fake_core.reset();
+        fake_core.setCatalogPlan(plan);
+        const runtime = try createTestRuntime(.{ .max_sessions = 1 });
+        defer {
+            runtime.shutdown() catch unreachable;
+            runtime.deinit();
+        }
+        const root = try std.Io.Dir.cwd().realPathFileAlloc(
+            std.testing.io,
+            ".",
+            std.testing.allocator,
+        );
+        defer std.testing.allocator.free(root);
+        const expected = if (plan == .malformed)
+            error.InvalidCatalogDescriptor
+        else
+            error.DuplicateCatalogIdentity;
+        try std.testing.expectError(expected, runtime.querySkillCatalog(.{
+            .workspace_root = root,
+            .canonical_user_home = root,
+            .workspace_epoch = "workspace-1",
+        }));
+        fake_core.lock();
+        const releases = fake_core.catalog_releases;
+        const buffers = fake_core.buffer_releases;
+        fake_core.unlock();
+        try std.testing.expectEqual(@as(usize, 1), releases);
+        try std.testing.expectEqual(@as(usize, 1), buffers);
+    }
+}
+
+test "Skill input is deep-copied and encoded only for the typed Core call" {
+    fake_core.reset();
+    const runtime = try createTestRuntime(.{ .max_sessions = 1 });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const root = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        ".",
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(root);
+    var acquisition = try runtime.querySkillCatalog(.{
+        .workspace_root = root,
+        .canonical_user_home = root,
+        .workspace_epoch = "workspace-1",
+    });
+    defer acquisition.projection.deinit();
+    const session = try runtime.createSession(.{
+        .provider = .anthropic,
+        .permission_mode = .default,
+        .shell_policy = .disabled,
+        .credential = "fixture-secret",
+        .model = "fixture-model",
+        .workspace = .{
+            .canonical_root = root,
+            .trust = .explicitly_trusted,
+        },
+        .canonical_user_home = root,
+        .workspace_epoch = "workspace-1",
+        .skill_catalog = acquisition.lease,
+    });
+    try runtime.releaseSkillCatalog(acquisition.lease);
+
+    const skill_id = try std.testing.allocator.dupe(
+        u8,
+        fixture.fixture_skill_id,
+    );
+    defer std.testing.allocator.free(skill_id);
+    const revision = try std.testing.allocator.dupe(
+        u8,
+        fixture.fixture_catalog_revision,
+    );
+    defer std.testing.allocator.free(revision);
+    const target = try std.testing.allocator.dupe(u8, "src/main.zig");
+    defer std.testing.allocator.free(target);
+    const focus = try std.testing.allocator.dupe(u8, "correctness");
+    defer std.testing.allocator.free(focus);
+    const run_id = try session.prepareRun(.{ .skill = .{
+        .skill_id = skill_id,
+        .catalog_revision = revision,
+        .argument_values = &.{ target, focus },
+    } });
+    @memset(skill_id, 'x');
+    @memset(revision, 'x');
+    @memset(target, 'x');
+    @memset(focus, 'x');
+    var run = try session.beginRun(run_id);
+    var terminal = run.execute();
+    defer terminal.deinit();
+    run.deinit();
+    try std.testing.expectEqual(lifecycle.Status.ok, terminal.abi_status.?);
+    fake_core.lock();
+    const saw_skill = fake_core.skill_run_seen;
+    const input_matches = fake_core.skill_input_matches;
+    const home_seen = fake_core.workspace_home_seen;
+    const bound = fake_core.skill_session_bound;
+    fake_core.unlock();
+    try std.testing.expect(saw_skill);
+    try std.testing.expect(input_matches);
+    try std.testing.expect(home_seen);
+    try std.testing.expect(bound);
+    try session.close(.session_close);
+}
+
+test "Skill rejection statuses leave the Session reusable" {
+    fake_core.reset();
+    const runtime = try createTestRuntime(.{ .max_sessions = 1 });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const root = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        ".",
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(root);
+    const cases = [_]struct {
+        plan: Plan,
+        status: lifecycle.Status,
+    }{
+        .{ .plan = .stale_catalog, .status = .stale_catalog },
+        .{ .plan = .skill_not_found, .status = .skill_not_found },
+        .{ .plan = .invalid_skill_arguments, .status = .invalid_skill_arguments },
+        .{ .plan = .skill_policy_violation, .status = .skill_policy_violation },
+        .{ .plan = .skill_unavailable, .status = .skill_unavailable },
+    };
+    for (cases) |case| {
+        fake_core.setNextPlan(case.plan);
+        var acquisition = try runtime.querySkillCatalog(.{
+            .workspace_root = root,
+            .canonical_user_home = root,
+            .workspace_epoch = "workspace-1",
+        });
+        const session = try runtime.createSession(.{
+            .provider = .anthropic,
+            .permission_mode = .default,
+            .shell_policy = .disabled,
+            .credential = "fixture-secret",
+            .model = "fixture-model",
+            .workspace = .{
+                .canonical_root = root,
+                .trust = .explicitly_trusted,
+            },
+            .canonical_user_home = root,
+            .workspace_epoch = "workspace-1",
+            .skill_catalog = acquisition.lease,
+        });
+        try runtime.releaseSkillCatalog(acquisition.lease);
+        acquisition.projection.deinit();
+        const run_id = try session.prepareRun(.{ .skill = .{
+            .skill_id = fixture.fixture_skill_id,
+            .catalog_revision = fixture.fixture_catalog_revision,
+            .argument_values = &.{ "src/main.zig", "correctness" },
+        } });
+        var run = try session.beginRun(run_id);
+        var terminal = run.execute();
+        run.deinit();
+        try std.testing.expectEqual(case.status, terminal.abi_status.?);
+        try std.testing.expectEqual(
+            lifecycle.SessionDisposition.reusable,
+            terminal.session_disposition_at_completion,
+        );
+        terminal.deinit();
+        const retry = try session.prepareRun(.{ .text = "still reusable" });
+        try session.cancelPreparedRun(retry);
+        try session.close(.session_close);
+        try runtime.releaseClosedSession(session);
+    }
+}
+
+test "Session catalog refresh is idle-only and rejects another Workspace epoch" {
+    fake_core.reset();
+    const runtime = try createTestRuntime(.{ .max_sessions = 1 });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const root = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        ".",
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(root);
+    var current = try runtime.querySkillCatalog(.{
+        .workspace_root = root,
+        .canonical_user_home = root,
+        .workspace_epoch = "workspace-1",
+    });
+    defer current.projection.deinit();
+    defer runtime.releaseSkillCatalog(current.lease) catch unreachable;
+    const session = try runtime.createSession(.{
+        .provider = .anthropic,
+        .permission_mode = .default,
+        .shell_policy = .disabled,
+        .credential = "fixture-secret",
+        .model = "fixture-model",
+        .workspace = .{
+            .canonical_root = root,
+            .trust = .explicitly_trusted,
+        },
+        .canonical_user_home = root,
+        .workspace_epoch = "workspace-1",
+    });
+
+    const queued = try session.prepareRun(.{ .text = "queued" });
+    try std.testing.expectError(
+        error.SessionNotIdle,
+        session.refreshSkillCatalog(current.lease),
+    );
+    try session.cancelPreparedRun(queued);
+    try session.refreshSkillCatalog(current.lease);
+
+    var other = try runtime.querySkillCatalog(.{
+        .workspace_root = root,
+        .canonical_user_home = root,
+        .workspace_epoch = "workspace-2",
+    });
+    defer other.projection.deinit();
+    defer runtime.releaseSkillCatalog(other.lease) catch unreachable;
+    try std.testing.expectError(
+        error.CatalogBindingMismatch,
+        session.refreshSkillCatalog(other.lease),
+    );
+    fake_core.lock();
+    const refreshes = fake_core.catalog_refreshes;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 1), refreshes);
+    try session.close(.session_close);
+}
 
 const UiAnswerThenIdentityMismatch = struct {
     session: ?*lifecycle.Session = null,
@@ -63,7 +386,9 @@ test "RunControlLease remains safe after natural completion" {
         deinitTestComposition(runtime);
     }
     const session = try openSession(runtime);
-    const run_id = try session.prepareRun("complete before the retained lease is released");
+    const run_id = try session.prepareRun(.{
+        .text = "complete before the retained lease is released",
+    });
     var run = try session.beginRun(run_id);
     var lease = run.control().tryAcquireLease().?;
     var terminal = run.execute();
@@ -87,14 +412,14 @@ test "RunControlLease rejects a stale generation after slot reuse" {
     }
     const session = try openSession(runtime);
 
-    const first_id = try session.prepareRun("first generation");
+    const first_id = try session.prepareRun(.{ .text = "first generation" });
     var first = try session.beginRun(first_id);
     var stale = first.control().tryAcquireLease().?;
     var first_terminal = first.execute();
     defer first_terminal.deinit();
     first.deinit();
 
-    const second_id = try session.prepareRun("second generation");
+    const second_id = try session.prepareRun(.{ .text = "second generation" });
     var second = try session.beginRun(second_id);
     try std.testing.expectEqual(
         lifecycle.TerminationRequestResult.stale_run,
@@ -115,7 +440,9 @@ test "RunControlLease termination before execute avoids the Core call" {
         deinitTestComposition(runtime);
     }
     const session = try openSession(runtime);
-    const run_id = try session.prepareRun("cancel before entering Core");
+    const run_id = try session.prepareRun(.{
+        .text = "cancel before entering Core",
+    });
     var run = try session.beginRun(run_id);
     var lease = run.control().tryAcquireLease().?;
     try std.testing.expectEqual(
@@ -149,7 +476,9 @@ test "RunControlLease close disables acquisition and waits for quiescence" {
         deinitTestComposition(runtime);
     }
     const session = try openSession(runtime);
-    const run_id = try session.prepareRun("retain control across close");
+    const run_id = try session.prepareRun(.{
+        .text = "retain control across close",
+    });
     var run = try session.beginRun(run_id);
     const control = run.control();
     var lease = control.tryAcquireLease().?;
@@ -250,7 +579,7 @@ test "queued prompt memory is bounded before allocation" {
         deinitTestComposition(runtime);
     }
     const session = try openSession(runtime);
-    try std.testing.expectError(error.PromptTooLarge, submitSession(session, "12345"));
+    try std.testing.expectError(error.RunInputTooLarge, submitSession(session, "12345"));
     try std.testing.expectEqual(lifecycle.SessionState.idle, session.snapshot().state);
     try closeSession(session, .session_close);
 }
@@ -567,7 +896,9 @@ test "UI request validates identity and close wakes a suspended callback" {
     try std.testing.expectError(error.StaleUiResponse, answered.respondUi(run_id, request_id + 1, response));
     try std.testing.expectError(
         error.InvalidUiResponse,
-        answered.respondUi(run_id, request_id, .{ .answers = &.{"Yes"} }),
+        answered.respondUi(run_id, request_id, .{
+            .answers = &.{.{ .values = &.{"Yes"} }},
+        }),
     );
     try answered.respondUi(run_id, request_id, response);
     try std.testing.expectError(error.StaleUiResponse, answered.respondUi(run_id, request_id, response));

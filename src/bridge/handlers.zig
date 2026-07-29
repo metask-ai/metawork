@@ -1,6 +1,7 @@
 //! Strict payload records and parsing shared by Bridge handlers.
 
 const std = @import("std");
+const max_skill_argument_values: usize = 64;
 
 pub const PermissionChoice = enum {
     allow_once,
@@ -29,11 +30,34 @@ pub const TaskCreate = struct {
     workspaceId: []const u8,
     expectedWorkspaceEpoch: []const u8,
     expectedExecutionGeneration: []const u8,
+    expectedSkillCatalogRevision: ?[]const u8,
 };
 pub const TaskRun = struct {
     taskId: []const u8,
     expectedBindingEpoch: []const u8,
-    prompt: []const u8,
+    input: std.json.Value,
+};
+pub const TaskRunInput = union(enum) {
+    text: []const u8,
+    skill: struct {
+        skill_id: []const u8,
+        catalog_revision: []const u8,
+        argument_values: []const []const u8,
+    },
+};
+pub const ParsedTaskRunInput = struct {
+    value: TaskRunInput,
+    owned_argument_values: ?[][]const u8 = null,
+
+    pub fn deinit(self: *ParsedTaskRunInput) void {
+        if (self.owned_argument_values) |values|
+            std.heap.c_allocator.free(values);
+        self.* = undefined;
+    }
+};
+pub const TaskCatalogRefresh = struct {
+    taskId: []const u8,
+    expectedBindingEpoch: []const u8,
 };
 pub const TaskIdentity = struct { taskId: []const u8, runId: []const u8 };
 pub const TaskClose = struct { taskId: []const u8 };
@@ -45,7 +69,7 @@ pub const UiResponseRequest = struct {
     runId: []const u8,
     requestId: []const u8,
     kind: []const u8,
-    answers: ?[]const []const u8 = null,
+    answers: ?[]const []const []const u8 = null,
     permission: ?[]const u8 = null,
 };
 
@@ -66,6 +90,65 @@ pub fn parseWireId(value: []const u8) !u64 {
     return std.fmt.parseInt(u64, value, 10) catch error.InvalidBridgeId;
 }
 
+pub fn parseTaskRunInput(value: std.json.Value) !ParsedTaskRunInput {
+    const object = switch (value) {
+        .object => |object| object,
+        else => return error.InvalidBridgePayload,
+    };
+    const kind = object.get("kind") orelse return error.InvalidBridgePayload;
+    const kind_text = switch (kind) {
+        .string => |text| text,
+        else => return error.InvalidBridgePayload,
+    };
+    if (std.mem.eql(u8, kind_text, "text")) {
+        if (object.count() != 2) return error.InvalidBridgePayload;
+        const text_value = object.get("text") orelse
+            return error.InvalidBridgePayload;
+        const text = switch (text_value) {
+            .string => |text| text,
+            else => return error.InvalidBridgePayload,
+        };
+        return .{ .value = .{ .text = text } };
+    }
+    if (!std.mem.eql(u8, kind_text, "skill") or object.count() != 4)
+        return error.InvalidBridgePayload;
+    const skill_id = switch (object.get("skillId") orelse
+        return error.InvalidBridgePayload) {
+        .string => |text| text,
+        else => return error.InvalidBridgePayload,
+    };
+    const catalog_revision = switch (object.get("catalogRevision") orelse
+        return error.InvalidBridgePayload) {
+        .string => |text| text,
+        else => return error.InvalidBridgePayload,
+    };
+    const argument_array = switch (object.get("argumentValues") orelse
+        return error.InvalidBridgePayload) {
+        .array => |items| items,
+        else => return error.InvalidBridgePayload,
+    };
+    if (argument_array.items.len > max_skill_argument_values)
+        return error.InvalidBridgePayload;
+    const argument_values = try std.heap.c_allocator.alloc(
+        []const u8,
+        argument_array.items.len,
+    );
+    errdefer std.heap.c_allocator.free(argument_values);
+    for (argument_array.items, argument_values) |item, *target|
+        target.* = switch (item) {
+            .string => |text| text,
+            else => return error.InvalidBridgePayload,
+        };
+    return .{
+        .value = .{ .skill = .{
+            .skill_id = skill_id,
+            .catalog_revision = catalog_revision,
+            .argument_values = argument_values,
+        } },
+        .owned_argument_values = argument_values,
+    };
+}
+
 pub fn acknowledgementSequence(payload: []const u8) !u64 {
     const prefix = "{\"sequence\":";
     if (!std.mem.startsWith(u8, payload, prefix) or !std.mem.endsWith(u8, payload, "}"))
@@ -78,4 +161,58 @@ pub fn permissionChoice(value: []const u8) ?PermissionChoice {
     if (std.mem.eql(u8, value, "allow_once")) return .allow_once;
     if (std.mem.eql(u8, value, "deny_once")) return .deny_once;
     return null;
+}
+
+test "Task Run input is an exact text or skill tagged object" {
+    var text_payload = try parsePayload(TaskRun,
+        \\{"taskId":"1","expectedBindingEpoch":"2","input":{"kind":"text","text":"inspect"}}
+    );
+    defer text_payload.deinit();
+    var text_input = try parseTaskRunInput(text_payload.value.input);
+    defer text_input.deinit();
+    try std.testing.expectEqualStrings("inspect", text_input.value.text);
+
+    var skill_payload = try parsePayload(TaskRun,
+        \\{"taskId":"1","expectedBindingEpoch":"2","input":{"kind":"skill","skillId":"builtin.review","catalogRevision":"revision","argumentValues":["src/main.zig","correctness"]}}
+    );
+    defer skill_payload.deinit();
+    var skill_input = try parseTaskRunInput(skill_payload.value.input);
+    defer skill_input.deinit();
+    try std.testing.expectEqualStrings(
+        "builtin.review",
+        skill_input.value.skill.skill_id,
+    );
+    try std.testing.expectEqual(@as(usize, 2), skill_input.value.skill.argument_values.len);
+
+    var legacy = try std.json.parseFromSlice(std.json.Value, std.testing.allocator,
+        \\{"kind":"text","prompt":"inspect"}
+    , .{});
+    defer legacy.deinit();
+    try std.testing.expectError(
+        error.InvalidBridgePayload,
+        parseTaskRunInput(legacy.value),
+    );
+
+    var mixed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator,
+        \\{"kind":"text","text":"inspect","skillId":"builtin.review"}
+    , .{});
+    defer mixed.deinit();
+    try std.testing.expectError(
+        error.InvalidBridgePayload,
+        parseTaskRunInput(mixed.value),
+    );
+}
+
+test "Task creation requires an explicit nullable catalog revision" {
+    var text = try parsePayload(TaskCreate,
+        \\{"workspaceId":"1","expectedWorkspaceEpoch":"2","expectedExecutionGeneration":"3","expectedSkillCatalogRevision":null}
+    );
+    defer text.deinit();
+    try std.testing.expect(text.value.expectedSkillCatalogRevision == null);
+    try std.testing.expectError(
+        error.InvalidBridgePayload,
+        parsePayload(TaskCreate,
+            \\{"workspaceId":"1","expectedWorkspaceEpoch":"2","expectedExecutionGeneration":"3"}
+        ),
+    );
 }
