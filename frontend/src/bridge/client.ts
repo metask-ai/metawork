@@ -7,6 +7,7 @@ import {
 import type { NativeSdkJson, NativeSdkShortcutDetail } from "@native-sdk/cli";
 import type {
   HostSignal,
+  TaskRunInput,
   UiResponsePayload,
   WorkspaceChoice,
 } from "./contracts.ts";
@@ -21,6 +22,7 @@ import {
   assertWindowDragStarted,
   assertWindowControlCompleted,
   decodeAccountCommandResult,
+  decodeCatalogRefreshResult,
   decodeHostSignalEvent,
   decodePingResponse,
   decodeRendererBridgeConnect,
@@ -291,19 +293,46 @@ export class BridgeClient {
     workspaceId: string,
     expectedWorkspaceEpoch: string,
     expectedExecutionGeneration: string,
+    expectedSkillCatalogRevision: string | null,
   ) {
     return decodeTaskCreateResult(
       await this.invoke(commands.createTask, {
         workspaceId,
         expectedWorkspaceEpoch,
         expectedExecutionGeneration,
+        expectedSkillCatalogRevision,
       }),
     );
   }
 
-  async run(taskId: string, expectedBindingEpoch: string, prompt: string) {
+  async run(taskId: string, expectedBindingEpoch: string, input: TaskRunInput) {
     return decodeTaskRunResult(
-      await this.invoke(commands.run, { taskId, expectedBindingEpoch, prompt }),
+      await this.invoke(commands.run, { taskId, expectedBindingEpoch, input }),
+      taskId,
+    );
+  }
+
+  async refreshWorkspaceSkillCatalog(
+    workspaceId: string,
+    expectedWorkspaceEpoch: string,
+  ) {
+    return decodeCatalogRefreshResult(
+      await this.invoke(commands.refreshWorkspaceSkillCatalog, {
+        workspaceId,
+        expectedWorkspaceEpoch,
+      }),
+      "workspaceId",
+      workspaceId,
+    );
+  }
+
+  async refreshTaskSkillCatalog(taskId: string, expectedBindingEpoch: string) {
+    return decodeCatalogRefreshResult(
+      await this.invoke(commands.refreshTaskSkillCatalog, {
+        taskId,
+        expectedBindingEpoch,
+      }),
+      "taskId",
       taskId,
     );
   }

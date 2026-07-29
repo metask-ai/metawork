@@ -138,6 +138,16 @@ test "Workbench pins an async catalog and admits typed Skill through the existin
         &workbench,
         "\"lastRunOutcome\":\"completed\"",
     );
+    try waitWorkbenchSnapshot(
+        runtime,
+        &workbench,
+        "\"skillCatalog\":{\"availability\":\"ready\"",
+    );
+    try waitWorkbenchSnapshot(
+        runtime,
+        &workbench,
+        "\"input\":{\"kind\":\"skill\"",
+    );
     fake_core.lock();
     const skill_seen = fake_core.skill_run_seen;
     const input_matches = fake_core.skill_input_matches;

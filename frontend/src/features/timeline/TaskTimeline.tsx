@@ -16,6 +16,7 @@ import type {
   UiRecord,
   UiResponsePayload,
 } from "../../bridge/contracts.ts";
+import { runInputDisplay } from "../../workbench/run-input.ts";
 import { formatInteger, formatMilliseconds } from "../../i18n/formatters.ts";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
 
@@ -242,7 +243,10 @@ export function TaskTimeline({
                   </div>
                 </header>
                 <div className="run-content">
-                  <Message role={t("message.you")} text={run.user} />
+                  <Message
+                    role={t("message.you")}
+                    text={runInputDisplay(run.input)}
+                  />
                   {activities.map((activity) => {
                     if (activity.kind === "tool")
                       return (
@@ -371,6 +375,7 @@ function RunOutcome({
   onPrepareRetry: (instruction: string) => void;
 }) {
   const { t } = useI18n();
+  const retryText = run.input.kind === "text" ? run.input.text : null;
   return (
     <section
       className="run-outcome"
@@ -381,13 +386,13 @@ function RunOutcome({
         <p>{t(terminalMessageId(outcome))}</p>
         {run.cause && <span>{t(`cause.${run.cause}`)}</span>}
       </div>
-      {retryAvailable && retryableOutcome(outcome) && (
+      {retryAvailable && retryText !== null && retryableOutcome(outcome) && (
         <button
           className="outcome-action focus-ring"
           title={
             composerHasDraft ? t("run.review_draft_help") : t("run.retry_help")
           }
-          onClick={() => onPrepareRetry(run.user)}
+          onClick={() => onPrepareRetry(retryText)}
         >
           {composerHasDraft ? t("run.review_draft") : t("run.prepare_retry")}
         </button>

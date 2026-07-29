@@ -195,6 +195,14 @@ test("the fixed revision 1 contract carries Host-owned Workspace and generation 
           runId: "17",
           reason: null,
         };
+      if (command === "metawork.workspaces.refreshSkillCatalog")
+        return { accepted: true, workspaceId: "7", reason: null };
+      if (command === "metawork.tasks.refreshSkillCatalog")
+        return {
+          accepted: false,
+          taskId: "11",
+          reason: "catalog_unavailable",
+        };
       assert.fail(`unexpected command ${command}`);
     }),
   });
@@ -206,17 +214,35 @@ test("the fixed revision 1 contract carries Host-owned Workspace and generation 
     workspaceEpoch: "29",
     reason: null,
   });
-  assert.deepEqual(await client.createTask("7", "29", "23"), {
+  assert.deepEqual(await client.createTask("7", "29", "23", null), {
     accepted: true,
     taskId: "11",
     bindingEpoch: "13",
     reason: null,
   });
-  assert.deepEqual(await client.run("11", "13", "Inspect"), {
+  assert.deepEqual(
+    await client.run("11", "13", {
+      kind: "skill",
+      skillId: "builtin.review",
+      catalogRevision: "catalog-revision",
+      argumentValues: ["src/main.zig"],
+    }),
+    {
+      accepted: true,
+      taskId: "11",
+      runId: "17",
+      reason: null,
+    },
+  );
+  assert.deepEqual(await client.refreshWorkspaceSkillCatalog("7", "29"), {
     accepted: true,
-    taskId: "11",
-    runId: "17",
+    workspaceId: "7",
     reason: null,
+  });
+  assert.deepEqual(await client.refreshTaskSkillCatalog("11", "13"), {
+    accepted: false,
+    taskId: "11",
+    reason: "catalog_unavailable",
   });
   assert.deepEqual(calls, [
     {
@@ -237,11 +263,29 @@ test("the fixed revision 1 contract carries Host-owned Workspace and generation 
         workspaceId: "7",
         expectedWorkspaceEpoch: "29",
         expectedExecutionGeneration: "23",
+        expectedSkillCatalogRevision: null,
       },
     },
     {
       command: "metawork.tasks.run",
-      payload: { taskId: "11", expectedBindingEpoch: "13", prompt: "Inspect" },
+      payload: {
+        taskId: "11",
+        expectedBindingEpoch: "13",
+        input: {
+          kind: "skill",
+          skillId: "builtin.review",
+          catalogRevision: "catalog-revision",
+          argumentValues: ["src/main.zig"],
+        },
+      },
+    },
+    {
+      command: "metawork.workspaces.refreshSkillCatalog",
+      payload: { workspaceId: "7", expectedWorkspaceEpoch: "29" },
+    },
+    {
+      command: "metawork.tasks.refreshSkillCatalog",
+      payload: { taskId: "11", expectedBindingEpoch: "13" },
     },
   ]);
 });

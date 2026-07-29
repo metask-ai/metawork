@@ -5,7 +5,10 @@ import {
   type AskQuestion,
   type HostSignal,
   type PendingUi,
+  type CatalogRefreshResult,
+  type RunInputView,
   type RunView,
+  type SkillCatalogView,
   type TaskView,
   type TaskCreateResult,
   type TaskRunResult,
@@ -54,6 +57,11 @@ const hostCauses = [
   "queue_capacity_failure",
   "ui_pipeline_failure",
   "dependency_contract_failure",
+  "stale_catalog",
+  "skill_not_found",
+  "invalid_skill_arguments",
+  "skill_policy_violation",
+  "skill_unavailable",
 ] as const;
 const uiRecordKinds = ["ask_question", "permission"] as const;
 const uiRecordStates = [
@@ -155,6 +163,19 @@ const workspaceAuthorizations = [
   "reauthorization_required",
 ] as const;
 const bindingAvailabilities = ["available", "unavailable"] as const;
+const skillCatalogAvailabilities = [
+  "uninitialized",
+  "loading",
+  "ready",
+  "degraded",
+  "unavailable",
+] as const;
+const skillCatalogIssueCodes = [
+  "invalid_definition",
+  "source_conflict",
+  "invalid_resource",
+  "invalid_invocation_name",
+] as const;
 const workspaceMutationReasons = [
   "workspace_changed",
   "workspace_unavailable",
@@ -168,6 +189,9 @@ const taskCreateReasons = [
   "workspace_changed",
   "workspace_unavailable",
   "workspace_removing",
+  "catalog_loading",
+  "catalog_unavailable",
+  "stale_catalog",
   "capacity_reached",
   "shutting_down",
 ] as const;
@@ -177,7 +201,24 @@ const taskRunReasons = [
   "task_unavailable",
   "task_busy",
   "workspace_unavailable",
+  "workspace_changed",
   "workspace_removing",
+  "catalog_unavailable",
+  "stale_catalog",
+  "skill_not_found",
+  "invalid_skill_arguments",
+  "capacity_reached",
+  "shutting_down",
+] as const;
+const catalogRefreshReasons = [
+  "workspace_changed",
+  "binding_changed",
+  "workspace_unavailable",
+  "workspace_removing",
+  "task_unavailable",
+  "task_busy",
+  "catalog_loading",
+  "catalog_unavailable",
   "capacity_reached",
   "shutting_down",
 ] as const;
@@ -203,6 +244,12 @@ function object(value: unknown, path: string, keys: readonly string[]) {
 function stringValue(value: unknown, path: string) {
   if (typeof value !== "string") fail(path, "expected string");
   return value;
+}
+
+function nonEmptyString(value: unknown, path: string) {
+  const result = stringValue(value, path);
+  if (result.length === 0) fail(path, "expected non-empty string");
+  return result;
 }
 
 function wireId(value: unknown, path: string) {
@@ -266,6 +313,147 @@ function nullableEnum<const T extends readonly string[]>(
   values: T,
 ): T[number] | null {
   return value === null ? null : enumValue(value, path, values);
+}
+
+function decodeRunInput(value: unknown, path: string): RunInputView {
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    fail(path, "expected object");
+  const kind = enumValue((value as JsonObject).kind, `${path}.kind`, [
+    "text",
+    "skill",
+  ] as const);
+  if (kind === "text") {
+    const item = object(value, path, ["kind", "text", "redacted"]);
+    return {
+      kind,
+      text: stringValue(item.text, `${path}.text`),
+      redacted: booleanValue(item.redacted, `${path}.redacted`),
+    };
+  }
+  const item = object(value, path, [
+    "kind",
+    "skillId",
+    "catalogRevision",
+    "invocationName",
+    "displayName",
+    "argumentValues",
+    "redacted",
+  ]);
+  return {
+    kind,
+    skillId: nonEmptyString(item.skillId, `${path}.skillId`),
+    catalogRevision: nonEmptyString(
+      item.catalogRevision,
+      `${path}.catalogRevision`,
+    ),
+    invocationName: nonEmptyString(
+      item.invocationName,
+      `${path}.invocationName`,
+    ),
+    displayName: nonEmptyString(item.displayName, `${path}.displayName`),
+    argumentValues: arrayValue(
+      item.argumentValues,
+      `${path}.argumentValues`,
+      stringValue,
+    ),
+    redacted: booleanValue(item.redacted, `${path}.redacted`),
+  };
+}
+
+function decodeSkillCatalog(value: unknown, path: string): SkillCatalogView {
+  const item = object(value, path, [
+    "availability",
+    "redacted",
+    "revision",
+    "skills",
+    "issues",
+  ]);
+  const availability = enumValue(
+    item.availability,
+    `${path}.availability`,
+    skillCatalogAvailabilities,
+  );
+  const revision =
+    item.revision === null
+      ? null
+      : nonEmptyString(item.revision, `${path}.revision`);
+  const skills = arrayValue(
+    item.skills,
+    `${path}.skills`,
+    (value, itemPath) => {
+      const skill = object(value, itemPath, [
+        "skillId",
+        "invocationName",
+        "displayName",
+        "description",
+        "argumentNames",
+        "maxValues",
+      ]);
+      const argumentNames = arrayValue(
+        skill.argumentNames,
+        `${itemPath}.argumentNames`,
+        nonEmptyString,
+      );
+      const maxValues = nonNegativeNumber(
+        skill.maxValues,
+        `${itemPath}.maxValues`,
+      );
+      if (argumentNames.length > maxValues)
+        fail(itemPath, "argument names exceed max values");
+      return {
+        skillId: nonEmptyString(skill.skillId, `${itemPath}.skillId`),
+        invocationName: nonEmptyString(
+          skill.invocationName,
+          `${itemPath}.invocationName`,
+        ),
+        displayName: nonEmptyString(
+          skill.displayName,
+          `${itemPath}.displayName`,
+        ),
+        description: stringValue(skill.description, `${itemPath}.description`),
+        argumentNames,
+        maxValues,
+      };
+    },
+  );
+  const issues = arrayValue(
+    item.issues,
+    `${path}.issues`,
+    (value, itemPath) => {
+      const issue = object(value, itemPath, ["code", "invocationName"]);
+      return {
+        code: enumValue(issue.code, `${itemPath}.code`, skillCatalogIssueCodes),
+        invocationName:
+          issue.invocationName === null
+            ? null
+            : nonEmptyString(
+                issue.invocationName,
+                `${itemPath}.invocationName`,
+              ),
+      };
+    },
+  );
+  const available = availability === "ready" || availability === "degraded";
+  if (available !== (revision !== null))
+    fail(path, "availability and revision must agree");
+  if (!available && (skills.length !== 0 || issues.length !== 0))
+    fail(path, "an unavailable catalog cannot expose descriptors");
+  if (
+    (availability === "ready" && issues.length !== 0) ||
+    (availability === "degraded" && issues.length === 0)
+  )
+    fail(path, "catalog health and issues must agree");
+  const skillIds = new Set(skills.map((skill) => skill.skillId));
+  const invocationNames = new Set(skills.map((skill) => skill.invocationName));
+  if (skillIds.size !== skills.length || invocationNames.size !== skills.length)
+    fail(path, "catalog skill identities must be unique");
+  return {
+    availability,
+    redacted: booleanValue(item.redacted, `${path}.redacted`),
+    revision,
+    skills,
+    issues,
+  };
 }
 
 function decodeAccount(value: unknown, path: string): AccountView {
@@ -604,7 +792,7 @@ function decodeRun(value: unknown, path: string): RunView {
   const item = object(value, path, [
     "id",
     "phase",
-    "user",
+    "input",
     "assistant",
     "assistantRedacted",
     "status",
@@ -625,7 +813,7 @@ function decodeRun(value: unknown, path: string): RunView {
   return {
     id: positiveWireId(item.id, `${path}.id`),
     phase,
-    user: stringValue(item.user, `${path}.user`),
+    input: decodeRunInput(item.input, `${path}.input`),
     assistant: stringValue(item.assistant, `${path}.assistant`),
     assistantRedacted: booleanValue(
       item.assistantRedacted,
@@ -783,6 +971,7 @@ function decodeTask(value: unknown, path: string): TaskView {
     "title",
     "workspaceId",
     "binding",
+    "skillCatalog",
     "lifecycle",
     "continuationAvailable",
     "archived",
@@ -950,6 +1139,7 @@ function decodeTask(value: unknown, path: string): TaskView {
     title: stringValue(item.title, `${path}.title`),
     workspaceId: positiveWireId(item.workspaceId, `${path}.workspaceId`),
     binding,
+    skillCatalog: decodeSkillCatalog(item.skillCatalog, `${path}.skillCatalog`),
     lifecycle,
     continuationAvailable,
     archived,
@@ -977,6 +1167,7 @@ function decodeWorkspace(value: unknown, path: string): WorkspaceView {
     "redacted",
     "authorization",
     "lastRemovalFailure",
+    "skillCatalog",
     "recentOrder",
     "signals",
   ]);
@@ -1001,6 +1192,7 @@ function decodeWorkspace(value: unknown, path: string): WorkspaceView {
       `${path}.lastRemovalFailure`,
       ["task_close_failed"] as const,
     ),
+    skillCatalog: decodeSkillCatalog(item.skillCatalog, `${path}.skillCatalog`),
     recentOrder: positiveWireId(item.recentOrder, `${path}.recentOrder`),
     signals: {
       running: nonNegativeNumber(signals.running, `${path}.signals.running`),
@@ -1317,6 +1509,31 @@ export function decodeTaskRunResult(
     runId: null,
     reason: enumValue(item.reason, "$.reason", taskRunReasons),
   };
+}
+
+export function decodeCatalogRefreshResult<
+  Identity extends "workspaceId" | "taskId",
+>(
+  value: unknown,
+  identityName: Identity,
+  expectedIdentity: string,
+): CatalogRefreshResult<Identity> {
+  const item = object(value, "$", ["accepted", identityName, "reason"]);
+  const accepted = booleanValue(item.accepted, "$.accepted");
+  const identity = positiveWireId(item[identityName], `$.${identityName}`);
+  if (identity !== expectedIdentity)
+    fail(`$.${identityName}`, "response identity mismatch");
+  const reason =
+    item.reason === null
+      ? null
+      : enumValue(item.reason, "$.reason", catalogRefreshReasons);
+  if (accepted !== (reason === null))
+    fail("$", "accepted and reason must agree");
+  return {
+    accepted,
+    [identityName]: identity,
+    reason,
+  } as CatalogRefreshResult<Identity>;
 }
 
 export function assertCancelAccepted(

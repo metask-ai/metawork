@@ -168,6 +168,7 @@ try {
     workspaceId,
     expectedWorkspaceEpoch,
     expectedExecutionGeneration,
+    expectedSkillCatalogRevision: null,
   });
   if (
     createResult !== null &&
@@ -207,7 +208,10 @@ try {
   const runResult = await invokeBridge("metawork.tasks.run", {
     taskId,
     expectedBindingEpoch,
-    prompt: "Exercise Read, Bash, Edit, and AskUserQuestion, then finish.",
+    input: {
+      kind: "text",
+      text: "Exercise Read, Bash, Edit, and AskUserQuestion, then finish.",
+    },
   });
   if (
     runResult !== null &&
@@ -538,7 +542,7 @@ async function snapshot() {
     !/^[1-9][0-9]*$/.test(descriptor.snapshotId) ||
     !Number.isSafeInteger(descriptor.bytes) ||
     descriptor.bytes <= 0 ||
-    descriptor.bytes > 12 * 1024 * 1024 ||
+    descriptor.bytes > 16 * 1024 * 1024 ||
     !Number.isSafeInteger(descriptor.chunkBytes) ||
     descriptor.chunkBytes <= 0 ||
     descriptor.chunkBytes > 256 * 1024

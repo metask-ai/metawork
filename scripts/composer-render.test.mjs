@@ -121,7 +121,11 @@ function renderCompletedTimeline(assistant = "Release is ready") {
       {
         id: "9",
         phase: "completed",
-        user: "Inspect the release",
+        input: {
+          kind: "text",
+          text: "Inspect the release",
+          redacted: false,
+        },
         assistant,
         assistantRedacted: false,
         outcome: "completed",

@@ -38,7 +38,11 @@ function run(overrides = {}) {
   return {
     id: "9",
     phase: "completed",
-    user: "Inspect the release",
+    input: {
+      kind: "text",
+      text: "Inspect the release",
+      redacted: false,
+    },
     assistant: "Release is ready",
     assistantRedacted: false,
     status: "Completed",

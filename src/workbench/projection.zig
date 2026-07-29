@@ -64,7 +64,7 @@ pub const Limits = struct {
     max_pending_ui_requests: usize = 4,
     max_ui_history_per_task: usize = 8,
     max_terminal_diagnostic_bytes: usize = 512,
-    max_snapshot_bytes: usize = 12 * 1024 * 1024,
+    max_snapshot_bytes: usize = 16 * 1024 * 1024,
 };
 
 pub const Provider = enum {
@@ -205,6 +205,10 @@ const account_snapshot_overhead: usize = 1024 +
 const workspace_snapshot_overhead: usize = 512;
 const task_snapshot_overhead: usize = 1024;
 const run_snapshot_overhead: usize = 1024;
+const catalog_snapshot_overhead: usize = 256;
+const catalog_skill_snapshot_overhead: usize = 256;
+const catalog_argument_snapshot_overhead: usize = 16;
+const catalog_issue_snapshot_overhead: usize = 128;
 const tool_snapshot_overhead: usize = 512;
 const pending_ui_snapshot_overhead: usize = 8 * 1024;
 const ui_record_detail_capacity: usize = 512;
@@ -2535,6 +2539,15 @@ pub const Workbench = struct {
         else
             writer.print("\"{s}\"", .{@tagName(workspace.last_removal_failure)}) catch
                 return error.SnapshotTooLarge;
+        writer.writeAll(",\"skillCatalog\":") catch
+            return error.SnapshotTooLarge;
+        try self.writeCatalogProjection(
+            writer,
+            catalogProjection(
+                workspace.catalog_availability,
+                if (workspace.catalog) |*snapshot| snapshot else null,
+            ),
+        );
         writer.print(",\"recentOrder\":\"{d}\",\"signals\":{{\"running\":{},\"attention\":{},\"failedOrInterrupted\":{}}}}}", .{
             workspace.recent_order,
             signals.running,
@@ -2636,6 +2649,15 @@ pub const Workbench = struct {
         else
             writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.writeByte('}') catch return error.SnapshotTooLarge;
+        writer.writeAll(",\"skillCatalog\":") catch
+            return error.SnapshotTooLarge;
+        try self.writeCatalogProjection(
+            writer,
+            if (view.pinned_catalog) |*snapshot|
+                snapshot.view()
+            else
+                .{ .availability = .uninitialized },
+        );
         writer.print(",\"lifecycle\":\"{s}\",\"continuationAvailable\":{},\"archived\":{},\"closeFailed\":{},\"currentRunId\":\"{d}\",\"currentRunPhase\":", .{
             @tagName(view.lifecycle),
             self.taskContinuationAvailable(view),
@@ -2665,6 +2687,98 @@ pub const Workbench = struct {
         try self.writeUiHistory(writer, view);
         writer.writeByte(']') catch return error.SnapshotTooLarge;
         writer.writeByte('}') catch return error.SnapshotTooLarge;
+    }
+
+    fn writeCatalogProjection(
+        self: *Workbench,
+        writer: *std.Io.Writer,
+        catalog: CatalogProjection,
+    ) Error!void {
+        writer.print("{{\"availability\":\"{s}\",\"redacted\":{},\"revision\":", .{
+            @tagName(catalog.availability),
+            self.catalogContainsKnownCredential(catalog),
+        }) catch return error.SnapshotTooLarge;
+        switch (catalog.availability) {
+            .ready, .degraded => try self.projectedJsonValueWithKnownCredentials(
+                writer,
+                catalog.revision,
+            ),
+            .uninitialized, .loading, .unavailable => writer.writeAll("null") catch
+                return error.SnapshotTooLarge,
+        }
+        writer.writeAll(",\"skills\":[") catch return error.SnapshotTooLarge;
+        for (catalog.skills, 0..) |skill, index| {
+            if (index != 0) writer.writeByte(',') catch
+                return error.SnapshotTooLarge;
+            writer.writeAll("{\"skillId\":") catch return error.SnapshotTooLarge;
+            try self.projectedJsonValueWithKnownCredentials(
+                writer,
+                skill.skill_id,
+            );
+            writer.writeAll(",\"invocationName\":") catch
+                return error.SnapshotTooLarge;
+            try self.projectedJsonValueWithKnownCredentials(
+                writer,
+                skill.invocation_name,
+            );
+            writer.writeAll(",\"displayName\":") catch
+                return error.SnapshotTooLarge;
+            try self.projectedJsonValueWithKnownCredentials(
+                writer,
+                skill.display_name,
+            );
+            writer.writeAll(",\"description\":") catch
+                return error.SnapshotTooLarge;
+            try self.projectedJsonValueWithKnownCredentials(
+                writer,
+                skill.description,
+            );
+            writer.writeAll(",\"argumentNames\":[") catch
+                return error.SnapshotTooLarge;
+            for (skill.argument_names, 0..) |name, argument_index| {
+                if (argument_index != 0) writer.writeByte(',') catch
+                    return error.SnapshotTooLarge;
+                try self.projectedJsonValueWithKnownCredentials(writer, name);
+            }
+            writer.print("],\"maxValues\":{d}}}", .{skill.max_values}) catch
+                return error.SnapshotTooLarge;
+        }
+        writer.writeAll("],\"issues\":[") catch return error.SnapshotTooLarge;
+        for (catalog.issues, 0..) |issue, index| {
+            if (index != 0) writer.writeByte(',') catch
+                return error.SnapshotTooLarge;
+            writer.print("{{\"code\":\"{s}\",\"invocationName\":", .{
+                @tagName(issue.code),
+            }) catch return error.SnapshotTooLarge;
+            if (issue.invocation_name) |name|
+                try self.projectedJsonValueWithKnownCredentials(writer, name)
+            else
+                writer.writeAll("null") catch return error.SnapshotTooLarge;
+            writer.writeByte('}') catch return error.SnapshotTooLarge;
+        }
+        writer.writeAll("]}") catch return error.SnapshotTooLarge;
+    }
+
+    fn catalogContainsKnownCredential(
+        self: *const Workbench,
+        catalog: CatalogProjection,
+    ) bool {
+        if (self.containsKnownCredential(catalog.revision)) return true;
+        for (catalog.skills) |skill| {
+            inline for (.{
+                skill.skill_id,
+                skill.invocation_name,
+                skill.display_name,
+                skill.description,
+            }) |field|
+                if (self.containsKnownCredential(field)) return true;
+            for (skill.argument_names) |name|
+                if (self.containsKnownCredential(name)) return true;
+        }
+        for (catalog.issues) |issue|
+            if (issue.invocation_name) |name|
+                if (self.containsKnownCredential(name)) return true;
+        return false;
     }
 
     fn writePendingUi(self: *Workbench, writer: *std.Io.Writer, view: *TaskView) Error!void {
@@ -3859,16 +3973,59 @@ pub const Workbench = struct {
 
     fn writeRun(self: *Workbench, writer: *std.Io.Writer, run: *RunRecord) Error!void {
         const terminal = productTerminalFacts(run);
-        writer.print("{{\"id\":\"{d}\",\"phase\":\"{s}\",\"user\":", .{ run.id, @tagName(runPhase(run)) }) catch return error.SnapshotTooLarge;
+        writer.print("{{\"id\":\"{d}\",\"phase\":\"{s}\",\"input\":", .{
+            run.id,
+            @tagName(runPhase(run)),
+        }) catch return error.SnapshotTooLarge;
         switch (run.input) {
-            .text => |text| try self.projectedJsonValueWithKnownCredentials(
-                writer,
-                text.value,
-            ),
-            .skill => |skill| try self.projectedJsonValueWithKnownCredentials(
-                writer,
-                skill.display_name,
-            ),
+            .text => |text| {
+                writer.writeAll("{\"kind\":\"text\",\"text\":") catch
+                    return error.SnapshotTooLarge;
+                try self.projectedJsonValueWithKnownCredentials(
+                    writer,
+                    text.value,
+                );
+                writer.print(",\"redacted\":{}}}", .{text.redacted}) catch
+                    return error.SnapshotTooLarge;
+            },
+            .skill => |skill| {
+                writer.writeAll("{\"kind\":\"skill\",\"skillId\":") catch
+                    return error.SnapshotTooLarge;
+                try self.projectedJsonValueWithKnownCredentials(
+                    writer,
+                    skill.skill_id,
+                );
+                writer.writeAll(",\"catalogRevision\":") catch
+                    return error.SnapshotTooLarge;
+                try self.projectedJsonValueWithKnownCredentials(
+                    writer,
+                    skill.catalog_revision,
+                );
+                writer.writeAll(",\"invocationName\":") catch
+                    return error.SnapshotTooLarge;
+                try self.projectedJsonValueWithKnownCredentials(
+                    writer,
+                    skill.invocation_name,
+                );
+                writer.writeAll(",\"displayName\":") catch
+                    return error.SnapshotTooLarge;
+                try self.projectedJsonValueWithKnownCredentials(
+                    writer,
+                    skill.display_name,
+                );
+                writer.writeAll(",\"argumentValues\":[") catch
+                    return error.SnapshotTooLarge;
+                for (skill.argument_values, 0..) |value, index| {
+                    if (index != 0) writer.writeByte(',') catch
+                        return error.SnapshotTooLarge;
+                    try self.projectedJsonValueWithKnownCredentials(
+                        writer,
+                        value,
+                    );
+                }
+                writer.print("],\"redacted\":{}}}", .{skill.redacted}) catch
+                    return error.SnapshotTooLarge;
+            },
         }
         writer.writeAll(",\"assistant\":") catch return error.SnapshotTooLarge;
         try self.projectedJsonValueWithKnownCredentials(
@@ -4871,6 +5028,46 @@ fn worstCaseSnapshotBytes(limits: Limits) ?usize {
         total,
         std.math.mul(usize, limits.max_tasks, task_snapshot_overhead) catch return null,
     ) catch return null;
+    const catalog_skill_structure = std.math.add(
+        usize,
+        catalog_skill_snapshot_overhead,
+        std.math.mul(
+            usize,
+            limits.max_skill_arguments,
+            catalog_argument_snapshot_overhead,
+        ) catch return null,
+    ) catch return null;
+    const catalog_structure = std.math.add(
+        usize,
+        catalog_snapshot_overhead,
+        std.math.add(
+            usize,
+            std.math.mul(
+                usize,
+                limits.max_catalog_skills,
+                catalog_skill_structure,
+            ) catch return null,
+            std.math.mul(
+                usize,
+                limits.max_catalog_issues,
+                catalog_issue_snapshot_overhead,
+            ) catch return null,
+        ) catch return null,
+    ) catch return null;
+    const catalog_copies = std.math.add(
+        usize,
+        limits.max_workspaces,
+        limits.max_tasks,
+    ) catch return null;
+    total = std.math.add(
+        usize,
+        total,
+        std.math.mul(
+            usize,
+            catalog_copies,
+            catalog_structure,
+        ) catch return null,
+    ) catch return null;
     const runs = std.math.mul(usize, limits.max_tasks, limits.max_runs_per_task) catch return null;
     total = std.math.add(
         usize,
@@ -4976,6 +5173,9 @@ fn testWorkbench() !Workbench {
         .max_tools_per_run = 2,
         .max_projection_bytes = 64 * 1024,
         .max_workspace_bytes = 1024,
+        .max_catalog_skills = 8,
+        .max_catalog_issues = 8,
+        .max_skill_arguments = 8,
         .max_user_message_bytes = 1024,
         .max_assistant_message_bytes = 32 * 1024,
         .max_tool_field_bytes = 8 * 1024,
@@ -5294,6 +5494,33 @@ test "Workbench snapshot serializer matches the Renderer contract fixture" {
     );
     try std.testing.expect(
         std.mem.indexOf(u8, snapshot, "\"baseUrl\"") == null,
+    );
+}
+
+test "Skill catalog snapshot reports redaction without exposing credential bytes" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    const skills = [_]SkillProjection{.{
+        .skill_id = "builtin.review",
+        .invocation_name = "review",
+        .display_name = "Review",
+        .description = "Review SECRET-KEY usage",
+        .argument_names = &.{"target"},
+        .max_values = 1,
+    }};
+    var storage: [2048]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&storage);
+    try workbench.writeCatalogProjection(&writer, .{
+        .availability = .ready,
+        .revision = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        .skills = &skills,
+    });
+    const encoded = writer.buffered();
+    try std.testing.expect(
+        std.mem.indexOf(u8, encoded, "\"redacted\":true") != null,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(u8, encoded, "SECRET-KEY") == null,
     );
 }
 

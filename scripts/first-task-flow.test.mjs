@@ -59,12 +59,14 @@ test("the first send uses Host generations and creates one Task before its Run",
         workspaceId,
         expectedWorkspaceEpoch,
         expectedExecutionGeneration,
+        expectedSkillCatalogRevision,
       ) {
         calls.push([
           "create",
           workspaceId,
           expectedWorkspaceEpoch,
           expectedExecutionGeneration,
+          expectedSkillCatalogRevision,
         ]);
         return {
           accepted: true,
@@ -73,8 +75,8 @@ test("the first send uses Host generations and creates one Task before its Run",
           reason: null,
         };
       },
-      async run(taskId, expectedBindingEpoch, instruction) {
-        calls.push(["run", taskId, expectedBindingEpoch, instruction]);
+      async run(taskId, expectedBindingEpoch, input) {
+        calls.push(["run", taskId, expectedBindingEpoch, input]);
         return { accepted: true, taskId, runId: "9", reason: null };
       },
     },
@@ -87,8 +89,8 @@ test("the first send uses Host generations and creates one Task before its Run",
     onTaskCreated: (taskId) => created.push(taskId),
   });
   assert.deepEqual(calls, [
-    ["create", "7", "5", "19"],
-    ["run", "41", "8", "Ship a working product"],
+    ["create", "7", "5", "19", null],
+    ["run", "41", "8", { kind: "text", text: "Ship a working product" }],
   ]);
   assert.deepEqual(created, ["41"]);
   assert.deepEqual(result, { kind: "started", taskId: "41", created: true });
@@ -222,10 +224,10 @@ test("sending on an existing Task uses its binding epoch and never creates", asy
           reason: null,
         };
       },
-      async run(taskId, expectedBindingEpoch, instruction) {
+      async run(taskId, expectedBindingEpoch, input) {
         assert.equal(taskId, "9");
         assert.equal(expectedBindingEpoch, "12");
-        assert.equal(instruction, "Continue");
+        assert.deepEqual(input, { kind: "text", text: "Continue" });
         return { accepted: true, taskId, runId: "10", reason: null };
       },
     },

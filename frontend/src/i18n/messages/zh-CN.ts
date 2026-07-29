@@ -370,6 +370,11 @@ export const zhCN: Record<MessageId, string> = {
   "cause.queue_capacity_failure": "工作台容量已满",
   "cause.ui_pipeline_failure": "回复传递失败",
   "cause.dependency_contract_failure": "任务运行环境已不兼容",
+  "cause.stale_catalog": "Skill 未开始执行：所选目录已过期",
+  "cause.skill_not_found": "Skill 未开始执行：所选 Skill 已不可用",
+  "cause.invalid_skill_arguments": "Skill 未开始执行：参数被拒绝",
+  "cause.skill_policy_violation": "Skill 未开始执行：当前任务不允许使用",
+  "cause.skill_unavailable": "Skill 未开始执行：无法加载该 Skill",
   "account.options_updated":
     "\u53ef\u7528\u9009\u9879\u5df2\u66f4\u65b0\uff0c\u8bf7\u91cd\u65b0\u9009\u62e9\u3002",
   "workspace.selection_unavailable":
@@ -387,6 +392,12 @@ export const zhCN: Record<MessageId, string> = {
   "mutation.reason.binding_unavailable": "任务的执行配置已不可用。",
   "mutation.reason.task_unavailable": "该任务已不可用。",
   "mutation.reason.task_busy": "该任务正在执行中。",
+  "mutation.reason.catalog_loading":
+    "Skill 仍在加载；你可以先发送文本，或稍后重试。",
+  "mutation.reason.catalog_unavailable": "当前工作区或任务无法使用 Skill。",
+  "mutation.reason.stale_catalog": "Skill 目录已变化，请刷新后重新选择。",
+  "mutation.reason.skill_not_found": "所选 Skill 已不在当前任务目录中。",
+  "mutation.reason.invalid_skill_arguments": "请检查 Skill 参数后重试。",
   "mutation.reason.capacity_reached":
     "MetaWork 当前容量已满，请结束部分工作后重试。",
   "mutation.reason.shutting_down": "MetaWork 正在关闭，请重启后重试。",

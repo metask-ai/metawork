@@ -797,7 +797,10 @@ test("Renderer Bridge fixed revision 1 owns the exact product wire catalog", () 
   const handlers = read("src/bridge/handlers.zig");
   assert.match(handlers, /expectedWorkspaceEpoch/);
   assert.match(handlers, /expectedExecutionGeneration/);
+  assert.match(handlers, /expectedSkillCatalogRevision/);
   assert.match(handlers, /expectedBindingEpoch/);
+  assert.match(handlers, /parseTaskRunInput/);
+  assert.doesNotMatch(handlers, /\bprompt\s*:/);
   assert.doesNotMatch(
     handlers,
     /workspaceGrant|workspaceRoot|apiKeyId|modelId/,
@@ -816,12 +819,23 @@ test("Renderer Bridge fixed revision 1 owns the exact product wire catalog", () 
   assert.match(projection, /\\"account\\":/);
   assert.match(projection, /\\"workspaces\\":\[/);
   assert.match(projection, /\\"tasks\\":\[/);
+  assert.match(projection, /\\"skillCatalog\\":/);
+  assert.match(projection, /\\"input\\":/);
+  assert.doesNotMatch(projection, /\\"user\\":/);
   assert.match(projection, /pub fn createTask/);
   assert.match(projection, /pub fn runTask/);
   assert.doesNotMatch(projection, /host_shutdown|\\"sessions\\":\[/);
   assert.doesNotMatch(
     projection,
     /const SessionView|pub fn submit|max_runs_per_session/,
+  );
+  assert.doesNotMatch(
+    dispatcher,
+    /runSkill|sessionRunSkill|skill_catalog_release/,
+  );
+  assert.match(
+    dispatcher,
+    /commands\.refresh_workspace_skill_catalog[\s\S]*commands\.refresh_task_skill_catalog/,
   );
 
   const contracts = read("frontend/src/bridge/contracts.ts");

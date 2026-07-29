@@ -34,6 +34,61 @@ test("the canonical Workbench fixture decodes without normalization", () => {
   assert.deepEqual(decodeWorkbenchSnapshot(fixture), fixture);
 });
 
+test("Skill catalogs and typed Skill history decode without exposing loader internals", () => {
+  const withSkill = clone(fixture);
+  const catalog = {
+    availability: "degraded",
+    redacted: false,
+    revision: "catalog-revision",
+    skills: [
+      {
+        skillId: "builtin.review",
+        invocationName: "review",
+        displayName: "Review",
+        description: "Review a target",
+        argumentNames: ["target", "focus"],
+        maxValues: 2,
+      },
+    ],
+    issues: [
+      {
+        code: "invalid_resource",
+        invocationName: "broken-skill",
+      },
+    ],
+  };
+  withSkill.workspaces[0].skillCatalog = catalog;
+  withSkill.tasks[0].skillCatalog = clone(catalog);
+  withSkill.tasks[0].runs[0].input = {
+    kind: "skill",
+    skillId: "builtin.review",
+    catalogRevision: "catalog-revision",
+    invocationName: "review",
+    displayName: "Review",
+    argumentValues: ["src/main.zig", "correctness"],
+    redacted: false,
+  };
+  assert.deepEqual(decodeWorkbenchSnapshot(withSkill), withSkill);
+  assert.equal(JSON.stringify(withSkill).includes("skillBody"), false);
+  assert.equal(JSON.stringify(withSkill).includes("sourcePath"), false);
+
+  const staleProjection = clone(withSkill);
+  staleProjection.tasks[0].skillCatalog.availability = "unavailable";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(staleProjection),
+    /availability and revision must agree/,
+  );
+
+  const duplicateIdentity = clone(withSkill);
+  duplicateIdentity.tasks[0].skillCatalog.skills.push(
+    clone(duplicateIdentity.tasks[0].skillCatalog.skills[0]),
+  );
+  assert.throws(
+    () => decodeWorkbenchSnapshot(duplicateIdentity),
+    /identities must be unique/,
+  );
+});
+
 test("Account command acknowledgements preserve state-machine and attempt identity", () => {
   assert.deepEqual(
     decodeAccountCommandResult({
@@ -159,6 +214,11 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   const secretField = clone(fixture);
   secretField.account.apiKey = "must-never-cross-Bridge";
   assert.throws(() => decodeWorkbenchSnapshot(secretField), /expected keys/);
+
+  const legacyRunInput = clone(fixture);
+  legacyRunInput.tasks[0].runs[0].user = "inspect";
+  delete legacyRunInput.tasks[0].runs[0].input;
+  assert.throws(() => decodeWorkbenchSnapshot(legacyRunInput), /expected keys/);
 
   const invalidReadyAccount = clone(fixture);
   invalidReadyAccount.account.executionGeneration = "0";

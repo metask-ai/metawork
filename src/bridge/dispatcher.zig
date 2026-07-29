@@ -128,6 +128,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.choose_workspace, .function = chooseWorkspace },
             .{ .name = commands.select_workspace, .function = selectWorkspace },
             .{ .name = commands.remove_workspace, .function = removeWorkspace },
+            .{ .name = commands.refresh_workspace_skill_catalog, .function = refreshWorkspaceSkillCatalog },
             .{ .name = commands.snapshot, .function = beginSnapshot },
             .{ .name = commands.snapshot_chunk, .function = fetchSnapshotChunk },
             .{ .name = commands.account_begin_login, .function = accountBeginLogin },
@@ -140,6 +141,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.account_logout, .function = accountLogout },
             .{ .name = commands.create_task, .function = createTask },
             .{ .name = commands.run, .function = runTask },
+            .{ .name = commands.refresh_task_skill_catalog, .function = refreshTaskSkillCatalog },
             .{ .name = commands.cancel, .function = cancelTask },
             .{ .name = commands.respond_ui, .function = respondUi },
             .{ .name = commands.close_task, .function = closeTask },
@@ -721,12 +723,14 @@ pub const Dispatcher = struct {
         const execution_generation = try handlers.parseWireId(
             parsed.value.expectedExecutionGeneration,
         );
+        if (parsed.value.expectedSkillCatalogRevision) |revision|
+            if (revision.len == 0) return error.InvalidBridgePayload;
         const workbench = try self.requireWorkbench();
         const task_id = workbench.createTaskInWorkspace(
             workspace_id,
             workspace_epoch,
             execution_generation,
-            null,
+            parsed.value.expectedSkillCatalogRevision,
         ) catch |err| {
             if (taskCreateRejection(err)) |reason|
                 return encodeTaskCreateResult(output, false, null, null, reason);
@@ -754,13 +758,29 @@ pub const Dispatcher = struct {
             128 * 1024,
         );
         defer parsed.deinit();
+        var input = try handlers.parseTaskRunInput(parsed.value.input);
+        defer input.deinit();
         const task_id = try handlers.parseWireId(parsed.value.taskId);
         const binding_epoch = try handlers.parseWireId(parsed.value.expectedBindingEpoch);
-        if (parsed.value.prompt.len == 0) return error.EmptyPrompt;
+        const workbench_input: workbench_api.TaskRunInput = switch (input.value) {
+            .text => |text| text_input: {
+                if (text.len == 0) return error.EmptyPrompt;
+                break :text_input .{ .text = text };
+            },
+            .skill => |skill| skill_input: {
+                if (skill.skill_id.len == 0 or skill.catalog_revision.len == 0)
+                    return error.InvalidBridgePayload;
+                break :skill_input .{ .skill = .{
+                    .skill_id = skill.skill_id,
+                    .catalog_revision = skill.catalog_revision,
+                    .argument_values = skill.argument_values,
+                } };
+            },
+        };
         const run_id = (try self.requireWorkbench()).runTaskAtBinding(
             task_id,
             binding_epoch,
-            .{ .text = parsed.value.prompt },
+            workbench_input,
         ) catch |err| {
             if (taskRunRejection(err)) |reason|
                 return encodeTaskRunResult(output, false, task_id, null, reason);
@@ -772,6 +792,91 @@ pub const Dispatcher = struct {
             true,
             task_id,
             run_id,
+            null,
+        );
+    }
+
+    fn refreshWorkspaceSkillCatalog(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(
+            handlers.WorkspaceIdentity,
+            invocation.request.payload,
+        );
+        defer parsed.deinit();
+        const workspace_id = try handlers.parseWireId(parsed.value.workspaceId);
+        const expected_epoch = try handlers.parseWireId(
+            parsed.value.expectedWorkspaceEpoch,
+        );
+        const workbench = try self.requireWorkbench();
+        workbench.refreshWorkspaceCatalog(
+            workspace_id,
+            expected_epoch,
+        ) catch |err| {
+            if (catalogRefreshRejection(err)) |reason|
+                return encodeCatalogRefreshResult(
+                    output,
+                    false,
+                    "workspaceId",
+                    workspace_id,
+                    reason,
+                );
+            return err;
+        };
+        self.notifyCommitted();
+        return encodeCatalogRefreshResult(
+            output,
+            true,
+            "workspaceId",
+            workspace_id,
+            null,
+        );
+    }
+
+    fn refreshTaskSkillCatalog(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(
+            handlers.TaskCatalogRefresh,
+            invocation.request.payload,
+        );
+        defer parsed.deinit();
+        const task_id = try handlers.parseWireId(parsed.value.taskId);
+        const expected_binding_epoch = try handlers.parseWireId(
+            parsed.value.expectedBindingEpoch,
+        );
+        (try self.requireWorkbench()).refreshTaskCatalog(
+            task_id,
+            expected_binding_epoch,
+        ) catch |err| {
+            if (catalogRefreshRejection(err)) |reason|
+                return encodeCatalogRefreshResult(
+                    output,
+                    false,
+                    "taskId",
+                    task_id,
+                    reason,
+                );
+            return err;
+        };
+        self.notifyCommitted();
+        return encodeCatalogRefreshResult(
+            output,
+            true,
+            "taskId",
+            task_id,
             null,
         );
     }
@@ -1015,7 +1120,10 @@ fn taskCreateRejection(err: anyerror) ?[]const u8 {
         error.WorkspaceEpochMismatch => "workspace_changed",
         error.UnknownWorkspace, error.WorkspaceUnavailable => "workspace_unavailable",
         error.WorkspaceRemovalInProgress => "workspace_removing",
-        error.TaskCapacity => "capacity_reached",
+        error.CatalogLoading => "catalog_loading",
+        error.CatalogUnavailable => "catalog_unavailable",
+        error.StaleCatalog => "stale_catalog",
+        error.TaskCapacity, error.ProjectionCapacity => "capacity_reached",
         error.ExecutorShuttingDown => "shutting_down",
         else => null,
     };
@@ -1028,8 +1136,32 @@ fn taskRunRejection(err: anyerror) ?[]const u8 {
         error.UnknownTask, error.TaskClosing => "task_unavailable",
         error.TaskBusy => "task_busy",
         error.UnknownWorkspace, error.WorkspaceUnavailable => "workspace_unavailable",
+        error.WorkspaceEpochMismatch => "workspace_changed",
         error.WorkspaceRemovalInProgress => "workspace_removing",
-        error.RunCapacity, error.QueueFull => "capacity_reached",
+        error.CatalogUnavailable => "catalog_unavailable",
+        error.StaleCatalog => "stale_catalog",
+        error.SkillNotFound => "skill_not_found",
+        error.InvalidSkillArguments => "invalid_skill_arguments",
+        error.RunCapacity, error.QueueFull, error.ProjectionCapacity => "capacity_reached",
+        error.ExecutorShuttingDown => "shutting_down",
+        else => null,
+    };
+}
+
+fn catalogRefreshRejection(err: anyerror) ?[]const u8 {
+    return switch (err) {
+        error.WorkspaceEpochMismatch => "workspace_changed",
+        error.BindingEpochMismatch => "binding_changed",
+        error.UnknownWorkspace, error.WorkspaceUnavailable => "workspace_unavailable",
+        error.UnknownTask, error.TaskClosing => "task_unavailable",
+        error.WorkspaceRemovalInProgress => "workspace_removing",
+        error.TaskBusy => "task_busy",
+        error.CatalogLoading => "catalog_loading",
+        error.CatalogUnavailable => "catalog_unavailable",
+        error.CatalogRequestGenerationExhausted,
+        error.ProjectionCapacity,
+        error.QueueFull,
+        => "capacity_reached",
         error.ExecutorShuttingDown => "shutting_down",
         else => null,
     };
@@ -1118,6 +1250,30 @@ fn encodeTaskRunResult(
     writer.writeAll(",\"reason\":") catch return error.NoSpaceLeft;
     if (reason) |value|
         std.json.Stringify.value(value, .{}, &writer) catch return error.NoSpaceLeft
+    else
+        writer.writeAll("null") catch return error.NoSpaceLeft;
+    writer.writeByte('}') catch return error.NoSpaceLeft;
+    return writer.buffered();
+}
+
+fn encodeCatalogRefreshResult(
+    output: []u8,
+    accepted: bool,
+    identity_name: []const u8,
+    identity: u64,
+    reason: ?[]const u8,
+) ![]const u8 {
+    if (identity == 0 or accepted != (reason == null))
+        return error.InvalidCatalogRefreshResult;
+    var writer = std.Io.Writer.fixed(output);
+    writer.print("{{\"accepted\":{},\"{s}\":\"{d}\",\"reason\":", .{
+        accepted,
+        identity_name,
+        identity,
+    }) catch return error.NoSpaceLeft;
+    if (reason) |value|
+        std.json.Stringify.value(value, .{}, &writer) catch
+            return error.NoSpaceLeft
     else
         writer.writeAll("null") catch return error.NoSpaceLeft;
     writer.writeByte('}') catch return error.NoSpaceLeft;
@@ -1688,9 +1844,25 @@ test "Dispatcher validates authority before domain calls and preserves committed
         "\"reason\":\"workspace_changed\"",
     ) != null);
 
+    const refresh_workspace_request = try std.fmt.bufPrint(
+        &workspace_request_storage,
+        "{{\"id\":\"refresh-skills\",\"command\":\"metawork.workspaces.refreshSkillCatalog\",\"payload\":{{\"workspaceId\":\"{d}\",\"expectedWorkspaceEpoch\":\"1\"}}}}",
+        .{workspace_id},
+    );
+    const refresh_workspace = native_dispatcher.dispatch(
+        refresh_workspace_request,
+        source,
+        &response,
+    );
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        refresh_workspace,
+        "\"reason\":\"catalog_unavailable\"",
+    ) != null);
+
     const stale_create = try std.fmt.bufPrint(
         &workspace_request_storage,
-        "{{\"id\":\"stale-create\",\"command\":\"metawork.tasks.create\",\"payload\":{{\"workspaceId\":\"{d}\",\"expectedWorkspaceEpoch\":\"1\",\"expectedExecutionGeneration\":\"99\"}}}}",
+        "{{\"id\":\"stale-create\",\"command\":\"metawork.tasks.create\",\"payload\":{{\"workspaceId\":\"{d}\",\"expectedWorkspaceEpoch\":\"1\",\"expectedExecutionGeneration\":\"99\",\"expectedSkillCatalogRevision\":null}}}}",
         .{workspace_id},
     );
     const rejected_create = native_dispatcher.dispatch(
@@ -1707,7 +1879,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
     var request_storage: [256]u8 = undefined;
     const request = try std.fmt.bufPrint(
         &request_storage,
-        "{{\"id\":\"create\",\"command\":\"metawork.tasks.create\",\"payload\":{{\"workspaceId\":\"{d}\",\"expectedWorkspaceEpoch\":\"1\",\"expectedExecutionGeneration\":\"1\"}}}}",
+        "{{\"id\":\"create\",\"command\":\"metawork.tasks.create\",\"payload\":{{\"workspaceId\":\"{d}\",\"expectedWorkspaceEpoch\":\"1\",\"expectedExecutionGeneration\":\"1\",\"expectedSkillCatalogRevision\":null}}}}",
         .{workspace_id},
     );
     var lost_response: [32]u8 = undefined;
