@@ -156,6 +156,62 @@ test "Workbench pins an async catalog and admits typed Skill through the existin
     try std.testing.expect(input_matches);
 }
 
+test "Workspace reauthorization reschedules the latest catalog query" {
+    fake_core.reset();
+    fake_core.setCatalogPlan(.controlled);
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_sessions = 1,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    const home = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        ".",
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(home);
+    var workbench = try workbench_api.Workbench.init(
+        std.testing.allocator,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 2,
+            .max_workspaces = 1,
+            .max_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        .{ .directories = .{ .canonical_user_home = home } },
+    );
+    defer workbench.deinit();
+    defer fake_core.releaseCatalogQuery();
+    try installWorkbenchExecution(&workbench);
+
+    const workspace_id = try workbench.openWorkspace(workbenchTaskInput());
+    fake_core.waitCatalogQueryEntered();
+    try workbench.removeWorkspace(workspace_id);
+    const reauthorized_id = try workbench.openWorkspace(workbenchTaskInput());
+    try std.testing.expectEqual(workspace_id, reauthorized_id);
+    try std.testing.expectEqual(
+        workbench_api.CatalogAvailability.loading,
+        (try workbench.workspaceCatalog(workspace_id)).availability,
+    );
+
+    fake_core.setCatalogPlan(.healthy);
+    fake_core.releaseCatalogQuery();
+    _ = try waitCatalogReady(&workbench, workspace_id);
+    fake_core.lock();
+    const catalog_queries = fake_core.catalog_queries;
+    const catalog_releases = fake_core.catalog_releases;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 2), catalog_queries);
+    try std.testing.expectEqual(@as(usize, 1), catalog_releases);
+}
+
 test "Workbench rejects stale Skill identity before Session or Run mutation and releases catalog on shutdown" {
     fake_core.reset();
     const runtime = try createTestComposition(.{

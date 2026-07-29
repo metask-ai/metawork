@@ -144,6 +144,7 @@ pub const CatalogIssueProjection = struct {
 
 pub const CatalogProjection = struct {
     availability: CatalogAvailability,
+    redacted: bool = false,
     revision: []const u8 = "",
     skills: []const SkillProjection = &.{},
     issues: []const CatalogIssueProjection = &.{},
@@ -601,6 +602,7 @@ const CatalogSnapshot = struct {
     skills: []const SkillProjection,
     issues: []const CatalogIssueProjection,
     projected_bytes: usize,
+    redacted: bool = false,
 
     fn init(
         allocator: std.mem.Allocator,
@@ -734,6 +736,7 @@ const CatalogSnapshot = struct {
             .skills = skills,
             .issues = issues,
             .projected_bytes = self.projected_bytes,
+            .redacted = self.redacted,
         };
     }
 
@@ -743,6 +746,7 @@ const CatalogSnapshot = struct {
                 .healthy => .ready,
                 .degraded => .degraded,
             },
+            .redacted = self.redacted,
             .revision = self.revision,
             .skills = self.skills,
             .issues = self.issues,
@@ -756,6 +760,51 @@ const CatalogSnapshot = struct {
         for (self.skills) |*skill|
             if (std.mem.eql(u8, skill.skill_id, skill_id)) return skill;
         return null;
+    }
+
+    fn identityContainsCredential(
+        self: *const CatalogSnapshot,
+        credential: []const u8,
+    ) bool {
+        if (credential.len == 0) return false;
+        if (std.mem.indexOf(u8, self.revision, credential) != null) return true;
+        for (self.skills) |skill|
+            if (std.mem.indexOf(u8, skill.skill_id, credential) != null or
+                std.mem.indexOf(u8, skill.invocation_name, credential) != null)
+                return true;
+        return false;
+    }
+
+    fn redactPresentationNoFail(
+        self: *CatalogSnapshot,
+        credential: []const u8,
+    ) void {
+        var redacted = false;
+        for (self.skills) |*skill| {
+            redacted = redactFixedWidthNoFail(
+                @constCast(skill.display_name),
+                credential,
+            ) or redacted;
+            redacted = redactFixedWidthNoFail(
+                @constCast(skill.description),
+                credential,
+            ) or redacted;
+            for (skill.argument_names) |name| {
+                redacted = redactFixedWidthNoFail(
+                    @constCast(name),
+                    credential,
+                ) or redacted;
+            }
+        }
+        for (self.issues) |*issue| {
+            if (issue.invocation_name) |name| {
+                redacted = redactFixedWidthNoFail(
+                    @constCast(name),
+                    credential,
+                ) or redacted;
+            }
+        }
+        self.redacted = self.redacted or redacted;
     }
 
     fn deinit(self: *CatalogSnapshot) void {
@@ -816,6 +865,7 @@ const WorkspaceView = struct {
     catalog_availability: CatalogAvailability = .uninitialized,
     catalog_request_generation: u64 = 0,
     catalog_job: ?*CatalogJob = null,
+    catalog_reschedule_pending: bool = false,
     catalog_lease: ?*lifecycle.CatalogLease = null,
     catalog: ?CatalogSnapshot = null,
 };
@@ -1420,9 +1470,15 @@ pub const Workbench = struct {
         const workspace = try self.upsertWorkspace(input);
         self.selected_workspace_id = workspace.id;
         workspace.recent_order = recent_order;
-        if (workspace.catalog_availability == .uninitialized)
-            self.scheduleCatalogQuery(workspace) catch
-                self.markWorkspaceCatalogUnavailable(workspace);
+        if (workspace.catalog_availability == .uninitialized) {
+            if (workspace.catalog_job != null) {
+                workspace.catalog_reschedule_pending = true;
+                workspace.catalog_availability = .loading;
+            } else {
+                self.scheduleCatalogQuery(workspace) catch
+                    self.markWorkspaceCatalogUnavailable(workspace);
+            }
+        }
         self.bumpRevision();
         return workspace.id;
     }
@@ -1900,7 +1956,13 @@ pub const Workbench = struct {
                         self.limits.max_skill_arguments,
                     ))
                     return error.InvalidSkillArguments;
-                var argument_bytes: usize = 0;
+                var argument_bytes = std.math.add(
+                    usize,
+                    skill.skill_id.len,
+                    pinned.revision.len,
+                ) catch return error.ProjectionCapacity;
+                if (argument_bytes > self.limits.max_user_message_bytes)
+                    return error.ProjectionCapacity;
                 for (skill_input.argument_values) |value| {
                     if (!std.unicode.utf8ValidateSlice(value))
                         return error.InvalidSkillArguments;
@@ -2696,7 +2758,7 @@ pub const Workbench = struct {
     ) Error!void {
         writer.print("{{\"availability\":\"{s}\",\"redacted\":{},\"revision\":", .{
             @tagName(catalog.availability),
-            self.catalogContainsKnownCredential(catalog),
+            catalog.redacted or self.catalogContainsKnownCredential(catalog),
         }) catch return error.SnapshotTooLarge;
         switch (catalog.availability) {
             .ready, .degraded => try self.projectedJsonValueWithKnownCredentials(
@@ -2995,6 +3057,8 @@ pub const Workbench = struct {
             if (reauthorizing) {
                 self.markWorkspaceCatalogUnavailable(workspace);
                 workspace.catalog_availability = .uninitialized;
+                workspace.catalog_reschedule_pending =
+                    workspace.catalog_job != null;
                 workspace.epoch += 1;
             }
             self.redactWorkspaceProjectionNoFail(
@@ -3134,6 +3198,7 @@ pub const Workbench = struct {
         });
         workspace.catalog_request_generation = generation;
         workspace.catalog_job = job;
+        workspace.catalog_reschedule_pending = false;
         workspace.catalog_availability = .loading;
     }
 
@@ -3145,6 +3210,11 @@ pub const Workbench = struct {
             const state = job.state.load(.acquire);
             if (state == .queued or state == .running) continue;
             workspace.catalog_job = null;
+            const reschedule = workspace.catalog_reschedule_pending and
+                workspace.visible and
+                workspace.authorization == .available and
+                !self.shutting_down;
+            workspace.catalog_reschedule_pending = false;
             const current = self.findWorkspace(job.workspace_id);
             const still_current = current == workspace and
                 workspace.epoch == job.workspace_epoch and
@@ -3208,6 +3278,9 @@ pub const Workbench = struct {
                 .queued, .running => unreachable,
             }
             job.deinit();
+            if (reschedule)
+                self.scheduleCatalogQuery(workspace) catch
+                    self.markWorkspaceCatalogUnavailable(workspace);
             changed = true;
         }
         return changed;
@@ -3300,6 +3373,7 @@ pub const Workbench = struct {
 
     fn deinitWorkspaceView(self: *Workbench, workspace: *WorkspaceView) void {
         std.debug.assert(workspace.catalog_job == null);
+        std.debug.assert(!workspace.catalog_reschedule_pending);
         if (workspace.catalog) |*snapshot| {
             self.projection_bytes -= snapshot.projected_bytes;
             snapshot.deinit();
@@ -3335,9 +3409,36 @@ pub const Workbench = struct {
     ) void {
         if (credential.len == 0) return;
         self.redactWorkspaceProjectionsNoFail(credential);
+        self.redactCatalogProjectionsNoFail(credential);
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
             self.redactTaskProjectionNoFail(task, credential);
+        }
+    }
+
+    fn redactCatalogProjectionsNoFail(
+        self: *Workbench,
+        credential: []const u8,
+    ) void {
+        for (self.workspaces) |*entry| {
+            const workspace = &(entry.* orelse continue);
+            const snapshot = if (workspace.catalog) |*value| value else continue;
+            if (snapshot.identityContainsCredential(credential)) {
+                self.markWorkspaceCatalogUnavailable(workspace);
+            } else {
+                snapshot.redactPresentationNoFail(credential);
+            }
+        }
+        for (self.tasks) |*entry| {
+            const task = &(entry.* orelse continue);
+            const snapshot = if (task.pinned_catalog) |*value| value else continue;
+            if (snapshot.identityContainsCredential(credential)) {
+                self.projection_bytes -= snapshot.projected_bytes;
+                snapshot.deinit();
+                task.pinned_catalog = null;
+            } else {
+                snapshot.redactPresentationNoFail(credential);
+            }
         }
     }
 
@@ -3369,9 +3470,17 @@ pub const Workbench = struct {
                 },
                 .skill => |*skill| {
                     var redacted = redactFixedWidthNoFail(
-                        skill.invocation_name,
+                        skill.skill_id,
                         credential,
                     );
+                    redacted = redactFixedWidthNoFail(
+                        skill.catalog_revision,
+                        credential,
+                    ) or redacted;
+                    redacted = redactFixedWidthNoFail(
+                        skill.invocation_name,
+                        credential,
+                    ) or redacted;
                     redacted = redactFixedWidthNoFail(
                         skill.display_name,
                         credential,
@@ -5522,6 +5631,103 @@ test "Skill catalog snapshot reports redaction without exposing credential bytes
     try std.testing.expect(
         std.mem.indexOf(u8, encoded, "SECRET-KEY") == null,
     );
+}
+
+test "credential release permanently scrubs catalog and every Skill history field" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    const source_skills = [_]lifecycle.CatalogSkill{.{
+        .skill_id = "builtin.review",
+        .invocation_name = "review",
+        .display_name = "Review SECRET-KEY",
+        .description = "Review SECRET-KEY usage",
+        .argument_names = &.{"SECRET-KEY target"},
+        .max_values = 1,
+    }};
+    const workspace_catalog = try CatalogSnapshot.init(
+        workbench.allocator,
+        .{
+            .revision = "safe-revision",
+            .health = .healthy,
+            .skills = &source_skills,
+            .issues = &.{},
+            .storage = undefined,
+        },
+        workbench.limits,
+        workbench.limits.max_projection_bytes - workbench.projection_bytes,
+    );
+    const task_catalog = try workspace_catalog.clone(
+        workbench.allocator,
+        workbench.limits,
+        workbench.limits.max_projection_bytes -
+            workbench.projection_bytes -
+            workspace_catalog.projected_bytes,
+    );
+    workbench.projection_bytes += workspace_catalog.projected_bytes;
+    workbench.workspaces[0].?.catalog = workspace_catalog;
+    workbench.workspaces[0].?.catalog_availability = .ready;
+    workbench.projection_bytes += task_catalog.projected_bytes;
+    workbench.tasks[0].?.pinned_catalog = task_catalog;
+
+    const task = &workbench.tasks[0].?;
+    const run = &task.runs[0].?;
+    const history_input: RunInputRecord = history: {
+        const skill_id = try workbench.copyBounded(
+            "history-SECRET-KEY",
+            workbench.limits.max_catalog_projection_bytes,
+        );
+        errdefer workbench.freeTracked(skill_id);
+        const revision = try workbench.copyBounded(
+            "revision-SECRET-KEY",
+            workbench.limits.max_catalog_projection_bytes,
+        );
+        errdefer workbench.freeTracked(revision);
+        const invocation = try workbench.copyBounded(
+            "review-SECRET-KEY",
+            workbench.limits.max_catalog_projection_bytes,
+        );
+        errdefer workbench.freeTracked(invocation);
+        const display = try workbench.copyBounded(
+            "Review SECRET-KEY",
+            workbench.limits.max_catalog_projection_bytes,
+        );
+        errdefer workbench.freeTracked(display);
+        const values = try workbench.allocator.alloc([]u8, 1);
+        errdefer workbench.allocator.free(values);
+        values[0] = try workbench.copyBounded(
+            "SECRET-KEY target",
+            workbench.limits.max_user_message_bytes,
+        );
+        errdefer workbench.freeTracked(values[0]);
+        break :history .{ .skill = .{
+            .skill_id = skill_id,
+            .catalog_revision = revision,
+            .invocation_name = invocation,
+            .display_name = display,
+            .argument_values = values,
+        } };
+    };
+    workbench.deinitRunInputRecord(&run.input);
+    run.input = history_input;
+
+    workbench.redactAllProductProjectionsNoFail("SECRET-KEY");
+    workbench.execution.clearNoFail();
+    if (task.execution) |*execution| {
+        execution.deinit();
+        task.execution = null;
+    }
+    run.redaction_secret = &.{};
+
+    var storage: [16 * 1024]u8 = undefined;
+    const snapshot = try workbench.writeSnapshot(&storage);
+    try std.testing.expect(
+        std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(u8, snapshot, "\"redacted\":true") != null,
+    );
+    try std.testing.expect(workbench.workspaces[0].?.catalog.?.redacted);
+    try std.testing.expect(workbench.tasks[0].?.pinned_catalog.?.redacted);
 }
 
 test "mutation admission rejects stale execution and binding facts" {

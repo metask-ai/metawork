@@ -82,6 +82,7 @@ pub const FakeCatalog = struct {
 
 pub const CatalogPlan = enum {
     healthy,
+    controlled,
     duplicate_skill_id,
     malformed,
     query_failure,
@@ -172,6 +173,7 @@ pub const FakeSession = struct {
 
 pub const FakeCore = struct {
     mutex: std.Io.Mutex = .init,
+    catalog_condition: std.Io.Condition = .init,
     runtime: FakeRuntime = .{},
     catalogs: [16]FakeCatalog = [_]FakeCatalog{.{}} ** 16,
     sessions: [16]FakeSession = [_]FakeSession{.{}} ** 16,
@@ -183,6 +185,8 @@ pub const FakeCore = struct {
     catalog_releases: usize = 0,
     catalog_refreshes: usize = 0,
     catalog_plan: CatalogPlan = .healthy,
+    catalog_query_entered: bool = false,
+    allow_catalog_query: bool = false,
     session_created: usize = 0,
     session_destroyed: usize = 0,
     run_calls: usize = 0,
@@ -226,6 +230,23 @@ pub const FakeCore = struct {
     pub fn setCatalogPlan(self: *FakeCore, plan: CatalogPlan) void {
         self.lock();
         self.catalog_plan = plan;
+        self.unlock();
+    }
+
+    pub fn waitCatalogQueryEntered(self: *FakeCore) void {
+        self.lock();
+        defer self.unlock();
+        while (!self.catalog_query_entered)
+            self.catalog_condition.waitUncancelable(
+                std.testing.io,
+                &self.mutex,
+            );
+    }
+
+    pub fn releaseCatalogQuery(self: *FakeCore) void {
+        self.lock();
+        self.allow_catalog_query = true;
+        self.catalog_condition.broadcast(std.testing.io);
         self.unlock();
     }
 
@@ -503,6 +524,15 @@ pub fn runtimeQuerySkillCatalog(
     fake_core.catalog_queries += 1;
     fake_core.workspace_home_seen = true;
     fake_core.workspace_epoch_seen = true;
+    if (fake_core.catalog_plan == .controlled) {
+        fake_core.catalog_query_entered = true;
+        fake_core.catalog_condition.broadcast(std.testing.io);
+        while (!fake_core.allow_catalog_query)
+            fake_core.catalog_condition.waitUncancelable(
+                std.testing.io,
+                &fake_core.mutex,
+            );
+    }
     if (fake_core.catalog_plan == .query_failure) {
         diagnostic(out_error);
         return wire.STATUS_SKILL_CATALOG_INVALID;
@@ -513,6 +543,7 @@ pub fn runtimeQuerySkillCatalog(
         out_catalog.?.* = @ptrCast(catalog_entry);
         const descriptor: []const u8 = switch (fake_core.catalog_plan) {
             .healthy => healthy_catalog_json,
+            .controlled => healthy_catalog_json,
             .duplicate_skill_id => duplicate_catalog_json,
             .malformed => "{}",
             .query_failure => unreachable,
