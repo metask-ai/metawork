@@ -374,7 +374,7 @@ export const zhCN: Record<MessageId, string> = {
   "cause.skill_not_found": "Skill 未开始执行：所选 Skill 已不可用",
   "cause.invalid_skill_arguments": "Skill 未开始执行：参数被拒绝",
   "cause.skill_policy_violation": "Skill 未开始执行：当前任务不允许使用",
-  "cause.skill_unavailable": "Skill 未开始执行：无法加载该 Skill",
+  "cause.skill_unavailable": "Skill 未开始执行：当前执行环境不支持该 Skill",
   "account.options_updated":
     "\u53ef\u7528\u9009\u9879\u5df2\u66f4\u65b0\uff0c\u8bf7\u91cd\u65b0\u9009\u62e9\u3002",
   "workspace.selection_unavailable":

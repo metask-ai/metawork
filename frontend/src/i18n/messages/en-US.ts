@@ -416,7 +416,7 @@ export const enUS = {
   "cause.skill_policy_violation":
     "Skill execution did not start because it is not allowed in this task",
   "cause.skill_unavailable":
-    "Skill execution did not start because the skill could not be loaded",
+    "Skill execution did not start because it is unavailable in the current execution environment",
   "workspace.selection_unavailable":
     "That workspace is no longer available. Refresh and choose another one.",
   "account.options_updated":
