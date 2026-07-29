@@ -695,7 +695,25 @@ test("Workbench owns Task lifecycle, continuation, and canonical redaction", () 
   assert.match(closeWorker, /notifier\.notify\(\)/);
   assert.doesNotMatch(closeWorker, /requestWake\(\)/);
   assert.match(workbench, /sanitizeInto\(\s*run\.terminal_diagnostic/);
-  assert.match(workbench, /copyProjected\(\s*prompt/);
+  assert.match(
+    workbench,
+    /fn copyRunInputRecord[\s\S]*\.text =>[\s\S]*copyProjected\(/,
+  );
+  assert.match(workbench, /const RunInputRecord = union\(enum\)/);
+  assert.match(workbench, /const CatalogJob = struct/);
+  assert.match(
+    workbench,
+    /executor\.enqueue\(\.\{[\s\S]*execute_fn = executeCatalogJob/,
+  );
+  assert.match(
+    workbench,
+    /commitCatalogJobsNoFail[\s\S]*workspace\.epoch == job\.workspace_epoch[\s\S]*catalog_request_generation == job\.request_generation/,
+  );
+  assert.match(
+    read("src/app.zig"),
+    /resolveCanonicalUserHome[\s\S]*\.canonical_user_home = canonical_user_home/,
+  );
+  assert.doesNotMatch(read("src/bridge/dispatcher.zig"), /canonical_user_home/);
   assert.match(workbench, /replaceTrackedProjected\(\s*&view\.title/);
   assert.match(taskRecord, /execution: \?OwnedTaskExecution/);
   assert.match(workbench, /const OwnedTaskExecution = struct/);
@@ -836,7 +854,7 @@ test("lifecycle tests are grouped by invariant", () => {
   const cases = [
     ["tests/agent/lifecycle_test.zig", 37],
     ["tests/agent/event_pump_test.zig", 5],
-    ["tests/workbench/executor_lifecycle_test.zig", 9],
+    ["tests/workbench/executor_lifecycle_test.zig", 12],
     ["tests/integration/lifecycle/lifecycle_test.zig", 4],
   ];
   for (const [path, expectedCount] of cases) {

@@ -30,7 +30,7 @@
 
 已批准的新基线是 Metask AgentCore ABI v1 revision 4。它在既有 RunContext、typed status/StopReason、CoreEvent/UI codec 和同步 Run 语义上增加 AgentCore-owned Skill catalog snapshot、Session catalog binding/refresh 与 tagged Text/Skill Run input。精确 API layout、artifact identity、payload 和 manifest schema 只由 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)定义。MetaWork 对它执行 hard cut：active build、Host、probe 和规范文档只接受 revision 4，不保留 revision 3 parser、function table、Run payload 或 fallback。
 
-当前 checkout 的 repository locks、verifier、build graph、staged bundle 和纯 Text Host baseline 已切到 revision 4；macOS 与 Windows artifacts 均来自 clean source commit `ac2584da8bfcf18ed74c7b2738fb4c784f714579`。Catalog、Workbench、Bridge 与 Renderer Slash vertical 仍须按 [实施方案](agent-interaction-entry-decision.md)完成后才可声明整个产品能力通过；历史 revision 3 迁移事实不构成兼容要求。
+当前 checkout 的 repository locks、verifier、build graph、staged bundle、Agent catalog lease/typed Run surface，以及 Workbench catalog ownership/typed admission 已切到 revision 4；macOS 与 Windows artifacts 均来自 clean source commit `ac2584da8bfcf18ed74c7b2738fb4c784f714579`。Bridge 与 Renderer Slash vertical 仍须按 [实施方案](agent-interaction-entry-decision.md)完成后才可声明整个产品能力通过；历史 revision 3 迁移事实不构成兼容要求。
 
 该 baseline 不包含：
 
@@ -167,6 +167,10 @@ production 网络接入受 [Metask Account API 合同](metask-account-contract.m
 因此“默认配置切换”和“历史 Task rebind”是两种不同 mutation：前者不触碰既有 Task，后者只由用户对单个只读 Task 明确发起，并受 optimistic epoch 与 admission 校验保护。
 
 Workspace 是 Workbench-owned 产品对象，而不是 Renderer 从 Task 路径派生的 convenience view。Renderer Bridge 固定 revision 1 发布 stable identity、optimistic epoch、canonical root、display label、authorization/removal outcome 与聚合 Task signals；一次性目录能力由 Bridge/Native capability 生成并在同一 `workspaces.choose` Host 命令内消费，Renderer 只得到 Workspace identity。Task 创建绑定 expected execution generation，后续 Run 绑定 expected binding epoch，Workspace mutation 绑定 expected Workspace epoch；Host 对 window、ownership、catalog membership 与 admission 重新校验。预期业务拒绝编码为严格 typed result，非法 payload 与 authority failure 仍走 Bridge failure；合同不接受被当前形态取代的临时 payload 或兼容字段。
+
+App 在 composition 时只解析一次 existing canonical user home，并以 immutable capability 注入 Workbench；Renderer、Bridge payload 和 Workspace selection 都不能覆盖。Workbench 把 AgentCore catalog discovery 作为现有 bounded Executor 的一种 job：worker 只产生 Agent-owned acquisition，主线程按 Workspace id、epoch 和 request generation 提交或丢弃。Workspace current catalog 持有唯一 opaque lease 与有界产品 projection；Task 创建在 Agent Session 前完成容量证明并复制独立 pinned projection，同步借用 current lease 绑定 Session。Task refresh 只从已经提交的 Workspace catalog 进行、只允许 idle Session，并在 Agent refresh 成功后替换 pinned projection。shutdown 先停止/join Executor、收口 catalog job 并释放全部 Workspace lease，再允许 Agent Runtime destroy；不建立第二 scheduler、隐式文件监听或 Renderer Skill loader。
+
+Workbench `TaskRunInput` 只有 Text/Skill 两个分支。Skill admission 在建立 Run record 前校验 Workspace/Task epoch、pinned revision、稳定 `skill_id`、参数数量、UTF-8 与产品容量；Run history 保存 admission 时的 invocation/display/arguments，不随后续 catalog 改写。AgentCore 仍负责最终参数、资源和 policy 校验；`stale_catalog`、`skill_not_found`、`invalid_skill_arguments`、`skill_policy_violation` 与 `skill_unavailable` 形成独立产品 cause，保持 Session 可复用且不自动刷新或重放。
 
 Workbench 单独分配稳定的产品 Task identity，并在 Task owner 内保存 Agent Session route identity；AgentCore event 与 event-projection failure 都只按 route identity 回到 owner，Bridge snapshot 与 mutation 只使用产品 Task identity，二者不共享生成器也不依赖数值相等。Task binding descriptor 包含无 secret 的 account/profile、API、Provider、model、generation 与 binding epoch；内部执行使用的 raw model 与 Renderer projection 的 selection identity 分开持有。
 

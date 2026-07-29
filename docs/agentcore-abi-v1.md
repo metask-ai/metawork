@@ -1,9 +1,9 @@
 # MetaWork AgentCore ABI v1 revision 4 消费合同
 
-> 状态：revision 4 exact artifacts、Agent catalog ownership 与 typed Text/Skill Agent surface 已通过；Workbench、Bridge 与 Renderer Slash vertical 正在实施，不声明 stable support policy
+> 状态：revision 4 exact artifacts、Agent catalog/typed Run surface 与 Workbench catalog/admission 已通过；Bridge 与 Renderer Slash vertical 正在实施，不声明 stable support policy
 > 所有者：Metask AgentCore 负责 facade、bindings、bundle 和兼容政策；MetaWork 负责精确消费验证
 
-本文记录 MetaWork 对 AgentCore binary ABI version 1 revision 4 的消费边界。线程、事件泵和 Host 生命周期见 [AgentCore 集成契约](agentcore-integration.md)，当前验收要求见 [验证规范](validation.md)。当前实现的 repository locks、verifier、canonical staged bundle、official SDK、Agent catalog lease 与 typed Text/Skill Agent surface 已 hard cut；Workbench、Bridge 与 Renderer Slash vertical 仍按 [实施方案](agent-interaction-entry-decision.md)推进。
+本文记录 MetaWork 对 AgentCore binary ABI version 1 revision 4 的消费边界。线程、事件泵和 Host 生命周期见 [AgentCore 集成契约](agentcore-integration.md)，当前验收要求见 [验证规范](validation.md)。当前实现的 repository locks、verifier、canonical staged bundle、official SDK、Agent catalog lease/typed Text/Skill surface 与 Workbench catalog/admission 已 hard cut；Bridge 与 Renderer Slash vertical 仍按 [实施方案](agent-interaction-entry-decision.md)推进。
 
 ## 1. 版本含义
 
@@ -272,7 +272,7 @@ candidate probe 不导入 MetaWork Agent，也不承担 Runtime/Session、真实
 
 ### staged 正式 Host gate
 
-> revision 4 exact artifacts、candidate/stage、typed SDK discovery、Agent catalog ownership、typed Text/Skill Agent surface 与本机 Native test 已通过。Workbench catalog/admission、Composer Slash、完整 macOS/Windows vertical 和 package 仍须按实施方案完成；revision 3 不构成兼容要求。
+> revision 4 exact artifacts、candidate/stage、typed SDK discovery、Agent catalog ownership、typed Text/Skill Agent surface、Workbench catalog/admission 与本机 Native test 已通过。Composer Slash、完整 macOS/Windows vertical 和 package 仍须按实施方案完成；revision 3 不构成兼容要求。
 
 - typed SDK 完成并通过 source-free consumer；
 - status-before-result 和 diagnostic release 测试；

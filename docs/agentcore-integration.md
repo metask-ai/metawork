@@ -1,6 +1,6 @@
 # MetaWork AgentCore 集成契约
 
-> 状态：AgentCore ABI v1 revision 4 macOS 与 Windows exact artifacts 已锁定，typed Skill 产品链正在实施；fault-domain 验证选择单 AgentCore Worker 作为后续正式方向
+> 状态：AgentCore ABI v1 revision 4 macOS 与 Windows exact artifacts、Agent typed surface 与 Workbench catalog/admission 已完成，Bridge/Renderer Slash vertical 正在实施；fault-domain 验证选择单 AgentCore Worker 作为后续正式方向
 > 目标依赖：Metask AgentCore ABI v1 revision 4；精确 artifact identity 见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)
 
 本文定义 MetaWork `agent/` 执行子系统与 Metask AgentCore 之间的规范边界。Desktop Host 的 composition、Workbench 产品状态和 Bridge transport 见 [高层架构](architecture.md)，revision 4 目标能力见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。
@@ -206,6 +206,10 @@ Agent Runtime 的 catalog query 是同步 Core 调用；调用在哪条受界线
 - opaque catalog lease：内部持有 AgentCore handle 及 root/home/epoch/Runtime owner 绑定，只能同步借给 Session create 或 idle refresh，并由原 Runtime 精确 release 一次。
 
 projection 的销毁不释放 lease，lease 的释放也不使已经复制的 projection 失效。Session create/refresh 必须拒绝另一 Runtime、Workspace、home 或 epoch 的 lease；refresh 在 queued/running/waiting/closing 状态 fail closed。Runtime shutdown 先阻止新 query，等待正在执行的 catalog call 收敛，并在仍有 lease 时明确返回 `CatalogLeasesOutstanding` 而不销毁 Core Runtime；上层释放 lease 后可重试同一 shutdown。实际 catalog 缓存、刷新合并、Task admission 和状态投影归 Workbench，Agent 不在内部隐式监听文件变化。
+
+当前 Workbench 已将 catalog discovery 接入同一 bounded Executor。worker 使用 App-owned canonical home 和 Workspace root/epoch query；主线程只提交仍匹配 Workspace id、epoch、request generation、authorization 和 Runtime 生命周期的结果，过期/取消结果立即释放 projection 与 lease。Workspace current catalog 与每个 Task 的 pinned catalog 分离；创建 Task 时先复制并计入全局 projection budget，再同步借用 current lease 创建 Session。loading/unavailable 仍允许 text-only Task；只要 App home 可用，Session 仍保存同一 epoch，以便后续用户显式 idle refresh。Workbench shutdown join catalog/Run jobs 并释放 Workspace leases 后，App 才销毁 Agent Runtime。
+
+Workbench 的 typed Skill admission 在 `Session.prepareRun` 前验证 pinned revision、skill identity、参数数量、UTF-8、Workspace/Task epoch 和容量。RunRecord 保存 admission 时的稳定 Skill 身份、invocation/display 与参数副本；五类 AgentCore Skill rejection 映射为独立产品 cause，不 poison Session、不自动刷新和不重放用户动作。
 
 每个 Session 拥有独立分配、存活到 Session release 的 `SessionControlBlock`。`RunControlLease` 用 closed-bit + atomic reference count 保活该 control block，并携带单调 `run_generation`；旧 lease 在下一 Run 复用执行槽后返回 `stale_run`，Run 自然完成后返回 `already_terminal`。Session close 先关闭 lease acquisition gate，再等待 Run、callback 和全部 control lease 归零；该 quiescence wait 不持有 Session/Workbench lock。`Run.execute()` 返回 immutable `TerminalResult`，worker 在释放 execution base lease 前将它提交到 Workbench admission 时预留的 write-once terminal payload。Workbench executor worker 入队前取得的 Task-owned stable record reference 归零前，所属 Task 即使已关闭并请求删除也只进入 `delete_pending`；不存在只被测试消费的第二套公开 record-reference 协议。
 

@@ -726,6 +726,7 @@ pub const Dispatcher = struct {
             workspace_id,
             workspace_epoch,
             execution_generation,
+            null,
         ) catch |err| {
             if (taskCreateRejection(err)) |reason|
                 return encodeTaskCreateResult(output, false, null, null, reason);
@@ -759,7 +760,7 @@ pub const Dispatcher = struct {
         const run_id = (try self.requireWorkbench()).runTaskAtBinding(
             task_id,
             binding_epoch,
-            parsed.value.prompt,
+            .{ .text = parsed.value.prompt },
         ) catch |err| {
             if (taskRunRejection(err)) |reason|
                 return encodeTaskRunResult(output, false, task_id, null, reason);

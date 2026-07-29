@@ -34,6 +34,12 @@ pub const Error = lifecycle.Error || std.mem.Allocator.Error || std.Thread.Spawn
     WorkspaceRemovalInProgress,
     WorkspaceEpochMismatch,
     WorkspaceEpochExhausted,
+    CatalogLoading,
+    CatalogUnavailable,
+    CatalogRequestGenerationExhausted,
+    StaleCatalog,
+    SkillNotFound,
+    InvalidSkillArguments,
     EventAfterTerminalDrain,
 };
 
@@ -46,6 +52,10 @@ pub const Limits = struct {
     max_tools_per_run: usize = 32,
     max_projection_bytes: usize = 512 * 1024,
     max_workspace_bytes: usize = 16 * 1024,
+    max_catalog_projection_bytes: usize = 64 * 1024,
+    max_catalog_skills: usize = 128,
+    max_catalog_issues: usize = 128,
+    max_skill_arguments: usize = 64,
     max_task_title_bytes: usize = 512,
     max_user_message_bytes: usize = 64 * 1024,
     max_assistant_message_bytes: usize = 256 * 1024,
@@ -70,6 +80,15 @@ pub const TaskWorkspaceTrust = union(enum) {
 pub const TaskCreateInput = struct {
     workspace_root: []const u8,
     trust: TaskWorkspaceTrust,
+};
+
+pub const TaskRunInput = union(enum) {
+    text: []const u8,
+    skill: struct {
+        skill_id: []const u8,
+        catalog_revision: []const u8,
+        argument_values: []const []const u8,
+    },
 };
 
 pub const WorkspaceAuthorization = enum {
@@ -101,6 +120,35 @@ pub const WorkspaceProjection = struct {
     signals: WorkspaceSignals,
 };
 
+pub const CatalogAvailability = enum {
+    uninitialized,
+    loading,
+    ready,
+    degraded,
+    unavailable,
+};
+
+pub const SkillProjection = struct {
+    skill_id: []const u8,
+    invocation_name: []const u8,
+    display_name: []const u8,
+    description: []const u8,
+    argument_names: []const []const u8,
+    max_values: u32,
+};
+
+pub const CatalogIssueProjection = struct {
+    code: lifecycle.CatalogIssueCode,
+    invocation_name: ?[]const u8,
+};
+
+pub const CatalogProjection = struct {
+    availability: CatalogAvailability,
+    revision: []const u8 = "",
+    skills: []const SkillProjection = &.{},
+    issues: []const CatalogIssueProjection = &.{},
+};
+
 pub const ExecutionIdentity = struct {
     generation: u64,
     provider: Provider,
@@ -126,8 +174,13 @@ pub const UiResponse = union(enum) {
     permission: PermissionChoice,
 };
 
+pub const AppDirectories = struct {
+    canonical_user_home: ?[]const u8 = null,
+};
+
 pub const Configuration = struct {
     change_notifier: ChangeNotifier = .{},
+    directories: AppDirectories = .{},
 };
 
 const json_string_expansion: usize = 6;
@@ -194,6 +247,11 @@ const RunCause = enum {
     event_pipeline_failure,
     queue_capacity_failure,
     ui_pipeline_failure,
+    stale_catalog,
+    skill_not_found,
+    invalid_skill_arguments,
+    skill_policy_violation,
+    skill_unavailable,
     dependency_contract_failure,
 };
 
@@ -326,14 +384,28 @@ const TerminalPayload = struct {
     diagnostic_redacted: bool = false,
 };
 
+const RunInputRecord = union(enum) {
+    text: struct {
+        value: []u8,
+        redacted: bool = false,
+    },
+    skill: struct {
+        skill_id: []u8,
+        catalog_revision: []u8,
+        invocation_name: []u8,
+        display_name: []u8,
+        argument_values: [][]u8,
+        redacted: bool = false,
+    },
+};
+
 const RunRecord = struct {
     id: u64,
     generation: u64,
     execution_generation: u64,
     execution_provider: Provider,
     execution_model: []const u8,
-    user: []u8,
-    user_redacted: bool = false,
+    input: RunInputRecord,
     assistant: TrackedText = .{},
     assistant_redacted: bool = false,
     active_phase: RunPhase = .queued,
@@ -405,7 +477,9 @@ const TaskView = struct {
     binding_model_id: []u8,
     binding_model_display_name: []u8,
     workspace_id: u64,
+    workspace_epoch: u64 = 1,
     workspace_root: []u8,
+    pinned_catalog: ?CatalogSnapshot = null,
     title: []u8,
     title_redacted: bool = false,
     archived: bool = false,
@@ -516,6 +590,211 @@ const WorkspaceTrust = union(enum) {
     temporary: []u8,
 };
 
+const CatalogSnapshot = struct {
+    arena: std.heap.ArenaAllocator,
+    revision: []const u8,
+    health: lifecycle.CatalogHealth,
+    skills: []const SkillProjection,
+    issues: []const CatalogIssueProjection,
+    projected_bytes: usize,
+
+    fn init(
+        allocator: std.mem.Allocator,
+        source: lifecycle.CatalogProjection,
+        limits: Limits,
+        available_projection_bytes: usize,
+    ) Error!CatalogSnapshot {
+        if (source.skills.len > limits.max_catalog_skills or
+            source.issues.len > limits.max_catalog_issues)
+            return error.ProjectionCapacity;
+        var projected_bytes = source.revision.len;
+        for (source.skills) |skill| {
+            if (skill.argument_names.len > limits.max_skill_arguments)
+                return error.ProjectionCapacity;
+            inline for (.{
+                skill.skill_id,
+                skill.invocation_name,
+                skill.display_name,
+                skill.description,
+            }) |field| {
+                projected_bytes = try addCatalogProjectionBytes(
+                    projected_bytes,
+                    field.len,
+                    limits,
+                    available_projection_bytes,
+                );
+            }
+            for (skill.argument_names) |name|
+                projected_bytes = try addCatalogProjectionBytes(
+                    projected_bytes,
+                    name.len,
+                    limits,
+                    available_projection_bytes,
+                );
+        }
+        for (source.issues) |issue| {
+            if (issue.invocation_name) |name|
+                projected_bytes = try addCatalogProjectionBytes(
+                    projected_bytes,
+                    name.len,
+                    limits,
+                    available_projection_bytes,
+                );
+        }
+        if (projected_bytes > limits.max_catalog_projection_bytes or
+            projected_bytes > available_projection_bytes)
+            return error.ProjectionCapacity;
+
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        errdefer arena.deinit();
+        const owned = arena.allocator();
+        const skills = try owned.alloc(SkillProjection, source.skills.len);
+        for (source.skills, skills) |skill, *target| {
+            const argument_names = try owned.alloc(
+                []const u8,
+                skill.argument_names.len,
+            );
+            for (skill.argument_names, argument_names) |name, *target_name|
+                target_name.* = try owned.dupe(u8, name);
+            target.* = .{
+                .skill_id = try owned.dupe(u8, skill.skill_id),
+                .invocation_name = try owned.dupe(u8, skill.invocation_name),
+                .display_name = try owned.dupe(u8, skill.display_name),
+                .description = try owned.dupe(u8, skill.description),
+                .argument_names = argument_names,
+                .max_values = skill.max_values,
+            };
+        }
+        const issues = try owned.alloc(
+            CatalogIssueProjection,
+            source.issues.len,
+        );
+        for (source.issues, issues) |issue, *target| target.* = .{
+            .code = issue.code,
+            .invocation_name = if (issue.invocation_name) |name|
+                try owned.dupe(u8, name)
+            else
+                null,
+        };
+        return .{
+            .arena = arena,
+            .revision = try owned.dupe(u8, source.revision),
+            .health = source.health,
+            .skills = skills,
+            .issues = issues,
+            .projected_bytes = projected_bytes,
+        };
+    }
+
+    fn clone(
+        self: *const CatalogSnapshot,
+        allocator: std.mem.Allocator,
+        limits: Limits,
+        available_projection_bytes: usize,
+    ) Error!CatalogSnapshot {
+        if (self.projected_bytes > limits.max_catalog_projection_bytes or
+            self.projected_bytes > available_projection_bytes)
+            return error.ProjectionCapacity;
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        errdefer arena.deinit();
+        const owned = arena.allocator();
+        const skills = try owned.alloc(SkillProjection, self.skills.len);
+        for (self.skills, skills) |skill, *target| {
+            const argument_names = try owned.alloc(
+                []const u8,
+                skill.argument_names.len,
+            );
+            for (skill.argument_names, argument_names) |name, *target_name|
+                target_name.* = try owned.dupe(u8, name);
+            target.* = .{
+                .skill_id = try owned.dupe(u8, skill.skill_id),
+                .invocation_name = try owned.dupe(u8, skill.invocation_name),
+                .display_name = try owned.dupe(u8, skill.display_name),
+                .description = try owned.dupe(u8, skill.description),
+                .argument_names = argument_names,
+                .max_values = skill.max_values,
+            };
+        }
+        const issues = try owned.alloc(CatalogIssueProjection, self.issues.len);
+        for (self.issues, issues) |issue, *target| target.* = .{
+            .code = issue.code,
+            .invocation_name = if (issue.invocation_name) |name|
+                try owned.dupe(u8, name)
+            else
+                null,
+        };
+        return .{
+            .arena = arena,
+            .revision = try owned.dupe(u8, self.revision),
+            .health = self.health,
+            .skills = skills,
+            .issues = issues,
+            .projected_bytes = self.projected_bytes,
+        };
+    }
+
+    fn view(self: *const CatalogSnapshot) CatalogProjection {
+        return .{
+            .availability = switch (self.health) {
+                .healthy => .ready,
+                .degraded => .degraded,
+            },
+            .revision = self.revision,
+            .skills = self.skills,
+            .issues = self.issues,
+        };
+    }
+
+    fn findSkill(
+        self: *const CatalogSnapshot,
+        skill_id: []const u8,
+    ) ?*const SkillProjection {
+        for (self.skills) |*skill|
+            if (std.mem.eql(u8, skill.skill_id, skill_id)) return skill;
+        return null;
+    }
+
+    fn deinit(self: *CatalogSnapshot) void {
+        self.arena.deinit();
+        self.* = undefined;
+    }
+};
+
+const CatalogJobState = enum(u8) {
+    queued,
+    running,
+    completed,
+    cancelled,
+};
+
+const CatalogJobOutcome = union(enum) {
+    success: lifecycle.CatalogAcquisition,
+    failure,
+};
+
+const CatalogJob = struct {
+    allocator: std.mem.Allocator,
+    runtime: *lifecycle.Runtime,
+    notifier: ChangeNotifier,
+    workspace_id: u64,
+    workspace_epoch: u64,
+    request_generation: u64,
+    canonical_root: []u8,
+    canonical_user_home: []u8,
+    epoch_token: []u8,
+    state: std.atomic.Value(CatalogJobState) = .init(.queued),
+    outcome: CatalogJobOutcome = .failure,
+
+    fn deinit(self: *CatalogJob) void {
+        self.allocator.free(self.epoch_token);
+        self.allocator.free(self.canonical_user_home);
+        self.allocator.free(self.canonical_root);
+        const allocator = self.allocator;
+        self.* = undefined;
+        allocator.destroy(self);
+    }
+};
+
 const WorkspaceView = struct {
     id: u64,
     epoch: u64 = 1,
@@ -530,6 +809,11 @@ const WorkspaceView = struct {
     last_removal_failure: WorkspaceRemovalFailure = .none,
     visible: bool = true,
     recent_order: u64,
+    catalog_availability: CatalogAvailability = .uninitialized,
+    catalog_request_generation: u64 = 0,
+    catalog_job: ?*CatalogJob = null,
+    catalog_lease: ?*lifecycle.CatalogLease = null,
+    catalog: ?CatalogSnapshot = null,
 };
 
 fn FixedText(comptime capacity: usize) type {
@@ -912,6 +1196,7 @@ pub const Workbench = struct {
     revision: u64 = 0,
     account: AccountProjection,
     execution: ActiveExecution,
+    canonical_user_home: ?[]u8,
     execution_replacement_pending: bool = false,
     selected_workspace_id: u64 = 0,
     next_workspace_id: u64 = 1,
@@ -930,6 +1215,10 @@ pub const Workbench = struct {
             limits.max_runs_per_task == 0 or
             limits.max_tools_per_run == 0 or limits.max_projection_bytes == 0 or
             limits.max_workspace_bytes == 0 or
+            limits.max_catalog_projection_bytes == 0 or
+            limits.max_catalog_skills == 0 or
+            limits.max_catalog_issues == 0 or
+            limits.max_skill_arguments == 0 or
             limits.max_task_title_bytes == 0 or
             limits.max_user_message_bytes == 0 or limits.max_assistant_message_bytes == 0 or
             limits.max_tool_field_bytes == 0 or limits.max_pending_ui_json_bytes == 0 or
@@ -943,6 +1232,20 @@ pub const Workbench = struct {
         errdefer account.deinit();
         var execution = try ActiveExecution.init(allocator);
         errdefer execution.deinit();
+        const canonical_user_home = if (configuration.directories.canonical_user_home) |home| home_copy: {
+            if (home.len == 0 or !std.fs.path.isAbsolute(home) or
+                !std.unicode.utf8ValidateSlice(home))
+                return error.InvalidWorkspace;
+            const resolved = std.Io.Dir.realPathFileAbsoluteAlloc(
+                agent_runtime.io,
+                home,
+                allocator,
+            ) catch return error.InvalidWorkspace;
+            defer allocator.free(resolved);
+            if (!std.mem.eql(u8, resolved, home)) return error.InvalidWorkspace;
+            break :home_copy try allocator.dupe(u8, home);
+        } else null;
+        errdefer if (canonical_user_home) |home| allocator.free(home);
         const workspaces = try allocator.alloc(?WorkspaceView, limits.max_workspaces);
         errdefer allocator.free(workspaces);
         @memset(workspaces, null);
@@ -966,6 +1269,7 @@ pub const Workbench = struct {
             .executor = executor,
             .account = account,
             .execution = execution,
+            .canonical_user_home = canonical_user_home,
         };
     }
 
@@ -1112,8 +1416,97 @@ pub const Workbench = struct {
         const workspace = try self.upsertWorkspace(input);
         self.selected_workspace_id = workspace.id;
         workspace.recent_order = recent_order;
+        if (workspace.catalog_availability == .uninitialized)
+            self.scheduleCatalogQuery(workspace) catch
+                self.markWorkspaceCatalogUnavailable(workspace);
         self.bumpRevision();
         return workspace.id;
+    }
+
+    pub fn workspaceCatalog(
+        self: *Workbench,
+        workspace_id: u64,
+    ) Error!CatalogProjection {
+        self.syncLifecycle();
+        const workspace = self.findWorkspace(workspace_id) orelse
+            return error.UnknownWorkspace;
+        return catalogProjection(
+            workspace.catalog_availability,
+            if (workspace.catalog) |*snapshot| snapshot else null,
+        );
+    }
+
+    pub fn taskCatalog(
+        self: *Workbench,
+        task_id: u64,
+    ) Error!CatalogProjection {
+        self.syncLifecycle();
+        const task = self.findTask(task_id) orelse return error.UnknownTask;
+        return if (task.pinned_catalog) |*snapshot|
+            snapshot.view()
+        else
+            .{ .availability = .unavailable };
+    }
+
+    pub fn refreshWorkspaceCatalog(
+        self: *Workbench,
+        workspace_id: u64,
+        expected_workspace_epoch: u64,
+    ) Error!void {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        self.syncLifecycle();
+        const workspace = self.findWorkspace(workspace_id) orelse
+            return error.UnknownWorkspace;
+        if (workspace.epoch != expected_workspace_epoch)
+            return error.WorkspaceEpochMismatch;
+        if (!workspace.visible or workspace.authorization != .available)
+            return error.WorkspaceUnavailable;
+        if (workspace.catalog_job != null) return error.CatalogLoading;
+        try self.scheduleCatalogQuery(workspace);
+        self.bumpRevision();
+    }
+
+    pub fn refreshTaskCatalog(
+        self: *Workbench,
+        task_id: u64,
+        expected_binding_epoch: u64,
+    ) Error!void {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        self.syncLifecycle();
+        const task = self.findTask(task_id) orelse return error.UnknownTask;
+        if (task.binding_epoch != expected_binding_epoch)
+            return error.BindingEpochMismatch;
+        if (!self.taskContinuationAvailable(task) or hasNonTerminalRun(task))
+            return error.TaskBusy;
+        const workspace = self.findWorkspace(task.workspace_id) orelse
+            return error.WorkspaceUnavailable;
+        if (workspace.epoch != task.workspace_epoch)
+            return error.WorkspaceEpochMismatch;
+        const current = workspace.catalog orelse
+            return switch (workspace.catalog_availability) {
+                .loading => error.CatalogLoading,
+                else => error.CatalogUnavailable,
+            };
+        if (workspace.catalog_availability != .ready and
+            workspace.catalog_availability != .degraded)
+            return error.CatalogUnavailable;
+        const lease = workspace.catalog_lease orelse
+            return error.CatalogUnavailable;
+        var replacement = try current.clone(
+            self.allocator,
+            self.limits,
+            self.limits.max_projection_bytes - self.projection_bytes,
+        );
+        errdefer replacement.deinit();
+        const session = task.session orelse return error.TaskClosing;
+        try session.refreshSkillCatalog(lease);
+        if (task.pinned_catalog) |*old| {
+            self.projection_bytes -= old.projected_bytes;
+            old.deinit();
+        }
+        self.projection_bytes += replacement.projected_bytes;
+        task.pinned_catalog = replacement;
+        self.bumpRevision();
     }
 
     pub fn selectWorkspace(self: *Workbench, workspace_id: u64) Error!void {
@@ -1216,6 +1609,7 @@ pub const Workbench = struct {
             return error.WorkspaceRemovalInProgress;
         if (workspace.epoch == std.math.maxInt(u64))
             return error.WorkspaceEpochExhausted;
+        self.markWorkspaceCatalogUnavailable(workspace);
         workspace.epoch += 1;
         workspace.authorization = .removing;
         workspace.last_removal_failure = .none;
@@ -1252,6 +1646,7 @@ pub const Workbench = struct {
             workspace_id,
             (self.findWorkspace(workspace_id) orelse return error.UnknownWorkspace).epoch,
             self.execution.generation,
+            null,
         );
     }
 
@@ -1260,6 +1655,7 @@ pub const Workbench = struct {
         workspace_id: u64,
         expected_workspace_epoch: u64,
         expected_execution_generation: u64,
+        expected_skill_catalog_revision: ?[]const u8,
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
@@ -1282,6 +1678,33 @@ pub const Workbench = struct {
             return error.WorkspaceRemovalInProgress;
         if (workspace_view.authorization != .available)
             return error.WorkspaceUnavailable;
+        var pinned_catalog: ?CatalogSnapshot = null;
+        errdefer if (pinned_catalog) |*snapshot| {
+            self.projection_bytes -= snapshot.projected_bytes;
+            snapshot.deinit();
+        };
+        var catalog_lease: ?*lifecycle.CatalogLease = null;
+        switch (workspace_view.catalog_availability) {
+            .ready, .degraded => {
+                const current = workspace_view.catalog orelse
+                    return error.CatalogUnavailable;
+                if (expected_skill_catalog_revision) |expected|
+                    if (!std.mem.eql(u8, expected, current.revision))
+                        return error.StaleCatalog;
+                pinned_catalog = try current.clone(
+                    self.allocator,
+                    self.limits,
+                    self.limits.max_projection_bytes - self.projection_bytes,
+                );
+                self.projection_bytes += pinned_catalog.?.projected_bytes;
+                catalog_lease = workspace_view.catalog_lease orelse
+                    return error.CatalogUnavailable;
+            },
+            .loading => if (expected_skill_catalog_revision != null)
+                return error.CatalogLoading,
+            .uninitialized, .unavailable => if (expected_skill_catalog_revision != null)
+                return error.CatalogUnavailable,
+        }
         var task_execution = try self.execution.cloneOwned(self.allocator);
         errdefer task_execution.deinit();
         const task_execution_input = task_execution.input();
@@ -1356,6 +1779,12 @@ pub const Workbench = struct {
         @memset(ui_history, null);
         if (self.next_task_id == 0) return error.TaskIdentityExhausted;
         const task_id = self.next_task_id;
+        var epoch_storage: [32]u8 = undefined;
+        const epoch_token = std.fmt.bufPrint(
+            &epoch_storage,
+            "{d}",
+            .{workspace_view.epoch},
+        ) catch unreachable;
         const route = self.agent_runtime.createSessionRoute(.{
             .provider = agentProvider(accountProvider(task_execution_input.target.provider_kind)),
             .permission_mode = .default,
@@ -1367,6 +1796,12 @@ pub const Workbench = struct {
                 .canonical_root = canonical,
                 .trust = workspace_trust,
             },
+            .canonical_user_home = self.canonical_user_home orelse "",
+            .workspace_epoch = if (self.canonical_user_home != null)
+                epoch_token
+            else
+                "",
+            .skill_catalog = catalog_lease,
         }) catch |err| switch (err) {
             error.SessionCapacity => return error.TaskCapacity,
             else => return err,
@@ -1390,7 +1825,9 @@ pub const Workbench = struct {
             .binding_model_id = binding_model_id,
             .binding_model_display_name = binding_model_display_name,
             .workspace_id = workspace_id,
+            .workspace_epoch = workspace_view.epoch,
             .workspace_root = workspace,
+            .pinned_catalog = pinned_catalog,
             .title = title,
             .runs = runs,
             .ui_history = ui_history,
@@ -1399,11 +1836,15 @@ pub const Workbench = struct {
         return task_id;
     }
 
-    pub fn runTask(self: *Workbench, task_id: u64, prompt: []const u8) Error!u64 {
+    pub fn runTask(
+        self: *Workbench,
+        task_id: u64,
+        input: TaskRunInput,
+    ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
         const task = self.findTask(task_id) orelse return error.UnknownTask;
-        return self.runTaskAtBinding(task_id, task.binding_epoch, prompt);
+        return self.runTaskAtBinding(task_id, task.binding_epoch, input);
     }
 
     pub fn taskBindingEpoch(self: *Workbench, task_id: u64) Error!u64 {
@@ -1415,7 +1856,7 @@ pub const Workbench = struct {
         self: *Workbench,
         task_id: u64,
         expected_binding_epoch: u64,
-        prompt: []const u8,
+        input: TaskRunInput,
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
@@ -1431,13 +1872,53 @@ pub const Workbench = struct {
             return error.WorkspaceRemovalInProgress;
         if (workspace.authorization != .available)
             return error.WorkspaceUnavailable;
+        if (workspace.epoch != view.workspace_epoch)
+            return error.WorkspaceEpochMismatch;
         _ = try taskExecutionInput(view);
         if (hasNonTerminalRun(view)) return error.TaskBusy;
         const session = view.session orelse return error.TaskClosing;
+        const agent_input: lifecycle.RunInput = switch (input) {
+            .text => |text| .{ .text = text },
+            .skill => |skill_input| skill_admission: {
+                const pinned = view.pinned_catalog orelse
+                    return error.CatalogUnavailable;
+                if (!std.mem.eql(
+                    u8,
+                    skill_input.catalog_revision,
+                    pinned.revision,
+                ))
+                    return error.StaleCatalog;
+                const skill = pinned.findSkill(skill_input.skill_id) orelse
+                    return error.SkillNotFound;
+                if (skill_input.argument_values.len >
+                    @min(
+                        @as(usize, @intCast(skill.max_values)),
+                        self.limits.max_skill_arguments,
+                    ))
+                    return error.InvalidSkillArguments;
+                var argument_bytes: usize = 0;
+                for (skill_input.argument_values) |value| {
+                    if (!std.unicode.utf8ValidateSlice(value))
+                        return error.InvalidSkillArguments;
+                    argument_bytes = std.math.add(
+                        usize,
+                        argument_bytes,
+                        value.len,
+                    ) catch return error.ProjectionCapacity;
+                    if (argument_bytes > self.limits.max_user_message_bytes)
+                        return error.ProjectionCapacity;
+                }
+                break :skill_admission .{ .skill = .{
+                    .skill_id = skill.skill_id,
+                    .catalog_revision = pinned.revision,
+                    .argument_values = skill_input.argument_values,
+                } };
+            },
+        };
         const recent_order = try self.takeWorkspaceRecentOrder();
-        const run_id = try session.prepareRun(.{ .text = prompt });
+        const run_id = try session.prepareRun(agent_input);
         errdefer cancelPreparedRunOrPanic(session, run_id);
-        const slot = try self.reserveRunRecord(view, prompt);
+        const slot = try self.reserveRunRecord(view, input);
         errdefer self.discardRunRecord(view, slot);
         const run = &view.runs[slot].?;
         run.id = run_id;
@@ -1694,7 +2175,7 @@ pub const Workbench = struct {
     /// projection. It never allocates, so an effects wake cannot fail merely
     /// while publishing a terminal state.
     pub fn syncLifecycle(self: *Workbench) void {
-        var changed = false;
+        var changed = self.commitCatalogJobsNoFail();
         for (self.tasks) |*entry| {
             const view = &(entry.* orelse continue);
             if (view.delete_pending and view.lifecycle == .closed and view.close_thread == null and
@@ -2075,6 +2556,7 @@ pub const Workbench = struct {
             self.deinitWorkspaceView(workspace);
         }
         self.allocator.free(self.workspaces);
+        if (self.canonical_user_home) |home| self.allocator.free(home);
         self.execution.deinit();
         self.account.deinit();
         std.debug.assert(self.projection_bytes == 0);
@@ -2112,6 +2594,11 @@ pub const Workbench = struct {
         }
         self.executor.shutdown();
         self.executor_shutdown = true;
+        _ = self.commitCatalogJobsNoFail();
+        for (self.workspaces) |*entry| {
+            const workspace = &(entry.* orelse continue);
+            self.markWorkspaceCatalogUnavailable(workspace);
+        }
         self.syncLifecycle();
     }
 
@@ -2391,7 +2878,11 @@ pub const Workbench = struct {
                 .explicitly_trusted;
             workspace.authorization = .available;
             workspace.visible = true;
-            if (reauthorizing) workspace.epoch += 1;
+            if (reauthorizing) {
+                self.markWorkspaceCatalogUnavailable(workspace);
+                workspace.catalog_availability = .uninitialized;
+                workspace.epoch += 1;
+            }
             self.redactWorkspaceProjectionNoFail(
                 workspace,
                 self.execution.credential(),
@@ -2403,7 +2894,9 @@ pub const Workbench = struct {
         if (slot == null) {
             for (self.workspaces, 0..) |*entry, index| {
                 const workspace = &(entry.* orelse continue);
-                if (workspace.visible or self.workspaceHasTasks(workspace.id)) continue;
+                if (workspace.visible or workspace.catalog_job != null or
+                    self.workspaceHasTasks(workspace.id))
+                    continue;
                 self.deinitWorkspaceView(workspace);
                 entry.* = null;
                 slot = index;
@@ -2485,6 +2978,144 @@ pub const Workbench = struct {
         return null;
     }
 
+    fn scheduleCatalogQuery(
+        self: *Workbench,
+        workspace: *WorkspaceView,
+    ) Error!void {
+        if (workspace.catalog_job != null) return error.CatalogLoading;
+        const home = self.canonical_user_home orelse {
+            self.markWorkspaceCatalogUnavailable(workspace);
+            return error.CatalogUnavailable;
+        };
+        if (workspace.catalog_request_generation == std.math.maxInt(u64))
+            return error.CatalogRequestGenerationExhausted;
+        const generation = workspace.catalog_request_generation + 1;
+        const epoch_token = try std.fmt.allocPrint(
+            self.allocator,
+            "{d}",
+            .{workspace.epoch},
+        );
+        errdefer self.allocator.free(epoch_token);
+        const root = try self.allocator.dupe(u8, workspace.canonical_root);
+        errdefer self.allocator.free(root);
+        const owned_home = try self.allocator.dupe(u8, home);
+        errdefer self.allocator.free(owned_home);
+        const job = try self.allocator.create(CatalogJob);
+        errdefer self.allocator.destroy(job);
+        job.* = .{
+            .allocator = self.allocator,
+            .runtime = self.agent_runtime,
+            .notifier = self.change_notifier,
+            .workspace_id = workspace.id,
+            .workspace_epoch = workspace.epoch,
+            .request_generation = generation,
+            .canonical_root = root,
+            .canonical_user_home = owned_home,
+            .epoch_token = epoch_token,
+        };
+        try self.executor.enqueue(.{
+            .context = job,
+            .execute_fn = executeCatalogJob,
+            .cancel_fn = cancelCatalogJob,
+        });
+        workspace.catalog_request_generation = generation;
+        workspace.catalog_job = job;
+        workspace.catalog_availability = .loading;
+    }
+
+    fn commitCatalogJobsNoFail(self: *Workbench) bool {
+        var changed = false;
+        for (self.workspaces) |*entry| {
+            const workspace = &(entry.* orelse continue);
+            const job = workspace.catalog_job orelse continue;
+            const state = job.state.load(.acquire);
+            if (state == .queued or state == .running) continue;
+            workspace.catalog_job = null;
+            const current = self.findWorkspace(job.workspace_id);
+            const still_current = current == workspace and
+                workspace.epoch == job.workspace_epoch and
+                workspace.catalog_request_generation == job.request_generation and
+                workspace.visible and workspace.authorization == .available and
+                !self.shutting_down;
+            switch (state) {
+                .completed => switch (job.outcome) {
+                    .success => |*acquisition| {
+                        if (still_current) {
+                            const snapshot = CatalogSnapshot.init(
+                                self.allocator,
+                                acquisition.projection,
+                                self.limits,
+                                self.limits.max_projection_bytes -
+                                    self.projection_bytes,
+                            ) catch {
+                                acquisition.projection.deinit();
+                                self.agent_runtime.releaseSkillCatalog(
+                                    acquisition.lease,
+                                ) catch
+                                    @panic("Agent rejected a Workbench-owned catalog lease");
+                                workspace.catalog_availability = .unavailable;
+                                job.deinit();
+                                changed = true;
+                                continue;
+                            };
+                            acquisition.projection.deinit();
+                            const old_lease = workspace.catalog_lease;
+                            if (workspace.catalog) |*old| {
+                                self.projection_bytes -= old.projected_bytes;
+                                old.deinit();
+                            }
+                            self.projection_bytes += snapshot.projected_bytes;
+                            workspace.catalog = snapshot;
+                            workspace.catalog_lease = acquisition.lease;
+                            workspace.catalog_availability = switch (snapshot.health) {
+                                .healthy => .ready,
+                                .degraded => .degraded,
+                            };
+                            if (old_lease) |lease|
+                                self.agent_runtime.releaseSkillCatalog(lease) catch
+                                    @panic("Agent rejected a Workbench-owned catalog lease");
+                        } else {
+                            acquisition.projection.deinit();
+                            self.agent_runtime.releaseSkillCatalog(
+                                acquisition.lease,
+                            ) catch
+                                @panic("Agent rejected a stale Workbench catalog lease");
+                            if (current == workspace)
+                                self.markWorkspaceCatalogUnavailable(workspace);
+                        }
+                    },
+                    .failure => {
+                        if (still_current)
+                            workspace.catalog_availability = .unavailable;
+                    },
+                },
+                .cancelled => if (current == workspace)
+                    self.markWorkspaceCatalogUnavailable(workspace),
+                .queued, .running => unreachable,
+            }
+            job.deinit();
+            changed = true;
+        }
+        return changed;
+    }
+
+    fn markWorkspaceCatalogUnavailable(
+        self: *Workbench,
+        workspace: *WorkspaceView,
+    ) void {
+        if (workspace.catalog) |*snapshot| {
+            self.projection_bytes -= snapshot.projected_bytes;
+            snapshot.deinit();
+            workspace.catalog = null;
+        }
+        if (workspace.catalog_lease) |lease| {
+            self.agent_runtime.releaseSkillCatalog(lease) catch
+                @panic("Agent rejected a Workbench-owned catalog lease");
+            workspace.catalog_lease = null;
+        }
+        workspace.catalog_availability = .unavailable;
+    }
+
     fn workspaceHasTasks(self: *const Workbench, workspace_id: u64) bool {
         for (self.tasks) |entry| if (entry) |task|
             if (task.workspace_id == workspace_id) return true;
@@ -2554,6 +3185,14 @@ pub const Workbench = struct {
     }
 
     fn deinitWorkspaceView(self: *Workbench, workspace: *WorkspaceView) void {
+        std.debug.assert(workspace.catalog_job == null);
+        if (workspace.catalog) |*snapshot| {
+            self.projection_bytes -= snapshot.projected_bytes;
+            snapshot.deinit();
+        }
+        if (workspace.catalog_lease) |lease|
+            self.agent_runtime.releaseSkillCatalog(lease) catch
+                @panic("Agent rejected a Workbench-owned catalog lease");
         self.freeTracked(workspace.canonical_root);
         self.freeTracked(workspace.projected_root_storage);
         self.freeTracked(workspace.display_name_storage);
@@ -2607,8 +3246,30 @@ pub const Workbench = struct {
         _ = redactFixedWidthNoFail(task.binding_model_display_name, credential);
         for (task.runs) |*run_entry| {
             const run = &(run_entry.* orelse continue);
-            run.user_redacted = redactFixedWidthNoFail(run.user, credential) or
-                run.user_redacted;
+            switch (run.input) {
+                .text => |*text| {
+                    text.redacted = redactFixedWidthNoFail(
+                        text.value,
+                        credential,
+                    ) or text.redacted;
+                },
+                .skill => |*skill| {
+                    var redacted = redactFixedWidthNoFail(
+                        skill.invocation_name,
+                        credential,
+                    );
+                    redacted = redactFixedWidthNoFail(
+                        skill.display_name,
+                        credential,
+                    ) or redacted;
+                    for (skill.argument_values) |value|
+                        redacted = redactFixedWidthNoFail(
+                            value,
+                            credential,
+                        ) or redacted;
+                    skill.redacted = redacted or skill.redacted;
+                },
+            }
             run.assistant_redacted = redactFixedWidthNoFail(
                 run.assistant.list.items,
                 credential,
@@ -2675,19 +3336,122 @@ pub const Workbench = struct {
         return null;
     }
 
-    fn reserveRunRecord(self: *Workbench, task: *TaskView, prompt: []const u8) Error!usize {
+    fn copyRunInputRecord(
+        self: *Workbench,
+        task: *const TaskView,
+        input: TaskRunInput,
+        credential: []const u8,
+    ) Error!RunInputRecord {
+        return switch (input) {
+            .text => |text| {
+                if (text.len > self.limits.max_user_message_bytes)
+                    return error.ProjectionCapacity;
+                const projected = try self.copyProjected(
+                    text,
+                    self.limits.max_user_message_bytes,
+                    credential,
+                );
+                return .{ .text = .{
+                    .value = projected.value,
+                    .redacted = projected.redacted,
+                } };
+            },
+            .skill => |skill_input| {
+                const pinned = task.pinned_catalog orelse
+                    return error.CatalogUnavailable;
+                if (!std.mem.eql(
+                    u8,
+                    skill_input.catalog_revision,
+                    pinned.revision,
+                ))
+                    return error.StaleCatalog;
+                const skill = pinned.findSkill(skill_input.skill_id) orelse
+                    return error.SkillNotFound;
+                const skill_id = try self.copyBounded(
+                    skill.skill_id,
+                    self.limits.max_catalog_projection_bytes,
+                );
+                errdefer self.freeTracked(skill_id);
+                const revision = try self.copyBounded(
+                    pinned.revision,
+                    self.limits.max_catalog_projection_bytes,
+                );
+                errdefer self.freeTracked(revision);
+                const invocation = try self.copyProjected(
+                    skill.invocation_name,
+                    self.limits.max_catalog_projection_bytes,
+                    credential,
+                );
+                errdefer self.freeTracked(invocation.value);
+                const display = try self.copyProjected(
+                    skill.display_name,
+                    self.limits.max_catalog_projection_bytes,
+                    credential,
+                );
+                errdefer self.freeTracked(display.value);
+                const values = try self.allocator.alloc(
+                    []u8,
+                    skill_input.argument_values.len,
+                );
+                errdefer self.allocator.free(values);
+                var initialized: usize = 0;
+                var redacted = invocation.redacted or display.redacted;
+                errdefer for (values[0..initialized]) |value|
+                    self.freeTracked(value);
+                for (skill_input.argument_values, values) |value, *target| {
+                    const projected = try self.copyProjected(
+                        value,
+                        self.limits.max_user_message_bytes,
+                        credential,
+                    );
+                    target.* = projected.value;
+                    initialized += 1;
+                    redacted = redacted or projected.redacted;
+                }
+                return .{ .skill = .{
+                    .skill_id = skill_id,
+                    .catalog_revision = revision,
+                    .invocation_name = invocation.value,
+                    .display_name = display.value,
+                    .argument_values = values,
+                    .redacted = redacted,
+                } };
+            },
+        };
+    }
+
+    fn deinitRunInputRecord(
+        self: *Workbench,
+        input: *RunInputRecord,
+    ) void {
+        switch (input.*) {
+            .text => |text| self.freeTracked(text.value),
+            .skill => |skill| {
+                self.freeTracked(skill.skill_id);
+                self.freeTracked(skill.catalog_revision);
+                self.freeTracked(skill.invocation_name);
+                self.freeTracked(skill.display_name);
+                for (skill.argument_values) |value| self.freeTracked(value);
+                self.allocator.free(skill.argument_values);
+            },
+        }
+        input.* = undefined;
+    }
+
+    fn reserveRunRecord(
+        self: *Workbench,
+        task: *TaskView,
+        input: TaskRunInput,
+    ) Error!usize {
         const execution = try taskExecutionInput(task);
         const slot = findEmpty(RunRecord, task.runs) orelse return error.RunCapacity;
         if (task.next_run_generation == std.math.maxInt(u64)) return error.RunGenerationExhausted;
-        if (prompt.len > self.limits.max_user_message_bytes)
-            return error.ProjectionCapacity;
-        const user_projection = try self.copyProjected(
-            prompt,
-            self.limits.max_user_message_bytes,
+        var input_record = try self.copyRunInputRecord(
+            task,
+            input,
             execution.api_key,
         );
-        const user = user_projection.value;
-        errdefer self.freeTracked(user);
+        errdefer self.deinitRunInputRecord(&input_record);
         const status_text = try self.copyBounded("Queued", self.limits.max_tool_field_bytes);
         errdefer self.freeTracked(status_text);
         const tools = try self.allocator.alloc(?ToolView, self.limits.max_tools_per_run);
@@ -2702,8 +3466,7 @@ pub const Workbench = struct {
             .execution_generation = task.execution_generation,
             .execution_provider = task.execution_provider,
             .execution_model = task.execution_model,
-            .user = user,
-            .user_redacted = user_projection.redacted,
+            .input = input_record,
             .tools = tools,
             .status_text = status_text,
             .terminal_diagnostic = terminal_diagnostic,
@@ -2731,7 +3494,7 @@ pub const Workbench = struct {
             self.freeTracked(tool.content);
         }
         self.allocator.free(run.tools);
-        self.freeTracked(run.user);
+        self.deinitRunInputRecord(&run.input);
         self.freeTrackedText(&run.assistant);
         self.freeTracked(run.status_text);
         self.freeTracked(run.terminal_diagnostic);
@@ -2757,6 +3520,10 @@ pub const Workbench = struct {
         self.freeTracked(task.binding_model_id);
         self.freeTracked(task.binding_model_display_name);
         self.freeTracked(task.workspace_root);
+        if (task.pinned_catalog) |*snapshot| {
+            self.projection_bytes -= snapshot.projected_bytes;
+            snapshot.deinit();
+        }
         self.freeTracked(task.title);
         task.* = undefined;
     }
@@ -3093,7 +3860,16 @@ pub const Workbench = struct {
     fn writeRun(self: *Workbench, writer: *std.Io.Writer, run: *RunRecord) Error!void {
         const terminal = productTerminalFacts(run);
         writer.print("{{\"id\":\"{d}\",\"phase\":\"{s}\",\"user\":", .{ run.id, @tagName(runPhase(run)) }) catch return error.SnapshotTooLarge;
-        try self.projectedJsonValueWithKnownCredentials(writer, run.user);
+        switch (run.input) {
+            .text => |text| try self.projectedJsonValueWithKnownCredentials(
+                writer,
+                text.value,
+            ),
+            .skill => |skill| try self.projectedJsonValueWithKnownCredentials(
+                writer,
+                skill.display_name,
+            ),
+        }
         writer.writeAll(",\"assistant\":") catch return error.SnapshotTooLarge;
         try self.projectedJsonValueWithKnownCredentials(
             writer,
@@ -3343,6 +4119,39 @@ fn executeRunJob(context: *anyopaque) void {
     _ = notifier.notify();
 }
 
+fn executeCatalogJob(context: *anyopaque) void {
+    const job: *CatalogJob = @ptrCast(@alignCast(context));
+    const claimed = job.state.cmpxchgStrong(
+        .queued,
+        .running,
+        .acq_rel,
+        .acquire,
+    );
+    std.debug.assert(claimed == null);
+    job.outcome = if (job.runtime.querySkillCatalog(.{
+        .workspace_root = job.canonical_root,
+        .canonical_user_home = job.canonical_user_home,
+        .workspace_epoch = job.epoch_token,
+    })) |acquisition|
+        .{ .success = acquisition }
+    else |_|
+        .failure;
+    job.state.store(.completed, .release);
+    _ = job.notifier.notify();
+}
+
+fn cancelCatalogJob(context: *anyopaque) void {
+    const job: *CatalogJob = @ptrCast(@alignCast(context));
+    const prior = job.state.cmpxchgStrong(
+        .queued,
+        .cancelled,
+        .acq_rel,
+        .acquire,
+    );
+    std.debug.assert(prior == null);
+    _ = job.notifier.notify();
+}
+
 fn requestRunTermination(
     run: *RunRecord,
     interruption: lifecycle.ExternalInterruption,
@@ -3562,7 +4371,19 @@ fn classifyAgentTerminal(result: *const lifecycle.TerminalResult) TerminalDecisi
     if (result.failure == .abi_status) return .{
         .phase = .failed,
         .outcome = .failed,
-        .cause = if (result.termination_signal) |signal| causeForSignal(signal) else null,
+        .cause = if (result.termination_signal) |signal|
+            causeForSignal(signal)
+        else if (result.abi_status) |status|
+            switch (status) {
+                .stale_catalog => .stale_catalog,
+                .skill_not_found => .skill_not_found,
+                .invalid_skill_arguments => .invalid_skill_arguments,
+                .skill_policy_violation => .skill_policy_violation,
+                .skill_unavailable => .skill_unavailable,
+                else => null,
+            }
+        else
+            null,
     };
     if (result.stop_reason) |reason| return switch (reason) {
         .end_turn => .{ .phase = .completed, .outcome = .completed, .cause = null },
@@ -3986,6 +4807,35 @@ fn addU64(left: u64, right: u64) error{ProjectionCapacity}!u64 {
     return std.math.add(u64, left, right) catch error.ProjectionCapacity;
 }
 
+fn addCatalogProjectionBytes(
+    current: usize,
+    added: usize,
+    limits: Limits,
+    available_projection_bytes: usize,
+) error{ProjectionCapacity}!usize {
+    const total = std.math.add(usize, current, added) catch
+        return error.ProjectionCapacity;
+    if (total > limits.max_catalog_projection_bytes or
+        total > available_projection_bytes)
+        return error.ProjectionCapacity;
+    return total;
+}
+
+fn catalogProjection(
+    availability: CatalogAvailability,
+    snapshot: ?*const CatalogSnapshot,
+) CatalogProjection {
+    return switch (availability) {
+        .ready, .degraded => if (snapshot) |value|
+            value.view()
+        else
+            .{ .availability = .unavailable },
+        .uninitialized, .loading, .unavailable => .{
+            .availability = availability,
+        },
+    };
+}
+
 fn takeActivityOrder(run: *RunRecord) u64 {
     const result = run.next_activity_order;
     std.debug.assert(result != std.math.maxInt(u64));
@@ -4177,7 +5027,12 @@ fn testWorkbench() !Workbench {
         .execution_generation = 1,
         .execution_provider = .anthropic,
         .execution_model = execution_model,
-        .user = try workbench.copyBounded("inspect", workbench.limits.max_user_message_bytes),
+        .input = .{ .text = .{
+            .value = try workbench.copyBounded(
+                "inspect",
+                workbench.limits.max_user_message_bytes,
+            ),
+        } },
         .active_phase = .running,
         .agent_handoff = .init(.running),
         .tools = tools,
@@ -4413,7 +5268,10 @@ test "Workspace projection derives aggregate Task signals and removal preserves 
     try std.testing.expectEqualStrings(task_root, workbench.tasks[0].?.workspace_root);
     const removed = try workbench.copyWorkspaceProjections(&storage);
     try std.testing.expectEqual(@as(usize, 0), removed.len);
-    try std.testing.expectError(error.WorkspaceUnavailable, workbench.runTask(3, "continue"));
+    try std.testing.expectError(
+        error.WorkspaceUnavailable,
+        workbench.runTask(3, .{ .text = "continue" }),
+    );
 }
 
 test "Workbench snapshot serializer matches the Renderer contract fixture" {
@@ -4445,19 +5303,19 @@ test "mutation admission rejects stale execution and binding facts" {
 
     try std.testing.expectError(
         error.ExecutionGenerationMismatch,
-        workbench.createTaskInWorkspace(1, 1, 0),
+        workbench.createTaskInWorkspace(1, 1, 0, null),
     );
     try std.testing.expectError(
         error.ExecutionGenerationMismatch,
-        workbench.createTaskInWorkspace(1, 1, 2),
+        workbench.createTaskInWorkspace(1, 1, 2, null),
     );
     try std.testing.expectError(
         error.WorkspaceEpochMismatch,
-        workbench.createTaskInWorkspace(1, 2, 1),
+        workbench.createTaskInWorkspace(1, 2, 1, null),
     );
     try std.testing.expectError(
         error.BindingEpochMismatch,
-        workbench.runTaskAtBinding(3, 2, "stale continuation"),
+        workbench.runTaskAtBinding(3, 2, .{ .text = "stale continuation" }),
     );
 }
 
@@ -4503,7 +5361,7 @@ test "Run admission reserves a stable generation and rolls back every fallible a
     @memset(&oversized_prompt, 'x');
     try std.testing.expectError(
         error.ProjectionCapacity,
-        workbench.reserveRunRecord(task, &oversized_prompt),
+        workbench.reserveRunRecord(task, .{ .text = &oversized_prompt }),
     );
     try std.testing.expectEqual(tracked_before, workbench.projection_bytes);
     try std.testing.expectEqual(generation_before, task.next_run_generation);
@@ -4512,12 +5370,15 @@ test "Run admission reserves a stable generation and rolls back every fallible a
     const allocator = workbench.allocator;
     workbench.allocator = failing.allocator();
     defer workbench.allocator = allocator;
-    try std.testing.expectError(error.OutOfMemory, workbench.reserveRunRecord(task, "will fail"));
+    try std.testing.expectError(
+        error.OutOfMemory,
+        workbench.reserveRunRecord(task, .{ .text = "will fail" }),
+    );
     workbench.allocator = allocator;
     try std.testing.expectEqual(tracked_before, workbench.projection_bytes);
     try std.testing.expectEqual(generation_before, task.next_run_generation);
 
-    const slot = try workbench.reserveRunRecord(task, "reserved");
+    const slot = try workbench.reserveRunRecord(task, .{ .text = "reserved" });
     const first_generation = task.runs[slot].?.generation;
     try std.testing.expectEqual(
         task.execution_generation,
@@ -4532,10 +5393,16 @@ test "Run admission reserves a stable generation and rolls back every fallible a
         task.runs[slot].?.execution_model,
     );
     workbench.discardRunRecord(task, slot);
-    const reused_slot = try workbench.reserveRunRecord(task, "reserved again");
+    const reused_slot = try workbench.reserveRunRecord(
+        task,
+        .{ .text = "reserved again" },
+    );
     try std.testing.expectEqual(slot, reused_slot);
     try std.testing.expect(task.runs[reused_slot].?.generation > first_generation);
-    try std.testing.expectError(error.RunCapacity, workbench.reserveRunRecord(task, "overflow"));
+    try std.testing.expectError(
+        error.RunCapacity,
+        workbench.reserveRunRecord(task, .{ .text = "overflow" }),
+    );
     workbench.discardRunRecord(task, reused_slot);
 }
 
@@ -4756,10 +5623,16 @@ test "default replacement preserves Task generation and installs the next admiss
         next_task_execution.input().execution_generation,
     );
 
-    const slot = try workbench.reserveRunRecord(task, "old SECRET-KEY remains private");
+    const slot = try workbench.reserveRunRecord(
+        task,
+        .{ .text = "old SECRET-KEY remains private" },
+    );
     defer workbench.discardRunRecord(task, slot);
     try std.testing.expectEqual(@as(u64, 1), task.runs[slot].?.execution_generation);
-    try std.testing.expectEqualStrings("old *** remains private", task.runs[slot].?.user);
+    try std.testing.expectEqualStrings(
+        "old *** remains private",
+        task.runs[slot].?.input.text.value,
+    );
     try std.testing.expectEqualStrings("SECRET-KEY", task.runs[slot].?.redaction_secret);
 
     task.execution_generation = 2;
@@ -4769,7 +5642,10 @@ test "default replacement preserves Task generation and installs the next admiss
     );
     try std.testing.expectError(
         error.ExecutionGenerationMismatch,
-        workbench.runTask(task.id, "must reject a mismatched binding"),
+        workbench.runTask(
+            task.id,
+            .{ .text = "must reject a mismatched binding" },
+        ),
     );
     task.execution_generation = 1;
 }
@@ -4791,7 +5667,7 @@ test "released Task credential is permanently scrubbed from every product projec
         account_contract.Limits.model_id_bytes,
     );
     try workbench.replaceTracked(
-        &run.user,
+        &run.input.text.value,
         "prompt SECRET-KEY",
         workbench.limits.max_user_message_bytes,
     );
@@ -4942,10 +5818,15 @@ test "opaque credential redaction is UTF-8 safe across product inputs and assist
     const task = &workbench.tasks[0].?;
     try replaceTaskCredentialForTest(task, &.{0xa9});
 
-    const slot = try workbench.reserveRunRecord(task, "café");
+    const slot = try workbench.reserveRunRecord(task, .{ .text = "café" });
     defer workbench.discardRunRecord(task, slot);
-    try std.testing.expectEqualStrings("caf**", task.runs[slot].?.user);
-    try std.testing.expect(std.unicode.utf8ValidateSlice(task.runs[slot].?.user));
+    try std.testing.expectEqualStrings(
+        "caf**",
+        task.runs[slot].?.input.text.value,
+    );
+    try std.testing.expect(std.unicode.utf8ValidateSlice(
+        task.runs[slot].?.input.text.value,
+    ));
 
     var tool_event = try testEnvelope(
         task.route_id,
@@ -5194,10 +6075,15 @@ test "canonical prompt title and terminal diagnostic never retain the registered
     try std.testing.expect(std.mem.indexOf(u8, task.title, "SECRET-KEY") == null);
     try std.testing.expect(task.title_redacted);
 
-    const slot = try workbench.reserveRunRecord(task, "prompt SECRET-KEY payload");
+    const slot = try workbench.reserveRunRecord(
+        task,
+        .{ .text = "prompt SECRET-KEY payload" },
+    );
     const run = &task.runs[slot].?;
-    try std.testing.expect(std.mem.indexOf(u8, run.user, "SECRET-KEY") == null);
-    try std.testing.expect(run.user_redacted);
+    try std.testing.expect(
+        std.mem.indexOf(u8, run.input.text.value, "SECRET-KEY") == null,
+    );
+    try std.testing.expect(run.input.text.redacted);
     try std.testing.expect(commitTerminal(
         run,
         .failed,
@@ -5501,7 +6387,12 @@ test "default snapshot budget contains the maximum structural projection" {
                 .execution_generation = 1,
                 .execution_provider = .anthropic,
                 .execution_model = execution_model,
-                .user = try workbench.copyBounded("", limits.max_user_message_bytes),
+                .input = .{ .text = .{
+                    .value = try workbench.copyBounded(
+                        "",
+                        limits.max_user_message_bytes,
+                    ),
+                } },
                 .tools = tools,
                 .status_text = try workbench.copyBounded("", limits.max_tool_field_bytes),
                 .terminal_diagnostic = try workbench.allocTrackedCapacity(limits.max_terminal_diagnostic_bytes),
