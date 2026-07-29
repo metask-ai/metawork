@@ -1,6 +1,6 @@
 # MetaWork 高层架构
 
-> 状态：AgentCore ABI v1 revision 4 macOS 与 Windows exact artifacts 已锁定，typed Skill 产品链正在本功能分支实施；后续正式方向选择单 AgentCore Worker
+> 状态：AgentCore ABI v1 revision 4 macOS exact artifact 与 Agent/Workbench/Bridge typed Skill 产品链已完成；Composer Slash 属于后续独立产品入口；后续正式方向选择单 AgentCore Worker
 > 日期：2026-07-22
 
 产品范围见 [产品需求](requirements.md)，Metask AgentCore 的具体接入约束见 [AgentCore 集成契约](agentcore-integration.md)，revision 4 目标能力见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。精确源码路径、binary 和 symbol identifier 只作为机器合同保留。
@@ -30,7 +30,7 @@
 
 已批准的新基线是 Metask AgentCore ABI v1 revision 4。它在既有 RunContext、typed status/StopReason、CoreEvent/UI codec 和同步 Run 语义上增加 AgentCore-owned Skill catalog snapshot、Session catalog binding/refresh 与 tagged Text/Skill Run input。精确 API layout、artifact identity、payload 和 manifest schema 只由 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)定义。MetaWork 对它执行 hard cut：active build、Host、probe 和规范文档只接受 revision 4，不保留 revision 3 parser、function table、Run payload 或 fallback。
 
-当前 checkout 的 repository locks、verifier、build graph、staged bundle、Agent catalog lease/typed Run surface，以及 Workbench catalog ownership/typed admission 已切到 revision 4；macOS 与 Windows artifacts 均来自 clean source commit `ac2584da8bfcf18ed74c7b2738fb4c784f714579`。Bridge 与 Renderer Slash vertical 仍须按 [实施方案](agent-interaction-entry-decision.md)完成后才可声明整个产品能力通过；历史 revision 3 迁移事实不构成兼容要求。
+当前 checkout 的 verifier、build graph、staged bundle、Agent catalog lease/typed Run surface、Workbench catalog ownership/typed admission 与 Bridge tagged contract 均已切到 revision 4；active macOS artifact 来自 clean source commit `576b0a2791e904f01257c6f7fe17e9b43d8154d0`。其他 target 的独立历史 lock 不参与当前 macOS 依赖升级或验收门槛。Composer Slash 不属于本次升级；历史 revision 3 迁移事实不构成兼容要求。
 
 该 baseline 不包含：
 

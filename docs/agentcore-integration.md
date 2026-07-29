@@ -1,6 +1,6 @@
 # MetaWork AgentCore 集成契约
 
-> 状态：AgentCore ABI v1 revision 4 macOS 与 Windows exact artifacts、Agent typed surface 与 Workbench catalog/admission 已完成，Bridge/Renderer Slash vertical 正在实施；fault-domain 验证选择单 AgentCore Worker 作为后续正式方向
+> 状态：AgentCore ABI v1 revision 4 macOS exact artifact 与 Agent/Workbench/Bridge typed Skill surface 已完成；Composer Slash 属于后续独立产品入口；fault-domain 验证选择单 AgentCore Worker 作为后续正式方向
 > 目标依赖：Metask AgentCore ABI v1 revision 4；精确 artifact identity 见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)
 
 本文定义 MetaWork `agent/` 执行子系统与 Metask AgentCore 之间的规范边界。Desktop Host 的 composition、Workbench 产品状态和 Bridge transport 见 [高层架构](architecture.md)，revision 4 目标能力见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。
@@ -25,7 +25,7 @@ MetaWork 的依赖输入是一个完整 bundle，而不是 AgentCore 实现源�
 
 - Metask AgentCore 独立构建并测试 target-specific bundle，candidate 直接取自本机精确路径 `metacodes/zig-out/agentcore/<target>`；
 - candidate probe 与 `agentcore:stage` 使用显式绝对 bundle root；正式 build/test/package 只消费 `.agentcore/bundle`；
-- 每个已接入 target 的 repository lock 保存完整 revision 4 manifest，并锁定 package/source、target、toolchain、ABI version/revision、link inputs 和所有 payload checksum；macOS 与 Windows lock 不互相替代；
+- 每个已接入 target 的 repository lock 保存完整 revision 4 manifest，并锁定 package/source、target、toolchain、ABI version/revision、link inputs 和所有 payload checksum；当前依赖升级与持续回归只以 macOS arm64 为 active target，其他 target 的历史 lock 不互相替代，也不反向阻塞 macOS；
 - stager 只复制 manifest whitelist；捕获到的复制/rename 错误必须恢复旧 canonical bundle。当前内部开发不承诺跨进程 crash transaction 或并发 build/stage，强制中断后的残留由再次执行 stage 清理；
 - staged bundle 在正式 build 前由 MetaWork verifier 再校验；官方 Zig package 只负责 module/link graph，不承担 repository lock 和 checksum 信任政策；
 - 由于 Zig 会在执行 root build verification 前解析 staged path dependency，正式 `dev/check/test/build/package` 必须先运行轻量 `agentcore:verify-staged` preflight，给出明确的缺包或 lock mismatch 错误；Zig build-time verifier 仍负责最终 build correctness；
