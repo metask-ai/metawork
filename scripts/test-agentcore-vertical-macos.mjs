@@ -53,6 +53,25 @@ const workspace = await mkdtemp(join(tmpdir(), "metawork-agentcore-vertical-"));
 const canonicalWorkspace = await realpath(workspace);
 const fixturePath = join(workspace, "fixture.txt");
 await writeFile(fixturePath, "agentcore-vertical-before\n", { mode: 0o600 });
+// This fixture targets an AgentCore-owned canonical project source. No
+// MetaWork product module reads, configures, or exposes this physical path.
+const skillDirectory = join(workspace, ".metacodes", "skills", "review");
+await mkdir(skillDirectory, { recursive: true });
+await writeFile(
+  join(skillDirectory, "SKILL.md"),
+  [
+    "---",
+    "name: Review",
+    "description: Exercise the real AgentCore typed Skill vertical",
+    "arguments: [target]",
+    "disable-model-invocation: true",
+    "---",
+    "METAWORK_TYPED_SKILL_VERTICAL",
+    "Review $target. Exercise Read, Bash, Edit, and AskUserQuestion, then finish.",
+    "",
+  ].join("\n"),
+  { mode: 0o600 },
+);
 await rm(automationDir, { recursive: true, force: true });
 
 const responses = [
@@ -164,11 +183,40 @@ try {
   const expectedExecutionGeneration = afterChoose.account.executionGeneration;
   if (!isWireId(expectedExecutionGeneration))
     throw new Error("snapshot omitted the current execution generation");
+  const catalogSnapshot = await poll(
+    async () => {
+      const current = await snapshot();
+      const selected = current.workspaces.find(
+        (item) => item.id === workspaceId,
+      );
+      const catalog = selected?.skillCatalog;
+      if (
+        (catalog?.availability !== "ready" &&
+          catalog?.availability !== "degraded") ||
+        !isOpaqueRevision(catalog.revision)
+      )
+        return null;
+      const skill = catalog.skills.find(
+        (item) => item.invocationName === "review",
+      );
+      return skill ? { catalog, skill } : null;
+    },
+    commandTimeoutMs,
+    "Workspace Skill catalog",
+  );
+  if (
+    !/^[0-9a-f]{64}$/.test(catalogSnapshot.skill.skillId) ||
+    catalogSnapshot.skill.displayName !== "Review" ||
+    !catalogSnapshot.skill.argumentNames.includes("target")
+  )
+    throw new Error(
+      `Workspace catalog omitted the review Skill projection: ${JSON.stringify(catalogSnapshot)}`,
+    );
   const createResult = await invokeBridge("metawork.tasks.create", {
     workspaceId,
     expectedWorkspaceEpoch,
     expectedExecutionGeneration,
-    expectedSkillCatalogRevision: null,
+    expectedSkillCatalogRevision: catalogSnapshot.catalog.revision,
   });
   if (
     createResult !== null &&
@@ -209,8 +257,10 @@ try {
     taskId,
     expectedBindingEpoch,
     input: {
-      kind: "text",
-      text: "Exercise Read, Bash, Edit, and AskUserQuestion, then finish.",
+      kind: "skill",
+      skillId: catalogSnapshot.skill.skillId,
+      catalogRevision: catalogSnapshot.catalog.revision,
+      argumentValues: ["fixture.txt"],
     },
   });
   if (
@@ -243,6 +293,19 @@ try {
   if (!isWireId(runId)) throw new Error("Run submission omitted its identity");
   if (acceptedRunId !== null && submittedRun.id !== acceptedRunId)
     throw new Error("Run snapshot disagrees with the accepted Run identity");
+  if (
+    submittedRun.input?.kind !== "skill" ||
+    submittedRun.input.skillId !== catalogSnapshot.skill.skillId ||
+    submittedRun.input.catalogRevision !== catalogSnapshot.catalog.revision ||
+    submittedRun.input.invocationName !== "review" ||
+    submittedRun.input.displayName !== "Review" ||
+    submittedRun.input.redacted !== false ||
+    JSON.stringify(submittedRun.input.argumentValues) !==
+      JSON.stringify(["fixture.txt"])
+  )
+    throw new Error(
+      `Run history lost its typed Skill input: ${JSON.stringify(submittedRun.input)}`,
+    );
   await captureVisual("running-1320x812", 1320, 812, false, true);
   let reloadedRequest = null;
   let deliveryEmitsBeforeReload = null;
@@ -417,6 +480,14 @@ try {
       `provider served ${provider.served}/${responses.length} responses`,
     );
   if (provider.error) throw provider.error;
+  const providerInput = JSON.stringify(provider.requests);
+  if (
+    !providerInput.includes("METAWORK_TYPED_SKILL_VERTICAL") ||
+    !providerInput.includes("fixture.txt")
+  )
+    throw new Error("provider did not receive the materialized Skill input");
+  if (providerInput.includes("/review"))
+    throw new Error("raw slash syntax reached the AgentCore provider");
 
   await invokeBridge("metawork.tasks.rename", {
     taskId,
@@ -467,7 +538,7 @@ try {
     throw new Error("normal runtime stop was not observed");
 
   process.stdout.write(
-    "AgentCore desktop vertical passed: real bundle, main-thread ProductDelivery, Read/Bash/Edit, permission UI, duplicate UI-response rejection, reload-safe AskUserQuestion resume, Task metadata lifecycle, async close.\n",
+    "AgentCore desktop vertical passed: real typed Skill catalog/run, materialized arguments without raw slash, main-thread ProductDelivery, Read/Bash/Edit, permission UI, duplicate UI-response rejection, reload-safe AskUserQuestion resume, Task metadata lifecycle, async close.\n",
   );
 } catch (error) {
   process.stderr.write(`${output}\n`);
@@ -594,6 +665,10 @@ function isWireId(value) {
   return typeof value === "string" && /^[1-9][0-9]*$/.test(value);
 }
 
+function isOpaqueRevision(value) {
+  return typeof value === "string" && value.length > 0;
+}
+
 async function automate(...args) {
   return execFileAsync(process.execPath, [native, "automate", ...args], {
     cwd: appCwd,
@@ -697,6 +772,7 @@ async function poll(operation, milliseconds, label) {
 function createProvider(queue, responseDelayMs = 0) {
   let served = 0;
   let providerError = null;
+  const requests = [];
   const server = createServer((request, response) => {
     const chunks = [];
     let bytes = 0;
@@ -718,6 +794,7 @@ function createProvider(queue, responseDelayMs = 0) {
         )
           throw new Error("Host credential did not reach AgentCore correctly");
         const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        requests.push(payload);
         if (payload.model !== "metawork-agentcore-vertical-fixture-model")
           throw new Error("Host model did not reach AgentCore correctly");
         const body = queue[served];
@@ -744,6 +821,9 @@ function createProvider(queue, responseDelayMs = 0) {
     },
     get error() {
       return providerError;
+    },
+    get requests() {
+      return requests;
     },
     listen() {
       return new Promise((resolve, reject) => {
