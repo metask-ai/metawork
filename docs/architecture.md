@@ -1,6 +1,6 @@
 # MetaWork 高层架构
 
-> 状态：AgentCore ABI v1 revision 4 macOS exact artifact 与 Agent/Workbench/Bridge typed Skill 产品链已完成；Composer Slash 属于后续独立产品入口；后续正式方向选择单 AgentCore Worker
+> 状态：AgentCore ABI v1 revision 4 macOS exact artifact、typed Skill 产品链与 Composer Slash 已完成；后续正式方向选择单 AgentCore Worker
 > 日期：2026-07-22
 
 产品范围见 [产品需求](requirements.md)，Metask AgentCore 的具体接入约束见 [AgentCore 集成契约](agentcore-integration.md)，revision 4 目标能力见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。精确源码路径、binary 和 symbol identifier 只作为机器合同保留。
@@ -30,7 +30,7 @@
 
 已批准的新基线是 Metask AgentCore ABI v1 revision 4。它在既有 RunContext、typed status/StopReason、CoreEvent/UI codec 和同步 Run 语义上增加 AgentCore-owned Skill catalog snapshot、Session catalog binding/refresh 与 tagged Text/Skill Run input。精确 API layout、artifact identity、payload 和 manifest schema 只由 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)定义。MetaWork 对它执行 hard cut：active build、Host、probe 和规范文档只接受 revision 4，不保留 revision 3 parser、function table、Run payload 或 fallback。
 
-当前 checkout 的 verifier、build graph、staged bundle、Agent catalog lease/typed Run surface、Workbench catalog ownership/typed admission 与 Bridge tagged contract 均已切到 revision 4；active macOS artifact 来自 clean source commit `576b0a2791e904f01257c6f7fe17e9b43d8154d0`。其他 target 的独立历史 lock 不参与当前 macOS 依赖升级或验收门槛。Composer Slash 不属于本次升级；历史 revision 3 迁移事实不构成兼容要求。
+当前 checkout 的 verifier、build graph、staged bundle、Agent catalog lease/typed Run surface、Workbench catalog ownership/typed admission 与 Bridge tagged contract 均已切到 revision 4；active macOS artifact 来自 clean source commit `576b0a2791e904f01257c6f7fe17e9b43d8154d0`。其他 target 的独立历史 lock 不参与当前 macOS 依赖升级或验收门槛。Composer Slash 在该 typed baseline 之上作为独立 Renderer 产品入口实现，不属于 ABI 升级本身；历史 revision 3 迁移事实不构成兼容要求。
 
 该 baseline 不包含：
 
@@ -290,6 +290,8 @@ Host 与 Renderer 随同一应用包原子发布，不承担旧 Renderer/新 Hos
 Renderer Bridge 使用独立合同身份 `metawork.renderer-bridge`，快速开发阶段固定 revision 为 `1`。Host 与 Renderer 随同一应用包原子发布，任何 command、event、payload 字段或 wire 语义变化都直接原地 hard cut，不为临时合同形态递增 revision、不维护兼容层，也不在 snapshot 内维护第二个局部版本。`contractRevision` 仍精确匹配，用于拒绝非当前固定标识，但不承诺识别同 revision 的开发产物错配。任何 Renderer Bridge revision 变更都必须先得到用户显式同意。
 
 当前 `metawork.tasks.run` 只有 `input.kind = text | skill` 的 tagged payload，旧 `prompt` 不兼容；`tasks.create` 必须携带 nullable `expectedSkillCatalogRevision`。Skill 没有 `runSkill` 第二入口。Workspace/Task catalog、typed Run history 和 Skill terminal cause 只从 Workbench snapshot 发布；显式 catalog refresh 也只通过 Bridge 调用 Workbench transaction，Bridge 不持有 catalog lease、不解析 slash、不读取 Skill body。
+
+Renderer 的 Slash Resolver 只在 Composer 首 token 处理 `/` 手势。单一 Command registry 当前只由 `App` action controller 复用既有 New task 动作；Command 原文在 Renderer 消费，不产生 Run。Skill 候选只来自当前 Workspace/Task catalog projection，选择后形成带稳定 identity、pinned revision 与 positional arguments 的 tagged draft，再沿唯一 `tasks.run` 路径提交。Command/Skill 同名时裸名称归 Command，Skill 使用 `/skill:name`；Renderer 不读取 Skill body、物理路径或 policy。
 
 `connect` 是 product delivery 的 bootstrap 边界。Host 必须在合同身份与 revision 校验成功后才建立 `ProductDelivery` connection；既有 `requireWindow()` 门禁随后统一保护 Account、Task、event 和 snapshot 产品路径。协商前只允许显式列出的无状态 bootstrap/smoke 命令，不得读取或修改产品状态。合同不匹配返回 typed terminal bootstrap error，Renderer 不把它当作瞬时断线重试。
 
