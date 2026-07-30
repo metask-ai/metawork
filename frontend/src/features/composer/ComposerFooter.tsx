@@ -1,17 +1,32 @@
-import { useEffect, useRef, type KeyboardEvent, type RefObject } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type RefObject,
+} from "react";
 
 import type { SkillCatalogView } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { useI18n } from "../../i18n/context.ts";
 import { maxComposerCharacters } from "./drafts.ts";
 import { ModelSelector } from "./ModelSelector.tsx";
+import { SlashMenu } from "./SlashMenu.tsx";
 import {
   composerDraftWithinLimits,
   emptyComposerDraft,
   isSkillDraftCurrent,
+  parseSlashInput,
+  resolveSlashCandidates,
+  skillDraftFromCandidate,
   skillDraftVisibleArgumentCount,
   type ComposerDraft,
   type ComposerSkillDraft,
+  type SlashCandidate,
+  type SlashCommandName,
+  type SlashCommandState,
 } from "./slash.ts";
 import { WorkspaceContextSelector } from "./WorkspaceContextSelector.tsx";
 
@@ -31,6 +46,7 @@ export function ComposerFooter({
   unavailable,
   draft,
   skillCatalog,
+  slashCommands,
   composeDisabled,
   canSubmit,
   runInFlight,
@@ -51,6 +67,8 @@ export function ComposerFooter({
   actionDisabled,
   onDraftChange,
   onSubmit,
+  onSlashCommand,
+  onRefreshSkillCatalog,
   onConfirmAccess,
   onSelectWorkspace,
   onSelectModel,
@@ -62,6 +80,7 @@ export function ComposerFooter({
   unavailable: boolean;
   draft: ComposerDraft;
   skillCatalog: SkillCatalogView;
+  slashCommands: readonly SlashCommandState[];
   composeDisabled: boolean;
   canSubmit: boolean;
   runInFlight: boolean;
@@ -87,11 +106,18 @@ export function ComposerFooter({
   actionDisabled: boolean;
   onDraftChange: (value: ComposerDraft) => void;
   onSubmit: () => void;
+  onSlashCommand: (command: SlashCommandName) => void;
+  onRefreshSkillCatalog: () => void;
   onConfirmAccess: () => void;
   onSelectWorkspace: (workspaceId: string) => void;
   onSelectModel: (id: string) => void;
 }) {
   const { t } = useI18n();
+  const [menuDismissed, setMenuDismissed] = useState(false);
+  const [activeCandidateKey, setActiveCandidateKey] = useState<string | null>(
+    null,
+  );
+  const [composing, setComposing] = useState(false);
   const firstSkillArgumentRef = useRef<HTMLInputElement>(null);
   const skillRemoveButtonRef = useRef<HTMLButtonElement>(null);
   const sendButtonRef = useRef<HTMLButtonElement>(null);
@@ -101,10 +127,46 @@ export function ComposerFooter({
       ? `skill:${draft.skillId}:${draft.catalogRevision}`
       : "text";
   const previousDraftFocusIdentity = useRef(draftFocusIdentity);
-  const sendEnabled = canSubmit;
+  const slashInput = useMemo(
+    () => (draft.kind === "text" ? parseSlashInput(draft.text) : null),
+    [draft],
+  );
+  const menuOpen = Boolean(slashInput && !menuDismissed && !composing);
+  const sendEnabled = canSubmit && slashInput === null;
   const skillDraftCurrent =
     draft.kind !== "skill" || isSkillDraftCurrent(draft, skillCatalog);
   const draftWithinLimits = composerDraftWithinLimits(draft);
+  const candidates = useMemo(
+    () =>
+      slashInput
+        ? resolveSlashCandidates({
+            input: slashInput,
+            commands: slashCommands,
+            catalog: skillCatalog,
+          })
+        : [],
+    [skillCatalog, slashCommands, slashInput],
+  );
+  const activeCandidate =
+    candidates.find((candidate) => candidate.key === activeCandidateKey) ??
+    candidates.find((candidate) => candidate.enabled) ??
+    null;
+
+  const chooseCandidate = useCallback(
+    (candidate: SlashCandidate) => {
+      if (!candidate.enabled) return;
+      if (candidate.kind === "skill") {
+        onDraftChange(skillDraftFromCandidate(candidate));
+      } else {
+        onDraftChange(emptyComposerDraft());
+        onSlashCommand(candidate.name);
+      }
+      setMenuDismissed(false);
+      setActiveCandidateKey(null);
+    },
+    [onDraftChange, onSlashCommand],
+  );
+
   useEffect(() => {
     if (previousDraftFocusIdentity.current === draftFocusIdentity) return;
     previousDraftFocusIdentity.current = draftFocusIdentity;
@@ -144,8 +206,36 @@ export function ComposerFooter({
     };
   }, [textareaRef]);
 
+  function moveActive(direction: 1 | -1) {
+    const enabled = candidates.filter((candidate) => candidate.enabled);
+    if (enabled.length === 0) return;
+    const current = enabled.findIndex(
+      (candidate) => candidate.key === activeCandidate?.key,
+    );
+    const next =
+      current < 0 ? 0 : (current + direction + enabled.length) % enabled.length;
+    setActiveCandidateKey(enabled[next]?.key ?? null);
+  }
+
   function handleTextKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.nativeEvent.isComposing) return;
+    if (menuOpen) {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        moveActive(event.key === "ArrowDown" ? 1 : -1);
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setMenuDismissed(true);
+        return;
+      }
+      if (event.key === "Enter" || event.key === "Tab") {
+        event.preventDefault();
+        if (activeCandidate) chooseCandidate(activeCandidate);
+        return;
+      }
+    }
     if (event.key === "Enter" && !event.shiftKey && sendEnabled) {
       event.preventDefault();
       onSubmit();
@@ -183,6 +273,18 @@ export function ComposerFooter({
   return (
     <footer className="composer-bar">
       <div className="composer-shell">
+        {menuOpen && slashInput && (
+          <SlashMenu
+            input={slashInput}
+            commands={slashCommands}
+            catalog={skillCatalog}
+            skillsOnly={slashInput.explicitSkill}
+            activeKey={activeCandidate?.key ?? null}
+            onActiveKey={setActiveCandidateKey}
+            onChoose={chooseCandidate}
+            onRefresh={onRefreshSkillCatalog}
+          />
+        )}
         <div className="composer">
           {draft.kind === "text" ? (
             <textarea
@@ -190,6 +292,15 @@ export function ComposerFooter({
               value={draft.text}
               maxLength={maxComposerCharacters}
               disabled={composeDisabled}
+              role="combobox"
+              aria-autocomplete="list"
+              aria-expanded={menuOpen}
+              aria-controls={menuOpen ? "composer-slash-menu" : undefined}
+              aria-activedescendant={
+                menuOpen && activeCandidate
+                  ? `slash-option-${activeCandidate.key.replaceAll(":", "-")}`
+                  : undefined
+              }
               placeholder={
                 closed
                   ? t("run.placeholder_closed")
@@ -201,15 +312,18 @@ export function ComposerFooter({
                         ? t("run.placeholder_archived")
                         : t("run.placeholder")
               }
+              onCompositionStart={() => setComposing(true)}
               onCompositionEnd={(event) => {
+                setComposing(false);
                 onDraftChange({
                   kind: "text",
                   text: event.currentTarget.value,
                 });
               }}
-              onChange={(event) =>
-                onDraftChange({ kind: "text", text: event.target.value })
-              }
+              onChange={(event) => {
+                setMenuDismissed(false);
+                onDraftChange({ kind: "text", text: event.target.value });
+              }}
               onKeyDown={handleTextKeyDown}
             />
           ) : (
@@ -298,6 +412,13 @@ export function ComposerFooter({
               {!skillDraftCurrent && (
                 <div className="skill-draft-warning" role="status">
                   <span>{t("slash.skill_stale")}</span>
+                  <button
+                    type="button"
+                    className="slash-refresh focus-ring"
+                    onClick={onRefreshSkillCatalog}
+                  >
+                    {t("slash.refresh")}
+                  </button>
                 </div>
               )}
               {!draftWithinLimits && (

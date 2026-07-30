@@ -64,7 +64,11 @@ import {
   emptyComposerDraft,
   isSkillDraftCurrent,
   maxSkillArguments,
+  skillCatalogRefreshTarget,
+  slashCommandNames,
   type ComposerDraft,
+  type SlashCommandName,
+  type SlashCommandState,
 } from "../features/composer/slash.ts";
 import {
   BridgeClient,
@@ -166,6 +170,7 @@ export default function App() {
   );
   const [accountBusy, setAccountBusy] = useState(false);
   const [workspaceBusy, setWorkspaceBusy] = useState(false);
+  const [skillCatalogBusy, setSkillCatalogBusy] = useState(false);
   const [taskPending, setTaskPending] = useState<Record<string, string>>({});
   const [cancelPending, setCancelPending] = useState<Record<string, true>>({});
   const [connectionBusy, setConnectionBusy] = useState(false);
@@ -283,6 +288,7 @@ export default function App() {
     composerRunInput !== null &&
     composerDraftWithinLimits(composerDraft) &&
     skillDraftCurrent &&
+    (composerDraft.kind === "text" || !skillCatalogBusy) &&
     !taskMutationDisabled &&
     !workspaceBusy;
   const selectedModel = snapshot.account.models.find(
@@ -1083,6 +1089,68 @@ export default function App() {
     };
   }
 
+  async function refreshComposerSkillCatalog() {
+    if (
+      skillCatalogBusy ||
+      bridgeUnavailable ||
+      !composerWorkspace ||
+      !composerWorkspaceId
+    )
+      return;
+    setSkillCatalogBusy(true);
+    try {
+      const refreshTarget = skillCatalogRefreshTarget(
+        Boolean(activeTask) && !newTaskDraftActive,
+        composerWorkspace.skillCatalog,
+      );
+      const audience: StatusAudience =
+        refreshTarget === "workspace"
+          ? { scope: "workspace", workspaceId: composerWorkspaceId }
+          : { scope: "task", taskId: activeTask!.id };
+      const result =
+        refreshTarget === "workspace"
+          ? await client.refreshWorkspaceSkillCatalog(
+              composerWorkspaceId,
+              composerWorkspace.epoch,
+            )
+          : await client.refreshTaskSkillCatalog(
+              activeTask!.id,
+              activeTask!.binding.epoch,
+            );
+      if (!result.accepted) {
+        setStatus(
+          attentionStatus(mutationReasonMessageId(result.reason!), audience),
+        );
+        return;
+      }
+      await refreshAfterCommit(
+        "slash.catalog_refresh_started",
+        "operation.skill_catalog_refresh",
+        audience,
+      );
+    } catch (error) {
+      await refreshSnapshot().catch(() => undefined);
+      setStatus(
+        attentionStatus(
+          "slash.catalog_refresh_failed",
+          skillCatalogRefreshTarget(
+            Boolean(activeTask) && !newTaskDraftActive,
+            composerWorkspace.skillCatalog,
+          ) === "task"
+            ? { scope: "task", taskId: activeTask!.id }
+            : { scope: "workspace", workspaceId: composerWorkspaceId },
+          { diagnostic: errorText(error) },
+        ),
+      );
+    } finally {
+      setSkillCatalogBusy(false);
+    }
+  }
+
+  function runSlashCommand(command: SlashCommandName) {
+    if (command === "new") beginNewTask();
+  }
+
   async function closeTask() {
     if (
       viewSyncFailed ||
@@ -1471,6 +1539,19 @@ export default function App() {
   const activeTaskTitle = activeTask
     ? activeTask.title || t("task.item", { id: activeTask.id })
     : t(newTaskDraftActive ? "task.new" : "task.open");
+  const slashCommands: SlashCommandState[] = slashCommandNames.map((name) => {
+    const unavailable = t("slash.disabled_unavailable");
+    const enabled = !newTaskDraftActive && !bridgeUnavailable;
+    return {
+      name,
+      enabled,
+      disabledReason: enabled
+        ? null
+        : newTaskDraftActive
+          ? t("slash.disabled_already_new_task")
+          : unavailable,
+    };
+  });
   const commandBarStatus = selectCommandBarStatus(statuses, {
     route,
     workspaceId: currentWorkspaceId,
@@ -1963,6 +2044,7 @@ export default function App() {
             )}
             draft={composerDraft}
             skillCatalog={skillCatalog}
+            slashCommands={slashCommands}
             composeDisabled={!taskCanCompose || taskMutationDisabled}
             canSubmit={canSubmit}
             runInFlight={Boolean(taskCanCompose && runInFlight)}
@@ -2020,6 +2102,8 @@ export default function App() {
             actionDisabled={bridgeUnavailable || workspaceBusy}
             onDraftChange={updateComposerDraft}
             onSubmit={() => void submitRun()}
+            onSlashCommand={runSlashCommand}
+            onRefreshSkillCatalog={() => void refreshComposerSkillCatalog()}
             onConfirmAccess={() => void chooseWorkspace(true)}
             onSelectWorkspace={(workspaceId) =>
               void selectWorkspaceById(workspaceId, { kind: "draft" })
