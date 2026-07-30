@@ -49,7 +49,7 @@ export function ApprovalPanel({
     <section
       id={`ui-request-${pending.requestId}`}
       tabIndex={-1}
-      className="inline-request rounded-2xl border border-amber bg-amber/8 p-5"
+      className="inline-request"
       aria-busy={responseInFlight}
     >
       <p className="font-mono text-[10px] tracking-[0.14em] text-amber-ink uppercase">
@@ -104,16 +104,25 @@ export function ApprovalPanel({
         >
           {pending.questions.map((question, index) => (
             <div key={`${question.header}-${index}`}>
-              <p className="text-sm font-semibold">{question.question}</p>
+              <p
+                id={`ui-question-${pending.requestId}-${index}`}
+                className="text-sm font-semibold"
+              >
+                {question.question}
+              </p>
               {question.multi && question.options.length > 0 ? (
-                <div className="mt-3 space-y-2">
+                <div
+                  className="mt-3 space-y-2"
+                  role="group"
+                  aria-labelledby={`ui-question-${pending.requestId}-${index}`}
+                >
                   {question.options.map((option, optionIndex) => (
                     <label
                       key={`${option.label}-${optionIndex}`}
                       className="flex items-start gap-3 rounded-lg border border-rule bg-paper px-3 py-2 text-sm"
                     >
                       <input
-                        className="mt-1 accent-cobalt"
+                        className="mt-1 accent-brand-600"
                         type="checkbox"
                         checked={optionAnswerSelected(
                           answers,
@@ -152,6 +161,7 @@ export function ApprovalPanel({
                 <>
                   <select
                     className="focus-ring mt-2 w-full rounded-lg border border-rule bg-paper px-3 py-2 text-sm"
+                    aria-labelledby={`ui-question-${pending.requestId}-${index}`}
                     value={selectedOptionIndex(answers, index) + 1}
                     onChange={(event) => {
                       const optionIndex = Number(event.target.value) - 1;
@@ -184,6 +194,7 @@ export function ApprovalPanel({
               ) : (
                 <input
                   className="focus-ring mt-2 w-full rounded-lg border border-rule bg-paper px-3 py-2 text-sm"
+                  aria-labelledby={`ui-question-${pending.requestId}-${index}`}
                   value={textAnswerValue(answers, index)}
                   onChange={(event) => {
                     setAnswers(
@@ -239,7 +250,8 @@ function DecisionButton({
   return (
     <button
       {...props}
-      className={`focus-ring rounded-lg px-3 py-2 text-sm font-semibold disabled:opacity-40 ${primary ? "bg-amber-ink text-white" : "border border-amber/60 text-amber-ink"}`}
+      className="decision-button focus-ring"
+      data-primary={primary}
     />
   );
 }

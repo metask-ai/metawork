@@ -397,6 +397,27 @@ test("terminal delivery follows tool activity and precedes the outcome", () => {
   assert.match(renderCompletedTimeline(""), /did not return a final response/);
 });
 
+test("each typed Tool stays an independent bounded detail card", async () => {
+  const [markup, css, timeline, approval] = await Promise.all([
+    Promise.resolve(renderCompletedTimeline()),
+    readFile(join(process.cwd(), "frontend/src/index.css"), "utf8"),
+    readFile(
+      join(process.cwd(), "frontend/src/features/timeline/TaskTimeline.tsx"),
+      "utf8",
+    ),
+    readFile(
+      join(process.cwd(), "frontend/src/features/approvals/ApprovalPanel.tsx"),
+      "utf8",
+    ),
+  ]);
+  assert.equal(markup.match(/class="tool-card"/g)?.length, 1);
+  assert.match(markup, /class="tool-card" data-state="completed"/);
+  assert.match(css, /\.code-block-preview\s*\{[\s\S]*?max-height:\s*240px/);
+  assert.match(timeline, /key=\{`tool:\$\{activity\.value\.id\}`\}/);
+  assert.doesNotMatch(timeline, /bg-cobalt/);
+  assert.doesNotMatch(approval, /accent-cobalt/);
+});
+
 test("Timeline preserves typed Skill identity and positional arguments", () => {
   const markup = renderCompletedTimeline("Review complete", {
     kind: "skill",

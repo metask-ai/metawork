@@ -691,13 +691,13 @@ async function captureVisual(
   openSearch = false,
 ) {
   if (visualCaptureDir === null) return;
-  if (
-    process.platform === "darwin" &&
-    (openSettings || selectFirstTask || openSearch)
-  )
-    return;
+  if (process.platform === "darwin" && (openSettings || openSearch)) return;
   if (process.platform !== "darwin" && process.platform !== "win32") return;
   await mkdir(visualCaptureDir, { recursive: true });
+  if (process.platform === "darwin" && selectFirstTask) {
+    await automate("reload");
+    await waitForBridge();
+  }
   await automate("resize", String(width), String(height));
   await new Promise((resolve) => setTimeout(resolve, 350));
   if (process.platform === "darwin") {
