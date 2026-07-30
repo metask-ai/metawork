@@ -249,6 +249,16 @@ export const enUS = {
   "run.draft_preserved": "Your current Composer draft was kept unchanged.",
   "run.retry_too_long":
     "This instruction is too long for the Composer. Write a shorter follow-up instead.",
+  "slash.group.skills": "Skills",
+  "slash.remove_skill": "Remove selected Skill",
+  "slash.arguments": "Skill arguments",
+  "slash.argument": "Argument {index}",
+  "slash.add_argument": "Add argument",
+  "slash.remove_argument": "Remove last argument",
+  "slash.skill_input_too_large":
+    "This Skill input exceeds the supported argument limit.",
+  "slash.skill_stale":
+    "This Skill belongs to a different catalog snapshot. Refresh and choose it again.",
   "message.you": "You",
   "message.agent": "Agent",
   "tool.input": "Input",

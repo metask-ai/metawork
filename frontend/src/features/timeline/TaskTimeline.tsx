@@ -10,13 +10,13 @@ import {
 import { CodeBlock } from "../../components/ui/CodeBlock.tsx";
 import type {
   PendingUi,
+  RunInputView,
   RunView,
   TaskView,
   ToolView,
   UiRecord,
   UiResponsePayload,
 } from "../../bridge/contracts.ts";
-import { runInputDisplay } from "../../workbench/run-input.ts";
 import { formatInteger, formatMilliseconds } from "../../i18n/formatters.ts";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
 
@@ -148,7 +148,7 @@ export function TaskTimeline({
   retryAvailable: boolean;
   responseDisabled: boolean;
   onUseExample: (instruction: string) => void;
-  onPrepareRetry: (instruction: string) => void;
+  onPrepareRetry: (input: RunInputView) => void;
   onInspect: (
     section: TimelineDetailSection,
     opener: HTMLButtonElement,
@@ -243,10 +243,7 @@ export function TaskTimeline({
                   </div>
                 </header>
                 <div className="run-content">
-                  <Message
-                    role={t("message.you")}
-                    text={runInputDisplay(run.input)}
-                  />
+                  <RunInputMessage input={run.input} />
                   {activities.map((activity) => {
                     if (activity.kind === "tool")
                       return (
@@ -372,10 +369,9 @@ function RunOutcome({
   composerHasDraft: boolean;
   latest: boolean;
   retryAvailable: boolean;
-  onPrepareRetry: (instruction: string) => void;
+  onPrepareRetry: (input: RunInputView) => void;
 }) {
   const { t } = useI18n();
-  const retryText = run.input.kind === "text" ? run.input.text : null;
   return (
     <section
       className="run-outcome"
@@ -386,17 +382,41 @@ function RunOutcome({
         <p>{t(terminalMessageId(outcome))}</p>
         {run.cause && <span>{t(`cause.${run.cause}`)}</span>}
       </div>
-      {retryAvailable && retryText !== null && retryableOutcome(outcome) && (
+      {retryAvailable && retryableOutcome(outcome) && (
         <button
           className="outcome-action focus-ring"
           title={
             composerHasDraft ? t("run.review_draft_help") : t("run.retry_help")
           }
-          onClick={() => onPrepareRetry(retryText)}
+          onClick={() => onPrepareRetry(run.input)}
         >
           {composerHasDraft ? t("run.review_draft") : t("run.prepare_retry")}
         </button>
       )}
+    </section>
+  );
+}
+
+function RunInputMessage({ input }: { input: RunInputView }) {
+  const { t } = useI18n();
+  if (input.kind === "text")
+    return <Message role={t("message.you")} text={input.text} />;
+  return (
+    <section className="timeline-message is-user is-skill">
+      <p className="message-role">{t("message.you")}</p>
+      <div className="timeline-skill-input">
+        <span className="timeline-skill-token">
+          /{input.invocationName}
+          <small>{t("slash.group.skills")}</small>
+        </span>
+        {input.argumentValues.length > 0 && (
+          <span className="timeline-skill-arguments">
+            {input.argumentValues.map((value, index) => (
+              <code key={index}>{value}</code>
+            ))}
+          </span>
+        )}
+      </div>
     </section>
   );
 }

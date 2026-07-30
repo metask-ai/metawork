@@ -10,18 +10,21 @@ import {
   writeNewTaskDraft,
   writeTaskDraft,
 } from "./drafts.ts";
+import { emptyComposerDraft, type ComposerDraft } from "./slash.ts";
 
 function useDrafts(
   activeId: string | null,
-  readDraft: (id: string) => string,
-  writeDraft: (id: string, value: string) => void,
+  readDraft: (id: string) => ComposerDraft,
+  writeDraft: (id: string, value: ComposerDraft) => void,
   clearStoredDraft: (id: string) => void,
 ) {
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
-  const draft = activeId ? (drafts[activeId] ?? readDraft(activeId)) : "";
+  const [drafts, setDrafts] = useState<Record<string, ComposerDraft>>({});
+  const draft = activeId
+    ? (drafts[activeId] ?? readDraft(activeId))
+    : emptyComposerDraft();
 
   const updateDraft = useCallback(
-    (value: string) => {
+    (value: ComposerDraft) => {
       if (!activeId) return;
       setDrafts((current) => ({ ...current, [activeId]: value }));
       writeDraft(activeId, value);
@@ -30,7 +33,7 @@ function useDrafts(
   );
 
   const setDraft = useCallback(
-    (id: string, value: string) => {
+    (id: string, value: ComposerDraft) => {
       setDrafts((current) => ({ ...current, [id]: value }));
       writeDraft(id, value);
     },

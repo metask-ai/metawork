@@ -24,6 +24,7 @@ import {
   writeNewTaskDraft,
   writeTaskDraft,
 } from "../frontend/src/features/composer/drafts.ts";
+import { composerDraftWithinLimits } from "../frontend/src/features/composer/slash.ts";
 import {
   isRunInFlight,
   searchWorkbench,
@@ -386,52 +387,170 @@ test("Composer drafts survive a WebView reload scope and fail safely when storag
       removeItem: (key) => values.delete(key),
     },
   };
-  writeTaskDraft("7", "Follow up after this run");
-  writeTaskDraft("8", "Stale draft");
-  writeNewTaskDraft(unscopedNewTaskDraftId, "First instruction");
-  writeNewTaskDraft("/repo/alpha", "Alpha draft");
-  writeNewTaskDraft("/repo/beta", "Beta draft");
-  assert.equal(readTaskDraft("7"), "Follow up after this run");
+  values.set("metawork.task-draft.legacy", "Preserve this existing draft");
+  assert.deepEqual(readTaskDraft("legacy"), {
+    kind: "text",
+    text: "Preserve this existing draft",
+  });
+  writeTaskDraft("legacy", {
+    kind: "text",
+    text: "Preserve this existing draft",
+  });
+  assert.equal(values.has("metawork.task-draft.legacy"), false);
+  assert.match(values.get("metawork.task-draft.v1.legacy"), /^\{/);
+  writeTaskDraft("7", {
+    kind: "text",
+    text: "Follow up after this run",
+  });
+  writeTaskDraft("8", { kind: "text", text: "Stale draft" });
+  writeNewTaskDraft(unscopedNewTaskDraftId, {
+    kind: "text",
+    text: "First instruction",
+  });
+  writeNewTaskDraft("/repo/alpha", { kind: "text", text: "Alpha draft" });
+  writeNewTaskDraft("/repo/beta", { kind: "text", text: "Beta draft" });
+  assert.deepEqual(readTaskDraft("7"), {
+    kind: "text",
+    text: "Follow up after this run",
+  });
   pruneTaskDrafts(new Set(["7"]));
-  assert.equal(readTaskDraft("7"), "Follow up after this run");
-  assert.equal(readTaskDraft("8"), "");
-  assert.equal(readNewTaskDraft(unscopedNewTaskDraftId), "First instruction");
-  assert.equal(readNewTaskDraft("/repo/alpha"), "Alpha draft");
-  assert.equal(readNewTaskDraft("/repo/beta"), "Beta draft");
+  assert.deepEqual(readTaskDraft("7"), {
+    kind: "text",
+    text: "Follow up after this run",
+  });
+  assert.deepEqual(readTaskDraft("8"), { kind: "text", text: "" });
+  assert.deepEqual(readNewTaskDraft(unscopedNewTaskDraftId), {
+    kind: "text",
+    text: "First instruction",
+  });
+  assert.deepEqual(readNewTaskDraft("/repo/alpha"), {
+    kind: "text",
+    text: "Alpha draft",
+  });
+  assert.deepEqual(readNewTaskDraft("/repo/beta"), {
+    kind: "text",
+    text: "Beta draft",
+  });
   clearTaskDraft("7");
   clearNewTaskDraft(unscopedNewTaskDraftId);
   clearNewTaskDraft("/repo/alpha");
   clearNewTaskDraft("/repo/beta");
-  assert.equal(readTaskDraft("7"), "");
-  assert.equal(readNewTaskDraft(unscopedNewTaskDraftId), "");
+  assert.deepEqual(readTaskDraft("7"), { kind: "text", text: "" });
+  assert.deepEqual(readNewTaskDraft(unscopedNewTaskDraftId), {
+    kind: "text",
+    text: "",
+  });
 
   Object.defineProperty(globalThis.window, "sessionStorage", {
     get() {
       throw new Error("storage disabled");
     },
   });
-  assert.doesNotThrow(() => writeTaskDraft("7", "still typeable"));
   assert.doesNotThrow(() =>
-    writeNewTaskDraft(unscopedNewTaskDraftId, "still typeable"),
+    writeTaskDraft("7", { kind: "text", text: "still typeable" }),
   );
-  assert.equal(readTaskDraft("7"), "");
-  assert.equal(readNewTaskDraft(unscopedNewTaskDraftId), "");
+  assert.doesNotThrow(() =>
+    writeNewTaskDraft(unscopedNewTaskDraftId, {
+      kind: "text",
+      text: "still typeable",
+    }),
+  );
+  assert.deepEqual(readTaskDraft("7"), { kind: "text", text: "" });
+  assert.deepEqual(readNewTaskDraft(unscopedNewTaskDraftId), {
+    kind: "text",
+    text: "",
+  });
+  delete globalThis.window;
+});
+
+test("Skill drafts persist identity, revision, and positional values together", () => {
+  const values = new Map();
+  globalThis.window = {
+    sessionStorage: {
+      get length() {
+        return values.size;
+      },
+      key: (index) => [...values.keys()][index] ?? null,
+      getItem: (key) => values.get(key) ?? null,
+      setItem: (key, value) => values.set(key, value),
+      removeItem: (key) => values.delete(key),
+    },
+  };
+  const draft = {
+    kind: "skill",
+    skillId: "builtin.review",
+    invocationName: "review",
+    displayName: "Review",
+    catalogRevision: "17",
+    argumentNames: ["target"],
+    argumentValues: ["src/main.zig"],
+    maxValues: 1,
+  };
+  writeTaskDraft("7", draft);
+  assert.deepEqual(readTaskDraft("7"), draft);
+
+  values.set(
+    "metawork.task-draft.v1.7",
+    JSON.stringify({ ...draft, argumentValues: ["one", "two"] }),
+  );
+  assert.deepEqual(readTaskDraft("7"), { kind: "text", text: "" });
+  values.set(
+    "metawork.task-draft.v1.7",
+    JSON.stringify({ ...draft, unexpected: true }),
+  );
+  assert.deepEqual(readTaskDraft("7"), { kind: "text", text: "" });
+  const overRunBudget = {
+    ...draft,
+    argumentNames: [],
+    argumentValues: Array.from({ length: 2 }, () => "界".repeat(12 * 1024)),
+    maxValues: 2,
+  };
+  assert.equal(composerDraftWithinLimits(overRunBudget), false);
+  writeTaskDraft("7", overRunBudget);
+  assert.deepEqual(readTaskDraft("7"), overRunBudget);
+  writeTaskDraft("7", {
+    ...draft,
+    argumentNames: [],
+    argumentValues: Array.from({ length: 4 }, () => "界".repeat(16 * 1024)),
+    maxValues: 4,
+  });
+  assert.deepEqual(readTaskDraft("7"), overRunBudget);
+  values.set(
+    "metawork.task-draft.v1.7",
+    JSON.stringify({
+      kind: "text",
+      text: "x".repeat(16 * 1024 + 1),
+    }),
+  );
+  assert.deepEqual(readTaskDraft("7"), { kind: "text", text: "" });
   delete globalThis.window;
 });
 
 test("preparing a retry never overwrites an existing Composer draft", () => {
-  assert.deepEqual(prepareRetryDraft("", "Run the release checks"), {
-    draft: "Run the release checks",
-    kind: "prepared",
-  });
-  assert.deepEqual(prepareRetryDraft("Current draft", "Old instruction"), {
-    draft: "Current draft",
-    kind: "preserved",
-  });
-  assert.deepEqual(prepareRetryDraft("", "x".repeat(16 * 1024 + 1)), {
-    draft: "",
-    kind: "too_long",
-  });
+  assert.deepEqual(
+    prepareRetryDraft({ kind: "text", text: "" }, "Run the release checks"),
+    {
+      draft: { kind: "text", text: "Run the release checks" },
+      kind: "prepared",
+    },
+  );
+  assert.deepEqual(
+    prepareRetryDraft(
+      { kind: "text", text: "Current draft" },
+      "Old instruction",
+    ),
+    {
+      draft: { kind: "text", text: "Current draft" },
+      kind: "preserved",
+    },
+  );
+  assert.deepEqual(
+    prepareRetryDraft({ kind: "text", text: "" }, "x".repeat(16 * 1024 + 1)),
+    {
+      draft: { kind: "text", text: "" },
+      kind: "too_long",
+    },
+  );
 });
 
 test("New task draft identities are isolated by Workspace", () => {
@@ -442,10 +561,25 @@ test("New task draft identities are isolated by Workspace", () => {
 });
 
 test("New task draft migration never overwrites an existing Workspace draft", () => {
-  assert.equal(newTaskDraftMoveDecision("", "Alpha draft"), "preserve_target");
-  assert.equal(newTaskDraftMoveDecision("Current draft", ""), "move");
   assert.equal(
-    newTaskDraftMoveDecision("Current draft", "Alpha draft"),
+    newTaskDraftMoveDecision(
+      { kind: "text", text: "" },
+      { kind: "text", text: "Alpha draft" },
+    ),
+    "preserve_target",
+  );
+  assert.equal(
+    newTaskDraftMoveDecision(
+      { kind: "text", text: "Current draft" },
+      { kind: "text", text: "" },
+    ),
+    "move",
+  );
+  assert.equal(
+    newTaskDraftMoveDecision(
+      { kind: "text", text: "Current draft" },
+      { kind: "text", text: "Alpha draft" },
+    ),
     "preserve_both",
   );
 });

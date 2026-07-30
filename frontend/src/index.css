@@ -2651,6 +2651,56 @@ summary::-webkit-details-marker {
   line-height: 1.7;
 }
 
+.timeline-skill-input {
+  display: flex;
+  margin-top: 7px;
+  align-items: flex-start;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.timeline-skill-token {
+  display: inline-flex;
+  min-height: 26px;
+  padding: 4px 7px;
+  align-items: center;
+  gap: 7px;
+  border-radius: 7px;
+  color: #fff;
+  background: var(--color-cobalt);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 680;
+}
+
+.timeline-skill-token small {
+  opacity: 0.7;
+  font-family: var(--font-sans);
+  font-size: 8.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.timeline-skill-arguments {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.timeline-skill-arguments code {
+  max-width: 100%;
+  padding: 5px 7px;
+  overflow-wrap: anywhere;
+  border: 1px solid rgba(24, 50, 71, 0.12);
+  border-radius: 7px;
+  color: var(--color-graphite);
+  background: rgba(255, 255, 255, 0.72);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+
 .preparing-copy {
   margin: 0;
   color: var(--color-muted);
@@ -2825,6 +2875,16 @@ summary::-webkit-details-marker {
   margin: 0 auto;
 }
 
+.slash-refresh {
+  padding: 5px 8px;
+  border: 1px solid #d5dede;
+  border-radius: 7px;
+  color: var(--color-cobalt);
+  background: #fff;
+  font-size: 10.5px;
+  font-weight: 660;
+}
+
 .composer {
   display: flex;
   min-height: 108px;
@@ -2879,6 +2939,135 @@ summary::-webkit-details-marker {
 
 .composer textarea::placeholder {
   color: #939da2;
+}
+
+.skill-draft {
+  display: grid;
+  padding: 3px 4px 1px;
+  grid-template-columns: 168px minmax(0, 1fr);
+  gap: 12px;
+}
+
+.skill-draft-identity {
+  position: relative;
+  display: grid;
+  min-height: 58px;
+  padding: 8px 30px 8px 10px;
+  grid-template-columns: 24px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  border-left: 2px solid var(--color-cobalt);
+  border-radius: 8px;
+  background: #f2f6f6;
+}
+
+.skill-draft-mark {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: 7px;
+  color: #fff;
+  background: var(--color-cobalt);
+  font-family: var(--font-mono);
+  font-weight: 760;
+}
+
+.skill-draft-identity > span:nth-child(2) {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.skill-draft-identity strong,
+.skill-draft-identity small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skill-draft-identity strong {
+  font-size: 11.5px;
+}
+
+.skill-draft-identity small {
+  color: #6e7a7f;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+}
+
+.skill-draft-remove {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: grid;
+  width: 23px;
+  height: 23px;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  color: #788489;
+  background: transparent;
+}
+
+.skill-draft-remove:hover {
+  color: var(--color-graphite);
+  background: rgba(24, 50, 71, 0.07);
+}
+
+.skill-arguments {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 7px;
+}
+
+.skill-arguments label {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+  color: #6e7a7f;
+  font-size: 9.5px;
+  font-weight: 660;
+}
+
+.skill-arguments input {
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  padding: 0 9px;
+  border: 1px solid #d8e0e0;
+  border-radius: 8px;
+  outline: 0;
+  color: var(--color-graphite);
+  background: #fff;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.skill-arguments input:focus {
+  border-color: #9bb7bb;
+  box-shadow: 0 0 0 3px rgba(47, 116, 130, 0.07);
+}
+
+.skill-argument-actions {
+  display: flex;
+  min-height: 34px;
+  align-items: end;
+  gap: 8px;
+}
+
+.skill-draft-warning {
+  display: flex;
+  padding: 0 4px 2px;
+  grid-column: 1 / -1;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--color-amber-ink);
+  font-size: 10.5px;
 }
 
 .composer-toolbar {
@@ -3053,6 +3242,12 @@ summary::-webkit-details-marker {
   color: var(--color-muted);
   font-size: 10px;
   line-height: 1.4;
+}
+
+@media (max-width: 620px) {
+  .skill-draft {
+    grid-template-columns: 1fr;
+  }
 }
 
 .search-scrim {

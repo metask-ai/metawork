@@ -58,6 +58,15 @@ import {
 } from "../features/composer/drafts.ts";
 import { submitTaskInstruction } from "../features/composer/submitTaskInstruction.ts";
 import {
+  composerDraftHasContent,
+  composerDraftToRunInput,
+  composerDraftWithinLimits,
+  emptyComposerDraft,
+  isSkillDraftCurrent,
+  maxSkillArguments,
+  type ComposerDraft,
+} from "../features/composer/slash.ts";
+import {
   BridgeClient,
   BridgeCommandTimeoutError,
   RendererBridgeContractError,
@@ -68,6 +77,7 @@ import {
 } from "../bridge/connection.ts";
 import type {
   TaskCreateReason,
+  RunInputView,
   TaskRunReason,
   UiResponsePayload,
   WorkspaceMutationReason,
@@ -217,8 +227,10 @@ export default function App() {
     workbench.draftWorkspaceId ?? currentWorkspaceId,
   );
   const newTaskDrafts = useNewTaskDrafts(newTaskDraftId);
-  const prompt = newTaskDraftActive ? newTaskDrafts.draft : taskDrafts.draft;
-  const updatePrompt = newTaskDraftActive
+  const composerDraft = newTaskDraftActive
+    ? newTaskDrafts.draft
+    : taskDrafts.draft;
+  const updateComposerDraft = newTaskDraftActive
     ? newTaskDrafts.updateDraft
     : taskDrafts.updateDraft;
   const bridgeUnavailable = viewSyncFailed || !bridgeReady;
@@ -242,13 +254,35 @@ export default function App() {
   );
   const composerWorkspaceReady =
     composerWorkspace?.authorization === "available";
+  const skillCatalog = newTaskDraftActive
+    ? (composerWorkspace?.skillCatalog ?? {
+        availability: "unavailable" as const,
+        redacted: false,
+        revision: null,
+        skills: [],
+        issues: [],
+      })
+    : (activeTask?.skillCatalog ?? {
+        availability: "unavailable" as const,
+        redacted: false,
+        revision: null,
+        skills: [],
+        issues: [],
+      });
+  const skillDraftCurrent =
+    composerDraft.kind !== "skill" ||
+    isSkillDraftCurrent(composerDraft, skillCatalog);
+  const composerRunInput = composerDraftToRunInput(composerDraft);
   const canSubmit =
     taskCanCompose &&
     (!newTaskDraftActive || snapshot.account.canCreateTask) &&
     (!newTaskDraftActive || composerWorkspaceReady) &&
     !accountMutationBlocksTaskAdmission(newTaskDraftActive, accountBusy) &&
     !runInFlight &&
-    prompt.trim().length > 0 &&
+    composerDraftHasContent(composerDraft) &&
+    composerRunInput !== null &&
+    composerDraftWithinLimits(composerDraft) &&
+    skillDraftCurrent &&
     !taskMutationDisabled &&
     !workspaceBusy;
   const selectedModel = snapshot.account.models.find(
@@ -879,7 +913,9 @@ export default function App() {
 
   async function submitRun() {
     if (!canSubmit) return;
-    const submitted = prompt;
+    const submitted = composerDraft;
+    const input = composerDraftToRunInput(submitted);
+    if (!input) return;
     const existingTaskId = activeTask?.id ?? null;
     if (!composerWorkspace || !composerWorkspaceId) return;
     const submittedDraftId = newTaskDraftId;
@@ -887,7 +923,7 @@ export default function App() {
     if (!beginTaskPendingOperation(pendingScope, "run")) return;
     if (newTaskDraftActive && submittedDraftId)
       newTaskDrafts.clearDraft(submittedDraftId);
-    else updatePrompt("");
+    else updateComposerDraft(emptyComposerDraft());
     try {
       const result = await submitTaskInstruction({
         client,
@@ -896,7 +932,7 @@ export default function App() {
         expectedWorkspaceEpoch: composerWorkspace.epoch,
         expectedExecutionGeneration: snapshot.account.executionGeneration,
         expectedBindingEpoch: activeTask?.binding.epoch ?? null,
-        instruction: submitted,
+        input,
         onTaskCreated: (taskId) => {
           pendingTaskSelection.current = taskId;
           pendingTaskDraftRetention.current.add(taskId);
@@ -1023,6 +1059,28 @@ export default function App() {
     } finally {
       setCancelPendingForTask(taskId, false);
     }
+  }
+
+  function composerDraftFromRunInput(
+    input: RunInputView,
+  ): ComposerDraft | null {
+    if (input.redacted) return null;
+    if (input.kind === "text") return { kind: "text", text: input.text };
+    const descriptor = skillCatalog.skills.find(
+      (skill) => skill.skillId === input.skillId,
+    );
+    if (!descriptor || skillCatalog.revision !== input.catalogRevision)
+      return null;
+    return {
+      kind: "skill",
+      skillId: input.skillId,
+      invocationName: input.invocationName,
+      displayName: input.displayName,
+      catalogRevision: input.catalogRevision,
+      argumentNames: descriptor.argumentNames,
+      argumentValues: input.argumentValues,
+      maxValues: Math.min(descriptor.maxValues, maxSkillArguments),
+    };
   }
 
   async function closeTask() {
@@ -1239,12 +1297,41 @@ export default function App() {
     );
   }
 
-  function prepareRetry(instruction: string) {
+  function prepareRetry(input: RunInputView) {
     if (!activeTask || !taskCanCompose) return;
-    const prepared = prepareRetryDraft(prompt, instruction);
+    if (input.kind === "skill") {
+      if (composerDraftHasContent(composerDraft)) {
+        setStatus(
+          quietStatus("run.draft_preserved", {
+            scope: "task",
+            taskId: activeTask.id,
+          }),
+        );
+      } else {
+        const reusable = composerDraftFromRunInput(input);
+        if (reusable) {
+          updateComposerDraft(reusable);
+          setStatus(
+            quietStatus("run.retry_prepared", {
+              scope: "task",
+              taskId: activeTask.id,
+            }),
+          );
+        } else {
+          setStatus(
+            attentionStatus("mutation.reason.stale_catalog", {
+              scope: "task",
+              taskId: activeTask.id,
+            }),
+          );
+        }
+      }
+      return;
+    }
+    const prepared = prepareRetryDraft(composerDraft, input.text);
     switch (prepared.kind) {
       case "prepared":
-        updatePrompt(prepared.draft);
+        updateComposerDraft(prepared.draft);
         setStatus(
           quietStatus("run.retry_prepared", {
             scope: "task",
@@ -1832,12 +1919,13 @@ export default function App() {
             draft={newTaskDraftActive}
             draftHasWorkspace={Boolean(composerWorkspace)}
             revision={snapshot.revision}
-            composerHasDraft={prompt.trim().length > 0}
+            composerHasDraft={composerDraftHasContent(composerDraft)}
             retryAvailable={taskCanCompose && !runInFlight}
             responseDisabled={bridgeUnavailable}
             onUseExample={(instruction) => {
-              const prepared = prepareRetryDraft(prompt, instruction);
-              if (prepared.kind === "prepared") updatePrompt(prepared.draft);
+              const prepared = prepareRetryDraft(composerDraft, instruction);
+              if (prepared.kind === "prepared")
+                updateComposerDraft(prepared.draft);
               else if (activeTask)
                 setStatus(
                   quietStatus("run.draft_preserved", {
@@ -1873,7 +1961,8 @@ export default function App() {
               activeTask.lifecycle === "open" &&
               !activeTask.continuationAvailable,
             )}
-            prompt={prompt}
+            draft={composerDraft}
+            skillCatalog={skillCatalog}
             composeDisabled={!taskCanCompose || taskMutationDisabled}
             canSubmit={canSubmit}
             runInFlight={Boolean(taskCanCompose && runInFlight)}
@@ -1929,7 +2018,7 @@ export default function App() {
                 : t("settings.task_binding_model")
             }
             actionDisabled={bridgeUnavailable || workspaceBusy}
-            onPromptChange={updatePrompt}
+            onDraftChange={updateComposerDraft}
             onSubmit={() => void submitRun()}
             onConfirmAccess={() => void chooseWorkspace(true)}
             onSelectWorkspace={(workspaceId) =>

@@ -85,7 +85,7 @@ test("the first send uses Host generations and creates one Task before its Run",
     expectedWorkspaceEpoch: "5",
     expectedExecutionGeneration: "19",
     expectedBindingEpoch: null,
-    instruction: "Ship a working product",
+    input: { kind: "text", text: "Ship a working product" },
     onTaskCreated: (taskId) => created.push(taskId),
   });
   assert.deepEqual(calls, [
@@ -93,6 +93,45 @@ test("the first send uses Host generations and creates one Task before its Run",
     ["run", "41", "8", { kind: "text", text: "Ship a working product" }],
   ]);
   assert.deepEqual(created, ["41"]);
+  assert.deepEqual(result, { kind: "started", taskId: "41", created: true });
+});
+
+test("the first Skill send pins its selected catalog before typed execution", async () => {
+  const calls = [];
+  const input = {
+    kind: "skill",
+    skillId: "builtin.review",
+    catalogRevision: "17",
+    argumentValues: ["src/main.zig"],
+  };
+  const result = await submitTaskInstruction({
+    client: {
+      async createTask(...args) {
+        calls.push(["create", ...args]);
+        return {
+          accepted: true,
+          taskId: "41",
+          bindingEpoch: "8",
+          reason: null,
+        };
+      },
+      async run(...args) {
+        calls.push(["run", ...args]);
+        return { accepted: true, taskId: "41", runId: "9", reason: null };
+      },
+    },
+    taskId: null,
+    workspaceId: "7",
+    expectedWorkspaceEpoch: "5",
+    expectedExecutionGeneration: "19",
+    expectedBindingEpoch: null,
+    input,
+    onTaskCreated() {},
+  });
+  assert.deepEqual(calls, [
+    ["create", "7", "5", "19", "17"],
+    ["run", "41", "8", input],
+  ]);
   assert.deepEqual(result, { kind: "started", taskId: "41", created: true });
 });
 
@@ -114,7 +153,7 @@ test("a creation failure never starts a Run or invents a Task", async () => {
     expectedWorkspaceEpoch: "5",
     expectedExecutionGeneration: "19",
     expectedBindingEpoch: null,
-    instruction: "Keep this text",
+    input: { kind: "text", text: "Keep this text" },
     onTaskCreated: () => {
       createdCalled = true;
     },
@@ -144,7 +183,7 @@ test("a Host-rejected creation preserves the structured product reason", async (
     expectedWorkspaceEpoch: "5",
     expectedExecutionGeneration: "19",
     expectedBindingEpoch: null,
-    instruction: "Keep this text",
+    input: { kind: "text", text: "Keep this text" },
     onTaskCreated: () => assert.fail("a rejected creation has no Task"),
   });
   assert.deepEqual(result, {
@@ -170,7 +209,7 @@ test("the first send cannot bypass the Host-projected Workspace identity", async
     expectedWorkspaceEpoch: "",
     expectedExecutionGeneration: "19",
     expectedBindingEpoch: null,
-    instruction: "Do not bypass trust",
+    input: { kind: "text", text: "Do not bypass trust" },
     onTaskCreated() {
       assert.fail("a Task cannot exist without a Workspace");
     },
@@ -200,7 +239,7 @@ test("a Run failure reports the real created Task for draft recovery", async () 
     expectedWorkspaceEpoch: "5",
     expectedExecutionGeneration: "19",
     expectedBindingEpoch: null,
-    instruction: "Recover me",
+    input: { kind: "text", text: "Recover me" },
     onTaskCreated() {},
   });
   assert.deepEqual(result, {
@@ -236,7 +275,7 @@ test("sending on an existing Task uses its binding epoch and never creates", asy
     expectedWorkspaceEpoch: "5",
     expectedExecutionGeneration: "19",
     expectedBindingEpoch: "12",
-    instruction: "Continue",
+    input: { kind: "text", text: "Continue" },
     onTaskCreated() {
       assert.fail("existing Task must not create a Task");
     },
@@ -265,7 +304,7 @@ test("a Host-rejected Run preserves the structured product reason", async () => 
     expectedWorkspaceEpoch: "5",
     expectedExecutionGeneration: "19",
     expectedBindingEpoch: "12",
-    instruction: "Continue",
+    input: { kind: "text", text: "Continue" },
     onTaskCreated() {},
   });
   assert.deepEqual(result, {
@@ -292,7 +331,7 @@ test("an existing Task without a binding epoch fails closed", async () => {
     expectedWorkspaceEpoch: "5",
     expectedExecutionGeneration: "19",
     expectedBindingEpoch: null,
-    instruction: "Continue",
+    input: { kind: "text", text: "Continue" },
     onTaskCreated() {},
   });
   assert.equal(result.kind, "run_failed");

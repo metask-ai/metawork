@@ -1,9 +1,18 @@
-import { useEffect, type RefObject } from "react";
+import { useEffect, useRef, type KeyboardEvent, type RefObject } from "react";
 
+import type { SkillCatalogView } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { useI18n } from "../../i18n/context.ts";
 import { maxComposerCharacters } from "./drafts.ts";
 import { ModelSelector } from "./ModelSelector.tsx";
+import {
+  composerDraftWithinLimits,
+  emptyComposerDraft,
+  isSkillDraftCurrent,
+  skillDraftVisibleArgumentCount,
+  type ComposerDraft,
+  type ComposerSkillDraft,
+} from "./slash.ts";
 import { WorkspaceContextSelector } from "./WorkspaceContextSelector.tsx";
 
 function resizeComposerTextarea(textarea: HTMLTextAreaElement) {
@@ -20,7 +29,8 @@ export function ComposerFooter({
   closing,
   closed,
   unavailable,
-  prompt,
+  draft,
+  skillCatalog,
   composeDisabled,
   canSubmit,
   runInFlight,
@@ -39,7 +49,7 @@ export function ComposerFooter({
   modelSelectionPending,
   modelContextTitle,
   actionDisabled,
-  onPromptChange,
+  onDraftChange,
   onSubmit,
   onConfirmAccess,
   onSelectWorkspace,
@@ -50,7 +60,8 @@ export function ComposerFooter({
   closing: boolean;
   closed: boolean;
   unavailable: boolean;
-  prompt: string;
+  draft: ComposerDraft;
+  skillCatalog: SkillCatalogView;
   composeDisabled: boolean;
   canSubmit: boolean;
   runInFlight: boolean;
@@ -74,19 +85,50 @@ export function ComposerFooter({
   modelSelectionPending: boolean;
   modelContextTitle: string;
   actionDisabled: boolean;
-  onPromptChange: (value: string) => void;
+  onDraftChange: (value: ComposerDraft) => void;
   onSubmit: () => void;
   onConfirmAccess: () => void;
   onSelectWorkspace: (workspaceId: string) => void;
   onSelectModel: (id: string) => void;
 }) {
   const { t } = useI18n();
+  const firstSkillArgumentRef = useRef<HTMLInputElement>(null);
+  const skillRemoveButtonRef = useRef<HTMLButtonElement>(null);
+  const sendButtonRef = useRef<HTMLButtonElement>(null);
+  const text = draft.kind === "text" ? draft.text : "";
+  const draftFocusIdentity =
+    draft.kind === "skill"
+      ? `skill:${draft.skillId}:${draft.catalogRevision}`
+      : "text";
+  const previousDraftFocusIdentity = useRef(draftFocusIdentity);
+  const sendEnabled = canSubmit;
+  const skillDraftCurrent =
+    draft.kind !== "skill" || isSkillDraftCurrent(draft, skillCatalog);
+  const draftWithinLimits = composerDraftWithinLimits(draft);
+  useEffect(() => {
+    if (previousDraftFocusIdentity.current === draftFocusIdentity) return;
+    previousDraftFocusIdentity.current = draftFocusIdentity;
+    const frame = window.requestAnimationFrame(() => {
+      const firstArgument = firstSkillArgumentRef.current;
+      const sendButton = sendButtonRef.current;
+      const target =
+        draft.kind === "skill"
+          ? firstArgument && !firstArgument.disabled
+            ? firstArgument
+            : sendButton && !sendButton.disabled
+              ? sendButton
+              : skillRemoveButtonRef.current
+          : textareaRef.current;
+      target?.focus();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [draft.kind, draftFocusIdentity, textareaRef]);
 
   useEffect(() => {
     const textarea = textareaRef.current;
     if (!textarea || typeof window === "undefined") return;
     resizeComposerTextarea(textarea);
-  }, [prompt, textareaRef]);
+  }, [text, textareaRef]);
 
   useEffect(() => {
     const textarea = textareaRef.current;
@@ -102,39 +144,169 @@ export function ComposerFooter({
     };
   }, [textareaRef]);
 
+  function handleTextKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.nativeEvent.isComposing) return;
+    if (event.key === "Enter" && !event.shiftKey && sendEnabled) {
+      event.preventDefault();
+      onSubmit();
+    }
+  }
+
+  function updateSkillArgument(
+    skill: ComposerSkillDraft,
+    index: number,
+    value: string,
+  ) {
+    const values = [...skill.argumentValues];
+    values[index] = value.slice(0, maxComposerCharacters);
+    onDraftChange({ ...skill, argumentValues: values });
+  }
+
+  function appendSkillArgument(skill: ComposerSkillDraft) {
+    const visible = skillDraftVisibleArgumentCount(skill);
+    if (visible >= skill.maxValues) return;
+    const values = Array.from(
+      { length: visible + 1 },
+      (_, index) => skill.argumentValues[index] ?? "",
+    );
+    onDraftChange({ ...skill, argumentValues: values });
+  }
+
+  function removeLastSkillArgument(skill: ComposerSkillDraft) {
+    if (skill.argumentValues.length <= skill.argumentNames.length) return;
+    onDraftChange({
+      ...skill,
+      argumentValues: skill.argumentValues.slice(0, -1),
+    });
+  }
+
   return (
     <footer className="composer-bar">
       <div className="composer-shell">
         <div className="composer">
-          <textarea
-            ref={textareaRef}
-            value={prompt}
-            maxLength={maxComposerCharacters}
-            disabled={composeDisabled}
-            placeholder={
-              closed
-                ? t("run.placeholder_closed")
-                : closing
-                  ? t("run.placeholder_closing")
-                  : unavailable
-                    ? t("run.placeholder_unavailable")
-                    : archived
-                      ? t("run.placeholder_archived")
-                      : t("run.placeholder")
-            }
-            onChange={(event) => onPromptChange(event.target.value)}
-            onKeyDown={(event) => {
-              if (
-                event.key === "Enter" &&
-                !event.shiftKey &&
-                !event.nativeEvent.isComposing &&
-                canSubmit
-              ) {
-                event.preventDefault();
-                onSubmit();
+          {draft.kind === "text" ? (
+            <textarea
+              ref={textareaRef}
+              value={draft.text}
+              maxLength={maxComposerCharacters}
+              disabled={composeDisabled}
+              placeholder={
+                closed
+                  ? t("run.placeholder_closed")
+                  : closing
+                    ? t("run.placeholder_closing")
+                    : unavailable
+                      ? t("run.placeholder_unavailable")
+                      : archived
+                        ? t("run.placeholder_archived")
+                        : t("run.placeholder")
               }
-            }}
-          />
+              onCompositionEnd={(event) => {
+                onDraftChange({
+                  kind: "text",
+                  text: event.currentTarget.value,
+                });
+              }}
+              onChange={(event) =>
+                onDraftChange({ kind: "text", text: event.target.value })
+              }
+              onKeyDown={handleTextKeyDown}
+            />
+          ) : (
+            <div className="skill-draft">
+              <div className="skill-draft-identity">
+                <span className="skill-draft-mark" aria-hidden="true">
+                  /
+                </span>
+                <span>
+                  <strong>{draft.displayName || draft.invocationName}</strong>
+                  <small>/skill:{draft.invocationName}</small>
+                </span>
+                <button
+                  ref={skillRemoveButtonRef}
+                  type="button"
+                  className="skill-draft-remove focus-ring"
+                  aria-label={t("slash.remove_skill")}
+                  onClick={() => onDraftChange(emptyComposerDraft())}
+                >
+                  <Icon name="close" />
+                </button>
+              </div>
+              {skillDraftVisibleArgumentCount(draft) > 0 && (
+                <div
+                  className="skill-arguments"
+                  role="group"
+                  aria-label={t("slash.arguments")}
+                >
+                  {Array.from({
+                    length: skillDraftVisibleArgumentCount(draft),
+                  }).map((_, index) => (
+                    <label
+                      key={`${draft.argumentNames[index] ?? "arg"}:${index}`}
+                    >
+                      <span>
+                        {draft.argumentNames[index] ||
+                          t("slash.argument", { index: String(index + 1) })}
+                      </span>
+                      <input
+                        ref={index === 0 ? firstSkillArgumentRef : undefined}
+                        value={draft.argumentValues[index] ?? ""}
+                        maxLength={maxComposerCharacters}
+                        disabled={composeDisabled}
+                        onChange={(event) =>
+                          updateSkillArgument(draft, index, event.target.value)
+                        }
+                        onKeyDown={(event) => {
+                          if (
+                            event.key === "Enter" &&
+                            !event.nativeEvent.isComposing &&
+                            sendEnabled
+                          ) {
+                            event.preventDefault();
+                            onSubmit();
+                          }
+                        }}
+                      />
+                    </label>
+                  ))}
+                  <div className="skill-argument-actions">
+                    {skillDraftVisibleArgumentCount(draft) <
+                      draft.maxValues && (
+                      <button
+                        type="button"
+                        className="slash-refresh focus-ring"
+                        disabled={composeDisabled}
+                        onClick={() => appendSkillArgument(draft)}
+                      >
+                        {t("slash.add_argument")}
+                      </button>
+                    )}
+                    {draft.argumentValues.length >
+                      draft.argumentNames.length && (
+                      <button
+                        type="button"
+                        className="slash-refresh focus-ring"
+                        disabled={composeDisabled}
+                        onClick={() => removeLastSkillArgument(draft)}
+                      >
+                        {t("slash.remove_argument")}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+              {!skillDraftCurrent && (
+                <div className="skill-draft-warning" role="status">
+                  <span>{t("slash.skill_stale")}</span>
+                </div>
+              )}
+              {!draftWithinLimits && (
+                <div className="skill-draft-warning" role="status">
+                  <span>{t("slash.skill_input_too_large")}</span>
+                </div>
+              )}
+            </div>
+          )}
           <div
             className="composer-toolbar"
             role="group"
@@ -156,10 +328,11 @@ export function ComposerFooter({
               </span>
             )}
             <button
+              ref={sendButtonRef}
               className="composer-send focus-ring"
               aria-label={t("run.submit")}
               title={t("run.submit")}
-              disabled={!canSubmit}
+              disabled={!sendEnabled}
               onClick={onSubmit}
             >
               <Icon name="send" />

@@ -40,7 +40,15 @@ const base = {
   closing: false,
   closed: false,
   unavailable: false,
-  prompt: "",
+  draft: { kind: "text", text: "" },
+  skillCatalog: {
+    availability: "ready",
+    redacted: false,
+    revision: "4",
+    skills: [],
+    issues: [],
+  },
+  slashCommands: [],
   composeDisabled: false,
   canSubmit: false,
   runInFlight: false,
@@ -61,8 +69,10 @@ const base = {
   modelSelectionPending: false,
   modelContextTitle: "Default model",
   actionDisabled: false,
-  onPromptChange() {},
+  onDraftChange() {},
   onSubmit() {},
+  onSlashCommand() {},
+  onRefreshSkillCatalog() {},
   onConfirmAccess() {},
   onSelectWorkspace() {},
   onSelectModel() {},
@@ -114,18 +124,21 @@ function renderShell(inspector, inspectorOpen = false, left = undefined) {
   );
 }
 
-function renderCompletedTimeline(assistant = "Release is ready") {
+function renderCompletedTimeline(
+  assistant = "Release is ready",
+  input = {
+    kind: "text",
+    text: "Inspect the release",
+    redacted: false,
+  },
+) {
   const task = {
     id: "3",
     runs: [
       {
         id: "9",
         phase: "completed",
-        input: {
-          kind: "text",
-          text: "Inspect the release",
-          redacted: false,
-        },
+        input,
         assistant,
         assistantRedacted: false,
         outcome: "completed",
@@ -383,6 +396,21 @@ test("terminal delivery follows tool activity and precedes the outcome", () => {
   assert.match(renderCompletedTimeline(""), /did not return a final response/);
 });
 
+test("Timeline preserves typed Skill identity and positional arguments", () => {
+  const markup = renderCompletedTimeline("Review complete", {
+    kind: "skill",
+    skillId: "builtin.review",
+    catalogRevision: "17",
+    invocationName: "review",
+    displayName: "Review",
+    argumentValues: ["src/main.zig"],
+    redacted: false,
+  });
+  assert.match(markup, /timeline-skill-token/);
+  assert.match(markup, />\/review/);
+  assert.match(markup, />src\/main\.zig</);
+});
+
 test("task examples disappear before they can overwrite an existing draft", () => {
   assert.match(renderNewTaskTimeline(false), /Review this project/);
   assert.doesNotMatch(renderNewTaskTimeline(true), /Review this project/);
@@ -390,7 +418,7 @@ test("task examples disappear before they can overwrite an existing draft", () =
 
 test("a new Task draft is editable before its first send", () => {
   const markup = render({
-    prompt: "Ship the release",
+    draft: { kind: "text", text: "Ship the release" },
     canSubmit: true,
     workspaceMissing: false,
     workspaceLabel: "alpha",
@@ -413,7 +441,7 @@ test("a new Task draft is editable before its first send", () => {
 
 test("an expired workspace grant preserves editable text and exposes recovery", () => {
   const markup = render({
-    prompt: "Keep this draft",
+    draft: { kind: "text", text: "Keep this draft" },
     accessRequired: true,
     workspaceMissing: false,
     workspaceLabel: "/repo/alpha",

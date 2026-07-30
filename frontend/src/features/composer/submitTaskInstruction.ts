@@ -39,7 +39,7 @@ export async function submitTaskInstruction({
   expectedWorkspaceEpoch,
   expectedExecutionGeneration,
   expectedBindingEpoch,
-  instruction,
+  input,
   onTaskCreated,
 }: {
   client: TaskSubmissionClient;
@@ -48,7 +48,7 @@ export async function submitTaskInstruction({
   expectedWorkspaceEpoch: string;
   expectedExecutionGeneration: string;
   expectedBindingEpoch: string | null;
-  instruction: string;
+  input: TaskRunInput;
   onTaskCreated: (taskId: string) => void;
 }): Promise<TaskSubmissionResult> {
   let targetTaskId = taskId;
@@ -65,7 +65,7 @@ export async function submitTaskInstruction({
         workspaceId,
         expectedWorkspaceEpoch,
         expectedExecutionGeneration,
-        null,
+        input.kind === "skill" ? input.catalogRevision : null,
       );
       if (!createdTask.accepted)
         return { kind: "create_rejected", reason: createdTask.reason };
@@ -86,10 +86,7 @@ export async function submitTaskInstruction({
       error: new Error("Task execution binding is unavailable"),
     };
   try {
-    const run = await client.run(targetTaskId, targetBindingEpoch, {
-      kind: "text",
-      text: instruction,
-    });
+    const run = await client.run(targetTaskId, targetBindingEpoch, input);
     if (!run.accepted)
       return {
         kind: "run_rejected",
