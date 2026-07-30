@@ -3,7 +3,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { JSDOM } from "jsdom";
-import { createElement, createRef } from "react";
+import { createElement, createRef, useState } from "react";
 import { createServer } from "vite";
 
 const dom = new JSDOM("<!doctype html><html><body></body></html>", {
@@ -537,6 +537,62 @@ test("Settings keeps section navigation fixed while content scrolls independentl
 function renderComposer(overrides = {}) {
   const textareaRef = createRef();
   let submissions = 0;
+  const initialDraft = overrides.draft ?? {
+    kind: "text",
+    text: "请检查当前实现",
+  };
+  const externalOnDraftChange = overrides.onDraftChange;
+  function ComposerHarness() {
+    const [draft, setDraft] = useState(initialDraft);
+    return createElement(ComposerFooter, {
+      textareaRef,
+      archived: false,
+      closing: false,
+      closed: false,
+      unavailable: false,
+      draft,
+      skillCatalog: {
+        availability: "ready",
+        redacted: false,
+        revision: "4",
+        skills: [],
+        issues: [],
+      },
+      slashCommands: [],
+      composeDisabled: false,
+      canSubmit: true,
+      runInFlight: false,
+      accessRequired: false,
+      workspaceMissing: false,
+      workspaceLabel: "metawork",
+      workspaceTitle: "/repo/metawork",
+      workspaceOptions: [],
+      selectedWorkspaceId: "1",
+      workspaceEditable: false,
+      modelLabel: null,
+      modelOptions: [],
+      selectedModelId: "",
+      modelEditable: false,
+      modelSelectionDisabled: false,
+      modelSelectionPending: false,
+      modelContextTitle: "",
+      actionDisabled: false,
+      onSubmit() {
+        submissions += 1;
+      },
+      onSlashCommand() {},
+      onRefreshSkillCatalog() {},
+      onConfirmAccess() {},
+      onSelectWorkspace() {},
+      onSelectModel() {},
+      ...overrides,
+      draft,
+      onDraftChange(value) {
+        setDraft(value);
+        externalOnDraftChange?.(value);
+      },
+    });
+  }
   render(
     createElement(
       I18nContext.Provider,
@@ -547,40 +603,7 @@ function renderComposer(overrides = {}) {
           t: (id, values) => translate("en-US", id, values),
         },
       },
-      createElement(ComposerFooter, {
-        textareaRef,
-        archived: false,
-        closing: false,
-        closed: false,
-        unavailable: false,
-        prompt: "请检查当前实现",
-        composeDisabled: false,
-        canSubmit: true,
-        runInFlight: false,
-        accessRequired: false,
-        workspaceMissing: false,
-        workspaceLabel: "metawork",
-        workspaceTitle: "/repo/metawork",
-        workspaceOptions: [],
-        selectedWorkspaceId: "1",
-        workspaceEditable: false,
-        modelLabel: null,
-        modelOptions: [],
-        selectedModelId: "",
-        modelEditable: false,
-        modelSelectionDisabled: false,
-        modelSelectionPending: false,
-        modelContextTitle: "",
-        actionDisabled: false,
-        onPromptChange() {},
-        onSubmit() {
-          submissions += 1;
-        },
-        onConfirmAccess() {},
-        onSelectWorkspace() {},
-        onSelectModel() {},
-        ...overrides,
-      }),
+      createElement(ComposerHarness),
     ),
   );
   return {
@@ -620,4 +643,197 @@ test("Composer recalculates its height when its rendered width changes", () => {
   observer.notify(420);
   assert.equal(composer.textarea.style.height, "126px");
   assert.equal(composer.textarea.style.overflowY, "hidden");
+});
+
+test("Slash menu is an IME-safe combobox and consumes Command Enter locally", () => {
+  const commands = [{ name: "new", enabled: true, disabledReason: null }];
+  const chosen = [];
+  const composer = renderComposer({
+    draft: { kind: "text", text: "/" },
+    slashCommands: commands,
+    canSubmit: true,
+    onSlashCommand: (command) => chosen.push(command),
+  });
+  assert.equal(composer.textarea.getAttribute("role"), "combobox");
+  assert.equal(composer.textarea.getAttribute("aria-expanded"), "true");
+  assert.ok(screen.getByRole("listbox"));
+  fireEvent.keyDown(composer.textarea, {
+    key: "Enter",
+    shiftKey: false,
+    isComposing: true,
+  });
+  assert.deepEqual(chosen, []);
+  fireEvent.keyDown(composer.textarea, {
+    key: "Enter",
+    shiftKey: false,
+    isComposing: false,
+  });
+  assert.deepEqual(chosen, ["new"]);
+  assert.equal(composer.submissions(), 0);
+});
+
+test("keyboard Skill selection moves focus into the structured draft", async () => {
+  const composer = renderComposer({
+    draft: { kind: "text", text: "/review" },
+    skillCatalog: {
+      availability: "ready",
+      redacted: false,
+      revision: "17",
+      skills: [
+        {
+          skillId: "builtin.review",
+          invocationName: "review",
+          displayName: "Review",
+          description: "Review a target",
+          argumentNames: ["target"],
+          maxValues: 1,
+        },
+      ],
+      issues: [],
+    },
+  });
+  fireEvent.keyDown(composer.textarea, {
+    key: "Enter",
+    shiftKey: false,
+    isComposing: false,
+  });
+  await new Promise((resolve) => window.requestAnimationFrame(resolve));
+  assert.equal(
+    document.activeElement,
+    screen.getByRole("textbox", { name: "target" }),
+  );
+});
+
+test("a no-argument Skill moves keyboard focus to the real Send action", async () => {
+  const composer = renderComposer({
+    draft: { kind: "text", text: "/review" },
+    skillCatalog: {
+      availability: "ready",
+      redacted: false,
+      revision: "17",
+      skills: [
+        {
+          skillId: "builtin.review",
+          invocationName: "review",
+          displayName: "Review",
+          description: "Review the current task",
+          argumentNames: [],
+          maxValues: 0,
+        },
+      ],
+      issues: [],
+    },
+  });
+  fireEvent.keyDown(composer.textarea, {
+    key: "Enter",
+    shiftKey: false,
+    isComposing: false,
+  });
+  await new Promise((resolve) => window.requestAnimationFrame(resolve));
+  assert.equal(
+    document.activeElement,
+    screen.getByRole("button", { name: "Send" }),
+  );
+});
+
+test("unknown leading Slash text cannot leak through ordinary submit", () => {
+  const composer = renderComposer({
+    draft: { kind: "text", text: "/not-a-command" },
+    slashCommands: [],
+    canSubmit: true,
+  });
+  const send = screen.getByRole("button", { name: "Send" });
+  assert.equal(send.disabled, true);
+  fireEvent.keyDown(composer.textarea, {
+    key: "Escape",
+    isComposing: false,
+  });
+  fireEvent.keyDown(composer.textarea, {
+    key: "Enter",
+    shiftKey: false,
+    isComposing: false,
+  });
+  assert.equal(composer.submissions(), 0);
+});
+
+test("a positional Skill tail remains visible even without a named label", () => {
+  renderComposer({
+    draft: {
+      kind: "skill",
+      skillId: "builtin.review",
+      invocationName: "review",
+      displayName: "Review",
+      catalogRevision: "17",
+      argumentNames: [],
+      argumentValues: ["src/main.zig"],
+      maxValues: 1,
+    },
+    skillCatalog: {
+      availability: "ready",
+      redacted: false,
+      revision: "17",
+      skills: [
+        {
+          skillId: "builtin.review",
+          invocationName: "review",
+          displayName: "Review",
+          description: "",
+          argumentNames: [],
+          maxValues: 1,
+        },
+      ],
+      issues: [],
+    },
+  });
+  assert.equal(
+    screen.getByRole("textbox", { name: "Argument 1" }).value,
+    "src/main.zig",
+  );
+});
+
+test("variadic Skills expose unnamed argument slots up to maxValues", () => {
+  const changes = [];
+  renderComposer({
+    draft: {
+      kind: "skill",
+      skillId: "builtin.review",
+      invocationName: "review",
+      displayName: "Review",
+      catalogRevision: "17",
+      argumentNames: [],
+      argumentValues: [],
+      maxValues: 3,
+    },
+    skillCatalog: {
+      availability: "ready",
+      redacted: false,
+      revision: "17",
+      skills: [
+        {
+          skillId: "builtin.review",
+          invocationName: "review",
+          displayName: "Review",
+          description: "",
+          argumentNames: [],
+          maxValues: 3,
+        },
+      ],
+      issues: [],
+    },
+    onDraftChange: (draft) => changes.push(draft),
+  });
+  assert.equal(screen.getByRole("textbox", { name: "Argument 1" }).value, "");
+  fireEvent.click(screen.getByRole("button", { name: "Add argument" }));
+  assert.deepEqual(changes, [
+    {
+      kind: "skill",
+      skillId: "builtin.review",
+      invocationName: "review",
+      displayName: "Review",
+      catalogRevision: "17",
+      argumentNames: [],
+      argumentValues: ["", ""],
+      maxValues: 3,
+    },
+  ]);
 });

@@ -1,6 +1,6 @@
 # MetaWork AgentCore 集成契约
 
-> 状态：AgentCore ABI v1 revision 4 macOS exact artifact 与 Agent/Workbench/Bridge typed Skill surface 已完成；Composer Slash 属于后续独立产品入口；fault-domain 验证选择单 AgentCore Worker 作为后续正式方向
+> 状态：AgentCore ABI v1 revision 4 macOS exact artifact、Agent/Workbench/Bridge typed Skill surface 与独立 Composer Slash 入口已完成；fault-domain 验证选择单 AgentCore Worker 作为后续正式方向
 > 目标依赖：Metask AgentCore ABI v1 revision 4；精确 artifact identity 见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)
 
 本文定义 MetaWork `agent/` 执行子系统与 Metask AgentCore 之间的规范边界。Desktop Host 的 composition、Workbench 产品状态和 Bridge transport 见 [高层架构](architecture.md)，revision 4 目标能力见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。
