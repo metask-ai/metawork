@@ -96,6 +96,7 @@ const server = await createServer({
 import React, { useLayoutEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "/src/index.css";
+import { GlobalSearch } from "/src/features/search/GlobalSearch.tsx";
 import { SettingsPage } from "/src/features/settings/SettingsPage.tsx";
 import { I18nContext } from "/src/i18n/context.ts";
 import { translate } from "/src/i18n/runtime.ts";
@@ -245,6 +246,31 @@ function AuditApp() {
           </section>
         </div>
       </div>
+      <GlobalSearch
+        open={query.get("search") === "open"}
+        query="meta"
+        results={[
+          {
+            key: "workspace:alpha",
+            kind: "workspace",
+            title: "metawork",
+            detail: "/Users/example/Projects/metawork",
+            workspaceId: "alpha",
+            taskId: null,
+          },
+          {
+            key: "task:one",
+            kind: "task",
+            title: "Refine the task execution timeline",
+            detail: "metawork · Completed",
+            workspaceId: "alpha",
+            taskId: "one",
+          },
+        ]}
+        onQuery={() => undefined}
+        onClose={() => undefined}
+        onSelect={() => undefined}
+      />
       <pre id="audit-result" hidden />
     </I18nContext.Provider>
   );
@@ -298,6 +324,22 @@ try {
     height: 812,
     query: "locale=zh-CN&scroll=account",
   });
+  const zoom200 = await capture({
+    origin,
+    name: "settings-zoom-200",
+    width: 660,
+    height: 406,
+    deviceScaleFactor: 2,
+    query: "locale=zh-CN&scroll=account",
+    screenshotSize: "1320x812",
+  });
+  const searchCompact = await capture({
+    origin,
+    name: "search-compact",
+    width: 540,
+    height: 812,
+    query: "locale=en-US&search=open",
+  });
   const interaction = await auditInteractions(origin);
   const singleton = await auditSingletonCatalog(origin);
 
@@ -306,6 +348,8 @@ try {
     ["desktopScrolled", desktopScrolled],
     ["narrow", narrow],
     ["compact", compact],
+    ["zoom200", zoom200],
+    ["searchCompact", searchCompact],
   ]) {
     assert.equal(result.horizontalOverflow, false, `${name} overflowed`);
     assert.equal(result.pageFitsStage, true, `${name} page escaped its stage`);
@@ -332,6 +376,8 @@ try {
         desktopScrolled,
         narrow,
         compact,
+        zoom200,
+        searchCompact,
         interaction,
         singleton,
       },
@@ -422,13 +468,21 @@ async function auditSingletonCatalog(origin) {
   };
 }
 
-async function capture({ origin, name, width, height, query }) {
+async function capture({
+  origin,
+  name,
+  width,
+  height,
+  query,
+  deviceScaleFactor = 1,
+  screenshotSize = `${width}x${height}`,
+}) {
   const url = `${origin}/?${query}`;
-  const screenshot = join(outputDir, `${name}-${width}x${height}.png`);
+  const screenshot = join(outputDir, `${name}-${screenshotSize}.png`);
   await chromeClient.call("Emulation.setDeviceMetricsOverride", {
     width,
     height,
-    deviceScaleFactor: 1,
+    deviceScaleFactor,
     mobile: false,
   });
   await chromeClient.call("Page.navigate", { url });
@@ -605,6 +659,9 @@ async function auditInteractions(origin) {
   await pressKey("Escape");
   await waitForExpression(
     '!document.querySelector(".settings-signout-confirmation")',
+  );
+  await waitForExpression(
+    'document.activeElement === document.querySelector(".settings-danger-zone .danger-button")',
   );
   const signOutFocusRestored = await evaluate(
     'document.activeElement === document.querySelector(".settings-danger-zone .danger-button")',

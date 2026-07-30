@@ -136,15 +136,8 @@ const exited = new Promise((resolve, reject) => {
 
 try {
   await waitForBridge();
-  await captureVisual("new-task-1320x812", 1320, 812);
-  await captureVisual(
-    "search-keyboard-1320x812",
-    1320,
-    812,
-    false,
-    false,
-    true,
-  );
+  await captureVisual("new-task", 1320, 812);
+  await captureVisual("search-keyboard", 1320, 812, false, true);
   await probeWindowsChrome("exercise");
   const chosenWorkspace = await invokeBridge("metawork.workspaces.choose", {});
   let workspaceId;
@@ -311,7 +304,7 @@ try {
     throw new Error(
       `Run history lost its typed Skill input: ${JSON.stringify(submittedRun.input)}`,
     );
-  await captureVisual("running-1320x812", 1320, 812, false, true);
+  await captureVisual("running", 1320, 812);
   let reloadedRequest = null;
   let deliveryEmitsBeforeReload = null;
   let visualAttentionCaptured = false;
@@ -333,8 +326,9 @@ try {
       const pending = task.pendingUi;
       if (pending && !answered.has(pending.requestId)) {
         if (!visualAttentionCaptured) {
-          await captureVisual("attention-1320x812", 1320, 812);
-          await captureVisual("attention-inspector-960x680", 960, 680);
+          await captureVisual("attention", 1320, 812);
+          if (process.platform === "win32")
+            await captureVisual("attention-inspector", 960, 680);
           visualAttentionCaptured = true;
         }
         if (typeof pending.redacted !== "boolean")
@@ -403,8 +397,8 @@ try {
     throw new Error("completed Task did not remain available for continuation");
   if (run.phase !== "completed" || run.outcome !== "completed")
     throw new Error(`run did not complete truthfully: ${JSON.stringify(run)}`);
-  await captureVisual("terminal-1320x812", 1320, 812);
-  await captureVisual("settings-1320x812", 1320, 812, true);
+  await captureVisual("terminal", 1320, 812);
+  await captureVisual("settings", 1320, 812, true);
   if (run.cause !== null || task.cause !== null)
     throw new Error(
       `completed run retained a Host cause: ${JSON.stringify(task)}`,
@@ -687,19 +681,19 @@ async function captureVisual(
   width,
   height,
   openSettings = false,
-  selectFirstTask = false,
   openSearch = false,
 ) {
   if (visualCaptureDir === null) return;
   if (process.platform === "darwin" && (openSettings || openSearch)) return;
   if (process.platform !== "darwin" && process.platform !== "win32") return;
   await mkdir(visualCaptureDir, { recursive: true });
-  if (process.platform === "darwin" && selectFirstTask) {
+  if (process.platform === "darwin") {
     await automate("reload");
     await waitForBridge();
+  } else {
+    await automate("resize", String(width), String(height));
   }
-  await automate("resize", String(width), String(height));
-  await new Promise((resolve) => setTimeout(resolve, 350));
+  await new Promise((resolve) => setTimeout(resolve, 750));
   if (process.platform === "darwin") {
     const { stdout } = await execFileAsync("/usr/bin/xcrun", [
       "swift",

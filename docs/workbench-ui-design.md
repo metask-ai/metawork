@@ -822,7 +822,7 @@ Host/Core 传递状态 code 和结构化参数，Renderer 负责本地化。用�
 
 ## 16. 视觉系统
 
-> Capability：**混合**。登录、Workbench、设置和全部 capability gate 已存在；本章紫色视觉 hard cut 是已批准的当前实施目标，在 Renderer 切片完成并通过验证前不得报告为已落地。它不授权显示尚未通过 capability gate 的数据或控件。
+> Capability：**当前**。登录、Workbench、设置和全部 capability gate 已存在；本章定义的明亮紫色视觉系统已经进入正式 Renderer，并由持续回归约束。它不授权显示尚未通过 capability gate 的数据或控件。
 
 ### 16.1 视觉方向
 

@@ -78,6 +78,33 @@ const base = {
   onSelectModel() {},
 };
 
+function relativeLuminance(hex) {
+  const channels = hex
+    .match(/[0-9a-f]{2}/gi)
+    .map((channel) => Number.parseInt(channel, 16) / 255)
+    .map((channel) =>
+      channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4,
+    );
+  return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
+}
+
+function contrastRatio(foreground, background) {
+  const foregroundLuminance = relativeLuminance(foreground);
+  const backgroundLuminance = relativeLuminance(background);
+  return (
+    (Math.max(foregroundLuminance, backgroundLuminance) + 0.05) /
+    (Math.min(foregroundLuminance, backgroundLuminance) + 0.05)
+  );
+}
+
+function colorToken(css, name) {
+  const match = css.match(
+    new RegExp(`--color-${name}:\\s*(#[0-9a-f]{6})`, "i"),
+  );
+  assert.ok(match, `missing --color-${name}`);
+  return match[1];
+}
+
 function render(props = {}) {
   return renderToStaticMarkup(
     createElement(
@@ -473,6 +500,30 @@ test("Workbench foundation uses the purple system and centered new Task stage", 
   assert.ok(
     shell.indexOf("commandbar-workspace") < shell.indexOf("commandbar-task"),
   );
+});
+
+test("Workbench semantic text colors meet WCAG AA contrast", async () => {
+  const css = await readFile(
+    join(process.cwd(), "frontend/src/index.css"),
+    "utf8",
+  );
+  const canvas = colorToken(css, "canvas");
+  const pairs = [
+    [colorToken(css, "graphite"), canvas],
+    [colorToken(css, "muted"), canvas],
+    [colorToken(css, "brand-700"), canvas],
+    [canvas, colorToken(css, "brand-600")],
+    [colorToken(css, "amber-ink"), "#fff5e7"],
+    [colorToken(css, "danger"), canvas],
+    [colorToken(css, "live"), canvas],
+    [colorToken(css, "amber"), canvas],
+  ];
+  for (const [foreground, background] of pairs) {
+    assert.ok(
+      contrastRatio(foreground, background) >= 4.5,
+      `${foreground} on ${background} falls below WCAG AA`,
+    );
+  }
 });
 
 test("a new Task draft is editable before its first send", () => {
