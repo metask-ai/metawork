@@ -1,7 +1,7 @@
 # MetaWork Workbench UI 设计
 
 > 状态：维护登录优先、任务中心和 capability-gated 的成熟产品目标；未通过对应能力验收的界面不得出现
-> 设计基线：MetaWork 自有的本地 Agent Workbench；外部产品和参考图只用于提炼交互模式，不构成可复制的布局、品牌或组件规范
+> 设计基线：MetaWork 自有的“明亮工作台 + 紫色任务流”；外部产品和参考图只用于提炼交互模式，不构成可复制的布局、品牌或组件规范
 
 ## 1. 文档职责
 
@@ -42,6 +42,8 @@ Metask 登录和 ready ExecutionConfig 是进入 Workbench 的真实前置条件
 MetaWork 的视觉记忆点不是装饰性的暖色、通用衬线大标题、品牌吉祥物或大面积卡片，而是：
 
 > Task 启动前，Composer 清楚表达 Workspace 与模型；Task 启动后，中间区域沿一条可追溯的“工作轨迹”组织指令、可见活动、决策和交付。
+
+首个正式视觉版本使用明亮中性工作面和公司紫色品牌系统。紫色只标记品牌、主动作、当前选择、键盘焦点和当前活动轨迹；成功、等待、失败与中断继续使用独立语义色并配合文字或图标。界面不能退化为暗色原型的亮色翻版，也不能只是把既有青绿色字面量替换成紫色。
 
 ### 2.1 当前 ABI v1 capability profile
 
@@ -140,14 +142,16 @@ Workspace
 
 默认尺寸：
 
+- 一体化命令栏：52 px；
 - 左栏：248 px；
 - Inspector：打开时 304 px；审批、活动详情、usage 或真实结果只决定模块是否可用，不触发普通 Run 的自动开合。除新的 `Needs your attention` 可自动打开一次外，显隐由用户控制并在 Run terminal 后保持稳定；
+- 已有 Task 内容标题区：64 px；
 - 中间正文推荐最大宽度：760 px；
 - 表格、diff、日志和文件预览可以使用中间区域的可用宽度；
 - 960 × 680 仅作为窄窗口回归样本，不定义产品最小窗口；实际下限由内容可达性、Composer 可用性、系统窗口约束和 200% 文本验收共同决定；
-- 低于约 1100 px 时 Inspector 使用覆盖层或保持关闭，更窄时允许折叠左栏。
+- 低于约 1100 px 时 Inspector 使用右侧非模态覆盖层或保持关闭；低于约 820 px 时左栏和 Inspector 都使用互斥覆盖层；低于约 560 px 时命令栏隐藏次级文字，Task Header 次级动作进入 `More`。
 
-左栏折叠状态按用户偏好保存。Inspector 内容只决定模块和入口是否可用；显隐只由用户动作、Task 切换或新的 `Needs your attention` 单次自动打开改变，并按 Task 保留当前应用会话内状态，不持久化为空面板偏好。折叠只改变视图，不改变 Task、审批或运行状态。
+左栏折叠后完全隐藏并把宽度归还中央工作面，不保留 56 px 图标栏，也不用匿名图标映射任意 Task。命令栏左侧始终保留打开/关闭入口，折叠状态按用户偏好保存。Inspector 内容只决定模块和入口是否可用；显隐只由用户动作、Task 切换或新的 `Needs your attention` 单次自动打开改变，并按 Task 保留当前应用会话内状态，不持久化为空面板偏好。折叠只改变视图，不改变 Task、审批或运行状态。
 
 ### 4.2 窗口模型
 
@@ -288,7 +292,7 @@ Execution binding availability 是下一次 admission 的独立前置事实，�
 | run phase = waiting_user              | Needs your attention | 需要你处理   | 回答、批准、拒绝或停止      |
 | run phase = stopping                  | Stopping             | 正在停止     | 等待真实结果                |
 | run phase = running                   | Working              | 正在工作     | 草拟下一条指令或停止        |
-| run phase = queued                    | Queued               | 排队中       | 撤回或停止                  |
+| run phase = queued                    | Queued               | 排队中       | 停止                        |
 | no active Run + outcome = completed   | Completed            | 已完成       | 继续输入、打开结果          |
 | no active Run + outcome = cancelled   | Stopped              | 已停止       | 继续输入或重试              |
 | no active Run + outcome = failed      | Failed               | 失败         | 修复问题、重试或继续        |
@@ -331,7 +335,7 @@ Execution binding availability 是下一次 admission 的独立前置事实，�
 
 ### 7.2 用户指令
 
-- 使用全宽或正文宽度内的“任务指令”区块，与工作轨迹对齐；不使用靠右聊天气泡或双方头像布局；
+- 使用浅紫色“任务指令”区块，最大宽度约为正文的 72%，靠右但不使用聊天尾巴、头像或左右双方气泡布局；在窄窗口下可以放宽到约 88%；
 - 首条指令建立 Task 目标，后续指令作为明确的补充或重试节点；普通界面不显示 Run ID；
 - 附件以文件/目录 chip 展示名称、数量和大小；
 - 已发送内容不能静默编辑历史；
@@ -349,15 +353,11 @@ Execution binding availability 是下一次 admission 的独立前置事实，�
 
 ### 7.4 工具活动
 
-所有工具调用必须可见，但成功的细碎活动可以归并：
+所有 typed 工具调用必须可见。V1 中一个 Tool Call 对应一张 Tool Card，不按“低信息量”、连续次数或工具名称自动归并：
 
 ```text
-✓ Prepared invoice data                              18s
-  Read 24 PDF files
-  Extracted invoice fields
-  Grouped entries by project
-
-  Show details
+Bash · Running
+npm run test
 ```
 
 默认展开规则：
@@ -367,11 +367,11 @@ Execution binding availability 是下一次 admission 的独立前置事实，�
 - 失败：自动展开错误；
 - 被拒绝：展示拒绝结果；
 - 命中持久权限：展示对应规则；
-- 输出过长：展示摘要和查看详情入口。
+- 输出过长：时间线只展示 projection 已提供的有界预览，展开区域最大约 240 px 并独立滚动；只有 Inspector projection 提供真实结构化详情时才显示 `查看详情`。
 
 Read 详情显示真实文件范围；Bash 详情显示实际执行命令、工作目录、有界 stdout/stderr、exit code 和耗时；Edit 详情显示新增、修改、删除和 diff；MCP/连接器主标题使用用户可理解的动作，原始 operation 名称进入技术详情。
 
-“实际执行”不等于把秘密原样塞进 snapshot。Provider credential、Host-held token 和 schema 标记的 secret 字段永远不得进入工具详情；Host 在形成产品 projection 前完成过滤，并对命令与 stdout/stderr 提供明确的 byte 上限和 truncation 标记。任意工具输出可能包含 Host 无法可靠识别的用户数据，因此普通搜索、Task 导出和系统通知默认不索引原始详情；Renderer 不保存另一份未过滤副本。
+“实际执行”不等于把秘密原样塞进 snapshot。Provider credential、Host-held token 和 schema 标记的 secret 字段永远不得进入工具详情；Host 在形成产品 projection 前完成过滤，并对命令与 stdout/stderr 提供明确的 byte 上限和 truncation 标记。任意工具输出可能包含 Host 无法可靠识别的用户数据，因此普通搜索、Task 导出和系统通知默认不索引原始详情；Renderer 不保存另一份未过滤副本，也不建立 raw log viewer 或从普通输出文本猜测详情。
 
 ### 7.5 计划
 
@@ -398,6 +398,7 @@ Read 详情显示真实文件范围；Bash 详情显示实际执行命令、工�
 - 用户向上查看历史时停止自动滚动；
 - 出现 `Jump to latest`，不能强制抢回滚动位置；
 - 流式更新不能破坏文本选择、输入焦点或当前阅读位置；
+- 选择另一个 Task 时默认定位到其最新内容并重新开启自动跟随；V1 不保存每个 Task 的像素滚动位置；
 - 长 Task 按日期使用轻量分隔；
 - 详细工具输入、stdout/stderr 和 diff 使用按需展开；若未来提供 `标准 / 详细` 显示密度，只能改变信息展开程度，不改变 Agent 行为。当前没有足够必要性时不提前增加模式开关。
 
@@ -405,9 +406,9 @@ Read 详情显示真实文件范围；Bash 详情显示实际执行命令、工�
 
 > Capability：**混合**。当前 Run gate、停止、本地草稿、New task 主视觉、默认模型选择和既有 Task execution binding 提示已经由当前 Renderer 合同表达；跨重启恢复与显式 rebind 仍是目标能力。
 
-Composer 固定在中间区域底部，但必须为滚动内容预留空间。
+已有 Task 的 Composer 固定在中间区域底部，并为滚动内容预留空间。New task 的 Composer 位于工作面的视觉中心；Host 确认创建真实 Task 后，它再通过一次克制过渡落到底部。
 
-New task 页面以 Composer 为绝对主视觉。输入框附近只放与“这次 Task 如何开始”直接相关的上下文：模型、Workspace、附件（能力真实接通后）和发送。API Key、账号目录刷新、权限默认值、显示密度与诊断不得堆入同一行。
+New task 页面以 Composer 为绝对主视觉。其上方使用直接的行动标题和一句 Workspace 工作说明，不使用人格化欢迎语；下方可以放 3–4 个轻量真实任务示例，不使用大型推荐卡片。输入框附近只放与“这次 Task 如何开始”直接相关的上下文：模型、Workspace、附件（能力真实接通后）和发送。API Key、账号目录刷新、权限默认值、显示密度与诊断不得堆入同一行。
 
 ```text
 ┌────────────────────────────────────────────────────┐
@@ -434,6 +435,13 @@ Composer 布局与输入规则：
 - 输入框不允许用户拖拽改变大小。它随内容自动增高，达到约 7–8 行或视口高度的 28% 后改为内部滚动；
 - Workspace 缺失或授权失效时文本仍可编辑、草稿仍保存，但发送保持禁用并在 breadcrumb 中提供明确恢复动作；Workspace 选择和发送是两个独立动作。
 
+已有 Task 的内容标题区是唯一执行停止入口：
+
+- `queued / running / waiting_user` 时在 Task Header 显示 `Stop task`；
+- `stopping` 时替换为不可重复点击的 `Stopping…`；
+- Composer 不显示第二个 Stop，也不通过 Send 按钮变形制造另一入口；
+- Stop acknowledgement 只表示请求已接受，界面继续等待 canonical snapshot 的真实 terminal；transport failure 不得伪造 `Stopped`。
+
 ### 8.1 Slash、Command 与 Skill draft
 
 Slash 是 Composer 的输入手势，不是 CLI 模式。空 draft 的首个非空白字符为 `/` 时，输入框上方打开与 Composer 等宽的候选面；不位于首 token 的 `/`，以及 token 内仍含 `/` 的 URL、路径和代码片段不触发。单段绝对路径与 Slash identifier 在语法上不可区分，若未命中候选则按 unknown Slash 禁止发送，用户需要补充正文语境或改写。候选只有两处真值：
@@ -449,20 +457,49 @@ Command 只是现有动作的键盘入口。选择后由 `App` action controller
 
 Skill draft 与 Text draft 一样按 Task/New-task scope 保存在 Renderer session storage；既有 raw Text draft 读取后在下一次写入时单向升级为 tagged storage，暂时超过 Run 提交预算的非空 draft 不得删除已有持久值。发送失败、拒绝或 timeout reconciliation 后恢复完整 tagged draft。catalog revision 或 identity 变化时保留 token 与参数，但显示 stale 说明并禁用发送；刷新是显式动作，成功后仍要求用户从新 catalog 重新选择。已有 Task 的 Workspace current catalog 尚不可用时，同一刷新动作先刷新 Workspace；Workspace ready 后再次执行才刷新 Task binding，不隐式监听、重放或跨 revision 替换。`loading / unavailable` 只影响 Skill 候选，普通 Text 保持可编辑、可发送。
 
-| Task state           | Composer behavior                                                         |
-| -------------------- | ------------------------------------------------------------------------- |
-| draft / idle         | 文本、附件、发送                                                          |
-| queued               | 显示排队状态和撤回/停止                                                   |
-| running              | 显示当前活动、耗时和停止按钮；允许草拟下一条指令但禁止发送                |
-| waiting_user         | 普通输入让位于时间线请求，底部提示 `Respond above to continue` 并保留停止 |
-| stopping             | 禁用输入，显示 `Stopping…`                                                |
-| failed / interrupted | 恢复输入，提供针对性的重试或继续动作                                      |
+| Task state           | Composer behavior                                                                 |
+| -------------------- | --------------------------------------------------------------------------------- |
+| draft / idle         | 文本、附件、发送                                                                  |
+| queued               | 允许草拟但禁止发送；停止入口只在 Task Header                                      |
+| running              | 允许草拟下一条指令但禁止发送，显示 `当前任务结束后发送`；停止入口只在 Task Header |
+| waiting_user         | 普通输入让位于时间线请求，底部提示 `Respond above to continue` 并保留本地草稿     |
+| stopping             | 禁用输入，显示 `Stopping…`                                                        |
+| failed / interrupted | 恢复输入，提供针对性的重试或继续动作                                              |
 
 表中的 `idle` 仍受 execution binding availability 约束；`rebind_required / unavailable` 时以 §6.4 的只读说明和动作替代发送控件。
 
 输入区中的模式选择只有在语义明确时才出现。`Standard` 不能作为无定义装饰；模型、权限策略、执行强度和显示密度不能混成一个模式。
 
 运行中的输入不会发送给当前 Run，也不使用未验证的 `UiBackend.poll()` 模拟实时 steering。首版 Composer 只保存 Renderer 本地草稿，发送动作保持禁用并显示 `当前任务结束后发送`；当前 Run terminal 后由用户明确发送。不得自动提交、自动启动下一次 Run，或把草稿伪装成已排队状态。`queued` 只表示唯一已提交 Run 正在等待 Host executor，不表示当前 Run 后面还有另一条队列。未来只有在 AgentCore 发布 typed steering capability 后，才设计 `排队补充` 与 `立即打断` 的不同操作。
+
+### 8.2 New task 首次发送
+
+首次发送不是一个 UI 原子动作。Renderer 必须区分创建 Task 与启动第一个 Run：
+
+```text
+校验草稿与上下文
+        │
+        ▼
+创建 Task
+        │
+        ▼
+启动第一个 Run
+        │
+        ▼
+以 canonical snapshot 呈现 queued / running / terminal
+```
+
+| 结果                        | 页面            | 草稿                          | 反馈                                                                            |
+| --------------------------- | --------------- | ----------------------------- | ------------------------------------------------------------------------------- |
+| 本地 admission 条件不满足   | 保持 New task   | 保留                          | 在 Workspace、Model 或 Composer 就地说明                                        |
+| `create_rejected`           | 保持 New task   | 恢复 New task 草稿            | 显示 typed rejection 对应产品文案                                               |
+| `create_failed`             | 保持 New task   | 恢复 New task 草稿            | 显示创建失败和恢复动作                                                          |
+| Task 已创建，`run_rejected` | 切换到真实 Task | 恢复为该 Task 草稿            | 时间线不伪造已提交指令或 Running，显示启动被拒绝                                |
+| Task 已创建，`run_failed`   | 切换到真实 Task | 恢复为该 Task 草稿            | 显示启动失败，不伪造 Running                                                    |
+| Run accepted                | 切换到真实 Task | typed command accepted 后清除 | 等待 snapshot 发布 queued、running 或 terminal                                  |
+| command timeout             | 先刷新 snapshot | 对账完成前保留                | 由 snapshot 决定留在 New task、进入空 Task 或进入 active Task，禁止自动重复提交 |
+
+只有 Host 已确认创建真实 Task 后，New task 才切换成 Task 工作面：标题与示例淡出，Task Header 和工作轨迹出现，Composer 在约 220 ms 内落到底部，左栏出现真实 Task，焦点留在工作面。`prefers-reduced-motion` 下直接切换。Task 已创建但 Run 未成功启动时仍进入真实 Task，恢复 Task 草稿，不伪造 queued / running。
 
 ## 9. 审批、问题与计划确认
 
@@ -785,26 +822,45 @@ Host/Core 传递状态 code 和结构化参数，Renderer 负责本地化。用�
 
 ## 16. 视觉系统
 
-> Capability：**当前**。本章定义已显示登录、Workbench 与设置界面的视觉验收基线；它不授权显示尚未通过 capability gate 的数据或控件，具体人工证据仍由验证矩阵记录。
+> Capability：**混合**。登录、Workbench、设置和全部 capability gate 已存在；本章紫色视觉 hard cut 是已批准的当前实施目标，在 Renderer 切片完成并通过验证前不得报告为已落地。它不授权显示尚未通过 capability gate 的数据或控件。
 
 ### 16.1 视觉方向
 
-MetaWork 采用安静、精确、长时间可读的桌面工具方向。视觉个性来自工作轨迹、信息密度转换和本地执行语义，而不是暖米色加通用衬线、巨大品牌空态、吉祥物、渐变或每块内容一张圆角卡片。外部参考只用于判断主次关系，不能复制品牌字形、导航结构、输入框比例、图标或配色。
+MetaWork 采用“明亮工作台 + 紫色任务流”的桌面工具方向。视觉个性来自紫色工作轨迹、信息密度转换和本地执行语义，而不是暗色全局背景、暖米色加通用衬线、巨大品牌空态、吉祥物、渐变或每块内容一张圆角卡片。外部参考只用于判断主次关系，不能复制品牌字形、导航结构、输入框比例、图标或配色。
 
-初始核心色板如下；状态图标、焦点、文字和控件组合在实现前必须完成 WCAG 对比度校验，必要时调整：
+核心色板如下；公司发布正式品牌色时，`brand-*` 必须整体校准并重新验证，而不是只替换单个按钮：
 
-| Token              | Value     | Role                   |
-| ------------------ | --------- | ---------------------- |
-| `ink-primary`      | `#17212B` | 主文字与标题           |
-| `ink-secondary`    | `#52606D` | 次级文字               |
-| `surface-app`      | `#F3F5F7` | 应用背景               |
-| `surface-work`     | `#FFFFFF` | 中央工作面与浮层       |
-| `action-primary`   | `#176C7A` | 主操作、选择与键盘焦点 |
-| `status-success`   | `#2C7651` | 明确成功               |
-| `status-attention` | `#A85D00` | 等待用户或警告         |
-| `status-danger`    | `#B34444` | 失败、危险和删除       |
+| Token                 | Value     | Role                     |
+| --------------------- | --------- | ------------------------ |
+| `brand-700`           | `#4E38C2` | Pressed、高对比紫色文字  |
+| `brand-600`           | `#5B46D8` | 主按钮、Focus ring       |
+| `brand-500`           | `#6C5CFF` | Logo、当前轨迹、品牌识别 |
+| `brand-100`           | `#EAE7FF` | 当前导航项、弱标签       |
+| `brand-50`            | `#F6F4FF` | 紫色弱背景               |
+| `ink-primary`         | `#25222D` | 主文字与标题             |
+| `ink-secondary`       | `#6E6879` | 次级文字                 |
+| `surface-app`         | `#F6F5FA` | 应用外层背景             |
+| `surface-work`        | `#FFFFFF` | 中央工作面与浮层         |
+| `surface-rail`        | `#F1EFF7` | Workspace / Task 左栏    |
+| `surface-inspector`   | `#F7F6FA` | Inspector                |
+| `rule`                | `#E3E0E9` | 分隔线                   |
+| `status-success`      | `#287A54` | 明确成功                 |
+| `status-success-bg`   | `#EAF6EF` | 成功弱背景               |
+| `status-attention`    | `#9C5B10` | 等待用户或警告           |
+| `status-attention-bg` | `#FFF5E7` | 等待弱背景               |
+| `status-danger`       | `#B6424C` | 失败、危险和删除         |
+| `status-danger-bg`    | `#FFF0F1` | 失败弱背景               |
 
-主操作色不能同时代表运行、成功或选中；成功、等待和危险使用独立语义，并始终配合文字或图标。正常完成不需要大面积绿色庆祝。
+组件级规则：
+
+- Primary button 使用 `brand-600` 和白色文字；Pressed 使用 `brand-700`；
+- Selected navigation 使用 `brand-100` 背景和 `brand-700` 标识；
+- Focus visible 使用 2 px `brand-600` 并保留 2 px offset；
+- 普通正文、图标、边框和卡片默认使用中性色，不默认变紫；
+- 普通内容不使用紫色描边，App 背景不使用大面积紫色、发光或装饰渐变；
+- 主操作色不能同时代表成功、等待或危险；语义状态始终配合文字或图标；
+- 正常完成不使用大面积绿色或庆祝动画；
+- 状态图标、焦点、文字和控件组合必须通过 WCAG 对比度校验。当前候选的白字/`brand-600` 为 6.34:1，`brand-700`/`brand-100` 为 6.51:1，`status-attention`/浅琥珀背景为 4.97:1。
 
 组件层级依靠排版、间距、背景层次和分隔线建立。圆角只服务输入区、弹层和需要形成边界的交互组；普通消息、活动和设置项不默认卡片化。阴影只用于真实抬升层。
 
@@ -818,12 +874,15 @@ MetaWork 采用安静、精确、长时间可读的桌面工具方向。视觉�
 
 ### 16.3 形态与动效
 
+- 间距使用 4 / 8 / 12 / 16 / 24 / 32 px；小控件圆角约 7 px，导航与普通交互组约 9 px，Composer 16 px，Popover / Modal 约 14 px；
 - 工作轨迹是唯一允许形成强识别度的结构元素：它连接用户指令、Agent 可见活动、决策和交付，但不装饰无真实顺序的内容；
 - 圆角服务于交互分组，不让每条信息都变成浮动卡片；
 - 阴影只用于 Composer、浮层和真正需要抬升的元素；
 - 只让当前运行节点旋转，避免全屏多个 spinner；
-- 新 Output 使用轻微淡入和位置过渡；
-- 从 New task 到运行 Task 的布局变化使用一次克制过渡：Composer 从中央主视觉落到底部，工作轨迹获得空间；不散布无意义 hover 位移和入场动画；
+- Hover / Press 只在约 100–120 ms 内改变颜色或背景，不做位移；Popover / Slash menu 使用约 120–150 ms 淡入和最多 4 px 位移；
+- 左栏与 Inspector 的平移或列宽变化约 160–180 ms；不能使用内容状态驱动高频开合；
+- capability 到位后的新 Output 只使用约 160 ms 轻微淡入；
+- 从 New task 到运行 Task 的布局变化使用一次约 220 ms 的克制过渡：Composer 从中央主视觉落到底部，工作轨迹获得空间；不散布无意义入场动画；
 - Inspector 不随普通 Run 开始或 terminal 自动改变列宽；显隐只在用户动作、切换 Task 或新的待处理请求边界改变，避免正文高频重排；
 - 完成状态不使用庆祝动画；
 - 尊重 `prefers-reduced-motion`。
@@ -934,6 +993,7 @@ MetaWork 采用安静、精确、长时间可读的桌面工具方向。视觉�
 
 - Workspace 是独立 projection：空 Workspace、最近使用、重新授权、移除和跨 Workspace Task signal；
 - New task Composer 始终显示当前模型和 Workspace，上下文缺失时提供明确下一步而非静默 disabled；
+- New task 首次发送覆盖本地 admission 不满足、`create_rejected`、`create_failed`、Task 已创建后的 `run_rejected` / `run_failed`、Run accepted 与 command timeout；每种结果都保持正确页面和草稿 scope，不伪造指令、Running 或失败定论；
 - 当前 API 模型列表、模型切换 pending/error、设置与 Composer 默认值一致；
 - 设置页切换默认 API 后加载对应模型，默认只影响新 Task admission，不自动改绑已有 Task；
 - 已有 Task 保留当前 execution binding epoch，默认变化不改写历史或 live Session；只有 §6.4 的显式 rebind 可以建立新 epoch；
@@ -944,14 +1004,13 @@ MetaWork 采用安静、精确、长时间可读的桌面工具方向。视觉�
 ### 19.6 内容状态
 
 - 短文本和长文本流；
-- 多个成功工具归并；
-- Bash 失败和长 stdout/stderr；
+- 多个连续 Tool Call 保持一个 typed Tool 一张卡，不自动归并；
+- Bash 失败和长 stdout/stderr 使用有界预览；没有真实 Inspector projection 时不显示假详情入口；
 - Read 大量文件；
 - Edit diff；
-- Plan 创建和更新；
-- 问题回答、计划确认和 permission；
-- Allow once 和 Always allow；
-- Output 生成中、完成、失败和缺失；
+- 问题回答和 one-time permission；
+- capability 未验收时 Plan、plan approval、Always allow、Output 与 FileChange 完全不出现；
+- 对应 capability 未来验收后，Plan 创建/更新、计划确认、持久规则与 Output 的目标状态按各章节启用；
 - 后台 Task 通知；
 - Renderer reload 和视图重新同步。
 
@@ -972,12 +1031,14 @@ MetaWork 采用安静、精确、长时间可读的桌面工具方向。视觉�
 - 键盘完整操作；
 - focus 不丢失；
 - 用户上滚时不强制自动滚动；
+- 选择另一个 Task 时定位最新内容，不泄漏或恢复上一 Task 的像素滚动位置；
 - reduced motion；
 - 状态在无颜色条件下仍可识别；
 - 长英文、中文和 pseudo-locale 不溢出；
+- `queued / running / waiting_user` 的可见 Stop 只出现在 Task Header；Composer 不出现第二入口，`stopping` 阻止重复请求并等待真实 terminal；
 - 已有 Task 的内容标题区 Inspector 按钮可由键盘操作，`打开检查器 / 关闭检查器` 与 `aria-expanded` 始终匹配真实面板状态；
 - 普通 Run start/terminal 不改变 Inspector 列宽；新的待处理请求只自动打开一次，terminal 后保留 Last run summary，切换 Task 不泄漏旧详情；
-- 左栏折叠、Inspector 关闭或覆盖显示后功能不丢失。
+- 左栏折叠后完全隐藏且命令栏入口仍可达；Inspector 关闭或覆盖显示后功能不丢失。
 
 ## 20. 工程目录结构
 

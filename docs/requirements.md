@@ -102,6 +102,7 @@ Account 是 MetaWork 的 Metask 账号控制面，负责 OAuth 登录、账号/A
 ### 5.3 Task
 
 - New task 草稿只在登录和执行准备完成后进入 Workbench，由 Renderer 按 Workspace 隔离并可恢复；未选择 Workspace 时可以编辑临时草稿，但发送前必须取得 Host-issued Workspace grant；
+- New task 首次发送依次创建真实 Task 并启动第一个 Run，两步不能在界面中伪装成一个不可分失败状态：Task 创建失败或拒绝时留在 New task 并恢复原草稿；Task 已创建但 Run 启动失败或拒绝时进入该真实 Task、把输入恢复为 Task 草稿且不伪造已提交指令或 Running；命令 timeout 必须先刷新 canonical snapshot 决定实际页面和草稿 scope，不能自动重放可能有副作用的提交；
 - 用户可以在 Workspace 中创建、切换和关闭 Task；
 - 多个 Task 可以同时存在；
 - 后台 Task 的运行状态不能因 UI 切换而丢失；
@@ -168,6 +169,7 @@ Account 是 MetaWork 的 Metask 账号控制面，负责 OAuth 登录、账号/A
 - Workbench 左栏只承担 Workspace/Task 导航与左下角账号入口；New task 是稳定主动作，Task 按 `需要处理 / 正在运行 / 最近` 等行动优先级组织；
 - New task 中央区域始终以 Composer 为主，当前模型和 Workspace 在发送前可见；API 管理不进入 Composer，模型与 Workspace 也不得混成不透明的单一“模式”；
 - Task 启动后中央区域转为可追溯工作轨迹，Composer 固定在底部；审批、当前活动、工具详情、usage 或真实结果只决定 Inspector 模块是否可用，不因普通 Run 开始或结束自动开合。只有新的待处理请求可以自动打开一次；打开后保持到用户关闭或切换 Task；
+- `queued / running / waiting_user` 的停止只提供 Task Header 一个可见入口；Composer 只保留本地草稿和禁用发送提示，不建立第二个 Stop。停止请求必须等待 canonical terminal，transport acknowledgement 或 UI 状态变化都不能伪造 `Stopped`；
 - 标题栏只承载窗口、当前 Task/Workspace、搜索与异常状态等全局入口；正常连接状态、语言选择和工程诊断不长期占据主视觉；
 - 界面在任一时刻只突出一个与当前阶段一致的主动作；独立的导航和设置入口可以持续可见，但不得与主动作竞争；
 - 首个正式版本采用单主窗口；多个 Task 可以后台运行，切换 Workspace 或 Task 不停止执行；
