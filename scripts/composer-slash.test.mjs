@@ -1,0 +1,170 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import {
+  composerDraftToRunInput,
+  isSkillDraftCurrent,
+  parseSlashInput,
+  resolveSlashCandidates,
+  skillCatalogRefreshTarget,
+  slashCommandNames,
+  skillDraftFromCandidate,
+} from "../frontend/src/features/composer/slash.ts";
+
+const catalog = {
+  availability: "ready",
+  redacted: false,
+  revision: "17",
+  skills: [
+    {
+      skillId: "workspace.new",
+      invocationName: "new",
+      displayName: "Prepare new files",
+      description: "Prepare files for a new change",
+      argumentNames: [],
+      maxValues: 0,
+    },
+    {
+      skillId: "builtin.review",
+      invocationName: "review",
+      displayName: "Review",
+      description: "Review a target",
+      argumentNames: ["target"],
+      maxValues: 1,
+    },
+  ],
+  issues: [],
+};
+
+test("Slash resolver keeps Commands authoritative over colliding Skill names", () => {
+  const commands = [{ name: "new", enabled: true, disabledReason: null }];
+  assert.deepEqual(
+    resolveSlashCandidates({
+      input: parseSlashInput("/new"),
+      commands,
+      catalog,
+    }).map((candidate) => candidate.key),
+    ["command:new"],
+  );
+  assert.deepEqual(
+    resolveSlashCandidates({
+      input: parseSlashInput("/skill:new"),
+      commands,
+      catalog,
+    }).map((candidate) => candidate.key),
+    ["skill:workspace.new"],
+  );
+  const review = resolveSlashCandidates({
+    input: parseSlashInput("/review src/main.zig"),
+    commands,
+    catalog,
+  })[0];
+  assert.deepEqual(skillDraftFromCandidate(review), {
+    kind: "skill",
+    skillId: "builtin.review",
+    invocationName: "review",
+    displayName: "Review",
+    catalogRevision: "17",
+    argumentNames: ["target"],
+    argumentValues: ["src/main.zig"],
+    maxValues: 1,
+  });
+});
+
+test("Slash parsing is limited to one leading identifier token", () => {
+  assert.equal(parseSlashInput("Review /tmp/file"), null);
+  assert.equal(parseSlashInput("/tmp/file"), null);
+  assert.equal(parseSlashInput("https://example.test/review"), null);
+  assert.deepEqual(parseSlashInput("/tmp"), {
+    query: "tmp",
+    tail: "",
+    explicitSkill: false,
+  });
+});
+
+test("Run input conversion rejects unresolved Slash outside the UI layer", () => {
+  assert.equal(composerDraftToRunInput({ kind: "text", text: "/new" }), null);
+  assert.equal(
+    composerDraftToRunInput({ kind: "text", text: "/not-a-command" }),
+    null,
+  );
+  assert.deepEqual(
+    composerDraftToRunInput({ kind: "text", text: "/tmp/file" }),
+    { kind: "text", text: "/tmp/file" },
+  );
+  assert.deepEqual(
+    composerDraftToRunInput({
+      kind: "skill",
+      skillId: "builtin.review",
+      invocationName: "review",
+      displayName: "Review",
+      catalogRevision: "17",
+      argumentNames: ["target"],
+      argumentValues: ["src/main.zig"],
+      maxValues: 1,
+    }),
+    {
+      kind: "skill",
+      skillId: "builtin.review",
+      catalogRevision: "17",
+      argumentValues: ["src/main.zig"],
+    },
+  );
+});
+
+test("desktop Command registry is explicit and excludes CLI session controls", () => {
+  assert.deepEqual(slashCommandNames, ["new"]);
+  for (const legacy of [
+    "model",
+    "status",
+    "resume",
+    "continue",
+    "history",
+    "retry",
+    "clear",
+    "exit",
+  ])
+    assert.equal(slashCommandNames.includes(legacy), false);
+});
+
+test("stale Skill drafts retain values but cannot be treated as current", () => {
+  const draft = {
+    kind: "skill",
+    skillId: "builtin.review",
+    invocationName: "review",
+    displayName: "Review",
+    catalogRevision: "16",
+    argumentNames: ["target"],
+    argumentValues: ["src/main.zig"],
+    maxValues: 1,
+  };
+  assert.equal(isSkillDraftCurrent(draft, catalog), false);
+  assert.deepEqual(draft.argumentValues, ["src/main.zig"]);
+});
+
+test("Skill refresh repairs Workspace discovery before binding an existing Task", () => {
+  const emptyCatalog = (availability) => ({
+    availability,
+    redacted: false,
+    revision: null,
+    skills: [],
+    issues: [],
+  });
+  assert.equal(
+    skillCatalogRefreshTarget(false, emptyCatalog("ready")),
+    "workspace",
+  );
+  assert.equal(
+    skillCatalogRefreshTarget(true, emptyCatalog("unavailable")),
+    "workspace",
+  );
+  assert.equal(
+    skillCatalogRefreshTarget(true, emptyCatalog("loading")),
+    "workspace",
+  );
+  assert.equal(skillCatalogRefreshTarget(true, emptyCatalog("ready")), "task");
+  assert.equal(
+    skillCatalogRefreshTarget(true, emptyCatalog("degraded")),
+    "task",
+  );
+});
