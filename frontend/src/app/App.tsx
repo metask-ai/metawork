@@ -1557,6 +1557,90 @@ export default function App() {
     workspaceId: currentWorkspaceId,
     taskId: activeTask?.id ?? null,
   });
+  const composerFooter = (
+    <ComposerFooter
+      textareaRef={composer}
+      archived={Boolean(activeTask?.archived)}
+      closing={activeTask?.lifecycle === "closing"}
+      closed={activeTask?.lifecycle === "closed"}
+      unavailable={Boolean(
+        activeTask &&
+        activeTask.lifecycle === "open" &&
+        !activeTask.continuationAvailable,
+      )}
+      draft={composerDraft}
+      skillCatalog={skillCatalog}
+      slashCommands={slashCommands}
+      composeDisabled={!taskCanCompose || taskMutationDisabled}
+      canSubmit={canSubmit}
+      runInFlight={Boolean(taskCanCompose && runInFlight)}
+      accessRequired={Boolean(
+        newTaskDraftActive &&
+        composerWorkspace &&
+        composerWorkspace.authorization !== "available",
+      )}
+      workspaceMissing={Boolean(newTaskDraftActive && !composerWorkspace)}
+      workspaceLabel={
+        composerWorkspace
+          ? composerWorkspace.displayName ||
+            workspaceLabel(composerWorkspace.canonicalRoot)
+          : t("workspace.none")
+      }
+      workspaceTitle={composerWorkspace?.canonicalRoot || t("workspace.none")}
+      workspaceOptions={snapshot.workspaces.map((workspace) => ({
+        id: workspace.id,
+        label: workspace.displayName || workspaceLabel(workspace.canonicalRoot),
+        canonicalRoot: workspace.canonicalRoot,
+        authorization: workspace.authorization,
+      }))}
+      selectedWorkspaceId={
+        newTaskDraftActive ? (composerWorkspace?.id ?? "") : ""
+      }
+      workspaceEditable={newTaskDraftActive}
+      modelLabel={
+        newTaskDraftActive
+          ? selectedModelLabel
+          : activeTask?.binding.modelDisplayName ||
+            activeTask?.binding.modelSelectionId ||
+            null
+      }
+      modelOptions={snapshot.account.models}
+      selectedModelId={selectedModelId}
+      modelEditable={newTaskDraftActive}
+      modelSelectionDisabled={
+        bridgeUnavailable ||
+        accountBusy ||
+        snapshot.account.operation !== "none" ||
+        snapshot.account.models.length === 0
+      }
+      modelSelectionPending={
+        accountBusy || snapshot.account.operation !== "none"
+      }
+      modelContextTitle={
+        newTaskDraftActive
+          ? t("settings.default_model_help")
+          : t("settings.task_binding_model")
+      }
+      actionDisabled={bridgeUnavailable || workspaceBusy}
+      onDraftChange={updateComposerDraft}
+      onSubmit={() => void submitRun()}
+      onSlashCommand={runSlashCommand}
+      onRefreshSkillCatalog={() => void refreshComposerSkillCatalog()}
+      onConfirmAccess={() => void chooseWorkspace(true)}
+      onSelectWorkspace={(workspaceId) =>
+        void selectWorkspaceById(workspaceId, { kind: "draft" })
+      }
+      onSelectModel={(id) =>
+        void runAccountCommand(() =>
+          client.selectModel(
+            id,
+            snapshot.account.catalogGeneration,
+            snapshot.account.executionGeneration,
+          ),
+        )
+      }
+    />
+  );
 
   return (
     <AppShell
@@ -1704,208 +1788,210 @@ export default function App() {
           onLogout={() => void runAccountCommand(() => client.logout())}
         />
       ) : (
-        <>
-          <header className="task-header">
-            <div className="min-w-0">
-              <p className="task-header-workspace">
-                {composerWorkspace?.canonicalRoot || t("workspace.none")}
-              </p>
-              {activeTask && editingTitle ? (
-                <form
-                  className="task-title-editor"
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    void renameTask();
-                  }}
-                >
-                  <input
-                    autoFocus
-                    maxLength={120}
-                    value={titleDraft}
-                    aria-label={t("task.rename")}
-                    placeholder={t("task.item", { id: activeTask.id })}
-                    onChange={(event) => setTitleDraft(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key !== "Escape") return;
+        <div
+          className="workbench-view"
+          data-view={newTaskDraftActive ? "new-task" : "task"}
+        >
+          {!newTaskDraftActive && (
+            <header className="task-header">
+              <div className="min-w-0">
+                {activeTask && editingTitle ? (
+                  <form
+                    className="task-title-editor"
+                    onSubmit={(event) => {
                       event.preventDefault();
-                      setEditingTitle(false);
+                      void renameTask();
                     }}
-                  />
-                  <button
-                    className="secondary-button focus-ring"
-                    disabled={!titleDraft.trim() || taskMutationDisabled}
                   >
-                    {t("common.save")}
-                  </button>
+                    <input
+                      autoFocus
+                      maxLength={120}
+                      value={titleDraft}
+                      aria-label={t("task.rename")}
+                      placeholder={t("task.item", { id: activeTask.id })}
+                      onChange={(event) => setTitleDraft(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key !== "Escape") return;
+                        event.preventDefault();
+                        setEditingTitle(false);
+                      }}
+                    />
+                    <button
+                      className="secondary-button focus-ring"
+                      disabled={!titleDraft.trim() || taskMutationDisabled}
+                    >
+                      {t("common.save")}
+                    </button>
+                    <button
+                      type="button"
+                      className="text-button focus-ring"
+                      onClick={() => setEditingTitle(false)}
+                    >
+                      {t("common.cancel")}
+                    </button>
+                  </form>
+                ) : (
+                  <div className="task-title-row">
+                    <h1>
+                      {activeTask
+                        ? activeTaskTitle
+                        : newTaskDraftActive
+                          ? t("task.new")
+                          : t("task.open")}
+                    </h1>
+                    {activeTask && <TaskSignals task={activeTask} />}
+                  </div>
+                )}
+              </div>
+              <div className="task-actions">
+                {activeTask &&
+                  activeTask.currentRunId !== "0" &&
+                  activeTask.currentRunPhase !== null &&
+                  activeTask.currentRunPhase !== "stopping" && (
+                    <button
+                      className="danger-button focus-ring"
+                      disabled={
+                        bridgeUnavailable || activeTask.id in cancelPending
+                      }
+                      onClick={() => void cancelRun()}
+                    >
+                      <Icon name="stop" />
+                      {t("task.stop")}
+                    </button>
+                  )}
+                {activeTask && inspector.available && (
                   <button
-                    type="button"
-                    className="text-button focus-ring"
-                    onClick={() => setEditingTitle(false)}
+                    ref={inspectorToggle}
+                    className="inspector-toggle icon-button focus-ring"
+                    data-active={inspector.open}
+                    aria-controls="task-inspector"
+                    aria-expanded={inspector.open}
+                    aria-label={t(
+                      inspector.open ? "inspector.close" : "inspector.open",
+                    )}
+                    title={t(
+                      inspector.open ? "inspector.close" : "inspector.open",
+                    )}
+                    onClick={(event) => {
+                      setInspectorFocusRequest(null);
+                      if (inspector.open) {
+                        dismissInspector(false);
+                        return;
+                      }
+                      inspectorOpener.current = event.currentTarget;
+                      inspector.show();
+                    }}
                   >
-                    {t("common.cancel")}
-                  </button>
-                </form>
-              ) : (
-                <div className="task-title-row">
-                  <h1>
-                    {activeTask
-                      ? activeTaskTitle
-                      : newTaskDraftActive
-                        ? t("task.new")
-                        : t("task.open")}
-                  </h1>
-                  {activeTask && <TaskSignals task={activeTask} />}
-                </div>
-              )}
-            </div>
-            <div className="task-actions">
-              {activeTask &&
-                activeTask.currentRunId !== "0" &&
-                activeTask.currentRunPhase !== null &&
-                activeTask.currentRunPhase !== "stopping" && (
-                  <button
-                    className="danger-button focus-ring"
-                    disabled={
-                      bridgeUnavailable || activeTask.id in cancelPending
-                    }
-                    onClick={() => void cancelRun()}
-                  >
-                    <Icon name="stop" />
-                    {t("task.stop")}
+                    <Icon name="activity" />
                   </button>
                 )}
-              {activeTask && inspector.available && (
-                <button
-                  ref={inspectorToggle}
-                  className="inspector-toggle icon-button focus-ring"
-                  data-active={inspector.open}
-                  aria-controls="task-inspector"
-                  aria-expanded={inspector.open}
-                  aria-label={t(
-                    inspector.open ? "inspector.close" : "inspector.open",
-                  )}
-                  title={t(
-                    inspector.open ? "inspector.close" : "inspector.open",
-                  )}
-                  onClick={(event) => {
-                    setInspectorFocusRequest(null);
-                    if (inspector.open) {
-                      dismissInspector(false);
-                      return;
-                    }
-                    inspectorOpener.current = event.currentTarget;
-                    inspector.show();
-                  }}
-                >
-                  <Icon name="activity" />
-                </button>
-              )}
-              {activeTask && (
-                <div className="task-menu" ref={taskMenu}>
-                  <button
-                    className="secondary-button focus-ring"
-                    aria-expanded={taskMenuOpen}
-                    aria-haspopup="menu"
-                    onClick={() => setTaskMenuOpen((open) => !open)}
-                  >
-                    {t("task.actions")}
-                  </button>
-                  {taskMenuOpen && (
-                    <div
-                      className="task-menu-popover"
-                      role="menu"
-                      onKeyDown={(event) => {
-                        if (
-                          event.key !== "ArrowDown" &&
-                          event.key !== "ArrowUp"
-                        )
-                          return;
-                        const items = [
-                          ...event.currentTarget.querySelectorAll<HTMLButtonElement>(
-                            "button:not([disabled])",
-                          ),
-                        ];
-                        if (items.length === 0) return;
-                        event.preventDefault();
-                        const index = items.indexOf(
-                          document.activeElement as HTMLButtonElement,
-                        );
-                        const offset = event.key === "ArrowDown" ? 1 : -1;
-                        const next =
-                          index < 0
-                            ? event.key === "ArrowDown"
-                              ? 0
-                              : items.length - 1
-                            : (index + offset + items.length) % items.length;
-                        items[next].focus();
-                      }}
+                {activeTask && (
+                  <div className="task-menu" ref={taskMenu}>
+                    <button
+                      className="secondary-button focus-ring"
+                      aria-expanded={taskMenuOpen}
+                      aria-haspopup="menu"
+                      onClick={() => setTaskMenuOpen((open) => !open)}
                     >
-                      <button
-                        role="menuitem"
-                        disabled={taskMutationDisabled}
-                        onClick={() => {
-                          setTitleDraft(activeTask.title);
-                          setEditingTitle(true);
-                          setTaskMenuOpen(false);
+                      {t("task.actions")}
+                    </button>
+                    {taskMenuOpen && (
+                      <div
+                        className="task-menu-popover"
+                        role="menu"
+                        onKeyDown={(event) => {
+                          if (
+                            event.key !== "ArrowDown" &&
+                            event.key !== "ArrowUp"
+                          )
+                            return;
+                          const items = [
+                            ...event.currentTarget.querySelectorAll<HTMLButtonElement>(
+                              "button:not([disabled])",
+                            ),
+                          ];
+                          if (items.length === 0) return;
+                          event.preventDefault();
+                          const index = items.indexOf(
+                            document.activeElement as HTMLButtonElement,
+                          );
+                          const offset = event.key === "ArrowDown" ? 1 : -1;
+                          const next =
+                            index < 0
+                              ? event.key === "ArrowDown"
+                                ? 0
+                                : items.length - 1
+                              : (index + offset + items.length) % items.length;
+                          items[next].focus();
                         }}
                       >
-                        {t("task.rename")}
-                      </button>
-                      <button
-                        role="menuitem"
-                        disabled={
-                          taskMutationDisabled ||
-                          runInFlight ||
-                          activeTask.lifecycle === "closing"
-                        }
-                        onClick={() => {
-                          closeTaskMenuAndRestoreFocus();
-                          void setArchived(!activeTask.archived);
-                        }}
-                      >
-                        {activeTask.archived
-                          ? t("task.restore")
-                          : t("task.archive")}
-                      </button>
-                      <button
-                        role="menuitem"
-                        disabled={
-                          (activeTask.lifecycle === "closing" &&
-                            !activeTask.closeFailed) ||
-                          activeTask.lifecycle === "closed" ||
-                          taskMutationDisabled
-                        }
-                        onClick={() => {
-                          closeTaskMenuAndRestoreFocus();
-                          void closeTask();
-                        }}
-                      >
-                        {activeTask.closeFailed
-                          ? t("task.end_retry")
-                          : activeTask.lifecycle === "closing"
-                            ? t("task.ending")
-                            : t("task.end")}
-                      </button>
-                      <button
-                        role="menuitem"
-                        className="is-danger"
-                        disabled={
-                          activeTask.lifecycle !== "closed" ||
-                          taskMutationDisabled
-                        }
-                        onClick={() => {
-                          setTaskMenuOpen(false);
-                          setConfirmDelete(true);
-                        }}
-                      >
-                        {t("task.delete")}
-                      </button>
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          </header>
+                        <button
+                          role="menuitem"
+                          disabled={taskMutationDisabled}
+                          onClick={() => {
+                            setTitleDraft(activeTask.title);
+                            setEditingTitle(true);
+                            setTaskMenuOpen(false);
+                          }}
+                        >
+                          {t("task.rename")}
+                        </button>
+                        <button
+                          role="menuitem"
+                          disabled={
+                            taskMutationDisabled ||
+                            runInFlight ||
+                            activeTask.lifecycle === "closing"
+                          }
+                          onClick={() => {
+                            closeTaskMenuAndRestoreFocus();
+                            void setArchived(!activeTask.archived);
+                          }}
+                        >
+                          {activeTask.archived
+                            ? t("task.restore")
+                            : t("task.archive")}
+                        </button>
+                        <button
+                          role="menuitem"
+                          disabled={
+                            (activeTask.lifecycle === "closing" &&
+                              !activeTask.closeFailed) ||
+                            activeTask.lifecycle === "closed" ||
+                            taskMutationDisabled
+                          }
+                          onClick={() => {
+                            closeTaskMenuAndRestoreFocus();
+                            void closeTask();
+                          }}
+                        >
+                          {activeTask.closeFailed
+                            ? t("task.end_retry")
+                            : activeTask.lifecycle === "closing"
+                              ? t("task.ending")
+                              : t("task.end")}
+                        </button>
+                        <button
+                          role="menuitem"
+                          className="is-danger"
+                          disabled={
+                            activeTask.lifecycle !== "closed" ||
+                            taskMutationDisabled
+                          }
+                          onClick={() => {
+                            setTaskMenuOpen(false);
+                            setConfirmDelete(true);
+                          }}
+                        >
+                          {t("task.delete")}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </header>
+          )}
 
           {activeTask && confirmDelete && (
             <section
@@ -2003,6 +2089,7 @@ export default function App() {
             composerHasDraft={composerDraftHasContent(composerDraft)}
             retryAvailable={taskCanCompose && !runInFlight}
             responseDisabled={bridgeUnavailable}
+            draftComposer={newTaskDraftActive ? composerFooter : null}
             onUseExample={(instruction) => {
               const prepared = prepareRetryDraft(composerDraft, instruction);
               if (prepared.kind === "prepared")
@@ -2031,94 +2118,8 @@ export default function App() {
             }}
             renderUiRecord={(record) => <UiRecordCard record={record} />}
           />
-
-          <ComposerFooter
-            textareaRef={composer}
-            archived={Boolean(activeTask?.archived)}
-            closing={activeTask?.lifecycle === "closing"}
-            closed={activeTask?.lifecycle === "closed"}
-            unavailable={Boolean(
-              activeTask &&
-              activeTask.lifecycle === "open" &&
-              !activeTask.continuationAvailable,
-            )}
-            draft={composerDraft}
-            skillCatalog={skillCatalog}
-            slashCommands={slashCommands}
-            composeDisabled={!taskCanCompose || taskMutationDisabled}
-            canSubmit={canSubmit}
-            runInFlight={Boolean(taskCanCompose && runInFlight)}
-            accessRequired={Boolean(
-              newTaskDraftActive &&
-              composerWorkspace &&
-              composerWorkspace.authorization !== "available",
-            )}
-            workspaceMissing={Boolean(newTaskDraftActive && !composerWorkspace)}
-            workspaceLabel={
-              composerWorkspace
-                ? composerWorkspace.displayName ||
-                  workspaceLabel(composerWorkspace.canonicalRoot)
-                : t("workspace.none")
-            }
-            workspaceTitle={
-              composerWorkspace?.canonicalRoot || t("workspace.none")
-            }
-            workspaceOptions={snapshot.workspaces.map((workspace) => ({
-              id: workspace.id,
-              label:
-                workspace.displayName ||
-                workspaceLabel(workspace.canonicalRoot),
-              canonicalRoot: workspace.canonicalRoot,
-              authorization: workspace.authorization,
-            }))}
-            selectedWorkspaceId={
-              newTaskDraftActive ? (composerWorkspace?.id ?? "") : ""
-            }
-            workspaceEditable={newTaskDraftActive}
-            modelLabel={
-              newTaskDraftActive
-                ? selectedModelLabel
-                : activeTask?.binding.modelDisplayName ||
-                  activeTask?.binding.modelSelectionId ||
-                  null
-            }
-            modelOptions={snapshot.account.models}
-            selectedModelId={selectedModelId}
-            modelEditable={newTaskDraftActive}
-            modelSelectionDisabled={
-              bridgeUnavailable ||
-              accountBusy ||
-              snapshot.account.operation !== "none" ||
-              snapshot.account.models.length === 0
-            }
-            modelSelectionPending={
-              accountBusy || snapshot.account.operation !== "none"
-            }
-            modelContextTitle={
-              newTaskDraftActive
-                ? t("settings.default_model_help")
-                : t("settings.task_binding_model")
-            }
-            actionDisabled={bridgeUnavailable || workspaceBusy}
-            onDraftChange={updateComposerDraft}
-            onSubmit={() => void submitRun()}
-            onSlashCommand={runSlashCommand}
-            onRefreshSkillCatalog={() => void refreshComposerSkillCatalog()}
-            onConfirmAccess={() => void chooseWorkspace(true)}
-            onSelectWorkspace={(workspaceId) =>
-              void selectWorkspaceById(workspaceId, { kind: "draft" })
-            }
-            onSelectModel={(id) =>
-              void runAccountCommand(() =>
-                client.selectModel(
-                  id,
-                  snapshot.account.catalogGeneration,
-                  snapshot.account.executionGeneration,
-                ),
-              )
-            }
-          />
-        </>
+          {!newTaskDraftActive && composerFooter}
+        </div>
       )}
       <GlobalSearch
         open={searchOpen}

@@ -199,7 +199,7 @@ function renderCompletedTimeline(
   );
 }
 
-function renderNewTaskTimeline(composerHasDraft) {
+function renderNewTaskTimeline(composerHasDraft, draftComposer = null) {
   return renderToStaticMarkup(
     createElement(
       I18nContext.Provider,
@@ -218,6 +218,7 @@ function renderNewTaskTimeline(composerHasDraft) {
         composerHasDraft,
         retryAvailable: true,
         responseDisabled: false,
+        draftComposer,
         onUseExample() {},
         onPrepareRetry() {},
         onInspect() {},
@@ -414,6 +415,43 @@ test("Timeline preserves typed Skill identity and positional arguments", () => {
 test("task examples disappear before they can overwrite an existing draft", () => {
   assert.match(renderNewTaskTimeline(false), /Review this project/);
   assert.doesNotMatch(renderNewTaskTimeline(true), /Review this project/);
+});
+
+test("new Task places the Composer between the outcome prompt and examples", () => {
+  const markup = renderNewTaskTimeline(
+    false,
+    createElement("footer", { "data-test": "draft-composer" }, "Composer"),
+  );
+  const prompt = markup.indexOf("Start with the outcome");
+  const composer = markup.indexOf('data-test="draft-composer"');
+  const example = markup.indexOf("Review this project");
+  assert.ok(prompt >= 0 && composer > prompt && example > composer);
+});
+
+test("Workbench foundation uses the purple system and centered new Task stage", async () => {
+  const [app, shell, css] = await Promise.all([
+    readFile(join(process.cwd(), "frontend/src/app/App.tsx"), "utf8"),
+    readFile(join(process.cwd(), "frontend/src/app/AppShell.tsx"), "utf8"),
+    readFile(join(process.cwd(), "frontend/src/index.css"), "utf8"),
+  ]);
+  assert.match(css, /--color-brand-600:\s*#5b46d8/);
+  assert.match(css, /--left-column:\s*248px/);
+  assert.match(
+    css,
+    /\.task-empty-state\.is-new-task\s*\{[\s\S]*?align-content:\s*center/,
+  );
+  assert.doesNotMatch(css, /color-cobalt|settings-teal|35,\s*109,\s*100/);
+  assert.match(
+    app,
+    /draftComposer=\{newTaskDraftActive \? composerFooter : null\}/,
+  );
+  assert.match(
+    app,
+    /!newTaskDraftActive && \(\s*<header className="task-header">/,
+  );
+  assert.ok(
+    shell.indexOf("commandbar-workspace") < shell.indexOf("commandbar-task"),
+  );
 });
 
 test("a new Task draft is editable before its first send", () => {

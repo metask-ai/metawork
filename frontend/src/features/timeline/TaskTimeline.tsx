@@ -133,6 +133,7 @@ export function TaskTimeline({
   composerHasDraft,
   retryAvailable,
   responseDisabled,
+  draftComposer,
   onUseExample,
   onPrepareRetry,
   onInspect,
@@ -147,6 +148,7 @@ export function TaskTimeline({
   composerHasDraft: boolean;
   retryAvailable: boolean;
   responseDisabled: boolean;
+  draftComposer?: ReactNode;
   onUseExample: (instruction: string) => void;
   onPrepareRetry: (input: RunInputView) => void;
   onInspect: (
@@ -175,7 +177,13 @@ export function TaskTimeline({
 
   useLayoutEffect(() => {
     const viewport = timelineScroll.current;
-    if (!viewport || !followingLatest.current) return;
+    if (!viewport) return;
+    if (!task) {
+      viewport.scrollTop = 0;
+      setShowJumpLatest(false);
+      return;
+    }
+    if (!followingLatest.current) return;
     viewport.scrollTop = viewport.scrollHeight;
     setShowJumpLatest(false);
   }, [task?.id, revision]);
@@ -329,6 +337,7 @@ export function TaskTimeline({
                     : "task.no_tasks",
                 )}
               </p>
+              {draft && draftComposer}
               {draft && !composerHasDraft && (
                 <div className="task-examples" aria-label={t("task.examples")}>
                   {newTaskExampleIds.map((id) => (

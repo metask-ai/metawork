@@ -146,8 +146,11 @@ export function AppShell({
           <span className="commandbar-leading-spacer" aria-hidden="true" />
         )}
         <div className="commandbar-context">
-          <span className="commandbar-task">{taskTitle}</span>
           <span className="commandbar-workspace">{workspaceLabel}</span>
+          <span className="commandbar-separator" aria-hidden="true">
+            /
+          </span>
+          <span className="commandbar-task">{taskTitle}</span>
         </div>
         <div className="commandbar-alert-slot">
           <span

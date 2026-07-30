@@ -42,6 +42,11 @@ const visualCaptureScript = path.join(
   "scripts",
   "capture-windows-window.ps1",
 );
+const macosWindowLookupScript = path.join(
+  root,
+  "scripts",
+  "capture-macos-window.swift",
+);
 const windowsChromeProbeScript = path.join(
   root,
   "scripts",
@@ -685,10 +690,33 @@ async function captureVisual(
   selectFirstTask = false,
   openSearch = false,
 ) {
-  if (visualCaptureDir === null || process.platform !== "win32") return;
+  if (visualCaptureDir === null) return;
+  if (
+    process.platform === "darwin" &&
+    (openSettings || selectFirstTask || openSearch)
+  )
+    return;
+  if (process.platform !== "darwin" && process.platform !== "win32") return;
   await mkdir(visualCaptureDir, { recursive: true });
   await automate("resize", String(width), String(height));
   await new Promise((resolve) => setTimeout(resolve, 350));
+  if (process.platform === "darwin") {
+    const { stdout } = await execFileAsync("/usr/bin/xcrun", [
+      "swift",
+      macosWindowLookupScript,
+      String(app.pid),
+    ]);
+    const windowId = stdout.trim();
+    if (!/^[1-9][0-9]*$/.test(windowId))
+      throw new Error(`could not resolve MetaWork window id: ${windowId}`);
+    await execFileAsync("/usr/sbin/screencapture", [
+      "-x",
+      "-l",
+      windowId,
+      path.join(visualCaptureDir, `${name}.png`),
+    ]);
+    return;
+  }
   const args = [
     "-NoProfile",
     "-ExecutionPolicy",
