@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
+import { Icon } from "../../components/ui/Icon.tsx";
 import { useI18n } from "../../i18n/context.ts";
 import type { SearchResult } from "../../workbench/selectors.ts";
 
@@ -24,6 +25,8 @@ export function GlobalSearch({
   const previousFocus = useRef<HTMLElement | null>(null);
   const closeCallback = useRef(onClose);
   const [activeIndex, setActiveIndex] = useState(0);
+  const resolvedActiveIndex =
+    results.length > 0 ? Math.min(activeIndex, results.length - 1) : 0;
 
   useEffect(() => {
     closeCallback.current = onClose;
@@ -35,7 +38,10 @@ export function GlobalSearch({
     previousFocus.current = document.activeElement as HTMLElement | null;
     input.current?.focus();
     const handleDialogKeys = (event: KeyboardEvent) => {
-      if (event.key === "Escape") closeCallback.current();
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeCallback.current();
+      }
       if (event.key !== "Tab") return;
       const focusable = dialog.current?.querySelectorAll<HTMLElement>(
         'input, button:not([disabled]), [tabindex]:not([tabindex="-1"])',
@@ -74,6 +80,7 @@ export function GlobalSearch({
           {t("search.title")}
         </h2>
         <div className="search-input-row">
+          <Icon name="search" />
           <input
             ref={input}
             role="combobox"
@@ -83,7 +90,9 @@ export function GlobalSearch({
             aria-expanded="true"
             aria-controls="search-results"
             aria-activedescendant={
-              results.length > 0 ? `search-result-${activeIndex}` : undefined
+              results.length > 0
+                ? `search-result-${resolvedActiveIndex}`
+                : undefined
             }
             placeholder={t("search.placeholder")}
             onChange={(event) => onQuery(event.target.value)}
@@ -96,9 +105,12 @@ export function GlobalSearch({
                 setActiveIndex(
                   (index) => (index - 1 + results.length) % results.length,
                 );
-              } else if (event.key === "Enter" && results[activeIndex]) {
+              } else if (
+                event.key === "Enter" &&
+                results[resolvedActiveIndex]
+              ) {
                 event.preventDefault();
-                onSelect(results[activeIndex]);
+                onSelect(results[resolvedActiveIndex]);
               }
             }}
           />
@@ -115,8 +127,9 @@ export function GlobalSearch({
               key={result.key}
               className="search-result focus-ring"
               role="option"
-              aria-selected={index === activeIndex}
-              data-active={index === activeIndex}
+              tabIndex={-1}
+              aria-selected={index === resolvedActiveIndex}
+              data-active={index === resolvedActiveIndex}
               onMouseEnter={() => setActiveIndex(index)}
               onClick={() => onSelect(result)}
             >

@@ -1,6 +1,5 @@
 export const enUS = {
   "app.name": "MetaWork",
-  "app.window_label": "Local agent workbench",
   "app.toggle_workspaces": "Toggle workspace and task sidebar",
   "app.dismiss_panels": "Dismiss panels",
   "app.language": "Language",

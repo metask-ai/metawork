@@ -27,6 +27,7 @@ function initialPanel(key: string, minimumWidth: number) {
 export function AppShell({
   taskTitle,
   workspaceLabel,
+  contextVisible,
   attentionNotice,
   onBeginWindowDrag,
   onWindowControl,
@@ -39,6 +40,7 @@ export function AppShell({
 }: {
   taskTitle: string;
   workspaceLabel: string;
+  contextVisible: boolean;
   attentionNotice: string | null;
   onBeginWindowDrag: () => void;
   onWindowControl: (action: WindowControlAction) => void;
@@ -145,9 +147,16 @@ export function AppShell({
         ) : (
           <span className="commandbar-leading-spacer" aria-hidden="true" />
         )}
-        <div className="commandbar-context">
-          <span className="commandbar-task">{taskTitle}</span>
-          <span className="commandbar-workspace">{workspaceLabel}</span>
+        <div className="commandbar-context" data-visible={contextVisible}>
+          {contextVisible && (
+            <>
+              <span className="commandbar-workspace">{workspaceLabel}</span>
+              <span className="commandbar-separator" aria-hidden="true">
+                /
+              </span>
+              <span className="commandbar-task">{taskTitle}</span>
+            </>
+          )}
         </div>
         <div className="commandbar-alert-slot">
           <span

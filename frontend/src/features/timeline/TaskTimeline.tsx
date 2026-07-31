@@ -8,6 +8,7 @@ import {
 } from "react";
 
 import { CodeBlock } from "../../components/ui/CodeBlock.tsx";
+import { Icon } from "../../components/ui/Icon.tsx";
 import type {
   PendingUi,
   RunInputView,
@@ -133,6 +134,7 @@ export function TaskTimeline({
   composerHasDraft,
   retryAvailable,
   responseDisabled,
+  draftComposer,
   onUseExample,
   onPrepareRetry,
   onInspect,
@@ -147,6 +149,7 @@ export function TaskTimeline({
   composerHasDraft: boolean;
   retryAvailable: boolean;
   responseDisabled: boolean;
+  draftComposer?: ReactNode;
   onUseExample: (instruction: string) => void;
   onPrepareRetry: (input: RunInputView) => void;
   onInspect: (
@@ -175,7 +178,13 @@ export function TaskTimeline({
 
   useLayoutEffect(() => {
     const viewport = timelineScroll.current;
-    if (!viewport || !followingLatest.current) return;
+    if (!viewport) return;
+    if (!task) {
+      viewport.scrollTop = 0;
+      setShowJumpLatest(false);
+      return;
+    }
+    if (!followingLatest.current) return;
     viewport.scrollTop = viewport.scrollHeight;
     setShowJumpLatest(false);
   }, [task?.id, revision]);
@@ -198,7 +207,7 @@ export function TaskTimeline({
   }
 
   return (
-    <>
+    <div className="timeline-region">
       <div
         className="timeline-scroll"
         ref={timelineScroll}
@@ -329,6 +338,7 @@ export function TaskTimeline({
                     : "task.no_tasks",
                 )}
               </p>
+              {draft && draftComposer}
               {draft && !composerHasDraft && (
                 <div className="task-examples" aria-label={t("task.examples")}>
                   {newTaskExampleIds.map((id) => (
@@ -352,7 +362,7 @@ export function TaskTimeline({
           {t("timeline.jump_latest")}
         </button>
       )}
-    </>
+    </div>
   );
 }
 
@@ -373,12 +383,8 @@ function RunOutcome({
 }) {
   const { t } = useI18n();
   return (
-    <section
-      className="run-outcome"
-      data-phase={run.phase}
-      role={latest ? "status" : undefined}
-    >
-      <div className="run-outcome-copy">
+    <section className="run-outcome" data-phase={run.phase}>
+      <div className="run-outcome-copy" role={latest ? "status" : undefined}>
         <p>{t(terminalMessageId(outcome))}</p>
         {run.cause && <span>{t(`cause.${run.cause}`)}</span>}
       </div>
@@ -458,29 +464,36 @@ function ToolCard({
   );
   return (
     <details
-      className="group rounded-xl border border-rule bg-canvas"
+      className="tool-card"
+      data-state={tool.state}
       open={tool.state === "running" || tool.state === "failed"}
     >
-      <summary className="flex cursor-pointer list-none items-center justify-between gap-4 px-4 py-3">
-        <span className="flex items-center gap-3">
+      <summary className="tool-card-summary">
+        <span className="tool-card-identity">
           <span
-            className={`h-2 w-2 rounded-full ${tool.state === "failed" ? "bg-danger" : tool.state === "running" ? "bg-cobalt" : "bg-live"}`}
+            className="tool-state-dot"
+            data-state={tool.state}
             aria-hidden="true"
           />
-          <span className="font-mono text-xs font-semibold">{tool.name}</span>
+          <span className="tool-card-name">{tool.name}</span>
         </span>
-        <span className="tool-summary-state" data-state={tool.state}>
-          <strong>{state}</strong>
-          {duration !== null && duration > 0n && (
-            <span>
-              {t("tool.duration_ms", {
-                count: formatMilliseconds(locale, duration),
-              })}
-            </span>
-          )}
+        <span className="tool-card-meta">
+          <span className="tool-summary-state" data-state={tool.state}>
+            <strong>{state}</strong>
+            {duration !== null && duration > 0n && (
+              <span>
+                {t("tool.duration_ms", {
+                  count: formatMilliseconds(locale, duration),
+                })}
+              </span>
+            )}
+          </span>
+          <span className="tool-disclosure" aria-hidden="true">
+            <Icon name="chevron" />
+          </span>
         </span>
       </summary>
-      <div className="grid gap-3 border-t border-rule px-4 py-4 text-xs">
+      <div className="tool-card-body">
         {(tool.redacted ||
           tool.inputTruncated ||
           tool.progressTruncated ||

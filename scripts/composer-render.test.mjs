@@ -78,6 +78,33 @@ const base = {
   onSelectModel() {},
 };
 
+function relativeLuminance(hex) {
+  const channels = hex
+    .match(/[0-9a-f]{2}/gi)
+    .map((channel) => Number.parseInt(channel, 16) / 255)
+    .map((channel) =>
+      channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4,
+    );
+  return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
+}
+
+function contrastRatio(foreground, background) {
+  const foregroundLuminance = relativeLuminance(foreground);
+  const backgroundLuminance = relativeLuminance(background);
+  return (
+    (Math.max(foregroundLuminance, backgroundLuminance) + 0.05) /
+    (Math.min(foregroundLuminance, backgroundLuminance) + 0.05)
+  );
+}
+
+function colorToken(css, name) {
+  const match = css.match(
+    new RegExp(`--color-${name}:\\s*(#[0-9a-f]{6})`, "i"),
+  );
+  assert.ok(match, `missing --color-${name}`);
+  return match[1];
+}
+
 function render(props = {}) {
   return renderToStaticMarkup(
     createElement(
@@ -94,7 +121,12 @@ function render(props = {}) {
   );
 }
 
-function renderShell(inspector, inspectorOpen = false, left = undefined) {
+function renderShell(
+  inspector,
+  inspectorOpen = false,
+  left = undefined,
+  contextVisible = true,
+) {
   return renderToStaticMarkup(
     createElement(
       I18nContext.Provider,
@@ -110,6 +142,7 @@ function renderShell(inspector, inspectorOpen = false, left = undefined) {
         {
           taskTitle: "New task",
           workspaceLabel: "No workspace",
+          contextVisible,
           status: "Connected",
           onSearch() {},
           left:
@@ -199,7 +232,7 @@ function renderCompletedTimeline(
   );
 }
 
-function renderNewTaskTimeline(composerHasDraft) {
+function renderNewTaskTimeline(composerHasDraft, draftComposer = null) {
   return renderToStaticMarkup(
     createElement(
       I18nContext.Provider,
@@ -218,6 +251,7 @@ function renderNewTaskTimeline(composerHasDraft) {
         composerHasDraft,
         retryAvailable: true,
         responseDisabled: false,
+        draftComposer,
         onUseExample() {},
         onPrepareRetry() {},
         onInspect() {},
@@ -396,6 +430,27 @@ test("terminal delivery follows tool activity and precedes the outcome", () => {
   assert.match(renderCompletedTimeline(""), /did not return a final response/);
 });
 
+test("each typed Tool stays an independent bounded detail card", async () => {
+  const [markup, css, timeline, approval] = await Promise.all([
+    Promise.resolve(renderCompletedTimeline()),
+    readFile(join(process.cwd(), "frontend/src/index.css"), "utf8"),
+    readFile(
+      join(process.cwd(), "frontend/src/features/timeline/TaskTimeline.tsx"),
+      "utf8",
+    ),
+    readFile(
+      join(process.cwd(), "frontend/src/features/approvals/ApprovalPanel.tsx"),
+      "utf8",
+    ),
+  ]);
+  assert.equal(markup.match(/class="tool-card"/g)?.length, 1);
+  assert.match(markup, /class="tool-card" data-state="completed"/);
+  assert.match(css, /\.code-block-preview\s*\{[\s\S]*?max-height:\s*240px/);
+  assert.match(timeline, /key=\{`tool:\$\{activity\.value\.id\}`\}/);
+  assert.doesNotMatch(timeline, /bg-cobalt/);
+  assert.doesNotMatch(approval, /accent-cobalt/);
+});
+
 test("Timeline preserves typed Skill identity and positional arguments", () => {
   const markup = renderCompletedTimeline("Review complete", {
     kind: "skill",
@@ -414,6 +469,97 @@ test("Timeline preserves typed Skill identity and positional arguments", () => {
 test("task examples disappear before they can overwrite an existing draft", () => {
   assert.match(renderNewTaskTimeline(false), /Review this project/);
   assert.doesNotMatch(renderNewTaskTimeline(true), /Review this project/);
+});
+
+test("new Task places the Composer between the outcome prompt and examples", () => {
+  const markup = renderNewTaskTimeline(
+    false,
+    createElement("footer", { "data-test": "draft-composer" }, "Composer"),
+  );
+  const prompt = markup.indexOf("Start with the outcome");
+  const composer = markup.indexOf('data-test="draft-composer"');
+  const example = markup.indexOf("Review this project");
+  assert.ok(prompt >= 0 && composer > prompt && example > composer);
+});
+
+test("Workbench foundation uses the purple system and centered new Task stage", async () => {
+  const [app, shell, css] = await Promise.all([
+    readFile(join(process.cwd(), "frontend/src/app/App.tsx"), "utf8"),
+    readFile(join(process.cwd(), "frontend/src/app/AppShell.tsx"), "utf8"),
+    readFile(join(process.cwd(), "frontend/src/index.css"), "utf8"),
+  ]);
+  assert.match(css, /--color-brand-600:\s*#5b46d8/);
+  assert.match(css, /--left-column:\s*248px/);
+  assert.match(
+    css,
+    /\.app-window\[data-left-open="true"\] \.workbench-commandbar::before\s*\{[\s\S]*?width:\s*var\(--left-column\);[\s\S]*?border-right:\s*1px solid var\(--color-rule\);[\s\S]*?background:\s*var\(--color-rail\)/,
+  );
+  assert.match(
+    css,
+    /\.workbench-commandbar\s*\{[\s\S]*?background:\s*var\(--color-canvas\)/,
+  );
+  assert.doesNotMatch(
+    css.match(/\.workbench-commandbar\s*\{[\s\S]*?\n\}/)?.[0] ?? "",
+    /border-bottom|backdrop-filter/,
+  );
+  assert.doesNotMatch(app, /className="brand-mark"|app\.window_label/);
+  assert.match(app, /<p className="brand-name">\{t\("app\.name"\)\}<\/p>/);
+  assert.match(css, /\.sidebar-primary\s*\{[\s\S]*?padding:\s*10px 14px 0/);
+  assert.match(css, /\.new-task-button\s*\{[\s\S]*?margin-top:\s*8px/);
+  assert.match(css, /\.brand-name\s*\{[\s\S]*?min-height:\s*26px/);
+  assert.match(
+    css,
+    /\.task-empty-state\.is-new-task\s*\{[\s\S]*?align-content:\s*center/,
+  );
+  assert.doesNotMatch(css, /color-cobalt|settings-teal|35,\s*109,\s*100/);
+  assert.match(
+    app,
+    /draftComposer=\{newTaskDraftActive \? composerFooter : null\}/,
+  );
+  assert.match(
+    app,
+    /!newTaskDraftActive && \(\s*<header className="task-header">/,
+  );
+  assert.match(
+    app,
+    /contextVisible=\{route === "workbench" && activeTask !== null\}/,
+  );
+  assert.ok(
+    shell.indexOf("commandbar-workspace") < shell.indexOf("commandbar-task"),
+  );
+});
+
+test("New task keeps the titlebar quiet while a real Task retains context", () => {
+  const quiet = renderShell(null, false, undefined, false);
+  assert.doesNotMatch(quiet, /No workspace|New task/);
+
+  const contextual = renderShell(null, false, undefined, true);
+  assert.match(contextual, /No workspace/);
+  assert.match(contextual, /New task/);
+});
+
+test("Workbench semantic text colors meet WCAG AA contrast", async () => {
+  const css = await readFile(
+    join(process.cwd(), "frontend/src/index.css"),
+    "utf8",
+  );
+  const canvas = colorToken(css, "canvas");
+  const pairs = [
+    [colorToken(css, "graphite"), canvas],
+    [colorToken(css, "muted"), canvas],
+    [colorToken(css, "brand-700"), canvas],
+    [canvas, colorToken(css, "brand-600")],
+    [colorToken(css, "amber-ink"), "#fff5e7"],
+    [colorToken(css, "danger"), canvas],
+    [colorToken(css, "live"), canvas],
+    [colorToken(css, "amber"), canvas],
+  ];
+  for (const [foreground, background] of pairs) {
+    assert.ok(
+      contrastRatio(foreground, background) >= 4.5,
+      `${foreground} on ${background} falls below WCAG AA`,
+    );
+  }
 });
 
 test("a new Task draft is editable before its first send", () => {

@@ -87,6 +87,9 @@ const { ComposerFooter } = await vite.ssrLoadModule(
 const { SettingsPage } = await vite.ssrLoadModule(
   "/src/features/settings/SettingsPage.tsx",
 );
+const { GlobalSearch } = await vite.ssrLoadModule(
+  "/src/features/search/GlobalSearch.tsx",
+);
 const { I18nContext } = await vite.ssrLoadModule("/src/i18n/context.ts");
 const { translate } = await vite.ssrLoadModule("/src/i18n/runtime.ts");
 
@@ -114,6 +117,20 @@ function renderMenu(onValueChange, value = "alpha", overrides = {}) {
   );
 }
 
+function searchElement(props) {
+  return createElement(
+    I18nContext.Provider,
+    {
+      value: {
+        locale: "en-US",
+        setLocale() {},
+        t: (id, values) => translate("en-US", id, values),
+      },
+    },
+    createElement(GlobalSearch, props),
+  );
+}
+
 test("SelectionMenu uses combobox semantics and keyboard selection", async () => {
   const selected = [];
   const user = userEvent.setup({ document: dom.window.document });
@@ -129,6 +146,63 @@ test("SelectionMenu uses combobox semantics and keyboard selection", async () =>
   assert.deepEqual(selected, ["bravo"]);
   assert.equal(trigger.getAttribute("aria-expanded"), "false");
   assert.equal(document.activeElement, trigger);
+});
+
+test("Global search keeps focus in its combobox and restores the opener", () => {
+  const selected = [];
+  let closed = 0;
+  const opener = document.createElement("button");
+  document.body.append(opener);
+  opener.focus();
+  const props = {
+    open: true,
+    query: "task",
+    results: [
+      {
+        key: "task:1",
+        kind: "task",
+        title: "First task",
+        detail: "alpha",
+        workspaceId: "1",
+        taskId: "1",
+      },
+      {
+        key: "task:2",
+        kind: "task",
+        title: "Second task",
+        detail: "beta",
+        workspaceId: "1",
+        taskId: "2",
+      },
+    ],
+    onQuery() {},
+    onClose() {
+      closed += 1;
+    },
+    onSelect(result) {
+      selected.push(result.key);
+    },
+  };
+  const view = render(searchElement(props));
+  const combobox = screen.getByRole("combobox", { name: "Search MetaWork" });
+  assert.equal(document.activeElement, combobox);
+  const options = screen.getAllByRole("option");
+  assert.deepEqual(
+    options.map((option) => option.tabIndex),
+    [-1, -1],
+  );
+  fireEvent.keyDown(combobox, { key: "ArrowDown" });
+  assert.equal(
+    combobox.getAttribute("aria-activedescendant"),
+    "search-result-1",
+  );
+  fireEvent.keyDown(combobox, { key: "Enter" });
+  assert.deepEqual(selected, ["task:2"]);
+  fireEvent.keyDown(window, { key: "Escape" });
+  assert.equal(closed, 1);
+  view.rerender(searchElement({ ...props, open: false }));
+  assert.equal(document.activeElement, opener);
+  opener.remove();
 });
 
 test("SelectionMenu closes on Escape and restores trigger focus", async () => {
