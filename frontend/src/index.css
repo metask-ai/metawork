@@ -327,6 +327,25 @@ summary::-webkit-details-marker {
   padding: 0 18px;
 }
 
+.account-gate-signout-confirmation {
+  max-width: 390px;
+  margin-top: 12px;
+  padding: 12px 14px;
+  border: 1px solid #dfbdb7;
+  border-radius: 10px;
+  background: #fff8f7;
+  color: var(--color-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.account-gate-signout-confirmation span {
+  display: flex;
+  margin-top: 10px;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .account-gate-details {
   max-width: 390px;
   margin-top: 16px;

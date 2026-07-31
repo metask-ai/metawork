@@ -33,6 +33,7 @@ export const zhCN: Record<MessageId, string> = {
   "connection.refresh_failed": "无法加载最新的工作台视图。",
   "account.label": "Metask 账号",
   "account.signed_in": "已登录",
+  "account.saved_account": "已保存账号",
   "account.ready": "可执行",
   "account.gate.path": "Metask\n本地工作台",
   "account.gate.eyebrow": "Metask 访问",
@@ -52,6 +53,12 @@ export const zhCN: Record<MessageId, string> = {
   "account.readiness.needs_attention.title": "账号设置需要处理",
   "account.readiness.needs_attention.body":
     "Metask 账号仍保持连接，请使用下方操作继续。",
+  "account.reauthentication.title": "登录已过期",
+  "account.reauthentication.body":
+    "这台设备仍保存着此账号，但登录凭据已失效。请重新登录后继续。",
+  "account.reauthentication_stale.title": "需要重新登录",
+  "account.reauthentication_stale.body":
+    "本机保存的登录状态与当前 Metask 会话不一致。请重新登录；MetaWork 将以本次登录的账号为准。",
   "account.readiness.restart_required.title": "重启 MetaWork 后继续",
   "account.readiness.restart_required.body":
     "请关闭并重新打开 MetaWork；账号操作不会被自动重试。",
@@ -90,6 +97,7 @@ export const zhCN: Record<MessageId, string> = {
   "account.cancel": "取消当前操作",
   "account.refresh_catalog": "重新同步",
   "account.logout": "退出并清除这台设备上的信息",
+  "account.logout_confirm": "MetaWork 将请求 Host 清理这台设备，是否继续？",
   "account.command_rejected":
     "该账号操作已不可用，MetaWork 已保留最新账号状态。",
   "account.command_failed":
@@ -375,7 +383,6 @@ export const zhCN: Record<MessageId, string> = {
   "settings.signout_title": "在这台设备上退出",
   "settings.signout_help":
     "这会清除本机 Metask 凭据。任务记录和工作区文件会保留；正在运行的工作可能需要先结束。",
-  "settings.signout_confirm": "MetaWork 将请求 Host 清理这台设备，是否继续？",
   "settings.open_account_models": "打开账号与模型设置",
   "settings.task_binding_model": "此任务继续使用创建时绑定的模型。",
   "outcome.completed": "已完成",

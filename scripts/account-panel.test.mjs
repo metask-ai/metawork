@@ -275,10 +275,12 @@ test("retryable and restart-required failures never leave an actionless spinner"
     readiness: "needs_attention",
     primaryAction: "retry_catalog",
     accountId: "account-1",
+    displayName: "Metask User",
     errorCode: "metask_service_unavailable",
     safeDiagnostic: "upstream service returned internal status E_METASK_503",
   });
   assert.match(retry, /Account setup needs attention/);
+  assert.match(retry, />Signed in<[\s\S]*?>Metask User</);
   assert.match(retry, />Try again</);
   assert.match(retry, /temporarily unavailable/);
   assert.doesNotMatch(retry, /metask_service_unavailable/);
@@ -306,6 +308,60 @@ test("retryable and restart-required failures never leave an actionless spinner"
   assert.match(restart, /Restart MetaWork to continue/);
   assert.match(restart, /Close and reopen MetaWork/);
   assert.doesNotMatch(restart, /Try again|Sign in with Metask/);
+});
+
+test("reauth-required gate presents a saved identity instead of a signed-in account", () => {
+  const markup = renderGate({
+    ...signedOut,
+    sessionState: "reauth_required",
+    readiness: "needs_attention",
+    primaryAction: "reauthenticate",
+    accountId: "account-1",
+    displayName: "Metask User",
+    errorCode: "token_refresh_failed",
+  });
+  assert.match(markup, /Sign-in expired/);
+  assert.match(markup, /Saved account/);
+  assert.match(markup, /Metask User/);
+  assert.match(markup, />Sign in again</);
+  assert.match(markup, />Sign out…</);
+  assert.doesNotMatch(
+    markup,
+    /Account setup needs attention|Signed in|finish preparing this account/,
+  );
+});
+
+test("reauth-required gate replaces stale saved identity with the next explicit sign-in", () => {
+  const markup = renderGate({
+    ...signedOut,
+    sessionState: "reauth_required",
+    readiness: "needs_attention",
+    primaryAction: "reauthenticate",
+    accountId: "account-1",
+    profileId: "profile-1",
+    displayName: "Metask User",
+    errorCode: "account_mismatch",
+  });
+  assert.match(markup, />Sign in again</);
+  assert.match(markup, /use the account from the new sign-in/);
+  assert.match(markup, /Saved account/);
+  assert.match(markup, />Sign out…/);
+  assert.doesNotMatch(markup, /Sign-in expired|credential is no longer valid/);
+});
+
+test("reauth-required sign-out requires confirmation and restores focus", async () => {
+  const source = await readFile(
+    join(process.cwd(), "frontend/src/features/account/AccountGate.tsx"),
+    "utf8",
+  );
+  assert.match(source, /signOutCancel\.current\?\.focus\(\)/);
+  assert.match(source, /event\.key !== "Escape"/);
+  assert.match(source, /signOut\.current\?\.focus\(\)/);
+  assert.match(
+    source,
+    /aria-describedby="account-gate-signout-confirmation-copy"/,
+  );
+  assert.match(source, /onClick=\{onLogout\}/);
 });
 
 test("ready Account uses a formal settings route with truthful defaults", () => {

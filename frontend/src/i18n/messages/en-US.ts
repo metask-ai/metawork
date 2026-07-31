@@ -31,6 +31,7 @@ export const enUS = {
   "connection.refresh_failed": "The latest Workbench view could not be loaded.",
   "account.label": "Metask account",
   "account.signed_in": "Signed in",
+  "account.saved_account": "Saved account",
   "account.ready": "Ready",
   "account.gate.path": "Metask\nLocal workbench",
   "account.gate.eyebrow": "Metask access",
@@ -52,6 +53,12 @@ export const enUS = {
   "account.readiness.needs_attention.title": "Account setup needs attention",
   "account.readiness.needs_attention.body":
     "Your Metask account is still connected. Use the action below to continue.",
+  "account.reauthentication.title": "Sign-in expired",
+  "account.reauthentication.body":
+    "This account is saved on this device, but its sign-in credential is no longer valid. Sign in again to continue.",
+  "account.reauthentication_stale.title": "Sign in again",
+  "account.reauthentication_stale.body":
+    "The saved sign-in no longer matches the current Metask session. Sign in again; MetaWork will use the account from the new sign-in.",
   "account.readiness.restart_required.title": "Restart MetaWork to continue",
   "account.readiness.restart_required.body":
     "Close and reopen MetaWork. No account action will be retried automatically.",
@@ -95,6 +102,8 @@ export const enUS = {
   "account.cancel": "Cancel current action",
   "account.refresh_catalog": "Sync again",
   "account.logout": "Sign out and clear this device",
+  "account.logout_confirm":
+    "MetaWork will ask the Host to clear this device. Continue?",
   "account.command_rejected":
     "That account action is no longer available. MetaWork kept the latest account state.",
   "account.command_failed":
@@ -412,8 +421,6 @@ export const enUS = {
   "settings.signout_title": "Sign out on this device",
   "settings.signout_help":
     "This clears Metask credentials from this device. Task records and workspace files are preserved; live work may need to finish first.",
-  "settings.signout_confirm":
-    "MetaWork will ask the Host to clear this device. Continue?",
   "settings.open_account_models": "Open account and model settings",
   "settings.task_binding_model":
     "This task keeps the model bound when it was created.",

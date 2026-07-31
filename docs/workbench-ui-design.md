@@ -724,7 +724,7 @@ MetaWork
 [ 使用 Metask 登录 ]
 ```
 
-首次启动不显示四步进度条，不要求用户点击“加载 API Key”，不出现 C1/C2、Provider target、generation 或 Keychain 等技术术语。后台准备超过正常感知时长时说明正在等待什么，但不伪造百分比。OAuth 已成功而目录准备失败时必须保持已登录 identity，提供 `重试` 或 Host-owned `在 Metask 中管理`，不能退回未登录文案。
+首次启动不显示四步进度条，不要求用户点击“加载 API Key”，不出现 C1/C2、Provider target、generation 或 Keychain 等技术术语。后台准备超过正常感知时长时说明正在等待什么，但不伪造百分比。OAuth 已成功而目录准备失败时必须保持已登录 identity，提供 `重试` 或 Host-owned `在 Metask 中管理`，不能退回未登录文案。Host 发布 `reauth_required` 时，身份行标为“已保存账号”并以“重新登录”为主动作；`token_refresh_failed` 或 `metask_unauthorized` 明确显示“登录已过期”，后台恢复发现 `account_mismatch` 时则说明本机登录状态需要更新。显式重新登录成功后以本次登录账号为准，界面不得要求用户匹配旧缓存账号。Gate 同时提供“退出登录”次动作，但删除本机凭据前必须二次确认，并支持 Escape 取消与焦点恢复。
 
 冷启动恢复期间使用稳定的品牌与恢复状态，不先渲染一套全部 disabled 的 Workbench。恢复确认 `signed_out` 后显示登录；确认 `execution_ready` 后直接进入 Workbench；确认 `account_only` 后继续目录准备。
 
@@ -921,7 +921,7 @@ MetaWork 采用“明亮工作台 + 紫色任务流”的桌面工具方向。�
 3. 用户可以采取什么动作；
 4. 技术详情入口。
 
-首次启动 Account 错误必须保留已经完成的 OAuth identity，并提供与失败语义匹配的 `重试`、`重新登录`、`重新打开登录页面`、`取消`、`在 Metask 中管理` 或 `重启应用`。进入 Workbench 后的重认证或目录错误不得清空 Workspace、Task 或草稿。普通异常不能留下无动作 spinner；只有持久化结果不确定等明确 fail-closed 边界可以要求重启。
+首次启动 Account 错误必须保留已经完成的 OAuth identity，并提供与失败语义匹配的 `重试`、`重新登录`、`重新打开登录页面`、`取消`、`在 Metask 中管理` 或 `重启应用`。`authenticated` 下的目录失败显示“已登录”并提供重试；`reauth_required` 统一把 identity 标为“已保存账号”，凭据过期显示“登录已过期”，后台 identity 校验失败显示“登录状态需要更新”，两者都由显式重新登录替换为本次登录账号。进入 Workbench 后的重认证或目录错误不得清空 Workspace、Task 或草稿。普通异常不能留下无动作 spinner；只有持久化结果不确定等明确 fail-closed 边界可以要求重启。
 
 工具失败但 Agent 已恢复时不能把整个 Task 标记为失败。任务级失败才进入左栏 Failed 状态。
 
