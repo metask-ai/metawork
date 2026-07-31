@@ -37,6 +37,7 @@ import {
 import { useUiResponseStates } from "../features/approvals/useUiResponseStates.ts";
 import { GlobalSearch } from "../features/search/GlobalSearch.tsx";
 import { SkillsPage } from "../features/skills/SkillsPage.tsx";
+import { ScheduledTasksPage } from "../features/scheduled-tasks/ScheduledTasksPage.tsx";
 import {
   TaskInspector,
   type InspectorFocusRequest,
@@ -1682,7 +1683,9 @@ export default function App() {
           ? t("settings.title")
           : route === "skills"
             ? t("skills.title")
-            : activeTaskTitle
+            : route === "scheduled-tasks"
+              ? t("scheduled.title")
+              : activeTaskTitle
       }
       contextVisible={route === "workbench" && activeTask !== null}
       onSearch={() => setSearchOpen(true)}
@@ -1695,9 +1698,11 @@ export default function App() {
       workspaceLabel={
         route === "settings"
           ? t("settings.account_models")
-          : currentWorkspace?.displayName ||
-            currentWorkspace?.canonicalRoot ||
-            t("workspace.none")
+          : route === "scheduled-tasks"
+            ? t("scheduled.title")
+            : currentWorkspace?.displayName ||
+              currentWorkspace?.canonicalRoot ||
+              t("workspace.none")
       }
       attentionNotice={
         commandBarStatus
@@ -1709,21 +1714,22 @@ export default function App() {
           <div className="sidebar-frame">
             <div className="sidebar-primary">
               <p className="brand-name">{t("app.name")}</p>
-              <button
-                className="new-task-button focus-ring"
-                data-active={route === "workbench" && newTaskDraftActive}
-                disabled={bridgeUnavailable}
-                onClick={beginNewTask}
-              >
-                <Icon name="plus" />
-                <span>{t("task.new")}</span>
-                <kbd>{shortcutModifier}N</kbd>
-              </button>
-
               <nav
                 className="sidebar-capabilities"
                 aria-label={t("skills.navigation_label")}
               >
+                <button
+                  className="sidebar-capability focus-ring"
+                  data-active={route === "workbench" && newTaskDraftActive}
+                  disabled={viewSyncFailed || !bridgeReady}
+                  onClick={beginNewTask}
+                >
+                  <span className="sidebar-capability-mark" aria-hidden="true">
+                    <Icon name="plus" />
+                  </span>
+                  <span>{t("task.new")}</span>
+                  <kbd>{shortcutModifier}N</kbd>
+                </button>
                 <button
                   className="sidebar-capability focus-ring"
                   data-active={route === "skills"}
@@ -1738,6 +1744,27 @@ export default function App() {
                   </span>
                   <span>{t("skills.title")}</span>
                 </button>
+                {snapshot.capabilities.scheduledTasks && (
+                  <button
+                    className="sidebar-capability focus-ring"
+                    data-active={route === "scheduled-tasks"}
+                    aria-current={
+                      route === "scheduled-tasks" ? "page" : undefined
+                    }
+                    onClick={() => {
+                      pendingTaskSelection.current = null;
+                      setRoute("scheduled-tasks");
+                    }}
+                  >
+                    <span
+                      className="sidebar-capability-mark"
+                      aria-hidden="true"
+                    >
+                      <Icon name="clock" />
+                    </span>
+                    <span>{t("scheduled.title")}</span>
+                  </button>
+                )}
               </nav>
 
               <div className="sidebar-navigation">
@@ -1849,6 +1876,26 @@ export default function App() {
           disabled={bridgeUnavailable}
           onQuery={setSkillsQuery}
           onRefresh={() => void refreshSkillsPageCatalog()}
+        />
+      ) : route === "scheduled-tasks" ? (
+        <ScheduledTasksPage
+          snapshot={snapshot}
+          disabled={bridgeUnavailable}
+          onCreate={(input) => client.createScheduledTask(input)}
+          onUpdate={(id, epoch, input) =>
+            client.updateScheduledTask(id, epoch, input)
+          }
+          onSetEnabled={(id, epoch, enabled) =>
+            client.setScheduledTaskEnabled(id, epoch, enabled)
+          }
+          onRunNow={(id, epoch) => client.runScheduledTaskNow(id, epoch)}
+          onDelete={(id, epoch) => client.deleteScheduledTask(id, epoch)}
+          onOpenTask={(taskId) => {
+            const task = snapshot.tasks.find((item) => item.id === taskId);
+            if (!task) return;
+            setRoute("workbench");
+            dispatchWorkbench({ type: "task.selected", taskId });
+          }}
         />
       ) : (
         <div

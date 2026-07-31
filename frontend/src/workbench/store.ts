@@ -26,6 +26,9 @@ export const initialWorkbenchState: WorkbenchState = {
       typedOutputs: false,
       typedFileChanges: false,
       persistentWorkspacePermissions: false,
+      scheduledTasks: false,
+      scheduledTaskPersistence: false,
+      backgroundScheduleWake: false,
     },
     account: {
       sessionState: "restoring",
@@ -59,6 +62,7 @@ export const initialWorkbenchState: WorkbenchState = {
     },
     selectedWorkspaceId: null,
     workspaces: [],
+    scheduledTasks: [],
     tasks: [],
   },
   activeTaskId: null,
