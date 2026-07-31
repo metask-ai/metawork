@@ -28,6 +28,13 @@ const account_refresh_skew_seconds: i64 = 60;
 const account_refresh_retry_ns: u64 = 30 * std.time.ns_per_s;
 const FrontendMode = bridge_api.policy.Mode;
 const main_window_id: native_sdk.platform.WindowId = 1;
+const tray_open_id: native_sdk.platform.TrayItemId = 1;
+const tray_quit_id: native_sdk.platform.TrayItemId = 2;
+const tray_items = [_]native_sdk.platform.TrayMenuItem{
+    .{ .id = tray_open_id, .label = "Open MetaWork", .command = "metawork.tray.open" },
+    .{ .separator = true },
+    .{ .id = tray_quit_id, .label = "Quit MetaWork", .command = "metawork.tray.quit" },
+};
 const windows_data_directory_name = "MetaWork";
 
 fn platformDataDirectoryName(os_tag: @TypeOf(builtin.os.tag)) []const u8 {
@@ -834,6 +841,7 @@ const App = struct {
     agent_event_wake_pending: std.atomic.Value(bool) = .init(false),
     native_runtime: ?*native_sdk.Runtime = null,
     platform_services: ?native_sdk.platform.PlatformServices = null,
+    tray_installed: bool = false,
     account_coordinator: ?*AccountCoordinator = null,
     account_effects: ?*AccountEffects = null,
     account_platform: ?account_api.Platform.NativeBackend = null,
@@ -870,6 +878,7 @@ const App = struct {
         const self: *@This() = @ptrCast(@alignCast(context));
         self.native_runtime = native_runtime;
         self.platform_services = native_runtime.options.platform.services;
+        try self.installScheduleHost();
         if (self.automation.active()) {
             self.startAutomationAccount(
                 self.automation.executionFixture(),
@@ -899,6 +908,10 @@ const App = struct {
             dispatcher.detachWorkbench();
         }
         self.deinitAccountPlatform();
+        if (self.tray_installed) {
+            if (self.platform_services) |services| services.removeTray() catch {};
+            self.tray_installed = false;
+        }
         self.workbench = null;
         self.platform_services = null;
         if (self.native_runtime == native_runtime) self.native_runtime = null;
@@ -1867,8 +1880,67 @@ const App = struct {
                     try self.dispatcher.?.emitWorkbenchChanged();
                 }
             },
+            .command => |command| if (command.source == .tray) switch (command.tray_item_id) {
+                tray_open_id => self.showMainWindow(),
+                tray_quit_id => self.requestExplicitQuit(),
+                else => {},
+            },
             else => {},
         }
+    }
+
+    fn installScheduleHost(self: *@This()) anyerror!void {
+        const services = self.platform_services orelse
+            return error.RuntimeUnavailable;
+        try services.createTray(.{
+            .tooltip = "MetaWork",
+            .items = &tray_items,
+        });
+        self.tray_installed = true;
+        if (self.workbench) |workbench|
+            workbench.setScheduleBackgroundAvailableNoFail(true);
+    }
+
+    fn showMainWindow(self: *@This()) void {
+        const services = self.platform_services orelse return;
+        services.showWindow(main_window_id) catch return;
+        services.focusWindow(main_window_id) catch {};
+    }
+
+    fn requestExplicitQuit(self: *@This()) void {
+        const services = self.platform_services orelse return;
+        if (self.workbench) |workbench| if (workbench.hasEnabledScheduledTasks()) {
+            const result = services.showMessageDialog(.{
+                .style = .warning,
+                .title = "Quit MetaWork?",
+                .message = "Scheduled tasks will pause while MetaWork is not running.",
+                .informative_text = "Closing the main window keeps them running. Use Quit only when you want to stop the background host.",
+                .primary_button = "Keep Running",
+                .secondary_button = "Quit MetaWork",
+            }) catch return;
+            if (result != .secondary) return;
+        };
+        services.quitApp() catch {};
+    }
+
+    fn notifyScheduledTask(
+        context: ?*anyopaque,
+        notification: workbench_api.ScheduleNotification,
+    ) bool {
+        const self: *@This() = @ptrCast(@alignCast(context orelse return false));
+        const services = self.platform_services orelse return false;
+        const body = switch (notification.kind) {
+            .completed => "Scheduled task completed",
+            .failed => "Scheduled task failed",
+            .skipped => "A run was skipped because the previous run is still active",
+            .needs_attention => "Scheduled task needs attention",
+        };
+        services.showNotification(.{
+            .title = "MetaWork",
+            .subtitle = notification.title,
+            .body = body,
+        }) catch return false;
+        return true;
     }
 
     fn bridge(self: *@This(), mode: FrontendMode) native_sdk.BridgeDispatcher {
@@ -2388,6 +2460,11 @@ pub fn run(init: std.process.Init) !void {
                 .restored_bytes = scheduled_task_restored_bytes,
                 .restore_failed = scheduled_task_restore_failed,
                 .commit_fn = commitScheduledTaskStore,
+            },
+            .schedule_notifier = .{
+                .context = &app,
+                .enabled = true,
+                .notify_fn = App.notifyScheduledTask,
             },
         },
     );

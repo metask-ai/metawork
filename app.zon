@@ -5,8 +5,8 @@
     .description = "A native workbench for structured agent sessions.",
     .version = "0.1.0",
     .platforms = .{"macos"},
-    .permissions = .{"window"},
-    .capabilities = .{ "webview", "js_bridge" },
+    .permissions = .{ "window", "notifications" },
+    .capabilities = .{ "webview", "js_bridge", "tray", "notifications" },
     .shortcuts = .{
         .{ .id = "settings.open", .key = ",", .modifiers = .{"primary"} },
     },
@@ -75,6 +75,7 @@
             .height = 760,
             .restore_state = true,
             .titlebar = "hidden_inset_tall",
+            .close_policy = "hide",
         },
     },
 }

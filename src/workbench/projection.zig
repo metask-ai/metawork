@@ -204,6 +204,7 @@ pub const Configuration = struct {
     directories: AppDirectories = .{},
     schedule_timer: ScheduleTimer = .{},
     schedule_persistence: SchedulePersistence = .{},
+    schedule_notifier: ScheduleNotifier = .{},
 };
 
 pub const SchedulePersistenceCommit = enum {
@@ -246,6 +247,43 @@ pub const SchedulePersistenceHealth = enum {
     write_failed,
     outcome_unknown,
 };
+
+pub const ScheduleNotificationKind = enum {
+    completed,
+    failed,
+    skipped,
+    needs_attention,
+};
+
+pub const ScheduleNotification = struct {
+    scheduled_task_id: u64,
+    task_id: u64 = 0,
+    title: []const u8,
+    kind: ScheduleNotificationKind,
+};
+
+pub const ScheduleNotifier = struct {
+    context: ?*anyopaque = null,
+    enabled: bool = false,
+    notify_fn: *const fn (
+        context: ?*anyopaque,
+        notification: ScheduleNotification,
+    ) bool = noScheduleNotification,
+
+    fn notify(
+        self: ScheduleNotifier,
+        notification: ScheduleNotification,
+    ) bool {
+        return self.enabled and self.notify_fn(self.context, notification);
+    }
+};
+
+fn noScheduleNotification(
+    _: ?*anyopaque,
+    _: ScheduleNotification,
+) bool {
+    return false;
+}
 
 const json_string_expansion: usize = 6;
 const pending_ui_reencode_expansion: usize = 2;
@@ -1348,6 +1386,8 @@ pub const Workbench = struct {
     schedule_timer: ScheduleTimer,
     schedule_persistence: SchedulePersistence,
     schedule_persistence_health: SchedulePersistenceHealth,
+    schedule_notifier: ScheduleNotifier,
+    schedule_background_available: bool = false,
     change_notifier: ChangeNotifier,
     executor: *executor_impl.Executor,
     shutting_down: bool = false,
@@ -1463,6 +1503,7 @@ pub const Workbench = struct {
             .schedule_timer = configuration.schedule_timer,
             .schedule_persistence = configuration.schedule_persistence,
             .schedule_persistence_health = schedule_persistence_health,
+            .schedule_notifier = configuration.schedule_notifier,
             .change_notifier = configuration.change_notifier,
             .executor = executor,
             .account = account,
@@ -1486,6 +1527,27 @@ pub const Workbench = struct {
         workbench.scheduleSkillCatalogQuery() catch
             workbench.markSkillCatalogUnavailable();
         return workbench;
+    }
+
+    pub fn setScheduleBackgroundAvailableNoFail(
+        self: *Workbench,
+        available: bool,
+    ) void {
+        if (self.schedule_background_available == available) return;
+        self.schedule_background_available = available;
+        if (available)
+            self.rearmScheduledTaskTimerNoFail()
+        else
+            self.schedule_timer.cancelCurrent();
+        self.bumpRevision();
+    }
+
+    pub fn hasEnabledScheduledTasks(self: *Workbench) bool {
+        for (self.scheduled_tasks.items) |*entry| {
+            const item = &(entry.* orelse continue);
+            if (item.enabled) return true;
+        }
+        return false;
     }
 
     pub fn commitAccountFactNoFail(
@@ -1523,6 +1585,12 @@ pub const Workbench = struct {
     }
 
     pub fn finishAccountCommitNoFail(self: *Workbench) void {
+        if (self.canCreateTask()) {
+            _ = self.reconcileScheduledTaskBindingsNoFail();
+            self.rearmScheduledTaskTimerNoFail();
+        } else {
+            self.schedule_timer.cancelCurrent();
+        }
         self.bumpRevision();
     }
 
@@ -2644,6 +2712,7 @@ pub const Workbench = struct {
         }
         if (self.finalizeWorkspaceRemovalsNoFail()) changed = true;
         if (self.reconcileScheduledTaskBindingsNoFail()) changed = true;
+        if (self.reconcileScheduledTaskCompletionsNoFail()) changed = true;
         if (changed) self.bumpRevision();
     }
 
@@ -3505,6 +3574,13 @@ pub const Workbench = struct {
                         self.replaceScheduledTaskStore(&skipped);
                         skipped_owned = false;
                         self.bumpRevision();
+                        _ = self.schedule_notifier.notify(.{
+                            .scheduled_task_id = id,
+                            .task_id = last.task_id,
+                            .title = (self.scheduled_tasks.find(id) orelse
+                                unreachable).title,
+                            .kind = .skipped,
+                        });
                         return last.task_id;
                     }
                     return error.TaskBusy;
@@ -3621,11 +3697,18 @@ pub const Workbench = struct {
         self.replaceScheduledTaskStore(&candidate);
         candidate_owned = false;
         self.bumpRevision();
+        _ = self.schedule_notifier.notify(.{
+            .scheduled_task_id = id,
+            .title = (self.scheduled_tasks.find(id) orelse unreachable).title,
+            .kind = .needs_attention,
+        });
     }
 
     fn rearmScheduledTaskTimerNoFail(self: *Workbench) void {
         self.schedule_timer.cancelCurrent();
+        if (!self.schedule_background_available) return;
         if (self.schedule_persistence_health != .ready) return;
+        if (!self.canCreateTask()) return;
         const item = self.scheduled_tasks.earliestDue() orelse return;
         const due = item.next_run_at_unix_seconds orelse return;
         if (self.schedule_timer.armAt(due)) return;
@@ -3640,6 +3723,45 @@ pub const Workbench = struct {
         self.replaceScheduledTaskStore(&candidate);
         candidate_owned = false;
         self.bumpRevision();
+    }
+
+    fn reconcileScheduledTaskCompletionsNoFail(self: *Workbench) bool {
+        if (self.schedule_persistence_health != .ready) return false;
+        for (self.scheduled_tasks.items) |*entry| {
+            const item = &(entry.* orelse continue);
+            for (item.occurrences()) |occurrence| {
+                if (occurrence.result != .submitted or
+                    occurrence.task_id == 0 or occurrence.notification_sent)
+                    continue;
+                const task = self.findTask(occurrence.task_id) orelse continue;
+                const terminal = lastTerminalFacts(task.runs) orelse continue;
+                const notification_kind: ScheduleNotificationKind =
+                    if (terminal.outcome == .completed) .completed else .failed;
+                const item_id = item.id;
+                var candidate = self.scheduled_tasks.clone(self.allocator) catch
+                    return false;
+                var candidate_owned = true;
+                defer if (candidate_owned) candidate.deinit();
+                candidate.markOccurrenceNotificationSent(
+                    candidate.find(item_id) orelse return false,
+                    occurrence.planned_at_unix_seconds,
+                    occurrence.source,
+                ) catch return false;
+                self.commitScheduledTaskCandidate(&candidate) catch return false;
+                self.replaceScheduledTaskStore(&candidate);
+                candidate_owned = false;
+                const committed = self.scheduled_tasks.find(item_id) orelse
+                    return true;
+                _ = self.schedule_notifier.notify(.{
+                    .scheduled_task_id = committed.id,
+                    .task_id = occurrence.task_id,
+                    .title = committed.title,
+                    .kind = notification_kind,
+                });
+                return true;
+            }
+        }
+        return false;
     }
 
     fn reconcileScheduledTaskBindingsNoFail(self: *Workbench) bool {
@@ -6714,6 +6836,8 @@ test "Scheduled Task admission is bounded redacted and arms the Workbench clock"
             .every_seconds = 300,
         } },
     });
+    try std.testing.expect(clock.armed_at == null);
+    workbench.setScheduleBackgroundAvailableNoFail(true);
     try std.testing.expectEqual(@as(u64, 2_000), clock.armed_at.?);
     try std.testing.expectEqual(@as(usize, 1), persistence.commits);
     const item = workbench.scheduled_tasks.find(id).?;

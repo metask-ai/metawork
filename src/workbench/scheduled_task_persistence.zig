@@ -209,6 +209,7 @@ const OccurrenceWire = struct {
     result: []const u8,
     task_id: u64,
     reason: ?[]const u8,
+    notification_sent: bool,
 };
 
 pub fn encode(
@@ -349,7 +350,9 @@ fn encodeItem(writer: *std.Io.Writer, item: *const scheduled.Item) !void {
             try jsonString(writer, @tagName(reason))
         else
             try writer.writeAll("null");
-        try writer.writeByte('}');
+        try writer.print(",\"notification_sent\":{s}}}", .{
+            if (occurrence.notification_sent) "true" else "false",
+        });
     }
     try writer.writeAll("]}");
 }
@@ -455,6 +458,7 @@ fn decodeOccurrence(wire: OccurrenceWire) Error!scheduled.Occurrence {
                 return error.ScheduledTaskStoreCorrupt
         else
             null,
+        .notification_sent = wire.notification_sent,
     };
 }
 
@@ -491,6 +495,7 @@ test "scheduled task store round trips bounded occurrence history" {
     }, 1_000);
     const item = store.find(id).?;
     try store.markSubmitted(item, 2_000, 2_001, .timer, 42);
+    try store.markOccurrenceNotificationSent(item, 2_000, .timer);
 
     var output: [max_store_bytes]u8 = undefined;
     const bytes = try encode(&output, &store);
@@ -502,6 +507,7 @@ test "scheduled task store round trips bounded occurrence history" {
     const restored_item = restored.find(id).?;
     try std.testing.expectEqual(@as(usize, 1), restored_item.occurrences().len);
     try std.testing.expectEqual(@as(u64, 42), restored_item.occurrences()[0].task_id);
+    try std.testing.expect(restored_item.occurrences()[0].notification_sent);
     try std.testing.expectEqualStrings("Daily brief", restored_item.title);
     try std.testing.expectEqual(store.next_id, restored.next_id);
 }

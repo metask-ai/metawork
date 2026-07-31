@@ -163,6 +163,7 @@ pub const Occurrence = struct {
     result: OccurrenceResult,
     task_id: u64 = 0,
     reason: ?FailureReason = null,
+    notification_sent: bool = false,
 };
 
 pub const Definition = struct {
@@ -539,6 +540,31 @@ pub const Store = struct {
             changed = true;
         }
         return changed;
+    }
+
+    pub fn markOccurrenceNotificationSent(
+        _: *Store,
+        item: *Item,
+        planned_at_unix_seconds: u64,
+        source: OccurrenceSource,
+    ) error{InvalidSchedule}!void {
+        var index = item.occurrence_count;
+        while (index != 0) {
+            index -= 1;
+            const occurrence = &item.occurrence_history[index];
+            if (occurrence.planned_at_unix_seconds !=
+                planned_at_unix_seconds or occurrence.source != source)
+                continue;
+            if (occurrence.notification_sent) return error.InvalidSchedule;
+            occurrence.notification_sent = true;
+            if (item.last_occurrence != null and
+                item.last_occurrence.?.planned_at_unix_seconds ==
+                    planned_at_unix_seconds and
+                item.last_occurrence.?.source == source)
+                item.last_occurrence.?.notification_sent = true;
+            return;
+        }
+        return error.InvalidSchedule;
     }
 
     pub fn markSkipped(
