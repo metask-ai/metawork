@@ -2336,6 +2336,12 @@ pub const Workbench = struct {
         self.syncLifecycle();
         const now = self.schedule_timer.now() orelse
             return error.ScheduleTimerUnavailable;
+        const current = self.scheduled_tasks.find(id) orelse
+            return error.UnknownScheduledTask;
+        if (expected_epoch == 0 or current.epoch != expected_epoch)
+            return error.ScheduledTaskEpochMismatch;
+        if (enabled and current.health == .needs_attention)
+            return error.ScheduledTaskNeedsAttention;
         try self.scheduled_tasks.setEnabled(id, expected_epoch, enabled, now);
         _ = self.reconcileScheduledTaskBindingsNoFail();
         self.bumpRevision();

@@ -7,6 +7,7 @@ pub const Error = std.mem.Allocator.Error || error{
     ScheduledTaskIdentityExhausted,
     UnknownScheduledTask,
     ScheduledTaskEpochMismatch,
+    ScheduledTaskNeedsAttention,
     InvalidSchedule,
     ProjectionCapacity,
 };
