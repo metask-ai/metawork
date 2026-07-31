@@ -92,6 +92,9 @@ test("Skill catalogs and typed Skill history decode without exposing loader inte
 test("Scheduled Task projection decodes recurrence and occurrence without secrets", () => {
   const scheduled = clone(fixture);
   scheduled.capabilities.scheduledTasks = true;
+  scheduled.capabilities.scheduledTaskPersistence = true;
+  scheduled.capabilities.scheduledTaskPersistenceHealth = "ready";
+  scheduled.capabilities.backgroundScheduleWake = true;
   scheduled.scheduledTasks = [
     {
       id: "8",
@@ -121,14 +124,17 @@ test("Scheduled Task projection decodes recurrence and occurrence without secret
         everySeconds: "3600",
       },
       nextRunAtUnixSeconds: "1800003600",
-      lastOccurrence: {
-        plannedAtUnixSeconds: "1800000000",
-        triggeredAtUnixSeconds: "1800000001",
-        source: "timer",
-        result: "submitted",
-        taskId: "3",
-        reason: null,
-      },
+      occurrences: [
+        {
+          plannedAtUnixSeconds: "1800000000",
+          triggeredAtUnixSeconds: "1800000001",
+          source: "timer",
+          result: "submitted",
+          taskId: "3",
+          reason: null,
+          taskOutcome: null,
+        },
+      ],
     },
   ];
   assert.deepEqual(decodeWorkbenchSnapshot(scheduled), scheduled);

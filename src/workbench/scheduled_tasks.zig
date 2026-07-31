@@ -156,6 +156,15 @@ pub const OccurrenceResult = enum {
     rejected,
 };
 
+pub const OccurrenceTaskOutcome = enum {
+    completed,
+    stopped,
+    cancelled,
+    interrupted,
+    failed,
+    dependency_contract_failure,
+};
+
 pub const Occurrence = struct {
     planned_at_unix_seconds: u64,
     triggered_at_unix_seconds: u64,
@@ -163,6 +172,7 @@ pub const Occurrence = struct {
     result: OccurrenceResult,
     task_id: u64 = 0,
     reason: ?FailureReason = null,
+    task_outcome: ?OccurrenceTaskOutcome = null,
     notification_sent: bool = false,
 };
 
@@ -542,11 +552,12 @@ pub const Store = struct {
         return changed;
     }
 
-    pub fn markOccurrenceNotificationSent(
+    pub fn finalizeOccurrenceTask(
         _: *Store,
         item: *Item,
         planned_at_unix_seconds: u64,
         source: OccurrenceSource,
+        outcome: OccurrenceTaskOutcome,
     ) error{InvalidSchedule}!void {
         var index = item.occurrence_count;
         while (index != 0) {
@@ -555,13 +566,18 @@ pub const Store = struct {
             if (occurrence.planned_at_unix_seconds !=
                 planned_at_unix_seconds or occurrence.source != source)
                 continue;
-            if (occurrence.notification_sent) return error.InvalidSchedule;
+            if (occurrence.task_outcome != null or occurrence.notification_sent)
+                return error.InvalidSchedule;
+            occurrence.task_outcome = outcome;
             occurrence.notification_sent = true;
             if (item.last_occurrence != null and
                 item.last_occurrence.?.planned_at_unix_seconds ==
                     planned_at_unix_seconds and
                 item.last_occurrence.?.source == source)
+            {
+                item.last_occurrence.?.task_outcome = outcome;
                 item.last_occurrence.?.notification_sent = true;
+            }
             return;
         }
         return error.InvalidSchedule;
@@ -830,11 +846,14 @@ fn validOccurrence(occurrence: Occurrence) bool {
     if (occurrence.planned_at_unix_seconds == 0 or
         occurrence.triggered_at_unix_seconds == 0)
         return false;
+    if ((occurrence.task_outcome != null) != occurrence.notification_sent)
+        return false;
     return switch (occurrence.result) {
-        .claimed => occurrence.task_id == 0 and occurrence.reason == null,
+        .claimed => occurrence.task_id == 0 and occurrence.reason == null and
+            occurrence.task_outcome == null,
         .submitted => occurrence.task_id != 0 and occurrence.reason == null,
         .skipped, .rejected => occurrence.task_id == 0 and
-            occurrence.reason != null,
+            occurrence.reason != null and occurrence.task_outcome == null,
     };
 }
 

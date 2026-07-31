@@ -180,6 +180,8 @@ export type ScheduledTaskView = {
     | "shutting_down"
     | "task_start_failed"
     | "timer_unavailable"
+    | "persistence_failed"
+    | "host_interrupted"
     | null;
   workspaceId: string;
   workspaceEpoch: string;
@@ -199,14 +201,22 @@ export type ScheduledTaskView = {
       };
   recurrence: ScheduledTaskRecurrence;
   nextRunAtUnixSeconds: string | null;
-  lastOccurrence: {
+  occurrences: Array<{
     plannedAtUnixSeconds: string;
     triggeredAtUnixSeconds: string;
     source: "timer" | "manual";
-    result: "submitted" | "skipped" | "rejected";
+    result: "claimed" | "submitted" | "skipped" | "rejected";
     taskId: string | null;
     reason: ScheduledTaskView["failureReason"];
-  } | null;
+    taskOutcome:
+      | "completed"
+      | "stopped"
+      | "cancelled"
+      | "interrupted"
+      | "failed"
+      | "dependency_contract_failure"
+      | null;
+  }>;
 };
 
 export type ScheduledTaskMutation = {
@@ -369,6 +379,13 @@ export type WorkbenchSnapshot = {
     persistentWorkspacePermissions: boolean;
     scheduledTasks: boolean;
     scheduledTaskPersistence: boolean;
+    scheduledTaskPersistenceHealth:
+      | "unavailable"
+      | "ready"
+      | "read_failed"
+      | "corrupt"
+      | "write_failed"
+      | "outcome_unknown";
     backgroundScheduleWake: boolean;
   };
   account: AccountView;

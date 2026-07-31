@@ -28,6 +28,7 @@ export const initialWorkbenchState: WorkbenchState = {
       persistentWorkspacePermissions: false,
       scheduledTasks: false,
       scheduledTaskPersistence: false,
+      scheduledTaskPersistenceHealth: "unavailable",
       backgroundScheduleWake: false,
     },
     account: {

@@ -194,6 +194,8 @@ const scheduledTaskFailureReasons = [
   "shutting_down",
   "task_start_failed",
   "timer_unavailable",
+  "persistence_failed",
+  "host_interrupted",
 ] as const;
 const workspaceMutationReasons = [
   "workspace_changed",
@@ -1242,7 +1244,7 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
     "input",
     "recurrence",
     "nextRunAtUnixSeconds",
-    "lastOccurrence",
+    "occurrences",
   ]);
   const execution = object(item.execution, `${path}.execution`, [
     "generation",
@@ -1342,47 +1344,72 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
             };
           })()
         : fail(`${path}.recurrence.kind`, "unexpected recurrence kind");
-  const occurrence =
-    item.lastOccurrence === null
-      ? null
-      : (() => {
-          const last = object(item.lastOccurrence, `${path}.lastOccurrence`, [
-            "plannedAtUnixSeconds",
-            "triggeredAtUnixSeconds",
-            "source",
-            "result",
-            "taskId",
-            "reason",
-          ]);
-          return {
-            plannedAtUnixSeconds: positiveWireId(
-              last.plannedAtUnixSeconds,
-              `${path}.lastOccurrence.plannedAtUnixSeconds`,
-            ),
-            triggeredAtUnixSeconds: positiveWireId(
-              last.triggeredAtUnixSeconds,
-              `${path}.lastOccurrence.triggeredAtUnixSeconds`,
-            ),
-            source: enumValue(last.source, `${path}.lastOccurrence.source`, [
-              "timer",
-              "manual",
-            ] as const),
-            result: enumValue(last.result, `${path}.lastOccurrence.result`, [
-              "submitted",
-              "skipped",
-              "rejected",
-            ] as const),
-            taskId:
-              last.taskId === null
-                ? null
-                : positiveWireId(last.taskId, `${path}.lastOccurrence.taskId`),
-            reason: nullableEnum(
-              last.reason,
-              `${path}.lastOccurrence.reason`,
-              scheduledTaskFailureReasons,
-            ),
-          };
-        })();
+  const occurrences = arrayValue(
+    item.occurrences,
+    `${path}.occurrences`,
+    (value, occurrencePath) => {
+      const last = object(value, occurrencePath, [
+        "plannedAtUnixSeconds",
+        "triggeredAtUnixSeconds",
+        "source",
+        "result",
+        "taskId",
+        "reason",
+        "taskOutcome",
+      ]);
+      const result = enumValue(last.result, `${occurrencePath}.result`, [
+        "claimed",
+        "submitted",
+        "skipped",
+        "rejected",
+      ] as const);
+      const taskId =
+        last.taskId === null
+          ? null
+          : positiveWireId(last.taskId, `${occurrencePath}.taskId`);
+      const taskOutcome = nullableEnum(
+        last.taskOutcome,
+        `${occurrencePath}.taskOutcome`,
+        [
+          "completed",
+          "stopped",
+          "cancelled",
+          "interrupted",
+          "failed",
+          "dependency_contract_failure",
+        ] as const,
+      );
+      if (result === "submitted" && taskId === null)
+        fail(occurrencePath, "submitted occurrence must reference a Task");
+      if (result !== "submitted" && taskOutcome !== null)
+        fail(
+          occurrencePath,
+          "only submitted occurrence can expose Task outcome",
+        );
+      return {
+        plannedAtUnixSeconds: positiveWireId(
+          last.plannedAtUnixSeconds,
+          `${occurrencePath}.plannedAtUnixSeconds`,
+        ),
+        triggeredAtUnixSeconds: positiveWireId(
+          last.triggeredAtUnixSeconds,
+          `${occurrencePath}.triggeredAtUnixSeconds`,
+        ),
+        source: enumValue(last.source, `${occurrencePath}.source`, [
+          "timer",
+          "manual",
+        ] as const),
+        result,
+        taskId,
+        reason: nullableEnum(
+          last.reason,
+          `${occurrencePath}.reason`,
+          scheduledTaskFailureReasons,
+        ),
+        taskOutcome,
+      };
+    },
+  );
   const health = enumValue(item.health, `${path}.health`, scheduledTaskHealth);
   const enabled = booleanValue(item.enabled, `${path}.enabled`);
   const nextRunAtUnixSeconds =
@@ -1426,7 +1453,7 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
     input,
     recurrence,
     nextRunAtUnixSeconds,
-    lastOccurrence: occurrence,
+    occurrences,
   };
 }
 
@@ -1451,6 +1478,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     "persistentWorkspacePermissions",
     "scheduledTasks",
     "scheduledTaskPersistence",
+    "scheduledTaskPersistenceHealth",
     "backgroundScheduleWake",
   ]);
   const capabilities = {
@@ -1489,6 +1517,18 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     scheduledTaskPersistence: booleanValue(
       capabilityItem.scheduledTaskPersistence,
       "$.capabilities.scheduledTaskPersistence",
+    ),
+    scheduledTaskPersistenceHealth: enumValue(
+      capabilityItem.scheduledTaskPersistenceHealth,
+      "$.capabilities.scheduledTaskPersistenceHealth",
+      [
+        "unavailable",
+        "ready",
+        "read_failed",
+        "corrupt",
+        "write_failed",
+        "outcome_unknown",
+      ] as const,
     ),
     backgroundScheduleWake: booleanValue(
       capabilityItem.backgroundScheduleWake,

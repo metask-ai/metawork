@@ -61,6 +61,9 @@ function render(snapshot) {
 test("Scheduled tasks is a truthful independent management page", () => {
   const snapshot = structuredClone(fixture);
   snapshot.capabilities.scheduledTasks = true;
+  snapshot.capabilities.scheduledTaskPersistence = true;
+  snapshot.capabilities.scheduledTaskPersistenceHealth = "ready";
+  snapshot.capabilities.backgroundScheduleWake = true;
   snapshot.scheduledTasks = [
     {
       id: "8",
@@ -88,7 +91,7 @@ test("Scheduled tasks is a truthful independent management page", () => {
         everySeconds: "86400",
       },
       nextRunAtUnixSeconds: "1800000000",
-      lastOccurrence: null,
+      occurrences: [],
     },
   ];
   const html = render(snapshot);

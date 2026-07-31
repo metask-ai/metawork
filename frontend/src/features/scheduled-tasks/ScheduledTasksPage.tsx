@@ -280,6 +280,7 @@ export function ScheduledTasksPage({
               const boundWorkspace = snapshot.workspaces.find(
                 (candidate) => candidate.id === task.workspaceId,
               );
+              const latestOccurrence = task.occurrences.at(-1);
               return (
                 <li key={task.id} data-health={task.health}>
                   <button
@@ -311,10 +312,10 @@ export function ScheduledTasksPage({
                     </span>
                   </button>
                   <div className="scheduled-row-actions">
-                    {task.lastOccurrence?.taskId && (
+                    {latestOccurrence?.taskId && (
                       <button
                         className="text-button focus-ring"
-                        onClick={() => onOpenTask(task.lastOccurrence!.taskId!)}
+                        onClick={() => onOpenTask(latestOccurrence.taskId!)}
                       >
                         {t("scheduled.open_last_task")}
                       </button>

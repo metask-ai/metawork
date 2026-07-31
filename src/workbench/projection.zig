@@ -2841,9 +2841,16 @@ pub const Workbench = struct {
     pub fn writeSnapshot(self: *Workbench, output: []u8) Error![]const u8 {
         self.syncLifecycle();
         var writer = std.Io.Writer.fixed(output);
-        writer.print("{{\"revision\":\"{d}\",\"capabilities\":{{\"taskHistoryPersistence\":false,\"conversationRecovery\":false,\"executionRebind\":false,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":false,\"persistentWorkspacePermissions\":false,\"scheduledTasks\":{},\"scheduledTaskPersistence\":false,\"backgroundScheduleWake\":false}},\"account\":", .{
+        const schedule_persistence_ready =
+            self.schedule_persistence_health == .ready;
+        const background_schedule_wake = self.schedule_background_available;
+        writer.print("{{\"revision\":\"{d}\",\"capabilities\":{{\"taskHistoryPersistence\":false,\"conversationRecovery\":false,\"executionRebind\":false,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":false,\"persistentWorkspacePermissions\":false,\"scheduledTasks\":{},\"scheduledTaskPersistence\":{},\"scheduledTaskPersistenceHealth\":\"{s}\",\"backgroundScheduleWake\":{}}},\"account\":", .{
             self.revision,
-            self.schedule_timer.enabled,
+            self.schedule_timer.enabled and schedule_persistence_ready and
+                background_schedule_wake,
+            schedule_persistence_ready,
+            @tagName(self.schedule_persistence_health),
+            background_schedule_wake,
         }) catch
             return error.SnapshotTooLarge;
         try self.writeAccount(&writer);
@@ -2985,9 +2992,11 @@ pub const Workbench = struct {
                 return error.SnapshotTooLarge
         else
             writer.writeAll("null") catch return error.SnapshotTooLarge;
-        writer.writeAll(",\"lastOccurrence\":") catch
+        writer.writeAll(",\"occurrences\":[") catch
             return error.SnapshotTooLarge;
-        if (item.last_occurrence) |occurrence| {
+        for (item.occurrences(), 0..) |occurrence, index| {
+            if (index != 0) writer.writeByte(',') catch
+                return error.SnapshotTooLarge;
             writer.print(
                 "{{\"plannedAtUnixSeconds\":\"{d}\",\"triggeredAtUnixSeconds\":\"{d}\",\"source\":\"{s}\",\"result\":\"{s}\",\"taskId\":",
                 .{
@@ -3008,11 +3017,16 @@ pub const Workbench = struct {
                     return error.SnapshotTooLarge
             else
                 writer.writeAll("null") catch return error.SnapshotTooLarge;
+            writer.writeAll(",\"taskOutcome\":") catch
+                return error.SnapshotTooLarge;
+            if (occurrence.task_outcome) |outcome|
+                writer.print("\"{s}\"", .{@tagName(outcome)}) catch
+                    return error.SnapshotTooLarge
+            else
+                writer.writeAll("null") catch return error.SnapshotTooLarge;
             writer.writeByte('}') catch return error.SnapshotTooLarge;
-        } else {
-            writer.writeAll("null") catch return error.SnapshotTooLarge;
         }
-        writer.writeByte('}') catch return error.SnapshotTooLarge;
+        writer.writeAll("]}") catch return error.SnapshotTooLarge;
     }
 
     fn writeAccount(
@@ -3742,10 +3756,11 @@ pub const Workbench = struct {
                     return false;
                 var candidate_owned = true;
                 defer if (candidate_owned) candidate.deinit();
-                candidate.markOccurrenceNotificationSent(
+                candidate.finalizeOccurrenceTask(
                     candidate.find(item_id) orelse return false,
                     occurrence.planned_at_unix_seconds,
                     occurrence.source,
+                    scheduledOccurrenceOutcome(terminal.outcome),
                 ) catch return false;
                 self.commitScheduledTaskCandidate(&candidate) catch return false;
                 self.replaceScheduledTaskStore(&candidate);
@@ -5637,6 +5652,19 @@ fn scheduledProvider(provider: Provider) scheduled_tasks_impl.Provider {
     return switch (provider) {
         .anthropic => .anthropic,
         .openai => .openai,
+    };
+}
+
+fn scheduledOccurrenceOutcome(
+    outcome: RunOutcome,
+) scheduled_tasks_impl.OccurrenceTaskOutcome {
+    return switch (outcome) {
+        .completed => .completed,
+        .stopped => .stopped,
+        .cancelled => .cancelled,
+        .interrupted => .interrupted,
+        .failed => .failed,
+        .dependency_contract_failure => .dependency_contract_failure,
     };
 }
 
