@@ -80,44 +80,35 @@ function CatalogIssues({ issues }: { issues: CatalogIssue[] }) {
 }
 
 export function SkillsPage({
-  workspaceName,
   catalog,
   query,
   refreshing,
   disabled,
   onQuery,
   onRefresh,
-  onChooseWorkspace,
-  onNewTask,
 }: {
-  workspaceName: string | null;
-  catalog: SkillCatalogView | null;
+  catalog: SkillCatalogView;
   query: string;
   refreshing: boolean;
   disabled: boolean;
   onQuery: (query: string) => void;
   onRefresh: () => void;
-  onChooseWorkspace: () => void;
-  onNewTask: () => void;
 }) {
   const { t } = useI18n();
   const title = useRef<HTMLHeadingElement>(null);
   const filteredSkills = useMemo(
-    () => filterSkills(catalog?.skills ?? [], query),
-    [catalog?.skills, query],
+    () => filterSkills(catalog.skills, query),
+    [catalog.skills, query],
   );
   const catalogUsable =
-    catalog !== null &&
     !catalog.redacted &&
     (catalog.availability === "ready" || catalog.availability === "degraded");
   const initialLoading =
-    catalog !== null &&
     !catalog.redacted &&
     (catalog.availability === "uninitialized" ||
       catalog.availability === "loading") &&
     catalog.skills.length === 0;
   const catalogUnavailableWithoutSnapshot =
-    catalog === null ||
     catalog.redacted ||
     (catalog.availability === "unavailable" && catalog.skills.length === 0);
 
@@ -133,113 +124,83 @@ export function SkillsPage({
             <h1 id="skills-title" ref={title} tabIndex={-1}>
               {t("skills.title")}
             </h1>
-            <p>
-              {workspaceName
-                ? t("skills.subtitle", { workspace: workspaceName })
-                : t("skills.no_workspace_subtitle")}
-            </p>
+            <p>{t("skills.subtitle")}</p>
           </div>
-          {workspaceName && (
-            <button
-              className="secondary-button focus-ring skills-refresh"
-              disabled={disabled || refreshing}
-              onClick={onRefresh}
-            >
-              <Icon name="refresh" />
-              {t(refreshing ? "skills.refreshing" : "skills.refresh")}
-            </button>
-          )}
+          <button
+            className="secondary-button focus-ring skills-refresh"
+            disabled={disabled || refreshing}
+            onClick={onRefresh}
+          >
+            <Icon name="refresh" />
+            {t(refreshing ? "skills.refreshing" : "skills.refresh")}
+          </button>
         </header>
 
-        {!workspaceName ? (
-          <div className="skills-state">
-            <span className="skills-state-mark" aria-hidden="true">
-              /
+        <>
+          <div className="skills-toolbar">
+            <label className="skills-search">
+              <Icon name="search" />
+              <span className="sr-only">{t("skills.search_label")}</span>
+              <input
+                type="search"
+                value={query}
+                placeholder={t("skills.search_placeholder")}
+                onChange={(event) => onQuery(event.target.value)}
+              />
+            </label>
+            <span className="skills-count" aria-live="polite">
+              {catalogUsable
+                ? t("skills.available_count", {
+                    count: catalog.skills.length,
+                  })
+                : t(
+                    refreshing || initialLoading
+                      ? "skills.status_loading"
+                      : "skills.status_unavailable",
+                  )}
             </span>
-            <h2>{t("skills.no_workspace_title")}</h2>
-            <p>{t("skills.no_workspace_body")}</p>
-            <button
-              className="secondary-button focus-ring"
-              disabled={disabled}
-              onClick={onChooseWorkspace}
-            >
-              {t("workspace.add")}
-            </button>
           </div>
-        ) : (
-          <>
-            <div className="skills-toolbar">
-              <label className="skills-search">
-                <Icon name="search" />
-                <span className="sr-only">{t("skills.search_label")}</span>
-                <input
-                  type="search"
-                  value={query}
-                  placeholder={t("skills.search_placeholder")}
-                  onChange={(event) => onQuery(event.target.value)}
-                />
-              </label>
-              <span className="skills-count" aria-live="polite">
-                {catalogUsable
-                  ? t("skills.available_count", {
-                      count: catalog.skills.length,
-                    })
-                  : t(
-                      refreshing || initialLoading
-                        ? "skills.status_loading"
-                        : "skills.status_unavailable",
-                    )}
-              </span>
+
+          {initialLoading ? (
+            <div
+              className="skills-skeleton"
+              aria-label={t("skills.status_loading")}
+            >
+              {[0, 1, 2].map((item) => (
+                <span key={item} />
+              ))}
             </div>
+          ) : catalogUnavailableWithoutSnapshot ? (
+            <div className="skills-state skills-state-compact">
+              <span className="skills-state-mark" aria-hidden="true">
+                /
+              </span>
+              <h2>{t("skills.unavailable_title")}</h2>
+              <p>{t("skills.unavailable_body")}</p>
+            </div>
+          ) : catalog.skills.length === 0 ? (
+            <div className="skills-state skills-state-compact">
+              <span className="skills-state-mark" aria-hidden="true">
+                /
+              </span>
+              <h2>{t("skills.empty_title")}</h2>
+              <p>{t("skills.empty_body")}</p>
+            </div>
+          ) : filteredSkills.length === 0 ? (
+            <div className="skills-state skills-state-compact">
+              <h2>{t("skills.no_results_title")}</h2>
+              <p>{t("skills.no_results_body", { query: query.trim() })}</p>
+            </div>
+          ) : (
+            <ul className="skills-list" aria-label={t("skills.list_label")}>
+              {filteredSkills.map((skill) => (
+                <SkillRow key={skill.skillId} skill={skill} />
+              ))}
+            </ul>
+          )}
 
-            {initialLoading ? (
-              <div
-                className="skills-skeleton"
-                aria-label={t("skills.status_loading")}
-              >
-                {[0, 1, 2].map((item) => (
-                  <span key={item} />
-                ))}
-              </div>
-            ) : catalogUnavailableWithoutSnapshot ? (
-              <div className="skills-state skills-state-compact">
-                <span className="skills-state-mark" aria-hidden="true">
-                  /
-                </span>
-                <h2>{t("skills.unavailable_title")}</h2>
-                <p>{t("skills.unavailable_body")}</p>
-              </div>
-            ) : catalog.skills.length === 0 ? (
-              <div className="skills-state skills-state-compact">
-                <span className="skills-state-mark" aria-hidden="true">
-                  /
-                </span>
-                <h2>{t("skills.empty_title")}</h2>
-                <p>{t("skills.empty_body")}</p>
-                <button
-                  className="secondary-button focus-ring"
-                  disabled={disabled}
-                  onClick={onNewTask}
-                >
-                  {t("task.new")}
-                </button>
-              </div>
-            ) : filteredSkills.length === 0 ? (
-              <div className="skills-state skills-state-compact">
-                <h2>{t("skills.no_results_title")}</h2>
-                <p>{t("skills.no_results_body", { query: query.trim() })}</p>
-              </div>
-            ) : (
-              <ul className="skills-list" aria-label={t("skills.list_label")}>
-                {filteredSkills.map((skill) => (
-                  <SkillRow key={skill.skillId} skill={skill} />
-                ))}
-              </ul>
-            )}
-
-            {catalogUsable && <CatalogIssues issues={catalog.issues} />}
-          </>
-        )}
+          {catalogUsable && <CatalogIssues issues={catalog.issues} />}
+        </>
       </div>
     </section>
   );

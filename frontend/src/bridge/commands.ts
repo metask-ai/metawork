@@ -12,6 +12,7 @@ export const commands = {
   selectWorkspace: "metawork.workspaces.select",
   removeWorkspace: "metawork.workspaces.remove",
   refreshWorkspaceSkillCatalog: "metawork.workspaces.refreshSkillCatalog",
+  refreshSkillCatalog: "metawork.skills.refreshCatalog",
   snapshot: "metawork.workbench.snapshot",
   snapshotChunk: "metawork.workbench.snapshot.chunk",
   accountBeginLogin: "metawork.account.beginLogin",

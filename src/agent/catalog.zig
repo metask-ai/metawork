@@ -297,7 +297,6 @@ fn createLease(
 fn validQuery(input: Query) bool {
     return input.workspace_root.len != 0 and
         input.canonical_user_home.len != 0 and
-        input.workspace_epoch.len != 0 and
         std.unicode.utf8ValidateSlice(input.workspace_root) and
         std.unicode.utf8ValidateSlice(input.canonical_user_home) and
         std.unicode.utf8ValidateSlice(input.workspace_epoch);
@@ -332,4 +331,17 @@ fn emptyOwnedBytes() wire.OwnedBytesV1 {
 
 fn releaseOwned(api: sdk.Api, buffer: *wire.OwnedBytesV1) void {
     if (buffer.ptr != null or buffer.len != 0) api.bufferRelease()(buffer);
+}
+
+test "session-independent catalog queries may omit an external epoch" {
+    try std.testing.expect(validQuery(.{
+        .workspace_root = "/home/metawork",
+        .canonical_user_home = "/home/metawork",
+        .workspace_epoch = "",
+    }));
+    try std.testing.expect(!validQuery(.{
+        .workspace_root = "",
+        .canonical_user_home = "/home/metawork",
+        .workspace_epoch = "",
+    }));
 }

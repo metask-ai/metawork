@@ -197,6 +197,8 @@ test("the fixed revision 1 contract carries Host-owned Workspace and generation 
         };
       if (command === "metawork.workspaces.refreshSkillCatalog")
         return { accepted: true, workspaceId: "7", reason: null };
+      if (command === "metawork.skills.refreshCatalog")
+        return { accepted: true, reason: null };
       if (command === "metawork.tasks.refreshSkillCatalog")
         return {
           accepted: false,
@@ -237,6 +239,10 @@ test("the fixed revision 1 contract carries Host-owned Workspace and generation 
   assert.deepEqual(await client.refreshWorkspaceSkillCatalog("7", "29"), {
     accepted: true,
     workspaceId: "7",
+    reason: null,
+  });
+  assert.deepEqual(await client.refreshSkillCatalog(), {
+    accepted: true,
     reason: null,
   });
   assert.deepEqual(await client.refreshTaskSkillCatalog("11", "13"), {
@@ -282,6 +288,10 @@ test("the fixed revision 1 contract carries Host-owned Workspace and generation 
     {
       command: "metawork.workspaces.refreshSkillCatalog",
       payload: { workspaceId: "7", expectedWorkspaceEpoch: "29" },
+    },
+    {
+      command: "metawork.skills.refreshCatalog",
+      payload: {},
     },
     {
       command: "metawork.tasks.refreshSkillCatalog",

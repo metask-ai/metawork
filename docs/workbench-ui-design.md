@@ -107,7 +107,7 @@ Workspace
 | Workspace            | 工作区       | 本地目录和任务归属范围             |
 | Task                 | 任务         | 用户可持续补充的工作上下文         |
 | New task             | 新建任务     | 不使用 New session                 |
-| Skills               | 技能         | 当前 Workspace 可用 Skill 与健康   |
+| Skills               | 技能         | MetaWork 用户 Skill 目录与健康     |
 | Account & models     | 账号与模型   | API、默认模型、刷新与重新认证      |
 | Model                | 模型         | 新 Task 的执行模型，不称模式       |
 | Inspector            | 检查器       | 按需活动摘要与详情，不称 Monitor   |
@@ -185,7 +185,7 @@ Workspace
 
 ## 5. 左栏：能力、Workspace 与 Task
 
-> Capability：**混合**。当前 Renderer 合同已提供独立 Workspace 与 revision 4 Skill catalog projection，当前 shell 已提供稳定 New task、Workspace/Task 导航、行动优先分组和左下角账号入口；只读 Skill 中心复用这些现有能力，跨 Host Task persistence 仍是目标能力。
+> Capability：**混合**。当前 Renderer 合同已提供 MetaWork 顶层与 Workspace/Task 分离的 revision 4 Skill catalog projection，当前 shell 已提供稳定 New task、Workspace/Task 导航、行动优先分组和左下角账号入口；只读 Skill 中心复用这些现有能力，跨 Host Task persistence 仍是目标能力。
 
 ### 5.1 Workspace 切换
 
@@ -237,7 +237,7 @@ Workspace                              Add
 
 > Capability：**当前**。页面是现有 Workspace current Skill catalog 的只读视图；它与 Composer Slash 共享同一 revision、health、Skill 和 issue projection，并复用同一个显式 refresh transaction。
 
-Skill 中心只有一个工作：让用户看清当前 Workspace 中 MetaWork 可以使用哪些 Skill。它不是插件商店、文件浏览器、Skill 编辑器或 policy 面板，不提供安装、卸载、更新、创建、编辑、启用/禁用、打开物理目录或查看 `SKILL.md` body。
+Skill 中心只有一个工作：让用户看清 MetaWork 自身可使用哪些用户 Skill。它是全局管理视图，不跟随当前 Workspace；也不是插件商店、文件浏览器、Skill 编辑器或 policy 面板，不提供安装、卸载、更新、创建、编辑、启用/禁用、打开物理目录或查看 `SKILL.md` body。
 
 中央工作面使用紧凑标题、搜索、catalog 状态和连续列表：
 
@@ -263,8 +263,8 @@ release-notes · Invalid definition
 布局与视觉规则：
 
 - 页面保留 Workbench 左栏；中央标题使用 22–26 px 系统 Display 字体，一句短说明后立即进入 controls，不使用营销 Hero、统计卡、渐变或装饰插画；
-- 页面始终以左栏当前 Workspace 为上下文，并在说明中显示其 display name；没有 Workspace 时显示选择指引，不借用 New task draft 的临时 Workspace，也不建立 Personal/Managed 假 scope；
-- 搜索只过滤已提交 projection 中的 invocation、display name、description 与 argument name，不读取 Skill body；`Refresh` 复用 Host-owned `workspaces.refreshSkillCatalog` transaction 并保留最后一次 committed list，不能用 Renderer 文件监听或目录扫描替代；
+- 页面不以左栏当前 Workspace 为上下文；没有 Workspace 时仍可完整打开、搜索和刷新，且不得把 New task draft 的临时 Workspace 借作管理 scope；
+- 搜索只过滤已提交的 MetaWork 顶层 projection 中的 invocation、display name、description 与 argument name，不读取 Skill body；`Refresh` 调用 Host-owned `skills.refreshCatalog` transaction，不能用 Renderer 文件监听或目录扫描替代；
 - Skill 使用连续列表行，不逐项卡片化。每行以克制的紫色 `/` 标记 invocation 这一真实语义，随后显示 monospace invocation、display name、description 和 argument names；这是页面唯一的识别性视觉，不增加插画、渐变或装饰卡；
 - revision 4 未公开有效 Skill 的 source metadata，页面不显示 Workspace/Personal/vendor 标签，也不从路径、名称或优先级猜测来源；AgentCore 已完成 winner/conflict 解析，Renderer 只展示返回的 Skill 与 bounded issue；
 - 常规桌面内容列最大阅读宽度约 880 px；列表正文 13–15 px，次级文案不小于 12 px，每行最小高度 64 px。窄窗将 display name 与 argument summary 移到 invocation 下方，不产生水平滚动；
@@ -274,7 +274,7 @@ release-notes · Invalid definition
 
 - `ready` 显示 Skill 数量；`degraded` 保留可用 Skill 并在列表后显示本地化 issue summary；issue 只使用 AgentCore 投影的 code 与可选 invocation，不显示 raw diagnostic、source path 或 Skill body；
 - refresh pending 只禁用 Refresh 并显示 `Refreshing…`，不冻结导航、历史阅读或后台 Task；成功后由 canonical snapshot 更新，失败保留最后 committed catalog 并提供 Retry，不清空成“没有 Skill”；
-- 首次 `uninitialized/loading` 显示 skeleton rows 与明确状态；`unavailable` 显示恢复说明和 Refresh，不伪造成空 catalog；真正 ready/degraded 且 `skills.length === 0` 才显示当前 Workspace 未发现 Skill；
+- 首次 `uninitialized/loading` 显示 skeleton rows 与明确状态；`unavailable` 显示恢复说明和 Refresh，不伪造成空 catalog；真正 ready/degraded 且 `skills.length === 0` 才显示 MetaWork 用户目录未发现 Skill；
 - 空状态可以提供 `New task` 导航动作，并说明可在普通任务中请求 MetaWork 创建 `.agents/skills` 下的 Skill；该动作只打开普通 Text draft，不创建专用 Skill mutation。创建和修改仍走 Text Run 与 AgentCore built-in Read/Edit，完成后需要显式 refresh；
 - 页面不注册 install、uninstall、update、enable、disable、toggle、checkbox 或 switch 控件；未来这些能力必须重新经过 AgentCore/Workbench owner 与 capability 验收。
 

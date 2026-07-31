@@ -156,8 +156,7 @@ export const enUS = {
   "task.open": "Open a task",
   "skills.title": "Skills",
   "skills.navigation_label": "Workbench tools",
-  "skills.subtitle": "Skills available to MetaWork in {workspace}.",
-  "skills.no_workspace_subtitle": "Skills follow the current workspace.",
+  "skills.subtitle": "Manage the Skills available to MetaWork.",
   "skills.refresh": "Refresh",
   "skills.refreshing": "Refreshing…",
   "skills.search_label": "Search skills",
@@ -168,15 +167,12 @@ export const enUS = {
   "skills.list_label": "Available skills",
   "skills.no_arguments": "No arguments",
   "skills.arguments": "Arguments: {arguments}",
-  "skills.no_workspace_title": "Choose a workspace",
-  "skills.no_workspace_body":
-    "MetaWork discovers skills for the current workspace.",
   "skills.unavailable_title": "Skills could not be loaded",
   "skills.unavailable_body":
-    "Refresh the catalog to try loading this workspace’s skills again.",
+    "Refresh the catalog to load MetaWork’s Skills again.",
   "skills.empty_title": "No skills found",
   "skills.empty_body":
-    "Ask MetaWork in a task to create a skill under .agents/skills, then refresh this page.",
+    "MetaWork has not found any Skills in the user Skill directories.",
   "skills.no_results_title": "No matching skills",
   "skills.no_results_body": "Nothing matches “{query}”.",
   "skills.issue_count": "Catalog issues: {count}",

@@ -13,6 +13,7 @@ pub const choose_workspace = "metawork.workspaces.choose";
 pub const select_workspace = "metawork.workspaces.select";
 pub const remove_workspace = "metawork.workspaces.remove";
 pub const refresh_workspace_skill_catalog = "metawork.workspaces.refreshSkillCatalog";
+pub const refresh_skill_catalog = "metawork.skills.refreshCatalog";
 pub const snapshot = "metawork.workbench.snapshot";
 pub const snapshot_chunk = "metawork.workbench.snapshot.chunk";
 pub const account_begin_login = "metawork.account.beginLogin";
@@ -44,6 +45,7 @@ pub const product = [_][]const u8{
     select_workspace,
     remove_workspace,
     refresh_workspace_skill_catalog,
+    refresh_skill_catalog,
     snapshot,
     snapshot_chunk,
     account_begin_login,

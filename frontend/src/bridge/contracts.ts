@@ -306,6 +306,7 @@ export type WorkbenchSnapshot = {
     persistentWorkspacePermissions: boolean;
   };
   account: AccountView;
+  skillCatalog: SkillCatalogView;
   selectedWorkspaceId: string | null;
   workspaces: WorkspaceView[];
   tasks: TaskView[];
@@ -445,6 +446,11 @@ export type CatalogRefreshResult<Identity extends "workspaceId" | "taskId"> = {
   accepted: boolean;
   reason: CatalogRefreshReason | null;
 } & Record<Identity, string>;
+
+export type SkillCatalogRefreshResult = {
+  accepted: boolean;
+  reason: CatalogRefreshReason | null;
+};
 
 export type HostSignal = {
   sequence: number;

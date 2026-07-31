@@ -1151,24 +1151,11 @@ export default function App() {
   }
 
   async function refreshSkillsPageCatalog() {
-    if (
-      skillCatalogBusy ||
-      bridgeUnavailable ||
-      workspaceBusy ||
-      !currentWorkspace ||
-      !currentWorkspaceId
-    )
-      return;
-    const audience: StatusAudience = {
-      scope: "workspace",
-      workspaceId: currentWorkspaceId,
-    };
+    if (skillCatalogBusy || bridgeUnavailable) return;
+    const audience: StatusAudience = { scope: "skills" };
     setSkillCatalogBusy(true);
     try {
-      const result = await client.refreshWorkspaceSkillCatalog(
-        currentWorkspaceId,
-        currentWorkspace.epoch,
-      );
+      const result = await client.refreshSkillCatalog();
       if (!result.accepted) {
         setStatus(
           attentionStatus(mutationReasonMessageId(result.reason!), audience),
@@ -1697,10 +1684,7 @@ export default function App() {
             ? t("skills.title")
             : activeTaskTitle
       }
-      contextVisible={
-        (route === "workbench" && activeTask !== null) ||
-        (route === "skills" && currentWorkspace !== undefined)
-      }
+      contextVisible={route === "workbench" && activeTask !== null}
       onSearch={() => setSearchOpen(true)}
       onBeginWindowDrag={() => {
         void client.beginWindowDrag(1).catch(() => undefined);
@@ -1857,28 +1841,14 @@ export default function App() {
         />
       ) : route === "skills" ? (
         <SkillsPage
-          workspaceName={
-            currentWorkspace
-              ? currentWorkspace.displayName ||
-                workspaceLabel(currentWorkspace.canonicalRoot)
-              : null
-          }
-          catalog={currentWorkspace?.skillCatalog ?? null}
+          catalog={snapshot.skillCatalog}
           query={skillsQuery}
           refreshing={
-            skillCatalogBusy ||
-            currentWorkspace?.skillCatalog.availability === "loading"
+            skillCatalogBusy || snapshot.skillCatalog.availability === "loading"
           }
-          disabled={
-            bridgeUnavailable ||
-            workspaceBusy ||
-            (currentWorkspace !== undefined &&
-              currentWorkspace.authorization !== "available")
-          }
+          disabled={bridgeUnavailable}
           onQuery={setSkillsQuery}
           onRefresh={() => void refreshSkillsPageCatalog()}
-          onChooseWorkspace={() => void chooseWorkspace(false)}
-          onNewTask={beginNewTask}
         />
       ) : (
         <div

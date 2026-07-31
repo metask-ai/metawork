@@ -64,25 +64,22 @@ function render(props = {}) {
         },
       },
       createElement(SkillsPage, {
-        workspaceName: "metawork",
         catalog: readyCatalog,
         query: "",
         refreshing: false,
         disabled: false,
         onQuery() {},
         onRefresh() {},
-        onChooseWorkspace() {},
-        onNewTask() {},
         ...props,
       }),
     ),
   );
 }
 
-test("Skills center renders the canonical Workspace catalog as a read-only list", () => {
+test("Skills center renders the MetaWork catalog as a read-only list", () => {
   const markup = render();
   assert.match(markup, /<h1[^>]*tabindex="-1"[^>]*>Skills<\/h1>/);
-  assert.match(markup, /Skills available to MetaWork in metawork/);
+  assert.match(markup, /Manage the Skills available to MetaWork/);
   assert.match(markup, /type="search"/);
   assert.match(markup, /code-review/);
   assert.match(markup, /Review code changes/);
@@ -113,11 +110,8 @@ test("Skills search covers invocation, display name, description, and arguments"
   assert.equal(filterSkills(skills, "  ").length, 2);
 });
 
-test("Skills center distinguishes no Workspace, loading, unavailable, empty, and no results", () => {
-  const noWorkspace = render({ workspaceName: null, catalog: null });
-  assert.match(noWorkspace, /Choose a workspace/);
-  assert.match(noWorkspace, />Add<\/button>/);
-  assert.doesNotMatch(noWorkspace, /disabled="">Add<\/button>/);
+test("Skills center is independent of Workspace and distinguishes catalog states", () => {
+  assert.doesNotMatch(render(), /Choose a workspace|>Add<\/button>/);
   assert.match(
     render({
       catalog: {
@@ -195,7 +189,7 @@ test("refreshing and failed refresh preserve the last committed list", () => {
   );
 });
 
-test("Skills route reuses the existing Workspace refresh command and owns no policy path", async () => {
+test("Skills route uses its MetaWork catalog command and owns no policy path", async () => {
   const app = await readFile(
     join(process.cwd(), "frontend/src/app/App.tsx"),
     "utf8",
@@ -214,12 +208,16 @@ test("Skills route reuses the existing Workspace refresh command and owns no pol
     app,
     /className="sidebar-capability focus-ring"[\s\S]*?disabled=\{bridgeUnavailable\}[\s\S]*?setRoute\("skills"\)/,
   );
-  assert.match(app, /client\.refreshWorkspaceSkillCatalog/);
-  assert.match(
+  assert.match(app, /client\.refreshSkillCatalog\(\)/);
+  assert.match(app, /catalog=\{snapshot\.skillCatalog\}/);
+  assert.doesNotMatch(
     app,
-    /\(currentWorkspace !== undefined &&\s*currentWorkspace\.authorization !== "available"\)/,
+    /workspaceName=\{|catalog=\{currentWorkspace\?\.skillCatalog/,
   );
-  assert.doesNotMatch(app, /currentWorkspace\?\.authorization !== "available"/);
+  assert.match(
+    commands,
+    /refreshSkillCatalog: "metawork\.skills\.refreshCatalog"/,
+  );
   assert.match(page, /title\.current\?\.focus\(\)/);
   assert.doesNotMatch(
     commands,
@@ -231,13 +229,13 @@ test("Skills route reuses the existing Workspace refresh command and owns no pol
   );
 });
 
-test("Skills route sees Workspace attention without leaking Task attention", () => {
+test("Skills route sees global Skill attention without leaking Task attention", () => {
   assert.equal(
     statusVisibleInCommandBar(
       {
         id: "skills.catalog_refresh_failed",
         tone: "attention",
-        audience: { scope: "workspace", workspaceId: "7" },
+        audience: { scope: "skills" },
       },
       { route: "skills", workspaceId: "7", taskId: "9" },
     ),
