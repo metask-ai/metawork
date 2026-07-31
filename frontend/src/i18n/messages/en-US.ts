@@ -281,8 +281,6 @@ export const enUS = {
   "slash.command.new_help": "Open a fresh task draft.",
   "slash.catalog_refresh_started": "Refreshing the Skill catalog…",
   "slash.catalog_refresh_failed": "The Skill catalog could not be refreshed.",
-  "message.you": "You",
-  "message.agent": "Agent",
   "tool.input": "Input",
   "tool.progress": "Progress",
   "tool.error": "Error",

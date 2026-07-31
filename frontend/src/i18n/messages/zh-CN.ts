@@ -256,8 +256,6 @@ export const zhCN: Record<MessageId, string> = {
   "slash.command.new_help": "打开一个新的任务草稿。",
   "slash.catalog_refresh_started": "正在刷新 Skill 目录…",
   "slash.catalog_refresh_failed": "未能刷新 Skill 目录。",
-  "message.you": "你",
-  "message.agent": "Agent",
   "tool.input": "输入",
   "tool.progress": "进度",
   "tool.error": "错误",

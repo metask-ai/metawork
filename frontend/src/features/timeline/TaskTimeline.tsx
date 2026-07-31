@@ -286,11 +286,9 @@ export function TaskTimeline({
                   })}
                   {run.assistant && (
                     <div className="run-delivery">
-                      <Message
-                        role={t("message.agent")}
-                        text={run.assistant}
-                        agent
-                      />
+                      <section className="timeline-message is-agent">
+                        <p className="message-body">{run.assistant}</p>
+                      </section>
                       {run.assistantRedacted && (
                         <p className="projection-note">
                           {t("privacy.sensitive_hidden")}
@@ -426,23 +424,6 @@ function RunInputMessage({ input }: { input: RunInputView }) {
           </span>
         )}
       </div>
-    </section>
-  );
-}
-
-function Message({
-  role,
-  text,
-  agent = false,
-}: {
-  role: string;
-  text: string;
-  agent?: boolean;
-}) {
-  return (
-    <section className={`timeline-message ${agent ? "is-agent" : "is-user"}`}>
-      <p className="message-role">{role}</p>
-      <p className="message-body">{text}</p>
     </section>
   );
 }

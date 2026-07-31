@@ -2704,33 +2704,15 @@ summary::-webkit-details-marker {
   line-height: 1.55;
 }
 
-.message-role,
 .message-body {
   margin: 0;
 }
 
-.message-role {
-  color: var(--color-muted);
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
-}
-
 .message-body {
-  margin-top: 6px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   font-size: 13px;
   line-height: 1.72;
-}
-
-.timeline-message.is-user .message-body {
-  margin-top: 0;
-}
-
-.timeline-message.is-agent .message-role {
-  color: var(--color-brand-600);
 }
 
 .timeline-skill-input {
@@ -2792,23 +2774,22 @@ summary::-webkit-details-marker {
   position: relative;
   display: flex;
   width: 100%;
-  min-height: 42px;
-  padding: 9px 11px 9px 30px;
+  min-height: 34px;
+  padding: 9px 0 0 19px;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  border: 1px solid var(--color-rule);
-  border-radius: 10px;
+  border-top: 1px solid var(--color-rule);
   color: var(--color-muted);
-  background: var(--color-paper);
   font-size: 11px;
 }
 
 .run-outcome::before {
   position: absolute;
-  left: 13px;
-  width: 8px;
-  height: 8px;
+  top: 13px;
+  left: 1px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   background: var(--color-muted);
   content: "";
@@ -2843,7 +2824,7 @@ summary::-webkit-details-marker {
 }
 
 .run-outcome-copy p {
-  font-weight: 700;
+  font-weight: 650;
 }
 
 .run-outcome-copy span {
@@ -2860,7 +2841,7 @@ summary::-webkit-details-marker {
   border: 1px solid var(--color-rule);
   border-radius: 7px;
   color: var(--color-graphite);
-  background: var(--color-canvas);
+  background: transparent;
   font-size: 10px;
   font-weight: 650;
 }
@@ -3088,20 +3069,30 @@ summary::-webkit-details-marker {
 }
 
 .task-example {
-  min-height: 62px;
-  padding: 10px 12px;
-  border: 1px solid var(--color-rule);
-  border-radius: 12px;
+  min-height: 54px;
+  padding: 10px 8px;
+  border: 0;
+  border-top: 1px solid var(--color-rule);
+  border-radius: 0;
   color: var(--color-graphite);
-  background: var(--color-paper);
+  background: transparent;
   font-size: 12px;
   line-height: 1.45;
   text-align: left;
+  transition:
+    border-color 120ms ease,
+    color 120ms ease,
+    background-color 120ms ease;
 }
 
 .task-example:hover {
   border-color: var(--color-brand-200);
-  background: var(--color-brand-50);
+  color: var(--color-brand-700);
+  background: linear-gradient(
+    to bottom,
+    rgba(91, 70, 216, 0.045),
+    transparent 72%
+  );
 }
 
 @media (max-width: 720px) {
