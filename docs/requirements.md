@@ -61,6 +61,10 @@ Turn 是用户提交的一次交互；Run 是 AgentCore 为该交互进行的一
 
 Account 是 MetaWork 的 Metask 账号控制面，负责 OAuth 登录、账号/API Key/模型目录、凭据安全存储和默认执行配置代际。API Key 是低频账号资源，模型是创建 Task 时必须可见的执行上下文。Account 发布一个当前默认 `ExecutionConfig`，包含 typed `provider_kind + model + base_url`、API Key 和 `execution_generation`；Workbench 在 Task 创建时取得 owned copy，建立第一个 execution binding epoch，并把不含 secret 的 account/profile、generation、API/Provider 与模型事实固化到 Task。后续默认 API 或模型变化默认只影响新 Task admission，不静默修改既有 binding epoch；既有 Agent Session 继续使用当前 epoch 的配置，直到其全部 Task/Run/Session 引用安全释放。只有 §5.2 定义的显式历史 rebind 可以为既有 Task 创建新 epoch。
 
+### Scheduled Task
+
+Scheduled Task 是 Workbench-owned 的进程内计划定义，负责描述“做什么、在哪个 Workspace、从何时开始以及是否按固定间隔重复”。它不是 AgentCore Session、Task 草稿或第二套 automation 数据面。每次到期都必须重新经过 Workspace、Account、Skill catalog、容量和 shutdown admission，成功后创建一个新的真实 Task，再通过现有 bounded Executor 启动 Text 或 Skill Run。Scheduled Task 只保存无 secret 的执行代际与显示事实，不持有 API Key；默认执行配置、Workspace epoch 或 Skill revision 变化时不得静默改绑或重放。
+
 ## 5. 产品功能需求
 
 以下是目标产品需求，不代表当前 ABI v1 baseline 已全部实现。
@@ -166,7 +170,7 @@ Account 是 MetaWork 的 Metask 账号控制面，负责 OAuth 登录、账号/A
 ### 5.9 Workbench 界面与任务组织
 
 - 未登录与 Workbench 是两个明确界面阶段：首次启动只突出登录及其恢复动作；`execution_ready` 后才展示 Workspace、Task、Composer 和执行历史；
-- Workbench 左栏承担稳定 New task、已接通的全局能力入口、Workspace/Task 导航与左下角账号入口；New task 始终是唯一持续高权重的创建动作，能力入口以紧凑次级导航位于其下方且只在对应 capability 完整可用时显示，Task 按 `需要处理 / 正在运行 / 最近` 等行动优先级组织；
+- Workbench 左栏承担稳定 New task、已接通的全局能力入口、Workspace/Task 导航与左下角账号入口；`新建任务`、`技能` 与 `定时任务` 使用同一紧凑一级菜单的相同行高、缩进和 active 语义，不用额外留白或独立大按钮制造虚假层级；只有真实接通的 capability 才显示对应入口，Task 按 `需要处理 / 正在运行 / 最近` 等行动优先级组织；
 - New task 中央区域始终以 Composer 为主，当前模型和 Workspace 在发送前可见；API 管理不进入 Composer，模型与 Workspace 也不得混成不透明的单一“模式”；
 - Task 启动后中央区域转为可追溯工作轨迹，Composer 固定在底部；审批、当前活动、工具详情、usage 或真实结果只决定 Inspector 模块是否可用，不因普通 Run 开始或结束自动开合。只有新的待处理请求可以自动打开一次；打开后保持到用户关闭或切换 Task；
 - `queued / running / waiting_user` 的停止只提供 Task Header 一个可见入口；Composer 只保留本地草稿和禁用发送提示，不建立第二个 Stop。停止请求必须等待 canonical terminal，transport acknowledgement 或 UI 状态变化都不能伪造 `Stopped`；
@@ -188,6 +192,19 @@ Account 是 MetaWork 的 Metask 账号控制面，负责 OAuth 登录、账号/A
 - Task 归档只隐藏日常列表；归档、删除 Task 或移除 Workspace 前必须先终止其 queued/running/waiting/stopping Run；删除已关闭 Task 时若 executor worker 仍持有该 Task 的 stable Run record reference，只能标记 `delete_pending`，待引用归零后物理释放；删除 Task 记录不删除 Workspace 中的真实文件；移除 Workspace 先原子进入 `removing` 并推进 Workspace epoch、拒绝新 admission，全部 Task 收口后撤销当前 Host authorization 并退出活动导航；异步失败必须恢复可用状态并发布 Workspace 级失败事实，不能静默回弹；
 - 全局搜索覆盖 Workspace、Task、用户指令、完成消息和 Output 文件名；工具原始日志默认不进入普通搜索；
 - `en-US` 是规范产品文案和回退语言，`zh-CN` 是首个完整 locale；Host 传递 structured code 与参数，Renderer 负责本地化。
+
+### 5.10 定时任务
+
+- `定时任务` 是与 `新建任务`、`技能` 同级的独立页面，不属于 Skill 中心或某个 Workspace 的子页面；每条定义仍必须绑定一个当前已授权 Workspace；
+- 页面以紧凑列表显示名称、Text/Skill 类型、Workspace、固定计划、下一次运行、最近一次触发及其真实 Task 链接，并提供新建、编辑、暂停/恢复、立即运行和删除；
+- 首版只支持一次性计划和从明确起点开始的固定秒数间隔。Host 保存 canonical Unix time，Renderer 只负责本地化显示和结构化编辑，不用本地 timer 推进产品状态；
+- 每次自动或手动触发创建一个新的真实 Task。计划定义不复用旧 Conversation、不把结果复制成第二份聊天历史，也不绕过既有 Task/Run admission；
+- 同一 Scheduled Task 的上一次 Task 仍有 non-terminal Run 时，自动触发必须跳过本次；不得并发重放同一计划或自动终止已有 Run；
+- 自动触发使用 `(scheduledTaskId, plannedAt)` 形成进程内稳定 occurrence identity，并在 timer 延迟时最多提交一次当前 occurrence；过去的多个时间点不批量补跑；
+- 执行配置 generation、Workspace epoch、Skill catalog revision、容量或 shutdown gate 不再满足时，计划进入明确的 `needs_attention`，停止继续计时并保留 typed 原因；用户必须编辑并确认当前事实后才能恢复；
+- Scheduled Task 和 occurrence 不保存 credential、Authorization header、OAuth URL 或 AgentCore handle；计划标题、Text 和 Skill 参数进入产品 projection 前执行与 Task history 相同的有界复制和 credential 清洗；
+- 第一版的计划定义、occurrence 和 timer 都只存在于当前 Host 进程；退出、崩溃或系统未运行期间不会执行或恢复。页面必须持续显示“仅在 MetaWork 运行时有效”，不得宣称系统级后台、跨重启持久化、通知或 missed-run recovery 已完成；
+- AgentCore 只执行被 Workbench admission 后的单次 Run，不拥有 cron、时钟、timer、OS wake 或 Scheduled Task persistence。
 
 ## 6. 非功能需求
 

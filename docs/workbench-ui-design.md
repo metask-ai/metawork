@@ -185,7 +185,7 @@ Workspace
 
 ## 5. 左栏：能力、Workspace 与 Task
 
-> Capability：**混合**。当前 Renderer 合同已提供 MetaWork 顶层与 Workspace/Task 分离的 revision 4 Skill catalog projection，当前 shell 已提供稳定 New task、Workspace/Task 导航、行动优先分组和左下角账号入口；只读 Skill 中心复用这些现有能力，跨 Host Task persistence 仍是目标能力。
+> Capability：**混合**。当前 Renderer 合同已提供 MetaWork 顶层与 Workspace/Task 分离的 revision 4 Skill catalog projection，当前 shell 已提供稳定 New task、Workspace/Task 导航、行动优先分组和左下角账号入口；只读 Skill 中心与进程内定时任务复用这些现有能力，跨 Host Task/Scheduled Task persistence 仍是目标能力。
 
 ### 5.1 Workspace 切换
 
@@ -211,23 +211,21 @@ Invoices
 
 ### 5.2 全局能力入口
 
-> Capability：**当前**。Skill 入口只依赖现有 AgentCore revision 4 discovery/catalog 与 Workspace projection，不等待安装或启用/禁用 policy。
+> Capability：**当前**。Skill 入口只依赖现有 AgentCore revision 4 discovery/catalog 与 Workspace projection；定时任务入口依赖 Workbench-owned schedule projection、timer 与真实 Task admission。
 
-全局能力入口位于 `New task` 下方、Workspace 区标题上方。它使用纵向紧凑导航行，不使用窄侧栏中的卡片宫格：
+`新建任务`、`技能` 与 `定时任务` 位于 Workspace 区标题上方的同一个纵向紧凑菜单，不使用窄侧栏中的卡片宫格，也不通过额外分组间距制造父子关系：
 
 ```text
 MetaWork
 
-[ +  New task                         ⌘N ]
-
-  ◇  Skills
-  ◷  Automations        [仅 capability 到位后]
-  ◎  Connections        [仅 capability 到位后]
+  +  New task
+  /  Skills
+  ◷  Scheduled tasks
 
 Workspace                              Add
 ```
 
-- `New task` 保持唯一填充 `brand-600` 的持续高权重动作；能力入口使用中性文字、图标和 hover 背景，不能与创建动作竞争；
+- 三个菜单项使用相同行高、左右 padding、图标列、字号、字重、hover 与 focus 样式；`New task` 不再使用独立填充按钮，快捷键只作为 tooltip 或不改变布局的尾部提示；
 - 当前能力 route 使用 `brand-100` 弱背景、`brand-700` 图标/文字和左侧 2 px 选中标识，并设置 `aria-current="page"`；选中不能只靠颜色；
 - 一个能力可用时只显示一行；后续能力按真实 owner 与使用频率增加，不预留 disabled 占位、不用 `More` 收纳尚不存在的产品；
 - 点击能力入口保留完整 Workbench 左栏和当前 Workspace 选择，只替换中央 route；点击 New task、Workspace 或 Task 回到对应 Workbench route。Settings 仍是独立全局 route，进入后按 §14.2 隐藏 Workspace/Task 左栏；
@@ -284,7 +282,39 @@ release-notes · Invalid definition
 - 进入 route 后焦点落在页面标题；刷新完成不抢焦点，删除搜索字符不会把焦点移到第一项；
 - 点击 `New task`、Workspace 或 Task 离开页面后，返回 Skill 中心恢复上次搜索词；不持久化瞬时 refresh 状态。
 
-### 5.4 Task 分组与排序
+### 5.4 定时任务
+
+> Capability：**当前进程内**。Workbench 拥有计划定义、固定间隔计算、timer admission 与 occurrence；AgentCore 只执行触发后创建的真实 Run。跨重启持久化、系统级后台唤醒、通知和 missed-run recovery 尚未实现。
+
+定时任务是与 Skill 中心同级的全局管理页，不跟随当前 Workspace route；每条计划必须显式绑定一个已授权 Workspace。页面的单一工作是让用户看清“什么将在何时运行、最近发生了什么、哪里需要处理”。
+
+```text
+定时任务                                                   [ 新建 ]
+仅在 MetaWork 运行时触发。
+
+[ 全部 ] [ 已启用 ] [ 已暂停 ] [ 需要处理 ]
+
+每日项目总结
+每天，从 8 月 1 日 09:00 开始 · metawork · 普通指令
+下一次：明天 09:00                    已启用          ···
+
+每周代码审查
+每 7 天，从周五 18:00 开始 · metawork · /review
+最近：已完成 · 打开任务                已启用          ···
+```
+
+- 页面沿用 Skill 中心最大阅读宽度、标题尺度和连续列表，不使用统计卡、流程画布、营销 Hero 或装饰插画；`下一次`、`需要处理` 和真实 Task 链接构成唯一视觉重点；
+- 列表行显示名称、结构化 recurrence 的本地化摘要、Workspace、Text/Skill 类型、下一次运行和最近 occurrence。名称点击或 `Edit` 打开右侧 376–416 px 编辑面板；窄窗使用整页编辑；
+- 顶部过滤只改变 Renderer 展示，不改变 Host state。进入 route 后焦点落在标题；打开编辑器后落在名称输入，关闭后回到原列表行；
+- 编辑器按 `要做什么`、`在哪里运行`、`什么时候运行`、`执行规则` 排列。Text 使用有界多行输入；Skill 使用目标 Workspace current catalog 和 positional arguments；计划只提供一次性或固定间隔，不显示尚未实现的 cron、IANA timezone 或自然语言解析；
+- 时间控件提交 Host 可验证的 Unix seconds、明确起点和可选 interval seconds；Renderer 显示未来三次预览，但该预览不拥有 timer 或 occurrence；
+- 新建、保存、暂停/恢复、立即运行和删除使用 Host typed result 与 optimistic `scheduledTaskEpoch`。命令 timeout 后先刷新 canonical snapshot，不自动重放；
+- 删除计划不停止或删除已经创建的真实 Task；`立即运行` 也通过同一 occurrence 与 Task admission，不能建立测试/手动专用路径；
+- 上一次真实 Task 仍 non-terminal 时，自动 occurrence 显示 `已跳过：上一次仍在运行`；执行配置、Workspace 或 Skill binding 变化时显示 `需要处理`，并要求用户编辑确认后恢复；
+- 空状态说明计划只在 MetaWork 运行时有效并提供 `新建定时任务`；无 Workspace 时动作先引导用户选择 Workspace，不创建未绑定定义；
+- `仅在 MetaWork 运行时触发` 是持续可见的产品限制，不藏在 tooltip；退出后计划定义不会恢复，不能用通知、后台或持久化文案暗示相反事实。
+
+### 5.5 Task 分组与排序
 
 Task 按行动优先级分组，而不是全部按时间混排：
 
@@ -300,9 +330,9 @@ Recent
 - 运行中、排队、等待用户、失败和中断使用图标、文字和颜色共同表达；
 - 后台 Task 产生待处理请求时必须进入 `Needs your attention`；
 - 不能只用绿点、灰点区分状态。
-- `New task` 是左栏唯一持续高权重的创建动作；Workspace 的添加和管理进入切换器，不与其堆成多个同等级按钮。
+- Workspace 的添加和管理进入切换器，不与顶部三个同级菜单项混成 Workspace action。
 
-### 5.5 创建、命名、归档与删除
+### 5.6 创建、命名、归档与删除
 
 - 点击 `New task` 只打开空白任务页；第一次发送后才创建真实 Task，避免空记录；
 - 标题根据首条用户指令自动生成，用户可以重命名；
@@ -311,7 +341,7 @@ Recent
 - 删除确认必须明确说明文件不会被删除；
 - queued、running、waiting_user 或 stopping 的 Task 不能归档或删除；必须先停止或明确取消并等待真实 terminal 结果。
 
-### 5.6 左下角账号入口
+### 5.7 左下角账号入口
 
 `execution_ready` 后，左栏底部固定显示 Metask identity：头像或首字母、显示名和简短连接状态。它是全局账号入口，不显示完整 API Key，也不承担模型快速选择。
 
@@ -864,7 +894,7 @@ Account operation 在设置中的投影如下：
 | cancel / terminal failure | 恢复已提交默认配置，不保留失效候选                                 | 恢复已提交默认配置，不保留失效候选             | 取消明确说明未应用更改；失败说明原因与旧默认仍有效，不能留下永久 disabled selector |
 | `reauth_required`         | 保留脱敏事实但禁用 catalog mutation                                | 保留脱敏事实但禁用 catalog mutation            | 把重新认证作为当前恢复动作，不能清空 Workspace、Task 或已有 execution 事实         |
 
-Skill 中心按 §5.2–§5.3 进入 Workbench 一级能力导航；连接器、定时任务和 IM 频道仍只有在真实接通并形成清晰产品 owner 后才进入导航。未接通时不放置假入口，也不照搬其他 Agent 产品的信息架构。
+Skill 中心与定时任务按 §5.2–§5.4 进入 Workbench 一级能力导航；连接器和 IM 频道仍只有在真实接通并形成清晰产品 owner 后才进入导航。未接通时不放置假入口，也不照搬其他 Agent 产品的信息架构。
 
 ## 15. 国际化
 

@@ -117,7 +117,8 @@ Host 负责：
 - 由 Account 在 Renderer 之外完成 Metask OAuth、目录查询、凭据持久化与 ExecutionConfig 生成；
 - 由 App/Account 在 committed transition 之后启动有界 continuation，把登录后的确定性目录准备留在后台，并只把真实歧义投影成用户动作；
 - 由 App 在同一主线程 turn 内协调 Account prepare、Workbench no-fail install 和 Account commit；
-- 由 Workbench 管理 Task、Run record、队列、取消协调和产品历史；
+- 由 Workbench 管理 Scheduled Task、occurrence、Task、Run record、队列、取消协调和产品历史；
+- 由 App 向 Workbench 注入 wall clock 与单一 Native timer capability；timer callback 只唤醒 Workbench due reconciliation，不直接调用 AgentCore；
 - 由 Agent 管理 AgentCore Session、active Run、callback binding 和有界事件泵；
 - 管理跨会话产品状态；
 - 提供文件对话框、通知、更新和应用生命周期能力。
@@ -169,6 +170,8 @@ production 网络接入受 [Metask Account API 合同](metask-account-contract.m
 Workspace 是 Workbench-owned 产品对象，而不是 Renderer 从 Task 路径派生的 convenience view。Renderer Bridge 固定 revision 1 发布 stable identity、optimistic epoch、canonical root、display label、authorization/removal outcome 与聚合 Task signals；一次性目录能力由 Bridge/Native capability 生成并在同一 `workspaces.choose` Host 命令内消费，Renderer 只得到 Workspace identity。Task 创建绑定 expected execution generation，后续 Run 绑定 expected binding epoch，Workspace mutation 绑定 expected Workspace epoch；Host 对 window、ownership、catalog membership 与 admission 重新校验。预期业务拒绝编码为严格 typed result，非法 payload 与 authority failure 仍走 Bridge failure；合同不接受被当前形态取代的临时 payload 或兼容字段。
 
 App 在 composition 时只解析一次 existing canonical user home，并以 immutable capability 注入 Workbench；Renderer、Bridge payload 和 Workspace selection 都不能覆盖。Workbench 把 AgentCore catalog discovery 作为现有 bounded Executor 的一种 job：worker 只产生 Agent-owned acquisition，主线程按 Workspace id、epoch 和 request generation 提交或丢弃。Workspace current catalog 持有唯一 opaque lease 与有界产品 projection；Task 创建在 Agent Session 前完成容量证明并复制独立 pinned projection，同步借用 current lease 绑定 Session。Task refresh 只从已经提交的 Workspace catalog 进行、只允许 idle Session，并在 Agent refresh 成功后替换 pinned projection。shutdown 先停止/join Executor、收口 catalog job 并释放全部 Workspace lease，再允许 Agent Runtime destroy；不建立第二 scheduler、隐式文件监听或 Renderer Skill loader。
+
+Scheduled Task 是 Workbench 内新的可测试不变量，不是第六个 product module。`workbench/scheduled_tasks.zig` 只拥有一次性/固定间隔计算、bounded definition/occurrence storage、幂等 planned-time identity 与状态转换；`projection.zig` 负责 Workspace、execution、Skill 与 Task admission。App 注入的 timer 永远只为当前最早 due time 建立一个 one-shot wake，回调在主线程要求 Workbench 最多提交一个当前 occurrence，再为下一次 due time 重新 arm。成功 occurrence 依次调用既有 `createTaskInWorkspace`、Task rename 与 `runTaskAtBinding`，因此复用同一 Session、Run record、executor、event pump、permission 和 snapshot 路径；不能新增 schedule queue、schedule worker 或直接 AgentCore call。第一版 Schedule 不持久化、退出时取消 timer，也不拥有 OS wake。
 
 Workbench `TaskRunInput` 只有 Text/Skill 两个分支。Skill admission 在建立 Run record 前校验 Workspace/Task epoch、pinned revision、稳定 `skill_id`、参数数量、UTF-8 与产品容量；Run history 保存 admission 时的 invocation/display/arguments，不随后续 catalog 改写。AgentCore 仍负责最终参数、资源和 policy 校验；`stale_catalog`、`skill_not_found`、`invalid_skill_arguments`、`skill_policy_violation` 与 `skill_unavailable` 形成独立产品 cause，保持 Session 可复用且不自动刷新或重放。
 
@@ -246,6 +249,7 @@ RunJob
 - Host 使用有上限的 Run executor；
 - 空闲 Session 不占 worker；同步 Run 和同步 UI wait 占用 execution slot；
 - Workbench 创建、排队、停止并销毁 bounded Executor；Agent Runtime 不接收 Scheduler capability，worker 从 Workbench queue 主动进入 Agent Run；
+- Scheduled Task 的 wall clock、fixed recurrence 和 timer admission 由 Workbench 拥有；它只向同一 Task/Run Executor 提交真实产品工作，不把 timer capability 注入 Agent Runtime；
 - Bridge/main thread 不执行长耗时 Run，也不等待 permission；
 - 只有 `agent/` import `metask_agentcore`；App 让 Agent 内部完成 ABI discovery，Workbench 通过 Agent 公共 validated types 消费，Bridge DTO 不暴露 SDK enum/owner/handle；
 - `account/contract.zig` 不导入 Native SDK、Agent、Workbench、Bridge 或 AgentCore；Account runtime 可以导入 Native SDK，Workbench/Bridge 只导入纯 contract，不导入 Account runtime；

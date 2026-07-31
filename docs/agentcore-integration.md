@@ -57,7 +57,7 @@ revision 4 bundle 提供完整 typed status、六个 StopReason、known/unknown 
 - Workbench 只通过 `metawork_agent` 公共表面协调 Session/Run，并消费 SDK-validated `OwnedCoreEvent`/UI types；这不是复制一套 `AgentEvent`/UI schema；
 - Bridge DTO 使用 Bridge-owned transport enum，由 App 显式映射到 Agent UI response，不返回 SDK enum、owner 或 handle；
 - `src/main.zig` 只进入 `metawork_app`，不能绕过 App 组装低层模块；
-- Executor、queue 与 workers 归 Workbench 独占，Agent Runtime 不接收 Scheduler capability。Agent active Run 只保留 first-writer-wins `TerminationSignal`，并通过 immutable `TerminalResult` 向 Workbench 提交 terminal facts；Session snapshot 不保存历史结果。
+- Executor、queue 与 workers 归 Workbench 独占，Agent Runtime 不接收 Scheduler capability。进程内 Scheduled Task 的 wall clock、fixed recurrence、timer 和 occurrence admission 同样只归 Workbench；到期后必须先创建真实 Task，再由同一 Executor 进入 Agent Run。Agent active Run 只保留 first-writer-wins `TerminationSignal`，并通过 immutable `TerminalResult` 向 Workbench 提交 terminal facts；Session snapshot 不保存历史结果。
 
 ## 3. 当前协议表面
 
