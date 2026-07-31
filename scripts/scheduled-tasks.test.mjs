@@ -96,10 +96,27 @@ test("Scheduled tasks is a truthful independent management page", () => {
   ];
   const html = render(snapshot);
   assert.match(html, /Scheduled tasks/);
-  assert.match(html, /only while MetaWork is running/);
+  assert.match(html, /Runs in background/);
+  assert.match(html, /Search scheduled tasks/);
+  assert.match(html, /Ongoing/);
   assert.match(html, /Daily repository summary/);
   assert.match(html, /Run now/);
   assert.doesNotMatch(html, /cron/i);
+});
+
+test("Empty scheduled tasks page offers actionable starter templates", () => {
+  const snapshot = structuredClone(fixture);
+  snapshot.capabilities.scheduledTasks = true;
+  snapshot.capabilities.scheduledTaskPersistence = true;
+  snapshot.capabilities.scheduledTaskPersistenceHealth = "ready";
+  snapshot.capabilities.backgroundScheduleWake = true;
+  const html = render(snapshot);
+  assert.match(html, /Suggestions/);
+  assert.match(html, /Daily brief/);
+  assert.match(html, /Weekly review/);
+  assert.match(html, /Follow-up check/);
+  assert.match(html, /Try your own task/);
+  assert.doesNotMatch(html, /Nothing is scheduled/);
 });
 
 test("New task, Skills, and Scheduled tasks share one compact peer menu", async () => {

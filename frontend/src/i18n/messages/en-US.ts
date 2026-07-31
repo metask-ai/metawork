@@ -513,21 +513,13 @@ export const enUS = {
     "MetaWork is closing. Try again after restart.",
   "scheduled.title": "Scheduled tasks",
   "scheduled.subtitle":
-    "Run a fresh task in a chosen workspace at a specific time or fixed interval.",
+    "Let MetaWork start work at the right time and notify you when it is done.",
   "scheduled.new": "New schedule",
-  "scheduled.runtime_only":
-    "Schedules trigger only while MetaWork is running. They are not restored after restart.",
-  "scheduled.empty_title": "Nothing is scheduled",
-  "scheduled.empty_body":
-    "Create a schedule for work that should start later or repeat while MetaWork remains open.",
-  "scheduled.untitled": "Untitled schedule",
-  "scheduled.text_input": "Text instruction",
   "scheduled.no_next_run": "No next run",
   "scheduled.health.ready": "Scheduled",
   "scheduled.health.paused": "Paused",
   "scheduled.health.needs_attention": "Needs attention",
   "scheduled.health.completed": "Completed",
-  "scheduled.open_last_task": "Open task",
   "scheduled.pause": "Pause",
   "scheduled.resume": "Resume",
   "scheduled.run_now": "Run now",
@@ -552,6 +544,61 @@ export const enUS = {
   "scheduled.days": "Days",
   "scheduled.delete": "Delete schedule",
   "scheduled.saving": "Saving…",
+  "scheduled.background_ready": "Runs in background",
+  "scheduled.search_placeholder": "Search scheduled tasks",
+  "scheduled.suggestions": "Suggestions",
+  "scheduled.suggestion.daily.title": "Daily brief",
+  "scheduled.suggestion.daily.schedule": "Every day at 8:00 AM",
+  "scheduled.suggestion.daily.body":
+    "Summarize recent project progress, open work, and what needs attention today.",
+  "scheduled.suggestion.daily.prompt":
+    "Summarize recent project progress, open work, and what needs attention today in a concise daily brief.",
+  "scheduled.suggestion.weekly.title": "Weekly review",
+  "scheduled.suggestion.weekly.schedule": "Friday at 4:00 PM",
+  "scheduled.suggestion.weekly.body":
+    "Turn this week's completed work, open issues, and next steps into a status update.",
+  "scheduled.suggestion.weekly.prompt":
+    "Review this week's completed work, open issues, and next steps, then produce a clear status update.",
+  "scheduled.suggestion.followup.title": "Follow-up check",
+  "scheduled.suggestion.followup.schedule": "Every day at 9:00 AM",
+  "scheduled.suggestion.followup.body":
+    "Check the workspace for open items, blockers, and recent changes that need follow-up.",
+  "scheduled.suggestion.followup.prompt":
+    "Check the workspace for open items, blockers, and recent changes, then list what needs follow-up today.",
+  "scheduled.suggestion.custom.title": "Try your own task",
+  "scheduled.suggestion.custom.body":
+    "Describe the work first, then confirm when it should run.",
+  "scheduled.section.ongoing": "Ongoing",
+  "scheduled.section.needs_attention": "Needs attention",
+  "scheduled.section.paused": "Paused",
+  "scheduled.section.completed": "Completed",
+  "scheduled.no_matches": "No matching schedules",
+  "scheduled.no_matches_body": "Try another name or instruction keyword.",
+  "scheduled.repeat.hourly": "Every hour",
+  "scheduled.repeat.daily": "Every day",
+  "scheduled.repeat.weekly": "Every week",
+  "scheduled.next_run": "Next run",
+  "scheduled.status": "Status",
+  "scheduled.details": "Name and workspace",
+  "scheduled.history": "Run history",
+  "scheduled.history_empty": "Results will appear here after the first run.",
+  "scheduled.open_task": "View result",
+  "scheduled.occurrence.completed": "Completed",
+  "scheduled.occurrence.failed": "Run failed",
+  "scheduled.occurrence.running": "Running",
+  "scheduled.occurrence.skipped": "Skipped",
+  "scheduled.occurrence.rejected": "Could not start",
+  "scheduled.occurrence.starting": "Starting",
+  "scheduled.persistence.unavailable":
+    "Durable schedules are not available on this device.",
+  "scheduled.persistence.read_failed": "Saved schedules could not be read.",
+  "scheduled.persistence.corrupt":
+    "Schedule data is damaged. Automatic runs are stopped to prevent duplicates.",
+  "scheduled.persistence.write_failed":
+    "The latest change could not be saved. Automatic runs are stopped.",
+  "scheduled.persistence.outcome_unknown":
+    "MetaWork cannot confirm whether the latest change was saved. Automatic runs are stopped to prevent duplicates.",
+  "scheduled.persistence.ready": "Schedule storage is ready.",
 } as const;
 
 export type MessageId = keyof typeof enUS;

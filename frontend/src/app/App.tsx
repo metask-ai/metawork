@@ -1744,7 +1744,8 @@ export default function App() {
                   </span>
                   <span>{t("skills.title")}</span>
                 </button>
-                {snapshot.capabilities.scheduledTasks && (
+                {snapshot.capabilities.scheduledTaskPersistenceHealth !==
+                  "unavailable" && (
                   <button
                     className="sidebar-capability focus-ring"
                     data-active={route === "scheduled-tasks"}
@@ -1880,7 +1881,7 @@ export default function App() {
       ) : route === "scheduled-tasks" ? (
         <ScheduledTasksPage
           snapshot={snapshot}
-          disabled={bridgeUnavailable}
+          disabled={bridgeUnavailable || !snapshot.capabilities.scheduledTasks}
           onCreate={(input) => client.createScheduledTask(input)}
           onUpdate={(id, epoch, input) =>
             client.updateScheduledTask(id, epoch, input)
