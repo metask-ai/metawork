@@ -1227,10 +1227,7 @@ function decodeWorkspace(value: unknown, path: string): WorkspaceView {
   };
 }
 
-function decodeScheduledTask(
-  value: unknown,
-  path: string,
-): ScheduledTaskView {
+function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
   const item = object(value, path, [
     "id",
     "epoch",
@@ -1366,23 +1363,19 @@ function decodeScheduledTask(
               last.triggeredAtUnixSeconds,
               `${path}.lastOccurrence.triggeredAtUnixSeconds`,
             ),
-            source: enumValue(
-              last.source,
-              `${path}.lastOccurrence.source`,
-              ["timer", "manual"] as const,
-            ),
-            result: enumValue(
-              last.result,
-              `${path}.lastOccurrence.result`,
-              ["submitted", "skipped", "rejected"] as const,
-            ),
+            source: enumValue(last.source, `${path}.lastOccurrence.source`, [
+              "timer",
+              "manual",
+            ] as const),
+            result: enumValue(last.result, `${path}.lastOccurrence.result`, [
+              "submitted",
+              "skipped",
+              "rejected",
+            ] as const),
             taskId:
               last.taskId === null
                 ? null
-                : positiveWireId(
-                    last.taskId,
-                    `${path}.lastOccurrence.taskId`,
-                  ),
+                : positiveWireId(last.taskId, `${path}.lastOccurrence.taskId`),
             reason: nullableEnum(
               last.reason,
               `${path}.lastOccurrence.reason`,
@@ -1775,11 +1768,7 @@ export function decodeScheduledTaskMutationResult(
   value: unknown,
   expectedId?: string,
 ) {
-  const item = object(value, "$", [
-    "scheduledTaskId",
-    "epoch",
-    "accepted",
-  ]);
+  const item = object(value, "$", ["scheduledTaskId", "epoch", "accepted"]);
   if (!booleanValue(item.accepted, "$.accepted"))
     fail("$.accepted", "scheduled Task mutation must be accepted");
   const scheduledTaskId = positiveWireId(
@@ -1800,11 +1789,7 @@ export function decodeScheduledTaskEnabledResult(
   expectedId: string,
   expectedEnabled: boolean,
 ) {
-  const item = object(value, "$", [
-    "scheduledTaskId",
-    "epoch",
-    "enabled",
-  ]);
+  const item = object(value, "$", ["scheduledTaskId", "epoch", "enabled"]);
   const scheduledTaskId = positiveWireId(
     item.scheduledTaskId,
     "$.scheduledTaskId",
@@ -1824,11 +1809,7 @@ export function decodeScheduledTaskRunResult(
   value: unknown,
   expectedId: string,
 ) {
-  const item = object(value, "$", [
-    "scheduledTaskId",
-    "taskId",
-    "accepted",
-  ]);
+  const item = object(value, "$", ["scheduledTaskId", "taskId", "accepted"]);
   if (!booleanValue(item.accepted, "$.accepted"))
     fail("$.accepted", "scheduled Task run must be accepted");
   const scheduledTaskId = positiveWireId(
@@ -1844,14 +1825,9 @@ export function decodeScheduledTaskRunResult(
   };
 }
 
-export function assertScheduledTaskDeleted(
-  value: unknown,
-  expectedId: string,
-) {
+export function assertScheduledTaskDeleted(value: unknown, expectedId: string) {
   const item = object(value, "$", ["scheduledTaskId", "deleted"]);
-  if (
-    positiveWireId(item.scheduledTaskId, "$.scheduledTaskId") !== expectedId
-  )
+  if (positiveWireId(item.scheduledTaskId, "$.scheduledTaskId") !== expectedId)
     fail("$.scheduledTaskId", "response identity mismatch");
   if (!booleanValue(item.deleted, "$.deleted"))
     fail("$.deleted", "expected deletion confirmation");

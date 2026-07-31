@@ -447,10 +447,7 @@ export class BridgeClient {
     );
   }
 
-  async runScheduledTaskNow(
-    scheduledTaskId: string,
-    expectedEpoch: string,
-  ) {
+  async runScheduledTaskNow(scheduledTaskId: string, expectedEpoch: string) {
     return decodeScheduledTaskRunResult(
       await this.invoke(commands.runScheduledTaskNow, {
         scheduledTaskId,
@@ -460,10 +457,7 @@ export class BridgeClient {
     );
   }
 
-  async deleteScheduledTask(
-    scheduledTaskId: string,
-    expectedEpoch: string,
-  ) {
+  async deleteScheduledTask(scheduledTaskId: string, expectedEpoch: string) {
     assertScheduledTaskDeleted(
       await this.invoke(commands.deleteScheduledTask, {
         scheduledTaskId,
