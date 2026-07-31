@@ -2284,7 +2284,9 @@ summary::-webkit-details-marker {
 .scheduled-header .primary-button,
 .scheduled-editor .primary-button {
   display: inline-flex;
+  width: auto;
   align-items: center;
+  flex: none;
   gap: 7px;
 }
 
