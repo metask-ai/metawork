@@ -504,6 +504,9 @@ test("Workbench foundation uses the purple system and centered new Task stage", 
   );
   assert.doesNotMatch(app, /className="brand-mark"|app\.window_label/);
   assert.match(app, /<p className="brand-name">\{t\("app\.name"\)\}<\/p>/);
+  assert.match(css, /\.sidebar-primary\s*\{[\s\S]*?padding:\s*10px 14px 0/);
+  assert.match(css, /\.new-task-button\s*\{[\s\S]*?margin-top:\s*8px/);
+  assert.match(css, /\.brand-name\s*\{[\s\S]*?min-height:\s*26px/);
   assert.match(
     css,
     /\.task-empty-state\.is-new-task\s*\{[\s\S]*?align-content:\s*center/,

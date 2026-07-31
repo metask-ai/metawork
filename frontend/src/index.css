@@ -429,7 +429,7 @@ summary::-webkit-details-marker {
 .sidebar-primary {
   display: flex;
   min-height: 0;
-  padding: 18px 14px 0;
+  padding: 10px 14px 0;
   flex: 1;
   flex-direction: column;
 }
@@ -439,7 +439,7 @@ summary::-webkit-details-marker {
   grid-template-columns: auto minmax(0, 1fr) auto;
   width: 100%;
   min-height: 38px;
-  margin-top: 16px;
+  margin-top: 8px;
   padding: 0 10px;
   align-items: center;
   gap: 9px;
@@ -1685,11 +1685,11 @@ summary::-webkit-details-marker {
 
 @media (max-height: 720px) {
   .sidebar-primary {
-    padding-top: 12px;
+    padding-top: 8px;
   }
 
   .new-task-button {
-    margin-top: 14px;
+    margin-top: 8px;
   }
 
   .sidebar-navigation {
@@ -1921,7 +1921,7 @@ summary::-webkit-details-marker {
 
 .brand-name {
   display: flex;
-  min-height: 30px;
+  min-height: 26px;
   margin: 0 2px;
   align-items: center;
   font-size: 15px;
