@@ -732,32 +732,19 @@ pub const Account = struct {
                 );
             },
             .reauthenticate => {
-                if (!std.mem.eql(
-                    u8,
-                    next.account_id.view(),
-                    identity.account_id.view(),
-                ) or !std.mem.eql(
-                    u8,
-                    next.profile_id.view(),
-                    identity.profile_id.view(),
-                )) {
-                    next.session_state = .reauth_required;
-                    next.operation = .none;
-                    next.active_attempt_id = null;
-                    next.attempt_kind = .none;
-                    next.error_code = .account_mismatch;
-                    next.safe_diagnostic.clear();
-                    return transitionNoEffect(
-                        next,
-                        .operation_failed,
-                        self.state.active_attempt_id.?,
-                    );
-                }
                 next.session_state = .authenticated;
+                next.execution_state = .none;
                 next.operation = .none;
                 next.active_attempt_id = null;
                 next.attempt_kind = .none;
+                next.account_id = identity.account_id;
+                next.profile_id = identity.profile_id;
                 next.display_name = identity.display_name;
+                next.selected_api_key_id.clear();
+                next.selected_model.clear();
+                next.pending_api_key_id.clear();
+                next.pending_model.clear();
+                next.execution_generation = 0;
                 next.clearError();
                 return transitionNoEffect(
                     next,
@@ -1480,7 +1467,7 @@ test "RestoreReady validation does not consume execution on failure" {
     try std.testing.expectEqualStrings("model-1", execution.input().target.model);
 }
 
-test "restore ready and reauthentication preserve execution identity" {
+test "explicit reauthentication replaces identity and clears prior execution" {
     const allocator = std.testing.allocator;
     var account = Account.initRestoring();
     var restored_execution = try contract.OwnedExecutionConfig.initOwned(
@@ -1533,7 +1520,7 @@ test "restore ready and reauthentication preserve execution identity" {
     };
     _ = reauth.takeEffect();
     commitPrepared(&account, &reauth);
-    var mismatch: WorkerCompletion = .{
+    var replacement: WorkerCompletion = .{
         .attempt_id = account.activeAttempt().?,
         .payload = .{
             .authenticated = try .init(
@@ -1543,14 +1530,18 @@ test "restore ready and reauthentication preserve execution identity" {
             ),
         },
     };
-    var mismatch_transition = switch (account.prepareCompletion(&mismatch)) {
+    var replacement_transition = switch (account.prepareCompletion(&replacement)) {
         .transition => |value| value,
         else => return error.TestUnexpectedResult,
     };
-    commitPrepared(&account, &mismatch_transition);
-    try std.testing.expectEqual(contract.AccountSessionState.reauth_required, account.view().session_state);
-    try std.testing.expectEqual(contract.ExecutionState.ready, account.view().execution_state);
-    try std.testing.expectEqual(contract.ErrorCode.account_mismatch, account.view().error_code);
+    commitPrepared(&account, &replacement_transition);
+    try std.testing.expectEqual(contract.AccountSessionState.authenticated, account.view().session_state);
+    try std.testing.expectEqual(contract.ExecutionState.none, account.view().execution_state);
+    try std.testing.expectEqualStrings("account-2", account.view().account_id);
+    try std.testing.expectEqualStrings("profile-2", account.view().profile_id);
+    try std.testing.expectEqualStrings("Other User", account.view().display_name);
+    try std.testing.expectEqual(@as(u64, 0), account.view().execution_generation);
+    try std.testing.expectEqual(contract.ErrorCode.none, account.view().error_code);
 }
 
 test "failed reconfiguration preserves committed selection and generation high watermark" {

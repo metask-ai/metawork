@@ -18,6 +18,11 @@ export function accountErrorText(
     case "oauth_state_mismatch":
     case "oauth_exchange_failed":
       return t("account.error.authorization");
+    case "token_refresh_failed":
+    case "metask_unauthorized":
+      return t("account.reauthentication.body");
+    case "account_mismatch":
+      return t("account.reauthentication_stale.body");
     case "metask_rate_limited":
     case "metask_service_unavailable":
       return t("account.error.service");

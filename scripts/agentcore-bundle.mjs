@@ -20,6 +20,7 @@ const targetPolicies = [
     rustTarget: "aarch64-apple-darwin",
     zigTarget: /^aarch64-macos\.(\d+\.\d+(?:\.\d+)?)\.\.\.[^-]+-none$/,
     library: "lib/libmetask_agentcore.a",
+    optimize: "ReleaseSafe",
     systemLibraries: [],
     lock: path.join("build_support", "agentcore-bundle.macos.lock.json"),
   },
@@ -33,6 +34,7 @@ const targetPolicies = [
     rustTarget: "x86_64-pc-windows-gnu",
     zigTarget: /^x86_64-windows\.[a-z0-9_]+\.\.\.[a-z0-9_]+-gnu$/,
     library: "lib/metask_agentcore.lib",
+    optimize: "ReleaseSmall",
     systemLibraries: ["advapi32", "crypt32"],
     lock: path.join("build_support", "agentcore-bundle.windows.lock.json"),
   },
@@ -315,7 +317,7 @@ export async function validateAgentCoreBundle(bundleRoot, options = {}) {
     "unsupported AgentCore Rust target",
   );
   requireValue(
-    manifest.build.optimize === "ReleaseSafe",
+    manifest.build.optimize === policy.optimize,
     "unsupported AgentCore optimize mode",
   );
   requireValue(

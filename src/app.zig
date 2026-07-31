@@ -542,7 +542,7 @@ const AccountCoordinator = struct {
         }
         const replacement: ExecutionReplacement = switch (command) {
             .select_model => .default,
-            .logout => .identity,
+            .reauthenticate, .logout => .identity,
             else => .none,
         };
         switch (replacement) {
@@ -769,6 +769,13 @@ const AccountCoordinator = struct {
         var fact = prepared.fact();
         if (fact.view.session_state == .signed_out or
             fact.view.session_state == .shutting_down)
+        {
+            self.public_catalog.clear();
+            self.candidate_public_catalog.clear();
+        }
+        if (self.workbench.executionReplacementPending() and
+            fact.view.operation == .none and
+            fact.view.execution_state == .none)
         {
             self.public_catalog.clear();
             self.candidate_public_catalog.clear();
@@ -1736,23 +1743,6 @@ const App = struct {
     ) void {
         const coordinator = self.account_coordinator orelse
             @panic("Account coordinator is not composed");
-        if (coordinator.account.currentIdentity()) |committed_identity| {
-            if (!std.mem.eql(
-                u8,
-                committed_identity.accountId(),
-                login.identity.accountId(),
-            ) or !std.mem.eql(
-                u8,
-                committed_identity.profileId(),
-                login.identity.profileId(),
-            )) {
-                self.completeAccountFailure(
-                    attempt_id,
-                    .account_mismatch,
-                );
-                return;
-            }
-        }
         const platform = if (self.account_platform) |*value|
             value
         else {
@@ -2817,6 +2807,54 @@ test "Account coordinator commits login and transactional reconfiguration gates"
     try std.testing.expectEqualStrings(
         "key-2",
         workbench.accountView().model_catalog_api_key_id,
+    );
+
+    try std.testing.expect(coordinator.refreshToken());
+    try std.testing.expect(effects.take().?.effect == .refresh_token);
+    var refresh_failed: account_api.WorkerCompletion = .{
+        .attempt_id = coordinator.account.activeAttempt().?,
+        .payload = .{ .failed = .fromCode(.token_refresh_failed) },
+    };
+    defer refresh_failed.deinit();
+    try std.testing.expect(coordinator.complete(&refresh_failed));
+    try std.testing.expectEqual(
+        account_contract.AccountSessionState.reauth_required,
+        workbench.accountView().session_state,
+    );
+    const reauthenticate = coordinator.commandSink().submit(.reauthenticate);
+    try std.testing.expect(reauthenticate.accepted);
+    try std.testing.expect(workbench.executionReplacementPending());
+    try std.testing.expect(effects.take().?.effect == .begin_oauth);
+    var reauthenticated: account_api.WorkerCompletion = .{
+        .attempt_id = reauthenticate.attempt_id.?,
+        .payload = .{ .authenticated = try .init(
+            "account-2",
+            "profile-2",
+            "Other User",
+        ) },
+    };
+    defer reauthenticated.deinit();
+    try std.testing.expect(coordinator.complete(&reauthenticated));
+    try std.testing.expect(!workbench.executionReplacementPending());
+    try std.testing.expectEqual(
+        account_contract.AccountSessionState.authenticated,
+        workbench.accountView().session_state,
+    );
+    try std.testing.expectEqual(
+        account_contract.ExecutionState.none,
+        workbench.accountView().execution_state,
+    );
+    try std.testing.expectEqualStrings(
+        "account-2",
+        workbench.accountView().account_id,
+    );
+    try std.testing.expectEqualStrings(
+        "profile-2",
+        workbench.accountView().profile_id,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        workbench.accountView().api_keys.len,
     );
 
     const logout = coordinator.commandSink().submit(.logout);

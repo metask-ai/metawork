@@ -193,11 +193,17 @@ try {
           catalog?.availability !== "degraded") ||
         !isOpaqueRevision(catalog.revision)
       )
-        return null;
+        throw new Error(
+          `Workspace Skill catalog is not ready: ${JSON.stringify(catalog)}`,
+        );
       const skill = catalog.skills.find(
         (item) => item.invocationName === "review",
       );
-      return skill ? { catalog, skill } : null;
+      if (!skill)
+        throw new Error(
+          `Workspace Skill catalog omitted review: ${JSON.stringify(catalog)}`,
+        );
+      return { catalog, skill };
     },
     commandTimeoutMs,
     "Workspace Skill catalog",
@@ -583,8 +589,14 @@ async function invokeBridge(command, payload) {
       // The runtime replaces this file, so another bridge call may win.
     }
   }
-  if (response && !response.ok)
-    throw new Error(`${command} failed: ${JSON.stringify(response.error)}`);
+  if (response && !response.ok) {
+    const error = new Error(
+      `${command} failed: ${JSON.stringify(response.error)}`,
+    );
+    error.bridgeCommand = command;
+    error.bridgeResponseError = response.error;
+    throw error;
+  }
   return response?.result ?? null;
 }
 
@@ -606,9 +618,28 @@ async function expectBridgeFailure(command, payload, context) {
 }
 
 async function snapshot() {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await readSnapshot();
+    } catch (error) {
+      const stale =
+        error?.bridgeCommand === "metawork.workbench.snapshot.chunk" &&
+        error?.bridgeResponseError?.code === "handler_failed" &&
+        error?.bridgeResponseError?.message === "StaleSnapshot";
+      if ((!stale && error?.retryableSnapshotRead !== true) || attempt >= 2)
+        throw error;
+    }
+  }
+}
+
+async function readSnapshot() {
   const descriptor = await invokeBridge("metawork.workbench.snapshot", {});
+  if (descriptor === null) {
+    const error = new Error("snapshot descriptor response was unavailable");
+    error.retryableSnapshotRead = true;
+    throw error;
+  }
   if (
-    !descriptor ||
     !/^[1-9][0-9]*$/.test(descriptor.snapshotId) ||
     !Number.isSafeInteger(descriptor.bytes) ||
     descriptor.bytes <= 0 ||

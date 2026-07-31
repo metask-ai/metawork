@@ -32,7 +32,7 @@ const paths: Record<IconName, React.ReactNode> = {
   ),
   "arrow-left": <path d="m14.5 6-6 6 6 6" />,
   close: <path d="m6.5 6.5 11 11m0-11-11 11" />,
-  minimize: <path d="M6 17.5h12" />,
+  minimize: <path d="M6 12h12" />,
   maximize: <rect x="6.5" y="6.5" width="11" height="11" rx="0.5" />,
   warning: <path d="M12 4 21 20H3L12 4Zm0 5.5v4.5m0 3h.01" />,
   account: <path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm7 8a7 7 0 0 0-14 0" />,

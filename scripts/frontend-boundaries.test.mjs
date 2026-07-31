@@ -125,6 +125,10 @@ test("Renderer command bars own the hidden-inset titlebar without stealing contr
     "utf8",
   );
   const css = await readFile(resolve(sourceRoot, "index.css"), "utf8");
+  const icons = await readFile(
+    resolve(sourceRoot, "components", "ui", "Icon.tsx"),
+    "utf8",
+  );
   const manifest = await readFile(
     new URL("../app.zon", import.meta.url),
     "utf8",
@@ -143,6 +147,16 @@ test("Renderer command bars own the hidden-inset titlebar without stealing contr
   assert.match(gate, /WindowControls/);
   assert.match(css, /\[data-platform="windows"\] \.window-controls/);
   assert.match(css, /--window-bar-height: 52px/);
+  assert.match(
+    css,
+    /\[data-platform="windows"\] \{[\s\S]*--window-bar-height: 40px/,
+  );
+  assert.match(
+    css,
+    /\[data-platform="windows"\] \.workbench-commandbar \{[\s\S]*padding-top: 0;[\s\S]*padding-bottom: 0;/,
+  );
+  assert.match(icons, /minimize: <path d="M6 12h12" \/>/);
+  assert.doesNotMatch(icons, /minimize:[^\n]*17\.5/);
   assert.match(
     css,
     /top: calc\(var\(--window-bar-height\) \+ env\(safe-area-inset-top, 0px\)\)/,

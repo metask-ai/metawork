@@ -115,7 +115,7 @@ Model catalog：
 
 其他 platform 当前 fail closed。production 不接受 Renderer、环境变量或任意 URL 覆盖。
 
-Account 同时保存 token 的 `account_id` 与当前 `profile.id`。macOS 将其写入 committed manifest；Windows 只将无 secret identity 写入 `account.json`。后者用于请求 header、catalog ownership 和 execution credential 归属；重认证身份不一致时不得沿用旧 execution。
+Account 同时保存 token 的 `account_id` 与当前 `profile.id`。macOS 将其写入 committed manifest；Windows 只将无 secret identity 写入 `account.json`。后者用于请求 header、catalog ownership 和 execution credential 归属。自动 refresh 与冷启动恢复必须用已提交 identity 校验远端结果，防止后台静默切换账号；用户显式完成 OAuth 重认证时则以本次 OAuth 返回的 token 与 profile identity 为准，不得再用旧 identity 否决登录。显式重认证通过 identity replacement gate 后原子替换本机 identity 和 token，清除旧默认 execution、API/model selection 与 catalog，再按新 identity 重新准备目录；旧 execution 不得与新账号混用。
 
 ## 6. macOS 双 family 崩溃一致性
 

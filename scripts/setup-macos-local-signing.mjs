@@ -63,13 +63,13 @@ function run(command, args, options = {}) {
 }
 
 export function xcodeContentsForDeveloperDirectory(developerDirectory) {
-  const normalized = path.resolve(developerDirectory);
-  const contents = path.dirname(normalized);
-  const application = path.dirname(contents);
+  const normalized = path.posix.resolve(developerDirectory);
+  const contents = path.posix.dirname(normalized);
+  const application = path.posix.dirname(contents);
   if (
-    path.basename(normalized) !== "Developer" ||
-    path.basename(contents) !== "Contents" ||
-    !path.basename(application).endsWith(".app")
+    path.posix.basename(normalized) !== "Developer" ||
+    path.posix.basename(contents) !== "Contents" ||
+    !path.posix.basename(application).endsWith(".app")
   ) {
     return null;
   }

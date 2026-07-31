@@ -44,6 +44,7 @@
 }
 
 [data-platform="windows"] {
+  --window-bar-height: 40px;
   --window-controls-leading: 0px;
   --window-controls-trailing: 0px;
 }
@@ -325,6 +326,25 @@ summary::-webkit-details-marker {
   min-height: 42px;
   margin: 0;
   padding: 0 18px;
+}
+
+.account-gate-signout-confirmation {
+  max-width: 390px;
+  margin-top: 12px;
+  padding: 12px 14px;
+  border: 1px solid #dfbdb7;
+  border-radius: 10px;
+  background: #fff8f7;
+  color: var(--color-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.account-gate-signout-confirmation span {
+  display: flex;
+  margin-top: 10px;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .account-gate-details {
@@ -1751,7 +1771,9 @@ summary::-webkit-details-marker {
 }
 
 [data-platform="windows"] .workbench-commandbar {
+  padding-top: 0;
   padding-right: 0;
+  padding-bottom: 0;
 }
 
 .icon-button {

@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { AccountView } from "../../bridge/contracts.ts";
 import {
@@ -25,6 +25,7 @@ type Props = {
   onBeginLogin: () => void;
   onReopenLogin: () => void;
   onReauthenticate: () => void;
+  onLogout: () => void;
   onCancel: () => void;
   onRetry: () => void;
   onSelectApiKey: (id: string) => void;
@@ -46,6 +47,7 @@ export function AccountGate({
   onBeginLogin,
   onReopenLogin,
   onReauthenticate,
+  onLogout,
   onCancel,
   onRetry,
   onSelectApiKey,
@@ -53,22 +55,54 @@ export function AccountGate({
 }: Props) {
   const { locale, setLocale, t } = useI18n();
   const titlebarGesture = useRef(new WindowTitlebarGesture()).current;
+  const signOut = useRef<HTMLButtonElement>(null);
+  const signOutCancel = useRef<HTMLButtonElement>(null);
+  const [confirmSignOut, setConfirmSignOut] = useState(false);
+
+  useEffect(() => {
+    if (confirmSignOut)
+      window.requestAnimationFrame(() => signOutCancel.current?.focus());
+  }, [confirmSignOut]);
+
   if (account.readiness === "ready") return null;
 
   const operation =
     account.operation === "none"
       ? null
       : t(`account.operation.${account.operation}`);
+  const reauthenticationRequired =
+    account.sessionState === "reauth_required" &&
+    account.primaryAction === "reauthenticate";
+  const identityMismatch =
+    reauthenticationRequired && account.errorCode === "account_mismatch";
+  const signInExpired =
+    reauthenticationRequired &&
+    (account.errorCode === "token_refresh_failed" ||
+      account.errorCode === "metask_unauthorized");
   const hasError =
     account.readiness !== "restart_required" &&
     account.errorCode !== "none" &&
     account.errorCode !== "user_cancelled";
-  const body = hasError
-    ? accountErrorText(account.errorCode, t)
-    : operation ||
-      (account.errorCode === "user_cancelled"
-        ? t("account.cancelled")
-        : t(`account.readiness.${account.readiness}.body`));
+  const body = identityMismatch
+    ? t("account.reauthentication_stale.body")
+    : signInExpired
+      ? t("account.reauthentication.body")
+      : hasError
+        ? accountErrorText(account.errorCode, t)
+        : operation ||
+          (account.errorCode === "user_cancelled"
+            ? t("account.cancelled")
+            : t(`account.readiness.${account.readiness}.body`));
+  const reauthenticationTitle = identityMismatch
+    ? t("account.reauthentication_stale.title")
+    : signInExpired
+      ? t("account.reauthentication.title")
+      : t("account.action_failed");
+
+  function closeSignOutConfirmation() {
+    setConfirmSignOut(false);
+    window.requestAnimationFrame(() => signOut.current?.focus());
+  }
 
   return (
     <main
@@ -149,7 +183,9 @@ export function AccountGate({
                     ? "connection.failed"
                     : "connection.contract_failed",
                 )
-              : t(`account.readiness.${account.readiness}.title`)}
+              : reauthenticationRequired
+                ? reauthenticationTitle
+                : t(`account.readiness.${account.readiness}.title`)}
           </h1>
           <p
             className="account-gate-body"
@@ -167,7 +203,13 @@ export function AccountGate({
 
           {!connectionFailed && account.displayName && (
             <p className="account-gate-identity">
-              <span>{t("account.signed_in")}</span>
+              <span>
+                {t(
+                  reauthenticationRequired
+                    ? "account.saved_account"
+                    : "account.signed_in",
+                )}
+              </span>
               <strong>{account.displayName}</strong>
             </p>
           )}
@@ -276,6 +318,16 @@ export function AccountGate({
                     {t("account.reauthenticate")}
                   </button>
                 )}
+                {reauthenticationRequired && (
+                  <button
+                    ref={signOut}
+                    className="text-button focus-ring"
+                    disabled={disabled}
+                    onClick={() => setConfirmSignOut(true)}
+                  >
+                    {t("account.logout_short")}
+                  </button>
+                )}
                 {account.canCancel && (
                   <button
                     className="text-button focus-ring"
@@ -297,6 +349,39 @@ export function AccountGate({
               </>
             )}
           </div>
+          {reauthenticationRequired && confirmSignOut && (
+            <div
+              className="account-gate-signout-confirmation"
+              role="group"
+              aria-labelledby="account-gate-title"
+              aria-describedby="account-gate-signout-confirmation-copy"
+              onKeyDown={(event) => {
+                if (event.key !== "Escape") return;
+                event.preventDefault();
+                closeSignOutConfirmation();
+              }}
+            >
+              <p id="account-gate-signout-confirmation-copy">
+                {t("account.logout_confirm")}
+              </p>
+              <span>
+                <button
+                  ref={signOutCancel}
+                  className="secondary-button focus-ring"
+                  onClick={closeSignOutConfirmation}
+                >
+                  {t("common.cancel")}
+                </button>
+                <button
+                  className="danger-button focus-ring"
+                  disabled={disabled}
+                  onClick={onLogout}
+                >
+                  {t("account.logout")}
+                </button>
+              </span>
+            </div>
+          )}
 
           {(connectionDiagnostic || account.safeDiagnostic) && (
             <details className="account-gate-details">

@@ -142,7 +142,7 @@ Workspace
 
 默认尺寸：
 
-- 一体化命令栏：52 px；
+- 一体化命令栏：macOS 52 px，Windows 40 px；
 - 左栏：248 px；
 - 左栏品牌区使用紧凑单行，只显示 `MetaWork` 字样，不把品牌区表现成第二层标题栏，也不重复使用首字母图标、产品说明或宣传副标题；
 - Inspector：打开时 304 px；审批、活动详情、usage 或真实结果只决定模块是否可用，不触发普通 Run 的自动开合。除新的 `Needs your attention` 可自动打开一次外，显隐由用户控制并在 Run terminal 后保持稳定；
@@ -169,6 +169,7 @@ Workspace
 
 - 命令栏是窗口交互层，不表现为独立横向标题栏：不使用贯穿全窗的底边或异色横带；左侧 Workspace/Task rail 的背景与竖分隔线必须延伸到窗口顶部，中央命令区与 Task 工作面使用同一 surface；
 - macOS 为系统交通灯保留左侧安全区；Windows system WebView 无法可靠显露 DWM glyph 时，命令栏提供唯一可见的最小化、最大化/还原与关闭 affordance，Host 在重新校验来源窗口后执行真实 native action；不得同时显示两套窗口按钮；
+- macOS 52 px、Windows 40 px 是各平台一体化窗口栏的最终布局高度。Windows 窗口按钮组必须完整落在 40 px 内，命令栏不得再用垂直 padding 把等高按钮组下移或扩张到布局行之外；最小化、最大化与关闭 glyph 使用同一视觉中心线，不能把最小化横线当作文字基线下沉；
 - 命令栏只包含左栏开关、当前 Task/Workspace 上下文、全局搜索和按需异常入口；`左栏开关` 只控制 Workspace/Task 导航，不兼任 Inspector 开关；
 - 命令栏空白背景在越过移动阈值后请求窗口拖拽；按钮、输入、选择框、链接、disclosure 和展开内容必须排除。Renderer 只提交 drag/control 意图；Host 以 App-owned 单一启动窗口 identity 和主线程校验受限 bootstrap chrome capability，使连接失败页仍能移动或关闭窗口，而不依赖 ProductDelivery 已连接。Windows 平台操作必须继续使用同一精确窗口身份，不能猜测当前活动窗口；当前不伪造跨平台双击标题栏语义；
 - 正常连接、恢复成功和普通操作成功不持续占据命令栏；只有同步失败、命令失败或其他确实需要用户行动的异常才显示状态入口；
@@ -724,7 +725,7 @@ MetaWork
 [ 使用 Metask 登录 ]
 ```
 
-首次启动不显示四步进度条，不要求用户点击“加载 API Key”，不出现 C1/C2、Provider target、generation 或 Keychain 等技术术语。后台准备超过正常感知时长时说明正在等待什么，但不伪造百分比。OAuth 已成功而目录准备失败时必须保持已登录 identity，提供 `重试` 或 Host-owned `在 Metask 中管理`，不能退回未登录文案。
+首次启动不显示四步进度条，不要求用户点击“加载 API Key”，不出现 C1/C2、Provider target、generation 或 Keychain 等技术术语。后台准备超过正常感知时长时说明正在等待什么，但不伪造百分比。OAuth 已成功而目录准备失败时必须保持已登录 identity，提供 `重试` 或 Host-owned `在 Metask 中管理`，不能退回未登录文案。Host 发布 `reauth_required` 时，身份行标为“已保存账号”并以“重新登录”为主动作；`token_refresh_failed` 或 `metask_unauthorized` 明确显示“登录已过期”，后台恢复发现 `account_mismatch` 时则说明本机登录状态需要更新。显式重新登录成功后以本次登录账号为准，界面不得要求用户匹配旧缓存账号。Gate 同时提供“退出登录”次动作，但删除本机凭据前必须二次确认，并支持 Escape 取消与焦点恢复。
 
 冷启动恢复期间使用稳定的品牌与恢复状态，不先渲染一套全部 disabled 的 Workbench。恢复确认 `signed_out` 后显示登录；确认 `execution_ready` 后直接进入 Workbench；确认 `account_only` 后继续目录准备。
 
@@ -921,7 +922,7 @@ MetaWork 采用“明亮工作台 + 紫色任务流”的桌面工具方向。�
 3. 用户可以采取什么动作；
 4. 技术详情入口。
 
-首次启动 Account 错误必须保留已经完成的 OAuth identity，并提供与失败语义匹配的 `重试`、`重新登录`、`重新打开登录页面`、`取消`、`在 Metask 中管理` 或 `重启应用`。进入 Workbench 后的重认证或目录错误不得清空 Workspace、Task 或草稿。普通异常不能留下无动作 spinner；只有持久化结果不确定等明确 fail-closed 边界可以要求重启。
+首次启动 Account 错误必须保留已经完成的 OAuth identity，并提供与失败语义匹配的 `重试`、`重新登录`、`重新打开登录页面`、`取消`、`在 Metask 中管理` 或 `重启应用`。`authenticated` 下的目录失败显示“已登录”并提供重试；`reauth_required` 统一把 identity 标为“已保存账号”，凭据过期显示“登录已过期”，后台 identity 校验失败显示“登录状态需要更新”，两者都由显式重新登录替换为本次登录账号。进入 Workbench 后的重认证或目录错误不得清空 Workspace、Task 或草稿。普通异常不能留下无动作 spinner；只有持久化结果不确定等明确 fail-closed 边界可以要求重启。
 
 工具失败但 Agent 已恢复时不能把整个 Task 标记为失败。任务级失败才进入左栏 Failed 状态。
 

@@ -1499,6 +1499,7 @@ export default function App() {
         onReauthenticate={() =>
           void runAccountCommand(() => client.reauthenticate())
         }
+        onLogout={() => void runAccountCommand(() => client.logout())}
         onCancel={() => void cancelAccountOperation()}
         onRetry={() =>
           void runAccountCommand(() => client.refreshAccountCatalog())

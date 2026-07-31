@@ -702,7 +702,7 @@ export function SettingsPage({
                   }}
                 >
                   <p id="settings-signout-confirmation-copy">
-                    {t("settings.signout_confirm")}
+                    {t("account.logout_confirm")}
                   </p>
                   <span>
                     <button
