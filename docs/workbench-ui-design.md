@@ -107,6 +107,7 @@ Workspace
 | Workspace            | 工作区       | 本地目录和任务归属范围             |
 | Task                 | 任务         | 用户可持续补充的工作上下文         |
 | New task             | 新建任务     | 不使用 New session                 |
+| Skills               | 技能         | 已发现 Skill 的启用状态与健康      |
 | Account & models     | 账号与模型   | API、默认模型、刷新与重新认证      |
 | Model                | 模型         | 新 Task 的执行模型，不称模式       |
 | Inspector            | 检查器       | 按需活动摘要与详情，不称 Monitor   |
@@ -182,13 +183,13 @@ Workspace
 
 平台文案、路径、快捷键和文件管理器动作按 OS 切换。
 
-## 5. 左栏：Workspace 与 Task
+## 5. 左栏：能力、Workspace 与 Task
 
-> Capability：**混合**。当前 Renderer 合同已提供独立 Workspace projection，当前 shell 已提供稳定 New task、Workspace/Task 导航、行动优先分组和左下角账号入口；跨 Host Task persistence 仍是目标能力。
+> Capability：**混合**。当前 Renderer 合同已提供独立 Workspace projection，当前 shell 已提供稳定 New task、Workspace/Task 导航、行动优先分组和左下角账号入口；Skill 中心必须等 AgentCore 启用/禁用 policy 与管理 projection 完整落地后才显示，跨 Host Task persistence 仍是目标能力。
 
 ### 5.1 Workspace 切换
 
-登录后的左栏从上到下只承担四类稳定职责：品牌/窗口识别、New task、Workspace/Task 导航、左下角账号入口。搜索由标题栏或命令面板提供，不在窄侧栏重复占据首要位置。
+登录后的左栏从上到下只承担五类稳定职责：品牌/窗口识别、New task、已接通的全局能力入口、Workspace/Task 导航、左下角账号入口。搜索由标题栏或命令面板提供，不在窄侧栏重复占据首要位置。
 
 当前 Workspace 显示名称和必要时的路径：
 
@@ -208,7 +209,86 @@ Invoices
 - 移除 Workspace 不删除历史 Task 或真实文件。入口只在当前 Workspace 可用时出现，并先用就地非模态确认说明“运行中的 Task 会停止、不会删除本地文件和历史记录”；确认打开时聚焦安全的取消动作，`Escape` 取消并把焦点还给触发入口，确认后把焦点移到不会随最后一个 Workspace 消失的稳定区标题。随后 Host 把 Workspace 标记为 `removing`、推进 epoch 并拒绝新 Task/Run，导航持续显示进行中状态；全部收口后才撤销当前 Host authorization 并退出活动导航。失败时 Workspace 保持可用、显示“移除未完成，部分任务可能已经停止”并允许重试，不能静默恢复得像什么都没发生；
 - 再次打开历史 Task 只保证可浏览记录；需要访问原目录时重新选择或授权，能否继续执行还必须服从 §6.4 的 Conversation 与 execution binding 规则。
 
-### 5.2 Task 分组与排序
+### 5.2 全局能力入口
+
+> Capability：**目标**。当前 AgentCore 已提供 Skill discovery、catalog 与 typed Run，但尚未提供启用/禁用 policy；在该 capability 到位前，本节入口和对应页面必须整体隐藏。
+
+全局能力入口位于 `New task` 下方、Workspace 区标题上方。它使用纵向紧凑导航行，不使用窄侧栏中的卡片宫格：
+
+```text
+MetaWork
+
+[ +  New task                         ⌘N ]
+
+  ◇  Skills
+  ◷  Automations        [仅 capability 到位后]
+  ◎  Connections        [仅 capability 到位后]
+
+Workspace                              Add
+```
+
+- `New task` 保持唯一填充 `brand-600` 的持续高权重动作；能力入口使用中性文字、图标和 hover 背景，不能与创建动作竞争；
+- 当前能力 route 使用 `brand-100` 弱背景、`brand-700` 图标/文字和左侧 2 px 选中标识，并设置 `aria-current="page"`；选中不能只靠颜色；
+- 一个能力可用时只显示一行；后续能力按真实 owner 与使用频率增加，不预留 disabled 占位、不用 `More` 收纳尚不存在的产品；
+- 点击能力入口保留完整 Workbench 左栏和当前 Workspace 选择，只替换中央 route；点击 New task、Workspace 或 Task 回到对应 Workbench route。Settings 仍是独立全局 route，进入后按 §14.2 隐藏 Workspace/Task 左栏；
+- 能力页面打开期间后台 Task 继续运行，左栏的 `Needs your attention`、Running 与失败信号继续更新。
+
+### 5.3 Skill 中心
+
+> Capability：**目标**。页面只在 AgentCore 同时提供 management catalog、effective enabled state、optimistic policy mutation 和后续 Run 强制能力后显示；当前不可用时不显示入口、只读替身、disabled toggle 或静态示例数据。
+
+Skill 中心只有一个工作：控制 AgentCore 已发现的 Skill 是否可供 MetaWork 后续 Run 使用。它不是插件商店、文件浏览器或 Skill 编辑器，不提供安装、卸载、更新、创建、编辑、打开物理目录或查看 `SKILL.md` body。
+
+中央工作面使用紧凑标题、scope 切换、搜索和连续列表：
+
+```text
+Skills                                                   [ Refresh ]
+Choose which skills MetaWork can use.
+To change a skill, ask MetaWork in a task.
+
+[ Current workspace · metawork ]  [ Personal ]  [ Managed · when present ]
+                                                   [ Search skills ]
+
+Workspace skills · 3
+──────────────────────────────────────────────────────────────────────
+code-review
+Review code changes for correctness, security, and maintainability.
+Workspace · Agent Skills                                  [ Enabled ]
+
+release-check
+Check versions, tests, and build state before release.
+Workspace · Agent Skills                                  [ Enabled ]
+```
+
+布局与视觉规则：
+
+- 页面保留 Workbench 左栏；中央标题使用 22–26 px 系统 Display 字体，一句短说明后立即进入 controls，不使用营销 Hero、统计卡、渐变或装饰插画；
+- `Current workspace` 与 `Personal` 是稳定单选 scope；只有 AgentCore management catalog 实际发布 Enterprise/managed winner 时才追加 `Managed`。Workspace scope 使用左栏当前选择并在标签内显示其 display name；没有 Workspace 时保留 Personal 可用，Workspace 面显示选择指引而不是空 disabled 列表；Managed 项显示 AgentCore 发布的 locked reason，不提供可交互开关；
+- 搜索只过滤已提交 management projection 中的名称与 description，不读取 Skill body；`Refresh` 发起 Host-owned 显式刷新并保留最后一次已提交列表，不能用 Renderer 文件监听或目录扫描替代；
+- Skill 使用连续列表行，不逐项卡片化。名称是主信息，description 是次级信息，来源使用 `Workspace / Personal` 与 AgentCore 发布的安全 source kind 表达；不显示 canonical path、user home、raw issue、内部 policy 或 catalog handle；
+- scope 分组使用短标题和水平 rule 表达来源，不把列表连接成假的执行时间线。紫色只用于当前 scope、键盘焦点与已启用控件，健康状态继续使用独立语义色和文字；
+- 常规桌面内容列最大阅读宽度约 880 px；列表正文 13–15 px，次级文案不小于 12 px，行高与点击区至少 40 px。窄窗将搜索换到 scope 下方，名称、来源与开关按两行排列，不产生水平滚动；
+- 页面只显示 AgentCore management catalog 已按 canonical priority 解析出的每个 policy scope winner，不枚举 raw shadow candidate，也不在 Renderer 重算目录优先级。当前 AgentCore 的同 scope source 顺序为 `.agents` 高于 `.metacodes`、`.metacodes` 高于 `.claude`，Workspace winner 高于 Personal winner；后续兼容目录的顺序仍由 AgentCore 合同发布。被当前 Workspace 同名项 shadow 的 Personal winner 仍显示在 Personal scope，并以不可调用的 shadow 状态说明影响；禁用 Workspace winner 后该 invocation 保持不可用，不自动显露或启用较低优先级 candidate。equal-priority conflict 作为不可调用的 AgentCore issue 显示，不能包装成多个可切换行；
+- Skill 名称、description、厂商 source label 和用户内容不翻译；`Skills / 技能`、scope、状态、动作与错误文案进入完整 locale catalog。
+
+状态与 mutation：
+
+- `Enabled / Disabled` 是 Host 已持久化并经 AgentCore binding 提交的 effective state，不是 Renderer preference。开关提交 stable management identity、scope、expected policy generation 与目标状态；Host 必须重新校验 account/Workspace ownership、当前 generation、Workspace authorization 和 AgentCore management membership；
+- 开关是可逆且作用明确的操作，不使用确认 Modal。pending 只锁定对应行并显示 `Enabling… / Disabling…`；其他 Skill、导航、历史阅读和后台 Task 不被冻结；
+- 禁用不移动、改名或删除目录，也不修改 `SKILL.md`。已经 admission 的 Run 默认继续完成；mutation 成功后立即阻止该 scope 的新 Skill Run，使引用旧 revision 的 draft 进入 stale，并只通过 canonical snapshot 宣布完成；
+- Workspace Skill 的开关只作用于所属 Workspace；Personal Skill 的开关作用于当前 MetaWork 用户范围。首期不提供“只在某一个 Workspace 禁用 Personal Skill”的 override matrix；
+- invalid、unavailable、conflict、shadow 信息、locked policy 和 policy rejection 与 disabled 分开显示。不能把解析失败或 shadow candidate 包装成 Disabled，也不能允许 Renderer 用开关掩盖 AgentCore issue；失败在对应行或 scope 级 issue 区说明可执行恢复动作，保留已提交状态。Host policy persistence 损坏或不可用时页面保留可证明的只读管理事实、关闭全部 mutation，并明确说明 Skill 暂不可用于新 Run；不能把未知状态默认成 Enabled；
+- catalog loading 保留最后一次 committed 列表和只读状态；首次无 snapshot 时显示明确 loading。刷新失败保留旧列表并提供 Retry，不清空成“没有 Skill”；
+- 空 catalog 说明当前 scope 未发现 Skill。Workspace scope 可以提供 `New task` 导航动作，并说明可在普通任务中请求 MetaWork 创建 `.agents/skills` 下的 Skill；该动作只打开带普通 Text draft 的 New task，不创建专用 Skill mutation；
+- 创建和修改 Skill 始终走普通 Text Run 与 AgentCore built-in Read/Edit。Workspace Skill 服从既有 Workspace authority；用户级 Skill 只有在目标目录被用户明确作为 trusted Workspace 授权后才能修改。当前 Run 继续使用已绑定 snapshot，修改成功后仍需显式 refresh，页面不自动热替换 Task catalog。
+
+键盘与焦点：
+
+- scope 使用 tablist/tab 或等价单选语义，搜索使用 `type="search"`，列表使用有标签的 region/list，开关使用原生或 headless switch 语义并发布可读的名称、scope 与状态；
+- 进入 route 后焦点落在页面标题；刷新与 mutation 完成不抢焦点。行内失败通过邻近 `role="status"` / `role="alert"` 宣布，删除搜索字符不会把焦点移到第一项；
+- 点击 `New task`、Workspace 或 Task 离开页面后，返回 Skill 中心应恢复上次 scope 与搜索词；不持久化打开行或瞬时 pending 状态。
+
+### 5.4 Task 分组与排序
 
 Task 按行动优先级分组，而不是全部按时间混排：
 
@@ -226,7 +306,7 @@ Recent
 - 不能只用绿点、灰点区分状态。
 - `New task` 是左栏唯一持续高权重的创建动作；Workspace 的添加和管理进入切换器，不与其堆成多个同等级按钮。
 
-### 5.3 创建、命名、归档与删除
+### 5.5 创建、命名、归档与删除
 
 - 点击 `New task` 只打开空白任务页；第一次发送后才创建真实 Task，避免空记录；
 - 标题根据首条用户指令自动生成，用户可以重命名；
@@ -235,7 +315,7 @@ Recent
 - 删除确认必须明确说明文件不会被删除；
 - queued、running、waiting_user 或 stopping 的 Task 不能归档或删除；必须先停止或明确取消并等待真实 terminal 结果。
 
-### 5.4 左下角账号入口
+### 5.6 左下角账号入口
 
 `execution_ready` 后，左栏底部固定显示 Metask identity：头像或首字母、显示名和简短连接状态。它是全局账号入口，不显示完整 API Key，也不承担模型快速选择。
 
@@ -788,7 +868,7 @@ Account operation 在设置中的投影如下：
 | cancel / terminal failure | 恢复已提交默认配置，不保留失效候选                                 | 恢复已提交默认配置，不保留失效候选             | 取消明确说明未应用更改；失败说明原因与旧默认仍有效，不能留下永久 disabled selector |
 | `reauth_required`         | 保留脱敏事实但禁用 catalog mutation                                | 保留脱敏事实但禁用 catalog mutation            | 把重新认证作为当前恢复动作，不能清空 Workspace、Task 或已有 execution 事实         |
 
-技能、连接器、定时任务和 IM 频道只有在真实接通并形成清晰产品 owner 后才进入导航；未接通时不放置假入口，也不照搬其他 Agent 产品的信息架构。
+Skill 中心按 §5.2–§5.3 进入 Workbench 一级能力导航；连接器、定时任务和 IM 频道仍只有在真实接通并形成清晰产品 owner 后才进入导航。未接通时不放置假入口，也不照搬其他 Agent 产品的信息架构。
 
 ## 15. 国际化
 
