@@ -185,7 +185,7 @@ Workspace
 
 ## 5. 左栏：能力、Workspace 与 Task
 
-> Capability：**混合**。当前 Renderer 合同已提供 MetaWork 顶层与 Workspace/Task 分离的 revision 4 Skill catalog projection，当前 shell 已提供稳定 New task、Workspace/Task 导航、行动优先分组和左下角账号入口；只读 Skill 中心与进程内定时任务复用这些现有能力，跨 Host Task/Scheduled Task persistence 仍是目标能力。
+> Capability：**当前**。Renderer 合同提供 MetaWork 顶层与 Workspace/Task 分离的 revision 4 Skill catalog projection，shell 提供稳定 New task、Workspace/Task 导航、行动优先分组和左下角账号入口；只读 Skill 中心与持久定时任务都作为同级全局能力进入该 shell。
 
 ### 5.1 Workspace 切换
 
@@ -211,7 +211,7 @@ Invoices
 
 ### 5.2 全局能力入口
 
-> Capability：**当前**。Skill 入口只依赖现有 AgentCore revision 4 discovery/catalog 与 Workspace projection；定时任务入口依赖 Workbench-owned schedule projection、timer 与真实 Task admission。
+> Capability：**当前**。Skill 入口只依赖现有 AgentCore revision 4 discovery/catalog；定时任务入口依赖 Workbench-owned 持久 schedule projection、后台 Host timer/notification 与真实 Task admission。
 
 `新建任务`、`技能` 与 `定时任务` 位于 Workspace 区标题上方的同一个纵向紧凑菜单，不使用窄侧栏中的卡片宫格，也不通过额外分组间距制造父子关系：
 
@@ -284,35 +284,42 @@ release-notes · Invalid definition
 
 ### 5.4 定时任务
 
-> Capability：**当前进程内**。Workbench 拥有计划定义、固定间隔计算、timer admission 与 occurrence；AgentCore 只执行触发后创建的真实 Run。跨重启持久化、系统级后台唤醒、通知和 missed-run recovery 尚未实现。
+> Capability：**当前**。Workbench 拥有持久计划定义、recurrence、后台 timer admission、missed-run reconciliation、occurrence history 与通知事实；AgentCore 只执行触发后创建的真实 Run。主窗口关闭后 Host 继续在后台运行，重新启动后从 canonical store 恢复。
 
-定时任务是与 Skill 中心同级的全局管理页，不跟随当前 Workspace route；每条计划必须显式绑定一个已授权 Workspace。页面的单一工作是让用户看清“什么将在何时运行、最近发生了什么、哪里需要处理”。
+定时任务是与 Skill 中心同级的全局自动化页，不跟随当前 Workspace route，也不要求先创建交互式 Task。Task 回答“这一次做了什么”，Schedule 回答“何时自动触发”，Skill 回答“可选地如何执行”；页面不把三者做成父子信息架构。
+
+没有已安排任务时，首屏先帮助用户找到值得自动化的工作，不展示空白工程表单：
 
 ```text
-定时任务                                                   [ 新建 ]
-仅在 MetaWork 运行时触发。
+[ 搜索已安排任务                                              ]
 
-[ 全部 ] [ 已启用 ] [ 已暂停 ] [ 需要处理 ]
+建议
 
-每日项目总结
-每天，从 8 月 1 日 09:00 开始 · metawork · 普通指令
-下一次：明天 09:00                    已启用          ···
+◌  每日工作简报   工作日 8:00
+   汇总今天的安排、待办和需要关注的工作
 
-每周代码审查
-每 7 天，从周五 18:00 开始 · metawork · /review
-最近：已完成 · 打开任务                已启用          ···
+▣  每周项目回顾   周五 16:00
+   将本周进展、决定和后续行动整理成状态更新
+
++  跟进监控       工作日 9:00
+   定期检查指定事项，只在出现值得关注的变化时通知
+
++  试试自己的任务
 ```
 
-- 页面沿用 Skill 中心最大阅读宽度、标题尺度和连续列表，不使用统计卡、流程画布、营销 Hero 或装饰插画；`下一次`、`需要处理` 和真实 Task 链接构成唯一视觉重点；
-- 列表行显示名称、结构化 recurrence 的本地化摘要、Workspace、Text/Skill 类型、下一次运行和最近 occurrence。名称点击或 `Edit` 打开右侧 376–416 px 编辑面板；窄窗使用整页编辑；
-- 顶部过滤只改变 Renderer 展示，不改变 Host state。进入 route 后焦点落在标题；打开编辑器后落在名称输入，关闭后回到原列表行；
-- 编辑器按 `要做什么`、`在哪里运行`、`什么时候运行`、`执行规则` 排列。Text 使用有界多行输入；Skill 使用目标 Workspace current catalog 和 positional arguments；计划只提供一次性或固定间隔，不显示尚未实现的 cron、IANA timezone 或自然语言解析；
-- 时间控件提交 Host 可验证的 Unix seconds、明确起点和可选 interval seconds；Renderer 显示未来三次预览，但该预览不拥有 timer 或 occurrence；
+已有定义时，同一个搜索框过滤标题、说明和可见 Skill 名称；下面按 `进行中 / 需要处理 / 已暂停 / 已完成` 分区呈现连续列表。建议仍可从 `新建` 流程访问，不与用户定义混在同一状态分区。
+
+- 建议行是可执行模板，不是静态示例。整行点击进入创建确认层，预填任务说明、recurrence 和通知；`试试自己的任务` 先聚焦自然语言说明，再进入同一确认层，不建立第二种创建协议；
+- 页面沿用 Skill 中心最大阅读宽度与克制的连续列表，不使用统计卡、流程画布或常驻左右分栏。每行显示识别图标、名称、自然语言计划摘要、短说明、下一次/最近结果；hover 才显示 `···`，键盘 focus 时动作同样可见；
+- 创建/编辑使用右侧 drawer，窄窗切为整页。按 `任务内容`、`运行时间`、`可选上下文`、`结果通知` 排列；Workspace 和 Skill 都是可选高级上下文，不在空状态首屏要求用户理解它们；
+- 时间选项优先呈现一次、每小时、每天、工作日、每周与每月，并明确本地 timezone；高级固定间隔可折叠，Renderer 只提交 Host 可验证的结构化 recurrence，不拥有 timer 或 occurrence；
+- 保存前提供一句完整确认摘要，例如“每个工作日 08:00 运行「每日工作简报」，结果完成后通知我”；provider、generation、Unix seconds 和 catalog revision 不进入产品文案；
 - 新建、保存、暂停/恢复、立即运行和删除使用 Host typed result 与 optimistic `scheduledTaskEpoch`。命令 timeout 后先刷新 canonical snapshot，不自动重放；
-- 删除计划不停止或删除已经创建的真实 Task；`立即运行` 也通过同一 occurrence 与 Task admission，不能建立测试/手动专用路径；
-- 上一次真实 Task 仍 non-terminal 时，自动 occurrence 显示 `已跳过：上一次仍在运行`；执行配置、Workspace 或 Skill binding 变化时显示 `需要处理`，并要求用户编辑确认后恢复；
-- 空状态说明计划只在 MetaWork 运行时有效并提供 `新建定时任务`；无 Workspace 时动作先引导用户选择 Workspace，不创建未绑定定义；
-- `仅在 MetaWork 运行时触发` 是持续可见的产品限制，不藏在 tooltip；退出后计划定义不会恢复，不能用通知、后台或持久化文案暗示相反事实。
+- 点击计划打开 detail drawer：上半部是定义与下一次运行，下半部是有界运行历史。每个 occurrence 链接到其真实 Task，并显示完成、失败、已跳过、延迟或等待处理；结果历史不复制 Task timeline；
+- 删除计划不停止或删除已经创建的真实 Task；`立即运行` 也通过同一 occurrence 与 Task admission，不能建立测试/手动专用路径；上一次真实 Task 仍 non-terminal 时显示 `已跳过：上一次仍在运行`；
+- 执行配置、Workspace authority 或 Skill binding 变化时显示 `需要处理`，并要求用户编辑确认；需要 Agent permission/question 的 occurrence 链接到真实请求并发出系统通知，不把等待伪装成 schedule failure；
+- 页面不再显示“仅在 MetaWork 运行时触发”限制条。窗口关闭时 MetaWork 留在系统后台并继续计划；显式退出通过托盘动作完成并在确认中说明影响，重启后定义与触发游标从 Host store 恢复；
+- 搜索使用 `type="search"`；分区是带可访问名称的 region/list；模板行、任务行和 overflow 动作都有明确 button 语义。drawer 打开后焦点进入标题/说明，关闭回到原触发行；运行历史更新不抢焦点。
 
 ### 5.5 Task 分组与排序
 
