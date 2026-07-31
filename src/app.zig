@@ -23,6 +23,7 @@ const agent_event_notification_timeout: std.Io.Duration = .fromMilliseconds(50);
 const host_worker_count = 4;
 const workbench_snapshot_capacity = bridge_api.snapshot_max_bytes;
 const account_refresh_timer_id: u64 = 0x4d57_4143_4354_5246;
+const scheduled_task_timer_id: u64 = 0x4d57_5343_4844_544b;
 const account_refresh_skew_seconds: i64 = 60;
 const account_refresh_retry_ns: u64 = 30 * std.time.ns_per_s;
 const FrontendMode = bridge_api.policy.Mode;
@@ -1852,6 +1853,14 @@ const App = struct {
                     self.onAccountRefreshTimer();
                     return;
                 }
+                if (timer.id == scheduled_task_timer_id) {
+                    if (self.workbench) |workbench| {
+                        workbench.onScheduledTaskTimer();
+                        if (self.dispatcher) |dispatcher|
+                            try dispatcher.emitWorkbenchChanged();
+                    }
+                    return;
+                }
                 if (self.dispatcher != null and
                     self.dispatcher.?.onTimer(timer.id))
                 {
@@ -1990,6 +1999,41 @@ const App = struct {
     fn platformCancelTimer(context: ?*anyopaque, timer_id: u64) anyerror!void {
         const self: *@This() = @ptrCast(@alignCast(context.?));
         try (self.platform_services orelse return error.RuntimeUnavailable).cancelTimer(timer_id);
+    }
+
+    fn scheduledTaskNow(context: ?*anyopaque) ?u64 {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        const now = wallUnixSeconds(self.io) orelse return null;
+        return @intCast(now);
+    }
+
+    fn armScheduledTaskTimer(
+        context: ?*anyopaque,
+        due_unix_seconds: u64,
+    ) bool {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        const now = scheduledTaskNow(context) orelse return false;
+        const delay_seconds = if (due_unix_seconds > now)
+            due_unix_seconds - now
+        else
+            1;
+        const delay_ns = std.math.mul(
+            u64,
+            delay_seconds,
+            std.time.ns_per_s,
+        ) catch return false;
+        (self.platform_services orelse return false).startTimer(
+            scheduled_task_timer_id,
+            delay_ns,
+            false,
+        ) catch return false;
+        return true;
+    }
+
+    fn cancelScheduledTaskTimer(context: ?*anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        if (self.platform_services) |services|
+            services.cancelTimer(scheduled_task_timer_id) catch {};
     }
 
     fn platformShowOpenDialog(
@@ -2290,6 +2334,13 @@ pub fn run(init: std.process.Init) !void {
             },
             .directories = .{
                 .canonical_user_home = canonical_user_home,
+            },
+            .schedule_timer = .{
+                .context = &app,
+                .enabled = true,
+                .now_unix_seconds = App.scheduledTaskNow,
+                .arm = App.armScheduledTaskTimer,
+                .cancel = App.cancelScheduledTaskTimer,
             },
         },
     );

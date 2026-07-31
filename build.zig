@@ -314,6 +314,11 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .target = target,
         .optimize = root_module.optimize,
     });
+    const scheduled_tasks = b.createModule(.{
+        .root_source_file = b.path("src/workbench/scheduled_tasks.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
     const projection = b.createModule(.{
         .root_source_file = b.path("src/workbench/projection.zig"),
         .target = target,
@@ -322,6 +327,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     projection.addImport("metawork_agent", agent);
     projection.addImport("metawork_account_contract", account_contract);
     projection.addImport("workbench_executor", executor);
+    projection.addImport("workbench_scheduled_tasks", scheduled_tasks);
     projection.addImport(
         "build_options",
         existingImport(
