@@ -42,6 +42,11 @@
             .{ .name = "metawork.tasks.rename", .origins = .{"zero://app"} },
             .{ .name = "metawork.tasks.archive", .origins = .{"zero://app"} },
             .{ .name = "metawork.tasks.delete", .origins = .{"zero://app"} },
+            .{ .name = "metawork.scheduledTasks.create", .origins = .{"zero://app"} },
+            .{ .name = "metawork.scheduledTasks.update", .origins = .{"zero://app"} },
+            .{ .name = "metawork.scheduledTasks.setEnabled", .origins = .{"zero://app"} },
+            .{ .name = "metawork.scheduledTasks.runNow", .origins = .{"zero://app"} },
+            .{ .name = "metawork.scheduledTasks.delete", .origins = .{"zero://app"} },
         },
     },
     .frontend = .{

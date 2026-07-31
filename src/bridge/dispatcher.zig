@@ -149,6 +149,11 @@ pub const Dispatcher = struct {
             .{ .name = commands.rename_task, .function = renameTask },
             .{ .name = commands.archive_task, .function = archiveTask },
             .{ .name = commands.delete_task, .function = deleteTask },
+            .{ .name = commands.create_scheduled_task, .function = createScheduledTask },
+            .{ .name = commands.update_scheduled_task, .function = updateScheduledTask },
+            .{ .name = commands.set_scheduled_task_enabled, .function = setScheduledTaskEnabled },
+            .{ .name = commands.run_scheduled_task_now, .function = runScheduledTaskNow },
+            .{ .name = commands.delete_scheduled_task, .function = deleteScheduledTask },
         };
         inline for (product_specs, 0..) |spec, index| self.registered_handlers[index] = .{
             .name = spec.name,
@@ -1004,6 +1009,165 @@ pub const Dispatcher = struct {
         return std.fmt.bufPrint(output, "{{\"taskId\":\"{d}\",\"deleted\":true}}", .{task_id});
     }
 
+    fn createScheduledTask(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayloadWithLimit(
+            handlers.ScheduledTaskMutation,
+            invocation.request.payload,
+            128 * 1024,
+        );
+        defer parsed.deinit();
+        var input = try handlers.parseTaskRunInput(parsed.value.input);
+        defer input.deinit();
+        const definition = try scheduledTaskDefinition(
+            parsed.value.title,
+            parsed.value.workspaceId,
+            parsed.value.expectedWorkspaceEpoch,
+            parsed.value.expectedExecutionGeneration,
+            input.value,
+            parsed.value.recurrence,
+        );
+        const workbench = try self.requireWorkbench();
+        const scheduled_task_id = try workbench.createScheduledTask(definition);
+        const epoch = try workbench.scheduledTaskEpoch(scheduled_task_id);
+        self.notifyCommitted();
+        return std.fmt.bufPrint(
+            output,
+            "{{\"scheduledTaskId\":\"{d}\",\"epoch\":\"{d}\",\"accepted\":true}}",
+            .{ scheduled_task_id, epoch },
+        );
+    }
+
+    fn updateScheduledTask(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayloadWithLimit(
+            handlers.ScheduledTaskUpdate,
+            invocation.request.payload,
+            128 * 1024,
+        );
+        defer parsed.deinit();
+        var input = try handlers.parseTaskRunInput(parsed.value.input);
+        defer input.deinit();
+        const scheduled_task_id =
+            try handlers.parseWireId(parsed.value.scheduledTaskId);
+        const expected_epoch = try handlers.parseWireId(parsed.value.expectedEpoch);
+        const definition = try scheduledTaskDefinition(
+            parsed.value.title,
+            parsed.value.workspaceId,
+            parsed.value.expectedWorkspaceEpoch,
+            parsed.value.expectedExecutionGeneration,
+            input.value,
+            parsed.value.recurrence,
+        );
+        const workbench = try self.requireWorkbench();
+        try workbench.updateScheduledTask(
+            scheduled_task_id,
+            expected_epoch,
+            definition,
+        );
+        const epoch = try workbench.scheduledTaskEpoch(scheduled_task_id);
+        self.notifyCommitted();
+        return std.fmt.bufPrint(
+            output,
+            "{{\"scheduledTaskId\":\"{d}\",\"epoch\":\"{d}\",\"accepted\":true}}",
+            .{ scheduled_task_id, epoch },
+        );
+    }
+
+    fn setScheduledTaskEnabled(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(
+            handlers.ScheduledTaskEnable,
+            invocation.request.payload,
+        );
+        defer parsed.deinit();
+        const id = try handlers.parseWireId(parsed.value.scheduledTaskId);
+        const epoch = try handlers.parseWireId(parsed.value.expectedEpoch);
+        const workbench = try self.requireWorkbench();
+        try workbench.setScheduledTaskEnabled(id, epoch, parsed.value.enabled);
+        const next_epoch = try workbench.scheduledTaskEpoch(id);
+        self.notifyCommitted();
+        return std.fmt.bufPrint(
+            output,
+            "{{\"scheduledTaskId\":\"{d}\",\"epoch\":\"{d}\",\"enabled\":{}}}",
+            .{ id, next_epoch, parsed.value.enabled },
+        );
+    }
+
+    fn runScheduledTaskNow(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(
+            handlers.ScheduledTaskIdentity,
+            invocation.request.payload,
+        );
+        defer parsed.deinit();
+        const id = try handlers.parseWireId(parsed.value.scheduledTaskId);
+        const epoch = try handlers.parseWireId(parsed.value.expectedEpoch);
+        const task_id = try (try self.requireWorkbench()).runScheduledTaskNow(
+            id,
+            epoch,
+        );
+        self.notifyCommitted();
+        return std.fmt.bufPrint(
+            output,
+            "{{\"scheduledTaskId\":\"{d}\",\"taskId\":\"{d}\",\"accepted\":true}}",
+            .{ id, task_id },
+        );
+    }
+
+    fn deleteScheduledTask(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(
+            handlers.ScheduledTaskIdentity,
+            invocation.request.payload,
+        );
+        defer parsed.deinit();
+        const id = try handlers.parseWireId(parsed.value.scheduledTaskId);
+        const epoch = try handlers.parseWireId(parsed.value.expectedEpoch);
+        try (try self.requireWorkbench()).deleteScheduledTask(id, epoch);
+        self.notifyCommitted();
+        return std.fmt.bufPrint(
+            output,
+            "{{\"scheduledTaskId\":\"{d}\",\"deleted\":true}}",
+            .{id},
+        );
+    }
+
     fn requireWindow(self: *const Dispatcher, window_id: native_sdk.platform.WindowId) !void {
         _ = try self.delivery.requireWindow(window_id);
     }
@@ -1247,6 +1411,32 @@ fn encodeTaskCreateResult(
         writer.writeAll("null") catch return error.NoSpaceLeft;
     writer.writeByte('}') catch return error.NoSpaceLeft;
     return writer.buffered();
+}
+
+fn scheduledTaskDefinition(
+    title: []const u8,
+    workspace_id_wire: []const u8,
+    workspace_epoch_wire: []const u8,
+    execution_generation_wire: []const u8,
+    input: handlers.TaskRunInput,
+    recurrence_value: std.json.Value,
+) !workbench_api.ScheduledTaskDefinitionInput {
+    const workbench_input: workbench_api.TaskRunInput = switch (input) {
+        .text => |text| .{ .text = text },
+        .skill => |skill| .{ .skill = .{
+            .skill_id = skill.skill_id,
+            .catalog_revision = skill.catalog_revision,
+            .argument_values = skill.argument_values,
+        } },
+    };
+    return .{
+        .title = title,
+        .workspace_id = try handlers.parseWireId(workspace_id_wire),
+        .expected_workspace_epoch = try handlers.parseWireId(workspace_epoch_wire),
+        .expected_execution_generation = try handlers.parseWireId(execution_generation_wire),
+        .input = workbench_input,
+        .recurrence = try handlers.parseScheduledTaskRecurrence(recurrence_value),
+    };
 }
 
 fn encodeTaskRunResult(

@@ -8,6 +8,7 @@ import {
   type CatalogRefreshResult,
   type RunInputView,
   type RunView,
+  type ScheduledTaskView,
   type SkillCatalogView,
   type SkillCatalogRefreshResult,
   type TaskView,
@@ -176,6 +177,23 @@ const skillCatalogIssueCodes = [
   "source_conflict",
   "invalid_resource",
   "invalid_invocation_name",
+] as const;
+const scheduledTaskHealth = [
+  "ready",
+  "paused",
+  "needs_attention",
+  "completed",
+] as const;
+const scheduledTaskFailureReasons = [
+  "previous_task_running",
+  "execution_changed",
+  "workspace_changed",
+  "workspace_unavailable",
+  "catalog_changed",
+  "capacity_reached",
+  "shutting_down",
+  "task_start_failed",
+  "timer_unavailable",
 ] as const;
 const workspaceMutationReasons = [
   "workspace_changed",
@@ -1209,6 +1227,216 @@ function decodeWorkspace(value: unknown, path: string): WorkspaceView {
   };
 }
 
+function decodeScheduledTask(
+  value: unknown,
+  path: string,
+): ScheduledTaskView {
+  const item = object(value, path, [
+    "id",
+    "epoch",
+    "title",
+    "titleRedacted",
+    "enabled",
+    "health",
+    "failureReason",
+    "workspaceId",
+    "workspaceEpoch",
+    "execution",
+    "input",
+    "recurrence",
+    "nextRunAtUnixSeconds",
+    "lastOccurrence",
+  ]);
+  const execution = object(item.execution, `${path}.execution`, [
+    "generation",
+    "provider",
+    "model",
+  ]);
+  if (
+    typeof item.input !== "object" ||
+    item.input === null ||
+    Array.isArray(item.input)
+  )
+    fail(`${path}.input`, "expected object");
+  const inputObject = item.input as JsonObject;
+  const inputKind = stringValue(inputObject.kind, `${path}.input.kind`);
+  const input =
+    inputKind === "text"
+      ? (() => {
+          const text = object(item.input, `${path}.input`, [
+            "kind",
+            "text",
+            "redacted",
+          ]);
+          return {
+            kind: "text" as const,
+            text: stringValue(text.text, `${path}.input.text`),
+            redacted: booleanValue(text.redacted, `${path}.input.redacted`),
+          };
+        })()
+      : inputKind === "skill"
+        ? (() => {
+            const skill = object(item.input, `${path}.input`, [
+              "kind",
+              "skillId",
+              "catalogRevision",
+              "argumentValues",
+              "redacted",
+            ]);
+            return {
+              kind: "skill" as const,
+              skillId: stringValue(skill.skillId, `${path}.input.skillId`),
+              catalogRevision: stringValue(
+                skill.catalogRevision,
+                `${path}.input.catalogRevision`,
+              ),
+              argumentValues: arrayValue(
+                skill.argumentValues,
+                `${path}.input.argumentValues`,
+                stringValue,
+              ),
+              redacted: booleanValue(skill.redacted, `${path}.input.redacted`),
+            };
+          })()
+        : fail(`${path}.input.kind`, "unexpected scheduled Task input kind");
+  if (
+    typeof item.recurrence !== "object" ||
+    item.recurrence === null ||
+    Array.isArray(item.recurrence)
+  )
+    fail(`${path}.recurrence`, "expected object");
+  const recurrenceObject = item.recurrence as JsonObject;
+  const recurrenceKind = stringValue(
+    recurrenceObject.kind,
+    `${path}.recurrence.kind`,
+  );
+  const recurrence =
+    recurrenceKind === "once"
+      ? (() => {
+          const once = object(item.recurrence, `${path}.recurrence`, [
+            "kind",
+            "atUnixSeconds",
+          ]);
+          return {
+            kind: "once" as const,
+            atUnixSeconds: positiveWireId(
+              once.atUnixSeconds,
+              `${path}.recurrence.atUnixSeconds`,
+            ),
+          };
+        })()
+      : recurrenceKind === "interval"
+        ? (() => {
+            const interval = object(item.recurrence, `${path}.recurrence`, [
+              "kind",
+              "startAtUnixSeconds",
+              "everySeconds",
+            ]);
+            return {
+              kind: "interval" as const,
+              startAtUnixSeconds: positiveWireId(
+                interval.startAtUnixSeconds,
+                `${path}.recurrence.startAtUnixSeconds`,
+              ),
+              everySeconds: positiveWireId(
+                interval.everySeconds,
+                `${path}.recurrence.everySeconds`,
+              ),
+            };
+          })()
+        : fail(`${path}.recurrence.kind`, "unexpected recurrence kind");
+  const occurrence =
+    item.lastOccurrence === null
+      ? null
+      : (() => {
+          const last = object(item.lastOccurrence, `${path}.lastOccurrence`, [
+            "plannedAtUnixSeconds",
+            "triggeredAtUnixSeconds",
+            "source",
+            "result",
+            "taskId",
+            "reason",
+          ]);
+          return {
+            plannedAtUnixSeconds: positiveWireId(
+              last.plannedAtUnixSeconds,
+              `${path}.lastOccurrence.plannedAtUnixSeconds`,
+            ),
+            triggeredAtUnixSeconds: positiveWireId(
+              last.triggeredAtUnixSeconds,
+              `${path}.lastOccurrence.triggeredAtUnixSeconds`,
+            ),
+            source: enumValue(
+              last.source,
+              `${path}.lastOccurrence.source`,
+              ["timer", "manual"] as const,
+            ),
+            result: enumValue(
+              last.result,
+              `${path}.lastOccurrence.result`,
+              ["submitted", "skipped", "rejected"] as const,
+            ),
+            taskId:
+              last.taskId === null
+                ? null
+                : positiveWireId(
+                    last.taskId,
+                    `${path}.lastOccurrence.taskId`,
+                  ),
+            reason: nullableEnum(
+              last.reason,
+              `${path}.lastOccurrence.reason`,
+              scheduledTaskFailureReasons,
+            ),
+          };
+        })();
+  const health = enumValue(item.health, `${path}.health`, scheduledTaskHealth);
+  const enabled = booleanValue(item.enabled, `${path}.enabled`);
+  const nextRunAtUnixSeconds =
+    item.nextRunAtUnixSeconds === null
+      ? null
+      : positiveWireId(
+          item.nextRunAtUnixSeconds,
+          `${path}.nextRunAtUnixSeconds`,
+        );
+  if (enabled !== (health === "ready" && nextRunAtUnixSeconds !== null))
+    fail(path, "enabled schedule must be ready and expose its next run");
+  return {
+    id: positiveWireId(item.id, `${path}.id`),
+    epoch: positiveWireId(item.epoch, `${path}.epoch`),
+    title: stringValue(item.title, `${path}.title`),
+    titleRedacted: booleanValue(item.titleRedacted, `${path}.titleRedacted`),
+    enabled,
+    health,
+    failureReason: nullableEnum(
+      item.failureReason,
+      `${path}.failureReason`,
+      scheduledTaskFailureReasons,
+    ),
+    workspaceId: positiveWireId(item.workspaceId, `${path}.workspaceId`),
+    workspaceEpoch: positiveWireId(
+      item.workspaceEpoch,
+      `${path}.workspaceEpoch`,
+    ),
+    execution: {
+      generation: positiveWireId(
+        execution.generation,
+        `${path}.execution.generation`,
+      ),
+      provider: enumValue(
+        execution.provider,
+        `${path}.execution.provider`,
+        providers,
+      ),
+      model: stringValue(execution.model, `${path}.execution.model`),
+    },
+    input,
+    recurrence,
+    nextRunAtUnixSeconds,
+    lastOccurrence: occurrence,
+  };
+}
+
 export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
   const root = object(value, "$", [
     "revision",
@@ -1217,6 +1445,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     "skillCatalog",
     "selectedWorkspaceId",
     "workspaces",
+    "scheduledTasks",
     "tasks",
   ]);
   const capabilityItem = object(root.capabilities, "$.capabilities", [
@@ -1227,6 +1456,9 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     "typedOutputs",
     "typedFileChanges",
     "persistentWorkspacePermissions",
+    "scheduledTasks",
+    "scheduledTaskPersistence",
+    "backgroundScheduleWake",
   ]);
   const capabilities = {
     taskHistoryPersistence: booleanValue(
@@ -1257,6 +1489,18 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
       capabilityItem.persistentWorkspacePermissions,
       "$.capabilities.persistentWorkspacePermissions",
     ),
+    scheduledTasks: booleanValue(
+      capabilityItem.scheduledTasks,
+      "$.capabilities.scheduledTasks",
+    ),
+    scheduledTaskPersistence: booleanValue(
+      capabilityItem.scheduledTaskPersistence,
+      "$.capabilities.scheduledTaskPersistence",
+    ),
+    backgroundScheduleWake: booleanValue(
+      capabilityItem.backgroundScheduleWake,
+      "$.capabilities.backgroundScheduleWake",
+    ),
   };
   const workspaces = arrayValue(
     root.workspaces,
@@ -1264,6 +1508,11 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     decodeWorkspace,
   );
   const tasks = arrayValue(root.tasks, "$.tasks", decodeTask);
+  const scheduledTasks = arrayValue(
+    root.scheduledTasks,
+    "$.scheduledTasks",
+    decodeScheduledTask,
+  );
   const selectedWorkspaceId =
     root.selectedWorkspaceId === null
       ? null
@@ -1276,6 +1525,13 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
   const workspaceIds = new Set(workspaces.map((workspace) => workspace.id));
   if (new Set(tasks.map((task) => task.id)).size !== tasks.length)
     fail("$.tasks", "Task identities must be unique");
+  if (
+    new Set(scheduledTasks.map((task) => task.id)).size !==
+    scheduledTasks.length
+  )
+    fail("$.scheduledTasks", "scheduled Task identities must be unique");
+  if (scheduledTasks.some((task) => !workspaceIds.has(task.workspaceId)))
+    fail("$.scheduledTasks", "scheduled Task Workspace must be projected");
   if (selectedWorkspaceId !== null && !workspaceIds.has(selectedWorkspaceId))
     fail("$.selectedWorkspaceId", "selected Workspace must be projected");
   return {
@@ -1285,6 +1541,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     skillCatalog: decodeSkillCatalog(root.skillCatalog, "$.skillCatalog"),
     selectedWorkspaceId,
     workspaces,
+    scheduledTasks,
     tasks,
   };
 }
@@ -1512,6 +1769,92 @@ export function decodeTaskRunResult(
     runId: null,
     reason: enumValue(item.reason, "$.reason", taskRunReasons),
   };
+}
+
+export function decodeScheduledTaskMutationResult(
+  value: unknown,
+  expectedId?: string,
+) {
+  const item = object(value, "$", [
+    "scheduledTaskId",
+    "epoch",
+    "accepted",
+  ]);
+  if (!booleanValue(item.accepted, "$.accepted"))
+    fail("$.accepted", "scheduled Task mutation must be accepted");
+  const scheduledTaskId = positiveWireId(
+    item.scheduledTaskId,
+    "$.scheduledTaskId",
+  );
+  if (expectedId !== undefined && scheduledTaskId !== expectedId)
+    fail("$.scheduledTaskId", "response identity mismatch");
+  return {
+    accepted: true as const,
+    scheduledTaskId,
+    epoch: positiveWireId(item.epoch, "$.epoch"),
+  };
+}
+
+export function decodeScheduledTaskEnabledResult(
+  value: unknown,
+  expectedId: string,
+  expectedEnabled: boolean,
+) {
+  const item = object(value, "$", [
+    "scheduledTaskId",
+    "epoch",
+    "enabled",
+  ]);
+  const scheduledTaskId = positiveWireId(
+    item.scheduledTaskId,
+    "$.scheduledTaskId",
+  );
+  if (scheduledTaskId !== expectedId)
+    fail("$.scheduledTaskId", "response identity mismatch");
+  const enabled = booleanValue(item.enabled, "$.enabled");
+  if (enabled !== expectedEnabled) fail("$.enabled", "response state mismatch");
+  return {
+    scheduledTaskId,
+    epoch: positiveWireId(item.epoch, "$.epoch"),
+    enabled,
+  };
+}
+
+export function decodeScheduledTaskRunResult(
+  value: unknown,
+  expectedId: string,
+) {
+  const item = object(value, "$", [
+    "scheduledTaskId",
+    "taskId",
+    "accepted",
+  ]);
+  if (!booleanValue(item.accepted, "$.accepted"))
+    fail("$.accepted", "scheduled Task run must be accepted");
+  const scheduledTaskId = positiveWireId(
+    item.scheduledTaskId,
+    "$.scheduledTaskId",
+  );
+  if (scheduledTaskId !== expectedId)
+    fail("$.scheduledTaskId", "response identity mismatch");
+  return {
+    accepted: true as const,
+    scheduledTaskId,
+    taskId: positiveWireId(item.taskId, "$.taskId"),
+  };
+}
+
+export function assertScheduledTaskDeleted(
+  value: unknown,
+  expectedId: string,
+) {
+  const item = object(value, "$", ["scheduledTaskId", "deleted"]);
+  if (
+    positiveWireId(item.scheduledTaskId, "$.scheduledTaskId") !== expectedId
+  )
+    fail("$.scheduledTaskId", "response identity mismatch");
+  if (!booleanValue(item.deleted, "$.deleted"))
+    fail("$.deleted", "expected deletion confirmation");
 }
 
 export function decodeCatalogRefreshResult<
