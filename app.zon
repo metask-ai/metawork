@@ -22,6 +22,7 @@
             .{ .name = "metawork.workspaces.select", .origins = .{"zero://app"} },
             .{ .name = "metawork.workspaces.remove", .origins = .{"zero://app"} },
             .{ .name = "metawork.workspaces.refreshSkillCatalog", .origins = .{"zero://app"} },
+            .{ .name = "metawork.skills.refreshCatalog", .origins = .{"zero://app"} },
             .{ .name = "metawork.workbench.snapshot", .origins = .{"zero://app"} },
             .{ .name = "metawork.workbench.snapshot.chunk", .origins = .{"zero://app"} },
             .{ .name = "metawork.account.beginLogin", .origins = .{"zero://app"} },

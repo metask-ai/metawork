@@ -107,6 +107,7 @@ Workspace
 | Workspace            | 工作区       | 本地目录和任务归属范围             |
 | Task                 | 任务         | 用户可持续补充的工作上下文         |
 | New task             | 新建任务     | 不使用 New session                 |
+| Skills               | 技能         | MetaWork 用户 Skill 目录与健康     |
 | Account & models     | 账号与模型   | API、默认模型、刷新与重新认证      |
 | Model                | 模型         | 新 Task 的执行模型，不称模式       |
 | Inspector            | 检查器       | 按需活动摘要与详情，不称 Monitor   |
@@ -182,13 +183,13 @@ Workspace
 
 平台文案、路径、快捷键和文件管理器动作按 OS 切换。
 
-## 5. 左栏：Workspace 与 Task
+## 5. 左栏：能力、Workspace 与 Task
 
-> Capability：**混合**。当前 Renderer 合同已提供独立 Workspace projection，当前 shell 已提供稳定 New task、Workspace/Task 导航、行动优先分组和左下角账号入口；跨 Host Task persistence 仍是目标能力。
+> Capability：**混合**。当前 Renderer 合同已提供 MetaWork 顶层与 Workspace/Task 分离的 revision 4 Skill catalog projection，当前 shell 已提供稳定 New task、Workspace/Task 导航、行动优先分组和左下角账号入口；只读 Skill 中心复用这些现有能力，跨 Host Task persistence 仍是目标能力。
 
 ### 5.1 Workspace 切换
 
-登录后的左栏从上到下只承担四类稳定职责：品牌/窗口识别、New task、Workspace/Task 导航、左下角账号入口。搜索由标题栏或命令面板提供，不在窄侧栏重复占据首要位置。
+登录后的左栏从上到下只承担五类稳定职责：品牌/窗口识别、New task、已接通的全局能力入口、Workspace/Task 导航、左下角账号入口。搜索由标题栏或命令面板提供，不在窄侧栏重复占据首要位置。
 
 当前 Workspace 显示名称和必要时的路径：
 
@@ -208,7 +209,82 @@ Invoices
 - 移除 Workspace 不删除历史 Task 或真实文件。入口只在当前 Workspace 可用时出现，并先用就地非模态确认说明“运行中的 Task 会停止、不会删除本地文件和历史记录”；确认打开时聚焦安全的取消动作，`Escape` 取消并把焦点还给触发入口，确认后把焦点移到不会随最后一个 Workspace 消失的稳定区标题。随后 Host 把 Workspace 标记为 `removing`、推进 epoch 并拒绝新 Task/Run，导航持续显示进行中状态；全部收口后才撤销当前 Host authorization 并退出活动导航。失败时 Workspace 保持可用、显示“移除未完成，部分任务可能已经停止”并允许重试，不能静默恢复得像什么都没发生；
 - 再次打开历史 Task 只保证可浏览记录；需要访问原目录时重新选择或授权，能否继续执行还必须服从 §6.4 的 Conversation 与 execution binding 规则。
 
-### 5.2 Task 分组与排序
+### 5.2 全局能力入口
+
+> Capability：**当前**。Skill 入口只依赖现有 AgentCore revision 4 discovery/catalog 与 Workspace projection，不等待安装或启用/禁用 policy。
+
+全局能力入口位于 `New task` 下方、Workspace 区标题上方。它使用纵向紧凑导航行，不使用窄侧栏中的卡片宫格：
+
+```text
+MetaWork
+
+[ +  New task                         ⌘N ]
+
+  ◇  Skills
+  ◷  Automations        [仅 capability 到位后]
+  ◎  Connections        [仅 capability 到位后]
+
+Workspace                              Add
+```
+
+- `New task` 保持唯一填充 `brand-600` 的持续高权重动作；能力入口使用中性文字、图标和 hover 背景，不能与创建动作竞争；
+- 当前能力 route 使用 `brand-100` 弱背景、`brand-700` 图标/文字和左侧 2 px 选中标识，并设置 `aria-current="page"`；选中不能只靠颜色；
+- 一个能力可用时只显示一行；后续能力按真实 owner 与使用频率增加，不预留 disabled 占位、不用 `More` 收纳尚不存在的产品；
+- 点击能力入口保留完整 Workbench 左栏和当前 Workspace 选择，只替换中央 route；点击 New task、Workspace 或 Task 回到对应 Workbench route。Settings 仍是独立全局 route，进入后按 §14.2 隐藏 Workspace/Task 左栏；
+- 能力页面打开期间后台 Task 继续运行，左栏的 `Needs your attention`、Running 与失败信号继续更新。
+
+### 5.3 Skill 中心
+
+> Capability：**当前**。页面是现有 Workspace current Skill catalog 的只读视图；它与 Composer Slash 共享同一 revision、health、Skill 和 issue projection，并复用同一个显式 refresh transaction。
+
+Skill 中心只有一个工作：让用户看清 MetaWork 自身可使用哪些用户 Skill。它是全局管理视图，不跟随当前 Workspace；也不是插件商店、文件浏览器、Skill 编辑器或 policy 面板，不提供安装、卸载、更新、创建、编辑、启用/禁用、打开物理目录或查看 `SKILL.md` body。
+
+中央工作面使用紧凑标题、搜索、catalog 状态和连续列表：
+
+```text
+Skills                                                   [ Refresh ]
+Skills available to MetaWork in metawork.
+
+[ Search skills                                      ]  12 available
+
+──────────────────────────────────────────────────────────────────────
+/  code-review                              Review code changes
+Review code changes for correctness, security, and maintainability.
+Arguments  target · focus
+
+/  release-check                           Check before release
+Check versions, tests, and build state before release.
+No arguments
+
+1 skill could not be loaded
+release-notes · Invalid definition
+```
+
+布局与视觉规则：
+
+- 页面保留 Workbench 左栏；中央标题使用 22–26 px 系统 Display 字体，一句短说明后立即进入 controls，不使用营销 Hero、统计卡、渐变或装饰插画；
+- 页面不以左栏当前 Workspace 为上下文；没有 Workspace 时仍可完整打开、搜索和刷新，且不得把 New task draft 的临时 Workspace 借作管理 scope；
+- 搜索只过滤已提交的 MetaWork 顶层 projection 中的 invocation、display name、description 与 argument name，不读取 Skill body；`Refresh` 调用 Host-owned `skills.refreshCatalog` transaction，不能用 Renderer 文件监听或目录扫描替代；
+- Skill 使用连续列表行，不逐项卡片化。每行以克制的紫色 `/` 标记 invocation 这一真实语义，随后显示 monospace invocation、display name、description 和 argument names；这是页面唯一的识别性视觉，不增加插画、渐变或装饰卡；
+- revision 4 未公开有效 Skill 的 source metadata，页面不显示 Workspace/Personal/vendor 标签，也不从路径、名称或优先级猜测来源；AgentCore 已完成 winner/conflict 解析，Renderer 只展示返回的 Skill 与 bounded issue；
+- 常规桌面内容列最大阅读宽度约 880 px；列表正文 13–15 px，次级文案不小于 12 px，每行最小高度 64 px。窄窗将 display name 与 argument summary 移到 invocation 下方，不产生水平滚动；
+- Skill invocation、display name、description、argument name 和用户内容不翻译；`Skills / 技能`、catalog 状态、动作与 issue 文案进入完整 locale catalog。
+
+状态与刷新：
+
+- `ready` 显示 Skill 数量；`degraded` 保留可用 Skill 并在列表后显示本地化 issue summary；issue 只使用 AgentCore 投影的 code 与可选 invocation，不显示 raw diagnostic、source path 或 Skill body；
+- refresh pending 只禁用 Refresh 并显示 `Refreshing…`，不冻结导航、历史阅读或后台 Task；成功后由 canonical snapshot 更新，失败保留最后 committed catalog 并提供 Retry，不清空成“没有 Skill”；
+- 首次 `uninitialized/loading` 显示 skeleton rows 与明确状态；`unavailable` 显示恢复说明和 Refresh，不伪造成空 catalog；真正 ready/degraded 且 `skills.length === 0` 才显示 MetaWork 用户目录未发现 Skill；
+- 空状态可以提供 `New task` 导航动作，并说明可在普通任务中请求 MetaWork 创建 `.agents/skills` 下的 Skill；该动作只打开普通 Text draft，不创建专用 Skill mutation。创建和修改仍走 Text Run 与 AgentCore built-in Read/Edit，完成后需要显式 refresh；
+- 页面不注册 install、uninstall、update、enable、disable、toggle、checkbox 或 switch 控件；未来这些能力必须重新经过 AgentCore/Workbench owner 与 capability 验收。
+
+键盘与焦点：
+
+- 搜索使用 `type="search"`，列表使用有标签的 `region/list`，issue summary 使用邻近 `role="status"`；只读 Skill row 不伪装成 button 或 selectable option；
+- 进入 route 后焦点落在页面标题；刷新完成不抢焦点，删除搜索字符不会把焦点移到第一项；
+- 点击 `New task`、Workspace 或 Task 离开页面后，返回 Skill 中心恢复上次搜索词；不持久化瞬时 refresh 状态。
+
+### 5.4 Task 分组与排序
 
 Task 按行动优先级分组，而不是全部按时间混排：
 
@@ -226,7 +302,7 @@ Recent
 - 不能只用绿点、灰点区分状态。
 - `New task` 是左栏唯一持续高权重的创建动作；Workspace 的添加和管理进入切换器，不与其堆成多个同等级按钮。
 
-### 5.3 创建、命名、归档与删除
+### 5.5 创建、命名、归档与删除
 
 - 点击 `New task` 只打开空白任务页；第一次发送后才创建真实 Task，避免空记录；
 - 标题根据首条用户指令自动生成，用户可以重命名；
@@ -235,7 +311,7 @@ Recent
 - 删除确认必须明确说明文件不会被删除；
 - queued、running、waiting_user 或 stopping 的 Task 不能归档或删除；必须先停止或明确取消并等待真实 terminal 结果。
 
-### 5.4 左下角账号入口
+### 5.6 左下角账号入口
 
 `execution_ready` 后，左栏底部固定显示 Metask identity：头像或首字母、显示名和简短连接状态。它是全局账号入口，不显示完整 API Key，也不承担模型快速选择。
 
@@ -788,7 +864,7 @@ Account operation 在设置中的投影如下：
 | cancel / terminal failure | 恢复已提交默认配置，不保留失效候选                                 | 恢复已提交默认配置，不保留失效候选             | 取消明确说明未应用更改；失败说明原因与旧默认仍有效，不能留下永久 disabled selector |
 | `reauth_required`         | 保留脱敏事实但禁用 catalog mutation                                | 保留脱敏事实但禁用 catalog mutation            | 把重新认证作为当前恢复动作，不能清空 Workspace、Task 或已有 execution 事实         |
 
-技能、连接器、定时任务和 IM 频道只有在真实接通并形成清晰产品 owner 后才进入导航；未接通时不放置假入口，也不照搬其他 Agent 产品的信息架构。
+Skill 中心按 §5.2–§5.3 进入 Workbench 一级能力导航；连接器、定时任务和 IM 频道仍只有在真实接通并形成清晰产品 owner 后才进入导航。未接通时不放置假入口，也不照搬其他 Agent 产品的信息架构。
 
 ## 15. 国际化
 

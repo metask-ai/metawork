@@ -129,6 +129,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.select_workspace, .function = selectWorkspace },
             .{ .name = commands.remove_workspace, .function = removeWorkspace },
             .{ .name = commands.refresh_workspace_skill_catalog, .function = refreshWorkspaceSkillCatalog },
+            .{ .name = commands.refresh_skill_catalog, .function = refreshSkillCatalog },
             .{ .name = commands.snapshot, .function = beginSnapshot },
             .{ .name = commands.snapshot_chunk, .function = fetchSnapshotChunk },
             .{ .name = commands.account_begin_login, .function = accountBeginLogin },
@@ -839,6 +840,29 @@ pub const Dispatcher = struct {
         );
     }
 
+    fn refreshSkillCatalog(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(
+            handlers.Empty,
+            invocation.request.payload,
+        );
+        defer parsed.deinit();
+        (try self.requireWorkbench()).refreshSkillCatalog() catch |err| {
+            if (catalogRefreshRejection(err)) |reason|
+                return encodeSkillCatalogRefreshResult(output, false, reason);
+            return err;
+        };
+        self.notifyCommitted();
+        return encodeSkillCatalogRefreshResult(output, true, null);
+    }
+
     fn refreshTaskSkillCatalog(
         context: *anyopaque,
         invocation: native_sdk.bridge.Invocation,
@@ -1271,6 +1295,25 @@ fn encodeCatalogRefreshResult(
         identity_name,
         identity,
     }) catch return error.NoSpaceLeft;
+    if (reason) |value|
+        std.json.Stringify.value(value, .{}, &writer) catch
+            return error.NoSpaceLeft
+    else
+        writer.writeAll("null") catch return error.NoSpaceLeft;
+    writer.writeByte('}') catch return error.NoSpaceLeft;
+    return writer.buffered();
+}
+
+fn encodeSkillCatalogRefreshResult(
+    output: []u8,
+    accepted: bool,
+    reason: ?[]const u8,
+) ![]const u8 {
+    if (accepted != (reason == null))
+        return error.InvalidCatalogRefreshResult;
+    var writer = std.Io.Writer.fixed(output);
+    writer.print("{{\"accepted\":{},\"reason\":", .{accepted}) catch
+        return error.NoSpaceLeft;
     if (reason) |value|
         std.json.Stringify.value(value, .{}, &writer) catch
             return error.NoSpaceLeft

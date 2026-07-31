@@ -707,7 +707,19 @@ test("Workbench owns Task lifecycle, continuation, and canonical redaction", () 
   );
   assert.match(
     workbench,
-    /commitCatalogJobsNoFail[\s\S]*workspace\.epoch == job\.workspace_epoch[\s\S]*catalog_request_generation == job\.request_generation/,
+    /commitCatalogJobsNoFail[\s\S]*workspace\.epoch == identity\.epoch[\s\S]*catalog_request_generation == identity\.request_generation/,
+  );
+  assert.match(
+    workbench,
+    /scheduleSkillCatalogQuery[\s\S]*\.target = \.\{ \.skills = generation \}[\s\S]*\.canonical_root = root[\s\S]*\.epoch_token = epoch_token/,
+  );
+  assert.match(
+    workbench,
+    /pub fn refreshSkillCatalog[\s\S]*scheduleSkillCatalogQuery\(\)/,
+  );
+  assert.doesNotMatch(
+    workbench,
+    /refreshSkillCatalog[\s\S]{0,500}session\.refreshSkillCatalog/,
   );
   assert.match(
     read("src/app.zig"),

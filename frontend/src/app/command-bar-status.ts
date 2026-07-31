@@ -3,6 +3,7 @@ import type { MessageId } from "../i18n/context.ts";
 export type StatusAudience =
   | { scope: "connection" }
   | { scope: "account" }
+  | { scope: "skills" }
   | { scope: "workspace"; workspaceId: string | null }
   | { scope: "task"; taskId: string };
 
@@ -16,6 +17,7 @@ export type ShellStatus = {
 };
 
 export type ShellStatusState = Readonly<Partial<Record<string, ShellStatus>>>;
+export type ShellRoute = "workbench" | "skills" | "settings";
 
 type StatusDetails = Pick<ShellStatus, "values" | "diagnostic" | "sourceId">;
 
@@ -38,6 +40,7 @@ export function attentionStatus(
 export function statusKey(audience: StatusAudience): string {
   if (audience.scope === "connection" || audience.scope === "account")
     return audience.scope;
+  if (audience.scope === "skills") return audience.scope;
   if (audience.scope === "workspace")
     return `workspace:${audience.workspaceId ?? "*"}`;
   return `task:${audience.taskId}`;
@@ -61,7 +64,7 @@ export function publishStatus(
 export function statusVisibleInCommandBar(
   status: ShellStatus,
   context: {
-    route: "workbench" | "settings";
+    route: ShellRoute;
     workspaceId: string | null;
     taskId: string | null;
   },
@@ -69,13 +72,16 @@ export function statusVisibleInCommandBar(
   if (status.tone !== "attention") return false;
   if (status.audience.scope === "connection") return true;
   if (status.audience.scope === "account") return true;
-  if (context.route !== "workbench") return false;
+  if (status.audience.scope === "skills") return context.route === "skills";
   if (status.audience.scope === "workspace")
     return (
-      status.audience.workspaceId === null ||
-      status.audience.workspaceId === context.workspaceId
+      context.route !== "settings" &&
+      (status.audience.workspaceId === null ||
+        status.audience.workspaceId === context.workspaceId)
     );
-  return status.audience.taskId === context.taskId;
+  return (
+    context.route === "workbench" && status.audience.taskId === context.taskId
+  );
 }
 
 export function statusVisibleInAccountGate(status: ShellStatus): boolean {
@@ -85,7 +91,7 @@ export function statusVisibleInAccountGate(status: ShellStatus): boolean {
 export function selectCommandBarStatus(
   state: ShellStatusState,
   context: {
-    route: "workbench" | "settings";
+    route: ShellRoute;
     workspaceId: string | null;
     taskId: string | null;
   },
@@ -93,15 +99,19 @@ export function selectCommandBarStatus(
   const candidates =
     context.route === "settings"
       ? [state.connection, state.account]
-      : [
-          state.connection,
-          context.taskId === null ? undefined : state[`task:${context.taskId}`],
-          context.workspaceId === null
-            ? undefined
-            : state[`workspace:${context.workspaceId}`],
-          state["workspace:*"],
-          state.account,
-        ];
+      : context.route === "skills"
+        ? [state.connection, state.skills, state.account]
+        : [
+            state.connection,
+            context.taskId === null
+              ? undefined
+              : state[`task:${context.taskId}`],
+            context.workspaceId === null
+              ? undefined
+              : state[`workspace:${context.workspaceId}`],
+            state["workspace:*"],
+            state.account,
+          ];
   return (
     candidates.find(
       (status): status is ShellStatus =>

@@ -15,6 +15,7 @@ import {
   selectAccountGateStatus,
   selectCommandBarStatus,
   type ShellStatus,
+  type ShellRoute,
   type ShellStatusState,
   type StatusAudience,
 } from "./command-bar-status.ts";
@@ -35,6 +36,7 @@ import {
 } from "../features/approvals/response-state.ts";
 import { useUiResponseStates } from "../features/approvals/useUiResponseStates.ts";
 import { GlobalSearch } from "../features/search/GlobalSearch.tsx";
+import { SkillsPage } from "../features/skills/SkillsPage.tsx";
 import {
   TaskInspector,
   type InspectorFocusRequest,
@@ -152,12 +154,13 @@ export default function App() {
     initialWorkbenchState,
   );
   const [showArchived, setShowArchived] = useState(false);
-  const [route, setRoute] = useState<"workbench" | "settings">("workbench");
+  const [route, setRoute] = useState<ShellRoute>("workbench");
   const [settingsFocus, setSettingsFocus] =
     useState<SettingsFocusTarget>("title");
   const [workbenchEntered, setWorkbenchEntered] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const [skillsQuery, setSkillsQuery] = useState("");
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -1147,6 +1150,35 @@ export default function App() {
     }
   }
 
+  async function refreshSkillsPageCatalog() {
+    if (skillCatalogBusy || bridgeUnavailable) return;
+    const audience: StatusAudience = { scope: "skills" };
+    setSkillCatalogBusy(true);
+    try {
+      const result = await client.refreshSkillCatalog();
+      if (!result.accepted) {
+        setStatus(
+          attentionStatus(mutationReasonMessageId(result.reason!), audience),
+        );
+        return;
+      }
+      await refreshAfterCommit(
+        "skills.catalog_refresh_started",
+        "operation.skill_catalog_refresh",
+        audience,
+      );
+    } catch (error) {
+      await refreshSnapshot().catch(() => undefined);
+      setStatus(
+        attentionStatus("skills.catalog_refresh_failed", audience, {
+          diagnostic: errorText(error),
+        }),
+      );
+    } finally {
+      setSkillCatalogBusy(false);
+    }
+  }
+
   function runSlashCommand(command: SlashCommandName) {
     if (command === "new") beginNewTask();
   }
@@ -1645,7 +1677,13 @@ export default function App() {
 
   return (
     <AppShell
-      taskTitle={route === "settings" ? t("settings.title") : activeTaskTitle}
+      taskTitle={
+        route === "settings"
+          ? t("settings.title")
+          : route === "skills"
+            ? t("skills.title")
+            : activeTaskTitle
+      }
       contextVisible={route === "workbench" && activeTask !== null}
       onSearch={() => setSearchOpen(true)}
       onBeginWindowDrag={() => {
@@ -1681,6 +1719,26 @@ export default function App() {
                 <span>{t("task.new")}</span>
                 <kbd>{shortcutModifier}N</kbd>
               </button>
+
+              <nav
+                className="sidebar-capabilities"
+                aria-label={t("skills.navigation_label")}
+              >
+                <button
+                  className="sidebar-capability focus-ring"
+                  data-active={route === "skills"}
+                  aria-current={route === "skills" ? "page" : undefined}
+                  onClick={() => {
+                    pendingTaskSelection.current = null;
+                    setRoute("skills");
+                  }}
+                >
+                  <span className="sidebar-capability-mark" aria-hidden="true">
+                    /
+                  </span>
+                  <span>{t("skills.title")}</span>
+                </button>
+              </nav>
 
               <div className="sidebar-navigation">
                 <WorkspaceNavigation
@@ -1780,6 +1838,17 @@ export default function App() {
             void runAccountCommand(() => client.reauthenticate())
           }
           onLogout={() => void runAccountCommand(() => client.logout())}
+        />
+      ) : route === "skills" ? (
+        <SkillsPage
+          catalog={snapshot.skillCatalog}
+          query={skillsQuery}
+          refreshing={
+            skillCatalogBusy || snapshot.skillCatalog.availability === "loading"
+          }
+          disabled={bridgeUnavailable}
+          onQuery={setSkillsQuery}
+          onRefresh={() => void refreshSkillsPageCatalog()}
         />
       ) : (
         <div

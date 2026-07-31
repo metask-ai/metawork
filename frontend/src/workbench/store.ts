@@ -50,6 +50,13 @@ export const initialWorkbenchState: WorkbenchState = {
       catalogGeneration: "0",
       executionGeneration: "0",
     },
+    skillCatalog: {
+      availability: "uninitialized",
+      redacted: false,
+      revision: null,
+      skills: [],
+      issues: [],
+    },
     selectedWorkspaceId: null,
     workspaces: [],
     tasks: [],

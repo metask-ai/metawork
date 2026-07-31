@@ -23,6 +23,7 @@ import {
   assertWindowControlCompleted,
   decodeAccountCommandResult,
   decodeCatalogRefreshResult,
+  decodeSkillCatalogRefreshResult,
   decodeHostSignalEvent,
   decodePingResponse,
   decodeRendererBridgeConnect,
@@ -323,6 +324,12 @@ export class BridgeClient {
       }),
       "workspaceId",
       workspaceId,
+    );
+  }
+
+  async refreshSkillCatalog() {
+    return decodeSkillCatalogRefreshResult(
+      await this.invoke(commands.refreshSkillCatalog, {}),
     );
   }
 

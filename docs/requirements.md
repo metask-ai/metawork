@@ -166,7 +166,7 @@ Account 是 MetaWork 的 Metask 账号控制面，负责 OAuth 登录、账号/A
 ### 5.9 Workbench 界面与任务组织
 
 - 未登录与 Workbench 是两个明确界面阶段：首次启动只突出登录及其恢复动作；`execution_ready` 后才展示 Workspace、Task、Composer 和执行历史；
-- Workbench 左栏只承担 Workspace/Task 导航与左下角账号入口；New task 是稳定主动作，Task 按 `需要处理 / 正在运行 / 最近` 等行动优先级组织；
+- Workbench 左栏承担稳定 New task、已接通的全局能力入口、Workspace/Task 导航与左下角账号入口；New task 始终是唯一持续高权重的创建动作，能力入口以紧凑次级导航位于其下方且只在对应 capability 完整可用时显示，Task 按 `需要处理 / 正在运行 / 最近` 等行动优先级组织；
 - New task 中央区域始终以 Composer 为主，当前模型和 Workspace 在发送前可见；API 管理不进入 Composer，模型与 Workspace 也不得混成不透明的单一“模式”；
 - Task 启动后中央区域转为可追溯工作轨迹，Composer 固定在底部；审批、当前活动、工具详情、usage 或真实结果只决定 Inspector 模块是否可用，不因普通 Run 开始或结束自动开合。只有新的待处理请求可以自动打开一次；打开后保持到用户关闭或切换 Task；
 - `queued / running / waiting_user` 的停止只提供 Task Header 一个可见入口；Composer 只保留本地草稿和禁用发送提示，不建立第二个 Stop。停止请求必须等待 canonical terminal，transport acknowledgement 或 UI 状态变化都不能伪造 `Stopped`；
@@ -181,6 +181,8 @@ Account 是 MetaWork 的 Metask 账号控制面，负责 OAuth 登录、账号/A
 - Composer 以 `/` 作为 context-aware 发现手势，统一显示 Renderer 注册的产品 Command 与当前 Workspace/Task catalog 投影的 Skill；Slash 文本本身不是 Agent 输入协议，Command 必须在 Renderer 消费且不得进入 Bridge、Timeline 或 AgentCore；
 - Command 只复用已有产品动作，不迁移 CLI/TUI 的会话控制语义；V1 只注册 `/new`，不注册 `/model`、`/status`、`/resume`、`/continue` 或其他已有正式界面、与桌面产品对象冲突、缺少 typed capability 的 identifier；
 - Skill 选择形成单一、可移除的 typed Composer draft，保留稳定 Skill identity、catalog revision 和 positional arguments；New task 使用 Workspace current catalog，已有 Task 使用其 pinned catalog。过期或不可用 token 保留参数但禁止发送，必须显式刷新并重新选择，Renderer 不读取 Skill body、不猜测目录或权限；
+- Skill 中心是 MetaWork 级的用户 Skill 只读管理 route，与当前 Workspace 选择无关；它展示名称、invocation、description、参数、catalog health/issue 与显式刷新，不安装、卸载、更新、创建、编辑、启用/禁用或直接操作 Skill 目录。AgentCore 独占 source discovery、canonical priority、winner/conflict 与 catalog revision；当前 revision 4 未公开有效 Skill 的 source metadata，因此 MetaWork 不猜测目录、不重算优先级，也不显示虚构来源。Skill 中心消费 Workbench 独立持有的全局 catalog projection；Workspace current catalog 与 Task pinned catalog 仍只服务 Composer 和 Run execution context，不得与管理视图互换；
+- 用户创建或修改 Skill 仍通过普通 Text Run 与 AgentCore built-in Read/Edit 完成：Workspace 内的 `.agents/skills` 服从现有 Workspace authority，用户级目录只有在用户明确将目标 Skill 目录作为 trusted Workspace 授权后才能修改。一次 Run 使用已绑定 snapshot，不热替换正在执行的 Skill；文件变化只在显式 catalog refresh 后影响后续选择与 Run；
 - Host 重启后的历史 Task 默认只读；execution binding 和 Conversation 均可安全恢复时才允许继续。需要 rebind 时必须由用户明确确认并在时间线记录配置边界；当前 baseline 不承诺跨 Host Task history，若只读历史先行落地则只提供从历史创建新 Task；
 - `Files changed` 表示实际文件变更集合，`Outputs` 表示用户关心的交付结果，两者不得用“新建文件”自动等同；当前 ABI v1 未提供这两类 typed event 时，相关模块必须隐藏；
 - Task 归档只隐藏日常列表；归档、删除 Task 或移除 Workspace 前必须先终止其 queued/running/waiting/stopping Run；删除已关闭 Task 时若 executor worker 仍持有该 Task 的 stable Run record reference，只能标记 `delete_pending`，待引用归零后物理释放；删除 Task 记录不删除 Workspace 中的真实文件；移除 Workspace 先原子进入 `removing` 并推进 Workspace epoch、拒绝新 admission，全部 Task 收口后撤销当前 Host authorization 并退出活动导航；异步失败必须恢复可用状态并发布 Workspace 级失败事实，不能静默回弹；
@@ -263,7 +265,7 @@ Windows x86_64 GNU 当前提供与 macOS 同一产品语义的开发可执行 ba
 
 ### 7.5 后续产品能力
 
-async pending、持久化恢复、strict Workspace security、正式 Host tools、远程 artifact 发布、Windows 分发交付和 Linux 接入按独立 capability 与阶段推进，不能反向伪装成当前 v1 已具备。
+async pending、持久化恢复、Skill 启用/禁用 policy、strict Workspace security、正式 Host tools、远程 artifact 发布、Windows 分发交付和 Linux 接入按独立 capability 与阶段推进，不能反向伪装成当前 v1 已具备。
 
 具体验证矩阵见 [当前验证规范](validation.md)。
 

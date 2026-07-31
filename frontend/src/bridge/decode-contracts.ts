@@ -9,6 +9,7 @@ import {
   type RunInputView,
   type RunView,
   type SkillCatalogView,
+  type SkillCatalogRefreshResult,
   type TaskView,
   type TaskCreateResult,
   type TaskRunResult,
@@ -1213,6 +1214,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     "revision",
     "capabilities",
     "account",
+    "skillCatalog",
     "selectedWorkspaceId",
     "workspaces",
     "tasks",
@@ -1280,6 +1282,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     revision: wireId(root.revision, "$.revision"),
     capabilities,
     account: decodeAccount(root.account, "$.account"),
+    skillCatalog: decodeSkillCatalog(root.skillCatalog, "$.skillCatalog"),
     selectedWorkspaceId,
     workspaces,
     tasks,
@@ -1534,6 +1537,20 @@ export function decodeCatalogRefreshResult<
     [identityName]: identity,
     reason,
   } as CatalogRefreshResult<Identity>;
+}
+
+export function decodeSkillCatalogRefreshResult(
+  value: unknown,
+): SkillCatalogRefreshResult {
+  const item = object(value, "$", ["accepted", "reason"]);
+  const accepted = booleanValue(item.accepted, "$.accepted");
+  const reason =
+    item.reason === null
+      ? null
+      : enumValue(item.reason, "$.reason", catalogRefreshReasons);
+  if (accepted !== (reason === null))
+    fail("$", "accepted and reason must agree");
+  return { accepted, reason };
 }
 
 export function assertCancelAccepted(

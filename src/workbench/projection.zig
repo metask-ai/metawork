@@ -825,13 +825,20 @@ const CatalogJobOutcome = union(enum) {
     failure,
 };
 
+const CatalogJobTarget = union(enum) {
+    skills: u64,
+    workspace: struct {
+        id: u64,
+        epoch: u64,
+        request_generation: u64,
+    },
+};
+
 const CatalogJob = struct {
     allocator: std.mem.Allocator,
     runtime: *lifecycle.Runtime,
     notifier: ChangeNotifier,
-    workspace_id: u64,
-    workspace_epoch: u64,
-    request_generation: u64,
+    target: CatalogJobTarget,
     canonical_root: []u8,
     canonical_user_home: []u8,
     epoch_token: []u8,
@@ -1251,6 +1258,11 @@ pub const Workbench = struct {
     account: AccountProjection,
     execution: ActiveExecution,
     canonical_user_home: ?[]u8,
+    skill_catalog_availability: CatalogAvailability = .uninitialized,
+    skill_catalog_request_generation: u64 = 0,
+    skill_catalog_job: ?*CatalogJob = null,
+    skill_catalog_lease: ?*lifecycle.CatalogLease = null,
+    skill_catalog: ?CatalogSnapshot = null,
     execution_replacement_pending: bool = false,
     selected_workspace_id: u64 = 0,
     next_workspace_id: u64 = 1,
@@ -1313,7 +1325,7 @@ pub const Workbench = struct {
             error.InvalidLimits => unreachable,
             else => return err,
         };
-        return .{
+        var workbench: Workbench = .{
             .allocator = allocator,
             .agent_runtime = agent_runtime,
             .limits = limits,
@@ -1325,6 +1337,9 @@ pub const Workbench = struct {
             .execution = execution,
             .canonical_user_home = canonical_user_home,
         };
+        workbench.scheduleSkillCatalogQuery() catch
+            workbench.markSkillCatalogUnavailable();
+        return workbench;
     }
 
     pub fn commitAccountFactNoFail(
@@ -1494,6 +1509,22 @@ pub const Workbench = struct {
             workspace.catalog_availability,
             if (workspace.catalog) |*snapshot| snapshot else null,
         );
+    }
+
+    pub fn skillCatalog(self: *Workbench) CatalogProjection {
+        self.syncLifecycle();
+        return catalogProjection(
+            self.skill_catalog_availability,
+            if (self.skill_catalog) |*snapshot| snapshot else null,
+        );
+    }
+
+    pub fn refreshSkillCatalog(self: *Workbench) Error!void {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        self.syncLifecycle();
+        if (self.skill_catalog_job != null) return error.CatalogLoading;
+        try self.scheduleSkillCatalogQuery();
+        self.bumpRevision();
     }
 
     pub fn taskCatalog(
@@ -2461,6 +2492,15 @@ pub const Workbench = struct {
         writer.print("{{\"revision\":\"{d}\",\"capabilities\":{{\"taskHistoryPersistence\":false,\"conversationRecovery\":false,\"executionRebind\":false,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":false,\"persistentWorkspacePermissions\":false}},\"account\":", .{self.revision}) catch
             return error.SnapshotTooLarge;
         try self.writeAccount(&writer);
+        writer.writeAll(",\"skillCatalog\":") catch
+            return error.SnapshotTooLarge;
+        try self.writeCatalogProjection(
+            &writer,
+            catalogProjection(
+                self.skill_catalog_availability,
+                if (self.skill_catalog) |*snapshot| snapshot else null,
+            ),
+        );
         writer.writeAll(",\"selectedWorkspaceId\":") catch
             return error.SnapshotTooLarge;
         if (self.selected_workspace_id == 0)
@@ -2617,6 +2657,7 @@ pub const Workbench = struct {
 
     pub fn deinit(self: *Workbench) void {
         self.shutdownExecutor();
+        self.markSkillCatalogUnavailable();
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
             if (task.close_thread) |thread| thread.join();
@@ -2667,6 +2708,7 @@ pub const Workbench = struct {
         self.executor.shutdown();
         self.executor_shutdown = true;
         _ = self.commitCatalogJobsNoFail();
+        self.markSkillCatalogUnavailable();
         for (self.workspaces) |*entry| {
             const workspace = &(entry.* orelse continue);
             self.markWorkspaceCatalogUnavailable(workspace);
@@ -3178,9 +3220,11 @@ pub const Workbench = struct {
             .allocator = self.allocator,
             .runtime = self.agent_runtime,
             .notifier = self.change_notifier,
-            .workspace_id = workspace.id,
-            .workspace_epoch = workspace.epoch,
-            .request_generation = generation,
+            .target = .{ .workspace = .{
+                .id = workspace.id,
+                .epoch = workspace.epoch,
+                .request_generation = generation,
+            } },
             .canonical_root = root,
             .canonical_user_home = owned_home,
             .epoch_token = epoch_token,
@@ -3196,8 +3240,114 @@ pub const Workbench = struct {
         workspace.catalog_availability = .loading;
     }
 
+    fn scheduleSkillCatalogQuery(self: *Workbench) Error!void {
+        if (self.skill_catalog_job != null) return error.CatalogLoading;
+        const home = self.canonical_user_home orelse {
+            self.markSkillCatalogUnavailable();
+            return error.CatalogUnavailable;
+        };
+        if (self.skill_catalog_request_generation == std.math.maxInt(u64))
+            return error.CatalogRequestGenerationExhausted;
+        const generation = self.skill_catalog_request_generation + 1;
+        const root = try self.allocator.dupe(u8, home);
+        errdefer self.allocator.free(root);
+        const owned_home = try self.allocator.dupe(u8, home);
+        errdefer self.allocator.free(owned_home);
+        const epoch_token = try self.allocator.dupe(u8, "");
+        errdefer self.allocator.free(epoch_token);
+        const job = try self.allocator.create(CatalogJob);
+        errdefer self.allocator.destroy(job);
+        job.* = .{
+            .allocator = self.allocator,
+            .runtime = self.agent_runtime,
+            .notifier = self.change_notifier,
+            .target = .{ .skills = generation },
+            .canonical_root = root,
+            .canonical_user_home = owned_home,
+            .epoch_token = epoch_token,
+        };
+        try self.executor.enqueue(.{
+            .context = job,
+            .execute_fn = executeCatalogJob,
+            .cancel_fn = cancelCatalogJob,
+        });
+        self.skill_catalog_request_generation = generation;
+        self.skill_catalog_job = job;
+        self.skill_catalog_availability = .loading;
+    }
+
     fn commitCatalogJobsNoFail(self: *Workbench) bool {
         var changed = false;
+        if (self.skill_catalog_job) |job| {
+            const state = job.state.load(.acquire);
+            if (state != .queued and state != .running) {
+                self.skill_catalog_job = null;
+                const expected_generation = switch (job.target) {
+                    .skills => |generation| generation,
+                    .workspace => unreachable,
+                };
+                const still_current =
+                    self.skill_catalog_request_generation == expected_generation and
+                    !self.shutting_down;
+                switch (state) {
+                    .completed => switch (job.outcome) {
+                        .success => |*acquisition| {
+                            if (still_current) {
+                                const snapshot = CatalogSnapshot.init(
+                                    self.allocator,
+                                    acquisition.projection,
+                                    self.limits,
+                                    self.limits.max_projection_bytes -
+                                        self.projection_bytes,
+                                ) catch {
+                                    acquisition.projection.deinit();
+                                    self.agent_runtime.releaseSkillCatalog(
+                                        acquisition.lease,
+                                    ) catch
+                                        @panic("Agent rejected the MetaWork Skill catalog lease");
+                                    self.skill_catalog_availability = .unavailable;
+                                    job.deinit();
+                                    return true;
+                                };
+                                acquisition.projection.deinit();
+                                const old_lease = self.skill_catalog_lease;
+                                if (self.skill_catalog) |*old| {
+                                    self.projection_bytes -= old.projected_bytes;
+                                    old.deinit();
+                                }
+                                self.projection_bytes += snapshot.projected_bytes;
+                                self.skill_catalog = snapshot;
+                                self.skill_catalog_lease = acquisition.lease;
+                                self.skill_catalog_availability = switch (snapshot.health) {
+                                    .healthy => .ready,
+                                    .degraded => .degraded,
+                                };
+                                if (old_lease) |lease|
+                                    self.agent_runtime.releaseSkillCatalog(lease) catch
+                                        @panic("Agent rejected the prior MetaWork Skill catalog lease");
+                            } else {
+                                acquisition.projection.deinit();
+                                self.agent_runtime.releaseSkillCatalog(
+                                    acquisition.lease,
+                                ) catch
+                                    @panic("Agent rejected a stale MetaWork Skill catalog lease");
+                            }
+                        },
+                        .failure => {
+                            if (still_current)
+                                self.skill_catalog_availability = .unavailable;
+                        },
+                    },
+                    .cancelled => {
+                        if (still_current)
+                            self.skill_catalog_availability = .unavailable;
+                    },
+                    .queued, .running => unreachable,
+                }
+                job.deinit();
+                changed = true;
+            }
+        }
         for (self.workspaces) |*entry| {
             const workspace = &(entry.* orelse continue);
             const job = workspace.catalog_job orelse continue;
@@ -3209,10 +3359,14 @@ pub const Workbench = struct {
                 workspace.authorization == .available and
                 !self.shutting_down;
             workspace.catalog_reschedule_pending = false;
-            const current = self.findWorkspace(job.workspace_id);
+            const identity = switch (job.target) {
+                .workspace => |value| value,
+                .skills => unreachable,
+            };
+            const current = self.findWorkspace(identity.id);
             const still_current = current == workspace and
-                workspace.epoch == job.workspace_epoch and
-                workspace.catalog_request_generation == job.request_generation and
+                workspace.epoch == identity.epoch and
+                workspace.catalog_request_generation == identity.request_generation and
                 workspace.visible and workspace.authorization == .available and
                 !self.shutting_down;
             switch (state) {
@@ -3278,6 +3432,20 @@ pub const Workbench = struct {
             changed = true;
         }
         return changed;
+    }
+
+    fn markSkillCatalogUnavailable(self: *Workbench) void {
+        if (self.skill_catalog) |*snapshot| {
+            self.projection_bytes -= snapshot.projected_bytes;
+            snapshot.deinit();
+            self.skill_catalog = null;
+        }
+        if (self.skill_catalog_lease) |lease| {
+            self.agent_runtime.releaseSkillCatalog(lease) catch
+                @panic("Agent rejected the MetaWork Skill catalog lease");
+            self.skill_catalog_lease = null;
+        }
+        self.skill_catalog_availability = .unavailable;
     }
 
     fn markWorkspaceCatalogUnavailable(
@@ -3414,6 +3582,13 @@ pub const Workbench = struct {
         self: *Workbench,
         credential: []const u8,
     ) void {
+        if (self.skill_catalog) |*snapshot| {
+            if (snapshot.identityContainsCredential(credential)) {
+                self.markSkillCatalogUnavailable();
+            } else {
+                snapshot.redactPresentationNoFail(credential);
+            }
+        }
         for (self.workspaces) |*entry| {
             const workspace = &(entry.* orelse continue);
             const snapshot = if (workspace.catalog) |*value| value else continue;
@@ -5164,10 +5339,15 @@ fn worstCaseSnapshotBytes(limits: Limits) ?usize {
             ) catch return null,
         ) catch return null,
     ) catch return null;
-    const catalog_copies = std.math.add(
+    const workspace_and_task_catalogs = std.math.add(
         usize,
         limits.max_workspaces,
         limits.max_tasks,
+    ) catch return null;
+    const catalog_copies = std.math.add(
+        usize,
+        workspace_and_task_catalogs,
+        1,
     ) catch return null;
     total = std.math.add(
         usize,
