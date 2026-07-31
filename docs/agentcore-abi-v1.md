@@ -7,12 +7,12 @@
 
 ## 1. 版本含义
 
-当前 active macOS development bundle 来自 clean source commit `576b0a2791e904f01257c6f7fe17e9b43d8154d0`。repository 仍保留此前 Windows development baseline 的独立 lock，但它不参与当前 macOS 依赖升级或验收门槛。两个 artifact 都是 ABI v1 revision 4、136-byte API table、Zig 0.16.0、ReleaseSafe、strip=true，并需要 C runtime：
+当前 macOS development bundle 来自 clean source commit `576b0a2791e904f01257c6f7fe17e9b43d8154d0`，Windows development bundle 来自修复 Skill catalog identity 的 clean source commit `94b9fcc941ea069893efdeed1433e853feefe0db`；两个 target 分别锁定完整 artifact。两个 artifact 都是 ABI v1 revision 4、136-byte API table、Zig 0.16.0、strip=true，并需要 C runtime；macOS 使用 ReleaseSafe，Windows 使用 ReleaseSmall：
 
 | Target                         | Version                  | Source commit                              | Provenance             | Link input            |
 | ------------------------------ | ------------------------ | ------------------------------------------ | ---------------------- | --------------------- |
 | macOS arm64（最低 macOS 13.0） | `0.1.0-dev+576b0a2791e9` | `576b0a2791e904f01257c6f7fe17e9b43d8154d0` | `source.dirty = false` | 无 system library     |
-| Windows x86_64 GNU（历史基线） | `0.1.0-dev+ac2584da8bfc` | `ac2584da8bfcf18ed74c7b2738fb4c784f714579` | `source.dirty = false` | `advapi32`、`crypt32` |
+| Windows x86_64 GNU             | `0.1.0-dev+94b9fcc941ea` | `94b9fcc941ea069893efdeed1433e853feefe0db` | `source.dirty = false` | `advapi32`、`crypt32` |
 
 revision 4 是从 revision 3 进行的 breaking capability 与 Run-input hard cut：增加 Skill catalog query/release、Session catalog bind/refresh、typed Text/Skill input、Skill codec 和 Skill status。两个 bundle 分别由完整 manifest bytes/checksum 锁定，不能仅凭相同 commit 推断 artifact 可互换，也不等于 stable ABI support policy。
 

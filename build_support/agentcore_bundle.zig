@@ -65,7 +65,7 @@ pub fn verify(b: *std.Build, root: []const u8) Bundle {
         lock.contract.binary_abi_revision != 4 or
         !std.mem.eql(u8, lock.contract.binary_abi_status, "experimental"))
         @panic("unsupported locked AgentCore bundle contract");
-    if (!std.mem.eql(u8, lock.build.optimize, "ReleaseSafe") or !lock.build.strip)
+    if (!std.mem.eql(u8, lock.build.optimize, expectedOptimizeForTarget(lock.target.id)) or !lock.build.strip)
         @panic("unsupported locked AgentCore build identity");
     const deployment_target = validateTarget(lock);
     if (lock.files.len == 0 or lock.files.len > 256)
@@ -87,6 +87,14 @@ fn lockPathForTarget(target_id: []const u8) []const u8 {
         return "build_support/agentcore-bundle.macos.lock.json";
     if (std.mem.eql(u8, target_id, "x86_64-windows-gnu"))
         return "build_support/agentcore-bundle.windows.lock.json";
+    @panic("unsupported AgentCore bundle target");
+}
+
+fn expectedOptimizeForTarget(target_id: []const u8) []const u8 {
+    if (std.mem.eql(u8, target_id, "aarch64-macos"))
+        return "ReleaseSafe";
+    if (std.mem.eql(u8, target_id, "x86_64-windows-gnu"))
+        return "ReleaseSmall";
     @panic("unsupported AgentCore bundle target");
 }
 
