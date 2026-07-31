@@ -1645,6 +1645,7 @@ export default function App() {
   return (
     <AppShell
       taskTitle={route === "settings" ? t("settings.title") : activeTaskTitle}
+      contextVisible={route === "workbench" && activeTask !== null}
       onSearch={() => setSearchOpen(true)}
       onBeginWindowDrag={() => {
         void client.beginWindowDrag(1).catch(() => undefined);

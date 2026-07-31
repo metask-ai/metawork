@@ -121,7 +121,12 @@ function render(props = {}) {
   );
 }
 
-function renderShell(inspector, inspectorOpen = false, left = undefined) {
+function renderShell(
+  inspector,
+  inspectorOpen = false,
+  left = undefined,
+  contextVisible = true,
+) {
   return renderToStaticMarkup(
     createElement(
       I18nContext.Provider,
@@ -137,6 +142,7 @@ function renderShell(inspector, inspectorOpen = false, left = undefined) {
         {
           taskTitle: "New task",
           workspaceLabel: "No workspace",
+          contextVisible,
           status: "Connected",
           onSearch() {},
           left:
@@ -497,9 +503,22 @@ test("Workbench foundation uses the purple system and centered new Task stage", 
     app,
     /!newTaskDraftActive && \(\s*<header className="task-header">/,
   );
+  assert.match(
+    app,
+    /contextVisible=\{route === "workbench" && activeTask !== null\}/,
+  );
   assert.ok(
     shell.indexOf("commandbar-workspace") < shell.indexOf("commandbar-task"),
   );
+});
+
+test("New task keeps the titlebar quiet while a real Task retains context", () => {
+  const quiet = renderShell(null, false, undefined, false);
+  assert.doesNotMatch(quiet, /No workspace|New task/);
+
+  const contextual = renderShell(null, false, undefined, true);
+  assert.match(contextual, /No workspace/);
+  assert.match(contextual, /New task/);
 });
 
 test("Workbench semantic text colors meet WCAG AA contrast", async () => {
