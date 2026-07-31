@@ -1,6 +1,7 @@
 //! Workbench-owned product orchestration and durable projection surface.
 
 const projection_impl = @import("workbench_projection");
+const scheduled_task_persistence = @import("workbench_scheduled_task_persistence");
 
 pub const Error = projection_impl.Error;
 pub const Limits = projection_impl.Limits;
@@ -22,6 +23,11 @@ pub const Configuration = projection_impl.Configuration;
 pub const Workbench = projection_impl.Workbench;
 pub const ChangeNotifier = projection_impl.ChangeNotifier;
 pub const ScheduleTimer = projection_impl.ScheduleTimer;
+pub const SchedulePersistence = projection_impl.SchedulePersistence;
+pub const SchedulePersistenceCommit = projection_impl.SchedulePersistenceCommit;
+pub const SchedulePersistenceHealth = projection_impl.SchedulePersistenceHealth;
+pub const ScheduledTaskFileStore = scheduled_task_persistence.FileStore;
+pub const scheduled_task_store_max_bytes = scheduled_task_persistence.max_store_bytes;
 pub const TransportFailureStage = projection_impl.TransportFailureStage;
 pub const TransportFailureReport = projection_impl.TransportFailureReport;
 pub const TransportFailureDecision = projection_impl.TransportFailureDecision;

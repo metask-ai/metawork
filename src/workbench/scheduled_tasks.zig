@@ -1,6 +1,7 @@
 const std = @import("std");
 
 pub const minimum_interval_seconds: u64 = 60;
+pub const max_occurrence_history: usize = 16;
 
 pub const Error = std.mem.Allocator.Error || error{
     ScheduledTaskCapacity,
@@ -9,6 +10,7 @@ pub const Error = std.mem.Allocator.Error || error{
     ScheduledTaskEpochMismatch,
     ScheduledTaskNeedsAttention,
     InvalidSchedule,
+    InvalidScheduledTaskRestore,
     ProjectionCapacity,
 };
 
@@ -138,6 +140,8 @@ pub const FailureReason = enum {
     shutting_down,
     task_start_failed,
     timer_unavailable,
+    persistence_failed,
+    host_interrupted,
 };
 
 pub const OccurrenceSource = enum {
@@ -146,6 +150,7 @@ pub const OccurrenceSource = enum {
 };
 
 pub const OccurrenceResult = enum {
+    claimed,
     submitted,
     skipped,
     rejected,
@@ -188,6 +193,23 @@ pub const Item = struct {
     failure_reason: ?FailureReason = null,
     next_run_at_unix_seconds: ?u64,
     last_occurrence: ?Occurrence = null,
+    occurrence_history: [max_occurrence_history]Occurrence = undefined,
+    occurrence_count: usize = 0,
+
+    pub fn occurrences(self: *const Item) []const Occurrence {
+        return self.occurrence_history[0..self.occurrence_count];
+    }
+};
+
+pub const RestoredItem = struct {
+    id: u64,
+    epoch: u64,
+    definition: Definition,
+    enabled: bool,
+    health: Health,
+    failure_reason: ?FailureReason,
+    next_run_at_unix_seconds: ?u64,
+    occurrences: []const Occurrence,
 };
 
 pub const Limits = struct {
@@ -225,6 +247,90 @@ pub const Store = struct {
         self.allocator.free(self.items);
         std.debug.assert(self.projection_bytes == 0);
         self.* = undefined;
+    }
+
+    pub fn clone(
+        self: *const Store,
+        allocator: std.mem.Allocator,
+    ) Error!Store {
+        var result = try Store.init(allocator, .{
+            .max_items = self.items.len,
+            .max_projection_bytes = self.max_projection_bytes,
+        });
+        errdefer result.deinit();
+        for (self.items) |entry| {
+            const item = entry orelse continue;
+            try result.restoreItem(.{
+                .id = item.id,
+                .epoch = item.epoch,
+                .definition = .{
+                    .title = item.title,
+                    .workspace_id = item.workspace_id,
+                    .workspace_epoch = item.workspace_epoch,
+                    .execution_generation = item.execution_generation,
+                    .execution_provider = item.execution_provider,
+                    .execution_model = item.execution_model,
+                    .input = item.input.borrowed(),
+                    .recurrence = item.recurrence,
+                },
+                .enabled = item.enabled,
+                .health = item.health,
+                .failure_reason = item.failure_reason,
+                .next_run_at_unix_seconds = item.next_run_at_unix_seconds,
+                .occurrences = item.occurrences(),
+            });
+        }
+        result.next_id = self.next_id;
+        return result;
+    }
+
+    pub fn restoreItem(
+        self: *Store,
+        restored: RestoredItem,
+    ) Error!void {
+        if (restored.id == 0 or restored.id == std.math.maxInt(u64) or
+            restored.epoch == 0 or
+            restored.occurrences.len > max_occurrence_history or
+            self.find(restored.id) != null)
+            return error.InvalidScheduledTaskRestore;
+        if (!validDefinition(restored.definition))
+            return error.InvalidScheduledTaskRestore;
+        try restored.definition.recurrence.validate();
+        if (!validRestoredState(restored))
+            return error.InvalidScheduledTaskRestore;
+        const slot = self.emptySlot() orelse return error.ScheduledTaskCapacity;
+        var item = try self.cloneDefinition(
+            restored.id,
+            restored.epoch,
+            restored.definition,
+            restored.next_run_at_unix_seconds,
+        );
+        errdefer self.deinitItem(&item);
+        item.enabled = restored.enabled;
+        item.health = restored.health;
+        item.failure_reason = restored.failure_reason;
+        for (restored.occurrences, 0..) |occurrence, index| {
+            if (!validOccurrence(occurrence))
+                return error.InvalidScheduledTaskRestore;
+            item.occurrence_history[index] = occurrence;
+        }
+        item.occurrence_count = restored.occurrences.len;
+        item.last_occurrence = if (item.occurrence_count == 0)
+            null
+        else
+            item.occurrence_history[item.occurrence_count - 1];
+        self.items[slot] = item;
+        if (restored.id >= self.next_id) {
+            if (restored.id == std.math.maxInt(u64))
+                return error.ScheduledTaskIdentityExhausted;
+            self.next_id = restored.id + 1;
+        }
+    }
+
+    pub fn restoreNextId(self: *Store, next_id: u64) Error!void {
+        if (next_id == 0 or next_id < self.next_id)
+            return error.InvalidScheduledTaskRestore;
+        self.next_id = next_id;
     }
 
     pub fn create(
@@ -274,6 +380,11 @@ pub const Store = struct {
         );
         errdefer self.deinitItem(&replacement);
         replacement.last_occurrence = current.last_occurrence;
+        replacement.occurrence_count = current.occurrence_count;
+        @memcpy(
+            replacement.occurrence_history[0..current.occurrence_count],
+            current.occurrence_history[0..current.occurrence_count],
+        );
         self.deinitItem(current);
         self.items[slot] = replacement;
     }
@@ -342,7 +453,7 @@ pub const Store = struct {
     }
 
     pub fn markSubmitted(
-        _: *Store,
+        self: *Store,
         item: *Item,
         planned_at_unix_seconds: u64,
         triggered_at_unix_seconds: u64,
@@ -350,30 +461,99 @@ pub const Store = struct {
         task_id: u64,
     ) error{InvalidSchedule}!void {
         std.debug.assert(task_id != 0);
-        item.last_occurrence = .{
+        self.recordOccurrence(item, .{
             .planned_at_unix_seconds = planned_at_unix_seconds,
             .triggered_at_unix_seconds = triggered_at_unix_seconds,
             .source = source,
             .result = .submitted,
             .task_id = task_id,
-        };
+        });
         if (source == .manual) return;
         try advanceAfterTimer(item, triggered_at_unix_seconds);
     }
 
-    pub fn markSkipped(
+    pub fn claim(
+        self: *Store,
+        item: *Item,
+        planned_at_unix_seconds: u64,
+        triggered_at_unix_seconds: u64,
+        source: OccurrenceSource,
+    ) error{InvalidSchedule}!void {
+        self.recordOccurrence(item, .{
+            .planned_at_unix_seconds = planned_at_unix_seconds,
+            .triggered_at_unix_seconds = triggered_at_unix_seconds,
+            .source = source,
+            .result = .claimed,
+        });
+        if (source == .timer)
+            try advanceAfterTimer(item, triggered_at_unix_seconds);
+    }
+
+    pub fn finalizeClaimSubmitted(
         _: *Store,
+        item: *Item,
+        planned_at_unix_seconds: u64,
+        source: OccurrenceSource,
+        task_id: u64,
+    ) error{InvalidSchedule}!void {
+        if (task_id == 0) return error.InvalidSchedule;
+        const occurrence = claimedOccurrence(
+            item,
+            planned_at_unix_seconds,
+            source,
+        ) orelse return error.InvalidSchedule;
+        occurrence.result = .submitted;
+        occurrence.task_id = task_id;
+        item.last_occurrence = occurrence.*;
+    }
+
+    pub fn finalizeClaimRejected(
+        self: *Store,
+        item: *Item,
+        planned_at_unix_seconds: u64,
+        source: OccurrenceSource,
+        reason: FailureReason,
+    ) error{InvalidSchedule}!void {
+        const occurrence = claimedOccurrence(
+            item,
+            planned_at_unix_seconds,
+            source,
+        ) orelse return error.InvalidSchedule;
+        occurrence.result = .rejected;
+        occurrence.reason = reason;
+        item.last_occurrence = occurrence.*;
+        self.markNeedsAttention(item, reason);
+    }
+
+    pub fn interruptClaimedOccurrences(self: *Store) bool {
+        var changed = false;
+        for (self.items) |*entry| {
+            const item = &(entry.* orelse continue);
+            if (item.occurrence_count == 0) continue;
+            const occurrence = &item.occurrence_history[item.occurrence_count - 1];
+            if (occurrence.result != .claimed) continue;
+            occurrence.result = .rejected;
+            occurrence.reason = .host_interrupted;
+            item.last_occurrence = occurrence.*;
+            self.markNeedsAttention(item, .host_interrupted);
+            changed = true;
+        }
+        return changed;
+    }
+
+    pub fn markSkipped(
+        self: *Store,
         item: *Item,
         planned_at_unix_seconds: u64,
         triggered_at_unix_seconds: u64,
     ) error{InvalidSchedule}!void {
-        item.last_occurrence = .{
+        self.recordOccurrence(item, .{
             .planned_at_unix_seconds = planned_at_unix_seconds,
             .triggered_at_unix_seconds = triggered_at_unix_seconds,
             .source = .timer,
             .result = .skipped,
             .reason = .previous_task_running,
-        };
+        });
         try advanceAfterTimer(item, triggered_at_unix_seconds);
     }
 
@@ -396,14 +576,32 @@ pub const Store = struct {
         source: OccurrenceSource,
         reason: FailureReason,
     ) void {
-        item.last_occurrence = .{
+        self.recordOccurrence(item, .{
             .planned_at_unix_seconds = planned_at_unix_seconds,
             .triggered_at_unix_seconds = triggered_at_unix_seconds,
             .source = source,
             .result = .rejected,
             .reason = reason,
-        };
+        });
         self.markNeedsAttention(item, reason);
+    }
+
+    fn recordOccurrence(
+        _: *Store,
+        item: *Item,
+        occurrence: Occurrence,
+    ) void {
+        if (item.occurrence_count == max_occurrence_history) {
+            std.mem.copyForwards(
+                Occurrence,
+                item.occurrence_history[0 .. max_occurrence_history - 1],
+                item.occurrence_history[1..max_occurrence_history],
+            );
+            item.occurrence_count -= 1;
+        }
+        item.occurrence_history[item.occurrence_count] = occurrence;
+        item.occurrence_count += 1;
+        item.last_occurrence = occurrence;
     }
 
     fn cloneDefinition(
@@ -411,7 +609,7 @@ pub const Store = struct {
         id: u64,
         epoch: u64,
         definition: Definition,
-        next_run: u64,
+        next_run: ?u64,
     ) Error!Item {
         var item: Item = undefined;
         const title = try self.copy(definition.title);
@@ -558,6 +756,74 @@ fn advanceAfterTimer(
         item.health = .completed;
         item.failure_reason = null;
     }
+}
+
+fn validRestoredState(restored: RestoredItem) bool {
+    if (restored.enabled) {
+        return restored.health == .ready and
+            restored.failure_reason == null and
+            restored.next_run_at_unix_seconds != null;
+    }
+    return switch (restored.health) {
+        .paused => restored.failure_reason == null and
+            restored.next_run_at_unix_seconds == null,
+        .needs_attention => restored.failure_reason != null and
+            restored.next_run_at_unix_seconds == null,
+        .completed => restored.failure_reason == null and
+            restored.next_run_at_unix_seconds == null,
+        .ready => false,
+    };
+}
+
+fn validDefinition(definition: Definition) bool {
+    if (definition.title.len == 0 or
+        !std.unicode.utf8ValidateSlice(definition.title) or
+        definition.workspace_id == 0 or definition.workspace_epoch == 0 or
+        definition.execution_generation == 0 or
+        definition.execution_model.len == 0 or
+        !std.unicode.utf8ValidateSlice(definition.execution_model))
+        return false;
+    return switch (definition.input) {
+        .text => |text| text.len != 0 and
+            std.unicode.utf8ValidateSlice(text),
+        .skill => |skill| skill.skill_id.len != 0 and
+            std.unicode.utf8ValidateSlice(skill.skill_id) and
+            skill.catalog_revision.len != 0 and
+            std.unicode.utf8ValidateSlice(skill.catalog_revision) and
+            validArguments(skill.argument_values),
+    };
+}
+
+fn validArguments(values: []const []const u8) bool {
+    for (values) |value|
+        if (!std.unicode.utf8ValidateSlice(value)) return false;
+    return true;
+}
+
+fn validOccurrence(occurrence: Occurrence) bool {
+    if (occurrence.planned_at_unix_seconds == 0 or
+        occurrence.triggered_at_unix_seconds == 0)
+        return false;
+    return switch (occurrence.result) {
+        .claimed => occurrence.task_id == 0 and occurrence.reason == null,
+        .submitted => occurrence.task_id != 0 and occurrence.reason == null,
+        .skipped, .rejected => occurrence.task_id == 0 and
+            occurrence.reason != null,
+    };
+}
+
+fn claimedOccurrence(
+    item: *Item,
+    planned_at_unix_seconds: u64,
+    source: OccurrenceSource,
+) ?*Occurrence {
+    if (item.occurrence_count == 0) return null;
+    const occurrence = &item.occurrence_history[item.occurrence_count - 1];
+    if (occurrence.result != .claimed or
+        occurrence.planned_at_unix_seconds != planned_at_unix_seconds or
+        occurrence.source != source)
+        return null;
+    return occurrence;
 }
 
 test "fixed recurrence aligns without replaying missed occurrences" {

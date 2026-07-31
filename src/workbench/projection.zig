@@ -3,10 +3,11 @@ const lifecycle = @import("metawork_agent");
 const account_contract = @import("metawork_account_contract");
 const executor_impl = @import("workbench_executor");
 const scheduled_tasks_impl = @import("workbench_scheduled_tasks");
+const scheduled_task_persistence = @import("workbench_scheduled_task_persistence");
 const contract_fixture = @import("workbench_contract_fixture");
 const build_options = @import("build_options");
 
-pub const Error = lifecycle.Error || scheduled_tasks_impl.Error || std.mem.Allocator.Error || std.Thread.SpawnError || error{
+pub const Error = lifecycle.Error || scheduled_tasks_impl.Error || scheduled_task_persistence.Error || std.mem.Allocator.Error || std.Thread.SpawnError || error{
     ProjectionCapacity,
     RunCapacity,
     ToolCapacity,
@@ -17,6 +18,9 @@ pub const Error = lifecycle.Error || scheduled_tasks_impl.Error || std.mem.Alloc
     InvalidTaskTitle,
     InvalidScheduledTaskInput,
     ScheduleTimerUnavailable,
+    ScheduledTaskPersistenceUnavailable,
+    ScheduledTaskPersistenceFailed,
+    ScheduledTaskPersistenceOutcomeUnknown,
     RunGenerationExhausted,
     ExecutorShuttingDown,
     TaskCapacity,
@@ -199,6 +203,48 @@ pub const Configuration = struct {
     change_notifier: ChangeNotifier = .{},
     directories: AppDirectories = .{},
     schedule_timer: ScheduleTimer = .{},
+    schedule_persistence: SchedulePersistence = .{},
+};
+
+pub const SchedulePersistenceCommit = enum {
+    committed,
+    failed,
+    outcome_unknown,
+};
+
+pub const SchedulePersistence = struct {
+    context: ?*anyopaque = null,
+    enabled: bool = false,
+    restored_bytes: ?[]const u8 = null,
+    restore_failed: bool = false,
+    commit_fn: *const fn (
+        context: ?*anyopaque,
+        bytes: []const u8,
+    ) SchedulePersistenceCommit = unsupportedCommit,
+
+    fn commit(
+        self: SchedulePersistence,
+        bytes: []const u8,
+    ) SchedulePersistenceCommit {
+        if (!self.enabled) return .failed;
+        return self.commit_fn(self.context, bytes);
+    }
+
+    fn unsupportedCommit(
+        _: ?*anyopaque,
+        _: []const u8,
+    ) SchedulePersistenceCommit {
+        return .failed;
+    }
+};
+
+pub const SchedulePersistenceHealth = enum {
+    unavailable,
+    ready,
+    read_failed,
+    corrupt,
+    write_failed,
+    outcome_unknown,
 };
 
 const json_string_expansion: usize = 6;
@@ -1300,6 +1346,8 @@ pub const Workbench = struct {
     tasks: []?TaskView,
     scheduled_tasks: scheduled_tasks_impl.Store,
     schedule_timer: ScheduleTimer,
+    schedule_persistence: SchedulePersistence,
+    schedule_persistence_health: SchedulePersistenceHealth,
     change_notifier: ChangeNotifier,
     executor: *executor_impl.Executor,
     shutting_down: bool = false,
@@ -1371,10 +1419,32 @@ pub const Workbench = struct {
         const tasks = try allocator.alloc(?TaskView, limits.max_tasks);
         errdefer allocator.free(tasks);
         @memset(tasks, null);
-        var scheduled_tasks = try scheduled_tasks_impl.Store.init(allocator, .{
+        const scheduled_limits: scheduled_tasks_impl.Limits = .{
             .max_items = limits.max_scheduled_tasks,
             .max_projection_bytes = limits.max_scheduled_task_projection_bytes,
-        });
+        };
+        var schedule_persistence_health: SchedulePersistenceHealth =
+            if (configuration.schedule_persistence.enabled)
+                .ready
+            else
+                .unavailable;
+        if (configuration.schedule_persistence.restore_failed)
+            schedule_persistence_health = .read_failed;
+        var scheduled_tasks = if (schedule_persistence_health == .ready and
+            configuration.schedule_persistence.restored_bytes != null)
+            scheduled_task_persistence.decode(
+                allocator,
+                configuration.schedule_persistence.restored_bytes.?,
+                scheduled_limits,
+            ) catch restore: {
+                schedule_persistence_health = .corrupt;
+                break :restore try scheduled_tasks_impl.Store.init(
+                    allocator,
+                    scheduled_limits,
+                );
+            }
+        else
+            try scheduled_tasks_impl.Store.init(allocator, scheduled_limits);
         errdefer scheduled_tasks.deinit();
         const executor = executor_impl.Executor.create(agent_runtime.io, allocator, .{
             .worker_count = limits.worker_count,
@@ -1391,12 +1461,28 @@ pub const Workbench = struct {
             .tasks = tasks,
             .scheduled_tasks = scheduled_tasks,
             .schedule_timer = configuration.schedule_timer,
+            .schedule_persistence = configuration.schedule_persistence,
+            .schedule_persistence_health = schedule_persistence_health,
             .change_notifier = configuration.change_notifier,
             .executor = executor,
             .account = account,
             .execution = execution,
             .canonical_user_home = canonical_user_home,
         };
+        if (workbench.schedule_persistence_health == .ready) {
+            var recovered = workbench.scheduled_tasks.clone(allocator) catch null;
+            if (recovered) |*candidate| {
+                var candidate_owned = true;
+                defer if (candidate_owned) candidate.deinit();
+                if (candidate.interruptClaimedOccurrences()) {
+                    workbench.commitScheduledTaskCandidate(candidate) catch {};
+                    if (workbench.schedule_persistence_health == .ready) {
+                        workbench.replaceScheduledTaskStore(candidate);
+                        candidate_owned = false;
+                    }
+                }
+            }
+        }
         workbench.scheduleSkillCatalogQuery() catch
             workbench.markSkillCatalogUnavailable();
         return workbench;
@@ -2296,11 +2382,17 @@ pub const Workbench = struct {
         const now = self.schedule_timer.now() orelse
             return error.ScheduleTimerUnavailable;
         const definition = try self.scheduledTaskDefinition(input);
-        const id = try self.scheduled_tasks.create(definition, now);
+        var candidate = try self.scheduled_tasks.clone(self.allocator);
+        var candidate_owned = true;
+        defer if (candidate_owned) candidate.deinit();
+        const id = try candidate.create(definition, now);
         self.redactScheduledTaskNoFail(
-            self.scheduled_tasks.find(id).?,
+            candidate.find(id).?,
             self.execution.credential(),
         );
+        try self.commitScheduledTaskCandidate(&candidate);
+        self.replaceScheduledTaskStore(&candidate);
+        candidate_owned = false;
         self.bumpRevision();
         self.rearmScheduledTaskTimerNoFail();
         return id;
@@ -2317,11 +2409,17 @@ pub const Workbench = struct {
         const now = self.schedule_timer.now() orelse
             return error.ScheduleTimerUnavailable;
         const definition = try self.scheduledTaskDefinition(input);
-        try self.scheduled_tasks.update(id, expected_epoch, definition, now);
+        var candidate = try self.scheduled_tasks.clone(self.allocator);
+        var candidate_owned = true;
+        defer if (candidate_owned) candidate.deinit();
+        try candidate.update(id, expected_epoch, definition, now);
         self.redactScheduledTaskNoFail(
-            self.scheduled_tasks.find(id).?,
+            candidate.find(id).?,
             self.execution.credential(),
         );
+        try self.commitScheduledTaskCandidate(&candidate);
+        self.replaceScheduledTaskStore(&candidate);
+        candidate_owned = false;
         self.bumpRevision();
         self.rearmScheduledTaskTimerNoFail();
     }
@@ -2342,8 +2440,14 @@ pub const Workbench = struct {
             return error.ScheduledTaskEpochMismatch;
         if (enabled and current.health == .needs_attention)
             return error.ScheduledTaskNeedsAttention;
-        try self.scheduled_tasks.setEnabled(id, expected_epoch, enabled, now);
-        _ = self.reconcileScheduledTaskBindingsNoFail();
+        var candidate = try self.scheduled_tasks.clone(self.allocator);
+        var candidate_owned = true;
+        defer if (candidate_owned) candidate.deinit();
+        try candidate.setEnabled(id, expected_epoch, enabled, now);
+        _ = self.reconcileScheduledTaskBindingsInStore(&candidate);
+        try self.commitScheduledTaskCandidate(&candidate);
+        self.replaceScheduledTaskStore(&candidate);
+        candidate_owned = false;
         self.bumpRevision();
         self.rearmScheduledTaskTimerNoFail();
     }
@@ -2354,7 +2458,13 @@ pub const Workbench = struct {
         expected_epoch: u64,
     ) Error!void {
         self.syncLifecycle();
-        try self.scheduled_tasks.delete(id, expected_epoch);
+        var candidate = try self.scheduled_tasks.clone(self.allocator);
+        var candidate_owned = true;
+        defer if (candidate_owned) candidate.deinit();
+        try candidate.delete(id, expected_epoch);
+        try self.commitScheduledTaskCandidate(&candidate);
+        self.replaceScheduledTaskStore(&candidate);
+        candidate_owned = false;
         self.bumpRevision();
         self.rearmScheduledTaskTimerNoFail();
     }
@@ -2381,7 +2491,7 @@ pub const Workbench = struct {
             return error.UnknownScheduledTask;
         if (expected_epoch == 0 or item.epoch != expected_epoch)
             return error.ScheduledTaskEpochMismatch;
-        return self.triggerScheduledTask(item, now, now, .manual);
+        return self.triggerScheduledTask(id, now, now, .manual);
     }
 
     pub fn onScheduledTaskTimer(self: *Workbench) void {
@@ -2389,12 +2499,13 @@ pub const Workbench = struct {
         self.syncLifecycle();
         const now = self.schedule_timer.now() orelse return;
         const item = self.scheduled_tasks.earliestDue() orelse return;
+        const id = item.id;
         const planned = item.next_run_at_unix_seconds orelse return;
         if (planned > now) {
             self.rearmScheduledTaskTimerNoFail();
             return;
         }
-        _ = self.triggerScheduledTask(item, planned, now, .timer) catch {};
+        _ = self.triggerScheduledTask(id, planned, now, .timer) catch {};
         self.rearmScheduledTaskTimerNoFail();
     }
 
@@ -3369,20 +3480,30 @@ pub const Workbench = struct {
 
     fn triggerScheduledTask(
         self: *Workbench,
-        item: *scheduled_tasks_impl.Item,
+        id: u64,
         planned_at_unix_seconds: u64,
         triggered_at_unix_seconds: u64,
         source: scheduled_tasks_impl.OccurrenceSource,
     ) Error!u64 {
+        const item = self.scheduled_tasks.find(id) orelse
+            return error.UnknownScheduledTask;
         if (item.last_occurrence) |last| if (last.task_id != 0) {
             if (self.findTask(last.task_id)) |task| {
                 if (hasNonTerminalRun(task)) {
                     if (source == .timer) {
-                        try self.scheduled_tasks.markSkipped(
-                            item,
+                        var skipped = try self.scheduled_tasks.clone(
+                            self.allocator,
+                        );
+                        var skipped_owned = true;
+                        defer if (skipped_owned) skipped.deinit();
+                        try skipped.markSkipped(
+                            skipped.find(id).?,
                             planned_at_unix_seconds,
                             triggered_at_unix_seconds,
                         );
+                        try self.commitScheduledTaskCandidate(&skipped);
+                        self.replaceScheduledTaskStore(&skipped);
+                        skipped_owned = false;
                         self.bumpRevision();
                         return last.task_id;
                     }
@@ -3390,37 +3511,49 @@ pub const Workbench = struct {
                 }
             }
         };
-        const expected_catalog_revision = switch (item.input) {
+        var claimed = try self.scheduled_tasks.clone(self.allocator);
+        var claimed_owned = true;
+        defer if (claimed_owned) claimed.deinit();
+        try claimed.claim(
+            claimed.find(id).?,
+            planned_at_unix_seconds,
+            triggered_at_unix_seconds,
+            source,
+        );
+        try self.commitScheduledTaskCandidate(&claimed);
+        self.replaceScheduledTaskStore(&claimed);
+        claimed_owned = false;
+
+        const claimed_item = self.scheduled_tasks.find(id) orelse unreachable;
+        const expected_catalog_revision = switch (claimed_item.input) {
             .text => null,
             .skill => |skill| skill.catalog_revision,
         };
         const task_id = self.createTaskInWorkspace(
-            item.workspace_id,
-            item.workspace_epoch,
-            item.execution_generation,
+            claimed_item.workspace_id,
+            claimed_item.workspace_epoch,
+            claimed_item.execution_generation,
             expected_catalog_revision,
         ) catch |err| {
-            self.rejectScheduledTask(
-                item,
+            self.finalizeScheduledTaskClaimRejected(
+                id,
                 planned_at_unix_seconds,
-                triggered_at_unix_seconds,
                 source,
                 scheduledFailure(err),
             );
             return err;
         };
-        self.renameTask(task_id, item.title) catch |err| {
-            self.rejectScheduledTask(
-                item,
+        self.renameTask(task_id, claimed_item.title) catch |err| {
+            self.finalizeScheduledTaskClaimRejected(
+                id,
                 planned_at_unix_seconds,
-                triggered_at_unix_seconds,
                 source,
                 .task_start_failed,
             );
             return err;
         };
         const task = self.findTask(task_id) orelse unreachable;
-        const run_input: TaskRunInput = switch (item.input.borrowed()) {
+        const run_input: TaskRunInput = switch (claimed_item.input.borrowed()) {
             .text => |text| .{ .text = text },
             .skill => |skill| .{ .skill = .{
                 .skill_id = skill.skill_id,
@@ -3429,56 +3562,107 @@ pub const Workbench = struct {
             } },
         };
         _ = self.runTaskAtBinding(task_id, task.binding_epoch, run_input) catch |err| {
-            self.rejectScheduledTask(
-                item,
+            self.finalizeScheduledTaskClaimRejected(
+                id,
                 planned_at_unix_seconds,
-                triggered_at_unix_seconds,
                 source,
                 scheduledFailure(err),
             );
             return err;
         };
-        try self.scheduled_tasks.markSubmitted(
-            item,
+        try self.finalizeScheduledTaskClaimSubmitted(
+            id,
             planned_at_unix_seconds,
-            triggered_at_unix_seconds,
             source,
             task_id,
         );
-        self.bumpRevision();
         return task_id;
     }
 
-    fn rejectScheduledTask(
+    fn finalizeScheduledTaskClaimSubmitted(
         self: *Workbench,
-        item: *scheduled_tasks_impl.Item,
+        id: u64,
         planned_at_unix_seconds: u64,
-        triggered_at_unix_seconds: u64,
+        source: scheduled_tasks_impl.OccurrenceSource,
+        task_id: u64,
+    ) Error!void {
+        var candidate = try self.scheduled_tasks.clone(self.allocator);
+        var candidate_owned = true;
+        defer if (candidate_owned) candidate.deinit();
+        try candidate.finalizeClaimSubmitted(
+            candidate.find(id) orelse return error.UnknownScheduledTask,
+            planned_at_unix_seconds,
+            source,
+            task_id,
+        );
+        try self.commitScheduledTaskCandidate(&candidate);
+        self.replaceScheduledTaskStore(&candidate);
+        candidate_owned = false;
+        self.bumpRevision();
+    }
+
+    fn finalizeScheduledTaskClaimRejected(
+        self: *Workbench,
+        id: u64,
+        planned_at_unix_seconds: u64,
         source: scheduled_tasks_impl.OccurrenceSource,
         reason: scheduled_tasks_impl.FailureReason,
     ) void {
-        self.scheduled_tasks.markRejected(
-            item,
+        var candidate = self.scheduled_tasks.clone(self.allocator) catch return;
+        var candidate_owned = true;
+        defer if (candidate_owned) candidate.deinit();
+        candidate.finalizeClaimRejected(
+            candidate.find(id) orelse return,
             planned_at_unix_seconds,
-            triggered_at_unix_seconds,
             source,
             reason,
-        );
+        ) catch return;
+        self.commitScheduledTaskCandidate(&candidate) catch return;
+        self.replaceScheduledTaskStore(&candidate);
+        candidate_owned = false;
         self.bumpRevision();
     }
 
     fn rearmScheduledTaskTimerNoFail(self: *Workbench) void {
         self.schedule_timer.cancelCurrent();
+        if (self.schedule_persistence_health != .ready) return;
         const item = self.scheduled_tasks.earliestDue() orelse return;
         const due = item.next_run_at_unix_seconds orelse return;
         if (self.schedule_timer.armAt(due)) return;
-        self.scheduled_tasks.markNeedsAttention(item, .timer_unavailable);
+        var candidate = self.scheduled_tasks.clone(self.allocator) catch return;
+        var candidate_owned = true;
+        defer if (candidate_owned) candidate.deinit();
+        candidate.markNeedsAttention(
+            candidate.find(item.id) orelse return,
+            .timer_unavailable,
+        );
+        self.commitScheduledTaskCandidate(&candidate) catch return;
+        self.replaceScheduledTaskStore(&candidate);
+        candidate_owned = false;
         self.bumpRevision();
     }
 
     fn reconcileScheduledTaskBindingsNoFail(self: *Workbench) bool {
+        if (self.schedule_persistence_health != .ready) return false;
+        var candidate = self.scheduled_tasks.clone(self.allocator) catch
+            return false;
+        var candidate_owned = true;
+        defer if (candidate_owned) candidate.deinit();
+        const changed = self.reconcileScheduledTaskBindingsInStore(&candidate);
+        if (!changed) return false;
+        self.commitScheduledTaskCandidate(&candidate) catch return false;
+        self.replaceScheduledTaskStore(&candidate);
+        candidate_owned = false;
+        self.rearmScheduledTaskTimerNoFail();
+        return true;
+    }
+
+    fn reconcileScheduledTaskBindingsInStore(
+        self: *Workbench,
+        store: *scheduled_tasks_impl.Store,
+    ) bool {
         var changed = false;
-        for (self.scheduled_tasks.items) |*entry| {
+        for (store.items) |*entry| {
             const item = &(entry.* orelse continue);
             if (!item.enabled or item.health != .ready) continue;
             const reason: ?scheduled_tasks_impl.FailureReason = binding: {
@@ -3510,12 +3694,50 @@ pub const Workbench = struct {
                 break :binding null;
             };
             if (reason) |failure| {
-                self.scheduled_tasks.markNeedsAttention(item, failure);
+                store.markNeedsAttention(item, failure);
                 changed = true;
             }
         }
-        if (changed) self.rearmScheduledTaskTimerNoFail();
         return changed;
+    }
+
+    fn commitScheduledTaskCandidate(
+        self: *Workbench,
+        candidate: *const scheduled_tasks_impl.Store,
+    ) Error!void {
+        switch (self.schedule_persistence_health) {
+            .ready => {},
+            .outcome_unknown => return error.ScheduledTaskPersistenceOutcomeUnknown,
+            else => return error.ScheduledTaskPersistenceUnavailable,
+        }
+        const output = try self.allocator.alloc(
+            u8,
+            scheduled_task_persistence.max_store_bytes,
+        );
+        defer self.allocator.free(output);
+        const bytes = try scheduled_task_persistence.encode(output, candidate);
+        switch (self.schedule_persistence.commit(bytes)) {
+            .committed => {},
+            .failed => {
+                self.schedule_persistence_health = .write_failed;
+                self.bumpRevision();
+                return error.ScheduledTaskPersistenceFailed;
+            },
+            .outcome_unknown => {
+                self.schedule_persistence_health = .outcome_unknown;
+                self.bumpRevision();
+                return error.ScheduledTaskPersistenceOutcomeUnknown;
+            },
+        }
+    }
+
+    fn replaceScheduledTaskStore(
+        self: *Workbench,
+        candidate: *scheduled_tasks_impl.Store,
+    ) void {
+        self.scheduled_tasks.deinit();
+        self.scheduled_tasks = candidate.*;
+        candidate.* = undefined;
     }
 
     fn executionQuiescent(self: *const Workbench) bool {
@@ -6241,6 +6463,29 @@ const TestScheduleClock = struct {
     }
 };
 
+const TestSchedulePersistence = struct {
+    commits: usize = 0,
+    result: SchedulePersistenceCommit = .committed,
+
+    fn commit(
+        context: ?*anyopaque,
+        bytes: []const u8,
+    ) SchedulePersistenceCommit {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        std.debug.assert(bytes.len != 0);
+        self.commits += 1;
+        return self.result;
+    }
+
+    fn capability(self: *@This()) SchedulePersistence {
+        return .{
+            .context = self,
+            .enabled = true,
+            .commit_fn = commit,
+        };
+    }
+};
+
 fn replaceTaskCredentialForTest(
     task: *TaskView,
     credential: []const u8,
@@ -6454,7 +6699,10 @@ test "Scheduled Task admission is bounded redacted and arms the Workbench clock"
     var workbench = try testWorkbench();
     defer workbench.deinit();
     var clock: TestScheduleClock = .{ .now = 1_000 };
+    var persistence: TestSchedulePersistence = .{};
     workbench.schedule_timer = clock.timer();
+    workbench.schedule_persistence = persistence.capability();
+    workbench.schedule_persistence_health = .ready;
     const id = try workbench.createScheduledTask(.{
         .title = "Review SECRET-KEY",
         .workspace_id = 1,
@@ -6467,6 +6715,7 @@ test "Scheduled Task admission is bounded redacted and arms the Workbench clock"
         } },
     });
     try std.testing.expectEqual(@as(u64, 2_000), clock.armed_at.?);
+    try std.testing.expectEqual(@as(usize, 1), persistence.commits);
     const item = workbench.scheduled_tasks.find(id).?;
     try std.testing.expect(item.title_redacted);
     try std.testing.expect(
@@ -6492,10 +6741,26 @@ test "Scheduled Task admission is bounded redacted and arms the Workbench clock"
         std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null,
     );
     try workbench.setScheduledTaskEnabled(id, item.epoch, false);
+    try std.testing.expectEqual(@as(usize, 2), persistence.commits);
     try std.testing.expect(clock.armed_at == null);
     try std.testing.expectEqual(
         scheduled_tasks_impl.Health.paused,
         workbench.scheduled_tasks.find(id).?.health,
+    );
+    const committed_epoch = workbench.scheduled_tasks.find(id).?.epoch;
+    persistence.result = .failed;
+    try std.testing.expectError(
+        error.ScheduledTaskPersistenceFailed,
+        workbench.deleteScheduledTask(id, committed_epoch),
+    );
+    try std.testing.expect(workbench.scheduled_tasks.find(id) != null);
+    try std.testing.expectEqual(
+        committed_epoch,
+        workbench.scheduled_tasks.find(id).?.epoch,
+    );
+    try std.testing.expectEqual(
+        SchedulePersistenceHealth.write_failed,
+        workbench.schedule_persistence_health,
     );
 }
 

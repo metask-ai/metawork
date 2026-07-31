@@ -2192,6 +2192,20 @@ fn wallUnixSeconds(io: std.Io) ?i64 {
     return @intCast(seconds);
 }
 
+fn commitScheduledTaskStore(
+    context: ?*anyopaque,
+    bytes: []const u8,
+) workbench_api.SchedulePersistenceCommit {
+    const store: *workbench_api.ScheduledTaskFileStore = @ptrCast(
+        @alignCast(context orelse return .failed),
+    );
+    store.commit(bytes) catch |err| return switch (err) {
+        error.PersistenceOutcomeUnknown => .outcome_unknown,
+        else => .failed,
+    };
+    return .committed;
+}
+
 fn frontendMode(env_map: *std.process.Environ.Map) FrontendMode {
     return if (env_map.get(frontend_url_env) != null) .development else .release;
 }
@@ -2294,6 +2308,28 @@ pub fn run(init: std.process.Init) !void {
         &.{ data_dir, "account" },
     );
     app.account_dir_len = account_dir.len;
+    var scheduled_task_dir_storage: [4096]u8 = undefined;
+    const scheduled_task_dir = try native_sdk.app_dirs.join(
+        native_sdk.app_dirs.currentPlatform(),
+        &scheduled_task_dir_storage,
+        &.{ data_dir, "workbench" },
+    );
+    var scheduled_task_file_store: ?workbench_api.ScheduledTaskFileStore =
+        workbench_api.ScheduledTaskFileStore.init(
+            init.io,
+            scheduled_task_dir,
+        ) catch null;
+    defer if (scheduled_task_file_store) |*store| store.deinit();
+    var scheduled_task_restore_failed = scheduled_task_file_store == null;
+    const scheduled_task_restored_bytes = if (scheduled_task_file_store) |*store|
+        store.loadAlloc(std.heap.c_allocator) catch restore: {
+            scheduled_task_restore_failed = true;
+            break :restore null;
+        }
+    else
+        null;
+    defer if (scheduled_task_restored_bytes) |bytes|
+        std.heap.c_allocator.free(bytes);
     const canonical_user_home = resolveCanonicalUserHome(
         init.io,
         std.heap.c_allocator,
@@ -2341,6 +2377,17 @@ pub fn run(init: std.process.Init) !void {
                 .now_unix_seconds = App.scheduledTaskNow,
                 .arm = App.armScheduledTaskTimer,
                 .cancel = App.cancelScheduledTaskTimer,
+            },
+            .schedule_persistence = .{
+                .context = if (scheduled_task_file_store) |*store|
+                    store
+                else
+                    null,
+                .enabled = scheduled_task_file_store != null and
+                    !scheduled_task_restore_failed,
+                .restored_bytes = scheduled_task_restored_bytes,
+                .restore_failed = scheduled_task_restore_failed,
+                .commit_fn = commitScheduledTaskStore,
             },
         },
     );
