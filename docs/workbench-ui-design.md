@@ -142,7 +142,7 @@ Workspace
 
 默认尺寸：
 
-- 一体化命令栏：52 px；
+- 一体化命令栏：macOS 52 px，Windows 40 px；
 - 左栏：248 px；
 - 左栏品牌区使用紧凑单行，只显示 `MetaWork` 字样，不把品牌区表现成第二层标题栏，也不重复使用首字母图标、产品说明或宣传副标题；
 - Inspector：打开时 304 px；审批、活动详情、usage 或真实结果只决定模块是否可用，不触发普通 Run 的自动开合。除新的 `Needs your attention` 可自动打开一次外，显隐由用户控制并在 Run terminal 后保持稳定；
@@ -169,6 +169,7 @@ Workspace
 
 - 命令栏是窗口交互层，不表现为独立横向标题栏：不使用贯穿全窗的底边或异色横带；左侧 Workspace/Task rail 的背景与竖分隔线必须延伸到窗口顶部，中央命令区与 Task 工作面使用同一 surface；
 - macOS 为系统交通灯保留左侧安全区；Windows system WebView 无法可靠显露 DWM glyph 时，命令栏提供唯一可见的最小化、最大化/还原与关闭 affordance，Host 在重新校验来源窗口后执行真实 native action；不得同时显示两套窗口按钮；
+- macOS 52 px、Windows 40 px 是各平台一体化窗口栏的最终布局高度。Windows 窗口按钮组必须完整落在 40 px 内，命令栏不得再用垂直 padding 把等高按钮组下移或扩张到布局行之外；最小化、最大化与关闭 glyph 使用同一视觉中心线，不能把最小化横线当作文字基线下沉；
 - 命令栏只包含左栏开关、当前 Task/Workspace 上下文、全局搜索和按需异常入口；`左栏开关` 只控制 Workspace/Task 导航，不兼任 Inspector 开关；
 - 命令栏空白背景在越过移动阈值后请求窗口拖拽；按钮、输入、选择框、链接、disclosure 和展开内容必须排除。Renderer 只提交 drag/control 意图；Host 以 App-owned 单一启动窗口 identity 和主线程校验受限 bootstrap chrome capability，使连接失败页仍能移动或关闭窗口，而不依赖 ProductDelivery 已连接。Windows 平台操作必须继续使用同一精确窗口身份，不能猜测当前活动窗口；当前不伪造跨平台双击标题栏语义；
 - 正常连接、恢复成功和普通操作成功不持续占据命令栏；只有同步失败、命令失败或其他确实需要用户行动的异常才显示状态入口；
