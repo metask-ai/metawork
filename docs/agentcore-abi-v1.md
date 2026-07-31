@@ -7,12 +7,12 @@
 
 ## 1. 版本含义
 
-当前 macOS development bundle 来自 clean source commit `576b0a2791e904f01257c6f7fe17e9b43d8154d0`，Windows development bundle 来自修复 Skill catalog identity 的 clean source commit `94b9fcc941ea069893efdeed1433e853feefe0db`；两个 target 分别锁定完整 artifact。两个 artifact 都是 ABI v1 revision 4、136-byte API table、Zig 0.16.0、strip=true，并需要 C runtime；macOS 使用 ReleaseSafe，Windows 使用 ReleaseSmall：
+当前 macOS development bundle 来自 clean source commit `576b0a2791e904f01257c6f7fe17e9b43d8154d0`，Windows development bundle 来自增加 `.agents/skills` discovery 的 clean source commit `f554ade228f8d479b2b2e39ee714d6aa329eb7ff`；两个 target 分别锁定完整 artifact。两个 artifact 都是 ABI v1 revision 4、136-byte API table、Zig 0.16.0、strip=true，并需要 C runtime；macOS 使用 ReleaseSafe，Windows 使用 ReleaseSmall：
 
 | Target                         | Version                  | Source commit                              | Provenance             | Link input            |
 | ------------------------------ | ------------------------ | ------------------------------------------ | ---------------------- | --------------------- |
 | macOS arm64（最低 macOS 13.0） | `0.1.0-dev+576b0a2791e9` | `576b0a2791e904f01257c6f7fe17e9b43d8154d0` | `source.dirty = false` | 无 system library     |
-| Windows x86_64 GNU             | `0.1.0-dev+94b9fcc941ea` | `94b9fcc941ea069893efdeed1433e853feefe0db` | `source.dirty = false` | `advapi32`、`crypt32` |
+| Windows x86_64 GNU             | `0.1.0-dev+f554ade228f8` | `f554ade228f8d479b2b2e39ee714d6aa329eb7ff` | `source.dirty = false` | `advapi32`、`crypt32` |
 
 revision 4 是从 revision 3 进行的 breaking capability 与 Run-input hard cut：增加 Skill catalog query/release、Session catalog bind/refresh、typed Text/Skill input、Skill codec 和 Skill status。两个 bundle 分别由完整 manifest bytes/checksum 锁定，不能仅凭相同 commit 推断 artifact 可互换，也不等于 stable ABI support policy。
 
@@ -263,7 +263,7 @@ manifest schema 1 必须精确记录：
 
 ### candidate bundle acceptance
 
-- active macOS arm64 artifact-only consumer 只访问 candidate bundle，不访问 AgentCore 实现源码；其他 target 只有在明确进入变更范围时才运行各自独立验收；
+- 当前变更涉及的 target 使用 artifact-only consumer，只访问 candidate bundle，不访问 AgentCore 实现源码；未进入变更范围的 target 不替代也不反向阻塞当前验收；
 - exact manifest bytes、payload checksum、target、toolchain、layout 和唯一 discovery symbol 校验；
 - 隔离 Zig consumer 通过 candidate 官方 `bindings/zig` package 完成 source-free `Api.discover()`、link 和运行；
 - probe 结束后再次校验 candidate，证明消费过程没有改写 bundle。
@@ -272,7 +272,7 @@ candidate probe 不导入 MetaWork Agent，也不承担 Runtime/Session、真实
 
 ### staged 正式 Host gate
 
-> revision 4 macOS exact artifact、candidate/stage、typed SDK discovery、Agent catalog ownership、typed Text/Skill Agent surface、Workbench/Bridge 产品链、本机 Native test 与 macOS typed Skill desktop vertical 已通过。Composer Slash 不属于本次升级；其他 target 不参与当前验收；revision 3 不构成兼容要求。
+> revision 4 macOS 与 Windows exact artifact、candidate/stage、typed SDK discovery、Agent catalog ownership、typed Text/Skill Agent surface、Workbench/Bridge 产品链和各自 Native vertical 已通过；Windows 当前 bundle 额外覆盖 `.agents/skills` discovery。未锁定 target 不参与当前验收；revision 3 不构成兼容要求。
 
 - typed SDK 完成并通过 source-free consumer；
 - status-before-result 和 diagnostic release 测试；
