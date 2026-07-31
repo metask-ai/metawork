@@ -114,10 +114,10 @@ test("Skills search covers invocation, display name, description, and arguments"
 });
 
 test("Skills center distinguishes no Workspace, loading, unavailable, empty, and no results", () => {
-  assert.match(
-    render({ workspaceName: null, catalog: null }),
-    /Choose a workspace/,
-  );
+  const noWorkspace = render({ workspaceName: null, catalog: null });
+  assert.match(noWorkspace, /Choose a workspace/);
+  assert.match(noWorkspace, />Add<\/button>/);
+  assert.doesNotMatch(noWorkspace, /disabled="">Add<\/button>/);
   assert.match(
     render({
       catalog: {
@@ -215,6 +215,11 @@ test("Skills route reuses the existing Workspace refresh command and owns no pol
     /className="sidebar-capability focus-ring"[\s\S]*?disabled=\{bridgeUnavailable\}[\s\S]*?setRoute\("skills"\)/,
   );
   assert.match(app, /client\.refreshWorkspaceSkillCatalog/);
+  assert.match(
+    app,
+    /\(currentWorkspace !== undefined &&\s*currentWorkspace\.authorization !== "available"\)/,
+  );
+  assert.doesNotMatch(app, /currentWorkspace\?\.authorization !== "available"/);
   assert.match(page, /title\.current\?\.focus\(\)/);
   assert.doesNotMatch(
     commands,

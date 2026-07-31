@@ -1872,7 +1872,8 @@ export default function App() {
           disabled={
             bridgeUnavailable ||
             workspaceBusy ||
-            currentWorkspace?.authorization !== "available"
+            (currentWorkspace !== undefined &&
+              currentWorkspace.authorization !== "available")
           }
           onQuery={setSkillsQuery}
           onRefresh={() => void refreshSkillsPageCatalog()}
