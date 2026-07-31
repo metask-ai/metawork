@@ -340,9 +340,15 @@ test("Inspector has one controlled panel and the central narrative is not chat",
     /\.timeline-message\.is-user\s*\{([^}]*)\}/,
   )?.[1];
   assert.ok(userMessageRule);
-  assert.match(userMessageRule, /width:\s*min\(72%, 620px\)/);
+  assert.match(userMessageRule, /width:\s*fit-content/);
+  assert.match(userMessageRule, /max-width:\s*min\(72%, 620px\)/);
   assert.match(userMessageRule, /margin-left:\s*auto/);
   assert.match(userMessageRule, /border-radius:\s*12px/);
+  assert.doesNotMatch(timeline, /message\.you/);
+  assert.match(
+    css,
+    /@media \(max-width: 560px\)[\s\S]*?\.timeline-message\.is-user\s*\{[^}]*max-width:\s*88%/,
+  );
   assert.doesNotMatch(css, /\.timeline-message\.is-user::(?:before|after)/);
 });
 

@@ -406,10 +406,13 @@ function RunOutcome({
 function RunInputMessage({ input }: { input: RunInputView }) {
   const { t } = useI18n();
   if (input.kind === "text")
-    return <Message role={t("message.you")} text={input.text} />;
+    return (
+      <section className="timeline-message is-user">
+        <p className="message-body">{input.text}</p>
+      </section>
+    );
   return (
     <section className="timeline-message is-user is-skill">
-      <p className="message-role">{t("message.you")}</p>
       <div className="timeline-skill-input">
         <span className="timeline-skill-token">
           /{input.invocationName}
