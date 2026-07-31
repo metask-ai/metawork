@@ -2,7 +2,6 @@ import type { MessageId } from "./en-US.ts";
 
 export const zhCN: Record<MessageId, string> = {
   "app.name": "MetaWork",
-  "app.window_label": "本地智能工作台",
   "app.toggle_workspaces": "切换工作区与任务侧栏",
   "app.dismiss_panels": "收起面板",
   "app.language": "语言",

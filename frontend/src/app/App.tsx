@@ -1669,15 +1669,7 @@ export default function App() {
         route === "settings" ? null : (
           <div className="sidebar-frame">
             <div className="sidebar-primary">
-              <div className="brand-lockup">
-                <span className="brand-mark" aria-hidden="true">
-                  M
-                </span>
-                <div>
-                  <p className="brand-name">{t("app.name")}</p>
-                  <p className="brand-subtitle">{t("app.window_label")}</p>
-                </div>
-              </div>
+              <p className="brand-name">{t("app.name")}</p>
               <button
                 className="new-task-button focus-ring"
                 data-active={route === "workbench" && newTaskDraftActive}

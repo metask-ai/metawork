@@ -492,6 +492,20 @@ test("Workbench foundation uses the purple system and centered new Task stage", 
   assert.match(css, /--left-column:\s*248px/);
   assert.match(
     css,
+    /\.app-window\[data-left-open="true"\] \.workbench-commandbar::before\s*\{[\s\S]*?width:\s*var\(--left-column\);[\s\S]*?border-right:\s*1px solid var\(--color-rule\);[\s\S]*?background:\s*var\(--color-rail\)/,
+  );
+  assert.match(
+    css,
+    /\.workbench-commandbar\s*\{[\s\S]*?background:\s*var\(--color-canvas\)/,
+  );
+  assert.doesNotMatch(
+    css.match(/\.workbench-commandbar\s*\{[\s\S]*?\n\}/)?.[0] ?? "",
+    /border-bottom|backdrop-filter/,
+  );
+  assert.doesNotMatch(app, /className="brand-mark"|app\.window_label/);
+  assert.match(app, /<p className="brand-name">\{t\("app\.name"\)\}<\/p>/);
+  assert.match(
+    css,
     /\.task-empty-state\.is-new-task\s*\{[\s\S]*?align-content:\s*center/,
   );
   assert.doesNotMatch(css, /color-cobalt|settings-teal|35,\s*109,\s*100/);
