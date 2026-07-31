@@ -107,7 +107,7 @@ Workspace
 | Workspace            | 工作区       | 本地目录和任务归属范围             |
 | Task                 | 任务         | 用户可持续补充的工作上下文         |
 | New task             | 新建任务     | 不使用 New session                 |
-| Skills               | 技能         | 已发现 Skill 的启用状态与健康      |
+| Skills               | 技能         | 当前 Workspace 可用 Skill 与健康   |
 | Account & models     | 账号与模型   | API、默认模型、刷新与重新认证      |
 | Model                | 模型         | 新 Task 的执行模型，不称模式       |
 | Inspector            | 检查器       | 按需活动摘要与详情，不称 Monitor   |
@@ -185,7 +185,7 @@ Workspace
 
 ## 5. 左栏：能力、Workspace 与 Task
 
-> Capability：**混合**。当前 Renderer 合同已提供独立 Workspace projection，当前 shell 已提供稳定 New task、Workspace/Task 导航、行动优先分组和左下角账号入口；Skill 中心必须等 AgentCore 启用/禁用 policy 与管理 projection 完整落地后才显示，跨 Host Task persistence 仍是目标能力。
+> Capability：**混合**。当前 Renderer 合同已提供独立 Workspace 与 revision 4 Skill catalog projection，当前 shell 已提供稳定 New task、Workspace/Task 导航、行动优先分组和左下角账号入口；只读 Skill 中心复用这些现有能力，跨 Host Task persistence 仍是目标能力。
 
 ### 5.1 Workspace 切换
 
@@ -211,7 +211,7 @@ Invoices
 
 ### 5.2 全局能力入口
 
-> Capability：**目标**。当前 AgentCore 已提供 Skill discovery、catalog 与 typed Run，但尚未提供启用/禁用 policy；在该 capability 到位前，本节入口和对应页面必须整体隐藏。
+> Capability：**当前**。Skill 入口只依赖现有 AgentCore revision 4 discovery/catalog 与 Workspace projection，不等待安装或启用/禁用 policy。
 
 全局能力入口位于 `New task` 下方、Workspace 区标题上方。它使用纵向紧凑导航行，不使用窄侧栏中的卡片宫格：
 
@@ -235,58 +235,54 @@ Workspace                              Add
 
 ### 5.3 Skill 中心
 
-> Capability：**目标**。页面只在 AgentCore 同时提供 management catalog、effective enabled state、optimistic policy mutation 和后续 Run 强制能力后显示；当前不可用时不显示入口、只读替身、disabled toggle 或静态示例数据。
+> Capability：**当前**。页面是现有 Workspace current Skill catalog 的只读视图；它与 Composer Slash 共享同一 revision、health、Skill 和 issue projection，并复用同一个显式 refresh transaction。
 
-Skill 中心只有一个工作：控制 AgentCore 已发现的 Skill 是否可供 MetaWork 后续 Run 使用。它不是插件商店、文件浏览器或 Skill 编辑器，不提供安装、卸载、更新、创建、编辑、打开物理目录或查看 `SKILL.md` body。
+Skill 中心只有一个工作：让用户看清当前 Workspace 中 MetaWork 可以使用哪些 Skill。它不是插件商店、文件浏览器、Skill 编辑器或 policy 面板，不提供安装、卸载、更新、创建、编辑、启用/禁用、打开物理目录或查看 `SKILL.md` body。
 
-中央工作面使用紧凑标题、scope 切换、搜索和连续列表：
+中央工作面使用紧凑标题、搜索、catalog 状态和连续列表：
 
 ```text
 Skills                                                   [ Refresh ]
-Choose which skills MetaWork can use.
-To change a skill, ask MetaWork in a task.
+Skills available to MetaWork in metawork.
 
-[ Current workspace · metawork ]  [ Personal ]  [ Managed · when present ]
-                                                   [ Search skills ]
+[ Search skills                                      ]  12 available
 
-Workspace skills · 3
 ──────────────────────────────────────────────────────────────────────
-code-review
+/  code-review                              Review code changes
 Review code changes for correctness, security, and maintainability.
-Workspace · Agent Skills                                  [ Enabled ]
+Arguments  target · focus
 
-release-check
+/  release-check                           Check before release
 Check versions, tests, and build state before release.
-Workspace · Agent Skills                                  [ Enabled ]
+No arguments
+
+1 skill could not be loaded
+release-notes · Invalid definition
 ```
 
 布局与视觉规则：
 
 - 页面保留 Workbench 左栏；中央标题使用 22–26 px 系统 Display 字体，一句短说明后立即进入 controls，不使用营销 Hero、统计卡、渐变或装饰插画；
-- `Current workspace` 与 `Personal` 是稳定单选 scope；只有 AgentCore management catalog 实际发布 Enterprise/managed winner 时才追加 `Managed`。Workspace scope 使用左栏当前选择并在标签内显示其 display name；没有 Workspace 时保留 Personal 可用，Workspace 面显示选择指引而不是空 disabled 列表；Managed 项显示 AgentCore 发布的 locked reason，不提供可交互开关；
-- 搜索只过滤已提交 management projection 中的名称与 description，不读取 Skill body；`Refresh` 发起 Host-owned 显式刷新并保留最后一次已提交列表，不能用 Renderer 文件监听或目录扫描替代；
-- Skill 使用连续列表行，不逐项卡片化。名称是主信息，description 是次级信息，来源使用 `Workspace / Personal` 与 AgentCore 发布的安全 source kind 表达；不显示 canonical path、user home、raw issue、内部 policy 或 catalog handle；
-- scope 分组使用短标题和水平 rule 表达来源，不把列表连接成假的执行时间线。紫色只用于当前 scope、键盘焦点与已启用控件，健康状态继续使用独立语义色和文字；
-- 常规桌面内容列最大阅读宽度约 880 px；列表正文 13–15 px，次级文案不小于 12 px，行高与点击区至少 40 px。窄窗将搜索换到 scope 下方，名称、来源与开关按两行排列，不产生水平滚动；
-- 页面只显示 AgentCore management catalog 已按 canonical priority 解析出的每个 policy scope winner，不枚举 raw shadow candidate，也不在 Renderer 重算目录优先级。当前 AgentCore 的同 scope source 顺序为 `.agents` 高于 `.metacodes`、`.metacodes` 高于 `.claude`，Workspace winner 高于 Personal winner；后续兼容目录的顺序仍由 AgentCore 合同发布。被当前 Workspace 同名项 shadow 的 Personal winner 仍显示在 Personal scope，并以不可调用的 shadow 状态说明影响；禁用 Workspace winner 后该 invocation 保持不可用，不自动显露或启用较低优先级 candidate。equal-priority conflict 作为不可调用的 AgentCore issue 显示，不能包装成多个可切换行；
-- Skill 名称、description、厂商 source label 和用户内容不翻译；`Skills / 技能`、scope、状态、动作与错误文案进入完整 locale catalog。
+- 页面始终以左栏当前 Workspace 为上下文，并在说明中显示其 display name；没有 Workspace 时显示选择指引，不借用 New task draft 的临时 Workspace，也不建立 Personal/Managed 假 scope；
+- 搜索只过滤已提交 projection 中的 invocation、display name、description 与 argument name，不读取 Skill body；`Refresh` 复用 Host-owned `workspaces.refreshSkillCatalog` transaction 并保留最后一次 committed list，不能用 Renderer 文件监听或目录扫描替代；
+- Skill 使用连续列表行，不逐项卡片化。每行以克制的紫色 `/` 标记 invocation 这一真实语义，随后显示 monospace invocation、display name、description 和 argument names；这是页面唯一的识别性视觉，不增加插画、渐变或装饰卡；
+- revision 4 未公开有效 Skill 的 source metadata，页面不显示 Workspace/Personal/vendor 标签，也不从路径、名称或优先级猜测来源；AgentCore 已完成 winner/conflict 解析，Renderer 只展示返回的 Skill 与 bounded issue；
+- 常规桌面内容列最大阅读宽度约 880 px；列表正文 13–15 px，次级文案不小于 12 px，每行最小高度 64 px。窄窗将 display name 与 argument summary 移到 invocation 下方，不产生水平滚动；
+- Skill invocation、display name、description、argument name 和用户内容不翻译；`Skills / 技能`、catalog 状态、动作与 issue 文案进入完整 locale catalog。
 
-状态与 mutation：
+状态与刷新：
 
-- `Enabled / Disabled` 是 Host 已持久化并经 AgentCore binding 提交的 effective state，不是 Renderer preference。开关提交 stable management identity、scope、expected policy generation 与目标状态；Host 必须重新校验 account/Workspace ownership、当前 generation、Workspace authorization 和 AgentCore management membership；
-- 开关是可逆且作用明确的操作，不使用确认 Modal。pending 只锁定对应行并显示 `Enabling… / Disabling…`；其他 Skill、导航、历史阅读和后台 Task 不被冻结；
-- 禁用不移动、改名或删除目录，也不修改 `SKILL.md`。已经 admission 的 Run 默认继续完成；mutation 成功后立即阻止该 scope 的新 Skill Run，使引用旧 revision 的 draft 进入 stale，并只通过 canonical snapshot 宣布完成；
-- Workspace Skill 的开关只作用于所属 Workspace；Personal Skill 的开关作用于当前 MetaWork 用户范围。首期不提供“只在某一个 Workspace 禁用 Personal Skill”的 override matrix；
-- invalid、unavailable、conflict、shadow 信息、locked policy 和 policy rejection 与 disabled 分开显示。不能把解析失败或 shadow candidate 包装成 Disabled，也不能允许 Renderer 用开关掩盖 AgentCore issue；失败在对应行或 scope 级 issue 区说明可执行恢复动作，保留已提交状态。Host policy persistence 损坏或不可用时页面保留可证明的只读管理事实、关闭全部 mutation，并明确说明 Skill 暂不可用于新 Run；不能把未知状态默认成 Enabled；
-- catalog loading 保留最后一次 committed 列表和只读状态；首次无 snapshot 时显示明确 loading。刷新失败保留旧列表并提供 Retry，不清空成“没有 Skill”；
-- 空 catalog 说明当前 scope 未发现 Skill。Workspace scope 可以提供 `New task` 导航动作，并说明可在普通任务中请求 MetaWork 创建 `.agents/skills` 下的 Skill；该动作只打开带普通 Text draft 的 New task，不创建专用 Skill mutation；
-- 创建和修改 Skill 始终走普通 Text Run 与 AgentCore built-in Read/Edit。Workspace Skill 服从既有 Workspace authority；用户级 Skill 只有在目标目录被用户明确作为 trusted Workspace 授权后才能修改。当前 Run 继续使用已绑定 snapshot，修改成功后仍需显式 refresh，页面不自动热替换 Task catalog。
+- `ready` 显示 Skill 数量；`degraded` 保留可用 Skill 并在列表后显示本地化 issue summary；issue 只使用 AgentCore 投影的 code 与可选 invocation，不显示 raw diagnostic、source path 或 Skill body；
+- refresh pending 只禁用 Refresh 并显示 `Refreshing…`，不冻结导航、历史阅读或后台 Task；成功后由 canonical snapshot 更新，失败保留最后 committed catalog 并提供 Retry，不清空成“没有 Skill”；
+- 首次 `uninitialized/loading` 显示 skeleton rows 与明确状态；`unavailable` 显示恢复说明和 Refresh，不伪造成空 catalog；真正 ready/degraded 且 `skills.length === 0` 才显示当前 Workspace 未发现 Skill；
+- 空状态可以提供 `New task` 导航动作，并说明可在普通任务中请求 MetaWork 创建 `.agents/skills` 下的 Skill；该动作只打开普通 Text draft，不创建专用 Skill mutation。创建和修改仍走 Text Run 与 AgentCore built-in Read/Edit，完成后需要显式 refresh；
+- 页面不注册 install、uninstall、update、enable、disable、toggle、checkbox 或 switch 控件；未来这些能力必须重新经过 AgentCore/Workbench owner 与 capability 验收。
 
 键盘与焦点：
 
-- scope 使用 tablist/tab 或等价单选语义，搜索使用 `type="search"`，列表使用有标签的 region/list，开关使用原生或 headless switch 语义并发布可读的名称、scope 与状态；
-- 进入 route 后焦点落在页面标题；刷新与 mutation 完成不抢焦点。行内失败通过邻近 `role="status"` / `role="alert"` 宣布，删除搜索字符不会把焦点移到第一项；
-- 点击 `New task`、Workspace 或 Task 离开页面后，返回 Skill 中心应恢复上次 scope 与搜索词；不持久化打开行或瞬时 pending 状态。
+- 搜索使用 `type="search"`，列表使用有标签的 `region/list`，issue summary 使用邻近 `role="status"`；只读 Skill row 不伪装成 button 或 selectable option；
+- 进入 route 后焦点落在页面标题；刷新完成不抢焦点，删除搜索字符不会把焦点移到第一项；
+- 点击 `New task`、Workspace 或 Task 离开页面后，返回 Skill 中心恢复上次搜索词；不持久化瞬时 refresh 状态。
 
 ### 5.4 Task 分组与排序
 
