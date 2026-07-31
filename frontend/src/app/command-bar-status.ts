@@ -16,6 +16,7 @@ export type ShellStatus = {
 };
 
 export type ShellStatusState = Readonly<Partial<Record<string, ShellStatus>>>;
+export type ShellRoute = "workbench" | "skills" | "settings";
 
 type StatusDetails = Pick<ShellStatus, "values" | "diagnostic" | "sourceId">;
 
@@ -61,7 +62,7 @@ export function publishStatus(
 export function statusVisibleInCommandBar(
   status: ShellStatus,
   context: {
-    route: "workbench" | "settings";
+    route: ShellRoute;
     workspaceId: string | null;
     taskId: string | null;
   },
@@ -69,13 +70,15 @@ export function statusVisibleInCommandBar(
   if (status.tone !== "attention") return false;
   if (status.audience.scope === "connection") return true;
   if (status.audience.scope === "account") return true;
-  if (context.route !== "workbench") return false;
   if (status.audience.scope === "workspace")
     return (
-      status.audience.workspaceId === null ||
-      status.audience.workspaceId === context.workspaceId
+      context.route !== "settings" &&
+      (status.audience.workspaceId === null ||
+        status.audience.workspaceId === context.workspaceId)
     );
-  return status.audience.taskId === context.taskId;
+  return (
+    context.route === "workbench" && status.audience.taskId === context.taskId
+  );
 }
 
 export function statusVisibleInAccountGate(status: ShellStatus): boolean {
@@ -85,7 +88,7 @@ export function statusVisibleInAccountGate(status: ShellStatus): boolean {
 export function selectCommandBarStatus(
   state: ShellStatusState,
   context: {
-    route: "workbench" | "settings";
+    route: ShellRoute;
     workspaceId: string | null;
     taskId: string | null;
   },

@@ -132,6 +132,10 @@ Bridge handler 不能绕过 Workbench 操作 AgentCore handle。automation 只�
 
 `slash.ts` 是 Renderer-owned Command identifier、Slash Resolver、Text/Skill draft 和 typed Run input 转换的唯一纯语义模块；它只消费 Bridge catalog projection，不读取 Skill source。`SlashMenu.tsx` 拥有 context-aware listbox 展示，`ComposerFooter.tsx` 拥有输入焦点、键盘、IME、Skill identity 与 positional argument 交互；真正的产品动作仍由 `app/App.tsx` action controller 复用既有路径。`drafts.ts` 与 `useTaskDrafts.ts` 只持有 Renderer session-scoped tagged draft，不形成产品 history。禁止在这些模块中新增 Skill loader、raw slash Bridge payload 或 command 专用执行路线。
 
+### `frontend/src/features/skills/`
+
+`SkillsPage.tsx` 是当前 Workspace Skill catalog 的只读一级视图，拥有搜索、catalog 状态、bounded issue 与空状态展示。它只消费 Bridge 已解码的 canonical projection，并由 `app/App.tsx` 复用既有 `workspaces.refreshSkillCatalog` action；不得读取目录或 Skill body、推断 source、持有 policy，或增加安装、编辑、启用/禁用路径。
+
 ### `workbench/` 与 `agent/`
 
 `workbench/projection.zig` 当前拥有 Workspace current catalog、Task pinned catalog、typed Text/Skill admission 与 history、Workspace/Task/Run 产品状态、stable Run record、executor worker reference、write-once terminal publication 和 bounded snapshot writer。`workbench/executor.zig` 独占 catalog/Run 共用的单一队列、workers、admission 和 shutdown。只有这些职责形成可独立测试的不变量时才拆文件；本文不预先指定未来文件名。

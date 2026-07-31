@@ -522,7 +522,7 @@ test("Workbench foundation uses the purple system and centered new Task stage", 
   );
   assert.match(
     app,
-    /contextVisible=\{route === "workbench" && activeTask !== null\}/,
+    /contextVisible=\{\s*\(route === "workbench" && activeTask !== null\) \|\|\s*\(route === "skills" && currentWorkspace !== undefined\)\s*\}/,
   );
   assert.ok(
     shell.indexOf("commandbar-workspace") < shell.indexOf("commandbar-task"),
