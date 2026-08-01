@@ -149,6 +149,9 @@ pub const FakeSession = struct {
     session_id: [wire.MAX_SESSION_ID_BYTES_V1]u8 = [_]u8{0} ** wire.MAX_SESSION_ID_BYTES_V1,
     session_id_len: usize = 0,
     run_id: u64 = 0,
+    compact_id: u64 = 0,
+    compacting: bool = false,
+    compact_abort_requested: bool = false,
     catalog: ?*FakeCatalog = null,
     abort_requested: bool = false,
     allow_finish: bool = false,
@@ -192,6 +195,8 @@ pub const FakeCore = struct {
     session_destroyed: usize = 0,
     run_calls: usize = 0,
     abort_calls: usize = 0,
+    compact_calls: usize = 0,
+    compact_abort_calls: usize = 0,
     last_abort_reason: ?u32 = null,
     buffer_releases: usize = 0,
     credential_seen: bool = false,
@@ -209,6 +214,10 @@ pub const FakeCore = struct {
     session_create_failures: usize = 0,
     forced_skill_update_status: ?u32 = null,
     forced_abort_status: ?u32 = null,
+    forced_compact_status: ?u32 = null,
+    forced_compact_abort_status: ?u32 = null,
+    forced_compact_outcome: ?u32 = null,
+    malformed_compact_result: bool = false,
     forced_session_destroy_status: ?u32 = null,
     ui_answered_callbacks: usize = 0,
     ui_fatal_callbacks: usize = 0,
@@ -230,6 +239,14 @@ pub const FakeCore = struct {
         self.lock();
         self.next_plan = plan;
         self.unlock();
+    }
+
+    pub fn setSessionPlan(self: *FakeCore, plan: Plan) void {
+        for (&self.sessions) |*session| {
+            session.lock();
+            if (session.in_use and !session.destroyed) session.plan = plan;
+            session.unlock();
+        }
     }
 
     pub fn setCatalogPlan(self: *FakeCore, plan: CatalogPlan) void {
@@ -269,6 +286,7 @@ pub const FakeCore = struct {
             session.lock();
             session.allow_finish = false;
             session.abort_requested = false;
+            session.compact_abort_requested = false;
             session.unlock();
         }
     }
@@ -294,6 +312,30 @@ pub const FakeCore = struct {
     pub fn forceNextAbortStatus(self: *FakeCore, status: u32) void {
         self.lock();
         self.forced_abort_status = status;
+        self.unlock();
+    }
+
+    pub fn forceNextCompactStatus(self: *FakeCore, status: u32) void {
+        self.lock();
+        self.forced_compact_status = status;
+        self.unlock();
+    }
+
+    pub fn forceNextCompactAbortStatus(self: *FakeCore, status: u32) void {
+        self.lock();
+        self.forced_compact_abort_status = status;
+        self.unlock();
+    }
+
+    pub fn forceNextCompactOutcome(self: *FakeCore, outcome: u32) void {
+        self.lock();
+        self.forced_compact_outcome = outcome;
+        self.unlock();
+    }
+
+    pub fn makeNextCompactResultMalformed(self: *FakeCore) void {
+        self.lock();
+        self.malformed_compact_result = true;
         self.unlock();
     }
 
@@ -618,7 +660,7 @@ pub fn sessionDestroy(
         return wire.STATUS_INVALID_ARGUMENT;
     }));
     session.lock();
-    if (session.running) {
+    if (session.running or session.compacting) {
         session.unlock();
         diagnostic(out_error);
         return wire.STATUS_BUSY;
@@ -691,7 +733,7 @@ pub fn sessionUpdateSkills(
         return status;
     }
     session.lock();
-    if (session.running) {
+    if (session.running or session.compacting) {
         session.unlock();
         diagnostic(out_error);
         return wire.STATUS_BUSY;
@@ -720,24 +762,106 @@ pub fn sessionUpdatePermissionRules(
 }
 
 pub fn sessionCompact(
-    _: ?*wire.SessionHandle,
-    _: u64,
-    _: ?*wire.CompactResultV1,
+    handle: ?*wire.SessionHandle,
+    operation_id: u64,
+    out_result: ?*wire.CompactResultV1,
     out_error: ?*wire.OwnedBytesV1,
 ) callconv(.c) u32 {
     if (out_error) |out| out.* = .{ .ptr = null, .len = 0 };
-    diagnostic(out_error);
-    return wire.STATUS_INVALID_STATE;
+    const session: *FakeSession = @ptrCast(@alignCast(handle orelse {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    }));
+    if (operation_id == 0 or out_result == null) {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    }
+    session.lock();
+    if (session.running or session.compacting) {
+        session.unlock();
+        diagnostic(out_error);
+        return wire.STATUS_BUSY;
+    }
+    if (operation_id <= session.compact_id) {
+        session.unlock();
+        diagnostic(out_error);
+        return wire.STATUS_STALE_COMPACT;
+    }
+    session.compact_id = operation_id;
+    session.compacting = true;
+    session.compact_abort_requested = false;
+    const plan = session.plan;
+    session.broadcast();
+    session.unlock();
+
+    fake_core.lock();
+    fake_core.compact_calls += 1;
+    const forced_status = fake_core.forced_compact_status;
+    fake_core.forced_compact_status = null;
+    const forced_outcome = fake_core.forced_compact_outcome;
+    fake_core.forced_compact_outcome = null;
+    const malformed = fake_core.malformed_compact_result;
+    fake_core.malformed_compact_result = false;
+    fake_core.unlock();
+
+    session.lock();
+    while (plan == .controlled and !session.allow_finish and
+        !session.compact_abort_requested)
+        session.wait();
+    const aborted = session.compact_abort_requested;
+    session.compacting = false;
+    session.broadcast();
+    session.unlock();
+
+    if (forced_status) |status| {
+        diagnostic(out_error);
+        return status;
+    }
+    const result = out_result.?;
+    result.* = std.mem.zeroes(wire.CompactResultV1);
+    result.struct_size = if (malformed) 0 else @sizeOf(wire.CompactResultV1);
+    result.outcome_code = if (aborted)
+        wire.COMPACT_ABORTED
+    else
+        forced_outcome orelse wire.COMPACT_COMPACTED;
+    result.before_context_tokens = 100;
+    result.after_context_tokens = 40;
+    result.input_tokens = 5;
+    result.output_tokens = 2;
+    return wire.STATUS_OK;
 }
 
 pub fn sessionAbortCompact(
-    _: ?*wire.SessionHandle,
-    _: u64,
+    handle: ?*wire.SessionHandle,
+    operation_id: u64,
     out_error: ?*wire.OwnedBytesV1,
 ) callconv(.c) u32 {
     if (out_error) |out| out.* = .{ .ptr = null, .len = 0 };
+    const session: *FakeSession = @ptrCast(@alignCast(handle orelse {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    }));
+    fake_core.lock();
+    fake_core.compact_abort_calls += 1;
+    const forced_status = fake_core.forced_compact_abort_status;
+    fake_core.forced_compact_abort_status = null;
+    fake_core.unlock();
+    if (forced_status) |status| {
+        diagnostic(out_error);
+        return status;
+    }
+    session.lock();
+    defer session.unlock();
+    if (session.compacting and operation_id == session.compact_id) {
+        session.compact_abort_requested = true;
+        session.broadcast();
+        return wire.STATUS_OK;
+    }
     diagnostic(out_error);
-    return wire.STATUS_INVALID_STATE;
+    if (operation_id < session.compact_id) return wire.STATUS_STALE_COMPACT;
+    if (!session.compacting and operation_id == session.compact_id)
+        return wire.STATUS_TOO_LATE;
+    return wire.STATUS_INVALID_ARGUMENT;
 }
 
 pub fn sessionRunInput(
@@ -804,6 +928,11 @@ pub fn sessionRunInput(
     fake_core.run_calls += 1;
     fake_core.unlock();
     session.lock();
+    if (session.compacting) {
+        session.unlock();
+        diagnostic(out_error);
+        return wire.STATUS_BUSY;
+    }
     session.running = true;
     session.run_id = run_id;
     const plan = session.plan;

@@ -380,7 +380,7 @@ Metask 已连接
 
 ### 6.1 核心规则
 
-- 每个 Task 同时最多一次执行；
+- 每个 Task 同时最多一个 active operation；当前 operation 可以是 Run 或 manual compact，二者不能并发；
 - 每个 Task 创建时建立第一个 execution binding epoch，固化不含 secret 的 generation、account/profile、Provider/API identity 和模型事实，并让对应 Agent Session 持有 owned ExecutionConfig；默认 API/模型变化不修改当前 epoch；
 - 多个 Task 可以后台运行，超过 Host executor 能力时明确排队；
 - 切换 Task 不停止执行；
@@ -394,14 +394,16 @@ Metask 已连接
 
 不得把 Task 生命周期、当前 Run 阶段和最近一次 Run 结果压成一个 enum。Host projection 分别提供以下状态，Renderer 只派生展示标签。
 
-| 状态轴           | 值                                                    | 含义                                            |
-| ---------------- | ----------------------------------------------------- | ----------------------------------------------- |
-| Task lifecycle   | `active / archived / deleting`                        | Task 记录本身是否参与日常工作                   |
-| Active Run phase | `none / queued / running / waiting_user / stopping`   | 唯一 non-terminal Run 是否需要调度、工作或等待  |
-| Last Run outcome | `none / completed / cancelled / failed / interrupted` | 最近一次 terminal Run 的结果，不关闭 Task       |
-| View sync        | `ready / syncing / failed`                            | Renderer 是否拥有可安全 mutation 的最新投影视图 |
+| 状态轴               | 值                                                    | 含义                                            |
+| -------------------- | ----------------------------------------------------- | ----------------------------------------------- |
+| Task lifecycle       | `active / archived / deleting`                        | Task 记录本身是否参与日常工作                   |
+| Active operation     | `none / run / compact`                                | 当前占用唯一 Session operation 槽的操作种类     |
+| Active Run phase     | `none / queued / running / waiting_user / stopping`   | `run` operation 的调度、工作或等待状态          |
+| Active compact phase | `none / queued / compacting / stopping`               | `compact` operation 的调度、工作或取消状态      |
+| Last Run outcome     | `none / completed / cancelled / failed / interrupted` | 最近一次 terminal Run 的结果，不关闭 Task       |
+| View sync            | `ready / syncing / failed`                            | Renderer 是否拥有可安全 mutation 的最新投影视图 |
 
-`draft` 是进入 Workbench 后、尚未创建真实 Task 的 Renderer 临时页面，不进入 Host Task lifecycle。它可以在 Workspace 尚未选择时暂存，但发送前必须同时确定 Workspace grant 与默认执行配置。一次执行完成后 `Active Run phase` 回到 `none`，`Last Run outcome` 保留结果。
+`draft` 是进入 Workbench 后、尚未创建真实 Task 的 Renderer 临时页面，不进入 Host Task lifecycle。它可以在 Workspace 尚未选择时暂存，但发送前必须同时确定 Workspace grant 与默认执行配置。一次 Run 完成后 `Active operation` 与 `Active Run phase` 回到 `none`，`Last Run outcome` 保留结果。Manual compact 完成后 active operation 同样回到 `none`，其 outcome 进入独立、有界、append-only 的 maintenance history，不改写最近一次 Run outcome。
 
 Execution binding availability 是下一次 admission 的独立前置事实，不得塞入上述四个状态轴或改写最近一次 Run 结果。Host projection 只发布 `available / rebind_required / unavailable` 及脱敏原因；Renderer 不根据当前默认模型自行判断能否继续。
 
@@ -510,6 +512,7 @@ Read 详情显示真实文件范围；Bash 详情显示实际执行命令、工�
 ```text
 ──────── Task stopped by you · 14:32 ────────
 ──────── Task interrupted unexpectedly ──────
+──────── Context compacted · 18.4k → 6.2k ───
 ```
 
 正常 Renderer reload 和成功同步不进入时间线；只有同步失败或内容可能不完整时才提示。
@@ -557,9 +560,10 @@ Composer 布局与输入规则：
 - 输入框不允许用户拖拽改变大小。它随内容自动增高，达到约 7–8 行或视口高度的 28% 后改为内部滚动；
 - Workspace 缺失或授权失效时文本仍可编辑、草稿仍保存，但发送保持禁用并在 breadcrumb 中提供明确恢复动作；Workspace 选择和发送是两个独立动作。
 
-已有 Task 的内容标题区是唯一执行停止入口：
+已有 Task 的内容标题区是唯一 active operation 停止入口：
 
 - `queued / running / waiting_user` 时在 Task Header 显示 `Stop task`；
+- manual compact 为 `queued / compacting` 时显示 `Stop compacting`；
 - `stopping` 时替换为不可重复点击的 `Stopping…`；
 - Composer 不显示第二个 Stop，也不通过 Send 按钮变形制造另一入口；
 - Stop acknowledgement 只表示请求已接受，界面继续等待 canonical snapshot 的真实 terminal；transport failure 不得伪造 `Stopped`。
@@ -573,7 +577,7 @@ Slash 是 Composer 的输入手势，不是 CLI 模式。空 draft 的首个非�
 
 菜单贴附于 Composer，而不是全局模态命令面板。Command 与 Skill 分组显示，使用确定性的大小写不敏感 prefix/substring 过滤；`ArrowUp / ArrowDown` 移动，`Enter / Tab` 选择，`Escape` 关闭但保留可见文本。菜单打开时 `Enter` 绝不能提交普通 Text；IME composition 期间不打开、过滤或执行。textarea 使用 combobox 语义，候选容器使用 listbox/group/option，并同步 `aria-expanded`、`aria-controls` 与 `aria-activedescendant`。不可用 Command 保留可发现性并显示真实原因。
 
-Command 只是现有动作的键盘入口。选择后由 `App` action controller 消费，不创建 command history，也不把原始 `/command` 送入 Bridge。V1 registry 只包含 `/new`，用于从已有 Task 打开 New task；已经位于 New task 或产品视图不可用时保留候选但明确禁用。`/model`、`/status`、`/resume`、`/continue` 以及其他 CLI/TUI identifier 不注册。带尾随参数的 Command 不执行；无法解析的首 token Slash 保持可见但发送禁用，用户必须选择候选、删除 `/` 或改写为普通正文。Command 与 Skill 同名时，裸 `/name` 归 Command，Skill 通过 `/skill:name` 显式选择。
+Command 只是现有动作的键盘入口。选择后由 `App` action controller 消费，不创建 command history，也不把原始 `/command` 送入 Bridge。V1 registry 包含 `/new` 与 `/compact`：`/new` 从已有 Task 打开 New task；`/compact` 在已有 finalized Run、continuation available 且没有 active operation 时触发 typed Task maintenance action。不可用 Command 保留候选并明确禁用原因。`/model`、`/status`、`/goal`、`/resume`、`/continue` 以及其他尚无正式产品 owner/合同的 CLI/TUI identifier 不注册。带尾随参数的 Command 不执行；无法解析的首 token Slash 保持可见但发送禁用，用户必须选择候选、删除 `/` 或改写为普通正文。Command 与 Skill 同名时，裸 `/name` 归 Command，Skill 通过 `/skill:name` 显式选择。
 
 选择 Skill 后，文本 draft 原子变为结构化 draft：左侧能力轨显示可移除的 Skill identity，右侧按 descriptor 顺序显示 positional argument 输入。Renderer 保留 catalog 的 `maxValues`，未命名的可选 positional argument 由用户逐项添加或移除，字段数不得超过该上限和产品的 64 项硬上限；发送前同时校验完整 Skill Run 输入的 64 KiB UTF-8 字节预算。`/review src/main.zig` 的可见尾随文本成为第一个参数，不实现 shell quote/escape parser；每次 Run 至多一个 Skill。Skill 原始 Slash 文本不进入 Bridge 或历史，发送只产生 `{ kind: "skill", skillId, catalogRevision, argumentValues }`。
 
@@ -586,6 +590,7 @@ Skill draft 与 Text draft 一样按 Task/New-task scope 保存在 Renderer sess
 | running              | 允许草拟下一条指令但禁止发送，显示 `当前任务结束后发送`；停止入口只在 Task Header |
 | waiting_user         | 普通输入让位于时间线请求，底部提示 `Respond above to continue` 并保留本地草稿     |
 | stopping             | 禁用输入，显示 `Stopping…`                                                        |
+| compact queued/running | 允许编辑本地草稿但禁止发送；唯一停止入口在 Task Header                          |
 | failed / interrupted | 恢复输入，提供针对性的重试或继续动作                                              |
 
 表中的 `idle` 仍受 execution binding availability 约束；`rebind_required / unavailable` 时以 §6.4 的只读说明和动作替代发送控件。

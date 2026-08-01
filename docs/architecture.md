@@ -90,6 +90,7 @@ flowchart TB
 负责：
 
 - Workbench 页面、布局和交互；
+- 解析 Composer Slash 手势并由唯一 action controller 转换为具体产品动作；Slash identifier 不进入 Host 通用协议；
 - 渲染消息、工具、审批、错误、usage 和运行状态；
 - 维护纯 UI 临时状态；
 - 通过集中式 client 调用 Host 领域命令并接收事件。
@@ -117,10 +118,10 @@ Host 负责：
 - 由 Account 在 Renderer 之外完成 Metask OAuth、目录查询、凭据持久化与 ExecutionConfig 生成；
 - 由 App/Account 在 committed transition 之后启动有界 continuation，把登录后的确定性目录准备留在后台，并只把真实歧义投影成用户动作；
 - 由 App 在同一主线程 turn 内协调 Account prepare、Workbench no-fail install 和 Account commit；
-- 由 Workbench 管理持久 Scheduled Task、触发游标、有界 occurrence history、Task、Run record、队列、取消协调和产品历史；
+- 由 Workbench 管理持久 Scheduled Task、触发游标、有界 occurrence history、Task、Run/maintenance record、唯一 active operation 槽、队列、取消协调和产品历史；
 - 由 App 通过 Native SDK `.data` 规则解析并打开 `<MetaWork data dir>/workspaces`，只把可用或不可用的 managed root capability 注入 Workbench；由 Workbench 独占目录分配、Workspace 注册、Task 创建事务与回滚；
 - 由 App 向 Workbench 注入原子 schedule persistence、wall clock、单一 Native timer、系统通知与后台窗口生命周期 capability；timer callback 只唤醒 Workbench due reconciliation，不直接调用 AgentCore；
-- 由 Agent 管理 AgentCore Session、active Run、callback binding 和有界事件泵；
+- 由 Agent 管理 AgentCore Session、active Run/manual compact、callback binding 和有界事件泵；
 - 管理跨会话产品状态；
 - 提供文件对话框、通知、更新和应用生命周期能力。
 
@@ -241,7 +242,7 @@ SessionRuntime
 ├── AgentCore Session handle
 ├── Conversation 所在 AgentCore Session 生命周期
 ├── task binding epoch 对应的 owned ExecutionConfig generation
-├── current_run: optional RunJob
+├── current_operation: none | RunJob | CompactJob
 ├── bounded input/event state
 ├── synchronous UI wait state
 └── callback lifetime guard
@@ -251,12 +252,18 @@ RunJob
 ├── pending external interruption（Workbench admission/handoff 窗口）
 ├── executor slot
 └── run-scoped Host scratch
+
+CompactJob
+├── monotonic operation_id
+├── executor slot
+├── cancellation/abort state
+└── immutable compact terminal result
 ```
 
-- 每个 Session 至多一个 in-flight Run；
+- 每个 Session 至多一个 in-flight operation；Run、manual compact、Session mutation 与 destroy 互斥；
 - 每个 Session 在创建时绑定一个 immutable ExecutionConfig generation；默认 Account 配置变化不热替换 live Session，显式 Task rebind 也必须创建新 Session；
-- Host 使用有上限的 Run executor；
-- 空闲 Session 不占 worker；同步 Run 和同步 UI wait 占用 execution slot；
+- Host 使用有上限的 Workbench executor；
+- 空闲 Session 不占 worker；同步 Run、同步 UI wait 和 manual compact 占用 execution slot；
 - Workbench 创建、排队、停止并销毁 bounded Executor；Agent Runtime 不接收 Scheduler capability，worker 从 Workbench queue 主动进入 Agent Run；
 - Scheduled Task 的 recurrence、持久触发游标、wall clock 和 timer admission 由 Workbench 拥有；App 只提供 store/timer/notification/tray capability。它只向同一 Task/Run Executor 提交真实产品工作，不把 scheduler capability 注入 Agent Runtime；
 - Bridge/main thread 不执行长耗时 Run，也不等待 permission；
@@ -288,6 +295,7 @@ RunJob
 - 工具调用和结果；
 - 同步审批决策；
 - Run 的 running/waiting/stopped/completed/cancelled/failed/interrupted 状态；
+- manual compact 的 queued/compacting/stopping 与 append-only terminal history；
 - WebView reload 所需的当前 Host view snapshot。
 
 Workbench 在 admission 时为每个 Run 建立稳定 record slot、单调 generation 和 bounded terminal diagnostic storage。executor worker 入队前直接取得 Task-owned stable record reference，并在 queued cancellation、执行失败或 terminal publication 收口后精确释放；该真实引用非零时 Task record 不得物理释放。删除已关闭 Task 只能进入 `delete_pending`，并在 worker reference 归零后收口。Agent 对已开始的 Run 返回自包含、不可变的 `TerminalResult`；Workbench 将其无分配、write-once 地提交进 Run record。queued-before-execute 由 Workbench 直接生成 pre-execution 产品结果。Session snapshot 只描述 live lifecycle，不再承载历史 terminal facts。

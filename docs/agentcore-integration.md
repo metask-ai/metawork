@@ -70,6 +70,8 @@ revision 5 bundle 提供完整 typed status、六个 StopReason、known/unknown 
 | ABI status        | Core → Host | function 调用层错误，独立于有效 Run 结果                                           |
 | `RunResult`       | Core → Host | status OK 后才有效；包含 stop reason code、turn/tool count                         |
 | abort             | Host → Core | 按 Session/Run 的 user/timeout 中断机制                                            |
+| manual compact    | 双向        | Host 分配严格递增 operation ID；Core 返回 typed compact result                     |
+| compact abort     | Host → Core | 只按 active compact operation ID 请求取消，不等待 provider I/O response            |
 | Skill descriptor  | Core → Host | query-scoped owned bytes；由 SDK 解码后立即释放                                    |
 | Skill catalog     | 双向借用    | Runtime query 返回 opaque handle；Session create/idle update 同步借用              |
 | Skill selection   | Host → Core | Session create/update 显式传入完整 replacement；当前固定 all-enabled、无 exception |
@@ -175,6 +177,11 @@ Open.Idle
   ↔ Open.WaitingUi
   → Open.Idle / terminal Run state
 
+Open.Idle
+  → Open.CompactQueued
+  → Open.Compacting
+  → Open.Idle / terminal Compact state
+
 Open.*
   → Closing
   → Closed
@@ -184,12 +191,13 @@ Open.*
 
 ### 每 Session 规则
 
-- 至多一个 in-flight Run；
+- 至多一个 in-flight operation；Run、manual compact、model/Skill/permission mutation 与 destroy 互斥；
 - 第二个 Run 明确排队或拒绝；
 - run ID 单调且与 Session 绑定；
 - queued Run 不接触 AgentCore mutable state；
 - queued Text/Skill input 在复制前按 Host byte limit、catalog identity 和参数数量拒绝，保证 executor 有界时输入内存也有明确上限；
 - active Run 独占 Session Conversation；
+- active compact 同样独占 Session Conversation；Host operation ID 在独立 compact ID space 中严格递增，pre-admission rejection 不消费 ID，admitted terminal path 消费 ID；
 - callback context 与 Session handle 具有独立 lifetime guard；
 - Run 返回不等于可以立刻 free callback context，必须确认 callback refcount 为零。
 
@@ -206,7 +214,7 @@ Agent Runtime 的 catalog query 是同步 Core 调用；调用在哪条受界线
 - MetaWork-owned catalog projection：只包含 revision、health、可调用 Skill 的产品字段与 bounded issue；不包含 raw JSON、catalog scope、物理路径、Skill body 或内部 policy；
 - opaque catalog lease：内部持有 AgentCore handle 及 root/home/epoch/Runtime owner 绑定，只能同步借给 Session create 或 idle refresh，并由原 Runtime 精确 release 一次。
 
-projection 的销毁不释放 lease，lease 的释放也不使已经复制的 projection 失效。Session create/update 必须拒绝另一 Runtime、Workspace、home 或 epoch 的 lease；create 在绑定 catalog 时同步传入 all-enabled `SkillSelectionV1`，update 只在 idle 状态调用 `session_update_skills` 并原子替换 catalog 与同一 selection。queued/running/waiting/closing 状态 fail closed。`permission_rules` 保持 null；set-model、manual compact、permission-rule 和 Skill toggle 没有 MetaWork 产品入口。Runtime shutdown 先阻止新 query，等待正在执行的 catalog call 收敛，并在仍有 lease 时明确返回 `CatalogLeasesOutstanding` 而不销毁 Core Runtime；上层释放 lease 后可重试同一 shutdown。实际 catalog 缓存、刷新合并、Task admission 和状态投影归 Workbench，Agent 不在内部隐式监听文件变化。
+projection 的销毁不释放 lease，lease 的释放也不使已经复制的 projection 失效。Session create/update 必须拒绝另一 Runtime、Workspace、home 或 epoch 的 lease；create 在绑定 catalog 时同步传入 all-enabled `SkillSelectionV1`，update 只在 idle 状态调用 `session_update_skills` 并原子替换 catalog 与同一 selection。queued/running/waiting/closing 状态 fail closed。`permission_rules` 保持 null；set-model、permission-rule 和 Skill toggle 没有 MetaWork 产品入口。Manual compact 只由 Workbench 在 Task idle admission 后进入 Agent typed surface，不由 catalog、Bridge 或 Renderer 直接调用。Runtime shutdown 先阻止新 query，等待正在执行的 catalog call 收敛，并在仍有 lease 时明确返回 `CatalogLeasesOutstanding` 而不销毁 Core Runtime；上层释放 lease 后可重试同一 shutdown。实际 catalog 缓存、刷新合并、Task admission 和状态投影归 Workbench，Agent 不在内部隐式监听文件变化。
 
 当前 Workbench 已将 catalog discovery 接入同一 bounded Executor。顶层管理 job 按 request generation 提交到独立 projection；User Workspace job 使用 App-owned canonical home 和 Workspace root/epoch query，主线程只提交仍匹配 Workspace id、epoch、request generation、authorization 和 Runtime 生命周期的结果，过期/取消结果立即释放 projection 与 lease。若 User Workspace 在旧 epoch query 尚未收敛时重新授权，Workbench 只记录一次 latest-epoch reschedule intent；旧 job 收口并释放结果后立即通过同一 Executor 发起新 query，不能因已有 job 而把已恢复授权的 Workspace 永久留在 unavailable。User Workspace current catalog 与每个 Task 的 pinned catalog 分离；创建 Task 时先复制并计入全局 projection budget，再同步借用 current lease 创建 Session。loading/unavailable 仍允许 text-only Task；此时 Task 没有 pinned catalog，其 Task-level catalog 固定投影为 uninitialized，不镜像 Workspace availability，只有显式 idle refresh 成功后才进入 ready/degraded。只要 App home 可用，Session 仍保存同一 epoch，以便后续用户显式 idle refresh。
 
@@ -222,12 +230,12 @@ Renderer Bridge revision 1 原地 hard cut 后，`metawork.tasks.run` 只接受 
 
 ```text
 1. close control lease acquisition gate and CAS Session state → Closing
-2. reject new Run and UI response
-3. remove/cancel queued Run
+2. reject new Run/compact and UI response
+3. remove/cancel queued Run or compact
 4. wake active synchronous UI wait
 5. set first-writer-wins TerminationSignal if absent
-6. request abort for active Run
-7. join Run job
+6. request matching abort for active Run or compact
+7. join active Workbench job and wait every abort call to return
 8. wait callback refcount == 0
 9. wait control refcount == owner only
 10. call session_destroy
@@ -252,6 +260,7 @@ Renderer Bridge revision 1 原地 hard cut 后，`metawork.tasks.run` 只接受 
 - cancel 与自然完成同时发生；
 - close queued Session；
 - close active Run；
+- close queued/active compact；
 - close while WaitingUi；
 - callback fatal 与用户 cancel 同时发生；
 - Host shutdown 多 Session；
@@ -466,6 +475,19 @@ React stop command
 ```
 
 stop 不进入普通 FIFO，不能被文本或 queue message 阻塞。abort 只请求中断；UI 必须等待真实 Run 返回后才能显示 terminal state。
+
+Manual compact 的反向控制遵循同一产品原则，但使用独立 identity 与 ABI entry：
+
+```text
+React stop compact command
+→ Native SDK main thread handler
+→ validate Task active operation + compact operation ID
+→ session_abort_compact(operation_id)
+→ join synchronous compact
+→ publish typed compact terminal history
+```
+
+Compact abort 同样不进入普通 FIFO；accepted cancellation 最终必须由 `session_compact` 返回 `STATUS_OK + COMPACT_ABORTED` 才能发布 aborted，acknowledgement 本身不构成 terminal product state。
 
 生成期 `queue_message` 当前只进入 Host 有界 Session 输入队列，在当前 Run 结束后按确定规则形成下一 Run 输入。它不依赖未接通的 `UiBackend.poll()`。
 

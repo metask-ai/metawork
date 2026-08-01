@@ -41,7 +41,7 @@ MetaWork 当前不定义为：
 
 ### Task 与内部 Agent Session
 
-Task 是用户可持续补充的产品工作上下文，归属于 Workspace，拥有消息、运行状态、Run 历史和不含 secret 的 execution binding 历史。每个 live Task 在当前进程中持有一个内部 Agent Session 与 Conversation；Session 是执行生命周期术语，不是第二个产品对象或 Renderer 身份。历史 Task 可以跨重启恢复为只读记录；跨进程 Conversation 恢复或安全重建属于后续能力，未通过验收前不得显示虚假的“继续此 Task”。
+Task 是用户可持续补充的产品工作上下文，归属于 Workspace，拥有消息、运行状态、Run 历史、Session maintenance 历史和不含 secret 的 execution binding 历史。每个 live Task 在当前进程中持有一个内部 Agent Session 与 Conversation；Session 是执行生命周期术语，不是第二个产品对象或 Renderer 身份。Run 与会改变 Conversation 的 maintenance operation 共用一个 Workbench-owned active operation 槽，不能并发进入同一 Session。历史 Task 可以跨重启恢复为只读记录；跨进程 Conversation 恢复或安全重建属于后续能力，未通过验收前不得显示虚假的“继续此 Task”。
 
 ### Turn / Run
 
@@ -119,7 +119,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - 后台 Task 的运行状态不能因 UI 切换而丢失；
 - 每条事件、审批和工具结果必须路由到正确 Task/Run；
 - 每个 Task 在创建时建立 execution binding epoch，固化 account/profile、generation、Provider/API identity 与模型；全局默认变化不改写当前 epoch、Task 历史或 live Agent Session；显式 rebind 只能在没有 non-terminal Run 且 Conversation capability 已验收时创建新的可审计 epoch；
-- 每个 Task 至多一个 non-terminal Run，包括 executor 中的 `queued` Run；当前 Run 结束前 Workbench 拒绝第二次提交，Renderer 只能保留未提交草稿；
+- 每个 Task 至多一个 active operation：当前可以是 non-terminal Run 或 manual compact，包括 executor 中的 `queued` 状态；Run 与 compact 互斥，当前 operation 结束前 Workbench 拒绝新的 Run、compact 和其他 Session mutation，Renderer 只能保留未提交草稿；
 - Renderer 产品合同为 `metawork.renderer-bridge` 固定 revision 1：`connect` 精确协商后才开放产品路径，snapshot 根节点由严格的无 secret `capabilities`、`account`、`selectedWorkspaceId`、`workspaces` 与 `tasks` 组成且不维护第二个局部版本；Account 发布脱敏 catalog selection identifier 与 generation，Workspace 由 Host 独立发布，Task 固化 binding epoch 与显示事实；Account、Workspace 和 Task mutation 均提交 expected generation/epoch，Host 重新校验 window、ownership、catalog membership 与 admission；快速开发阶段的合同内容直接原地 hard cut，不接受或双写被取代的临时 payload；
 - 预期的 Task/Workspace admission 拒绝必须作为严格 typed result 返回并由 Renderer 映射为产品文案；非法 payload、伪造 ownership 与不可信 origin 仍 fail closed 为 Bridge error，不得把内部 error name 显示给用户；
 - 当前固定 revision 1 合同原子提供独立 Workspace projection 与 Task execution binding。一次性目录能力必须由选择命令在 Host 内创建并消费，Renderer 不接收路径授权 token，不从 Task 反推 Workspace，也不能通过可选字段继续发送被取代的临时 payload；
@@ -132,8 +132,10 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - UI 流式显示 assistant 文本；
 - UI 展示工具开始、进度、结果、错误和耗时；
 - UI 展示 token usage、上下文警告、重试和压缩等可见状态；
+- 用户可以在已有 finalized Run 且 Task 可继续时显式压缩当前 Conversation；manual compact 是 Workbench-owned Task maintenance operation，不创建 Turn/Run，不产生用户消息，也不把 `/compact` 原文送入 Bridge 或模型；
+- manual compact 必须发布真实的 queued/compacting/stopping 与 terminal outcome；`compacted / no_change / degraded / aborted` 保持各自语义，before/after context token 只作为估算展示，compact provider usage 与 Run usage 分开记录；
 - 用户可以取消当前 Run；
-- 取消必须等待 AgentCore 给出真实终止结果，不能只在 UI 中停止渲染。
+- 用户可以取消 active compact；Run 或 compact 的取消都必须等待 AgentCore 给出真实终止结果，不能只在 UI 中停止渲染。
 
 ### 5.5 审批与输入
 
@@ -160,7 +162,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - OAuth 等待超过正常感知时长时，界面必须提供 Host-owned `重新打开登录页面` 与 `取消登录`；Renderer 不接触授权 URL。目录等幂读取可以有限自动重试，OAuth code exchange、持久化 mutation 和其他结果不确定操作不得盲目重放；
 - Bridge command 或 view refresh 超时必须释放 Renderer 本地 busy 状态并进入 snapshot resync；结果不确定的 mutation 只能依据 Host snapshot 决定后续动作，不能由 Renderer 自动重复；
 - Account cancel 是独立逃生动作，不能因普通 mutation busy 被禁用；但 credential persistence 一旦开始提交就跨过取消边界，Host 必须暂时撤销 cancel 并等待唯一 terminal completion，不能在磁盘已提交、main-thread completion 尚未消费的窗口把内存回滚到旧 generation。Bridge 暂不可用时 Host deadline 仍必须收口 attempt，Renderer reload 后从 snapshot 恢复可用动作；
-- 用户消息、已完成 assistant 消息、工具结果、审批决策和关键 Run 状态应形成可靠状态边界；Run admission 必须先建立稳定、带 generation 的 Workbench Run record，terminal payload 一经发布不可变，内部 Agent Session 关闭或销毁后 Task 历史仍可独立生成 snapshot；
+- 用户消息、已完成 assistant 消息、工具结果、审批决策、关键 Run 状态和改变 Conversation 的 manual compact 应形成可靠状态边界；Run/compact admission 必须先建立稳定的 Workbench record，terminal payload 一经发布不可变，内部 Agent Session 关闭或销毁后 Task 历史仍可独立生成 snapshot；compact history 有界且 append-only，容量耗尽时拒绝新 compact，不覆盖既有 Conversation 边界；
 - 当前 baseline 的 Renderer reload 只能从仍存活的 Host 恢复视图；
 - Host 或 AgentCore 进程退出时，当前同步 Run 标记 `interrupted`，不得伪装完成；
 - 崩溃后不得自动重放可能产生副作用的工具；
