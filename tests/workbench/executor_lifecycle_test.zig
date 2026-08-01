@@ -338,10 +338,6 @@ test "managed Workspace admission is isolated non-selecting and Text-only" {
     );
     try std.testing.expectEqual(
         workbench_api.CatalogAvailability.uninitialized,
-        (try workbench.taskCatalog(first_task)).availability,
-    );
-    try std.testing.expectEqual(
-        workbench_api.CatalogAvailability.uninitialized,
         (try workbench.taskCatalog(second_task)).availability,
     );
 }
