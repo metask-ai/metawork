@@ -34,6 +34,48 @@ test("the canonical Workbench fixture decodes without normalization", () => {
   assert.deepEqual(decodeWorkbenchSnapshot(fixture), fixture);
 });
 
+test("managed Workspace projection is one-to-one non-selecting and capability-gated", () => {
+  const managed = clone(fixture);
+  managed.capabilities.managedWorkspaces = true;
+  managed.workspaces.push({
+    ...clone(fixture.workspaces[0]),
+    id: "9",
+    origin: "managed",
+    displayName: "Managed workspace",
+    canonicalRoot: "/data/workspaces/0000000000000009",
+    recentOrder: "0",
+    signals: { running: 0, attention: 0, failedOrInterrupted: 0 },
+  });
+  managed.tasks.push({
+    ...clone(fixture.tasks[0]),
+    id: "4",
+    recentOrder: "2",
+    workspaceId: "9",
+  });
+  assert.deepEqual(decodeWorkbenchSnapshot(managed), managed);
+
+  const missingOwner = clone(managed);
+  missingOwner.tasks.pop();
+  assert.throws(
+    () => decodeWorkbenchSnapshot(missingOwner),
+    /exactly one Task/,
+  );
+
+  const selectedManaged = clone(managed);
+  selectedManaged.selectedWorkspaceId = "9";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(selectedManaged),
+    /selected Workspace must be a projected user Workspace/,
+  );
+
+  const unavailable = clone(managed);
+  unavailable.capabilities.managedWorkspaces = false;
+  assert.throws(
+    () => decodeWorkbenchSnapshot(unavailable),
+    /managed Workspace capability is unavailable/,
+  );
+});
+
 test("Skill catalogs and typed Skill history decode without exposing loader internals", () => {
   const withSkill = clone(fixture);
   const catalog = {
@@ -104,8 +146,11 @@ test("Scheduled Task projection decodes recurrence and occurrence without secret
       enabled: true,
       health: "ready",
       failureReason: null,
-      workspaceId: "1",
-      workspaceEpoch: "1",
+      target: {
+        kind: "explicit",
+        workspaceId: "1",
+        workspaceEpoch: "1",
+      },
       execution: {
         generation: "1",
         provider: "anthropic",
@@ -138,6 +183,69 @@ test("Scheduled Task projection decodes recurrence and occurrence without secret
     },
   ];
   assert.deepEqual(decodeWorkbenchSnapshot(scheduled), scheduled);
+
+  const rejectedAfterTaskCreation = clone(scheduled);
+  rejectedAfterTaskCreation.scheduledTasks[0].occurrences[0] = {
+    ...rejectedAfterTaskCreation.scheduledTasks[0].occurrences[0],
+    result: "rejected",
+    reason: "capacity_reached",
+  };
+  assert.deepEqual(
+    decodeWorkbenchSnapshot(rejectedAfterTaskCreation),
+    rejectedAfterTaskCreation,
+  );
+
+  const rejectedWithoutReason = clone(rejectedAfterTaskCreation);
+  rejectedWithoutReason.scheduledTasks[0].occurrences[0].reason = null;
+  assert.throws(
+    () => decodeWorkbenchSnapshot(rejectedWithoutReason),
+    /rejected occurrence requires a reason/,
+  );
+
+  const managedTarget = clone(scheduled);
+  managedTarget.capabilities.managedWorkspaces = true;
+  managedTarget.workspaces.push({
+    ...clone(fixture.workspaces[0]),
+    id: "9",
+    origin: "managed",
+    displayName: "Managed workspace",
+    canonicalRoot: "/data/workspaces/0000000000000009",
+    recentOrder: "0",
+  });
+  managedTarget.tasks.push({
+    ...clone(fixture.tasks[0]),
+    id: "4",
+    workspaceId: "9",
+  });
+  managedTarget.scheduledTasks[0].target.workspaceId = "9";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(managedTarget),
+    /explicit scheduled Task cannot target a managed Workspace/,
+  );
+
+  const unavailableExplicitTarget = clone(scheduled);
+  unavailableExplicitTarget.scheduledTasks[0].target.workspaceId = "99";
+  assert.deepEqual(
+    decodeWorkbenchSnapshot(unavailableExplicitTarget),
+    unavailableExplicitTarget,
+  );
+
+  const defaultTarget = clone(scheduled);
+  defaultTarget.scheduledTasks[0].target = { kind: "default" };
+  defaultTarget.scheduledTasks[0].input = {
+    kind: "text",
+    text: "Summarize current work",
+    redacted: false,
+  };
+  assert.deepEqual(decodeWorkbenchSnapshot(defaultTarget), defaultTarget);
+
+  const defaultSkill = clone(scheduled);
+  defaultSkill.scheduledTasks[0].target = { kind: "default" };
+  assert.throws(
+    () => decodeWorkbenchSnapshot(defaultSkill),
+    /default scheduled Task target requires text input/,
+  );
+
   const invalid = clone(scheduled);
   invalid.scheduledTasks[0].recurrence.cron = "* * * * *";
   assert.throws(() => decodeWorkbenchSnapshot(invalid), /expected keys/);

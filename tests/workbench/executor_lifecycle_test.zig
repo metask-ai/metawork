@@ -44,6 +44,63 @@ fn waitCatalogUnavailable(
     return error.TestUnexpectedResult;
 }
 
+fn directoryEntryCount(dir: std.Io.Dir) !usize {
+    const iterable = try dir.openDir(
+        std.testing.io,
+        ".",
+        .{ .iterate = true, .follow_symlinks = false },
+    );
+    defer iterable.close(std.testing.io);
+    var iterator = iterable.iterate();
+    var count: usize = 0;
+    while (try iterator.next(std.testing.io) != null) count += 1;
+    return count;
+}
+
+const TestScheduleSupport = struct {
+    now: u64 = 1_000,
+    commits: usize = 0,
+
+    fn nowUnixSeconds(context: ?*anyopaque) ?u64 {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        return self.now;
+    }
+
+    fn arm(_: ?*anyopaque, _: u64) bool {
+        return true;
+    }
+
+    fn cancel(_: ?*anyopaque) void {}
+
+    fn commit(
+        context: ?*anyopaque,
+        bytes: []const u8,
+    ) workbench_api.SchedulePersistenceCommit {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        std.debug.assert(bytes.len != 0);
+        self.commits += 1;
+        return .committed;
+    }
+
+    fn timer(self: *@This()) workbench_api.ScheduleTimer {
+        return .{
+            .context = self,
+            .enabled = true,
+            .now_unix_seconds = nowUnixSeconds,
+            .arm = arm,
+            .cancel = cancel,
+        };
+    }
+
+    fn persistence(self: *@This()) workbench_api.SchedulePersistence {
+        return .{
+            .context = self,
+            .enabled = true,
+            .commit_fn = commit,
+        };
+    }
+};
+
 test "bounded executor rejects overflow and close cancels a queued Run" {
     fake_core.reset();
     fake_core.setNextPlan(.controlled);
@@ -154,6 +211,367 @@ test "Workbench pins an async catalog and admits typed Skill through the existin
     fake_core.unlock();
     try std.testing.expect(skill_seen);
     try std.testing.expect(input_matches);
+}
+
+test "managed Workspace admission is isolated non-selecting and Text-only" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_sessions = 2,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
+    var managed_root = try workbench_api.ManagedWorkspaceRoot.open(
+        std.testing.io,
+        std.testing.allocator,
+        root_storage[0..root_len],
+    );
+    defer managed_root.deinit();
+    var workbench = try workbench_api.Workbench.init(
+        std.testing.allocator,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 2,
+            .max_workspaces = 1,
+            .max_tasks = 2,
+            .max_runs_per_task = 2,
+            .max_tools_per_run = 1,
+        },
+        .{ .directories = .{ .managed_workspace_root = &managed_root } },
+    );
+    defer workbench.deinit();
+    try installWorkbenchExecution(&workbench);
+
+    const user_workspace_id = try workbench.openWorkspace(workbenchTaskInput());
+    var user_projection_storage: [3]workbench_api.WorkspaceProjection = undefined;
+    const before = try workbench.copyWorkspaceProjections(&user_projection_storage);
+    const user_recent_order = before[0].recent_order;
+
+    const first_task = try workbench.createTaskForWorkspace(
+        .managed,
+        1,
+        null,
+    );
+    const first_workspace = try workbench.taskWorkspaceId(first_task);
+    try std.testing.expectEqual(
+        workbench_api.WorkspaceOrigin.managed,
+        try workbench.workspaceOrigin(first_workspace),
+    );
+    try std.testing.expectEqual(
+        workbench_api.CatalogAvailability.uninitialized,
+        (try workbench.taskCatalog(first_task)).availability,
+    );
+    try std.testing.expectEqual(user_workspace_id, workbench.selectedWorkspaceId());
+    const after_first = try workbench.copyWorkspaceProjections(&user_projection_storage);
+    try std.testing.expectEqual(@as(usize, 2), after_first.len);
+    const projected_user = for (after_first) |workspace| {
+        if (workspace.origin == .user) break workspace;
+    } else return error.TestUnexpectedResult;
+    const projected_managed = for (after_first) |workspace| {
+        if (workspace.origin == .managed) break workspace;
+    } else return error.TestUnexpectedResult;
+    try std.testing.expectEqual(user_recent_order, projected_user.recent_order);
+    try std.testing.expectEqual(first_workspace, projected_managed.id);
+    var managed_snapshot_storage: [128 * 1024]u8 = undefined;
+    const managed_snapshot = try workbench.writeSnapshot(
+        &managed_snapshot_storage,
+    );
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        managed_snapshot,
+        "\"managedWorkspaces\":true",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        managed_snapshot,
+        "\"origin\":\"managed\"",
+    ) != null);
+    try std.testing.expectEqual(@as(usize, 1), try directoryEntryCount(tmp.dir));
+    try std.testing.expectError(
+        error.WorkspaceUnavailable,
+        workbench.createTaskInWorkspace(
+            first_workspace,
+            try workbench.workspaceEpoch(first_workspace),
+            1,
+            null,
+        ),
+    );
+    try std.testing.expectError(
+        error.CatalogUnavailable,
+        workbench.runTask(first_task, .{ .skill = .{
+            .skill_id = fixture.fixture_skill_id,
+            .catalog_revision = fixture.fixture_catalog_revision,
+            .argument_values = &.{},
+        } }),
+    );
+
+    const second_task = try workbench.createTaskForWorkspace(
+        .managed,
+        1,
+        null,
+    );
+    const second_workspace = try workbench.taskWorkspaceId(second_task);
+    try std.testing.expect(first_workspace != second_workspace);
+    try std.testing.expectEqual(@as(usize, 2), try directoryEntryCount(tmp.dir));
+
+    _ = try workbench.runTask(first_task, .{ .text = "managed text run" });
+    try waitWorkbenchSnapshot(runtime, &workbench, "\"lastRunOutcome\":\"completed\"");
+    try workbench.closeTask(first_task);
+    try waitWorkbenchSnapshot(runtime, &workbench, "\"lifecycle\":\"closed\"");
+    try workbench.deleteTask(first_task);
+    try std.testing.expectError(
+        error.UnknownWorkspace,
+        workbench.workspaceEpoch(first_workspace),
+    );
+    try std.testing.expectEqual(@as(usize, 2), try directoryEntryCount(tmp.dir));
+    try std.testing.expectEqual(
+        workbench_api.WorkspaceOrigin.managed,
+        try workbench.workspaceOrigin(second_workspace),
+    );
+    try std.testing.expectEqual(
+        workbench_api.CatalogAvailability.uninitialized,
+        (try workbench.taskCatalog(second_task)).availability,
+    );
+}
+
+test "managed Workspace creation rolls back record and empty directory on Session failure" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_sessions = 1,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
+    var managed_root = try workbench_api.ManagedWorkspaceRoot.open(
+        std.testing.io,
+        std.testing.allocator,
+        root_storage[0..root_len],
+    );
+    defer managed_root.deinit();
+    var workbench = try workbench_api.Workbench.init(
+        std.testing.allocator,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 2,
+            .max_workspaces = 1,
+            .max_tasks = 2,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        .{ .directories = .{ .managed_workspace_root = &managed_root } },
+    );
+    defer workbench.deinit();
+    try installWorkbenchExecution(&workbench);
+    _ = try workbench.createTask(workbenchTaskInput());
+    const revision = workbench.currentRevision();
+
+    try std.testing.expectError(
+        error.TaskCapacity,
+        workbench.createTaskForWorkspace(.managed, 1, null),
+    );
+    try std.testing.expectEqual(revision, workbench.currentRevision());
+    try std.testing.expectEqual(@as(usize, 0), try directoryEntryCount(tmp.dir));
+}
+
+test "Text schedule default creates a fresh managed Workspace per occurrence" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_sessions = 2,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
+    var managed_root = try workbench_api.ManagedWorkspaceRoot.open(
+        std.testing.io,
+        std.testing.allocator,
+        root_storage[0..root_len],
+    );
+    defer managed_root.deinit();
+    var schedule_support: TestScheduleSupport = .{};
+    var workbench = try workbench_api.Workbench.init(
+        std.testing.allocator,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 2,
+            .max_workspaces = 1,
+            .max_tasks = 2,
+            .max_scheduled_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        .{
+            .directories = .{ .managed_workspace_root = &managed_root },
+            .schedule_timer = schedule_support.timer(),
+            .schedule_persistence = schedule_support.persistence(),
+        },
+    );
+    defer workbench.deinit();
+    try installWorkbenchExecution(&workbench);
+
+    const default_schedule = try workbench.createScheduledTask(.{
+        .title = "Independent brief",
+        .target = .default,
+        .expected_execution_generation = 1,
+        .input = .{ .text = "Summarize current work" },
+        .recurrence = .{ .interval = .{
+            .start_at_unix_seconds = 2_000,
+            .every_seconds = 3_600,
+        } },
+    });
+    const commits_before_rejection = schedule_support.commits;
+    try std.testing.expectError(
+        error.InvalidScheduledTaskInput,
+        workbench.createScheduledTask(.{
+            .title = "Invalid managed Skill",
+            .target = .default,
+            .expected_execution_generation = 1,
+            .input = .{ .skill = .{
+                .skill_id = fixture.fixture_skill_id,
+                .catalog_revision = fixture.fixture_catalog_revision,
+                .argument_values = &.{},
+            } },
+            .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
+        }),
+    );
+    try std.testing.expectEqual(commits_before_rejection, schedule_support.commits);
+
+    const first_task = try workbench.runScheduledTaskNow(default_schedule, 1);
+    const first_workspace = try workbench.taskWorkspaceId(first_task);
+    try std.testing.expectEqual(
+        workbench_api.WorkspaceOrigin.managed,
+        try workbench.workspaceOrigin(first_workspace),
+    );
+    try std.testing.expectEqual(@as(u64, 0), workbench.selectedWorkspaceId());
+    try waitWorkbenchSnapshot(runtime, &workbench, "\"taskOutcome\":\"completed\"");
+
+    const second_task = try workbench.runScheduledTaskNow(default_schedule, 1);
+    const second_workspace = try workbench.taskWorkspaceId(second_task);
+    try std.testing.expect(first_task != second_task);
+    try std.testing.expect(first_workspace != second_workspace);
+    try std.testing.expectEqual(
+        workbench_api.WorkspaceOrigin.managed,
+        try workbench.workspaceOrigin(second_workspace),
+    );
+    var projection_storage: [2]workbench_api.WorkspaceProjection = undefined;
+    const projections = try workbench.copyWorkspaceProjections(
+        &projection_storage,
+    );
+    try std.testing.expectEqual(@as(usize, 2), projections.len);
+    for (projections) |workspace| {
+        try std.testing.expectEqual(
+            workbench_api.WorkspaceOrigin.managed,
+            workspace.origin,
+        );
+        try std.testing.expectEqual(@as(u64, 0), workspace.recent_order);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), try directoryEntryCount(tmp.dir));
+    var snapshot_storage: [128 * 1024]u8 = undefined;
+    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"target\":{\"kind\":\"default\"}",
+    ) != null);
+}
+
+test "schedule rejection retains the managed Task created before a full Run queue" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 3,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
+    var managed_root = try workbench_api.ManagedWorkspaceRoot.open(
+        std.testing.io,
+        std.testing.allocator,
+        root_storage[0..root_len],
+    );
+    defer managed_root.deinit();
+    var schedule_support: TestScheduleSupport = .{};
+    var workbench = try workbench_api.Workbench.init(
+        std.testing.allocator,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 1,
+            .max_tasks = 3,
+            .max_scheduled_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        .{
+            .directories = .{ .managed_workspace_root = &managed_root },
+            .schedule_timer = schedule_support.timer(),
+            .schedule_persistence = schedule_support.persistence(),
+        },
+    );
+    defer workbench.deinit();
+    try installWorkbenchExecution(&workbench);
+
+    const schedule_id = try workbench.createScheduledTask(.{
+        .title = "Queued brief",
+        .target = .default,
+        .expected_execution_generation = 1,
+        .input = .{ .text = "Summarize current work" },
+        .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
+    });
+    fake_core.setNextPlan(.controlled);
+    defer fake_core.releaseControlled();
+    const running_task = try workbench.createTaskForWorkspace(.managed, 1, null);
+    const queued_task = try workbench.createTaskForWorkspace(.managed, 1, null);
+    _ = try workbench.runTask(running_task, .{ .text = "hold worker" });
+    try waitWorkbenchSnapshot(
+        runtime,
+        &workbench,
+        "\"currentRunPhase\":\"running\"",
+    );
+    _ = try workbench.runTask(queued_task, .{ .text = "fill queue" });
+
+    try std.testing.expectError(
+        error.QueueFull,
+        workbench.runScheduledTaskNow(schedule_id, 1),
+    );
+    try std.testing.expectEqual(@as(usize, 3), try directoryEntryCount(tmp.dir));
+    var snapshot_storage: [128 * 1024]u8 = undefined;
+    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"result\":\"rejected\",\"taskId\":\"3\",\"reason\":\"capacity_reached\"",
+    ) != null);
 }
 
 test "Workspace reauthorization reschedules the latest catalog query" {

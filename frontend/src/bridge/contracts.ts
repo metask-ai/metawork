@@ -183,8 +183,9 @@ export type ScheduledTaskView = {
     | "persistence_failed"
     | "host_interrupted"
     | null;
-  workspaceId: string;
-  workspaceEpoch: string;
+  target:
+    | { kind: "default" }
+    | { kind: "explicit"; workspaceId: string; workspaceEpoch: string };
   execution: {
     generation: string;
     provider: Provider;
@@ -221,8 +222,13 @@ export type ScheduledTaskView = {
 
 export type ScheduledTaskMutation = {
   title: string;
-  workspaceId: string;
-  expectedWorkspaceEpoch: string;
+  target:
+    | { kind: "default" }
+    | {
+        kind: "explicit";
+        workspaceId: string;
+        expectedWorkspaceEpoch: string;
+      };
   expectedExecutionGeneration: string;
   input: TaskRunInput;
   recurrence: ScheduledTaskRecurrence;
@@ -377,6 +383,7 @@ export type WorkbenchSnapshot = {
     typedOutputs: boolean;
     typedFileChanges: boolean;
     persistentWorkspacePermissions: boolean;
+    managedWorkspaces: boolean;
     scheduledTasks: boolean;
     scheduledTaskPersistence: boolean;
     scheduledTaskPersistenceHealth:
@@ -399,6 +406,7 @@ export type WorkbenchSnapshot = {
 export type WorkspaceView = {
   id: string;
   epoch: string;
+  origin: "user" | "managed";
   displayName: string;
   canonicalRoot: string;
   redacted: boolean;

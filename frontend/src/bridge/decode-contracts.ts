@@ -164,6 +164,7 @@ const workspaceAuthorizations = [
   "removing",
   "reauthorization_required",
 ] as const;
+const workspaceOrigins = ["user", "managed"] as const;
 const bindingAvailabilities = ["available", "unavailable"] as const;
 const skillCatalogAvailabilities = [
   "uninitialized",
@@ -1183,6 +1184,7 @@ function decodeWorkspace(value: unknown, path: string): WorkspaceView {
   const item = object(value, path, [
     "id",
     "epoch",
+    "origin",
     "displayName",
     "canonicalRoot",
     "redacted",
@@ -1197,24 +1199,43 @@ function decodeWorkspace(value: unknown, path: string): WorkspaceView {
     "attention",
     "failedOrInterrupted",
   ]);
+  const origin = enumValue(item.origin, `${path}.origin`, workspaceOrigins);
+  const authorization = enumValue(
+    item.authorization,
+    `${path}.authorization`,
+    workspaceAuthorizations,
+  );
+  const lastRemovalFailure = nullableEnum(
+    item.lastRemovalFailure,
+    `${path}.lastRemovalFailure`,
+    ["task_close_failed"] as const,
+  );
+  const recentOrder = wireId(item.recentOrder, `${path}.recentOrder`);
+  const skillCatalog = decodeSkillCatalog(
+    item.skillCatalog,
+    `${path}.skillCatalog`,
+  );
+  if (origin === "user" && recentOrder === "0")
+    fail(`${path}.recentOrder`, "user Workspace requires recent order");
+  if (
+    origin === "managed" &&
+    (recentOrder !== "0" ||
+      authorization !== "available" ||
+      lastRemovalFailure !== null ||
+      skillCatalog.availability !== "uninitialized")
+  )
+    fail(path, "managed Workspace must remain non-selecting and catalog-free");
   return {
     id: positiveWireId(item.id, `${path}.id`),
     epoch: positiveWireId(item.epoch, `${path}.epoch`),
+    origin,
     displayName: stringValue(item.displayName, `${path}.displayName`),
     canonicalRoot: stringValue(item.canonicalRoot, `${path}.canonicalRoot`),
     redacted: booleanValue(item.redacted, `${path}.redacted`),
-    authorization: enumValue(
-      item.authorization,
-      `${path}.authorization`,
-      workspaceAuthorizations,
-    ),
-    lastRemovalFailure: nullableEnum(
-      item.lastRemovalFailure,
-      `${path}.lastRemovalFailure`,
-      ["task_close_failed"] as const,
-    ),
-    skillCatalog: decodeSkillCatalog(item.skillCatalog, `${path}.skillCatalog`),
-    recentOrder: positiveWireId(item.recentOrder, `${path}.recentOrder`),
+    authorization,
+    lastRemovalFailure,
+    skillCatalog,
+    recentOrder,
     signals: {
       running: nonNegativeNumber(signals.running, `${path}.signals.running`),
       attention: nonNegativeNumber(
@@ -1238,8 +1259,7 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
     "enabled",
     "health",
     "failureReason",
-    "workspaceId",
-    "workspaceEpoch",
+    "target",
     "execution",
     "input",
     "recurrence",
@@ -1251,6 +1271,40 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
     "provider",
     "model",
   ]);
+  if (
+    typeof item.target !== "object" ||
+    item.target === null ||
+    Array.isArray(item.target)
+  )
+    fail(`${path}.target`, "expected object");
+  const targetObject = item.target as JsonObject;
+  const targetKind = stringValue(targetObject.kind, `${path}.target.kind`);
+  const target =
+    targetKind === "default"
+      ? (() => {
+          object(item.target, `${path}.target`, ["kind"]);
+          return { kind: "default" as const };
+        })()
+      : targetKind === "explicit"
+        ? (() => {
+            const explicit = object(item.target, `${path}.target`, [
+              "kind",
+              "workspaceId",
+              "workspaceEpoch",
+            ]);
+            return {
+              kind: "explicit" as const,
+              workspaceId: positiveWireId(
+                explicit.workspaceId,
+                `${path}.target.workspaceId`,
+              ),
+              workspaceEpoch: positiveWireId(
+                explicit.workspaceEpoch,
+                `${path}.target.workspaceEpoch`,
+              ),
+            };
+          })()
+        : fail(`${path}.target.kind`, "unexpected scheduled Task target kind");
   if (
     typeof item.input !== "object" ||
     item.input === null ||
@@ -1367,6 +1421,11 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
         last.taskId === null
           ? null
           : positiveWireId(last.taskId, `${occurrencePath}.taskId`);
+      const reason = nullableEnum(
+        last.reason,
+        `${occurrencePath}.reason`,
+        scheduledTaskFailureReasons,
+      );
       const taskOutcome = nullableEnum(
         last.taskOutcome,
         `${occurrencePath}.taskOutcome`,
@@ -1379,12 +1438,28 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
           "dependency_contract_failure",
         ] as const,
       );
-      if (result === "submitted" && taskId === null)
-        fail(occurrencePath, "submitted occurrence must reference a Task");
-      if (result !== "submitted" && taskOutcome !== null)
+      if (
+        result === "claimed" &&
+        (taskId !== null || reason !== null || taskOutcome !== null)
+      )
+        fail(occurrencePath, "claimed occurrence cannot expose terminal facts");
+      if (result === "submitted" && (taskId === null || reason !== null))
         fail(
           occurrencePath,
-          "only submitted occurrence can expose Task outcome",
+          "submitted occurrence requires a Task without a rejection reason",
+        );
+      if (
+        result === "skipped" &&
+        (taskId !== null || reason === null || taskOutcome !== null)
+      )
+        fail(
+          occurrencePath,
+          "skipped occurrence requires only a rejection reason",
+        );
+      if (result === "rejected" && (reason === null || taskOutcome !== null))
+        fail(
+          occurrencePath,
+          "rejected occurrence requires a reason and may reference a Task",
         );
       return {
         plannedAtUnixSeconds: positiveWireId(
@@ -1401,11 +1476,7 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
         ] as const),
         result,
         taskId,
-        reason: nullableEnum(
-          last.reason,
-          `${occurrencePath}.reason`,
-          scheduledTaskFailureReasons,
-        ),
+        reason,
         taskOutcome,
       };
     },
@@ -1421,6 +1492,8 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
         );
   if (enabled !== (health === "ready" && nextRunAtUnixSeconds !== null))
     fail(path, "enabled schedule must be ready and expose its next run");
+  if (target.kind === "default" && input.kind !== "text")
+    fail(path, "default scheduled Task target requires text input");
   return {
     id: positiveWireId(item.id, `${path}.id`),
     epoch: positiveWireId(item.epoch, `${path}.epoch`),
@@ -1433,11 +1506,7 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
       `${path}.failureReason`,
       scheduledTaskFailureReasons,
     ),
-    workspaceId: positiveWireId(item.workspaceId, `${path}.workspaceId`),
-    workspaceEpoch: positiveWireId(
-      item.workspaceEpoch,
-      `${path}.workspaceEpoch`,
-    ),
+    target,
     execution: {
       generation: positiveWireId(
         execution.generation,
@@ -1476,6 +1545,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     "typedOutputs",
     "typedFileChanges",
     "persistentWorkspacePermissions",
+    "managedWorkspaces",
     "scheduledTasks",
     "scheduledTaskPersistence",
     "scheduledTaskPersistenceHealth",
@@ -1509,6 +1579,10 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     persistentWorkspacePermissions: booleanValue(
       capabilityItem.persistentWorkspacePermissions,
       "$.capabilities.persistentWorkspacePermissions",
+    ),
+    managedWorkspaces: booleanValue(
+      capabilityItem.managedWorkspaces,
+      "$.capabilities.managedWorkspaces",
     ),
     scheduledTasks: booleanValue(
       capabilityItem.scheduledTasks,
@@ -1563,10 +1637,43 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     scheduledTasks.length
   )
     fail("$.scheduledTasks", "scheduled Task identities must be unique");
-  if (scheduledTasks.some((task) => !workspaceIds.has(task.workspaceId)))
-    fail("$.scheduledTasks", "scheduled Task Workspace must be projected");
-  if (selectedWorkspaceId !== null && !workspaceIds.has(selectedWorkspaceId))
-    fail("$.selectedWorkspaceId", "selected Workspace must be projected");
+  if (
+    scheduledTasks.some((task) => {
+      const target = task.target;
+      if (target.kind !== "explicit") return false;
+      return (
+        workspaces.find((workspace) => workspace.id === target.workspaceId)
+          ?.origin === "managed"
+      );
+    })
+  )
+    fail(
+      "$.scheduledTasks",
+      "explicit scheduled Task cannot target a managed Workspace",
+    );
+  const selectedWorkspace = workspaces.find(
+    (workspace) => workspace.id === selectedWorkspaceId,
+  );
+  if (selectedWorkspaceId !== null && selectedWorkspace?.origin !== "user")
+    fail(
+      "$.selectedWorkspaceId",
+      "selected Workspace must be a projected user Workspace",
+    );
+  for (const workspace of workspaces) {
+    const taskCount = tasks.filter(
+      (task) => task.workspaceId === workspace.id,
+    ).length;
+    if (workspace.origin === "managed" && taskCount !== 1)
+      fail("$.workspaces", "managed Workspace must belong to exactly one Task");
+  }
+  if (
+    !capabilities.managedWorkspaces &&
+    workspaces.some((workspace) => workspace.origin === "managed")
+  )
+    fail(
+      "$.capabilities.managedWorkspaces",
+      "managed Workspace capability is unavailable",
+    );
   return {
     revision: wireId(root.revision, "$.revision"),
     capabilities,

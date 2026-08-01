@@ -28,6 +28,7 @@ import { composerDraftWithinLimits } from "../frontend/src/features/composer/sla
 import {
   isRunInFlight,
   searchWorkbench,
+  sidebarTasks,
   taskDisplayState,
   taskGroups,
   taskSignals,
@@ -123,6 +124,32 @@ test("Task navigation groups action before recency and keeps Host order exact", 
   );
 });
 
+test("sidebar keeps managed Tasks globally visible without leaking other user Workspace Tasks", () => {
+  const snapshot = {
+    workspaces: [
+      { id: "user-a", origin: "user" },
+      { id: "user-b", origin: "user" },
+      { id: "managed-a", origin: "managed" },
+      { id: "managed-b", origin: "managed" },
+    ],
+    tasks: [
+      task({ id: "user-a-task", workspaceId: "user-a" }),
+      task({ id: "user-b-task", workspaceId: "user-b" }),
+      task({ id: "managed-a-task", workspaceId: "managed-a" }),
+      task({ id: "managed-b-task", workspaceId: "managed-b" }),
+    ],
+  };
+
+  assert.deepEqual(
+    sidebarTasks(snapshot, "user-a").map((item) => item.id),
+    ["user-a-task", "managed-a-task", "managed-b-task"],
+  );
+  assert.deepEqual(
+    sidebarTasks(snapshot, null).map((item) => item.id),
+    ["managed-a-task", "managed-b-task"],
+  );
+});
+
 test("workspace navigation aggregates actionable cross-workspace signals without conflating axes", () => {
   const tasks = [
     task({ id: "1", currentRunId: "9", currentRunPhase: "running" }),
@@ -148,6 +175,7 @@ test("workspace navigation aggregates actionable cross-workspace signals without
       workspaces: [
         {
           id: "1",
+          origin: "user",
           displayName: "alpha",
           canonicalRoot: "/repo/alpha",
           authorization: "available",
@@ -157,6 +185,7 @@ test("workspace navigation aggregates actionable cross-workspace signals without
         },
         {
           id: "2",
+          origin: "user",
           displayName: "beta",
           canonicalRoot: "/repo/beta",
           authorization: "removing",
@@ -349,8 +378,15 @@ test("global search finds product content and deliberately excludes raw tool out
     workspaces: [
       {
         id: "1",
+        origin: "user",
         displayName: "alpha",
         canonicalRoot: "/repo/alpha",
+      },
+      {
+        id: "9",
+        origin: "managed",
+        displayName: "Independent workspace",
+        canonicalRoot: "/data/workspaces/deadbeefdeadbeef",
       },
     ],
     tasks: [
@@ -365,6 +401,7 @@ test("global search finds product content and deliberately excludes raw tool out
           ),
         ],
       }),
+      task({ id: "9", workspaceId: "9", title: "Managed report" }),
     ],
   };
   assert.equal(searchWorkbench(snapshot, "alpha")[0].kind, "workspace");
@@ -372,6 +409,11 @@ test("global search finds product content and deliberately excludes raw tool out
   assert.equal(searchWorkbench(snapshot, "readiness")[0].kind, "instruction");
   assert.equal(searchWorkbench(snapshot, "checklist")[0].kind, "completion");
   assert.deepEqual(searchWorkbench(snapshot, "tool-only"), []);
+  assert.deepEqual(searchWorkbench(snapshot, "deadbeef"), []);
+  assert.equal(
+    searchWorkbench(snapshot, "managed report")[0].detail,
+    "Independent workspace",
+  );
 });
 
 test("Composer drafts survive a WebView reload scope and fail safely when storage is unavailable", () => {

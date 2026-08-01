@@ -53,6 +53,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-bridge", .root_module = test_modules.bridge },
         .{ .name = "metawork-workbench", .root_module = test_modules.workbench_projection },
         .{ .name = "metawork-workbench-executor", .root_module = test_modules.workbench_executor },
+        .{ .name = "metawork-managed-workspace-store", .root_module = test_modules.workbench_managed_workspace_store },
         .{ .name = "metawork-scheduled-task-persistence", .root_module = test_modules.workbench_scheduled_persistence },
     };
     for (module_tests) |spec| {
@@ -124,6 +125,7 @@ const WiredModules = struct {
     workbench: *std.Build.Module,
     workbench_projection: *std.Build.Module,
     workbench_executor: *std.Build.Module,
+    workbench_managed_workspace_store: *std.Build.Module,
     workbench_scheduled_persistence: *std.Build.Module,
 };
 
@@ -318,6 +320,11 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .target = target,
         .optimize = root_module.optimize,
     });
+    const managed_workspace_store = b.createModule(.{
+        .root_source_file = b.path("src/workbench/managed_workspace_store.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
     const scheduled_tasks = b.createModule(.{
         .root_source_file = b.path("src/workbench/scheduled_tasks.zig"),
         .target = target,
@@ -340,6 +347,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     projection.addImport("metawork_agent", agent);
     projection.addImport("metawork_account_contract", account_contract);
     projection.addImport("workbench_executor", executor);
+    projection.addImport("workbench_managed_workspace_store", managed_workspace_store);
     projection.addImport("workbench_scheduled_tasks", scheduled_tasks);
     projection.addImport(
         "workbench_scheduled_task_persistence",
@@ -365,6 +373,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .optimize = root_module.optimize,
     });
     workbench.addImport("workbench_projection", projection);
+    workbench.addImport("workbench_managed_workspace_store", managed_workspace_store);
     workbench.addImport(
         "workbench_scheduled_task_persistence",
         scheduled_task_persistence,
@@ -444,6 +453,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .workbench = workbench,
         .workbench_projection = projection,
         .workbench_executor = executor,
+        .workbench_managed_workspace_store = managed_workspace_store,
         .workbench_scheduled_persistence = scheduled_task_persistence,
     };
 }

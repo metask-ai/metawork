@@ -42,6 +42,22 @@ export type TaskGroup = {
   tasks: TaskView[];
 };
 
+export function sidebarTasks(
+  snapshot: WorkbenchSnapshot,
+  selectedUserWorkspaceId: string | null,
+): TaskView[] {
+  const managedWorkspaceIds = new Set(
+    snapshot.workspaces
+      .filter((workspace) => workspace.origin === "managed")
+      .map((workspace) => workspace.id),
+  );
+  return snapshot.tasks.filter(
+    (task) =>
+      task.workspaceId === selectedUserWorkspaceId ||
+      managedWorkspaceIds.has(task.workspaceId),
+  );
+}
+
 export function taskGroups(
   tasks: TaskView[],
   showArchived: boolean,
@@ -137,6 +153,7 @@ export function workspaceSummaries(
   snapshot: WorkbenchSnapshot,
 ): WorkspaceSummary[] {
   return [...snapshot.workspaces]
+    .filter((workspace) => workspace.origin === "user")
     .sort((left, right) => {
       const leftOrder = BigInt(left.recentOrder);
       const rightOrder = BigInt(right.recentOrder);
@@ -186,7 +203,9 @@ export function searchWorkbench(
   const workspaces = new Map(
     snapshot.workspaces.map((workspace) => [workspace.id, workspace]),
   );
-  for (const workspace of snapshot.workspaces) {
+  for (const workspace of snapshot.workspaces.filter(
+    (candidate) => candidate.origin === "user",
+  )) {
     if (matches(workspace.canonicalRoot) || matches(workspace.displayName))
       results.push({
         key: `workspace:${workspace.id}`,
@@ -208,7 +227,10 @@ export function searchWorkbench(
         taskId: task.id,
         workspaceId: task.workspaceId,
         title,
-        detail: workspace.canonicalRoot,
+        detail:
+          workspace.origin === "managed"
+            ? workspace.displayName
+            : workspace.canonicalRoot,
       });
     for (const run of task.runs) {
       const input = runInputDisplay(run.input);

@@ -173,8 +173,7 @@ const ItemWire = struct {
     id: u64,
     epoch: u64,
     title: []const u8,
-    workspace_id: u64,
-    workspace_epoch: u64,
+    target: TargetWire,
     execution_generation: u64,
     execution_provider: []const u8,
     execution_model: []const u8,
@@ -185,6 +184,12 @@ const ItemWire = struct {
     failure_reason: ?[]const u8,
     next_run_at_unix_seconds: ?u64,
     occurrences: []OccurrenceWire,
+};
+
+const TargetWire = struct {
+    kind: []const u8,
+    workspace_id: ?u64 = null,
+    workspace_epoch: ?u64 = null,
 };
 
 const InputWire = struct {
@@ -269,6 +274,7 @@ pub fn decode(
             occurrences[index] = try decodeOccurrence(occurrence);
         const recurrence = try decodeRecurrence(wire.recurrence);
         const input_value = try decodeInput(wire.input);
+        const target = try decodeTarget(wire.target);
         if (!validText(wire.title) or !validText(wire.execution_model))
             return error.ScheduledTaskStoreCorrupt;
         store.restoreItem(.{
@@ -276,8 +282,7 @@ pub fn decode(
             .epoch = wire.epoch,
             .definition = .{
                 .title = wire.title,
-                .workspace_id = wire.workspace_id,
-                .workspace_epoch = wire.workspace_epoch,
+                .target = target,
                 .execution_generation = wire.execution_generation,
                 .execution_provider = parseEnum(
                     scheduled.Provider,
@@ -310,9 +315,11 @@ fn encodeItem(writer: *std.Io.Writer, item: *const scheduled.Item) !void {
         .{ item.id, item.epoch },
     );
     try jsonString(writer, item.title);
+    try writer.writeAll(",\"target\":");
+    try encodeTarget(writer, item.target);
     try writer.print(
-        ",\"workspace_id\":{d},\"workspace_epoch\":{d},\"execution_generation\":{d},\"execution_provider\":",
-        .{ item.workspace_id, item.workspace_epoch, item.execution_generation },
+        ",\"execution_generation\":{d},\"execution_provider\":",
+        .{item.execution_generation},
     );
     try jsonString(writer, @tagName(item.execution_provider));
     try writer.writeAll(",\"execution_model\":");
@@ -361,6 +368,36 @@ fn encodeItem(writer: *std.Io.Writer, item: *const scheduled.Item) !void {
         });
     }
     try writer.writeAll("]}");
+}
+
+fn encodeTarget(writer: *std.Io.Writer, target: scheduled.Target) !void {
+    switch (target) {
+        .default => try writer.writeAll("{\"kind\":\"default\"}"),
+        .explicit => |explicit| try writer.print(
+            "{{\"kind\":\"explicit\",\"workspace_id\":{d},\"workspace_epoch\":{d}}}",
+            .{ explicit.workspace_id, explicit.workspace_epoch },
+        ),
+    }
+}
+
+fn decodeTarget(wire: TargetWire) Error!scheduled.Target {
+    if (std.mem.eql(u8, wire.kind, "default")) {
+        if (wire.workspace_id != null or wire.workspace_epoch != null)
+            return error.ScheduledTaskStoreCorrupt;
+        return .default;
+    }
+    if (!std.mem.eql(u8, wire.kind, "explicit"))
+        return error.ScheduledTaskStoreCorrupt;
+    const workspace_id = wire.workspace_id orelse
+        return error.ScheduledTaskStoreCorrupt;
+    const workspace_epoch = wire.workspace_epoch orelse
+        return error.ScheduledTaskStoreCorrupt;
+    if (workspace_id == 0 or workspace_epoch == 0)
+        return error.ScheduledTaskStoreCorrupt;
+    return .{ .explicit = .{
+        .workspace_id = workspace_id,
+        .workspace_epoch = workspace_epoch,
+    } };
 }
 
 fn encodeInput(writer: *std.Io.Writer, input: scheduled.Input) !void {
@@ -493,8 +530,10 @@ test "scheduled task store round trips bounded occurrence history" {
     defer store.deinit();
     const id = try store.create(.{
         .title = "Daily brief",
-        .workspace_id = 7,
-        .workspace_epoch = 3,
+        .target = .{ .explicit = .{
+            .workspace_id = 7,
+            .workspace_epoch = 3,
+        } },
         .execution_generation = 9,
         .execution_provider = .openai,
         .execution_model = "gpt-test",
@@ -507,6 +546,24 @@ test "scheduled task store round trips bounded occurrence history" {
     const item = store.find(id).?;
     try store.markSubmitted(item, 2_000, 2_001, .timer, 42);
     try store.finalizeOccurrenceTask(item, 2_000, .timer, .completed);
+    const default_id = try store.create(.{
+        .title = "Independent brief",
+        .target = .default,
+        .execution_generation = 9,
+        .execution_provider = .openai,
+        .execution_model = "gpt-test",
+        .input = .{ .text = "Summarize current work" },
+        .recurrence = .{ .once = .{ .at_unix_seconds = 3_000 } },
+    }, 1_000);
+    const default_item = store.find(default_id).?;
+    try store.claim(default_item, 3_000, 3_001, .manual);
+    try store.finalizeClaimRejected(
+        default_item,
+        3_000,
+        .manual,
+        .capacity_reached,
+        84,
+    );
 
     var output: [max_store_bytes]u8 = undefined;
     const bytes = try encode(&output, &store);
@@ -524,6 +581,21 @@ test "scheduled task store round trips bounded occurrence history" {
     );
     try std.testing.expect(restored_item.occurrences()[0].notification_sent);
     try std.testing.expectEqualStrings("Daily brief", restored_item.title);
+    try std.testing.expectEqualDeep(
+        scheduled.Target{ .explicit = .{
+            .workspace_id = 7,
+            .workspace_epoch = 3,
+        } },
+        restored_item.target,
+    );
+    switch (restored.find(default_id).?.target) {
+        .default => {},
+        .explicit => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(
+        @as(u64, 84),
+        restored.find(default_id).?.occurrences()[0].task_id,
+    );
     try std.testing.expectEqual(store.next_id, restored.next_id);
 }
 
@@ -545,6 +617,14 @@ test "scheduled task store rejects unknown fields and revisions" {
         decode(
             std.testing.allocator,
             "{\"schema_version\":1,\"next_id\":1,\"items\":[],\"extra\":true}",
+            limits,
+        ),
+    );
+    try std.testing.expectError(
+        error.ScheduledTaskStoreCorrupt,
+        decode(
+            std.testing.allocator,
+            "{\"schema_version\":1,\"next_id\":2,\"items\":[{\"id\":1,\"epoch\":1,\"title\":\"legacy\",\"workspace_id\":7,\"workspace_epoch\":3,\"execution_generation\":1,\"execution_provider\":\"openai\",\"execution_model\":\"gpt-test\",\"input\":{\"kind\":\"text\",\"text\":\"legacy\"},\"recurrence\":{\"kind\":\"once\",\"at_unix_seconds\":2},\"enabled\":true,\"health\":\"ready\",\"failure_reason\":null,\"next_run_at_unix_seconds\":2,\"occurrences\":[]}]}",
             limits,
         ),
     );

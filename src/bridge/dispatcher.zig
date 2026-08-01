@@ -1028,8 +1028,7 @@ pub const Dispatcher = struct {
         defer input.deinit();
         const definition = try scheduledTaskDefinition(
             parsed.value.title,
-            parsed.value.workspaceId,
-            parsed.value.expectedWorkspaceEpoch,
+            parsed.value.target,
             parsed.value.expectedExecutionGeneration,
             input.value,
             parsed.value.recurrence,
@@ -1067,8 +1066,7 @@ pub const Dispatcher = struct {
         const expected_epoch = try handlers.parseWireId(parsed.value.expectedEpoch);
         const definition = try scheduledTaskDefinition(
             parsed.value.title,
-            parsed.value.workspaceId,
-            parsed.value.expectedWorkspaceEpoch,
+            parsed.value.target,
             parsed.value.expectedExecutionGeneration,
             input.value,
             parsed.value.recurrence,
@@ -1415,8 +1413,7 @@ fn encodeTaskCreateResult(
 
 fn scheduledTaskDefinition(
     title: []const u8,
-    workspace_id_wire: []const u8,
-    workspace_epoch_wire: []const u8,
+    target_value: std.json.Value,
     execution_generation_wire: []const u8,
     input: handlers.TaskRunInput,
     recurrence_value: std.json.Value,
@@ -1431,8 +1428,7 @@ fn scheduledTaskDefinition(
     };
     return .{
         .title = title,
-        .workspace_id = try handlers.parseWireId(workspace_id_wire),
-        .expected_workspace_epoch = try handlers.parseWireId(workspace_epoch_wire),
+        .target = try handlers.parseScheduledTaskTarget(target_value),
         .expected_execution_generation = try handlers.parseWireId(execution_generation_wire),
         .input = workbench_input,
         .recurrence = try handlers.parseScheduledTaskRecurrence(recurrence_value),

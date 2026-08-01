@@ -129,6 +129,7 @@ export const enUS = {
   "workspace.running_count": "{count} working",
   "workspace.failed_count": "{count} failed",
   "workspace.none": "No workspace selected",
+  "workspace.managed": "Independent workspace",
   "workspace.grant_ready": "Ready to start a task in this trusted workspace.",
   "workspace.selection_cancelled": "Workspace selection cancelled.",
   "workspace.selection_failed":
@@ -528,7 +529,16 @@ export const enUS = {
   "scheduled.creating": "New schedule",
   "scheduled.error": "MetaWork could not complete this schedule change.",
   "scheduled.name": "Name",
+  "scheduled.target": "Run files",
+  "scheduled.target.default": "Independent workspace",
+  "scheduled.target.default_help":
+    "MetaWork creates a new independent workspace for every run.",
+  "scheduled.target.explicit": "Selected workspace",
+  "scheduled.target.explicit_help":
+    "Every run uses the files in the selected workspace.",
   "scheduled.workspace": "Workspace",
+  "scheduled.workspace_unavailable":
+    "Previously selected workspace unavailable",
   "scheduled.what": "What to run",
   "scheduled.input.text": "Instruction",
   "scheduled.input.skill": "Skill",
@@ -579,7 +589,7 @@ export const enUS = {
   "scheduled.repeat.weekly": "Every week",
   "scheduled.next_run": "Next run",
   "scheduled.status": "Status",
-  "scheduled.details": "Name and workspace",
+  "scheduled.details": "Name and context",
   "scheduled.history": "Run history",
   "scheduled.history_empty": "Results will appear here after the first run.",
   "scheduled.open_task": "View result",

@@ -288,6 +288,7 @@ function renderWorkspaceNavigation(
           ? [
               {
                 id: "1",
+                origin: "user",
                 canonicalRoot: "/repo/alpha",
                 label: "alpha",
                 authorization,

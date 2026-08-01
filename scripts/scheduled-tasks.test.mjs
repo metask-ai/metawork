@@ -3,11 +3,38 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
+import { JSDOM } from "jsdom";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createServer } from "vite";
 
 import { BridgeClient } from "../frontend/src/bridge/client.ts";
+
+const dom = new JSDOM("<!doctype html><html><body></body></html>", {
+  pretendToBeVisual: true,
+  url: "http://localhost/",
+});
+Object.assign(globalThis, {
+  window: dom.window,
+  document: dom.window.document,
+  Node: dom.window.Node,
+  DocumentFragment: dom.window.DocumentFragment,
+  Element: dom.window.Element,
+  HTMLElement: dom.window.HTMLElement,
+  MutationObserver: dom.window.MutationObserver,
+  getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
+});
+Object.defineProperty(globalThis, "navigator", {
+  configurable: true,
+  value: dom.window.navigator,
+});
+const {
+  cleanup,
+  fireEvent,
+  render: renderDom,
+  screen,
+  waitFor,
+} = await import("@testing-library/react");
 
 const vite = await createServer({
   root: join(process.cwd(), "frontend"),
@@ -21,7 +48,11 @@ const { ScheduledTasksPage } = await vite.ssrLoadModule(
 const { I18nContext } = await vite.ssrLoadModule("/src/i18n/context.ts");
 const { translate } = await vite.ssrLoadModule("/src/i18n/runtime.ts");
 
-test.after(async () => vite.close());
+test.afterEach(() => cleanup());
+test.after(async () => {
+  await vite.close();
+  dom.window.close();
+});
 
 const fixture = JSON.parse(
   readFileSync(
@@ -33,33 +64,37 @@ const fixture = JSON.parse(
   ),
 );
 
-function render(snapshot) {
-  return renderToStaticMarkup(
-    createElement(
-      I18nContext.Provider,
-      {
-        value: {
-          locale: "en-US",
-          setLocale() {},
-          t: (id, values) => translate("en-US", id, values),
-        },
+function scheduledElement(snapshot, overrides = {}) {
+  return createElement(
+    I18nContext.Provider,
+    {
+      value: {
+        locale: "en-US",
+        setLocale() {},
+        t: (id, values) => translate("en-US", id, values),
       },
-      createElement(ScheduledTasksPage, {
-        snapshot,
-        disabled: false,
-        onCreate: async () => undefined,
-        onUpdate: async () => undefined,
-        onSetEnabled: async () => undefined,
-        onRunNow: async () => ({ taskId: "3" }),
-        onDelete: async () => undefined,
-        onOpenTask() {},
-      }),
-    ),
+    },
+    createElement(ScheduledTasksPage, {
+      snapshot,
+      disabled: false,
+      onCreate: async () => undefined,
+      onUpdate: async () => undefined,
+      onSetEnabled: async () => undefined,
+      onRunNow: async () => ({ taskId: "3" }),
+      onDelete: async () => undefined,
+      onOpenTask() {},
+      ...overrides,
+    }),
   );
+}
+
+function render(snapshot) {
+  return renderToStaticMarkup(scheduledElement(snapshot));
 }
 
 test("Scheduled tasks is a truthful independent management page", () => {
   const snapshot = structuredClone(fixture);
+  snapshot.capabilities.managedWorkspaces = true;
   snapshot.capabilities.scheduledTasks = true;
   snapshot.capabilities.scheduledTaskPersistence = true;
   snapshot.capabilities.scheduledTaskPersistenceHealth = "ready";
@@ -73,8 +108,7 @@ test("Scheduled tasks is a truthful independent management page", () => {
       enabled: true,
       health: "ready",
       failureReason: null,
-      workspaceId: "1",
-      workspaceEpoch: "1",
+      target: { kind: "default" },
       execution: {
         generation: "1",
         provider: "anthropic",
@@ -106,6 +140,7 @@ test("Scheduled tasks is a truthful independent management page", () => {
 
 test("Empty scheduled tasks page offers actionable starter templates", () => {
   const snapshot = structuredClone(fixture);
+  snapshot.capabilities.managedWorkspaces = true;
   snapshot.capabilities.scheduledTasks = true;
   snapshot.capabilities.scheduledTaskPersistence = true;
   snapshot.capabilities.scheduledTaskPersistenceHealth = "ready";
@@ -117,6 +152,80 @@ test("Empty scheduled tasks page offers actionable starter templates", () => {
   assert.match(html, /Follow-up check/);
   assert.match(html, /Try your own task/);
   assert.doesNotMatch(html, /Nothing is scheduled/);
+});
+
+test("project-aware starter templates require an explicit user Workspace", () => {
+  const snapshot = structuredClone(fixture);
+  snapshot.capabilities.managedWorkspaces = true;
+  snapshot.capabilities.scheduledTasks = true;
+  snapshot.capabilities.scheduledTaskPersistence = true;
+  snapshot.capabilities.scheduledTaskPersistenceHealth = "ready";
+  renderDom(scheduledElement(snapshot));
+
+  fireEvent.click(screen.getByRole("button", { name: /Daily brief/ }));
+  assert.equal(screen.getByLabelText("Run files").value, "explicit");
+  assert.equal(screen.getByLabelText("Workspace").value, "1");
+});
+
+test("Text schedules default to a managed workspace without requiring a user Workspace", async () => {
+  const snapshot = structuredClone(fixture);
+  snapshot.capabilities.managedWorkspaces = true;
+  snapshot.capabilities.scheduledTasks = true;
+  snapshot.capabilities.scheduledTaskPersistence = true;
+  snapshot.capabilities.scheduledTaskPersistenceHealth = "ready";
+  snapshot.capabilities.backgroundScheduleWake = true;
+  snapshot.selectedWorkspaceId = null;
+  snapshot.workspaces = [];
+  snapshot.tasks = [];
+  let created = null;
+  renderDom(
+    scheduledElement(snapshot, {
+      onCreate: async (input) => {
+        created = input;
+      },
+    }),
+  );
+
+  assert.equal(
+    screen.getByRole("button", { name: /Daily brief/ }).disabled,
+    true,
+  );
+  assert.equal(
+    screen.getByRole("button", { name: /Try your own task/ }).disabled,
+    false,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "New schedule" }));
+  assert.ok(screen.getByRole("dialog", { name: "Schedule editor" }));
+  assert.equal(screen.getByRole("button", { name: "Skill" }).disabled, true);
+  assert.equal(screen.getByLabelText("Run files").value, "default");
+  fireEvent.change(screen.getByLabelText("Name"), {
+    target: { value: "Independent brief" },
+  });
+  fireEvent.change(
+    screen.getByPlaceholderText(/Describe what MetaWork should do/),
+    { target: { value: "Summarize current work" } },
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => assert.ok(created));
+  assert.deepEqual(created.target, { kind: "default" });
+  assert.equal("workspaceId" in created, false);
+  assert.equal(created.input.kind, "text");
+});
+
+test("Skill schedules force an explicit user Workspace target", () => {
+  const snapshot = structuredClone(fixture);
+  snapshot.capabilities.managedWorkspaces = true;
+  snapshot.capabilities.scheduledTasks = true;
+  snapshot.capabilities.scheduledTaskPersistence = true;
+  snapshot.capabilities.scheduledTaskPersistenceHealth = "ready";
+  renderDom(scheduledElement(snapshot));
+
+  fireEvent.click(screen.getByRole("button", { name: "New schedule" }));
+  fireEvent.click(screen.getByRole("button", { name: "Skill" }));
+  const target = screen.getByLabelText("Run files");
+  assert.equal(target.value, "explicit");
+  assert.equal(target.disabled, true);
+  assert.equal(screen.getByLabelText("Workspace").value, "1");
 });
 
 test("New task, Skills, and Scheduled tasks share one compact peer menu", async () => {
@@ -166,8 +275,11 @@ test("Scheduled task Bridge commands preserve IDs, epochs, and exact payloads", 
   });
   const mutation = {
     title: "Summary",
-    workspaceId: "1",
-    expectedWorkspaceEpoch: "2",
+    target: {
+      kind: "explicit",
+      workspaceId: "1",
+      expectedWorkspaceEpoch: "2",
+    },
     expectedExecutionGeneration: "3",
     input: { kind: "text", text: "Summarize" },
     recurrence: { kind: "once", atUnixSeconds: "1800000000" },
@@ -188,6 +300,7 @@ test("Scheduled task Bridge commands preserve IDs, epochs, and exact payloads", 
       "metawork.scheduledTasks.delete",
     ],
   );
+  assert.deepEqual(calls[0].payload, mutation);
   assert.deepEqual(calls[1].payload, {
     scheduledTaskId: "8",
     expectedEpoch: "1",
