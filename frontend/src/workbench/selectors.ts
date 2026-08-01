@@ -42,6 +42,22 @@ export type TaskGroup = {
   tasks: TaskView[];
 };
 
+export function sidebarTasks(
+  snapshot: WorkbenchSnapshot,
+  selectedUserWorkspaceId: string | null,
+): TaskView[] {
+  const managedWorkspaceIds = new Set(
+    snapshot.workspaces
+      .filter((workspace) => workspace.origin === "managed")
+      .map((workspace) => workspace.id),
+  );
+  return snapshot.tasks.filter(
+    (task) =>
+      task.workspaceId === selectedUserWorkspaceId ||
+      managedWorkspaceIds.has(task.workspaceId),
+  );
+}
+
 export function taskGroups(
   tasks: TaskView[],
   showArchived: boolean,

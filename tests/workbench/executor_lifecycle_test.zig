@@ -476,6 +476,18 @@ test "Text schedule default creates a fresh managed Workspace per occurrence" {
         workbench_api.WorkspaceOrigin.managed,
         try workbench.workspaceOrigin(second_workspace),
     );
+    var projection_storage: [2]workbench_api.WorkspaceProjection = undefined;
+    const projections = try workbench.copyWorkspaceProjections(
+        &projection_storage,
+    );
+    try std.testing.expectEqual(@as(usize, 2), projections.len);
+    for (projections) |workspace| {
+        try std.testing.expectEqual(
+            workbench_api.WorkspaceOrigin.managed,
+            workspace.origin,
+        );
+        try std.testing.expectEqual(@as(u64, 0), workspace.recent_order);
+    }
 
     try std.testing.expectEqual(@as(usize, 2), try directoryEntryCount(tmp.dir));
     var snapshot_storage: [128 * 1024]u8 = undefined;

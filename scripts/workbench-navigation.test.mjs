@@ -28,6 +28,7 @@ import { composerDraftWithinLimits } from "../frontend/src/features/composer/sla
 import {
   isRunInFlight,
   searchWorkbench,
+  sidebarTasks,
   taskDisplayState,
   taskGroups,
   taskSignals,
@@ -120,6 +121,32 @@ test("Task navigation groups action before recency and keeps Host order exact", 
       ["recent", ["recent-new", "recent-old"]],
       ["archived", ["archived"]],
     ],
+  );
+});
+
+test("sidebar keeps managed Tasks globally visible without leaking other user Workspace Tasks", () => {
+  const snapshot = {
+    workspaces: [
+      { id: "user-a", origin: "user" },
+      { id: "user-b", origin: "user" },
+      { id: "managed-a", origin: "managed" },
+      { id: "managed-b", origin: "managed" },
+    ],
+    tasks: [
+      task({ id: "user-a-task", workspaceId: "user-a" }),
+      task({ id: "user-b-task", workspaceId: "user-b" }),
+      task({ id: "managed-a-task", workspaceId: "managed-a" }),
+      task({ id: "managed-b-task", workspaceId: "managed-b" }),
+    ],
+  };
+
+  assert.deepEqual(
+    sidebarTasks(snapshot, "user-a").map((item) => item.id),
+    ["user-a-task", "managed-a-task", "managed-b-task"],
+  );
+  assert.deepEqual(
+    sidebarTasks(snapshot, null).map((item) => item.id),
+    ["managed-a-task", "managed-b-task"],
   );
 });
 

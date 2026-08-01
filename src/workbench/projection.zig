@@ -2370,7 +2370,10 @@ pub const Workbench = struct {
                 } };
             },
         };
-        const recent_order = try self.takeWorkspaceRecentOrder();
+        const recent_order = if (workspace.origin == .user)
+            try self.takeWorkspaceRecentOrder()
+        else
+            0;
         const run_id = try session.prepareRun(agent_input);
         errdefer cancelPreparedRunOrPanic(session, run_id);
         const slot = try self.reserveRunRecord(view, input);
@@ -2393,7 +2396,7 @@ pub const Workbench = struct {
         view.active_run_id = run_id;
         view.cancel_requested = false;
         self.touchTask(view);
-        workspace.recent_order = recent_order;
+        if (workspace.origin == .user) workspace.recent_order = recent_order;
         self.bumpRevision();
         return run_id;
     }

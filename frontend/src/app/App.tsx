@@ -93,6 +93,7 @@ import { useI18n, type MessageId } from "../i18n/context.ts";
 import { primaryShortcutModifier } from "../platform/keyboard.ts";
 import {
   searchWorkbench,
+  sidebarTasks,
   isRunInFlight,
   selectActiveTask,
   selectCurrentWorkspace,
@@ -233,12 +234,9 @@ export default function App() {
       ? currentWorkspace.id
       : selectedUserWorkspaceId;
   const summaries = useMemo(() => workspaceSummaries(snapshot), [snapshot]);
-  const currentTasks = useMemo(
-    () =>
-      snapshot.tasks.filter(
-        (task) => task.workspaceId === navigationWorkspaceId,
-      ),
-    [navigationWorkspaceId, snapshot.tasks],
+  const sidebarTaskItems = useMemo(
+    () => sidebarTasks(snapshot, navigationWorkspaceId),
+    [navigationWorkspaceId, snapshot],
   );
   const searchResults = useMemo(
     () => searchWorkbench(snapshot, searchQuery),
@@ -1805,10 +1803,11 @@ export default function App() {
                 <WorkspaceNavigation
                   summaries={summaries}
                   currentWorkspaceId={navigationWorkspaceId}
-                  tasks={currentTasks}
+                  tasks={sidebarTaskItems}
                   activeTaskId={
                     route === "workbench" &&
-                    activeTask?.workspaceId === navigationWorkspaceId
+                    activeTask !== null &&
+                    sidebarTaskItems.some((task) => task.id === activeTask.id)
                       ? activeTask.id
                       : null
                   }

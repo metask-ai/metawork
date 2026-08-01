@@ -207,6 +207,7 @@ Invoices
 - Workspace projection 的 `origin` 是 Host 事实。切换器、recent、重新授权和移除只展示 `origin = user`；`origin = managed` 不显示随机目录名或伪装成用户选择项，但必须随 owning Task 保留在 canonical snapshot 中；
 - 一个 User Workspace 可以承载多个共享目录上下文的 Task。Managed Workspace 精确归属一个 Task；只有 Managed Workspace 承诺不同 Task 默认使用独立目录，不能把该语义误写成所有 Task 都强制隔离文件；
 - 点击或由系统通知进入 managed Task 时，Renderer 可以切换活动 Task route，但不提交 `workspaces.select`，不改变 Host 当前 User Workspace、recent order 或 New task draft scope。离开该 Task 后，Workspace 切换器仍保持用户原选择；
+- 左侧 Task 列表按当前 User Workspace 收纳其 Task，同时全局纳入所有已投影 Managed Workspace 的 owning Task；不得因为 Managed Workspace 不进入切换器而隐藏自动执行的真实 Task。没有选中 User Workspace 时，Managed Task 仍按统一的行动优先级分组显示；
 - 每个 Workspace 入口汇总 `Running`、`Needs your attention` 和 `Failed/Interrupted` 数量；当前 Workspace 之外的待处理状态不能只依赖系统通知；
 - 点击 Workspace 状态徽标切换到该 Workspace，并优先定位对应分组；系统通知点击后直接定位原 Task 和请求；
 - 移除 Workspace 不删除历史 Task 或真实文件。入口只在当前 Workspace 可用时出现，并先用就地非模态确认说明“运行中的 Task 会停止、不会删除本地文件和历史记录”；确认打开时聚焦安全的取消动作，`Escape` 取消并把焦点还给触发入口，确认后把焦点移到不会随最后一个 Workspace 消失的稳定区标题。随后 Host 把 Workspace 标记为 `removing`、推进 epoch 并拒绝新 Task/Run，导航持续显示进行中状态；全部收口后才撤销当前 Host authorization 并退出活动导航。失败时 Workspace 保持可用、显示“移除未完成，部分任务可能已经停止”并允许重试，不能静默恢复得像什么都没发生；
