@@ -67,6 +67,16 @@ fn shellPolicyCode(value: ShellPolicy) u32 {
     };
 }
 
+fn allSkillsEnabledSelection() wire.SkillSelectionV1 {
+    return .{
+        .struct_size = @sizeOf(wire.SkillSelectionV1),
+        .default_state_code = wire.SKILL_SELECTION_ENABLED,
+        .exception_skill_ids = null,
+        .exception_skill_id_count = 0,
+        .reserved = [_]u64{0} ** 4,
+    };
+}
+
 pub const SessionState = enum {
     idle,
     queued,
@@ -957,10 +967,16 @@ pub const Runtime = struct {
         config.base_url = sdk.bytesView(options.base_url);
         config.workspace_root = sdk.bytesView(workspace_root);
         config.workspace_home = sdk.bytesView(workspace_home);
+        const skill_selection = allSkillsEnabledSelection();
         config.skill_catalog = if (options.skill_catalog) |lease|
             catalog.rawHandle(lease)
         else
             null;
+        config.skill_selection = if (options.skill_catalog != null)
+            &skill_selection
+        else
+            null;
+        config.permission_rules = null;
         const allowed_views = try self.allocator.alloc(wire.BytesViewV1, options.allowed_tools.len);
         defer self.allocator.free(allowed_views);
         for (options.allowed_tools, 0..) |name, index|
@@ -1374,21 +1390,34 @@ pub const Session = struct {
             .poisoned => return error.SessionPoisoned,
             .closing, .closed => return error.SessionClosing,
         }
+        const selection = allSkillsEnabledSelection();
         var diagnostic = emptyOwnedBytes();
-        const status_code = self.agent_runtime.api.sessionRefreshSkillCatalog()(
+        const status_code = self.agent_runtime.api.sessionUpdateSkills()(
             self.raw,
             catalog.rawHandle(lease),
+            &selection,
             &diagnostic,
         );
         releaseOwned(self.agent_runtime.api, &diagnostic);
         const status = sdk.Status.fromCode(status_code) catch
-            return error.CatalogRefreshFailed;
+            return self.failSkillUpdateContract();
+        if (!isSkillUpdateStatus(status)) return self.failSkillUpdateContract();
         return switch (status) {
             .ok => {},
             .busy => error.SessionNotIdle,
-            .skill_catalog_invalid => error.SkillCatalogInvalid,
+            .invalid_state => {
+                self.state = .poisoned;
+                return error.SessionPoisoned;
+            },
             else => error.CatalogRefreshFailed,
         };
+    }
+
+    fn failSkillUpdateContract(self: *Session) Error {
+        self.dependency_contract_failure = true;
+        self.state = .poisoned;
+        self.broadcast();
+        return error.CatalogRefreshFailed;
     }
 
     pub fn requestTermination(
@@ -1665,7 +1694,10 @@ pub const Session = struct {
         const typed_status = sdk.Status.fromCode(status) catch null;
         self.lock();
         self.close_finished = true;
-        if (typed_status == .ok) {
+        if (typed_status == null or !isSessionDestroyStatus(typed_status.?)) {
+            self.dependency_contract_failure = true;
+            self.close_failed = true;
+        } else if (typed_status == .ok) {
             self.raw = null;
             self.state = .closed;
             self.close_failed = false;
@@ -1752,7 +1784,13 @@ pub const Session = struct {
             failure = .dependency_contract;
             self.state = .poisoned;
         } else if (typed_status) |known_status| {
-            if (known_status == .ok) {
+            const poisons_session = runStatusPoisonsSession(known_status);
+            if (poisons_session == null) {
+                self.dependency_contract_failure = true;
+                failure = .dependency_contract;
+                self.state = .poisoned;
+            }
+            if (!self.dependency_contract_failure and known_status == .ok) {
                 if (result.struct_size != @sizeOf(wire.RunResultV1) or !allZero(&result.reserved)) {
                     self.dependency_contract_failure = true;
                     failure = .dependency_contract;
@@ -1767,11 +1805,11 @@ pub const Session = struct {
                         self.state = .poisoned;
                     }
                 }
-            } else {
+            } else if (!self.dependency_contract_failure) {
                 if (known_status == .callback_failed and self.termination_signal == null)
                     setTerminationSignalLocked(self, .{ .callback_failure = .event });
                 failure = .abi_status;
-                if (statusPoisonsSession(known_status)) self.state = .poisoned;
+                if (poisons_session.?) self.state = .poisoned;
             }
         } else {
             self.dependency_contract_failure = true;
@@ -1826,7 +1864,8 @@ pub const Session = struct {
         if (self.active_run_id == run_id) {
             self.raw_abort_status_code = status;
             self.abort_status = sdk.Status.fromCode(status) catch null;
-            if (self.abort_status == null) self.dependency_contract_failure = true;
+            if (self.abort_status == null or !isAbortStatus(self.abort_status.?))
+                self.dependency_contract_failure = true;
         }
         self.abort_calls_in_progress -= 1;
         self.broadcast();
@@ -2272,7 +2311,32 @@ fn isRunProgressState(state: SessionState) bool {
     return state == .queued or state == .running or state == .waiting_ui;
 }
 
-fn statusPoisonsSession(status: sdk.Status) bool {
+fn isSkillUpdateStatus(status: sdk.Status) bool {
+    return switch (status) {
+        .ok,
+        .invalid_argument,
+        .out_of_memory,
+        .busy,
+        .invalid_state,
+        .core_error,
+        .resource_limit,
+        .skill_unavailable,
+        => true,
+        .stale_run,
+        .too_late,
+        .callback_failed,
+        .internal_error,
+        .skill_catalog_invalid,
+        .stale_catalog,
+        .skill_not_found,
+        .invalid_skill_arguments,
+        .skill_policy_violation,
+        .stale_compact,
+        => false,
+    };
+}
+
+fn runStatusPoisonsSession(status: sdk.Status) ?bool {
     return switch (status) {
         .out_of_memory,
         .invalid_state,
@@ -2284,14 +2348,66 @@ fn statusPoisonsSession(status: sdk.Status) bool {
         .invalid_argument,
         .busy,
         .stale_run,
-        .too_late,
         .resource_limit,
-        .skill_catalog_invalid,
         .stale_catalog,
         .skill_not_found,
         .invalid_skill_arguments,
         .skill_policy_violation,
         .skill_unavailable,
+        => false,
+        .too_late,
+        .skill_catalog_invalid,
+        .stale_compact,
+        => null,
+    };
+}
+
+fn isAbortStatus(status: sdk.Status) bool {
+    return switch (status) {
+        .ok,
+        .invalid_argument,
+        .out_of_memory,
+        .busy,
+        .stale_run,
+        .too_late,
+        .invalid_state,
+        .core_error,
+        .internal_error,
+        .resource_limit,
+        .skill_unavailable,
+        => true,
+        .callback_failed,
+        .skill_catalog_invalid,
+        .stale_catalog,
+        .skill_not_found,
+        .invalid_skill_arguments,
+        .skill_policy_violation,
+        .stale_compact,
+        => false,
+    };
+}
+
+fn isSessionDestroyStatus(status: sdk.Status) bool {
+    return switch (status) {
+        .ok,
+        .invalid_argument,
+        .out_of_memory,
+        .busy,
+        .invalid_state,
+        .core_error,
+        .resource_limit,
+        .skill_unavailable,
+        => true,
+        .stale_run,
+        .too_late,
+        .callback_failed,
+        .internal_error,
+        .skill_catalog_invalid,
+        .stale_catalog,
+        .skill_not_found,
+        .invalid_skill_arguments,
+        .skill_policy_violation,
+        .stale_compact,
         => false,
     };
 }

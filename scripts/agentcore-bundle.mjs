@@ -8,6 +8,10 @@ const execFileAsync = promisify(execFile);
 const maxManifestBytes = 1024 * 1024;
 const maxPayloadBytes = 128 * 1024 * 1024;
 const maxPayloadFiles = 256;
+const supportedAbiVersion = 1;
+const supportedAbiRevision = 5;
+const supportedAbiTableSize = 168;
+const supportedCapabilities = 0x0fff;
 
 const targetPolicies = [
   {
@@ -237,7 +241,13 @@ export async function validateAgentCoreBundle(bundleRoot, options = {}) {
   );
   requireExactKeys(
     manifest.contract,
-    ["binary_abi_status", "binary_abi_version", "binary_abi_revision"],
+    [
+      "binary_abi_status",
+      "binary_abi_version",
+      "binary_abi_revision",
+      "binary_abi_table_size",
+      "capabilities",
+    ],
     "contract",
   );
   if (options.expectedManifest) {
@@ -270,6 +280,10 @@ export async function validateAgentCoreBundle(bundleRoot, options = {}) {
   requireValue(
     typeof manifest.source.dirty === "boolean",
     "source.dirty must be boolean",
+  );
+  requireValue(
+    manifest.source.dirty === false,
+    "AgentCore bundle must come from a clean source checkout",
   );
   const escapedCommitPrefix = commit.slice(0, 12);
   const versionPattern = new RegExp(
@@ -340,12 +354,20 @@ export async function validateAgentCoreBundle(bundleRoot, options = {}) {
     "unsupported AgentCore binary ABI status",
   );
   requireValue(
-    manifest.contract.binary_abi_version === 1,
+    manifest.contract.binary_abi_version === supportedAbiVersion,
     "unsupported AgentCore binary ABI",
   );
   requireValue(
-    manifest.contract.binary_abi_revision === 4,
+    manifest.contract.binary_abi_revision === supportedAbiRevision,
     "unsupported AgentCore binary ABI revision",
+  );
+  requireValue(
+    manifest.contract.binary_abi_table_size === supportedAbiTableSize,
+    "unsupported AgentCore binary ABI table size",
+  );
+  requireValue(
+    manifest.contract.capabilities === supportedCapabilities,
+    "unsupported AgentCore capability set",
   );
 
   requireValue(
@@ -415,7 +437,7 @@ export async function validateAgentCoreBundle(bundleRoot, options = {}) {
       symbols.match(/\b_?metask_agentcore_get_api\b/g) ?? [];
     requireValue(
       discoveryMatches.length === 1,
-      "AgentCore bundle must expose exactly one revision 4 discovery symbol",
+      "AgentCore bundle must expose exactly one revision 5 discovery symbol",
     );
     requireValue(
       !/\b_?metacodes_agentcore_get_api\b/.test(symbols),

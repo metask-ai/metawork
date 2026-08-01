@@ -57,10 +57,10 @@ async function fixture(t, mutateManifest = () => {}) {
     schema_version: 1,
     vendor: "metask",
     name: "agentcore",
-    version: "0.1.0-dev+0123456789ab.dirty",
+    version: "0.1.0-dev+0123456789ab",
     source: {
       commit: "0123456789abcdef0123456789abcdef01234567",
-      dirty: true,
+      dirty: false,
     },
     toolchain: { zig_version: "0.16.0" },
     target: {
@@ -83,7 +83,9 @@ async function fixture(t, mutateManifest = () => {}) {
     contract: {
       binary_abi_status: "experimental",
       binary_abi_version: 1,
-      binary_abi_revision: 4,
+      binary_abi_revision: 5,
+      binary_abi_table_size: 168,
+      capabilities: 0x0fff,
     },
     files,
   };
@@ -124,7 +126,7 @@ async function seedCanonicalBundle(repositoryRoot) {
   return { storageRoot, target };
 }
 
-test("accepts a complete pinned macOS arm64 revision 4 bundle", async (t) => {
+test("accepts a complete pinned macOS arm64 revision 5 bundle", async (t) => {
   const { root, manifest } = await fixture(t);
   const result = await validateAgentCoreBundle(root, {
     ...injectedChecks,
@@ -134,7 +136,7 @@ test("accepts a complete pinned macOS arm64 revision 4 bundle", async (t) => {
   assert.deepEqual(result.payloadFiles, fixtureFiles);
 });
 
-test("accepts a complete pinned Windows x64 GNU revision 4 bundle", async (t) => {
+test("accepts a complete pinned Windows x64 GNU revision 5 bundle", async (t) => {
   const { root, manifest } = await fixture(t);
   const oldLibrary = fixtureFiles[0];
   const newLibrary = "lib/metask_agentcore.lib";
@@ -199,6 +201,24 @@ test("rejects a missing or legacy binary ABI revision", async (t) => {
   );
 });
 
+test("rejects incorrect ABI table size and capability set", async (t) => {
+  const table = await fixture(t, (manifest) => {
+    manifest.contract.binary_abi_table_size = 136;
+  });
+  await assert.rejects(
+    validateAgentCoreBundle(table.root, injectedChecks),
+    /binary ABI table size/,
+  );
+
+  const capabilities = await fixture(t, (manifest) => {
+    manifest.contract.capabilities ^= 1;
+  });
+  await assert.rejects(
+    validateAgentCoreBundle(capabilities.root, injectedChecks),
+    /capability set/,
+  );
+});
+
 test("rejects missing and extra payload entries", async (t) => {
   const missing = await fixture(t, (manifest) => {
     manifest.files = manifest.files.filter(
@@ -229,20 +249,21 @@ test("rejects a bundle for another target", async (t) => {
   );
 });
 
-test("rejects dirty and clean versions that do not match source identity", async (t) => {
+test("rejects dirty provenance and versions that do not match source identity", async (t) => {
   const dirty = await fixture(t, (manifest) => {
-    manifest.version = "0.1.0-dev+0123456789ab";
+    manifest.source.dirty = true;
+    manifest.version = "0.1.0-dev+0123456789ab.dirty";
   });
   await assert.rejects(
     validateAgentCoreBundle(dirty.root, injectedChecks),
-    /version does not match source identity/,
+    /must come from a clean source checkout/,
   );
 
-  const clean = await fixture(t, (manifest) => {
-    manifest.source.dirty = false;
+  const mismatched = await fixture(t, (manifest) => {
+    manifest.version = "0.1.0-dev+0123456789ab.dirty";
   });
   await assert.rejects(
-    validateAgentCoreBundle(clean.root, injectedChecks),
+    validateAgentCoreBundle(mismatched.root, injectedChecks),
     /version does not match source identity/,
   );
 });
@@ -368,14 +389,14 @@ test("rejects missing, duplicated, and obsolete discovery symbols", async (t) =>
   const { root } = await fixture(t);
   await assert.rejects(
     validateAgentCoreBundle(root, { ...injectedChecks, symbols: "" }),
-    /exactly one revision 4 discovery symbol/,
+    /exactly one revision 5 discovery symbol/,
   );
   await assert.rejects(
     validateAgentCoreBundle(root, {
       ...injectedChecks,
       symbols: "T _metask_agentcore_get_api\nT _metask_agentcore_get_api\n",
     }),
-    /exactly one revision 4 discovery symbol/,
+    /exactly one revision 5 discovery symbol/,
   );
   await assert.rejects(
     validateAgentCoreBundle(root, {

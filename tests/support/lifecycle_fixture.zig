@@ -71,6 +71,7 @@ pub const Plan = enum {
     unknown_stop_result,
     invalid_result_layout,
     unknown_status,
+    stale_compact_status,
 };
 
 pub const FakeRuntime = struct {};
@@ -199,12 +200,16 @@ pub const FakeCore = struct {
     workspace_home_seen: bool = false,
     workspace_epoch_seen: bool = false,
     skill_session_bound: bool = false,
+    skill_selection_seen: bool = false,
+    permission_rules_absent: bool = false,
     skill_run_seen: bool = false,
     skill_input_matches: bool = false,
     session_destroy_failures: usize = 0,
     runtime_destroy_failures: usize = 0,
     session_create_failures: usize = 0,
+    forced_skill_update_status: ?u32 = null,
     forced_abort_status: ?u32 = null,
+    forced_session_destroy_status: ?u32 = null,
     ui_answered_callbacks: usize = 0,
     ui_fatal_callbacks: usize = 0,
     callback_signal: ?*CallbackSignal = null,
@@ -289,6 +294,18 @@ pub const FakeCore = struct {
     pub fn forceNextAbortStatus(self: *FakeCore, status: u32) void {
         self.lock();
         self.forced_abort_status = status;
+        self.unlock();
+    }
+
+    pub fn forceNextSkillUpdateStatus(self: *FakeCore, status: u32) void {
+        self.lock();
+        self.forced_skill_update_status = status;
+        self.unlock();
+    }
+
+    pub fn forceNextSessionDestroyStatus(self: *FakeCore, status: u32) void {
+        self.lock();
+        self.forced_session_destroy_status = status;
         self.unlock();
     }
 
@@ -435,6 +452,17 @@ pub fn sessionCreate(
         @ptrCast(@alignCast(handle))
     else
         null;
+    const selection_valid = if (config.?.skill_selection) |selection|
+        allSkillsEnabled(selection)
+    else
+        false;
+    if ((bound_catalog != null and !selection_valid) or
+        (bound_catalog == null and config.?.skill_selection != null) or
+        config.?.permission_rules != null)
+    {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    }
     if (bound_catalog) |catalog_entry| {
         if (!catalog_entry.in_use or catalog_entry.released) {
             diagnostic(out_error);
@@ -474,6 +502,8 @@ pub fn sessionCreate(
                 config.?.allowed_tool_count == 4;
             fake_core.workspace_home_seen = workspace_home.len != 0;
             fake_core.skill_session_bound = bound_catalog != null;
+            fake_core.skill_selection_seen = bound_catalog != null and selection_valid;
+            fake_core.permission_rules_absent = config.?.permission_rules == null;
             out_session.?.* = @ptrCast(session);
             return wire.STATUS_OK;
         }
@@ -595,6 +625,13 @@ pub fn sessionDestroy(
     }
     session.unlock();
     fake_core.lock();
+    const forced_status = fake_core.forced_session_destroy_status;
+    fake_core.forced_session_destroy_status = null;
+    if (forced_status) |status| {
+        fake_core.unlock();
+        diagnostic(out_error);
+        return status;
+    }
     if (fake_core.session_destroy_failures > 0) {
         fake_core.session_destroy_failures -= 1;
         fake_core.unlock();
@@ -611,9 +648,20 @@ pub fn sessionDestroy(
     return wire.STATUS_OK;
 }
 
-pub fn sessionRefreshSkillCatalog(
+pub fn sessionSetModel(
+    _: ?*wire.SessionHandle,
+    _: wire.BytesViewV1,
+    out_error: ?*wire.OwnedBytesV1,
+) callconv(.c) u32 {
+    if (out_error) |out| out.* = .{ .ptr = null, .len = 0 };
+    diagnostic(out_error);
+    return wire.STATUS_INVALID_STATE;
+}
+
+pub fn sessionUpdateSkills(
     session_handle: ?*wire.SessionHandle,
     catalog_handle: ?*wire.SkillCatalogHandle,
+    selection: ?*const wire.SkillSelectionV1,
     out_error: ?*wire.OwnedBytesV1,
 ) callconv(.c) u32 {
     if (out_error) |out| out.* = .{ .ptr = null, .len = 0 };
@@ -625,6 +673,23 @@ pub fn sessionRefreshSkillCatalog(
         diagnostic(out_error);
         return wire.STATUS_INVALID_ARGUMENT;
     }));
+    const selected = selection orelse {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    };
+    if (!allSkillsEnabled(selected)) {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    }
+    fake_core.lock();
+    const forced_status = fake_core.forced_skill_update_status;
+    fake_core.forced_skill_update_status = null;
+    fake_core.skill_selection_seen = true;
+    fake_core.unlock();
+    if (forced_status) |status| {
+        diagnostic(out_error);
+        return status;
+    }
     session.lock();
     if (session.running) {
         session.unlock();
@@ -634,7 +699,7 @@ pub fn sessionRefreshSkillCatalog(
     if (!catalog_entry.in_use or catalog_entry.released) {
         session.unlock();
         diagnostic(out_error);
-        return wire.STATUS_SKILL_CATALOG_INVALID;
+        return wire.STATUS_INVALID_ARGUMENT;
     }
     session.catalog = catalog_entry;
     session.unlock();
@@ -642,6 +707,37 @@ pub fn sessionRefreshSkillCatalog(
     fake_core.catalog_refreshes += 1;
     fake_core.unlock();
     return wire.STATUS_OK;
+}
+
+pub fn sessionUpdatePermissionRules(
+    _: ?*wire.SessionHandle,
+    _: ?*const wire.PermissionRuleSetV1,
+    out_error: ?*wire.OwnedBytesV1,
+) callconv(.c) u32 {
+    if (out_error) |out| out.* = .{ .ptr = null, .len = 0 };
+    diagnostic(out_error);
+    return wire.STATUS_INVALID_STATE;
+}
+
+pub fn sessionCompact(
+    _: ?*wire.SessionHandle,
+    _: u64,
+    _: ?*wire.CompactResultV1,
+    out_error: ?*wire.OwnedBytesV1,
+) callconv(.c) u32 {
+    if (out_error) |out| out.* = .{ .ptr = null, .len = 0 };
+    diagnostic(out_error);
+    return wire.STATUS_INVALID_STATE;
+}
+
+pub fn sessionAbortCompact(
+    _: ?*wire.SessionHandle,
+    _: u64,
+    out_error: ?*wire.OwnedBytesV1,
+) callconv(.c) u32 {
+    if (out_error) |out| out.* = .{ .ptr = null, .len = 0 };
+    diagnostic(out_error);
+    return wire.STATUS_INVALID_STATE;
 }
 
 pub fn sessionRunInput(
@@ -883,6 +979,10 @@ pub fn sessionRunInput(
         diagnostic(out_error);
         return 42;
     }
+    if (plan == .stale_compact_status) {
+        diagnostic(out_error);
+        return wire.STATUS_STALE_COMPACT;
+    }
     if (out_result) |result| {
         result.* = std.mem.zeroes(wire.RunResultV1);
         result.struct_size = if (plan == .invalid_result_layout) 0 else @sizeOf(wire.RunResultV1);
@@ -951,12 +1051,28 @@ pub const fake_api = wire.ApiV1{
     .skill_catalog_release = skillCatalogRelease,
     .session_create = sessionCreate,
     .session_destroy = sessionDestroy,
-    .session_refresh_skill_catalog = sessionRefreshSkillCatalog,
+    .session_set_model = sessionSetModel,
+    .session_update_skills = sessionUpdateSkills,
+    .session_update_permission_rules = sessionUpdatePermissionRules,
     .session_run_input = sessionRunInput,
     .session_abort = sessionAbort,
+    .session_compact = sessionCompact,
+    .session_abort_compact = sessionAbortCompact,
     .buffer_release = bufferRelease,
     .reserved = [_]u64{0} ** 4,
 };
+
+fn allSkillsEnabled(selection: *const wire.SkillSelectionV1) bool {
+    if (selection.struct_size != @sizeOf(wire.SkillSelectionV1) or
+        selection.default_state_code != wire.SKILL_SELECTION_ENABLED or
+        selection.exception_skill_ids != null or
+        selection.exception_skill_id_count != 0)
+        return false;
+    for (selection.reserved) |value| {
+        if (value != 0) return false;
+    }
+    return true;
+}
 
 fn invokeDetachedUiCallback(session: *FakeSession) void {
     session.lock();

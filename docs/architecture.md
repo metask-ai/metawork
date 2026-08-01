@@ -1,9 +1,9 @@
 # MetaWork 高层架构
 
-> 状态：AgentCore ABI v1 revision 4 macOS exact artifact、typed Skill 产品链与 Composer Slash 已完成；后续正式方向选择单 AgentCore Worker
-> 日期：2026-07-22
+> 状态：AgentCore ABI v1 revision 5 已 hard cut 共享 consumer 并完成双平台 baseline；Windows follow-up artifact 已锁定并完成 probe/build，真实 vertical 仍被既有 titlebar preflight 阻断；后续正式方向选择单 AgentCore Worker
+> 日期：2026-08-01
 
-产品范围见 [产品需求](requirements.md)，Metask AgentCore 的具体接入约束见 [AgentCore 集成契约](agentcore-integration.md)，revision 4 目标能力见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。精确源码路径、binary 和 symbol identifier 只作为机器合同保留。
+产品范围见 [产品需求](requirements.md)，Metask AgentCore 的具体接入约束见 [AgentCore 集成契约](agentcore-integration.md)，revision 5 目标能力见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。精确源码路径、binary 和 symbol identifier 只作为机器合同保留。
 
 ## 1. 已确认的技术选型
 
@@ -26,11 +26,11 @@
 
 ## 2. 当前里程碑边界
 
-### 同步 macOS baseline
+### AgentCore revision 5 baseline
 
-已批准的新基线是 Metask AgentCore ABI v1 revision 4。它在既有 RunContext、typed status/StopReason、CoreEvent/UI codec 和同步 Run 语义上增加 AgentCore-owned Skill catalog snapshot、Session catalog binding/refresh 与 tagged Text/Skill Run input。精确 API layout、artifact identity、payload 和 manifest schema 只由 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)定义。MetaWork 对它执行 hard cut：active build、Host、probe 和规范文档只接受 revision 4，不保留 revision 3 parser、function table、Run payload 或 fallback。
+已批准的新基线是 Metask AgentCore ABI v1 revision 5。它保留既有 RunContext、typed status/StopReason、CoreEvent/UI codec、Skill catalog 与 tagged Text/Skill Run，并把 Session model、Skill replacement、permission rules 和 manual compact 纳入新的 mandatory function table。精确 API layout、artifact identity、payload 和 manifest schema 只由 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)定义。MetaWork 对它执行 hard cut：active build、Host、probe 和规范文档只接受 revision 5，不保留 revision 4 function table、`session_refresh_skill_catalog` 或 fallback。
 
-当前 checkout 的 verifier、build graph、staged bundle、Agent catalog lease/typed Run surface、Workbench catalog ownership/typed admission 与 Bridge tagged contract 均已切到 revision 4；active macOS artifact 来自 clean source commit `576b0a2791e904f01257c6f7fe17e9b43d8154d0`。其他 target 的独立历史 lock 不参与当前 macOS 依赖升级或验收门槛。Composer Slash 在该 typed baseline 之上作为独立 Renderer 产品入口实现，不属于 ABI 升级本身；历史 revision 3 迁移事实不构成兼容要求。
+当前 checkout 的 verifier、build graph、共享 Agent Session、macOS 与 Windows repository lock 都已切到 revision 5；Windows exact artifact 来自 clean source commit `72655b68b882945f5b47125ddcba1023b0667a17`，macOS exact artifact 来自包含默认 Skill discovery 收敛的 clean source commit `0060bd660c588041c942127438361abdf2dc46e2`，manifest、payload checksum 和平台结果独立锁定、互不替代。MetaWork 当前只消费显式 all-enabled Skill selection 和 `session_update_skills`，不因 ABI entry 存在而开放 set-model、manual compact、permission-rule 或 Skill toggle 产品能力；Workbench、Bridge 与 Renderer 合同保持不变。
 
 该 baseline 不包含：
 
@@ -184,7 +184,7 @@ App 只注入平台 capability：产品数据目录中的原子读写、wall clo
 
 Workbench `TaskRunInput` 只有 Text/Skill 两个分支。Skill admission 在建立 Run record 前校验 Workspace/Task epoch、pinned revision、稳定 `skill_id`、参数数量、UTF-8 与产品容量；Run history 保存 admission 时的 invocation/display/arguments，不随后续 catalog 改写。AgentCore 仍负责最终参数、资源和 policy 校验；`stale_catalog`、`skill_not_found`、`invalid_skill_arguments`、`skill_policy_violation` 与 `skill_unavailable` 形成独立产品 cause，保持 Session 可复用且不自动刷新或重放。
 
-首期 Skill 中心是 revision 4 typed catalog 的 MetaWork 级只读 Workbench 视图，不是新的 Skill loader、source resolver、policy owner 或文件编辑路径。Workbench 独立持有该用户级 catalog acquisition、projection 与 lease，并通过 `skills.refreshCatalog` 刷新；它不依赖 selected Workspace，也不得作为 Session 的执行 binding。Workspace current catalog、Task pinned catalog 与对应 refresh transaction 继续只服务 Composer 和 Run。AgentCore 继续独占 source discovery、canonical priority、winner/conflict 和 catalog revision；revision 4 未公开有效 Skill 的 source metadata，MetaWork 不从 invocation、用户目录或 Workspace root 反推来源。创建和修改仍走用户明确发起的普通 Agent 路径，安装和启用/禁用 policy 留待独立能力。
+首期 Skill 中心是 revision 5 typed catalog 的 MetaWork 级只读 Workbench 视图，不是新的 Skill loader、source resolver、policy owner 或文件编辑路径。Workbench 独立持有该用户级 catalog acquisition、projection 与 lease，并通过 `skills.refreshCatalog` 刷新；它不依赖 selected Workspace，也不得作为 Session 的执行 binding。Workspace current catalog、Task pinned catalog 与对应 refresh transaction 继续只服务 Composer 和 Run。AgentCore 继续独占 source discovery、canonical priority、winner/conflict 和 catalog revision；revision 5 未公开有效 Skill 的 source metadata，MetaWork 不从 invocation、用户目录或 Workspace root 反推来源。创建和修改仍走用户明确发起的普通 Agent 路径，安装和启用/禁用 policy 留待独立能力。
 
 Workbench 单独分配稳定的产品 Task identity，并在 Task owner 内保存 Agent Session route identity；AgentCore event 与 event-projection failure 都只按 route identity 回到 owner，Bridge snapshot 与 mutation 只使用产品 Task identity，二者不共享生成器也不依赖数值相等。Task binding descriptor 包含无 secret 的 account/profile、API、Provider、model、generation 与 binding epoch；内部执行使用的 raw model 与 Renderer projection 的 selection identity 分开持有。
 
@@ -216,12 +216,12 @@ Renderer Bridge revision、Account manifest schema、AgentCore artifact version�
 
 ## 5. AgentCore bundle 边界
 
-Metask AgentCore 与 MetaWork 是两个独立构建单元。revision 4 正式接入物是 Metask AgentCore 构建的 target-specific bundle，包含 binary、C header、官方语言 bindings、README 和 manifest；精确 payload whitelist 只在 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)定义。
+Metask AgentCore 与 MetaWork 是两个独立构建单元。revision 5 正式接入物是 Metask AgentCore 构建的 target-specific bundle，包含 binary、C header、官方语言 bindings、README 和 manifest；精确 payload whitelist 只在 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)定义。
 
 规范要求：
 
 - Metask AgentCore 单一维护 binary facade、C header、官方 Zig/Rust bindings、内部映射和 link metadata；
-- 公司内部初步开发期直接从精确本机路径 `<metacodes>/zig-out/agentcore/aarch64-macos` 取得 candidate bundle；当前不建设下载器、resolver、artifact repository、content-addressed cache 或跨机器自动分发；
+- 公司内部初步开发期直接从精确本机路径 `<metacodes>/zig-out/agentcore/<target>` 取得 candidate bundle；当前不建设下载器、resolver、artifact repository、content-addressed cache 或跨机器自动分发；
 - candidate probe 使用显式绝对 bundle root；`agentcore:stage` 校验 candidate 后只复制 manifest whitelist 到 `.agentcore/bundle`；正式 build/test/package 只消费这个 canonical staged root，不直接链接精确本机路径 `metacodes/zig-out`；
 - MetaWork verifier 决定 artifact 是否可信，官方 Zig package 只负责 module/link graph；精确 identity、schema、checksum、target、ABI 和 symbol 规则见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)；
 - artifact 缺失或校验失败时明确失败；不使用 `latest`、版本范围、可变 tag 或 source fallback；
@@ -230,7 +230,7 @@ Metask AgentCore 与 MetaWork 是两个独立构建单元。revision 4 正式接
 - 只有 `agent/` 可以 import `metask_agentcore`；Workbench、Bridge、Renderer 和 Account 只消费 MetaWork-owned 产品类型；
 - 当前产品 Runtime 配置不注册 Host tools，Read/Bash/Edit 使用 AgentCore built-in tools。
 
-revision 4 是硬切换，不提供 revision 3 active compatibility path。新增 observation tag 仍由 bundle SDK 解码为 owned unknown observation；MetaWork 在 SDK 校验后立即释放并忽略，不让它占用产品事件泵，也不传给 Renderer 或猜测为产品状态。
+revision 5 是硬切换，不提供 revision 4 active compatibility path。新增 observation tag 仍由 bundle SDK 解码为 owned unknown observation；MetaWork 在 SDK 校验后立即释放并忽略，不让它占用产品事件泵，也不传给 Renderer 或猜测为产品状态。
 
 ## 6. 并发、生命周期与故障边界
 

@@ -2,9 +2,9 @@
   "schema_version": 1,
   "vendor": "metask",
   "name": "agentcore",
-  "version": "0.1.0-dev+576b0a2791e9",
+  "version": "0.1.0-dev+0060bd660c58",
   "source": {
-    "commit": "576b0a2791e904f01257c6f7fe17e9b43d8154d0",
+    "commit": "0060bd660c588041c942127438361abdf2dc46e2",
     "dirty": false
   },
   "toolchain": {
@@ -30,16 +30,18 @@
   "contract": {
     "binary_abi_status": "experimental",
     "binary_abi_version": 1,
-    "binary_abi_revision": 4
+    "binary_abi_revision": 5,
+    "binary_abi_table_size": 168,
+    "capabilities": 4095
   },
   "files": [
     {
       "path": "lib/libmetask_agentcore.a",
-      "sha256": "65bdc89457b130818c82bea310636315a98581945c43551e59e8e91d55d07025"
+      "sha256": "93544cd48c59a5ec551baed8a236569f4872361439a8e32e2123b5b0006b9144"
     },
     {
       "path": "include/metask/agentcore.h",
-      "sha256": "620dbb57dbaa9d65acdf365ed7102cddd245c83f112fd802904fcdb3ed06e6c7"
+      "sha256": "605766712f11825ba5153c7630a788a0721c5092aa8c7aa3d014562451415815"
     },
     {
       "path": "bindings/zig/build.zig",
@@ -47,27 +49,27 @@
     },
     {
       "path": "bindings/zig/build.zig.zon",
-      "sha256": "9edcf6351c449645e6c9f50da7d8651263dada425db5d5526f9cf80211580678"
+      "sha256": "e62649581ad3dc7213db56881f6eac2ba2fb5a80bb9aa2f662ff4ca9b268291d"
     },
     {
       "path": "bindings/zig/src/root.zig",
-      "sha256": "7329973bd348b30ba5d02485c1b55fc5bb3978e3fa96e697963a88463589f933"
+      "sha256": "655a68d9ece31bbdf5a6138a8492bc9cc23497674ffd56df46ba43395667e4a0"
     },
     {
       "path": "bindings/zig/src/protocol.zig",
-      "sha256": "8f849cfa8a6a3a6f43b07a573c3120ab7b937494ee9a87e85266ab3cfd60535f"
+      "sha256": "8fbbc9f12b8ae37c29b377833df2d2a94ed22b9aac2383397edfdb776354671e"
     },
     {
       "path": "bindings/zig/src/types.zig",
-      "sha256": "20ae500e71e280bd9332f803d9e699ebe6e3b1bdf6963e6a3fe3741a76d0ce45"
+      "sha256": "c7db9b043d2d846c4f944b3994d03ce1389b3e6dbff2c38c52b435485d937658"
     },
     {
       "path": "bindings/rust/Cargo.toml",
-      "sha256": "bcedc8aa9e71ba3ff942c986990dbb5f21dbdadfe3c0c302f198c977630cb44e"
+      "sha256": "0f572b01a2feec078822e67cf4c820c3fcdf5d6d8243dd39b2e982c611575469"
     },
     {
       "path": "bindings/rust/Cargo.lock",
-      "sha256": "9efe33d44e0520bc66e5ecdfea54aaa3b59ed00f387255e02fd04f9f03d54edd"
+      "sha256": "d4a5e1609971e53f48f84f750df5e7ab79735bc04c71ea81d5fbd65af9ff6cdc"
     },
     {
       "path": "bindings/rust/link.cfg",
@@ -83,15 +85,15 @@
     },
     {
       "path": "bindings/rust/src/raw.rs",
-      "sha256": "04117244825d87de9baedf7d9a080014eeac1dc8a5f082c41d038443acfcd562"
+      "sha256": "cf5636d1d4a5b59d6c864982fd6dc2d6218abaff95c89a38ea17494ec96fcdb1"
     },
     {
       "path": "bindings/rust/examples/link_probe.rs",
-      "sha256": "ebe44999c932c1c5cc019aabae1af6f84e50c6ae389710daa3267860e38adc58"
+      "sha256": "193e75b483badd4b79baecda757cab5be105c740c120d8ad79d02239faab8aed"
     },
     {
       "path": "README.md",
-      "sha256": "f32c850467716823776de2fa78374415072899a4ca13b389c6441744e49ea307"
+      "sha256": "91986d4f5392a778935da03d8bd4f4cf4f807f6395bb47f975ac8cffda0fbfa7"
     }
   ]
 }

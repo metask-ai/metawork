@@ -21,7 +21,7 @@ for (const script of [
 }
 
 console.log(
-  "Windows integration baseline passed: staged revision 4 bundle, SDK candidate probe, lifecycle, Native Debug/Release, and AgentCore vertical automation.",
+  "Windows integration baseline passed: staged revision 5 bundle, bundle guards, staged SDK probe, lifecycle, Native Debug/Release, and AgentCore vertical automation.",
 );
 
 function runNpm(script) {
