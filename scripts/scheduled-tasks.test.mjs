@@ -154,6 +154,19 @@ test("Empty scheduled tasks page offers actionable starter templates", () => {
   assert.doesNotMatch(html, /Nothing is scheduled/);
 });
 
+test("project-aware starter templates require an explicit user Workspace", () => {
+  const snapshot = structuredClone(fixture);
+  snapshot.capabilities.managedWorkspaces = true;
+  snapshot.capabilities.scheduledTasks = true;
+  snapshot.capabilities.scheduledTaskPersistence = true;
+  snapshot.capabilities.scheduledTaskPersistenceHealth = "ready";
+  renderDom(scheduledElement(snapshot));
+
+  fireEvent.click(screen.getByRole("button", { name: /Daily brief/ }));
+  assert.equal(screen.getByLabelText("Run files").value, "explicit");
+  assert.equal(screen.getByLabelText("Workspace").value, "1");
+});
+
 test("Text schedules default to a managed workspace without requiring a user Workspace", async () => {
   const snapshot = structuredClone(fixture);
   snapshot.capabilities.managedWorkspaces = true;
@@ -173,6 +186,14 @@ test("Text schedules default to a managed workspace without requiring a user Wor
     }),
   );
 
+  assert.equal(
+    screen.getByRole("button", { name: /Daily brief/ }).disabled,
+    true,
+  );
+  assert.equal(
+    screen.getByRole("button", { name: /Try your own task/ }).disabled,
+    false,
+  );
   fireEvent.click(screen.getByRole("button", { name: "New schedule" }));
   assert.ok(screen.getByRole("dialog", { name: "Schedule editor" }));
   assert.equal(screen.getByRole("button", { name: "Skill" }).disabled, true);

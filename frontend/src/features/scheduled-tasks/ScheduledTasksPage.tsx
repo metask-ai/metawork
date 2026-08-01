@@ -222,6 +222,9 @@ export function ScheduledTasksPage({
   const userWorkspaces = snapshot.workspaces.filter(
     (candidate) => candidate.origin === "user",
   );
+  const selectedUserWorkspaceId = userWorkspaces.find(
+    (candidate) => candidate.id === snapshot.selectedWorkspaceId,
+  )?.id;
   const workspace =
     draft.targetKind === "explicit"
       ? userWorkspaces.find((candidate) => candidate.id === draft.workspaceId)
@@ -314,7 +317,11 @@ export function ScheduledTasksPage({
         unit: "days",
       },
     };
-    beginCreate(presets[kind]);
+    beginCreate({
+      ...presets[kind],
+      targetKind: "explicit",
+      workspaceId: selectedUserWorkspaceId ?? userWorkspaces[0]?.id ?? "",
+    });
   }
 
   function edit(task: ScheduledTaskView) {
@@ -471,9 +478,7 @@ export function ScheduledTasksPage({
                 <button
                   key={suggestion.kind}
                   className="scheduled-suggestion focus-ring"
-                  disabled={
-                    disabled || !snapshot.capabilities.managedWorkspaces
-                  }
+                  disabled={disabled || userWorkspaces.length === 0}
                   onClick={() => beginSuggestion(suggestion.kind)}
                 >
                   <span
