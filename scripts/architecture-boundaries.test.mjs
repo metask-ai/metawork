@@ -192,6 +192,16 @@ test("candidate validation keeps only repository locks and the official SDK cons
   assert.match(probeRunner, /agentcore\.Api\.discover\(\)/);
   assert.match(probeRunner, /addRunArtifact/);
   assert.match(probeRunner, /source-free AgentCore Zig package consumer/);
+  assert.match(
+    read("scripts/agentcore-bundle.mjs"),
+    /manifest\.source\.dirty === false/,
+    "candidate verification must reject dirty source provenance",
+  );
+  assert.match(
+    read("build_support/agentcore_bundle.zig"),
+    /lock\.source\.dirty/,
+    "the formal build verifier must reject a dirty repository lock",
+  );
 });
 
 test("build graph registers Account product and pure contract modules", () => {

@@ -281,6 +281,10 @@ export async function validateAgentCoreBundle(bundleRoot, options = {}) {
     typeof manifest.source.dirty === "boolean",
     "source.dirty must be boolean",
   );
+  requireValue(
+    manifest.source.dirty === false,
+    "AgentCore bundle must come from a clean source checkout",
+  );
   const escapedCommitPrefix = commit.slice(0, 12);
   const versionPattern = new RegExp(
     `^[0-9]+\\.[0-9]+\\.[0-9]+-dev\\+${escapedCommitPrefix}${

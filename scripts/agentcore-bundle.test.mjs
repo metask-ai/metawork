@@ -57,10 +57,10 @@ async function fixture(t, mutateManifest = () => {}) {
     schema_version: 1,
     vendor: "metask",
     name: "agentcore",
-    version: "0.1.0-dev+0123456789ab.dirty",
+    version: "0.1.0-dev+0123456789ab",
     source: {
       commit: "0123456789abcdef0123456789abcdef01234567",
-      dirty: true,
+      dirty: false,
     },
     toolchain: { zig_version: "0.16.0" },
     target: {
@@ -249,20 +249,21 @@ test("rejects a bundle for another target", async (t) => {
   );
 });
 
-test("rejects dirty and clean versions that do not match source identity", async (t) => {
+test("rejects dirty provenance and versions that do not match source identity", async (t) => {
   const dirty = await fixture(t, (manifest) => {
-    manifest.version = "0.1.0-dev+0123456789ab";
+    manifest.source.dirty = true;
+    manifest.version = "0.1.0-dev+0123456789ab.dirty";
   });
   await assert.rejects(
     validateAgentCoreBundle(dirty.root, injectedChecks),
-    /version does not match source identity/,
+    /must come from a clean source checkout/,
   );
 
-  const clean = await fixture(t, (manifest) => {
-    manifest.source.dirty = false;
+  const mismatched = await fixture(t, (manifest) => {
+    manifest.version = "0.1.0-dev+0123456789ab.dirty";
   });
   await assert.rejects(
-    validateAgentCoreBundle(clean.root, injectedChecks),
+    validateAgentCoreBundle(mismatched.root, injectedChecks),
     /version does not match source identity/,
   );
 });

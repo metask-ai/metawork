@@ -62,6 +62,7 @@ pub fn verify(b: *std.Build, root: []const u8) Bundle {
         !std.mem.eql(u8, lock.vendor, "metask") or
         !std.mem.eql(u8, lock.name, "agentcore") or
         lock.source.commit.len != 40 or
+        lock.source.dirty or
         !std.mem.eql(u8, lock.toolchain.zig_version, @import("builtin").zig_version_string) or
         lock.contract.binary_abi_version != 1 or
         lock.contract.binary_abi_revision != 5 or

@@ -72,7 +72,7 @@ npm run test:lifecycle
 npm run test:agentcore-vertical:macos
 ```
 
-当前 macOS revision 5 baseline 使用 clean `f0141f878d36f2bd5a76b097507cf19cbbbb174b` target artifact，并已完成 exact lock、candidate/staged probe、lifecycle、Debug、Release、签名 package 与真实 Native vertical。Windows lock、staged artifact 和结果不能替代 macOS artifact identity 或平台证据。AgentCore vertical 是当前真实桌面自动化入口，同时验证 `.agents/skills` typed catalog/run、真实 `ProductDelivery` 主线程 revision emit、Renderer reload、snapshot 恢复和 AgentCore Run；automation build 把个人 Skill discovery 限定在同一临时 Workspace capability，Release build 仍只使用 canonical system home，且不建立第二套 Renderer 数据面。一次性阶段聚合脚本和 fault-domain harness 不再保留。
+当前 macOS revision 5 baseline 使用包含默认 Skill discovery 收敛的 clean `0060bd660c588041c942127438361abdf2dc46e2` target artifact，并已完成 exact lock、candidate/staged probe、lifecycle、Debug、Release、签名 package 与真实 Native vertical。Windows lock、staged artifact 和结果不能替代 macOS artifact identity 或平台证据。AgentCore vertical 是当前真实桌面自动化入口，同时验证 `.agents/skills` typed catalog/run、真实 `ProductDelivery` 主线程 revision emit、Renderer reload、snapshot 恢复和 AgentCore Run；automation build 把个人 Skill discovery 限定在同一临时 Workspace capability，Release build 仍只使用 canonical system home，且不建立第二套 Renderer 数据面。一次性阶段聚合脚本和 fault-domain harness 不再保留。
 
 ### Windows development baseline
 

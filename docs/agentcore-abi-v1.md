@@ -7,11 +7,11 @@
 
 ## 1. 版本含义
 
-当前 Windows development bundle 已更新到 clean source commit `72655b68b882945f5b47125ddcba1023b0667a17`；macOS development bundle 仍锁定 clean source commit `f0141f878d36f2bd5a76b097507cf19cbbbb174b`，等待平台 owner 独立更新。两者分别锁定完整 manifest 与 payload checksum，都是 ABI v1 revision 5、168-byte API table、required capabilities `0x0fff`、Zig 0.16.0、strip=true 并需要 C runtime；macOS 使用 ReleaseSafe，Windows 使用 ReleaseSmall：
+当前 Windows development bundle 锁定 clean source commit `72655b68b882945f5b47125ddcba1023b0667a17`；macOS development bundle 锁定包含默认 Skill discovery 收敛的 clean source commit `0060bd660c588041c942127438361abdf2dc46e2`。两者分别锁定完整 manifest 与 payload checksum，都是 ABI v1 revision 5、168-byte API table、required capabilities `0x0fff`、Zig 0.16.0、strip=true 并需要 C runtime；macOS 使用 ReleaseSafe，Windows 使用 ReleaseSmall：
 
-| Target                         | Version                  | Source commit                              | Provenance             | Link input            | 状态                    |
-| ------------------------------ | ------------------------ | ------------------------------------------ | ---------------------- | --------------------- | ----------------------- |
-| macOS arm64（最低 macOS 13.0） | `0.1.0-dev+f0141f878d36` | `f0141f878d36f2bd5a76b097507cf19cbbbb174b` | `source.dirty = false` | 无 system library     | exact lock 与验证已完成 |
+| Target                         | Version                  | Source commit                              | Provenance             | Link input            | 状态                                                   |
+| ------------------------------ | ------------------------ | ------------------------------------------ | ---------------------- | --------------------- | ------------------------------------------------------ |
+| macOS arm64（最低 macOS 13.0） | `0.1.0-dev+0060bd660c58` | `0060bd660c588041c942127438361abdf2dc46e2` | `source.dirty = false` | 无 system library     | exact lock 与验证已完成                                |
 | Windows x86_64 GNU             | `0.1.0-dev+72655b68b882` | `72655b68b882945f5b47125ddcba1023b0667a17` | `source.dirty = false` | `advapi32`、`crypt32` | exact lock/probe/build 已完成；vertical preflight 受阻 |
 
 revision 5 是从 revision 4 进行的 breaking function-table hard cut：API table 增加 Session model mutation、manual compact、Skill selection 与 Host permission-rules capability；`session_refresh_skill_catalog` 被 `session_update_skills` 取代，Session create 和 Skill update 都显式携带 selection。每个 target 仍由完整 manifest bytes/checksum 独立锁定，不能凭相同 source commit 推断 artifact 可互换，也不等于 stable ABI support policy。
