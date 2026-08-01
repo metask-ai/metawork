@@ -204,6 +204,9 @@ Invoices
 - 当前没有 Workspace 时仍先打开空白 New task 页面并允许暂存草稿；发送保持禁用，由 Composer 下方的 Workspace 控件显式选择已有 Workspace 或打开原生目录选择器。选择完成后只更新草稿上下文，不得自动创建 Task 或发送已有内容；
 - New task 草稿按 Workspace 隔离。未绑定 Workspace 的临时草稿只在目标 Workspace 没有草稿时迁移；目标已有草稿时保留两边内容并打开目标草稿，不能覆盖或丢弃任一份；
 - Workspace 切换器消费 Host 发布的独立 Workspace projection，支持最近使用、打开新目录、重新授权和移除入口；没有 Task 的 Workspace 仍然可见；
+- Workspace projection 的 `origin` 是 Host 事实。切换器、recent、重新授权和移除只展示 `origin = user`；`origin = managed` 不显示随机目录名或伪装成用户选择项，但必须随 owning Task 保留在 canonical snapshot 中；
+- 一个 User Workspace 可以承载多个共享目录上下文的 Task。Managed Workspace 精确归属一个 Task；只有 Managed Workspace 承诺不同 Task 默认使用独立目录，不能把该语义误写成所有 Task 都强制隔离文件；
+- 点击或由系统通知进入 managed Task 时，Renderer 可以切换活动 Task route，但不提交 `workspaces.select`，不改变 Host 当前 User Workspace、recent order 或 New task draft scope。离开该 Task 后，Workspace 切换器仍保持用户原选择；
 - 每个 Workspace 入口汇总 `Running`、`Needs your attention` 和 `Failed/Interrupted` 数量；当前 Workspace 之外的待处理状态不能只依赖系统通知；
 - 点击 Workspace 状态徽标切换到该 Workspace，并优先定位对应分组；系统通知点击后直接定位原 Task 和请求；
 - 移除 Workspace 不删除历史 Task 或真实文件。入口只在当前 Workspace 可用时出现，并先用就地非模态确认说明“运行中的 Task 会停止、不会删除本地文件和历史记录”；确认打开时聚焦安全的取消动作，`Escape` 取消并把焦点还给触发入口，确认后把焦点移到不会随最后一个 Workspace 消失的稳定区标题。随后 Host 把 Workspace 标记为 `removing`、推进 epoch 并拒绝新 Task/Run，导航持续显示进行中状态；全部收口后才撤销当前 Host authorization 并退出活动导航。失败时 Workspace 保持可用、显示“移除未完成，部分任务可能已经停止”并允许重试，不能静默恢复得像什么都没发生；
@@ -311,13 +314,15 @@ release-notes · Invalid definition
 
 - 建议行是可执行模板，不是静态示例。整行点击进入创建确认层，预填任务说明、recurrence 和通知；`试试自己的任务` 先聚焦自然语言说明，再进入同一确认层，不建立第二种创建协议；
 - 页面沿用 Skill 中心最大阅读宽度与克制的连续列表，不使用统计卡、流程画布或常驻左右分栏。每行显示识别图标、名称、自然语言计划摘要、短说明、下一次/最近结果；hover 才显示 `···`，键盘 focus 时动作同样可见；
-- 创建/编辑使用右侧 drawer，窄窗切为整页。按 `任务内容`、`运行时间`、`可选上下文`、`结果通知` 排列；Workspace 和 Skill 都是可选高级上下文，不在空状态首屏要求用户理解它们；
+- 创建/编辑使用右侧 drawer，窄窗切为整页。按 `任务内容`、`运行时间`、`可选上下文`、`结果通知` 排列。Text 任务的 Workspace target 默认是“由 MetaWork 分配独立工作区”，用户可以在高级上下文中改为显式 User Workspace；Skill 任务首期必须选择 User Workspace，以满足 root-specific catalog binding。空状态首屏不要求用户先理解 Workspace；
+- Host 投影 `managedWorkspaces = false` 时，Text 模板仍可查看，但确认层必须明确说明当前无法分配工作目录并禁用保存；不得静默采用当前或第一个 User Workspace。用户显式选择 User Workspace 后才可继续；
 - 时间选项优先呈现一次、每小时、每天、工作日、每周与每月，并明确本地 timezone；高级固定间隔可折叠，Renderer 只提交 Host 可验证的结构化 recurrence，不拥有 timer 或 occurrence；
 - 保存前提供一句完整确认摘要，例如“每个工作日 08:00 运行「每日工作简报」，结果完成后通知我”；provider、generation、Unix seconds 和 catalog revision 不进入产品文案；
 - 新建、保存、暂停/恢复、立即运行和删除使用 Host typed result 与 optimistic `scheduledTaskEpoch`。命令 timeout 后先刷新 canonical snapshot，不自动重放；
 - 点击计划打开 detail drawer：上半部是定义与下一次运行，下半部是有界运行历史。每个 occurrence 链接到其真实 Task，并显示完成、失败、已跳过、延迟或等待处理；结果历史不复制 Task timeline；
 - 删除计划不停止或删除已经创建的真实 Task；`立即运行` 也通过同一 occurrence 与 Task admission，不能建立测试/手动专用路径；上一次真实 Task 仍 non-terminal 时显示 `已跳过：上一次仍在运行`；
 - 执行配置、Workspace authority 或 Skill binding 变化时显示 `需要处理`，并要求用户编辑确认；需要 Agent permission/question 的 occurrence 链接到真实请求并发出系统通知，不把等待伪装成 schedule failure；
+- 每次 default occurrence 创建新的真实 Task 与 Managed Workspace；同一 occurrence 所属 Task 的后续 Run 复用该目录。运行历史链接 Task，不展示 managed `workspace-key`；目录保留不等于 Host 重启后恢复 Task。
 - 页面不再显示“仅在 MetaWork 运行时触发”限制条。窗口关闭时 MetaWork 留在系统后台并继续计划；显式退出通过托盘动作完成并在确认中说明影响，重启后定义与触发游标从 Host store 恢复；
 - 搜索使用 `type="search"`；分区是带可访问名称的 region/list；模板行、任务行和 overflow 动作都有明确 button 语义。drawer 打开后焦点进入标题/说明，关闭回到原触发行；运行历史更新不抢焦点。
 

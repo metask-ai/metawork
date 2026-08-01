@@ -37,7 +37,7 @@ MetaWork 当前不定义为：
 
 ### Workspace
 
-代表 Agent 工作所针对的本地目录和权限范围。Workspace 是独立产品对象，不得仅从已有 Task 的路径反向推导；即使尚无 Task，也应能保存、选择、移除和表达授权状态。Workspace 最终应成为文件访问、工具执行和 Task 归属的安全边界。当前同步 baseline 只在临时或用户明确 trusted 的 Workspace 中验证，不能据此宣称 strict Workspace security 已完成。
+代表 Agent 工作所针对的本地目录和权限范围。Workspace 是独立产品对象，不得仅从已有 Task 的路径反向推导。User Workspace 由用户明确选择或重新授权，一个目录可以承载零个、一个或多个共享文件上下文的 Task；Managed Workspace 由 Workbench 在调用方请求系统分配时创建，一个独立目录精确归属一个 Task。两者共用真实 Workspace、Task 与 AgentCore admission 模型，但具有不同的 origin、容量、选择状态和生命周期；Renderer 不得从路径或目录名推断 origin。Workspace 最终应成为文件访问、工具执行和 Task 归属的安全边界。当前同步 baseline 只在临时或用户明确 trusted 的 Workspace 中验证，不能据此宣称 strict Workspace security 已完成。
 
 ### Task 与内部 Agent Session
 
@@ -63,7 +63,7 @@ Account 是 MetaWork 的 Metask 账号控制面，负责 OAuth 登录、账号/A
 
 ### Scheduled Task
 
-Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做什么、何时触发、使用哪个可选 Skill，以及需要哪个可选 Workspace 上下文”。Task 是一次真实执行及其结果历史，Schedule 是触发规则，Skill 是可复用执行方法；三者可以关联，但 Scheduled Task 不是 AgentCore Session、交互式 Task 草稿、Skill 子对象或第二套 automation 数据面。主窗口只是管理视图；Host 在窗口关闭后继续以后台形态维护 timer、恢复定义并接纳 occurrence。每次触发仍必须重新经过 Account、Workspace/Skill（若绑定）、容量和 shutdown admission，成功后创建一个新的真实 Task，再通过现有 bounded Executor 启动 Text 或 Skill Run。Scheduled Task 只持久化无 secret 的定义、触发游标和有界 occurrence 事实，不持有 API Key；默认执行配置、Workspace authority 或 Skill revision 变化时不得静默改绑或重放。
+Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做什么、何时触发、使用哪个可选 Skill，以及 Workspace target 是系统默认还是用户显式绑定”。Task 是一次真实执行及其结果历史，Schedule 是触发规则，Skill 是可复用执行方法；三者可以关联，但 Scheduled Task 不是 AgentCore Session、交互式 Task 草稿、Skill 子对象或第二套 automation 数据面。主窗口只是管理视图；Host 在窗口关闭后继续以后台形态维护 timer、恢复定义并接纳 occurrence。Text 定时任务默认在每个 occurrence 触发时请求新的 Managed Workspace；显式 target 继续绑定并校验 User Workspace identity/epoch。首期 Skill 定时任务只允许显式 User Workspace，因为 catalog lease 绑定精确 root/home/epoch。每次触发仍必须重新经过 Account、Workspace/Skill（若绑定）、容量和 shutdown admission，成功后创建一个新的真实 Task，再通过现有 bounded Executor 启动 Text 或 Skill Run。Scheduled Task 只持久化无 secret 的定义、触发游标和有界 occurrence 事实，不持有 API Key；默认执行配置、Workspace authority 或 Skill revision 变化时不得静默改绑或重放。
 
 ## 5. 产品功能需求
 
@@ -73,8 +73,15 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 
 - 用户可以选择并打开本地 Workspace；
 - Host 校验并保存 Workspace 的规范路径；
-- Workbench projection 必须把 Workspace 作为独立对象发布，至少包含稳定 identity、显示名称、规范路径、当前授权状态和可汇总的 Task 信号；
-- 没有 Task 的 Workspace 仍然存在于切换器与设置中；最近使用、重新授权和移除不能依赖 Renderer 从 Task 列表猜测；
+- Workspace 记录 immutable `origin = user | managed`。User Workspace 可承载多个 Task；Managed Workspace 精确归属一个 Task，两种 origin 不允许对同一 canonical root 相互转换；
+- App 只通过 Native SDK `.data` 目录规则解析 `<MetaWork data dir>/workspaces` 并向 Workbench 注入可用或不可用 capability；Renderer、Bridge payload、cwd、home 和环境 fallback 都不能决定托管目录根；
+- 每个 managed Task 使用 `<MetaWork data dir>/workspaces/<16 位随机小写 hex>` 独立目录，同一 Task 的后续 Run 复用该目录。分配必须 exclusive create、有界重试、校验 canonical containment；失败不能回退到共享目录；
+- managed root 及其子目录是保留命名空间，不能注册为 User Workspace；用户明确选择 managed root 的祖先仍服从当前 trust 语义，不因此获得 strict isolation；
+- Workbench projection 必须把 Workspace 作为独立对象发布，至少包含稳定 identity、origin、显示名称、规范路径、当前授权状态和可汇总的 Task 信号；每个被 Task 引用的 Managed Workspace 必须出现在同一 canonical snapshot；
+- 没有 Task 的 User Workspace 仍然存在于切换器与设置中；最近使用、重新授权和移除不能依赖 Renderer 从 Task 列表猜测。Managed Workspace 不进入普通选择器、recent、重新授权或移除入口，但其 owning Task 仍可导航；
+- 后台创建 Managed Workspace 不修改 Host `selectedWorkspaceId`、User Workspace recent order 或 Renderer New task draft scope；user 与 managed record 使用独立容量，后台 Task 不得耗尽用户打开 Workspace 的能力；
+- managed root 无法初始化时只关闭 `managedWorkspaces` capability，并对 managed admission 返回 typed unavailable；Account、显式 User Workspace 和普通 Workbench 仍可运行；
+- 当前 Task/Workspace 历史不跨 Host 恢复。Run、Task 删除、shutdown 和重启后托管目录保留，但不据此恢复或猜测 Task/Workspace；Task persistence、目录浏览和磁盘清理属于后续独立能力；
 - 文件和工具能力最终必须受 Workspace 与显式权限约束；
 - UI 能显示当前 Task 所属 Workspace；
 - strict Workspace security 未验证前，产品必须明确限制使用范围，不能制造虚假的安全承诺。
