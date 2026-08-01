@@ -81,7 +81,7 @@ npm run agentcore:stage -- C:\absolute\path\to\x86_64-windows.win10...win11_dt-g
 npm run test:windows:bringup
 ```
 
-Windows owner 只锁定并验证 Windows x86_64 GNU artifact；candidate 先通过 `AGENTCORE_BUNDLE_ROOT=<absolute-path> npm run probe:agentcore`，`test:windows:bringup` 再覆盖 staged verifier/probe、bundle 与 lifecycle tests、正式 test graph、Debug/Release build 和真实 Windows vertical，并明确报告 revision 5。macOS 与 Windows 结果不能互相替代。安装器、签名、更新、file dialog、process tree、timeout 和完整 security matrix 需要独立证据。
+Windows owner 只锁定并验证 Windows x86_64 GNU artifact；当前 exact lock 使用 clean `72655b68b882945f5b47125ddcba1023b0667a17` source artifact。candidate 先通过 `AGENTCORE_BUNDLE_ROOT=<absolute-path> npm run probe:agentcore`，`test:windows:bringup` 再覆盖 staged verifier/probe、bundle 与 lifecycle tests、正式 test graph、Debug/Release build 和真实 Windows vertical，并明确报告 revision 5。当前 follow-up artifact 的 candidate/staged probe、bundle guard、正式 test graph、lifecycle、Debug 与 Release build 已通过；真实 vertical 连续两次在进入 AgentCore 场景前被既有 `Renderer titlebar drag did not move the Native window` preflight 阻断，不能据此声明当前 artifact 的 vertical 通过。macOS 与 Windows 结果不能互相替代。安装器、签名、更新、file dialog、process tree、timeout 和完整 security matrix 需要独立证据。
 
 ## 4. 登录优先与成熟 Workbench 验收矩阵
 

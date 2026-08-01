@@ -1,20 +1,22 @@
 # MetaWork AgentCore ABI v1 revision 5 消费合同
 
-> 状态：revision 5 已在 macOS arm64 与 Windows x86_64 GNU 完成 exact artifact、共享 Agent Session 与各自真实 vertical 验证；不声明 stable support policy
+> 状态：revision 5 baseline 已在两个平台完成；Windows follow-up artifact 已完成 exact lock、probe 与 build，真实 vertical 仍被既有 titlebar preflight 阻断；不声明 stable support policy
 > 所有者：Metask AgentCore 负责 facade、bindings、bundle 和兼容政策；MetaWork 负责精确消费验证
 
 本文记录 MetaWork 对 AgentCore binary ABI version 1 revision 5 的消费边界。线程、事件泵和 Host 生命周期见 [AgentCore 集成契约](agentcore-integration.md)，当前验收要求见 [验证规范](validation.md)。verifier、两个 target 的 repository lock、canonical staged bundle、official SDK 与共享 Agent Session 已 hard cut。既有 Workbench、Bridge、Renderer 产品合同不因本次依赖升级变化。
 
 ## 1. 版本含义
 
-当前 macOS 与 Windows development bundle 都来自 clean source commit `f0141f878d36f2bd5a76b097507cf19cbbbb174b`，但仍是分别锁定完整 manifest 与 payload checksum 的 target-specific artifact。两者都是 ABI v1 revision 5、168-byte API table、required capabilities `0x0fff`、Zig 0.16.0、strip=true 并需要 C runtime；macOS 使用 ReleaseSafe，Windows 使用 ReleaseSmall：
+当前 Windows development bundle 已更新到 clean source commit `72655b68b882945f5b47125ddcba1023b0667a17`；macOS development bundle 仍锁定 clean source commit `f0141f878d36f2bd5a76b097507cf19cbbbb174b`，等待平台 owner 独立更新。两者分别锁定完整 manifest 与 payload checksum，都是 ABI v1 revision 5、168-byte API table、required capabilities `0x0fff`、Zig 0.16.0、strip=true 并需要 C runtime；macOS 使用 ReleaseSafe，Windows 使用 ReleaseSmall：
 
 | Target                         | Version                  | Source commit                              | Provenance             | Link input            | 状态                    |
 | ------------------------------ | ------------------------ | ------------------------------------------ | ---------------------- | --------------------- | ----------------------- |
 | macOS arm64（最低 macOS 13.0） | `0.1.0-dev+f0141f878d36` | `f0141f878d36f2bd5a76b097507cf19cbbbb174b` | `source.dirty = false` | 无 system library     | exact lock 与验证已完成 |
-| Windows x86_64 GNU             | `0.1.0-dev+f0141f878d36` | `f0141f878d36f2bd5a76b097507cf19cbbbb174b` | `source.dirty = false` | `advapi32`、`crypt32` | exact lock 与验证已完成 |
+| Windows x86_64 GNU             | `0.1.0-dev+72655b68b882` | `72655b68b882945f5b47125ddcba1023b0667a17` | `source.dirty = false` | `advapi32`、`crypt32` | exact lock/probe/build 已完成；vertical preflight 受阻 |
 
 revision 5 是从 revision 4 进行的 breaking function-table hard cut：API table 增加 Session model mutation、manual compact、Skill selection 与 Host permission-rules capability；`session_refresh_skill_catalog` 被 `session_update_skills` 取代，Session create 和 Skill update 都显式携带 selection。每个 target 仍由完整 manifest bytes/checksum 独立锁定，不能凭相同 source commit 推断 artifact 可互换，也不等于 stable ABI support policy。
+
+Windows 当前 follow-up bundle 不改变 ABI 或 MetaWork 产品合同；它把 AgentCore 默认 Skill discovery 收敛为 `<workspace_home>/.agents/skills` 与 `<workspace_root>/.agents/skills`，同名 Skill 由 Workspace 来源覆盖 Home 来源，两个根相同时只扫描一次。MetaWork 不依赖 AgentCore 隐式扫描 `.claude/skills`、`.metacodes/skills` 或系统级目录。
 
 - repository lock 保存完整 manifest，并精确锁定 package/source、target、toolchain、link contract、ABI 和所有 payload checksum；
 - 每个锁定 artifact 都必须是 clean provenance；MetaWork 只信任完整 manifest bytes 与 payload checksums，而不从 commit 推断 artifact bytes；

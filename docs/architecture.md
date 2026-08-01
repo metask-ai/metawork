@@ -1,6 +1,6 @@
 # MetaWork 高层架构
 
-> 状态：AgentCore ABI v1 revision 5 已 hard cut 共享 consumer，Windows x86_64 GNU exact artifact 与真实 vertical 已完成，macOS 由平台 owner 独立收口；后续正式方向选择单 AgentCore Worker
+> 状态：AgentCore ABI v1 revision 5 已 hard cut 共享 consumer 并完成双平台 baseline；Windows follow-up artifact 已锁定并完成 probe/build，真实 vertical 仍被既有 titlebar preflight 阻断；后续正式方向选择单 AgentCore Worker
 > 日期：2026-08-01
 
 产品范围见 [产品需求](requirements.md)，Metask AgentCore 的具体接入约束见 [AgentCore 集成契约](agentcore-integration.md)，revision 5 目标能力见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。精确源码路径、binary 和 symbol identifier 只作为机器合同保留。
@@ -30,7 +30,7 @@
 
 已批准的新基线是 Metask AgentCore ABI v1 revision 5。它保留既有 RunContext、typed status/StopReason、CoreEvent/UI codec、Skill catalog 与 tagged Text/Skill Run，并把 Session model、Skill replacement、permission rules 和 manual compact 纳入新的 mandatory function table。精确 API layout、artifact identity、payload 和 manifest schema 只由 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)定义。MetaWork 对它执行 hard cut：active build、Host、probe 和规范文档只接受 revision 5，不保留 revision 4 function table、`session_refresh_skill_catalog` 或 fallback。
 
-当前 checkout 的 verifier、build graph、共享 Agent Session、macOS 与 Windows repository lock 都已切到 revision 5；两个 target 的 exact artifact 分别来自 clean source commit `f0141f878d36f2bd5a76b097507cf19cbbbb174b`，但 manifest、payload checksum 和平台结果仍独立锁定、互不替代。MetaWork 当前只消费显式 all-enabled Skill selection 和 `session_update_skills`，不因 ABI entry 存在而开放 set-model、manual compact、permission-rule 或 Skill toggle 产品能力；Workbench、Bridge 与 Renderer 合同保持不变。
+当前 checkout 的 verifier、build graph、共享 Agent Session、macOS 与 Windows repository lock 都已切到 revision 5；Windows exact artifact 来自 clean source commit `72655b68b882945f5b47125ddcba1023b0667a17`，macOS exact artifact 仍来自 clean source commit `f0141f878d36f2bd5a76b097507cf19cbbbb174b`，manifest、payload checksum 和平台结果独立锁定、互不替代。MetaWork 当前只消费显式 all-enabled Skill selection 和 `session_update_skills`，不因 ABI entry 存在而开放 set-model、manual compact、permission-rule 或 Skill toggle 产品能力；Workbench、Bridge 与 Renderer 合同保持不变。
 
 该 baseline 不包含：
 
