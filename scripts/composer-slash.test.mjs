@@ -113,7 +113,7 @@ test("Run input conversion rejects unresolved Slash outside the UI layer", () =>
 });
 
 test("desktop Command registry is explicit and excludes CLI session controls", () => {
-  assert.deepEqual(slashCommandNames, ["new"]);
+  assert.deepEqual(slashCommandNames, ["new", "compact"]);
   for (const legacy of [
     "model",
     "status",
@@ -122,6 +122,7 @@ test("desktop Command registry is explicit and excludes CLI session controls", (
     "history",
     "retry",
     "clear",
+    "goal",
     "exit",
   ])
     assert.equal(slashCommandNames.includes(legacy), false);

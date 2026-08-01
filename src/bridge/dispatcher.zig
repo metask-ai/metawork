@@ -142,6 +142,8 @@ pub const Dispatcher = struct {
             .{ .name = commands.account_logout, .function = accountLogout },
             .{ .name = commands.create_task, .function = createTask },
             .{ .name = commands.run, .function = runTask },
+            .{ .name = commands.compact, .function = compactTask },
+            .{ .name = commands.cancel_compact, .function = cancelCompact },
             .{ .name = commands.refresh_task_skill_catalog, .function = refreshTaskSkillCatalog },
             .{ .name = commands.cancel, .function = cancelTask },
             .{ .name = commands.respond_ui, .function = respondUi },
@@ -802,6 +804,73 @@ pub const Dispatcher = struct {
         );
     }
 
+    fn compactTask(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(
+            handlers.TaskCompact,
+            invocation.request.payload,
+        );
+        defer parsed.deinit();
+        const task_id = try handlers.parseWireId(parsed.value.taskId);
+        const binding_epoch = try handlers.parseWireId(
+            parsed.value.expectedBindingEpoch,
+        );
+        const operation_id = (try self.requireWorkbench()).compactTaskAtBinding(
+            task_id,
+            binding_epoch,
+        ) catch |err| {
+            if (taskCompactRejection(err)) |reason|
+                return encodeTaskCompactResult(
+                    output,
+                    false,
+                    task_id,
+                    null,
+                    reason,
+                );
+            return err;
+        };
+        self.notifyCommitted();
+        return encodeTaskCompactResult(
+            output,
+            true,
+            task_id,
+            operation_id,
+            null,
+        );
+    }
+
+    fn cancelCompact(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(
+            handlers.TaskCompactIdentity,
+            invocation.request.payload,
+        );
+        defer parsed.deinit();
+        const task_id = try handlers.parseWireId(parsed.value.taskId);
+        const operation_id = try handlers.parseWireId(parsed.value.operationId);
+        try (try self.requireWorkbench()).cancelCompact(task_id, operation_id);
+        self.notifyCommitted();
+        return std.fmt.bufPrint(
+            output,
+            "{{\"taskId\":\"{d}\",\"operationId\":\"{d}\",\"cancelRequested\":true}}",
+            .{ task_id, operation_id },
+        );
+    }
+
     fn refreshWorkspaceSkillCatalog(
         context: *anyopaque,
         invocation: native_sdk.bridge.Invocation,
@@ -1334,6 +1403,23 @@ fn taskRunRejection(err: anyerror) ?[]const u8 {
     };
 }
 
+fn taskCompactRejection(err: anyerror) ?[]const u8 {
+    return switch (err) {
+        error.BindingEpochMismatch => "binding_changed",
+        error.ExecutionUnavailable, error.ExecutionGenerationMismatch => "binding_unavailable",
+        error.UnknownTask, error.TaskClosing => "task_unavailable",
+        error.TaskBusy => "task_busy",
+        error.NoSuchRun => "no_history",
+        error.CompactCapacity,
+        error.CompactIdExhausted,
+        error.QueueFull,
+        error.ProjectionCapacity,
+        => "capacity_reached",
+        error.ExecutorShuttingDown => "shutting_down",
+        else => null,
+    };
+}
+
 fn catalogRefreshRejection(err: anyerror) ?[]const u8 {
     return switch (err) {
         error.WorkspaceEpochMismatch => "workspace_changed",
@@ -1454,6 +1540,36 @@ fn encodeTaskRunResult(
         task_id,
     }) catch return error.NoSpaceLeft;
     if (run_id) |value|
+        writer.print("\"{d}\"", .{value}) catch return error.NoSpaceLeft
+    else
+        writer.writeAll("null") catch return error.NoSpaceLeft;
+    writer.writeAll(",\"reason\":") catch return error.NoSpaceLeft;
+    if (reason) |value|
+        std.json.Stringify.value(value, .{}, &writer) catch return error.NoSpaceLeft
+    else
+        writer.writeAll("null") catch return error.NoSpaceLeft;
+    writer.writeByte('}') catch return error.NoSpaceLeft;
+    return writer.buffered();
+}
+
+fn encodeTaskCompactResult(
+    output: []u8,
+    accepted: bool,
+    task_id: u64,
+    operation_id: ?u64,
+    reason: ?[]const u8,
+) ![]const u8 {
+    const valid = task_id != 0 and if (accepted)
+        operation_id != null and operation_id.? != 0 and reason == null
+    else
+        operation_id == null and reason != null;
+    if (!valid) return error.InvalidTaskCompactResult;
+    var writer = std.Io.Writer.fixed(output);
+    writer.print("{{\"accepted\":{},\"taskId\":\"{d}\",\"operationId\":", .{
+        accepted,
+        task_id,
+    }) catch return error.NoSpaceLeft;
+    if (operation_id) |value|
         writer.print("\"{d}\"", .{value}) catch return error.NoSpaceLeft
     else
         writer.writeAll("null") catch return error.NoSpaceLeft;
@@ -1664,6 +1780,22 @@ test "mutation response encoders reject every inconsistent success and rejection
     try std.testing.expectError(
         error.InvalidTaskRunResult,
         encodeTaskRunResult(&output, true, 1, 0, null),
+    );
+    try std.testing.expectError(
+        error.InvalidTaskCompactResult,
+        encodeTaskCompactResult(&output, false, 1, 9, "task_busy"),
+    );
+    try std.testing.expectError(
+        error.InvalidTaskCompactResult,
+        encodeTaskCompactResult(&output, false, 1, null, null),
+    );
+    try std.testing.expectError(
+        error.InvalidTaskCompactResult,
+        encodeTaskCompactResult(&output, true, 0, 9, null),
+    );
+    try std.testing.expectError(
+        error.InvalidTaskCompactResult,
+        encodeTaskCompactResult(&output, true, 1, 0, null),
     );
     try std.testing.expectError(
         error.InvalidWorkspaceMutationResult,

@@ -16,6 +16,14 @@ export function isRunInFlight(task: TaskView | null): boolean {
   return task?.currentRunPhase != null;
 }
 
+function activeCompact(task: TaskView) {
+  return task.activeOperation?.kind === "compact"
+    ? (task.compacts?.find(
+        (compact) => compact.operationId === task.activeOperation?.id,
+      ) ?? null)
+    : null;
+}
+
 export type WorkspaceSummary = {
   id: string;
   canonicalRoot: string;
@@ -78,23 +86,34 @@ export function taskGroups(
     {
       kind: "running",
       tasks: active
-        .filter(
-          (task) =>
+        .filter((task) => {
+          const compact = activeCompact(task);
+          return (
             task.currentRunPhase === "running" ||
-            task.currentRunPhase === "stopping",
-        )
+            task.currentRunPhase === "stopping" ||
+            compact?.phase === "compacting" ||
+            compact?.phase === "stopping"
+          );
+        })
         .sort(byRecent),
     },
     {
       kind: "queued",
       tasks: active
-        .filter((task) => task.currentRunPhase === "queued")
+        .filter(
+          (task) =>
+            task.currentRunPhase === "queued" ||
+            activeCompact(task)?.phase === "queued",
+        )
         .sort(byRecent),
     },
     {
       kind: "recent",
       tasks: active
-        .filter((task) => task.currentRunPhase === null)
+        .filter(
+          (task) =>
+            task.currentRunPhase === null && task.activeOperation == null,
+        )
         .sort(byRecent),
     },
   ];
@@ -112,6 +131,7 @@ export type TaskDisplayState =
       value: NonNullable<TaskView["currentRunPhase"]>;
     }
   | { kind: "lifecycle"; value: Exclude<TaskView["lifecycle"], "open"> }
+  | { kind: "compact_phase"; value: "queued" | "compacting" | "stopping" }
   | { kind: "archived" }
   | { kind: "outcome"; value: NonNullable<TaskView["lastRunOutcome"]> }
   | { kind: "ready" };
@@ -119,6 +139,13 @@ export type TaskDisplayState =
 export function taskDisplayState(task: TaskView): TaskDisplayState {
   if (task.currentRunPhase)
     return { kind: "phase", value: task.currentRunPhase };
+  const compact = activeCompact(task);
+  if (
+    compact?.phase === "queued" ||
+    compact?.phase === "compacting" ||
+    compact?.phase === "stopping"
+  )
+    return { kind: "compact_phase", value: compact.phase };
   if (task.lifecycle !== "open")
     return { kind: "lifecycle", value: task.lifecycle };
   if (task.archived) return { kind: "archived" };
@@ -128,11 +155,16 @@ export function taskDisplayState(task: TaskView): TaskDisplayState {
 }
 
 export function taskSignals(task: TaskView): TaskSignals {
+  const compact = activeCompact(task);
+  const lastCompact = task.compacts?.at(-1);
   return {
     running:
       task.currentRunPhase === "queued" ||
       task.currentRunPhase === "running" ||
-      task.currentRunPhase === "stopping",
+      task.currentRunPhase === "stopping" ||
+      compact?.phase === "queued" ||
+      compact?.phase === "compacting" ||
+      compact?.phase === "stopping",
     attention: task.currentRunPhase === "waiting_ui",
     failed:
       task.lastRunOutcome === "failed" ||
@@ -140,7 +172,8 @@ export function taskSignals(task: TaskView): TaskSignals {
       task.lastRunOutcome === "interrupted" ||
       (task.cause !== null &&
         task.cause !== "user_cancel" &&
-        task.cause !== "session_close"),
+        task.cause !== "session_close") ||
+      lastCompact?.phase === "failed",
   };
 }
 

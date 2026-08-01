@@ -38,6 +38,14 @@ pub const TaskRun = struct {
     expectedBindingEpoch: []const u8,
     input: std.json.Value,
 };
+pub const TaskCompact = struct {
+    taskId: []const u8,
+    expectedBindingEpoch: []const u8,
+};
+pub const TaskCompactIdentity = struct {
+    taskId: []const u8,
+    operationId: []const u8,
+};
 pub const TaskRunInput = union(enum) {
     text: []const u8,
     skill: struct {

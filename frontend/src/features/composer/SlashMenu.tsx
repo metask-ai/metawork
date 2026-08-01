@@ -14,6 +14,10 @@ const commandMessageIds: Record<
   { label: MessageId; description: MessageId }
 > = {
   new: { label: "slash.command.new", description: "slash.command.new_help" },
+  compact: {
+    label: "slash.command.compact",
+    description: "slash.command.compact_help",
+  },
 };
 
 export function SlashMenu({

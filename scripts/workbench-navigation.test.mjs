@@ -260,6 +260,37 @@ test("Task display state preserves Run, lifecycle, archive, and outcome preceden
   assert.deepEqual(taskDisplayState(task({})), { kind: "ready" });
 });
 
+test("manual Compact participates in Task action grouping without becoming a Run", () => {
+  const compacting = task({
+    activeOperation: { kind: "compact", id: "11" },
+    compacts: [
+      {
+        operationId: "11",
+        afterRunId: "9",
+        phase: "compacting",
+        cause: null,
+        beforeContextTokens: "0",
+        afterContextTokens: "0",
+        usage: {
+          input: "0",
+          output: "0",
+          cacheRead: "0",
+          cacheCreation: "0",
+        },
+      },
+    ],
+  });
+  assert.equal(isRunInFlight(compacting), false);
+  assert.deepEqual(taskDisplayState(compacting), {
+    kind: "compact_phase",
+    value: "compacting",
+  });
+  assert.deepEqual(taskGroups([compacting], false), [
+    { kind: "running", tasks: [compacting] },
+  ]);
+  assert.equal(taskSignals(compacting).running, true);
+});
+
 test("a new Task draft is not mistaken for an in-flight Run", () => {
   assert.equal(isRunInFlight(null), false);
   assert.equal(isRunInFlight(task({ currentRunPhase: null })), false);

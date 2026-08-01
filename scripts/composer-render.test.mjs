@@ -164,6 +164,7 @@ function renderCompletedTimeline(
     text: "Inspect the release",
     redacted: false,
   },
+  compacts = [],
 ) {
   const task = {
     id: "3",
@@ -196,6 +197,7 @@ function renderCompletedTimeline(
         ],
       },
     ],
+    compacts,
     pendingUi: null,
     uiHistory: [],
   };
@@ -465,6 +467,24 @@ test("Timeline preserves typed Skill identity and positional arguments", () => {
   assert.match(markup, /timeline-skill-token/);
   assert.match(markup, />\/review/);
   assert.match(markup, />src\/main\.zig</);
+});
+
+test("Timeline projects manual Compact as a lightweight system event", () => {
+  const markup = renderCompletedTimeline("Release is ready", undefined, [
+    {
+      operationId: "11",
+      afterRunId: "9",
+      phase: "compacted",
+      cause: null,
+      beforeContextTokens: "100",
+      afterContextTokens: "40",
+      usage: { input: "5", output: "2", cacheRead: "0", cacheCreation: "0" },
+    },
+  ]);
+  assert.match(markup, /timeline-system-event/);
+  assert.match(markup, /Context compacted/);
+  assert.match(markup, /100/);
+  assert.match(markup, /40/);
 });
 
 test("task examples disappear before they can overwrite an existing draft", () => {

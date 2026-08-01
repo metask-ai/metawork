@@ -109,7 +109,7 @@ export function skillDraftVisibleArgumentCount(draft: ComposerSkillDraft) {
   );
 }
 
-export const slashCommandNames = ["new"] as const;
+export const slashCommandNames = ["new", "compact"] as const;
 
 export type SlashCommandName = (typeof slashCommandNames)[number];
 

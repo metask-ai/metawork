@@ -3588,6 +3588,31 @@ summary::-webkit-details-marker {
   animation: workline-pulse 1.8s ease-in-out infinite;
 }
 
+.timeline-system-event {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: -24px 0 32px 30px;
+  color: var(--color-muted);
+  font-size: 11px;
+}
+
+.timeline-system-event p {
+  margin: 0;
+}
+
+.timeline-system-mark {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--color-rule);
+}
+
+.timeline-system-event[data-active="true"] .timeline-system-mark {
+  background: var(--color-brand-600);
+}
+
 .run-heading {
   display: flex;
   min-height: 22px;
