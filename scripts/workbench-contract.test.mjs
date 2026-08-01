@@ -184,6 +184,24 @@ test("Scheduled Task projection decodes recurrence and occurrence without secret
   ];
   assert.deepEqual(decodeWorkbenchSnapshot(scheduled), scheduled);
 
+  const rejectedAfterTaskCreation = clone(scheduled);
+  rejectedAfterTaskCreation.scheduledTasks[0].occurrences[0] = {
+    ...rejectedAfterTaskCreation.scheduledTasks[0].occurrences[0],
+    result: "rejected",
+    reason: "capacity_reached",
+  };
+  assert.deepEqual(
+    decodeWorkbenchSnapshot(rejectedAfterTaskCreation),
+    rejectedAfterTaskCreation,
+  );
+
+  const rejectedWithoutReason = clone(rejectedAfterTaskCreation);
+  rejectedWithoutReason.scheduledTasks[0].occurrences[0].reason = null;
+  assert.throws(
+    () => decodeWorkbenchSnapshot(rejectedWithoutReason),
+    /rejected occurrence requires a reason/,
+  );
+
   const managedTarget = clone(scheduled);
   managedTarget.capabilities.managedWorkspaces = true;
   managedTarget.workspaces.push({

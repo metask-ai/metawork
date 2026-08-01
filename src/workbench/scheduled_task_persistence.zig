@@ -555,6 +555,15 @@ test "scheduled task store round trips bounded occurrence history" {
         .input = .{ .text = "Summarize current work" },
         .recurrence = .{ .once = .{ .at_unix_seconds = 3_000 } },
     }, 1_000);
+    const default_item = store.find(default_id).?;
+    try store.claim(default_item, 3_000, 3_001, .manual);
+    try store.finalizeClaimRejected(
+        default_item,
+        3_000,
+        .manual,
+        .capacity_reached,
+        84,
+    );
 
     var output: [max_store_bytes]u8 = undefined;
     const bytes = try encode(&output, &store);
@@ -583,6 +592,10 @@ test "scheduled task store round trips bounded occurrence history" {
         .default => {},
         .explicit => return error.TestUnexpectedResult,
     }
+    try std.testing.expectEqual(
+        @as(u64, 84),
+        restored.find(default_id).?.occurrences()[0].task_id,
+    );
     try std.testing.expectEqual(store.next_id, restored.next_id);
 }
 

@@ -1421,6 +1421,11 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
         last.taskId === null
           ? null
           : positiveWireId(last.taskId, `${occurrencePath}.taskId`);
+      const reason = nullableEnum(
+        last.reason,
+        `${occurrencePath}.reason`,
+        scheduledTaskFailureReasons,
+      );
       const taskOutcome = nullableEnum(
         last.taskOutcome,
         `${occurrencePath}.taskOutcome`,
@@ -1433,12 +1438,28 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
           "dependency_contract_failure",
         ] as const,
       );
-      if (result === "submitted" && taskId === null)
-        fail(occurrencePath, "submitted occurrence must reference a Task");
-      if (result !== "submitted" && taskOutcome !== null)
+      if (
+        result === "claimed" &&
+        (taskId !== null || reason !== null || taskOutcome !== null)
+      )
+        fail(occurrencePath, "claimed occurrence cannot expose terminal facts");
+      if (result === "submitted" && (taskId === null || reason !== null))
         fail(
           occurrencePath,
-          "only submitted occurrence can expose Task outcome",
+          "submitted occurrence requires a Task without a rejection reason",
+        );
+      if (
+        result === "skipped" &&
+        (taskId !== null || reason === null || taskOutcome !== null)
+      )
+        fail(
+          occurrencePath,
+          "skipped occurrence requires only a rejection reason",
+        );
+      if (result === "rejected" && (reason === null || taskOutcome !== null))
+        fail(
+          occurrencePath,
+          "rejected occurrence requires a reason and may reference a Task",
         );
       return {
         plannedAtUnixSeconds: positiveWireId(
@@ -1455,11 +1476,7 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
         ] as const),
         result,
         taskId,
-        reason: nullableEnum(
-          last.reason,
-          `${occurrencePath}.reason`,
-          scheduledTaskFailureReasons,
-        ),
+        reason,
         taskOutcome,
       };
     },

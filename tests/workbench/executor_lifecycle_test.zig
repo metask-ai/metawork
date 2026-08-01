@@ -487,6 +487,81 @@ test "Text schedule default creates a fresh managed Workspace per occurrence" {
     ) != null);
 }
 
+test "schedule rejection retains the managed Task created before a full Run queue" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 3,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
+    var managed_root = try workbench_api.ManagedWorkspaceRoot.open(
+        std.testing.io,
+        std.testing.allocator,
+        root_storage[0..root_len],
+    );
+    defer managed_root.deinit();
+    var schedule_support: TestScheduleSupport = .{};
+    var workbench = try workbench_api.Workbench.init(
+        std.testing.allocator,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 1,
+            .max_tasks = 3,
+            .max_scheduled_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        .{
+            .directories = .{ .managed_workspace_root = &managed_root },
+            .schedule_timer = schedule_support.timer(),
+            .schedule_persistence = schedule_support.persistence(),
+        },
+    );
+    defer workbench.deinit();
+    try installWorkbenchExecution(&workbench);
+
+    const schedule_id = try workbench.createScheduledTask(.{
+        .title = "Queued brief",
+        .target = .default,
+        .expected_execution_generation = 1,
+        .input = .{ .text = "Summarize current work" },
+        .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
+    });
+    fake_core.setNextPlan(.controlled);
+    defer fake_core.releaseControlled();
+    const running_task = try workbench.createTaskForWorkspace(.managed, 1, null);
+    const queued_task = try workbench.createTaskForWorkspace(.managed, 1, null);
+    _ = try workbench.runTask(running_task, .{ .text = "hold worker" });
+    try waitWorkbenchSnapshot(
+        runtime,
+        &workbench,
+        "\"currentRunPhase\":\"running\"",
+    );
+    _ = try workbench.runTask(queued_task, .{ .text = "fill queue" });
+
+    try std.testing.expectError(
+        error.QueueFull,
+        workbench.runScheduledTaskNow(schedule_id, 1),
+    );
+    try std.testing.expectEqual(@as(usize, 3), try directoryEntryCount(tmp.dir));
+    var snapshot_storage: [128 * 1024]u8 = undefined;
+    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"result\":\"rejected\",\"taskId\":\"3\",\"reason\":\"capacity_reached\"",
+    ) != null);
+}
+
 test "Workspace reauthorization reschedules the latest catalog query" {
     fake_core.reset();
     fake_core.setCatalogPlan(.controlled);

@@ -3822,6 +3822,7 @@ pub const Workbench = struct {
                 planned_at_unix_seconds,
                 source,
                 scheduledFailure(err),
+                0,
             );
             return err;
         };
@@ -3831,6 +3832,7 @@ pub const Workbench = struct {
                 planned_at_unix_seconds,
                 source,
                 .task_start_failed,
+                task_id,
             );
             return err;
         };
@@ -3849,6 +3851,7 @@ pub const Workbench = struct {
                 planned_at_unix_seconds,
                 source,
                 scheduledFailure(err),
+                task_id,
             );
             return err;
         };
@@ -3889,6 +3892,7 @@ pub const Workbench = struct {
         planned_at_unix_seconds: u64,
         source: scheduled_tasks_impl.OccurrenceSource,
         reason: scheduled_tasks_impl.FailureReason,
+        task_id: u64,
     ) void {
         var candidate = self.scheduled_tasks.clone(self.allocator) catch return;
         var candidate_owned = true;
@@ -3898,6 +3902,7 @@ pub const Workbench = struct {
             planned_at_unix_seconds,
             source,
             reason,
+            task_id,
         ) catch return;
         self.commitScheduledTaskCandidate(&candidate) catch return;
         self.replaceScheduledTaskStore(&candidate);

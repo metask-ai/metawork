@@ -529,6 +529,7 @@ pub const Store = struct {
         planned_at_unix_seconds: u64,
         source: OccurrenceSource,
         reason: FailureReason,
+        task_id: u64,
     ) error{InvalidSchedule}!void {
         const occurrence = claimedOccurrence(
             item,
@@ -537,6 +538,7 @@ pub const Store = struct {
         ) orelse return error.InvalidSchedule;
         occurrence.result = .rejected;
         occurrence.reason = reason;
+        occurrence.task_id = task_id;
         item.last_occurrence = occurrence.*;
         self.markNeedsAttention(item, reason);
     }
@@ -864,8 +866,10 @@ fn validOccurrence(occurrence: Occurrence) bool {
         .claimed => occurrence.task_id == 0 and occurrence.reason == null and
             occurrence.task_outcome == null,
         .submitted => occurrence.task_id != 0 and occurrence.reason == null,
-        .skipped, .rejected => occurrence.task_id == 0 and
-            occurrence.reason != null and occurrence.task_outcome == null,
+        .skipped => occurrence.task_id == 0 and occurrence.reason != null and
+            occurrence.task_outcome == null,
+        .rejected => occurrence.reason != null and
+            occurrence.task_outcome == null,
     };
 }
 
