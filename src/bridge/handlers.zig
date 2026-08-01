@@ -1,6 +1,7 @@
 //! Strict payload records and parsing shared by Bridge handlers.
 
 const std = @import("std");
+const workbench_api = @import("metawork_workbench");
 const max_skill_argument_values: usize = 64;
 
 pub const PermissionChoice = enum {
@@ -64,6 +65,33 @@ pub const TaskClose = struct { taskId: []const u8 };
 pub const TaskRename = struct { taskId: []const u8, title: []const u8 };
 pub const TaskArchive = struct { taskId: []const u8, archived: bool };
 pub const TaskDelete = struct { taskId: []const u8 };
+pub const ScheduledTaskMutation = struct {
+    title: []const u8,
+    workspaceId: []const u8,
+    expectedWorkspaceEpoch: []const u8,
+    expectedExecutionGeneration: []const u8,
+    input: std.json.Value,
+    recurrence: std.json.Value,
+};
+pub const ScheduledTaskUpdate = struct {
+    scheduledTaskId: []const u8,
+    expectedEpoch: []const u8,
+    title: []const u8,
+    workspaceId: []const u8,
+    expectedWorkspaceEpoch: []const u8,
+    expectedExecutionGeneration: []const u8,
+    input: std.json.Value,
+    recurrence: std.json.Value,
+};
+pub const ScheduledTaskIdentity = struct {
+    scheduledTaskId: []const u8,
+    expectedEpoch: []const u8,
+};
+pub const ScheduledTaskEnable = struct {
+    scheduledTaskId: []const u8,
+    expectedEpoch: []const u8,
+    enabled: bool,
+};
 pub const UiResponseRequest = struct {
     taskId: []const u8,
     runId: []const u8,
@@ -149,6 +177,45 @@ pub fn parseTaskRunInput(value: std.json.Value) !ParsedTaskRunInput {
     };
 }
 
+pub fn parseScheduledTaskRecurrence(
+    value: std.json.Value,
+) !workbench_api.ScheduledTaskRecurrence {
+    const object = switch (value) {
+        .object => |object| object,
+        else => return error.InvalidBridgePayload,
+    };
+    const kind = switch (object.get("kind") orelse
+        return error.InvalidBridgePayload) {
+        .string => |text| text,
+        else => return error.InvalidBridgePayload,
+    };
+    if (std.mem.eql(u8, kind, "once")) {
+        if (object.count() != 2) return error.InvalidBridgePayload;
+        const at = switch (object.get("atUnixSeconds") orelse
+            return error.InvalidBridgePayload) {
+            .string => |text| try parseWireId(text),
+            else => return error.InvalidBridgePayload,
+        };
+        return .{ .once = .{ .at_unix_seconds = at } };
+    }
+    if (!std.mem.eql(u8, kind, "interval") or object.count() != 3)
+        return error.InvalidBridgePayload;
+    const start = switch (object.get("startAtUnixSeconds") orelse
+        return error.InvalidBridgePayload) {
+        .string => |text| try parseWireId(text),
+        else => return error.InvalidBridgePayload,
+    };
+    const every = switch (object.get("everySeconds") orelse
+        return error.InvalidBridgePayload) {
+        .string => |text| try parseWireId(text),
+        else => return error.InvalidBridgePayload,
+    };
+    return .{ .interval = .{
+        .start_at_unix_seconds = start,
+        .every_seconds = every,
+    } };
+}
+
 pub fn acknowledgementSequence(payload: []const u8) !u64 {
     const prefix = "{\"sequence\":";
     if (!std.mem.startsWith(u8, payload, prefix) or !std.mem.endsWith(u8, payload, "}"))
@@ -214,5 +281,44 @@ test "Task creation requires an explicit nullable catalog revision" {
         parsePayload(TaskCreate,
             \\{"workspaceId":"1","expectedWorkspaceEpoch":"2","expectedExecutionGeneration":"3"}
         ),
+    );
+}
+
+test "Scheduled Task recurrence is exact and uses wire integers" {
+    var once = try std.json.parseFromSlice(
+        std.json.Value,
+        std.testing.allocator,
+        \\{"kind":"once","atUnixSeconds":"1700000000"}
+    ,
+        .{},
+    );
+    defer once.deinit();
+    try std.testing.expectEqual(
+        @as(u64, 1_700_000_000),
+        (try parseScheduledTaskRecurrence(once.value)).once.at_unix_seconds,
+    );
+    var interval = try std.json.parseFromSlice(
+        std.json.Value,
+        std.testing.allocator,
+        \\{"kind":"interval","startAtUnixSeconds":"1700000000","everySeconds":"3600"}
+    ,
+        .{},
+    );
+    defer interval.deinit();
+    try std.testing.expectEqual(
+        @as(u64, 3600),
+        (try parseScheduledTaskRecurrence(interval.value)).interval.every_seconds,
+    );
+    var extra = try std.json.parseFromSlice(
+        std.json.Value,
+        std.testing.allocator,
+        \\{"kind":"once","atUnixSeconds":"1700000000","cron":"* * * * *"}
+    ,
+        .{},
+    );
+    defer extra.deinit();
+    try std.testing.expectError(
+        error.InvalidBridgePayload,
+        parseScheduledTaskRecurrence(extra.value),
     );
 }

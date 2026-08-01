@@ -23,10 +23,18 @@ const agent_event_notification_timeout: std.Io.Duration = .fromMilliseconds(50);
 const host_worker_count = 4;
 const workbench_snapshot_capacity = bridge_api.snapshot_max_bytes;
 const account_refresh_timer_id: u64 = 0x4d57_4143_4354_5246;
+const scheduled_task_timer_id: u64 = 0x4d57_5343_4844_544b;
 const account_refresh_skew_seconds: i64 = 60;
 const account_refresh_retry_ns: u64 = 30 * std.time.ns_per_s;
 const FrontendMode = bridge_api.policy.Mode;
 const main_window_id: native_sdk.platform.WindowId = 1;
+const tray_open_id: native_sdk.platform.TrayItemId = 1;
+const tray_quit_id: native_sdk.platform.TrayItemId = 2;
+const tray_items = [_]native_sdk.platform.TrayMenuItem{
+    .{ .id = tray_open_id, .label = "Open MetaWork", .command = "metawork.tray.open" },
+    .{ .separator = true },
+    .{ .id = tray_quit_id, .label = "Quit MetaWork", .command = "metawork.tray.quit" },
+};
 const windows_data_directory_name = "MetaWork";
 
 fn platformDataDirectoryName(os_tag: @TypeOf(builtin.os.tag)) []const u8 {
@@ -833,6 +841,7 @@ const App = struct {
     agent_event_wake_pending: std.atomic.Value(bool) = .init(false),
     native_runtime: ?*native_sdk.Runtime = null,
     platform_services: ?native_sdk.platform.PlatformServices = null,
+    tray_installed: bool = false,
     account_coordinator: ?*AccountCoordinator = null,
     account_effects: ?*AccountEffects = null,
     account_platform: ?account_api.Platform.NativeBackend = null,
@@ -869,6 +878,7 @@ const App = struct {
         const self: *@This() = @ptrCast(@alignCast(context));
         self.native_runtime = native_runtime;
         self.platform_services = native_runtime.options.platform.services;
+        try self.installScheduleHost();
         if (self.automation.active()) {
             self.startAutomationAccount(
                 self.automation.executionFixture(),
@@ -898,6 +908,10 @@ const App = struct {
             dispatcher.detachWorkbench();
         }
         self.deinitAccountPlatform();
+        if (self.tray_installed) {
+            if (self.platform_services) |services| services.removeTray() catch {};
+            self.tray_installed = false;
+        }
         self.workbench = null;
         self.platform_services = null;
         if (self.native_runtime == native_runtime) self.native_runtime = null;
@@ -1852,14 +1866,81 @@ const App = struct {
                     self.onAccountRefreshTimer();
                     return;
                 }
+                if (timer.id == scheduled_task_timer_id) {
+                    if (self.workbench) |workbench| {
+                        workbench.onScheduledTaskTimer();
+                        if (self.dispatcher) |dispatcher|
+                            try dispatcher.emitWorkbenchChanged();
+                    }
+                    return;
+                }
                 if (self.dispatcher != null and
                     self.dispatcher.?.onTimer(timer.id))
                 {
                     try self.dispatcher.?.emitWorkbenchChanged();
                 }
             },
+            .command => |command| if (command.source == .tray) switch (command.tray_item_id) {
+                tray_open_id => self.showMainWindow(),
+                tray_quit_id => self.requestExplicitQuit(),
+                else => {},
+            },
             else => {},
         }
+    }
+
+    fn installScheduleHost(self: *@This()) anyerror!void {
+        const services = self.platform_services orelse
+            return error.RuntimeUnavailable;
+        try services.createTray(.{
+            .tooltip = "MetaWork",
+            .items = &tray_items,
+        });
+        self.tray_installed = true;
+        if (self.workbench) |workbench|
+            workbench.setScheduleBackgroundAvailableNoFail(true);
+    }
+
+    fn showMainWindow(self: *@This()) void {
+        const services = self.platform_services orelse return;
+        services.showWindow(main_window_id) catch return;
+        services.focusWindow(main_window_id) catch {};
+    }
+
+    fn requestExplicitQuit(self: *@This()) void {
+        const services = self.platform_services orelse return;
+        if (self.workbench) |workbench| if (workbench.hasEnabledScheduledTasks()) {
+            const result = services.showMessageDialog(.{
+                .style = .warning,
+                .title = "Quit MetaWork?",
+                .message = "Scheduled tasks will pause while MetaWork is not running.",
+                .informative_text = "Closing the main window keeps them running. Use Quit only when you want to stop the background host.",
+                .primary_button = "Keep Running",
+                .secondary_button = "Quit MetaWork",
+            }) catch return;
+            if (result != .secondary) return;
+        };
+        services.quitApp() catch {};
+    }
+
+    fn notifyScheduledTask(
+        context: ?*anyopaque,
+        notification: workbench_api.ScheduleNotification,
+    ) bool {
+        const self: *@This() = @ptrCast(@alignCast(context orelse return false));
+        const services = self.platform_services orelse return false;
+        const body = switch (notification.kind) {
+            .completed => "Scheduled task completed",
+            .failed => "Scheduled task failed",
+            .skipped => "A run was skipped because the previous run is still active",
+            .needs_attention => "Scheduled task needs attention",
+        };
+        services.showNotification(.{
+            .title = "MetaWork",
+            .subtitle = notification.title,
+            .body = body,
+        }) catch return false;
+        return true;
     }
 
     fn bridge(self: *@This(), mode: FrontendMode) native_sdk.BridgeDispatcher {
@@ -1990,6 +2071,41 @@ const App = struct {
     fn platformCancelTimer(context: ?*anyopaque, timer_id: u64) anyerror!void {
         const self: *@This() = @ptrCast(@alignCast(context.?));
         try (self.platform_services orelse return error.RuntimeUnavailable).cancelTimer(timer_id);
+    }
+
+    fn scheduledTaskNow(context: ?*anyopaque) ?u64 {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        const now = wallUnixSeconds(self.io) orelse return null;
+        return @intCast(now);
+    }
+
+    fn armScheduledTaskTimer(
+        context: ?*anyopaque,
+        due_unix_seconds: u64,
+    ) bool {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        const now = scheduledTaskNow(context) orelse return false;
+        const delay_seconds = if (due_unix_seconds > now)
+            due_unix_seconds - now
+        else
+            1;
+        const delay_ns = std.math.mul(
+            u64,
+            delay_seconds,
+            std.time.ns_per_s,
+        ) catch return false;
+        (self.platform_services orelse return false).startTimer(
+            scheduled_task_timer_id,
+            delay_ns,
+            false,
+        ) catch return false;
+        return true;
+    }
+
+    fn cancelScheduledTaskTimer(context: ?*anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        if (self.platform_services) |services|
+            services.cancelTimer(scheduled_task_timer_id) catch {};
     }
 
     fn platformShowOpenDialog(
@@ -2148,6 +2264,20 @@ fn wallUnixSeconds(io: std.Io) ?i64 {
     return @intCast(seconds);
 }
 
+fn commitScheduledTaskStore(
+    context: ?*anyopaque,
+    bytes: []const u8,
+) workbench_api.SchedulePersistenceCommit {
+    const store: *workbench_api.ScheduledTaskFileStore = @ptrCast(
+        @alignCast(context orelse return .failed),
+    );
+    store.commit(bytes) catch |err| return switch (err) {
+        error.PersistenceOutcomeUnknown => .outcome_unknown,
+        else => .failed,
+    };
+    return .committed;
+}
+
 fn frontendMode(env_map: *std.process.Environ.Map) FrontendMode {
     return if (env_map.get(frontend_url_env) != null) .development else .release;
 }
@@ -2250,6 +2380,28 @@ pub fn run(init: std.process.Init) !void {
         &.{ data_dir, "account" },
     );
     app.account_dir_len = account_dir.len;
+    var scheduled_task_dir_storage: [4096]u8 = undefined;
+    const scheduled_task_dir = try native_sdk.app_dirs.join(
+        native_sdk.app_dirs.currentPlatform(),
+        &scheduled_task_dir_storage,
+        &.{ data_dir, "workbench" },
+    );
+    var scheduled_task_file_store: ?workbench_api.ScheduledTaskFileStore =
+        workbench_api.ScheduledTaskFileStore.init(
+            init.io,
+            scheduled_task_dir,
+        ) catch null;
+    defer if (scheduled_task_file_store) |*store| store.deinit();
+    var scheduled_task_restore_failed = scheduled_task_file_store == null;
+    const scheduled_task_restored_bytes = if (scheduled_task_file_store) |*store|
+        store.loadAlloc(std.heap.c_allocator) catch restore: {
+            scheduled_task_restore_failed = true;
+            break :restore null;
+        }
+    else
+        null;
+    defer if (scheduled_task_restored_bytes) |bytes|
+        std.heap.c_allocator.free(bytes);
     const canonical_user_home = resolveCanonicalUserHome(
         init.io,
         std.heap.c_allocator,
@@ -2290,6 +2442,29 @@ pub fn run(init: std.process.Init) !void {
             },
             .directories = .{
                 .canonical_user_home = canonical_user_home,
+            },
+            .schedule_timer = .{
+                .context = &app,
+                .enabled = true,
+                .now_unix_seconds = App.scheduledTaskNow,
+                .arm = App.armScheduledTaskTimer,
+                .cancel = App.cancelScheduledTaskTimer,
+            },
+            .schedule_persistence = .{
+                .context = if (scheduled_task_file_store) |*store|
+                    store
+                else
+                    null,
+                .enabled = scheduled_task_file_store != null and
+                    !scheduled_task_restore_failed,
+                .restored_bytes = scheduled_task_restored_bytes,
+                .restore_failed = scheduled_task_restore_failed,
+                .commit_fn = commitScheduledTaskStore,
+            },
+            .schedule_notifier = .{
+                .context = &app,
+                .enabled = true,
+                .notify_fn = App.notifyScheduledTask,
             },
         },
     );

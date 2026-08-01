@@ -155,6 +155,79 @@ export type TaskRunInput =
       argumentValues: string[];
     };
 
+export type ScheduledTaskRecurrence =
+  | { kind: "once"; atUnixSeconds: string }
+  | {
+      kind: "interval";
+      startAtUnixSeconds: string;
+      everySeconds: string;
+    };
+
+export type ScheduledTaskView = {
+  id: string;
+  epoch: string;
+  title: string;
+  titleRedacted: boolean;
+  enabled: boolean;
+  health: "ready" | "paused" | "needs_attention" | "completed";
+  failureReason:
+    | "previous_task_running"
+    | "execution_changed"
+    | "workspace_changed"
+    | "workspace_unavailable"
+    | "catalog_changed"
+    | "capacity_reached"
+    | "shutting_down"
+    | "task_start_failed"
+    | "timer_unavailable"
+    | "persistence_failed"
+    | "host_interrupted"
+    | null;
+  workspaceId: string;
+  workspaceEpoch: string;
+  execution: {
+    generation: string;
+    provider: Provider;
+    model: string;
+  };
+  input:
+    | { kind: "text"; text: string; redacted: boolean }
+    | {
+        kind: "skill";
+        skillId: string;
+        catalogRevision: string;
+        argumentValues: string[];
+        redacted: boolean;
+      };
+  recurrence: ScheduledTaskRecurrence;
+  nextRunAtUnixSeconds: string | null;
+  occurrences: Array<{
+    plannedAtUnixSeconds: string;
+    triggeredAtUnixSeconds: string;
+    source: "timer" | "manual";
+    result: "claimed" | "submitted" | "skipped" | "rejected";
+    taskId: string | null;
+    reason: ScheduledTaskView["failureReason"];
+    taskOutcome:
+      | "completed"
+      | "stopped"
+      | "cancelled"
+      | "interrupted"
+      | "failed"
+      | "dependency_contract_failure"
+      | null;
+  }>;
+};
+
+export type ScheduledTaskMutation = {
+  title: string;
+  workspaceId: string;
+  expectedWorkspaceEpoch: string;
+  expectedExecutionGeneration: string;
+  input: TaskRunInput;
+  recurrence: ScheduledTaskRecurrence;
+};
+
 export type RunInputView =
   | {
       kind: "text";
@@ -304,11 +377,22 @@ export type WorkbenchSnapshot = {
     typedOutputs: boolean;
     typedFileChanges: boolean;
     persistentWorkspacePermissions: boolean;
+    scheduledTasks: boolean;
+    scheduledTaskPersistence: boolean;
+    scheduledTaskPersistenceHealth:
+      | "unavailable"
+      | "ready"
+      | "read_failed"
+      | "corrupt"
+      | "write_failed"
+      | "outcome_unknown";
+    backgroundScheduleWake: boolean;
   };
   account: AccountView;
   skillCatalog: SkillCatalogView;
   selectedWorkspaceId: string | null;
   workspaces: WorkspaceView[];
+  scheduledTasks: ScheduledTaskView[];
   tasks: TaskView[];
 };
 

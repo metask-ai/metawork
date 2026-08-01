@@ -136,9 +136,13 @@ Bridge handler 不能绕过 Workbench 操作 AgentCore handle。automation 只�
 
 `SkillsPage.tsx` 是 MetaWork 用户 Skill catalog 的只读一级视图，拥有搜索、catalog 状态、bounded issue 与空状态展示。它只消费 Bridge 已解码的 Workbench 顶层 canonical projection，并由 `app/App.tsx` 发起 `skills.refreshCatalog`；不得读取目录或 Skill body、依赖 selected Workspace、推断 source、持有 policy，或增加安装、编辑、启用/禁用路径。
 
+### `frontend/src/features/scheduled-tasks/`
+
+`ScheduledTasksPage.tsx` 是与 Skill 中心同级的持久自动化管理视图，拥有搜索、建议模板、自然语言创建入口、状态分区、连续列表、真实 Task/occurrence 链接与 detail/editor drawer；recurrence 的本地输入与确认摘要留在该 feature，但 Host snapshot 和 typed mutation result 始终是产品真相。该目录不得使用 Renderer timer 触发 Run、用浏览器存储持久化 Scheduled Task、直接调用 AgentCore，或复制 Task timeline。
+
 ### `workbench/` 与 `agent/`
 
-`workbench/projection.zig` 当前拥有 Workspace current catalog、Task pinned catalog、typed Text/Skill admission 与 history、Workspace/Task/Run 产品状态、stable Run record、executor worker reference、write-once terminal publication 和 bounded snapshot writer。`workbench/executor.zig` 独占 catalog/Run 共用的单一队列、workers、admission 和 shutdown。只有这些职责形成可独立测试的不变量时才拆文件；本文不预先指定未来文件名。
+`workbench/projection.zig` 当前拥有 Workspace current catalog、Task pinned catalog、typed Text/Skill admission 与 history、Workspace/Scheduled Task/Task/Run 产品状态、stable Run record、executor worker reference、write-once terminal publication 和 bounded snapshot writer。`workbench/scheduled_tasks.zig` 拥有 bounded definition/occurrence storage、结构化 recurrence、跨恢复 planned-time identity 和纯状态转换；`workbench/scheduled_task_persistence.zig` 拥有无 secret codec、candidate commit、恢复校验和 schema revision。它们都属于 Workbench owner，不是第二个执行器或 AgentCore scheduler。`workbench/executor.zig` 独占 catalog/Run 共用的单一队列、workers、admission 和 shutdown。
 
 `agent/catalog.zig` 拥有 AgentCore Skill catalog descriptor 的即时解码、MetaWork-owned 安全投影、opaque handle lease 与 root/home/epoch 绑定；raw handle、scope、物理来源和 policy 不离开 Agent。`agent/session.zig` 拥有 AgentCore Runtime/Session、Conversation、typed Text/Skill Run、catalog bind/idle refresh、callback quiescence、UI wait、cancel/close/shutdown 和 immutable `TerminalResult`。`event_sink.zig` 与 `event_pump.zig` 管理 borrowed event 深拷贝、容量和通知。Agent 不接收 Scheduler capability，也不反向 enqueue Workbench。
 

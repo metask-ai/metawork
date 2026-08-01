@@ -49,9 +49,11 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-account-state", .root_module = test_modules.account_state },
         .{ .name = "metawork-account", .root_module = test_modules.account },
         .{ .name = "metawork-app", .root_module = test_modules.app },
+        .{ .name = "metawork-automation-enabled", .root_module = test_modules.automation_enabled },
         .{ .name = "metawork-bridge", .root_module = test_modules.bridge },
         .{ .name = "metawork-workbench", .root_module = test_modules.workbench_projection },
         .{ .name = "metawork-workbench-executor", .root_module = test_modules.workbench_executor },
+        .{ .name = "metawork-scheduled-task-persistence", .root_module = test_modules.workbench_scheduled_persistence },
     };
     for (module_tests) |spec| {
         spec.root_module.link_libc = bundle.link_libc;
@@ -115,12 +117,14 @@ const WiredModules = struct {
     metask_client: *std.Build.Module,
     app: *std.Build.Module,
     agent: *std.Build.Module,
+    automation_enabled: *std.Build.Module,
     bridge: *std.Build.Module,
     event_pump: *std.Build.Module,
     sdk: *std.Build.Module,
     workbench: *std.Build.Module,
     workbench_projection: *std.Build.Module,
     workbench_executor: *std.Build.Module,
+    workbench_scheduled_persistence: *std.Build.Module,
 };
 
 fn createLifecycleFixture(
@@ -314,6 +318,20 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .target = target,
         .optimize = root_module.optimize,
     });
+    const scheduled_tasks = b.createModule(.{
+        .root_source_file = b.path("src/workbench/scheduled_tasks.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    const scheduled_task_persistence = b.createModule(.{
+        .root_source_file = b.path("src/workbench/scheduled_task_persistence.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    scheduled_task_persistence.addImport(
+        "workbench_scheduled_tasks",
+        scheduled_tasks,
+    );
     const projection = b.createModule(.{
         .root_source_file = b.path("src/workbench/projection.zig"),
         .target = target,
@@ -322,6 +340,11 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     projection.addImport("metawork_agent", agent);
     projection.addImport("metawork_account_contract", account_contract);
     projection.addImport("workbench_executor", executor);
+    projection.addImport("workbench_scheduled_tasks", scheduled_tasks);
+    projection.addImport(
+        "workbench_scheduled_task_persistence",
+        scheduled_task_persistence,
+    );
     projection.addImport(
         "build_options",
         existingImport(
@@ -342,6 +365,10 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .optimize = root_module.optimize,
     });
     workbench.addImport("workbench_projection", projection);
+    workbench.addImport(
+        "workbench_scheduled_task_persistence",
+        scheduled_task_persistence,
+    );
 
     const bridge = b.createModule(.{
         .root_source_file = b.path("src/bridge.zig"),
@@ -410,12 +437,14 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .metask_client = metask_client,
         .app = app,
         .agent = agent,
+        .automation_enabled = automation_enabled,
         .bridge = bridge,
         .event_pump = event_pump,
         .sdk = sdk,
         .workbench = workbench,
         .workbench_projection = projection,
         .workbench_executor = executor,
+        .workbench_scheduled_persistence = scheduled_task_persistence,
     };
 }
 

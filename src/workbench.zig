@@ -1,6 +1,7 @@
 //! Workbench-owned product orchestration and durable projection surface.
 
 const projection_impl = @import("workbench_projection");
+const scheduled_task_persistence = @import("workbench_scheduled_task_persistence");
 
 pub const Error = projection_impl.Error;
 pub const Limits = projection_impl.Limits;
@@ -9,6 +10,8 @@ pub const ExecutionIdentity = projection_impl.ExecutionIdentity;
 pub const TaskWorkspaceTrust = projection_impl.TaskWorkspaceTrust;
 pub const TaskCreateInput = projection_impl.TaskCreateInput;
 pub const TaskRunInput = projection_impl.TaskRunInput;
+pub const ScheduledTaskRecurrence = projection_impl.ScheduledTaskRecurrence;
+pub const ScheduledTaskDefinitionInput = projection_impl.ScheduledTaskDefinitionInput;
 pub const AppDirectories = projection_impl.AppDirectories;
 pub const CatalogAvailability = projection_impl.CatalogAvailability;
 pub const SkillProjection = projection_impl.SkillProjection;
@@ -19,6 +22,15 @@ pub const UiResponse = projection_impl.UiResponse;
 pub const Configuration = projection_impl.Configuration;
 pub const Workbench = projection_impl.Workbench;
 pub const ChangeNotifier = projection_impl.ChangeNotifier;
+pub const ScheduleTimer = projection_impl.ScheduleTimer;
+pub const SchedulePersistence = projection_impl.SchedulePersistence;
+pub const SchedulePersistenceCommit = projection_impl.SchedulePersistenceCommit;
+pub const SchedulePersistenceHealth = projection_impl.SchedulePersistenceHealth;
+pub const ScheduleNotification = projection_impl.ScheduleNotification;
+pub const ScheduleNotificationKind = projection_impl.ScheduleNotificationKind;
+pub const ScheduleNotifier = projection_impl.ScheduleNotifier;
+pub const ScheduledTaskFileStore = scheduled_task_persistence.FileStore;
+pub const scheduled_task_store_max_bytes = scheduled_task_persistence.max_store_bytes;
 pub const TransportFailureStage = projection_impl.TransportFailureStage;
 pub const TransportFailureReport = projection_impl.TransportFailureReport;
 pub const TransportFailureDecision = projection_impl.TransportFailureDecision;

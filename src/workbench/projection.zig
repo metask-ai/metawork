@@ -2,10 +2,12 @@ const std = @import("std");
 const lifecycle = @import("metawork_agent");
 const account_contract = @import("metawork_account_contract");
 const executor_impl = @import("workbench_executor");
+const scheduled_tasks_impl = @import("workbench_scheduled_tasks");
+const scheduled_task_persistence = @import("workbench_scheduled_task_persistence");
 const contract_fixture = @import("workbench_contract_fixture");
 const build_options = @import("build_options");
 
-pub const Error = lifecycle.Error || std.mem.Allocator.Error || std.Thread.SpawnError || error{
+pub const Error = lifecycle.Error || scheduled_tasks_impl.Error || scheduled_task_persistence.Error || std.mem.Allocator.Error || std.Thread.SpawnError || error{
     ProjectionCapacity,
     RunCapacity,
     ToolCapacity,
@@ -14,6 +16,11 @@ pub const Error = lifecycle.Error || std.mem.Allocator.Error || std.Thread.Spawn
     TaskBusy,
     TaskNotClosed,
     InvalidTaskTitle,
+    InvalidScheduledTaskInput,
+    ScheduleTimerUnavailable,
+    ScheduledTaskPersistenceUnavailable,
+    ScheduledTaskPersistenceFailed,
+    ScheduledTaskPersistenceOutcomeUnknown,
     RunGenerationExhausted,
     ExecutorShuttingDown,
     TaskCapacity,
@@ -48,11 +55,13 @@ pub const Limits = struct {
     queue_capacity: usize = 16,
     max_tasks: usize = 8,
     max_workspaces: usize = 16,
+    max_scheduled_tasks: usize = 16,
     max_runs_per_task: usize = 16,
     max_tools_per_run: usize = 32,
     max_projection_bytes: usize = 512 * 1024,
     max_workspace_bytes: usize = 16 * 1024,
     max_catalog_projection_bytes: usize = 64 * 1024,
+    max_scheduled_task_projection_bytes: usize = 256 * 1024,
     max_catalog_skills: usize = 128,
     max_catalog_issues: usize = 128,
     max_skill_arguments: usize = 64,
@@ -89,6 +98,17 @@ pub const TaskRunInput = union(enum) {
         catalog_revision: []const u8,
         argument_values: []const []const u8,
     },
+};
+
+pub const ScheduledTaskRecurrence = scheduled_tasks_impl.Recurrence;
+
+pub const ScheduledTaskDefinitionInput = struct {
+    title: []const u8,
+    workspace_id: u64,
+    expected_workspace_epoch: u64,
+    expected_execution_generation: u64,
+    input: TaskRunInput,
+    recurrence: ScheduledTaskRecurrence,
 };
 
 pub const WorkspaceAuthorization = enum {
@@ -182,7 +202,88 @@ pub const AppDirectories = struct {
 pub const Configuration = struct {
     change_notifier: ChangeNotifier = .{},
     directories: AppDirectories = .{},
+    schedule_timer: ScheduleTimer = .{},
+    schedule_persistence: SchedulePersistence = .{},
+    schedule_notifier: ScheduleNotifier = .{},
 };
+
+pub const SchedulePersistenceCommit = enum {
+    committed,
+    failed,
+    outcome_unknown,
+};
+
+pub const SchedulePersistence = struct {
+    context: ?*anyopaque = null,
+    enabled: bool = false,
+    restored_bytes: ?[]const u8 = null,
+    restore_failed: bool = false,
+    commit_fn: *const fn (
+        context: ?*anyopaque,
+        bytes: []const u8,
+    ) SchedulePersistenceCommit = unsupportedCommit,
+
+    fn commit(
+        self: SchedulePersistence,
+        bytes: []const u8,
+    ) SchedulePersistenceCommit {
+        if (!self.enabled) return .failed;
+        return self.commit_fn(self.context, bytes);
+    }
+
+    fn unsupportedCommit(
+        _: ?*anyopaque,
+        _: []const u8,
+    ) SchedulePersistenceCommit {
+        return .failed;
+    }
+};
+
+pub const SchedulePersistenceHealth = enum {
+    unavailable,
+    ready,
+    read_failed,
+    corrupt,
+    write_failed,
+    outcome_unknown,
+};
+
+pub const ScheduleNotificationKind = enum {
+    completed,
+    failed,
+    skipped,
+    needs_attention,
+};
+
+pub const ScheduleNotification = struct {
+    scheduled_task_id: u64,
+    task_id: u64 = 0,
+    title: []const u8,
+    kind: ScheduleNotificationKind,
+};
+
+pub const ScheduleNotifier = struct {
+    context: ?*anyopaque = null,
+    enabled: bool = false,
+    notify_fn: *const fn (
+        context: ?*anyopaque,
+        notification: ScheduleNotification,
+    ) bool = noScheduleNotification,
+
+    fn notify(
+        self: ScheduleNotifier,
+        notification: ScheduleNotification,
+    ) bool {
+        return self.enabled and self.notify_fn(self.context, notification);
+    }
+};
+
+fn noScheduleNotification(
+    _: ?*anyopaque,
+    _: ScheduleNotification,
+) bool {
+    return false;
+}
 
 const json_string_expansion: usize = 6;
 const pending_ui_reencode_expansion: usize = 2;
@@ -205,6 +306,7 @@ const account_snapshot_overhead: usize = 1024 +
     account_contract.Limits.model_entries * 128;
 const workspace_snapshot_overhead: usize = 512;
 const task_snapshot_overhead: usize = 1024;
+const scheduled_task_snapshot_overhead: usize = 1024;
 const run_snapshot_overhead: usize = 1024;
 const catalog_snapshot_overhead: usize = 256;
 const catalog_skill_snapshot_overhead: usize = 256;
@@ -291,6 +393,37 @@ pub const ChangeNotifier = struct {
         return self.wake(self.context);
     }
 };
+
+pub const ScheduleTimer = struct {
+    context: ?*anyopaque = null,
+    enabled: bool = false,
+    now_unix_seconds: *const fn (?*anyopaque) ?u64 = noScheduleClock,
+    arm: *const fn (?*anyopaque, u64) bool = noScheduleArm,
+    cancel: *const fn (?*anyopaque) void = noScheduleCancel,
+
+    fn now(self: ScheduleTimer) ?u64 {
+        if (!self.enabled) return null;
+        return self.now_unix_seconds(self.context);
+    }
+
+    fn armAt(self: ScheduleTimer, due_unix_seconds: u64) bool {
+        return self.enabled and self.arm(self.context, due_unix_seconds);
+    }
+
+    fn cancelCurrent(self: ScheduleTimer) void {
+        if (self.enabled) self.cancel(self.context);
+    }
+};
+
+fn noScheduleClock(_: ?*anyopaque) ?u64 {
+    return null;
+}
+
+fn noScheduleArm(_: ?*anyopaque, _: u64) bool {
+    return false;
+}
+
+fn noScheduleCancel(_: ?*anyopaque) void {}
 
 pub const TransportFailureStage = enum {
     ingress_validation,
@@ -1249,6 +1382,12 @@ pub const Workbench = struct {
     limits: Limits,
     workspaces: []?WorkspaceView,
     tasks: []?TaskView,
+    scheduled_tasks: scheduled_tasks_impl.Store,
+    schedule_timer: ScheduleTimer,
+    schedule_persistence: SchedulePersistence,
+    schedule_persistence_health: SchedulePersistenceHealth,
+    schedule_notifier: ScheduleNotifier,
+    schedule_background_available: bool = false,
     change_notifier: ChangeNotifier,
     executor: *executor_impl.Executor,
     shutting_down: bool = false,
@@ -1278,10 +1417,12 @@ pub const Workbench = struct {
     ) Error!Workbench {
         if (limits.worker_count == 0 or limits.queue_capacity == 0 or
             limits.max_tasks == 0 or limits.max_workspaces == 0 or
+            limits.max_scheduled_tasks == 0 or
             limits.max_runs_per_task == 0 or
             limits.max_tools_per_run == 0 or limits.max_projection_bytes == 0 or
             limits.max_workspace_bytes == 0 or
             limits.max_catalog_projection_bytes == 0 or
+            limits.max_scheduled_task_projection_bytes == 0 or
             limits.max_catalog_skills == 0 or
             limits.max_catalog_issues == 0 or
             limits.max_skill_arguments == 0 or
@@ -1318,6 +1459,33 @@ pub const Workbench = struct {
         const tasks = try allocator.alloc(?TaskView, limits.max_tasks);
         errdefer allocator.free(tasks);
         @memset(tasks, null);
+        const scheduled_limits: scheduled_tasks_impl.Limits = .{
+            .max_items = limits.max_scheduled_tasks,
+            .max_projection_bytes = limits.max_scheduled_task_projection_bytes,
+        };
+        var schedule_persistence_health: SchedulePersistenceHealth =
+            if (configuration.schedule_persistence.enabled)
+                .ready
+            else
+                .unavailable;
+        if (configuration.schedule_persistence.restore_failed)
+            schedule_persistence_health = .read_failed;
+        var scheduled_tasks = if (schedule_persistence_health == .ready and
+            configuration.schedule_persistence.restored_bytes != null)
+            scheduled_task_persistence.decode(
+                allocator,
+                configuration.schedule_persistence.restored_bytes.?,
+                scheduled_limits,
+            ) catch restore: {
+                schedule_persistence_health = .corrupt;
+                break :restore try scheduled_tasks_impl.Store.init(
+                    allocator,
+                    scheduled_limits,
+                );
+            }
+        else
+            try scheduled_tasks_impl.Store.init(allocator, scheduled_limits);
+        errdefer scheduled_tasks.deinit();
         const executor = executor_impl.Executor.create(agent_runtime.io, allocator, .{
             .worker_count = limits.worker_count,
             .queue_capacity = limits.queue_capacity,
@@ -1331,15 +1499,55 @@ pub const Workbench = struct {
             .limits = limits,
             .workspaces = workspaces,
             .tasks = tasks,
+            .scheduled_tasks = scheduled_tasks,
+            .schedule_timer = configuration.schedule_timer,
+            .schedule_persistence = configuration.schedule_persistence,
+            .schedule_persistence_health = schedule_persistence_health,
+            .schedule_notifier = configuration.schedule_notifier,
             .change_notifier = configuration.change_notifier,
             .executor = executor,
             .account = account,
             .execution = execution,
             .canonical_user_home = canonical_user_home,
         };
+        if (workbench.schedule_persistence_health == .ready) {
+            var recovered = workbench.scheduled_tasks.clone(allocator) catch null;
+            if (recovered) |*candidate| {
+                var candidate_owned = true;
+                defer if (candidate_owned) candidate.deinit();
+                if (candidate.interruptClaimedOccurrences()) {
+                    workbench.commitScheduledTaskCandidate(candidate) catch {};
+                    if (workbench.schedule_persistence_health == .ready) {
+                        workbench.replaceScheduledTaskStore(candidate);
+                        candidate_owned = false;
+                    }
+                }
+            }
+        }
         workbench.scheduleSkillCatalogQuery() catch
             workbench.markSkillCatalogUnavailable();
         return workbench;
+    }
+
+    pub fn setScheduleBackgroundAvailableNoFail(
+        self: *Workbench,
+        available: bool,
+    ) void {
+        if (self.schedule_background_available == available) return;
+        self.schedule_background_available = available;
+        if (available)
+            self.rearmScheduledTaskTimerNoFail()
+        else
+            self.schedule_timer.cancelCurrent();
+        self.bumpRevision();
+    }
+
+    pub fn hasEnabledScheduledTasks(self: *Workbench) bool {
+        for (self.scheduled_tasks.items) |*entry| {
+            const item = &(entry.* orelse continue);
+            if (item.enabled) return true;
+        }
+        return false;
     }
 
     pub fn commitAccountFactNoFail(
@@ -1377,6 +1585,12 @@ pub const Workbench = struct {
     }
 
     pub fn finishAccountCommitNoFail(self: *Workbench) void {
+        if (self.canCreateTask()) {
+            _ = self.reconcileScheduledTaskBindingsNoFail();
+            self.rearmScheduledTaskTimerNoFail();
+        } else {
+            self.schedule_timer.cancelCurrent();
+        }
         self.bumpRevision();
     }
 
@@ -2227,6 +2441,142 @@ pub const Workbench = struct {
         self.bumpRevision();
     }
 
+    pub fn createScheduledTask(
+        self: *Workbench,
+        input: ScheduledTaskDefinitionInput,
+    ) Error!u64 {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        self.syncLifecycle();
+        const now = self.schedule_timer.now() orelse
+            return error.ScheduleTimerUnavailable;
+        const definition = try self.scheduledTaskDefinition(input);
+        var candidate = try self.scheduled_tasks.clone(self.allocator);
+        var candidate_owned = true;
+        defer if (candidate_owned) candidate.deinit();
+        const id = try candidate.create(definition, now);
+        self.redactScheduledTaskNoFail(
+            candidate.find(id).?,
+            self.execution.credential(),
+        );
+        try self.commitScheduledTaskCandidate(&candidate);
+        self.replaceScheduledTaskStore(&candidate);
+        candidate_owned = false;
+        self.bumpRevision();
+        self.rearmScheduledTaskTimerNoFail();
+        return id;
+    }
+
+    pub fn updateScheduledTask(
+        self: *Workbench,
+        id: u64,
+        expected_epoch: u64,
+        input: ScheduledTaskDefinitionInput,
+    ) Error!void {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        self.syncLifecycle();
+        const now = self.schedule_timer.now() orelse
+            return error.ScheduleTimerUnavailable;
+        const definition = try self.scheduledTaskDefinition(input);
+        var candidate = try self.scheduled_tasks.clone(self.allocator);
+        var candidate_owned = true;
+        defer if (candidate_owned) candidate.deinit();
+        try candidate.update(id, expected_epoch, definition, now);
+        self.redactScheduledTaskNoFail(
+            candidate.find(id).?,
+            self.execution.credential(),
+        );
+        try self.commitScheduledTaskCandidate(&candidate);
+        self.replaceScheduledTaskStore(&candidate);
+        candidate_owned = false;
+        self.bumpRevision();
+        self.rearmScheduledTaskTimerNoFail();
+    }
+
+    pub fn setScheduledTaskEnabled(
+        self: *Workbench,
+        id: u64,
+        expected_epoch: u64,
+        enabled: bool,
+    ) Error!void {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        self.syncLifecycle();
+        const now = self.schedule_timer.now() orelse
+            return error.ScheduleTimerUnavailable;
+        const current = self.scheduled_tasks.find(id) orelse
+            return error.UnknownScheduledTask;
+        if (expected_epoch == 0 or current.epoch != expected_epoch)
+            return error.ScheduledTaskEpochMismatch;
+        if (enabled and current.health == .needs_attention)
+            return error.ScheduledTaskNeedsAttention;
+        var candidate = try self.scheduled_tasks.clone(self.allocator);
+        var candidate_owned = true;
+        defer if (candidate_owned) candidate.deinit();
+        try candidate.setEnabled(id, expected_epoch, enabled, now);
+        _ = self.reconcileScheduledTaskBindingsInStore(&candidate);
+        try self.commitScheduledTaskCandidate(&candidate);
+        self.replaceScheduledTaskStore(&candidate);
+        candidate_owned = false;
+        self.bumpRevision();
+        self.rearmScheduledTaskTimerNoFail();
+    }
+
+    pub fn deleteScheduledTask(
+        self: *Workbench,
+        id: u64,
+        expected_epoch: u64,
+    ) Error!void {
+        self.syncLifecycle();
+        var candidate = try self.scheduled_tasks.clone(self.allocator);
+        var candidate_owned = true;
+        defer if (candidate_owned) candidate.deinit();
+        try candidate.delete(id, expected_epoch);
+        try self.commitScheduledTaskCandidate(&candidate);
+        self.replaceScheduledTaskStore(&candidate);
+        candidate_owned = false;
+        self.bumpRevision();
+        self.rearmScheduledTaskTimerNoFail();
+    }
+
+    pub fn scheduledTaskEpoch(
+        self: *Workbench,
+        id: u64,
+    ) Error!u64 {
+        self.syncLifecycle();
+        return (self.scheduled_tasks.find(id) orelse
+            return error.UnknownScheduledTask).epoch;
+    }
+
+    pub fn runScheduledTaskNow(
+        self: *Workbench,
+        id: u64,
+        expected_epoch: u64,
+    ) Error!u64 {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        self.syncLifecycle();
+        const now = self.schedule_timer.now() orelse
+            return error.ScheduleTimerUnavailable;
+        const item = self.scheduled_tasks.find(id) orelse
+            return error.UnknownScheduledTask;
+        if (expected_epoch == 0 or item.epoch != expected_epoch)
+            return error.ScheduledTaskEpochMismatch;
+        return self.triggerScheduledTask(id, now, now, .manual);
+    }
+
+    pub fn onScheduledTaskTimer(self: *Workbench) void {
+        if (self.shutting_down) return;
+        self.syncLifecycle();
+        const now = self.schedule_timer.now() orelse return;
+        const item = self.scheduled_tasks.earliestDue() orelse return;
+        const id = item.id;
+        const planned = item.next_run_at_unix_seconds orelse return;
+        if (planned > now) {
+            self.rearmScheduledTaskTimerNoFail();
+            return;
+        }
+        _ = self.triggerScheduledTask(id, planned, now, .timer) catch {};
+        self.rearmScheduledTaskTimerNoFail();
+    }
+
     pub fn setTaskArchived(self: *Workbench, task_id: u64, archived: bool) Error!void {
         self.syncLifecycle();
         const view = self.findTask(task_id) orelse return error.UnknownTask;
@@ -2361,6 +2711,8 @@ pub const Workbench = struct {
                 changed = true;
         }
         if (self.finalizeWorkspaceRemovalsNoFail()) changed = true;
+        if (self.reconcileScheduledTaskBindingsNoFail()) changed = true;
+        if (self.reconcileScheduledTaskCompletionsNoFail()) changed = true;
         if (changed) self.bumpRevision();
     }
 
@@ -2489,7 +2841,17 @@ pub const Workbench = struct {
     pub fn writeSnapshot(self: *Workbench, output: []u8) Error![]const u8 {
         self.syncLifecycle();
         var writer = std.Io.Writer.fixed(output);
-        writer.print("{{\"revision\":\"{d}\",\"capabilities\":{{\"taskHistoryPersistence\":false,\"conversationRecovery\":false,\"executionRebind\":false,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":false,\"persistentWorkspacePermissions\":false}},\"account\":", .{self.revision}) catch
+        const schedule_persistence_ready =
+            self.schedule_persistence_health == .ready;
+        const background_schedule_wake = self.schedule_background_available;
+        writer.print("{{\"revision\":\"{d}\",\"capabilities\":{{\"taskHistoryPersistence\":false,\"conversationRecovery\":false,\"executionRebind\":false,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":false,\"persistentWorkspacePermissions\":false,\"scheduledTasks\":{},\"scheduledTaskPersistence\":{},\"scheduledTaskPersistenceHealth\":\"{s}\",\"backgroundScheduleWake\":{}}},\"account\":", .{
+            self.revision,
+            self.schedule_timer.enabled and schedule_persistence_ready and
+                background_schedule_wake,
+            schedule_persistence_ready,
+            @tagName(self.schedule_persistence_health),
+            background_schedule_wake,
+        }) catch
             return error.SnapshotTooLarge;
         try self.writeAccount(&writer);
         writer.writeAll(",\"skillCatalog\":") catch
@@ -2518,6 +2880,16 @@ pub const Workbench = struct {
             workspace_count += 1;
             try self.writeWorkspace(&writer, workspace);
         }
+        writer.writeAll("],\"scheduledTasks\":[") catch
+            return error.SnapshotTooLarge;
+        var scheduled_task_count: usize = 0;
+        for (self.scheduled_tasks.items) |*entry| {
+            const scheduled_task = &(entry.* orelse continue);
+            if (scheduled_task_count != 0) writer.writeByte(',') catch
+                return error.SnapshotTooLarge;
+            scheduled_task_count += 1;
+            try self.writeScheduledTask(&writer, scheduled_task);
+        }
         writer.writeAll("],\"tasks\":[") catch
             return error.SnapshotTooLarge;
         var task_count: usize = 0;
@@ -2529,6 +2901,132 @@ pub const Workbench = struct {
         }
         writer.writeAll("]}") catch return error.SnapshotTooLarge;
         return writer.buffered();
+    }
+
+    fn writeScheduledTask(
+        self: *Workbench,
+        writer: *std.Io.Writer,
+        item: *const scheduled_tasks_impl.Item,
+    ) Error!void {
+        writer.print(
+            "{{\"id\":\"{d}\",\"epoch\":\"{d}\",\"title\":",
+            .{ item.id, item.epoch },
+        ) catch return error.SnapshotTooLarge;
+        try self.projectedJsonValueWithKnownCredentials(writer, item.title);
+        writer.print(
+            ",\"titleRedacted\":{},\"enabled\":{},\"health\":\"{s}\",\"failureReason\":",
+            .{ item.title_redacted, item.enabled, @tagName(item.health) },
+        ) catch return error.SnapshotTooLarge;
+        if (item.failure_reason) |reason|
+            writer.print("\"{s}\"", .{@tagName(reason)}) catch
+                return error.SnapshotTooLarge
+        else
+            writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.print(
+            ",\"workspaceId\":\"{d}\",\"workspaceEpoch\":\"{d}\",\"execution\":{{\"generation\":\"{d}\",\"provider\":\"{s}\",\"model\":",
+            .{
+                item.workspace_id,
+                item.workspace_epoch,
+                item.execution_generation,
+                @tagName(item.execution_provider),
+            },
+        ) catch return error.SnapshotTooLarge;
+        try self.projectedJsonValueWithKnownCredentials(
+            writer,
+            item.execution_model,
+        );
+        writer.writeAll("},\"input\":") catch return error.SnapshotTooLarge;
+        switch (item.input) {
+            .text => |text| {
+                writer.writeAll("{\"kind\":\"text\",\"text\":") catch
+                    return error.SnapshotTooLarge;
+                try self.projectedJsonValueWithKnownCredentials(
+                    writer,
+                    text.value,
+                );
+                writer.print(",\"redacted\":{}}}", .{text.redacted}) catch
+                    return error.SnapshotTooLarge;
+            },
+            .skill => |skill| {
+                writer.writeAll("{\"kind\":\"skill\",\"skillId\":") catch
+                    return error.SnapshotTooLarge;
+                try self.projectedJsonValueWithKnownCredentials(
+                    writer,
+                    skill.skill_id,
+                );
+                writer.writeAll(",\"catalogRevision\":") catch
+                    return error.SnapshotTooLarge;
+                try self.projectedJsonValueWithKnownCredentials(
+                    writer,
+                    skill.catalog_revision,
+                );
+                writer.writeAll(",\"argumentValues\":[") catch
+                    return error.SnapshotTooLarge;
+                for (skill.argument_values, 0..) |value, index| {
+                    if (index != 0) writer.writeByte(',') catch
+                        return error.SnapshotTooLarge;
+                    try self.projectedJsonValueWithKnownCredentials(
+                        writer,
+                        value,
+                    );
+                }
+                writer.print("],\"redacted\":{}}}", .{skill.redacted}) catch
+                    return error.SnapshotTooLarge;
+            },
+        }
+        writer.writeAll(",\"recurrence\":") catch return error.SnapshotTooLarge;
+        switch (item.recurrence) {
+            .once => |once| writer.print(
+                "{{\"kind\":\"once\",\"atUnixSeconds\":\"{d}\"}}",
+                .{once.at_unix_seconds},
+            ) catch return error.SnapshotTooLarge,
+            .interval => |interval| writer.print(
+                "{{\"kind\":\"interval\",\"startAtUnixSeconds\":\"{d}\",\"everySeconds\":\"{d}\"}}",
+                .{ interval.start_at_unix_seconds, interval.every_seconds },
+            ) catch return error.SnapshotTooLarge,
+        }
+        writer.writeAll(",\"nextRunAtUnixSeconds\":") catch
+            return error.SnapshotTooLarge;
+        if (item.next_run_at_unix_seconds) |next|
+            writer.print("\"{d}\"", .{next}) catch
+                return error.SnapshotTooLarge
+        else
+            writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeAll(",\"occurrences\":[") catch
+            return error.SnapshotTooLarge;
+        for (item.occurrences(), 0..) |occurrence, index| {
+            if (index != 0) writer.writeByte(',') catch
+                return error.SnapshotTooLarge;
+            writer.print(
+                "{{\"plannedAtUnixSeconds\":\"{d}\",\"triggeredAtUnixSeconds\":\"{d}\",\"source\":\"{s}\",\"result\":\"{s}\",\"taskId\":",
+                .{
+                    occurrence.planned_at_unix_seconds,
+                    occurrence.triggered_at_unix_seconds,
+                    @tagName(occurrence.source),
+                    @tagName(occurrence.result),
+                },
+            ) catch return error.SnapshotTooLarge;
+            if (occurrence.task_id == 0)
+                writer.writeAll("null") catch return error.SnapshotTooLarge
+            else
+                writer.print("\"{d}\"", .{occurrence.task_id}) catch
+                    return error.SnapshotTooLarge;
+            writer.writeAll(",\"reason\":") catch return error.SnapshotTooLarge;
+            if (occurrence.reason) |reason|
+                writer.print("\"{s}\"", .{@tagName(reason)}) catch
+                    return error.SnapshotTooLarge
+            else
+                writer.writeAll("null") catch return error.SnapshotTooLarge;
+            writer.writeAll(",\"taskOutcome\":") catch
+                return error.SnapshotTooLarge;
+            if (occurrence.task_outcome) |outcome|
+                writer.print("\"{s}\"", .{@tagName(outcome)}) catch
+                    return error.SnapshotTooLarge
+            else
+                writer.writeAll("null") catch return error.SnapshotTooLarge;
+            writer.writeByte('}') catch return error.SnapshotTooLarge;
+        }
+        writer.writeAll("]}") catch return error.SnapshotTooLarge;
     }
 
     fn writeAccount(
@@ -2657,6 +3155,7 @@ pub const Workbench = struct {
 
     pub fn deinit(self: *Workbench) void {
         self.shutdownExecutor();
+        self.schedule_timer.cancelCurrent();
         self.markSkillCatalogUnavailable();
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
@@ -2669,6 +3168,7 @@ pub const Workbench = struct {
             self.deinitWorkspaceView(workspace);
         }
         self.allocator.free(self.workspaces);
+        self.scheduled_tasks.deinit();
         if (self.canonical_user_home) |home| self.allocator.free(home);
         self.execution.deinit();
         self.account.deinit();
@@ -2680,6 +3180,7 @@ pub const Workbench = struct {
     pub fn shutdownExecutor(self: *Workbench) void {
         if (self.executor_shutdown) return;
         self.shutting_down = true;
+        self.schedule_timer.cancelCurrent();
         for (self.tasks) |*entry| {
             const view = &(entry.* orelse continue);
             const session = view.session orelse continue;
@@ -2978,6 +3479,402 @@ pub const Workbench = struct {
             self.account.execution_state == .ready and
             self.execution.ready() and
             self.account.execution_generation == self.execution.generation;
+    }
+
+    fn scheduledTaskDefinition(
+        self: *Workbench,
+        input: ScheduledTaskDefinitionInput,
+    ) Error!scheduled_tasks_impl.Definition {
+        if (!self.canCreateTask()) return error.ExecutionUnavailable;
+        if (input.expected_execution_generation == 0 or
+            input.expected_execution_generation != self.execution.generation or
+            input.expected_execution_generation != self.account.execution_generation)
+            return error.ExecutionGenerationMismatch;
+        const title = std.mem.trim(u8, input.title, " \t\r\n");
+        if (title.len == 0 or title.len > self.limits.max_task_title_bytes or
+            !std.unicode.utf8ValidateSlice(title))
+            return error.InvalidTaskTitle;
+        for (title) |byte| if (byte < 0x20) return error.InvalidTaskTitle;
+        const workspace = self.findWorkspace(input.workspace_id) orelse
+            return error.UnknownWorkspace;
+        if (input.expected_workspace_epoch == 0 or
+            input.expected_workspace_epoch != workspace.epoch)
+            return error.WorkspaceEpochMismatch;
+        if (!workspace.visible or workspace.authorization != .available)
+            return error.WorkspaceUnavailable;
+        try input.recurrence.validate();
+        const scheduled_input: scheduled_tasks_impl.Input = switch (input.input) {
+            .text => |text| text_input: {
+                const trimmed = std.mem.trim(u8, text, " \t\r\n");
+                if (trimmed.len == 0 or
+                    trimmed.len > self.limits.max_user_message_bytes or
+                    !std.unicode.utf8ValidateSlice(trimmed))
+                    return error.InvalidScheduledTaskInput;
+                break :text_input .{ .text = trimmed };
+            },
+            .skill => |skill_input| skill_admission: {
+                const catalog = workspace.catalog orelse
+                    return error.CatalogUnavailable;
+                if (!std.mem.eql(
+                    u8,
+                    skill_input.catalog_revision,
+                    catalog.revision,
+                ))
+                    return error.StaleCatalog;
+                const skill = catalog.findSkill(skill_input.skill_id) orelse
+                    return error.SkillNotFound;
+                if (skill_input.argument_values.len >
+                    @min(
+                        @as(usize, @intCast(skill.max_values)),
+                        self.limits.max_skill_arguments,
+                    ))
+                    return error.InvalidSkillArguments;
+                var bytes = std.math.add(
+                    usize,
+                    skill.skill_id.len,
+                    catalog.revision.len,
+                ) catch return error.ProjectionCapacity;
+                for (skill_input.argument_values) |value| {
+                    if (!std.unicode.utf8ValidateSlice(value))
+                        return error.InvalidSkillArguments;
+                    bytes = std.math.add(usize, bytes, value.len) catch
+                        return error.ProjectionCapacity;
+                    if (bytes > self.limits.max_user_message_bytes)
+                        return error.ProjectionCapacity;
+                }
+                break :skill_admission .{ .skill = .{
+                    .skill_id = skill.skill_id,
+                    .catalog_revision = catalog.revision,
+                    .argument_values = skill_input.argument_values,
+                } };
+            },
+        };
+        return .{
+            .title = title,
+            .workspace_id = workspace.id,
+            .workspace_epoch = workspace.epoch,
+            .execution_generation = self.execution.generation,
+            .execution_provider = scheduledProvider(self.execution.provider.?),
+            .execution_model = self.execution.model(),
+            .input = scheduled_input,
+            .recurrence = input.recurrence,
+        };
+    }
+
+    fn triggerScheduledTask(
+        self: *Workbench,
+        id: u64,
+        planned_at_unix_seconds: u64,
+        triggered_at_unix_seconds: u64,
+        source: scheduled_tasks_impl.OccurrenceSource,
+    ) Error!u64 {
+        const item = self.scheduled_tasks.find(id) orelse
+            return error.UnknownScheduledTask;
+        if (item.last_occurrence) |last| if (last.task_id != 0) {
+            if (self.findTask(last.task_id)) |task| {
+                if (hasNonTerminalRun(task)) {
+                    if (source == .timer) {
+                        var skipped = try self.scheduled_tasks.clone(
+                            self.allocator,
+                        );
+                        var skipped_owned = true;
+                        defer if (skipped_owned) skipped.deinit();
+                        try skipped.markSkipped(
+                            skipped.find(id).?,
+                            planned_at_unix_seconds,
+                            triggered_at_unix_seconds,
+                        );
+                        try self.commitScheduledTaskCandidate(&skipped);
+                        self.replaceScheduledTaskStore(&skipped);
+                        skipped_owned = false;
+                        self.bumpRevision();
+                        _ = self.schedule_notifier.notify(.{
+                            .scheduled_task_id = id,
+                            .task_id = last.task_id,
+                            .title = (self.scheduled_tasks.find(id) orelse
+                                unreachable).title,
+                            .kind = .skipped,
+                        });
+                        return last.task_id;
+                    }
+                    return error.TaskBusy;
+                }
+            }
+        };
+        var claimed = try self.scheduled_tasks.clone(self.allocator);
+        var claimed_owned = true;
+        defer if (claimed_owned) claimed.deinit();
+        try claimed.claim(
+            claimed.find(id).?,
+            planned_at_unix_seconds,
+            triggered_at_unix_seconds,
+            source,
+        );
+        try self.commitScheduledTaskCandidate(&claimed);
+        self.replaceScheduledTaskStore(&claimed);
+        claimed_owned = false;
+
+        const claimed_item = self.scheduled_tasks.find(id) orelse unreachable;
+        const expected_catalog_revision = switch (claimed_item.input) {
+            .text => null,
+            .skill => |skill| skill.catalog_revision,
+        };
+        const task_id = self.createTaskInWorkspace(
+            claimed_item.workspace_id,
+            claimed_item.workspace_epoch,
+            claimed_item.execution_generation,
+            expected_catalog_revision,
+        ) catch |err| {
+            self.finalizeScheduledTaskClaimRejected(
+                id,
+                planned_at_unix_seconds,
+                source,
+                scheduledFailure(err),
+            );
+            return err;
+        };
+        self.renameTask(task_id, claimed_item.title) catch |err| {
+            self.finalizeScheduledTaskClaimRejected(
+                id,
+                planned_at_unix_seconds,
+                source,
+                .task_start_failed,
+            );
+            return err;
+        };
+        const task = self.findTask(task_id) orelse unreachable;
+        const run_input: TaskRunInput = switch (claimed_item.input.borrowed()) {
+            .text => |text| .{ .text = text },
+            .skill => |skill| .{ .skill = .{
+                .skill_id = skill.skill_id,
+                .catalog_revision = skill.catalog_revision,
+                .argument_values = skill.argument_values,
+            } },
+        };
+        _ = self.runTaskAtBinding(task_id, task.binding_epoch, run_input) catch |err| {
+            self.finalizeScheduledTaskClaimRejected(
+                id,
+                planned_at_unix_seconds,
+                source,
+                scheduledFailure(err),
+            );
+            return err;
+        };
+        try self.finalizeScheduledTaskClaimSubmitted(
+            id,
+            planned_at_unix_seconds,
+            source,
+            task_id,
+        );
+        return task_id;
+    }
+
+    fn finalizeScheduledTaskClaimSubmitted(
+        self: *Workbench,
+        id: u64,
+        planned_at_unix_seconds: u64,
+        source: scheduled_tasks_impl.OccurrenceSource,
+        task_id: u64,
+    ) Error!void {
+        var candidate = try self.scheduled_tasks.clone(self.allocator);
+        var candidate_owned = true;
+        defer if (candidate_owned) candidate.deinit();
+        try candidate.finalizeClaimSubmitted(
+            candidate.find(id) orelse return error.UnknownScheduledTask,
+            planned_at_unix_seconds,
+            source,
+            task_id,
+        );
+        try self.commitScheduledTaskCandidate(&candidate);
+        self.replaceScheduledTaskStore(&candidate);
+        candidate_owned = false;
+        self.bumpRevision();
+    }
+
+    fn finalizeScheduledTaskClaimRejected(
+        self: *Workbench,
+        id: u64,
+        planned_at_unix_seconds: u64,
+        source: scheduled_tasks_impl.OccurrenceSource,
+        reason: scheduled_tasks_impl.FailureReason,
+    ) void {
+        var candidate = self.scheduled_tasks.clone(self.allocator) catch return;
+        var candidate_owned = true;
+        defer if (candidate_owned) candidate.deinit();
+        candidate.finalizeClaimRejected(
+            candidate.find(id) orelse return,
+            planned_at_unix_seconds,
+            source,
+            reason,
+        ) catch return;
+        self.commitScheduledTaskCandidate(&candidate) catch return;
+        self.replaceScheduledTaskStore(&candidate);
+        candidate_owned = false;
+        self.bumpRevision();
+        _ = self.schedule_notifier.notify(.{
+            .scheduled_task_id = id,
+            .title = (self.scheduled_tasks.find(id) orelse unreachable).title,
+            .kind = .needs_attention,
+        });
+    }
+
+    fn rearmScheduledTaskTimerNoFail(self: *Workbench) void {
+        self.schedule_timer.cancelCurrent();
+        if (!self.schedule_background_available) return;
+        if (self.schedule_persistence_health != .ready) return;
+        if (!self.canCreateTask()) return;
+        const item = self.scheduled_tasks.earliestDue() orelse return;
+        const due = item.next_run_at_unix_seconds orelse return;
+        if (self.schedule_timer.armAt(due)) return;
+        var candidate = self.scheduled_tasks.clone(self.allocator) catch return;
+        var candidate_owned = true;
+        defer if (candidate_owned) candidate.deinit();
+        candidate.markNeedsAttention(
+            candidate.find(item.id) orelse return,
+            .timer_unavailable,
+        );
+        self.commitScheduledTaskCandidate(&candidate) catch return;
+        self.replaceScheduledTaskStore(&candidate);
+        candidate_owned = false;
+        self.bumpRevision();
+    }
+
+    fn reconcileScheduledTaskCompletionsNoFail(self: *Workbench) bool {
+        if (self.schedule_persistence_health != .ready) return false;
+        for (self.scheduled_tasks.items) |*entry| {
+            const item = &(entry.* orelse continue);
+            for (item.occurrences()) |occurrence| {
+                if (occurrence.result != .submitted or
+                    occurrence.task_id == 0 or occurrence.notification_sent)
+                    continue;
+                const task = self.findTask(occurrence.task_id) orelse continue;
+                const terminal = lastTerminalFacts(task.runs) orelse continue;
+                const notification_kind: ScheduleNotificationKind =
+                    if (terminal.outcome == .completed) .completed else .failed;
+                const item_id = item.id;
+                var candidate = self.scheduled_tasks.clone(self.allocator) catch
+                    return false;
+                var candidate_owned = true;
+                defer if (candidate_owned) candidate.deinit();
+                candidate.finalizeOccurrenceTask(
+                    candidate.find(item_id) orelse return false,
+                    occurrence.planned_at_unix_seconds,
+                    occurrence.source,
+                    scheduledOccurrenceOutcome(terminal.outcome),
+                ) catch return false;
+                self.commitScheduledTaskCandidate(&candidate) catch return false;
+                self.replaceScheduledTaskStore(&candidate);
+                candidate_owned = false;
+                const committed = self.scheduled_tasks.find(item_id) orelse
+                    return true;
+                _ = self.schedule_notifier.notify(.{
+                    .scheduled_task_id = committed.id,
+                    .task_id = occurrence.task_id,
+                    .title = committed.title,
+                    .kind = notification_kind,
+                });
+                return true;
+            }
+        }
+        return false;
+    }
+
+    fn reconcileScheduledTaskBindingsNoFail(self: *Workbench) bool {
+        if (self.schedule_persistence_health != .ready) return false;
+        var candidate = self.scheduled_tasks.clone(self.allocator) catch
+            return false;
+        var candidate_owned = true;
+        defer if (candidate_owned) candidate.deinit();
+        const changed = self.reconcileScheduledTaskBindingsInStore(&candidate);
+        if (!changed) return false;
+        self.commitScheduledTaskCandidate(&candidate) catch return false;
+        self.replaceScheduledTaskStore(&candidate);
+        candidate_owned = false;
+        self.rearmScheduledTaskTimerNoFail();
+        return true;
+    }
+
+    fn reconcileScheduledTaskBindingsInStore(
+        self: *Workbench,
+        store: *scheduled_tasks_impl.Store,
+    ) bool {
+        var changed = false;
+        for (store.items) |*entry| {
+            const item = &(entry.* orelse continue);
+            if (!item.enabled or item.health != .ready) continue;
+            const reason: ?scheduled_tasks_impl.FailureReason = binding: {
+                if (!self.canCreateTask() or
+                    item.execution_generation != self.execution.generation or
+                    item.execution_provider != scheduledProvider(self.execution.provider orelse
+                        break :binding .execution_changed) or
+                    !std.mem.eql(u8, item.execution_model, self.execution.model()))
+                    break :binding .execution_changed;
+                const workspace = self.findWorkspace(item.workspace_id) orelse
+                    break :binding .workspace_unavailable;
+                if (!workspace.visible or workspace.authorization != .available)
+                    break :binding .workspace_unavailable;
+                if (workspace.epoch != item.workspace_epoch)
+                    break :binding .workspace_changed;
+                switch (item.input) {
+                    .text => {},
+                    .skill => |skill| {
+                        const catalog = workspace.catalog orelse
+                            break :binding .catalog_changed;
+                        if (!std.mem.eql(
+                            u8,
+                            skill.catalog_revision,
+                            catalog.revision,
+                        ))
+                            break :binding .catalog_changed;
+                    },
+                }
+                break :binding null;
+            };
+            if (reason) |failure| {
+                store.markNeedsAttention(item, failure);
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    fn commitScheduledTaskCandidate(
+        self: *Workbench,
+        candidate: *const scheduled_tasks_impl.Store,
+    ) Error!void {
+        switch (self.schedule_persistence_health) {
+            .ready => {},
+            .outcome_unknown => return error.ScheduledTaskPersistenceOutcomeUnknown,
+            else => return error.ScheduledTaskPersistenceUnavailable,
+        }
+        const output = try self.allocator.alloc(
+            u8,
+            scheduled_task_persistence.max_store_bytes,
+        );
+        defer self.allocator.free(output);
+        const bytes = try scheduled_task_persistence.encode(output, candidate);
+        switch (self.schedule_persistence.commit(bytes)) {
+            .committed => {},
+            .failed => {
+                self.schedule_persistence_health = .write_failed;
+                self.bumpRevision();
+                return error.ScheduledTaskPersistenceFailed;
+            },
+            .outcome_unknown => {
+                self.schedule_persistence_health = .outcome_unknown;
+                self.bumpRevision();
+                return error.ScheduledTaskPersistenceOutcomeUnknown;
+            },
+        }
+    }
+
+    fn replaceScheduledTaskStore(
+        self: *Workbench,
+        candidate: *scheduled_tasks_impl.Store,
+    ) void {
+        self.scheduled_tasks.deinit();
+        self.scheduled_tasks = candidate.*;
+        candidate.* = undefined;
     }
 
     fn executionQuiescent(self: *const Workbench) bool {
@@ -3572,9 +4469,44 @@ pub const Workbench = struct {
         if (credential.len == 0) return;
         self.redactWorkspaceProjectionsNoFail(credential);
         self.redactCatalogProjectionsNoFail(credential);
+        for (self.scheduled_tasks.items) |*entry| {
+            const item = &(entry.* orelse continue);
+            self.redactScheduledTaskNoFail(item, credential);
+        }
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
             self.redactTaskProjectionNoFail(task, credential);
+        }
+    }
+
+    fn redactScheduledTaskNoFail(
+        _: *Workbench,
+        item: *scheduled_tasks_impl.Item,
+        credential: []const u8,
+    ) void {
+        if (credential.len == 0) return;
+        item.title_redacted =
+            redactFixedWidthNoFail(item.title, credential) or
+            item.title_redacted;
+        _ = redactFixedWidthNoFail(item.execution_model, credential);
+        switch (item.input) {
+            .text => |*text| {
+                text.redacted =
+                    redactFixedWidthNoFail(text.value, credential) or
+                    text.redacted;
+            },
+            .skill => |*skill| {
+                var redacted =
+                    redactFixedWidthNoFail(skill.skill_id, credential) or
+                    redactFixedWidthNoFail(
+                        skill.catalog_revision,
+                        credential,
+                    );
+                for (skill.argument_values) |value|
+                    redacted =
+                        redactFixedWidthNoFail(value, credential) or redacted;
+                skill.redacted = skill.redacted or redacted;
+            },
         }
     }
 
@@ -4716,6 +5648,52 @@ fn accountProvider(
     };
 }
 
+fn scheduledProvider(provider: Provider) scheduled_tasks_impl.Provider {
+    return switch (provider) {
+        .anthropic => .anthropic,
+        .openai => .openai,
+    };
+}
+
+fn scheduledOccurrenceOutcome(
+    outcome: RunOutcome,
+) scheduled_tasks_impl.OccurrenceTaskOutcome {
+    return switch (outcome) {
+        .completed => .completed,
+        .stopped => .stopped,
+        .cancelled => .cancelled,
+        .interrupted => .interrupted,
+        .failed => .failed,
+        .dependency_contract_failure => .dependency_contract_failure,
+    };
+}
+
+fn scheduledFailure(err: anyerror) scheduled_tasks_impl.FailureReason {
+    return switch (err) {
+        error.ExecutionUnavailable,
+        error.ExecutionInUse,
+        error.ExecutionGenerationMismatch,
+        => .execution_changed,
+        error.UnknownWorkspace,
+        error.WorkspaceUnavailable,
+        error.WorkspaceRemovalInProgress,
+        => .workspace_unavailable,
+        error.WorkspaceEpochMismatch => .workspace_changed,
+        error.CatalogLoading,
+        error.CatalogUnavailable,
+        error.StaleCatalog,
+        error.SkillNotFound,
+        error.InvalidSkillArguments,
+        => .catalog_changed,
+        error.TaskCapacity,
+        error.RunCapacity,
+        error.ExecutorShuttingDown,
+        error.QueueFull,
+        => .capacity_reached,
+        else => .task_start_failed,
+    };
+}
+
 fn agentUiResponse(
     response: UiResponse,
     answer_buffer: []lifecycle.Answer,
@@ -5287,6 +6265,15 @@ fn takeActivityOrder(run: *RunRecord) u64 {
 
 fn worstCaseSnapshotBytes(limits: Limits) ?usize {
     var total = std.math.mul(usize, limits.max_projection_bytes, json_string_expansion) catch return null;
+    total = std.math.add(
+        usize,
+        total,
+        std.math.mul(
+            usize,
+            limits.max_scheduled_task_projection_bytes,
+            json_string_expansion,
+        ) catch return null,
+    ) catch return null;
     total = std.math.add(usize, total, root_snapshot_overhead) catch return null;
     total = std.math.add(
         usize,
@@ -5312,6 +6299,15 @@ fn worstCaseSnapshotBytes(limits: Limits) ?usize {
         usize,
         total,
         std.math.mul(usize, limits.max_tasks, task_snapshot_overhead) catch return null,
+    ) catch return null;
+    total = std.math.add(
+        usize,
+        total,
+        std.math.mul(
+            usize,
+            limits.max_scheduled_tasks,
+            scheduled_task_snapshot_overhead,
+        ) catch return null,
     ) catch return null;
     const catalog_skill_structure = std.math.add(
         usize,
@@ -5459,9 +6455,11 @@ fn testWorkbench() !Workbench {
     test_agent_runtime.io = std.testing.io;
     var workbench = try Workbench.init(std.testing.allocator, &test_agent_runtime, .{
         .max_tasks = 2,
+        .max_scheduled_tasks = 2,
         .max_runs_per_task = 2,
         .max_tools_per_run = 2,
         .max_projection_bytes = 64 * 1024,
+        .max_scheduled_task_projection_bytes = 4 * 1024,
         .max_workspace_bytes = 1024,
         .max_catalog_skills = 8,
         .max_catalog_issues = 8,
@@ -5581,6 +6579,62 @@ fn testWorkbench() !Workbench {
     };
     return workbench;
 }
+
+const TestScheduleClock = struct {
+    now: u64,
+    armed_at: ?u64 = null,
+    cancel_count: usize = 0,
+
+    fn nowUnixSeconds(context: ?*anyopaque) ?u64 {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        return self.now;
+    }
+
+    fn arm(context: ?*anyopaque, due_unix_seconds: u64) bool {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        self.armed_at = due_unix_seconds;
+        return true;
+    }
+
+    fn cancel(context: ?*anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        self.armed_at = null;
+        self.cancel_count += 1;
+    }
+
+    fn timer(self: *@This()) ScheduleTimer {
+        return .{
+            .context = self,
+            .enabled = true,
+            .now_unix_seconds = nowUnixSeconds,
+            .arm = arm,
+            .cancel = cancel,
+        };
+    }
+};
+
+const TestSchedulePersistence = struct {
+    commits: usize = 0,
+    result: SchedulePersistenceCommit = .committed,
+
+    fn commit(
+        context: ?*anyopaque,
+        bytes: []const u8,
+    ) SchedulePersistenceCommit {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        std.debug.assert(bytes.len != 0);
+        self.commits += 1;
+        return self.result;
+    }
+
+    fn capability(self: *@This()) SchedulePersistence {
+        return .{
+            .context = self,
+            .enabled = true,
+            .commit_fn = commit,
+        };
+    }
+};
 
 fn replaceTaskCredentialForTest(
     task: *TaskView,
@@ -5788,6 +6842,77 @@ test "Workbench snapshot serializer matches the Renderer contract fixture" {
     );
     try std.testing.expect(
         std.mem.indexOf(u8, snapshot, "\"baseUrl\"") == null,
+    );
+}
+
+test "Scheduled Task admission is bounded redacted and arms the Workbench clock" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    var clock: TestScheduleClock = .{ .now = 1_000 };
+    var persistence: TestSchedulePersistence = .{};
+    workbench.schedule_timer = clock.timer();
+    workbench.schedule_persistence = persistence.capability();
+    workbench.schedule_persistence_health = .ready;
+    const id = try workbench.createScheduledTask(.{
+        .title = "Review SECRET-KEY",
+        .workspace_id = 1,
+        .expected_workspace_epoch = 1,
+        .expected_execution_generation = 1,
+        .input = .{ .text = "Inspect SECRET-KEY usage" },
+        .recurrence = .{ .interval = .{
+            .start_at_unix_seconds = 2_000,
+            .every_seconds = 300,
+        } },
+    });
+    try std.testing.expect(clock.armed_at == null);
+    workbench.setScheduleBackgroundAvailableNoFail(true);
+    try std.testing.expectEqual(@as(u64, 2_000), clock.armed_at.?);
+    try std.testing.expectEqual(@as(usize, 1), persistence.commits);
+    const item = workbench.scheduled_tasks.find(id).?;
+    try std.testing.expect(item.title_redacted);
+    try std.testing.expect(
+        std.mem.indexOf(u8, item.title, "SECRET-KEY") == null,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            item.input.text.value,
+            "SECRET-KEY",
+        ) == null,
+    );
+    const storage = try std.testing.allocator.alloc(
+        u8,
+        workbench.limits.max_snapshot_bytes,
+    );
+    defer std.testing.allocator.free(storage);
+    const snapshot = try workbench.writeSnapshot(storage);
+    try std.testing.expect(
+        std.mem.indexOf(u8, snapshot, "\"scheduledTasks\":[{") != null,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null,
+    );
+    try workbench.setScheduledTaskEnabled(id, item.epoch, false);
+    try std.testing.expectEqual(@as(usize, 2), persistence.commits);
+    try std.testing.expect(clock.armed_at == null);
+    try std.testing.expectEqual(
+        scheduled_tasks_impl.Health.paused,
+        workbench.scheduled_tasks.find(id).?.health,
+    );
+    const committed_epoch = workbench.scheduled_tasks.find(id).?.epoch;
+    persistence.result = .failed;
+    try std.testing.expectError(
+        error.ScheduledTaskPersistenceFailed,
+        workbench.deleteScheduledTask(id, committed_epoch),
+    );
+    try std.testing.expect(workbench.scheduled_tasks.find(id) != null);
+    try std.testing.expectEqual(
+        committed_epoch,
+        workbench.scheduled_tasks.find(id).?.epoch,
+    );
+    try std.testing.expectEqual(
+        SchedulePersistenceHealth.write_failed,
+        workbench.schedule_persistence_health,
     );
 }
 

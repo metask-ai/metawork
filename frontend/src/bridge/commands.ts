@@ -32,6 +32,11 @@ export const commands = {
   renameTask: "metawork.tasks.rename",
   archiveTask: "metawork.tasks.archive",
   deleteTask: "metawork.tasks.delete",
+  createScheduledTask: "metawork.scheduledTasks.create",
+  updateScheduledTask: "metawork.scheduledTasks.update",
+  setScheduledTaskEnabled: "metawork.scheduledTasks.setEnabled",
+  runScheduledTaskNow: "metawork.scheduledTasks.runNow",
+  deleteScheduledTask: "metawork.scheduledTasks.delete",
 } as const;
 
 export const events = {

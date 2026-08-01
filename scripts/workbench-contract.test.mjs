@@ -89,6 +89,60 @@ test("Skill catalogs and typed Skill history decode without exposing loader inte
   );
 });
 
+test("Scheduled Task projection decodes recurrence and occurrence without secrets", () => {
+  const scheduled = clone(fixture);
+  scheduled.capabilities.scheduledTasks = true;
+  scheduled.capabilities.scheduledTaskPersistence = true;
+  scheduled.capabilities.scheduledTaskPersistenceHealth = "ready";
+  scheduled.capabilities.backgroundScheduleWake = true;
+  scheduled.scheduledTasks = [
+    {
+      id: "8",
+      epoch: "2",
+      title: "Daily summary",
+      titleRedacted: false,
+      enabled: true,
+      health: "ready",
+      failureReason: null,
+      workspaceId: "1",
+      workspaceEpoch: "1",
+      execution: {
+        generation: "1",
+        provider: "anthropic",
+        model: "fixture-model",
+      },
+      input: {
+        kind: "skill",
+        skillId: "builtin.summary",
+        catalogRevision: "catalog-4",
+        argumentValues: ["src"],
+        redacted: false,
+      },
+      recurrence: {
+        kind: "interval",
+        startAtUnixSeconds: "1800000000",
+        everySeconds: "3600",
+      },
+      nextRunAtUnixSeconds: "1800003600",
+      occurrences: [
+        {
+          plannedAtUnixSeconds: "1800000000",
+          triggeredAtUnixSeconds: "1800000001",
+          source: "timer",
+          result: "submitted",
+          taskId: "3",
+          reason: null,
+          taskOutcome: null,
+        },
+      ],
+    },
+  ];
+  assert.deepEqual(decodeWorkbenchSnapshot(scheduled), scheduled);
+  const invalid = clone(scheduled);
+  invalid.scheduledTasks[0].recurrence.cron = "* * * * *";
+  assert.throws(() => decodeWorkbenchSnapshot(invalid), /expected keys/);
+});
+
 test("Account command acknowledgements preserve state-machine and attempt identity", () => {
   assert.deepEqual(
     decodeAccountCommandResult({

@@ -16,7 +16,8 @@ type IconName =
   | "account"
   | "model"
   | "refresh"
-  | "check";
+  | "check"
+  | "clock";
 
 const paths: Record<IconName, React.ReactNode> = {
   sidebar: <path d="M3.5 5.5h17v13h-17zM8.5 5.5v13" />,
@@ -41,6 +42,12 @@ const paths: Record<IconName, React.ReactNode> = {
   ),
   refresh: <path d="M19 7v5h-5m4.2-4a7.5 7.5 0 1 0 .7 7" />,
   check: <path d="m5 12.5 4.2 4.2L19 7" />,
+  clock: (
+    <>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M12 7.5V12l3 2" />
+    </>
+  ),
 };
 
 export function Icon({ name }: { name: IconName }) {

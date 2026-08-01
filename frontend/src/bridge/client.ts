@@ -7,6 +7,7 @@ import {
 import type { NativeSdkJson, NativeSdkShortcutDetail } from "@native-sdk/cli";
 import type {
   HostSignal,
+  ScheduledTaskMutation,
   TaskRunInput,
   UiResponsePayload,
   WorkspaceChoice,
@@ -30,6 +31,10 @@ import {
   decodeRevisionNotification,
   decodeTaskCreateResult,
   decodeTaskRunResult,
+  decodeScheduledTaskMutationResult,
+  decodeScheduledTaskEnabledResult,
+  decodeScheduledTaskRunResult,
+  assertScheduledTaskDeleted,
   decodeWorkspaceMutationResult,
   decodeWorkspaceChoice,
 } from "./decode-contracts.ts";
@@ -402,6 +407,63 @@ export class BridgeClient {
       await this.invoke(commands.deleteTask, { taskId }),
       taskId,
       "deleted",
+    );
+  }
+
+  async createScheduledTask(input: ScheduledTaskMutation) {
+    return decodeScheduledTaskMutationResult(
+      await this.invoke(commands.createScheduledTask, input),
+    );
+  }
+
+  async updateScheduledTask(
+    scheduledTaskId: string,
+    expectedEpoch: string,
+    input: ScheduledTaskMutation,
+  ) {
+    return decodeScheduledTaskMutationResult(
+      await this.invoke(commands.updateScheduledTask, {
+        scheduledTaskId,
+        expectedEpoch,
+        ...input,
+      }),
+      scheduledTaskId,
+    );
+  }
+
+  async setScheduledTaskEnabled(
+    scheduledTaskId: string,
+    expectedEpoch: string,
+    enabled: boolean,
+  ) {
+    return decodeScheduledTaskEnabledResult(
+      await this.invoke(commands.setScheduledTaskEnabled, {
+        scheduledTaskId,
+        expectedEpoch,
+        enabled,
+      }),
+      scheduledTaskId,
+      enabled,
+    );
+  }
+
+  async runScheduledTaskNow(scheduledTaskId: string, expectedEpoch: string) {
+    return decodeScheduledTaskRunResult(
+      await this.invoke(commands.runScheduledTaskNow, {
+        scheduledTaskId,
+        expectedEpoch,
+      }),
+      scheduledTaskId,
+    );
+  }
+
+  async deleteScheduledTask(scheduledTaskId: string, expectedEpoch: string) {
+    assertScheduledTaskDeleted(
+      await this.invoke(commands.deleteScheduledTask, {
+        scheduledTaskId,
+        expectedEpoch,
+      }),
+      scheduledTaskId,
     );
   }
 }

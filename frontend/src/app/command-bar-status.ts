@@ -17,7 +17,8 @@ export type ShellStatus = {
 };
 
 export type ShellStatusState = Readonly<Partial<Record<string, ShellStatus>>>;
-export type ShellRoute = "workbench" | "skills" | "settings";
+export type ShellRoute =
+  "workbench" | "skills" | "scheduled-tasks" | "settings";
 
 type StatusDetails = Pick<ShellStatus, "values" | "diagnostic" | "sourceId">;
 
