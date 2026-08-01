@@ -14,6 +14,9 @@ const builtin_names = [_][]const u8{
     "native-sdk.window.close",
 };
 
+pub const product_command_count = commands.product.len;
+pub const builtin_command_count = builtin_names.len;
+
 fn commandPolicies(
     comptime names: []const []const u8,
     allowed_origins: []const []const u8,

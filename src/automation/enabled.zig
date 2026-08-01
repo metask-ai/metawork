@@ -6,6 +6,7 @@
 const std = @import("std");
 const native_sdk = @import("native_sdk");
 const account_contract = @import("metawork_account_contract");
+const bridge = @import("metawork_bridge");
 
 pub const enabled = true;
 
@@ -27,8 +28,8 @@ pub const ExecutionFixture = struct {
 
 pub const Runtime = struct {
     env_map: ?*std.process.Environ.Map = null,
-    policy_commands: [32]native_sdk.bridge.CommandPolicy = undefined,
-    builtin_commands: [16]native_sdk.bridge.CommandPolicy = undefined,
+    policy_commands: [bridge.policy.product_command_count]native_sdk.bridge.CommandPolicy = undefined,
+    builtin_commands: [bridge.policy.builtin_command_count]native_sdk.bridge.CommandPolicy = undefined,
 
     pub fn init(env_map: *std.process.Environ.Map) Runtime {
         return .{ .env_map = env_map };
@@ -70,7 +71,7 @@ pub const Runtime = struct {
 
     pub fn productPolicy(self: *Runtime, base: native_sdk.BridgePolicy) native_sdk.BridgePolicy {
         if (!self.active()) return base;
-        std.debug.assert(base.commands.len <= self.policy_commands.len);
+        std.debug.assert(base.commands.len == self.policy_commands.len);
         for (base.commands, 0..) |command, index| {
             self.policy_commands[index] = command;
             self.policy_commands[index].origins = &allowed_origins;
@@ -84,7 +85,7 @@ pub const Runtime = struct {
 
     pub fn builtinPolicy(self: *Runtime, base: native_sdk.BridgePolicy) native_sdk.BridgePolicy {
         if (!self.active()) return base;
-        std.debug.assert(base.commands.len <= self.builtin_commands.len);
+        std.debug.assert(base.commands.len == self.builtin_commands.len);
         for (base.commands, 0..) |command, index| {
             self.builtin_commands[index] = command;
             self.builtin_commands[index].origins = &allowed_origins;
