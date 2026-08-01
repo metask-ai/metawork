@@ -1,6 +1,7 @@
 //! Workbench-owned product orchestration and durable projection surface.
 
 const projection_impl = @import("workbench_projection");
+const managed_workspace_store = @import("workbench_managed_workspace_store");
 const scheduled_task_persistence = @import("workbench_scheduled_task_persistence");
 
 pub const Error = projection_impl.Error;
@@ -13,6 +14,7 @@ pub const TaskRunInput = projection_impl.TaskRunInput;
 pub const ScheduledTaskRecurrence = projection_impl.ScheduledTaskRecurrence;
 pub const ScheduledTaskDefinitionInput = projection_impl.ScheduledTaskDefinitionInput;
 pub const AppDirectories = projection_impl.AppDirectories;
+pub const ManagedWorkspaceRoot = managed_workspace_store.Root;
 pub const CatalogAvailability = projection_impl.CatalogAvailability;
 pub const SkillProjection = projection_impl.SkillProjection;
 pub const CatalogIssueProjection = projection_impl.CatalogIssueProjection;

@@ -2,6 +2,7 @@ const std = @import("std");
 const lifecycle = @import("metawork_agent");
 const account_contract = @import("metawork_account_contract");
 const executor_impl = @import("workbench_executor");
+const managed_workspace_store = @import("workbench_managed_workspace_store");
 const scheduled_tasks_impl = @import("workbench_scheduled_tasks");
 const scheduled_task_persistence = @import("workbench_scheduled_task_persistence");
 const contract_fixture = @import("workbench_contract_fixture");
@@ -197,6 +198,7 @@ pub const UiResponse = union(enum) {
 
 pub const AppDirectories = struct {
     canonical_user_home: ?[]const u8 = null,
+    managed_workspace_root: ?*managed_workspace_store.Root = null,
 };
 
 pub const Configuration = struct {
@@ -1397,6 +1399,7 @@ pub const Workbench = struct {
     account: AccountProjection,
     execution: ActiveExecution,
     canonical_user_home: ?[]u8,
+    managed_workspaces: ?managed_workspace_store.Store,
     skill_catalog_availability: CatalogAvailability = .uninitialized,
     skill_catalog_request_generation: u64 = 0,
     skill_catalog_job: ?*CatalogJob = null,
@@ -1453,6 +1456,11 @@ pub const Workbench = struct {
             break :home_copy try allocator.dupe(u8, home);
         } else null;
         errdefer if (canonical_user_home) |home| allocator.free(home);
+        var managed_workspaces = if (configuration.directories.managed_workspace_root) |root|
+            managed_workspace_store.Store.init(root)
+        else
+            null;
+        errdefer if (managed_workspaces) |*store| store.deinit();
         const workspaces = try allocator.alloc(?WorkspaceView, limits.max_workspaces);
         errdefer allocator.free(workspaces);
         @memset(workspaces, null);
@@ -1509,6 +1517,7 @@ pub const Workbench = struct {
             .account = account,
             .execution = execution,
             .canonical_user_home = canonical_user_home,
+            .managed_workspaces = managed_workspaces,
         };
         if (workbench.schedule_persistence_health == .ready) {
             var recovered = workbench.scheduled_tasks.clone(allocator) catch null;
@@ -1540,6 +1549,10 @@ pub const Workbench = struct {
         else
             self.schedule_timer.cancelCurrent();
         self.bumpRevision();
+    }
+
+    pub fn managedWorkspacesAvailable(self: *const Workbench) bool {
+        return self.managed_workspaces != null;
     }
 
     pub fn hasEnabledScheduledTasks(self: *Workbench) bool {
@@ -3169,6 +3182,7 @@ pub const Workbench = struct {
         }
         self.allocator.free(self.workspaces);
         self.scheduled_tasks.deinit();
+        if (self.managed_workspaces) |*store| store.deinit();
         if (self.canonical_user_home) |home| self.allocator.free(home);
         self.execution.deinit();
         self.account.deinit();
@@ -3941,6 +3955,9 @@ pub const Workbench = struct {
             .{},
         ) catch return error.InvalidWorkspace;
         if (workspace_stat.kind != .directory) return error.InvalidWorkspace;
+        if (self.managed_workspaces) |*store|
+            if (store.containsCanonicalPath(canonical))
+                return error.InvalidWorkspace;
 
         var canonical_temporary: ?[:0]u8 = null;
         defer if (canonical_temporary) |root| self.allocator.free(root);
@@ -6401,6 +6418,27 @@ fn worstCaseSnapshotBytes(limits: Limits) ?usize {
 
 var test_agent_runtime: lifecycle.Runtime = undefined;
 
+fn testLimits() Limits {
+    return .{
+        .max_tasks = 2,
+        .max_scheduled_tasks = 2,
+        .max_runs_per_task = 2,
+        .max_tools_per_run = 2,
+        .max_projection_bytes = 64 * 1024,
+        .max_scheduled_task_projection_bytes = 4 * 1024,
+        .max_workspace_bytes = 1024,
+        .max_catalog_skills = 8,
+        .max_catalog_issues = 8,
+        .max_skill_arguments = 8,
+        .max_user_message_bytes = 1024,
+        .max_assistant_message_bytes = 32 * 1024,
+        .max_tool_field_bytes = 8 * 1024,
+        .max_pending_ui_json_bytes = 64 * 1024,
+        .max_pending_ui_requests = 2,
+        .max_snapshot_bytes = 4 * 1024 * 1024,
+    };
+}
+
 fn installTestExecution(workbench: *Workbench) !void {
     var execution = try account_contract.OwnedExecutionConfig.initOwned(
         std.testing.allocator,
@@ -6453,24 +6491,12 @@ fn installTestExecution(workbench: *Workbench) !void {
 
 fn testWorkbench() !Workbench {
     test_agent_runtime.io = std.testing.io;
-    var workbench = try Workbench.init(std.testing.allocator, &test_agent_runtime, .{
-        .max_tasks = 2,
-        .max_scheduled_tasks = 2,
-        .max_runs_per_task = 2,
-        .max_tools_per_run = 2,
-        .max_projection_bytes = 64 * 1024,
-        .max_scheduled_task_projection_bytes = 4 * 1024,
-        .max_workspace_bytes = 1024,
-        .max_catalog_skills = 8,
-        .max_catalog_issues = 8,
-        .max_skill_arguments = 8,
-        .max_user_message_bytes = 1024,
-        .max_assistant_message_bytes = 32 * 1024,
-        .max_tool_field_bytes = 8 * 1024,
-        .max_pending_ui_json_bytes = 64 * 1024,
-        .max_pending_ui_requests = 2,
-        .max_snapshot_bytes = 4 * 1024 * 1024,
-    }, .{});
+    var workbench = try Workbench.init(
+        std.testing.allocator,
+        &test_agent_runtime,
+        testLimits(),
+        .{},
+    );
     try installTestExecution(&workbench);
     var task_execution = try workbench.execution.cloneOwned(workbench.allocator);
     errdefer task_execution.deinit();
@@ -6683,6 +6709,57 @@ test "Workspace containment accepts platform roots and rejects path prefixes" {
         workspacePathWithin("/project", "/project-other");
     try std.testing.expect(workspacePathWithin(root, child));
     try std.testing.expect(!sibling_prefix);
+}
+
+test "managed Workspace root is optional and reserved from user registration" {
+    test_agent_runtime.io = std.testing.io;
+    var unavailable = try Workbench.init(
+        std.testing.allocator,
+        &test_agent_runtime,
+        testLimits(),
+        .{},
+    );
+    try std.testing.expect(!unavailable.managedWorkspacesAvailable());
+    unavailable.deinit();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var canonical_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const canonical_len = try tmp.dir.realPath(
+        std.testing.io,
+        &canonical_storage,
+    );
+    var root = try managed_workspace_store.Root.open(
+        std.testing.io,
+        std.testing.allocator,
+        canonical_storage[0..canonical_len],
+    );
+    defer root.deinit();
+    var workbench = try Workbench.init(
+        std.testing.allocator,
+        &test_agent_runtime,
+        testLimits(),
+        .{ .directories = .{ .managed_workspace_root = &root } },
+    );
+    defer workbench.deinit();
+    try std.testing.expect(workbench.managedWorkspacesAvailable());
+    try std.testing.expectError(
+        error.InvalidWorkspace,
+        workbench.openWorkspace(.{
+            .workspace_root = workbench.managed_workspaces.?.canonicalRoot(),
+            .trust = .explicitly_trusted,
+        }),
+    );
+    var allocation = try workbench.managed_workspaces.?.allocate();
+    defer allocation.deinit();
+    try std.testing.expectError(
+        error.InvalidWorkspace,
+        workbench.openWorkspace(.{
+            .workspace_root = allocation.path(),
+            .trust = .explicitly_trusted,
+        }),
+    );
+    try std.testing.expect(workbench.managed_workspaces.?.rollback(&allocation));
 }
 
 test "Workspace registry owns empty selection recent use authorization and capacity" {
