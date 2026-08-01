@@ -215,11 +215,15 @@ test "Skill input is deep-copied and encoded only for the typed Core call" {
     const input_matches = fake_core.skill_input_matches;
     const home_seen = fake_core.workspace_home_seen;
     const bound = fake_core.skill_session_bound;
+    const selection_seen = fake_core.skill_selection_seen;
+    const permission_rules_absent = fake_core.permission_rules_absent;
     fake_core.unlock();
     try std.testing.expect(saw_skill);
     try std.testing.expect(input_matches);
     try std.testing.expect(home_seen);
     try std.testing.expect(bound);
+    try std.testing.expect(selection_seen);
+    try std.testing.expect(permission_rules_absent);
     try session.close(.session_close);
 }
 
@@ -343,10 +347,29 @@ test "Session catalog refresh is idle-only and rejects another Workspace epoch" 
         error.CatalogBindingMismatch,
         session.refreshSkillCatalog(other.lease),
     );
+    fake_core.forceNextSkillUpdateStatus(wire.STATUS_RESOURCE_LIMIT);
+    try std.testing.expectError(
+        error.CatalogRefreshFailed,
+        session.refreshSkillCatalog(current.lease),
+    );
+    const reusable = try session.prepareRun(.{ .text = "still reusable" });
+    try session.cancelPreparedRun(reusable);
+    fake_core.forceNextSkillUpdateStatus(wire.STATUS_STALE_COMPACT);
+    try std.testing.expectError(
+        error.CatalogRefreshFailed,
+        session.refreshSkillCatalog(current.lease),
+    );
+    try std.testing.expectEqual(lifecycle.SessionState.poisoned, session.snapshot().state);
+    try std.testing.expectError(
+        error.SessionPoisoned,
+        session.prepareRun(.{ .text = "must not continue" }),
+    );
     fake_core.lock();
     const refreshes = fake_core.catalog_refreshes;
+    const selection_seen = fake_core.skill_selection_seen;
     fake_core.unlock();
     try std.testing.expectEqual(@as(usize, 1), refreshes);
+    try std.testing.expect(selection_seen);
     try session.close(.session_close);
 }
 
@@ -1123,7 +1146,7 @@ test "UI response encoding is bounded before ownership transfer" {
 
 test "status is validated before RunResult and invalid results poison the Session" {
     fake_core.reset();
-    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 3 });
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 4 });
     defer {
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
@@ -1137,6 +1160,7 @@ test "status is validated before RunResult and invalid results poison the Sessio
         .{ .plan = .unknown_stop_result, .expected_status = wire.STATUS_OK, .expected_stop = 42 },
         .{ .plan = .invalid_result_layout, .expected_status = wire.STATUS_OK, .expected_stop = null },
         .{ .plan = .unknown_status, .expected_status = 42, .expected_stop = null },
+        .{ .plan = .stale_compact_status, .expected_status = wire.STATUS_STALE_COMPACT, .expected_stop = null },
     };
     for (cases) |case| {
         fake_core.setNextPlan(case.plan);
@@ -1254,9 +1278,9 @@ test "Runtime destroy while a Session is live returns busy without consuming own
     try std.testing.expectEqual(@as(usize, 1), releases);
 }
 
-test "transient Session and Runtime destroy failures are explicit and retryable" {
+test "Session and Runtime destroy failures are explicit and retryable" {
     fake_core.reset();
-    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 2 });
     defer {
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
@@ -1267,13 +1291,25 @@ test "transient Session and Runtime destroy failures are explicit and retryable"
     try std.testing.expectEqual(lifecycle.SessionState.closing, session.snapshot().state);
     try closeSession(session, .session_close);
 
+    const contract_session = try openSession(runtime);
+    fake_core.forceNextSessionDestroyStatus(wire.STATUS_STALE_COMPACT);
+    try std.testing.expectError(
+        error.SessionDestroyFailed,
+        closeSession(contract_session, .session_close),
+    );
+    try std.testing.expectEqual(
+        lifecycle.SessionState.closing,
+        contract_session.snapshot().state,
+    );
+    try closeSession(contract_session, .session_close);
+
     fake_core.failNextRuntimeDestroy();
     try std.testing.expectError(error.RuntimeDestroyFailed, shutdownTestComposition(runtime));
     try shutdownTestComposition(runtime);
     fake_core.lock();
     const releases = fake_core.buffer_releases;
     fake_core.unlock();
-    try std.testing.expectEqual(@as(usize, 2), releases);
+    try std.testing.expectEqual(@as(usize, 3), releases);
 }
 
 test "Core Session creation failure releases diagnostics and leaves capacity reusable" {
@@ -1358,6 +1394,25 @@ test "abort stale and too-late statuses remain observable without losing diagnos
         lifecycle.TerminationSignal{ .interrupted = .timeout },
         timeout_terminal.termination_signal.?,
     );
+
+    fake_core.rearmControlled();
+    const fourth = try submitSession(session, "wrong operation status");
+    try session.waitForState(.running);
+    fake_core.forceNextAbortStatus(wire.STATUS_STALE_COMPACT);
+    try cancelSession(session, fourth, .user_cancel);
+    fake_core.releaseControlled();
+    try session.waitRun(fourth);
+    var contract_terminal = takeTestTerminal(session, fourth);
+    defer contract_terminal.deinit();
+    try std.testing.expectEqual(
+        @as(?u32, wire.STATUS_STALE_COMPACT),
+        contract_terminal.raw_abort_status_code,
+    );
+    try std.testing.expectEqual(
+        @as(?lifecycle.TerminalFailure, .dependency_contract),
+        contract_terminal.failure,
+    );
+    try std.testing.expectEqual(lifecycle.SessionState.poisoned, session.snapshot().state);
     try closeSession(session, .session_close);
 
     fake_core.lock();
@@ -1365,9 +1420,9 @@ test "abort stale and too-late statuses remain observable without losing diagnos
     const abort_calls = fake_core.abort_calls;
     const last_abort_reason = fake_core.last_abort_reason;
     fake_core.unlock();
-    try std.testing.expectEqual(@as(usize, 2), releases);
-    try std.testing.expectEqual(@as(usize, 3), abort_calls);
-    try std.testing.expectEqual(@as(?u32, wire.ABORT_TIMEOUT), last_abort_reason);
+    try std.testing.expectEqual(@as(usize, 3), releases);
+    try std.testing.expectEqual(@as(usize, 4), abort_calls);
+    try std.testing.expectEqual(@as(?u32, wire.ABORT_USER_REQUEST), last_abort_reason);
 }
 
 test "Agent Runtime initialization OOM fails before acquiring the Runtime" {
