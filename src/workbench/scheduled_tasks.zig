@@ -176,10 +176,17 @@ pub const Occurrence = struct {
     notification_sent: bool = false,
 };
 
+pub const Target = union(enum) {
+    default,
+    explicit: struct {
+        workspace_id: u64,
+        workspace_epoch: u64,
+    },
+};
+
 pub const Definition = struct {
     title: []const u8,
-    workspace_id: u64,
-    workspace_epoch: u64,
+    target: Target,
     execution_generation: u64,
     execution_provider: Provider,
     execution_model: []const u8,
@@ -192,8 +199,7 @@ pub const Item = struct {
     epoch: u64 = 1,
     title: []u8,
     title_redacted: bool = false,
-    workspace_id: u64,
-    workspace_epoch: u64,
+    target: Target,
     execution_generation: u64,
     execution_provider: Provider,
     execution_model: []u8,
@@ -276,8 +282,7 @@ pub const Store = struct {
                 .epoch = item.epoch,
                 .definition = .{
                     .title = item.title,
-                    .workspace_id = item.workspace_id,
-                    .workspace_epoch = item.workspace_epoch,
+                    .target = item.target,
                     .execution_generation = item.execution_generation,
                     .execution_provider = item.execution_provider,
                     .execution_model = item.execution_model,
@@ -664,8 +669,7 @@ pub const Store = struct {
             .id = id,
             .epoch = epoch,
             .title = title,
-            .workspace_id = definition.workspace_id,
-            .workspace_epoch = definition.workspace_epoch,
+            .target = definition.target,
             .execution_generation = definition.execution_generation,
             .execution_provider = definition.execution_provider,
             .execution_model = model,
@@ -820,12 +824,11 @@ fn validRestoredState(restored: RestoredItem) bool {
 fn validDefinition(definition: Definition) bool {
     if (definition.title.len == 0 or
         !std.unicode.utf8ValidateSlice(definition.title) or
-        definition.workspace_id == 0 or definition.workspace_epoch == 0 or
         definition.execution_generation == 0 or
         definition.execution_model.len == 0 or
         !std.unicode.utf8ValidateSlice(definition.execution_model))
         return false;
-    return switch (definition.input) {
+    const input_valid = switch (definition.input) {
         .text => |text| text.len != 0 and
             std.unicode.utf8ValidateSlice(text),
         .skill => |skill| skill.skill_id.len != 0 and
@@ -833,6 +836,15 @@ fn validDefinition(definition: Definition) bool {
             skill.catalog_revision.len != 0 and
             std.unicode.utf8ValidateSlice(skill.catalog_revision) and
             validArguments(skill.argument_values),
+    };
+    if (!input_valid) return false;
+    return switch (definition.target) {
+        .default => switch (definition.input) {
+            .text => true,
+            .skill => false,
+        },
+        .explicit => |explicit| explicit.workspace_id != 0 and
+            explicit.workspace_epoch != 0,
     };
 }
 
@@ -898,8 +910,10 @@ test "store updates optimistically and a one-time occurrence completes" {
     defer store.deinit();
     const id = try store.create(.{
         .title = "Daily summary",
-        .workspace_id = 7,
-        .workspace_epoch = 3,
+        .target = .{ .explicit = .{
+            .workspace_id = 7,
+            .workspace_epoch = 3,
+        } },
         .execution_generation = 9,
         .execution_provider = .openai,
         .execution_model = "gpt-test",

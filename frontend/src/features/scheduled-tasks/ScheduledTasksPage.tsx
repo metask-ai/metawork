@@ -11,6 +11,7 @@ import { useI18n } from "../../i18n/context.ts";
 
 type Draft = {
   title: string;
+  targetKind: "default" | "explicit";
   workspaceId: string;
   inputKind: "text" | "skill";
   text: string;
@@ -51,6 +52,9 @@ function defaultDraft(snapshot: WorkbenchSnapshot): Draft {
   );
   return {
     title: "",
+    targetKind: snapshot.capabilities.managedWorkspaces
+      ? "default"
+      : "explicit",
     workspaceId: snapshot.selectedWorkspaceId ?? userWorkspaces[0]?.id ?? "",
     inputKind: "text",
     text: "",
@@ -81,7 +85,8 @@ function draftFromTask(task: ScheduledTaskView): Draft {
   const divisor = unit === "days" ? 86_400 : unit === "hours" ? 3600 : 60;
   return {
     title: task.title,
-    workspaceId: task.workspaceId,
+    targetKind: task.target.kind,
+    workspaceId: task.target.kind === "explicit" ? task.target.workspaceId : "",
     inputKind: task.input.kind,
     text: task.input.kind === "text" ? task.input.text : "",
     skillId: task.input.kind === "skill" ? task.input.skillId : "",
@@ -98,23 +103,28 @@ function toMutation(
   snapshot: WorkbenchSnapshot,
   draft: Draft,
 ): ScheduledTaskMutation | null {
-  const workspace = snapshot.workspaces.find(
-    (candidate) =>
-      candidate.id === draft.workspaceId && candidate.origin === "user",
-  );
+  const workspace =
+    draft.targetKind === "explicit"
+      ? snapshot.workspaces.find(
+          (candidate) =>
+            candidate.id === draft.workspaceId && candidate.origin === "user",
+        )
+      : null;
   const start = Math.floor(new Date(draft.start).getTime() / 1000);
-  if (
-    !workspace ||
-    !draft.title.trim() ||
-    !Number.isSafeInteger(start) ||
-    start <= 0
-  )
+  if (!draft.title.trim() || !Number.isSafeInteger(start) || start <= 0)
     return null;
   let input: TaskRunInput;
   if (draft.inputKind === "text") {
     if (!draft.text.trim()) return null;
+    if (
+      draft.targetKind === "default" &&
+      !snapshot.capabilities.managedWorkspaces
+    )
+      return null;
+    if (draft.targetKind === "explicit" && !workspace) return null;
     input = { kind: "text", text: draft.text.trim() };
   } else {
+    if (draft.targetKind !== "explicit" || !workspace) return null;
     const skill = workspace.skillCatalog.skills.find(
       (candidate) => candidate.skillId === draft.skillId,
     );
@@ -137,8 +147,14 @@ function toMutation(
     return null;
   return {
     title: draft.title.trim(),
-    workspaceId: workspace.id,
-    expectedWorkspaceEpoch: workspace.epoch,
+    target:
+      draft.targetKind === "default"
+        ? { kind: "default" }
+        : {
+            kind: "explicit",
+            workspaceId: workspace!.id,
+            expectedWorkspaceEpoch: workspace!.epoch,
+          },
     expectedExecutionGeneration: snapshot.account.executionGeneration,
     input,
     recurrence:
@@ -206,9 +222,12 @@ export function ScheduledTasksPage({
   const userWorkspaces = snapshot.workspaces.filter(
     (candidate) => candidate.origin === "user",
   );
-  const workspace = userWorkspaces.find(
-    (candidate) => candidate.id === draft.workspaceId,
-  );
+  const workspace =
+    draft.targetKind === "explicit"
+      ? userWorkspaces.find((candidate) => candidate.id === draft.workspaceId)
+      : undefined;
+  const canCreateDefinition =
+    snapshot.capabilities.managedWorkspaces || userWorkspaces.length > 0;
   const selectedSkill = workspace?.skillCatalog.skills.find(
     (skill) => skill.skillId === draft.skillId,
   );
@@ -406,7 +425,7 @@ export function ScheduledTasksPage({
           </div>
           <button
             className="primary-button focus-ring"
-            disabled={disabled || userWorkspaces.length === 0}
+            disabled={disabled || !canCreateDefinition}
             onClick={() => beginCreate()}
           >
             <Icon name="plus" />
@@ -452,7 +471,9 @@ export function ScheduledTasksPage({
                 <button
                   key={suggestion.kind}
                   className="scheduled-suggestion focus-ring"
-                  disabled={disabled || userWorkspaces.length === 0}
+                  disabled={
+                    disabled || !snapshot.capabilities.managedWorkspaces
+                  }
                   onClick={() => beginSuggestion(suggestion.kind)}
                 >
                   <span
@@ -473,7 +494,7 @@ export function ScheduledTasksPage({
               ))}
               <button
                 className="scheduled-suggestion scheduled-suggestion-custom focus-ring"
-                disabled={disabled || userWorkspaces.length === 0}
+                disabled={disabled || !snapshot.capabilities.managedWorkspaces}
                 onClick={() =>
                   beginCreate({
                     title: query.trim().slice(0, 80),
@@ -658,8 +679,23 @@ export function ScheduledTasksPage({
                       key={kind}
                       type="button"
                       data-active={draft.inputKind === kind}
+                      disabled={kind === "skill" && userWorkspaces.length === 0}
                       onClick={() =>
-                        setDraft((value) => ({ ...value, inputKind: kind }))
+                        setDraft((value) => ({
+                          ...value,
+                          inputKind: kind,
+                          targetKind:
+                            kind === "skill" ? "explicit" : value.targetKind,
+                          workspaceId:
+                            kind === "skill" && !value.workspaceId
+                              ? (snapshot.selectedWorkspaceId ??
+                                userWorkspaces[0]?.id ??
+                                "")
+                              : value.workspaceId,
+                          skillId: kind === "text" ? "" : value.skillId,
+                          argumentValues:
+                            kind === "text" ? [] : value.argumentValues,
+                        }))
                       }
                     >
                       {t(`scheduled.input.${kind}`)}
@@ -813,25 +849,77 @@ export function ScheduledTasksPage({
                     />
                   </label>
                   <label>
-                    <span>{t("scheduled.workspace")}</span>
+                    <span>{t("scheduled.target")}</span>
                     <select
-                      value={draft.workspaceId}
+                      aria-label={t("scheduled.target")}
+                      value={draft.targetKind}
+                      disabled={draft.inputKind === "skill"}
                       onChange={(event) =>
                         setDraft((value) => ({
                           ...value,
-                          workspaceId: event.target.value,
+                          targetKind: event.target.value as Draft["targetKind"],
+                          workspaceId:
+                            event.target.value === "explicit" &&
+                            !value.workspaceId
+                              ? (snapshot.selectedWorkspaceId ??
+                                userWorkspaces[0]?.id ??
+                                "")
+                              : value.workspaceId,
                           skillId: "",
                           argumentValues: [],
                         }))
                       }
                     >
-                      {userWorkspaces.map((item) => (
-                        <option key={item.id} value={item.id}>
-                          {item.displayName || item.canonicalRoot}
+                      {draft.inputKind === "text" &&
+                        (snapshot.capabilities.managedWorkspaces ||
+                          draft.targetKind === "default") && (
+                          <option value="default">
+                            {t("scheduled.target.default")}
+                          </option>
+                        )}
+                      {(userWorkspaces.length > 0 ||
+                        draft.targetKind === "explicit") && (
+                        <option value="explicit">
+                          {t("scheduled.target.explicit")}
                         </option>
-                      ))}
+                      )}
                     </select>
+                    <small>
+                      {t(
+                        draft.targetKind === "default"
+                          ? "scheduled.target.default_help"
+                          : "scheduled.target.explicit_help",
+                      )}
+                    </small>
                   </label>
+                  {draft.targetKind === "explicit" && (
+                    <label>
+                      <span>{t("scheduled.workspace")}</span>
+                      <select
+                        aria-label={t("scheduled.workspace")}
+                        value={draft.workspaceId}
+                        onChange={(event) =>
+                          setDraft((value) => ({
+                            ...value,
+                            workspaceId: event.target.value,
+                            skillId: "",
+                            argumentValues: [],
+                          }))
+                        }
+                      >
+                        {!workspace && draft.workspaceId && (
+                          <option value={draft.workspaceId} disabled>
+                            {t("scheduled.workspace_unavailable")}
+                          </option>
+                        )}
+                        {userWorkspaces.map((item) => (
+                          <option key={item.id} value={item.id}>
+                            {item.displayName || item.canonicalRoot}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
                 </div>
               </details>
 

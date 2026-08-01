@@ -146,8 +146,11 @@ test("Scheduled Task projection decodes recurrence and occurrence without secret
       enabled: true,
       health: "ready",
       failureReason: null,
-      workspaceId: "1",
-      workspaceEpoch: "1",
+      target: {
+        kind: "explicit",
+        workspaceId: "1",
+        workspaceEpoch: "1",
+      },
       execution: {
         generation: "1",
         provider: "anthropic",
@@ -196,10 +199,33 @@ test("Scheduled Task projection decodes recurrence and occurrence without secret
     id: "4",
     workspaceId: "9",
   });
-  managedTarget.scheduledTasks[0].workspaceId = "9";
+  managedTarget.scheduledTasks[0].target.workspaceId = "9";
   assert.throws(
     () => decodeWorkbenchSnapshot(managedTarget),
-    /scheduled Task requires a projected user Workspace/,
+    /explicit scheduled Task cannot target a managed Workspace/,
+  );
+
+  const unavailableExplicitTarget = clone(scheduled);
+  unavailableExplicitTarget.scheduledTasks[0].target.workspaceId = "99";
+  assert.deepEqual(
+    decodeWorkbenchSnapshot(unavailableExplicitTarget),
+    unavailableExplicitTarget,
+  );
+
+  const defaultTarget = clone(scheduled);
+  defaultTarget.scheduledTasks[0].target = { kind: "default" };
+  defaultTarget.scheduledTasks[0].input = {
+    kind: "text",
+    text: "Summarize current work",
+    redacted: false,
+  };
+  assert.deepEqual(decodeWorkbenchSnapshot(defaultTarget), defaultTarget);
+
+  const defaultSkill = clone(scheduled);
+  defaultSkill.scheduledTasks[0].target = { kind: "default" };
+  assert.throws(
+    () => decodeWorkbenchSnapshot(defaultSkill),
+    /default scheduled Task target requires text input/,
   );
 
   const invalid = clone(scheduled);

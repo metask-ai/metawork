@@ -15,6 +15,7 @@ pub const TaskRunInput = projection_impl.TaskRunInput;
 pub const WorkspaceOrigin = projection_impl.WorkspaceOrigin;
 pub const WorkspaceProjection = projection_impl.WorkspaceProjection;
 pub const ScheduledTaskRecurrence = projection_impl.ScheduledTaskRecurrence;
+pub const ScheduledTaskTarget = projection_impl.ScheduledTaskTarget;
 pub const ScheduledTaskDefinitionInput = projection_impl.ScheduledTaskDefinitionInput;
 pub const AppDirectories = projection_impl.AppDirectories;
 pub const ManagedWorkspaceRoot = managed_workspace_store.Root;

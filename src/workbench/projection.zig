@@ -111,10 +111,17 @@ pub const TaskRunInput = union(enum) {
 
 pub const ScheduledTaskRecurrence = scheduled_tasks_impl.Recurrence;
 
+pub const ScheduledTaskTarget = union(enum) {
+    default,
+    explicit: struct {
+        workspace_id: u64,
+        expected_workspace_epoch: u64,
+    },
+};
+
 pub const ScheduledTaskDefinitionInput = struct {
     title: []const u8,
-    workspace_id: u64,
-    expected_workspace_epoch: u64,
+    target: ScheduledTaskTarget,
     expected_execution_generation: u64,
     input: TaskRunInput,
     recurrence: ScheduledTaskRecurrence,
@@ -3077,14 +3084,18 @@ pub const Workbench = struct {
                 return error.SnapshotTooLarge
         else
             writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeAll(",\"target\":") catch return error.SnapshotTooLarge;
+        switch (item.target) {
+            .default => writer.writeAll("{\"kind\":\"default\"}") catch
+                return error.SnapshotTooLarge,
+            .explicit => |explicit| writer.print(
+                "{{\"kind\":\"explicit\",\"workspaceId\":\"{d}\",\"workspaceEpoch\":\"{d}\"}}",
+                .{ explicit.workspace_id, explicit.workspace_epoch },
+            ) catch return error.SnapshotTooLarge,
+        }
         writer.print(
-            ",\"workspaceId\":\"{d}\",\"workspaceEpoch\":\"{d}\",\"execution\":{{\"generation\":\"{d}\",\"provider\":\"{s}\",\"model\":",
-            .{
-                item.workspace_id,
-                item.workspace_epoch,
-                item.execution_generation,
-                @tagName(item.execution_provider),
-            },
+            ",\"execution\":{{\"generation\":\"{d}\",\"provider\":\"{s}\",\"model\":",
+            .{ item.execution_generation, @tagName(item.execution_provider) },
         ) catch return error.SnapshotTooLarge;
         try self.projectedJsonValueWithKnownCredentials(
             writer,
@@ -3317,6 +3328,7 @@ pub const Workbench = struct {
             const task = &(entry.* orelse continue);
             if (task.close_thread) |thread| thread.join();
             self.deinitTaskView(task);
+            entry.* = null;
         }
         self.allocator.free(self.tasks);
         for (self.workspaces) |*entry| {
@@ -3652,14 +3664,23 @@ pub const Workbench = struct {
             !std.unicode.utf8ValidateSlice(title))
             return error.InvalidTaskTitle;
         for (title) |byte| if (byte < 0x20) return error.InvalidTaskTitle;
-        const workspace = self.findWorkspace(input.workspace_id) orelse
-            return error.UnknownWorkspace;
-        if (input.expected_workspace_epoch == 0 or
-            input.expected_workspace_epoch != workspace.epoch)
-            return error.WorkspaceEpochMismatch;
-        if (workspace.origin != .user or !workspace.visible or
-            workspace.authorization != .available)
-            return error.WorkspaceUnavailable;
+        const workspace: ?*WorkspaceView = switch (input.target) {
+            .default => if (self.managed_workspaces != null)
+                null
+            else
+                return error.WorkspaceUnavailable,
+            .explicit => |explicit| explicit_target: {
+                const candidate = self.findWorkspace(explicit.workspace_id) orelse
+                    return error.UnknownWorkspace;
+                if (explicit.expected_workspace_epoch == 0 or
+                    explicit.expected_workspace_epoch != candidate.epoch)
+                    return error.WorkspaceEpochMismatch;
+                if (candidate.origin != .user or !candidate.visible or
+                    candidate.authorization != .available)
+                    return error.WorkspaceUnavailable;
+                break :explicit_target candidate;
+            },
+        };
         try input.recurrence.validate();
         const scheduled_input: scheduled_tasks_impl.Input = switch (input.input) {
             .text => |text| text_input: {
@@ -3671,7 +3692,9 @@ pub const Workbench = struct {
                 break :text_input .{ .text = trimmed };
             },
             .skill => |skill_input| skill_admission: {
-                const catalog = workspace.catalog orelse
+                const explicit_workspace = workspace orelse
+                    return error.InvalidScheduledTaskInput;
+                const catalog = explicit_workspace.catalog orelse
                     return error.CatalogUnavailable;
                 if (!std.mem.eql(
                     u8,
@@ -3709,8 +3732,13 @@ pub const Workbench = struct {
         };
         return .{
             .title = title,
-            .workspace_id = workspace.id,
-            .workspace_epoch = workspace.epoch,
+            .target = switch (input.target) {
+                .default => .default,
+                .explicit => .{ .explicit = .{
+                    .workspace_id = workspace.?.id,
+                    .workspace_epoch = workspace.?.epoch,
+                } },
+            },
             .execution_generation = self.execution.generation,
             .execution_provider = scheduledProvider(self.execution.provider.?),
             .execution_model = self.execution.model(),
@@ -3777,9 +3805,15 @@ pub const Workbench = struct {
             .text => null,
             .skill => |skill| skill.catalog_revision,
         };
-        const task_id = self.createTaskInWorkspace(
-            claimed_item.workspace_id,
-            claimed_item.workspace_epoch,
+        const workspace_request: TaskWorkspaceRequest = switch (claimed_item.target) {
+            .default => .managed,
+            .explicit => |explicit| .{ .existing = .{
+                .workspace_id = explicit.workspace_id,
+                .expected_epoch = explicit.workspace_epoch,
+            } },
+        };
+        const task_id = self.createTaskForWorkspace(
+            workspace_request,
             claimed_item.execution_generation,
             expected_catalog_revision,
         ) catch |err| {
@@ -3967,17 +4001,28 @@ pub const Workbench = struct {
                         break :binding .execution_changed) or
                     !std.mem.eql(u8, item.execution_model, self.execution.model()))
                     break :binding .execution_changed;
-                const workspace = self.findWorkspace(item.workspace_id) orelse
-                    break :binding .workspace_unavailable;
-                if (workspace.origin != .user or !workspace.visible or
-                    workspace.authorization != .available)
-                    break :binding .workspace_unavailable;
-                if (workspace.epoch != item.workspace_epoch)
-                    break :binding .workspace_changed;
+                const workspace: ?*WorkspaceView = switch (item.target) {
+                    .default => if (self.managed_workspaces != null)
+                        null
+                    else
+                        break :binding .workspace_unavailable,
+                    .explicit => |explicit| explicit_target: {
+                        const candidate = self.findWorkspace(explicit.workspace_id) orelse
+                            break :binding .workspace_unavailable;
+                        if (candidate.origin != .user or !candidate.visible or
+                            candidate.authorization != .available)
+                            break :binding .workspace_unavailable;
+                        if (candidate.epoch != explicit.workspace_epoch)
+                            break :binding .workspace_changed;
+                        break :explicit_target candidate;
+                    },
+                };
                 switch (item.input) {
                     .text => {},
                     .skill => |skill| {
-                        const catalog = workspace.catalog orelse
+                        const explicit_workspace = workspace orelse
+                            break :binding .catalog_changed;
+                        const catalog = explicit_workspace.catalog orelse
                             break :binding .catalog_changed;
                         if (!std.mem.eql(
                             u8,
@@ -5935,6 +5980,7 @@ fn scheduledFailure(err: anyerror) scheduled_tasks_impl.FailureReason {
         error.InvalidSkillArguments,
         => .catalog_changed,
         error.TaskCapacity,
+        error.WorkspaceCapacity,
         error.RunCapacity,
         error.ExecutorShuttingDown,
         error.QueueFull,
@@ -7172,10 +7218,23 @@ test "Scheduled Task admission is bounded redacted and arms the Workbench clock"
     workbench.schedule_timer = clock.timer();
     workbench.schedule_persistence = persistence.capability();
     workbench.schedule_persistence_health = .ready;
+    try std.testing.expectError(
+        error.WorkspaceUnavailable,
+        workbench.createScheduledTask(.{
+            .title = "Independent review",
+            .target = .default,
+            .expected_execution_generation = 1,
+            .input = .{ .text = "Review current work" },
+            .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), persistence.commits);
     const id = try workbench.createScheduledTask(.{
         .title = "Review SECRET-KEY",
-        .workspace_id = 1,
-        .expected_workspace_epoch = 1,
+        .target = .{ .explicit = .{
+            .workspace_id = 1,
+            .expected_workspace_epoch = 1,
+        } },
         .expected_execution_generation = 1,
         .input = .{ .text = "Inspect SECRET-KEY usage" },
         .recurrence = .{ .interval = .{

@@ -67,8 +67,7 @@ pub const TaskArchive = struct { taskId: []const u8, archived: bool };
 pub const TaskDelete = struct { taskId: []const u8 };
 pub const ScheduledTaskMutation = struct {
     title: []const u8,
-    workspaceId: []const u8,
-    expectedWorkspaceEpoch: []const u8,
+    target: std.json.Value,
     expectedExecutionGeneration: []const u8,
     input: std.json.Value,
     recurrence: std.json.Value,
@@ -77,8 +76,7 @@ pub const ScheduledTaskUpdate = struct {
     scheduledTaskId: []const u8,
     expectedEpoch: []const u8,
     title: []const u8,
-    workspaceId: []const u8,
-    expectedWorkspaceEpoch: []const u8,
+    target: std.json.Value,
     expectedExecutionGeneration: []const u8,
     input: std.json.Value,
     recurrence: std.json.Value,
@@ -216,6 +214,40 @@ pub fn parseScheduledTaskRecurrence(
     } };
 }
 
+pub fn parseScheduledTaskTarget(
+    value: std.json.Value,
+) !workbench_api.ScheduledTaskTarget {
+    const object = switch (value) {
+        .object => |object| object,
+        else => return error.InvalidBridgePayload,
+    };
+    const kind = switch (object.get("kind") orelse
+        return error.InvalidBridgePayload) {
+        .string => |text| text,
+        else => return error.InvalidBridgePayload,
+    };
+    if (std.mem.eql(u8, kind, "default")) {
+        if (object.count() != 1) return error.InvalidBridgePayload;
+        return .default;
+    }
+    if (!std.mem.eql(u8, kind, "explicit") or object.count() != 3)
+        return error.InvalidBridgePayload;
+    const workspace_id = switch (object.get("workspaceId") orelse
+        return error.InvalidBridgePayload) {
+        .string => |text| try parseWireId(text),
+        else => return error.InvalidBridgePayload,
+    };
+    const expected_epoch = switch (object.get("expectedWorkspaceEpoch") orelse
+        return error.InvalidBridgePayload) {
+        .string => |text| try parseWireId(text),
+        else => return error.InvalidBridgePayload,
+    };
+    return .{ .explicit = .{
+        .workspace_id = workspace_id,
+        .expected_workspace_epoch = expected_epoch,
+    } };
+}
+
 pub fn acknowledgementSequence(payload: []const u8) !u64 {
     const prefix = "{\"sequence\":";
     if (!std.mem.startsWith(u8, payload, prefix) or !std.mem.endsWith(u8, payload, "}"))
@@ -320,5 +352,52 @@ test "Scheduled Task recurrence is exact and uses wire integers" {
     try std.testing.expectError(
         error.InvalidBridgePayload,
         parseScheduledTaskRecurrence(extra.value),
+    );
+}
+
+test "Scheduled Task target is exact and legacy Workspace fields are rejected" {
+    var default_value = try std.json.parseFromSlice(
+        std.json.Value,
+        std.testing.allocator,
+        \\{"kind":"default"}
+    ,
+        .{},
+    );
+    defer default_value.deinit();
+    switch (try parseScheduledTaskTarget(default_value.value)) {
+        .default => {},
+        .explicit => return error.TestUnexpectedResult,
+    }
+
+    var explicit_value = try std.json.parseFromSlice(
+        std.json.Value,
+        std.testing.allocator,
+        \\{"kind":"explicit","workspaceId":"7","expectedWorkspaceEpoch":"3"}
+    ,
+        .{},
+    );
+    defer explicit_value.deinit();
+    const explicit = (try parseScheduledTaskTarget(explicit_value.value)).explicit;
+    try std.testing.expectEqual(@as(u64, 7), explicit.workspace_id);
+    try std.testing.expectEqual(@as(u64, 3), explicit.expected_workspace_epoch);
+
+    var mixed = try std.json.parseFromSlice(
+        std.json.Value,
+        std.testing.allocator,
+        \\{"kind":"default","workspaceId":"7"}
+    ,
+        .{},
+    );
+    defer mixed.deinit();
+    try std.testing.expectError(
+        error.InvalidBridgePayload,
+        parseScheduledTaskTarget(mixed.value),
+    );
+
+    try std.testing.expectError(
+        error.InvalidBridgePayload,
+        parsePayload(ScheduledTaskMutation,
+            \\{"title":"Legacy","workspaceId":"7","expectedWorkspaceEpoch":"3","expectedExecutionGeneration":"1","input":{"kind":"text","text":"inspect"},"recurrence":{"kind":"once","atUnixSeconds":"2"}}
+        ),
     );
 }
