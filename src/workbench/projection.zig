@@ -92,6 +92,14 @@ pub const TaskCreateInput = struct {
     trust: TaskWorkspaceTrust,
 };
 
+pub const TaskWorkspaceRequest = union(enum) {
+    existing: struct {
+        workspace_id: u64,
+        expected_epoch: u64,
+    },
+    managed,
+};
+
 pub const TaskRunInput = union(enum) {
     text: []const u8,
     skill: struct {
@@ -116,6 +124,11 @@ pub const WorkspaceAuthorization = enum {
     available,
     removing,
     reauthorization_required,
+};
+
+pub const WorkspaceOrigin = enum {
+    user,
+    managed,
 };
 
 pub const WorkspaceRemovalFailure = enum {
@@ -992,6 +1005,8 @@ const CatalogJob = struct {
 
 const WorkspaceView = struct {
     id: u64,
+    origin: WorkspaceOrigin = .user,
+    managed_task_id: u64 = 0,
     epoch: u64 = 1,
     canonical_root: []u8,
     projected_root_storage: []u8,
@@ -1461,7 +1476,9 @@ pub const Workbench = struct {
         else
             null;
         errdefer if (managed_workspaces) |*store| store.deinit();
-        const workspaces = try allocator.alloc(?WorkspaceView, limits.max_workspaces);
+        const workspace_capacity = workspaceRecordCapacity(limits) orelse
+            return error.ProjectionCapacity;
+        const workspaces = try allocator.alloc(?WorkspaceView, workspace_capacity);
         errdefer allocator.free(workspaces);
         @memset(workspaces, null);
         const tasks = try allocator.alloc(?TaskView, limits.max_tasks);
@@ -1772,6 +1789,7 @@ pub const Workbench = struct {
         self.syncLifecycle();
         const workspace = self.findWorkspace(workspace_id) orelse
             return error.UnknownWorkspace;
+        if (workspace.origin != .user) return error.WorkspaceUnavailable;
         if (workspace.epoch != expected_workspace_epoch)
             return error.WorkspaceEpochMismatch;
         if (!workspace.visible or workspace.authorization != .available)
@@ -1795,6 +1813,7 @@ pub const Workbench = struct {
             return error.TaskBusy;
         const workspace = self.findWorkspace(task.workspace_id) orelse
             return error.WorkspaceUnavailable;
+        if (workspace.origin != .user) return error.CatalogUnavailable;
         if (workspace.epoch != task.workspace_epoch)
             return error.WorkspaceEpochMismatch;
         const current = workspace.catalog orelse
@@ -1838,7 +1857,8 @@ pub const Workbench = struct {
         self.syncLifecycle();
         const workspace = self.findWorkspace(workspace_id) orelse
             return error.UnknownWorkspace;
-        if (!workspace.visible) return error.UnknownWorkspace;
+        if (workspace.origin != .user or !workspace.visible)
+            return error.UnknownWorkspace;
         if (expected_workspace_epoch == 0 or workspace.epoch != expected_workspace_epoch)
             return error.WorkspaceEpochMismatch;
         if (workspace.authorization == .removing)
@@ -1858,6 +1878,22 @@ pub const Workbench = struct {
         const workspace = self.findWorkspace(workspace_id) orelse
             return error.UnknownWorkspace;
         return workspace.epoch;
+    }
+
+    pub fn workspaceOrigin(
+        self: *Workbench,
+        workspace_id: u64,
+    ) Error!WorkspaceOrigin {
+        self.syncLifecycle();
+        const workspace = self.findWorkspace(workspace_id) orelse
+            return error.UnknownWorkspace;
+        return workspace.origin;
+    }
+
+    pub fn taskWorkspaceId(self: *Workbench, task_id: u64) Error!u64 {
+        self.syncLifecycle();
+        const task = self.findTask(task_id) orelse return error.UnknownTask;
+        return task.workspace_id;
     }
 
     /// Copies the visible Workspace projection in recent-use order without
@@ -1917,7 +1953,8 @@ pub const Workbench = struct {
         self.syncLifecycle();
         const workspace = self.findWorkspace(workspace_id) orelse
             return error.UnknownWorkspace;
-        if (!workspace.visible) return error.UnknownWorkspace;
+        if (workspace.origin != .user or !workspace.visible)
+            return error.UnknownWorkspace;
         if (expected_workspace_epoch == 0 or workspace.epoch != expected_workspace_epoch)
             return error.WorkspaceEpochMismatch;
         if (workspace.authorization == .removing)
@@ -1972,6 +2009,43 @@ pub const Workbench = struct {
         expected_execution_generation: u64,
         expected_skill_catalog_revision: ?[]const u8,
     ) Error!u64 {
+        return self.createTaskInWorkspaceInternal(
+            workspace_id,
+            expected_workspace_epoch,
+            expected_execution_generation,
+            expected_skill_catalog_revision,
+            false,
+        );
+    }
+
+    pub fn createTaskForWorkspace(
+        self: *Workbench,
+        request: TaskWorkspaceRequest,
+        expected_execution_generation: u64,
+        expected_skill_catalog_revision: ?[]const u8,
+    ) Error!u64 {
+        return switch (request) {
+            .existing => |existing| self.createTaskInWorkspace(
+                existing.workspace_id,
+                existing.expected_epoch,
+                expected_execution_generation,
+                expected_skill_catalog_revision,
+            ),
+            .managed => self.createManagedTask(
+                expected_execution_generation,
+                expected_skill_catalog_revision,
+            ),
+        };
+    }
+
+    fn createTaskInWorkspaceInternal(
+        self: *Workbench,
+        workspace_id: u64,
+        expected_workspace_epoch: u64,
+        expected_execution_generation: u64,
+        expected_skill_catalog_revision: ?[]const u8,
+        allow_unowned_managed: bool,
+    ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
         if (self.execution_replacement_pending)
@@ -1987,7 +2061,10 @@ pub const Workbench = struct {
         if (expected_workspace_epoch == 0 or
             expected_workspace_epoch != workspace_view.epoch)
             return error.WorkspaceEpochMismatch;
-        if (!workspace_view.visible)
+        if (workspace_view.origin == .managed and
+            (!allow_unowned_managed or workspace_view.managed_task_id != 0))
+            return error.WorkspaceUnavailable;
+        if (workspace_view.origin == .user and !workspace_view.visible)
             return error.WorkspaceUnavailable;
         if (workspace_view.authorization == .removing)
             return error.WorkspaceRemovalInProgress;
@@ -2151,6 +2228,47 @@ pub const Workbench = struct {
         return task_id;
     }
 
+    fn createManagedTask(
+        self: *Workbench,
+        expected_execution_generation: u64,
+        expected_skill_catalog_revision: ?[]const u8,
+    ) Error!u64 {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        self.syncLifecycle();
+        if (self.execution_replacement_pending)
+            return error.ExecutionInUse;
+        if (!self.canCreateTask())
+            return error.ExecutionUnavailable;
+        if (expected_execution_generation == 0 or
+            expected_execution_generation != self.execution.generation or
+            expected_execution_generation != self.account.execution_generation)
+            return error.ExecutionGenerationMismatch;
+        if (expected_skill_catalog_revision != null)
+            return error.CatalogUnavailable;
+        if (findEmpty(TaskView, self.tasks) == null) return error.TaskCapacity;
+        if (self.workspaceCount(.managed) >= self.limits.max_tasks)
+            return error.WorkspaceCapacity;
+        const store = if (self.managed_workspaces) |*value| value else return error.WorkspaceUnavailable;
+        var allocation = store.allocate() catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidManagedRoot => return error.InvalidWorkspace,
+            error.RootUnavailable, error.AllocationUnavailable => return error.WorkspaceUnavailable,
+        };
+        errdefer _ = store.rollback(&allocation);
+        const workspace = try self.registerManagedWorkspace(allocation.path());
+        errdefer self.releaseManagedWorkspaceNoFail(workspace.id);
+        const task_id = try self.createTaskInWorkspaceInternal(
+            workspace.id,
+            workspace.epoch,
+            expected_execution_generation,
+            null,
+            true,
+        );
+        workspace.managed_task_id = task_id;
+        allocation.deinit();
+        return task_id;
+    }
+
     pub fn runTask(
         self: *Workbench,
         task_id: u64,
@@ -2181,7 +2299,7 @@ pub const Workbench = struct {
         if (!self.taskContinuationAvailable(view)) return error.TaskClosing;
         const workspace = self.findWorkspace(view.workspace_id) orelse
             return error.WorkspaceUnavailable;
-        if (!workspace.visible)
+        if (workspace.origin == .user and !workspace.visible)
             return error.WorkspaceUnavailable;
         if (workspace.authorization == .removing)
             return error.WorkspaceRemovalInProgress;
@@ -2189,6 +2307,11 @@ pub const Workbench = struct {
             return error.WorkspaceUnavailable;
         if (workspace.epoch != view.workspace_epoch)
             return error.WorkspaceEpochMismatch;
+        if (workspace.origin == .managed and switch (input) {
+            .text => false,
+            .skill => true,
+        })
+            return error.CatalogUnavailable;
         _ = try taskExecutionInput(view);
         if (hasNonTerminalRun(view)) return error.TaskBusy;
         const session = view.session orelse return error.TaskClosing;
@@ -2618,8 +2741,15 @@ pub const Workbench = struct {
             }
             return;
         }
+        const workspace_id = view.workspace_id;
+        const release_managed_workspace = if (self.findWorkspace(workspace_id)) |workspace|
+            workspace.origin == .managed
+        else
+            false;
         self.deinitTaskView(view);
         self.tasks[index] = null;
+        if (release_managed_workspace)
+            self.releaseManagedWorkspaceNoFail(workspace_id);
         self.bumpRevision();
     }
 
@@ -2639,8 +2769,15 @@ pub const Workbench = struct {
                 view.session == null and !hasUnfinalizedTerminalEvents(view) and
                 view.worker_references.load(.acquire) == 0)
             {
+                const workspace_id = view.workspace_id;
+                const release_managed_workspace = if (self.findWorkspace(workspace_id)) |workspace|
+                    workspace.origin == .managed
+                else
+                    false;
                 self.deinitTaskView(view);
                 entry.* = null;
+                if (release_managed_workspace)
+                    self.releaseManagedWorkspaceNoFail(workspace_id);
                 changed = true;
                 continue;
             }
@@ -3514,7 +3651,8 @@ pub const Workbench = struct {
         if (input.expected_workspace_epoch == 0 or
             input.expected_workspace_epoch != workspace.epoch)
             return error.WorkspaceEpochMismatch;
-        if (!workspace.visible or workspace.authorization != .available)
+        if (workspace.origin != .user or !workspace.visible or
+            workspace.authorization != .available)
             return error.WorkspaceUnavailable;
         try input.recurrence.validate();
         const scheduled_input: scheduled_tasks_impl.Input = switch (input.input) {
@@ -3825,7 +3963,8 @@ pub const Workbench = struct {
                     break :binding .execution_changed;
                 const workspace = self.findWorkspace(item.workspace_id) orelse
                     break :binding .workspace_unavailable;
-                if (!workspace.visible or workspace.authorization != .available)
+                if (workspace.origin != .user or !workspace.visible or
+                    workspace.authorization != .available)
                     break :binding .workspace_unavailable;
                 if (workspace.epoch != item.workspace_epoch)
                     break :binding .workspace_changed;
@@ -4018,19 +4157,21 @@ pub const Workbench = struct {
             return workspace;
         }
 
-        var slot = findEmpty(WorkspaceView, self.workspaces);
-        if (slot == null) {
-            for (self.workspaces, 0..) |*entry, index| {
-                const workspace = &(entry.* orelse continue);
-                if (workspace.visible or workspace.catalog_job != null or
-                    self.workspaceHasTasks(workspace.id))
-                    continue;
-                self.deinitWorkspaceView(workspace);
-                entry.* = null;
-                slot = index;
-                break;
-            }
+        var slot: ?usize = null;
+        for (self.workspaces, 0..) |*entry, index| {
+            const workspace = &(entry.* orelse continue);
+            if (workspace.origin != .user or workspace.visible or
+                workspace.catalog_job != null or
+                self.workspaceHasTasks(workspace.id))
+                continue;
+            self.deinitWorkspaceView(workspace);
+            entry.* = null;
+            slot = index;
+            break;
         }
+        if (slot == null and self.workspaceCount(.user) >= self.limits.max_workspaces)
+            return error.WorkspaceCapacity;
+        if (slot == null) slot = findEmpty(WorkspaceView, self.workspaces);
         const target = slot orelse return error.WorkspaceCapacity;
         if (self.next_workspace_id == 0) return error.WorkspaceIdentityExhausted;
 
@@ -4074,6 +4215,81 @@ pub const Workbench = struct {
         return &self.workspaces[target].?;
     }
 
+    fn registerManagedWorkspace(
+        self: *Workbench,
+        canonical_root: []const u8,
+    ) Error!*WorkspaceView {
+        const store = if (self.managed_workspaces) |*value| value else return error.WorkspaceUnavailable;
+        if (!std.fs.path.isAbsolute(canonical_root) or
+            canonical_root.len > self.limits.max_workspace_bytes or
+            !std.unicode.utf8ValidateSlice(canonical_root) or
+            !store.containsCanonicalPath(canonical_root) or
+            self.findWorkspaceByRoot(canonical_root) != null)
+            return error.InvalidWorkspace;
+        if (self.workspaceCount(.managed) >= self.limits.max_tasks)
+            return error.WorkspaceCapacity;
+        const target = findEmpty(WorkspaceView, self.workspaces) orelse
+            return error.WorkspaceCapacity;
+        if (self.next_workspace_id == 0) return error.WorkspaceIdentityExhausted;
+
+        const owned_root = try self.copyBounded(
+            canonical_root,
+            self.limits.max_workspace_bytes,
+        );
+        errdefer self.freeTracked(owned_root);
+        const projected_root = try self.copyProjected(
+            canonical_root,
+            self.limits.max_workspace_bytes,
+            self.execution.credential(),
+        );
+        errdefer self.freeTracked(projected_root.value);
+        const display_name = try self.copyProjected(
+            "Managed workspace",
+            self.limits.max_workspace_bytes,
+            self.execution.credential(),
+        );
+        errdefer self.freeTracked(display_name.value);
+        const owned_temporary = try self.copyBounded(
+            canonical_root,
+            self.limits.max_workspace_bytes,
+        );
+        errdefer self.freeTracked(owned_temporary);
+
+        const workspace_id = self.next_workspace_id;
+        self.next_workspace_id +%= 1;
+        self.workspaces[target] = .{
+            .id = workspace_id,
+            .origin = .managed,
+            .canonical_root = owned_root,
+            .projected_root_storage = projected_root.value,
+            .projected_root_len = projected_root.value.len,
+            .display_name_storage = display_name.value,
+            .display_name_len = display_name.value.len,
+            .projection_redacted = projected_root.redacted or display_name.redacted,
+            .trust = .{ .temporary = owned_temporary },
+            .visible = false,
+            .recent_order = 0,
+        };
+        return &self.workspaces[target].?;
+    }
+
+    fn releaseManagedWorkspaceNoFail(
+        self: *Workbench,
+        workspace_id: u64,
+    ) void {
+        for (self.workspaces) |*entry| {
+            const workspace = &(entry.* orelse continue);
+            if (workspace.id != workspace_id) continue;
+            std.debug.assert(workspace.origin == .managed);
+            std.debug.assert(!self.workspaceHasTasks(workspace_id));
+            std.debug.assert(workspace.catalog_job == null);
+            self.deinitWorkspaceView(workspace);
+            entry.* = null;
+            return;
+        }
+        unreachable;
+    }
+
     fn takeWorkspaceRecentOrder(self: *Workbench) Error!u64 {
         if (self.next_workspace_recent_order == 0)
             return error.WorkspaceOrderExhausted;
@@ -4106,10 +4322,20 @@ pub const Workbench = struct {
         return null;
     }
 
+    fn workspaceCount(self: *const Workbench, origin: WorkspaceOrigin) usize {
+        var count: usize = 0;
+        for (self.workspaces) |entry| if (entry) |workspace|
+            if (workspace.origin == origin) {
+                count += 1;
+            };
+        return count;
+    }
+
     fn scheduleCatalogQuery(
         self: *Workbench,
         workspace: *WorkspaceView,
     ) Error!void {
+        if (workspace.origin != .user) return error.CatalogUnavailable;
         if (workspace.catalog_job != null) return error.CatalogLoading;
         const home = self.canonical_user_home orelse {
             self.markWorkspaceCatalogUnavailable(workspace);
@@ -6280,6 +6506,11 @@ fn takeActivityOrder(run: *RunRecord) u64 {
     return result;
 }
 
+fn workspaceRecordCapacity(limits: Limits) ?usize {
+    return std.math.add(usize, limits.max_workspaces, limits.max_tasks) catch
+        null;
+}
+
 fn worstCaseSnapshotBytes(limits: Limits) ?usize {
     var total = std.math.mul(usize, limits.max_projection_bytes, json_string_expansion) catch return null;
     total = std.math.add(
@@ -6308,7 +6539,7 @@ fn worstCaseSnapshotBytes(limits: Limits) ?usize {
         total,
         std.math.mul(
             usize,
-            limits.max_workspaces,
+            workspaceRecordCapacity(limits) orelse return null,
             workspace_snapshot_overhead,
         ) catch return null,
     ) catch return null;
@@ -6720,6 +6951,11 @@ test "managed Workspace root is optional and reserved from user registration" {
         .{},
     );
     try std.testing.expect(!unavailable.managedWorkspacesAvailable());
+    try installTestExecution(&unavailable);
+    try std.testing.expectError(
+        error.WorkspaceUnavailable,
+        unavailable.createTaskForWorkspace(.managed, 1, null),
+    );
     unavailable.deinit();
 
     var tmp = std.testing.tmpDir(.{});
