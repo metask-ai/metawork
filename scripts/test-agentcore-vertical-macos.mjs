@@ -60,8 +60,7 @@ const fixturePath = join(workspace, "fixture.txt");
 await writeFile(fixturePath, "agentcore-vertical-before\n", { mode: 0o600 });
 // This fixture targets an AgentCore-owned canonical project source. No
 // MetaWork product module reads, configures, or exposes this physical path.
-const skillSourceDirectory =
-  process.platform === "win32" ? ".agents" : ".metacodes";
+const skillSourceDirectory = ".agents";
 const skillDirectory = join(
   workspace,
   skillSourceDirectory,

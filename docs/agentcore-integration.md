@@ -1,6 +1,6 @@
 # MetaWork AgentCore 集成契约
 
-> 状态：AgentCore ABI v1 revision 5 已 hard cut 共享 Agent consumer，并完成 Windows x86_64 GNU exact artifact 与真实 vertical；macOS artifact 与平台结果由 macOS owner 独立收口；fault-domain 验证选择单 AgentCore Worker 作为后续正式方向
+> 状态：AgentCore ABI v1 revision 5 已 hard cut 共享 Agent consumer，并完成 macOS arm64、Windows x86_64 GNU exact artifact 与各自真实 vertical；fault-domain 验证选择单 AgentCore Worker 作为后续正式方向
 > 目标依赖：Metask AgentCore ABI v1 revision 5；精确 artifact identity 见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)
 
 本文定义 MetaWork `agent/` 执行子系统与 Metask AgentCore 之间的规范边界。Desktop Host 的 composition、Workbench 产品状态和 Bridge transport 见 [高层架构](architecture.md)，revision 5 目标能力见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。
@@ -61,17 +61,17 @@ revision 5 bundle 提供完整 typed status、六个 StopReason、known/unknown 
 
 ## 3. 当前协议表面
 
-| 类型              | 方向        | 当前 ABI v1 语义                                                                 |
-| ----------------- | ----------- | -------------------------------------------------------------------------------- |
-| `RunContext`      | Core → Host | callback-scoped borrowed identity；包含 Session handle、run ID 和稳定 session ID |
-| `CoreEvent` JSON  | Core → Host | callback-scoped borrowed bytes；与同次 callback 的 `RunContext` 绑定             |
-| `UiRequest` JSON  | Core → Host | 同步 callback 请求；与同次 callback 的 `RunContext` 绑定                         |
-| `UiResponse` JSON | Host → Core | 同一 callback 内 answered response；或 unavailable/fatal                         |
-| ABI status        | Core → Host | function 调用层错误，独立于有效 Run 结果                                         |
-| `RunResult`       | Core → Host | status OK 后才有效；包含 stop reason code、turn/tool count                       |
-| abort             | Host → Core | 按 Session/Run 的 user/timeout 中断机制                                          |
-| Skill descriptor  | Core → Host | query-scoped owned bytes；由 SDK 解码后立即释放                                  |
-| Skill catalog     | 双向借用    | Runtime query 返回 opaque handle；Session create/idle update 同步借用            |
+| 类型              | 方向        | 当前 ABI v1 语义                                                                   |
+| ----------------- | ----------- | ---------------------------------------------------------------------------------- |
+| `RunContext`      | Core → Host | callback-scoped borrowed identity；包含 Session handle、run ID 和稳定 session ID   |
+| `CoreEvent` JSON  | Core → Host | callback-scoped borrowed bytes；与同次 callback 的 `RunContext` 绑定               |
+| `UiRequest` JSON  | Core → Host | 同步 callback 请求；与同次 callback 的 `RunContext` 绑定                           |
+| `UiResponse` JSON | Host → Core | 同一 callback 内 answered response；或 unavailable/fatal                           |
+| ABI status        | Core → Host | function 调用层错误，独立于有效 Run 结果                                           |
+| `RunResult`       | Core → Host | status OK 后才有效；包含 stop reason code、turn/tool count                         |
+| abort             | Host → Core | 按 Session/Run 的 user/timeout 中断机制                                            |
+| Skill descriptor  | Core → Host | query-scoped owned bytes；由 SDK 解码后立即释放                                    |
+| Skill catalog     | 双向借用    | Runtime query 返回 opaque handle；Session create/idle update 同步借用              |
 | Skill selection   | Host → Core | Session create/update 显式传入完整 replacement；当前固定 all-enabled、无 exception |
 
 `UiEvent` / `UiBackend.poll()` 虽然存在于 Metask AgentCore native 协议中，但当前生产 agent loop 未证明消费。MetaWork 不依赖它完成 stop、生成期 queue message 或 steering。

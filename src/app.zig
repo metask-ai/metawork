@@ -2332,6 +2332,14 @@ fn resolveCanonicalUserHome(
         .windows => env_map.get("USERPROFILE"),
         else => env_map.get("HOME"),
     } orelse return null;
+    return resolveCanonicalDirectory(io, allocator, configured);
+}
+
+fn resolveCanonicalDirectory(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    configured: []const u8,
+) ?[]u8 {
     if (configured.len == 0 or !std.fs.path.isAbsolute(configured) or
         !std.unicode.utf8ValidateSlice(configured))
         return null;
@@ -2418,11 +2426,14 @@ pub fn run(init: std.process.Init) !void {
         null;
     defer if (scheduled_task_restored_bytes) |bytes|
         std.heap.c_allocator.free(bytes);
-    const canonical_user_home = resolveCanonicalUserHome(
-        init.io,
-        std.heap.c_allocator,
-        init.environ_map,
-    );
+    const canonical_user_home = if (app.automation.canonicalUserHome()) |home|
+        resolveCanonicalDirectory(init.io, std.heap.c_allocator, home)
+    else
+        resolveCanonicalUserHome(
+            init.io,
+            std.heap.c_allocator,
+            init.environ_map,
+        );
     defer if (canonical_user_home) |home|
         std.heap.c_allocator.free(home);
 

@@ -69,6 +69,13 @@ pub const Runtime = struct {
         return if (root.len == 0) null else root;
     }
 
+    /// Keeps AgentCore personal-source discovery inside the same temporary
+    /// directory capability as the automation Workspace. Release builds do
+    /// not expose this hook and continue to use the canonical system home.
+    pub fn canonicalUserHome(self: *const Runtime) ?[]const u8 {
+        return self.workspaceRoot();
+    }
+
     pub fn productPolicy(self: *Runtime, base: native_sdk.BridgePolicy) native_sdk.BridgePolicy {
         if (!self.active()) return base;
         std.debug.assert(base.commands.len == self.policy_commands.len);
@@ -131,5 +138,9 @@ test "automation workspace is an explicit activation-scoped capability" {
     try std.testing.expectEqualStrings(
         "/tmp/metawork-automation",
         runtime.workspaceRoot().?,
+    );
+    try std.testing.expectEqualStrings(
+        "/tmp/metawork-automation",
+        runtime.canonicalUserHome().?,
     );
 }

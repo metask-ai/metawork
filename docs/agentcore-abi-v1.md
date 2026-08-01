@@ -1,18 +1,18 @@
 # MetaWork AgentCore ABI v1 revision 5 消费合同
 
-> 状态：revision 5 已在 Windows x86_64 GNU 完成 exact artifact、共享 Agent Session 与真实 vertical 验证；macOS revision 5 artifact 由 macOS owner 独立锁定和验收；不声明 stable support policy
+> 状态：revision 5 已在 macOS arm64 与 Windows x86_64 GNU 完成 exact artifact、共享 Agent Session 与各自真实 vertical 验证；不声明 stable support policy
 > 所有者：Metask AgentCore 负责 facade、bindings、bundle 和兼容政策；MetaWork 负责精确消费验证
 
-本文记录 MetaWork 对 AgentCore binary ABI version 1 revision 5 的消费边界。线程、事件泵和 Host 生命周期见 [AgentCore 集成契约](agentcore-integration.md)，当前验收要求见 [验证规范](validation.md)。verifier、canonical staged bundle、official SDK 与共享 Agent Session 已 hard cut；Windows repository lock 已更新，macOS repository lock 和平台结果由 macOS owner 单独收口。既有 Workbench、Bridge、Renderer 产品合同不因本次依赖升级变化。
+本文记录 MetaWork 对 AgentCore binary ABI version 1 revision 5 的消费边界。线程、事件泵和 Host 生命周期见 [AgentCore 集成契约](agentcore-integration.md)，当前验收要求见 [验证规范](validation.md)。verifier、两个 target 的 repository lock、canonical staged bundle、official SDK 与共享 Agent Session 已 hard cut。既有 Workbench、Bridge、Renderer 产品合同不因本次依赖升级变化。
 
 ## 1. 版本含义
 
-当前 Windows development bundle 是 clean source commit `f0141f878d36f2bd5a76b097507cf19cbbbb174b` 构建的 x86_64 GNU artifact：ABI v1 revision 5、168-byte API table、required capabilities `0x0fff`、Zig 0.16.0、ReleaseSmall、strip=true，并需要 C runtime。macOS revision 5 的 exact identity、link inputs 和验证结果必须由 macOS owner 从该 target 的 clean candidate 得出；Windows 结果不能替代它：
+当前 macOS 与 Windows development bundle 都来自 clean source commit `f0141f878d36f2bd5a76b097507cf19cbbbb174b`，但仍是分别锁定完整 manifest 与 payload checksum 的 target-specific artifact。两者都是 ABI v1 revision 5、168-byte API table、required capabilities `0x0fff`、Zig 0.16.0、strip=true 并需要 C runtime；macOS 使用 ReleaseSafe，Windows 使用 ReleaseSmall：
 
-| Target             | Version                  | Source commit                              | Provenance             | Link input            | 本分支状态                |
-| ------------------ | ------------------------ | ------------------------------------------ | ---------------------- | --------------------- | ------------------------- |
-| Windows x86_64 GNU | `0.1.0-dev+f0141f878d36` | `f0141f878d36f2bd5a76b097507cf19cbbbb174b` | `source.dirty = false` | `advapi32`、`crypt32` | exact lock 与验证已完成   |
-| macOS arm64        | 由 macOS candidate 决定  | 由 macOS candidate 决定                    | 必须为 clean           | 由 manifest 精确声明  | 等待 macOS owner 独立收口 |
+| Target                         | Version                  | Source commit                              | Provenance             | Link input            | 状态                    |
+| ------------------------------ | ------------------------ | ------------------------------------------ | ---------------------- | --------------------- | ----------------------- |
+| macOS arm64（最低 macOS 13.0） | `0.1.0-dev+f0141f878d36` | `f0141f878d36f2bd5a76b097507cf19cbbbb174b` | `source.dirty = false` | 无 system library     | exact lock 与验证已完成 |
+| Windows x86_64 GNU             | `0.1.0-dev+f0141f878d36` | `f0141f878d36f2bd5a76b097507cf19cbbbb174b` | `source.dirty = false` | `advapi32`、`crypt32` | exact lock 与验证已完成 |
 
 revision 5 是从 revision 4 进行的 breaking function-table hard cut：API table 增加 Session model mutation、manual compact、Skill selection 与 Host permission-rules capability；`session_refresh_skill_catalog` 被 `session_update_skills` 取代，Session create 和 Skill update 都显式携带 selection。每个 target 仍由完整 manifest bytes/checksum 独立锁定，不能凭相同 source commit 推断 artifact 可互换，也不等于 stable ABI support policy。
 
@@ -30,22 +30,22 @@ revision 5 是从 revision 4 进行的 breaking function-table hard cut：API ta
 
 ## 2. 目标 v1 baseline 必须具备的能力
 
-| 能力              | 目标合同                                                                                                         |
-| ----------------- | ---------------------------------------------------------------------------------------------------------------- |
-| API discovery     | 从 `metask_agentcore_get_api` 获取并校验 ABI v1 revision 5、168-byte table 与 required capabilities `0x0fff`     |
-| Runtime           | 创建/销毁共享 Runtime；按 Workspace root/home/epoch query immutable Skill catalog snapshot                       |
-| Catalog ownership | query 返回 Host handle 与 descriptor buffer；descriptor、SDK parsed value、catalog handle 各自按合同释放         |
-| Session           | 创建/销毁 Session；catalog 与显式 Skill selection 成对绑定，并仅在 idle 时通过 `session_update_skills` 原子替换  |
+| 能力              | 目标合同                                                                                                          |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------- |
+| API discovery     | 从 `metask_agentcore_get_api` 获取并校验 ABI v1 revision 5、168-byte table 与 required capabilities `0x0fff`      |
+| Runtime           | 创建/销毁共享 Runtime；按 Workspace root/home/epoch query immutable Skill catalog snapshot                        |
+| Catalog ownership | query 返回 Host handle 与 descriptor buffer；descriptor、SDK parsed value、catalog handle 各自按合同释放          |
+| Session           | 创建/销毁 Session；catalog 与显式 Skill selection 成对绑定，并仅在 idle 时通过 `session_update_skills` 原子替换   |
 | Session mutation  | ABI 提供 model、Skill、permission-rules replacement 与 manual compact；MetaWork 当前只消费 all-enabled Skill 更新 |
-| 同步 Run          | `session_run_input` 接收 tagged Text/Skill input；每 Session 至多一个 active Run                                 |
-| built-in tools    | Session 可按 allowlist 使用 AgentCore built-in Read/Bash/Edit 等工具；Skill authority 只能进一步收窄             |
-| callback identity | Event、UI 和 Host tool callback 共享 validated `RunContext`：Session handle、run ID、Session-lifetime session ID |
-| 结构化事件        | callback 输出现有 tagged `CoreEvent` JSON，并绑定 `RunContext`                                                   |
-| 同步 Host UI      | callback 接收 `RunContext` + `UiRequest` JSON，并同步返回 answered/unavailable/fatal 与 response JSON            |
-| abort             | 其他线程可以按 Session/Run 请求 user/timeout abort                                                               |
-| 结果              | 成功 ABI 调用返回 stop reason code、turn count 和 tool count                                                     |
-| 错误              | ABI status 与 diagnostic 独立于有效 `RunResult`；Skill pre-admission status 保持 Session reusable                |
-| 所有权            | borrowed callback views、owned buffers、catalog handle 和 Session snapshot 的生命周期与 release 责任明确         |
+| 同步 Run          | `session_run_input` 接收 tagged Text/Skill input；每 Session 至多一个 active Run                                  |
+| built-in tools    | Session 可按 allowlist 使用 AgentCore built-in Read/Bash/Edit 等工具；Skill authority 只能进一步收窄              |
+| callback identity | Event、UI 和 Host tool callback 共享 validated `RunContext`：Session handle、run ID、Session-lifetime session ID  |
+| 结构化事件        | callback 输出现有 tagged `CoreEvent` JSON，并绑定 `RunContext`                                                    |
+| 同步 Host UI      | callback 接收 `RunContext` + `UiRequest` JSON，并同步返回 answered/unavailable/fatal 与 response JSON             |
+| abort             | 其他线程可以按 Session/Run 请求 user/timeout abort                                                                |
+| 结果              | 成功 ABI 调用返回 stop reason code、turn count 和 tool count                                                      |
+| 错误              | ABI status 与 diagnostic 独立于有效 `RunResult`；Skill pre-admission status 保持 Session reusable                 |
+| 所有权            | borrowed callback views、owned buffers、catalog handle 和 Session snapshot 的生命周期与 release 责任明确          |
 
 目标 bundle 也声明 synchronous Host tool capability，但 MetaWork 产品路径暂不使用，原因见第 6 节。
 
@@ -276,7 +276,7 @@ candidate probe 不导入 MetaWork Agent，也不承担 Runtime/Session、真实
 
 ### staged 正式 Host gate
 
-> Windows revision 5 exact artifact、candidate/stage、typed SDK discovery、Agent catalog ownership、typed Text/Skill Agent surface 与真实 Native vertical 已通过；macOS exact artifact、Debug/Release/package 和 Native vertical 由 macOS owner 独立验收。未验收 target 不参与当前平台结论；revision 4 不构成兼容要求。
+> macOS 与 Windows revision 5 exact artifact、candidate/stage、typed SDK discovery、Agent catalog ownership、typed Text/Skill Agent surface 和各自真实 Native vertical 已通过；macOS 另完成 Debug、Release 与签名 package 验收。两个 target 的结果互不替代；revision 4 不构成兼容要求。
 
 - typed SDK 完成并通过 source-free consumer；
 - status-before-result 和 diagnostic release 测试；

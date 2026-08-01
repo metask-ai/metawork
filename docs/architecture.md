@@ -30,7 +30,7 @@
 
 已批准的新基线是 Metask AgentCore ABI v1 revision 5。它保留既有 RunContext、typed status/StopReason、CoreEvent/UI codec、Skill catalog 与 tagged Text/Skill Run，并把 Session model、Skill replacement、permission rules 和 manual compact 纳入新的 mandatory function table。精确 API layout、artifact identity、payload 和 manifest schema 只由 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)定义。MetaWork 对它执行 hard cut：active build、Host、probe 和规范文档只接受 revision 5，不保留 revision 4 function table、`session_refresh_skill_catalog` 或 fallback。
 
-当前 checkout 的 verifier、build graph、共享 Agent Session 和 Windows staged bundle 已切到 revision 5；Windows exact artifact 来自 clean source commit `f0141f878d36f2bd5a76b097507cf19cbbbb174b`。macOS lock、artifact 和平台验证由 macOS owner 独立更新，Windows 结果不冒充 macOS 证据。MetaWork 当前只消费显式 all-enabled Skill selection 和 `session_update_skills`，不因 ABI entry 存在而开放 set-model、manual compact、permission-rule 或 Skill toggle 产品能力；Workbench、Bridge 与 Renderer 合同保持不变。
+当前 checkout 的 verifier、build graph、共享 Agent Session、macOS 与 Windows repository lock 都已切到 revision 5；两个 target 的 exact artifact 分别来自 clean source commit `f0141f878d36f2bd5a76b097507cf19cbbbb174b`，但 manifest、payload checksum 和平台结果仍独立锁定、互不替代。MetaWork 当前只消费显式 all-enabled Skill selection 和 `session_update_skills`，不因 ABI entry 存在而开放 set-model、manual compact、permission-rule 或 Skill toggle 产品能力；Workbench、Bridge 与 Renderer 合同保持不变。
 
 该 baseline 不包含：
 
