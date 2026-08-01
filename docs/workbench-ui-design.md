@@ -47,7 +47,7 @@ MetaWork 的视觉记忆点不是装饰性的暖色、通用衬线大标题、�
 
 ### 2.1 当前 ABI v1 capability profile
 
-当前锁定的 development ABI v1 revision 4 已为以下既有界面提供可验证数据；Skill catalog、typed Skill Run 与 Composer Slash 使用同一 Workspace/Task snapshot 和 Run product path：
+当前锁定的 development ABI v1 revision 5 已为以下既有界面提供可验证数据；Skill catalog、typed Skill Run 与 Composer Slash 使用同一 Workspace/Task snapshot 和 Run product path：
 
 - 文本流、工具开始/进度/结果、Run progress、usage、context warning、auto compact、retry 和 stream done；
 - Ask question 与 permission 两类同步用户请求；
@@ -185,7 +185,7 @@ Workspace
 
 ## 5. 左栏：能力、Workspace 与 Task
 
-> Capability：**当前**。Renderer 合同提供 MetaWork 顶层与 Workspace/Task 分离的 revision 4 Skill catalog projection，shell 提供稳定 New task、Workspace/Task 导航、行动优先分组和左下角账号入口；只读 Skill 中心与持久定时任务都作为同级全局能力进入该 shell。
+> Capability：**当前**。Renderer 合同提供 MetaWork 顶层与 Workspace/Task 分离的 revision 5 Skill catalog projection，shell 提供稳定 New task、Workspace/Task 导航、行动优先分组和左下角账号入口；只读 Skill 中心与持久定时任务都作为同级全局能力进入该 shell。
 
 ### 5.1 Workspace 切换
 
@@ -215,7 +215,7 @@ Invoices
 
 ### 5.2 全局能力入口
 
-> Capability：**当前**。Skill 入口只依赖现有 AgentCore revision 4 discovery/catalog；定时任务入口依赖 Workbench-owned 持久 schedule projection、后台 Host timer/notification 与真实 Task admission。
+> Capability：**当前**。Skill 入口只依赖现有 AgentCore revision 5 discovery/catalog；定时任务入口依赖 Workbench-owned 持久 schedule projection、后台 Host timer/notification 与真实 Task admission。
 
 `新建任务`、`技能` 与 `定时任务` 位于 Workspace 区标题上方的同一个纵向紧凑菜单，不使用窄侧栏中的卡片宫格，也不通过额外分组间距制造父子关系：
 
@@ -268,7 +268,7 @@ release-notes · Invalid definition
 - 页面不以左栏当前 Workspace 为上下文；没有 Workspace 时仍可完整打开、搜索和刷新，且不得把 New task draft 的临时 Workspace 借作管理 scope；
 - 搜索只过滤已提交的 MetaWork 顶层 projection 中的 invocation、display name、description 与 argument name，不读取 Skill body；`Refresh` 调用 Host-owned `skills.refreshCatalog` transaction，不能用 Renderer 文件监听或目录扫描替代；
 - Skill 使用连续列表行，不逐项卡片化。每行以克制的紫色 `/` 标记 invocation 这一真实语义，随后显示 monospace invocation、display name、description 和 argument names；这是页面唯一的识别性视觉，不增加插画、渐变或装饰卡；
-- revision 4 未公开有效 Skill 的 source metadata，页面不显示 Workspace/Personal/vendor 标签，也不从路径、名称或优先级猜测来源；AgentCore 已完成 winner/conflict 解析，Renderer 只展示返回的 Skill 与 bounded issue；
+- revision 5 未公开有效 Skill 的 source metadata，页面不显示 Workspace/Personal/vendor 标签，也不从路径、名称或优先级猜测来源；AgentCore 已完成 winner/conflict 解析，Renderer 只展示返回的 Skill 与 bounded issue；
 - 常规桌面内容列最大阅读宽度约 880 px；列表正文 13–15 px，次级文案不小于 12 px，每行最小高度 64 px。窄窗将 display name 与 argument summary 移到 invocation 下方，不产生水平滚动；
 - Skill invocation、display name、description、argument name 和用户内容不翻译；`Skills / 技能`、catalog 状态、动作与 issue 文案进入完整 locale catalog。
 

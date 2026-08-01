@@ -1,27 +1,27 @@
-# MetaWork AgentCore ABI v1 revision 4 消费合同
+# MetaWork AgentCore ABI v1 revision 5 消费合同
 
-> 状态：revision 4 macOS exact artifact 与 Agent/Workbench/Bridge typed Skill surface 已完成；不声明 stable support policy
+> 状态：revision 5 已在 Windows x86_64 GNU 完成 exact artifact、共享 Agent Session 与真实 vertical 验证；macOS revision 5 artifact 由 macOS owner 独立锁定和验收；不声明 stable support policy
 > 所有者：Metask AgentCore 负责 facade、bindings、bundle 和兼容政策；MetaWork 负责精确消费验证
 
-本文记录 MetaWork 对 AgentCore binary ABI version 1 revision 4 的消费边界。线程、事件泵和 Host 生命周期见 [AgentCore 集成契约](agentcore-integration.md)，当前验收要求见 [验证规范](validation.md)。当前实现的 repository locks、verifier、canonical staged bundle、official SDK、Agent catalog lease/typed Text/Skill surface、Workbench catalog/admission 与 Bridge tagged contract 已 hard cut。Composer Slash 是后续消费该能力的独立产品入口，不属于本次 ABI 升级。
+本文记录 MetaWork 对 AgentCore binary ABI version 1 revision 5 的消费边界。线程、事件泵和 Host 生命周期见 [AgentCore 集成契约](agentcore-integration.md)，当前验收要求见 [验证规范](validation.md)。verifier、canonical staged bundle、official SDK 与共享 Agent Session 已 hard cut；Windows repository lock 已更新，macOS repository lock 和平台结果由 macOS owner 单独收口。既有 Workbench、Bridge、Renderer 产品合同不因本次依赖升级变化。
 
 ## 1. 版本含义
 
-当前 macOS development bundle 来自 clean source commit `576b0a2791e904f01257c6f7fe17e9b43d8154d0`，Windows development bundle 来自增加 `.agents/skills` discovery 的 clean source commit `f554ade228f8d479b2b2e39ee714d6aa329eb7ff`；两个 target 分别锁定完整 artifact。两个 artifact 都是 ABI v1 revision 4、136-byte API table、Zig 0.16.0、strip=true，并需要 C runtime；macOS 使用 ReleaseSafe，Windows 使用 ReleaseSmall：
+当前 Windows development bundle 是 clean source commit `f0141f878d36f2bd5a76b097507cf19cbbbb174b` 构建的 x86_64 GNU artifact：ABI v1 revision 5、168-byte API table、required capabilities `0x0fff`、Zig 0.16.0、ReleaseSmall、strip=true，并需要 C runtime。macOS revision 5 的 exact identity、link inputs 和验证结果必须由 macOS owner 从该 target 的 clean candidate 得出；Windows 结果不能替代它：
 
-| Target                         | Version                  | Source commit                              | Provenance             | Link input            |
-| ------------------------------ | ------------------------ | ------------------------------------------ | ---------------------- | --------------------- |
-| macOS arm64（最低 macOS 13.0） | `0.1.0-dev+576b0a2791e9` | `576b0a2791e904f01257c6f7fe17e9b43d8154d0` | `source.dirty = false` | 无 system library     |
-| Windows x86_64 GNU             | `0.1.0-dev+f554ade228f8` | `f554ade228f8d479b2b2e39ee714d6aa329eb7ff` | `source.dirty = false` | `advapi32`、`crypt32` |
+| Target             | Version                  | Source commit                              | Provenance             | Link input            | 本分支状态                |
+| ------------------ | ------------------------ | ------------------------------------------ | ---------------------- | --------------------- | ------------------------- |
+| Windows x86_64 GNU | `0.1.0-dev+f0141f878d36` | `f0141f878d36f2bd5a76b097507cf19cbbbb174b` | `source.dirty = false` | `advapi32`、`crypt32` | exact lock 与验证已完成   |
+| macOS arm64        | 由 macOS candidate 决定  | 由 macOS candidate 决定                    | 必须为 clean           | 由 manifest 精确声明  | 等待 macOS owner 独立收口 |
 
-revision 4 是从 revision 3 进行的 breaking capability 与 Run-input hard cut：增加 Skill catalog query/release、Session catalog bind/refresh、typed Text/Skill input、Skill codec 和 Skill status。两个 bundle 分别由完整 manifest bytes/checksum 锁定，不能仅凭相同 commit 推断 artifact 可互换，也不等于 stable ABI support policy。
+revision 5 是从 revision 4 进行的 breaking function-table hard cut：API table 增加 Session model mutation、manual compact、Skill selection 与 Host permission-rules capability；`session_refresh_skill_catalog` 被 `session_update_skills` 取代，Session create 和 Skill update 都显式携带 selection。每个 target 仍由完整 manifest bytes/checksum 独立锁定，不能凭相同 source commit 推断 artifact 可互换，也不等于 stable ABI support policy。
 
 - repository lock 保存完整 manifest，并精确锁定 package/source、target、toolchain、link contract、ABI 和所有 payload checksum；
-- 两个锁定 artifact 都是 clean provenance；MetaWork 仍只信任完整 manifest bytes 与 payload checksums，而不从 commit 推断 artifact bytes；
+- 每个锁定 artifact 都必须是 clean provenance；MetaWork 只信任完整 manifest bytes 与 payload checksums，而不从 commit 推断 artifact bytes；
 - 对一个固定 bundle，ABI version/revision、layout、整数 code、callback 签名和语义不得漂移；
 - 未来不兼容的 layout/code/ownership 变化必须发布新的 ABI revision/version；
 - 兼容增量能力必须通过 capability 和新的 bundle identity 显式表达；
-- v1 revision 4 struct size 必须精确匹配且全部 reserved 字段为零；MetaWork 不接受 revision 3 的 112-byte API table、其他 revision 或旧 `session_run`；
+- v1 revision 5 struct size 必须精确匹配且全部 reserved 字段为零；MetaWork 不接受 revision 4 的 136-byte API table、旧 `session_refresh_skill_catalog`、其他 revision 或旧 `session_run`；
 - 唯一 discovery symbol 是 `metask_agentcore_get_api`；旧 symbol 不得进入 active code；
 - 新 observation tag 可以由新 bundle identity 兼容增加，旧 SDK 将其保存为 owned unknown observation；
 - MetaWork 不复制 facade、header、code、event tag 或 UI JSON schema。
@@ -32,10 +32,11 @@ revision 4 是从 revision 3 进行的 breaking capability 与 Run-input hard cu
 
 | 能力              | 目标合同                                                                                                         |
 | ----------------- | ---------------------------------------------------------------------------------------------------------------- |
-| API discovery     | 从 `metask_agentcore_get_api` 获取并校验 ABI v1 revision 4、136-byte table 与完整 required capabilities          |
+| API discovery     | 从 `metask_agentcore_get_api` 获取并校验 ABI v1 revision 5、168-byte table 与 required capabilities `0x0fff`     |
 | Runtime           | 创建/销毁共享 Runtime；按 Workspace root/home/epoch query immutable Skill catalog snapshot                       |
 | Catalog ownership | query 返回 Host handle 与 descriptor buffer；descriptor、SDK parsed value、catalog handle 各自按合同释放         |
-| Session           | 创建/销毁 Session；可选绑定 catalog snapshot，并仅在 idle 时显式 refresh                                         |
+| Session           | 创建/销毁 Session；catalog 与显式 Skill selection 成对绑定，并仅在 idle 时通过 `session_update_skills` 原子替换  |
+| Session mutation  | ABI 提供 model、Skill、permission-rules replacement 与 manual compact；MetaWork 当前只消费 all-enabled Skill 更新 |
 | 同步 Run          | `session_run_input` 接收 tagged Text/Skill input；每 Session 至多一个 active Run                                 |
 | built-in tools    | Session 可按 allowlist 使用 AgentCore built-in Read/Bash/Edit 等工具；Skill authority 只能进一步收窄             |
 | callback identity | Event、UI 和 Host tool callback 共享 validated `RunContext`：Session handle、run ID、Session-lifetime session ID |
@@ -128,13 +129,13 @@ candidate acceptance 通过 exact artifact 校验和官方 Zig package 的 sourc
 
 生产 build graph 只把 SDK 注入 `agent/` 的 catalog、event sink、event pump 和 Session 实现。App 通过 Agent Runtime 完成 ABI discovery；Workbench 只消费 Agent module root 暴露的 SDK-validated owned/typed 表面；Bridge wire DTO 不引用 SDK enum、owner 或 handle。该边界避免复制协议，同时阻止 transport 与产品层直接依赖 bundle module。
 
-目标 revision 4 bundle 的 `CoreEvent` 提供十个 known observation tags：`text_chunk`、`tool_start`、`tool_progress`、`progress`、`tool_result`、`usage`、`context_warning`、`auto_compact`、`retry_notice` 和 `stream_done`。有效的新 observation tag 被解码成 owned `UnknownCoreEvent`；迁移后的 Host 在 SDK 完成结构、ownership 和 byte-bound 校验后立即释放并忽略它，不让未知产品语义消耗事件泵容量，也不得把 raw tag/payload 传给 Renderer。
+目标 revision 5 bundle 的 `CoreEvent` 提供十个 known observation tags：`text_chunk`、`tool_start`、`tool_progress`、`progress`、`tool_result`、`usage`、`context_warning`、`auto_compact`、`retry_notice` 和 `stream_done`。有效的新 observation tag 被解码成 owned `UnknownCoreEvent`；迁移后的 Host 在 SDK 完成结构、ownership 和 byte-bound 校验后立即释放并忽略它，不让未知产品语义消耗事件泵容量，也不得把 raw tag/payload 传给 Renderer。
 
 目标 baseline 没有 typed `FileChange`、`Output` 或 plan-progress 事件。MetaWork 因此只能投影可验证的工具活动，并保持 `Files changed` / `Outputs` 模块隐藏；不得解析 Bash/Edit 参数或 stdout 猜测文件变更，也不得把普通新文件自动归类为 Output。
 
 ### 更早 experimental 表面的历史收口
 
-| 旧表面                                            | revision 4 处理                                                                   |
+| 旧表面                                            | revision 5 处理                                                                   |
 | ------------------------------------------------- | --------------------------------------------------------------------------------- |
 | direct `ParsedCoreEvent.value`                    | 必须先处理 `DecodedCoreEvent.known/unknown`                                       |
 | `stream_begin`、current-tool 与 diagnostic events | 从公开 observation contract 删除，MetaWork 不复制                                 |
@@ -145,6 +146,9 @@ candidate acceptance 通过 exact artifact 校验和官方 Zig package 的 sourc
 | flat AskUserQuestion answers                      | 删除；按 question 传递有序 `values[]`，多选值不得用展示字符串拼接                 |
 | admitted fatal status                             | `out_of_memory`、`core_error`、`callback_failed`、`internal_error` poison Session |
 | permission mode codes                             | 只使用 SDK 常量；不保留旧数值映射                                                 |
+| revision 4 `session_refresh_skill_catalog`        | 删除；以 `session_update_skills` 原子替换 catalog 与显式 selection                |
+
+revision 5 的新 mutation entry 是 ABI 必需函数，不等于 MetaWork 产品能力自动开放。当前 Host 在 Session create 与 catalog refresh 中固定使用“全部启用、无 exception”的 Skill selection，并保持 `permission_rules = null`；不注册 set-model、manual compact、permission-rule 或 Skill toggle 产品入口。fake API 只为未消费 entry 提供满足 function-table 校验的最小失败 stub，不模拟上游实现。
 
 ## 6. 工具与 Workspace
 
@@ -162,7 +166,7 @@ candidate acceptance 通过 exact artifact 校验和官方 Zig package 的 sourc
 
 ### Host tools
 
-目标 revision 4 的 Host tool callback 也携带 `RunContext`，wire identity 已可验证；但 MetaWork 尚未定义产品级 Host tool catalog、权限、Workspace 与路由政策。因此：
+目标 revision 5 的 Host tool callback 也携带 `RunContext`，wire identity 已可验证；但 MetaWork 尚未定义产品级 Host tool catalog、权限、Workspace 与路由政策。因此：
 
 - artifact-only probe 可以验证 Host tool callback/release mechanics；
 - MetaWork 产品 Runtime 的 `host_tool_count` 必须为零；
@@ -224,11 +228,11 @@ status == OK
 
 wire abort reason 只提供目标 v1 的中断机制；用户取消、timeout、Session close 和 application shutdown 进入 active Run 的 typed `TerminationSignal`。callback 内失败优先直接返回 callback fatal；callback 返回后只有 canonical event/projection failure 可以按 Run identity 请求 abort。`Run.execute()` 在 ABI 返回后产出同时包含 typed/raw status、StopReason、abort status 和最终 latch 的 immutable `TerminalResult`。Renderer/Bridge transport failure 由 Workbench policy 处理，不进入 Agent termination state。
 
-Status 还包括 `resource_limit`、`skill_catalog_invalid`、`stale_catalog`、`skill_not_found`、`invalid_skill_arguments`、`skill_policy_violation` 和 `skill_unavailable`。Session 创建时绑定的 provider model 对全部 Run 和 Skill fork child 都是固定的；Skill 声明空值或 `inherit` 时继承 Session model，声明其他 model 时以 `skill_unavailable` 在 admission 前失败，不允许覆盖 Task execution binding。pre-admission validation、Skill rejection、resource-limit、busy 和 stale-run failure 保持 Session 可复用；admission 后的 `out_of_memory`、`core_error`、`callback_failed` 或 `internal_error` poison Session，之后的 Run/abort 返回 `invalid_state`，仅 destroy 仍有效。
+Status 还包括 `resource_limit`、`skill_catalog_invalid`、`stale_catalog`、`skill_not_found`、`invalid_skill_arguments`、`skill_policy_violation`、`skill_unavailable` 和 `stale_compact`。Status enum 是全局 code 集，不代表每个函数都能返回每个 known code；Host 必须按 run、abort、Skill update、destroy 的 operation-specific status set 验证，unknown 或属于其他 operation 的 known status 都 fail closed。Session 创建时绑定的 provider model 对全部 Run 和 Skill fork child 都是固定的；Skill 声明空值或 `inherit` 时继承 Session model，声明其他 model 时以 `skill_unavailable` 在 admission 前失败，不允许覆盖 Task execution binding。pre-admission validation、Skill rejection、resource-limit、busy 和 stale-run failure 保持 Session 可复用；admission 后的 `out_of_memory`、`core_error`、`callback_failed` 或 `internal_error` poison Session，之后的 Run/abort 返回 `invalid_state`，仅 destroy 仍有效。Skill update 的普通非 OK status 保持 Session 可复用，`invalid_state` 表示 Session 已 poisoned。
 
 ## 9. Bundle 交付
 
-revision 4 bundle 精确包含 target-specific library 与共同 SDK payload：
+revision 5 bundle 精确包含 target-specific library 与共同 SDK payload：
 
 ```text
 lib/libmetask_agentcore.a          # macOS
@@ -252,14 +256,14 @@ manifest schema 1 必须精确记录：
 - `target { id, architecture, os, abi, zig_target, rust_target }`；
 - `build { optimize, strip }`；
 - `link { requires_c_runtime, system_libraries, system_frameworks }`；
-- `contract { binary_abi_status, binary_abi_version = 1, binary_abi_revision = 4 }`；
+- `contract { binary_abi_status, binary_abi_version = 1, binary_abi_revision = 5, binary_abi_table_size = 168, capabilities = 4095 }`；
 - 除 manifest 自身外的完整 `{path, sha256}` payload whitelist。
 
 公司内部初步开发期，candidate bundle 直接来自本机精确路径 `metacodes/zig-out/agentcore/<target>`。MetaWork 根据 manifest target 选择显式 target policy 与 exact repository lock，对 candidate 做 artifact-only probe，并经 `agentcore:stage` 复制到 `.agentcore/bundle`；正式 build/test/package 只消费 staged root。当前不建设 resolver、cache、artifact repository 或跨机器分发。未知 target、artifact 缺失或校验失败时明确失败，禁止 generic/source fallback。
 
-正式 Zig build 必须通过 staged `bindings/zig` package 获取 `metask_agentcore` module。MetaWork verifier 负责 exact lock/checksum/target/ABI 信任；官方 package 负责 module、capability/function-table 校验和 link graph。任何 active build 中的 revision 3 function table、`session_run`、双格式 Run payload、手工 Skill schema、SDK module graph 或 archive 直链都属于迁移失败。
+正式 Zig build 必须通过 staged `bindings/zig` package 获取 `metask_agentcore` module。MetaWork verifier 负责 exact lock/checksum/target/ABI 信任；官方 package 负责 module、capability/function-table 校验和 link graph。任何 active build 中的 revision 4 function table、`session_refresh_skill_catalog`、旧 table size/capability set、手工 Skill schema、SDK module graph 或 archive 直链都属于迁移失败。
 
-## 10. revision 4 接收门槛
+## 10. revision 5 接收门槛
 
 ### candidate bundle acceptance
 
@@ -272,7 +276,7 @@ candidate probe 不导入 MetaWork Agent，也不承担 Runtime/Session、真实
 
 ### staged 正式 Host gate
 
-> revision 4 macOS 与 Windows exact artifact、candidate/stage、typed SDK discovery、Agent catalog ownership、typed Text/Skill Agent surface、Workbench/Bridge 产品链和各自 Native vertical 已通过；Windows 当前 bundle 额外覆盖 `.agents/skills` discovery。未锁定 target 不参与当前验收；revision 3 不构成兼容要求。
+> Windows revision 5 exact artifact、candidate/stage、typed SDK discovery、Agent catalog ownership、typed Text/Skill Agent surface 与真实 Native vertical 已通过；macOS exact artifact、Debug/Release/package 和 Native vertical 由 macOS owner 独立验收。未验收 target 不参与当前平台结论；revision 4 不构成兼容要求。
 
 - typed SDK 完成并通过 source-free consumer；
 - status-before-result 和 diagnostic release 测试；
@@ -282,7 +286,7 @@ candidate probe 不导入 MetaWork Agent，也不承担 Runtime/Session、真实
 - 同步 UI deadline/cancel/close/shutdown 测试；
 - event pump fatal 能停止 in-flight Run；
 - MetaWork 从真实 bundle 完成 link/run 集成。
-- macOS Debug/Release/package 与 Windows Debug/Release executable、module tests 均使用各自 staged identity；
+- 每个平台的 Debug/Release/package 或 executable/module tests 必须使用该平台独立 staged identity；
 - `.app` 不携带 AgentCore archive、header、Zig/Rust binding 源文件或 `.agentcore` staging 内容；
 - architecture tests 证明正式 build 只从官方 dependency module 获取 SDK，且只有 `agent/` import `metask_agentcore`。
 
