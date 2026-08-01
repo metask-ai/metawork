@@ -1756,7 +1756,7 @@ export default function App() {
                   onClick={beginNewTask}
                 >
                   <span className="sidebar-capability-mark" aria-hidden="true">
-                    <Icon name="plus" />
+                    <Icon name="new-task" />
                   </span>
                   <span>{t("task.new")}</span>
                   <kbd>{shortcutModifier}N</kbd>
@@ -1771,7 +1771,7 @@ export default function App() {
                   }}
                 >
                   <span className="sidebar-capability-mark" aria-hidden="true">
-                    /
+                    <Icon name="skills" />
                   </span>
                   <span>{t("skills.title")}</span>
                 </button>
@@ -1792,7 +1792,7 @@ export default function App() {
                       className="sidebar-capability-mark"
                       aria-hidden="true"
                     >
-                      <Icon name="clock" />
+                      <Icon name="scheduled-tasks" />
                     </span>
                     <span>{t("scheduled.title")}</span>
                   </button>

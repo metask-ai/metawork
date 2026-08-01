@@ -488,7 +488,7 @@ summary::-webkit-details-marker {
 }
 
 .sidebar-capability-mark svg {
-  font-size: 13px;
+  font-size: 15px;
 }
 
 .sidebar-capability::before {
@@ -521,12 +521,7 @@ summary::-webkit-details-marker {
   width: 20px;
   height: 20px;
   place-items: center;
-  border-radius: 6px 6px 6px 2px;
-  color: var(--color-brand-700);
-  background: rgba(91, 70, 216, 0.1);
-  font-family: var(--font-mono);
-  font-size: 13px;
-  font-weight: 700;
+  color: currentColor;
 }
 
 .sidebar-navigation {

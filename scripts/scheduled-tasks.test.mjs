@@ -250,6 +250,8 @@ test("New task, Skills, and Scheduled tasks share one compact peer menu", async 
       .length,
     3,
   );
+  for (const icon of ["new-task", "skills", "scheduled-tasks"])
+    assert.match(navigation, new RegExp(`<Icon name="${icon}"`));
 });
 
 test("Scheduled task Bridge commands preserve IDs, epochs, and exact payloads", async () => {

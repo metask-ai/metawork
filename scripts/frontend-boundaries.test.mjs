@@ -155,8 +155,8 @@ test("Renderer command bars own the hidden-inset titlebar without stealing contr
     css,
     /\[data-platform="windows"\] \.workbench-commandbar \{[\s\S]*padding-top: 0;[\s\S]*padding-bottom: 0;/,
   );
-  assert.match(icons, /minimize: <path d="M6 12h12" \/>/);
-  assert.doesNotMatch(icons, /minimize:[^\n]*17\.5/);
+  assert.match(icons, /} from "lucide-react";/);
+  assert.match(icons, /minimize: Minus/);
   assert.match(
     css,
     /top: calc\(var\(--window-bar-height\) \+ env\(safe-area-inset-top, 0px\)\)/,
