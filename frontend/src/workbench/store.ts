@@ -26,6 +26,7 @@ export const initialWorkbenchState: WorkbenchState = {
       typedOutputs: false,
       typedFileChanges: false,
       persistentWorkspacePermissions: false,
+      managedWorkspaces: false,
       scheduledTasks: false,
       scheduledTaskPersistence: false,
       scheduledTaskPersistenceHealth: "unavailable",
@@ -123,7 +124,11 @@ export function workbenchReducer(
       draftWorkspaceId: null,
     };
   if (action.type === "workspace.selected") {
-    if (!state.snapshot.workspaces.some(({ id }) => id === action.workspaceId))
+    if (
+      !state.snapshot.workspaces.some(
+        ({ id, origin }) => id === action.workspaceId && origin === "user",
+      )
+    )
       return state;
     const activeTaskId = firstTaskInWorkspace(
       state.snapshot,
@@ -157,9 +162,7 @@ export function workbenchReducer(
 
   const activeTaskStillExists = action.snapshot.tasks.some(
     (task) =>
-      task.id === state.activeTaskId &&
-      task.workspaceId === retainedWorkspaceId &&
-      workspaceIds.has(task.workspaceId),
+      task.id === state.activeTaskId && workspaceIds.has(task.workspaceId),
   );
   const activeTaskId = activeTaskStillExists
     ? state.activeTaskId

@@ -207,7 +207,7 @@ test "managed Workspace admission is isolated non-selecting and Text-only" {
     try installWorkbenchExecution(&workbench);
 
     const user_workspace_id = try workbench.openWorkspace(workbenchTaskInput());
-    var user_projection_storage: [1]workbench_api.WorkspaceProjection = undefined;
+    var user_projection_storage: [3]workbench_api.WorkspaceProjection = undefined;
     const before = try workbench.copyWorkspaceProjections(&user_projection_storage);
     const user_recent_order = before[0].recent_order;
 
@@ -227,8 +227,29 @@ test "managed Workspace admission is isolated non-selecting and Text-only" {
     );
     try std.testing.expectEqual(user_workspace_id, workbench.selectedWorkspaceId());
     const after_first = try workbench.copyWorkspaceProjections(&user_projection_storage);
-    try std.testing.expectEqual(@as(usize, 1), after_first.len);
-    try std.testing.expectEqual(user_recent_order, after_first[0].recent_order);
+    try std.testing.expectEqual(@as(usize, 2), after_first.len);
+    const projected_user = for (after_first) |workspace| {
+        if (workspace.origin == .user) break workspace;
+    } else return error.TestUnexpectedResult;
+    const projected_managed = for (after_first) |workspace| {
+        if (workspace.origin == .managed) break workspace;
+    } else return error.TestUnexpectedResult;
+    try std.testing.expectEqual(user_recent_order, projected_user.recent_order);
+    try std.testing.expectEqual(first_workspace, projected_managed.id);
+    var managed_snapshot_storage: [128 * 1024]u8 = undefined;
+    const managed_snapshot = try workbench.writeSnapshot(
+        &managed_snapshot_storage,
+    );
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        managed_snapshot,
+        "\"managedWorkspaces\":true",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        managed_snapshot,
+        "\"origin\":\"managed\"",
+    ) != null);
     try std.testing.expectEqual(@as(usize, 1), try directoryEntryCount(tmp.dir));
     try std.testing.expectError(
         error.WorkspaceUnavailable,

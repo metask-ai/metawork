@@ -146,6 +146,7 @@ pub const WorkspaceSignals = struct {
 pub const WorkspaceProjection = struct {
     id: u64,
     epoch: u64,
+    origin: WorkspaceOrigin,
     canonical_root: []const u8,
     display_name: []const u8,
     authorization: WorkspaceAuthorization,
@@ -1896,8 +1897,10 @@ pub const Workbench = struct {
         return task.workspace_id;
     }
 
-    /// Copies the visible Workspace projection in recent-use order without
-    /// allocating. Aggregate signals are computed from canonical Task state.
+    /// Copies the canonical Workspace projection without allocating. Hidden
+    /// user Workspaces remain omitted; managed Workspaces stay projected so
+    /// their Task routes remain addressable. Aggregate signals are computed
+    /// from canonical Task state.
     pub fn copyWorkspaceProjections(
         self: *Workbench,
         output: []WorkspaceProjection,
@@ -1906,11 +1909,12 @@ pub const Workbench = struct {
         var count: usize = 0;
         for (self.workspaces) |*entry| {
             const workspace = &(entry.* orelse continue);
-            if (!workspace.visible) continue;
+            if (workspace.origin == .user and !workspace.visible) continue;
             if (count == output.len) return error.WorkspaceCapacity;
             output[count] = .{
                 .id = workspace.id,
                 .epoch = workspace.epoch,
+                .origin = workspace.origin,
                 .canonical_root = workspace.projected_root_storage[0..workspace.projected_root_len],
                 .display_name = workspace.display_name_storage[0..workspace.display_name_len],
                 .authorization = workspace.authorization,
@@ -2994,8 +2998,9 @@ pub const Workbench = struct {
         const schedule_persistence_ready =
             self.schedule_persistence_health == .ready;
         const background_schedule_wake = self.schedule_background_available;
-        writer.print("{{\"revision\":\"{d}\",\"capabilities\":{{\"taskHistoryPersistence\":false,\"conversationRecovery\":false,\"executionRebind\":false,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":false,\"persistentWorkspacePermissions\":false,\"scheduledTasks\":{},\"scheduledTaskPersistence\":{},\"scheduledTaskPersistenceHealth\":\"{s}\",\"backgroundScheduleWake\":{}}},\"account\":", .{
+        writer.print("{{\"revision\":\"{d}\",\"capabilities\":{{\"taskHistoryPersistence\":false,\"conversationRecovery\":false,\"executionRebind\":false,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":false,\"persistentWorkspacePermissions\":false,\"managedWorkspaces\":{},\"scheduledTasks\":{},\"scheduledTaskPersistence\":{},\"scheduledTaskPersistenceHealth\":\"{s}\",\"backgroundScheduleWake\":{}}},\"account\":", .{
             self.revision,
+            self.managed_workspaces != null,
             self.schedule_timer.enabled and schedule_persistence_ready and
                 background_schedule_wake,
             schedule_persistence_ready,
@@ -3024,7 +3029,7 @@ pub const Workbench = struct {
         var workspace_count: usize = 0;
         for (self.workspaces) |*entry| {
             const workspace = &(entry.* orelse continue);
-            if (!workspace.visible) continue;
+            if (workspace.origin == .user and !workspace.visible) continue;
             if (workspace_count != 0) writer.writeByte(',') catch
                 return error.SnapshotTooLarge;
             workspace_count += 1;
@@ -3265,9 +3270,10 @@ pub const Workbench = struct {
         workspace: *const WorkspaceView,
     ) Error!void {
         const signals = self.workspaceSignals(workspace.id);
-        writer.print("{{\"id\":\"{d}\",\"epoch\":\"{d}\",\"displayName\":", .{
+        writer.print("{{\"id\":\"{d}\",\"epoch\":\"{d}\",\"origin\":\"{s}\",\"displayName\":", .{
             workspace.id,
             workspace.epoch,
+            @tagName(workspace.origin),
         }) catch
             return error.SnapshotTooLarge;
         const display_name = workspace.display_name_storage[0..workspace.display_name_len];

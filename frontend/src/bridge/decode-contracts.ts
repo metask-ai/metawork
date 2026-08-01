@@ -164,6 +164,7 @@ const workspaceAuthorizations = [
   "removing",
   "reauthorization_required",
 ] as const;
+const workspaceOrigins = ["user", "managed"] as const;
 const bindingAvailabilities = ["available", "unavailable"] as const;
 const skillCatalogAvailabilities = [
   "uninitialized",
@@ -1183,6 +1184,7 @@ function decodeWorkspace(value: unknown, path: string): WorkspaceView {
   const item = object(value, path, [
     "id",
     "epoch",
+    "origin",
     "displayName",
     "canonicalRoot",
     "redacted",
@@ -1197,24 +1199,43 @@ function decodeWorkspace(value: unknown, path: string): WorkspaceView {
     "attention",
     "failedOrInterrupted",
   ]);
+  const origin = enumValue(item.origin, `${path}.origin`, workspaceOrigins);
+  const authorization = enumValue(
+    item.authorization,
+    `${path}.authorization`,
+    workspaceAuthorizations,
+  );
+  const lastRemovalFailure = nullableEnum(
+    item.lastRemovalFailure,
+    `${path}.lastRemovalFailure`,
+    ["task_close_failed"] as const,
+  );
+  const recentOrder = wireId(item.recentOrder, `${path}.recentOrder`);
+  const skillCatalog = decodeSkillCatalog(
+    item.skillCatalog,
+    `${path}.skillCatalog`,
+  );
+  if (origin === "user" && recentOrder === "0")
+    fail(`${path}.recentOrder`, "user Workspace requires recent order");
+  if (
+    origin === "managed" &&
+    (recentOrder !== "0" ||
+      authorization !== "available" ||
+      lastRemovalFailure !== null ||
+      skillCatalog.availability !== "uninitialized")
+  )
+    fail(path, "managed Workspace must remain non-selecting and catalog-free");
   return {
     id: positiveWireId(item.id, `${path}.id`),
     epoch: positiveWireId(item.epoch, `${path}.epoch`),
+    origin,
     displayName: stringValue(item.displayName, `${path}.displayName`),
     canonicalRoot: stringValue(item.canonicalRoot, `${path}.canonicalRoot`),
     redacted: booleanValue(item.redacted, `${path}.redacted`),
-    authorization: enumValue(
-      item.authorization,
-      `${path}.authorization`,
-      workspaceAuthorizations,
-    ),
-    lastRemovalFailure: nullableEnum(
-      item.lastRemovalFailure,
-      `${path}.lastRemovalFailure`,
-      ["task_close_failed"] as const,
-    ),
-    skillCatalog: decodeSkillCatalog(item.skillCatalog, `${path}.skillCatalog`),
-    recentOrder: positiveWireId(item.recentOrder, `${path}.recentOrder`),
+    authorization,
+    lastRemovalFailure,
+    skillCatalog,
+    recentOrder,
     signals: {
       running: nonNegativeNumber(signals.running, `${path}.signals.running`),
       attention: nonNegativeNumber(
@@ -1476,6 +1497,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     "typedOutputs",
     "typedFileChanges",
     "persistentWorkspacePermissions",
+    "managedWorkspaces",
     "scheduledTasks",
     "scheduledTaskPersistence",
     "scheduledTaskPersistenceHealth",
@@ -1509,6 +1531,10 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     persistentWorkspacePermissions: booleanValue(
       capabilityItem.persistentWorkspacePermissions,
       "$.capabilities.persistentWorkspacePermissions",
+    ),
+    managedWorkspaces: booleanValue(
+      capabilityItem.managedWorkspaces,
+      "$.capabilities.managedWorkspaces",
     ),
     scheduledTasks: booleanValue(
       capabilityItem.scheduledTasks,
@@ -1563,10 +1589,40 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     scheduledTasks.length
   )
     fail("$.scheduledTasks", "scheduled Task identities must be unique");
-  if (scheduledTasks.some((task) => !workspaceIds.has(task.workspaceId)))
-    fail("$.scheduledTasks", "scheduled Task Workspace must be projected");
-  if (selectedWorkspaceId !== null && !workspaceIds.has(selectedWorkspaceId))
-    fail("$.selectedWorkspaceId", "selected Workspace must be projected");
+  if (
+    scheduledTasks.some(
+      (task) =>
+        workspaces.find((workspace) => workspace.id === task.workspaceId)
+          ?.origin !== "user",
+    )
+  )
+    fail(
+      "$.scheduledTasks",
+      "scheduled Task requires a projected user Workspace",
+    );
+  const selectedWorkspace = workspaces.find(
+    (workspace) => workspace.id === selectedWorkspaceId,
+  );
+  if (selectedWorkspaceId !== null && selectedWorkspace?.origin !== "user")
+    fail(
+      "$.selectedWorkspaceId",
+      "selected Workspace must be a projected user Workspace",
+    );
+  for (const workspace of workspaces) {
+    const taskCount = tasks.filter(
+      (task) => task.workspaceId === workspace.id,
+    ).length;
+    if (workspace.origin === "managed" && taskCount !== 1)
+      fail("$.workspaces", "managed Workspace must belong to exactly one Task");
+  }
+  if (
+    !capabilities.managedWorkspaces &&
+    workspaces.some((workspace) => workspace.origin === "managed")
+  )
+    fail(
+      "$.capabilities.managedWorkspaces",
+      "managed Workspace capability is unavailable",
+    );
   return {
     revision: wireId(root.revision, "$.revision"),
     capabilities,

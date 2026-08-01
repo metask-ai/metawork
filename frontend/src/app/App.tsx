@@ -219,11 +219,26 @@ export default function App() {
   const currentWorkspace = snapshot.workspaces.find(
     (workspace) => workspace.id === currentWorkspaceId,
   );
+  const userWorkspaces = useMemo(
+    () =>
+      snapshot.workspaces.filter((workspace) => workspace.origin === "user"),
+    [snapshot.workspaces],
+  );
+  const selectedUserWorkspaceId =
+    userWorkspaces.find(
+      (workspace) => workspace.id === snapshot.selectedWorkspaceId,
+    )?.id ?? null;
+  const navigationWorkspaceId =
+    currentWorkspace?.origin === "user"
+      ? currentWorkspace.id
+      : selectedUserWorkspaceId;
   const summaries = useMemo(() => workspaceSummaries(snapshot), [snapshot]);
   const currentTasks = useMemo(
     () =>
-      snapshot.tasks.filter((task) => task.workspaceId === currentWorkspaceId),
-    [currentWorkspaceId, snapshot],
+      snapshot.tasks.filter(
+        (task) => task.workspaceId === navigationWorkspaceId,
+      ),
+    [navigationWorkspaceId, snapshot.tasks],
   );
   const searchResults = useMemo(
     () => searchWorkbench(snapshot, searchQuery),
@@ -233,7 +248,7 @@ export default function App() {
   const newTaskDraftActive = workbench.draftOpen || activeTask === null;
   const newTaskDraftId = newTaskDraftStorageId(
     newTaskDraftActive,
-    workbench.draftWorkspaceId ?? currentWorkspaceId,
+    workbench.draftWorkspaceId ?? navigationWorkspaceId,
   );
   const newTaskDrafts = useNewTaskDrafts(newTaskDraftId);
   const composerDraft = newTaskDraftActive
@@ -257,7 +272,9 @@ export default function App() {
       !activeTask.archived);
   const runInFlight = isRunInFlight(activeTask);
   const composerWorkspaceId =
-    activeTask?.workspaceId || workbench.draftWorkspaceId || currentWorkspaceId;
+    activeTask?.workspaceId ||
+    workbench.draftWorkspaceId ||
+    navigationWorkspaceId;
   const composerWorkspace = snapshot.workspaces.find(
     (workspace) => workspace.id === composerWorkspaceId,
   );
@@ -400,7 +417,7 @@ export default function App() {
     };
     window.addEventListener("keydown", openSearch);
     return () => window.removeEventListener("keydown", openSearch);
-  }, [accountGateRequired, bridgeUnavailable, currentWorkspaceId]);
+  }, [accountGateRequired, bridgeUnavailable, navigationWorkspaceId]);
 
   useEffect(() => {
     if (!client.available()) return;
@@ -428,12 +445,12 @@ export default function App() {
       return;
     dispatchWorkbench({
       type: "task.draft.opened",
-      workspaceId: currentWorkspaceId,
+      workspaceId: navigationWorkspaceId,
     });
     window.requestAnimationFrame(() => composer.current?.focus());
   }, [
     activeTask,
-    currentWorkspaceId,
+    navigationWorkspaceId,
     snapshot.account.readiness,
     workbench.draftOpen,
   ]);
@@ -705,7 +722,7 @@ export default function App() {
       setStatus(
         quietStatus("workspace.selection_cancelled", {
           scope: "workspace",
-          workspaceId: currentWorkspaceId,
+          workspaceId: navigationWorkspaceId,
         }),
       );
       if (openDraft)
@@ -813,7 +830,7 @@ export default function App() {
     const workspace = snapshot.workspaces.find(
       (candidate) => candidate.id === workspaceId,
     );
-    if (!workspace) {
+    if (!workspace || workspace.origin !== "user") {
       setStatus(
         attentionStatus("workspace.selection_unavailable", {
           scope: "workspace",
@@ -897,13 +914,13 @@ export default function App() {
     pendingTaskSelection.current = null;
     setRoute("workbench");
     if (workspaceNavigationRunningRef.current) {
-      if (currentWorkspaceId)
-        selectWorkspaceById(currentWorkspaceId, { kind: "draft" });
+      if (navigationWorkspaceId)
+        selectWorkspaceById(navigationWorkspaceId, { kind: "draft" });
       else workspaceNavigationIntents.current.invalidate();
     }
     dispatchWorkbench({
       type: "task.draft.opened",
-      workspaceId: currentWorkspaceId,
+      workspaceId: navigationWorkspaceId,
     });
     window.requestAnimationFrame(() => composer.current?.focus());
   }
@@ -1350,10 +1367,18 @@ export default function App() {
 
   function selectSearchResult(result: SearchResult) {
     pendingTaskSelection.current = null;
-    void selectWorkspaceById(result.workspaceId, {
-      kind: "navigation",
-      taskId: result.taskId,
-    });
+    const workspace = snapshot.workspaces.find(
+      (candidate) => candidate.id === result.workspaceId,
+    );
+    if (workspace?.origin === "managed" && result.taskId) {
+      setRoute("workbench");
+      dispatchWorkbench({ type: "task.selected", taskId: result.taskId });
+    } else {
+      void selectWorkspaceById(result.workspaceId, {
+        kind: "navigation",
+        taskId: result.taskId,
+      });
+    }
     setSearchOpen(false);
     setSearchQuery("");
   }
@@ -1616,12 +1641,18 @@ export default function App() {
       workspaceMissing={Boolean(newTaskDraftActive && !composerWorkspace)}
       workspaceLabel={
         composerWorkspace
-          ? composerWorkspace.displayName ||
-            workspaceLabel(composerWorkspace.canonicalRoot)
+          ? composerWorkspace.origin === "managed"
+            ? t("workspace.managed")
+            : composerWorkspace.displayName ||
+              workspaceLabel(composerWorkspace.canonicalRoot)
           : t("workspace.none")
       }
-      workspaceTitle={composerWorkspace?.canonicalRoot || t("workspace.none")}
-      workspaceOptions={snapshot.workspaces.map((workspace) => ({
+      workspaceTitle={
+        composerWorkspace?.origin === "managed"
+          ? t("workspace.managed")
+          : composerWorkspace?.canonicalRoot || t("workspace.none")
+      }
+      workspaceOptions={userWorkspaces.map((workspace) => ({
         id: workspace.id,
         label: workspace.displayName || workspaceLabel(workspace.canonicalRoot),
         canonicalRoot: workspace.canonicalRoot,
@@ -1700,9 +1731,11 @@ export default function App() {
           ? t("settings.account_models")
           : route === "scheduled-tasks"
             ? t("scheduled.title")
-            : currentWorkspace?.displayName ||
-              currentWorkspace?.canonicalRoot ||
-              t("workspace.none")
+            : currentWorkspace?.origin === "managed"
+              ? t("workspace.managed")
+              : currentWorkspace?.displayName ||
+                currentWorkspace?.canonicalRoot ||
+                t("workspace.none")
       }
       attentionNotice={
         commandBarStatus
@@ -1771,10 +1804,13 @@ export default function App() {
               <div className="sidebar-navigation">
                 <WorkspaceNavigation
                   summaries={summaries}
-                  currentWorkspaceId={currentWorkspaceId}
+                  currentWorkspaceId={navigationWorkspaceId}
                   tasks={currentTasks}
                   activeTaskId={
-                    route === "workbench" ? (activeTask?.id ?? null) : null
+                    route === "workbench" &&
+                    activeTask?.workspaceId === navigationWorkspaceId
+                      ? activeTask.id
+                      : null
                   }
                   showArchived={showArchived}
                   disabled={bridgeUnavailable || workspaceBusy}
@@ -1796,7 +1832,16 @@ export default function App() {
                     const task = snapshot.tasks.find(
                       (candidate) => candidate.id === taskId,
                     );
-                    if (workspaceNavigationRunningRef.current && task)
+                    const taskWorkspace = task
+                      ? snapshot.workspaces.find(
+                          (workspace) => workspace.id === task.workspaceId,
+                        )
+                      : null;
+                    if (
+                      workspaceNavigationRunningRef.current &&
+                      task &&
+                      taskWorkspace?.origin === "user"
+                    )
                       selectWorkspaceById(task.workspaceId, {
                         kind: "navigation",
                         taskId,

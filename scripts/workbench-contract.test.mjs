@@ -34,6 +34,48 @@ test("the canonical Workbench fixture decodes without normalization", () => {
   assert.deepEqual(decodeWorkbenchSnapshot(fixture), fixture);
 });
 
+test("managed Workspace projection is one-to-one non-selecting and capability-gated", () => {
+  const managed = clone(fixture);
+  managed.capabilities.managedWorkspaces = true;
+  managed.workspaces.push({
+    ...clone(fixture.workspaces[0]),
+    id: "9",
+    origin: "managed",
+    displayName: "Managed workspace",
+    canonicalRoot: "/data/workspaces/0000000000000009",
+    recentOrder: "0",
+    signals: { running: 0, attention: 0, failedOrInterrupted: 0 },
+  });
+  managed.tasks.push({
+    ...clone(fixture.tasks[0]),
+    id: "4",
+    recentOrder: "2",
+    workspaceId: "9",
+  });
+  assert.deepEqual(decodeWorkbenchSnapshot(managed), managed);
+
+  const missingOwner = clone(managed);
+  missingOwner.tasks.pop();
+  assert.throws(
+    () => decodeWorkbenchSnapshot(missingOwner),
+    /exactly one Task/,
+  );
+
+  const selectedManaged = clone(managed);
+  selectedManaged.selectedWorkspaceId = "9";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(selectedManaged),
+    /selected Workspace must be a projected user Workspace/,
+  );
+
+  const unavailable = clone(managed);
+  unavailable.capabilities.managedWorkspaces = false;
+  assert.throws(
+    () => decodeWorkbenchSnapshot(unavailable),
+    /managed Workspace capability is unavailable/,
+  );
+});
+
 test("Skill catalogs and typed Skill history decode without exposing loader internals", () => {
   const withSkill = clone(fixture);
   const catalog = {
@@ -138,6 +180,28 @@ test("Scheduled Task projection decodes recurrence and occurrence without secret
     },
   ];
   assert.deepEqual(decodeWorkbenchSnapshot(scheduled), scheduled);
+
+  const managedTarget = clone(scheduled);
+  managedTarget.capabilities.managedWorkspaces = true;
+  managedTarget.workspaces.push({
+    ...clone(fixture.workspaces[0]),
+    id: "9",
+    origin: "managed",
+    displayName: "Managed workspace",
+    canonicalRoot: "/data/workspaces/0000000000000009",
+    recentOrder: "0",
+  });
+  managedTarget.tasks.push({
+    ...clone(fixture.tasks[0]),
+    id: "4",
+    workspaceId: "9",
+  });
+  managedTarget.scheduledTasks[0].workspaceId = "9";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(managedTarget),
+    /scheduled Task requires a projected user Workspace/,
+  );
+
   const invalid = clone(scheduled);
   invalid.scheduledTasks[0].recurrence.cron = "* * * * *";
   assert.throws(() => decodeWorkbenchSnapshot(invalid), /expected keys/);

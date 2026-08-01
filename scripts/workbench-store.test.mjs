@@ -29,14 +29,15 @@ function task(id, workspaceId, archived = false) {
   };
 }
 
-function workspace(id) {
+function workspace(id, origin = "user") {
   return {
     id,
+    origin,
     displayName: `workspace-${id}`,
     canonicalRoot: `/repo/${id}`,
     redacted: false,
     authorization: "available",
-    recentOrder: id,
+    recentOrder: origin === "managed" ? "0" : id,
     signals: { running: 0, attention: 0, failedOrInterrupted: 0 },
   };
 }
@@ -50,7 +51,7 @@ function snapshot(revision, tasks, workspaceIds = null) {
     capabilities: initialWorkbenchState.snapshot.capabilities,
     account: initialWorkbenchState.snapshot.account,
     selectedWorkspaceId: ids[0] ?? null,
-    workspaces: ids.map(workspace),
+    workspaces: ids.map((id) => workspace(id)),
     tasks,
   };
 }
@@ -176,6 +177,40 @@ test("workspace selection chooses a visible local Task and never leaks another w
   assert.equal(newWorkspace.activeTaskId, null);
   assert.equal(newWorkspace.draftOpen, true);
   assert.equal(newWorkspace.draftWorkspaceId, "3");
+});
+
+test("a managed Task route survives refresh without becoming the selected user Workspace", () => {
+  const managedSnapshot = {
+    ...snapshot("1", [task("2", "1"), task("3", "9")], ["1"]),
+    selectedWorkspaceId: "1",
+    workspaces: [workspace("1"), workspace("9", "managed")],
+  };
+  const accepted = workbenchReducer(initialWorkbenchState, {
+    type: "snapshot.accepted",
+    snapshot: managedSnapshot,
+  });
+  const selected = workbenchReducer(accepted, {
+    type: "task.selected",
+    taskId: "3",
+  });
+  assert.equal(selected.activeTaskId, "3");
+  assert.equal(selected.activeWorkspaceId, "9");
+  assert.equal(selected.snapshot.selectedWorkspaceId, "1");
+
+  const refreshed = workbenchReducer(selected, {
+    type: "snapshot.accepted",
+    snapshot: { ...managedSnapshot, revision: "2" },
+  });
+  assert.equal(refreshed.activeTaskId, "3");
+  assert.equal(refreshed.activeWorkspaceId, "9");
+  assert.equal(refreshed.snapshot.selectedWorkspaceId, "1");
+  assert.equal(
+    workbenchReducer(refreshed, {
+      type: "workspace.selected",
+      workspaceId: "9",
+    }),
+    refreshed,
+  );
 });
 
 test("the Workbench store rejects unknown Tasks and falls back within the current workspace", () => {

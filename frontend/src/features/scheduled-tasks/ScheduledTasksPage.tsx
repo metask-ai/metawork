@@ -46,10 +46,12 @@ function nextLocalOccurrence(hour: number, minute: number, weekday?: number) {
 }
 
 function defaultDraft(snapshot: WorkbenchSnapshot): Draft {
+  const userWorkspaces = snapshot.workspaces.filter(
+    (workspace) => workspace.origin === "user",
+  );
   return {
     title: "",
-    workspaceId:
-      snapshot.selectedWorkspaceId ?? snapshot.workspaces[0]?.id ?? "",
+    workspaceId: snapshot.selectedWorkspaceId ?? userWorkspaces[0]?.id ?? "",
     inputKind: "text",
     text: "",
     skillId: "",
@@ -97,7 +99,8 @@ function toMutation(
   draft: Draft,
 ): ScheduledTaskMutation | null {
   const workspace = snapshot.workspaces.find(
-    (candidate) => candidate.id === draft.workspaceId,
+    (candidate) =>
+      candidate.id === draft.workspaceId && candidate.origin === "user",
   );
   const start = Math.floor(new Date(draft.start).getTime() / 1000);
   if (
@@ -200,7 +203,10 @@ export function ScheduledTasksPage({
   const [error, setError] = useState<string | null>(null);
   const selected =
     snapshot.scheduledTasks.find((task) => task.id === selectedId) ?? null;
-  const workspace = snapshot.workspaces.find(
+  const userWorkspaces = snapshot.workspaces.filter(
+    (candidate) => candidate.origin === "user",
+  );
+  const workspace = userWorkspaces.find(
     (candidate) => candidate.id === draft.workspaceId,
   );
   const selectedSkill = workspace?.skillCatalog.skills.find(
@@ -400,7 +406,7 @@ export function ScheduledTasksPage({
           </div>
           <button
             className="primary-button focus-ring"
-            disabled={disabled || snapshot.workspaces.length === 0}
+            disabled={disabled || userWorkspaces.length === 0}
             onClick={() => beginCreate()}
           >
             <Icon name="plus" />
@@ -446,7 +452,7 @@ export function ScheduledTasksPage({
                 <button
                   key={suggestion.kind}
                   className="scheduled-suggestion focus-ring"
-                  disabled={disabled || snapshot.workspaces.length === 0}
+                  disabled={disabled || userWorkspaces.length === 0}
                   onClick={() => beginSuggestion(suggestion.kind)}
                 >
                   <span
@@ -467,7 +473,7 @@ export function ScheduledTasksPage({
               ))}
               <button
                 className="scheduled-suggestion scheduled-suggestion-custom focus-ring"
-                disabled={disabled || snapshot.workspaces.length === 0}
+                disabled={disabled || userWorkspaces.length === 0}
                 onClick={() =>
                   beginCreate({
                     title: query.trim().slice(0, 80),
@@ -819,7 +825,7 @@ export function ScheduledTasksPage({
                         }))
                       }
                     >
-                      {snapshot.workspaces.map((item) => (
+                      {userWorkspaces.map((item) => (
                         <option key={item.id} value={item.id}>
                           {item.displayName || item.canonicalRoot}
                         </option>

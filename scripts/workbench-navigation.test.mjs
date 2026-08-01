@@ -148,6 +148,7 @@ test("workspace navigation aggregates actionable cross-workspace signals without
       workspaces: [
         {
           id: "1",
+          origin: "user",
           displayName: "alpha",
           canonicalRoot: "/repo/alpha",
           authorization: "available",
@@ -157,6 +158,7 @@ test("workspace navigation aggregates actionable cross-workspace signals without
         },
         {
           id: "2",
+          origin: "user",
           displayName: "beta",
           canonicalRoot: "/repo/beta",
           authorization: "removing",
@@ -349,8 +351,15 @@ test("global search finds product content and deliberately excludes raw tool out
     workspaces: [
       {
         id: "1",
+        origin: "user",
         displayName: "alpha",
         canonicalRoot: "/repo/alpha",
+      },
+      {
+        id: "9",
+        origin: "managed",
+        displayName: "Independent workspace",
+        canonicalRoot: "/data/workspaces/deadbeefdeadbeef",
       },
     ],
     tasks: [
@@ -365,6 +374,7 @@ test("global search finds product content and deliberately excludes raw tool out
           ),
         ],
       }),
+      task({ id: "9", workspaceId: "9", title: "Managed report" }),
     ],
   };
   assert.equal(searchWorkbench(snapshot, "alpha")[0].kind, "workspace");
@@ -372,6 +382,11 @@ test("global search finds product content and deliberately excludes raw tool out
   assert.equal(searchWorkbench(snapshot, "readiness")[0].kind, "instruction");
   assert.equal(searchWorkbench(snapshot, "checklist")[0].kind, "completion");
   assert.deepEqual(searchWorkbench(snapshot, "tool-only"), []);
+  assert.deepEqual(searchWorkbench(snapshot, "deadbeef"), []);
+  assert.equal(
+    searchWorkbench(snapshot, "managed report")[0].detail,
+    "Independent workspace",
+  );
 });
 
 test("Composer drafts survive a WebView reload scope and fail safely when storage is unavailable", () => {

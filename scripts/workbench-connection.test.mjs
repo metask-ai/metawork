@@ -42,6 +42,7 @@ function snapshot(revision) {
       typedOutputs: false,
       typedFileChanges: false,
       persistentWorkspacePermissions: false,
+      managedWorkspaces: false,
     },
     selectedWorkspaceId: null,
     workspaces: [],

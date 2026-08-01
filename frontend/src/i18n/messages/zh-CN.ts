@@ -122,6 +122,7 @@ export const zhCN: Record<MessageId, string> = {
   "workspace.running_count": "{count} 项进行中",
   "workspace.failed_count": "{count} 项失败",
   "workspace.none": "尚未选择工作区",
+  "workspace.managed": "独立工作区",
   "workspace.grant_ready": "可以在这个已信任的工作区中开始任务。",
   "workspace.selection_cancelled": "已取消选择工作区。",
   "workspace.selection_failed": "未能打开工作区，请重新选择。",
