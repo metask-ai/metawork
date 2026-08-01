@@ -880,7 +880,7 @@ test("lifecycle tests are grouped by invariant", () => {
   const cases = [
     ["tests/agent/lifecycle_test.zig", 37],
     ["tests/agent/event_pump_test.zig", 5],
-    ["tests/workbench/executor_lifecycle_test.zig", 16],
+    ["tests/workbench/executor_lifecycle_test.zig", 17],
     ["tests/integration/lifecycle/lifecycle_test.zig", 4],
   ];
   for (const [path, expectedCount] of cases) {
