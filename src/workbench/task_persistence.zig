@@ -232,6 +232,7 @@ pub const TaskWire = struct {
     title: []const u8,
     title_redacted: bool,
     archived: bool,
+    closed: bool,
     binding: BindingWire,
     next_run_generation: u64,
     active_operation: ?OperationWire,
@@ -458,11 +459,13 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
         try validateRunInput(run.input, limits);
         for (run.tools, 0..) |tool, tool_index| {
             if (!validText(tool.id, limits.max_tool_field_bytes, false) or
+                tool.order == 0 or
                 !validText(tool.name, limits.max_tool_field_bytes, false) or
                 !validText(tool.input, limits.max_tool_field_bytes, true) or
                 !validText(tool.progress, limits.max_tool_field_bytes, true) or
                 !validText(tool.content, limits.max_tool_field_bytes, true) or
-                !oneOf(tool.state, &.{ "running", "completed", "failed" }))
+                !oneOf(tool.state, &.{ "running", "completed", "failed" }) or
+                (std.mem.eql(u8, tool.state, "failed") != tool.is_error))
                 return error.Invalid;
             for (run.tools[0..tool_index]) |previous|
                 if (std.mem.eql(u8, previous.id, tool.id) or previous.order == tool.order)
@@ -470,34 +473,57 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
         }
         const terminal = terminalRunPhase(run.phase);
         if (terminal) {
-            if (run.outcome == null or !oneOf(run.outcome.?, &.{
-                "completed",                   "stopped", "cancelled", "interrupted", "failed",
-                "dependency_contract_failure",
-            })) return error.Invalid;
+            if (!validRunTerminalState(run.phase, run.outcome))
+                return error.Invalid;
         } else {
             if (!oneOf(run.phase, &.{ "queued", "running", "waiting_ui", "stopping" }) or
-                run.outcome != null)
+                run.outcome != null or run.cause != null)
                 return error.Invalid;
             active_count += 1;
         }
+        if (run.cause) |cause| if (!oneOf(cause, &.{
+            "user_cancel",
+            "timeout",
+            "session_close",
+            "app_shutdown",
+            "event_pipeline_failure",
+            "queue_capacity_failure",
+            "ui_pipeline_failure",
+            "dependency_contract_failure",
+            "stale_catalog",
+            "skill_not_found",
+            "invalid_skill_arguments",
+            "skill_policy_violation",
+            "skill_unavailable",
+        })) return error.Invalid;
         max_generation = @max(max_generation, run.generation);
     }
     if (task.next_run_generation < max_generation) return error.Invalid;
     for (task.compacts, 0..) |compact, index| {
-        if (compact.id == 0 or
+        if (compact.id == 0 or compact.after_run_id == 0 or
             !validText(compact.diagnostic, limits.max_terminal_diagnostic_bytes, true))
             return error.Invalid;
         for (task.compacts[0..index]) |previous|
             if (previous.id == compact.id) return error.Invalid;
+        const after_run = findRun(task.runs, compact.after_run_id) orelse
+            return error.Invalid;
+        if (!terminalRunPhase(after_run.phase)) return error.Invalid;
         if (!terminalCompactPhase(compact.phase)) {
             if (!oneOf(compact.phase, &.{ "queued", "compacting", "stopping" }))
                 return error.Invalid;
+            if (compact.cause != null) return error.Invalid;
             active_count += 1;
-        } else if (compact.cause) |cause|
-            if (!oneOf(cause, &.{ "user_cancel", "session_close", "app_shutdown", "resource_limit", "agent_failure", "dependency_contract_failure" }))
-                return error.Invalid;
+        } else {
+            const failed = std.mem.eql(u8, compact.phase, "aborted") or
+                std.mem.eql(u8, compact.phase, "failed");
+            if (failed != (compact.cause != null)) return error.Invalid;
+            if (compact.cause) |cause|
+                if (!oneOf(cause, &.{ "user_cancel", "session_close", "app_shutdown", "resource_limit", "agent_failure", "dependency_contract_failure" }))
+                    return error.Invalid;
+        }
     }
-    if (active_count > 1 or ((task.active_operation == null) != (active_count == 0)))
+    if (active_count > 1 or ((task.active_operation == null) != (active_count == 0)) or
+        ((task.closed or task.archived) and active_count != 0))
         return error.Invalid;
     if (task.active_operation) |operation| {
         if (operation.id == 0 or !oneOf(operation.kind, &.{ "run", "compact" }))
@@ -518,8 +544,31 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
             !validText(record.detail, 512, true) or findRun(task.runs, record.run_id) == null)
             return error.Invalid;
         for (task.ui_history[0..index]) |previous|
-            if (previous.request_id == record.request_id) return error.Invalid;
+            if (previous.request_id == record.request_id or
+                (previous.run_id == record.run_id and previous.order == record.order))
+                return error.Invalid;
+        const run = findRun(task.runs, record.run_id) orelse unreachable;
+        for (run.tools) |tool| if (tool.order == record.order)
+            return error.Invalid;
     }
+    for (task.runs) |run| {
+        var max_activity_order: u64 = 0;
+        for (run.tools) |tool| max_activity_order = @max(max_activity_order, tool.order);
+        for (task.ui_history) |record| {
+            if (record.run_id == run.id)
+                max_activity_order = @max(max_activity_order, record.order);
+        }
+        if (run.next_activity_order <= max_activity_order) return error.Invalid;
+    }
+}
+
+fn validRunTerminalState(phase: []const u8, outcome: ?[]const u8) bool {
+    const value = outcome orelse return false;
+    if (std.mem.eql(u8, phase, "failed"))
+        return oneOf(value, &.{ "failed", "dependency_contract_failure" });
+    return std.mem.eql(u8, phase, value) and oneOf(phase, &.{
+        "completed", "stopped", "cancelled", "interrupted",
+    });
 }
 
 fn validateRunInput(input: RunInputWire, limits: Limits) !void {
@@ -601,7 +650,7 @@ test "task store rejects unknown schema fields and dangling workspace references
         decode(std.testing.allocator, unknown, limits),
     );
     const dangling =
-        \\{"schema_version":1,"next_workspace_id":1,"next_workspace_recent_order":1,"next_task_id":2,"next_task_recent_order":2,"selected_workspace_id":null,"workspaces":[],"tasks":[{"id":1,"recent_order":1,"workspace_id":1,"workspace_epoch":1,"workspace_root":"C:\\\\repo","title":"","title_redacted":false,"archived":false,"binding":{"epoch":1,"execution_generation":1,"provider":"openai","model":"m","account_id":"a","profile_id":"p","account_display_name":"","api_key_selection_id":"k","api_key_name":"","api_key_suffix":"","model_selection_id":"m","model_display_name":""},"next_run_generation":0,"active_operation":null,"runs":[],"compacts":[],"ui_history":[]}]}
+        \\{"schema_version":1,"next_workspace_id":1,"next_workspace_recent_order":1,"next_task_id":2,"next_task_recent_order":2,"selected_workspace_id":null,"workspaces":[],"tasks":[{"id":1,"recent_order":1,"workspace_id":1,"workspace_epoch":1,"workspace_root":"C:\\\\repo","title":"","title_redacted":false,"archived":false,"closed":false,"binding":{"epoch":1,"execution_generation":1,"provider":"openai","model":"m","account_id":"a","profile_id":"p","account_display_name":"","api_key_selection_id":"k","api_key_name":"","api_key_suffix":"","model_selection_id":"m","model_display_name":""},"next_run_generation":0,"active_operation":null,"runs":[],"compacts":[],"ui_history":[]}]}
     ;
     try std.testing.expectError(
         error.TaskStoreCorrupt,
@@ -611,12 +660,162 @@ test "task store rejects unknown schema fields and dangling workspace references
 
 test "task store preserves history bound to an older Workspace epoch" {
     const state =
-        \\{"schema_version":1,"next_workspace_id":2,"next_workspace_recent_order":2,"next_task_id":2,"next_task_recent_order":2,"selected_workspace_id":1,"workspaces":[{"id":1,"epoch":2,"origin":"user","canonical_root":"C:\\\\repo","display_name":"repo","visible":true,"recent_order":1}],"tasks":[{"id":1,"recent_order":1,"workspace_id":1,"workspace_epoch":1,"workspace_root":"C:\\\\repo","title":"","title_redacted":false,"archived":false,"binding":{"epoch":1,"execution_generation":1,"provider":"openai","model":"m","account_id":"a","profile_id":"p","account_display_name":"","api_key_selection_id":"k","api_key_name":"","api_key_suffix":"","model_selection_id":"m","model_display_name":""},"next_run_generation":0,"active_operation":null,"runs":[],"compacts":[],"ui_history":[]}]}
+        \\{"schema_version":1,"next_workspace_id":2,"next_workspace_recent_order":2,"next_task_id":2,"next_task_recent_order":2,"selected_workspace_id":1,"workspaces":[{"id":1,"epoch":2,"origin":"user","canonical_root":"C:\\\\repo","display_name":"repo","visible":true,"recent_order":1}],"tasks":[{"id":1,"recent_order":1,"workspace_id":1,"workspace_epoch":1,"workspace_root":"C:\\\\repo","title":"","title_redacted":false,"archived":false,"closed":false,"binding":{"epoch":1,"execution_generation":1,"provider":"openai","model":"m","account_id":"a","profile_id":"p","account_display_name":"","api_key_selection_id":"k","api_key_name":"","api_key_suffix":"","model_selection_id":"m","model_display_name":""},"next_run_generation":0,"active_operation":null,"runs":[],"compacts":[],"ui_history":[]}]}
     ;
     var parsed = try decode(std.testing.allocator, state, testLimits());
     defer parsed.deinit();
     try std.testing.expectEqual(@as(u64, 2), parsed.value.workspaces[0].epoch);
     try std.testing.expectEqual(@as(u64, 1), parsed.value.tasks[0].workspace_epoch);
+}
+
+test "task store rejects states that would violate the Renderer contract" {
+    var workspaces = [_]WorkspaceWire{.{
+        .id = 1,
+        .epoch = 1,
+        .origin = "user",
+        .canonical_root = "C:\\repo",
+        .display_name = "repo",
+        .visible = true,
+        .recent_order = 1,
+    }};
+    var tools = [_]ToolWire{.{
+        .id = "tool-1",
+        .order = 1,
+        .name = "Read",
+        .input = "",
+        .progress = "",
+        .content = "done",
+        .state = "completed",
+        .is_error = false,
+        .elapsed_ms = 1,
+        .input_truncated = false,
+        .progress_truncated = false,
+        .content_truncated = false,
+        .redacted = false,
+    }};
+    var runs = [_]RunWire{.{
+        .id = 1,
+        .generation = 1,
+        .execution_generation = 1,
+        .execution_provider = "openai",
+        .execution_model = "model",
+        .input = .{
+            .kind = "text",
+            .text = "inspect",
+            .skill_id = null,
+            .catalog_revision = null,
+            .invocation_name = null,
+            .display_name = null,
+            .argument_values = null,
+            .redacted = false,
+        },
+        .assistant = "done",
+        .assistant_redacted = false,
+        .phase = "completed",
+        .outcome = "completed",
+        .cause = null,
+        .status = "Completed",
+        .usage = .{
+            .input_tokens = 1,
+            .output_tokens = 1,
+            .cache_read_input_tokens = 0,
+            .cache_creation_input_tokens = 0,
+        },
+        .tools = &tools,
+        .diagnostic = "",
+        .diagnostic_truncated = false,
+        .diagnostic_redacted = false,
+        .event_projection_failure = false,
+        .next_activity_order = 3,
+    }};
+    var compacts = [_]CompactWire{.{
+        .id = 2,
+        .after_run_id = 1,
+        .phase = "compacted",
+        .cause = null,
+        .before_context_tokens = 10,
+        .after_context_tokens = 5,
+        .usage = .{
+            .input_tokens = 0,
+            .output_tokens = 0,
+            .cache_read_input_tokens = 0,
+            .cache_creation_input_tokens = 0,
+        },
+        .diagnostic = "",
+        .diagnostic_truncated = false,
+        .diagnostic_redacted = false,
+    }};
+    var ui_history = [_]UiRecordWire{.{
+        .request_id = 1,
+        .run_id = 1,
+        .order = 2,
+        .kind = "permission",
+        .state = "allowed_once",
+        .detail = "Read",
+        .item_count = 0,
+        .detail_truncated = false,
+        .redacted = false,
+    }};
+    var tasks = [_]TaskWire{.{
+        .id = 1,
+        .recent_order = 1,
+        .workspace_id = 1,
+        .workspace_epoch = 1,
+        .workspace_root = "C:\\repo",
+        .title = "task",
+        .title_redacted = false,
+        .archived = false,
+        .closed = false,
+        .binding = .{
+            .epoch = 1,
+            .execution_generation = 1,
+            .provider = "openai",
+            .model = "model",
+            .account_id = "account",
+            .profile_id = "profile",
+            .account_display_name = "Account",
+            .api_key_selection_id = "key",
+            .api_key_name = "Key",
+            .api_key_suffix = "1234",
+            .model_selection_id = "model",
+            .model_display_name = "Model",
+        },
+        .next_run_generation = 1,
+        .active_operation = null,
+        .runs = &runs,
+        .compacts = &compacts,
+        .ui_history = &ui_history,
+    }};
+    var state: StateWire = .{
+        .schema_version = schema_version,
+        .next_workspace_id = 2,
+        .next_workspace_recent_order = 2,
+        .next_task_id = 2,
+        .next_task_recent_order = 2,
+        .selected_workspace_id = 1,
+        .workspaces = &workspaces,
+        .tasks = &tasks,
+    };
+    try validate(&state, testLimits());
+
+    runs[0].outcome = "failed";
+    try std.testing.expectError(error.Invalid, validate(&state, testLimits()));
+    runs[0].outcome = "completed";
+
+    tools[0].state = "failed";
+    try std.testing.expectError(error.Invalid, validate(&state, testLimits()));
+    tools[0].state = "completed";
+
+    compacts[0].after_run_id = 99;
+    try std.testing.expectError(error.Invalid, validate(&state, testLimits()));
+    compacts[0].after_run_id = 1;
+
+    compacts[0].cause = "user_cancel";
+    try std.testing.expectError(error.Invalid, validate(&state, testLimits()));
+    compacts[0].cause = null;
+
+    ui_history[0].order = 1;
+    try std.testing.expectError(error.Invalid, validate(&state, testLimits()));
 }
 
 test "task file store holds one writer and atomically replaces bytes" {

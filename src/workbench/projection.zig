@@ -745,6 +745,7 @@ const DurableTaskRecord = struct {
     title: []u8,
     title_redacted: bool = false,
     archived: bool = false,
+    closed: bool = false,
     runs: []?RunRecord,
     compacts: []?CompactRecord,
     next_run_generation: u64 = 0,
@@ -3031,7 +3032,31 @@ pub const Workbench = struct {
         self.syncLifecycle();
         const view = self.findTask(task_id) orelse return error.UnknownTask;
         if (view.runtime.close_completion.load(.acquire) == .running) return error.CloseInProgress;
-        const session = view.runtime.session orelse return;
+        const session = view.runtime.session orelse {
+            if (view.runtime.lifecycle == .closed) return;
+            const restored_read_only = switch (view.runtime.continuation) {
+                .available => false,
+                .unavailable => |reason| reason == .session_recovery_unsupported,
+            };
+            if (view.runtime.lifecycle != .open or !restored_read_only) return;
+            try self.requireTaskPersistenceMutation();
+            const previous_recent_order = view.durable.recent_order;
+            const previous_next_recent_order = self.next_task_recent_order;
+            view.durable.closed = true;
+            view.runtime.lifecycle = .closed;
+            view.runtime.continuation = .{ .unavailable = .closed };
+            self.touchTask(view);
+            self.commitTaskStateIfConfigured() catch |err| {
+                view.durable.closed = false;
+                view.runtime.lifecycle = .open;
+                view.runtime.continuation = .{ .unavailable = .session_recovery_unsupported };
+                view.durable.recent_order = previous_recent_order;
+                self.next_task_recent_order = previous_next_recent_order;
+                return err;
+            };
+            self.bumpRevision();
+            return;
+        };
         const prior_lifecycle = view.runtime.lifecycle;
         const prior_continuation = view.runtime.continuation;
         if (switch (view.runtime.active_operation) {
@@ -3400,6 +3425,10 @@ pub const Workbench = struct {
                         view.runtime.continuation = .{ .unavailable = .closed };
                         view.runtime.session = null;
                         view.runtime.close_failed = false;
+                        if (!view.durable.closed) {
+                            view.durable.closed = true;
+                            durable_changed = true;
+                        }
                     },
                     .failed_reusable, .failed_poisoned, .failed_closing => {
                         view.runtime.session = closing_session;
@@ -3524,6 +3553,7 @@ pub const Workbench = struct {
             .unknown => return,
             .known => |known| known,
         };
+        var durable_boundary = false;
         switch (event) {
             .text_chunk => |text| {
                 try self.appendTrackedText(&run.assistant, text, self.limits.max_assistant_message_bytes);
@@ -3552,6 +3582,7 @@ pub const Workbench = struct {
                 tool.is_error = result.is_error;
                 tool.elapsed_ms = result.elapsed_ms;
                 tool.state = if (result.is_error) .failed else .completed;
+                durable_boundary = true;
             },
             .usage => |usage| {
                 run.usage.input_tokens = try addU64(run.usage.input_tokens, usage.input_tokens);
@@ -3564,6 +3595,7 @@ pub const Workbench = struct {
             .retry_notice => _ = try self.replaceTrackedProjected(&run.status_text, "Retrying provider", self.limits.max_tool_field_bytes, run.redaction_secret),
             .stream_done => _ = try self.replaceTrackedProjected(&run.status_text, "Finishing", self.limits.max_tool_field_bytes, run.redaction_secret),
         }
+        if (durable_boundary) self.commitTaskStateNoFail();
         self.bumpRevision();
     }
 
@@ -4812,6 +4844,7 @@ pub const Workbench = struct {
                 .title = title,
                 .title_redacted = wire.title_redacted,
                 .archived = wire.archived,
+                .closed = wire.closed,
                 .runs = runs,
                 .compacts = compacts,
                 .next_run_generation = wire.next_run_generation,
@@ -4820,7 +4853,11 @@ pub const Workbench = struct {
                 .ui_history_next = wire.ui_history.len % ui_history.len,
             },
             .runtime = .{
-                .continuation = .{ .unavailable = .session_recovery_unsupported },
+                .lifecycle = if (wire.closed) .closed else .open,
+                .continuation = if (wire.closed)
+                    .{ .unavailable = .closed }
+                else
+                    .{ .unavailable = .session_recovery_unsupported },
             },
         };
     }
@@ -5192,6 +5229,7 @@ pub const Workbench = struct {
             .title = task.durable.title,
             .title_redacted = task.durable.title_redacted,
             .archived = task.durable.archived,
+            .closed = task.durable.closed,
             .binding = .{
                 .epoch = task.durable.binding_epoch,
                 .execution_generation = task.durable.execution_generation,
@@ -5272,7 +5310,7 @@ pub const Workbench = struct {
             },
         };
         const terminal = productTerminalFacts(run);
-        const terminal_payload = terminalPayload(run);
+        const terminal_payload = if (terminal != null) terminalPayload(run) else null;
         return .{
             .id = run.id,
             .generation = run.generation,
@@ -9038,6 +9076,14 @@ test "Task state round trip restores product history without fabricating a Sessi
         source.task_persistence_health = .ready;
         try source.commitTaskState();
         try std.testing.expectEqual(@as(usize, 1), persistence.commits);
+        var tool_result = try testEnvelope(
+            3,
+            7,
+            "{\"tool_result\":{\"id\":\"tool-1\",\"name\":\"Read\",\"input\":\"{}\",\"content\":\"persisted before terminal\",\"is_error\":false,\"elapsed_ms\":1}}",
+        );
+        defer tool_result.deinit();
+        try source.applyEvent(&tool_result);
+        try std.testing.expectEqual(@as(usize, 2), persistence.commits);
         try std.testing.expect(persistence.len != 0);
         var verified = try task_persistence.decode(
             std.testing.allocator,
@@ -9072,6 +9118,12 @@ test "Task state round trip restores product history without fabricating a Sessi
     const run = findRun(task.durable.runs, 7) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(RunPhase.interrupted, runPhase(run));
     try std.testing.expectEqual(RunOutcome.interrupted, productTerminalFacts(run).?.outcome);
+    const tool = for (run.tools) |*entry| {
+        const candidate = &(entry.* orelse continue);
+        if (std.mem.eql(u8, candidate.content, "persisted before terminal"))
+            break candidate;
+    } else return error.TestUnexpectedResult;
+    try std.testing.expectEqual(ToolState.completed, tool.state);
 
     var snapshot_storage: [96 * 1024]u8 = undefined;
     const snapshot = try restored.writeSnapshot(&snapshot_storage);
@@ -9084,6 +9136,43 @@ test "Task state round trip restores product history without fabricating a Sessi
     try std.testing.expect(
         std.mem.indexOf(u8, snapshot, "\"continuationUnavailableReason\":\"session_recovery_unsupported\"") != null,
     );
+
+    try restored.closeTask(3);
+    try std.testing.expectEqual(TaskLifecycle.closed, restored.findTask(3).?.runtime.lifecycle);
+    try std.testing.expect(restored.findTask(3).?.durable.closed);
+
+    var closed_restore = try Workbench.init(
+        std.testing.allocator,
+        &test_agent_runtime,
+        testLimits(),
+        .{
+            .task_persistence = persistence.capability(
+                persistence.storage[0..persistence.len],
+            ),
+        },
+    );
+    defer closed_restore.deinit();
+    const closed_task = closed_restore.findTask(3) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(TaskLifecycle.closed, closed_task.runtime.lifecycle);
+    try std.testing.expectEqual(
+        ContinuationUnavailableReason.closed,
+        closed_task.runtime.continuation.unavailable,
+    );
+
+    try closed_restore.deleteTask(3);
+    var deleted_restore = try Workbench.init(
+        std.testing.allocator,
+        &test_agent_runtime,
+        testLimits(),
+        .{
+            .task_persistence = persistence.capability(
+                persistence.storage[0..persistence.len],
+            ),
+        },
+    );
+    defer deleted_restore.deinit();
+    try std.testing.expect(deleted_restore.findTask(3) == null);
 }
 
 test "Task persistence restore failure blocks product mutations" {
