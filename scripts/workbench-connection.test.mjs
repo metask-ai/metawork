@@ -3,6 +3,10 @@ import test from "node:test";
 
 import { WorkbenchConnection } from "../frontend/src/bridge/connection.ts";
 import { RendererBridgeContractError } from "../frontend/src/bridge/client.ts";
+import {
+  connectionFailurePresentation,
+  connectionStatus,
+} from "../frontend/src/app/connection-status.ts";
 
 globalThis.window ??= {
   setTimeout: globalThis.setTimeout,
@@ -78,6 +82,14 @@ test("contract mismatch is terminal and never enters connection retry backoff", 
   assert.equal(connectCalls, 2);
   assert.equal(statuses.at(-1)?.kind, "contract_failed");
   assert.equal(statuses.at(-1)?.source, "bootstrap");
+  assert.equal(statuses.at(-1)?.code, "revision_mismatch");
+  const shellStatus = connectionStatus(statuses.at(-1));
+  assert.equal(shellStatus.id, "connection.component_mismatch");
+  assert.deepEqual(connectionFailurePresentation(shellStatus), {
+    titleId: "connection.component_mismatch",
+    helpId: "connection.component_mismatch_help",
+    retryable: false,
+  });
 });
 
 test("snapshot contract failure is terminal and never enters refresh retry backoff", async () => {
@@ -109,6 +121,14 @@ test("snapshot contract failure is terminal and never enters refresh retry backo
   assert.equal(fetchCalls, 1);
   assert.equal(statuses.at(-1)?.kind, "contract_failed");
   assert.equal(statuses.at(-1)?.source, "snapshot");
+  assert.equal(statuses.at(-1)?.code, "invalid_response");
+  const shellStatus = connectionStatus(statuses.at(-1));
+  assert.equal(shellStatus.id, "connection.contract_failed");
+  assert.deepEqual(connectionFailurePresentation(shellStatus), {
+    titleId: "connection.contract_failed",
+    helpId: "connection.contract_failed_help",
+    retryable: true,
+  });
   assert.equal(failed.at(-1), true);
 });
 

@@ -424,6 +424,8 @@ Execution binding availability 是下一次 admission 的独立前置事实，�
 
 表格按优先级匹配。`Completed` 等 terminal 标签只描述最近一次执行；归档状态由独立标记表达，不得覆盖需要处理或正在停止的运行状态。
 
+连接失败必须按可恢复边界呈现：只有 bootstrap `connect` 明确返回 Renderer Bridge identity 或 revision 不匹配时，才显示“组件不匹配”并要求关闭后重建或安装；snapshot、revision notification 或 Host signal 的 malformed/unknown payload 仍然 fail closed、禁止 mutation，但显示对应的视图读取失败、技术来源和显式重新连接入口，不能伪装成已经证实的组件版本问题。
+
 没有 active Run 且 execution binding 为 `rebind_required` 或 `unavailable` 时，左栏仍保留最近一次 Run 的 outcome；Composer 区域另外显示 `需要确认执行配置` 或 `当前无法继续`。不得用 binding 问题把历史结果改标成 Failed，也不得继续显示可发送输入造成错误暗示。
 
 ### 6.4 跨重启历史与 execution rebind
@@ -577,21 +579,21 @@ Slash 是 Composer 的输入手势，不是 CLI 模式。空 draft 的首个非�
 
 菜单贴附于 Composer，而不是全局模态命令面板。Command 与 Skill 分组显示，使用确定性的大小写不敏感 prefix/substring 过滤；`ArrowUp / ArrowDown` 移动，`Enter / Tab` 选择，`Escape` 关闭但保留可见文本。菜单打开时 `Enter` 绝不能提交普通 Text；IME composition 期间不打开、过滤或执行。textarea 使用 combobox 语义，候选容器使用 listbox/group/option，并同步 `aria-expanded`、`aria-controls` 与 `aria-activedescendant`。不可用 Command 保留可发现性并显示真实原因。
 
-Command 只是现有动作的键盘入口。选择后由 `App` action controller 消费，不创建 command history，也不把原始 `/command` 送入 Bridge。V1 registry 包含 `/new` 与 `/compact`：`/new` 从已有 Task 打开 New task；`/compact` 在已有 finalized Run、continuation available 且没有 active operation 时触发 typed Task maintenance action。不可用 Command 保留候选并明确禁用原因。`/model`、`/status`、`/goal`、`/resume`、`/continue` 以及其他尚无正式产品 owner/合同的 CLI/TUI identifier 不注册。带尾随参数的 Command 不执行；无法解析的首 token Slash 保持可见但发送禁用，用户必须选择候选、删除 `/` 或改写为普通正文。Command 与 Skill 同名时，裸 `/name` 归 Command，Skill 通过 `/skill:name` 显式选择。
+Command 只是现有动作的键盘入口。选择后由 `App` action controller 消费，不创建 command history，也不把原始 `/command` 送入 Bridge。V1 registry 包含 `/new` 与 `/compact`：`/new` 从已有 Task 打开 New task；`/compact` 在已有 finalized Run、continuation available 且没有 active operation 时触发 typed Task maintenance action。不可用 Command 保留候选并明确显示各自的禁用原因；New task draft 中 `/new` 说明草稿已打开，`/compact` 说明尚无可压缩历史，不能让一个 Command 的 gate 覆盖另一个 Command。`/model`、`/status`、`/goal`、`/resume`、`/continue` 以及其他尚无正式产品 owner/合同的 CLI/TUI identifier 不注册。带尾随参数的 Command 不执行；无法解析的首 token Slash 保持可见但发送禁用，用户必须选择候选、删除 `/` 或改写为普通正文。Command 与 Skill 同名时，裸 `/name` 归 Command，Skill 通过 `/skill:name` 显式选择。
 
 选择 Skill 后，文本 draft 原子变为结构化 draft：左侧能力轨显示可移除的 Skill identity，右侧按 descriptor 顺序显示 positional argument 输入。Renderer 保留 catalog 的 `maxValues`，未命名的可选 positional argument 由用户逐项添加或移除，字段数不得超过该上限和产品的 64 项硬上限；发送前同时校验完整 Skill Run 输入的 64 KiB UTF-8 字节预算。`/review src/main.zig` 的可见尾随文本成为第一个参数，不实现 shell quote/escape parser；每次 Run 至多一个 Skill。Skill 原始 Slash 文本不进入 Bridge 或历史，发送只产生 `{ kind: "skill", skillId, catalogRevision, argumentValues }`。
 
 Skill draft 与 Text draft 一样按 Task/New-task scope 保存在 Renderer session storage；既有 raw Text draft 读取后在下一次写入时单向升级为 tagged storage，暂时超过 Run 提交预算的非空 draft 不得删除已有持久值。发送失败、拒绝或 timeout reconciliation 后恢复完整 tagged draft。catalog revision 或 identity 变化时保留 token 与参数，但显示 stale 说明并禁用发送；刷新是显式动作，成功后仍要求用户从新 catalog 重新选择。已有 Task 的 Workspace current catalog 尚不可用时，同一刷新动作先刷新 Workspace；Workspace ready 后再次执行才刷新 Task binding，不隐式监听、重放或跨 revision 替换。`loading / unavailable` 只影响 Skill 候选，普通 Text 保持可编辑、可发送。
 
-| Task state           | Composer behavior                                                                 |
-| -------------------- | --------------------------------------------------------------------------------- |
-| draft / idle         | 文本、附件、发送                                                                  |
-| queued               | 允许草拟但禁止发送；停止入口只在 Task Header                                      |
-| running              | 允许草拟下一条指令但禁止发送，显示 `当前任务结束后发送`；停止入口只在 Task Header |
-| waiting_user         | 普通输入让位于时间线请求，底部提示 `Respond above to continue` 并保留本地草稿     |
-| stopping             | 禁用输入，显示 `Stopping…`                                                        |
-| compact queued/running | 允许编辑本地草稿但禁止发送；唯一停止入口在 Task Header                          |
-| failed / interrupted | 恢复输入，提供针对性的重试或继续动作                                              |
+| Task state             | Composer behavior                                                                 |
+| ---------------------- | --------------------------------------------------------------------------------- |
+| draft / idle           | 文本、附件、发送                                                                  |
+| queued                 | 允许草拟但禁止发送；停止入口只在 Task Header                                      |
+| running                | 允许草拟下一条指令但禁止发送，显示 `当前任务结束后发送`；停止入口只在 Task Header |
+| waiting_user           | 普通输入让位于时间线请求，底部提示 `Respond above to continue` 并保留本地草稿     |
+| stopping               | 禁用输入，显示 `Stopping…`                                                        |
+| compact queued/running | 允许编辑本地草稿但禁止发送；唯一停止入口在 Task Header                            |
+| failed / interrupted   | 恢复输入，提供针对性的重试或继续动作                                              |
 
 表中的 `idle` 仍受 execution binding availability 约束；`rebind_required / unavailable` 时以 §6.4 的只读说明和动作替代发送控件。
 

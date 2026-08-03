@@ -17,8 +17,11 @@ export const enUS = {
   "connection.recovered": "Workbench connection recovered.",
   "connection.failed": "The Workbench view is unavailable.",
   "connection.failed_help": "Reconnect before making changes.",
-  "connection.contract_failed": "MetaWork components do not match",
+  "connection.contract_failed": "MetaWork could not read the Workbench view",
   "connection.contract_failed_help":
+    "Reconnect to load a fresh view. If this continues, close and reopen MetaWork.",
+  "connection.component_mismatch": "MetaWork components do not match",
+  "connection.component_mismatch_help":
     "Close MetaWork, then rebuild or reinstall the matching application components before reopening it.",
   "connection.retry": "Reconnect",
   "connection.retrying": "Reconnecting…",

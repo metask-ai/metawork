@@ -5,6 +5,7 @@ import { useI18n, type MessageId } from "../../i18n/context.ts";
 import {
   resolveSlashCandidates,
   type SlashCandidate,
+  type SlashCommandDisabledReason,
   type SlashCommandState,
   type SlashInput,
 } from "./slash.ts";
@@ -19,6 +20,14 @@ const commandMessageIds: Record<
     description: "slash.command.compact_help",
   },
 };
+
+const disabledReasonMessageIds: Record<SlashCommandDisabledReason, MessageId> =
+  {
+    already_new_task: "slash.disabled_already_new_task",
+    task_busy: "slash.disabled_task_busy",
+    no_history: "slash.disabled_no_history",
+    unavailable: "slash.disabled_unavailable",
+  };
 
 export function SlashMenu({
   input,
@@ -102,17 +111,12 @@ export function SlashMenu({
         <span className="slash-option-copy">
           <strong>{label}</strong>
           <span>
-            {candidate.disabledReason ||
-              description ||
-              t("slash.no_description")}
+            {candidate.kind === "command" && candidate.disabledReason
+              ? t(disabledReasonMessageIds[candidate.disabledReason])
+              : candidate.disabledReason ||
+                description ||
+                t("slash.no_description")}
           </span>
-        </span>
-        <span className="slash-option-kind">
-          {t(
-            candidate.kind === "command"
-              ? "slash.group.commands"
-              : "slash.group.skills",
-          )}
         </span>
       </button>
     );

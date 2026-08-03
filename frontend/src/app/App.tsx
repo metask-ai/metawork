@@ -19,6 +19,10 @@ import {
   type ShellStatusState,
   type StatusAudience,
 } from "./command-bar-status.ts";
+import {
+  connectionFailurePresentation,
+  connectionStatus,
+} from "./connection-status.ts";
 import { Icon } from "../components/ui/Icon.tsx";
 import { AccountIdentity } from "../features/account/AccountIdentity.tsx";
 import { AccountGate } from "../features/account/AccountGate.tsx";
@@ -67,8 +71,8 @@ import {
   emptyComposerDraft,
   isSkillDraftCurrent,
   maxSkillArguments,
+  resolveSlashCommandStates,
   skillCatalogRefreshTarget,
-  slashCommandNames,
   type ComposerDraft,
   type SlashCommandName,
   type SlashCommandState,
@@ -78,10 +82,7 @@ import {
   BridgeCommandTimeoutError,
   RendererBridgeContractError,
 } from "../bridge/client.ts";
-import {
-  WorkbenchConnection,
-  type WorkbenchConnectionStatus,
-} from "../bridge/connection.ts";
+import { WorkbenchConnection } from "../bridge/connection.ts";
 import type {
   TaskCreateReason,
   TaskCompactReason,
@@ -125,30 +126,6 @@ type MutationReason =
 
 function mutationReasonMessageId(reason: MutationReason): MessageId {
   return `mutation.reason.${reason}`;
-}
-
-function connectionStatus(status: WorkbenchConnectionStatus): ShellStatus {
-  if (status.kind === "connected")
-    return quietStatus(
-      status.recovered ? "connection.recovered" : "connection.connected",
-      { scope: "connection" },
-    );
-  if (status.kind === "refresh_failed")
-    return attentionStatus(
-      "connection.refresh_failed",
-      { scope: "connection" },
-      {
-        diagnostic: status.diagnostic,
-      },
-    );
-  return attentionStatus(
-    "connection.contract_failed",
-    { scope: "connection" },
-    {
-      diagnostic: status.diagnostic,
-      sourceId: `connection.source.${status.source}`,
-    },
-  );
 }
 
 export default function App() {
@@ -1633,8 +1610,10 @@ export default function App() {
   }
 
   const connectionShellStatus = statuses.connection;
-  const connectionRetryable =
-    connectionShellStatus?.id !== "connection.contract_failed";
+  const connectionFailure = connectionFailurePresentation(
+    connectionShellStatus,
+  );
+  const connectionRetryable = connectionFailure.retryable;
   const accountGateStatus = selectAccountGateStatus(statuses);
   if (accountGateRequired)
     return (
@@ -1644,6 +1623,9 @@ export default function App() {
         cancelDisabled={viewSyncFailed || !bridgeReady || accountCancelBusy}
         connectionFailed={viewSyncFailed}
         connectionRetryable={connectionRetryable}
+        connectionTitleId={connectionFailure.titleId}
+        connectionHelpId={connectionFailure.helpId}
+        connectionSourceId={connectionShellStatus?.sourceId}
         connectionDiagnostic={connectionShellStatus?.diagnostic}
         reconnecting={connectionBusy}
         notice={
@@ -1706,35 +1688,19 @@ export default function App() {
   const activeTaskTitle = activeTask
     ? activeTask.title || t("task.item", { id: activeTask.id })
     : t(newTaskDraftActive ? "task.new" : "task.open");
-  const slashCommands: SlashCommandState[] = slashCommandNames.map((name) => {
-    const unavailable = t("slash.disabled_unavailable");
-    const enabled =
-      name === "new"
-        ? !newTaskDraftActive && !bridgeUnavailable
-        : Boolean(
-            activeTask &&
-            !newTaskDraftActive &&
-            !bridgeUnavailable &&
-            !taskMutationDisabled &&
-            activeTask.lifecycle === "open" &&
-            activeTask.continuationAvailable &&
-            !activeTask.archived &&
-            activeTask.activeOperation === null &&
-            activeTask.runs.length > 0,
-          );
-    return {
-      name,
-      enabled,
-      disabledReason: enabled
-        ? null
-        : newTaskDraftActive
-          ? t("slash.disabled_already_new_task")
-          : name === "compact" && Boolean(activeTask?.activeOperation)
-            ? t("slash.disabled_task_busy")
-            : name === "compact" && activeTask?.runs.length === 0
-              ? t("slash.disabled_no_history")
-              : unavailable,
-    };
+  const slashCommands: SlashCommandState[] = resolveSlashCommandStates({
+    newTaskDraftActive,
+    bridgeUnavailable,
+    taskMutationDisabled,
+    task: activeTask
+      ? {
+          lifecycleOpen: activeTask.lifecycle === "open",
+          continuationAvailable: activeTask.continuationAvailable,
+          archived: activeTask.archived,
+          activeOperation: activeTask.activeOperation !== null,
+          hasFinalizedRun: activeTask.runs.length > 0,
+        }
+      : null,
   });
   const commandBarStatus = selectCommandBarStatus(statuses, {
     route,
@@ -2328,20 +2294,8 @@ export default function App() {
 
           {viewSyncFailed && (
             <section className="sync-failure task-sync-failure" role="alert">
-              <h3>
-                {t(
-                  connectionRetryable
-                    ? "connection.failed"
-                    : "connection.contract_failed",
-                )}
-              </h3>
-              <p>
-                {t(
-                  connectionRetryable
-                    ? "connection.failed_help"
-                    : "connection.contract_failed_help",
-                )}
-              </p>
+              <h3>{t(connectionFailure.titleId)}</h3>
+              <p>{t(connectionFailure.helpId)}</p>
               {connectionRetryable ? (
                 <button
                   className="secondary-button focus-ring"

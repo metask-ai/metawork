@@ -746,6 +746,29 @@ test("Slash menu is an IME-safe combobox and consumes Command Enter locally", ()
   assert.equal(composer.submissions(), 0);
 });
 
+test("Slash menu translates command-specific disabled reasons without repeating its group label", () => {
+  renderComposer({
+    draft: { kind: "text", text: "/" },
+    slashCommands: [
+      {
+        name: "new",
+        enabled: false,
+        disabledReason: "already_new_task",
+      },
+      { name: "compact", enabled: false, disabledReason: "no_history" },
+    ],
+  });
+  assert.match(
+    screen.getByRole("option", { name: /New task/ }).textContent,
+    /A new task draft is already open/,
+  );
+  assert.match(
+    screen.getByRole("option", { name: /Compact context/ }).textContent,
+    /Run the task once before compacting context/,
+  );
+  assert.equal(screen.getAllByText("Commands").length, 1);
+});
+
 test("keyboard Skill selection moves focus into the structured draft", async () => {
   const composer = renderComposer({
     draft: { kind: "text", text: "/review" },

@@ -19,8 +19,11 @@ export const zhCN: Record<MessageId, string> = {
   "connection.recovered": "工作台连接已恢复。",
   "connection.failed": "工作台视图暂不可用。",
   "connection.failed_help": "重新连接后才能继续修改。",
-  "connection.contract_failed": "MetaWork 组件不匹配",
+  "connection.contract_failed": "MetaWork 无法读取工作台视图",
   "connection.contract_failed_help":
+    "请重新连接以加载最新视图。如果问题持续，请关闭并重新打开 MetaWork。",
+  "connection.component_mismatch": "MetaWork 组件不匹配",
+  "connection.component_mismatch_help":
     "请关闭 MetaWork，重新构建或安装相互匹配的应用组件后再打开。",
   "connection.retry": "重新连接",
   "connection.retrying": "正在重新连接…",
