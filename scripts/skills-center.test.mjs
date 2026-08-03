@@ -223,6 +223,10 @@ test("Skills route uses the canonical management commands and no policy path", a
     join(process.cwd(), "frontend/src/features/skills/SkillsPage.tsx"),
     "utf8",
   );
+  const css = await readFile(
+    join(process.cwd(), "frontend/src/index.css"),
+    "utf8",
+  );
   assert.match(app, /management=\{snapshot\.skillManagement\}/);
   assert.match(app, /commitSkillMutation/);
   for (const command of [
@@ -242,6 +246,14 @@ test("Skills route uses the canonical management commands and no policy path", a
   assert.doesNotMatch(
     page,
     /window\.zero|window\.confirm|localStorage|FileSystem|toggle|switch/i,
+  );
+  assert.match(
+    css,
+    /\.skill-center \.primary-button \{[\s\S]*?display: inline-flex;[\s\S]*?width: auto;[\s\S]*?margin-top: 0;[\s\S]*?gap: 6px;/,
+  );
+  assert.match(
+    css,
+    /\.skill-empty-state > \.primary-button \{\s*min-width: 168px;/,
   );
 });
 

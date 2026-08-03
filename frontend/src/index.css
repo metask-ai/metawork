@@ -2019,6 +2019,17 @@ summary::-webkit-details-marker {
   --skill-surface: rgba(255, 255, 255, 0.78);
 }
 
+.skill-center .primary-button {
+  display: inline-flex;
+  width: auto;
+  margin-top: 0;
+  padding: 0 12px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
 .skill-header-actions {
   display: flex;
   align-items: center;
@@ -2276,6 +2287,10 @@ summary::-webkit-details-marker {
   color: var(--color-muted);
   font-size: 12px;
   line-height: 1.55;
+}
+
+.skill-empty-state > .primary-button {
+  min-width: 168px;
 }
 
 .skill-drawer-backdrop {
