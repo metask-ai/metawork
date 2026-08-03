@@ -2016,6 +2016,7 @@ const App = struct {
             .show_message_dialog_fn = platformShowMessageDialog,
             .begin_window_drag_fn = platformBeginWindowDrag,
             .window_control_fn = platformWindowControl,
+            .window_state_fn = platformWindowState,
             .now_fn = platformNow,
             .on_main_thread_fn = platformOnMainThread,
         };
@@ -2134,30 +2135,45 @@ const App = struct {
         context: ?*anyopaque,
         window_id: native_sdk.platform.WindowId,
         clicks: u8,
-    ) anyerror!void {
+    ) anyerror!bridge_api.WindowChromeState {
         const self: *@This() = @ptrCast(@alignCast(context.?));
-        return window_chrome.beginDrag(
+        const state = try window_chrome.beginDrag(
             self.platform_services orelse return error.RuntimeUnavailable,
             window_id,
             clicks,
         );
+        return .{ .maximized = state.maximized };
     }
 
     fn platformWindowControl(
         context: ?*anyopaque,
         window_id: native_sdk.platform.WindowId,
         action: bridge_api.WindowControl,
-    ) anyerror!void {
+    ) anyerror!bridge_api.WindowChromeState {
         const self: *@This() = @ptrCast(@alignCast(context.?));
-        return window_chrome.control(
+        const state = try window_chrome.control(
             self.platform_services orelse return error.RuntimeUnavailable,
             window_id,
             switch (action) {
                 .minimize => .minimize,
                 .toggle_maximize => .toggle_maximize,
+                .show_system_menu => .show_system_menu,
                 .close => .close,
             },
         );
+        return .{ .maximized = state.maximized };
+    }
+
+    fn platformWindowState(
+        context: ?*anyopaque,
+        window_id: native_sdk.platform.WindowId,
+    ) anyerror!bridge_api.WindowChromeState {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        const state = try window_chrome.state(
+            self.platform_services orelse return error.RuntimeUnavailable,
+            window_id,
+        );
+        return .{ .maximized = state.maximized };
     }
 
     fn platformNow(_: ?*anyopaque) u64 {

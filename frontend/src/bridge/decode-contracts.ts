@@ -2038,16 +2038,30 @@ export function assertDisconnected(value: unknown, generation: string) {
     fail("$", "disconnect response mismatch");
 }
 
-export function assertWindowDragStarted(value: unknown) {
-  const item = object(value, "$", ["started"]);
-  if (booleanValue(item.started, "$.started") !== true)
-    fail("$.started", "window drag did not start");
+export type WindowChromeState = { maximized: boolean };
+
+function windowChromeState(item: JsonObject): WindowChromeState {
+  return { maximized: booleanValue(item.maximized, "$.maximized") };
 }
 
-export function assertWindowControlCompleted(value: unknown) {
-  const item = object(value, "$", ["completed"]);
+export function decodeWindowDragStarted(value: unknown): WindowChromeState {
+  const item = object(value, "$", ["started", "maximized"]);
+  if (booleanValue(item.started, "$.started") !== true)
+    fail("$.started", "window drag did not start");
+  return windowChromeState(item);
+}
+
+export function decodeWindowControlCompleted(
+  value: unknown,
+): WindowChromeState {
+  const item = object(value, "$", ["completed", "maximized"]);
   if (booleanValue(item.completed, "$.completed") !== true)
     fail("$.completed", "window control did not complete");
+  return windowChromeState(item);
+}
+
+export function decodeWindowChromeState(value: unknown): WindowChromeState {
+  return windowChromeState(object(value, "$", ["maximized"]));
 }
 
 export function decodeWorkspaceChoice(value: unknown): WorkspaceChoice {

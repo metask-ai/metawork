@@ -18,7 +18,8 @@ const workspace_path_capacity = workspace_grant.max_path_bytes;
 const event_name = "metawork:host-signal";
 
 const AccountSelectionKind = enum { api_key, model };
-pub const WindowControl = enum { minimize, toggle_maximize, close };
+pub const WindowControl = enum { minimize, toggle_maximize, show_system_menu, close };
+pub const WindowChromeState = struct { maximized: bool = false };
 
 pub const Platform = struct {
     context: ?*anyopaque,
@@ -44,12 +45,16 @@ pub const Platform = struct {
         ?*anyopaque,
         native_sdk.platform.WindowId,
         u8,
-    ) anyerror!void,
+    ) anyerror!WindowChromeState,
     window_control_fn: *const fn (
         ?*anyopaque,
         native_sdk.platform.WindowId,
         WindowControl,
-    ) anyerror!void,
+    ) anyerror!WindowChromeState,
+    window_state_fn: *const fn (
+        ?*anyopaque,
+        native_sdk.platform.WindowId,
+    ) anyerror!WindowChromeState,
     now_fn: *const fn (?*anyopaque) u64,
     on_main_thread_fn: *const fn (?*anyopaque) bool,
 };
@@ -128,6 +133,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.disconnect, .function = disconnectEvents },
             .{ .name = commands.window_begin_drag, .function = beginWindowDrag },
             .{ .name = commands.window_control, .function = controlWindow },
+            .{ .name = commands.window_state, .function = getWindowState },
             .{ .name = commands.choose_workspace, .function = chooseWorkspace },
             .{ .name = commands.select_workspace, .function = selectWorkspace },
             .{ .name = commands.remove_workspace, .function = removeWorkspace },
@@ -345,16 +351,20 @@ pub const Dispatcher = struct {
             invocation.request.payload,
         );
         defer parsed.deinit();
-        if (parsed.value.clicks != 1)
+        if (parsed.value.clicks != 1 and parsed.value.clicks != 2)
             return error.InvalidBridgePayload;
         if (!self.platform.on_main_thread_fn(self.platform.context))
             return error.InvalidBridgeThread;
-        try self.platform.begin_window_drag_fn(
+        const state = try self.platform.begin_window_drag_fn(
             self.platform.context,
             invocation.source.window_id,
             parsed.value.clicks,
         );
-        return std.fmt.bufPrint(output, "{{\"started\":true}}", .{});
+        return std.fmt.bufPrint(
+            output,
+            "{{\"started\":true,\"maximized\":{}}}",
+            .{state.maximized},
+        );
     }
 
     fn controlWindow(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
@@ -373,16 +383,45 @@ pub const Dispatcher = struct {
             .minimize
         else if (std.mem.eql(u8, parsed.value.action, "toggle_maximize"))
             .toggle_maximize
+        else if (std.mem.eql(u8, parsed.value.action, "show_system_menu"))
+            .show_system_menu
         else if (std.mem.eql(u8, parsed.value.action, "close"))
             .close
         else
             return error.InvalidBridgePayload;
-        try self.platform.window_control_fn(
+        const state = try self.platform.window_control_fn(
             self.platform.context,
             invocation.source.window_id,
             action,
         );
-        return std.fmt.bufPrint(output, "{{\"completed\":true}}", .{});
+        return std.fmt.bufPrint(
+            output,
+            "{{\"completed\":true,\"maximized\":{}}}",
+            .{state.maximized},
+        );
+    }
+
+    fn getWindowState(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireBootstrapWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(
+            handlers.Empty,
+            invocation.request.payload,
+        );
+        defer parsed.deinit();
+        if (!self.platform.on_main_thread_fn(self.platform.context))
+            return error.InvalidBridgeThread;
+        const state = try self.platform.window_state_fn(
+            self.platform.context,
+            invocation.source.window_id,
+        );
+        return std.fmt.bufPrint(
+            output,
+            "{{\"maximized\":{}}}",
+            .{state.maximized},
+        );
     }
 
     fn beginSnapshot(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
@@ -2357,6 +2396,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
         account_calls: usize = 0,
         drag_calls: usize = 0,
         window_control_calls: usize = 0,
+        window_state_calls: usize = 0,
         on_main_thread: bool = true,
         account_result: account_contract.AccountCommandResult =
             .acceptedAttempt(41),
@@ -2391,22 +2431,34 @@ test "Dispatcher validates authority before domain calls and preserves committed
             context: ?*anyopaque,
             window_id: native_sdk.platform.WindowId,
             clicks: u8,
-        ) anyerror!void {
+        ) anyerror!WindowChromeState {
             const self: *@This() = @ptrCast(@alignCast(context.?));
             try std.testing.expectEqual(@as(native_sdk.platform.WindowId, 3), window_id);
             try std.testing.expect(clicks == 1 or clicks == 2);
             self.drag_calls += 1;
+            return .{ .maximized = clicks == 2 };
         }
 
         fn controlWindow(
             context: ?*anyopaque,
             window_id: native_sdk.platform.WindowId,
             action: WindowControl,
-        ) anyerror!void {
+        ) anyerror!WindowChromeState {
             const self: *@This() = @ptrCast(@alignCast(context.?));
             try std.testing.expectEqual(@as(native_sdk.platform.WindowId, 3), window_id);
             try std.testing.expectEqual(WindowControl.minimize, action);
             self.window_control_calls += 1;
+            return .{};
+        }
+
+        fn windowState(
+            context: ?*anyopaque,
+            window_id: native_sdk.platform.WindowId,
+        ) anyerror!WindowChromeState {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            try std.testing.expectEqual(@as(native_sdk.platform.WindowId, 3), window_id);
+            self.window_state_calls += 1;
+            return .{ .maximized = true };
         }
 
         fn now(_: ?*anyopaque) u64 {
@@ -2467,6 +2519,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
             .show_message_dialog_fn = Harness.confirm,
             .begin_window_drag_fn = Harness.beginWindowDrag,
             .window_control_fn = Harness.controlWindow,
+            .window_state_fn = Harness.windowState,
             .now_fn = Harness.now,
             .on_main_thread_fn = Harness.onMainThread,
         },
@@ -2503,7 +2556,22 @@ test "Dispatcher validates authority before domain calls and preserves committed
         &response,
     );
     try std.testing.expect(std.mem.indexOf(u8, bootstrap_drag, "\"started\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bootstrap_drag, "\"maximized\":false") != null);
     try std.testing.expectEqual(@as(usize, 1), harness.drag_calls);
+    const bootstrap_double_click = native_dispatcher.dispatch(
+        "{\"id\":\"double-click-before-contract\",\"command\":\"metawork.window.beginDrag\",\"payload\":{\"clicks\":2}}",
+        source,
+        &response,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, bootstrap_double_click, "\"maximized\":true") != null);
+    try std.testing.expectEqual(@as(usize, 2), harness.drag_calls);
+    const bootstrap_state = native_dispatcher.dispatch(
+        "{\"id\":\"state-before-contract\",\"command\":\"metawork.window.state\",\"payload\":{}}",
+        source,
+        &response,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, bootstrap_state, "\"maximized\":true") != null);
+    try std.testing.expectEqual(@as(usize, 1), harness.window_state_calls);
     const bootstrap_minimize = native_dispatcher.dispatch(
         "{\"id\":\"minimize-before-contract\",\"command\":\"metawork.window.control\",\"payload\":{\"action\":\"minimize\"}}",
         source,
@@ -2522,6 +2590,13 @@ test "Dispatcher validates authority before domain calls and preserves committed
     );
     try std.testing.expect(std.mem.indexOf(u8, denied_bootstrap_control, "\"handler_failed\"") != null);
     try std.testing.expectEqual(@as(usize, 1), harness.window_control_calls);
+    const denied_bootstrap_state = native_dispatcher.dispatch(
+        "{\"id\":\"wrong-bootstrap-state\",\"command\":\"metawork.window.state\",\"payload\":{}}",
+        foreign_bootstrap_window,
+        &response,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, denied_bootstrap_state, "\"handler_failed\"") != null);
+    try std.testing.expectEqual(@as(usize, 1), harness.window_state_calls);
     harness.on_main_thread = false;
     const off_thread_drag = native_dispatcher.dispatch(
         "{\"id\":\"off-thread-drag\",\"command\":\"metawork.window.beginDrag\",\"payload\":{\"clicks\":1}}",
@@ -2529,7 +2604,14 @@ test "Dispatcher validates authority before domain calls and preserves committed
         &response,
     );
     try std.testing.expect(std.mem.indexOf(u8, off_thread_drag, "\"handler_failed\"") != null);
-    try std.testing.expectEqual(@as(usize, 1), harness.drag_calls);
+    try std.testing.expectEqual(@as(usize, 2), harness.drag_calls);
+    const off_thread_state = native_dispatcher.dispatch(
+        "{\"id\":\"off-thread-state\",\"command\":\"metawork.window.state\",\"payload\":{}}",
+        source,
+        &response,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, off_thread_state, "\"handler_failed\"") != null);
+    try std.testing.expectEqual(@as(usize, 1), harness.window_state_calls);
     harness.on_main_thread = true;
     const invalid_control = native_dispatcher.dispatch(
         "{\"id\":\"invalid-window-control\",\"command\":\"metawork.window.control\",\"payload\":{\"action\":\"resize\"}}",
@@ -2538,6 +2620,13 @@ test "Dispatcher validates authority before domain calls and preserves committed
     );
     try std.testing.expect(std.mem.indexOf(u8, invalid_control, "\"handler_failed\"") != null);
     try std.testing.expectEqual(@as(usize, 1), harness.window_control_calls);
+    const invalid_state = native_dispatcher.dispatch(
+        "{\"id\":\"invalid-window-state\",\"command\":\"metawork.window.state\",\"payload\":{\"extra\":true}}",
+        source,
+        &response,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, invalid_state, "\"handler_failed\"") != null);
+    try std.testing.expectEqual(@as(usize, 1), harness.window_state_calls);
 
     const mismatch = native_dispatcher.dispatch(
         "{\"id\":\"mismatch\",\"command\":\"metawork.events.connect\",\"payload\":{\"contractId\":\"metawork.renderer-bridge\",\"contractRevision\":2}}",
@@ -2593,7 +2682,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
         &response,
     );
     try std.testing.expect(std.mem.indexOf(u8, drag, "\"started\":true") != null);
-    try std.testing.expectEqual(@as(usize, 2), harness.drag_calls);
+    try std.testing.expectEqual(@as(usize, 3), harness.drag_calls);
     const minimize = native_dispatcher.dispatch(
         "{\"id\":\"minimize\",\"command\":\"metawork.window.control\",\"payload\":{\"action\":\"minimize\"}}",
         source,
