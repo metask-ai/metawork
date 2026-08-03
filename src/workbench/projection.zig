@@ -721,9 +721,10 @@ const UiRecord = struct {
     }
 };
 
-/// Product facts that outlive an AgentCore handle and are eligible for the
-/// Workbench durable-state codec. This type deliberately contains no secret,
-/// thread, callback, lease, raw pointer, or Session handle.
+/// Task-owned product history. Direct Task lifecycle and Session ownership
+/// live in `RuntimeAttachment`. Nested Run and Compact records retain live
+/// control fields until quiescent; the persistence codec explicitly allowlists
+/// only durable, secret-free product facts.
 const DurableTaskRecord = struct {
     id: u64,
     recent_order: u64,
@@ -762,7 +763,6 @@ const RuntimeAttachment = struct {
     route_id: u64 = 0,
     pinned_catalog: ?CatalogSnapshot = null,
     worker_references: std.atomic.Value(usize) = .init(0),
-    delete_pending: bool = false,
     pending_ui_request_id: u64 = 0,
     pending_ui_order: u64 = 0,
     lifecycle: TaskLifecycle = .open,
@@ -801,7 +801,7 @@ const TaskStateWireScratch = struct {
     }
 };
 
-test "Task aggregate keeps durable facts separate from process runtime" {
+test "Task aggregate separates Task runtime ownership from product history" {
     try std.testing.expect(@hasField(TaskView, "durable"));
     try std.testing.expect(@hasField(TaskView, "runtime"));
     inline for (&.{
@@ -3338,13 +3338,8 @@ pub const Workbench = struct {
         // normally implied by close publication in `syncLifecycle`; keep the
         // explicit guard here because deletion is the destructive boundary.
         if (hasUnfinalizedTerminalEvents(view)) return error.TaskBusy;
-        if (view.runtime.worker_references.load(.acquire) != 0) {
-            if (!view.runtime.delete_pending) {
-                view.runtime.delete_pending = true;
-                self.bumpRevision();
-            }
-            return;
-        }
+        if (view.runtime.worker_references.load(.acquire) != 0)
+            return error.TaskBusy;
         const workspace_id = view.durable.workspace_id;
         const release_managed_workspace = if (self.findWorkspace(workspace_id)) |workspace|
             workspace.origin == .managed
@@ -3389,23 +3384,6 @@ pub const Workbench = struct {
         var durable_changed = false;
         for (self.tasks) |*entry| {
             const view = &(entry.* orelse continue);
-            if (view.runtime.delete_pending and view.runtime.lifecycle == .closed and view.runtime.close_thread == null and
-                view.runtime.session == null and !hasUnfinalizedTerminalEvents(view) and
-                view.runtime.worker_references.load(.acquire) == 0)
-            {
-                const workspace_id = view.durable.workspace_id;
-                const release_managed_workspace = if (self.findWorkspace(workspace_id)) |workspace|
-                    workspace.origin == .managed
-                else
-                    false;
-                self.deinitTaskView(view);
-                entry.* = null;
-                if (release_managed_workspace)
-                    self.releaseManagedWorkspaceNoFail(workspace_id);
-                changed = true;
-                durable_changed = true;
-                continue;
-            }
             const close_completion = view.runtime.close_completion.load(.acquire);
             // Session close may finish after Agent execution but before the
             // main thread has drained callbacks already enqueued for the Run.
@@ -4900,8 +4878,10 @@ pub const Workbench = struct {
             self.freeTracked(tool.progress);
             self.freeTracked(tool.content);
         };
-        for (wire.tools, 0..) |tool, index| {
-            tools[index] = try self.restoreTool(tool);
+        for (wire.tools) |tool| {
+            if (std.mem.eql(u8, tool.state, "running"))
+                continue;
+            tools[restored_tools] = try self.restoreTool(tool);
             restored_tools += 1;
         }
         const phase: RunPhase = if (interrupted)
@@ -5499,6 +5479,10 @@ pub const Workbench = struct {
         for (task.durable.runs) |*run_entry| {
             const run = &(run_entry.* orelse continue);
             run.redaction_secret = &.{};
+        }
+        for (task.durable.compacts) |*compact_entry| {
+            const compact = &(compact_entry.* orelse continue);
+            compact.redaction_secret = &.{};
         }
         execution.deinit();
         task.runtime.execution = null;
@@ -9076,6 +9060,13 @@ test "Task state round trip restores product history without fabricating a Sessi
         source.task_persistence_health = .ready;
         try source.commitTaskState();
         try std.testing.expectEqual(@as(usize, 1), persistence.commits);
+        var running_tool = try testEnvelope(
+            3,
+            7,
+            "{\"tool_start\":{\"id\":\"tool-running\",\"name\":\"Bash\",\"input\":\"{}\"}}",
+        );
+        defer running_tool.deinit();
+        try source.applyEvent(&running_tool);
         var tool_result = try testEnvelope(
             3,
             7,
@@ -9094,6 +9085,41 @@ test "Task state round trip restores product history without fabricating a Sessi
         try std.testing.expect(
             std.mem.indexOf(u8, persistence.storage[0..persistence.len], "SECRET-KEY") == null,
         );
+
+        const terminal_storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
+        defer std.testing.allocator.free(terminal_storage);
+        var terminal_state = try task_persistence.decode(
+            std.testing.allocator,
+            persistence.storage[0..persistence.len],
+            source.taskPersistenceLimits(),
+        );
+        defer terminal_state.deinit();
+        terminal_state.value.tasks[0].runs[0].phase = "completed";
+        terminal_state.value.tasks[0].runs[0].outcome = "completed";
+        terminal_state.value.tasks[0].active_operation = null;
+        const terminal_bytes = try task_persistence.encode(
+            terminal_storage,
+            terminal_state.value,
+        );
+        var terminal_restore = try Workbench.init(
+            std.testing.allocator,
+            &test_agent_runtime,
+            testLimits(),
+            .{
+                .task_persistence = persistence.capability(terminal_bytes),
+            },
+        );
+        defer terminal_restore.deinit();
+        const terminal_task = terminal_restore.findTask(3) orelse
+            return error.TestUnexpectedResult;
+        const terminal_run = findRun(terminal_task.durable.runs, 7) orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expectEqual(RunPhase.completed, runPhase(terminal_run));
+        for (terminal_run.tools) |*entry| {
+            const restored_tool = &(entry.* orelse continue);
+            try std.testing.expect(restored_tool.state != .running);
+            try std.testing.expect(!std.mem.eql(u8, restored_tool.id, "tool-running"));
+        }
     }
 
     var restored = try Workbench.init(
@@ -9124,6 +9150,11 @@ test "Task state round trip restores product history without fabricating a Sessi
             break candidate;
     } else return error.TestUnexpectedResult;
     try std.testing.expectEqual(ToolState.completed, tool.state);
+    for (run.tools) |*entry| {
+        const restored_tool = &(entry.* orelse continue);
+        try std.testing.expect(restored_tool.state != .running);
+        try std.testing.expect(!std.mem.eql(u8, restored_tool.id, "tool-running"));
+    }
 
     var snapshot_storage: [96 * 1024]u8 = undefined;
     const snapshot = try restored.writeSnapshot(&snapshot_storage);
@@ -9224,6 +9255,33 @@ test "Task persistence failure rolls back metadata and closes mutation admission
         error.TaskPersistenceUnavailable,
         workbench.setTaskArchived(3, true),
     );
+}
+
+test "Task persistence failure rolls back deletion before physical release" {
+    const persistence_storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(persistence_storage);
+    var persistence = TestTaskPersistence{
+        .storage = persistence_storage,
+        .result = .failed,
+    };
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+
+    const task = &workbench.tasks[0].?;
+    task.runtime.active_run_id = 0;
+    const completed = &task.durable.runs[0].?;
+    _ = commitTerminal(completed, .completed, .completed, null, .reusable, "", false);
+    finalizeTestTerminalEvents(&workbench);
+    task.runtime.lifecycle = .closed;
+    task.runtime.continuation = .{ .unavailable = .closed };
+    workbench.task_persistence = persistence.capability(null);
+    workbench.task_persistence_health = .ready;
+    const tracked_before_delete = workbench.projection_bytes;
+
+    try std.testing.expectError(error.TaskPersistenceFailed, workbench.deleteTask(3));
+    try std.testing.expect(workbench.findTask(3) != null);
+    try std.testing.expectEqual(tracked_before_delete, workbench.projection_bytes);
+    try std.testing.expectEqual(TaskPersistenceHealth.write_failed, workbench.task_persistence_health);
 }
 
 test "Task persistence failure rolls back Workspace upsert candidates" {
@@ -9573,6 +9631,10 @@ test "Task metadata mutations preserve lifecycle guards and projection accountin
     try std.testing.expectError(error.TaskBusy, workbench.setTaskArchived(3, false));
     workbench.tasks[0].?.runtime.lifecycle = .closed;
     workbench.tasks[0].?.runtime.continuation = .{ .unavailable = .closed };
+    workbench.tasks[0].?.runtime.worker_references.store(1, .release);
+    try std.testing.expectError(error.TaskBusy, workbench.deleteTask(3));
+    try std.testing.expect(workbench.tasks[0] != null);
+    workbench.tasks[0].?.runtime.worker_references.store(0, .release);
     const tracked_before_delete = workbench.projection_bytes;
     try workbench.deleteTask(3);
     try std.testing.expect(workbench.tasks[0] == null);
@@ -9932,6 +9994,9 @@ test "released Task credential is permanently scrubbed from every product projec
     @memcpy(task.durable.ui_history[0].?.detail[0.."SECRET-KEY".len], "SECRET-KEY");
     task.durable.ui_history[0].?.detail_len = "SECRET-KEY".len;
     task.durable.ui_history_count = 1;
+    const compact_slot = try workbench.reserveCompactRecord(task, 9, run.id);
+    const compact = &task.durable.compacts[compact_slot].?;
+    try std.testing.expectEqualStrings("SECRET-KEY", compact.redaction_secret);
 
     run.active_phase = .completed;
     task.runtime.lifecycle = .closed;
@@ -9939,6 +10004,8 @@ test "released Task credential is permanently scrubbed from every product projec
     task.runtime.active_run_id = 0;
     try workbench.beginExecutionReplacement();
     try std.testing.expect(task.runtime.execution == null);
+    try std.testing.expectEqual(@as(usize, 0), run.redaction_secret.len);
+    try std.testing.expectEqual(@as(usize, 0), compact.redaction_secret.len);
     try std.testing.expectEqualStrings("fixture-model", task.durable.execution_model);
     try std.testing.expect(std.mem.indexOf(u8, task.durable.binding_model_id, "SECRET-KEY") == null);
     var snapshot_storage: [96 * 1024]u8 = undefined;

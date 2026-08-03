@@ -378,6 +378,7 @@ fn validate(state: *const StateWire, limits: Limits) !void {
     for (state.workspaces, 0..) |workspace, index| {
         if (workspace.id == 0 or workspace.epoch == 0 or
             !oneOf(workspace.origin, &.{ "user", "managed" }) or
+            (std.mem.eql(u8, workspace.origin, "user") and workspace.recent_order == 0) or
             !validText(workspace.canonical_root, limits.max_workspace_bytes, false) or
             !std.fs.path.isAbsolute(workspace.canonical_root) or
             !validText(workspace.display_name, limits.max_workspace_bytes, false))
@@ -402,7 +403,7 @@ fn validate(state: *const StateWire, limits: Limits) !void {
     var max_task_id: u64 = 0;
     var max_task_order: u64 = 0;
     for (state.tasks, 0..) |task, index| {
-        if (task.id == 0 or task.workspace_id == 0 or task.workspace_epoch == 0 or
+        if (task.id == 0 or task.recent_order == 0 or task.workspace_id == 0 or task.workspace_epoch == 0 or
             !validText(task.workspace_root, limits.max_workspace_bytes, false) or
             !validText(task.title, limits.max_task_title_bytes, true) or
             task.binding.epoch == 0 or task.binding.execution_generation == 0 or
@@ -797,6 +798,14 @@ test "task store rejects states that would violate the Renderer contract" {
         .tasks = &tasks,
     };
     try validate(&state, testLimits());
+
+    workspaces[0].recent_order = 0;
+    try std.testing.expectError(error.Invalid, validate(&state, testLimits()));
+    workspaces[0].recent_order = 1;
+
+    tasks[0].recent_order = 0;
+    try std.testing.expectError(error.Invalid, validate(&state, testLimits()));
+    tasks[0].recent_order = 1;
 
     runs[0].outcome = "failed";
     try std.testing.expectError(error.Invalid, validate(&state, testLimits()));

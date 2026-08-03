@@ -761,6 +761,18 @@ test("Workbench owns Task lifecycle, continuation, and canonical redaction", () 
   assert.match(workbench, /redaction_secret = execution\.api_key/);
   assert.match(workbench, /releaseQuiescentTaskExecutions/);
   assert.match(workbench, /fn releaseTaskExecutionNoFail/);
+  const releaseTaskExecution = workbench.slice(
+    workbench.indexOf("fn releaseTaskExecutionNoFail"),
+    workbench.indexOf("fn upsertWorkspace"),
+  );
+  assert.match(
+    releaseTaskExecution,
+    /task\.durable\.runs[\s\S]*run\.redaction_secret = &\.\{\}/,
+  );
+  assert.match(
+    releaseTaskExecution,
+    /task\.durable\.compacts[\s\S]*compact\.redaction_secret = &\.\{\}/,
+  );
   assert.doesNotMatch(workbench, /pub const RunRef|acquireRunRef/);
 
   const agent = read("src/agent/session.zig");

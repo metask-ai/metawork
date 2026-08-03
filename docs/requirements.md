@@ -201,7 +201,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - 用户创建或修改 Skill 仍通过普通 Text Run 与 AgentCore built-in Read/Edit 完成：Workspace 内的 `.agents/skills` 服从现有 Workspace authority，用户级目录只有在用户明确将目标 Skill 目录作为 trusted Workspace 授权后才能修改。一次 Run 使用已绑定 snapshot，不热替换正在执行的 Skill；文件变化只在显式 catalog refresh 后影响后续选择与 Run；
 - Host 重启后恢复的历史 Task 当前只读；用户选择左栏 Task 时必须显示其已保存产品历史和明确的 Session 恢复限制。execution binding 与 Conversation 均可安全恢复后才允许继续；rebind 或从历史创建新 Task 属于后续显式产品能力，当前实现不得用它们掩盖 revision 5 的恢复缺口；
 - `Files changed` 表示实际文件变更集合，`Outputs` 表示用户关心的交付结果，两者不得用“新建文件”自动等同；当前 ABI v1 未提供这两类 typed event 时，相关模块必须隐藏；
-- Task 归档只隐藏日常列表；归档、删除 Task 或移除 Workspace 前必须先终止其 queued/running/waiting/stopping Run；删除已关闭 Task 时若 executor worker 仍持有该 Task 的 stable Run record reference，只能标记 `delete_pending`，待引用归零后物理释放；删除 Task 记录不删除 Workspace 中的真实文件；移除 Workspace 先原子进入 `removing` 并推进 Workspace epoch、拒绝新 admission，全部 Task 收口后撤销当前 Host authorization 并退出活动导航；异步失败必须恢复可用状态并发布 Workspace 级失败事实，不能静默回弹；
+- Task 归档只隐藏日常列表；归档、删除 Task 或移除 Workspace 前必须先终止其 queued/running/waiting/stopping Run；删除已关闭 Task 时若 executor worker 仍持有该 Task 的 stable Run record reference，Host 必须以 `task_busy` 拒绝且保持记录不变，待引用归零后由用户重试；只有持久化删除提交成功后才能返回成功并物理释放，不能先从内存删除后让磁盘记录在重启时复活；删除 Task 记录不删除 Workspace 中的真实文件；移除 Workspace 先原子进入 `removing` 并推进 Workspace epoch、拒绝新 admission，全部 Task 收口后撤销当前 Host authorization 并退出活动导航；异步失败必须恢复可用状态并发布 Workspace 级失败事实，不能静默回弹；
 - 全局搜索覆盖 Workspace、Task、用户指令、完成消息和 Output 文件名；工具原始日志默认不进入普通搜索；
 - `en-US` 是规范产品文案和回退语言，`zh-CN` 是首个完整 locale；Host 传递 structured code 与参数，Renderer 负责本地化。
 
