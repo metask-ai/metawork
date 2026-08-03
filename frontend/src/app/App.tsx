@@ -1716,6 +1716,7 @@ export default function App() {
         activeTask.lifecycle === "open" &&
         !activeTask.continuationAvailable,
       )}
+      unavailableReason={activeTask?.continuationUnavailableReason ?? null}
       draft={composerDraft}
       skillCatalog={skillCatalog}
       slashCommands={slashCommands}
@@ -1882,6 +1883,19 @@ export default function App() {
               </nav>
 
               <div className="sidebar-navigation">
+                {snapshot.capabilities.taskHistoryPersistenceHealth !==
+                  "ready" &&
+                  snapshot.capabilities.taskHistoryPersistenceHealth !==
+                    "unavailable" && (
+                    <div className="task-persistence-error" role="alert">
+                      <Icon name="warning" />
+                      <span>
+                        {t(
+                          `task.persistence.${snapshot.capabilities.taskHistoryPersistenceHealth}`,
+                        )}
+                      </span>
+                    </div>
+                  )}
                 <WorkspaceNavigation
                   summaries={summaries}
                   currentWorkspaceId={navigationWorkspaceId}
