@@ -2775,11 +2775,6 @@ summary::-webkit-details-marker {
   border-top: 1px solid var(--color-rule);
 }
 
-.scheduled-editor .scheduled-editor-primary {
-  padding-top: 0;
-  border-top: 0;
-}
-
 .scheduled-editor label > span,
 .scheduled-editor-section > h3 {
   margin: 0;
@@ -2920,31 +2915,6 @@ summary::-webkit-details-marker {
   gap: 8px;
 }
 
-.scheduled-advanced {
-  margin-bottom: 20px;
-  border-block: 1px solid var(--color-rule);
-}
-
-.scheduled-advanced summary {
-  display: flex;
-  min-height: 44px;
-  align-items: center;
-  justify-content: space-between;
-  color: #625b6b;
-  cursor: pointer;
-  font-size: var(--scheduled-text-label);
-  font-weight: 680;
-  line-height: 1.35;
-}
-
-.scheduled-advanced summary svg {
-  transition: transform 140ms ease;
-}
-
-.scheduled-advanced[open] summary svg {
-  transform: rotate(180deg);
-}
-
 .scheduled-history {
   margin-top: 22px;
 }
@@ -3008,12 +2978,6 @@ summary::-webkit-details-marker {
 
 .scheduled-history .text-button {
   font-size: 11px;
-}
-
-.scheduled-field-warning {
-  color: var(--color-amber-ink) !important;
-  font-size: 11px;
-  line-height: 1.45;
 }
 
 .scheduled-confirmation {

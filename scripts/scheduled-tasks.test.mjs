@@ -108,7 +108,6 @@ test("Scheduled tasks is a truthful independent management page", () => {
       enabled: true,
       health: "ready",
       failureReason: null,
-      target: { kind: "default" },
       execution: {
         generation: "1",
         provider: "anthropic",
@@ -158,20 +157,32 @@ test("Empty scheduled tasks page offers actionable starter templates", () => {
   assert.doesNotMatch(html, /Nothing is scheduled/);
 });
 
-test("starter templates use an automatic Workspace even when a user Workspace is selected", () => {
+test("starter templates hide Workspace configuration and submit target-free managed execution", async () => {
   const snapshot = structuredClone(fixture);
   snapshot.capabilities.managedWorkspaces = true;
   snapshot.capabilities.scheduledTasks = true;
   snapshot.capabilities.scheduledTaskPersistence = true;
   snapshot.capabilities.scheduledTaskPersistenceHealth = "ready";
-  renderDom(scheduledElement(snapshot));
+  let created = null;
+  renderDom(
+    scheduledElement(snapshot, {
+      onCreate: async (input) => {
+        created = input;
+      },
+    }),
+  );
 
   fireEvent.click(screen.getByRole("button", { name: /Daily brief/ }));
-  assert.equal(screen.getByLabelText("Workspace mode").value, "default");
+  const dialog = screen.getByRole("dialog", { name: "Schedule editor" });
+  assert.doesNotMatch(dialog.textContent, /workspace/i);
+  assert.equal(screen.queryByLabelText("Workspace mode"), null);
   assert.equal(screen.queryByLabelText("Manual workspace"), null);
+  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => assert.ok(created));
+  assert.equal("target" in created, false);
 });
 
-test("Text schedules default to a managed workspace without requiring a user Workspace", async () => {
+test("Text schedules use a Managed Workspace without requiring a user Workspace", async () => {
   const snapshot = structuredClone(fixture);
   snapshot.capabilities.managedWorkspaces = true;
   snapshot.capabilities.scheduledTasks = true;
@@ -193,10 +204,11 @@ test("Text schedules default to a managed workspace without requiring a user Wor
   const template = screen.getByRole("button", { name: /Daily brief/ });
   assert.equal(template.disabled, false);
   fireEvent.click(template);
-  assert.ok(screen.getByRole("dialog", { name: "Schedule editor" }));
-  assert.equal(screen.getByLabelText("Workspace mode").value, "default");
-  assert.equal(screen.queryByText(/Add a workspace from the sidebar/), null);
-  fireEvent.keyDown(screen.getByRole("dialog", { name: "Schedule editor" }), {
+  const templateDialog = screen.getByRole("dialog", {
+    name: "Schedule editor",
+  });
+  assert.doesNotMatch(templateDialog.textContent, /workspace/i);
+  fireEvent.keyDown(templateDialog, {
     key: "Escape",
   });
   assert.equal(screen.queryByRole("dialog"), null);
@@ -204,9 +216,9 @@ test("Text schedules default to a managed workspace without requiring a user Wor
   const newSchedule = screen.getByRole("button", { name: "New schedule" });
   newSchedule.focus();
   fireEvent.click(newSchedule);
-  assert.ok(screen.getByRole("dialog", { name: "Schedule editor" }));
+  const dialog = screen.getByRole("dialog", { name: "Schedule editor" });
   assert.equal(screen.queryByRole("button", { name: "Skill" }), null);
-  assert.equal(screen.getByLabelText("Workspace mode").value, "default");
+  assert.doesNotMatch(dialog.textContent, /workspace/i);
   fireEvent.change(screen.getByLabelText("Name"), {
     target: { value: "Independent brief" },
   });
@@ -216,12 +228,12 @@ test("Text schedules default to a managed workspace without requiring a user Wor
   );
   fireEvent.click(screen.getByRole("button", { name: "Save" }));
   await waitFor(() => assert.ok(created));
-  assert.deepEqual(created.target, { kind: "default" });
+  assert.equal("target" in created, false);
   assert.equal("workspaceId" in created, false);
   assert.equal(created.input.kind, "text");
 });
 
-test("schedule instructions have no separate Skill configuration", () => {
+test("schedule instructions have no separate Skill or Workspace configuration", () => {
   const snapshot = structuredClone(fixture);
   snapshot.capabilities.managedWorkspaces = true;
   snapshot.capabilities.scheduledTasks = true;
@@ -236,11 +248,8 @@ test("schedule instructions have no separate Skill configuration", () => {
     screen.getByText(/describe that in the instruction/).textContent,
     /global Skill/,
   );
-  const target = screen.getByLabelText("Workspace mode");
-  assert.equal(target.value, "default");
-  assert.equal(target.disabled, false);
-  fireEvent.change(target, { target: { value: "explicit" } });
-  assert.equal(screen.getByLabelText("Manual workspace").value, "1");
+  const dialog = screen.getByRole("dialog", { name: "Schedule editor" });
+  assert.doesNotMatch(dialog.textContent, /workspace/i);
 });
 
 test("schedule editor controls have explicit semantics and no native chrome", () => {
@@ -253,9 +262,14 @@ test("schedule editor controls have explicit semantics and no native chrome", ()
 
   fireEvent.click(screen.getByRole("button", { name: "New schedule" }));
   const dialog = screen.getByRole("dialog", { name: "Schedule editor" });
-  assert.ok(screen.getByLabelText("Instruction"));
-  assert.ok(screen.getByRole("heading", { name: "What to run" }));
-  assert.ok(screen.getByRole("heading", { name: "When" }));
+  const name = screen.getByLabelText("Name");
+  const instruction = screen.getByLabelText("Instruction");
+  assert.ok(
+    name.compareDocumentPosition(instruction) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+  );
+  assert.ok(screen.getByRole("heading", { level: 3, name: "What to run" }));
+  assert.ok(screen.getByRole("heading", { level: 3, name: "When" }));
   assert.equal(dialog.querySelectorAll("fieldset, legend").length, 0);
   assert.ok(
     [...dialog.querySelectorAll("button")].every(
@@ -278,7 +292,7 @@ test("schedule editor controls have explicit semantics and no native chrome", ()
   assert.match(css, /input\[type="number"\][\s\S]*?appearance: textfield;/);
   assert.match(css, /::-webkit-search-cancel-button/);
   assert.match(css, /resize: none;/);
-  assert.match(css, /\.scheduled-editor-section > h3/);
+  assert.match(css, /\.scheduled-editor-section > h3 \{/);
   assert.doesNotMatch(css, /\.scheduled-editor fieldset/);
 });
 
@@ -331,11 +345,6 @@ test("Scheduled task Bridge commands preserve IDs, epochs, and exact payloads", 
   });
   const mutation = {
     title: "Summary",
-    target: {
-      kind: "explicit",
-      workspaceId: "1",
-      expectedWorkspaceEpoch: "2",
-    },
     expectedExecutionGeneration: "3",
     input: { kind: "text", text: "Summarize" },
     recurrence: { kind: "once", atUnixSeconds: "1800000000" },

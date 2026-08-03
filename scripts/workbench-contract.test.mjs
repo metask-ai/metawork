@@ -146,11 +146,6 @@ test("Scheduled Task projection decodes recurrence and occurrence without secret
       enabled: true,
       health: "ready",
       failureReason: null,
-      target: {
-        kind: "explicit",
-        workspaceId: "1",
-        workspaceEpoch: "1",
-      },
       execution: {
         generation: "1",
         provider: "anthropic",
@@ -200,42 +195,20 @@ test("Scheduled Task projection decodes recurrence and occurrence without secret
     /rejected occurrence requires a reason/,
   );
 
-  const managedTarget = clone(scheduled);
-  managedTarget.capabilities.managedWorkspaces = true;
-  managedTarget.workspaces.push({
-    ...clone(fixture.workspaces[0]),
-    id: "9",
-    origin: "managed",
-    displayName: "Managed workspace",
-    canonicalRoot: "/data/workspaces/0000000000000009",
-    recentOrder: "0",
-  });
-  managedTarget.tasks.push({
-    ...clone(fixture.tasks[0]),
-    id: "4",
-    workspaceId: "9",
-  });
-  managedTarget.scheduledTasks[0].target.workspaceId = "9";
+  const configuredWorkspace = clone(scheduled);
+  configuredWorkspace.scheduledTasks[0].target = { kind: "default" };
   assert.throws(
-    () => decodeWorkbenchSnapshot(managedTarget),
-    /explicit scheduled Task cannot target a managed Workspace/,
+    () => decodeWorkbenchSnapshot(configuredWorkspace),
+    /expected keys/,
   );
 
-  const unavailableExplicitTarget = clone(scheduled);
-  unavailableExplicitTarget.scheduledTasks[0].target.workspaceId = "99";
-  assert.deepEqual(
-    decodeWorkbenchSnapshot(unavailableExplicitTarget),
-    unavailableExplicitTarget,
-  );
-
-  const defaultTarget = clone(scheduled);
-  defaultTarget.scheduledTasks[0].target = { kind: "default" };
-  defaultTarget.scheduledTasks[0].input = {
+  const textTarget = clone(scheduled);
+  textTarget.scheduledTasks[0].input = {
     kind: "text",
     text: "Summarize current work",
     redacted: false,
   };
-  assert.deepEqual(decodeWorkbenchSnapshot(defaultTarget), defaultTarget);
+  assert.deepEqual(decodeWorkbenchSnapshot(textTarget), textTarget);
 
   const configuredSkill = clone(scheduled);
   configuredSkill.scheduledTasks[0].input = {

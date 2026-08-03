@@ -472,14 +472,6 @@ export const zhCN: Record<MessageId, string> = {
   "scheduled.creating": "新建定时任务",
   "scheduled.error": "MetaWork 无法完成这次定时任务操作。",
   "scheduled.name": "名称",
-  "scheduled.target": "工作区方式",
-  "scheduled.target.default": "自动工作区",
-  "scheduled.target.default_help":
-    "每次运行时，MetaWork 都会创建并管理一个新的自动工作区。",
-  "scheduled.target.explicit": "手动工作区",
-  "scheduled.target.explicit_help": "每次运行都使用你选择的手动工作区。",
-  "scheduled.workspace": "手动工作区",
-  "scheduled.workspace_unavailable": "之前选择的手动工作区当前不可用",
   "scheduled.what": "运行内容",
   "scheduled.instruction_placeholder": "描述希望 MetaWork 完成什么…",
   "scheduled.instruction": "任务指令",
@@ -499,7 +491,7 @@ export const zhCN: Record<MessageId, string> = {
   "scheduled.background_ready": "关闭窗口后仍会运行",
   "scheduled.search_placeholder": "搜索已安排任务",
   "scheduled.suggestions": "建议",
-  "scheduled.suggestions_help": "从常见节奏开始，默认使用自动工作区。",
+  "scheduled.suggestions_help": "从常见节奏开始。",
   "scheduled.suggestion.daily.title": "每日简报",
   "scheduled.suggestion.daily.schedule": "每天 8:00",
   "scheduled.suggestion.daily.body":
@@ -531,9 +523,6 @@ export const zhCN: Record<MessageId, string> = {
   "scheduled.repeat.weekly": "每周",
   "scheduled.next_run": "下次运行",
   "scheduled.status": "状态",
-  "scheduled.details": "名称与上下文",
-  "scheduled.workspace_required":
-    "先从左栏添加手动工作区，才能保存这个定时任务。",
   "scheduled.confirmation.title": "运行摘要",
   "scheduled.confirmation.untitled": "未命名任务",
   "scheduled.confirmation.once": "{time} 运行「{title}」。",

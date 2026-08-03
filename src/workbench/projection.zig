@@ -111,17 +111,8 @@ pub const TaskRunInput = union(enum) {
 
 pub const ScheduledTaskRecurrence = scheduled_tasks_impl.Recurrence;
 
-pub const ScheduledTaskTarget = union(enum) {
-    default,
-    explicit: struct {
-        workspace_id: u64,
-        expected_workspace_epoch: u64,
-    },
-};
-
 pub const ScheduledTaskDefinitionInput = struct {
     title: []const u8,
-    target: ScheduledTaskTarget,
     expected_execution_generation: u64,
     input: []const u8,
     recurrence: ScheduledTaskRecurrence,
@@ -3087,15 +3078,6 @@ pub const Workbench = struct {
                 return error.SnapshotTooLarge
         else
             writer.writeAll("null") catch return error.SnapshotTooLarge;
-        writer.writeAll(",\"target\":") catch return error.SnapshotTooLarge;
-        switch (item.target) {
-            .default => writer.writeAll("{\"kind\":\"default\"}") catch
-                return error.SnapshotTooLarge,
-            .explicit => |explicit| writer.print(
-                "{{\"kind\":\"explicit\",\"workspaceId\":\"{d}\",\"workspaceEpoch\":\"{d}\"}}",
-                .{ explicit.workspace_id, explicit.workspace_epoch },
-            ) catch return error.SnapshotTooLarge,
-        }
         writer.print(
             ",\"execution\":{{\"generation\":\"{d}\",\"provider\":\"{s}\",\"model\":",
             .{ item.execution_generation, @tagName(item.execution_provider) },
@@ -3633,23 +3615,8 @@ pub const Workbench = struct {
             !std.unicode.utf8ValidateSlice(title))
             return error.InvalidTaskTitle;
         for (title) |byte| if (byte < 0x20) return error.InvalidTaskTitle;
-        const workspace: ?*WorkspaceView = switch (input.target) {
-            .default => if (self.managed_workspaces != null)
-                null
-            else
-                return error.WorkspaceUnavailable,
-            .explicit => |explicit| explicit_target: {
-                const candidate = self.findWorkspace(explicit.workspace_id) orelse
-                    return error.UnknownWorkspace;
-                if (explicit.expected_workspace_epoch == 0 or
-                    explicit.expected_workspace_epoch != candidate.epoch)
-                    return error.WorkspaceEpochMismatch;
-                if (candidate.origin != .user or !candidate.visible or
-                    candidate.authorization != .available)
-                    return error.WorkspaceUnavailable;
-                break :explicit_target candidate;
-            },
-        };
+        if (self.managed_workspaces == null)
+            return error.WorkspaceUnavailable;
         try input.recurrence.validate();
         const scheduled_input = std.mem.trim(u8, input.input, " \t\r\n");
         if (scheduled_input.len == 0 or
@@ -3658,13 +3625,6 @@ pub const Workbench = struct {
             return error.InvalidScheduledTaskInput;
         return .{
             .title = title,
-            .target = switch (input.target) {
-                .default => .default,
-                .explicit => .{ .explicit = .{
-                    .workspace_id = workspace.?.id,
-                    .workspace_epoch = workspace.?.epoch,
-                } },
-            },
             .execution_generation = self.execution.generation,
             .execution_provider = scheduledProvider(self.execution.provider.?),
             .execution_model = self.execution.model(),
@@ -3727,15 +3687,8 @@ pub const Workbench = struct {
         claimed_owned = false;
 
         const claimed_item = self.scheduled_tasks.find(id) orelse unreachable;
-        const workspace_request: TaskWorkspaceRequest = switch (claimed_item.target) {
-            .default => .managed,
-            .explicit => |explicit| .{ .existing = .{
-                .workspace_id = explicit.workspace_id,
-                .expected_epoch = explicit.workspace_epoch,
-            } },
-        };
         const task_id = self.createTaskForWorkspace(
-            workspace_request,
+            .managed,
             claimed_item.execution_generation,
             null,
         ) catch |err| {
@@ -3923,19 +3876,8 @@ pub const Workbench = struct {
                         break :binding .execution_changed) or
                     !std.mem.eql(u8, item.execution_model, self.execution.model()))
                     break :binding .execution_changed;
-                switch (item.target) {
-                    .default => if (self.managed_workspaces == null)
-                        break :binding .workspace_unavailable,
-                    .explicit => |explicit| {
-                        const candidate = self.findWorkspace(explicit.workspace_id) orelse
-                            break :binding .workspace_unavailable;
-                        if (candidate.origin != .user or !candidate.visible or
-                            candidate.authorization != .available)
-                            break :binding .workspace_unavailable;
-                        if (candidate.epoch != explicit.workspace_epoch)
-                            break :binding .workspace_changed;
-                    },
-                }
+                if (self.managed_workspaces == null)
+                    break :binding .workspace_unavailable;
                 break :binding null;
             };
             if (reason) |failure| {
@@ -5860,7 +5802,6 @@ fn scheduledFailure(err: anyerror) scheduled_tasks_impl.FailureReason {
         error.WorkspaceUnavailable,
         error.WorkspaceRemovalInProgress,
         => .workspace_unavailable,
-        error.WorkspaceEpochMismatch => .workspace_changed,
         error.TaskCapacity,
         error.WorkspaceCapacity,
         error.RunCapacity,
@@ -7095,6 +7036,19 @@ test "Workbench snapshot serializer matches the Renderer contract fixture" {
 test "Scheduled Task admission is bounded redacted and arms the Workbench clock" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
+    var managed_tmp = std.testing.tmpDir(.{});
+    defer managed_tmp.cleanup();
+    var managed_root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const managed_root_len = try managed_tmp.dir.realPath(
+        std.testing.io,
+        &managed_root_storage,
+    );
+    var managed_root = try managed_workspace_store.Root.open(
+        std.testing.io,
+        std.testing.allocator,
+        managed_root_storage[0..managed_root_len],
+    );
+    defer managed_root.deinit();
     var clock: TestScheduleClock = .{ .now = 1_000 };
     var persistence: TestSchedulePersistence = .{};
     workbench.schedule_timer = clock.timer();
@@ -7104,19 +7058,17 @@ test "Scheduled Task admission is bounded redacted and arms the Workbench clock"
         error.WorkspaceUnavailable,
         workbench.createScheduledTask(.{
             .title = "Independent review",
-            .target = .default,
             .expected_execution_generation = 1,
             .input = "Review current work",
             .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
         }),
     );
     try std.testing.expectEqual(@as(usize, 0), persistence.commits);
+    workbench.managed_workspaces = managed_workspace_store.Store.init(
+        &managed_root,
+    );
     const id = try workbench.createScheduledTask(.{
         .title = "Review SECRET-KEY",
-        .target = .{ .explicit = .{
-            .workspace_id = 1,
-            .expected_workspace_epoch = 1,
-        } },
         .expected_execution_generation = 1,
         .input = "Inspect SECRET-KEY usage",
         .recurrence = .{ .interval = .{

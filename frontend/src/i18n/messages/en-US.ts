@@ -529,16 +529,6 @@ export const enUS = {
   "scheduled.creating": "New schedule",
   "scheduled.error": "MetaWork could not complete this schedule change.",
   "scheduled.name": "Name",
-  "scheduled.target": "Workspace mode",
-  "scheduled.target.default": "Automatic workspace",
-  "scheduled.target.default_help":
-    "MetaWork creates and manages a new automatic workspace for every run.",
-  "scheduled.target.explicit": "Manual workspace",
-  "scheduled.target.explicit_help":
-    "Every run uses the manual workspace you select.",
-  "scheduled.workspace": "Manual workspace",
-  "scheduled.workspace_unavailable":
-    "Previously selected manual workspace unavailable",
   "scheduled.what": "What to run",
   "scheduled.instruction_placeholder": "Describe what MetaWork should do…",
   "scheduled.instruction": "Instruction",
@@ -558,8 +548,7 @@ export const enUS = {
   "scheduled.background_ready": "Continues after the window closes",
   "scheduled.search_placeholder": "Search scheduled tasks",
   "scheduled.suggestions": "Suggestions",
-  "scheduled.suggestions_help":
-    "Start with a useful rhythm. MetaWork uses an automatic workspace by default.",
+  "scheduled.suggestions_help": "Start with a useful rhythm.",
   "scheduled.suggestion.daily.title": "Daily brief",
   "scheduled.suggestion.daily.schedule": "Every day at 8:00 AM",
   "scheduled.suggestion.daily.body":
@@ -591,9 +580,6 @@ export const enUS = {
   "scheduled.repeat.weekly": "Every week",
   "scheduled.next_run": "Next run",
   "scheduled.status": "Status",
-  "scheduled.details": "Name and context",
-  "scheduled.workspace_required":
-    "Add a manual workspace from the sidebar before saving this schedule.",
   "scheduled.confirmation.title": "Run summary",
   "scheduled.confirmation.untitled": "Untitled task",
   "scheduled.confirmation.once": "Run “{title}” on {time}.",

@@ -434,7 +434,6 @@ test "Text schedule default creates a fresh managed Workspace per occurrence" {
 
     const default_schedule = try workbench.createScheduledTask(.{
         .title = "Independent brief",
-        .target = .default,
         .expected_execution_generation = 1,
         .input = .{ .text = "Summarize current work" },
         .recurrence = .{ .interval = .{
@@ -447,7 +446,6 @@ test "Text schedule default creates a fresh managed Workspace per occurrence" {
         error.InvalidScheduledTaskInput,
         workbench.createScheduledTask(.{
             .title = "Invalid managed Skill",
-            .target = .default,
             .expected_execution_generation = 1,
             .input = .{ .skill = .{
                 .skill_id = fixture.fixture_skill_id,
@@ -492,11 +490,7 @@ test "Text schedule default creates a fresh managed Workspace per occurrence" {
     try std.testing.expectEqual(@as(usize, 2), try directoryEntryCount(tmp.dir));
     var snapshot_storage: [128 * 1024]u8 = undefined;
     const snapshot = try workbench.writeSnapshot(&snapshot_storage);
-    try std.testing.expect(std.mem.indexOf(
-        u8,
-        snapshot,
-        "\"target\":{\"kind\":\"default\"}",
-    ) != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"target\"") == null);
 }
 
 test "schedule rejection retains the managed Task created before a full Run queue" {
@@ -543,7 +537,6 @@ test "schedule rejection retains the managed Task created before a full Run queu
 
     const schedule_id = try workbench.createScheduledTask(.{
         .title = "Queued brief",
-        .target = .default,
         .expected_execution_generation = 1,
         .input = .{ .text = "Summarize current work" },
         .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },

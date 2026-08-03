@@ -16,8 +16,6 @@ import { useI18n } from "../../i18n/context.ts";
 
 type Draft = {
   title: string;
-  targetKind: "default" | "explicit";
-  workspaceId: string;
   text: string;
   recurrenceKind: "once" | "interval";
   start: string;
@@ -57,16 +55,9 @@ function nextLocalOccurrence(hour: number, minute: number, weekday?: number) {
   return localDateTime(Math.floor(next.getTime() / 1000));
 }
 
-function defaultDraft(snapshot: WorkbenchSnapshot): Draft {
-  const userWorkspaces = snapshot.workspaces.filter(
-    (workspace) => workspace.origin === "user",
-  );
+function defaultDraft(): Draft {
   return {
     title: "",
-    targetKind: snapshot.capabilities.managedWorkspaces
-      ? "default"
-      : "explicit",
-    workspaceId: snapshot.selectedWorkspaceId ?? userWorkspaces[0]?.id ?? "",
     text: "",
     recurrenceKind: "once",
     start: localDateTime(Math.floor(Date.now() / 1000) + 3600),
@@ -93,8 +84,6 @@ function draftFromTask(task: ScheduledTaskView): Draft {
   const divisor = unit === "days" ? 86_400 : unit === "hours" ? 3600 : 60;
   return {
     title: task.title,
-    targetKind: task.target.kind,
-    workspaceId: task.target.kind === "explicit" ? task.target.workspaceId : "",
     text: task.input.text,
     recurrenceKind: task.recurrence.kind,
     start: localDateTime(Number(start)),
@@ -107,23 +96,11 @@ function toMutation(
   snapshot: WorkbenchSnapshot,
   draft: Draft,
 ): ScheduledTaskMutation | null {
-  const workspace =
-    draft.targetKind === "explicit"
-      ? snapshot.workspaces.find(
-          (candidate) =>
-            candidate.id === draft.workspaceId && candidate.origin === "user",
-        )
-      : null;
   const start = Math.floor(new Date(draft.start).getTime() / 1000);
   if (!draft.title.trim() || !Number.isSafeInteger(start) || start <= 0)
     return null;
   if (!draft.text.trim()) return null;
-  if (
-    draft.targetKind === "default" &&
-    !snapshot.capabilities.managedWorkspaces
-  )
-    return null;
-  if (draft.targetKind === "explicit" && !workspace) return null;
+  if (!snapshot.capabilities.managedWorkspaces) return null;
   const every = Number(draft.every);
   const unitSeconds =
     draft.unit === "days" ? 86_400 : draft.unit === "hours" ? 3600 : 60;
@@ -134,14 +111,6 @@ function toMutation(
     return null;
   return {
     title: draft.title.trim(),
-    target:
-      draft.targetKind === "default"
-        ? { kind: "default" }
-        : {
-            kind: "explicit",
-            workspaceId: workspace!.id,
-            expectedWorkspaceEpoch: workspace!.epoch,
-          },
     expectedExecutionGeneration: snapshot.account.executionGeneration,
     input: { kind: "text", text: draft.text.trim() },
     recurrence:
@@ -210,7 +179,7 @@ export function ScheduledTasksPage({
   const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
-  const [draft, setDraft] = useState(() => defaultDraft(snapshot));
+  const [draft, setDraft] = useState(defaultDraft);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const editorTrigger = useRef<HTMLElement | null>(null);
@@ -220,13 +189,6 @@ export function ScheduledTasksPage({
   const editorOpen = creating || selected !== null;
   const hasScheduledTasks = snapshot.scheduledTasks.length > 0;
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  const userWorkspaces = snapshot.workspaces.filter(
-    (candidate) => candidate.origin === "user",
-  );
-  const workspace =
-    draft.targetKind === "explicit"
-      ? userWorkspaces.find((candidate) => candidate.id === draft.workspaceId)
-      : undefined;
   const mutation = useMemo(
     () => toMutation(snapshot, draft),
     [snapshot, draft],
@@ -302,7 +264,7 @@ export function ScheduledTasksPage({
     rememberEditorTrigger();
     setCreating(true);
     setSelectedId(null);
-    setDraft({ ...defaultDraft(snapshot), ...seed });
+    setDraft({ ...defaultDraft(), ...seed });
     setError(null);
   }
 
@@ -702,6 +664,21 @@ export function ScheduledTasksPage({
             </header>
 
             <div className="scheduled-editor-scroll">
+              <label className="scheduled-editor-name">
+                <span>{t("scheduled.name")}</span>
+                <input
+                  autoFocus={creating}
+                  value={draft.title}
+                  maxLength={120}
+                  onChange={(event) =>
+                    setDraft((value) => ({
+                      ...value,
+                      title: event.target.value,
+                    }))
+                  }
+                />
+              </label>
+
               {selected && (
                 <section className="scheduled-detail-summary">
                   <div>
@@ -722,14 +699,13 @@ export function ScheduledTasksPage({
               )}
 
               <section
-                className="scheduled-editor-section scheduled-editor-primary"
+                className="scheduled-editor-section"
                 aria-labelledby="scheduled-editor-content-title"
               >
                 <h3 id="scheduled-editor-content-title">
                   {t("scheduled.what")}
                 </h3>
                 <textarea
-                  autoFocus={creating}
                   aria-label={t("scheduled.instruction")}
                   rows={6}
                   value={draft.text}
@@ -817,99 +793,6 @@ export function ScheduledTasksPage({
                   </label>
                 )}
               </section>
-
-              <details className="scheduled-advanced" open={creating}>
-                <summary className="focus-ring">
-                  <span>{t("scheduled.details")}</span>
-                  <Icon name="chevron" />
-                </summary>
-                <div>
-                  <label>
-                    <span>{t("scheduled.name")}</span>
-                    <input
-                      value={draft.title}
-                      maxLength={120}
-                      onChange={(event) =>
-                        setDraft((value) => ({
-                          ...value,
-                          title: event.target.value,
-                        }))
-                      }
-                    />
-                  </label>
-                  <label>
-                    <span>{t("scheduled.target")}</span>
-                    <ScheduledSelect
-                      aria-label={t("scheduled.target")}
-                      value={draft.targetKind}
-                      onChange={(event) =>
-                        setDraft((value) => ({
-                          ...value,
-                          targetKind: event.target.value as Draft["targetKind"],
-                          workspaceId:
-                            event.target.value === "explicit" &&
-                            !value.workspaceId
-                              ? (snapshot.selectedWorkspaceId ??
-                                userWorkspaces[0]?.id ??
-                                "")
-                              : value.workspaceId,
-                        }))
-                      }
-                    >
-                      {(snapshot.capabilities.managedWorkspaces ||
-                        draft.targetKind === "default") && (
-                        <option value="default">
-                          {t("scheduled.target.default")}
-                        </option>
-                      )}
-                      {(userWorkspaces.length > 0 ||
-                        draft.targetKind === "explicit") && (
-                        <option value="explicit">
-                          {t("scheduled.target.explicit")}
-                        </option>
-                      )}
-                    </ScheduledSelect>
-                    <small>
-                      {t(
-                        draft.targetKind === "default"
-                          ? "scheduled.target.default_help"
-                          : "scheduled.target.explicit_help",
-                      )}
-                    </small>
-                  </label>
-                  {draft.targetKind === "explicit" && (
-                    <label>
-                      <span>{t("scheduled.workspace")}</span>
-                      <ScheduledSelect
-                        aria-label={t("scheduled.workspace")}
-                        value={draft.workspaceId}
-                        onChange={(event) =>
-                          setDraft((value) => ({
-                            ...value,
-                            workspaceId: event.target.value,
-                          }))
-                        }
-                      >
-                        {!workspace && draft.workspaceId && (
-                          <option value={draft.workspaceId} disabled>
-                            {t("scheduled.workspace_unavailable")}
-                          </option>
-                        )}
-                        {userWorkspaces.map((item) => (
-                          <option key={item.id} value={item.id}>
-                            {item.displayName || item.canonicalRoot}
-                          </option>
-                        ))}
-                      </ScheduledSelect>
-                      {userWorkspaces.length === 0 && (
-                        <small className="scheduled-field-warning">
-                          {t("scheduled.workspace_required")}
-                        </small>
-                      )}
-                    </label>
-                  )}
-                </div>
-              </details>
 
               {selected && (
                 <section className="scheduled-history">

@@ -1029,7 +1029,6 @@ pub const Dispatcher = struct {
         );
         const definition = try scheduledTaskDefinition(
             parsed.value.title,
-            parsed.value.target,
             parsed.value.expectedExecutionGeneration,
             instruction,
             parsed.value.recurrence,
@@ -1068,7 +1067,6 @@ pub const Dispatcher = struct {
         const expected_epoch = try handlers.parseWireId(parsed.value.expectedEpoch);
         const definition = try scheduledTaskDefinition(
             parsed.value.title,
-            parsed.value.target,
             parsed.value.expectedExecutionGeneration,
             instruction,
             parsed.value.recurrence,
@@ -1415,14 +1413,12 @@ fn encodeTaskCreateResult(
 
 fn scheduledTaskDefinition(
     title: []const u8,
-    target_value: std.json.Value,
     execution_generation_wire: []const u8,
     instruction: []const u8,
     recurrence_value: std.json.Value,
 ) !workbench_api.ScheduledTaskDefinitionInput {
     return .{
         .title = title,
-        .target = try handlers.parseScheduledTaskTarget(target_value),
         .expected_execution_generation = try handlers.parseWireId(execution_generation_wire),
         .input = instruction,
         .recurrence = try handlers.parseScheduledTaskRecurrence(recurrence_value),

@@ -173,7 +173,6 @@ export type ScheduledTaskView = {
   failureReason:
     | "previous_task_running"
     | "execution_changed"
-    | "workspace_changed"
     | "workspace_unavailable"
     | "capacity_reached"
     | "shutting_down"
@@ -182,9 +181,6 @@ export type ScheduledTaskView = {
     | "persistence_failed"
     | "host_interrupted"
     | null;
-  target:
-    | { kind: "default" }
-    | { kind: "explicit"; workspaceId: string; workspaceEpoch: string };
   execution: {
     generation: string;
     provider: Provider;
@@ -213,13 +209,6 @@ export type ScheduledTaskView = {
 
 export type ScheduledTaskMutation = {
   title: string;
-  target:
-    | { kind: "default" }
-    | {
-        kind: "explicit";
-        workspaceId: string;
-        expectedWorkspaceEpoch: string;
-      };
   expectedExecutionGeneration: string;
   input: Extract<TaskRunInput, { kind: "text" }>;
   recurrence: ScheduledTaskRecurrence;

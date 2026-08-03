@@ -109,7 +109,6 @@ pub const Health = enum {
 pub const FailureReason = enum {
     previous_task_running,
     execution_changed,
-    workspace_changed,
     workspace_unavailable,
     capacity_reached,
     shutting_down,
@@ -151,17 +150,8 @@ pub const Occurrence = struct {
     notification_sent: bool = false,
 };
 
-pub const Target = union(enum) {
-    default,
-    explicit: struct {
-        workspace_id: u64,
-        workspace_epoch: u64,
-    },
-};
-
 pub const Definition = struct {
     title: []const u8,
-    target: Target,
     execution_generation: u64,
     execution_provider: Provider,
     execution_model: []const u8,
@@ -174,7 +164,6 @@ pub const Item = struct {
     epoch: u64 = 1,
     title: []u8,
     title_redacted: bool = false,
-    target: Target,
     execution_generation: u64,
     execution_provider: Provider,
     execution_model: []u8,
@@ -257,7 +246,6 @@ pub const Store = struct {
                 .epoch = item.epoch,
                 .definition = .{
                     .title = item.title,
-                    .target = item.target,
                     .execution_generation = item.execution_generation,
                     .execution_provider = item.execution_provider,
                     .execution_model = item.execution_model,
@@ -646,7 +634,6 @@ pub const Store = struct {
             .id = id,
             .epoch = epoch,
             .title = title,
-            .target = definition.target,
             .execution_generation = definition.execution_generation,
             .execution_provider = definition.execution_provider,
             .execution_model = model,
@@ -756,11 +743,7 @@ fn validDefinition(definition: Definition) bool {
         return false;
     if (definition.input.len == 0 or
         !std.unicode.utf8ValidateSlice(definition.input)) return false;
-    return switch (definition.target) {
-        .default => true,
-        .explicit => |explicit| explicit.workspace_id != 0 and
-            explicit.workspace_epoch != 0,
-    };
+    return true;
 }
 
 fn validOccurrence(occurrence: Occurrence) bool {
@@ -821,10 +804,6 @@ test "store updates optimistically and a one-time occurrence completes" {
     defer store.deinit();
     const id = try store.create(.{
         .title = "Daily summary",
-        .target = .{ .explicit = .{
-            .workspace_id = 7,
-            .workspace_epoch = 3,
-        } },
         .execution_generation = 9,
         .execution_provider = .openai,
         .execution_model = "gpt-test",
