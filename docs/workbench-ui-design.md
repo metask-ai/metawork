@@ -185,7 +185,7 @@ Workspace
 
 ## 5. 左栏：能力、Workspace 与 Task
 
-> Capability：**当前**。Renderer 合同提供 MetaWork 顶层与 Workspace/Task 分离的 revision 5 Skill catalog projection，shell 提供稳定 New task、Workspace/Task 导航、行动优先分组和左下角账号入口；只读 Skill 中心与持久定时任务都作为同级全局能力进入该 shell。
+> Capability：**部分当前、部分目标**。Renderer 合同已提供 MetaWork 顶层与 Workspace/Task 分离的 revision 5 Skill catalog projection；本地 package/inventory、详情与管理 mutation 是本次目标合同。shell 已提供稳定 New task、Workspace/Task 导航、行动优先分组和左下角账号入口；Skill 中心与持久定时任务都作为同级全局能力进入该 shell。
 
 ### 5.1 Workspace 切换
 
@@ -237,54 +237,68 @@ Workspace                              Add
 
 ### 5.3 Skill 中心
 
-> Capability：**当前**。页面是现有 Workspace current Skill catalog 的只读视图；它与 Composer Slash 共享同一 revision、health、Skill 和 issue projection，并复用同一个显式 refresh transaction。
+> Capability：**目标合同**。页面在现有 revision 5 catalog/health projection 之上增加 Workbench-owned 本地 package、inventory 与管理 mutation；不要求 AgentCore 增加安装 API，也不把管理 projection 当作 Session execution binding。
 
-Skill 中心只有一个工作：让用户看清 MetaWork 自身可使用哪些用户 Skill。它是全局管理视图，不跟随当前 Workspace；也不是插件商店、文件浏览器、Skill 编辑器或 policy 面板，不提供安装、卸载、更新、创建、编辑、启用/禁用、打开物理目录或查看 `SKILL.md` body。
+Skill 中心只有一个工作：管理 MetaWork 已知的本地 Skill 资产。创建和修改仍属于普通 Task；在线市场、远程更新、启用开关、Preset、标签、排序、中央仓库和多 Agent 同步当前不存在，也不显示占位入口。
 
-中央工作面使用紧凑标题、搜索、catalog 状态和连续列表：
+中央工作面沿用定时任务页的最大宽度、标题节奏、按钮和行动优先分组，使用与 Workbench 一致的紧凑卡片，而不是管理表格或外部市场视觉：
 
 ```text
-Skills                                                   [ Refresh ]
-Skills available to MetaWork in metawork.
+Skills                                           [ Import skill ] [ Refresh ]
+Manage skills available to MetaWork.
 
-[ Search skills                                      ]  12 available
+[ Search skills…                              ]  [ All ] [ Personal ] [ Project ]
+                                                   Project: [ MetaWork ▾ ]
 
-──────────────────────────────────────────────────────────────────────
-/  code-review                              Review code changes
-Review code changes for correctness, security, and maintainability.
-Arguments  target · focus
+Needs attention                                                     2
+┌────────────────────────────────┐  ┌────────────────────────────────┐
+│ [doc] Release check          ···│  │ [doc] Documentation         ···│
+│ Check versions, tests and build │  │ Keep project docs consistent.  │
+│ MetaWork · /release      ⚠ Issue│  │ Personal · /docs      ⚠ Conflict│
+└────────────────────────────────┘  └────────────────────────────────┘
 
-/  release-check                           Check before release
-Check versions, tests, and build state before release.
-No arguments
-
-1 skill could not be loaded
-release-notes · Invalid definition
+Skills                                                              10
+┌────────────────────────────────┐  ┌────────────────────────────────┐
+│ [doc] Code review            ···│  │ [doc] Image guide            ···│
+│ Review correctness and safety. │  │ Create consistent image briefs.│
+│ Personal · /review      ● Ready │  │ Design · /image       ● Ready │
+└────────────────────────────────┘  └────────────────────────────────┘
 ```
 
-布局与视觉规则：
+页面与卡片：
 
-- 页面保留 Workbench 左栏；中央标题使用 22–26 px 系统 Display 字体，一句短说明后立即进入 controls，不使用营销 Hero、统计卡、渐变或装饰插画；
-- 页面不以左栏当前 Workspace 为上下文；没有 Workspace 时仍可完整打开、搜索和刷新，且不得把 New task draft 的临时 Workspace 借作管理 scope；
-- 搜索只过滤已提交的 MetaWork 顶层 projection 中的 invocation、display name、description 与 argument name，不读取 Skill body；`Refresh` 调用 Host-owned `skills.refreshCatalog` transaction，不能用 Renderer 文件监听或目录扫描替代；
-- Skill 使用连续列表行，不逐项卡片化。每行以克制的紫色 `/` 标记 invocation 这一真实语义，随后显示 monospace invocation、display name、description 和 argument names；这是页面唯一的识别性视觉，不增加插画、渐变或装饰卡；
-- revision 5 未公开有效 Skill 的 source metadata，页面不显示 Workspace/Personal/vendor 标签，也不从路径、名称或优先级猜测来源；AgentCore 已完成 winner/conflict 解析，Renderer 只展示返回的 Skill 与 bounded issue；
-- 常规桌面内容列最大阅读宽度约 880 px；列表正文 13–15 px，次级文案不小于 12 px，每行最小高度 64 px。窄窗将 display name 与 argument summary 移到 invocation 下方，不产生水平滚动；
-- Skill invocation、display name、description、argument name 和用户内容不翻译；`Skills / 技能`、catalog 状态、动作与 issue 文案进入完整 locale catalog。
+- 页面保留 Workbench 左栏和约 944 px 内容宽度；标题使用现有 24–28 px Display scale，一句产品说明后直接进入 controls，不增加 Hero、统计卡、渐变、来源 Logo 或装饰插画；
+- Header 的 `Import skill` 是唯一主动作，`Refresh` 使用现有次级按钮。导入、重新导入或卸载成功后仍自动请求 catalog reconciliation；显式 Refresh 是恢复与外部文件变化入口；
+- 搜索过滤已提交管理 projection 的 display name、description、invocation 和 argument name。`All / Personal / Project` 是范围筛选；选择 Project 后显示已注册 User Workspace selector，不借用左栏 current Workspace，也不列出 Managed Workspace；
+- 异常、冲突和 `pending_verification` 进入 `Needs attention`，正常资产进入 `Skills`；空分组不渲染，同一 Skill 不在两个分组重复；
+- 常规桌面使用两列卡片，中等与窄窗降为一列。卡片使用 `canvas/paper`、`rule`、约 12 px 圆角和无常驻阴影；hover/focus 只增加极浅 brand 背景、边框和最多 1 px 位移；
+- 卡片显示统一的线性 Skill 文档图标、display name、单行 description、范围、可选 monospace invocation 和带文字的状态。删除原 `/` 装饰；不显示安装量、`Installed`、来源品牌徽章或启用 switch；
+- 状态颜色只复用 `live / amber / danger`，且必须同时显示文字或图标。来源、revision、资源数量和物理管理细节留在 drawer；
+- 卡片是带标题的 `article/listitem`，打开详情的按钮与 `···` menu button 为并列元素，禁止嵌套 interactive element。只在 hover 或 keyboard focus 时增强菜单可见度；
+- Skill invocation、display name、description、argument name、文件名和用户内容不翻译；页面标题、范围、状态、动作、错误和空状态进入完整 locale catalog。
 
-状态与刷新：
+详情 drawer：
 
-- `ready` 显示 Skill 数量；`degraded` 保留可用 Skill 并在列表后显示本地化 issue summary；issue 只使用 AgentCore 投影的 code 与可选 invocation，不显示 raw diagnostic、source path 或 Skill body；
-- refresh pending 只禁用 Refresh 并显示 `Refreshing…`，不冻结导航、历史阅读或后台 Task；成功后由 canonical snapshot 更新，失败保留最后 committed catalog 并提供 Retry，不清空成“没有 Skill”；
-- 首次 `uninitialized/loading` 显示 skeleton rows 与明确状态；`unavailable` 显示恢复说明和 Refresh，不伪造成空 catalog；真正 ready/degraded 且 `skills.length === 0` 才显示 MetaWork 用户目录未发现 Skill；
-- 空状态可以提供 `New task` 导航动作，并说明可在普通任务中请求 MetaWork 创建 `.agents/skills` 下的 Skill；该动作只打开普通 Text draft，不创建专用 Skill mutation。创建和修改仍走 Text Run 与 AgentCore built-in Read/Edit，完成后需要显式 refresh；
-- 页面不注册 install、uninstall、update、enable、disable、toggle、checkbox 或 switch 控件；未来这些能力必须重新经过 AgentCore/Workbench owner 与 capability 验收。
+- 点击卡片主体打开右侧 drawer；窄窗切为整页详情。顶部显示名称、description、范围和 health；正文依次显示 invocation/参数、安全渲染的 `SKILL.md`、资源/脚本/模板列表、结构化 issue 和折叠的安装信息；
+- Markdown 禁止 raw HTML、script、远程 embed 和隐式网络加载；文件区只允许查看 package 内受支持的文本资源，不形成通用仓库或磁盘浏览器；物理路径、raw diagnostic、credential、内部 handle 和 hash 不进入普通详情；
+- Drawer 底部提供 `Export .skill`、`Modify in new task` 和 `More`。`More` 仅在有精确管理 authority 时包含 `Re-import` 与 `Uninstall`；外部管理资产显示原因并隐藏不可执行动作；
+- `Modify in new task` 只导航到预填普通 Text draft，不创建 Skill editor 或专用 Agent protocol。关闭 drawer 后焦点回到原卡片；异步刷新不抢焦点或关闭用户正在阅读的详情。
 
-键盘与焦点：
+导入 drawer：
 
-- 搜索使用 `type="search"`，列表使用有标签的 `region/list`，issue summary 使用邻近 `role="status"`；只读 Skill row 不伪装成 button 或 selectable option；
-- 进入 route 后焦点落在页面标题；刷新完成不抢焦点，删除搜索字符不会把焦点移到第一项；
-- 点击 `New task`、Workspace 或 Task 离开页面后，返回 Skill 中心恢复上次搜索词；不持久化瞬时 refresh 状态。
+- `Import skill` 打开同一 drawer 体系，首屏突出 Host 原生 `Choose .skill or .zip`，次级入口为 `Choose folder`；当前 Native SDK 没有可信 drop capability，因此不显示不可兑现的拖放热区，也不提供 GitHub、skills.sh、URL、市场或代理配置；
+- Native 选择先生成 window-bound、一次性 staged capability；Renderer 只消费 opaque preview identity。Preview 显示名称、description、`SKILL.md`、文件清单、总大小、候选 invocation 和机械安全检查结果；导出同样通过 Host 原生目录选择取得一次性目标 authority，由 Host 生成规范文件名并写入，不让 Renderer提交路径；
+- 用户选择 `Personal` 或一个已注册且已授权的 User Workspace。范围默认沿用页面筛选，但必须在最终确认中可见；没有合法目标时安装保持禁用并提供恢复动作；
+- 同名目录、相同 invocation、project override 或 external asset 都必须在确认前说明精确影响，安全默认是取消；不提供自动重命名 invocation、静默覆盖或“仍然继续”绕过失败；
+- `Import` 后 drawer 展示 progress。成功只在资产发布且 catalog 确认可用时成立；候选 definition/resource/conflict failure 回滚并保留 preview，catalog 暂时不可验证时显示 `Installed, awaiting verification` 与 Retry/Uninstall；页面导航和后台 Task 不被冻结。
+
+状态、空状态与恢复：
+
+- `ready` 展示已提交 inventory 与 health；`degraded` 保留可用资产并把对应 issue 卡片置于 `Needs attention`。issue 只使用 bounded code、scope 和可选 invocation，不显示 raw diagnostic；
+- refresh pending 只禁用 Refresh 并显示 `Refreshing…`；失败保留最后 committed view 并提供 Retry，不清空成“没有 Skill”；
+- 首次 `uninitialized/loading` 显示两列 card skeleton；`unavailable` 显示恢复说明与 Refresh；真正 ready/degraded 且当前筛选无资产才显示空状态；
+- 全局空状态提供 `Import skill` 与 `Create in new task`。后者只打开预填 Text draft；返回 Skill 中心保留搜索、范围和选中的 Project，不持久化瞬时 drawer/progress；
+- delete/uninstall 确认必须写明 personal 或具体 Project 范围，并把安全的 Cancel 作为初始焦点。成功后焦点移到相邻卡片或分组标题；失败保留资产和操作入口，不静默消失。
 
 ### 5.4 定时任务
 
