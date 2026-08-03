@@ -254,6 +254,9 @@ test("schedule editor controls have explicit semantics and no native chrome", ()
   fireEvent.click(screen.getByRole("button", { name: "New schedule" }));
   const dialog = screen.getByRole("dialog", { name: "Schedule editor" });
   assert.ok(screen.getByLabelText("Instruction"));
+  assert.ok(screen.getByRole("heading", { name: "What to run" }));
+  assert.ok(screen.getByRole("heading", { name: "When" }));
+  assert.equal(dialog.querySelectorAll("fieldset, legend").length, 0);
   assert.ok(
     [...dialog.querySelectorAll("button")].every(
       (button) => button.type === "button",
@@ -275,6 +278,8 @@ test("schedule editor controls have explicit semantics and no native chrome", ()
   assert.match(css, /input\[type="number"\][\s\S]*?appearance: textfield;/);
   assert.match(css, /::-webkit-search-cancel-button/);
   assert.match(css, /resize: none;/);
+  assert.match(css, /\.scheduled-editor-section > h3/);
+  assert.doesNotMatch(css, /\.scheduled-editor fieldset/);
 });
 
 test("New task, Skills, and Scheduled tasks share one compact peer menu", async () => {

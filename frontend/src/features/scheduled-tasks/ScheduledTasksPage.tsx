@@ -721,8 +721,13 @@ export function ScheduledTasksPage({
                 </section>
               )}
 
-              <fieldset className="scheduled-editor-primary">
-                <legend>{t("scheduled.what")}</legend>
+              <section
+                className="scheduled-editor-section scheduled-editor-primary"
+                aria-labelledby="scheduled-editor-content-title"
+              >
+                <h3 id="scheduled-editor-content-title">
+                  {t("scheduled.what")}
+                </h3>
                 <textarea
                   autoFocus={creating}
                   aria-label={t("scheduled.instruction")}
@@ -737,10 +742,13 @@ export function ScheduledTasksPage({
                   }
                 />
                 <small>{t("scheduled.instruction_help")}</small>
-              </fieldset>
+              </section>
 
-              <fieldset>
-                <legend>{t("scheduled.when")}</legend>
+              <section
+                className="scheduled-editor-section"
+                aria-labelledby="scheduled-editor-time-title"
+              >
+                <h3 id="scheduled-editor-time-title">{t("scheduled.when")}</h3>
                 <div className="scheduled-segments">
                   {(["once", "interval"] as const).map((kind) => (
                     <button
@@ -808,7 +816,7 @@ export function ScheduledTasksPage({
                     </div>
                   </label>
                 )}
-              </fieldset>
+              </section>
 
               <details className="scheduled-advanced" open={creating}>
                 <summary className="focus-ring">
