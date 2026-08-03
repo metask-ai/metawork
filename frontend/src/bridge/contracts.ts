@@ -412,9 +412,18 @@ export type WorkbenchSnapshot = {
       | "write_failed"
       | "outcome_unknown";
     backgroundScheduleWake: boolean;
+    localSkillManagement: boolean;
+    skillManagementHealth:
+      | "unavailable"
+      | "ready"
+      | "read_failed"
+      | "corrupt"
+      | "write_failed"
+      | "outcome_unknown";
   };
   account: AccountView;
   skillCatalog: SkillCatalogView;
+  skillManagement: SkillManagementView;
   selectedWorkspaceId: string | null;
   workspaces: WorkspaceView[];
   scheduledTasks: ScheduledTaskView[];
@@ -461,6 +470,34 @@ export type SkillCatalogView = {
       | "invalid_resource"
       | "invalid_invocation_name";
     invocationName: string | null;
+  }[];
+};
+
+export type SkillManagementView = {
+  availability: WorkbenchSnapshot["capabilities"]["skillManagementHealth"];
+  assets: {
+    installId: string | null;
+    sourceKind: "local_package" | "local_directory" | "external";
+    scope:
+      | { kind: "personal"; workspaceId: null; workspaceEpoch: null }
+      | {
+          kind: "project";
+          workspaceId: string;
+          workspaceEpoch: string;
+        }
+      | { kind: "external"; workspaceId: null; workspaceEpoch: null };
+    managementState: "ready" | "pending_verification" | "externally_managed";
+    skillId: string | null;
+    invocationName: string;
+    displayName: string;
+    description: string;
+    argumentNames: string[];
+    maxValues: number;
+    canExport: boolean;
+    canReimport: boolean;
+    canUninstall: boolean;
+    canRetry: boolean;
+    issueCodes: SkillCatalogView["issues"][number]["code"][];
   }[];
 };
 
@@ -591,6 +628,68 @@ export type HostSignal = {
 
 export type WorkspaceChoice =
   { selected: false } | { selected: true; workspaceId: string };
+
+export type SkillImportPreview =
+  | { selected: false }
+  | {
+      selected: true;
+      previewId: string;
+      sourceKind: "local_package" | "local_directory";
+      invocationName: string;
+      displayName: string;
+      description: string;
+      fileCount: number;
+      totalBytes: number;
+    };
+
+export type SkillMutationReason =
+  | "invalid_scope"
+  | "invalid_preview"
+  | "source_changed"
+  | "asset_unavailable"
+  | "state_changed"
+  | "target_exists"
+  | "busy"
+  | "catalog_loading"
+  | "workspace_changed"
+  | "workspace_unavailable"
+  | "capacity_reached"
+  | "shutting_down"
+  | "local_storage_failed";
+
+export type SkillMutationResult =
+  | {
+      accepted: true;
+      installId: string;
+      verificationPending: boolean;
+      reason: null;
+    }
+  | {
+      accepted: false;
+      installId: null;
+      verificationPending: false;
+      reason: SkillMutationReason;
+    };
+
+export type SkillExportResult =
+  | { exported: true; fileName: string; reason: null }
+  | { exported: false; fileName: null; reason: string };
+
+export type SkillDetailResult =
+  | {
+      available: true;
+      definition: string;
+      fileCount: number;
+      totalBytes: number;
+      reason: null;
+    }
+  | {
+      available: false;
+      definition: null;
+      fileCount: 0;
+      totalBytes: 0;
+      reason: string;
+    };
 
 export type UiResponsePayload =
   | { kind: "permission"; permission: "deny_once" | "allow_once" }

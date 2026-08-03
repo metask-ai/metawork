@@ -31,6 +31,8 @@ export const initialWorkbenchState: WorkbenchState = {
       scheduledTaskPersistence: false,
       scheduledTaskPersistenceHealth: "unavailable",
       backgroundScheduleWake: false,
+      localSkillManagement: false,
+      skillManagementHealth: "unavailable",
     },
     account: {
       sessionState: "restoring",
@@ -61,6 +63,10 @@ export const initialWorkbenchState: WorkbenchState = {
       revision: null,
       skills: [],
       issues: [],
+    },
+    skillManagement: {
+      availability: "unavailable",
+      assets: [],
     },
     selectedWorkspaceId: null,
     workspaces: [],
