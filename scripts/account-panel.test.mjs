@@ -192,7 +192,8 @@ test("authorization wait can reopen or cancel without exposing the OAuth URL", (
   assert.match(markup, /Waiting for Metask authorization/);
   assert.match(markup, />Open sign-in page again</);
   assert.match(markup, />Cancel current action</);
-  assert.doesNotMatch(markup, /https?:\/\//);
+  assert.doesNotMatch(markup, /href=/);
+  assert.doesNotMatch(markup.replace(/<[^>]*>/g, ""), /https?:\/\//);
 });
 
 test("background catalog preparation does not ask for a manual load step", () => {

@@ -138,7 +138,7 @@ Bridge handler 不能绕过 Workbench 操作 AgentCore handle。automation 只�
 
 ### `frontend/src/features/scheduled-tasks/`
 
-`ScheduledTasksPage.tsx` 是与 Skill 中心同级的持久自动化管理视图，拥有搜索、建议模板、自然语言创建入口、状态分区、连续列表、真实 Task/occurrence 链接与 detail/editor drawer；recurrence 的本地输入与确认摘要留在该 feature，但 Host snapshot 和 typed mutation result 始终是产品真相。该目录不得使用 Renderer timer 触发 Run、用浏览器存储持久化 Scheduled Task、直接调用 AgentCore，或复制 Task timeline。
+`ScheduledTasksPage.tsx` 是与 Skill 中心同级的持久自动化管理视图，拥有搜索、Text 建议模板、状态分区、连续列表、真实 Task/occurrence 链接与 detail/editor drawer；任务内容只编辑 Text instruction，不读取任何 Skill catalog 或持有 Skill 配置。recurrence 的本地输入与确认摘要留在该 feature，但 Host snapshot 和 typed mutation result 始终是产品真相。该目录不得使用 Renderer timer 触发 Run、用浏览器存储持久化 Scheduled Task、直接调用 AgentCore，或复制 Task timeline。
 
 ### `workbench/` 与 `agent/`
 

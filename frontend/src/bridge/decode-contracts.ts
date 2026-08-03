@@ -209,9 +209,7 @@ const scheduledTaskHealth = [
 const scheduledTaskFailureReasons = [
   "previous_task_running",
   "execution_changed",
-  "workspace_changed",
   "workspace_unavailable",
-  "catalog_changed",
   "capacity_reached",
   "shutting_down",
   "task_start_failed",
@@ -1394,7 +1392,6 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
     "enabled",
     "health",
     "failureReason",
-    "target",
     "execution",
     "input",
     "recurrence",
@@ -1407,40 +1404,6 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
     "model",
   ]);
   if (
-    typeof item.target !== "object" ||
-    item.target === null ||
-    Array.isArray(item.target)
-  )
-    fail(`${path}.target`, "expected object");
-  const targetObject = item.target as JsonObject;
-  const targetKind = stringValue(targetObject.kind, `${path}.target.kind`);
-  const target =
-    targetKind === "default"
-      ? (() => {
-          object(item.target, `${path}.target`, ["kind"]);
-          return { kind: "default" as const };
-        })()
-      : targetKind === "explicit"
-        ? (() => {
-            const explicit = object(item.target, `${path}.target`, [
-              "kind",
-              "workspaceId",
-              "workspaceEpoch",
-            ]);
-            return {
-              kind: "explicit" as const,
-              workspaceId: positiveWireId(
-                explicit.workspaceId,
-                `${path}.target.workspaceId`,
-              ),
-              workspaceEpoch: positiveWireId(
-                explicit.workspaceEpoch,
-                `${path}.target.workspaceEpoch`,
-              ),
-            };
-          })()
-        : fail(`${path}.target.kind`, "unexpected scheduled Task target kind");
-  if (
     typeof item.input !== "object" ||
     item.input === null ||
     Array.isArray(item.input)
@@ -1448,45 +1411,18 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
     fail(`${path}.input`, "expected object");
   const inputObject = item.input as JsonObject;
   const inputKind = stringValue(inputObject.kind, `${path}.input.kind`);
-  const input =
-    inputKind === "text"
-      ? (() => {
-          const text = object(item.input, `${path}.input`, [
-            "kind",
-            "text",
-            "redacted",
-          ]);
-          return {
-            kind: "text" as const,
-            text: stringValue(text.text, `${path}.input.text`),
-            redacted: booleanValue(text.redacted, `${path}.input.redacted`),
-          };
-        })()
-      : inputKind === "skill"
-        ? (() => {
-            const skill = object(item.input, `${path}.input`, [
-              "kind",
-              "skillId",
-              "catalogRevision",
-              "argumentValues",
-              "redacted",
-            ]);
-            return {
-              kind: "skill" as const,
-              skillId: stringValue(skill.skillId, `${path}.input.skillId`),
-              catalogRevision: stringValue(
-                skill.catalogRevision,
-                `${path}.input.catalogRevision`,
-              ),
-              argumentValues: arrayValue(
-                skill.argumentValues,
-                `${path}.input.argumentValues`,
-                stringValue,
-              ),
-              redacted: booleanValue(skill.redacted, `${path}.input.redacted`),
-            };
-          })()
-        : fail(`${path}.input.kind`, "unexpected scheduled Task input kind");
+  if (inputKind !== "text")
+    fail(`${path}.input.kind`, "unexpected scheduled Task input kind");
+  const text = object(item.input, `${path}.input`, [
+    "kind",
+    "text",
+    "redacted",
+  ]);
+  const input = {
+    kind: "text" as const,
+    text: stringValue(text.text, `${path}.input.text`),
+    redacted: booleanValue(text.redacted, `${path}.input.redacted`),
+  };
   if (
     typeof item.recurrence !== "object" ||
     item.recurrence === null ||
@@ -1627,8 +1563,6 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
         );
   if (enabled !== (health === "ready" && nextRunAtUnixSeconds !== null))
     fail(path, "enabled schedule must be ready and expose its next run");
-  if (target.kind === "default" && input.kind !== "text")
-    fail(path, "default scheduled Task target requires text input");
   return {
     id: positiveWireId(item.id, `${path}.id`),
     epoch: positiveWireId(item.epoch, `${path}.epoch`),
@@ -1641,7 +1575,6 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
       `${path}.failureReason`,
       scheduledTaskFailureReasons,
     ),
-    target,
     execution: {
       generation: positiveWireId(
         execution.generation,
@@ -1772,20 +1705,6 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     scheduledTasks.length
   )
     fail("$.scheduledTasks", "scheduled Task identities must be unique");
-  if (
-    scheduledTasks.some((task) => {
-      const target = task.target;
-      if (target.kind !== "explicit") return false;
-      return (
-        workspaces.find((workspace) => workspace.id === target.workspaceId)
-          ?.origin === "managed"
-      );
-    })
-  )
-    fail(
-      "$.scheduledTasks",
-      "explicit scheduled Task cannot target a managed Workspace",
-    );
   const selectedWorkspace = workspaces.find(
     (workspace) => workspace.id === selectedWorkspaceId,
   );

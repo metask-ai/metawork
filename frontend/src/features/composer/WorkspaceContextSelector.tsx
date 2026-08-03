@@ -5,7 +5,7 @@ import { useI18n } from "../../i18n/context.ts";
 type WorkspaceOption = {
   id: string;
   label: string;
-  canonicalRoot: string;
+  description?: string;
   authorization: "available" | "removing" | "reauthorization_required";
 };
 
@@ -53,7 +53,7 @@ export function WorkspaceContextSelector({
           options={options.map((workspace) => ({
             value: workspace.id,
             label: workspace.label,
-            description: workspace.canonicalRoot,
+            description: workspace.description,
             disabled: workspace.authorization !== "available",
             trailing:
               workspace.authorization === "removing"

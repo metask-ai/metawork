@@ -91,7 +91,7 @@ export function ComposerFooter({
   workspaceOptions: {
     id: string;
     label: string;
-    canonicalRoot: string;
+    description?: string;
     authorization: "available" | "removing" | "reauthorization_required";
   }[];
   selectedWorkspaceId: string;

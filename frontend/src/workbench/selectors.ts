@@ -2,6 +2,7 @@ import type {
   RunView,
   TaskView,
   WorkbenchSnapshot,
+  WorkspaceView,
 } from "../bridge/contracts.ts";
 import { runInputDisplay } from "./run-input.ts";
 import type { WorkbenchState } from "./store.ts";
@@ -180,6 +181,15 @@ export function taskSignals(task: TaskView): TaskSignals {
 export function workspaceLabel(root: string): string {
   const normalized = root.replaceAll("\\", "/").replace(/\/+$/, "");
   return normalized.split("/").filter(Boolean).at(-1) ?? root;
+}
+
+export function workspaceDirectoryLabel(
+  workspace: Pick<WorkspaceView, "origin" | "canonicalRoot">,
+  defaultLabel: string,
+): string {
+  return workspace.origin === "managed"
+    ? defaultLabel
+    : workspace.canonicalRoot;
 }
 
 export function workspaceSummaries(

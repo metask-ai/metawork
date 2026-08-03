@@ -63,7 +63,7 @@ Account 是 MetaWork 的 Metask 账号控制面，负责 OAuth 登录、账号/A
 
 ### Scheduled Task
 
-Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做什么、何时触发、使用哪个可选 Skill，以及 Workspace target 是系统默认还是用户显式绑定”。Task 是一次真实执行及其结果历史，Schedule 是触发规则，Skill 是可复用执行方法；三者可以关联，但 Scheduled Task 不是 AgentCore Session、交互式 Task 草稿、Skill 子对象或第二套 automation 数据面。主窗口只是管理视图；Host 在窗口关闭后继续以后台形态维护 timer、恢复定义并接纳 occurrence。Text 定时任务默认在每个 occurrence 触发时请求新的 Managed Workspace；显式 target 继续绑定并校验 User Workspace identity/epoch。首期 Skill 定时任务只允许显式 User Workspace，因为 catalog lease 绑定精确 root/home/epoch。每次触发仍必须重新经过 Account、Workspace/Skill（若绑定）、容量和 shutdown admission，成功后创建一个新的真实 Task，再通过现有 bounded Executor 启动 Text 或 Skill Run。Scheduled Task 只持久化无 secret 的定义、触发游标和有界 occurrence 事实，不持有 API Key；默认执行配置、Workspace authority 或 Skill revision 变化时不得静默改绑或重放。
+Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做什么、何时触发”。Task 是一次真实执行及其结果历史，Schedule 是触发规则，Skill 是独立的可复用执行方法；Scheduled Task 不保存 Skill identity、catalog revision 或参数，也不是 AgentCore Session、交互式 Task 草稿、Skill 子对象或第二套 automation 数据面。用户需要采用某个全局 Skill 时可以在任务指令中表达，但 occurrence 始终按普通 Text Run 重新经过 Account、Workspace、容量和 shutdown admission，成功后创建一个新的真实 Task，再通过现有 bounded Executor 启动。每个 occurrence 都请求新的 Managed Workspace，Scheduled Task 界面不提供 User Workspace 选择。Scheduled Task 只持久化无 secret 的指令、触发游标和有界 occurrence 事实，不持有 API Key；默认执行配置或 Workspace authority 变化时不得静默改绑或重放。
 
 ## 5. 产品功能需求
 
@@ -183,7 +183,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - New task 中央区域始终以 Composer 为主，当前模型和 Workspace 在发送前可见；API 管理不进入 Composer，模型与 Workspace 也不得混成不透明的单一“模式”；
 - Task 启动后中央区域转为可追溯工作轨迹，Composer 固定在底部；审批、当前活动、工具详情、usage 或真实结果只决定 Inspector 模块是否可用，不因普通 Run 开始或结束自动开合。只有新的待处理请求可以自动打开一次；打开后保持到用户关闭或切换 Task；
 - `queued / running / waiting_user` 的停止只提供 Task Header 一个可见入口；Composer 只保留本地草稿和禁用发送提示，不建立第二个 Stop。停止请求必须等待 canonical terminal，transport acknowledgement 或 UI 状态变化都不能伪造 `Stopped`；
-- 标题栏只承载窗口、当前 Task/Workspace、搜索与异常状态等全局入口；正常连接状态、语言选择和工程诊断不长期占据主视觉；
+- 标题栏只承载窗口、当前 Task 名称、搜索与异常状态等全局入口；不重复说明 Task 的 Workspace，正常连接状态、语言选择和工程诊断也不长期占据主视觉；
 - 界面在任一时刻只突出一个与当前阶段一致的主动作；独立的导航和设置入口可以持续可见，但不得与主动作竞争；
 - 首个正式版本采用单主窗口；多个 Task 可以后台运行，切换 Workspace 或 Task 不停止执行；
 - Renderer reload、断开连接以及 Bridge revision/snapshot failure 默认只影响视图同步和重连，不得终止后台 Agent Run；只有 Workbench 根据 canonical 产品状态作出的显式 termination 决策才能请求结束 Run；
@@ -204,17 +204,17 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 
 ### 5.10 定时任务
 
-- `定时任务` 是与 `新建任务`、`技能` 同级的独立页面，不属于 Skill 中心、交互式 Task 或某个 Workspace 的子页面；Workspace 是可选执行上下文，只在计划确实需要本地目录时于创建确认层显式绑定；
-- 页面首先提供搜索、可直接采用的建议模板和自然语言“试试自己的任务”入口；已有定义按 `进行中 / 已暂停 / 已完成` 组织，紧凑行显示名称、计划、下一次运行、最近结果及其真实 Task 链接，并提供编辑、暂停/恢复、立即运行和删除；
-- 创建流程先回答“想自动完成什么”，再在确认层审阅任务说明、时间、通知、可选 Workspace 与可选 Skill；不得让空页面先暴露 provider、generation、Unix seconds 或固定间隔秒数等工程字段；
+- `定时任务` 是与 `新建任务`、`技能` 同级的独立页面，不属于 Skill 中心、交互式 Task 或某个 Workspace 的子页面；页面不显示或选择 Workspace，每次 occurrence 直接请求新的 Managed Workspace；
+- 没有定义时，页面提供可采用的 Text 建议模板，并保留页首统一 `新建定时任务` 入口；不建立无法推导时间规则的伪自然语言快捷入口。Text 模板和普通定时任务都使用自动工作区，不要求用户先添加或选择 User Workspace。已有定义时切换为搜索工具栏，并按 `需要处理 / 进行中 / 已暂停 / 已完成` 组织。紧凑行显示名称、计划、下一次运行、最近结果及其真实 Task 链接，并提供编辑、暂停/恢复、立即运行和删除；
+- 创建流程按名称、任务说明、运行时间和确认摘要排列；不提供 Workspace 或 Skill 配置、catalog revision 或参数配置，不得让空页面先暴露 provider、generation、Unix seconds 或固定间隔秒数等工程字段；
 - 首版支持一次性、每小时、每日、每周和由明确起点开始的固定间隔；Host 保存 canonical Unix time、locale-independent recurrence 与创建时 timezone identity，Renderer 只负责本地化显示和结构化编辑，不用本地 timer 推进产品状态；
 - 每次自动或手动触发创建一个新的真实 Task。计划定义不复用旧 Conversation、不把结果复制成第二份聊天历史，也不绕过既有 Task/Run admission；
 - 同一 Scheduled Task 的上一次 Task 仍有 non-terminal Run 时，自动触发必须跳过本次；不得并发重放同一计划或自动终止已有 Run；
 - 自动触发使用 `(scheduledTaskId, plannedAt)` 形成跨 Host 恢复稳定的 occurrence identity；后台 Host 延迟、休眠或重启恢复时最多接纳一个最新的到期 occurrence，过去的多个时间点不批量补跑，并在 occurrence history 中明确标记 delayed/skipped；
 - Scheduled Task 定义、触发游标和有界 occurrence history 由 Workbench 在产品数据目录原子持久化；损坏、commit 结果不确定或恢复校验失败必须 fail closed 并发布 typed persistence health，不得回退成空列表或继续使用可能重复的游标；
 - 主窗口关闭使用后台/托盘形态而不是销毁 Host；后台 Host 继续 timer、Run、通知与待处理事实，托盘提供重新打开和显式退出。显式退出可以停止本机后台执行，但下次启动仍恢复定义并执行上述单次 missed-run reconciliation；
-- 执行配置、Workspace authority、Skill catalog revision、容量或 shutdown gate 不再满足时，计划进入明确的 `needs_attention`，停止继续计时并保留 typed 原因；用户必须编辑并确认当前事实后才能恢复；
-- Scheduled Task 和 occurrence 不保存 credential、Authorization header、OAuth URL 或 AgentCore handle；计划标题、Text 和 Skill 参数进入产品 projection 前执行与 Task history 相同的有界复制和 credential 清洗；
+- 执行配置、Workspace authority、容量或 shutdown gate 不再满足时，计划进入明确的 `needs_attention`，停止继续计时并保留 typed 原因；用户必须编辑并确认当前事实后才能恢复；
+- Scheduled Task 和 occurrence 不保存 credential、Authorization header、OAuth URL 或 AgentCore handle；计划标题和 Text instruction 进入产品 projection 前执行与 Task history 相同的有界复制和 credential 清洗；
 - occurrence 完成、失败、跳过或等待用户时进入有界历史并发出系统通知；通知点击只定位真实 Task/请求，不携带 secret 或建立第二状态面；通知不可用不得改变 Run terminal cause；
 - AgentCore 只执行被 Workbench admission 后的单次 Run，不拥有 cron、时钟、timer、OS wake 或 Scheduled Task persistence。
 

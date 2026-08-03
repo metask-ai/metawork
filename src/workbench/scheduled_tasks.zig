@@ -90,36 +90,12 @@ pub const Recurrence = union(enum) {
     }
 };
 
-pub const Input = union(enum) {
-    text: []const u8,
-    skill: struct {
-        skill_id: []const u8,
-        catalog_revision: []const u8,
-        argument_values: []const []const u8,
-    },
-};
+pub const OwnedInput = struct {
+    value: []u8,
+    redacted: bool = false,
 
-pub const OwnedInput = union(enum) {
-    text: struct {
-        value: []u8,
-        redacted: bool = false,
-    },
-    skill: struct {
-        skill_id: []u8,
-        catalog_revision: []u8,
-        argument_values: [][]u8,
-        redacted: bool = false,
-    },
-
-    pub fn borrowed(self: *const OwnedInput) Input {
-        return switch (self.*) {
-            .text => |text| .{ .text = text.value },
-            .skill => |skill| .{ .skill = .{
-                .skill_id = skill.skill_id,
-                .catalog_revision = skill.catalog_revision,
-                .argument_values = skill.argument_values,
-            } },
-        };
+    pub fn borrowed(self: *const OwnedInput) []const u8 {
+        return self.value;
     }
 };
 
@@ -133,9 +109,7 @@ pub const Health = enum {
 pub const FailureReason = enum {
     previous_task_running,
     execution_changed,
-    workspace_changed,
     workspace_unavailable,
-    catalog_changed,
     capacity_reached,
     shutting_down,
     task_start_failed,
@@ -176,21 +150,12 @@ pub const Occurrence = struct {
     notification_sent: bool = false,
 };
 
-pub const Target = union(enum) {
-    default,
-    explicit: struct {
-        workspace_id: u64,
-        workspace_epoch: u64,
-    },
-};
-
 pub const Definition = struct {
     title: []const u8,
-    target: Target,
     execution_generation: u64,
     execution_provider: Provider,
     execution_model: []const u8,
-    input: Input,
+    input: []const u8,
     recurrence: Recurrence,
 };
 
@@ -199,7 +164,6 @@ pub const Item = struct {
     epoch: u64 = 1,
     title: []u8,
     title_redacted: bool = false,
-    target: Target,
     execution_generation: u64,
     execution_provider: Provider,
     execution_model: []u8,
@@ -282,7 +246,6 @@ pub const Store = struct {
                 .epoch = item.epoch,
                 .definition = .{
                     .title = item.title,
-                    .target = item.target,
                     .execution_generation = item.execution_generation,
                     .execution_provider = item.execution_provider,
                     .execution_model = item.execution_model,
@@ -671,7 +634,6 @@ pub const Store = struct {
             .id = id,
             .epoch = epoch,
             .title = title,
-            .target = definition.target,
             .execution_generation = definition.execution_generation,
             .execution_provider = definition.execution_provider,
             .execution_model = model,
@@ -682,49 +644,8 @@ pub const Store = struct {
         return item;
     }
 
-    fn cloneInput(self: *Store, input: Input) Error!OwnedInput {
-        return switch (input) {
-            .text => |text| .{ .text = .{ .value = try self.copy(text) } },
-            .skill => |skill| skill_copy: {
-                const skill_id = try self.copy(skill.skill_id);
-                errdefer self.free(skill_id);
-                const revision = try self.copy(skill.catalog_revision);
-                errdefer self.free(revision);
-                const values = try self.copyArgumentArray(
-                    skill.argument_values,
-                );
-                break :skill_copy .{ .skill = .{
-                    .skill_id = skill_id,
-                    .catalog_revision = revision,
-                    .argument_values = values,
-                } };
-            },
-        };
-    }
-
-    fn copyArgumentArray(
-        self: *Store,
-        values: []const []const u8,
-    ) Error![][]u8 {
-        const structure_bytes = std.math.mul(
-            usize,
-            values.len,
-            @sizeOf([]u8),
-        ) catch return error.ProjectionCapacity;
-        try self.reserve(structure_bytes);
-        const copied = try self.allocator.alloc([]u8, values.len);
-        self.projection_bytes += structure_bytes;
-        errdefer {
-            self.projection_bytes -= structure_bytes;
-            self.allocator.free(copied);
-        }
-        var completed: usize = 0;
-        errdefer for (copied[0..completed]) |value| self.free(value);
-        for (values, copied) |value, *target| {
-            target.* = try self.copy(value);
-            completed += 1;
-        }
-        return copied;
+    fn cloneInput(self: *Store, input: []const u8) Error!OwnedInput {
+        return .{ .value = try self.copy(input) };
     }
 
     fn deinitItem(self: *Store, item: *Item) void {
@@ -735,17 +656,7 @@ pub const Store = struct {
     }
 
     fn deinitInput(self: *Store, input: *OwnedInput) void {
-        switch (input.*) {
-            .text => |text| self.free(text.value),
-            .skill => |skill| {
-                for (skill.argument_values) |value| self.free(value);
-                self.projection_bytes -=
-                    skill.argument_values.len * @sizeOf([]u8);
-                self.allocator.free(skill.argument_values);
-                self.free(skill.catalog_revision);
-                self.free(skill.skill_id);
-            },
-        }
+        self.free(input.value);
         input.* = undefined;
     }
 
@@ -830,29 +741,8 @@ fn validDefinition(definition: Definition) bool {
         definition.execution_model.len == 0 or
         !std.unicode.utf8ValidateSlice(definition.execution_model))
         return false;
-    const input_valid = switch (definition.input) {
-        .text => |text| text.len != 0 and
-            std.unicode.utf8ValidateSlice(text),
-        .skill => |skill| skill.skill_id.len != 0 and
-            std.unicode.utf8ValidateSlice(skill.skill_id) and
-            skill.catalog_revision.len != 0 and
-            std.unicode.utf8ValidateSlice(skill.catalog_revision) and
-            validArguments(skill.argument_values),
-    };
-    if (!input_valid) return false;
-    return switch (definition.target) {
-        .default => switch (definition.input) {
-            .text => true,
-            .skill => false,
-        },
-        .explicit => |explicit| explicit.workspace_id != 0 and
-            explicit.workspace_epoch != 0,
-    };
-}
-
-fn validArguments(values: []const []const u8) bool {
-    for (values) |value|
-        if (!std.unicode.utf8ValidateSlice(value)) return false;
+    if (definition.input.len == 0 or
+        !std.unicode.utf8ValidateSlice(definition.input)) return false;
     return true;
 }
 
@@ -914,14 +804,10 @@ test "store updates optimistically and a one-time occurrence completes" {
     defer store.deinit();
     const id = try store.create(.{
         .title = "Daily summary",
-        .target = .{ .explicit = .{
-            .workspace_id = 7,
-            .workspace_epoch = 3,
-        } },
         .execution_generation = 9,
         .execution_provider = .openai,
         .execution_model = "gpt-test",
-        .input = .{ .text = "Summarize the project" },
+        .input = "Summarize the project",
         .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
     }, 1_000);
     const item = store.find(id).?;

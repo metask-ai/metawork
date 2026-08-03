@@ -92,14 +92,13 @@ import type {
   WorkspaceMutationReason,
 } from "../bridge/contracts.ts";
 import { useI18n, type MessageId } from "../i18n/context.ts";
-import { primaryShortcutModifier } from "../platform/keyboard.ts";
 import {
   searchWorkbench,
   sidebarTasks,
   selectActiveTask,
   selectCurrentWorkspace,
   taskDisplayState,
-  workspaceLabel,
+  workspaceDirectoryLabel,
   workspaceSummaries,
   type SearchResult,
 } from "../workbench/selectors.ts";
@@ -130,7 +129,6 @@ function mutationReasonMessageId(reason: MutationReason): MessageId {
 
 export default function App() {
   const { t } = useI18n();
-  const shortcutModifier = primaryShortcutModifier();
   const [workbench, dispatchWorkbench] = useReducer(
     workbenchReducer,
     initialWorkbenchState,
@@ -1732,21 +1730,24 @@ export default function App() {
       workspaceMissing={Boolean(newTaskDraftActive && !composerWorkspace)}
       workspaceLabel={
         composerWorkspace
-          ? composerWorkspace.origin === "managed"
-            ? t("workspace.managed")
-            : composerWorkspace.displayName ||
-              workspaceLabel(composerWorkspace.canonicalRoot)
+          ? workspaceDirectoryLabel(
+              composerWorkspace,
+              t("workspace.default_directory"),
+            )
           : t("workspace.none")
       }
       workspaceTitle={
-        composerWorkspace?.origin === "managed"
-          ? t("workspace.managed")
-          : composerWorkspace?.canonicalRoot || t("workspace.none")
+        composerWorkspace
+          ? workspaceDirectoryLabel(
+              composerWorkspace,
+              t("workspace.default_directory"),
+            )
+          : t("workspace.none")
       }
       workspaceOptions={userWorkspaces.map((workspace) => ({
         id: workspace.id,
-        label: workspace.displayName || workspaceLabel(workspace.canonicalRoot),
-        canonicalRoot: workspace.canonicalRoot,
+        label: workspace.canonicalRoot,
+        description: workspace.displayName || undefined,
         authorization: workspace.authorization,
       }))}
       selectedWorkspaceId={
@@ -1817,17 +1818,6 @@ export default function App() {
       onWindowControl={(action) => {
         void client.controlWindow(action).catch(() => undefined);
       }}
-      workspaceLabel={
-        route === "settings"
-          ? t("settings.account_models")
-          : route === "scheduled-tasks"
-            ? t("scheduled.title")
-            : currentWorkspace?.origin === "managed"
-              ? t("workspace.managed")
-              : currentWorkspace?.displayName ||
-                currentWorkspace?.canonicalRoot ||
-                t("workspace.none")
-      }
       attentionNotice={
         commandBarStatus
           ? t(commandBarStatus.id, commandBarStatus.values)
@@ -1849,10 +1839,9 @@ export default function App() {
                   onClick={beginNewTask}
                 >
                   <span className="sidebar-capability-mark" aria-hidden="true">
-                    <Icon name="plus" />
+                    <Icon name="new-task" />
                   </span>
                   <span>{t("task.new")}</span>
-                  <kbd>{shortcutModifier}N</kbd>
                 </button>
                 <button
                   className="sidebar-capability focus-ring"
@@ -1864,7 +1853,7 @@ export default function App() {
                   }}
                 >
                   <span className="sidebar-capability-mark" aria-hidden="true">
-                    /
+                    <Icon name="skills" />
                   </span>
                   <span>{t("skills.title")}</span>
                 </button>
@@ -1885,7 +1874,7 @@ export default function App() {
                       className="sidebar-capability-mark"
                       aria-hidden="true"
                     >
-                      <Icon name="clock" />
+                      <Icon name="scheduled-tasks" />
                     </span>
                     <span>{t("scheduled.title")}</span>
                   </button>
