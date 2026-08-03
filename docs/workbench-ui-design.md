@@ -171,7 +171,7 @@ Workspace
 - 命令栏是窗口交互层，不表现为独立横向标题栏：不使用贯穿全窗的底边或异色横带；左侧 Workspace/Task rail 的背景与竖分隔线必须延伸到窗口顶部，中央命令区与 Task 工作面使用同一 surface；
 - macOS 为系统交通灯保留左侧安全区；Windows system WebView 无法可靠显露 DWM glyph 时，命令栏提供唯一可见的最小化、最大化/还原与关闭 affordance，Host 在重新校验来源窗口后执行真实 native action；不得同时显示两套窗口按钮；
 - macOS 52 px、Windows 40 px 是各平台一体化窗口栏的最终布局高度。Windows 窗口按钮组必须完整落在 40 px 内，命令栏不得再用垂直 padding 把等高按钮组下移或扩张到布局行之外；最小化、最大化与关闭 glyph 使用同一视觉中心线，不能把最小化横线当作文字基线下沉；
-- 命令栏只包含左栏开关、当前 Task/Workspace 上下文、全局搜索和按需异常入口；`左栏开关` 只控制 Workspace/Task 导航，不兼任 Inspector 开关；
+- 命令栏只包含左栏开关、当前 Task 名称、全局搜索和按需异常入口；不在 Task 名称前重复 Workspace，`左栏开关` 只控制 Workspace/Task 导航，不兼任 Inspector 开关；
 - 命令栏空白背景在越过移动阈值后请求窗口拖拽；按钮、输入、选择框、链接、disclosure 和展开内容必须排除。Renderer 只提交 drag/control 意图；Host 以 App-owned 单一启动窗口 identity 和主线程校验受限 bootstrap chrome capability，使连接失败页仍能移动或关闭窗口，而不依赖 ProductDelivery 已连接。Windows 平台操作必须继续使用同一精确窗口身份，不能猜测当前活动窗口；当前不伪造跨平台双击标题栏语义；
 - 正常连接、恢复成功和普通操作成功不持续占据命令栏；只有同步失败、命令失败或其他确实需要用户行动的异常才显示状态入口；
 - 异常状态按 connection、account、Workspace identity 或 Task identity 分域保存；并行 Task 的结果不得互相覆盖，命令栏只选择当前上下文中优先级最高的一项显示；
@@ -201,7 +201,7 @@ Invoices
 点击后打开 Workspace 切换器。左栏主体只列出当前 Workspace 的 Task，不同时展开所有 Workspace。
 
 - `New task` 默认使用当前 Workspace；
-- 当前没有 Workspace 时仍先打开空白 New task 页面并允许暂存草稿；发送保持禁用，由 Composer 下方的 Workspace 控件显式选择已有 Workspace 或打开原生目录选择器。选择完成后只更新草稿上下文，不得自动创建 Task 或发送已有内容；
+- 当前没有 Workspace 时仍先打开空白 New task 页面并允许暂存草稿；发送保持禁用，由 Composer 下方的工作目录控件显式选择已有 Workspace 或打开原生目录选择器。选择完成后只更新草稿上下文，不得自动创建 Task 或发送已有内容；User Workspace 直接显示 canonical directory，Managed Workspace 统一显示“默认”，不得暴露随机目录或内部 origin 术语；
 - New task 草稿按 Workspace 隔离。未绑定 Workspace 的临时草稿只在目标 Workspace 没有草稿时迁移；目标已有草稿时保留两边内容并打开目标草稿，不能覆盖或丢弃任一份；
 - Workspace 切换器消费 Host 发布的独立 Workspace projection，支持最近使用、打开新目录、重新授权和移除入口；没有 Task 的 Workspace 仍然可见；
 - Workspace projection 的 `origin` 是 Host 事实。切换器、recent、重新授权和移除只展示 `origin = user`；`origin = managed` 不显示随机目录名或伪装成用户选择项，但必须随 owning Task 保留在 canonical snapshot 中；

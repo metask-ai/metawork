@@ -129,7 +129,7 @@ export const enUS = {
   "workspace.running_count": "{count} working",
   "workspace.failed_count": "{count} failed",
   "workspace.none": "No workspace selected",
-  "workspace.managed": "Independent workspace",
+  "workspace.default_directory": "Default",
   "workspace.grant_ready": "Ready to start a task in this trusted workspace.",
   "workspace.selection_cancelled": "Workspace selection cancelled.",
   "workspace.selection_failed":

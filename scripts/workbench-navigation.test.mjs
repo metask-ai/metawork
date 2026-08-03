@@ -32,6 +32,7 @@ import {
   taskDisplayState,
   taskGroups,
   taskSignals,
+  workspaceDirectoryLabel,
   workspaceLabel,
   workspaceSummaries,
 } from "../frontend/src/workbench/selectors.ts";
@@ -231,6 +232,23 @@ test("workspace navigation aggregates actionable cross-workspace signals without
     { running: false, attention: false, failed: true },
   );
   assert.equal(workspaceLabel("C:\\work\\metawork\\"), "metawork");
+  assert.equal(
+    workspaceDirectoryLabel(
+      { origin: "user", canonicalRoot: "/repo/metawork" },
+      "Default",
+    ),
+    "/repo/metawork",
+  );
+  assert.equal(
+    workspaceDirectoryLabel(
+      {
+        origin: "managed",
+        canonicalRoot: "/data/workspaces/deadbeefdeadbeef",
+      },
+      "Default",
+    ),
+    "Default",
+  );
 });
 
 test("Task display state preserves Run, lifecycle, archive, and outcome precedence", () => {

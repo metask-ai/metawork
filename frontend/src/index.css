@@ -1841,21 +1841,6 @@ summary::-webkit-details-marker {
   white-space: nowrap;
 }
 
-.commandbar-workspace {
-  overflow: hidden;
-  max-width: 260px;
-  color: var(--color-muted);
-  font-size: 12px;
-  font-weight: 560;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.commandbar-separator {
-  color: #aaa4b4;
-  font-size: 12px;
-}
-
 .commandbar-alert-slot {
   grid-column: 3;
   min-width: 0;
@@ -5465,11 +5450,6 @@ summary::-webkit-details-marker {
     display: block;
     border: 0;
     background: rgba(24, 50, 71, 0.16);
-  }
-
-  .commandbar-workspace,
-  .commandbar-separator {
-    display: none;
   }
 
   .workbench-commandbar {

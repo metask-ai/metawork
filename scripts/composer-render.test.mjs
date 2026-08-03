@@ -141,7 +141,6 @@ function renderShell(
         AppShell,
         {
           taskTitle: "New task",
-          workspaceLabel: "No workspace",
           contextVisible,
           status: "Connected",
           onSearch() {},
@@ -525,9 +524,8 @@ test("Workbench foundation uses the purple system and centered new Task stage", 
     app,
     /contextVisible=\{route === "workbench" && activeTask !== null\}/,
   );
-  assert.ok(
-    shell.indexOf("commandbar-workspace") < shell.indexOf("commandbar-task"),
-  );
+  assert.doesNotMatch(shell, /commandbar-workspace|commandbar-separator/);
+  assert.match(shell, /commandbar-task/);
 });
 
 test("New task keeps the titlebar quiet while a real Task retains context", () => {
@@ -535,7 +533,7 @@ test("New task keeps the titlebar quiet while a real Task retains context", () =
   assert.doesNotMatch(quiet, /No workspace|New task/);
 
   const contextual = renderShell(null, false, undefined, true);
-  assert.match(contextual, /No workspace/);
+  assert.doesNotMatch(contextual, /No workspace/);
   assert.match(contextual, /New task/);
 });
 
@@ -573,8 +571,8 @@ test("a new Task draft is editable before its first send", () => {
     workspaceOptions: [
       {
         id: "1",
-        label: "alpha",
-        canonicalRoot: "/repo/alpha",
+        label: "/repo/alpha",
+        description: "alpha",
         authorization: "available",
       },
     ],

@@ -97,7 +97,7 @@ import {
   selectActiveTask,
   selectCurrentWorkspace,
   taskDisplayState,
-  workspaceLabel,
+  workspaceDirectoryLabel,
   workspaceSummaries,
   type SearchResult,
 } from "../workbench/selectors.ts";
@@ -1637,21 +1637,24 @@ export default function App() {
       workspaceMissing={Boolean(newTaskDraftActive && !composerWorkspace)}
       workspaceLabel={
         composerWorkspace
-          ? composerWorkspace.origin === "managed"
-            ? t("workspace.managed")
-            : composerWorkspace.displayName ||
-              workspaceLabel(composerWorkspace.canonicalRoot)
+          ? workspaceDirectoryLabel(
+              composerWorkspace,
+              t("workspace.default_directory"),
+            )
           : t("workspace.none")
       }
       workspaceTitle={
-        composerWorkspace?.origin === "managed"
-          ? t("workspace.managed")
-          : composerWorkspace?.canonicalRoot || t("workspace.none")
+        composerWorkspace
+          ? workspaceDirectoryLabel(
+              composerWorkspace,
+              t("workspace.default_directory"),
+            )
+          : t("workspace.none")
       }
       workspaceOptions={userWorkspaces.map((workspace) => ({
         id: workspace.id,
-        label: workspace.displayName || workspaceLabel(workspace.canonicalRoot),
-        canonicalRoot: workspace.canonicalRoot,
+        label: workspace.canonicalRoot,
+        description: workspace.displayName || undefined,
         authorization: workspace.authorization,
       }))}
       selectedWorkspaceId={
@@ -1722,17 +1725,6 @@ export default function App() {
       onWindowControl={(action) => {
         void client.controlWindow(action).catch(() => undefined);
       }}
-      workspaceLabel={
-        route === "settings"
-          ? t("settings.account_models")
-          : route === "scheduled-tasks"
-            ? t("scheduled.title")
-            : currentWorkspace?.origin === "managed"
-              ? t("workspace.managed")
-              : currentWorkspace?.displayName ||
-                currentWorkspace?.canonicalRoot ||
-                t("workspace.none")
-      }
       attentionNotice={
         commandBarStatus
           ? t(commandBarStatus.id, commandBarStatus.values)
