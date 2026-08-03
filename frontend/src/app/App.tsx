@@ -90,7 +90,6 @@ import type {
   WorkspaceMutationReason,
 } from "../bridge/contracts.ts";
 import { useI18n, type MessageId } from "../i18n/context.ts";
-import { primaryShortcutModifier } from "../platform/keyboard.ts";
 import {
   searchWorkbench,
   sidebarTasks,
@@ -150,7 +149,6 @@ function connectionStatus(status: WorkbenchConnectionStatus): ShellStatus {
 
 export default function App() {
   const { t } = useI18n();
-  const shortcutModifier = primaryShortcutModifier();
   const [workbench, dispatchWorkbench] = useReducer(
     workbenchReducer,
     initialWorkbenchState,
@@ -1759,7 +1757,6 @@ export default function App() {
                     <Icon name="new-task" />
                   </span>
                   <span>{t("task.new")}</span>
-                  <kbd>{shortcutModifier}N</kbd>
                 </button>
                 <button
                   className="sidebar-capability focus-ring"
