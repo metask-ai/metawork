@@ -177,7 +177,7 @@ test("timed-out mutations resync from Host state without automatic replay", asyn
 
   assert.match(client, /Promise\.race\(\[pending, timeout\]\)/);
   assert.match(client, /BridgeCommandTimeoutError/);
-  assert.doesNotMatch(client, /retry.*this\.invoke/s);
+  assert.doesNotMatch(client, /catch[^{]*\{[^}]*this\.invoke/s);
   assert.match(
     app,
     /instanceof BridgeCommandTimeoutError[\s\S]*await refreshSnapshot\(\)/,

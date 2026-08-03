@@ -24,8 +24,12 @@ const { translate } = await vite.ssrLoadModule("/src/i18n/runtime.ts");
 
 test.after(async () => vite.close());
 
-const skills = [
+const assets = [
   {
+    installId: "aabbccdd",
+    sourceKind: "local_package",
+    scope: { kind: "personal", workspaceId: null, workspaceEpoch: null },
+    managementState: "ready",
     skillId: "skill-review",
     invocationName: "code-review",
     displayName: "Review code changes",
@@ -33,24 +37,58 @@ const skills = [
       "Review code changes for correctness, security, and maintainability.",
     argumentNames: ["target", "focus"],
     maxValues: 64,
+    canExport: true,
+    canReimport: true,
+    canUninstall: true,
+    canRetry: false,
+    issueCodes: [],
   },
   {
-    skillId: "skill-release",
+    installId: "eeff0011",
+    sourceKind: "local_directory",
+    scope: { kind: "project", workspaceId: "1", workspaceEpoch: "1" },
+    managementState: "pending_verification",
+    skillId: null,
     invocationName: "release-check",
     displayName: "Check before release",
     description: "Check versions, tests, and build state before release.",
     argumentNames: [],
     maxValues: 64,
+    canExport: false,
+    canReimport: false,
+    canUninstall: false,
+    canRetry: true,
+    issueCodes: [],
+  },
+  {
+    installId: null,
+    sourceKind: "external",
+    scope: { kind: "external", workspaceId: null, workspaceEpoch: null },
+    managementState: "externally_managed",
+    skillId: "skill-notes",
+    invocationName: "release-notes",
+    displayName: "Release notes",
+    description: "Create concise release notes.",
+    argumentNames: ["range"],
+    maxValues: 64,
+    canExport: false,
+    canReimport: false,
+    canUninstall: false,
+    canRetry: false,
+    issueCodes: ["invalid_resource"],
   },
 ];
 
-const readyCatalog = {
-  availability: "ready",
-  redacted: false,
-  revision: "revision-4",
-  skills,
-  issues: [],
-};
+const readyManagement = { availability: "ready", assets };
+const workspaces = [
+  {
+    id: "1",
+    epoch: "1",
+    origin: "user",
+    displayName: "MetaWork",
+    authorization: "available",
+  },
+];
 
 function render(props = {}) {
   return renderToStaticMarkup(
@@ -64,132 +102,115 @@ function render(props = {}) {
         },
       },
       createElement(SkillsPage, {
-        catalog: readyCatalog,
+        management: readyManagement,
+        workspaces,
         query: "",
         refreshing: false,
         disabled: false,
         onQuery() {},
         onRefresh() {},
+        async onChooseImport() {
+          return { selected: false };
+        },
+        async onInstall() {
+          return {
+            accepted: true,
+            installId: "aabbccdd",
+            verificationPending: true,
+            reason: null,
+          };
+        },
+        async onReimport() {
+          return {
+            accepted: true,
+            installId: "aabbccdd",
+            verificationPending: true,
+            reason: null,
+          };
+        },
+        async onUninstall() {
+          return {
+            accepted: true,
+            installId: "aabbccdd",
+            verificationPending: true,
+            reason: null,
+          };
+        },
+        async onRetry() {
+          return {
+            accepted: true,
+            installId: "aabbccdd",
+            verificationPending: true,
+            reason: null,
+          };
+        },
+        async onExport() {
+          return {
+            exported: true,
+            fileName: "code-review.skill",
+            reason: null,
+          };
+        },
+        async onDetail() {
+          return {
+            available: true,
+            definition: "---\nname: code-review\n---\n",
+            fileCount: 1,
+            totalBytes: 42,
+            reason: null,
+          };
+        },
         ...props,
       }),
     ),
   );
 }
 
-test("Skills center renders the MetaWork catalog as a read-only list", () => {
+test("Skills center renders a compact local management surface", () => {
   const markup = render();
   assert.match(markup, /<h1[^>]*tabindex="-1"[^>]*>Skills<\/h1>/);
-  assert.match(markup, /Manage the Skills available to MetaWork/);
+  assert.match(markup, /Manage local Skills available to MetaWork/);
   assert.match(markup, /type="search"/);
-  assert.match(markup, /code-review/);
+  assert.match(markup, /Import Skill/);
+  assert.match(markup, /Needs attention/);
   assert.match(markup, /Review code changes/);
-  assert.match(markup, /Arguments: target · focus/);
-  assert.match(markup, /release-check/);
-  assert.match(markup, /No arguments/);
-  assert.match(markup, /2 available/);
-  assert.doesNotMatch(
-    markup,
-    /install|uninstall|enable|disable|checkbox|switch|\.claude|\.metacodes/i,
-  );
+  assert.match(markup, /Check before release/);
+  assert.match(markup, /Release notes/);
+  assert.match(markup, /Personal/);
+  assert.match(markup, /MetaWork/);
+  assert.doesNotMatch(markup, />\/<|installed|checkbox|switch/i);
 });
 
 test("Skills search covers invocation, display name, description, and arguments", () => {
   assert.deepEqual(
-    filterSkills(skills, "SECURITY").map((skill) => skill.skillId),
+    filterSkills(assets, "SECURITY").map((skill) => skill.skillId),
     ["skill-review"],
   );
   assert.deepEqual(
-    filterSkills(skills, "focus").map((skill) => skill.skillId),
+    filterSkills(assets, "focus").map((skill) => skill.skillId),
     ["skill-review"],
   );
   assert.deepEqual(
-    filterSkills(skills, "before release").map((skill) => skill.skillId),
-    ["skill-release"],
+    filterSkills(assets, "before release").map((skill) => skill.skillId),
+    [null],
   );
-  assert.equal(filterSkills(skills, "missing").length, 0);
-  assert.equal(filterSkills(skills, "  ").length, 2);
+  assert.equal(filterSkills(assets, "missing").length, 0);
+  assert.equal(filterSkills(assets, "  ").length, 3);
 });
 
-test("Skills center is independent of Workspace and distinguishes catalog states", () => {
-  assert.doesNotMatch(render(), /Choose a workspace|>Add<\/button>/);
+test("Skills center distinguishes unavailable, empty, and filtered states", () => {
   assert.match(
-    render({
-      catalog: {
-        ...readyCatalog,
-        availability: "loading",
-        revision: null,
-        skills: [],
-      },
-    }),
-    /skills-skeleton/,
+    render({ management: { availability: "unavailable", assets: [] } }),
+    /Skill management is unavailable/,
   );
   assert.match(
-    render({
-      catalog: {
-        ...readyCatalog,
-        availability: "unavailable",
-        revision: null,
-        skills: [],
-      },
-    }),
-    /Skills could not be loaded/,
+    render({ management: { availability: "ready", assets: [] } }),
+    /No local Skills yet/,
   );
-  assert.match(
-    render({ catalog: { ...readyCatalog, skills: [] } }),
-    /No skills found/,
-  );
-  assert.match(render({ query: "not-here" }), /No matching skills/);
+  assert.match(render({ query: "not-here" }), /No matching Skills/);
 });
 
-test("degraded catalogs keep usable skills and expose bounded issue copy", () => {
-  const markup = render({
-    catalog: {
-      ...readyCatalog,
-      availability: "degraded",
-      issues: [
-        {
-          code: "invalid_definition",
-          invocationName: "release-notes",
-        },
-        {
-          code: "source_conflict",
-          invocationName: "review",
-        },
-      ],
-    },
-  });
-  assert.match(markup, /code-review/);
-  assert.match(markup, /Catalog issues: 2/);
-  assert.match(markup, /release-notes/);
-  assert.match(markup, /Invalid definition/);
-  assert.match(markup, /Conflicting definitions/);
-});
-
-test("refreshing and failed refresh preserve the last committed list", () => {
-  assert.match(
-    render({
-      refreshing: true,
-      catalog: {
-        ...readyCatalog,
-        availability: "loading",
-        revision: null,
-      },
-    }),
-    /code-review/,
-  );
-  assert.match(
-    render({
-      catalog: {
-        ...readyCatalog,
-        availability: "unavailable",
-        revision: null,
-      },
-    }),
-    /code-review/,
-  );
-});
-
-test("Skills route uses its MetaWork catalog command and owns no policy path", async () => {
+test("Skills route uses the canonical management commands and no policy path", async () => {
   const app = await readFile(
     join(process.cwd(), "frontend/src/app/App.tsx"),
     "utf8",
@@ -202,30 +223,25 @@ test("Skills route uses its MetaWork catalog command and owns no policy path", a
     join(process.cwd(), "frontend/src/features/skills/SkillsPage.tsx"),
     "utf8",
   );
-  assert.match(app, /setRoute\("skills"\)/);
-  assert.match(app, /aria-current=\{route === "skills" \? "page"/);
-  assert.doesNotMatch(
-    app,
-    /className="sidebar-capability focus-ring"[\s\S]*?disabled=\{bridgeUnavailable\}[\s\S]*?setRoute\("skills"\)/,
-  );
-  assert.match(app, /client\.refreshSkillCatalog\(\)/);
-  assert.match(app, /catalog=\{snapshot\.skillCatalog\}/);
-  assert.doesNotMatch(
-    app,
-    /workspaceName=\{|catalog=\{currentWorkspace\?\.skillCatalog/,
-  );
-  assert.match(
-    commands,
-    /refreshSkillCatalog: "metawork\.skills\.refreshCatalog"/,
-  );
+  assert.match(app, /management=\{snapshot\.skillManagement\}/);
+  assert.match(app, /commitSkillMutation/);
+  for (const command of [
+    "chooseImport",
+    "install",
+    "reimport",
+    "uninstall",
+    "retry",
+    "export",
+    "detail",
+    "refreshCatalog",
+  ]) {
+    assert.match(commands, new RegExp(`skills\\.${command}`));
+  }
   assert.match(page, /title\.current\?\.focus\(\)/);
-  assert.doesNotMatch(
-    commands,
-    /skills\.(?:install|uninstall|enable|disable)|skillPolicy/i,
-  );
+  assert.match(page, /aria-modal="true"/);
   assert.doesNotMatch(
     page,
-    /window\.zero|localStorage|FileSystem|toggle|switch/i,
+    /window\.zero|window\.confirm|localStorage|FileSystem|toggle|switch/i,
   );
 });
 
