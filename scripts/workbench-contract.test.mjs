@@ -157,10 +157,8 @@ test("Scheduled Task projection decodes recurrence and occurrence without secret
         model: "fixture-model",
       },
       input: {
-        kind: "skill",
-        skillId: "builtin.summary",
-        catalogRevision: "catalog-4",
-        argumentValues: ["src"],
+        kind: "text",
+        text: "Summarize src",
         redacted: false,
       },
       recurrence: {
@@ -239,11 +237,17 @@ test("Scheduled Task projection decodes recurrence and occurrence without secret
   };
   assert.deepEqual(decodeWorkbenchSnapshot(defaultTarget), defaultTarget);
 
-  const defaultSkill = clone(scheduled);
-  defaultSkill.scheduledTasks[0].target = { kind: "default" };
+  const configuredSkill = clone(scheduled);
+  configuredSkill.scheduledTasks[0].input = {
+    kind: "skill",
+    skillId: "builtin.summary",
+    catalogRevision: "catalog-4",
+    argumentValues: ["src"],
+    redacted: false,
+  };
   assert.throws(
-    () => decodeWorkbenchSnapshot(defaultSkill),
-    /default scheduled Task target requires text input/,
+    () => decodeWorkbenchSnapshot(configuredSkill),
+    /unexpected scheduled Task input kind/,
   );
 
   const invalid = clone(scheduled);

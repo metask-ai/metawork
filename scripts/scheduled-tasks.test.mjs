@@ -130,8 +130,10 @@ test("Scheduled tasks is a truthful independent management page", () => {
   ];
   const html = render(snapshot);
   assert.match(html, /Scheduled tasks/);
-  assert.match(html, /Runs in background/);
+  assert.match(html, /Continues after the window closes/);
   assert.match(html, /Search scheduled tasks/);
+  assert.match(html, /type="search"/);
+  assert.match(html, /1 schedule/);
   assert.match(html, /Ongoing/);
   assert.match(html, /Daily repository summary/);
   assert.match(html, /Run now/);
@@ -150,11 +152,13 @@ test("Empty scheduled tasks page offers actionable starter templates", () => {
   assert.match(html, /Daily brief/);
   assert.match(html, /Weekly review/);
   assert.match(html, /Follow-up check/);
-  assert.match(html, /Try your own task/);
+  assert.match(html, /New schedule/);
+  assert.doesNotMatch(html, /What should happen automatically/);
+  assert.doesNotMatch(html, /Search scheduled tasks/);
   assert.doesNotMatch(html, /Nothing is scheduled/);
 });
 
-test("project-aware starter templates require an explicit user Workspace", () => {
+test("starter templates use an automatic Workspace even when a user Workspace is selected", () => {
   const snapshot = structuredClone(fixture);
   snapshot.capabilities.managedWorkspaces = true;
   snapshot.capabilities.scheduledTasks = true;
@@ -163,8 +167,8 @@ test("project-aware starter templates require an explicit user Workspace", () =>
   renderDom(scheduledElement(snapshot));
 
   fireEvent.click(screen.getByRole("button", { name: /Daily brief/ }));
-  assert.equal(screen.getByLabelText("Run files").value, "explicit");
-  assert.equal(screen.getByLabelText("Workspace").value, "1");
+  assert.equal(screen.getByLabelText("Workspace mode").value, "default");
+  assert.equal(screen.queryByLabelText("Manual workspace"), null);
 });
 
 test("Text schedules default to a managed workspace without requiring a user Workspace", async () => {
@@ -186,18 +190,23 @@ test("Text schedules default to a managed workspace without requiring a user Wor
     }),
   );
 
-  assert.equal(
-    screen.getByRole("button", { name: /Daily brief/ }).disabled,
-    true,
-  );
-  assert.equal(
-    screen.getByRole("button", { name: /Try your own task/ }).disabled,
-    false,
-  );
-  fireEvent.click(screen.getByRole("button", { name: "New schedule" }));
+  const template = screen.getByRole("button", { name: /Daily brief/ });
+  assert.equal(template.disabled, false);
+  fireEvent.click(template);
   assert.ok(screen.getByRole("dialog", { name: "Schedule editor" }));
-  assert.equal(screen.getByRole("button", { name: "Skill" }).disabled, true);
-  assert.equal(screen.getByLabelText("Run files").value, "default");
+  assert.equal(screen.getByLabelText("Workspace mode").value, "default");
+  assert.equal(screen.queryByText(/Add a workspace from the sidebar/), null);
+  fireEvent.keyDown(screen.getByRole("dialog", { name: "Schedule editor" }), {
+    key: "Escape",
+  });
+  assert.equal(screen.queryByRole("dialog"), null);
+
+  const newSchedule = screen.getByRole("button", { name: "New schedule" });
+  newSchedule.focus();
+  fireEvent.click(newSchedule);
+  assert.ok(screen.getByRole("dialog", { name: "Schedule editor" }));
+  assert.equal(screen.queryByRole("button", { name: "Skill" }), null);
+  assert.equal(screen.getByLabelText("Workspace mode").value, "default");
   fireEvent.change(screen.getByLabelText("Name"), {
     target: { value: "Independent brief" },
   });
@@ -212,7 +221,7 @@ test("Text schedules default to a managed workspace without requiring a user Wor
   assert.equal(created.input.kind, "text");
 });
 
-test("Skill schedules force an explicit user Workspace target", () => {
+test("schedule instructions have no separate Skill configuration", () => {
   const snapshot = structuredClone(fixture);
   snapshot.capabilities.managedWorkspaces = true;
   snapshot.capabilities.scheduledTasks = true;
@@ -221,11 +230,51 @@ test("Skill schedules force an explicit user Workspace target", () => {
   renderDom(scheduledElement(snapshot));
 
   fireEvent.click(screen.getByRole("button", { name: "New schedule" }));
-  fireEvent.click(screen.getByRole("button", { name: "Skill" }));
-  const target = screen.getByLabelText("Run files");
-  assert.equal(target.value, "explicit");
-  assert.equal(target.disabled, true);
-  assert.equal(screen.getByLabelText("Workspace").value, "1");
+  assert.equal(screen.queryByRole("button", { name: "Skill" }), null);
+  assert.equal(screen.queryByLabelText(/Choose a skill/), null);
+  assert.match(
+    screen.getByText(/describe that in the instruction/).textContent,
+    /global Skill/,
+  );
+  const target = screen.getByLabelText("Workspace mode");
+  assert.equal(target.value, "default");
+  assert.equal(target.disabled, false);
+  fireEvent.change(target, { target: { value: "explicit" } });
+  assert.equal(screen.getByLabelText("Manual workspace").value, "1");
+});
+
+test("schedule editor controls have explicit semantics and no native chrome", () => {
+  const snapshot = structuredClone(fixture);
+  snapshot.capabilities.managedWorkspaces = true;
+  snapshot.capabilities.scheduledTasks = true;
+  snapshot.capabilities.scheduledTaskPersistence = true;
+  snapshot.capabilities.scheduledTaskPersistenceHealth = "ready";
+  renderDom(scheduledElement(snapshot));
+
+  fireEvent.click(screen.getByRole("button", { name: "New schedule" }));
+  const dialog = screen.getByRole("dialog", { name: "Schedule editor" });
+  assert.ok(screen.getByLabelText("Instruction"));
+  assert.ok(
+    [...dialog.querySelectorAll("button")].every(
+      (button) => button.type === "button",
+    ),
+  );
+  assert.equal(screen.queryByRole("button", { name: "Skill" }), null);
+
+  fireEvent.click(screen.getByRole("button", { name: "Repeat" }));
+  assert.ok(screen.getByLabelText("Every"));
+  assert.ok(screen.getByLabelText("Interval unit"));
+  for (const select of dialog.querySelectorAll("select"))
+    assert.equal(select.parentElement.className, "scheduled-select");
+
+  const css = readFileSync(
+    join(process.cwd(), "frontend/src/index.css"),
+    "utf8",
+  );
+  assert.match(css, /\.scheduled-select select \{[\s\S]*?appearance: none;/);
+  assert.match(css, /input\[type="number"\][\s\S]*?appearance: textfield;/);
+  assert.match(css, /::-webkit-search-cancel-button/);
+  assert.match(css, /resize: none;/);
 });
 
 test("New task, Skills, and Scheduled tasks share one compact peer menu", async () => {

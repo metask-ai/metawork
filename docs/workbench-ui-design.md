@@ -295,7 +295,7 @@ release-notes · Invalid definition
 没有已安排任务时，首屏先帮助用户找到值得自动化的工作，不展示空白工程表单：
 
 ```text
-[ 搜索已安排任务                                              ]
+定时任务                                      [新建定时任务]
 
 建议
 
@@ -308,24 +308,24 @@ release-notes · Invalid definition
 +  跟进监控       工作日 9:00
    定期检查指定事项，只在出现值得关注的变化时通知
 
-+  试试自己的任务
 ```
 
-已有定义时，同一个搜索框过滤标题、说明和可见 Skill 名称；下面按 `进行中 / 需要处理 / 已暂停 / 已完成` 分区呈现连续列表。建议仍可从 `新建` 流程访问，不与用户定义混在同一状态分区。
+空态直接展示建议模板，并由页首 `新建定时任务` 承担自定义创建；不增加无法可靠推导时间规则的自然语言快捷入口。已有定义时才切换为搜索工具栏，过滤标题和任务指令；下面按 `需要处理 / 进行中 / 已暂停 / 已完成` 分区呈现连续列表。建议不与用户定义混在同一状态分区。
 
-- 建议行是可执行模板，不是静态示例。整行点击进入创建确认层，预填任务说明、recurrence 和通知；`试试自己的任务` 先聚焦自然语言说明，再进入同一确认层，不建立第二种创建协议；
+- 建议行是可执行模板，不是静态示例。整行点击进入创建确认层，预填任务说明、recurrence 和通知；自定义创建始终使用页首统一入口，不建立第二种创建协议；
+- 当前建议均必须默认使用自动工作区，不得因为标题或说明提到“项目”“工作区”或某个 Skill 就擅自切换到 User Workspace；只有用户明确选择手动工作区时才出现 User Workspace 约束；
 - 页面沿用 Skill 中心最大阅读宽度与克制的连续列表，不使用统计卡、流程画布或常驻左右分栏。每行显示识别图标、名称、自然语言计划摘要、短说明、下一次/最近结果；hover 才显示 `···`，键盘 focus 时动作同样可见；
-- 创建/编辑使用右侧 drawer，窄窗切为整页。按 `任务内容`、`运行时间`、`可选上下文`、`结果通知` 排列。Text 任务的 Workspace target 默认是“由 MetaWork 分配独立工作区”，用户可以在高级上下文中改为显式 User Workspace；Skill 任务首期必须选择 User Workspace，以满足 root-specific catalog binding。空状态首屏不要求用户先理解 Workspace；
+- 创建/编辑使用右侧 drawer，窄窗切为整页。按 `任务内容`、`运行时间`、`可选上下文`、`结果通知` 排列。任务内容只有一段 Text 指令，不提供 Skill 类型切换、Skill 选择器、catalog revision 或参数配置；需要采用某个全局 Skill 时由用户在指令中说明。UI 将 `default | explicit` 明确呈现为“自动工作区 / 手动工作区”：默认自动工作区，每次 occurrence 由 MetaWork 分配新的 Managed Workspace；用户可以在高级上下文中改为手动工作区并绑定 User Workspace。空状态首屏不要求用户先理解或选择 Workspace；
 - Host 投影 `managedWorkspaces = false` 时，Text 模板仍可查看，但确认层必须明确说明当前无法分配工作目录并禁用保存；不得静默采用当前或第一个 User Workspace。用户显式选择 User Workspace 后才可继续；
 - 时间选项优先呈现一次、每小时、每天、工作日、每周与每月，并明确本地 timezone；高级固定间隔可折叠，Renderer 只提交 Host 可验证的结构化 recurrence，不拥有 timer 或 occurrence；
 - 保存前提供一句完整确认摘要，例如“每个工作日 08:00 运行「每日工作简报」，结果完成后通知我”；provider、generation、Unix seconds 和 catalog revision 不进入产品文案；
 - 新建、保存、暂停/恢复、立即运行和删除使用 Host typed result 与 optimistic `scheduledTaskEpoch`。命令 timeout 后先刷新 canonical snapshot，不自动重放；
 - 点击计划打开 detail drawer：上半部是定义与下一次运行，下半部是有界运行历史。每个 occurrence 链接到其真实 Task，并显示完成、失败、已跳过、延迟或等待处理；结果历史不复制 Task timeline；
 - 删除计划不停止或删除已经创建的真实 Task；`立即运行` 也通过同一 occurrence 与 Task admission，不能建立测试/手动专用路径；上一次真实 Task 仍 non-terminal 时显示 `已跳过：上一次仍在运行`；
-- 执行配置、Workspace authority 或 Skill binding 变化时显示 `需要处理`，并要求用户编辑确认；需要 Agent permission/question 的 occurrence 链接到真实请求并发出系统通知，不把等待伪装成 schedule failure；
+- 执行配置或 Workspace authority 变化时显示 `需要处理`，并要求用户编辑确认；需要 Agent permission/question 的 occurrence 链接到真实请求并发出系统通知，不把等待伪装成 schedule failure；
 - 每次 default occurrence 创建新的真实 Task 与 Managed Workspace；同一 occurrence 所属 Task 的后续 Run 复用该目录。运行历史链接 Task，不展示 managed `workspace-key`；目录保留不等于 Host 重启后恢复 Task。
 - 页面不再显示“仅在 MetaWork 运行时触发”限制条。窗口关闭时 MetaWork 留在系统后台并继续计划；显式退出通过托盘动作完成并在确认中说明影响，重启后定义与触发游标从 Host store 恢复；
-- 搜索使用 `type="search"`；分区是带可访问名称的 region/list；模板行、任务行和 overflow 动作都有明确 button 语义。drawer 打开后焦点进入标题/说明，关闭回到原触发行；运行历史更新不抢焦点。
+- 已有定义时的搜索使用 `type="search"`；分区是带可访问名称的 region/list；模板行、任务行和 overflow 动作都有明确 button 语义。drawer 打开后焦点进入标题/说明，`Escape` 或关闭动作回到原触发行；运行历史更新不抢焦点。
 
 ### 5.5 Task 分组与排序
 
