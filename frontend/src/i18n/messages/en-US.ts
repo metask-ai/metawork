@@ -285,7 +285,7 @@ export const enUS = {
   "run.placeholder_unavailable":
     "End this task and start a new one to continue",
   "run.placeholder_recovery_unsupported":
-    "This task was restored for reading, but this AgentCore version cannot continue its conversation",
+    "This task was restored for reading, but this Metask AgentCore version cannot continue its conversation",
   "run.draft_only":
     "Saved locally as a draft. You can send it after the current work finishes.",
   "run.started": "Work started.",

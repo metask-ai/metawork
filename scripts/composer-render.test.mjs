@@ -684,7 +684,7 @@ test("a poisoned Task explains why continuation is unavailable", () => {
   assert.match(markup, /End this task and start a new one to continue/);
 });
 
-test("a restored Task explains the AgentCore conversation recovery limit", () => {
+test("a restored Task explains the Metask AgentCore conversation recovery limit", () => {
   const markup = render({
     unavailable: true,
     unavailableReason: "session_recovery_unsupported",
@@ -693,7 +693,7 @@ test("a restored Task explains the AgentCore conversation recovery limit", () =>
   assert.match(markup.match(/<textarea[^>]*>/)?.[0] ?? "", /disabled/);
   assert.match(
     markup,
-    /restored for reading, but this AgentCore version cannot continue its conversation/,
+    /restored for reading, but this Metask AgentCore version cannot continue its conversation/,
   );
   assert.doesNotMatch(markup, /start a new one to continue/);
 });
