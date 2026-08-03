@@ -438,9 +438,10 @@ Execution binding availability 是下一次 admission 的独立前置事实，�
 
 1. Host 从 bounded Workbench store 恢复 Workspace/Task、消息、Run/tool/UI 决策和 compact 历史，以及不含 secret 的 execution binding descriptor；不得把当前默认配置静默写入历史 Task；
 2. 没有 live owner 的 non-terminal Run 或 compact 显示为 `Interrupted`，不显示 Running/Stopping，不自动重放输入、工具或 permission；
-3. 恢复 Task 发布 `conversationRecovery = false` 和 `continuationUnavailableReason = session_recovery_unsupported`。左栏仍可选择，时间线仍可阅读，Composer 禁用并明确说明“当前 AgentCore 版本无法继续原会话”；
-4. Task store read/corrupt/write/outcome-unknown health 由 Host snapshot 发布；Renderer 只解释该事实并停止 mutation，不自行清空、修复、迁移或重试持久数据；
-5. 当前界面不显示 `继续此 Task`、`使用当前配置继续` 或假的 resume；exact-match execution generation 也不能替代 Conversation 恢复证明。
+3. 恢复 Task 发布 `conversationRecovery = false` 和 `continuationUnavailableReason = session_recovery_unsupported`。左栏仍可选择，时间线仍可阅读，Composer 禁用并明确说明“当前 Metask AgentCore 版本无法继续原会话”；
+4. open 的恢复 Task 虽无 Session，仍可执行真实的 Host-owned 结束动作；成功后 `lifecycle = closed` 必须写入同一 store，删除入口随 canonical snapshot 开放，再次重启不得复活。Renderer 不能把无状态变化的 acknowledgement 当成已结束；
+5. Task store read/corrupt/write/outcome-unknown health 由 Host snapshot 发布；Renderer 只解释该事实并停止 mutation，不自行清空、修复、迁移或重试持久数据；
+6. 当前界面不显示 `继续此 Task`、`使用当前配置继续` 或假的 resume；exact-match execution generation 也不能替代 Conversation 恢复证明。
 
 未来只有 Host 同时证明 account/profile、API、model、generation 与 Task binding epoch 精确匹配，并且 AgentCore 提供已验收的 Session/Conversation 恢复时，continuation 才能变为 available。若另外交付 rebind，必须由用户明确发起，重新校验 Workspace 和 catalog ownership，创建新 binding epoch/Session，并以不可改写的配置边界保留旧 Run、usage 与模型归属；失败不得回退到静默默认值。
 

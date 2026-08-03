@@ -81,7 +81,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - 没有 Task 的 User Workspace 仍然存在于切换器与设置中；最近使用、重新授权和移除不能依赖 Renderer 从 Task 列表猜测。Managed Workspace 不进入普通选择器、recent、重新授权或移除入口，但其 owning Task 仍可导航；
 - 后台创建 Managed Workspace 不修改 Host `selectedWorkspaceId`、User Workspace recent order 或 Renderer New task draft scope；user 与 managed record 使用独立容量，后台 Task 不得耗尽用户打开 Workspace 的能力；
 - managed root 无法初始化时只关闭 `managedWorkspaces` capability，并对 managed admission 返回 typed unavailable；Account、显式 User Workspace 和普通 Workbench 仍可运行；
-- 当前 Task/Workspace 历史不跨 Host 恢复。Run、Task 删除、shutdown 和重启后托管目录保留，但不据此恢复或猜测 Task/Workspace；Task persistence、目录浏览和磁盘清理属于后续独立能力；
+- Task/Workspace persistence 与跨 Host 恢复行为由 5.3 的 Task 合同定义；托管目录本身不是历史恢复依据，目录浏览和磁盘清理仍属于后续独立能力；
 - 文件和工具能力最终必须受 Workspace 与显式权限约束；
 - UI 能显示当前 Task 所属 Workspace；
 - strict Workspace security 未验证前，产品必须明确限制使用范围，不能制造虚假的安全承诺。
@@ -124,7 +124,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - 预期的 Task/Workspace admission 拒绝必须作为严格 typed result 返回并由 Renderer 映射为产品文案；非法 payload、伪造 ownership 与不可信 origin 仍 fail closed 为 Bridge error，不得把内部 error name 显示给用户；
 - 当前固定 revision 1 合同原子提供独立 Workspace projection 与 Task execution binding。一次性目录能力必须由选择命令在 Host 内创建并消费，Renderer 不接收路径授权 token，不从 Task 反推 Workspace，也不能通过可选字段继续发送被取代的临时 payload；
 - 产品 Task identity 由 Workbench 独立、稳定地分配；内部 Agent/Gate 原始事件使用单独的 Session route identity 做路由，两者不得复用或假定数值相等。Session route identity 不进入产品 snapshot，Renderer 始终只看到唯一的产品 `taskId`。
-- Workbench 必须把有界、无 secret 的 Workspace/Task 产品历史持久化到 App 数据目录，并在 Host 重启时恢复侧栏、选择、消息、Run/tool/UI 决策和 compact 历史；恢复时没有 live owner 的 non-terminal Run 或 compact 一律收口为 `interrupted`，不得重放输入、工具或 permission；
+- Workbench 必须把有界、无 secret 的 Workspace/Task 产品历史持久化到 App 数据目录，并在 Host 重启时恢复侧栏、选择、Task closed 产品终态、消息、Run/tool/UI 决策和 compact 历史；恢复时没有 live owner 的 non-terminal Run 或 compact 一律收口为 `interrupted`，不得重放输入、工具或 permission；恢复后没有 Session 的 open Task 仍可通过同一 Host mutation 持久关闭并删除，不能返回假成功或在再次重启时复活；
 - 当前锁定的 AgentCore ABI v1 revision 5 不提供跨进程 Session open/checkpoint/Conversation hydration。由该 store 恢复的 Task 因此只读，`conversationRecovery = false`，并发布 `session_recovery_unsupported`；MetaWork 不保存 Session handle、私有 transcript 或伪造 resume，后续继续对话必须等待独立 AgentCore capability 验收；
 - credential 不得因 owner 释放而重新出现在任何 Renderer projection。Host 在安装新 credential 以及 secure-zero 旧默认或 Task-owned credential 之前，必须永久清洗既有 Workspace、Task、Run、tool 和 UI history 投影；同时存在前缀重叠 credential 时按最长匹配脱敏。
 
@@ -164,7 +164,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - OAuth 等待超过正常感知时长时，界面必须提供 Host-owned `重新打开登录页面` 与 `取消登录`；Renderer 不接触授权 URL。目录等幂读取可以有限自动重试，OAuth code exchange、持久化 mutation 和其他结果不确定操作不得盲目重放；
 - Bridge command 或 view refresh 超时必须释放 Renderer 本地 busy 状态并进入 snapshot resync；结果不确定的 mutation 只能依据 Host snapshot 决定后续动作，不能由 Renderer 自动重复；
 - Account cancel 是独立逃生动作，不能因普通 mutation busy 被禁用；但 credential persistence 一旦开始提交就跨过取消边界，Host 必须暂时撤销 cancel 并等待唯一 terminal completion，不能在磁盘已提交、main-thread completion 尚未消费的窗口把内存回滚到旧 generation。Bridge 暂不可用时 Host deadline 仍必须收口 attempt，Renderer reload 后从 snapshot 恢复可用动作；
-- 用户消息、已完成 assistant 消息、工具结果、审批决策、关键 Run 状态和改变 Conversation 的 manual compact 应形成可靠状态边界；Run/compact admission 必须先建立稳定的 Workbench record，terminal payload 一经发布不可变，内部 Agent Session 关闭或销毁后 Task 历史仍可独立生成 snapshot；compact history 有界且 append-only，容量耗尽时拒绝新 compact，不覆盖既有 Conversation 边界；
+- 用户消息、已完成 assistant 消息、完成态工具结果、审批决策、关键 Run 状态和改变 Conversation 的 manual compact 应形成可靠状态边界；完成态工具结果必须在 Run terminal 前提交 Workbench store，流式 text chunk 与 progress 不构成逐事件磁盘提交；Run/compact admission 必须先建立稳定的 Workbench record，terminal payload 一经发布不可变，内部 Agent Session 关闭或销毁后 Task 历史仍可独立生成 snapshot；compact history 有界且 append-only，容量耗尽时拒绝新 compact，不覆盖既有 Conversation 边界；
 - Renderer reload 从仍存活的 Host 恢复视图；Host 重启则从 Workbench Task store 恢复有界产品历史，但不据此恢复 Agent Session 或 Conversation；
 - Host 或 AgentCore 进程退出时，当前同步 Run 标记 `interrupted`，不得伪装完成；
 - 崩溃后不得自动重放可能产生副作用的工具；
