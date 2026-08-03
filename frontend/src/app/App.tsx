@@ -103,7 +103,11 @@ import {
   type SearchResult,
 } from "../workbench/selectors.ts";
 import { chooseWorkspaceWithDraft } from "../features/workspaces/chooseWorkspace.ts";
-import { initialWorkbenchState, workbenchReducer } from "../workbench/store.ts";
+import {
+  initialWorkbenchState,
+  taskHistoryMutationBlocked,
+  workbenchReducer,
+} from "../workbench/store.ts";
 import {
   WorkspaceNavigationIntents,
   type WorkspaceNavigationRequest,
@@ -238,9 +242,14 @@ export default function App() {
     workbenchEntered,
     snapshot.account,
   );
+  const workbenchMutationDisabled =
+    bridgeUnavailable ||
+    taskHistoryMutationBlocked(
+      snapshot.capabilities.taskHistoryPersistenceHealth,
+    );
   const currentTaskScope = activeTask ? `task:${activeTask.id}` : "new-task";
   const taskMutationDisabled =
-    bridgeUnavailable || currentTaskScope in taskPending;
+    workbenchMutationDisabled || currentTaskScope in taskPending;
   const taskCanCompose =
     newTaskDraftActive ||
     (activeTask?.lifecycle === "open" &&
@@ -659,7 +668,7 @@ export default function App() {
   }
 
   async function chooseWorkspace(openDraft = false) {
-    if (bridgeUnavailable || workspaceBusyRef.current) return null;
+    if (workbenchMutationDisabled || workspaceBusyRef.current) return null;
     workspaceBusyRef.current = true;
     setWorkspaceBusy(true);
     try {
@@ -726,6 +735,7 @@ export default function App() {
   async function executeWorkspaceNavigation(
     request: WorkspaceNavigationRequest,
   ) {
+    if (workbenchMutationDisabled) return;
     workspaceBusyRef.current = true;
     workspaceNavigationRunningRef.current = true;
     setWorkspaceBusy(true);
@@ -802,7 +812,7 @@ export default function App() {
       taskId: null,
     },
   ) {
-    if (bridgeUnavailable) return;
+    if (workbenchMutationDisabled) return;
     const workspace = snapshot.workspaces.find(
       (candidate) => candidate.id === workspaceId,
     );
@@ -839,7 +849,7 @@ export default function App() {
   }
 
   async function removeWorkspaceById(workspaceId: string) {
-    if (bridgeUnavailable || workspaceBusyRef.current) return;
+    if (workbenchMutationDisabled || workspaceBusyRef.current) return;
     workspaceBusyRef.current = true;
     setWorkspaceBusy(true);
     try {
@@ -1779,7 +1789,7 @@ export default function App() {
           ? t("settings.default_model_help")
           : t("settings.task_binding_model")
       }
-      actionDisabled={bridgeUnavailable || workspaceBusy}
+      actionDisabled={workbenchMutationDisabled || workspaceBusy}
       onDraftChange={updateComposerDraft}
       onSubmit={() => void submitRun()}
       onSlashCommand={runSlashCommand}
@@ -1908,7 +1918,7 @@ export default function App() {
                       : null
                   }
                   showArchived={showArchived}
-                  disabled={bridgeUnavailable || workspaceBusy}
+                  disabled={workbenchMutationDisabled || workspaceBusy}
                   onChooseWorkspace={() => void chooseWorkspace(false)}
                   onRemoveWorkspace={(workspaceId) =>
                     void removeWorkspaceById(workspaceId)

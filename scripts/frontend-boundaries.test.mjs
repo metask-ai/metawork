@@ -115,6 +115,34 @@ test("login-first composition gates every Workbench surface on Host readiness", 
   );
 });
 
+test("Task persistence failure disables mutations without hiding Task history", async () => {
+  const app = await readFile(resolve(sourceRoot, "app", "App.tsx"), "utf8");
+  const navigation = await readFile(
+    resolve(sourceRoot, "features", "workspaces", "WorkspaceNavigation.tsx"),
+    "utf8",
+  );
+  assert.match(
+    app,
+    /const workbenchMutationDisabled =\s*bridgeUnavailable \|\|\s*taskHistoryMutationBlocked\(/,
+  );
+  assert.match(
+    app,
+    /const taskMutationDisabled =\s*workbenchMutationDisabled \|\|/,
+  );
+  assert.match(
+    app,
+    /actionDisabled=\{workbenchMutationDisabled \|\| workspaceBusy\}/,
+  );
+  assert.match(
+    app,
+    /<WorkspaceNavigation[\s\S]*disabled=\{workbenchMutationDisabled \|\| workspaceBusy\}/,
+  );
+  const taskList = navigation.slice(
+    navigation.indexOf('<nav className="task-list"'),
+  );
+  assert.doesNotMatch(taskList, /disabled=\{disabled\}/);
+});
+
 test("Renderer command bars own the hidden-inset titlebar without stealing control input", async () => {
   const shell = await readFile(
     resolve(sourceRoot, "app", "AppShell.tsx"),

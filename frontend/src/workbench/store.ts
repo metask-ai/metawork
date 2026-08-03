@@ -74,6 +74,12 @@ export const initialWorkbenchState: WorkbenchState = {
   draftWorkspaceId: null,
 };
 
+export function taskHistoryMutationBlocked(
+  health: WorkbenchSnapshot["capabilities"]["taskHistoryPersistenceHealth"],
+) {
+  return health !== "ready" && health !== "unavailable";
+}
+
 function firstTaskInWorkspace(
   snapshot: WorkbenchSnapshot,
   workspaceId: string | null,
