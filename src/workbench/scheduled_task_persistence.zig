@@ -195,9 +195,6 @@ const TargetWire = struct {
 const InputWire = struct {
     kind: []const u8,
     text: ?[]const u8 = null,
-    skill_id: ?[]const u8 = null,
-    catalog_revision: ?[]const u8 = null,
-    argument_values: ?[][]const u8 = null,
 };
 
 const RecurrenceWire = struct {
@@ -400,26 +397,10 @@ fn decodeTarget(wire: TargetWire) Error!scheduled.Target {
     } };
 }
 
-fn encodeInput(writer: *std.Io.Writer, input: scheduled.Input) !void {
-    switch (input) {
-        .text => |text| {
-            try writer.writeAll("{\"kind\":\"text\",\"text\":");
-            try jsonString(writer, text);
-            try writer.writeByte('}');
-        },
-        .skill => |skill| {
-            try writer.writeAll("{\"kind\":\"skill\",\"skill_id\":");
-            try jsonString(writer, skill.skill_id);
-            try writer.writeAll(",\"catalog_revision\":");
-            try jsonString(writer, skill.catalog_revision);
-            try writer.writeAll(",\"argument_values\":[");
-            for (skill.argument_values, 0..) |value, index| {
-                if (index != 0) try writer.writeByte(',');
-                try jsonString(writer, value);
-            }
-            try writer.writeAll("]}");
-        },
-    }
+fn encodeInput(writer: *std.Io.Writer, input: []const u8) !void {
+    try writer.writeAll("{\"kind\":\"text\",\"text\":");
+    try jsonString(writer, input);
+    try writer.writeByte('}');
 }
 
 fn encodeRecurrence(writer: *std.Io.Writer, recurrence: scheduled.Recurrence) !void {
@@ -435,32 +416,12 @@ fn encodeRecurrence(writer: *std.Io.Writer, recurrence: scheduled.Recurrence) !v
     }
 }
 
-fn decodeInput(wire: InputWire) Error!scheduled.Input {
-    if (std.mem.eql(u8, wire.kind, "text")) {
-        if (wire.skill_id != null or wire.catalog_revision != null or
-            wire.argument_values != null)
-            return error.ScheduledTaskStoreCorrupt;
-        const text = wire.text orelse return error.ScheduledTaskStoreCorrupt;
-        if (!validText(text)) return error.ScheduledTaskStoreCorrupt;
-        return .{ .text = text };
-    }
-    if (!std.mem.eql(u8, wire.kind, "skill") or wire.text != null)
+fn decodeInput(wire: InputWire) Error![]const u8 {
+    if (!std.mem.eql(u8, wire.kind, "text"))
         return error.ScheduledTaskStoreCorrupt;
-    const skill_id = wire.skill_id orelse
-        return error.ScheduledTaskStoreCorrupt;
-    const revision = wire.catalog_revision orelse
-        return error.ScheduledTaskStoreCorrupt;
-    const arguments = wire.argument_values orelse
-        return error.ScheduledTaskStoreCorrupt;
-    if (!validText(skill_id) or !validText(revision))
-        return error.ScheduledTaskStoreCorrupt;
-    for (arguments) |value| if (!std.unicode.utf8ValidateSlice(value))
-        return error.ScheduledTaskStoreCorrupt;
-    return .{ .skill = .{
-        .skill_id = skill_id,
-        .catalog_revision = revision,
-        .argument_values = arguments,
-    } };
+    const text = wire.text orelse return error.ScheduledTaskStoreCorrupt;
+    if (!validText(text)) return error.ScheduledTaskStoreCorrupt;
+    return text;
 }
 
 fn decodeRecurrence(wire: RecurrenceWire) Error!scheduled.Recurrence {
@@ -537,7 +498,7 @@ test "scheduled task store round trips bounded occurrence history" {
         .execution_generation = 9,
         .execution_provider = .openai,
         .execution_model = "gpt-test",
-        .input = .{ .text = "Summarize today's work" },
+        .input = "Summarize today's work",
         .recurrence = .{ .interval = .{
             .start_at_unix_seconds = 2_000,
             .every_seconds = 3_600,
@@ -552,7 +513,7 @@ test "scheduled task store round trips bounded occurrence history" {
         .execution_generation = 9,
         .execution_provider = .openai,
         .execution_model = "gpt-test",
-        .input = .{ .text = "Summarize current work" },
+        .input = "Summarize current work",
         .recurrence = .{ .once = .{ .at_unix_seconds = 3_000 } },
     }, 1_000);
     const default_item = store.find(default_id).?;
@@ -625,6 +586,14 @@ test "scheduled task store rejects unknown fields and revisions" {
         decode(
             std.testing.allocator,
             "{\"schema_version\":1,\"next_id\":2,\"items\":[{\"id\":1,\"epoch\":1,\"title\":\"legacy\",\"workspace_id\":7,\"workspace_epoch\":3,\"execution_generation\":1,\"execution_provider\":\"openai\",\"execution_model\":\"gpt-test\",\"input\":{\"kind\":\"text\",\"text\":\"legacy\"},\"recurrence\":{\"kind\":\"once\",\"at_unix_seconds\":2},\"enabled\":true,\"health\":\"ready\",\"failure_reason\":null,\"next_run_at_unix_seconds\":2,\"occurrences\":[]}]}",
+            limits,
+        ),
+    );
+    try std.testing.expectError(
+        error.ScheduledTaskStoreCorrupt,
+        decode(
+            std.testing.allocator,
+            "{\"schema_version\":1,\"next_id\":2,\"items\":[{\"id\":1,\"epoch\":1,\"title\":\"configured skill\",\"target\":{\"kind\":\"explicit\",\"workspace_id\":7,\"workspace_epoch\":3},\"execution_generation\":1,\"execution_provider\":\"openai\",\"execution_model\":\"gpt-test\",\"input\":{\"kind\":\"skill\",\"skill_id\":\"builtin.summary\",\"catalog_revision\":\"4\",\"argument_values\":[]},\"recurrence\":{\"kind\":\"once\",\"at_unix_seconds\":2},\"enabled\":true,\"health\":\"ready\",\"failure_reason\":null,\"next_run_at_unix_seconds\":2,\"occurrences\":[]}]}",
             limits,
         ),
     );

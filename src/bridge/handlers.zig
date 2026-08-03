@@ -175,6 +175,25 @@ pub fn parseTaskRunInput(value: std.json.Value) !ParsedTaskRunInput {
     };
 }
 
+pub fn parseScheduledTaskInstruction(value: std.json.Value) ![]const u8 {
+    const object = switch (value) {
+        .object => |object| object,
+        else => return error.InvalidBridgePayload,
+    };
+    if (object.count() != 2) return error.InvalidBridgePayload;
+    const kind = switch (object.get("kind") orelse
+        return error.InvalidBridgePayload) {
+        .string => |text| text,
+        else => return error.InvalidBridgePayload,
+    };
+    if (!std.mem.eql(u8, kind, "text")) return error.InvalidBridgePayload;
+    return switch (object.get("text") orelse
+        return error.InvalidBridgePayload) {
+        .string => |text| text,
+        else => return error.InvalidBridgePayload,
+    };
+}
+
 pub fn parseScheduledTaskRecurrence(
     value: std.json.Value,
 ) !workbench_api.ScheduledTaskRecurrence {
@@ -399,5 +418,18 @@ test "Scheduled Task target is exact and legacy Workspace fields are rejected" {
         parsePayload(ScheduledTaskMutation,
             \\{"title":"Legacy","workspaceId":"7","expectedWorkspaceEpoch":"3","expectedExecutionGeneration":"1","input":{"kind":"text","text":"inspect"},"recurrence":{"kind":"once","atUnixSeconds":"2"}}
         ),
+    );
+
+    var skill_input = try std.json.parseFromSlice(
+        std.json.Value,
+        std.testing.allocator,
+        \\{"kind":"skill","skillId":"builtin.summary","catalogRevision":"4","argumentValues":[]}
+    ,
+        .{},
+    );
+    defer skill_input.deinit();
+    try std.testing.expectError(
+        error.InvalidBridgePayload,
+        parseScheduledTaskInstruction(skill_input.value),
     );
 }

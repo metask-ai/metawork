@@ -123,7 +123,7 @@ pub const ScheduledTaskDefinitionInput = struct {
     title: []const u8,
     target: ScheduledTaskTarget,
     expected_execution_generation: u64,
-    input: TaskRunInput,
+    input: []const u8,
     recurrence: ScheduledTaskRecurrence,
 };
 
@@ -3104,45 +3104,11 @@ pub const Workbench = struct {
             writer,
             item.execution_model,
         );
-        writer.writeAll("},\"input\":") catch return error.SnapshotTooLarge;
-        switch (item.input) {
-            .text => |text| {
-                writer.writeAll("{\"kind\":\"text\",\"text\":") catch
-                    return error.SnapshotTooLarge;
-                try self.projectedJsonValueWithKnownCredentials(
-                    writer,
-                    text.value,
-                );
-                writer.print(",\"redacted\":{}}}", .{text.redacted}) catch
-                    return error.SnapshotTooLarge;
-            },
-            .skill => |skill| {
-                writer.writeAll("{\"kind\":\"skill\",\"skillId\":") catch
-                    return error.SnapshotTooLarge;
-                try self.projectedJsonValueWithKnownCredentials(
-                    writer,
-                    skill.skill_id,
-                );
-                writer.writeAll(",\"catalogRevision\":") catch
-                    return error.SnapshotTooLarge;
-                try self.projectedJsonValueWithKnownCredentials(
-                    writer,
-                    skill.catalog_revision,
-                );
-                writer.writeAll(",\"argumentValues\":[") catch
-                    return error.SnapshotTooLarge;
-                for (skill.argument_values, 0..) |value, index| {
-                    if (index != 0) writer.writeByte(',') catch
-                        return error.SnapshotTooLarge;
-                    try self.projectedJsonValueWithKnownCredentials(
-                        writer,
-                        value,
-                    );
-                }
-                writer.print("],\"redacted\":{}}}", .{skill.redacted}) catch
-                    return error.SnapshotTooLarge;
-            },
-        }
+        writer.writeAll("},\"input\":{\"kind\":\"text\",\"text\":") catch
+            return error.SnapshotTooLarge;
+        try self.projectedJsonValueWithKnownCredentials(writer, item.input.value);
+        writer.print(",\"redacted\":{}}}", .{item.input.redacted}) catch
+            return error.SnapshotTooLarge;
         writer.writeAll(",\"recurrence\":") catch return error.SnapshotTooLarge;
         switch (item.recurrence) {
             .once => |once| writer.print(
@@ -3685,54 +3651,11 @@ pub const Workbench = struct {
             },
         };
         try input.recurrence.validate();
-        const scheduled_input: scheduled_tasks_impl.Input = switch (input.input) {
-            .text => |text| text_input: {
-                const trimmed = std.mem.trim(u8, text, " \t\r\n");
-                if (trimmed.len == 0 or
-                    trimmed.len > self.limits.max_user_message_bytes or
-                    !std.unicode.utf8ValidateSlice(trimmed))
-                    return error.InvalidScheduledTaskInput;
-                break :text_input .{ .text = trimmed };
-            },
-            .skill => |skill_input| skill_admission: {
-                const explicit_workspace = workspace orelse
-                    return error.InvalidScheduledTaskInput;
-                const catalog = explicit_workspace.catalog orelse
-                    return error.CatalogUnavailable;
-                if (!std.mem.eql(
-                    u8,
-                    skill_input.catalog_revision,
-                    catalog.revision,
-                ))
-                    return error.StaleCatalog;
-                const skill = catalog.findSkill(skill_input.skill_id) orelse
-                    return error.SkillNotFound;
-                if (skill_input.argument_values.len >
-                    @min(
-                        @as(usize, @intCast(skill.max_values)),
-                        self.limits.max_skill_arguments,
-                    ))
-                    return error.InvalidSkillArguments;
-                var bytes = std.math.add(
-                    usize,
-                    skill.skill_id.len,
-                    catalog.revision.len,
-                ) catch return error.ProjectionCapacity;
-                for (skill_input.argument_values) |value| {
-                    if (!std.unicode.utf8ValidateSlice(value))
-                        return error.InvalidSkillArguments;
-                    bytes = std.math.add(usize, bytes, value.len) catch
-                        return error.ProjectionCapacity;
-                    if (bytes > self.limits.max_user_message_bytes)
-                        return error.ProjectionCapacity;
-                }
-                break :skill_admission .{ .skill = .{
-                    .skill_id = skill.skill_id,
-                    .catalog_revision = catalog.revision,
-                    .argument_values = skill_input.argument_values,
-                } };
-            },
-        };
+        const scheduled_input = std.mem.trim(u8, input.input, " \t\r\n");
+        if (scheduled_input.len == 0 or
+            scheduled_input.len > self.limits.max_user_message_bytes or
+            !std.unicode.utf8ValidateSlice(scheduled_input))
+            return error.InvalidScheduledTaskInput;
         return .{
             .title = title,
             .target = switch (input.target) {
@@ -3804,10 +3727,6 @@ pub const Workbench = struct {
         claimed_owned = false;
 
         const claimed_item = self.scheduled_tasks.find(id) orelse unreachable;
-        const expected_catalog_revision = switch (claimed_item.input) {
-            .text => null,
-            .skill => |skill| skill.catalog_revision,
-        };
         const workspace_request: TaskWorkspaceRequest = switch (claimed_item.target) {
             .default => .managed,
             .explicit => |explicit| .{ .existing = .{
@@ -3818,7 +3737,7 @@ pub const Workbench = struct {
         const task_id = self.createTaskForWorkspace(
             workspace_request,
             claimed_item.execution_generation,
-            expected_catalog_revision,
+            null,
         ) catch |err| {
             self.finalizeScheduledTaskClaimRejected(
                 id,
@@ -3840,13 +3759,8 @@ pub const Workbench = struct {
             return err;
         };
         const task = self.findTask(task_id) orelse unreachable;
-        const run_input: TaskRunInput = switch (claimed_item.input.borrowed()) {
-            .text => |text| .{ .text = text },
-            .skill => |skill| .{ .skill = .{
-                .skill_id = skill.skill_id,
-                .catalog_revision = skill.catalog_revision,
-                .argument_values = skill.argument_values,
-            } },
+        const run_input: TaskRunInput = .{
+            .text = claimed_item.input.borrowed(),
         };
         _ = self.runTaskAtBinding(task_id, task.binding_epoch, run_input) catch |err| {
             self.finalizeScheduledTaskClaimRejected(
@@ -4009,12 +3923,10 @@ pub const Workbench = struct {
                         break :binding .execution_changed) or
                     !std.mem.eql(u8, item.execution_model, self.execution.model()))
                     break :binding .execution_changed;
-                const workspace: ?*WorkspaceView = switch (item.target) {
-                    .default => if (self.managed_workspaces != null)
-                        null
-                    else
+                switch (item.target) {
+                    .default => if (self.managed_workspaces == null)
                         break :binding .workspace_unavailable,
-                    .explicit => |explicit| explicit_target: {
+                    .explicit => |explicit| {
                         const candidate = self.findWorkspace(explicit.workspace_id) orelse
                             break :binding .workspace_unavailable;
                         if (candidate.origin != .user or !candidate.visible or
@@ -4022,22 +3934,6 @@ pub const Workbench = struct {
                             break :binding .workspace_unavailable;
                         if (candidate.epoch != explicit.workspace_epoch)
                             break :binding .workspace_changed;
-                        break :explicit_target candidate;
-                    },
-                };
-                switch (item.input) {
-                    .text => {},
-                    .skill => |skill| {
-                        const explicit_workspace = workspace orelse
-                            break :binding .catalog_changed;
-                        const catalog = explicit_workspace.catalog orelse
-                            break :binding .catalog_changed;
-                        if (!std.mem.eql(
-                            u8,
-                            skill.catalog_revision,
-                            catalog.revision,
-                        ))
-                            break :binding .catalog_changed;
                     },
                 }
                 break :binding null;
@@ -4791,25 +4687,9 @@ pub const Workbench = struct {
             redactFixedWidthNoFail(item.title, credential) or
             item.title_redacted;
         _ = redactFixedWidthNoFail(item.execution_model, credential);
-        switch (item.input) {
-            .text => |*text| {
-                text.redacted =
-                    redactFixedWidthNoFail(text.value, credential) or
-                    text.redacted;
-            },
-            .skill => |*skill| {
-                var redacted =
-                    redactFixedWidthNoFail(skill.skill_id, credential) or
-                    redactFixedWidthNoFail(
-                        skill.catalog_revision,
-                        credential,
-                    );
-                for (skill.argument_values) |value|
-                    redacted =
-                        redactFixedWidthNoFail(value, credential) or redacted;
-                skill.redacted = skill.redacted or redacted;
-            },
-        }
+        item.input.redacted =
+            redactFixedWidthNoFail(item.input.value, credential) or
+            item.input.redacted;
     }
 
     fn redactCatalogProjectionsNoFail(
@@ -5981,12 +5861,6 @@ fn scheduledFailure(err: anyerror) scheduled_tasks_impl.FailureReason {
         error.WorkspaceRemovalInProgress,
         => .workspace_unavailable,
         error.WorkspaceEpochMismatch => .workspace_changed,
-        error.CatalogLoading,
-        error.CatalogUnavailable,
-        error.StaleCatalog,
-        error.SkillNotFound,
-        error.InvalidSkillArguments,
-        => .catalog_changed,
         error.TaskCapacity,
         error.WorkspaceCapacity,
         error.RunCapacity,
@@ -7232,7 +7106,7 @@ test "Scheduled Task admission is bounded redacted and arms the Workbench clock"
             .title = "Independent review",
             .target = .default,
             .expected_execution_generation = 1,
-            .input = .{ .text = "Review current work" },
+            .input = "Review current work",
             .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
         }),
     );
@@ -7244,7 +7118,7 @@ test "Scheduled Task admission is bounded redacted and arms the Workbench clock"
             .expected_workspace_epoch = 1,
         } },
         .expected_execution_generation = 1,
-        .input = .{ .text = "Inspect SECRET-KEY usage" },
+        .input = "Inspect SECRET-KEY usage",
         .recurrence = .{ .interval = .{
             .start_at_unix_seconds = 2_000,
             .every_seconds = 300,
@@ -7262,7 +7136,7 @@ test "Scheduled Task admission is bounded redacted and arms the Workbench clock"
     try std.testing.expect(
         std.mem.indexOf(
             u8,
-            item.input.text.value,
+            item.input.value,
             "SECRET-KEY",
         ) == null,
     );

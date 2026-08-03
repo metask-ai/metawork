@@ -1024,13 +1024,14 @@ pub const Dispatcher = struct {
             128 * 1024,
         );
         defer parsed.deinit();
-        var input = try handlers.parseTaskRunInput(parsed.value.input);
-        defer input.deinit();
+        const instruction = try handlers.parseScheduledTaskInstruction(
+            parsed.value.input,
+        );
         const definition = try scheduledTaskDefinition(
             parsed.value.title,
             parsed.value.target,
             parsed.value.expectedExecutionGeneration,
-            input.value,
+            instruction,
             parsed.value.recurrence,
         );
         const workbench = try self.requireWorkbench();
@@ -1059,8 +1060,9 @@ pub const Dispatcher = struct {
             128 * 1024,
         );
         defer parsed.deinit();
-        var input = try handlers.parseTaskRunInput(parsed.value.input);
-        defer input.deinit();
+        const instruction = try handlers.parseScheduledTaskInstruction(
+            parsed.value.input,
+        );
         const scheduled_task_id =
             try handlers.parseWireId(parsed.value.scheduledTaskId);
         const expected_epoch = try handlers.parseWireId(parsed.value.expectedEpoch);
@@ -1068,7 +1070,7 @@ pub const Dispatcher = struct {
             parsed.value.title,
             parsed.value.target,
             parsed.value.expectedExecutionGeneration,
-            input.value,
+            instruction,
             parsed.value.recurrence,
         );
         const workbench = try self.requireWorkbench();
@@ -1415,22 +1417,14 @@ fn scheduledTaskDefinition(
     title: []const u8,
     target_value: std.json.Value,
     execution_generation_wire: []const u8,
-    input: handlers.TaskRunInput,
+    instruction: []const u8,
     recurrence_value: std.json.Value,
 ) !workbench_api.ScheduledTaskDefinitionInput {
-    const workbench_input: workbench_api.TaskRunInput = switch (input) {
-        .text => |text| .{ .text = text },
-        .skill => |skill| .{ .skill = .{
-            .skill_id = skill.skill_id,
-            .catalog_revision = skill.catalog_revision,
-            .argument_values = skill.argument_values,
-        } },
-    };
     return .{
         .title = title,
         .target = try handlers.parseScheduledTaskTarget(target_value),
         .expected_execution_generation = try handlers.parseWireId(execution_generation_wire),
-        .input = workbench_input,
+        .input = instruction,
         .recurrence = try handlers.parseScheduledTaskRecurrence(recurrence_value),
     };
 }
