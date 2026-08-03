@@ -13,6 +13,10 @@ import {
   decodeTaskCreateResult,
   decodeTaskCompactResult,
   decodeTaskRunResult,
+  decodeSkillDetailResult,
+  decodeSkillExportResult,
+  decodeSkillImportPreview,
+  decodeSkillMutationResult,
   decodeWorkspaceMutationResult,
   decodeWorkbenchSnapshot,
 } from "../frontend/src/bridge/decode-contracts.ts";
@@ -878,5 +882,119 @@ test("Host notifications and lifecycle responses require their exact payload sha
   assert.throws(
     () => assertDisconnected({ generation: "0", detached: true }, "0"),
     /positive wire integer/,
+  );
+});
+
+test("Skill import previews expose only bounded metadata and an opaque identity", () => {
+  assert.deepEqual(decodeSkillImportPreview({ selected: false }), {
+    selected: false,
+  });
+  const preview = {
+    selected: true,
+    previewId: "7",
+    sourceKind: "local_package",
+    invocationName: "release-check",
+    displayName: "release-check",
+    description: "Check a release.",
+    fileCount: 2,
+    totalBytes: 42,
+  };
+  assert.deepEqual(decodeSkillImportPreview(preview), preview);
+  assert.throws(
+    () =>
+      decodeSkillImportPreview({ ...preview, sourcePath: "/private/skill" }),
+    /expected keys/,
+  );
+});
+
+test("Skill management responses keep mutations and file access explicit", () => {
+  assert.deepEqual(
+    decodeSkillMutationResult({
+      accepted: true,
+      installId: "aabbccdd",
+      verificationPending: true,
+      reason: null,
+    }),
+    {
+      accepted: true,
+      installId: "aabbccdd",
+      verificationPending: true,
+      reason: null,
+    },
+  );
+  assert.deepEqual(
+    decodeSkillMutationResult({
+      accepted: false,
+      installId: null,
+      verificationPending: false,
+      reason: "source_changed",
+    }),
+    {
+      accepted: false,
+      installId: null,
+      verificationPending: false,
+      reason: "source_changed",
+    },
+  );
+  assert.throws(
+    () =>
+      decodeSkillMutationResult({
+        accepted: false,
+        installId: null,
+        verificationPending: true,
+        reason: "busy",
+      }),
+    /rejection cannot be pending/,
+  );
+
+  assert.deepEqual(
+    decodeSkillExportResult({
+      exported: true,
+      fileName: "release-check.skill",
+      reason: null,
+    }),
+    {
+      exported: true,
+      fileName: "release-check.skill",
+      reason: null,
+    },
+  );
+  assert.throws(
+    () =>
+      decodeSkillExportResult({
+        exported: true,
+        fileName: "release-check.skill",
+        destinationPath: "/private/export",
+        reason: null,
+      }),
+    /expected keys/,
+  );
+
+  assert.deepEqual(
+    decodeSkillDetailResult({
+      available: true,
+      definition: "---\nname: release-check\n---\n",
+      fileCount: 2,
+      totalBytes: 42,
+      reason: null,
+    }),
+    {
+      available: true,
+      definition: "---\nname: release-check\n---\n",
+      fileCount: 2,
+      totalBytes: 42,
+      reason: null,
+    },
+  );
+  assert.throws(
+    () =>
+      decodeSkillDetailResult({
+        available: false,
+        definition: null,
+        fileCount: 1,
+        totalBytes: 42,
+        reason: "externally_managed",
+      }),
+    /cannot expose file metadata/,
   );
 });

@@ -11,6 +11,11 @@ import {
   type RunView,
   type ScheduledTaskView,
   type SkillCatalogView,
+  type SkillManagementView,
+  type SkillImportPreview,
+  type SkillMutationResult,
+  type SkillExportResult,
+  type SkillDetailResult,
   type SkillCatalogRefreshResult,
   type TaskView,
   type TaskCreateResult,
@@ -504,6 +509,127 @@ function decodeSkillCatalog(value: unknown, path: string): SkillCatalogView {
     skills,
     issues,
   };
+}
+
+function decodeSkillManagement(
+  value: unknown,
+  path: string,
+): SkillManagementView {
+  const item = object(value, path, ["availability", "assets"]);
+  const availability = enumValue(item.availability, `${path}.availability`, [
+    "unavailable",
+    "ready",
+    "read_failed",
+    "corrupt",
+    "write_failed",
+    "outcome_unknown",
+  ] as const);
+  const assets = arrayValue(
+    item.assets,
+    `${path}.assets`,
+    (value, itemPath) => {
+      const asset = object(value, itemPath, [
+        "installId",
+        "sourceKind",
+        "scope",
+        "managementState",
+        "skillId",
+        "invocationName",
+        "displayName",
+        "description",
+        "argumentNames",
+        "maxValues",
+        "canExport",
+        "canReimport",
+        "canUninstall",
+        "canRetry",
+        "issueCodes",
+      ]);
+      const scopeValue = object(asset.scope, `${itemPath}.scope`, [
+        "kind",
+        "workspaceId",
+        "workspaceEpoch",
+      ]);
+      const scopeKind = enumValue(scopeValue.kind, `${itemPath}.scope.kind`, [
+        "personal",
+        "project",
+        "external",
+      ] as const);
+      const scope =
+        scopeKind === "project"
+          ? {
+              kind: scopeKind,
+              workspaceId: positiveWireId(
+                scopeValue.workspaceId,
+                `${itemPath}.scope.workspaceId`,
+              ),
+              workspaceEpoch: positiveWireId(
+                scopeValue.workspaceEpoch,
+                `${itemPath}.scope.workspaceEpoch`,
+              ),
+            }
+          : {
+              kind: scopeKind,
+              workspaceId: null,
+              workspaceEpoch: null,
+            };
+      if (
+        scopeKind !== "project" &&
+        (scopeValue.workspaceId !== null || scopeValue.workspaceEpoch !== null)
+      )
+        fail(`${itemPath}.scope`, "non-project scope cannot name a workspace");
+      return {
+        installId:
+          asset.installId === null
+            ? null
+            : nonEmptyString(asset.installId, `${itemPath}.installId`),
+        sourceKind: enumValue(asset.sourceKind, `${itemPath}.sourceKind`, [
+          "local_package",
+          "local_directory",
+          "external",
+        ] as const),
+        scope,
+        managementState: enumValue(
+          asset.managementState,
+          `${itemPath}.managementState`,
+          ["ready", "pending_verification", "externally_managed"] as const,
+        ),
+        skillId:
+          asset.skillId === null
+            ? null
+            : nonEmptyString(asset.skillId, `${itemPath}.skillId`),
+        invocationName: nonEmptyString(
+          asset.invocationName,
+          `${itemPath}.invocationName`,
+        ),
+        displayName: nonEmptyString(
+          asset.displayName,
+          `${itemPath}.displayName`,
+        ),
+        description: stringValue(asset.description, `${itemPath}.description`),
+        argumentNames: arrayValue(
+          asset.argumentNames,
+          `${itemPath}.argumentNames`,
+          nonEmptyString,
+        ),
+        maxValues: nonNegativeNumber(asset.maxValues, `${itemPath}.maxValues`),
+        canExport: booleanValue(asset.canExport, `${itemPath}.canExport`),
+        canReimport: booleanValue(asset.canReimport, `${itemPath}.canReimport`),
+        canUninstall: booleanValue(
+          asset.canUninstall,
+          `${itemPath}.canUninstall`,
+        ),
+        canRetry: booleanValue(asset.canRetry, `${itemPath}.canRetry`),
+        issueCodes: arrayValue(
+          asset.issueCodes,
+          `${itemPath}.issueCodes`,
+          (value, issuePath) =>
+            enumValue(value, issuePath, skillCatalogIssueCodes),
+        ),
+      };
+    },
+  );
+  return { availability, assets } as SkillManagementView;
 }
 
 function decodeAccount(value: unknown, path: string): AccountView {
@@ -1600,6 +1726,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     "capabilities",
     "account",
     "skillCatalog",
+    "skillManagement",
     "selectedWorkspaceId",
     "workspaces",
     "scheduledTasks",
@@ -1618,6 +1745,8 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     "scheduledTaskPersistence",
     "scheduledTaskPersistenceHealth",
     "backgroundScheduleWake",
+    "localSkillManagement",
+    "skillManagementHealth",
   ]);
   const capabilities = {
     taskHistoryPersistence: booleanValue(
@@ -1676,6 +1805,22 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
       capabilityItem.backgroundScheduleWake,
       "$.capabilities.backgroundScheduleWake",
     ),
+    localSkillManagement: booleanValue(
+      capabilityItem.localSkillManagement,
+      "$.capabilities.localSkillManagement",
+    ),
+    skillManagementHealth: enumValue(
+      capabilityItem.skillManagementHealth,
+      "$.capabilities.skillManagementHealth",
+      [
+        "unavailable",
+        "ready",
+        "read_failed",
+        "corrupt",
+        "write_failed",
+        "outcome_unknown",
+      ] as const,
+    ),
   };
   const workspaces = arrayValue(
     root.workspaces,
@@ -1733,6 +1878,10 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     capabilities,
     account: decodeAccount(root.account, "$.account"),
     skillCatalog: decodeSkillCatalog(root.skillCatalog, "$.skillCatalog"),
+    skillManagement: decodeSkillManagement(
+      root.skillManagement,
+      "$.skillManagement",
+    ),
     selectedWorkspaceId,
     workspaces,
     scheduledTasks,
@@ -1877,6 +2026,134 @@ export function decodeWorkspaceChoice(value: unknown): WorkspaceChoice {
   return {
     selected: true,
     workspaceId: positiveWireId(item.workspaceId, "$.workspaceId"),
+  };
+}
+
+export function decodeSkillImportPreview(value: unknown): SkillImportPreview {
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    fail("$", "expected Skill import preview object");
+  const selected = booleanValue((value as JsonObject).selected, "$.selected");
+  if (!selected) {
+    object(value, "$", ["selected"]);
+    return { selected: false };
+  }
+  const item = object(value, "$", [
+    "selected",
+    "previewId",
+    "sourceKind",
+    "invocationName",
+    "displayName",
+    "description",
+    "fileCount",
+    "totalBytes",
+  ]);
+  return {
+    selected: true,
+    previewId: positiveWireId(item.previewId, "$.previewId"),
+    sourceKind: enumValue(item.sourceKind, "$.sourceKind", [
+      "local_package",
+      "local_directory",
+    ] as const),
+    invocationName: stringValue(item.invocationName, "$.invocationName"),
+    displayName: stringValue(item.displayName, "$.displayName"),
+    description: stringValue(item.description, "$.description"),
+    fileCount: positiveNumber(item.fileCount, "$.fileCount"),
+    totalBytes: positiveNumber(item.totalBytes, "$.totalBytes"),
+  };
+}
+
+export function decodeSkillMutationResult(value: unknown): SkillMutationResult {
+  const item = object(value, "$", [
+    "accepted",
+    "installId",
+    "verificationPending",
+    "reason",
+  ]);
+  const accepted = booleanValue(item.accepted, "$.accepted");
+  const pending = booleanValue(
+    item.verificationPending,
+    "$.verificationPending",
+  );
+  if (accepted) {
+    if (item.reason !== null) fail("$.reason", "expected null");
+    return {
+      accepted: true,
+      installId: nonEmptyString(item.installId, "$.installId"),
+      verificationPending: pending,
+      reason: null,
+    };
+  }
+  if (item.installId !== null) fail("$.installId", "expected null");
+  if (pending) fail("$.verificationPending", "rejection cannot be pending");
+  return {
+    accepted: false,
+    installId: null,
+    verificationPending: false,
+    reason: enumValue(item.reason, "$.reason", [
+      "invalid_scope",
+      "invalid_preview",
+      "source_changed",
+      "asset_unavailable",
+      "state_changed",
+      "target_exists",
+      "busy",
+      "catalog_loading",
+      "workspace_changed",
+      "workspace_unavailable",
+      "capacity_reached",
+      "shutting_down",
+      "local_storage_failed",
+    ] as const),
+  };
+}
+
+export function decodeSkillExportResult(value: unknown): SkillExportResult {
+  const item = object(value, "$", ["exported", "fileName", "reason"]);
+  const exported = booleanValue(item.exported, "$.exported");
+  if (exported) {
+    if (item.reason !== null) fail("$.reason", "expected null");
+    return {
+      exported: true,
+      fileName: nonEmptyString(item.fileName, "$.fileName"),
+      reason: null,
+    };
+  }
+  if (item.fileName !== null) fail("$.fileName", "expected null");
+  return {
+    exported: false,
+    fileName: null,
+    reason: nonEmptyString(item.reason, "$.reason"),
+  };
+}
+
+export function decodeSkillDetailResult(value: unknown): SkillDetailResult {
+  const item = object(value, "$", [
+    "available",
+    "definition",
+    "fileCount",
+    "totalBytes",
+    "reason",
+  ]);
+  const available = booleanValue(item.available, "$.available");
+  if (available) {
+    if (item.reason !== null) fail("$.reason", "expected null");
+    return {
+      available: true,
+      definition: stringValue(item.definition, "$.definition"),
+      fileCount: positiveNumber(item.fileCount, "$.fileCount"),
+      totalBytes: positiveNumber(item.totalBytes, "$.totalBytes"),
+      reason: null,
+    };
+  }
+  if (item.definition !== null) fail("$.definition", "expected null");
+  if (item.fileCount !== 0 || item.totalBytes !== 0)
+    fail("$", "unavailable detail cannot expose file metadata");
+  return {
+    available: false,
+    definition: null,
+    fileCount: 0,
+    totalBytes: 0,
+    reason: nonEmptyString(item.reason, "$.reason"),
   };
 }
 

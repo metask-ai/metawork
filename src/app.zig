@@ -2410,6 +2410,12 @@ pub fn run(init: std.process.Init) !void {
         &scheduled_task_dir_storage,
         &.{ data_dir, "workbench" },
     );
+    var skill_staging_dir_storage: [4096]u8 = undefined;
+    const skill_staging_dir = try native_sdk.app_dirs.join(
+        native_sdk.app_dirs.currentPlatform(),
+        &skill_staging_dir_storage,
+        &.{ scheduled_task_dir, "skill-staging" },
+    );
     var scheduled_task_file_store: ?workbench_api.ScheduledTaskFileStore =
         workbench_api.ScheduledTaskFileStore.init(
             init.io,
@@ -2425,6 +2431,22 @@ pub fn run(init: std.process.Init) !void {
     else
         null;
     defer if (scheduled_task_restored_bytes) |bytes|
+        std.heap.c_allocator.free(bytes);
+    var skill_management_file_store: ?workbench_api.SkillManagementFileStore =
+        workbench_api.SkillManagementFileStore.init(
+            init.io,
+            scheduled_task_dir,
+        ) catch null;
+    defer if (skill_management_file_store) |*store| store.deinit();
+    var skill_management_restore_failed = skill_management_file_store == null;
+    const skill_management_restored_bytes = if (skill_management_file_store) |*store|
+        store.loadAlloc(std.heap.c_allocator) catch restore: {
+            skill_management_restore_failed = true;
+            break :restore null;
+        }
+    else
+        null;
+    defer if (skill_management_restored_bytes) |bytes|
         std.heap.c_allocator.free(bytes);
     const canonical_user_home = if (app.automation.canonicalUserHome()) |home|
         resolveCanonicalDirectory(init.io, std.heap.c_allocator, home)
@@ -2496,6 +2518,15 @@ pub fn run(init: std.process.Init) !void {
                 .context = &app,
                 .enabled = true,
                 .notify_fn = App.notifyScheduledTask,
+            },
+            .skill_management = .{
+                .file_store = if (skill_management_file_store) |*store|
+                    store
+                else
+                    null,
+                .staging_root = skill_staging_dir,
+                .restored_bytes = skill_management_restored_bytes,
+                .restore_failed = skill_management_restore_failed,
             },
         },
     );

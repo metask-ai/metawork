@@ -27,6 +27,19 @@ pub const WorkspaceIdentity = struct {
     workspaceId: []const u8,
     expectedWorkspaceEpoch: []const u8,
 };
+pub const SkillImportChoice = struct { kind: []const u8 };
+pub const SkillInstall = struct {
+    previewId: []const u8,
+    scope: []const u8,
+    workspaceId: ?[]const u8,
+    expectedWorkspaceEpoch: ?[]const u8,
+    allowReplace: bool,
+};
+pub const SkillReimport = struct {
+    installId: []const u8,
+    previewId: []const u8,
+};
+pub const SkillIdentity = struct { installId: []const u8 };
 pub const TaskCreate = struct {
     workspaceId: []const u8,
     expectedWorkspaceEpoch: []const u8,

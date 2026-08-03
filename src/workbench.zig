@@ -3,6 +3,8 @@
 const projection_impl = @import("workbench_projection");
 const managed_workspace_store = @import("workbench_managed_workspace_store");
 const scheduled_task_persistence = @import("workbench_scheduled_task_persistence");
+const skill_package = @import("workbench_skill_package");
+const skill_management = @import("workbench_skill_management");
 
 pub const Error = projection_impl.Error;
 pub const Limits = projection_impl.Limits;
@@ -36,6 +38,16 @@ pub const ScheduleNotificationKind = projection_impl.ScheduleNotificationKind;
 pub const ScheduleNotifier = projection_impl.ScheduleNotifier;
 pub const ScheduledTaskFileStore = scheduled_task_persistence.FileStore;
 pub const scheduled_task_store_max_bytes = scheduled_task_persistence.max_store_bytes;
+pub const SkillManagementFileStore = skill_management.FileStore;
+pub const skill_management_store_max_bytes = skill_management.max_store_bytes;
+pub const SkillManagementHealth = projection_impl.SkillManagementHealth;
+pub const SkillImportPreview = skill_package.Preview;
+pub const SkillSourceKind = skill_management.SourceKind;
+pub const SkillScope = skill_management.Scope;
+pub const SkillInstallId = skill_management.InstallId;
+pub const SkillInstallInput = projection_impl.SkillInstallInput;
+pub const SkillMutationResult = projection_impl.SkillMutationResult;
+pub const SkillExportResult = projection_impl.SkillExportResult;
 pub const TransportFailureStage = projection_impl.TransportFailureStage;
 pub const TransportFailureReport = projection_impl.TransportFailureReport;
 pub const TransportFailureDecision = projection_impl.TransportFailureDecision;

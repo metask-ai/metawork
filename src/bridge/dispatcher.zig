@@ -11,6 +11,7 @@ const handlers = @import("handlers.zig");
 const callback_gate = @import("callback_gate.zig");
 const product_delivery = @import("product_delivery.zig");
 const workspace_grant = @import("workspace_grant.zig");
+const skill_grant = @import("skill_grant.zig");
 
 const product_handler_count = commands.product.len;
 const workspace_path_capacity = workspace_grant.max_path_bytes;
@@ -76,6 +77,7 @@ pub const Dispatcher = struct {
     delivery: product_delivery.Delivery,
     callbacks: callback_gate.State = .{},
     grants: workspace_grant.State = .{},
+    skill_grants: skill_grant.State = .{},
     sequence: u64 = 0,
     acknowledged_sequence: u64 = 0,
     registered_handlers: [product_handler_count]native_sdk.bridge.Handler = undefined,
@@ -104,6 +106,7 @@ pub const Dispatcher = struct {
         self.callbacks.assertQuiescent();
         self.delivery.breakConnection(self.transport());
         self.grants.invalidate();
+        self.skill_grants.invalidate();
         self.workbench = null;
         self.delivery.deinitOwnedBuffers();
         self.* = undefined;
@@ -130,6 +133,13 @@ pub const Dispatcher = struct {
             .{ .name = commands.remove_workspace, .function = removeWorkspace },
             .{ .name = commands.refresh_workspace_skill_catalog, .function = refreshWorkspaceSkillCatalog },
             .{ .name = commands.refresh_skill_catalog, .function = refreshSkillCatalog },
+            .{ .name = commands.choose_skill_import, .function = chooseSkillImport },
+            .{ .name = commands.install_skill, .function = installSkill },
+            .{ .name = commands.reimport_skill, .function = reimportSkill },
+            .{ .name = commands.uninstall_skill, .function = uninstallSkill },
+            .{ .name = commands.retry_skill, .function = retrySkill },
+            .{ .name = commands.export_skill, .function = exportSkill },
+            .{ .name = commands.skill_detail, .function = skillDetail },
             .{ .name = commands.snapshot, .function = beginSnapshot },
             .{ .name = commands.snapshot_chunk, .function = fetchSnapshotChunk },
             .{ .name = commands.account_begin_login, .function = accountBeginLogin },
@@ -183,6 +193,7 @@ pub const Dispatcher = struct {
     pub fn breakConnection(self: *Dispatcher) void {
         self.delivery.breakConnection(self.transport());
         self.grants.invalidate();
+        self.skill_grants.invalidate();
     }
 
     pub fn connectedWindow(self: *const Dispatcher) ?native_sdk.platform.WindowId {
@@ -300,6 +311,8 @@ pub const Dispatcher = struct {
             );
         }
         const generation = try self.delivery.connect(invocation.source.window_id, self.transport());
+        self.grants.invalidate();
+        self.skill_grants.invalidate();
         try self.platform.wake_fn(self.platform.context);
         return std.fmt.bufPrint(
             output,
@@ -317,6 +330,7 @@ pub const Dispatcher = struct {
         const generation = try handlers.parseWireId(parsed.value.generation);
         try self.delivery.validateConnection(generation, invocation.source.window_id);
         defer self.grants.invalidate();
+        defer self.skill_grants.invalidate();
         defer self.delivery.breakConnection(self.transport());
         return std.fmt.bufPrint(output, "{{\"generation\":\"{d}\",\"detached\":true}}", .{generation});
     }
@@ -937,6 +951,395 @@ pub const Dispatcher = struct {
         return encodeSkillCatalogRefreshResult(output, true, null);
     }
 
+    fn chooseSkillImport(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        const generation = self.delivery.connectedGeneration() orelse
+            return error.NoConnection;
+        var parsed = try handlers.parsePayload(
+            handlers.SkillImportChoice,
+            invocation.request.payload,
+        );
+        defer parsed.deinit();
+        const source_kind: skill_grant.SourceKind =
+            if (std.mem.eql(u8, parsed.value.kind, "package"))
+                .local_package
+            else if (std.mem.eql(u8, parsed.value.kind, "directory"))
+                .local_directory
+            else
+                return error.InvalidBridgePayload;
+        self.skill_grants.invalidate();
+        var dialog_storage: [native_sdk.platform.max_dialog_paths_bytes]u8 = undefined;
+        const package_filters = [_]native_sdk.platform.FileFilter{.{
+            .name = "Skill packages",
+            .extensions = &.{ "skill", "zip" },
+        }};
+        const selected = try self.platform.show_open_dialog_fn(
+            self.platform.context,
+            .{
+                .title = if (source_kind == .local_package)
+                    "Choose a Skill package"
+                else
+                    "Choose a Skill folder",
+                .filters = if (source_kind == .local_package)
+                    &package_filters
+                else
+                    &.{},
+                .allow_directories = source_kind == .local_directory,
+                .allow_multiple = false,
+            },
+            &dialog_storage,
+        );
+        if (selected.count == 0) return "{\"selected\":false}";
+        if (selected.count != 1 or selected.paths.len == 0 or
+            selected.paths.len > skill_grant.max_path_bytes)
+            return error.InvalidBridgePayload;
+        var preview = switch (source_kind) {
+            .local_package => try (try self.requireWorkbench()).previewSkillArchive(
+                selected.paths,
+            ),
+            .local_directory => try (try self.requireWorkbench()).previewSkillDirectory(
+                selected.paths,
+            ),
+        };
+        defer preview.deinit();
+        const issued = try self.skill_grants.issue(
+            generation,
+            invocation.source.window_id,
+            self.now(),
+            .{
+                .source_kind = source_kind,
+                .selected_path = selected.paths,
+                .invocation_name = preview.invocation_name,
+                .description = preview.description,
+                .file_count = preview.file_count,
+                .total_bytes = preview.total_bytes,
+                .content_hash = preview.content_hash,
+            },
+        );
+        var writer = std.Io.Writer.fixed(output);
+        writer.print(
+            "{{\"selected\":true,\"previewId\":\"{d}\",\"sourceKind\":\"{s}\",\"invocationName\":",
+            .{ issued.token, @tagName(source_kind) },
+        ) catch return error.NoSpaceLeft;
+        std.json.Stringify.value(issued.invocation_name, .{}, &writer) catch
+            return error.NoSpaceLeft;
+        writer.writeAll(",\"displayName\":") catch return error.NoSpaceLeft;
+        std.json.Stringify.value(issued.invocation_name, .{}, &writer) catch
+            return error.NoSpaceLeft;
+        writer.writeAll(",\"description\":") catch return error.NoSpaceLeft;
+        std.json.Stringify.value(issued.description, .{}, &writer) catch
+            return error.NoSpaceLeft;
+        writer.print(",\"fileCount\":{d},\"totalBytes\":{d}}}", .{
+            issued.file_count,
+            issued.total_bytes,
+        }) catch return error.NoSpaceLeft;
+        return writer.buffered();
+    }
+
+    fn installSkill(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(
+            handlers.SkillInstall,
+            invocation.request.payload,
+        );
+        defer parsed.deinit();
+        const preview_id = try handlers.parseWireId(parsed.value.previewId);
+        const scope = parseSkillScope(
+            parsed.value.scope,
+            parsed.value.workspaceId,
+            parsed.value.expectedWorkspaceEpoch,
+        ) catch return encodeSkillMutationResult(
+            output,
+            false,
+            null,
+            false,
+            "invalid_scope",
+        );
+        const consumed = self.skill_grants.consume(
+            preview_id,
+            invocation.source.window_id,
+            self.delivery.connectedGeneration() orelse return error.NoConnection,
+            self.now(),
+        ) catch return encodeSkillMutationResult(
+            output,
+            false,
+            null,
+            false,
+            "invalid_preview",
+        );
+        const source_kind: workbench_api.SkillSourceKind = switch (consumed.source_kind) {
+            .local_package => .local_package,
+            .local_directory => .local_directory,
+        };
+        const input: workbench_api.SkillInstallInput = .{
+            .source_kind = source_kind,
+            .scope = scope,
+            .expected_invocation_name = consumed.invocationName(),
+            .expected_content_hash = consumed.content_hash,
+            .allow_replace = parsed.value.allowReplace,
+        };
+        const result = switch (consumed.source_kind) {
+            .local_package => (try self.requireWorkbench()).installSkillArchive(
+                consumed.path(),
+                input,
+            ),
+            .local_directory => (try self.requireWorkbench()).installSkillDirectory(
+                consumed.path(),
+                input,
+            ),
+        } catch |err| {
+            if (skillMutationRejection(err)) |reason| {
+                if (skillMutationMayHaveCommitted(err)) self.notifyCommitted();
+                return encodeSkillMutationResult(
+                    output,
+                    false,
+                    null,
+                    false,
+                    reason,
+                );
+            }
+            return err;
+        };
+        self.notifyCommitted();
+        return encodeSkillMutationResult(
+            output,
+            true,
+            result.install_id,
+            result.verification_pending,
+            null,
+        );
+    }
+
+    fn reimportSkill(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(
+            handlers.SkillReimport,
+            invocation.request.payload,
+        );
+        defer parsed.deinit();
+        const install_id = parseSkillInstallId(parsed.value.installId) catch
+            return encodeSkillMutationResult(
+                output,
+                false,
+                null,
+                false,
+                "asset_unavailable",
+            );
+        const preview_id = try handlers.parseWireId(parsed.value.previewId);
+        const consumed = self.skill_grants.consume(
+            preview_id,
+            invocation.source.window_id,
+            self.delivery.connectedGeneration() orelse return error.NoConnection,
+            self.now(),
+        ) catch return encodeSkillMutationResult(
+            output,
+            false,
+            null,
+            false,
+            "invalid_preview",
+        );
+        const result = switch (consumed.source_kind) {
+            .local_package => (try self.requireWorkbench()).reimportSkillArchive(
+                install_id,
+                consumed.path(),
+                consumed.invocationName(),
+                consumed.content_hash,
+            ),
+            .local_directory => (try self.requireWorkbench()).reimportSkillDirectory(
+                install_id,
+                consumed.path(),
+                consumed.invocationName(),
+                consumed.content_hash,
+            ),
+        } catch |err| {
+            if (skillMutationRejection(err)) |reason| {
+                if (skillMutationMayHaveCommitted(err)) self.notifyCommitted();
+                return encodeSkillMutationResult(
+                    output,
+                    false,
+                    null,
+                    false,
+                    reason,
+                );
+            }
+            return err;
+        };
+        self.notifyCommitted();
+        return encodeSkillMutationResult(
+            output,
+            true,
+            result.install_id,
+            result.verification_pending,
+            null,
+        );
+    }
+
+    fn uninstallSkill(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        return mutateExistingSkill(context, invocation, output, .uninstall);
+    }
+
+    fn retrySkill(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        return mutateExistingSkill(context, invocation, output, .retry);
+    }
+
+    const ExistingSkillMutation = enum { uninstall, retry };
+
+    fn mutateExistingSkill(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+        operation: ExistingSkillMutation,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(
+            handlers.SkillIdentity,
+            invocation.request.payload,
+        );
+        defer parsed.deinit();
+        const install_id = parseSkillInstallId(parsed.value.installId) catch
+            return encodeSkillMutationResult(
+                output,
+                false,
+                null,
+                false,
+                "asset_unavailable",
+            );
+        const workbench = try self.requireWorkbench();
+        const result = switch (operation) {
+            .uninstall => workbench.uninstallSkill(install_id),
+            .retry => workbench.retrySkillVerification(install_id),
+        } catch |err| {
+            if (skillMutationRejection(err)) |reason| {
+                if (skillMutationMayHaveCommitted(err)) self.notifyCommitted();
+                return encodeSkillMutationResult(
+                    output,
+                    false,
+                    null,
+                    false,
+                    reason,
+                );
+            }
+            return err;
+        };
+        self.notifyCommitted();
+        return encodeSkillMutationResult(
+            output,
+            true,
+            result.install_id,
+            result.verification_pending,
+            null,
+        );
+    }
+
+    fn exportSkill(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(
+            handlers.SkillIdentity,
+            invocation.request.payload,
+        );
+        defer parsed.deinit();
+        const install_id = parseSkillInstallId(parsed.value.installId) catch
+            return encodeSkillExportResult(output, false, null, "asset_unavailable");
+        var dialog_storage: [native_sdk.platform.max_dialog_paths_bytes]u8 = undefined;
+        const selected = try self.platform.show_open_dialog_fn(
+            self.platform.context,
+            .{
+                .title = "Export Skill package",
+                .allow_directories = true,
+                .allow_multiple = false,
+            },
+            &dialog_storage,
+        );
+        if (selected.count == 0) return "{\"exported\":false,\"fileName\":null,\"reason\":\"cancelled\"}";
+        if (selected.count != 1 or selected.paths.len == 0 or
+            selected.paths.len > skill_grant.max_path_bytes)
+            return error.InvalidBridgePayload;
+        const result = (try self.requireWorkbench()).exportSkill(
+            install_id,
+            selected.paths,
+        ) catch |err| return encodeSkillExportResult(
+            output,
+            false,
+            null,
+            skillMutationRejection(err) orelse "export_failed",
+        );
+        return encodeSkillExportResult(output, true, result.fileName(), null);
+    }
+
+    fn skillDetail(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(
+            handlers.SkillIdentity,
+            invocation.request.payload,
+        );
+        defer parsed.deinit();
+        const install_id = parseSkillInstallId(parsed.value.installId) catch
+            return encodeSkillDetailUnavailable(output, "asset_unavailable");
+        var detail = (try self.requireWorkbench()).readSkillDefinition(
+            install_id,
+        ) catch |err| return encodeSkillDetailUnavailable(
+            output,
+            skillMutationRejection(err) orelse "detail_unavailable",
+        );
+        defer detail.deinit();
+        var writer = std.Io.Writer.fixed(output);
+        writer.writeAll("{\"available\":true,\"definition\":") catch
+            return error.NoSpaceLeft;
+        std.json.Stringify.value(detail.definition, .{}, &writer) catch
+            return error.NoSpaceLeft;
+        writer.print(",\"fileCount\":{d},\"totalBytes\":{d},\"reason\":null}}", .{
+            detail.file_count,
+            detail.total_bytes,
+        }) catch return error.NoSpaceLeft;
+        return writer.buffered();
+    }
+
     fn refreshTaskSkillCatalog(
         context: *anyopaque,
         invocation: native_sdk.bridge.Invocation,
@@ -1439,6 +1842,77 @@ fn catalogRefreshRejection(err: anyerror) ?[]const u8 {
     };
 }
 
+fn parseSkillScope(
+    kind: []const u8,
+    workspace_id: ?[]const u8,
+    workspace_epoch: ?[]const u8,
+) !workbench_api.SkillScope {
+    if (std.mem.eql(u8, kind, "personal")) {
+        if (workspace_id != null or workspace_epoch != null)
+            return error.InvalidBridgePayload;
+        return .personal;
+    }
+    if (!std.mem.eql(u8, kind, "project") or
+        workspace_id == null or workspace_epoch == null)
+        return error.InvalidBridgePayload;
+    return .{ .project = .{
+        .workspace_id = try handlers.parseWireId(workspace_id.?),
+        .workspace_epoch = try handlers.parseWireId(workspace_epoch.?),
+    } };
+}
+
+fn parseSkillInstallId(value: []const u8) !workbench_api.SkillInstallId {
+    if (value.len != @sizeOf(workbench_api.SkillInstallId) * 2)
+        return error.InvalidBridgePayload;
+    var result: workbench_api.SkillInstallId = undefined;
+    _ = std.fmt.hexToBytes(&result, value) catch
+        return error.InvalidBridgePayload;
+    return result;
+}
+
+fn skillMutationRejection(err: anyerror) ?[]const u8 {
+    return switch (err) {
+        error.InvalidAsset,
+        error.InvalidDefinition,
+        error.SkillDefinitionMissing,
+        error.SourceUnavailable,
+        error.ArchiveCorrupt,
+        => "source_changed",
+        error.AssetNotFound => "asset_unavailable",
+        error.TransactionAlreadyActive,
+        error.TransactionMissing,
+        error.InvalidTransaction,
+        => "state_changed",
+        error.TargetAlreadyExists, error.DuplicateTarget => "target_exists",
+        error.TaskBusy => "busy",
+        error.CatalogLoading => "catalog_loading",
+        error.WorkspaceEpochMismatch => "workspace_changed",
+        error.UnknownWorkspace, error.WorkspaceUnavailable => "workspace_unavailable",
+        error.ProjectionCapacity, error.QueueFull => "capacity_reached",
+        error.ExecutorShuttingDown => "shutting_down",
+        error.PersistenceFailed,
+        error.PersistenceOutcomeUnknown,
+        error.FileTransactionFailed,
+        error.CandidateUnavailable,
+        error.TargetUnavailable,
+        error.RootUnavailable,
+        => "local_storage_failed",
+        else => null,
+    };
+}
+
+fn skillMutationMayHaveCommitted(err: anyerror) bool {
+    return switch (err) {
+        error.PersistenceFailed,
+        error.PersistenceOutcomeUnknown,
+        error.FileTransactionFailed,
+        error.CandidateUnavailable,
+        error.TargetUnavailable,
+        => true,
+        else => false,
+    };
+}
+
 fn workspaceSelectionRejection(err: anyerror) ?[]const u8 {
     return switch (err) {
         error.WorkspaceEpochMismatch => "workspace_changed",
@@ -1611,6 +2085,69 @@ fn encodeSkillCatalogRefreshResult(
             return error.NoSpaceLeft
     else
         writer.writeAll("null") catch return error.NoSpaceLeft;
+    writer.writeByte('}') catch return error.NoSpaceLeft;
+    return writer.buffered();
+}
+
+fn encodeSkillMutationResult(
+    output: []u8,
+    accepted: bool,
+    install_id: ?workbench_api.SkillInstallId,
+    verification_pending: bool,
+    reason: ?[]const u8,
+) ![]const u8 {
+    const valid = if (accepted)
+        install_id != null and reason == null
+    else
+        install_id == null and !verification_pending and reason != null;
+    if (!valid) return error.InvalidSkillMutationResult;
+    var writer = std.Io.Writer.fixed(output);
+    writer.print("{{\"accepted\":{},\"installId\":", .{accepted}) catch
+        return error.NoSpaceLeft;
+    if (install_id) |value| {
+        const hex = std.fmt.bytesToHex(value, .lower);
+        writer.print("\"{s}\"", .{&hex}) catch return error.NoSpaceLeft;
+    } else writer.writeAll("null") catch return error.NoSpaceLeft;
+    writer.print(",\"verificationPending\":{},\"reason\":", .{verification_pending}) catch
+        return error.NoSpaceLeft;
+    if (reason) |value|
+        std.json.Stringify.value(value, .{}, &writer) catch return error.NoSpaceLeft
+    else
+        writer.writeAll("null") catch return error.NoSpaceLeft;
+    writer.writeByte('}') catch return error.NoSpaceLeft;
+    return writer.buffered();
+}
+
+fn encodeSkillExportResult(
+    output: []u8,
+    exported: bool,
+    file_name: ?[]const u8,
+    reason: ?[]const u8,
+) ![]const u8 {
+    if (exported != (file_name != null and reason == null))
+        return error.InvalidSkillExportResult;
+    var writer = std.Io.Writer.fixed(output);
+    writer.print("{{\"exported\":{},\"fileName\":", .{exported}) catch
+        return error.NoSpaceLeft;
+    if (file_name) |value|
+        std.json.Stringify.value(value, .{}, &writer) catch return error.NoSpaceLeft
+    else
+        writer.writeAll("null") catch return error.NoSpaceLeft;
+    writer.writeAll(",\"reason\":") catch return error.NoSpaceLeft;
+    if (reason) |value|
+        std.json.Stringify.value(value, .{}, &writer) catch return error.NoSpaceLeft
+    else
+        writer.writeAll("null") catch return error.NoSpaceLeft;
+    writer.writeByte('}') catch return error.NoSpaceLeft;
+    return writer.buffered();
+}
+
+fn encodeSkillDetailUnavailable(output: []u8, reason: []const u8) ![]const u8 {
+    if (reason.len == 0) return error.InvalidSkillDetailResult;
+    var writer = std.Io.Writer.fixed(output);
+    writer.writeAll("{\"available\":false,\"definition\":null,\"fileCount\":0,\"totalBytes\":0,\"reason\":") catch
+        return error.NoSpaceLeft;
+    std.json.Stringify.value(reason, .{}, &writer) catch return error.NoSpaceLeft;
     writer.writeByte('}') catch return error.NoSpaceLeft;
     return writer.buffered();
 }

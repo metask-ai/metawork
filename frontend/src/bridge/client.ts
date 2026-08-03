@@ -39,6 +39,10 @@ import {
   assertScheduledTaskDeleted,
   decodeWorkspaceMutationResult,
   decodeWorkspaceChoice,
+  decodeSkillImportPreview,
+  decodeSkillMutationResult,
+  decodeSkillExportResult,
+  decodeSkillDetailResult,
 } from "./decode-contracts.ts";
 import { RendererBridgeContractError } from "./contract-error.ts";
 import { fetchWorkbenchSnapshot } from "./snapshot/snapshot-client.ts";
@@ -210,6 +214,61 @@ export class BridgeClient {
     // Host work. Their lifetime must not be confused with a wedged command.
     return decodeWorkspaceChoice(
       await this.bridge().invoke(commands.chooseWorkspace, {}),
+    );
+  }
+
+  async chooseSkillImport(kind: "package" | "directory") {
+    return decodeSkillImportPreview(
+      await this.bridge().invoke(commands.chooseSkillImport, { kind }),
+    );
+  }
+
+  async installSkill(
+    previewId: string,
+    scope:
+      | { kind: "personal" }
+      | { kind: "project"; workspaceId: string; workspaceEpoch: string },
+    allowReplace: boolean,
+  ) {
+    return decodeSkillMutationResult(
+      await this.invoke(commands.installSkill, {
+        previewId,
+        scope: scope.kind,
+        workspaceId: scope.kind === "project" ? scope.workspaceId : null,
+        expectedWorkspaceEpoch:
+          scope.kind === "project" ? scope.workspaceEpoch : null,
+        allowReplace,
+      }),
+    );
+  }
+
+  async reimportSkill(installId: string, previewId: string) {
+    return decodeSkillMutationResult(
+      await this.invoke(commands.reimportSkill, { installId, previewId }),
+    );
+  }
+
+  async uninstallSkill(installId: string) {
+    return decodeSkillMutationResult(
+      await this.invoke(commands.uninstallSkill, { installId }),
+    );
+  }
+
+  async retrySkillVerification(installId: string) {
+    return decodeSkillMutationResult(
+      await this.invoke(commands.retrySkill, { installId }),
+    );
+  }
+
+  async exportSkill(installId: string) {
+    return decodeSkillExportResult(
+      await this.bridge().invoke(commands.exportSkill, { installId }),
+    );
+  }
+
+  async skillDetail(installId: string) {
+    return decodeSkillDetailResult(
+      await this.invoke(commands.skillDetail, { installId }),
     );
   }
 

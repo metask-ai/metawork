@@ -87,6 +87,7 @@ import type {
   TaskCreateReason,
   TaskCompactReason,
   RunInputView,
+  SkillMutationResult,
   TaskRunReason,
   UiResponsePayload,
   WorkspaceMutationReason,
@@ -1271,6 +1272,14 @@ export default function App() {
     }
   }
 
+  async function commitSkillMutation(
+    mutation: () => Promise<SkillMutationResult>,
+  ): Promise<SkillMutationResult> {
+    const result = await mutation();
+    if (result.accepted) await refreshSnapshot();
+    return result;
+  }
+
   function runSlashCommand(command: SlashCommandName) {
     switch (command) {
       case "new":
@@ -1995,7 +2004,8 @@ export default function App() {
         />
       ) : route === "skills" ? (
         <SkillsPage
-          catalog={snapshot.skillCatalog}
+          management={snapshot.skillManagement}
+          workspaces={snapshot.workspaces}
           query={skillsQuery}
           refreshing={
             skillCatalogBusy || snapshot.skillCatalog.availability === "loading"
@@ -2003,6 +2013,25 @@ export default function App() {
           disabled={bridgeUnavailable}
           onQuery={setSkillsQuery}
           onRefresh={() => void refreshSkillsPageCatalog()}
+          onChooseImport={(kind) => client.chooseSkillImport(kind)}
+          onInstall={(previewId, scope, allowReplace) =>
+            commitSkillMutation(() =>
+              client.installSkill(previewId, scope, allowReplace),
+            )
+          }
+          onReimport={(installId, previewId) =>
+            commitSkillMutation(() =>
+              client.reimportSkill(installId, previewId),
+            )
+          }
+          onUninstall={(installId) =>
+            commitSkillMutation(() => client.uninstallSkill(installId))
+          }
+          onRetry={(installId) =>
+            commitSkillMutation(() => client.retrySkillVerification(installId))
+          }
+          onExport={(installId) => client.exportSkill(installId)}
+          onDetail={(installId) => client.skillDetail(installId)}
         />
       ) : route === "scheduled-tasks" ? (
         <ScheduledTasksPage
