@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 import { Icon } from "../components/ui/Icon.tsx";
 import {
   WindowControls,
   type WindowControlAction,
 } from "../components/ui/WindowControls.tsx";
+import { WindowTitlebar } from "../components/ui/WindowTitlebar.tsx";
 import { shouldDismissInspectorForEscape } from "../features/inspector/inspector-interaction.ts";
 import { useI18n } from "../i18n/context.ts";
 import {
@@ -15,7 +16,7 @@ import {
   desktopPlatform,
   primaryShortcutModifier,
 } from "../platform/keyboard.ts";
-import { WindowTitlebarGesture } from "../platform/window-titlebar-gesture.ts";
+import type { WindowTitlebarClickCount } from "../platform/window-chrome.ts";
 
 const leftPreference = "metawork.panel.workspaces";
 function initialPanel(key: string, minimumWidth: number) {
@@ -29,6 +30,9 @@ export function AppShell({
   contextVisible,
   attentionNotice,
   onBeginWindowDrag,
+  onToggleWindowSize,
+  onOpenWindowMenu,
+  windowMaximized,
   onWindowControl,
   onSearch,
   left,
@@ -40,7 +44,10 @@ export function AppShell({
   taskTitle: string;
   contextVisible: boolean;
   attentionNotice: string | null;
-  onBeginWindowDrag: () => void;
+  onBeginWindowDrag: (clicks: WindowTitlebarClickCount) => void;
+  onToggleWindowSize?: () => void;
+  onOpenWindowMenu?: () => void;
+  windowMaximized: boolean;
   onWindowControl: (action: WindowControlAction) => void;
   onSearch: () => void;
   left: ReactNode | null;
@@ -58,7 +65,6 @@ export function AppShell({
   const effectiveLeftOpen = leftAvailable && leftOpen;
   const inspectorAvailable = inspector !== null;
   const effectiveInspectorOpen = inspectorAvailable && inspectorOpen;
-  const titlebarGesture = useRef(new WindowTitlebarGesture()).current;
 
   useEffect(() => {
     const narrow = window.matchMedia("(max-width: 819px)");
@@ -106,30 +112,11 @@ export function AppShell({
         onDismissInspector();
       }}
     >
-      <header
+      <WindowTitlebar
         className="workbench-commandbar"
-        onPointerDown={(event) => {
-          if (
-            event.button !== 0 ||
-            (event.target as HTMLElement).closest(
-              "button, input, select, textarea, details, a",
-            )
-          )
-            return;
-          event.currentTarget.setPointerCapture(event.pointerId);
-          titlebarGesture.begin(event.pointerId, event.clientX, event.clientY);
-        }}
-        onPointerMove={(event) => {
-          const gesture = titlebarGesture.move(
-            event.pointerId,
-            event.clientX,
-            event.clientY,
-            event.buttons,
-          );
-          if (gesture) onBeginWindowDrag();
-        }}
-        onPointerUp={(event) => titlebarGesture.end(event.pointerId)}
-        onPointerCancel={(event) => titlebarGesture.cancel(event.pointerId)}
+        onBeginWindowDrag={onBeginWindowDrag}
+        onToggleWindowSize={onToggleWindowSize}
+        onOpenWindowMenu={onOpenWindowMenu}
       >
         {leftAvailable ? (
           <button
@@ -180,15 +167,17 @@ export function AppShell({
           <kbd>{shortcutModifier}K</kbd>
         </button>
         <WindowControls
+          maximized={windowMaximized}
           labels={{
             controls: t("window.controls"),
             minimize: t("window.minimize"),
             maximize: t("window.maximize"),
+            restore: t("window.restore"),
             close: t("window.close"),
           }}
           onAction={onWindowControl}
         />
-      </header>
+      </WindowTitlebar>
 
       <div className="app-columns">
         {leftAvailable && (

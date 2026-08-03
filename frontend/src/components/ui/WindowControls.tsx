@@ -3,13 +3,16 @@ import { Icon } from "./Icon.tsx";
 export type WindowControlAction = "minimize" | "toggle_maximize" | "close";
 
 export function WindowControls({
+  maximized,
   labels,
   onAction,
 }: {
+  maximized: boolean;
   labels: {
     controls: string;
     minimize: string;
     maximize: string;
+    restore: string;
     close: string;
   };
   onAction: (action: WindowControlAction) => void;
@@ -26,11 +29,11 @@ export function WindowControls({
       </button>
       <button
         type="button"
-        aria-label={labels.maximize}
-        title={labels.maximize}
+        aria-label={maximized ? labels.restore : labels.maximize}
+        title={maximized ? labels.restore : labels.maximize}
         onClick={() => onAction("toggle_maximize")}
       >
-        <Icon name="maximize" />
+        <Icon name={maximized ? "restore" : "maximize"} />
       </button>
       <button
         type="button"

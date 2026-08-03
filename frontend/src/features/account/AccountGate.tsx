@@ -5,10 +5,11 @@ import {
   WindowControls,
   type WindowControlAction,
 } from "../../components/ui/WindowControls.tsx";
+import { WindowTitlebar } from "../../components/ui/WindowTitlebar.tsx";
 import { useI18n, type Locale, type MessageId } from "../../i18n/context.ts";
 import { accountErrorText } from "../../i18n/account-error.ts";
 import { desktopPlatform } from "../../platform/keyboard.ts";
-import { WindowTitlebarGesture } from "../../platform/window-titlebar-gesture.ts";
+import type { WindowTitlebarClickCount } from "../../platform/window-chrome.ts";
 
 type Props = {
   account: AccountView;
@@ -22,7 +23,10 @@ type Props = {
   connectionDiagnostic?: string;
   reconnecting: boolean;
   notice: string;
-  onBeginWindowDrag: () => void;
+  onBeginWindowDrag: (clicks: WindowTitlebarClickCount) => void;
+  onToggleWindowSize?: () => void;
+  onOpenWindowMenu?: () => void;
+  windowMaximized: boolean;
   onWindowControl: (action: WindowControlAction) => void;
   onReconnect: () => void;
   onBeginLogin: () => void;
@@ -48,6 +52,9 @@ export function AccountGate({
   reconnecting,
   notice,
   onBeginWindowDrag,
+  onToggleWindowSize,
+  onOpenWindowMenu,
+  windowMaximized,
   onWindowControl,
   onReconnect,
   onBeginLogin,
@@ -60,7 +67,6 @@ export function AccountGate({
   onSelectModel,
 }: Props) {
   const { locale, setLocale, t } = useI18n();
-  const titlebarGesture = useRef(new WindowTitlebarGesture()).current;
   const signOut = useRef<HTMLButtonElement>(null);
   const signOutCancel = useRef<HTMLButtonElement>(null);
   const [confirmSignOut, setConfirmSignOut] = useState(false);
@@ -116,28 +122,11 @@ export function AccountGate({
       data-platform={desktopPlatform()}
       data-readiness={account.readiness}
     >
-      <header
+      <WindowTitlebar
         className="account-gate-toolbar"
-        onPointerDown={(event) => {
-          if (
-            event.button !== 0 ||
-            (event.target as HTMLElement).closest("button, input, select, a")
-          )
-            return;
-          event.currentTarget.setPointerCapture(event.pointerId);
-          titlebarGesture.begin(event.pointerId, event.clientX, event.clientY);
-        }}
-        onPointerMove={(event) => {
-          const gesture = titlebarGesture.move(
-            event.pointerId,
-            event.clientX,
-            event.clientY,
-            event.buttons,
-          );
-          if (gesture) onBeginWindowDrag();
-        }}
-        onPointerUp={(event) => titlebarGesture.end(event.pointerId)}
-        onPointerCancel={(event) => titlebarGesture.cancel(event.pointerId)}
+        onBeginWindowDrag={onBeginWindowDrag}
+        onToggleWindowSize={onToggleWindowSize}
+        onOpenWindowMenu={onOpenWindowMenu}
       >
         <div className="account-gate-brand" aria-label={t("app.name")}>
           <span className="brand-mark" aria-hidden="true">
@@ -162,16 +151,18 @@ export function AccountGate({
             </select>
           </label>
           <WindowControls
+            maximized={windowMaximized}
             labels={{
               controls: t("window.controls"),
               minimize: t("window.minimize"),
               maximize: t("window.maximize"),
+              restore: t("window.restore"),
               close: t("window.close"),
             }}
             onAction={onWindowControl}
           />
         </div>
-      </header>
+      </WindowTitlebar>
 
       <section
         className="account-gate-stage"
