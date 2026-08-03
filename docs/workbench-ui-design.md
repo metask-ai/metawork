@@ -212,6 +212,8 @@ Invoices
 - 点击 Workspace 状态徽标切换到该 Workspace，并优先定位对应分组；系统通知点击后直接定位原 Task 和请求；
 - 移除 Workspace 不删除历史 Task 或真实文件。入口只在当前 Workspace 可用时出现，并先用就地非模态确认说明“运行中的 Task 会停止、不会删除本地文件和历史记录”；确认打开时聚焦安全的取消动作，`Escape` 取消并把焦点还给触发入口，确认后把焦点移到不会随最后一个 Workspace 消失的稳定区标题。随后 Host 把 Workspace 标记为 `removing`、推进 epoch 并拒绝新 Task/Run，导航持续显示进行中状态；全部收口后才撤销当前 Host authorization 并退出活动导航。失败时 Workspace 保持可用、显示“移除未完成，部分任务可能已经停止”并允许重试，不能静默恢复得像什么都没发生；
 - 再次打开历史 Task 只保证可浏览记录；需要访问原目录时重新选择或授权，能否继续执行还必须服从 §6.4 的 Conversation 与 execution binding 规则。
+- App 重启后，左栏直接使用 Host 恢复的 Workspace/Task 列表和顺序；点击 Task 打开其已保存时间线，不自动创建新 Task、不重放最后一次输入，也不把恢复的 `interrupted` 显示成仍在运行；
+- `taskHistoryPersistenceHealth = read_failed / corrupt / write_failed / outcome_unknown` 时，左栏在 Workspace/Task 导航前显示一条紧凑、可读的错误提示。历史读取失败或损坏不得伪装成空列表；mutation 保持禁用，`outcome_unknown` 明确要求重启，Renderer 不提供盲目重试同一命令的入口；
 
 ### 5.2 全局能力入口
 
@@ -390,7 +392,7 @@ Metask 已连接
 
 ## 6. Task 生命周期
 
-> Capability：**混合**。四轴 Run/Task 状态和单 Task 单 in-flight Run 属于当前合同；Task-bound generation、跨重启历史恢复与显式 rebind 属于目标能力。
+> Capability：**混合**。四轴 Run/Task 状态、单 Task 单 in-flight Run 与只读跨重启产品历史属于当前合同；Agent Session/Conversation continuation 和显式 rebind 属于目标能力。
 
 ### 6.1 核心规则
 
@@ -444,18 +446,18 @@ Execution binding availability 是下一次 admission 的独立前置事实，�
 
 ### 6.4 跨重启历史与 execution rebind
 
-> Capability：**目标**。显式 rebind 还依赖 Workbench Task persistence、可验证的 execution binding 恢复，以及已经单独通过验收的 Conversation 恢复或重建能力；当前 baseline 不显示“继续此 Task”。
+> Capability：**混合**。Workbench 只读 Task history persistence 已接通；当前 AgentCore revision 5 没有跨进程 Session/Conversation 恢复，显式 rebind 与 continuation 仍是目标能力。
 
-历史 Task 跨 Host 进程恢复时遵循以下规则：
+当前恢复规则：
 
-1. 先恢复可浏览的消息、Run 结果和不含 secret 的 execution binding descriptor；不得把当前默认配置静默写入历史 Task；
-2. 只有 Host 证明已恢复的 account/profile、API、model 和 generation 与 Task 当前 binding epoch 精确一致，并且 Conversation 可安全恢复时，binding 才是 `available`；
-3. 原 binding epoch 无法精确恢复时，Task 进入 `rebind_required`，Composer 保持只读并显示旧配置与拟采用配置的脱敏差异；当前默认配置是否不同不单独决定 binding availability；
-4. 用户点击 `使用当前配置继续` 后，Host 重新校验 Workspace、account/profile、API→model 归属与当前 generation，在没有 non-terminal Run 时原子创建新的 binding epoch 和新的 Agent Session；
-5. 时间线记录一条不可改写的 `执行配置已更改` 边界事件，显示旧/新 API、Provider、model 与 generation 事实；旧 Run、usage 和模型归属保持原样；
-6. 用户可以取消 rebind 并继续只读浏览，或选择 `从此历史新建任务`。rebind 失败不得回退到静默默认值。
+1. Host 从 bounded Workbench store 恢复 Workspace/Task、消息、Run/tool/UI 决策和 compact 历史，以及不含 secret 的 execution binding descriptor；不得把当前默认配置静默写入历史 Task；
+2. 没有 live owner 的 non-terminal Run 或 compact 显示为 `Interrupted`，不显示 Running/Stopping，不自动重放输入、工具或 permission；
+3. 恢复 Task 发布 `conversationRecovery = false` 和 `continuationUnavailableReason = session_recovery_unsupported`。左栏仍可选择，时间线仍可阅读，Composer 禁用并明确说明“当前 Metask AgentCore 版本无法继续原会话”；
+4. open 的恢复 Task 虽无 Session，仍可执行真实的 Host-owned 结束动作；成功后 `lifecycle = closed` 必须写入同一 store，删除入口随 canonical snapshot 开放，再次重启不得复活。Renderer 不能把无状态变化的 acknowledgement 当成已结束；
+5. Task store read/corrupt/write/outcome-unknown health 由 Host snapshot 发布；Renderer 只解释该事实并停止 mutation，不自行清空、修复、迁移或重试持久数据；
+6. 当前界面不显示 `继续此 Task`、`使用当前配置继续` 或假的 resume；exact-match execution generation 也不能替代 Conversation 恢复证明。
 
-当前 ABI 不提供跨进程 Conversation 恢复，当前 baseline 也不承诺跨 Host Task history。若只读 Task persistence 先行落地，Host/Core 退出后的历史 Task 只能浏览并提供 `从此历史新建任务`；即使原 execution generation 恰好仍可恢复，也不得因此伪造原 Conversation 可以继续。
+未来只有 Host 同时证明 account/profile、API、model、generation 与 Task binding epoch 精确匹配，并且 AgentCore 提供已验收的 Session/Conversation 恢复时，continuation 才能变为 available。若另外交付 rebind，必须由用户明确发起，重新校验 Workspace 和 catalog ownership，创建新 binding epoch/Session，并以不可改写的配置边界保留旧 Run、usage 与模型归属；失败不得回退到静默默认值。
 
 ## 7. 中间区域：工作叙事
 
@@ -1140,7 +1142,7 @@ MetaWork 采用“明亮工作台 + 紫色任务流”的桌面工具方向。�
 - 当前 API 模型列表、模型切换 pending/error、设置与 Composer 默认值一致；
 - 设置页切换默认 API 后加载对应模型，默认只影响新 Task admission，不自动改绑已有 Task；
 - 已有 Task 保留当前 execution binding epoch，默认变化不改写历史或 live Session；只有 §6.4 的显式 rebind 可以建立新 epoch；
-- Host 重启后历史 Task 先只读恢复；exact-match binding 与 Conversation 均可恢复时才继续，否则显示脱敏差异并要求显式 rebind。当前 baseline 不承诺跨 Host history；若只读 persistence 先行落地则只显示 `从此历史新建任务`；
+- Host 重启后历史 Task 只读恢复；点击左栏 Task 可浏览已保存时间线，未完成 operation 显示 `Interrupted`，Composer 以 `session_recovery_unsupported` 说明当前 revision 5 无法继续。不得显示假的 resume/rebind，也不得因当前默认配置恰好匹配而开放发送；
 - API 只在设置中显示脱敏名称、Provider 和尾号；完整 secret 不进入 DOM、snapshot、日志或错误；
 - 左下账号入口在窄窗口、长姓名、重认证和 200% text 下仍可用。
 

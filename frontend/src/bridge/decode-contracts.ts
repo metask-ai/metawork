@@ -1193,6 +1193,7 @@ function decodeTask(value: unknown, path: string): TaskView {
     "skillCatalog",
     "lifecycle",
     "continuationAvailable",
+    "continuationUnavailableReason",
     "archived",
     "closeFailed",
     "activeOperation",
@@ -1286,6 +1287,19 @@ function decodeTask(value: unknown, path: string): TaskView {
     item.continuationAvailable,
     `${path}.continuationAvailable`,
   );
+  const continuationUnavailableReason = nullableEnum(
+    item.continuationUnavailableReason,
+    `${path}.continuationUnavailableReason`,
+    [
+      "session_poisoned",
+      "event_projection_failure",
+      "closing",
+      "closed",
+      "session_recovery_unsupported",
+    ] as const,
+  );
+  if (continuationAvailable !== (continuationUnavailableReason === null))
+    fail(path, "continuation availability and unavailable reason must agree");
   const archived = booleanValue(item.archived, `${path}.archived`);
   const currentRunId = wireId(item.currentRunId, `${path}.currentRunId`);
   const currentRunPhase = nullableEnum(
@@ -1421,6 +1435,7 @@ function decodeTask(value: unknown, path: string): TaskView {
     skillCatalog: decodeSkillCatalog(item.skillCatalog, `${path}.skillCatalog`),
     lifecycle,
     continuationAvailable,
+    continuationUnavailableReason,
     archived,
     closeFailed: booleanValue(item.closeFailed, `${path}.closeFailed`),
     activeOperation,
@@ -1734,6 +1749,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
   ]);
   const capabilityItem = object(root.capabilities, "$.capabilities", [
     "taskHistoryPersistence",
+    "taskHistoryPersistenceHealth",
     "conversationRecovery",
     "executionRebind",
     "structuredPlan",
@@ -1752,6 +1768,18 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     taskHistoryPersistence: booleanValue(
       capabilityItem.taskHistoryPersistence,
       "$.capabilities.taskHistoryPersistence",
+    ),
+    taskHistoryPersistenceHealth: enumValue(
+      capabilityItem.taskHistoryPersistenceHealth,
+      "$.capabilities.taskHistoryPersistenceHealth",
+      [
+        "unavailable",
+        "ready",
+        "read_failed",
+        "corrupt",
+        "write_failed",
+        "outcome_unknown",
+      ] as const,
     ),
     conversationRecovery: booleanValue(
       capabilityItem.conversationRecovery,
@@ -1822,6 +1850,14 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
       ] as const,
     ),
   };
+  if (
+    capabilities.taskHistoryPersistence !==
+    (capabilities.taskHistoryPersistenceHealth === "ready")
+  )
+    fail(
+      "$.capabilities.taskHistoryPersistence",
+      "Task history persistence availability and health must agree",
+    );
   const workspaces = arrayValue(
     root.workspaces,
     "$.workspaces",

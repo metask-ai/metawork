@@ -689,11 +689,26 @@ test("Agent terminal facts have one immutable handoff and no legacy history latc
 test("Workbench owns Task lifecycle, continuation, and canonical redaction", () => {
   const workbench = read("src/workbench/projection.zig");
   const taskRecord = workbench.slice(
-    workbench.indexOf("const TaskView = struct"),
+    workbench.indexOf("const DurableTaskRecord = struct"),
     workbench.indexOf("fn FixedText"),
   );
-  assert.match(taskRecord, /lifecycle: TaskLifecycle/);
-  assert.match(taskRecord, /continuation: ContinuationCapability/);
+  const durableTaskRecord = taskRecord.slice(
+    taskRecord.indexOf("const DurableTaskRecord = struct"),
+    taskRecord.indexOf("const RuntimeAttachment = struct"),
+  );
+  const runtimeAttachment = taskRecord.slice(
+    taskRecord.indexOf("const RuntimeAttachment = struct"),
+    taskRecord.indexOf("const TaskView = struct"),
+  );
+  assert.doesNotMatch(durableTaskRecord, /lifecycle: TaskLifecycle/);
+  assert.doesNotMatch(
+    durableTaskRecord,
+    /continuation: ContinuationCapability/,
+  );
+  assert.match(runtimeAttachment, /lifecycle: TaskLifecycle/);
+  assert.match(runtimeAttachment, /continuation: ContinuationCapability/);
+  assert.match(taskRecord, /durable: DurableTaskRecord/);
+  assert.match(taskRecord, /runtime: RuntimeAttachment/);
   assert.doesNotMatch(taskRecord, /SessionState/);
   assert.doesNotMatch(workbench, /session\.snapshot\(/);
   assert.match(workbench, /session_disposition_at_completion/);
@@ -736,13 +751,28 @@ test("Workbench owns Task lifecycle, continuation, and canonical redaction", () 
     /resolveCanonicalUserHome[\s\S]*\.canonical_user_home = canonical_user_home/,
   );
   assert.doesNotMatch(read("src/bridge/dispatcher.zig"), /canonical_user_home/);
-  assert.match(workbench, /replaceTrackedProjected\(\s*&view\.title/);
+  assert.match(
+    workbench,
+    /pub fn renameTask[\s\S]*copyProjected\([\s\S]*execution\.input\(\)\.api_key[\s\S]*view\.durable\.title_redacted = projected\.redacted/,
+  );
   assert.match(taskRecord, /execution: \?OwnedTaskExecution/);
   assert.match(workbench, /const OwnedTaskExecution = struct/);
   assert.match(workbench, /account_contract\.validateExecutionConfig\(input\)/);
   assert.match(workbench, /redaction_secret = execution\.api_key/);
   assert.match(workbench, /releaseQuiescentTaskExecutions/);
   assert.match(workbench, /fn releaseTaskExecutionNoFail/);
+  const releaseTaskExecution = workbench.slice(
+    workbench.indexOf("fn releaseTaskExecutionNoFail"),
+    workbench.indexOf("fn upsertWorkspace"),
+  );
+  assert.match(
+    releaseTaskExecution,
+    /task\.durable\.runs[\s\S]*run\.redaction_secret = &\.\{\}/,
+  );
+  assert.match(
+    releaseTaskExecution,
+    /task\.durable\.compacts[\s\S]*compact\.redaction_secret = &\.\{\}/,
+  );
   assert.doesNotMatch(workbench, /pub const RunRef|acquireRunRef/);
 
   const agent = read("src/agent/session.zig");

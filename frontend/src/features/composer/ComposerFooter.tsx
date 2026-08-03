@@ -8,7 +8,7 @@ import {
   type RefObject,
 } from "react";
 
-import type { SkillCatalogView } from "../../bridge/contracts.ts";
+import type { SkillCatalogView, TaskView } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { useI18n } from "../../i18n/context.ts";
 import { maxComposerCharacters } from "./drafts.ts";
@@ -44,6 +44,7 @@ export function ComposerFooter({
   closing,
   closed,
   unavailable,
+  unavailableReason,
   draft,
   skillCatalog,
   slashCommands,
@@ -78,6 +79,7 @@ export function ComposerFooter({
   closing: boolean;
   closed: boolean;
   unavailable: boolean;
+  unavailableReason: TaskView["continuationUnavailableReason"];
   draft: ComposerDraft;
   skillCatalog: SkillCatalogView;
   slashCommands: readonly SlashCommandState[];
@@ -307,7 +309,11 @@ export function ComposerFooter({
                   : closing
                     ? t("run.placeholder_closing")
                     : unavailable
-                      ? t("run.placeholder_unavailable")
+                      ? t(
+                          unavailableReason === "session_recovery_unsupported"
+                            ? "run.placeholder_recovery_unsupported"
+                            : "run.placeholder_unavailable",
+                        )
                       : archived
                         ? t("run.placeholder_archived")
                         : t("run.placeholder")

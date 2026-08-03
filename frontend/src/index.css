@@ -525,6 +525,25 @@ summary::-webkit-details-marker {
   scrollbar-gutter: stable;
 }
 
+.task-persistence-error {
+  display: flex;
+  margin: 0 4px 14px;
+  padding: 9px 10px;
+  align-items: flex-start;
+  gap: 8px;
+  border: 1px solid rgba(156, 91, 16, 0.18);
+  border-radius: 9px;
+  color: var(--color-amber-ink);
+  background: rgba(156, 91, 16, 0.055);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.task-persistence-error svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
 .sidebar-navigation .workspace-card,
 .sidebar-navigation .task-list {
   margin-top: 0;

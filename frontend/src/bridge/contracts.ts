@@ -277,6 +277,7 @@ export type CompactPhase =
   | "no_change"
   | "degraded"
   | "aborted"
+  | "interrupted"
   | "failed";
 
 export type CompactCause =
@@ -378,6 +379,13 @@ export type TaskView = {
   skillCatalog: SkillCatalogView;
   lifecycle: "open" | "closing" | "closed";
   continuationAvailable: boolean;
+  continuationUnavailableReason:
+    | "session_poisoned"
+    | "event_projection_failure"
+    | "closing"
+    | "closed"
+    | "session_recovery_unsupported"
+    | null;
   archived: boolean;
   closeFailed: boolean;
   activeOperation: ActiveOperation | null;
@@ -395,6 +403,13 @@ export type WorkbenchSnapshot = {
   revision: string;
   capabilities: {
     taskHistoryPersistence: boolean;
+    taskHistoryPersistenceHealth:
+      | "unavailable"
+      | "ready"
+      | "read_failed"
+      | "corrupt"
+      | "write_failed"
+      | "outcome_unknown";
     conversationRecovery: boolean;
     executionRebind: boolean;
     structuredPlan: boolean;

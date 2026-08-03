@@ -20,6 +20,7 @@ export const initialWorkbenchState: WorkbenchState = {
     revision: "0",
     capabilities: {
       taskHistoryPersistence: false,
+      taskHistoryPersistenceHealth: "unavailable",
       conversationRecovery: false,
       executionRebind: false,
       structuredPlan: false,
@@ -78,6 +79,12 @@ export const initialWorkbenchState: WorkbenchState = {
   draftOpen: false,
   draftWorkspaceId: null,
 };
+
+export function taskHistoryMutationBlocked(
+  health: WorkbenchSnapshot["capabilities"]["taskHistoryPersistenceHealth"],
+) {
+  return health !== "ready" && health !== "unavailable";
+}
 
 function firstTaskInWorkspace(
   snapshot: WorkbenchSnapshot,

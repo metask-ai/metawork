@@ -283,6 +283,7 @@ export const zhCN: Record<MessageId, string> = {
   "compact.timeline.degraded":
     "上下文已降级压缩 · 约 {before} → {after} tokens",
   "compact.timeline.aborted": "上下文压缩已停止",
+  "compact.timeline.interrupted": "上下文压缩意外中断",
   "compact.timeline.failed": "上下文压缩失败",
   "compact.phase.queued": "压缩已排队",
   "compact.phase.compacting": "正在压缩上下文",
@@ -309,6 +310,8 @@ export const zhCN: Record<MessageId, string> = {
   "run.placeholder_closing": "此任务正在结束",
   "run.placeholder_closed": "此任务已结束",
   "run.placeholder_unavailable": "结束此任务并新建任务后才能继续",
+  "run.placeholder_recovery_unsupported":
+    "此任务已恢复为只读历史，但当前 Metask AgentCore 版本无法继续原会话",
   "run.draft_only": "已在本地保存为草稿。当前工作结束后即可发送。",
   "run.started": "工作已开始。",
   "run.start_failed": "未能开始工作，请检查连接后重试。",
@@ -622,4 +625,11 @@ export const zhCN: Record<MessageId, string> = {
   "scheduled.persistence.outcome_unknown":
     "无法确认最近的更改是否保存。为避免重复运行，自动触发已停止。",
   "scheduled.persistence.ready": "定时任务存储已就绪。",
+  "task.persistence.read_failed": "无法读取已保存的任务历史。",
+  "task.persistence.corrupt":
+    "已保存的任务历史无效。MetaWork 已保留原文件并禁用任务更改。",
+  "task.persistence.write_failed":
+    "最近的任务更改未能保存，后续任务更改已禁用。",
+  "task.persistence.outcome_unknown":
+    "无法确认最近的任务更改是否已保存，请重启应用后再继续更改。",
 };

@@ -37,6 +37,13 @@ function clone(value) {
 
 test("the canonical Workbench fixture decodes without normalization", () => {
   assert.deepEqual(decodeWorkbenchSnapshot(fixture), fixture);
+
+  const inconsistentPersistence = clone(fixture);
+  inconsistentPersistence.capabilities.taskHistoryPersistence = true;
+  assert.throws(
+    () => decodeWorkbenchSnapshot(inconsistentPersistence),
+    /availability and health must agree/,
+  );
 });
 
 test("managed Workspace projection is one-to-one non-selecting and capability-gated", () => {
@@ -393,6 +400,7 @@ test("Compact projection is append-only and mutually exclusive with Run work", (
   const closedActive = clone(active);
   closedActive.tasks[0].lifecycle = "closed";
   closedActive.tasks[0].continuationAvailable = false;
+  closedActive.tasks[0].continuationUnavailableReason = "closed";
   assert.throws(
     () => decodeWorkbenchSnapshot(closedActive),
     /closed Task cannot have an active Compact/,
@@ -401,6 +409,7 @@ test("Compact projection is append-only and mutually exclusive with Run work", (
   const closingActive = clone(active);
   closingActive.tasks[0].lifecycle = "closing";
   closingActive.tasks[0].continuationAvailable = false;
+  closingActive.tasks[0].continuationUnavailableReason = "closing";
   closingActive.tasks[0].compacts[0].phase = "stopping";
   assert.deepEqual(decodeWorkbenchSnapshot(closingActive), closingActive);
 
@@ -672,6 +681,8 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
 
   const nonContinuableRunning = clone(fixture);
   nonContinuableRunning.tasks[0].continuationAvailable = false;
+  nonContinuableRunning.tasks[0].continuationUnavailableReason =
+    "session_poisoned";
   assert.throws(
     () => decodeWorkbenchSnapshot(nonContinuableRunning),
     /open non-continuable Task cannot have active work/,
@@ -680,12 +691,14 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   const closingRun = clone(fixture);
   closingRun.tasks[0].lifecycle = "closing";
   closingRun.tasks[0].continuationAvailable = false;
+  closingRun.tasks[0].continuationUnavailableReason = "closing";
   closingRun.tasks[0].currentRunPhase = "stopping";
   closingRun.tasks[0].runs[0].phase = "stopping";
   assert.doesNotThrow(() => decodeWorkbenchSnapshot(closingRun));
 
   const continuableClosing = clone(closingRun);
   continuableClosing.tasks[0].continuationAvailable = true;
+  continuableClosing.tasks[0].continuationUnavailableReason = null;
   assert.throws(
     () => decodeWorkbenchSnapshot(continuableClosing),
     /non-open Task cannot accept future work/,

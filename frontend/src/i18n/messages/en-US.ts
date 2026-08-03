@@ -302,6 +302,7 @@ export const enUS = {
   "compact.timeline.degraded":
     "Context compacted with reduced fidelity · about {before} → {after} tokens",
   "compact.timeline.aborted": "Context compaction stopped",
+  "compact.timeline.interrupted": "Context compaction was interrupted",
   "compact.timeline.failed": "Context compaction failed",
   "compact.phase.queued": "Compaction queued",
   "compact.phase.compacting": "Compacting context",
@@ -330,6 +331,8 @@ export const enUS = {
   "run.placeholder_closed": "This task has ended",
   "run.placeholder_unavailable":
     "End this task and start a new one to continue",
+  "run.placeholder_recovery_unsupported":
+    "This task was restored for reading, but this Metask AgentCore version cannot continue its conversation",
   "run.draft_only":
     "Saved locally as a draft. You can send it after the current work finishes.",
   "run.started": "Work started.",
@@ -685,6 +688,13 @@ export const enUS = {
   "scheduled.persistence.outcome_unknown":
     "MetaWork cannot confirm whether the latest change was saved. Automatic runs are stopped to prevent duplicates.",
   "scheduled.persistence.ready": "Schedule storage is ready.",
+  "task.persistence.read_failed": "Saved task history could not be read.",
+  "task.persistence.corrupt":
+    "Saved task history is invalid. MetaWork kept the original file and disabled task changes.",
+  "task.persistence.write_failed":
+    "The latest task change could not be saved. Further task changes are disabled.",
+  "task.persistence.outcome_unknown":
+    "MetaWork could not confirm whether the latest task change was saved. Restart before making more changes.",
 } as const;
 
 export type MessageId = keyof typeof enUS;

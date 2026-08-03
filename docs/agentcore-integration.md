@@ -80,6 +80,8 @@ revision 5 bundle 提供完整 typed status、六个 StopReason、known/unknown 
 
 当前 ABI `RunResult` 不包含 `SuspendInfo`、resume token、background handle 或 budget stop。unknown stop code 在 SDK validation 层失败；Host 不能制造这些产品状态。
 
+revision 5 的公开 Runtime/Session surface 也只有进程内 create/destroy、typed Run/abort、manual compact 与已列出的 mutation；没有按持久 identity open Session、checkpoint、Conversation export/import 或 hydration。MetaWork 的 Workbench store 因此只恢复产品 Task 历史：恢复 Task 不创建 Agent Session，不把历史文本重新喂给模型，不从 bundle 私有数据或 CLI 行为推断 resume，并向 Bridge 发布 `conversationRecovery = false` 与 `session_recovery_unsupported`。后续 AgentCore 若增加恢复能力，必须先在本合同和 ABI 消费合同中定义 ownership、exclusive open、checkpoint/terminal 对账与失败语义，再由 Workbench 接入；不能在 `agent/` 外建立兼容实现。
+
 ## 4. Agent binding
 
 Agent binding 是 Metask AgentCore 的 ABI 消费者，不是 Native SDK Adapter。它直接持有 bundle SDK API table 和 opaque handles。
@@ -228,7 +230,7 @@ Workbench 的 typed Skill admission 在 `Session.prepareRun` 前验证 pinned re
 
 Renderer Bridge revision 1 原地 hard cut 后，`metawork.tasks.run` 只接受 `input.kind = text | skill` 的 tagged payload，旧 `prompt` 字段必然解码失败；`tasks.create` 必须显式传 `expectedSkillCatalogRevision`，Text 为 `null`，Skill 为选择时 revision。Workspace current catalog、Task pinned catalog 与 Run typed input 由同一 Workbench snapshot 投影；Bridge 只严格解码、路由和编码，不解析 slash、归档或 AgentCore raw catalog。`workspaces.refreshSkillCatalog` 与 `tasks.refreshSkillCatalog` 分别只调用 Workbench 的 Workspace query transaction 与 idle Task binding transaction。`skills.refreshCatalog` 更新顶层管理 catalog/inventory reconciliation，不改变 Task 或 Session binding；Skill preview/detail 只发布 Workbench 已做容量与内容边界处理的文本，file picker 返回的一次性 staged handle 和 Host-only physical path 都不得进入 snapshot。Import/export/reimport/uninstall mutation 沿同一 Dispatcher authority、expected generation/Workspace epoch 与 ProductDelivery resync 路径返回 typed result，不形成第二条执行路线。
 
-每个 Session 拥有独立分配、存活到 Session release 的 `SessionControlBlock`。`RunControlLease` 用 closed-bit + atomic reference count 保活该 control block，并携带单调 `run_generation`；旧 lease 在下一 Run 复用执行槽后返回 `stale_run`，Run 自然完成后返回 `already_terminal`。Session close 先关闭 lease acquisition gate，再等待 Run、callback 和全部 control lease 归零；该 quiescence wait 不持有 Session/Workbench lock。`Run.execute()` 返回 immutable `TerminalResult`，worker 在释放 execution base lease 前将它提交到 Workbench admission 时预留的 write-once terminal payload。Workbench executor worker 入队前取得的 Task-owned stable record reference 归零前，所属 Task 即使已关闭并请求删除也只进入 `delete_pending`；不存在只被测试消费的第二套公开 record-reference 协议。
+每个 Session 拥有独立分配、存活到 Session release 的 `SessionControlBlock`。`RunControlLease` 用 closed-bit + atomic reference count 保活该 control block，并携带单调 `run_generation`；旧 lease 在下一 Run 复用执行槽后返回 `stale_run`，Run 自然完成后返回 `already_terminal`。Session close 先关闭 lease acquisition gate，再等待 Run、callback 和全部 control lease 归零；该 quiescence wait 不持有 Session/Workbench lock。`Run.execute()` 返回 immutable `TerminalResult`，worker 在释放 execution base lease 前将它提交到 Workbench admission 时预留的 write-once terminal payload。Workbench executor worker 入队前取得的 Task-owned stable record reference 归零前，所属 Task 即使已关闭，删除命令也必须返回 `task_busy` 并保持记录不变；不存在只被测试消费的第二套公开 record-reference 协议。
 
 ### Close 顺序
 

@@ -2278,6 +2278,20 @@ fn commitScheduledTaskStore(
     return .committed;
 }
 
+fn commitTaskStore(
+    context: ?*anyopaque,
+    bytes: []const u8,
+) workbench_api.TaskPersistenceCommit {
+    const store: *workbench_api.TaskFileStore = @ptrCast(
+        @alignCast(context orelse return .failed),
+    );
+    store.commit(bytes) catch |err| return switch (err) {
+        error.PersistenceOutcomeUnknown => .outcome_unknown,
+        else => .failed,
+    };
+    return .committed;
+}
+
 fn frontendMode(env_map: *std.process.Environ.Map) FrontendMode {
     return if (env_map.get(frontend_url_env) != null) .development else .release;
 }
@@ -2416,6 +2430,22 @@ pub fn run(init: std.process.Init) !void {
         &skill_staging_dir_storage,
         &.{ scheduled_task_dir, "skill-staging" },
     );
+    var task_file_store: ?workbench_api.TaskFileStore =
+        workbench_api.TaskFileStore.init(
+            init.io,
+            scheduled_task_dir,
+        ) catch null;
+    defer if (task_file_store) |*store| store.deinit();
+    var task_restore_failed = task_file_store == null;
+    const task_restored_bytes = if (task_file_store) |*store|
+        store.loadAlloc(std.heap.c_allocator) catch restore: {
+            task_restore_failed = true;
+            break :restore null;
+        }
+    else
+        null;
+    defer if (task_restored_bytes) |bytes|
+        std.heap.c_allocator.free(bytes);
     var scheduled_task_file_store: ?workbench_api.ScheduledTaskFileStore =
         workbench_api.ScheduledTaskFileStore.init(
             init.io,
@@ -2513,6 +2543,13 @@ pub fn run(init: std.process.Init) !void {
                 .restored_bytes = scheduled_task_restored_bytes,
                 .restore_failed = scheduled_task_restore_failed,
                 .commit_fn = commitScheduledTaskStore,
+            },
+            .task_persistence = .{
+                .context = if (task_file_store) |*store| store else null,
+                .enabled = task_file_store != null and !task_restore_failed,
+                .restored_bytes = task_restored_bytes,
+                .restore_failed = task_restore_failed,
+                .commit_fn = commitTaskStore,
             },
             .schedule_notifier = .{
                 .context = &app,

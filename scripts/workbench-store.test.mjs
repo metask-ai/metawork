@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   initialWorkbenchState,
+  taskHistoryMutationBlocked,
   workbenchReducer,
 } from "../frontend/src/workbench/store.ts";
 import {
@@ -55,6 +56,15 @@ function snapshot(revision, tasks, workspaceIds = null) {
     tasks,
   };
 }
+
+test("task history persistence health blocks only unsafe mutations", () => {
+  assert.equal(taskHistoryMutationBlocked("ready"), false);
+  assert.equal(taskHistoryMutationBlocked("unavailable"), false);
+  assert.equal(taskHistoryMutationBlocked("read_failed"), true);
+  assert.equal(taskHistoryMutationBlocked("corrupt"), true);
+  assert.equal(taskHistoryMutationBlocked("write_failed"), true);
+  assert.equal(taskHistoryMutationBlocked("outcome_unknown"), true);
+});
 
 test("pending scopes isolate unrelated mutations and reject duplicate admission", () => {
   const pending = new PendingScopes();

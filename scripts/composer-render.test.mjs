@@ -40,6 +40,7 @@ const base = {
   closing: false,
   closed: false,
   unavailable: false,
+  unavailableReason: null,
   draft: { kind: "text", text: "" },
   skillCatalog: {
     availability: "ready",
@@ -681,6 +682,20 @@ test("a poisoned Task explains why continuation is unavailable", () => {
   });
   assert.match(markup.match(/<textarea[^>]*>/)?.[0] ?? "", /disabled/);
   assert.match(markup, /End this task and start a new one to continue/);
+});
+
+test("a restored Task explains the Metask AgentCore conversation recovery limit", () => {
+  const markup = render({
+    unavailable: true,
+    unavailableReason: "session_recovery_unsupported",
+    composeDisabled: true,
+  });
+  assert.match(markup.match(/<textarea[^>]*>/)?.[0] ?? "", /disabled/);
+  assert.match(
+    markup,
+    /restored for reading, but this Metask AgentCore version cannot continue its conversation/,
+  );
+  assert.doesNotMatch(markup, /start a new one to continue/);
 });
 
 test("terminal state takes precedence over archive state in Composer guidance", () => {
