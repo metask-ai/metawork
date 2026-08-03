@@ -20,6 +20,7 @@ export const initialWorkbenchState: WorkbenchState = {
     revision: "0",
     capabilities: {
       taskHistoryPersistence: false,
+      taskHistoryPersistenceHealth: "unavailable",
       conversationRecovery: false,
       executionRebind: false,
       structuredPlan: false,

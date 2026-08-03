@@ -55,6 +55,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-workbench-executor", .root_module = test_modules.workbench_executor },
         .{ .name = "metawork-managed-workspace-store", .root_module = test_modules.workbench_managed_workspace_store },
         .{ .name = "metawork-scheduled-task-persistence", .root_module = test_modules.workbench_scheduled_persistence },
+        .{ .name = "metawork-task-persistence", .root_module = test_modules.workbench_task_persistence },
     };
     for (module_tests) |spec| {
         spec.root_module.link_libc = bundle.link_libc;
@@ -127,6 +128,7 @@ const WiredModules = struct {
     workbench_executor: *std.Build.Module,
     workbench_managed_workspace_store: *std.Build.Module,
     workbench_scheduled_persistence: *std.Build.Module,
+    workbench_task_persistence: *std.Build.Module,
 };
 
 fn createLifecycleFixture(
@@ -339,6 +341,11 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         "workbench_scheduled_tasks",
         scheduled_tasks,
     );
+    const task_persistence = b.createModule(.{
+        .root_source_file = b.path("src/workbench/task_persistence.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
     const projection = b.createModule(.{
         .root_source_file = b.path("src/workbench/projection.zig"),
         .target = target,
@@ -353,6 +360,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         "workbench_scheduled_task_persistence",
         scheduled_task_persistence,
     );
+    projection.addImport("workbench_task_persistence", task_persistence);
     projection.addImport(
         "build_options",
         existingImport(
@@ -378,6 +386,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         "workbench_scheduled_task_persistence",
         scheduled_task_persistence,
     );
+    workbench.addImport("workbench_task_persistence", task_persistence);
 
     const bridge = b.createModule(.{
         .root_source_file = b.path("src/bridge.zig"),
@@ -455,6 +464,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .workbench_executor = executor,
         .workbench_managed_workspace_store = managed_workspace_store,
         .workbench_scheduled_persistence = scheduled_task_persistence,
+        .workbench_task_persistence = task_persistence,
     };
 }
 

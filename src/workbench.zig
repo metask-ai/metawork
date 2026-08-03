@@ -3,6 +3,7 @@
 const projection_impl = @import("workbench_projection");
 const managed_workspace_store = @import("workbench_managed_workspace_store");
 const scheduled_task_persistence = @import("workbench_scheduled_task_persistence");
+const task_persistence = @import("workbench_task_persistence");
 
 pub const Error = projection_impl.Error;
 pub const Limits = projection_impl.Limits;
@@ -31,11 +32,16 @@ pub const ScheduleTimer = projection_impl.ScheduleTimer;
 pub const SchedulePersistence = projection_impl.SchedulePersistence;
 pub const SchedulePersistenceCommit = projection_impl.SchedulePersistenceCommit;
 pub const SchedulePersistenceHealth = projection_impl.SchedulePersistenceHealth;
+pub const TaskPersistence = projection_impl.TaskPersistence;
+pub const TaskPersistenceCommit = projection_impl.TaskPersistenceCommit;
+pub const TaskPersistenceHealth = projection_impl.TaskPersistenceHealth;
 pub const ScheduleNotification = projection_impl.ScheduleNotification;
 pub const ScheduleNotificationKind = projection_impl.ScheduleNotificationKind;
 pub const ScheduleNotifier = projection_impl.ScheduleNotifier;
 pub const ScheduledTaskFileStore = scheduled_task_persistence.FileStore;
 pub const scheduled_task_store_max_bytes = scheduled_task_persistence.max_store_bytes;
+pub const TaskFileStore = task_persistence.FileStore;
+pub const task_store_max_bytes = task_persistence.max_store_bytes;
 pub const TransportFailureStage = projection_impl.TransportFailureStage;
 pub const TransportFailureReport = projection_impl.TransportFailureReport;
 pub const TransportFailureDecision = projection_impl.TransportFailureDecision;
