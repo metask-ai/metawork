@@ -119,6 +119,7 @@ Host 负责：
 - 由 App/Account 在 committed transition 之后启动有界 continuation，把登录后的确定性目录准备留在后台，并只把真实歧义投影成用户动作；
 - 由 App 在同一主线程 turn 内协调 Account prepare、Workbench no-fail install 和 Account commit；
 - 由 Workbench 管理持久 Scheduled Task、触发游标、有界 occurrence history、Task、Run/maintenance record、唯一 active operation 槽、队列、取消协调和产品历史；
+- 由 App 在 `<MetaWork data dir>/workbench` 打开并持有 Task history 的进程级单写锁，把 bounded load/atomic replace capability 注入 Workbench；codec、恢复校验、candidate commit、持久化 health 和所有 Workspace/Task 产品事实仍归 Workbench；
 - 由 App 通过 Native SDK `.data` 规则解析并打开 `<MetaWork data dir>/workspaces`，只把可用或不可用的 managed root capability 注入 Workbench；由 Workbench 独占目录分配、Workspace 注册、Task 创建事务与回滚；
 - 由 App 向 Workbench 注入原子 schedule persistence、wall clock、单一 Native timer、系统通知与后台窗口生命周期 capability；timer callback 只唤醒 Workbench due reconciliation，不直接调用 AgentCore；
 - 由 Agent 管理 AgentCore Session、active Run/manual compact、callback binding 和有界事件泵；
@@ -163,7 +164,7 @@ production 网络接入受 [Metask Account API 合同](metask-account-contract.m
 
 1. Workbench 先把历史 Task、Run 与 binding descriptor 恢复成只读 projection；
 2. Account 恢复可执行默认配置后，Host 才能比较 account/profile、API、model 和 generation。macOS 可从 committed execution family 恢复；Windows 必须刷新 OAuth、重新拉取 catalog 并在内存重建，不能从 `account.json` 恢复 credential。全部精确匹配也只证明 credential binding 可恢复，不证明 AgentCore Conversation 可恢复；
-3. binding 或 Conversation 任一不可恢复时，Task admission 保持关闭。当前 baseline 不承诺跨 Host Task history；若只读 history persistence 先行落地，只发布 `从此历史新建任务`，不注册伪 `resume` 或 `rebind` 产品路径；
+3. binding 或 Conversation 任一不可恢复时，Task admission 保持关闭。当前 Workbench 已恢复跨 Host 的只读产品历史，但只发布 typed `session_recovery_unsupported`，不注册伪 `resume`、`rebind` 或临时的“从历史新建”路径；
 4. 未来 Conversation 恢复或重建通过独立能力验收后，无法精确恢复旧 binding 的 Task 发布 `rebind_required`。用户确认只提交 Task identity、expected binding epoch 和当前 catalog selection identifier；Host 重新校验 Workspace、account/profile、API→model 归属和无 non-terminal Run；
 5. rebind commit 原子关闭旧 Session owner、创建新 binding epoch 与新 Agent Session，并追加不可改写的配置边界事件。它不修改旧 Run 记录，也绝不热替换 live Session。
 
@@ -303,7 +304,9 @@ Workbench 在 admission 时为每个 Run 或 compact 建立稳定 record slot �
 
 Compact 的 executor handoff 与 pending interruption 是 advisory control fact，不能覆盖 terminal payload。Workbench main thread 按 `terminal publication > pending interruption > worker handoff` 派生 `terminal / stopping / queued|compacting` 产品 phase；独立 cancellation atomic 即使在 terminal race 后被设置也必须被忽略。Compact 没有 Run event stream，因此不复制 Run 的 final event-drain product gate；snapshot acquire 到 published payload 后即可消费全部 terminal fields 和 diagnostic bytes。
 
-Renderer reload 只重建仍存活 Host 的视图。Host/AgentCore crash 后当前 Run 必须标记 interrupted，危险工具不得自动重放。Conversation/checkpoint 跨进程恢复只有在未来 AgentCore capability 明确提供后才能设计。
+Workbench 将 `DurableTaskRecord` 与 `RuntimeAttachment` 分开：前者只含无 secret、可编码的 Workspace/Task/Run/tool/UI/compact 产品事实，后者独占 Session、ExecutionConfig owned copy、catalog lease、thread/reference 和 active lifecycle。App 在 restore 前取得 `workbench-state.json` 的 OS exclusive writer lock，读取上限为 16 MiB；commit 使用同目录随机临时文件、file sync、原子 rename 和最终文件/目录 sync。store 不存在表示首次启动；read failure、损坏、definite write failure 与 outcome unknown 分别进入 typed health，保留原文件并关闭新的 Task/Workspace mutation，不能静默降级为空状态。
+
+Renderer reload 重建仍存活 Host 的视图；Host 重启从 Workbench store 重建只读产品历史。没有 live owner 的 non-terminal Run/compact 保守收口为 interrupted，不重放输入、工具或 permission。当前 canonical AgentCore revision 5 不提供跨进程 Session open/checkpoint/Conversation hydration，因此恢复 Task 不创建 Session，`conversationRecovery` 保持 false，continuation 原因为 `session_recovery_unsupported`。Conversation/checkpoint 跨进程恢复只有在未来 AgentCore capability 明确提供并通过独立验收后才能接通；MetaWork 不读取私有 transcript、不保存 opaque handle，也不修改 bundle 来填补该缺口。
 
 Account attempt 与 Renderer 生命周期解耦：Renderer reload、短暂断连或视图同步失败不能遗失 Host 中的 deadline、取消能力或 terminal result。Workbench Account projection 必须发布产品 readiness 和 Host 允许的用户动作；Renderer 不从内部 operation、error code 或候选数量自行发明 continuation。
 

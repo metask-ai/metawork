@@ -104,7 +104,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - Account 只维护一个当前默认 ExecutionConfig，但 Workbench 可以保留被既有 Task 引用的旧 generation owned copy。切换默认 API 或模型不得篡改、停止或重新配置既有 Task；旧 generation 只有在对应 Task、Agent Session、Run、executor job 与真实 worker reference 全部释放后才能清零；
 - Workbench 必须为 Task persistence 保存不含 secret 的 execution binding descriptor 和 epoch history；macOS Account `manifest.json` schema 1 仍只保存一个默认 execution family，不为每个 Task 复制 credential。Windows 只持久化一个 Metask refresh token 与无 secret 的 account/API/model 选择，access token、Provider API Key 和 execution config 不跨进程；
 - 跨 Host 重启恢复历史 Task 时，只有 Host 证明 restored account/profile、API、model 与 generation 精确匹配且 Conversation 可以安全恢复，才能把 binding 标记为 available；否则 Task 只读并进入 `rebind_required` 或 `unavailable`，不得静默采用当前默认配置；
-- 目标 rebind 流程必须展示旧配置与当前候选的脱敏差异，并在用户明确确认后由 Host 原子创建新 binding epoch 和新 Agent Session；旧 Run 历史、usage 和模型归属保持不可改写。如果只读 Task history persistence 先于跨进程 Conversation 恢复落地，该阶段只提供 `从此历史新建任务`；
+- 目标 rebind 流程必须展示旧配置与当前候选的脱敏差异，并在用户明确确认后由 Host 原子创建新 binding epoch 和新 Agent Session；旧 Run 历史、usage 和模型归属保持不可改写。当前只读 Task history persistence 只发布明确的 continuation unavailable；`从此历史新建任务` 也必须作为后续独立产品动作实现和验收，不能由 Renderer 临时拼接；
 - 显式重新登录、切换账号、退出登录或清除设备凭据必须取得 Workbench execution replacement gate，并证明所有引用该账号 credential 的 Task、Agent Session、Run、executor job 与真实 worker reference 已安全终止；OAuth 成功后以本次登录返回的 token 和 profile identity 替换本机账号，旧缓存 identity 不得否决显式登录，旧默认 execution、API/model selection 与 catalog 必须先清除再按新账号重建；
 - OAuth refresh 失败只进入 `reauth_required`，不自动判定现有 API Key 失效；只有 Metask 明确撤销/禁用或锁定 credential probe 返回确定鉴权拒绝，才关闭既有执行配置；
 - New Task admission 必须同时满足 Account execution state 为 ready、Workbench 已安装所选默认 generation、Workspace grant 有效且默认安装/identity replacement gate 未开启，并在创建 Task 时固化第一个 binding epoch；既有 Task 的新 Run admission 改为校验其当前 binding `available`、owned generation 仍有效、Workspace grant 有效、没有 non-terminal Run 且 identity replacement 或该 Task 的 rebind gate 未开启，不能强迫它跟随 Account 当前默认 generation，也不能被无关的默认切换冻结；
@@ -124,6 +124,8 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - 预期的 Task/Workspace admission 拒绝必须作为严格 typed result 返回并由 Renderer 映射为产品文案；非法 payload、伪造 ownership 与不可信 origin 仍 fail closed 为 Bridge error，不得把内部 error name 显示给用户；
 - 当前固定 revision 1 合同原子提供独立 Workspace projection 与 Task execution binding。一次性目录能力必须由选择命令在 Host 内创建并消费，Renderer 不接收路径授权 token，不从 Task 反推 Workspace，也不能通过可选字段继续发送被取代的临时 payload；
 - 产品 Task identity 由 Workbench 独立、稳定地分配；内部 Agent/Gate 原始事件使用单独的 Session route identity 做路由，两者不得复用或假定数值相等。Session route identity 不进入产品 snapshot，Renderer 始终只看到唯一的产品 `taskId`。
+- Workbench 必须把有界、无 secret 的 Workspace/Task 产品历史持久化到 App 数据目录，并在 Host 重启时恢复侧栏、选择、消息、Run/tool/UI 决策和 compact 历史；恢复时没有 live owner 的 non-terminal Run 或 compact 一律收口为 `interrupted`，不得重放输入、工具或 permission；
+- 当前锁定的 AgentCore ABI v1 revision 5 不提供跨进程 Session open/checkpoint/Conversation hydration。由该 store 恢复的 Task 因此只读，`conversationRecovery = false`，并发布 `session_recovery_unsupported`；MetaWork 不保存 Session handle、私有 transcript 或伪造 resume，后续继续对话必须等待独立 AgentCore capability 验收；
 - credential 不得因 owner 释放而重新出现在任何 Renderer projection。Host 在安装新 credential 以及 secure-zero 旧默认或 Task-owned credential 之前，必须永久清洗既有 Workspace、Task、Run、tool 和 UI history 投影；同时存在前缀重叠 credential 时按最长匹配脱敏。
 
 ### 5.4 Agent 交互
@@ -163,10 +165,11 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - Bridge command 或 view refresh 超时必须释放 Renderer 本地 busy 状态并进入 snapshot resync；结果不确定的 mutation 只能依据 Host snapshot 决定后续动作，不能由 Renderer 自动重复；
 - Account cancel 是独立逃生动作，不能因普通 mutation busy 被禁用；但 credential persistence 一旦开始提交就跨过取消边界，Host 必须暂时撤销 cancel 并等待唯一 terminal completion，不能在磁盘已提交、main-thread completion 尚未消费的窗口把内存回滚到旧 generation。Bridge 暂不可用时 Host deadline 仍必须收口 attempt，Renderer reload 后从 snapshot 恢复可用动作；
 - 用户消息、已完成 assistant 消息、工具结果、审批决策、关键 Run 状态和改变 Conversation 的 manual compact 应形成可靠状态边界；Run/compact admission 必须先建立稳定的 Workbench record，terminal payload 一经发布不可变，内部 Agent Session 关闭或销毁后 Task 历史仍可独立生成 snapshot；compact history 有界且 append-only，容量耗尽时拒绝新 compact，不覆盖既有 Conversation 边界；
-- 当前 baseline 的 Renderer reload 只能从仍存活的 Host 恢复视图；
+- Renderer reload 从仍存活的 Host 恢复视图；Host 重启则从 Workbench Task store 恢复有界产品历史，但不据此恢复 Agent Session 或 Conversation；
 - Host 或 AgentCore 进程退出时，当前同步 Run 标记 `interrupted`，不得伪装完成；
 - 崩溃后不得自动重放可能产生副作用的工具；
 - 可 checkpoint 的 AgentCore suspend/resume 和跨进程 Conversation 恢复属于后续 capability；
+- Task store 不存在表示合法首次启动；read failure、损坏或未知 schema 必须保留原文件、发布 typed persistence health 并禁止 Task/Workspace mutation，不得显示成空历史后覆盖。definite write failure 保留上一次 committed store 并回滚尚无外部副作用的候选；结果不确定时停止后续 mutation 并要求重启对账；
 - 成本预算、轮数上限或工具循环熔断后，Task 进入等待用户状态，只有用户明确继续后才创建新 Run。
 
 ### 5.8 桌面能力
@@ -196,7 +199,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - Skill 选择形成单一、可移除的 typed Composer draft，保留稳定 Skill identity、catalog revision 和 positional arguments；New task 使用 Workspace current catalog，已有 Task 使用其 pinned catalog。过期或不可用 token 保留参数但禁止发送，必须显式刷新并重新选择，Renderer 不读取 Skill body、不猜测目录或权限；
 - Skill 中心是 MetaWork 级的用户 Skill 只读管理 route，与当前 Workspace 选择无关；它展示名称、invocation、description、参数、catalog health/issue 与显式刷新，不安装、卸载、更新、创建、编辑、启用/禁用或直接操作 Skill 目录。AgentCore 独占 source discovery、canonical priority、winner/conflict 与 catalog revision；当前 revision 5 未公开有效 Skill 的 source metadata，因此 MetaWork 不猜测目录、不重算优先级，也不显示虚构来源。Skill 中心消费 Workbench 独立持有的全局 catalog projection；Workspace current catalog 与 Task pinned catalog 仍只服务 Composer 和 Run execution context，不得与管理视图互换；
 - 用户创建或修改 Skill 仍通过普通 Text Run 与 AgentCore built-in Read/Edit 完成：Workspace 内的 `.agents/skills` 服从现有 Workspace authority，用户级目录只有在用户明确将目标 Skill 目录作为 trusted Workspace 授权后才能修改。一次 Run 使用已绑定 snapshot，不热替换正在执行的 Skill；文件变化只在显式 catalog refresh 后影响后续选择与 Run；
-- Host 重启后的历史 Task 默认只读；execution binding 和 Conversation 均可安全恢复时才允许继续。需要 rebind 时必须由用户明确确认并在时间线记录配置边界；当前 baseline 不承诺跨 Host Task history，若只读历史先行落地则只提供从历史创建新 Task；
+- Host 重启后恢复的历史 Task 当前只读；用户选择左栏 Task 时必须显示其已保存产品历史和明确的 Session 恢复限制。execution binding 与 Conversation 均可安全恢复后才允许继续；rebind 或从历史创建新 Task 属于后续显式产品能力，当前实现不得用它们掩盖 revision 5 的恢复缺口；
 - `Files changed` 表示实际文件变更集合，`Outputs` 表示用户关心的交付结果，两者不得用“新建文件”自动等同；当前 ABI v1 未提供这两类 typed event 时，相关模块必须隐藏；
 - Task 归档只隐藏日常列表；归档、删除 Task 或移除 Workspace 前必须先终止其 queued/running/waiting/stopping Run；删除已关闭 Task 时若 executor worker 仍持有该 Task 的 stable Run record reference，只能标记 `delete_pending`，待引用归零后物理释放；删除 Task 记录不删除 Workspace 中的真实文件；移除 Workspace 先原子进入 `removing` 并推进 Workspace epoch、拒绝新 admission，全部 Task 收口后撤销当前 Host authorization 并退出活动导航；异步失败必须恢复可用状态并发布 Workspace 级失败事实，不能静默回弹；
 - 全局搜索覆盖 Workspace、Task、用户指令、完成消息和 Output 文件名；工具原始日志默认不进入普通搜索；

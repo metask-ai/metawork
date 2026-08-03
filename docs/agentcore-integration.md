@@ -80,6 +80,8 @@ revision 5 bundle 提供完整 typed status、六个 StopReason、known/unknown 
 
 当前 ABI `RunResult` 不包含 `SuspendInfo`、resume token、background handle 或 budget stop。unknown stop code 在 SDK validation 层失败；Host 不能制造这些产品状态。
 
+revision 5 的公开 Runtime/Session surface 也只有进程内 create/destroy、typed Run/abort、manual compact 与已列出的 mutation；没有按持久 identity open Session、checkpoint、Conversation export/import 或 hydration。MetaWork 的 Workbench store 因此只恢复产品 Task 历史：恢复 Task 不创建 Agent Session，不把历史文本重新喂给模型，不从 bundle 私有数据或 CLI 行为推断 resume，并向 Bridge 发布 `conversationRecovery = false` 与 `session_recovery_unsupported`。后续 AgentCore 若增加恢复能力，必须先在本合同和 ABI 消费合同中定义 ownership、exclusive open、checkpoint/terminal 对账与失败语义，再由 Workbench 接入；不能在 `agent/` 外建立兼容实现。
+
 ## 4. Agent binding
 
 Agent binding 是 Metask AgentCore 的 ABI 消费者，不是 Native SDK Adapter。它直接持有 bundle SDK API table 和 opaque handles。

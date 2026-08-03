@@ -68,6 +68,8 @@ Windows 当前 follow-up bundle 不改变 ABI 或 MetaWork 产品合同；它把
 
 这些能力必须通过后续 capability、兼容 bundle 更新或新 ABI revision 明确引入，不能根据内部 native Zig 类型推断它们已经存在。
 
+因此 MetaWork 当前可以独立持久化并恢复 Workbench-owned Task 产品历史，但不能恢复同一 AgentCore Session/Conversation。恢复 Task 必须保持 `conversationRecovery = false`、不创建 Session，并以 typed `session_recovery_unsupported` 关闭 continuation；这不是 ABI 缺失的 Host shim，也不授权 MetaWork 修改 bundle、读取私有 transcript 或把历史消息重新提交成新 Conversation。
+
 ## 4. Runtime、Session 与 Run 生命周期
 
 ABI v1 的 Run 是同步调用，但 MetaWork 必须通过 bounded executor 调度：
