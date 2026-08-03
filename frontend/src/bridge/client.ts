@@ -14,6 +14,7 @@ import type {
 } from "./contracts.ts";
 import {
   assertCancelAccepted,
+  assertCompactCancelAccepted,
   assertCloseAccepted,
   assertDisconnected,
   assertSignalAcknowledged,
@@ -30,6 +31,7 @@ import {
   decodeRendererBridgeConnect,
   decodeRevisionNotification,
   decodeTaskCreateResult,
+  decodeTaskCompactResult,
   decodeTaskRunResult,
   decodeScheduledTaskMutationResult,
   decodeScheduledTaskEnabledResult,
@@ -315,6 +317,21 @@ export class BridgeClient {
     return decodeTaskRunResult(
       await this.invoke(commands.run, { taskId, expectedBindingEpoch, input }),
       taskId,
+    );
+  }
+
+  async compact(taskId: string, expectedBindingEpoch: string) {
+    return decodeTaskCompactResult(
+      await this.invoke(commands.compact, { taskId, expectedBindingEpoch }),
+      taskId,
+    );
+  }
+
+  async cancelCompact(taskId: string, operationId: string) {
+    assertCompactCancelAccepted(
+      await this.invoke(commands.cancelCompact, { taskId, operationId }),
+      taskId,
+      operationId,
     );
   }
 

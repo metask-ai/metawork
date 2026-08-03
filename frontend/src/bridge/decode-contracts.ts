@@ -6,6 +6,7 @@ import {
   type HostSignal,
   type PendingUi,
   type CatalogRefreshResult,
+  type CompactView,
   type RunInputView,
   type RunView,
   type ScheduledTaskView,
@@ -13,6 +14,7 @@ import {
   type SkillCatalogRefreshResult,
   type TaskView,
   type TaskCreateResult,
+  type TaskCompactResult,
   type TaskRunResult,
   type ToolView,
   type UiRecord,
@@ -41,6 +43,25 @@ const nonTerminalRunPhases = [
   "running",
   "waiting_ui",
   "stopping",
+] as const;
+const compactPhases = [
+  "queued",
+  "compacting",
+  "stopping",
+  "compacted",
+  "no_change",
+  "degraded",
+  "aborted",
+  "failed",
+] as const;
+const nonTerminalCompactPhases = ["queued", "compacting", "stopping"] as const;
+const compactCauses = [
+  "user_cancel",
+  "session_close",
+  "app_shutdown",
+  "resource_limit",
+  "agent_failure",
+  "dependency_contract_failure",
 ] as const;
 const runOutcomes = [
   "completed",
@@ -229,6 +250,15 @@ const taskRunReasons = [
   "stale_catalog",
   "skill_not_found",
   "invalid_skill_arguments",
+  "capacity_reached",
+  "shutting_down",
+] as const;
+const taskCompactReasons = [
+  "binding_changed",
+  "binding_unavailable",
+  "task_unavailable",
+  "task_busy",
+  "no_history",
   "capacity_reached",
   "shutting_down",
 ] as const;
@@ -854,6 +884,49 @@ function decodeRun(value: unknown, path: string): RunView {
   };
 }
 
+function decodeCompact(value: unknown, path: string): CompactView {
+  const item = object(value, path, [
+    "operationId",
+    "afterRunId",
+    "phase",
+    "cause",
+    "beforeContextTokens",
+    "afterContextTokens",
+    "usage",
+  ]);
+  const phase = enumValue(item.phase, `${path}.phase`, compactPhases);
+  const cause = nullableEnum(item.cause, `${path}.cause`, compactCauses);
+  const terminalFailure = phase === "aborted" || phase === "failed";
+  if (terminalFailure !== (cause !== null))
+    fail(path, "Compact phase and cause must describe the same terminal state");
+  const usage = object(item.usage, `${path}.usage`, [
+    "input",
+    "output",
+    "cacheRead",
+    "cacheCreation",
+  ]);
+  return {
+    operationId: positiveWireId(item.operationId, `${path}.operationId`),
+    afterRunId: positiveWireId(item.afterRunId, `${path}.afterRunId`),
+    phase,
+    cause,
+    beforeContextTokens: wireId(
+      item.beforeContextTokens,
+      `${path}.beforeContextTokens`,
+    ),
+    afterContextTokens: wireId(
+      item.afterContextTokens,
+      `${path}.afterContextTokens`,
+    ),
+    usage: {
+      input: wireId(usage.input, `${path}.usage.input`),
+      output: wireId(usage.output, `${path}.usage.output`),
+      cacheRead: wireId(usage.cacheRead, `${path}.usage.cacheRead`),
+      cacheCreation: wireId(usage.cacheCreation, `${path}.usage.cacheCreation`),
+    },
+  };
+}
+
 function validateRunTerminalState(
   phase: RunView["phase"],
   outcome: RunView["outcome"],
@@ -998,11 +1071,13 @@ function decodeTask(value: unknown, path: string): TaskView {
     "continuationAvailable",
     "archived",
     "closeFailed",
+    "activeOperation",
     "currentRunId",
     "currentRunPhase",
     "lastRunOutcome",
     "cause",
     "runs",
+    "compacts",
     "pendingUi",
     "uiHistory",
   ]);
@@ -1077,6 +1152,7 @@ function decodeTask(value: unknown, path: string): TaskView {
     unavailableReason,
   };
   const runs = arrayValue(item.runs, `${path}.runs`, decodeRun);
+  const compacts = arrayValue(item.compacts, `${path}.compacts`, decodeCompact);
   const lifecycle = enumValue(
     item.lifecycle,
     `${path}.lifecycle`,
@@ -1093,6 +1169,23 @@ function decodeTask(value: unknown, path: string): TaskView {
     `${path}.currentRunPhase`,
     nonTerminalRunPhases,
   );
+  const activeOperation =
+    item.activeOperation === null
+      ? null
+      : (() => {
+          const operation = object(
+            item.activeOperation,
+            `${path}.activeOperation`,
+            ["kind", "id"],
+          );
+          return {
+            kind: enumValue(operation.kind, `${path}.activeOperation.kind`, [
+              "run",
+              "compact",
+            ] as const),
+            id: positiveWireId(operation.id, `${path}.activeOperation.id`),
+          };
+        })();
   if ((currentRunId === "0") !== (currentRunPhase === null))
     fail(path, "current Run identity and phase must both be present or absent");
   if (currentRunPhase !== null) {
@@ -1103,6 +1196,15 @@ function decodeTask(value: unknown, path: string): TaskView {
     if (lifecycle === "closed")
       fail(path, "a closed Task cannot have a current Run");
   }
+  const activeRuns = runs.filter((run) =>
+    nonTerminalRunPhases.includes(run.phase as never),
+  );
+  if (
+    (currentRunPhase === null && activeRuns.length !== 0) ||
+    (currentRunPhase !== null &&
+      (activeRuns.length !== 1 || activeRuns[0]!.id !== currentRunId))
+  )
+    fail(path, "current Run must be the only non-terminal projected Run");
   const pendingUi = decodePendingUi(item.pendingUi, `${path}.pendingUi`);
   if (
     pendingUi &&
@@ -1115,6 +1217,37 @@ function decodeTask(value: unknown, path: string): TaskView {
     decodeUiRecord,
   );
   const runIds = new Set(runs.map((run) => run.id));
+  const compactIds = new Set(compacts.map((compact) => compact.operationId));
+  if (compactIds.size !== compacts.length)
+    fail(path, "Compact operation identities must be unique");
+  for (const compact of compacts) {
+    const afterRun = runs.find((run) => run.id === compact.afterRunId);
+    if (!afterRun || nonTerminalRunPhases.includes(afterRun.phase as never))
+      fail(path, "Compact history must follow a terminal projected Run");
+  }
+  const activeCompacts = compacts.filter((compact) =>
+    nonTerminalCompactPhases.includes(compact.phase as never),
+  );
+  if (activeCompacts.length > 1)
+    fail(path, "a Task cannot have multiple active Compact operations");
+  if (activeOperation?.kind === "run") {
+    if (activeOperation.id !== currentRunId || currentRunPhase === null)
+      fail(path, "active Run operation must match the current Run");
+    if (activeCompacts.length !== 0)
+      fail(path, "Run and Compact cannot be active together");
+  } else if (activeOperation?.kind === "compact") {
+    if (archived) fail(path, "an archived Task cannot have an active Compact");
+    if (lifecycle === "closed")
+      fail(path, "a closed Task cannot have an active Compact");
+    if (
+      activeCompacts.length !== 1 ||
+      activeCompacts[0]!.operationId !== activeOperation.id ||
+      currentRunPhase !== null
+    )
+      fail(path, "active Compact operation must be the only active Task work");
+  } else if (currentRunPhase !== null || activeCompacts.length !== 0) {
+    fail(path, "active Task work must have an active operation identity");
+  }
   const requestIds = new Set<string>();
   const activityOrders = new Map(
     runs.map((run) => [run.id, new Set(run.tools.map((tool) => tool.order))]),
@@ -1166,6 +1299,7 @@ function decodeTask(value: unknown, path: string): TaskView {
     continuationAvailable,
     archived,
     closeFailed: booleanValue(item.closeFailed, `${path}.closeFailed`),
+    activeOperation,
     currentRunId,
     currentRunPhase,
     lastRunOutcome: nullableEnum(
@@ -1175,6 +1309,7 @@ function decodeTask(value: unknown, path: string): TaskView {
     ),
     cause: nullableEnum(item.cause, `${path}.cause`, hostCauses),
     runs,
+    compacts,
     pendingUi,
     uiHistory,
   };
@@ -1909,6 +2044,51 @@ export function decodeTaskRunResult(
     runId: null,
     reason: enumValue(item.reason, "$.reason", taskRunReasons),
   };
+}
+
+export function decodeTaskCompactResult(
+  value: unknown,
+  expectedTaskId: string,
+): TaskCompactResult {
+  const item = object(value, "$", [
+    "accepted",
+    "taskId",
+    "operationId",
+    "reason",
+  ]);
+  const accepted = booleanValue(item.accepted, "$.accepted");
+  const taskId = positiveWireId(item.taskId, "$.taskId");
+  if (taskId !== expectedTaskId) fail("$.taskId", "response identity mismatch");
+  if (accepted) {
+    if (item.reason !== null) fail("$.reason", "expected null");
+    return {
+      accepted: true,
+      taskId,
+      operationId: positiveWireId(item.operationId, "$.operationId"),
+      reason: null,
+    };
+  }
+  if (item.operationId !== null) fail("$.operationId", "expected null");
+  return {
+    accepted: false,
+    taskId,
+    operationId: null,
+    reason: enumValue(item.reason, "$.reason", taskCompactReasons),
+  };
+}
+
+export function assertCompactCancelAccepted(
+  value: unknown,
+  taskId: string,
+  operationId: string,
+) {
+  const item = object(value, "$", ["taskId", "operationId", "cancelRequested"]);
+  if (
+    positiveWireId(item.taskId, "$.taskId") !== taskId ||
+    positiveWireId(item.operationId, "$.operationId") !== operationId ||
+    booleanValue(item.cancelRequested, "$.cancelRequested") !== true
+  )
+    fail("$", "Compact cancel response mismatch");
 }
 
 export function decodeScheduledTaskMutationResult(

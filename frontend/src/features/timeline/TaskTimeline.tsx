@@ -11,6 +11,7 @@ import { CodeBlock } from "../../components/ui/CodeBlock.tsx";
 import { Icon } from "../../components/ui/Icon.tsx";
 import type {
   PendingUi,
+  CompactView,
   RunInputView,
   RunView,
   TaskView,
@@ -65,6 +66,35 @@ function isNonTerminalRun(phase: RunView["phase"]): boolean {
     phase === "running" ||
     phase === "waiting_ui" ||
     phase === "stopping"
+  );
+}
+
+function CompactTimelineEvent({ compact }: { compact: CompactView }) {
+  const { locale, t } = useI18n();
+  const values = {
+    before: formatInteger(locale, BigInt(compact.beforeContextTokens)),
+    after: formatInteger(locale, BigInt(compact.afterContextTokens)),
+  };
+  const message =
+    compact.phase === "queued" ||
+    compact.phase === "compacting" ||
+    compact.phase === "stopping"
+      ? t(`compact.timeline.${compact.phase}`)
+      : compact.phase === "compacted" || compact.phase === "degraded"
+        ? t(`compact.timeline.${compact.phase}`, values)
+        : t(`compact.timeline.${compact.phase}`);
+  return (
+    <div
+      className="timeline-system-event"
+      data-active={
+        compact.phase === "queued" ||
+        compact.phase === "compacting" ||
+        compact.phase === "stopping"
+      }
+    >
+      <span className="timeline-system-mark" aria-hidden="true" />
+      <p>{message}</p>
+    </div>
   );
 }
 
@@ -218,104 +248,119 @@ export function TaskTimeline({
             const total = tokenTotal(run);
             const activities = orderedActivity(run, task);
             return (
-              <article
-                key={run.id}
-                className="timeline-run"
-                data-active={
-                  run.phase === "queued" ||
-                  run.phase === "running" ||
-                  run.phase === "waiting_ui" ||
-                  run.phase === "stopping"
-                }
-              >
-                <div className="workline-node" aria-hidden="true" />
-                <header className="run-heading">
-                  <p>{runPhaseLabel(t, run.phase)}</p>
-                  <div className="run-heading-meta">
-                    {total !== null && (
-                      <span>
-                        {t("run.tokens", {
-                          count: formatInteger(locale, total),
-                        })}
-                      </span>
-                    )}
-                    {run.id === latestRunId && total !== null && total > 0n && (
-                      <button
-                        className="run-inspector-link focus-ring"
-                        onClick={(event) =>
-                          onInspect("usage", event.currentTarget)
-                        }
-                      >
-                        {t("inspector.view_details")}
-                      </button>
-                    )}
-                  </div>
-                </header>
-                <div className="run-content">
-                  <RunInputMessage input={run.input} />
-                  {activities.map((activity) => {
-                    if (activity.kind === "tool")
+              <Fragment key={run.id}>
+                <article
+                  className="timeline-run"
+                  data-active={
+                    run.phase === "queued" ||
+                    run.phase === "running" ||
+                    run.phase === "waiting_ui" ||
+                    run.phase === "stopping"
+                  }
+                >
+                  <div className="workline-node" aria-hidden="true" />
+                  <header className="run-heading">
+                    <p>{runPhaseLabel(t, run.phase)}</p>
+                    <div className="run-heading-meta">
+                      {total !== null && (
+                        <span>
+                          {t("run.tokens", {
+                            count: formatInteger(locale, total),
+                          })}
+                        </span>
+                      )}
+                      {run.id === latestRunId &&
+                        total !== null &&
+                        total > 0n && (
+                          <button
+                            className="run-inspector-link focus-ring"
+                            onClick={(event) =>
+                              onInspect("usage", event.currentTarget)
+                            }
+                          >
+                            {t("inspector.view_details")}
+                          </button>
+                        )}
+                    </div>
+                  </header>
+                  <div className="run-content">
+                    <RunInputMessage input={run.input} />
+                    {activities.map((activity) => {
+                      if (activity.kind === "tool")
+                        return (
+                          <ToolCard
+                            key={`tool:${activity.value.id}`}
+                            tool={activity.value}
+                            onInspect={
+                              run.id === latestRunId
+                                ? (opener) => onInspect("tools", opener)
+                                : null
+                            }
+                          />
+                        );
+                      if (activity.kind === "resolved_ui")
+                        return (
+                          <Fragment key={`ui:${activity.value.requestId}`}>
+                            {renderUiRecord(activity.value)}
+                          </Fragment>
+                        );
+                      const pending = activity.value;
                       return (
-                        <ToolCard
-                          key={`tool:${activity.value.id}`}
-                          tool={activity.value}
-                          onInspect={
-                            run.id === latestRunId
-                              ? (opener) => onInspect("tools", opener)
-                              : null
-                          }
-                        />
-                      );
-                    if (activity.kind === "resolved_ui")
-                      return (
-                        <Fragment key={`ui:${activity.value.requestId}`}>
-                          {renderUiRecord(activity.value)}
+                        <Fragment key={`ui:${pending.requestId}`}>
+                          {renderPendingUi({
+                            taskId: task.id,
+                            pending,
+                            busy: responseDisabled,
+                            respond: onRespond,
+                          })}
                         </Fragment>
                       );
-                    const pending = activity.value;
-                    return (
-                      <Fragment key={`ui:${pending.requestId}`}>
-                        {renderPendingUi({
-                          taskId: task.id,
-                          pending,
-                          busy: responseDisabled,
-                          respond: onRespond,
-                        })}
-                      </Fragment>
-                    );
-                  })}
-                  {run.assistant && (
-                    <div className="run-delivery">
-                      <section className="timeline-message is-agent">
-                        <p className="message-body">{run.assistant}</p>
-                      </section>
-                      {run.assistantRedacted && (
-                        <p className="projection-note">
-                          {t("privacy.sensitive_hidden")}
-                        </p>
-                      )}
-                    </div>
-                  )}
-                  {!run.assistant && !isNonTerminalRun(run.phase) && (
-                    <p className="run-no-final">{t("run.no_final_response")}</p>
-                  )}
-                  {!run.assistant &&
-                    run.tools.length === 0 &&
-                    isNonTerminalRun(run.phase) && (
-                      <p className="preparing-copy">{t("run.preparing")}</p>
+                    })}
+                    {run.assistant && (
+                      <div className="run-delivery">
+                        <section className="timeline-message is-agent">
+                          <p className="message-body">{run.assistant}</p>
+                        </section>
+                        {run.assistantRedacted && (
+                          <p className="projection-note">
+                            {t("privacy.sensitive_hidden")}
+                          </p>
+                        )}
+                      </div>
                     )}
-                  {run.outcome && (
-                    <RunOutcome
-                      run={run}
-                      outcome={run.outcome}
-                      composerHasDraft={composerHasDraft}
-                      latest={run.id === latestRunId}
-                      retryAvailable={retryAvailable && run.id === latestRunId}
-                      onPrepareRetry={onPrepareRetry}
+                    {!run.assistant && !isNonTerminalRun(run.phase) && (
+                      <p className="run-no-final">
+                        {t("run.no_final_response")}
+                      </p>
+                    )}
+                    {!run.assistant &&
+                      run.tools.length === 0 &&
+                      isNonTerminalRun(run.phase) && (
+                        <p className="preparing-copy">{t("run.preparing")}</p>
+                      )}
+                    {run.outcome && (
+                      <RunOutcome
+                        run={run}
+                        outcome={run.outcome}
+                        composerHasDraft={composerHasDraft}
+                        latest={run.id === latestRunId}
+                        retryAvailable={
+                          retryAvailable && run.id === latestRunId
+                        }
+                        onPrepareRetry={onPrepareRetry}
+                      />
+                    )}
+                  </div>
+                </article>
+                {task.compacts
+                  .filter((compact) => compact.afterRunId === run.id)
+                  .map((compact) => (
+                    <CompactTimelineEvent
+                      key={compact.operationId}
+                      compact={compact}
                     />
-                  )}
-                </div>
-              </article>
+                  ))}
+              </Fragment>
             );
           })}
           {task && task.runs.length === 0 && (

@@ -195,6 +195,19 @@ test("the fixed revision 1 contract carries Host-owned Workspace and generation 
           runId: "17",
           reason: null,
         };
+      if (command === "metawork.tasks.compact")
+        return {
+          accepted: true,
+          taskId: "11",
+          operationId: "19",
+          reason: null,
+        };
+      if (command === "metawork.tasks.cancelCompact")
+        return {
+          taskId: "11",
+          operationId: "19",
+          cancelRequested: true,
+        };
       if (command === "metawork.workspaces.refreshSkillCatalog")
         return { accepted: true, workspaceId: "7", reason: null };
       if (command === "metawork.skills.refreshCatalog")
@@ -236,6 +249,13 @@ test("the fixed revision 1 contract carries Host-owned Workspace and generation 
       reason: null,
     },
   );
+  assert.deepEqual(await client.compact("11", "13"), {
+    accepted: true,
+    taskId: "11",
+    operationId: "19",
+    reason: null,
+  });
+  await client.cancelCompact("11", "19");
   assert.deepEqual(await client.refreshWorkspaceSkillCatalog("7", "29"), {
     accepted: true,
     workspaceId: "7",
@@ -284,6 +304,14 @@ test("the fixed revision 1 contract carries Host-owned Workspace and generation 
           argumentValues: ["src/main.zig"],
         },
       },
+    },
+    {
+      command: "metawork.tasks.compact",
+      payload: { taskId: "11", expectedBindingEpoch: "13" },
+    },
+    {
+      command: "metawork.tasks.cancelCompact",
+      payload: { taskId: "11", operationId: "19" },
     },
     {
       command: "metawork.workspaces.refreshSkillCatalog",

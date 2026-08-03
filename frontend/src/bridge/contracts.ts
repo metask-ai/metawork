@@ -289,6 +289,42 @@ export type RunView = {
   tools: ToolView[];
 };
 
+export type CompactPhase =
+  | "queued"
+  | "compacting"
+  | "stopping"
+  | "compacted"
+  | "no_change"
+  | "degraded"
+  | "aborted"
+  | "failed";
+
+export type CompactCause =
+  | "user_cancel"
+  | "session_close"
+  | "app_shutdown"
+  | "resource_limit"
+  | "agent_failure"
+  | "dependency_contract_failure";
+
+export type CompactView = {
+  operationId: string;
+  afterRunId: string;
+  phase: CompactPhase;
+  cause: CompactCause | null;
+  beforeContextTokens: string;
+  afterContextTokens: string;
+  usage: {
+    input: string;
+    output: string;
+    cacheRead: string;
+    cacheCreation: string;
+  };
+};
+
+export type ActiveOperation =
+  { kind: "run"; id: string } | { kind: "compact"; id: string };
+
 export type AskOption = {
   label: string;
   description: string;
@@ -364,11 +400,13 @@ export type TaskView = {
   continuationAvailable: boolean;
   archived: boolean;
   closeFailed: boolean;
+  activeOperation: ActiveOperation | null;
   currentRunId: string;
   currentRunPhase: NonTerminalRunPhase | null;
   lastRunOutcome: RunView["outcome"];
   cause: RunView["cause"];
   runs: RunView[];
+  compacts: CompactView[];
   pendingUi: PendingUi | null;
   uiHistory: UiRecord[];
 };
@@ -520,6 +558,29 @@ export type TaskRunResult =
       taskId: string;
       runId: null;
       reason: TaskRunReason;
+    };
+
+export type TaskCompactReason =
+  | "binding_changed"
+  | "binding_unavailable"
+  | "task_unavailable"
+  | "task_busy"
+  | "no_history"
+  | "capacity_reached"
+  | "shutting_down";
+
+export type TaskCompactResult =
+  | {
+      accepted: true;
+      taskId: string;
+      operationId: string;
+      reason: null;
+    }
+  | {
+      accepted: false;
+      taskId: string;
+      operationId: null;
+      reason: TaskCompactReason;
     };
 
 export type CatalogRefreshReason =

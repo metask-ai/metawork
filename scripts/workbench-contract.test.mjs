@@ -11,6 +11,7 @@ import {
   decodeHostSignalEvent,
   decodePingResponse,
   decodeTaskCreateResult,
+  decodeTaskCompactResult,
   decodeTaskRunResult,
   decodeWorkspaceMutationResult,
   decodeWorkbenchSnapshot,
@@ -317,6 +318,23 @@ test("Task metadata mutation acknowledgements are identity-checked and exact", (
     },
   );
   assert.deepEqual(
+    decodeTaskCompactResult(
+      {
+        accepted: true,
+        taskId: "3",
+        operationId: "11",
+        reason: null,
+      },
+      "3",
+    ),
+    {
+      accepted: true,
+      taskId: "3",
+      operationId: "11",
+      reason: null,
+    },
+  );
+  assert.deepEqual(
     decodeWorkspaceMutationResult(
       {
         accepted: false,
@@ -354,6 +372,76 @@ test("Task metadata mutation acknowledgements are identity-checked and exact", (
         true,
       ),
     /expected keys/,
+  );
+});
+
+test("Compact projection is append-only and mutually exclusive with Run work", () => {
+  const compacted = clone(fixture);
+  const task = compacted.tasks[0];
+  task.activeOperation = null;
+  task.currentRunId = "0";
+  task.currentRunPhase = null;
+  task.lastRunOutcome = "completed";
+  task.runs[0].phase = "completed";
+  task.runs[0].outcome = "completed";
+  task.compacts.push({
+    operationId: "11",
+    afterRunId: "7",
+    phase: "compacted",
+    cause: null,
+    beforeContextTokens: "100",
+    afterContextTokens: "40",
+    usage: { input: "5", output: "2", cacheRead: "0", cacheCreation: "0" },
+  });
+  assert.deepEqual(decodeWorkbenchSnapshot(compacted), compacted);
+
+  const active = clone(compacted);
+  active.tasks[0].compacts[0].phase = "compacting";
+  active.tasks[0].compacts[0].beforeContextTokens = "0";
+  active.tasks[0].compacts[0].afterContextTokens = "0";
+  active.tasks[0].activeOperation = { kind: "compact", id: "11" };
+  assert.deepEqual(decodeWorkbenchSnapshot(active), active);
+
+  const archivedActive = clone(active);
+  archivedActive.tasks[0].archived = true;
+  assert.throws(
+    () => decodeWorkbenchSnapshot(archivedActive),
+    /archived Task cannot have an active Compact/,
+  );
+
+  const closedActive = clone(active);
+  closedActive.tasks[0].lifecycle = "closed";
+  closedActive.tasks[0].continuationAvailable = false;
+  assert.throws(
+    () => decodeWorkbenchSnapshot(closedActive),
+    /closed Task cannot have an active Compact/,
+  );
+
+  const closingActive = clone(active);
+  closingActive.tasks[0].lifecycle = "closing";
+  closingActive.tasks[0].continuationAvailable = false;
+  closingActive.tasks[0].compacts[0].phase = "stopping";
+  assert.deepEqual(decodeWorkbenchSnapshot(closingActive), closingActive);
+
+  const simultaneous = clone(active);
+  simultaneous.tasks[0].runs.push({
+    ...clone(simultaneous.tasks[0].runs[0]),
+    id: "8",
+    phase: "running",
+    outcome: null,
+  });
+  simultaneous.tasks[0].currentRunId = "8";
+  simultaneous.tasks[0].currentRunPhase = "running";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(simultaneous),
+    /active Compact operation must be the only active Task work/,
+  );
+
+  const invalidCause = clone(compacted);
+  invalidCause.tasks[0].compacts[0].cause = "agent_failure";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(invalidCause),
+    /phase and cause must describe the same terminal state/,
   );
 });
 

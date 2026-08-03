@@ -82,6 +82,8 @@ pub const SessionState = enum {
     queued,
     running,
     waiting_ui,
+    compact_queued,
+    compacting,
     poisoned,
     closing,
     closed,
@@ -178,6 +180,45 @@ pub const TerminalResult = struct {
     }
 
     pub fn deinit(self: *TerminalResult) void {
+        self.allocator.free(self.diagnostic_storage);
+        self.* = undefined;
+    }
+};
+
+pub const CompactOutcome = enum {
+    compacted,
+    no_change,
+    degraded,
+    aborted,
+};
+
+/// Immutable Agent-owned facts for one admitted manual compact. Context token
+/// values are estimates; usage fields are the operation's provider deltas.
+pub const CompactTerminalResult = struct {
+    allocator: std.mem.Allocator,
+    diagnostic_storage: []u8,
+    diagnostic_len: usize,
+    diagnostic_truncated: bool,
+    abi_status: ?sdk.Status,
+    raw_status_code: ?u32,
+    abort_status: ?sdk.Status,
+    raw_abort_status_code: ?u32,
+    outcome: ?CompactOutcome,
+    before_context_tokens: u64,
+    after_context_tokens: u64,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_input_tokens: u64,
+    cache_creation_input_tokens: u64,
+    interruption: ?ExternalInterruption,
+    failure: ?TerminalFailure,
+    session_disposition_at_completion: SessionDisposition,
+
+    pub fn diagnostic(self: *const CompactTerminalResult) []const u8 {
+        return self.diagnostic_storage[0..self.diagnostic_len];
+    }
+
+    pub fn deinit(self: *CompactTerminalResult) void {
         self.allocator.free(self.diagnostic_storage);
         self.* = undefined;
     }
@@ -600,6 +641,7 @@ pub const SessionSnapshot = struct {
     state: SessionState,
     workspace_root: []const u8,
     active_run_id: u64,
+    active_compact_id: u64,
     pending_ui_request_id: ?u64,
 };
 
@@ -642,8 +684,10 @@ pub const Error = error{
     RunInputTooLarge,
     RunIdExhausted,
     RunGenerationExhausted,
+    CompactIdExhausted,
     SessionIdExhausted,
     NoSuchRun,
+    NoSuchCompact,
     NoPendingUiRequest,
     StaleUiResponse,
     InvalidUiResponse,
@@ -1182,6 +1226,17 @@ pub const Session = struct {
     next_run_generation: u64 = 0,
     active_run_id: u64 = 0,
     active_run_generation: u64 = 0,
+    next_compact_id: u64 = 0,
+    active_compact_id: u64 = 0,
+    compact_started: bool = false,
+    compact_done: bool = true,
+    compact_cancel_requested: bool = false,
+    compact_interruption: ?ExternalInterruption = null,
+    compact_abort_status: ?sdk.Status = null,
+    raw_compact_abort_status_code: ?u32 = null,
+    compact_terminal_diagnostic: ?[]u8 = null,
+    compact_terminal_diagnostic_len: usize = 0,
+    compact_terminal_diagnostic_truncated: bool = false,
     run_started: bool = false,
     core_call_in_progress: bool = false,
     abort_calls_in_progress: usize = 0,
@@ -1320,7 +1375,7 @@ pub const Session = struct {
             const begin_error: Error = switch (self.state) {
                 .poisoned => error.SessionPoisoned,
                 .closing, .closed => error.SessionClosing,
-                .idle, .running, .waiting_ui, .queued => error.NoSuchRun,
+                .idle, .running, .waiting_ui, .queued, .compact_queued, .compacting => error.NoSuchRun,
             };
             if ((self.state == .closing or self.state == .closed) and !self.run_done and
                 !self.run_started)
@@ -1365,6 +1420,171 @@ pub const Session = struct {
         _ = self.agent_runtime.notifyEventConsumer();
     }
 
+    /// Reserves the Session's single operation slot for a Workbench-owned
+    /// manual compact. Workbench must either execute or cancel the reservation.
+    pub fn prepareCompact(self: *Session) (Error || std.mem.Allocator.Error)!u64 {
+        const diagnostic = try self.agent_runtime.allocator.alloc(
+            u8,
+            self.agent_runtime.max_terminal_diagnostic_bytes,
+        );
+        errdefer self.agent_runtime.allocator.free(diagnostic);
+        self.lock();
+        defer self.unlock();
+        if (self.agent_runtime.shutting_down.load(.acquire))
+            return error.RuntimeShuttingDown;
+        switch (self.state) {
+            .idle => {},
+            .poisoned => return error.SessionPoisoned,
+            .closing, .closed => return error.SessionClosing,
+            .queued, .running, .waiting_ui, .compact_queued, .compacting => return error.SessionNotIdle,
+        }
+        if (self.next_compact_id == std.math.maxInt(u64))
+            return error.CompactIdExhausted;
+        std.debug.assert(self.run_done);
+        std.debug.assert(self.compact_done);
+        std.debug.assert(!self.core_call_in_progress);
+        std.debug.assert(self.abort_calls_in_progress == 0);
+        self.next_compact_id += 1;
+        self.active_compact_id = self.next_compact_id;
+        self.compact_started = false;
+        self.compact_done = false;
+        self.compact_cancel_requested = false;
+        self.compact_interruption = null;
+        self.compact_abort_status = null;
+        self.raw_compact_abort_status_code = null;
+        self.compact_terminal_diagnostic = diagnostic;
+        self.compact_terminal_diagnostic_len = 0;
+        self.compact_terminal_diagnostic_truncated = false;
+        self.dependency_contract_failure = false;
+        self.state = .compact_queued;
+        return self.active_compact_id;
+    }
+
+    pub fn cancelPreparedCompact(self: *Session, operation_id: u64) Error!void {
+        self.lock();
+        defer self.unlock();
+        if (operation_id == 0 or operation_id != self.active_compact_id or
+            self.state != .compact_queued)
+            return error.NoSuchCompact;
+        self.finishPreparedCompactLocked();
+    }
+
+    /// Called only by a Workbench executor worker after successful admission.
+    pub fn executePreparedCompact(
+        self: *Session,
+        operation_id: u64,
+    ) Error!CompactTerminalResult {
+        self.lock();
+        if (operation_id == 0 or operation_id != self.active_compact_id or
+            self.state != .compact_queued)
+        {
+            self.unlock();
+            return error.NoSuchCompact;
+        }
+        self.state = .compacting;
+        self.compact_started = true;
+        self.broadcast();
+        if (self.compact_cancel_requested) {
+            const terminal = self.finishCompactBeforeCoreCallLocked();
+            self.unlock();
+            return terminal;
+        }
+        self.core_call_in_progress = true;
+        self.unlock();
+
+        var result = std.mem.zeroes(wire.CompactResultV1);
+        var diagnostic = emptyOwnedBytes();
+        const status_code = self.agent_runtime.api.sessionCompact()(
+            self.raw,
+            operation_id,
+            &result,
+            &diagnostic,
+        );
+        const typed_status = sdk.Status.fromCode(status_code) catch null;
+        const diagnostic_valid = self.copyCompactDiagnostic(diagnostic);
+        releaseOwned(self.agent_runtime.api, &diagnostic);
+
+        self.lock();
+        self.core_call_in_progress = false;
+        while (self.abort_calls_in_progress != 0) self.wait();
+        var failure: ?TerminalFailure = null;
+        var outcome: ?CompactOutcome = null;
+        if (!diagnostic_valid) {
+            self.dependency_contract_failure = true;
+        } else if (typed_status) |status| {
+            const poisons = compactStatusPoisonsSession(status);
+            if (poisons == null) {
+                self.dependency_contract_failure = true;
+            } else if (status == .ok) {
+                if (result.struct_size != @sizeOf(wire.CompactResultV1) or
+                    !allZero(&result.reserved))
+                {
+                    self.dependency_contract_failure = true;
+                } else {
+                    outcome = compactOutcome(result.outcome_code) catch invalid: {
+                        self.dependency_contract_failure = true;
+                        break :invalid null;
+                    };
+                }
+            } else {
+                failure = .abi_status;
+                if (poisons.?) self.state = .poisoned;
+            }
+        } else {
+            self.dependency_contract_failure = true;
+        }
+        if (self.compact_abort_status == .ok and
+            (typed_status == null or typed_status.? != .ok or outcome != .aborted))
+        {
+            self.dependency_contract_failure = true;
+        }
+        if (self.dependency_contract_failure) {
+            failure = .dependency_contract;
+            self.state = .poisoned;
+        }
+        self.compact_started = false;
+        self.compact_done = true;
+        if (self.state != .closing and self.state != .poisoned) self.state = .idle;
+        const terminal = self.takeCompactTerminalResultLocked(
+            typed_status,
+            status_code,
+            outcome,
+            if (outcome == null) null else &result,
+            failure,
+        );
+        self.broadcast();
+        self.unlock();
+        return terminal;
+    }
+
+    pub fn requestCompactCancellation(
+        self: *Session,
+        operation_id: u64,
+        interruption: ExternalInterruption,
+    ) error{ NoSuchCompact, SessionClosing }!void {
+        self.lock();
+        if (operation_id == 0 or operation_id != self.active_compact_id or
+            self.compact_done)
+        {
+            self.unlock();
+            return error.NoSuchCompact;
+        }
+        if (self.state == .closing or self.state == .closed) {
+            self.unlock();
+            return error.SessionClosing;
+        }
+        if (self.compact_cancel_requested) {
+            self.unlock();
+            return;
+        }
+        self.compact_cancel_requested = true;
+        self.compact_interruption = interruption;
+        const should_abort = self.state == .compacting and self.core_call_in_progress;
+        if (should_abort) self.abort_calls_in_progress += 1;
+        self.unlock();
+        if (should_abort) self.abortCompact(operation_id);
+    }
+
     /// Rebinds the Session's internal immutable Skill snapshot. The caller
     /// serializes lease borrowing with replacement/release and may call this
     /// only while the Session is idle.
@@ -1386,7 +1606,7 @@ pub const Session = struct {
             return error.RuntimeShuttingDown;
         switch (self.state) {
             .idle => {},
-            .queued, .running, .waiting_ui => return error.SessionNotIdle,
+            .queued, .running, .waiting_ui, .compact_queued, .compacting => return error.SessionNotIdle,
             .poisoned => return error.SessionPoisoned,
             .closing, .closed => return error.SessionClosing,
         }
@@ -1592,6 +1812,7 @@ pub const Session = struct {
             .state = self.state,
             .workspace_root = self.workspace_root,
             .active_run_id = self.active_run_id,
+            .active_compact_id = self.active_compact_id,
             .pending_ui_request_id = if (self.ui_active) self.ui_request_id else null,
         };
     }
@@ -1636,31 +1857,60 @@ pub const Session = struct {
             return self.destroyRawSession();
         }
         self.control_block.disableNewLeases();
-        const should_abort_now = self.core_call_in_progress and !self.run_done and
-            self.abort_calls_in_progress == 0 and self.raw_abort_status_code == null;
+        const compact_active = self.state == .compact_queued or self.state == .compacting;
+        const operation_done = if (compact_active) self.compact_done else self.run_done;
+        const should_abort_now = self.core_call_in_progress and !operation_done and
+            self.abort_calls_in_progress == 0 and
+            (if (compact_active)
+                self.raw_compact_abort_status_code == null
+            else
+                self.raw_abort_status_code == null);
         if (should_abort_now) self.abort_calls_in_progress += 1;
         const run_id = self.active_run_id;
+        const compact_id = self.active_compact_id;
         self.state = .closing;
         const signal: TerminationSignal = .{ .interrupted = interruption };
-        if (!self.run_done) setTerminationSignalLocked(self, signal);
-        wakeUiLocked(self);
-        if (!self.run_done and !self.run_started) self.finishPreparedRunLocked();
+        if (compact_active) {
+            if (!self.compact_done) {
+                self.compact_cancel_requested = true;
+                if (self.compact_interruption == null)
+                    self.compact_interruption = interruption;
+            }
+            if (!self.compact_done and !self.compact_started)
+                self.finishPreparedCompactLocked();
+        } else {
+            if (!self.run_done) setTerminationSignalLocked(self, signal);
+            wakeUiLocked(self);
+            if (!self.run_done and !self.run_started) self.finishPreparedRunLocked();
+        }
         self.broadcast();
         self.unlock();
 
-        if (should_abort_now) self.abortRun(run_id, signal);
+        if (should_abort_now) {
+            if (compact_active) self.abortCompact(compact_id) else self.abortRun(run_id, signal);
+        }
 
         self.lock();
-        while (!self.run_done and !self.run_started) self.wait();
+        while (if (compact_active)
+            (!self.compact_done and !self.compact_started)
+        else
+            (!self.run_done and !self.run_started)) self.wait();
         const should_abort_late = !should_abort_now and self.core_call_in_progress and
-            !self.run_done and self.abort_calls_in_progress == 0 and
-            self.raw_abort_status_code == null;
+            !(if (compact_active) self.compact_done else self.run_done) and
+            self.abort_calls_in_progress == 0 and
+            (if (compact_active)
+                self.raw_compact_abort_status_code == null
+            else
+                self.raw_abort_status_code == null);
         if (should_abort_late) self.abort_calls_in_progress += 1;
         self.unlock();
-        if (should_abort_late) self.abortRun(run_id, signal);
+        if (should_abort_late) {
+            if (compact_active) self.abortCompact(compact_id) else self.abortRun(run_id, signal);
+        }
 
         self.lock();
-        while (!self.run_done) self.wait();
+        while (!(if (compact_active) self.compact_done else self.run_done)) self.wait();
+        while (self.abort_calls_in_progress != 0) self.wait();
         while (self.active_refs != 0) self.wait();
         self.unlock();
 
@@ -1887,6 +2137,103 @@ pub const Session = struct {
         self.broadcast();
     }
 
+    fn finishPreparedCompactLocked(self: *Session) void {
+        std.debug.assert(!self.compact_started and !self.core_call_in_progress);
+        if (self.compact_terminal_diagnostic) |buffer| {
+            self.agent_runtime.allocator.free(buffer);
+            self.compact_terminal_diagnostic = null;
+        }
+        self.compact_done = true;
+        if (self.state != .closing and self.state != .poisoned) self.state = .idle;
+        self.broadcast();
+    }
+
+    fn finishCompactBeforeCoreCallLocked(self: *Session) CompactTerminalResult {
+        std.debug.assert(!self.core_call_in_progress);
+        self.compact_started = false;
+        self.compact_done = true;
+        if (self.state != .closing and self.state != .poisoned) self.state = .idle;
+        const terminal = self.takeCompactTerminalResultLocked(
+            null,
+            null,
+            .aborted,
+            null,
+            null,
+        );
+        self.broadcast();
+        return terminal;
+    }
+
+    fn abortCompact(self: *Session, operation_id: u64) void {
+        var diagnostic = emptyOwnedBytes();
+        const status_code = self.agent_runtime.api.sessionAbortCompact()(
+            self.raw,
+            operation_id,
+            &diagnostic,
+        );
+        releaseOwned(self.agent_runtime.api, &diagnostic);
+        self.lock();
+        std.debug.assert(self.abort_calls_in_progress != 0);
+        if (self.active_compact_id == operation_id) {
+            self.raw_compact_abort_status_code = status_code;
+            self.compact_abort_status = sdk.Status.fromCode(status_code) catch null;
+            if (self.compact_abort_status == null or
+                !isCompactAbortStatus(self.compact_abort_status.?))
+                self.dependency_contract_failure = true;
+        }
+        self.abort_calls_in_progress -= 1;
+        self.broadcast();
+        self.unlock();
+    }
+
+    fn copyCompactDiagnostic(self: *Session, diagnostic: wire.OwnedBytesV1) bool {
+        const bytes = sdk.borrowedBytes(.{
+            .ptr = diagnostic.ptr,
+            .len = diagnostic.len,
+        }) catch return false;
+        const storage = self.compact_terminal_diagnostic orelse unreachable;
+        const len = @min(bytes.len, storage.len);
+        @memcpy(storage[0..len], bytes[0..len]);
+        self.compact_terminal_diagnostic_len = len;
+        self.compact_terminal_diagnostic_truncated = bytes.len != len;
+        return true;
+    }
+
+    fn takeCompactTerminalResultLocked(
+        self: *Session,
+        abi_status: ?sdk.Status,
+        raw_status_code: ?u32,
+        outcome: ?CompactOutcome,
+        result: ?*const wire.CompactResultV1,
+        failure: ?TerminalFailure,
+    ) CompactTerminalResult {
+        const storage = self.compact_terminal_diagnostic orelse unreachable;
+        self.compact_terminal_diagnostic = null;
+        return .{
+            .allocator = self.agent_runtime.allocator,
+            .diagnostic_storage = storage,
+            .diagnostic_len = self.compact_terminal_diagnostic_len,
+            .diagnostic_truncated = self.compact_terminal_diagnostic_truncated,
+            .abi_status = abi_status,
+            .raw_status_code = raw_status_code,
+            .abort_status = self.compact_abort_status,
+            .raw_abort_status_code = self.raw_compact_abort_status_code,
+            .outcome = outcome,
+            .before_context_tokens = if (result) |value| value.before_context_tokens else 0,
+            .after_context_tokens = if (result) |value| value.after_context_tokens else 0,
+            .input_tokens = if (result) |value| value.input_tokens else 0,
+            .output_tokens = if (result) |value| value.output_tokens else 0,
+            .cache_read_input_tokens = if (result) |value| value.cache_read_input_tokens else 0,
+            .cache_creation_input_tokens = if (result) |value| value.cache_creation_input_tokens else 0,
+            .interruption = self.compact_interruption,
+            .failure = if (self.dependency_contract_failure)
+                .dependency_contract
+            else
+                failure,
+            .session_disposition_at_completion = self.dispositionLocked(),
+        };
+    }
+
     fn copyTerminalDiagnostic(self: *Session, diagnostic: wire.OwnedBytesV1) bool {
         const bytes = sdk.borrowedBytes(.{ .ptr = diagnostic.ptr, .len = diagnostic.len }) catch
             return false;
@@ -1932,7 +2279,7 @@ pub const Session = struct {
         return switch (self.state) {
             .poisoned => .poisoned,
             .closing, .closed => .closing,
-            .idle, .queued, .running, .waiting_ui => .reusable,
+            .idle, .queued, .running, .waiting_ui, .compact_queued, .compacting => .reusable,
         };
     }
 
@@ -1940,11 +2287,14 @@ pub const Session = struct {
         std.debug.assert(self.state == .closed);
         std.debug.assert(self.active_refs == 0);
         std.debug.assert(self.active_callback_refs == 0);
+        std.debug.assert(self.compact_done);
         self.control_block.deinit();
         self.agent_runtime.allocator.destroy(self.control_block);
         if (self.run_input) |*input|
             input.deinit(self.agent_runtime.allocator);
         if (self.terminal_diagnostic) |buffer| self.agent_runtime.allocator.free(buffer);
+        if (self.compact_terminal_diagnostic) |buffer|
+            self.agent_runtime.allocator.free(buffer);
         if (self.ui_request_json) |json| self.agent_runtime.allocator.free(json);
         if (self.ui_response_json) |json| self.agent_runtime.allocator.free(json);
         self.agent_runtime.allocator.free(self.workspace_root);
@@ -2239,8 +2589,12 @@ pub const Session = struct {
                     self.state = .poisoned;
                     self.finishPreparedRunLocked();
                 },
+                .compact_queued => {
+                    self.state = .poisoned;
+                    self.finishPreparedCompactLocked();
+                },
                 .poisoned, .closing, .closed => {},
-                .running, .waiting_ui => unreachable,
+                .running, .waiting_ui, .compacting => unreachable,
             }
         }
         if (self.ui_active) {
@@ -2309,6 +2663,53 @@ fn setTerminationSignalLocked(self: *Session, signal: TerminationSignal) void {
 
 fn isRunProgressState(state: SessionState) bool {
     return state == .queued or state == .running or state == .waiting_ui;
+}
+
+fn compactOutcome(code: u32) error{UnknownCompactOutcome}!CompactOutcome {
+    return switch (code) {
+        wire.COMPACT_COMPACTED => .compacted,
+        wire.COMPACT_NO_CHANGE => .no_change,
+        wire.COMPACT_DEGRADED => .degraded,
+        wire.COMPACT_ABORTED => .aborted,
+        else => error.UnknownCompactOutcome,
+    };
+}
+
+fn compactStatusPoisonsSession(status: sdk.Status) ?bool {
+    return switch (status) {
+        .out_of_memory, .invalid_state, .core_error, .internal_error => true,
+        .ok, .invalid_argument, .busy, .resource_limit, .stale_compact => false,
+        .stale_run,
+        .too_late,
+        .callback_failed,
+        .skill_catalog_invalid,
+        .stale_catalog,
+        .skill_not_found,
+        .invalid_skill_arguments,
+        .skill_policy_violation,
+        .skill_unavailable,
+        => null,
+    };
+}
+
+fn isCompactAbortStatus(status: sdk.Status) bool {
+    return switch (status) {
+        .ok, .invalid_argument, .too_late, .invalid_state, .stale_compact => true,
+        .out_of_memory,
+        .busy,
+        .stale_run,
+        .core_error,
+        .callback_failed,
+        .internal_error,
+        .resource_limit,
+        .skill_catalog_invalid,
+        .stale_catalog,
+        .skill_not_found,
+        .invalid_skill_arguments,
+        .skill_policy_violation,
+        .skill_unavailable,
+        => false,
+    };
 }
 
 fn isSkillUpdateStatus(status: sdk.Status) bool {

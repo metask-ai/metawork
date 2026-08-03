@@ -164,6 +164,7 @@ function renderCompletedTimeline(
     text: "Inspect the release",
     redacted: false,
   },
+  compacts = [],
 ) {
   const task = {
     id: "3",
@@ -196,6 +197,7 @@ function renderCompletedTimeline(
         ],
       },
     ],
+    compacts,
     pendingUi: null,
     uiHistory: [],
   };
@@ -408,6 +410,19 @@ test("Workspace selection is not hidden inside submit", async () => {
   assert.doesNotMatch(submitRun, /chooseWorkspace|client\.chooseWorkspace/);
 });
 
+test("Slash V1 reuses the existing New task and Compact actions", async () => {
+  const source = await readFile(
+    join(process.cwd(), "frontend/src/app/App.tsx"),
+    "utf8",
+  );
+  const start = source.indexOf("function runSlashCommand(");
+  const end = source.indexOf("\n  async function", start + 1);
+  const controller = source.slice(start, end);
+  assert.match(controller, /case "new":[\s\S]*beginNewTask\(\)/);
+  assert.match(controller, /case "compact":[\s\S]*compactTask\(\)/);
+  assert.doesNotMatch(controller, /client\.|invoke\(|tasks\./);
+});
+
 test("New task does not render or reserve an empty Inspector", () => {
   const markup = renderShell(null);
   assert.doesNotMatch(markup, /id="task-inspector"/);
@@ -465,6 +480,24 @@ test("Timeline preserves typed Skill identity and positional arguments", () => {
   assert.match(markup, /timeline-skill-token/);
   assert.match(markup, />\/review/);
   assert.match(markup, />src\/main\.zig</);
+});
+
+test("Timeline projects manual Compact as a lightweight system event", () => {
+  const markup = renderCompletedTimeline("Release is ready", undefined, [
+    {
+      operationId: "11",
+      afterRunId: "9",
+      phase: "compacted",
+      cause: null,
+      beforeContextTokens: "100",
+      afterContextTokens: "40",
+      usage: { input: "5", output: "2", cacheRead: "0", cacheCreation: "0" },
+    },
+  ]);
+  assert.match(markup, /timeline-system-event/);
+  assert.match(markup, /Context compacted/);
+  assert.match(markup, /100/);
+  assert.match(markup, /40/);
 });
 
 test("task examples disappear before they can overwrite an existing draft", () => {

@@ -109,15 +109,77 @@ export function skillDraftVisibleArgumentCount(draft: ComposerSkillDraft) {
   );
 }
 
-export const slashCommandNames = ["new"] as const;
+export const slashCommandNames = ["new", "compact"] as const;
 
 export type SlashCommandName = (typeof slashCommandNames)[number];
+
+export type SlashCommandDisabledReason =
+  "already_new_task" | "task_busy" | "no_history" | "unavailable";
 
 export type SlashCommandState = {
   name: SlashCommandName;
   enabled: boolean;
-  disabledReason: string | null;
+  disabledReason: SlashCommandDisabledReason | null;
 };
+
+export type SlashCommandContext = {
+  newTaskDraftActive: boolean;
+  bridgeUnavailable: boolean;
+  taskMutationDisabled: boolean;
+  task: {
+    lifecycleOpen: boolean;
+    continuationAvailable: boolean;
+    archived: boolean;
+    activeOperation: boolean;
+    hasFinalizedRun: boolean;
+  } | null;
+};
+
+export function resolveSlashCommandStates({
+  newTaskDraftActive,
+  bridgeUnavailable,
+  taskMutationDisabled,
+  task,
+}: SlashCommandContext): SlashCommandState[] {
+  const newEnabled = !newTaskDraftActive && !bridgeUnavailable;
+  const compactEnabled = Boolean(
+    task &&
+    !newTaskDraftActive &&
+    !bridgeUnavailable &&
+    !taskMutationDisabled &&
+    task.lifecycleOpen &&
+    task.continuationAvailable &&
+    !task.archived &&
+    !task.activeOperation &&
+    task.hasFinalizedRun,
+  );
+
+  return slashCommandNames.map((name) => {
+    if (name === "new")
+      return {
+        name,
+        enabled: newEnabled,
+        disabledReason: newEnabled
+          ? null
+          : newTaskDraftActive
+            ? "already_new_task"
+            : "unavailable",
+      };
+    return {
+      name,
+      enabled: compactEnabled,
+      disabledReason: compactEnabled
+        ? null
+        : newTaskDraftActive
+          ? "no_history"
+          : task?.activeOperation
+            ? "task_busy"
+            : !task?.hasFinalizedRun
+              ? "no_history"
+              : "unavailable",
+    };
+  });
+}
 
 export type SlashCandidate =
   | {
@@ -126,7 +188,7 @@ export type SlashCandidate =
       name: SlashCommandName;
       invocation: string;
       enabled: boolean;
-      disabledReason: string | null;
+      disabledReason: SlashCommandDisabledReason | null;
     }
   | {
       kind: "skill";

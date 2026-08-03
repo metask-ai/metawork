@@ -19,6 +19,10 @@ import {
   type ShellStatusState,
   type StatusAudience,
 } from "./command-bar-status.ts";
+import {
+  connectionFailurePresentation,
+  connectionStatus,
+} from "./connection-status.ts";
 import { Icon } from "../components/ui/Icon.tsx";
 import { AccountIdentity } from "../features/account/AccountIdentity.tsx";
 import { AccountGate } from "../features/account/AccountGate.tsx";
@@ -67,8 +71,8 @@ import {
   emptyComposerDraft,
   isSkillDraftCurrent,
   maxSkillArguments,
+  resolveSlashCommandStates,
   skillCatalogRefreshTarget,
-  slashCommandNames,
   type ComposerDraft,
   type SlashCommandName,
   type SlashCommandState,
@@ -78,12 +82,10 @@ import {
   BridgeCommandTimeoutError,
   RendererBridgeContractError,
 } from "../bridge/client.ts";
-import {
-  WorkbenchConnection,
-  type WorkbenchConnectionStatus,
-} from "../bridge/connection.ts";
+import { WorkbenchConnection } from "../bridge/connection.ts";
 import type {
   TaskCreateReason,
+  TaskCompactReason,
   RunInputView,
   TaskRunReason,
   UiResponsePayload,
@@ -94,7 +96,6 @@ import { primaryShortcutModifier } from "../platform/keyboard.ts";
 import {
   searchWorkbench,
   sidebarTasks,
-  isRunInFlight,
   selectActiveTask,
   selectCurrentWorkspace,
   taskDisplayState,
@@ -118,34 +119,13 @@ function errorText(error: unknown) {
 }
 
 type MutationReason =
-  TaskCreateReason | TaskRunReason | WorkspaceMutationReason;
+  | TaskCreateReason
+  | TaskCompactReason
+  | TaskRunReason
+  | WorkspaceMutationReason;
 
 function mutationReasonMessageId(reason: MutationReason): MessageId {
   return `mutation.reason.${reason}`;
-}
-
-function connectionStatus(status: WorkbenchConnectionStatus): ShellStatus {
-  if (status.kind === "connected")
-    return quietStatus(
-      status.recovered ? "connection.recovered" : "connection.connected",
-      { scope: "connection" },
-    );
-  if (status.kind === "refresh_failed")
-    return attentionStatus(
-      "connection.refresh_failed",
-      { scope: "connection" },
-      {
-        diagnostic: status.diagnostic,
-      },
-    );
-  return attentionStatus(
-    "connection.contract_failed",
-    { scope: "connection" },
-    {
-      diagnostic: status.diagnostic,
-      sourceId: `connection.source.${status.source}`,
-    },
-  );
 }
 
 export default function App() {
@@ -268,7 +248,7 @@ export default function App() {
     (activeTask?.lifecycle === "open" &&
       activeTask.continuationAvailable &&
       !activeTask.archived);
-  const runInFlight = isRunInFlight(activeTask);
+  const taskOperationInFlight = Boolean(activeTask?.activeOperation);
   const composerWorkspaceId =
     activeTask?.workspaceId ||
     workbench.draftWorkspaceId ||
@@ -302,7 +282,7 @@ export default function App() {
     (!newTaskDraftActive || snapshot.account.canCreateTask) &&
     (!newTaskDraftActive || composerWorkspaceReady) &&
     !accountMutationBlocksTaskAdmission(newTaskDraftActive, accountBusy) &&
-    !runInFlight &&
+    !taskOperationInFlight &&
     composerDraftHasContent(composerDraft) &&
     composerRunInput !== null &&
     composerDraftWithinLimits(composerDraft) &&
@@ -1086,6 +1066,104 @@ export default function App() {
     }
   }
 
+  async function compactTask() {
+    if (
+      viewSyncFailed ||
+      !bridgeReady ||
+      !activeTask ||
+      activeTask.lifecycle !== "open" ||
+      !activeTask.continuationAvailable ||
+      activeTask.archived ||
+      activeTask.activeOperation !== null ||
+      activeTask.runs.length === 0
+    )
+      return;
+    const taskId = activeTask.id;
+    const scope = `task:${taskId}`;
+    if (!beginTaskPendingOperation(scope, "compact")) return;
+    try {
+      try {
+        const result = await client.compact(taskId, activeTask.binding.epoch);
+        if (!result.accepted) {
+          await refreshSnapshot().catch(() => undefined);
+          setStatus(
+            attentionStatus(mutationReasonMessageId(result.reason), {
+              scope: "task",
+              taskId,
+            }),
+          );
+          return;
+        }
+      } catch (error) {
+        if (
+          await reconcileCommandTimeout(error, "operation.compact", {
+            scope: "task",
+            taskId,
+          })
+        )
+          return;
+        await refreshSnapshot().catch(() => undefined);
+        setStatus(
+          attentionStatus(
+            "compact.start_failed",
+            { scope: "task", taskId },
+            { diagnostic: errorText(error) },
+          ),
+        );
+        return;
+      }
+      await refreshAfterCommit("compact.started", "operation.compact", {
+        scope: "task",
+        taskId,
+      });
+    } finally {
+      endTaskPendingOperation(scope);
+    }
+  }
+
+  async function cancelCompact() {
+    if (
+      viewSyncFailed ||
+      !bridgeReady ||
+      !activeTask ||
+      cancelPendingTasks.current.has(activeTask.id) ||
+      activeTask.activeOperation?.kind !== "compact"
+    )
+      return;
+    const taskId = activeTask.id;
+    const operationId = activeTask.activeOperation.id;
+    setCancelPendingForTask(taskId, true);
+    try {
+      try {
+        await client.cancelCompact(taskId, operationId);
+      } catch (error) {
+        if (
+          await reconcileCommandTimeout(error, "operation.compact_stop", {
+            scope: "task",
+            taskId,
+          })
+        )
+          return;
+        await refreshSnapshot().catch(() => undefined);
+        setStatus(
+          attentionStatus(
+            "compact.stop_failed",
+            { scope: "task", taskId },
+            { diagnostic: errorText(error) },
+          ),
+        );
+        return;
+      }
+      await refreshAfterCommit(
+        "compact.stop_requested",
+        "operation.compact_stop",
+        { scope: "task", taskId },
+      );
+    } finally {
+      setCancelPendingForTask(taskId, false);
+    }
+  }
+
   function composerDraftFromRunInput(
     input: RunInputView,
   ): ComposerDraft | null {
@@ -1196,7 +1274,14 @@ export default function App() {
   }
 
   function runSlashCommand(command: SlashCommandName) {
-    if (command === "new") beginNewTask();
+    switch (command) {
+      case "new":
+        beginNewTask();
+        return;
+      case "compact":
+        void compactTask();
+        return;
+    }
   }
 
   async function closeTask() {
@@ -1282,7 +1367,7 @@ export default function App() {
     if (
       !activeTask ||
       taskMutationDisabled ||
-      activeTask.currentRunPhase !== null
+      activeTask.activeOperation !== null
     )
       return;
     const taskId = activeTask.id;
@@ -1525,8 +1610,10 @@ export default function App() {
   }
 
   const connectionShellStatus = statuses.connection;
-  const connectionRetryable =
-    connectionShellStatus?.id !== "connection.contract_failed";
+  const connectionFailure = connectionFailurePresentation(
+    connectionShellStatus,
+  );
+  const connectionRetryable = connectionFailure.retryable;
   const accountGateStatus = selectAccountGateStatus(statuses);
   if (accountGateRequired)
     return (
@@ -1536,6 +1623,9 @@ export default function App() {
         cancelDisabled={viewSyncFailed || !bridgeReady || accountCancelBusy}
         connectionFailed={viewSyncFailed}
         connectionRetryable={connectionRetryable}
+        connectionTitleId={connectionFailure.titleId}
+        connectionHelpId={connectionFailure.helpId}
+        connectionSourceId={connectionShellStatus?.sourceId}
         connectionDiagnostic={connectionShellStatus?.diagnostic}
         reconnecting={connectionBusy}
         notice={
@@ -1586,28 +1676,31 @@ export default function App() {
     ? t(newTaskDraftActive ? "task.new" : "task.open")
     : currentTaskState.kind === "phase"
       ? t(`task.phase.${currentTaskState.value}`)
-      : currentTaskState.kind === "lifecycle"
-        ? t(`task.lifecycle.${currentTaskState.value}`)
-        : currentTaskState.kind === "archived"
-          ? t("task.archived")
-          : currentTaskState.kind === "outcome"
-            ? t(`outcome.${currentTaskState.value}`)
-            : t("task.ready");
+      : currentTaskState.kind === "compact_phase"
+        ? t(`compact.phase.${currentTaskState.value}`)
+        : currentTaskState.kind === "lifecycle"
+          ? t(`task.lifecycle.${currentTaskState.value}`)
+          : currentTaskState.kind === "archived"
+            ? t("task.archived")
+            : currentTaskState.kind === "outcome"
+              ? t(`outcome.${currentTaskState.value}`)
+              : t("task.ready");
   const activeTaskTitle = activeTask
     ? activeTask.title || t("task.item", { id: activeTask.id })
     : t(newTaskDraftActive ? "task.new" : "task.open");
-  const slashCommands: SlashCommandState[] = slashCommandNames.map((name) => {
-    const unavailable = t("slash.disabled_unavailable");
-    const enabled = !newTaskDraftActive && !bridgeUnavailable;
-    return {
-      name,
-      enabled,
-      disabledReason: enabled
-        ? null
-        : newTaskDraftActive
-          ? t("slash.disabled_already_new_task")
-          : unavailable,
-    };
+  const slashCommands: SlashCommandState[] = resolveSlashCommandStates({
+    newTaskDraftActive,
+    bridgeUnavailable,
+    taskMutationDisabled,
+    task: activeTask
+      ? {
+          lifecycleOpen: activeTask.lifecycle === "open",
+          continuationAvailable: activeTask.continuationAvailable,
+          archived: activeTask.archived,
+          activeOperation: activeTask.activeOperation !== null,
+          hasFinalizedRun: activeTask.runs.length > 0,
+        }
+      : null,
   });
   const commandBarStatus = selectCommandBarStatus(statuses, {
     route,
@@ -1630,7 +1723,7 @@ export default function App() {
       slashCommands={slashCommands}
       composeDisabled={!taskCanCompose || taskMutationDisabled}
       canSubmit={canSubmit}
-      runInFlight={Boolean(taskCanCompose && runInFlight)}
+      runInFlight={Boolean(taskCanCompose && taskOperationInFlight)}
       accessRequired={Boolean(
         newTaskDraftActive &&
         composerWorkspace &&
@@ -2000,18 +2093,31 @@ export default function App() {
               </div>
               <div className="task-actions">
                 {activeTask &&
-                  activeTask.currentRunId !== "0" &&
-                  activeTask.currentRunPhase !== null &&
-                  activeTask.currentRunPhase !== "stopping" && (
+                  activeTask.activeOperation !== null &&
+                  !(activeTask.activeOperation.kind === "run"
+                    ? activeTask.currentRunPhase === "stopping"
+                    : activeTask.compacts.find(
+                        (compact) =>
+                          compact.operationId ===
+                          activeTask.activeOperation?.id,
+                      )?.phase === "stopping") && (
                     <button
                       className="danger-button focus-ring"
                       disabled={
                         bridgeUnavailable || activeTask.id in cancelPending
                       }
-                      onClick={() => void cancelRun()}
+                      onClick={() =>
+                        void (activeTask.activeOperation?.kind === "compact"
+                          ? cancelCompact()
+                          : cancelRun())
+                      }
                     >
                       <Icon name="stop" />
-                      {t("task.stop")}
+                      {t(
+                        activeTask.activeOperation.kind === "compact"
+                          ? "compact.stop"
+                          : "task.stop",
+                      )}
                     </button>
                   )}
                 {activeTask && inspector.available && (
@@ -2095,7 +2201,7 @@ export default function App() {
                           role="menuitem"
                           disabled={
                             taskMutationDisabled ||
-                            runInFlight ||
+                            taskOperationInFlight ||
                             activeTask.lifecycle === "closing"
                           }
                           onClick={() => {
@@ -2188,20 +2294,8 @@ export default function App() {
 
           {viewSyncFailed && (
             <section className="sync-failure task-sync-failure" role="alert">
-              <h3>
-                {t(
-                  connectionRetryable
-                    ? "connection.failed"
-                    : "connection.contract_failed",
-                )}
-              </h3>
-              <p>
-                {t(
-                  connectionRetryable
-                    ? "connection.failed_help"
-                    : "connection.contract_failed_help",
-                )}
-              </p>
+              <h3>{t(connectionFailure.titleId)}</h3>
+              <p>{t(connectionFailure.helpId)}</p>
               {connectionRetryable ? (
                 <button
                   className="secondary-button focus-ring"
@@ -2242,7 +2336,7 @@ export default function App() {
             draftHasWorkspace={Boolean(composerWorkspace)}
             revision={snapshot.revision}
             composerHasDraft={composerDraftHasContent(composerDraft)}
-            retryAvailable={taskCanCompose && !runInFlight}
+            retryAvailable={taskCanCompose && !taskOperationInFlight}
             responseDisabled={bridgeUnavailable}
             draftComposer={newTaskDraftActive ? composerFooter : null}
             onUseExample={(instruction) => {

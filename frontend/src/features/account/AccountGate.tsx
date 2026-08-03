@@ -5,7 +5,7 @@ import {
   WindowControls,
   type WindowControlAction,
 } from "../../components/ui/WindowControls.tsx";
-import { useI18n, type Locale } from "../../i18n/context.ts";
+import { useI18n, type Locale, type MessageId } from "../../i18n/context.ts";
 import { accountErrorText } from "../../i18n/account-error.ts";
 import { desktopPlatform } from "../../platform/keyboard.ts";
 import { WindowTitlebarGesture } from "../../platform/window-titlebar-gesture.ts";
@@ -16,6 +16,9 @@ type Props = {
   cancelDisabled: boolean;
   connectionFailed: boolean;
   connectionRetryable: boolean;
+  connectionTitleId: MessageId;
+  connectionHelpId: MessageId;
+  connectionSourceId?: MessageId;
   connectionDiagnostic?: string;
   reconnecting: boolean;
   notice: string;
@@ -38,6 +41,9 @@ export function AccountGate({
   cancelDisabled,
   connectionFailed,
   connectionRetryable,
+  connectionTitleId,
+  connectionHelpId,
+  connectionSourceId,
   connectionDiagnostic,
   reconnecting,
   notice,
@@ -178,11 +184,7 @@ export function AccountGate({
           <p className="account-gate-eyebrow">{t("account.gate.eyebrow")}</p>
           <h1 id="account-gate-title">
             {connectionFailed
-              ? t(
-                  connectionRetryable
-                    ? "connection.failed"
-                    : "connection.contract_failed",
-                )
+              ? t(connectionTitleId)
               : reauthenticationRequired
                 ? reauthenticationTitle
                 : t(`account.readiness.${account.readiness}.title`)}
@@ -192,13 +194,7 @@ export function AccountGate({
             aria-live={hasError || connectionFailed ? "assertive" : "polite"}
             role={hasError || connectionFailed ? "alert" : "status"}
           >
-            {connectionFailed
-              ? t(
-                  connectionRetryable
-                    ? "connection.failed_help"
-                    : "connection.contract_failed_help",
-                )
-              : body}
+            {connectionFailed ? t(connectionHelpId) : body}
           </p>
 
           {!connectionFailed && account.displayName && (
@@ -386,7 +382,12 @@ export function AccountGate({
           {(connectionDiagnostic || account.safeDiagnostic) && (
             <details className="account-gate-details">
               <summary>{t("connection.details")}</summary>
-              <p>{connectionDiagnostic || account.safeDiagnostic}</p>
+              <p>
+                {connectionDiagnostic && connectionSourceId
+                  ? `${t(connectionSourceId)}: `
+                  : ""}
+                {connectionDiagnostic || account.safeDiagnostic}
+              </p>
             </details>
           )}
           <div className="account-gate-meta">

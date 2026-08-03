@@ -11,6 +11,7 @@ const build_options = @import("build_options");
 pub const Error = lifecycle.Error || scheduled_tasks_impl.Error || scheduled_task_persistence.Error || std.mem.Allocator.Error || std.Thread.SpawnError || error{
     ProjectionCapacity,
     RunCapacity,
+    CompactCapacity,
     ToolCapacity,
     SnapshotTooLarge,
     CloseInProgress,
@@ -58,6 +59,7 @@ pub const Limits = struct {
     max_workspaces: usize = 16,
     max_scheduled_tasks: usize = 16,
     max_runs_per_task: usize = 16,
+    max_compacts_per_task: usize = 16,
     max_tools_per_run: usize = 32,
     max_projection_bytes: usize = 512 * 1024,
     max_workspace_bytes: usize = 16 * 1024,
@@ -331,6 +333,7 @@ const workspace_snapshot_overhead: usize = 512;
 const task_snapshot_overhead: usize = 1024;
 const scheduled_task_snapshot_overhead: usize = 1024;
 const run_snapshot_overhead: usize = 1024;
+const compact_snapshot_overhead: usize = 512;
 const catalog_snapshot_overhead: usize = 256;
 const catalog_skill_snapshot_overhead: usize = 256;
 const catalog_argument_snapshot_overhead: usize = 16;
@@ -366,6 +369,40 @@ const RunOutcome = enum {
     interrupted,
     failed,
     dependency_contract_failure,
+};
+
+const CompactPhase = enum(u8) {
+    queued,
+    compacting,
+    stopping,
+    compacted,
+    no_change,
+    degraded,
+    aborted,
+    failed,
+};
+
+const CompactCause = enum {
+    user_cancel,
+    session_close,
+    app_shutdown,
+    resource_limit,
+    agent_failure,
+    dependency_contract_failure,
+};
+
+const CompactTerminationDispatch = enum {
+    queued_aborted,
+    requested,
+    already_requested,
+    already_terminal,
+    session_closing,
+};
+
+const ActiveOperation = union(enum) {
+    none,
+    run: u64,
+    compact: u64,
 };
 
 /// Workbench-owned durable product cause.
@@ -545,6 +582,18 @@ const TerminalPayload = struct {
     diagnostic_redacted: bool = false,
 };
 
+const CompactTerminalPayload = struct {
+    phase: CompactPhase,
+    cause: ?CompactCause,
+    before_context_tokens: u64,
+    after_context_tokens: u64,
+    usage: UsageView,
+    session_disposition_at_completion: lifecycle.SessionDisposition,
+    diagnostic_len: usize = 0,
+    diagnostic_truncated: bool = false,
+    diagnostic_redacted: bool = false,
+};
+
 const RunInputRecord = union(enum) {
     text: struct {
         value: []u8,
@@ -589,6 +638,23 @@ const RunRecord = struct {
     agent_handoff: std.atomic.Value(AgentHandoffState) = .init(.queued),
     pending_termination: std.atomic.Value(PendingInterruption) = .init(.none),
     run_control: lifecycle.RunControl = undefined,
+};
+
+const CompactRecord = struct {
+    id: u64,
+    after_run_id: u64,
+    agent_handoff: std.atomic.Value(AgentHandoffState) = .init(.queued),
+    pending_interruption: std.atomic.Value(PendingInterruption) = .init(.none),
+    terminal_publication: std.atomic.Value(TerminalPublication) = .init(.open),
+    terminal_payload: CompactTerminalPayload = undefined,
+    terminal_observed: bool = false,
+    terminal_diagnostic: []u8,
+    redaction_secret: []const u8 = &.{},
+    workbench: *Workbench = undefined,
+    task: *TaskView = undefined,
+    session: *lifecycle.Session = undefined,
+    worker_reference_held: std.atomic.Value(bool) = .init(false),
+    session_reference_held: std.atomic.Value(bool) = .init(false),
 };
 
 const UiRecordKind = enum { ask_question, permission };
@@ -645,6 +711,7 @@ const TaskView = struct {
     title_redacted: bool = false,
     archived: bool = false,
     runs: []?RunRecord,
+    compacts: []?CompactRecord,
     next_run_generation: u64 = 0,
     worker_references: std.atomic.Value(usize) = .init(0),
     delete_pending: bool = false,
@@ -656,6 +723,7 @@ const TaskView = struct {
     lifecycle: TaskLifecycle = .open,
     continuation: ContinuationCapability = .available,
     active_run_id: u64 = 0,
+    active_operation: ActiveOperation = .none,
     closing_session: ?*lifecycle.Session = null,
     close_thread: ?std.Thread = null,
     close_completion: std.atomic.Value(CloseCompletion) = .init(.none),
@@ -1445,6 +1513,7 @@ pub const Workbench = struct {
             limits.max_tasks == 0 or limits.max_workspaces == 0 or
             limits.max_scheduled_tasks == 0 or
             limits.max_runs_per_task == 0 or
+            limits.max_compacts_per_task == 0 or
             limits.max_tools_per_run == 0 or limits.max_projection_bytes == 0 or
             limits.max_workspace_bytes == 0 or
             limits.max_catalog_projection_bytes == 0 or
@@ -1817,7 +1886,7 @@ pub const Workbench = struct {
         const task = self.findTask(task_id) orelse return error.UnknownTask;
         if (task.binding_epoch != expected_binding_epoch)
             return error.BindingEpochMismatch;
-        if (!self.taskContinuationAvailable(task) or hasNonTerminalRun(task))
+        if (!self.taskContinuationAvailable(task) or hasActiveOperation(task))
             return error.TaskBusy;
         const workspace = self.findWorkspace(task.workspace_id) orelse
             return error.WorkspaceUnavailable;
@@ -2177,6 +2246,12 @@ pub const Workbench = struct {
         const runs = try self.allocator.alloc(?RunRecord, self.limits.max_runs_per_task);
         errdefer self.allocator.free(runs);
         @memset(runs, null);
+        const compacts = try self.allocator.alloc(
+            ?CompactRecord,
+            self.limits.max_compacts_per_task,
+        );
+        errdefer self.allocator.free(compacts);
+        @memset(compacts, null);
         const ui_history = try self.allocator.alloc(?UiRecord, self.limits.max_ui_history_per_task);
         errdefer self.allocator.free(ui_history);
         @memset(ui_history, null);
@@ -2233,6 +2308,7 @@ pub const Workbench = struct {
             .pinned_catalog = pinned_catalog,
             .title = title,
             .runs = runs,
+            .compacts = compacts,
             .ui_history = ui_history,
         };
         self.bumpRevision();
@@ -2324,7 +2400,7 @@ pub const Workbench = struct {
         })
             return error.CatalogUnavailable;
         _ = try taskExecutionInput(view);
-        if (hasNonTerminalRun(view)) return error.TaskBusy;
+        if (hasActiveOperation(view)) return error.TaskBusy;
         const session = view.session orelse return error.TaskClosing;
         const agent_input: lifecycle.RunInput = switch (input) {
             .text => |text| .{ .text = text },
@@ -2394,11 +2470,139 @@ pub const Workbench = struct {
             return err;
         };
         view.active_run_id = run_id;
+        view.active_operation = .{ .run = run_id };
         view.cancel_requested = false;
         self.touchTask(view);
         if (workspace.origin == .user) workspace.recent_order = recent_order;
         self.bumpRevision();
         return run_id;
+    }
+
+    pub fn compactTaskAtBinding(
+        self: *Workbench,
+        task_id: u64,
+        expected_binding_epoch: u64,
+    ) Error!u64 {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        self.syncLifecycle();
+        const view = self.findTask(task_id) orelse return error.UnknownTask;
+        if (expected_binding_epoch == 0 or
+            expected_binding_epoch != view.binding_epoch)
+            return error.BindingEpochMismatch;
+        if (!self.taskContinuationAvailable(view)) return error.TaskClosing;
+        if (hasActiveOperation(view)) return error.TaskBusy;
+        if (hasUnfinalizedTerminalEvents(view)) return error.TaskBusy;
+        if (findEmpty(CompactRecord, view.compacts) == null)
+            return error.CompactCapacity;
+        const after_run_id = lastFinalizedRunId(view) orelse
+            return error.NoSuchRun;
+        _ = try taskExecutionInput(view);
+        const session = view.session orelse return error.TaskClosing;
+        const operation_id = try session.prepareCompact();
+        var prepared = true;
+        errdefer if (prepared)
+            cancelPreparedCompactOrPanic(session, operation_id);
+        const slot = try self.reserveCompactRecord(view, operation_id, after_run_id);
+        errdefer self.discardCompactRecord(view, slot);
+        const compact = &view.compacts[slot].?;
+        compact.workbench = self;
+        compact.task = view;
+        compact.session = session;
+        if (!session.retainReference()) return error.TaskClosing;
+        compact.session_reference_held.store(true, .release);
+        _ = view.worker_references.fetchAdd(1, .acq_rel);
+        compact.worker_reference_held.store(true, .release);
+        self.executor.enqueue(.{
+            .context = compact,
+            .execute_fn = executeCompactJob,
+            .cancel_fn = cancelCompactJobForShutdown,
+        }) catch |err| {
+            releaseCompactReferences(compact);
+            return err;
+        };
+        prepared = false;
+        view.active_operation = .{ .compact = operation_id };
+        self.touchTask(view);
+        self.bumpRevision();
+        return operation_id;
+    }
+
+    pub fn cancelCompact(
+        self: *Workbench,
+        task_id: u64,
+        operation_id: u64,
+    ) Error!void {
+        self.syncLifecycle();
+        const view = self.findTask(task_id) orelse return error.UnknownTask;
+        const active_id = switch (view.active_operation) {
+            .compact => |id| id,
+            .none, .run => return error.NoSuchCompact,
+        };
+        if (operation_id == 0 or operation_id != active_id)
+            return error.NoSuchCompact;
+        const compact = findCompact(view.compacts, operation_id) orelse
+            return error.NoSuchCompact;
+        _ = self.cancelCompactRecord(view, compact, .user_cancel);
+    }
+
+    fn cancelCompactRecord(
+        self: *Workbench,
+        view: *TaskView,
+        compact: *CompactRecord,
+        interruption: lifecycle.ExternalInterruption,
+    ) CompactTerminationDispatch {
+        if (compactTerminalPayload(compact) != null) {
+            self.syncLifecycle();
+            return .already_terminal;
+        }
+        const pending = pendingInterruption(interruption);
+        const prior = compact.pending_interruption.cmpxchgStrong(
+            .none,
+            pending,
+            .acq_rel,
+            .acquire,
+        );
+        if (compactTerminalPayload(compact) != null) {
+            self.syncLifecycle();
+            return .already_terminal;
+        }
+        if (self.executor.cancel(compact)) {
+            cancelPreparedCompactOrPanic(compact.session, compact.id);
+            _ = commitCompactProductTerminal(
+                compact,
+                .aborted,
+                compactCauseForInterruption(pendingExternalInterruption(compact)),
+                if (pendingExternalInterruption(compact) == .user_cancel)
+                    .reusable
+                else
+                    .closing,
+                .{},
+                0,
+                0,
+                "",
+                false,
+            );
+            releaseCompactReferences(compact);
+            self.touchTask(view);
+            self.syncLifecycle();
+            return .queued_aborted;
+        } else {
+            compact.session.requestCompactCancellation(
+                compact.id,
+                pendingExternalInterruption(compact),
+            ) catch |err| switch (err) {
+                error.NoSuchCompact, error.SessionClosing => {
+                    self.syncLifecycle();
+                    return if (err == error.NoSuchCompact)
+                        .already_terminal
+                    else
+                        .session_closing;
+                },
+            };
+        }
+        self.touchTask(view);
+        self.bumpRevision();
+        return if (prior == null) .requested else .already_requested;
     }
 
     pub fn taskExecutionIdentity(
@@ -2514,6 +2718,18 @@ pub const Workbench = struct {
         const session = view.session orelse return;
         const prior_lifecycle = view.lifecycle;
         const prior_continuation = view.continuation;
+        if (switch (view.active_operation) {
+            .compact => true,
+            .none, .run => false,
+        }) {
+            const compact_id = switch (view.active_operation) {
+                .compact => |id| id,
+                .none, .run => unreachable,
+            };
+            const compact = findCompact(view.compacts, compact_id) orelse
+                return error.NoSuchCompact;
+            _ = self.cancelCompactRecord(view, compact, .session_close);
+        }
         const cancelled_ui = self.prepareCancelledUiRecord(
             session,
             view.active_run_id,
@@ -2547,7 +2763,10 @@ pub const Workbench = struct {
         view.closing_session = session;
         view.lifecycle = .closing;
         view.continuation = .{ .unavailable = .closing };
-        view.cancel_requested = view.active_run_id != 0;
+        view.cancel_requested = switch (view.active_operation) {
+            .run => true,
+            .none, .compact => false,
+        };
         if (findRun(view.runs, view.active_run_id)) |run| {
             if (!isTerminalPhase(runPhase(run))) _ = setActivePhase(run, .stopping);
         }
@@ -2730,7 +2949,7 @@ pub const Workbench = struct {
     pub fn setTaskArchived(self: *Workbench, task_id: u64, archived: bool) Error!void {
         self.syncLifecycle();
         const view = self.findTask(task_id) orelse return error.UnknownTask;
-        if (view.lifecycle == .closing or hasNonTerminalRun(view)) return error.TaskBusy;
+        if (view.lifecycle == .closing or hasActiveOperation(view)) return error.TaskBusy;
         if (view.archived == archived) return;
         view.archived = archived;
         self.touchTask(view);
@@ -2851,9 +3070,42 @@ pub const Workbench = struct {
                 }
                 changed = true;
             }
+            if (switch (view.active_operation) {
+                .compact => true,
+                .none, .run => false,
+            }) {
+                const operation_id = switch (view.active_operation) {
+                    .compact => |id| id,
+                    .none, .run => unreachable,
+                };
+                const compact = findCompact(view.compacts, operation_id) orelse {
+                    view.active_operation = .none;
+                    changed = true;
+                    continue;
+                };
+                if (compactTerminalPayload(compact)) |terminal| {
+                    if (!compact.terminal_observed) {
+                        foldTerminalDisposition(
+                            view,
+                            terminal.session_disposition_at_completion,
+                        );
+                        compact.terminal_observed = true;
+                    }
+                    view.active_operation = .none;
+                    changed = true;
+                }
+                continue;
+            }
             const run = findRun(view.runs, view.active_run_id) orelse continue;
             if (productTerminalFacts(run)) |terminal| {
                 view.cancel_requested = false;
+                if (switch (view.active_operation) {
+                    .run => |id| id == run.id,
+                    .none, .compact => false,
+                }) {
+                    view.active_operation = .none;
+                    changed = true;
+                }
                 if (!run.terminal_observed) {
                     foldTerminalDisposition(view, terminal.session_disposition_at_completion);
                     if (run.event_projection_failure != null and view.lifecycle == .open)
@@ -3356,26 +3608,40 @@ pub const Workbench = struct {
         for (self.tasks) |*entry| {
             const view = &(entry.* orelse continue);
             const session = view.session orelse continue;
-            const run = findRun(view.runs, view.active_run_id) orelse continue;
-            if (isTerminalPhase(runPhase(run))) continue;
-            if (self.executor.cancel(run)) {
-                cancelPreparedRunOrPanic(session, run.id);
-                releaseWorkerReference(run);
-                _ = commitTerminal(
-                    run,
-                    .interrupted,
-                    .interrupted,
-                    .app_shutdown,
-                    .closing,
-                    "",
-                    false,
-                );
-                run.terminal_observed = true;
-            } else {
-                consumeLifecycleTermination(
-                    requestRunTermination(run, .app_shutdown),
-                    run.id,
-                );
+            switch (view.active_operation) {
+                .none => {},
+                .compact => |operation_id| {
+                    const compact = findCompact(view.compacts, operation_id) orelse
+                        continue;
+                    _ = self.cancelCompactRecord(
+                        view,
+                        compact,
+                        .app_shutdown,
+                    );
+                },
+                .run => |run_id| {
+                    const run = findRun(view.runs, run_id) orelse continue;
+                    if (isTerminalPhase(runPhase(run))) continue;
+                    if (self.executor.cancel(run)) {
+                        cancelPreparedRunOrPanic(session, run.id);
+                        releaseWorkerReference(run);
+                        _ = commitTerminal(
+                            run,
+                            .interrupted,
+                            .interrupted,
+                            .app_shutdown,
+                            .closing,
+                            "",
+                            false,
+                        );
+                        run.terminal_observed = true;
+                    } else {
+                        consumeLifecycleTermination(
+                            requestRunTermination(run, .app_shutdown),
+                            run.id,
+                        );
+                    }
+                },
             }
         }
         self.executor.shutdown();
@@ -3429,11 +3695,20 @@ pub const Workbench = struct {
             writer,
             taskCatalogProjection(view),
         );
-        writer.print(",\"lifecycle\":\"{s}\",\"continuationAvailable\":{},\"archived\":{},\"closeFailed\":{},\"currentRunId\":\"{d}\",\"currentRunPhase\":", .{
+        writer.print(",\"lifecycle\":\"{s}\",\"continuationAvailable\":{},\"archived\":{},\"closeFailed\":{},\"activeOperation\":", .{
             @tagName(view.lifecycle),
             self.taskContinuationAvailable(view),
             view.archived,
             view.close_failed,
+        }) catch return error.SnapshotTooLarge;
+        switch (view.active_operation) {
+            .none => writer.writeAll("null") catch return error.SnapshotTooLarge,
+            .run => |id| writer.print("{{\"kind\":\"run\",\"id\":\"{d}\"}}", .{id}) catch
+                return error.SnapshotTooLarge,
+            .compact => |id| writer.print("{{\"kind\":\"compact\",\"id\":\"{d}\"}}", .{id}) catch
+                return error.SnapshotTooLarge,
+        }
+        writer.print(",\"currentRunId\":\"{d}\",\"currentRunPhase\":", .{
             if (currentRunPhase(view) == null) 0 else view.active_run_id,
         }) catch return error.SnapshotTooLarge;
         if (currentRunPhase(view)) |phase| jsonValue(writer, @tagName(phase)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
@@ -3452,12 +3727,62 @@ pub const Workbench = struct {
             run_count += 1;
             try self.writeRun(writer, run);
         }
+        writer.writeAll("],\"compacts\":[") catch return error.SnapshotTooLarge;
+        var compact_count: usize = 0;
+        for (view.compacts) |*entry| {
+            const compact = &(entry.* orelse continue);
+            if (compact_count != 0) writer.writeByte(',') catch
+                return error.SnapshotTooLarge;
+            compact_count += 1;
+            try self.writeCompact(writer, compact);
+        }
         writer.writeAll("],\"pendingUi\":") catch return error.SnapshotTooLarge;
         try self.writePendingUi(writer, view);
         writer.writeAll(",\"uiHistory\":[") catch return error.SnapshotTooLarge;
         try self.writeUiHistory(writer, view);
         writer.writeByte(']') catch return error.SnapshotTooLarge;
         writer.writeByte('}') catch return error.SnapshotTooLarge;
+    }
+
+    fn writeCompact(
+        self: *Workbench,
+        writer: *std.Io.Writer,
+        compact: *const CompactRecord,
+    ) Error!void {
+        _ = self;
+        const terminal = compactTerminalPayload(compact);
+        const phase = if (terminal) |payload|
+            payload.phase
+        else
+            activeCompactPhase(compact);
+        writer.print(
+            "{{\"operationId\":\"{d}\",\"afterRunId\":\"{d}\",\"phase\":\"{s}\",\"cause\":",
+            .{ compact.id, compact.after_run_id, @tagName(phase) },
+        ) catch return error.SnapshotTooLarge;
+        if (if (terminal) |payload| payload.cause else null) |cause|
+            jsonValue(writer, @tagName(cause)) catch return error.SnapshotTooLarge
+        else
+            writer.writeAll("null") catch return error.SnapshotTooLarge;
+        const before_context_tokens = if (terminal) |payload|
+            payload.before_context_tokens
+        else
+            0;
+        const after_context_tokens = if (terminal) |payload|
+            payload.after_context_tokens
+        else
+            0;
+        const usage = if (terminal) |payload| payload.usage else UsageView{};
+        writer.print(
+            ",\"beforeContextTokens\":\"{d}\",\"afterContextTokens\":\"{d}\",\"usage\":{{\"input\":\"{d}\",\"output\":\"{d}\",\"cacheRead\":\"{d}\",\"cacheCreation\":\"{d}\"}}}}",
+            .{
+                before_context_tokens,
+                after_context_tokens,
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cache_read_input_tokens,
+                usage.cache_creation_input_tokens,
+            },
+        ) catch return error.SnapshotTooLarge;
     }
 
     fn writeCatalogProjection(
@@ -3761,7 +4086,7 @@ pub const Workbench = struct {
             return error.UnknownScheduledTask;
         if (item.last_occurrence) |last| if (last.task_id != 0) {
             if (self.findTask(last.task_id)) |task| {
-                if (hasNonTerminalRun(task)) {
+                if (hasActiveOperation(task)) {
                     if (source == .timer) {
                         var skipped = try self.scheduled_tasks.clone(
                             self.allocator,
@@ -4098,7 +4423,7 @@ pub const Workbench = struct {
                 task.closing_session != null or
                 task.close_thread != null or
                 task.worker_references.load(.acquire) != 0 or
-                hasNonTerminalRun(task))
+                hasActiveOperation(task))
                 return false;
         }
         return true;
@@ -4111,7 +4436,7 @@ pub const Workbench = struct {
                 task.session != null or task.closing_session != null or
                 task.close_thread != null or
                 task.worker_references.load(.acquire) != 0 or
-                hasNonTerminalRun(task))
+                hasActiveOperation(task))
                 continue;
             self.releaseTaskExecutionNoFail(task);
         }
@@ -4690,7 +5015,7 @@ pub const Workbench = struct {
                 if (task.session != null or task.closing_session != null or
                     task.close_thread != null or
                     task.worker_references.load(.acquire) != 0 or
-                    hasNonTerminalRun(task))
+                    hasActiveOperation(task))
                 {
                     pending = true;
                 }
@@ -4722,6 +5047,13 @@ pub const Workbench = struct {
                     .queued, .running, .stopping => signals.running +|= 1,
                     else => unreachable,
                 }
+                continue;
+            }
+            if (switch (task.active_operation) {
+                .compact => true,
+                .none, .run => false,
+            }) {
+                signals.running +|= 1;
                 continue;
             }
             if (lastTerminalFacts(task.runs)) |terminal| switch (terminal.outcome) {
@@ -5104,6 +5436,46 @@ pub const Workbench = struct {
         return slot;
     }
 
+    fn reserveCompactRecord(
+        self: *Workbench,
+        task: *TaskView,
+        operation_id: u64,
+        after_run_id: u64,
+    ) Error!usize {
+        const slot = findEmpty(CompactRecord, task.compacts) orelse
+            return error.CompactCapacity;
+        const diagnostic = try self.allocTrackedCapacity(
+            self.limits.max_terminal_diagnostic_bytes,
+        );
+        errdefer self.freeTracked(diagnostic);
+        const execution = try taskExecutionInput(task);
+        task.compacts[slot] = .{
+            .id = operation_id,
+            .after_run_id = after_run_id,
+            .terminal_diagnostic = diagnostic,
+            .redaction_secret = execution.api_key,
+        };
+        return slot;
+    }
+
+    fn discardCompactRecord(
+        self: *Workbench,
+        task: *TaskView,
+        slot: usize,
+    ) void {
+        const compact = &(task.compacts[slot] orelse return);
+        self.deinitCompactRecord(compact);
+        task.compacts[slot] = null;
+    }
+
+    fn deinitCompactRecord(self: *Workbench, compact: *CompactRecord) void {
+        std.debug.assert(!compact.worker_reference_held.load(.acquire));
+        std.debug.assert(!compact.session_reference_held.load(.acquire));
+        std.debug.assert(compact.terminal_publication.load(.acquire) != .publishing);
+        self.freeTracked(compact.terminal_diagnostic);
+        compact.* = undefined;
+    }
+
     fn discardRunRecord(self: *Workbench, task: *TaskView, slot: usize) void {
         const run = &(task.runs[slot] orelse return);
         self.deinitRunRecord(run);
@@ -5135,6 +5507,11 @@ pub const Workbench = struct {
             self.deinitRunRecord(run);
         }
         self.allocator.free(task.runs);
+        for (task.compacts) |*compact_entry| {
+            const compact = &(compact_entry.* orelse continue);
+            self.deinitCompactRecord(compact);
+        }
+        self.allocator.free(task.compacts);
         self.allocator.free(task.ui_history);
         self.freeTracked(task.execution_model);
         self.freeTracked(task.binding_account_id);
@@ -5788,6 +6165,156 @@ fn executeRunJob(context: *anyopaque) void {
     _ = notifier.notify();
 }
 
+fn executeCompactJob(context: *anyopaque) void {
+    const compact: *CompactRecord = @ptrCast(@alignCast(context));
+    compact.agent_handoff.store(.starting, .release);
+    _ = compact.workbench.change_notifier.notify();
+    compact.agent_handoff.store(.running, .release);
+    var terminal = compact.session.executePreparedCompact(compact.id) catch |err| {
+        compact.agent_handoff.store(.finishing, .release);
+        _ = commitCompactProductTerminal(
+            compact,
+            .failed,
+            if (err == error.SessionClosing)
+                .session_close
+            else
+                .dependency_contract_failure,
+            if (err == error.SessionClosing)
+                .closing
+            else
+                .poisoned,
+            .{},
+            0,
+            0,
+            "",
+            false,
+        );
+        const notifier = compact.workbench.change_notifier;
+        releaseCompactReferences(compact);
+        _ = notifier.notify();
+        return;
+    };
+    compact.agent_handoff.store(.finishing, .release);
+    commitCompactTerminal(compact, &terminal);
+    terminal.deinit();
+    const notifier = compact.workbench.change_notifier;
+    releaseCompactReferences(compact);
+    _ = notifier.notify();
+}
+
+fn cancelCompactJobForShutdown(context: *anyopaque) void {
+    const compact: *CompactRecord = @ptrCast(@alignCast(context));
+    _ = compact.pending_interruption.cmpxchgStrong(
+        .none,
+        .app_shutdown,
+        .acq_rel,
+        .acquire,
+    );
+    cancelPreparedCompactOrPanic(compact.session, compact.id);
+    _ = commitCompactProductTerminal(
+        compact,
+        .aborted,
+        compactCauseForInterruption(pendingExternalInterruption(compact)),
+        .closing,
+        .{},
+        0,
+        0,
+        "",
+        false,
+    );
+    const notifier = compact.workbench.change_notifier;
+    releaseCompactReferences(compact);
+    _ = notifier.notify();
+}
+
+fn commitCompactTerminal(
+    compact: *CompactRecord,
+    result: *const lifecycle.CompactTerminalResult,
+) void {
+    var cause: ?CompactCause = null;
+    const phase: CompactPhase = if (result.failure == .dependency_contract) failure: {
+        cause = .dependency_contract_failure;
+        break :failure .failed;
+    } else if (result.failure == .abi_status) failure: {
+        cause = if (result.abi_status == .resource_limit)
+            .resource_limit
+        else
+            .agent_failure;
+        break :failure .failed;
+    } else if (result.outcome) |outcome| switch (outcome) {
+        .compacted => .compacted,
+        .no_change => .no_change,
+        .degraded => .degraded,
+        .aborted => aborted: {
+            cause = if (result.interruption) |interruption|
+                compactCauseForInterruption(interruption)
+            else
+                .agent_failure;
+            break :aborted .aborted;
+        },
+    } else missing: {
+        cause = .dependency_contract_failure;
+        break :missing .failed;
+    };
+    _ = commitCompactProductTerminal(
+        compact,
+        phase,
+        cause,
+        result.session_disposition_at_completion,
+        .{
+            .input_tokens = result.input_tokens,
+            .output_tokens = result.output_tokens,
+            .cache_read_input_tokens = result.cache_read_input_tokens,
+            .cache_creation_input_tokens = result.cache_creation_input_tokens,
+        },
+        result.before_context_tokens,
+        result.after_context_tokens,
+        result.diagnostic(),
+        result.diagnostic_truncated,
+    );
+}
+
+fn commitCompactProductTerminal(
+    compact: *CompactRecord,
+    phase: CompactPhase,
+    cause: ?CompactCause,
+    session_disposition_at_completion: lifecycle.SessionDisposition,
+    usage: UsageView,
+    before_context_tokens: u64,
+    after_context_tokens: u64,
+    diagnostic_bytes: []const u8,
+    source_diagnostic_truncated: bool,
+) bool {
+    std.debug.assert(isTerminalCompactPhase(phase));
+    if (compact.terminal_publication.cmpxchgStrong(
+        .open,
+        .publishing,
+        .acq_rel,
+        .acquire,
+    ) == null) {
+        const diagnostic = sanitizeInto(
+            compact.terminal_diagnostic,
+            diagnostic_bytes,
+            compact.redaction_secret,
+        );
+        compact.terminal_payload = .{
+            .phase = phase,
+            .cause = cause,
+            .before_context_tokens = before_context_tokens,
+            .after_context_tokens = after_context_tokens,
+            .usage = usage,
+            .session_disposition_at_completion = session_disposition_at_completion,
+            .diagnostic_len = diagnostic.len,
+            .diagnostic_truncated = source_diagnostic_truncated or diagnostic.truncated,
+            .diagnostic_redacted = diagnostic.redacted,
+        };
+        compact.terminal_publication.store(.published, .release);
+        return true;
+    }
+    _ = compactTerminalPayload(compact).?;
+    return false;
+}
+
 fn executeCatalogJob(context: *anyopaque) void {
     const job: *CatalogJob = @ptrCast(@alignCast(context));
     const claimed = job.state.cmpxchgStrong(
@@ -5906,11 +6433,30 @@ fn cancelPreparedRunOrPanic(
     );
 }
 
+fn cancelPreparedCompactOrPanic(
+    session: *lifecycle.Session,
+    operation_id: u64,
+) void {
+    session.cancelPreparedCompact(operation_id) catch |err| std.debug.panic(
+        "Executor removed queued compact {d}, but Agent rejected prepared cancellation: {s}",
+        .{ operation_id, @errorName(err) },
+    );
+}
+
 fn releaseWorkerReference(run: *RunRecord) void {
     std.debug.assert(run.worker_reference_held.swap(false, .acq_rel));
     const references = &run.task.worker_references;
     const previous = references.fetchSub(1, .release);
     std.debug.assert(previous != 0);
+}
+
+fn releaseCompactReferences(compact: *CompactRecord) void {
+    if (compact.session_reference_held.swap(false, .acq_rel))
+        compact.session.releaseReference();
+    if (compact.worker_reference_held.swap(false, .acq_rel)) {
+        const previous = compact.task.worker_references.fetchSub(1, .release);
+        std.debug.assert(previous != 0);
+    }
 }
 
 fn noChangeNotification(_: ?*anyopaque) bool {
@@ -5990,6 +6536,7 @@ fn scheduledFailure(err: anyerror) scheduled_tasks_impl.FailureReason {
         error.TaskCapacity,
         error.WorkspaceCapacity,
         error.RunCapacity,
+        error.CompactCapacity,
         error.ExecutorShuttingDown,
         error.QueueFull,
         => .capacity_reached,
@@ -6269,6 +6816,77 @@ fn currentRunPhase(view: *const TaskView) ?RunPhase {
     return if (isTerminalPhase(phase)) null else phase;
 }
 
+fn hasActiveOperation(view: *const TaskView) bool {
+    return switch (view.active_operation) {
+        .none => false,
+        .run => |id| if (findRun(view.runs, id)) |run|
+            !isTerminalPhase(runPhase(run))
+        else
+            false,
+        .compact => |id| if (findCompact(view.compacts, id)) |compact|
+            compactTerminalPayload(compact) == null
+        else
+            false,
+    };
+}
+
+fn lastFinalizedRunId(view: *const TaskView) ?u64 {
+    var latest: u64 = 0;
+    for (view.runs) |*entry| {
+        const run = &(entry.* orelse continue);
+        if (!run.event_stream_finalized or productTerminalFacts(run) == null) continue;
+        latest = @max(latest, run.id);
+    }
+    return if (latest == 0) null else latest;
+}
+
+fn isTerminalCompactPhase(phase: CompactPhase) bool {
+    return switch (phase) {
+        .queued, .compacting, .stopping => false,
+        .compacted, .no_change, .degraded, .aborted, .failed => true,
+    };
+}
+
+fn compactTerminalPayload(
+    compact: *const CompactRecord,
+) ?*const CompactTerminalPayload {
+    while (true) switch (compact.terminal_publication.load(.acquire)) {
+        .open => return null,
+        .publishing => std.atomic.spinLoopHint(),
+        .published => return &compact.terminal_payload,
+    };
+}
+
+fn activeCompactPhase(compact: *const CompactRecord) CompactPhase {
+    if (compact.pending_interruption.load(.acquire) != .none) return .stopping;
+    return switch (compact.agent_handoff.load(.acquire)) {
+        .queued, .starting => .queued,
+        .running, .finishing => .compacting,
+    };
+}
+
+fn pendingExternalInterruption(
+    compact: *const CompactRecord,
+) lifecycle.ExternalInterruption {
+    return switch (compact.pending_interruption.load(.acquire)) {
+        .none => unreachable,
+        .user_cancel => .user_cancel,
+        .timeout => .timeout,
+        .session_close => .session_close,
+        .app_shutdown => .app_shutdown,
+    };
+}
+
+fn compactCauseForInterruption(
+    interruption: lifecycle.ExternalInterruption,
+) CompactCause {
+    return switch (interruption) {
+        .user_cancel, .timeout => .user_cancel,
+        .session_close => .session_close,
+        .app_shutdown => .app_shutdown,
+    };
+}
+
 fn continuationAvailable(capability: ContinuationCapability) bool {
     return switch (capability) {
         .available => true,
@@ -6289,11 +6907,6 @@ fn foldTerminalDisposition(
             task.continuation = .{ .unavailable = .closing };
         },
     }
-}
-
-fn hasNonTerminalRun(view: *const TaskView) bool {
-    if (currentRunPhase(view)) |phase| return !isTerminalPhase(phase);
-    return false;
 }
 
 fn hasUnfinalizedTerminalEvents(view: *const TaskView) bool {
@@ -6500,6 +7113,17 @@ fn findRun(entries: []?RunRecord, run_id: u64) ?*RunRecord {
     return null;
 }
 
+fn findCompact(
+    entries: []?CompactRecord,
+    operation_id: u64,
+) ?*CompactRecord {
+    for (entries) |*entry| {
+        const compact = &(entry.* orelse continue);
+        if (compact.id == operation_id) return compact;
+    }
+    return null;
+}
+
 fn toolRouteDigest(id: []const u8) [tool_route_digest_bytes]u8 {
     var digest: [tool_route_digest_bytes]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(id, &digest, .{});
@@ -6668,6 +7292,16 @@ fn worstCaseSnapshotBytes(limits: Limits) ?usize {
         total,
         std.math.mul(usize, runs, run_snapshot_overhead) catch return null,
     ) catch return null;
+    const compacts = std.math.mul(
+        usize,
+        limits.max_tasks,
+        limits.max_compacts_per_task,
+    ) catch return null;
+    total = std.math.add(
+        usize,
+        total,
+        std.math.mul(usize, compacts, compact_snapshot_overhead) catch return null,
+    ) catch return null;
     const tools = std.math.mul(usize, runs, limits.max_tools_per_run) catch return null;
     total = std.math.add(
         usize,
@@ -6822,6 +7456,11 @@ fn testWorkbench() !Workbench {
     );
     const runs = try workbench.allocator.alloc(?RunRecord, workbench.limits.max_runs_per_task);
     @memset(runs, null);
+    const compacts = try workbench.allocator.alloc(
+        ?CompactRecord,
+        workbench.limits.max_compacts_per_task,
+    );
+    @memset(compacts, null);
     const ui_history = try workbench.allocator.alloc(?UiRecord, workbench.limits.max_ui_history_per_task);
     @memset(ui_history, null);
     const tools = try workbench.allocator.alloc(?ToolView, workbench.limits.max_tools_per_run);
@@ -6890,9 +7529,11 @@ fn testWorkbench() !Workbench {
         .workspace_root = workspace,
         .title = try workbench.copyBounded("", workbench.limits.max_task_title_bytes),
         .runs = runs,
+        .compacts = compacts,
         .next_run_generation = 1,
         .ui_history = ui_history,
         .active_run_id = 7,
+        .active_operation = .{ .run = 7 },
     };
     return workbench;
 }
@@ -8163,6 +8804,56 @@ test "terminal publication is allocation-free write-once bounded history" {
     try std.testing.expectEqual(@as(?RunCause, .event_pipeline_failure), terminalPayload(run).?.cause);
 }
 
+test "compact terminal publication is write-once and outranks late cancellation" {
+    var diagnostic_storage: [32]u8 = undefined;
+    var compact = CompactRecord{
+        .id = 1,
+        .after_run_id = 7,
+        .terminal_diagnostic = &diagnostic_storage,
+    };
+    try std.testing.expectEqual(CompactPhase.queued, activeCompactPhase(&compact));
+    try std.testing.expect(commitCompactProductTerminal(
+        &compact,
+        .compacted,
+        null,
+        .reusable,
+        .{ .input_tokens = 5, .output_tokens = 2 },
+        100,
+        40,
+        "terminal diagnostic",
+        false,
+    ));
+    _ = compact.pending_interruption.cmpxchgStrong(
+        .none,
+        .user_cancel,
+        .acq_rel,
+        .acquire,
+    );
+    const terminal = compactTerminalPayload(&compact).?;
+    try std.testing.expectEqual(CompactPhase.compacted, terminal.phase);
+    try std.testing.expectEqual(@as(?CompactCause, null), terminal.cause);
+    try std.testing.expectEqual(@as(u64, 100), terminal.before_context_tokens);
+    try std.testing.expectEqual(@as(u64, 40), terminal.after_context_tokens);
+    try std.testing.expectEqual(@as(u64, 5), terminal.usage.input_tokens);
+    try std.testing.expectEqualStrings(
+        "terminal diagnostic",
+        compact.terminal_diagnostic[0..terminal.diagnostic_len],
+    );
+    try std.testing.expect(!commitCompactProductTerminal(
+        &compact,
+        .aborted,
+        .user_cancel,
+        .reusable,
+        .{},
+        0,
+        0,
+        "late mutation",
+        false,
+    ));
+    try std.testing.expectEqual(CompactPhase.compacted, compactTerminalPayload(&compact).?.phase);
+    try std.testing.expectEqual(@as(?CompactCause, null), compactTerminalPayload(&compact).?.cause);
+}
+
 test "terminal disposition folds exactly once without reopening a closing Task" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
@@ -8492,6 +9183,11 @@ test "default snapshot budget contains the maximum structural projection" {
         );
         const runs = try workbench.allocator.alloc(?RunRecord, limits.max_runs_per_task);
         @memset(runs, null);
+        const compacts = try workbench.allocator.alloc(
+            ?CompactRecord,
+            limits.max_compacts_per_task,
+        );
+        @memset(compacts, null);
         const ui_history = try workbench.allocator.alloc(?UiRecord, limits.max_ui_history_per_task);
         @memset(ui_history, null);
         for (0..limits.max_runs_per_task) |run_index| {
@@ -8525,6 +9221,29 @@ test "default snapshot budget contains the maximum structural projection" {
                 .tools = tools,
                 .status_text = try workbench.copyBounded("", limits.max_tool_field_bytes),
                 .terminal_diagnostic = try workbench.allocTrackedCapacity(limits.max_terminal_diagnostic_bytes),
+            };
+        }
+        for (0..limits.max_compacts_per_task) |compact_index| {
+            compacts[compact_index] = .{
+                .id = @intCast(compact_index + 1),
+                .after_run_id = 1,
+                .terminal_publication = .init(.published),
+                .terminal_payload = .{
+                    .phase = .compacted,
+                    .cause = null,
+                    .before_context_tokens = std.math.maxInt(u64),
+                    .after_context_tokens = std.math.maxInt(u64),
+                    .usage = .{
+                        .input_tokens = std.math.maxInt(u64),
+                        .output_tokens = std.math.maxInt(u64),
+                        .cache_read_input_tokens = std.math.maxInt(u64),
+                        .cache_creation_input_tokens = std.math.maxInt(u64),
+                    },
+                    .session_disposition_at_completion = .reusable,
+                },
+                .terminal_diagnostic = try workbench.allocTrackedCapacity(
+                    limits.max_terminal_diagnostic_bytes,
+                ),
             };
         }
         workbench.tasks[task_index] = .{
@@ -8571,6 +9290,7 @@ test "default snapshot budget contains the maximum structural projection" {
             .workspace_root = try workbench.copyBounded("", limits.max_workspace_bytes),
             .title = try workbench.copyBounded("", limits.max_task_title_bytes),
             .runs = runs,
+            .compacts = compacts,
             .next_run_generation = @intCast(limits.max_runs_per_task),
             .ui_history = ui_history,
         };

@@ -88,6 +88,8 @@ function renderGate(account) {
       cancelDisabled: false,
       connectionFailed: false,
       connectionRetryable: true,
+      connectionTitleId: "connection.failed",
+      connectionHelpId: "connection.failed_help",
       reconnecting: false,
       notice: "Workbench connected.",
       ...callbacks,
@@ -103,6 +105,8 @@ function renderGateWith(account, props) {
       cancelDisabled: false,
       connectionFailed: false,
       connectionRetryable: true,
+      connectionTitleId: "connection.failed",
+      connectionHelpId: "connection.failed_help",
       reconnecting: false,
       notice: "Workbench connected.",
       ...callbacks,
@@ -690,7 +694,10 @@ test("stale application components expose terminal recovery instead of reconnect
     {
       connectionFailed: true,
       connectionRetryable: false,
-      connectionDiagnostic: "snapshot contract mismatch",
+      connectionTitleId: "connection.component_mismatch",
+      connectionHelpId: "connection.component_mismatch_help",
+      connectionSourceId: "connection.source.bootstrap",
+      connectionDiagnostic: "Host requires Renderer Bridge revision 1",
     },
   );
   assert.match(markup, /MetaWork components do not match/);
@@ -699,6 +706,9 @@ test("stale application components expose terminal recovery instead of reconnect
     /rebuild or reinstall the matching application components/,
   );
   assert.match(markup, />Close MetaWork</);
-  assert.match(markup, /snapshot contract mismatch/);
+  assert.match(
+    markup,
+    /Renderer contract: Host requires Renderer Bridge revision 1/,
+  );
   assert.doesNotMatch(markup, />Reconnect</);
 });

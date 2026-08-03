@@ -28,6 +28,158 @@ const cancelOnThread = fixture.cancelOnThread;
 const failPipelineOnThread = fixture.failPipelineOnThread;
 const CallbackSignal = fixture.CallbackSignal;
 
+const CompactThreadContext = struct {
+    session: *lifecycle.Session,
+    operation_id: u64,
+    result: ?lifecycle.CompactTerminalResult = null,
+};
+
+fn compactOnThread(context: *CompactThreadContext) void {
+    context.result = context.session.executePreparedCompact(
+        context.operation_id,
+    ) catch unreachable;
+}
+
+test "manual compact is a typed Session operation and preserves Run identity" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 1,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    const session = try openSession(runtime);
+    const operation_id = try session.prepareCompact();
+    try std.testing.expectEqual(@as(u64, 1), operation_id);
+    try std.testing.expectEqual(
+        lifecycle.SessionState.compact_queued,
+        session.snapshot().state,
+    );
+    try std.testing.expectError(
+        error.SessionNotIdle,
+        session.prepareRun(.{ .text = "must wait" }),
+    );
+    var terminal = try session.executePreparedCompact(operation_id);
+    defer terminal.deinit();
+    try std.testing.expectEqual(@as(?lifecycle.CompactOutcome, .compacted), terminal.outcome);
+    try std.testing.expectEqual(@as(u64, 100), terminal.before_context_tokens);
+    try std.testing.expectEqual(@as(u64, 40), terminal.after_context_tokens);
+    try std.testing.expectEqual(@as(u64, 5), terminal.input_tokens);
+    try std.testing.expectEqual(lifecycle.SessionDisposition.reusable, terminal.session_disposition_at_completion);
+    try std.testing.expectEqual(lifecycle.SessionState.idle, session.snapshot().state);
+
+    const run_id = try submitSession(session, "continue after compact");
+    try session.waitRun(run_id);
+    var run_terminal = takeTestTerminal(session, run_id);
+    defer run_terminal.deinit();
+    try std.testing.expectEqual(@as(u64, 1), run_id);
+    try closeSession(session, .session_close);
+}
+
+test "manual compact cancellation waits for the typed aborted result" {
+    fake_core.reset();
+    fake_core.setNextPlan(.controlled);
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 1,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    const session = try openSession(runtime);
+    const operation_id = try session.prepareCompact();
+    var context = CompactThreadContext{
+        .session = session,
+        .operation_id = operation_id,
+    };
+    const thread = try std.Thread.spawn(.{}, compactOnThread, .{&context});
+    try session.waitForState(.compacting);
+    try session.requestCompactCancellation(operation_id, .user_cancel);
+    thread.join();
+    var terminal = context.result.?;
+    defer terminal.deinit();
+    try std.testing.expectEqual(@as(?lifecycle.CompactOutcome, .aborted), terminal.outcome);
+    try std.testing.expectEqual(@as(?sdk.Status, .ok), terminal.abort_status);
+    try std.testing.expectEqual(@as(?lifecycle.ExternalInterruption, .user_cancel), terminal.interruption);
+    fake_core.lock();
+    const abort_calls = fake_core.compact_abort_calls;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 1), abort_calls);
+    try closeSession(session, .session_close);
+}
+
+test "accepted compact cancellation requires the typed aborted result" {
+    fake_core.reset();
+    fake_core.setNextPlan(.controlled);
+    fake_core.forceNextCompactAbortStatus(wire.STATUS_OK);
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 1,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    const session = try openSession(runtime);
+    const operation_id = try session.prepareCompact();
+    var context = CompactThreadContext{
+        .session = session,
+        .operation_id = operation_id,
+    };
+    const thread = try std.Thread.spawn(.{}, compactOnThread, .{&context});
+    try session.waitForState(.compacting);
+    try session.requestCompactCancellation(operation_id, .user_cancel);
+    fake_core.releaseControlled();
+    thread.join();
+    var terminal = context.result.?;
+    defer terminal.deinit();
+    try std.testing.expectEqual(
+        @as(?lifecycle.TerminalFailure, .dependency_contract),
+        terminal.failure,
+    );
+    try std.testing.expectEqual(@as(?sdk.Status, .ok), terminal.abort_status);
+    try std.testing.expectEqual(
+        lifecycle.SessionDisposition.poisoned,
+        terminal.session_disposition_at_completion,
+    );
+    try std.testing.expectEqual(lifecycle.SessionState.poisoned, session.snapshot().state);
+    try closeSession(session, .session_close);
+}
+
+test "malformed compact result poisons Session and queued compact can be cancelled" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 1,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    const session = try openSession(runtime);
+    const cancelled_id = try session.prepareCompact();
+    try session.cancelPreparedCompact(cancelled_id);
+    try std.testing.expectEqual(lifecycle.SessionState.idle, session.snapshot().state);
+    fake_core.makeNextCompactResultMalformed();
+    const operation_id = try session.prepareCompact();
+    var terminal = try session.executePreparedCompact(operation_id);
+    defer terminal.deinit();
+    try std.testing.expectEqual(
+        @as(?lifecycle.TerminalFailure, .dependency_contract),
+        terminal.failure,
+    );
+    try std.testing.expectEqual(lifecycle.SessionDisposition.poisoned, terminal.session_disposition_at_completion);
+    try std.testing.expectEqual(lifecycle.SessionState.poisoned, session.snapshot().state);
+    try closeSession(session, .session_close);
+}
+
 test "Runtime rejects revision 4 tables without required Skill capabilities" {
     var api = fake_api;
     api.capabilities &= ~wire.CAP_SKILL_CATALOG;

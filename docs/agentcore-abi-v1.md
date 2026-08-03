@@ -38,7 +38,7 @@ Windows 当前 follow-up bundle 不改变 ABI 或 MetaWork 产品合同；它把
 | Runtime           | 创建/销毁共享 Runtime；按 Workspace root/home/epoch query immutable Skill catalog snapshot                        |
 | Catalog ownership | query 返回 Host handle 与 descriptor buffer；descriptor、SDK parsed value、catalog handle 各自按合同释放          |
 | Session           | 创建/销毁 Session；catalog 与显式 Skill selection 成对绑定，并仅在 idle 时通过 `session_update_skills` 原子替换   |
-| Session mutation  | ABI 提供 model、Skill、permission-rules replacement 与 manual compact；MetaWork 当前只消费 all-enabled Skill 更新 |
+| Session mutation  | ABI 提供 model、Skill、permission-rules replacement 与 manual compact；MetaWork 消费 all-enabled Skill 更新和 typed manual compact |
 | 同步 Run          | `session_run_input` 接收 tagged Text/Skill input；每 Session 至多一个 active Run                                  |
 | built-in tools    | Session 可按 allowlist 使用 AgentCore built-in Read/Bash/Edit 等工具；Skill authority 只能进一步收窄              |
 | callback identity | Event、UI 和 Host tool callback 共享 validated `RunContext`：Session handle、run ID、Session-lifetime session ID  |
@@ -150,7 +150,18 @@ candidate acceptance 通过 exact artifact 校验和官方 Zig package 的 sourc
 | permission mode codes                             | 只使用 SDK 常量；不保留旧数值映射                                                 |
 | revision 4 `session_refresh_skill_catalog`        | 删除；以 `session_update_skills` 原子替换 catalog 与显式 selection                |
 
-revision 5 的新 mutation entry 是 ABI 必需函数，不等于 MetaWork 产品能力自动开放。当前 Host 在 Session create 与 catalog refresh 中固定使用“全部启用、无 exception”的 Skill selection，并保持 `permission_rules = null`；不注册 set-model、manual compact、permission-rule 或 Skill toggle 产品入口。fake API 只为未消费 entry 提供满足 function-table 校验的最小失败 stub，不模拟上游实现。
+revision 5 的新 mutation entry 是 ABI 必需函数，不等于 MetaWork 产品能力自动开放。当前 Host 在 Session create 与 catalog refresh 中固定使用“全部启用、无 exception”的 Skill selection，并保持 `permission_rules = null`；只开放 Workbench-owned manual compact，不注册 set-model、permission-rule 或 Skill toggle 产品入口。fake API 必须真实模拟 compact identity、result、abort 与 mutual-exclusion 语义；其他未消费 entry 只提供满足 function-table 校验的最小失败 stub。
+
+### Manual compact 消费合同
+
+- `operation_id` 由 Host 在每个 Session 独立分配，非零且严格递增；pre-admission rejection 不消费 ID，admitted terminal path 消费 ID；
+- revision 5 只提供 canonical default best-effort policy，不接受 target token budget，也不保证结果适配任意 model context window；
+- `STATUS_OK` 后才读取并完整校验 `CompactResultV1`；outcome 必须穷尽映射 `compacted / no_change / degraded / aborted`，reserved/layout/unknown outcome fail closed；
+- accepted cancellation 必须返回 `STATUS_OK + COMPACT_ABORTED`，且不提交 Conversation 变化；abort acknowledgement 不是 terminal result；
+- before/after context token 是估算，不是 provider billing；四个 usage 字段是本次 compact 独立的 provider usage delta；revision 5 不提供 degraded reason；
+- Run、compact、model/Skill/permission mutation 和 destroy 在同一 Session 上互斥；matching abort 只允许与对应 active compact 重叠，Host 必须等待 abort call 返回后才能在同一 handle 上发起后续调用；
+- `session_compact` 的 `invalid_argument / busy / resource_limit / stale_compact` 是 pre-admission、Session reusable；`out_of_memory / core_error / internal_error` 关闭 continuation；`invalid_state` 表示 Session 已不可继续；其他 known-operation status 或 unknown status 视为 dependency contract failure；
+- `session_abort_compact` 只接受 `ok / invalid_argument / too_late / invalid_state / stale_compact`；其他 known-operation status 或 unknown status 视为 dependency contract failure。无论 abort 返回何值，Host 都必须等待原 compact call 收口后再决定 terminal product state。
 
 ## 6. 工具与 Workspace
 

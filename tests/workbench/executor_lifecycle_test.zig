@@ -2,6 +2,7 @@ const fixture = @import("lifecycle_fixture");
 const std = fixture.std;
 const lifecycle = fixture.lifecycle;
 const workbench_api = fixture.workbench_api;
+const wire = fixture.wire;
 const fake_core = &fixture.fake_core;
 const openSession = fixture.openSession;
 const submitSession = fixture.submitSession;
@@ -25,6 +26,35 @@ fn waitCatalogReady(
             .unavailable => return error.TestUnexpectedResult,
             .uninitialized, .loading => std.Thread.yield() catch {},
         }
+    }
+    return error.TestUnexpectedResult;
+}
+
+fn waitTaskSnapshot(
+    runtime: *lifecycle.Runtime,
+    workbench: *workbench_api.Workbench,
+    task_marker: []const u8,
+    needle: []const u8,
+) !void {
+    var output: [128 * 1024]u8 = undefined;
+    for (0..10_000) |_| {
+        while (runtime.takeEvent()) |value| {
+            var envelope = value;
+            defer envelope.deinit();
+            try workbench.applyEvent(&envelope);
+        }
+        workbench.markTerminalRunsBeforeEventDrain();
+        while (runtime.takeEvent()) |value| {
+            var envelope = value;
+            defer envelope.deinit();
+            try workbench.applyEvent(&envelope);
+        }
+        workbench.finalizeMarkedTerminalRunsAfterEventDrain();
+        const snapshot = try workbench.writeSnapshot(&output);
+        if (std.mem.indexOf(u8, snapshot, task_marker)) |start| {
+            if (std.mem.indexOf(u8, snapshot[start..], needle) != null) return;
+        }
+        std.Thread.yield() catch {};
     }
     return error.TestUnexpectedResult;
 }
@@ -958,6 +988,255 @@ test "Workbench cancel of a completed Run is an idempotent no-op" {
 
     try workbench.closeTask(task_id);
     try waitWorkbenchSnapshot(runtime, &workbench, "\"lifecycle\":\"closed\"");
+}
+
+test "Workbench manual compact uses the active operation lane and appends history" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_sessions = 1,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var workbench = try workbench_api.Workbench.init(
+        std.testing.allocator,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 2,
+            .max_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_compacts_per_task = 2,
+            .max_tools_per_run = 1,
+        },
+        workbenchConfiguration(),
+    );
+    defer workbench.deinit();
+    try installWorkbenchExecution(&workbench);
+
+    const task_id = try workbench.createTask(workbenchTaskInput());
+    try std.testing.expectError(
+        error.NoSuchRun,
+        workbench.compactTaskAtBinding(task_id, 1),
+    );
+    _ = try workbench.runTask(task_id, .{ .text = "establish conversation" });
+    try waitWorkbenchSnapshot(runtime, &workbench, "\"lastRunOutcome\":\"completed\"");
+
+    _ = try workbench.compactTaskAtBinding(task_id, 1);
+    try waitWorkbenchSnapshot(runtime, &workbench, "\"phase\":\"compacted\"");
+    _ = try workbench.compactTaskAtBinding(task_id, 1);
+    try waitWorkbenchSnapshot(runtime, &workbench, "\"operationId\":\"2\"");
+    try std.testing.expectError(
+        error.CompactCapacity,
+        workbench.compactTaskAtBinding(task_id, 1),
+    );
+
+    var storage: [128 * 1024]u8 = undefined;
+    const snapshot = try workbench.writeSnapshot(&storage);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"activeOperation\":null",
+    ) != null);
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        std.mem.count(u8, snapshot, "\"afterRunId\":\"1\""),
+    );
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"beforeContextTokens\":\"100\",\"afterContextTokens\":\"40\"",
+    ) != null);
+
+    try workbench.closeTask(task_id);
+    try waitWorkbenchSnapshot(runtime, &workbench, "\"lifecycle\":\"closed\"");
+}
+
+test "Workbench compact cancellation and close wait for the Agent terminal result" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_sessions = 1,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var workbench = try workbench_api.Workbench.init(
+        std.testing.allocator,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 2,
+            .max_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_compacts_per_task = 2,
+            .max_tools_per_run = 1,
+        },
+        workbenchConfiguration(),
+    );
+    defer workbench.deinit();
+    try installWorkbenchExecution(&workbench);
+
+    const task_id = try workbench.createTask(workbenchTaskInput());
+    _ = try workbench.runTask(task_id, .{ .text = "establish conversation" });
+    try waitWorkbenchSnapshot(runtime, &workbench, "\"lastRunOutcome\":\"completed\"");
+    fake_core.setSessionPlan(.controlled);
+    fake_core.rearmControlled();
+    const operation_id = try workbench.compactTaskAtBinding(task_id, 1);
+    try waitWorkbenchSnapshot(runtime, &workbench, "\"phase\":\"compacting\"");
+    try std.testing.expectError(
+        error.TaskBusy,
+        workbench.runTask(task_id, .{ .text = "must wait" }),
+    );
+    try workbench.cancelCompact(task_id, operation_id);
+    try waitWorkbenchSnapshot(runtime, &workbench, "\"phase\":\"aborted\"");
+    try waitWorkbenchSnapshot(runtime, &workbench, "\"activeOperation\":null");
+
+    fake_core.rearmControlled();
+    _ = try workbench.compactTaskAtBinding(task_id, 1);
+    try waitWorkbenchSnapshot(runtime, &workbench, "\"phase\":\"compacting\"");
+    try workbench.closeTask(task_id);
+    try waitWorkbenchSnapshot(runtime, &workbench, "\"lifecycle\":\"closed\"");
+    fake_core.lock();
+    const abort_calls = fake_core.compact_abort_calls;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 2), abort_calls);
+}
+
+test "Workbench terminal compact result wins a too-late cancellation race" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_sessions = 1,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var workbench = try workbench_api.Workbench.init(
+        std.testing.allocator,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 2,
+            .max_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_compacts_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        workbenchConfiguration(),
+    );
+    defer workbench.deinit();
+    try installWorkbenchExecution(&workbench);
+
+    const task_id = try workbench.createTask(workbenchTaskInput());
+    _ = try workbench.runTask(task_id, .{ .text = "establish conversation" });
+    try waitWorkbenchSnapshot(runtime, &workbench, "\"lastRunOutcome\":\"completed\"");
+    fake_core.setSessionPlan(.controlled);
+    fake_core.rearmControlled();
+    fake_core.forceNextCompactAbortStatus(wire.STATUS_TOO_LATE);
+    const operation_id = try workbench.compactTaskAtBinding(task_id, 1);
+    try waitWorkbenchSnapshot(runtime, &workbench, "\"phase\":\"compacting\"");
+    try workbench.cancelCompact(task_id, operation_id);
+    try waitWorkbenchSnapshot(runtime, &workbench, "\"phase\":\"stopping\"");
+    fake_core.releaseControlled();
+    try waitWorkbenchSnapshot(runtime, &workbench, "\"phase\":\"compacted\"");
+    try waitWorkbenchSnapshot(runtime, &workbench, "\"activeOperation\":null");
+    try std.testing.expectError(
+        error.NoSuchCompact,
+        workbench.cancelCompact(task_id, operation_id),
+    );
+
+    try workbench.closeTask(task_id);
+    try waitWorkbenchSnapshot(runtime, &workbench, "\"lifecycle\":\"closed\"");
+}
+
+test "Workbench cancels a queued compact without entering AgentCore" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_sessions = 2,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var workbench = try workbench_api.Workbench.init(
+        std.testing.allocator,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 2,
+            .max_tasks = 2,
+            .max_runs_per_task = 2,
+            .max_compacts_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        workbenchConfiguration(),
+    );
+    defer workbench.deinit();
+    try installWorkbenchExecution(&workbench);
+
+    const blocking_task_id = try workbench.createTask(workbenchTaskInput());
+    const compact_task_id = try workbench.createTask(workbenchTaskInput());
+    try workbench.renameTask(blocking_task_id, "blocking target");
+    try workbench.renameTask(compact_task_id, "compact target");
+    _ = try workbench.runTask(blocking_task_id, .{ .text = "first conversation" });
+    try waitTaskSnapshot(
+        runtime,
+        &workbench,
+        "\"title\":\"blocking target\"",
+        "\"lastRunOutcome\":\"completed\"",
+    );
+    _ = try workbench.runTask(compact_task_id, .{ .text = "second conversation" });
+    try waitTaskSnapshot(
+        runtime,
+        &workbench,
+        "\"title\":\"compact target\"",
+        "\"lastRunOutcome\":\"completed\"",
+    );
+
+    fake_core.setSessionPlan(.controlled);
+    fake_core.rearmControlled();
+    const blocking_run_id = try workbench.runTask(
+        blocking_task_id,
+        .{ .text = "occupy the only worker" },
+    );
+    try waitWorkbenchSnapshot(runtime, &workbench, "\"currentRunPhase\":\"running\"");
+    const operation_id = try workbench.compactTaskAtBinding(compact_task_id, 1);
+    try waitWorkbenchSnapshot(runtime, &workbench, "\"phase\":\"queued\"");
+    try workbench.cancelCompact(compact_task_id, operation_id);
+    try waitWorkbenchSnapshot(runtime, &workbench, "\"phase\":\"aborted\"");
+    fake_core.lock();
+    const compact_calls = fake_core.compact_calls;
+    const compact_abort_calls = fake_core.compact_abort_calls;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 0), compact_calls);
+    try std.testing.expectEqual(@as(usize, 0), compact_abort_calls);
+
+    try workbench.cancel(blocking_task_id, blocking_run_id);
+    try waitWorkbenchSnapshot(runtime, &workbench, "\"lastRunOutcome\":\"cancelled\"");
+    try workbench.closeTask(blocking_task_id);
+    try workbench.closeTask(compact_task_id);
+    try waitTaskSnapshot(
+        runtime,
+        &workbench,
+        "\"title\":\"blocking target\"",
+        "\"lifecycle\":\"closed\"",
+    );
+    try waitTaskSnapshot(
+        runtime,
+        &workbench,
+        "\"title\":\"compact target\"",
+        "\"lifecycle\":\"closed\"",
+    );
 }
 
 test "Workbench shutdown terminates a waiting UI Run before joining workers" {

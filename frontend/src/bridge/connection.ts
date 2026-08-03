@@ -1,6 +1,9 @@
 import type { WorkbenchSnapshot } from "./contracts.ts";
 import { BridgeClient } from "./client.ts";
-import { RendererBridgeContractError } from "./contract-error.ts";
+import {
+  RendererBridgeContractError,
+  type RendererBridgeContractErrorCode,
+} from "./contract-error.ts";
 import { RevisionNotificationQueue } from "./revision-notification.ts";
 import { SnapshotDemand } from "./snapshot/snapshot-demand.ts";
 
@@ -22,6 +25,7 @@ export type WorkbenchConnectionStatus =
         | "revision"
         | "host_signal_ack"
         | "host_signal";
+      code: RendererBridgeContractErrorCode;
       diagnostic: string;
     };
 
@@ -251,6 +255,10 @@ export class WorkbenchConnection {
     this.callbacks.onStatus({
       kind: "contract_failed",
       source,
+      code:
+        error instanceof RendererBridgeContractError
+          ? error.code
+          : "invalid_response",
       diagnostic: errorText(error),
     });
   }

@@ -6,6 +6,7 @@ import {
   isSkillDraftCurrent,
   parseSlashInput,
   resolveSlashCandidates,
+  resolveSlashCommandStates,
   skillCatalogRefreshTarget,
   slashCommandNames,
   skillDraftFromCandidate,
@@ -113,7 +114,7 @@ test("Run input conversion rejects unresolved Slash outside the UI layer", () =>
 });
 
 test("desktop Command registry is explicit and excludes CLI session controls", () => {
-  assert.deepEqual(slashCommandNames, ["new"]);
+  assert.deepEqual(slashCommandNames, ["new", "compact"]);
   for (const legacy of [
     "model",
     "status",
@@ -122,9 +123,58 @@ test("desktop Command registry is explicit and excludes CLI session controls", (
     "history",
     "retry",
     "clear",
+    "goal",
     "exit",
   ])
     assert.equal(slashCommandNames.includes(legacy), false);
+});
+
+test("Command availability is derived independently for new task and compact", () => {
+  assert.deepEqual(
+    resolveSlashCommandStates({
+      newTaskDraftActive: true,
+      bridgeUnavailable: false,
+      taskMutationDisabled: false,
+      task: null,
+    }),
+    [
+      {
+        name: "new",
+        enabled: false,
+        disabledReason: "already_new_task",
+      },
+      { name: "compact", enabled: false, disabledReason: "no_history" },
+    ],
+  );
+
+  const idleTask = {
+    lifecycleOpen: true,
+    continuationAvailable: true,
+    archived: false,
+    activeOperation: false,
+    hasFinalizedRun: true,
+  };
+  assert.deepEqual(
+    resolveSlashCommandStates({
+      newTaskDraftActive: false,
+      bridgeUnavailable: false,
+      taskMutationDisabled: false,
+      task: idleTask,
+    }),
+    [
+      { name: "new", enabled: true, disabledReason: null },
+      { name: "compact", enabled: true, disabledReason: null },
+    ],
+  );
+  assert.equal(
+    resolveSlashCommandStates({
+      newTaskDraftActive: false,
+      bridgeUnavailable: false,
+      taskMutationDisabled: true,
+      task: { ...idleTask, activeOperation: true },
+    })[1].disabledReason,
+    "task_busy",
+  );
 });
 
 test("stale Skill drafts retain values but cannot be treated as current", () => {

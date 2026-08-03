@@ -17,8 +17,11 @@ export const enUS = {
   "connection.recovered": "Workbench connection recovered.",
   "connection.failed": "The Workbench view is unavailable.",
   "connection.failed_help": "Reconnect before making changes.",
-  "connection.contract_failed": "MetaWork components do not match",
+  "connection.contract_failed": "MetaWork could not read the Workbench view",
   "connection.contract_failed_help":
+    "Reconnect to load a fresh view. If this continues, close and reopen MetaWork.",
+  "connection.component_mismatch": "MetaWork components do not match",
+  "connection.component_mismatch_help":
     "Close MetaWork, then rebuild or reinstall the matching application components before reopening it.",
   "connection.retry": "Reconnect",
   "connection.retrying": "Reconnecting…",
@@ -237,6 +240,25 @@ export const enUS = {
   "task.delete_confirm_body":
     "The conversation and activity will be removed from MetaWork. Files in the workspace stay untouched.",
   "task.stop": "Stop task",
+  "compact.stop": "Stop compacting",
+  "compact.started": "Context compaction started.",
+  "compact.start_failed": "Context compaction could not be started.",
+  "compact.stop_requested": "Stopping context compaction…",
+  "compact.stop_failed":
+    "The stop request could not be confirmed. Refresh and try again.",
+  "compact.timeline.queued": "Context compaction queued",
+  "compact.timeline.compacting": "Compacting context…",
+  "compact.timeline.stopping": "Stopping context compaction…",
+  "compact.timeline.compacted":
+    "Context compacted · about {before} → {after} tokens",
+  "compact.timeline.no_change": "Context was already compact",
+  "compact.timeline.degraded":
+    "Context compacted with reduced fidelity · about {before} → {after} tokens",
+  "compact.timeline.aborted": "Context compaction stopped",
+  "compact.timeline.failed": "Context compaction failed",
+  "compact.phase.queued": "Compaction queued",
+  "compact.phase.compacting": "Compacting context",
+  "compact.phase.stopping": "Stopping compaction",
   "task.create_failed":
     "The task could not be created. Check your connection and try again.",
   "task.created": "Task created.",
@@ -306,8 +328,13 @@ export const enUS = {
     "This Skill belongs to a different catalog snapshot. Refresh and choose it again.",
   "slash.disabled_unavailable": "This action is temporarily unavailable.",
   "slash.disabled_already_new_task": "A new task draft is already open.",
+  "slash.disabled_task_busy": "Wait for the current task operation to finish.",
+  "slash.disabled_no_history": "Run the task once before compacting context.",
   "slash.command.new": "New task",
   "slash.command.new_help": "Open a fresh task draft.",
+  "slash.command.compact": "Compact context",
+  "slash.command.compact_help":
+    "Compact this task's conversation without starting a new Run.",
   "slash.catalog_refresh_started": "Refreshing the Skill catalog…",
   "slash.catalog_refresh_failed": "The Skill catalog could not be refreshed.",
   "tool.input": "Input",
@@ -363,6 +390,8 @@ export const enUS = {
   "operation.task_create": "Task creation",
   "operation.run_submit": "Starting work",
   "operation.run_stop": "Stopping work",
+  "operation.compact": "Compacting context",
+  "operation.compact_stop": "Stopping context compaction",
   "operation.ui_response": "Sending the response",
   "operation.task_close": "Ending the task",
   "operation.task_rename": "Renaming the task",
@@ -498,6 +527,7 @@ export const enUS = {
     "This task's execution setup is no longer available.",
   "mutation.reason.task_unavailable": "This task is no longer available.",
   "mutation.reason.task_busy": "This task is already working.",
+  "mutation.reason.no_history": "Run this task once before compacting context.",
   "mutation.reason.catalog_loading":
     "Skills are still loading. You can send text or wait and try again.",
   "mutation.reason.catalog_unavailable":
