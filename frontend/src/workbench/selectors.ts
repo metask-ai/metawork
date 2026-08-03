@@ -18,7 +18,7 @@ export function isRunInFlight(task: TaskView | null): boolean {
 
 function activeCompact(task: TaskView) {
   return task.activeOperation?.kind === "compact"
-    ? (task.compacts?.find(
+    ? (task.compacts.find(
         (compact) => compact.operationId === task.activeOperation?.id,
       ) ?? null)
     : null;
@@ -156,7 +156,7 @@ export function taskDisplayState(task: TaskView): TaskDisplayState {
 
 export function taskSignals(task: TaskView): TaskSignals {
   const compact = activeCompact(task);
-  const lastCompact = task.compacts?.at(-1);
+  const lastCompact = task.compacts.at(-1);
   return {
     running:
       task.currentRunPhase === "queued" ||

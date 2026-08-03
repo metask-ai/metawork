@@ -113,6 +113,45 @@ test "manual compact cancellation waits for the typed aborted result" {
     try closeSession(session, .session_close);
 }
 
+test "accepted compact cancellation requires the typed aborted result" {
+    fake_core.reset();
+    fake_core.setNextPlan(.controlled);
+    fake_core.forceNextCompactAbortStatus(wire.STATUS_OK);
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 1,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    const session = try openSession(runtime);
+    const operation_id = try session.prepareCompact();
+    var context = CompactThreadContext{
+        .session = session,
+        .operation_id = operation_id,
+    };
+    const thread = try std.Thread.spawn(.{}, compactOnThread, .{&context});
+    try session.waitForState(.compacting);
+    try session.requestCompactCancellation(operation_id, .user_cancel);
+    fake_core.releaseControlled();
+    thread.join();
+    var terminal = context.result.?;
+    defer terminal.deinit();
+    try std.testing.expectEqual(
+        @as(?lifecycle.TerminalFailure, .dependency_contract),
+        terminal.failure,
+    );
+    try std.testing.expectEqual(@as(?sdk.Status, .ok), terminal.abort_status);
+    try std.testing.expectEqual(
+        lifecycle.SessionDisposition.poisoned,
+        terminal.session_disposition_at_completion,
+    );
+    try std.testing.expectEqual(lifecycle.SessionState.poisoned, session.snapshot().state);
+    try closeSession(session, .session_close);
+}
+
 test "malformed compact result poisons Session and queued compact can be cancelled" {
     fake_core.reset();
     const runtime = try createTestComposition(.{

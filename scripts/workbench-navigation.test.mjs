@@ -84,6 +84,7 @@ function task(overrides) {
     lastRunOutcome: null,
     cause: null,
     runs: [],
+    compacts: [],
     pendingUi: null,
     uiHistory: [],
     ...overrides,

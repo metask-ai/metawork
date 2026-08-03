@@ -1533,6 +1533,11 @@ pub const Session = struct {
         } else {
             self.dependency_contract_failure = true;
         }
+        if (self.compact_abort_status == .ok and
+            (typed_status == null or typed_status.? != .ok or outcome != .aborted))
+        {
+            self.dependency_contract_failure = true;
+        }
         if (self.dependency_contract_failure) {
             failure = .dependency_contract;
             self.state = .poisoned;
@@ -1556,7 +1561,7 @@ pub const Session = struct {
         self: *Session,
         operation_id: u64,
         interruption: ExternalInterruption,
-    ) Error!void {
+    ) error{ NoSuchCompact, SessionClosing }!void {
         self.lock();
         if (operation_id == 0 or operation_id != self.active_compact_id or
             self.compact_done)

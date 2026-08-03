@@ -402,6 +402,27 @@ test("Compact projection is append-only and mutually exclusive with Run work", (
   active.tasks[0].activeOperation = { kind: "compact", id: "11" };
   assert.deepEqual(decodeWorkbenchSnapshot(active), active);
 
+  const archivedActive = clone(active);
+  archivedActive.tasks[0].archived = true;
+  assert.throws(
+    () => decodeWorkbenchSnapshot(archivedActive),
+    /archived Task cannot have an active Compact/,
+  );
+
+  const closedActive = clone(active);
+  closedActive.tasks[0].lifecycle = "closed";
+  closedActive.tasks[0].continuationAvailable = false;
+  assert.throws(
+    () => decodeWorkbenchSnapshot(closedActive),
+    /closed Task cannot have an active Compact/,
+  );
+
+  const closingActive = clone(active);
+  closingActive.tasks[0].lifecycle = "closing";
+  closingActive.tasks[0].continuationAvailable = false;
+  closingActive.tasks[0].compacts[0].phase = "stopping";
+  assert.deepEqual(decodeWorkbenchSnapshot(closingActive), closingActive);
+
   const simultaneous = clone(active);
   simultaneous.tasks[0].runs.push({
     ...clone(simultaneous.tasks[0].runs[0]),

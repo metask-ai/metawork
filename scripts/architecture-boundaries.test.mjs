@@ -888,9 +888,9 @@ test("Renderer Bridge fixed revision 1 owns the exact product wire catalog", () 
 
 test("lifecycle tests are grouped by invariant", () => {
   const cases = [
-    ["tests/agent/lifecycle_test.zig", 40],
+    ["tests/agent/lifecycle_test.zig", 41],
     ["tests/agent/event_pump_test.zig", 5],
-    ["tests/workbench/executor_lifecycle_test.zig", 19],
+    ["tests/workbench/executor_lifecycle_test.zig", 21],
     ["tests/integration/lifecycle/lifecycle_test.zig", 4],
   ];
   for (const [path, expectedCount] of cases) {

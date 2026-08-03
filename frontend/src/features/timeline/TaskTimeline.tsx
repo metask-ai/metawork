@@ -352,7 +352,7 @@ export function TaskTimeline({
                     )}
                   </div>
                 </article>
-                {(task.compacts ?? [])
+                {task.compacts
                   .filter((compact) => compact.afterRunId === run.id)
                   .map((compact) => (
                     <CompactTimelineEvent

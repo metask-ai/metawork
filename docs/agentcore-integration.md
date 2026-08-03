@@ -189,6 +189,8 @@ Open.*
 
 `WaitingUi` 是仍在执行的同步 Run 子状态，不是可持久化 `suspended`。
 
+Compact 的 `Queued / Compacting / Stopping` 不是由 Worker 直接覆盖同一个 phase atomic。Workbench record 分开保存 executor handoff、first-writer pending interruption 与三态 terminal publication；main thread 以 terminal 优先派生产品 phase。`published` 是 terminal linearization point，payload 与 diagnostic bytes 在 release-store 后不可修改；pending interruption 是 advisory control fact，在 terminal race 后即使被设置也不得改变真实 outcome。
+
 ### 每 Session 规则
 
 - 至多一个 in-flight operation；Run、manual compact、model/Skill/permission mutation 与 destroy 互斥；
@@ -253,6 +255,7 @@ Renderer Bridge revision 1 原地 hard cut 后，`metawork.tasks.run` 只接受 
 - Host shutdown 对全部 Session 执行同样状态机，不另写一条危险的快速路径。
 - Host shutdown 本身必须串行化；并发调用不得重复 join executor、`session_destroy` 或 `runtime_destroy`；暂时的 destroy failure 必须可由后续显式 shutdown/close 重试，失败时不得强行 deinit。
 - abort 的 raw status 即使是 stale/too-late 也要保留供 diagnostic/telemetry 使用，且 owned diagnostic 仍按 bundle release contract 释放。
+- queued compact 由 Workbench 从 Executor 移除后调用 `cancelPreparedCompact` 并直接发布 pre-Core `aborted`；已由 Worker claim 的 compact 只登记 pending interruption 并通过 Agent typed cancellation 收口。两条路径都必须进入同一个 allocation-free、no-fail terminal commit，terminal 发布后才 release record references。
 - `Closed` tombstone 保留到 owner 显式 `releaseClosedSession`，以支持幂等 close 和事后 snapshot；释放后指针失效且 Host slot 才可复用。Host shutdown 开始后禁止单独 release，由统一 teardown 持有所有权。
 
 ### 必测 race
@@ -265,6 +268,9 @@ Renderer Bridge revision 1 原地 hard cut 后，`metawork.tasks.run` 只接受 
 - callback fatal 与用户 cancel 同时发生；
 - Host shutdown 多 Session；
 - abort 返回 stale/too-late；
+- accepted compact abort 返回 OK 但原 compact 返回非 aborted；
+- compact terminal publication 与 cancel/snapshot 同时发生；
+- Executor pop 与 queued compact cancel 同时发生；
 - double close / duplicate response；
 - runtime destroy while Session alive；
 - diagnostic/release callback 恰好一次。
@@ -482,12 +488,15 @@ Manual compact 的反向控制遵循同一产品原则，但使用独立 identit
 React stop compact command
 → Native SDK main thread handler
 → validate Task active operation + compact operation ID
-→ session_abort_compact(operation_id)
+→ publish first-writer pending interruption
+→ remove queued Executor job and publish pre-Core aborted
+  OR session_abort_compact(operation_id) after Worker claim
 → join synchronous compact
-→ publish typed compact terminal history
+→ allocation-free write-once terminal publication
+→ publish typed compact terminal history from canonical snapshot
 ```
 
-Compact abort 同样不进入普通 FIFO；accepted cancellation 最终必须由 `session_compact` 返回 `STATUS_OK + COMPACT_ABORTED` 才能发布 aborted，acknowledgement 本身不构成 terminal product state。
+Compact abort 同样不进入普通 FIFO；accepted cancellation 最终必须由 `session_compact` 返回 `STATUS_OK + COMPACT_ABORTED` 才能发布 aborted，acknowledgement 本身不构成 terminal product state。`too_late / stale_compact / invalid_argument / invalid_state` 仍等待并独立验证原 compact result；只有 abort `STATUS_OK` 与非 aborted terminal 的组合属于 dependency contract failure。Compact terminal publication 直接成为产品 terminal fact，不复制 Run 的 event-drain barrier。
 
 生成期 `queue_message` 当前只进入 Host 有界 Session 输入队列，在当前 Run 结束后按确定规则形成下一 Run 输入。它不依赖未接通的 `UiBackend.poll()`。
 

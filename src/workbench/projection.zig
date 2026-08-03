@@ -391,6 +391,14 @@ const CompactCause = enum {
     dependency_contract_failure,
 };
 
+const CompactTerminationDispatch = enum {
+    queued_aborted,
+    requested,
+    already_requested,
+    already_terminal,
+    session_closing,
+};
+
 const ActiveOperation = union(enum) {
     none,
     run: u64,
@@ -574,6 +582,18 @@ const TerminalPayload = struct {
     diagnostic_redacted: bool = false,
 };
 
+const CompactTerminalPayload = struct {
+    phase: CompactPhase,
+    cause: ?CompactCause,
+    before_context_tokens: u64,
+    after_context_tokens: u64,
+    usage: UsageView,
+    session_disposition_at_completion: lifecycle.SessionDisposition,
+    diagnostic_len: usize = 0,
+    diagnostic_truncated: bool = false,
+    diagnostic_redacted: bool = false,
+};
+
 const RunInputRecord = union(enum) {
     text: struct {
         value: []u8,
@@ -623,17 +643,12 @@ const RunRecord = struct {
 const CompactRecord = struct {
     id: u64,
     after_run_id: u64,
-    phase: std.atomic.Value(CompactPhase) = .init(.queued),
-    cause: ?CompactCause = null,
-    before_context_tokens: u64 = 0,
-    after_context_tokens: u64 = 0,
-    usage: UsageView = .{},
-    session_disposition_at_completion: lifecycle.SessionDisposition = .reusable,
+    agent_handoff: std.atomic.Value(AgentHandoffState) = .init(.queued),
+    pending_interruption: std.atomic.Value(PendingInterruption) = .init(.none),
+    terminal_publication: std.atomic.Value(TerminalPublication) = .init(.open),
+    terminal_payload: CompactTerminalPayload = undefined,
     terminal_observed: bool = false,
     terminal_diagnostic: []u8,
-    diagnostic_len: usize = 0,
-    diagnostic_truncated: bool = false,
-    diagnostic_redacted: bool = false,
     redaction_secret: []const u8 = &.{},
     workbench: *Workbench = undefined,
     task: *TaskView = undefined,
@@ -2527,7 +2542,7 @@ pub const Workbench = struct {
             return error.NoSuchCompact;
         const compact = findCompact(view.compacts, operation_id) orelse
             return error.NoSuchCompact;
-        try self.cancelCompactRecord(view, compact, .user_cancel);
+        _ = self.cancelCompactRecord(view, compact, .user_cancel);
     }
 
     fn cancelCompactRecord(
@@ -2535,35 +2550,59 @@ pub const Workbench = struct {
         view: *TaskView,
         compact: *CompactRecord,
         interruption: lifecycle.ExternalInterruption,
-    ) Error!void {
-        const phase = compact.phase.load(.acquire);
-        if (isTerminalCompactPhase(phase)) return;
+    ) CompactTerminationDispatch {
+        if (compactTerminalPayload(compact) != null) {
+            self.syncLifecycle();
+            return .already_terminal;
+        }
+        const pending = pendingInterruption(interruption);
+        const prior = compact.pending_interruption.cmpxchgStrong(
+            .none,
+            pending,
+            .acq_rel,
+            .acquire,
+        );
+        if (compactTerminalPayload(compact) != null) {
+            self.syncLifecycle();
+            return .already_terminal;
+        }
         if (self.executor.cancel(compact)) {
             cancelPreparedCompactOrPanic(compact.session, compact.id);
-            compact.cause = compactCauseForInterruption(interruption);
-            compact.session_disposition_at_completion = if (interruption == .user_cancel)
-                .reusable
-            else
-                .closing;
-            compact.phase.store(.aborted, .release);
-            compact.terminal_observed = true;
+            _ = commitCompactProductTerminal(
+                compact,
+                .aborted,
+                compactCauseForInterruption(pendingExternalInterruption(compact)),
+                if (pendingExternalInterruption(compact) == .user_cancel)
+                    .reusable
+                else
+                    .closing,
+                .{},
+                0,
+                0,
+                "",
+                false,
+            );
             releaseCompactReferences(compact);
-            view.active_operation = .none;
+            self.touchTask(view);
+            self.syncLifecycle();
+            return .queued_aborted;
         } else {
-            compact.phase.store(.stopping, .release);
             compact.session.requestCompactCancellation(
                 compact.id,
-                interruption,
+                pendingExternalInterruption(compact),
             ) catch |err| switch (err) {
                 error.NoSuchCompact, error.SessionClosing => {
                     self.syncLifecycle();
-                    return;
+                    return if (err == error.NoSuchCompact)
+                        .already_terminal
+                    else
+                        .session_closing;
                 },
-                else => return err,
             };
         }
         self.touchTask(view);
         self.bumpRevision();
+        return if (prior == null) .requested else .already_requested;
     }
 
     pub fn taskExecutionIdentity(
@@ -2689,7 +2728,7 @@ pub const Workbench = struct {
             };
             const compact = findCompact(view.compacts, compact_id) orelse
                 return error.NoSuchCompact;
-            try self.cancelCompactRecord(view, compact, .session_close);
+            _ = self.cancelCompactRecord(view, compact, .session_close);
         }
         const cancelled_ui = self.prepareCancelledUiRecord(
             session,
@@ -3044,12 +3083,11 @@ pub const Workbench = struct {
                     changed = true;
                     continue;
                 };
-                const phase = compact.phase.load(.acquire);
-                if (isTerminalCompactPhase(phase)) {
+                if (compactTerminalPayload(compact)) |terminal| {
                     if (!compact.terminal_observed) {
                         foldTerminalDisposition(
                             view,
-                            compact.session_disposition_at_completion,
+                            terminal.session_disposition_at_completion,
                         );
                         compact.terminal_observed = true;
                     }
@@ -3575,11 +3613,11 @@ pub const Workbench = struct {
                 .compact => |operation_id| {
                     const compact = findCompact(view.compacts, operation_id) orelse
                         continue;
-                    self.cancelCompactRecord(
+                    _ = self.cancelCompactRecord(
                         view,
                         compact,
                         .app_shutdown,
-                    ) catch {};
+                    );
                 },
                 .run => |run_id| {
                     const run = findRun(view.runs, run_id) orelse continue;
@@ -3712,24 +3750,37 @@ pub const Workbench = struct {
         compact: *const CompactRecord,
     ) Error!void {
         _ = self;
-        const phase = compact.phase.load(.acquire);
+        const terminal = compactTerminalPayload(compact);
+        const phase = if (terminal) |payload|
+            payload.phase
+        else
+            activeCompactPhase(compact);
         writer.print(
             "{{\"operationId\":\"{d}\",\"afterRunId\":\"{d}\",\"phase\":\"{s}\",\"cause\":",
             .{ compact.id, compact.after_run_id, @tagName(phase) },
         ) catch return error.SnapshotTooLarge;
-        if (compact.cause) |cause|
+        if (if (terminal) |payload| payload.cause else null) |cause|
             jsonValue(writer, @tagName(cause)) catch return error.SnapshotTooLarge
         else
             writer.writeAll("null") catch return error.SnapshotTooLarge;
+        const before_context_tokens = if (terminal) |payload|
+            payload.before_context_tokens
+        else
+            0;
+        const after_context_tokens = if (terminal) |payload|
+            payload.after_context_tokens
+        else
+            0;
+        const usage = if (terminal) |payload| payload.usage else UsageView{};
         writer.print(
             ",\"beforeContextTokens\":\"{d}\",\"afterContextTokens\":\"{d}\",\"usage\":{{\"input\":\"{d}\",\"output\":\"{d}\",\"cacheRead\":\"{d}\",\"cacheCreation\":\"{d}\"}}}}",
             .{
-                compact.before_context_tokens,
-                compact.after_context_tokens,
-                compact.usage.input_tokens,
-                compact.usage.output_tokens,
-                compact.usage.cache_read_input_tokens,
-                compact.usage.cache_creation_input_tokens,
+                before_context_tokens,
+                after_context_tokens,
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cache_read_input_tokens,
+                usage.cache_creation_input_tokens,
             },
         ) catch return error.SnapshotTooLarge;
     }
@@ -5193,13 +5244,6 @@ pub const Workbench = struct {
                     progress_redacted or content_redacted or tool.redacted;
             }
         }
-        for (task.compacts) |*compact_entry| {
-            const compact = &(compact_entry.* orelse continue);
-            compact.diagnostic_redacted = redactFixedWidthNoFail(
-                compact.terminal_diagnostic[0..compact.diagnostic_len],
-                credential,
-            ) or compact.diagnostic_redacted;
-        }
         for (task.ui_history) |*record_entry| {
             const record = &(record_entry.* orelse continue);
             record.redacted = redactFixedWidthNoFail(
@@ -5427,6 +5471,7 @@ pub const Workbench = struct {
     fn deinitCompactRecord(self: *Workbench, compact: *CompactRecord) void {
         std.debug.assert(!compact.worker_reference_held.load(.acquire));
         std.debug.assert(!compact.session_reference_held.load(.acquire));
+        std.debug.assert(compact.terminal_publication.load(.acquire) != .publishing);
         self.freeTracked(compact.terminal_diagnostic);
         compact.* = undefined;
     }
@@ -6122,28 +6167,34 @@ fn executeRunJob(context: *anyopaque) void {
 
 fn executeCompactJob(context: *anyopaque) void {
     const compact: *CompactRecord = @ptrCast(@alignCast(context));
-    _ = compact.phase.cmpxchgStrong(
-        .queued,
-        .compacting,
-        .acq_rel,
-        .acquire,
-    );
+    compact.agent_handoff.store(.starting, .release);
     _ = compact.workbench.change_notifier.notify();
+    compact.agent_handoff.store(.running, .release);
     var terminal = compact.session.executePreparedCompact(compact.id) catch |err| {
-        compact.cause = if (err == error.SessionClosing)
-            .session_close
-        else
-            .dependency_contract_failure;
-        compact.session_disposition_at_completion = if (err == error.SessionClosing)
-            .closing
-        else
-            .poisoned;
-        compact.phase.store(.failed, .release);
+        compact.agent_handoff.store(.finishing, .release);
+        _ = commitCompactProductTerminal(
+            compact,
+            .failed,
+            if (err == error.SessionClosing)
+                .session_close
+            else
+                .dependency_contract_failure,
+            if (err == error.SessionClosing)
+                .closing
+            else
+                .poisoned,
+            .{},
+            0,
+            0,
+            "",
+            false,
+        );
         const notifier = compact.workbench.change_notifier;
         releaseCompactReferences(compact);
         _ = notifier.notify();
         return;
     };
+    compact.agent_handoff.store(.finishing, .release);
     commitCompactTerminal(compact, &terminal);
     terminal.deinit();
     const notifier = compact.workbench.change_notifier;
@@ -6153,10 +6204,24 @@ fn executeCompactJob(context: *anyopaque) void {
 
 fn cancelCompactJobForShutdown(context: *anyopaque) void {
     const compact: *CompactRecord = @ptrCast(@alignCast(context));
+    _ = compact.pending_interruption.cmpxchgStrong(
+        .none,
+        .app_shutdown,
+        .acq_rel,
+        .acquire,
+    );
     cancelPreparedCompactOrPanic(compact.session, compact.id);
-    compact.cause = .app_shutdown;
-    compact.session_disposition_at_completion = .closing;
-    compact.phase.store(.aborted, .release);
+    _ = commitCompactProductTerminal(
+        compact,
+        .aborted,
+        compactCauseForInterruption(pendingExternalInterruption(compact)),
+        .closing,
+        .{},
+        0,
+        0,
+        "",
+        false,
+    );
     const notifier = compact.workbench.change_notifier;
     releaseCompactReferences(compact);
     _ = notifier.notify();
@@ -6166,28 +6231,12 @@ fn commitCompactTerminal(
     compact: *CompactRecord,
     result: *const lifecycle.CompactTerminalResult,
 ) void {
-    const diagnostic = sanitizeInto(
-        compact.terminal_diagnostic,
-        result.diagnostic(),
-        compact.redaction_secret,
-    );
-    compact.diagnostic_len = diagnostic.len;
-    compact.diagnostic_truncated = result.diagnostic_truncated or diagnostic.truncated;
-    compact.diagnostic_redacted = diagnostic.redacted;
-    compact.before_context_tokens = result.before_context_tokens;
-    compact.after_context_tokens = result.after_context_tokens;
-    compact.usage = .{
-        .input_tokens = result.input_tokens,
-        .output_tokens = result.output_tokens,
-        .cache_read_input_tokens = result.cache_read_input_tokens,
-        .cache_creation_input_tokens = result.cache_creation_input_tokens,
-    };
-    compact.session_disposition_at_completion = result.session_disposition_at_completion;
+    var cause: ?CompactCause = null;
     const phase: CompactPhase = if (result.failure == .dependency_contract) failure: {
-        compact.cause = .dependency_contract_failure;
+        cause = .dependency_contract_failure;
         break :failure .failed;
     } else if (result.failure == .abi_status) failure: {
-        compact.cause = if (result.abi_status == .resource_limit)
+        cause = if (result.abi_status == .resource_limit)
             .resource_limit
         else
             .agent_failure;
@@ -6197,17 +6246,73 @@ fn commitCompactTerminal(
         .no_change => .no_change,
         .degraded => .degraded,
         .aborted => aborted: {
-            compact.cause = if (result.interruption) |interruption|
+            cause = if (result.interruption) |interruption|
                 compactCauseForInterruption(interruption)
             else
                 .agent_failure;
             break :aborted .aborted;
         },
     } else missing: {
-        compact.cause = .dependency_contract_failure;
+        cause = .dependency_contract_failure;
         break :missing .failed;
     };
-    compact.phase.store(phase, .release);
+    _ = commitCompactProductTerminal(
+        compact,
+        phase,
+        cause,
+        result.session_disposition_at_completion,
+        .{
+            .input_tokens = result.input_tokens,
+            .output_tokens = result.output_tokens,
+            .cache_read_input_tokens = result.cache_read_input_tokens,
+            .cache_creation_input_tokens = result.cache_creation_input_tokens,
+        },
+        result.before_context_tokens,
+        result.after_context_tokens,
+        result.diagnostic(),
+        result.diagnostic_truncated,
+    );
+}
+
+fn commitCompactProductTerminal(
+    compact: *CompactRecord,
+    phase: CompactPhase,
+    cause: ?CompactCause,
+    session_disposition_at_completion: lifecycle.SessionDisposition,
+    usage: UsageView,
+    before_context_tokens: u64,
+    after_context_tokens: u64,
+    diagnostic_bytes: []const u8,
+    source_diagnostic_truncated: bool,
+) bool {
+    std.debug.assert(isTerminalCompactPhase(phase));
+    if (compact.terminal_publication.cmpxchgStrong(
+        .open,
+        .publishing,
+        .acq_rel,
+        .acquire,
+    ) == null) {
+        const diagnostic = sanitizeInto(
+            compact.terminal_diagnostic,
+            diagnostic_bytes,
+            compact.redaction_secret,
+        );
+        compact.terminal_payload = .{
+            .phase = phase,
+            .cause = cause,
+            .before_context_tokens = before_context_tokens,
+            .after_context_tokens = after_context_tokens,
+            .usage = usage,
+            .session_disposition_at_completion = session_disposition_at_completion,
+            .diagnostic_len = diagnostic.len,
+            .diagnostic_truncated = source_diagnostic_truncated or diagnostic.truncated,
+            .diagnostic_redacted = diagnostic.redacted,
+        };
+        compact.terminal_publication.store(.published, .release);
+        return true;
+    }
+    _ = compactTerminalPayload(compact).?;
+    return false;
 }
 
 fn executeCatalogJob(context: *anyopaque) void {
@@ -6719,7 +6824,7 @@ fn hasActiveOperation(view: *const TaskView) bool {
         else
             false,
         .compact => |id| if (findCompact(view.compacts, id)) |compact|
-            !isTerminalCompactPhase(compact.phase.load(.acquire))
+            compactTerminalPayload(compact) == null
         else
             false,
     };
@@ -6739,6 +6844,36 @@ fn isTerminalCompactPhase(phase: CompactPhase) bool {
     return switch (phase) {
         .queued, .compacting, .stopping => false,
         .compacted, .no_change, .degraded, .aborted, .failed => true,
+    };
+}
+
+fn compactTerminalPayload(
+    compact: *const CompactRecord,
+) ?*const CompactTerminalPayload {
+    while (true) switch (compact.terminal_publication.load(.acquire)) {
+        .open => return null,
+        .publishing => std.atomic.spinLoopHint(),
+        .published => return &compact.terminal_payload,
+    };
+}
+
+fn activeCompactPhase(compact: *const CompactRecord) CompactPhase {
+    if (compact.pending_interruption.load(.acquire) != .none) return .stopping;
+    return switch (compact.agent_handoff.load(.acquire)) {
+        .queued, .starting => .queued,
+        .running, .finishing => .compacting,
+    };
+}
+
+fn pendingExternalInterruption(
+    compact: *const CompactRecord,
+) lifecycle.ExternalInterruption {
+    return switch (compact.pending_interruption.load(.acquire)) {
+        .none => unreachable,
+        .user_cancel => .user_cancel,
+        .timeout => .timeout,
+        .session_close => .session_close,
+        .app_shutdown => .app_shutdown,
     };
 }
 
@@ -8669,6 +8804,56 @@ test "terminal publication is allocation-free write-once bounded history" {
     try std.testing.expectEqual(@as(?RunCause, .event_pipeline_failure), terminalPayload(run).?.cause);
 }
 
+test "compact terminal publication is write-once and outranks late cancellation" {
+    var diagnostic_storage: [32]u8 = undefined;
+    var compact = CompactRecord{
+        .id = 1,
+        .after_run_id = 7,
+        .terminal_diagnostic = &diagnostic_storage,
+    };
+    try std.testing.expectEqual(CompactPhase.queued, activeCompactPhase(&compact));
+    try std.testing.expect(commitCompactProductTerminal(
+        &compact,
+        .compacted,
+        null,
+        .reusable,
+        .{ .input_tokens = 5, .output_tokens = 2 },
+        100,
+        40,
+        "terminal diagnostic",
+        false,
+    ));
+    _ = compact.pending_interruption.cmpxchgStrong(
+        .none,
+        .user_cancel,
+        .acq_rel,
+        .acquire,
+    );
+    const terminal = compactTerminalPayload(&compact).?;
+    try std.testing.expectEqual(CompactPhase.compacted, terminal.phase);
+    try std.testing.expectEqual(@as(?CompactCause, null), terminal.cause);
+    try std.testing.expectEqual(@as(u64, 100), terminal.before_context_tokens);
+    try std.testing.expectEqual(@as(u64, 40), terminal.after_context_tokens);
+    try std.testing.expectEqual(@as(u64, 5), terminal.usage.input_tokens);
+    try std.testing.expectEqualStrings(
+        "terminal diagnostic",
+        compact.terminal_diagnostic[0..terminal.diagnostic_len],
+    );
+    try std.testing.expect(!commitCompactProductTerminal(
+        &compact,
+        .aborted,
+        .user_cancel,
+        .reusable,
+        .{},
+        0,
+        0,
+        "late mutation",
+        false,
+    ));
+    try std.testing.expectEqual(CompactPhase.compacted, compactTerminalPayload(&compact).?.phase);
+    try std.testing.expectEqual(@as(?CompactCause, null), compactTerminalPayload(&compact).?.cause);
+}
+
 test "terminal disposition folds exactly once without reopening a closing Task" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
@@ -9042,14 +9227,19 @@ test "default snapshot budget contains the maximum structural projection" {
             compacts[compact_index] = .{
                 .id = @intCast(compact_index + 1),
                 .after_run_id = 1,
-                .phase = .init(.compacted),
-                .before_context_tokens = std.math.maxInt(u64),
-                .after_context_tokens = std.math.maxInt(u64),
-                .usage = .{
-                    .input_tokens = std.math.maxInt(u64),
-                    .output_tokens = std.math.maxInt(u64),
-                    .cache_read_input_tokens = std.math.maxInt(u64),
-                    .cache_creation_input_tokens = std.math.maxInt(u64),
+                .terminal_publication = .init(.published),
+                .terminal_payload = .{
+                    .phase = .compacted,
+                    .cause = null,
+                    .before_context_tokens = std.math.maxInt(u64),
+                    .after_context_tokens = std.math.maxInt(u64),
+                    .usage = .{
+                        .input_tokens = std.math.maxInt(u64),
+                        .output_tokens = std.math.maxInt(u64),
+                        .cache_read_input_tokens = std.math.maxInt(u64),
+                        .cache_creation_input_tokens = std.math.maxInt(u64),
+                    },
+                    .session_disposition_at_completion = .reusable,
                 },
                 .terminal_diagnostic = try workbench.allocTrackedCapacity(
                     limits.max_terminal_diagnostic_bytes,

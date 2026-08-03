@@ -1297,8 +1297,14 @@ export default function App() {
   }
 
   function runSlashCommand(command: SlashCommandName) {
-    if (command === "new") beginNewTask();
-    if (command === "compact") void compactTask();
+    switch (command) {
+      case "new":
+        beginNewTask();
+        return;
+      case "compact":
+        void compactTask();
+        return;
+    }
   }
 
   async function closeTask() {

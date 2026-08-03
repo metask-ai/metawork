@@ -1236,6 +1236,9 @@ function decodeTask(value: unknown, path: string): TaskView {
     if (activeCompacts.length !== 0)
       fail(path, "Run and Compact cannot be active together");
   } else if (activeOperation?.kind === "compact") {
+    if (archived) fail(path, "an archived Task cannot have an active Compact");
+    if (lifecycle === "closed")
+      fail(path, "a closed Task cannot have an active Compact");
     if (
       activeCompacts.length !== 1 ||
       activeCompacts[0]!.operationId !== activeOperation.id ||

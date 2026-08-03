@@ -30,7 +30,7 @@
 
 已批准的新基线是 Metask AgentCore ABI v1 revision 5。它保留既有 RunContext、typed status/StopReason、CoreEvent/UI codec、Skill catalog 与 tagged Text/Skill Run，并把 Session model、Skill replacement、permission rules 和 manual compact 纳入新的 mandatory function table。精确 API layout、artifact identity、payload 和 manifest schema 只由 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)定义。MetaWork 对它执行 hard cut：active build、Host、probe 和规范文档只接受 revision 5，不保留 revision 4 function table、`session_refresh_skill_catalog` 或 fallback。
 
-当前 checkout 的 verifier、build graph、共享 Agent Session、macOS 与 Windows repository lock 都已切到 revision 5；Windows exact artifact 来自 clean source commit `72655b68b882945f5b47125ddcba1023b0667a17`，macOS exact artifact 来自包含默认 Skill discovery 收敛的 clean source commit `0060bd660c588041c942127438361abdf2dc46e2`，manifest、payload checksum 和平台结果独立锁定、互不替代。MetaWork 当前只消费显式 all-enabled Skill selection 和 `session_update_skills`，不因 ABI entry 存在而开放 set-model、manual compact、permission-rule 或 Skill toggle 产品能力；Workbench、Bridge 与 Renderer 合同保持不变。
+当前 checkout 的 verifier、build graph、共享 Agent Session、macOS 与 Windows repository lock 都已切到 revision 5；Windows exact artifact 来自 clean source commit `72655b68b882945f5b47125ddcba1023b0667a17`，macOS exact artifact 来自包含默认 Skill discovery 收敛的 clean source commit `0060bd660c588041c942127438361abdf2dc46e2`，manifest、payload checksum 和平台结果独立锁定、互不替代。MetaWork 当前消费显式 all-enabled Skill selection、`session_update_skills` 与 Workbench-owned manual compact；不因其他 ABI entry 存在而开放 set-model、permission-rule 或 Skill toggle 产品能力。
 
 该 baseline 不包含：
 
@@ -256,8 +256,9 @@ RunJob
 CompactJob
 ├── monotonic operation_id
 ├── executor slot
-├── cancellation/abort state
-└── immutable compact terminal result
+├── advisory handoff / pending interruption
+├── preallocated bounded terminal diagnostic storage
+└── allocation-free write-once compact terminal publication
 ```
 
 - 每个 Session 至多一个 in-flight operation；Run、manual compact、Session mutation 与 destroy 互斥；
@@ -298,7 +299,9 @@ CompactJob
 - manual compact 的 queued/compacting/stopping 与 append-only terminal history；
 - WebView reload 所需的当前 Host view snapshot。
 
-Workbench 在 admission 时为每个 Run 建立稳定 record slot、单调 generation 和 bounded terminal diagnostic storage。executor worker 入队前直接取得 Task-owned stable record reference，并在 queued cancellation、执行失败或 terminal publication 收口后精确释放；该真实引用非零时 Task record 不得物理释放。删除已关闭 Task 只能进入 `delete_pending`，并在 worker reference 归零后收口。Agent 对已开始的 Run 返回自包含、不可变的 `TerminalResult`；Workbench 将其无分配、write-once 地提交进 Run record。queued-before-execute 由 Workbench 直接生成 pre-execution 产品结果。Session snapshot 只描述 live lifecycle，不再承载历史 terminal facts。
+Workbench 在 admission 时为每个 Run 或 compact 建立稳定 record slot 和 bounded terminal diagnostic storage；Run 另有单调 generation。executor worker 入队前直接取得 Task-owned stable record reference，并在 queued cancellation、执行失败或 terminal publication 收口后精确释放；该真实引用非零时 Task record 不得物理释放。删除已关闭 Task 只能进入 `delete_pending`，并在 worker reference 归零后收口。Agent 对已开始的 operation 返回自包含、不可变的 terminal result；Workbench 将其 allocation-free、no-fail、write-once 地提交进预留 payload，`published` release-store 是唯一 terminal linearization point，完成前不得 notify、释放引用或调用外部 owner。queued-before-execute 由 Workbench 直接生成 pre-execution 产品结果。Session snapshot 只描述 live lifecycle，不再承载历史 terminal facts。
+
+Compact 的 executor handoff 与 pending interruption 是 advisory control fact，不能覆盖 terminal payload。Workbench main thread 按 `terminal publication > pending interruption > worker handoff` 派生 `terminal / stopping / queued|compacting` 产品 phase；独立 cancellation atomic 即使在 terminal race 后被设置也必须被忽略。Compact 没有 Run event stream，因此不复制 Run 的 final event-drain product gate；snapshot acquire 到 published payload 后即可消费全部 terminal fields 和 diagnostic bytes。
 
 Renderer reload 只重建仍存活 Host 的视图。Host/AgentCore crash 后当前 Run 必须标记 interrupted，危险工具不得自动重放。Conversation/checkpoint 跨进程恢复只有在未来 AgentCore capability 明确提供后才能设计。
 

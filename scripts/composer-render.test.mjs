@@ -410,6 +410,19 @@ test("Workspace selection is not hidden inside submit", async () => {
   assert.doesNotMatch(submitRun, /chooseWorkspace|client\.chooseWorkspace/);
 });
 
+test("Slash V1 reuses the existing New task and Compact actions", async () => {
+  const source = await readFile(
+    join(process.cwd(), "frontend/src/app/App.tsx"),
+    "utf8",
+  );
+  const start = source.indexOf("function runSlashCommand(");
+  const end = source.indexOf("\n  async function", start + 1);
+  const controller = source.slice(start, end);
+  assert.match(controller, /case "new":[\s\S]*beginNewTask\(\)/);
+  assert.match(controller, /case "compact":[\s\S]*compactTask\(\)/);
+  assert.doesNotMatch(controller, /client\.|invoke\(|tasks\./);
+});
+
 test("New task does not render or reserve an empty Inspector", () => {
   const markup = renderShell(null);
   assert.doesNotMatch(markup, /id="task-inspector"/);

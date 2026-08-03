@@ -192,7 +192,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - 中间区域以用户指令、Agent 回复、工具活动、可用审批和结果构成可追溯时间线，不展示 raw AgentCore event 或 chain-of-thought；
 - Run 执行期间的新输入不得暗示可以修改当前 Run；首版只保存 Renderer 草稿，等待当前 Run terminal 后由用户明确发送，不自动创建或启动下一次 Run；
 - Composer 以 `/` 作为 context-aware 发现手势，统一显示 Renderer 注册的产品 Command 与当前 Workspace/Task catalog 投影的 Skill；Slash 文本本身不是 Agent 输入协议，Command 必须在 Renderer 消费且不得进入 Bridge、Timeline 或 AgentCore；
-- Command 只复用已有产品动作，不迁移 CLI/TUI 的会话控制语义；V1 只注册 `/new`，不注册 `/model`、`/status`、`/resume`、`/continue` 或其他已有正式界面、与桌面产品对象冲突、缺少 typed capability 的 identifier；
+- Command 只复用已有产品动作，不迁移 CLI/TUI 的会话控制语义；V1 只注册 `/new` 与 `/compact`，前者打开既有 New task draft action，后者触发 Workbench-owned typed maintenance action；不注册 `/model`、`/status`、`/goal`、`/resume`、`/continue` 或其他已有正式界面、与桌面产品对象冲突、缺少 typed capability 的 identifier；
 - Skill 选择形成单一、可移除的 typed Composer draft，保留稳定 Skill identity、catalog revision 和 positional arguments；New task 使用 Workspace current catalog，已有 Task 使用其 pinned catalog。过期或不可用 token 保留参数但禁止发送，必须显式刷新并重新选择，Renderer 不读取 Skill body、不猜测目录或权限；
 - Skill 中心是 MetaWork 级的用户 Skill 只读管理 route，与当前 Workspace 选择无关；它展示名称、invocation、description、参数、catalog health/issue 与显式刷新，不安装、卸载、更新、创建、编辑、启用/禁用或直接操作 Skill 目录。AgentCore 独占 source discovery、canonical priority、winner/conflict 与 catalog revision；当前 revision 5 未公开有效 Skill 的 source metadata，因此 MetaWork 不猜测目录、不重算优先级，也不显示虚构来源。Skill 中心消费 Workbench 独立持有的全局 catalog projection；Workspace current catalog 与 Task pinned catalog 仍只服务 Composer 和 Run execution context，不得与管理视图互换；
 - 用户创建或修改 Skill 仍通过普通 Text Run 与 AgentCore built-in Read/Edit 完成：Workspace 内的 `.agents/skills` 服从现有 Workspace authority，用户级目录只有在用户明确将目标 Skill 目录作为 trusted Workspace 授权后才能修改。一次 Run 使用已绑定 snapshot，不热替换正在执行的 Skill；文件变化只在显式 catalog refresh 后影响后续选择与 Run；
