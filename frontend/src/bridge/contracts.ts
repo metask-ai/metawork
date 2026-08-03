@@ -175,7 +175,6 @@ export type ScheduledTaskView = {
     | "execution_changed"
     | "workspace_changed"
     | "workspace_unavailable"
-    | "catalog_changed"
     | "capacity_reached"
     | "shutting_down"
     | "task_start_failed"
@@ -191,15 +190,7 @@ export type ScheduledTaskView = {
     provider: Provider;
     model: string;
   };
-  input:
-    | { kind: "text"; text: string; redacted: boolean }
-    | {
-        kind: "skill";
-        skillId: string;
-        catalogRevision: string;
-        argumentValues: string[];
-        redacted: boolean;
-      };
+  input: { kind: "text"; text: string; redacted: boolean };
   recurrence: ScheduledTaskRecurrence;
   nextRunAtUnixSeconds: string | null;
   occurrences: Array<{
@@ -230,7 +221,7 @@ export type ScheduledTaskMutation = {
         expectedWorkspaceEpoch: string;
       };
   expectedExecutionGeneration: string;
-  input: TaskRunInput;
+  input: Extract<TaskRunInput, { kind: "text" }>;
   recurrence: ScheduledTaskRecurrence;
 };
 

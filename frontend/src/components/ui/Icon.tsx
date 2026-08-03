@@ -1,6 +1,7 @@
 import {
   Activity,
   ArrowLeft,
+  CalendarDays,
   Check,
   ChevronDown,
   Clock3,
@@ -11,12 +12,14 @@ import {
   PanelLeft,
   Plus,
   Puzzle,
+  Radar,
   RefreshCw,
   Search,
   Send,
   Settings,
   Square,
   SquarePen,
+  Sunrise,
   TriangleAlert,
   UserRound,
   X,
@@ -45,7 +48,10 @@ type IconName =
   | "clock"
   | "new-task"
   | "skills"
-  | "scheduled-tasks";
+  | "scheduled-tasks"
+  | "calendar-days"
+  | "radar"
+  | "sunrise";
 
 const icons: Record<IconName, LucideIcon> = {
   sidebar: PanelLeft,
@@ -70,6 +76,9 @@ const icons: Record<IconName, LucideIcon> = {
   "new-task": SquarePen,
   skills: Puzzle,
   "scheduled-tasks": Clock3,
+  "calendar-days": CalendarDays,
+  radar: Radar,
+  sunrise: Sunrise,
 };
 
 export function Icon({ name }: { name: IconName }) {

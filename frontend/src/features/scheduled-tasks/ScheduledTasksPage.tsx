@@ -1,9 +1,14 @@
-import { useEffect, useMemo, useState } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ComponentProps,
+} from "react";
 
 import type {
   ScheduledTaskMutation,
   ScheduledTaskView,
-  TaskRunInput,
   WorkbenchSnapshot,
 } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
@@ -13,10 +18,7 @@ type Draft = {
   title: string;
   targetKind: "default" | "explicit";
   workspaceId: string;
-  inputKind: "text" | "skill";
   text: string;
-  skillId: string;
-  argumentValues: string[];
   recurrenceKind: "once" | "interval";
   start: string;
   every: string;
@@ -24,6 +26,15 @@ type Draft = {
 };
 
 type SuggestionKind = "daily" | "weekly" | "followup";
+
+function ScheduledSelect({ children, ...props }: ComponentProps<"select">) {
+  return (
+    <span className="scheduled-select">
+      <select {...props}>{children}</select>
+      <Icon name="chevron" />
+    </span>
+  );
+}
 
 function localDateTime(unixSeconds: number) {
   const date = new Date(unixSeconds * 1000);
@@ -56,10 +67,7 @@ function defaultDraft(snapshot: WorkbenchSnapshot): Draft {
       ? "default"
       : "explicit",
     workspaceId: snapshot.selectedWorkspaceId ?? userWorkspaces[0]?.id ?? "",
-    inputKind: "text",
     text: "",
-    skillId: "",
-    argumentValues: [],
     recurrenceKind: "once",
     start: localDateTime(Math.floor(Date.now() / 1000) + 3600),
     every: "1",
@@ -87,11 +95,7 @@ function draftFromTask(task: ScheduledTaskView): Draft {
     title: task.title,
     targetKind: task.target.kind,
     workspaceId: task.target.kind === "explicit" ? task.target.workspaceId : "",
-    inputKind: task.input.kind,
-    text: task.input.kind === "text" ? task.input.text : "",
-    skillId: task.input.kind === "skill" ? task.input.skillId : "",
-    argumentValues:
-      task.input.kind === "skill" ? task.input.argumentValues : [],
+    text: task.input.text,
     recurrenceKind: task.recurrence.kind,
     start: localDateTime(Number(start)),
     every: String(everySeconds / divisor),
@@ -113,30 +117,13 @@ function toMutation(
   const start = Math.floor(new Date(draft.start).getTime() / 1000);
   if (!draft.title.trim() || !Number.isSafeInteger(start) || start <= 0)
     return null;
-  let input: TaskRunInput;
-  if (draft.inputKind === "text") {
-    if (!draft.text.trim()) return null;
-    if (
-      draft.targetKind === "default" &&
-      !snapshot.capabilities.managedWorkspaces
-    )
-      return null;
-    if (draft.targetKind === "explicit" && !workspace) return null;
-    input = { kind: "text", text: draft.text.trim() };
-  } else {
-    if (draft.targetKind !== "explicit" || !workspace) return null;
-    const skill = workspace.skillCatalog.skills.find(
-      (candidate) => candidate.skillId === draft.skillId,
-    );
-    const revision = workspace.skillCatalog.revision;
-    if (!skill || !revision) return null;
-    input = {
-      kind: "skill",
-      skillId: skill.skillId,
-      catalogRevision: revision,
-      argumentValues: draft.argumentValues,
-    };
-  }
+  if (!draft.text.trim()) return null;
+  if (
+    draft.targetKind === "default" &&
+    !snapshot.capabilities.managedWorkspaces
+  )
+    return null;
+  if (draft.targetKind === "explicit" && !workspace) return null;
   const every = Number(draft.every);
   const unitSeconds =
     draft.unit === "days" ? 86_400 : draft.unit === "hours" ? 3600 : 60;
@@ -156,7 +143,7 @@ function toMutation(
             expectedWorkspaceEpoch: workspace!.epoch,
           },
     expectedExecutionGeneration: snapshot.account.executionGeneration,
-    input,
+    input: { kind: "text", text: draft.text.trim() },
     recurrence:
       draft.recurrenceKind === "once"
         ? { kind: "once", atUnixSeconds: String(start) }
@@ -181,6 +168,15 @@ function formatTime(
     hour: "2-digit",
     minute: "2-digit",
   }).format(new Date(Number(unixSeconds) * 1000));
+}
+
+function formatDraftTime(value: string, locale: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat(locale, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(date);
 }
 
 export function ScheduledTasksPage({
@@ -217,23 +213,20 @@ export function ScheduledTasksPage({
   const [draft, setDraft] = useState(() => defaultDraft(snapshot));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const editorTrigger = useRef<HTMLElement | null>(null);
+  const editorHeading = useRef<HTMLHeadingElement | null>(null);
   const selected =
     snapshot.scheduledTasks.find((task) => task.id === selectedId) ?? null;
+  const editorOpen = creating || selected !== null;
+  const hasScheduledTasks = snapshot.scheduledTasks.length > 0;
+  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const userWorkspaces = snapshot.workspaces.filter(
     (candidate) => candidate.origin === "user",
   );
-  const selectedUserWorkspaceId = userWorkspaces.find(
-    (candidate) => candidate.id === snapshot.selectedWorkspaceId,
-  )?.id;
   const workspace =
     draft.targetKind === "explicit"
       ? userWorkspaces.find((candidate) => candidate.id === draft.workspaceId)
       : undefined;
-  const canCreateDefinition =
-    snapshot.capabilities.managedWorkspaces || userWorkspaces.length > 0;
-  const selectedSkill = workspace?.skillCatalog.skills.find(
-    (skill) => skill.skillId === draft.skillId,
-  );
   const mutation = useMemo(
     () => toMutation(snapshot, draft),
     [snapshot, draft],
@@ -241,24 +234,20 @@ export function ScheduledTasksPage({
   const normalizedQuery = query.trim().toLocaleLowerCase(locale);
   const filteredTasks = snapshot.scheduledTasks.filter((task) => {
     if (!normalizedQuery) return true;
-    const instruction =
-      task.input.kind === "text"
-        ? task.input.text
-        : `/${task.input.skillId} ${task.input.argumentValues.join(" ")}`;
-    return `${task.title} ${instruction}`
+    return `${task.title} ${task.input.text}`
       .toLocaleLowerCase(locale)
       .includes(normalizedQuery);
   });
   const groups = [
     {
-      key: "ongoing",
-      label: t("scheduled.section.ongoing"),
-      tasks: filteredTasks.filter((task) => task.health === "ready"),
-    },
-    {
       key: "attention",
       label: t("scheduled.section.needs_attention"),
       tasks: filteredTasks.filter((task) => task.health === "needs_attention"),
+    },
+    {
+      key: "ongoing",
+      label: t("scheduled.section.ongoing"),
+      tasks: filteredTasks.filter((task) => task.health === "ready"),
     },
     {
       key: "paused",
@@ -283,7 +272,34 @@ export function ScheduledTasksPage({
     }
   }, [selectedId, snapshot.scheduledTasks]);
 
+  useEffect(() => {
+    if (!editorOpen || creating) return;
+    const frame = window.requestAnimationFrame(() =>
+      editorHeading.current?.focus(),
+    );
+    return () => window.cancelAnimationFrame(frame);
+  }, [creating, editorOpen, selectedId]);
+
+  function rememberEditorTrigger() {
+    editorTrigger.current =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+  }
+
+  function closeEditor(restoreFocus = true) {
+    const trigger = editorTrigger.current;
+    setCreating(false);
+    setSelectedId(null);
+    setError(null);
+    if (restoreFocus)
+      window.requestAnimationFrame(() => {
+        if (trigger?.isConnected) trigger.focus();
+      });
+  }
+
   function beginCreate(seed?: Partial<Draft>) {
+    rememberEditorTrigger();
     setCreating(true);
     setSelectedId(null);
     setDraft({ ...defaultDraft(snapshot), ...seed });
@@ -317,14 +333,11 @@ export function ScheduledTasksPage({
         unit: "days",
       },
     };
-    beginCreate({
-      ...presets[kind],
-      targetKind: "explicit",
-      workspaceId: selectedUserWorkspaceId ?? userWorkspaces[0]?.id ?? "",
-    });
+    beginCreate(presets[kind]);
   }
 
   function edit(task: ScheduledTaskView) {
+    rememberEditorTrigger();
     setSelectedId(task.id);
     setCreating(false);
     setDraft(draftFromTask(task));
@@ -338,8 +351,7 @@ export function ScheduledTasksPage({
     try {
       if (selected) await onUpdate(selected.id, selected.epoch, mutation);
       else await onCreate(mutation);
-      setCreating(false);
-      setSelectedId(null);
+      closeEditor();
       setQuery("");
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : t("scheduled.error"));
@@ -389,50 +401,62 @@ export function ScheduledTasksPage({
     return t("scheduled.occurrence.starting");
   }
 
-  const editorOpen = creating || selected !== null;
   const suggestions = [
     {
       kind: "daily" as const,
-      mark: "◔",
+      icon: "sunrise" as const,
       title: t("scheduled.suggestion.daily.title"),
       schedule: t("scheduled.suggestion.daily.schedule"),
       body: t("scheduled.suggestion.daily.body"),
     },
     {
       kind: "weekly" as const,
-      mark: "▣",
+      icon: "calendar-days" as const,
       title: t("scheduled.suggestion.weekly.title"),
       schedule: t("scheduled.suggestion.weekly.schedule"),
       body: t("scheduled.suggestion.weekly.body"),
     },
     {
       kind: "followup" as const,
-      mark: "⌁",
+      icon: "radar" as const,
       title: t("scheduled.suggestion.followup.title"),
       schedule: t("scheduled.suggestion.followup.schedule"),
       body: t("scheduled.suggestion.followup.body"),
     },
   ];
+  const confirmationTitle =
+    draft.title.trim() || t("scheduled.confirmation.untitled");
+  const confirmation =
+    draft.recurrenceKind === "once"
+      ? t("scheduled.confirmation.once", {
+          title: confirmationTitle,
+          time: formatDraftTime(draft.start, locale),
+        })
+      : t("scheduled.confirmation.interval", {
+          title: confirmationTitle,
+          time: formatDraftTime(draft.start, locale),
+          every: draft.every || "—",
+          unit: t(`scheduled.unit.${draft.unit}`),
+        });
 
   return (
     <section className="scheduled-page" aria-labelledby="scheduled-title">
       <div className="scheduled-page-inner">
         <header className="scheduled-header">
-          <div>
-            <div className="scheduled-title-line">
-              <h1 id="scheduled-title">{t("scheduled.title")}</h1>
-              {snapshot.capabilities.backgroundScheduleWake && (
-                <span className="scheduled-background-state">
-                  <span aria-hidden="true" />
-                  {t("scheduled.background_ready")}
-                </span>
-              )}
-            </div>
+          <div className="scheduled-header-copy">
+            <h1 id="scheduled-title">{t("scheduled.title")}</h1>
             <p>{t("scheduled.subtitle")}</p>
+            {snapshot.capabilities.backgroundScheduleWake && (
+              <span className="scheduled-background-state">
+                <Icon name="clock" />
+                {t("scheduled.background_ready")}
+              </span>
+            )}
           </div>
           <button
+            type="button"
             className="primary-button focus-ring"
-            disabled={disabled || !canCreateDefinition}
+            disabled={disabled}
             onClick={() => beginCreate()}
           >
             <Icon name="plus" />
@@ -451,171 +475,186 @@ export function ScheduledTasksPage({
           </div>
         )}
 
-        <label className="scheduled-search">
-          <Icon name="search" />
-          <span className="sr-only">{t("scheduled.search_placeholder")}</span>
-          <input
-            value={query}
-            placeholder={t("scheduled.search_placeholder")}
-            onChange={(event) => setQuery(event.target.value)}
-          />
-          {query && (
-            <button
-              className="focus-ring"
-              aria-label={t("common.cancel")}
-              onClick={() => setQuery("")}
-            >
-              <Icon name="close" />
-            </button>
-          )}
-        </label>
-
-        {snapshot.scheduledTasks.length === 0 ? (
-          <div className="scheduled-starter">
-            <h2>{t("scheduled.suggestions")}</h2>
-            <div className="scheduled-suggestion-list">
-              {suggestions.map((suggestion) => (
-                <button
-                  key={suggestion.kind}
-                  className="scheduled-suggestion focus-ring"
-                  disabled={disabled || userWorkspaces.length === 0}
-                  onClick={() => beginSuggestion(suggestion.kind)}
-                >
-                  <span
-                    className="scheduled-suggestion-mark"
-                    aria-hidden="true"
+        {!hasScheduledTasks ? (
+          <div className="scheduled-empty-state">
+            <div className="scheduled-starter">
+              <div className="scheduled-section-heading">
+                <div>
+                  <h2>{t("scheduled.suggestions")}</h2>
+                  <p>{t("scheduled.suggestions_help")}</p>
+                </div>
+              </div>
+              <div className="scheduled-suggestion-list">
+                {suggestions.map((suggestion) => (
+                  <button
+                    key={suggestion.kind}
+                    type="button"
+                    className="scheduled-suggestion focus-ring"
+                    disabled={disabled}
+                    onClick={() => beginSuggestion(suggestion.kind)}
                   >
-                    {suggestion.mark}
-                  </span>
-                  <span>
-                    <strong>
-                      {suggestion.title}
+                    <span
+                      className="scheduled-suggestion-mark"
+                      aria-hidden="true"
+                    >
+                      <Icon name={suggestion.icon} />
+                    </span>
+                    <span>
+                      <strong>{suggestion.title}</strong>
+                      <span>{suggestion.body}</span>
+                    </span>
+                    <span className="scheduled-suggestion-time">
                       <small>{suggestion.schedule}</small>
-                    </strong>
-                    <span>{suggestion.body}</span>
-                  </span>
-                  <Icon name="plus" />
-                </button>
-              ))}
-              <button
-                className="scheduled-suggestion scheduled-suggestion-custom focus-ring"
-                disabled={disabled || !snapshot.capabilities.managedWorkspaces}
-                onClick={() =>
-                  beginCreate({
-                    title: query.trim().slice(0, 80),
-                    text: query.trim(),
-                  })
-                }
-              >
-                <span className="scheduled-suggestion-mark" aria-hidden="true">
-                  <Icon name="plus" />
-                </span>
-                <span>
-                  <strong>{t("scheduled.suggestion.custom.title")}</strong>
-                  <span>{t("scheduled.suggestion.custom.body")}</span>
-                </span>
-                <Icon name="chevron" />
-              </button>
+                      <Icon name="chevron" />
+                    </span>
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
-        ) : groups.length === 0 ? (
-          <div className="scheduled-no-results">
-            <Icon name="search" />
-            <h2>{t("scheduled.no_matches")}</h2>
-            <p>{t("scheduled.no_matches_body")}</p>
-          </div>
         ) : (
-          <div className="scheduled-groups">
-            {groups.map((group) => (
-              <section key={group.key} className="scheduled-group">
-                <h2>{group.label}</h2>
-                <ul className="scheduled-list">
-                  {group.tasks.map((task) => {
-                    const latestOccurrence = task.occurrences.at(-1);
-                    return (
-                      <li key={task.id} data-health={task.health}>
-                        <button
-                          className="scheduled-row-main focus-ring"
-                          onClick={() => edit(task)}
-                        >
-                          <span
-                            className="scheduled-row-status"
-                            aria-hidden="true"
-                          />
-                          <span className="scheduled-row-copy">
-                            <strong>{task.title}</strong>
-                            <small>
-                              {recurrenceLabel(task)}
-                              <span aria-hidden="true"> · </span>
-                              {task.input.kind === "skill"
-                                ? `/${task.input.skillId}`
-                                : task.input.text}
-                            </small>
-                          </span>
-                          <span className="scheduled-row-next">
-                            <small>
-                              {t(`scheduled.health.${task.health}`)}
-                            </small>
-                            <time>
-                              {formatTime(
-                                task.nextRunAtUnixSeconds,
-                                locale,
-                                latestOccurrence
-                                  ? occurrenceLabel(latestOccurrence)
-                                  : t("scheduled.no_next_run"),
-                              )}
-                            </time>
-                          </span>
-                          <Icon name="chevron" />
-                        </button>
-                        <div className="scheduled-row-actions">
-                          <button
-                            className="text-button focus-ring"
-                            disabled={disabled || busy}
-                            onClick={() =>
-                              void action(async () => {
-                                const result = await onRunNow(
-                                  task.id,
-                                  task.epoch,
-                                );
-                                onOpenTask(result.taskId);
-                              })
-                            }
-                          >
-                            {t("scheduled.run_now")}
-                          </button>
-                          <button
-                            className="text-button focus-ring"
-                            disabled={
-                              disabled ||
-                              busy ||
-                              task.health === "completed" ||
-                              task.health === "needs_attention"
-                            }
-                            onClick={() =>
-                              void action(() =>
-                                onSetEnabled(
-                                  task.id,
-                                  task.epoch,
-                                  !task.enabled,
-                                ),
-                              )
-                            }
-                          >
-                            {t(
-                              task.enabled
-                                ? "scheduled.pause"
-                                : "scheduled.resume",
-                            )}
-                          </button>
-                        </div>
-                      </li>
-                    );
-                  })}
-                </ul>
-              </section>
-            ))}
-          </div>
+          <>
+            <div className="scheduled-toolbar">
+              <label className="scheduled-search">
+                <Icon name="search" />
+                <span className="sr-only">
+                  {t("scheduled.search_placeholder")}
+                </span>
+                <input
+                  type="search"
+                  value={query}
+                  placeholder={t("scheduled.search_placeholder")}
+                  onChange={(event) => setQuery(event.target.value)}
+                />
+                {query && (
+                  <button
+                    type="button"
+                    className="focus-ring"
+                    aria-label={t("common.cancel")}
+                    onClick={() => setQuery("")}
+                  >
+                    <Icon name="close" />
+                  </button>
+                )}
+              </label>
+              <span className="scheduled-count">
+                {t(
+                  filteredTasks.length === 1
+                    ? "scheduled.count.one"
+                    : "scheduled.count.other",
+                  { count: filteredTasks.length },
+                )}
+              </span>
+            </div>
+
+            {groups.length === 0 ? (
+              <div className="scheduled-no-results">
+                <Icon name="search" />
+                <h2>{t("scheduled.no_matches")}</h2>
+                <p>{t("scheduled.no_matches_body")}</p>
+              </div>
+            ) : (
+              <div className="scheduled-groups">
+                {groups.map((group) => (
+                  <section
+                    key={group.key}
+                    className="scheduled-group"
+                    aria-labelledby={`scheduled-group-${group.key}`}
+                  >
+                    <div className="scheduled-section-heading">
+                      <h2 id={`scheduled-group-${group.key}`}>{group.label}</h2>
+                      <span>{group.tasks.length}</span>
+                    </div>
+                    <ul className="scheduled-list" aria-label={group.label}>
+                      {group.tasks.map((task) => {
+                        const latestOccurrence = task.occurrences.at(-1);
+                        return (
+                          <li key={task.id} data-health={task.health}>
+                            <button
+                              type="button"
+                              className="scheduled-row-main focus-ring"
+                              onClick={() => edit(task)}
+                            >
+                              <span
+                                className="scheduled-row-status"
+                                aria-hidden="true"
+                              />
+                              <span className="scheduled-row-copy">
+                                <strong>{task.title}</strong>
+                                <small>
+                                  {recurrenceLabel(task)}
+                                  <span aria-hidden="true"> · </span>
+                                  {task.input.text}
+                                </small>
+                              </span>
+                              <span className="scheduled-row-next">
+                                <small>
+                                  {t(`scheduled.health.${task.health}`)}
+                                </small>
+                                <time>
+                                  {formatTime(
+                                    task.nextRunAtUnixSeconds,
+                                    locale,
+                                    latestOccurrence
+                                      ? occurrenceLabel(latestOccurrence)
+                                      : t("scheduled.no_next_run"),
+                                  )}
+                                </time>
+                              </span>
+                              <Icon name="chevron" />
+                            </button>
+                            <div className="scheduled-row-actions">
+                              <button
+                                type="button"
+                                className="text-button focus-ring"
+                                disabled={disabled || busy}
+                                onClick={() =>
+                                  void action(async () => {
+                                    const result = await onRunNow(
+                                      task.id,
+                                      task.epoch,
+                                    );
+                                    onOpenTask(result.taskId);
+                                  })
+                                }
+                              >
+                                {t("scheduled.run_now")}
+                              </button>
+                              <button
+                                type="button"
+                                className="text-button focus-ring"
+                                disabled={
+                                  disabled ||
+                                  busy ||
+                                  task.health === "completed" ||
+                                  task.health === "needs_attention"
+                                }
+                                onClick={() =>
+                                  void action(() =>
+                                    onSetEnabled(
+                                      task.id,
+                                      task.epoch,
+                                      !task.enabled,
+                                    ),
+                                  )
+                                }
+                              >
+                                {t(
+                                  task.enabled
+                                    ? "scheduled.pause"
+                                    : "scheduled.resume",
+                                )}
+                              </button>
+                            </div>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </section>
+                ))}
+              </div>
+            )}
+          </>
         )}
       </div>
 
@@ -624,9 +663,12 @@ export function ScheduledTasksPage({
           className="scheduled-editor-backdrop"
           onMouseDown={() => {
             if (busy) return;
-            setCreating(false);
-            setSelectedId(null);
-            setError(null);
+            closeEditor();
+          }}
+          onKeyDown={(event) => {
+            if (event.key !== "Escape" || busy) return;
+            event.preventDefault();
+            closeEditor();
           }}
         >
           <aside
@@ -641,16 +683,19 @@ export function ScheduledTasksPage({
                 <small>
                   {selected ? t("scheduled.editing") : t("scheduled.creating")}
                 </small>
-                <h2>{selected?.title || t("scheduled.new")}</h2>
+                <h2
+                  id="scheduled-editor-title"
+                  ref={editorHeading}
+                  tabIndex={-1}
+                >
+                  {selected?.title || t("scheduled.new")}
+                </h2>
               </div>
               <button
+                type="button"
                 className="icon-button focus-ring"
                 aria-label={t("common.cancel")}
-                onClick={() => {
-                  setCreating(false);
-                  setSelectedId(null);
-                  setError(null);
-                }}
+                onClick={() => closeEditor()}
               >
                 <Icon name="close" />
               </button>
@@ -678,92 +723,20 @@ export function ScheduledTasksPage({
 
               <fieldset className="scheduled-editor-primary">
                 <legend>{t("scheduled.what")}</legend>
-                <div className="scheduled-segments">
-                  {(["text", "skill"] as const).map((kind) => (
-                    <button
-                      key={kind}
-                      type="button"
-                      data-active={draft.inputKind === kind}
-                      disabled={kind === "skill" && userWorkspaces.length === 0}
-                      onClick={() =>
-                        setDraft((value) => ({
-                          ...value,
-                          inputKind: kind,
-                          targetKind:
-                            kind === "skill" ? "explicit" : value.targetKind,
-                          workspaceId:
-                            kind === "skill" && !value.workspaceId
-                              ? (snapshot.selectedWorkspaceId ??
-                                userWorkspaces[0]?.id ??
-                                "")
-                              : value.workspaceId,
-                          skillId: kind === "text" ? "" : value.skillId,
-                          argumentValues:
-                            kind === "text" ? [] : value.argumentValues,
-                        }))
-                      }
-                    >
-                      {t(`scheduled.input.${kind}`)}
-                    </button>
-                  ))}
-                </div>
-                {draft.inputKind === "text" ? (
-                  <textarea
-                    autoFocus={creating}
-                    rows={6}
-                    value={draft.text}
-                    placeholder={t("scheduled.instruction_placeholder")}
-                    onChange={(event) =>
-                      setDraft((value) => ({
-                        ...value,
-                        text: event.target.value,
-                      }))
-                    }
-                  />
-                ) : (
-                  <>
-                    <select
-                      value={draft.skillId}
-                      onChange={(event) => {
-                        const skill = workspace?.skillCatalog.skills.find(
-                          (item) => item.skillId === event.target.value,
-                        );
-                        setDraft((value) => ({
-                          ...value,
-                          skillId: event.target.value,
-                          argumentValues: skill
-                            ? skill.argumentNames.map(() => "")
-                            : [],
-                        }));
-                      }}
-                    >
-                      <option value="">{t("scheduled.choose_skill")}</option>
-                      {workspace?.skillCatalog.skills.map((skill) => (
-                        <option key={skill.skillId} value={skill.skillId}>
-                          /{skill.invocationName}
-                        </option>
-                      ))}
-                    </select>
-                    {selectedSkill?.argumentNames.map((name, index) => (
-                      <label
-                        key={`${name}:${index}`}
-                        className="scheduled-argument"
-                      >
-                        <span>{name}</span>
-                        <input
-                          value={draft.argumentValues[index] ?? ""}
-                          onChange={(event) =>
-                            setDraft((value) => {
-                              const values = [...value.argumentValues];
-                              values[index] = event.target.value;
-                              return { ...value, argumentValues: values };
-                            })
-                          }
-                        />
-                      </label>
-                    ))}
-                  </>
-                )}
+                <textarea
+                  autoFocus={creating}
+                  aria-label={t("scheduled.instruction")}
+                  rows={6}
+                  value={draft.text}
+                  placeholder={t("scheduled.instruction_placeholder")}
+                  onChange={(event) =>
+                    setDraft((value) => ({
+                      ...value,
+                      text: event.target.value,
+                    }))
+                  }
+                />
+                <small>{t("scheduled.instruction_help")}</small>
               </fieldset>
 
               <fieldset>
@@ -774,6 +747,7 @@ export function ScheduledTasksPage({
                       key={kind}
                       type="button"
                       data-active={draft.recurrenceKind === kind}
+                      aria-pressed={draft.recurrenceKind === kind}
                       onClick={() =>
                         setDraft((value) => ({
                           ...value,
@@ -804,6 +778,7 @@ export function ScheduledTasksPage({
                     <div className="scheduled-interval">
                       <input
                         type="number"
+                        aria-label={t("scheduled.every")}
                         min="1"
                         step="1"
                         value={draft.every}
@@ -814,7 +789,8 @@ export function ScheduledTasksPage({
                           }))
                         }
                       />
-                      <select
+                      <ScheduledSelect
+                        aria-label={t("scheduled.interval_unit")}
                         value={draft.unit}
                         onChange={(event) =>
                           setDraft((value) => ({
@@ -828,7 +804,7 @@ export function ScheduledTasksPage({
                         </option>
                         <option value="hours">{t("scheduled.hours")}</option>
                         <option value="days">{t("scheduled.days")}</option>
-                      </select>
+                      </ScheduledSelect>
                     </div>
                   </label>
                 )}
@@ -855,10 +831,9 @@ export function ScheduledTasksPage({
                   </label>
                   <label>
                     <span>{t("scheduled.target")}</span>
-                    <select
+                    <ScheduledSelect
                       aria-label={t("scheduled.target")}
                       value={draft.targetKind}
-                      disabled={draft.inputKind === "skill"}
                       onChange={(event) =>
                         setDraft((value) => ({
                           ...value,
@@ -870,25 +845,22 @@ export function ScheduledTasksPage({
                                 userWorkspaces[0]?.id ??
                                 "")
                               : value.workspaceId,
-                          skillId: "",
-                          argumentValues: [],
                         }))
                       }
                     >
-                      {draft.inputKind === "text" &&
-                        (snapshot.capabilities.managedWorkspaces ||
-                          draft.targetKind === "default") && (
-                          <option value="default">
-                            {t("scheduled.target.default")}
-                          </option>
-                        )}
+                      {(snapshot.capabilities.managedWorkspaces ||
+                        draft.targetKind === "default") && (
+                        <option value="default">
+                          {t("scheduled.target.default")}
+                        </option>
+                      )}
                       {(userWorkspaces.length > 0 ||
                         draft.targetKind === "explicit") && (
                         <option value="explicit">
                           {t("scheduled.target.explicit")}
                         </option>
                       )}
-                    </select>
+                    </ScheduledSelect>
                     <small>
                       {t(
                         draft.targetKind === "default"
@@ -900,15 +872,13 @@ export function ScheduledTasksPage({
                   {draft.targetKind === "explicit" && (
                     <label>
                       <span>{t("scheduled.workspace")}</span>
-                      <select
+                      <ScheduledSelect
                         aria-label={t("scheduled.workspace")}
                         value={draft.workspaceId}
                         onChange={(event) =>
                           setDraft((value) => ({
                             ...value,
                             workspaceId: event.target.value,
-                            skillId: "",
-                            argumentValues: [],
                           }))
                         }
                       >
@@ -922,7 +892,12 @@ export function ScheduledTasksPage({
                             {item.displayName || item.canonicalRoot}
                           </option>
                         ))}
-                      </select>
+                      </ScheduledSelect>
+                      {userWorkspaces.length === 0 && (
+                        <small className="scheduled-field-warning">
+                          {t("scheduled.workspace_required")}
+                        </small>
+                      )}
                     </label>
                   )}
                 </div>
@@ -955,6 +930,7 @@ export function ScheduledTasksPage({
                           </span>
                           {occurrence.taskId && (
                             <button
+                              type="button"
                               className="text-button focus-ring"
                               onClick={() => onOpenTask(occurrence.taskId!)}
                             >
@@ -968,6 +944,15 @@ export function ScheduledTasksPage({
                 </section>
               )}
 
+              <section className="scheduled-confirmation" aria-live="polite">
+                <Icon name="clock" />
+                <div>
+                  <strong>{t("scheduled.confirmation.title")}</strong>
+                  <p>{confirmation}</p>
+                  <small>{t("scheduled.timezone", { timezone })}</small>
+                </div>
+              </section>
+
               {error && <p className="scheduled-error">{error}</p>}
             </div>
 
@@ -975,18 +960,43 @@ export function ScheduledTasksPage({
               {selected && (
                 <>
                   <button
+                    type="button"
                     className="danger-text-button focus-ring"
                     disabled={disabled || busy}
                     onClick={() =>
                       void action(async () => {
                         await onDelete(selected.id, selected.epoch);
-                        setSelectedId(null);
+                        closeEditor();
                       })
                     }
                   >
                     {t("scheduled.delete")}
                   </button>
                   <button
+                    type="button"
+                    className="text-button focus-ring"
+                    disabled={
+                      disabled ||
+                      busy ||
+                      selected.health === "completed" ||
+                      selected.health === "needs_attention"
+                    }
+                    onClick={() =>
+                      void action(() =>
+                        onSetEnabled(
+                          selected.id,
+                          selected.epoch,
+                          !selected.enabled,
+                        ),
+                      )
+                    }
+                  >
+                    {t(
+                      selected.enabled ? "scheduled.pause" : "scheduled.resume",
+                    )}
+                  </button>
+                  <button
+                    type="button"
                     className="text-button focus-ring"
                     disabled={disabled || busy}
                     onClick={() =>
@@ -1004,6 +1014,7 @@ export function ScheduledTasksPage({
                 </>
               )}
               <button
+                type="button"
                 className="primary-button focus-ring"
                 disabled={disabled || busy || mutation === null}
                 onClick={() => void submit()}
