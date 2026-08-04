@@ -781,7 +781,7 @@ test("Workbench owns Task lifecycle, continuation, and canonical redaction", () 
   assert.match(agent, /pub const CloseOutcome = union\(enum\)/);
 });
 
-test("Bridge Dispatcher owns product command decisions and App only composes it", () => {
+test("Bridge Dispatcher owns ingress while Application owns product admission", () => {
   const build = read("build.zig");
   assert.match(build, /bridge\.addImport\("metawork_workbench", workbench\)/);
 
@@ -798,8 +798,12 @@ test("Bridge Dispatcher owns product command decisions and App only composes it"
   }
   assert.match(dispatcher, /registered_handlers:/);
   assert.match(dispatcher, /self\.requireWorkbench/);
+  assert.doesNotMatch(dispatcher, /validateAccountSelection/);
+  assert.doesNotMatch(dispatcher, /\.accountView\(\)/);
 
   const app = read("src/app.zig");
+  assert.match(app, /fn decorateAccountView\(/);
+  assert.match(app, /expected_catalog_generation != view\.catalog_generation/);
   assert.match(app, /bridge_api\.Dispatcher\.init/);
   assert.match(app, /\.register\(/);
   assert.doesNotMatch(

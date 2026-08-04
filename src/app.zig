@@ -503,6 +503,17 @@ const AccountEffects = struct {
 
 const ExecutionReplacement = enum { none, default, identity };
 
+fn accountSelectionCommand(
+    selection_id: []const u8,
+    view: account_contract.AccountView,
+) account_contract.AccountSelectionCommand {
+    return .{
+        .selection_id = selection_id,
+        .expected_catalog_generation = view.catalog_generation,
+        .expected_execution_generation = view.execution_generation,
+    };
+}
+
 const AccountCoordinator = struct {
     account: account_api.Account = .initRestoring(),
     workbench: *workbench_api.Workbench,
@@ -532,20 +543,48 @@ const AccountCoordinator = struct {
         return .{ .context = self, .submit_fn = submitCommand };
     }
 
+    fn decorateAccountView(
+        self: *AccountCoordinator,
+        view: *account_contract.AccountView,
+    ) void {
+        const catalog = switch (view.operation) {
+            .selecting_key,
+            .loading_models,
+            .selecting_model,
+            .persisting,
+            => &self.candidate_public_catalog,
+            else => self.public_catalog,
+        };
+        catalog.decorate(view);
+    }
+
     fn submitCommand(
         context: *anyopaque,
         command: account_contract.AccountCommand,
     ) account_contract.AccountCommandResult {
         const self: *AccountCoordinator = @ptrCast(@alignCast(context));
         self.assertMainThread();
-        const before = self.account.view();
+        var view = self.account.view();
+        self.decorateAccountView(&view);
         switch (command) {
-            .select_api_key => |id| if (before.operation == .selecting_key and
-                !self.candidate_public_catalog.hasApiKey(id))
-                return .rejected(.invalid_command),
-            .select_model => |id| if (before.operation == .selecting_model and
-                !self.candidate_public_catalog.hasModel(id))
-                return .rejected(.invalid_command),
+            .select_api_key => |selection| {
+                if (selection.expected_catalog_generation != view.catalog_generation or
+                    selection.expected_execution_generation != view.execution_generation)
+                    return .rejected(.generation_mismatch);
+                const member = for (view.api_keys) |candidate| {
+                    if (std.mem.eql(u8, candidate.id, selection.selection_id)) break true;
+                } else false;
+                if (!member) return .rejected(.invalid_command);
+            },
+            .select_model => |selection| {
+                if (selection.expected_catalog_generation != view.catalog_generation or
+                    selection.expected_execution_generation != view.execution_generation)
+                    return .rejected(.generation_mismatch);
+                const member = for (view.models) |candidate| {
+                    if (std.mem.eql(u8, candidate.id, selection.selection_id)) break true;
+                } else false;
+                if (!member) return .rejected(.invalid_command);
+            },
             else => {},
         }
         const replacement: ExecutionReplacement = switch (command) {
@@ -553,16 +592,22 @@ const AccountCoordinator = struct {
             .reauthenticate, .logout => .identity,
             else => .none,
         };
-        switch (replacement) {
-            .none => {},
-            .default => self.workbench.beginDefaultExecutionReplacement() catch
-                return .rejected(.execution_in_use),
-            .identity => self.workbench.beginExecutionReplacement() catch
-                return .rejected(.execution_in_use),
-        }
         const prepared = self.account.prepareCommand(command);
         return switch (prepared) {
             .transition => |value| result: {
+                switch (replacement) {
+                    .none => {},
+                    .default => self.workbench.beginDefaultExecutionReplacement() catch {
+                        var rejected = value;
+                        rejected.deinit();
+                        break :result .rejected(.execution_in_use);
+                    },
+                    .identity => self.workbench.beginExecutionReplacement() catch {
+                        var rejected = value;
+                        rejected.deinit();
+                        break :result .rejected(.execution_in_use);
+                    },
+                }
                 const fact = value.fact();
                 const promotes_refreshed_catalog =
                     fact.kind == .catalog_changed and
@@ -577,11 +622,7 @@ const AccountCoordinator = struct {
                     self.candidate_public_catalog.clear();
                 break :result committed;
             },
-            .rejected => |error_code| result: {
-                if (replacement != .none)
-                    self.workbench.endExecutionReplacementNoFail();
-                break :result .rejected(error_code);
-            },
+            .rejected => |error_code| .rejected(error_code),
             .ignored_stale => unreachable,
         };
     }
@@ -788,11 +829,7 @@ const AccountCoordinator = struct {
             self.public_catalog.clear();
             self.candidate_public_catalog.clear();
         }
-        const projection_catalog = switch (fact.view.operation) {
-            .selecting_key, .loading_models, .selecting_model, .persisting => &self.candidate_public_catalog,
-            else => self.public_catalog,
-        };
-        projection_catalog.decorate(&fact.view);
+        self.decorateAccountView(&fact.view);
         self.workbench.commitAccountFactNoFail(fact);
         if (prepared.takeExecution()) |execution_value| {
             var execution = execution_value;
@@ -1688,11 +1725,17 @@ const App = struct {
                             .none => {},
                             .api_key => |id| _ = AccountCoordinator.submitCommand(
                                 coordinator,
-                                .{ .select_api_key = id },
+                                .{ .select_api_key = accountSelectionCommand(
+                                    id,
+                                    coordinator.account.view(),
+                                ) },
                             ),
                             .model => |id| _ = AccountCoordinator.submitCommand(
                                 coordinator,
-                                .{ .select_model = id },
+                                .{ .select_model = accountSelectionCommand(
+                                    id,
+                                    coordinator.account.view(),
+                                ) },
                             ),
                         }
                     }
@@ -2801,8 +2844,42 @@ test "Account coordinator commits login and transactional reconfiguration gates"
         &.{},
     );
     try std.testing.expect(coordinator.complete(&keys_loaded));
+    var stale_key = accountSelectionCommand("key-1", workbench.accountView());
+    stale_key.expected_catalog_generation -= 1;
+    const stale_key_result = coordinator.commandSink().submit(.{
+        .select_api_key = stale_key,
+    });
+    try std.testing.expect(!stale_key_result.accepted);
+    try std.testing.expectEqual(
+        account_contract.ErrorCode.generation_mismatch,
+        stale_key_result.error_code,
+    );
+    var stale_execution = accountSelectionCommand("key-1", workbench.accountView());
+    stale_execution.expected_execution_generation += 1;
+    const stale_execution_result = coordinator.commandSink().submit(.{
+        .select_api_key = stale_execution,
+    });
+    try std.testing.expect(!stale_execution_result.accepted);
+    try std.testing.expectEqual(
+        account_contract.ErrorCode.generation_mismatch,
+        stale_execution_result.error_code,
+    );
+    const unknown_key = coordinator.commandSink().submit(.{
+        .select_api_key = accountSelectionCommand(
+            "unknown-key",
+            workbench.accountView(),
+        ),
+    });
+    try std.testing.expect(!unknown_key.accepted);
+    try std.testing.expectEqual(
+        account_contract.ErrorCode.invalid_command,
+        unknown_key.error_code,
+    );
     const key = coordinator.commandSink().submit(.{
-        .select_api_key = "key-1",
+        .select_api_key = accountSelectionCommand(
+            "key-1",
+            workbench.accountView(),
+        ),
     });
     try std.testing.expect(key.accepted);
     try std.testing.expectEqualStrings(
@@ -2819,9 +2896,23 @@ test "Account coordinator commits login and transactional reconfiguration gates"
         &.{.{ .id = "key-1", .name = "Primary", .suffix = "1234", .provider_kind = .anthropic }},
         &.{.{ .id = "model-1", .display_name = "Model One" }},
     );
+    const hidden_model = coordinator.commandSink().submit(.{
+        .select_model = accountSelectionCommand(
+            "model-1",
+            workbench.accountView(),
+        ),
+    });
+    try std.testing.expect(!hidden_model.accepted);
+    try std.testing.expectEqual(
+        account_contract.ErrorCode.invalid_command,
+        hidden_model.error_code,
+    );
     try std.testing.expect(coordinator.complete(&models_loaded));
     const model = coordinator.commandSink().submit(.{
-        .select_model = "model-1",
+        .select_model = accountSelectionCommand(
+            "model-1",
+            workbench.accountView(),
+        ),
     });
     try std.testing.expect(model.accepted);
     try std.testing.expect(workbench.executionReplacementPending());
@@ -2834,6 +2925,19 @@ test "Account coordinator commits login and transactional reconfiguration gates"
         workbench.accountView().operation,
     );
     try std.testing.expect(!workbench.accountView().can_cancel);
+
+    const invalid_while_persisting = coordinator.commandSink().submit(.{
+        .select_model = accountSelectionCommand(
+            "model-1",
+            workbench.accountView(),
+        ),
+    });
+    try std.testing.expect(!invalid_while_persisting.accepted);
+    try std.testing.expectEqual(
+        account_contract.ErrorCode.invalid_state,
+        invalid_while_persisting.error_code,
+    );
+    try std.testing.expect(workbench.executionReplacementPending());
 
     // Persistence has committed before execution_ready reaches the main
     // thread. A cancel in that window must not roll memory back behind disk.
@@ -2889,7 +2993,10 @@ test "Account coordinator commits login and transactional reconfiguration gates"
         workbench.accountView().operation,
     );
     const keep_key = coordinator.commandSink().submit(.{
-        .select_api_key = "key-1",
+        .select_api_key = accountSelectionCommand(
+            "key-1",
+            workbench.accountView(),
+        ),
     });
     try std.testing.expect(keep_key.accepted);
     try std.testing.expectEqualStrings(
@@ -2918,7 +3025,10 @@ test "Account coordinator commits login and transactional reconfiguration gates"
         workbench.accountView().operation,
     );
     const keep_model = coordinator.commandSink().submit(.{
-        .select_model = "model-1",
+        .select_model = accountSelectionCommand(
+            "model-1",
+            workbench.accountView(),
+        ),
     });
     try std.testing.expect(keep_model.accepted);
     try std.testing.expect(effects.take() == null);
@@ -2934,8 +3044,48 @@ test "Account coordinator commits login and transactional reconfiguration gates"
     try std.testing.expectEqual(@as(usize, 2), workbench.accountView().api_keys.len);
     try std.testing.expectEqual(@as(usize, 2), workbench.accountView().models.len);
 
+    effects.entry = .{ .attempt_id = 99, .effect = .begin_oauth };
+    const exhausted_switch = coordinator.commandSink().submit(.{
+        .select_model = accountSelectionCommand(
+            "model-2",
+            workbench.accountView(),
+        ),
+    });
+    try std.testing.expect(!exhausted_switch.accepted);
+    try std.testing.expectEqual(
+        account_contract.ErrorCode.local_resource_exhausted,
+        exhausted_switch.error_code,
+    );
+    try std.testing.expect(!workbench.executionReplacementPending());
+    try std.testing.expectEqual(
+        account_contract.OperationKind.none,
+        coordinator.account.view().operation,
+    );
+    _ = effects.take().?;
+
+    try workbench.beginDefaultExecutionReplacement();
+    const blocked_switch = coordinator.commandSink().submit(.{
+        .select_model = accountSelectionCommand(
+            "model-2",
+            workbench.accountView(),
+        ),
+    });
+    try std.testing.expect(!blocked_switch.accepted);
+    try std.testing.expectEqual(
+        account_contract.ErrorCode.execution_in_use,
+        blocked_switch.error_code,
+    );
+    try std.testing.expectEqual(
+        account_contract.OperationKind.none,
+        coordinator.account.view().operation,
+    );
+    workbench.endExecutionReplacementNoFail();
+
     const failed_switch = coordinator.commandSink().submit(.{
-        .select_model = "model-failed",
+        .select_model = accountSelectionCommand(
+            "model-2",
+            workbench.accountView(),
+        ),
     });
     try std.testing.expect(failed_switch.accepted);
     try std.testing.expect(workbench.executionReplacementPending());
@@ -2959,7 +3109,7 @@ test "Account coordinator commits login and transactional reconfiguration gates"
     account_api.Catalog.TestSupport.replacePublic(
         &coordinator.candidate_public_catalog,
         &.{.{ .id = "key-1", .name = "Primary", .suffix = "1234", .provider_kind = .anthropic }},
-        &.{.{ .id = "model-failed", .display_name = "Failed model" }},
+        &.{.{ .id = "model-2", .display_name = "Failed model" }},
     );
     var failed_models: account_api.WorkerCompletion = .{
         .attempt_id = failed_switch.attempt_id.?,
@@ -2968,7 +3118,7 @@ test "Account coordinator commits login and transactional reconfiguration gates"
     defer failed_models.deinit();
     try std.testing.expect(coordinator.complete(&failed_models));
     try std.testing.expectEqualStrings(
-        "model-failed",
+        "model-2",
         effects.take().?.effect.argument().?,
     );
     var persistence_failed: account_api.WorkerCompletion = .{
@@ -2990,13 +3140,16 @@ test "Account coordinator commits login and transactional reconfiguration gates"
     );
 
     const cancelled_api = coordinator.commandSink().submit(.{
-        .select_api_key = "key-cancelled",
+        .select_api_key = accountSelectionCommand(
+            "key-2",
+            workbench.accountView(),
+        ),
     });
     try std.testing.expect(cancelled_api.accepted);
     try std.testing.expect(effects.take().?.effect == .load_api_keys);
     account_api.Catalog.TestSupport.replacePublic(
         &coordinator.candidate_public_catalog,
-        &.{.{ .id = "key-cancelled", .name = "Cancelled", .suffix = "9999", .provider_kind = .anthropic }},
+        &.{.{ .id = "key-2", .name = "Cancelled", .suffix = "9999", .provider_kind = .anthropic }},
         &.{},
     );
     var cancelled_keys: account_api.WorkerCompletion = .{
@@ -3008,7 +3161,7 @@ test "Account coordinator commits login and transactional reconfiguration gates"
     _ = effects.take().?;
     account_api.Catalog.TestSupport.replacePublic(
         &coordinator.candidate_public_catalog,
-        &.{.{ .id = "key-cancelled", .name = "Cancelled", .suffix = "9999", .provider_kind = .anthropic }},
+        &.{.{ .id = "key-2", .name = "Cancelled", .suffix = "9999", .provider_kind = .anthropic }},
         &.{.{ .id = "model-1", .display_name = "Same model id" }},
     );
     var cancelled_models: account_api.WorkerCompletion = .{
@@ -3034,7 +3187,10 @@ test "Account coordinator commits login and transactional reconfiguration gates"
     );
 
     const api_switch = coordinator.commandSink().submit(.{
-        .select_api_key = "key-2",
+        .select_api_key = accountSelectionCommand(
+            "key-2",
+            workbench.accountView(),
+        ),
     });
     try std.testing.expect(api_switch.accepted);
     try std.testing.expect(effects.take().?.effect == .load_api_keys);
@@ -3065,7 +3221,10 @@ test "Account coordinator commits login and transactional reconfiguration gates"
     defer switched_models.deinit();
     try std.testing.expect(coordinator.complete(&switched_models));
     const switched_model = coordinator.commandSink().submit(.{
-        .select_model = "model-1",
+        .select_model = accountSelectionCommand(
+            "model-1",
+            workbench.accountView(),
+        ),
     });
     try std.testing.expect(switched_model.accepted);
     try std.testing.expectEqualStrings(

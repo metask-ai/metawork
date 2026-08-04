@@ -17,7 +17,6 @@ const product_handler_count = commands.product.len;
 const workspace_path_capacity = workspace_grant.max_path_bytes;
 const event_name = "metawork:host-signal";
 
-const AccountSelectionKind = enum { api_key, model };
 pub const WindowControl = enum { minimize, toggle_maximize, show_system_menu, close };
 pub const WindowChromeState = struct { maximized: bool = false };
 
@@ -589,16 +588,21 @@ pub const Dispatcher = struct {
             invocation.request.payload,
         );
         defer parsed.deinit();
-        const admission = try self.validateAccountSelection(
-            parsed.value,
-            .api_key,
-        );
-        if (admission != .none)
-            return encodeAccountResult(output, .rejected(admission));
+        if (parsed.value.selectionId.len == 0 or
+            parsed.value.selectionId.len > account_contract.Limits.api_key_id_bytes)
+            return error.InvalidBridgePayload;
         return encodeAccountResult(
             output,
             self.account_commands.submit(.{
-                .select_api_key = parsed.value.selectionId,
+                .select_api_key = .{
+                    .selection_id = parsed.value.selectionId,
+                    .expected_catalog_generation = try handlers.parseWireId(
+                        parsed.value.expectedCatalogGeneration,
+                    ),
+                    .expected_execution_generation = try handlers.parseWireId(
+                        parsed.value.expectedExecutionGeneration,
+                    ),
+                },
             }),
         );
     }
@@ -617,16 +621,21 @@ pub const Dispatcher = struct {
             invocation.request.payload,
         );
         defer parsed.deinit();
-        const admission = try self.validateAccountSelection(
-            parsed.value,
-            .model,
-        );
-        if (admission != .none)
-            return encodeAccountResult(output, .rejected(admission));
+        if (parsed.value.selectionId.len == 0 or
+            parsed.value.selectionId.len > account_contract.Limits.model_id_bytes)
+            return error.InvalidBridgePayload;
         return encodeAccountResult(
             output,
             self.account_commands.submit(.{
-                .select_model = parsed.value.selectionId,
+                .select_model = .{
+                    .selection_id = parsed.value.selectionId,
+                    .expected_catalog_generation = try handlers.parseWireId(
+                        parsed.value.expectedCatalogGeneration,
+                    ),
+                    .expected_execution_generation = try handlers.parseWireId(
+                        parsed.value.expectedExecutionGeneration,
+                    ),
+                },
             }),
         );
     }
@@ -1698,36 +1707,6 @@ pub const Dispatcher = struct {
             return error.InvalidBridgeThread;
     }
 
-    fn validateAccountSelection(
-        self: *Dispatcher,
-        selection: handlers.AccountSelection,
-        kind: AccountSelectionKind,
-    ) !account_contract.ErrorCode {
-        const expected_catalog_generation = try handlers.parseWireId(
-            selection.expectedCatalogGeneration,
-        );
-        const expected_execution_generation = try handlers.parseWireId(
-            selection.expectedExecutionGeneration,
-        );
-        if (selection.selectionId.len == 0 or selection.selectionId.len > switch (kind) {
-            .api_key => account_contract.Limits.api_key_id_bytes,
-            .model => account_contract.Limits.model_id_bytes,
-        }) return error.InvalidBridgePayload;
-        const view = (try self.requireWorkbench()).accountView();
-        if (expected_catalog_generation != view.catalog_generation or
-            expected_execution_generation != view.execution_generation)
-            return .generation_mismatch;
-        const member = switch (kind) {
-            .api_key => for (view.api_keys) |candidate| {
-                if (std.mem.eql(u8, candidate.id, selection.selectionId)) break true;
-            } else false,
-            .model => for (view.models) |candidate| {
-                if (std.mem.eql(u8, candidate.id, selection.selectionId)) break true;
-            } else false,
-        };
-        return if (member) .none else .invalid_command;
-    }
-
     fn requireWorkbench(self: *Dispatcher) !*workbench_api.Workbench {
         return self.workbench orelse error.RuntimeUnavailable;
     }
@@ -2398,6 +2377,8 @@ test "Dispatcher validates authority before domain calls and preserves committed
         window_control_calls: usize = 0,
         window_state_calls: usize = 0,
         on_main_thread: bool = true,
+        last_catalog_generation: u64 = 0,
+        last_execution_generation: u64 = 0,
         account_result: account_contract.AccountCommandResult =
             .acceptedAttempt(41),
 
@@ -2484,8 +2465,13 @@ test "Dispatcher validates authority before domain calls and preserves committed
                 .refresh_catalog,
                 .logout,
                 => {},
-                .select_api_key => |id| std.debug.assert(id.len != 0),
-                .select_model => |id| std.debug.assert(id.len != 0),
+                .select_api_key, .select_model => |selection| {
+                    std.debug.assert(selection.selection_id.len != 0);
+                    self.last_catalog_generation =
+                        selection.expected_catalog_generation;
+                    self.last_execution_generation =
+                        selection.expected_execution_generation;
+                },
             }
             return self.account_result;
         }
@@ -2748,28 +2734,19 @@ test "Dispatcher validates authority before domain calls and preserves committed
         std.mem.indexOf(u8, empty_model, "\"handler_failed\"") != null,
     );
     try std.testing.expectEqual(@as(usize, 1), harness.account_calls);
-    const stale_selection = native_dispatcher.dispatch(
-        "{\"id\":\"stale-key\",\"command\":\"metawork.account.selectApiKey\",\"payload\":{\"selectionId\":\"key-1\",\"expectedCatalogGeneration\":\"0\",\"expectedExecutionGeneration\":\"1\"}}",
+    const forwarded_selection = native_dispatcher.dispatch(
+        "{\"id\":\"select-key\",\"command\":\"metawork.account.selectApiKey\",\"payload\":{\"selectionId\":\"key-1\",\"expectedCatalogGeneration\":\"0\",\"expectedExecutionGeneration\":\"0\"}}",
         source,
         &response,
     );
     try std.testing.expect(std.mem.indexOf(
         u8,
-        stale_selection,
-        "\"errorCode\":\"generation_mismatch\"",
-    ) != null);
-    try std.testing.expectEqual(@as(usize, 1), harness.account_calls);
-    const valid_selection = native_dispatcher.dispatch(
-        "{\"id\":\"select-key\",\"command\":\"metawork.account.selectApiKey\",\"payload\":{\"selectionId\":\"key-1\",\"expectedCatalogGeneration\":\"1\",\"expectedExecutionGeneration\":\"1\"}}",
-        source,
-        &response,
-    );
-    try std.testing.expect(std.mem.indexOf(
-        u8,
-        valid_selection,
+        forwarded_selection,
         "\"accepted\":true",
     ) != null);
     try std.testing.expectEqual(@as(usize, 2), harness.account_calls);
+    try std.testing.expectEqual(@as(u64, 0), harness.last_catalog_generation);
+    try std.testing.expectEqual(@as(u64, 0), harness.last_execution_generation);
     harness.on_main_thread = false;
     _ = native_dispatcher.dispatch(
         "{\"id\":\"wrong-thread\",\"command\":\"metawork.account.logout\",\"payload\":{}}",
