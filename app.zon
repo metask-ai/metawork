@@ -18,6 +18,7 @@
             .{ .name = "metawork.events.disconnect", .origins = .{"zero://app"} },
             .{ .name = "metawork.window.beginDrag", .origins = .{"zero://app"} },
             .{ .name = "metawork.window.control", .origins = .{"zero://app"} },
+            .{ .name = "metawork.window.state", .origins = .{"zero://app"} },
             .{ .name = "metawork.workspaces.choose", .origins = .{"zero://app"} },
             .{ .name = "metawork.workspaces.select", .origins = .{"zero://app"} },
             .{ .name = "metawork.workspaces.remove", .origins = .{"zero://app"} },

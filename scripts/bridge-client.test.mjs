@@ -137,33 +137,61 @@ test("a native Workspace picker remains user-controlled instead of command-timed
   assert.deepEqual(await client.chooseWorkspace(), { selected: false });
 });
 
-test("the hidden-inset titlebar delegates drag to the connected Host window", async () => {
+test("the native window menu remains user-controlled instead of command-timed", async () => {
+  const client = new BridgeClient({
+    bridge: bridgeWith(
+      () =>
+        new Promise((resolve) =>
+          setTimeout(() => resolve({ completed: true, maximized: false }), 25),
+        ),
+    ),
+    commandTimeoutMs: 5,
+  });
+
+  assert.deepEqual(await client.openWindowSystemMenu(), { maximized: false });
+});
+
+test("the hidden-inset titlebar delegates native drag and double-click counts", async () => {
   const calls = [];
   const client = new BridgeClient({
     bridge: bridgeWith(async (command, payload) => {
       calls.push({ command, payload });
-      return { started: true };
+      return { started: true, maximized: payload.clicks === 2 };
     }),
   });
 
-  await client.beginWindowDrag(1);
+  assert.deepEqual(await client.beginWindowDrag(1), { maximized: false });
+  assert.deepEqual(await client.beginWindowDrag(2), { maximized: true });
   assert.deepEqual(calls, [
     { command: "metawork.window.beginDrag", payload: { clicks: 1 } },
+    { command: "metawork.window.beginDrag", payload: { clicks: 2 } },
   ]);
 });
 
-test("visible window controls delegate their exact action to the Host", async () => {
+test("window chrome controls and state stay behind the Host boundary", async () => {
   const calls = [];
   const client = new BridgeClient({
     bridge: bridgeWith(async (command, payload) => {
       calls.push({ command, payload });
-      return { completed: true };
+      if (command === "metawork.window.state") return { maximized: true };
+      return { completed: true, maximized: false };
     }),
   });
 
-  await client.controlWindow("minimize");
+  assert.deepEqual(await client.controlWindow("minimize"), {
+    maximized: false,
+  });
+  assert.deepEqual(await client.openWindowSystemMenu(), {
+    maximized: false,
+  });
+  assert.deepEqual(await client.windowState(), { maximized: true });
   assert.deepEqual(calls, [
     { command: "metawork.window.control", payload: { action: "minimize" } },
+    {
+      command: "metawork.window.control",
+      payload: { action: "show_system_menu" },
+    },
+    { command: "metawork.window.state", payload: {} },
   ]);
 });
 

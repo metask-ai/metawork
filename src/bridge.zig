@@ -15,6 +15,7 @@ pub const Dispatcher = dispatcher_impl.Dispatcher;
 pub const DispatcherPlatform = dispatcher_impl.Platform;
 pub const DispatcherAutomationAuthority = dispatcher_impl.AutomationAuthority;
 pub const WindowControl = dispatcher_impl.WindowControl;
+pub const WindowChromeState = dispatcher_impl.WindowChromeState;
 
 pub const ProductDelivery = product_delivery_impl.Delivery;
 pub const ProductDeliveryTransport = product_delivery_impl.Transport;
@@ -34,6 +35,7 @@ pub const commands = struct {
     pub const disconnect = commands_impl.disconnect;
     pub const window_begin_drag = commands_impl.window_begin_drag;
     pub const window_control = commands_impl.window_control;
+    pub const window_state = commands_impl.window_state;
     pub const choose_workspace = commands_impl.choose_workspace;
     pub const select_workspace = commands_impl.select_workspace;
     pub const remove_workspace = commands_impl.remove_workspace;

@@ -8,6 +8,7 @@ export const commands = {
   disconnect: "metawork.events.disconnect",
   windowBeginDrag: "metawork.window.beginDrag",
   windowControl: "metawork.window.control",
+  windowState: "metawork.window.state",
   chooseWorkspace: "metawork.workspaces.choose",
   selectWorkspace: "metawork.workspaces.select",
   removeWorkspace: "metawork.workspaces.remove",

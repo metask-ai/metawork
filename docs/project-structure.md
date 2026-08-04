@@ -97,7 +97,7 @@ Renderer Bridge `metawork.renderer-bridge` 覆盖完整 command、event 和 snap
 
 ### `app.zig` 与 module entrypoint
 
-`main.zig` 只调用 `metawork_app`。`app.zig` 注入 Native platform capability 并按顺序组织 Account、Workbench、Agent、Bridge 与 automation 生命周期，不复制这些 owner 的状态。`window_chrome.zig` 只补齐 App-owned 单一启动窗口的 WebView `hidden_inset_tall` 真实拖拽与 Windows maximize/restore seam；Windows 必须先由精确 SDK window id 定位并验证同一 Host window，minimize/close 继续调用 Native SDK 的 window-id API。它不形成通用 Desktop Interface，也不拥有产品状态。
+`main.zig` 只调用 `metawork_app`。`app.zig` 注入 Native platform capability 并按顺序组织 Account、Workbench、Agent、Bridge 与 automation 生命周期，不复制这些 owner 的状态。`window_chrome.zig` 是 App-owned 单一启动窗口的窄平台 seam：WebView `hidden_inset_tall` 的 press 交回系统拖动，Windows 在同一精确窗口上补齐双击最大化/还原、最大化拖拽恢复、原生系统菜单与只读最大化状态；minimize/close 继续调用 Native SDK 的 window-id API。Renderer 的 `components/ui/WindowTitlebar.tsx` 统一拥有空白区与交互控件的命中规则，`app/useWindowChrome.ts` 只维护 Host 状态的瞬时呈现投影。该边界不形成通用 Desktop Interface，也不拥有产品状态。
 
 `account.zig`、`bridge.zig`、`workbench.zig` 和 `agent.zig` 是小型公开入口，只显式暴露实际消费者需要的类型、函数或窄 namespace。内部文件不通过 `usingnamespace` 或无边界 barrel 重新泄漏。
 

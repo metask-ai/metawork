@@ -153,6 +153,10 @@ test("Renderer command bars own the hidden-inset titlebar without stealing contr
     "utf8",
   );
   const css = await readFile(resolve(sourceRoot, "index.css"), "utf8");
+  const titlebar = await readFile(
+    resolve(sourceRoot, "components", "ui", "WindowTitlebar.tsx"),
+    "utf8",
+  );
   const icons = await readFile(
     resolve(sourceRoot, "components", "ui", "Icon.tsx"),
     "utf8",
@@ -166,9 +170,13 @@ test("Renderer command bars own the hidden-inset titlebar without stealing contr
   assert.match(shell, /attentionNotice/);
   assert.match(shell, /commandbar-alert-slot/);
   assert.match(shell, /aria-live="polite"/);
-  assert.match(shell, /onBeginWindowDrag/);
+  assert.match(shell, /WindowTitlebar/);
   assert.match(gate, /account-gate-toolbar/);
-  assert.match(gate, /onBeginWindowDrag/);
+  assert.match(gate, /WindowTitlebar/);
+  assert.match(titlebar, /onPointerDown=\{beginDrag\}/);
+  assert.match(titlebar, /onDoubleClick=/);
+  assert.match(titlebar, /onContextMenu=/);
+  assert.doesNotMatch(`${shell}\n${gate}`, /onPointerMove|setPointerCapture/);
   assert.match(manifest, /\.titlebar = "hidden_inset_tall"/);
   assert.doesNotMatch(css, /-webkit-app-region:/);
   assert.match(shell, /WindowControls/);
@@ -185,6 +193,8 @@ test("Renderer command bars own the hidden-inset titlebar without stealing contr
   );
   assert.match(icons, /} from "lucide-react";/);
   assert.match(icons, /minimize: Minus/);
+  assert.match(icons, /maximize: Square/);
+  assert.match(icons, /restore: Copy/);
   assert.match(
     css,
     /top: calc\(var\(--window-bar-height\) \+ env\(safe-area-inset-top, 0px\)\)/,

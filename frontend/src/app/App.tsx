@@ -8,6 +8,7 @@ import {
 } from "react";
 
 import { AppShell } from "./AppShell.tsx";
+import { useWindowChrome } from "./useWindowChrome.ts";
 import {
   attentionStatus,
   publishStatus,
@@ -175,6 +176,7 @@ export default function App() {
     observeSnapshot: observeUiResponseSnapshot,
   } = useUiResponseStates();
   const client = useMemo(() => new BridgeClient(), []);
+  const windowChrome = useWindowChrome(client);
   const connection = useRef<WorkbenchConnection | null>(null);
   const pendingTaskSelection = useRef<string | null>(null);
   const pendingTaskDraftRetention = useRef(new Set<string>());
@@ -1650,12 +1652,11 @@ export default function App() {
             ? t(accountGateStatus.id, accountGateStatus.values)
             : ""
         }
-        onBeginWindowDrag={() => {
-          void client.beginWindowDrag(1).catch(() => undefined);
-        }}
-        onWindowControl={(action) => {
-          void client.controlWindow(action).catch(() => undefined);
-        }}
+        onBeginWindowDrag={windowChrome.beginDrag}
+        onToggleWindowSize={windowChrome.toggleFromDoubleClick}
+        onOpenWindowMenu={windowChrome.openSystemMenu}
+        windowMaximized={windowChrome.maximized}
+        onWindowControl={windowChrome.control}
         onReconnect={() => void retryViewSynchronization()}
         onBeginLogin={() => void runAccountCommand(() => client.beginLogin())}
         onReopenLogin={() => void runAccountCommand(() => client.reopenLogin())}
@@ -1832,12 +1833,11 @@ export default function App() {
       }
       contextVisible={route === "workbench" && activeTask !== null}
       onSearch={() => setSearchOpen(true)}
-      onBeginWindowDrag={() => {
-        void client.beginWindowDrag(1).catch(() => undefined);
-      }}
-      onWindowControl={(action) => {
-        void client.controlWindow(action).catch(() => undefined);
-      }}
+      onBeginWindowDrag={windowChrome.beginDrag}
+      onToggleWindowSize={windowChrome.toggleFromDoubleClick}
+      onOpenWindowMenu={windowChrome.openSystemMenu}
+      windowMaximized={windowChrome.maximized}
+      onWindowControl={windowChrome.control}
       attentionNotice={
         commandBarStatus
           ? t(commandBarStatus.id, commandBarStatus.values)

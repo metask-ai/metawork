@@ -46,6 +46,28 @@ public static class MetaWorkChromeProbe {
         uint data,
         UIntPtr extraInfo
     );
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct GuiThreadInfo {
+        public int Size;
+        public uint Flags;
+        public IntPtr Active;
+        public IntPtr Focus;
+        public IntPtr Capture;
+        public IntPtr MenuOwner;
+        public IntPtr MoveSize;
+        public IntPtr Caret;
+        public Rect CaretRect;
+    }
+
+    [DllImport("user32.dll")]
+    public static extern uint GetWindowThreadProcessId(IntPtr window, IntPtr processId);
+
+    [DllImport("user32.dll")]
+    public static extern bool GetGUIThreadInfo(uint threadId, ref GuiThreadInfo info);
+
+    [DllImport("user32.dll")]
+    public static extern void keybd_event(byte virtualKey, byte scanCode, uint flags, UIntPtr extraInfo);
 }
 '@
 
@@ -60,6 +82,32 @@ function Get-MetaWorkRect([IntPtr]$window) {
 function Invoke-MetaWorkClick([int]$x, [int]$y) {
     [MetaWorkChromeProbe]::SetCursorPos($x, $y) | Out-Null
     [MetaWorkChromeProbe]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero)
+    [MetaWorkChromeProbe]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
+}
+
+function Invoke-MetaWorkDoubleClick([int]$x, [int]$y) {
+    Invoke-MetaWorkClick $x $y
+    Start-Sleep -Milliseconds 80
+    Invoke-MetaWorkClick $x $y
+}
+
+function Invoke-MetaWorkRightClick([int]$x, [int]$y) {
+    [MetaWorkChromeProbe]::SetCursorPos($x, $y) | Out-Null
+    [MetaWorkChromeProbe]::mouse_event(8, 0, 0, 0, [UIntPtr]::Zero)
+    [MetaWorkChromeProbe]::mouse_event(16, 0, 0, 0, [UIntPtr]::Zero)
+}
+
+function Invoke-MetaWorkDrag([int]$x, [int]$y, [int]$deltaX, [int]$deltaY) {
+    [MetaWorkChromeProbe]::SetCursorPos($x, $y) | Out-Null
+    [MetaWorkChromeProbe]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero)
+    Start-Sleep -Milliseconds 80
+    for ($step = 1; $step -le 8; $step++) {
+        [MetaWorkChromeProbe]::SetCursorPos(
+            $x + [Math]::Round($deltaX * $step / 8),
+            $y + [Math]::Round($deltaY * $step / 8)
+        ) | Out-Null
+        Start-Sleep -Milliseconds 55
+    }
     [MetaWorkChromeProbe]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
 }
 
@@ -87,24 +135,26 @@ $originalLeft = $rect.Left
 $originalTop = $rect.Top
 $dragX = $rect.Left + [Math]::Min(760, ($rect.Right - $rect.Left) / 2)
 $dragY = $rect.Top + 25
-[MetaWorkChromeProbe]::SetCursorPos($dragX, $dragY) | Out-Null
-[MetaWorkChromeProbe]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero)
-Start-Sleep -Milliseconds 80
-[MetaWorkChromeProbe]::SetCursorPos($dragX + 12, $dragY + 8) | Out-Null
-Start-Sleep -Milliseconds 300
-for ($step = 2; $step -le 8; $step++) {
-    [MetaWorkChromeProbe]::SetCursorPos(
-        $dragX + (10 * $step),
-        $dragY + (6 * $step)
-    ) | Out-Null
-    Start-Sleep -Milliseconds 55
-}
-[MetaWorkChromeProbe]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
+Invoke-MetaWorkDrag $dragX $dragY 80 48
 Start-Sleep -Milliseconds 350
 $rect = Get-MetaWorkRect $window
 if ([Math]::Abs($rect.Left - $originalLeft) -lt 12 -and [Math]::Abs($rect.Top - $originalTop) -lt 12) {
     throw 'Renderer titlebar drag did not move the Native window'
 }
+
+$menuX = $rect.Left + [Math]::Min(760, ($rect.Right - $rect.Left) / 2)
+$menuY = $rect.Top + 25
+Invoke-MetaWorkRightClick $menuX $menuY
+Start-Sleep -Milliseconds 350
+$threadId = [MetaWorkChromeProbe]::GetWindowThreadProcessId($window, [IntPtr]::Zero)
+$threadInfo = New-Object MetaWorkChromeProbe+GuiThreadInfo
+$threadInfo.Size = [Runtime.InteropServices.Marshal]::SizeOf($threadInfo)
+if (-not [MetaWorkChromeProbe]::GetGUIThreadInfo($threadId, [ref]$threadInfo) -or ($threadInfo.Flags -band 28) -eq 0 -or $threadInfo.MenuOwner -eq [IntPtr]::Zero) {
+    throw 'Renderer titlebar right-click did not open the Native system menu'
+}
+[MetaWorkChromeProbe]::keybd_event(0x1b, 0, 0, [UIntPtr]::Zero)
+[MetaWorkChromeProbe]::keybd_event(0x1b, 0, 2, [UIntPtr]::Zero)
+Start-Sleep -Milliseconds 200
 
 Invoke-MetaWorkClick ($rect.Right - 121) ($rect.Top + 25)
 Start-Sleep -Milliseconds 350
@@ -116,12 +166,47 @@ if (-not [MetaWorkChromeProbe]::IsIconic($window)) {
 Start-Sleep -Milliseconds 350
 
 $rect = Get-MetaWorkRect $window
+Invoke-MetaWorkDoubleClick ($rect.Left + [Math]::Min(760, ($rect.Right - $rect.Left) / 2)) ($rect.Top + 25)
+Start-Sleep -Milliseconds 350
+if (-not [MetaWorkChromeProbe]::IsZoomed($window)) {
+    throw 'Renderer titlebar double-click did not maximize the Native window'
+}
+
+$rect = Get-MetaWorkRect $window
+Invoke-MetaWorkDoubleClick ($rect.Left + [Math]::Min(760, ($rect.Right - $rect.Left) / 2)) ($rect.Top + 25)
+Start-Sleep -Milliseconds 350
+if ([MetaWorkChromeProbe]::IsZoomed($window)) {
+    throw 'Renderer titlebar double-click did not restore the Native window'
+}
+
+$rect = Get-MetaWorkRect $window
 Invoke-MetaWorkClick ($rect.Right - 75) ($rect.Top + 25)
 Start-Sleep -Milliseconds 350
 if (-not [MetaWorkChromeProbe]::IsZoomed($window)) {
     throw 'Renderer maximize control did not maximize the Native window'
 }
 
+$maximizedRect = Get-MetaWorkRect $window
+$dragX = $maximizedRect.Left + (($maximizedRect.Right - $maximizedRect.Left) / 2)
+$dragY = $maximizedRect.Top + 25
+Invoke-MetaWorkDrag $dragX $dragY 96 64
+Start-Sleep -Milliseconds 350
+if ([MetaWorkChromeProbe]::IsZoomed($window)) {
+    throw 'Dragging the maximized Renderer titlebar did not restore the Native window'
+}
+$restoredRect = Get-MetaWorkRect $window
+if ($restoredRect.Right - $restoredRect.Left -ge $maximizedRect.Right - $maximizedRect.Left) {
+    throw 'Dragging the maximized Renderer titlebar did not recover the restored width'
+}
+if ([Math]::Abs($restoredRect.Left - $maximizedRect.Left) -lt 24 -and [Math]::Abs($restoredRect.Top - $maximizedRect.Top) -lt 24) {
+    throw 'Dragging the maximized Renderer titlebar did not continue moving after restore'
+}
+
+Invoke-MetaWorkClick ($restoredRect.Right - 75) ($restoredRect.Top + 25)
+Start-Sleep -Milliseconds 350
+if (-not [MetaWorkChromeProbe]::IsZoomed($window)) {
+    throw 'Renderer maximize control did not re-maximize the Native window'
+}
 $rect = Get-MetaWorkRect $window
 Invoke-MetaWorkClick ($rect.Right - 75) ($rect.Top + 25)
 Start-Sleep -Milliseconds 350
