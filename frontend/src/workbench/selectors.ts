@@ -6,6 +6,7 @@ import type {
 } from "../bridge/contracts.ts";
 import { runInputDisplay } from "./run-input.ts";
 import type { WorkbenchState } from "./store.ts";
+import { navigableTasks } from "./task-visibility.ts";
 
 export function selectActiveTask(state: WorkbenchState): TaskView | null {
   return (
@@ -228,9 +229,8 @@ export function selectCurrentWorkspace(state: WorkbenchState): string | null {
 
 export type SearchResult = {
   key: string;
-  kind: "workspace" | "task" | "instruction" | "completion";
-  taskId: string | null;
-  workspaceId: string;
+  kind: "task" | "instruction" | "completion";
+  taskId: string;
   title: string;
   detail: string;
 };
@@ -246,20 +246,7 @@ export function searchWorkbench(
   const workspaces = new Map(
     snapshot.workspaces.map((workspace) => [workspace.id, workspace]),
   );
-  for (const workspace of snapshot.workspaces.filter(
-    (candidate) => candidate.origin === "user",
-  )) {
-    if (matches(workspace.canonicalRoot) || matches(workspace.displayName))
-      results.push({
-        key: `workspace:${workspace.id}`,
-        kind: "workspace",
-        taskId: null,
-        workspaceId: workspace.id,
-        title: workspace.displayName || workspaceLabel(workspace.canonicalRoot),
-        detail: workspace.canonicalRoot,
-      });
-  }
-  for (const task of snapshot.tasks) {
+  for (const task of navigableTasks(snapshot)) {
     const workspace = workspaces.get(task.workspaceId);
     if (!workspace) continue;
     const title = task.title;
@@ -268,7 +255,6 @@ export function searchWorkbench(
         key: `task:${task.id}`,
         kind: "task",
         taskId: task.id,
-        workspaceId: task.workspaceId,
         title,
         detail:
           workspace.origin === "managed"
@@ -282,7 +268,6 @@ export function searchWorkbench(
           key: `instruction:${task.id}:${run.id}`,
           kind: "instruction",
           taskId: task.id,
-          workspaceId: task.workspaceId,
           title,
           detail: input,
         });
@@ -295,7 +280,6 @@ export function searchWorkbench(
           key: `completion:${task.id}:${run.id}`,
           kind: "completion",
           taskId: task.id,
-          workspaceId: task.workspaceId,
           title,
           detail: run.assistant,
         });

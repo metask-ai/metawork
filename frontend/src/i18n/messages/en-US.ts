@@ -1,6 +1,6 @@
 export const enUS = {
   "app.name": "MetaWork",
-  "app.toggle_workspaces": "Toggle workspace and task sidebar",
+  "app.toggle_sidebar": "Toggle task sidebar",
   "app.dismiss_panels": "Dismiss panels",
   "app.language": "Language",
   "app.language.en-US": "English",

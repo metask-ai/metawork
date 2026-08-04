@@ -544,13 +544,12 @@ summary::-webkit-details-marker {
   margin-top: 1px;
 }
 
-.sidebar-navigation .workspace-card,
 .sidebar-navigation .task-list {
   margin-top: 0;
 }
 
 .sidebar-navigation .task-list {
-  margin-top: 24px;
+  margin-top: 0;
 }
 
 .task-group {
