@@ -15,7 +15,7 @@
     "react-dom": "19.2.6"
   },
   "devDependencies": {
-    "@native-sdk/cli": "0.6.1",
+    "@native-sdk/cli": "0.8.0",
     "@tailwindcss/vite": "4.3.2",
     "@testing-library/react": "16.3.0",
     "@testing-library/user-event": "14.6.1",
