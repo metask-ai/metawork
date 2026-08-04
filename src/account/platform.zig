@@ -13,6 +13,8 @@ const manifest_name = store.manifest_name;
 const manifest_bytes = 16 * 1024;
 const public_state_bytes = 8 * 1024;
 
+pub const Services = native_sdk.platform.PlatformServices;
+
 pub const PlatformError = error{
     WrongThread,
     InvalidAuthorizationUrl,
@@ -469,6 +471,21 @@ pub const NativeBackend = if (builtin.os.tag == .windows)
     WindowsBackend
 else
     MacosBackend;
+
+pub fn startTimer(
+    backend: *NativeBackend,
+    timer_id: u64,
+    interval_ns: u64,
+    repeats: bool,
+) !void {
+    try backend.assertMainThread();
+    try backend.services.startTimer(timer_id, interval_ns, repeats);
+}
+
+pub fn cancelTimer(backend: *NativeBackend, timer_id: u64) !void {
+    try backend.assertMainThread();
+    try backend.services.cancelTimer(timer_id);
+}
 
 const WindowsPublicStateWire = struct {
     account_id: []const u8,

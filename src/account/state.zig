@@ -232,8 +232,12 @@ pub const Account = struct {
             .reauthenticate => self.prepareReauthenticate(),
             .cancel_operation => self.prepareCancel(),
             .refresh_catalog => self.prepareRefreshCatalog(),
-            .select_api_key => |id| self.prepareSelectApiKey(id),
-            .select_model => |model| self.prepareSelectModel(model),
+            .select_api_key => |selection| self.prepareSelectApiKey(
+                selection.selection_id,
+            ),
+            .select_model => |selection| self.prepareSelectModel(
+                selection.selection_id,
+            ),
             .logout => self.prepareLogout(),
         };
     }
@@ -1289,6 +1293,14 @@ fn commitPrepared(account: *Account, prepared: *PreparedTransition) void {
     prepared.deinit();
 }
 
+fn testSelection(selection_id: []const u8) contract.AccountSelectionCommand {
+    return .{
+        .selection_id = selection_id,
+        .expected_catalog_generation = 0,
+        .expected_execution_generation = 0,
+    };
+}
+
 test "command prepare does not mutate committed state before commit" {
     var account = Account.initSignedOutForTest();
     var prepared = switch (account.prepareCommand(.begin_login)) {
@@ -1587,7 +1599,7 @@ test "failed reconfiguration preserves committed selection and generation high w
     };
     commitPrepared(&account, &keys_ready);
     var select_key = switch (account.prepareCommand(.{
-        .select_api_key = "key-new",
+        .select_api_key = testSelection("key-new"),
     })) {
         .transition => |value| value,
         else => return error.TestUnexpectedResult,
@@ -1604,7 +1616,7 @@ test "failed reconfiguration preserves committed selection and generation high w
     };
     commitPrepared(&account, &models_ready);
     var select_model = switch (account.prepareCommand(.{
-        .select_model = "model-new",
+        .select_model = testSelection("model-new"),
     })) {
         .transition => |value| value,
         else => return error.TestUnexpectedResult,
@@ -1691,7 +1703,7 @@ test "ready execution reloads authenticated catalog before reconfiguration" {
     } };
 
     var select_api = switch (account.prepareCommand(.{
-        .select_api_key = "key-new",
+        .select_api_key = testSelection("key-new"),
     })) {
         .transition => |value| value,
         else => return error.TestUnexpectedResult,
@@ -1717,7 +1729,7 @@ test "ready execution reloads authenticated catalog before reconfiguration" {
     commitPrepared(&account, &cancel);
 
     var select_model = switch (account.prepareCommand(.{
-        .select_model = "model-new",
+        .select_model = testSelection("model-new"),
     })) {
         .transition => |value| value,
         else => return error.TestUnexpectedResult,
@@ -1988,7 +2000,7 @@ test "unknown execution persistence outcome clears old runtime identity" {
     };
     commitPrepared(&account, &keys_ready);
     var select_key = switch (account.prepareCommand(.{
-        .select_api_key = "key-new",
+        .select_api_key = testSelection("key-new"),
     })) {
         .transition => |value| value,
         else => return error.TestUnexpectedResult,
@@ -2005,7 +2017,7 @@ test "unknown execution persistence outcome clears old runtime identity" {
     };
     commitPrepared(&account, &models_ready);
     var select_model = switch (account.prepareCommand(.{
-        .select_model = "model-new",
+        .select_model = testSelection("model-new"),
     })) {
         .transition => |value| value,
         else => return error.TestUnexpectedResult,
@@ -2082,7 +2094,9 @@ test "login commits account-only before a separate catalog generation" {
     };
     commitPrepared(&account, &keys_transition);
 
-    var select_key = switch (account.prepareCommand(.{ .select_api_key = "key-1" })) {
+    var select_key = switch (account.prepareCommand(.{
+        .select_api_key = testSelection("key-1"),
+    })) {
         .transition => |value| value,
         else => return error.TestUnexpectedResult,
     };
@@ -2099,7 +2113,9 @@ test "login commits account-only before a separate catalog generation" {
     };
     commitPrepared(&account, &models_transition);
 
-    var select_model = switch (account.prepareCommand(.{ .select_model = "model-1" })) {
+    var select_model = switch (account.prepareCommand(.{
+        .select_model = testSelection("model-1"),
+    })) {
         .transition => |value| value,
         else => return error.TestUnexpectedResult,
     };

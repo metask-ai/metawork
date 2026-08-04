@@ -60,6 +60,11 @@ test("module roots and Agent directory use product semantics", () => {
     true,
     "the pure Account contract must have an explicit source root",
   );
+  assert.equal(
+    existsSync(new URL("src/account/runtime.zig", root)),
+    true,
+    "Account must have an explicit long-lived Runtime owner",
+  );
   assert.equal(existsSync(new URL("src/agentcore.zig", root)), false);
   assert.equal(existsSync(new URL("src/agentcore/", root)), false);
 });
@@ -227,6 +232,7 @@ test("build graph registers Account product and pure contract modules", () => {
     "account_platform",
     "account_loopback",
     "account_login_attempt",
+    "account_runtime",
   ]) {
     assert.match(
       source,
@@ -250,8 +256,9 @@ test("build graph registers Account product and pure contract modules", () => {
   assert.doesNotMatch(source, /src\/agentcore(?:\/|\.zig)/);
 });
 
-test("Account execution is installed explicitly without process defaults", () => {
+test("Account Runtime owns policy while App installs execution explicitly", () => {
   const app = read("src/app.zig");
+  const accountRuntime = read("src/account/runtime.zig");
   const workbench = read("src/workbench/projection.zig");
   for (const variable of [
     "METAWORK_PROVIDER_API_KEY",
@@ -272,10 +279,48 @@ test("Account execution is installed explicitly without process defaults", () =>
     /pub const Configuration = struct \{\s*change_notifier:/,
   );
   assert.doesNotMatch(workbench, /ExecutionDefaults/);
-  assert.match(app, /effect_commit_hook\.dispatch\(\)/);
-  assert.match(app, /commitAccountOnly\(/);
-  assert.match(app, /account_api\.CredentialOwner/);
+  assert.match(app, /prepared\.takeExecution\(\)/);
+  assert.match(app, /prepared\.attemptId\(\)/);
+  assert.doesNotMatch(app, /prepared\.transition/);
+  assert.match(app, /workbench\.installExecutionNoFail/);
+  assert.match(app, /runtime\.dispatchCommitted\(&prepared\)/);
+  assert.match(accountRuntime, /credentials: credentials_impl\.CredentialOwner/);
+  assert.match(accountRuntime, /fn automaticApiSelection\(/);
+  assert.match(accountRuntime, /fn automaticModelSelection\(/);
+  assert.match(accountRuntime, /fn prepareAndPersistExecution\(/);
+  assert.match(accountRuntime, /catalog_after_refresh:/);
+  assert.doesNotMatch(
+    app,
+    /CredentialOwner|automaticApiSelection|automaticModelSelection|prepareAndPersistExecution|catalog_after_refresh|mailbox_mutex/,
+  );
   assert.doesNotMatch(app, /account_api\.OAuth\.TokenSet/);
+
+  const runtimeDeinit = accountRuntime.slice(
+    accountRuntime.indexOf("pub fn deinit(self: *Runtime)"),
+    accountRuntime.indexOf("pub fn prepareStart("),
+  );
+  assert.doesNotMatch(runtimeDeinit, /cancelRefreshTimer|platform\.deinit/);
+  assert.ok(
+    runtimeDeinit.indexOf("self.effects.deinit();") <
+      runtimeDeinit.indexOf("self.credentials.deinit();"),
+    "Account effects must quiesce before credentials are released",
+  );
+
+  const shutdownEffect = accountRuntime.slice(
+    accountRuntime.indexOf(".shutdown => {"),
+    accountRuntime.indexOf(".refresh_token => {"),
+  );
+  const cancelTimer = shutdownEffect.indexOf("self.cancelRefreshTimer();");
+  const joinEffects = shutdownEffect.indexOf(
+    "self.effects.cancelJoinAndDiscard();",
+  );
+  const releasePlatform = shutdownEffect.indexOf("platform.deinit();");
+  assert.ok(
+    cancelTimer >= 0 &&
+      cancelTimer < joinEffects &&
+      joinEffects < releasePlatform,
+    "Account shutdown must cancel Native timers, join effects, then release its platform seam",
+  );
 });
 
 test("macOS development identity and Account manifest hard cut have one code owner", () => {
@@ -329,6 +374,7 @@ test("macOS development identity and Account manifest hard cut have one code own
 test("Windows Account persistence is refresh-only and unversioned", () => {
   const store = read("src/account/windows_store.zig");
   const app = read("src/app.zig");
+  const accountRuntime = read("src/account/runtime.zig");
   assert.match(store, /pub const service = "dev\.metawork\.account"/);
   assert.match(
     store,
@@ -340,7 +386,8 @@ test("Windows Account persistence is refresh-only and unversioned", () => {
     /manifest\.v[0-9]+|persistence_revision|CredentialStore|OwnedExecutionConfig|TokenSet/,
   );
   assert.match(app, /builtin\.os\.tag == \.windows/);
-  assert.match(app, /WindowsStore\.restore/);
+  assert.match(accountRuntime, /windows_store\.restore/);
+  assert.doesNotMatch(app, /windows_store\.restore|WindowsStore\.restore/);
   assert.doesNotMatch(app, /dev\.metawork\.desktop/);
   assert.match(app, /const windows_data_directory_name = "MetaWork"/);
   assert.match(
@@ -440,6 +487,7 @@ test("formal Native test graph runs every product module test root", () => {
       "test_modules.account_network_attempt",
     ],
     ["metawork-account-state", "test_modules.account_state"],
+    ["metawork-account-runtime", "test_modules.account_runtime"],
     ["metawork-account", "test_modules.account"],
     ["metawork-app", "test_modules.app"],
     ["metawork-bridge", "test_modules.bridge"],
@@ -781,7 +829,7 @@ test("Workbench owns Task lifecycle, continuation, and canonical redaction", () 
   assert.match(agent, /pub const CloseOutcome = union\(enum\)/);
 });
 
-test("Bridge Dispatcher owns product command decisions and App only composes it", () => {
+test("Bridge owns ingress, Account owns validation, and App coordinates commits", () => {
   const build = read("build.zig");
   assert.match(build, /bridge\.addImport\("metawork_workbench", workbench\)/);
 
@@ -798,8 +846,19 @@ test("Bridge Dispatcher owns product command decisions and App only composes it"
   }
   assert.match(dispatcher, /registered_handlers:/);
   assert.match(dispatcher, /self\.requireWorkbench/);
+  assert.doesNotMatch(dispatcher, /validateAccountSelection/);
+  assert.doesNotMatch(dispatcher, /\.accountView\(\)/);
 
   const app = read("src/app.zig");
+  const accountRuntime = read("src/account/runtime.zig");
+  assert.match(
+    accountRuntime,
+    /expected_catalog_generation !=\s*account_view\.catalog_generation/,
+  );
+  assert.match(accountRuntime, /return \.\{ \.rejected = \.generation_mismatch \}/);
+  assert.doesNotMatch(app, /expected_catalog_generation|generation_mismatch/);
+  assert.match(app, /workbench\.commitAccountFactNoFail\(fact\)/);
+  assert.match(app, /runtime\.commit\(&prepared\)/);
   assert.match(app, /bridge_api\.Dispatcher\.init/);
   assert.match(app, /\.register\(/);
   assert.doesNotMatch(
@@ -830,19 +889,19 @@ test("Renderer Bridge fixed revision 1 owns the exact product wire catalog", () 
   );
   assert.match(rendererCommands, /RENDERER_BRIDGE_CONTRACT_REVISION = 1/);
   const agents = read("AGENTS.md");
-  const architecture = read("docs/architecture.md");
+  const bridgeContract = read("docs/renderer-bridge-contract.md");
   assert.match(agents, /任何合同类版本标识的变更都必须先得到用户显式同意/);
   assert.match(
-    architecture,
+    bridgeContract,
     /任何合同类版本标识的变更都必须先得到用户显式同意/,
   );
-  assert.match(architecture, /快速开发阶段固定 revision 为 `1`/);
+  assert.match(bridgeContract, /快速开发阶段固定 revision 为 `1`/);
   assert.match(
-    architecture,
+    bridgeContract,
     /`connect` 无法通过 revision 数字识别同 revision 的陈旧开发产物/,
   );
-  assert.match(architecture, /不能检测纯 wire 语义错配/);
-  assert.match(architecture, /不构成 runtime compatibility guarantee/);
+  assert.match(bridgeContract, /不能检测纯 wire 语义错配/);
+  assert.match(bridgeContract, /不构成 runtime compatibility guarantee/);
   assert.doesNotMatch(zigCommands, /metawork\.workspace\.choose/);
   assert.doesNotMatch(rendererCommands, /metawork\.workspace\.choose/);
 

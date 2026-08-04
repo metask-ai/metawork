@@ -3,7 +3,7 @@
 > 状态：AgentCore ABI v1 revision 5 已 hard cut 共享 Agent consumer，并完成 macOS arm64、Windows x86_64 GNU exact artifact 与各自真实 vertical；fault-domain 验证选择单 AgentCore Worker 作为后续正式方向
 > 目标依赖：Metask AgentCore ABI v1 revision 5；精确 artifact identity 见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)
 
-本文定义 MetaWork `agent/` 执行子系统与 Metask AgentCore 之间的规范边界。Desktop Host 的 composition、Workbench 产品状态和 Bridge transport 见 [高层架构](architecture.md)，revision 5 目标能力见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。
+本文定义 MetaWork `agent/` 执行子系统与 Metask AgentCore 之间的规范边界。顶层模块与故障域见 [高层架构](architecture.md)，Application 内部 owner 见 [Application 内部架构](application-architecture.md)，Bridge transport 见 [Renderer Bridge 合同](renderer-bridge-contract.md)，revision 5 目标能力见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。
 
 ## 1. 集成原则
 

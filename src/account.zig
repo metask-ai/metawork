@@ -10,30 +10,12 @@ const login_attempt_impl = @import("account_login_attempt");
 const catalog_impl = @import("account_catalog");
 const credentials_impl = @import("account_credentials_runtime");
 const network_attempt_impl = @import("account_network_attempt");
+const runtime_impl = @import("account_runtime");
 
-pub const Account = state_impl.Account;
-pub const AccountIdentity = state_impl.AccountIdentity;
-pub const Effect = state_impl.Effect;
-pub const EffectSink = state_impl.EffectSink;
-pub const PrepareResult = state_impl.PrepareResult;
-pub const PreparedTransition = state_impl.PreparedTransition;
-pub const RestoreReady = state_impl.RestoreReady;
-pub const RestoreAccountOnly = state_impl.RestoreAccountOnly;
-pub const RestoreResult = state_impl.RestoreResult;
-pub const RestoreSignedOut = state_impl.RestoreSignedOut;
-pub const WorkerCompletion = state_impl.WorkerCompletion;
-pub const WorkerFailure = state_impl.WorkerFailure;
-pub const OAuth = oauth_impl;
-pub const MetaskClient = metask_client_impl;
-pub const CredentialStore = credential_store_impl;
-pub const WindowsStore = windows_store_impl;
-pub const Platform = platform_impl;
-pub const Loopback = loopback_impl;
-pub const LoginAttempt = login_attempt_impl;
-pub const Catalog = catalog_impl;
-pub const CredentialOwner = credentials_impl.CredentialOwner;
-pub const CredentialRotation = credentials_impl.CredentialRotation;
-pub const NetworkAttempt = network_attempt_impl;
+pub const Runtime = runtime_impl.Runtime;
+pub const Prepared = runtime_impl.Prepared;
+pub const PlatformServices = platform_impl.Services;
+pub const TestSupport = runtime_impl.TestSupport;
 
 test {
     _ = state_impl;
@@ -47,4 +29,5 @@ test {
     _ = catalog_impl;
     _ = credentials_impl;
     _ = network_attempt_impl;
+    _ = runtime_impl;
 }

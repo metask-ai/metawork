@@ -183,14 +183,20 @@ pub const AccountFact = struct {
     view: AccountView,
 };
 
+pub const AccountSelectionCommand = struct {
+    selection_id: []const u8,
+    expected_catalog_generation: u64,
+    expected_execution_generation: u64,
+};
+
 pub const AccountCommand = union(enum) {
     begin_login,
     reopen_login,
     reauthenticate,
     cancel_operation,
     refresh_catalog,
-    select_api_key: []const u8,
-    select_model: []const u8,
+    select_api_key: AccountSelectionCommand,
+    select_model: AccountSelectionCommand,
     logout,
 };
 
@@ -391,8 +397,14 @@ pub const ValidationError = error{
 
 pub fn validateCommand(command: AccountCommand) ValidationError!void {
     switch (command) {
-        .select_api_key => |id| try validateRequired(id, Limits.api_key_id_bytes),
-        .select_model => |model| try validateRequired(model, Limits.model_id_bytes),
+        .select_api_key => |selection| try validateRequired(
+            selection.selection_id,
+            Limits.api_key_id_bytes,
+        ),
+        .select_model => |selection| try validateRequired(
+            selection.selection_id,
+            Limits.model_id_bytes,
+        ),
         else => {},
     }
 }
