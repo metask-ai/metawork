@@ -3824,10 +3824,6 @@ summary::-webkit-details-marker {
   text-transform: uppercase;
 }
 
-.workspace-card {
-  margin-top: 28px;
-}
-
 .search-input-row kbd {
   padding: 2px 5px;
   border: 1px solid var(--color-rule);
@@ -3837,18 +3833,6 @@ summary::-webkit-details-marker {
   font-family: var(--font-mono);
   font-size: 9px;
   box-shadow: 0 1px rgba(24, 50, 71, 0.08);
-}
-
-.workspace-section-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.workspace-heading-actions {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
 }
 
 .text-button {
@@ -3865,118 +3849,14 @@ summary::-webkit-details-marker {
   background: rgba(91, 70, 216, 0.08);
 }
 
-.workspace-switcher {
-  position: relative;
-}
-
-.workspace-removal-warning {
-  margin-top: 8px;
-  padding: 9px 10px;
-  border: 1px solid rgba(163, 75, 60, 0.28);
-  border-radius: 9px;
-  color: var(--color-danger);
-  background: rgba(163, 75, 60, 0.07);
-}
-
-.workspace-removal-warning p {
-  margin: 0;
-  font-size: 10px;
-  line-height: 1.45;
-}
-
-.workspace-removal-warning .text-button {
-  margin-top: 5px;
-  padding-left: 0;
-  color: var(--color-danger);
-}
-
-.workspace-removing {
-  margin: 8px 2px 0;
-  color: var(--color-amber-ink);
-  font-size: 10px;
-  line-height: 1.45;
-}
-
-.workspace-removal-confirmation {
-  margin-top: 8px;
-  padding: 10px;
-  border: 1px solid rgba(163, 75, 60, 0.28);
-  border-radius: 9px;
-  color: var(--color-graphite);
-  background: rgba(255, 255, 255, 0.72);
-}
-
-.workspace-removal-confirmation strong,
-.workspace-removal-confirmation p {
-  display: block;
-  margin: 0;
-  font-size: 10px;
-  line-height: 1.45;
-}
-
-.workspace-removal-confirmation p {
-  margin-top: 3px;
-  color: var(--color-muted);
-}
-
-.workspace-removal-confirmation > span {
-  display: flex;
-  margin-top: 6px;
-  justify-content: flex-end;
-  gap: 5px;
-}
-
-.workspace-removal-confirmation .is-danger {
-  color: var(--color-danger);
-}
-
-.workspace-picker {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  width: 100%;
-  min-height: 40px;
-  margin-top: 8px;
-  padding: 0 10px;
-  align-items: center;
-  gap: 8px;
-  border: 1px solid transparent;
-  border-radius: 9px;
-  color: var(--color-graphite);
-  background: rgba(255, 255, 255, 0.48);
-  font-size: 12px;
-  text-align: left;
-}
-
-.workspace-picker:hover:not(:disabled) {
-  border-color: var(--color-rule);
-  background: var(--color-canvas);
-}
-
-.workspace-menu {
-  width: min(340px, calc(100vw - 32px));
-  max-height: 310px;
-}
-
-.workspace-signals {
-  display: grid;
-  flex: 0 0 auto;
-  gap: 2px;
-  font-family: var(--font-mono);
-  font-size: 8px;
-  text-align: right;
-}
-
-.workspace-signals [data-signal="attention"],
 .task-signal[data-signal="attention"] {
   color: var(--color-amber-ink);
 }
 
-.workspace-signals [data-signal="running"],
 .task-signal[data-signal="running"] {
   color: var(--color-brand-600);
 }
 
-.workspace-signals [data-signal="failed"],
 .task-signal[data-signal="failed"] {
   color: var(--color-danger);
 }
