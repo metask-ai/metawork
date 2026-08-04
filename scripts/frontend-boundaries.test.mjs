@@ -117,8 +117,8 @@ test("login-first composition gates every Workbench surface on Host readiness", 
 
 test("Task persistence failure disables mutations without hiding Task history", async () => {
   const app = await readFile(resolve(sourceRoot, "app", "App.tsx"), "utf8");
-  const navigation = await readFile(
-    resolve(sourceRoot, "features", "workspaces", "WorkspaceNavigation.tsx"),
+  const taskList = await readFile(
+    resolve(sourceRoot, "features", "tasks", "TaskList.tsx"),
     "utf8",
   );
   assert.match(
@@ -133,14 +133,55 @@ test("Task persistence failure disables mutations without hiding Task history", 
     app,
     /actionDisabled=\{workbenchMutationDisabled \|\| workspaceBusy\}/,
   );
+  assert.match(app, /<TaskList[\s\S]*tasks=\{navigableTaskItems\}/);
+  assert.doesNotMatch(taskList, /disabled=/);
+});
+
+test("Task selection invalidates an older asynchronous Workspace draft selection", async () => {
+  const app = await readFile(resolve(sourceRoot, "app", "App.tsx"), "utf8");
   assert.match(
     app,
-    /<WorkspaceNavigation[\s\S]*disabled=\{workbenchMutationDisabled \|\| workspaceBusy\}/,
+    /function openTask\(taskId: string\) \{[\s\S]*?workspaceSelectionIntents\.current\.invalidate\(\);[\s\S]*?dispatchWorkbench\(\{ type: "task\.selected", taskId \}\);[\s\S]*?\}/,
   );
-  const taskList = navigation.slice(
-    navigation.indexOf('<nav className="task-list"'),
+  assert.match(app, /onSelectTask=\{openTask\}/);
+  assert.match(app, /openTask\(result\.taskId\)/);
+});
+
+test("Task and draft contexts do not recreate a global active Workspace", async () => {
+  const [app, store, selectors] = await Promise.all([
+    readFile(resolve(sourceRoot, "app", "App.tsx"), "utf8"),
+    readFile(resolve(sourceRoot, "workbench", "store.ts"), "utf8"),
+    readFile(resolve(sourceRoot, "workbench", "selectors.ts"), "utf8"),
+  ]);
+  assert.doesNotMatch(app, /navigationWorkspaceId|activeWorkspaceId/);
+  assert.doesNotMatch(store, /activeWorkspaceId/);
+  assert.doesNotMatch(selectors, /selectCurrentWorkspace/);
+  assert.match(app, /const defaultDraftWorkspaceId = selectedUserWorkspaceId/);
+  assert.match(
+    app,
+    /const composerWorkspaceId =\s*activeTask\?\.workspaceId \|\|\s*workbench\.draftWorkspaceId \|\|\s*defaultDraftWorkspaceId/,
   );
-  assert.doesNotMatch(taskList, /disabled=\{disabled\}/);
+});
+
+test("Workspace lifecycle recovery lives in Settings with explicit focus handling", async () => {
+  const [app, settings] = await Promise.all([
+    readFile(resolve(sourceRoot, "app", "App.tsx"), "utf8"),
+    readFile(
+      resolve(sourceRoot, "features", "settings", "WorkspaceSettings.tsx"),
+      "utf8",
+    ),
+  ]);
+  assert.match(app, /workspace\.origin === "user"/);
+  assert.match(settings, /userWorkspaces: WorkspaceView\[\]/);
+  assert.match(settings, /lastRemovalFailure/);
+  assert.match(settings, /removalCancel\.current\?\.focus\(\)/);
+  assert.match(settings, /event\.key !== "Escape"/);
+  assert.match(settings, /onRemoveWorkspace\(workspaceId\)/);
+  assert.match(
+    app,
+    /intent\.kind === "reauthorize"[\s\S]*result\.workspaceId !== intent\.workspaceId[\s\S]*kind: "target_mismatch"/,
+  );
+  assert.doesNotMatch(settings, /dispatchWorkbench|selectWorkspace/);
 });
 
 test("Renderer command bars own the hidden-inset titlebar without stealing control input", async () => {

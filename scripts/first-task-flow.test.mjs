@@ -2,13 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { submitTaskInstruction } from "../frontend/src/features/composer/submitTaskInstruction.ts";
-import { chooseWorkspaceWithDraft } from "../frontend/src/features/workspaces/chooseWorkspace.ts";
+import { chooseWorkspaceAndMigrateDraft } from "../frontend/src/features/workspaces/chooseWorkspace.ts";
 
 test("a failed authoritative refresh cannot move or lose the source draft", async () => {
   const calls = [];
   const failure = new Error("snapshot unavailable");
   await assert.rejects(
-    chooseWorkspaceWithDraft({
+    chooseWorkspaceAndMigrateDraft({
       choose: async () => {
         calls.push("choose");
         return { selected: true, workspaceId: "7" };
@@ -17,7 +17,6 @@ test("a failed authoritative refresh cannot move or lose the source draft", asyn
         calls.push("refresh");
         throw failure;
       },
-      openDraft: true,
       migratableDraftId: "unscoped",
       moveDraft() {
         calls.push("move");
@@ -29,15 +28,14 @@ test("a failed authoritative refresh cannot move or lose the source draft", asyn
   assert.deepEqual(calls, ["choose", "refresh"]);
 });
 
-test("choosing a Workspace without a migratable draft only changes context", async () => {
+test("choosing a Workspace without a migratable draft only changes draft context", async () => {
   const calls = [];
-  const result = await chooseWorkspaceWithDraft({
+  const result = await chooseWorkspaceAndMigrateDraft({
     choose: async () => {
       calls.push("choose");
       return { selected: true, workspaceId: "7" };
     },
     refresh: async () => calls.push("refresh"),
-    openDraft: true,
     migratableDraftId: null,
     moveDraft() {
       calls.push("move");

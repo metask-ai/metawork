@@ -24,8 +24,8 @@ const { primaryShortcutModifier } = await vite.ssrLoadModule(
 const { TaskTimeline } = await vite.ssrLoadModule(
   "/src/features/timeline/TaskTimeline.tsx",
 );
-const { WorkspaceNavigation } = await vite.ssrLoadModule(
-  "/src/features/workspaces/WorkspaceNavigation.tsx",
+const { TaskList } = await vite.ssrLoadModule(
+  "/src/features/tasks/TaskList.tsx",
 );
 const { I18nContext } = await vite.ssrLoadModule("/src/i18n/context.ts");
 const { translate } = await vite.ssrLoadModule("/src/i18n/runtime.ts");
@@ -269,12 +269,7 @@ function renderNewTaskTimeline(composerHasDraft, draftComposer = null) {
   );
 }
 
-function renderWorkspaceNavigation(
-  lastRemovalFailure,
-  authorization = "available",
-  includeWorkspace = true,
-  disabled = false,
-) {
+function renderTaskList(tasks, workspaces = []) {
   return renderToStaticMarkup(
     createElement(
       I18nContext.Provider,
@@ -285,32 +280,11 @@ function renderWorkspaceNavigation(
           t: (id, values) => translate("en-US", id, values),
         },
       },
-      createElement(WorkspaceNavigation, {
-        summaries: includeWorkspace
-          ? [
-              {
-                id: "1",
-                origin: "user",
-                canonicalRoot: "/repo/alpha",
-                label: "alpha",
-                authorization,
-                lastRemovalFailure,
-                taskCount: 0,
-                running: 0,
-                attention: 0,
-                failed: 0,
-              },
-            ]
-          : [],
-        currentWorkspaceId: includeWorkspace ? "1" : null,
-        tasks: [],
+      createElement(TaskList, {
+        tasks,
+        workspaces,
         activeTaskId: null,
         showArchived: false,
-        disabled,
-        onChooseWorkspace() {},
-        onRemoveWorkspace() {},
-        onRetryRemoval() {},
-        onSelectWorkspace() {},
         onSelectTask() {},
         onToggleArchived() {},
       }),
@@ -430,7 +404,7 @@ test("New task does not render or reserve an empty Inspector", () => {
   assert.match(markup, /data-inspector-open="false"/);
 });
 
-test("Settings uses the global stage without retaining Task navigation", () => {
+test("Settings uses the global stage without retaining the Task sidebar", () => {
   const markup = renderShell(null, false, null);
   assert.doesNotMatch(markup, /id="workspace-sidebar"/);
   assert.doesNotMatch(markup, /aria-controls="workspace-sidebar"/);
@@ -717,36 +691,74 @@ test("terminal state takes precedence over archive state in Composer guidance", 
   );
 });
 
-test("Workspace removal failure survives refresh with an honest retry surface", () => {
-  const failed = renderWorkspaceNavigation("task_close_failed");
-  assert.match(failed, /Some tasks may have stopped/);
-  assert.match(failed, />Retry removal</);
-  assert.doesNotMatch(renderWorkspaceNavigation(null), /Retry removal/);
+test("Task list shows tasks from different workspaces without workspace controls", () => {
+  const task = (id, title, workspaceId, recentOrder) => ({
+    id,
+    title,
+    workspaceId,
+    lifecycle: "open",
+    continuationAvailable: true,
+    archived: false,
+    closeFailed: false,
+    currentRunId: "0",
+    currentRunPhase: null,
+    activeOperation: null,
+    recentOrder,
+    lastRunOutcome: null,
+    cause: null,
+    runs: [],
+    compacts: [],
+    pendingUi: null,
+    uiHistory: [],
+  });
+  const markup = renderTaskList([
+    task("1", "Alpha task", "workspace-a", "2"),
+    task("2", "Beta task", "workspace-b", "1"),
+  ]);
+
+  assert.match(markup, /Alpha task/);
+  assert.match(markup, /Beta task/);
+  assert.doesNotMatch(markup, /workspace-card|workspace-picker|>Add</);
 });
 
-test("Workspace removal state remains explicit without owning the global New task action", () => {
-  const available = renderWorkspaceNavigation(null);
-  assert.match(available, />Remove</);
-  assert.doesNotMatch(available, /Removal in progress/);
-
-  const removing = renderWorkspaceNavigation(null, "removing");
-  assert.match(removing, /Removing this workspace/);
-  assert.match(removing, /can’t start or continue tasks/);
-  assert.doesNotMatch(removing, />New task</);
-});
-
-test("Workspace busy state disables real Workspace actions instead of swallowing clicks", async () => {
-  const busy = renderWorkspaceNavigation(null, "available", true, true);
-  assert.match(tag(busy, "workspace-picker") ?? "", /disabled/);
-
-  const source = await readFile(
-    join(
-      process.cwd(),
-      "frontend/src/features/workspaces/WorkspaceNavigation.tsx",
-    ),
-    "utf8",
+test("Task list disambiguates duplicate titles with their own paths", () => {
+  const task = (id, workspaceId) => ({
+    id,
+    title: "Review changes",
+    workspaceId,
+    lifecycle: "open",
+    continuationAvailable: true,
+    archived: false,
+    closeFailed: false,
+    currentRunId: "0",
+    currentRunPhase: null,
+    activeOperation: null,
+    recentOrder: id,
+    lastRunOutcome: null,
+    cause: null,
+    runs: [],
+    compacts: [],
+    pendingUi: null,
+    uiHistory: [],
+  });
+  const markup = renderTaskList(
+    [task("2", "workspace-a"), task("1", "workspace-b")],
+    [
+      {
+        id: "workspace-a",
+        origin: "user",
+        canonicalRoot: "/repo/alpha",
+      },
+      {
+        id: "workspace-b",
+        origin: "user",
+        canonicalRoot: "/repo/beta",
+      },
+    ],
   );
-  assert.match(source, /disabled: workspace\.authorization === "removing"/);
+
+  assert.match(markup, /\/repo\/alpha/);
+  assert.match(markup, /\/repo\/beta/);
 });
 
 test("global shortcuts obey Account and Bridge gates", async () => {
@@ -782,21 +794,4 @@ test("draft moves read authoritative storage instead of a render-time closure", 
   assert.match(source, /const source = readDraft\(from\)/);
   assert.match(source, /const target = readDraft\(to\)/);
   assert.doesNotMatch(source, /drafts\[from\]|drafts\[to\]/);
-});
-
-test("removing the final empty Workspace leaves a stable focus destination", () => {
-  const empty = renderWorkspaceNavigation(null, "available", false);
-  assert.match(
-    empty,
-    /class="workspace-section-heading focus-ring" tabindex="-1" aria-label="Workspace"/,
-  );
-  const picker = empty.match(
-    /<button[^>]*class="[^"]*workspace-picker[^"]*"[^>]*>/,
-  )?.[0];
-  assert.match(picker ?? "", /disabled/);
-  const add = empty.match(
-    /<button[^>]*class="text-button focus-ring"[^>]*>Add/,
-  );
-  assert.ok(add);
-  assert.doesNotMatch(empty, />Remove</);
 });
