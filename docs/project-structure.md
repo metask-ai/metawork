@@ -36,7 +36,7 @@ metawork/
 │   ├── product_identity.zig # 从 app.zon 派生 development identity 与 macOS namespace
 │   ├── window_chrome.zig  # WebView hidden-inset drag 的平台 seam
 │   ├── account.zig        # Account module entrypoint
-│   ├── account/           # OAuth、catalog、credential 与 Account 状态机
+│   ├── account/           # Account Runtime、OAuth、catalog、credential 与状态机
 │   ├── bridge.zig         # Renderer Bridge module entrypoint
 │   ├── bridge/            # command policy、Dispatcher 与 ProductDelivery
 │   ├── workbench.zig      # Workbench module entrypoint
@@ -63,8 +63,8 @@ metawork/
 
 | Owner     | 唯一职责                                                                                                   | 不拥有                                                 |
 | --------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
-| App       | Native SDK composition、主线程平台动作、owner 生命周期顺序                                                 | 产品状态、Agent 调度策略、第二套 Bridge transport      |
-| Account   | OAuth/catalog 状态、credential、脱敏 Account view、ExecutionConfig transfer                                | Workbench Task、Renderer 状态、AgentCore Runtime       |
+| App       | Native SDK composition、capability 注入、主线程跨 owner 提交协调与生命周期顺序                              | Account/Workbench 领域状态、Agent 调度策略、第二套 Bridge transport |
+| Account   | Runtime、OAuth/catalog 状态、credential、attempt/effect/mailbox、恢复、脱敏 Account view、ExecutionConfig transfer | Workbench Task、Renderer 状态、AgentCore Runtime       |
 | Workbench | Workspace/Task/Run 产品状态、Executor、admission、terminal product record、snapshot projection             | AgentCore raw protocol、Native WebView、Account secret |
 | Agent     | AgentCore Runtime/Session/Conversation、callback、event pump、Run terminal facts                           | 产品队列、Task 历史、Bridge transport                  |
 | Bridge    | command authority、payload decode、Workspace grant、ProductDelivery connection/revision/snapshot transport | 产品策略真相、AgentCore handle、Account runtime        |
@@ -103,12 +103,13 @@ Renderer Bridge 的 identity、revision、command、event、snapshot 与兼容�
 
 ### `app.zig` 与 module entrypoint
 
-`main.zig` 只调用 `metawork_app`。`app.zig` 注入 Native platform capability 并按顺序组织 Account、Workbench、Agent、Bridge 与 automation 生命周期，不复制这些 owner 的状态。`window_chrome.zig` 是 App-owned 单一启动窗口的窄平台 seam：WebView `hidden_inset_tall` 的 press 交回系统拖动，Windows 在同一精确窗口上补齐双击最大化/还原、最大化拖拽恢复、原生系统菜单与只读最大化状态；minimize/close 继续调用 Native SDK 的 window-id API。Renderer 的 `components/ui/WindowTitlebar.tsx` 统一拥有空白区与交互控件的命中规则，`app/useWindowChrome.ts` 只维护 Host 状态的瞬时呈现投影。该边界不形成通用 Desktop Interface，也不拥有产品状态。
+`main.zig` 只调用 `metawork_app`。`app.zig` 创建 Account Runtime、Workbench 与 Agent，注入 Native platform capability，并按顺序协调 Account prepare/commit、Workbench no-fail install 与 owner 生命周期；它不复制这些 owner 的状态或策略。`window_chrome.zig` 是 App-owned 单一启动窗口的窄平台 seam：WebView `hidden_inset_tall` 的 press 交回系统拖动，Windows 在同一精确窗口上补齐双击最大化/还原、最大化拖拽恢复、原生系统菜单与只读最大化状态；minimize/close 继续调用 Native SDK 的 window-id API。Renderer 的 `components/ui/WindowTitlebar.tsx` 统一拥有空白区与交互控件的命中规则，`app/useWindowChrome.ts` 只维护 Host 状态的瞬时呈现投影。该边界不形成通用 Desktop Interface，也不拥有产品状态。
 
 `account.zig`、`bridge.zig`、`workbench.zig` 和 `agent.zig` 是小型公开入口，只显式暴露实际消费者需要的类型、函数或窄 namespace。内部文件不通过 `usingnamespace` 或无边界 barrel 重新泄漏。
 
 ### `account/`
 
+- `runtime.zig` 是 Account 长生命周期 owner，拥有状态机实例、private/public candidate catalog、credential、attempt、mailbox/effect queue、平台恢复状态、自动选择与 continuation；它不导入 Workbench，跨 owner 提交仍由 App 协调；
 - `state.zig` 拥有 Account 状态机、attempt/generation 与 prepare/admit/commit；
 - `oauth.zig`、`loopback.zig`、`login_attempt.zig` 和 `network_attempt.zig` 拥有登录网络链路；
 - `metask_client.zig` 与 `catalog.zig` 消费锁定的 Metask production contract；
@@ -116,10 +117,10 @@ Renderer Bridge 的 identity、revision、command、event、snapshot 与兼容�
 - `credential_store.zig` 独立拥有 macOS 双 family slot、固定 `manifest.json` schema 与原子提交语义；
 - `scripts/cleanup-legacy-macos-account.mjs` 是 Account-owned、只由开发者显式执行的一次性 legacy maintenance 入口；签名 setup 不拥有或删除 Account credential；
 - `windows_store.zig` 拥有 Windows 单 refresh token 与无版本、无 secret `account.json` 状态；不读取 macOS manifest，也不持久化 access token 或 Provider API Key；
-- `platform.zig` 分别适配 macOS 与 Windows 的 Account Native 主线程能力，不形成通用 Desktop Interface；
+- `platform.zig` 是 Account 内唯一导入 Native SDK 的窄主线程 seam，分别适配 macOS 与 Windows 的 credential、timer 与持久化能力，不形成通用 Desktop Interface；
 - `credentials.zig` 管理 execution credential ownership/rotation。
 
-Account 与 Workbench 是同级 owner，只通过纯 `account/contract.zig` 和 App 主线程提交链协作。Bridge 只消费脱敏 view/command contract，不导入 Account runtime。
+Account 与 Workbench 是同级 owner，只通过纯 `account/contract.zig` 和 App 主线程提交链协作。Bridge 只消费脱敏 view/command contract，不导入 Account Runtime。App 可以持有两个 owner 的实例引用以协调提交，但不得持有 Account catalog、credential、attempt、mailbox 或 continuation 状态。
 
 ### `bridge/`
 

@@ -7,12 +7,12 @@
 
 ## 1. 模块与 owner
 
-本节只在顶层模块边界确定后描述 Application 内部 owner。Application 内部由四个 named product modules 组成：`app` 负责 composition、主线程提交协调和平台 capability 注入，`account` 负责 Metask 登录、catalog 与 credential generation，`workbench` 拥有产品状态、Task、队列、投影与持久化语义，`agent` 执行并收口一个真实 Agent Run。Bridge 位于 Application 之外，但与它们同属 Zig Desktop Host。`metawork_account_contract` 只承载 Account 发布给 App/Bridge/Workbench 的有界纯合同，不是第五个产品模块。
+本节只在顶层模块边界确定后描述 Application 内部 owner。Application 内部由四个 named product modules 组成：`app` 负责 composition、主线程跨 owner 提交协调和平台 capability 注入，不持有领域运行状态；`account` 的 Runtime 负责 Metask 登录、catalog、credential、attempt/effect/mailbox、恢复与 ExecutionConfig generation；`workbench` 拥有产品状态、Task、队列、投影与持久化语义；`agent` 执行并收口一个真实 Agent Run。Bridge 位于 Application 之外，但与它们同属 Zig Desktop Host。`metawork_account_contract` 只承载 Account 发布给 App/Bridge/Workbench 的有界纯合同，不是第五个产品模块。
 
 Application 内部负责：
 
 - 由 Account 在 Renderer 之外完成 Metask OAuth、目录查询、凭据持久化与 ExecutionConfig 生成；
-- 由 App/Account 在 committed transition 之后启动有界 continuation，把登录后的确定性目录准备留在后台，并只把真实歧义投影成用户动作；
+- 由 Account Runtime 在 committed transition 之后产生有界 continuation，由 App 将其重新送入同一提交链；登录后的确定性目录准备留在后台，并只把真实歧义投影成用户动作；
 - 由 App 在同一主线程 turn 内协调 Account prepare、Workbench no-fail install 和 Account commit；
 - 由 Workbench 管理持久 Scheduled Task、触发游标、有界 occurrence history、Task、Run/maintenance record、唯一 active operation 槽、队列、取消协调和产品历史；
 - 由 App 在 `<MetaWork data dir>/workbench` 打开并持有 Task history 的进程级单写锁，把 bounded load/atomic replace capability 注入 Workbench；codec、恢复校验、candidate commit、持久化 health 和所有 Workspace/Task 产品事实仍归 Workbench；
@@ -25,7 +25,7 @@ Application 内部负责：
 
 ### 2.1 Account 与 ExecutionConfig
 
-Account 和 Workbench 是同级 owner，彼此不导入 runtime。Account 独占 OAuth token、PKCE、完整 API Key、平台凭据 locator、catalog attempt、当前默认选择和 credential generation；Workbench 独占已安装的默认 runtime ExecutionConfig、被 Task 引用的 generation owned copy、不含 secret 的 Task execution binding descriptor/epoch history、Task admission、Workspace/Task/Run history 与 execution replacement gate。Bridge 只提交无 secret 的 catalog selection identifier、严格解码后的 expected catalog/execution generation 或其他 `AccountCommand`；Renderer 不能提交 provider、base URL、完整 credential 或未被 Host catalog 验证的模型配置。App/Account coordinator 使用与 projection 相同的 committed/candidate catalog 装饰规则形成 canonical `AccountView`，对两个 generation 做允许 `0` 的精确相等比较，并只接纳该 view 当前发布的 API/model identifier；Bridge 不读取 `AccountView` 或决定 selection admission。
+Account 和 Workbench 是同级 owner，彼此不导入 runtime。Account Runtime 独占 OAuth token、PKCE、完整 API Key、平台凭据 locator、catalog attempt、mailbox/effect queue、当前默认选择、恢复 continuation 和 credential generation；Workbench 独占已安装的默认 runtime ExecutionConfig、被 Task 引用的 generation owned copy、不含 secret 的 Task execution binding descriptor/epoch history、Task admission、Workspace/Task/Run history 与 execution replacement gate。Bridge 只提交无 secret 的 catalog selection identifier、严格解码后的 expected catalog/execution generation 或其他 `AccountCommand`；Renderer 不能提交 provider、base URL、完整 credential 或未被 Host catalog 验证的模型配置。Account Runtime 使用与 projection 相同的 committed/candidate catalog 装饰规则形成 canonical `AccountView`，校验 generation 与当前发布的 API/model membership；App 只协调 Workbench replacement gate 和两位 owner 的提交，不重复这些 Account policy。Bridge 不读取 `AccountView` 或决定 selection admission。
 
 Account 使用 `AccountSessionState` 与 `ExecutionState` 两个正交状态。OAuth refresh 失败可以进入 `reauth_required` 并保留 ready ExecutionConfig；默认 API Key/模型/base URL 变化递增 `execution_generation`。Workbench 安装新 generation 后把它作为后续 New Task admission 的默认配置；创建 Task 时建立第一个 binding epoch，为 Agent Session 固化对应 owned config，并在 Task/Run 记录不含 secret 的 account/profile、generation、API/Provider identity 和 model。既有 Task 的后续 Run 校验当前 binding epoch，不要求等于 Account 当前默认 generation。后续默认值变化不修改或停止既有 Task 的当前 epoch；旧 generation 在最后一个 Task、Session、Run、executor job 与真实 worker reference 释放后 secure-zero。
 
@@ -37,19 +37,19 @@ Account 使用 `AccountSessionState` 与 `ExecutionState` 两个正交状态。O
 唯一 committed-state 写路径为：
 
 ```text
-Account.prepare(command | completion)
+Account Runtime.prepare(command | completion)
 → Account effect admission
 → Workbench.commitAccountFactNoFail(...)
 → Workbench.installDefaultExecutionNoFail(...)  [可选]
-→ Account.commit(prepared)
+→ Account Runtime.commit(prepared)
 → dispatch committed Account effect
 ```
 
 前五步在 App 主线程同一 turn 内完成，effect 只有在 committed swap 后才能启动；worker completion 再经主循环进入同一条链。任何校验或内部不变量失败都保留旧 committed state，并清零 staged secret；Bridge 不参与 prepare/commit，也不接触 credential。C1 登录只依赖锁定的 OAuth client/scope/loopback/profile 合同，成功先提交 `account_only`，不等待 API Key 或模型目录。
 
-Renderer catalog selection 的同步拒绝顺序固定为：Bridge authority/wire validation，App/Account coordinator generation 与 published membership validation，Account state-machine prepare，Workbench execution replacement gate，最后进入上述 commit 链。Account 独占 session/operation/attempt 的状态合法性；Workbench 独占 replacement gate。`prepare` 成功但 gate 拒绝时必须销毁 prepared transition，不能提交 Account fact 或启动 effect；gate 打开后的 effect admission 失败必须平衡关闭。
+Renderer catalog selection 的同步拒绝顺序固定为：Bridge authority/wire validation，Account Runtime generation 与 published membership validation，Account state-machine prepare，Workbench execution replacement gate，最后进入上述 commit 链。Account 独占 selection、session、operation 与 attempt 的状态合法性；Workbench 独占 replacement gate；App 只安排顺序。`prepare` 成功但 gate 拒绝时必须销毁 prepared transition，不能提交 Account fact 或启动 effect；gate 打开后的 effect admission 失败必须平衡关闭。
 
-`account_only` 是安全与持久化提交边界，不是可进入 Workbench 的产品 readiness，也不是要求用户手动启动 C2 的边界。C1 commit 完成后，App/Account 创建新的 catalog attempt 自动继续；历史选择仍存在且匹配当前 catalog 时优先恢复，单一候选自动采用，只有无法由锁定合同确定的多候选才进入 waiting-for-user。这个 continuation 必须通过相同 prepare/admit/commit 链，不得由 Renderer 观察状态后发送隐藏命令。
+`account_only` 是安全与持久化提交边界，不是可进入 Workbench 的产品 readiness，也不是要求用户手动启动 C2 的边界。C1 commit 完成后，Account Runtime 产生新的 catalog command，App 将其重新送入相同 prepare/admit/commit 链；历史选择仍存在且匹配当前 catalog 时优先恢复，单一候选自动采用，只有无法由锁定合同确定的多候选才进入 waiting-for-user。Renderer 不观察状态后发送隐藏命令。
 
 每个 Account attempt 都有 Host-owned deadline、attempt identity 和唯一 terminal completion。浏览器未回调、网络悬挂、effect 启动失败和取消都必须收口到可恢复 committed state。幂等 catalog read 可以有限重试；OAuth code exchange、凭据持久化和结果不确定 mutation 不得自动重放。进入 credential persistence 前允许取消；持久化 effect 开始后撤销 cancel admission，直到 main thread 原子消费 completion，避免磁盘已提交而内存被取消回滚。Renderer command timeout 只释放本地交互并触发 snapshot resync，不能代表 Host mutation 失败。
 
@@ -139,7 +139,8 @@ CompactJob
 - Scheduled Task 的 recurrence、持久触发游标、wall clock 和 timer admission 由 Workbench 拥有；App 只提供 store/timer/notification/tray capability。它只向同一 Task/Run Executor 提交真实产品工作，不把 scheduler capability 注入 Agent Runtime；
 - Bridge/main thread 不执行长耗时 Run，也不等待 permission；
 - 只有 `agent/` import `metask_agentcore`；App 让 Agent 内部完成 ABI discovery，Workbench 通过 Agent 公共 validated types 消费，Bridge DTO 不暴露 SDK enum/owner/handle；
-- `account/contract.zig` 不导入 Native SDK、Agent、Workbench、Bridge 或 AgentCore；Account runtime 可以导入 Native SDK，Workbench/Bridge 只导入纯 contract，不导入 Account runtime；
+- `account/contract.zig` 不导入 Native SDK、Agent、Workbench、Bridge 或 AgentCore；只有 `account/platform.zig` 适配 Native SDK，Account Runtime 消费该窄平台 seam；Workbench/Bridge 只导入纯 contract，不导入 Account runtime；
+- Account Runtime 的 committed shutdown effect 必须在 Native SDK runner 返回前取消 Account timer、join attempt worker 并释放 platform seam；之后的普通 `deinit` 只释放不依赖平台存活的 Account 内存；
 - Agent 只通过有界 notifier 报告事件就绪，App 负责把 wake 安全提交到平台主循环；精确状态、retry 与 deadline 见 [AgentCore 集成契约](agentcore-integration.md)；
 - Renderer response、revision、snapshot 和 connection failure 作为 typed transport fact 进入 Workbench policy，默认只拒绝、重试或断开，不中止后台 Agent Run；
 

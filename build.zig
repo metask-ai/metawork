@@ -47,6 +47,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-account-credentials-runtime", .root_module = test_modules.account_credentials_runtime },
         .{ .name = "metawork-account-network-attempt", .root_module = test_modules.account_network_attempt },
         .{ .name = "metawork-account-state", .root_module = test_modules.account_state },
+        .{ .name = "metawork-account-runtime", .root_module = test_modules.account_runtime },
         .{ .name = "metawork-account", .root_module = test_modules.account },
         .{ .name = "metawork-app", .root_module = test_modules.app },
         .{ .name = "metawork-automation-enabled", .root_module = test_modules.automation_enabled },
@@ -107,6 +108,7 @@ fn addLifecycleTests(
 
 const WiredModules = struct {
     account: *std.Build.Module,
+    account_runtime: *std.Build.Module,
     account_catalog: *std.Build.Module,
     account_credentials_runtime: *std.Build.Module,
     account_contract: *std.Build.Module,
@@ -305,6 +307,21 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     account_platform.addImport("account_oauth", account_oauth);
     account_platform.addImport("account_credential_store", account_credential_store);
     account_platform.addImport("account_windows_store", account_windows_store);
+    const account_runtime = b.createModule(.{
+        .root_source_file = b.path("src/account/runtime.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    account_runtime.addImport("metawork_account_contract", account_contract);
+    account_runtime.addImport("account_state", account_state);
+    account_runtime.addImport("metask_client", metask_client);
+    account_runtime.addImport("account_credential_store", account_credential_store);
+    account_runtime.addImport("account_windows_store", account_windows_store);
+    account_runtime.addImport("account_platform", account_platform);
+    account_runtime.addImport("account_login_attempt", account_login_attempt);
+    account_runtime.addImport("account_catalog", account_catalog);
+    account_runtime.addImport("account_credentials_runtime", account_credentials_runtime);
+    account_runtime.addImport("account_network_attempt", account_network_attempt);
     const account = b.createModule(.{
         .root_source_file = b.path("src/account.zig"),
         .target = target,
@@ -321,6 +338,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     account.addImport("account_catalog", account_catalog);
     account.addImport("account_credentials_runtime", account_credentials_runtime);
     account.addImport("account_network_attempt", account_network_attempt);
+    account.addImport("account_runtime", account_runtime);
     const executor = b.createModule(.{
         .root_source_file = b.path("src/workbench/executor.zig"),
         .target = target,
@@ -460,6 +478,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     root_module.link_libc = bundle.link_libc;
     return .{
         .account = account,
+        .account_runtime = account_runtime,
         .account_catalog = account_catalog,
         .account_credentials_runtime = account_credentials_runtime,
         .account_contract = account_contract,
