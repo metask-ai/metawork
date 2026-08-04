@@ -465,7 +465,7 @@ test "Text schedule default creates a fresh managed Workspace per occurrence" {
     const default_schedule = try workbench.createScheduledTask(.{
         .title = "Independent brief",
         .expected_execution_generation = 1,
-        .input = .{ .text = "Summarize current work" },
+        .input = "Summarize current work",
         .recurrence = .{ .interval = .{
             .start_at_unix_seconds = 2_000,
             .every_seconds = 3_600,
@@ -475,13 +475,9 @@ test "Text schedule default creates a fresh managed Workspace per occurrence" {
     try std.testing.expectError(
         error.InvalidScheduledTaskInput,
         workbench.createScheduledTask(.{
-            .title = "Invalid managed Skill",
+            .title = "Empty schedule input",
             .expected_execution_generation = 1,
-            .input = .{ .skill = .{
-                .skill_id = fixture.fixture_skill_id,
-                .catalog_revision = fixture.fixture_catalog_revision,
-                .argument_values = &.{},
-            } },
+            .input = "",
             .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
         }),
     );
@@ -568,7 +564,7 @@ test "schedule rejection retains the managed Task created before a full Run queu
     const schedule_id = try workbench.createScheduledTask(.{
         .title = "Queued brief",
         .expected_execution_generation = 1,
-        .input = .{ .text = "Summarize current work" },
+        .input = "Summarize current work",
         .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
     });
     fake_core.setNextPlan(.controlled);
