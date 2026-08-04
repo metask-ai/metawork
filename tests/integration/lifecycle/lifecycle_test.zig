@@ -30,7 +30,7 @@ test "all executor workers waiting on UI remain controllable" {
     for (sessions) |session| try session.waitForState(.waiting_ui);
 
     const first_request = sessions[0].pendingUiRequest().?;
-    try sessions[0].respondUi(run_ids[0], first_request, .{ .permission = .allow_once });
+    try sessions[0].respondPermission(run_ids[0], first_request, .allow_once);
     try cancelSession(sessions[1], run_ids[1], .user_cancel);
     try closeSession(sessions[2], .session_close);
     fake_core.releaseControlled();

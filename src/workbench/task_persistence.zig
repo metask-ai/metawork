@@ -496,6 +496,7 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
             "invalid_skill_arguments",
             "skill_policy_violation",
             "skill_unavailable",
+            "resource_limit",
         })) return error.Invalid;
         max_generation = @max(max_generation, run.generation);
     }

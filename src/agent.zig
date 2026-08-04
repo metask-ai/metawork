@@ -7,7 +7,6 @@ pub const OwnedCoreEvent = session_impl.OwnedCoreEvent;
 pub const Status = session_impl.Status;
 pub const StopReason = session_impl.StopReason;
 pub const UiRequest = session_impl.UiRequest;
-pub const UiResponse = session_impl.UiResponse;
 pub const Answer = session_impl.Answer;
 pub const PermissionChoice = session_impl.PermissionChoice;
 pub const ParsedUiRequest = session_impl.ParsedUiRequest;

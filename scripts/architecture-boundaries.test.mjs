@@ -179,6 +179,11 @@ test("only Agent implementation imports the AgentCore SDK", () => {
   const agentRoot = read("src/agent.zig");
   assert.match(agentRoot, /pub const OwnedCoreEvent/);
   assert.doesNotMatch(agentRoot, /EventEnvelope/);
+  assert.doesNotMatch(agentRoot, /pub const UiResponse/);
+  const agentSession = read("src/agent/session.zig");
+  assert.match(agentSession, /pub fn respondAnswers\(/);
+  assert.match(agentSession, /pub fn respondPermission\(/);
+  assert.doesNotMatch(agentSession, /pub fn respondUi\(/);
   const workbench = read("src/workbench/projection.zig");
   assert.match(workbench, /lifecycle\.OwnedCoreEvent/);
   const bridgeHandlers = read("src/bridge/handlers.zig");
@@ -284,7 +289,10 @@ test("Account Runtime owns policy while App installs execution explicitly", () =
   assert.doesNotMatch(app, /prepared\.transition/);
   assert.match(app, /workbench\.installExecutionNoFail/);
   assert.match(app, /runtime\.dispatchCommitted\(&prepared\)/);
-  assert.match(accountRuntime, /credentials: credentials_impl\.CredentialOwner/);
+  assert.match(
+    accountRuntime,
+    /credentials: credentials_impl\.CredentialOwner/,
+  );
   assert.match(accountRuntime, /fn automaticApiSelection\(/);
   assert.match(accountRuntime, /fn automaticModelSelection\(/);
   assert.match(accountRuntime, /fn prepareAndPersistExecution\(/);
@@ -855,7 +863,10 @@ test("Bridge owns ingress, Account owns validation, and App coordinates commits"
     accountRuntime,
     /expected_catalog_generation !=\s*account_view\.catalog_generation/,
   );
-  assert.match(accountRuntime, /return \.\{ \.rejected = \.generation_mismatch \}/);
+  assert.match(
+    accountRuntime,
+    /return \.\{ \.rejected = \.generation_mismatch \}/,
+  );
   assert.doesNotMatch(app, /expected_catalog_generation|generation_mismatch/);
   assert.match(app, /workbench\.commitAccountFactNoFail\(fact\)/);
   assert.match(app, /runtime\.commit\(&prepared\)/);
@@ -977,7 +988,7 @@ test("Renderer Bridge fixed revision 1 owns the exact product wire catalog", () 
 
 test("lifecycle tests are grouped by invariant", () => {
   const cases = [
-    ["tests/agent/lifecycle_test.zig", 41],
+    ["tests/agent/lifecycle_test.zig", 43],
     ["tests/agent/event_pump_test.zig", 5],
     ["tests/workbench/executor_lifecycle_test.zig", 21],
     ["tests/integration/lifecycle/lifecycle_test.zig", 4],

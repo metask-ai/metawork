@@ -1,9 +1,9 @@
 # MetaWork AgentCore 集成契约
 
-> 状态：AgentCore ABI v1 revision 5 已 hard cut 共享 Agent consumer，并完成 macOS arm64、Windows x86_64 GNU exact artifact 与各自真实 vertical；fault-domain 验证选择单 AgentCore Worker 作为后续正式方向
-> 目标依赖：Metask AgentCore ABI v1 revision 5；精确 artifact identity 见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)
+> 状态：AgentCore ABI v1 revision 6 已 hard cut 共享 Agent consumer；Windows x86_64 GNU 与 macOS arm64 使用独立 clean exact artifact，当前分支的真实 vertical 结果以验证规范为准
+> 目标依赖：Metask AgentCore ABI v1 revision 6；精确 artifact identity 见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)
 
-本文定义 MetaWork `agent/` 执行子系统与 Metask AgentCore 之间的规范边界。顶层模块与故障域见 [高层架构](architecture.md)，Application 内部 owner 见 [Application 内部架构](application-architecture.md)，Bridge transport 见 [Renderer Bridge 合同](renderer-bridge-contract.md)，revision 5 目标能力见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。
+本文定义 MetaWork `agent/` 执行子系统与 Metask AgentCore 之间的规范边界。顶层模块与故障域见 [高层架构](architecture.md)，Application 内部 owner 见 [Application 内部架构](application-architecture.md)，Bridge transport 见 [Renderer Bridge 合同](renderer-bridge-contract.md)，revision 6 目标能力见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。
 
 ## 1. 集成原则
 
@@ -21,11 +21,11 @@
 
 MetaWork 的依赖输入是一个完整 bundle，而不是 AgentCore 实现源码。精确 artifact identity、payload whitelist 和 manifest schema 只由 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)定义；本文只定义 candidate、staging、build graph 和 Host 生命周期。
 
-### revision 5 开发期 bootstrap
+### revision 6 开发期 bootstrap
 
 - Metask AgentCore 独立构建并测试 target-specific bundle，candidate 直接取自本机精确路径 `metacodes/zig-out/agentcore/<target>`；
 - candidate probe 与 `agentcore:stage` 使用显式绝对 bundle root；正式 build/test/package 只消费 `.agentcore/bundle`；
-- 每个已接入 target 的 repository lock 保存完整 revision 5 manifest，并锁定 package/source、target、toolchain、ABI version/revision、table size、required capabilities、link inputs 和所有 payload checksum；依赖升级按变更实际涉及的 target 独立验收，macOS 与 Windows lock 不互相替代，也不因另一 target 未参与本轮而反向阻塞；
+- 每个已接入 target 的 repository lock 保存完整 revision 6 manifest，并锁定 package/source、target、toolchain、ABI version/revision、table size、required capabilities、link inputs 和所有 payload checksum；macOS 与 Windows lock 不互相替代，任一 target 缺少 revision 6 artifact 都必须失败，不能保留旧 revision；
 - stager 只复制 manifest whitelist；捕获到的复制/rename 错误必须恢复旧 canonical bundle。当前内部开发不承诺跨进程 crash transaction 或并发 build/stage，强制中断后的残留由再次执行 stage 清理；
 - staged bundle 在正式 build 前由 MetaWork verifier 再校验；官方 Zig package 只负责 module/link graph，不承担 repository lock 和 checksum 信任政策；
 - 由于 Zig 会在执行 root build verification 前解析 staged path dependency，正式 `dev/check/test/build/package` 必须先运行轻量 `agentcore:verify-staged` preflight，给出明确的缺包或 lock mismatch 错误；Zig build-time verifier 仍负责最终 build correctness；
@@ -33,7 +33,7 @@ MetaWork 的依赖输入是一个完整 bundle，而不是 AgentCore 实现源�
 - artifact 缺失、target 不匹配或 checksum 错误时明确失败；
 - 禁止 path/Git source dependency、源码复制、`latest`、版本范围、可变 tag 和 source fallback。
 
-stager 与 verifier 根据 manifest target 选择显式 target policy 和 exact lock，只接受 ABI 消费合同定义的 schema 1 revision 5 manifest、168-byte table 与 required capabilities `0x0fff`。未知 target 必须失败；Linux 后续通过新增独立 policy/lock 接入，不提供 generic fallback。MetaWork 不保留 revision 4 function table、`session_refresh_skill_catalog` 或其他兼容 parser/fallback。
+stager 与 verifier 根据 manifest target 选择显式 target policy 和 exact lock，只接受 ABI 消费合同定义的 schema 1 revision 6 manifest、216-byte table 与 required capabilities `0x7ffff`。未知 target 必须失败；Linux 后续通过新增独立 policy/lock 接入，不提供 generic fallback。MetaWork 不保留任何旧 revision 的 function table、类型别名、兼容 parser 或 fallback。
 
 当前内部初步开发不实现 dependency resolver、content-addressed cache、artifact repository 或跨机器自动分发。这个限制意味着开发 checkout 需要本机 Metask AgentCore 构建输出；它是明确的开发期前提，不得伪装成公司发布方案。
 
@@ -47,7 +47,7 @@ candidate probe 只用于证明锁定 artifact 与官方 Zig package 可以 sour
 - 不能注册到 React/Native SDK 正式链路；
 - 不维护上游 ABI facade 或 SDK 行为的平行测试套件。
 
-revision 5 bundle 提供完整 typed status、六个 StopReason、known/unknown observation decoder、`UiRequest` decoder、request-aware `UiResponse` encoder、Skill catalog decoder、Skill argument encoder、Session mutation entry，以及 callback-scoped validated `RunContext`。正式 `agent/` 直接使用官方 `bindings/zig` package 暴露的表面；MetaWork 不手写 raw enum、tag switch、identity layout、Skill schema 或 SDK module/link graph。
+revision 6 bundle 提供完整 typed status、八个 StopReason、known/unknown observation decoder、Permission provenance、`UiRequest` decoder、request-aware `UiResponse` encoder、Skill/MCP catalog decoder、Session description/restore/checkpoint entry，以及 callback-scoped validated `RunContext`。正式 `agent/` 直接使用官方 `bindings/zig` package 暴露的表面；MetaWork 不手写 raw enum、tag switch、identity layout、Permission/Skill/MCP schema 或 SDK module/link graph。
 
 ### MetaWork module boundary
 
@@ -68,7 +68,7 @@ revision 5 bundle 提供完整 typed status、六个 StopReason、known/unknown 
 | `UiRequest` JSON  | Core → Host | 同步 callback 请求；与同次 callback 的 `RunContext` 绑定                           |
 | `UiResponse` JSON | Host → Core | 同一 callback 内 answered response；或 unavailable/fatal                           |
 | ABI status        | Core → Host | function 调用层错误，独立于有效 Run 结果                                           |
-| `RunResult`       | Core → Host | status OK 后才有效；包含 stop reason code、turn/tool count                         |
+| `RunResult`       | Core → Host | status OK 时完整有效；checkpoint budget pre-admission status 只定义 budget 字段    |
 | abort             | Host → Core | 按 Session/Run 的 user/timeout 中断机制                                            |
 | manual compact    | 双向        | Host 分配严格递增 operation ID；Core 返回 typed compact result                     |
 | compact abort     | Host → Core | 只按 active compact operation ID 请求取消，不等待 provider I/O response            |
@@ -78,9 +78,9 @@ revision 5 bundle 提供完整 typed status、六个 StopReason、known/unknown 
 
 `UiEvent` / `UiBackend.poll()` 虽然存在于 Metask AgentCore native 协议中，但当前生产 agent loop 未证明消费。MetaWork 不依赖它完成 stop、生成期 queue message 或 steering。
 
-当前 ABI `RunResult` 不包含 `SuspendInfo`、resume token、background handle 或 budget stop。unknown stop code 在 SDK validation 层失败；Host 不能制造这些产品状态。
+当前 ABI `RunResult` 不包含 `SuspendInfo`、resume token 或 background handle，但包含 checkpoint outcome、durable usage、required checkpoint bytes 与两个 budget stop。unknown status、stop reason、checkpoint outcome、result flag 或不一致组合在 Host validation 层 fail closed；Host 不能制造这些产品状态。
 
-revision 5 的公开 Runtime/Session surface 也只有进程内 create/destroy、typed Run/abort、manual compact 与已列出的 mutation；没有按持久 identity open Session、checkpoint、Conversation export/import 或 hydration。MetaWork 的 Workbench store 因此只恢复产品 Task 历史：恢复 Task 不创建 Agent Session，不把历史文本重新喂给模型，不从 bundle 私有数据或 CLI 行为推断 resume，并向 Bridge 发布 `conversationRecovery = false` 与 `session_recovery_unsupported`。后续 AgentCore 若增加恢复能力，必须先在本合同和 ABI 消费合同中定义 ownership、exclusive open、checkpoint/terminal 对账与失败语义，再由 Workbench 接入；不能在 `agent/` 外建立兼容实现。
+revision 6 的公开 Runtime/Session surface 包含 fresh create、checkpoint export/restore、Session description、typed Run/abort、manual compact、MCP catalog/selection 与已列出的 mutation。当前 MetaWork 只消费 fresh create 和既有运行路径；`SessionHostConfigV1.mcp_selection` 与 `durable_budget` 保持 null，MCP、checkpoint store 和 restore 产品路径继续关闭。Workbench store 只恢复产品 Task 历史：恢复 Task 不创建 Agent Session，不把历史文本重新喂给模型，不从 bundle 私有数据或 CLI 行为推断 resume，并向 Bridge 发布 `conversationRecovery = false` 与 `session_recovery_unsupported`。启用恢复前必须独立定义并验收 checkpoint ownership、exclusive restore、execution binding、terminal 对账与失败语义；不能在 `agent/` 外建立兼容实现。
 
 ## 4. Agent binding
 
@@ -133,11 +133,13 @@ Bridge handler 只写入 response channel，不同步等待 AgentCore。callback
 
 callback admission 只建立 lifetime 与当时的 identity 事实，不保证等待期间不会有另一个并发 callback 发现 identity 漂移。因此 Host 在发布 UI request 前和最终提取 response 的线性化点都必须在同一 Session lock 下重新检查现有 Core identity 与 dependency-contract 状态。检查失败时返回 UI fatal；如果 Renderer response 已完成编码但 ownership 尚未转移给 Core，Host 必须自行释放，禁止返回 answered。
 
-目标 ABI v1 revision 5 的 `UiRequest` / `UiResponse` 只有 `ask_question`/`answers` 与 `permission`。`answers` 是按 question 排列的 `values[]`，不能再用逗号拼接多选值。更早 experimental bundle 的 `plan_approval` 和 `custom` 已从 Host、Bridge、Renderer 与测试移除；未来控制消息扩展需要新的 ABI revision/version。
+目标 ABI v1 revision 6 的 `UiRequest` / `UiResponse` 只有 `ask_question`/`answers` 与 `permission`。`answers` 是按 question 排列的 `values[]`；Permission request 是携带 request/session/run/tool/digest/policy generation/candidate 的 typed flat object，response 必须回显 request identity 与 generation，Session choice 还必须回显 candidate rule ID。Permission request 与 callback `RunContext` identity 不一致时立即 fatal 并 poison Session；`permission_provenance` 是 control event，不得静默丢弃。
+
+Agent Session 的公开回答入口只有 answers-only `respondAnswers` 与 choice-only `respondPermission`。调用方不能提交任意 SDK `UiResponse`：answers 入口只接收值数组，Permission 入口从 pending request 回填 request ID、policy generation 和 candidate rule ID；完整 SDK response 只在 Agent 私有 encoder 边界内构造并校验。
 
 ### Host tools
 
-目标 revision 5 的 Host tool callback 同样携带 validated `RunContext`，但这只补齐 wire identity，不自动建立 MetaWork 的产品工具、安全与路由政策。当前产品 Runtime 配置仍必须保持 `host_tool_count = 0`，Read/Bash/Edit 使用 built-in tool catalog；启用正式 Host tools 属于独立 capability Gate，不在本次 ABI 迁移中顺带开放。
+目标 revision 6 的 Host tool callback 同样携带 validated `RunContext`，但这只补齐 wire identity，不自动建立 MetaWork 的产品工具、安全与路由政策。当前产品 Runtime 配置仍必须保持 `host_tool_count = 0`，Read/Bash/Edit 使用 built-in tool catalog；启用正式 Host tools 属于独立 capability Gate，不在本次 ABI 迁移中顺带开放。
 
 ## 5. Host envelope 与产品状态
 
@@ -213,7 +215,7 @@ Compact 的 `Queued / Compacting / Stopping` 不是由 Worker 直接覆盖同一
 
 ### Skill catalog ownership
 
-Agent Runtime 的 catalog query 是同步 Core 调用；调用在哪条受界线程运行由 Workbench 决定。执行 catalog 的 query 输入必须是 App/Workbench 已解析并验证的 canonical Workspace root、canonical user home 和 Workspace epoch。MetaWork 顶层管理 catalog 使用 revision 5 明确允许的无外部 generation 形式：root 与 home 都绑定 canonical user home，epoch 为空；该 lease 只由 Workbench 持有和释放，禁止借给 Session。AgentCore descriptor 由官方 SDK 校验后立即释放，Agent 只向上层返回两份彼此独立的线性值：
+Agent Runtime 的 catalog query 是同步 Core 调用；调用在哪条受界线程运行由 Workbench 决定。执行 catalog 的 query 输入必须是 App/Workbench 已解析并验证的 canonical Workspace root、canonical user home 和 Workspace epoch。MetaWork 顶层管理 catalog 使用 revision 6 明确允许的无外部 generation 形式：root 与 home 都绑定 canonical user home，epoch 为空；该 lease 只由 Workbench 持有和释放，禁止借给 Session。AgentCore descriptor 由官方 SDK 校验后立即释放，Agent 只向上层返回两份彼此独立的线性值：
 
 - MetaWork-owned catalog projection：只包含 revision、health、可调用 Skill 的产品字段与 bounded issue；不包含 raw JSON、catalog scope、物理路径、Skill body 或内部 policy；
 - opaque catalog lease：内部持有 AgentCore handle 及 root/home/epoch/Runtime owner 绑定，只能同步借给 Session create 或 idle refresh，并由原 Runtime 精确 release 一次。
@@ -420,23 +422,26 @@ Workbench revision 通知只在 revision 变化时发送，Renderer 合并并发
 ```text
 call ABI
 → validate typed function Status
-→ non-OK: release diagnostic, do not read RunResult
-→ OK: validate RunResult and typed StopReason
+→ checkpoint_budget_required: validate only the fields defined for that status and keep Session retryable
+→ every other non-OK: release diagnostic, do not read RunResult
+→ OK: validate RunResult layout, reserved bytes, checkpoint outcome/result flags and typed StopReason consistency
 → exhaustive Host mapping
 ```
 
-| StopReason   | 当前 Host 状态                                                                           |
-| ------------ | ---------------------------------------------------------------------------------------- |
-| `end_turn`   | completed                                                                                |
-| `max_turns`  | stopped / awaiting_user                                                                  |
-| `aborted`    | `TerminalResult.termination_signal` 由 Workbench 映射为 cancelled / interrupted / failed |
-| `tool_error` | failed                                                                                   |
-| `api_error`  | failed                                                                                   |
-| `tool_loop`  | stopped / awaiting_user                                                                  |
+| StopReason                    | 当前 Host 状态                                                                           |
+| ----------------------------- | ---------------------------------------------------------------------------------------- |
+| `end_turn`                    | completed                                                                                |
+| `max_turns`                   | stopped / awaiting_user                                                                  |
+| `aborted`                     | `TerminalResult.termination_signal` 由 Workbench 映射为 cancelled / interrupted / failed |
+| `tool_error`                  | failed                                                                                   |
+| `api_error`                   | failed                                                                                   |
+| `tool_loop`                   | stopped / awaiting_user                                                                  |
+| `checkpoint_budget_exhausted` | stopped / resource_limit                                                                 |
+| `checkpoint_resource_limit`   | stopped / resource_limit                                                                 |
 
 MetaWork 对 bundle SDK 的 typed StopReason 使用无 `else` switch。unknown raw code 必须在 SDK validation 层失败，并在 diagnostic 中保留 raw value。
 
-ABI status 新增 `resource_limit`。它与 pre-admission `invalid_argument`、`busy`、`stale_run` 一样不污染 Session；一旦 Run 已 admission，`out_of_memory`、`core_error`、`callback_failed` 或 `internal_error` 会 poison Session。Host 在这些状态后拒绝新 Run 并要求关闭或重建 Task 的 AgentCore Session，不能提供虚假的原 Session retry。
+ABI status 的 `checkpoint_budget_required` 表示 Run 未 admission，Host 只读取其合同明确允许的 `checkpoint_outcome_code`、`result_flags`、`durable_usage_bytes` 和 `required_checkpoint_bytes`，并保持 Session 可重试；当前产品未开放 checkpoint 后自动重试，因此向 Workbench 失败收口。manual compact 与 idle Session Skill mutation 也分别按自己的 operation-specific status set 接受该 status，当前操作失败但不污染 Session；不能因为 status 属于 revision 6 typed enum 就跨 operation 接受，也不能把某个 operation 的合法 status 当成 dependency contract failure。`resource_limit` 与 pre-admission `invalid_argument`、`busy`、`stale_run` 一样不污染 Session；一旦 Run 已 admission，`out_of_memory`、`core_error`、`callback_failed` 或 `internal_error` 会 poison Session。Host 在这些状态后拒绝新 Run 并要求关闭或重建 Task 的 AgentCore Session，不能提供虚假的原 Session retry。
 
 `stream_done` 只表示一次模型流结束，不等于整个 Run 完成。只有 ABI status 与 RunResult 映射完成后才能发布 terminal product state。
 
@@ -521,6 +526,6 @@ Compact abort 同样不进入普通 FIFO；accepted cancellation 最终必须由
 
 独立测试进程已经完成同进程 fatal baseline 和最小 Worker harness。结果是同进程 fatal 会带走 Host 与全部进程内 Session；Worker crash 时 Host 与已有产品 snapshot 可继续存活，归属 active Run 进入 `interrupted/worker_disconnected`，危险工具不自动重放。因此后续正式方向选择单 AgentCore Worker。
 
-当前应用仍是同进程 bounded-executor prototype。正式 Worker 尚未实现，spike IPC 不是产品协议。后续必须单独定义版本化 transport、容量/backpressure、ownership、correlation、credential、disconnect 和 shutdown；在 AgentCore 没有 checkpoint capability 时，Worker restart 不等于 Run 或 Conversation 恢复。
+当前应用仍是同进程 bounded-executor prototype。正式 Worker 尚未实现，spike IPC 不是产品协议。后续必须单独定义版本化 transport、容量/backpressure、ownership、correlation、credential、disconnect 和 shutdown；revision 6 具备 checkpoint capability 也不意味着 Worker restart 已具备 Run 或 Conversation 恢复，产品恢复仍需独立接入和验收。
 
 Renderer 始终只面对 Host 领域命令和产品 envelope，不直接绑定 Worker 或 AgentCore memory。

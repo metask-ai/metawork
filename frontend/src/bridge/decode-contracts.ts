@@ -1,4 +1,6 @@
 import {
+  compactCauses,
+  runCauses,
   type AccountCommandResult,
   type AccountView,
   type AskOption,
@@ -60,14 +62,6 @@ const compactPhases = [
   "failed",
 ] as const;
 const nonTerminalCompactPhases = ["queued", "compacting", "stopping"] as const;
-const compactCauses = [
-  "user_cancel",
-  "session_close",
-  "app_shutdown",
-  "resource_limit",
-  "agent_failure",
-  "dependency_contract_failure",
-] as const;
 const runOutcomes = [
   "completed",
   "stopped",
@@ -75,21 +69,6 @@ const runOutcomes = [
   "interrupted",
   "failed",
   "dependency_contract_failure",
-] as const;
-const hostCauses = [
-  "user_cancel",
-  "timeout",
-  "session_close",
-  "app_shutdown",
-  "event_pipeline_failure",
-  "queue_capacity_failure",
-  "ui_pipeline_failure",
-  "dependency_contract_failure",
-  "stale_catalog",
-  "skill_not_found",
-  "invalid_skill_arguments",
-  "skill_policy_violation",
-  "skill_unavailable",
 ] as const;
 const uiRecordKinds = ["ask_question", "permission"] as const;
 const uiRecordStates = [
@@ -997,7 +976,7 @@ function decodeRun(value: unknown, path: string): RunView {
     ),
     status: stringValue(item.status, `${path}.status`),
     outcome,
-    cause: nullableEnum(item.cause, `${path}.cause`, hostCauses),
+    cause: nullableEnum(item.cause, `${path}.cause`, runCauses),
     usage: {
       input: wireId(usage.input, `${path}.usage.input`),
       output: wireId(usage.output, `${path}.usage.output`),
@@ -1446,7 +1425,7 @@ function decodeTask(value: unknown, path: string): TaskView {
       `${path}.lastRunOutcome`,
       runOutcomes,
     ),
-    cause: nullableEnum(item.cause, `${path}.cause`, hostCauses),
+    cause: nullableEnum(item.cause, `${path}.cause`, runCauses),
     runs,
     compacts,
     pendingUi,

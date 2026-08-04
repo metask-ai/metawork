@@ -83,9 +83,9 @@ async function fixture(t, mutateManifest = () => {}) {
     contract: {
       binary_abi_status: "experimental",
       binary_abi_version: 1,
-      binary_abi_revision: 5,
-      binary_abi_table_size: 168,
-      capabilities: 0x0fff,
+      binary_abi_revision: 6,
+      binary_abi_table_size: 216,
+      capabilities: 0x7ffff,
     },
     files,
   };
@@ -126,7 +126,7 @@ async function seedCanonicalBundle(repositoryRoot) {
   return { storageRoot, target };
 }
 
-test("accepts a complete pinned macOS arm64 revision 5 bundle", async (t) => {
+test("accepts a complete pinned macOS arm64 revision 6 bundle", async (t) => {
   const { root, manifest } = await fixture(t);
   const result = await validateAgentCoreBundle(root, {
     ...injectedChecks,
@@ -136,7 +136,7 @@ test("accepts a complete pinned macOS arm64 revision 5 bundle", async (t) => {
   assert.deepEqual(result.payloadFiles, fixtureFiles);
 });
 
-test("accepts a complete pinned Windows x64 GNU revision 5 bundle", async (t) => {
+test("accepts a complete pinned Windows x64 GNU revision 6 bundle", async (t) => {
   const { root, manifest } = await fixture(t);
   const oldLibrary = fixtureFiles[0];
   const newLibrary = "lib/metask_agentcore.lib";
@@ -389,14 +389,14 @@ test("rejects missing, duplicated, and obsolete discovery symbols", async (t) =>
   const { root } = await fixture(t);
   await assert.rejects(
     validateAgentCoreBundle(root, { ...injectedChecks, symbols: "" }),
-    /exactly one revision 5 discovery symbol/,
+    /exactly one revision 6 discovery symbol/,
   );
   await assert.rejects(
     validateAgentCoreBundle(root, {
       ...injectedChecks,
       symbols: "T _metask_agentcore_get_api\nT _metask_agentcore_get_api\n",
     }),
-    /exactly one revision 5 discovery symbol/,
+    /exactly one revision 6 discovery symbol/,
   );
   await assert.rejects(
     validateAgentCoreBundle(root, {
