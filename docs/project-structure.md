@@ -143,6 +143,10 @@ Bridge handler 不能绕过 Workbench 操作 AgentCore handle。automation 只�
 
 `SkillsPage.tsx` 是 MetaWork 用户 Skill catalog 的只读一级视图，拥有搜索、catalog 状态、bounded issue 与空状态展示。它只消费 Bridge 已解码的 Workbench 顶层 canonical projection，并由 `app/App.tsx` 发起 `skills.refreshCatalog`；不得读取目录或 Skill body、依赖 selected Workspace、推断 source、持有 policy，或增加安装、编辑、启用/禁用路径。
 
+### `frontend/src/features/mcp/`
+
+`McpPage.tsx` 是具有稳定左栏入口的 MCP 服务状态与工具目录一级视图，拥有搜索、行动优先分组、空/不可用状态和详情 drawer。它只消费 Bridge 已严格解码并清洗的顶层 `mcp` projection；不得读取 MCP 配置、AgentCore handle、schema、credential 或 raw diagnostic，不得直接调用 AgentCore，也不得在没有 typed Workbench command 时增加服务、认证、刷新、启停、删除、工具选择或 marketplace 动作。当前 Host 固定发布 unavailable，因此入口和 route 存在不代表产品 MCP capability 已开放。
+
 ### `frontend/src/features/scheduled-tasks/`
 
 `ScheduledTasksPage.tsx` 是与 Skill 中心同级的持久自动化管理视图，拥有搜索、Text 建议模板、状态分区、连续列表、真实 Task/occurrence 链接与 detail/editor drawer；任务内容只编辑 Text instruction，不读取任何 Skill catalog 或持有 Skill 配置。recurrence 的本地输入与确认摘要留在该 feature，但 Host snapshot 和 typed mutation result 始终是产品真相。该目录不得使用 Renderer timer 触发 Run、用浏览器存储持久化 Scheduled Task、直接调用 AgentCore，或复制 Task timeline。

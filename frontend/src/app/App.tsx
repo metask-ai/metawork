@@ -45,6 +45,7 @@ import {
 import { useUiResponseStates } from "../features/approvals/useUiResponseStates.ts";
 import { GlobalSearch } from "../features/search/GlobalSearch.tsx";
 import { SkillsPage } from "../features/skills/SkillsPage.tsx";
+import { McpPage } from "../features/mcp/McpPage.tsx";
 import { ScheduledTasksPage } from "../features/scheduled-tasks/ScheduledTasksPage.tsx";
 import {
   TaskInspector,
@@ -145,6 +146,7 @@ export default function App() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [skillsQuery, setSkillsQuery] = useState("");
+  const [mcpQuery, setMcpQuery] = useState("");
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -173,6 +175,7 @@ export default function App() {
     failed: failUiResponse,
     observeSnapshot: observeUiResponseSnapshot,
   } = useUiResponseStates();
+
   const client = useMemo(() => new BridgeClient(), []);
   const windowChrome = useWindowChrome(client);
   const connection = useRef<WorkbenchConnection | null>(null);
@@ -1804,9 +1807,11 @@ export default function App() {
           ? t("settings.title")
           : route === "skills"
             ? t("skills.title")
-            : route === "scheduled-tasks"
-              ? t("scheduled.title")
-              : activeTaskTitle
+            : route === "mcp"
+              ? t("mcp.title")
+              : route === "scheduled-tasks"
+                ? t("scheduled.title")
+                : activeTaskTitle
       }
       contextVisible={route === "workbench" && activeTask !== null}
       onSearch={() => setSearchOpen(true)}
@@ -1853,6 +1858,20 @@ export default function App() {
                     <Icon name="skills" />
                   </span>
                   <span>{t("skills.title")}</span>
+                </button>
+                <button
+                  className="sidebar-capability focus-ring"
+                  data-active={route === "mcp"}
+                  aria-current={route === "mcp" ? "page" : undefined}
+                  onClick={() => {
+                    pendingTaskSelection.current = null;
+                    setRoute("mcp");
+                  }}
+                >
+                  <span className="sidebar-capability-mark" aria-hidden="true">
+                    <Icon name="mcp" />
+                  </span>
+                  <span>{t("mcp.title")}</span>
                 </button>
                 {snapshot.capabilities.scheduledTaskPersistenceHealth !==
                   "unavailable" && (
@@ -2002,6 +2021,12 @@ export default function App() {
           }
           onExport={(installId) => client.exportSkill(installId)}
           onDetail={(installId) => client.skillDetail(installId)}
+        />
+      ) : route === "mcp" ? (
+        <McpPage
+          management={snapshot.mcp}
+          query={mcpQuery}
+          onQuery={setMcpQuery}
         />
       ) : route === "scheduled-tasks" ? (
         <ScheduledTasksPage
