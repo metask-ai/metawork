@@ -335,14 +335,24 @@ function settingsElement(account, overrides = {}) {
     },
     createElement(SettingsPage, {
       account,
+      userWorkspaces: [],
+      tasks: [],
       focusTarget: "title",
       disabled: false,
+      workspaceDisabled: false,
+      workspaceBusy: false,
       cancelDisabled: false,
       onBack() {},
       onRefresh() {},
       onCancel() {},
       onSelectApiKey() {},
       onSelectModel() {},
+      async onChooseWorkspace() {
+        return { kind: "cancelled" };
+      },
+      async onRemoveWorkspace() {
+        return { kind: "accepted" };
+      },
       onReauthenticate() {},
       onLogout() {},
       ...overrides,
@@ -574,12 +584,16 @@ test("Settings keeps section navigation fixed while content scrolls independentl
   renderSettings(readySettingsAccount);
   const page = document.querySelector(".settings-page");
   const content = document.querySelector(".settings-content");
+  const workspaceSection = document.querySelector("#settings-workspaces");
   const accountSection = document.querySelector("#settings-account");
   Object.defineProperty(content, "clientHeight", {
     configurable: true,
     value: 680,
   });
   content.getBoundingClientRect = () => ({ top: 100 });
+  workspaceSection.getBoundingClientRect = () => ({
+    top: 360 - content.scrollTop,
+  });
   accountSection.getBoundingClientRect = () => ({
     top: 520 - content.scrollTop,
   });

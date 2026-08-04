@@ -441,6 +441,27 @@ export const zhCN: Record<MessageId, string> = {
   "settings.sections": "设置分区",
   "settings.section_label": "设置",
   "settings.general": "通用",
+  "settings.workspaces": "工作目录",
+  "settings.workspaces_help":
+    "这些已信任目录可用于新建任务。移除目录不会删除本地文件和任务历史。",
+  "settings.workspace_add": "添加目录",
+  "settings.workspace_empty_title": "还没有工作目录",
+  "settings.workspace_empty_help":
+    "添加一个已信任的本地目录后，即可让任务处理其中的文件。",
+  "settings.workspace_action_failed": "工作目录操作失败",
+  "settings.workspace_status.available": "可用",
+  "settings.workspace_status.removing": "正在移除",
+  "settings.workspace_status.reauthorization_required": "需要访问权限",
+  "settings.workspace_status.removal_failed": "移除未完成",
+  "settings.workspace_reauthorize": "确认访问权限",
+  "settings.workspace_reauthorize_mismatch":
+    "已添加所选目录，但当前目录仍需要重新确认访问权限。",
+  "settings.workspace_remove": "移除",
+  "settings.workspace_retry_removal": "重试移除",
+  "settings.workspace_remove_confirm_title": "移除这个工作目录？",
+  "settings.workspace_remove_confirm_body":
+    "其中 {count} 条任务记录和本地文件会保留；该目录中正在运行的工作将停止。",
+  "settings.workspace_remove_confirm_action": "移除目录",
   "settings.account_models": "账号与模型",
   "settings.execution_defaults": "执行默认配置",
   "settings.catalog_count": "API {apis} · 模型 {models}",
