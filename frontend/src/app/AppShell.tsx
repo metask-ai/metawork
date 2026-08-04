@@ -123,8 +123,8 @@ export function AppShell({
             className="icon-button focus-ring"
             aria-controls="workspace-sidebar"
             aria-expanded={leftOpen}
-            aria-label={t("app.toggle_workspaces")}
-            title={t("app.toggle_workspaces")}
+            aria-label={t("app.toggle_sidebar")}
+            title={t("app.toggle_sidebar")}
             onClick={toggleLeft}
           >
             <Icon name="sidebar" />

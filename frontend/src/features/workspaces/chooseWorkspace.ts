@@ -5,16 +5,14 @@ export type WorkspaceChoiceOutcome =
   | { kind: "cancelled" }
   | { kind: "selected"; result: Extract<WorkspaceChoice, { selected: true }> };
 
-export async function chooseWorkspaceWithDraft({
+export async function chooseWorkspaceAndMigrateDraft({
   choose,
   refresh,
-  openDraft,
   migratableDraftId,
   moveDraft,
 }: {
   choose: () => Promise<WorkspaceChoice>;
   refresh: () => Promise<void>;
-  openDraft: boolean;
   migratableDraftId: string | null;
   moveDraft: (sourceId: string, targetId: string) => unknown;
 }): Promise<WorkspaceChoiceOutcome> {
@@ -24,11 +22,7 @@ export async function chooseWorkspaceWithDraft({
   // A picker result is not an authoritative product projection. Keep the
   // source draft untouched until the Host snapshot proves the Workspace.
   await refresh();
-  if (
-    openDraft &&
-    migratableDraftId !== null &&
-    migratableDraftId !== result.workspaceId
-  )
+  if (migratableDraftId !== null && migratableDraftId !== result.workspaceId)
     moveDraft(migratableDraftId, result.workspaceId);
 
   return { kind: "selected", result };

@@ -28,13 +28,10 @@ import { composerDraftWithinLimits } from "../frontend/src/features/composer/sla
 import {
   isRunInFlight,
   searchWorkbench,
-  sidebarTasks,
   taskDisplayState,
   taskGroups,
   taskSignals,
   workspaceDirectoryLabel,
-  workspaceLabel,
-  workspaceSummaries,
 } from "../frontend/src/workbench/selectors.ts";
 
 function run(id, text, assistant, outcome, toolContent = "") {
@@ -92,7 +89,7 @@ function task(overrides) {
   };
 }
 
-test("Task navigation groups action before recency and keeps Host order exact", () => {
+test("Task list groups action before recency and keeps Host order exact", () => {
   const groups = taskGroups(
     [
       task({ id: "recent-old", recentOrder: "9007199254740993" }),
@@ -126,33 +123,7 @@ test("Task navigation groups action before recency and keeps Host order exact", 
   );
 });
 
-test("sidebar keeps managed Tasks globally visible without leaking other user Workspace Tasks", () => {
-  const snapshot = {
-    workspaces: [
-      { id: "user-a", origin: "user" },
-      { id: "user-b", origin: "user" },
-      { id: "managed-a", origin: "managed" },
-      { id: "managed-b", origin: "managed" },
-    ],
-    tasks: [
-      task({ id: "user-a-task", workspaceId: "user-a" }),
-      task({ id: "user-b-task", workspaceId: "user-b" }),
-      task({ id: "managed-a-task", workspaceId: "managed-a" }),
-      task({ id: "managed-b-task", workspaceId: "managed-b" }),
-    ],
-  };
-
-  assert.deepEqual(
-    sidebarTasks(snapshot, "user-a").map((item) => item.id),
-    ["user-a-task", "managed-a-task", "managed-b-task"],
-  );
-  assert.deepEqual(
-    sidebarTasks(snapshot, null).map((item) => item.id),
-    ["managed-a-task", "managed-b-task"],
-  );
-});
-
-test("workspace navigation aggregates actionable cross-workspace signals without conflating axes", () => {
+test("Task signals and Workspace path labels preserve their independent semantics", () => {
   const tasks = [
     task({ id: "1", currentRunId: "9", currentRunPhase: "running" }),
     task({
@@ -172,57 +143,6 @@ test("workspace navigation aggregates actionable cross-workspace signals without
       lastRunOutcome: "failed",
     }),
   ];
-  assert.deepEqual(
-    workspaceSummaries({
-      workspaces: [
-        {
-          id: "1",
-          origin: "user",
-          displayName: "alpha",
-          canonicalRoot: "/repo/alpha",
-          authorization: "available",
-          lastRemovalFailure: null,
-          recentOrder: "2",
-          signals: { running: 1, attention: 1, failedOrInterrupted: 0 },
-        },
-        {
-          id: "2",
-          origin: "user",
-          displayName: "beta",
-          canonicalRoot: "/repo/beta",
-          authorization: "removing",
-          lastRemovalFailure: "task_close_failed",
-          recentOrder: "1",
-          signals: { running: 0, attention: 0, failedOrInterrupted: 1 },
-        },
-      ],
-      tasks,
-    }),
-    [
-      {
-        id: "1",
-        canonicalRoot: "/repo/alpha",
-        label: "alpha",
-        authorization: "available",
-        lastRemovalFailure: null,
-        taskCount: 2,
-        running: 1,
-        attention: 1,
-        failed: 0,
-      },
-      {
-        id: "2",
-        canonicalRoot: "/repo/beta",
-        label: "beta",
-        authorization: "removing",
-        lastRemovalFailure: "task_close_failed",
-        taskCount: 1,
-        running: 0,
-        attention: 0,
-        failed: 1,
-      },
-    ],
-  );
   assert.deepEqual(taskSignals(tasks[2]), {
     running: false,
     attention: false,
@@ -232,7 +152,6 @@ test("workspace navigation aggregates actionable cross-workspace signals without
     taskSignals(task({ lastRunOutcome: "interrupted", cause: "app_shutdown" })),
     { running: false, attention: false, failed: true },
   );
-  assert.equal(workspaceLabel("C:\\work\\metawork\\"), "metawork");
   assert.equal(
     workspaceDirectoryLabel(
       { origin: "user", canonicalRoot: "/repo/metawork" },
@@ -454,7 +373,7 @@ test("global search finds product content and deliberately excludes raw tool out
       task({ id: "9", workspaceId: "9", title: "Managed report" }),
     ],
   };
-  assert.equal(searchWorkbench(snapshot, "alpha")[0].kind, "workspace");
+  assert.deepEqual(searchWorkbench(snapshot, "alpha"), []);
   assert.equal(searchWorkbench(snapshot, "audit")[0].kind, "task");
   assert.equal(searchWorkbench(snapshot, "readiness")[0].kind, "instruction");
   assert.equal(searchWorkbench(snapshot, "checklist")[0].kind, "completion");

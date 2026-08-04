@@ -6,6 +6,7 @@ import type {
 } from "../bridge/contracts.ts";
 import { runInputDisplay } from "./run-input.ts";
 import type { WorkbenchState } from "./store.ts";
+import { navigableTasks } from "./task-visibility.ts";
 
 export function selectActiveTask(state: WorkbenchState): TaskView | null {
   return (
@@ -25,18 +26,6 @@ function activeCompact(task: TaskView) {
     : null;
 }
 
-export type WorkspaceSummary = {
-  id: string;
-  canonicalRoot: string;
-  label: string;
-  authorization: "available" | "removing" | "reauthorization_required";
-  lastRemovalFailure: "task_close_failed" | null;
-  taskCount: number;
-  running: number;
-  attention: number;
-  failed: number;
-};
-
 export type TaskSignals = {
   running: boolean;
   attention: boolean;
@@ -50,22 +39,6 @@ export type TaskGroup = {
   kind: TaskGroupKind;
   tasks: TaskView[];
 };
-
-export function sidebarTasks(
-  snapshot: WorkbenchSnapshot,
-  selectedUserWorkspaceId: string | null,
-): TaskView[] {
-  const managedWorkspaceIds = new Set(
-    snapshot.workspaces
-      .filter((workspace) => workspace.origin === "managed")
-      .map((workspace) => workspace.id),
-  );
-  return snapshot.tasks.filter(
-    (task) =>
-      task.workspaceId === selectedUserWorkspaceId ||
-      managedWorkspaceIds.has(task.workspaceId),
-  );
-}
 
 export function taskGroups(
   tasks: TaskView[],
@@ -178,11 +151,6 @@ export function taskSignals(task: TaskView): TaskSignals {
   };
 }
 
-export function workspaceLabel(root: string): string {
-  const normalized = root.replaceAll("\\", "/").replace(/\/+$/, "");
-  return normalized.split("/").filter(Boolean).at(-1) ?? root;
-}
-
 export function workspaceDirectoryLabel(
   workspace: Pick<WorkspaceView, "origin" | "canonicalRoot">,
   defaultLabel: string,
@@ -192,45 +160,10 @@ export function workspaceDirectoryLabel(
     : workspace.canonicalRoot;
 }
 
-export function workspaceSummaries(
-  snapshot: WorkbenchSnapshot,
-): WorkspaceSummary[] {
-  return [...snapshot.workspaces]
-    .filter((workspace) => workspace.origin === "user")
-    .sort((left, right) => {
-      const leftOrder = BigInt(left.recentOrder);
-      const rightOrder = BigInt(right.recentOrder);
-      return rightOrder > leftOrder ? 1 : rightOrder < leftOrder ? -1 : 0;
-    })
-    .map((workspace) => ({
-      id: workspace.id,
-      canonicalRoot: workspace.canonicalRoot,
-      label: workspace.displayName || workspaceLabel(workspace.canonicalRoot),
-      authorization: workspace.authorization,
-      lastRemovalFailure: workspace.lastRemovalFailure,
-      taskCount: snapshot.tasks.filter(
-        (task) => task.workspaceId === workspace.id && !task.archived,
-      ).length,
-      running: workspace.signals.running,
-      attention: workspace.signals.attention,
-      failed: workspace.signals.failedOrInterrupted,
-    }));
-}
-
-export function selectCurrentWorkspace(state: WorkbenchState): string | null {
-  return (
-    state.activeWorkspaceId ??
-    selectActiveTask(state)?.workspaceId ??
-    state.snapshot.selectedWorkspaceId ??
-    null
-  );
-}
-
 export type SearchResult = {
   key: string;
-  kind: "workspace" | "task" | "instruction" | "completion";
-  taskId: string | null;
-  workspaceId: string;
+  kind: "task" | "instruction" | "completion";
+  taskId: string;
   title: string;
   detail: string;
 };
@@ -246,20 +179,7 @@ export function searchWorkbench(
   const workspaces = new Map(
     snapshot.workspaces.map((workspace) => [workspace.id, workspace]),
   );
-  for (const workspace of snapshot.workspaces.filter(
-    (candidate) => candidate.origin === "user",
-  )) {
-    if (matches(workspace.canonicalRoot) || matches(workspace.displayName))
-      results.push({
-        key: `workspace:${workspace.id}`,
-        kind: "workspace",
-        taskId: null,
-        workspaceId: workspace.id,
-        title: workspace.displayName || workspaceLabel(workspace.canonicalRoot),
-        detail: workspace.canonicalRoot,
-      });
-  }
-  for (const task of snapshot.tasks) {
+  for (const task of navigableTasks(snapshot)) {
     const workspace = workspaces.get(task.workspaceId);
     if (!workspace) continue;
     const title = task.title;
@@ -268,7 +188,6 @@ export function searchWorkbench(
         key: `task:${task.id}`,
         kind: "task",
         taskId: task.id,
-        workspaceId: task.workspaceId,
         title,
         detail:
           workspace.origin === "managed"
@@ -282,7 +201,6 @@ export function searchWorkbench(
           key: `instruction:${task.id}:${run.id}`,
           kind: "instruction",
           taskId: task.id,
-          workspaceId: task.workspaceId,
           title,
           detail: input,
         });
@@ -295,7 +213,6 @@ export function searchWorkbench(
           key: `completion:${task.id}:${run.id}`,
           kind: "completion",
           taskId: task.id,
-          workspaceId: task.workspaceId,
           title,
           detail: run.assistant,
         });

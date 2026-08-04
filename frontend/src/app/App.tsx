@@ -31,6 +31,9 @@ import { requiresAccountGate } from "../features/account/gating.ts";
 import {
   SettingsPage,
   type SettingsFocusTarget,
+  type WorkspaceChoiceIntent,
+  type WorkspaceChoiceResult,
+  type WorkspaceRemovalResult,
 } from "../features/settings/SettingsPage.tsx";
 import { ComposerFooter } from "../features/composer/ComposerFooter.tsx";
 import { ApprovalPanel } from "../features/approvals/ApprovalPanel.tsx";
@@ -51,10 +54,7 @@ import { inspectorFocusReturnTarget } from "../features/inspector/inspector-inte
 import type { InspectorSection } from "../features/inspector/inspector-state.ts";
 import { useInspectorSession } from "../features/inspector/useInspectorSession.ts";
 import { TaskTimeline } from "../features/timeline/TaskTimeline.tsx";
-import {
-  TaskSignals,
-  WorkspaceNavigation,
-} from "../features/workspaces/WorkspaceNavigation.tsx";
+import { TaskList, TaskSignals } from "../features/tasks/TaskList.tsx";
 import {
   useNewTaskDrafts,
   useTaskDrafts,
@@ -96,24 +96,22 @@ import type {
 import { useI18n, type MessageId } from "../i18n/context.ts";
 import {
   searchWorkbench,
-  sidebarTasks,
   selectActiveTask,
-  selectCurrentWorkspace,
   taskDisplayState,
   workspaceDirectoryLabel,
-  workspaceSummaries,
   type SearchResult,
 } from "../workbench/selectors.ts";
-import { chooseWorkspaceWithDraft } from "../features/workspaces/chooseWorkspace.ts";
+import { chooseWorkspaceAndMigrateDraft } from "../features/workspaces/chooseWorkspace.ts";
 import {
   initialWorkbenchState,
   taskHistoryMutationBlocked,
   workbenchReducer,
 } from "../workbench/store.ts";
+import { navigableTasks } from "../workbench/task-visibility.ts";
 import {
-  WorkspaceNavigationIntents,
-  type WorkspaceNavigationRequest,
-} from "../workbench/workspace-navigation-intents.ts";
+  WorkspaceSelectionIntents,
+  type WorkspaceSelectionRequest,
+} from "../workbench/workspace-selection-intents.ts";
 import {
   accountMutationBlocksTaskAdmission,
   PendingScopes,
@@ -185,8 +183,8 @@ export default function App() {
   const accountBusyRef = useRef(false);
   const accountCancelBusyRef = useRef(false);
   const workspaceBusyRef = useRef(false);
-  const workspaceNavigationRunningRef = useRef(false);
-  const workspaceNavigationIntents = useRef(new WorkspaceNavigationIntents());
+  const workspaceSelectionRunningRef = useRef(false);
+  const workspaceSelectionIntents = useRef(new WorkspaceSelectionIntents());
   const connectionBusyRef = useRef(false);
   const taskMenu = useRef<HTMLDivElement>(null);
   const inspectorToggle = useRef<HTMLButtonElement>(null);
@@ -201,10 +199,6 @@ export default function App() {
   const snapshot = workbench.snapshot;
   const activeTask = useMemo(() => selectActiveTask(workbench), [workbench]);
   const inspector = useInspectorSession(activeTask);
-  const currentWorkspaceId = selectCurrentWorkspace(workbench);
-  const currentWorkspace = snapshot.workspaces.find(
-    (workspace) => workspace.id === currentWorkspaceId,
-  );
   const userWorkspaces = useMemo(
     () =>
       snapshot.workspaces.filter((workspace) => workspace.origin === "user"),
@@ -214,14 +208,10 @@ export default function App() {
     userWorkspaces.find(
       (workspace) => workspace.id === snapshot.selectedWorkspaceId,
     )?.id ?? null;
-  const navigationWorkspaceId =
-    currentWorkspace?.origin === "user"
-      ? currentWorkspace.id
-      : selectedUserWorkspaceId;
-  const summaries = useMemo(() => workspaceSummaries(snapshot), [snapshot]);
-  const sidebarTaskItems = useMemo(
-    () => sidebarTasks(snapshot, navigationWorkspaceId),
-    [navigationWorkspaceId, snapshot],
+  const defaultDraftWorkspaceId = selectedUserWorkspaceId;
+  const navigableTaskItems = useMemo(
+    () => navigableTasks(snapshot),
+    [snapshot],
   );
   const searchResults = useMemo(
     () => searchWorkbench(snapshot, searchQuery),
@@ -231,7 +221,7 @@ export default function App() {
   const newTaskDraftActive = workbench.draftOpen || activeTask === null;
   const newTaskDraftId = newTaskDraftStorageId(
     newTaskDraftActive,
-    workbench.draftWorkspaceId ?? navigationWorkspaceId,
+    workbench.draftWorkspaceId ?? defaultDraftWorkspaceId,
   );
   const newTaskDrafts = useNewTaskDrafts(newTaskDraftId);
   const composerDraft = newTaskDraftActive
@@ -262,7 +252,7 @@ export default function App() {
   const composerWorkspaceId =
     activeTask?.workspaceId ||
     workbench.draftWorkspaceId ||
-    navigationWorkspaceId;
+    defaultDraftWorkspaceId;
   const composerWorkspace = snapshot.workspaces.find(
     (workspace) => workspace.id === composerWorkspaceId,
   );
@@ -405,7 +395,7 @@ export default function App() {
     };
     window.addEventListener("keydown", openSearch);
     return () => window.removeEventListener("keydown", openSearch);
-  }, [accountGateRequired, bridgeUnavailable, navigationWorkspaceId]);
+  }, [accountGateRequired, bridgeUnavailable, defaultDraftWorkspaceId]);
 
   useEffect(() => {
     if (!client.available()) return;
@@ -433,12 +423,12 @@ export default function App() {
       return;
     dispatchWorkbench({
       type: "task.draft.opened",
-      workspaceId: navigationWorkspaceId,
+      workspaceId: defaultDraftWorkspaceId,
     });
     window.requestAnimationFrame(() => composer.current?.focus());
   }, [
     activeTask,
-    navigationWorkspaceId,
+    defaultDraftWorkspaceId,
     snapshot.account.readiness,
     workbench.draftOpen,
   ]);
@@ -670,15 +660,14 @@ export default function App() {
     }
   }
 
-  async function chooseWorkspace(openDraft = false) {
+  async function chooseWorkspaceForDraft() {
     if (workbenchMutationDisabled || workspaceBusyRef.current) return null;
     workspaceBusyRef.current = true;
     setWorkspaceBusy(true);
     try {
-      const outcome = await chooseWorkspaceWithDraft({
+      const outcome = await chooseWorkspaceAndMigrateDraft({
         choose: () => client.chooseWorkspace(),
         refresh: refreshSnapshot,
-        openDraft,
         migratableDraftId:
           newTaskDraftId === unscopedNewTaskDraftId ? newTaskDraftId : null,
         moveDraft: (sourceId, targetId) =>
@@ -686,35 +675,26 @@ export default function App() {
       });
       if (outcome.kind === "selected") {
         const { result } = outcome;
-        dispatchWorkbench(
-          openDraft
-            ? {
-                type: "task.draft.opened",
-                workspaceId: result.workspaceId,
-              }
-            : {
-                type: "workspace.selected",
-                workspaceId: result.workspaceId,
-              },
-        );
+        dispatchWorkbench({
+          type: "task.draft.opened",
+          workspaceId: result.workspaceId,
+        });
         setStatus(
           quietStatus("workspace.grant_confirmed", {
             scope: "workspace",
             workspaceId: result.workspaceId,
           }),
         );
-        if (openDraft)
-          window.requestAnimationFrame(() => composer.current?.focus());
+        window.requestAnimationFrame(() => composer.current?.focus());
         return result;
       }
       setStatus(
         quietStatus("workspace.selection_cancelled", {
           scope: "workspace",
-          workspaceId: navigationWorkspaceId,
+          workspaceId: defaultDraftWorkspaceId,
         }),
       );
-      if (openDraft)
-        window.requestAnimationFrame(() => composer.current?.focus());
+      window.requestAnimationFrame(() => composer.current?.focus());
       return null;
     } catch (error) {
       setStatus(
@@ -726,8 +706,7 @@ export default function App() {
           },
         ),
       );
-      if (openDraft)
-        window.requestAnimationFrame(() => composer.current?.focus());
+      window.requestAnimationFrame(() => composer.current?.focus());
       return null;
     } finally {
       workspaceBusyRef.current = false;
@@ -735,12 +714,91 @@ export default function App() {
     }
   }
 
-  async function executeWorkspaceNavigation(
-    request: WorkspaceNavigationRequest,
-  ) {
+  async function chooseWorkspaceForSettings(
+    intent: WorkspaceChoiceIntent,
+  ): Promise<WorkspaceChoiceResult> {
+    if (workbenchMutationDisabled || workspaceBusyRef.current)
+      return { kind: "failed" };
+    workspaceBusyRef.current = true;
+    setWorkspaceBusy(true);
+    try {
+      const result = await client.chooseWorkspace();
+      if (!result.selected) return { kind: "cancelled" };
+      await refreshSnapshot();
+      setStatus(
+        quietStatus("workspace.grant_confirmed", {
+          scope: "workspace",
+          workspaceId: result.workspaceId,
+        }),
+      );
+      if (
+        intent.kind === "reauthorize" &&
+        result.workspaceId !== intent.workspaceId
+      )
+        return {
+          kind: "target_mismatch",
+          selectedWorkspaceId: result.workspaceId,
+        };
+      return { kind: "selected", workspaceId: result.workspaceId };
+    } catch (error) {
+      await refreshSnapshot().catch(() => undefined);
+      setStatus(
+        attentionStatus(
+          "workspace.selection_failed",
+          { scope: "workspace", workspaceId: null },
+          { diagnostic: errorText(error) },
+        ),
+      );
+      return { kind: "failed" };
+    } finally {
+      workspaceBusyRef.current = false;
+      setWorkspaceBusy(false);
+    }
+  }
+
+  async function removeWorkspaceById(
+    workspaceId: string,
+  ): Promise<WorkspaceRemovalResult> {
+    if (workbenchMutationDisabled || workspaceBusyRef.current)
+      return { kind: "failed" };
+    const workspace = snapshot.workspaces.find(
+      (candidate) =>
+        candidate.id === workspaceId && candidate.origin === "user",
+    );
+    if (!workspace) return { kind: "failed" };
+    workspaceBusyRef.current = true;
+    setWorkspaceBusy(true);
+    try {
+      const result = await client.removeWorkspace(
+        workspace.id,
+        workspace.epoch,
+      );
+      if (!result.accepted) {
+        await refreshSnapshot().catch(() => undefined);
+        return { kind: "rejected", reason: result.reason };
+      }
+      await refreshSnapshot();
+      return { kind: "accepted" };
+    } catch (error) {
+      await refreshSnapshot().catch(() => undefined);
+      setStatus(
+        attentionStatus(
+          "mutation.transport_failed",
+          { scope: "workspace", workspaceId },
+          { diagnostic: errorText(error) },
+        ),
+      );
+      return { kind: "failed" };
+    } finally {
+      workspaceBusyRef.current = false;
+      setWorkspaceBusy(false);
+    }
+  }
+
+  async function executeWorkspaceSelection(request: WorkspaceSelectionRequest) {
     if (workbenchMutationDisabled) return;
     workspaceBusyRef.current = true;
-    workspaceNavigationRunningRef.current = true;
+    workspaceSelectionRunningRef.current = true;
     setWorkspaceBusy(true);
     try {
       const result = await client.selectWorkspace(
@@ -749,7 +807,7 @@ export default function App() {
       );
       if (!result.accepted) {
         await refreshSnapshot().catch(() => undefined);
-        if (workspaceNavigationIntents.current.isCurrent(request))
+        if (workspaceSelectionIntents.current.isCurrent(request))
           setStatus(
             attentionStatus(mutationReasonMessageId(result.reason), {
               scope: "workspace",
@@ -759,27 +817,17 @@ export default function App() {
         return;
       }
       await refreshSnapshot();
-      if (!workspaceNavigationIntents.current.isCurrent(request)) return;
-      if (request.target.kind === "draft") {
-        const sourceDraftId = request.target.migratableDraftId;
-        if (sourceDraftId && sourceDraftId !== request.workspaceId)
-          newTaskDrafts.moveDraft(sourceDraftId, request.workspaceId);
-        dispatchWorkbench({
-          type: "task.draft.opened",
-          workspaceId: request.workspaceId,
-        });
-        window.requestAnimationFrame(() => composer.current?.focus());
-      } else {
-        dispatchWorkbench({
-          type: "workspace.selected",
-          workspaceId: request.workspaceId,
-        });
-        if (request.target.taskId !== null)
-          dispatchWorkbench({
-            type: "task.selected",
-            taskId: request.target.taskId,
-          });
-      }
+      if (!workspaceSelectionIntents.current.isCurrent(request)) return;
+      if (
+        request.migratableDraftId &&
+        request.migratableDraftId !== request.workspaceId
+      )
+        newTaskDrafts.moveDraft(request.migratableDraftId, request.workspaceId);
+      dispatchWorkbench({
+        type: "task.draft.opened",
+        workspaceId: request.workspaceId,
+      });
+      window.requestAnimationFrame(() => composer.current?.focus());
       setStatus(
         quietStatus("workspace.grant_confirmed", {
           scope: "workspace",
@@ -788,7 +836,7 @@ export default function App() {
       );
     } catch (error) {
       await refreshSnapshot().catch(() => undefined);
-      if (workspaceNavigationIntents.current.isCurrent(request))
+      if (workspaceSelectionIntents.current.isCurrent(request))
         setStatus(
           attentionStatus(
             "workspace.selection_failed",
@@ -799,22 +847,15 @@ export default function App() {
           ),
         );
     } finally {
-      workspaceNavigationRunningRef.current = false;
+      workspaceSelectionRunningRef.current = false;
       workspaceBusyRef.current = false;
       setWorkspaceBusy(false);
-      const queued = workspaceNavigationIntents.current.takeQueued();
-      if (queued) void executeWorkspaceNavigation(queued);
+      const queued = workspaceSelectionIntents.current.takeQueued();
+      if (queued) void executeWorkspaceSelection(queued);
     }
   }
 
-  function selectWorkspaceById(
-    workspaceId: string,
-    target:
-      { kind: "navigation"; taskId: string | null } | { kind: "draft" } = {
-      kind: "navigation",
-      taskId: null,
-    },
-  ) {
+  function selectWorkspaceById(workspaceId: string) {
     if (workbenchMutationDisabled) return;
     const workspace = snapshot.workspaces.find(
       (candidate) => candidate.id === workspaceId,
@@ -831,87 +872,37 @@ export default function App() {
     const input = {
       workspaceId,
       workspaceEpoch: workspace.epoch,
-      target:
-        target.kind === "draft"
-          ? {
-              kind: "draft" as const,
-              migratableDraftId:
-                newTaskDraftId === unscopedNewTaskDraftId
-                  ? newTaskDraftId
-                  : null,
-            }
-          : target,
+      migratableDraftId:
+        newTaskDraftId === unscopedNewTaskDraftId ? newTaskDraftId : null,
     };
-    if (workspaceNavigationRunningRef.current) {
-      workspaceNavigationIntents.current.queue(input);
+    if (workspaceSelectionRunningRef.current) {
+      workspaceSelectionIntents.current.queue(input);
       return;
     }
     if (workspaceBusyRef.current) return;
-    const request = workspaceNavigationIntents.current.begin(input);
-    void executeWorkspaceNavigation(request);
-  }
-
-  async function removeWorkspaceById(workspaceId: string) {
-    if (workbenchMutationDisabled || workspaceBusyRef.current) return;
-    workspaceBusyRef.current = true;
-    setWorkspaceBusy(true);
-    try {
-      const workspace = snapshot.workspaces.find(
-        (candidate) => candidate.id === workspaceId,
-      );
-      if (!workspace) {
-        setStatus(
-          attentionStatus("workspace.selection_unavailable", {
-            scope: "workspace",
-            workspaceId,
-          }),
-        );
-        return;
-      }
-      const result = await client.removeWorkspace(workspaceId, workspace.epoch);
-      if (!result.accepted) {
-        await refreshSnapshot().catch(() => undefined);
-        setStatus(
-          attentionStatus(mutationReasonMessageId(result.reason), {
-            scope: "workspace",
-            workspaceId,
-          }),
-        );
-        return;
-      }
-      await refreshAfterCommit(
-        "workspace.removal_started",
-        "operation.workspace_remove",
-        { scope: "workspace", workspaceId },
-      );
-    } catch (error) {
-      await refreshSnapshot().catch(() => undefined);
-      setStatus(
-        attentionStatus(
-          "mutation.transport_failed",
-          { scope: "workspace", workspaceId },
-          { diagnostic: errorText(error) },
-        ),
-      );
-    } finally {
-      workspaceBusyRef.current = false;
-      setWorkspaceBusy(false);
-    }
+    const request = workspaceSelectionIntents.current.begin(input);
+    void executeWorkspaceSelection(request);
   }
 
   function beginNewTask() {
     pendingTaskSelection.current = null;
     setRoute("workbench");
-    if (workspaceNavigationRunningRef.current) {
-      if (navigationWorkspaceId)
-        selectWorkspaceById(navigationWorkspaceId, { kind: "draft" });
-      else workspaceNavigationIntents.current.invalidate();
+    if (workspaceSelectionRunningRef.current) {
+      if (defaultDraftWorkspaceId) selectWorkspaceById(defaultDraftWorkspaceId);
+      else workspaceSelectionIntents.current.invalidate();
     }
     dispatchWorkbench({
       type: "task.draft.opened",
-      workspaceId: navigationWorkspaceId,
+      workspaceId: defaultDraftWorkspaceId,
     });
     window.requestAnimationFrame(() => composer.current?.focus());
+  }
+
+  function openTask(taskId: string) {
+    pendingTaskSelection.current = null;
+    workspaceSelectionIntents.current.invalidate();
+    setRoute("workbench");
+    dispatchWorkbench({ type: "task.selected", taskId });
   }
 
   function openSettings(target: SettingsFocusTarget = "title") {
@@ -1468,19 +1459,7 @@ export default function App() {
   }
 
   function selectSearchResult(result: SearchResult) {
-    pendingTaskSelection.current = null;
-    const workspace = snapshot.workspaces.find(
-      (candidate) => candidate.id === result.workspaceId,
-    );
-    if (workspace?.origin === "managed" && result.taskId) {
-      setRoute("workbench");
-      dispatchWorkbench({ type: "task.selected", taskId: result.taskId });
-    } else {
-      void selectWorkspaceById(result.workspaceId, {
-        kind: "navigation",
-        taskId: result.taskId,
-      });
-    }
+    openTask(result.taskId);
     setSearchOpen(false);
     setSearchQuery("");
   }
@@ -1722,7 +1701,7 @@ export default function App() {
   });
   const commandBarStatus = selectCommandBarStatus(statuses, {
     route,
-    workspaceId: currentWorkspaceId,
+    workspaceId: composerWorkspaceId ?? null,
     taskId: activeTask?.id ?? null,
   });
   const composerFooter = (
@@ -1804,10 +1783,8 @@ export default function App() {
       onSubmit={() => void submitRun()}
       onSlashCommand={runSlashCommand}
       onRefreshSkillCatalog={() => void refreshComposerSkillCatalog()}
-      onConfirmAccess={() => void chooseWorkspace(true)}
-      onSelectWorkspace={(workspaceId) =>
-        void selectWorkspaceById(workspaceId, { kind: "draft" })
-      }
+      onConfirmAccess={() => void chooseWorkspaceForDraft()}
+      onSelectWorkspace={(workspaceId) => void selectWorkspaceById(workspaceId)}
       onSelectModel={(id) =>
         void runAccountCommand(() =>
           client.selectModel(
@@ -1915,53 +1892,16 @@ export default function App() {
                       </span>
                     </div>
                   )}
-                <WorkspaceNavigation
-                  summaries={summaries}
-                  currentWorkspaceId={navigationWorkspaceId}
-                  tasks={sidebarTaskItems}
+                <TaskList
+                  tasks={navigableTaskItems}
+                  workspaces={snapshot.workspaces}
                   activeTaskId={
-                    route === "workbench" &&
-                    activeTask !== null &&
-                    sidebarTaskItems.some((task) => task.id === activeTask.id)
+                    route === "workbench" && activeTask !== null
                       ? activeTask.id
                       : null
                   }
                   showArchived={showArchived}
-                  disabled={workbenchMutationDisabled || workspaceBusy}
-                  onChooseWorkspace={() => void chooseWorkspace(false)}
-                  onRemoveWorkspace={(workspaceId) =>
-                    void removeWorkspaceById(workspaceId)
-                  }
-                  onRetryRemoval={(workspaceId) =>
-                    void removeWorkspaceById(workspaceId)
-                  }
-                  onSelectWorkspace={(workspaceId) => {
-                    pendingTaskSelection.current = null;
-                    setRoute("workbench");
-                    void selectWorkspaceById(workspaceId);
-                  }}
-                  onSelectTask={(taskId) => {
-                    pendingTaskSelection.current = null;
-                    setRoute("workbench");
-                    const task = snapshot.tasks.find(
-                      (candidate) => candidate.id === taskId,
-                    );
-                    const taskWorkspace = task
-                      ? snapshot.workspaces.find(
-                          (workspace) => workspace.id === task.workspaceId,
-                        )
-                      : null;
-                    if (
-                      workspaceNavigationRunningRef.current &&
-                      task &&
-                      taskWorkspace?.origin === "user"
-                    )
-                      selectWorkspaceById(task.workspaceId, {
-                        kind: "navigation",
-                        taskId,
-                      });
-                    dispatchWorkbench({ type: "task.selected", taskId });
-                  }}
+                  onSelectTask={openTask}
                   onToggleArchived={() => setShowArchived((shown) => !shown)}
                 />
               </div>
@@ -1995,8 +1935,12 @@ export default function App() {
       {route === "settings" ? (
         <SettingsPage
           account={snapshot.account}
+          userWorkspaces={userWorkspaces}
+          tasks={snapshot.tasks}
           focusTarget={settingsFocus}
           disabled={bridgeUnavailable || accountBusy}
+          workspaceDisabled={workbenchMutationDisabled}
+          workspaceBusy={workspaceBusy}
           cancelDisabled={viewSyncFailed || !bridgeReady || accountCancelBusy}
           onBack={() => setRoute("workbench")}
           onRefresh={() =>
@@ -2021,6 +1965,8 @@ export default function App() {
               ),
             )
           }
+          onChooseWorkspace={chooseWorkspaceForSettings}
+          onRemoveWorkspace={removeWorkspaceById}
           onReauthenticate={() =>
             void runAccountCommand(() => client.reauthenticate())
           }
@@ -2073,8 +2019,7 @@ export default function App() {
           onOpenTask={(taskId) => {
             const task = snapshot.tasks.find((item) => item.id === taskId);
             if (!task) return;
-            setRoute("workbench");
-            dispatchWorkbench({ type: "task.selected", taskId });
+            openTask(taskId);
           }}
         />
       ) : (

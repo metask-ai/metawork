@@ -74,7 +74,7 @@ metawork/
 
 ### `app/`
 
-`App.tsx` 是唯一 React composition entry。它组装 feature、选择当前 Workspace/Task，并协调 bootstrap、view-sync 和窗口级错误状态。只有形成可独立测试的不变量时才提取 controller 或 hook；不得只为缩短文件制造 callback 转发层。
+`App.tsx` 是唯一 React composition entry。它组装 feature、选择当前 Task 与 New task 路径上下文，并协调 bootstrap、view-sync 和窗口级错误状态。只有形成可独立测试的不变量时才提取 controller 或 hook；不得只为缩短文件制造 callback 转发层。
 
 ### `bridge/`
 
@@ -91,7 +91,11 @@ Renderer Bridge `metawork.renderer-bridge` 覆盖完整 command、event 和 snap
 
 `workbench/` 只保存 canonical Host snapshot、selector 和无副作用派生状态。Workspace/Task 生命周期仍由 Host 决定；Renderer 只持有选择、折叠、输入草稿等纯 UI 状态。
 
-`features/` 按用户可见能力分区。feature 通过 `workbench/` selector 消费产品状态，不读取其他 feature 的内部文件。带业务语义的 Timeline、Approval、Composer、Workspace navigation、Search 和 Task activity 保留在各自 feature；真正无业务语义的 primitive 才进入 `components/ui/`。
+`features/` 按用户可见能力分区。feature 通过 `workbench/` selector 消费产品状态，不读取其他 feature 的内部文件。带业务语义的 Timeline、Approval、Composer、Task list、Workspace path selection、Search 和 Task activity 保留在各自 feature；真正无业务语义的 primitive 才进入 `components/ui/`。
+
+`features/settings/WorkspaceSettings.tsx` 是 User Workspace 的低频 lifecycle 视图，消费已解码 projection 并通过 App action controller 调用现有 choose/remove command；它不拥有 registry、authority、Task 导航或 Host removal 状态机。已有 Task 的 Workspace 只从 Task projection 推导，New task 只持有 `draftWorkspaceId`，Renderer 不保存 `activeWorkspaceId` 镜像。
+
+`workbench/task-visibility.ts` 定义一个跨 Store、左栏与搜索复用的纯 projection 不变量：只有 owning Workspace 同时存在于 canonical snapshot 的 Task 才参与活动导航。它不拥有 Task 历史或 Workspace lifecycle；被移除 Workspace 的 Task 仍由 Host 保存。
 
 ## 5. Zig 结构
 

@@ -64,6 +64,19 @@ const callbacks = {
   onBack() {},
 };
 
+const workspaceSettingsProps = {
+  userWorkspaces: [],
+  tasks: [],
+  workspaceDisabled: false,
+  workspaceBusy: false,
+  async onChooseWorkspace() {
+    return { kind: "cancelled" };
+  },
+  async onRemoveWorkspace() {
+    return { kind: "accepted" };
+  },
+};
+
 function withI18n(child) {
   return renderToStaticMarkup(
     createElement(
@@ -397,6 +410,7 @@ test("ready Account uses a formal settings route with truthful defaults", () => 
   const panel = withI18n(
     createElement(SettingsPage, {
       account: ready,
+      ...workspaceSettingsProps,
       focusTarget: "title",
       disabled: false,
       cancelDisabled: false,
@@ -461,6 +475,7 @@ test("settings keep APIs and models identifiable when display names are absent",
   const panel = withI18n(
     createElement(SettingsPage, {
       account,
+      ...workspaceSettingsProps,
       focusTarget: "title",
       disabled: false,
       cancelDisabled: false,
@@ -518,6 +533,7 @@ test("reauth-required settings disable stale catalog mutations", () => {
   const panel = withI18n(
     createElement(SettingsPage, {
       account,
+      ...workspaceSettingsProps,
       focusTarget: "title",
       disabled: false,
       cancelDisabled: false,
@@ -572,6 +588,7 @@ test("settings project the full API transaction without replacing committed trut
     withI18n(
       createElement(SettingsPage, {
         account,
+        ...workspaceSettingsProps,
         focusTarget: "title",
         disabled: false,
         cancelDisabled: false,
