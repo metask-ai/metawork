@@ -4454,7 +4454,7 @@ pub const Workbench = struct {
             self.schedule_persistence_health == .ready;
         const task_persistence_ready = self.task_persistence_health == .ready;
         const background_schedule_wake = self.schedule_background_available;
-        writer.print("{{\"revision\":\"{d}\",\"capabilities\":{{\"taskHistoryPersistence\":{},\"taskHistoryPersistenceHealth\":\"{s}\",\"conversationRecovery\":false,\"executionRebind\":false,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":false,\"persistentWorkspacePermissions\":false,\"managedWorkspaces\":{},\"scheduledTasks\":{},\"scheduledTaskPersistence\":{},\"scheduledTaskPersistenceHealth\":\"{s}\",\"backgroundScheduleWake\":{},\"localSkillManagement\":{},\"skillManagementHealth\":\"{s}\"}},\"account\":", .{
+        writer.print("{{\"revision\":\"{d}\",\"capabilities\":{{\"taskHistoryPersistence\":{},\"taskHistoryPersistenceHealth\":\"{s}\",\"conversationRecovery\":false,\"executionRebind\":false,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":false,\"persistentWorkspacePermissions\":false,\"managedWorkspaces\":{},\"scheduledTasks\":{},\"scheduledTaskPersistence\":{},\"scheduledTaskPersistenceHealth\":\"{s}\",\"backgroundScheduleWake\":{},\"localSkillManagement\":{},\"skillManagementHealth\":\"{s}\",\"mcpManagement\":false}},\"account\":", .{
             self.revision,
             task_persistence_ready,
             @tagName(self.task_persistence_health),
@@ -4481,6 +4481,8 @@ pub const Workbench = struct {
         writer.writeAll(",\"skillManagement\":") catch
             return error.SnapshotTooLarge;
         try self.writeSkillManagement(&writer);
+        writer.writeAll(",\"mcp\":{\"availability\":\"unavailable\",\"redacted\":false,\"generation\":null,\"servers\":[]}") catch
+            return error.SnapshotTooLarge;
         writer.writeAll(",\"selectedWorkspaceId\":") catch
             return error.SnapshotTooLarge;
         if (self.selected_workspace_id == 0)

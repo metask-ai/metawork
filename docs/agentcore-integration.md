@@ -80,7 +80,7 @@ revision 6 bundle 提供完整 typed status、八个 StopReason、known/unknown 
 
 当前 ABI `RunResult` 不包含 `SuspendInfo`、resume token 或 background handle，但包含 checkpoint outcome、durable usage、required checkpoint bytes 与两个 budget stop。unknown status、stop reason、checkpoint outcome、result flag 或不一致组合在 Host validation 层 fail closed；Host 不能制造这些产品状态。
 
-revision 6 的公开 Runtime/Session surface 包含 fresh create、checkpoint export/restore、Session description、typed Run/abort、manual compact、MCP catalog/selection 与已列出的 mutation。当前 MetaWork 只消费 fresh create 和既有运行路径；`SessionHostConfigV1.mcp_selection` 与 `durable_budget` 保持 null，MCP、checkpoint store 和 restore 产品路径继续关闭。Workbench store 只恢复产品 Task 历史：恢复 Task 不创建 Agent Session，不把历史文本重新喂给模型，不从 bundle 私有数据或 CLI 行为推断 resume，并向 Bridge 发布 `conversationRecovery = false` 与 `session_recovery_unsupported`。启用恢复前必须独立定义并验收 checkpoint ownership、exclusive restore、execution binding、terminal 对账与失败语义；不能在 `agent/` 外建立兼容实现。
+revision 6 的公开 Runtime/Session surface 包含 fresh create、checkpoint export/restore、Session description、typed Run/abort、manual compact、MCP catalog/selection 与已列出的 mutation。当前 MetaWork 只消费 fresh create 和既有运行路径；`SessionHostConfigV1.mcp_selection` 与 `durable_budget` 保持 null，MCP、checkpoint store 和 restore 产品路径继续关闭。MCP Renderer route 以稳定入口消费 Workbench 安全投影；当前 Workbench 必须发布 `mcpManagement = false` 与 unavailable 空目录，页面只呈现不可用说明，不能用入口、页面代码或 ABI symbol 冒充 MCP selection、catalog refresh 或 tool execution 已接通。Workbench store 只恢复产品 Task 历史：恢复 Task 不创建 Agent Session，不把历史文本重新喂给模型，不从 bundle 私有数据或 CLI 行为推断 resume，并向 Bridge 发布 `conversationRecovery = false` 与 `session_recovery_unsupported`。启用恢复前必须独立定义并验收 checkpoint ownership、exclusive restore、execution binding、terminal 对账与失败语义；不能在 `agent/` 外建立兼容实现。
 
 ## 4. Agent binding
 
