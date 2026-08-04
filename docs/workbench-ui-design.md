@@ -166,18 +166,19 @@ Workspace
 
 ### 4.3 一体化窗口栏
 
-主窗口使用 `hidden_inset_tall`：Renderer 命令栏同时承担窗口标题栏的视觉角色，不再叠加独立的标准系统标题行。窗口效果仍由 Native Host 执行，不允许 Renderer 直接操作原生窗口身份。
+主窗口使用 `hidden_inset_tall`：Renderer 命令栏同时承担窗口标题栏的视觉角色，不再叠加独立的标准系统标题行。Renderer 只拥有视觉呈现、交互命中与意图提交，窗口行为、系统资源和真实状态仍由 Native Host 拥有；不允许 Renderer 直接操作原生窗口身份。
 
 - 命令栏是窗口交互层，不表现为独立横向标题栏：不使用贯穿全窗的底边或异色横带；左侧 Workspace/Task rail 的背景与竖分隔线必须延伸到窗口顶部，中央命令区与 Task 工作面使用同一 surface；
-- macOS 为系统交通灯保留左侧安全区；Windows system WebView 无法可靠显露 DWM glyph 时，命令栏提供唯一可见的最小化、最大化/还原与关闭 affordance，Host 在重新校验来源窗口后执行真实 native action；不得同时显示两套窗口按钮；
+- macOS 为系统交通灯保留左侧安全区；Windows system WebView 无法可靠显露 DWM glyph 时，命令栏提供唯一可见的最小化、最大化/还原与关闭 affordance，Host 在重新校验来源窗口后执行真实 native action；最大化按钮必须消费 Host 状态，普通状态显示单方框与“最大化”，最大化状态显示重叠方框与“还原”；不得同时显示两套窗口按钮；
 - macOS 52 px、Windows 40 px 是各平台一体化窗口栏的最终布局高度。Windows 窗口按钮组必须完整落在 40 px 内，命令栏不得再用垂直 padding 把等高按钮组下移或扩张到布局行之外；最小化、最大化与关闭 glyph 使用同一视觉中心线，不能把最小化横线当作文字基线下沉；
 - 命令栏只包含左栏开关、当前 Task 名称、全局搜索和按需异常入口；不在 Task 名称前重复 Workspace，`左栏开关` 只控制 Workspace/Task 导航，不兼任 Inspector 开关；
-- 命令栏空白背景在越过移动阈值后请求窗口拖拽；按钮、输入、选择框、链接、disclosure 和展开内容必须排除。Renderer 只提交 drag/control 意图；Host 以 App-owned 单一启动窗口 identity 和主线程校验受限 bootstrap chrome capability，使连接失败页仍能移动或关闭窗口，而不依赖 ProductDelivery 已连接。Windows 平台操作必须继续使用同一精确窗口身份，不能猜测当前活动窗口；当前不伪造跨平台双击标题栏语义；
+- 命令栏空白背景的主按钮按下必须立即交给 Native Host，由系统拥有移动阈值、拖动循环、边缘吸附以及最大化后拖拽恢复；Renderer 不得自行等待位移或捕获指针来模拟系统标题栏。按钮、输入、选择框、标签、链接、disclosure、可编辑内容和显式 no-drag 内容必须排除。双击空白区在 Windows 切换最大化/还原，在 macOS 交给 AppKit 并遵循用户的标题栏双击偏好；Windows 右键空白区显示该窗口的原生系统菜单，不在 Renderer 复制菜单项；
+- Renderer 只提交 drag/control 与只读 state 意图；Host 以 App-owned 单一启动窗口 identity 和主线程校验受限 bootstrap chrome capability，使连接失败页仍能移动或关闭窗口，而不依赖 ProductDelivery 已连接。Windows 平台操作必须继续使用同一精确窗口身份，不能猜测当前活动窗口；窗口 resize/focus 后 Renderer 重新读取 Host 最大化状态，不能从 viewport 尺寸猜测状态；
 - 正常连接、恢复成功和普通操作成功不持续占据命令栏；只有同步失败、命令失败或其他确实需要用户行动的异常才显示状态入口；
 - 异常状态按 connection、account、Workspace identity 或 Task identity 分域保存；并行 Task 的结果不得互相覆盖，命令栏只选择当前上下文中优先级最高的一项显示；
 - 每个已有 Task 的内容标题区右侧提供稳定的 Inspector 图标按钮，accessible name 随状态使用 `打开检查器 / 关闭检查器` 并发布 `aria-expanded`；New task、无 Task 或没有任何可检查事实时不显示该按钮；
 - 未登录界面的应用工具栏只保留产品 identity 与语言入口；语言不能藏进尚不可进入的设置；
-- `chromeless` 仍被禁止；Windows 可见按钮只是 hidden-inset WebView 的控制 affordance，不能据此宣称自绘窗口系统已经覆盖 resize、Snap、系统菜单、DPI 或高对比；
+- `chromeless` 仍被禁止；Windows 可见按钮只是 hidden-inset WebView 的控制 affordance。当前基线覆盖系统 resize frame、原生拖动/吸附、双击、最大化拖拽恢复与系统菜单；自绘 maximize 按钮仍不能宣称具备 Windows 11 原生 `HTMAXBUTTON` 的 Snap Layout hover，DPI 与高对比仍需独立平台验收；
 - 语言、API、模型和诊断进入设置或对应任务上下文，不常驻命令栏；
 - 不在命令栏放 ABI、Provider、Host mode 等工程状态。
 
