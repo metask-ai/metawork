@@ -228,8 +228,36 @@ function AuditApp() {
           <section className="task-stage">
             <SettingsPage
               account={accountView}
+              userWorkspaces={[
+                {
+                  id: "workspace-1",
+                  epoch: "1",
+                  origin: "user",
+                  displayName: "metawork",
+                  canonicalRoot: "/Users/example/Projects/metawork",
+                  redacted: false,
+                  authorization: "available",
+                  lastRemovalFailure: null,
+                  skillCatalog: {
+                    availability: "ready",
+                    redacted: false,
+                    revision: "1",
+                    skills: [],
+                    issues: [],
+                  },
+                  recentOrder: "1",
+                  signals: {
+                    running: 0,
+                    attention: 0,
+                    failedOrInterrupted: 0,
+                  },
+                },
+              ]}
+              tasks={[]}
               focusTarget="title"
               disabled={false}
+              workspaceDisabled={false}
+              workspaceBusy={false}
               cancelDisabled={false}
               onBack={() => undefined}
               onRefresh={() => window.__auditEvents.push({ type: "refresh" })}
@@ -240,6 +268,8 @@ function AuditApp() {
               onSelectModel={(id) =>
                 window.__auditEvents.push({ type: "model", id })
               }
+              onChooseWorkspace={async () => ({ kind: "cancelled" })}
+              onRemoveWorkspace={async () => ({ kind: "accepted" })}
               onReauthenticate={() => undefined}
               onLogout={() => window.__auditEvents.push({ type: "logout" })}
             />
@@ -251,19 +281,10 @@ function AuditApp() {
         query="meta"
         results={[
           {
-            key: "workspace:alpha",
-            kind: "workspace",
-            title: "metawork",
-            detail: "/Users/example/Projects/metawork",
-            workspaceId: "alpha",
-            taskId: null,
-          },
-          {
             key: "task:one",
             kind: "task",
             title: "Refine the task execution timeline",
             detail: "metawork · Completed",
-            workspaceId: "alpha",
             taskId: "one",
           },
         ]}
