@@ -7,13 +7,13 @@
 
 ## 1. 已确认的技术选型
 
-| 顶层模块    | 选择                            | 定位                                                                         |
-| ----------- | ------------------------------- | ---------------------------------------------------------------------------- |
-| Renderer    | React + Tailwind                | 唯一正式 UI；运行于 Native SDK 托管的系统 WebView                            |
-| Bridge      | Zig                             | Renderer Bridge revision 1 的协议、验证和 ProductDelivery 边界               |
-| Application | Zig                             | MetaWork 产品事实、产品行为、执行协调和恢复语义的唯一边界                    |
-| AgentCore   | Metask AgentCore library bundle | 独立构建和发布；MetaWork 只消费 canonical bundle                             |
-| Native SDK  | Native SDK                      | Zig 桌面 Runtime，提供 WebView、窗口、主线程和受限平台 capability             |
+| 顶层模块    | 选择                            | 定位                                                              |
+| ----------- | ------------------------------- | ----------------------------------------------------------------- |
+| Renderer    | React + Tailwind                | 唯一正式 UI；运行于 Native SDK 托管的系统 WebView                 |
+| Bridge      | Zig                             | Renderer Bridge revision 1 的协议、验证和 ProductDelivery 边界    |
+| Application | Zig                             | MetaWork 产品事实、产品行为、执行协调和恢复语义的唯一边界         |
+| AgentCore   | Metask AgentCore library bundle | 独立构建和发布；MetaWork 只消费 canonical bundle                  |
+| Native SDK  | Native SDK                      | Zig 桌面 Runtime，提供 WebView、窗口、主线程和受限平台 capability |
 
 正式主路径不采用 Tauri + Rust，不建立第二套 Renderer，不以 PTY、xterm、终端字节流或 Provider SSE 作为 Agent UI 协议，不复制 AgentCore ABI 或实现源码，也不建立 Native SDK Adapter、通用 Desktop Interface 或可替换框架抽象。
 
@@ -90,7 +90,7 @@ Native SDK 直接构成 Zig Desktop Host 的系统 WebView、窗口与桌面生�
 
 ## 5. 状态、恢复与故障域
 
-Application 在 Renderer 生命周期之外拥有产品状态。WebView reload 通过完整 Snapshot 重建视图；Host 重启只恢复经过校验的产品历史。当前 AgentCore ABI 不提供 Conversation checkpoint/hydration，因此历史 Task 不伪造 continuation，无法恢复的 non-terminal operation 保守收口为 interrupted。
+Application 在 Renderer 生命周期之外拥有产品状态。WebView reload 通过完整 Snapshot 重建视图；Host 重启只恢复经过校验的产品历史。AgentCore ABI v1 revision 6 已提供 checkpoint export/restore 原语，但 MetaWork 尚未完成其持久化、exclusive restore、execution binding 对账和故障恢复验收；因此当前历史 Task 不伪造 continuation，无法恢复的 non-terminal operation 保守收口为 interrupted。
 
 Bridge transport、Application 产品状态和 Agent execution terminal cause 是不同事实。Snapshot/Event 失败不覆盖产品历史；transport failure 不伪造用户取消；Agent terminal result 只有经 Application 提交后才成为 MetaWork 产品事实。详细线性化、持久化和恢复规则见 [Application 内部架构](application-architecture.md)，连接与 Snapshot transport 见 [Renderer Bridge 合同](renderer-bridge-contract.md)。
 
@@ -104,7 +104,7 @@ Bridge transport、Application 产品状态和 Agent execution terminal cause �
 
 ## 6. 当前能力边界
 
-当前正式 AgentCore baseline 是 ABI v1 revision 5。MetaWork 只消费经 verifier 接收并 stage 到 `.agentcore/bundle` 的 canonical bundle；缺失、identity、checksum、target、ABI 或 symbol 校验失败必须明确失败，不允许 `latest`、可变 tag、implementation source fallback 或静默降级。精确 bundle 规则见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。
+当前正式 AgentCore baseline 是 ABI v1 revision 6。MetaWork 只消费经 verifier 接收并 stage 到 `.agentcore/bundle` 的 canonical bundle；缺失、identity、checksum、target、ABI 或 symbol 校验失败必须明确失败，不允许旧 revision、`latest`、可变 tag、implementation source fallback 或静默降级。精确 bundle 规则见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。
 
 当前 baseline 不包含 async pending、suspend/resume、跨进程 Conversation 恢复、strict Workspace security、正式 Host tools、typed Output/FileChange、plan progress/approval、custom UI 或 Windows 安装签名更新。存在 ABI entry 不代表产品能力已经开放；能力状态只以 [验证规范](validation.md)为准。
 
@@ -136,17 +136,17 @@ Renderer Bridge revision、Account persistence schema、AgentCore artifact versi
 
 ## 9. 主要风险
 
-| 风险                                   | 当前控制方式                                                            |
-| -------------------------------------- | ----------------------------------------------------------------------- |
-| Native SDK Zig → React 路径不符合预期  | 真实 dev/prod smoke                                                     |
-| typed SDK 与真实 producer wire 漂移    | source-free corpus + 真实 Host link/run 回归                            |
-| callback 数据返回后失效                | callback 内验证并深拷贝                                                 |
-| callback/close race 造成 UAF           | abort、join、callback quiescence 后 destroy                             |
-| callback identity race 泄漏 permission | UI request publication 与 response extraction 均在 Session lock 下复检  |
-| 同步 UI 耗尽 executor                  | bounded slots、deadline、cancel/close/shutdown 唤醒和压力测试           |
-| Bridge/event 造成无限内存              | count/byte/time 多维上限和公平调度                                      |
+| 风险                                   | 当前控制方式                                                              |
+| -------------------------------------- | ------------------------------------------------------------------------- |
+| Native SDK Zig → React 路径不符合预期  | 真实 dev/prod smoke                                                       |
+| typed SDK 与真实 producer wire 漂移    | source-free corpus + 真实 Host link/run 回归                              |
+| callback 数据返回后失效                | callback 内验证并深拷贝                                                   |
+| callback/close race 造成 UAF           | abort、join、callback quiescence 后 destroy                               |
+| callback identity race 泄漏 permission | UI request publication 与 response extraction 均在 Session lock 下复检    |
+| 同步 UI 耗尽 executor                  | bounded slots、deadline、cancel/close/shutdown 唤醒和压力测试             |
+| Bridge/event 造成无限内存              | count/byte/time 多维上限和公平调度                                        |
 | Run failure 被误报用户取消             | active first-writer cause 与 Application write-once terminal history 分层 |
-| Renderer 掉线杀死后台 Run              | typed transport policy 不向 Agent termination 反向泄漏                  |
-| v1 Workspace 被误报安全                | 只允许临时/trusted 验证并显式标注限制                                   |
-| 同进程 native crash 带走全部状态       | fault-domain 验证已选后续单 Worker；当前同进程应用仍是 prototype        |
-| 过早建设发布系统                       | baseline 通过后再做 cache 与 remote                                     |
+| Renderer 掉线杀死后台 Run              | typed transport policy 不向 Agent termination 反向泄漏                    |
+| v1 Workspace 被误报安全                | 只允许临时/trusted 验证并显式标注限制                                     |
+| 同进程 native crash 带走全部状态       | fault-domain 验证已选后续单 Worker；当前同进程应用仍是 prototype          |
+| 过早建设发布系统                       | baseline 通过后再做 cache 与 remote                                       |

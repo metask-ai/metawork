@@ -9,10 +9,10 @@ React + Tailwind Renderer
         ↓ Renderer Bridge
 Native SDK + Zig Host / Workbench
         ↓ official bundle SDK
-Metask AgentCore ABI v1 revision 5
+Metask AgentCore ABI v1 revision 6
 ```
 
-当前应用是一条真实的同进程同步垂直链路，已经覆盖 Account、Task、typed Text/Skill Run、built-in Read/Bash/Edit、question/permission、取消、Renderer reload、bounded event delivery 和生命周期收口。正式 build 只消费 staged `.agentcore/bundle` 中的官方 Zig package。Revision 4 已提供 Host-owned Skill catalog 与 typed invocation；Composer Slash 属于后续独立产品入口，不是 ABI 升级的一部分。
+当前应用是一条真实的同进程同步垂直链路，已经覆盖 Account、Task、typed Text/Skill Run、built-in Read/Bash/Edit、question/permission、取消、Renderer reload、bounded event delivery 和生命周期收口。正式 build 只消费 staged `.agentcore/bundle` 中的官方 Zig package。revision 6 提供 checkpoint、MCP 与 Permission provenance 等 ABI 原语，但未完成独立产品验收的能力保持关闭。
 
 macOS 与 Windows development baseline 已通过；当前仍是同进程 prototype，不具备 AgentCore 进程隔离、crash recovery、跨进程 Conversation 恢复、strict Workspace security 或正式安装/更新能力。精确证据与尚未验证的能力见 [验证规范](docs/validation.md)。
 
@@ -70,7 +70,7 @@ probe 使用临时 source-free SDK consumer，不进入正式产品 build graph�
 - [Renderer Bridge 合同](docs/renderer-bridge-contract.md)：command、event、Snapshot 与运输语义
 - [工程结构与所有权](docs/project-structure.md)：active tree、owner 与依赖方向
 - [AgentCore 集成契约](docs/agentcore-integration.md)：线程、事件、所有权和生命周期
-- [AgentCore ABI v1 revision 5 消费合同](docs/agentcore-abi-v1.md)：锁定 bundle 的机器合同与能力边界
+- [AgentCore ABI v1 revision 6 消费合同](docs/agentcore-abi-v1.md)：锁定 bundle 的机器合同与能力边界
 - [Metask Account API 合同](docs/metask-account-contract.md)：OAuth、catalog、ExecutionTarget 与持久化
 - [macOS 本地开发签名](docs/macos-local-development.md)：Apple Development identity 与 Keychain 稳定性
 - [验证规范](docs/validation.md)：证据、持续回归和未验证能力
