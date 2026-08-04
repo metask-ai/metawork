@@ -267,6 +267,7 @@ pub fn classify(event: sdk.DecodedCoreEvent) EventClass {
             .auto_compact,
             .retry_notice,
             .stream_done,
+            .permission_provenance,
             => .control,
         },
     };

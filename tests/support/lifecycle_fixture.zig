@@ -62,7 +62,13 @@ pub const Plan = enum {
     cross_run_session_id_mismatch,
     ui_callback_outlives_run,
     malformed_ui_callback,
+    wrong_ui_request_run_id,
+    wrong_ui_request_session_id,
     resource_limit,
+    checkpoint_budget_required,
+    checkpoint_budget_required_invalid_result,
+    checkpoint_budget_exhausted,
+    checkpoint_resource_limit,
     stale_catalog,
     skill_not_found,
     invalid_skill_arguments,
@@ -70,6 +76,9 @@ pub const Plan = enum {
     skill_unavailable,
     unknown_stop_result,
     invalid_result_layout,
+    invalid_checkpoint_outcome,
+    invalid_result_flags,
+    mismatched_checkpoint_outcome,
     unknown_status,
     stale_compact_status,
 };
@@ -221,6 +230,7 @@ pub const FakeCore = struct {
     forced_session_destroy_status: ?u32 = null,
     ui_answered_callbacks: usize = 0,
     ui_fatal_callbacks: usize = 0,
+    permission_response_valid: bool = false,
     callback_signal: ?*CallbackSignal = null,
 
     pub fn lock(self: *FakeCore) void {
@@ -289,6 +299,21 @@ pub const FakeCore = struct {
             session.compact_abort_requested = false;
             session.unlock();
         }
+    }
+
+    pub fn waitRunEntered(self: *FakeCore) void {
+        for (&self.sessions) |*session| {
+            session.lock();
+            if (!session.in_use or session.destroyed) {
+                session.unlock();
+                continue;
+            }
+            while (!session.running and !session.destroyed) session.wait();
+            const entered = session.running;
+            session.unlock();
+            if (entered) return;
+        }
+        unreachable;
     }
 
     pub fn failNextSessionDestroy(self: *FakeCore) void {
@@ -472,7 +497,7 @@ pub fn runtimeDestroy(
 
 pub fn sessionCreate(
     _: ?*wire.RuntimeHandle,
-    config: ?*const wire.SessionConfigV1,
+    config: ?*const wire.SessionCreateConfigV1,
     callbacks: ?*const wire.SessionCallbacksV1,
     out_session: ?*?*wire.SessionHandle,
     out_error: ?*wire.OwnedBytesV1,
@@ -482,25 +507,31 @@ pub fn sessionCreate(
         diagnostic(out_error);
         return wire.STATUS_INVALID_ARGUMENT;
     }
-    const key = sdk.borrowedBytes(config.?.api_key) catch {
+    const host = config.?.host orelse {
         diagnostic(out_error);
         return wire.STATUS_INVALID_ARGUMENT;
     };
-    const workspace_home = sdk.borrowedBytes(config.?.workspace_home) catch {
+    const key = sdk.borrowedBytes(host.api_key) catch {
         diagnostic(out_error);
         return wire.STATUS_INVALID_ARGUMENT;
     };
-    const bound_catalog: ?*FakeCatalog = if (config.?.skill_catalog) |handle|
+    const workspace_home = sdk.borrowedBytes(host.workspace_home) catch {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    };
+    const bound_catalog: ?*FakeCatalog = if (host.skill_catalog) |handle|
         @ptrCast(@alignCast(handle))
     else
         null;
-    const selection_valid = if (config.?.skill_selection) |selection|
+    const selection_valid = if (host.skill_selection) |selection|
         allSkillsEnabled(selection)
     else
         false;
     if ((bound_catalog != null and !selection_valid) or
-        (bound_catalog == null and config.?.skill_selection != null) or
-        config.?.permission_rules != null)
+        (bound_catalog == null and host.skill_selection != null) or
+        host.permission_rules != null or
+        host.mcp_selection != null or
+        host.durable_budget != null)
     {
         diagnostic(out_error);
         return wire.STATUS_INVALID_ARGUMENT;
@@ -523,7 +554,7 @@ pub fn sessionCreate(
             var session_id = [_]u8{0} ** wire.MAX_SESSION_ID_BYTES_V1;
             const id = std.fmt.bufPrint(
                 &session_id,
-                "fake-session-{d}",
+                "{d:0>24}",
                 .{fake_core.session_created + 1},
             ) catch {
                 diagnostic(out_error);
@@ -540,12 +571,12 @@ pub fn sessionCreate(
             fake_core.next_plan = .immediate;
             fake_core.session_created += 1;
             fake_core.credential_seen = std.mem.eql(u8, key, "fixture-secret");
-            fake_core.builtin_allowlist_seen = config.?.allowed_tools != null and
-                config.?.allowed_tool_count == 4;
+            fake_core.builtin_allowlist_seen = host.allowed_tools != null and
+                host.allowed_tool_count == 4;
             fake_core.workspace_home_seen = workspace_home.len != 0;
             fake_core.skill_session_bound = bound_catalog != null;
             fake_core.skill_selection_seen = bound_catalog != null and selection_valid;
-            fake_core.permission_rules_absent = config.?.permission_rules == null;
+            fake_core.permission_rules_absent = host.permission_rules == null;
             out_session.?.* = @ptrCast(session);
             return wire.STATUS_OK;
         }
@@ -757,6 +788,64 @@ pub fn sessionUpdatePermissionRules(
     out_error: ?*wire.OwnedBytesV1,
 ) callconv(.c) u32 {
     if (out_error) |out| out.* = .{ .ptr = null, .len = 0 };
+    diagnostic(out_error);
+    return wire.STATUS_INVALID_STATE;
+}
+
+pub fn runtimeRefreshMcp(
+    _: ?*wire.RuntimeHandle,
+    _: ?*u64,
+    out_error: ?*wire.OwnedBytesV1,
+) callconv(.c) u32 {
+    diagnostic(out_error);
+    return wire.STATUS_INVALID_STATE;
+}
+
+pub fn runtimeDescribeMcp(
+    _: ?*wire.RuntimeHandle,
+    _: ?*wire.OwnedBytesV1,
+    out_error: ?*wire.OwnedBytesV1,
+) callconv(.c) u32 {
+    diagnostic(out_error);
+    return wire.STATUS_INVALID_STATE;
+}
+
+pub fn sessionRestore(
+    _: ?*wire.RuntimeHandle,
+    _: ?*const wire.SessionRestoreConfigV1,
+    _: ?*const wire.SessionCallbacksV1,
+    _: ?*?*wire.SessionHandle,
+    _: ?*wire.OwnedBytesV1,
+    out_error: ?*wire.OwnedBytesV1,
+) callconv(.c) u32 {
+    diagnostic(out_error);
+    return wire.STATUS_INVALID_STATE;
+}
+
+pub fn sessionDescribe(
+    _: ?*wire.SessionHandle,
+    _: ?*wire.OwnedBytesV1,
+    out_error: ?*wire.OwnedBytesV1,
+) callconv(.c) u32 {
+    diagnostic(out_error);
+    return wire.STATUS_INVALID_STATE;
+}
+
+pub fn sessionUpdateMcp(
+    _: ?*wire.SessionHandle,
+    _: ?*const wire.McpSelectionV1,
+    out_error: ?*wire.OwnedBytesV1,
+) callconv(.c) u32 {
+    diagnostic(out_error);
+    return wire.STATUS_INVALID_STATE;
+}
+
+pub fn sessionExportCheckpoint(
+    _: ?*wire.SessionHandle,
+    _: ?*const wire.CheckpointExportConfigV1,
+    _: ?*wire.CheckpointExportResultV1,
+    out_error: ?*wire.OwnedBytesV1,
+) callconv(.c) u32 {
     diagnostic(out_error);
     return wire.STATUS_INVALID_STATE;
 }
@@ -1013,14 +1102,27 @@ pub fn sessionRunInput(
         }
     }
 
-    if (plan == .ui_wait or plan == .malformed_ui_callback) {
+    if (plan == .ui_wait or plan == .malformed_ui_callback or
+        plan == .wrong_ui_request_run_id or plan == .wrong_ui_request_session_id)
+    {
         var response = wire.OwnedBytesV1{ .ptr = null, .len = 0 };
         const callback = session.callbacks.on_ui_request orelse {
             diagnostic(out_error);
             return wire.STATUS_CALLBACK_FAILED;
         };
-        const request_json = if (plan == .ui_wait)
-            "{\"permission\":{\"tool\":\"Bash\",\"args\":\"{}\"}}"
+        var request_storage: [2048]u8 = undefined;
+        const request_json = if (plan != .malformed_ui_callback)
+            permissionRequestJson(
+                &request_storage,
+                if (plan == .wrong_ui_request_session_id)
+                    "999999999999999999999999"
+                else
+                    session.session_id[0..session.session_id_len],
+                if (plan == .wrong_ui_request_run_id) run_id + 1 else run_id,
+            ) catch {
+                diagnostic(out_error);
+                return wire.STATUS_OUT_OF_MEMORY;
+            }
         else
             "{}";
         const callback_status = callback(
@@ -1043,6 +1145,45 @@ pub fn sessionRunInput(
             fake_core.ui_fatal_callbacks += 1;
         fake_core.unlock();
         if (callback_status == wire.UI_ANSWERED) {
+            const response_ptr = response.ptr orelse {
+                diagnostic(out_error);
+                return wire.STATUS_CALLBACK_FAILED;
+            };
+            const response_len = std.math.cast(usize, response.len) orelse {
+                diagnostic(out_error);
+                return wire.STATUS_CALLBACK_FAILED;
+            };
+            const encoded_response = response_ptr[0..response_len];
+            var decoded_response = sdk.protocol.decodeUiResponse(
+                std.testing.allocator,
+                encoded_response,
+            ) catch {
+                diagnostic(out_error);
+                return wire.STATUS_CALLBACK_FAILED;
+            };
+            defer decoded_response.deinit();
+            const response_valid = switch (decoded_response.value) {
+                .permission => |permission| std.mem.eql(
+                    u8,
+                    permission.request_id,
+                    "1111111111111111111111111111111111111111111111111111111111111111",
+                ) and permission.policy_generation == 1 and
+                    switch (permission.permission) {
+                        .allow_session, .deny_session => if (permission.rule_id) |rule_id|
+                            std.mem.eql(
+                                u8,
+                                rule_id,
+                                "2222222222222222222222222222222222222222222222222222222222222222",
+                            )
+                        else
+                            false,
+                        .allow_once, .deny_once => permission.rule_id == null,
+                    },
+                .answers => false,
+            };
+            fake_core.lock();
+            fake_core.permission_response_valid = response_valid;
+            fake_core.unlock();
             const release = session.callbacks.release_response orelse {
                 diagnostic(out_error);
                 return wire.STATUS_CALLBACK_FAILED;
@@ -1078,6 +1219,22 @@ pub fn sessionRunInput(
     if (plan == .resource_limit) {
         diagnostic(out_error);
         return wire.STATUS_RESOURCE_LIMIT;
+    }
+    if (plan == .checkpoint_budget_required or
+        plan == .checkpoint_budget_required_invalid_result)
+    {
+        if (out_result) |result| {
+            result.* = std.mem.zeroes(wire.RunResultV1);
+            result.struct_size = @sizeOf(wire.RunResultV1);
+            result.checkpoint_outcome_code = if (plan == .checkpoint_budget_required)
+                wire.RUN_CHECKPOINT_BUDGET_REQUIRED
+            else
+                wire.RUN_CHECKPOINT_NONE;
+            result.durable_usage_bytes = 4096;
+            result.required_checkpoint_bytes = 8192;
+        }
+        diagnostic(out_error);
+        return wire.STATUS_CHECKPOINT_BUDGET_REQUIRED;
     }
     if (plan == .stale_catalog) {
         diagnostic(out_error);
@@ -1119,8 +1276,18 @@ pub fn sessionRunInput(
             wire.STOP_ABORTED
         else switch (plan) {
             .unknown_stop_result => 42,
+            .checkpoint_budget_exhausted => wire.STOP_CHECKPOINT_BUDGET_EXHAUSTED,
+            .checkpoint_resource_limit => wire.STOP_CHECKPOINT_RESOURCE_LIMIT,
             else => wire.STOP_END_TURN,
         };
+        result.checkpoint_outcome_code = switch (plan) {
+            .checkpoint_budget_exhausted => wire.RUN_CHECKPOINT_BUDGET_EXHAUSTED,
+            .checkpoint_resource_limit => wire.RUN_CHECKPOINT_RESOURCE_LIMIT,
+            .invalid_checkpoint_outcome => 42,
+            .mismatched_checkpoint_outcome => wire.RUN_CHECKPOINT_RESOURCE_LIMIT,
+            else => wire.RUN_CHECKPOINT_NONE,
+        };
+        if (plan == .invalid_result_flags) result.result_flags = 1 << 31;
     }
     return wire.STATUS_OK;
 }
@@ -1178,15 +1345,21 @@ pub const fake_api = wire.ApiV1{
     .runtime_destroy = runtimeDestroy,
     .runtime_query_skill_catalog = runtimeQuerySkillCatalog,
     .skill_catalog_release = skillCatalogRelease,
+    .runtime_refresh_mcp = runtimeRefreshMcp,
+    .runtime_describe_mcp = runtimeDescribeMcp,
     .session_create = sessionCreate,
+    .session_restore = sessionRestore,
     .session_destroy = sessionDestroy,
+    .session_describe = sessionDescribe,
     .session_set_model = sessionSetModel,
     .session_update_skills = sessionUpdateSkills,
     .session_update_permission_rules = sessionUpdatePermissionRules,
+    .session_update_mcp = sessionUpdateMcp,
     .session_run_input = sessionRunInput,
     .session_abort = sessionAbort,
     .session_compact = sessionCompact,
     .session_abort_compact = sessionAbortCompact,
+    .session_export_checkpoint = sessionExportCheckpoint,
     .buffer_release = bufferRelease,
     .reserved = [_]u64{0} ** 4,
 };
@@ -1222,10 +1395,16 @@ fn invokeDetachedUiCallback(session: *FakeSession) void {
     run.run_id = run_id;
     run.session_id = sdk.bytesView(session_id[0..session_id_len]);
     var response = wire.OwnedBytesV1{ .ptr = null, .len = 0 };
+    var request_storage: [2048]u8 = undefined;
+    const request_json = permissionRequestJson(
+        &request_storage,
+        session_id[0..session_id_len],
+        run_id,
+    ) catch return;
     const callback_status = callback(
         callback_context,
         &run,
-        sdk.bytesView("{\"permission\":{\"tool\":\"Bash\",\"args\":\"{}\"}}"),
+        sdk.bytesView(request_json),
         &response,
     );
     fake_core.lock();
@@ -1242,6 +1421,18 @@ fn invokeDetachedUiCallback(session: *FakeSession) void {
     const signal = fake_core.callback_signal;
     fake_core.unlock();
     if (signal) |active_signal| active_signal.markFinished();
+}
+
+fn permissionRequestJson(
+    storage: []u8,
+    session_id: []const u8,
+    run_id: u64,
+) std.fmt.BufPrintError![]const u8 {
+    return std.fmt.bufPrint(
+        storage,
+        "{{\"type\":\"permission\",\"request_id\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"session_id\":\"{s}\",\"run_id\":{d},\"tool_call_id\":\"tool-1\",\"tool\":{{\"namespace\":\"builtin\",\"name\":\"Bash\",\"binding\":\"0000000000000000000000000000000000000000000000000000000000000000\"}},\"canonical_arguments_digest\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"policy_generation\":1,\"arguments_json\":\"{{}}\",\"responses\":[\"deny_once\",\"deny_session\",\"allow_once\",\"allow_session\"],\"candidate\":{{\"rule_id\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"scope\":\"exact_arguments\"}}}}",
+        .{ session_id, run_id },
+    );
 }
 
 const ConcurrentEventInvocation = struct {

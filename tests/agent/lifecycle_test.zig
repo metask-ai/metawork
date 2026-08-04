@@ -76,6 +76,30 @@ test "manual compact is a typed Session operation and preserves Run identity" {
     var run_terminal = takeTestTerminal(session, run_id);
     defer run_terminal.deinit();
     try std.testing.expectEqual(@as(u64, 1), run_id);
+
+    fake_core.forceNextCompactStatus(wire.STATUS_CHECKPOINT_BUDGET_REQUIRED);
+    const budget_operation_id = try session.prepareCompact();
+    var budget_terminal = try session.executePreparedCompact(budget_operation_id);
+    defer budget_terminal.deinit();
+    try std.testing.expectEqual(
+        @as(?sdk.Status, .checkpoint_budget_required),
+        budget_terminal.abi_status,
+    );
+    try std.testing.expectEqual(
+        @as(?lifecycle.TerminalFailure, .abi_status),
+        budget_terminal.failure,
+    );
+    try std.testing.expectEqual(
+        lifecycle.SessionDisposition.reusable,
+        budget_terminal.session_disposition_at_completion,
+    );
+    try std.testing.expectEqual(lifecycle.SessionState.idle, session.snapshot().state);
+
+    const retry_run_id = try submitSession(session, "continue after compact budget rejection");
+    try session.waitRun(retry_run_id);
+    var retry_terminal = takeTestTerminal(session, retry_run_id);
+    defer retry_terminal.deinit();
+    try std.testing.expectEqual(@as(?sdk.StopReason, .end_turn), retry_terminal.stop_reason);
     try closeSession(session, .session_close);
 }
 
@@ -180,7 +204,7 @@ test "malformed compact result poisons Session and queued compact can be cancell
     try closeSession(session, .session_close);
 }
 
-test "Runtime rejects revision 4 tables without required Skill capabilities" {
+test "Runtime rejects tables missing required revision 6 capabilities" {
     var api = fake_api;
     api.capabilities &= ~wire.CAP_SKILL_CATALOG;
     try std.testing.expectError(
@@ -499,13 +523,19 @@ test "Session catalog refresh is idle-only and rejects another Workspace epoch" 
         error.CatalogBindingMismatch,
         session.refreshSkillCatalog(other.lease),
     );
-    fake_core.forceNextSkillUpdateStatus(wire.STATUS_RESOURCE_LIMIT);
-    try std.testing.expectError(
-        error.CatalogRefreshFailed,
-        session.refreshSkillCatalog(current.lease),
-    );
-    const reusable = try session.prepareRun(.{ .text = "still reusable" });
-    try session.cancelPreparedRun(reusable);
+    for ([_]u32{
+        wire.STATUS_RESOURCE_LIMIT,
+        wire.STATUS_CHECKPOINT_BUDGET_REQUIRED,
+    }) |recoverable_status| {
+        fake_core.forceNextSkillUpdateStatus(recoverable_status);
+        try std.testing.expectError(
+            error.CatalogRefreshFailed,
+            session.refreshSkillCatalog(current.lease),
+        );
+        try std.testing.expectEqual(lifecycle.SessionState.idle, session.snapshot().state);
+        const reusable = try session.prepareRun(.{ .text = "still reusable" });
+        try session.cancelPreparedRun(reusable);
+    }
     fake_core.forceNextSkillUpdateStatus(wire.STATUS_STALE_COMPACT);
     try std.testing.expectError(
         error.CatalogRefreshFailed,
@@ -539,10 +569,10 @@ const UiAnswerThenIdentityMismatch = struct {
         const request_id = session.pendingUiRequest() orelse return .already_pending;
         self.invoked = true;
         const run_id = session.snapshot().active_run_id;
-        session.respondUi(
+        session.respondPermission(
             run_id,
             request_id,
-            .{ .permission = .allow_once },
+            .allow_once,
         ) catch {
             self.failed = true;
             return .unavailable;
@@ -1066,19 +1096,20 @@ test "UI request validates identity and close wakes a suspended callback" {
     var decoded = try sdk.decodeUiRequest(std.testing.allocator, pending.json);
     defer decoded.deinit();
     try std.testing.expectEqual(std.meta.Tag(sdk.UiRequest).permission, std.meta.activeTag(decoded.value));
-    const response = sdk.UiResponse{ .permission = .allow_once };
-    try std.testing.expectError(error.StaleUiResponse, answered.respondUi(run_id + 1, request_id, response));
-    try std.testing.expectError(error.StaleUiResponse, answered.respondUi(run_id, request_id + 1, response));
+    try std.testing.expectError(error.StaleUiResponse, answered.respondPermission(run_id + 1, request_id, .allow_once));
+    try std.testing.expectError(error.StaleUiResponse, answered.respondPermission(run_id, request_id + 1, .allow_once));
     try std.testing.expectError(
         error.InvalidUiResponse,
-        answered.respondUi(run_id, request_id, .{
-            .answers = &.{.{ .values = &.{"Yes"} }},
-        }),
+        answered.respondAnswers(run_id, request_id, &.{.{ .values = &.{"Yes"} }}),
     );
-    try answered.respondUi(run_id, request_id, response);
-    try std.testing.expectError(error.StaleUiResponse, answered.respondUi(run_id, request_id, response));
+    try answered.respondPermission(run_id, request_id, .allow_session);
+    try std.testing.expectError(error.StaleUiResponse, answered.respondPermission(run_id, request_id, .allow_once));
     fake_core.releaseControlled();
     try answered.waitRun(run_id);
+    fake_core.lock();
+    const permission_response_valid = fake_core.permission_response_valid;
+    fake_core.unlock();
+    try std.testing.expect(permission_response_valid);
     try closeSession(answered, .session_close);
 
     fake_core.setNextPlan(.ui_wait);
@@ -1109,6 +1140,31 @@ test "UI request validates identity and close wakes a suspended callback" {
         cancelled_terminal.termination_signal.?,
     );
     try closeSession(cancelled, .session_close);
+}
+
+test "permission callback request identity mismatch fails closed" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 2 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+
+    for ([_]Plan{ .wrong_ui_request_run_id, .wrong_ui_request_session_id }) |plan| {
+        fake_core.setNextPlan(plan);
+        const session = try openSession(runtime);
+        const run_id = try submitSession(session, "reject mismatched permission identity");
+        try session.waitRun(run_id);
+        var terminal = takeTestTerminal(session, run_id);
+        defer terminal.deinit();
+        try std.testing.expectEqual(@as(?u32, wire.STATUS_CALLBACK_FAILED), terminal.raw_status_code);
+        try std.testing.expectEqual(
+            @as(?lifecycle.TerminalFailure, .dependency_contract),
+            terminal.failure,
+        );
+        try std.testing.expectEqual(lifecycle.SessionState.poisoned, session.snapshot().state);
+        try closeSession(session, .session_close);
+    }
 }
 
 test "Core identity failure discards an accepted UI permission response" {
@@ -1282,7 +1338,7 @@ test "UI response encoding is bounded before ownership transfer" {
     const request_id = session.pendingUiRequest().?;
     try std.testing.expectError(
         error.InvalidUiResponse,
-        session.respondUi(run_id, request_id, .{ .permission = .allow_once }),
+        session.respondPermission(run_id, request_id, .allow_once),
     );
     try std.testing.expectEqual(request_id, session.pendingUiRequest().?);
     try cancelSession(session, run_id, .user_cancel);
@@ -1298,7 +1354,7 @@ test "UI response encoding is bounded before ownership transfer" {
 
 test "status is validated before RunResult and invalid results poison the Session" {
     fake_core.reset();
-    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 4 });
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 16 });
     defer {
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
@@ -1311,6 +1367,10 @@ test "status is validated before RunResult and invalid results poison the Sessio
     }{
         .{ .plan = .unknown_stop_result, .expected_status = wire.STATUS_OK, .expected_stop = 42 },
         .{ .plan = .invalid_result_layout, .expected_status = wire.STATUS_OK, .expected_stop = null },
+        .{ .plan = .invalid_checkpoint_outcome, .expected_status = wire.STATUS_OK, .expected_stop = null },
+        .{ .plan = .invalid_result_flags, .expected_status = wire.STATUS_OK, .expected_stop = null },
+        .{ .plan = .mismatched_checkpoint_outcome, .expected_status = wire.STATUS_OK, .expected_stop = wire.STOP_END_TURN },
+        .{ .plan = .checkpoint_budget_required_invalid_result, .expected_status = wire.STATUS_CHECKPOINT_BUDGET_REQUIRED, .expected_stop = null },
         .{ .plan = .unknown_status, .expected_status = 42, .expected_stop = null },
         .{ .plan = .stale_compact_status, .expected_status = wire.STATUS_STALE_COMPACT, .expected_stop = null },
     };
@@ -1330,6 +1390,57 @@ test "status is validated before RunResult and invalid results poison the Sessio
         );
         try std.testing.expectEqual(lifecycle.SessionState.poisoned, snapshot.state);
         try std.testing.expectError(error.SessionPoisoned, submitSession(session, "must not continue"));
+        try closeSession(session, .session_close);
+    }
+}
+
+test "revision 6 checkpoint outcomes are typed and budget admission remains retryable" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 3 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+
+    fake_core.setNextPlan(.checkpoint_budget_required);
+    const budget_session = try openSession(runtime);
+    const budget_run = try submitSession(budget_session, "require checkpoint before admission");
+    try budget_session.waitRun(budget_run);
+    var budget_terminal = takeTestTerminal(budget_session, budget_run);
+    defer budget_terminal.deinit();
+    try std.testing.expectEqual(
+        @as(?sdk.Status, .checkpoint_budget_required),
+        budget_terminal.abi_status,
+    );
+    try std.testing.expectEqual(
+        @as(?lifecycle.TerminalFailure, .abi_status),
+        budget_terminal.failure,
+    );
+    try std.testing.expectEqual(lifecycle.SessionState.idle, budget_session.snapshot().state);
+    fake_core.setSessionPlan(.immediate);
+    const retry_run = try submitSession(budget_session, "retry after product checkpoint handling");
+    try budget_session.waitRun(retry_run);
+    var retry_terminal = takeTestTerminal(budget_session, retry_run);
+    defer retry_terminal.deinit();
+    try std.testing.expectEqual(@as(?sdk.StopReason, .end_turn), retry_terminal.stop_reason);
+    try closeSession(budget_session, .session_close);
+
+    const terminal_cases = [_]struct {
+        plan: Plan,
+        expected: sdk.StopReason,
+    }{
+        .{ .plan = .checkpoint_budget_exhausted, .expected = .checkpoint_budget_exhausted },
+        .{ .plan = .checkpoint_resource_limit, .expected = .checkpoint_resource_limit },
+    };
+    for (terminal_cases) |case| {
+        fake_core.setNextPlan(case.plan);
+        const session = try openSession(runtime);
+        const run_id = try submitSession(session, "validate checkpoint terminal outcome");
+        try session.waitRun(run_id);
+        var terminal = takeTestTerminal(session, run_id);
+        defer terminal.deinit();
+        try std.testing.expectEqual(@as(?sdk.StopReason, case.expected), terminal.stop_reason);
+        try std.testing.expectEqual(@as(?lifecycle.TerminalFailure, null), terminal.failure);
         try closeSession(session, .session_close);
     }
 }
@@ -1511,7 +1622,7 @@ test "abort stale and too-late statuses remain observable without losing diagnos
     const session = try openSession(runtime);
 
     const first = try submitSession(session, "too late");
-    try session.waitForState(.running);
+    fake_core.waitRunEntered();
     try std.testing.expectError(error.NoSuchRun, cancelSession(session, first + 1, .user_cancel));
     fake_core.forceNextAbortStatus(wire.STATUS_TOO_LATE);
     try cancelSession(session, first, .user_cancel);
@@ -1524,7 +1635,7 @@ test "abort stale and too-late statuses remain observable without losing diagnos
 
     fake_core.rearmControlled();
     const second = try submitSession(session, "stale");
-    try session.waitForState(.running);
+    fake_core.waitRunEntered();
     fake_core.forceNextAbortStatus(wire.STATUS_STALE_RUN);
     try cancelSession(session, second, .user_cancel);
     try cancelSession(session, second, .user_cancel);
@@ -1536,7 +1647,7 @@ test "abort stale and too-late statuses remain observable without losing diagnos
 
     fake_core.rearmControlled();
     const third = try submitSession(session, "timeout");
-    try session.waitForState(.running);
+    fake_core.waitRunEntered();
     try cancelSession(session, third, .timeout);
     try session.waitRun(third);
     var timeout_terminal = takeTestTerminal(session, third);
@@ -1549,7 +1660,7 @@ test "abort stale and too-late statuses remain observable without losing diagnos
 
     fake_core.rearmControlled();
     const fourth = try submitSession(session, "wrong operation status");
-    try session.waitForState(.running);
+    fake_core.waitRunEntered();
     fake_core.forceNextAbortStatus(wire.STATUS_STALE_COMPACT);
     try cancelSession(session, fourth, .user_cancel);
     fake_core.releaseControlled();

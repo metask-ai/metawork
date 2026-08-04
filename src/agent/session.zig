@@ -12,7 +12,6 @@ pub const OwnedCoreEvent = event_pump.OwnedCoreEvent;
 pub const Status = sdk.Status;
 pub const StopReason = sdk.StopReason;
 pub const UiRequest = sdk.UiRequest;
-pub const UiResponse = sdk.UiResponse;
 pub const Answer = sdk.protocol.Answer;
 pub const PermissionChoice = sdk.protocol.PermissionChoice;
 pub const ParsedUiRequest = sdk.ParsedUiRequest;
@@ -55,7 +54,7 @@ fn permissionModeCode(value: PermissionMode) u32 {
         .accept_edits => wire.PERMISSION_ACCEPT_EDITS,
         .auto => wire.PERMISSION_AUTO,
         .dont_ask => wire.PERMISSION_DONT_ASK,
-        .bypass => wire.PERMISSION_BYPASS,
+        .full_access => wire.PERMISSION_FULL_ACCESS,
     };
 }
 
@@ -591,7 +590,7 @@ pub const PermissionMode = enum {
     accept_edits,
     auto,
     dont_ask,
-    bypass,
+    full_access,
 };
 
 pub const ShellPolicy = enum {
@@ -1001,32 +1000,37 @@ pub const Runtime = struct {
         callbacks.on_event = Session.onEvent;
         callbacks.on_ui_request = Session.onUiRequest;
         callbacks.release_response = Session.releaseUiResponse;
-        var config = std.mem.zeroes(wire.SessionConfigV1);
-        config.struct_size = @sizeOf(wire.SessionConfigV1);
-        config.provider_kind_code = providerKindCode(options.provider);
-        config.permission_mode_code = permissionModeCode(options.permission_mode);
-        config.shell_policy_code = shellPolicyCode(options.shell_policy);
-        config.api_key = sdk.bytesView(secret);
-        config.model = sdk.bytesView(options.model);
-        config.base_url = sdk.bytesView(options.base_url);
-        config.workspace_root = sdk.bytesView(workspace_root);
-        config.workspace_home = sdk.bytesView(workspace_home);
+        var host_config = std.mem.zeroes(wire.SessionHostConfigV1);
+        host_config.struct_size = @sizeOf(wire.SessionHostConfigV1);
+        host_config.provider_kind_code = providerKindCode(options.provider);
+        host_config.permission_mode_code = permissionModeCode(options.permission_mode);
+        host_config.shell_policy_code = shellPolicyCode(options.shell_policy);
+        host_config.api_key = sdk.bytesView(secret);
+        host_config.base_url = sdk.bytesView(options.base_url);
+        host_config.workspace_root = sdk.bytesView(workspace_root);
+        host_config.workspace_home = sdk.bytesView(workspace_home);
         const skill_selection = allSkillsEnabledSelection();
-        config.skill_catalog = if (options.skill_catalog) |lease|
+        host_config.skill_catalog = if (options.skill_catalog) |lease|
             catalog.rawHandle(lease)
         else
             null;
-        config.skill_selection = if (options.skill_catalog != null)
+        host_config.skill_selection = if (options.skill_catalog != null)
             &skill_selection
         else
             null;
-        config.permission_rules = null;
+        host_config.permission_rules = null;
+        host_config.mcp_selection = null;
+        host_config.durable_budget = null;
         const allowed_views = try self.allocator.alloc(wire.BytesViewV1, options.allowed_tools.len);
         defer self.allocator.free(allowed_views);
         for (options.allowed_tools, 0..) |name, index|
             allowed_views[index] = sdk.bytesView(name);
-        config.allowed_tools = if (allowed_views.len == 0) null else allowed_views.ptr;
-        config.allowed_tool_count = allowed_views.len;
+        host_config.allowed_tools = if (allowed_views.len == 0) null else allowed_views.ptr;
+        host_config.allowed_tool_count = allowed_views.len;
+        var config = std.mem.zeroes(wire.SessionCreateConfigV1);
+        config.struct_size = @sizeOf(wire.SessionCreateConfigV1);
+        config.host = &host_config;
+        config.model = sdk.bytesView(options.model);
 
         var diagnostic = emptyOwnedBytes();
         var raw_session: ?*wire.SessionHandle = null;
@@ -1512,8 +1516,8 @@ pub const Session = struct {
         if (!diagnostic_valid) {
             self.dependency_contract_failure = true;
         } else if (typed_status) |status| {
-            const poisons = compactStatusPoisonsSession(status);
-            if (poisons == null) {
+            const disposition = compactStatusDisposition(status);
+            if (disposition == null) {
                 self.dependency_contract_failure = true;
             } else if (status == .ok) {
                 if (result.struct_size != @sizeOf(wire.CompactResultV1) or
@@ -1528,7 +1532,7 @@ pub const Session = struct {
                 }
             } else {
                 failure = .abi_status;
-                if (poisons.?) self.state = .poisoned;
+                if (disposition.? == .poisoned) self.state = .poisoned;
             }
         } else {
             self.dependency_contract_failure = true;
@@ -1621,14 +1625,15 @@ pub const Session = struct {
         releaseOwned(self.agent_runtime.api, &diagnostic);
         const status = sdk.Status.fromCode(status_code) catch
             return self.failSkillUpdateContract();
-        if (!isSkillUpdateStatus(status)) return self.failSkillUpdateContract();
+        const disposition = skillUpdateStatusDisposition(status) orelse
+            return self.failSkillUpdateContract();
+        if (disposition == .poisoned) {
+            self.state = .poisoned;
+            return error.SessionPoisoned;
+        }
         return switch (status) {
             .ok => {},
             .busy => error.SessionNotIdle,
-            .invalid_state => {
-                self.state = .poisoned;
-                return error.SessionPoisoned;
-            },
             else => error.CatalogRefreshFailed,
         };
     }
@@ -1714,14 +1719,52 @@ pub const Session = struct {
         return .requested;
     }
 
-    pub fn respondUi(
+    pub fn respondAnswers(
         self: *Session,
         run_id: u64,
         request_id: u64,
-        response: sdk.UiResponse,
+        answers: []const Answer,
     ) (Error || std.mem.Allocator.Error)!void {
         self.lock();
         defer self.unlock();
+        const request = try self.pendingUiRequestLocked(run_id, request_id);
+        try self.encodeUiResponseLocked(request, .{ .answers = answers });
+    }
+
+    pub fn respondPermission(
+        self: *Session,
+        run_id: u64,
+        request_id: u64,
+        choice: PermissionChoice,
+    ) (Error || std.mem.Allocator.Error)!void {
+        self.lock();
+        defer self.unlock();
+        const request = try self.pendingUiRequestLocked(run_id, request_id);
+        const permission_request = switch (request.*) {
+            .permission => |permission| permission,
+            else => return error.InvalidUiResponse,
+        };
+        const rule_id = switch (choice) {
+            .allow_once, .deny_once => null,
+            .allow_session, .deny_session => session_rule: {
+                const candidate = permission_request.candidate orelse
+                    return error.InvalidUiResponse;
+                break :session_rule candidate.rule_id;
+            },
+        };
+        try self.encodeUiResponseLocked(request, .{ .permission = .{
+            .permission = choice,
+            .request_id = permission_request.request_id,
+            .policy_generation = permission_request.policy_generation,
+            .rule_id = rule_id,
+        } });
+    }
+
+    fn pendingUiRequestLocked(
+        self: *Session,
+        run_id: u64,
+        request_id: u64,
+    ) Error!*const sdk.UiRequest {
         if (self.state == .closing or self.state == .closed) return error.SessionClosing;
         if (!self.ui_active) {
             if (self.ui_request_id != 0 and run_id == self.active_run_id and
@@ -1732,6 +1775,14 @@ pub const Session = struct {
         if (run_id != self.active_run_id or request_id != self.ui_request_id or self.ui_answered)
             return error.StaleUiResponse;
         const request = self.ui_request_value orelse return error.NoPendingUiRequest;
+        return request;
+    }
+
+    fn encodeUiResponseLocked(
+        self: *Session,
+        request: *const sdk.UiRequest,
+        response: sdk.UiResponse,
+    ) (Error || std.mem.Allocator.Error)!void {
         const scratch = try self.agent_runtime.allocator.alloc(u8, self.agent_runtime.max_ui_response_bytes);
         defer self.agent_runtime.allocator.free(scratch);
         var fixed = std.heap.FixedBufferAllocator.init(scratch);
@@ -2034,21 +2085,30 @@ pub const Session = struct {
             failure = .dependency_contract;
             self.state = .poisoned;
         } else if (typed_status) |known_status| {
-            const poisons_session = runStatusPoisonsSession(known_status);
-            if (poisons_session == null) {
+            const disposition = runStatusDisposition(known_status);
+            if (disposition == null) {
                 self.dependency_contract_failure = true;
                 failure = .dependency_contract;
                 self.state = .poisoned;
             }
             if (!self.dependency_contract_failure and known_status == .ok) {
-                if (result.struct_size != @sizeOf(wire.RunResultV1) or !allZero(&result.reserved)) {
+                if (result.struct_size != @sizeOf(wire.RunResultV1) or
+                    !allZero(&result.reserved) or
+                    !runCheckpointFieldsValid(result))
+                {
                     self.dependency_contract_failure = true;
                     failure = .dependency_contract;
                     self.state = .poisoned;
                 } else {
                     raw_stop_reason_code = result.stop_reason_code;
                     if (sdk.StopReason.fromCode(result.stop_reason_code)) |reason| {
-                        stop_reason = reason;
+                        if (runCheckpointOutcomeMatchesStop(result.checkpoint_outcome_code, reason)) {
+                            stop_reason = reason;
+                        } else {
+                            self.dependency_contract_failure = true;
+                            failure = .dependency_contract;
+                            self.state = .poisoned;
+                        }
                     } else |_| {
                         self.dependency_contract_failure = true;
                         failure = .dependency_contract;
@@ -2056,10 +2116,20 @@ pub const Session = struct {
                     }
                 }
             } else if (!self.dependency_contract_failure) {
-                if (known_status == .callback_failed and self.termination_signal == null)
-                    setTerminationSignalLocked(self, .{ .callback_failure = .event });
-                failure = .abi_status;
-                if (poisons_session.?) self.state = .poisoned;
+                if (known_status == .checkpoint_budget_required and
+                    (result.struct_size != @sizeOf(wire.RunResultV1) or
+                        !runCheckpointFieldsValid(result) or
+                        result.checkpoint_outcome_code != wire.RUN_CHECKPOINT_BUDGET_REQUIRED))
+                {
+                    self.dependency_contract_failure = true;
+                    failure = .dependency_contract;
+                    self.state = .poisoned;
+                } else {
+                    if (known_status == .callback_failed and self.termination_signal == null)
+                        setTerminationSignalLocked(self, .{ .callback_failure = .event });
+                    failure = .abi_status;
+                    if (disposition.? == .poisoned) self.state = .poisoned;
+                }
             }
         } else {
             self.dependency_contract_failure = true;
@@ -2380,7 +2450,7 @@ pub const Session = struct {
             self.recordTerminationSignal(.{ .callback_failure = .ui });
             return wire.UI_FATAL;
         };
-        _ = self.retainCoreCallback(raw_run) orelse return wire.UI_FATAL;
+        const callback_run_id = self.retainCoreCallback(raw_run) orelse return wire.UI_FATAL;
         defer self.releaseCoreCallback();
 
         const encoded_request = sdk.borrowedBytes(request_json) catch {
@@ -2402,7 +2472,10 @@ pub const Session = struct {
         };
 
         self.lock();
-        if (!self.coreIdentityHealthyLocked()) {
+        if (!self.coreIdentityHealthyLocked() or
+            !self.uiRequestIdentityMatchesLocked(parsed.value, callback_run_id))
+        {
+            self.failCoreIdentityLocked();
             self.unlock();
             self.agent_runtime.allocator.free(owned_request);
             return wire.UI_FATAL;
@@ -2572,6 +2645,25 @@ pub const Session = struct {
         };
     }
 
+    fn uiRequestIdentityMatchesLocked(
+        self: *const Session,
+        request: sdk.UiRequest,
+        run_id: u64,
+    ) bool {
+        return switch (request) {
+            .ask_question => true,
+            .permission => |permission| permission.run_id == run_id and
+                switch (self.core_session_identity) {
+                    .bound => |binding| std.mem.eql(
+                        u8,
+                        binding.bytes[0..binding.len],
+                        permission.session_id,
+                    ),
+                    .unbound, .failed => false,
+                },
+        };
+    }
+
     fn rejectInvalidCoreIdentity(self: *Session) void {
         self.lock();
         defer self.unlock();
@@ -2675,10 +2767,21 @@ fn compactOutcome(code: u32) error{UnknownCompactOutcome}!CompactOutcome {
     };
 }
 
-fn compactStatusPoisonsSession(status: sdk.Status) ?bool {
+const SessionStatusDisposition = enum {
+    reusable,
+    poisoned,
+};
+
+fn compactStatusDisposition(status: sdk.Status) ?SessionStatusDisposition {
     return switch (status) {
-        .out_of_memory, .invalid_state, .core_error, .internal_error => true,
-        .ok, .invalid_argument, .busy, .resource_limit, .stale_compact => false,
+        .out_of_memory, .invalid_state, .core_error, .internal_error => .poisoned,
+        .ok,
+        .invalid_argument,
+        .busy,
+        .resource_limit,
+        .stale_compact,
+        .checkpoint_budget_required,
+        => .reusable,
         .stale_run,
         .too_late,
         .callback_failed,
@@ -2688,6 +2791,13 @@ fn compactStatusPoisonsSession(status: sdk.Status) ?bool {
         .invalid_skill_arguments,
         .skill_policy_violation,
         .skill_unavailable,
+        .checkpoint_corrupt,
+        .checkpoint_unsupported,
+        .checkpoint_incompatible,
+        .checkpoint_io,
+        .logical_session_conflict,
+        .mcp_not_refreshed,
+        .invalid_mcp_selection,
         => null,
     };
 }
@@ -2708,21 +2818,30 @@ fn isCompactAbortStatus(status: sdk.Status) bool {
         .invalid_skill_arguments,
         .skill_policy_violation,
         .skill_unavailable,
+        .checkpoint_budget_required,
+        .checkpoint_corrupt,
+        .checkpoint_unsupported,
+        .checkpoint_incompatible,
+        .checkpoint_io,
+        .logical_session_conflict,
+        .mcp_not_refreshed,
+        .invalid_mcp_selection,
         => false,
     };
 }
 
-fn isSkillUpdateStatus(status: sdk.Status) bool {
+fn skillUpdateStatusDisposition(status: sdk.Status) ?SessionStatusDisposition {
     return switch (status) {
         .ok,
         .invalid_argument,
         .out_of_memory,
         .busy,
-        .invalid_state,
         .core_error,
         .resource_limit,
         .skill_unavailable,
-        => true,
+        .checkpoint_budget_required,
+        => .reusable,
+        .invalid_state => .poisoned,
         .stale_run,
         .too_late,
         .callback_failed,
@@ -2733,33 +2852,69 @@ fn isSkillUpdateStatus(status: sdk.Status) bool {
         .invalid_skill_arguments,
         .skill_policy_violation,
         .stale_compact,
-        => false,
-    };
-}
-
-fn runStatusPoisonsSession(status: sdk.Status) ?bool {
-    return switch (status) {
-        .out_of_memory,
-        .invalid_state,
-        .core_error,
-        .callback_failed,
-        .internal_error,
-        => true,
-        .ok,
-        .invalid_argument,
-        .busy,
-        .stale_run,
-        .resource_limit,
-        .stale_catalog,
-        .skill_not_found,
-        .invalid_skill_arguments,
-        .skill_policy_violation,
-        .skill_unavailable,
-        => false,
-        .too_late,
-        .skill_catalog_invalid,
-        .stale_compact,
+        .checkpoint_corrupt,
+        .checkpoint_unsupported,
+        .checkpoint_incompatible,
+        .checkpoint_io,
+        .logical_session_conflict,
+        .mcp_not_refreshed,
+        .invalid_mcp_selection,
         => null,
+    };
+}
+
+fn runStatusDisposition(status: sdk.Status) ?SessionStatusDisposition {
+    return switch (status) {
+        .out_of_memory,
+        .invalid_state,
+        .core_error,
+        .callback_failed,
+        .internal_error,
+        => .poisoned,
+        .ok,
+        .invalid_argument,
+        .busy,
+        .stale_run,
+        .resource_limit,
+        .stale_catalog,
+        .skill_not_found,
+        .invalid_skill_arguments,
+        .skill_policy_violation,
+        .skill_unavailable,
+        .checkpoint_budget_required,
+        => .reusable,
+        .too_late,
+        .skill_catalog_invalid,
+        .stale_compact,
+        .checkpoint_corrupt,
+        .checkpoint_unsupported,
+        .checkpoint_incompatible,
+        .checkpoint_io,
+        .logical_session_conflict,
+        .mcp_not_refreshed,
+        .invalid_mcp_selection,
+        => null,
+    };
+}
+
+fn runCheckpointFieldsValid(result: wire.RunResultV1) bool {
+    if (result.result_flags & ~wire.RUN_RESULT_COMPACTION_RECOMMENDED != 0)
+        return false;
+    return switch (result.checkpoint_outcome_code) {
+        wire.RUN_CHECKPOINT_NONE,
+        wire.RUN_CHECKPOINT_BUDGET_REQUIRED,
+        wire.RUN_CHECKPOINT_BUDGET_EXHAUSTED,
+        wire.RUN_CHECKPOINT_RESOURCE_LIMIT,
+        => true,
+        else => false,
+    };
+}
+
+fn runCheckpointOutcomeMatchesStop(outcome: u32, stop_reason: sdk.StopReason) bool {
+    return switch (stop_reason) {
+        .checkpoint_budget_exhausted => outcome == wire.RUN_CHECKPOINT_BUDGET_EXHAUSTED,
+        .checkpoint_resource_limit => outcome == wire.RUN_CHECKPOINT_RESOURCE_LIMIT,
+        else => outcome == wire.RUN_CHECKPOINT_NONE,
     };
 }
 
@@ -2784,6 +2939,14 @@ fn isAbortStatus(status: sdk.Status) bool {
         .invalid_skill_arguments,
         .skill_policy_violation,
         .stale_compact,
+        .checkpoint_budget_required,
+        .checkpoint_corrupt,
+        .checkpoint_unsupported,
+        .checkpoint_incompatible,
+        .checkpoint_io,
+        .logical_session_conflict,
+        .mcp_not_refreshed,
+        .invalid_mcp_selection,
         => false,
     };
 }
@@ -2809,6 +2972,14 @@ fn isSessionDestroyStatus(status: sdk.Status) bool {
         .invalid_skill_arguments,
         .skill_policy_violation,
         .stale_compact,
+        .checkpoint_budget_required,
+        .checkpoint_corrupt,
+        .checkpoint_unsupported,
+        .checkpoint_incompatible,
+        .checkpoint_io,
+        .logical_session_conflict,
+        .mcp_not_refreshed,
+        .invalid_mcp_selection,
         => false,
     };
 }

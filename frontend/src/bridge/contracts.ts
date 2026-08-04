@@ -230,6 +230,25 @@ export type RunInputView =
       redacted: boolean;
     };
 
+export const runCauses = [
+  "user_cancel",
+  "timeout",
+  "session_close",
+  "app_shutdown",
+  "event_pipeline_failure",
+  "queue_capacity_failure",
+  "ui_pipeline_failure",
+  "dependency_contract_failure",
+  "stale_catalog",
+  "skill_not_found",
+  "invalid_skill_arguments",
+  "skill_policy_violation",
+  "skill_unavailable",
+  "resource_limit",
+] as const;
+
+export type RunCause = (typeof runCauses)[number];
+
 export type RunView = {
   id: string;
   phase: RunPhase;
@@ -245,21 +264,7 @@ export type RunView = {
     | "failed"
     | "dependency_contract_failure"
     | null;
-  cause:
-    | "user_cancel"
-    | "timeout"
-    | "session_close"
-    | "app_shutdown"
-    | "event_pipeline_failure"
-    | "queue_capacity_failure"
-    | "ui_pipeline_failure"
-    | "dependency_contract_failure"
-    | "stale_catalog"
-    | "skill_not_found"
-    | "invalid_skill_arguments"
-    | "skill_policy_violation"
-    | "skill_unavailable"
-    | null;
+  cause: RunCause | null;
   usage: {
     input: string;
     output: string;
@@ -280,13 +285,16 @@ export type CompactPhase =
   | "interrupted"
   | "failed";
 
-export type CompactCause =
-  | "user_cancel"
-  | "session_close"
-  | "app_shutdown"
-  | "resource_limit"
-  | "agent_failure"
-  | "dependency_contract_failure";
+export const compactCauses = [
+  "user_cancel",
+  "session_close",
+  "app_shutdown",
+  "resource_limit",
+  "agent_failure",
+  "dependency_contract_failure",
+] as const;
+
+export type CompactCause = (typeof compactCauses)[number];
 
 export type CompactView = {
   operationId: string;

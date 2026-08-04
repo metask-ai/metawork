@@ -46,6 +46,21 @@ test("the canonical Workbench fixture decodes without normalization", () => {
   );
 });
 
+test("resource-limited Run terminal crosses the Host to Renderer contract", () => {
+  const resourceLimited = clone(fixture);
+  const task = resourceLimited.tasks[0];
+  task.activeOperation = null;
+  task.currentRunId = "0";
+  task.currentRunPhase = null;
+  task.lastRunOutcome = "stopped";
+  task.cause = "resource_limit";
+  task.runs[0].phase = "stopped";
+  task.runs[0].outcome = "stopped";
+  task.runs[0].cause = "resource_limit";
+
+  assert.deepEqual(decodeWorkbenchSnapshot(resourceLimited), resourceLimited);
+});
+
 test("managed Workspace projection is one-to-one non-selecting and capability-gated", () => {
   const managed = clone(fixture);
   managed.capabilities.managedWorkspaces = true;

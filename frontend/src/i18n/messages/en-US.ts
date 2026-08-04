@@ -561,6 +561,7 @@ export const enUS = {
     "Skill execution did not start because it is not allowed in this task",
   "cause.skill_unavailable":
     "Skill execution did not start because it is unavailable in the current execution environment",
+  "cause.resource_limit": "Task runtime resource limit reached",
   "workspace.selection_unavailable":
     "That workspace is no longer available. Refresh and choose another one.",
   "account.options_updated":
