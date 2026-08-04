@@ -492,6 +492,7 @@ pub const Transactions = struct {
             root.dir.deleteTree(root.io, names.candidateSlice()) catch {};
         const candidate = root.dir.openDir(root.io, names.candidateSlice(), .{
             .follow_symlinks = false,
+            .iterate = true,
         }) catch return error.CandidateUnavailable;
         defer candidate.close(root.io);
         skill_package.stageDirectory(root.io, staged_source, candidate, manifest) catch
@@ -564,6 +565,7 @@ pub const Transactions = struct {
             root.dir.deleteTree(root.io, names.candidateSlice()) catch {};
         const candidate = root.dir.openDir(root.io, names.candidateSlice(), .{
             .follow_symlinks = false,
+            .iterate = true,
         }) catch return error.CandidateUnavailable;
         defer candidate.close(root.io);
         skill_package.stageDirectory(root.io, staged_source, candidate, manifest) catch
@@ -1321,11 +1323,12 @@ test "candidate rejection restores an existing external directory" {
 }
 
 fn expectFileContents(dir: std.Io.Dir, path: []const u8, expected: []const u8) !void {
-    const file = try dir.openFile(std.testing.io, path, .{
+    var file = try dir.openFile(std.testing.io, path, .{
         .allow_directory = false,
         .follow_symlinks = false,
         .resolve_beneath = true,
     });
+    if (builtin.os.tag == .windows) file.flags.nonblocking = true;
     defer file.close(std.testing.io);
     var storage: [512]u8 = undefined;
     const read = try file.readPositionalAll(std.testing.io, storage[0..expected.len], 0);

@@ -120,11 +120,7 @@ pub fn inspectDirectory(
             else => return error.UnsupportedEntry,
         }
         if (files.items.len == limits.max_files) return error.FileLimitExceeded;
-        const file = entry.dir.openFile(io, entry.basename, .{
-            .allow_directory = false,
-            .follow_symlinks = false,
-            .resolve_beneath = true,
-        }) catch return error.SourceUnavailable;
+        const file = try openRegularFile(io, entry.dir, entry.basename);
         defer file.close(io);
         const stat = file.stat(io) catch return error.SourceUnavailable;
         if (stat.kind != .file) return error.UnsupportedEntry;
@@ -189,11 +185,7 @@ pub fn previewDirectory(
         return error.DefinitionTooLarge;
     const definition = try allocator.alloc(u8, @intCast(definition_entry.size));
     errdefer allocator.free(definition);
-    const file = source.openFile(io, "SKILL.md", .{
-        .allow_directory = false,
-        .follow_symlinks = false,
-        .resolve_beneath = true,
-    }) catch return error.SourceUnavailable;
+    const file = try openRegularFile(io, source, "SKILL.md");
     defer file.close(io);
     const read = file.readPositionalAll(io, definition, 0) catch
         return error.ReadFailed;
@@ -339,11 +331,7 @@ pub fn exportArchive(
     for (manifest.files, 0..) |entry, index| {
         if (entry.size > std.math.maxInt(u32) or offset > std.math.maxInt(u32))
             return error.FileTooLarge;
-        const file = source.openFile(io, entry.path, .{
-            .allow_directory = false,
-            .follow_symlinks = false,
-            .resolve_beneath = true,
-        }) catch return error.SourceUnavailable;
+        const file = try openRegularFile(io, source, entry.path);
         defer file.close(io);
         const bytes = readFileBounded(io, file, entry.size) catch |err| return err;
         defer std.heap.page_allocator.free(bytes);
@@ -505,6 +493,18 @@ fn lessThanFileEntry(_: void, left: FileEntry, right: FileEntry) bool {
     return std.mem.lessThan(u8, left.path, right.path);
 }
 
+fn openRegularFile(io: std.Io, dir: std.Io.Dir, path: []const u8) Error!std.Io.File {
+    var file = dir.openFile(io, path, .{
+        .allow_directory = false,
+        .follow_symlinks = false,
+        .resolve_beneath = true,
+    }) catch return error.SourceUnavailable;
+    // Zig 0.16 opens a no-follow Windows handle asynchronously but reports it
+    // as blocking. Match the File flag to the handle before any positional I/O.
+    if (builtin.os.tag == .windows) file.flags.nonblocking = true;
+    return file;
+}
+
 fn hashFiles(io: std.Io, source: std.Io.Dir, files: []const FileEntry) Error![32]u8 {
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     var buffer: [8192]u8 = undefined;
@@ -513,11 +513,7 @@ fn hashFiles(io: std.Io, source: std.Io.Dir, files: []const FileEntry) Error![32
         std.mem.writeInt(u64, &length_bytes, entry.path.len, .little);
         hasher.update(&length_bytes);
         hasher.update(entry.path);
-        const file = source.openFile(io, entry.path, .{
-            .allow_directory = false,
-            .follow_symlinks = false,
-            .resolve_beneath = true,
-        }) catch return error.SourceUnavailable;
+        const file = try openRegularFile(io, source, entry.path);
         defer file.close(io);
         var offset: u64 = 0;
         while (offset < entry.size) {
