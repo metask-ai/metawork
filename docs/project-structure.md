@@ -8,6 +8,8 @@
 
 - 产品行为以 [产品需求](requirements.md) 为准；
 - 系统职责与安全边界以 [高层架构](architecture.md) 为准；
+- Application 内部 owner、事务与恢复以 [Application 内部架构](application-architecture.md) 为准；
+- Renderer Bridge wire 与运输语义以 [Renderer Bridge 合同](renderer-bridge-contract.md) 为准；
 - AgentCore 生命周期以 [AgentCore 集成契约](agentcore-integration.md) 为准；
 - UI 行为以 [Workbench UI 设计](workbench-ui-design.md) 为准；
 - 验证状态与入口以 [验证规范](validation.md) 为准。
@@ -85,7 +87,7 @@ metawork/
 - `snapshot/` 负责 bounded descriptor、分块读取和 retry，不拥有产品状态；
 - `__fixtures__/workbench-snapshot.fixture` 是 Zig serializer 与 TypeScript decoder 共用的 canonical bytes。
 
-Renderer Bridge `metawork.renderer-bridge` 覆盖完整 command、event 和 snapshot surface；快速开发阶段的合同变化在固定 revision 1 内原地 hard cut，snapshot 不维护局部 schema version，任何 revision 变更必须先得到用户显式同意。React component 不得直接访问 `window.zero`、拼 wire payload 或解析 AgentCore raw JSON。
+Renderer Bridge 的 identity、revision、command、event、snapshot 与兼容策略只由 [Renderer Bridge 合同](renderer-bridge-contract.md)定义。React component 不得直接访问 `window.zero`、拼 wire payload 或解析 AgentCore raw JSON。
 
 ### `workbench/` 与 `features/`
 

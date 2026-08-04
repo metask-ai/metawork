@@ -830,19 +830,19 @@ test("Renderer Bridge fixed revision 1 owns the exact product wire catalog", () 
   );
   assert.match(rendererCommands, /RENDERER_BRIDGE_CONTRACT_REVISION = 1/);
   const agents = read("AGENTS.md");
-  const architecture = read("docs/architecture.md");
+  const bridgeContract = read("docs/renderer-bridge-contract.md");
   assert.match(agents, /任何合同类版本标识的变更都必须先得到用户显式同意/);
   assert.match(
-    architecture,
+    bridgeContract,
     /任何合同类版本标识的变更都必须先得到用户显式同意/,
   );
-  assert.match(architecture, /快速开发阶段固定 revision 为 `1`/);
+  assert.match(bridgeContract, /快速开发阶段固定 revision 为 `1`/);
   assert.match(
-    architecture,
+    bridgeContract,
     /`connect` 无法通过 revision 数字识别同 revision 的陈旧开发产物/,
   );
-  assert.match(architecture, /不能检测纯 wire 语义错配/);
-  assert.match(architecture, /不构成 runtime compatibility guarantee/);
+  assert.match(bridgeContract, /不能检测纯 wire 语义错配/);
+  assert.match(bridgeContract, /不构成 runtime compatibility guarantee/);
   assert.doesNotMatch(zigCommands, /metawork\.workspace\.choose/);
   assert.doesNotMatch(rendererCommands, /metawork\.workspace\.choose/);
 

@@ -11,6 +11,8 @@
 | 产品对象、行为与范围                                          | [docs/requirements.md](docs/requirements.md)                       |
 | UI 信息架构、交互与 capability gate                           | [docs/workbench-ui-design.md](docs/workbench-ui-design.md)         |
 | 技术选型、系统 owner 与安全边界                               | [docs/architecture.md](docs/architecture.md)                       |
+| Application 内部 owner、事务、并发与恢复                      | [docs/application-architecture.md](docs/application-architecture.md) |
+| Renderer Bridge command、event、Snapshot 与运输合同           | [docs/renderer-bridge-contract.md](docs/renderer-bridge-contract.md) |
 | active tree、目录 owner 与依赖方向                            | [docs/project-structure.md](docs/project-structure.md)             |
 | AgentCore 线程、事件、所有权和生命周期                        | [docs/agentcore-integration.md](docs/agentcore-integration.md)     |
 | AgentCore bundle、ABI 与 required capability                  | [docs/agentcore-abi-v1.md](docs/agentcore-abi-v1.md)               |
@@ -65,7 +67,9 @@
 
 - 产品需求变化更新 `docs/requirements.md`。
 - UI 交互规则变化更新 `docs/workbench-ui-design.md`。
-- 技术决策或 owner 变化更新 `docs/architecture.md`；实际目录和依赖变化更新 `docs/project-structure.md`。
+- 顶层技术决策、模块职责、进程或安全边界变化更新 `docs/architecture.md`。
+- Application 内部 owner、事务、并发或恢复变化更新 `docs/application-architecture.md`；实际目录和依赖变化更新 `docs/project-structure.md`。
+- Renderer Bridge command、event、Snapshot 或 transport 语义变化更新 `docs/renderer-bridge-contract.md`。
 - AgentCore 线程、所有权、生命周期和 Shell 行为变化更新 `docs/agentcore-integration.md`。
 - AgentCore ABI、bundle、required capability 或兼容门槛变化更新 `docs/agentcore-abi-v1.md`。
 - Metask Account 外部合同或 persistence revision 策略变化更新 `docs/metask-account-contract.md`。
