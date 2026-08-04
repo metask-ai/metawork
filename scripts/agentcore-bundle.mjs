@@ -9,9 +9,9 @@ const maxManifestBytes = 1024 * 1024;
 const maxPayloadBytes = 128 * 1024 * 1024;
 const maxPayloadFiles = 256;
 const supportedAbiVersion = 1;
-const supportedAbiRevision = 5;
-const supportedAbiTableSize = 168;
-const supportedCapabilities = 0x0fff;
+const supportedAbiRevision = 6;
+const supportedAbiTableSize = 216;
+const supportedCapabilities = 0x7ffff;
 
 const targetPolicies = [
   {
@@ -437,7 +437,7 @@ export async function validateAgentCoreBundle(bundleRoot, options = {}) {
       symbols.match(/\b_?metask_agentcore_get_api\b/g) ?? [];
     requireValue(
       discoveryMatches.length === 1,
-      "AgentCore bundle must expose exactly one revision 5 discovery symbol",
+      "AgentCore bundle must expose exactly one revision 6 discovery symbol",
     );
     requireValue(
       !/\b_?metacodes_agentcore_get_api\b/.test(symbols),
