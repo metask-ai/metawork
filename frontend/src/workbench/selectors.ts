@@ -26,18 +26,6 @@ function activeCompact(task: TaskView) {
     : null;
 }
 
-export type WorkspaceSummary = {
-  id: string;
-  canonicalRoot: string;
-  label: string;
-  authorization: "available" | "removing" | "reauthorization_required";
-  lastRemovalFailure: "task_close_failed" | null;
-  taskCount: number;
-  running: number;
-  attention: number;
-  failed: number;
-};
-
 export type TaskSignals = {
   running: boolean;
   attention: boolean;
@@ -51,22 +39,6 @@ export type TaskGroup = {
   kind: TaskGroupKind;
   tasks: TaskView[];
 };
-
-export function sidebarTasks(
-  snapshot: WorkbenchSnapshot,
-  selectedUserWorkspaceId: string | null,
-): TaskView[] {
-  const managedWorkspaceIds = new Set(
-    snapshot.workspaces
-      .filter((workspace) => workspace.origin === "managed")
-      .map((workspace) => workspace.id),
-  );
-  return snapshot.tasks.filter(
-    (task) =>
-      task.workspaceId === selectedUserWorkspaceId ||
-      managedWorkspaceIds.has(task.workspaceId),
-  );
-}
 
 export function taskGroups(
   tasks: TaskView[],
@@ -179,11 +151,6 @@ export function taskSignals(task: TaskView): TaskSignals {
   };
 }
 
-export function workspaceLabel(root: string): string {
-  const normalized = root.replaceAll("\\", "/").replace(/\/+$/, "");
-  return normalized.split("/").filter(Boolean).at(-1) ?? root;
-}
-
 export function workspaceDirectoryLabel(
   workspace: Pick<WorkspaceView, "origin" | "canonicalRoot">,
   defaultLabel: string,
@@ -191,40 +158,6 @@ export function workspaceDirectoryLabel(
   return workspace.origin === "managed"
     ? defaultLabel
     : workspace.canonicalRoot;
-}
-
-export function workspaceSummaries(
-  snapshot: WorkbenchSnapshot,
-): WorkspaceSummary[] {
-  return [...snapshot.workspaces]
-    .filter((workspace) => workspace.origin === "user")
-    .sort((left, right) => {
-      const leftOrder = BigInt(left.recentOrder);
-      const rightOrder = BigInt(right.recentOrder);
-      return rightOrder > leftOrder ? 1 : rightOrder < leftOrder ? -1 : 0;
-    })
-    .map((workspace) => ({
-      id: workspace.id,
-      canonicalRoot: workspace.canonicalRoot,
-      label: workspace.displayName || workspaceLabel(workspace.canonicalRoot),
-      authorization: workspace.authorization,
-      lastRemovalFailure: workspace.lastRemovalFailure,
-      taskCount: snapshot.tasks.filter(
-        (task) => task.workspaceId === workspace.id && !task.archived,
-      ).length,
-      running: workspace.signals.running,
-      attention: workspace.signals.attention,
-      failed: workspace.signals.failedOrInterrupted,
-    }));
-}
-
-export function selectCurrentWorkspace(state: WorkbenchState): string | null {
-  return (
-    state.activeWorkspaceId ??
-    selectActiveTask(state)?.workspaceId ??
-    state.snapshot.selectedWorkspaceId ??
-    null
-  );
 }
 
 export type SearchResult = {
