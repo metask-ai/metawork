@@ -16,6 +16,7 @@ import {
   Plus,
   Puzzle,
   Package,
+  Plug,
   Radar,
   RefreshCw,
   Search,
@@ -63,6 +64,7 @@ type IconName =
   | "download"
   | "trash"
   | "scheduled-tasks"
+  | "mcp"
   | "calendar-days"
   | "radar"
   | "sunrise";
@@ -98,6 +100,7 @@ const icons: Record<IconName, LucideIcon> = {
   download: Download,
   trash: Trash2,
   "scheduled-tasks": Clock3,
+  mcp: Plug,
   "calendar-days": CalendarDays,
   radar: Radar,
   sunrise: Sunrise,

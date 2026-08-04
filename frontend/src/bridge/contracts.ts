@@ -443,10 +443,12 @@ export type WorkbenchSnapshot = {
       | "corrupt"
       | "write_failed"
       | "outcome_unknown";
+    mcpManagement: boolean;
   };
   account: AccountView;
   skillCatalog: SkillCatalogView;
   skillManagement: SkillManagementView;
+  mcp: McpManagementView;
   selectedWorkspaceId: string | null;
   workspaces: WorkspaceView[];
   scheduledTasks: ScheduledTaskView[];
@@ -521,6 +523,26 @@ export type SkillManagementView = {
     canUninstall: boolean;
     canRetry: boolean;
     issueCodes: SkillCatalogView["issues"][number]["code"][];
+  }[];
+};
+
+export type McpManagementView = {
+  availability: "unavailable" | "ready" | "degraded";
+  redacted: boolean;
+  generation: string | null;
+  servers: {
+    id: string;
+    displayName: string;
+    namespace: string;
+    transport: "stdio" | "streamable_http";
+    status:
+      | "ready"
+      | "disabled"
+      | "needs_authentication"
+      | "unreachable"
+      | "invalid_catalog";
+    safeDiagnostic: string;
+    tools: { name: string }[];
   }[];
 };
 

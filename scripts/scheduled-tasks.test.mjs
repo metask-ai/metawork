@@ -296,7 +296,7 @@ test("schedule editor controls have explicit semantics and no native chrome", ()
   assert.doesNotMatch(css, /\.scheduled-editor fieldset/);
 });
 
-test("New task, Skills, and Scheduled tasks share one compact peer menu", async () => {
+test("New task, Skills, MCP, and Scheduled tasks share one compact peer menu", async () => {
   const source = readFileSync(
     join(process.cwd(), "frontend/src/app/App.tsx"),
     "utf8",
@@ -311,15 +311,26 @@ test("New task, Skills, and Scheduled tasks share one compact peer menu", async 
   );
   assert.ok(
     navigation.indexOf('t("skills.title")') <
+      navigation.indexOf('t("mcp.title")'),
+  );
+  assert.ok(
+    navigation.indexOf('t("mcp.title")') <
       navigation.indexOf('t("scheduled.title")'),
   );
   assert.equal(
     (navigation.match(/className="sidebar-capability focus-ring"/g) ?? [])
       .length,
-    3,
+    4,
   );
-  for (const icon of ["new-task", "skills", "scheduled-tasks"])
+  for (const icon of ["new-task", "skills", "mcp", "scheduled-tasks"])
     assert.match(navigation, new RegExp(`<Icon name="${icon}"`));
+  assert.match(navigation, /setRoute\("mcp"\)/);
+  assert.doesNotMatch(navigation, /capabilities\.mcpManagement/);
+  assert.match(source, /<McpPage[\s\S]*?management=\{snapshot\.mcp\}/);
+  assert.doesNotMatch(
+    source,
+    /route === "mcp"\s*&&\s*!workbench\.snapshot\.capabilities\.mcpManagement/,
+  );
 });
 
 test("Scheduled task Bridge commands preserve IDs, epochs, and exact payloads", async () => {

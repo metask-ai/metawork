@@ -25,6 +25,10 @@ Renderer Bridge 使用独立合同身份 `metawork.renderer-bridge`，快速开�
 
 Skill management 使用同一 revision 1 数据面发布 bounded preview/detail/projection 与 typed import/export/reimport/uninstall mutation；command catalog、Zig DTO、TypeScript runtime decoder、snapshot fixture 和 automation 必须完全一致，不建立第二 transport 或局部 revision。
 
+MCP 页面同样使用 revision 1 snapshot 数据面，但当前没有 MCP mutation。根 `capabilities` 必须包含 boolean `mcpManagement`，根 `mcp` 必须精确包含 `availability`、`redacted`、`generation` 与 `servers`：`availability` 只允许 `unavailable | ready | degraded`；`generation` 是 decimal `u64` wire string 或 null；server 使用唯一 opaque `id` 与唯一 `namespace`，并包含 `displayName`、`transport = stdio | streamable_http`、`status = ready | disabled | needs_authentication | unreachable | invalid_catalog`、已清洗的 `safeDiagnostic` 和 server 内唯一的 canonical tool `name` 列表。`unavailable` 必须对应 null generation 与空 servers，非 unavailable 必须有 generation；`ready` 不得包含 attention status；`mcpManagement` 必须精确等于 availability 非 unavailable。任何不变量不满足都使 Renderer snapshot decode fail closed。
+
+当前 Host baseline 固定发布 `mcpManagement = false` 与 `{ availability: "unavailable", redacted: false, generation: null, servers: [] }`。这是管理 capability fact，不是“空 MCP 目录”；Renderer 保留稳定页面入口，但只能呈现明确的 unavailable 状态。command、args、environment、完整 URL、header、credential、OAuth 数据、raw diagnostic、schema body、fingerprint 和 AgentCore handle 不进入该 projection。未来接通时由产品 owner 将 AgentCore typed catalog 与 Host-owned 配置/健康事实合成上述安全投影；Renderer 不直接解码或镜像 AgentCore MCP JSON schema。
+
 Renderer 的 Slash Resolver 只在 Composer 首 token 处理 `/` 手势。单一 Command registry 当前只由 `App` action controller 复用既有 New task 动作；Command 原文在 Renderer 消费，不产生 Run。Skill 候选只来自当前 Workspace/Task catalog projection，选择后形成带稳定 identity、pinned revision 与 positional arguments 的 tagged draft，再沿唯一 `tasks.run` 路径提交。Command/Skill 同名时裸名称归 Command，Skill 使用 `/skill:name`；Renderer 不读取 Skill body、物理路径或 policy。
 
 Account API/model selection payload 携带脱敏 selection identifier、`expectedCatalogGeneration` 与 `expectedExecutionGeneration`。Bridge 只校验 identifier 的 wire 边界并把 generation 严格解析为 `u64`；单值 `"0"` 合法，前导零、非数字与 overflow 非法。generation 是否匹配以及 identifier 是否属于当前发布的 Account catalog 由 Application 判断，Bridge 不读取产品 `AccountView`。

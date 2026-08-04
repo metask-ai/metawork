@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const contract = @import("metawork_account_contract");
 
 const AccountId = BoundedString(contract.Limits.account_id_bytes);
@@ -1156,6 +1157,31 @@ pub const PreparedTransition = struct {
         self.execution = null;
     }
 };
+
+pub const TestSupport = if (builtin.is_test) struct {
+    pub fn installInitialExecutionPreparation(
+        account: *Account,
+        api_key_id: []const u8,
+        model_id: []const u8,
+    ) void {
+        var next: CommittedState = .{
+            .session_state = .authenticated,
+            .execution_state = .preparing,
+            .operation = .persisting,
+            .catalog_generation = 1,
+            .active_attempt_id = 1,
+            .attempt_kind = .catalog,
+            .next_attempt_id = 2,
+        };
+        next.account_id.set("account-1") catch unreachable;
+        next.profile_id.set("profile-1") catch unreachable;
+        next.display_name.set("Metask User") catch unreachable;
+        next.pending_api_key_id.set(api_key_id) catch unreachable;
+        next.pending_model.set(model_id) catch unreachable;
+        std.debug.assert(stateIsValid(&next));
+        account.state = next;
+    }
+} else struct {};
 
 pub const AccountIdentity = struct {
     account_id: AccountId,

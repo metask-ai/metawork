@@ -14,6 +14,7 @@ import {
   type ScheduledTaskView,
   type SkillCatalogView,
   type SkillManagementView,
+  type McpManagementView,
   type SkillImportPreview,
   type SkillMutationResult,
   type SkillExportResult,
@@ -1714,6 +1715,106 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
   };
 }
 
+function decodeMcpManagement(value: unknown, path: string): McpManagementView {
+  const item = object(value, path, [
+    "availability",
+    "redacted",
+    "generation",
+    "servers",
+  ]);
+  const availability = enumValue(item.availability, `${path}.availability`, [
+    "unavailable",
+    "ready",
+    "degraded",
+  ] as const);
+  const generation =
+    item.generation === null
+      ? null
+      : wireId(item.generation, `${path}.generation`);
+  const servers = arrayValue(
+    item.servers,
+    `${path}.servers`,
+    (value, serverPath) => {
+      const server = object(value, serverPath, [
+        "id",
+        "displayName",
+        "namespace",
+        "transport",
+        "status",
+        "safeDiagnostic",
+        "tools",
+      ]);
+      const tools = arrayValue(
+        server.tools,
+        `${serverPath}.tools`,
+        (value, toolPath) => {
+          const tool = object(value, toolPath, ["name"]);
+          return {
+            name: nonEmptyString(tool.name, `${toolPath}.name`),
+          };
+        },
+      );
+      if (new Set(tools.map((tool) => tool.name)).size !== tools.length)
+        fail(
+          `${serverPath}.tools`,
+          "MCP tool names must be unique within a server",
+        );
+      return {
+        id: nonEmptyString(server.id, `${serverPath}.id`),
+        displayName: nonEmptyString(
+          server.displayName,
+          `${serverPath}.displayName`,
+        ),
+        namespace: nonEmptyString(server.namespace, `${serverPath}.namespace`),
+        transport: enumValue(server.transport, `${serverPath}.transport`, [
+          "stdio",
+          "streamable_http",
+        ] as const),
+        status: enumValue(server.status, `${serverPath}.status`, [
+          "ready",
+          "disabled",
+          "needs_authentication",
+          "unreachable",
+          "invalid_catalog",
+        ] as const),
+        safeDiagnostic: stringValue(
+          server.safeDiagnostic,
+          `${serverPath}.safeDiagnostic`,
+        ),
+        tools,
+      };
+    },
+  );
+  if (new Set(servers.map((server) => server.id)).size !== servers.length)
+    fail(`${path}.servers`, "MCP server identities must be unique");
+  if (
+    new Set(servers.map((server) => server.namespace)).size !== servers.length
+  )
+    fail(`${path}.servers`, "MCP server namespaces must be unique");
+  if (
+    availability === "unavailable" &&
+    (generation !== null || servers.length !== 0)
+  )
+    fail(path, "unavailable MCP management cannot expose a catalog");
+  if (availability !== "unavailable" && generation === null)
+    fail(path, "available MCP management requires a catalog generation");
+  if (
+    availability === "ready" &&
+    servers.some((server) =>
+      ["needs_authentication", "unreachable", "invalid_catalog"].includes(
+        server.status,
+      ),
+    )
+  )
+    fail(path, "ready MCP management cannot contain attention states");
+  return {
+    availability,
+    redacted: booleanValue(item.redacted, `${path}.redacted`),
+    generation,
+    servers,
+  };
+}
+
 export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
   const root = object(value, "$", [
     "revision",
@@ -1721,6 +1822,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     "account",
     "skillCatalog",
     "skillManagement",
+    "mcp",
     "selectedWorkspaceId",
     "workspaces",
     "scheduledTasks",
@@ -1742,6 +1844,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     "backgroundScheduleWake",
     "localSkillManagement",
     "skillManagementHealth",
+    "mcpManagement",
   ]);
   const capabilities = {
     taskHistoryPersistence: booleanValue(
@@ -1828,6 +1931,10 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
         "outcome_unknown",
       ] as const,
     ),
+    mcpManagement: booleanValue(
+      capabilityItem.mcpManagement,
+      "$.capabilities.mcpManagement",
+    ),
   };
   if (
     capabilities.taskHistoryPersistence !==
@@ -1848,6 +1955,12 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     "$.scheduledTasks",
     decodeScheduledTask,
   );
+  const mcp = decodeMcpManagement(root.mcp, "$.mcp");
+  if (capabilities.mcpManagement !== (mcp.availability !== "unavailable"))
+    fail(
+      "$.capabilities.mcpManagement",
+      "MCP management capability and availability must agree",
+    );
   const selectedWorkspaceId =
     root.selectedWorkspaceId === null
       ? null
@@ -1897,6 +2010,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
       root.skillManagement,
       "$.skillManagement",
     ),
+    mcp,
     selectedWorkspaceId,
     workspaces,
     scheduledTasks,

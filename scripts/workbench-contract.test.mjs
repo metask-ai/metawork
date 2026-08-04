@@ -255,6 +255,76 @@ test("Scheduled Task projection decodes recurrence and occurrence without secret
   assert.throws(() => decodeWorkbenchSnapshot(invalid), /expected keys/);
 });
 
+test("MCP management is capability-gated and identity checked", () => {
+  const withMcp = clone(fixture);
+  withMcp.capabilities.mcpManagement = true;
+  withMcp.mcp = {
+    availability: "degraded",
+    redacted: false,
+    generation: "0",
+    servers: [
+      {
+        id: "github-binding",
+        displayName: "GitHub",
+        namespace: "github",
+        transport: "streamable_http",
+        status: "ready",
+        safeDiagnostic: "",
+        tools: [{ name: "search_repositories" }],
+      },
+      {
+        id: "notion-binding",
+        displayName: "Notion",
+        namespace: "notion",
+        transport: "streamable_http",
+        status: "needs_authentication",
+        safeDiagnostic: "Sign in again.",
+        tools: [],
+      },
+    ],
+  };
+  assert.deepEqual(decodeWorkbenchSnapshot(withMcp), withMcp);
+
+  const hiddenCatalog = clone(withMcp);
+  hiddenCatalog.capabilities.mcpManagement = false;
+  assert.throws(
+    () => decodeWorkbenchSnapshot(hiddenCatalog),
+    /capability and availability must agree/,
+  );
+
+  const duplicateServer = clone(withMcp);
+  duplicateServer.mcp.servers.push(clone(duplicateServer.mcp.servers[0]));
+  assert.throws(
+    () => decodeWorkbenchSnapshot(duplicateServer),
+    /server identities must be unique/,
+  );
+
+  const duplicateTool = clone(withMcp);
+  duplicateTool.mcp.servers[0].tools.push(
+    clone(duplicateTool.mcp.servers[0].tools[0]),
+  );
+  assert.throws(
+    () => decodeWorkbenchSnapshot(duplicateTool),
+    /tool names must be unique/,
+  );
+
+  const falselyReady = clone(withMcp);
+  falselyReady.mcp.availability = "ready";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(falselyReady),
+    /cannot contain attention states/,
+  );
+
+  const unavailableLeak = clone(withMcp);
+  unavailableLeak.capabilities.mcpManagement = false;
+  unavailableLeak.mcp.availability = "unavailable";
+  unavailableLeak.mcp.generation = null;
+  assert.throws(
+    () => decodeWorkbenchSnapshot(unavailableLeak),
+    /cannot expose a catalog/,
+  );
+});
+
 test("Account command acknowledgements preserve state-machine and attempt identity", () => {
   assert.deepEqual(
     decodeAccountCommandResult({

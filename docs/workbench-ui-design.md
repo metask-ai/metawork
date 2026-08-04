@@ -96,7 +96,7 @@ Workspace
 - `Turn` 和 `Run` 通常不直接命名，用当前活动、排队、停止和结果表达。
 - 一项 Task 可以包含多次用户补充和多次执行；停止一次执行不会删除 Task。
 
-当前 Renderer 产品合同为 `metawork.renderer-bridge` 固定 revision 1：`connect` 精确协商后才开放产品路径，snapshot 根节点包含无 secret `capabilities`、`account`、`selectedWorkspaceId`、`workspaces` 与 `tasks` 且不维护局部版本；Account 直接发布 `readiness`、唯一 `primaryAction`、脱敏 catalog selection 与 generation，Workspace 独立于 Task 发布，Task 固化 binding epoch 与显示事实。快速开发阶段直接原地 hard cut 合同内容，不提供临时形态兼容层或可选字段退路；任何合同类版本标识变更必须先得到用户显式同意。Agent 内部 Session route identity 不属于 Renderer 产品模型。
+当前 Renderer 产品合同为 `metawork.renderer-bridge` 固定 revision 1：`connect` 精确协商后才开放产品路径，snapshot 根节点包含无 secret `capabilities`、`account`、`skillCatalog`、`skillManagement`、`mcp`、`selectedWorkspaceId`、`workspaces`、`scheduledTasks` 与 `tasks` 且不维护局部版本；Account 直接发布 `readiness`、唯一 `primaryAction`、脱敏 catalog selection 与 generation，Workspace 独立于 Task 发布，Task 固化 binding epoch 与显示事实。快速开发阶段直接原地 hard cut 合同内容，不提供临时形态兼容层或可选字段退路；任何合同类版本标识变更必须先得到用户显式同意。Agent 内部 Session route identity 不属于 Renderer 产品模型。
 
 ### 3.2 规范术语
 
@@ -108,6 +108,7 @@ Workspace
 | Task                 | 任务         | 用户可持续补充的工作上下文         |
 | New task             | 新建任务     | 不使用 New session                 |
 | Skills               | 技能         | MetaWork 用户 Skill 目录与健康     |
+| MCP                  | MCP          | 可信服务、连接状态与已发现工具目录 |
 | Account & models     | 账号与模型   | API、默认模型、刷新与重新认证      |
 | Model                | 模型         | 新 Task 的执行模型，不称模式       |
 | Inspector            | 检查器       | 按需活动摘要与详情，不称 Monitor   |
@@ -186,7 +187,7 @@ Workspace
 
 ## 5. 左栏：能力与 Task
 
-> Capability：**部分当前、部分目标**。Renderer 合同已提供 MetaWork 顶层与 Workspace/Task 分离的 revision 6 Skill catalog projection；本地 package/inventory、详情与管理 mutation 是本次目标合同。shell 已提供稳定 New task、全局 Task 导航、行动优先分组和左下角账号入口；Skill 中心与持久定时任务都作为同级全局能力进入该 shell。
+> Capability：**部分当前、部分目标**。Renderer 合同已提供 MetaWork 顶层与 Workspace/Task 分离的 revision 6 Skill catalog projection；本地 package/inventory、详情与管理 mutation 是本次目标合同。shell 已提供稳定 New task、全局 Task 导航、行动优先分组和左下角账号入口；Skill 中心、常驻但诚实呈现 availability 的 MCP 页面与持久定时任务都作为同级全局能力进入该 shell。
 
 ### 5.1 Task 列表与路径上下文
 
@@ -204,21 +205,22 @@ Workspace
 
 ### 5.2 全局能力入口
 
-> Capability：**当前**。Skill 入口只依赖现有 AgentCore revision 6 discovery/catalog；定时任务入口依赖 Workbench-owned 持久 schedule projection、后台 Host timer/notification 与真实 Task admission。
+> Capability：**当前与受 gate 目标**。Skill 入口只依赖现有 AgentCore revision 6 discovery/catalog；定时任务入口依赖 Workbench-owned 持久 schedule projection、后台 Host timer/notification 与真实 Task admission。MCP 入口与 route 已进入稳定 shell；当前 Host 固定发布 unavailable，页面据此显示不可用空状态，不显示虚构的服务或管理动作。
 
-`新建任务`、`技能` 与 `定时任务` 位于 Task 列表上方的同一个纵向紧凑菜单，不使用窄侧栏中的卡片宫格，也不通过额外分组间距制造父子关系：
+`新建任务`、`技能`、`MCP` 与 `定时任务` 位于 Task 列表上方的同一个纵向紧凑菜单，不使用窄侧栏中的卡片宫格，也不通过额外分组间距制造父子关系：
 
 ```text
 MetaWork
 
   +  New task
   /  Skills
+  ⌁  MCP
   ◷  Scheduled tasks
 
 Tasks
 ```
 
-- 三个菜单项使用相同行高、左右 padding、图标列、字号、字重、hover 与 focus 样式；`New task` 不再使用独立填充按钮，快捷键只作为 tooltip 或不改变布局的尾部提示；
+- 四个菜单项使用相同行高、左右 padding、图标列、字号、字重、hover 与 focus 样式；`New task` 不再使用独立填充按钮，快捷键只作为 tooltip 或不改变布局的尾部提示；
 - 当前能力 route 使用 `brand-100` 弱背景、`brand-700` 图标/文字和左侧 2 px 选中标识，并设置 `aria-current="page"`；选中不能只靠颜色；
 - 一个能力可用时只显示一行；后续能力按真实 owner 与使用频率增加，不预留 disabled 占位、不用 `More` 收纳尚不存在的产品；
 - 点击能力入口保留完整 Workbench 左栏和 Task 选择，只替换中央 route；点击 New task 或 Task 回到对应 Workbench route。Settings 仍是独立全局 route，进入后按 §14.2 隐藏 Task 左栏；
@@ -289,7 +291,36 @@ Skills                                                              10
 - 全局空状态提供 `Import skill` 与 `Create in new task`。后者只打开预填 Text draft；返回 Skill 中心保留搜索、范围和选中的 Project，不持久化瞬时 drawer/progress；
 - delete/uninstall 确认必须写明 personal 或具体 Project 范围，并把安全的 Cancel 作为初始焦点。成功后焦点移到相邻卡片或分组标题；失败保留资产和操作入口，不静默消失。
 
-### 5.4 定时任务
+### 5.4 MCP 服务
+
+> Capability：**入口当前可用，管理能力尚未接通**。Renderer 已实现严格解码、稳定 route 和只读视图；Workbench 当前必须发布 `mcpManagement = false` 与 `mcp.availability = unavailable`，页面因此只显示明确的不可用状态。只有 AgentCore MCP selection、catalog lifecycle、authority 与安全投影全部接通后，Host 才能在同一合同中切换为 ready/degraded。
+
+MCP 页面沿用 Skill 中心约 944 px 的内容宽度、24–28 px 标题尺度、搜索和行动优先分组，但对象密度不同：Skill 是需要辨识内容的资产卡片，MCP server 是需要快速扫描连接状态的单列连续行。
+
+```text
+MCP                                                   Catalog generation 7
+View trusted servers and the tools they expose to MetaWork.
+
+[ Search servers and tools                                      ]
+
+Needs attention
+┃ Notion             notion          Remote · HTTP     0 tools   Sign-in required
+
+Available servers
+┃ GitHub             github          Remote · HTTP     2 tools   Ready
+
+Disabled
+┃ Filesystem         local_files     Local · stdio     1 tool    Disabled
+```
+
+- 分组顺序固定为 `Needs attention / Available servers / Disabled`，空分组不渲染；状态栏同时使用细色轨、文字和语义图标，不能只靠颜色。`needs_authentication / unreachable / invalid_catalog` 进入 attention；
+- 每行以服务 display name 为主标题，namespace 使用 monospace，右侧依次放连接类型、工具数和状态。搜索只覆盖 display name、namespace、transport 与 Host 发布的 canonical tool name；不检索 Renderer 不持有的 schema 或原始配置；
+- 点击行打开右侧详情 drawer，窄窗为整页。详情只重复 Host 已清洗的状态、transport、工具数、safe diagnostic 和 tool name 目录；关闭、Escape、焦点陷阱与焦点归还沿用 Skill drawer 的可访问性规则；
+- `redacted = true` 时详情明确说明 Host 移除了敏感目录文本；Renderer 不展示或重建 command、args、environment、完整 URL、headers、credential、OAuth 数据、raw diagnostic、schema body、fingerprint 或 AgentCore handle；
+- 页面当前没有 mutation，不显示 Add、Sign in、Enable/Disable、Reconnect、Delete、Refresh、逐工具开关、Resources、Prompts、Apps 或 marketplace 占位。将来接入时，服务配置、已发现目录和实际授权工具必须保持三个不同事实；新增服务默认不能扩大现有 authority，刷新必须是显式 typed transaction；
+- 交互基线参考 VS Code、Claude、Cursor、Continue 与 Hermes Desktop 的成熟 MCP 组织方式。Hermes 提供的配置/目录/工具分层、默认关闭新服务、逐服务工具范围与显式 reload 被吸收为约束；MetaWork 不复制其配置格式、市场数据或 publisher 信任结论。没有 MetaWork-owned 可信 catalog、签名与 publisher verification 前不实现市场。
+
+### 5.5 定时任务
 
 > Capability：**当前**。Workbench 拥有持久计划定义、recurrence、后台 timer admission、missed-run reconciliation、occurrence history 与通知事实；AgentCore 只执行触发后创建的真实 Run。主窗口关闭后 Host 继续在后台运行，重新启动后从 canonical store 恢复。
 
@@ -330,7 +361,7 @@ Skills                                                              10
 - 页面不再显示“仅在 MetaWork 运行时触发”限制条。窗口关闭时 MetaWork 留在系统后台并继续计划；显式退出通过托盘动作完成并在确认中说明影响，重启后定义与触发游标从 Host store 恢复；
 - 已有定义时的搜索使用 `type="search"`；分区是带可访问名称的 region/list；模板行、任务行和 overflow 动作都有明确 button 语义。drawer 打开后焦点进入标题/说明，`Escape` 或关闭动作回到原触发行；运行历史更新不抢焦点。
 
-### 5.5 Task 分组与排序
+### 5.6 Task 分组与排序
 
 Task 按行动优先级分组，而不是全部按时间混排：
 
@@ -347,7 +378,7 @@ Recent
 - 后台 Task 产生待处理请求时必须进入 `Needs your attention`；
 - 不能只用绿点、灰点区分状态。
 
-### 5.6 创建、命名、归档与删除
+### 5.7 创建、命名、归档与删除
 
 - 点击 `New task` 只打开空白任务页；第一次发送后才创建真实 Task，避免空记录；
 - 标题根据首条用户指令自动生成，用户可以重命名；
@@ -356,7 +387,7 @@ Recent
 - 删除确认必须明确说明文件不会被删除；
 - queued、running、waiting_user 或 stopping 的 Task 不能归档或删除；必须先停止或明确取消并等待真实 terminal 结果。
 
-### 5.7 左下角账号入口
+### 5.8 左下角账号入口
 
 `execution_ready` 后，左栏底部固定显示 Metask identity：头像或首字母、显示名和简短连接状态。它是全局账号入口，不显示完整 API Key，也不承担模型快速选择。
 
@@ -930,7 +961,7 @@ Account operation 在设置中的投影如下：
 | cancel / terminal failure | 恢复已提交默认配置，不保留失效候选                                 | 恢复已提交默认配置，不保留失效候选             | 取消明确说明未应用更改；失败说明原因与旧默认仍有效，不能留下永久 disabled selector |
 | `reauth_required`         | 保留脱敏事实但禁用 catalog mutation                                | 保留脱敏事实但禁用 catalog mutation            | 把重新认证作为当前恢复动作，不能清空 Workspace、Task 或已有 execution 事实         |
 
-Skill 中心与定时任务按 §5.2–§5.4 进入 Workbench 一级能力导航；连接器和 IM 频道仍只有在真实接通并形成清晰产品 owner 后才进入导航。未接通时不放置假入口，也不照搬其他 Agent 产品的信息架构。
+Skill 中心、MCP 与定时任务按 §5.2–§5.5 进入 Workbench 一级能力导航；MCP 使用稳定入口和 Host-owned availability 区分“页面可达”与“管理能力可用”，不可用时只呈现说明。其他连接器和 IM 频道仍只有在真实接通并形成清晰产品 owner 后才进入导航，不照搬其他 Agent 产品的信息架构。
 
 ## 15. 国际化
 

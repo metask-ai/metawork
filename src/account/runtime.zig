@@ -754,9 +754,7 @@ pub const Runtime = struct {
             (fact.view.operation == .none and
                 fact.view.execution_state == .none))
             return fact;
-        const catalog = if (fact.kind == .catalog_changed and
-            fact.view.operation == .none and
-            fact.view.execution_state == .ready)
+        const catalog = if (completesCatalogTransaction(fact))
             &self.candidate_public_catalog
         else
             self.catalogForOperation(fact.view.operation);
@@ -780,10 +778,7 @@ pub const Runtime = struct {
     pub fn commit(self: *Runtime, prepared: *Prepared) void {
         self.assertMainThread();
         const fact = prepared.transition.fact();
-        if (fact.kind == .catalog_changed and
-            fact.view.operation == .none and
-            fact.view.execution_state == .ready)
-        {
+        if (completesCatalogTransaction(fact)) {
             self.effects.public_catalog.replaceFromPublic(
                 &self.candidate_public_catalog,
             );
@@ -1638,6 +1633,13 @@ pub const Runtime = struct {
     }
 };
 
+fn completesCatalogTransaction(fact: contract.AccountFact) bool {
+    if (fact.view.operation != .none or
+        fact.view.execution_state != .ready)
+        return false;
+    return fact.kind == .catalog_changed or fact.kind == .execution_changed;
+}
+
 pub const TestSupport = if (builtin.is_test) struct {
     pub fn prepareReadyRestore(
         runtime: *Runtime,
@@ -1860,6 +1862,69 @@ test "Account Runtime owns automatic catalog selection policy" {
     try std.testing.expect(
         runtime.automaticModelSelection(&catalog, loading_models_view) == null,
     );
+}
+
+test "Account Runtime publishes the candidate catalog with first execution" {
+    var wake_context: u8 = 0;
+    var runtime = try initRuntimeForTest(&wake_context);
+    defer runtime.deinit();
+
+    state_impl.TestSupport.installInitialExecutionPreparation(
+        &runtime.account,
+        "key-1",
+        "model-1",
+    );
+    catalog_impl.TestSupport.replacePublic(
+        &runtime.candidate_public_catalog,
+        &.{.{
+            .id = "key-1",
+            .name = "Primary",
+            .suffix = "1234",
+            .provider_kind = .anthropic,
+        }},
+        &.{.{ .id = "model-1", .display_name = "Model 1" }},
+    );
+
+    var execution = try contract.OwnedExecutionConfig.initOwned(
+        std.testing.allocator,
+        .anthropic,
+        try std.testing.allocator.dupe(u8, "model-1"),
+        try std.testing.allocator.dupe(
+            u8,
+            contract.metask_anthropic_messages_url,
+        ),
+        1,
+        try std.testing.allocator.dupe(u8, "secret-key"),
+    );
+    var completion: state_impl.WorkerCompletion = .{
+        .attempt_id = 1,
+        .payload = .{ .execution_ready = execution.take() },
+    };
+    defer completion.deinit();
+    var prepared = preparedFromState(
+        runtime.account.prepareCompletion(&completion),
+    );
+    defer prepared.deinit();
+
+    const fact = runtime.preparedFact(&prepared);
+    try contract.validateView(fact.view);
+    try std.testing.expectEqual(@as(usize, 1), fact.view.api_keys.len);
+    try std.testing.expectEqual(@as(usize, 1), fact.view.models.len);
+    if (prepared.takeExecution()) |execution_value| {
+        var committed_execution = execution_value;
+        committed_execution.deinit();
+    }
+    runtime.commit(&prepared);
+
+    const committed_view = runtime.view();
+    try contract.validateView(committed_view);
+    try std.testing.expectEqualStrings(
+        "key-1",
+        committed_view.selected_api_key_id,
+    );
+    try std.testing.expectEqualStrings("model-1", committed_view.selected_model);
+    try std.testing.expectEqual(@as(usize, 1), committed_view.api_keys.len);
+    try std.testing.expectEqual(@as(usize, 1), committed_view.models.len);
 }
 
 test "Account Runtime mailbox transfers ownership and reports collision" {

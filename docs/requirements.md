@@ -121,7 +121,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - 每条事件、审批和工具结果必须路由到正确 Task/Run；
 - 每个 Task 在创建时建立 execution binding epoch，固化 account/profile、generation、Provider/API identity 与模型；全局默认变化不改写当前 epoch、Task 历史或 live Agent Session；显式 rebind 只能在没有 non-terminal Run 且 Conversation capability 已验收时创建新的可审计 epoch；
 - 每个 Task 至多一个 active operation：当前可以是 non-terminal Run 或 manual compact，包括 executor 中的 `queued` 状态；Run 与 compact 互斥，当前 operation 结束前 Workbench 拒绝新的 Run、compact 和其他 Session mutation，Renderer 只能保留未提交草稿；
-- Renderer 产品合同为 `metawork.renderer-bridge` 固定 revision 1：`connect` 精确协商后才开放产品路径，snapshot 根节点由严格的无 secret `capabilities`、`account`、`selectedWorkspaceId`、`workspaces` 与 `tasks` 组成且不维护第二个局部版本；Account 发布脱敏 catalog selection identifier 与 generation，Workspace 由 Host 独立发布，Task 固化 binding epoch 与显示事实；Account、Workspace 和 Task mutation 均提交 expected generation/epoch，Host 重新校验 window、ownership、catalog membership 与 admission；快速开发阶段的合同内容直接原地 hard cut，不接受或双写被取代的临时 payload；
+- Renderer 产品合同为 `metawork.renderer-bridge` 固定 revision 1：`connect` 精确协商后才开放产品路径，snapshot 根节点由严格的无 secret `capabilities`、`account`、`skillCatalog`、`skillManagement`、`mcp`、`selectedWorkspaceId`、`workspaces`、`scheduledTasks` 与 `tasks` 组成且不维护第二个局部版本；Account 发布脱敏 catalog selection identifier 与 generation，Workspace 由 Host 独立发布，Task 固化 binding epoch 与显示事实；Account、Workspace 和 Task mutation 均提交 expected generation/epoch，Host 重新校验 window、ownership、catalog membership 与 admission；快速开发阶段的合同内容直接原地 hard cut，不接受或双写被取代的临时 payload；
 - 预期的 Task/Workspace admission 拒绝必须作为严格 typed result 返回并由 Renderer 映射为产品文案；非法 payload、伪造 ownership 与不可信 origin 仍 fail closed 为 Bridge error，不得把内部 error name 显示给用户；
 - 当前固定 revision 1 合同原子提供独立 Workspace projection 与 Task execution binding。一次性目录能力必须由选择命令在 Host 内创建并消费，Renderer 不接收路径授权 token，不从 Task 反推 Workspace，也不能通过可选字段继续发送被取代的临时 payload；
 - 产品 Task identity 由 Workbench 独立、稳定地分配；内部 Agent/Gate 原始事件使用单独的 Session route identity 做路由，两者不得复用或假定数值相等。Session route identity 不进入产品 snapshot，Renderer 始终只看到唯一的产品 `taskId`。
@@ -180,7 +180,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 ### 5.9 Workbench 界面与任务组织
 
 - 未登录与 Workbench 是两个明确界面阶段：首次启动只突出登录及其恢复动作；`execution_ready` 后才展示 Workspace、Task、Composer 和执行历史；
-- Workbench 左栏承担稳定 New task、已接通的全局能力入口、全局 Task 列表与左下角账号入口；`新建任务`、`技能` 与 `定时任务` 使用同一紧凑一级菜单的相同行高、缩进和 active 语义，不用额外留白或独立大按钮制造虚假层级；只有真实接通的 capability 才显示对应入口，Task 按 `需要处理 / 正在运行 / 最近` 等行动优先级组织；
+- Workbench 左栏承担稳定 New task、已接通的全局能力入口、全局 Task 列表与左下角账号入口；`新建任务`、`技能`、`MCP` 与 `定时任务` 使用同一紧凑一级菜单的相同行高、缩进和 active 语义，不用额外留白或独立大按钮制造虚假层级；只有真实接通的 capability 才显示对应入口，Task 按 `需要处理 / 正在运行 / 最近` 等行动优先级组织；
 - New task 中央区域始终以 Composer 为主，当前模型和 Workspace 在发送前可见；API 管理不进入 Composer，模型与 Workspace 也不得混成不透明的单一“模式”；
 - Task 启动后中央区域转为可追溯工作轨迹，Composer 固定在底部；审批、当前活动、工具详情、usage 或真实结果只决定 Inspector 模块是否可用，不因普通 Run 开始或结束自动开合。只有新的待处理请求可以自动打开一次；打开后保持到用户关闭或切换 Task；
 - `queued / running / waiting_user` 的停止只提供 Task Header 一个可见入口；Composer 只保留本地草稿和禁用发送提示，不建立第二个 Stop。停止请求必须等待 canonical terminal，transport acknowledgement 或 UI 状态变化都不能伪造 `Stopped`；
@@ -205,7 +205,16 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - 全局搜索覆盖 Task、用户指令、完成消息和 Output 文件名；Workspace 只作为 Task 与 New task 的路径上下文，不作为独立导航结果；工具原始日志默认不进入普通搜索；
 - `en-US` 是规范产品文案和回退语言，`zh-CN` 是首个完整 locale；Host 传递 structured code 与参数，Renderer 负责本地化。
 
-### 5.10 定时任务
+### 5.10 MCP 服务
+
+- `MCP` 是与 `新建任务`、`技能`、`定时任务` 同级的 MetaWork 全局页面，不跟随当前 Task 或 Workspace，左栏入口稳定显示。`capabilities.mcpManagement` 只声明真实管理目录是否已经接通；`mcp.availability = unavailable` 时 Host 必须发布空目录，Renderer 打开页面后显示明确的不可用状态，不能因入口或 AgentCore ABI 存在 MCP symbol 就推断产品能力已经接通；
+- 页面复用 Skill 中心的最大宽度、标题节奏、搜索与行动优先分组，但服务采用单列连续紧凑行而不是 Skill 卡片宫格。服务按 `需要处理 / 可用服务 / 已停用` 分区，每行只显示名称、namespace、连接类型、工具数和结构化状态；
+- 搜索覆盖服务名称、namespace、连接类型和 Host 已投影的 canonical tool name。点击服务打开详情抽屉，展示相同的有界产品事实、safe diagnostic 与工具目录；Renderer 不读取 AgentCore handle、原始配置或服务响应，也不从名称推断健康、权限或来源；
+- Host 只可发布已清洗的 MCP 投影。command、arguments、environment、完整 URL、header、credential、OAuth 数据、raw diagnostic、schema body 和 catalog fingerprint 不得进入 snapshot；已发生清洗时用 `redacted` 事实说明，不把被移除内容替换为 Renderer 猜测文本；
+- 首个页面合同只提供发现与诊断视图，不提供添加服务、登录、启用/停用、重连、删除、逐工具 include/exclude、Resources、Prompts、Apps 或 marketplace。上述动作必须先确定 Workbench/Account/AgentCore owner、authority、持久化与失败语义，并以 typed command 接入；不存在可信 catalog 与 publisher verification 前，不建立推荐市场；
+- 页面采用成熟 MCP 客户端共有的“配置服务、已发现目录、实际暴露工具”分层，并吸收 Hermes Desktop 的默认不扩大 authority、逐服务明确工具范围和显式刷新原则；这些是交互约束，不构成对 Hermes 配置、协议或市场数据的复制。当前 MetaWork 仍保持 `SessionHostConfigV1.mcp_selection = null`，因此正式 Host 发布 `mcpManagement = false` 与 unavailable 空投影；常驻入口和不可用页面都不等于 MCP execution 已可用。
+
+### 5.11 定时任务
 
 - `定时任务` 是与 `新建任务`、`技能` 同级的独立页面，不属于 Skill 中心、交互式 Task 或某个 Workspace 的子页面；页面不显示或选择 Workspace，每次 occurrence 直接请求新的 Managed Workspace；
 - 没有定义时，页面提供可采用的 Text 建议模板，并保留页首统一 `新建定时任务` 入口；不建立无法推导时间规则的伪自然语言快捷入口。Text 模板和普通定时任务都使用自动工作区，不要求用户先添加或选择 User Workspace。已有定义时切换为搜索工具栏，并按 `需要处理 / 进行中 / 已暂停 / 已完成` 组织。紧凑行显示名称、计划、下一次运行、最近结果及其真实 Task 链接，并提供编辑、暂停/恢复、立即运行和删除；
