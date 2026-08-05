@@ -56,6 +56,7 @@ import type { InspectorSection } from "../features/inspector/inspector-state.ts"
 import { useInspectorSession } from "../features/inspector/useInspectorSession.ts";
 import { TaskTimeline } from "../features/timeline/TaskTimeline.tsx";
 import { TaskList, TaskSignals } from "../features/tasks/TaskList.tsx";
+import { NewTaskView } from "../features/tasks/NewTaskView.tsx";
 import {
   useNewTaskDrafts,
   useTaskDrafts,
@@ -2287,44 +2288,47 @@ export default function App() {
             </section>
           )}
 
-          <TaskTimeline
-            task={activeTask}
-            draft={newTaskDraftActive}
-            draftHasWorkspace={Boolean(composerWorkspace)}
-            revision={snapshot.revision}
-            composerHasDraft={composerDraftHasContent(composerDraft)}
-            retryAvailable={taskCanCompose && !taskOperationInFlight}
-            responseDisabled={bridgeUnavailable}
-            draftComposer={newTaskDraftActive ? composerFooter : null}
-            onUseExample={(instruction) => {
-              const prepared = prepareRetryDraft(composerDraft, instruction);
-              if (prepared.kind === "prepared")
-                updateComposerDraft(prepared.draft);
-              else if (activeTask)
-                setStatus(
-                  quietStatus("run.draft_preserved", {
-                    scope: "task",
-                    taskId: activeTask.id,
-                  }),
-                );
-              window.requestAnimationFrame(() => composer.current?.focus());
-            }}
-            onPrepareRetry={prepareRetry}
-            onInspect={openInspectorSection}
-            onRespond={(payload) => void respondUi(payload)}
-            renderPendingUi={(props) => {
-              const { taskId, ...panelProps } = props;
-              const identity = uiRequestIdentity(taskId, props.pending);
-              return (
-                <ApprovalPanel
-                  {...panelProps}
-                  responsePhase={uiResponsePhase(uiResponseStates, identity)}
-                />
-              );
-            }}
-            renderUiRecord={(record) => <UiRecordCard record={record} />}
-          />
-          {!newTaskDraftActive && composerFooter}
+          {newTaskDraftActive ? (
+            <NewTaskView
+              hasWorkspace={Boolean(composerWorkspace)}
+              composerHasDraft={composerDraftHasContent(composerDraft)}
+              composer={composerFooter}
+              onUseExample={(instruction) => {
+                const prepared = prepareRetryDraft(composerDraft, instruction);
+                if (prepared.kind === "prepared")
+                  updateComposerDraft(prepared.draft);
+                window.requestAnimationFrame(() => composer.current?.focus());
+              }}
+            />
+          ) : (
+            <>
+              <TaskTimeline
+                task={activeTask}
+                revision={snapshot.revision}
+                composerHasDraft={composerDraftHasContent(composerDraft)}
+                retryAvailable={taskCanCompose && !taskOperationInFlight}
+                responseDisabled={bridgeUnavailable}
+                onPrepareRetry={prepareRetry}
+                onInspect={openInspectorSection}
+                onRespond={(payload) => void respondUi(payload)}
+                renderPendingUi={(props) => {
+                  const { taskId, ...panelProps } = props;
+                  const identity = uiRequestIdentity(taskId, props.pending);
+                  return (
+                    <ApprovalPanel
+                      {...panelProps}
+                      responsePhase={uiResponsePhase(
+                        uiResponseStates,
+                        identity,
+                      )}
+                    />
+                  );
+                }}
+                renderUiRecord={(record) => <UiRecordCard record={record} />}
+              />
+              {composerFooter}
+            </>
+          )}
         </div>
       )}
       <GlobalSearch

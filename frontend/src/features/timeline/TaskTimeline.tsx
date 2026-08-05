@@ -24,12 +24,6 @@ import { useI18n, type MessageId } from "../../i18n/context.ts";
 
 type TimelineDetailSection = "tools" | "usage";
 
-const newTaskExampleIds: MessageId[] = [
-  "task.example.review",
-  "task.example.test_failure",
-  "task.example.todo",
-];
-
 function tokenTotal(run: RunView): bigint | null {
   try {
     return BigInt(run.usage.input) + BigInt(run.usage.output);
@@ -158,14 +152,10 @@ function orderedActivity(run: RunView, task: TaskView): RunActivity[] {
 
 export function TaskTimeline({
   task,
-  draft,
-  draftHasWorkspace,
   revision,
   composerHasDraft,
   retryAvailable,
   responseDisabled,
-  draftComposer,
-  onUseExample,
   onPrepareRetry,
   onInspect,
   onRespond,
@@ -173,14 +163,10 @@ export function TaskTimeline({
   renderUiRecord,
 }: {
   task: TaskView | null;
-  draft: boolean;
-  draftHasWorkspace: boolean;
   revision: string;
   composerHasDraft: boolean;
   retryAvailable: boolean;
   responseDisabled: boolean;
-  draftComposer?: ReactNode;
-  onUseExample: (instruction: string) => void;
   onPrepareRetry: (input: RunInputView) => void;
   onInspect: (
     section: TimelineDetailSection,
@@ -367,34 +353,6 @@ export function TaskTimeline({
             <div className="task-empty-state">
               <h2>{t("task.empty_title")}</h2>
               <p>{t("task.created_empty_body")}</p>
-            </div>
-          )}
-          {!task && (
-            <div className="task-empty-state is-new-task">
-              <h2>{t(draft ? "task.empty_title" : "task.new")}</h2>
-              <p>
-                {t(
-                  draft
-                    ? draftHasWorkspace
-                      ? "task.empty_body_with_workspace"
-                      : "task.empty_body_without_workspace"
-                    : "task.no_tasks",
-                )}
-              </p>
-              {draft && draftComposer}
-              {draft && !composerHasDraft && (
-                <div className="task-examples" aria-label={t("task.examples")}>
-                  {newTaskExampleIds.map((id) => (
-                    <button
-                      key={id}
-                      className="task-example focus-ring"
-                      onClick={() => onUseExample(t(id))}
-                    >
-                      {t(id)}
-                    </button>
-                  ))}
-                </div>
-              )}
             </div>
           )}
         </div>

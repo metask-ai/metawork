@@ -24,6 +24,9 @@ const { primaryShortcutModifier } = await vite.ssrLoadModule(
 const { TaskTimeline } = await vite.ssrLoadModule(
   "/src/features/timeline/TaskTimeline.tsx",
 );
+const { NewTaskView } = await vite.ssrLoadModule(
+  "/src/features/tasks/NewTaskView.tsx",
+);
 const { TaskList } = await vite.ssrLoadModule(
   "/src/features/tasks/TaskList.tsx",
 );
@@ -219,13 +222,10 @@ function renderCompletedTimeline(
       },
       createElement(TaskTimeline, {
         task,
-        draft: false,
-        draftHasWorkspace: true,
         revision: "1",
         composerHasDraft: false,
         retryAvailable: true,
         responseDisabled: false,
-        onUseExample() {},
         onPrepareRetry() {},
         onInspect() {},
         onRespond() {},
@@ -240,7 +240,7 @@ function renderCompletedTimeline(
   );
 }
 
-function renderNewTaskTimeline(composerHasDraft, draftComposer = null) {
+function renderNewTaskView(composerHasDraft, composer = null) {
   return renderToStaticMarkup(
     createElement(
       I18nContext.Provider,
@@ -251,25 +251,11 @@ function renderNewTaskTimeline(composerHasDraft, draftComposer = null) {
           t: (id, values) => translate("en-US", id, values),
         },
       },
-      createElement(TaskTimeline, {
-        task: null,
-        draft: true,
-        draftHasWorkspace: true,
-        revision: "1",
+      createElement(NewTaskView, {
+        hasWorkspace: true,
         composerHasDraft,
-        retryAvailable: true,
-        responseDisabled: false,
-        draftComposer,
+        composer,
         onUseExample() {},
-        onPrepareRetry() {},
-        onInspect() {},
-        onRespond() {},
-        renderPendingUi() {
-          return null;
-        },
-        renderUiRecord() {
-          return null;
-        },
       }),
     ),
   );
@@ -480,12 +466,12 @@ test("Timeline projects manual Compact as a lightweight system event", () => {
 });
 
 test("task examples disappear before they can overwrite an existing draft", () => {
-  assert.match(renderNewTaskTimeline(false), /Review this project/);
-  assert.doesNotMatch(renderNewTaskTimeline(true), /Review this project/);
+  assert.match(renderNewTaskView(false), /Review this project/);
+  assert.doesNotMatch(renderNewTaskView(true), /Review this project/);
 });
 
 test("new Task places the Composer between the outcome prompt and examples", () => {
-  const markup = renderNewTaskTimeline(
+  const markup = renderNewTaskView(
     false,
     createElement("footer", { "data-test": "draft-composer" }, "Composer"),
   );
@@ -495,7 +481,7 @@ test("new Task places the Composer between the outcome prompt and examples", () 
   assert.ok(prompt >= 0 && composer > prompt && example > composer);
 });
 
-test("Workbench foundation uses the purple system and centered new Task stage", async () => {
+test("Workbench foundation uses a stable 760px new Task Composer stage", async () => {
   const [app, shell, css] = await Promise.all([
     readFile(join(process.cwd(), "frontend/src/app/App.tsx"), "utf8"),
     readFile(join(process.cwd(), "frontend/src/app/AppShell.tsx"), "utf8"),
@@ -520,15 +506,19 @@ test("Workbench foundation uses the purple system and centered new Task stage", 
   assert.match(css, /\.sidebar-primary\s*\{[\s\S]*?padding:\s*10px 14px 0/);
   assert.match(css, /\.new-task-button\s*\{[\s\S]*?margin-top:\s*8px/);
   assert.match(css, /\.brand-name\s*\{[\s\S]*?min-height:\s*26px/);
+  assert.match(css, /--content-measure:\s*760px/);
   assert.match(
     css,
-    /\.task-empty-state\.is-new-task\s*\{[\s\S]*?align-content:\s*center/,
+    /\.new-task-content\s*\{[\s\S]*?width:\s*min\(100%, var\(--content-measure\)\)/,
   );
-  assert.doesNotMatch(css, /color-cobalt|settings-teal|35,\s*109,\s*100/);
   assert.match(
-    app,
-    /draftComposer=\{newTaskDraftActive \? composerFooter : null\}/,
+    css,
+    /\.new-task-content \.composer\s*\{[\s\S]*?min-height:\s*140px/,
   );
+  assert.match(css, /\.task-examples\s*\{[\s\S]*?width:\s*100%/);
+  assert.doesNotMatch(css, /color-cobalt|settings-teal|35,\s*109,\s*100/);
+  assert.match(app, /<NewTaskView[\s\S]*?composer=\{composerFooter\}/);
+  assert.doesNotMatch(app, /draftComposer=/);
   assert.match(
     app,
     /!newTaskDraftActive && \(\s*<header className="task-header">/,
