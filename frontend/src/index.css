@@ -405,33 +405,6 @@ summary::-webkit-details-marker {
 }
 
 /* Mature Workbench shell */
-.commandbar-search {
-  grid-column: 4;
-  display: inline-flex;
-  min-width: 88px;
-  height: 30px;
-  padding: 0 8px;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  border: 1px solid transparent;
-  border-radius: 7px;
-  color: var(--color-muted);
-  background: transparent;
-  font-size: 11px;
-}
-
-.commandbar-search:hover {
-  border-color: var(--color-rule);
-  color: var(--color-graphite);
-  background: var(--color-canvas);
-}
-
-.commandbar-search svg {
-  font-size: 15px;
-}
-
-.commandbar-search kbd,
 .new-task-button kbd {
   color: #849096;
   font-family: var(--font-mono);
@@ -1839,17 +1812,6 @@ summary::-webkit-details-marker {
 }
 
 @media (max-width: 620px) {
-  .commandbar-search span,
-  .commandbar-search kbd {
-    display: none;
-  }
-
-  .commandbar-search {
-    min-width: 32px;
-    width: 32px;
-    padding: 0;
-  }
-
   .settings-header,
   .settings-layout {
     width: min(100% - 28px, 920px);
@@ -1989,8 +1951,8 @@ summary::-webkit-details-marker {
   z-index: 50;
   display: grid;
   grid-template-columns:
-    max(34px, calc(var(--left-column) - var(--commandbar-left-inset)))
-    minmax(0, auto) minmax(0, 1fr) auto auto;
+    max(72px, calc(var(--left-column) - var(--commandbar-left-inset)))
+    minmax(0, auto) minmax(0, 1fr) auto;
   align-items: center;
   min-height: var(--window-bar-height);
   padding: 8px calc(10px + var(--window-controls-trailing, 0px)) 8px
@@ -2014,6 +1976,13 @@ summary::-webkit-details-marker {
 .workbench-commandbar > * {
   position: relative;
   z-index: 1;
+}
+
+.commandbar-leading-actions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
 }
 
 [data-platform="windows"] .workbench-commandbar {
@@ -6410,7 +6379,7 @@ summary::-webkit-details-marker {
   }
 
   .workbench-commandbar {
-    grid-template-columns: 34px minmax(0, 1fr) 30px auto auto;
+    grid-template-columns: 72px minmax(0, 1fr) 30px auto;
   }
 
   .commandbar-alert-slot {
@@ -6470,7 +6439,7 @@ summary::-webkit-details-marker {
   }
 
   .workbench-commandbar {
-    grid-template-columns: 34px minmax(0, 1fr) 30px auto;
+    grid-template-columns: 72px minmax(0, 1fr) 30px auto;
   }
 
   .task-header {

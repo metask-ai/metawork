@@ -12,10 +12,7 @@ import {
   readLocalPreference,
   writeLocalPreference,
 } from "../platform/local-preferences.ts";
-import {
-  desktopPlatform,
-  primaryShortcutModifier,
-} from "../platform/keyboard.ts";
+import { desktopPlatform } from "../platform/keyboard.ts";
 import type { WindowTitlebarClickCount } from "../platform/window-chrome.ts";
 
 const leftPreference = "metawork.panel.workspaces";
@@ -57,7 +54,6 @@ export function AppShell({
   children: ReactNode;
 }) {
   const { t } = useI18n();
-  const shortcutModifier = primaryShortcutModifier();
   const [leftOpen, setLeftOpen] = useState(() =>
     initialPanel(leftPreference, 820),
   );
@@ -118,20 +114,27 @@ export function AppShell({
         onToggleWindowSize={onToggleWindowSize}
         onOpenWindowMenu={onOpenWindowMenu}
       >
-        {leftAvailable ? (
+        <div className="commandbar-leading-actions">
+          {leftAvailable && (
+            <button
+              className="icon-button focus-ring"
+              aria-controls="workspace-sidebar"
+              aria-expanded={leftOpen}
+              aria-label={t("app.toggle_sidebar")}
+              title={t("app.toggle_sidebar")}
+              onClick={toggleLeft}
+            >
+              <Icon name="sidebar" />
+            </button>
+          )}
           <button
             className="icon-button focus-ring"
-            aria-controls="workspace-sidebar"
-            aria-expanded={leftOpen}
-            aria-label={t("app.toggle_sidebar")}
-            title={t("app.toggle_sidebar")}
-            onClick={toggleLeft}
+            aria-label={t("search.open")}
+            onClick={onSearch}
           >
-            <Icon name="sidebar" />
+            <Icon name="search" />
           </button>
-        ) : (
-          <span className="commandbar-leading-spacer" aria-hidden="true" />
-        )}
+        </div>
         <div className="commandbar-context" data-visible={contextVisible}>
           {contextVisible && (
             <span className="commandbar-task">{taskTitle}</span>
@@ -156,16 +159,6 @@ export function AppShell({
             </details>
           )}
         </div>
-        <button
-          className="commandbar-search focus-ring"
-          aria-label={t("search.open")}
-          title={t("search.open")}
-          onClick={onSearch}
-        >
-          <Icon name="search" />
-          <span>{t("search.open")}</span>
-          <kbd>{shortcutModifier}K</kbd>
-        </button>
         <WindowControls
           maximized={windowMaximized}
           labels={{

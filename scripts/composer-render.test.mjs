@@ -18,9 +18,6 @@ const { ComposerFooter } = await vite.ssrLoadModule(
   "/src/features/composer/ComposerFooter.tsx",
 );
 const { AppShell } = await vite.ssrLoadModule("/src/app/AppShell.tsx");
-const { primaryShortcutModifier } = await vite.ssrLoadModule(
-  "/src/platform/keyboard.ts",
-);
 const { TaskTimeline } = await vite.ssrLoadModule(
   "/src/features/timeline/TaskTimeline.tsx",
 );
@@ -342,12 +339,15 @@ test("model selection keeps its exact identity when display metadata is absent",
   assert.doesNotMatch(markup, />Available model</);
 });
 
-test("desktop shortcut labels follow the host platform", () => {
-  assert.equal(primaryShortcutModifier("Win32"), "Ctrl+");
-  assert.equal(primaryShortcutModifier("MacIntel"), "⌘");
-  assert.ok(
-    renderShell(null).includes(`<kbd>${primaryShortcutModifier()}K</kbd>`),
-  );
+test("Workbench keeps Search as an icon beside the sidebar control", () => {
+  const markup = renderShell(null);
+  const leading = markup.indexOf('class="commandbar-leading-actions"');
+  const search = markup.indexOf('aria-label="Search"');
+  const context = markup.indexOf('class="commandbar-context"');
+  assert.ok(leading >= 0 && search > leading && context > search);
+  assert.doesNotMatch(markup, /<kbd>.*K<\/kbd>/);
+  assert.doesNotMatch(markup, /<span>Search<\/span>/);
+  assert.doesNotMatch(markup, /title="Search"/);
 });
 
 test("Account catalog work blocks New task admission but not bound Tasks", async () => {
