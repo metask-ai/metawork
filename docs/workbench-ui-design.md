@@ -167,14 +167,14 @@ Workspace
 
 ### 4.3 一体化窗口栏
 
-主窗口使用 `hidden_inset_tall`：Renderer 命令栏同时承担窗口标题栏的视觉角色，不再叠加独立的标准系统标题行。Renderer 只拥有视觉呈现、交互命中与意图提交，窗口行为、系统资源和真实状态仍由 Native Host 拥有；不允许 Renderer 直接操作原生窗口身份。
+主窗口使用 `hidden_inset_tall`：Renderer 命令栏同时承担窗口标题栏的视觉角色，不再叠加独立的标准系统标题行。Renderer 只拥有视觉呈现、Web 内容交互命中与意图提交，窗口行为、系统资源和真实状态仍由 Desktop Host 拥有；不允许 Renderer 直接操作原生窗口身份。
 
 - 命令栏是窗口交互层，不表现为独立横向标题栏：不使用贯穿全窗的底边或异色横带；左侧 Task rail 的背景与竖分隔线必须延伸到窗口顶部，中央命令区与 Task 工作面使用同一 surface；
 - macOS 为系统交通灯保留左侧安全区；Windows system WebView 无法可靠显露 DWM glyph 时，命令栏提供唯一可见的最小化、最大化/还原与关闭 affordance，Host 在重新校验来源窗口后执行真实 native action；最大化按钮必须消费 Host 状态，普通状态显示单方框与“最大化”，最大化状态显示重叠方框与“还原”；不得同时显示两套窗口按钮；
 - macOS 52 px、Windows 40 px 是各平台一体化窗口栏的最终布局高度。Windows 窗口按钮组必须完整落在 40 px 内，命令栏不得再用垂直 padding 把等高按钮组下移或扩张到布局行之外；最小化、最大化与关闭 glyph 使用同一视觉中心线，不能把最小化横线当作文字基线下沉；
 - 命令栏只包含左栏开关、当前 Task 名称、全局搜索和按需异常入口；不在 Task 名称前重复 Workspace，`左栏开关` 只控制能力与 Task 导航，不兼任 Inspector 开关；
-- 命令栏空白背景的主按钮按下必须立即交给 Native Host，由系统拥有移动阈值、拖动循环、边缘吸附以及最大化后拖拽恢复；Renderer 不得自行等待位移或捕获指针来模拟系统标题栏。按钮、输入、选择框、标签、链接、disclosure、可编辑内容和显式 no-drag 内容必须排除。双击空白区在 Windows 切换最大化/还原，在 macOS 交给 AppKit 并遵循用户的标题栏双击偏好；Windows 右键空白区显示该窗口的原生系统菜单，不在 Renderer 复制菜单项；
-- Renderer 只提交 drag/control 与只读 state 意图；Host 以 App-owned 单一启动窗口 identity 和主线程校验受限 bootstrap chrome capability，使连接失败页仍能移动或关闭窗口，而不依赖 ProductDelivery 已连接。Windows 平台操作必须继续使用同一精确窗口身份，不能猜测当前活动窗口；窗口 resize/focus 后 Renderer 重新读取 Host 最大化状态，不能从 viewport 尺寸猜测状态；
+- 命令栏空白背景的主按钮按下必须立即交给 Desktop Host，由系统拥有移动阈值、拖动循环、边缘吸附以及最大化后拖拽恢复；Renderer 不得自行等待位移或捕获指针来模拟系统标题栏。按钮、输入、选择框、标签、链接、disclosure、可编辑内容和显式 no-drag 内容必须排除。双击空白区在 Windows 切换最大化/还原，在 macOS 交给 AppKit 并遵循用户的标题栏双击偏好；Windows 右键空白区显示该窗口的原生系统菜单，不在 Renderer 复制菜单项；
+- Renderer 只提交 drag/control 与只读 state 意图；Host 以 Desktop Host-owned 单一启动窗口 identity 和主线程校验受限 bootstrap chrome capability，使连接失败页仍能移动或关闭窗口，而不依赖 ProductDelivery 已连接。Windows 平台操作必须继续使用同一精确窗口身份，不能猜测当前活动窗口；窗口 resize/focus 后 Renderer 重新读取 Host 最大化状态，不能从 viewport 尺寸猜测状态；
 - 正常连接、恢复成功和普通操作成功不持续占据命令栏；只有同步失败、命令失败或其他确实需要用户行动的异常才显示状态入口；
 - 异常状态按 connection、account、Workspace identity 或 Task identity 分域保存；并行 Task 的结果不得互相覆盖，命令栏只选择当前上下文中优先级最高的一项显示；
 - 每个已有 Task 的内容标题区右侧提供稳定的 Inspector 图标按钮，accessible name 随状态使用 `打开检查器 / 关闭检查器` 并发布 `aria-expanded`；New task、无 Task 或没有任何可检查事实时不显示该按钮；
@@ -200,7 +200,7 @@ Workspace
 - Workspace projection 的 `kind` 是 Host 事实；一个 Manual Workspace 可以承载多个 Task，Automatic Workspace 精确归属一个 Task；
 - Composer 的工作目录控件只选择、添加或重新授权 New task 路径；Manual Workspace 的完整列表、移除、移除失败重试和空目录记录管理归正式设置页。两处消费同一 Host projection 与 mutation，不复制 registry 或维护第二套 Renderer 状态；
 - 再次打开历史 Task 只保证可浏览记录；需要访问原目录时重新选择或授权，能否继续执行还必须服从 §6.4 的 Conversation 与 execution binding 规则；
-- App 重启后，左栏直接使用 Host 恢复的 Task 列表和顺序；点击 Task 打开其已保存时间线，不自动创建新 Task、不重放最后一次输入，也不把恢复的 `interrupted` 显示成仍在运行；
+- Desktop Host 重启后，左栏直接使用 Host 恢复的 Task 列表和顺序；点击 Task 打开其已保存时间线，不自动创建新 Task、不重放最后一次输入，也不把恢复的 `interrupted` 显示成仍在运行；
 - `taskHistoryPersistenceHealth = read_failed / corrupt / write_failed / outcome_unknown` 时，左栏在 Task 列表前显示一条紧凑、可读的错误提示。历史读取失败或损坏不得伪装成空列表；mutation 保持禁用，`outcome_unknown` 明确要求重启，Renderer 不提供盲目重试同一命令的入口；
 
 ### 5.2 全局能力入口

@@ -1,31 +1,40 @@
 # MetaWork Application 内部架构
 
 > 状态：Application 内部 owner、事务、并发与恢复的当前规范
-> 日期：2026-08-04
+> 日期：2026-08-05
 
-顶层模块、进程方向和跨模块安全边界见 [MetaWork 高层架构](architecture.md)。本文件只定义 Application 内部的 `app`、`account`、`workbench` 与 `agent` owner；实际目录和依赖见 [工程结构与所有权](project-structure.md)，AgentCore 线程与 ABI 生命周期见 [AgentCore 集成契约](agentcore-integration.md)，Metask Account 外部合同见 [Metask Account API 合同](metask-account-contract.md)。
+顶层模块、进程方向和跨模块安全边界见 [MetaWork 高层架构](architecture.md)。本文件定义 Application 内部的 `account`、`workbench` 与 `agent` owner，以及当前共置于 `app.zig` 的跨 owner 协调角色；实际目录和依赖见 [工程结构与所有权](project-structure.md)，AgentCore 线程与 ABI 生命周期见 [AgentCore 集成契约](agentcore-integration.md)，Metask Account 外部合同见 [Metask Account API 合同](metask-account-contract.md)。
 
 ## 1. 模块与 owner
 
-本节只在顶层模块边界确定后描述 Application 内部 owner。Application 内部由四个 named product modules 组成：`app` 负责 composition、主线程跨 owner 提交协调和平台 capability 注入，不持有领域运行状态；`account` 的 Runtime 负责 Metask 登录、catalog、credential、attempt/effect/mailbox、恢复与 ExecutionConfig generation；`workbench` 拥有产品状态、Task、队列、投影与持久化语义；`agent` 执行并收口一个真实 Agent Run。Bridge 位于 Application 之外，但与它们同属 Zig Desktop Host。`metawork_account_contract` 只承载 Account 发布给 App/Bridge/Workbench 的有界纯合同，不是第五个产品模块。
+Application 内部由三个 named product owners 和一个无状态协调角色组成：
+
+- `account` 的 Runtime 负责 Metask 登录、catalog、credential、attempt/effect/mailbox、恢复与 ExecutionConfig generation；
+- `workbench` 拥有产品状态、Task、队列、投影与持久化语义；
+- `agent` 执行并收口一个真实 Agent Run。
+
+App coordinator 负责主线程跨 owner 提交与生命周期顺序，不持有领域运行状态，也不独立决定 Account、Workbench 或 Agent policy。它当前与 Desktop Host composition root 共置于 `app.zig`：同一文件中的 Host 角色负责组装 Bridge 与 Application、注入平台 capability 和驱动平台生命周期；这只是物理共置，不把 Desktop Host 纳入 Application，也不产生第四个产品 owner。Bridge 位于 Application 之外；`metawork_account_contract` 只承载 Account 发布给 App/Bridge/Workbench 的有界纯合同。Host、Renderer 与原生窗口边界只由 [高层架构](architecture.md)定义。
 
 Application 内部负责：
 
 - 由 Account 在 Renderer 之外完成 Metask OAuth、目录查询、凭据持久化与 ExecutionConfig 生成；
-- 由 Account Runtime 在 committed transition 之后产生有界 continuation，由 App 将其重新送入同一提交链；登录后的确定性目录准备留在后台，并只把真实歧义投影成用户动作；
-- 由 App 在同一主线程 turn 内协调 Account prepare、Workbench no-fail install 和 Account commit；
+- 由 Account Runtime 在 committed transition 之后产生有界 continuation，由 App coordinator 将其重新送入同一提交链；登录后的确定性目录准备留在后台，并只把真实歧义投影成用户动作；
+- 由 App coordinator 在同一主线程 turn 内协调 Account prepare、Workbench no-fail install 和 Account commit；
 - 由 Workbench 管理持久 Scheduled Task、触发游标、有界 occurrence history、Task、Run/maintenance record、唯一 active operation 槽、队列、取消协调和产品历史；
-- 由 App 在 `<MetaWork data dir>/workbench` 打开并持有 Task history 的进程级单写锁，把 bounded load/atomic replace capability 注入 Workbench；codec、恢复校验、candidate commit、持久化 health 和所有 Workspace/Task 产品事实仍归 Workbench；
-- 由 App 通过 Native SDK `.data` 规则解析并打开 `<MetaWork data dir>/workspaces`，只把可用或不可用的 automatic root capability 注入 Workbench；由 Workbench 独占目录分配、Workspace 注册、Task 创建事务与回滚；
-- 由 App 向 Workbench 注入原子 schedule persistence、wall clock、单一 Native timer、系统通知与后台窗口生命周期 capability；timer callback 只唤醒 Workbench due reconciliation，不直接调用 AgentCore；
 - 由 Agent 管理 AgentCore Session、active Run/manual compact、callback binding 和有界事件泵；
 - 管理跨会话产品状态，并向 Bridge 提供 canonical 产品 projection。
+
+Desktop Host composition role 只向上述 Application 边界提供平台 capability：
+
+- 在 `<MetaWork data dir>/workbench` 打开并持有 Task history 的进程级单写锁，把 bounded load/atomic replace capability 注入 Workbench；codec、恢复校验、candidate commit、持久化 health 和所有 Workspace/Task 产品事实仍归 Workbench；
+- 通过 Native SDK `.data` 规则解析并打开 `<MetaWork data dir>/workspaces`，只把可用或不可用的 automatic root capability 注入 Workbench；由 Workbench 独占目录分配、Workspace 注册、Task 创建事务与回滚；
+- 向 Workbench 注入原子 schedule persistence、wall clock、单一 Native timer、系统通知与后台窗口生命周期 capability；timer callback 只唤醒 Workbench due reconciliation，不直接调用 AgentCore。
 
 ## 2. 领域状态与业务事务
 
 ### 2.1 Account 与 ExecutionConfig
 
-Account 和 Workbench 是同级 owner，彼此不导入 runtime。Account Runtime 独占 OAuth token、PKCE、完整 API Key、平台凭据 locator、catalog attempt、mailbox/effect queue、当前默认选择、恢复 continuation 和 credential generation；Workbench 独占已安装的默认 runtime ExecutionConfig、被 Task 引用的 generation owned copy、不含 secret 的 Task execution binding descriptor/epoch history、Task admission、Workspace/Task/Run history 与 execution replacement gate。Bridge 只提交无 secret 的 catalog selection identifier、严格解码后的 expected catalog/execution generation 或其他 `AccountCommand`；Renderer 不能提交 provider、base URL、完整 credential 或未被 Host catalog 验证的模型配置。Account Runtime 使用与 projection 相同的 committed/candidate catalog 装饰规则形成 canonical `AccountView`，校验 generation 与当前发布的 API/model membership；App 只协调 Workbench replacement gate 和两位 owner 的提交，不重复这些 Account policy。Bridge 不读取 `AccountView` 或决定 selection admission。
+Account 和 Workbench 是同级 owner，彼此不导入 runtime。Account Runtime 独占 OAuth token、PKCE、完整 API Key、平台凭据 locator、catalog attempt、mailbox/effect queue、当前默认选择、恢复 continuation 和 credential generation；Workbench 独占已安装的默认 runtime ExecutionConfig、被 Task 引用的 generation owned copy、不含 secret 的 Task execution binding descriptor/epoch history、Task admission、Workspace/Task/Run history 与 execution replacement gate。Bridge 只提交无 secret 的 catalog selection identifier、严格解码后的 expected catalog/execution generation 或其他 `AccountCommand`；Renderer 不能提交 provider、base URL、完整 credential 或未被 Host catalog 验证的模型配置。Account Runtime 使用与 projection 相同的 committed/candidate catalog 装饰规则形成 canonical `AccountView`，校验 generation 与当前发布的 API/model membership；App coordinator 只协调 Workbench replacement gate 和两位 owner 的提交，不重复这些 Account policy。Bridge 不读取 `AccountView` 或决定 selection admission。
 
 Account 使用 `AccountSessionState` 与 `ExecutionState` 两个正交状态。OAuth refresh 失败可以进入 `reauth_required` 并保留 ready ExecutionConfig；默认 API Key/模型/base URL 变化递增 `execution_generation`。Workbench 安装新 generation 后把它作为后续 New Task admission 的默认配置；创建 Task 时建立第一个 binding epoch，为 Agent Session 固化对应 owned config，并在 Task/Run 记录不含 secret 的 account/profile、generation、API/Provider identity 和 model。既有 Task 的后续 Run 校验当前 binding epoch，不要求等于 Account 当前默认 generation。后续默认值变化不修改或停止既有 Task 的当前 epoch；旧 generation 在最后一个 Task、Session、Run、executor job 与真实 worker reference 释放后 secure-zero。
 
@@ -45,11 +54,11 @@ Account Runtime.prepare(command | completion)
 → dispatch committed Account effect
 ```
 
-前五步在 App 主线程同一 turn 内完成，effect 只有在 committed swap 后才能启动；worker completion 再经主循环进入同一条链。任何校验或内部不变量失败都保留旧 committed state，并清零 staged secret；Bridge 不参与 prepare/commit，也不接触 credential。C1 登录只依赖锁定的 OAuth client/scope/loopback/profile 合同，成功先提交 `account_only`，不等待 API Key 或模型目录。
+前五步由 App coordinator 在主线程同一 turn 内完成，effect 只有在 committed swap 后才能启动；worker completion 再经主循环进入同一条链。任何校验或内部不变量失败都保留旧 committed state，并清零 staged secret；Bridge 不参与 prepare/commit，也不接触 credential。C1 登录只依赖锁定的 OAuth client/scope/loopback/profile 合同，成功先提交 `account_only`，不等待 API Key 或模型目录。
 
-Renderer catalog selection 的同步拒绝顺序固定为：Bridge authority/wire validation，Account Runtime generation 与 published membership validation，Account state-machine prepare，Workbench execution replacement gate，最后进入上述 commit 链。Account 独占 selection、session、operation 与 attempt 的状态合法性；Workbench 独占 replacement gate；App 只安排顺序。`prepare` 成功但 gate 拒绝时必须销毁 prepared transition，不能提交 Account fact 或启动 effect；gate 打开后的 effect admission 失败必须平衡关闭。
+Renderer catalog selection 的同步拒绝顺序固定为：Bridge authority/wire validation，Account Runtime generation 与 published membership validation，Account state-machine prepare，Workbench execution replacement gate，最后进入上述 commit 链。Account 独占 selection、session、operation 与 attempt 的状态合法性；Workbench 独占 replacement gate；App coordinator 只安排顺序。`prepare` 成功但 gate 拒绝时必须销毁 prepared transition，不能提交 Account fact 或启动 effect；gate 打开后的 effect admission 失败必须平衡关闭。
 
-`account_only` 是安全与持久化提交边界，不是可进入 Workbench 的产品 readiness，也不是要求用户手动启动 C2 的边界。C1 commit 完成后，Account Runtime 产生新的 catalog command，App 将其重新送入相同 prepare/admit/commit 链；历史选择仍存在且匹配当前 catalog 时优先恢复，单一候选自动采用，只有无法由锁定合同确定的多候选才进入 waiting-for-user。Renderer 不观察状态后发送隐藏命令。
+`account_only` 是安全与持久化提交边界，不是可进入 Workbench 的产品 readiness，也不是要求用户手动启动 C2 的边界。C1 commit 完成后，Account Runtime 产生新的 catalog command，App coordinator 将其重新送入相同 prepare/admit/commit 链；历史选择仍存在且匹配当前 catalog 时优先恢复，单一候选自动采用，只有无法由锁定合同确定的多候选才进入 waiting-for-user。Renderer 不观察状态后发送隐藏命令。
 
 每个 Account attempt 都有 Host-owned deadline、attempt identity 和唯一 terminal completion。浏览器未回调、网络悬挂、effect 启动失败和取消都必须收口到可恢复 committed state。幂等 catalog read 可以有限重试；OAuth code exchange、凭据持久化和结果不确定 mutation 不得自动重放。进入 credential persistence 前允许取消；持久化 effect 开始后撤销 cancel admission，直到 main thread 原子消费 completion，避免磁盘已提交而内存被取消回滚。Renderer command timeout 只释放本地交互并触发 snapshot resync，不能代表 Host mutation 失败。
 
@@ -71,17 +80,17 @@ production 网络接入受 [Metask Account API 合同](metask-account-contract.m
 
 Workspace 是 Workbench-owned 产品对象，而不是 Renderer 从 Task 路径派生的 convenience view。Workspace record 具有 immutable `kind = manual | automatic`：Manual Workspace 由用户选择或重新授权，一个 record 可承载零到多个共享文件上下文的 Task；Automatic Workspace 由 Workbench 分配，一个 record 精确归属一个 Task。两者共用同一个 registry、Task 引用和 AgentCore Session admission；`kind` 只表达目录取得方式，不替代 authorization、Task ownership 或生命周期事实。Application 的 canonical projection 发布 stable identity、kind、optimistic epoch、canonical root、display label、authorization/removal outcome 与聚合 Task signals；每个 Task 引用的 Automatic Workspace 必须在同一 projection 中存在。一次性用户目录能力由 Bridge/Native capability 生成并在同一 `workspaces.choose` Host 命令内消费，Renderer 只得到 Workspace identity；automatic root/path/key 永不进入 Renderer 请求。Task 创建绑定 expected execution generation，后续 Run 绑定 expected binding epoch，Workspace mutation 绑定 expected Workspace epoch；Host 对 window、ownership、catalog membership 与 admission 重新校验。预期业务拒绝编码为 typed result，非法 payload 与 authority failure 仍由 Bridge fail closed；精确 wire 语义见 [Renderer Bridge 合同](renderer-bridge-contract.md)。
 
-App 使用现有 `app_dirs.resolveOne(..., .data)` 结果派生 `workspaces` 保留根，并在启动时尝试创建、canonicalize 和打开该目录。失败只投影 `automaticWorkspaces = false`，不得阻止 Account、Manual Workspace 或普通 Workbench 启动。成功后 Workbench-owned `AutomaticWorkspaceAllocator` 只通过已打开的 root handle 相对创建随机 `u64` 的 16 位小写 hex 子目录，exclusive create 最多尝试 8 次，并验证结果严格位于 canonical automatic root。automatic root 及其子目录不得注册为 Manual Workspace；分配失败不得回退到 cwd、home 或共享目录。
+Desktop Host composition role 使用现有 `app_dirs.resolveOne(..., .data)` 结果派生 `workspaces` 保留根，并在启动时尝试创建、canonicalize 和打开该目录。失败只投影 `automaticWorkspaces = false`，不得阻止 Account、Manual Workspace 或普通 Workbench 启动。成功后 Workbench-owned `AutomaticWorkspaceAllocator` 只通过已打开的 root handle 相对创建随机 `u64` 的 16 位小写 hex 子目录，exclusive create 最多尝试 8 次，并验证结果严格位于 canonical automatic root。automatic root 及其子目录不得注册为 Manual Workspace；分配失败不得回退到 cwd、home 或共享目录。
 
 Workbench 的 Task workspace request 直接使用 `manual(workspace_id, expected_epoch) | automatic`；Renderer/Bridge 提交相同语义，不保留 `existing/managed` 内部别名，交互式 New task 与 Scheduled Task 也不建立第二条 Task 创建路径。Manual intent 在 Task 创建事务内重新校验 identity、epoch 与 authorization，并原子更新 recent order；Renderer 对工作目录控件的切换只更新 New task draft，不发送独立 Host selection mutation。Automatic admission 先证明 execution、Task slot、Automatic Workspace slot、Session 与 shutdown capacity，再创建目录、注册 `kind=automatic` temporary Workspace、创建 Session 并发布 Task；发布前任何失败用局部 rollback/`errdefer` 释放 Session/record 并删除本次创建且仍为空的目录，发布后的 Run 失败不回滚 Task 或目录。Manual Workspace record capacity 与 `max_tasks` 约束的 Automatic record capacity 分槽，后台创建不修改 Manual recent order 或 Renderer draft scope。owning Task 物理删除且 Run event、worker、Session 与 catalog 全部 quiescent 后释放 Automatic record，但不删除真实目录；shutdown 与重启也只释放进程内 record，不扫描、接管或删除旧目录。目录持久存在不是 Task 恢复协议。
 
-App 在 composition 时只解析一次 existing canonical user home，并以 immutable capability 注入 Workbench；Renderer、Bridge payload 和 Workspace selection 都不能覆盖。Workbench 把 AgentCore catalog discovery 作为现有 bounded Executor 的一种 job：worker 只产生 Agent-owned acquisition，主线程按 Workspace id、epoch 和 request generation 提交或丢弃。Manual Workspace current catalog 持有唯一 opaque lease 与有界产品 projection；Task 创建在 Agent Session 前完成容量证明并复制独立 pinned projection，同步借用 current lease 绑定 Session。首期 Automatic Workspace 只接纳 Text Task，不启动 Workspace catalog job、不发布 refresh 动作，并以 null catalog lease 创建 Session；Skill automatic admission fail closed，直到 root-specific acquisition、identity、容量和 shutdown 通过独立验收。Task refresh 只从已经提交的 Manual Workspace catalog 进行、只允许 idle Session，并在 Agent refresh 成功后替换 pinned projection。shutdown 先停止/join Executor、收口 catalog job 并释放全部 Workspace lease，再允许 Agent Runtime destroy；不建立第二 scheduler、隐式文件监听或 Renderer Skill loader。
+Desktop Host composition role 在 composition 时只解析一次 existing canonical user home，并以 immutable capability 注入 Workbench；Renderer、Bridge payload 和 Workspace selection 都不能覆盖。Workbench 把 AgentCore catalog discovery 作为现有 bounded Executor 的一种 job：worker 只产生 Agent-owned acquisition，主线程按 Workspace id、epoch 和 request generation 提交或丢弃。Manual Workspace current catalog 持有唯一 opaque lease 与有界产品 projection；Task 创建在 Agent Session 前完成容量证明并复制独立 pinned projection，同步借用 current lease 绑定 Session。首期 Automatic Workspace 只接纳 Text Task，不启动 Workspace catalog job、不发布 refresh 动作，并以 null catalog lease 创建 Session；Skill automatic admission fail closed，直到 root-specific acquisition、identity、容量和 shutdown 通过独立验收。Task refresh 只从已经提交的 Manual Workspace catalog 进行、只允许 idle Session，并在 Agent refresh 成功后替换 pinned projection。shutdown 先停止/join Executor、收口 catalog job 并释放全部 Workspace lease，再允许 Agent Runtime destroy；不建立第二 scheduler、隐式文件监听或 Renderer Skill loader。
 
 ### 2.3 Scheduled Task
 
 Scheduled Task 是 Workbench 内新的可测试不变量，不是第六个 product module。`workbench/scheduled_tasks.zig` 拥有结构化 recurrence、bounded definition/occurrence storage、跨恢复稳定的 `(scheduledTaskId, plannedAt)` identity 与纯状态转换；独立的 `workbench/scheduled_task_persistence.zig` 拥有无 secret codec、原子 candidate commit、恢复校验和 schema revision。定义只保存名称、Text instruction、recurrence 与无 secret execution facts，不保存 Workspace target、Skill identity、catalog revision 或 Skill 参数；需要 Skill 的意图仍属于 instruction，occurrence 只生成普通 Text Run。`projection.zig` 在每个 occurrence 中固定请求新的 Automatic Workspace，再进入真实 Task admission。当前仍处于 pre-release 开发期，Scheduled Task persistence schema 固定为 `1` 并对定义结构原地 hard cut：只接受当前 shape，不保留旧字段的解析、双写或迁移；旧开发数据按现有损坏恢复路径处理。
 
-App 只注入平台 capability：产品数据目录中的原子读写、wall clock、单一 Native timer、notification，以及 tray/hidden-window 生命周期。主窗口 `close_policy = hide` 后 Host、Workbench、Executor 与 timer 都保持存活；tray 是重新打开窗口和显式退出的唯一入口。后台不是 Renderer timer，也不是 Agent Runtime capability。App 重启时必须先恢复并校验 canonical Schedule store，再 arm 最早 due time；若最近计划时间已经过去，只对每条定义协调一个最新 occurrence，不遍历补跑全部历史。store 损坏或提交结果不确定时 fail closed，保留可诊断 persistence health，不能假装成空列表。
+Desktop Host composition role 只注入平台 capability：产品数据目录中的原子读写、wall clock、单一 Native timer、notification，以及 tray/hidden-window 生命周期。主窗口 `close_policy = hide` 后 Host、Workbench、Executor 与 timer 都保持存活；tray 是重新打开窗口和显式退出的唯一入口。后台不是 Renderer timer，也不是 Agent Runtime capability。Host 重启时必须先恢复并校验 canonical Schedule store，再 arm 最早 due time；若最近计划时间已经过去，只对每条定义协调一个最新 occurrence，不遍历补跑全部历史。store 损坏或提交结果不确定时 fail closed，保留可诊断 persistence health，不能假装成空列表。
 
 到期回调在主线程要求 Workbench 最多提交一个 occurrence，再为下一次 due time 重新 arm。成功 occurrence 调用既有 Task 创建、命名与 `runTaskAtBinding`，因此复用同一 Session、Run record、Executor、event pump、permission 和 snapshot 路径；不能新增绕开 admission 的 schedule queue、schedule worker 或直接 AgentCore call。系统通知只消费已经提交的 Workbench occurrence/Task fact，通知失败不得伪造 Run cause或回滚 terminal fact。
 
@@ -89,7 +98,7 @@ App 只注入平台 capability：产品数据目录中的原子读写、wall clo
 
 Workbench `TaskRunInput` 只有 Text/Skill 两个分支。Skill admission 在建立 Run record 前校验 Workspace/Task epoch、pinned revision、稳定 `skill_id`、参数数量、UTF-8 与产品容量；Run history 保存 admission 时的 invocation/display/arguments，不随后续 catalog 改写。AgentCore 仍负责最终参数、资源和 policy 校验；`stale_catalog`、`skill_not_found`、`invalid_skill_arguments`、`skill_policy_violation` 与 `skill_unavailable` 形成独立产品 cause，保持 Session 可复用且不自动刷新或重放。
 
-Skill 中心在 revision 6 typed catalog 之外增加 Workbench-owned 本地资产管理层，但不形成新的产品 owner、AgentCore loader 或 Session execution binding。`workbench/skill_management.zig` 拥有 personal/project inventory、安装 provenance、独立 `install_id`、staged import/export、原子 publish/rollback、管理 health 和持久 store；App 只注入 canonical user home、产品数据目录原子文件能力与 Native file/folder picker，Bridge/Renderer 不持有物理路径。`agent/catalog.zig` 继续独占 AgentCore query/lease 与运行时 projection；runtime identity 始终是 `catalog_scope_id + skill_id`，不得被 `install_id`、目录名或 invocation 取代。管理 inventory 可以在已经授权的 canonical `<home>/.agents/skills` 和 `<workspace>/.agents/skills` 内枚举直接 Skill entry、读取受限 package 内容并建立 provenance，但不得自行决定 runtime winner、conflict、health 或 catalog revision；这些结果只来自 reconciliation 后的 AgentCore projection。
+Skill 中心在 revision 6 typed catalog 之外增加 Workbench-owned 本地资产管理层，但不形成新的产品 owner、AgentCore loader 或 Session execution binding。`workbench/skill_management.zig` 拥有 personal/project inventory、安装 provenance、独立 `install_id`、staged import/export、原子 publish/rollback、管理 health 和持久 store；Desktop Host composition role 只注入 canonical user home、产品数据目录原子文件能力与 Native file/folder picker，Bridge/Renderer 不持有物理路径。`agent/catalog.zig` 继续独占 AgentCore query/lease 与运行时 projection；runtime identity 始终是 `catalog_scope_id + skill_id`，不得被 `install_id`、目录名或 invocation 取代。管理 inventory 可以在已经授权的 canonical `<home>/.agents/skills` 和 `<workspace>/.agents/skills` 内枚举直接 Skill entry、读取受限 package 内容并建立 provenance，但不得自行决定 runtime winner、conflict、health 或 catalog revision；这些结果只来自 reconciliation 后的 AgentCore projection。
 
 当前本地来源只有 `local_package`、`local_directory` 与 `external`。普通 Task 写出的 Skill 没有可靠发布事件，因此不得虚构 `created` 来源：写入项目 Skill root 后表现为 external project asset，打包后再导入则按真实本地来源记录。公司市场未来只能作为新的 package acquisition adapter 接入同一 staged transaction；服务上线前不注册 wire tag、UI 占位、搜索、排名、在线更新或 GitHub/skills.sh 依赖。MetaWork 不建立中央 Skill repository、symlink/copy fanout、Agent adapter、Preset 或第二份 catalog。
 
@@ -137,12 +146,12 @@ CompactJob
 - Host 使用有上限的 Workbench executor；
 - 空闲 Session 不占 worker；同步 Run、同步 UI wait 和 manual compact 占用 execution slot；
 - Workbench 创建、排队、停止并销毁 bounded Executor；Agent Runtime 不接收 Scheduler capability，worker 从 Workbench queue 主动进入 Agent Run；
-- Scheduled Task 的 recurrence、持久触发游标、wall clock 和 timer admission 由 Workbench 拥有；App 只提供 store/timer/notification/tray capability。它只向同一 Task/Run Executor 提交真实产品工作，不把 scheduler capability 注入 Agent Runtime；
+- Scheduled Task 的 recurrence、持久触发游标、wall clock 和 timer admission 由 Workbench 拥有；Desktop Host composition role 只提供 store/timer/notification/tray capability。Workbench 只向同一 Task/Run Executor 提交真实产品工作，不把 scheduler capability 注入 Agent Runtime；
 - Bridge/main thread 不执行长耗时 Run，也不等待 permission；
-- 只有 `agent/` import `metask_agentcore`；App 让 Agent 内部完成 ABI discovery，Workbench 通过 Agent 公共 validated types 消费，Bridge DTO 不暴露 SDK enum/owner/handle；
+- 只有 `agent/` import `metask_agentcore`；Desktop Host composition role 只组装 Agent，ABI discovery 由 Agent 内部完成，Workbench 通过 Agent 公共 validated types 消费，Bridge DTO 不暴露 SDK enum/owner/handle；
 - `account/contract.zig` 不导入 Native SDK、Agent、Workbench、Bridge 或 AgentCore；只有 `account/platform.zig` 适配 Native SDK，Account Runtime 消费该窄平台 seam；Workbench/Bridge 只导入纯 contract，不导入 Account runtime；
 - Account Runtime 的 committed shutdown effect 必须在 Native SDK runner 返回前取消 Account timer、join attempt worker 并释放 platform seam；之后的普通 `deinit` 只释放不依赖平台存活的 Account 内存；
-- Agent 只通过有界 notifier 报告事件就绪，App 负责把 wake 安全提交到平台主循环；精确状态、retry 与 deadline 见 [AgentCore 集成契约](agentcore-integration.md)；
+- Agent 只通过有界 notifier 报告事件就绪，Desktop Host composition role 负责把 wake 安全提交到平台主循环；精确状态、retry 与 deadline 见 [AgentCore 集成契约](agentcore-integration.md)；
 - Renderer response、revision、snapshot 和 connection failure 作为 typed transport fact 进入 Workbench policy，默认只拒绝、重试或断开，不中止后台 Agent Run；
 
 AgentCore Session、callback、UI request、event pump、close race、错误映射与 Runtime 销毁顺序只由 [AgentCore 集成契约](agentcore-integration.md)定义。
@@ -163,7 +172,7 @@ Workbench 在 admission 时为每个 Run 或 compact 建立稳定 record slot �
 
 Compact 的 executor handoff 与 pending interruption 是 advisory control fact，不能覆盖 terminal payload。Workbench main thread 按 `terminal publication > pending interruption > worker handoff` 派生 `terminal / stopping / queued|compacting` 产品 phase；独立 cancellation atomic 即使在 terminal race 后被设置也必须被忽略。Compact 没有 Run event stream，因此不复制 Run 的 final event-drain product gate；snapshot acquire 到 published payload 后即可消费全部 terminal fields 和 diagnostic bytes。
 
-Workbench 将 `DurableTaskRecord` 与 `RuntimeAttachment` 分开：前者拥有 Task 产品历史和最小 `closed` 产品终态，后者独占 Task 级 Session、ExecutionConfig owned copy、catalog lease、thread/reference 以及 open/closing 的进程内协调。Run/Compact 内存 record 在 quiescent 前仍包含 terminal control 与临时 redaction secret；Task persistence codec 逐字段白名单编码无 secret 的 Workspace/Task/Run/tool/UI/compact 产品事实，pointer、atomic、control payload 和 credential 不进入 wire，Task execution 释放前同时清空 Run 与 Compact 的 secret 引用。App 在 restore 前取得 `workbench-history.json` 的 OS exclusive writer lock，读取上限为 16 MiB；commit 使用同目录随机临时文件、file sync、原子 rename 和最终文件/目录 sync。该文件名是本次 pre-release hard cut：旧 `workbench-state.json` 不读取、不迁移、不删除，也不构成当前损坏状态。当前 store 不存在表示首次启动；当前文件的 read failure、损坏、definite write failure 与 outcome unknown 分别进入 typed health，保留原文件并关闭新的 Task/Workspace mutation，不能静默降级为空状态。Host decoder 在安装候选前校验正数 recent order、Run phase/outcome、Tool state/error、Compact→Run、Compact phase/cause 和 activity order 等跨记录不变量，不能把 Renderer 必然拒绝的状态标为 ready。
+Workbench 将 `DurableTaskRecord` 与 `RuntimeAttachment` 分开：前者拥有 Task 产品历史和最小 `closed` 产品终态，后者独占 Task 级 Session、ExecutionConfig owned copy、catalog lease、thread/reference 以及 open/closing 的进程内协调。Run/Compact 内存 record 在 quiescent 前仍包含 terminal control 与临时 redaction secret；Task persistence codec 逐字段白名单编码无 secret 的 Workspace/Task/Run/tool/UI/compact 产品事实，pointer、atomic、control payload 和 credential 不进入 wire，Task execution 释放前同时清空 Run 与 Compact 的 secret 引用。Desktop Host composition role 在 restore 前取得 `workbench-history.json` 的 OS exclusive writer lock，读取上限为 16 MiB；commit 使用同目录随机临时文件、file sync、原子 rename 和最终文件/目录 sync。该文件名是本次 pre-release hard cut：旧 `workbench-state.json` 不读取、不迁移、不删除，也不构成当前损坏状态。当前 store 不存在表示首次启动；当前文件的 read failure、损坏、definite write failure 与 outcome unknown 分别进入 typed health，保留原文件并关闭新的 Task/Workspace mutation，不能静默降级为空状态。Host decoder 在安装候选前校验正数 recent order、Run phase/outcome、Tool state/error、Compact→Run、Compact phase/cause 和 activity order 等跨记录不变量，不能把 Renderer 必然拒绝的状态标为 ready。
 
 Renderer reload 重建仍存活 Host 的视图；Host 重启从 Workbench store 重建只读产品历史。没有 live owner 的 non-terminal Run/compact 保守收口为 interrupted，不重放输入、工具或 permission；任何恢复 Run 中未完成的 running Tool 都不进入 projection，已完成 Tool result 保留。完成态 Tool result 是 Run terminal 前的持久边界，text chunk 与 progress 只保留在 live projection。canonical Metask AgentCore revision 6 已提供 checkpoint export/restore 与 Session description，但 MetaWork 尚未实现 checkpoint store、exclusive restore、execution binding 对账和 terminal reconciliation；因此恢复 Task 仍不创建 Session，`conversationRecovery` 保持 false，continuation 原因为 `session_recovery_unsupported`。恢复后的 open Task 仍能把 `closed` 产品终态原子提交后进入可删除状态；该动作不恢复或伪造 Session。Conversation/checkpoint 跨进程恢复必须通过独立能力验收后才能接通；MetaWork 不读取私有 transcript、不保存 opaque handle，也不建立 ABI 兼容实现。
 

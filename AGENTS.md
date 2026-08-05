@@ -36,7 +36,9 @@
 ### Renderer 与 Bridge
 
 - React + Tailwind 是唯一正式 Renderer；不建立 `.native` 替代层、第二套 Renderer 或通用 Desktop Interface。
-- Native SDK 直接构成 Zig Host，不增加 `NativeSdkAdapter` 或框架替换层。
+- Native SDK 与 Metask AgentCore 都是外部依赖。`app.zig` 是 Desktop Host 的 composition root，并在当前源码布局中承载 Application 的主线程协调角色：前者组装 Bridge 与 Application、注入 Native SDK capability 和驱动平台生命周期，后者只执行 Application 已定义的跨 owner 事务与生命周期顺序。两种角色都不成为新的业务 owner，也不增加统一 Host facade。
+- 原生窗口机制由 Desktop Host 通过 Native SDK 执行；React 只负责 WebUI，涉及产品语义的决策归 Application 中对应 owner。Renderer 可以呈现一体化标题/命令栏并提交白名单化意图，但不得持有原生窗口身份、模拟平台行为或把本地推测作为平台真相。
+- `src/window_chrome.zig` 只是在 Native SDK 尚未提供官方 WebView drag-region 时补齐单一启动窗口标题栏能力的窄平台 seam；它不得扩展成通用 Desktop Interface、第二套窗口 owner 或 Renderer 可调用的任意原生 API。官方 drag-region 经目标平台验收可用后必须原位替换该 seam，并同步收口不再需要的专用 command、allowlist 和测试。
 - Renderer Bridge 产品合同是 `metawork.renderer-bridge` 固定 revision 1。快速开发阶段直接原地 hard cut command、event、payload 与 wire 语义；不得为临时合同形态递增 revision、保留兼容层或在 snapshot 内建立局部 schema version。`connect` 精确匹配 identity/revision 后才开放产品路径；任何 revision 变更必须先得到用户显式同意。
 - `app.zon`、Zig 和 TypeScript command catalog 必须完全一致。Renderer 对 Host payload 做 runtime decode；Host 执行 origin、command、payload、Workspace、Task 和权限校验。
 - Bridge 只拥有 command ingress 与 `ProductDelivery` transport；产品状态和 Run policy 归 Workbench。automation 只能驱动真实产品路径，不注册测试专用协议或第二数据面。
@@ -50,7 +52,7 @@
 
 ### Owner、并发与生命周期
 
-- App 只做 composition 和平台 capability 注入；Account 拥有 credential 与 ExecutionConfig；Workbench 拥有 Workspace/Task/Run、Executor 和产品历史；Agent 拥有 Runtime/Session/Conversation；Bridge 拥有 Renderer transport。
+- App 的 Host 角色只做 composition、平台 capability 注入与平台生命周期驱动；其 Application 协调角色不持有领域状态，只执行跨 owner 提交和生命周期顺序。Account 拥有 credential 与 ExecutionConfig；Workbench 拥有 Workspace/Task/Run、Executor 和产品历史；Agent 拥有 Runtime/Session/Conversation；Bridge 拥有 Renderer transport。
 - Workbench 独占 executor、queue、workers、admission 和 shutdown。Agent Runtime 不接收 Scheduler capability，不反向 enqueue 或销毁 Workbench 资源。
 - 每个 Session 至多一个 in-flight Run；队列和 worker 数量必须有界。Conversation 与跨 Run 状态属于 Session，不能引用 run-scoped arena。
 - AgentCore/tool 线程不得调用 WebView。跨 callback 保留的 borrowed bytes 必须在返回前深拷贝；control event 不得静默丢弃。

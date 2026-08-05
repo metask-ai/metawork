@@ -32,9 +32,9 @@ metawork/
 │       └── platform/      # Renderer-only 本地偏好等平台能力
 ├── src/
 │   ├── main.zig           # 进程入口
-│   ├── app.zig            # Native composition root
+│   ├── app.zig            # Desktop Host composition root；共置 Application coordinator
 │   ├── product_identity.zig # 从 app.zon 派生 development identity 与 macOS namespace
-│   ├── window_chrome.zig  # WebView hidden-inset drag 的平台 seam
+│   ├── window_chrome.zig  # SDK 官方 drag-region 到位前的窄平台 seam
 │   ├── account.zig        # Account module entrypoint
 │   ├── account/           # Account Runtime、OAuth、catalog、credential 与状态机
 │   ├── bridge.zig         # Renderer Bridge module entrypoint
@@ -61,14 +61,15 @@ metawork/
 
 ## 3. 顶层所有权
 
-| Owner     | 唯一职责                                                                                                   | 不拥有                                                 |
-| --------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
-| App       | Native SDK composition、capability 注入、主线程跨 owner 提交协调与生命周期顺序                              | Account/Workbench 领域状态、Agent 调度策略、第二套 Bridge transport |
+| Boundary / role          | 唯一职责                                                                                  | 不拥有                                                 |
+| ------------------------ | ----------------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| Desktop Host composition | Native SDK composition、平台 capability 注入、平台资源与顶层 Bridge/Application/Native 生命周期顺序 | 产品 policy、Application 内部事务、第二套 Bridge transport |
+| App coordinator          | Application 主线程跨 owner 提交、事件屏障与内部生命周期顺序                              | Account/Workbench 领域状态、Agent 调度策略、平台资源    |
 | Account   | Runtime、OAuth/catalog 状态、credential、attempt/effect/mailbox、恢复、脱敏 Account view、ExecutionConfig transfer | Workbench Task、Renderer 状态、AgentCore Runtime       |
 | Workbench | Workspace/Task/Run 产品状态、Executor、admission、terminal product record、snapshot projection             | AgentCore raw protocol、Native WebView、Account secret |
 | Agent     | AgentCore Runtime/Session/Conversation、callback、event pump、Run terminal facts                           | 产品队列、Task 历史、Bridge transport                  |
 | Bridge    | command authority、payload decode、Workspace grant、ProductDelivery connection/revision/snapshot transport | 产品策略真相、AgentCore handle、Account runtime        |
-| Renderer  | snapshot 消费、用户交互、纯 UI 状态与本地草稿                                                              | 安全决策、secret、AgentCore raw event、产品状态机      |
+| Renderer  | snapshot 消费、产品 WebUI 交互、纯 UI 状态与本地草稿                                                    | 原生窗口 owner、平台真实状态、安全决策、secret、AgentCore raw event、产品状态机 |
 
 `account/contract.zig` 是 Account owner 发布的纯合同，不是第六个产品 owner。`automation/` 只提供受控账号、origin 和临时 Workspace authority，不注册额外协议，也不拥有产品 transport state。
 
@@ -103,13 +104,15 @@ Renderer Bridge 的 identity、revision、command、event、snapshot 与兼容�
 
 ### `app.zig` 与 module entrypoint
 
-`main.zig` 只调用 `metawork_app`。`app.zig` 创建 Account Runtime、Workbench 与 Agent，注入 Native platform capability，并按顺序协调 Account prepare/commit、Workbench no-fail install 与 owner 生命周期；它不复制这些 owner 的状态或策略。`window_chrome.zig` 是 App-owned 单一启动窗口的窄平台 seam：WebView `hidden_inset_tall` 的 press 交回系统拖动，Windows 在同一精确窗口上补齐双击最大化/还原、最大化拖拽恢复、原生系统菜单与只读最大化状态；minimize/close 继续调用 Native SDK 的 window-id API。Renderer 的 `components/ui/WindowTitlebar.tsx` 统一拥有空白区与交互控件的命中规则，`app/useWindowChrome.ts` 只维护 Host 状态的瞬时呈现投影。该边界不形成通用 Desktop Interface，也不拥有产品状态。
+`main.zig` 只调用 `metawork_app`。`app.zig` 物理上共置两个角色：Desktop Host composition root 组装 Bridge 与 Application、消费并注入 Native SDK 的窄平台 capability、驱动平台生命周期；Application coordinator 在主线程按规范协调 Account prepare/commit、Workbench no-fail install、Agent event drain 与 owner 生命周期。后者属于 Application 的事务协调但不持有领域状态或复制 owner policy；这种源码共置不产生新的模块、业务 owner 或统一 Host facade。
+
+`window_chrome.zig` 是 Desktop Host-owned 单一启动窗口的窄平台 seam，只在 Native SDK 尚未提供官方 WebView drag-region 时补齐标题栏能力：WebView `hidden_inset_tall` 的 press 交回系统拖动，Windows 在同一精确窗口上补齐双击最大化/还原、最大化拖拽恢复、原生系统菜单与只读最大化状态；minimize/close 继续调用 Native SDK 的 window-id API。Renderer 的 `components/ui/WindowTitlebar.tsx` 统一拥有 Web 内容空白区与交互控件的命中规则，`app/useWindowChrome.ts` 只维护 Host 状态的瞬时呈现投影；原生行为、系统资源和真实状态仍由 Desktop Host 独占。该 seam 不形成通用 Desktop Interface、Native SDK adapter、第二窗口 owner 或任意原生调用面；官方 drag-region 经平台验收可用后，必须原位替换该 seam，并同步收口不再需要的专用 command、allowlist 和测试。
 
 `account.zig`、`bridge.zig`、`workbench.zig` 和 `agent.zig` 是小型公开入口，只显式暴露实际消费者需要的类型、函数或窄 namespace。内部文件不通过 `usingnamespace` 或无边界 barrel 重新泄漏。
 
 ### `account/`
 
-- `runtime.zig` 是 Account 长生命周期 owner，拥有状态机实例、private/public candidate catalog、credential、attempt、mailbox/effect queue、平台恢复状态、自动选择与 continuation；它不导入 Workbench，跨 owner 提交仍由 App 协调；
+- `runtime.zig` 是 Account 长生命周期 owner，拥有状态机实例、private/public candidate catalog、credential、attempt、mailbox/effect queue、平台恢复状态、自动选择与 continuation；它不导入 Workbench，跨 owner 提交仍由 App coordinator 协调；
 - `state.zig` 拥有 Account 状态机、attempt/generation 与 prepare/admit/commit；
 - `oauth.zig`、`loopback.zig`、`login_attempt.zig` 和 `network_attempt.zig` 拥有登录网络链路；
 - `metask_client.zig` 与 `catalog.zig` 消费锁定的 Metask production contract；
@@ -120,7 +123,7 @@ Renderer Bridge 的 identity、revision、command、event、snapshot 与兼容�
 - `platform.zig` 是 Account 内唯一导入 Native SDK 的窄主线程 seam，分别适配 macOS 与 Windows 的 credential、timer 与持久化能力，不形成通用 Desktop Interface；
 - `credentials.zig` 管理 execution credential ownership/rotation。
 
-Account 与 Workbench 是同级 owner，只通过纯 `account/contract.zig` 和 App 主线程提交链协作。Bridge 只消费脱敏 view/command contract，不导入 Account Runtime。App 可以持有两个 owner 的实例引用以协调提交，但不得持有 Account catalog、credential、attempt、mailbox 或 continuation 状态。
+Account 与 Workbench 是同级 owner，只通过纯 `account/contract.zig` 和 App coordinator 主线程提交链协作。Bridge 只消费脱敏 view/command contract，不导入 Account Runtime。App coordinator 可以持有两个 owner 的实例引用以协调提交，但不得持有 Account catalog、credential、attempt、mailbox 或 continuation 状态。
 
 ### `bridge/`
 
@@ -153,7 +156,7 @@ Bridge handler 不能绕过 Workbench 操作 AgentCore handle。automation 只�
 
 ### `workbench/` 与 `agent/`
 
-`workbench/projection.zig` 当前拥有 Workspace current catalog、Task pinned catalog、typed Text/Skill admission 与 history、Workspace/Scheduled Task/Task/Run 产品状态、Task 唯一 active operation、stable Run/compact record、executor worker reference、write-once terminal publication 和 bounded snapshot writer。Manual compact 是 append-only Task maintenance history，不复用 Run identity。`workbench/task_persistence.zig` 拥有 schema 1 的无 secret Workspace/Task history codec、严格恢复校验、16 MiB 上限、进程级单写锁与同目录原子替换；当前文件为 `workbench-history.json`，旧 `workbench-state.json` 按 pre-release hard cut 忽略且不迁移。App 只打开 data root 并注入 load/commit capability，Session/Conversation 不进入该文件。`workbench/automatic_workspace_allocator.zig` 拥有 App-opened automatic root capability、相对随机子目录分配、canonical containment 与发布前空目录回滚；它不扫描旧目录、不恢复 Task，也不递归删除目录。`workbench/scheduled_tasks.zig` 拥有 bounded definition/occurrence storage、结构化 recurrence、跨恢复 planned-time identity 和纯状态转换；`workbench/scheduled_task_persistence.zig` 拥有无 secret codec、candidate commit、恢复校验和 schema revision。`workbench/skill_package.zig` 拥有本地 Skill 目录与 ZIP 包的路径/资源上限预检、regular-bytes-only staging、内容摘要和 canonical `.skill` 导出，不执行包内容或访问网络；`workbench/skill_management.zig` 拥有独立 install identity、personal/project inventory、管理状态、未完成文件事务恢复事实和 schema 1 无 secret 原子持久化。它们都属于 Workbench owner，不是第二个执行器或 AgentCore scheduler。`workbench/executor.zig` 独占 catalog/Run/compact 共用的单一队列、workers、admission 和 shutdown。
+`workbench/projection.zig` 当前拥有 Workspace current catalog、Task pinned catalog、typed Text/Skill admission 与 history、Workspace/Scheduled Task/Task/Run 产品状态、Task 唯一 active operation、stable Run/compact record、executor worker reference、write-once terminal publication 和 bounded snapshot writer。Manual compact 是 append-only Task maintenance history，不复用 Run identity。`workbench/task_persistence.zig` 拥有 schema 1 的无 secret Workspace/Task history codec、严格恢复校验、16 MiB 上限、进程级单写锁与同目录原子替换；当前文件为 `workbench-history.json`，旧 `workbench-state.json` 按 pre-release hard cut 忽略且不迁移。Desktop Host composition role 只打开 data root 并注入 load/commit capability，Session/Conversation 不进入该文件。`workbench/automatic_workspace_allocator.zig` 拥有 Desktop Host-opened automatic root capability、相对随机子目录分配、canonical containment 与发布前空目录回滚；它不扫描旧目录、不恢复 Task，也不递归删除目录。`workbench/scheduled_tasks.zig` 拥有 bounded definition/occurrence storage、结构化 recurrence、跨恢复 planned-time identity 和纯状态转换；`workbench/scheduled_task_persistence.zig` 拥有无 secret codec、candidate commit、恢复校验和 schema revision。`workbench/skill_package.zig` 拥有本地 Skill 目录与 ZIP 包的路径/资源上限预检、regular-bytes-only staging、内容摘要和 canonical `.skill` 导出，不执行包内容或访问网络；`workbench/skill_management.zig` 拥有独立 install identity、personal/project inventory、管理状态、未完成文件事务恢复事实和 schema 1 无 secret 原子持久化。它们都属于 Workbench owner，不是第二个执行器或 AgentCore scheduler。`workbench/executor.zig` 独占 catalog/Run/compact 共用的单一队列、workers、admission 和 shutdown。
 
 `agent/catalog.zig` 拥有 AgentCore Skill catalog descriptor 的即时解码、MetaWork-owned 安全投影、opaque handle lease 与 root/home/epoch 绑定；raw handle、scope、物理来源和 policy 不离开 Agent。`agent/session.zig` 拥有 AgentCore Runtime/Session、Conversation、typed Text/Skill Run、typed manual compact、catalog bind/idle refresh、callback quiescence、UI wait、cancel/close/shutdown 以及 immutable Run/compact terminal result。`event_sink.zig` 与 `event_pump.zig` 管理 borrowed event 深拷贝、容量和通知。Agent 不接收 Scheduler capability，也不反向 enqueue Workbench。
 

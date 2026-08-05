@@ -5,11 +5,12 @@ MetaWork 是一款面向本地工作区的桌面 Agent Workbench。产品围绕 
 ## 当前基线
 
 ```text
-React + Tailwind Renderer
-        ↓ Renderer Bridge
-Native SDK + Zig Host / Workbench
-        ↓ official bundle SDK
-Metask AgentCore ABI v1 revision 6
+Native SDK ── desktop capabilities ──> Desktop Host (Zig)
+                                      ├── React + Tailwind Renderer
+                                      ├── Renderer Bridge
+                                      └── Application
+                                          ├── App coordinator + Account / Workbench
+                                          └── Agent ──> Metask AgentCore ABI v1 revision 6
 ```
 
 当前应用是一条真实的同进程同步垂直链路，已经覆盖 Account、Task、typed Text/Skill Run、built-in Read/Bash/Edit、question/permission、取消、Renderer reload、bounded event delivery 和生命周期收口。正式 build 只消费 staged `.agentcore/bundle` 中的官方 Zig package。revision 6 提供 checkpoint、MCP 与 Permission provenance 等 ABI 原语，但未完成独立产品验收的能力保持关闭。
