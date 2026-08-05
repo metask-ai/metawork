@@ -137,6 +137,20 @@ pub const Adapter = struct {
         self.* = undefined;
     }
 
+    /// Transfers this quiescent adapter into a wider Runtime owner. On
+    /// success the source is invalid and must not be used or deinitialized.
+    pub fn take(self: *Adapter) Error!Adapter {
+        if (self.active_connections.load(.acquire) != 0)
+            return error.ConnectionsActive;
+        const moved = self.*;
+        self.* = undefined;
+        return moved;
+    }
+
+    pub fn isQuiescent(self: *const Adapter) bool {
+        return self.active_connections.load(.acquire) == 0;
+    }
+
     pub fn descriptor(self: *Adapter) wire.McpConnectorV1 {
         return .{
             .struct_size = @sizeOf(wire.McpConnectorV1),

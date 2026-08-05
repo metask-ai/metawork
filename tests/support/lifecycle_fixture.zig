@@ -197,6 +197,12 @@ pub const FakeCore = struct {
     catalog_queries: usize = 0,
     catalog_releases: usize = 0,
     catalog_refreshes: usize = 0,
+    mcp_refreshes: usize = 0,
+    mcp_descriptions: usize = 0,
+    mcp_updates: usize = 0,
+    mcp_server_count: usize = 0,
+    mcp_descriptor_valid: bool = false,
+    last_mcp_update_selector_count: ?u64 = null,
     catalog_plan: CatalogPlan = .healthy,
     catalog_query_entered: bool = false,
     allow_catalog_query: bool = false,
@@ -222,6 +228,7 @@ pub const FakeCore = struct {
     runtime_destroy_failures: usize = 0,
     session_create_failures: usize = 0,
     forced_skill_update_status: ?u32 = null,
+    forced_mcp_update_status: ?u32 = null,
     forced_abort_status: ?u32 = null,
     forced_compact_status: ?u32 = null,
     forced_compact_abort_status: ?u32 = null,
@@ -370,6 +377,12 @@ pub const FakeCore = struct {
         self.unlock();
     }
 
+    pub fn forceNextMcpUpdateStatus(self: *FakeCore, status: u32) void {
+        self.lock();
+        self.forced_mcp_update_status = status;
+        self.unlock();
+    }
+
     pub fn forceNextSessionDestroyStatus(self: *FakeCore, status: u32) void {
         self.lock();
         self.forced_session_destroy_status = status;
@@ -437,6 +450,11 @@ const duplicate_catalog_json =
     fixture_skill_id ++
     "\",\"invocation_name\":\"audit\",\"display_name\":\"Audit\",\"description\":\"Duplicate id\",\"argument_schema\":{\"schema\":\"metask.skill-arguments/v1\",\"max_values\":64,\"names\":[]}}],\"issues\":[]}";
 
+const empty_mcp_catalog_json =
+    "{\"schema\":\"agentcore.mcp-catalog/v1\",\"catalog_generation\":7," ++
+    "\"catalog_fingerprint\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"," ++
+    "\"servers\":[],\"tools\":[],\"issues\":[]}";
+
 pub fn diagnostic(out: ?*wire.OwnedBytesV1) void {
     if (out) |value| value.* = .{ .ptr = @ptrCast(&diagnostic_byte), .len = 1 };
 }
@@ -458,6 +476,18 @@ pub fn runtimeCreate(
         config.?.host_tool_count == 0 and
         config.?.builtin_tools != null and
         config.?.builtin_tool_count == 4;
+    fake_core.mcp_server_count = @intCast(config.?.mcp_server_count);
+    fake_core.mcp_descriptor_valid = if (config.?.mcp_server_count == 0)
+        config.?.mcp_servers == null
+    else if (config.?.mcp_servers) |servers|
+        servers[0].struct_size == @sizeOf(wire.McpServerV1) and
+            servers[0].connector.open != null and
+            servers[0].connector.request != null and
+            servers[0].connector.notify != null and
+            servers[0].connector.close != null and
+            servers[0].connector.release_response != null
+    else
+        false;
     out_runtime.?.* = @ptrCast(&fake_core.runtime);
     return wire.STATUS_OK;
 }
@@ -527,10 +557,14 @@ pub fn sessionCreate(
         allSkillsEnabled(selection)
     else
         false;
+    const mcp_selection_valid = if (host.mcp_selection) |selection|
+        validMcpSelection(selection)
+    else
+        true;
     if ((bound_catalog != null and !selection_valid) or
         (bound_catalog == null and host.skill_selection != null) or
         host.permission_rules != null or
-        host.mcp_selection != null or
+        !mcp_selection_valid or
         host.durable_budget != null)
     {
         diagnostic(out_error);
@@ -793,21 +827,41 @@ pub fn sessionUpdatePermissionRules(
 }
 
 pub fn runtimeRefreshMcp(
-    _: ?*wire.RuntimeHandle,
-    _: ?*u64,
+    runtime: ?*wire.RuntimeHandle,
+    out_generation: ?*u64,
     out_error: ?*wire.OwnedBytesV1,
 ) callconv(.c) u32 {
-    diagnostic(out_error);
-    return wire.STATUS_INVALID_STATE;
+    if (out_error) |out| out.* = .{ .ptr = null, .len = 0 };
+    if (runtime == null or out_generation == null) {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    }
+    fake_core.lock();
+    fake_core.mcp_refreshes += 1;
+    fake_core.unlock();
+    out_generation.?.* = 7;
+    return wire.STATUS_OK;
 }
 
 pub fn runtimeDescribeMcp(
-    _: ?*wire.RuntimeHandle,
-    _: ?*wire.OwnedBytesV1,
+    runtime: ?*wire.RuntimeHandle,
+    out_descriptor: ?*wire.OwnedBytesV1,
     out_error: ?*wire.OwnedBytesV1,
 ) callconv(.c) u32 {
-    diagnostic(out_error);
-    return wire.STATUS_INVALID_STATE;
+    if (out_error) |out| out.* = .{ .ptr = null, .len = 0 };
+    if (out_descriptor) |out| out.* = .{ .ptr = null, .len = 0 };
+    if (runtime == null or out_descriptor == null) {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    }
+    fake_core.lock();
+    fake_core.mcp_descriptions += 1;
+    fake_core.unlock();
+    out_descriptor.?.* = .{
+        .ptr = @ptrCast(@constCast(empty_mcp_catalog_json.ptr)),
+        .len = empty_mcp_catalog_json.len,
+    };
+    return wire.STATUS_OK;
 }
 
 pub fn sessionRestore(
@@ -832,12 +886,48 @@ pub fn sessionDescribe(
 }
 
 pub fn sessionUpdateMcp(
-    _: ?*wire.SessionHandle,
-    _: ?*const wire.McpSelectionV1,
+    handle: ?*wire.SessionHandle,
+    selection: ?*const wire.McpSelectionV1,
     out_error: ?*wire.OwnedBytesV1,
 ) callconv(.c) u32 {
-    diagnostic(out_error);
-    return wire.STATUS_INVALID_STATE;
+    if (out_error) |out| out.* = .{ .ptr = null, .len = 0 };
+    const session: *FakeSession = @ptrCast(@alignCast(handle orelse {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    }));
+    const value = selection orelse {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    };
+    if (!validMcpSelection(value)) {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    }
+    fake_core.lock();
+    const forced_status = fake_core.forced_mcp_update_status;
+    fake_core.forced_mcp_update_status = null;
+    fake_core.unlock();
+    if (forced_status) |status| {
+        diagnostic(out_error);
+        return status;
+    }
+    session.lock();
+    const unavailable = !session.in_use or session.destroyed;
+    const busy = session.running or session.compacting;
+    session.unlock();
+    if (unavailable) {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    }
+    if (busy) {
+        diagnostic(out_error);
+        return wire.STATUS_BUSY;
+    }
+    fake_core.lock();
+    fake_core.mcp_updates += 1;
+    fake_core.last_mcp_update_selector_count = value.selector_count;
+    fake_core.unlock();
+    return wire.STATUS_OK;
 }
 
 pub fn sessionExportCheckpoint(
@@ -1373,6 +1463,23 @@ fn allSkillsEnabled(selection: *const wire.SkillSelectionV1) bool {
     for (selection.reserved) |value| {
         if (value != 0) return false;
     }
+    return true;
+}
+
+fn validMcpSelection(selection: *const wire.McpSelectionV1) bool {
+    if (selection.struct_size != @sizeOf(wire.McpSelectionV1) or
+        selection.reserved0 != 0 or
+        (selection.selectors == null) != (selection.selector_count == 0))
+        return false;
+    for (selection.reserved) |value| if (value != 0) return false;
+    if (selection.selectors) |selectors| for (selectors[0..selection.selector_count]) |selector| {
+        if (selector.struct_size != @sizeOf(wire.McpSelectorV1) or
+            selector.reserved0 != 0)
+            return false;
+        const name = sdk.borrowedBytes(selector.tool_name) catch return false;
+        if (name.len == 0) return false;
+        for (selector.reserved) |value| if (value != 0) return false;
+    };
     return true;
 }
 

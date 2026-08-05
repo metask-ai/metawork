@@ -28,6 +28,230 @@ const cancelOnThread = fixture.cancelOnThread;
 const failPipelineOnThread = fixture.failPipelineOnThread;
 const CallbackSignal = fixture.CallbackSignal;
 
+const McpFixtureTransport = struct {
+    fn descriptor(self: *McpFixtureTransport) lifecycle.McpTransport {
+        return .{ .context = self, .open_fn = open, .request_fn = request, .notify_fn = notify, .close_fn = close };
+    }
+    fn open(context: *anyopaque, _: lifecycle.McpPurpose, _: lifecycle.McpEra, _: u32) lifecycle.McpOpenOutcome {
+        return .{ .connection = context };
+    }
+    fn request(_: *anyopaque, _: std.mem.Allocator, _: []const u8, _: u32, _: lifecycle.McpCancellation) lifecycle.McpExchangeOutcome {
+        return .{ .failure = .fatal };
+    }
+    fn notify(_: *anyopaque, _: []const u8, _: u32, _: lifecycle.McpCancellation) ?lifecycle.McpTransportFailure {
+        return .fatal;
+    }
+    fn close(_: *anyopaque) void {}
+};
+
+const CanonicalUnavailableMcpTransport = struct {
+    opens: std.atomic.Value(usize) = .init(0),
+
+    fn descriptor(self: *CanonicalUnavailableMcpTransport) lifecycle.McpTransport {
+        return .{ .context = self, .open_fn = open, .request_fn = request, .notify_fn = notify, .close_fn = close };
+    }
+    fn open(context: *anyopaque, _: lifecycle.McpPurpose, _: lifecycle.McpEra, _: u32) lifecycle.McpOpenOutcome {
+        const self: *CanonicalUnavailableMcpTransport = @ptrCast(@alignCast(context));
+        _ = self.opens.fetchAdd(1, .acq_rel);
+        return .{ .failure = .network };
+    }
+    fn request(_: *anyopaque, _: std.mem.Allocator, _: []const u8, _: u32, _: lifecycle.McpCancellation) lifecycle.McpExchangeOutcome {
+        return .{ .failure = .fatal };
+    }
+    fn notify(_: *anyopaque, _: []const u8, _: u32, _: lifecycle.McpCancellation) ?lifecycle.McpTransportFailure {
+        return .fatal;
+    }
+    fn close(_: *anyopaque) void {}
+};
+
+test "canonical AgentCore refresh invokes the Host MCP connector and returns a bounded unavailable catalog" {
+    var transport: CanonicalUnavailableMcpTransport = .{};
+    var adapter = try lifecycle.McpConnectorAdapter.init(std.testing.allocator, .{
+        .transport = transport.descriptor(),
+    });
+    const runtime = try lifecycle.Runtime.init(std.testing.io, std.testing.allocator, .{
+        .max_sessions = 1,
+        .mcp_servers = &.{.{
+            .binding_identity = @splat(0x6b),
+            .adapter = &adapter,
+            .transport = .streamable_http,
+            .namespace = "offline",
+            .client_name = "MetaWork",
+            .client_version = "test",
+            .timeout_ms = 100,
+        }},
+    });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const projection = try runtime.refreshMcpCatalog();
+    defer projection.deinit();
+    try std.testing.expect(transport.opens.load(.acquire) > 0);
+    try std.testing.expectEqual(@as(usize, 0), projection.servers().len);
+    try std.testing.expect(projection.issues().len > 0);
+    try std.testing.expectEqualDeep(
+        @as([32]u8, @splat(0x6b)),
+        projection.issues()[0].binding_identity,
+    );
+}
+
+test "canonical AgentCore accepts an empty complete MCP Session replacement" {
+    const runtime = try lifecycle.Runtime.init(std.testing.io, std.testing.allocator, .{
+        .max_sessions = 1,
+    });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const workspace_root = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        ".",
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(workspace_root);
+    const session = try runtime.createSession(.{
+        .provider = .anthropic,
+        .permission_mode = .default,
+        .shell_policy = .disabled,
+        .credential = "fixture-secret",
+        .model = "fixture-model",
+        .workspace = .{
+            .canonical_root = workspace_root,
+            .trust = .explicitly_trusted,
+        },
+        .canonical_user_home = workspace_root,
+        .workspace_epoch = "canonical-mcp-empty-replacement",
+        .allowed_tools = &.{"Read"},
+    });
+    try session.updateMcpSelection(null);
+    try std.testing.expectEqual(lifecycle.SessionState.idle, session.snapshot().state);
+}
+
+test "MCP Runtime creation borrows one complete server descriptor and owns its adapter" {
+    fake_core.reset();
+    var transport: McpFixtureTransport = .{};
+    var adapter = try lifecycle.McpConnectorAdapter.init(std.testing.allocator, .{
+        .transport = transport.descriptor(),
+    });
+    const runtime = try createTestRuntime(.{
+        .max_sessions = 1,
+        .mcp_servers = &.{.{
+            .binding_identity = @splat(0x5a),
+            .adapter = &adapter,
+            .transport = .stdio,
+            .namespace = "fixture",
+            .client_name = "MetaWork",
+            .client_version = "test",
+            .timeout_ms = 1000,
+        }},
+    });
+    try runtime.shutdown();
+    runtime.deinit();
+    fake_core.lock();
+    const count = fake_core.mcp_server_count;
+    const valid = fake_core.mcp_descriptor_valid;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 1), count);
+    try std.testing.expect(valid);
+}
+
+test "MCP catalog refresh binds explicit Session selection and idle replacement" {
+    fake_core.reset();
+    const runtime = try createTestRuntime(.{ .max_sessions = 1 });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const projection = try runtime.refreshMcpCatalog();
+    defer projection.deinit();
+    try std.testing.expectEqual(@as(u64, 7), projection.catalogGeneration());
+    const selection = try runtime.createMcpSelection(projection, &.{});
+    defer selection.deinit();
+    const workspace_root = if (std.fs.path.sep == '\\')
+        "C:\\tmp\\metawork-mcp-selection"
+    else
+        "/tmp/metawork-mcp-selection";
+    const temporary_root = if (std.fs.path.sep == '\\') "C:\\tmp" else "/tmp";
+    const session = try runtime.createSession(.{
+        .provider = .anthropic,
+        .permission_mode = .default,
+        .shell_policy = .disabled,
+        .credential = "fixture-secret",
+        .model = "fixture-model",
+        .workspace = .{
+            .canonical_root = workspace_root,
+            .trust = .{ .temporary = temporary_root },
+        },
+        .mcp_selection = selection,
+    });
+    try session.updateMcpSelection(null);
+    fake_core.lock();
+    const updates_after_clear = fake_core.mcp_updates;
+    const selectors_after_clear = fake_core.last_mcp_update_selector_count;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 1), updates_after_clear);
+    try std.testing.expectEqual(@as(?u64, 0), selectors_after_clear);
+    try session.updateMcpSelection(selection);
+    const queued_run = try session.prepareRun(.{ .text = "hold selection" });
+    try std.testing.expectError(
+        error.SessionNotIdle,
+        session.updateMcpSelection(null),
+    );
+    try session.cancelPreparedRun(queued_run);
+    fake_core.lock();
+    const refreshes = fake_core.mcp_refreshes;
+    const descriptions = fake_core.mcp_descriptions;
+    const updates = fake_core.mcp_updates;
+    const last_selector_count = fake_core.last_mcp_update_selector_count;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 1), refreshes);
+    try std.testing.expectEqual(@as(usize, 1), descriptions);
+    try std.testing.expectEqual(@as(usize, 2), updates);
+    try std.testing.expectEqual(@as(?u64, 0), last_selector_count);
+}
+
+test "MCP selection mutation preserves reusable and poison status contracts" {
+    fake_core.reset();
+    const runtime = try createTestRuntime(.{ .max_sessions = 1 });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const projection = try runtime.refreshMcpCatalog();
+    defer projection.deinit();
+    const selection = try runtime.createMcpSelection(projection, &.{});
+    defer selection.deinit();
+    const session = try runtime.createSession(.{
+        .provider = .anthropic,
+        .permission_mode = .default,
+        .shell_policy = .disabled,
+        .credential = "fixture-secret",
+        .model = "fixture-model",
+        .workspace = .{
+            .canonical_root = if (std.fs.path.sep == '\\') "C:\\tmp\\metawork-mcp-status" else "/tmp/metawork-mcp-status",
+            .trust = .{ .temporary = if (std.fs.path.sep == '\\') "C:\\tmp" else "/tmp" },
+        },
+        .mcp_selection = selection,
+    });
+    fake_core.forceNextMcpUpdateStatus(wire.STATUS_BUSY);
+    try std.testing.expectError(error.SessionNotIdle, session.updateMcpSelection(null));
+    try std.testing.expectEqual(lifecycle.SessionState.idle, session.snapshot().state);
+    fake_core.forceNextMcpUpdateStatus(wire.STATUS_CHECKPOINT_BUDGET_REQUIRED);
+    try std.testing.expectError(
+        error.McpCheckpointBudgetRequired,
+        session.updateMcpSelection(selection),
+    );
+    try std.testing.expectEqual(lifecycle.SessionState.idle, session.snapshot().state);
+    try session.updateMcpSelection(null);
+    fake_core.forceNextMcpUpdateStatus(wire.STATUS_STALE_CATALOG);
+    try std.testing.expectError(
+        error.McpSelectionUpdateFailed,
+        session.updateMcpSelection(selection),
+    );
+    try std.testing.expectEqual(lifecycle.SessionState.poisoned, session.snapshot().state);
+}
+
 const CompactThreadContext = struct {
     session: *lifecycle.Session,
     operation_id: u64,

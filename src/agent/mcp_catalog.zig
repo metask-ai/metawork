@@ -1,0 +1,592 @@
+//! Agent-private consumption of the official AgentCore MCP catalog and
+//! selection ABI. This module decodes only through the bundle SDK, then copies
+//! the minimum product-neutral authority facts. Fingerprints, schema bodies,
+//! permission bindings, raw JSON, and issue detail never leave this boundary.
+
+const std = @import("std");
+const sdk = @import("metask_agentcore");
+const wire = sdk.types;
+const mcp_runtime = @import("agent_mcp_runtime");
+
+pub const ExpectedServer = mcp_runtime.ExpectedServer;
+
+pub const Server = struct {
+    binding_identity: [32]u8,
+    namespace: []const u8,
+    fresh: bool,
+    ttl_remaining_ms: u64,
+    tool_offset: u32,
+    tool_count: u32,
+};
+
+pub const Tool = struct {
+    binding_identity: [32]u8,
+    name: []const u8,
+};
+
+pub const Issue = struct {
+    binding_identity: [32]u8,
+    tool_name: ?[]const u8,
+};
+
+/// Opaque linear owner for one reduced catalog projection. Public accessors
+/// expose only the second-copy view; authority checks and selection creation
+/// use private canonical storage that callers cannot replace.
+pub const Projection = opaque {
+    pub fn deinit(self: *Projection) void {
+        const owned = projectionStorage(self);
+        const allocator = owned.allocator;
+        owned.arena.deinit();
+        allocator.destroy(owned);
+    }
+
+    pub fn catalogGeneration(self: *const Projection) u64 {
+        return projectionStorageConst(self).generation;
+    }
+
+    pub fn servers(self: *const Projection) []const Server {
+        return projectionStorageConst(self).published_servers;
+    }
+
+    pub fn tools(self: *const Projection) []const Tool {
+        return projectionStorageConst(self).published_tools;
+    }
+
+    pub fn issues(self: *const Projection) []const Issue {
+        return projectionStorageConst(self).published_issues;
+    }
+};
+
+pub const Selector = struct {
+    binding_identity: [32]u8,
+    tool_name: []const u8,
+};
+
+/// Opaque linear Host-owned selection bound to the Runtime and catalog
+/// generation that validated it. Callers cannot rewrite authority-bearing
+/// generation or selector storage. The ABI descriptor borrows it
+/// synchronously.
+pub const Selection = opaque {
+    pub fn deinit(self: *Selection) void {
+        const owned = selectionStorage(self);
+        const allocator = owned.allocator;
+        owned.arena.deinit();
+        allocator.destroy(owned);
+    }
+};
+
+pub const Error = error{
+    RefreshFailed,
+    DescribeFailed,
+    InvalidCatalogDescriptor,
+    CatalogResourceLimit,
+    CatalogGenerationMismatch,
+    CatalogBindingMismatch,
+    DuplicateCatalogIdentity,
+    InvalidSelection,
+    StaleSelection,
+};
+
+const ProjectionStorage = struct {
+    allocator: std.mem.Allocator,
+    owner_id: u64,
+    generation: u64,
+    servers: []const Server,
+    tools: []const Tool,
+    issues: []const Issue,
+    published_servers: []const Server,
+    published_tools: []const Tool,
+    published_issues: []const Issue,
+    arena: std.heap.ArenaAllocator,
+};
+
+const SelectionStorage = struct {
+    allocator: std.mem.Allocator,
+    owner_id: u64,
+    generation: u64,
+    arena: std.heap.ArenaAllocator,
+    raw_selectors: []wire.McpSelectorV1,
+};
+
+pub fn refresh(
+    allocator: std.mem.Allocator,
+    api: sdk.Api,
+    runtime: *wire.RuntimeHandle,
+    owner_id: u64,
+    expected_servers: []const ExpectedServer,
+) (Error || std.mem.Allocator.Error)!*Projection {
+    if (expected_servers.len > wire.MAX_MCP_SERVERS_V1)
+        return error.CatalogBindingMismatch;
+
+    var generation: u64 = 0;
+    var diagnostic = emptyOwnedBytes();
+    const refresh_code = api.runtimeRefreshMcp()(
+        runtime,
+        &generation,
+        &diagnostic,
+    );
+    defer releaseOwned(api, &diagnostic);
+    const refresh_status = sdk.Status.fromCode(refresh_code) catch
+        return error.RefreshFailed;
+    if (refresh_status != .ok) return error.RefreshFailed;
+
+    var descriptor = emptyOwnedBytes();
+    var describe_diagnostic = emptyOwnedBytes();
+    const describe_code = api.runtimeDescribeMcp()(
+        runtime,
+        &descriptor,
+        &describe_diagnostic,
+    );
+    defer releaseOwned(api, &descriptor);
+    defer releaseOwned(api, &describe_diagnostic);
+    const describe_status = sdk.Status.fromCode(describe_code) catch
+        return error.DescribeFailed;
+    if (describe_status != .ok) return error.DescribeFailed;
+
+    const encoded = sdk.borrowedBytes(.{
+        .ptr = descriptor.ptr,
+        .len = descriptor.len,
+    }) catch return error.InvalidCatalogDescriptor;
+    var parsed = sdk.decodeMcpCatalog(allocator, encoded) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.ResourceLimit => return error.CatalogResourceLimit,
+        error.MalformedJson,
+        error.UnknownTag,
+        error.InvalidPayload,
+        => return error.InvalidCatalogDescriptor,
+    };
+    releaseOwned(api, &descriptor);
+    defer parsed.deinit();
+    if (generation != parsed.value.catalog_generation)
+        return error.CatalogGenerationMismatch;
+    return copyProjection(
+        allocator,
+        owner_id,
+        parsed.value,
+        expected_servers,
+    );
+}
+
+pub fn createSelection(
+    allocator: std.mem.Allocator,
+    owner_id: u64,
+    projection: *const Projection,
+    requested: []const Selector,
+) (Error || std.mem.Allocator.Error)!*Selection {
+    const projection_storage = projectionStorageConst(projection);
+    if (projection_storage.owner_id != owner_id)
+        return error.CatalogBindingMismatch;
+    if (requested.len > wire.MAX_MCP_TOOLS_V1)
+        return error.InvalidSelection;
+
+    const storage = try allocator.create(SelectionStorage);
+    errdefer allocator.destroy(storage);
+    storage.* = .{
+        .allocator = allocator,
+        .owner_id = owner_id,
+        .generation = projection_storage.generation,
+        .arena = std.heap.ArenaAllocator.init(allocator),
+        .raw_selectors = &.{},
+    };
+    errdefer storage.arena.deinit();
+    const arena = storage.arena.allocator();
+    const raw_selectors = try arena.alloc(wire.McpSelectorV1, requested.len);
+    storage.raw_selectors = raw_selectors;
+    for (requested, raw_selectors, 0..) |source, *raw, index| {
+        const server = projectionServer(
+            projection_storage.servers,
+            source.binding_identity,
+        ) orelse
+            return error.InvalidSelection;
+        if (!server.fresh or
+            !projectionContainsTool(
+                projection_storage.tools,
+                source.binding_identity,
+                source.tool_name,
+            )) return error.InvalidSelection;
+        for (requested[0..index]) |previous| if (std.mem.eql(
+            u8,
+            &previous.binding_identity,
+            &source.binding_identity,
+        ) and std.mem.eql(u8, previous.tool_name, source.tool_name))
+            return error.InvalidSelection;
+        const name = try arena.dupe(u8, source.tool_name);
+        raw.* = .{
+            .struct_size = @sizeOf(wire.McpSelectorV1),
+            .reserved0 = 0,
+            .server_binding_identity = source.binding_identity,
+            .tool_name = sdk.bytesView(name),
+            .reserved = [_]u64{0} ** 3,
+        };
+    }
+    return @ptrCast(storage);
+}
+
+pub fn belongsTo(selection: *const Selection, owner_id: u64) bool {
+    return selectionStorageConst(selection).owner_id == owner_id;
+}
+
+pub fn projectionGeneration(projection: *const Projection) u64 {
+    return projectionStorageConst(projection).generation;
+}
+
+pub fn projectionBelongsTo(
+    projection: *const Projection,
+    owner_id: u64,
+) bool {
+    return projectionStorageConst(projection).owner_id == owner_id;
+}
+
+pub fn selectionGeneration(selection: *const Selection) u64 {
+    return selectionStorageConst(selection).generation;
+}
+
+/// Encodes one complete Session authority replacement. A null MetaWork
+/// selection means an empty authority view, but the returned ABI descriptor
+/// itself is always present so it is valid for `session_update_mcp`.
+pub fn rawSelectionReplacement(selection: ?*const Selection) wire.McpSelectionV1 {
+    const raw_selectors = if (selection) |value|
+        selectionStorageConst(value).raw_selectors
+    else
+        &.{};
+    return .{
+        .struct_size = @sizeOf(wire.McpSelectionV1),
+        .reserved0 = 0,
+        .selectors = if (raw_selectors.len == 0)
+            null
+        else
+            raw_selectors.ptr,
+        .selector_count = raw_selectors.len,
+        .reserved = [_]u64{0} ** 4,
+    };
+}
+
+fn copyProjection(
+    allocator: std.mem.Allocator,
+    owner_id: u64,
+    catalog: sdk.McpCatalog,
+    expected_servers: []const ExpectedServer,
+) (Error || std.mem.Allocator.Error)!*Projection {
+    const storage = try allocator.create(ProjectionStorage);
+    errdefer allocator.destroy(storage);
+    storage.* = .{
+        .allocator = allocator,
+        .owner_id = owner_id,
+        .generation = catalog.catalog_generation,
+        .servers = &.{},
+        .tools = &.{},
+        .issues = &.{},
+        .published_servers = &.{},
+        .published_tools = &.{},
+        .published_issues = &.{},
+        .arena = std.heap.ArenaAllocator.init(allocator),
+    };
+    errdefer storage.arena.deinit();
+    const arena = storage.arena.allocator();
+
+    const servers = try arena.alloc(Server, catalog.servers.len);
+    for (catalog.servers, servers, 0..) |source, *target, index| {
+        const identity = decodeIdentity(source.server_binding_identity) orelse
+            return error.InvalidCatalogDescriptor;
+        const expected = expectedServer(expected_servers, identity) orelse
+            return error.CatalogBindingMismatch;
+        if (!std.mem.eql(u8, expected.namespace, source.namespace))
+            return error.CatalogBindingMismatch;
+        for (servers[0..index]) |previous| if (std.mem.eql(
+            u8,
+            &previous.binding_identity,
+            &identity,
+        ) or std.mem.eql(u8, previous.namespace, source.namespace))
+            return error.DuplicateCatalogIdentity;
+        target.* = .{
+            .binding_identity = identity,
+            .namespace = try arena.dupe(u8, source.namespace),
+            .fresh = source.fresh,
+            .ttl_remaining_ms = source.ttl_remaining_ms,
+            .tool_offset = source.tool_offset,
+            .tool_count = source.tool_count,
+        };
+    }
+
+    const tools = try arena.alloc(Tool, catalog.tools.len);
+    for (catalog.tools, tools, 0..) |source, *target, index| {
+        const identity = decodeIdentity(source.server_binding_identity) orelse
+            return error.InvalidCatalogDescriptor;
+        if (expectedServer(expected_servers, identity) == null)
+            return error.CatalogBindingMismatch;
+        for (tools[0..index]) |previous| if (std.mem.eql(
+            u8,
+            &previous.binding_identity,
+            &identity,
+        ) and std.mem.eql(u8, previous.name, source.canonical_name))
+            return error.DuplicateCatalogIdentity;
+        target.* = .{
+            .binding_identity = identity,
+            .name = try arena.dupe(u8, source.canonical_name),
+        };
+    }
+
+    const issues = try arena.alloc(Issue, catalog.issues.len);
+    for (catalog.issues, issues) |source, *target| {
+        const identity = decodeIdentity(source.server_binding_identity) orelse
+            return error.InvalidCatalogDescriptor;
+        if (expectedServer(expected_servers, identity) == null)
+            return error.CatalogBindingMismatch;
+        target.* = .{
+            .binding_identity = identity,
+            .tool_name = if (source.tool_name) |name|
+                try arena.dupe(u8, name)
+            else
+                null,
+        };
+    }
+    storage.servers = servers;
+    storage.tools = tools;
+    storage.issues = issues;
+
+    // The public projection is deliberately a second copy. Workbench may
+    // inspect it, but selection and integrity checks always read the private
+    // canonical arrays above. Sharing either structs or string bytes would
+    // let a caller rewrite the value against which it is later validated.
+    const published_servers = try arena.alloc(Server, servers.len);
+    for (servers, published_servers) |source, *target| {
+        target.* = source;
+        target.namespace = try arena.dupe(u8, source.namespace);
+    }
+    const published_tools = try arena.alloc(Tool, tools.len);
+    for (tools, published_tools) |source, *target| {
+        target.* = source;
+        target.name = try arena.dupe(u8, source.name);
+    }
+    const published_issues = try arena.alloc(Issue, issues.len);
+    for (issues, published_issues) |source, *target| {
+        target.* = source;
+        target.tool_name = if (source.tool_name) |name|
+            try arena.dupe(u8, name)
+        else
+            null;
+    }
+    storage.published_servers = published_servers;
+    storage.published_tools = published_tools;
+    storage.published_issues = published_issues;
+    return @ptrCast(storage);
+}
+
+fn projectionServer(
+    servers: []const Server,
+    identity: [32]u8,
+) ?Server {
+    for (servers) |server| if (std.mem.eql(
+        u8,
+        &server.binding_identity,
+        &identity,
+    )) return server;
+    return null;
+}
+
+fn projectionContainsTool(
+    tools: []const Tool,
+    identity: [32]u8,
+    name: []const u8,
+) bool {
+    for (tools) |tool| if (std.mem.eql(
+        u8,
+        &tool.binding_identity,
+        &identity,
+    ) and std.mem.eql(u8, tool.name, name)) return true;
+    return false;
+}
+
+fn expectedServer(
+    expected: []const ExpectedServer,
+    identity: [32]u8,
+) ?ExpectedServer {
+    for (expected) |server| if (std.mem.eql(
+        u8,
+        &server.binding_identity,
+        &identity,
+    )) return server;
+    return null;
+}
+
+fn decodeIdentity(encoded: []const u8) ?[32]u8 {
+    if (encoded.len != 64) return null;
+    var result: [32]u8 = undefined;
+    for (0..result.len) |index| {
+        const high = hexNibble(encoded[index * 2]) orelse return null;
+        const low = hexNibble(encoded[index * 2 + 1]) orelse return null;
+        result[index] = high << 4 | low;
+    }
+    return result;
+}
+
+fn hexNibble(value: u8) ?u8 {
+    return switch (value) {
+        '0'...'9' => value - '0',
+        'a'...'f' => value - 'a' + 10,
+        else => null,
+    };
+}
+
+fn projectionStorage(projection: *Projection) *ProjectionStorage {
+    return @ptrCast(@alignCast(projection));
+}
+
+fn projectionStorageConst(projection: *const Projection) *const ProjectionStorage {
+    return @ptrCast(@alignCast(projection));
+}
+
+fn selectionStorage(selection: *Selection) *SelectionStorage {
+    return @ptrCast(@alignCast(selection));
+}
+
+fn selectionStorageConst(selection: *const Selection) *const SelectionStorage {
+    return @ptrCast(@alignCast(selection));
+}
+
+fn emptyOwnedBytes() wire.OwnedBytesV1 {
+    return .{ .ptr = null, .len = 0 };
+}
+
+fn releaseOwned(api: sdk.Api, buffer: *wire.OwnedBytesV1) void {
+    if (buffer.ptr != null or buffer.len != 0) api.bufferRelease()(buffer);
+}
+
+fn encodeIdentity(identity: [32]u8, output: *[64]u8) []const u8 {
+    const hex = "0123456789abcdef";
+    for (identity, 0..) |byte, index| {
+        output[index * 2] = hex[byte >> 4];
+        output[index * 2 + 1] = hex[byte & 0x0f];
+    }
+    return output;
+}
+
+test "projection drops fingerprints schema bindings and issue detail" {
+    const identity: [32]u8 = @splat(0x2a);
+    var identity_storage: [64]u8 = undefined;
+    const encoded_identity = encodeIdentity(identity, &identity_storage);
+    const servers = [_]sdk.protocol.McpCatalogServer{.{
+        .server_binding_identity = encoded_identity,
+        .namespace = "github",
+        .negotiated_protocol = "2026-07-28",
+        .server_fingerprint = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        .cache_scope = "private",
+        .fresh = true,
+        .ttl_remaining_ms = 1000,
+        .tool_offset = 0,
+        .tool_count = 1,
+    }};
+    const tools = [_]sdk.protocol.McpCatalogTool{.{
+        .server_binding_identity = encoded_identity,
+        .canonical_name = "search",
+        .schema_fingerprint = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        .permission_binding = "mcp:github/search",
+    }};
+    const issues = [_]sdk.protocol.McpCatalogIssue{.{
+        .issue_id = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        .server_binding_identity = encoded_identity,
+        .tool_name = "search",
+        .kind = "unavailable",
+        .detail = "raw detail must not be copied",
+    }};
+    const owner_id: u64 = 41;
+    const projection = try copyProjection(
+        std.testing.allocator,
+        owner_id,
+        .{
+            .schema = "agentcore.mcp-catalog/v1",
+            .catalog_generation = 7,
+            .catalog_fingerprint = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            .servers = &servers,
+            .tools = &tools,
+            .issues = &issues,
+        },
+        &.{.{
+            .binding_identity = identity,
+            .namespace = "github",
+        }},
+    );
+    defer projection.deinit();
+    try std.testing.expectEqual(@as(u64, 7), projection.catalogGeneration());
+    try std.testing.expectEqualStrings("github", projection.servers()[0].namespace);
+    try std.testing.expectEqualStrings("search", projection.tools()[0].name);
+    try std.testing.expectEqualStrings("search", projection.issues()[0].tool_name.?);
+    try std.testing.expect(projectionBelongsTo(projection, owner_id));
+    @constCast(projection.servers())[0].fresh = false;
+    @constCast(projection.tools()[0].name)[0] = 'S';
+
+    const selection = try createSelection(
+        std.testing.allocator,
+        owner_id,
+        projection,
+        &.{.{ .binding_identity = identity, .tool_name = "search" }},
+    );
+    defer selection.deinit();
+    const raw = rawSelectionReplacement(selection);
+    try std.testing.expectEqual(@as(u64, 1), raw.selector_count);
+    try std.testing.expectEqualDeep(identity, raw.selectors.?[0].server_binding_identity);
+
+    const empty = rawSelectionReplacement(null);
+    try std.testing.expectEqual(@as(u32, @sizeOf(wire.McpSelectionV1)), empty.struct_size);
+    try std.testing.expectEqual(@as(u64, 0), empty.selector_count);
+    try std.testing.expectEqual(@as(?[*]const wire.McpSelectorV1, null), empty.selectors);
+}
+
+test "selection rejects stale authority and duplicate selectors" {
+    const identity: [32]u8 = @splat(1);
+    const owner_id: u64 = 41;
+    const other_owner_id: u64 = 42;
+    const storage = try std.testing.allocator.create(ProjectionStorage);
+    storage.* = .{
+        .allocator = std.testing.allocator,
+        .owner_id = owner_id,
+        .generation = 1,
+        .servers = &.{},
+        .tools = &.{},
+        .issues = &.{},
+        .published_servers = &.{},
+        .published_tools = &.{},
+        .published_issues = &.{},
+        .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
+    };
+    const arena = storage.arena.allocator();
+    const servers = try arena.dupe(Server, &.{.{
+        .binding_identity = identity,
+        .namespace = "github",
+        .fresh = true,
+        .ttl_remaining_ms = 1,
+        .tool_offset = 0,
+        .tool_count = 1,
+    }});
+    const tools = try arena.dupe(Tool, &.{.{
+        .binding_identity = identity,
+        .name = "search",
+    }});
+    storage.servers = servers;
+    storage.tools = tools;
+    storage.published_servers = servers;
+    storage.published_tools = tools;
+    const projection: *Projection = @ptrCast(storage);
+    defer projection.deinit();
+    try std.testing.expectError(
+        error.CatalogBindingMismatch,
+        createSelection(
+            std.testing.allocator,
+            other_owner_id,
+            projection,
+            &.{},
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidSelection,
+        createSelection(
+            std.testing.allocator,
+            owner_id,
+            projection,
+            &.{
+                .{ .binding_identity = identity, .tool_name = "search" },
+                .{ .binding_identity = identity, .tool_name = "search" },
+            },
+        ),
+    );
+}
