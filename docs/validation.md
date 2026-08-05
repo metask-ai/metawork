@@ -85,6 +85,8 @@ npm run test:windows:bringup
 
 Windows owner 只锁定并验证 Windows x86_64 GNU artifact；当前 exact lock 使用 clean `a5b3821c17b337d33f40f903df12484b01f92010` source artifact。candidate 先通过 `AGENTCORE_BUNDLE_ROOT=<absolute-path> npm run probe:agentcore`，`test:windows:bringup` 再覆盖 staged verifier/probe、bundle 与 lifecycle tests、正式 test graph、Debug/Release build 和真实 Windows vertical，并必须明确报告 revision 6。macOS 与 Windows 结果不能互相替代。安装器、签名、更新、file dialog、process tree、timeout 和完整 security matrix 需要独立证据。
 
+Windows 真实 desktop vertical 还必须在 Bridge 连接后通过 UI Automation 点击 Composer、发送真实键盘输入并清理临时内容，证明只读窗口状态同步没有把焦点从 WebView 抢回 Native 顶层窗口。
+
 ## 4. 登录优先与成熟 Workbench 验收矩阵
 
 产品行为由 [产品需求的 Metask Account、恢复与 Workbench 章节](requirements.md)定义；下表只记录覆盖状态和证据。

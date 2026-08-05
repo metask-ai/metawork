@@ -115,7 +115,6 @@ const Windows = if (builtin.os.tag == .windows) struct {
         if (platform.app_info.startupWindowCount() != 1 or
             platform.app_info.resolvedMainWindow().id != window_id)
             return error.WindowIdentityMismatch;
-        try services.focusWindow(window_id);
         const window = GetActiveWindow() orelse return error.WindowUnavailable;
         const expected_host: isize = @bitCast(@intFromPtr(platform.host));
         if (GetWindowLongPtrW(window, gwlp_userdata) != expected_host)
