@@ -64,7 +64,7 @@ const base = {
       authorization: "available",
     },
   ],
-  selectedWorkspaceId: "automatic",
+  selectedWorkspaceOptionId: "automatic",
   workspaceEditable: true,
   modelLabel: "Claude Sonnet 4",
   modelOptions: [
@@ -589,7 +589,7 @@ test("a new Task draft is editable before its first send", () => {
         authorization: "available",
       },
     ],
-    selectedWorkspaceId: "1",
+    selectedWorkspaceOptionId: "1",
   });
   assert.match(markup, /<textarea/);
   assert.match(markup, />Ship the release</);
@@ -751,12 +751,12 @@ test("Task list disambiguates duplicate titles with their own paths", () => {
     [
       {
         id: "workspace-a",
-        origin: "user",
+        kind: "manual",
         canonicalRoot: "/repo/alpha",
       },
       {
         id: "workspace-b",
-        origin: "user",
+        kind: "manual",
         canonicalRoot: "/repo/beta",
       },
     ],

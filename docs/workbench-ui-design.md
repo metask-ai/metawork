@@ -96,7 +96,7 @@ Workspace
 - `Turn` 和 `Run` 通常不直接命名，用当前活动、排队、停止和结果表达。
 - 一项 Task 可以包含多次用户补充和多次执行；停止一次执行不会删除 Task。
 
-当前 Renderer 产品合同为 `metawork.renderer-bridge` 固定 revision 1：`connect` 精确协商后才开放产品路径，snapshot 根节点包含无 secret `capabilities`、`account`、`skillCatalog`、`skillManagement`、`mcp`、`selectedWorkspaceId`、`workspaces`、`scheduledTasks` 与 `tasks` 且不维护局部版本；Account 直接发布 `readiness`、唯一 `primaryAction`、脱敏 catalog selection 与 generation，Workspace 独立于 Task 发布，Task 固化 binding epoch 与显示事实。快速开发阶段直接原地 hard cut 合同内容，不提供临时形态兼容层或可选字段退路；任何合同类版本标识变更必须先得到用户显式同意。Agent 内部 Session route identity 不属于 Renderer 产品模型。
+当前 Renderer 产品合同为 `metawork.renderer-bridge` 固定 revision 1：`connect` 精确协商后才开放产品路径，snapshot 根节点包含无 secret `capabilities`、`account`、`skillCatalog`、`skillManagement`、`mcp`、`workspaces`、`scheduledTasks` 与 `tasks` 且不维护局部版本；Account 直接发布 `readiness`、唯一 `primaryAction`、脱敏 catalog selection 与 generation，Workspace 独立于 Task 发布，Task 固化 binding epoch 与显示事实。快速开发阶段直接原地 hard cut 合同内容，不提供临时形态兼容层或可选字段退路；任何合同类版本标识变更必须先得到用户显式同意。Agent 内部 Session route identity 不属于 Renderer 产品模型。
 
 ### 3.2 规范术语
 
@@ -193,12 +193,12 @@ Workspace
 
 登录后的左栏从上到下只承担五类稳定职责：品牌/窗口识别、New task、已接通的全局能力入口、Task 导航、左下角账号入口。搜索由标题栏或命令面板提供，不在窄侧栏重复占据首要位置。
 
-- 左栏不显示 Workspace 标题、添加动作或切换器；它直接列出同一 canonical snapshot 中 owning Workspace 仍被投影的所有 User/Managed Task，并按统一行动优先级分组。Workspace 移除后保留的历史 Task 不生成可点击的死入口；
+- 左栏不显示 Workspace 标题、添加动作或切换器；它直接列出同一 canonical snapshot 中 owning Workspace 仍被投影的所有 Manual/Automatic Task，并按统一行动优先级分组。Workspace 移除后保留的历史 Task 不生成可点击的死入口；
 - Task 被选择后使用自身绑定的 Workspace 路径，不提交额外的全局 Workspace 导航动作；不同路径下的后台 Task 都必须持续可见；
-- New task 默认选择 Automatic Workspace，工作目录控件直接显示“默认”；此时不提前创建 Workspace 或 Task，首次发送才请求 Host 分配 Managed Workspace。用户可以在发送前切换到已有 User Workspace 或打开原生目录选择器；选择完成后只更新草稿上下文，不得自动创建 Task 或发送已有内容。User Workspace 直接显示 canonical directory，Managed Workspace 统一显示“默认”，不得暴露随机目录或内部 origin 术语；
+- New task 默认选择 Automatic Workspace，工作目录控件直接显示“默认”；此时不提前创建 Workspace 或 Task，首次发送才请求 Host 分配 Automatic Workspace。用户可以在发送前切换到已有 Manual Workspace 或打开原生目录选择器；选择完成后只更新草稿上下文，不得自动创建 Task 或发送已有内容。Manual Workspace 直接显示 canonical directory，Automatic Workspace 统一显示“默认”，不得暴露随机目录或内部 kind 术语；
 - New task 草稿按 Workspace 隔离。未绑定 Workspace 的临时草稿只在目标 Workspace 没有草稿时迁移；目标已有草稿时保留两边内容并打开目标草稿，不能覆盖或丢弃任一份；
-- Workspace projection 的 `origin` 仍是 Host 事实；一个 User Workspace 可以承载多个 Task，Managed Workspace 精确归属一个 Task；
-- Composer 的工作目录控件只选择、添加或重新授权 New task 路径；User Workspace 的完整列表、移除、移除失败重试和空目录记录管理归正式设置页。两处消费同一 Host projection 与 mutation，不复制 registry 或维护第二套 Renderer 状态；
+- Workspace projection 的 `kind` 是 Host 事实；一个 Manual Workspace 可以承载多个 Task，Automatic Workspace 精确归属一个 Task；
+- Composer 的工作目录控件只选择、添加或重新授权 New task 路径；Manual Workspace 的完整列表、移除、移除失败重试和空目录记录管理归正式设置页。两处消费同一 Host projection 与 mutation，不复制 registry 或维护第二套 Renderer 状态；
 - 再次打开历史 Task 只保证可浏览记录；需要访问原目录时重新选择或授权，能否继续执行还必须服从 §6.4 的 Conversation 与 execution binding 规则；
 - App 重启后，左栏直接使用 Host 恢复的 Task 列表和顺序；点击 Task 打开其已保存时间线，不自动创建新 Task、不重放最后一次输入，也不把恢复的 `interrupted` 显示成仍在运行；
 - `taskHistoryPersistenceHealth = read_failed / corrupt / write_failed / outcome_unknown` 时，左栏在 Task 列表前显示一条紧凑、可读的错误提示。历史读取失败或损坏不得伪装成空列表；mutation 保持禁用，`outcome_unknown` 明确要求重启，Renderer 不提供盲目重试同一命令的入口；
@@ -260,7 +260,7 @@ Skills                                                              10
 
 - 页面保留 Workbench 左栏和约 944 px 内容宽度；标题使用现有 24–28 px Display scale，一句产品说明后直接进入 controls，不增加 Hero、统计卡、渐变、来源 Logo 或装饰插画；
 - Header 的 `Import skill` 是唯一主动作，`Refresh` 使用现有次级按钮。导入、重新导入或卸载成功后仍自动请求 catalog reconciliation；显式 Refresh 是恢复与外部文件变化入口；
-- 搜索过滤已提交管理 projection 的 display name、description、invocation 和 argument name。`All / Personal / Project` 是范围筛选；选择 Project 后显示已注册 User Workspace selector，不借用左栏 current Workspace，也不列出 Managed Workspace；
+- 搜索过滤已提交管理 projection 的 display name、description、invocation 和 argument name。`All / Personal / Project` 是范围筛选；选择 Project 后显示已注册 Manual Workspace selector，不借用左栏 current Workspace，也不列出 Automatic Workspace；
 - 异常、冲突和 `pending_verification` 进入 `Needs attention`，正常资产进入 `Skills`；空分组不渲染，同一 Skill 不在两个分组重复；
 - 常规桌面使用两列卡片，中等与窄窗降为一列。卡片使用 `canvas/paper`、`rule`、约 12 px 圆角和无常驻阴影；hover/focus 只增加极浅 brand 背景、边框和最多 1 px 位移；
 - 卡片显示统一的线性 Skill 文档图标、display name、单行 description、范围、可选 monospace invocation 和带文字的状态。删除原 `/` 装饰；不显示安装量、`Installed`、来源品牌徽章或启用 switch；
@@ -279,7 +279,7 @@ Skills                                                              10
 
 - `Import skill` 打开同一 drawer 体系，首屏突出 Host 原生 `Choose .skill or .zip`，次级入口为 `Choose folder`；当前 Native SDK 没有可信 drop capability，因此不显示不可兑现的拖放热区，也不提供 GitHub、skills.sh、URL、市场或代理配置；
 - Native 选择先生成 window-bound、一次性 staged capability；Renderer 只消费 opaque preview identity。Preview 显示名称、description、`SKILL.md`、文件清单、总大小、候选 invocation 和机械安全检查结果；导出同样通过 Host 原生目录选择取得一次性目标 authority，由 Host 生成规范文件名并写入，不让 Renderer提交路径；
-- 用户选择 `Personal` 或一个已注册且已授权的 User Workspace。范围默认沿用页面筛选，但必须在最终确认中可见；没有合法目标时安装保持禁用并提供恢复动作；
+- 用户选择 `Personal` 或一个已注册且已授权的 Manual Workspace。范围默认沿用页面筛选，但必须在最终确认中可见；没有合法目标时安装保持禁用并提供恢复动作；
 - 同名目录、相同 invocation、project override 或 external asset 都必须在确认前说明精确影响，安全默认是取消；不提供自动重命名 invocation、静默覆盖或“仍然继续”绕过失败；
 - `Import` 后 drawer 展示 progress。成功只在资产发布且 catalog 确认可用时成立；候选 definition/resource/conflict failure 回滚并保留 preview，catalog 暂时不可验证时显示 `Installed, awaiting verification` 与 Retry/Uninstall；页面导航和后台 Task 不被冻结。
 
@@ -347,17 +347,17 @@ Disabled
 空态直接展示建议模板，并由页首 `新建定时任务` 承担自定义创建；不增加无法可靠推导时间规则的自然语言快捷入口。已有定义时才切换为搜索工具栏，过滤标题和任务指令；下面按 `需要处理 / 进行中 / 已暂停 / 已完成` 分区呈现连续列表。建议不与用户定义混在同一状态分区。
 
 - 建议行是可执行模板，不是静态示例。整行点击进入创建确认层，预填任务说明、recurrence 和通知；自定义创建始终使用页首统一入口，不建立第二种创建协议；
-- 当前建议和自定义计划都直接使用自动工作区，不得因为标题或说明提到“项目”“工作区”或某个 Skill 就切换到 User Workspace；页面不显示 Workspace 配置；
+- 当前建议和自定义计划都直接使用自动工作区，不得因为标题或说明提到“项目”“工作区”或某个 Skill 就切换到 Manual Workspace；页面不显示 Workspace 配置；
 - 页面沿用 Skill 中心最大阅读宽度与克制的连续列表，不使用统计卡、流程画布或常驻左右分栏。每行显示识别图标、名称、自然语言计划摘要、短说明、下一次/最近结果；hover 才显示 `···`，键盘 focus 时动作同样可见；
-- 创建/编辑使用右侧 drawer，窄窗切为整页。按 `名称`、`任务内容`、`运行时间`、`确认摘要` 排列，名称输入始终位于表单最上方。任务内容只有一段 Text 指令，不提供 Workspace、Skill 类型切换、Skill 选择器、catalog revision 或参数配置；需要采用某个全局 Skill 时由用户在指令中说明。每次 occurrence 由 MetaWork 分配新的 Managed Workspace，界面不要求用户理解或选择 Workspace；
-- Host 投影 `managedWorkspaces = false` 时，Text 模板仍可查看，但创建/编辑不可保存；不得静默采用当前或第一个 User Workspace；
+- 创建/编辑使用右侧 drawer，窄窗切为整页。按 `名称`、`任务内容`、`运行时间`、`确认摘要` 排列，名称输入始终位于表单最上方。任务内容只有一段 Text 指令，不提供 Workspace、Skill 类型切换、Skill 选择器、catalog revision 或参数配置；需要采用某个全局 Skill 时由用户在指令中说明。每次 occurrence 由 MetaWork 分配新的 Automatic Workspace，界面不要求用户理解或选择 Workspace；
+- Host 投影 `automaticWorkspaces = false` 时，Text 模板仍可查看，但创建/编辑不可保存；不得静默采用当前或第一个 Manual Workspace；
 - 时间选项优先呈现一次、每小时、每天、工作日、每周与每月，并明确本地 timezone；高级固定间隔可折叠，Renderer 只提交 Host 可验证的结构化 recurrence，不拥有 timer 或 occurrence；
 - 保存前提供一句完整确认摘要，例如“每个工作日 08:00 运行「每日工作简报」，结果完成后通知我”；provider、generation、Unix seconds 和 catalog revision 不进入产品文案；
 - 新建、保存、暂停/恢复、立即运行和删除使用 Host typed result 与 optimistic `scheduledTaskEpoch`。命令 timeout 后先刷新 canonical snapshot，不自动重放；
 - 点击计划打开 detail drawer：上半部是定义与下一次运行，下半部是有界运行历史。每个 occurrence 链接到其真实 Task，并显示完成、失败、已跳过、延迟或等待处理；结果历史不复制 Task timeline；
 - 删除计划不停止或删除已经创建的真实 Task；`立即运行` 也通过同一 occurrence 与 Task admission，不能建立测试/手动专用路径；上一次真实 Task 仍 non-terminal 时显示 `已跳过：上一次仍在运行`；
 - 执行配置或 Workspace authority 变化时显示 `需要处理`，并要求用户编辑确认；需要 Agent permission/question 的 occurrence 链接到真实请求并发出系统通知，不把等待伪装成 schedule failure；
-- 每次 default occurrence 创建新的真实 Task 与 Managed Workspace；同一 occurrence 所属 Task 的后续 Run 复用该目录。运行历史链接 Task，不展示 managed `workspace-key`；目录保留不等于 Host 重启后恢复 Task。
+- 每次 default occurrence 创建新的真实 Task 与 Automatic Workspace；同一 occurrence 所属 Task 的后续 Run 复用该目录。运行历史链接 Task，不展示 automatic `workspace-key`；目录保留不等于 Host 重启后恢复 Task。
 - 页面不再显示“仅在 MetaWork 运行时触发”限制条。窗口关闭时 MetaWork 留在系统后台并继续计划；显式退出通过托盘动作完成并在确认中说明影响，重启后定义与触发游标从 Host store 恢复；
 - 已有定义时的搜索使用 `type="search"`；分区是带可访问名称的 region/list；模板行、任务行和 overflow 动作都有明确 button 语义。drawer 打开后焦点进入标题/说明，`Escape` 或关闭动作回到原触发行；运行历史更新不抢焦点。
 
@@ -591,9 +591,9 @@ New task 页面以 Composer 为绝对主视觉。其上方使用直接的行动�
 Composer 布局与输入规则：
 
 - 模型控件位于输入框内部左下角，发送位于右下角；textarea 与底部工具带共同组成一个完整圆角容器，不得拆成相互竞争的表单块。Workspace 位于容器外下方的轻量 breadcrumb 行，不能做成第二个有边框卡片，也不能放回输入框上方形成第二条上下文栏；
-- New task 的 Workspace breadcrumb 默认选中“默认”，并可以在 Automatic 与已授权 User Workspace 之间切换，也可以打开原生目录选择器添加或重新授权；已有 Task 只显示其绑定 Workspace 事实，不提供虚假的切换；
+- New task 的 Workspace breadcrumb 默认选中“默认”，并可以在 Automatic 与已授权 Manual Workspace 之间切换，也可以打开原生目录选择器添加或重新授权；已有 Task 只显示其绑定 Workspace 事实，不提供虚假的切换；
 - 输入框不允许用户拖拽改变大小。它随内容自动增高，达到约 7–8 行或视口高度的 28% 后改为内部滚动；
-- Automatic intent 不是 Workspace 缺失；`managedWorkspaces` 可用时普通 Text 可以直接发送。只有所选 User Workspace 缺失或授权失效时发送才保持禁用，并在 breadcrumb 中提供明确恢复动作；Workspace 选择和发送是两个独立动作。
+- Automatic intent 不是 Workspace 缺失；`automaticWorkspaces` 可用时普通 Text 可以直接发送。只有所选 Manual Workspace 缺失或授权失效时发送才保持禁用，并在 breadcrumb 中提供明确恢复动作；Workspace 选择和发送是两个独立动作。
 
 已有 Task 的内容标题区是唯一 active operation 停止入口：
 
@@ -896,7 +896,7 @@ General
 └── Language
 
 Work directories
-├── Trusted User Workspace list
+├── Trusted Manual Workspace list
 ├── Authorization and removal status
 └── Add / reauthorize / remove
 
@@ -914,11 +914,11 @@ Account & models
 
 `Work directories` 是低频 Workspace 生命周期控制面，不是第二套导航：
 
-- 只列 Host 投影的 `origin = user` Workspace，按 Host recent order 展示 display name、canonical directory、Task 记录数和授权/移除状态；Managed Workspace 只随 owning Task 导航，不进入设置；
+- 只列 Host 投影的 `kind = manual` Workspace，按 Host recent order 展示 display name、canonical directory、Task 记录数和授权/移除状态；Automatic Workspace 只随 owning Task 导航，不进入设置；
 - `Add directory` 使用同一 Host-owned native picker 与一次性 authority。重新授权要求用户重新选择目录；Renderer 不持有路径 capability，也不从字符串判断是否为同一目录，而是在 authoritative snapshot 刷新后用 Host 返回的稳定 Workspace identity 校验目标。选择了其他目录时可以保留该新增目录，但必须明确原目标仍需授权；
 - 移除使用行内非模态确认，明确本地文件与 Task 历史保留、live work 会停止；确认打开后聚焦取消，Escape 取消并归还焦点，提交后以 canonical `removing` 状态为准；
 - `lastRemovalFailure` 必须显示为可重试事实。transport 或 typed rejection 就地显示，不把失败藏到当前不可见的 Workspace command-bar scope；
-- 设置页只管理 lifecycle，不改变当前 Task。Host `selectedWorkspaceId` 不决定后续 New task 的默认 intent；每个 New task 都默认回到 Automatic。Renderer 不维护 `activeWorkspaceId` 或其他全局活动 Workspace 镜像。
+- 设置页只管理 lifecycle，不改变当前 Task。每个 New task 都默认回到 Automatic；Renderer 只在该 draft 内保存 Manual Workspace identity，不维护 `activeWorkspaceId` 或其他全局活动 Workspace 镜像。
 
 `Account & models` 规则：
 

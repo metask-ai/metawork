@@ -56,7 +56,7 @@ export function ComposerFooter({
   workspaceLabel,
   workspaceTitle,
   workspaceOptions,
-  selectedWorkspaceId,
+  selectedWorkspaceOptionId,
   workspaceEditable,
   modelLabel,
   modelOptions,
@@ -97,7 +97,7 @@ export function ComposerFooter({
     authorization: "available" | "removing" | "reauthorization_required";
     disabled?: boolean;
   }[];
-  selectedWorkspaceId: string;
+  selectedWorkspaceOptionId: string;
   workspaceEditable: boolean;
   modelLabel: string | null;
   modelOptions: { selectionId: string; displayName: string }[];
@@ -473,7 +473,7 @@ export function ComposerFooter({
           label={workspaceLabel}
           title={workspaceTitle}
           options={workspaceOptions}
-          selectedId={selectedWorkspaceId}
+          selectedId={selectedWorkspaceOptionId}
           editable={workspaceEditable}
           disabled={actionDisabled}
           onConfirmAccess={onConfirmAccess}

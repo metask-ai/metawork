@@ -152,10 +152,10 @@ export function taskSignals(task: TaskView): TaskSignals {
 }
 
 export function workspaceDirectoryLabel(
-  workspace: Pick<WorkspaceView, "origin" | "canonicalRoot">,
+  workspace: Pick<WorkspaceView, "kind" | "canonicalRoot">,
   defaultLabel: string,
 ): string {
-  return workspace.origin === "managed"
+  return workspace.kind === "automatic"
     ? defaultLabel
     : workspace.canonicalRoot;
 }
@@ -190,7 +190,7 @@ export function searchWorkbench(
         taskId: task.id,
         title,
         detail:
-          workspace.origin === "managed"
+          workspace.kind === "automatic"
             ? workspace.displayName
             : workspace.canonicalRoot,
       });

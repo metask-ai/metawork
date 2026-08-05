@@ -161,7 +161,8 @@ try {
     // authoritative snapshot instead.
     const reconciled = await snapshot();
     const selected = reconciled.workspaces.find(
-      (item) => item.id === reconciled.selectedWorkspaceId,
+      (item) =>
+        item.kind === "manual" && item.canonicalRoot === canonicalWorkspace,
     );
     if (!selected)
       throw new Error("Workspace choice had no response or committed state");
@@ -181,8 +182,8 @@ try {
     (item) => item.id === workspaceId,
   );
   if (
-    afterChoose.selectedWorkspaceId !== workspaceId ||
-    selectedWorkspace?.authorization !== "available" ||
+    selectedWorkspace?.kind !== "manual" ||
+    selectedWorkspace.authorization !== "available" ||
     selectedWorkspace.canonicalRoot !== canonicalWorkspace ||
     !isWireId(selectedWorkspace.epoch) ||
     selectedWorkspace.lastRemovalFailure !== null

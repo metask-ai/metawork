@@ -110,10 +110,6 @@ import {
 } from "../workbench/store.ts";
 import { navigableTasks } from "../workbench/task-visibility.ts";
 import {
-  WorkspaceSelectionIntents,
-  type WorkspaceSelectionRequest,
-} from "../workbench/workspace-selection-intents.ts";
-import {
   accountMutationBlocksTaskAdmission,
   PendingScopes,
 } from "../workbench/pendingScopes.ts";
@@ -188,8 +184,6 @@ export default function App() {
   const accountBusyRef = useRef(false);
   const accountCancelBusyRef = useRef(false);
   const workspaceBusyRef = useRef(false);
-  const workspaceSelectionRunningRef = useRef(false);
-  const workspaceSelectionIntents = useRef(new WorkspaceSelectionIntents());
   const connectionBusyRef = useRef(false);
   const taskMenu = useRef<HTMLDivElement>(null);
   const inspectorToggle = useRef<HTMLButtonElement>(null);
@@ -204,9 +198,9 @@ export default function App() {
   const snapshot = workbench.snapshot;
   const activeTask = useMemo(() => selectActiveTask(workbench), [workbench]);
   const inspector = useInspectorSession(activeTask);
-  const userWorkspaces = useMemo(
+  const manualWorkspaces = useMemo(
     () =>
-      snapshot.workspaces.filter((workspace) => workspace.origin === "user"),
+      snapshot.workspaces.filter((workspace) => workspace.kind === "manual"),
     [snapshot.workspaces],
   );
   const navigableTaskItems = useMemo(
@@ -256,7 +250,7 @@ export default function App() {
   );
   const newTaskWorkspaceReady = workbench.draftWorkspaceId
     ? composerWorkspace?.authorization === "available"
-    : snapshot.capabilities.managedWorkspaces;
+    : snapshot.capabilities.automaticWorkspaces;
   const skillCatalog = newTaskDraftActive
     ? (composerWorkspace?.skillCatalog ?? {
         availability: "unavailable" as const,
@@ -731,7 +725,7 @@ export default function App() {
       )
         return {
           kind: "target_mismatch",
-          selectedWorkspaceId: result.workspaceId,
+          chosenWorkspaceId: result.workspaceId,
         };
       return { kind: "selected", workspaceId: result.workspaceId };
     } catch (error) {
@@ -757,7 +751,7 @@ export default function App() {
       return { kind: "failed" };
     const workspace = snapshot.workspaces.find(
       (candidate) =>
-        candidate.id === workspaceId && candidate.origin === "user",
+        candidate.id === workspaceId && candidate.kind === "manual",
     );
     if (!workspace) return { kind: "failed" };
     workspaceBusyRef.current = true;
@@ -789,70 +783,9 @@ export default function App() {
     }
   }
 
-  async function executeWorkspaceSelection(request: WorkspaceSelectionRequest) {
-    if (workbenchMutationDisabled) return;
-    workspaceBusyRef.current = true;
-    workspaceSelectionRunningRef.current = true;
-    setWorkspaceBusy(true);
-    try {
-      const result = await client.selectWorkspace(
-        request.workspaceId,
-        request.workspaceEpoch,
-      );
-      if (!result.accepted) {
-        await refreshSnapshot().catch(() => undefined);
-        if (workspaceSelectionIntents.current.isCurrent(request))
-          setStatus(
-            attentionStatus(mutationReasonMessageId(result.reason), {
-              scope: "workspace",
-              workspaceId: null,
-            }),
-          );
-        return;
-      }
-      await refreshSnapshot();
-      if (!workspaceSelectionIntents.current.isCurrent(request)) return;
-      if (
-        request.migratableDraftId &&
-        request.migratableDraftId !== request.workspaceId
-      )
-        newTaskDrafts.moveDraft(request.migratableDraftId, request.workspaceId);
-      dispatchWorkbench({
-        type: "task.draft.opened",
-        workspaceId: request.workspaceId,
-      });
-      window.requestAnimationFrame(() => composer.current?.focus());
-      setStatus(
-        quietStatus("workspace.grant_confirmed", {
-          scope: "workspace",
-          workspaceId: request.workspaceId,
-        }),
-      );
-    } catch (error) {
-      await refreshSnapshot().catch(() => undefined);
-      if (workspaceSelectionIntents.current.isCurrent(request))
-        setStatus(
-          attentionStatus(
-            "workspace.selection_failed",
-            { scope: "workspace", workspaceId: null },
-            {
-              diagnostic: errorText(error),
-            },
-          ),
-        );
-    } finally {
-      workspaceSelectionRunningRef.current = false;
-      workspaceBusyRef.current = false;
-      setWorkspaceBusy(false);
-      const queued = workspaceSelectionIntents.current.takeQueued();
-      if (queued) void executeWorkspaceSelection(queued);
-    }
-  }
-
-  function selectWorkspaceById(workspaceId: string) {
+  function setDraftWorkspaceById(workspaceId: string) {
     if (workbenchMutationDisabled) return;
     if (workspaceId === automaticWorkspaceOptionId) {
-      workspaceSelectionIntents.current.invalidate();
       if (newTaskDraftId && newTaskDraftId !== unscopedNewTaskDraftId)
         newTaskDrafts.moveDraft(newTaskDraftId, unscopedNewTaskDraftId);
       dispatchWorkbench({ type: "task.draft.opened", workspaceId: null });
@@ -862,7 +795,11 @@ export default function App() {
     const workspace = snapshot.workspaces.find(
       (candidate) => candidate.id === workspaceId,
     );
-    if (!workspace || workspace.origin !== "user") {
+    if (
+      !workspace ||
+      workspace.kind !== "manual" ||
+      workspace.authorization !== "available"
+    ) {
       setStatus(
         attentionStatus("workspace.selection_unavailable", {
           scope: "workspace",
@@ -871,25 +808,18 @@ export default function App() {
       );
       return;
     }
-    const input = {
-      workspaceId,
-      workspaceEpoch: workspace.epoch,
-      migratableDraftId:
-        newTaskDraftId === unscopedNewTaskDraftId ? newTaskDraftId : null,
-    };
-    if (workspaceSelectionRunningRef.current) {
-      workspaceSelectionIntents.current.queue(input);
-      return;
-    }
-    if (workspaceBusyRef.current) return;
-    const request = workspaceSelectionIntents.current.begin(input);
-    void executeWorkspaceSelection(request);
+    if (newTaskDraftId === unscopedNewTaskDraftId)
+      newTaskDrafts.moveDraft(newTaskDraftId, workspace.id);
+    dispatchWorkbench({
+      type: "task.draft.opened",
+      workspaceId: workspace.id,
+    });
+    window.requestAnimationFrame(() => composer.current?.focus());
   }
 
   function beginNewTask() {
     pendingTaskSelection.current = null;
     setRoute("workbench");
-    workspaceSelectionIntents.current.invalidate();
     dispatchWorkbench({
       type: "task.draft.opened",
       workspaceId: null,
@@ -899,7 +829,6 @@ export default function App() {
 
   function openTask(taskId: string) {
     pendingTaskSelection.current = null;
-    workspaceSelectionIntents.current.invalidate();
     setRoute("workbench");
     dispatchWorkbench({ type: "task.selected", taskId });
   }
@@ -1758,16 +1687,16 @@ export default function App() {
           id: automaticWorkspaceOptionId,
           label: t("workspace.default_directory"),
           authorization: "available" as const,
-          disabled: !snapshot.capabilities.managedWorkspaces,
+          disabled: !snapshot.capabilities.automaticWorkspaces,
         },
-        ...userWorkspaces.map((workspace) => ({
+        ...manualWorkspaces.map((workspace) => ({
           id: workspace.id,
           label: workspace.canonicalRoot,
           description: workspace.displayName || undefined,
           authorization: workspace.authorization,
         })),
       ]}
-      selectedWorkspaceId={
+      selectedWorkspaceOptionId={
         newTaskDraftActive
           ? (composerWorkspace?.id ?? automaticWorkspaceOptionId)
           : ""
@@ -1803,7 +1732,7 @@ export default function App() {
       onSlashCommand={runSlashCommand}
       onRefreshSkillCatalog={() => void refreshComposerSkillCatalog()}
       onConfirmAccess={() => void chooseWorkspaceForDraft()}
-      onSelectWorkspace={(workspaceId) => void selectWorkspaceById(workspaceId)}
+      onSelectWorkspace={(workspaceId) => setDraftWorkspaceById(workspaceId)}
       onSelectModel={(id) =>
         void runAccountCommand(() =>
           client.selectModel(
@@ -1970,7 +1899,7 @@ export default function App() {
       {route === "settings" ? (
         <SettingsPage
           account={snapshot.account}
-          userWorkspaces={userWorkspaces}
+          manualWorkspaces={manualWorkspaces}
           tasks={snapshot.tasks}
           focusTarget={settingsFocus}
           disabled={bridgeUnavailable || accountBusy}

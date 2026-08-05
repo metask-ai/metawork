@@ -100,7 +100,7 @@ function toMutation(
   if (!draft.title.trim() || !Number.isSafeInteger(start) || start <= 0)
     return null;
   if (!draft.text.trim()) return null;
-  if (!snapshot.capabilities.managedWorkspaces) return null;
+  if (!snapshot.capabilities.automaticWorkspaces) return null;
   const every = Number(draft.every);
   const unitSeconds =
     draft.unit === "days" ? 86_400 : draft.unit === "hours" ? 3600 : 60;

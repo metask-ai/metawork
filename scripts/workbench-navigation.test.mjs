@@ -154,7 +154,7 @@ test("Task signals and Workspace path labels preserve their independent semantic
   );
   assert.equal(
     workspaceDirectoryLabel(
-      { origin: "user", canonicalRoot: "/repo/metawork" },
+      { kind: "manual", canonicalRoot: "/repo/metawork" },
       "Default",
     ),
     "/repo/metawork",
@@ -162,7 +162,7 @@ test("Task signals and Workspace path labels preserve their independent semantic
   assert.equal(
     workspaceDirectoryLabel(
       {
-        origin: "managed",
+        kind: "automatic",
         canonicalRoot: "/data/workspaces/deadbeefdeadbeef",
       },
       "Default",
@@ -347,13 +347,13 @@ test("global search finds product content and deliberately excludes raw tool out
     workspaces: [
       {
         id: "1",
-        origin: "user",
+        kind: "manual",
         displayName: "alpha",
         canonicalRoot: "/repo/alpha",
       },
       {
         id: "9",
-        origin: "managed",
+        kind: "automatic",
         displayName: "Independent workspace",
         canonicalRoot: "/data/workspaces/deadbeefdeadbeef",
       },
@@ -370,7 +370,7 @@ test("global search finds product content and deliberately excludes raw tool out
           ),
         ],
       }),
-      task({ id: "9", workspaceId: "9", title: "Managed report" }),
+      task({ id: "9", workspaceId: "9", title: "Automatic report" }),
     ],
   };
   assert.deepEqual(searchWorkbench(snapshot, "alpha"), []);
@@ -380,7 +380,7 @@ test("global search finds product content and deliberately excludes raw tool out
   assert.deepEqual(searchWorkbench(snapshot, "tool-only"), []);
   assert.deepEqual(searchWorkbench(snapshot, "deadbeef"), []);
   assert.equal(
-    searchWorkbench(snapshot, "managed report")[0].detail,
+    searchWorkbench(snapshot, "automatic report")[0].detail,
     "Independent workspace",
   );
 });

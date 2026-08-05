@@ -13,7 +13,7 @@ export type WorkspaceChoiceIntent =
   { kind: "add" } | { kind: "reauthorize"; workspaceId: string };
 export type WorkspaceChoiceResult =
   | { kind: "selected"; workspaceId: string }
-  | { kind: "target_mismatch"; selectedWorkspaceId: string }
+  | { kind: "target_mismatch"; chosenWorkspaceId: string }
   | { kind: "cancelled" }
   | { kind: "failed" };
 export type WorkspaceRemovalResult =
@@ -32,14 +32,14 @@ type WorkspaceActionError = {
 };
 
 export function WorkspaceSettings({
-  userWorkspaces,
+  manualWorkspaces,
   tasks,
   disabled,
   busy,
   onChooseWorkspace,
   onRemoveWorkspace,
 }: {
-  userWorkspaces: WorkspaceView[];
+  manualWorkspaces: WorkspaceView[];
   tasks: TaskView[];
   disabled: boolean;
   busy: boolean;
@@ -73,17 +73,17 @@ export function WorkspaceSettings({
 
   useEffect(() => {
     if (confirmRemovalId === null) return;
-    const workspace = userWorkspaces.find(
+    const workspace = manualWorkspaces.find(
       (item) => item.id === confirmRemovalId,
     );
     if (workspace && workspace.authorization !== "removing") return;
     setConfirmRemovalId(null);
     window.requestAnimationFrame(() => heading.current?.focus());
-  }, [confirmRemovalId, userWorkspaces]);
+  }, [confirmRemovalId, manualWorkspaces]);
 
   useEffect(() => {
     if (!actionError || actionError.workspaceId === null) return;
-    const workspace = userWorkspaces.find(
+    const workspace = manualWorkspaces.find(
       (item) => item.id === actionError.workspaceId,
     );
     const resolvedReauthorization =
@@ -95,7 +95,7 @@ export function WorkspaceSettings({
       resolvedReauthorization
     )
       setActionError(null);
-  }, [actionError, userWorkspaces]);
+  }, [actionError, manualWorkspaces]);
 
   function closeRemovalConfirmation(returnToTrigger: boolean) {
     const workspaceId = confirmRemovalId;
@@ -166,7 +166,7 @@ export function WorkspaceSettings({
         <WorkspaceActionErrorNotice code={actionError.code} />
       )}
 
-      {userWorkspaces.length === 0 ? (
+      {manualWorkspaces.length === 0 ? (
         <div className="settings-workspace-empty">
           <Icon name="workspace" />
           <div>
@@ -176,7 +176,7 @@ export function WorkspaceSettings({
         </div>
       ) : (
         <div className="settings-workspace-list">
-          {userWorkspaces.map((workspace) => {
+          {manualWorkspaces.map((workspace) => {
             const count = taskCounts.get(workspace.id) ?? 0;
             const removalFailed = workspace.lastRemovalFailure !== null;
             const confirming = confirmRemovalId === workspace.id;

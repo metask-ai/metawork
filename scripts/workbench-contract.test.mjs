@@ -61,45 +61,38 @@ test("resource-limited Run terminal crosses the Host to Renderer contract", () =
   assert.deepEqual(decodeWorkbenchSnapshot(resourceLimited), resourceLimited);
 });
 
-test("managed Workspace projection is one-to-one non-selecting and capability-gated", () => {
-  const managed = clone(fixture);
-  managed.capabilities.managedWorkspaces = true;
-  managed.workspaces.push({
+test("automatic Workspace projection is one-to-one and capability-gated", () => {
+  const automatic = clone(fixture);
+  automatic.capabilities.automaticWorkspaces = true;
+  automatic.workspaces.push({
     ...clone(fixture.workspaces[0]),
     id: "9",
-    origin: "managed",
-    displayName: "Managed workspace",
+    kind: "automatic",
+    displayName: "Automatic workspace",
     canonicalRoot: "/data/workspaces/0000000000000009",
     recentOrder: "0",
     signals: { running: 0, attention: 0, failedOrInterrupted: 0 },
   });
-  managed.tasks.push({
+  automatic.tasks.push({
     ...clone(fixture.tasks[0]),
     id: "4",
     recentOrder: "2",
     workspaceId: "9",
   });
-  assert.deepEqual(decodeWorkbenchSnapshot(managed), managed);
+  assert.deepEqual(decodeWorkbenchSnapshot(automatic), automatic);
 
-  const missingOwner = clone(managed);
+  const missingOwner = clone(automatic);
   missingOwner.tasks.pop();
   assert.throws(
     () => decodeWorkbenchSnapshot(missingOwner),
     /exactly one Task/,
   );
 
-  const selectedManaged = clone(managed);
-  selectedManaged.selectedWorkspaceId = "9";
-  assert.throws(
-    () => decodeWorkbenchSnapshot(selectedManaged),
-    /selected Workspace must be a projected user Workspace/,
-  );
-
-  const unavailable = clone(managed);
-  unavailable.capabilities.managedWorkspaces = false;
+  const unavailable = clone(automatic);
+  unavailable.capabilities.automaticWorkspaces = false;
   assert.throws(
     () => decodeWorkbenchSnapshot(unavailable),
-    /managed Workspace capability is unavailable/,
+    /automatic Workspace capability is unavailable/,
   );
 });
 
@@ -690,7 +683,6 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   );
 
   const orphanHistory = clone(fixture);
-  orphanHistory.selectedWorkspaceId = null;
   orphanHistory.workspaces = [];
   assert.doesNotThrow(() => decodeWorkbenchSnapshot(orphanHistory));
 

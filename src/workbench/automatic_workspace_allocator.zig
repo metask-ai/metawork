@@ -8,11 +8,11 @@ pub const allocation_attempts: usize = 8;
 pub const Error = std.mem.Allocator.Error || error{
     RootUnavailable,
     AllocationUnavailable,
-    InvalidManagedRoot,
+    InvalidAutomaticRoot,
 };
 
-/// App-created, opened capability for the reserved managed Workspace root.
-/// `Store.init` consumes it even when the surrounding Workbench init later
+/// App-created, opened capability for the reserved automatic Workspace root.
+/// `Allocator.init` consumes it even when the surrounding Workbench init later
 /// fails, so the App can unconditionally call `deinit` on its moved-from Root.
 pub const Root = struct {
     allocator: std.mem.Allocator,
@@ -29,7 +29,7 @@ pub const Root = struct {
         if (absolute_path.len == 0 or
             !std.fs.path.isAbsolute(absolute_path) or
             !std.unicode.utf8ValidateSlice(absolute_path))
-            return error.InvalidManagedRoot;
+            return error.InvalidAutomaticRoot;
         const dir = std.Io.Dir.cwd().createDirPathOpen(
             io,
             absolute_path,
@@ -45,7 +45,7 @@ pub const Root = struct {
         const canonical = canonical_storage[0..canonical_len];
         if (!std.fs.path.isAbsolute(canonical) or
             !std.unicode.utf8ValidateSlice(canonical))
-            return error.InvalidManagedRoot;
+            return error.InvalidAutomaticRoot;
         return .{
             .allocator = allocator,
             .io = io,
@@ -94,32 +94,32 @@ pub const Allocation = struct {
     }
 };
 
-/// Workbench-owned allocator for one-directory-per-managed-Task roots.
+/// Workbench-owned allocator for one-directory-per-automatic-Task roots.
 /// It intentionally has no recovery scan or recursive deletion operation.
-pub const Store = struct {
+pub const Allocator = struct {
     root: Root,
 
-    pub fn init(root: *Root) Store {
+    pub fn init(root: *Root) Allocator {
         return .{ .root = root.take() };
     }
 
-    pub fn deinit(self: *Store) void {
+    pub fn deinit(self: *Allocator) void {
         self.root.deinit();
         self.* = undefined;
     }
 
-    pub fn canonicalRoot(self: *const Store) []const u8 {
+    pub fn canonicalRoot(self: *const Allocator) []const u8 {
         return self.root.canonical_path;
     }
 
     pub fn containsCanonicalPath(
-        self: *const Store,
+        self: *const Allocator,
         canonical_path: []const u8,
     ) bool {
         return pathWithin(self.root.canonical_path, canonical_path);
     }
 
-    pub fn allocate(self: *Store) Error!Allocation {
+    pub fn allocate(self: *Allocator) Error!Allocation {
         var attempt: usize = 0;
         while (attempt < allocation_attempts) : (attempt += 1) {
             var random: [key_bytes]u8 = undefined;
@@ -153,7 +153,7 @@ pub const Store = struct {
             if (!strictPathWithin(self.root.canonical_path, canonical) or
                 !std.mem.eql(u8, std.fs.path.basename(canonical), &key) or
                 !std.unicode.utf8ValidateSlice(canonical))
-                return error.InvalidManagedRoot;
+                return error.InvalidAutomaticRoot;
             const owned_path = try self.root.allocator.dupeZ(u8, canonical);
             directory_exists = false;
             return .{
@@ -167,7 +167,7 @@ pub const Store = struct {
 
     /// Deletes only the exact newly allocated directory and only while it is
     /// still empty. A failure leaves the directory in place and is observable.
-    pub fn rollback(self: *Store, allocation: *Allocation) bool {
+    pub fn rollback(self: *Allocator, allocation: *Allocation) bool {
         std.debug.assert(allocation.owned);
         const deleted = blk: {
             self.root.dir.deleteDir(
@@ -215,7 +215,7 @@ fn directoryPermissions() std.Io.File.Permissions {
         .fromMode(0o700);
 }
 
-test "managed Workspace Store allocates private independent child roots" {
+test "automatic Workspace allocator allocates private independent child roots" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const duplicate = try tmp.dir.openDir(std.testing.io, ".", .{});
@@ -231,7 +231,7 @@ test "managed Workspace Store allocates private independent child roots" {
         canonical_storage[0..canonical_len],
     );
     defer root.deinit();
-    var store = Store.init(&root);
+    var store = Allocator.init(&root);
     defer store.deinit();
 
     var first = try store.allocate();
@@ -259,7 +259,7 @@ test "managed Workspace Store allocates private independent child roots" {
     }
 }
 
-test "managed Workspace rollback removes only an empty allocation" {
+test "automatic Workspace rollback removes only an empty allocation" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var canonical_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -272,7 +272,7 @@ test "managed Workspace rollback removes only an empty allocation" {
         std.testing.allocator,
         canonical_storage[0..canonical_len],
     );
-    var store = Store.init(&root);
+    var store = Allocator.init(&root);
     defer store.deinit();
 
     var allocation = try store.allocate();
@@ -285,9 +285,9 @@ test "managed Workspace rollback removes only an empty allocation" {
     );
 }
 
-test "managed root rejects relative input and path prefix confusion" {
+test "automatic root rejects relative input and path prefix confusion" {
     try std.testing.expectError(
-        error.InvalidManagedRoot,
+        error.InvalidAutomaticRoot,
         Root.open(std.testing.io, std.testing.allocator, "relative"),
     );
     const root = if (builtin.os.tag == .windows) "C:\\MetaWork\\workspaces" else "/metawork/workspaces";

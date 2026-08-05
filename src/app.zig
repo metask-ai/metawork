@@ -814,22 +814,22 @@ pub fn run(init: std.process.Init) !void {
         .data,
         &data_dir_storage,
     );
-    var managed_workspace_dir_storage: [4096]u8 = undefined;
-    const managed_workspace_dir = native_sdk.app_dirs.join(
+    var automatic_workspace_dir_storage: [4096]u8 = undefined;
+    const automatic_workspace_dir = native_sdk.app_dirs.join(
         native_sdk.app_dirs.currentPlatform(),
-        &managed_workspace_dir_storage,
+        &automatic_workspace_dir_storage,
         &.{ data_dir, "workspaces" },
     ) catch null;
-    var managed_workspace_root: ?workbench_api.ManagedWorkspaceRoot =
-        if (managed_workspace_dir) |directory|
-            workbench_api.ManagedWorkspaceRoot.open(
+    var automatic_workspace_root: ?workbench_api.AutomaticWorkspaceRoot =
+        if (automatic_workspace_dir) |directory|
+            workbench_api.AutomaticWorkspaceRoot.open(
                 init.io,
                 std.heap.c_allocator,
                 directory,
             ) catch null
         else
             null;
-    defer if (managed_workspace_root) |*root| root.deinit();
+    defer if (automatic_workspace_root) |*root| root.deinit();
     var account_dir_storage: [4096]u8 = undefined;
     const account_dir = try native_sdk.app_dirs.join(
         native_sdk.app_dirs.currentPlatform(),
@@ -939,7 +939,7 @@ pub fn run(init: std.process.Init) !void {
             },
             .directories = .{
                 .canonical_user_home = canonical_user_home,
-                .managed_workspace_root = if (managed_workspace_root) |*root|
+                .automatic_workspace_root = if (automatic_workspace_root) |*root|
                     root
                 else
                     null,

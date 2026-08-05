@@ -84,7 +84,7 @@ const workspaces = [
   {
     id: "1",
     epoch: "1",
-    origin: "user",
+    kind: "manual",
     displayName: "MetaWork",
     authorization: "available",
   },

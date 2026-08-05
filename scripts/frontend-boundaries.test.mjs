@@ -137,12 +137,13 @@ test("Task persistence failure disables mutations without hiding Task history", 
   assert.doesNotMatch(taskList, /disabled=/);
 });
 
-test("Task selection invalidates an older asynchronous Workspace draft selection", async () => {
+test("draft Workspace selection stays local until Task creation", async () => {
   const app = await readFile(resolve(sourceRoot, "app", "App.tsx"), "utf8");
   assert.match(
     app,
-    /function openTask\(taskId: string\) \{[\s\S]*?workspaceSelectionIntents\.current\.invalidate\(\);[\s\S]*?dispatchWorkbench\(\{ type: "task\.selected", taskId \}\);[\s\S]*?\}/,
+    /function setDraftWorkspaceById\(workspaceId: string\) \{[\s\S]*?type: "task\.draft\.opened",[\s\S]*?workspaceId: workspace\.id/,
   );
+  assert.doesNotMatch(app, /client\.selectWorkspace|WorkspaceSelectionIntents/);
   assert.match(app, /onSelectTask=\{openTask\}/);
   assert.match(app, /openTask\(result\.taskId\)/);
 });
@@ -171,8 +172,8 @@ test("Workspace lifecycle recovery lives in Settings with explicit focus handlin
       "utf8",
     ),
   ]);
-  assert.match(app, /workspace\.origin === "user"/);
-  assert.match(settings, /userWorkspaces: WorkspaceView\[\]/);
+  assert.match(app, /workspace\.kind === "manual"/);
+  assert.match(settings, /manualWorkspaces: WorkspaceView\[\]/);
   assert.match(settings, /lastRemovalFailure/);
   assert.match(settings, /removalCancel\.current\?\.focus\(\)/);
   assert.match(settings, /event\.key !== "Escape"/);

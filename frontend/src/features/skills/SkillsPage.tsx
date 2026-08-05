@@ -170,9 +170,9 @@ export function SkillsPage({
       asset.issueCodes.length > 0,
   );
   const regular = visibleAssets.filter((asset) => !attention.includes(asset));
-  const userWorkspaces = workspaces.filter(
+  const manualWorkspaces = workspaces.filter(
     (workspace) =>
-      workspace.origin === "user" && workspace.authorization === "available",
+      workspace.kind === "manual" && workspace.authorization === "available",
   );
   const drawerOpen = selected !== null || importOpen;
 
@@ -297,7 +297,7 @@ export function SkillsPage({
 
   function selectedScope(): ImportScope | null {
     if (importScope === "personal") return { kind: "personal" };
-    const workspace = userWorkspaces.find((item) => item.id === importScope);
+    const workspace = manualWorkspaces.find((item) => item.id === importScope);
     return workspace
       ? {
           kind: "project",
@@ -599,7 +599,7 @@ export function SkillsPage({
                             <option value="personal">
                               {t("skills.scope.personal")}
                             </option>
-                            {userWorkspaces.map((workspace) => (
+                            {manualWorkspaces.map((workspace) => (
                               <option key={workspace.id} value={workspace.id}>
                                 {workspace.displayName}
                               </option>

@@ -288,16 +288,6 @@ export class BridgeClient {
     );
   }
 
-  async selectWorkspace(workspaceId: string, expectedWorkspaceEpoch: string) {
-    return decodeWorkspaceMutationResult(
-      await this.invoke(commands.selectWorkspace, {
-        workspaceId,
-        expectedWorkspaceEpoch,
-      }),
-      workspaceId,
-    );
-  }
-
   async removeWorkspace(workspaceId: string, expectedWorkspaceEpoch: string) {
     return decodeWorkspaceMutationResult(
       await this.invoke(commands.removeWorkspace, {

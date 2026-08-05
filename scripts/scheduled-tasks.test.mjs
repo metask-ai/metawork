@@ -94,7 +94,7 @@ function render(snapshot) {
 
 test("Scheduled tasks is a truthful independent management page", () => {
   const snapshot = structuredClone(fixture);
-  snapshot.capabilities.managedWorkspaces = true;
+  snapshot.capabilities.automaticWorkspaces = true;
   snapshot.capabilities.scheduledTasks = true;
   snapshot.capabilities.scheduledTaskPersistence = true;
   snapshot.capabilities.scheduledTaskPersistenceHealth = "ready";
@@ -141,7 +141,7 @@ test("Scheduled tasks is a truthful independent management page", () => {
 
 test("Empty scheduled tasks page offers actionable starter templates", () => {
   const snapshot = structuredClone(fixture);
-  snapshot.capabilities.managedWorkspaces = true;
+  snapshot.capabilities.automaticWorkspaces = true;
   snapshot.capabilities.scheduledTasks = true;
   snapshot.capabilities.scheduledTaskPersistence = true;
   snapshot.capabilities.scheduledTaskPersistenceHealth = "ready";
@@ -157,9 +157,9 @@ test("Empty scheduled tasks page offers actionable starter templates", () => {
   assert.doesNotMatch(html, /Nothing is scheduled/);
 });
 
-test("starter templates hide Workspace configuration and submit target-free managed execution", async () => {
+test("starter templates hide Workspace configuration and submit target-free automatic execution", async () => {
   const snapshot = structuredClone(fixture);
-  snapshot.capabilities.managedWorkspaces = true;
+  snapshot.capabilities.automaticWorkspaces = true;
   snapshot.capabilities.scheduledTasks = true;
   snapshot.capabilities.scheduledTaskPersistence = true;
   snapshot.capabilities.scheduledTaskPersistenceHealth = "ready";
@@ -182,14 +182,13 @@ test("starter templates hide Workspace configuration and submit target-free mana
   assert.equal("target" in created, false);
 });
 
-test("Text schedules use a Managed Workspace without requiring a user Workspace", async () => {
+test("Text schedules use an Automatic Workspace without requiring a Manual Workspace", async () => {
   const snapshot = structuredClone(fixture);
-  snapshot.capabilities.managedWorkspaces = true;
+  snapshot.capabilities.automaticWorkspaces = true;
   snapshot.capabilities.scheduledTasks = true;
   snapshot.capabilities.scheduledTaskPersistence = true;
   snapshot.capabilities.scheduledTaskPersistenceHealth = "ready";
   snapshot.capabilities.backgroundScheduleWake = true;
-  snapshot.selectedWorkspaceId = null;
   snapshot.workspaces = [];
   snapshot.tasks = [];
   let created = null;
@@ -235,7 +234,7 @@ test("Text schedules use a Managed Workspace without requiring a user Workspace"
 
 test("schedule instructions have no separate Skill or Workspace configuration", () => {
   const snapshot = structuredClone(fixture);
-  snapshot.capabilities.managedWorkspaces = true;
+  snapshot.capabilities.automaticWorkspaces = true;
   snapshot.capabilities.scheduledTasks = true;
   snapshot.capabilities.scheduledTaskPersistence = true;
   snapshot.capabilities.scheduledTaskPersistenceHealth = "ready";
@@ -254,7 +253,7 @@ test("schedule instructions have no separate Skill or Workspace configuration", 
 
 test("schedule editor controls have explicit semantics and no native chrome", () => {
   const snapshot = structuredClone(fixture);
-  snapshot.capabilities.managedWorkspaces = true;
+  snapshot.capabilities.automaticWorkspaces = true;
   snapshot.capabilities.scheduledTasks = true;
   snapshot.capabilities.scheduledTaskPersistence = true;
   snapshot.capabilities.scheduledTaskPersistenceHealth = "ready";
