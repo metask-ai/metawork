@@ -195,7 +195,7 @@ Workspace
 
 - 左栏不显示 Workspace 标题、添加动作或切换器；它直接列出同一 canonical snapshot 中 owning Workspace 仍被投影的所有 User/Managed Task，并按统一行动优先级分组。Workspace 移除后保留的历史 Task 不生成可点击的死入口；
 - Task 被选择后使用自身绑定的 Workspace 路径，不提交额外的全局 Workspace 导航动作；不同路径下的后台 Task 都必须持续可见；
-- 当前没有 Workspace 时仍先打开空白 New task 页面并允许暂存草稿；发送保持禁用，由 Composer 下方的工作目录控件显式选择已有 Workspace 或打开原生目录选择器。选择完成后只更新草稿上下文，不得自动创建 Task 或发送已有内容；User Workspace 直接显示 canonical directory，Managed Workspace 统一显示“默认”，不得暴露随机目录或内部 origin 术语；
+- New task 默认选择 Automatic Workspace，工作目录控件直接显示“默认”；此时不提前创建 Workspace 或 Task，首次发送才请求 Host 分配 Managed Workspace。用户可以在发送前切换到已有 User Workspace 或打开原生目录选择器；选择完成后只更新草稿上下文，不得自动创建 Task 或发送已有内容。User Workspace 直接显示 canonical directory，Managed Workspace 统一显示“默认”，不得暴露随机目录或内部 origin 术语；
 - New task 草稿按 Workspace 隔离。未绑定 Workspace 的临时草稿只在目标 Workspace 没有草稿时迁移；目标已有草稿时保留两边内容并打开目标草稿，不能覆盖或丢弃任一份；
 - Workspace projection 的 `origin` 仍是 Host 事实；一个 User Workspace 可以承载多个 Task，Managed Workspace 精确归属一个 Task；
 - Composer 的工作目录控件只选择、添加或重新授权 New task 路径；User Workspace 的完整列表、移除、移除失败重试和空目录记录管理归正式设置页。两处消费同一 Host projection 与 mutation，不复制 registry 或维护第二套 Renderer 状态；
@@ -436,7 +436,7 @@ Metask 已连接
 | Last Run outcome     | `none / completed / cancelled / failed / interrupted` | 最近一次 terminal Run 的结果，不关闭 Task       |
 | View sync            | `ready / syncing / failed`                            | Renderer 是否拥有可安全 mutation 的最新投影视图 |
 
-`draft` 是进入 Workbench 后、尚未创建真实 Task 的 Renderer 临时页面，不进入 Host Task lifecycle。它可以在 Workspace 尚未选择时暂存，但发送前必须同时确定 Workspace grant 与默认执行配置。一次 Run 完成后 `Active operation` 与 `Active Run phase` 回到 `none`，`Last Run outcome` 保留结果。Manual compact 完成后 active operation 同样回到 `none`，其 outcome 进入独立、有界、append-only 的 maintenance history，不改写最近一次 Run outcome。
+`draft` 是进入 Workbench 后、尚未创建真实 Task 的 Renderer 临时页面，不进入 Host Task lifecycle。它默认持有 Automatic Workspace intent，也可以切换到 Manual Workspace identity；发送前必须同时满足相应 Workspace admission 与默认执行配置。一次 Run 完成后 `Active operation` 与 `Active Run phase` 回到 `none`，`Last Run outcome` 保留结果。Manual compact 完成后 active operation 同样回到 `none`，其 outcome 进入独立、有界、append-only 的 maintenance history，不改写最近一次 Run outcome。
 
 Execution binding availability 是下一次 admission 的独立前置事实，不得塞入上述四个状态轴或改写最近一次 Run 结果。Host projection 只发布 `available / rebind_required / unavailable` 及脱敏原因；Renderer 不根据当前默认模型自行判断能否继续。
 
@@ -591,9 +591,9 @@ New task 页面以 Composer 为绝对主视觉。其上方使用直接的行动�
 Composer 布局与输入规则：
 
 - 模型控件位于输入框内部左下角，发送位于右下角；textarea 与底部工具带共同组成一个完整圆角容器，不得拆成相互竞争的表单块。Workspace 位于容器外下方的轻量 breadcrumb 行，不能做成第二个有边框卡片，也不能放回输入框上方形成第二条上下文栏；
-- New task 的 Workspace breadcrumb 可以切换已授权 Workspace，也可以打开原生目录选择器添加或重新授权；已有 Task 只显示其绑定 Workspace 事实，不提供虚假的切换；
+- New task 的 Workspace breadcrumb 默认选中“默认”，并可以在 Automatic 与已授权 User Workspace 之间切换，也可以打开原生目录选择器添加或重新授权；已有 Task 只显示其绑定 Workspace 事实，不提供虚假的切换；
 - 输入框不允许用户拖拽改变大小。它随内容自动增高，达到约 7–8 行或视口高度的 28% 后改为内部滚动；
-- Workspace 缺失或授权失效时文本仍可编辑、草稿仍保存，但发送保持禁用并在 breadcrumb 中提供明确恢复动作；Workspace 选择和发送是两个独立动作。
+- Automatic intent 不是 Workspace 缺失；`managedWorkspaces` 可用时普通 Text 可以直接发送。只有所选 User Workspace 缺失或授权失效时发送才保持禁用，并在 breadcrumb 中提供明确恢复动作；Workspace 选择和发送是两个独立动作。
 
 已有 Task 的内容标题区是唯一 active operation 停止入口：
 
@@ -918,7 +918,7 @@ Account & models
 - `Add directory` 使用同一 Host-owned native picker 与一次性 authority。重新授权要求用户重新选择目录；Renderer 不持有路径 capability，也不从字符串判断是否为同一目录，而是在 authoritative snapshot 刷新后用 Host 返回的稳定 Workspace identity 校验目标。选择了其他目录时可以保留该新增目录，但必须明确原目标仍需授权；
 - 移除使用行内非模态确认，明确本地文件与 Task 历史保留、live work 会停止；确认打开后聚焦取消，Escape 取消并归还焦点，提交后以 canonical `removing` 状态为准；
 - `lastRemovalFailure` 必须显示为可重试事实。transport 或 typed rejection 就地显示，不把失败藏到当前不可见的 Workspace command-bar scope；
-- 设置页只管理 lifecycle，不改变当前 Task。Host `selectedWorkspaceId` 只作为后续 New task 的默认 User Workspace；Renderer 不维护 `activeWorkspaceId` 或其他全局活动 Workspace 镜像。
+- 设置页只管理 lifecycle，不改变当前 Task。Host `selectedWorkspaceId` 不决定后续 New task 的默认 intent；每个 New task 都默认回到 Automatic。Renderer 不维护 `activeWorkspaceId` 或其他全局活动 Workspace 镜像。
 
 `Account & models` 规则：
 

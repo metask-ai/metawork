@@ -593,6 +593,14 @@ export type TaskCreateResult =
       reason: TaskCreateReason;
     };
 
+export type TaskWorkspaceIntent =
+  | { kind: "automatic" }
+  | {
+      kind: "manual";
+      workspaceId: string;
+      expectedWorkspaceEpoch: string;
+    };
+
 export type TaskRunReason =
   | "binding_changed"
   | "binding_unavailable"

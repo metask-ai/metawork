@@ -108,12 +108,12 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - 目标 rebind 流程必须展示旧配置与当前候选的脱敏差异，并在用户明确确认后由 Host 原子创建新 binding epoch 和新 Agent Session；旧 Run 历史、usage 和模型归属保持不可改写。如果只读 Task history persistence 先于跨进程 Conversation 恢复落地，该阶段只提供 `从此历史新建任务`；
 - 显式重新登录、切换账号、退出登录或清除设备凭据必须取得 Workbench execution replacement gate，并证明所有引用该账号 credential 的 Task、Agent Session、Run、executor job 与真实 worker reference 已安全终止；OAuth 成功后以本次登录返回的 token 和 profile identity 替换本机账号，旧缓存 identity 不得否决显式登录，旧默认 execution、API/model selection 与 catalog 必须先清除再按新账号重建；
 - OAuth refresh 失败只进入 `reauth_required`，不自动判定现有 API Key 失效；只有 Metask 明确撤销/禁用或锁定 credential probe 返回确定鉴权拒绝，才关闭既有执行配置；
-- New Task admission 必须同时满足 Account execution state 为 ready、Workbench 已安装所选默认 generation、Workspace grant 有效且默认安装/identity replacement gate 未开启，并在创建 Task 时固化第一个 binding epoch；既有 Task 的新 Run admission 改为校验其当前 binding `available`、owned generation 仍有效、Workspace grant 有效、没有 non-terminal Run 且 identity replacement 或该 Task 的 rebind gate 未开启，不能强迫它跟随 Account 当前默认 generation，也不能被无关的默认切换冻结；
+- New Task admission 必须同时满足 Account execution state 为 ready、Workbench 已安装所选默认 generation、Workspace intent 可解析且默认安装/identity replacement gate 未开启，并在创建 Task 时固化第一个 binding epoch；Automatic intent 要求 managed root capability 并在首次发送时分配 Workspace，Manual intent 要求目标 User Workspace grant 与 epoch 有效。既有 Task 的新 Run admission 改为校验其当前 binding `available`、owned generation 仍有效、Workspace grant 有效、没有 non-terminal Run 且 identity replacement 或该 Task 的 rebind gate 未开启，不能强迫它跟随 Account 当前默认 generation，也不能被无关的默认切换冻结；
 - production Account 接入必须符合 [Metask Account API 合同](metask-account-contract.md)。C1 OAuth/login 独立交付 `account_only`；C2 只从 profile-aware API Key/model catalog 与精确 `group.platform` 形成 fixed ExecutionTarget。Account 提交 `execution_ready` 且 Workbench 安装同一默认 generation 前禁止进入 Workbench 或创建新 Task；既有 Task 的后续 Run 服从其 binding epoch，不与默认 generation 做错误等值比较。
 
 ### 5.3 Task
 
-- New task 草稿只在登录和执行准备完成后进入 Workbench，由 Renderer 按 Workspace 隔离并可恢复；未选择 Workspace 时可以编辑临时草稿，但发送前必须取得 Host-issued Workspace grant；
+- New task 草稿只在登录和执行准备完成后进入 Workbench，由 Renderer 按 Workspace intent 隔离并可恢复；默认 intent 为 Automatic，界面显示“默认”，首次发送时才由 Host 创建 Managed Workspace。用户可以在发送前切换到已授权或新选择的 Manual Workspace；
 - New task 首次发送依次创建真实 Task 并启动第一个 Run，两步不能在界面中伪装成一个不可分失败状态：Task 创建失败或拒绝时留在 New task 并恢复原草稿；Task 已创建但 Run 启动失败或拒绝时进入该真实 Task、把输入恢复为 Task 草稿且不伪造已提交指令或 Running；命令 timeout 必须先刷新 canonical snapshot 决定实际页面和草稿 scope，不能自动重放可能有副作用的提交；
 - 用户可以在 Workspace 中创建、切换和关闭 Task；
 - 多个 Task 可以同时存在；
@@ -121,7 +121,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - 每条事件、审批和工具结果必须路由到正确 Task/Run；
 - 每个 Task 在创建时建立 execution binding epoch，固化 account/profile、generation、Provider/API identity 与模型；全局默认变化不改写当前 epoch、Task 历史或 live Agent Session；显式 rebind 只能在没有 non-terminal Run 且 Conversation capability 已验收时创建新的可审计 epoch；
 - 每个 Task 至多一个 active operation：当前可以是 non-terminal Run 或 manual compact，包括 executor 中的 `queued` 状态；Run 与 compact 互斥，当前 operation 结束前 Workbench 拒绝新的 Run、compact 和其他 Session mutation，Renderer 只能保留未提交草稿；
-- Renderer 产品合同为 `metawork.renderer-bridge` 固定 revision 1：`connect` 精确协商后才开放产品路径，snapshot 根节点由严格的无 secret `capabilities`、`account`、`skillCatalog`、`skillManagement`、`mcp`、`selectedWorkspaceId`、`workspaces`、`scheduledTasks` 与 `tasks` 组成且不维护第二个局部版本；Account 发布脱敏 catalog selection identifier 与 generation，Workspace 由 Host 独立发布，Task 固化 binding epoch 与显示事实；Account、Workspace 和 Task mutation 均提交 expected generation/epoch，Host 重新校验 window、ownership、catalog membership 与 admission；快速开发阶段的合同内容直接原地 hard cut，不接受或双写被取代的临时 payload；
+- Renderer 产品合同为 `metawork.renderer-bridge` 固定 revision 1：`connect` 精确协商后才开放产品路径，snapshot 根节点由严格的无 secret `capabilities`、`account`、`skillCatalog`、`skillManagement`、`mcp`、`selectedWorkspaceId`、`workspaces`、`scheduledTasks` 与 `tasks` 组成且不维护第二个局部版本；Account 发布脱敏 catalog selection identifier 与 generation，Workspace 由 Host 独立发布，Task 固化 binding epoch 与显示事实；`tasks.create` 提交严格的 `automatic | manual(workspaceId, expectedWorkspaceEpoch)` Workspace intent，Account、Workspace 和 Task mutation 均提交对应 expected generation/epoch，Host 重新校验 window、ownership、catalog membership 与 admission；快速开发阶段的合同内容直接原地 hard cut，不接受或双写被取代的临时 payload；
 - 预期的 Task/Workspace admission 拒绝必须作为严格 typed result 返回并由 Renderer 映射为产品文案；非法 payload、伪造 ownership 与不可信 origin 仍 fail closed 为 Bridge error，不得把内部 error name 显示给用户；
 - 当前固定 revision 1 合同原子提供独立 Workspace projection 与 Task execution binding。一次性目录能力必须由选择命令在 Host 内创建并消费，Renderer 不接收路径授权 token，不从 Task 反推 Workspace，也不能通过可选字段继续发送被取代的临时 payload；
 - 产品 Task identity 由 Workbench 独立、稳定地分配；内部 Agent/Gate 原始事件使用单独的 Session route identity 做路由，两者不得复用或假定数值相等。Session route identity 不进入产品 snapshot，Renderer 始终只看到唯一的产品 `taskId`。

@@ -54,11 +54,17 @@ const base = {
   canSubmit: false,
   runInFlight: false,
   accessRequired: false,
-  workspaceMissing: true,
-  workspaceLabel: "No workspace",
-  workspaceTitle: "No workspace",
-  workspaceOptions: [],
-  selectedWorkspaceId: "",
+  workspaceMissing: false,
+  workspaceLabel: "Default",
+  workspaceTitle: "Default",
+  workspaceOptions: [
+    {
+      id: "automatic",
+      label: "Default",
+      authorization: "available",
+    },
+  ],
+  selectedWorkspaceId: "automatic",
   workspaceEditable: true,
   modelLabel: "Claude Sonnet 4",
   modelOptions: [
@@ -302,7 +308,8 @@ test("New task opens as an editable Composer with its execution context", () => 
   const markup = render();
   assert.match(markup, /<textarea/);
   assert.match(markup, />Claude Sonnet 4</);
-  assert.match(markup, />Select a workspace</);
+  assert.match(markup, />Default</);
+  assert.doesNotMatch(markup, />Select a workspace</);
   assert.match(markup, /composer-workspace-context/);
   assert.doesNotMatch(markup.match(/<textarea[^>]*>/)?.[0] ?? "", /disabled/);
   assert.doesNotMatch(markup, /composer-start/);
@@ -366,10 +373,10 @@ test("Account catalog work blocks New task admission but not bound Tasks", async
     source,
     /\(!newTaskDraftActive \|\| snapshot\.account\.canCreateTask\)/,
   );
-  assert.match(source, /\(!newTaskDraftActive \|\| composerWorkspaceReady\)/);
+  assert.match(source, /\(!newTaskDraftActive \|\| newTaskWorkspaceReady\)/);
 });
 
-test("Workspace selection is not hidden inside submit", async () => {
+test("Automatic Workspace creation is explicit in the first submit", async () => {
   const source = await readFile(
     join(process.cwd(), "frontend/src/app/App.tsx"),
     "utf8",
@@ -377,10 +384,8 @@ test("Workspace selection is not hidden inside submit", async () => {
   const start = source.indexOf("async function submitRun()");
   const end = source.indexOf("\n  async function", start + 1);
   const submitRun = source.slice(start, end);
-  assert.match(
-    submitRun,
-    /if \(!composerWorkspace \|\| !composerWorkspaceId\) return/,
-  );
+  assert.match(submitRun, /kind: "automatic" as const/);
+  assert.match(submitRun, /kind: "manual" as const/);
   assert.doesNotMatch(submitRun, /chooseWorkspace|client\.chooseWorkspace/);
 });
 

@@ -132,6 +132,8 @@ function mutationReasonMessageId(reason: MutationReason): MessageId {
   return `mutation.reason.${reason}`;
 }
 
+const automaticWorkspaceOptionId = "automatic";
+
 export default function App() {
   const { t } = useI18n();
   const [workbench, dispatchWorkbench] = useReducer(
@@ -207,11 +209,6 @@ export default function App() {
       snapshot.workspaces.filter((workspace) => workspace.origin === "user"),
     [snapshot.workspaces],
   );
-  const selectedUserWorkspaceId =
-    userWorkspaces.find(
-      (workspace) => workspace.id === snapshot.selectedWorkspaceId,
-    )?.id ?? null;
-  const defaultDraftWorkspaceId = selectedUserWorkspaceId;
   const navigableTaskItems = useMemo(
     () => navigableTasks(snapshot),
     [snapshot],
@@ -224,7 +221,7 @@ export default function App() {
   const newTaskDraftActive = workbench.draftOpen || activeTask === null;
   const newTaskDraftId = newTaskDraftStorageId(
     newTaskDraftActive,
-    workbench.draftWorkspaceId ?? defaultDraftWorkspaceId,
+    workbench.draftWorkspaceId,
   );
   const newTaskDrafts = useNewTaskDrafts(newTaskDraftId);
   const composerDraft = newTaskDraftActive
@@ -253,14 +250,13 @@ export default function App() {
       !activeTask.archived);
   const taskOperationInFlight = Boolean(activeTask?.activeOperation);
   const composerWorkspaceId =
-    activeTask?.workspaceId ||
-    workbench.draftWorkspaceId ||
-    defaultDraftWorkspaceId;
+    activeTask?.workspaceId || workbench.draftWorkspaceId;
   const composerWorkspace = snapshot.workspaces.find(
     (workspace) => workspace.id === composerWorkspaceId,
   );
-  const composerWorkspaceReady =
-    composerWorkspace?.authorization === "available";
+  const newTaskWorkspaceReady = workbench.draftWorkspaceId
+    ? composerWorkspace?.authorization === "available"
+    : snapshot.capabilities.managedWorkspaces;
   const skillCatalog = newTaskDraftActive
     ? (composerWorkspace?.skillCatalog ?? {
         availability: "unavailable" as const,
@@ -283,7 +279,7 @@ export default function App() {
   const canSubmit =
     taskCanCompose &&
     (!newTaskDraftActive || snapshot.account.canCreateTask) &&
-    (!newTaskDraftActive || composerWorkspaceReady) &&
+    (!newTaskDraftActive || newTaskWorkspaceReady) &&
     !accountMutationBlocksTaskAdmission(newTaskDraftActive, accountBusy) &&
     !taskOperationInFlight &&
     composerDraftHasContent(composerDraft) &&
@@ -398,7 +394,7 @@ export default function App() {
     };
     window.addEventListener("keydown", openSearch);
     return () => window.removeEventListener("keydown", openSearch);
-  }, [accountGateRequired, bridgeUnavailable, defaultDraftWorkspaceId]);
+  }, [accountGateRequired, bridgeUnavailable]);
 
   useEffect(() => {
     if (!client.available()) return;
@@ -426,15 +422,10 @@ export default function App() {
       return;
     dispatchWorkbench({
       type: "task.draft.opened",
-      workspaceId: defaultDraftWorkspaceId,
+      workspaceId: null,
     });
     window.requestAnimationFrame(() => composer.current?.focus());
-  }, [
-    activeTask,
-    defaultDraftWorkspaceId,
-    snapshot.account.readiness,
-    workbench.draftOpen,
-  ]);
+  }, [activeTask, snapshot.account.readiness, workbench.draftOpen]);
 
   function focusPendingRequest() {
     const requestId = activeTask?.pendingUi?.requestId;
@@ -694,7 +685,7 @@ export default function App() {
       setStatus(
         quietStatus("workspace.selection_cancelled", {
           scope: "workspace",
-          workspaceId: defaultDraftWorkspaceId,
+          workspaceId: workbench.draftWorkspaceId,
         }),
       );
       window.requestAnimationFrame(() => composer.current?.focus());
@@ -860,6 +851,14 @@ export default function App() {
 
   function selectWorkspaceById(workspaceId: string) {
     if (workbenchMutationDisabled) return;
+    if (workspaceId === automaticWorkspaceOptionId) {
+      workspaceSelectionIntents.current.invalidate();
+      if (newTaskDraftId && newTaskDraftId !== unscopedNewTaskDraftId)
+        newTaskDrafts.moveDraft(newTaskDraftId, unscopedNewTaskDraftId);
+      dispatchWorkbench({ type: "task.draft.opened", workspaceId: null });
+      window.requestAnimationFrame(() => composer.current?.focus());
+      return;
+    }
     const workspace = snapshot.workspaces.find(
       (candidate) => candidate.id === workspaceId,
     );
@@ -890,13 +889,10 @@ export default function App() {
   function beginNewTask() {
     pendingTaskSelection.current = null;
     setRoute("workbench");
-    if (workspaceSelectionRunningRef.current) {
-      if (defaultDraftWorkspaceId) selectWorkspaceById(defaultDraftWorkspaceId);
-      else workspaceSelectionIntents.current.invalidate();
-    }
+    workspaceSelectionIntents.current.invalidate();
     dispatchWorkbench({
       type: "task.draft.opened",
-      workspaceId: defaultDraftWorkspaceId,
+      workspaceId: null,
     });
     window.requestAnimationFrame(() => composer.current?.focus());
   }
@@ -927,7 +923,14 @@ export default function App() {
     const input = composerDraftToRunInput(submitted);
     if (!input) return;
     const existingTaskId = activeTask?.id ?? null;
-    if (!composerWorkspace || !composerWorkspaceId) return;
+    const workspace =
+      newTaskDraftActive && composerWorkspace
+        ? {
+            kind: "manual" as const,
+            workspaceId: composerWorkspace.id,
+            expectedWorkspaceEpoch: composerWorkspace.epoch,
+          }
+        : { kind: "automatic" as const };
     const submittedDraftId = newTaskDraftId;
     let pendingScope = currentTaskScope;
     if (!beginTaskPendingOperation(pendingScope, "run")) return;
@@ -938,8 +941,7 @@ export default function App() {
       const result = await submitTaskInstruction({
         client,
         taskId: existingTaskId,
-        workspaceId: composerWorkspaceId,
-        expectedWorkspaceEpoch: composerWorkspace.epoch,
+        workspace,
         expectedExecutionGeneration: snapshot.account.executionGeneration,
         expectedBindingEpoch: activeTask?.binding.epoch ?? null,
         input,
@@ -959,7 +961,7 @@ export default function App() {
         if (
           await reconcileCommandTimeout(result.error, "operation.task_create", {
             scope: "workspace",
-            workspaceId: composerWorkspaceId,
+            workspaceId: composerWorkspaceId ?? null,
           })
         )
           return;
@@ -967,7 +969,7 @@ export default function App() {
         setStatus(
           attentionStatus(
             "task.create_failed",
-            { scope: "workspace", workspaceId: composerWorkspaceId },
+            { scope: "workspace", workspaceId: composerWorkspaceId ?? null },
             {
               diagnostic: errorText(result.error),
             },
@@ -1730,31 +1732,45 @@ export default function App() {
         composerWorkspace &&
         composerWorkspace.authorization !== "available",
       )}
-      workspaceMissing={Boolean(newTaskDraftActive && !composerWorkspace)}
+      workspaceMissing={Boolean(!newTaskDraftActive && !composerWorkspace)}
       workspaceLabel={
-        composerWorkspace
-          ? workspaceDirectoryLabel(
-              composerWorkspace,
-              t("workspace.default_directory"),
-            )
-          : t("workspace.none")
+        newTaskDraftActive && !composerWorkspace
+          ? t("workspace.default_directory")
+          : composerWorkspace
+            ? workspaceDirectoryLabel(
+                composerWorkspace,
+                t("workspace.default_directory"),
+              )
+            : t("workspace.none")
       }
       workspaceTitle={
-        composerWorkspace
-          ? workspaceDirectoryLabel(
-              composerWorkspace,
-              t("workspace.default_directory"),
-            )
-          : t("workspace.none")
+        newTaskDraftActive && !composerWorkspace
+          ? t("workspace.default_directory")
+          : composerWorkspace
+            ? workspaceDirectoryLabel(
+                composerWorkspace,
+                t("workspace.default_directory"),
+              )
+            : t("workspace.none")
       }
-      workspaceOptions={userWorkspaces.map((workspace) => ({
-        id: workspace.id,
-        label: workspace.canonicalRoot,
-        description: workspace.displayName || undefined,
-        authorization: workspace.authorization,
-      }))}
+      workspaceOptions={[
+        {
+          id: automaticWorkspaceOptionId,
+          label: t("workspace.default_directory"),
+          authorization: "available" as const,
+          disabled: !snapshot.capabilities.managedWorkspaces,
+        },
+        ...userWorkspaces.map((workspace) => ({
+          id: workspace.id,
+          label: workspace.canonicalRoot,
+          description: workspace.displayName || undefined,
+          authorization: workspace.authorization,
+        })),
+      ]}
       selectedWorkspaceId={
-        newTaskDraftActive ? (composerWorkspace?.id ?? "") : ""
+        newTaskDraftActive
+          ? (composerWorkspace?.id ?? automaticWorkspaceOptionId)
+          : ""
       }
       workspaceEditable={newTaskDraftActive}
       modelLabel={

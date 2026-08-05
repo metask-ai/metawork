@@ -257,12 +257,23 @@ test("the fixed revision 1 contract carries Host-owned Workspace and generation 
     workspaceEpoch: "29",
     reason: null,
   });
-  assert.deepEqual(await client.createTask("7", "29", "23", null), {
-    accepted: true,
-    taskId: "11",
-    bindingEpoch: "13",
-    reason: null,
-  });
+  assert.deepEqual(
+    await client.createTask(
+      {
+        kind: "manual",
+        workspaceId: "7",
+        expectedWorkspaceEpoch: "29",
+      },
+      "23",
+      null,
+    ),
+    {
+      accepted: true,
+      taskId: "11",
+      bindingEpoch: "13",
+      reason: null,
+    },
+  );
   assert.deepEqual(
     await client.run("11", "13", {
       kind: "skill",
@@ -314,8 +325,11 @@ test("the fixed revision 1 contract carries Host-owned Workspace and generation 
     {
       command: "metawork.tasks.create",
       payload: {
-        workspaceId: "7",
-        expectedWorkspaceEpoch: "29",
+        workspace: {
+          kind: "manual",
+          workspaceId: "7",
+          expectedWorkspaceEpoch: "29",
+        },
         expectedExecutionGeneration: "23",
         expectedSkillCatalogRevision: null,
       },

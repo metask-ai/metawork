@@ -95,6 +95,7 @@ export function ComposerFooter({
     label: string;
     description?: string;
     authorization: "available" | "removing" | "reauthorization_required";
+    disabled?: boolean;
   }[];
   selectedWorkspaceId: string;
   workspaceEditable: boolean;
