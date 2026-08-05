@@ -568,7 +568,7 @@ Read 详情显示真实文件范围；Bash 详情显示实际执行命令、工�
 
 已有 Task 的 Composer 固定在中间区域底部，并为滚动内容预留空间。New task 的 Composer 位于工作面的视觉中心；Host 确认创建真实 Task 后，它再通过一次克制过渡落到底部。
 
-New task 页面以 Composer 为绝对主视觉。其上方使用直接的行动标题和一句 Workspace 工作说明，不使用人格化欢迎语；下方可以放 3–4 个轻量真实任务示例，不使用大型推荐卡片。输入框附近只放与“这次 Task 如何开始”直接相关的上下文：模型、Workspace、附件（能力真实接通后）和发送。API Key、账号目录刷新、权限默认值、显示密度与诊断不得堆入同一行。
+New task 页面以 Composer 为绝对主视觉。其上方使用直接的行动标题和一句 Workspace 工作说明，不使用人格化欢迎语；Composer 下方不放示例、推荐卡片或快捷指令。输入框附近只放与“这次 Task 如何开始”直接相关的上下文：模型、Workspace、附件（能力真实接通后）和发送。API Key、账号目录刷新、权限默认值、显示密度与诊断不得堆入同一行。
 
 ```text
 ┌────────────────────────────────────────────────────┐
@@ -661,7 +661,7 @@ Skill draft 与 Text draft 一样按 Task/New-task scope 保存在 Renderer sess
 | Run accepted                | 切换到真实 Task | typed command accepted 后清除 | 等待 snapshot 发布 queued、running 或 terminal                                  |
 | command timeout             | 先刷新 snapshot | 对账完成前保留                | 由 snapshot 决定留在 New task、进入空 Task 或进入 active Task，禁止自动重复提交 |
 
-只有 Host 已确认创建真实 Task 后，New task 才切换成 Task 工作面：标题与示例淡出，Task Header 和工作轨迹出现，Composer 在约 220 ms 内落到底部，左栏出现真实 Task，焦点留在工作面。`prefers-reduced-motion` 下直接切换。Task 已创建但 Run 未成功启动时仍进入真实 Task，恢复 Task 草稿，不伪造 queued / running。
+只有 Host 已确认创建真实 Task 后，New task 才切换成 Task 工作面：行动标题淡出，Task Header 和工作轨迹出现，Composer 在约 220 ms 内落到底部，左栏出现真实 Task，焦点留在工作面。`prefers-reduced-motion` 下直接切换。Task 已创建但 Run 未成功启动时仍进入真实 Task，恢复 Task 草稿，不伪造 queued / running。
 
 ## 9. 审批、问题与计划确认
 
@@ -1080,11 +1080,10 @@ MetaWork 采用“明亮工作台 + 紫色任务流”的桌面工具方向。�
 - 清晰的行动标题，不使用空泛欢迎语或人格化 Assistant 宣传；
 - 一句话说明 MetaWork 将在当前本地 Workspace 中完成工作；
 - 作为首屏主视觉的 Composer；
-- 3–4 个真实任务示例；
 - 当前模型与 Workspace；
 - 必要的 trusted Workspace 限制提示。
 
-示例必须与本地工作任务相关，不使用空泛营销分类。没有 Workspace 时可以先输入临时草稿，但发送动作明确引导选择并确认 Workspace；Account 此时已经 ready，不再出现登录 prerequisite。
+没有 Workspace 时可以先输入临时草稿，但发送动作明确引导选择并确认 Workspace；Account 此时已经 ready，不再出现登录 prerequisite。
 
 ### 17.3 错误原则
 

@@ -247,10 +247,6 @@ export const zhCN: Record<MessageId, string> = {
   "task.empty_body_without_workspace":
     "描述一个明确结果；首次发送时再选择工作区。取消选择不会丢失草稿。",
   "task.created_empty_body": "这个任务已经准备好，输入第一条指令即可开始。",
-  "task.examples": "本地任务示例",
-  "task.example.review": "梳理这个项目，并指出最值得先修的风险",
-  "task.example.test_failure": "定位最近一次测试失败的根因，并给出修复方案",
-  "task.example.todo": "实现仓库里优先级最高的 TODO，并补上测试",
   "task.no_tasks": "从新建任务开始；需要目录时，发送前再选择。",
   "task.archived_hidden": "已归档任务当前隐藏。",
   "task.show_archived": "显示已归档（{count}）",

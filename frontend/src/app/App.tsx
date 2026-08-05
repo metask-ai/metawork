@@ -2291,14 +2291,7 @@ export default function App() {
           {newTaskDraftActive ? (
             <NewTaskView
               hasWorkspace={Boolean(composerWorkspace)}
-              composerHasDraft={composerDraftHasContent(composerDraft)}
               composer={composerFooter}
-              onUseExample={(instruction) => {
-                const prepared = prepareRetryDraft(composerDraft, instruction);
-                if (prepared.kind === "prepared")
-                  updateComposerDraft(prepared.draft);
-                window.requestAnimationFrame(() => composer.current?.focus());
-              }}
             />
           ) : (
             <>

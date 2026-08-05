@@ -1,23 +1,13 @@
 import type { ReactNode } from "react";
 
-import { useI18n, type MessageId } from "../../i18n/context.ts";
-
-const newTaskExampleIds: MessageId[] = [
-  "task.example.review",
-  "task.example.test_failure",
-  "task.example.todo",
-];
+import { useI18n } from "../../i18n/context.ts";
 
 export function NewTaskView({
   hasWorkspace,
-  composerHasDraft,
   composer,
-  onUseExample,
 }: {
   hasWorkspace: boolean;
-  composerHasDraft: boolean;
   composer: ReactNode;
-  onUseExample: (instruction: string) => void;
 }) {
   const { t } = useI18n();
 
@@ -34,19 +24,6 @@ export function NewTaskView({
             )}
           </p>
           {composer}
-          {!composerHasDraft && (
-            <div className="task-examples" aria-label={t("task.examples")}>
-              {newTaskExampleIds.map((id) => (
-                <button
-                  key={id}
-                  className="task-example focus-ring"
-                  onClick={() => onUseExample(t(id))}
-                >
-                  {t(id)}
-                </button>
-              ))}
-            </div>
-          )}
         </div>
       </section>
     </div>

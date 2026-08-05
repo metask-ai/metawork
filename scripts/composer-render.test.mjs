@@ -237,7 +237,7 @@ function renderCompletedTimeline(
   );
 }
 
-function renderNewTaskView(composerHasDraft, composer = null) {
+function renderNewTaskView(composer = null) {
   return renderToStaticMarkup(
     createElement(
       I18nContext.Provider,
@@ -250,9 +250,7 @@ function renderNewTaskView(composerHasDraft, composer = null) {
       },
       createElement(NewTaskView, {
         hasWorkspace: true,
-        composerHasDraft,
         composer,
-        onUseExample() {},
       }),
     ),
   );
@@ -465,20 +463,14 @@ test("Timeline projects manual Compact as a lightweight system event", () => {
   assert.match(markup, /40/);
 });
 
-test("task examples disappear before they can overwrite an existing draft", () => {
-  assert.match(renderNewTaskView(false), /Review this project/);
-  assert.doesNotMatch(renderNewTaskView(true), /Review this project/);
-});
-
-test("new Task places the Composer between the outcome prompt and examples", () => {
+test("new Task places the Composer after the outcome prompt", () => {
   const markup = renderNewTaskView(
-    false,
     createElement("footer", { "data-test": "draft-composer" }, "Composer"),
   );
   const prompt = markup.indexOf("Start with the outcome");
   const composer = markup.indexOf('data-test="draft-composer"');
-  const example = markup.indexOf("Review this project");
-  assert.ok(prompt >= 0 && composer > prompt && example > composer);
+  assert.ok(prompt >= 0 && composer > prompt);
+  assert.doesNotMatch(markup, /task-examples|task-example/);
 });
 
 test("Workbench foundation uses a stable 760px new Task Composer stage", async () => {
@@ -513,9 +505,13 @@ test("Workbench foundation uses a stable 760px new Task Composer stage", async (
   );
   assert.match(
     css,
+    /\.new-task-view\s*\{[\s\S]*?display:\s*grid[\s\S]*?padding:\s*clamp\(24px, 4vh, 40px\) 24px clamp\(104px, 16vh, 144px\)[\s\S]*?align-items:\s*center/,
+  );
+  assert.match(
+    css,
     /\.new-task-content \.composer\s*\{[\s\S]*?min-height:\s*140px/,
   );
-  assert.match(css, /\.task-examples\s*\{[\s\S]*?width:\s*100%/);
+  assert.doesNotMatch(css, /\.task-examples|\.task-example/);
   assert.doesNotMatch(css, /color-cobalt|settings-teal|35,\s*109,\s*100/);
   assert.match(app, /<NewTaskView[\s\S]*?composer=\{composerFooter\}/);
   assert.doesNotMatch(app, /draftComposer=/);

@@ -5239,10 +5239,12 @@ summary::-webkit-details-marker {
 }
 
 .new-task-view {
+  display: grid;
   width: 100%;
   min-height: 100%;
   margin: 0 auto;
-  padding: clamp(48px, 9vh, 92px) 24px 48px;
+  padding: clamp(24px, 4vh, 40px) 24px clamp(104px, 16vh, 144px);
+  align-items: center;
 }
 
 .new-task-content {
@@ -5299,48 +5301,6 @@ summary::-webkit-details-marker {
   box-shadow:
     0 16px 46px rgba(91, 70, 216, 0.12),
     0 0 0 3px rgba(91, 70, 216, 0.09);
-}
-
-.task-examples {
-  display: grid;
-  width: 100%;
-  margin: 18px auto 0;
-  gap: 12px;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
-.task-example {
-  min-height: 54px;
-  padding: 10px 12px;
-  border: 0;
-  border-top: 1px solid var(--color-rule);
-  border-radius: 0;
-  color: var(--color-graphite);
-  background: transparent;
-  font-size: 12px;
-  line-height: 1.45;
-  text-align: left;
-  text-wrap: balance;
-  transition:
-    border-color 120ms ease,
-    color 120ms ease,
-    background-color 120ms ease;
-}
-
-.task-example:hover {
-  border-color: var(--color-brand-200);
-  color: var(--color-brand-700);
-  background: linear-gradient(
-    to bottom,
-    rgba(91, 70, 216, 0.045),
-    transparent 72%
-  );
-}
-
-@media (max-width: 720px) {
-  .task-examples {
-    grid-template-columns: 1fr;
-  }
 }
 
 .composer-bar {
