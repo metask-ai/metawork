@@ -261,13 +261,6 @@ export const enUS = {
     "Describe a clear outcome and choose a workspace on first send. Cancelling the picker keeps your draft.",
   "task.created_empty_body":
     "This task is ready. Enter its first instruction to begin.",
-  "task.examples": "Local task examples",
-  "task.example.review":
-    "Review this project and identify the risks worth fixing first",
-  "task.example.test_failure":
-    "Find the root cause of the latest test failure and propose a fix",
-  "task.example.todo":
-    "Implement the highest-priority TODO in this repository and add tests",
   "task.no_tasks":
     "Start a new task; choose a folder before sending when one is needed.",
   "task.archived_hidden": "Archived tasks are hidden.",

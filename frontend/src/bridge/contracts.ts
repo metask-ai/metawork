@@ -424,7 +424,7 @@ export type WorkbenchSnapshot = {
     typedOutputs: boolean;
     typedFileChanges: boolean;
     persistentWorkspacePermissions: boolean;
-    managedWorkspaces: boolean;
+    automaticWorkspaces: boolean;
     scheduledTasks: boolean;
     scheduledTaskPersistence: boolean;
     scheduledTaskPersistenceHealth:
@@ -449,7 +449,6 @@ export type WorkbenchSnapshot = {
   skillCatalog: SkillCatalogView;
   skillManagement: SkillManagementView;
   mcp: McpManagementView;
-  selectedWorkspaceId: string | null;
   workspaces: WorkspaceView[];
   scheduledTasks: ScheduledTaskView[];
   tasks: TaskView[];
@@ -458,7 +457,7 @@ export type WorkbenchSnapshot = {
 export type WorkspaceView = {
   id: string;
   epoch: string;
-  origin: "user" | "managed";
+  kind: "manual" | "automatic";
   displayName: string;
   canonicalRoot: string;
   redacted: boolean;
@@ -591,6 +590,14 @@ export type TaskCreateResult =
       taskId: null;
       bindingEpoch: null;
       reason: TaskCreateReason;
+    };
+
+export type TaskWorkspaceIntent =
+  | { kind: "automatic" }
+  | {
+      kind: "manual";
+      workspaceId: string;
+      expectedWorkspaceEpoch: string;
     };
 
 export type TaskRunReason =

@@ -335,7 +335,7 @@ function settingsElement(account, overrides = {}) {
     },
     createElement(SettingsPage, {
       account,
-      userWorkspaces: [],
+      manualWorkspaces: [],
       tasks: [],
       focusTarget: "title",
       disabled: false,
@@ -385,7 +385,7 @@ function settingsWorkspace(id, authorization, lastRemovalFailure = null) {
   return {
     id,
     epoch: "3",
-    origin: "user",
+    kind: "manual",
     displayName: id,
     canonicalRoot: `/repo/${id}`,
     redacted: false,
@@ -650,11 +650,11 @@ test(
   async () => {
     const removals = [];
     renderSettings(readySettingsAccount, {
-      userWorkspaces: [
+      manualWorkspaces: [
         {
           id: "workspace-1",
           epoch: "3",
-          origin: "user",
+          kind: "manual",
           displayName: "metawork",
           canonicalRoot: "/Users/example/Projects/metawork",
           redacted: false,
@@ -703,7 +703,7 @@ test(
 
 test("Workspace settings expose canonical removal and authorization recovery states", () => {
   renderSettings(readySettingsAccount, {
-    userWorkspaces: [
+    manualWorkspaces: [
       settingsWorkspace("reauthorize", "reauthorization_required"),
       settingsWorkspace("failed", "available", "task_close_failed"),
       settingsWorkspace("removing", "removing"),
@@ -724,12 +724,12 @@ test("Workspace settings expose canonical removal and authorization recovery sta
 test("Workspace reauthorization preserves the target Host identity", async () => {
   const intents = [];
   renderSettings(readySettingsAccount, {
-    userWorkspaces: [settingsWorkspace("target", "reauthorization_required")],
+    manualWorkspaces: [settingsWorkspace("target", "reauthorization_required")],
     async onChooseWorkspace(intent) {
       intents.push(intent);
       return {
         kind: "target_mismatch",
-        selectedWorkspaceId: "different",
+        chosenWorkspaceId: "different",
       };
     },
   });
@@ -753,7 +753,7 @@ test(
   { timeout: 2_000 },
   async () => {
     renderSettings(readySettingsAccount, {
-      userWorkspaces: [
+      manualWorkspaces: [
         settingsWorkspace("target", "available"),
         settingsWorkspace("other", "available"),
       ],
@@ -786,7 +786,7 @@ test(
   async () => {
     const available = settingsWorkspace("target", "available");
     const view = renderSettings(readySettingsAccount, {
-      userWorkspaces: [available],
+      manualWorkspaces: [available],
     });
     fireEvent.click(screen.getByRole("button", { name: "Remove" }));
     await new Promise((resolve) => window.requestAnimationFrame(resolve));
@@ -797,7 +797,7 @@ test(
 
     view.rerender(
       settingsElement(readySettingsAccount, {
-        userWorkspaces: [{ ...available, authorization: "removing" }],
+        manualWorkspaces: [{ ...available, authorization: "removing" }],
       }),
     );
     await new Promise((resolve) => window.requestAnimationFrame(resolve));
@@ -842,7 +842,7 @@ function renderComposer(overrides = {}) {
       workspaceLabel: "metawork",
       workspaceTitle: "/repo/metawork",
       workspaceOptions: [],
-      selectedWorkspaceId: "1",
+      selectedWorkspaceOptionId: "1",
       workspaceEditable: false,
       modelLabel: null,
       modelOptions: [],

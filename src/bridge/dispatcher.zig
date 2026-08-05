@@ -134,7 +134,6 @@ pub const Dispatcher = struct {
             .{ .name = commands.window_control, .function = controlWindow },
             .{ .name = commands.window_state, .function = getWindowState },
             .{ .name = commands.choose_workspace, .function = chooseWorkspace },
-            .{ .name = commands.select_workspace, .function = selectWorkspace },
             .{ .name = commands.remove_workspace, .function = removeWorkspace },
             .{ .name = commands.refresh_workspace_skill_catalog, .function = refreshWorkspaceSkillCatalog },
             .{ .name = commands.refresh_skill_catalog, .function = refreshSkillCatalog },
@@ -712,38 +711,6 @@ pub const Dispatcher = struct {
         );
     }
 
-    fn selectWorkspace(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
-        const self: *Dispatcher = @ptrCast(@alignCast(context));
-        var callback = try self.callbacks.enter();
-        defer callback.deinit();
-        try self.requireWindow(invocation.source.window_id);
-        var parsed = try handlers.parsePayload(handlers.WorkspaceIdentity, invocation.request.payload);
-        defer parsed.deinit();
-        const workspace_id = try handlers.parseWireId(parsed.value.workspaceId);
-        const expected_epoch = try handlers.parseWireId(parsed.value.expectedWorkspaceEpoch);
-        const workbench = try self.requireWorkbench();
-        workbench.selectWorkspaceAtEpoch(workspace_id, expected_epoch) catch |err| {
-            if (workspaceSelectionRejection(err)) |reason|
-                return encodeWorkspaceMutationResult(
-                    output,
-                    false,
-                    workspace_id,
-                    null,
-                    reason,
-                );
-            return err;
-        };
-        const workspace_epoch = try workbench.workspaceEpoch(workspace_id);
-        self.notifyCommitted();
-        return encodeWorkspaceMutationResult(
-            output,
-            true,
-            workspace_id,
-            workspace_epoch,
-            null,
-        );
-    }
-
     fn removeWorkspace(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         var callback = try self.callbacks.enter();
@@ -786,19 +753,35 @@ pub const Dispatcher = struct {
         try self.requireWindow(invocation.source.window_id);
         var parsed = try handlers.parsePayload(handlers.TaskCreate, invocation.request.payload);
         defer parsed.deinit();
-        const workspace_id = try handlers.parseWireId(parsed.value.workspaceId);
-        const workspace_epoch = try handlers.parseWireId(
-            parsed.value.expectedWorkspaceEpoch,
-        );
+        const workspace_request: workbench_api.TaskWorkspaceRequest = if (std.mem.eql(
+            u8,
+            parsed.value.workspace.kind,
+            "automatic",
+        )) automatic: {
+            if (parsed.value.workspace.workspaceId != null or
+                parsed.value.workspace.expectedWorkspaceEpoch != null)
+                return error.InvalidBridgePayload;
+            break :automatic .automatic;
+        } else if (std.mem.eql(u8, parsed.value.workspace.kind, "manual")) manual: {
+            const workspace_id = try handlers.parseWireId(
+                parsed.value.workspace.workspaceId orelse return error.InvalidBridgePayload,
+            );
+            const workspace_epoch = try handlers.parseWireId(
+                parsed.value.workspace.expectedWorkspaceEpoch orelse return error.InvalidBridgePayload,
+            );
+            break :manual .{ .manual = .{
+                .workspace_id = workspace_id,
+                .expected_epoch = workspace_epoch,
+            } };
+        } else return error.InvalidBridgePayload;
         const execution_generation = try handlers.parseWireId(
             parsed.value.expectedExecutionGeneration,
         );
         if (parsed.value.expectedSkillCatalogRevision) |revision|
             if (revision.len == 0) return error.InvalidBridgePayload;
         const workbench = try self.requireWorkbench();
-        const task_id = workbench.createTaskInWorkspace(
-            workspace_id,
-            workspace_epoch,
+        const task_id = workbench.createTaskForWorkspace(
+            workspace_request,
             execution_generation,
             parsed.value.expectedSkillCatalogRevision,
         ) catch |err| {
@@ -1931,16 +1914,6 @@ fn skillMutationMayHaveCommitted(err: anyerror) bool {
     };
 }
 
-fn workspaceSelectionRejection(err: anyerror) ?[]const u8 {
-    return switch (err) {
-        error.WorkspaceEpochMismatch => "workspace_changed",
-        error.UnknownWorkspace => "workspace_unavailable",
-        error.WorkspaceRemovalInProgress => "workspace_removing",
-        error.WorkspaceOrderExhausted => "capacity_reached",
-        else => null,
-    };
-}
-
 fn workspaceRemovalRejection(err: anyerror) ?[]const u8 {
     return switch (err) {
         error.WorkspaceEpochMismatch => "workspace_changed",
@@ -2782,22 +2755,6 @@ test "Dispatcher validates authority before domain calls and preserves committed
     const workspace_id = try handlers.parseWireId(chosen[digits_start..digits_end]);
 
     var workspace_request_storage: [512]u8 = undefined;
-    const stale_workspace_request = try std.fmt.bufPrint(
-        &workspace_request_storage,
-        "{{\"id\":\"stale-workspace\",\"command\":\"metawork.workspaces.select\",\"payload\":{{\"workspaceId\":\"{d}\",\"expectedWorkspaceEpoch\":\"99\"}}}}",
-        .{workspace_id},
-    );
-    const stale_workspace = native_dispatcher.dispatch(
-        stale_workspace_request,
-        source,
-        &response,
-    );
-    try std.testing.expect(std.mem.indexOf(
-        u8,
-        stale_workspace,
-        "\"reason\":\"workspace_changed\"",
-    ) != null);
-
     const refresh_workspace_request = try std.fmt.bufPrint(
         &workspace_request_storage,
         "{{\"id\":\"refresh-skills\",\"command\":\"metawork.workspaces.refreshSkillCatalog\",\"payload\":{{\"workspaceId\":\"{d}\",\"expectedWorkspaceEpoch\":\"1\"}}}}",
@@ -2816,7 +2773,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
 
     const stale_create = try std.fmt.bufPrint(
         &workspace_request_storage,
-        "{{\"id\":\"stale-create\",\"command\":\"metawork.tasks.create\",\"payload\":{{\"workspaceId\":\"{d}\",\"expectedWorkspaceEpoch\":\"1\",\"expectedExecutionGeneration\":\"99\",\"expectedSkillCatalogRevision\":null}}}}",
+        "{{\"id\":\"stale-create\",\"command\":\"metawork.tasks.create\",\"payload\":{{\"workspace\":{{\"kind\":\"manual\",\"workspaceId\":\"{d}\",\"expectedWorkspaceEpoch\":\"1\"}},\"expectedExecutionGeneration\":\"99\",\"expectedSkillCatalogRevision\":null}}}}",
         .{workspace_id},
     );
     const rejected_create = native_dispatcher.dispatch(
@@ -2830,10 +2787,21 @@ test "Dispatcher validates authority before domain calls and preserves committed
         "\"reason\":\"execution_changed\"",
     ) != null);
 
+    const automatic_create = native_dispatcher.dispatch(
+        "{\"id\":\"automatic-create\",\"command\":\"metawork.tasks.create\",\"payload\":{\"workspace\":{\"kind\":\"automatic\"},\"expectedExecutionGeneration\":\"1\",\"expectedSkillCatalogRevision\":null}}",
+        source,
+        &response,
+    );
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        automatic_create,
+        "\"reason\":\"workspace_unavailable\"",
+    ) != null);
+
     var request_storage: [256]u8 = undefined;
     const request = try std.fmt.bufPrint(
         &request_storage,
-        "{{\"id\":\"create\",\"command\":\"metawork.tasks.create\",\"payload\":{{\"workspaceId\":\"{d}\",\"expectedWorkspaceEpoch\":\"1\",\"expectedExecutionGeneration\":\"1\",\"expectedSkillCatalogRevision\":null}}}}",
+        "{{\"id\":\"create\",\"command\":\"metawork.tasks.create\",\"payload\":{{\"workspace\":{{\"kind\":\"manual\",\"workspaceId\":\"{d}\",\"expectedWorkspaceEpoch\":\"1\"}},\"expectedExecutionGeneration\":\"1\",\"expectedSkillCatalogRevision\":null}}}}",
         .{workspace_id},
     );
     var lost_response: [32]u8 = undefined;

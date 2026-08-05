@@ -9,6 +9,7 @@ import type {
   HostSignal,
   ScheduledTaskMutation,
   TaskRunInput,
+  TaskWorkspaceIntent,
   UiResponsePayload,
   WorkspaceChoice,
 } from "./contracts.ts";
@@ -287,16 +288,6 @@ export class BridgeClient {
     );
   }
 
-  async selectWorkspace(workspaceId: string, expectedWorkspaceEpoch: string) {
-    return decodeWorkspaceMutationResult(
-      await this.invoke(commands.selectWorkspace, {
-        workspaceId,
-        expectedWorkspaceEpoch,
-      }),
-      workspaceId,
-    );
-  }
-
   async removeWorkspace(workspaceId: string, expectedWorkspaceEpoch: string) {
     return decodeWorkspaceMutationResult(
       await this.invoke(commands.removeWorkspace, {
@@ -372,15 +363,13 @@ export class BridgeClient {
   }
 
   async createTask(
-    workspaceId: string,
-    expectedWorkspaceEpoch: string,
+    workspace: TaskWorkspaceIntent,
     expectedExecutionGeneration: string,
     expectedSkillCatalogRevision: string | null,
   ) {
     return decodeTaskCreateResult(
       await this.invoke(commands.createTask, {
-        workspaceId,
-        expectedWorkspaceEpoch,
+        workspace,
         expectedExecutionGeneration,
         expectedSkillCatalogRevision,
       }),

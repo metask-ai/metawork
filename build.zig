@@ -54,7 +54,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-bridge", .root_module = test_modules.bridge },
         .{ .name = "metawork-workbench", .root_module = test_modules.workbench_projection },
         .{ .name = "metawork-workbench-executor", .root_module = test_modules.workbench_executor },
-        .{ .name = "metawork-managed-workspace-store", .root_module = test_modules.workbench_managed_workspace_store },
+        .{ .name = "metawork-automatic-workspace-allocator", .root_module = test_modules.workbench_automatic_workspace_allocator },
         .{ .name = "metawork-scheduled-task-persistence", .root_module = test_modules.workbench_scheduled_persistence },
         .{ .name = "metawork-skill-package", .root_module = test_modules.workbench_skill_package },
         .{ .name = "metawork-skill-management", .root_module = test_modules.workbench_skill_management },
@@ -130,7 +130,7 @@ const WiredModules = struct {
     workbench: *std.Build.Module,
     workbench_projection: *std.Build.Module,
     workbench_executor: *std.Build.Module,
-    workbench_managed_workspace_store: *std.Build.Module,
+    workbench_automatic_workspace_allocator: *std.Build.Module,
     workbench_scheduled_persistence: *std.Build.Module,
     workbench_skill_package: *std.Build.Module,
     workbench_skill_management: *std.Build.Module,
@@ -344,8 +344,8 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .target = target,
         .optimize = root_module.optimize,
     });
-    const managed_workspace_store = b.createModule(.{
-        .root_source_file = b.path("src/workbench/managed_workspace_store.zig"),
+    const automatic_workspace_allocator = b.createModule(.{
+        .root_source_file = b.path("src/workbench/automatic_workspace_allocator.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
@@ -387,7 +387,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     projection.addImport("metawork_agent", agent);
     projection.addImport("metawork_account_contract", account_contract);
     projection.addImport("workbench_executor", executor);
-    projection.addImport("workbench_managed_workspace_store", managed_workspace_store);
+    projection.addImport("workbench_automatic_workspace_allocator", automatic_workspace_allocator);
     projection.addImport("workbench_scheduled_tasks", scheduled_tasks);
     projection.addImport(
         "workbench_scheduled_task_persistence",
@@ -416,7 +416,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .optimize = root_module.optimize,
     });
     workbench.addImport("workbench_projection", projection);
-    workbench.addImport("workbench_managed_workspace_store", managed_workspace_store);
+    workbench.addImport("workbench_automatic_workspace_allocator", automatic_workspace_allocator);
     workbench.addImport(
         "workbench_scheduled_task_persistence",
         scheduled_task_persistence,
@@ -500,7 +500,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .workbench = workbench,
         .workbench_projection = projection,
         .workbench_executor = executor,
-        .workbench_managed_workspace_store = managed_workspace_store,
+        .workbench_automatic_workspace_allocator = automatic_workspace_allocator,
         .workbench_scheduled_persistence = scheduled_task_persistence,
         .workbench_skill_package = skill_package,
         .workbench_skill_management = skill_management,

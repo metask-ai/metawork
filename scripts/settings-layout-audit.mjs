@@ -228,11 +228,11 @@ function AuditApp() {
           <section className="task-stage">
             <SettingsPage
               account={accountView}
-              userWorkspaces={[
+              manualWorkspaces={[
                 {
                   id: "workspace-1",
                   epoch: "1",
-                  origin: "user",
+                  kind: "manual",
                   displayName: "metawork",
                   canonicalRoot: "/Users/example/Projects/metawork",
                   redacted: false,

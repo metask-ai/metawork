@@ -4,12 +4,12 @@ import type {
   TaskRunInput,
   TaskRunReason,
   TaskRunResult,
+  TaskWorkspaceIntent,
 } from "../../bridge/contracts.ts";
 
 export type TaskSubmissionClient = {
   createTask: (
-    workspaceId: string,
-    expectedWorkspaceEpoch: string,
+    workspace: TaskWorkspaceIntent,
     expectedExecutionGeneration: string,
     expectedSkillCatalogRevision: string | null,
   ) => Promise<TaskCreateResult>;
@@ -35,8 +35,7 @@ export type TaskSubmissionResult =
 export async function submitTaskInstruction({
   client,
   taskId,
-  workspaceId,
-  expectedWorkspaceEpoch,
+  workspace,
   expectedExecutionGeneration,
   expectedBindingEpoch,
   input,
@@ -44,8 +43,7 @@ export async function submitTaskInstruction({
 }: {
   client: TaskSubmissionClient;
   taskId: string | null;
-  workspaceId: string;
-  expectedWorkspaceEpoch: string;
+  workspace: TaskWorkspaceIntent;
   expectedExecutionGeneration: string;
   expectedBindingEpoch: string | null;
   input: TaskRunInput;
@@ -55,15 +53,9 @@ export async function submitTaskInstruction({
   let targetBindingEpoch = expectedBindingEpoch;
   let created = false;
   if (!targetTaskId) {
-    if (!workspaceId || !expectedWorkspaceEpoch)
-      return {
-        kind: "create_failed",
-        error: new Error("Workspace access is required"),
-      };
     try {
       const createdTask = await client.createTask(
-        workspaceId,
-        expectedWorkspaceEpoch,
+        workspace,
         expectedExecutionGeneration,
         input.kind === "skill" ? input.catalogRevision : null,
       );

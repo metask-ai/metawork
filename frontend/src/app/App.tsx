@@ -56,6 +56,7 @@ import type { InspectorSection } from "../features/inspector/inspector-state.ts"
 import { useInspectorSession } from "../features/inspector/useInspectorSession.ts";
 import { TaskTimeline } from "../features/timeline/TaskTimeline.tsx";
 import { TaskList, TaskSignals } from "../features/tasks/TaskList.tsx";
+import { NewTaskView } from "../features/tasks/NewTaskView.tsx";
 import {
   useNewTaskDrafts,
   useTaskDrafts,
@@ -110,10 +111,6 @@ import {
 } from "../workbench/store.ts";
 import { navigableTasks } from "../workbench/task-visibility.ts";
 import {
-  WorkspaceSelectionIntents,
-  type WorkspaceSelectionRequest,
-} from "../workbench/workspace-selection-intents.ts";
-import {
   accountMutationBlocksTaskAdmission,
   PendingScopes,
 } from "../workbench/pendingScopes.ts";
@@ -131,6 +128,8 @@ type MutationReason =
 function mutationReasonMessageId(reason: MutationReason): MessageId {
   return `mutation.reason.${reason}`;
 }
+
+const automaticWorkspaceOptionId = "automatic";
 
 export default function App() {
   const { t } = useI18n();
@@ -186,8 +185,6 @@ export default function App() {
   const accountBusyRef = useRef(false);
   const accountCancelBusyRef = useRef(false);
   const workspaceBusyRef = useRef(false);
-  const workspaceSelectionRunningRef = useRef(false);
-  const workspaceSelectionIntents = useRef(new WorkspaceSelectionIntents());
   const connectionBusyRef = useRef(false);
   const taskMenu = useRef<HTMLDivElement>(null);
   const inspectorToggle = useRef<HTMLButtonElement>(null);
@@ -202,16 +199,11 @@ export default function App() {
   const snapshot = workbench.snapshot;
   const activeTask = useMemo(() => selectActiveTask(workbench), [workbench]);
   const inspector = useInspectorSession(activeTask);
-  const userWorkspaces = useMemo(
+  const manualWorkspaces = useMemo(
     () =>
-      snapshot.workspaces.filter((workspace) => workspace.origin === "user"),
+      snapshot.workspaces.filter((workspace) => workspace.kind === "manual"),
     [snapshot.workspaces],
   );
-  const selectedUserWorkspaceId =
-    userWorkspaces.find(
-      (workspace) => workspace.id === snapshot.selectedWorkspaceId,
-    )?.id ?? null;
-  const defaultDraftWorkspaceId = selectedUserWorkspaceId;
   const navigableTaskItems = useMemo(
     () => navigableTasks(snapshot),
     [snapshot],
@@ -224,7 +216,7 @@ export default function App() {
   const newTaskDraftActive = workbench.draftOpen || activeTask === null;
   const newTaskDraftId = newTaskDraftStorageId(
     newTaskDraftActive,
-    workbench.draftWorkspaceId ?? defaultDraftWorkspaceId,
+    workbench.draftWorkspaceId,
   );
   const newTaskDrafts = useNewTaskDrafts(newTaskDraftId);
   const composerDraft = newTaskDraftActive
@@ -253,14 +245,13 @@ export default function App() {
       !activeTask.archived);
   const taskOperationInFlight = Boolean(activeTask?.activeOperation);
   const composerWorkspaceId =
-    activeTask?.workspaceId ||
-    workbench.draftWorkspaceId ||
-    defaultDraftWorkspaceId;
+    activeTask?.workspaceId || workbench.draftWorkspaceId;
   const composerWorkspace = snapshot.workspaces.find(
     (workspace) => workspace.id === composerWorkspaceId,
   );
-  const composerWorkspaceReady =
-    composerWorkspace?.authorization === "available";
+  const newTaskWorkspaceReady = workbench.draftWorkspaceId
+    ? composerWorkspace?.authorization === "available"
+    : snapshot.capabilities.automaticWorkspaces;
   const skillCatalog = newTaskDraftActive
     ? (composerWorkspace?.skillCatalog ?? {
         availability: "unavailable" as const,
@@ -283,7 +274,7 @@ export default function App() {
   const canSubmit =
     taskCanCompose &&
     (!newTaskDraftActive || snapshot.account.canCreateTask) &&
-    (!newTaskDraftActive || composerWorkspaceReady) &&
+    (!newTaskDraftActive || newTaskWorkspaceReady) &&
     !accountMutationBlocksTaskAdmission(newTaskDraftActive, accountBusy) &&
     !taskOperationInFlight &&
     composerDraftHasContent(composerDraft) &&
@@ -398,7 +389,7 @@ export default function App() {
     };
     window.addEventListener("keydown", openSearch);
     return () => window.removeEventListener("keydown", openSearch);
-  }, [accountGateRequired, bridgeUnavailable, defaultDraftWorkspaceId]);
+  }, [accountGateRequired, bridgeUnavailable]);
 
   useEffect(() => {
     if (!client.available()) return;
@@ -426,15 +417,10 @@ export default function App() {
       return;
     dispatchWorkbench({
       type: "task.draft.opened",
-      workspaceId: defaultDraftWorkspaceId,
+      workspaceId: null,
     });
     window.requestAnimationFrame(() => composer.current?.focus());
-  }, [
-    activeTask,
-    defaultDraftWorkspaceId,
-    snapshot.account.readiness,
-    workbench.draftOpen,
-  ]);
+  }, [activeTask, snapshot.account.readiness, workbench.draftOpen]);
 
   function focusPendingRequest() {
     const requestId = activeTask?.pendingUi?.requestId;
@@ -694,7 +680,7 @@ export default function App() {
       setStatus(
         quietStatus("workspace.selection_cancelled", {
           scope: "workspace",
-          workspaceId: defaultDraftWorkspaceId,
+          workspaceId: workbench.draftWorkspaceId,
         }),
       );
       window.requestAnimationFrame(() => composer.current?.focus());
@@ -740,7 +726,7 @@ export default function App() {
       )
         return {
           kind: "target_mismatch",
-          selectedWorkspaceId: result.workspaceId,
+          chosenWorkspaceId: result.workspaceId,
         };
       return { kind: "selected", workspaceId: result.workspaceId };
     } catch (error) {
@@ -766,7 +752,7 @@ export default function App() {
       return { kind: "failed" };
     const workspace = snapshot.workspaces.find(
       (candidate) =>
-        candidate.id === workspaceId && candidate.origin === "user",
+        candidate.id === workspaceId && candidate.kind === "manual",
     );
     if (!workspace) return { kind: "failed" };
     workspaceBusyRef.current = true;
@@ -798,72 +784,23 @@ export default function App() {
     }
   }
 
-  async function executeWorkspaceSelection(request: WorkspaceSelectionRequest) {
+  function setDraftWorkspaceById(workspaceId: string) {
     if (workbenchMutationDisabled) return;
-    workspaceBusyRef.current = true;
-    workspaceSelectionRunningRef.current = true;
-    setWorkspaceBusy(true);
-    try {
-      const result = await client.selectWorkspace(
-        request.workspaceId,
-        request.workspaceEpoch,
-      );
-      if (!result.accepted) {
-        await refreshSnapshot().catch(() => undefined);
-        if (workspaceSelectionIntents.current.isCurrent(request))
-          setStatus(
-            attentionStatus(mutationReasonMessageId(result.reason), {
-              scope: "workspace",
-              workspaceId: null,
-            }),
-          );
-        return;
-      }
-      await refreshSnapshot();
-      if (!workspaceSelectionIntents.current.isCurrent(request)) return;
-      if (
-        request.migratableDraftId &&
-        request.migratableDraftId !== request.workspaceId
-      )
-        newTaskDrafts.moveDraft(request.migratableDraftId, request.workspaceId);
-      dispatchWorkbench({
-        type: "task.draft.opened",
-        workspaceId: request.workspaceId,
-      });
+    if (workspaceId === automaticWorkspaceOptionId) {
+      if (newTaskDraftId && newTaskDraftId !== unscopedNewTaskDraftId)
+        newTaskDrafts.moveDraft(newTaskDraftId, unscopedNewTaskDraftId);
+      dispatchWorkbench({ type: "task.draft.opened", workspaceId: null });
       window.requestAnimationFrame(() => composer.current?.focus());
-      setStatus(
-        quietStatus("workspace.grant_confirmed", {
-          scope: "workspace",
-          workspaceId: request.workspaceId,
-        }),
-      );
-    } catch (error) {
-      await refreshSnapshot().catch(() => undefined);
-      if (workspaceSelectionIntents.current.isCurrent(request))
-        setStatus(
-          attentionStatus(
-            "workspace.selection_failed",
-            { scope: "workspace", workspaceId: null },
-            {
-              diagnostic: errorText(error),
-            },
-          ),
-        );
-    } finally {
-      workspaceSelectionRunningRef.current = false;
-      workspaceBusyRef.current = false;
-      setWorkspaceBusy(false);
-      const queued = workspaceSelectionIntents.current.takeQueued();
-      if (queued) void executeWorkspaceSelection(queued);
+      return;
     }
-  }
-
-  function selectWorkspaceById(workspaceId: string) {
-    if (workbenchMutationDisabled) return;
     const workspace = snapshot.workspaces.find(
       (candidate) => candidate.id === workspaceId,
     );
-    if (!workspace || workspace.origin !== "user") {
+    if (
+      !workspace ||
+      workspace.kind !== "manual" ||
+      workspace.authorization !== "available"
+    ) {
       setStatus(
         attentionStatus("workspace.selection_unavailable", {
           scope: "workspace",
@@ -872,38 +809,27 @@ export default function App() {
       );
       return;
     }
-    const input = {
-      workspaceId,
-      workspaceEpoch: workspace.epoch,
-      migratableDraftId:
-        newTaskDraftId === unscopedNewTaskDraftId ? newTaskDraftId : null,
-    };
-    if (workspaceSelectionRunningRef.current) {
-      workspaceSelectionIntents.current.queue(input);
-      return;
-    }
-    if (workspaceBusyRef.current) return;
-    const request = workspaceSelectionIntents.current.begin(input);
-    void executeWorkspaceSelection(request);
+    if (newTaskDraftId === unscopedNewTaskDraftId)
+      newTaskDrafts.moveDraft(newTaskDraftId, workspace.id);
+    dispatchWorkbench({
+      type: "task.draft.opened",
+      workspaceId: workspace.id,
+    });
+    window.requestAnimationFrame(() => composer.current?.focus());
   }
 
   function beginNewTask() {
     pendingTaskSelection.current = null;
     setRoute("workbench");
-    if (workspaceSelectionRunningRef.current) {
-      if (defaultDraftWorkspaceId) selectWorkspaceById(defaultDraftWorkspaceId);
-      else workspaceSelectionIntents.current.invalidate();
-    }
     dispatchWorkbench({
       type: "task.draft.opened",
-      workspaceId: defaultDraftWorkspaceId,
+      workspaceId: null,
     });
     window.requestAnimationFrame(() => composer.current?.focus());
   }
 
   function openTask(taskId: string) {
     pendingTaskSelection.current = null;
-    workspaceSelectionIntents.current.invalidate();
     setRoute("workbench");
     dispatchWorkbench({ type: "task.selected", taskId });
   }
@@ -927,7 +853,14 @@ export default function App() {
     const input = composerDraftToRunInput(submitted);
     if (!input) return;
     const existingTaskId = activeTask?.id ?? null;
-    if (!composerWorkspace || !composerWorkspaceId) return;
+    const workspace =
+      newTaskDraftActive && composerWorkspace
+        ? {
+            kind: "manual" as const,
+            workspaceId: composerWorkspace.id,
+            expectedWorkspaceEpoch: composerWorkspace.epoch,
+          }
+        : { kind: "automatic" as const };
     const submittedDraftId = newTaskDraftId;
     let pendingScope = currentTaskScope;
     if (!beginTaskPendingOperation(pendingScope, "run")) return;
@@ -938,8 +871,7 @@ export default function App() {
       const result = await submitTaskInstruction({
         client,
         taskId: existingTaskId,
-        workspaceId: composerWorkspaceId,
-        expectedWorkspaceEpoch: composerWorkspace.epoch,
+        workspace,
         expectedExecutionGeneration: snapshot.account.executionGeneration,
         expectedBindingEpoch: activeTask?.binding.epoch ?? null,
         input,
@@ -959,7 +891,7 @@ export default function App() {
         if (
           await reconcileCommandTimeout(result.error, "operation.task_create", {
             scope: "workspace",
-            workspaceId: composerWorkspaceId,
+            workspaceId: composerWorkspaceId ?? null,
           })
         )
           return;
@@ -967,7 +899,7 @@ export default function App() {
         setStatus(
           attentionStatus(
             "task.create_failed",
-            { scope: "workspace", workspaceId: composerWorkspaceId },
+            { scope: "workspace", workspaceId: composerWorkspaceId ?? null },
             {
               diagnostic: errorText(result.error),
             },
@@ -1730,31 +1662,45 @@ export default function App() {
         composerWorkspace &&
         composerWorkspace.authorization !== "available",
       )}
-      workspaceMissing={Boolean(newTaskDraftActive && !composerWorkspace)}
+      workspaceMissing={Boolean(!newTaskDraftActive && !composerWorkspace)}
       workspaceLabel={
-        composerWorkspace
-          ? workspaceDirectoryLabel(
-              composerWorkspace,
-              t("workspace.default_directory"),
-            )
-          : t("workspace.none")
+        newTaskDraftActive && !composerWorkspace
+          ? t("workspace.default_directory")
+          : composerWorkspace
+            ? workspaceDirectoryLabel(
+                composerWorkspace,
+                t("workspace.default_directory"),
+              )
+            : t("workspace.none")
       }
       workspaceTitle={
-        composerWorkspace
-          ? workspaceDirectoryLabel(
-              composerWorkspace,
-              t("workspace.default_directory"),
-            )
-          : t("workspace.none")
+        newTaskDraftActive && !composerWorkspace
+          ? t("workspace.default_directory")
+          : composerWorkspace
+            ? workspaceDirectoryLabel(
+                composerWorkspace,
+                t("workspace.default_directory"),
+              )
+            : t("workspace.none")
       }
-      workspaceOptions={userWorkspaces.map((workspace) => ({
-        id: workspace.id,
-        label: workspace.canonicalRoot,
-        description: workspace.displayName || undefined,
-        authorization: workspace.authorization,
-      }))}
-      selectedWorkspaceId={
-        newTaskDraftActive ? (composerWorkspace?.id ?? "") : ""
+      workspaceOptions={[
+        {
+          id: automaticWorkspaceOptionId,
+          label: t("workspace.default_directory"),
+          authorization: "available" as const,
+          disabled: !snapshot.capabilities.automaticWorkspaces,
+        },
+        ...manualWorkspaces.map((workspace) => ({
+          id: workspace.id,
+          label: workspace.canonicalRoot,
+          description: workspace.displayName || undefined,
+          authorization: workspace.authorization,
+        })),
+      ]}
+      selectedWorkspaceOptionId={
+        newTaskDraftActive
+          ? (composerWorkspace?.id ?? automaticWorkspaceOptionId)
+          : ""
       }
       workspaceEditable={newTaskDraftActive}
       modelLabel={
@@ -1787,7 +1733,7 @@ export default function App() {
       onSlashCommand={runSlashCommand}
       onRefreshSkillCatalog={() => void refreshComposerSkillCatalog()}
       onConfirmAccess={() => void chooseWorkspaceForDraft()}
-      onSelectWorkspace={(workspaceId) => void selectWorkspaceById(workspaceId)}
+      onSelectWorkspace={(workspaceId) => setDraftWorkspaceById(workspaceId)}
       onSelectModel={(id) =>
         void runAccountCommand(() =>
           client.selectModel(
@@ -1954,7 +1900,7 @@ export default function App() {
       {route === "settings" ? (
         <SettingsPage
           account={snapshot.account}
-          userWorkspaces={userWorkspaces}
+          manualWorkspaces={manualWorkspaces}
           tasks={snapshot.tasks}
           focusTarget={settingsFocus}
           disabled={bridgeUnavailable || accountBusy}
@@ -2342,44 +2288,40 @@ export default function App() {
             </section>
           )}
 
-          <TaskTimeline
-            task={activeTask}
-            draft={newTaskDraftActive}
-            draftHasWorkspace={Boolean(composerWorkspace)}
-            revision={snapshot.revision}
-            composerHasDraft={composerDraftHasContent(composerDraft)}
-            retryAvailable={taskCanCompose && !taskOperationInFlight}
-            responseDisabled={bridgeUnavailable}
-            draftComposer={newTaskDraftActive ? composerFooter : null}
-            onUseExample={(instruction) => {
-              const prepared = prepareRetryDraft(composerDraft, instruction);
-              if (prepared.kind === "prepared")
-                updateComposerDraft(prepared.draft);
-              else if (activeTask)
-                setStatus(
-                  quietStatus("run.draft_preserved", {
-                    scope: "task",
-                    taskId: activeTask.id,
-                  }),
-                );
-              window.requestAnimationFrame(() => composer.current?.focus());
-            }}
-            onPrepareRetry={prepareRetry}
-            onInspect={openInspectorSection}
-            onRespond={(payload) => void respondUi(payload)}
-            renderPendingUi={(props) => {
-              const { taskId, ...panelProps } = props;
-              const identity = uiRequestIdentity(taskId, props.pending);
-              return (
-                <ApprovalPanel
-                  {...panelProps}
-                  responsePhase={uiResponsePhase(uiResponseStates, identity)}
-                />
-              );
-            }}
-            renderUiRecord={(record) => <UiRecordCard record={record} />}
-          />
-          {!newTaskDraftActive && composerFooter}
+          {newTaskDraftActive ? (
+            <NewTaskView
+              hasWorkspace={Boolean(composerWorkspace)}
+              composer={composerFooter}
+            />
+          ) : (
+            <>
+              <TaskTimeline
+                task={activeTask}
+                revision={snapshot.revision}
+                composerHasDraft={composerDraftHasContent(composerDraft)}
+                retryAvailable={taskCanCompose && !taskOperationInFlight}
+                responseDisabled={bridgeUnavailable}
+                onPrepareRetry={prepareRetry}
+                onInspect={openInspectorSection}
+                onRespond={(payload) => void respondUi(payload)}
+                renderPendingUi={(props) => {
+                  const { taskId, ...panelProps } = props;
+                  const identity = uiRequestIdentity(taskId, props.pending);
+                  return (
+                    <ApprovalPanel
+                      {...panelProps}
+                      responsePhase={uiResponsePhase(
+                        uiResponseStates,
+                        identity,
+                      )}
+                    />
+                  );
+                }}
+                renderUiRecord={(record) => <UiRecordCard record={record} />}
+              />
+              {composerFooter}
+            </>
+          )}
         </div>
       )}
       <GlobalSearch

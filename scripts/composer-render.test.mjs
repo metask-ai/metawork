@@ -18,11 +18,11 @@ const { ComposerFooter } = await vite.ssrLoadModule(
   "/src/features/composer/ComposerFooter.tsx",
 );
 const { AppShell } = await vite.ssrLoadModule("/src/app/AppShell.tsx");
-const { primaryShortcutModifier } = await vite.ssrLoadModule(
-  "/src/platform/keyboard.ts",
-);
 const { TaskTimeline } = await vite.ssrLoadModule(
   "/src/features/timeline/TaskTimeline.tsx",
+);
+const { NewTaskView } = await vite.ssrLoadModule(
+  "/src/features/tasks/NewTaskView.tsx",
 );
 const { TaskList } = await vite.ssrLoadModule(
   "/src/features/tasks/TaskList.tsx",
@@ -54,11 +54,17 @@ const base = {
   canSubmit: false,
   runInFlight: false,
   accessRequired: false,
-  workspaceMissing: true,
-  workspaceLabel: "No workspace",
-  workspaceTitle: "No workspace",
-  workspaceOptions: [],
-  selectedWorkspaceId: "",
+  workspaceMissing: false,
+  workspaceLabel: "Default",
+  workspaceTitle: "Default",
+  workspaceOptions: [
+    {
+      id: "automatic",
+      label: "Default",
+      authorization: "available",
+    },
+  ],
+  selectedWorkspaceOptionId: "automatic",
   workspaceEditable: true,
   modelLabel: "Claude Sonnet 4",
   modelOptions: [
@@ -213,13 +219,10 @@ function renderCompletedTimeline(
       },
       createElement(TaskTimeline, {
         task,
-        draft: false,
-        draftHasWorkspace: true,
         revision: "1",
         composerHasDraft: false,
         retryAvailable: true,
         responseDisabled: false,
-        onUseExample() {},
         onPrepareRetry() {},
         onInspect() {},
         onRespond() {},
@@ -234,7 +237,7 @@ function renderCompletedTimeline(
   );
 }
 
-function renderNewTaskTimeline(composerHasDraft, draftComposer = null) {
+function renderNewTaskView(composer = null) {
   return renderToStaticMarkup(
     createElement(
       I18nContext.Provider,
@@ -245,25 +248,9 @@ function renderNewTaskTimeline(composerHasDraft, draftComposer = null) {
           t: (id, values) => translate("en-US", id, values),
         },
       },
-      createElement(TaskTimeline, {
-        task: null,
-        draft: true,
-        draftHasWorkspace: true,
-        revision: "1",
-        composerHasDraft,
-        retryAvailable: true,
-        responseDisabled: false,
-        draftComposer,
-        onUseExample() {},
-        onPrepareRetry() {},
-        onInspect() {},
-        onRespond() {},
-        renderPendingUi() {
-          return null;
-        },
-        renderUiRecord() {
-          return null;
-        },
+      createElement(NewTaskView, {
+        hasWorkspace: true,
+        composer,
       }),
     ),
   );
@@ -302,7 +289,8 @@ test("New task opens as an editable Composer with its execution context", () => 
   const markup = render();
   assert.match(markup, /<textarea/);
   assert.match(markup, />Claude Sonnet 4</);
-  assert.match(markup, />Select a workspace</);
+  assert.match(markup, />Default</);
+  assert.doesNotMatch(markup, />Select a workspace</);
   assert.match(markup, /composer-workspace-context/);
   assert.doesNotMatch(markup.match(/<textarea[^>]*>/)?.[0] ?? "", /disabled/);
   assert.doesNotMatch(markup, /composer-start/);
@@ -349,12 +337,15 @@ test("model selection keeps its exact identity when display metadata is absent",
   assert.doesNotMatch(markup, />Available model</);
 });
 
-test("desktop shortcut labels follow the host platform", () => {
-  assert.equal(primaryShortcutModifier("Win32"), "Ctrl+");
-  assert.equal(primaryShortcutModifier("MacIntel"), "⌘");
-  assert.ok(
-    renderShell(null).includes(`<kbd>${primaryShortcutModifier()}K</kbd>`),
-  );
+test("Workbench keeps Search as an icon beside the sidebar control", () => {
+  const markup = renderShell(null);
+  const leading = markup.indexOf('class="commandbar-leading-actions"');
+  const search = markup.indexOf('aria-label="Search"');
+  const context = markup.indexOf('class="commandbar-context"');
+  assert.ok(leading >= 0 && search > leading && context > search);
+  assert.doesNotMatch(markup, /<kbd>.*K<\/kbd>/);
+  assert.doesNotMatch(markup, /<span>Search<\/span>/);
+  assert.doesNotMatch(markup, /title="Search"/);
 });
 
 test("Account catalog work blocks New task admission but not bound Tasks", async () => {
@@ -366,10 +357,10 @@ test("Account catalog work blocks New task admission but not bound Tasks", async
     source,
     /\(!newTaskDraftActive \|\| snapshot\.account\.canCreateTask\)/,
   );
-  assert.match(source, /\(!newTaskDraftActive \|\| composerWorkspaceReady\)/);
+  assert.match(source, /\(!newTaskDraftActive \|\| newTaskWorkspaceReady\)/);
 });
 
-test("Workspace selection is not hidden inside submit", async () => {
+test("Automatic Workspace creation is explicit in the first submit", async () => {
   const source = await readFile(
     join(process.cwd(), "frontend/src/app/App.tsx"),
     "utf8",
@@ -377,10 +368,8 @@ test("Workspace selection is not hidden inside submit", async () => {
   const start = source.indexOf("async function submitRun()");
   const end = source.indexOf("\n  async function", start + 1);
   const submitRun = source.slice(start, end);
-  assert.match(
-    submitRun,
-    /if \(!composerWorkspace \|\| !composerWorkspaceId\) return/,
-  );
+  assert.match(submitRun, /kind: "automatic" as const/);
+  assert.match(submitRun, /kind: "manual" as const/);
   assert.doesNotMatch(submitRun, /chooseWorkspace|client\.chooseWorkspace/);
 });
 
@@ -474,23 +463,17 @@ test("Timeline projects manual Compact as a lightweight system event", () => {
   assert.match(markup, /40/);
 });
 
-test("task examples disappear before they can overwrite an existing draft", () => {
-  assert.match(renderNewTaskTimeline(false), /Review this project/);
-  assert.doesNotMatch(renderNewTaskTimeline(true), /Review this project/);
-});
-
-test("new Task places the Composer between the outcome prompt and examples", () => {
-  const markup = renderNewTaskTimeline(
-    false,
+test("new Task places the Composer after the outcome prompt", () => {
+  const markup = renderNewTaskView(
     createElement("footer", { "data-test": "draft-composer" }, "Composer"),
   );
   const prompt = markup.indexOf("Start with the outcome");
   const composer = markup.indexOf('data-test="draft-composer"');
-  const example = markup.indexOf("Review this project");
-  assert.ok(prompt >= 0 && composer > prompt && example > composer);
+  assert.ok(prompt >= 0 && composer > prompt);
+  assert.doesNotMatch(markup, /task-examples|task-example/);
 });
 
-test("Workbench foundation uses the purple system and centered new Task stage", async () => {
+test("Workbench foundation uses a stable 760px new Task Composer stage", async () => {
   const [app, shell, css] = await Promise.all([
     readFile(join(process.cwd(), "frontend/src/app/App.tsx"), "utf8"),
     readFile(join(process.cwd(), "frontend/src/app/AppShell.tsx"), "utf8"),
@@ -515,15 +498,23 @@ test("Workbench foundation uses the purple system and centered new Task stage", 
   assert.match(css, /\.sidebar-primary\s*\{[\s\S]*?padding:\s*10px 14px 0/);
   assert.match(css, /\.new-task-button\s*\{[\s\S]*?margin-top:\s*8px/);
   assert.match(css, /\.brand-name\s*\{[\s\S]*?min-height:\s*26px/);
+  assert.match(css, /--content-measure:\s*760px/);
   assert.match(
     css,
-    /\.task-empty-state\.is-new-task\s*\{[\s\S]*?align-content:\s*center/,
+    /\.new-task-content\s*\{[\s\S]*?width:\s*min\(100%, var\(--content-measure\)\)/,
   );
-  assert.doesNotMatch(css, /color-cobalt|settings-teal|35,\s*109,\s*100/);
   assert.match(
-    app,
-    /draftComposer=\{newTaskDraftActive \? composerFooter : null\}/,
+    css,
+    /\.new-task-view\s*\{[\s\S]*?display:\s*grid[\s\S]*?padding:\s*clamp\(24px, 4vh, 40px\) 24px clamp\(104px, 16vh, 144px\)[\s\S]*?align-items:\s*center/,
   );
+  assert.match(
+    css,
+    /\.new-task-content \.composer\s*\{[\s\S]*?min-height:\s*140px/,
+  );
+  assert.doesNotMatch(css, /\.task-examples|\.task-example/);
+  assert.doesNotMatch(css, /color-cobalt|settings-teal|35,\s*109,\s*100/);
+  assert.match(app, /<NewTaskView[\s\S]*?composer=\{composerFooter\}/);
+  assert.doesNotMatch(app, /draftComposer=/);
   assert.match(
     app,
     /!newTaskDraftActive && \(\s*<header className="task-header">/,
@@ -584,7 +575,7 @@ test("a new Task draft is editable before its first send", () => {
         authorization: "available",
       },
     ],
-    selectedWorkspaceId: "1",
+    selectedWorkspaceOptionId: "1",
   });
   assert.match(markup, /<textarea/);
   assert.match(markup, />Ship the release</);
@@ -746,12 +737,12 @@ test("Task list disambiguates duplicate titles with their own paths", () => {
     [
       {
         id: "workspace-a",
-        origin: "user",
+        kind: "manual",
         canonicalRoot: "/repo/alpha",
       },
       {
         id: "workspace-b",
-        origin: "user",
+        kind: "manual",
         canonicalRoot: "/repo/beta",
       },
     ],

@@ -7,6 +7,7 @@ type WorkspaceOption = {
   label: string;
   description?: string;
   authorization: "available" | "removing" | "reauthorization_required";
+  disabled?: boolean;
 };
 
 export function WorkspaceContextSelector({
@@ -54,7 +55,8 @@ export function WorkspaceContextSelector({
             value: workspace.id,
             label: workspace.label,
             description: workspace.description,
-            disabled: workspace.authorization !== "available",
+            disabled:
+              workspace.disabled || workspace.authorization !== "available",
             trailing:
               workspace.authorization === "removing"
                 ? t("workspace.removing_short")

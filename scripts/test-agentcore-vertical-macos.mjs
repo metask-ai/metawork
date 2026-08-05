@@ -52,6 +52,11 @@ const windowsChromeProbeScript = path.join(
   "scripts",
   "probe-windows-window-chrome.ps1",
 );
+const windowsWebViewFocusProbeScript = path.join(
+  root,
+  "scripts",
+  "probe-windows-webview-focus.ps1",
+);
 const commandTimeoutMs = 20_000;
 const runTimeoutMs = 60_000;
 const workspace = await mkdtemp(join(tmpdir(), "metawork-agentcore-vertical-"));
@@ -143,6 +148,8 @@ const exited = new Promise((resolve, reject) => {
 try {
   await waitForBridge();
   await captureVisual("new-task", 1320, 812);
+  await new Promise((resolve) => setTimeout(resolve, 1_000));
+  await probeWindowsWebViewFocus();
   await captureVisual("search-keyboard", 1320, 812, false, true);
   await probeWindowsChrome("exercise");
   const chosenWorkspace = await invokeBridge("metawork.workspaces.choose", {});
@@ -154,7 +161,8 @@ try {
     // authoritative snapshot instead.
     const reconciled = await snapshot();
     const selected = reconciled.workspaces.find(
-      (item) => item.id === reconciled.selectedWorkspaceId,
+      (item) =>
+        item.kind === "manual" && item.canonicalRoot === canonicalWorkspace,
     );
     if (!selected)
       throw new Error("Workspace choice had no response or committed state");
@@ -174,8 +182,8 @@ try {
     (item) => item.id === workspaceId,
   );
   if (
-    afterChoose.selectedWorkspaceId !== workspaceId ||
-    selectedWorkspace?.authorization !== "available" ||
+    selectedWorkspace?.kind !== "manual" ||
+    selectedWorkspace.authorization !== "available" ||
     selectedWorkspace.canonicalRoot !== canonicalWorkspace ||
     !isWireId(selectedWorkspace.epoch) ||
     selectedWorkspace.lastRemovalFailure !== null
@@ -790,6 +798,44 @@ async function probeWindowsChrome(mode) {
     ],
     { timeout: commandTimeoutMs, maxBuffer: 1024 * 1024 },
   );
+}
+
+async function probeWindowsWebViewFocus() {
+  if (process.platform !== "win32") return;
+  await new Promise((resolve, reject) => {
+    const args = [
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      windowsWebViewFocusProbeScript,
+      "-ProcessId",
+      String(app.pid),
+    ];
+    const child = spawn(
+      "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+      args,
+      { stdio: "inherit", windowsHide: true },
+    );
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error("Windows WebView focus probe timed out"));
+    }, commandTimeoutMs);
+    child.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once("exit", (code, signal) => {
+      clearTimeout(timer);
+      if (code === 0 && signal === null) resolve();
+      else
+        reject(
+          new Error(
+            `Windows WebView focus probe failed: code=${code} signal=${signal}`,
+          ),
+        );
+    });
+  });
 }
 
 async function waitForBridge() {

@@ -54,15 +54,13 @@ test("the first send uses Host generations and creates one Task before its Run",
   const result = await submitTaskInstruction({
     client: {
       async createTask(
-        workspaceId,
-        expectedWorkspaceEpoch,
+        workspace,
         expectedExecutionGeneration,
         expectedSkillCatalogRevision,
       ) {
         calls.push([
           "create",
-          workspaceId,
-          expectedWorkspaceEpoch,
+          workspace,
           expectedExecutionGeneration,
           expectedSkillCatalogRevision,
         ]);
@@ -79,15 +77,23 @@ test("the first send uses Host generations and creates one Task before its Run",
       },
     },
     taskId: null,
-    workspaceId: "7",
-    expectedWorkspaceEpoch: "5",
+    workspace: {
+      kind: "manual",
+      workspaceId: "7",
+      expectedWorkspaceEpoch: "5",
+    },
     expectedExecutionGeneration: "19",
     expectedBindingEpoch: null,
     input: { kind: "text", text: "Ship a working product" },
     onTaskCreated: (taskId) => created.push(taskId),
   });
   assert.deepEqual(calls, [
-    ["create", "7", "5", "19", null],
+    [
+      "create",
+      { kind: "manual", workspaceId: "7", expectedWorkspaceEpoch: "5" },
+      "19",
+      null,
+    ],
     ["run", "41", "8", { kind: "text", text: "Ship a working product" }],
   ]);
   assert.deepEqual(created, ["41"]);
@@ -119,15 +125,23 @@ test("the first Skill send pins its selected catalog before typed execution", as
       },
     },
     taskId: null,
-    workspaceId: "7",
-    expectedWorkspaceEpoch: "5",
+    workspace: {
+      kind: "manual",
+      workspaceId: "7",
+      expectedWorkspaceEpoch: "5",
+    },
     expectedExecutionGeneration: "19",
     expectedBindingEpoch: null,
     input,
     onTaskCreated() {},
   });
   assert.deepEqual(calls, [
-    ["create", "7", "5", "19", "17"],
+    [
+      "create",
+      { kind: "manual", workspaceId: "7", expectedWorkspaceEpoch: "5" },
+      "19",
+      "17",
+    ],
     ["run", "41", "8", input],
   ]);
   assert.deepEqual(result, { kind: "started", taskId: "41", created: true });
@@ -147,8 +161,7 @@ test("a creation failure never starts a Run or invents a Task", async () => {
       },
     },
     taskId: null,
-    workspaceId: "7",
-    expectedWorkspaceEpoch: "5",
+    workspace: { kind: "automatic" },
     expectedExecutionGeneration: "19",
     expectedBindingEpoch: null,
     input: { kind: "text", text: "Keep this text" },
@@ -177,8 +190,7 @@ test("a Host-rejected creation preserves the structured product reason", async (
       },
     },
     taskId: null,
-    workspaceId: "7",
-    expectedWorkspaceEpoch: "5",
+    workspace: { kind: "automatic" },
     expectedExecutionGeneration: "19",
     expectedBindingEpoch: null,
     input: { kind: "text", text: "Keep this text" },
@@ -190,30 +202,32 @@ test("a Host-rejected creation preserves the structured product reason", async (
   });
 });
 
-test("the first send cannot bypass the Host-projected Workspace identity", async () => {
-  let createCalled = false;
+test("the first send can request an Automatic Workspace without a prior identity", async () => {
+  const calls = [];
   const result = await submitTaskInstruction({
     client: {
-      async createTask() {
-        createCalled = true;
+      async createTask(...args) {
+        calls.push(["create", ...args]);
         return { accepted: true, taskId: "1", bindingEpoch: "1", reason: null };
       },
-      async run() {
-        assert.fail("a Run cannot start without a Workspace");
+      async run(...args) {
+        calls.push(["run", ...args]);
+        return { accepted: true, taskId: "1", runId: "1", reason: null };
       },
     },
     taskId: null,
-    workspaceId: "",
-    expectedWorkspaceEpoch: "",
+    workspace: { kind: "automatic" },
     expectedExecutionGeneration: "19",
     expectedBindingEpoch: null,
     input: { kind: "text", text: "Do not bypass trust" },
-    onTaskCreated() {
-      assert.fail("a Task cannot exist without a Workspace");
-    },
+    onTaskCreated: (taskId) => calls.push(["created", taskId]),
   });
-  assert.equal(result.kind, "create_failed");
-  assert.equal(createCalled, false);
+  assert.deepEqual(calls, [
+    ["create", { kind: "automatic" }, "19", null],
+    ["created", "1"],
+    ["run", "1", "1", { kind: "text", text: "Do not bypass trust" }],
+  ]);
+  assert.deepEqual(result, { kind: "started", taskId: "1", created: true });
 });
 
 test("a Run failure reports the real created Task for draft recovery", async () => {
@@ -233,8 +247,7 @@ test("a Run failure reports the real created Task for draft recovery", async () 
       },
     },
     taskId: null,
-    workspaceId: "7",
-    expectedWorkspaceEpoch: "5",
+    workspace: { kind: "automatic" },
     expectedExecutionGeneration: "19",
     expectedBindingEpoch: null,
     input: { kind: "text", text: "Recover me" },
@@ -269,8 +282,7 @@ test("sending on an existing Task uses its binding epoch and never creates", asy
       },
     },
     taskId: "9",
-    workspaceId: "7",
-    expectedWorkspaceEpoch: "5",
+    workspace: { kind: "automatic" },
     expectedExecutionGeneration: "19",
     expectedBindingEpoch: "12",
     input: { kind: "text", text: "Continue" },
@@ -298,8 +310,7 @@ test("a Host-rejected Run preserves the structured product reason", async () => 
       },
     },
     taskId: "9",
-    workspaceId: "7",
-    expectedWorkspaceEpoch: "5",
+    workspace: { kind: "automatic" },
     expectedExecutionGeneration: "19",
     expectedBindingEpoch: "12",
     input: { kind: "text", text: "Continue" },
@@ -325,8 +336,7 @@ test("an existing Task without a binding epoch fails closed", async () => {
       },
     },
     taskId: "9",
-    workspaceId: "7",
-    expectedWorkspaceEpoch: "5",
+    workspace: { kind: "automatic" },
     expectedExecutionGeneration: "19",
     expectedBindingEpoch: null,
     input: { kind: "text", text: "Continue" },

@@ -40,9 +40,13 @@ pub const SkillReimport = struct {
     previewId: []const u8,
 };
 pub const SkillIdentity = struct { installId: []const u8 };
+pub const TaskWorkspaceIntent = struct {
+    kind: []const u8,
+    workspaceId: ?[]const u8 = null,
+    expectedWorkspaceEpoch: ?[]const u8 = null,
+};
 pub const TaskCreate = struct {
-    workspaceId: []const u8,
-    expectedWorkspaceEpoch: []const u8,
+    workspace: TaskWorkspaceIntent,
     expectedExecutionGeneration: []const u8,
     expectedSkillCatalogRevision: ?[]const u8,
 };
@@ -308,14 +312,14 @@ test "Task Run input is an exact text or skill tagged object" {
 
 test "Task creation requires an explicit nullable catalog revision" {
     var text = try parsePayload(TaskCreate,
-        \\{"workspaceId":"1","expectedWorkspaceEpoch":"2","expectedExecutionGeneration":"3","expectedSkillCatalogRevision":null}
+        \\{"workspace":{"kind":"manual","workspaceId":"1","expectedWorkspaceEpoch":"2"},"expectedExecutionGeneration":"3","expectedSkillCatalogRevision":null}
     );
     defer text.deinit();
     try std.testing.expect(text.value.expectedSkillCatalogRevision == null);
     try std.testing.expectError(
         error.InvalidBridgePayload,
         parsePayload(TaskCreate,
-            \\{"workspaceId":"1","expectedWorkspaceEpoch":"2","expectedExecutionGeneration":"3"}
+            \\{"workspace":{"kind":"manual","workspaceId":"1","expectedWorkspaceEpoch":"2"},"expectedExecutionGeneration":"3"}
         ),
     );
 }

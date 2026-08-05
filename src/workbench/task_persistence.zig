@@ -3,8 +3,8 @@ const builtin = @import("builtin");
 
 pub const schema_version: u8 = 1;
 pub const max_store_bytes: usize = 16 * 1024 * 1024;
-pub const file_name = "workbench-state.json";
-const lock_file_name = ".workbench-state.lock";
+pub const file_name = "workbench-history.json";
+const lock_file_name = ".workbench-history.lock";
 
 pub const Error = error{
     TaskStoreEmpty,
@@ -82,7 +82,7 @@ pub const FileStore = struct {
         const random_hex = std.fmt.bytesToHex(random, .lower);
         var temp_name_storage: [64]u8 = undefined;
         var name_writer = std.Io.Writer.fixed(&temp_name_storage);
-        name_writer.print(".workbench-state.{s}.tmp", .{random_hex}) catch
+        name_writer.print(".workbench-history.{s}.tmp", .{random_hex}) catch
             return error.WriteFailed;
         const temp_name = name_writer.buffered();
         const file = self.dir.createFile(
@@ -208,7 +208,6 @@ pub const StateWire = struct {
     next_workspace_recent_order: u64,
     next_task_id: u64,
     next_task_recent_order: u64,
-    selected_workspace_id: ?u64,
     workspaces: []WorkspaceWire,
     tasks: []TaskWire,
 };
@@ -216,7 +215,7 @@ pub const StateWire = struct {
 pub const WorkspaceWire = struct {
     id: u64,
     epoch: u64,
-    origin: []const u8,
+    kind: []const u8,
     canonical_root: []const u8,
     display_name: []const u8,
     visible: bool,
@@ -377,8 +376,8 @@ fn validate(state: *const StateWire, limits: Limits) !void {
     var max_workspace_order: u64 = 0;
     for (state.workspaces, 0..) |workspace, index| {
         if (workspace.id == 0 or workspace.epoch == 0 or
-            !oneOf(workspace.origin, &.{ "user", "managed" }) or
-            (std.mem.eql(u8, workspace.origin, "user") and workspace.recent_order == 0) or
+            !oneOf(workspace.kind, &.{ "manual", "automatic" }) or
+            (std.mem.eql(u8, workspace.kind, "manual") and workspace.recent_order == 0) or
             !validText(workspace.canonical_root, limits.max_workspace_bytes, false) or
             !std.fs.path.isAbsolute(workspace.canonical_root) or
             !validText(workspace.display_name, limits.max_workspace_bytes, false))
@@ -393,13 +392,6 @@ fn validate(state: *const StateWire, limits: Limits) !void {
     if (state.next_workspace_id <= max_workspace_id or
         state.next_workspace_recent_order <= max_workspace_order)
         return error.Invalid;
-    if (state.selected_workspace_id) |id| {
-        const selected = findWorkspace(state.workspaces, id) orelse
-            return error.Invalid;
-        if (!std.mem.eql(u8, selected.origin, "user") or !selected.visible)
-            return error.Invalid;
-    }
-
     var max_task_id: u64 = 0;
     var max_task_order: u64 = 0;
     for (state.tasks, 0..) |task, index| {
@@ -427,7 +419,7 @@ fn validate(state: *const StateWire, limits: Limits) !void {
     if (state.next_task_id <= max_task_id or state.next_task_recent_order <= max_task_order)
         return error.Invalid;
     for (state.workspaces) |workspace| {
-        if (!std.mem.eql(u8, workspace.origin, "managed")) continue;
+        if (!std.mem.eql(u8, workspace.kind, "automatic")) continue;
         if (workspace.visible or workspace.recent_order != 0)
             return error.Invalid;
         var task_count: usize = 0;
@@ -645,14 +637,14 @@ fn findCompact(items: []const CompactWire, id: u64) ?CompactWire {
 test "task store rejects unknown schema fields and dangling workspace references" {
     const limits = testLimits();
     const unknown =
-        \\{"schema_version":1,"next_workspace_id":1,"next_workspace_recent_order":1,"next_task_id":1,"next_task_recent_order":1,"selected_workspace_id":null,"workspaces":[],"tasks":[],"extra":true}
+        \\{"schema_version":1,"next_workspace_id":1,"next_workspace_recent_order":1,"next_task_id":1,"next_task_recent_order":1,"workspaces":[],"tasks":[],"extra":true}
     ;
     try std.testing.expectError(
         error.TaskStoreCorrupt,
         decode(std.testing.allocator, unknown, limits),
     );
     const dangling =
-        \\{"schema_version":1,"next_workspace_id":1,"next_workspace_recent_order":1,"next_task_id":2,"next_task_recent_order":2,"selected_workspace_id":null,"workspaces":[],"tasks":[{"id":1,"recent_order":1,"workspace_id":1,"workspace_epoch":1,"workspace_root":"C:\\\\repo","title":"","title_redacted":false,"archived":false,"closed":false,"binding":{"epoch":1,"execution_generation":1,"provider":"openai","model":"m","account_id":"a","profile_id":"p","account_display_name":"","api_key_selection_id":"k","api_key_name":"","api_key_suffix":"","model_selection_id":"m","model_display_name":""},"next_run_generation":0,"active_operation":null,"runs":[],"compacts":[],"ui_history":[]}]}
+        \\{"schema_version":1,"next_workspace_id":1,"next_workspace_recent_order":1,"next_task_id":2,"next_task_recent_order":2,"workspaces":[],"tasks":[{"id":1,"recent_order":1,"workspace_id":1,"workspace_epoch":1,"workspace_root":"C:\\\\repo","title":"","title_redacted":false,"archived":false,"closed":false,"binding":{"epoch":1,"execution_generation":1,"provider":"openai","model":"m","account_id":"a","profile_id":"p","account_display_name":"","api_key_selection_id":"k","api_key_name":"","api_key_suffix":"","model_selection_id":"m","model_display_name":""},"next_run_generation":0,"active_operation":null,"runs":[],"compacts":[],"ui_history":[]}]}
     ;
     try std.testing.expectError(
         error.TaskStoreCorrupt,
@@ -662,7 +654,7 @@ test "task store rejects unknown schema fields and dangling workspace references
 
 test "task store preserves history bound to an older Workspace epoch" {
     const state =
-        \\{"schema_version":1,"next_workspace_id":2,"next_workspace_recent_order":2,"next_task_id":2,"next_task_recent_order":2,"selected_workspace_id":1,"workspaces":[{"id":1,"epoch":2,"origin":"user","canonical_root":"C:\\\\repo","display_name":"repo","visible":true,"recent_order":1}],"tasks":[{"id":1,"recent_order":1,"workspace_id":1,"workspace_epoch":1,"workspace_root":"C:\\\\repo","title":"","title_redacted":false,"archived":false,"closed":false,"binding":{"epoch":1,"execution_generation":1,"provider":"openai","model":"m","account_id":"a","profile_id":"p","account_display_name":"","api_key_selection_id":"k","api_key_name":"","api_key_suffix":"","model_selection_id":"m","model_display_name":""},"next_run_generation":0,"active_operation":null,"runs":[],"compacts":[],"ui_history":[]}]}
+        \\{"schema_version":1,"next_workspace_id":2,"next_workspace_recent_order":2,"next_task_id":2,"next_task_recent_order":2,"workspaces":[{"id":1,"epoch":2,"kind":"manual","canonical_root":"C:\\\\repo","display_name":"repo","visible":true,"recent_order":1}],"tasks":[{"id":1,"recent_order":1,"workspace_id":1,"workspace_epoch":1,"workspace_root":"C:\\\\repo","title":"","title_redacted":false,"archived":false,"closed":false,"binding":{"epoch":1,"execution_generation":1,"provider":"openai","model":"m","account_id":"a","profile_id":"p","account_display_name":"","api_key_selection_id":"k","api_key_name":"","api_key_suffix":"","model_selection_id":"m","model_display_name":""},"next_run_generation":0,"active_operation":null,"runs":[],"compacts":[],"ui_history":[]}]}
     ;
     var parsed = try decode(std.testing.allocator, state, testLimits());
     defer parsed.deinit();
@@ -674,7 +666,7 @@ test "task store rejects states that would violate the Renderer contract" {
     var workspaces = [_]WorkspaceWire{.{
         .id = 1,
         .epoch = 1,
-        .origin = "user",
+        .kind = "manual",
         .canonical_root = "C:\\repo",
         .display_name = "repo",
         .visible = true,
@@ -794,7 +786,6 @@ test "task store rejects states that would violate the Renderer contract" {
         .next_workspace_recent_order = 2,
         .next_task_id = 2,
         .next_task_recent_order = 2,
-        .selected_workspace_id = 1,
         .workspaces = &workspaces,
         .tasks = &tasks,
     };
@@ -845,6 +836,24 @@ test "task file store holds one writer and atomically replaces bytes" {
     const restored = (try first.loadAlloc(std.testing.allocator)).?;
     defer std.testing.allocator.free(restored);
     try std.testing.expectEqualStrings("{\"schema_version\":2}", restored);
+}
+
+test "task file store ignores the retired pre-release file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "workbench-state.json",
+        .data = "retired",
+    });
+    var absolute_storage: [std.fs.max_path_bytes]u8 = undefined;
+    const absolute_len = try tmp.dir.realPath(std.testing.io, &absolute_storage);
+    var store = try FileStore.init(
+        std.testing.io,
+        absolute_storage[0..absolute_len],
+    );
+    defer store.deinit();
+
+    try std.testing.expectEqual(null, try store.loadAlloc(std.testing.allocator));
 }
 
 fn testLimits() Limits {

@@ -10,7 +10,6 @@ import {
   accountMutationBlocksTaskAdmission,
   PendingScopes,
 } from "../frontend/src/workbench/pendingScopes.ts";
-import { WorkspaceSelectionIntents } from "../frontend/src/workbench/workspace-selection-intents.ts";
 import { navigableTasks } from "../frontend/src/workbench/task-visibility.ts";
 
 function task(id, workspaceId, archived = false) {
@@ -31,15 +30,15 @@ function task(id, workspaceId, archived = false) {
   };
 }
 
-function workspace(id, origin = "user") {
+function workspace(id, kind = "manual") {
   return {
     id,
-    origin,
+    kind,
     displayName: `workspace-${id}`,
     canonicalRoot: `/repo/${id}`,
     redacted: false,
     authorization: "available",
-    recentOrder: origin === "managed" ? "0" : id,
+    recentOrder: kind === "automatic" ? "0" : id,
     signals: { running: 0, attention: 0, failedOrInterrupted: 0 },
   };
 }
@@ -52,7 +51,6 @@ function snapshot(revision, tasks, workspaceIds = null) {
     revision,
     capabilities: initialWorkbenchState.snapshot.capabilities,
     account: initialWorkbenchState.snapshot.account,
-    selectedWorkspaceId: ids[0] ?? null,
     workspaces: ids.map((id) => workspace(id)),
     tasks,
   };
@@ -92,45 +90,6 @@ test("account mutations block only New task admission", () => {
   assert.equal(accountMutationBlocksTaskAdmission(true, false), false);
 });
 
-test("Workspace selection retains only the latest explicit draft destination", () => {
-  const intents = new WorkspaceSelectionIntents();
-  const first = intents.begin({
-    workspaceId: "2",
-    workspaceEpoch: "4",
-    migratableDraftId: null,
-  });
-  const latest = intents.queue({
-    workspaceId: "1",
-    workspaceEpoch: "7",
-    migratableDraftId: "unscoped",
-  });
-  const newest = intents.queue({
-    workspaceId: "3",
-    workspaceEpoch: "2",
-    migratableDraftId: null,
-  });
-
-  assert.equal(intents.isCurrent(first), false);
-  assert.equal(intents.isCurrent(latest), false);
-  assert.equal(intents.isCurrent(newest), true);
-  assert.deepEqual(intents.takeQueued(), newest);
-  assert.equal(intents.takeQueued(), null);
-});
-
-test("opening a Task invalidates an in-flight Workspace draft destination", () => {
-  const intents = new WorkspaceSelectionIntents();
-  const selection = intents.begin({
-    workspaceId: "2",
-    workspaceEpoch: "4",
-    migratableDraftId: "unscoped",
-  });
-
-  intents.invalidate();
-
-  assert.equal(intents.isCurrent(selection), false);
-  assert.equal(intents.takeQueued(), null);
-});
-
 test("the Workbench store selects the first Task and preserves a valid choice", () => {
   const accepted = workbenchReducer(initialWorkbenchState, {
     type: "snapshot.accepted",
@@ -147,10 +106,7 @@ test("the Workbench store selects the first Task and preserves a valid choice", 
 
   const refreshed = workbenchReducer(selected, {
     type: "snapshot.accepted",
-    snapshot: {
-      ...snapshot("2", [task("3", "2"), task("4", "1")]),
-      selectedWorkspaceId: "2",
-    },
+    snapshot: snapshot("2", [task("3", "2"), task("4", "1")]),
   });
   assert.equal(refreshed.activeTaskId, "3");
 });
@@ -167,29 +123,26 @@ test("active navigation includes only Tasks with a projected Workspace", () => {
   );
 });
 
-test("a managed Task route survives refresh without becoming the selected user Workspace", () => {
-  const managedSnapshot = {
+test("an automatic Task route survives refresh independently of the draft Workspace", () => {
+  const automaticSnapshot = {
     ...snapshot("1", [task("2", "1"), task("3", "9")], ["1"]),
-    selectedWorkspaceId: "1",
-    workspaces: [workspace("1"), workspace("9", "managed")],
+    workspaces: [workspace("1"), workspace("9", "automatic")],
   };
   const accepted = workbenchReducer(initialWorkbenchState, {
     type: "snapshot.accepted",
-    snapshot: managedSnapshot,
+    snapshot: automaticSnapshot,
   });
   const selected = workbenchReducer(accepted, {
     type: "task.selected",
     taskId: "3",
   });
   assert.equal(selected.activeTaskId, "3");
-  assert.equal(selected.snapshot.selectedWorkspaceId, "1");
 
   const refreshed = workbenchReducer(selected, {
     type: "snapshot.accepted",
-    snapshot: { ...managedSnapshot, revision: "2" },
+    snapshot: { ...automaticSnapshot, revision: "2" },
   });
   assert.equal(refreshed.activeTaskId, "3");
-  assert.equal(refreshed.snapshot.selectedWorkspaceId, "1");
 });
 
 test("the Workbench store rejects unknown Tasks and falls back to the first global Task", () => {

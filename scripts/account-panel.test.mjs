@@ -65,7 +65,7 @@ const callbacks = {
 };
 
 const workspaceSettingsProps = {
-  userWorkspaces: [],
+  manualWorkspaces: [],
   tasks: [],
   workspaceDisabled: false,
   workspaceBusy: false,

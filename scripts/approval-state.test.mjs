@@ -98,14 +98,13 @@ function snapshot(tasks) {
       typedOutputs: false,
       typedFileChanges: false,
       persistentWorkspacePermissions: false,
-      managedWorkspaces: false,
+      automaticWorkspaces: false,
     },
     account,
-    selectedWorkspaceId: "1",
     workspaces: [
       {
         id: "1",
-        origin: "user",
+        kind: "manual",
         displayName: "repo",
         canonicalRoot: "/repo",
         redacted: false,

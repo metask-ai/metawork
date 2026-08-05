@@ -55,7 +55,7 @@ function modelLabel(
 
 export function SettingsPage({
   account,
-  userWorkspaces,
+  manualWorkspaces,
   tasks,
   focusTarget,
   disabled,
@@ -73,7 +73,7 @@ export function SettingsPage({
   onLogout,
 }: {
   account: AccountView;
-  userWorkspaces: WorkspaceView[];
+  manualWorkspaces: WorkspaceView[];
   tasks: TaskView[];
   focusTarget: SettingsFocusTarget;
   disabled: boolean;
@@ -474,7 +474,7 @@ export function SettingsPage({
             className="settings-section"
           >
             <WorkspaceSettings
-              userWorkspaces={userWorkspaces}
+              manualWorkspaces={manualWorkspaces}
               tasks={tasks}
               disabled={workspaceDisabled}
               busy={workspaceBusy}

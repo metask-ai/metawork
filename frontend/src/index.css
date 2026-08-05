@@ -405,33 +405,6 @@ summary::-webkit-details-marker {
 }
 
 /* Mature Workbench shell */
-.commandbar-search {
-  grid-column: 4;
-  display: inline-flex;
-  min-width: 88px;
-  height: 30px;
-  padding: 0 8px;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  border: 1px solid transparent;
-  border-radius: 7px;
-  color: var(--color-muted);
-  background: transparent;
-  font-size: 11px;
-}
-
-.commandbar-search:hover {
-  border-color: var(--color-rule);
-  color: var(--color-graphite);
-  background: var(--color-canvas);
-}
-
-.commandbar-search svg {
-  font-size: 15px;
-}
-
-.commandbar-search kbd,
 .new-task-button kbd {
   color: #849096;
   font-family: var(--font-mono);
@@ -1839,17 +1812,6 @@ summary::-webkit-details-marker {
 }
 
 @media (max-width: 620px) {
-  .commandbar-search span,
-  .commandbar-search kbd {
-    display: none;
-  }
-
-  .commandbar-search {
-    min-width: 32px;
-    width: 32px;
-    padding: 0;
-  }
-
   .settings-header,
   .settings-layout {
     width: min(100% - 28px, 920px);
@@ -1989,8 +1951,8 @@ summary::-webkit-details-marker {
   z-index: 50;
   display: grid;
   grid-template-columns:
-    max(34px, calc(var(--left-column) - var(--commandbar-left-inset)))
-    minmax(0, auto) minmax(0, 1fr) auto auto;
+    max(72px, calc(var(--left-column) - var(--commandbar-left-inset)))
+    minmax(0, auto) minmax(0, 1fr) auto;
   align-items: center;
   min-height: var(--window-bar-height);
   padding: 8px calc(10px + var(--window-controls-trailing, 0px)) 8px
@@ -2014,6 +1976,13 @@ summary::-webkit-details-marker {
 .workbench-commandbar > * {
   position: relative;
   z-index: 1;
+}
+
+.commandbar-leading-actions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
 }
 
 [data-platform="windows"] .workbench-commandbar {
@@ -5261,15 +5230,33 @@ summary::-webkit-details-marker {
   line-height: 1.7;
 }
 
-.task-empty-state.is-new-task {
-  width: min(100%, 860px);
-  min-height: 100%;
-  margin: 0 auto;
-  padding: clamp(48px, 9vh, 92px) 50px;
-  align-content: center;
+.new-task-scroll {
+  width: 100%;
+  min-height: 0;
+  flex: 1;
+  overflow: hidden auto;
+  scrollbar-gutter: stable;
 }
 
-.task-empty-state.is-new-task h2 {
+.new-task-view {
+  display: grid;
+  width: 100%;
+  min-height: 100%;
+  margin: 0 auto;
+  padding: clamp(24px, 4vh, 40px) 24px clamp(104px, 16vh, 144px);
+  align-items: center;
+}
+
+.new-task-content {
+  width: min(100%, var(--content-measure));
+  margin: 0 auto;
+  text-align: center;
+}
+
+.new-task-content h2 {
+  max-width: 560px;
+  margin: 0 auto;
+  color: var(--color-graphite);
   font-family: var(--font-sans);
   font-size: clamp(28px, 3.4vw, 42px);
   font-weight: 680;
@@ -5277,12 +5264,15 @@ summary::-webkit-details-marker {
   line-height: 1.1;
 }
 
-.task-empty-state.is-new-task > p {
-  margin-top: 14px;
+.new-task-content > p {
+  max-width: 500px;
+  margin: 14px auto 0;
+  color: var(--color-muted);
   font-size: 13px;
+  line-height: 1.7;
 }
 
-.task-empty-state.is-new-task .composer-bar {
+.new-task-content .composer-bar {
   width: 100%;
   margin-top: 28px;
   padding: 0;
@@ -5290,60 +5280,27 @@ summary::-webkit-details-marker {
   text-align: left;
 }
 
-.task-empty-state.is-new-task .composer {
-  min-height: 126px;
+.new-task-content .composer {
+  min-height: 140px;
   border-color: var(--color-brand-200);
   box-shadow:
     0 1px 2px rgba(37, 34, 45, 0.04),
     0 16px 42px rgba(91, 70, 216, 0.1);
 }
 
-.task-empty-state.is-new-task .composer:focus-within {
+.new-task-content .composer textarea {
+  min-height: 56px;
+}
+
+.new-task-content .composer-toolbar {
+  margin-top: auto;
+}
+
+.new-task-content .composer:focus-within {
   border-color: var(--color-brand-500);
   box-shadow:
     0 16px 46px rgba(91, 70, 216, 0.12),
     0 0 0 3px rgba(91, 70, 216, 0.09);
-}
-
-.task-examples {
-  display: grid;
-  width: min(680px, 100%);
-  margin: 18px auto 0;
-  gap: 8px;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
-.task-example {
-  min-height: 54px;
-  padding: 10px 8px;
-  border: 0;
-  border-top: 1px solid var(--color-rule);
-  border-radius: 0;
-  color: var(--color-graphite);
-  background: transparent;
-  font-size: 12px;
-  line-height: 1.45;
-  text-align: left;
-  transition:
-    border-color 120ms ease,
-    color 120ms ease,
-    background-color 120ms ease;
-}
-
-.task-example:hover {
-  border-color: var(--color-brand-200);
-  color: var(--color-brand-700);
-  background: linear-gradient(
-    to bottom,
-    rgba(91, 70, 216, 0.045),
-    transparent 72%
-  );
-}
-
-@media (max-width: 720px) {
-  .task-examples {
-    grid-template-columns: 1fr;
-  }
 }
 
 .composer-bar {
@@ -6382,7 +6339,7 @@ summary::-webkit-details-marker {
   }
 
   .workbench-commandbar {
-    grid-template-columns: 34px minmax(0, 1fr) 30px auto auto;
+    grid-template-columns: 72px minmax(0, 1fr) 30px auto;
   }
 
   .commandbar-alert-slot {
@@ -6426,7 +6383,7 @@ summary::-webkit-details-marker {
     padding-inline: 16px;
   }
 
-  .task-empty-state.is-new-task {
+  .new-task-view {
     padding-inline: 28px;
   }
 }
@@ -6442,7 +6399,7 @@ summary::-webkit-details-marker {
   }
 
   .workbench-commandbar {
-    grid-template-columns: 34px minmax(0, 1fr) 30px auto;
+    grid-template-columns: 72px minmax(0, 1fr) 30px auto;
   }
 
   .task-header {
@@ -6478,7 +6435,7 @@ summary::-webkit-details-marker {
     padding: 24px 10px;
   }
 
-  .task-empty-state.is-new-task {
+  .new-task-view {
     padding: 36px 16px;
   }
 

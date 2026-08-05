@@ -10,7 +10,6 @@ export const commands = {
   windowControl: "metawork.window.control",
   windowState: "metawork.window.state",
   chooseWorkspace: "metawork.workspaces.choose",
-  selectWorkspace: "metawork.workspaces.select",
   removeWorkspace: "metawork.workspaces.remove",
   refreshWorkspaceSkillCatalog: "metawork.workspaces.refreshSkillCatalog",
   refreshSkillCatalog: "metawork.skills.refreshCatalog",
