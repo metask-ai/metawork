@@ -31,6 +31,7 @@ pub fn build(b: *std.Build) void {
     test_modules.app.addImport("lifecycle_fixture", lifecycle_fixture);
     test_modules.bridge.addImport("lifecycle_fixture", lifecycle_fixture);
     addLifecycleTests(b, test_modules, lifecycle_fixture, bundle.link_libc);
+    addMcpConnectorTests(b, test_modules, bundle.link_libc);
     const module_tests = [_]struct {
         name: []const u8,
         root_module: *std.Build.Module,
@@ -52,6 +53,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-app", .root_module = test_modules.app },
         .{ .name = "metawork-automation-enabled", .root_module = test_modules.automation_enabled },
         .{ .name = "metawork-bridge", .root_module = test_modules.bridge },
+        .{ .name = "metawork-agent-mcp-connector", .root_module = test_modules.agent_mcp_connector },
         .{ .name = "metawork-workbench", .root_module = test_modules.workbench_projection },
         .{ .name = "metawork-workbench-executor", .root_module = test_modules.workbench_executor },
         .{ .name = "metawork-managed-workspace-store", .root_module = test_modules.workbench_managed_workspace_store },
@@ -123,6 +125,7 @@ const WiredModules = struct {
     metask_client: *std.Build.Module,
     app: *std.Build.Module,
     agent: *std.Build.Module,
+    agent_mcp_connector: *std.Build.Module,
     automation_enabled: *std.Build.Module,
     bridge: *std.Build.Module,
     event_pump: *std.Build.Module,
@@ -155,6 +158,23 @@ fn createLifecycleFixture(
     fixture.addImport("metask_agentcore", modules.sdk);
     fixture.addImport("workbench_executor", modules.workbench_executor);
     return fixture;
+}
+
+fn addMcpConnectorTests(
+    b: *std.Build,
+    modules: WiredModules,
+    link_libc: bool,
+) void {
+    const step = b.step(
+        "test-mcp-connector",
+        "Run Agent-private MCP connector adapter tests",
+    );
+    modules.agent_mcp_connector.link_libc = link_libc;
+    const tests = b.addTest(.{
+        .name = "metawork-agent-mcp-connector",
+        .root_module = modules.agent_mcp_connector,
+    });
+    step.dependOn(&b.addRunArtifact(tests).step);
 }
 
 fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcore_bundle.Bundle) WiredModules {
@@ -197,6 +217,12 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .optimize = root_module.optimize,
     });
     agent_catalog.addImport("metask_agentcore", sdk);
+    const agent_mcp_connector = b.createModule(.{
+        .root_source_file = b.path("src/agent/mcp_connector.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    agent_mcp_connector.addImport("metask_agentcore", sdk);
     const session = b.createModule(.{
         .root_source_file = b.path("src/agent/session.zig"),
         .target = target,
@@ -493,6 +519,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .metask_client = metask_client,
         .app = app,
         .agent = agent,
+        .agent_mcp_connector = agent_mcp_connector,
         .automation_enabled = automation_enabled,
         .bridge = bridge,
         .event_pump = event_pump,

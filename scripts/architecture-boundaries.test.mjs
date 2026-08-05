@@ -162,7 +162,14 @@ test("only Agent implementation imports the AgentCore SDK", () => {
     .sort();
   assert.deepEqual(
     sdkImportReceivers,
-    ["agent_catalog", "event_pump", "event_sink", "fixture", "session"].sort(),
+    [
+      "agent_catalog",
+      "agent_mcp_connector",
+      "event_pump",
+      "event_sink",
+      "fixture",
+      "session",
+    ].sort(),
     "only the Agent runtime modules and lifecycle fixture may receive the SDK module",
   );
   assert.match(
