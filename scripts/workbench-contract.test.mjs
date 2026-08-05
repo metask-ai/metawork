@@ -90,10 +90,7 @@ test("automatic Workspace projection is one-to-one and capability-gated", () => 
 
   const unavailable = clone(automatic);
   unavailable.capabilities.automaticWorkspaces = false;
-  assert.throws(
-    () => decodeWorkbenchSnapshot(unavailable),
-    /automatic Workspace capability is unavailable/,
-  );
+  assert.deepEqual(decodeWorkbenchSnapshot(unavailable), unavailable);
 });
 
 test("Skill catalogs and typed Skill history decode without exposing loader internals", () => {

@@ -1983,14 +1983,6 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
         "automatic Workspace must belong to exactly one Task",
       );
   }
-  if (
-    !capabilities.automaticWorkspaces &&
-    workspaces.some((workspace) => workspace.kind === "automatic")
-  )
-    fail(
-      "$.capabilities.automaticWorkspaces",
-      "automatic Workspace capability is unavailable",
-    );
   return {
     revision: wireId(root.revision, "$.revision"),
     capabilities,

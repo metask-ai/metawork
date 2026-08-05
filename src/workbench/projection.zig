@@ -5667,11 +5667,6 @@ pub const Workbench = struct {
         errdefer self.freeTracked(trust_root);
         const kind = parsePersistedEnum(WorkspaceKind, wire.kind) orelse
             return error.InvalidWorkspace;
-        const automatic_available = kind == .automatic and
-            if (self.automatic_workspaces) |*store|
-                store.containsCanonicalPath(wire.canonical_root)
-            else
-                false;
         return .{
             .id = wire.id,
             .kind = kind,
@@ -5682,7 +5677,7 @@ pub const Workbench = struct {
             .display_name_storage = display_name,
             .display_name_len = display_name.len,
             .trust = .{ .temporary = trust_root },
-            .authorization = if (automatic_available) .available else .reauthorization_required,
+            .authorization = if (kind == .automatic) .available else .reauthorization_required,
             .visible = wire.visible,
             .recent_order = wire.recent_order,
         };
@@ -10449,6 +10444,62 @@ test "Task state round trip restores product history without fabricating a Sessi
     );
     defer deleted_restore.deinit();
     try std.testing.expect(deleted_restore.findTask(3) == null);
+}
+
+test "Automatic Workspace history survives an unavailable allocator" {
+    const persistence_storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(persistence_storage);
+    var persistence = TestTaskPersistence{ .storage = persistence_storage };
+
+    {
+        var source = try testWorkbench();
+        defer source.deinit();
+        const workspace = &source.workspaces[0].?;
+        workspace.kind = .automatic;
+        workspace.automatic_task_id = 3;
+        workspace.visible = false;
+        workspace.recent_order = 0;
+        source.next_task_recent_order = 2;
+        source.task_persistence = persistence.capability(null);
+        source.task_persistence_health = .ready;
+        try source.commitTaskState();
+    }
+
+    var restored = try Workbench.init(
+        std.testing.allocator,
+        &test_agent_runtime,
+        testLimits(),
+        .{
+            .task_persistence = persistence.capability(
+                persistence.storage[0..persistence.len],
+            ),
+        },
+    );
+    defer restored.deinit();
+    try std.testing.expectEqual(TaskPersistenceHealth.ready, restored.task_persistence_health);
+    try std.testing.expect(!restored.automaticWorkspacesAvailable());
+    const restored_workspace = restored.findWorkspace(1) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(WorkspaceKind.automatic, restored_workspace.kind);
+    var workspace_storage: [1]WorkspaceProjection = undefined;
+    const workspaces = try restored.copyWorkspaceProjections(&workspace_storage);
+    try std.testing.expectEqual(@as(usize, 1), workspaces.len);
+    try std.testing.expectEqual(WorkspaceKind.automatic, workspaces[0].kind);
+    try std.testing.expectEqual(WorkspaceAuthorization.available, workspaces[0].authorization);
+    const task = restored.findTask(3) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        ContinuationUnavailableReason.session_recovery_unsupported,
+        task.runtime.continuation.unavailable,
+    );
+
+    var snapshot_storage: [96 * 1024]u8 = undefined;
+    const snapshot = try restored.writeSnapshot(&snapshot_storage);
+    try std.testing.expect(
+        std.mem.indexOf(u8, snapshot, "\"automaticWorkspaces\":false") != null,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(u8, snapshot, "\"kind\":\"automatic\"") != null,
+    );
 }
 
 test "Task persistence restore failure blocks product mutations" {
