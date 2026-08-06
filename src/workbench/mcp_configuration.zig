@@ -429,14 +429,20 @@ pub const ManagementPort = struct {
         startup_registry: ?RegistryWire,
         configuration: ManagementConfiguration,
     ) std.mem.Allocator.Error!ManagementPort {
-        var desired = if (startup_registry) |registry|
-            try cloneRegistry(allocator, registry, configuration.limits)
-        else
-            null;
-        errdefer if (desired) |*registry| registry.deinit();
         var health = configuration.initial_health;
         if (!configuration.persistence.available or !configuration.credentials.available)
             health = .recovery_required;
+        var desired: ?std.json.Parsed(RegistryWire) = null;
+        if (startup_registry) |registry| {
+            desired = cloneRegistry(allocator, registry, configuration.limits) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => failed: {
+                    health = .recovery_required;
+                    break :failed null;
+                },
+            };
+        }
+        errdefer if (desired) |*registry| registry.deinit();
         return .{
             .allocator = allocator,
             .limits = configuration.limits,
@@ -553,6 +559,7 @@ pub const ManagementPort = struct {
     ) std.mem.Allocator.Error!ManagementOutcome {
         var owned_target = cloneRegistry(self.allocator, target, self.limits) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
+            else => return .rejected,
         };
         var target_owned = true;
         defer if (target_owned) owned_target.deinit();
@@ -619,14 +626,11 @@ fn cloneRegistry(
     allocator: std.mem.Allocator,
     registry: RegistryWire,
     limits: Limits,
-) std.mem.Allocator.Error!std.json.Parsed(RegistryWire) {
+) (Error || std.mem.Allocator.Error)!std.json.Parsed(RegistryWire) {
     const buffer = try allocator.alloc(u8, max_store_bytes);
     defer allocator.free(buffer);
-    const bytes = encode(buffer, registry, limits) catch unreachable;
-    return decode(allocator, bytes, limits) catch |err| switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        else => unreachable,
-    };
+    const bytes = try encode(buffer, registry, limits);
+    return try decode(allocator, bytes, limits);
 }
 
 fn findServerIndex(servers: []const ServerWire, id: []const u8) ?usize {
@@ -2710,6 +2714,218 @@ test "management port freezes a second mutation after registry outcome uncertain
         try management.removeServer(7, "local"),
     );
     try std.testing.expectEqual(@as(usize, 1), fake.journal_count);
+}
+
+test "saved desired registry becomes effective only through cold-start preparation" {
+    const Credentials = struct {
+        locator: [64]u8 = undefined,
+        locator_len: usize = 0,
+        secret: [64]u8 = undefined,
+        secret_len: usize = 0,
+
+        fn probe(context: ?*anyopaque, locator: []const u8) CredentialPresence {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            if (self.locator_len == 0) return .missing;
+            return if (std.mem.eql(u8, self.locator[0..self.locator_len], locator))
+                .present
+            else
+                .missing;
+        }
+        fn create(context: ?*anyopaque, locator: []const u8, secret: []const u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            if (self.locator_len != 0 or locator.len > self.locator.len or
+                secret.len > self.secret.len)
+                return false;
+            @memcpy(self.locator[0..locator.len], locator);
+            self.locator_len = locator.len;
+            @memcpy(self.secret[0..secret.len], secret);
+            self.secret_len = secret.len;
+            return true;
+        }
+        fn delete(context: ?*anyopaque, locator: []const u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            if (self.locator_len == 0) return true;
+            if (!std.mem.eql(u8, self.locator[0..self.locator_len], locator))
+                return false;
+            std.crypto.secureZero(u8, self.secret[0..self.secret_len]);
+            self.locator_len = 0;
+            self.secret_len = 0;
+            return true;
+        }
+        fn resolve(
+            context: ?*anyopaque,
+            allocator: std.mem.Allocator,
+            locator: []const u8,
+        ) CredentialResolution {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            if (self.locator_len == 0 or
+                !std.mem.eql(u8, self.locator[0..self.locator_len], locator))
+                return .missing;
+            return .{ .value = allocator.dupe(
+                u8,
+                self.secret[0..self.secret_len],
+            ) catch return .out_of_memory };
+        }
+        fn fill(_: ?*anyopaque, output: *[16]u8) bool {
+            @memset(output, 0xcd);
+            return true;
+        }
+        fn effects(self: *@This()) CredentialEffects {
+            return .{
+                .context = self,
+                .available = true,
+                .probe_fn = probe,
+                .create_fn = create,
+                .delete_fn = delete,
+            };
+        }
+    };
+    var initial = try prepare(
+        std.testing.allocator,
+        null,
+        true,
+        false,
+        .{},
+        test_limits,
+    );
+    defer initial.deinit();
+    try std.testing.expect(initial.generation() == null);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const lock = try tmp.dir.createFile(std.testing.io, lock_file_name, .{
+        .read = true,
+        .truncate = false,
+    });
+    var store: FileStore = .{ .io = std.testing.io, .dir = tmp.dir, .lock_file = lock };
+    defer store.lock_file.close(std.testing.io);
+    var credentials: Credentials = .{};
+    var management = try ManagementPort.init(std.testing.allocator, null, .{
+        .persistence = store.mutationPersistence(),
+        .credentials = credentials.effects(),
+        .locator_generator = .{ .available = true, .fill_fn = Credentials.fill },
+        .limits = test_limits,
+    });
+    defer management.deinit();
+    var secret = [_]u8{ 'c', 'o', 'l', 'd', '-', 's', 't', 'a', 'r', 't' };
+    const headers = [_]NamedCredentialInput{.{
+        .name = "Authorization",
+        .value = .{ .replace = &secret },
+    }};
+    try std.testing.expectEqual(
+        ManagementOutcome.saved_restart_required,
+        try management.upsertServer(0, .{
+            .id = "remote",
+            .namespace = "remote",
+            .display_name = "Remote",
+            .enabled = true,
+            .negotiation = "automatic",
+            .timeout_ms = 1000,
+            .transport = .{ .streamable_http = .{
+                .url = "https://mcp.example.test/rpc",
+                .headers = &headers,
+            } },
+        }),
+    );
+    try std.testing.expect(management.inspect().startup_generation == null);
+    try std.testing.expectEqual(@as(?u64, 1), management.inspect().desired_generation);
+
+    const restored = (try store.loadAlloc(std.testing.allocator)).?;
+    defer std.testing.allocator.free(restored);
+    var restarted = try prepare(
+        std.testing.allocator,
+        restored,
+        true,
+        false,
+        .{
+            .context = &credentials,
+            .available = true,
+            .resolve_fn = Credentials.resolve,
+        },
+        test_limits,
+    );
+    defer restarted.deinit();
+    try std.testing.expectEqual(@as(?u64, 1), restarted.generation());
+    try std.testing.expectEqual(PreparationState.available, restarted.state);
+    try std.testing.expectEqual(
+        ServerPreparationState.eligible,
+        restarted.server_states[0],
+    );
+}
+
+test "management rejects an oversized target before persistence effects" {
+    const Fake = struct {
+        effects: usize = 0,
+
+        fn journal(context: ?*anyopaque, _: []const u8) PersistenceEffect {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.effects += 1;
+            return .committed;
+        }
+        fn registry(context: ?*anyopaque, _: []const u8) PersistenceEffect {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.effects += 1;
+            return .committed;
+        }
+        fn clear(context: ?*anyopaque) PersistenceEffect {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.effects += 1;
+            return .committed;
+        }
+        fn probe(_: ?*anyopaque, _: []const u8) CredentialPresence {
+            return .missing;
+        }
+        fn create(_: ?*anyopaque, _: []const u8, _: []const u8) bool {
+            return true;
+        }
+        fn delete(_: ?*anyopaque, _: []const u8) bool {
+            return true;
+        }
+    };
+    var limits = test_limits;
+    limits.max_tools_per_server = 1024;
+    limits.max_tool_name_bytes = 256;
+    const tool_storage = try std.testing.allocator.alloc([256]u8, 1024);
+    defer std.testing.allocator.free(tool_storage);
+    const tools = try std.testing.allocator.alloc([]const u8, tool_storage.len);
+    defer std.testing.allocator.free(tools);
+    for (tool_storage, tools, 0..) |*storage, *tool, index| {
+        @memset(storage, 'x');
+        _ = std.fmt.bufPrint(storage[0..20], "tool-{d}", .{index}) catch unreachable;
+        tool.* = storage;
+    }
+    var fake: Fake = .{};
+    var management = try ManagementPort.init(std.testing.allocator, null, .{
+        .persistence = .{
+            .context = &fake,
+            .available = true,
+            .commit_journal_fn = Fake.journal,
+            .commit_registry_fn = Fake.registry,
+            .clear_journal_fn = Fake.clear,
+        },
+        .credentials = .{
+            .available = true,
+            .probe_fn = Fake.probe,
+            .create_fn = Fake.create,
+            .delete_fn = Fake.delete,
+        },
+        .limits = limits,
+    });
+    defer management.deinit();
+    try std.testing.expectEqual(
+        ManagementOutcome.rejected,
+        try management.upsertServer(0, .{
+            .id = "large",
+            .namespace = "large",
+            .display_name = "Large",
+            .enabled = true,
+            .negotiation = "automatic",
+            .timeout_ms = 1000,
+            .transport = .{ .stdio = .{ .command = "tool" } },
+            .tools = tools,
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), fake.effects);
 }
 
 test "preparation separates disabled invalid missing-auth and eligible servers" {

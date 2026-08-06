@@ -16,6 +16,7 @@ const max_session_token_bytes: usize = 1024;
 const max_sse_framing_bytes: usize = 64 * 1024;
 
 pub const CredentialStore = struct {
+    io: std.Io,
     services: native_sdk.platform.PlatformServices,
     main_thread_id: std.Thread.Id,
 
@@ -45,6 +46,21 @@ pub const CredentialStore = struct {
             .create_fn = create,
             .delete_fn = delete,
         };
+    }
+
+    pub fn locatorGenerator(self: *CredentialStore) workbench.McpFreshLocatorGenerator {
+        return .{
+            .context = self,
+            .available = true,
+            .fill_fn = fillLocatorEntropy,
+        };
+    }
+
+    fn fillLocatorEntropy(context: ?*anyopaque, output: *[16]u8) bool {
+        const self: *CredentialStore = @ptrCast(@alignCast(context orelse return false));
+        if (std.Thread.getCurrentId() != self.main_thread_id) return false;
+        std.Io.randomSecure(self.io, output) catch return false;
+        return true;
     }
 
     fn resolve(
