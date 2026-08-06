@@ -43,6 +43,10 @@
   text-rendering: optimizeLegibility;
 }
 
+html[data-metawork-renderer-window-controls="true"] {
+  --window-bar-height: 40px;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -1912,7 +1916,7 @@ summary::-webkit-details-marker {
   display: grid;
   grid-template-columns:
     max(72px, calc(var(--left-column) - var(--commandbar-left-inset)))
-    minmax(0, 1fr) auto;
+    minmax(0, 1fr) auto auto;
   align-items: center;
   min-height: var(--window-bar-height);
   padding: 8px calc(10px + var(--metawork-window-chrome-trailing)) 8px
@@ -1943,6 +1947,104 @@ summary::-webkit-details-marker {
   min-width: 0;
   align-items: center;
   gap: 4px;
+}
+
+.window-controls {
+  display: none;
+  height: var(--window-bar-height);
+  align-items: stretch;
+}
+
+html[data-metawork-renderer-window-controls="true"] .window-controls {
+  display: flex;
+}
+
+.workbench-commandbar > .window-controls {
+  align-self: center;
+  margin: -8px calc(-10px - var(--metawork-window-chrome-trailing)) -8px 0;
+}
+
+html[data-metawork-renderer-window-controls="true"] .workbench-commandbar {
+  padding-top: 0;
+  padding-right: 0;
+  padding-bottom: 0;
+}
+
+html[data-metawork-renderer-window-controls="true"]
+  .workbench-commandbar
+  > .window-controls {
+  margin-top: 0;
+  margin-right: 0;
+  margin-bottom: 0;
+}
+
+html[data-metawork-renderer-window-controls="true"] .account-gate-toolbar {
+  padding-right: 0;
+}
+
+html[data-metawork-renderer-window-controls="true"]
+  .account-gate-toolbar
+  .window-controls {
+  margin-right: 0;
+}
+
+.account-gate-toolbar .window-controls {
+  margin-right: calc(-16px - var(--metawork-window-chrome-trailing));
+}
+
+.window-controls button {
+  display: grid;
+  width: 46px;
+  height: 100%;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 0;
+  color: #46545a;
+  background: transparent;
+  font-size: 15px;
+}
+
+.window-controls button:hover,
+.window-controls button:focus-visible {
+  color: #18262c;
+  background: rgba(24, 38, 44, 0.08);
+}
+
+.window-controls button:focus-visible {
+  position: relative;
+  z-index: 1;
+  outline: 2px solid var(--color-brand-600);
+  outline-offset: -3px;
+}
+
+.window-controls .window-control-close:hover,
+.window-controls .window-control-close:focus-visible {
+  color: #fff;
+  background: #c42b1c;
+}
+
+.window-controls button:disabled {
+  color: var(--color-muted);
+  background: transparent;
+  opacity: 0.45;
+}
+
+.window-controls svg {
+  width: 13px;
+  height: 13px;
+}
+
+.window-control-restore {
+  display: none !important;
+}
+
+html[data-metawork-window-maximized="true"] .window-control-maximize {
+  display: none;
+}
+
+html[data-metawork-window-maximized="true"] .window-control-restore {
+  display: grid !important;
 }
 
 .icon-button {
@@ -6293,7 +6395,7 @@ summary::-webkit-details-marker {
   }
 
   .workbench-commandbar {
-    grid-template-columns: 72px minmax(0, 1fr) 30px;
+    grid-template-columns: 72px minmax(0, 1fr) 30px auto;
   }
 
   .commandbar-alert-slot {
@@ -6353,7 +6455,7 @@ summary::-webkit-details-marker {
   }
 
   .workbench-commandbar {
-    grid-template-columns: 72px minmax(0, 1fr) 30px;
+    grid-template-columns: 72px minmax(0, 1fr) 30px auto;
   }
 
   .task-header {

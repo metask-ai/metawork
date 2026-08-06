@@ -11,6 +11,7 @@ const std = @import("std");
 const native_sdk = @import("native_sdk");
 
 pub const live_pointer_drag = false;
+pub const chrome_top_override: ?f64 = 40;
 pub const PointIsDraggableFn = *const fn (*const anyopaque, f64, f64) bool;
 
 const HWND = ?*anyopaque;

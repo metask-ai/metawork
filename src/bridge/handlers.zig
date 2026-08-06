@@ -34,6 +34,10 @@ pub const WindowChromeGesture = struct {
     x: f64,
     y: f64,
 };
+pub const WindowChromeControl = struct {
+    generation: []const u8,
+    action: []const u8,
+};
 pub const WindowChromeDisconnect = struct { generation: []const u8 };
 pub const AccountSelection = struct {
     selectionId: []const u8,

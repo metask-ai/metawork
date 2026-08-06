@@ -71,6 +71,41 @@ const exited = new Promise((resolve, reject) => {
 try {
   await waitForOutput(/metawork\.smoke\.event_ack sequence=1/);
   await waitForRendererChromeReady();
+  await execFileAsync(
+    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    [
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      hitTestProbe,
+      "-ProcessId",
+      String(app.pid),
+      "-Mode",
+      "controls",
+    ],
+    { timeout: timeoutMs, maxBuffer: 1024 * 1024 },
+  );
+  await execFileAsync(
+    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    [
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      hitTestProbe,
+      "-ProcessId",
+      String(app.pid),
+      "-Mode",
+      "close",
+    ],
+    { timeout: timeoutMs, maxBuffer: 1024 * 1024 },
+  );
+  await execFileAsync(
+    process.execPath,
+    [native, "automate", "tray-action", "1"],
+    { cwd: appCwd, timeout: timeoutMs, maxBuffer: 1024 * 1024 },
+  );
   const connected = await invokeBridge(
     "window-chrome-connect",
     "metawork.host.windowChrome.connect",
@@ -187,7 +222,7 @@ try {
   if (!/runtime\.event.*event="stop"/.test(output))
     throw new Error("normal Runtime stop was not observed");
   process.stdout.write(
-    "Windows System WebView drag-region binding and clean Runtime shutdown passed.\n",
+    "Windows Renderer controls, close-policy hide/reopen, drag-region binding, and clean Runtime shutdown passed.\n",
   );
 } catch (error) {
   process.stderr.write(output);

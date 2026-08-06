@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory = $true)]
     [int]$ProcessId,
-    [ValidateSet('exercise', 'close', 'hit-test', 'hit-test-cleared')]
+    [ValidateSet('exercise', 'controls', 'close', 'hit-test', 'hit-test-cleared')]
     [string]$Mode = 'exercise',
     [int]$DragX = 300,
     [int]$DragY = 15,
@@ -35,6 +35,12 @@ public static class MetaWorkChromeProbe {
 
     [DllImport("user32.dll")]
     public static extern bool IsIconic(IntPtr window);
+
+    [DllImport("user32.dll")]
+    public static extern bool IsWindow(IntPtr window);
+
+    [DllImport("user32.dll")]
+    public static extern bool IsWindowVisible(IntPtr window);
 
     [DllImport("user32.dll")]
     public static extern bool IsZoomed(IntPtr window);
@@ -185,6 +191,47 @@ $rect = Get-MetaWorkRect $window
 
 if ($Mode -eq 'close') {
     Invoke-MetaWorkClick ($rect.Right - 29) ($rect.Top + 25)
+    Start-Sleep -Milliseconds 350
+    $process.Refresh()
+    if ($process.HasExited) {
+        throw 'Renderer close control exited the MetaWork process instead of applying close_policy = hide'
+    }
+    if (-not [MetaWorkChromeProbe]::IsWindow($window)) {
+        throw 'Renderer close control destroyed the Native window instead of applying close_policy = hide'
+    }
+    if ([MetaWorkChromeProbe]::IsWindowVisible($window)) {
+        throw 'Renderer close control did not hide the Native window'
+    }
+    Write-Output 'hidden=true processAlive=true windowAlive=true'
+    return
+}
+
+if ($Mode -eq 'controls') {
+    Invoke-MetaWorkClick ($rect.Right - 121) ($rect.Top + 25)
+    Start-Sleep -Milliseconds 350
+    if (-not [MetaWorkChromeProbe]::IsIconic($window)) {
+        throw 'Renderer minimize control did not minimize the Native window'
+    }
+
+    [MetaWorkChromeProbe]::ShowWindow($window, 9) | Out-Null
+    [MetaWorkChromeProbe]::SetForegroundWindow($window) | Out-Null
+    Start-Sleep -Milliseconds 350
+
+    $rect = Get-MetaWorkRect $window
+    Invoke-MetaWorkClick ($rect.Right - 75) ($rect.Top + 25)
+    Start-Sleep -Milliseconds 350
+    if (-not [MetaWorkChromeProbe]::IsZoomed($window)) {
+        throw 'Renderer maximize control did not maximize the Native window'
+    }
+
+    $rect = Get-MetaWorkRect $window
+    Invoke-MetaWorkClick ($rect.Right - 75) ($rect.Top + 25)
+    Start-Sleep -Milliseconds 350
+    if ([MetaWorkChromeProbe]::IsZoomed($window)) {
+        throw 'Renderer maximize control did not restore the Native window'
+    }
+
+    Write-Output 'minimize=true maximize=true restore=true'
     return
 }
 

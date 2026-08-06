@@ -1,10 +1,10 @@
 //! Desktop Host compatibility seam for System WebView drag regions.
 //!
-//! Native SDK 0.8.0 owns the window, chrome geometry, controls, close policy,
-//! and platform drag loop. It does not yet expose drag regions for the startup
-//! System WebView, so MetaWork keeps this single-capability seam until the
-//! Runtime API is available. Renderer input is constrained to one top-band
-//! candidate plus bounded exclusions and never carries native window identity.
+//! Native SDK 0.8.0 owns the window, chrome geometry, and platform drag loop.
+//! It does not yet expose drag regions for the startup System WebView, so
+//! MetaWork keeps this bounded seam until that Runtime API is available.
+//! Renderer input is constrained to one top-band candidate plus bounded
+//! exclusions; it never carries native window identity.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -15,6 +15,7 @@ const Platform = switch (builtin.os.tag) {
     .macos => @import("system_webview_drag_region/macos.zig"),
     else => struct {
         pub const live_pointer_drag = false;
+        pub const chrome_top_override: ?f64 = null;
         pub const State = struct {};
 
         pub fn prepareStartup(_: *State, _: *const anyopaque, _: PointIsDraggableFn) !void {
@@ -125,16 +126,16 @@ pub const Capability = struct {
         if (regions.len == 0) {
             self.clearRegions();
             try self.installPlatformOrDisconnect(services);
-            return environmentFromChrome(self.generation, chrome);
+            return self.environmentFromChrome(chrome);
         }
         try self.replaceRegions(
-            chrome.insets.top,
+            self.chromeTop(chrome),
             viewport_width,
             viewport_height,
             regions,
         );
         try self.installPlatformOrDisconnect(services);
-        return environmentFromChrome(self.generation, chrome);
+        return self.environmentFromChrome(chrome);
     }
 
     pub fn beginLivePointerDrag(
@@ -156,6 +157,15 @@ pub const Capability = struct {
         return self.environment(services);
     }
 
+    pub fn current(
+        self: *const Capability,
+        services: native_sdk.platform.PlatformServices,
+        generation: u64,
+    ) !Environment {
+        try self.requireCurrent(generation);
+        return self.environment(services);
+    }
+
     pub fn disconnect(self: *Capability, generation: u64) !void {
         try self.requireCurrent(generation);
         self.connected = false;
@@ -172,10 +182,32 @@ pub const Capability = struct {
         self: *const Capability,
         services: native_sdk.platform.PlatformServices,
     ) Environment {
-        return environmentFromChrome(
-            self.generation,
-            services.windowChrome(self.window_id),
-        );
+        return self.environmentFromChrome(services.windowChrome(self.window_id));
+    }
+
+    fn environmentFromChrome(
+        self: *const Capability,
+        chrome: native_sdk.platform.WindowChrome,
+    ) Environment {
+        return .{
+            .generation = self.generation,
+            .top = self.chromeTop(chrome),
+            .left = chrome.insets.left,
+            .bottom = chrome.insets.bottom,
+            .right = chrome.insets.right,
+            .buttons_x = chrome.buttons.x,
+            .buttons_y = chrome.buttons.y,
+            .buttons_width = chrome.buttons.width,
+            .buttons_height = chrome.buttons.height,
+            .live_pointer_drag = Platform.live_pointer_drag,
+        };
+    }
+
+    fn chromeTop(
+        _: *const Capability,
+        chrome: native_sdk.platform.WindowChrome,
+    ) f64 {
+        return Platform.chrome_top_override orelse chrome.insets.top;
     }
 
     fn requireCurrent(self: *const Capability, generation: u64) !void {
@@ -257,24 +289,6 @@ pub const Capability = struct {
         return self.pointIsDraggable(x, y);
     }
 };
-
-fn environmentFromChrome(
-    generation: u64,
-    chrome: native_sdk.platform.WindowChrome,
-) Environment {
-    return .{
-        .generation = generation,
-        .top = chrome.insets.top,
-        .left = chrome.insets.left,
-        .bottom = chrome.insets.bottom,
-        .right = chrome.insets.right,
-        .buttons_x = chrome.buttons.x,
-        .buttons_y = chrome.buttons.y,
-        .buttons_width = chrome.buttons.width,
-        .buttons_height = chrome.buttons.height,
-        .live_pointer_drag = Platform.live_pointer_drag,
-    };
-}
 
 fn validCoordinate(value: f64) bool {
     return std.math.isFinite(value) and value >= 0 and value <= max_coordinate;

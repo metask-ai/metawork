@@ -36,6 +36,14 @@ pub const WindowChromeEnvironment = struct {
     buttons_width: f64,
     buttons_height: f64,
     live_pointer_drag: bool,
+    renderer_controls: bool,
+    maximized: bool,
+};
+
+pub const WindowChromeControlAction = enum {
+    minimize,
+    toggle_maximize,
+    close,
 };
 
 pub const Platform = struct {
@@ -76,6 +84,12 @@ pub const Platform = struct {
         u64,
         f64,
         f64,
+    ) anyerror!WindowChromeEnvironment,
+    window_chrome_control_fn: *const fn (
+        ?*anyopaque,
+        native_sdk.platform.WindowId,
+        u64,
+        WindowChromeControlAction,
     ) anyerror!WindowChromeEnvironment,
     window_chrome_disconnect_fn: *const fn (
         ?*anyopaque,
@@ -161,6 +175,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.window_chrome_connect, .function = connectWindowChrome },
             .{ .name = commands.window_chrome_sync, .function = syncWindowChrome },
             .{ .name = commands.window_chrome_begin_drag, .function = beginWindowChromeDrag },
+            .{ .name = commands.window_chrome_control, .function = controlWindowChrome },
             .{ .name = commands.window_chrome_disconnect, .function = disconnectWindowChrome },
             .{ .name = commands.choose_workspace, .function = chooseWorkspace },
             .{ .name = commands.remove_workspace, .function = removeWorkspace },
@@ -456,10 +471,36 @@ pub const Dispatcher = struct {
         return std.fmt.bufPrint(output, "{{\"generation\":\"{d}\",\"detached\":true}}", .{generation});
     }
 
+    fn controlWindowChrome(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireBootstrapWindow(invocation.source.window_id);
+        if (!self.platform.on_main_thread_fn(self.platform.context))
+            return error.InvalidBridgeThread;
+        var parsed = try handlers.parsePayload(handlers.WindowChromeControl, invocation.request.payload);
+        defer parsed.deinit();
+        const action: WindowChromeControlAction = if (std.mem.eql(u8, parsed.value.action, "minimize"))
+            .minimize
+        else if (std.mem.eql(u8, parsed.value.action, "toggle_maximize"))
+            .toggle_maximize
+        else if (std.mem.eql(u8, parsed.value.action, "close"))
+            .close
+        else
+            return error.InvalidBridgePayload;
+        const environment = try self.platform.window_chrome_control_fn(
+            self.platform.context,
+            invocation.source.window_id,
+            try handlers.parseWireId(parsed.value.generation),
+            action,
+        );
+        return encodeWindowChromeEnvironment(output, environment);
+    }
+
     fn encodeWindowChromeEnvironment(output: []u8, value: WindowChromeEnvironment) ![]const u8 {
         return std.fmt.bufPrint(
             output,
-            "{{\"generation\":\"{d}\",\"insets\":{{\"top\":{d},\"left\":{d},\"bottom\":{d},\"right\":{d}}},\"buttons\":{{\"x\":{d},\"y\":{d},\"width\":{d},\"height\":{d}}},\"livePointerDrag\":{}}}",
+            "{{\"generation\":\"{d}\",\"insets\":{{\"top\":{d},\"left\":{d},\"bottom\":{d},\"right\":{d}}},\"buttons\":{{\"x\":{d},\"y\":{d},\"width\":{d},\"height\":{d}}},\"livePointerDrag\":{},\"rendererControls\":{},\"maximized\":{}}}",
             .{
                 value.generation,
                 value.top,
@@ -471,6 +512,8 @@ pub const Dispatcher = struct {
                 value.buttons_width,
                 value.buttons_height,
                 value.live_pointer_drag,
+                value.renderer_controls,
+                value.maximized,
             },
         );
     }
@@ -2402,6 +2445,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
         chrome_connect_calls: usize = 0,
         chrome_sync_calls: usize = 0,
         chrome_drag_calls: usize = 0,
+        chrome_control_calls: usize = 0,
         chrome_disconnect_calls: usize = 0,
         on_main_thread: bool = true,
         last_catalog_generation: u64 = 0,
@@ -2447,6 +2491,8 @@ test "Dispatcher validates authority before domain calls and preserves committed
                 .buttons_width = 138,
                 .buttons_height = 52,
                 .live_pointer_drag = true,
+                .renderer_controls = true,
+                .maximized = false,
             };
         }
 
@@ -2494,6 +2540,22 @@ test "Dispatcher validates authority before domain calls and preserves committed
             try std.testing.expectEqual(@as(f64, 20), y);
             self.chrome_drag_calls += 1;
             return chromeEnvironment();
+        }
+
+        fn controlWindowChrome(
+            context: ?*anyopaque,
+            window_id: native_sdk.platform.WindowId,
+            generation: u64,
+            action: WindowChromeControlAction,
+        ) anyerror!WindowChromeEnvironment {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            try std.testing.expectEqual(@as(native_sdk.platform.WindowId, 3), window_id);
+            try std.testing.expectEqual(@as(u64, 17), generation);
+            try std.testing.expectEqual(WindowChromeControlAction.toggle_maximize, action);
+            self.chrome_control_calls += 1;
+            var environment = chromeEnvironment();
+            environment.maximized = true;
+            return environment;
         }
 
         fn disconnectWindowChrome(
@@ -2571,6 +2633,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
             .window_chrome_connect_fn = Harness.connectWindowChrome,
             .window_chrome_sync_fn = Harness.syncWindowChrome,
             .window_chrome_begin_drag_fn = Harness.beginWindowChromeDrag,
+            .window_chrome_control_fn = Harness.controlWindowChrome,
             .window_chrome_disconnect_fn = Harness.disconnectWindowChrome,
             .now_fn = Harness.now,
             .on_main_thread_fn = Harness.onMainThread,
@@ -2624,6 +2687,13 @@ test "Dispatcher validates authority before domain calls and preserves committed
     );
     try std.testing.expect(std.mem.indexOf(u8, chrome_drag, "\"generation\":\"17\"") != null);
     try std.testing.expectEqual(@as(usize, 1), harness.chrome_drag_calls);
+    const chrome_control = native_dispatcher.dispatch(
+        "{\"id\":\"chrome-control\",\"command\":\"metawork.host.windowChrome.control\",\"payload\":{\"generation\":\"17\",\"action\":\"toggle_maximize\"}}",
+        source,
+        &response,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, chrome_control, "\"maximized\":true") != null);
+    try std.testing.expectEqual(@as(usize, 1), harness.chrome_control_calls);
     const foreign_bootstrap_window = native_sdk.bridge.Source{
         .origin = source.origin,
         .window_id = source.window_id + 1,

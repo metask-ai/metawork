@@ -11,6 +11,8 @@ const environment = {
   insets: { top: 52, left: 72, bottom: 0, right: 138 },
   buttons: { x: 0, y: 0, width: 138, height: 52 },
   livePointerDrag: false,
+  rendererControls: true,
+  maximized: false,
 };
 
 test("window chrome environment is runtime-decoded at the Bridge boundary", () => {
@@ -29,7 +31,8 @@ test("window chrome environment is runtime-decoded at the Bridge boundary", () =
     { ...environment, insets: { ...environment.insets, top: -1 } },
     { ...environment, buttons: { ...environment.buttons, width: Infinity } },
     { ...environment, livePointerDrag: "false" },
-    { ...environment, rendererOwnsControls: true },
+    { ...environment, rendererControls: "true" },
+    { ...environment, maximized: "false" },
   ])
     assert.throws(() => decodeWindowChromeEnvironment(malformed));
 });

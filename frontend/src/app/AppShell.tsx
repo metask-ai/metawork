@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 
 import { Icon } from "../components/ui/Icon.tsx";
+import { WindowControls } from "../components/ui/WindowControls.tsx";
 import { WindowTitlebar } from "../components/ui/WindowTitlebar.tsx";
 import { shouldDismissInspectorForEscape } from "../features/inspector/inspector-interaction.ts";
 import { useI18n } from "../i18n/context.ts";
@@ -137,6 +138,15 @@ export function AppShell({
             </details>
           )}
         </div>
+        <WindowControls
+          labels={{
+            controls: t("window.controls"),
+            minimize: t("window.minimize"),
+            maximize: t("window.maximize"),
+            restore: t("window.restore"),
+            close: t("window.close"),
+          }}
+        />
       </WindowTitlebar>
 
       <div className="app-columns">

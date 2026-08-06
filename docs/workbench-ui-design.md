@@ -132,7 +132,7 @@ Workspace
 
 ```text
 ┌───────────────────────────────────────────────────────────────┐
-│ Integrated title/command bar · context · search · OS controls │
+│ Integrated title/command bar · context · search · controls    │
 ├──────────────┬────────────────────────────────┬───────────────┤
 │ New task     │ New task Composer              │ Inspector     │
 │ Workspaces   │ or Task work trace             │ when useful   │
@@ -144,7 +144,7 @@ Workspace
 
 默认尺寸：
 
-- 一体化命令栏：52 px 产品视觉基线，实际交通灯/DWM 按钮安全区由 Host geometry 注入；
+- 一体化命令栏：默认 52 px 产品视觉基线；Windows 沿用历史实现的 40 px 标题栏，macOS 交通灯安全区由 Host geometry 注入；
 - 左栏：248 px；
 - 左栏品牌区使用紧凑单行，只显示 `MetaWork` 字样，不把品牌区表现成第二层标题栏，也不重复使用首字母图标、产品说明或宣传副标题；
 - Inspector：打开时 304 px；审批、活动详情、usage 或真实结果只决定模块是否可用，不触发普通 Run 的自动开合。除新的 `Needs your attention` 可自动打开一次外，显隐由用户控制并在 Run terminal 后保持稳定；
@@ -167,22 +167,22 @@ Workspace
 
 ### 4.3 一体化窗口栏
 
-主窗口使用 `hidden_inset_tall`：Renderer 命令栏承担自定义标题栏的产品视觉，不叠加独立的标准系统标题行。React 只绘制产品 header 并声明一个 drag candidate；Native SDK/OS 独占窗口按钮、native hit test、拖动循环、系统菜单、resize、close policy 与真实窗口状态。Renderer 不得推断平台、读取窗口状态或发起最小化、最大化、还原、关闭和系统菜单动作。
+主窗口使用 `hidden_inset_tall`：Renderer 命令栏承担自定义标题栏的产品视觉，不叠加独立的标准系统标题行。React 绘制产品 header、声明一个 drag candidate，并绘制带固定 `data-metawork-window-control` 语义的窗口按钮；browser-side Bridge 才能把这些声明转换为受限 Host command。Native SDK/OS 独占 native hit test、拖动循环、系统菜单、resize、close policy 与真实窗口状态。React component 不推断平台、不直接调用 transport，也不持有原生窗口 identity、handle 或执行权。
 
 - 命令栏是窗口交互层，不表现为独立横向标题栏：不使用贯穿全窗的底边或异色横带；左侧 Task rail 的背景与竖分隔线必须延伸到窗口顶部，中央命令区与 Task 工作面使用同一 surface；
-- Native SDK/OS 提供唯一一套可见原生窗口按钮：macOS 使用系统交通灯，Windows 使用 DWM caption buttons。Host 发布安全 inset 和原生按钮 bounds，browser-side Bridge 只把它们转换为 CSS layout variables；React 不绘制按钮、不维护 maximize/restore glyph，也不复制 accessible name；
-- 产品 header 的视觉基线为 52 px；交通灯、DWM 按钮和可拖动 top band 的真实安全区以 Host 返回的 native chrome geometry 为准，不允许 React 用平台名或固定按钮宽度分支布局；
+- macOS 保留系统交通灯；Windows 由 Renderer 绘制最小化、最大化/还原与关闭按钮。Host 只发布 `rendererControls` capability、`maximized` 真值和安全 inset，browser-side Bridge 将它们转换为 document dataset/CSS variables；React 不读取平台名或调用 transport，最大化与还原使用互斥的可访问按钮，由 Host 真值控制显隐；
+- 产品 header 默认视觉基线为 52 px；Windows Renderer header 沿用历史实现的 40 px 高度，每个 window control 使用 46 px 命中宽度并贴齐窗口右缘。关闭 hover/focus 使用系统危险红色，其余按钮保持中性色。macOS 交通灯与可拖动 top band 的真实安全区以 Host geometry 为准；
 - 命令栏只包含左栏开关、当前 Task 名称、全局搜索和按需异常入口；不在 Task 名称前重复 Workspace，`左栏开关` 只控制能力与 Task 导航，不兼任 Inspector 开关；
 - `WindowTitlebar` 只声明一个 drag candidate。browser-side Bridge 在 animation frame 内镜像该区域与按钮、输入、选择框、标签、链接、disclosure、可编辑内容和显式 no-drag 内容的交集排除区；区域数量、数值、viewport、native top band、document generation 和精确启动窗口 identity 均由 Host 重新校验，任何 malformed、stale、多 candidate 或越界输入都 fail closed；
-- 窗口 resize/maximize/restore 会改变 native inset、caption-button bounds 或 document generation；browser-side Bridge 必须先重新连接 Host chrome capability，再同步当前候选，React 不保存或推导转换前后的窗口状态；
+- 窗口 resize/maximize/restore 会改变 native inset、control state 或 document generation；browser-side Bridge 必须先重新连接 Host chrome capability，再同步当前候选。React 不保存或推导窗口状态，只由 `maximized` Host 真值选择互斥按钮；
 - Windows seam 只把已校验候选减排除区转换为 native `HTCAPTION`，因此拖动阈值、拖动循环、边缘吸附、最大化后拖拽恢复、双击最大化/还原与右键系统菜单均由系统处理。macOS 仅因 Native SDK 0.8.0 的公开接口要求 live pointer event，由 browser-side Bridge 在 trusted primary pointer 命中已同步区域时请求 Host 调用 `startWindowDrag`；React component 不注册 pointer、double-click 或 context-menu handler；
-- window-chrome bootstrap capability 不依赖 ProductDelivery connection，使登录/连接失败页仍保留系统窗口行为。它只接受 connect/sync/disconnect 与 macOS 条件化 live-pointer drag，不接受 window id、control action 或 state query；
+- window-chrome bootstrap capability 不依赖 ProductDelivery connection，使登录/连接失败页仍保留系统窗口行为。它只接受 connect/sync/disconnect、macOS 条件化 live-pointer drag，以及绑定当前 document generation 的 `minimize | toggle_maximize | close` 固定语义动作；不接受 window id、任意 action 或独立 state query；
 - 正常连接、恢复成功和普通操作成功不持续占据命令栏；只有同步失败、命令失败或其他确实需要用户行动的异常才显示状态入口；
 - 异常状态按 connection、account、Workspace identity 或 Task identity 分域保存；并行 Task 的结果不得互相覆盖，命令栏只选择当前上下文中优先级最高的一项显示；
 - 每个已有 Task 的内容标题区右侧提供稳定的 Inspector 图标按钮，accessible name 随状态使用 `打开检查器 / 关闭检查器` 并发布 `aria-expanded`；New task、无 Task 或没有任何可检查事实时不显示该按钮；
 - 未登录界面的应用工具栏只保留产品 identity 与语言入口；语言不能藏进尚不可进入的设置；
-- 原生关闭按钮遵循 manifest `close_policy = hide`，后台 Host 与计划任务继续运行；重新打开由 Native SDK 托盘菜单进入 Desktop Host 的 `showWindow`/`focusWindow` capability，显式 Quit 才进入应用 shutdown。Renderer 不提供关闭或重新打开入口；
-- `chromeless` 和自绘窗口按钮均被禁止；系统 resize frame、caption buttons、Snap Layout、双击偏好、系统菜单、DPI 与高对比行为只按真实平台验收声明，不由 WebUI 模拟；
+- Renderer 关闭按钮必须进入平台的 user-close 语义并遵循 manifest `close_policy = hide`，后台 Host 与计划任务继续运行；重新打开由 Native SDK 托盘菜单进入 Desktop Host 的 `showWindow`/`focusWindow` capability，显式 Quit 才进入应用 shutdown；
+- 不使用 `chromeless`；系统 resize frame、Snap Layout、拖动、双击、系统菜单、DPI 与高对比行为只按真实平台验收声明，不由 WebUI 模拟。Renderer 只绘制按钮并提交固定语义意图，不复制这些底层行为；
 - 语言、API、模型和诊断进入设置或对应任务上下文，不常驻命令栏；
 - 不在命令栏放 ABI、Provider、Host mode 等工程状态。
 
@@ -1116,6 +1116,7 @@ MetaWork 采用“明亮工作台 + 紫色任务流”的桌面工具方向。�
 - 所有交互元素具有可见 focus 状态；
 - 状态不能只依赖颜色；
 - 图标按钮必须提供本地化可访问名称；
+- Renderer 窗口按钮必须键盘可达；最大化/还原的可访问名称与 Host 发布的真实状态一致；
 - 流式文本不按 token 频率向辅助技术播报，使用节流后的有意义状态；
 - 任务完成、失败和待处理请求使用适度的 live region；
 - 窄窗口、200% 文本缩放和长英文文案不得导致关键操作不可用；
@@ -1217,6 +1218,7 @@ MetaWork 采用“明亮工作台 + 紫色任务流”的桌面工具方向。�
 - 已有 Task 的内容标题区 Inspector 按钮可由键盘操作，`打开检查器 / 关闭检查器` 与 `aria-expanded` 始终匹配真实面板状态；
 - 普通 Run start/terminal 不改变 Inspector 列宽；新的待处理请求只自动打开一次，terminal 后保留 Last run summary，切换 Task 不泄漏旧详情；
 - 左栏折叠后完全隐藏且命令栏入口仍可达；Inspector 关闭或覆盖显示后功能不丢失。
+- Windows Renderer 窗口按钮在登录页与 Workbench 均可见、键盘可达；最小化、最大化/还原和遵循 `close_policy = hide` 的关闭命中真实窗口，按钮区域不进入 drag candidate；
 
 ## 20. 工程目录结构
 

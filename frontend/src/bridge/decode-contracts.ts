@@ -2123,6 +2123,8 @@ export type WindowChromeEnvironment = {
   insets: { top: number; left: number; bottom: number; right: number };
   buttons: { x: number; y: number; width: number; height: number };
   livePointerDrag: boolean;
+  rendererControls: boolean;
+  maximized: boolean;
 };
 
 export function decodeWindowChromeEnvironment(
@@ -2133,6 +2135,8 @@ export function decodeWindowChromeEnvironment(
     "insets",
     "buttons",
     "livePointerDrag",
+    "rendererControls",
+    "maximized",
   ]);
   const insets = object(item.insets, "$.insets", [
     "top",
@@ -2161,6 +2165,8 @@ export function decodeWindowChromeEnvironment(
       height: nonNegativeFiniteNumber(buttons.height, "$.buttons.height"),
     },
     livePointerDrag: booleanValue(item.livePointerDrag, "$.livePointerDrag"),
+    rendererControls: booleanValue(item.rendererControls, "$.rendererControls"),
+    maximized: booleanValue(item.maximized, "$.maximized"),
   };
 }
 

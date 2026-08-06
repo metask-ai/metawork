@@ -7,9 +7,11 @@ import {
 } from "./decode-contracts.ts";
 
 const candidateSelector = "[data-metawork-window-drag]";
+const controlSelector = "[data-metawork-window-control]";
 const exclusionSelector =
   "button, input, select, textarea, label, details, a, [contenteditable='true'], [data-metawork-window-drag-exclude]";
 const maxExclusions = 32;
+const controlActions = new Set(["minimize", "toggle_maximize", "close"]);
 
 type ChromeRegion = {
   x: number;
@@ -38,6 +40,10 @@ export function installWindowChromeBridge() {
     environment = value;
     const root = document.documentElement;
     root.dataset.metaworkWindowChrome = "ready";
+    root.dataset.metaworkRendererWindowControls = String(
+      value.rendererControls,
+    );
+    root.dataset.metaworkWindowMaximized = String(value.maximized);
     root.style.setProperty(
       "--metawork-window-chrome-top",
       `${value.insets.top}px`,
@@ -64,6 +70,8 @@ export function installWindowChromeBridge() {
     environment = null;
     const root = document.documentElement;
     delete root.dataset.metaworkWindowChrome;
+    delete root.dataset.metaworkRendererWindowControls;
+    delete root.dataset.metaworkWindowMaximized;
     for (const name of [
       "--metawork-window-chrome-top",
       "--metawork-window-chrome-leading",
@@ -266,6 +274,46 @@ export function installWindowChromeBridge() {
       .catch(() => disconnect(bridge, requestGeneration));
   }
 
+  function onControlClick(event: MouseEvent) {
+    const target = event.target instanceof Element ? event.target : null;
+    const button = target?.closest<HTMLButtonElement>(controlSelector);
+    const action = button?.dataset.metaworkWindowControl;
+    if (
+      !button ||
+      !action ||
+      !controlActions.has(action) ||
+      !environment?.rendererControls ||
+      !generation
+    )
+      return;
+    event.preventDefault();
+    const requestGeneration = generation;
+    for (const control of document.querySelectorAll<HTMLButtonElement>(
+      controlSelector,
+    ))
+      control.disabled = true;
+    void bridge
+      .invoke(commands.windowChromeControl, {
+        generation: requestGeneration,
+        action,
+      })
+      .then(decodeWindowChromeEnvironment)
+      .then((value) => {
+        if (
+          generation === requestGeneration &&
+          value.generation === requestGeneration
+        )
+          applyEnvironment(value);
+      })
+      .catch(() => refresh())
+      .finally(() => {
+        for (const control of document.querySelectorAll<HTMLButtonElement>(
+          controlSelector,
+        ))
+          control.disabled = false;
+      });
+  }
+
   void bridge
     .invoke(commands.windowChromeConnect, {})
     .then(decodeWindowChromeEnvironment)
@@ -286,6 +334,7 @@ export function installWindowChromeBridge() {
     once: true,
   });
   document.addEventListener("pointerdown", onPointerDown, true);
+  document.addEventListener("click", onControlClick, true);
 
   return () => {
     if (animationFrame !== null) window.cancelAnimationFrame(animationFrame);
@@ -293,6 +342,7 @@ export function installWindowChromeBridge() {
     mutationObserver.disconnect();
     window.removeEventListener("resize", refresh);
     document.removeEventListener("pointerdown", onPointerDown, true);
+    document.removeEventListener("click", onControlClick, true);
     void disconnect(bridge);
   };
 }
