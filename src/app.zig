@@ -9,8 +9,7 @@ const workbench_api = @import("metawork_workbench");
 const account_contract = @import("metawork_account_contract");
 const account_api = @import("metawork_account");
 const product_identity = @import("metawork_product_identity");
-const window_chrome = @import("window_chrome.zig");
-const windows_host = @import("windows_host.zig");
+const window_chrome = @import("native_sdk_compat/system_webview_drag_region.zig");
 
 pub const panic = std.debug.FullPanic(native_sdk.debug.capturePanic);
 
@@ -287,6 +286,7 @@ const App = struct {
 
     fn start(context: *anyopaque, native_runtime: *native_sdk.Runtime) anyerror!void {
         const self: *@This() = @ptrCast(@alignCast(context));
+        try self.window_chrome_capability.captureStartupWindow();
         self.native_runtime = native_runtime;
         self.platform_services = native_runtime.options.platform.services;
         if (self.platform_services) |services|
@@ -849,6 +849,7 @@ pub fn run(init: std.process.Init) !void {
         .main_thread_id = std.Thread.getCurrentId(),
         .automation = automation_api.Runtime.init(init.environ_map),
     };
+    defer app.window_chrome_capability.deinit();
     defer app.automation.deinit();
     var data_dir_storage: [4096]u8 = undefined;
     const data_dir = try native_sdk.app_dirs.resolveOne(
@@ -1064,6 +1065,7 @@ pub fn run(init: std.process.Init) !void {
     app.dispatcher = &dispatcher;
     const mode = frontendMode(init.environ_map);
 
+    try app.window_chrome_capability.prepareStartup();
     try runner.runWithOptions(app.app(), .{
         .app_name = "MetaWork",
         .window_title = "MetaWork",
@@ -1084,6 +1086,10 @@ test "App remains a composition root with explicit platform limits" {
     try std.testing.expectEqual(@as(usize, 1024 * 1024), native_sdk.bridge.max_message_bytes);
     try std.testing.expectEqual(@as(usize, 8192), native_sdk.platform.max_window_event_detail_bytes);
     try std.testing.expectEqual(@as(usize, 1), bridge_api.policy.origins(.release).len);
+}
+
+test {
+    _ = window_chrome;
 }
 
 test "product identity does not unify macOS and Windows Account storage" {

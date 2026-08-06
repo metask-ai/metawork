@@ -34,8 +34,11 @@ metawork/
 │   ├── main.zig           # 进程入口
 │   ├── app.zig            # Desktop Host composition root；共置 Application coordinator
 │   ├── product_identity.zig # 从 app.zon 派生 development identity 与 macOS namespace
-│   ├── windows_host.zig   # SDK 0.8.0 单一 startup window identity 窄 seam
-│   ├── window_chrome.zig  # SDK 官方 System WebView drag-region 到位前的窄 Host seam
+│   ├── native_sdk_compat/ # 按已登记 capability 隔离的 Desktop Host 兼容实现
+│   │   ├── system_webview_drag_region.zig # 唯一共享 capability contract 与有界 region 状态
+│   │   └── system_webview_drag_region/
+│   │       ├── windows.zig # 创建期 HWND 捕获、overlay/subclass 与 Win32 资源
+│   │       └── macos.zig   # live-pointer drag 的公开 SDK 原语
 │   ├── account.zig        # Account module entrypoint
 │   ├── account/           # Account Runtime、OAuth、catalog、credential 与状态机
 │   ├── bridge.zig         # Renderer Bridge module entrypoint
@@ -62,15 +65,15 @@ metawork/
 
 ## 3. 顶层所有权
 
-| Boundary / role          | 唯一职责                                                                                  | 不拥有                                                 |
-| ------------------------ | ----------------------------------------------------------------------------------------- | ------------------------------------------------------ |
-| Desktop Host composition | Native SDK composition、平台 capability 注入、平台资源与顶层 Bridge/Application/Native 生命周期顺序 | 产品 policy、Application 内部事务、第二套 Bridge transport |
-| App coordinator          | Application 主线程跨 owner 提交、事件屏障与内部生命周期顺序                              | Account/Workbench 领域状态、Agent 调度策略、平台资源    |
-| Account   | Runtime、OAuth/catalog 状态、credential、attempt/effect/mailbox、恢复、脱敏 Account view、ExecutionConfig transfer | Workbench Task、Renderer 状态、AgentCore Runtime       |
-| Workbench | Workspace/Task/Run 产品状态、Executor、admission、terminal product record、snapshot projection             | AgentCore raw protocol、Native WebView、Account secret |
-| Agent     | AgentCore Runtime/Session/Conversation、callback、event pump、Run terminal facts                           | 产品队列、Task 历史、Bridge transport                  |
-| Bridge    | command authority、payload decode、Workspace grant、ProductDelivery connection/revision/snapshot transport | 产品策略真相、AgentCore handle、Account runtime        |
-| Renderer  | snapshot 消费、产品 WebUI 交互、纯 UI 状态与本地草稿                                                    | 原生窗口 owner、平台真实状态、安全决策、secret、AgentCore raw event、产品状态机 |
+| Boundary / role          | 唯一职责                                                                                                           | 不拥有                                                                          |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------- |
+| Desktop Host composition | Native SDK composition、平台 capability 注入、平台资源与顶层 Bridge/Application/Native 生命周期顺序                | 产品 policy、Application 内部事务、第二套 Bridge transport                      |
+| App coordinator          | Application 主线程跨 owner 提交、事件屏障与内部生命周期顺序                                                        | Account/Workbench 领域状态、Agent 调度策略、平台资源                            |
+| Account                  | Runtime、OAuth/catalog 状态、credential、attempt/effect/mailbox、恢复、脱敏 Account view、ExecutionConfig transfer | Workbench Task、Renderer 状态、AgentCore Runtime                                |
+| Workbench                | Workspace/Task/Run 产品状态、Executor、admission、terminal product record、snapshot projection                     | AgentCore raw protocol、Native WebView、Account secret                          |
+| Agent                    | AgentCore Runtime/Session/Conversation、callback、event pump、Run terminal facts                                   | 产品队列、Task 历史、Bridge transport                                           |
+| Bridge                   | command authority、payload decode、Workspace grant、ProductDelivery connection/revision/snapshot transport         | 产品策略真相、AgentCore handle、Account runtime                                 |
+| Renderer                 | snapshot 消费、产品 WebUI 交互、纯 UI 状态与本地草稿                                                               | 原生窗口 owner、平台真实状态、安全决策、secret、AgentCore raw event、产品状态机 |
 
 `account/contract.zig` 是 Account owner 发布的纯合同，不是第六个产品 owner。`automation/` 只提供受控账号、origin 和临时 Workspace authority，不注册额外协议，也不拥有产品 transport state。
 
@@ -107,9 +110,11 @@ Renderer Bridge 的 identity、revision、command、event、snapshot 与兼容�
 
 `main.zig` 只调用 `metawork_app`。`app.zig` 物理上共置两个角色：Desktop Host composition root 组装 Bridge 与 Application、消费并注入 Native SDK 的窄平台 capability、驱动平台生命周期；Application coordinator 在主线程按规范协调 Account prepare/commit、Workbench no-fail install、Agent event drain 与 owner 生命周期。后者属于 Application 的事务协调但不持有领域状态或复制 owner policy；这种源码共置不产生新的模块、业务 owner 或统一 Host facade。
 
-`windows_host.zig` 不是第六模块或统一 Windows facade；它只承载 Native SDK 0.8.0 尚未公开的单一 `startup_window_identity` 二级兼容 seam，供 `window_chrome.zig` 的 drag-region 实现使用。当前实现仍通过强转 `PlatformServices.context` 获得 SDK 私有 Windows 状态，因此尚未通过 Native SDK 能力路径 gate。Native SDK 公开稳定窗口 identity 并经 Windows 验收后必须删除该 seam。只有 `app.zig` 和 `window_chrome.zig` 可以导入该文件；它不得增加其他 capability，也不得吸收菜单、托盘、Application policy 或 Renderer protocol。显式退出不属于兼容层：确认对话框和主窗口关闭均经过 Native SDK Runtime API。
+`native_sdk_compat/system_webview_drag_region.zig` 是一条 Desktop Host-owned capability seam，只补齐 Native SDK 0.8.0 尚未进入 Runtime API 的 System WebView drag-region。共享根拥有 document generation、有界 region 校验和平台调用编排；只有 `app.zig` 可以组装它。`system_webview_drag_region/macos.zig` 在 live pointer event 内调用 SDK 已有 `startWindowDrag` 原语，属于一级兼容；`system_webview_drag_region/windows.zig` 以 Win32 透明 top-band overlay 与 root/WebView hit-test subclass 补足 SDK 实现缺口，属于二级兼容，并独占 HWND、hook、subclass、overlay、rollback 与 teardown。
 
-`window_chrome.zig` 实现一条 Desktop Host-owned `system_webview_drag_region` capability seam，只补齐 Native SDK 0.8.0 尚未进入 Runtime API 的 System WebView drag-region。macOS 在 live pointer event 内调用 SDK 已有 `startWindowDrag` 原语，属于该 seam 的一级兼容实现；Windows 以 Win32 透明 native top-band overlay 与 root/WebView hit-test subclass 补足 SDK 实现缺口，属于同一 seam 的二级兼容实现，并把标准 non-client pointer 消息交还同一根窗口、以该窗口的 OS system menu 处理 overlay 右键。该文件拥有 document generation、region bounds、native top band、精确启动窗口 identity 和 teardown 校验，但不接受或执行 Renderer 提交的 minimize/maximize/restore/close/system-menu action，不读取或复制 Runtime 窗口状态，也不形成通用 Desktop Interface、Native SDK adapter、第二窗口 owner 或 action facade。Native SDK Runtime drag-region 经目标平台验收可用后，必须原位替换并删除对应兼容路径。
+Windows startup identity 不是独立 capability。Desktop Host 在进入 Native SDK runner 前为当前 UI 线程武装 CBT 创建 hook，并在 `app.start` 入口立即收口；该区间必须恰好产生一个无 parent 的 top-level HWND，随后还要通过 root、owner、thread 与 process 校验，零个或多个候选一律 fail closed。该机制不读取标题、焦点、前台窗口、`GWLP_USERDATA` 或 `PlatformServices.context`，也不解释 Native SDK 私有类型。显式退出不属于兼容层：确认对话框与主窗口关闭使用 Native SDK Runtime API，由 Runtime 维护窗口/View 状态并驱动正常 shutdown。
+
+整个 seam 不接受或执行 Renderer 提交的 minimize/maximize/restore/close/system-menu action，不读取或复制 Runtime 窗口状态，也不形成通用 Desktop Interface、Native SDK adapter、第二窗口 owner 或 action facade。Native SDK Runtime System WebView drag-region 经目标平台验收可用后，必须原位替换共享根并删除对应平台实现、allowlist 与专用验证。
 
 Renderer 的 `components/ui/WindowTitlebar.tsx` 绘制产品 header，并通过 portal 在 document root 只声明一个 `data-metawork-window-drag` marker。`frontend/src/bridge/window-chrome.ts` 是 browser-side Bridge boundary：它有界镜像一个 candidate 与全 document 交互排除区，runtime decode Host geometry，并写入 CSS layout variables；窗口 resize 时先重新 `connect` 获取新的 generation/geometry，再同步当前 region。产品 React 代码不得直接调用 `window.zero`，不得维护平台名、原生按钮或窗口状态。已删除的 `app/useWindowChrome.ts`、`components/ui/WindowControls.tsx` 与 `platform/window-chrome.ts` 不得恢复。Native SDK 官方 System WebView drag-region 经目标平台验收可用后，必须原位替换 seam，并同步收口不再需要的专用 command、allowlist 和测试。
 
@@ -170,6 +175,7 @@ Bridge handler 不能绕过 Workbench 操作 AgentCore handle。automation 只�
 ```text
 main -> app
 app  -> account, workbench, agent, bridge, automation, Native SDK
+app  -> native_sdk_compat
 bridge -> workbench, account contract, Native SDK
 workbench -> agent, account contract
 agent -> Metask AgentCore bundle SDK

@@ -1057,46 +1057,129 @@ test("Desktop Host owns native window chrome and Renderer only declares geometry
 
   const app = read("src/app.zig");
   const policy = read("src/bridge/policy.zig");
-  const seam = read("src/window_chrome.zig");
-  const windowsHost = read("src/windows_host.zig");
+  const seamPath = "src/native_sdk_compat/system_webview_drag_region.zig";
+  const windowsPath =
+    "src/native_sdk_compat/system_webview_drag_region/windows.zig";
+  const macosPath =
+    "src/native_sdk_compat/system_webview_drag_region/macos.zig";
+  const seam = read(seamPath);
+  const windows = read(windowsPath);
+  const macos = read(macosPath);
+  const compatFiles = zigFiles("src/native_sdk_compat/");
+  const compatSource = compatFiles.map(read).join("\n");
   assert.match(app, /\.js_window_api = false/);
   assert.match(app, /\.permissions = &\.\{\}/);
   assert.match(policy, /builtin_command_count: usize = 0/);
+  assert.equal(existsSync(new URL("src/window_chrome.zig", root)), false);
+  assert.equal(existsSync(new URL("src/windows_host.zig", root)), false);
   assert.doesNotMatch(
-    seam,
-    /(?:minimize|maximize|restore|close|show|focus|create)Window|quitApp/,
+    compatSource,
+    /\.(?:minimizeWindow|maximizeWindow|restoreWindow|closeWindow|showWindow|focusWindow|showMessageDialog|showOpenDialog|showNotification|startTimer|cancelTimer|quitApp)\(/,
   );
   assert.match(
     seam,
-    /fn installPlatformOrDisconnect[\s\S]*Windows\.install[\s\S]*self\.connected = false[\s\S]*self\.clearRegions\(\)[\s\S]*Windows\.uninstall/,
+    /fn installPlatformOrDisconnect[\s\S]*Platform\.install[\s\S]*self\.connected = false[\s\S]*self\.clearRegions\(\)[\s\S]*Platform\.deinit/,
   );
   assert.deepEqual(
     zigFiles("src/").filter((file) =>
-      read(file).includes('@import("window_chrome.zig")'),
+      read(file).includes(
+        '@import("native_sdk_compat/system_webview_drag_region.zig")',
+      ),
     ),
     ["src/app.zig"],
   );
   assert.deepEqual(
-    zigFiles("src/").filter((file) =>
-      read(file).includes('@import("windows_host.zig")'),
+    compatFiles.filter((file) =>
+      read(file).includes('@import("system_webview_drag_region/windows.zig")'),
     ),
-    ["src/app.zig", "src/window_chrome.zig"],
+    [seamPath],
   );
-  assert.match(windowsHost, /pub fn exactStartupWindow/);
-  assert.doesNotMatch(windowsHost, /quitApplication|closeWindow|quitApp/);
+  assert.deepEqual(
+    compatFiles.filter((file) =>
+      read(file).includes('@import("system_webview_drag_region/macos.zig")'),
+    ),
+    [seamPath],
+  );
+  assert.doesNotMatch(
+    zigFiles("src/").map(read).join("\n"),
+    /(?:services|platform_services)\.context\b|native_sdk\.platform\.windows|GWLP_USERDATA|GetWindowLongPtrW/,
+  );
+  assert.doesNotMatch(compatSource, /\.context\b/);
+  assert.deepEqual(
+    compatFiles
+      .filter((file) =>
+        read(file).includes("native_sdk.platform.PlatformServices"),
+      )
+      .sort(),
+    [seamPath, macosPath, windowsPath].sort(),
+  );
+  assert.match(windows, /SetWindowsHookExW[\s\S]*StartupCapture/);
+  assert.match(
+    windows,
+    /captureStartupWindow[\s\S]*capture\.take\(window_id\)/,
+  );
+  assert.match(
+    windows,
+    /candidate_count != 1[\s\S]*GetAncestor[\s\S]*GetWindowThreadProcessId/,
+  );
+  assert.match(macos, /try services\.startWindowDrag\(window_id\)/);
+  assert.deepEqual(
+    zigFiles("src/").filter((file) =>
+      read(file).includes("services.startWindowDrag(window_id)"),
+    ),
+    [macosPath],
+  );
+  const allowedWindowsSymbols = [
+    "CallNextHookEx",
+    "CreateWindowExW",
+    "DefSubclassProc",
+    "DefWindowProcW",
+    "DestroyWindow",
+    "EnumChildWindows",
+    "GetAncestor",
+    "GetClientRect",
+    "GetCurrentProcessId",
+    "GetCurrentThreadId",
+    "GetCursorPos",
+    "GetDpiForWindow",
+    "GetModuleHandleW",
+    "GetSystemMenu",
+    "GetWindow",
+    "GetWindowThreadProcessId",
+    "IsWindow",
+    "PostMessageW",
+    "RegisterClassExW",
+    "RemoveWindowSubclass",
+    "ScreenToClient",
+    "SendMessageW",
+    "SetWindowPos",
+    "SetWindowSubclass",
+    "SetWindowsHookExW",
+    "TrackPopupMenu",
+    "UnhookWindowsHookEx",
+    "ValidateRect",
+  ];
+  assert.deepEqual(
+    [...windows.matchAll(/extern "(?:user32|kernel32|comctl32)" fn (\w+)/g)]
+      .map((match) => match[1])
+      .sort(),
+    allowedWindowsSymbols.sort(),
+  );
   assert.match(app, /native_runtime\.showMessageDialog\(/);
   assert.match(app, /native_runtime\.closeWindow\(main_window_id\)/);
+  assert.match(app, /defer app\.window_chrome_capability\.deinit\(\)/);
+  assert.doesNotMatch(app, /services\.closeWindow\(|windows_host/);
   assert.doesNotMatch(
-    app,
-    /services\.closeWindow\(|windows_host\.quitApplication/,
+    compatSource,
+    /@import\("(?:bridge|workbench|account|agent)(?:\.zig|\/)|window\.zero|metawork\.host\./,
   );
-  assert.doesNotMatch(
-    windowsHost,
-    /@import\("(?:bridge|workbench|account|agent)(?:\.zig|\/)|window\.zero|metawork\.host\.|Renderer/,
+  assert.equal(
+    existsSync(new URL("scripts/test-window-chrome-windows.mjs", root)),
+    true,
   );
-  assert.doesNotMatch(
-    windowsHost,
-    /minimizeWindow|maximizeWindow|restoreWindow|showWindow|focusWindow|startWindowDrag/,
+  assert.equal(
+    existsSync(new URL("scripts/probe-windows-window-chrome.ps1", root)),
+    true,
   );
 });
 

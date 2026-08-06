@@ -1,8 +1,12 @@
 param(
     [Parameter(Mandatory = $true)]
     [int]$ProcessId,
-    [ValidateSet('exercise', 'close')]
-    [string]$Mode = 'exercise'
+    [ValidateSet('exercise', 'close', 'hit-test')]
+    [string]$Mode = 'exercise',
+    [int]$DragX = 300,
+    [int]$DragY = 15,
+    [int]$ExcludedX = 40,
+    [int]$ExcludedY = 15
 )
 
 $ErrorActionPreference = 'Stop'
@@ -18,6 +22,12 @@ public static class MetaWorkChromeProbe {
         public int Top;
         public int Right;
         public int Bottom;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct Point {
+        public int X;
+        public int Y;
     }
 
     [DllImport("user32.dll")]
@@ -68,6 +78,28 @@ public static class MetaWorkChromeProbe {
 
     [DllImport("user32.dll")]
     public static extern void keybd_event(byte virtualKey, byte scanCode, uint flags, UIntPtr extraInfo);
+
+    [DllImport("user32.dll")]
+    private static extern bool ClientToScreen(IntPtr window, ref Point point);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr ChildWindowFromPointEx(IntPtr parent, Point point, uint flags);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr SendMessageW(IntPtr window, uint message, UIntPtr wParam, IntPtr lParam);
+
+    public static int HitTest(IntPtr root, int x, int y) {
+        Point point = new Point { X = x, Y = y };
+        IntPtr target = ChildWindowFromPointEx(root, point, 0);
+        if (target == IntPtr.Zero) {
+            throw new InvalidOperationException("ChildWindowFromPointEx found no target");
+        }
+        if (!ClientToScreen(root, ref point)) {
+            throw new InvalidOperationException("ClientToScreen failed");
+        }
+        long packed = ((long)(ushort)point.X) | ((long)(ushort)point.Y << 16);
+        return SendMessageW(target, 0x0084, UIntPtr.Zero, (IntPtr)packed).ToInt32();
+    }
 }
 '@
 
@@ -122,6 +154,23 @@ if ($process.MainWindowHandle -eq 0) {
 }
 
 $window = $process.MainWindowHandle
+if ($Mode -eq 'hit-test') {
+    $dragResult = [MetaWorkChromeProbe]::HitTest($window, $DragX, $DragY)
+    $excludedResult = [MetaWorkChromeProbe]::HitTest(
+        $window,
+        $ExcludedX,
+        $ExcludedY
+    )
+    if ($dragResult -ne 2) {
+        throw "drag candidate returned hit-test $dragResult instead of HTCAPTION"
+    }
+    if ($excludedResult -eq 2) {
+        throw "interactive exclusion returned HTCAPTION"
+    }
+    Write-Output "drag=$dragResult exclusion=$excludedResult"
+    return
+}
+
 [MetaWorkChromeProbe]::SetForegroundWindow($window) | Out-Null
 Start-Sleep -Milliseconds 200
 $rect = Get-MetaWorkRect $window
