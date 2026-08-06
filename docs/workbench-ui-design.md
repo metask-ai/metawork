@@ -151,7 +151,7 @@ Workspace
 - 已有 Task 内容标题区：64 px；
 - 中间正文推荐最大宽度：760 px；
 - 表格、diff、日志和文件预览可以使用中间区域的可用宽度；
-- 960 × 680 仅作为窄窗口回归样本，不定义产品最小窗口；实际下限由内容可达性、Composer 可用性、系统窗口约束和 200% 文本验收共同决定；
+- Native 主窗口声明 320 × 520 logical px 的系统最小尺寸，保证窗口不能被缩到 Renderer 已定义布局下限之外；960 × 680 仍只是窄窗口回归样本，不是固定设计画布；
 - 低于约 1100 px 时 Inspector 使用右侧非模态覆盖层或保持关闭；低于约 820 px 时左栏和 Inspector 都使用互斥覆盖层；低于约 560 px 时命令栏隐藏次级文字，Task Header 次级动作进入 `More`。
 
 左栏折叠后完全隐藏并把宽度归还中央工作面，不保留 56 px 图标栏，也不用匿名图标映射任意 Task。命令栏左侧始终保留打开/关闭入口，折叠状态按用户偏好保存。Inspector 内容只决定模块和入口是否可用；显隐只由用户动作、Task 切换或新的 `Needs your attention` 单次自动打开改变，并按 Task 保留当前应用会话内状态，不持久化为空面板偏好。折叠只改变视图，不改变 Task、审批或运行状态。
@@ -174,9 +174,9 @@ Workspace
 - 产品 header 默认视觉基线为 52 px；Windows Renderer header 沿用历史实现的 40 px 高度，每个 window control 使用 46 px 命中宽度并贴齐窗口右缘。关闭 hover/focus 使用系统危险红色，其余按钮保持中性色。macOS 交通灯与可拖动 top band 的真实安全区以 Host geometry 为准；
 - 命令栏只包含左栏开关、当前 Task 名称、全局搜索和按需异常入口；不在 Task 名称前重复 Workspace，`左栏开关` 只控制能力与 Task 导航，不兼任 Inspector 开关；
 - `WindowTitlebar` 只声明一个 drag candidate。browser-side Bridge 在 animation frame 内镜像该区域与按钮、输入、选择框、标签、链接、disclosure、可编辑内容和显式 no-drag 内容的交集排除区；区域数量、数值、viewport、native top band、document generation 和精确启动窗口 identity 均由 Host 重新校验，任何 malformed、stale、多 candidate 或越界输入都 fail closed；
-- 窗口 resize/maximize/restore 会改变 native inset、control state 或 document generation；browser-side Bridge 必须先重新连接 Host chrome capability，再同步当前候选。React 不保存或推导窗口状态，只由 `maximized` Host 真值选择互斥按钮；
-- Windows seam 只把已校验候选减排除区转换为 native `HTCAPTION`，因此拖动阈值、拖动循环、边缘吸附、最大化后拖拽恢复、双击最大化/还原与右键系统菜单均由系统处理。macOS 仅因 Native SDK 0.8.0 的公开接口要求 live pointer event，由 browser-side Bridge 在 trusted primary pointer 命中已同步区域时请求 Host 调用 `startWindowDrag`；React component 不注册 pointer、double-click 或 context-menu handler；
-- window-chrome bootstrap capability 不依赖 ProductDelivery connection，使登录/连接失败页仍保留系统窗口行为。它只接受 connect/sync/disconnect、macOS 条件化 live-pointer drag，以及绑定当前 document generation 的 `minimize | toggle_maximize | close` 固定语义动作；不接受 window id、任意 action 或独立 state query；
+- 窗口 resize/maximize/restore 由 Native SDK/OS 执行，并通过 Native SDK 正式 resize event 通知 browser-side Bridge；Bridge 在当前 document generation 内合并最新 viewport 与候选后执行 `sync`，不得因 resize、layout 或 command failure 重新 `connect`。React 不保存或推导窗口状态，只由 `maximized` Host 真值选择互斥按钮；
+- Windows 不递归 subclass Chromium 的跨进程 child HWND，也不由 Renderer 模拟窗口位移；在 Native SDK 提供正式 System WebView drag-region 能力前，Host 不发布 live-pointer drag。macOS 对应请求只调用 Native SDK 0.8.0 的 `startWindowDrag`；React component 不注册 pointer、double-click 或 context-menu handler；
+- window-chrome bootstrap capability 不依赖 ProductDelivery connection，使登录/连接失败页仍保留系统窗口行为。它只接受 connect/sync/disconnect、Host capability gate 控制的 live-pointer drag，以及绑定当前 document generation 的 `minimize | toggle_maximize | close` 固定语义动作；不接受 window id、任意 action 或独立 state query；
 - 正常连接、恢复成功和普通操作成功不持续占据命令栏；只有同步失败、命令失败或其他确实需要用户行动的异常才显示状态入口；
 - 异常状态按 connection、account、Workspace identity 或 Task identity 分域保存；并行 Task 的结果不得互相覆盖，命令栏只选择当前上下文中优先级最高的一项显示；
 - 每个已有 Task 的内容标题区右侧提供稳定的 Inspector 图标按钮，accessible name 随状态使用 `打开检查器 / 关闭检查器` 并发布 `aria-expanded`；New task、无 Task 或没有任何可检查事实时不显示该按钮；

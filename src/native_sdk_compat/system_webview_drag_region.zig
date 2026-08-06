@@ -30,7 +30,7 @@ const Platform = switch (builtin.os.tag) {
             return error.SystemWebViewChromeUnavailable;
         }
 
-        pub fn install(_: *State, _: native_sdk.platform.PlatformServices, _: native_sdk.platform.WindowId) !void {
+        pub fn bindRoot(_: *State) !void {
             return error.SystemWebViewChromeUnavailable;
         }
 
@@ -56,7 +56,6 @@ pub const Region = struct {
 };
 
 pub const Environment = struct {
-    generation: u64,
     top: f64,
     left: f64,
     bottom: f64,
@@ -70,8 +69,8 @@ pub const Environment = struct {
 
 pub const Capability = struct {
     window_id: native_sdk.platform.WindowId,
-    generation: u64 = 0,
-    connected: bool = false,
+    platform_ready: bool = false,
+    document_attached: bool = false,
     regions: [max_regions]Region = undefined,
     region_count: usize = 0,
     platform: Platform.State = .{},
@@ -98,34 +97,36 @@ pub const Capability = struct {
         try Platform.requirePlatform(services);
     }
 
+    pub fn bindRoot(self: *Capability) void {
+        Platform.bindRoot(&self.platform) catch {
+            self.platform_ready = false;
+            return;
+        };
+        self.platform_ready = true;
+    }
+
     pub fn connect(
         self: *Capability,
         services: native_sdk.platform.PlatformServices,
     ) !Environment {
         try self.requirePlatform(services);
-        try self.installPlatformOrDisconnect(services);
         self.clearRegions();
-        self.generation +%= 1;
-        if (self.generation == 0) self.generation = 1;
-        self.connected = true;
+        self.document_attached = self.platform_ready;
         return self.environment(services);
     }
 
     pub fn sync(
         self: *Capability,
         services: native_sdk.platform.PlatformServices,
-        generation: u64,
         viewport_width: f64,
         viewport_height: f64,
         regions: []const Region,
     ) !Environment {
-        try self.requireCurrent(generation);
         if (!validExtent(viewport_width) or !validExtent(viewport_height))
             return error.InvalidWindowChromeGeometry;
         const chrome = services.windowChrome(self.window_id);
         if (regions.len == 0) {
             self.clearRegions();
-            try self.installPlatformOrDisconnect(services);
             return self.environmentFromChrome(chrome);
         }
         try self.replaceRegions(
@@ -134,19 +135,17 @@ pub const Capability = struct {
             viewport_height,
             regions,
         );
-        try self.installPlatformOrDisconnect(services);
         return self.environmentFromChrome(chrome);
     }
 
     pub fn beginLivePointerDrag(
         self: *Capability,
         services: native_sdk.platform.PlatformServices,
-        generation: u64,
         x: f64,
         y: f64,
     ) !Environment {
-        try self.requireCurrent(generation);
-        if (!validCoordinate(x) or !validCoordinate(y) or
+        if (!self.document_attached or
+            !validCoordinate(x) or !validCoordinate(y) or
             !self.pointIsDraggable(x, y))
             return error.InvalidWindowChromeGesture;
         try Platform.beginLivePointerDrag(
@@ -160,21 +159,18 @@ pub const Capability = struct {
     pub fn current(
         self: *const Capability,
         services: native_sdk.platform.PlatformServices,
-        generation: u64,
-    ) !Environment {
-        try self.requireCurrent(generation);
+    ) Environment {
         return self.environment(services);
     }
 
-    pub fn disconnect(self: *Capability, generation: u64) !void {
-        try self.requireCurrent(generation);
-        self.connected = false;
+    pub fn disconnect(self: *Capability) void {
+        self.document_attached = false;
         self.clearRegions();
     }
 
     pub fn deinit(self: *Capability) void {
-        self.connected = false;
-        self.clearRegions();
+        self.disconnect();
+        self.platform_ready = false;
         Platform.deinit(&self.platform);
     }
 
@@ -190,7 +186,6 @@ pub const Capability = struct {
         chrome: native_sdk.platform.WindowChrome,
     ) Environment {
         return .{
-            .generation = self.generation,
             .top = self.chromeTop(chrome),
             .left = chrome.insets.left,
             .bottom = chrome.insets.bottom,
@@ -199,7 +194,7 @@ pub const Capability = struct {
             .buttons_y = chrome.buttons.y,
             .buttons_width = chrome.buttons.width,
             .buttons_height = chrome.buttons.height,
-            .live_pointer_drag = Platform.live_pointer_drag,
+            .live_pointer_drag = Platform.live_pointer_drag and self.document_attached,
         };
     }
 
@@ -210,25 +205,8 @@ pub const Capability = struct {
         return Platform.chrome_top_override orelse chrome.insets.top;
     }
 
-    fn requireCurrent(self: *const Capability, generation: u64) !void {
-        if (!self.connected or generation == 0 or generation != self.generation)
-            return error.StaleWindowChromeDocument;
-    }
-
     fn clearRegions(self: *Capability) void {
         self.region_count = 0;
-    }
-
-    fn installPlatformOrDisconnect(
-        self: *Capability,
-        services: native_sdk.platform.PlatformServices,
-    ) !void {
-        Platform.install(&self.platform, services, self.window_id) catch |err| {
-            self.connected = false;
-            self.clearRegions();
-            Platform.deinit(&self.platform);
-            return err;
-        };
     }
 
     fn replaceRegions(
@@ -273,7 +251,7 @@ pub const Capability = struct {
     }
 
     fn pointIsDraggable(self: *const Capability, x: f64, y: f64) bool {
-        if (!self.connected or self.region_count == 0 or
+        if (!self.document_attached or self.region_count == 0 or
             !containsPoint(self.regions[0], x, y)) return false;
         for (self.regions[1..self.region_count]) |region|
             if (containsPoint(region, x, y)) return false;
@@ -346,7 +324,7 @@ test "chrome regions stay inside one native top band" {
 
 test "chrome hit testing only accepts candidate minus exclusions" {
     var capability = Capability.init(1);
-    capability.connected = true;
+    capability.document_attached = true;
     capability.region_count = 2;
     capability.regions[0] = .{ .x = 0, .y = 0, .width = 500, .height = 52, .exclusion = false };
     capability.regions[1] = .{ .x = 12, .y = 8, .width = 40, .height = 36, .exclusion = true };
@@ -370,23 +348,16 @@ test "invalid chrome geometry cannot partially replace live regions" {
         capability.replaceRegions(52, 800, 600, &invalid),
     );
     try std.testing.expectEqual(@as(usize, valid.len), capability.region_count);
-    capability.connected = true;
+    capability.document_attached = true;
     try std.testing.expect(capability.pointIsDraggable(200, 20));
     try std.testing.expect(!capability.pointIsDraggable(20, 20));
 }
 
-test "chrome document generations fail closed" {
+test "disconnect clears document-owned regions without owning generation" {
     var capability = Capability.init(1);
-    capability.connected = true;
-    capability.generation = 7;
-    try capability.requireCurrent(7);
-    try std.testing.expectError(
-        error.StaleWindowChromeDocument,
-        capability.requireCurrent(6),
-    );
-    try capability.disconnect(7);
-    try std.testing.expectError(
-        error.StaleWindowChromeDocument,
-        capability.requireCurrent(7),
-    );
+    capability.document_attached = true;
+    capability.region_count = 1;
+    capability.disconnect();
+    try std.testing.expect(!capability.document_attached);
+    try std.testing.expectEqual(@as(usize, 0), capability.region_count);
 }

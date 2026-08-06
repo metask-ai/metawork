@@ -16,11 +16,7 @@ pub fn requirePlatform(services: native_sdk.platform.PlatformServices) !void {
         return error.SystemWebViewChromeUnavailable;
 }
 
-pub fn install(
-    _: *State,
-    _: native_sdk.platform.PlatformServices,
-    _: native_sdk.platform.WindowId,
-) !void {}
+pub fn bindRoot(_: *State) !void {}
 
 pub fn beginLivePointerDrag(
     _: *State,

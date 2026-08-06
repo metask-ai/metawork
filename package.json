@@ -35,6 +35,7 @@
     "test:lifecycle": "node scripts/run-lifecycle-tests.mjs",
     "test:agentcore-vertical:macos": "npm run agentcore:verify-staged && npm run build:frontend && native build . --yes -Doptimize=Debug -Dautomation=true && node scripts/test-agentcore-vertical-macos.mjs",
     "test:agentcore-vertical:windows": "npm run agentcore:verify-staged && node scripts/run-agentcore-vertical-windows.mjs",
+    "test:window-chrome:resize-windows": "npm run agentcore:verify-staged && npm run build:frontend && native build . --yes -Doptimize=Debug -Dautomation=true && node scripts/test-window-chrome-windows.mjs --resize-session-only",
     "test:window-chrome:windows": "npm run agentcore:verify-staged && npm run build:frontend && native build . --yes -Doptimize=Debug -Dautomation=true && node scripts/test-window-chrome-windows.mjs",
     "test:windows:bringup": "node scripts/run-windows-bringup.mjs"
   },

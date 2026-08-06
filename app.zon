@@ -84,6 +84,8 @@
             .title = "MetaWork",
             .width = 1180,
             .height = 760,
+            .min_width = 320,
+            .min_height = 520,
             .restore_state = true,
             .titlebar = "hidden_inset_tall",
             .close_policy = "hide",

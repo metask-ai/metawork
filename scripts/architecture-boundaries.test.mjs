@@ -1088,6 +1088,9 @@ test("Renderer declares window chrome UI while Desktop Host owns native behavior
 
   const app = read("src/app.zig");
   const policy = read("src/bridge/policy.zig");
+  const dispatcher = read("src/bridge/dispatcher.zig");
+  const rendererChrome = read("frontend/src/bridge/window-chrome.ts");
+  const manifest = read("app.zon");
   const seamPath = "src/native_sdk_compat/system_webview_drag_region.zig";
   const windowsPath =
     "src/native_sdk_compat/system_webview_drag_region/windows.zig";
@@ -1113,10 +1116,26 @@ test("Renderer declares window chrome UI while Desktop Host owns native behavior
     compatSource,
     /\.(?:maximizeWindow|restoreWindow|closeWindow|showWindow|focusWindow|showMessageDialog|showOpenDialog|showNotification|startTimer|cancelTimer|quitApp)\(/,
   );
-  assert.match(
+  assert.doesNotMatch(
     seam,
-    /fn installPlatformOrDisconnect[\s\S]*Platform\.install[\s\S]*self\.connected = false[\s\S]*self\.clearRegions\(\)[\s\S]*Platform\.deinit/,
+    /\bgeneration\s*:|\.generation\b|requireCurrent|installPlatformOrDisconnect/,
   );
+  assert.match(
+    dispatcher,
+    /window_chrome_generation: u64[\s\S]*validateWindowChromeSession/,
+  );
+  assert.match(app, /captureStartupWindow\(\)[\s\S]*bindRoot\(\)/);
+  assert.doesNotMatch(
+    seam.match(/pub fn sync[\s\S]*?pub fn beginLivePointerDrag/)?.[0] ?? "",
+    /bindRoot|deinit/,
+  );
+  assert.doesNotMatch(windows, /EnumChildWindows|bindDocument|installChild/);
+  assert.match(rendererChrome, /bridge\.on\("resize", scheduleSync\)/);
+  assert.doesNotMatch(
+    rendererChrome,
+    /addEventListener\("resize"|\brefreshAgain\b|\brefresh\(/,
+  );
+  assert.match(manifest, /\.min_width = 320[\s\S]*\.min_height = 520/);
   assert.deepEqual(
     zigFiles("src/").filter((file) =>
       read(file).includes(
@@ -1182,9 +1201,10 @@ test("Renderer declares window chrome UI while Desktop Host owns native behavior
   );
   assert.doesNotMatch(
     seam + windows + macos,
-    /renderer_controls|maximized|PostMessageW|IsZoomed|ShowWindow|user_close/,
+    /renderer_controls|maximized|IsZoomed|ShowWindow|user_close/,
     "the drag-region seam must not own window-control capability",
   );
+  assert.match(windows, /live_pointer_drag = false/);
   assert.match(macos, /try services\.startWindowDrag\(window_id\)/);
   assert.deepEqual(
     zigFiles("src/").filter((file) =>
@@ -1197,7 +1217,6 @@ test("Renderer declares window chrome UI while Desktop Host owns native behavior
     "CreateWindowExW",
     "DefSubclassProc",
     "DestroyWindow",
-    "EnumChildWindows",
     "GetAncestor",
     "GetCurrentProcessId",
     "GetCurrentThreadId",
@@ -1207,7 +1226,6 @@ test("Renderer declares window chrome UI while Desktop Host owns native behavior
     "IsWindow",
     "RemoveWindowSubclass",
     "ScreenToClient",
-    "SendMessageW",
     "SetWindowSubclass",
     "SetWindowsHookExW",
     "UnhookWindowsHookEx",
@@ -1269,7 +1287,11 @@ test("Renderer declares window chrome UI while Desktop Host owns native behavior
   const windowsProbe = read("scripts/probe-windows-window-chrome.ps1");
   assert.match(
     windowsVertical,
-    /"-Mode",[\s\S]*"controls"[\s\S]*"-Mode",[\s\S]*"close"[\s\S]*"tray-action", "1"/,
+    /"-Mode",[\s\S]*"resize"[\s\S]*"-Mode",[\s\S]*"controls"[\s\S]*"-Mode",[\s\S]*"close"[\s\S]*"tray-action", "1"/,
+  );
+  assert.match(
+    windowsProbe,
+    /\$Mode -eq 'resize'[\s\S]*SetWindowPos[\s\S]*Native minimum size was not enforced/,
   );
   assert.match(
     windowsProbe,
