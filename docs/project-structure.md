@@ -158,6 +158,8 @@ Bridge handler 不能绕过 Workbench 操作 AgentCore handle。automation 只�
 
 `app/mcp_platform.zig` 是系统 credential service、stdio process capability 与 Streamable HTTP mechanics 的 App composition seam；它只把惰性、opaque transport owner 注入 Agent，不解析 MCP JSON-RPC 或复制协商。`agent/catalog.zig` 拥有 AgentCore Skill catalog descriptor 的即时解码、MetaWork-owned 安全投影、opaque handle lease 与 root/home/epoch 绑定；raw handle、scope、物理来源和 policy 不离开 Agent。`agent/mcp_connector.zig` 是 Host transport capability 到官方 `McpConnectorV1` 的唯一映射点，只拥有 callback/status、取消借用、response ownership、bounded secret guard、transport owner 与连接引用，不解析 MCP JSON 或协商协议；`agent/mcp_stdio.zig` 以显式 argv/cwd/environment capability 提供 bounded 子进程与 pipe 生命周期，stderr 只做固定缓冲 drain 和清零，不形成诊断数据面；`agent/mcp_http.zig` 只持有 opaque preauthorized endpoint capability、bounded session token 与连接状态，credential/header/HTTP mechanics 留在 capability owner；`agent/mcp_runtime.zig` 以一次性 `McpRuntimeInput` 线性接管 transport owner、adapter、official server descriptor、稳定 binding identity 与 allowlist；`agent/mcp_catalog.zig` 只经官方 decoder 复制 bounded catalog authority，并原子构造 Runtime-bound selection 与 typed activation health。`agent/session.zig` 串行化 MCP refresh、立即 generation invalidation、activation、Session create/idle replacement 与 shutdown，并继续拥有 AgentCore Runtime/Session、Conversation、typed Run/compact、callback quiescence 和 immutable terminal result。`event_sink.zig` 与 `event_pump.zig` 管理 borrowed event 深拷贝、容量和通知。Agent 不接收 Scheduler capability，也不反向 enqueue Workbench。
 
+`app/mcp_platform.zig` 对 transport-facing credential bytes 做最终 fail-closed 校验，并按 Content-Type 有界读取 JSON 或增量剥离 SSE framing；它不解析 JSON-RPC identity/semantics。`agent/mcp_connector.zig` 的公开 runtime limits 经 App 注入 Workbench preparation，确保 `eligible` server 可直接构造正式 connector。
+
 依赖方向固定为：
 
 ```text

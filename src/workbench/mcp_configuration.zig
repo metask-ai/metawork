@@ -27,6 +27,8 @@ pub const Limits = struct {
     max_credential_locators: usize,
     max_credential_locator_bytes: usize = 256,
     max_credential_secret_bytes: usize = 16 * 1024,
+    max_runtime_secrets_per_server: usize,
+    max_runtime_secret_bytes_per_server: usize,
     max_tool_name_bytes: usize = 256,
 };
 
@@ -117,6 +119,7 @@ pub const ServerProblem = enum {
     invalid_transport,
     invalid_allowlist,
     invalid_credential_locator,
+    credential_capacity_exceeded,
 };
 
 pub const ServerPreparationState = union(enum) {
@@ -275,7 +278,22 @@ pub fn prepare(
                 };
             },
         };
-        server_states[index] = if (resolution) .eligible else .needs_authentication;
+        if (!resolution) {
+            server_states[index] = .needs_authentication;
+            continue;
+        }
+        server_states[index] = switch (try validateResolvedServerCredentials(
+            allocator,
+            server,
+            credentials.items,
+            limits,
+        )) {
+            .usable => .eligible,
+            .unusable => .needs_authentication,
+            .capacity_exceeded => .{
+                .invalid_catalog = .credential_capacity_exceeded,
+            },
+        };
     }
     pruneUnusedCredentials(registry.value.servers, server_states, allocator, &credentials);
     return .{
@@ -377,6 +395,77 @@ fn resolveCredential(
             break :blk true;
         },
     };
+}
+
+const CredentialUse = enum { usable, unusable, capacity_exceeded };
+
+fn validateResolvedServerCredentials(
+    allocator: std.mem.Allocator,
+    server: ServerWire,
+    credentials: []const ResolvedCredential,
+    limits: Limits,
+) std.mem.Allocator.Error!CredentialUse {
+    var unique_secrets: std.ArrayList([]const u8) = .empty;
+    defer unique_secrets.deinit(allocator);
+    var total_bytes: usize = 0;
+
+    if (std.mem.eql(u8, server.transport.kind, "stdio")) {
+        for (server.transport.environment) |entry| {
+            const locator = entry.value.credential_ref orelse return .unusable;
+            const secret = resolvedCredential(credentials, locator) orelse return .unusable;
+            if (!validEnvironmentCredential(secret)) return .unusable;
+            if (try appendUniqueSecret(allocator, &unique_secrets, secret)) {
+                total_bytes = std.math.add(usize, total_bytes, secret.len) catch
+                    return .capacity_exceeded;
+            }
+        }
+    } else if (std.mem.eql(u8, server.transport.kind, "streamable_http")) {
+        for (server.transport.headers) |entry| {
+            const locator = entry.value.credential_ref orelse return .unusable;
+            const secret = resolvedCredential(credentials, locator) orelse return .unusable;
+            if (!validHttpHeaderCredential(secret)) return .unusable;
+            if (try appendUniqueSecret(allocator, &unique_secrets, secret)) {
+                total_bytes = std.math.add(usize, total_bytes, secret.len) catch
+                    return .capacity_exceeded;
+            }
+        }
+    } else return .unusable;
+
+    if (unique_secrets.items.len > limits.max_runtime_secrets_per_server or
+        total_bytes > limits.max_runtime_secret_bytes_per_server)
+        return .capacity_exceeded;
+    return .usable;
+}
+
+fn appendUniqueSecret(
+    allocator: std.mem.Allocator,
+    secrets: *std.ArrayList([]const u8),
+    candidate: []const u8,
+) std.mem.Allocator.Error!bool {
+    for (secrets.items) |secret|
+        if (std.mem.eql(u8, secret, candidate)) return false;
+    try secrets.append(allocator, candidate);
+    return true;
+}
+
+fn resolvedCredential(
+    credentials: []const ResolvedCredential,
+    locator: []const u8,
+) ?[]const u8 {
+    for (credentials) |credential|
+        if (std.mem.eql(u8, credential.locator, locator)) return credential.secret;
+    return null;
+}
+
+pub fn validEnvironmentCredential(value: []const u8) bool {
+    return value.len != 0 and std.mem.indexOfScalar(u8, value, 0) == null;
+}
+
+pub fn validHttpHeaderCredential(value: []const u8) bool {
+    if (value.len == 0) return false;
+    for (value) |byte| if ((byte < 0x20 and byte != '\t') or byte == 0x7f)
+        return false;
+    return true;
 }
 
 fn secureFree(allocator: std.mem.Allocator, bytes: []u8) void {
@@ -513,7 +602,9 @@ pub fn serverProblem(server: ServerWire, limits: Limits) ?ServerProblem {
 fn validateRegistryIdentity(registry: *const RegistryWire, limits: Limits) !void {
     if (registry.schema_version != schema_version or registry.generation == 0 or
         registry.servers.len > limits.max_servers or limits.max_servers == 0 or
-        limits.max_tools_per_server == 0 or limits.max_namespace_bytes == 0)
+        limits.max_tools_per_server == 0 or limits.max_namespace_bytes == 0 or
+        limits.max_runtime_secrets_per_server == 0 or
+        limits.max_runtime_secret_bytes_per_server == 0)
         return error.Invalid;
     for (registry.servers, 0..) |server, index| {
         if (!validIdentifier(server.id, limits.max_identity_bytes) or
@@ -913,6 +1004,8 @@ const test_limits: Limits = .{
     .max_tools_per_server = 8,
     .max_namespace_bytes = 24,
     .max_credential_locators = 16,
+    .max_runtime_secrets_per_server = 128,
+    .max_runtime_secret_bytes_per_server = 16 * 1024,
 };
 
 test "registry strictly decodes valid stdio and HTTP configuration" {
@@ -1188,6 +1281,50 @@ test "preparation separates disabled invalid missing-auth and eligible servers" 
     try std.testing.expectEqual(@as(usize, 1), prepared.credentials.len);
     try std.testing.expectEqualStrings("present/token", prepared.credentials[0].locator);
     try std.testing.expectEqualStrings("credential-value", prepared.credentials[0].secret);
+}
+
+test "preparation rejects unusable or over-capacity credentials per server" {
+    const Resolver = struct {
+        fn resolve(
+            _: ?*anyopaque,
+            allocator: std.mem.Allocator,
+            locator: []const u8,
+        ) CredentialResolution {
+            const value: []const u8 = if (std.mem.eql(u8, locator, "unsafe/header"))
+                "bad\r\nheader"
+            else if (std.mem.eql(u8, locator, "unsafe/environment"))
+                "bad\x00environment"
+            else if (std.mem.eql(u8, locator, "large/one"))
+                "1234"
+            else if (std.mem.eql(u8, locator, "large/two"))
+                "5678"
+            else
+                return .missing;
+            return .{ .value = allocator.dupe(u8, value) catch return .out_of_memory };
+        }
+    };
+    const registry =
+        \\{"schema_version":1,"generation":1,"servers":[{"id":"unsafe-http","namespace":"unsafe_http","display_name":"Unsafe HTTP","enabled":true,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"streamable_http","url":"https://mcp.example.test/rpc","headers":[{"name":"Authorization","value":{"credential_ref":"unsafe/header"}}]}},{"id":"unsafe-env","namespace":"unsafe_env","display_name":"Unsafe env","enabled":true,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"stdio","command":"tool","environment":[{"name":"TOKEN","value":{"credential_ref":"unsafe/environment"}}]}},{"id":"too-large","namespace":"too_large","display_name":"Too large","enabled":true,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"stdio","command":"tool","environment":[{"name":"ONE","value":{"credential_ref":"large/one"}},{"name":"TWO","value":{"credential_ref":"large/two"}}]}},{"id":"ready","namespace":"ready","display_name":"Ready","enabled":true,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"stdio","command":"tool"}}]}
+    ;
+    var limits = test_limits;
+    limits.max_runtime_secret_bytes_per_server = 6;
+    var prepared = try prepare(
+        std.testing.allocator,
+        registry,
+        true,
+        false,
+        .{ .available = true, .resolve_fn = Resolver.resolve },
+        limits,
+    );
+    defer prepared.deinit();
+    try std.testing.expect(prepared.server_states[0] == .needs_authentication);
+    try std.testing.expect(prepared.server_states[1] == .needs_authentication);
+    try std.testing.expectEqual(
+        ServerProblem.credential_capacity_exceeded,
+        prepared.server_states[2].invalid_catalog,
+    );
+    try std.testing.expect(prepared.server_states[3] == .eligible);
+    try std.testing.expectEqual(@as(usize, 0), prepared.credentials.len);
 }
 
 test "preparation classifies unsafe disabled server facts before projection" {

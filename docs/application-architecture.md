@@ -25,6 +25,8 @@ MCP 仍服从这四个 named modules：Workbench 通过 `workbench/mcp_configura
 
 启动按 `Workbench MCP preparation → Agent Runtime init → MCP activation → Workbench health/selection commit → Bridge ingress` 线性化。Preparation 的预期 registry/read/credential 故障形成 MCP unavailable/degraded 并向 Agent 传入空 server 集合；OOM 和内部不变量仍是 fatal。`agent.Runtime.init`/AgentCore `runtimeCreate` 失败始终终止 App 启动，不得猜测为 MCP-specific 并空配置重试。Runtime 创建成功后的 refresh/transport/catalog failure 才能降级 MCP并让普通 Task 使用 null selection。新 Session 只借用 Workbench 当前 committed opaque selection；启动后没有 registry hot reload 或既有 Session mutation 路径。关闭先停止 Bridge ingress 并证明同步 callback quiescent，再停止 Account/Workbench admission、join Agent callback，最后由 owner 逆序释放 MCP transport、Workbench 与 Runtime。
 
+Workbench preparation 按 transport 校验 credential bytes 与每服务 aggregate runtime secret limit；Agent 是该运行限制的真源，App 负责注入。App 的 HTTP capability 只处理 HTTP Content-Type 和 SSE framing，输出单条 JSON payload；JSON-RPC 与 MCP 消息语义仍完全归 AgentCore。
+
 ## 2. 领域状态与业务事务
 
 ### 2.1 Account 与 ExecutionConfig

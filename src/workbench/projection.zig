@@ -4536,7 +4536,7 @@ pub const Workbench = struct {
             }) catch return error.SnapshotTooLarge;
             try self.projectedJsonValueWithKnownCredentials(writer, switch (status) {
                 .ready, .disabled => "",
-                .needs_authentication => "Credential is missing",
+                .needs_authentication => "Credential is unavailable",
                 .@"unreachable" => "Server is unavailable",
                 .invalid_catalog => "Configuration or catalog is invalid",
             });
@@ -12867,6 +12867,8 @@ test "MCP startup health commits a safe degraded Workbench projection" {
             .max_tools_per_server = 32,
             .max_namespace_bytes = 128,
             .max_credential_locators = 64,
+            .max_runtime_secrets_per_server = 128,
+            .max_runtime_secret_bytes_per_server = 16 * 1024,
         },
     );
     var preparation_owned = true;

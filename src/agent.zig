@@ -71,6 +71,7 @@ pub const McpCancellation = mcp_connector.Cancellation;
 pub const McpOpenOutcome = mcp_connector.OpenOutcome;
 pub const McpExchangeOutcome = mcp_connector.ExchangeOutcome;
 pub const McpTransportFailure = mcp_connector.Failure;
+pub const McpRuntimeLimits = mcp_connector.Limits;
 pub const McpStdioBackend = mcp_stdio.Backend;
 pub const McpStdioConfig = mcp_stdio.Config;
 pub const McpHttpBackend = mcp_http.Backend;

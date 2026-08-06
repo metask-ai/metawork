@@ -89,6 +89,8 @@ Windows owner 只锁定并验证 Windows x86_64 GNU artifact；当前 exact lock
 
 Windows 真实 desktop vertical 还必须在 Bridge 连接后通过 UI Automation 点击 Composer、发送真实键盘输入并清理临时内容，证明只读窗口状态同步没有把焦点从 WebView 抢回 Native 顶层窗口。
 
+MCP 定向验证中，`test-mcp-configuration` 还固定 transport-facing credential byte validation、每服务 aggregate runtime secret limit 与单服务失败隔离；`test-mcp-platform` 固定 HTTP Content-Type 分流、bounded SSE framing、完整事件后不等待 EOF 和超限拒绝。这些自动化仍不替代真实第三方 server 或平台 credential/network 人工验收。
+
 ## 4. 登录优先与成熟 Workbench 验收矩阵
 
 产品行为由 [产品需求的 Metask Account、恢复与 Workbench 章节](requirements.md)定义；下表只记录覆盖状态和证据。

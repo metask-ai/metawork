@@ -84,6 +84,8 @@ revision 6 的公开 Runtime/Session surface 包含 fresh create、checkpoint ex
 
 MetaWork MCP Host 工程接线不得改变上述协议 owner。Workbench preparation 只把 enabled、配置有效且 credential-ready 的 owned server input 线性转交 Agent；disabled、missing credential 和 invalid configuration 保留为 Workbench 产品事实。Agent 在 Runtime 创建前只能构造惰性 transport/backend capability，不得连接网络或启动 child；真正的 open/reachability 发生在 Runtime 成功后的 official refresh/activation，失败映射为 MCP health 而不是伪造 Runtime 创建失败。`McpRuntimeInput` 以失败零消费、成功全接管的方式持有 transport owner、secret guard、adapter、official descriptor、稳定 id→binding identity 与 allowlist；Runtime create 只移动这份已完成的输入。每次 refresh 在进入 AgentCore 前使旧 MCP generation 失效，只有 official describe、binding identity 与 Workbench allowlist 全部通过后才原子构造 opaque activation；存在 catalog issue、缺少 allowlist tool 或 server 不 fresh 时 fail closed，不把对应 tool 纳入 selection。Activation 只发布 registry/catalog generation、ready/degraded/unavailable、稳定 server id、计数和 reduced catalog，不包含 raw issue detail、schema、fingerprint、transport 或 credential。AgentCore `runtimeCreate` 仍返回统一 Runtime 结果；MetaWork 不重试、不复制协议，也不把该失败降级为普通 MCP unavailable。
 
+Workbench 只有在 resolved credential 对目标 transport 可用且满足 Agent-owned runtime secret limits 时才发布 `eligible`；Agent 公开这组运行期限制，App 通过 composition 注入 Workbench，Workbench 不反向依赖 Agent 实现模块。App-owned HTTP capability 严格分流 JSON 与 event-stream response，只把 SSE framing 还原后的单条 JSON payload 交给 AgentCore，不解析 JSON-RPC identity 或 MCP 语义。
+
 ## 4. Agent binding
 
 Agent binding 是 Metask AgentCore 的 ABI 消费者，不是 Native SDK Adapter。它直接持有 bundle SDK API table 和 opaque handles。

@@ -34,6 +34,7 @@ const tray_items = [_]native_sdk.platform.TrayMenuItem{
     .{ .id = tray_quit_id, .label = "Quit MetaWork", .command = "metawork.tray.quit" },
 };
 const windows_data_directory_name = "MetaWork";
+const mcp_runtime_limits: agent.McpRuntimeLimits = .{};
 
 const mcp_configuration_limits: workbench_api.McpConfigurationLimits = .{
     .max_servers = 64,
@@ -41,6 +42,8 @@ const mcp_configuration_limits: workbench_api.McpConfigurationLimits = .{
     .max_namespace_bytes = 24,
     .max_credential_locators = 4096,
     .max_credential_secret_bytes = native_sdk.platform.max_credential_secret_bytes,
+    .max_runtime_secrets_per_server = mcp_runtime_limits.max_secrets,
+    .max_runtime_secret_bytes_per_server = mcp_runtime_limits.max_secret_bytes,
 };
 
 fn platformDataDirectoryName(os_tag: @TypeOf(builtin.os.tag)) []const u8 {
