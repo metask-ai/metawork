@@ -107,9 +107,9 @@ Renderer Bridge 的 identity、revision、command、event、snapshot 与兼容�
 
 `main.zig` 只调用 `metawork_app`。`app.zig` 物理上共置两个角色：Desktop Host composition root 组装 Bridge 与 Application、消费并注入 Native SDK 的窄平台 capability、驱动平台生命周期；Application coordinator 在主线程按规范协调 Account prepare/commit、Workbench no-fail install、Agent event drain 与 owner 生命周期。后者属于 Application 的事务协调但不持有领域状态或复制 owner policy；这种源码共置不产生新的模块、业务 owner 或统一 Host facade。
 
-`windows_host.zig` 不是第六模块或新的 lifecycle owner。它只封装 Native SDK 0.8.0 Windows Host 的两个可测试不变量：从 SDK context 精确解析唯一 startup HWND；显式托盘 Quit 在验证同一窗口后使用 SDK `closeWindow` 进入正常 last-window shutdown，而非停不下当前 callback path 的 `quitApp`。非 Windows 仍直接使用 `quitApp`。只有 `app.zig` 和 `window_chrome.zig` 可以导入该文件；它不得吸收菜单、托盘、Application policy 或 Renderer protocol。
+`windows_host.zig` 不是第六模块、统一 Windows facade 或单一 capability seam，而是共享同一 startup window identity/lifecycle 不变量的窄兼容容器；它只允许承载两条独立登记的 Native SDK 0.8.0 Windows seam。`startup_window_identity` 在 Runtime 尚未公开原生窗口 identity 时补齐单一 startup window 的窄平台识别，属于二级兼容；`explicit_quit` 在 Runtime `quitApp` 尚不能结束当前 callback path 时使用 SDK 已有关闭原语进入正常 last-window shutdown，属于一级兼容，并可依赖前一条 identity seam。两者具有独立 allowlist、验证和删除条件：Native SDK 公开稳定窗口 identity 并经 Windows 验收后删除前者；Runtime quit path 验收可用后删除后者。当前实现仍通过强转 `PlatformServices.context` 获得 SDK 私有 Windows 状态，因此依赖该识别的两条路径尚未通过 Native SDK 能力路径 gate，不能仅凭共处 Desktop Host 文件就视为获准兼容。非 Windows 仍使用 Runtime `quitApp`。只有 `app.zig` 和 `window_chrome.zig` 可以导入该文件；它不得增加第三项 capability，也不得吸收菜单、托盘、Application policy 或 Renderer protocol。
 
-`window_chrome.zig` 是 Desktop Host-owned 单一启动窗口的窄平台 seam，只补齐 Native SDK 0.8.0 尚未覆盖 System WebView 的 drag-region。它拥有 document generation、region bounds、native top band、精确启动窗口 identity 和 teardown 校验；Windows 安装透明 native top-band overlay 与 root/WebView hit-test subclass，把标准 non-client pointer 消息交还同一根窗口，并以该窗口的 OS system menu 处理 overlay 右键；macOS 只在 live pointer event 内调用 SDK `startWindowDrag`。它不接受或执行 Renderer 提交的 minimize/maximize/restore/close/system-menu action，不读取窗口状态，也不形成通用 Desktop Interface、Native SDK adapter、第二窗口 owner 或 action facade。
+`window_chrome.zig` 实现一条 Desktop Host-owned `system_webview_drag_region` capability seam，只补齐 Native SDK 0.8.0 尚未进入 Runtime API 的 System WebView drag-region。macOS 在 live pointer event 内调用 SDK 已有 `startWindowDrag` 原语，属于该 seam 的一级兼容实现；Windows 以 Win32 透明 native top-band overlay 与 root/WebView hit-test subclass 补足 SDK 实现缺口，属于同一 seam 的二级兼容实现，并把标准 non-client pointer 消息交还同一根窗口、以该窗口的 OS system menu 处理 overlay 右键。该文件拥有 document generation、region bounds、native top band、精确启动窗口 identity 和 teardown 校验，但不接受或执行 Renderer 提交的 minimize/maximize/restore/close/system-menu action，不读取或复制 Runtime 窗口状态，也不形成通用 Desktop Interface、Native SDK adapter、第二窗口 owner 或 action facade。Native SDK Runtime drag-region 经目标平台验收可用后，必须原位替换并删除对应兼容路径。
 
 Renderer 的 `components/ui/WindowTitlebar.tsx` 绘制产品 header，并通过 portal 在 document root 只声明一个 `data-metawork-window-drag` marker。`frontend/src/bridge/window-chrome.ts` 是 browser-side Bridge boundary：它有界镜像一个 candidate 与全 document 交互排除区，runtime decode Host geometry，并写入 CSS layout variables；窗口 resize 时先重新 `connect` 获取新的 generation/geometry，再同步当前 region。产品 React 代码不得直接调用 `window.zero`，不得维护平台名、原生按钮或窗口状态。已删除的 `app/useWindowChrome.ts`、`components/ui/WindowControls.tsx` 与 `platform/window-chrome.ts` 不得恢复。Native SDK 官方 System WebView drag-region 经目标平台验收可用后，必须原位替换 seam，并同步收口不再需要的专用 command、allowlist 和测试。
 
@@ -125,7 +125,7 @@ Renderer 的 `components/ui/WindowTitlebar.tsx` 绘制产品 header，并通过 
 - `credential_store.zig` 独立拥有 macOS 双 family slot、固定 `manifest.json` schema 与原子提交语义；
 - `scripts/cleanup-legacy-macos-account.mjs` 是 Account-owned、只由开发者显式执行的一次性 legacy maintenance 入口；签名 setup 不拥有或删除 Account credential；
 - `windows_store.zig` 拥有 Windows 单 refresh token 与无版本、无 secret `account.json` 状态；不读取 macOS manifest，也不持久化 access token 或 Provider API Key；
-- `platform.zig` 是 Account 内唯一导入 Native SDK 的窄主线程 seam，分别适配 macOS 与 Windows 的 credential、timer 与持久化能力，不形成通用 Desktop Interface；
+- `platform.zig` 是当前 Account 平台实现中唯一导入 Native SDK 的过渡边界，分别适配 macOS 与 Windows 的 credential、URL、timer 与持久化能力；它仍让 Application owner 持有原始 `PlatformServices`，属于 [验证规范](validation.md#native-sdk-能力路径)登记的架构缺口，不是获准兼容 seam，也不得增加新的底层能力或消费者；
 - `credentials.zig` 管理 execution credential ownership/rotation。
 
 Account 与 Workbench 是同级 owner，只通过纯 `account/contract.zig` 和 App coordinator 主线程提交链协作。Bridge 只消费脱敏 view/command contract，不导入 Account Runtime。App coordinator 可以持有两个 owner 的实例引用以协调提交，但不得持有 Account catalog、credential、attempt、mailbox 或 continuation 状态。
@@ -165,7 +165,7 @@ Bridge handler 不能绕过 Workbench 操作 AgentCore handle。automation 只�
 
 `agent/catalog.zig` 拥有 AgentCore Skill catalog descriptor 的即时解码、MetaWork-owned 安全投影、opaque handle lease 与 root/home/epoch 绑定；raw handle、scope、物理来源和 policy 不离开 Agent。`agent/session.zig` 拥有 AgentCore Runtime/Session、Conversation、typed Text/Skill Run、typed manual compact、catalog bind/idle refresh、callback quiescence、UI wait、cancel/close/shutdown 以及 immutable Run/compact terminal result。`event_sink.zig` 与 `event_pump.zig` 管理 borrowed event 深拷贝、容量和通知。Agent 不接收 Scheduler capability，也不反向 enqueue Workbench。
 
-依赖方向固定为：
+正式允许的依赖方向固定为：
 
 ```text
 main -> app
@@ -173,10 +173,10 @@ app  -> account, workbench, agent, bridge, automation, Native SDK
 bridge -> workbench, account contract, Native SDK
 workbench -> agent, account contract
 agent -> Metask AgentCore bundle SDK
-account -> account contract, Native SDK platform capability
+account -> account contract
 ```
 
-禁止 `agent -> workbench/bridge/app`、`workbench -> bridge`、`bridge -> Account runtime` 和任何产品模块反向依赖 Renderer。
+`bridge -> Native SDK` 只允许消费正式 Bridge transport contract，以及 transport authority 和窄 Host capability 调用所需的 data-only DTO/opaque identifier；它不允许 Bridge 持有 `PlatformServices`、具体平台实现、OS handle 或直接系统调用权。当前 `account/platform.zig -> Native SDK` 是验证规范登记的非合规例外，不属于允许依赖图，也不能作为新增依赖的先例。禁止 `agent -> workbench/bridge/app`、`workbench -> bridge`、`bridge -> Account runtime` 和任何产品模块反向依赖 Renderer。
 
 ## 6. 测试与构建资产
 

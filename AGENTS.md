@@ -43,6 +43,12 @@
 - `app.zon`、Zig 和 TypeScript command catalog 必须完全一致。Renderer 对 Host payload 做 runtime decode；Host 执行 origin、command、payload、Workspace、Task 和权限校验。
 - Bridge 只拥有 command ingress 与 `ProductDelivery` transport；产品状态和 Run policy 归 Workbench。automation 只能驱动真实产品路径，不注册测试专用协议或第二数据面。
 
+### Native SDK 能力路径
+
+- 对窗口、WebView、生命周期和其他系统 effect，Native SDK Runtime API 已提供且可用时必须使用 Runtime API。Bridge 可以消费正式 Native SDK Bridge transport contract，以及完成 transport authority 和窄 Host capability 调用所必需的 data-only DTO/opaque identifier；这些值不得授予直接系统执行权或传播到 Application owner。
+- 低层 SDK 原语或 Win32/AppKit/GTK API 只能存在于 [高层架构](docs/architecture.md#35-native-sdk)和[验证规范](docs/validation.md#native-sdk-能力路径)逐项登记的 Desktop Host compatibility seam。每条 seam 只补一个 SDK 缺口，并独立 allowlist、验证和删除；禁止文件级或目录级宽泛放行，现存违规不得作为新增依赖的先例。
+- Application 和 Renderer 不得依赖 Native SDK 系统能力类型；Bridge 不得持有原始 `PlatformServices`、具体平台实现类型、系统 handle 或底层调用权。任何 MetaWork 代码都不得访问、解释或强转 `PlatformServices.context`。Desktop Host 只能向 Bridge 或 Application 对应 owner 注入其职责所需的 MetaWork-owned 窄 capability。
+
 ### AgentCore 依赖
 
 - 正式应用只消费 canonical `.agentcore/bundle` 与官方 `bindings/zig` package。外部 bundle root 只用于 candidate probe/stage；禁止源码依赖、源码复制、Git/path implementation dependency、`latest`、可变 tag 和静默 fallback。

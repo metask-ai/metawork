@@ -1,7 +1,7 @@
 # MetaWork 高层架构
 
 > 状态：当前为同进程 prototype；后续正式故障域选择单 AgentCore Worker
-> 日期：2026-08-05
+> 日期：2026-08-06
 
 本文只定义 MetaWork 的顶层边界、依赖方向、运行形态、进程与故障域以及跨模块安全边界。产品对象和行为见 [产品需求](requirements.md)，Application 内部 owner、事务、并发和恢复见 [Application 内部架构](application-architecture.md)，Renderer Bridge wire 见 [Renderer Bridge 合同](renderer-bridge-contract.md)，AgentCore 线程与生命周期见 [AgentCore 集成契约](agentcore-integration.md)，ABI 与 bundle 门槛见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。实际源码目录和依赖方向见 [工程结构与所有权](project-structure.md)，验证状态见 [验证规范](validation.md)。
 
@@ -83,7 +83,36 @@ AgentCore 拥有 Provider 调用、agent loop、Conversation、built-in tools、
 
 Native SDK 是外部桌面依赖。Desktop Host 通过 Native SDK 执行桌面生命周期、原生窗口与 window chrome 行为、System WebView、菜单、托盘、全局快捷键及其他受限平台机制，并拥有对应系统资源和真实状态；它托管 React Renderer，为 Bridge 提供受限平台 seam。`app.zig` 的 Host composition 角色只把产品所需的窄 capability 注入 Application 并驱动平台生命周期；共置的 Application 协调角色执行已定义的跨 owner 顺序，但不持有产品 policy。Renderer 也不能把视觉呈现或交互命中升级为原生 owner。
 
-当前 Host 只保留两个受约束的 Native SDK 0.8.0 兼容接线文件，其中 `windows_host.zig` 仅用于 Windows；它们不形成新模块或统一 facade。`windows_host.zig` 只解析并验证 Desktop Host-owned 单一启动 HWND，并为显式 Quit 选择 SDK 的正常 last-window shutdown 路径；`window_chrome.zig` 只补齐 SDK 尚未覆盖 System WebView 的 drag-region。Windows 以透明 native top-band overlay 和 hit-test subclass 把已校验区域交给系统 non-client 行为，并在 overlay 截获右键时打开该根窗口的原生 system menu；macOS 只在 SDK 要求的 live pointer event 内调用公开 `startWindowDrag`。原生按钮、双击、拖动循环、resize、close policy、托盘、生命周期与真实状态仍由 Native SDK/OS 拥有。这些文件不得演化为 Native SDK adapter、通用 Desktop Interface、第二套窗口 owner、窗口 action facade 或 Renderer 任意原生调用面；SDK 官方 System WebView drag-region 与 Windows lifecycle path 经目标平台验收可用后必须分别原位替换对应接线。精确文件、wire 和验证状态分别见 [工程结构与所有权](project-structure.md)、[Renderer Bridge 合同](renderer-bridge-contract.md)与 [验证规范](validation.md)。
+从 MetaWork Desktop Host 作为 Native SDK consumer 的视角，对于窗口、WebView、生命周期、对话框、通知、计时器、凭据和其他系统 effect，只有 Native SDK Runtime API 才是 SDK 正式提供给应用的能力入口。这里的“应用”指整个 MetaWork executable，不表示 MetaWork 的 Application 逻辑边界可以依赖 Native SDK Runtime 类型；Application owner 只消费 MetaWork-owned 窄 capability，由 Desktop Host binding 映射到 Runtime API。SDK 内存在但尚未进入 Runtime API 的函数或平台实现只证明底层机制存在，不构成 MetaWork 可以长期依赖的系统能力合同。
+
+Native SDK Bridge API 是独立的正式 transport surface，不属于系统能力入口。Bridge 可以使用完成 command ingress、source/window authority、handler 注册和 Host capability 调用所必需的 Native SDK Bridge contract、data-only DTO 与 opaque identifier；这些值本身不授予系统执行权。Application owner 不消费这些 SDK 类型，Renderer 只消费 Renderer Bridge wire。
+
+| Native SDK surface | MetaWork 消费者 | 边界 |
+| ------------------ | --------------- | ---- |
+| Runtime API | Desktop Host | 执行系统 effect，并维护 Native SDK 的窗口、WebView、托盘和生命周期状态 |
+| Bridge API | Bridge、Desktop Host composition | `Invocation`、`Source`、`Handler`、`BridgePolicy` 等正式 transport contract |
+| data-only DTO / opaque identifier | Bridge、Desktop Host binding | `WindowId`、dialog options/result 等无执行 authority 的公开值；不得传播到 Application owner |
+| `PlatformServices` | 已登记的一级兼容 seam | 可执行低层 SDK 原语的受限 authority，不是普通依赖 |
+| 具体平台实现类型与 OS handle | 已登记的二级兼容 seam | `WindowsPlatform`、`HWND`、AppKit/GTK 对象等平台 authority |
+| `PlatformServices.context` | 无 | Native SDK 私有 opaque 数据，MetaWork 永不访问、解释或强转 |
+
+产品需要系统能力时，正常依赖链是 `Application owner → MetaWork-owned capability → Desktop Host binding → Native SDK Runtime API → SDK internals → OS`；Bridge 需要受限系统 effect 时经 Bridge-owned 窄 Host capability 进入同一 Runtime 路径；纯 Host 生命周期和窗口行为从 Desktop Host 直接进入 Runtime API。系统能力按以下三级 Host 调用路径消费：
+
+| 路径 | 调用链 | 适用条件 |
+| ---- | ------ | -------- |
+| 正常路径 | Desktop Host → Native SDK Runtime API → SDK `PlatformServices` → OS | Runtime API 已提供完整能力；MetaWork 只调用 Runtime API，后两段属于 SDK 内部实现 |
+| 一级兼容 | Desktop Host 窄 seam → SDK `PlatformServices` 已有原语 → OS | Runtime API 缺失或存在已确认的目标平台缺陷，但 SDK 底层已有所需原语 |
+| 二级兼容 | Desktop Host 窄平台 seam → Win32 / AppKit / GTK → OS | SDK 连可用底层原语都缺失，MetaWork 必须暂时补齐平台实现 |
+
+Runtime API 已提供且可用时，绕过它调用低层函数属于架构违规，不得包装成“兼容”。兼容的治理单位是 capability seam，而不是文件；每条 seam 只补一个明确的 Runtime/SDK 缺口，并且必须同时满足：
+
+- 只存在于 Desktop Host-owned、按 capability 和平台收窄的兼容实现中；Application 和 Renderer 不得持有 Native SDK 系统能力类型，Bridge 不得持有原始 `PlatformServices`、具体平台实现类型、系统 handle 或底层调用权；Desktop Host 只能向 Bridge 或 Application 对应 owner 注入其职责所需的窄 capability；
+- 只调用 SDK 对外可见的低层原语或公开系统 API；`PlatformServices.context` 始终视为 Native SDK 私有 opaque 数据，MetaWork 不得访问、解释或强转为具体平台内部类型；
+- 明确线程、窗口身份、资源 ownership、失败和 shutdown 语义，不建立第二份窗口、WebView、托盘或生命周期状态，也不得使 OS 状态与 Runtime 状态静默分裂；
+- 写明 capability identity、对应 SDK 缺口、允许的低层调用、目标平台、调用者、验证方式和删除条件；优先推动 Native SDK 补齐 Runtime API，正式 API 经目标平台验收可用后原位替换并删除兼容 seam；
+- 多条 seam 只有共享同一资源、线程或生命周期不变量时才可共处一个窄 Host 文件，并且仍须独立登记、allowlist、验证和删除；禁止文件级或目录级宽泛放行，新增无直接关联的 capability 默认使用新的窄文件。
+
+获准兼容 seam 的当前文件、SDK 缺口、目标平台与删除条件由 [工程结构与所有权](project-structure.md)映射，合规状态和平台证据由 [验证规范](validation.md)维护；与 Renderer 交换的精确 wire 仍只由 [Renderer Bridge 合同](renderer-bridge-contract.md)定义。未登记的低层调用一律不构成兼容能力。
 
 ## 4. 跨模块合同
 

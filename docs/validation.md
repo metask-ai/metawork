@@ -48,6 +48,26 @@ npm test
 
 Automatic Workspace 的正式 Zig graph 持续固定 Native SDK `.data/workspaces` root capability、unavailable 降级、保留命名空间、随机独立目录、exclusive create/碰撞上限、canonical containment、manual/automatic 独立 record capacity、Task-owned registration、Session/Task 发布事务、发布前空目录回滚和 Task 删除 quiescence。跨语言 fixture、Renderer suite 与 lifecycle 持续固定 Workspace `kind`、Task → Workspace snapshot 引用完整、Manual recent/操作过滤、automatic Task route、定时任务每个 occurrence 创建并保留不同 Automatic Workspace、Bridge/Renderer/持久化不接受 Scheduled Task Workspace target、后台 occurrence 不改变 Manual Workspace recent/draft scope，以及 capability unavailable 时不静默采用用户目录。Windows bring-up 与 macOS 对应验证必须各自证明真实平台目录解析和权限行为；单元测试不能替代平台结果。
 
+### Native SDK 能力路径
+
+[高层架构](architecture.md#35-native-sdk)定义 Native SDK Runtime、Bridge transport、data-only DTO/opaque identifier、一级兼容和二级兼容。Bridge 对正式 Native SDK Bridge contract 及必要 data-only 值的依赖属于正常 transport 路径，不是系统能力兼容；持续回归必须证明这些值不授予直接系统执行权、不传播到 Application owner，并且 Bridge 不持有 `PlatformServices`、具体平台实现类型或 OS handle。兼容 seam 不得访问或强转 `PlatformServices.context`，每条 seam 都必须保持单一 capability identity、平台范围和独立删除条件。关键词扫描只能作为 guard，不能替代 Runtime 状态、平台行为和 shutdown 验证。
+
+“兼容 seam 合规”与“全仓 Native SDK 能力路径合规”是两个不同 gate。当前状态如下：
+
+| 路径 | 架构分类 | 当前状态 | 收口范围 |
+| ---- | -------- | -------- | -------- |
+| `src/window_chrome.zig` macOS live-pointer drag | 一级兼容 | 使用 SDK 已有 `startWindowDrag` 原语；仍需目标平台行为验收 | 当前 window-chrome seam |
+| `src/window_chrome.zig` Windows overlay/hit-test | 二级兼容 | Win32 实现按单一 startup window 收窄，但其窗口 identity 仍依赖 `windows_host.zig` 的私有 context 访问 | 当前 window-chrome seam；identity 缺口消除前不能关闭 Windows gate |
+| `src/windows_host.zig` startup identity | 二级兼容意图 | 当前仍把 `PlatformServices.context` 强转为 SDK 私有 Windows 类型，不是获准实现 | 当前 Desktop Host 兼容层必须消除或撤回该路径 |
+| `src/windows_host.zig` explicit quit | 一级兼容意图 | SDK `closeWindow` 原语用于规避已确认的 Runtime `quitApp` callback-path 缺陷，但当前前置窗口校验仍依赖同一私有 context | identity 缺口消除并完成 shutdown 验证后才能关闭该 gate |
+| `src/app.zig` 中 Runtime 已覆盖的系统能力 | 架构违规 | `showMessageDialog`、`showNotification`、`showOpenDialog`、`startTimer` 与 `cancelTimer` 仍存在直接低层调用，且 `App` 长期持有原始 `PlatformServices` | 后续 Runtime routing DAG；不扩大为兼容 allowlist |
+| `src/app.zig` 的 main-loop `wake` | 一级兼容候选 | 当前 SDK Runtime API 缺口尚未形成单项兼容 seam | 后续先确认 SDK 缺口，再隔离并验证线程与 shutdown 语义 |
+| `src/account/platform.zig` | Application 边界违规 | Account backend 持有原始 `PlatformServices`，并直接适配 credential、URL 与 timer 等能力 | 后续 Application capability DAG，由 Desktop Host 注入 owner-defined 窄 capability |
+
+当前 Desktop Host 兼容层只有在私有 context 访问归零、每项 seam 的线程/身份/资源与 shutdown 不变量得到对应验证后，才能声明 seam gate 关闭；该结论不代表全仓能力路径已经合规。`app.zig` 与 Account 的登记缺口完成独立 DAG 前，全仓 Native SDK 能力路径 gate 保持打开。
+
+架构 guard 必须让 `PlatformServices.context` 保持零 allowlist；原始 `PlatformServices` 和 Win32/AppKit/GTK 调用只能出现在逐项登记的当前缺口或兼容 seam 中。Bridge import guard 可以放行正式 `native_sdk.bridge` contract 和逐项确认的 data-only DTO/opaque identifier，但必须拒绝 `PlatformServices`、具体平台实现和直接系统 effect。每个兼容 allowlist 项必须绑定 exact capability、symbol/call path、平台、原因和删除条件，不得以整个文件、目录或通用 Host/Platform 名称放宽。关键词扫描只固定结构边界，Runtime 状态一致性、真实窗口行为和 shutdown 仍由对应行为与平台测试负责。
+
 ### macOS
 
 首次使用真实 Account 前，按 [macOS 本地开发签名](macos-local-development.md)选择 Apple Development identity：
