@@ -33,9 +33,36 @@ pub const McpCatalogTool = mcp_catalog.Tool;
 pub const McpCatalogIssue = mcp_catalog.Issue;
 pub const McpSelection = mcp_catalog.Selection;
 pub const McpSelector = mcp_catalog.Selector;
-pub const McpServerConfig = mcp_runtime.ServerConfig;
+pub const McpActivation = mcp_catalog.Activation;
+pub const McpActivationState = mcp_catalog.ActivationState;
+pub const McpActivationServer = mcp_catalog.ActivationServer;
+pub const McpActivationServerState = mcp_catalog.ActivationServerState;
+pub const McpRuntimeInput = mcp_runtime.Input;
+pub const McpServerInput = mcp_runtime.ServerInput;
 pub const McpTransportKind = mcp_runtime.TransportKind;
 pub const McpNegotiationPolicy = mcp_runtime.NegotiationPolicy;
+pub const mcpBindingIdentity = mcp_runtime.bindingIdentity;
+
+pub const McpActivationUnavailableReason = enum {
+    refresh_failed,
+    invalid_catalog,
+    resource_limit,
+    generation_mismatch,
+    binding_mismatch,
+    invalid_selection,
+};
+
+pub const McpActivationOutcome = union(enum) {
+    empty,
+    activated: *McpActivation,
+    unavailable: McpActivationUnavailableReason,
+};
+
+const McpRefreshLease = struct {
+    raw_runtime: *wire.RuntimeHandle,
+    expected_servers: []const mcp_runtime.ExpectedServer,
+    registry_generation: ?u64,
+};
 
 pub fn decodeUiRequest(
     allocator: std.mem.Allocator,
@@ -629,7 +656,10 @@ pub const SessionOpenOptions = struct {
 
 pub const Limits = struct {
     max_sessions: usize,
-    mcp_servers: []const McpServerConfig = &.{},
+    /// Consumed exactly once during successful Agent Runtime construction.
+    /// Build this input before Runtime init so attributable MCP preparation
+    /// failures can select the ordinary empty Runtime path.
+    mcp_input: ?*McpRuntimeInput = null,
     max_prompt_bytes: usize = 1024 * 1024,
     event_capacity: usize = 512,
     event_bytes: usize = 8 * 1024 * 1024,
@@ -750,6 +780,7 @@ pub const Runtime = struct {
     active_mcp_calls: usize = 0,
     mcp_refresh_running: bool = false,
     mcp_catalog_generation: ?u64 = null,
+    mcp_registry_generation: ?u64,
     mcp_owner_id: u64,
     mcp_servers: mcp_runtime.Servers,
     next_session_id: u64 = 0,
@@ -824,13 +855,17 @@ pub const Runtime = struct {
         runtime_config.builtin_tool_count = builtin_views.len;
         runtime_config.host_tools = null;
         runtime_config.host_tool_count = 0;
-        var mcp_servers = mcp_runtime.Servers.init(
-            allocator,
-            limits.mcp_servers,
-        ) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidConfig => return error.InvalidLimits,
-        };
+        const mcp_registry_generation = if (limits.mcp_input) |input|
+            input.generation
+        else
+            null;
+        var mcp_servers = if (limits.mcp_input) |input|
+            input.take() catch return error.InvalidLimits
+        else
+            mcp_runtime.Servers.init(allocator, &.{}) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.InvalidConfig => return error.InvalidLimits,
+            };
         errdefer mcp_servers.deinit();
         mcp_servers.attach(&runtime_config);
         var diagnostic = emptyOwnedBytes();
@@ -863,6 +898,7 @@ pub const Runtime = struct {
             .events = events,
             .sessions = sessions,
             .mcp_owner_id = mcp_owner_id,
+            .mcp_registry_generation = mcp_registry_generation,
             .mcp_servers = mcp_servers,
         };
         return self;
@@ -964,6 +1000,15 @@ pub const Runtime = struct {
     pub fn refreshMcpCatalog(
         self: *Runtime,
     ) (Error || std.mem.Allocator.Error)!*McpCatalogProjection {
+        const projection = try self.performMcpRefresh(try self.beginMcpRefresh());
+        self.completeMcpRefresh(mcp_catalog.projectionGeneration(projection)) catch |err| {
+            projection.deinit();
+            return err;
+        };
+        return projection;
+    }
+
+    fn beginMcpRefresh(self: *Runtime) Error!McpRefreshLease {
         self.sessions_mutex.lockUncancelable(self.io);
         if (self.shutting_down.load(.acquire)) {
             self.sessions_mutex.unlock(self.io);
@@ -978,22 +1023,38 @@ pub const Runtime = struct {
             return error.RuntimeShuttingDown;
         };
         const expected_servers = self.mcp_servers.expectedServers();
+        // Refresh is an authority fence. Old selections become stale before
+        // any transport or AgentCore call, and remain stale on every failure.
+        self.mcp_catalog_generation = null;
         self.mcp_refresh_running = true;
         self.active_mcp_calls += 1;
         self.sessions_mutex.unlock(self.io);
+        return .{
+            .raw_runtime = raw_runtime,
+            .expected_servers = expected_servers,
+            .registry_generation = self.mcp_registry_generation,
+        };
+    }
 
+    fn performMcpRefresh(
+        self: *Runtime,
+        lease: McpRefreshLease,
+    ) (Error || std.mem.Allocator.Error)!*McpCatalogProjection {
         const projection = mcp_catalog.refresh(
             self.allocator,
             self.api,
-            raw_runtime,
+            lease.raw_runtime,
             self.mcp_owner_id,
-            expected_servers,
+            lease.expected_servers,
         ) catch |err| {
             self.finishMcpCall();
             if (err == error.OutOfMemory) return error.OutOfMemory;
             return mapMcpCatalogError(err);
         };
+        return projection;
+    }
 
+    fn completeMcpRefresh(self: *Runtime, generation: u64) Error!void {
         self.sessions_mutex.lockUncancelable(self.io);
         std.debug.assert(self.active_mcp_calls > 0);
         std.debug.assert(self.mcp_refresh_running);
@@ -1001,14 +1062,56 @@ pub const Runtime = struct {
         self.mcp_refresh_running = false;
         const reject = self.shutting_down.load(.acquire);
         if (!reject)
-            self.mcp_catalog_generation = mcp_catalog.projectionGeneration(projection);
+            self.mcp_catalog_generation = generation;
         self.shutdown_condition.broadcast(self.io);
         self.sessions_mutex.unlock(self.io);
-        if (reject) {
-            projection.deinit();
-            return error.RuntimeShuttingDown;
+        if (reject) return error.RuntimeShuttingDown;
+    }
+
+    /// Builds one complete catalog/allowlist authority generation. Expected
+    /// post-Runtime MCP failures become an unavailable outcome; Runtime and
+    /// ordinary Session creation remain usable with a null selection.
+    pub fn activateMcp(
+        self: *Runtime,
+    ) (Error || std.mem.Allocator.Error)!McpActivationOutcome {
+        const lease = try self.beginMcpRefresh();
+        if (lease.expected_servers.len == 0) {
+            self.finishMcpCall();
+            return .empty;
         }
-        return projection;
+        const projection = self.performMcpRefresh(lease) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.RuntimeShuttingDown,
+            error.McpRefreshInProgress,
+            => return err,
+            else => return .{ .unavailable = mcpActivationUnavailableReason(err) },
+        };
+        const durable_generation = lease.registry_generation orelse {
+            projection.deinit();
+            self.finishMcpCall();
+            return error.McpCatalogBindingMismatch;
+        };
+        const activation = mcp_catalog.createActivation(
+            self.allocator,
+            durable_generation,
+            self.mcp_owner_id,
+            projection,
+            lease.expected_servers,
+        ) catch |err| {
+            projection.deinit();
+            self.finishMcpCall();
+            return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                else => .{ .unavailable = mcpActivationUnavailableReason(
+                    mapMcpCatalogError(err),
+                ) },
+            };
+        };
+        self.completeMcpRefresh(activation.catalogGeneration()) catch |err| {
+            activation.deinit();
+            return err;
+        };
+        return .{ .activated = activation };
     }
 
     pub fn createMcpSelection(
@@ -3270,6 +3373,18 @@ fn mapMcpCatalogError(err: anyerror) Error {
         error.InvalidSelection => error.InvalidMcpSelection,
         error.StaleSelection => error.StaleMcpSelection,
         else => error.McpRefreshFailed,
+    };
+}
+
+fn mcpActivationUnavailableReason(err: anyerror) McpActivationUnavailableReason {
+    return switch (err) {
+        error.McpRefreshFailed => .refresh_failed,
+        error.InvalidMcpCatalogDescriptor => .invalid_catalog,
+        error.McpCatalogResourceLimit => .resource_limit,
+        error.McpCatalogGenerationMismatch => .generation_mismatch,
+        error.McpCatalogBindingMismatch => .binding_mismatch,
+        error.InvalidMcpSelection, error.StaleMcpSelection => .invalid_selection,
+        else => .refresh_failed,
     };
 }
 

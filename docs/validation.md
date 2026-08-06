@@ -42,7 +42,7 @@ npm test
 
 `npm test` 必须覆盖 Renderer runtime、Zig serializer 与 TypeScript decoder 共用的投影 fixture、架构边界、AgentCore bundle 校验、child-process wrapper 和正式 Zig test graph。缺少 canonical staged bundle 时必须明确失败，不能跳过 AgentCore 相关用例后继续报告成功。
 
-MCP Host 工程基础按失败模式运行最小验证：registry/schema/credential preparation 使用正式 build graph 的 `zig build test-mcp-configuration`；Agent ownership、catalog/selection 与 transport 分别使用现有 `test-mcp-runtime`、`test-mcp-catalog`、`test-mcp-stdio`、`test-mcp-http`；跨 Workbench/Bridge/Agent shutdown 或真实 connector 路径变化才追加对应 lifecycle/vertical。不得仅因新增 MCP 配置模块运行全部 Renderer 或全平台矩阵。
+MCP Host 工程基础按失败模式运行最小验证：registry/schema/credential preparation 使用正式 build graph 的 `zig build test-mcp-configuration`；Agent ownership、catalog/selection 与 transport 分别使用 `test-mcp-runtime`、`test-mcp-catalog`、`test-mcp-stdio`、`test-mcp-http`；Agent Runtime、canonical connector activation、generation invalidation 与 shutdown 使用单 root 的 `test-agent-lifecycle`。只有跨 Workbench/Bridge 生命周期变化才运行聚合 `test-lifecycle` 或对应 product vertical；不得仅因 MCP 配置或 Agent 内部变更运行全部 Renderer、全部 lifecycle root 或全平台矩阵。
 
 `npm run test:renderer-runtime` 中的 `scripts/scheduled-tasks.test.mjs` 持续固定定时任务一级入口、同级紧凑菜单、名称优先的 Text 编辑器、无 Workspace/Skill 配置、状态分区、detail/editor drawer、无 Manual Workspace 时的 Automatic Workspace 创建和 Bridge exact mutation payload；正式 Zig test graph 持续固定 recurrence、持久 store candidate commit/恢复、schema 1 definition 原地 hard cut、旧 shape 判损坏、timer/missed-run 调度、binding 校验、凭据清洗，以及 occurrence 复用真实 Task/Run admission 的边界。
 

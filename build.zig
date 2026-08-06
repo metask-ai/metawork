@@ -87,6 +87,10 @@ fn addLifecycleTests(
 ) void {
     const test_filter = b.option([]const u8, "tfilter", "Lifecycle test name filter");
     const step = b.step("test-lifecycle", "Run invariant-grouped lifecycle tests");
+    const agent_step = b.step(
+        "test-agent-lifecycle",
+        "Run the Agent Runtime and MCP lifecycle root",
+    );
     const roots = [_][]const u8{
         "tests/agent/lifecycle_test.zig",
         "tests/agent/event_pump_test.zig",
@@ -105,7 +109,10 @@ fn addLifecycleTests(
             .root_module = cases,
             .filters = if (test_filter) |filter| &.{filter} else &.{},
         });
-        step.dependOn(&b.addRunArtifact(artifact).step);
+        const run = b.addRunArtifact(artifact);
+        step.dependOn(&run.step);
+        if (std.mem.eql(u8, root, "tests/agent/lifecycle_test.zig"))
+            agent_step.dependOn(&run.step);
     }
 
     const source_tests = b.addTest(.{
