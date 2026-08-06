@@ -21,6 +21,10 @@ Application 内部负责：
 - 由 Agent 管理 AgentCore Session、active Run/manual compact、callback binding 和有界事件泵；
 - 管理跨会话产品状态，并向 Bridge 提供 canonical 产品 projection。
 
+MCP 仍服从这四个 named modules：Workbench 通过 `workbench/mcp_configuration.zig` 独占 `<MetaWork data dir>/mcp/registry.json` schema 1 的严格 codec、单 writer lock、原子替换、credential locator/窄事务恢复、server 产品状态、显式 tool allowlist 与 Task selection binding；Agent 独占 stdio/Streamable HTTP backend、运行期 credential copy、connector/descriptor、official catalog/selection 与 health fact；App 只打开目录并注入系统 credential/network capability。Account 与 MCP 没有 ownership 或 persistence 依赖，Bridge 不参与配置或激活事务。
+
+启动按 `Workbench MCP preparation → Agent Runtime init → Workbench init/MCP activation → Bridge ingress` 线性化。Preparation 的预期 registry/read/credential 故障形成 MCP unavailable/degraded 并向 Agent 传入空 server 集合；OOM 和内部不变量仍是 fatal。`agent.Runtime.init`/AgentCore `runtimeCreate` 失败始终终止 App 启动，不得猜测为 MCP-specific 并空配置重试。Runtime 创建成功后的 refresh/transport/catalog failure 才能降级 MCP并让普通 Task 使用 null selection。
+
 ## 2. 领域状态与业务事务
 
 ### 2.1 Account 与 ExecutionConfig

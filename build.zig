@@ -36,6 +36,7 @@ pub fn build(b: *std.Build) void {
     addMcpHttpTests(b, test_modules, bundle.link_libc);
     addMcpRuntimeTests(b, test_modules, bundle.link_libc);
     addMcpCatalogTests(b, test_modules, bundle.link_libc);
+    addMcpConfigurationTests(b, test_modules, bundle.link_libc);
     const module_tests = [_]struct {
         name: []const u8,
         root_module: *std.Build.Module,
@@ -68,6 +69,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-scheduled-task-persistence", .root_module = test_modules.workbench_scheduled_persistence },
         .{ .name = "metawork-skill-package", .root_module = test_modules.workbench_skill_package },
         .{ .name = "metawork-skill-management", .root_module = test_modules.workbench_skill_management },
+        .{ .name = "metawork-mcp-configuration", .root_module = test_modules.workbench_mcp_configuration },
         .{ .name = "metawork-task-persistence", .root_module = test_modules.workbench_task_persistence },
     };
     for (module_tests) |spec| {
@@ -149,6 +151,7 @@ const WiredModules = struct {
     workbench_scheduled_persistence: *std.Build.Module,
     workbench_skill_package: *std.Build.Module,
     workbench_skill_management: *std.Build.Module,
+    workbench_mcp_configuration: *std.Build.Module,
     workbench_task_persistence: *std.Build.Module,
 };
 
@@ -247,6 +250,23 @@ fn addMcpCatalogTests(
     const tests = b.addTest(.{
         .name = "metawork-agent-mcp-catalog",
         .root_module = modules.agent_mcp_catalog,
+    });
+    step.dependOn(&b.addRunArtifact(tests).step);
+}
+
+fn addMcpConfigurationTests(
+    b: *std.Build,
+    modules: WiredModules,
+    link_libc: bool,
+) void {
+    const step = b.step(
+        "test-mcp-configuration",
+        "Run Workbench-owned MCP registry and preparation tests",
+    );
+    modules.workbench_mcp_configuration.link_libc = link_libc;
+    const tests = b.addTest(.{
+        .name = "metawork-mcp-configuration",
+        .root_module = modules.workbench_mcp_configuration,
     });
     step.dependOn(&b.addRunArtifact(tests).step);
 }
@@ -510,6 +530,11 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .target = target,
         .optimize = root_module.optimize,
     });
+    const mcp_configuration = b.createModule(.{
+        .root_source_file = b.path("src/workbench/mcp_configuration.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
     const projection = b.createModule(.{
         .root_source_file = b.path("src/workbench/projection.zig"),
         .target = target,
@@ -554,6 +579,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     );
     workbench.addImport("workbench_skill_package", skill_package);
     workbench.addImport("workbench_skill_management", skill_management);
+    workbench.addImport("workbench_mcp_configuration", mcp_configuration);
     workbench.addImport("workbench_task_persistence", task_persistence);
 
     const bridge = b.createModule(.{
@@ -640,6 +666,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .workbench_scheduled_persistence = scheduled_task_persistence,
         .workbench_skill_package = skill_package,
         .workbench_skill_management = skill_management,
+        .workbench_mcp_configuration = mcp_configuration,
         .workbench_task_persistence = task_persistence,
     };
 }

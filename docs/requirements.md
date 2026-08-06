@@ -213,6 +213,8 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - Host 只可发布已清洗的 MCP 投影。command、arguments、environment、完整 URL、header、credential、OAuth 数据、raw diagnostic、schema body 和 catalog fingerprint 不得进入 snapshot；已发生清洗时用 `redacted` 事实说明，不把被移除内容替换为 Renderer 猜测文本；
 - 首个页面合同只提供发现与诊断视图，不提供添加服务、登录、启用/停用、重连、删除、逐工具 include/exclude、Resources、Prompts、Apps 或 marketplace。上述动作必须先确定 Workbench/Account/AgentCore owner、authority、持久化与失败语义，并以 typed command 接入；不存在可信 catalog 与 publisher verification 前，不建立推荐市场；
 - 页面采用成熟 MCP 客户端共有的“配置服务、已发现目录、实际暴露工具”分层，并吸收 Hermes Desktop 的默认不扩大 authority、逐服务明确工具范围和显式刷新原则；这些是交互约束，不构成对 Hermes 配置、协议或市场数据的复制。当前 MetaWork 仍保持 `SessionHostConfigV1.mcp_selection = null`，因此正式 Host 发布 `mcpManagement = false` 与 unavailable 空投影；常驻入口和不可用页面都不等于 MCP execution 已可用。
+- MCP 配置是 Workbench-owned 的全局产品配置，不属于 Metask Account、Workspace 或 AgentCore 协议状态。Host 从 `<MetaWork data dir>/mcp/registry.json` schema 1 恢复稳定 server identity、namespace、启停、transport、timeout、协商策略、credential locator 与显式 tool allowlist；allowlist 缺省为空，catalog 新增工具不得自动扩权。Registry 不保存 credential 原文；stdio 不接受 shell string 或继承整个进程环境，argv 只允许明确的公开 literal 且不得承载 credential，environment value 全部通过系统 credential locator 注入；Streamable HTTP 的明文 endpoint 只允许 HTTPS 或精确 loopback HTTP，userinfo、query 和 fragment 不得进入 endpoint，所有自定义 header value 也必须引用系统 credential。
+- MCP 配置准备、Agent Runtime 创建和 MCP 激活是三个不同失败边界：Registry/credential 等可归因 MCP 故障使用空 server Runtime 并发布 unavailable/degraded，普通 Task 仍可运行；Agent Runtime init 或 AgentCore `runtimeCreate` 失败是 App 启动失败，禁止用空 MCP 配置静默重试；Runtime 成功后的 catalog/transport activation failure 只降低 MCP availability，新 Session 使用 null 或当前已提交 selection。旧 generation 在 refresh 开始时失效，只有当前 catalog、显式 allowlist 和 server binding 全部校验后才原子提交新 selection。
 
 ### 5.11 定时任务
 
