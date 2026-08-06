@@ -92,6 +92,7 @@ pub const Runtime = struct {
 
     pub fn builtinPolicy(self: *Runtime, base: native_sdk.BridgePolicy) native_sdk.BridgePolicy {
         if (!self.active()) return base;
+        if (comptime bridge.policy.builtin_command_count == 0) return base;
         std.debug.assert(base.commands.len == self.builtin_commands.len);
         for (base.commands, 0..) |command, index| {
             self.builtin_commands[index] = command;
@@ -121,6 +122,10 @@ test "automation policy changes authority without adding a data plane" {
     const policy = runtime.productPolicy(base);
     try std.testing.expectEqual(base.commands.len, policy.commands.len);
     try std.testing.expectEqualStrings(inline_origin, policy.commands[0].origins[1]);
+
+    const builtin = runtime.builtinPolicy(@import("metawork_bridge").policy.builtin(.release));
+    try std.testing.expect(!builtin.enabled);
+    try std.testing.expectEqual(@as(usize, 0), builtin.commands.len);
 }
 
 test "automation workspace is an explicit activation-scoped capability" {

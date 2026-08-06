@@ -47,11 +47,6 @@ const macosWindowLookupScript = path.join(
   "scripts",
   "capture-macos-window.swift",
 );
-const windowsChromeProbeScript = path.join(
-  root,
-  "scripts",
-  "probe-windows-window-chrome.ps1",
-);
 const windowsWebViewFocusProbeScript = path.join(
   root,
   "scripts",
@@ -151,7 +146,34 @@ try {
   await new Promise((resolve) => setTimeout(resolve, 1_000));
   await probeWindowsWebViewFocus();
   await captureVisual("search-keyboard", 1320, 812, false, true);
-  await probeWindowsChrome("exercise");
+  const staleVerticalWorkspaces = (await snapshot()).workspaces.filter(
+    (item) =>
+      item.kind === "manual" &&
+      typeof item.canonicalRoot === "string" &&
+      path
+        .basename(item.canonicalRoot)
+        .startsWith("metawork-agentcore-vertical-"),
+  );
+  for (const stale of staleVerticalWorkspaces) {
+    if (!isWireId(stale.id) || !isWireId(stale.epoch)) continue;
+    await invokeBridge("metawork.workspaces.remove", {
+      workspaceId: stale.id,
+      expectedWorkspaceEpoch: stale.epoch,
+    });
+  }
+  if (staleVerticalWorkspaces.length > 0)
+    await poll(
+      async () => {
+        const current = await snapshot();
+        return current.workspaces.some((item) =>
+          staleVerticalWorkspaces.some((stale) => stale.id === item.id),
+        )
+          ? null
+          : current;
+      },
+      commandTimeoutMs,
+      "stale vertical Workspace cleanup",
+    );
   const chosenWorkspace = await invokeBridge("metawork.workspaces.choose", {});
   let workspaceId;
   if (chosenWorkspace === null) {
@@ -231,8 +253,11 @@ try {
       `Workspace catalog omitted the review Skill projection: ${JSON.stringify(catalogSnapshot)}`,
     );
   const createResult = await invokeBridge("metawork.tasks.create", {
-    workspaceId,
-    expectedWorkspaceEpoch,
+    workspace: {
+      kind: "manual",
+      workspaceId,
+      expectedWorkspaceEpoch,
+    },
     expectedExecutionGeneration,
     expectedSkillCatalogRevision: catalogSnapshot.catalog.revision,
   });
@@ -547,17 +572,42 @@ try {
   const afterDelete = await snapshot();
   if (afterDelete.tasks.some((item) => item.id === taskId))
     throw new Error("Deleted Task record remained in the projection");
+  await invokeBridge("metawork.workspaces.remove", {
+    workspaceId,
+    expectedWorkspaceEpoch,
+  });
+  await poll(
+    async () =>
+      (await snapshot()).workspaces.some((item) => item.id === workspaceId)
+        ? null
+        : true,
+    commandTimeoutMs,
+    "vertical Workspace cleanup",
+  );
 
-  if (process.platform === "win32") await probeWindowsChrome("close");
-  else await invokeBridge("native-sdk.window.close", { label: "main" });
-  const final = await withTimeout(exited, commandTimeoutMs, "app stop");
-  if (final.code !== 0 || final.signal !== null)
-    throw new Error(`app exited abnormally: ${JSON.stringify(final)}`);
-  if (!/runtime\.event.*event="stop"/.test(output))
-    throw new Error("normal runtime stop was not observed");
+  if (process.platform === "win32") {
+    // This validates Native SDK Runtime state and MetaWork's real tray command
+    // routing. User-reachable Windows Shell chrome/tray remain separate
+    // platform acceptance gates.
+    await automate("tray-action", "2");
+    const final = await withTimeout(exited, commandTimeoutMs, "app stop");
+    if (final.code !== 0 || final.signal !== null)
+      throw new Error(`app exited abnormally: ${JSON.stringify(final)}`);
+    if (!/runtime\.event.*event="stop"/.test(output))
+      throw new Error("normal runtime stop was not observed");
+  } else {
+    await invokeBridge("native-sdk.window.close", { label: "main" });
+    const final = await withTimeout(exited, commandTimeoutMs, "app stop");
+    if (final.code !== 0 || final.signal !== null)
+      throw new Error(`app exited abnormally: ${JSON.stringify(final)}`);
+    if (!/runtime\.event.*event="stop"/.test(output))
+      throw new Error("normal runtime stop was not observed");
+  }
 
   process.stdout.write(
-    "AgentCore desktop vertical passed: real typed Skill catalog/run, materialized arguments without raw slash, main-thread ProductDelivery, Read/Bash/Edit, permission UI, duplicate UI-response rejection, reload-safe AskUserQuestion resume, Task metadata lifecycle, async close.\n",
+    process.platform === "win32"
+      ? "AgentCore Windows desktop vertical passed: real typed Skill catalog/run, main-thread ProductDelivery, Runtime-owned tray routing, and clean shutdown; Windows Shell chrome/tray remain separate non-blocking gates.\n"
+      : "AgentCore desktop vertical passed: real typed Skill catalog/run, materialized arguments without raw slash, main-thread ProductDelivery, Read/Bash/Edit, permission UI, duplicate UI-response rejection, reload-safe AskUserQuestion resume, Task metadata lifecycle, async close.\n",
   );
 } catch (error) {
   process.stderr.write(`${output}\n`);
@@ -777,25 +827,6 @@ async function captureVisual(
   await execFileAsync(
     "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
     args,
-    { timeout: commandTimeoutMs, maxBuffer: 1024 * 1024 },
-  );
-}
-
-async function probeWindowsChrome(mode) {
-  if (process.platform !== "win32") return;
-  await execFileAsync(
-    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
-    [
-      "-NoProfile",
-      "-ExecutionPolicy",
-      "Bypass",
-      "-File",
-      windowsChromeProbeScript,
-      "-ProcessId",
-      String(app.pid),
-      "-Mode",
-      mode,
-    ],
     { timeout: commandTimeoutMs, maxBuffer: 1024 * 1024 },
   );
 }

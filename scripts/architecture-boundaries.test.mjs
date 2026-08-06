@@ -6,15 +6,21 @@ import test from "node:test";
 const root = new URL("../", import.meta.url);
 const read = (path) => readFileSync(new URL(path, root), "utf8");
 
-function zigFiles(directory) {
+function filesWithExtensions(directory, extensions) {
   return readdirSync(new URL(directory, root), { withFileTypes: true }).flatMap(
     (entry) => {
       const path = join(directory, entry.name).replaceAll("\\", "/");
-      if (entry.isDirectory()) return zigFiles(`${path}/`);
-      return entry.isFile() && entry.name.endsWith(".zig") ? [path] : [];
+      if (entry.isDirectory())
+        return filesWithExtensions(`${path}/`, extensions);
+      return entry.isFile() &&
+        extensions.some((value) => entry.name.endsWith(value))
+        ? [path]
+        : [];
     },
   );
 }
+
+const zigFiles = (directory) => filesWithExtensions(directory, [".zig"]);
 
 function assertNoImports(files, forbidden) {
   for (const file of files) {
@@ -893,14 +899,34 @@ test("Renderer Bridge fixed revision 1 owns the exact product wire catalog", () 
   const rendererCommands = read("frontend/src/bridge/commands.ts");
   const appManifest = read("app.zon");
   const productCommand =
-    /"(metawork\.(?:smoke|events|workspaces|workbench|account|tasks)\.[A-Za-z.]+)"/g;
+    /"(metawork\.[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)+)"/g;
   const catalog = (source) =>
     [
-      ...new Set([...source.matchAll(productCommand)].map((match) => match[1])),
+      ...new Set(
+        [...source.matchAll(productCommand)]
+          .map((match) => match[1])
+          .filter((value) => value !== "metawork.renderer-bridge"),
+      ),
     ].sort();
   assert.deepEqual(catalog(rendererCommands), catalog(zigCommands));
   assert.deepEqual(catalog(appManifest), catalog(zigCommands));
   assert.ok(catalog(zigCommands).includes("metawork.account.reopenLogin"));
+  assert.deepEqual(
+    catalog(zigCommands).filter((command) =>
+      command.startsWith("metawork.host."),
+    ),
+    [
+      "metawork.host.windowChrome.beginDrag",
+      "metawork.host.windowChrome.connect",
+      "metawork.host.windowChrome.disconnect",
+      "metawork.host.windowChrome.sync",
+    ],
+  );
+  for (const source of [zigCommands, rendererCommands, appManifest])
+    assert.doesNotMatch(
+      source,
+      /metawork\.window\.(?:beginDrag|control|state)|native-sdk\.window\./,
+    );
   assert.match(zigCommands, /contract_id = "metawork\.renderer-bridge"/);
   assert.match(zigCommands, /contract_revision: u32 = 1/);
   assert.match(
@@ -992,6 +1018,172 @@ test("Renderer Bridge fixed revision 1 owns the exact product wire catalog", () 
   assert.deepEqual(
     readdirSync(new URL("frontend/src/bridge/__fixtures__/", root)),
     ["workbench-snapshot.fixture"],
+  );
+});
+
+test("Desktop Host owns native window chrome and Renderer only declares geometry", () => {
+  const rendererFiles = filesWithExtensions("frontend/src/", [".ts", ".tsx"]);
+  const chromeTransportOwners = rendererFiles.filter((file) =>
+    read(file).includes("commands.windowChrome"),
+  );
+  assert.deepEqual(chromeTransportOwners, [
+    "frontend/src/bridge/window-chrome.ts",
+  ]);
+
+  for (const retired of [
+    "frontend/src/app/useWindowChrome.ts",
+    "frontend/src/components/ui/WindowControls.tsx",
+    "frontend/src/platform/window-chrome.ts",
+  ])
+    assert.equal(
+      existsSync(new URL(retired, root)),
+      false,
+      `${retired} must stay deleted`,
+    );
+
+  for (const file of rendererFiles.filter(
+    (path) => !path.startsWith("frontend/src/bridge/"),
+  )) {
+    const source = read(file);
+    assert.doesNotMatch(
+      source,
+      /window\.zero|native-sdk\.window\./,
+      `${file} reaches a native window API`,
+    );
+    assert.doesNotMatch(
+      source,
+      /beginWindowDrag|controlWindow|openWindowSystemMenu|windowState|WindowControls/,
+      `${file} owns native window behavior`,
+    );
+  }
+
+  const titlebar = read("frontend/src/components/ui/WindowTitlebar.tsx");
+  assert.match(titlebar, /data-metawork-window-drag=""/);
+  assert.doesNotMatch(
+    titlebar,
+    /onPointer|onDoubleClick|onContextMenu|platform/,
+  );
+
+  const app = read("src/app.zig");
+  const policy = read("src/bridge/policy.zig");
+  const seamPath = "src/native_sdk_compat/system_webview_drag_region.zig";
+  const windowsPath =
+    "src/native_sdk_compat/system_webview_drag_region/windows.zig";
+  const macosPath =
+    "src/native_sdk_compat/system_webview_drag_region/macos.zig";
+  const seam = read(seamPath);
+  const windows = read(windowsPath);
+  const macos = read(macosPath);
+  const compatFiles = zigFiles("src/native_sdk_compat/");
+  const compatSource = compatFiles.map(read).join("\n");
+  assert.match(app, /\.js_window_api = false/);
+  assert.match(app, /\.permissions = &\.\{\}/);
+  assert.match(policy, /builtin_command_count: usize = 0/);
+  assert.equal(existsSync(new URL("src/window_chrome.zig", root)), false);
+  assert.equal(existsSync(new URL("src/windows_host.zig", root)), false);
+  assert.doesNotMatch(
+    compatSource,
+    /\.(?:minimizeWindow|maximizeWindow|restoreWindow|closeWindow|showWindow|focusWindow|showMessageDialog|showOpenDialog|showNotification|startTimer|cancelTimer|quitApp)\(/,
+  );
+  assert.match(
+    seam,
+    /fn installPlatformOrDisconnect[\s\S]*Platform\.install[\s\S]*self\.connected = false[\s\S]*self\.clearRegions\(\)[\s\S]*Platform\.deinit/,
+  );
+  assert.deepEqual(
+    zigFiles("src/").filter((file) =>
+      read(file).includes(
+        '@import("native_sdk_compat/system_webview_drag_region.zig")',
+      ),
+    ),
+    ["src/app.zig"],
+  );
+  assert.deepEqual(
+    compatFiles.filter((file) =>
+      read(file).includes('@import("system_webview_drag_region/windows.zig")'),
+    ),
+    [seamPath],
+  );
+  assert.deepEqual(
+    compatFiles.filter((file) =>
+      read(file).includes('@import("system_webview_drag_region/macos.zig")'),
+    ),
+    [seamPath],
+  );
+  assert.doesNotMatch(
+    zigFiles("src/").map(read).join("\n"),
+    /(?:services|platform_services)\.context\b|native_sdk\.platform\.windows|GWLP_USERDATA|GetWindowLongPtrW/,
+  );
+  assert.doesNotMatch(compatSource, /\.context\b/);
+  assert.deepEqual(
+    compatFiles
+      .filter((file) =>
+        read(file).includes("native_sdk.platform.PlatformServices"),
+      )
+      .sort(),
+    [seamPath, macosPath, windowsPath].sort(),
+  );
+  assert.match(windows, /SetWindowsHookExW[\s\S]*StartupCapture/);
+  assert.match(
+    windows,
+    /captureStartupWindow[\s\S]*capture\.take\(window_id\)/,
+  );
+  assert.match(
+    windows,
+    /candidate_count != 1[\s\S]*GetAncestor[\s\S]*GetWindowThreadProcessId/,
+  );
+  assert.doesNotMatch(
+    windows,
+    /MetaWorkSystemWebViewChrome|\boverlay\b|RegisterClassExW|SetWindowPos/,
+    "the System WebView drag seam must not cover Renderer pixels with another HWND",
+  );
+  assert.match(macos, /try services\.startWindowDrag\(window_id\)/);
+  assert.deepEqual(
+    zigFiles("src/").filter((file) =>
+      read(file).includes("services.startWindowDrag(window_id)"),
+    ),
+    [macosPath],
+  );
+  const allowedWindowsSymbols = [
+    "CallNextHookEx",
+    "CreateWindowExW",
+    "DefSubclassProc",
+    "DestroyWindow",
+    "EnumChildWindows",
+    "GetAncestor",
+    "GetCurrentProcessId",
+    "GetCurrentThreadId",
+    "GetDpiForWindow",
+    "GetWindow",
+    "GetWindowThreadProcessId",
+    "IsWindow",
+    "RemoveWindowSubclass",
+    "ScreenToClient",
+    "SendMessageW",
+    "SetWindowSubclass",
+    "SetWindowsHookExW",
+    "UnhookWindowsHookEx",
+  ];
+  assert.deepEqual(
+    [...windows.matchAll(/extern "(?:user32|kernel32|comctl32)" fn (\w+)/g)]
+      .map((match) => match[1])
+      .sort(),
+    allowedWindowsSymbols.sort(),
+  );
+  assert.match(app, /native_runtime\.showMessageDialog\(/);
+  assert.match(app, /native_runtime\.closeWindow\(main_window_id\)/);
+  assert.match(app, /defer app\.window_chrome_capability\.deinit\(\)/);
+  assert.doesNotMatch(app, /services\.closeWindow\(|windows_host/);
+  assert.doesNotMatch(
+    compatSource,
+    /@import\("(?:bridge|workbench|account|agent)(?:\.zig|\/)|window\.zero|metawork\.host\./,
+  );
+  assert.equal(
+    existsSync(new URL("scripts/test-window-chrome-windows.mjs", root)),
+    true,
+  );
+  assert.equal(
+    existsSync(new URL("scripts/probe-windows-window-chrome.ps1", root)),
+    true,
   );
 });
 

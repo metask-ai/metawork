@@ -28,6 +28,11 @@
 
 :root {
   --window-bar-height: 52px;
+  --metawork-window-chrome-top: 0px;
+  --metawork-window-chrome-leading: 0px;
+  --metawork-window-chrome-trailing: 0px;
+  --metawork-window-chrome-buttons-x: 0px;
+  --metawork-window-chrome-buttons-width: 0px;
   --content-measure: 760px;
   --shadow-soft: 0 10px 30px rgba(37, 34, 45, 0.08);
   --shadow-raised: 0 20px 54px rgba(37, 34, 45, 0.14);
@@ -36,22 +41,6 @@
   color: var(--color-graphite);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
-}
-
-[data-platform="macos"] {
-  --window-controls-leading: 72px;
-  --window-controls-trailing: 0px;
-}
-
-[data-platform="windows"] {
-  --window-bar-height: 40px;
-  --window-controls-leading: 0px;
-  --window-controls-trailing: 0px;
-}
-
-[data-platform="linux"] {
-  --window-controls-leading: 0px;
-  --window-controls-trailing: 112px;
 }
 
 * {
@@ -115,14 +104,25 @@ summary::-webkit-details-marker {
 }
 
 .account-gate-toolbar {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 0 0 calc(16px + var(--window-controls-leading, 0px));
+  padding: 0 calc(16px + var(--metawork-window-chrome-trailing)) 0
+    calc(16px + var(--metawork-window-chrome-leading));
   border-bottom: 1px solid var(--color-rule);
   background: rgba(250, 249, 252, 0.96);
   backdrop-filter: blur(16px);
   user-select: none;
+}
+
+.window-drag-region {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: var(--metawork-window-chrome-top);
+  pointer-events: none;
 }
 
 .account-gate-toolbar-actions {
@@ -162,46 +162,6 @@ summary::-webkit-details-marker {
 .account-gate-brand .brand-mark {
   width: 28px;
   height: 28px;
-}
-
-.window-controls {
-  display: none;
-  height: var(--window-bar-height);
-  align-items: stretch;
-}
-
-[data-platform="windows"] .window-controls {
-  display: flex;
-}
-
-.window-controls button {
-  display: grid;
-  width: 46px;
-  height: 100%;
-  padding: 0;
-  place-items: center;
-  border: 0;
-  border-radius: 0;
-  color: #46545a;
-  background: transparent;
-  font-size: 15px;
-}
-
-.window-controls button:hover,
-.window-controls button:focus-visible {
-  color: #18262c;
-  background: rgba(24, 38, 44, 0.08);
-}
-
-.window-controls .window-control-close:hover,
-.window-controls .window-control-close:focus-visible {
-  color: #fff;
-  background: #c42b1c;
-}
-
-.window-controls svg {
-  width: 13px;
-  height: 13px;
 }
 
 .account-gate-stage {
@@ -1946,16 +1906,16 @@ summary::-webkit-details-marker {
 }
 
 .workbench-commandbar {
-  --commandbar-left-inset: calc(10px + var(--window-controls-leading, 0px));
+  --commandbar-left-inset: calc(10px + var(--metawork-window-chrome-leading));
   position: relative;
   z-index: 50;
   display: grid;
   grid-template-columns:
     max(72px, calc(var(--left-column) - var(--commandbar-left-inset)))
-    minmax(0, auto) minmax(0, 1fr) auto;
+    minmax(0, 1fr) auto;
   align-items: center;
   min-height: var(--window-bar-height);
-  padding: 8px calc(10px + var(--window-controls-trailing, 0px)) 8px
+  padding: 8px calc(10px + var(--metawork-window-chrome-trailing)) 8px
     var(--commandbar-left-inset);
   gap: 8px;
   background: var(--color-canvas);
@@ -1983,12 +1943,6 @@ summary::-webkit-details-marker {
   min-width: 0;
   align-items: center;
   gap: 4px;
-}
-
-[data-platform="windows"] .workbench-commandbar {
-  padding-top: 0;
-  padding-right: 0;
-  padding-bottom: 0;
 }
 
 .icon-button {
@@ -6339,7 +6293,7 @@ summary::-webkit-details-marker {
   }
 
   .workbench-commandbar {
-    grid-template-columns: 72px minmax(0, 1fr) 30px auto;
+    grid-template-columns: 72px minmax(0, 1fr) 30px;
   }
 
   .commandbar-alert-slot {
@@ -6399,7 +6353,7 @@ summary::-webkit-details-marker {
   }
 
   .workbench-commandbar {
-    grid-template-columns: 72px minmax(0, 1fr) 30px auto;
+    grid-template-columns: 72px minmax(0, 1fr) 30px;
   }
 
   .task-header {

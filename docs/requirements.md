@@ -74,7 +74,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - 用户可以选择并打开本地 Workspace；
 - Host 校验并保存 Workspace 的规范路径；
 - Workspace 记录 immutable `kind = manual | automatic`。Manual Workspace 可承载多个 Task；Automatic Workspace 精确归属一个 Task，两种 kind 不允许对同一 canonical root 相互转换；
-- App 只通过 Native SDK `.data` 目录规则解析 `<MetaWork data dir>/workspaces` 并向 Workbench 注入可用或不可用 capability；Renderer、Bridge payload、cwd、home 和环境 fallback 都不能决定托管目录根；
+- Desktop Host composition role 只通过 Native SDK `.data` 目录规则解析 `<MetaWork data dir>/workspaces` 并向 Workbench 注入可用或不可用 capability；Renderer、Bridge payload、cwd、home 和环境 fallback 都不能决定托管目录根；
 - 每个 automatic Task 使用 `<MetaWork data dir>/workspaces/<16 位随机小写 hex>` 独立目录，同一 Task 的后续 Run 复用该目录。分配必须 exclusive create、有界重试、校验 canonical containment；失败不能回退到共享目录；
 - automatic root 及其子目录是保留命名空间，不能注册为 Manual Workspace；用户明确选择 automatic root 的祖先仍服从当前 trust 语义，不因此获得 strict isolation；
 - Workbench projection 必须把 Workspace 作为独立对象发布，至少包含稳定 identity、kind、显示名称、规范路径、当前授权状态和可汇总的 Task 信号；每个被 Task 引用的 Automatic Workspace 必须出现在同一 canonical snapshot；
@@ -143,7 +143,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - 工具 permission 默认拒绝，只有明确授权才允许执行；
 - 用户可以回答 Agent 问题；计划批准或拒绝只有在 AgentCore 发布 typed control capability 后才显示；
 - 审批和回答必须绑定 Task、Run 和请求标识，拒绝过期或重复响应；
-- 同步等待必须支持 deadline、用户取消、Task close 和 App shutdown 唤醒；
+- 同步等待必须支持 deadline、用户取消、Task close 和 Desktop Host shutdown 唤醒；
 - 同步等待区间发生 Host/Core crash 后，Run 标记 `interrupted`，工具不得自动执行；
 - 目标产品支持用户主动创建和撤销 Host-owned 持久权限规则，但 UI 只能在 Host 声明当前请求可形成安全、范围明确的规则时显示 `Always allow`；
 - 持久规则必须绑定稳定 Workspace identity、tool identity 与版本、operation 和规范化资源约束，并定义 Workspace、tool、脚本内容或安全能力变化时的失效规则；
@@ -237,7 +237,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - Renderer 按不可信调用方处理；
 - Host 命令默认拒绝，只开放白名单；
 - 校验来源、payload、Workspace、Task/Run 归属和权限；
-- production 执行配置只由 Account 生成并在 App 主线程的一致性提交链中安装到 Workbench；禁止环境默认值、Renderer 字段或 Bridge payload 注入 provider/base URL/credential。Renderer 只可提交 Host 当前脱敏 catalog 中的稳定 API/model selection identifier，Host 必须重新校验并从锁定合同生成配置；
+- production 执行配置只由 Account 生成并由 App coordinator 在主线程一致性提交链中安装到 Workbench；禁止环境默认值、Renderer 字段或 Bridge payload 注入 provider/base URL/credential。Renderer 只可提交 Host 当前脱敏 catalog 中的稳定 API/model selection identifier，Host 必须重新校验并从锁定合同生成配置；
 - Provider credential 不得进入 Renderer、Bridge、日志、事件或视图 snapshot；
 - OAuth token、PKCE verifier、authorization code、完整 API Key 和 Authorization header 必须使用单 owner secret buffer，所有失败、取消、过期 completion、replacement 和 shutdown 路径都先不可消除地清零再释放；
 - Host 必须在形成产品 projection 前移除已知 Host-held credential 和 schema 标记的 secret 字段，并对命令与工具输出设置明确上限和 truncation 状态；不得把秘密过滤责任推给 Renderer；
@@ -249,7 +249,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - 高频事件不能造成无限内存增长；
 - 控制事件、工具结果和审批不能静默丢失；
 - 单个 Task 的事件不得串入其他 Task；
-- Task close 和 App shutdown 必须等待 Run 与 callback 安全退出；
+- Task close 和 Desktop Host shutdown 必须等待 Run 与 callback 安全退出；
 - 进程模型必须通过故障注入和恢复数据选择。
 
 ### 性能

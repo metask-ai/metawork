@@ -29,12 +29,16 @@ metawork/
 │       ├── features/      # 用户可见 feature
 │       ├── components/ui/ # 无业务语义的 UI primitive
 │       ├── i18n/          # message catalog、formatter 与 locale runtime
-│       └── platform/      # Renderer-only 本地偏好等平台能力
+│       └── platform/      # Renderer-only 本地偏好；不得包含原生窗口能力
 ├── src/
 │   ├── main.zig           # 进程入口
-│   ├── app.zig            # Native composition root
+│   ├── app.zig            # Desktop Host composition root；共置 Application coordinator
 │   ├── product_identity.zig # 从 app.zon 派生 development identity 与 macOS namespace
-│   ├── window_chrome.zig  # WebView hidden-inset drag 的平台 seam
+│   ├── native_sdk_compat/ # 按已登记 capability 隔离的 Desktop Host 兼容实现
+│   │   ├── system_webview_drag_region.zig # 唯一共享 capability contract 与有界 region 状态
+│   │   └── system_webview_drag_region/
+│   │       ├── windows.zig # 创建期 HWND 捕获与 root/WebView hit-test subclass
+│   │       └── macos.zig   # live-pointer drag 的公开 SDK 原语
 │   ├── account.zig        # Account module entrypoint
 │   ├── account/           # Account Runtime、OAuth、catalog、credential 与状态机
 │   ├── bridge.zig         # Renderer Bridge module entrypoint
@@ -61,14 +65,15 @@ metawork/
 
 ## 3. 顶层所有权
 
-| Owner     | 唯一职责                                                                                                   | 不拥有                                                 |
-| --------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
-| App       | Native SDK composition、capability 注入、主线程跨 owner 提交协调与生命周期顺序                              | Account/Workbench 领域状态、Agent 调度策略、第二套 Bridge transport |
-| Account   | Runtime、OAuth/catalog 状态、credential、attempt/effect/mailbox、恢复、脱敏 Account view、ExecutionConfig transfer | Workbench Task、Renderer 状态、AgentCore Runtime       |
-| Workbench | Workspace/Task/Run 产品状态、Executor、admission、terminal product record、snapshot projection             | AgentCore raw protocol、Native WebView、Account secret |
-| Agent     | AgentCore Runtime/Session/Conversation、callback、event pump、Run terminal facts                           | 产品队列、Task 历史、Bridge transport                  |
-| Bridge    | command authority、payload decode、Workspace grant、ProductDelivery connection/revision/snapshot transport | 产品策略真相、AgentCore handle、Account runtime        |
-| Renderer  | snapshot 消费、用户交互、纯 UI 状态与本地草稿                                                              | 安全决策、secret、AgentCore raw event、产品状态机      |
+| Boundary / role          | 唯一职责                                                                                                           | 不拥有                                                                          |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------- |
+| Desktop Host composition | Native SDK composition、平台 capability 注入、平台资源与顶层 Bridge/Application/Native 生命周期顺序                | 产品 policy、Application 内部事务、第二套 Bridge transport                      |
+| App coordinator          | Application 主线程跨 owner 提交、事件屏障与内部生命周期顺序                                                        | Account/Workbench 领域状态、Agent 调度策略、平台资源                            |
+| Account                  | Runtime、OAuth/catalog 状态、credential、attempt/effect/mailbox、恢复、脱敏 Account view、ExecutionConfig transfer | Workbench Task、Renderer 状态、AgentCore Runtime                                |
+| Workbench                | Workspace/Task/Run 产品状态、Executor、admission、terminal product record、snapshot projection                     | AgentCore raw protocol、Native WebView、Account secret                          |
+| Agent                    | AgentCore Runtime/Session/Conversation、callback、event pump、Run terminal facts                                   | 产品队列、Task 历史、Bridge transport                                           |
+| Bridge                   | command authority、payload decode、Workspace grant、ProductDelivery connection/revision/snapshot transport         | 产品策略真相、AgentCore handle、Account runtime                                 |
+| Renderer                 | snapshot 消费、产品 WebUI 交互、纯 UI 状态与本地草稿                                                               | 原生窗口 owner、平台真实状态、安全决策、secret、AgentCore raw event、产品状态机 |
 
 `account/contract.zig` 是 Account owner 发布的纯合同，不是第六个产品 owner。`automation/` 只提供受控账号、origin 和临时 Workspace authority，不注册额外协议，也不拥有产品 transport state。
 
@@ -103,13 +108,21 @@ Renderer Bridge 的 identity、revision、command、event、snapshot 与兼容�
 
 ### `app.zig` 与 module entrypoint
 
-`main.zig` 只调用 `metawork_app`。`app.zig` 创建 Account Runtime、Workbench 与 Agent，注入 Native platform capability，并按顺序协调 Account prepare/commit、Workbench no-fail install 与 owner 生命周期；它不复制这些 owner 的状态或策略。`window_chrome.zig` 是 App-owned 单一启动窗口的窄平台 seam：WebView `hidden_inset_tall` 的 press 交回系统拖动，Windows 在同一精确窗口上补齐双击最大化/还原、最大化拖拽恢复、原生系统菜单与只读最大化状态；minimize/close 继续调用 Native SDK 的 window-id API。Renderer 的 `components/ui/WindowTitlebar.tsx` 统一拥有空白区与交互控件的命中规则，`app/useWindowChrome.ts` 只维护 Host 状态的瞬时呈现投影。该边界不形成通用 Desktop Interface，也不拥有产品状态。
+`main.zig` 只调用 `metawork_app`。`app.zig` 物理上共置两个角色：Desktop Host composition root 组装 Bridge 与 Application、消费并注入 Native SDK 的窄平台 capability、驱动平台生命周期；Application coordinator 在主线程按规范协调 Account prepare/commit、Workbench no-fail install、Agent event drain 与 owner 生命周期。后者属于 Application 的事务协调但不持有领域状态或复制 owner policy；这种源码共置不产生新的模块、业务 owner 或统一 Host facade。
+
+`native_sdk_compat/system_webview_drag_region.zig` 是一条 Desktop Host-owned capability seam，只补齐 Native SDK 0.8.0 尚未进入 Runtime API 的 System WebView drag-region。共享根拥有 document generation、有界 region 校验和平台调用编排；只有 `app.zig` 可以组装它。`system_webview_drag_region/macos.zig` 在 live pointer event 内调用 SDK 已有 `startWindowDrag` 原语，属于一级兼容；`system_webview_drag_region/windows.zig` 以创建期精确捕获的 Host HWND 与其 System WebView 子树上的 Win32 hit-test subclass 补足 SDK 实现缺口，属于二级兼容，并独占 HWND、hook、subclass、rollback 与 teardown；它不创建覆盖 WebView 的辅助窗口，系统按钮、resize、双击与系统菜单继续由原窗口的原生 non-client 命中链处理。
+
+Windows startup identity 不是独立 capability。Desktop Host 在进入 Native SDK runner 前为当前 UI 线程武装 CBT 创建 hook，并在 `app.start` 入口立即收口；该区间必须恰好产生一个无 parent 的 top-level HWND，随后还要通过 root、owner、thread 与 process 校验，零个或多个候选一律 fail closed。该机制不读取标题、焦点、前台窗口、`GWLP_USERDATA` 或 `PlatformServices.context`，也不解释 Native SDK 私有类型。显式退出不属于兼容层：确认对话框与主窗口关闭使用 Native SDK Runtime API，由 Runtime 维护窗口/View 状态并驱动正常 shutdown。
+
+整个 seam 不接受或执行 Renderer 提交的 minimize/maximize/restore/close/system-menu action，不读取或复制 Runtime 窗口状态，也不形成通用 Desktop Interface、Native SDK adapter、第二窗口 owner 或 action facade。Native SDK Runtime System WebView drag-region 经目标平台验收可用后，必须原位替换共享根并删除对应平台实现、allowlist 与专用验证。
+
+Renderer 的 `components/ui/WindowTitlebar.tsx` 绘制产品 header，并通过 portal 在 document root 只声明一个 `data-metawork-window-drag` marker。`frontend/src/bridge/window-chrome.ts` 是 browser-side Bridge boundary：它有界镜像一个 candidate 与全 document 交互排除区，runtime decode Host geometry，并写入 CSS layout variables；窗口 resize 时先重新 `connect` 获取新的 generation/geometry，再同步当前 region。产品 React 代码不得直接调用 `window.zero`，不得维护平台名、原生按钮或窗口状态。已删除的 `app/useWindowChrome.ts`、`components/ui/WindowControls.tsx` 与 `platform/window-chrome.ts` 不得恢复。Native SDK 官方 System WebView drag-region 经目标平台验收可用后，必须原位替换 seam，并同步收口不再需要的专用 command、allowlist 和测试。
 
 `account.zig`、`bridge.zig`、`workbench.zig` 和 `agent.zig` 是小型公开入口，只显式暴露实际消费者需要的类型、函数或窄 namespace。内部文件不通过 `usingnamespace` 或无边界 barrel 重新泄漏。
 
 ### `account/`
 
-- `runtime.zig` 是 Account 长生命周期 owner，拥有状态机实例、private/public candidate catalog、credential、attempt、mailbox/effect queue、平台恢复状态、自动选择与 continuation；它不导入 Workbench，跨 owner 提交仍由 App 协调；
+- `runtime.zig` 是 Account 长生命周期 owner，拥有状态机实例、private/public candidate catalog、credential、attempt、mailbox/effect queue、平台恢复状态、自动选择与 continuation；它不导入 Workbench，跨 owner 提交仍由 App coordinator 协调；
 - `state.zig` 拥有 Account 状态机、attempt/generation 与 prepare/admit/commit；
 - `oauth.zig`、`loopback.zig`、`login_attempt.zig` 和 `network_attempt.zig` 拥有登录网络链路；
 - `metask_client.zig` 与 `catalog.zig` 消费锁定的 Metask production contract；
@@ -117,10 +130,10 @@ Renderer Bridge 的 identity、revision、command、event、snapshot 与兼容�
 - `credential_store.zig` 独立拥有 macOS 双 family slot、固定 `manifest.json` schema 与原子提交语义；
 - `scripts/cleanup-legacy-macos-account.mjs` 是 Account-owned、只由开发者显式执行的一次性 legacy maintenance 入口；签名 setup 不拥有或删除 Account credential；
 - `windows_store.zig` 拥有 Windows 单 refresh token 与无版本、无 secret `account.json` 状态；不读取 macOS manifest，也不持久化 access token 或 Provider API Key；
-- `platform.zig` 是 Account 内唯一导入 Native SDK 的窄主线程 seam，分别适配 macOS 与 Windows 的 credential、timer 与持久化能力，不形成通用 Desktop Interface；
+- `platform.zig` 是当前 Account 平台实现中唯一导入 Native SDK 的过渡边界，分别适配 macOS 与 Windows 的 credential、URL、timer 与持久化能力；它仍让 Application owner 持有原始 `PlatformServices`，属于 [验证规范](validation.md#native-sdk-能力路径)登记的架构缺口，不是获准兼容 seam，也不得增加新的底层能力或消费者；
 - `credentials.zig` 管理 execution credential ownership/rotation。
 
-Account 与 Workbench 是同级 owner，只通过纯 `account/contract.zig` 和 App 主线程提交链协作。Bridge 只消费脱敏 view/command contract，不导入 Account Runtime。App 可以持有两个 owner 的实例引用以协调提交，但不得持有 Account catalog、credential、attempt、mailbox 或 continuation 状态。
+Account 与 Workbench 是同级 owner，只通过纯 `account/contract.zig` 和 App coordinator 主线程提交链协作。Bridge 只消费脱敏 view/command contract，不导入 Account Runtime。App coordinator 可以持有两个 owner 的实例引用以协调提交，但不得持有 Account catalog、credential、attempt、mailbox 或 continuation 状态。
 
 ### `bridge/`
 
@@ -153,22 +166,23 @@ Bridge handler 不能绕过 Workbench 操作 AgentCore handle。automation 只�
 
 ### `workbench/` 与 `agent/`
 
-`workbench/projection.zig` 当前拥有 Workspace current catalog、Task pinned catalog、typed Text/Skill admission 与 history、Workspace/Scheduled Task/Task/Run 产品状态、Task 唯一 active operation、stable Run/compact record、executor worker reference、write-once terminal publication 和 bounded snapshot writer。Manual compact 是 append-only Task maintenance history，不复用 Run identity。`workbench/task_persistence.zig` 拥有 schema 1 的无 secret Workspace/Task history codec、严格恢复校验、16 MiB 上限、进程级单写锁与同目录原子替换；当前文件为 `workbench-history.json`，旧 `workbench-state.json` 按 pre-release hard cut 忽略且不迁移。App 只打开 data root 并注入 load/commit capability，Session/Conversation 不进入该文件。`workbench/automatic_workspace_allocator.zig` 拥有 App-opened automatic root capability、相对随机子目录分配、canonical containment 与发布前空目录回滚；它不扫描旧目录、不恢复 Task，也不递归删除目录。`workbench/scheduled_tasks.zig` 拥有 bounded definition/occurrence storage、结构化 recurrence、跨恢复 planned-time identity 和纯状态转换；`workbench/scheduled_task_persistence.zig` 拥有无 secret codec、candidate commit、恢复校验和 schema revision。`workbench/skill_package.zig` 拥有本地 Skill 目录与 ZIP 包的路径/资源上限预检、regular-bytes-only staging、内容摘要和 canonical `.skill` 导出，不执行包内容或访问网络；`workbench/skill_management.zig` 拥有独立 install identity、personal/project inventory、管理状态、未完成文件事务恢复事实和 schema 1 无 secret 原子持久化。它们都属于 Workbench owner，不是第二个执行器或 AgentCore scheduler。`workbench/executor.zig` 独占 catalog/Run/compact 共用的单一队列、workers、admission 和 shutdown。
+`workbench/projection.zig` 当前拥有 Workspace current catalog、Task pinned catalog、typed Text/Skill admission 与 history、Workspace/Scheduled Task/Task/Run 产品状态、Task 唯一 active operation、stable Run/compact record、executor worker reference、write-once terminal publication 和 bounded snapshot writer。Manual compact 是 append-only Task maintenance history，不复用 Run identity。`workbench/task_persistence.zig` 拥有 schema 1 的无 secret Workspace/Task history codec、严格恢复校验、16 MiB 上限、进程级单写锁与同目录原子替换；当前文件为 `workbench-history.json`，旧 `workbench-state.json` 按 pre-release hard cut 忽略且不迁移。Desktop Host composition role 只打开 data root 并注入 load/commit capability，Session/Conversation 不进入该文件。`workbench/automatic_workspace_allocator.zig` 拥有 Desktop Host-opened automatic root capability、相对随机子目录分配、canonical containment 与发布前空目录回滚；它不扫描旧目录、不恢复 Task，也不递归删除目录。`workbench/scheduled_tasks.zig` 拥有 bounded definition/occurrence storage、结构化 recurrence、跨恢复 planned-time identity 和纯状态转换；`workbench/scheduled_task_persistence.zig` 拥有无 secret codec、candidate commit、恢复校验和 schema revision。`workbench/skill_package.zig` 拥有本地 Skill 目录与 ZIP 包的路径/资源上限预检、regular-bytes-only staging、内容摘要和 canonical `.skill` 导出，不执行包内容或访问网络；`workbench/skill_management.zig` 拥有独立 install identity、personal/project inventory、管理状态、未完成文件事务恢复事实和 schema 1 无 secret 原子持久化。它们都属于 Workbench owner，不是第二个执行器或 AgentCore scheduler。`workbench/executor.zig` 独占 catalog/Run/compact 共用的单一队列、workers、admission 和 shutdown。
 
 `agent/catalog.zig` 拥有 AgentCore Skill catalog descriptor 的即时解码、MetaWork-owned 安全投影、opaque handle lease 与 root/home/epoch 绑定；raw handle、scope、物理来源和 policy 不离开 Agent。`agent/mcp_connector.zig` 是 Host transport capability 到官方 `McpConnectorV1` 的唯一映射点，只拥有 callback/status、取消借用、response ownership、bounded secret guard 与连接引用，不解析 MCP JSON 或协商协议；`agent/mcp_stdio.zig` 以显式 argv/cwd/environment capability 提供 bounded 子进程与 pipe 生命周期，stderr 只做固定缓冲 drain 和清零，不形成诊断数据面；`agent/mcp_http.zig` 只持有 opaque preauthorized endpoint capability、bounded session token 与连接状态，credential/header/HTTP mechanics 留在 capability owner；`agent/mcp_runtime.zig` 线性持有 official server descriptors 与 adapters；`agent/mcp_catalog.zig` 只经官方 decoder 复制 bounded catalog authority 和构造 Runtime-bound selection。`agent/session.zig` 串行化 MCP refresh、当前 generation、Session create/idle replacement 与 shutdown，并继续拥有 AgentCore Runtime/Session、Conversation、typed Run/compact、callback quiescence 和 immutable terminal result。`event_sink.zig` 与 `event_pump.zig` 管理 borrowed event 深拷贝、容量和通知。Agent 不接收 Scheduler capability，也不反向 enqueue Workbench。
 
-依赖方向固定为：
+正式允许的依赖方向固定为：
 
 ```text
 main -> app
 app  -> account, workbench, agent, bridge, automation, Native SDK
+app  -> native_sdk_compat
 bridge -> workbench, account contract, Native SDK
 workbench -> agent, account contract
 agent -> Metask AgentCore bundle SDK
-account -> account contract, Native SDK platform capability
+account -> account contract
 ```
 
-禁止 `agent -> workbench/bridge/app`、`workbench -> bridge`、`bridge -> Account runtime` 和任何产品模块反向依赖 Renderer。
+`bridge -> Native SDK` 只允许消费正式 Bridge transport contract，以及 transport authority 和窄 Host capability 调用所需的 data-only DTO/opaque identifier；它不允许 Bridge 持有 `PlatformServices`、具体平台实现、OS handle 或直接系统调用权。当前 `account/platform.zig -> Native SDK` 是验证规范登记的非合规例外，不属于允许依赖图，也不能作为新增依赖的先例。禁止 `agent -> workbench/bridge/app`、`workbench -> bridge`、`bridge -> Account runtime` 和任何产品模块反向依赖 Renderer。
 
 ## 6. 测试与构建资产
 
