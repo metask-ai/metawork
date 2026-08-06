@@ -346,6 +346,22 @@ test("Account Runtime owns policy while App installs execution explicitly", () =
   );
 });
 
+test("cold Account restore preserves Task history without impersonating an identity switch", () => {
+  const app = read("src/app.zig");
+  assert.match(
+    app,
+    /const ExecutionReplacement = enum \{ none, startup, default, identity \}/,
+  );
+  assert.match(
+    app,
+    /prepareStart\(services\),\s*\.startup[\s\S]*prepareAutomationStart\(\),\s*\.startup[\s\S]*prepareStartUnavailable\(\),\s*\.startup/,
+  );
+  assert.match(
+    app,
+    /\.startup => self\.workbench\.beginDefaultExecutionReplacement\(\)/,
+  );
+});
+
 test("macOS development identity and Account manifest hard cut have one code owner", () => {
   const appZon = read("app.zon");
   const build = read("build.zig");

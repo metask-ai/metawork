@@ -62,7 +62,7 @@ fn platformDataDirectoryName(os_tag: @TypeOf(builtin.os.tag)) []const u8 {
         windows_data_directory_name;
 }
 
-const ExecutionReplacement = enum { none, default, identity };
+const ExecutionReplacement = enum { none, startup, default, identity };
 
 const AccountCoordinator = struct {
     runtime: *account_api.Runtime,
@@ -113,7 +113,7 @@ const AccountCoordinator = struct {
         self.assertMainThread();
         const result = self.commitPrepared(
             self.runtime.prepareStart(services),
-            .identity,
+            .startup,
         );
         std.debug.assert(result.accepted);
     }
@@ -122,7 +122,7 @@ const AccountCoordinator = struct {
         self.assertMainThread();
         const result = self.commitPrepared(
             self.runtime.prepareAutomationStart(),
-            .identity,
+            .startup,
         );
         std.debug.assert(result.accepted);
     }
@@ -131,7 +131,7 @@ const AccountCoordinator = struct {
         self.assertMainThread();
         const result = self.commitPrepared(
             self.runtime.prepareStartUnavailable(),
-            .identity,
+            .startup,
         );
         std.debug.assert(result.accepted);
     }
@@ -173,6 +173,12 @@ const AccountCoordinator = struct {
 
         switch (replacement) {
             .none => {},
+            // A cold process has no live Account-owned identity or credential
+            // to replace. Restored Task history must not be mistaken for an
+            // in-process identity switch, but installation still needs the
+            // Workbench's default-execution transaction boundary.
+            .startup => self.workbench.beginDefaultExecutionReplacement() catch
+                return .rejected(.execution_in_use),
             .default => self.workbench.beginDefaultExecutionReplacement() catch
                 return .rejected(.execution_in_use),
             .identity => self.workbench.beginExecutionReplacement() catch

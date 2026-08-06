@@ -43,6 +43,8 @@ Account 使用 `AccountSessionState` 与 `ExecutionState` 两个正交状态。O
 - 默认 API/模型切换可以安装新 generation，既有 Task 继续引用旧 generation，且其 admission 不被无关的默认切换冻结；默认安装只在新配置无法安全安装、目标 catalog 已失效或同一 generation 提交仍未收口时拒绝；
 - 账号 identity 切换、退出登录和设备 credential 清理必须等待所有引用该账号 credential 的 Task/Session/Run/job/worker reference 归零，不能借默认切换绕过 secret lifetime。
 
+冷启动恢复不是运行中的 identity 切换：新进程尚未持有可被替换的 Account credential，因而启动事务使用 default-execution transaction boundary 安装或清空当前默认执行配置，并保留已恢复的 Task history；不得让持久化但尚未重新绑定 execution 的未关闭 Task 触发 identity replacement rejection。运行中的 reauthenticate/logout 仍必须经过 identity gate。
+
 唯一 committed-state 写路径为：
 
 ```text
