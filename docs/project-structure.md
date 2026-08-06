@@ -37,7 +37,7 @@ metawork/
 │   ├── native_sdk_compat/ # 按已登记 capability 隔离的 Desktop Host 兼容实现
 │   │   ├── system_webview_drag_region.zig # 唯一共享 capability contract 与有界 region 状态
 │   │   └── system_webview_drag_region/
-│   │       ├── windows.zig # 创建期 HWND 捕获、overlay/subclass 与 Win32 资源
+│   │       ├── windows.zig # 创建期 HWND 捕获与 root/WebView hit-test subclass
 │   │       └── macos.zig   # live-pointer drag 的公开 SDK 原语
 │   ├── account.zig        # Account module entrypoint
 │   ├── account/           # Account Runtime、OAuth、catalog、credential 与状态机
@@ -110,7 +110,7 @@ Renderer Bridge 的 identity、revision、command、event、snapshot 与兼容�
 
 `main.zig` 只调用 `metawork_app`。`app.zig` 物理上共置两个角色：Desktop Host composition root 组装 Bridge 与 Application、消费并注入 Native SDK 的窄平台 capability、驱动平台生命周期；Application coordinator 在主线程按规范协调 Account prepare/commit、Workbench no-fail install、Agent event drain 与 owner 生命周期。后者属于 Application 的事务协调但不持有领域状态或复制 owner policy；这种源码共置不产生新的模块、业务 owner 或统一 Host facade。
 
-`native_sdk_compat/system_webview_drag_region.zig` 是一条 Desktop Host-owned capability seam，只补齐 Native SDK 0.8.0 尚未进入 Runtime API 的 System WebView drag-region。共享根拥有 document generation、有界 region 校验和平台调用编排；只有 `app.zig` 可以组装它。`system_webview_drag_region/macos.zig` 在 live pointer event 内调用 SDK 已有 `startWindowDrag` 原语，属于一级兼容；`system_webview_drag_region/windows.zig` 以 Win32 透明 top-band overlay 与 root/WebView hit-test subclass 补足 SDK 实现缺口，属于二级兼容，并独占 HWND、hook、subclass、overlay、rollback 与 teardown。
+`native_sdk_compat/system_webview_drag_region.zig` 是一条 Desktop Host-owned capability seam，只补齐 Native SDK 0.8.0 尚未进入 Runtime API 的 System WebView drag-region。共享根拥有 document generation、有界 region 校验和平台调用编排；只有 `app.zig` 可以组装它。`system_webview_drag_region/macos.zig` 在 live pointer event 内调用 SDK 已有 `startWindowDrag` 原语，属于一级兼容；`system_webview_drag_region/windows.zig` 以创建期精确捕获的 Host HWND 与其 System WebView 子树上的 Win32 hit-test subclass 补足 SDK 实现缺口，属于二级兼容，并独占 HWND、hook、subclass、rollback 与 teardown；它不创建覆盖 WebView 的辅助窗口，系统按钮、resize、双击与系统菜单继续由原窗口的原生 non-client 命中链处理。
 
 Windows startup identity 不是独立 capability。Desktop Host 在进入 Native SDK runner 前为当前 UI 线程武装 CBT 创建 hook，并在 `app.start` 入口立即收口；该区间必须恰好产生一个无 parent 的 top-level HWND，随后还要通过 root、owner、thread 与 process 校验，零个或多个候选一律 fail closed。该机制不读取标题、焦点、前台窗口、`GWLP_USERDATA` 或 `PlatformServices.context`，也不解释 Native SDK 私有类型。显式退出不属于兼容层：确认对话框与主窗口关闭使用 Native SDK Runtime API，由 Runtime 维护窗口/View 状态并驱动正常 shutdown。
 

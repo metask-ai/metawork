@@ -1122,6 +1122,11 @@ test("Desktop Host owns native window chrome and Renderer only declares geometry
     windows,
     /candidate_count != 1[\s\S]*GetAncestor[\s\S]*GetWindowThreadProcessId/,
   );
+  assert.doesNotMatch(
+    windows,
+    /MetaWorkSystemWebViewChrome|\boverlay\b|RegisterClassExW|SetWindowPos/,
+    "the System WebView drag seam must not cover Renderer pixels with another HWND",
+  );
   assert.match(macos, /try services\.startWindowDrag\(window_id\)/);
   assert.deepEqual(
     zigFiles("src/").filter((file) =>
@@ -1133,31 +1138,21 @@ test("Desktop Host owns native window chrome and Renderer only declares geometry
     "CallNextHookEx",
     "CreateWindowExW",
     "DefSubclassProc",
-    "DefWindowProcW",
     "DestroyWindow",
     "EnumChildWindows",
     "GetAncestor",
-    "GetClientRect",
     "GetCurrentProcessId",
     "GetCurrentThreadId",
-    "GetCursorPos",
     "GetDpiForWindow",
-    "GetModuleHandleW",
-    "GetSystemMenu",
     "GetWindow",
     "GetWindowThreadProcessId",
     "IsWindow",
-    "PostMessageW",
-    "RegisterClassExW",
     "RemoveWindowSubclass",
     "ScreenToClient",
     "SendMessageW",
-    "SetWindowPos",
     "SetWindowSubclass",
     "SetWindowsHookExW",
-    "TrackPopupMenu",
     "UnhookWindowsHookEx",
-    "ValidateRect",
   ];
   assert.deepEqual(
     [...windows.matchAll(/extern "(?:user32|kernel32|comctl32)" fn (\w+)/g)]

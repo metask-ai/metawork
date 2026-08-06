@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory = $true)]
     [int]$ProcessId,
-    [ValidateSet('exercise', 'close', 'hit-test')]
+    [ValidateSet('exercise', 'close', 'hit-test', 'hit-test-cleared')]
     [string]$Mode = 'exercise',
     [int]$DragX = 300,
     [int]$DragY = 15,
@@ -98,7 +98,11 @@ public static class MetaWorkChromeProbe {
             throw new InvalidOperationException("ClientToScreen failed");
         }
         long packed = ((long)(ushort)point.X) | ((long)(ushort)point.Y << 16);
-        return SendMessageW(target, 0x0084, UIntPtr.Zero, (IntPtr)packed).ToInt32();
+        int result = SendMessageW(target, 0x0084, UIntPtr.Zero, (IntPtr)packed).ToInt32();
+        if (result == -1 && target != root) {
+            return SendMessageW(root, 0x0084, UIntPtr.Zero, (IntPtr)packed).ToInt32();
+        }
+        return result;
     }
 }
 '@
@@ -154,18 +158,22 @@ if ($process.MainWindowHandle -eq 0) {
 }
 
 $window = $process.MainWindowHandle
-if ($Mode -eq 'hit-test') {
+if ($Mode -eq 'hit-test' -or $Mode -eq 'hit-test-cleared') {
     $dragResult = [MetaWorkChromeProbe]::HitTest($window, $DragX, $DragY)
     $excludedResult = [MetaWorkChromeProbe]::HitTest(
         $window,
         $ExcludedX,
         $ExcludedY
     )
-    if ($dragResult -ne 2) {
-        throw "drag candidate returned hit-test $dragResult instead of HTCAPTION"
-    }
-    if ($excludedResult -eq 2) {
-        throw "interactive exclusion returned HTCAPTION"
+    if ($Mode -eq 'hit-test') {
+        if ($dragResult -ne 2) {
+            throw "drag candidate returned hit-test $dragResult instead of HTCAPTION"
+        }
+        if ($excludedResult -eq 2) {
+            throw "interactive exclusion returned HTCAPTION"
+        }
+    } elseif ($dragResult -eq 2 -or $excludedResult -eq 2) {
+        throw "disconnected drag mirror still returned HTCAPTION: drag=$dragResult exclusion=$excludedResult"
     }
     Write-Output "drag=$dragResult exclusion=$excludedResult"
     return

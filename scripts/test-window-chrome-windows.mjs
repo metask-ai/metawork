@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -27,6 +27,7 @@ const hitTestProbe = path.join(
   "probe-windows-window-chrome.ps1",
 );
 const automationDir = path.join(appCwd, ".zig-cache", "native-sdk-automation");
+const bridgeResponsePath = path.join(automationDir, "bridge-response.txt");
 const timeoutMs = 20_000;
 const fixtureRoot = await mkdtemp(
   path.join(tmpdir(), "metawork-window-chrome-"),
@@ -69,6 +70,7 @@ const exited = new Promise((resolve, reject) => {
 
 try {
   await waitForOutput(/metawork\.smoke\.event_ack sequence=1/);
+  await waitForRendererChromeReady();
   const connected = await invokeBridge(
     "window-chrome-connect",
     "metawork.host.windowChrome.connect",
@@ -152,6 +154,29 @@ try {
     { generation: connected.generation },
   );
   await execFileAsync(
+    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    [
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      hitTestProbe,
+      "-ProcessId",
+      String(app.pid),
+      "-Mode",
+      "hit-test-cleared",
+      "-DragX",
+      "300",
+      "-DragY",
+      String(Math.max(1, Math.floor(dragHeight / 2))),
+      "-ExcludedX",
+      "40",
+      "-ExcludedY",
+      String(Math.max(1, Math.floor(dragHeight / 2))),
+    ],
+    { timeout: timeoutMs, maxBuffer: 1024 * 1024 },
+  );
+  await execFileAsync(
     process.execPath,
     [native, "automate", "tray-action", "2"],
     { cwd: appCwd, timeout: timeoutMs, maxBuffer: 1024 * 1024 },
@@ -196,6 +221,26 @@ async function invokeBridge(id, command, payload) {
   if (!response.ok)
     throw new Error(`${command} failed: ${JSON.stringify(response.error)}`);
   return response.result;
+}
+
+async function waitForRendererChromeReady() {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const response = JSON.parse(await readFile(bridgeResponsePath, "utf8"));
+      if (
+        response?.ok === true &&
+        /^[1-9][0-9]*$/.test(response.result?.generation) &&
+        Number.isFinite(response.result?.insets?.top)
+      )
+        return;
+    } catch (error) {
+      if (error?.code !== "ENOENT" && !(error instanceof SyntaxError))
+        throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error("Renderer window chrome did not reach a synchronized state");
 }
 
 function waitForOutput(pattern) {
