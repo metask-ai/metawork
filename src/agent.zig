@@ -54,6 +54,7 @@ pub const McpSelector = session_impl.McpSelector;
 pub const McpActivation = session_impl.McpActivation;
 pub const McpActivationState = session_impl.McpActivationState;
 pub const McpActivationServer = session_impl.McpActivationServer;
+pub const McpActivationTool = session_impl.McpActivationTool;
 pub const McpActivationServerState = session_impl.McpActivationServerState;
 pub const McpActivationUnavailableReason = session_impl.McpActivationUnavailableReason;
 pub const McpActivationOutcome = session_impl.McpActivationOutcome;

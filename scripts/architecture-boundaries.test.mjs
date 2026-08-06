@@ -367,7 +367,16 @@ test("macOS development identity and Account manifest hard cut have one code own
         /addImport\("metawork_product_identity", product_identity\)/g,
       ) ?? []
     ).length,
-    2,
+    3,
+  );
+  assert.match(
+    identity,
+    /pub const mcp_credential_service = bundle_id \+\+ "\.mcp"/,
+  );
+  const mcpPlatform = read("src/app/mcp_platform.zig");
+  assert.match(
+    mcpPlatform,
+    /pub const credential_service = product_identity\.mcp_credential_service/,
   );
   assert.match(app, /\.name = platformDataDirectoryName\(builtin\.os\.tag\)/);
   assert.match(app, /\.bundle_id = product_identity\.bundle_id/);

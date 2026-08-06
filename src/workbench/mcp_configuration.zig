@@ -198,6 +198,23 @@ pub const Preparation = struct {
     pub fn generation(self: *const Preparation) ?u64 {
         return if (self.registry) |registry| registry.value.generation else null;
     }
+
+    /// Releases the linear credential staging copy after App has constructed
+    /// Agent-owned transport capabilities. Product state retains only the
+    /// registry and per-server preparation facts.
+    pub fn releaseCredentials(self: *Preparation) void {
+        for (self.credentials) |credential| secureFree(self.allocator, credential.secret);
+        if (self.credentials.len != 0) self.allocator.free(self.credentials);
+        self.credentials = &.{};
+    }
+
+    /// Moves the complete preparation into Workbench after every other
+    /// fallible initialization step has succeeded.
+    pub fn take(self: *Preparation) Preparation {
+        const moved = self.*;
+        self.* = undefined;
+        return moved;
+    }
 };
 
 /// Restores a registry and resolves only credentials referenced by enabled,
@@ -231,12 +248,12 @@ pub fn prepare(
     }
 
     for (registry.value.servers, 0..) |server, index| {
-        if (!server.enabled) {
-            server_states[index] = .disabled;
-            continue;
-        }
         if (serverProblem(server, limits)) |problem| {
             server_states[index] = .{ .invalid_catalog = problem };
+            continue;
+        }
+        if (!server.enabled) {
+            server_states[index] = .disabled;
             continue;
         }
         const resolution = resolveServerCredentials(
@@ -578,7 +595,8 @@ fn validateTransport(transport: TransportWire, limits: Limits) ?ServerProblem {
         !validEndpoint(url, limits.max_url_bytes))
         return .invalid_transport;
     for (transport.headers, 0..) |entry, index| {
-        if (!validHeaderName(entry.name)) return .invalid_transport;
+        if (!validHeaderName(entry.name) or reservedHttpHeader(entry.name))
+            return .invalid_transport;
         const source = validateValueSource(entry.value, limits) orelse
             return .invalid_credential_locator;
         if (entry.value.literal != null)
@@ -589,6 +607,19 @@ fn validateTransport(transport: TransportWire, limits: Limits) ?ServerProblem {
                 return .invalid_transport;
     }
     return null;
+}
+
+fn reservedHttpHeader(name: []const u8) bool {
+    inline for (.{
+        "Accept",
+        "Accept-Encoding",
+        "Content-Length",
+        "Content-Type",
+        "Host",
+        "MCP-Protocol-Version",
+        "Mcp-Session-Id",
+    }) |reserved| if (std.ascii.eqlIgnoreCase(name, reserved)) return true;
+    return false;
 }
 
 fn validateValueSource(value: ValueSourceWire, limits: Limits) ?[]const u8 {
@@ -927,6 +958,31 @@ test "registry never treats argv env or headers as secret-capable literals" {
     }
 }
 
+test "registry reserves Host-owned Streamable HTTP mechanics headers" {
+    inline for (.{
+        "Accept",
+        "accept-encoding",
+        "Content-Length",
+        "content-type",
+        "Host",
+        "mcp-protocol-version",
+        "Mcp-Session-Id",
+    }) |header_name| {
+        const bytes = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "{{\"schema_version\":1,\"generation\":1,\"servers\":[{{\"id\":\"remote\",\"namespace\":\"remote\",\"display_name\":\"Remote\",\"enabled\":true,\"negotiation\":\"automatic\",\"timeout_ms\":1000,\"transport\":{{\"kind\":\"streamable_http\",\"url\":\"https://mcp.example.test/rpc\",\"headers\":[{{\"name\":\"{s}\",\"value\":{{\"credential_ref\":\"secret/header\"}}}}]}}}}]}}",
+            .{header_name},
+        );
+        defer std.testing.allocator.free(bytes);
+        var parsed = try decode(std.testing.allocator, bytes, test_limits);
+        defer parsed.deinit();
+        try std.testing.expectEqual(
+            ServerProblem.invalid_transport,
+            serverProblem(parsed.value.servers[0], test_limits).?,
+        );
+    }
+}
+
 test "registry bounds the aggregate credential locator count" {
     var limits = test_limits;
     limits.max_credential_locators = 1;
@@ -1132,6 +1188,25 @@ test "preparation separates disabled invalid missing-auth and eligible servers" 
     try std.testing.expectEqual(@as(usize, 1), prepared.credentials.len);
     try std.testing.expectEqualStrings("present/token", prepared.credentials[0].locator);
     try std.testing.expectEqualStrings("credential-value", prepared.credentials[0].secret);
+}
+
+test "preparation classifies unsafe disabled server facts before projection" {
+    const registry =
+        \\{"schema_version":1,"generation":1,"servers":[{"id":"disabled","namespace":"disabled","display_name":"","enabled":false,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"stdio","command":"tool"},"tools":[]}]}
+    ;
+    var prepared = try prepare(
+        std.testing.allocator,
+        registry,
+        true,
+        false,
+        .{},
+        test_limits,
+    );
+    defer prepared.deinit();
+    try std.testing.expectEqual(
+        ServerProblem.invalid_display_name,
+        prepared.server_states[0].invalid_catalog,
+    );
 }
 
 test "preparation keeps ordinary MCP empty or eligible without credential services" {

@@ -104,7 +104,7 @@ pub const TransportOwner = struct {
 };
 
 pub const Limits = struct {
-    max_secrets: usize = 16,
+    max_secrets: usize = 128,
     max_secret_bytes: usize = 16 * 1024,
     max_response_bytes: usize = @intCast(wire.MAX_MCP_FRAME_BYTES_V1),
 };

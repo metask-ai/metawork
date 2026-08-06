@@ -37,6 +37,9 @@ pub fn build(b: *std.Build) void {
     addMcpRuntimeTests(b, test_modules, bundle.link_libc);
     addMcpCatalogTests(b, test_modules, bundle.link_libc);
     addMcpConfigurationTests(b, test_modules, bundle.link_libc);
+    addMcpPlatformTests(b, test_modules, bundle.link_libc);
+    addMcpAppTests(b, test_modules, bundle.link_libc);
+    addWorkbenchMcpTests(b, test_modules, bundle.link_libc);
     const module_tests = [_]struct {
         name: []const u8,
         root_module: *std.Build.Module,
@@ -70,6 +73,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-skill-package", .root_module = test_modules.workbench_skill_package },
         .{ .name = "metawork-skill-management", .root_module = test_modules.workbench_skill_management },
         .{ .name = "metawork-mcp-configuration", .root_module = test_modules.workbench_mcp_configuration },
+        .{ .name = "metawork-mcp-platform", .root_module = test_modules.mcp_platform },
         .{ .name = "metawork-task-persistence", .root_module = test_modules.workbench_task_persistence },
     };
     for (module_tests) |spec| {
@@ -141,6 +145,7 @@ const WiredModules = struct {
     account_state: *std.Build.Module,
     metask_client: *std.Build.Module,
     app: *std.Build.Module,
+    mcp_platform: *std.Build.Module,
     agent: *std.Build.Module,
     agent_mcp_connector: *std.Build.Module,
     agent_mcp_catalog: *std.Build.Module,
@@ -274,6 +279,59 @@ fn addMcpConfigurationTests(
     const tests = b.addTest(.{
         .name = "metawork-mcp-configuration",
         .root_module = modules.workbench_mcp_configuration,
+    });
+    step.dependOn(&b.addRunArtifact(tests).step);
+}
+
+fn addWorkbenchMcpTests(
+    b: *std.Build,
+    modules: WiredModules,
+    link_libc: bool,
+) void {
+    const step = b.step(
+        "test-workbench-mcp",
+        "Run Workbench MCP binding and safe projection tests",
+    );
+    modules.workbench_projection.link_libc = link_libc;
+    const tests = b.addTest(.{
+        .name = "metawork-workbench-mcp",
+        .root_module = modules.workbench_projection,
+        .filters = &.{"MCP"},
+    });
+    step.dependOn(&b.addRunArtifact(tests).step);
+}
+
+fn addMcpPlatformTests(
+    b: *std.Build,
+    modules: WiredModules,
+    link_libc: bool,
+) void {
+    const step = b.step(
+        "test-mcp-platform",
+        "Run App-owned MCP credential and transport composition tests",
+    );
+    modules.mcp_platform.link_libc = link_libc;
+    const tests = b.addTest(.{
+        .name = "metawork-mcp-platform",
+        .root_module = modules.mcp_platform,
+    });
+    step.dependOn(&b.addRunArtifact(tests).step);
+}
+
+fn addMcpAppTests(
+    b: *std.Build,
+    modules: WiredModules,
+    link_libc: bool,
+) void {
+    const step = b.step(
+        "test-mcp-app",
+        "Compile App MCP startup composition and run its focused tests",
+    );
+    modules.app.link_libc = link_libc;
+    const tests = b.addTest(.{
+        .name = "metawork-mcp-app",
+        .root_module = modules.app,
+        .filters = &.{"MCP"},
     });
     step.dependOn(&b.addRunArtifact(tests).step);
 }
@@ -559,6 +617,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     projection.addImport("workbench_skill_management", skill_management);
     projection.addImport("workbench_skill_package", skill_package);
     projection.addImport("workbench_task_persistence", task_persistence);
+    projection.addImport("workbench_mcp_configuration", mcp_configuration);
     projection.addImport(
         "build_options",
         existingImport(
@@ -623,6 +682,16 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     automation.addImport("automation_enabled", automation_enabled);
     automation.addImport("automation_disabled", automation_disabled);
 
+    const mcp_platform = b.createModule(.{
+        .root_source_file = b.path("src/app/mcp_platform.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    mcp_platform.addImport("native_sdk", existingImport(root_module, "native_sdk"));
+    mcp_platform.addImport("metawork_agent", agent);
+    mcp_platform.addImport("metawork_workbench", workbench);
+    mcp_platform.addImport("metawork_product_identity", product_identity);
+
     const app = b.createModule(.{
         .root_source_file = b.path("src/app.zig"),
         .target = target,
@@ -637,6 +706,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     app.addImport("metawork_account_contract", account_contract);
     app.addImport("metawork_account", account);
     app.addImport("metawork_product_identity", product_identity);
+    app.addImport("metawork_mcp_platform", mcp_platform);
 
     root_module.addImport("metawork_app", app);
     root_module.link_libc = bundle.link_libc;
@@ -656,6 +726,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .account_state = account_state,
         .metask_client = metask_client,
         .app = app,
+        .mcp_platform = mcp_platform,
         .agent = agent,
         .agent_mcp_connector = agent_mcp_connector,
         .agent_mcp_catalog = agent_mcp_catalog,

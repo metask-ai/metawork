@@ -33,6 +33,7 @@ metawork/
 ├── src/
 │   ├── main.zig           # 进程入口
 │   ├── app.zig            # Native composition root
+│   ├── app/                # App-owned 窄平台 capability composition
 │   ├── product_identity.zig # 从 app.zon 派生 development identity 与 macOS namespace
 │   ├── window_chrome.zig  # WebView hidden-inset drag 的平台 seam
 │   ├── account.zig        # Account module entrypoint
@@ -101,9 +102,9 @@ Renderer Bridge 的 identity、revision、command、event、snapshot 与兼容�
 
 ## 5. Zig 结构
 
-### `app.zig` 与 module entrypoint
+### `app.zig`、`app/` 与 module entrypoint
 
-`main.zig` 只调用 `metawork_app`。`app.zig` 创建 Account Runtime、Workbench 与 Agent，注入 Native platform capability，并按顺序协调 Account prepare/commit、Workbench no-fail install 与 owner 生命周期；它不复制这些 owner 的状态或策略。`window_chrome.zig` 是 App-owned 单一启动窗口的窄平台 seam：WebView `hidden_inset_tall` 的 press 交回系统拖动，Windows 在同一精确窗口上补齐双击最大化/还原、最大化拖拽恢复、原生系统菜单与只读最大化状态；minimize/close 继续调用 Native SDK 的 window-id API。Renderer 的 `components/ui/WindowTitlebar.tsx` 统一拥有空白区与交互控件的命中规则，`app/useWindowChrome.ts` 只维护 Host 状态的瞬时呈现投影。该边界不形成通用 Desktop Interface，也不拥有产品状态。
+`main.zig` 只调用 `metawork_app`。`app.zig` 创建 Account Runtime、Workbench 与 Agent，注入 Native platform capability，并按顺序协调 Account prepare/commit、MCP preparation/activation、Workbench no-fail install 与 owner 生命周期；它不复制这些 owner 的状态或策略。`app/mcp_platform.zig` 只适配 MCP 系统 credential、stdio 与 Streamable HTTP mechanics，不形成新的产品 owner。`window_chrome.zig` 是 App-owned 单一启动窗口的窄平台 seam：WebView `hidden_inset_tall` 的 press 交回系统拖动，Windows 在同一精确窗口上补齐双击最大化/还原、最大化拖拽恢复、原生系统菜单与只读最大化状态；minimize/close 继续调用 Native SDK 的 window-id API。Renderer 的 `components/ui/WindowTitlebar.tsx` 统一拥有空白区与交互控件的命中规则，`app/useWindowChrome.ts` 只维护 Host 状态的瞬时呈现投影。该边界不形成通用 Desktop Interface，也不拥有产品状态。
 
 `account.zig`、`bridge.zig`、`workbench.zig` 和 `agent.zig` 是小型公开入口，只显式暴露实际消费者需要的类型、函数或窄 namespace。内部文件不通过 `usingnamespace` 或无边界 barrel 重新泄漏。
 
@@ -145,7 +146,7 @@ Bridge handler 不能绕过 Workbench 操作 AgentCore handle。automation 只�
 
 ### `frontend/src/features/mcp/`
 
-`McpPage.tsx` 是具有稳定左栏入口的 MCP 服务状态与工具目录一级视图，拥有搜索、行动优先分组、空/不可用状态和详情 drawer。它只消费 Bridge 已严格解码并清洗的顶层 `mcp` projection；不得读取 MCP 配置、AgentCore handle、schema、credential 或 raw diagnostic，不得直接调用 AgentCore，也不得在没有 typed Workbench command 时增加服务、认证、刷新、启停、删除、工具选择或 marketplace 动作。当前 Host 固定发布 unavailable，因此入口和 route 存在不代表产品 MCP capability 已开放。
+`McpPage.tsx` 是具有稳定左栏入口的 MCP 服务状态与工具目录一级视图，拥有搜索、行动优先分组、空/不可用状态和详情 drawer。它只消费 Bridge 已严格解码并清洗的顶层 `mcp` projection；不得读取 MCP 配置、AgentCore handle、schema、credential 或 raw diagnostic，不得直接调用 AgentCore，也不得在没有 typed Workbench command 时增加服务、认证、刷新、启停、删除、工具选择或 marketplace 动作。Host 可以发布 ready/degraded 只读目录，但这不代表 Renderer 管理 capability 已开放。
 
 ### `frontend/src/features/scheduled-tasks/`
 
@@ -155,7 +156,7 @@ Bridge handler 不能绕过 Workbench 操作 AgentCore handle。automation 只�
 
 `workbench/projection.zig` 当前拥有 Workspace current catalog、Task pinned catalog、typed Text/Skill admission 与 history、Workspace/Scheduled Task/Task/Run 产品状态、Task 唯一 active operation、stable Run/compact record、executor worker reference、write-once terminal publication 和 bounded snapshot writer。Manual compact 是 append-only Task maintenance history，不复用 Run identity。`workbench/task_persistence.zig` 拥有 schema 1 的无 secret Workspace/Task history codec、严格恢复校验、16 MiB 上限、进程级单写锁与同目录原子替换；当前文件为 `workbench-history.json`，旧 `workbench-state.json` 按 pre-release hard cut 忽略且不迁移。`workbench/mcp_configuration.zig` 拥有 `<MetaWork data dir>/mcp/registry.json` schema 1 的 bounded strict codec、稳定 server/namespace identity、单 server 配置分类、credential locator preparation、进程级单写锁与原子替换；它不保存 credential 原文、不解析 AgentCore catalog，也不形成新的 product owner。App 只打开 data root 并注入 load/commit/platform capability，Session/Conversation 不进入这些文件。`workbench/automatic_workspace_allocator.zig` 拥有 App-opened automatic root capability、相对随机子目录分配、canonical containment 与发布前空目录回滚；它不扫描旧目录、不恢复 Task，也不递归删除目录。`workbench/scheduled_tasks.zig` 拥有 bounded definition/occurrence storage、结构化 recurrence、跨恢复 planned-time identity 和纯状态转换；`workbench/scheduled_task_persistence.zig` 拥有无 secret codec、candidate commit、恢复校验和 schema revision。`workbench/skill_package.zig` 拥有本地 Skill 目录与 ZIP 包的路径/资源上限预检、regular-bytes-only staging、内容摘要和 canonical `.skill` 导出，不执行包内容或访问网络；`workbench/skill_management.zig` 拥有独立 install identity、personal/project inventory、管理状态、未完成文件事务恢复事实和 schema 1 无 secret 原子持久化。它们都属于 Workbench owner，不是第二个执行器或 AgentCore scheduler。`workbench/executor.zig` 独占 catalog/Run/compact 共用的单一队列、workers、admission 和 shutdown。
 
-`agent/catalog.zig` 拥有 AgentCore Skill catalog descriptor 的即时解码、MetaWork-owned 安全投影、opaque handle lease 与 root/home/epoch 绑定；raw handle、scope、物理来源和 policy 不离开 Agent。`agent/mcp_connector.zig` 是 Host transport capability 到官方 `McpConnectorV1` 的唯一映射点，只拥有 callback/status、取消借用、response ownership、bounded secret guard、transport owner 与连接引用，不解析 MCP JSON 或协商协议；`agent/mcp_stdio.zig` 以显式 argv/cwd/environment capability 提供 bounded 子进程与 pipe 生命周期，stderr 只做固定缓冲 drain 和清零，不形成诊断数据面；`agent/mcp_http.zig` 只持有 opaque preauthorized endpoint capability、bounded session token 与连接状态，credential/header/HTTP mechanics 留在 capability owner；`agent/mcp_runtime.zig` 以一次性 `McpRuntimeInput` 线性接管 transport owner、adapter、official server descriptor、稳定 binding identity 与 allowlist；`agent/mcp_catalog.zig` 只经官方 decoder 复制 bounded catalog authority，并原子构造 Runtime-bound selection 与 typed activation health。`agent/session.zig` 串行化 MCP refresh、立即 generation invalidation、activation、Session create/idle replacement 与 shutdown，并继续拥有 AgentCore Runtime/Session、Conversation、typed Run/compact、callback quiescence 和 immutable terminal result。`event_sink.zig` 与 `event_pump.zig` 管理 borrowed event 深拷贝、容量和通知。Agent 不接收 Scheduler capability，也不反向 enqueue Workbench。
+`app/mcp_platform.zig` 是系统 credential service、stdio process capability 与 Streamable HTTP mechanics 的 App composition seam；它只把惰性、opaque transport owner 注入 Agent，不解析 MCP JSON-RPC 或复制协商。`agent/catalog.zig` 拥有 AgentCore Skill catalog descriptor 的即时解码、MetaWork-owned 安全投影、opaque handle lease 与 root/home/epoch 绑定；raw handle、scope、物理来源和 policy 不离开 Agent。`agent/mcp_connector.zig` 是 Host transport capability 到官方 `McpConnectorV1` 的唯一映射点，只拥有 callback/status、取消借用、response ownership、bounded secret guard、transport owner 与连接引用，不解析 MCP JSON 或协商协议；`agent/mcp_stdio.zig` 以显式 argv/cwd/environment capability 提供 bounded 子进程与 pipe 生命周期，stderr 只做固定缓冲 drain 和清零，不形成诊断数据面；`agent/mcp_http.zig` 只持有 opaque preauthorized endpoint capability、bounded session token 与连接状态，credential/header/HTTP mechanics 留在 capability owner；`agent/mcp_runtime.zig` 以一次性 `McpRuntimeInput` 线性接管 transport owner、adapter、official server descriptor、稳定 binding identity 与 allowlist；`agent/mcp_catalog.zig` 只经官方 decoder 复制 bounded catalog authority，并原子构造 Runtime-bound selection 与 typed activation health。`agent/session.zig` 串行化 MCP refresh、立即 generation invalidation、activation、Session create/idle replacement 与 shutdown，并继续拥有 AgentCore Runtime/Session、Conversation、typed Run/compact、callback quiescence 和 immutable terminal result。`event_sink.zig` 与 `event_pump.zig` 管理 borrowed event 深拷贝、容量和通知。Agent 不接收 Scheduler capability，也不反向 enqueue Workbench。
 
 依赖方向固定为：
 

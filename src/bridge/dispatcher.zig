@@ -186,6 +186,13 @@ pub const Dispatcher = struct {
         self.callbacks.stopIngress();
     }
 
+    /// App closes the freshly constructed dispatcher until all startup product
+    /// state has been committed, then opens it exactly once before the Native
+    /// Runtime loads the first Renderer window.
+    pub fn startIngress(self: *Dispatcher) void {
+        self.callbacks.startIngress();
+    }
+
     pub fn assertQuiescent(self: *Dispatcher) void {
         self.callbacks.assertQuiescent();
     }

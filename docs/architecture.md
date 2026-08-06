@@ -67,7 +67,7 @@ Application 是 MetaWork 产品事实与行为的逻辑边界。它不是统一�
 
 Application 内部如何拆分 owner 不属于本图，见 [Application 内部架构](application-architecture.md)。Application 的产品 policy 不依赖 DOM、React tab、Toast、JSX state 或 WebView URL。
 
-MCP 不形成第五个 Application owner。Workbench 拥有 registry、credential locator/恢复、产品状态、工具 authority、Task binding 与安全 projection；Agent 拥有运行期 transport、secret copy、AgentCore descriptor/catalog/selection 与 typed health；App 只注入 `<MetaWork data dir>/mcp` 的目录单写锁、系统 credential 和网络 capability并编排启动/关闭。Account 不参与 MCP，Bridge 仍只运输 Workbench projection，AgentCore 继续唯一拥有 MCP 协议、JSON-RPC、协商和 tool binding 语义。
+MCP 不形成第五个 Application owner。Workbench 拥有 registry、credential locator/恢复、产品状态、工具 authority、Task binding 与安全 projection；Agent 拥有运行期 transport、secret copy、AgentCore descriptor/catalog/selection 与 typed health；App 的 `app/mcp_platform.zig` 只注入 `<MetaWork data dir>/mcp` 的目录单写锁、独立系统 credential service、stdio/network capability并编排启动/关闭。Account 不参与 MCP，Bridge 仍只运输 Workbench projection，AgentCore 继续唯一拥有 MCP 协议、JSON-RPC、协商和 tool binding 语义。
 
 ### 3.4 AgentCore
 
@@ -122,7 +122,7 @@ Renderer 按不可信调用方处理：
 - trusted Workspace 只能由 Host 原生目录选择与原生确认生成一次性 grant；Renderer 不能提交路径加 boolean 自行授信；
 - Provider credential 不进入 Bridge、事件、日志或 snapshot；
 - OAuth token、PKCE verifier、authorization code、完整 API Key 和 Authorization header 只能存在于 Application secret owner、系统凭据存储和受控 runtime copy；所有 owner 在释放前 secure-zero；
-- MCP credential 同样只存在于系统凭据存储、Workbench preparation 的线性临时 copy 和 Agent runtime copy；`mcp/registry.json`、Bridge、Renderer、日志、产品历史和 raw diagnostic 均不得保存 credential 原文；
+- MCP credential 使用与 Metask Account 分离的 `<bundle-id>.mcp` 系统 credential service，只存在于系统凭据存储、Workbench preparation 的线性临时 copy 和 Agent runtime copy；`mcp/registry.json`、Bridge、Renderer、日志、产品历史和 raw diagnostic 均不得保存 credential 原文；
 - production provider/base URL/API Key 不从环境变量或 Renderer 注入，只能来自 Account 已锁定并验证的 Metask contract；Renderer 只能提交 Host 当前脱敏 catalog 中的稳定 API/model selection identifier，Host 必须重新校验 ownership、active 状态、API→model 归属并从锁定合同推导 typed provider/base URL；
 - Host 在形成产品 projection 前移除已知 Host-held credential 和 schema 标记的 secret 字段，并对命令与工具输出设置 byte 上限和 truncation 状态；Renderer 不是秘密过滤边界；
 - 当前不暴露通用 Host tool 或任意执行接口；

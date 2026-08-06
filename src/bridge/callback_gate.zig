@@ -29,6 +29,12 @@ pub const State = struct {
         self.ingress_open = false;
     }
 
+    pub fn startIngress(self: *State) void {
+        std.debug.assert(!self.ingress_open);
+        std.debug.assert(self.active == 0);
+        self.ingress_open = true;
+    }
+
     pub fn assertQuiescent(self: *const State) void {
         // Native SDK dispatches synchronous handlers and app.stop on the same
         // platform loop. If that contract changes, this must become a real
@@ -45,4 +51,12 @@ test "callback gate rejects ingress after quiescence begins" {
     state.stopIngress();
     state.assertQuiescent();
     try std.testing.expectError(error.BridgeStopping, state.enter());
+}
+
+test "callback gate opens only from a quiescent startup boundary" {
+    var state = State{};
+    state.stopIngress();
+    state.startIngress();
+    var lease = try state.enter();
+    lease.deinit();
 }

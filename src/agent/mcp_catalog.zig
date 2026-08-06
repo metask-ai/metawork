@@ -99,6 +99,14 @@ pub const ActivationServer = struct {
     issue_count: u32,
 };
 
+/// Safe, authority-derived tool fact for the exact selector set committed by
+/// an Activation. Registry allowlists and catalog contents are not recomputed
+/// outside Agent from parallel inputs.
+pub const ActivationTool = struct {
+    server_id: []const u8,
+    name: []const u8,
+};
+
 /// One atomically constructed MCP authority generation. The object owns both
 /// the reduced catalog and its optional complete selection.
 pub const Activation = opaque {
@@ -125,6 +133,10 @@ pub const Activation = opaque {
 
     pub fn serverHealth(self: *const Activation) []const ActivationServer {
         return activationStorageConst(self).published_servers;
+    }
+
+    pub fn selectedTools(self: *const Activation) []const ActivationTool {
+        return activationStorageConst(self).published_tools;
     }
 
     pub fn catalogServers(self: *const Activation) []const Server {
@@ -184,6 +196,7 @@ const ActivationStorage = struct {
     projection: *Projection,
     selection: ?*Selection,
     published_servers: []const ActivationServer,
+    published_tools: []const ActivationTool,
     arena: std.heap.ArenaAllocator,
 };
 
@@ -323,6 +336,7 @@ pub fn createActivation(
         .projection = projection,
         .selection = null,
         .published_servers = &.{},
+        .published_tools = &.{},
         .arena = std.heap.ArenaAllocator.init(allocator),
     };
     errdefer storage.arena.deinit();
@@ -330,6 +344,8 @@ pub fn createActivation(
     const health = try arena.alloc(ActivationServer, expected_servers.len);
     var selectors: std.ArrayList(Selector) = .empty;
     defer selectors.deinit(allocator);
+    var selected_tools: std.ArrayList(ActivationTool) = .empty;
+    defer selected_tools.deinit(allocator);
     const canonical = projectionStorageConst(projection);
     var available_count: usize = 0;
     var degraded = false;
@@ -368,6 +384,10 @@ pub fn createActivation(
                         try selectors.append(allocator, .{
                             .binding_identity = expected.binding_identity,
                             .tool_name = tool,
+                        });
+                        try selected_tools.append(allocator, .{
+                            .server_id = expected.id,
+                            .name = tool,
                         });
                         selected_count += 1;
                     } else {
@@ -413,6 +433,12 @@ pub fn createActivation(
         );
     }
     storage.published_servers = health;
+    const published_tools = try arena.alloc(ActivationTool, selected_tools.items.len);
+    for (selected_tools.items, published_tools) |source, *target| target.* = .{
+        .server_id = try arena.dupe(u8, source.server_id),
+        .name = try arena.dupe(u8, source.name),
+    };
+    storage.published_tools = published_tools;
     return @ptrCast(storage);
 }
 
@@ -873,6 +899,9 @@ test "activation atomically intersects allowlists and publishes bounded health" 
     try std.testing.expectEqual(ActivationServerState.degraded, activation.serverHealth()[0].state);
     try std.testing.expectEqual(@as(u32, 1), activation.serverHealth()[0].selected_tool_count);
     try std.testing.expectEqual(ActivationServerState.unavailable, activation.serverHealth()[1].state);
+    try std.testing.expectEqual(@as(usize, 1), activation.selectedTools().len);
+    try std.testing.expectEqualStrings("search", activation.selectedTools()[0].server_id);
+    try std.testing.expectEqualStrings("search", activation.selectedTools()[0].name);
     const raw = rawSelectionReplacement(activation.currentSelection());
     try std.testing.expectEqual(@as(u64, 1), raw.selector_count);
 }

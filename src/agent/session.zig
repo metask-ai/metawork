@@ -36,6 +36,7 @@ pub const McpSelector = mcp_catalog.Selector;
 pub const McpActivation = mcp_catalog.Activation;
 pub const McpActivationState = mcp_catalog.ActivationState;
 pub const McpActivationServer = mcp_catalog.ActivationServer;
+pub const McpActivationTool = mcp_catalog.ActivationTool;
 pub const McpActivationServerState = mcp_catalog.ActivationServerState;
 pub const McpRuntimeInput = mcp_runtime.Input;
 pub const McpServerInput = mcp_runtime.ServerInput;

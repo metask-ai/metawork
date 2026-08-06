@@ -9,6 +9,7 @@ const scheduled_task_persistence = @import("workbench_scheduled_task_persistence
 const skill_management_impl = @import("workbench_skill_management");
 const skill_package_impl = @import("workbench_skill_package");
 const task_persistence = @import("workbench_task_persistence");
+const mcp_configuration = @import("workbench_mcp_configuration");
 const contract_fixture = @import("workbench_contract_fixture");
 const build_options = @import("build_options");
 
@@ -171,6 +172,15 @@ pub const CatalogAvailability = enum {
     unavailable,
 };
 
+const McpAvailability = enum { unavailable, ready, degraded };
+const McpServerStatus = enum {
+    ready,
+    disabled,
+    needs_authentication,
+    @"unreachable",
+    invalid_catalog,
+};
+
 pub const SkillProjection = struct {
     skill_id: []const u8,
     invocation_name: []const u8,
@@ -281,6 +291,29 @@ pub const Configuration = struct {
     task_persistence: TaskPersistence = .{},
     schedule_notifier: ScheduleNotifier = .{},
     skill_management: SkillManagementConfiguration = .{},
+    mcp: McpStartupConfiguration = .{},
+};
+
+/// Successful Workbench initialization consumes `preparation` and
+/// `activation`; failure consumes neither. App clears its optional activation
+/// owner only after init returns successfully.
+pub const McpStartupConfiguration = struct {
+    preparation: ?*mcp_configuration.Preparation = null,
+    activation: ?*lifecycle.McpActivation = null,
+    activation_failed: bool = false,
+};
+
+const McpProductState = struct {
+    preparation: mcp_configuration.Preparation,
+    activation: ?*lifecycle.McpActivation,
+    activation_failed: bool,
+    committed: bool = false,
+
+    fn deinit(self: *McpProductState) void {
+        if (self.activation) |activation| activation.deinit();
+        self.preparation.deinit();
+        self.* = undefined;
+    }
 };
 
 pub const TaskPersistenceCommit = enum {
@@ -1680,6 +1713,7 @@ pub const Workbench = struct {
     skill_catalog_lease: ?*lifecycle.CatalogLease = null,
     skill_catalog: ?CatalogSnapshot = null,
     execution_replacement_pending: bool = false,
+    mcp: ?McpProductState = null,
     next_workspace_id: u64 = 1,
     next_workspace_recent_order: u64 = 1,
     next_task_id: u64 = 1,
@@ -1909,6 +1943,17 @@ pub const Workbench = struct {
         workbench.recoverSkillTransactionsForScopeNoFail(.personal);
         workbench.scheduleSkillCatalogQuery() catch
             workbench.markSkillCatalogUnavailable();
+        // This is the last ownership move in init: no later operation may fail.
+        // The first health observation is committed before App exposes Bridge
+        // ingress or loads the Renderer window.
+        if (configuration.mcp.preparation) |preparation| {
+            workbench.mcp = .{
+                .preparation = preparation.take(),
+                .activation = configuration.mcp.activation,
+                .activation_failed = configuration.mcp.activation_failed,
+            };
+            _ = workbench.syncMcpHealthNoFail();
+        }
         return workbench;
     }
 
@@ -3202,6 +3247,13 @@ pub const Workbench = struct {
             else
                 "",
             .skill_catalog = catalog_lease,
+            .mcp_selection = if (self.mcp) |*mcp|
+                if (mcp.committed)
+                    if (mcp.activation) |activation| activation.currentSelection() else null
+                else
+                    null
+            else
+                null,
         }) catch |err| switch (err) {
             error.SessionCapacity => return error.TaskCapacity,
             else => return err,
@@ -4146,6 +4198,7 @@ pub const Workbench = struct {
     /// while publishing a terminal state.
     pub fn syncLifecycle(self: *Workbench) void {
         var changed = self.commitCatalogJobsNoFail();
+        changed = self.syncMcpHealthNoFail() or changed;
         var durable_changed = false;
         for (self.tasks) |*entry| {
             const view = &(entry.* orelse continue);
@@ -4390,6 +4443,118 @@ pub const Workbench = struct {
         }
     }
 
+    fn syncMcpHealthNoFail(self: *Workbench) bool {
+        const mcp = if (self.mcp) |*value| value else return false;
+        if (mcp.committed) return false;
+        mcp.committed = true;
+        return true;
+    }
+
+    fn mcpAvailability(self: *const Workbench) McpAvailability {
+        const mcp = if (self.mcp) |*value| value else return .unavailable;
+        if (!mcp.committed or mcp.preparation.state != .available or
+            mcp.preparation.registry == null)
+            return .unavailable;
+        for (mcp.preparation.registry.?.value.servers, mcp.preparation.server_states) |server, state| {
+            const status = self.mcpServerStatus(mcp, server.id, state);
+            if (status == .needs_authentication or status == .@"unreachable" or
+                status == .invalid_catalog)
+                return .degraded;
+        }
+        return .ready;
+    }
+
+    fn mcpServerStatus(
+        self: *const Workbench,
+        mcp: *const McpProductState,
+        server_id: []const u8,
+        preparation: mcp_configuration.ServerPreparationState,
+    ) McpServerStatus {
+        _ = self;
+        return switch (preparation) {
+            .disabled => .disabled,
+            .needs_authentication => .needs_authentication,
+            .invalid_catalog => .invalid_catalog,
+            .eligible => status: {
+                if (mcp.activation_failed) break :status .@"unreachable";
+                const activation = mcp.activation orelse break :status .@"unreachable";
+                for (activation.serverHealth()) |health| {
+                    if (!std.mem.eql(u8, health.id, server_id)) continue;
+                    break :status switch (health.state) {
+                        .ready => .ready,
+                        .degraded => .invalid_catalog,
+                        .unavailable => .@"unreachable",
+                    };
+                }
+                break :status .@"unreachable";
+            },
+        };
+    }
+
+    fn writeMcpProjection(
+        self: *Workbench,
+        writer: *std.Io.Writer,
+    ) Error!void {
+        const availability = self.mcpAvailability();
+        if (availability == .unavailable) {
+            writer.writeAll("{\"availability\":\"unavailable\",\"redacted\":false,\"generation\":null,\"servers\":[]}") catch
+                return error.SnapshotTooLarge;
+            return;
+        }
+        const mcp = &self.mcp.?;
+        const registry = mcp.preparation.registry.?.value;
+        writer.print("{{\"availability\":\"{s}\",\"redacted\":{},\"generation\":\"{d}\",\"servers\":[", .{
+            @tagName(availability),
+            registry.servers.len != 0,
+            registry.generation,
+        }) catch return error.SnapshotTooLarge;
+        for (registry.servers, mcp.preparation.server_states, 0..) |server, state, index| {
+            if (index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+            const status = self.mcpServerStatus(mcp, server.id, state);
+            writer.writeAll("{\"id\":") catch return error.SnapshotTooLarge;
+            try self.projectedJsonValueWithKnownCredentials(writer, server.id);
+            writer.writeAll(",\"displayName\":") catch return error.SnapshotTooLarge;
+            const display_name = switch (state) {
+                .invalid_catalog => |problem| if (problem == .invalid_display_name)
+                    server.id
+                else
+                    server.display_name,
+                else => server.display_name,
+            };
+            try self.projectedJsonValueWithKnownCredentials(
+                writer,
+                display_name,
+            );
+            writer.writeAll(",\"namespace\":") catch return error.SnapshotTooLarge;
+            try self.projectedJsonValueWithKnownCredentials(writer, server.namespace);
+            writer.print(",\"transport\":\"{s}\",\"status\":\"{s}\",\"safeDiagnostic\":", .{
+                if (std.mem.eql(u8, server.transport.kind, "streamable_http"))
+                    "streamable_http"
+                else
+                    "stdio",
+                @tagName(status),
+            }) catch return error.SnapshotTooLarge;
+            try self.projectedJsonValueWithKnownCredentials(writer, switch (status) {
+                .ready, .disabled => "",
+                .needs_authentication => "Credential is missing",
+                .@"unreachable" => "Server is unavailable",
+                .invalid_catalog => "Configuration or catalog is invalid",
+            });
+            writer.writeAll(",\"tools\":[") catch return error.SnapshotTooLarge;
+            var tool_count: usize = 0;
+            if (mcp.activation) |activation| for (activation.selectedTools()) |tool| {
+                if (!std.mem.eql(u8, tool.server_id, server.id)) continue;
+                if (tool_count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+                tool_count += 1;
+                writer.writeAll("{\"name\":") catch return error.SnapshotTooLarge;
+                try self.projectedJsonValueWithKnownCredentials(writer, tool.name);
+                writer.writeByte('}') catch return error.SnapshotTooLarge;
+            };
+            writer.writeAll("]}") catch return error.SnapshotTooLarge;
+        }
+        writer.writeAll("]}") catch return error.SnapshotTooLarge;
+    }
+
     /// Commits the final assistant suffix only after the composition root has
     /// drained the Agent event pump following `markTerminalRunsBeforeEventDrain`.
     /// Any later event for the Run is rejected by `applyEvent`.
@@ -4425,7 +4590,8 @@ pub const Workbench = struct {
             self.schedule_persistence_health == .ready;
         const task_persistence_ready = self.task_persistence_health == .ready;
         const background_schedule_wake = self.schedule_background_available;
-        writer.print("{{\"revision\":\"{d}\",\"capabilities\":{{\"taskHistoryPersistence\":{},\"taskHistoryPersistenceHealth\":\"{s}\",\"conversationRecovery\":false,\"executionRebind\":false,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":false,\"persistentWorkspacePermissions\":false,\"automaticWorkspaces\":{},\"scheduledTasks\":{},\"scheduledTaskPersistence\":{},\"scheduledTaskPersistenceHealth\":\"{s}\",\"backgroundScheduleWake\":{},\"localSkillManagement\":{},\"skillManagementHealth\":\"{s}\",\"mcpManagement\":false}},\"account\":", .{
+        const mcp_management = self.mcpAvailability() != .unavailable;
+        writer.print("{{\"revision\":\"{d}\",\"capabilities\":{{\"taskHistoryPersistence\":{},\"taskHistoryPersistenceHealth\":\"{s}\",\"conversationRecovery\":false,\"executionRebind\":false,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":false,\"persistentWorkspacePermissions\":false,\"automaticWorkspaces\":{},\"scheduledTasks\":{},\"scheduledTaskPersistence\":{},\"scheduledTaskPersistenceHealth\":\"{s}\",\"backgroundScheduleWake\":{},\"localSkillManagement\":{},\"skillManagementHealth\":\"{s}\",\"mcpManagement\":{}}},\"account\":", .{
             self.revision,
             task_persistence_ready,
             @tagName(self.task_persistence_health),
@@ -4437,6 +4603,7 @@ pub const Workbench = struct {
             background_schedule_wake,
             self.skill_management_health == .ready,
             @tagName(self.skill_management_health),
+            mcp_management,
         }) catch
             return error.SnapshotTooLarge;
         try self.writeAccount(&writer);
@@ -4452,8 +4619,8 @@ pub const Workbench = struct {
         writer.writeAll(",\"skillManagement\":") catch
             return error.SnapshotTooLarge;
         try self.writeSkillManagement(&writer);
-        writer.writeAll(",\"mcp\":{\"availability\":\"unavailable\",\"redacted\":false,\"generation\":null,\"servers\":[]}") catch
-            return error.SnapshotTooLarge;
+        writer.writeAll(",\"mcp\":") catch return error.SnapshotTooLarge;
+        try self.writeMcpProjection(&writer);
         writer.writeAll(",\"workspaces\":[") catch return error.SnapshotTooLarge;
         var workspace_count: usize = 0;
         for (self.workspaces) |*entry| {
@@ -4721,6 +4888,7 @@ pub const Workbench = struct {
         if (self.automatic_workspaces) |*store| store.deinit();
         if (self.skill_staging_root) |root| self.allocator.free(root);
         if (self.canonical_user_home) |home| self.allocator.free(home);
+        if (self.mcp) |*mcp| mcp.deinit();
         self.execution.deinit();
         self.account.deinit();
         std.debug.assert(self.projection_bytes == 0);
@@ -9561,6 +9729,15 @@ fn worstCaseSnapshotBytes(limits: Limits) ?usize {
         total,
         std.math.mul(
             usize,
+            mcp_configuration.max_store_bytes,
+            json_string_expansion,
+        ) catch return null,
+    ) catch return null;
+    total = std.math.add(
+        usize,
+        total,
+        std.math.mul(
+            usize,
             limits.max_scheduled_task_projection_bytes,
             json_string_expansion,
         ) catch return null,
@@ -9728,7 +9905,9 @@ fn testLimits() Limits {
         .max_tool_field_bytes = 8 * 1024,
         .max_pending_ui_json_bytes = 64 * 1024,
         .max_pending_ui_requests = 2,
-        .max_snapshot_bytes = 4 * 1024 * 1024,
+        // Includes the independently bounded MCP safe projection in addition
+        // to the ordinary Workbench projection budget.
+        .max_snapshot_bytes = 8 * 1024 * 1024,
     };
 }
 
@@ -12671,4 +12850,62 @@ test "Workbench outcomes map to truthful terminal product phases" {
     try std.testing.expectEqual(RunPhase.cancelled, phaseForOutcome(.cancelled));
     try std.testing.expectEqual(RunPhase.interrupted, phaseForOutcome(.interrupted));
     try std.testing.expectEqual(RunPhase.failed, phaseForOutcome(.dependency_contract_failure));
+}
+
+test "MCP startup health commits a safe degraded Workbench projection" {
+    const registry =
+        \\{"schema_version":1,"generation":9,"servers":[{"id":"local-files","namespace":"files","display_name":"Local files","enabled":true,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"stdio","command":"/private/hidden/mcp-server","arguments":[{"literal":"--serve"}],"environment":[]},"tools":["read_file"]},{"id":"disabled","namespace":"disabled","display_name":"Disabled","enabled":false,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"streamable_http","url":"https://private.example.test/mcp","headers":[]},"tools":[]}]}
+    ;
+    var preparation = try mcp_configuration.prepare(
+        std.testing.allocator,
+        registry,
+        true,
+        false,
+        .{},
+        .{
+            .max_servers = 8,
+            .max_tools_per_server = 32,
+            .max_namespace_bytes = 128,
+            .max_credential_locators = 64,
+        },
+    );
+    var preparation_owned = true;
+    defer if (preparation_owned) preparation.deinit();
+    test_agent_runtime.io = std.testing.io;
+    var workbench = try Workbench.init(
+        std.testing.allocator,
+        &test_agent_runtime,
+        testLimits(),
+        .{ .mcp = .{
+            .preparation = &preparation,
+            .activation_failed = true,
+        } },
+    );
+    preparation_owned = false;
+    defer workbench.deinit();
+
+    var output: [128 * 1024]u8 = undefined;
+    const snapshot = try workbench.writeSnapshot(&output);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"mcpManagement\":true",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"availability\":\"degraded\",\"redacted\":true,\"generation\":\"9\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"status\":\"unreachable\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"status\":\"disabled\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "/private/hidden") == null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "private.example.test") == null);
 }
