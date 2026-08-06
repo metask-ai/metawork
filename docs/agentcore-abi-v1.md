@@ -62,7 +62,8 @@ fresh Session 只使用 `SessionHostConfigV1` 与 `SessionCreateConfigV1`：
 - create config 持有 Host config 与 model；
 - credential、root/home、model 和 allowlist 在同步 create 边界内借用，AgentCore 按合同复制；
 - Skill catalog 与显式 all-enabled selection 成对传入；无 catalog 时 selection 必须为 null；
-- 当前 `permission_rules = null`、`mcp_selection = null`、`durable_budget = null`；null durable budget 使用 AgentCore canonical defaults；
+- MCP authority 是完整 replacement：create config 的 `mcp_selection = null` 表示 empty view；`sessionUpdateMcp` 的 selection pointer 必须非 null，合法的零 selector descriptor 表示清空当前 view；
+- 当前正式 App 仍使用 `permission_rules = null`、`mcp_selection = null`、`durable_budget = null`；null durable budget 使用 AgentCore canonical defaults；
 - 每个 Session 至多一个 in-flight Run/compact/mutation；Runtime 必须活得比全部 Session 和 catalog lease 长。
 
 旧 AgentCore Session/Conversation 不迁移、不打开，也不通过重新提交历史文本伪造恢复。升级后只创建 revision 6 Session。

@@ -2,6 +2,9 @@
 //! Product projection and Renderer transport do not belong here.
 
 const session_impl = @import("agent_session");
+const mcp_connector = @import("agent_mcp_connector");
+const mcp_stdio = @import("agent_mcp_stdio");
+const mcp_http = @import("agent_mcp_http");
 
 pub const OwnedCoreEvent = session_impl.OwnedCoreEvent;
 pub const Status = session_impl.Status;
@@ -42,6 +45,32 @@ pub const CatalogProjection = session_impl.CatalogProjection;
 pub const CatalogLease = session_impl.CatalogLease;
 pub const CatalogAcquisition = session_impl.CatalogAcquisition;
 pub const CatalogQuery = session_impl.CatalogQuery;
+pub const McpCatalogProjection = session_impl.McpCatalogProjection;
+pub const McpCatalogServer = session_impl.McpCatalogServer;
+pub const McpCatalogTool = session_impl.McpCatalogTool;
+pub const McpCatalogIssue = session_impl.McpCatalogIssue;
+pub const McpSelection = session_impl.McpSelection;
+pub const McpSelector = session_impl.McpSelector;
+pub const McpServerConfig = session_impl.McpServerConfig;
+pub const McpTransportKind = session_impl.McpTransportKind;
+pub const McpNegotiationPolicy = session_impl.McpNegotiationPolicy;
+pub const McpConnectorAdapter = mcp_connector.Adapter;
+pub const McpConnectorConfig = mcp_connector.Config;
+pub const McpTransport = mcp_connector.Transport;
+pub const McpPurpose = mcp_connector.Purpose;
+pub const McpEra = mcp_connector.Era;
+pub const McpCancellation = mcp_connector.Cancellation;
+pub const McpOpenOutcome = mcp_connector.OpenOutcome;
+pub const McpExchangeOutcome = mcp_connector.ExchangeOutcome;
+pub const McpTransportFailure = mcp_connector.Failure;
+pub const McpStdioBackend = mcp_stdio.Backend;
+pub const McpStdioConfig = mcp_stdio.Config;
+pub const McpHttpBackend = mcp_http.Backend;
+pub const McpHttpConfig = mcp_http.Config;
+pub const McpAuthorizedEndpoint = mcp_http.AuthorizedEndpoint;
+pub const McpHttpRequest = mcp_http.Request;
+pub const McpHttpResponse = mcp_http.Response;
+pub const McpHttpPerformOutcome = mcp_http.PerformOutcome;
 pub const ProviderKind = session_impl.ProviderKind;
 pub const PermissionMode = session_impl.PermissionMode;
 pub const ShellPolicy = session_impl.ShellPolicy;
