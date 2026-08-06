@@ -229,6 +229,7 @@ pub const FakeCore = struct {
     session_create_failures: usize = 0,
     forced_skill_update_status: ?u32 = null,
     forced_mcp_update_status: ?u32 = null,
+    forced_mcp_refresh_status: ?u32 = null,
     forced_abort_status: ?u32 = null,
     forced_compact_status: ?u32 = null,
     forced_compact_abort_status: ?u32 = null,
@@ -338,6 +339,12 @@ pub const FakeCore = struct {
     pub fn failNextSessionCreate(self: *FakeCore) void {
         self.lock();
         self.session_create_failures += 1;
+        self.unlock();
+    }
+
+    pub fn forceNextMcpRefreshStatus(self: *FakeCore, status: u32) void {
+        self.lock();
+        self.forced_mcp_refresh_status = status;
         self.unlock();
     }
 
@@ -838,7 +845,13 @@ pub fn runtimeRefreshMcp(
     }
     fake_core.lock();
     fake_core.mcp_refreshes += 1;
+    const forced_status = fake_core.forced_mcp_refresh_status;
+    fake_core.forced_mcp_refresh_status = null;
     fake_core.unlock();
+    if (forced_status) |status| {
+        diagnostic(out_error);
+        return status;
+    }
     out_generation.?.* = 7;
     return wire.STATUS_OK;
 }

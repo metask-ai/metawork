@@ -9,6 +9,7 @@ const workbench_api = @import("metawork_workbench");
 const account_contract = @import("metawork_account_contract");
 const account_api = @import("metawork_account");
 const product_identity = @import("metawork_product_identity");
+const mcp_platform = @import("metawork_mcp_platform");
 const window_chrome = @import("native_sdk_compat/system_webview_drag_region.zig");
 
 pub const panic = std.debug.FullPanic(native_sdk.debug.capturePanic);
@@ -33,6 +34,17 @@ const tray_items = [_]native_sdk.platform.TrayMenuItem{
     .{ .id = tray_quit_id, .label = "Quit MetaWork", .command = "metawork.tray.quit" },
 };
 const windows_data_directory_name = "MetaWork";
+const mcp_runtime_limits: agent.McpRuntimeLimits = .{};
+
+const mcp_configuration_limits: workbench_api.McpConfigurationLimits = .{
+    .max_servers = 64,
+    .max_tools_per_server = 1024,
+    .max_namespace_bytes = 24,
+    .max_credential_locators = 4096,
+    .max_credential_secret_bytes = native_sdk.platform.max_credential_secret_bytes,
+    .max_runtime_secrets_per_server = mcp_runtime_limits.max_secrets,
+    .max_runtime_secret_bytes_per_server = mcp_runtime_limits.max_secret_bytes,
+};
 
 fn bridgeWindowChromeEnvironment(value: window_chrome.Environment) bridge_api.WindowChromeEnvironment {
     return .{
@@ -260,6 +272,11 @@ const App = struct {
     window_chrome_capability: window_chrome.Capability = window_chrome.Capability.init(main_window_id),
     tray_installed: bool = false,
     account_coordinator: ?*AccountCoordinator = null,
+    account_started: bool = false,
+    workbench_storage: ?*workbench_api.Workbench = null,
+    workbench_configuration: workbench_api.Configuration = .{},
+    workbench_initialized: bool = false,
+    mcp_configuration_store: ?*workbench_api.McpConfigurationFileStore = null,
 
     fn app(self: *@This()) native_sdk.App {
         return .{
@@ -293,6 +310,65 @@ const App = struct {
             try self.window_chrome_capability.requirePlatform(services)
         else
             return error.SystemWebViewChromeUnavailable;
+        var preparation = try self.prepareMcpConfiguration();
+        var preparation_owned = true;
+        defer if (preparation_owned) preparation.deinit();
+        var mcp_input: ?agent.McpRuntimeInput = null;
+        defer if (mcp_input) |*input| input.deinit();
+        var activation_failed = false;
+        mcp_input = mcp_platform.buildRuntimeInput(
+            self.io,
+            std.heap.c_allocator,
+            &preparation,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidConfig => failed: {
+                activation_failed = true;
+                break :failed null;
+            },
+        };
+        const agent_runtime = try createAgentRuntime(
+            self.io,
+            .{
+                .context = self,
+                .notify_fn = App.notifyAgentEventConsumer,
+            },
+            if (mcp_input) |*input| input else null,
+        );
+        self.agent_runtime = agent_runtime;
+        var activation: ?*agent.McpActivation = null;
+        defer if (activation) |value| value.deinit();
+        switch (try agent_runtime.activateMcp()) {
+            .empty => {},
+            .activated => |value| activation = value,
+            .unavailable => activation_failed = true,
+        }
+        preparation.releaseCredentials();
+        const workbench_storage = self.workbench_storage orelse
+            @panic("Workbench storage is not composed");
+        var configuration = self.workbench_configuration;
+        configuration.mcp = .{
+            .preparation = &preparation,
+            .activation = activation,
+            .activation_failed = activation_failed,
+        };
+        workbench_storage.* = try workbench_api.Workbench.init(
+            std.heap.c_allocator,
+            agent_runtime,
+            .{
+                .worker_count = host_worker_count,
+                .queue_capacity = 8,
+                .max_pending_ui_json_bytes = pending_ui_json_capacity,
+                .max_pending_ui_requests = host_worker_count,
+                .max_terminal_diagnostic_bytes = terminal_diagnostic_capacity,
+                .max_snapshot_bytes = workbench_snapshot_capacity,
+            },
+            configuration,
+        );
+        preparation_owned = false;
+        activation = null;
+        self.workbench = workbench_storage;
+        self.workbench_initialized = true;
         try self.installScheduleHost();
         const coordinator = self.account_coordinator orelse
             @panic("Account coordinator is not composed");
@@ -315,15 +391,90 @@ const App = struct {
         } else {
             coordinator.startUnavailable();
         }
+        self.account_started = true;
+        (self.dispatcher orelse @panic("Bridge Dispatcher is not composed")).startIngress();
+    }
+
+    fn prepareMcpConfiguration(self: *@This()) !workbench_api.McpPreparedConfiguration {
+        const store = self.mcp_configuration_store orelse
+            return workbench_api.prepareMcpConfiguration(
+                std.heap.c_allocator,
+                null,
+                false,
+                false,
+                .{},
+                mcp_configuration_limits,
+            );
+        const restored_bytes = store.loadAlloc(std.heap.c_allocator) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return workbench_api.prepareMcpConfiguration(
+                std.heap.c_allocator,
+                null,
+                true,
+                true,
+                .{},
+                mcp_configuration_limits,
+            ),
+        };
+        defer if (restored_bytes) |bytes| std.heap.c_allocator.free(bytes);
+        var registry_corrupt = false;
+        const generation: u64 = if (restored_bytes) |bytes| generation: {
+            var decoded = workbench_api.decodeMcpRegistry(
+                std.heap.c_allocator,
+                bytes,
+                mcp_configuration_limits,
+            ) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => {
+                    registry_corrupt = true;
+                    break :generation 0;
+                },
+            };
+            defer decoded.deinit();
+            break :generation decoded.value.generation;
+        } else 0;
+        var credential_store = mcp_platform.CredentialStore{
+            .services = self.platform_services orelse
+                return error.RuntimeUnavailable,
+            .main_thread_id = self.main_thread_id,
+        };
+        var recovery_failed = registry_corrupt;
+        if (!registry_corrupt) {
+            _ = store.recoverPendingCredentialTransaction(
+                std.heap.c_allocator,
+                generation,
+                credential_store.cleanup(),
+                mcp_configuration_limits,
+            ) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => recovery_failed = true,
+            };
+        }
+        return workbench_api.prepareMcpConfiguration(
+            std.heap.c_allocator,
+            restored_bytes,
+            true,
+            recovery_failed,
+            credential_store.resolver(),
+            mcp_configuration_limits,
+        );
     }
 
     fn stop(context: *anyopaque, native_runtime: *native_sdk.Runtime) anyerror!void {
         const self: *@This() = @ptrCast(@alignCast(context));
-        if (self.dispatcher) |dispatcher| dispatcher.stopIngress();
-        if (self.account_coordinator) |coordinator| {
+        if (self.dispatcher) |dispatcher| {
+            dispatcher.stopIngress();
+            // Native Bridge callbacks are synchronous on this same platform
+            // loop. Prove the product ingress boundary is quiescent before
+            // Workbench workers or Agent-owned transports begin shutdown.
+            dispatcher.assertQuiescent();
+            dispatcher.breakConnection();
+            dispatcher.detachWorkbench();
+        }
+        if (self.account_started) if (self.account_coordinator) |coordinator| {
             coordinator.shutdown();
             coordinator.drain();
-        }
+        };
         if (self.workbench) |workbench| workbench.shutdownExecutor();
         if (self.agent_runtime) |agent_runtime| {
             try agent_runtime.shutdown();
@@ -331,17 +482,13 @@ const App = struct {
         }
         self.drainAgentEvents();
         if (self.workbench) |workbench| workbench.syncLifecycle();
-        if (self.dispatcher) |dispatcher| {
-            dispatcher.breakConnection();
-            dispatcher.assertQuiescent();
-            dispatcher.detachWorkbench();
-        }
         if (self.tray_installed) {
             native_runtime.removeTray() catch {};
             self.tray_installed = false;
         }
         self.window_chrome_capability.deinit();
         self.workbench = null;
+        self.account_started = false;
         self.platform_services = null;
         if (self.native_runtime == native_runtime) self.native_runtime = null;
     }
@@ -788,9 +935,14 @@ fn frontendEntryExists(
     return true;
 }
 
-fn createAgentRuntime(io: std.Io, notifier: agent.EventReadyNotifier) !*agent.Runtime {
+fn createAgentRuntime(
+    io: std.Io,
+    notifier: agent.EventReadyNotifier,
+    mcp_input: ?*agent.McpRuntimeInput,
+) !*agent.Runtime {
     return agent.Runtime.init(io, std.heap.c_allocator, .{
         .max_sessions = 8,
+        .mcp_input = mcp_input,
         .max_ui_request_bytes = pending_ui_json_capacity,
         .max_terminal_diagnostic_bytes = terminal_diagnostic_capacity,
         .event_ready_notifier = notifier,
@@ -893,6 +1045,16 @@ pub fn run(init: std.process.Init) !void {
         &skill_staging_dir_storage,
         &.{ scheduled_task_dir, "skill-staging" },
     );
+    var mcp_dir_storage: [4096]u8 = undefined;
+    const mcp_dir = try native_sdk.app_dirs.join(
+        native_sdk.app_dirs.currentPlatform(),
+        &mcp_dir_storage,
+        &.{ data_dir, "mcp" },
+    );
+    var mcp_configuration_store: ?workbench_api.McpConfigurationFileStore =
+        workbench_api.McpConfigurationFileStore.init(init.io, mcp_dir) catch null;
+    defer if (mcp_configuration_store) |*store| store.deinit();
+    app.mcp_configuration_store = if (mcp_configuration_store) |*store| store else null;
     var task_file_store: ?workbench_api.TaskFileStore =
         workbench_api.TaskFileStore.init(
             init.io,
@@ -952,86 +1114,66 @@ pub fn run(init: std.process.Init) !void {
     defer if (canonical_user_home) |home|
         std.heap.c_allocator.free(home);
 
-    const agent_runtime = try createAgentRuntime(init.io, .{
-        .context = &app,
-        .notify_fn = App.notifyAgentEventConsumer,
-    });
-    app.agent_runtime = agent_runtime;
-    var workbench_initialized = false;
+    // AccountCoordinator and Dispatcher need stable Workbench addresses before
+    // Native startup, but neither may dereference this storage while Bridge
+    // ingress is closed. App.start initializes Workbench completely and only
+    // then opens ingress, before the first Renderer window is loaded.
     var workbench: workbench_api.Workbench = undefined;
+    app.workbench_storage = &workbench;
+    app.workbench_configuration = .{
+        .change_notifier = .{
+            .context = &app,
+            .wake = App.notifyMainLoop,
+        },
+        .directories = .{
+            .canonical_user_home = canonical_user_home,
+            .automatic_workspace_root = if (automatic_workspace_root) |*root|
+                root
+            else
+                null,
+        },
+        .schedule_timer = .{
+            .context = &app,
+            .enabled = true,
+            .now_unix_seconds = App.scheduledTaskNow,
+            .arm = App.armScheduledTaskTimer,
+            .cancel = App.cancelScheduledTaskTimer,
+        },
+        .schedule_persistence = .{
+            .context = if (scheduled_task_file_store) |*store| store else null,
+            .enabled = scheduled_task_file_store != null and
+                !scheduled_task_restore_failed,
+            .restored_bytes = scheduled_task_restored_bytes,
+            .restore_failed = scheduled_task_restore_failed,
+            .commit_fn = commitScheduledTaskStore,
+        },
+        .task_persistence = .{
+            .context = if (task_file_store) |*store| store else null,
+            .enabled = task_file_store != null and !task_restore_failed,
+            .restored_bytes = task_restored_bytes,
+            .restore_failed = task_restore_failed,
+            .commit_fn = commitTaskStore,
+        },
+        .schedule_notifier = .{
+            .context = &app,
+            .enabled = true,
+            .notify_fn = App.notifyScheduledTask,
+        },
+        .skill_management = .{
+            .file_store = if (skill_management_file_store) |*store| store else null,
+            .staging_root = skill_staging_dir,
+            .restored_bytes = skill_management_restored_bytes,
+            .restore_failed = skill_management_restore_failed,
+        },
+    };
     defer {
-        if (workbench_initialized) workbench.shutdownExecutor();
-        if (!app.agent_shutdown) agent_runtime.shutdown() catch {};
-        if (workbench_initialized) workbench.deinit();
-        agent_runtime.deinit();
+        if (app.workbench_initialized) workbench.shutdownExecutor();
+        if (app.agent_runtime) |runtime| {
+            if (!app.agent_shutdown) runtime.shutdown() catch {};
+            if (app.workbench_initialized) workbench.deinit();
+            runtime.deinit();
+        }
     }
-
-    workbench = try workbench_api.Workbench.init(
-        std.heap.c_allocator,
-        agent_runtime,
-        .{
-            .worker_count = host_worker_count,
-            .queue_capacity = 8,
-            .max_pending_ui_json_bytes = pending_ui_json_capacity,
-            .max_pending_ui_requests = host_worker_count,
-            .max_terminal_diagnostic_bytes = terminal_diagnostic_capacity,
-            .max_snapshot_bytes = workbench_snapshot_capacity,
-        },
-        .{
-            .change_notifier = .{
-                .context = &app,
-                .wake = App.notifyMainLoop,
-            },
-            .directories = .{
-                .canonical_user_home = canonical_user_home,
-                .automatic_workspace_root = if (automatic_workspace_root) |*root|
-                    root
-                else
-                    null,
-            },
-            .schedule_timer = .{
-                .context = &app,
-                .enabled = true,
-                .now_unix_seconds = App.scheduledTaskNow,
-                .arm = App.armScheduledTaskTimer,
-                .cancel = App.cancelScheduledTaskTimer,
-            },
-            .schedule_persistence = .{
-                .context = if (scheduled_task_file_store) |*store|
-                    store
-                else
-                    null,
-                .enabled = scheduled_task_file_store != null and
-                    !scheduled_task_restore_failed,
-                .restored_bytes = scheduled_task_restored_bytes,
-                .restore_failed = scheduled_task_restore_failed,
-                .commit_fn = commitScheduledTaskStore,
-            },
-            .task_persistence = .{
-                .context = if (task_file_store) |*store| store else null,
-                .enabled = task_file_store != null and !task_restore_failed,
-                .restored_bytes = task_restored_bytes,
-                .restore_failed = task_restore_failed,
-                .commit_fn = commitTaskStore,
-            },
-            .schedule_notifier = .{
-                .context = &app,
-                .enabled = true,
-                .notify_fn = App.notifyScheduledTask,
-            },
-            .skill_management = .{
-                .file_store = if (skill_management_file_store) |*store|
-                    store
-                else
-                    null,
-                .staging_root = skill_staging_dir,
-                .restored_bytes = skill_management_restored_bytes,
-                .restore_failed = skill_management_restore_failed,
-            },
-        },
-    );
-    workbench_initialized = true;
-    app.workbench = &workbench;
     var account_runtime = try account_api.Runtime.init(
         std.heap.c_allocator,
         init.io,
@@ -1061,6 +1203,7 @@ pub fn run(init: std.process.Init) !void {
         app.dispatcherAutomationAuthority(),
         main_window_id,
     );
+    dispatcher.stopIngress();
     defer dispatcher.deinit();
     app.dispatcher = &dispatcher;
     const mode = frontendMode(init.environ_map);
@@ -1090,6 +1233,14 @@ test "App remains a composition root with explicit platform limits" {
 
 test {
     _ = window_chrome;
+}
+
+test "MCP App composition keeps registry limits within AgentCore authority bounds" {
+    std.testing.refAllDecls(App);
+    comptime _ = run;
+    try std.testing.expectEqual(@as(usize, 64), mcp_configuration_limits.max_servers);
+    try std.testing.expectEqual(@as(usize, 1024), mcp_configuration_limits.max_tools_per_server);
+    try std.testing.expectEqual(@as(usize, 24), mcp_configuration_limits.max_namespace_bytes);
 }
 
 test "product identity does not unify macOS and Windows Account storage" {

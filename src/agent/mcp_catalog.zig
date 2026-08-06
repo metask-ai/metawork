@@ -75,6 +75,87 @@ pub const Selection = opaque {
     }
 };
 
+pub const ActivationState = enum {
+    ready,
+    degraded,
+    unavailable,
+};
+
+pub const ActivationServerState = enum {
+    ready,
+    degraded,
+    unavailable,
+};
+
+/// Product-neutral, bounded health facts derived from the official catalog and
+/// the Workbench allowlist. No raw issue detail, schema, fingerprint, endpoint,
+/// command, or credential crosses this boundary.
+pub const ActivationServer = struct {
+    id: []const u8,
+    binding_identity: [32]u8,
+    state: ActivationServerState,
+    configured_tool_count: u32,
+    selected_tool_count: u32,
+    issue_count: u32,
+};
+
+/// Safe, authority-derived tool fact for the exact selector set committed by
+/// an Activation. Registry allowlists and catalog contents are not recomputed
+/// outside Agent from parallel inputs.
+pub const ActivationTool = struct {
+    server_id: []const u8,
+    name: []const u8,
+};
+
+/// One atomically constructed MCP authority generation. The object owns both
+/// the reduced catalog and its optional complete selection.
+pub const Activation = opaque {
+    pub fn deinit(self: *Activation) void {
+        const owned = activationStorage(self);
+        if (owned.selection) |selection| selection.deinit();
+        owned.projection.deinit();
+        const allocator = owned.allocator;
+        owned.arena.deinit();
+        allocator.destroy(owned);
+    }
+
+    pub fn registryGeneration(self: *const Activation) u64 {
+        return activationStorageConst(self).registry_generation;
+    }
+
+    pub fn catalogGeneration(self: *const Activation) u64 {
+        return activationStorageConst(self).projection.catalogGeneration();
+    }
+
+    pub fn state(self: *const Activation) ActivationState {
+        return activationStorageConst(self).state;
+    }
+
+    pub fn serverHealth(self: *const Activation) []const ActivationServer {
+        return activationStorageConst(self).published_servers;
+    }
+
+    pub fn selectedTools(self: *const Activation) []const ActivationTool {
+        return activationStorageConst(self).published_tools;
+    }
+
+    pub fn catalogServers(self: *const Activation) []const Server {
+        return activationStorageConst(self).projection.servers();
+    }
+
+    pub fn catalogTools(self: *const Activation) []const Tool {
+        return activationStorageConst(self).projection.tools();
+    }
+
+    pub fn catalogIssues(self: *const Activation) []const Issue {
+        return activationStorageConst(self).projection.issues();
+    }
+
+    pub fn currentSelection(self: *const Activation) ?*const Selection {
+        return activationStorageConst(self).selection;
+    }
+};
+
 pub const Error = error{
     RefreshFailed,
     DescribeFailed,
@@ -106,6 +187,17 @@ const SelectionStorage = struct {
     generation: u64,
     arena: std.heap.ArenaAllocator,
     raw_selectors: []wire.McpSelectorV1,
+};
+
+const ActivationStorage = struct {
+    allocator: std.mem.Allocator,
+    registry_generation: u64,
+    state: ActivationState,
+    projection: *Projection,
+    selection: ?*Selection,
+    published_servers: []const ActivationServer,
+    published_tools: []const ActivationTool,
+    arena: std.heap.ArenaAllocator,
 };
 
 pub fn refresh(
@@ -219,6 +311,134 @@ pub fn createSelection(
             .reserved = [_]u64{0} ** 3,
         };
     }
+    return @ptrCast(storage);
+}
+
+/// Consumes `projection` on success. Failure leaves it owned by the caller.
+pub fn createActivation(
+    allocator: std.mem.Allocator,
+    registry_generation: u64,
+    owner_id: u64,
+    projection: *Projection,
+    expected_servers: []const ExpectedServer,
+) (Error || std.mem.Allocator.Error)!*Activation {
+    if (registry_generation == 0 or
+        !projectionBelongsTo(projection, owner_id) or
+        expected_servers.len > wire.MAX_MCP_SERVERS_V1)
+        return error.CatalogBindingMismatch;
+
+    const storage = try allocator.create(ActivationStorage);
+    errdefer allocator.destroy(storage);
+    storage.* = .{
+        .allocator = allocator,
+        .registry_generation = registry_generation,
+        .state = .unavailable,
+        .projection = projection,
+        .selection = null,
+        .published_servers = &.{},
+        .published_tools = &.{},
+        .arena = std.heap.ArenaAllocator.init(allocator),
+    };
+    errdefer storage.arena.deinit();
+    const arena = storage.arena.allocator();
+    const health = try arena.alloc(ActivationServer, expected_servers.len);
+    var selectors: std.ArrayList(Selector) = .empty;
+    defer selectors.deinit(allocator);
+    var selected_tools: std.ArrayList(ActivationTool) = .empty;
+    defer selected_tools.deinit(allocator);
+    const canonical = projectionStorageConst(projection);
+    var available_count: usize = 0;
+    var degraded = false;
+
+    for (expected_servers, health) |expected, *target| {
+        const catalog_server = projectionServer(
+            canonical.servers,
+            expected.binding_identity,
+        );
+        var issue_count: usize = 0;
+        var server_issue = false;
+        for (canonical.issues) |issue| {
+            if (std.mem.eql(
+                u8,
+                &issue.binding_identity,
+                &expected.binding_identity,
+            )) {
+                issue_count += 1;
+                if (issue.tool_name == null) server_issue = true;
+            }
+        }
+        var selected_count: usize = 0;
+        var missing_count: usize = 0;
+        if (catalog_server) |server| {
+            if (server.fresh) {
+                for (expected.allowed_tools) |tool| {
+                    if (!server_issue and !projectionHasToolIssue(
+                        canonical.issues,
+                        expected.binding_identity,
+                        tool,
+                    ) and projectionContainsTool(
+                        canonical.tools,
+                        expected.binding_identity,
+                        tool,
+                    )) {
+                        try selectors.append(allocator, .{
+                            .binding_identity = expected.binding_identity,
+                            .tool_name = tool,
+                        });
+                        try selected_tools.append(allocator, .{
+                            .server_id = expected.id,
+                            .name = tool,
+                        });
+                        selected_count += 1;
+                    } else {
+                        missing_count += 1;
+                    }
+                }
+            }
+        }
+        const state: ActivationServerState = if (catalog_server == null or
+            !catalog_server.?.fresh)
+            .unavailable
+        else if (issue_count != 0 or missing_count != 0)
+            .degraded
+        else
+            .ready;
+        if (state != .unavailable) available_count += 1;
+        if (state != .ready) degraded = true;
+        target.* = .{
+            .id = try arena.dupe(u8, expected.id),
+            .binding_identity = expected.binding_identity,
+            .state = state,
+            .configured_tool_count = std.math.cast(u32, expected.allowed_tools.len) orelse
+                return error.InvalidSelection,
+            .selected_tool_count = std.math.cast(u32, selected_count) orelse
+                return error.InvalidSelection,
+            .issue_count = std.math.cast(u32, issue_count) orelse
+                return error.InvalidCatalogDescriptor,
+        };
+    }
+
+    storage.state = if (available_count == 0)
+        .unavailable
+    else if (degraded)
+        .degraded
+    else
+        .ready;
+    if (storage.state != .unavailable) {
+        storage.selection = try createSelection(
+            allocator,
+            owner_id,
+            projection,
+            selectors.items,
+        );
+    }
+    storage.published_servers = health;
+    const published_tools = try arena.alloc(ActivationTool, selected_tools.items.len);
+    for (selected_tools.items, published_tools) |source, *target| target.* = .{
+        .server_id = try arena.dupe(u8, source.server_id),
+        .name = try arena.dupe(u8, source.name),
+    };
+    storage.published_tools = published_tools;
     return @ptrCast(storage);
 }
 
@@ -397,6 +617,20 @@ fn projectionContainsTool(
     return false;
 }
 
+fn projectionHasToolIssue(
+    issues: []const Issue,
+    identity: [32]u8,
+    name: []const u8,
+) bool {
+    for (issues) |issue| if (std.mem.eql(
+        u8,
+        &issue.binding_identity,
+        &identity,
+    ) and issue.tool_name != null and
+        std.mem.eql(u8, issue.tool_name.?, name)) return true;
+    return false;
+}
+
 fn expectedServer(
     expected: []const ExpectedServer,
     identity: [32]u8,
@@ -442,6 +676,14 @@ fn selectionStorage(selection: *Selection) *SelectionStorage {
 
 fn selectionStorageConst(selection: *const Selection) *const SelectionStorage {
     return @ptrCast(@alignCast(selection));
+}
+
+fn activationStorage(activation: *Activation) *ActivationStorage {
+    return @ptrCast(@alignCast(activation));
+}
+
+fn activationStorageConst(activation: *const Activation) *const ActivationStorage {
+    return @ptrCast(@alignCast(activation));
 }
 
 fn emptyOwnedBytes() wire.OwnedBytesV1 {
@@ -502,8 +744,10 @@ test "projection drops fingerprints schema bindings and issue detail" {
             .issues = &issues,
         },
         &.{.{
+            .id = "github",
             .binding_identity = identity,
             .namespace = "github",
+            .allowed_tools = &.{"search"},
         }},
     );
     defer projection.deinit();
@@ -589,4 +833,75 @@ test "selection rejects stale authority and duplicate selectors" {
             },
         ),
     );
+}
+
+test "activation atomically intersects allowlists and publishes bounded health" {
+    const first_identity: [32]u8 = @splat(1);
+    const second_identity: [32]u8 = @splat(2);
+    var encoded_storage: [64]u8 = undefined;
+    const encoded_identity = encodeIdentity(first_identity, &encoded_storage);
+    const catalog_servers = [_]sdk.protocol.McpCatalogServer{.{
+        .server_binding_identity = encoded_identity,
+        .namespace = "search",
+        .negotiated_protocol = "2026-07-28",
+        .server_fingerprint = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        .cache_scope = "private",
+        .fresh = true,
+        .ttl_remaining_ms = 1000,
+        .tool_offset = 0,
+        .tool_count = 1,
+    }};
+    const catalog_tools = [_]sdk.protocol.McpCatalogTool{.{
+        .server_binding_identity = encoded_identity,
+        .canonical_name = "search",
+        .schema_fingerprint = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        .permission_binding = "mcp:search/search",
+    }};
+    const expected = [_]ExpectedServer{
+        .{
+            .id = "search",
+            .binding_identity = first_identity,
+            .namespace = "search",
+            .allowed_tools = &.{ "search", "missing" },
+        },
+        .{
+            .id = "offline",
+            .binding_identity = second_identity,
+            .namespace = "offline",
+            .allowed_tools = &.{"read"},
+        },
+    };
+    const owner_id: u64 = 9;
+    const projection = try copyProjection(
+        std.testing.allocator,
+        owner_id,
+        .{
+            .schema = "agentcore.mcp-catalog/v1",
+            .catalog_generation = 4,
+            .catalog_fingerprint = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            .servers = &catalog_servers,
+            .tools = &catalog_tools,
+            .issues = &.{},
+        },
+        &expected,
+    );
+    const activation = try createActivation(
+        std.testing.allocator,
+        7,
+        owner_id,
+        projection,
+        &expected,
+    );
+    defer activation.deinit();
+    try std.testing.expectEqual(ActivationState.degraded, activation.state());
+    try std.testing.expectEqual(@as(u64, 7), activation.registryGeneration());
+    try std.testing.expectEqual(@as(usize, 2), activation.serverHealth().len);
+    try std.testing.expectEqual(ActivationServerState.degraded, activation.serverHealth()[0].state);
+    try std.testing.expectEqual(@as(u32, 1), activation.serverHealth()[0].selected_tool_count);
+    try std.testing.expectEqual(ActivationServerState.unavailable, activation.serverHealth()[1].state);
+    try std.testing.expectEqual(@as(usize, 1), activation.selectedTools().len);
+    try std.testing.expectEqualStrings("search", activation.selectedTools()[0].server_id);
+    try std.testing.expectEqualStrings("search", activation.selectedTools()[0].name);
+    const raw = rawSelectionReplacement(activation.currentSelection());
+    try std.testing.expectEqual(@as(u64, 1), raw.selector_count);
 }

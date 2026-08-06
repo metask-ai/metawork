@@ -42,6 +42,7 @@ const McpFixtureTransport = struct {
         return .fatal;
     }
     fn close(_: *anyopaque) void {}
+    fn deinit(_: *anyopaque) void {}
 };
 
 const CanonicalUnavailableMcpTransport = struct {
@@ -62,37 +63,46 @@ const CanonicalUnavailableMcpTransport = struct {
         return .fatal;
     }
     fn close(_: *anyopaque) void {}
+    fn deinit(_: *anyopaque) void {}
 };
 
 test "canonical AgentCore refresh invokes the Host MCP connector and returns a bounded unavailable catalog" {
     var transport: CanonicalUnavailableMcpTransport = .{};
-    var adapter = try lifecycle.McpConnectorAdapter.init(std.testing.allocator, .{
-        .transport = transport.descriptor(),
-    });
+    var transport_owner = lifecycle.McpTransportOwner.init(
+        transport.descriptor(),
+        CanonicalUnavailableMcpTransport.deinit,
+    );
+    var input = try lifecycle.McpRuntimeInput.init(std.testing.allocator, 1, &.{.{
+        .id = "offline",
+        .transport_owner = &transport_owner,
+        .transport = .streamable_http,
+        .namespace = "offline",
+        .client_name = "MetaWork",
+        .client_version = "test",
+        .timeout_ms = 100,
+    }});
+    defer input.deinit();
     const runtime = try lifecycle.Runtime.init(std.testing.io, std.testing.allocator, .{
         .max_sessions = 1,
-        .mcp_servers = &.{.{
-            .binding_identity = @splat(0x6b),
-            .adapter = &adapter,
-            .transport = .streamable_http,
-            .namespace = "offline",
-            .client_name = "MetaWork",
-            .client_version = "test",
-            .timeout_ms = 100,
-        }},
+        .mcp_input = &input,
     });
     defer {
         runtime.shutdown() catch unreachable;
         runtime.deinit();
     }
-    const projection = try runtime.refreshMcpCatalog();
-    defer projection.deinit();
+    try std.testing.expectEqual(@as(usize, 0), transport.opens.load(.acquire));
+    const activation = switch (try runtime.activateMcp()) {
+        .activated => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer activation.deinit();
     try std.testing.expect(transport.opens.load(.acquire) > 0);
-    try std.testing.expectEqual(@as(usize, 0), projection.servers().len);
-    try std.testing.expect(projection.issues().len > 0);
+    try std.testing.expectEqual(lifecycle.McpActivationState.unavailable, activation.state());
+    try std.testing.expectEqual(@as(usize, 0), activation.catalogServers().len);
+    try std.testing.expect(activation.catalogIssues().len > 0);
     try std.testing.expectEqualDeep(
-        @as([32]u8, @splat(0x6b)),
-        projection.issues()[0].binding_identity,
+        lifecycle.mcpBindingIdentity("offline"),
+        activation.catalogIssues()[0].binding_identity,
     );
 }
 
@@ -128,24 +138,47 @@ test "canonical AgentCore accepts an empty complete MCP Session replacement" {
     try std.testing.expectEqual(lifecycle.SessionState.idle, session.snapshot().state);
 }
 
-test "MCP Runtime creation borrows one complete server descriptor and owns its adapter" {
+test "MCP Runtime takes one complete input and activation publishes unavailable health" {
     fake_core.reset();
     var transport: McpFixtureTransport = .{};
-    var adapter = try lifecycle.McpConnectorAdapter.init(std.testing.allocator, .{
-        .transport = transport.descriptor(),
-    });
+    var transport_owner = lifecycle.McpTransportOwner.init(
+        transport.descriptor(),
+        McpFixtureTransport.deinit,
+    );
+    var input = try lifecycle.McpRuntimeInput.init(std.testing.allocator, 1, &.{.{
+        .id = "fixture",
+        .transport_owner = &transport_owner,
+        .transport = .stdio,
+        .namespace = "fixture",
+        .client_name = "MetaWork",
+        .client_version = "test",
+        .timeout_ms = 1000,
+    }});
+    defer input.deinit();
     const runtime = try createTestRuntime(.{
         .max_sessions = 1,
-        .mcp_servers = &.{.{
-            .binding_identity = @splat(0x5a),
-            .adapter = &adapter,
-            .transport = .stdio,
-            .namespace = "fixture",
-            .client_name = "MetaWork",
-            .client_version = "test",
-            .timeout_ms = 1000,
-        }},
+        .mcp_input = &input,
     });
+    const activation = switch (try runtime.activateMcp()) {
+        .activated => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer activation.deinit();
+    try std.testing.expectEqual(lifecycle.McpActivationState.unavailable, activation.state());
+    try std.testing.expectEqual(@as(usize, 1), activation.serverHealth().len);
+    try std.testing.expectEqual(
+        lifecycle.McpActivationServerState.unavailable,
+        activation.serverHealth()[0].state,
+    );
+    try std.testing.expectEqual(@as(?*const lifecycle.McpSelection, null), activation.currentSelection());
+    fake_core.forceNextMcpRefreshStatus(wire.STATUS_CORE_ERROR);
+    switch (try runtime.activateMcp()) {
+        .unavailable => |reason| try std.testing.expectEqual(
+            lifecycle.McpActivationUnavailableReason.refresh_failed,
+            reason,
+        ),
+        else => return error.TestUnexpectedResult,
+    }
     try runtime.shutdown();
     runtime.deinit();
     fake_core.lock();
@@ -154,6 +187,25 @@ test "MCP Runtime creation borrows one complete server descriptor and owns its a
     fake_core.unlock();
     try std.testing.expectEqual(@as(usize, 1), count);
     try std.testing.expect(valid);
+}
+
+test "MCP refresh failure immediately invalidates the previous selection generation" {
+    fake_core.reset();
+    const runtime = try createTestRuntime(.{ .max_sessions = 1 });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const projection = try runtime.refreshMcpCatalog();
+    defer projection.deinit();
+    const selection = try runtime.createMcpSelection(projection, &.{});
+    defer selection.deinit();
+    fake_core.forceNextMcpRefreshStatus(wire.STATUS_CORE_ERROR);
+    try std.testing.expectError(error.McpRefreshFailed, runtime.refreshMcpCatalog());
+    try std.testing.expectError(
+        error.StaleMcpSelection,
+        runtime.createMcpSelection(projection, &.{}),
+    );
 }
 
 test "MCP catalog refresh binds explicit Session selection and idle replacement" {

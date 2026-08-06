@@ -32,6 +32,10 @@ pub const Response = struct {
     body: []u8,
     status: u16,
     session_token: []const u8 = &.{},
+    /// Optional owned backing for `session_token`, allocated with the allocator
+    /// passed to `perform_fn`. Backend securely releases it after copying or
+    /// rejecting the token. Test/static endpoints may leave it null.
+    owned_session_token: ?[]u8 = null,
 };
 
 pub const PerformOutcome = union(enum) {
@@ -231,6 +235,7 @@ fn acceptRequest(
     allocator: std.mem.Allocator,
     response: Response,
 ) connector.ExchangeOutcome {
+    defer if (response.owned_session_token) |token| secureFree(allocator, token);
     if (response.body.len > connection.backend.config.max_response_bytes) {
         secureFree(allocator, response.body);
         return poisonExchange(connection, .fatal);
@@ -258,6 +263,7 @@ fn acceptNotification(
     response: Response,
 ) ?connector.Failure {
     defer secureFree(allocator, response.body);
+    defer if (response.owned_session_token) |token| secureFree(allocator, token);
     if (response.body.len > connection.backend.config.max_response_bytes)
         return poisonNotification(connection, .fatal);
     if (response.status == 401 or response.status == 403)

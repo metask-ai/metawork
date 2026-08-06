@@ -208,7 +208,7 @@ Workspace
 
 ### 5.2 全局能力入口
 
-> Capability：**当前与受 gate 目标**。Skill 入口只依赖现有 AgentCore revision 6 discovery/catalog；定时任务入口依赖 Workbench-owned 持久 schedule projection、后台 Host timer/notification 与真实 Task admission。MCP 入口与 route 已进入稳定 shell；当前 Host 固定发布 unavailable，页面据此显示不可用空状态，不显示虚构的服务或管理动作。
+> Capability：**当前与受 gate 目标**。Skill 入口只依赖现有 AgentCore revision 6 discovery/catalog；定时任务入口依赖 Workbench-owned 持久 schedule projection、后台 Host timer/notification 与真实 Task admission。MCP 入口与 route 已进入稳定 shell；Host 根据真实 preparation/activation 发布 unavailable、ready 或 degraded 只读目录，页面不显示虚构服务，也不提供尚未接通的管理动作。
 
 `新建任务`、`技能`、`MCP` 与 `定时任务` 位于 Task 列表上方的同一个纵向紧凑菜单，不使用窄侧栏中的卡片宫格，也不通过额外分组间距制造父子关系：
 
@@ -296,7 +296,7 @@ Skills                                                              10
 
 ### 5.4 MCP 服务
 
-> Capability：**入口当前可用，管理能力尚未接通**。Renderer 已实现严格解码、稳定 route 和只读视图；Workbench 当前必须发布 `mcpManagement = false` 与 `mcp.availability = unavailable`，页面因此只显示明确的不可用状态。只有 AgentCore MCP selection、catalog lifecycle、authority 与安全投影全部接通后，Host 才能在同一合同中切换为 ready/degraded。
+> Capability：**只读目录当前可用，管理能力尚未接通**。Renderer 已实现严格解码、稳定 route 和只读视图；Workbench 没有可用 registry/committed activation 时发布 unavailable，接通后依据 preparation 与 Agent typed health 发布 ready/degraded。页面不据此提供任何配置、认证、刷新或 authority mutation。
 
 MCP 页面沿用 Skill 中心约 944 px 的内容宽度、24–28 px 标题尺度、搜索和行动优先分组，但对象密度不同：Skill 是需要辨识内容的资产卡片，MCP server 是需要快速扫描连接状态的单列连续行。
 

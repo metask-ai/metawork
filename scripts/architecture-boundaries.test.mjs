@@ -373,7 +373,16 @@ test("macOS development identity and Account manifest hard cut have one code own
         /addImport\("metawork_product_identity", product_identity\)/g,
       ) ?? []
     ).length,
-    2,
+    3,
+  );
+  assert.match(
+    identity,
+    /pub const mcp_credential_service = bundle_id \+\+ "\.mcp"/,
+  );
+  const mcpPlatform = read("src/app/mcp_platform.zig");
+  assert.match(
+    mcpPlatform,
+    /pub const credential_service = product_identity\.mcp_credential_service/,
   );
   assert.match(app, /\.name = platformDataDirectoryName\(builtin\.os\.tag\)/);
   assert.match(app, /\.bundle_id = product_identity\.bundle_id/);
@@ -1189,7 +1198,7 @@ test("Desktop Host owns native window chrome and Renderer only declares geometry
 
 test("lifecycle tests are grouped by invariant", () => {
   const cases = [
-    ["tests/agent/lifecycle_test.zig", 48],
+    ["tests/agent/lifecycle_test.zig", 49],
     ["tests/agent/event_pump_test.zig", 5],
     ["tests/workbench/executor_lifecycle_test.zig", 22],
     ["tests/integration/lifecycle/lifecycle_test.zig", 4],

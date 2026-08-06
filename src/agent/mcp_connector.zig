@@ -76,8 +76,35 @@ pub const Transport = struct {
     close_fn: *const fn (*anyopaque) void,
 };
 
+/// Linear owner for one concrete transport context. The transport callbacks
+/// borrow `context`; Agent Runtime takes this owner before publishing the
+/// connector descriptor and releases it only after every adapter connection
+/// has quiesced.
+pub const TransportOwner = struct {
+    transport: Transport,
+    deinit_fn: *const fn (*anyopaque) void,
+
+    pub fn init(
+        transport: Transport,
+        deinit_fn: *const fn (*anyopaque) void,
+    ) TransportOwner {
+        return .{ .transport = transport, .deinit_fn = deinit_fn };
+    }
+
+    pub fn take(self: *TransportOwner) TransportOwner {
+        const moved = self.*;
+        self.* = undefined;
+        return moved;
+    }
+
+    pub fn deinit(self: *TransportOwner) void {
+        self.deinit_fn(self.transport.context);
+        self.* = undefined;
+    }
+};
+
 pub const Limits = struct {
-    max_secrets: usize = 16,
+    max_secrets: usize = 128,
     max_secret_bytes: usize = 16 * 1024,
     max_response_bytes: usize = @intCast(wire.MAX_MCP_FRAME_BYTES_V1),
 };
