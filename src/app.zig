@@ -337,7 +337,7 @@ const App = struct {
             dispatcher.detachWorkbench();
         }
         if (self.tray_installed) {
-            if (self.platform_services) |services| services.removeTray() catch {};
+            native_runtime.removeTray() catch {};
             self.tray_installed = false;
         }
         self.window_chrome_capability.deinit();
@@ -390,9 +390,9 @@ const App = struct {
     }
 
     fn installScheduleHost(self: *@This()) anyerror!void {
-        const services = self.platform_services orelse
+        const native_runtime = self.native_runtime orelse
             return error.RuntimeUnavailable;
-        try services.createTray(.{
+        try native_runtime.createTray(.{
             .tooltip = "MetaWork",
             .items = &tray_items,
         });
@@ -402,12 +402,13 @@ const App = struct {
     }
 
     fn showMainWindow(self: *@This()) void {
-        const services = self.platform_services orelse return;
-        services.showWindow(main_window_id) catch return;
-        services.focusWindow(main_window_id) catch {};
+        const native_runtime = self.native_runtime orelse return;
+        native_runtime.showWindow(main_window_id) catch return;
+        native_runtime.focusWindow(main_window_id) catch {};
     }
 
     fn requestExplicitQuit(self: *@This()) void {
+        const native_runtime = self.native_runtime orelse return;
         const services = self.platform_services orelse return;
         if (self.workbench) |workbench| if (workbench.hasEnabledScheduledTasks()) {
             const result = services.showMessageDialog(.{
@@ -420,7 +421,7 @@ const App = struct {
             }) catch return;
             if (result != .secondary) return;
         };
-        windows_host.quitApplication(services, main_window_id) catch {};
+        windows_host.quitApplication(native_runtime, services, main_window_id) catch {};
     }
 
     fn notifyScheduledTask(

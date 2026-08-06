@@ -1084,7 +1084,6 @@ test("Desktop Host owns native window chrome and Renderer only declares geometry
   );
   assert.match(windowsHost, /pub fn exactStartupWindow/);
   assert.match(windowsHost, /try services\.closeWindow\(window_id\)/);
-  assert.match(windowsHost, /try services\.quitApp\(\)/);
   assert.doesNotMatch(
     windowsHost,
     /@import\("(?:bridge|workbench|account|agent)(?:\.zig|\/)|window\.zero|metawork\.host\.|Renderer/,

@@ -63,6 +63,7 @@ pub fn exactStartupWindow(
 }
 
 pub fn quitApplication(
+    native_runtime: *native_sdk.Runtime,
     services: native_sdk.platform.PlatformServices,
     window_id: native_sdk.platform.WindowId,
 ) !void {
@@ -71,5 +72,5 @@ pub fn quitApplication(
         try services.closeWindow(window_id);
         return;
     }
-    try services.quitApp();
+    try native_runtime.quitApp();
 }
