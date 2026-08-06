@@ -59,7 +59,7 @@ Automatic Workspace 的正式 Zig graph 持续固定 Native SDK `.data/workspace
 | `src/window_chrome.zig` macOS live-pointer drag | 一级兼容 | 使用 SDK 已有 `startWindowDrag` 原语；仍需目标平台行为验收 | 当前 window-chrome seam |
 | `src/window_chrome.zig` Windows overlay/hit-test | 二级兼容 | Win32 实现按单一 startup window 收窄，但其窗口 identity 仍依赖 `windows_host.zig` 的私有 context 访问 | 当前 window-chrome seam；identity 缺口消除前不能关闭 Windows gate |
 | `src/windows_host.zig` startup identity | 二级兼容意图 | 当前仍把 `PlatformServices.context` 强转为 SDK 私有 Windows 类型，不是获准实现 | 当前 Desktop Host 兼容层必须消除或撤回该路径 |
-| `src/windows_host.zig` explicit quit | 一级兼容意图 | SDK `closeWindow` 原语用于规避已确认的 Runtime `quitApp` callback-path 缺陷，但当前前置窗口校验仍依赖同一私有 context | identity 缺口消除并完成 shutdown 验证后才能关闭该 gate |
+| `src/app.zig` explicit quit | 正常 Runtime 路径 | 确认对话框与 `closeWindow` 均使用 Native SDK Runtime API，不再经过 `windows_host.zig` 或原始 `PlatformServices` | 持续验证 Runtime 窗口状态与 clean shutdown |
 | `src/app.zig` 中 Runtime 已覆盖的系统能力 | 架构违规 | `showMessageDialog`、`showNotification`、`showOpenDialog`、`startTimer` 与 `cancelTimer` 仍存在直接低层调用，且 `App` 长期持有原始 `PlatformServices` | 后续 Runtime routing DAG；不扩大为兼容 allowlist |
 | `src/app.zig` 的 main-loop `wake` | 一级兼容候选 | 当前 SDK Runtime API 缺口尚未形成单项兼容 seam | 后续先确认 SDK 缺口，再隔离并验证线程与 shutdown 语义 |
 | `src/account/platform.zig` | Application 边界违规 | Account backend 持有原始 `PlatformServices`，并直接适配 credential、URL 与 timer 等能力 | 后续 Application capability DAG，由 Desktop Host 注入 owner-defined 窄 capability |

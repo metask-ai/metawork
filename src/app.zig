@@ -409,9 +409,8 @@ const App = struct {
 
     fn requestExplicitQuit(self: *@This()) void {
         const native_runtime = self.native_runtime orelse return;
-        const services = self.platform_services orelse return;
         if (self.workbench) |workbench| if (workbench.hasEnabledScheduledTasks()) {
-            const result = services.showMessageDialog(.{
+            const result = native_runtime.showMessageDialog(.{
                 .style = .warning,
                 .title = "Quit MetaWork?",
                 .message = "Scheduled tasks will pause while MetaWork is not running.",
@@ -421,7 +420,7 @@ const App = struct {
             }) catch return;
             if (result != .secondary) return;
         };
-        windows_host.quitApplication(native_runtime, services, main_window_id) catch {};
+        native_runtime.closeWindow(main_window_id) catch {};
     }
 
     fn notifyScheduledTask(

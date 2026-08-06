@@ -34,7 +34,7 @@ metawork/
 │   ├── main.zig           # 进程入口
 │   ├── app.zig            # Desktop Host composition root；共置 Application coordinator
 │   ├── product_identity.zig # 从 app.zon 派生 development identity 与 macOS namespace
-│   ├── windows_host.zig   # SDK 0.8.0 单一 Windows Host identity/lifecycle 窄接线
+│   ├── windows_host.zig   # SDK 0.8.0 单一 startup window identity 窄 seam
 │   ├── window_chrome.zig  # SDK 官方 System WebView drag-region 到位前的窄 Host seam
 │   ├── account.zig        # Account module entrypoint
 │   ├── account/           # Account Runtime、OAuth、catalog、credential 与状态机
@@ -107,7 +107,7 @@ Renderer Bridge 的 identity、revision、command、event、snapshot 与兼容�
 
 `main.zig` 只调用 `metawork_app`。`app.zig` 物理上共置两个角色：Desktop Host composition root 组装 Bridge 与 Application、消费并注入 Native SDK 的窄平台 capability、驱动平台生命周期；Application coordinator 在主线程按规范协调 Account prepare/commit、Workbench no-fail install、Agent event drain 与 owner 生命周期。后者属于 Application 的事务协调但不持有领域状态或复制 owner policy；这种源码共置不产生新的模块、业务 owner 或统一 Host facade。
 
-`windows_host.zig` 不是第六模块、统一 Windows facade 或单一 capability seam，而是共享同一 startup window identity/lifecycle 不变量的窄兼容容器；它只允许承载两条独立登记的 Native SDK 0.8.0 Windows seam。`startup_window_identity` 在 Runtime 尚未公开原生窗口 identity 时补齐单一 startup window 的窄平台识别，属于二级兼容；`explicit_quit` 在 Runtime `quitApp` 尚不能结束当前 callback path 时使用 SDK 已有关闭原语进入正常 last-window shutdown，属于一级兼容，并可依赖前一条 identity seam。两者具有独立 allowlist、验证和删除条件：Native SDK 公开稳定窗口 identity 并经 Windows 验收后删除前者；Runtime quit path 验收可用后删除后者。当前实现仍通过强转 `PlatformServices.context` 获得 SDK 私有 Windows 状态，因此依赖该识别的两条路径尚未通过 Native SDK 能力路径 gate，不能仅凭共处 Desktop Host 文件就视为获准兼容。非 Windows 仍使用 Runtime `quitApp`。只有 `app.zig` 和 `window_chrome.zig` 可以导入该文件；它不得增加第三项 capability，也不得吸收菜单、托盘、Application policy 或 Renderer protocol。
+`windows_host.zig` 不是第六模块或统一 Windows facade；它只承载 Native SDK 0.8.0 尚未公开的单一 `startup_window_identity` 二级兼容 seam，供 `window_chrome.zig` 的 drag-region 实现使用。当前实现仍通过强转 `PlatformServices.context` 获得 SDK 私有 Windows 状态，因此尚未通过 Native SDK 能力路径 gate。Native SDK 公开稳定窗口 identity 并经 Windows 验收后必须删除该 seam。只有 `app.zig` 和 `window_chrome.zig` 可以导入该文件；它不得增加其他 capability，也不得吸收菜单、托盘、Application policy 或 Renderer protocol。显式退出不属于兼容层：确认对话框和主窗口关闭均经过 Native SDK Runtime API。
 
 `window_chrome.zig` 实现一条 Desktop Host-owned `system_webview_drag_region` capability seam，只补齐 Native SDK 0.8.0 尚未进入 Runtime API 的 System WebView drag-region。macOS 在 live pointer event 内调用 SDK 已有 `startWindowDrag` 原语，属于该 seam 的一级兼容实现；Windows 以 Win32 透明 native top-band overlay 与 root/WebView hit-test subclass 补足 SDK 实现缺口，属于同一 seam 的二级兼容实现，并把标准 non-client pointer 消息交还同一根窗口、以该窗口的 OS system menu 处理 overlay 右键。该文件拥有 document generation、region bounds、native top band、精确启动窗口 identity 和 teardown 校验，但不接受或执行 Renderer 提交的 minimize/maximize/restore/close/system-menu action，不读取或复制 Runtime 窗口状态，也不形成通用 Desktop Interface、Native SDK adapter、第二窗口 owner 或 action facade。Native SDK Runtime drag-region 经目标平台验收可用后，必须原位替换并删除对应兼容路径。
 

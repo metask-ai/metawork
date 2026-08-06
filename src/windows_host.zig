@@ -1,10 +1,7 @@
-//! Narrow Windows seams for Native SDK 0.8.0's System WebView host.
+//! Narrow Windows startup-window identity seam for Native SDK 0.8.0.
 //!
 //! The SDK still owns every window and the application lifecycle. This file
-//! only resolves MetaWork's single startup HWND and selects the SDK's explicit
-//! close capability for Windows quit: 0.8.0's `quitApp` does not stop this
-//! callback path, while runtime-initiated `closeWindow` bypasses close-policy
-//! hide and reaches the normal last-window shutdown path.
+//! only resolves MetaWork's single startup HWND for the drag-region seam.
 
 const builtin = @import("builtin");
 const native_sdk = @import("native_sdk");
@@ -60,17 +57,4 @@ pub fn exactStartupWindow(
 ) !Windows.HWND {
     if (builtin.os.tag != .windows) return error.UnsupportedPlatform;
     return Windows.exactStartupWindow(services, expected_window_id);
-}
-
-pub fn quitApplication(
-    native_runtime: *native_sdk.Runtime,
-    services: native_sdk.platform.PlatformServices,
-    window_id: native_sdk.platform.WindowId,
-) !void {
-    if (builtin.os.tag == .windows) {
-        _ = try Windows.exactStartupWindow(services, window_id);
-        try services.closeWindow(window_id);
-        return;
-    }
-    try native_runtime.quitApp();
 }
