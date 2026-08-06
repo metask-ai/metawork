@@ -6,15 +6,21 @@ import test from "node:test";
 const root = new URL("../", import.meta.url);
 const read = (path) => readFileSync(new URL(path, root), "utf8");
 
-function zigFiles(directory) {
+function filesWithExtensions(directory, extensions) {
   return readdirSync(new URL(directory, root), { withFileTypes: true }).flatMap(
     (entry) => {
       const path = join(directory, entry.name).replaceAll("\\", "/");
-      if (entry.isDirectory()) return zigFiles(`${path}/`);
-      return entry.isFile() && entry.name.endsWith(".zig") ? [path] : [];
+      if (entry.isDirectory())
+        return filesWithExtensions(`${path}/`, extensions);
+      return entry.isFile() &&
+        extensions.some((value) => entry.name.endsWith(value))
+        ? [path]
+        : [];
     },
   );
 }
+
+const zigFiles = (directory) => filesWithExtensions(directory, [".zig"]);
 
 function assertNoImports(files, forbidden) {
   for (const file of files) {
@@ -884,14 +890,34 @@ test("Renderer Bridge fixed revision 1 owns the exact product wire catalog", () 
   const rendererCommands = read("frontend/src/bridge/commands.ts");
   const appManifest = read("app.zon");
   const productCommand =
-    /"(metawork\.(?:smoke|events|workspaces|workbench|account|tasks)\.[A-Za-z.]+)"/g;
+    /"(metawork\.[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)+)"/g;
   const catalog = (source) =>
     [
-      ...new Set([...source.matchAll(productCommand)].map((match) => match[1])),
+      ...new Set(
+        [...source.matchAll(productCommand)]
+          .map((match) => match[1])
+          .filter((value) => value !== "metawork.renderer-bridge"),
+      ),
     ].sort();
   assert.deepEqual(catalog(rendererCommands), catalog(zigCommands));
   assert.deepEqual(catalog(appManifest), catalog(zigCommands));
   assert.ok(catalog(zigCommands).includes("metawork.account.reopenLogin"));
+  assert.deepEqual(
+    catalog(zigCommands).filter((command) =>
+      command.startsWith("metawork.host."),
+    ),
+    [
+      "metawork.host.windowChrome.beginDrag",
+      "metawork.host.windowChrome.connect",
+      "metawork.host.windowChrome.disconnect",
+      "metawork.host.windowChrome.sync",
+    ],
+  );
+  for (const source of [zigCommands, rendererCommands, appManifest])
+    assert.doesNotMatch(
+      source,
+      /metawork\.window\.(?:beginDrag|control|state)|native-sdk\.window\./,
+    );
   assert.match(zigCommands, /contract_id = "metawork\.renderer-bridge"/);
   assert.match(zigCommands, /contract_revision: u32 = 1/);
   assert.match(
@@ -983,6 +1009,89 @@ test("Renderer Bridge fixed revision 1 owns the exact product wire catalog", () 
   assert.deepEqual(
     readdirSync(new URL("frontend/src/bridge/__fixtures__/", root)),
     ["workbench-snapshot.fixture"],
+  );
+});
+
+test("Desktop Host owns native window chrome and Renderer only declares geometry", () => {
+  const rendererFiles = filesWithExtensions("frontend/src/", [".ts", ".tsx"]);
+  const chromeTransportOwners = rendererFiles.filter((file) =>
+    read(file).includes("commands.windowChrome"),
+  );
+  assert.deepEqual(chromeTransportOwners, [
+    "frontend/src/bridge/window-chrome.ts",
+  ]);
+
+  for (const retired of [
+    "frontend/src/app/useWindowChrome.ts",
+    "frontend/src/components/ui/WindowControls.tsx",
+    "frontend/src/platform/window-chrome.ts",
+  ])
+    assert.equal(
+      existsSync(new URL(retired, root)),
+      false,
+      `${retired} must stay deleted`,
+    );
+
+  for (const file of rendererFiles.filter(
+    (path) => !path.startsWith("frontend/src/bridge/"),
+  )) {
+    const source = read(file);
+    assert.doesNotMatch(
+      source,
+      /window\.zero|native-sdk\.window\./,
+      `${file} reaches a native window API`,
+    );
+    assert.doesNotMatch(
+      source,
+      /beginWindowDrag|controlWindow|openWindowSystemMenu|windowState|WindowControls/,
+      `${file} owns native window behavior`,
+    );
+  }
+
+  const titlebar = read("frontend/src/components/ui/WindowTitlebar.tsx");
+  assert.match(titlebar, /data-metawork-window-drag=""/);
+  assert.doesNotMatch(
+    titlebar,
+    /onPointer|onDoubleClick|onContextMenu|platform/,
+  );
+
+  const app = read("src/app.zig");
+  const policy = read("src/bridge/policy.zig");
+  const seam = read("src/window_chrome.zig");
+  const windowsHost = read("src/windows_host.zig");
+  assert.match(app, /\.js_window_api = false/);
+  assert.match(app, /\.permissions = &\.\{\}/);
+  assert.match(policy, /builtin_command_count: usize = 0/);
+  assert.doesNotMatch(
+    seam,
+    /(?:minimize|maximize|restore|close|show|focus|create)Window|quitApp/,
+  );
+  assert.match(
+    seam,
+    /fn installPlatformOrDisconnect[\s\S]*Windows\.install[\s\S]*self\.connected = false[\s\S]*self\.clearRegions\(\)[\s\S]*Windows\.uninstall/,
+  );
+  assert.deepEqual(
+    zigFiles("src/").filter((file) =>
+      read(file).includes('@import("window_chrome.zig")'),
+    ),
+    ["src/app.zig"],
+  );
+  assert.deepEqual(
+    zigFiles("src/").filter((file) =>
+      read(file).includes('@import("windows_host.zig")'),
+    ),
+    ["src/app.zig", "src/window_chrome.zig"],
+  );
+  assert.match(windowsHost, /pub fn exactStartupWindow/);
+  assert.match(windowsHost, /try services\.closeWindow\(window_id\)/);
+  assert.match(windowsHost, /try services\.quitApp\(\)/);
+  assert.doesNotMatch(
+    windowsHost,
+    /@import\("(?:bridge|workbench|account|agent)(?:\.zig|\/)|window\.zero|metawork\.host\.|Renderer/,
+  );
+  assert.doesNotMatch(
+    windowsHost,
+    /minimizeWindow|maximizeWindow|restoreWindow|showWindow|focusWindow|startWindowDrag/,
   );
 });
 

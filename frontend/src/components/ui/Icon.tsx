@@ -6,12 +6,10 @@ import {
   ChevronRight,
   ChevronDown,
   Clock3,
-  Copy,
   Folder,
   FolderUp,
   FileText,
   Layers3,
-  Minus,
   PanelLeft,
   Plus,
   Puzzle,
@@ -46,9 +44,6 @@ type IconName =
   | "settings"
   | "arrow-left"
   | "close"
-  | "minimize"
-  | "maximize"
-  | "restore"
   | "warning"
   | "account"
   | "model"
@@ -82,9 +77,6 @@ const icons: Record<IconName, LucideIcon> = {
   settings: Settings,
   "arrow-left": ArrowLeft,
   close: X,
-  minimize: Minus,
-  maximize: Square,
-  restore: Copy,
   warning: TriangleAlert,
   account: UserRound,
   model: Layers3,

@@ -8,7 +8,6 @@ import {
 } from "react";
 
 import { AppShell } from "./AppShell.tsx";
-import { useWindowChrome } from "./useWindowChrome.ts";
 import {
   attentionStatus,
   publishStatus,
@@ -176,7 +175,6 @@ export default function App() {
   } = useUiResponseStates();
 
   const client = useMemo(() => new BridgeClient(), []);
-  const windowChrome = useWindowChrome(client);
   const connection = useRef<WorkbenchConnection | null>(null);
   const pendingTaskSelection = useRef<string | null>(null);
   const pendingTaskDraftRetention = useRef(new Set<string>());
@@ -1566,11 +1564,6 @@ export default function App() {
             ? t(accountGateStatus.id, accountGateStatus.values)
             : ""
         }
-        onBeginWindowDrag={windowChrome.beginDrag}
-        onToggleWindowSize={windowChrome.toggleFromDoubleClick}
-        onOpenWindowMenu={windowChrome.openSystemMenu}
-        windowMaximized={windowChrome.maximized}
-        onWindowControl={windowChrome.control}
         onReconnect={() => void retryViewSynchronization()}
         onBeginLogin={() => void runAccountCommand(() => client.beginLogin())}
         onReopenLogin={() => void runAccountCommand(() => client.reopenLogin())}
@@ -1761,11 +1754,6 @@ export default function App() {
       }
       contextVisible={route === "workbench" && activeTask !== null}
       onSearch={() => setSearchOpen(true)}
-      onBeginWindowDrag={windowChrome.beginDrag}
-      onToggleWindowSize={windowChrome.toggleFromDoubleClick}
-      onOpenWindowMenu={windowChrome.openSystemMenu}
-      windowMaximized={windowChrome.maximized}
-      onWindowControl={windowChrome.control}
       attentionNotice={
         commandBarStatus
           ? t(commandBarStatus.id, commandBarStatus.values)
@@ -2254,7 +2242,7 @@ export default function App() {
             <section className="sync-failure task-sync-failure" role="alert">
               <h3>{t(connectionFailure.titleId)}</h3>
               <p>{t(connectionFailure.helpId)}</p>
-              {connectionRetryable ? (
+              {connectionRetryable && (
                 <button
                   className="secondary-button focus-ring"
                   disabled={connectionBusy}
@@ -2263,15 +2251,6 @@ export default function App() {
                   {connectionBusy
                     ? t("connection.retrying")
                     : t("connection.retry")}
-                </button>
-              ) : (
-                <button
-                  className="secondary-button focus-ring"
-                  onClick={() =>
-                    void client.controlWindow("close").catch(() => undefined)
-                  }
-                >
-                  {t("window.close")}
                 </button>
               )}
               {connectionShellStatus?.diagnostic && (

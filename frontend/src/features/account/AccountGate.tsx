@@ -1,15 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 
 import type { AccountView } from "../../bridge/contracts.ts";
-import {
-  WindowControls,
-  type WindowControlAction,
-} from "../../components/ui/WindowControls.tsx";
 import { WindowTitlebar } from "../../components/ui/WindowTitlebar.tsx";
 import { useI18n, type Locale, type MessageId } from "../../i18n/context.ts";
 import { accountErrorText } from "../../i18n/account-error.ts";
-import { desktopPlatform } from "../../platform/keyboard.ts";
-import type { WindowTitlebarClickCount } from "../../platform/window-chrome.ts";
 
 type Props = {
   account: AccountView;
@@ -23,11 +17,6 @@ type Props = {
   connectionDiagnostic?: string;
   reconnecting: boolean;
   notice: string;
-  onBeginWindowDrag: (clicks: WindowTitlebarClickCount) => void;
-  onToggleWindowSize?: () => void;
-  onOpenWindowMenu?: () => void;
-  windowMaximized: boolean;
-  onWindowControl: (action: WindowControlAction) => void;
   onReconnect: () => void;
   onBeginLogin: () => void;
   onReopenLogin: () => void;
@@ -51,11 +40,6 @@ export function AccountGate({
   connectionDiagnostic,
   reconnecting,
   notice,
-  onBeginWindowDrag,
-  onToggleWindowSize,
-  onOpenWindowMenu,
-  windowMaximized,
-  onWindowControl,
   onReconnect,
   onBeginLogin,
   onReopenLogin,
@@ -117,17 +101,8 @@ export function AccountGate({
   }
 
   return (
-    <main
-      className="account-gate"
-      data-platform={desktopPlatform()}
-      data-readiness={account.readiness}
-    >
-      <WindowTitlebar
-        className="account-gate-toolbar"
-        onBeginWindowDrag={onBeginWindowDrag}
-        onToggleWindowSize={onToggleWindowSize}
-        onOpenWindowMenu={onOpenWindowMenu}
-      >
+    <main className="account-gate" data-readiness={account.readiness}>
+      <WindowTitlebar className="account-gate-toolbar">
         <div className="account-gate-brand" aria-label={t("app.name")}>
           <span className="brand-mark" aria-hidden="true">
             M
@@ -150,17 +125,6 @@ export function AccountGate({
               )}
             </select>
           </label>
-          <WindowControls
-            maximized={windowMaximized}
-            labels={{
-              controls: t("window.controls"),
-              minimize: t("window.minimize"),
-              maximize: t("window.maximize"),
-              restore: t("window.restore"),
-              close: t("window.close"),
-            }}
-            onAction={onWindowControl}
-          />
         </div>
       </WindowTitlebar>
 
@@ -258,15 +222,7 @@ export function AccountGate({
                   ? t("connection.retrying")
                   : t("connection.retry")}
               </button>
-            ) : connectionFailed ? (
-              <button
-                autoFocus
-                className="primary-button focus-ring"
-                onClick={() => onWindowControl("close")}
-              >
-                {t("window.close")}
-              </button>
-            ) : (
+            ) : connectionFailed ? null : (
               <>
                 {account.primaryAction === "sign_in" && (
                   <button
@@ -322,15 +278,6 @@ export function AccountGate({
                     onClick={onCancel}
                   >
                     {t("account.cancel")}
-                  </button>
-                )}
-                {account.readiness === "restart_required" && (
-                  <button
-                    autoFocus
-                    className="primary-button focus-ring"
-                    onClick={() => onWindowControl("close")}
-                  >
-                    {t("account.restart_close")}
                   </button>
                 )}
               </>

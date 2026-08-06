@@ -723,7 +723,7 @@ test("stale application components expose terminal recovery instead of reconnect
     markup,
     /rebuild or reinstall the matching application components/,
   );
-  assert.match(markup, />Close MetaWork</);
+  assert.doesNotMatch(markup, />Close MetaWork</);
   assert.match(
     markup,
     /Renderer contract: Host requires Renderer Bridge revision 1/,

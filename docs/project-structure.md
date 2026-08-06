@@ -29,12 +29,13 @@ metawork/
 │       ├── features/      # 用户可见 feature
 │       ├── components/ui/ # 无业务语义的 UI primitive
 │       ├── i18n/          # message catalog、formatter 与 locale runtime
-│       └── platform/      # Renderer-only 本地偏好等平台能力
+│       └── platform/      # Renderer-only 本地偏好；不得包含原生窗口能力
 ├── src/
 │   ├── main.zig           # 进程入口
 │   ├── app.zig            # Desktop Host composition root；共置 Application coordinator
 │   ├── product_identity.zig # 从 app.zon 派生 development identity 与 macOS namespace
-│   ├── window_chrome.zig  # SDK 官方 drag-region 到位前的窄平台 seam
+│   ├── windows_host.zig   # SDK 0.8.0 单一 Windows Host identity/lifecycle 窄接线
+│   ├── window_chrome.zig  # SDK 官方 System WebView drag-region 到位前的窄 Host seam
 │   ├── account.zig        # Account module entrypoint
 │   ├── account/           # Account Runtime、OAuth、catalog、credential 与状态机
 │   ├── bridge.zig         # Renderer Bridge module entrypoint
@@ -106,7 +107,11 @@ Renderer Bridge 的 identity、revision、command、event、snapshot 与兼容�
 
 `main.zig` 只调用 `metawork_app`。`app.zig` 物理上共置两个角色：Desktop Host composition root 组装 Bridge 与 Application、消费并注入 Native SDK 的窄平台 capability、驱动平台生命周期；Application coordinator 在主线程按规范协调 Account prepare/commit、Workbench no-fail install、Agent event drain 与 owner 生命周期。后者属于 Application 的事务协调但不持有领域状态或复制 owner policy；这种源码共置不产生新的模块、业务 owner 或统一 Host facade。
 
-`window_chrome.zig` 是 Desktop Host-owned 单一启动窗口的窄平台 seam，只在 Native SDK 尚未提供官方 WebView drag-region 时补齐标题栏能力：WebView `hidden_inset_tall` 的 press 交回系统拖动，Windows 在同一精确窗口上补齐双击最大化/还原、最大化拖拽恢复、原生系统菜单与只读最大化状态；minimize/close 继续调用 Native SDK 的 window-id API。Renderer 的 `components/ui/WindowTitlebar.tsx` 统一拥有 Web 内容空白区与交互控件的命中规则，`app/useWindowChrome.ts` 只维护 Host 状态的瞬时呈现投影；原生行为、系统资源和真实状态仍由 Desktop Host 独占。该 seam 不形成通用 Desktop Interface、Native SDK adapter、第二窗口 owner 或任意原生调用面；官方 drag-region 经平台验收可用后，必须原位替换该 seam，并同步收口不再需要的专用 command、allowlist 和测试。
+`windows_host.zig` 不是第六模块或新的 lifecycle owner。它只封装 Native SDK 0.8.0 Windows Host 的两个可测试不变量：从 SDK context 精确解析唯一 startup HWND；显式托盘 Quit 在验证同一窗口后使用 SDK `closeWindow` 进入正常 last-window shutdown，而非停不下当前 callback path 的 `quitApp`。非 Windows 仍直接使用 `quitApp`。只有 `app.zig` 和 `window_chrome.zig` 可以导入该文件；它不得吸收菜单、托盘、Application policy 或 Renderer protocol。
+
+`window_chrome.zig` 是 Desktop Host-owned 单一启动窗口的窄平台 seam，只补齐 Native SDK 0.8.0 尚未覆盖 System WebView 的 drag-region。它拥有 document generation、region bounds、native top band、精确启动窗口 identity 和 teardown 校验；Windows 安装透明 native top-band overlay 与 root/WebView hit-test subclass，把标准 non-client pointer 消息交还同一根窗口，并以该窗口的 OS system menu 处理 overlay 右键；macOS 只在 live pointer event 内调用 SDK `startWindowDrag`。它不接受或执行 Renderer 提交的 minimize/maximize/restore/close/system-menu action，不读取窗口状态，也不形成通用 Desktop Interface、Native SDK adapter、第二窗口 owner 或 action facade。
+
+Renderer 的 `components/ui/WindowTitlebar.tsx` 绘制产品 header，并通过 portal 在 document root 只声明一个 `data-metawork-window-drag` marker。`frontend/src/bridge/window-chrome.ts` 是 browser-side Bridge boundary：它有界镜像一个 candidate 与全 document 交互排除区，runtime decode Host geometry，并写入 CSS layout variables；窗口 resize 时先重新 `connect` 获取新的 generation/geometry，再同步当前 region。产品 React 代码不得直接调用 `window.zero`，不得维护平台名、原生按钮或窗口状态。已删除的 `app/useWindowChrome.ts`、`components/ui/WindowControls.tsx` 与 `platform/window-chrome.ts` 不得恢复。Native SDK 官方 System WebView drag-region 经目标平台验收可用后，必须原位替换 seam，并同步收口不再需要的专用 command、allowlist 和测试。
 
 `account.zig`、`bridge.zig`、`workbench.zig` 和 `agent.zig` 是小型公开入口，只显式暴露实际消费者需要的类型、函数或窄 namespace。内部文件不通过 `usingnamespace` 或无边界 barrel 重新泄漏。
 

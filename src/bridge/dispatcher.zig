@@ -17,8 +17,26 @@ const product_handler_count = commands.product.len;
 const workspace_path_capacity = workspace_grant.max_path_bytes;
 const event_name = "metawork:host-signal";
 
-pub const WindowControl = enum { minimize, toggle_maximize, show_system_menu, close };
-pub const WindowChromeState = struct { maximized: bool = false };
+pub const WindowChromeRegion = struct {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    exclusion: bool,
+};
+
+pub const WindowChromeEnvironment = struct {
+    generation: u64,
+    top: f64,
+    left: f64,
+    bottom: f64,
+    right: f64,
+    buttons_x: f64,
+    buttons_y: f64,
+    buttons_width: f64,
+    buttons_height: f64,
+    live_pointer_drag: bool,
+};
 
 pub const Platform = struct {
     context: ?*anyopaque,
@@ -40,20 +58,30 @@ pub const Platform = struct {
         ?*anyopaque,
         native_sdk.platform.MessageDialogOptions,
     ) anyerror!native_sdk.platform.MessageDialogResult,
-    begin_window_drag_fn: *const fn (
+    window_chrome_connect_fn: *const fn (
         ?*anyopaque,
         native_sdk.platform.WindowId,
-        u8,
-    ) anyerror!WindowChromeState,
-    window_control_fn: *const fn (
+    ) anyerror!WindowChromeEnvironment,
+    window_chrome_sync_fn: *const fn (
         ?*anyopaque,
         native_sdk.platform.WindowId,
-        WindowControl,
-    ) anyerror!WindowChromeState,
-    window_state_fn: *const fn (
+        u64,
+        f64,
+        f64,
+        []const WindowChromeRegion,
+    ) anyerror!WindowChromeEnvironment,
+    window_chrome_begin_drag_fn: *const fn (
         ?*anyopaque,
         native_sdk.platform.WindowId,
-    ) anyerror!WindowChromeState,
+        u64,
+        f64,
+        f64,
+    ) anyerror!WindowChromeEnvironment,
+    window_chrome_disconnect_fn: *const fn (
+        ?*anyopaque,
+        native_sdk.platform.WindowId,
+        u64,
+    ) anyerror!void,
     now_fn: *const fn (?*anyopaque) u64,
     on_main_thread_fn: *const fn (?*anyopaque) bool,
 };
@@ -130,9 +158,10 @@ pub const Dispatcher = struct {
             .{ .name = commands.ping_ack, .function = acknowledgeEvent },
             .{ .name = commands.connect, .function = connectEvents },
             .{ .name = commands.disconnect, .function = disconnectEvents },
-            .{ .name = commands.window_begin_drag, .function = beginWindowDrag },
-            .{ .name = commands.window_control, .function = controlWindow },
-            .{ .name = commands.window_state, .function = getWindowState },
+            .{ .name = commands.window_chrome_connect, .function = connectWindowChrome },
+            .{ .name = commands.window_chrome_sync, .function = syncWindowChrome },
+            .{ .name = commands.window_chrome_begin_drag, .function = beginWindowChromeDrag },
+            .{ .name = commands.window_chrome_disconnect, .function = disconnectWindowChrome },
             .{ .name = commands.choose_workspace, .function = chooseWorkspace },
             .{ .name = commands.remove_workspace, .function = removeWorkspace },
             .{ .name = commands.refresh_workspace_skill_catalog, .function = refreshWorkspaceSkillCatalog },
@@ -339,86 +368,110 @@ pub const Dispatcher = struct {
         return std.fmt.bufPrint(output, "{{\"generation\":\"{d}\",\"detached\":true}}", .{generation});
     }
 
-    fn beginWindowDrag(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+    fn connectWindowChrome(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         var callback = try self.callbacks.enter();
         defer callback.deinit();
         try self.requireBootstrapWindow(invocation.source.window_id);
-        var parsed = try handlers.parsePayload(
-            handlers.WindowDragStart,
-            invocation.request.payload,
-        );
-        defer parsed.deinit();
-        if (parsed.value.clicks != 1 and parsed.value.clicks != 2)
-            return error.InvalidBridgePayload;
         if (!self.platform.on_main_thread_fn(self.platform.context))
             return error.InvalidBridgeThread;
-        const state = try self.platform.begin_window_drag_fn(
+        var parsed = try handlers.parsePayload(handlers.Empty, invocation.request.payload);
+        defer parsed.deinit();
+        const environment = try self.platform.window_chrome_connect_fn(
             self.platform.context,
             invocation.source.window_id,
-            parsed.value.clicks,
         );
-        return std.fmt.bufPrint(
-            output,
-            "{{\"started\":true,\"maximized\":{}}}",
-            .{state.maximized},
-        );
+        return encodeWindowChromeEnvironment(output, environment);
     }
 
-    fn controlWindow(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+    fn syncWindowChrome(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         var callback = try self.callbacks.enter();
         defer callback.deinit();
         try self.requireBootstrapWindow(invocation.source.window_id);
         if (!self.platform.on_main_thread_fn(self.platform.context))
             return error.InvalidBridgeThread;
-        var parsed = try handlers.parsePayload(
-            handlers.WindowControl,
+        var parsed = try handlers.parsePayloadWithLimit(
+            handlers.WindowChromeSync,
             invocation.request.payload,
+            16 * 1024,
         );
         defer parsed.deinit();
-        const action: WindowControl = if (std.mem.eql(u8, parsed.value.action, "minimize"))
-            .minimize
-        else if (std.mem.eql(u8, parsed.value.action, "toggle_maximize"))
-            .toggle_maximize
-        else if (std.mem.eql(u8, parsed.value.action, "show_system_menu"))
-            .show_system_menu
-        else if (std.mem.eql(u8, parsed.value.action, "close"))
-            .close
-        else
+        if (parsed.value.regions.len > 33)
             return error.InvalidBridgePayload;
-        const state = try self.platform.window_control_fn(
+        const generation = try handlers.parseWireId(parsed.value.generation);
+        var regions: [33]WindowChromeRegion = undefined;
+        for (parsed.value.regions, 0..) |region, index| regions[index] = .{
+            .x = region.x,
+            .y = region.y,
+            .width = region.width,
+            .height = region.height,
+            .exclusion = region.exclusion,
+        };
+        const environment = try self.platform.window_chrome_sync_fn(
             self.platform.context,
             invocation.source.window_id,
-            action,
+            generation,
+            parsed.value.viewportWidth,
+            parsed.value.viewportHeight,
+            regions[0..parsed.value.regions.len],
         );
-        return std.fmt.bufPrint(
-            output,
-            "{{\"completed\":true,\"maximized\":{}}}",
-            .{state.maximized},
-        );
+        return encodeWindowChromeEnvironment(output, environment);
     }
 
-    fn getWindowState(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+    fn beginWindowChromeDrag(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         var callback = try self.callbacks.enter();
         defer callback.deinit();
         try self.requireBootstrapWindow(invocation.source.window_id);
-        var parsed = try handlers.parsePayload(
-            handlers.Empty,
-            invocation.request.payload,
-        );
-        defer parsed.deinit();
         if (!self.platform.on_main_thread_fn(self.platform.context))
             return error.InvalidBridgeThread;
-        const state = try self.platform.window_state_fn(
+        var parsed = try handlers.parsePayload(handlers.WindowChromeGesture, invocation.request.payload);
+        defer parsed.deinit();
+        const environment = try self.platform.window_chrome_begin_drag_fn(
             self.platform.context,
             invocation.source.window_id,
+            try handlers.parseWireId(parsed.value.generation),
+            parsed.value.x,
+            parsed.value.y,
         );
+        return encodeWindowChromeEnvironment(output, environment);
+    }
+
+    fn disconnectWindowChrome(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireBootstrapWindow(invocation.source.window_id);
+        if (!self.platform.on_main_thread_fn(self.platform.context))
+            return error.InvalidBridgeThread;
+        var parsed = try handlers.parsePayload(handlers.WindowChromeDisconnect, invocation.request.payload);
+        defer parsed.deinit();
+        const generation = try handlers.parseWireId(parsed.value.generation);
+        try self.platform.window_chrome_disconnect_fn(
+            self.platform.context,
+            invocation.source.window_id,
+            generation,
+        );
+        return std.fmt.bufPrint(output, "{{\"generation\":\"{d}\",\"detached\":true}}", .{generation});
+    }
+
+    fn encodeWindowChromeEnvironment(output: []u8, value: WindowChromeEnvironment) ![]const u8 {
         return std.fmt.bufPrint(
             output,
-            "{{\"maximized\":{}}}",
-            .{state.maximized},
+            "{{\"generation\":\"{d}\",\"insets\":{{\"top\":{d},\"left\":{d},\"bottom\":{d},\"right\":{d}}},\"buttons\":{{\"x\":{d},\"y\":{d},\"width\":{d},\"height\":{d}}},\"livePointerDrag\":{}}}",
+            .{
+                value.generation,
+                value.top,
+                value.left,
+                value.bottom,
+                value.right,
+                value.buttons_x,
+                value.buttons_y,
+                value.buttons_width,
+                value.buttons_height,
+                value.live_pointer_drag,
+            },
         );
     }
 
@@ -2346,9 +2399,10 @@ test "Dispatcher validates authority before domain calls and preserves committed
     const Harness = struct {
         wake_calls: usize = 0,
         account_calls: usize = 0,
-        drag_calls: usize = 0,
-        window_control_calls: usize = 0,
-        window_state_calls: usize = 0,
+        chrome_connect_calls: usize = 0,
+        chrome_sync_calls: usize = 0,
+        chrome_drag_calls: usize = 0,
+        chrome_disconnect_calls: usize = 0,
         on_main_thread: bool = true,
         last_catalog_generation: u64 = 0,
         last_execution_generation: u64 = 0,
@@ -2381,38 +2435,76 @@ test "Dispatcher validates authority before domain calls and preserves committed
             return .primary;
         }
 
-        fn beginWindowDrag(
-            context: ?*anyopaque,
-            window_id: native_sdk.platform.WindowId,
-            clicks: u8,
-        ) anyerror!WindowChromeState {
-            const self: *@This() = @ptrCast(@alignCast(context.?));
-            try std.testing.expectEqual(@as(native_sdk.platform.WindowId, 3), window_id);
-            try std.testing.expect(clicks == 1 or clicks == 2);
-            self.drag_calls += 1;
-            return .{ .maximized = clicks == 2 };
+        fn chromeEnvironment() WindowChromeEnvironment {
+            return .{
+                .generation = 17,
+                .top = 52,
+                .left = 0,
+                .bottom = 0,
+                .right = 138,
+                .buttons_x = 662,
+                .buttons_y = 0,
+                .buttons_width = 138,
+                .buttons_height = 52,
+                .live_pointer_drag = true,
+            };
         }
 
-        fn controlWindow(
+        fn connectWindowChrome(
             context: ?*anyopaque,
             window_id: native_sdk.platform.WindowId,
-            action: WindowControl,
-        ) anyerror!WindowChromeState {
+        ) anyerror!WindowChromeEnvironment {
             const self: *@This() = @ptrCast(@alignCast(context.?));
             try std.testing.expectEqual(@as(native_sdk.platform.WindowId, 3), window_id);
-            try std.testing.expectEqual(WindowControl.minimize, action);
-            self.window_control_calls += 1;
-            return .{};
+            self.chrome_connect_calls += 1;
+            return chromeEnvironment();
         }
 
-        fn windowState(
+        fn syncWindowChrome(
             context: ?*anyopaque,
             window_id: native_sdk.platform.WindowId,
-        ) anyerror!WindowChromeState {
+            generation: u64,
+            viewport_width: f64,
+            viewport_height: f64,
+            regions: []const WindowChromeRegion,
+        ) anyerror!WindowChromeEnvironment {
             const self: *@This() = @ptrCast(@alignCast(context.?));
             try std.testing.expectEqual(@as(native_sdk.platform.WindowId, 3), window_id);
-            self.window_state_calls += 1;
-            return .{ .maximized = true };
+            try std.testing.expectEqual(@as(u64, 17), generation);
+            try std.testing.expectEqual(@as(f64, 800), viewport_width);
+            try std.testing.expectEqual(@as(f64, 600), viewport_height);
+            try std.testing.expectEqual(@as(usize, 2), regions.len);
+            try std.testing.expect(!regions[0].exclusion);
+            try std.testing.expect(regions[1].exclusion);
+            self.chrome_sync_calls += 1;
+            return chromeEnvironment();
+        }
+
+        fn beginWindowChromeDrag(
+            context: ?*anyopaque,
+            window_id: native_sdk.platform.WindowId,
+            generation: u64,
+            x: f64,
+            y: f64,
+        ) anyerror!WindowChromeEnvironment {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            try std.testing.expectEqual(@as(native_sdk.platform.WindowId, 3), window_id);
+            try std.testing.expectEqual(@as(u64, 17), generation);
+            try std.testing.expectEqual(@as(f64, 200), x);
+            try std.testing.expectEqual(@as(f64, 20), y);
+            self.chrome_drag_calls += 1;
+            return chromeEnvironment();
+        }
+
+        fn disconnectWindowChrome(
+            context: ?*anyopaque,
+            window_id: native_sdk.platform.WindowId,
+            generation: u64,
+        ) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            try std.testing.expectEqual(@as(native_sdk.platform.WindowId, 3), window_id);
+            try std.testing.expectEqual(@as(u64, 17), generation);
+            self.chrome_disconnect_calls += 1;
         }
 
         fn now(_: ?*anyopaque) u64 {
@@ -2476,9 +2568,10 @@ test "Dispatcher validates authority before domain calls and preserves committed
             .cancel_timer_fn = Harness.cancelTimer,
             .show_open_dialog_fn = Harness.open,
             .show_message_dialog_fn = Harness.confirm,
-            .begin_window_drag_fn = Harness.beginWindowDrag,
-            .window_control_fn = Harness.controlWindow,
-            .window_state_fn = Harness.windowState,
+            .window_chrome_connect_fn = Harness.connectWindowChrome,
+            .window_chrome_sync_fn = Harness.syncWindowChrome,
+            .window_chrome_begin_drag_fn = Harness.beginWindowChromeDrag,
+            .window_chrome_disconnect_fn = Harness.disconnectWindowChrome,
             .now_fn = Harness.now,
             .on_main_thread_fn = Harness.onMainThread,
         },
@@ -2509,83 +2602,62 @@ test "Dispatcher validates authority before domain calls and preserves committed
     try std.testing.expectEqual(@as(usize, 0), harness.account_calls);
     try std.testing.expectEqual(initial_revision, workbench.currentRevision());
 
-    const bootstrap_drag = native_dispatcher.dispatch(
-        "{\"id\":\"drag-before-contract\",\"command\":\"metawork.window.beginDrag\",\"payload\":{\"clicks\":1}}",
+    const chrome_connect = native_dispatcher.dispatch(
+        "{\"id\":\"chrome-connect\",\"command\":\"metawork.host.windowChrome.connect\",\"payload\":{}}",
         source,
         &response,
     );
-    try std.testing.expect(std.mem.indexOf(u8, bootstrap_drag, "\"started\":true") != null);
-    try std.testing.expect(std.mem.indexOf(u8, bootstrap_drag, "\"maximized\":false") != null);
-    try std.testing.expectEqual(@as(usize, 1), harness.drag_calls);
-    const bootstrap_double_click = native_dispatcher.dispatch(
-        "{\"id\":\"double-click-before-contract\",\"command\":\"metawork.window.beginDrag\",\"payload\":{\"clicks\":2}}",
+    try std.testing.expect(std.mem.indexOf(u8, chrome_connect, "\"generation\":\"17\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, chrome_connect, "\"livePointerDrag\":true") != null);
+    try std.testing.expectEqual(@as(usize, 1), harness.chrome_connect_calls);
+    const chrome_sync = native_dispatcher.dispatch(
+        "{\"id\":\"chrome-sync\",\"command\":\"metawork.host.windowChrome.sync\",\"payload\":{\"generation\":\"17\",\"viewportWidth\":800,\"viewportHeight\":600,\"regions\":[{\"x\":0,\"y\":0,\"width\":500,\"height\":52,\"exclusion\":false},{\"x\":12,\"y\":8,\"width\":40,\"height\":36,\"exclusion\":true}]}}",
         source,
         &response,
     );
-    try std.testing.expect(std.mem.indexOf(u8, bootstrap_double_click, "\"maximized\":true") != null);
-    try std.testing.expectEqual(@as(usize, 2), harness.drag_calls);
-    const bootstrap_state = native_dispatcher.dispatch(
-        "{\"id\":\"state-before-contract\",\"command\":\"metawork.window.state\",\"payload\":{}}",
+    try std.testing.expect(std.mem.indexOf(u8, chrome_sync, "\"right\":138") != null);
+    try std.testing.expectEqual(@as(usize, 1), harness.chrome_sync_calls);
+    const chrome_drag = native_dispatcher.dispatch(
+        "{\"id\":\"chrome-drag\",\"command\":\"metawork.host.windowChrome.beginDrag\",\"payload\":{\"generation\":\"17\",\"x\":200,\"y\":20}}",
         source,
         &response,
     );
-    try std.testing.expect(std.mem.indexOf(u8, bootstrap_state, "\"maximized\":true") != null);
-    try std.testing.expectEqual(@as(usize, 1), harness.window_state_calls);
-    const bootstrap_minimize = native_dispatcher.dispatch(
-        "{\"id\":\"minimize-before-contract\",\"command\":\"metawork.window.control\",\"payload\":{\"action\":\"minimize\"}}",
-        source,
-        &response,
-    );
-    try std.testing.expect(std.mem.indexOf(u8, bootstrap_minimize, "\"completed\":true") != null);
-    try std.testing.expectEqual(@as(usize, 1), harness.window_control_calls);
+    try std.testing.expect(std.mem.indexOf(u8, chrome_drag, "\"generation\":\"17\"") != null);
+    try std.testing.expectEqual(@as(usize, 1), harness.chrome_drag_calls);
     const foreign_bootstrap_window = native_sdk.bridge.Source{
         .origin = source.origin,
         .window_id = source.window_id + 1,
     };
-    const denied_bootstrap_control = native_dispatcher.dispatch(
-        "{\"id\":\"wrong-bootstrap-window\",\"command\":\"metawork.window.control\",\"payload\":{\"action\":\"minimize\"}}",
+    const denied_bootstrap_connect = native_dispatcher.dispatch(
+        "{\"id\":\"wrong-bootstrap-window\",\"command\":\"metawork.host.windowChrome.connect\",\"payload\":{}}",
         foreign_bootstrap_window,
         &response,
     );
-    try std.testing.expect(std.mem.indexOf(u8, denied_bootstrap_control, "\"handler_failed\"") != null);
-    try std.testing.expectEqual(@as(usize, 1), harness.window_control_calls);
-    const denied_bootstrap_state = native_dispatcher.dispatch(
-        "{\"id\":\"wrong-bootstrap-state\",\"command\":\"metawork.window.state\",\"payload\":{}}",
-        foreign_bootstrap_window,
-        &response,
-    );
-    try std.testing.expect(std.mem.indexOf(u8, denied_bootstrap_state, "\"handler_failed\"") != null);
-    try std.testing.expectEqual(@as(usize, 1), harness.window_state_calls);
+    try std.testing.expect(std.mem.indexOf(u8, denied_bootstrap_connect, "\"handler_failed\"") != null);
+    try std.testing.expectEqual(@as(usize, 1), harness.chrome_connect_calls);
     harness.on_main_thread = false;
-    const off_thread_drag = native_dispatcher.dispatch(
-        "{\"id\":\"off-thread-drag\",\"command\":\"metawork.window.beginDrag\",\"payload\":{\"clicks\":1}}",
+    const off_thread_sync = native_dispatcher.dispatch(
+        "{\"id\":\"off-thread-sync\",\"command\":\"metawork.host.windowChrome.sync\",\"payload\":{\"generation\":\"17\",\"viewportWidth\":800,\"viewportHeight\":600,\"regions\":[{\"x\":0,\"y\":0,\"width\":500,\"height\":52,\"exclusion\":false}]}}",
         source,
         &response,
     );
-    try std.testing.expect(std.mem.indexOf(u8, off_thread_drag, "\"handler_failed\"") != null);
-    try std.testing.expectEqual(@as(usize, 2), harness.drag_calls);
-    const off_thread_state = native_dispatcher.dispatch(
-        "{\"id\":\"off-thread-state\",\"command\":\"metawork.window.state\",\"payload\":{}}",
-        source,
-        &response,
-    );
-    try std.testing.expect(std.mem.indexOf(u8, off_thread_state, "\"handler_failed\"") != null);
-    try std.testing.expectEqual(@as(usize, 1), harness.window_state_calls);
+    try std.testing.expect(std.mem.indexOf(u8, off_thread_sync, "\"handler_failed\"") != null);
+    try std.testing.expectEqual(@as(usize, 1), harness.chrome_sync_calls);
     harness.on_main_thread = true;
-    const invalid_control = native_dispatcher.dispatch(
-        "{\"id\":\"invalid-window-control\",\"command\":\"metawork.window.control\",\"payload\":{\"action\":\"resize\"}}",
+    const invalid_sync = native_dispatcher.dispatch(
+        "{\"id\":\"invalid-window-chrome\",\"command\":\"metawork.host.windowChrome.sync\",\"payload\":{\"generation\":\"17\",\"viewportWidth\":800,\"viewportHeight\":600,\"regions\":[],\"extra\":true}}",
         source,
         &response,
     );
-    try std.testing.expect(std.mem.indexOf(u8, invalid_control, "\"handler_failed\"") != null);
-    try std.testing.expectEqual(@as(usize, 1), harness.window_control_calls);
-    const invalid_state = native_dispatcher.dispatch(
-        "{\"id\":\"invalid-window-state\",\"command\":\"metawork.window.state\",\"payload\":{\"extra\":true}}",
+    try std.testing.expect(std.mem.indexOf(u8, invalid_sync, "\"handler_failed\"") != null);
+    try std.testing.expectEqual(@as(usize, 1), harness.chrome_sync_calls);
+    const chrome_disconnect = native_dispatcher.dispatch(
+        "{\"id\":\"chrome-disconnect\",\"command\":\"metawork.host.windowChrome.disconnect\",\"payload\":{\"generation\":\"17\"}}",
         source,
         &response,
     );
-    try std.testing.expect(std.mem.indexOf(u8, invalid_state, "\"handler_failed\"") != null);
-    try std.testing.expectEqual(@as(usize, 1), harness.window_state_calls);
+    try std.testing.expect(std.mem.indexOf(u8, chrome_disconnect, "\"detached\":true") != null);
+    try std.testing.expectEqual(@as(usize, 1), harness.chrome_disconnect_calls);
 
     const mismatch = native_dispatcher.dispatch(
         "{\"id\":\"mismatch\",\"command\":\"metawork.events.connect\",\"payload\":{\"contractId\":\"metawork.renderer-bridge\",\"contractRevision\":2}}",
@@ -2635,20 +2707,6 @@ test "Dispatcher validates authority before domain calls and preserves committed
         source,
         &response,
     );
-    const drag = native_dispatcher.dispatch(
-        "{\"id\":\"drag\",\"command\":\"metawork.window.beginDrag\",\"payload\":{\"clicks\":1}}",
-        source,
-        &response,
-    );
-    try std.testing.expect(std.mem.indexOf(u8, drag, "\"started\":true") != null);
-    try std.testing.expectEqual(@as(usize, 3), harness.drag_calls);
-    const minimize = native_dispatcher.dispatch(
-        "{\"id\":\"minimize\",\"command\":\"metawork.window.control\",\"payload\":{\"action\":\"minimize\"}}",
-        source,
-        &response,
-    );
-    try std.testing.expect(std.mem.indexOf(u8, minimize, "\"completed\":true") != null);
-    try std.testing.expectEqual(@as(usize, 2), harness.window_control_calls);
     const login = native_dispatcher.dispatch(
         "{\"id\":\"login\",\"command\":\"metawork.account.beginLogin\",\"payload\":{}}",
         source,

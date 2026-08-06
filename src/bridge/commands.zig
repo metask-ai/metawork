@@ -7,9 +7,10 @@ pub const ping = "metawork.smoke.ping";
 pub const ping_ack = "metawork.smoke.eventAck";
 pub const connect = "metawork.events.connect";
 pub const disconnect = "metawork.events.disconnect";
-pub const window_begin_drag = "metawork.window.beginDrag";
-pub const window_control = "metawork.window.control";
-pub const window_state = "metawork.window.state";
+pub const window_chrome_connect = "metawork.host.windowChrome.connect";
+pub const window_chrome_sync = "metawork.host.windowChrome.sync";
+pub const window_chrome_begin_drag = "metawork.host.windowChrome.beginDrag";
+pub const window_chrome_disconnect = "metawork.host.windowChrome.disconnect";
 pub const choose_workspace = "metawork.workspaces.choose";
 pub const remove_workspace = "metawork.workspaces.remove";
 pub const refresh_workspace_skill_catalog = "metawork.workspaces.refreshSkillCatalog";
@@ -53,9 +54,10 @@ pub const product = [_][]const u8{
     ping_ack,
     connect,
     disconnect,
-    window_begin_drag,
-    window_control,
-    window_state,
+    window_chrome_connect,
+    window_chrome_sync,
+    window_chrome_begin_drag,
+    window_chrome_disconnect,
     choose_workspace,
     remove_workspace,
     refresh_workspace_skill_catalog,

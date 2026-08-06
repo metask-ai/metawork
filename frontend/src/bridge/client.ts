@@ -22,9 +22,6 @@ import {
   assertTaskArchived,
   assertTaskFlag,
   assertUiResponseAccepted,
-  decodeWindowDragStarted,
-  decodeWindowControlCompleted,
-  decodeWindowChromeState,
   decodeAccountCommandResult,
   decodeCatalogRefreshResult,
   decodeSkillCatalogRefreshResult,
@@ -176,32 +173,6 @@ export class BridgeClient {
       await this.invoke(commands.disconnect, { generation }),
       generation,
     );
-  }
-
-  async beginWindowDrag(clicks: 1 | 2) {
-    return decodeWindowDragStarted(
-      await this.invoke(commands.windowBeginDrag, { clicks }),
-    );
-  }
-
-  async controlWindow(action: "minimize" | "toggle_maximize" | "close") {
-    return decodeWindowControlCompleted(
-      await this.invoke(commands.windowControl, { action }),
-    );
-  }
-
-  async openWindowSystemMenu() {
-    // Like a file picker, the native system menu is user-controlled modal UI,
-    // not bounded Host work. It must not become a false command timeout.
-    return decodeWindowControlCompleted(
-      await this.bridge().invoke(commands.windowControl, {
-        action: "show_system_menu",
-      }),
-    );
-  }
-
-  async windowState() {
-    return decodeWindowChromeState(await this.invoke(commands.windowState, {}));
   }
 
   fetchSnapshot() {

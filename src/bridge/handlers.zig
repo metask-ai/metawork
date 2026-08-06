@@ -16,8 +16,25 @@ pub const RendererBridgeConnect = struct {
 pub const EventDisconnect = struct { generation: []const u8 };
 pub const WorkbenchSnapshotChunk = struct { snapshotId: []const u8, offset: []const u8 };
 pub const Empty = struct {};
-pub const WindowDragStart = struct { clicks: u8 };
-pub const WindowControl = struct { action: []const u8 };
+pub const WindowChromeRegion = struct {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    exclusion: bool,
+};
+pub const WindowChromeSync = struct {
+    generation: []const u8,
+    viewportWidth: f64,
+    viewportHeight: f64,
+    regions: []const WindowChromeRegion,
+};
+pub const WindowChromeGesture = struct {
+    generation: []const u8,
+    x: f64,
+    y: f64,
+};
+pub const WindowChromeDisconnect = struct { generation: []const u8 };
 pub const AccountSelection = struct {
     selectionId: []const u8,
     expectedCatalogGeneration: []const u8,

@@ -1,10 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 
 import { Icon } from "../components/ui/Icon.tsx";
-import {
-  WindowControls,
-  type WindowControlAction,
-} from "../components/ui/WindowControls.tsx";
 import { WindowTitlebar } from "../components/ui/WindowTitlebar.tsx";
 import { shouldDismissInspectorForEscape } from "../features/inspector/inspector-interaction.ts";
 import { useI18n } from "../i18n/context.ts";
@@ -12,8 +8,6 @@ import {
   readLocalPreference,
   writeLocalPreference,
 } from "../platform/local-preferences.ts";
-import { desktopPlatform } from "../platform/keyboard.ts";
-import type { WindowTitlebarClickCount } from "../platform/window-chrome.ts";
 
 const leftPreference = "metawork.panel.workspaces";
 function initialPanel(key: string, minimumWidth: number) {
@@ -26,11 +20,6 @@ export function AppShell({
   taskTitle,
   contextVisible,
   attentionNotice,
-  onBeginWindowDrag,
-  onToggleWindowSize,
-  onOpenWindowMenu,
-  windowMaximized,
-  onWindowControl,
   onSearch,
   left,
   inspector,
@@ -41,11 +30,6 @@ export function AppShell({
   taskTitle: string;
   contextVisible: boolean;
   attentionNotice: string | null;
-  onBeginWindowDrag: (clicks: WindowTitlebarClickCount) => void;
-  onToggleWindowSize?: () => void;
-  onOpenWindowMenu?: () => void;
-  windowMaximized: boolean;
-  onWindowControl: (action: WindowControlAction) => void;
   onSearch: () => void;
   left: ReactNode | null;
   inspector: ReactNode | null;
@@ -87,7 +71,6 @@ export function AppShell({
   return (
     <main
       className="app-window"
-      data-platform={desktopPlatform()}
       data-left-open={effectiveLeftOpen}
       data-inspector-open={effectiveInspectorOpen}
       onKeyDown={(event) => {
@@ -108,12 +91,7 @@ export function AppShell({
         onDismissInspector();
       }}
     >
-      <WindowTitlebar
-        className="workbench-commandbar"
-        onBeginWindowDrag={onBeginWindowDrag}
-        onToggleWindowSize={onToggleWindowSize}
-        onOpenWindowMenu={onOpenWindowMenu}
-      >
+      <WindowTitlebar className="workbench-commandbar">
         <div className="commandbar-leading-actions">
           {leftAvailable && (
             <button
@@ -159,17 +137,6 @@ export function AppShell({
             </details>
           )}
         </div>
-        <WindowControls
-          maximized={windowMaximized}
-          labels={{
-            controls: t("window.controls"),
-            minimize: t("window.minimize"),
-            maximize: t("window.maximize"),
-            restore: t("window.restore"),
-            close: t("window.close"),
-          }}
-          onAction={onWindowControl}
-        />
       </WindowTitlebar>
 
       <div className="app-columns">

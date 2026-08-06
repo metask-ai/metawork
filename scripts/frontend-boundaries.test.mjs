@@ -56,7 +56,7 @@ test("Renderer modules preserve the approved dependency direction", async () => 
         false,
         `${relative(sourceRoot, file)} must stay React-free`,
       );
-    if (!(layer === "bridge" && parts.join("/") === "bridge/client.ts"))
+    if (layer !== "bridge")
       assert.equal(
         source.includes("window.zero"),
         false,
@@ -185,7 +185,7 @@ test("Workspace lifecycle recovery lives in Settings with explicit focus handlin
   assert.doesNotMatch(settings, /dispatchWorkbench|selectWorkspace/);
 });
 
-test("Renderer command bars own the hidden-inset titlebar without stealing control input", async () => {
+test("Renderer declares one titlebar region while Bridge and Host own native chrome", async () => {
   const shell = await readFile(
     resolve(sourceRoot, "app", "AppShell.tsx"),
     "utf8",
@@ -199,8 +199,8 @@ test("Renderer command bars own the hidden-inset titlebar without stealing contr
     resolve(sourceRoot, "components", "ui", "WindowTitlebar.tsx"),
     "utf8",
   );
-  const icons = await readFile(
-    resolve(sourceRoot, "components", "ui", "Icon.tsx"),
+  const chromeBridge = await readFile(
+    resolve(sourceRoot, "bridge", "window-chrome.ts"),
     "utf8",
   );
   const manifest = await readFile(
@@ -215,28 +215,45 @@ test("Renderer command bars own the hidden-inset titlebar without stealing contr
   assert.match(shell, /WindowTitlebar/);
   assert.match(gate, /account-gate-toolbar/);
   assert.match(gate, /WindowTitlebar/);
-  assert.match(titlebar, /onPointerDown=\{beginDrag\}/);
-  assert.match(titlebar, /onDoubleClick=/);
-  assert.match(titlebar, /onContextMenu=/);
+  assert.match(titlebar, /data-metawork-window-drag=""/);
+  assert.match(titlebar, /createPortal\(dragRegion, document\.body\)/);
+  assert.doesNotMatch(titlebar, /onPointerDown|onDoubleClick|onContextMenu/);
   assert.doesNotMatch(`${shell}\n${gate}`, /onPointerMove|setPointerCapture/);
   assert.match(manifest, /\.titlebar = "hidden_inset_tall"/);
   assert.doesNotMatch(css, /-webkit-app-region:/);
-  assert.match(shell, /WindowControls/);
-  assert.match(gate, /WindowControls/);
-  assert.match(css, /\[data-platform="windows"\] \.window-controls/);
+  assert.doesNotMatch(`${shell}\n${gate}`, /WindowControls|windowPlatform/);
+  assert.doesNotMatch(css, /\[data-platform=|\.window-controls/);
   assert.match(css, /--window-bar-height: 52px/);
   assert.match(
-    css,
-    /\[data-platform="windows"\] \{[\s\S]*--window-bar-height: 40px/,
+    chromeBridge,
+    /const candidateSelector = "\[data-metawork-window-drag\]"/,
+  );
+  assert.match(chromeBridge, /commands\.windowChromeConnect/);
+  assert.match(chromeBridge, /commands\.windowChromeSync/);
+  assert.match(chromeBridge, /commands\.windowChromeDisconnect/);
+  assert.match(chromeBridge, /decodeWindowChromeEnvironment/);
+  assert.match(chromeBridge, /document\.querySelectorAll\(exclusionSelector\)/);
+  assert.match(chromeBridge, /window\.addEventListener\("resize", refresh\)/);
+  assert.match(
+    chromeBridge,
+    /async function refresh\(\)[\s\S]*commands\.windowChromeConnect[\s\S]*generation = value\.generation[\s\S]*syncAgain = true/,
+  );
+  assert.match(
+    chromeBridge,
+    /const requestGeneration = generation;[\s\S]*generation: requestGeneration[\s\S]*generation === requestGeneration[\s\S]*value\.generation === requestGeneration/,
+  );
+  assert.match(
+    chromeBridge,
+    /async function disconnect\([\s\S]*expectedGeneration:[\s\S]*generation !== current\) return/,
+  );
+  assert.doesNotMatch(
+    chromeBridge,
+    /window\.addEventListener\("resize", scheduleSync\)/,
   );
   assert.match(
     css,
-    /\[data-platform="windows"\] \.workbench-commandbar \{[\s\S]*padding-top: 0;[\s\S]*padding-bottom: 0;/,
+    /\.window-drag-region \{[\s\S]*position: fixed;[\s\S]*width: 100vw;[\s\S]*height: var\(--metawork-window-chrome-top\)/,
   );
-  assert.match(icons, /} from "lucide-react";/);
-  assert.match(icons, /minimize: Minus/);
-  assert.match(icons, /maximize: Square/);
-  assert.match(icons, /restore: Copy/);
   assert.match(
     css,
     /top: calc\(var\(--window-bar-height\) \+ env\(safe-area-inset-top, 0px\)\)/,

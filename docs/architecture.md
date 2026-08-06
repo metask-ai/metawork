@@ -57,7 +57,7 @@ flowchart TB
 
 ### 3.1 Renderer
 
-Renderer 负责产品 WebUI 的页面、布局、交互、结构化 Agent 工作展示和纯 UI 临时状态。它可以呈现与 WebUI 一体化的标题/命令栏、定义 Web 内容的交互命中并提交白名单化意图，但这不转移 Desktop Host 对原生窗口行为、系统资源和真实状态的所有权。Renderer 可以缓存 Application projection，但不能成为 Workspace、Task、Run、Account readiness、Agent 执行状态、持久化历史、权限决策或窗口真实状态的唯一 owner。WebView reload 或重连后，Renderer 必须能够从完整 Snapshot 重建产品界面。
+Renderer 负责产品 WebUI 的页面、布局、交互、结构化 Agent 工作展示和纯 UI 临时状态。它可以呈现与 WebUI 一体化的标题/命令栏，并以单一 declarative marker 声明可拖动的 Web 内容候选区；它不处理原生窗口动作，不读取窗口状态，也不拥有平台差异。Renderer 可以缓存 Application projection，但不能成为 Workspace、Task、Run、Account readiness、Agent 执行状态、持久化历史、权限决策或窗口真实状态的唯一 owner。WebView reload 或重连后，Renderer 必须能够从完整 Snapshot 重建产品界面。
 
 Renderer 不直接加载 AgentCore，不访问任意文件或进程，不持有 Provider credential 或原生窗口身份，不实现或模拟系统拖动循环、窗口状态、系统菜单、托盘、全局快捷键等平台行为，也不作为权限或安全边界。
 
@@ -65,7 +65,7 @@ Renderer 不直接加载 AgentCore，不访问任意文件或进程，不持有 
 
 Bridge 验证来源与启动窗口 identity，严格解码 payload，把合法输入转换为产品命令，调用 Application，编码 typed result，并运输 Snapshot/Event。Bridge 不决定 Task admission、Workspace authority、Agent cancellation、credential replacement 或历史持久化。
 
-Bridge 的连接、revision、snapshot identity、分块读取、retry 和 fail-closed 规则只由 [Renderer Bridge 合同](renderer-bridge-contract.md)定义。窗口 chrome 兼容入口只是受限 Host capability，不转移原生 owner、不暴露任意窗口 API，也不形成第二产品数据面。
+Bridge 的连接、revision、snapshot identity、分块读取、retry 和 fail-closed 规则只由 [Renderer Bridge 合同](renderer-bridge-contract.md)定义。browser-side Bridge boundary 可以把一个 declarative drag candidate 及其有界交互排除区镜像给受限 Host window-chrome capability，并 runtime decode Host 发布的安全 inset；它不得暴露窗口动作、窗口状态、任意窗口 API 或第二产品数据面。
 
 ### 3.3 Application
 
@@ -83,11 +83,11 @@ AgentCore 拥有 Provider 调用、agent loop、Conversation、built-in tools、
 
 Native SDK 是外部桌面依赖。Desktop Host 通过 Native SDK 执行桌面生命周期、原生窗口与 window chrome 行为、System WebView、菜单、托盘、全局快捷键及其他受限平台机制，并拥有对应系统资源和真实状态；它托管 React Renderer，为 Bridge 提供受限平台 seam。`app.zig` 的 Host composition 角色只把产品所需的窄 capability 注入 Application 并驱动平台生命周期；共置的 Application 协调角色执行已定义的跨 owner 顺序，但不持有产品 policy。Renderer 也不能把视觉呈现或交互命中升级为原生 owner。
 
-当前 Host 只以绑定 Desktop Host-owned 单一启动窗口的窄 seam 补齐 Native SDK 尚未正式提供的 WebView drag-region；它不得演化为 Native SDK adapter、通用 Desktop Interface、第二套窗口 owner 或 Renderer 任意原生调用面。官方 drag-region 经目标平台验收可用后必须原位替换；精确文件、wire 和验证状态分别见 [工程结构与所有权](project-structure.md)、[Renderer Bridge 合同](renderer-bridge-contract.md)与 [验证规范](validation.md)。
+当前 Host 只保留两个受约束的 Native SDK 0.8.0 兼容接线文件，其中 `windows_host.zig` 仅用于 Windows；它们不形成新模块或统一 facade。`windows_host.zig` 只解析并验证 Desktop Host-owned 单一启动 HWND，并为显式 Quit 选择 SDK 的正常 last-window shutdown 路径；`window_chrome.zig` 只补齐 SDK 尚未覆盖 System WebView 的 drag-region。Windows 以透明 native top-band overlay 和 hit-test subclass 把已校验区域交给系统 non-client 行为，并在 overlay 截获右键时打开该根窗口的原生 system menu；macOS 只在 SDK 要求的 live pointer event 内调用公开 `startWindowDrag`。原生按钮、双击、拖动循环、resize、close policy、托盘、生命周期与真实状态仍由 Native SDK/OS 拥有。这些文件不得演化为 Native SDK adapter、通用 Desktop Interface、第二套窗口 owner、窗口 action facade 或 Renderer 任意原生调用面；SDK 官方 System WebView drag-region 与 Windows lifecycle path 经目标平台验收可用后必须分别原位替换对应接线。精确文件、wire 和验证状态分别见 [工程结构与所有权](project-structure.md)、[Renderer Bridge 合同](renderer-bridge-contract.md)与 [验证规范](validation.md)。
 
 ## 4. 跨模块合同
 
-- Renderer → Bridge 只提交产品语义命令或精确白名单化的标题栏兼容意图；两者都不得携带 React component state、任意路径、原生窗口 identity/handle、Provider 配置或完整 credential。
+- Renderer → Bridge 只提交产品语义命令；标题栏的唯一例外是 browser-side Bridge 从 declarative DOM marker 计算出的有界 region mirror，不包含窗口 action、state、平台名或原生窗口 identity/handle。两类输入都不得携带 React component state、任意路径、Provider 配置或完整 credential。
 - Bridge → Application 只提交严格解码后的 typed command；业务拒绝由 Application 返回 typed result，malformed payload 与 authority failure 由 Bridge fail closed。
 - Application → Bridge 发布 canonical projection；Bridge 只拥有编码后的 transport bytes、connection generation 和 Snapshot transport state。
 - Application → AgentCore 只经内部 AgentCore 边界；Renderer、Bridge 与 Application 的其他 owner 只使用 MetaWork-owned 产品类型。

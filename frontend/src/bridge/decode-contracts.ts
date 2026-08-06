@@ -322,6 +322,12 @@ function nonNegativeNumber(value: unknown, path: string) {
   return result;
 }
 
+function nonNegativeFiniteNumber(value: unknown, path: string) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0)
+    fail(path, "expected non-negative finite number");
+  return value;
+}
+
 function arrayValue<T>(
   value: unknown,
   path: string,
@@ -2112,30 +2118,50 @@ export function assertDisconnected(value: unknown, generation: string) {
     fail("$", "disconnect response mismatch");
 }
 
-export type WindowChromeState = { maximized: boolean };
+export type WindowChromeEnvironment = {
+  generation: string;
+  insets: { top: number; left: number; bottom: number; right: number };
+  buttons: { x: number; y: number; width: number; height: number };
+  livePointerDrag: boolean;
+};
 
-function windowChromeState(item: JsonObject): WindowChromeState {
-  return { maximized: booleanValue(item.maximized, "$.maximized") };
-}
-
-export function decodeWindowDragStarted(value: unknown): WindowChromeState {
-  const item = object(value, "$", ["started", "maximized"]);
-  if (booleanValue(item.started, "$.started") !== true)
-    fail("$.started", "window drag did not start");
-  return windowChromeState(item);
-}
-
-export function decodeWindowControlCompleted(
+export function decodeWindowChromeEnvironment(
   value: unknown,
-): WindowChromeState {
-  const item = object(value, "$", ["completed", "maximized"]);
-  if (booleanValue(item.completed, "$.completed") !== true)
-    fail("$.completed", "window control did not complete");
-  return windowChromeState(item);
-}
-
-export function decodeWindowChromeState(value: unknown): WindowChromeState {
-  return windowChromeState(object(value, "$", ["maximized"]));
+): WindowChromeEnvironment {
+  const item = object(value, "$", [
+    "generation",
+    "insets",
+    "buttons",
+    "livePointerDrag",
+  ]);
+  const insets = object(item.insets, "$.insets", [
+    "top",
+    "left",
+    "bottom",
+    "right",
+  ]);
+  const buttons = object(item.buttons, "$.buttons", [
+    "x",
+    "y",
+    "width",
+    "height",
+  ]);
+  return {
+    generation: positiveWireId(item.generation, "$.generation"),
+    insets: {
+      top: nonNegativeFiniteNumber(insets.top, "$.insets.top"),
+      left: nonNegativeFiniteNumber(insets.left, "$.insets.left"),
+      bottom: nonNegativeFiniteNumber(insets.bottom, "$.insets.bottom"),
+      right: nonNegativeFiniteNumber(insets.right, "$.insets.right"),
+    },
+    buttons: {
+      x: nonNegativeFiniteNumber(buttons.x, "$.buttons.x"),
+      y: nonNegativeFiniteNumber(buttons.y, "$.buttons.y"),
+      width: nonNegativeFiniteNumber(buttons.width, "$.buttons.width"),
+      height: nonNegativeFiniteNumber(buttons.height, "$.buttons.height"),
+    },
+    livePointerDrag: booleanValue(item.livePointerDrag, "$.livePointerDrag"),
+  };
 }
 
 export function decodeWorkspaceChoice(value: unknown): WorkspaceChoice {
