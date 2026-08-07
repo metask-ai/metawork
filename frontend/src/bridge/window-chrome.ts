@@ -247,9 +247,7 @@ export function installWindowChromeBridge() {
         )
           applyEnvironment(value);
       })
-      .catch(() => {
-        if (generation === requestGeneration) dragSynchronized = false;
-      });
+      .catch(() => undefined);
   }
 
   function onControlClick(event: MouseEvent) {

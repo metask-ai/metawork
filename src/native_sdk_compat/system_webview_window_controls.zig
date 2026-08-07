@@ -8,6 +8,7 @@
 const builtin = @import("builtin");
 const native_sdk = @import("native_sdk");
 const std = @import("std");
+const startup_window = @import("system_webview_startup_window.zig");
 
 const Platform = switch (builtin.os.tag) {
     .windows => @import("system_webview_window_controls/windows.zig"),
@@ -19,7 +20,7 @@ const Platform = switch (builtin.os.tag) {
 
         pub fn captureStartupWindow(
             _: *@This().State,
-            _: native_sdk.platform.WindowId,
+            _: startup_window.Binding,
         ) !void {}
 
         pub fn toggleMaximize(_: *@This().State) !void {
@@ -56,8 +57,11 @@ pub const Capability = struct {
         try Platform.prepareStartup(&self.platform);
     }
 
-    pub fn captureStartupWindow(self: *Capability) !void {
-        try Platform.captureStartupWindow(&self.platform, self.window_id);
+    pub fn captureStartupWindow(
+        self: *Capability,
+        binding: startup_window.Binding,
+    ) !void {
+        try Platform.captureStartupWindow(&self.platform, binding);
     }
 
     pub fn toggleMaximize(self: *Capability) !void {
@@ -85,7 +89,7 @@ test "unsupported platforms do not advertise Renderer controls" {
     var capability = Capability.init(1);
     defer capability.deinit();
     try capability.prepareStartup();
-    try capability.captureStartupWindow();
+    try capability.captureStartupWindow(.{});
     const state = capability.state();
     try std.testing.expect(!state.renderer_controls);
     try std.testing.expect(!state.maximized);
