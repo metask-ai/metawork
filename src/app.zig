@@ -46,6 +46,24 @@ const mcp_configuration_limits: workbench_api.McpConfigurationLimits = .{
     .max_runtime_secret_bytes_per_server = mcp_runtime_limits.max_secret_bytes,
 };
 
+const McpStartupPreparation = struct {
+    preparation: workbench_api.McpPreparedConfiguration,
+    management_health: workbench_api.McpStoreHealth,
+};
+
+fn mcpManagementHealthAfterPreparation(
+    state: workbench_api.McpPreparationState,
+    recovery_health: workbench_api.McpStoreHealth,
+) workbench_api.McpStoreHealth {
+    return switch (state) {
+        .empty, .available => recovery_health,
+        .unavailable => if (recovery_health == .outcome_unknown)
+            .outcome_unknown
+        else
+            .recovery_required,
+    };
+}
+
 fn bridgeWindowChromeEnvironment(value: window_chrome.Environment) bridge_api.WindowChromeEnvironment {
     return .{
         .generation = value.generation,
@@ -277,6 +295,7 @@ const App = struct {
     workbench_configuration: workbench_api.Configuration = .{},
     workbench_initialized: bool = false,
     mcp_configuration_store: ?*workbench_api.McpConfigurationFileStore = null,
+    mcp_credential_store: ?mcp_platform.CredentialStore = null,
 
     fn app(self: *@This()) native_sdk.App {
         return .{
@@ -310,7 +329,13 @@ const App = struct {
             try self.window_chrome_capability.requirePlatform(services)
         else
             return error.SystemWebViewChromeUnavailable;
-        var preparation = try self.prepareMcpConfiguration();
+        self.mcp_credential_store = .{
+            .io = self.io,
+            .services = self.platform_services.?,
+            .main_thread_id = self.main_thread_id,
+        };
+        const startup_preparation = try self.prepareMcpConfiguration();
+        var preparation = startup_preparation.preparation;
         var preparation_owned = true;
         defer if (preparation_owned) preparation.deinit();
         var mcp_input: ?agent.McpRuntimeInput = null;
@@ -351,6 +376,13 @@ const App = struct {
             .preparation = &preparation,
             .activation = activation,
             .activation_failed = activation_failed,
+            .management = if (self.mcp_configuration_store) |store| .{
+                .persistence = store.mutationPersistence(),
+                .credentials = self.mcp_credential_store.?.effects(),
+                .locator_generator = self.mcp_credential_store.?.locatorGenerator(),
+                .limits = mcp_configuration_limits,
+                .initial_health = startup_preparation.management_health,
+            } else null,
         };
         workbench_storage.* = try workbench_api.Workbench.init(
             std.heap.c_allocator,
@@ -395,26 +427,32 @@ const App = struct {
         (self.dispatcher orelse @panic("Bridge Dispatcher is not composed")).startIngress();
     }
 
-    fn prepareMcpConfiguration(self: *@This()) !workbench_api.McpPreparedConfiguration {
+    fn prepareMcpConfiguration(self: *@This()) !McpStartupPreparation {
         const store = self.mcp_configuration_store orelse
-            return workbench_api.prepareMcpConfiguration(
-                std.heap.c_allocator,
-                null,
-                false,
-                false,
-                .{},
-                mcp_configuration_limits,
-            );
+            return .{
+                .preparation = try workbench_api.prepareMcpConfiguration(
+                    std.heap.c_allocator,
+                    null,
+                    false,
+                    false,
+                    .{},
+                    mcp_configuration_limits,
+                ),
+                .management_health = .recovery_required,
+            };
         const restored_bytes = store.loadAlloc(std.heap.c_allocator) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            else => return workbench_api.prepareMcpConfiguration(
-                std.heap.c_allocator,
-                null,
-                true,
-                true,
-                .{},
-                mcp_configuration_limits,
-            ),
+            else => return .{
+                .preparation = try workbench_api.prepareMcpConfiguration(
+                    std.heap.c_allocator,
+                    null,
+                    true,
+                    true,
+                    .{},
+                    mcp_configuration_limits,
+                ),
+                .management_health = .recovery_required,
+            },
         };
         defer if (restored_bytes) |bytes| std.heap.c_allocator.free(bytes);
         var registry_corrupt = false;
@@ -433,12 +471,10 @@ const App = struct {
             defer decoded.deinit();
             break :generation decoded.value.generation;
         } else 0;
-        var credential_store = mcp_platform.CredentialStore{
-            .services = self.platform_services orelse
-                return error.RuntimeUnavailable,
-            .main_thread_id = self.main_thread_id,
-        };
+        const credential_store = if (self.mcp_credential_store) |*value| value else return error.RuntimeUnavailable;
         var recovery_failed = registry_corrupt;
+        var management_health: workbench_api.McpStoreHealth =
+            if (registry_corrupt) .recovery_required else .ready;
         if (!registry_corrupt) {
             _ = store.recoverPendingCredentialTransaction(
                 std.heap.c_allocator,
@@ -447,10 +483,17 @@ const App = struct {
                 mcp_configuration_limits,
             ) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                else => recovery_failed = true,
+                error.PersistenceOutcomeUnknown => {
+                    recovery_failed = true;
+                    management_health = .outcome_unknown;
+                },
+                else => {
+                    recovery_failed = true;
+                    management_health = .recovery_required;
+                },
             };
         }
-        return workbench_api.prepareMcpConfiguration(
+        const preparation = try workbench_api.prepareMcpConfiguration(
             std.heap.c_allocator,
             restored_bytes,
             true,
@@ -458,6 +501,13 @@ const App = struct {
             credential_store.resolver(),
             mcp_configuration_limits,
         );
+        return .{
+            .preparation = preparation,
+            .management_health = mcpManagementHealthAfterPreparation(
+                preparation.state,
+                management_health,
+            ),
+        };
     }
 
     fn stop(context: *anyopaque, native_runtime: *native_sdk.Runtime) anyerror!void {
@@ -1241,6 +1291,20 @@ test "MCP App composition keeps registry limits within AgentCore authority bound
     try std.testing.expectEqual(@as(usize, 64), mcp_configuration_limits.max_servers);
     try std.testing.expectEqual(@as(usize, 1024), mcp_configuration_limits.max_tools_per_server);
     try std.testing.expectEqual(@as(usize, 24), mcp_configuration_limits.max_namespace_bytes);
+    try std.testing.expectEqual(
+        workbench_api.McpStoreHealth.recovery_required,
+        mcpManagementHealthAfterPreparation(
+            .{ .unavailable = .credential_store_unavailable },
+            .ready,
+        ),
+    );
+    try std.testing.expectEqual(
+        workbench_api.McpStoreHealth.outcome_unknown,
+        mcpManagementHealthAfterPreparation(
+            .{ .unavailable = .read_failed },
+            .outcome_unknown,
+        ),
+    );
 }
 
 test "product identity does not unify macOS and Windows Account storage" {

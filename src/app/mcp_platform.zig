@@ -16,6 +16,7 @@ const max_session_token_bytes: usize = 1024;
 const max_sse_framing_bytes: usize = 64 * 1024;
 
 pub const CredentialStore = struct {
+    io: std.Io,
     services: native_sdk.platform.PlatformServices,
     main_thread_id: std.Thread.Id,
 
@@ -33,6 +34,33 @@ pub const CredentialStore = struct {
             .available = self.services.delete_credential_fn != null,
             .delete_fn = delete,
         };
+    }
+
+    pub fn effects(self: *CredentialStore) workbench.McpCredentialEffects {
+        return .{
+            .context = self,
+            .available = self.services.get_credential_fn != null and
+                self.services.set_credential_fn != null and
+                self.services.delete_credential_fn != null,
+            .probe_fn = probe,
+            .create_fn = create,
+            .delete_fn = delete,
+        };
+    }
+
+    pub fn locatorGenerator(self: *CredentialStore) workbench.McpFreshLocatorGenerator {
+        return .{
+            .context = self,
+            .available = true,
+            .fill_fn = fillLocatorEntropy,
+        };
+    }
+
+    fn fillLocatorEntropy(context: ?*anyopaque, output: *[16]u8) bool {
+        const self: *CredentialStore = @ptrCast(@alignCast(context orelse return false));
+        if (std.Thread.getCurrentId() != self.main_thread_id) return false;
+        std.Io.randomSecure(self.io, output) catch return false;
+        return true;
     }
 
     fn resolve(
@@ -53,6 +81,44 @@ pub const CredentialStore = struct {
             else => .unavailable,
         };
         return .{ .value = allocator.dupe(u8, value) catch return .out_of_memory };
+    }
+
+    fn probe(
+        context: ?*anyopaque,
+        locator: []const u8,
+    ) workbench.McpCredentialPresence {
+        const self: *CredentialStore = @ptrCast(@alignCast(context orelse return .unavailable));
+        if (std.Thread.getCurrentId() != self.main_thread_id)
+            return .unavailable;
+        var storage: [native_sdk.platform.max_credential_secret_bytes]u8 = undefined;
+        defer std.crypto.secureZero(u8, &storage);
+        _ = self.services.getCredential(.{
+            .service = credential_service,
+            .account = locator,
+        }, &storage) catch |err| return switch (err) {
+            error.CredentialNotFound => .missing,
+            else => .unavailable,
+        };
+        return .present;
+    }
+
+    fn create(
+        context: ?*anyopaque,
+        locator: []const u8,
+        secret: []const u8,
+    ) bool {
+        const self: *CredentialStore = @ptrCast(@alignCast(context orelse return false));
+        if (std.Thread.getCurrentId() != self.main_thread_id or
+            secret.len == 0 or
+            secret.len > native_sdk.platform.max_credential_secret_bytes or
+            probe(context, locator) != .missing)
+            return false;
+        self.services.setCredential(.{
+            .service = credential_service,
+            .account = locator,
+            .secret = secret,
+        }) catch return false;
+        return true;
     }
 
     fn delete(context: ?*anyopaque, locator: []const u8) bool {

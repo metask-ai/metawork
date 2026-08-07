@@ -37,6 +37,9 @@ pub const Error = error{
     RegistryTooLarge,
     RegistryCorrupt,
     RegistryEncodeFailed,
+    GenerationMismatch,
+    GenerationExhausted,
+    InvalidMutation,
     TransactionCorrupt,
     TransactionEncodeFailed,
     TransactionGenerationMismatch,
@@ -98,6 +101,34 @@ pub const TransactionWire = struct {
     retired_locators: []const []const u8,
 };
 
+/// Owned, effect-free plan for one base -> target registry transaction. The
+/// immutable target is the same value validated by the planner, encoded by the
+/// coordinator, and installed as desired state after a successful commit.
+/// Candidate locators are exactly the fresh credential identities introduced
+/// by target; retired locators are derived from the trusted reference-set
+/// difference and are never accepted from a caller.
+pub const MutationPlan = struct {
+    arena: std.heap.ArenaAllocator,
+    target: ?std.json.Parsed(RegistryWire),
+    transaction: TransactionWire,
+
+    fn targetRegistry(self: *const MutationPlan) Error!RegistryWire {
+        return if (self.target) |target| target.value else error.InvalidMutation;
+    }
+
+    fn takeTarget(self: *MutationPlan) std.json.Parsed(RegistryWire) {
+        const target = self.target.?;
+        self.target = null;
+        return target;
+    }
+
+    pub fn deinit(self: *MutationPlan) void {
+        if (self.target) |*target| target.deinit();
+        self.arena.deinit();
+        self.* = undefined;
+    }
+};
+
 pub const CredentialCleanup = struct {
     context: ?*anyopaque = null,
     available: bool = false,
@@ -111,6 +142,664 @@ pub const CredentialCleanup = struct {
         return false;
     }
 };
+
+pub const StoreHealth = enum {
+    ready,
+    recovery_required,
+    outcome_unknown,
+};
+
+pub const PersistenceEffect = enum {
+    committed,
+    failed,
+    outcome_unknown,
+};
+
+pub const MutationPersistence = struct {
+    context: ?*anyopaque = null,
+    available: bool = false,
+    commit_journal_fn: *const fn (?*anyopaque, []const u8) PersistenceEffect = unavailableCommit,
+    commit_registry_fn: *const fn (?*anyopaque, []const u8) PersistenceEffect = unavailableCommit,
+    clear_journal_fn: *const fn (?*anyopaque) PersistenceEffect = unavailableClear,
+
+    fn commitJournal(self: MutationPersistence, bytes: []const u8) PersistenceEffect {
+        if (!self.available) return .failed;
+        return self.commit_journal_fn(self.context, bytes);
+    }
+
+    fn commitRegistry(self: MutationPersistence, bytes: []const u8) PersistenceEffect {
+        if (!self.available) return .failed;
+        return self.commit_registry_fn(self.context, bytes);
+    }
+
+    fn clearJournal(self: MutationPersistence) PersistenceEffect {
+        if (!self.available) return .failed;
+        return self.clear_journal_fn(self.context);
+    }
+
+    fn unavailableCommit(_: ?*anyopaque, _: []const u8) PersistenceEffect {
+        return .failed;
+    }
+
+    fn unavailableClear(_: ?*anyopaque) PersistenceEffect {
+        return .failed;
+    }
+};
+
+pub const CredentialPresence = enum {
+    missing,
+    present,
+    unavailable,
+};
+
+pub const CredentialEffects = struct {
+    context: ?*anyopaque = null,
+    available: bool = false,
+    probe_fn: *const fn (?*anyopaque, []const u8) CredentialPresence = unavailableProbe,
+    create_fn: *const fn (?*anyopaque, []const u8, []const u8) bool = unavailableCreate,
+    delete_fn: *const fn (?*anyopaque, []const u8) bool = unavailableDelete,
+
+    fn probe(self: CredentialEffects, locator: []const u8) CredentialPresence {
+        if (!self.available) return .unavailable;
+        return self.probe_fn(self.context, locator);
+    }
+
+    fn create(self: CredentialEffects, locator: []const u8, secret: []const u8) bool {
+        return self.available and self.create_fn(self.context, locator, secret);
+    }
+
+    fn delete(self: CredentialEffects, locator: []const u8) bool {
+        return self.available and self.delete_fn(self.context, locator);
+    }
+
+    fn unavailableProbe(_: ?*anyopaque, _: []const u8) CredentialPresence {
+        return .unavailable;
+    }
+
+    fn unavailableCreate(_: ?*anyopaque, _: []const u8, _: []const u8) bool {
+        return false;
+    }
+
+    fn unavailableDelete(_: ?*anyopaque, _: []const u8) bool {
+        return false;
+    }
+};
+
+pub const CandidateCredential = struct {
+    locator: []const u8,
+    secret: []u8,
+};
+
+pub const MutationCommit = enum {
+    saved,
+    saved_recovery_required,
+    not_saved,
+    not_saved_recovery_required,
+    registry_outcome_unknown,
+    blocked,
+};
+
+/// Serial owner for the single durable MCP credential transaction. The plan
+/// owns the registry bytes; callers retain candidate secret storage, which is
+/// securely zeroed on every return path.
+pub const TransactionCoordinator = struct {
+    health: StoreHealth = .ready,
+
+    pub fn commit(
+        self: *TransactionCoordinator,
+        allocator: std.mem.Allocator,
+        persistence: MutationPersistence,
+        credentials: CredentialEffects,
+        plan: *const MutationPlan,
+        candidates: []CandidateCredential,
+        limits: Limits,
+    ) (Error || std.mem.Allocator.Error)!MutationCommit {
+        defer for (candidates) |candidate| std.crypto.secureZero(u8, candidate.secret);
+        if (self.health != .ready) return .blocked;
+        try validateCommitInputs(plan, candidates, limits);
+
+        const registry_buffer = try allocator.alloc(u8, max_store_bytes);
+        defer allocator.free(registry_buffer);
+        const registry_bytes = try encode(
+            registry_buffer,
+            try plan.targetRegistry(),
+            limits,
+        );
+        const journal_buffer = try allocator.alloc(u8, max_transaction_bytes);
+        defer allocator.free(journal_buffer);
+        const journal_bytes = try encodeTransaction(
+            journal_buffer,
+            plan.transaction,
+            limits,
+        );
+
+        for (plan.transaction.candidate_locators) |locator| switch (credentials.probe(locator)) {
+            .missing => {},
+            .present, .unavailable => return .not_saved,
+        };
+
+        switch (persistence.commitJournal(journal_bytes)) {
+            .committed => {},
+            .failed => return .not_saved,
+            .outcome_unknown => {
+                self.health = .outcome_unknown;
+                return .not_saved_recovery_required;
+            },
+        }
+        for (plan.transaction.candidate_locators) |locator| {
+            const candidate = candidateForLocator(candidates, locator) orelse unreachable;
+            if (!credentials.create(locator, candidate.secret))
+                return self.recoverBase(
+                    persistence,
+                    credentials,
+                    plan.transaction.candidate_locators,
+                );
+        }
+        switch (persistence.commitRegistry(registry_bytes)) {
+            .committed => {},
+            .failed => return self.recoverBase(
+                persistence,
+                credentials,
+                plan.transaction.candidate_locators,
+            ),
+            .outcome_unknown => {
+                self.health = .outcome_unknown;
+                return .registry_outcome_unknown;
+            },
+        }
+        if (!deleteAll(credentials, plan.transaction.retired_locators)) {
+            self.health = .recovery_required;
+            return .saved_recovery_required;
+        }
+        return switch (persistence.clearJournal()) {
+            .committed => .saved,
+            .failed => blocked: {
+                self.health = .recovery_required;
+                break :blocked .saved_recovery_required;
+            },
+            .outcome_unknown => blocked: {
+                self.health = .outcome_unknown;
+                break :blocked .saved_recovery_required;
+            },
+        };
+    }
+
+    fn recoverBase(
+        self: *TransactionCoordinator,
+        persistence: MutationPersistence,
+        credentials: CredentialEffects,
+        candidate_locators: []const []const u8,
+    ) MutationCommit {
+        if (!deleteAll(credentials, candidate_locators)) {
+            self.health = .recovery_required;
+            return .not_saved_recovery_required;
+        }
+        return switch (persistence.clearJournal()) {
+            .committed => .not_saved,
+            .failed => blocked: {
+                self.health = .recovery_required;
+                break :blocked .not_saved_recovery_required;
+            },
+            .outcome_unknown => blocked: {
+                self.health = .outcome_unknown;
+                break :blocked .not_saved_recovery_required;
+            },
+        };
+    }
+};
+
+/// Credential-bearing management input. `replace` is consumed by the call
+/// and securely zeroed on every return path. Durable credential locators are
+/// generated inside the Workbench owner and never accepted from callers.
+pub const CredentialUpdate = union(enum) {
+    retain,
+    replace: []u8,
+};
+
+pub const NamedCredentialInput = struct {
+    name: []const u8,
+    value: CredentialUpdate,
+};
+
+pub const StdioServerInput = struct {
+    command: []const u8,
+    arguments: []const []const u8 = &.{},
+    cwd: ?[]const u8 = null,
+    environment: []const NamedCredentialInput = &.{},
+};
+
+pub const HttpServerInput = struct {
+    url: []const u8,
+    headers: []const NamedCredentialInput = &.{},
+};
+
+pub const ManagedTransportInput = union(enum) {
+    stdio: StdioServerInput,
+    streamable_http: HttpServerInput,
+};
+
+pub const ManagedServerInput = struct {
+    id: []const u8,
+    namespace: []const u8,
+    display_name: []const u8,
+    enabled: bool,
+    negotiation: []const u8,
+    timeout_ms: u32,
+    transport: ManagedTransportInput,
+    tools: []const []const u8 = &.{},
+};
+
+pub const FreshLocatorGenerator = struct {
+    context: ?*anyopaque = null,
+    available: bool = false,
+    fill_fn: *const fn (?*anyopaque, *[16]u8) bool = unavailableFill,
+
+    fn fill(self: FreshLocatorGenerator, bytes: *[16]u8) bool {
+        return self.available and self.fill_fn(self.context, bytes);
+    }
+
+    fn unavailableFill(_: ?*anyopaque, _: *[16]u8) bool {
+        return false;
+    }
+};
+
+pub const ManagementConfiguration = struct {
+    persistence: MutationPersistence,
+    credentials: CredentialEffects,
+    locator_generator: FreshLocatorGenerator = .{},
+    limits: Limits,
+    initial_health: StoreHealth = .ready,
+};
+
+pub const ManagementInspection = struct {
+    health: StoreHealth,
+    startup_generation: ?u64,
+    desired_generation: ?u64,
+    pending_restart: bool,
+    server_count: usize,
+};
+
+pub const ManagementOutcome = enum {
+    unchanged,
+    saved_restart_required,
+    saved_recovery_required,
+    rejected,
+    indeterminate,
+};
+
+/// Workbench-owned desired MCP registry and mutation admission boundary.
+/// The startup Runtime preparation is deliberately not retained here: saving
+/// desired configuration never changes the effective Runtime or Sessions in
+/// the current process.
+pub const ManagementPort = struct {
+    allocator: std.mem.Allocator,
+    limits: Limits,
+    startup_generation: ?u64,
+    desired: ?std.json.Parsed(RegistryWire),
+    persistence: MutationPersistence,
+    credentials: CredentialEffects,
+    locator_generator: FreshLocatorGenerator,
+    coordinator: TransactionCoordinator,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        startup_registry: ?RegistryWire,
+        configuration: ManagementConfiguration,
+    ) std.mem.Allocator.Error!ManagementPort {
+        var health = configuration.initial_health;
+        if (!configuration.persistence.available or !configuration.credentials.available)
+            health = .recovery_required;
+        var desired: ?std.json.Parsed(RegistryWire) = null;
+        if (startup_registry) |registry| {
+            desired = cloneRegistry(allocator, registry, configuration.limits) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => failed: {
+                    health = .recovery_required;
+                    break :failed null;
+                },
+            };
+        }
+        errdefer if (desired) |*registry| registry.deinit();
+        return .{
+            .allocator = allocator,
+            .limits = configuration.limits,
+            .startup_generation = if (startup_registry) |registry| registry.generation else null,
+            .desired = desired,
+            .persistence = configuration.persistence,
+            .credentials = configuration.credentials,
+            .locator_generator = configuration.locator_generator,
+            .coordinator = .{ .health = health },
+        };
+    }
+
+    pub fn deinit(self: *ManagementPort) void {
+        if (self.desired) |*registry| registry.deinit();
+        self.* = undefined;
+    }
+
+    pub fn inspect(self: *const ManagementPort) ManagementInspection {
+        const desired_generation = if (self.desired) |registry|
+            registry.value.generation
+        else
+            null;
+        return .{
+            .health = self.coordinator.health,
+            .startup_generation = self.startup_generation,
+            .desired_generation = desired_generation,
+            .pending_restart = generationValue(self.startup_generation) !=
+                generationValue(desired_generation),
+            .server_count = if (self.desired) |registry| registry.value.servers.len else 0,
+        };
+    }
+
+    pub fn upsertServer(
+        self: *ManagementPort,
+        expected_generation: u64,
+        input: ManagedServerInput,
+    ) std.mem.Allocator.Error!ManagementOutcome {
+        defer zeroManagedServerSecrets(input);
+        if (self.coordinator.health != .ready or
+            expected_generation != generationValue(self.inspect().desired_generation))
+            return .rejected;
+
+        const base = if (self.desired) |registry| registry.value else null;
+        const base_servers = if (base) |registry| registry.servers else &.{};
+        const existing_index = findServerIndex(base_servers, input.id);
+        const target_count = if (existing_index == null)
+            std.math.add(usize, base_servers.len, 1) catch return .rejected
+        else
+            base_servers.len;
+        if (target_count > self.limits.max_servers) return .rejected;
+        if (expected_generation == std.math.maxInt(u64)) return .rejected;
+
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const temporary = arena.allocator();
+        var candidates: std.ArrayList(CandidateCredential) = .empty;
+        defer candidates.deinit(self.allocator);
+        const existing = if (existing_index) |index| base_servers[index] else null;
+        const replacement = buildManagedServer(
+            temporary,
+            input,
+            existing,
+            self.locator_generator,
+            &candidates,
+            self.allocator,
+            self.limits,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return .rejected,
+        };
+        const target_servers = try self.allocator.alloc(ServerWire, target_count);
+        defer self.allocator.free(target_servers);
+        if (existing_index) |replace_index| {
+            @memcpy(target_servers, base_servers);
+            target_servers[replace_index] = replacement;
+        } else {
+            @memcpy(target_servers[0..base_servers.len], base_servers);
+            target_servers[base_servers.len] = replacement;
+        }
+        return self.commitTarget(.{
+            .schema_version = schema_version,
+            .generation = expected_generation + 1,
+            .servers = target_servers,
+        }, candidates.items);
+    }
+
+    pub fn removeServer(
+        self: *ManagementPort,
+        expected_generation: u64,
+        server_id: []const u8,
+    ) std.mem.Allocator.Error!ManagementOutcome {
+        if (self.coordinator.health != .ready or
+            expected_generation != generationValue(self.inspect().desired_generation))
+            return .rejected;
+        const base = if (self.desired) |registry| registry.value else return .unchanged;
+        const remove_index = findServerIndex(base.servers, server_id) orelse
+            return .unchanged;
+        if (expected_generation == std.math.maxInt(u64)) return .rejected;
+        const target_servers = try self.allocator.alloc(ServerWire, base.servers.len - 1);
+        defer self.allocator.free(target_servers);
+        @memcpy(target_servers[0..remove_index], base.servers[0..remove_index]);
+        @memcpy(target_servers[remove_index..], base.servers[remove_index + 1 ..]);
+        return self.commitTarget(.{
+            .schema_version = schema_version,
+            .generation = expected_generation + 1,
+            .servers = target_servers,
+        }, &.{});
+    }
+
+    fn commitTarget(
+        self: *ManagementPort,
+        target: RegistryWire,
+        candidates: []CandidateCredential,
+    ) std.mem.Allocator.Error!ManagementOutcome {
+        var candidate_locators: std.ArrayList([]const u8) = .empty;
+        defer candidate_locators.deinit(self.allocator);
+        for (candidates) |candidate|
+            candidate_locators.append(self.allocator, candidate.locator) catch
+                return error.OutOfMemory;
+        var plan = (planMutation(
+            self.allocator,
+            if (self.desired) |registry| registry.value else null,
+            target,
+            generationValue(self.inspect().desired_generation),
+            candidate_locators.items,
+            self.limits,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return .rejected,
+        }) orelse return .unchanged;
+        defer plan.deinit();
+        const commit = self.coordinator.commit(
+            self.allocator,
+            self.persistence,
+            self.credentials,
+            &plan,
+            candidates,
+            self.limits,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return .rejected,
+        };
+        return switch (commit) {
+            .saved => saved: {
+                self.replaceDesired(plan.takeTarget());
+                break :saved .saved_restart_required;
+            },
+            .saved_recovery_required => saved: {
+                self.replaceDesired(plan.takeTarget());
+                break :saved .saved_recovery_required;
+            },
+            .registry_outcome_unknown => .indeterminate,
+            .not_saved, .not_saved_recovery_required, .blocked => .rejected,
+        };
+    }
+
+    fn replaceDesired(
+        self: *ManagementPort,
+        replacement: std.json.Parsed(RegistryWire),
+    ) void {
+        if (self.desired) |*registry| registry.deinit();
+        self.desired = replacement;
+    }
+};
+
+fn generationValue(generation: ?u64) u64 {
+    return generation orelse 0;
+}
+
+fn cloneRegistry(
+    allocator: std.mem.Allocator,
+    registry: RegistryWire,
+    limits: Limits,
+) (Error || std.mem.Allocator.Error)!std.json.Parsed(RegistryWire) {
+    const buffer = try allocator.alloc(u8, max_store_bytes);
+    defer allocator.free(buffer);
+    const bytes = try encode(buffer, registry, limits);
+    return try decode(allocator, bytes, limits);
+}
+
+fn findServerIndex(servers: []const ServerWire, id: []const u8) ?usize {
+    for (servers, 0..) |server, index|
+        if (std.mem.eql(u8, server.id, id)) return index;
+    return null;
+}
+
+fn buildManagedServer(
+    allocator: std.mem.Allocator,
+    input: ManagedServerInput,
+    existing: ?ServerWire,
+    generator: FreshLocatorGenerator,
+    candidates: *std.ArrayList(CandidateCredential),
+    candidate_allocator: std.mem.Allocator,
+    limits: Limits,
+) (Error || std.mem.Allocator.Error)!ServerWire {
+    const transport: TransportWire = switch (input.transport) {
+        .stdio => |stdio| .{
+            .kind = "stdio",
+            .command = stdio.command,
+            .arguments = try literalArguments(allocator, stdio.arguments),
+            .cwd = stdio.cwd,
+            .environment = try credentialEntries(
+                allocator,
+                stdio.environment,
+                if (existing) |server| server.transport.environment else &.{},
+                generator,
+                candidates,
+                candidate_allocator,
+                limits,
+            ),
+        },
+        .streamable_http => |http| .{
+            .kind = "streamable_http",
+            .url = http.url,
+            .headers = try credentialEntries(
+                allocator,
+                http.headers,
+                if (existing) |server| server.transport.headers else &.{},
+                generator,
+                candidates,
+                candidate_allocator,
+                limits,
+            ),
+        },
+    };
+    const server: ServerWire = .{
+        .id = input.id,
+        .namespace = input.namespace,
+        .display_name = input.display_name,
+        .enabled = input.enabled,
+        .negotiation = input.negotiation,
+        .timeout_ms = input.timeout_ms,
+        .transport = transport,
+        .tools = input.tools,
+    };
+    if (serverProblem(server, limits) != null) return error.InvalidMutation;
+    return server;
+}
+
+fn literalArguments(
+    allocator: std.mem.Allocator,
+    arguments: []const []const u8,
+) std.mem.Allocator.Error![]ValueSourceWire {
+    const values = try allocator.alloc(ValueSourceWire, arguments.len);
+    for (arguments, 0..) |argument, index| values[index] = .{ .literal = argument };
+    return values;
+}
+
+fn credentialEntries(
+    allocator: std.mem.Allocator,
+    inputs: []const NamedCredentialInput,
+    existing: []const NamedValueWire,
+    generator: FreshLocatorGenerator,
+    candidates: *std.ArrayList(CandidateCredential),
+    candidate_allocator: std.mem.Allocator,
+    limits: Limits,
+) (Error || std.mem.Allocator.Error)![]NamedValueWire {
+    const entries = try allocator.alloc(NamedValueWire, inputs.len);
+    for (inputs, 0..) |input, index| {
+        const locator = switch (input.value) {
+            .retain => retained: {
+                for (existing) |entry| {
+                    if (!std.ascii.eqlIgnoreCase(entry.name, input.name)) continue;
+                    break :retained entry.value.credential_ref orelse
+                        return error.InvalidMutation;
+                }
+                return error.InvalidMutation;
+            },
+            .replace => |secret| fresh: {
+                if (secret.len == 0 or secret.len > limits.max_credential_secret_bytes)
+                    return error.InvalidMutation;
+                var random: [16]u8 = undefined;
+                if (!generator.fill(&random)) return error.InvalidMutation;
+                const hex = std.fmt.bytesToHex(random, .lower);
+                const locator = try std.fmt.allocPrint(allocator, "v1/{s}", .{hex});
+                if (!validCredentialLocator(locator, limits.max_credential_locator_bytes))
+                    return error.InvalidMutation;
+                try candidates.append(candidate_allocator, .{
+                    .locator = locator,
+                    .secret = secret,
+                });
+                break :fresh locator;
+            },
+        };
+        entries[index] = .{
+            .name = input.name,
+            .value = .{ .credential_ref = locator },
+        };
+    }
+    return entries;
+}
+
+pub fn zeroManagedServerSecrets(input: ManagedServerInput) void {
+    const values = switch (input.transport) {
+        .stdio => |stdio| stdio.environment,
+        .streamable_http => |http| http.headers,
+    };
+    for (values) |value| switch (value.value) {
+        .retain => {},
+        .replace => |secret| std.crypto.secureZero(u8, secret),
+    };
+}
+
+fn validateCommitInputs(
+    plan: *const MutationPlan,
+    candidates: []const CandidateCredential,
+    limits: Limits,
+) Error!void {
+    validateTransaction(&plan.transaction, limits) catch return error.InvalidMutation;
+    const target = try plan.targetRegistry();
+    validateRegistryIdentity(&target, limits) catch return error.InvalidMutation;
+    if (target.generation != plan.transaction.target_generation)
+        return error.InvalidMutation;
+    if (candidates.len != plan.transaction.candidate_locators.len)
+        return error.InvalidMutation;
+    for (candidates, 0..) |candidate, index| {
+        if (!containsText(plan.transaction.candidate_locators, candidate.locator) or
+            candidate.secret.len == 0 or
+            candidate.secret.len > limits.max_credential_secret_bytes)
+            return error.InvalidMutation;
+        for (candidates[0..index]) |previous|
+            if (std.mem.eql(u8, previous.locator, candidate.locator))
+                return error.InvalidMutation;
+    }
+}
+
+fn candidateForLocator(
+    candidates: []const CandidateCredential,
+    locator: []const u8,
+) ?CandidateCredential {
+    for (candidates) |candidate|
+        if (std.mem.eql(u8, candidate.locator, locator)) return candidate;
+    return null;
+}
+
+fn deleteAll(credentials: CredentialEffects, locators: []const []const u8) bool {
+    var deleted = true;
+    for (locators) |locator| deleted = credentials.delete(locator) and deleted;
+    return deleted;
+}
 
 pub const ServerProblem = enum {
     invalid_display_name,
@@ -484,7 +1173,7 @@ pub fn decode(
         RegistryWire,
         allocator,
         input,
-        .{ .ignore_unknown_fields = false },
+        .{ .ignore_unknown_fields = false, .allocate = .alloc_always },
     ) catch return error.RegistryCorrupt;
     errdefer parsed.deinit();
     validateRegistryIdentity(&parsed.value, limits) catch
@@ -515,7 +1204,7 @@ pub fn decodeTransaction(
         TransactionWire,
         allocator,
         input,
-        .{ .ignore_unknown_fields = false },
+        .{ .ignore_unknown_fields = false, .allocate = .alloc_always },
     ) catch return error.TransactionCorrupt;
     errdefer parsed.deinit();
     validateTransaction(&parsed.value, limits) catch
@@ -537,6 +1226,215 @@ pub fn encodeTransaction(
     const encoded = writer.buffered();
     if (encoded.len > max_transaction_bytes) return error.TransactionEncodeFailed;
     return encoded;
+}
+
+/// Plans one complete desired-registry replacement without performing file or
+/// credential effects. A null result is a semantic no-op. A mutation may keep
+/// existing server-local failures byte-identical or remove them, but it cannot
+/// introduce or alter an invalid server. `candidate_locators` is supplied only
+/// by the Host-owned fresh-locator stage; every newly referenced trusted
+/// locator must be present exactly once and no base locator may be reclassified
+/// as a candidate.
+pub fn planMutation(
+    allocator: std.mem.Allocator,
+    base: ?RegistryWire,
+    target: RegistryWire,
+    expected_generation: u64,
+    candidate_locators: []const []const u8,
+    limits: Limits,
+) (Error || std.mem.Allocator.Error)!?MutationPlan {
+    const base_generation = if (base) |registry| registry.generation else 0;
+    if (base_generation != expected_generation) return error.GenerationMismatch;
+    if (base_generation == std.math.maxInt(u64)) return error.GenerationExhausted;
+    if (target.generation != base_generation + 1) return error.InvalidMutation;
+
+    if (base) |registry| {
+        validateRegistryIdentity(&registry, limits) catch return error.InvalidMutation;
+    }
+    validateMutationTransition(base, &target, limits) catch
+        return error.InvalidMutation;
+    if (base) |registry|
+        if (registryContentEqual(registry, target) and candidate_locators.len == 0)
+            return null;
+
+    var base_references: std.ArrayList([]const u8) = .empty;
+    defer base_references.deinit(allocator);
+    if (base) |registry| try collectCredentialReferences(
+        allocator,
+        registry,
+        &base_references,
+        limits,
+    );
+    var target_references: std.ArrayList([]const u8) = .empty;
+    defer target_references.deinit(allocator);
+    try collectCredentialReferences(allocator, target, &target_references, limits);
+
+    for (candidate_locators, 0..) |locator, index| {
+        if (!validCredentialLocator(locator, limits.max_credential_locator_bytes) or
+            containsText(base_references.items, locator) or
+            !containsText(target_references.items, locator))
+            return error.InvalidMutation;
+        for (candidate_locators[0..index]) |previous|
+            if (std.mem.eql(u8, previous, locator)) return error.InvalidMutation;
+    }
+    var candidate_count: usize = 0;
+    for (target_references.items) |locator| {
+        if (containsText(base_references.items, locator)) continue;
+        if (!containsText(candidate_locators, locator)) return error.InvalidMutation;
+        candidate_count += 1;
+    }
+    if (candidate_count != candidate_locators.len) return error.InvalidMutation;
+
+    var retired_count: usize = 0;
+    for (base_references.items) |locator| {
+        if (!containsText(target_references.items, locator)) retired_count += 1;
+    }
+    if (candidate_count > limits.max_credential_locators or
+        retired_count > limits.max_credential_locators - candidate_count)
+        return error.InvalidMutation;
+
+    var owned_target = try cloneRegistry(allocator, target, limits);
+    errdefer owned_target.deinit();
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const owned = arena.allocator();
+    const owned_candidates = try owned.alloc([]const u8, candidate_count);
+    var candidate_write: usize = 0;
+    for (target_references.items) |locator| {
+        if (containsText(base_references.items, locator)) continue;
+        owned_candidates[candidate_write] = try owned.dupe(u8, locator);
+        candidate_write += 1;
+    }
+    const owned_retired = try owned.alloc([]const u8, retired_count);
+    var retired_write: usize = 0;
+    for (base_references.items) |locator| {
+        if (containsText(target_references.items, locator)) continue;
+        owned_retired[retired_write] = try owned.dupe(u8, locator);
+        retired_write += 1;
+    }
+    const transaction: TransactionWire = .{
+        .schema_version = schema_version,
+        .base_generation = base_generation,
+        .target_generation = target.generation,
+        .candidate_locators = owned_candidates,
+        .retired_locators = owned_retired,
+    };
+    validateTransaction(&transaction, limits) catch return error.InvalidMutation;
+    return .{
+        .arena = arena,
+        .target = owned_target,
+        .transaction = transaction,
+    };
+}
+
+fn validateMutationTransition(
+    base: ?RegistryWire,
+    target: *const RegistryWire,
+    limits: Limits,
+) !void {
+    try validateRegistryIdentity(target, limits);
+    for (target.servers) |target_server| {
+        if (serverProblem(target_server, limits) == null) continue;
+        const base_registry = base orelse return error.Invalid;
+        const base_index = findServerIndex(
+            base_registry.servers,
+            target_server.id,
+        ) orelse return error.Invalid;
+        if (!serverWireEqual(base_registry.servers[base_index], target_server))
+            return error.Invalid;
+    }
+}
+
+fn collectCredentialReferences(
+    allocator: std.mem.Allocator,
+    registry: RegistryWire,
+    references: *std.ArrayList([]const u8),
+    limits: Limits,
+) std.mem.Allocator.Error!void {
+    for (registry.servers) |server| {
+        for (server.transport.arguments) |value|
+            if (value.credential_ref) |locator|
+                if (validCredentialLocator(locator, limits.max_credential_locator_bytes))
+                    try appendUniqueText(allocator, references, locator);
+        for (server.transport.environment) |entry|
+            if (entry.value.credential_ref) |locator|
+                if (validCredentialLocator(locator, limits.max_credential_locator_bytes))
+                    try appendUniqueText(allocator, references, locator);
+        for (server.transport.headers) |entry|
+            if (entry.value.credential_ref) |locator|
+                if (validCredentialLocator(locator, limits.max_credential_locator_bytes))
+                    try appendUniqueText(allocator, references, locator);
+    }
+}
+
+fn appendUniqueText(
+    allocator: std.mem.Allocator,
+    values: *std.ArrayList([]const u8),
+    candidate: []const u8,
+) std.mem.Allocator.Error!void {
+    if (!containsText(values.items, candidate)) try values.append(allocator, candidate);
+}
+
+fn containsText(values: []const []const u8, candidate: []const u8) bool {
+    for (values) |value| if (std.mem.eql(u8, value, candidate)) return true;
+    return false;
+}
+
+fn registryContentEqual(left: RegistryWire, right: RegistryWire) bool {
+    if (left.schema_version != right.schema_version or
+        left.servers.len != right.servers.len)
+        return false;
+    for (left.servers, right.servers) |left_server, right_server|
+        if (!serverWireEqual(left_server, right_server)) return false;
+    return true;
+}
+
+fn serverWireEqual(left: ServerWire, right: ServerWire) bool {
+    if (!std.mem.eql(u8, left.id, right.id) or
+        !std.mem.eql(u8, left.namespace, right.namespace) or
+        !std.mem.eql(u8, left.display_name, right.display_name) or
+        left.enabled != right.enabled or
+        !std.mem.eql(u8, left.negotiation, right.negotiation) or
+        left.timeout_ms != right.timeout_ms or
+        !transportWireEqual(left.transport, right.transport) or
+        left.tools.len != right.tools.len)
+        return false;
+    for (left.tools, right.tools) |left_tool, right_tool|
+        if (!std.mem.eql(u8, left_tool, right_tool)) return false;
+    return true;
+}
+
+fn transportWireEqual(left: TransportWire, right: TransportWire) bool {
+    if (!std.mem.eql(u8, left.kind, right.kind) or
+        !optionalTextEqual(left.command, right.command) or
+        !optionalTextEqual(left.cwd, right.cwd) or
+        !optionalTextEqual(left.url, right.url) or
+        left.arguments.len != right.arguments.len or
+        left.environment.len != right.environment.len or
+        left.headers.len != right.headers.len)
+        return false;
+    for (left.arguments, right.arguments) |left_value, right_value|
+        if (!valueSourceEqual(left_value, right_value)) return false;
+    for (left.environment, right.environment) |left_entry, right_entry|
+        if (!namedValueEqual(left_entry, right_entry)) return false;
+    for (left.headers, right.headers) |left_entry, right_entry|
+        if (!namedValueEqual(left_entry, right_entry)) return false;
+    return true;
+}
+
+fn namedValueEqual(left: NamedValueWire, right: NamedValueWire) bool {
+    return std.mem.eql(u8, left.name, right.name) and
+        valueSourceEqual(left.value, right.value);
+}
+
+fn valueSourceEqual(left: ValueSourceWire, right: ValueSourceWire) bool {
+    return optionalTextEqual(left.literal, right.literal) and
+        optionalTextEqual(left.credential_ref, right.credential_ref);
+}
+
+fn optionalTextEqual(left: ?[]const u8, right: ?[]const u8) bool {
+    if (left == null or right == null) return left == null and right == null;
+    return std.mem.eql(u8, left.?, right.?);
 }
 
 /// Recovery is decided from the durable registry generation, not from a
@@ -871,6 +1769,16 @@ pub const FileStore = struct {
         return self.commitNamed(bytes, transaction_file_name, ".transaction");
     }
 
+    pub fn mutationPersistence(self: *FileStore) MutationPersistence {
+        return .{
+            .context = self,
+            .available = true,
+            .commit_journal_fn = commitJournalEffect,
+            .commit_registry_fn = commitRegistryEffect,
+            .clear_journal_fn = clearJournalEffect,
+        };
+    }
+
     pub fn clearTransaction(self: *FileStore) FileStoreError!void {
         self.dir.deleteFile(self.io, transaction_file_name) catch |err| switch (err) {
             error.FileNotFound => return,
@@ -935,6 +1843,33 @@ pub const FileStore = struct {
             return error.WriteFailed;
         temp_exists = false;
         if (!self.syncCommit(target_name)) return error.PersistenceOutcomeUnknown;
+    }
+
+    fn commitJournalEffect(context: ?*anyopaque, bytes: []const u8) PersistenceEffect {
+        const self: *FileStore = @ptrCast(@alignCast(context orelse return .failed));
+        self.commitTransaction(bytes) catch |err| return switch (err) {
+            error.PersistenceOutcomeUnknown => .outcome_unknown,
+            else => .failed,
+        };
+        return .committed;
+    }
+
+    fn commitRegistryEffect(context: ?*anyopaque, bytes: []const u8) PersistenceEffect {
+        const self: *FileStore = @ptrCast(@alignCast(context orelse return .failed));
+        self.commit(bytes) catch |err| return switch (err) {
+            error.PersistenceOutcomeUnknown => .outcome_unknown,
+            else => .failed,
+        };
+        return .committed;
+    }
+
+    fn clearJournalEffect(context: ?*anyopaque) PersistenceEffect {
+        const self: *FileStore = @ptrCast(@alignCast(context orelse return .failed));
+        self.clearTransaction() catch |err| return switch (err) {
+            error.PersistenceOutcomeUnknown => .outcome_unknown,
+            else => .failed,
+        };
+        return .committed;
     }
 
     fn syncCommit(self: *FileStore, target_name: ?[]const u8) bool {
@@ -1243,6 +2178,982 @@ test "credential transaction rejects aliases across candidate and retired sets" 
             limits,
         ),
     );
+}
+
+test "mutation plan rotates a fresh locator without retiring a shared reference" {
+    var base = try decode(
+        std.testing.allocator,
+        "{\"schema_version\":1,\"generation\":4,\"servers\":[{\"id\":\"remote\",\"namespace\":\"remote\",\"display_name\":\"Remote\",\"enabled\":true,\"negotiation\":\"automatic\",\"timeout_ms\":1000,\"transport\":{\"kind\":\"streamable_http\",\"url\":\"https://mcp.example.test/rpc\",\"headers\":[{\"name\":\"Authorization\",\"value\":{\"credential_ref\":\"v1/shared\"}},{\"name\":\"X-Backup\",\"value\":{\"credential_ref\":\"v1/shared\"}}]},\"tools\":[]}]}",
+        test_limits,
+    );
+    defer base.deinit();
+    var target = try decode(
+        std.testing.allocator,
+        "{\"schema_version\":1,\"generation\":5,\"servers\":[{\"id\":\"remote\",\"namespace\":\"remote\",\"display_name\":\"Remote\",\"enabled\":true,\"negotiation\":\"automatic\",\"timeout_ms\":1000,\"transport\":{\"kind\":\"streamable_http\",\"url\":\"https://mcp.example.test/rpc\",\"headers\":[{\"name\":\"Authorization\",\"value\":{\"credential_ref\":\"v1/fresh\"}},{\"name\":\"X-Backup\",\"value\":{\"credential_ref\":\"v1/shared\"}}]},\"tools\":[]}]}",
+        test_limits,
+    );
+    defer target.deinit();
+
+    var plan = (try planMutation(
+        std.testing.allocator,
+        base.value,
+        target.value,
+        4,
+        &.{"v1/fresh"},
+        test_limits,
+    )).?;
+    defer plan.deinit();
+    try std.testing.expectEqual(@as(u64, 4), plan.transaction.base_generation);
+    try std.testing.expectEqual(@as(u64, 5), plan.transaction.target_generation);
+    try std.testing.expectEqual(@as(usize, 1), plan.transaction.candidate_locators.len);
+    try std.testing.expectEqualStrings(
+        "v1/fresh",
+        plan.transaction.candidate_locators[0],
+    );
+    try std.testing.expectEqual(@as(usize, 0), plan.transaction.retired_locators.len);
+}
+
+test "mutation plan retires only the last registry reference" {
+    var base = try decode(
+        std.testing.allocator,
+        "{\"schema_version\":1,\"generation\":8,\"servers\":[{\"id\":\"remote\",\"namespace\":\"remote\",\"display_name\":\"Remote\",\"enabled\":true,\"negotiation\":\"automatic\",\"timeout_ms\":1000,\"transport\":{\"kind\":\"streamable_http\",\"url\":\"https://mcp.example.test/rpc\",\"headers\":[{\"name\":\"Authorization\",\"value\":{\"credential_ref\":\"v1/retired\"}}]},\"tools\":[]}]}",
+        test_limits,
+    );
+    defer base.deinit();
+    var target = try decode(
+        std.testing.allocator,
+        "{\"schema_version\":1,\"generation\":9,\"servers\":[{\"id\":\"remote\",\"namespace\":\"remote\",\"display_name\":\"Remote\",\"enabled\":false,\"negotiation\":\"automatic\",\"timeout_ms\":1000,\"transport\":{\"kind\":\"streamable_http\",\"url\":\"https://mcp.example.test/rpc\",\"headers\":[]},\"tools\":[]}]}",
+        test_limits,
+    );
+    defer target.deinit();
+
+    var plan = (try planMutation(
+        std.testing.allocator,
+        base.value,
+        target.value,
+        8,
+        &.{},
+        test_limits,
+    )).?;
+    defer plan.deinit();
+    try std.testing.expectEqual(@as(usize, 0), plan.transaction.candidate_locators.len);
+    try std.testing.expectEqual(@as(usize, 1), plan.transaction.retired_locators.len);
+    try std.testing.expectEqualStrings(
+        "v1/retired",
+        plan.transaction.retired_locators[0],
+    );
+}
+
+test "mutation plan rejects unbacked locators and recognizes semantic no-op" {
+    var base = try decode(
+        std.testing.allocator,
+        "{\"schema_version\":1,\"generation\":1,\"servers\":[{\"id\":\"local\",\"namespace\":\"local\",\"display_name\":\"Local\",\"enabled\":true,\"negotiation\":\"automatic\",\"timeout_ms\":1000,\"transport\":{\"kind\":\"stdio\",\"command\":\"tool\"},\"tools\":[]}]}",
+        test_limits,
+    );
+    defer base.deinit();
+    var unchanged = try decode(
+        std.testing.allocator,
+        "{\"schema_version\":1,\"generation\":2,\"servers\":[{\"id\":\"local\",\"namespace\":\"local\",\"display_name\":\"Local\",\"enabled\":true,\"negotiation\":\"automatic\",\"timeout_ms\":1000,\"transport\":{\"kind\":\"stdio\",\"command\":\"tool\"},\"tools\":[]}]}",
+        test_limits,
+    );
+    defer unchanged.deinit();
+    try std.testing.expect((try planMutation(
+        std.testing.allocator,
+        base.value,
+        unchanged.value,
+        1,
+        &.{},
+        test_limits,
+    )) == null);
+
+    var missing = try decode(
+        std.testing.allocator,
+        "{\"schema_version\":1,\"generation\":2,\"servers\":[{\"id\":\"remote\",\"namespace\":\"remote\",\"display_name\":\"Remote\",\"enabled\":true,\"negotiation\":\"automatic\",\"timeout_ms\":1000,\"transport\":{\"kind\":\"streamable_http\",\"url\":\"https://mcp.example.test/rpc\",\"headers\":[{\"name\":\"Authorization\",\"value\":{\"credential_ref\":\"v1/missing\"}}]},\"tools\":[]}]}",
+        test_limits,
+    );
+    defer missing.deinit();
+    try std.testing.expectError(
+        error.InvalidMutation,
+        planMutation(
+            std.testing.allocator,
+            base.value,
+            missing.value,
+            1,
+            &.{},
+            test_limits,
+        ),
+    );
+}
+
+test "mutation plan permits only monotonic repair of invalid servers" {
+    var base = try decode(
+        std.testing.allocator,
+        "{\"schema_version\":1,\"generation\":1,\"servers\":[{\"id\":\"broken\",\"namespace\":\"broken\",\"display_name\":\"\",\"enabled\":true,\"negotiation\":\"automatic\",\"timeout_ms\":1000,\"transport\":{\"kind\":\"stdio\",\"command\":\"tool\"},\"tools\":[]}]}",
+        test_limits,
+    );
+    defer base.deinit();
+    var unchanged_invalid = try decode(
+        std.testing.allocator,
+        "{\"schema_version\":1,\"generation\":2,\"servers\":[{\"id\":\"broken\",\"namespace\":\"broken\",\"display_name\":\"\",\"enabled\":true,\"negotiation\":\"automatic\",\"timeout_ms\":1000,\"transport\":{\"kind\":\"stdio\",\"command\":\"tool\"},\"tools\":[]},{\"id\":\"healthy\",\"namespace\":\"healthy\",\"display_name\":\"Healthy\",\"enabled\":true,\"negotiation\":\"automatic\",\"timeout_ms\":1000,\"transport\":{\"kind\":\"stdio\",\"command\":\"tool\"},\"tools\":[]}]}",
+        test_limits,
+    );
+    defer unchanged_invalid.deinit();
+    var allowed = (try planMutation(
+        std.testing.allocator,
+        base.value,
+        unchanged_invalid.value,
+        1,
+        &.{},
+        test_limits,
+    )).?;
+    allowed.deinit();
+
+    var changed_invalid = try decode(
+        std.testing.allocator,
+        "{\"schema_version\":1,\"generation\":2,\"servers\":[{\"id\":\"broken\",\"namespace\":\"broken\",\"display_name\":\"\",\"enabled\":true,\"negotiation\":\"automatic\",\"timeout_ms\":1000,\"transport\":{\"kind\":\"stdio\",\"command\":\"different\"},\"tools\":[]}]}",
+        test_limits,
+    );
+    defer changed_invalid.deinit();
+    try std.testing.expectError(
+        error.InvalidMutation,
+        planMutation(
+            std.testing.allocator,
+            base.value,
+            changed_invalid.value,
+            1,
+            &.{},
+            test_limits,
+        ),
+    );
+
+    var valid_base = try decode(
+        std.testing.allocator,
+        "{\"schema_version\":1,\"generation\":1,\"servers\":[{\"id\":\"healthy\",\"namespace\":\"healthy\",\"display_name\":\"Healthy\",\"enabled\":true,\"negotiation\":\"automatic\",\"timeout_ms\":1000,\"transport\":{\"kind\":\"stdio\",\"command\":\"tool\"},\"tools\":[]}]}",
+        test_limits,
+    );
+    defer valid_base.deinit();
+    var damaged_target = try decode(
+        std.testing.allocator,
+        "{\"schema_version\":1,\"generation\":2,\"servers\":[{\"id\":\"healthy\",\"namespace\":\"healthy\",\"display_name\":\"Healthy\",\"enabled\":true,\"negotiation\":\"automatic\",\"timeout_ms\":0,\"transport\":{\"kind\":\"stdio\",\"command\":\"tool\"},\"tools\":[]}]}",
+        test_limits,
+    );
+    defer damaged_target.deinit();
+    try std.testing.expectError(
+        error.InvalidMutation,
+        planMutation(
+            std.testing.allocator,
+            valid_base.value,
+            damaged_target.value,
+            1,
+            &.{},
+            test_limits,
+        ),
+    );
+
+    var introduced_invalid = try decode(
+        std.testing.allocator,
+        "{\"schema_version\":1,\"generation\":1,\"servers\":[{\"id\":\"broken\",\"namespace\":\"broken\",\"display_name\":\"\",\"enabled\":true,\"negotiation\":\"automatic\",\"timeout_ms\":1000,\"transport\":{\"kind\":\"stdio\",\"command\":\"tool\"},\"tools\":[]}]}",
+        test_limits,
+    );
+    defer introduced_invalid.deinit();
+    try std.testing.expectError(
+        error.InvalidMutation,
+        planMutation(
+            std.testing.allocator,
+            null,
+            introduced_invalid.value,
+            0,
+            &.{},
+            test_limits,
+        ),
+    );
+}
+
+test "mutation plan retires only trusted references from invalid servers" {
+    var base = try decode(
+        std.testing.allocator,
+        "{\"schema_version\":1,\"generation\":1,\"servers\":[{\"id\":\"debris\",\"namespace\":\"debris\",\"display_name\":\"\",\"enabled\":true,\"negotiation\":\"automatic\",\"timeout_ms\":1000,\"transport\":{\"kind\":\"streamable_http\",\"url\":\"https://mcp.example.test/rpc\",\"headers\":[{\"name\":\"Authorization\",\"value\":{\"credential_ref\":\"bad locator\"}}]},\"tools\":[]},{\"id\":\"owned\",\"namespace\":\"owned\",\"display_name\":\"\",\"enabled\":true,\"negotiation\":\"automatic\",\"timeout_ms\":1000,\"transport\":{\"kind\":\"streamable_http\",\"url\":\"https://mcp.example.test/rpc\",\"headers\":[{\"name\":\"Authorization\",\"value\":{\"credential_ref\":\"v1/owned\"}}]},\"tools\":[]}]}",
+        test_limits,
+    );
+    defer base.deinit();
+    var target = try decode(
+        std.testing.allocator,
+        "{\"schema_version\":1,\"generation\":2,\"servers\":[]}",
+        test_limits,
+    );
+    defer target.deinit();
+    var plan = (try planMutation(
+        std.testing.allocator,
+        base.value,
+        target.value,
+        1,
+        &.{},
+        test_limits,
+    )).?;
+    defer plan.deinit();
+    try std.testing.expectEqual(@as(usize, 1), plan.transaction.retired_locators.len);
+    try std.testing.expectEqualStrings(
+        "v1/owned",
+        plan.transaction.retired_locators[0],
+    );
+}
+
+test "transaction coordinator commits journal credentials registry cleanup and clear in order" {
+    const Fake = struct {
+        const Event = enum { probe, journal, create, registry, delete, clear };
+        events: [8]Event = undefined,
+        event_count: usize = 0,
+
+        fn record(self: *@This(), event: Event) void {
+            self.events[self.event_count] = event;
+            self.event_count += 1;
+        }
+        fn commitJournal(context: ?*anyopaque, _: []const u8) PersistenceEffect {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.record(.journal);
+            return .committed;
+        }
+        fn commitRegistry(context: ?*anyopaque, _: []const u8) PersistenceEffect {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.record(.registry);
+            return .committed;
+        }
+        fn clear(context: ?*anyopaque) PersistenceEffect {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.record(.clear);
+            return .committed;
+        }
+        fn probe(context: ?*anyopaque, _: []const u8) CredentialPresence {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.record(.probe);
+            return .missing;
+        }
+        fn create(context: ?*anyopaque, _: []const u8, _: []const u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.record(.create);
+            return true;
+        }
+        fn delete(context: ?*anyopaque, _: []const u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.record(.delete);
+            return true;
+        }
+        fn persistence(self: *@This()) MutationPersistence {
+            return .{
+                .context = self,
+                .available = true,
+                .commit_journal_fn = commitJournal,
+                .commit_registry_fn = commitRegistry,
+                .clear_journal_fn = clear,
+            };
+        }
+        fn credentials(self: *@This()) CredentialEffects {
+            return .{
+                .context = self,
+                .available = true,
+                .probe_fn = probe,
+                .create_fn = create,
+                .delete_fn = delete,
+            };
+        }
+    };
+    var base = try decode(
+        std.testing.allocator,
+        "{\"schema_version\":1,\"generation\":3,\"servers\":[{\"id\":\"remote\",\"namespace\":\"remote\",\"display_name\":\"Remote\",\"enabled\":true,\"negotiation\":\"automatic\",\"timeout_ms\":1000,\"transport\":{\"kind\":\"streamable_http\",\"url\":\"https://mcp.example.test/rpc\",\"headers\":[{\"name\":\"Authorization\",\"value\":{\"credential_ref\":\"v1/old\"}}]},\"tools\":[]}]}",
+        test_limits,
+    );
+    defer base.deinit();
+    var target = try decode(
+        std.testing.allocator,
+        "{\"schema_version\":1,\"generation\":4,\"servers\":[{\"id\":\"remote\",\"namespace\":\"remote\",\"display_name\":\"Remote\",\"enabled\":true,\"negotiation\":\"automatic\",\"timeout_ms\":1000,\"transport\":{\"kind\":\"streamable_http\",\"url\":\"https://mcp.example.test/rpc\",\"headers\":[{\"name\":\"Authorization\",\"value\":{\"credential_ref\":\"v1/new\"}}]},\"tools\":[]}]}",
+        test_limits,
+    );
+    defer target.deinit();
+    var plan = (try planMutation(
+        std.testing.allocator,
+        base.value,
+        target.value,
+        3,
+        &.{"v1/new"},
+        test_limits,
+    )).?;
+    defer plan.deinit();
+    var secret = [_]u8{ 1, 2, 3, 4 };
+    var candidates = [_]CandidateCredential{.{ .locator = "v1/new", .secret = &secret }};
+    var fake: Fake = .{};
+    var coordinator: TransactionCoordinator = .{};
+    try std.testing.expectEqual(
+        MutationCommit.saved,
+        try coordinator.commit(
+            std.testing.allocator,
+            fake.persistence(),
+            fake.credentials(),
+            &plan,
+            &candidates,
+            test_limits,
+        ),
+    );
+    try std.testing.expectEqual(StoreHealth.ready, coordinator.health);
+    try std.testing.expectEqualSlices(
+        Fake.Event,
+        &.{ .probe, .journal, .create, .registry, .delete, .clear },
+        fake.events[0..fake.event_count],
+    );
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0 }, &secret);
+}
+
+test "transaction coordinator freezes the store at every uncertain boundary" {
+    const Mode = enum {
+        journal_failed,
+        journal_unknown,
+        create_failed,
+        registry_failed,
+        registry_unknown,
+        delete_failed,
+        clear_unknown,
+    };
+    const Fake = struct {
+        mode: Mode,
+        fn commitJournal(context: ?*anyopaque, _: []const u8) PersistenceEffect {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            return switch (self.mode) {
+                .journal_failed => .failed,
+                .journal_unknown => .outcome_unknown,
+                else => .committed,
+            };
+        }
+        fn commitRegistry(context: ?*anyopaque, _: []const u8) PersistenceEffect {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            return switch (self.mode) {
+                .registry_failed => .failed,
+                .registry_unknown => .outcome_unknown,
+                else => .committed,
+            };
+        }
+        fn clear(context: ?*anyopaque) PersistenceEffect {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            return if (self.mode == .clear_unknown) .outcome_unknown else .committed;
+        }
+        fn probe(_: ?*anyopaque, _: []const u8) CredentialPresence {
+            return .missing;
+        }
+        fn create(context: ?*anyopaque, _: []const u8, _: []const u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            return self.mode != .create_failed;
+        }
+        fn delete(context: ?*anyopaque, _: []const u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            return self.mode != .delete_failed;
+        }
+        fn persistence(self: *@This()) MutationPersistence {
+            return .{
+                .context = self,
+                .available = true,
+                .commit_journal_fn = commitJournal,
+                .commit_registry_fn = commitRegistry,
+                .clear_journal_fn = clear,
+            };
+        }
+        fn credentials(self: *@This()) CredentialEffects {
+            return .{
+                .context = self,
+                .available = true,
+                .probe_fn = probe,
+                .create_fn = create,
+                .delete_fn = delete,
+            };
+        }
+    };
+    const Expectation = struct { mode: Mode, commit: MutationCommit, health: StoreHealth };
+    const expectations = [_]Expectation{
+        .{ .mode = .journal_failed, .commit = .not_saved, .health = .ready },
+        .{ .mode = .journal_unknown, .commit = .not_saved_recovery_required, .health = .outcome_unknown },
+        .{ .mode = .create_failed, .commit = .not_saved, .health = .ready },
+        .{ .mode = .registry_failed, .commit = .not_saved, .health = .ready },
+        .{ .mode = .registry_unknown, .commit = .registry_outcome_unknown, .health = .outcome_unknown },
+        .{ .mode = .delete_failed, .commit = .saved_recovery_required, .health = .recovery_required },
+        .{ .mode = .clear_unknown, .commit = .saved_recovery_required, .health = .outcome_unknown },
+    };
+    var base = try decode(
+        std.testing.allocator,
+        "{\"schema_version\":1,\"generation\":5,\"servers\":[{\"id\":\"remote\",\"namespace\":\"remote\",\"display_name\":\"Remote\",\"enabled\":true,\"negotiation\":\"automatic\",\"timeout_ms\":1000,\"transport\":{\"kind\":\"streamable_http\",\"url\":\"https://mcp.example.test/rpc\",\"headers\":[{\"name\":\"Authorization\",\"value\":{\"credential_ref\":\"v1/old\"}}]},\"tools\":[]}]}",
+        test_limits,
+    );
+    defer base.deinit();
+    var target = try decode(
+        std.testing.allocator,
+        "{\"schema_version\":1,\"generation\":6,\"servers\":[{\"id\":\"remote\",\"namespace\":\"remote\",\"display_name\":\"Remote\",\"enabled\":true,\"negotiation\":\"automatic\",\"timeout_ms\":1000,\"transport\":{\"kind\":\"streamable_http\",\"url\":\"https://mcp.example.test/rpc\",\"headers\":[{\"name\":\"Authorization\",\"value\":{\"credential_ref\":\"v1/new\"}}]},\"tools\":[]}]}",
+        test_limits,
+    );
+    defer target.deinit();
+    var plan = (try planMutation(
+        std.testing.allocator,
+        base.value,
+        target.value,
+        5,
+        &.{"v1/new"},
+        test_limits,
+    )).?;
+    defer plan.deinit();
+
+    for (expectations) |expectation| {
+        var secret = [_]u8{ 9, 8, 7 };
+        var candidates = [_]CandidateCredential{.{ .locator = "v1/new", .secret = &secret }};
+        var fake: Fake = .{ .mode = expectation.mode };
+        var coordinator: TransactionCoordinator = .{};
+        try std.testing.expectEqual(
+            expectation.commit,
+            try coordinator.commit(
+                std.testing.allocator,
+                fake.persistence(),
+                fake.credentials(),
+                &plan,
+                &candidates,
+                test_limits,
+            ),
+        );
+        try std.testing.expectEqual(expectation.health, coordinator.health);
+        try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0 }, &secret);
+        if (coordinator.health != .ready) {
+            var blocked_secret = [_]u8{ 1, 1, 1 };
+            var blocked_candidates = [_]CandidateCredential{.{
+                .locator = "v1/new",
+                .secret = &blocked_secret,
+            }};
+            try std.testing.expectEqual(
+                MutationCommit.blocked,
+                try coordinator.commit(
+                    std.testing.allocator,
+                    fake.persistence(),
+                    fake.credentials(),
+                    &plan,
+                    &blocked_candidates,
+                    test_limits,
+                ),
+            );
+            try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0 }, &blocked_secret);
+        }
+    }
+}
+
+test "file store mutation persistence commits target and clears the journal" {
+    const Credentials = struct {
+        fn probe(_: ?*anyopaque, _: []const u8) CredentialPresence {
+            return .missing;
+        }
+        fn create(_: ?*anyopaque, _: []const u8, _: []const u8) bool {
+            return true;
+        }
+        fn delete(_: ?*anyopaque, _: []const u8) bool {
+            return true;
+        }
+        fn effects() CredentialEffects {
+            return .{
+                .available = true,
+                .probe_fn = probe,
+                .create_fn = create,
+                .delete_fn = delete,
+            };
+        }
+    };
+    const base_bytes =
+        "{\"schema_version\":1,\"generation\":1,\"servers\":[]}";
+    var base = try decode(std.testing.allocator, base_bytes, test_limits);
+    defer base.deinit();
+    var target = try decode(
+        std.testing.allocator,
+        "{\"schema_version\":1,\"generation\":2,\"servers\":[{\"id\":\"local\",\"namespace\":\"local\",\"display_name\":\"Local\",\"enabled\":false,\"negotiation\":\"automatic\",\"timeout_ms\":1000,\"transport\":{\"kind\":\"stdio\",\"command\":\"tool\"},\"tools\":[]}]}",
+        test_limits,
+    );
+    defer target.deinit();
+    var plan = (try planMutation(
+        std.testing.allocator,
+        base.value,
+        target.value,
+        1,
+        &.{},
+        test_limits,
+    )).?;
+    defer plan.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const lock = try tmp.dir.createFile(std.testing.io, lock_file_name, .{
+        .read = true,
+        .truncate = false,
+    });
+    var store: FileStore = .{ .io = std.testing.io, .dir = tmp.dir, .lock_file = lock };
+    defer store.lock_file.close(std.testing.io);
+    try store.commit(base_bytes);
+    var coordinator: TransactionCoordinator = .{};
+    try std.testing.expectEqual(
+        MutationCommit.saved,
+        try coordinator.commit(
+            std.testing.allocator,
+            store.mutationPersistence(),
+            Credentials.effects(),
+            &plan,
+            &.{},
+            test_limits,
+        ),
+    );
+    const saved = (try store.loadAlloc(std.testing.allocator)).?;
+    defer std.testing.allocator.free(saved);
+    var decoded_saved = try decode(std.testing.allocator, saved, test_limits);
+    defer decoded_saved.deinit();
+    try std.testing.expectEqual(@as(u64, 2), decoded_saved.value.generation);
+    try std.testing.expect((try store.loadTransactionAlloc(std.testing.allocator)) == null);
+}
+
+test "management port owns fresh locators and keeps restart pending" {
+    const Fake = struct {
+        created: bool = false,
+        retired: bool = false,
+
+        fn journal(_: ?*anyopaque, _: []const u8) PersistenceEffect {
+            return .committed;
+        }
+        fn registry(_: ?*anyopaque, bytes: []const u8) PersistenceEffect {
+            return if (std.mem.indexOf(u8, bytes, "v1/abababababababababababababababab") != null)
+                .committed
+            else
+                .failed;
+        }
+        fn clear(_: ?*anyopaque) PersistenceEffect {
+            return .committed;
+        }
+        fn probe(_: ?*anyopaque, locator: []const u8) CredentialPresence {
+            return if (std.mem.eql(u8, locator, "v1/abababababababababababababababab"))
+                .missing
+            else
+                .unavailable;
+        }
+        fn create(context: ?*anyopaque, locator: []const u8, secret: []const u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.created = std.mem.eql(u8, locator, "v1/abababababababababababababababab") and
+                std.mem.eql(u8, secret, "replacement");
+            return self.created;
+        }
+        fn delete(context: ?*anyopaque, locator: []const u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.retired = std.mem.eql(u8, locator, "v1/old");
+            return self.retired;
+        }
+        fn fill(_: ?*anyopaque, output: *[16]u8) bool {
+            @memset(output, 0xab);
+            return true;
+        }
+    };
+    var parsed = try decode(
+        std.testing.allocator,
+        "{\"schema_version\":1,\"generation\":4,\"servers\":[{\"id\":\"remote\",\"namespace\":\"remote\",\"display_name\":\"Remote\",\"enabled\":true,\"negotiation\":\"automatic\",\"timeout_ms\":1000,\"transport\":{\"kind\":\"streamable_http\",\"url\":\"https://mcp.example.test/rpc\",\"headers\":[{\"name\":\"Authorization\",\"value\":{\"credential_ref\":\"v1/old\"}}]},\"tools\":[]}]}",
+        test_limits,
+    );
+    defer parsed.deinit();
+    var fake: Fake = .{};
+    var management = try ManagementPort.init(std.testing.allocator, parsed.value, .{
+        .persistence = .{
+            .context = &fake,
+            .available = true,
+            .commit_journal_fn = Fake.journal,
+            .commit_registry_fn = Fake.registry,
+            .clear_journal_fn = Fake.clear,
+        },
+        .credentials = .{
+            .context = &fake,
+            .available = true,
+            .probe_fn = Fake.probe,
+            .create_fn = Fake.create,
+            .delete_fn = Fake.delete,
+        },
+        .locator_generator = .{ .available = true, .fill_fn = Fake.fill },
+        .limits = test_limits,
+    });
+    defer management.deinit();
+    var secret = [_]u8{ 'r', 'e', 'p', 'l', 'a', 'c', 'e', 'm', 'e', 'n', 't' };
+    const headers = [_]NamedCredentialInput{.{
+        .name = "Authorization",
+        .value = .{ .replace = &secret },
+    }};
+    try std.testing.expectEqual(
+        ManagementOutcome.saved_restart_required,
+        try management.upsertServer(4, .{
+            .id = "remote",
+            .namespace = "remote",
+            .display_name = "Remote updated",
+            .enabled = true,
+            .negotiation = "automatic",
+            .timeout_ms = 1000,
+            .transport = .{ .streamable_http = .{
+                .url = "https://mcp.example.test/rpc",
+                .headers = &headers,
+            } },
+        }),
+    );
+    try std.testing.expect(fake.created);
+    try std.testing.expect(fake.retired);
+    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** secret.len), &secret);
+    const inspection = management.inspect();
+    try std.testing.expectEqual(@as(?u64, 4), inspection.startup_generation);
+    try std.testing.expectEqual(@as(?u64, 5), inspection.desired_generation);
+    try std.testing.expect(inspection.pending_restart);
+    try std.testing.expectEqualStrings(
+        "Remote updated",
+        management.desired.?.value.servers[0].display_name,
+    );
+}
+
+test "management port repairs multiple invalid servers one transaction at a time" {
+    const Fake = struct {
+        registry_commits: usize = 0,
+
+        fn journal(_: ?*anyopaque, _: []const u8) PersistenceEffect {
+            return .committed;
+        }
+        fn registry(context: ?*anyopaque, _: []const u8) PersistenceEffect {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.registry_commits += 1;
+            return .committed;
+        }
+        fn clear(_: ?*anyopaque) PersistenceEffect {
+            return .committed;
+        }
+        fn probe(_: ?*anyopaque, _: []const u8) CredentialPresence {
+            return .missing;
+        }
+        fn create(_: ?*anyopaque, _: []const u8, _: []const u8) bool {
+            return true;
+        }
+        fn delete(_: ?*anyopaque, _: []const u8) bool {
+            return true;
+        }
+    };
+    var parsed = try decode(
+        std.testing.allocator,
+        "{\"schema_version\":1,\"generation\":3,\"servers\":[{\"id\":\"bad-name\",\"namespace\":\"bad-name\",\"display_name\":\"\",\"enabled\":true,\"negotiation\":\"automatic\",\"timeout_ms\":1000,\"transport\":{\"kind\":\"stdio\",\"command\":\"tool\"},\"tools\":[]},{\"id\":\"bad-negotiation\",\"namespace\":\"bad-negotiation\",\"display_name\":\"Broken\",\"enabled\":true,\"negotiation\":\"unsupported\",\"timeout_ms\":1000,\"transport\":{\"kind\":\"stdio\",\"command\":\"tool\"},\"tools\":[]}]}",
+        test_limits,
+    );
+    defer parsed.deinit();
+    var fake: Fake = .{};
+    var management = try ManagementPort.init(std.testing.allocator, parsed.value, .{
+        .persistence = .{
+            .context = &fake,
+            .available = true,
+            .commit_journal_fn = Fake.journal,
+            .commit_registry_fn = Fake.registry,
+            .clear_journal_fn = Fake.clear,
+        },
+        .credentials = .{
+            .context = &fake,
+            .available = true,
+            .probe_fn = Fake.probe,
+            .create_fn = Fake.create,
+            .delete_fn = Fake.delete,
+        },
+        .limits = test_limits,
+    });
+    defer management.deinit();
+
+    try std.testing.expectEqual(
+        ManagementOutcome.saved_restart_required,
+        try management.removeServer(3, "bad-name"),
+    );
+    try std.testing.expectEqual(@as(?u64, 4), management.inspect().desired_generation);
+    try std.testing.expectEqual(
+        ServerProblem.invalid_negotiation,
+        serverProblem(management.desired.?.value.servers[0], test_limits).?,
+    );
+    try std.testing.expectEqual(
+        ManagementOutcome.saved_restart_required,
+        try management.upsertServer(4, .{
+            .id = "bad-negotiation",
+            .namespace = "bad-negotiation",
+            .display_name = "Repaired",
+            .enabled = true,
+            .negotiation = "automatic",
+            .timeout_ms = 1000,
+            .transport = .{ .stdio = .{ .command = "tool" } },
+        }),
+    );
+    try std.testing.expectEqual(@as(?u64, 5), management.inspect().desired_generation);
+    try std.testing.expect(serverProblem(
+        management.desired.?.value.servers[0],
+        test_limits,
+    ) == null);
+    try std.testing.expectEqual(@as(usize, 2), fake.registry_commits);
+}
+
+test "management port freezes a second mutation after registry outcome uncertainty" {
+    const Fake = struct {
+        journal_count: usize = 0,
+
+        fn journal(context: ?*anyopaque, _: []const u8) PersistenceEffect {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.journal_count += 1;
+            return .committed;
+        }
+        fn registry(_: ?*anyopaque, _: []const u8) PersistenceEffect {
+            return .outcome_unknown;
+        }
+        fn clear(_: ?*anyopaque) PersistenceEffect {
+            return .committed;
+        }
+        fn probe(_: ?*anyopaque, _: []const u8) CredentialPresence {
+            return .missing;
+        }
+        fn create(_: ?*anyopaque, _: []const u8, _: []const u8) bool {
+            return true;
+        }
+        fn delete(_: ?*anyopaque, _: []const u8) bool {
+            return true;
+        }
+    };
+    var parsed = try decode(
+        std.testing.allocator,
+        "{\"schema_version\":1,\"generation\":7,\"servers\":[{\"id\":\"local\",\"namespace\":\"local\",\"display_name\":\"Local\",\"enabled\":true,\"negotiation\":\"automatic\",\"timeout_ms\":1000,\"transport\":{\"kind\":\"stdio\",\"command\":\"tool\"},\"tools\":[]}]}",
+        test_limits,
+    );
+    defer parsed.deinit();
+    var fake: Fake = .{};
+    var management = try ManagementPort.init(std.testing.allocator, parsed.value, .{
+        .persistence = .{
+            .context = &fake,
+            .available = true,
+            .commit_journal_fn = Fake.journal,
+            .commit_registry_fn = Fake.registry,
+            .clear_journal_fn = Fake.clear,
+        },
+        .credentials = .{
+            .context = &fake,
+            .available = true,
+            .probe_fn = Fake.probe,
+            .create_fn = Fake.create,
+            .delete_fn = Fake.delete,
+        },
+        .limits = test_limits,
+    });
+    defer management.deinit();
+    try std.testing.expectEqual(
+        ManagementOutcome.indeterminate,
+        try management.removeServer(7, "local"),
+    );
+    try std.testing.expectEqual(StoreHealth.outcome_unknown, management.inspect().health);
+    try std.testing.expectEqual(
+        ManagementOutcome.rejected,
+        try management.removeServer(7, "local"),
+    );
+    try std.testing.expectEqual(@as(usize, 1), fake.journal_count);
+}
+
+test "saved desired registry becomes effective only through cold-start preparation" {
+    const Credentials = struct {
+        locator: [64]u8 = undefined,
+        locator_len: usize = 0,
+        secret: [64]u8 = undefined,
+        secret_len: usize = 0,
+
+        fn probe(context: ?*anyopaque, locator: []const u8) CredentialPresence {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            if (self.locator_len == 0) return .missing;
+            return if (std.mem.eql(u8, self.locator[0..self.locator_len], locator))
+                .present
+            else
+                .missing;
+        }
+        fn create(context: ?*anyopaque, locator: []const u8, secret: []const u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            if (self.locator_len != 0 or locator.len > self.locator.len or
+                secret.len > self.secret.len)
+                return false;
+            @memcpy(self.locator[0..locator.len], locator);
+            self.locator_len = locator.len;
+            @memcpy(self.secret[0..secret.len], secret);
+            self.secret_len = secret.len;
+            return true;
+        }
+        fn delete(context: ?*anyopaque, locator: []const u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            if (self.locator_len == 0) return true;
+            if (!std.mem.eql(u8, self.locator[0..self.locator_len], locator))
+                return false;
+            std.crypto.secureZero(u8, self.secret[0..self.secret_len]);
+            self.locator_len = 0;
+            self.secret_len = 0;
+            return true;
+        }
+        fn resolve(
+            context: ?*anyopaque,
+            allocator: std.mem.Allocator,
+            locator: []const u8,
+        ) CredentialResolution {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            if (self.locator_len == 0 or
+                !std.mem.eql(u8, self.locator[0..self.locator_len], locator))
+                return .missing;
+            return .{ .value = allocator.dupe(
+                u8,
+                self.secret[0..self.secret_len],
+            ) catch return .out_of_memory };
+        }
+        fn fill(_: ?*anyopaque, output: *[16]u8) bool {
+            @memset(output, 0xcd);
+            return true;
+        }
+        fn effects(self: *@This()) CredentialEffects {
+            return .{
+                .context = self,
+                .available = true,
+                .probe_fn = probe,
+                .create_fn = create,
+                .delete_fn = delete,
+            };
+        }
+    };
+    var initial = try prepare(
+        std.testing.allocator,
+        null,
+        true,
+        false,
+        .{},
+        test_limits,
+    );
+    defer initial.deinit();
+    try std.testing.expect(initial.generation() == null);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const lock = try tmp.dir.createFile(std.testing.io, lock_file_name, .{
+        .read = true,
+        .truncate = false,
+    });
+    var store: FileStore = .{ .io = std.testing.io, .dir = tmp.dir, .lock_file = lock };
+    defer store.lock_file.close(std.testing.io);
+    var credentials: Credentials = .{};
+    var management = try ManagementPort.init(std.testing.allocator, null, .{
+        .persistence = store.mutationPersistence(),
+        .credentials = credentials.effects(),
+        .locator_generator = .{ .available = true, .fill_fn = Credentials.fill },
+        .limits = test_limits,
+    });
+    defer management.deinit();
+    var secret = [_]u8{ 'c', 'o', 'l', 'd', '-', 's', 't', 'a', 'r', 't' };
+    const headers = [_]NamedCredentialInput{.{
+        .name = "Authorization",
+        .value = .{ .replace = &secret },
+    }};
+    try std.testing.expectEqual(
+        ManagementOutcome.saved_restart_required,
+        try management.upsertServer(0, .{
+            .id = "remote",
+            .namespace = "remote",
+            .display_name = "Remote",
+            .enabled = true,
+            .negotiation = "automatic",
+            .timeout_ms = 1000,
+            .transport = .{ .streamable_http = .{
+                .url = "https://mcp.example.test/rpc",
+                .headers = &headers,
+            } },
+        }),
+    );
+    try std.testing.expect(management.inspect().startup_generation == null);
+    try std.testing.expectEqual(@as(?u64, 1), management.inspect().desired_generation);
+
+    const restored = (try store.loadAlloc(std.testing.allocator)).?;
+    defer std.testing.allocator.free(restored);
+    var restarted = try prepare(
+        std.testing.allocator,
+        restored,
+        true,
+        false,
+        .{
+            .context = &credentials,
+            .available = true,
+            .resolve_fn = Credentials.resolve,
+        },
+        test_limits,
+    );
+    defer restarted.deinit();
+    try std.testing.expectEqual(@as(?u64, 1), restarted.generation());
+    try std.testing.expectEqual(PreparationState.available, restarted.state);
+    try std.testing.expectEqual(
+        ServerPreparationState.eligible,
+        restarted.server_states[0],
+    );
+}
+
+test "management rejects an oversized target before persistence effects" {
+    const Fake = struct {
+        effects: usize = 0,
+
+        fn journal(context: ?*anyopaque, _: []const u8) PersistenceEffect {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.effects += 1;
+            return .committed;
+        }
+        fn registry(context: ?*anyopaque, _: []const u8) PersistenceEffect {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.effects += 1;
+            return .committed;
+        }
+        fn clear(context: ?*anyopaque) PersistenceEffect {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.effects += 1;
+            return .committed;
+        }
+        fn probe(_: ?*anyopaque, _: []const u8) CredentialPresence {
+            return .missing;
+        }
+        fn create(_: ?*anyopaque, _: []const u8, _: []const u8) bool {
+            return true;
+        }
+        fn delete(_: ?*anyopaque, _: []const u8) bool {
+            return true;
+        }
+    };
+    var limits = test_limits;
+    limits.max_tools_per_server = 1024;
+    limits.max_tool_name_bytes = 256;
+    const tool_storage = try std.testing.allocator.alloc([256]u8, 1024);
+    defer std.testing.allocator.free(tool_storage);
+    const tools = try std.testing.allocator.alloc([]const u8, tool_storage.len);
+    defer std.testing.allocator.free(tools);
+    for (tool_storage, tools, 0..) |*storage, *tool, index| {
+        @memset(storage, 'x');
+        _ = std.fmt.bufPrint(storage[0..20], "tool-{d}", .{index}) catch unreachable;
+        tool.* = storage;
+    }
+    var fake: Fake = .{};
+    var management = try ManagementPort.init(std.testing.allocator, null, .{
+        .persistence = .{
+            .context = &fake,
+            .available = true,
+            .commit_journal_fn = Fake.journal,
+            .commit_registry_fn = Fake.registry,
+            .clear_journal_fn = Fake.clear,
+        },
+        .credentials = .{
+            .available = true,
+            .probe_fn = Fake.probe,
+            .create_fn = Fake.create,
+            .delete_fn = Fake.delete,
+        },
+        .limits = limits,
+    });
+    defer management.deinit();
+    try std.testing.expectEqual(
+        ManagementOutcome.rejected,
+        try management.upsertServer(0, .{
+            .id = "large",
+            .namespace = "large",
+            .display_name = "Large",
+            .enabled = true,
+            .negotiation = "automatic",
+            .timeout_ms = 1000,
+            .transport = .{ .stdio = .{ .command = "tool" } },
+            .tools = tools,
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), fake.effects);
 }
 
 test "preparation separates disabled invalid missing-auth and eligible servers" {
