@@ -173,6 +173,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 ### 5.8 桌面能力
 
 - 提供窗口与应用生命周期管理；
+- 一体化标题栏由 Renderer 绘制窗口按钮并提交固定语义意图，Desktop Host 校验后通过 Native SDK 或已登记兼容 seam 执行；Renderer 不持有原生窗口 identity、handle 或执行权；
 - 提供受控的文件/目录选择；
 - 为通知、更新和系统集成保留明确入口；
 - Renderer 只能调用 Host 显式开放的领域命令。
@@ -184,7 +185,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - New task 中央区域始终以 Composer 为主，当前模型和 Workspace 在发送前可见；API 管理不进入 Composer，模型与 Workspace 也不得混成不透明的单一“模式”；
 - Task 启动后中央区域转为可追溯工作轨迹，Composer 固定在底部；审批、当前活动、工具详情、usage 或真实结果只决定 Inspector 模块是否可用，不因普通 Run 开始或结束自动开合。只有新的待处理请求可以自动打开一次；打开后保持到用户关闭或切换 Task；
 - `queued / running / waiting_user` 的停止只提供 Task Header 一个可见入口；Composer 只保留本地草稿和禁用发送提示，不建立第二个 Stop。停止请求必须等待 canonical terminal，transport acknowledgement 或 UI 状态变化都不能伪造 `Stopped`；
-- 标题栏只承载窗口、当前 Task 名称、搜索与异常状态等全局入口；不重复说明 Task 的 Workspace，正常连接状态、语言选择和工程诊断也不长期占据主视觉；
+- 标题栏只承载 Renderer 绘制的窗口按钮、当前 Task 名称、搜索与异常状态等全局入口；不重复说明 Task 的 Workspace，正常连接状态、语言选择和工程诊断也不长期占据主视觉；
 - 界面在任一时刻只突出一个与当前阶段一致的主动作；独立的导航和设置入口可以持续可见，但不得与主动作竞争；
 - 首个正式版本采用单主窗口；多个 Task 可以后台运行，切换 Task 不停止执行；
 - Renderer reload、断开连接以及 Bridge revision/snapshot failure 默认只影响视图同步和重连，不得终止后台 Agent Run；只有 Workbench 根据 canonical 产品状态作出的显式 termination 决策才能请求结束 Run；

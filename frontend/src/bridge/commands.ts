@@ -9,6 +9,7 @@ export const commands = {
   windowChromeConnect: "metawork.host.windowChrome.connect",
   windowChromeSync: "metawork.host.windowChrome.sync",
   windowChromeBeginDrag: "metawork.host.windowChrome.beginDrag",
+  windowChromeControl: "metawork.host.windowChrome.control",
   windowChromeDisconnect: "metawork.host.windowChrome.disconnect",
   chooseWorkspace: "metawork.workspaces.choose",
   removeWorkspace: "metawork.workspaces.remove",

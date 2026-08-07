@@ -6,10 +6,12 @@ import {
   ChevronRight,
   ChevronDown,
   Clock3,
+  Copy,
   Folder,
   FolderUp,
   FileText,
   Layers3,
+  Minus,
   PanelLeft,
   Plus,
   Puzzle,
@@ -33,6 +35,9 @@ import {
 
 type IconName =
   | "sidebar"
+  | "minimize"
+  | "maximize"
+  | "restore"
   | "activity"
   | "chevron"
   | "chevron-right"
@@ -66,6 +71,9 @@ type IconName =
 
 const icons: Record<IconName, LucideIcon> = {
   sidebar: PanelLeft,
+  minimize: Minus,
+  maximize: Square,
+  restore: Copy,
   activity: Activity,
   chevron: ChevronDown,
   "chevron-right": ChevronRight,

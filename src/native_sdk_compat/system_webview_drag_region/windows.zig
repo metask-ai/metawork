@@ -4,13 +4,15 @@
 //! a current-thread CBT hook immediately before entering the SDK runner and
 //! closes that interval at the start callback. Exactly one top-level window
 //! must be observed; no SDK private context or window-discovery heuristic is
-//! used. This file owns the narrow Win32 subclass needed to project the
-//! validated drag region through the startup System WebView hit-test chain.
+//! used. This file owns the narrow Win32 root binding associated with the
+//! startup System WebView. It does not traverse Chromium's cross-process
+//! child HWND tree or synthesize window movement.
 
 const std = @import("std");
 const native_sdk = @import("native_sdk");
 
 pub const live_pointer_drag = false;
+pub const chrome_top_override: ?f64 = 40;
 pub const PointIsDraggableFn = *const fn (*const anyopaque, f64, f64) bool;
 
 const HWND = ?*anyopaque;
@@ -33,14 +35,12 @@ const gw_owner: u32 = 4;
 const wm_nchittest: UINT = 0x0084;
 const wm_ncdestroy: UINT = 0x0082;
 const htclient: LRESULT = 1;
-const httransparent: LRESULT = -1;
 const htcaption: LRESULT = 2;
 const subclass_id: UINT_PTR = 0x4d57_4348;
 const ws_child: u32 = 0x4000_0000;
 
 const HookProc = *const fn (i32, WPARAM, LPARAM) callconv(.winapi) LRESULT;
 const SubclassProc = *const fn (HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PTR) callconv(.winapi) LRESULT;
-const EnumProc = *const fn (HWND, LPARAM) callconv(.winapi) BOOL;
 
 const CreateStructW = extern struct {
     create_params: ?*anyopaque,
@@ -71,12 +71,10 @@ extern "user32" fn IsWindow(window: HWND) callconv(.winapi) BOOL;
 extern "user32" fn GetAncestor(window: HWND, flags: u32) callconv(.winapi) HWND;
 extern "user32" fn GetWindow(window: HWND, command: u32) callconv(.winapi) HWND;
 extern "user32" fn GetWindowThreadProcessId(window: HWND, process_id: *DWORD) callconv(.winapi) DWORD;
-extern "user32" fn EnumChildWindows(parent: HWND, callback: EnumProc, data: LPARAM) callconv(.winapi) BOOL;
 extern "user32" fn ScreenToClient(window: HWND, point: *Point) callconv(.winapi) BOOL;
 extern "user32" fn GetDpiForWindow(window: HWND) callconv(.winapi) u32;
 extern "user32" fn CreateWindowExW(ex_style: DWORD, class_name: [*:0]const u16, title: [*:0]const u16, style: DWORD, x: i32, y: i32, width: i32, height: i32, parent: HWND, menu: HMENU, instance: HINSTANCE, param: ?*anyopaque) callconv(.winapi) HWND;
 extern "user32" fn DestroyWindow(window: HWND) callconv(.winapi) BOOL;
-extern "user32" fn SendMessageW(window: HWND, message: UINT, wparam: WPARAM, lparam: LPARAM) callconv(.winapi) LRESULT;
 extern "kernel32" fn GetCurrentThreadId() callconv(.winapi) DWORD;
 extern "kernel32" fn GetCurrentProcessId() callconv(.winapi) DWORD;
 extern "comctl32" fn SetWindowSubclass(window: HWND, callback: SubclassProc, id: UINT_PTR, data: DWORD_PTR) callconv(.winapi) BOOL;
@@ -147,6 +145,7 @@ const StartupCapture = struct {
 pub const State = struct {
     capture: StartupCapture = .{},
     root: HWND = null,
+    root_bound: bool = false,
     drag_context: ?*const anyopaque = null,
     point_is_draggable: ?PointIsDraggableFn = null,
 };
@@ -174,15 +173,12 @@ pub fn captureStartupWindow(
 
 pub fn requirePlatform(_: native_sdk.platform.PlatformServices) !void {}
 
-pub fn install(
-    state: *State,
-    _: native_sdk.platform.PlatformServices,
-    _: native_sdk.platform.WindowId,
-) !void {
+pub fn bindRoot(state: *State) !void {
     const root = state.root orelse return error.WindowUnavailable;
+    if (state.root_bound) return;
     if (SetWindowSubclass(root, subclassProc, subclass_id, @intFromPtr(state)) == 0)
         return error.SystemWebViewChromeInstallFailed;
-    _ = EnumChildWindows(root, installChild, @bitCast(@intFromPtr(state)));
+    state.root_bound = true;
 }
 
 pub fn beginLivePointerDrag(
@@ -194,7 +190,12 @@ pub fn beginLivePointerDrag(
 }
 
 pub fn deinit(state: *State) void {
-    uninstall(state);
+    if (state.root) |root| {
+        if (state.root_bound)
+            _ = RemoveWindowSubclass(root, subclassProc, subclass_id);
+    }
+    state.root_bound = false;
+    state.root = null;
     state.capture.deinit();
     state.drag_context = null;
     state.point_is_draggable = null;
@@ -218,24 +219,6 @@ fn isStartupCandidate(style: i32, parent: HWND) bool {
     return (@as(u32, @bitCast(style)) & ws_child) == 0 and parent == null;
 }
 
-fn uninstall(state: *State) void {
-    const root = state.root orelse return;
-    _ = EnumChildWindows(root, removeChild, 0);
-    _ = RemoveWindowSubclass(root, subclassProc, subclass_id);
-    state.root = null;
-}
-
-fn installChild(window: HWND, data: LPARAM) callconv(.winapi) BOOL {
-    const state: *State = @ptrFromInt(@as(usize, @bitCast(data)));
-    _ = SetWindowSubclass(window, subclassProc, subclass_id, @intFromPtr(state));
-    return 1;
-}
-
-fn removeChild(window: HWND, _: LPARAM) callconv(.winapi) BOOL {
-    _ = RemoveWindowSubclass(window, subclassProc, subclass_id);
-    return 1;
-}
-
 fn subclassProc(
     window: HWND,
     message: UINT,
@@ -247,14 +230,9 @@ fn subclassProc(
     const state: *State = @ptrFromInt(data);
     if (message == wm_ncdestroy) {
         _ = RemoveWindowSubclass(window, subclassProc, subclass_id);
-        return DefSubclassProc(window, message, wparam, lparam);
-    }
-    if (window != state.root) {
-        if (message == wm_nchittest) {
-            const root = state.root orelse
-                return DefSubclassProc(window, message, wparam, lparam);
-            if (SendMessageW(root, message, wparam, lparam) != htclient)
-                return httransparent;
+        if (window == state.root) {
+            state.root = null;
+            state.root_bound = false;
         }
         return DefSubclassProc(window, message, wparam, lparam);
     }

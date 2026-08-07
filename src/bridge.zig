@@ -15,7 +15,8 @@ pub const Dispatcher = dispatcher_impl.Dispatcher;
 pub const DispatcherPlatform = dispatcher_impl.Platform;
 pub const DispatcherAutomationAuthority = dispatcher_impl.AutomationAuthority;
 pub const WindowChromeRegion = dispatcher_impl.WindowChromeRegion;
-pub const WindowChromeEnvironment = dispatcher_impl.WindowChromeEnvironment;
+pub const WindowChromePlatformEnvironment = dispatcher_impl.WindowChromePlatformEnvironment;
+pub const WindowChromeControlAction = dispatcher_impl.WindowChromeControlAction;
 
 pub const ProductDelivery = product_delivery_impl.Delivery;
 pub const ProductDeliveryTransport = product_delivery_impl.Transport;
@@ -36,6 +37,7 @@ pub const commands = struct {
     pub const window_chrome_connect = commands_impl.window_chrome_connect;
     pub const window_chrome_sync = commands_impl.window_chrome_sync;
     pub const window_chrome_begin_drag = commands_impl.window_chrome_begin_drag;
+    pub const window_chrome_control = commands_impl.window_chrome_control;
     pub const window_chrome_disconnect = commands_impl.window_chrome_disconnect;
     pub const choose_workspace = commands_impl.choose_workspace;
     pub const select_workspace = commands_impl.select_workspace;

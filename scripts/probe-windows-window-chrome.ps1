@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory = $true)]
     [int]$ProcessId,
-    [ValidateSet('exercise', 'close', 'hit-test', 'hit-test-cleared')]
+    [ValidateSet('exercise', 'resize', 'controls', 'close', 'hit-test', 'hit-test-cleared')]
     [string]$Mode = 'exercise',
     [int]$DragX = 300,
     [int]$DragY = 15,
@@ -37,10 +37,27 @@ public static class MetaWorkChromeProbe {
     public static extern bool IsIconic(IntPtr window);
 
     [DllImport("user32.dll")]
+    public static extern bool IsWindow(IntPtr window);
+
+    [DllImport("user32.dll")]
+    public static extern bool IsWindowVisible(IntPtr window);
+
+    [DllImport("user32.dll")]
     public static extern bool IsZoomed(IntPtr window);
 
     [DllImport("user32.dll")]
     public static extern bool ShowWindow(IntPtr window, int command);
+
+    [DllImport("user32.dll")]
+    public static extern bool SetWindowPos(
+        IntPtr window,
+        IntPtr insertAfter,
+        int x,
+        int y,
+        int width,
+        int height,
+        uint flags
+    );
 
     [DllImport("user32.dll")]
     public static extern bool SetForegroundWindow(IntPtr window);
@@ -183,8 +200,91 @@ if ($Mode -eq 'hit-test' -or $Mode -eq 'hit-test-cleared') {
 Start-Sleep -Milliseconds 200
 $rect = Get-MetaWorkRect $window
 
+if ($Mode -eq 'resize') {
+    $originalWidth = $rect.Right - $rect.Left
+    $originalHeight = $rect.Bottom - $rect.Top
+    foreach ($size in @(
+        @(980, 700),
+        @(760, 620),
+        @(460, 560),
+        @(200, 200)
+    )) {
+        if (-not [MetaWorkChromeProbe]::SetWindowPos(
+            $window,
+            [IntPtr]::Zero,
+            0,
+            0,
+            $size[0],
+            $size[1],
+            0x0016
+        )) {
+            throw "SetWindowPos failed for $($size[0])x$($size[1])"
+        }
+        Start-Sleep -Milliseconds 180
+        $resized = Get-MetaWorkRect $window
+        $width = $resized.Right - $resized.Left
+        $height = $resized.Bottom - $resized.Top
+        if ($size[0] -eq 200 -and ($width -lt 320 -or $height -lt 520)) {
+            throw "Native minimum size was not enforced: ${width}x${height}"
+        }
+    }
+    [MetaWorkChromeProbe]::SetWindowPos(
+        $window,
+        [IntPtr]::Zero,
+        0,
+        0,
+        $originalWidth,
+        $originalHeight,
+        0x0016
+    ) | Out-Null
+    Start-Sleep -Milliseconds 250
+    Write-Output 'resize=true nativeMinimum=true'
+    return
+}
+
 if ($Mode -eq 'close') {
     Invoke-MetaWorkClick ($rect.Right - 29) ($rect.Top + 25)
+    Start-Sleep -Milliseconds 350
+    $process.Refresh()
+    if ($process.HasExited) {
+        throw 'Renderer close control exited the MetaWork process instead of applying close_policy = hide'
+    }
+    if (-not [MetaWorkChromeProbe]::IsWindow($window)) {
+        throw 'Renderer close control destroyed the Native window instead of applying close_policy = hide'
+    }
+    if ([MetaWorkChromeProbe]::IsWindowVisible($window)) {
+        throw 'Renderer close control did not hide the Native window'
+    }
+    Write-Output 'hidden=true processAlive=true windowAlive=true'
+    return
+}
+
+if ($Mode -eq 'controls') {
+    Invoke-MetaWorkClick ($rect.Right - 121) ($rect.Top + 25)
+    Start-Sleep -Milliseconds 350
+    if (-not [MetaWorkChromeProbe]::IsIconic($window)) {
+        throw 'Renderer minimize control did not minimize the Native window'
+    }
+
+    [MetaWorkChromeProbe]::ShowWindow($window, 9) | Out-Null
+    [MetaWorkChromeProbe]::SetForegroundWindow($window) | Out-Null
+    Start-Sleep -Milliseconds 350
+
+    $rect = Get-MetaWorkRect $window
+    Invoke-MetaWorkClick ($rect.Right - 75) ($rect.Top + 25)
+    Start-Sleep -Milliseconds 350
+    if (-not [MetaWorkChromeProbe]::IsZoomed($window)) {
+        throw 'Renderer maximize control did not maximize the Native window'
+    }
+
+    $rect = Get-MetaWorkRect $window
+    Invoke-MetaWorkClick ($rect.Right - 75) ($rect.Top + 25)
+    Start-Sleep -Milliseconds 350
+    if ([MetaWorkChromeProbe]::IsZoomed($window)) {
+        throw 'Renderer maximize control did not restore the Native window'
+    }
+
+    Write-Output 'minimize=true maximize=true restore=true'
     return
 }
 
@@ -198,7 +298,6 @@ $rect = Get-MetaWorkRect $window
 if ([Math]::Abs($rect.Left - $originalLeft) -lt 12 -and [Math]::Abs($rect.Top - $originalTop) -lt 12) {
     throw 'Renderer titlebar drag did not move the Native window'
 }
-
 $menuX = $rect.Left + [Math]::Min(760, ($rect.Right - $rect.Left) / 2)
 $menuY = $rect.Top + 25
 Invoke-MetaWorkRightClick $menuX $menuY

@@ -7,9 +7,11 @@ import {
 } from "./decode-contracts.ts";
 
 const candidateSelector = "[data-metawork-window-drag]";
+const controlSelector = "[data-metawork-window-control]";
 const exclusionSelector =
   "button, input, select, textarea, label, details, a, [contenteditable='true'], [data-metawork-window-drag-exclude]";
 const maxExclusions = 32;
+const controlActions = new Set(["minimize", "toggle_maximize", "close"]);
 
 type ChromeRegion = {
   x: number;
@@ -27,8 +29,8 @@ export function installWindowChromeBridge() {
   let environment: WindowChromeEnvironment | null = null;
   let animationFrame: number | null = null;
   let syncInFlight = false;
-  let syncAgain = false;
-  let refreshAgain = false;
+  let syncDirty = false;
+  let dragSynchronized = false;
   let observedCandidate: Element | null = null;
 
   const resizeObserver = new ResizeObserver(() => scheduleSync());
@@ -38,6 +40,10 @@ export function installWindowChromeBridge() {
     environment = value;
     const root = document.documentElement;
     root.dataset.metaworkWindowChrome = "ready";
+    root.dataset.metaworkRendererWindowControls = String(
+      value.rendererControls,
+    );
+    root.dataset.metaworkWindowMaximized = String(value.maximized);
     root.style.setProperty(
       "--metawork-window-chrome-top",
       `${value.insets.top}px`,
@@ -64,6 +70,8 @@ export function installWindowChromeBridge() {
     environment = null;
     const root = document.documentElement;
     delete root.dataset.metaworkWindowChrome;
+    delete root.dataset.metaworkRendererWindowControls;
+    delete root.dataset.metaworkWindowMaximized;
     for (const name of [
       "--metawork-window-chrome-top",
       "--metawork-window-chrome-leading",
@@ -133,10 +141,8 @@ export function installWindowChromeBridge() {
   }
 
   async function sync() {
-    if (!generation || syncInFlight) {
-      syncAgain = true;
-      return;
-    }
+    if (!generation || syncInFlight || !syncDirty) return;
+    syncDirty = false;
     const requestGeneration = generation;
     syncInFlight = true;
     try {
@@ -153,51 +159,26 @@ export function installWindowChromeBridge() {
       if (
         generation === requestGeneration &&
         value.generation === requestGeneration
-      )
+      ) {
         applyEnvironment(value);
+        dragSynchronized = true;
+      }
     } catch {
-      await disconnect(bridge, requestGeneration);
+      if (generation === requestGeneration) dragSynchronized = false;
     } finally {
-      finishOperation();
-    }
-  }
-
-  async function refresh() {
-    if (!generation) return;
-    if (syncInFlight) {
-      refreshAgain = true;
-      return;
-    }
-    const previousGeneration = generation;
-    syncInFlight = true;
-    try {
-      const value = decodeWindowChromeEnvironment(
-        await bridge.invoke(commands.windowChromeConnect, {}),
-      );
-      generation = value.generation;
-      applyEnvironment(value);
-      syncAgain = true;
-    } catch {
-      await disconnect(bridge, previousGeneration);
-    } finally {
-      finishOperation();
-    }
-  }
-
-  function finishOperation() {
-    syncInFlight = false;
-    if (refreshAgain) {
-      refreshAgain = false;
-      void refresh();
-      return;
-    }
-    if (syncAgain) {
-      syncAgain = false;
-      scheduleSync();
+      syncInFlight = false;
+      if (syncDirty) scheduleFrame();
     }
   }
 
   function scheduleSync() {
+    if (!generation) return;
+    syncDirty = true;
+    if (syncInFlight || animationFrame !== null) return;
+    scheduleFrame();
+  }
+
+  function scheduleFrame() {
     if (animationFrame !== null) return;
     animationFrame = window.requestAnimationFrame(() => {
       animationFrame = null;
@@ -212,6 +193,8 @@ export function installWindowChromeBridge() {
     const current = expectedGeneration;
     if (!current || generation !== current) return;
     generation = null;
+    syncDirty = false;
+    dragSynchronized = false;
     clearEnvironment();
     try {
       assertDisconnected(
@@ -228,6 +211,7 @@ export function installWindowChromeBridge() {
   function onPointerDown(event: PointerEvent) {
     if (
       !environment?.livePointerDrag ||
+      !dragSynchronized ||
       !generation ||
       !event.isTrusted ||
       event.button !== 0 ||
@@ -263,7 +247,49 @@ export function installWindowChromeBridge() {
         )
           applyEnvironment(value);
       })
-      .catch(() => disconnect(bridge, requestGeneration));
+      .catch(() => {
+        if (generation === requestGeneration) dragSynchronized = false;
+      });
+  }
+
+  function onControlClick(event: MouseEvent) {
+    const target = event.target instanceof Element ? event.target : null;
+    const button = target?.closest<HTMLButtonElement>(controlSelector);
+    const action = button?.dataset.metaworkWindowControl;
+    if (
+      !button ||
+      !action ||
+      !controlActions.has(action) ||
+      !environment?.rendererControls ||
+      !generation
+    )
+      return;
+    event.preventDefault();
+    const requestGeneration = generation;
+    for (const control of document.querySelectorAll<HTMLButtonElement>(
+      controlSelector,
+    ))
+      control.disabled = true;
+    void bridge
+      .invoke(commands.windowChromeControl, {
+        generation: requestGeneration,
+        action,
+      })
+      .then(decodeWindowChromeEnvironment)
+      .then((value) => {
+        if (
+          generation === requestGeneration &&
+          value.generation === requestGeneration
+        )
+          applyEnvironment(value);
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        for (const control of document.querySelectorAll<HTMLButtonElement>(
+          controlSelector,
+        ))
+          control.disabled = false;
+      });
   }
 
   void bridge
@@ -281,18 +307,22 @@ export function installWindowChromeBridge() {
     })
     .catch(clearEnvironment);
 
-  window.addEventListener("resize", refresh);
-  window.addEventListener("pagehide", () => void disconnect(bridge), {
+  const unsubscribeResize = bridge.on("resize", scheduleSync);
+  const onPageHide = () => void disconnect(bridge);
+  window.addEventListener("pagehide", onPageHide, {
     once: true,
   });
   document.addEventListener("pointerdown", onPointerDown, true);
+  document.addEventListener("click", onControlClick, true);
 
   return () => {
     if (animationFrame !== null) window.cancelAnimationFrame(animationFrame);
     resizeObserver.disconnect();
     mutationObserver.disconnect();
-    window.removeEventListener("resize", refresh);
+    unsubscribeResize();
+    window.removeEventListener("pagehide", onPageHide);
     document.removeEventListener("pointerdown", onPointerDown, true);
+    document.removeEventListener("click", onControlClick, true);
     void disconnect(bridge);
   };
 }

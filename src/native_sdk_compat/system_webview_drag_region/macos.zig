@@ -3,6 +3,7 @@
 const native_sdk = @import("native_sdk");
 
 pub const live_pointer_drag = true;
+pub const chrome_top_override: ?f64 = null;
 pub const PointIsDraggableFn = *const fn (*const anyopaque, f64, f64) bool;
 pub const State = struct {};
 
@@ -15,11 +16,7 @@ pub fn requirePlatform(services: native_sdk.platform.PlatformServices) !void {
         return error.SystemWebViewChromeUnavailable;
 }
 
-pub fn install(
-    _: *State,
-    _: native_sdk.platform.PlatformServices,
-    _: native_sdk.platform.WindowId,
-) !void {}
+pub fn bindRoot(_: *State) !void {}
 
 pub fn beginLivePointerDrag(
     _: *State,

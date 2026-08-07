@@ -7,13 +7,13 @@
 
 ## 1. 已确认的技术选型
 
-| 架构节点    | 选择                            | 定位                                                              |
-| ----------- | ------------------------------- | ----------------------------------------------------------------- |
+| 架构节点    | 选择                            | 定位                                                                   |
+| ----------- | ------------------------------- | ---------------------------------------------------------------------- |
 | Renderer    | React + Tailwind                | 唯一正式 UI；运行于 Desktop Host 通过 Native SDK 托管的 System WebView |
-| Bridge      | Zig                             | Renderer Bridge revision 1 的协议、验证和 ProductDelivery 边界    |
-| Application | Zig                             | MetaWork 产品事实、产品行为、执行协调和恢复语义的唯一边界         |
-| AgentCore   | Metask AgentCore library bundle | 外部执行依赖；独立构建和发布，MetaWork 只消费 canonical bundle    |
-| Native SDK  | Native SDK                      | 外部桌面依赖；由 Desktop Host 消费                                 |
+| Bridge      | Zig                             | Renderer Bridge revision 1 的协议、验证和 ProductDelivery 边界         |
+| Application | Zig                             | MetaWork 产品事实、产品行为、执行协调和恢复语义的唯一边界              |
+| AgentCore   | Metask AgentCore library bundle | 外部执行依赖；独立构建和发布，MetaWork 只消费 canonical bundle         |
+| Native SDK  | Native SDK                      | 外部桌面依赖；由 Desktop Host 消费                                     |
 
 正式主路径不采用 Tauri + Rust，不建立第二套 Renderer，不以 PTY、xterm、终端字节流或 Provider SSE 作为 Agent UI 协议，不复制 AgentCore ABI 或实现源码，也不建立 Native SDK Adapter、通用 Desktop Interface 或可替换框架抽象。
 
@@ -57,7 +57,7 @@ flowchart TB
 
 ### 3.1 Renderer
 
-Renderer 负责产品 WebUI 的页面、布局、交互、结构化 Agent 工作展示和纯 UI 临时状态。它可以呈现与 WebUI 一体化的标题/命令栏，并以单一 declarative marker 声明可拖动的 Web 内容候选区；它不处理原生窗口动作，不读取窗口状态，也不拥有平台差异。Renderer 可以缓存 Application projection，但不能成为 Workspace、Task、Run、Account readiness、Agent 执行状态、持久化历史、权限决策或窗口真实状态的唯一 owner。WebView reload 或重连后，Renderer 必须能够从完整 Snapshot 重建产品界面。
+Renderer 负责产品 WebUI 的页面、布局、交互、结构化 Agent 工作展示和纯 UI 临时状态。它可以呈现与 WebUI 一体化的标题/命令栏，以单一 declarative marker 声明可拖动候选区，并绘制带固定语义 marker 的窗口按钮；React component 不直接调用 transport。browser-side Bridge 可把这些声明转换为受限 Host intent，但 Renderer 不执行原生窗口动作、不持有原生 identity/handle，也不成为窗口真实状态 owner。Renderer 可以缓存 Application projection，但不能成为 Workspace、Task、Run、Account readiness、Agent 执行状态、持久化历史、权限决策或窗口真实状态的唯一 owner。WebView reload 或重连后，Renderer 必须能够从完整 Snapshot 重建产品界面。
 
 Renderer 不直接加载 AgentCore，不访问任意文件或进程，不持有 Provider credential 或原生窗口身份，不实现或模拟系统拖动循环、窗口状态、系统菜单、托盘、全局快捷键等平台行为，也不作为权限或安全边界。
 
@@ -65,7 +65,7 @@ Renderer 不直接加载 AgentCore，不访问任意文件或进程，不持有 
 
 Bridge 验证来源与启动窗口 identity，严格解码 payload，把合法输入转换为产品命令，调用 Application，编码 typed result，并运输 Snapshot/Event。Bridge 不决定 Task admission、Workspace authority、Agent cancellation、credential replacement 或历史持久化。
 
-Bridge 的连接、revision、snapshot identity、分块读取、retry 和 fail-closed 规则只由 [Renderer Bridge 合同](renderer-bridge-contract.md)定义。browser-side Bridge boundary 可以把一个 declarative drag candidate 及其有界交互排除区镜像给受限 Host window-chrome capability，并 runtime decode Host 发布的安全 inset；它不得暴露窗口动作、窗口状态、任意窗口 API 或第二产品数据面。
+Bridge 的连接、revision、snapshot identity、分块读取、retry 和 fail-closed 规则只由 [Renderer Bridge 合同](renderer-bridge-contract.md)定义。受限 window-chrome bootstrap session 的 source-window authority 与 document generation 同样归 Bridge：document attach 只建立一次 generation，Native SDK resize event 与 DOM layout observation 只驱动同 generation 的 geometry sync，不建立 resize command、第二 connection 或平台状态副本。browser-side Bridge boundary 可以把一个 declarative drag candidate 及其有界交互排除区镜像给受限 Host window-chrome capability，并把 Renderer window-control marker 转换为绑定 document generation 的固定语义 intent；它 runtime decode Host 发布的安全 inset、control capability 与 `maximized` 真值，但不暴露任意窗口 API、原生 identity/handle 或第二产品数据面。
 
 ### 3.3 Application
 
@@ -89,22 +89,22 @@ Native SDK 是外部桌面依赖。Desktop Host 通过 Native SDK 执行桌面�
 
 Native SDK Bridge API 是独立的正式 transport surface，不属于系统能力入口。Bridge 可以使用完成 command ingress、source/window authority、handler 注册和 Host capability 调用所必需的 Native SDK Bridge contract、data-only DTO 与 opaque identifier；这些值本身不授予系统执行权。Application owner 不消费这些 SDK 类型，Renderer 只消费 Renderer Bridge wire。
 
-| Native SDK surface | MetaWork 消费者 | 边界 |
-| ------------------ | --------------- | ---- |
-| Runtime API | Desktop Host | 执行系统 effect，并维护 Native SDK 的窗口、WebView、托盘和生命周期状态 |
-| Bridge API | Bridge、Desktop Host composition | `Invocation`、`Source`、`Handler`、`BridgePolicy` 等正式 transport contract |
-| data-only DTO / opaque identifier | Bridge、Desktop Host binding | `WindowId`、dialog options/result 等无执行 authority 的公开值；不得传播到 Application owner |
-| `PlatformServices` | 已登记的一级兼容 seam | 可执行低层 SDK 原语的受限 authority，不是普通依赖 |
-| 具体平台实现类型与 OS handle | 已登记的二级兼容 seam | `WindowsPlatform`、`HWND`、AppKit/GTK 对象等平台 authority |
-| `PlatformServices.context` | 无 | Native SDK 私有 opaque 数据，MetaWork 永不访问、解释或强转 |
+| Native SDK surface                | MetaWork 消费者                  | 边界                                                                                        |
+| --------------------------------- | -------------------------------- | ------------------------------------------------------------------------------------------- |
+| Runtime API                       | Desktop Host                     | 执行系统 effect，并维护 Native SDK 的窗口、WebView、托盘和生命周期状态                      |
+| Bridge API                        | Bridge、Desktop Host composition | `Invocation`、`Source`、`Handler`、`BridgePolicy` 等正式 transport contract                 |
+| data-only DTO / opaque identifier | Bridge、Desktop Host binding     | `WindowId`、dialog options/result 等无执行 authority 的公开值；不得传播到 Application owner |
+| `PlatformServices`                | 已登记的一级兼容 seam            | 可执行低层 SDK 原语的受限 authority，不是普通依赖                                           |
+| 具体平台实现类型与 OS handle      | 已登记的二级兼容 seam            | `WindowsPlatform`、`HWND`、AppKit/GTK 对象等平台 authority                                  |
+| `PlatformServices.context`        | 无                               | Native SDK 私有 opaque 数据，MetaWork 永不访问、解释或强转                                  |
 
 产品需要系统能力时，正常依赖链是 `Application owner → MetaWork-owned capability → Desktop Host binding → Native SDK Runtime API → SDK internals → OS`；Bridge 需要受限系统 effect 时经 Bridge-owned 窄 Host capability 进入同一 Runtime 路径；纯 Host 生命周期和窗口行为从 Desktop Host 直接进入 Runtime API。系统能力按以下三级 Host 调用路径消费：
 
-| 路径 | 调用链 | 适用条件 |
-| ---- | ------ | -------- |
+| 路径     | 调用链                                                              | 适用条件                                                                         |
+| -------- | ------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
 | 正常路径 | Desktop Host → Native SDK Runtime API → SDK `PlatformServices` → OS | Runtime API 已提供完整能力；MetaWork 只调用 Runtime API，后两段属于 SDK 内部实现 |
-| 一级兼容 | Desktop Host 窄 seam → SDK `PlatformServices` 已有原语 → OS | Runtime API 缺失或存在已确认的目标平台缺陷，但 SDK 底层已有所需原语 |
-| 二级兼容 | Desktop Host 窄平台 seam → Win32 / AppKit / GTK → OS | SDK 连可用底层原语都缺失，MetaWork 必须暂时补齐平台实现 |
+| 一级兼容 | Desktop Host 窄 seam → SDK `PlatformServices` 已有原语 → OS         | Runtime API 缺失或存在已确认的目标平台缺陷，但 SDK 底层已有所需原语              |
+| 二级兼容 | Desktop Host 窄平台 seam → Win32 / AppKit / GTK → OS                | SDK 连可用底层原语都缺失，MetaWork 必须暂时补齐平台实现                          |
 
 Runtime API 已提供且可用时，绕过它调用低层函数属于架构违规，不得包装成“兼容”。兼容的治理单位是 capability seam，而不是文件；每条 seam 只补一个明确的 Runtime/SDK 缺口，并且必须同时满足：
 
@@ -114,11 +114,13 @@ Runtime API 已提供且可用时，绕过它调用低层函数属于架构违�
 - 写明 capability identity、对应 SDK 缺口、允许的低层调用、目标平台、调用者、验证方式和删除条件；优先推动 Native SDK 补齐 Runtime API，正式 API 经目标平台验收可用后原位替换并删除兼容 seam；
 - 多条 seam 只有共享同一资源、线程或生命周期不变量时才可共处一个窄 Host 文件，并且仍须独立登记、allowlist、验证和删除；禁止文件级或目录级宽泛放行，新增无直接关联的 capability 默认使用新的窄文件。
 
+当前 System WebView window chrome 按 SDK 缺口独立登记：`system_webview_drag_region` 只补 drag-region；按钮兼容文件因共享同一 startup HWND 生命周期而共置 maximize/restore、maximized state 与 user-close 三项能力，但使用明确入口、逐项 allowlist 和独立删除条件，不提供内部任意 action facade。`minimize` 已由 Runtime API 提供，必须保持正常 Runtime 路径，不得进入兼容 seam。这些能力可以在 Bridge 的同一个固定 window-chrome command 边界内组合结果，但不得互相持有职责或扩展为统一窗口 facade。
+
 获准兼容 seam 的当前文件、SDK 缺口、目标平台与删除条件由 [工程结构与所有权](project-structure.md)映射，合规状态和平台证据由 [验证规范](validation.md)维护；与 Renderer 交换的精确 wire 仍只由 [Renderer Bridge 合同](renderer-bridge-contract.md)定义。未登记的低层调用一律不构成兼容能力。
 
 ## 4. 跨模块合同
 
-- Renderer → Bridge 只提交产品语义命令；标题栏的唯一例外是 browser-side Bridge 从 declarative DOM marker 计算出的有界 region mirror，不包含窗口 action、state、平台名或原生窗口 identity/handle。两类输入都不得携带 React component state、任意路径、Provider 配置或完整 credential。
+- Renderer → Bridge 只提交产品语义命令；标题栏例外严格限于 browser-side Bridge 从 declarative DOM marker 计算出的有界 region mirror，以及 `minimize | toggle_maximize | close` 固定语义 intent。输入不包含平台名、任意 action、独立 state query 或原生窗口 identity/handle，也不得携带 React component state、任意路径、Provider 配置或完整 credential。
 - Bridge → Application 只提交严格解码后的 typed command；业务拒绝由 Application 返回 typed result，malformed payload 与 authority failure 由 Bridge fail closed。
 - Application → Bridge 发布 canonical projection；Bridge 只拥有编码后的 transport bytes、connection generation 和 Snapshot transport state。
 - Application → AgentCore 只经内部 AgentCore 边界；Renderer、Bridge 与 Application 的其他 owner 只使用 MetaWork-owned 产品类型。

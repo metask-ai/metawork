@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 
 import type { AccountView } from "../../bridge/contracts.ts";
 import { WindowTitlebar } from "../../components/ui/WindowTitlebar.tsx";
+import { WindowControls } from "../../components/ui/WindowControls.tsx";
 import { useI18n, type Locale, type MessageId } from "../../i18n/context.ts";
 import { accountErrorText } from "../../i18n/account-error.ts";
 
@@ -125,6 +126,15 @@ export function AccountGate({
               )}
             </select>
           </label>
+          <WindowControls
+            labels={{
+              controls: t("window.controls"),
+              minimize: t("window.minimize"),
+              maximize: t("window.maximize"),
+              restore: t("window.restore"),
+              close: t("window.close"),
+            }}
+          />
         </div>
       </WindowTitlebar>
 

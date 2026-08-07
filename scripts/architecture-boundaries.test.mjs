@@ -346,6 +346,22 @@ test("Account Runtime owns policy while App installs execution explicitly", () =
   );
 });
 
+test("cold Account restore preserves Task history without impersonating an identity switch", () => {
+  const app = read("src/app.zig");
+  assert.match(
+    app,
+    /const ExecutionReplacement = enum \{ none, startup, default, identity \}/,
+  );
+  assert.match(
+    app,
+    /prepareStart\(services\),\s*\.startup[\s\S]*prepareAutomationStart\(\),\s*\.startup[\s\S]*prepareStartUnavailable\(\),\s*\.startup/,
+  );
+  assert.match(
+    app,
+    /\.startup => self\.workbench\.beginDefaultExecutionReplacement\(\)/,
+  );
+});
+
 test("macOS development identity and Account manifest hard cut have one code owner", () => {
   const appZon = read("app.zon");
   const build = read("build.zig");
@@ -927,6 +943,7 @@ test("Renderer Bridge fixed revision 1 owns the exact product wire catalog", () 
     [
       "metawork.host.windowChrome.beginDrag",
       "metawork.host.windowChrome.connect",
+      "metawork.host.windowChrome.control",
       "metawork.host.windowChrome.disconnect",
       "metawork.host.windowChrome.sync",
     ],
@@ -1030,7 +1047,7 @@ test("Renderer Bridge fixed revision 1 owns the exact product wire catalog", () 
   );
 });
 
-test("Desktop Host owns native window chrome and Renderer only declares geometry", () => {
+test("Renderer declares window chrome UI while Desktop Host owns native behavior", () => {
   const rendererFiles = filesWithExtensions("frontend/src/", [".ts", ".tsx"]);
   const chromeTransportOwners = rendererFiles.filter((file) =>
     read(file).includes("commands.windowChrome"),
@@ -1041,7 +1058,6 @@ test("Desktop Host owns native window chrome and Renderer only declares geometry
 
   for (const retired of [
     "frontend/src/app/useWindowChrome.ts",
-    "frontend/src/components/ui/WindowControls.tsx",
     "frontend/src/platform/window-chrome.ts",
   ])
     assert.equal(
@@ -1061,10 +1077,16 @@ test("Desktop Host owns native window chrome and Renderer only declares geometry
     );
     assert.doesNotMatch(
       source,
-      /beginWindowDrag|controlWindow|openWindowSystemMenu|windowState|WindowControls/,
+      /beginWindowDrag|controlWindow|openWindowSystemMenu|windowState/,
       `${file} owns native window behavior`,
     );
   }
+
+  const controls = read("frontend/src/components/ui/WindowControls.tsx");
+  assert.match(controls, /data-metawork-window-control="minimize"/);
+  assert.match(controls, /data-metawork-window-control="toggle_maximize"/);
+  assert.match(controls, /data-metawork-window-control="close"/);
+  assert.doesNotMatch(controls, /window\.zero|onClick|onPointer|onDoubleClick/);
 
   const titlebar = read("frontend/src/components/ui/WindowTitlebar.tsx");
   assert.match(titlebar, /data-metawork-window-drag=""/);
@@ -1075,14 +1097,23 @@ test("Desktop Host owns native window chrome and Renderer only declares geometry
 
   const app = read("src/app.zig");
   const policy = read("src/bridge/policy.zig");
+  const dispatcher = read("src/bridge/dispatcher.zig");
+  const rendererChrome = read("frontend/src/bridge/window-chrome.ts");
+  const manifest = read("app.zon");
   const seamPath = "src/native_sdk_compat/system_webview_drag_region.zig";
   const windowsPath =
     "src/native_sdk_compat/system_webview_drag_region/windows.zig";
   const macosPath =
     "src/native_sdk_compat/system_webview_drag_region/macos.zig";
+  const controlsSeamPath =
+    "src/native_sdk_compat/system_webview_window_controls.zig";
+  const controlsWindowsPath =
+    "src/native_sdk_compat/system_webview_window_controls/windows.zig";
   const seam = read(seamPath);
   const windows = read(windowsPath);
   const macos = read(macosPath);
+  const controlsSeam = read(controlsSeamPath);
+  const controlsWindows = read(controlsWindowsPath);
   const compatFiles = zigFiles("src/native_sdk_compat/");
   const compatSource = compatFiles.map(read).join("\n");
   assert.match(app, /\.js_window_api = false/);
@@ -1092,16 +1123,40 @@ test("Desktop Host owns native window chrome and Renderer only declares geometry
   assert.equal(existsSync(new URL("src/windows_host.zig", root)), false);
   assert.doesNotMatch(
     compatSource,
-    /\.(?:minimizeWindow|maximizeWindow|restoreWindow|closeWindow|showWindow|focusWindow|showMessageDialog|showOpenDialog|showNotification|startTimer|cancelTimer|quitApp)\(/,
+    /\.(?:maximizeWindow|restoreWindow|closeWindow|showWindow|focusWindow|showMessageDialog|showOpenDialog|showNotification|startTimer|cancelTimer|quitApp)\(/,
+  );
+  assert.doesNotMatch(
+    seam,
+    /\bgeneration\s*:|\.generation\b|requireCurrent|installPlatformOrDisconnect/,
   );
   assert.match(
-    seam,
-    /fn installPlatformOrDisconnect[\s\S]*Platform\.install[\s\S]*self\.connected = false[\s\S]*self\.clearRegions\(\)[\s\S]*Platform\.deinit/,
+    dispatcher,
+    /window_chrome_generation: u64[\s\S]*validateWindowChromeSession/,
   );
+  assert.match(app, /captureStartupWindow\(\)[\s\S]*bindRoot\(\)/);
+  assert.doesNotMatch(
+    seam.match(/pub fn sync[\s\S]*?pub fn beginLivePointerDrag/)?.[0] ?? "",
+    /bindRoot|deinit/,
+  );
+  assert.doesNotMatch(windows, /EnumChildWindows|bindDocument|installChild/);
+  assert.match(rendererChrome, /bridge\.on\("resize", scheduleSync\)/);
+  assert.doesNotMatch(
+    rendererChrome,
+    /addEventListener\("resize"|\brefreshAgain\b|\brefresh\(/,
+  );
+  assert.match(manifest, /\.min_width = 320[\s\S]*\.min_height = 520/);
   assert.deepEqual(
     zigFiles("src/").filter((file) =>
       read(file).includes(
         '@import("native_sdk_compat/system_webview_drag_region.zig")',
+      ),
+    ),
+    ["src/app.zig"],
+  );
+  assert.deepEqual(
+    zigFiles("src/").filter((file) =>
+      read(file).includes(
+        '@import("native_sdk_compat/system_webview_window_controls.zig")',
       ),
     ),
     ["src/app.zig"],
@@ -1117,6 +1172,14 @@ test("Desktop Host owns native window chrome and Renderer only declares geometry
       read(file).includes('@import("system_webview_drag_region/macos.zig")'),
     ),
     [seamPath],
+  );
+  assert.deepEqual(
+    compatFiles.filter((file) =>
+      read(file).includes(
+        '@import("system_webview_window_controls/windows.zig")',
+      ),
+    ),
+    [controlsSeamPath],
   );
   assert.doesNotMatch(
     zigFiles("src/").map(read).join("\n"),
@@ -1145,6 +1208,12 @@ test("Desktop Host owns native window chrome and Renderer only declares geometry
     /MetaWorkSystemWebViewChrome|\boverlay\b|RegisterClassExW|SetWindowPos/,
     "the System WebView drag seam must not cover Renderer pixels with another HWND",
   );
+  assert.doesNotMatch(
+    seam + windows + macos,
+    /renderer_controls|maximized|IsZoomed|ShowWindow|user_close/,
+    "the drag-region seam must not own window-control capability",
+  );
+  assert.match(windows, /live_pointer_drag = false/);
   assert.match(macos, /try services\.startWindowDrag\(window_id\)/);
   assert.deepEqual(
     zigFiles("src/").filter((file) =>
@@ -1152,12 +1221,11 @@ test("Desktop Host owns native window chrome and Renderer only declares geometry
     ),
     [macosPath],
   );
-  const allowedWindowsSymbols = [
+  const allowedDragWindowsSymbols = [
     "CallNextHookEx",
     "CreateWindowExW",
     "DefSubclassProc",
     "DestroyWindow",
-    "EnumChildWindows",
     "GetAncestor",
     "GetCurrentProcessId",
     "GetCurrentThreadId",
@@ -1167,7 +1235,6 @@ test("Desktop Host owns native window chrome and Renderer only declares geometry
     "IsWindow",
     "RemoveWindowSubclass",
     "ScreenToClient",
-    "SendMessageW",
     "SetWindowSubclass",
     "SetWindowsHookExW",
     "UnhookWindowsHookEx",
@@ -1176,11 +1243,53 @@ test("Desktop Host owns native window chrome and Renderer only declares geometry
     [...windows.matchAll(/extern "(?:user32|kernel32|comctl32)" fn (\w+)/g)]
       .map((match) => match[1])
       .sort(),
-    allowedWindowsSymbols.sort(),
+    allowedDragWindowsSymbols.sort(),
+  );
+  const allowedControlWindowsSymbols = [
+    "CallNextHookEx",
+    "CreateWindowExW",
+    "DestroyWindow",
+    "GetAncestor",
+    "GetCurrentProcessId",
+    "GetCurrentThreadId",
+    "GetWindow",
+    "GetWindowThreadProcessId",
+    "IsWindow",
+    "IsZoomed",
+    "PostMessageW",
+    "SetWindowsHookExW",
+    "ShowWindow",
+    "UnhookWindowsHookEx",
+  ];
+  assert.deepEqual(
+    [
+      ...controlsWindows.matchAll(
+        /extern "(?:user32|kernel32|comctl32)" fn (\w+)/g,
+      ),
+    ]
+      .map((match) => match[1])
+      .sort(),
+    allowedControlWindowsSymbols.sort(),
   );
   assert.match(app, /native_runtime\.showMessageDialog\(/);
   assert.match(app, /native_runtime\.closeWindow\(main_window_id\)/);
-  assert.match(app, /defer app\.window_chrome_capability\.deinit\(\)/);
+  assert.match(app, /runtime\.minimizeWindow\(main_window_id\)/);
+  assert.match(
+    app,
+    /\.toggle_maximize => try self\.window_controls_capability\.toggleMaximize\(\)/,
+  );
+  assert.match(
+    app,
+    /\.close => try self\.window_controls_capability\.userClose\(\)/,
+  );
+  assert.match(controlsWindows, /PostMessageW\(root, wm_close/);
+  assert.match(controlsWindows, /IsZoomed[\s\S]*ShowWindow/);
+  assert.match(controlsSeam, /pub fn toggleMaximize[\s\S]*pub fn userClose/);
+  assert.doesNotMatch(controlsSeam, /pub const Action|pub fn control\(/);
+  assert.match(controlsWindows, /pub fn toggleMaximize[\s\S]*pub fn userClose/);
+  assert.doesNotMatch(controlsWindows, /pub fn control\(|switch \(action\)/);
+  assert.match(app, /defer app\.drag_region_capability\.deinit\(\)/);
+  assert.match(app, /defer app\.window_controls_capability\.deinit\(\)/);
   assert.doesNotMatch(app, /services\.closeWindow\(|windows_host/);
   assert.doesNotMatch(
     compatSource,
@@ -1193,6 +1302,24 @@ test("Desktop Host owns native window chrome and Renderer only declares geometry
   assert.equal(
     existsSync(new URL("scripts/probe-windows-window-chrome.ps1", root)),
     true,
+  );
+  const windowsVertical = read("scripts/test-window-chrome-windows.mjs");
+  const windowsProbe = read("scripts/probe-windows-window-chrome.ps1");
+  assert.match(
+    windowsVertical,
+    /"-Mode",[\s\S]*"resize"[\s\S]*"-Mode",[\s\S]*"controls"[\s\S]*"-Mode",[\s\S]*"close"[\s\S]*"tray-action", "1"/,
+  );
+  assert.match(
+    windowsProbe,
+    /\$Mode -eq 'resize'[\s\S]*SetWindowPos[\s\S]*Native minimum size was not enforced/,
+  );
+  assert.match(
+    windowsProbe,
+    /\$Mode -eq 'controls'[\s\S]*IsIconic[\s\S]*IsZoomed[\s\S]*IsZoomed/,
+  );
+  assert.match(
+    windowsProbe,
+    /\$Mode -eq 'close'[\s\S]*HasExited[\s\S]*IsWindow[\s\S]*IsWindowVisible/,
   );
 });
 

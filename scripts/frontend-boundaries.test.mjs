@@ -185,7 +185,7 @@ test("Workspace lifecycle recovery lives in Settings with explicit focus handlin
   assert.doesNotMatch(settings, /dispatchWorkbench|selectWorkspace/);
 });
 
-test("Renderer declares one titlebar region while Bridge and Host own native chrome", async () => {
+test("Renderer draws declarative titlebar controls while Bridge and Host own native behavior", async () => {
   const shell = await readFile(
     resolve(sourceRoot, "app", "AppShell.tsx"),
     "utf8",
@@ -197,6 +197,10 @@ test("Renderer declares one titlebar region while Bridge and Host own native chr
   const css = await readFile(resolve(sourceRoot, "index.css"), "utf8");
   const titlebar = await readFile(
     resolve(sourceRoot, "components", "ui", "WindowTitlebar.tsx"),
+    "utf8",
+  );
+  const controls = await readFile(
+    resolve(sourceRoot, "components", "ui", "WindowControls.tsx"),
     "utf8",
   );
   const chromeBridge = await readFile(
@@ -221,8 +225,14 @@ test("Renderer declares one titlebar region while Bridge and Host own native chr
   assert.doesNotMatch(`${shell}\n${gate}`, /onPointerMove|setPointerCapture/);
   assert.match(manifest, /\.titlebar = "hidden_inset_tall"/);
   assert.doesNotMatch(css, /-webkit-app-region:/);
-  assert.doesNotMatch(`${shell}\n${gate}`, /WindowControls|windowPlatform/);
-  assert.doesNotMatch(css, /\[data-platform=|\.window-controls/);
+  assert.match(`${shell}\n${gate}`, /WindowControls/);
+  assert.doesNotMatch(`${shell}\n${gate}`, /windowPlatform/);
+  assert.match(controls, /data-metawork-window-control="minimize"/);
+  assert.match(controls, /data-metawork-window-control="toggle_maximize"/);
+  assert.match(controls, /data-metawork-window-control="close"/);
+  assert.doesNotMatch(controls, /window\.zero|onClick|onPointer|onDoubleClick/);
+  assert.doesNotMatch(css, /\[data-platform=/);
+  assert.match(css, /\.window-controls/);
   assert.match(css, /--window-bar-height: 52px/);
   assert.match(
     chromeBridge,
@@ -230,13 +240,14 @@ test("Renderer declares one titlebar region while Bridge and Host own native chr
   );
   assert.match(chromeBridge, /commands\.windowChromeConnect/);
   assert.match(chromeBridge, /commands\.windowChromeSync/);
+  assert.match(chromeBridge, /commands\.windowChromeControl/);
   assert.match(chromeBridge, /commands\.windowChromeDisconnect/);
   assert.match(chromeBridge, /decodeWindowChromeEnvironment/);
   assert.match(chromeBridge, /document\.querySelectorAll\(exclusionSelector\)/);
-  assert.match(chromeBridge, /window\.addEventListener\("resize", refresh\)/);
+  assert.match(chromeBridge, /bridge\.on\("resize", scheduleSync\)/);
   assert.match(
     chromeBridge,
-    /async function refresh\(\)[\s\S]*commands\.windowChromeConnect[\s\S]*generation = value\.generation[\s\S]*syncAgain = true/,
+    /async function sync\(\)[\s\S]*commands\.windowChromeSync[\s\S]*generation === requestGeneration[\s\S]*value\.generation === requestGeneration/,
   );
   assert.match(
     chromeBridge,
@@ -244,11 +255,16 @@ test("Renderer declares one titlebar region while Bridge and Host own native chr
   );
   assert.match(
     chromeBridge,
+    /commands\.windowChromeControl[\s\S]*\.catch\(\(\) => undefined\)/,
+    "a transient button action failure must preserve the current document session",
+  );
+  assert.match(
+    chromeBridge,
     /async function disconnect\([\s\S]*expectedGeneration:[\s\S]*generation !== current\) return/,
   );
   assert.doesNotMatch(
     chromeBridge,
-    /window\.addEventListener\("resize", scheduleSync\)/,
+    /window\.addEventListener\("resize"|async function refresh\(/,
   );
   assert.match(
     css,
