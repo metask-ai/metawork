@@ -208,7 +208,7 @@ Workspace
 
 ### 5.2 全局能力入口
 
-> Capability：**当前与受 gate 目标**。Skill 入口只依赖现有 AgentCore revision 6 discovery/catalog；定时任务入口依赖 Workbench-owned 持久 schedule projection、后台 Host timer/notification 与真实 Task admission。MCP 入口与 route 已进入稳定 shell；Host 根据真实 preparation/activation 发布 unavailable、ready 或 degraded 只读目录，页面不显示虚构服务，也不提供尚未接通的管理动作。
+> Capability：**当前与受 gate 目标**。Skill 入口只依赖现有 AgentCore revision 6 discovery/catalog；定时任务入口依赖 Workbench-owned 持久 schedule projection、后台 Host timer/notification 与真实 Task admission。MCP 入口与 route 已进入稳定 shell；目标合同由 Workbench typed 管理能力、Runtime/catalog availability 与新 Task authority 三类事实共同驱动，页面不得把其中任何一个状态冒充另一个。
 
 `新建任务`、`技能`、`MCP` 与 `定时任务` 位于 Task 列表上方的同一个纵向紧凑菜单，不使用窄侧栏中的卡片宫格，也不通过额外分组间距制造父子关系：
 
@@ -296,32 +296,40 @@ Skills                                                              10
 
 ### 5.4 MCP 服务
 
-> Capability：**只读目录当前可用，管理能力尚未接通**。Renderer 已实现严格解码、稳定 route 和只读视图；Workbench 没有可用 registry/committed activation 时发布 unavailable，接通后依据 preparation 与 Agent typed health 发布 ready/degraded。页面不据此提供任何配置、认证、刷新或 authority mutation。
+> Capability：**目标管理合同**。Renderer 通过 revision 1 strict snapshot 与 typed command 管理 Workbench-owned Desired Registry；Runtime/catalog availability 和 Admission Authority 仍是独立 Host 事实。管理 temporarily frozen、Runtime unavailable 或 registry 为空时页面保持可达并呈现真实恢复面，不能隐藏成没有服务或自行猜测可用动作。
 
 MCP 页面沿用 Skill 中心约 944 px 的内容宽度、24–28 px 标题尺度、搜索和行动优先分组，但对象密度不同：Skill 是需要辨识内容的资产卡片，MCP server 是需要快速扫描连接状态的单列连续行。
 
 ```text
-MCP                                                   Catalog generation 7
-View trusted servers and the tools they expose to MetaWork.
+MCP                                                        [ Add server ]
+Manage servers and the tools available to new tasks.
 
-[ Search servers and tools                                      ]
+[ Search servers and tools                              ] [ Refresh ]
+
+Restart MetaWork to apply connection changes.
+New tasks will not use MCP until restart. Open tasks keep their current access.
 
 Needs attention
-┃ Notion             notion          Remote · HTTP     0 tools   Sign-in required
+┃ Search             search          HTTP       Restart required
 
 Available servers
-┃ GitHub             github          Remote · HTTP     2 tools   Ready
+┃ GitHub             github          HTTP       2 of 5 tools available
 
 Disabled
-┃ Filesystem         local_files     Local · stdio     1 tool    Disabled
+┃ Filesystem         local_files     stdio      Disabled
 ```
 
-- 分组顺序固定为 `Needs attention / Available servers / Disabled`，空分组不渲染；状态栏同时使用细色轨、文字和语义图标，不能只靠颜色。`needs_authentication / unreachable / invalid_catalog` 进入 attention；
-- 每行以服务 display name 为主标题，namespace 使用 monospace，右侧依次放连接类型、工具数和状态。搜索只覆盖 display name、namespace、transport 与 Host 发布的 canonical tool name；不检索 Renderer 不持有的 schema 或原始配置；
-- 点击行打开右侧详情 drawer，窄窗为整页。详情只重复 Host 已清洗的状态、transport、工具数、safe diagnostic 和 tool name 目录；关闭、Escape、焦点陷阱与焦点归还沿用 Skill drawer 的可访问性规则；
-- `redacted = true` 时详情明确说明 Host 移除了敏感目录文本；Renderer 不展示或重建 command、args、environment、完整 URL、headers、credential、OAuth 数据、raw diagnostic、schema body、fingerprint 或 AgentCore handle；
-- 页面当前没有 mutation，不显示 Add、Sign in、Enable/Disable、Reconnect、Delete、Refresh、逐工具开关、Resources、Prompts、Apps 或 marketplace 占位。将来接入时，服务配置、已发现目录和实际授权工具必须保持三个不同事实；新增服务默认不能扩大现有 authority，刷新必须是显式 typed transaction；
-- 交互基线参考 VS Code、Claude、Cursor、Continue 与 Hermes Desktop 的成熟 MCP 组织方式。Hermes 提供的配置/目录/工具分层、默认关闭新服务、逐服务工具范围与显式 reload 被吸收为约束；MetaWork 不复制其配置格式、市场数据或 publisher 信任结论。没有 MetaWork-owned 可信 catalog、签名与 publisher verification 前不实现市场。
+- Header 只有 `Add server` 主动作与 `Refresh` 次级动作。Add drawer 第一阶段只接受 display name 与无认证 HTTPS/精确 loopback HTTP endpoint；Host 生成 identity/namespace，新 server 默认 disabled、allowlist 为空。页面不接受自定义 header、secret、OAuth、任意 stdio command/argv 或完整配置导入；
+- 分组顺序固定为 `Needs attention / Available servers / Disabled`，空分组不渲染；状态同时使用细色轨、文字和语义图标，不能只靠颜色。`needs_authentication / unreachable / invalid_catalog / restart_required / management recovery` 进入 attention；
+- 每行以服务 display name 为主标题，namespace 使用 monospace，右侧依次放连接类型、工具授权摘要和结构化状态。desired enabled、Runtime health 与 new Task access 必须分开；搜索只覆盖 display name、namespace、transport 与 Host 发布的 canonical tool name，不检索 Renderer 不持有的 schema 或原始配置；
+- 点击行打开右侧详情 drawer，窄窗为整页。详情按 `Configuration / Runtime / Tools` 排列：Configuration 只显示安全 desired facts 与 Rename、Enable/Disable、Delete；Runtime 显示 typed health、safe diagnostic、runtime alignment 和 Refresh；Tools 显示 discovered、desired allowed 与 available to new tasks 三个事实并提供逐项开关。新发现工具默认关闭，配置中保留但当前未发现的工具必须明确标记 unavailable，不能静默丢失；
+- `runtimeAlignment = current` 时，Rename 和 tool-only mutation 可以在 Host 成功提交后立即影响页面与后续新 Task；loaded server 的启停、删除或连接配置变化进入 `restart_required`。新增/删除 disabled server 或删除仍 invalid/missing-auth 的未加载 server 不得错误关闭其他 MCP。配置完整恢复到当前 Runtime Manifest 可证明的状态时，restart banner 必须消失；
+- `restart_required` banner 必须说明“重启前新任务不会使用 MCP；已打开任务保持当前权限”。Enable/Disable/Delete 确认不得暗示既有 Task 已撤权；本期没有既有 Session 热更新或紧急撤权能力。`runtimeAlignment = unknown` 或 management outcome unknown 时禁用普通编辑，隐藏未经确认的 desired 列表并提供重启/恢复说明；
+- Refresh 只刷新当前 Runtime catalog，不应用 pending connection configuration。refreshing 时禁用会与 catalog/authority 冲突的动作；失败保持 fail-closed new Task access，不恢复旧 catalog selection。页面导航与普通 Task 不被冻结；
+- `redacted = true` 时详情明确说明 Host 移除了敏感文本；Renderer 不展示或重建 command、args、environment、完整 URL、headers、credential、OAuth 数据、raw diagnostic、schema body、Runtime/absence fingerprint 或 AgentCore handle；
+- Rename、Enable/Disable、Delete 与工具开关都使用当前 `expectedDesiredGeneration`，stale result 触发完整 snapshot resync，不在 Renderer 合并 registry。command pending 只禁用同一 server 的冲突动作；outcome unknown 由顶层 management health 接管，不能盲目重试；
+- 空 registry 是可管理的正常空状态，显示 Add server；management capability 未接通才显示不可用说明。没有 MetaWork-owned 可信 catalog、签名与 publisher verification 前不显示 marketplace、推荐、publisher trust、Resources、Prompts、Apps 或占位入口；
+- 交互基线参考 VS Code、Claude、Cursor、Continue 与 Hermes Desktop 的成熟 MCP 组织方式。配置/目录/工具分层、默认关闭新服务、逐服务工具范围与显式 reload 被吸收为约束；MetaWork 不复制其配置格式、市场数据或 publisher 信任结论。
 
 ### 5.5 定时任务
 
@@ -964,7 +972,7 @@ Account operation 在设置中的投影如下：
 | cancel / terminal failure | 恢复已提交默认配置，不保留失效候选                                 | 恢复已提交默认配置，不保留失效候选             | 取消明确说明未应用更改；失败说明原因与旧默认仍有效，不能留下永久 disabled selector |
 | `reauth_required`         | 保留脱敏事实但禁用 catalog mutation                                | 保留脱敏事实但禁用 catalog mutation            | 把重新认证作为当前恢复动作，不能清空 Workspace、Task 或已有 execution 事实         |
 
-Skill 中心、MCP 与定时任务按 §5.2–§5.5 进入 Workbench 一级能力导航；MCP 使用稳定入口和 Host-owned availability 区分“页面可达”与“管理能力可用”，不可用时只呈现说明。其他连接器和 IM 频道仍只有在真实接通并形成清晰产品 owner 后才进入导航，不照搬其他 Agent 产品的信息架构。
+Skill 中心、MCP 与定时任务按 §5.2–§5.5 进入 Workbench 一级能力导航；MCP 使用稳定入口，并分别消费 Host-owned management health、Runtime/catalog availability 与 new Task access。空 registry 是可管理空状态，management capability 未接通或 outcome unknown 才进入对应不可用/恢复面；Renderer 不从 Runtime ready 推导管理动作。其他连接器和 IM 频道仍只有在真实接通并形成清晰产品 owner 后才进入导航，不照搬其他 Agent 产品的信息架构。
 
 ## 15. 国际化
 

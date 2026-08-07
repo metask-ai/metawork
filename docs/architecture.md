@@ -73,7 +73,7 @@ Application 是 MetaWork 产品事实与行为的逻辑边界。它不是统一�
 
 Application 内部如何拆分 owner 不属于本图，见 [Application 内部架构](application-architecture.md)。Application 的产品 policy 不依赖 DOM、React tab、Toast、JSX state 或 WebView URL。
 
-MCP 不形成第五个 Application owner。Workbench 拥有 registry、credential locator/恢复、产品状态、工具 authority、Task binding 与安全 projection；Agent 拥有运行期 transport、secret copy、AgentCore descriptor/catalog/selection 与 typed health；App 的 `app/mcp_platform.zig` 只注入 `<MetaWork data dir>/mcp` 的目录单写锁、独立系统 credential service、stdio/network capability并编排启动/关闭。Account 不参与 MCP，Bridge 仍只运输 Workbench projection，AgentCore 继续唯一拥有 MCP 协议、JSON-RPC、协商和 tool binding 语义。
+MCP 不形成第五个 Application owner。Workbench 拥有 Desired Registry、credential locator/恢复、与当前 Agent Runtime 同寿命的 Runtime Manifest、产品状态、工具 policy、Admission Authority、Task binding 与安全 projection；Agent 拥有运行期 transport、secret copy、AgentCore descriptor/catalog/selection、Activation 与 typed health；App 的 `app/mcp_platform.zig` 只注入 `<MetaWork data dir>/mcp` 的目录单写锁、独立系统 credential service、stdio/network capability并编排启动/关闭。Runtime Manifest 只记录已被当前 Runtime 接管的 descriptor fingerprint 或 disabled/invalid/missing-authentication 等安全 absence proof，不保存 secret、不进入 Bridge、不跨 Runtime 持久化；Workbench 用它与 target desired 的纯 compatibility 关系派生 `current | restart_required | unknown`，而不是比较 registry generation。新 Task 只消费 Workbench 原子提交的 Admission Authority，Bridge 与 Renderer 不得绕回 Agent current selection。Account 不参与 MCP，Bridge 仍只运输 Workbench projection 与 typed intent，AgentCore 继续唯一拥有 MCP 协议、JSON-RPC、协商和 tool binding 语义。
 
 ### 3.4 AgentCore
 
