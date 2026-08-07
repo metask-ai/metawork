@@ -23,6 +23,12 @@ pub const uninstall_skill = "metawork.skills.uninstall";
 pub const retry_skill = "metawork.skills.retry";
 pub const export_skill = "metawork.skills.export";
 pub const skill_detail = "metawork.skills.detail";
+pub const mcp_create_http_server = "metawork.mcp.createHttpServer";
+pub const mcp_rename_server = "metawork.mcp.renameServer";
+pub const mcp_set_server_enabled = "metawork.mcp.setServerEnabled";
+pub const mcp_set_allowed_tools = "metawork.mcp.setAllowedTools";
+pub const mcp_remove_server = "metawork.mcp.removeServer";
+pub const mcp_refresh_catalog = "metawork.mcp.refreshCatalog";
 pub const snapshot = "metawork.workbench.snapshot";
 pub const snapshot_chunk = "metawork.workbench.snapshot.chunk";
 pub const account_begin_login = "metawork.account.beginLogin";
@@ -71,6 +77,12 @@ pub const product = [_][]const u8{
     retry_skill,
     export_skill,
     skill_detail,
+    mcp_create_http_server,
+    mcp_rename_server,
+    mcp_set_server_enabled,
+    mcp_set_allowed_tools,
+    mcp_remove_server,
+    mcp_refresh_catalog,
     snapshot,
     snapshot_chunk,
     account_begin_login,

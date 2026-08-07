@@ -466,6 +466,7 @@ pub const ManagementOutcome = enum {
     unchanged,
     saved,
     saved_recovery_required,
+    stale_generation,
     rejected,
     indeterminate,
 };

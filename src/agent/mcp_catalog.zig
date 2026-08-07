@@ -78,6 +78,12 @@ pub const Selection = opaque {
         owned.arena.deinit();
         allocator.destroy(owned);
     }
+
+    /// Safe product facts for the exact selectors encoded by this authority.
+    /// The names are owned by the Selection and never expose schema or ABI data.
+    pub fn selectedTools(self: *const Selection) []const ActivationTool {
+        return selectionStorageConst(self).published_tools;
+    }
 };
 
 pub const ActivationState = enum {
@@ -195,6 +201,7 @@ const SelectionStorage = struct {
     generation: u64,
     arena: std.heap.ArenaAllocator,
     raw_selectors: []wire.McpSelectorV1,
+    published_tools: []const ActivationTool,
 };
 
 const ActivationStorage = struct {
@@ -287,6 +294,7 @@ pub fn createSelection(
         .generation = projection_storage.generation,
         .arena = std.heap.ArenaAllocator.init(allocator),
         .raw_selectors = &.{},
+        .published_tools = &.{},
     };
     errdefer storage.arena.deinit();
     const arena = storage.arena.allocator();
@@ -339,6 +347,8 @@ pub fn createSelectionForActivation(
 
     var selectors: std.ArrayList(Selector) = .empty;
     defer selectors.deinit(allocator);
+    var selected_tools: std.ArrayList(ActivationTool) = .empty;
+    defer selected_tools.deinit(allocator);
     const projection = projectionStorageConst(storage.projection);
     for (storage.published_servers) |server| {
         var policy: ?ServerAllowlist = null;
@@ -379,15 +389,22 @@ pub fn createSelectionForActivation(
                 .binding_identity = server.binding_identity,
                 .tool_name = tool,
             });
+            try selected_tools.append(allocator, .{
+                .server_id = server.id,
+                .name = tool,
+            });
         }
     }
     if (selectors.items.len == 0) return null;
-    return try createSelection(
+    const selection = try createSelection(
         allocator,
         owner_id,
         storage.projection,
         selectors.items,
     );
+    errdefer selection.deinit();
+    try publishSelectionTools(selection, selected_tools.items);
+    return selection;
 }
 
 /// Consumes `projection` on success. Failure leaves it owned by the caller.
@@ -415,6 +432,7 @@ pub fn createActivation(
         .published_tools = &.{},
         .arena = std.heap.ArenaAllocator.init(allocator),
     };
+    errdefer if (storage.selection) |selection| selection.deinit();
     errdefer storage.arena.deinit();
     const arena = storage.arena.allocator();
     const health = try arena.alloc(ActivationServer, expected_servers.len);
@@ -507,6 +525,7 @@ pub fn createActivation(
             projection,
             selectors.items,
         );
+        try publishSelectionTools(storage.selection.?, selected_tools.items);
     }
     storage.published_servers = health;
     const published_tools = try arena.alloc(ActivationTool, selected_tools.items.len);
@@ -516,6 +535,21 @@ pub fn createActivation(
     };
     storage.published_tools = published_tools;
     return @ptrCast(storage);
+}
+
+fn publishSelectionTools(
+    selection: *Selection,
+    tools: []const ActivationTool,
+) std.mem.Allocator.Error!void {
+    const storage = selectionStorage(selection);
+    std.debug.assert(storage.published_tools.len == 0);
+    const arena = storage.arena.allocator();
+    const published = try arena.alloc(ActivationTool, tools.len);
+    for (tools, published) |source, *target| target.* = .{
+        .server_id = try arena.dupe(u8, source.server_id),
+        .name = try arena.dupe(u8, source.name),
+    };
+    storage.published_tools = published;
 }
 
 pub fn belongsTo(selection: *const Selection, owner_id: u64) bool {
@@ -1005,5 +1039,14 @@ test "activation atomically intersects allowlists and publishes bounded health" 
     try std.testing.expectEqual(
         @as(u64, 1),
         rawSelectionReplacement(replacement).selector_count,
+    );
+    try std.testing.expectEqual(@as(usize, 1), replacement.selectedTools().len);
+    try std.testing.expectEqualStrings(
+        "search",
+        replacement.selectedTools()[0].server_id,
+    );
+    try std.testing.expectEqualStrings(
+        "search",
+        replacement.selectedTools()[0].name,
     );
 }

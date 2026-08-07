@@ -6,7 +6,8 @@ import { useI18n } from "../../i18n/context.ts";
 
 type McpServer = McpManagementView["servers"][number];
 
-const attentionStatuses = new Set<McpServer["status"]>([
+const attentionStatuses = new Set<McpServer["runtimeStatus"]>([
+  "not_loaded",
   "needs_authentication",
   "unreachable",
   "invalid_catalog",
@@ -40,7 +41,7 @@ function McpServerRow({
     <li>
       <button
         className="mcp-server-row focus-ring"
-        data-status={server.status}
+        data-status={server.runtimeStatus}
         onClick={(event) => onOpen(server, event.currentTarget)}
       >
         <span className="mcp-status-rail" aria-hidden="true" />
@@ -60,7 +61,7 @@ function McpServerRow({
           )}
         </span>
         <span className="mcp-server-state">
-          {t(`mcp.status.${server.status}`)}
+          {t(`mcp.status.${server.runtimeStatus}`)}
         </span>
         <Icon name="chevron-right" />
       </button>
@@ -91,11 +92,13 @@ export function McpPage({
   const selected =
     management.servers.find((server) => server.id === selectedId) ?? null;
   const attention = visibleServers.filter((server) =>
-    attentionStatuses.has(server.status),
+    attentionStatuses.has(server.runtimeStatus),
   );
-  const ready = visibleServers.filter((server) => server.status === "ready");
+  const ready = visibleServers.filter(
+    (server) => server.runtimeStatus === "ready",
+  );
   const disabled = visibleServers.filter(
-    (server) => server.status === "disabled",
+    (server) => server.runtimeStatus === "disabled",
   );
 
   useEffect(() => title.current?.focus(), []);
@@ -181,10 +184,10 @@ export function McpPage({
             </h1>
             <p>{t("mcp.subtitle")}</p>
           </div>
-          {management.generation && (
+          {management.desiredGeneration && (
             <span className="mcp-catalog-revision">
               {t("mcp.catalog_generation", {
-                generation: management.generation,
+                generation: management.desiredGeneration,
               })}
             </span>
           )}
@@ -272,8 +275,8 @@ export function McpPage({
               <dl className="mcp-detail-facts">
                 <div>
                   <dt>{t("mcp.detail.status")}</dt>
-                  <dd data-status={selected.status}>
-                    {t(`mcp.status.${selected.status}`)}
+                  <dd data-status={selected.runtimeStatus}>
+                    {t(`mcp.status.${selected.runtimeStatus}`)}
                   </dd>
                 </div>
                 <div>

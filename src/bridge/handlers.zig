@@ -61,6 +61,30 @@ pub const SkillReimport = struct {
     previewId: []const u8,
 };
 pub const SkillIdentity = struct { installId: []const u8 };
+pub const McpCreateHttpServer = struct {
+    expectedDesiredGeneration: []const u8,
+    displayName: []const u8,
+    endpoint: []const u8,
+};
+pub const McpServerRename = struct {
+    expectedDesiredGeneration: []const u8,
+    serverId: []const u8,
+    displayName: []const u8,
+};
+pub const McpServerEnable = struct {
+    expectedDesiredGeneration: []const u8,
+    serverId: []const u8,
+    enabled: bool,
+};
+pub const McpAllowedTools = struct {
+    expectedDesiredGeneration: []const u8,
+    serverId: []const u8,
+    toolNames: []const []const u8,
+};
+pub const McpServerIdentity = struct {
+    expectedDesiredGeneration: []const u8,
+    serverId: []const u8,
+};
 pub const TaskWorkspaceIntent = struct {
     kind: []const u8,
     workspaceId: ?[]const u8 = null,

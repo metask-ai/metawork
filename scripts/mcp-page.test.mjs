@@ -53,16 +53,33 @@ const servers = [
     displayName: "GitHub",
     namespace: "github",
     transport: "streamable_http",
-    status: "ready",
+    desiredEnabled: true,
+    runtimeStatus: "ready",
+    newTaskAccess: "available",
     safeDiagnostic: "",
-    tools: [{ name: "search_repositories" }, { name: "create_issue" }],
+    tools: [
+      {
+        name: "search_repositories",
+        discovered: true,
+        desiredAllowed: true,
+        availableToNewTasks: true,
+      },
+      {
+        name: "create_issue",
+        discovered: true,
+        desiredAllowed: true,
+        availableToNewTasks: true,
+      },
+    ],
   },
   {
     id: "notion-binding",
     displayName: "Notion",
     namespace: "notion",
     transport: "streamable_http",
-    status: "needs_authentication",
+    desiredEnabled: true,
+    runtimeStatus: "needs_authentication",
+    newTaskAccess: "unavailable",
     safeDiagnostic: "Sign in again to refresh this server's tools.",
     tools: [],
   },
@@ -71,9 +88,18 @@ const servers = [
     displayName: "Filesystem",
     namespace: "local_files",
     transport: "stdio",
-    status: "disabled",
+    desiredEnabled: false,
+    runtimeStatus: "disabled",
+    newTaskAccess: "not_allowed",
     safeDiagnostic: "",
-    tools: [{ name: "read_file" }],
+    tools: [
+      {
+        name: "read_file",
+        discovered: true,
+        desiredAllowed: true,
+        availableToNewTasks: false,
+      },
+    ],
   },
 ];
 
@@ -99,8 +125,11 @@ test("MCP page groups verified server state without presenting a marketplace", (
   render(
     pageElement({
       availability: "degraded",
+      managementHealth: "ready",
+      operation: "idle",
+      desiredGeneration: "7",
+      runtimeAlignment: "current",
       redacted: false,
-      generation: "7",
       servers,
     }),
   );
@@ -119,8 +148,11 @@ test("MCP detail exposes bounded product facts and the discovered tool catalog",
   render(
     pageElement({
       availability: "degraded",
+      managementHealth: "ready",
+      operation: "idle",
+      desiredGeneration: "7",
+      runtimeAlignment: "current",
       redacted: false,
-      generation: "7",
       servers,
     }),
   );
@@ -139,8 +171,11 @@ test("MCP page distinguishes unavailable, empty, filtered, and redacted states",
   const view = render(
     pageElement({
       availability: "unavailable",
+      managementHealth: "unavailable",
+      operation: "idle",
+      desiredGeneration: null,
+      runtimeAlignment: "unknown",
       redacted: false,
-      generation: null,
       servers: [],
     }),
   );
@@ -149,8 +184,11 @@ test("MCP page distinguishes unavailable, empty, filtered, and redacted states",
   view.rerender(
     pageElement({
       availability: "ready",
+      managementHealth: "ready",
+      operation: "idle",
+      desiredGeneration: "1",
+      runtimeAlignment: "current",
       redacted: false,
-      generation: "1",
       servers: [],
     }),
   );
@@ -160,8 +198,11 @@ test("MCP page distinguishes unavailable, empty, filtered, and redacted states",
     pageElement(
       {
         availability: "ready",
+        managementHealth: "ready",
+        operation: "idle",
+        desiredGeneration: "2",
+        runtimeAlignment: "current",
         redacted: true,
-        generation: "2",
         servers: [servers[0]],
       },
       "missing",

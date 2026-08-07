@@ -71,8 +71,11 @@ export const initialWorkbenchState: WorkbenchState = {
     },
     mcp: {
       availability: "unavailable",
+      managementHealth: "unavailable",
+      operation: "idle",
+      desiredGeneration: null,
+      runtimeAlignment: "unknown",
       redacted: false,
-      generation: null,
       servers: [],
     },
     workspaces: [],

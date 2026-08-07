@@ -53,6 +53,7 @@ pub const Error = lifecycle.Error || scheduled_tasks_impl.Error || scheduled_tas
     WorkspaceEpochExhausted,
     CatalogLoading,
     CatalogUnavailable,
+    McpManagementUnavailable,
     CatalogRequestGenerationExhausted,
     StaleCatalog,
     SkillNotFound,
@@ -173,7 +174,8 @@ pub const CatalogAvailability = enum {
 };
 
 const McpAvailability = enum { unavailable, ready, degraded };
-const McpServerStatus = enum {
+const McpRuntimeStatus = enum {
+    not_loaded,
     ready,
     disabled,
     needs_authentication,
@@ -410,9 +412,12 @@ fn findMcpServer(
 fn buildMcpRefreshAllowlists(
     allocator: std.mem.Allocator,
     mcp: *const McpProductState,
-    desired: mcp_configuration.RegistryWire,
+    desired: ?mcp_configuration.RegistryWire,
 ) std.mem.Allocator.Error![]const lifecycle.McpServerAllowlist {
-    const startup = mcp.preparation.registry.?.value;
+    const startup = if (mcp.preparation.registry) |registry|
+        registry.value
+    else
+        return allocator.alloc(lifecycle.McpServerAllowlist, 0);
     var count: usize = 0;
     for (mcp.preparation.server_states) |state| {
         if (state == .eligible) count += 1;
@@ -421,7 +426,10 @@ fn buildMcpRefreshAllowlists(
     var write: usize = 0;
     for (startup.servers, mcp.preparation.server_states) |server, state| {
         if (state != .eligible) continue;
-        const target = findMcpServer(desired.servers, server.id);
+        const target = if (desired) |registry|
+            findMcpServer(registry.servers, server.id)
+        else
+            null;
         const tools = if (target) |value| if (value.enabled) value.tools else &.{} else &.{};
         const owned_tools = try allocator.alloc([]const u8, tools.len);
         for (tools, owned_tools) |tool, *owned|
@@ -3002,23 +3010,16 @@ pub const Workbench = struct {
         if (!mcp.committed or mcp.preparation.state != .available)
             return error.CatalogUnavailable;
         if (mcp.refresh_job != null) return error.CatalogLoading;
+        const management = if (mcp.management) |*value| value else return error.CatalogUnavailable;
+        const inspection = management.inspect();
+        if (inspection.health != .ready) return error.McpManagementUnavailable;
         if (mcp.refresh_request_generation == std.math.maxInt(u64))
             return error.CatalogRequestGenerationExhausted;
         const generation = mcp.refresh_request_generation + 1;
         var refresh_arena = std.heap.ArenaAllocator.init(self.allocator);
         errdefer refresh_arena.deinit();
-        const desired = if (mcp.management) |*management|
-            management.desiredRegistry() orelse mcp.preparation.registry.?.value
-        else
-            mcp.preparation.registry.?.value;
-        const alignment = if (mcp.management) |*management|
-            management.runtimeAlignmentFor(desired)
-        else
-            mcp_configuration.RuntimeAlignment.current;
-        const management_ready = if (mcp.management) |*management|
-            management.inspect().health == .ready
-        else
-            true;
+        const desired = management.desiredRegistry();
+        const alignment = inspection.runtime_alignment;
         const allowlists = try buildMcpRefreshAllowlists(
             refresh_arena.allocator(),
             mcp,
@@ -3033,7 +3034,7 @@ pub const Workbench = struct {
             .request_generation = generation,
             .arena = refresh_arena,
             .allowlists = allowlists,
-            .build_admission = management_ready and alignment == .current,
+            .build_admission = alignment == .current,
         };
         self.blockMcpAdmission(mcp, .refreshing);
         errdefer self.blockMcpAdmission(mcp, .activation_unavailable);
@@ -4691,6 +4692,8 @@ pub const Workbench = struct {
         const mcp = if (self.mcp) |*value| value else return .rejected;
         if (mcp.refresh_job != null) return .rejected;
         const management = if (mcp.management) |*value| value else return .rejected;
+        if (!mcpExpectedGenerationMatches(management, expected_generation))
+            return .stale_generation;
         var preparation = try management.prepareCreateHttpServer(expected_generation, input);
         return try self.commitMcpMutation(mcp, &preparation);
     }
@@ -4704,6 +4707,8 @@ pub const Workbench = struct {
         const mcp = if (self.mcp) |*value| value else return .rejected;
         if (mcp.refresh_job != null) return .rejected;
         const management = if (mcp.management) |*value| value else return .rejected;
+        if (!mcpExpectedGenerationMatches(management, expected_generation))
+            return .stale_generation;
         var preparation = try management.prepareRenameServer(expected_generation, input);
         return try self.commitMcpMutation(mcp, &preparation);
     }
@@ -4717,6 +4722,8 @@ pub const Workbench = struct {
         const mcp = if (self.mcp) |*value| value else return .rejected;
         if (mcp.refresh_job != null) return .rejected;
         const management = if (mcp.management) |*value| value else return .rejected;
+        if (!mcpExpectedGenerationMatches(management, expected_generation))
+            return .stale_generation;
         var preparation = try management.prepareSetServerEnabled(expected_generation, input);
         return try self.commitMcpMutation(mcp, &preparation);
     }
@@ -4730,6 +4737,8 @@ pub const Workbench = struct {
         const mcp = if (self.mcp) |*value| value else return .rejected;
         if (mcp.refresh_job != null) return .rejected;
         const management = if (mcp.management) |*value| value else return .rejected;
+        if (!mcpExpectedGenerationMatches(management, expected_generation))
+            return .stale_generation;
         var preparation = try management.prepareSetAllowedTools(expected_generation, input);
         return try self.commitMcpMutation(mcp, &preparation);
     }
@@ -4743,6 +4752,8 @@ pub const Workbench = struct {
         const mcp = if (self.mcp) |*value| value else return .rejected;
         if (mcp.refresh_job != null) return .rejected;
         const management = if (mcp.management) |*value| value else return .rejected;
+        if (!mcpExpectedGenerationMatches(management, expected_generation))
+            return .stale_generation;
         var preparation = try management.prepareRemoveServer(expected_generation, server_id);
         return try self.commitMcpMutation(mcp, &preparation);
     }
@@ -4762,22 +4773,44 @@ pub const Workbench = struct {
                 defer if (candidate_owned) candidate.deinit();
                 const management = &mcp.management.?;
                 const outcome = try management.commitPreparedMutation(mutation);
-                switch (outcome) {
+                const reported_outcome = if (outcome == .saved_recovery_required and
+                    management.inspect().health == .outcome_unknown)
+                    mcp_configuration.ManagementOutcome.indeterminate
+                else
+                    outcome;
+                var changed = false;
+                switch (reported_outcome) {
                     .saved, .saved_recovery_required => {
                         self.replaceMcpAdmission(mcp, candidate);
                         candidate_owned = false;
+                        changed = true;
                     },
-                    .indeterminate => self.blockMcpAdmission(
-                        mcp,
-                        .persistence_outcome_unknown,
-                    ),
-                    .rejected => if (management.inspect().health != .ready)
-                        self.blockMcpAdmissionForCurrentState(mcp),
-                    .unchanged => unreachable,
+                    .indeterminate => {
+                        self.blockMcpAdmission(mcp, .persistence_outcome_unknown);
+                        changed = true;
+                    },
+                    .rejected => if (management.inspect().health != .ready) {
+                        self.blockMcpAdmissionForCurrentState(mcp);
+                        changed = true;
+                    },
+                    .unchanged, .stale_generation => unreachable,
                 }
-                return outcome;
+                if (changed) self.bumpRevision();
+                return reported_outcome;
             },
         }
+    }
+
+    fn mcpExpectedGenerationMatches(
+        management: *const mcp_configuration.ManagementPort,
+        expected_generation: u64,
+    ) bool {
+        const inspection = management.inspect();
+        if (inspection.health == .outcome_unknown) return true;
+        if (inspection.desired_generation) |generation|
+            return expected_generation == generation;
+        if (inspection.health == .ready) return expected_generation == 0;
+        return true;
     }
 
     fn mcpAdmissionForTarget(
@@ -4847,11 +4880,11 @@ pub const Workbench = struct {
 
     fn mcpAvailability(self: *const Workbench) McpAvailability {
         const mcp = if (self.mcp) |*value| value else return .unavailable;
-        if (!mcp.committed or mcp.preparation.state != .available or
-            mcp.preparation.registry == null)
+        if (!mcp.committed or mcp.preparation.state != .available)
             return .unavailable;
+        if (mcp.preparation.registry == null) return .ready;
         for (mcp.preparation.registry.?.value.servers, mcp.preparation.server_states) |server, state| {
-            const status = self.mcpServerStatus(mcp, server.id, state);
+            const status = self.mcpRuntimeServerStatus(mcp, server.id, state);
             if (status == .needs_authentication or status == .@"unreachable" or
                 status == .invalid_catalog)
                 return .degraded;
@@ -4859,12 +4892,12 @@ pub const Workbench = struct {
         return .ready;
     }
 
-    fn mcpServerStatus(
+    fn mcpRuntimeServerStatus(
         self: *const Workbench,
         mcp: *const McpProductState,
         server_id: []const u8,
         preparation: mcp_configuration.ServerPreparationState,
-    ) McpServerStatus {
+    ) McpRuntimeStatus {
         _ = self;
         return switch (preparation) {
             .disabled => .disabled,
@@ -4886,65 +4919,215 @@ pub const Workbench = struct {
         };
     }
 
+    fn mcpDesiredServerRuntimeStatus(
+        self: *const Workbench,
+        mcp: *const McpProductState,
+        server_id: []const u8,
+    ) McpRuntimeStatus {
+        const startup = mcp.preparation.registry orelse return .not_loaded;
+        for (startup.value.servers, mcp.preparation.server_states) |server, state|
+            if (std.mem.eql(u8, server.id, server_id))
+                return self.mcpRuntimeServerStatus(mcp, server_id, state);
+        return .not_loaded;
+    }
+
+    fn mcpToolSelectedForNewTask(
+        mcp: *const McpProductState,
+        server_id: []const u8,
+        tool_name: []const u8,
+    ) bool {
+        const ready = switch (mcp.admission) {
+            .ready => |value| value,
+            .blocked => return false,
+        };
+        const selection = ready.selection orelse return false;
+        for (selection.selectedTools()) |tool|
+            if (std.mem.eql(u8, tool.server_id, server_id) and
+                std.mem.eql(u8, tool.name, tool_name)) return true;
+        return false;
+    }
+
+    fn mcpServerHasNewTaskAccess(
+        mcp: *const McpProductState,
+        server_id: []const u8,
+    ) bool {
+        const ready = switch (mcp.admission) {
+            .ready => |value| value,
+            .blocked => return false,
+        };
+        const selection = ready.selection orelse return false;
+        for (selection.selectedTools()) |tool|
+            if (std.mem.eql(u8, tool.server_id, server_id)) return true;
+        return false;
+    }
+
+    fn mcpNewTaskAccess(
+        mcp: *const McpProductState,
+        server_id: []const u8,
+    ) []const u8 {
+        return switch (mcp.admission) {
+            .ready => if (mcpServerHasNewTaskAccess(mcp, server_id))
+                "available"
+            else
+                "not_allowed",
+            .blocked => |reason| switch (reason) {
+                .pending_restart => "restart_required",
+                else => "unavailable",
+            },
+        };
+    }
+
+    fn desiredAllowsTool(server: mcp_configuration.ServerWire, name: []const u8) bool {
+        for (server.tools) |tool| if (std.mem.eql(u8, tool, name)) return true;
+        return false;
+    }
+
+    fn mcpPublishableText(value: []const u8) bool {
+        if (value.len == 0 or !std.unicode.utf8ValidateSlice(value)) return false;
+        for (value) |byte| if (byte < 0x20 or byte == 0x7f) return false;
+        return true;
+    }
+
+    fn mcpToolAlreadyPublished(
+        tools: []const []const u8,
+        index: usize,
+    ) bool {
+        for (tools[0..index]) |previous|
+            if (std.mem.eql(u8, previous, tools[index])) return true;
+        return false;
+    }
+
+    fn activationServerForId(
+        activation: *const lifecycle.McpActivation,
+        server_id: []const u8,
+    ) ?lifecycle.McpActivationServer {
+        for (activation.serverHealth()) |server|
+            if (std.mem.eql(u8, server.id, server_id)) return server;
+        return null;
+    }
+
+    fn mcpProjectionRedacted(
+        self: *const Workbench,
+        registry: ?mcp_configuration.RegistryWire,
+    ) bool {
+        const desired = registry orelse return false;
+        for (desired.servers) |server| {
+            if (self.containsKnownCredential(server.id) or
+                self.containsKnownCredential(server.namespace) or
+                self.containsKnownCredential(server.display_name)) return true;
+            for (server.tools) |tool|
+                if (self.containsKnownCredential(tool)) return true;
+        }
+        return false;
+    }
+
+    fn writeMcpTool(
+        self: *Workbench,
+        writer: *std.Io.Writer,
+        mcp: *const McpProductState,
+        server: mcp_configuration.ServerWire,
+        name: []const u8,
+        discovered: bool,
+    ) Error!void {
+        writer.writeAll("{\"name\":") catch return error.SnapshotTooLarge;
+        try self.projectedJsonValueWithKnownCredentials(writer, name);
+        writer.print(",\"discovered\":{},\"desiredAllowed\":{},\"availableToNewTasks\":{}}}", .{
+            discovered,
+            desiredAllowsTool(server, name),
+            mcpToolSelectedForNewTask(mcp, server.id, name),
+        }) catch return error.SnapshotTooLarge;
+    }
+
     fn writeMcpProjection(
         self: *Workbench,
         writer: *std.Io.Writer,
     ) Error!void {
-        const availability = self.mcpAvailability();
-        if (availability == .unavailable) {
-            writer.writeAll("{\"availability\":\"unavailable\",\"redacted\":false,\"generation\":null,\"servers\":[]}") catch
+        const mcp = if (self.mcp) |*value| value else {
+            writer.writeAll("{\"availability\":\"unavailable\",\"managementHealth\":\"unavailable\",\"operation\":\"idle\",\"desiredGeneration\":null,\"runtimeAlignment\":\"unknown\",\"redacted\":false,\"servers\":[]}") catch
                 return error.SnapshotTooLarge;
             return;
-        }
-        const mcp = &self.mcp.?;
-        const registry = mcp.preparation.registry.?.value;
-        writer.print("{{\"availability\":\"{s}\",\"redacted\":{},\"generation\":\"{d}\",\"servers\":[", .{
-            @tagName(availability),
-            registry.servers.len != 0,
-            registry.generation,
+        };
+        const management = if (mcp.management) |*value| value else {
+            writer.writeAll("{\"availability\":\"unavailable\",\"managementHealth\":\"unavailable\",\"operation\":\"idle\",\"desiredGeneration\":null,\"runtimeAlignment\":\"unknown\",\"redacted\":false,\"servers\":[]}") catch
+                return error.SnapshotTooLarge;
+            return;
+        };
+        const inspection = management.inspect();
+        const trusted = inspection.health != .outcome_unknown and
+            (inspection.desired_generation != null or inspection.health == .ready);
+        const registry = if (trusted) management.desiredRegistry() else null;
+        writer.print("{{\"availability\":\"{s}\",\"managementHealth\":\"{s}\",\"operation\":\"{s}\",\"desiredGeneration\":", .{
+            @tagName(self.mcpAvailability()),
+            @tagName(inspection.health),
+            if (mcp.refresh_job != null) "refreshing" else "idle",
         }) catch return error.SnapshotTooLarge;
-        for (registry.servers, mcp.preparation.server_states, 0..) |server, state, index| {
+        if (trusted) writer.print("\"{d}\"", .{inspection.desired_generation orelse 0}) catch
+            return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.print(",\"runtimeAlignment\":\"{s}\",\"redacted\":{},\"servers\":[", .{
+            if (trusted) @tagName(inspection.runtime_alignment) else "unknown",
+            self.mcpProjectionRedacted(registry),
+        }) catch return error.SnapshotTooLarge;
+        const servers = if (registry) |value| value.servers else &.{};
+        for (servers, 0..) |server, index| {
             if (index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
-            const status = self.mcpServerStatus(mcp, server.id, state);
+            const status = self.mcpDesiredServerRuntimeStatus(mcp, server.id);
             writer.writeAll("{\"id\":") catch return error.SnapshotTooLarge;
             try self.projectedJsonValueWithKnownCredentials(writer, server.id);
             writer.writeAll(",\"displayName\":") catch return error.SnapshotTooLarge;
-            const display_name = switch (state) {
-                .invalid_catalog => |problem| if (problem == .invalid_display_name)
-                    server.id
-                else
-                    server.display_name,
-                else => server.display_name,
-            };
             try self.projectedJsonValueWithKnownCredentials(
                 writer,
-                display_name,
+                if (mcpPublishableText(server.display_name))
+                    server.display_name
+                else
+                    server.id,
             );
             writer.writeAll(",\"namespace\":") catch return error.SnapshotTooLarge;
             try self.projectedJsonValueWithKnownCredentials(writer, server.namespace);
-            writer.print(",\"transport\":\"{s}\",\"status\":\"{s}\",\"safeDiagnostic\":", .{
+            writer.print(",\"transport\":\"{s}\",\"desiredEnabled\":{},\"runtimeStatus\":\"{s}\",\"newTaskAccess\":\"{s}\",\"safeDiagnostic\":", .{
                 if (std.mem.eql(u8, server.transport.kind, "streamable_http"))
                     "streamable_http"
                 else
                     "stdio",
+                server.enabled,
                 @tagName(status),
+                mcpNewTaskAccess(mcp, server.id),
             }) catch return error.SnapshotTooLarge;
             try self.projectedJsonValueWithKnownCredentials(writer, switch (status) {
-                .ready, .disabled => "",
+                .not_loaded, .ready, .disabled => "",
                 .needs_authentication => "Credential is unavailable",
                 .@"unreachable" => "Server is unavailable",
                 .invalid_catalog => "Configuration or catalog is invalid",
             });
             writer.writeAll(",\"tools\":[") catch return error.SnapshotTooLarge;
             var tool_count: usize = 0;
-            if (mcp.activation) |activation| for (activation.selectedTools()) |tool| {
-                if (!std.mem.eql(u8, tool.server_id, server.id)) continue;
+            const activation_server = if (mcp.activation) |activation|
+                activationServerForId(activation, server.id)
+            else
+                null;
+            for (server.tools, 0..) |tool, desired_index| {
+                if (!mcpPublishableText(tool) or
+                    mcpToolAlreadyPublished(server.tools, desired_index)) continue;
                 if (tool_count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
                 tool_count += 1;
-                writer.writeAll("{\"name\":") catch return error.SnapshotTooLarge;
-                try self.projectedJsonValueWithKnownCredentials(writer, tool.name);
-                writer.writeByte('}') catch return error.SnapshotTooLarge;
-            };
+                var discovered = false;
+                if (mcp.activation) |activation| if (activation_server) |bound|
+                    for (activation.catalogTools()) |catalog_tool|
+                        if (std.mem.eql(u8, &catalog_tool.binding_identity, &bound.binding_identity) and
+                            std.mem.eql(u8, catalog_tool.name, tool))
+                        {
+                            discovered = true;
+                            break;
+                        };
+                try self.writeMcpTool(writer, mcp, server, tool, discovered);
+            }
+            if (mcp.activation) |activation| if (activation_server) |bound|
+                for (activation.catalogTools()) |tool| {
+                    if (!std.mem.eql(u8, &tool.binding_identity, &bound.binding_identity) or
+                        desiredAllowsTool(server, tool.name)) continue;
+                    if (tool_count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+                    tool_count += 1;
+                    try self.writeMcpTool(writer, mcp, server, tool.name, true);
+                };
             writer.writeAll("]}") catch return error.SnapshotTooLarge;
         }
         writer.writeAll("]}") catch return error.SnapshotTooLarge;
@@ -4985,7 +5168,10 @@ pub const Workbench = struct {
             self.schedule_persistence_health == .ready;
         const task_persistence_ready = self.task_persistence_health == .ready;
         const background_schedule_wake = self.schedule_background_available;
-        const mcp_management = self.mcpAvailability() != .unavailable;
+        const mcp_management = if (self.mcp) |*mcp|
+            mcp.committed and mcp.management != null
+        else
+            false;
         writer.print("{{\"revision\":\"{d}\",\"capabilities\":{{\"taskHistoryPersistence\":{},\"taskHistoryPersistenceHealth\":\"{s}\",\"conversationRecovery\":false,\"executionRebind\":false,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":false,\"persistentWorkspacePermissions\":false,\"automaticWorkspaces\":{},\"scheduledTasks\":{},\"scheduledTaskPersistence\":{},\"scheduledTaskPersistenceHealth\":\"{s}\",\"backgroundScheduleWake\":{},\"localSkillManagement\":{},\"skillManagementHealth\":\"{s}\",\"mcpManagement\":{}}},\"account\":", .{
             self.revision,
             task_persistence_ready,
@@ -13392,11 +13578,11 @@ test "MCP startup health commits a safe degraded Workbench projection" {
         fn failRegistry(_: ?*anyopaque, _: []const u8) mcp_configuration.PersistenceEffect {
             return .failed;
         }
-        fn unknownRegistry(_: ?*anyopaque, _: []const u8) mcp_configuration.PersistenceEffect {
-            return .outcome_unknown;
-        }
         fn clear(_: ?*anyopaque) mcp_configuration.PersistenceEffect {
             return .committed;
+        }
+        fn unknownClear(_: ?*anyopaque) mcp_configuration.PersistenceEffect {
+            return .outcome_unknown;
         }
         fn probe(_: ?*anyopaque, _: []const u8) mcp_configuration.CredentialPresence {
             return .missing;
@@ -13409,7 +13595,7 @@ test "MCP startup health commits a safe degraded Workbench projection" {
         }
     };
     const registry =
-        \\{"schema_version":1,"generation":9,"servers":[{"id":"local-files","namespace":"files","display_name":"Local files","enabled":true,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"stdio","command":"/private/hidden/mcp-server","arguments":[{"literal":"--serve"}],"environment":[]},"tools":["read_file"]},{"id":"disabled","namespace":"disabled","display_name":"Disabled","enabled":false,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"streamable_http","url":"https://private.example.test/mcp","headers":[]},"tools":[]}]}
+        \\{"schema_version":1,"generation":9,"servers":[{"id":"local-files","namespace":"files","display_name":"Local files","enabled":true,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"stdio","command":"/private/hidden/mcp-server","arguments":[{"literal":"--serve"}],"environment":[]},"tools":["read_file"]},{"id":"disabled","namespace":"disabled","display_name":"Disabled","enabled":false,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"streamable_http","url":"https://private.example.test/mcp","headers":[]},"tools":[]},{"id":"broken","namespace":"broken","display_name":"","enabled":false,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"streamable_http","url":"https://broken.example.test/mcp","headers":[]},"tools":["",""]}]}
     ;
     var preparation = try mcp_configuration.prepare(
         std.testing.allocator,
@@ -13481,17 +13667,22 @@ test "MCP startup health commits a safe degraded Workbench projection" {
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
-        "\"availability\":\"degraded\",\"redacted\":true,\"generation\":\"9\"",
+        "\"availability\":\"degraded\",\"managementHealth\":\"ready\",\"operation\":\"idle\",\"desiredGeneration\":\"9\",\"runtimeAlignment\":\"current\",\"redacted\":false",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
-        "\"status\":\"unreachable\"",
+        "\"runtimeStatus\":\"unreachable\"",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
-        "\"status\":\"disabled\"",
+        "\"runtimeStatus\":\"disabled\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"displayName\":\"broken\"",
     ) != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "/private/hidden") == null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "private.example.test") == null);
@@ -13506,6 +13697,7 @@ test "MCP startup health commits a safe degraded Workbench projection" {
         McpAdmissionBlockReason.activation_unavailable,
         workbench.mcp.?.admission.blocked,
     );
+    const revision_before_mutation = workbench.revision;
     try std.testing.expectEqual(
         mcp_configuration.ManagementOutcome.saved,
         try workbench.renameMcpServer(9, .{
@@ -13513,6 +13705,7 @@ test "MCP startup health commits a safe degraded Workbench projection" {
             .display_name = "Updated local files",
         }),
     );
+    try std.testing.expectEqual(revision_before_mutation + 1, workbench.revision);
     const after = workbench.inspectMcpDesiredConfiguration().?;
     try std.testing.expectEqual(@as(?u64, 10), after.desired_generation);
     try std.testing.expectEqual(
@@ -13572,7 +13765,9 @@ test "MCP startup health commits a safe degraded Workbench projection" {
         workbench.mcp.?.admission.blocked,
     );
     workbench.mcp.?.management.?.persistence.commit_registry_fn =
-        ManagementEffects.unknownRegistry;
+        ManagementEffects.registry;
+    workbench.mcp.?.management.?.persistence.clear_journal_fn =
+        ManagementEffects.unknownClear;
     try std.testing.expectEqual(
         mcp_configuration.ManagementOutcome.indeterminate,
         try workbench.setMcpServerEnabled(12, .{
@@ -13581,7 +13776,7 @@ test "MCP startup health commits a safe degraded Workbench projection" {
         }),
     );
     try std.testing.expectEqual(
-        @as(?u64, 12),
+        @as(?u64, 13),
         workbench.inspectMcpDesiredConfiguration().?.desired_generation,
     );
     try std.testing.expectEqual(
@@ -13593,7 +13788,7 @@ test "MCP startup health commits a safe degraded Workbench projection" {
     try std.testing.expect(std.mem.indexOf(
         u8,
         effective_snapshot,
-        "\"generation\":\"9\"",
+        "\"managementHealth\":\"outcome_unknown\",\"operation\":\"idle\",\"desiredGeneration\":null,\"runtimeAlignment\":\"unknown\",\"redacted\":false,\"servers\":[]",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
@@ -13624,7 +13819,7 @@ test "MCP startup health commits a safe degraded Workbench projection" {
     try std.testing.expect(workbench.mcp.?.refresh_job == null);
     try std.testing.expect(workbench.mcp.?.activation_failed);
     try std.testing.expectEqual(
-        @as(?u64, 12),
+        @as(?u64, 13),
         workbench.inspectMcpDesiredConfiguration().?.desired_generation,
     );
 

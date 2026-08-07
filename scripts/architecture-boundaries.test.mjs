@@ -948,6 +948,20 @@ test("Renderer Bridge fixed revision 1 owns the exact product wire catalog", () 
       "metawork.host.windowChrome.sync",
     ],
   );
+  assert.deepEqual(
+    catalog(zigCommands).filter((command) =>
+      command.startsWith("metawork.mcp."),
+    ),
+    [
+      "metawork.mcp.createHttpServer",
+      "metawork.mcp.refreshCatalog",
+      "metawork.mcp.removeServer",
+      "metawork.mcp.renameServer",
+      "metawork.mcp.setAllowedTools",
+      "metawork.mcp.setServerEnabled",
+    ],
+  );
+  assert.doesNotMatch(zigCommands, /mcp\.(?:upsert|configure|setCredential)/i);
   for (const source of [zigCommands, rendererCommands, appManifest])
     assert.doesNotMatch(
       source,
@@ -982,6 +996,8 @@ test("Renderer Bridge fixed revision 1 owns the exact product wire catalog", () 
   assert.match(handlers, /expectedExecutionGeneration/);
   assert.match(handlers, /expectedSkillCatalogRevision/);
   assert.match(handlers, /expectedBindingEpoch/);
+  assert.match(handlers, /expectedDesiredGeneration/);
+  assert.match(handlers, /toolNames/);
   assert.match(handlers, /parseTaskRunInput/);
   assert.doesNotMatch(handlers, /\bprompt\s*:/);
   assert.doesNotMatch(
@@ -1004,6 +1020,14 @@ test("Renderer Bridge fixed revision 1 owns the exact product wire catalog", () 
   assert.match(projection, /\\"tasks\\":\[/);
   assert.match(projection, /\\"skillCatalog\\":/);
   assert.match(projection, /\\"input\\":/);
+  const mcpProjection = projection.slice(
+    projection.indexOf("fn writeMcpProjection"),
+    projection.indexOf("pub fn finalizeMarkedTerminalRunsAfterEventDrain"),
+  );
+  assert.doesNotMatch(
+    mcpProjection,
+    /server\.transport\.(?:command|arguments|cwd|environment|url|headers)|catalogIssues|fingerprint|schema body|AgentCore/,
+  );
   assert.doesNotMatch(projection, /\\"user\\":/);
   assert.match(projection, /pub fn createTask/);
   assert.match(projection, /pub fn runTask/);

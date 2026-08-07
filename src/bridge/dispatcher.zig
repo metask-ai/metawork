@@ -186,6 +186,12 @@ pub const Dispatcher = struct {
             .{ .name = commands.retry_skill, .function = retrySkill },
             .{ .name = commands.export_skill, .function = exportSkill },
             .{ .name = commands.skill_detail, .function = skillDetail },
+            .{ .name = commands.mcp_create_http_server, .function = createMcpHttpServer },
+            .{ .name = commands.mcp_rename_server, .function = renameMcpServer },
+            .{ .name = commands.mcp_set_server_enabled, .function = setMcpServerEnabled },
+            .{ .name = commands.mcp_set_allowed_tools, .function = setMcpAllowedTools },
+            .{ .name = commands.mcp_remove_server, .function = removeMcpServer },
+            .{ .name = commands.mcp_refresh_catalog, .function = refreshMcpCatalog },
             .{ .name = commands.snapshot, .function = beginSnapshot },
             .{ .name = commands.snapshot_chunk, .function = fetchSnapshotChunk },
             .{ .name = commands.account_begin_login, .function = accountBeginLogin },
@@ -1497,6 +1503,200 @@ pub const Dispatcher = struct {
             detail.total_bytes,
         }) catch return error.NoSpaceLeft;
         return writer.buffered();
+    }
+
+    fn createMcpHttpServer(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayloadWithLimit(
+            handlers.McpCreateHttpServer,
+            invocation.request.payload,
+            8 * 1024,
+        );
+        defer parsed.deinit();
+        const expected = try handlers.parseWireId(parsed.value.expectedDesiredGeneration);
+        const workbench = try self.requireWorkbench();
+        const outcome = try workbench.createMcpHttpServer(expected, .{
+            .display_name = parsed.value.displayName,
+            .url = parsed.value.endpoint,
+        });
+        return self.finishMcpMutation(workbench, output, outcome);
+    }
+
+    fn renameMcpServer(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(
+            handlers.McpServerRename,
+            invocation.request.payload,
+        );
+        defer parsed.deinit();
+        const expected = try handlers.parseWireId(parsed.value.expectedDesiredGeneration);
+        const workbench = try self.requireWorkbench();
+        const outcome = try workbench.renameMcpServer(expected, .{
+            .server_id = parsed.value.serverId,
+            .display_name = parsed.value.displayName,
+        });
+        return self.finishMcpMutation(workbench, output, outcome);
+    }
+
+    fn setMcpServerEnabled(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(
+            handlers.McpServerEnable,
+            invocation.request.payload,
+        );
+        defer parsed.deinit();
+        const expected = try handlers.parseWireId(parsed.value.expectedDesiredGeneration);
+        const workbench = try self.requireWorkbench();
+        const outcome = try workbench.setMcpServerEnabled(expected, .{
+            .server_id = parsed.value.serverId,
+            .enabled = parsed.value.enabled,
+        });
+        return self.finishMcpMutation(workbench, output, outcome);
+    }
+
+    fn setMcpAllowedTools(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayloadWithLimit(
+            handlers.McpAllowedTools,
+            invocation.request.payload,
+            256 * 1024,
+        );
+        defer parsed.deinit();
+        try validateMcpToolNames(parsed.value.toolNames);
+        const expected = try handlers.parseWireId(parsed.value.expectedDesiredGeneration);
+        const workbench = try self.requireWorkbench();
+        const outcome = try workbench.setMcpAllowedTools(expected, .{
+            .server_id = parsed.value.serverId,
+            .tools = parsed.value.toolNames,
+        });
+        return self.finishMcpMutation(workbench, output, outcome);
+    }
+
+    fn removeMcpServer(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(
+            handlers.McpServerIdentity,
+            invocation.request.payload,
+        );
+        defer parsed.deinit();
+        const expected = try handlers.parseWireId(parsed.value.expectedDesiredGeneration);
+        const workbench = try self.requireWorkbench();
+        const outcome = try workbench.removeMcpServer(expected, parsed.value.serverId);
+        return self.finishMcpMutation(workbench, output, outcome);
+    }
+
+    fn refreshMcpCatalog(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(handlers.Empty, invocation.request.payload);
+        defer parsed.deinit();
+        const workbench = try self.requireWorkbench();
+        workbench.refreshMcpCatalog() catch |err| {
+            const outcome: ?[]const u8 = if (err == error.CatalogLoading)
+                "busy"
+            else if (err == error.CatalogUnavailable)
+                "unavailable"
+            else if (err == error.ExecutorShuttingDown)
+                "shutting_down"
+            else if (err == error.CatalogRequestGenerationExhausted)
+                "rejected"
+            else if (err == error.McpManagementUnavailable)
+                "rejected"
+            else
+                null;
+            if (outcome) |value|
+                return std.fmt.bufPrint(output, "{{\"outcome\":\"{s}\"}}", .{value});
+            return err;
+        };
+        self.notifyCommitted();
+        return std.fmt.bufPrint(output, "{\"outcome\":\"started\"}", .{});
+    }
+
+    fn finishMcpMutation(
+        self: *Dispatcher,
+        workbench: *workbench_api.Workbench,
+        output: []u8,
+        outcome: workbench_api.McpManagementOutcome,
+    ) ![]const u8 {
+        if (outcome != .unchanged and outcome != .stale_generation)
+            self.notifyCommitted();
+        const inspection = workbench.inspectMcpDesiredConfiguration();
+        const generation = if (outcome == .indeterminate)
+            null
+        else if (inspection) |value|
+            if (value.health == .outcome_unknown)
+                null
+            else if (value.desired_generation) |current|
+                current
+            else if (value.health == .ready)
+                0
+            else
+                null
+        else
+            null;
+        if (generation) |current| return std.fmt.bufPrint(
+            output,
+            "{{\"outcome\":\"{s}\",\"desiredGeneration\":\"{d}\"}}",
+            .{ @tagName(outcome), current },
+        );
+        return std.fmt.bufPrint(
+            output,
+            "{{\"outcome\":\"{s}\",\"desiredGeneration\":null}}",
+            .{@tagName(outcome)},
+        );
+    }
+
+    fn validateMcpToolNames(names: []const []const u8) !void {
+        if (names.len > 1024) return error.InvalidBridgePayload;
+        for (names, 0..) |name, index| {
+            if (name.len == 0 or name.len > 256 or !std.unicode.utf8ValidateSlice(name))
+                return error.InvalidBridgePayload;
+            for (name) |byte| if (byte < 0x20 or byte == 0x7f)
+                return error.InvalidBridgePayload;
+            for (names[0..index]) |previous|
+                if (std.mem.eql(u8, previous, name)) return error.InvalidBridgePayload;
+        }
     }
 
     fn refreshTaskSkillCatalog(
