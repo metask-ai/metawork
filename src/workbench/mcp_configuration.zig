@@ -101,15 +101,29 @@ pub const TransactionWire = struct {
     retired_locators: []const []const u8,
 };
 
-/// Owned, effect-free plan for one base -> target registry transaction.
+/// Owned, effect-free plan for one base -> target registry transaction. The
+/// immutable target is the same value validated by the planner, encoded by the
+/// coordinator, and installed as desired state after a successful commit.
 /// Candidate locators are exactly the fresh credential identities introduced
-/// by target; retired locators are derived from the complete reference-set
+/// by target; retired locators are derived from the trusted reference-set
 /// difference and are never accepted from a caller.
 pub const MutationPlan = struct {
     arena: std.heap.ArenaAllocator,
+    target: ?std.json.Parsed(RegistryWire),
     transaction: TransactionWire,
 
+    fn targetRegistry(self: *const MutationPlan) Error!RegistryWire {
+        return if (self.target) |target| target.value else error.InvalidMutation;
+    }
+
+    fn takeTarget(self: *MutationPlan) std.json.Parsed(RegistryWire) {
+        const target = self.target.?;
+        self.target = null;
+        return target;
+    }
+
     pub fn deinit(self: *MutationPlan) void {
+        if (self.target) |*target| target.deinit();
         self.arena.deinit();
         self.* = undefined;
     }
@@ -225,8 +239,8 @@ pub const MutationCommit = enum {
     blocked,
 };
 
-/// Serial owner for the single durable MCP credential transaction. It owns no
-/// registry or secret bytes; callers retain candidate storage, which is
+/// Serial owner for the single durable MCP credential transaction. The plan
+/// owns the registry bytes; callers retain candidate secret storage, which is
 /// securely zeroed on every return path.
 pub const TransactionCoordinator = struct {
     health: StoreHealth = .ready,
@@ -236,7 +250,6 @@ pub const TransactionCoordinator = struct {
         allocator: std.mem.Allocator,
         persistence: MutationPersistence,
         credentials: CredentialEffects,
-        target: RegistryWire,
         plan: *const MutationPlan,
         candidates: []CandidateCredential,
         limits: Limits,
@@ -247,7 +260,11 @@ pub const TransactionCoordinator = struct {
 
         const registry_buffer = try allocator.alloc(u8, max_store_bytes);
         defer allocator.free(registry_buffer);
-        const registry_bytes = try encode(registry_buffer, target, limits);
+        const registry_bytes = try encode(
+            registry_buffer,
+            try plan.targetRegistry(),
+            limits,
+        );
         const journal_buffer = try allocator.alloc(u8, max_transaction_bytes);
         defer allocator.free(journal_buffer);
         const journal_bytes = try encodeTransaction(
@@ -557,12 +574,6 @@ pub const ManagementPort = struct {
         target: RegistryWire,
         candidates: []CandidateCredential,
     ) std.mem.Allocator.Error!ManagementOutcome {
-        var owned_target = cloneRegistry(self.allocator, target, self.limits) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return .rejected,
-        };
-        var target_owned = true;
-        defer if (target_owned) owned_target.deinit();
         var candidate_locators: std.ArrayList([]const u8) = .empty;
         defer candidate_locators.deinit(self.allocator);
         for (candidates) |candidate|
@@ -571,7 +582,7 @@ pub const ManagementPort = struct {
         var plan = (planMutation(
             self.allocator,
             if (self.desired) |registry| registry.value else null,
-            owned_target.value,
+            target,
             generationValue(self.inspect().desired_generation),
             candidate_locators.items,
             self.limits,
@@ -584,7 +595,6 @@ pub const ManagementPort = struct {
             self.allocator,
             self.persistence,
             self.credentials,
-            owned_target.value,
             &plan,
             candidates,
             self.limits,
@@ -594,13 +604,11 @@ pub const ManagementPort = struct {
         };
         return switch (commit) {
             .saved => saved: {
-                self.replaceDesired(&owned_target);
-                target_owned = false;
+                self.replaceDesired(plan.takeTarget());
                 break :saved .saved_restart_required;
             },
             .saved_recovery_required => saved: {
-                self.replaceDesired(&owned_target);
-                target_owned = false;
+                self.replaceDesired(plan.takeTarget());
                 break :saved .saved_recovery_required;
             },
             .registry_outcome_unknown => .indeterminate,
@@ -610,11 +618,10 @@ pub const ManagementPort = struct {
 
     fn replaceDesired(
         self: *ManagementPort,
-        replacement: *std.json.Parsed(RegistryWire),
+        replacement: std.json.Parsed(RegistryWire),
     ) void {
         if (self.desired) |*registry| registry.deinit();
-        self.desired = replacement.*;
-        replacement.* = undefined;
+        self.desired = replacement;
     }
 };
 
@@ -761,6 +768,11 @@ fn validateCommitInputs(
     candidates: []const CandidateCredential,
     limits: Limits,
 ) Error!void {
+    validateTransaction(&plan.transaction, limits) catch return error.InvalidMutation;
+    const target = try plan.targetRegistry();
+    validateRegistryIdentity(&target, limits) catch return error.InvalidMutation;
+    if (target.generation != plan.transaction.target_generation)
+        return error.InvalidMutation;
     if (candidates.len != plan.transaction.candidate_locators.len)
         return error.InvalidMutation;
     for (candidates, 0..) |candidate, index| {
@@ -1217,10 +1229,12 @@ pub fn encodeTransaction(
 }
 
 /// Plans one complete desired-registry replacement without performing file or
-/// credential effects. A null result is a semantic no-op. `candidate_locators`
-/// is supplied only by the Host-owned fresh-locator stage; every newly
-/// referenced locator must be present exactly once and no base locator may be
-/// reclassified as a candidate.
+/// credential effects. A null result is a semantic no-op. A mutation may keep
+/// existing server-local failures byte-identical or remove them, but it cannot
+/// introduce or alter an invalid server. `candidate_locators` is supplied only
+/// by the Host-owned fresh-locator stage; every newly referenced trusted
+/// locator must be present exactly once and no base locator may be reclassified
+/// as a candidate.
 pub fn planMutation(
     allocator: std.mem.Allocator,
     base: ?RegistryWire,
@@ -1233,13 +1247,15 @@ pub fn planMutation(
     if (base_generation != expected_generation) return error.GenerationMismatch;
     if (base_generation == std.math.maxInt(u64)) return error.GenerationExhausted;
     if (target.generation != base_generation + 1) return error.InvalidMutation;
-    validateManagedRegistry(&target, limits) catch return error.InvalidMutation;
 
     if (base) |registry| {
         validateRegistryIdentity(&registry, limits) catch return error.InvalidMutation;
+    }
+    validateMutationTransition(base, &target, limits) catch
+        return error.InvalidMutation;
+    if (base) |registry|
         if (registryContentEqual(registry, target) and candidate_locators.len == 0)
             return null;
-    }
 
     var base_references: std.ArrayList([]const u8) = .empty;
     defer base_references.deinit(allocator);
@@ -1247,10 +1263,11 @@ pub fn planMutation(
         allocator,
         registry,
         &base_references,
+        limits,
     );
     var target_references: std.ArrayList([]const u8) = .empty;
     defer target_references.deinit(allocator);
-    try collectCredentialReferences(allocator, target, &target_references);
+    try collectCredentialReferences(allocator, target, &target_references, limits);
 
     for (candidate_locators, 0..) |locator, index| {
         if (!validCredentialLocator(locator, limits.max_credential_locator_bytes) or
@@ -1276,6 +1293,8 @@ pub fn planMutation(
         retired_count > limits.max_credential_locators - candidate_count)
         return error.InvalidMutation;
 
+    var owned_target = try cloneRegistry(allocator, target, limits);
+    errdefer owned_target.deinit();
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
     const owned = arena.allocator();
@@ -1301,30 +1320,50 @@ pub fn planMutation(
         .retired_locators = owned_retired,
     };
     validateTransaction(&transaction, limits) catch return error.InvalidMutation;
-    return .{ .arena = arena, .transaction = transaction };
+    return .{
+        .arena = arena,
+        .target = owned_target,
+        .transaction = transaction,
+    };
 }
 
-fn validateManagedRegistry(registry: *const RegistryWire, limits: Limits) !void {
-    try validateRegistryIdentity(registry, limits);
-    for (registry.servers) |server|
-        if (serverProblem(server, limits) != null) return error.Invalid;
+fn validateMutationTransition(
+    base: ?RegistryWire,
+    target: *const RegistryWire,
+    limits: Limits,
+) !void {
+    try validateRegistryIdentity(target, limits);
+    for (target.servers) |target_server| {
+        if (serverProblem(target_server, limits) == null) continue;
+        const base_registry = base orelse return error.Invalid;
+        const base_index = findServerIndex(
+            base_registry.servers,
+            target_server.id,
+        ) orelse return error.Invalid;
+        if (!serverWireEqual(base_registry.servers[base_index], target_server))
+            return error.Invalid;
+    }
 }
 
 fn collectCredentialReferences(
     allocator: std.mem.Allocator,
     registry: RegistryWire,
     references: *std.ArrayList([]const u8),
+    limits: Limits,
 ) std.mem.Allocator.Error!void {
     for (registry.servers) |server| {
         for (server.transport.arguments) |value|
             if (value.credential_ref) |locator|
-                try appendUniqueText(allocator, references, locator);
+                if (validCredentialLocator(locator, limits.max_credential_locator_bytes))
+                    try appendUniqueText(allocator, references, locator);
         for (server.transport.environment) |entry|
             if (entry.value.credential_ref) |locator|
-                try appendUniqueText(allocator, references, locator);
+                if (validCredentialLocator(locator, limits.max_credential_locator_bytes))
+                    try appendUniqueText(allocator, references, locator);
         for (server.transport.headers) |entry|
             if (entry.value.credential_ref) |locator|
-                try appendUniqueText(allocator, references, locator);
+                if (validCredentialLocator(locator, limits.max_credential_locator_bytes))
+                    try appendUniqueText(allocator, references, locator);
     }
 }
 
@@ -2246,6 +2285,119 @@ test "mutation plan rejects unbacked locators and recognizes semantic no-op" {
     );
 }
 
+test "mutation plan permits only monotonic repair of invalid servers" {
+    var base = try decode(
+        std.testing.allocator,
+        "{\"schema_version\":1,\"generation\":1,\"servers\":[{\"id\":\"broken\",\"namespace\":\"broken\",\"display_name\":\"\",\"enabled\":true,\"negotiation\":\"automatic\",\"timeout_ms\":1000,\"transport\":{\"kind\":\"stdio\",\"command\":\"tool\"},\"tools\":[]}]}",
+        test_limits,
+    );
+    defer base.deinit();
+    var unchanged_invalid = try decode(
+        std.testing.allocator,
+        "{\"schema_version\":1,\"generation\":2,\"servers\":[{\"id\":\"broken\",\"namespace\":\"broken\",\"display_name\":\"\",\"enabled\":true,\"negotiation\":\"automatic\",\"timeout_ms\":1000,\"transport\":{\"kind\":\"stdio\",\"command\":\"tool\"},\"tools\":[]},{\"id\":\"healthy\",\"namespace\":\"healthy\",\"display_name\":\"Healthy\",\"enabled\":true,\"negotiation\":\"automatic\",\"timeout_ms\":1000,\"transport\":{\"kind\":\"stdio\",\"command\":\"tool\"},\"tools\":[]}]}",
+        test_limits,
+    );
+    defer unchanged_invalid.deinit();
+    var allowed = (try planMutation(
+        std.testing.allocator,
+        base.value,
+        unchanged_invalid.value,
+        1,
+        &.{},
+        test_limits,
+    )).?;
+    allowed.deinit();
+
+    var changed_invalid = try decode(
+        std.testing.allocator,
+        "{\"schema_version\":1,\"generation\":2,\"servers\":[{\"id\":\"broken\",\"namespace\":\"broken\",\"display_name\":\"\",\"enabled\":true,\"negotiation\":\"automatic\",\"timeout_ms\":1000,\"transport\":{\"kind\":\"stdio\",\"command\":\"different\"},\"tools\":[]}]}",
+        test_limits,
+    );
+    defer changed_invalid.deinit();
+    try std.testing.expectError(
+        error.InvalidMutation,
+        planMutation(
+            std.testing.allocator,
+            base.value,
+            changed_invalid.value,
+            1,
+            &.{},
+            test_limits,
+        ),
+    );
+
+    var valid_base = try decode(
+        std.testing.allocator,
+        "{\"schema_version\":1,\"generation\":1,\"servers\":[{\"id\":\"healthy\",\"namespace\":\"healthy\",\"display_name\":\"Healthy\",\"enabled\":true,\"negotiation\":\"automatic\",\"timeout_ms\":1000,\"transport\":{\"kind\":\"stdio\",\"command\":\"tool\"},\"tools\":[]}]}",
+        test_limits,
+    );
+    defer valid_base.deinit();
+    var damaged_target = try decode(
+        std.testing.allocator,
+        "{\"schema_version\":1,\"generation\":2,\"servers\":[{\"id\":\"healthy\",\"namespace\":\"healthy\",\"display_name\":\"Healthy\",\"enabled\":true,\"negotiation\":\"automatic\",\"timeout_ms\":0,\"transport\":{\"kind\":\"stdio\",\"command\":\"tool\"},\"tools\":[]}]}",
+        test_limits,
+    );
+    defer damaged_target.deinit();
+    try std.testing.expectError(
+        error.InvalidMutation,
+        planMutation(
+            std.testing.allocator,
+            valid_base.value,
+            damaged_target.value,
+            1,
+            &.{},
+            test_limits,
+        ),
+    );
+
+    var introduced_invalid = try decode(
+        std.testing.allocator,
+        "{\"schema_version\":1,\"generation\":1,\"servers\":[{\"id\":\"broken\",\"namespace\":\"broken\",\"display_name\":\"\",\"enabled\":true,\"negotiation\":\"automatic\",\"timeout_ms\":1000,\"transport\":{\"kind\":\"stdio\",\"command\":\"tool\"},\"tools\":[]}]}",
+        test_limits,
+    );
+    defer introduced_invalid.deinit();
+    try std.testing.expectError(
+        error.InvalidMutation,
+        planMutation(
+            std.testing.allocator,
+            null,
+            introduced_invalid.value,
+            0,
+            &.{},
+            test_limits,
+        ),
+    );
+}
+
+test "mutation plan retires only trusted references from invalid servers" {
+    var base = try decode(
+        std.testing.allocator,
+        "{\"schema_version\":1,\"generation\":1,\"servers\":[{\"id\":\"debris\",\"namespace\":\"debris\",\"display_name\":\"\",\"enabled\":true,\"negotiation\":\"automatic\",\"timeout_ms\":1000,\"transport\":{\"kind\":\"streamable_http\",\"url\":\"https://mcp.example.test/rpc\",\"headers\":[{\"name\":\"Authorization\",\"value\":{\"credential_ref\":\"bad locator\"}}]},\"tools\":[]},{\"id\":\"owned\",\"namespace\":\"owned\",\"display_name\":\"\",\"enabled\":true,\"negotiation\":\"automatic\",\"timeout_ms\":1000,\"transport\":{\"kind\":\"streamable_http\",\"url\":\"https://mcp.example.test/rpc\",\"headers\":[{\"name\":\"Authorization\",\"value\":{\"credential_ref\":\"v1/owned\"}}]},\"tools\":[]}]}",
+        test_limits,
+    );
+    defer base.deinit();
+    var target = try decode(
+        std.testing.allocator,
+        "{\"schema_version\":1,\"generation\":2,\"servers\":[]}",
+        test_limits,
+    );
+    defer target.deinit();
+    var plan = (try planMutation(
+        std.testing.allocator,
+        base.value,
+        target.value,
+        1,
+        &.{},
+        test_limits,
+    )).?;
+    defer plan.deinit();
+    try std.testing.expectEqual(@as(usize, 1), plan.transaction.retired_locators.len);
+    try std.testing.expectEqualStrings(
+        "v1/owned",
+        plan.transaction.retired_locators[0],
+    );
+}
+
 test "transaction coordinator commits journal credentials registry cleanup and clear in order" {
     const Fake = struct {
         const Event = enum { probe, journal, create, registry, delete, clear };
@@ -2336,7 +2488,6 @@ test "transaction coordinator commits journal credentials registry cleanup and c
             std.testing.allocator,
             fake.persistence(),
             fake.credentials(),
-            target.value,
             &plan,
             &candidates,
             test_limits,
@@ -2456,7 +2607,6 @@ test "transaction coordinator freezes the store at every uncertain boundary" {
                 std.testing.allocator,
                 fake.persistence(),
                 fake.credentials(),
-                target.value,
                 &plan,
                 &candidates,
                 test_limits,
@@ -2476,7 +2626,6 @@ test "transaction coordinator freezes the store at every uncertain boundary" {
                     std.testing.allocator,
                     fake.persistence(),
                     fake.credentials(),
-                    target.value,
                     &plan,
                     &blocked_candidates,
                     test_limits,
@@ -2542,7 +2691,6 @@ test "file store mutation persistence commits target and clears the journal" {
             std.testing.allocator,
             store.mutationPersistence(),
             Credentials.effects(),
-            target.value,
             &plan,
             &.{},
             test_limits,
@@ -2652,6 +2800,86 @@ test "management port owns fresh locators and keeps restart pending" {
         "Remote updated",
         management.desired.?.value.servers[0].display_name,
     );
+}
+
+test "management port repairs multiple invalid servers one transaction at a time" {
+    const Fake = struct {
+        registry_commits: usize = 0,
+
+        fn journal(_: ?*anyopaque, _: []const u8) PersistenceEffect {
+            return .committed;
+        }
+        fn registry(context: ?*anyopaque, _: []const u8) PersistenceEffect {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.registry_commits += 1;
+            return .committed;
+        }
+        fn clear(_: ?*anyopaque) PersistenceEffect {
+            return .committed;
+        }
+        fn probe(_: ?*anyopaque, _: []const u8) CredentialPresence {
+            return .missing;
+        }
+        fn create(_: ?*anyopaque, _: []const u8, _: []const u8) bool {
+            return true;
+        }
+        fn delete(_: ?*anyopaque, _: []const u8) bool {
+            return true;
+        }
+    };
+    var parsed = try decode(
+        std.testing.allocator,
+        "{\"schema_version\":1,\"generation\":3,\"servers\":[{\"id\":\"bad-name\",\"namespace\":\"bad-name\",\"display_name\":\"\",\"enabled\":true,\"negotiation\":\"automatic\",\"timeout_ms\":1000,\"transport\":{\"kind\":\"stdio\",\"command\":\"tool\"},\"tools\":[]},{\"id\":\"bad-negotiation\",\"namespace\":\"bad-negotiation\",\"display_name\":\"Broken\",\"enabled\":true,\"negotiation\":\"unsupported\",\"timeout_ms\":1000,\"transport\":{\"kind\":\"stdio\",\"command\":\"tool\"},\"tools\":[]}]}",
+        test_limits,
+    );
+    defer parsed.deinit();
+    var fake: Fake = .{};
+    var management = try ManagementPort.init(std.testing.allocator, parsed.value, .{
+        .persistence = .{
+            .context = &fake,
+            .available = true,
+            .commit_journal_fn = Fake.journal,
+            .commit_registry_fn = Fake.registry,
+            .clear_journal_fn = Fake.clear,
+        },
+        .credentials = .{
+            .context = &fake,
+            .available = true,
+            .probe_fn = Fake.probe,
+            .create_fn = Fake.create,
+            .delete_fn = Fake.delete,
+        },
+        .limits = test_limits,
+    });
+    defer management.deinit();
+
+    try std.testing.expectEqual(
+        ManagementOutcome.saved_restart_required,
+        try management.removeServer(3, "bad-name"),
+    );
+    try std.testing.expectEqual(@as(?u64, 4), management.inspect().desired_generation);
+    try std.testing.expectEqual(
+        ServerProblem.invalid_negotiation,
+        serverProblem(management.desired.?.value.servers[0], test_limits).?,
+    );
+    try std.testing.expectEqual(
+        ManagementOutcome.saved_restart_required,
+        try management.upsertServer(4, .{
+            .id = "bad-negotiation",
+            .namespace = "bad-negotiation",
+            .display_name = "Repaired",
+            .enabled = true,
+            .negotiation = "automatic",
+            .timeout_ms = 1000,
+            .transport = .{ .stdio = .{ .command = "tool" } },
+        }),
+    );
+    try std.testing.expectEqual(@as(?u64, 5), management.inspect().desired_generation);
+    try std.testing.expect(serverProblem(
+        management.desired.?.value.servers[0],
+        test_limits,
+    ) == null);
+    try std.testing.expectEqual(@as(usize, 2), fake.registry_commits);
 }
 
 test "management port freezes a second mutation after registry outcome uncertainty" {
