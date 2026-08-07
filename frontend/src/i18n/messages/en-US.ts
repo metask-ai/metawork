@@ -150,7 +150,6 @@ export const enUS = {
   "mcp.title": "MCP",
   "mcp.subtitle":
     "Review trusted servers and the tools they make available to MetaWork.",
-  "mcp.catalog_generation": "Catalog generation {generation}",
   "mcp.desired_generation": "Desired · {generation}",
   "mcp.search_label": "Search MCP servers and tools",
   "mcp.search_placeholder": "Search servers and tools",
@@ -165,8 +164,6 @@ export const enUS = {
   "mcp.status.invalid_catalog": "Invalid tool catalog",
   "mcp.transport.stdio": "Local · stdio",
   "mcp.transport.streamable_http": "Remote · HTTP",
-  "mcp.tool_count.one": "{count} tool",
-  "mcp.tool_count.other": "{count} tools",
   "mcp.tool_access_summary": "{available} of {total} for new tasks",
   "mcp.access.available": "Available to new tasks",
   "mcp.access.not_allowed": "Not allowed",
@@ -229,7 +226,7 @@ export const enUS = {
   "mcp.add.endpoint_help":
     "Use HTTPS, or HTTP only for localhost, 127.0.0.1, or ::1. User info, query strings, and fragments are not accepted.",
   "mcp.add.defaults":
-    "The server starts disabled. Discover its catalog, then allow tools explicitly before enabling it.",
+    "The server starts disabled with no tools allowed. Enable it and restart if requested; discovered tools stay unavailable until you allow them.",
   "mcp.add.submit": "Add server",
   "mcp.add.adding": "Adding…",
   "mcp.rename.action": "Save name",

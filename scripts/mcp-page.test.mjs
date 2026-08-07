@@ -261,6 +261,11 @@ test("MCP add accepts only the bounded HTTP surface and preserves exact input", 
 
   fireEvent.click(screen.getAllByRole("button", { name: "Add server" })[0]);
   const dialog = screen.getByRole("dialog", { name: "Add an HTTP server" });
+  assert.ok(
+    dialog.textContent.includes(
+      "Enable it and restart if requested; discovered tools stay unavailable until you allow them.",
+    ),
+  );
   const name = within(dialog).getByRole("textbox", { name: "Display name" });
   const endpoint = within(dialog).getByRole("textbox", { name: "Endpoint" });
   const submit = within(dialog).getByRole("button", { name: "Add server" });

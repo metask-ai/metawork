@@ -140,7 +140,6 @@ export const zhCN: Record<MessageId, string> = {
   "skills.navigation_label": "工作台工具",
   "mcp.title": "MCP",
   "mcp.subtitle": "查看可信服务以及它们向 MetaWork 提供的工具。",
-  "mcp.catalog_generation": "目录代次 {generation}",
   "mcp.desired_generation": "期望配置 · {generation}",
   "mcp.search_label": "搜索 MCP 服务和工具",
   "mcp.search_placeholder": "搜索服务和工具",
@@ -155,8 +154,6 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.status.invalid_catalog": "工具目录无效",
   "mcp.transport.stdio": "本地 · stdio",
   "mcp.transport.streamable_http": "远程 · HTTP",
-  "mcp.tool_count.one": "{count} 个工具",
-  "mcp.tool_count.other": "{count} 个工具",
   "mcp.tool_access_summary": "新任务可用 {available}/{total}",
   "mcp.access.available": "新任务可用",
   "mcp.access.not_allowed": "未授权",
@@ -214,7 +211,8 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.add.endpoint": "Endpoint",
   "mcp.add.endpoint_help":
     "使用 HTTPS；HTTP 仅允许 localhost、127.0.0.1 或 ::1。不接受用户信息、查询参数和 fragment。",
-  "mcp.add.defaults": "服务默认停用。先刷新目录并逐项授权工具，再启用服务。",
+  "mcp.add.defaults":
+    "服务默认停用且未授权任何工具。先启用服务并按提示重启；发现工具后仍需逐项授权。",
   "mcp.add.submit": "添加服务",
   "mcp.add.adding": "正在添加…",
   "mcp.rename.action": "保存名称",

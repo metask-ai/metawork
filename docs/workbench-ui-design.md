@@ -190,7 +190,7 @@ Workspace
 
 ## 5. 左栏：能力与 Task
 
-> Capability：**部分当前、部分目标**。Renderer 合同已提供 MetaWork 顶层与 Workspace/Task 分离的 revision 6 Skill catalog projection；本地 package/inventory、详情与管理 mutation 是本次目标合同。shell 已提供稳定 New task、全局 Task 导航、行动优先分组和左下角账号入口；Skill 中心、常驻但诚实呈现 availability 的 MCP 页面与持久定时任务都作为同级全局能力进入该 shell。
+> Capability：**部分当前、部分目标**。Renderer 合同已提供 MetaWork 顶层与 Workspace/Task 分离的 revision 6 Skill catalog projection；本地 package/inventory、详情与管理 mutation 是本次目标合同。shell 已提供稳定 New task、全局 Task 导航、行动优先分组和左下角账号入口；Skill 中心、消费 Host-owned management/Runtime/admission 事实的 MCP 页面与持久定时任务都作为同级全局能力进入该 shell。
 
 ### 5.1 Task 列表与路径上下文
 
@@ -208,7 +208,7 @@ Workspace
 
 ### 5.2 全局能力入口
 
-> Capability：**当前与受 gate 目标**。Skill 入口只依赖现有 AgentCore revision 6 discovery/catalog；定时任务入口依赖 Workbench-owned 持久 schedule projection、后台 Host timer/notification 与真实 Task admission。MCP 入口与 route 已进入稳定 shell；目标合同由 Workbench typed 管理能力、Runtime/catalog availability 与新 Task authority 三类事实共同驱动，页面不得把其中任何一个状态冒充另一个。
+> Capability：**当前与受 gate 目标**。Skill 入口只依赖现有 AgentCore revision 6 discovery/catalog；定时任务入口依赖 Workbench-owned 持久 schedule projection、后台 Host timer/notification 与真实 Task admission。MCP 入口与 route 已进入稳定 shell；当前合同由 Workbench typed 管理能力、Runtime/catalog availability 与新 Task authority 三类事实共同驱动，页面不得把其中任何一个状态冒充另一个。
 
 `新建任务`、`技能`、`MCP` 与 `定时任务` 位于 Task 列表上方的同一个纵向紧凑菜单，不使用窄侧栏中的卡片宫格，也不通过额外分组间距制造父子关系：
 
@@ -296,7 +296,7 @@ Skills                                                              10
 
 ### 5.4 MCP 服务
 
-> Capability：**目标管理合同**。Renderer 通过 revision 1 strict snapshot 与 typed command 管理 Workbench-owned Desired Registry；Runtime/catalog availability 和 Admission Authority 仍是独立 Host 事实。管理 temporarily frozen、Runtime unavailable 或 registry 为空时页面保持可达并呈现真实恢复面，不能隐藏成没有服务或自行猜测可用动作。
+> Capability：**当前**。Renderer 通过 revision 1 strict snapshot 与 typed command 管理 Workbench-owned Desired Registry；Runtime/catalog availability 和 Admission Authority 仍是独立 Host 事实。管理 temporarily frozen、Runtime unavailable 或 registry 为空时页面保持可达并呈现真实恢复面，不能隐藏成没有服务或自行猜测可用动作。
 
 MCP 页面沿用 Skill 中心约 944 px 的内容宽度、24–28 px 标题尺度、搜索和行动优先分组，但对象密度不同：Skill 是需要辨识内容的资产卡片，MCP server 是需要快速扫描连接状态的单列连续行。
 
