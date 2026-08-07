@@ -35,15 +35,71 @@ export function filterMcpServers(
   );
 }
 
+function validRawAuthorityPort(value: string): boolean {
+  if (!/^:[0-9]+$/.test(value)) return false;
+  const port = Number(value.slice(1));
+  return Number.isInteger(port) && port > 0 && port <= 65535;
+}
+
+function validRawHostName(value: string): boolean {
+  const host = value.endsWith(".") ? value.slice(0, -1) : value;
+  if (host.length === 0 || host.length > 255) return false;
+  return host
+    .split(".")
+    .every(
+      (label) =>
+        label.length > 0 &&
+        label.length <= 63 &&
+        /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label),
+    );
+}
+
+function rawAuthorityHost(authority: string): string | null {
+  if (
+    authority.length === 0 ||
+    authority.includes("@") ||
+    authority.includes("%") ||
+    /[^\x00-\x7f]/.test(authority)
+  )
+    return null;
+
+  let host: string;
+  let port = "";
+  if (authority.startsWith("[")) {
+    const closingBracket = authority.indexOf("]");
+    if (closingBracket < 0) return null;
+    host = authority.slice(0, closingBracket + 1);
+    port = authority.slice(closingBracket + 1);
+  } else {
+    const separator = authority.indexOf(":");
+    if (separator < 0) {
+      host = authority;
+    } else {
+      if (authority.indexOf(":", separator + 1) >= 0) return null;
+      host = authority.slice(0, separator);
+      port = authority.slice(separator);
+    }
+  }
+
+  if (
+    !host ||
+    (port && !validRawAuthorityPort(port)) ||
+    (!host.startsWith("[") && !validRawHostName(host))
+  )
+    return null;
+  return host;
+}
+
 export function validMcpHttpEndpoint(value: string): boolean {
   if (
     !/^https?:\/\//i.test(value) ||
-    /[?#\r\n]/.test(value) ||
+    /[\u0000-\u0020\u007f\\?#]/.test(value) ||
     new TextEncoder().encode(value).length > 4096
   )
     return false;
   const authority = value.slice(value.indexOf("://") + 3).split("/", 1)[0];
-  if (authority.includes("@")) return false;
+  const host = rawAuthorityHost(authority);
+  if (host === null) return false;
   try {
     const endpoint = new URL(value);
     if (
@@ -56,7 +112,7 @@ export function validMcpHttpEndpoint(value: string): boolean {
     if (endpoint.protocol === "https:") return true;
     return (
       endpoint.protocol === "http:" &&
-      ["localhost", "127.0.0.1", "[::1]"].includes(endpoint.hostname)
+      ["localhost", "127.0.0.1", "[::1]"].includes(host.toLowerCase())
     );
   } catch {
     return false;
@@ -65,7 +121,11 @@ export function validMcpHttpEndpoint(value: string): boolean {
 
 function validMcpDisplayName(value: string): boolean {
   const trimmed = value.trim();
-  return trimmed.length > 0 && new TextEncoder().encode(trimmed).length <= 256;
+  return (
+    trimmed.length > 0 &&
+    !/[\u0000-\u001f\u007f]/.test(trimmed) &&
+    new TextEncoder().encode(trimmed).length <= 256
+  );
 }
 
 function serverNeedsAttention(server: McpServer) {

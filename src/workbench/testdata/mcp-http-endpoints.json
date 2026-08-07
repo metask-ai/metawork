@@ -1,0 +1,41 @@
+{
+  "accepted": [
+    "https://mcp.example.com/path",
+    "https://host-name.example.com./mcp",
+    "https://[2001:db8::1]:4310/mcp",
+    "http://localhost:3000/mcp",
+    "http://LOCALHOST/mcp",
+    "http://127.0.0.1/mcp",
+    "http://[::1]:3000/mcp"
+  ],
+  "rejected": [
+    "http://192.168.1.2/mcp",
+    "http://localhost.example/mcp",
+    "http://127.0.0.1.example/mcp",
+    "http://127.1/mcp",
+    "http://2130706433/mcp",
+    "http://0x7f000001/mcp",
+    "http://[0:0:0:0:0:0:0:1]/mcp",
+    "https://example.com:0/mcp",
+    "https://example.com:/mcp",
+    "https://example.com:+443/mcp",
+    "http://localhost:70000/mcp",
+    "https:example.com/mcp",
+    "https://example.com/mcp?",
+    "https://example.com/mcp#",
+    "https://@example.com/mcp",
+    "https://user@example.com/mcp",
+    "https://example.com/mcp?token=x",
+    "https://exa mple.com/mcp",
+    "https://example.com/a\\b",
+    "https://%65xample.com/mcp",
+    "https://例子.测试/mcp",
+    "https://host_name.example.com/mcp",
+    "https://-host.example.com/mcp",
+    "https://host-.example.com/mcp",
+    "https://host..example.com/mcp",
+    "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example.com/mcp",
+    "https://[not-ipv6]/mcp",
+    "https://[::1]suffix/mcp"
+  ]
+}

@@ -39,6 +39,12 @@ const { McpPage, filterMcpServers, validMcpHttpEndpoint } =
   await vite.ssrLoadModule("/src/features/mcp/McpPage.tsx");
 const { I18nContext } = await vite.ssrLoadModule("/src/i18n/context.ts");
 const { translate } = await vite.ssrLoadModule("/src/i18n/runtime.ts");
+const endpointContract = JSON.parse(
+  await readFile(
+    join(process.cwd(), "src/workbench/testdata/mcp-http-endpoints.json"),
+    "utf8",
+  ),
+);
 
 test.afterEach(() => cleanup());
 test.after(async () => {
@@ -293,17 +299,11 @@ test("MCP add accepts only the bounded HTTP surface and preserves exact input", 
   assert.equal(screen.queryByRole("dialog"), null);
 });
 
-test("MCP endpoint validation rejects ambient authority and unsafe HTTP", () => {
-  assert.equal(validMcpHttpEndpoint("https://mcp.example.com/path"), true);
-  assert.equal(validMcpHttpEndpoint("http://localhost:3000/mcp"), true);
-  assert.equal(validMcpHttpEndpoint("http://[::1]:3000/mcp"), true);
-  assert.equal(validMcpHttpEndpoint("http://192.168.1.2/mcp"), false);
-  assert.equal(validMcpHttpEndpoint("https:example.com/mcp"), false);
-  assert.equal(validMcpHttpEndpoint("https://example.com/mcp?"), false);
-  assert.equal(validMcpHttpEndpoint("https://example.com/mcp#"), false);
-  assert.equal(validMcpHttpEndpoint("https://@example.com/mcp"), false);
-  assert.equal(validMcpHttpEndpoint("https://user@example.com/mcp"), false);
-  assert.equal(validMcpHttpEndpoint("https://example.com/mcp?token=x"), false);
+test("MCP endpoint validation matches the Host authority contract", () => {
+  for (const endpoint of endpointContract.accepted)
+    assert.equal(validMcpHttpEndpoint(endpoint), true, endpoint);
+  for (const endpoint of endpointContract.rejected)
+    assert.equal(validMcpHttpEndpoint(endpoint), false, endpoint);
 });
 
 test("MCP tool allowlist mutation sends exact desired tools and generation", async () => {

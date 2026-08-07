@@ -1217,12 +1217,22 @@ pub const RuntimeManifest = struct {
     allocator: std.mem.Allocator,
     entries: []RuntimeManifestEntry,
 
+    /// Returns a proof for every successfully prepared Runtime input,
+    /// including a zero-entry proof for the canonical empty configuration.
+    /// Null is reserved for unavailable preparation facts.
     pub fn candidate(
         allocator: std.mem.Allocator,
         preparation: *const Preparation,
     ) std.mem.Allocator.Error!?RuntimeManifest {
-        if (preparation.state != .available or preparation.registry == null)
-            return null;
+        switch (preparation.state) {
+            .empty => return .{
+                .allocator = allocator,
+                .entries = try allocator.alloc(RuntimeManifestEntry, 0),
+            },
+            .available => {},
+            .unavailable => return null,
+        }
+        std.debug.assert(preparation.registry != null);
         const registry = preparation.registry.?.value;
         std.debug.assert(preparation.server_states.len == registry.servers.len);
         const entries = try allocator.alloc(RuntimeManifestEntry, registry.servers.len);
@@ -2008,13 +2018,15 @@ fn validateTransaction(transaction: *const TransactionWire, limits: Limits) !voi
 /// Server-local semantic failures remain classifiable product state instead
 /// of making the complete registry unreadable.
 pub fn serverProblem(server: ServerWire, limits: Limits) ?ServerProblem {
-    if (!validText(server.display_name, limits.max_display_name_bytes, false))
+    if (server.display_name.len > limits.max_display_name_bytes or
+        !publishableProductText(server.display_name))
         return .invalid_display_name;
     if (!oneOf(server.negotiation, &.{ "automatic", "modern_only", "compat_only" }))
         return .invalid_negotiation;
     if (server.timeout_ms == 0) return .invalid_timeout;
     for (server.tools, 0..) |tool, index| {
-        if (!validText(tool, limits.max_tool_name_bytes, false))
+        if (tool.len > limits.max_tool_name_bytes or
+            !publishableProductText(tool))
             return .invalid_allowlist;
         for (server.tools[0..index]) |previous|
             if (std.mem.eql(u8, previous, tool)) return .invalid_allowlist;
@@ -2152,21 +2164,90 @@ fn validateValueSource(value: ValueSourceWire, limits: Limits) ?[]const u8 {
 }
 
 fn validEndpoint(value: []const u8, max_bytes: usize) bool {
-    if (!validText(value, max_bytes, false) or
-        std.mem.indexOfAny(u8, value, "?#\r\n") != null)
+    if (!validText(value, max_bytes, false)) return false;
+    for (value) |byte| if (byte <= 0x20 or byte == 0x7f or byte == '\\')
+        return false;
+    if (std.mem.indexOfAny(u8, value, "?#") != null)
         return false;
     const uri = std.Uri.parse(value) catch return false;
     if (uri.user != null or uri.password != null or uri.query != null or
         uri.fragment != null or uri.host == null)
         return false;
+    const scheme_suffix = value[uri.scheme.len..];
+    if (!std.mem.startsWith(u8, scheme_suffix, "://")) return false;
+    const authority_and_path = scheme_suffix[3..];
+    const authority_end = std.mem.indexOfScalar(u8, authority_and_path, '/') orelse
+        authority_and_path.len;
+    const authority = parseEndpointAuthority(authority_and_path[0..authority_end]) orelse
+        return false;
+    const parsed_host = switch (uri.host.?) {
+        .raw, .percent_encoded => |bytes| bytes,
+    };
+    if (!std.mem.eql(u8, parsed_host, authority.host) or uri.port != authority.port)
+        return false;
     if (std.ascii.eqlIgnoreCase(uri.scheme, "https")) return true;
     if (!std.ascii.eqlIgnoreCase(uri.scheme, "http")) return false;
-    var host_storage: [std.Io.net.HostName.max_len]u8 = undefined;
-    const host = uri.getHost(&host_storage) catch return false;
-    return std.ascii.eqlIgnoreCase(host.bytes, "localhost") or
-        std.mem.eql(u8, host.bytes, "127.0.0.1") or
-        std.mem.eql(u8, host.bytes, "::1") or
-        std.mem.eql(u8, host.bytes, "[::1]");
+    return std.ascii.eqlIgnoreCase(authority.host, "localhost") or
+        std.mem.eql(u8, authority.host, "127.0.0.1") or
+        std.mem.eql(u8, authority.host, "[::1]");
+}
+
+const EndpointAuthority = struct {
+    host: []const u8,
+    port: ?u16,
+};
+
+fn parseEndpointAuthority(value: []const u8) ?EndpointAuthority {
+    if (value.len == 0) return null;
+    for (value) |byte|
+        if (byte >= 0x80 or byte == '%' or byte == '@') return null;
+
+    var host = value;
+    var port: ?u16 = null;
+    if (value[0] == '[') {
+        const closing_bracket = std.mem.indexOfScalar(u8, value, ']') orelse return null;
+        host = value[0 .. closing_bracket + 1];
+        const suffix = value[closing_bracket + 1 ..];
+        if (suffix.len != 0) port = parseEndpointPort(suffix) orelse return null;
+    } else if (std.mem.indexOfScalar(u8, value, ':')) |separator| {
+        if (std.mem.indexOfScalar(u8, value[separator + 1 ..], ':') != null)
+            return null;
+        host = value[0..separator];
+        port = parseEndpointPort(value[separator..]) orelse return null;
+    }
+
+    if (!validEndpointHost(host)) return null;
+    return .{ .host = host, .port = port };
+}
+
+fn parseEndpointPort(value: []const u8) ?u16 {
+    if (value.len < 2 or value[0] != ':') return null;
+    for (value[1..]) |byte| if (!std.ascii.isDigit(byte)) return null;
+    const port = std.fmt.parseInt(u16, value[1..], 10) catch return null;
+    return if (port == 0) null else port;
+}
+
+fn validEndpointHost(host: []const u8) bool {
+    if (host.len >= 2 and host[0] == '[' and host[host.len - 1] == ']') {
+        _ = std.Io.net.Ip6Address.parse(host[1 .. host.len - 1], 0) catch
+            return false;
+        return true;
+    }
+    std.Io.net.HostName.validate(host) catch return false;
+    return true;
+}
+
+/// Product text accepted into the canonical MCP registry and safe projection.
+/// Field-specific byte limits are checked by the caller; this predicate owns
+/// the shared UTF-8, control-character, and non-blank semantics.
+pub fn publishableProductText(value: []const u8) bool {
+    if (value.len == 0 or !std.unicode.utf8ValidateSlice(value)) return false;
+    var visible = false;
+    for (value) |byte| {
+        if (byte < 0x20 or byte == 0x7f) return false;
+        if (byte != ' ') visible = true;
+    }
+    return visible;
 }
 
 fn validIdentifier(value: []const u8, max_bytes: usize) bool {
@@ -2568,13 +2649,23 @@ test "registry rejects ambiguous identity and unknown fields" {
     );
 }
 
-test "registry permits plaintext HTTP only for exact loopback authorities" {
-    try std.testing.expect(validEndpoint("http://localhost:4310/mcp", 4096));
-    try std.testing.expect(validEndpoint("http://127.0.0.1/mcp", 4096));
-    try std.testing.expect(validEndpoint("http://[::1]:4310/mcp", 4096));
-    try std.testing.expect(!validEndpoint("http://localhost.example/mcp", 4096));
-    try std.testing.expect(!validEndpoint("http://127.0.0.1.example/mcp", 4096));
-    try std.testing.expect(!validEndpoint("http://localhost:70000/mcp", 4096));
+test "registry enforces the shared MCP HTTP endpoint contract" {
+    const Fixture = struct {
+        accepted: []const []const u8,
+        rejected: []const []const u8,
+    };
+    const parsed = try std.json.parseFromSlice(
+        Fixture,
+        std.testing.allocator,
+        @embedFile("testdata/mcp-http-endpoints.json"),
+        .{},
+    );
+    defer parsed.deinit();
+
+    for (parsed.value.accepted) |endpoint|
+        try std.testing.expect(validEndpoint(endpoint, 4096));
+    for (parsed.value.rejected) |endpoint|
+        try std.testing.expect(!validEndpoint(endpoint, 4096));
 }
 
 test "registry file store atomically replaces bytes under one writer lock" {
@@ -3380,6 +3471,14 @@ test "typed management creates default-disabled HTTP server and commits one targ
         .display_name = "Unsafe",
         .url = "http://example.test/rpc",
     })) == .rejected);
+    try std.testing.expect((try management.prepareCreateHttpServer(0, .{
+        .display_name = "Unsafe\nname",
+        .url = "https://mcp.example.test/rpc",
+    })) == .rejected);
+    try std.testing.expect((try management.prepareCreateHttpServer(0, .{
+        .display_name = "Remote",
+        .url = "https://exa mple.test/rpc",
+    })) == .rejected);
     var preparation = try management.prepareCreateHttpServer(0, .{
         .display_name = "Remote",
         .url = "https://mcp.example.test/rpc",
@@ -3460,6 +3559,10 @@ test "typed management validates field transitions before persistence" {
         .server_id = "remote",
         .display_name = "Remote",
     })) == .unchanged);
+    try std.testing.expect((try management.prepareRenameServer(4, .{
+        .server_id = "remote",
+        .display_name = "Remote\x00hidden",
+    })) == .rejected);
     try std.testing.expect((try management.prepareSetAllowedTools(4, .{
         .server_id = "remote",
         .tools = &.{ "read", "read" },
@@ -3911,7 +4014,7 @@ test "preparation rejects unusable or over-capacity credentials per server" {
 
 test "preparation classifies unsafe disabled server facts before projection" {
     const registry =
-        \\{"schema_version":1,"generation":1,"servers":[{"id":"disabled","namespace":"disabled","display_name":"","enabled":false,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"stdio","command":"tool"},"tools":[]}]}
+        \\{"schema_version":1,"generation":1,"servers":[{"id":"disabled","namespace":"disabled","display_name":"Unsafe\nname","enabled":false,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"stdio","command":"tool"},"tools":[]}]}
     ;
     var prepared = try prepare(
         std.testing.allocator,
@@ -4176,6 +4279,38 @@ test "runtime manifest is unavailable when preparation facts are unavailable" {
         std.testing.allocator,
         &preparation,
     )) == null);
+}
+
+test "runtime manifest proves a successfully prepared empty runtime" {
+    var preparation = try prepare(
+        std.testing.allocator,
+        null,
+        true,
+        false,
+        .{},
+        test_limits,
+    );
+    defer preparation.deinit();
+    var manifest = (try RuntimeManifest.candidate(
+        std.testing.allocator,
+        &preparation,
+    )).?;
+    defer manifest.deinit();
+    try std.testing.expectEqual(@as(usize, 0), manifest.entries.len);
+    try std.testing.expectEqual(
+        RuntimeAlignment.current,
+        manifest.alignment(null, test_limits),
+    );
+    var enabled = try decode(
+        std.testing.allocator,
+        "{\"schema_version\":1,\"generation\":1,\"servers\":[{\"id\":\"new\",\"namespace\":\"new\",\"display_name\":\"New\",\"enabled\":true,\"negotiation\":\"automatic\",\"timeout_ms\":1000,\"transport\":{\"kind\":\"streamable_http\",\"url\":\"https://new.example.test/mcp\"}}]}",
+        test_limits,
+    );
+    defer enabled.deinit();
+    try std.testing.expectEqual(
+        RuntimeAlignment.restart_required,
+        manifest.alignment(enabled.value, test_limits),
+    );
 }
 
 test "runtime manifest candidate stays unpublished until ownership commit" {
