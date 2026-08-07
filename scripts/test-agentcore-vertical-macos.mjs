@@ -707,7 +707,7 @@ async function readSnapshot() {
     !/^[1-9][0-9]*$/.test(descriptor.snapshotId) ||
     !Number.isSafeInteger(descriptor.bytes) ||
     descriptor.bytes <= 0 ||
-    descriptor.bytes > 16 * 1024 * 1024 ||
+    descriptor.bytes > 32 * 1024 * 1024 ||
     !Number.isSafeInteger(descriptor.chunkBytes) ||
     descriptor.chunkBytes <= 0 ||
     descriptor.chunkBytes > 256 * 1024

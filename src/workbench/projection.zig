@@ -85,7 +85,7 @@ pub const Limits = struct {
     max_pending_ui_requests: usize = 4,
     max_ui_history_per_task: usize = 8,
     max_terminal_diagnostic_bytes: usize = 512,
-    max_snapshot_bytes: usize = 16 * 1024 * 1024,
+    max_snapshot_bytes: usize = 32 * 1024 * 1024,
 };
 
 pub const Provider = enum {
