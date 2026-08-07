@@ -3,7 +3,7 @@
 > 状态：AgentCore ABI v1 revision 6 已 hard cut 共享 Agent consumer；Windows x86_64 GNU 与 macOS arm64 使用独立 clean exact artifact，当前分支的真实 vertical 结果以验证规范为准
 > 目标依赖：Metask AgentCore ABI v1 revision 6；精确 artifact identity 见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)
 
-本文定义 MetaWork `agent/` 执行子系统与 Metask AgentCore 之间的规范边界。顶层模块与故障域见 [高层架构](architecture.md)，Application 内部 owner 见 [Application 内部架构](application-architecture.md)，Bridge transport 见 [Renderer Bridge 合同](renderer-bridge-contract.md)，revision 6 目标能力见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。
+本文定义 MetaWork `agent/` 执行子系统与 Metask AgentCore 之间的规范边界。顶层模块与故障域见 [高层架构](architecture.md)，Product 内部 owner 见 [Product 内部架构](product-architecture.md)，Bridge transport 见 [Renderer Bridge 合同](renderer-bridge-contract.md)，revision 6 目标能力见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。
 
 ## 1. 集成原则
 
@@ -230,7 +230,7 @@ projection 的销毁不释放 lease，lease 的释放也不使已经复制的 pr
 
 当前 Workbench 已将 catalog discovery 接入同一 bounded Executor。顶层管理 job 按 request generation 提交到独立 projection；Manual Workspace job 使用 Desktop Host 提供的 canonical home 和 Workspace root/epoch query，主线程只提交仍匹配 Workspace id、epoch、request generation、authorization 和 Runtime 生命周期的结果，过期/取消结果立即释放 projection 与 lease。若 Manual Workspace 在旧 epoch query 尚未收敛时重新授权，Workbench 只记录一次 latest-epoch reschedule intent；旧 job 收口并释放结果后立即通过同一 Executor 发起新 query，不能因已有 job 而把已恢复授权的 Workspace 永久留在 unavailable。Manual Workspace current catalog 与每个 Task 的 pinned catalog 分离；创建 Task 时先复制并计入全局 projection budget，再同步借用 current lease 创建 Session。loading/unavailable 仍允许 text-only Task；此时 Task 没有 pinned catalog，其 Task-level catalog 固定投影为 uninitialized，不镜像 Workspace availability，只有显式 idle refresh 成功后才进入 ready/degraded。只要 canonical home capability 可用，Session 仍保存同一 epoch，以便后续用户显式 idle refresh。
 
-Automatic Workspace 复用同一个 Agent Session workspace 合同，不形成 AgentCore 新类型。首期 automatic admission 只允许 Text Task：Workbench 不为该 Workspace 排队 catalog job，以 null catalog lease 创建 Session，并仍传入精确 canonical root、temporary trust root 与 Workspace epoch。不同 automatic Task 使用不同 root；同一 Task 的后续 Run 继续使用原 Session/root。Skill automatic admission 在 Workbench fail closed，直到 automatic root-specific catalog acquisition 与 shutdown 通过独立验收。Task 发布前 Session 创建失败必须由 Workbench 回滚 Workspace record 和本次创建的空目录；Agent Runtime 不接收目录 store 或回收 capability。Workbench shutdown join catalog/Run jobs 并释放顶层与 Manual Workspace leases 后，由 App coordinator 销毁 Agent Runtime。
+Automatic Workspace 复用同一个 Agent Session workspace 合同，不形成 AgentCore 新类型。首期 automatic admission 只允许 Text Task：Workbench 不为该 Workspace 排队 catalog job，以 null catalog lease 创建 Session，并仍传入精确 canonical root、temporary trust root 与 Workspace epoch。不同 automatic Task 使用不同 root；同一 Task 的后续 Run 继续使用原 Session/root。Skill automatic admission 在 Workbench fail closed，直到 automatic root-specific catalog acquisition 与 shutdown 通过独立验收。Task 发布前 Session 创建失败必须由 Workbench 回滚 Workspace record 和本次创建的空目录；Agent Runtime 不接收目录 store 或回收 capability。Workbench shutdown join catalog/Run jobs 并释放顶层与 Manual Workspace leases 后，由 Product coordinator 销毁 Agent Runtime。
 
 Workbench 的 typed Skill admission 在 `Session.prepareRun` 前验证 pinned revision、skill identity、参数数量、UTF-8、Workspace/Task epoch 和容量。RunRecord 保存 admission 时的稳定 Skill 身份、invocation/display 与参数副本；五类 AgentCore Skill rejection 映射为独立产品 cause，不 poison Session、不自动刷新和不重放用户动作。
 
@@ -327,9 +327,9 @@ callback 返回后的 Workbench canonical projection failure 仍可以按 Run id
 
 AgentCore tool event 的 raw `id` 只在 Workbench 消费当前 event 时用于计算固定长度 SHA-256 correlation key；raw `id` 不保存在产品历史。后续 progress/result 使用同一 digest 关联 Tool record。Workbench 以 Run 内唯一 activity order 生成稳定且不敏感的产品 tool `id`；`name`、input、progress 和 content 在进入 canonical projection 前统一清理。该 digest 不进入 Renderer wire，也不是第二个产品 tool identity。Renderer decoder 必须拒绝同一 Run 内重复的产品 tool `id` 或 activity order。
 
-assistant `text_chunk` 的 credential 清理采用流式未决尾部：已经提交的 canonical 字节不再随之后的 chunk 重扫，只有仍可能组成跨 chunk credential 的有限后缀与新字节参与下一次清理。snapshot 只发布 committed prefix，未决尾部保持 Host-only。Run terminal publication acquire 后，App coordinator 再完整排空一次 Agent event pump，Workbench 才同时发布产品可见 terminal phase/outcome/cause、折叠 completion-time Session disposition、提交最终安全 assistant 尾部并关闭该 Run 的 event ingestion；raw terminal publication 本身不能替代这次 drain barrier。barrier 完成前新 Run admission 仍以当前 Run 未结束处理，close completion 和 Task 物理删除也必须等待该 Run 的事件流完成收口。barrier 后仍到达的 event 属于合同违约；仍开放的 Task 必须关闭 owning Session 并终止可能已经开始的后续 Run，不能只对已经 terminal 的历史 Run 重发无效 termination。上述状态属于 Workbench projection，不形成第二份 terminal 或 assistant 内容。
+assistant `text_chunk` 的 credential 清理采用流式未决尾部：已经提交的 canonical 字节不再随之后的 chunk 重扫，只有仍可能组成跨 chunk credential 的有限后缀与新字节参与下一次清理。snapshot 只发布 committed prefix，未决尾部保持 Host-only。Run terminal publication acquire 后，Product coordinator 再完整排空一次 Agent event pump，Workbench 才同时发布产品可见 terminal phase/outcome/cause、折叠 completion-time Session disposition、提交最终安全 assistant 尾部并关闭该 Run 的 event ingestion；raw terminal publication 本身不能替代这次 drain barrier。barrier 完成前新 Run admission 仍以当前 Run 未结束处理，close completion 和 Task 物理删除也必须等待该 Run 的事件流完成收口。barrier 后仍到达的 event 属于合同违约；仍开放的 Task 必须关闭 owning Session 并终止可能已经开始的后续 Run，不能只对已经 terminal 的历史 Run 重发无效 termination。上述状态属于 Workbench projection，不形成第二份 terminal 或 assistant 内容。
 
-Bridge 异步 payload 必须是 owned copy 或显式 ownership transfer。Native SDK 在 platform loop 上串行执行同步 Bridge handler 与 `app.stop`；Desktop Host composition role 先关闭 ingress，用 callback lease 计数断言 quiescence，再调用 Application 收口路径并 detach Workbench。Bridge retained JSON/batch 不借用 Workbench memory，因此在 Workbench deinit 后独立释放。
+Bridge 异步 payload 必须是 owned copy 或显式 ownership transfer。Native SDK 在 platform loop 上串行执行同步 Bridge handler 与 `app.stop`；Desktop Host composition role 先关闭 ingress，用 callback lease 计数断言 quiescence，再调用 Product 收口路径并 detach Workbench。Bridge retained JSON/batch 不借用 Workbench memory，因此在 Workbench deinit 后独立释放。
 
 ## 8. Event pump
 

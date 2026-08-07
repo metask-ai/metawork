@@ -8,7 +8,7 @@
 
 - 产品行为以 [产品需求](requirements.md) 为准；
 - 系统职责与安全边界以 [高层架构](architecture.md) 为准；
-- Application 内部 owner、事务与恢复以 [Application 内部架构](application-architecture.md) 为准；
+- Product 内部 owner、事务与恢复以 [Product 内部架构](product-architecture.md) 为准；
 - Renderer Bridge wire 与运输语义以 [Renderer Bridge 合同](renderer-bridge-contract.md) 为准；
 - AgentCore 生命周期以 [AgentCore 集成契约](agentcore-integration.md) 为准；
 - UI 行为以 [Workbench UI 设计](workbench-ui-design.md) 为准；
@@ -32,7 +32,7 @@ metawork/
 │       └── platform/      # Renderer-only 本地偏好；不得包含原生窗口能力
 ├── src/
 │   ├── main.zig           # 进程入口
-│   ├── app.zig            # Desktop Host composition root；共置 Application coordinator
+│   ├── app.zig            # Desktop Host composition root；共置 Product coordinator
 │   ├── app/                # Desktop Host-owned 窄平台 capability composition
 │   ├── product_identity.zig # 从 app.zon 派生 development identity 与 macOS namespace
 │   ├── native_sdk_compat/ # 按已登记 capability 隔离的 Desktop Host 兼容实现
@@ -71,8 +71,8 @@ metawork/
 
 | Boundary / role          | 唯一职责                                                                                                           | 不拥有                                                                          |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------- |
-| Desktop Host composition | Native SDK composition、平台 capability 注入、平台资源与顶层 Bridge/Application/Native 生命周期顺序                | 产品 policy、Application 内部事务、第二套 Bridge transport                      |
-| App coordinator          | Application 主线程跨 owner 提交、事件屏障与内部生命周期顺序                                                        | Account/Workbench 领域状态、Agent 调度策略、平台资源                            |
+| Desktop Host composition | Native SDK composition、平台 capability 注入、平台资源与顶层 Bridge/Product/Native 生命周期顺序                | 产品 policy、Product 内部事务、第二套 Bridge transport                      |
+| Product coordinator          | Product 主线程跨 owner 提交、事件屏障与内部生命周期顺序                                                        | Account/Workbench 领域状态、Agent 调度策略、平台资源                            |
 | Account                  | Runtime、OAuth/catalog 状态、credential、attempt/effect/mailbox、恢复、脱敏 Account view、ExecutionConfig transfer | Workbench Task、Renderer 状态、AgentCore Runtime                                |
 | Workbench                | Workspace/Task/Run 产品状态、Executor、admission、terminal product record、snapshot projection                     | AgentCore raw protocol、Native WebView、Account secret                          |
 | Agent                    | AgentCore Runtime/Session/Conversation、callback、event pump、Run terminal facts                                   | 产品队列、Task 历史、Bridge transport                                           |
@@ -112,7 +112,7 @@ metawork/
 
 ### `app.zig`、`app/` 与 module entrypoint
 
-`main.zig` 只调用 `metawork_app`。`app.zig` 物理上共置两个角色：Desktop Host composition root 组装 Bridge 与 Application、消费并注入 Native SDK 的窄平台 capability、驱动平台生命周期；Application coordinator 在主线程按规范协调 Account prepare/commit、MCP preparation/activation、Workbench no-fail install、Agent event drain 与 owner 生命周期。后者属于 Application 的事务协调但不持有领域状态或复制 owner policy；这种源码共置不产生新的模块、业务 owner 或统一 Host facade。
+`main.zig` 只调用 `metawork_app`。`app.zig` 物理上共置两个角色：Desktop Host composition root 组装 Bridge 与 Product、消费并注入 Native SDK 的窄平台 capability、驱动平台生命周期；Product coordinator 在主线程按规范协调 Account prepare/commit、MCP preparation/activation、Workbench no-fail install、Agent event drain 与 owner 生命周期。后者属于 Product 的事务协调但不持有领域状态或复制 owner policy；这种源码共置不产生新的模块、业务 owner 或统一 Host facade。
 
 `app/mcp_platform.zig` 只适配 MCP 系统 credential、stdio 与 Streamable HTTP mechanics，不解析 MCP JSON-RPC 或复制协商，也不形成新的产品 owner。
 
@@ -130,7 +130,7 @@ Renderer 的 `components/ui/WindowTitlebar.tsx` 绘制产品 header，并通过 
 
 ### `account/`
 
-- `runtime.zig` 是 Account 长生命周期 owner，拥有状态机实例、private/public candidate catalog、credential、attempt、mailbox/effect queue、平台恢复状态、自动选择与 continuation；它不导入 Workbench，跨 owner 提交仍由 App coordinator 协调；
+- `runtime.zig` 是 Account 长生命周期 owner，拥有状态机实例、private/public candidate catalog、credential、attempt、mailbox/effect queue、平台恢复状态、自动选择与 continuation；它不导入 Workbench，跨 owner 提交仍由 Product coordinator 协调；
 - `state.zig` 拥有 Account 状态机、attempt/generation 与 prepare/admit/commit；
 - `oauth.zig`、`loopback.zig`、`login_attempt.zig` 和 `network_attempt.zig` 拥有登录网络链路；
 - `metask_client.zig` 与 `catalog.zig` 消费锁定的 Metask production contract；
@@ -138,10 +138,10 @@ Renderer 的 `components/ui/WindowTitlebar.tsx` 绘制产品 header，并通过 
 - `credential_store.zig` 独立拥有 macOS 双 family slot、固定 `manifest.json` schema 与原子提交语义；
 - `scripts/cleanup-legacy-macos-account.mjs` 是 Account-owned、只由开发者显式执行的一次性 legacy maintenance 入口；签名 setup 不拥有或删除 Account credential；
 - `windows_store.zig` 拥有 Windows 单 refresh token 与无版本、无 secret `account.json` 状态；不读取 macOS manifest，也不持久化 access token 或 Provider API Key；
-- `platform.zig` 是当前 Account 平台实现中唯一导入 Native SDK 的过渡边界，分别适配 macOS 与 Windows 的 credential、URL、timer 与持久化能力；它仍让 Application owner 持有原始 `PlatformServices`，属于 [验证规范](validation.md#native-sdk-能力路径)登记的架构缺口，不是获准兼容 seam，也不得增加新的底层能力或消费者；
+- `platform.zig` 是当前 Account 平台实现中唯一导入 Native SDK 的过渡边界，分别适配 macOS 与 Windows 的 credential、URL、timer 与持久化能力；它仍让 Product owner 持有原始 `PlatformServices`，属于 [验证规范](validation.md#native-sdk-能力路径)登记的架构缺口，不是获准兼容 seam，也不得增加新的底层能力或消费者；
 - `credentials.zig` 管理 execution credential ownership/rotation。
 
-Account 与 Workbench 是同级 owner，只通过纯 `account/contract.zig` 和 App coordinator 主线程提交链协作。Bridge 只消费脱敏 view/command contract，不导入 Account Runtime。App coordinator 可以持有两个 owner 的实例引用以协调提交，但不得持有 Account catalog、credential、attempt、mailbox 或 continuation 状态。
+Account 与 Workbench 是同级 owner，只通过纯 `account/contract.zig` 和 Product coordinator 主线程提交链协作。Bridge 只消费脱敏 view/command contract，不导入 Account Runtime。Product coordinator 可以持有两个 owner 的实例引用以协调提交，但不得持有 Account catalog、credential、attempt、mailbox 或 continuation 状态。
 
 ### `bridge/`
 
