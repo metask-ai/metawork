@@ -77,7 +77,7 @@ metawork/
 | Workbench                | Workspace/Task/Run 产品状态、Executor、admission、terminal product record、snapshot projection                     | AgentCore raw protocol、Native WebView、Account secret                          |
 | Agent                    | AgentCore Runtime/Session/Conversation、callback、event pump、Run terminal facts                                   | 产品队列、Task 历史、Bridge transport                                           |
 | Bridge                   | command authority、payload decode、Workspace grant、ProductDelivery connection/revision/snapshot transport         | 产品策略真相、AgentCore handle、Account runtime                                 |
-| Renderer                 | snapshot 消费、产品 WebUI 交互、纯 UI 状态与本地草稿                                                               | 原生窗口 owner、平台真实状态、安全决策、secret、AgentCore raw event、产品状态机 |
+| Renderer                 | snapshot 消费、产品 WebUI 交互、纯 UI 状态与本地草稿、`frontend/src/bridge/` 合同实现层（transport 适配与 runtime decode） | 原生窗口 owner、平台真实状态、安全决策、secret、AgentCore raw event、产品状态机 |
 
 `account/contract.zig` 是 Account owner 发布的纯合同，不是第六个产品 owner。`automation/` 只提供受控账号、origin 和临时 Workspace authority，不注册额外协议，也不拥有产品 transport state。
 
@@ -96,7 +96,7 @@ metawork/
 - `snapshot/` 负责 bounded descriptor、分块读取和 retry，不拥有产品状态；
 - `__fixtures__/workbench-snapshot.fixture` 是 Zig serializer 与 TypeScript decoder 共用的 canonical bytes。
 
-Renderer Bridge 的 identity、revision、command、event、snapshot 与兼容策略只由 [Renderer Bridge 合同](renderer-bridge-contract.md)定义。React component 不得直接访问 `window.zero`、拼 wire payload 或解析 AgentCore raw JSON。
+`frontend/src/bridge/` 归 Renderer 模块，是其唯一的合同实现层（browser-side Bridge）：它写入 CSS variables/document dataset 属于 Renderer 呈现职责；runtime decode 的 fail-closed 规则仍由合同约束，不因归属放松。Renderer Bridge 的 identity、revision、command、event、snapshot 与兼容策略只由 [Renderer Bridge 合同](renderer-bridge-contract.md)定义。React component 不得直接访问 `window.zero`、拼 wire payload 或解析 AgentCore raw JSON。
 
 ### `workbench/` 与 `features/`
 
@@ -152,7 +152,8 @@ Account 与 Workbench 是同级 owner，只通过纯 `account/contract.zig` 和 
 - `product_delivery.zig` 是 connection generation、revision retry/timer、snapshot identity 和 owned transport storage 的唯一 owner；
 - `revision_delivery.zig` 与 `snapshot_delivery.zig` 是 `ProductDelivery` 内部状态，不形成第二个公开 transport；
 - `callback_gate.zig` 管理同步 Native callback ingress stop/quiescence；
-- `workspace_grant.zig` 管理绑定 window/source 的一次性 Renderer capability，不是持久 Workspace registry。
+- `workspace_grant.zig` 管理绑定 window/source 的一次性 Renderer capability，不是持久 Workspace registry；
+- `skill_grant.zig` 管理绑定 window/source 的一次性 Skill capability，与 workspace_grant 同构，不是持久 Skill registry。
 
 Bridge handler 不能绕过 Workbench 操作 AgentCore handle。automation 只能驱动和观察真实 `ProductDelivery`，不得注册测试专用 handler 或平行 event/ACK/object 协议。
 
@@ -190,9 +191,10 @@ bridge -> workbench, account contract, Native SDK
 workbench -> agent, account contract
 agent -> Metask AgentCore bundle SDK
 account -> account contract
+automation -> bridge, account contract, Native SDK
 ```
 
-`bridge -> Native SDK` 只允许消费正式 Bridge transport contract，以及 transport authority 和窄 Host capability 调用所需的 data-only DTO/opaque identifier；它不允许 Bridge 持有 `PlatformServices`、具体平台实现、OS handle 或直接系统调用权。当前 `account/platform.zig -> Native SDK` 是验证规范登记的非合规例外，不属于允许依赖图，也不能作为新增依赖的先例。禁止 `agent -> workbench/bridge/app`、`workbench -> bridge`、`bridge -> Account runtime` 和任何产品模块反向依赖 Renderer。
+`bridge -> Native SDK` 只允许消费正式 Bridge transport contract，以及 transport authority 和窄 Host capability 调用所需的 data-only DTO/opaque identifier；它不允许 Bridge 持有 `PlatformServices`、具体平台实现、OS handle 或直接系统调用权。`automation -> bridge` 只消费 policy 类型；`automation -> Native SDK` 只消费同级 Bridge policy contract 类型，同样不得持有 `PlatformServices`、平台实现或系统调用权。当前 `account/platform.zig -> Native SDK` 是验证规范登记的非合规例外，不属于允许依赖图，也不能作为新增依赖的先例。禁止 `agent -> workbench/bridge/app`、`workbench -> bridge`、`bridge -> Account runtime` 和任何产品模块反向依赖 Renderer。
 
 ## 6. 测试与构建资产
 

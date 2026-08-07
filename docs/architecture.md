@@ -57,15 +57,15 @@ flowchart TB
 
 ### 3.1 Renderer
 
-Renderer 负责产品 WebUI 的页面、布局、交互、结构化 Agent 工作展示和纯 UI 临时状态。它可以呈现与 WebUI 一体化的标题/命令栏，以单一 declarative marker 声明可拖动候选区，并绘制带固定语义 marker 的窗口按钮；React component 不直接调用 transport。browser-side Bridge 可把这些声明转换为受限 Host intent，但 Renderer 不执行原生窗口动作、不持有原生 identity/handle，也不成为窗口真实状态 owner。Renderer 可以缓存 Application projection，但不能成为 Workspace、Task、Run、Account readiness、Agent 执行状态、持久化历史、权限决策或窗口真实状态的唯一 owner。WebView reload 或重连后，Renderer 必须能够从完整 Snapshot 重建产品界面。
+Renderer 负责产品 WebUI 的页面、布局、交互、结构化 Agent 工作展示和纯 UI 临时状态。它可以呈现与 WebUI 一体化的标题/命令栏，以单一 declarative marker 声明可拖动候选区，并绘制带固定语义 marker 的窗口按钮；React component 不直接调用 transport；`frontend/src/bridge/` 是 Renderer 模块内的合同实现层（browser-side Bridge），由它把这些声明转换为受限 Host intent，并 runtime decode Host 发布的 geometry/capability/state。Renderer 不执行原生窗口动作、不持有原生 identity/handle，也不成为窗口真实状态 owner。Renderer 可以缓存 Application projection，但不能成为 Workspace、Task、Run、Account readiness、Agent 执行状态、持久化历史、权限决策或窗口真实状态的唯一 owner。WebView reload 或重连后，Renderer 必须能够从完整 Snapshot 重建产品界面。
 
 Renderer 不直接加载 AgentCore，不访问任意文件或进程，不持有 Provider credential 或原生窗口身份，不实现或模拟系统拖动循环、窗口状态、系统菜单、托盘、全局快捷键等平台行为，也不作为权限或安全边界。
 
 ### 3.2 Bridge
 
-Bridge 验证来源与启动窗口 identity，严格解码 payload，把合法输入转换为产品命令，调用 Application，编码 typed result，并运输 Snapshot/Event。Bridge 不决定 Task admission、Workspace authority、Agent cancellation、credential replacement 或历史持久化。
+Bridge 是 Renderer 与 Host 进程之间的唯一通信边界，承运两类 surface：产品命令面把 typed 产品命令 dispatch 给 Application 中对应 owner，并运输 Snapshot/Event，不决定 Task admission、Workspace authority、Agent cancellation、credential replacement 或历史持久化；受限平台 capability 面只承运封闭枚举的 window-chrome bootstrap command，dispatch 给 Desktop Host 执行。两面共用 transport、origin policy 与 source/window authority，不共用数据面。
 
-Bridge 的连接、revision、snapshot identity、分块读取、retry 和 fail-closed 规则只由 [Renderer Bridge 合同](renderer-bridge-contract.md)定义。受限 window-chrome bootstrap session 的 source-window authority 与 document generation 同样归 Bridge：document attach 只建立一次 generation，Native SDK resize event 与 DOM layout observation 只驱动同 generation 的 geometry sync，不建立 resize command、第二 connection 或平台状态副本。browser-side Bridge boundary 可以把一个 declarative drag candidate 及其有界交互排除区镜像给受限 Host window-chrome capability，并把 Renderer window-control marker 转换为绑定 document generation 的固定语义 intent；它 runtime decode Host 发布的安全 inset、control capability 与 `maximized` 真值，但不暴露任意窗口 API、原生 identity/handle 或第二产品数据面。
+职责细节、封闭 command 枚举、连接、revision、snapshot identity、分块读取、retry 和 fail-closed 规则只由 [Renderer Bridge 合同](renderer-bridge-contract.md)定义。受限 window-chrome bootstrap session 的 source-window authority 与 document generation 同样归 Bridge：document attach 只建立一次 generation，Native SDK resize event 与 DOM layout observation 只驱动同 generation 的 geometry sync，不建立 resize command、第二 connection 或平台状态副本。
 
 ### 3.3 Application
 

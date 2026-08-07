@@ -7,7 +7,7 @@
 
 ## 1. Bridge 定位
 
-Bridge 是 Renderer 与 Application 之间的入站协议边界。它只负责验证调用来源与启动窗口 identity、严格解码 payload、把合法输入转换为产品命令、调用 Application、编码 typed result，并通过 Snapshot/Event 运输发布产品投影。Bridge 不决定 Task 是否可以运行、Workspace 是否有效、Agent 是否应取消、credential 是否可以替换或历史如何持久化；这些判断必须由 Application 内对应 owner 完成。
+Bridge 是 Renderer 与 Host 进程之间的唯一通信边界，承运两类 surface。产品命令面：验证调用来源与启动窗口 identity、严格解码 payload、把合法输入转换为产品命令、dispatch 给 Application 中对应 owner、编码 typed result，并通过 Snapshot/Event 运输发布产品投影；Bridge 不决定 Task 是否可以运行、Workspace 是否有效、Agent 是否应取消、credential 是否可以替换或历史如何持久化，这些判断必须由 Application 内对应 owner 完成。受限平台 capability 面：只承运 window-chrome bootstrap capability，当前封闭枚举为 `metawork.host.windowChrome.connect / sync / beginDrag / control / disconnect` 五个 command，dispatch 给 Desktop Host 执行，原生窗口行为与真实状态由 Native SDK/OS 拥有。两面共用同一 transport、origin policy 与 source/window authority，不共用数据面；新增平台面 command 必须与 capability seam 同级登记（identity、SDK 缺口、删除条件），不因该面已存在而豁免。
 
 Bridge 的唯一产品数据面由具体 `Dispatcher` 内部的 `ProductDelivery` 统一拥有：connection generation、revision retry/timer、snapshot identity 和 snapshot transport storage 都不再存放在 `app.zig`。Dispatcher 通过明确的 `*Workbench` 同步生成 snapshot；Desktop Host composition role 只注入 Native emit/timer/dialog/window-chrome/main-thread capability，并在顶层按 Bridge → Application → Native SDK 的依赖顺序组织 shutdown；Application 内部的 owner 收口与事件屏障仍由 App coordinator 执行。
 
