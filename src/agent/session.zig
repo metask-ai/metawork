@@ -33,6 +33,7 @@ pub const McpCatalogTool = mcp_catalog.Tool;
 pub const McpCatalogIssue = mcp_catalog.Issue;
 pub const McpSelection = mcp_catalog.Selection;
 pub const McpSelector = mcp_catalog.Selector;
+pub const McpServerAllowlist = mcp_catalog.ServerAllowlist;
 pub const McpActivation = mcp_catalog.Activation;
 pub const McpActivationState = mcp_catalog.ActivationState;
 pub const McpActivationServer = mcp_catalog.ActivationServer;
@@ -1137,6 +1138,30 @@ pub const Runtime = struct {
             self.mcp_owner_id,
             projection,
             selectors,
+        ) catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            return mapMcpCatalogError(err);
+        };
+    }
+
+    pub fn createMcpAdmissionSelection(
+        self: *Runtime,
+        activation: *const McpActivation,
+        allowlists: []const McpServerAllowlist,
+    ) (Error || std.mem.Allocator.Error)!?*McpSelection {
+        self.sessions_mutex.lockUncancelable(self.io);
+        defer self.sessions_mutex.unlock(self.io);
+        if (self.shutting_down.load(.acquire))
+            return error.RuntimeShuttingDown;
+        if (self.mcp_refresh_running) return error.McpRefreshInProgress;
+        if (self.mcp_catalog_generation == null or
+            self.mcp_catalog_generation.? != activation.catalogGeneration())
+            return error.StaleMcpSelection;
+        return mcp_catalog.createSelectionForActivation(
+            self.allocator,
+            self.mcp_owner_id,
+            activation,
+            allowlists,
         ) catch |err| {
             if (err == error.OutOfMemory) return error.OutOfMemory;
             return mapMcpCatalogError(err);

@@ -51,6 +51,7 @@ pub const McpCatalogTool = session_impl.McpCatalogTool;
 pub const McpCatalogIssue = session_impl.McpCatalogIssue;
 pub const McpSelection = session_impl.McpSelection;
 pub const McpSelector = session_impl.McpSelector;
+pub const McpServerAllowlist = session_impl.McpServerAllowlist;
 pub const McpActivation = session_impl.McpActivation;
 pub const McpActivationState = session_impl.McpActivationState;
 pub const McpActivationServer = session_impl.McpActivationServer;

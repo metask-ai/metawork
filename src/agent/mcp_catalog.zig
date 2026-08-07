@@ -62,6 +62,11 @@ pub const Selector = struct {
     tool_name: []const u8,
 };
 
+pub const ServerAllowlist = struct {
+    id: []const u8,
+    tools: []const []const u8,
+};
+
 /// Opaque linear Host-owned selection bound to the Runtime and catalog
 /// generation that validated it. Callers cannot rewrite authority-bearing
 /// generation or selector storage. The ABI descriptor borrows it
@@ -151,8 +156,11 @@ pub const Activation = opaque {
         return activationStorageConst(self).projection.issues();
     }
 
-    pub fn currentSelection(self: *const Activation) ?*const Selection {
-        return activationStorageConst(self).selection;
+    pub fn takeSelection(self: *Activation) ?*Selection {
+        const storage = activationStorage(self);
+        const selection = storage.selection;
+        storage.selection = null;
+        return selection;
     }
 };
 
@@ -312,6 +320,74 @@ pub fn createSelection(
         };
     }
     return @ptrCast(storage);
+}
+
+/// Builds a complete selection candidate for the current Desired Registry
+/// allowlists using only this Activation's validated catalog facts. Missing,
+/// stale, or issue-bearing tools remain unselected; unknown/duplicate server
+/// policies fail closed.
+pub fn createSelectionForActivation(
+    allocator: std.mem.Allocator,
+    owner_id: u64,
+    activation: *const Activation,
+    allowlists: []const ServerAllowlist,
+) (Error || std.mem.Allocator.Error)!?*Selection {
+    const storage = activationStorageConst(activation);
+    if (!projectionBelongsTo(storage.projection, owner_id) or
+        allowlists.len != storage.published_servers.len)
+        return error.CatalogBindingMismatch;
+
+    var selectors: std.ArrayList(Selector) = .empty;
+    defer selectors.deinit(allocator);
+    const projection = projectionStorageConst(storage.projection);
+    for (storage.published_servers) |server| {
+        var policy: ?ServerAllowlist = null;
+        for (allowlists, 0..) |candidate, index| {
+            if (!std.mem.eql(u8, candidate.id, server.id)) continue;
+            for (allowlists[0..index]) |previous|
+                if (std.mem.eql(u8, previous.id, candidate.id))
+                    return error.InvalidSelection;
+            policy = candidate;
+            break;
+        }
+        const selected_policy = policy orelse return error.InvalidSelection;
+        const catalog_server = projectionServer(
+            projection.servers,
+            server.binding_identity,
+        ) orelse continue;
+        if (!catalog_server.fresh) continue;
+        var server_issue = false;
+        for (projection.issues) |issue|
+            if (std.mem.eql(u8, &issue.binding_identity, &server.binding_identity) and
+                issue.tool_name == null)
+            {
+                server_issue = true;
+                break;
+            };
+        if (server_issue) continue;
+        for (selected_policy.tools) |tool| {
+            if (projectionHasToolIssue(
+                projection.issues,
+                server.binding_identity,
+                tool,
+            ) or !projectionContainsTool(
+                projection.tools,
+                server.binding_identity,
+                tool,
+            )) continue;
+            try selectors.append(allocator, .{
+                .binding_identity = server.binding_identity,
+                .tool_name = tool,
+            });
+        }
+    }
+    if (selectors.items.len == 0) return null;
+    return try createSelection(
+        allocator,
+        owner_id,
+        storage.projection,
+        selectors.items,
+    );
 }
 
 /// Consumes `projection` on success. Failure leaves it owned by the caller.
@@ -902,6 +978,32 @@ test "activation atomically intersects allowlists and publishes bounded health" 
     try std.testing.expectEqual(@as(usize, 1), activation.selectedTools().len);
     try std.testing.expectEqualStrings("search", activation.selectedTools()[0].server_id);
     try std.testing.expectEqualStrings("search", activation.selectedTools()[0].name);
-    const raw = rawSelectionReplacement(activation.currentSelection());
+    const raw = rawSelectionReplacement(activationStorageConst(activation).selection);
     try std.testing.expectEqual(@as(u64, 1), raw.selector_count);
+    const startup_selection = activation.takeSelection().?;
+    startup_selection.deinit();
+    try std.testing.expect(activationStorageConst(activation).selection == null);
+    try std.testing.expect((try createSelectionForActivation(
+        std.testing.allocator,
+        owner_id,
+        activation,
+        &.{
+            .{ .id = "search", .tools = &.{} },
+            .{ .id = "offline", .tools = &.{} },
+        },
+    )) == null);
+    const replacement = (try createSelectionForActivation(
+        std.testing.allocator,
+        owner_id,
+        activation,
+        &.{
+            .{ .id = "search", .tools = &.{"search"} },
+            .{ .id = "offline", .tools = &.{"read"} },
+        },
+    )).?;
+    defer replacement.deinit();
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        rawSelectionReplacement(replacement).selector_count,
+    );
 }

@@ -403,28 +403,90 @@ pub const FreshLocatorGenerator = struct {
     }
 };
 
+pub const FreshServerIdentityGenerator = struct {
+    context: ?*anyopaque = null,
+    available: bool = false,
+    fill_fn: *const fn (?*anyopaque, *[16]u8) bool = unavailableFill,
+
+    fn fill(self: FreshServerIdentityGenerator, bytes: *[16]u8) bool {
+        return self.available and self.fill_fn(self.context, bytes);
+    }
+
+    fn unavailableFill(_: ?*anyopaque, _: *[16]u8) bool {
+        return false;
+    }
+};
+
+pub const CreateHttpServerInput = struct {
+    display_name: []const u8,
+    url: []const u8,
+};
+
+pub const RenameServerInput = struct {
+    server_id: []const u8,
+    display_name: []const u8,
+};
+
+pub const SetServerEnabledInput = struct {
+    server_id: []const u8,
+    enabled: bool,
+};
+
+pub const SetAllowedToolsInput = struct {
+    server_id: []const u8,
+    tools: []const []const u8,
+};
+
 pub const ManagementConfiguration = struct {
     persistence: MutationPersistence,
     credentials: CredentialEffects,
     locator_generator: FreshLocatorGenerator = .{},
+    identity_generator: FreshServerIdentityGenerator = .{},
     limits: Limits,
     initial_health: StoreHealth = .ready,
+    /// Candidate ownership is transferred only after Agent Runtime creation
+    /// has succeeded. A null manifest means Runtime alignment is unknowable.
+    runtime_manifest: ?*RuntimeManifest = null,
+};
+
+pub const RuntimeAlignment = enum {
+    current,
+    restart_required,
+    unknown,
 };
 
 pub const ManagementInspection = struct {
     health: StoreHealth,
-    startup_generation: ?u64,
     desired_generation: ?u64,
-    pending_restart: bool,
+    runtime_alignment: RuntimeAlignment,
     server_count: usize,
 };
 
 pub const ManagementOutcome = enum {
     unchanged,
-    saved_restart_required,
+    saved,
     saved_recovery_required,
     rejected,
     indeterminate,
+};
+
+pub const PreparedMutation = struct {
+    plan: MutationPlan,
+
+    pub fn target(self: *const PreparedMutation) RegistryWire {
+        return self.plan.targetRegistry() catch unreachable;
+    }
+
+    pub fn deinit(self: *PreparedMutation) void {
+        self.plan.deinit();
+        self.* = undefined;
+    }
+};
+
+pub const MutationPreparation = union(enum) {
+    unchanged,
+    rejected,
+    prepared: PreparedMutation,
 };
 
 /// Workbench-owned desired MCP registry and mutation admission boundary.
@@ -434,11 +496,12 @@ pub const ManagementOutcome = enum {
 pub const ManagementPort = struct {
     allocator: std.mem.Allocator,
     limits: Limits,
-    startup_generation: ?u64,
     desired: ?std.json.Parsed(RegistryWire),
+    runtime_manifest: ?RuntimeManifest,
     persistence: MutationPersistence,
     credentials: CredentialEffects,
     locator_generator: FreshLocatorGenerator,
+    identity_generator: FreshServerIdentityGenerator,
     coordinator: TransactionCoordinator,
 
     pub fn init(
@@ -463,16 +526,21 @@ pub const ManagementPort = struct {
         return .{
             .allocator = allocator,
             .limits = configuration.limits,
-            .startup_generation = if (startup_registry) |registry| registry.generation else null,
             .desired = desired,
+            .runtime_manifest = if (configuration.runtime_manifest) |manifest|
+                manifest.take()
+            else
+                null,
             .persistence = configuration.persistence,
             .credentials = configuration.credentials,
             .locator_generator = configuration.locator_generator,
+            .identity_generator = configuration.identity_generator,
             .coordinator = .{ .health = health },
         };
     }
 
     pub fn deinit(self: *ManagementPort) void {
+        if (self.runtime_manifest) |*manifest| manifest.deinit();
         if (self.desired) |*registry| registry.deinit();
         self.* = undefined;
     }
@@ -484,12 +552,218 @@ pub const ManagementPort = struct {
             null;
         return .{
             .health = self.coordinator.health,
-            .startup_generation = self.startup_generation,
             .desired_generation = desired_generation,
-            .pending_restart = generationValue(self.startup_generation) !=
-                generationValue(desired_generation),
+            .runtime_alignment = if (self.runtime_manifest) |*manifest|
+                manifest.alignment(if (self.desired) |registry| registry.value else null, self.limits)
+            else
+                .unknown,
             .server_count = if (self.desired) |registry| registry.value.servers.len else 0,
         };
+    }
+
+    pub fn runtimeAlignmentFor(
+        self: *const ManagementPort,
+        target: RegistryWire,
+    ) RuntimeAlignment {
+        return if (self.runtime_manifest) |*manifest|
+            manifest.alignment(target, self.limits)
+        else
+            .unknown;
+    }
+
+    pub fn desiredRegistry(self: *const ManagementPort) ?RegistryWire {
+        return if (self.desired) |registry| registry.value else null;
+    }
+
+    pub fn prepareCreateHttpServer(
+        self: *ManagementPort,
+        expected_generation: u64,
+        input: CreateHttpServerInput,
+    ) std.mem.Allocator.Error!MutationPreparation {
+        const base = if (self.desired) |registry| registry.value else null;
+        const base_servers = if (base) |registry| registry.servers else &.{};
+        if (!self.mutationReady(expected_generation) or
+            base_servers.len >= self.limits.max_servers)
+            return .rejected;
+        var identity_storage: [24]u8 = undefined;
+        const identity = identity: {
+            var attempts: usize = 0;
+            while (attempts < 8) : (attempts += 1) {
+                var entropy: [16]u8 = undefined;
+                if (!self.identity_generator.fill(&entropy)) return .rejected;
+                const hex = std.fmt.bytesToHex(entropy, .lower);
+                const candidate = std.fmt.bufPrint(
+                    &identity_storage,
+                    "mcp-{s}",
+                    .{hex[0..20]},
+                ) catch unreachable;
+                if (findServerIndex(base_servers, candidate) == null)
+                    break :identity candidate;
+            }
+            return .rejected;
+        };
+        const server: ServerWire = .{
+            .id = identity,
+            .namespace = identity,
+            .display_name = input.display_name,
+            .enabled = false,
+            .negotiation = "automatic",
+            .timeout_ms = 30_000,
+            .transport = .{
+                .kind = "streamable_http",
+                .url = input.url,
+            },
+            .tools = &.{},
+        };
+        if (serverProblem(server, self.limits) != null) return .rejected;
+        const servers = try self.allocator.alloc(ServerWire, base_servers.len + 1);
+        defer self.allocator.free(servers);
+        @memcpy(servers[0..base_servers.len], base_servers);
+        servers[base_servers.len] = server;
+        return try self.prepareTarget(expected_generation, .{
+            .schema_version = schema_version,
+            .generation = expected_generation + 1,
+            .servers = servers,
+        });
+    }
+
+    pub fn prepareRenameServer(
+        self: *ManagementPort,
+        expected_generation: u64,
+        input: RenameServerInput,
+    ) std.mem.Allocator.Error!MutationPreparation {
+        if (!self.mutationReady(expected_generation)) return .rejected;
+        const base = if (self.desired) |registry| registry.value else return .rejected;
+        const index = findServerIndex(base.servers, input.server_id) orelse return .rejected;
+        if (std.mem.eql(u8, base.servers[index].display_name, input.display_name))
+            return .unchanged;
+        const servers = try self.allocator.dupe(ServerWire, base.servers);
+        defer self.allocator.free(servers);
+        servers[index].display_name = input.display_name;
+        if (serverProblem(servers[index], self.limits) != null) return .rejected;
+        return try self.prepareTarget(expected_generation, .{
+            .schema_version = schema_version,
+            .generation = expected_generation + 1,
+            .servers = servers,
+        });
+    }
+
+    pub fn prepareSetServerEnabled(
+        self: *ManagementPort,
+        expected_generation: u64,
+        input: SetServerEnabledInput,
+    ) std.mem.Allocator.Error!MutationPreparation {
+        if (!self.mutationReady(expected_generation)) return .rejected;
+        const base = if (self.desired) |registry| registry.value else return .rejected;
+        const index = findServerIndex(base.servers, input.server_id) orelse return .rejected;
+        if (base.servers[index].enabled == input.enabled) return .unchanged;
+        const servers = try self.allocator.dupe(ServerWire, base.servers);
+        defer self.allocator.free(servers);
+        servers[index].enabled = input.enabled;
+        if (input.enabled and serverProblem(servers[index], self.limits) != null)
+            return .rejected;
+        return try self.prepareTarget(expected_generation, .{
+            .schema_version = schema_version,
+            .generation = expected_generation + 1,
+            .servers = servers,
+        });
+    }
+
+    pub fn prepareSetAllowedTools(
+        self: *ManagementPort,
+        expected_generation: u64,
+        input: SetAllowedToolsInput,
+    ) std.mem.Allocator.Error!MutationPreparation {
+        if (!self.mutationReady(expected_generation)) return .rejected;
+        const base = if (self.desired) |registry| registry.value else return .rejected;
+        const index = findServerIndex(base.servers, input.server_id) orelse return .rejected;
+        if (stringSlicesEqual(base.servers[index].tools, input.tools)) return .unchanged;
+        const servers = try self.allocator.dupe(ServerWire, base.servers);
+        defer self.allocator.free(servers);
+        servers[index].tools = input.tools;
+        if (serverProblem(servers[index], self.limits) != null) return .rejected;
+        return try self.prepareTarget(expected_generation, .{
+            .schema_version = schema_version,
+            .generation = expected_generation + 1,
+            .servers = servers,
+        });
+    }
+
+    pub fn prepareRemoveServer(
+        self: *ManagementPort,
+        expected_generation: u64,
+        server_id: []const u8,
+    ) std.mem.Allocator.Error!MutationPreparation {
+        if (!self.mutationReady(expected_generation)) return .rejected;
+        const base = if (self.desired) |registry| registry.value else return .unchanged;
+        const index = findServerIndex(base.servers, server_id) orelse return .unchanged;
+        const servers = try self.allocator.alloc(ServerWire, base.servers.len - 1);
+        defer self.allocator.free(servers);
+        @memcpy(servers[0..index], base.servers[0..index]);
+        @memcpy(servers[index..], base.servers[index + 1 ..]);
+        return try self.prepareTarget(expected_generation, .{
+            .schema_version = schema_version,
+            .generation = expected_generation + 1,
+            .servers = servers,
+        });
+    }
+
+    pub fn commitPreparedMutation(
+        self: *ManagementPort,
+        mutation: *PreparedMutation,
+    ) std.mem.Allocator.Error!ManagementOutcome {
+        if (!self.mutationReady(mutation.plan.transaction.base_generation))
+            return .rejected;
+        const commit = self.coordinator.commit(
+            self.allocator,
+            self.persistence,
+            self.credentials,
+            &mutation.plan,
+            &.{},
+            self.limits,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return .rejected,
+        };
+        return switch (commit) {
+            .saved => saved: {
+                self.replaceDesired(mutation.plan.takeTarget());
+                break :saved .saved;
+            },
+            .saved_recovery_required => saved: {
+                self.replaceDesired(mutation.plan.takeTarget());
+                break :saved .saved_recovery_required;
+            },
+            .registry_outcome_unknown => .indeterminate,
+            .not_saved, .not_saved_recovery_required, .blocked => .rejected,
+        };
+    }
+
+    fn mutationReady(self: *const ManagementPort, expected_generation: u64) bool {
+        return self.coordinator.health == .ready and
+            expected_generation != std.math.maxInt(u64) and
+            expected_generation == generationValue(self.inspect().desired_generation);
+    }
+
+    fn prepareTarget(
+        self: *ManagementPort,
+        expected_generation: u64,
+        target: RegistryWire,
+    ) std.mem.Allocator.Error!MutationPreparation {
+        if (!self.mutationReady(expected_generation)) return .rejected;
+        var plan = (planMutation(
+            self.allocator,
+            if (self.desired) |registry| registry.value else null,
+            target,
+            expected_generation,
+            &.{},
+            self.limits,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return .rejected,
+        }) orelse return .unchanged;
+        errdefer plan.deinit();
+        return .{ .prepared = .{ .plan = plan } };
     }
 
     pub fn upsertServer(
@@ -605,7 +879,7 @@ pub const ManagementPort = struct {
         return switch (commit) {
             .saved => saved: {
                 self.replaceDesired(plan.takeTarget());
-                break :saved .saved_restart_required;
+                break :saved .saved;
             },
             .saved_recovery_required => saved: {
                 self.replaceDesired(plan.takeTarget());
@@ -627,6 +901,13 @@ pub const ManagementPort = struct {
 
 fn generationValue(generation: ?u64) u64 {
     return generation orelse 0;
+}
+
+fn stringSlicesEqual(left: []const []const u8, right: []const []const u8) bool {
+    if (left.len != right.len) return false;
+    for (left, right) |left_value, right_value|
+        if (!std.mem.eql(u8, left_value, right_value)) return false;
+    return true;
 }
 
 fn cloneRegistry(
@@ -908,6 +1189,249 @@ pub const Preparation = struct {
         return moved;
     }
 };
+
+const DescriptorFingerprint = [32]u8;
+
+const AbsenceProof = union(enum) {
+    disabled,
+    needs_authentication: DescriptorFingerprint,
+    invalid_catalog: struct {
+        problem: ServerProblem,
+        fingerprint: DescriptorFingerprint,
+    },
+};
+
+const RuntimeManifestEntry = struct {
+    id: []const u8,
+    state: union(enum) {
+        loaded: DescriptorFingerprint,
+        absent: AbsenceProof,
+    },
+};
+
+/// Immutable, in-memory proof of the descriptors accepted by one Agent
+/// Runtime. It contains no credential bytes and is never persisted or
+/// projected through Bridge.
+pub const RuntimeManifest = struct {
+    allocator: std.mem.Allocator,
+    entries: []RuntimeManifestEntry,
+
+    pub fn candidate(
+        allocator: std.mem.Allocator,
+        preparation: *const Preparation,
+    ) std.mem.Allocator.Error!?RuntimeManifest {
+        if (preparation.state != .available or preparation.registry == null)
+            return null;
+        const registry = preparation.registry.?.value;
+        std.debug.assert(preparation.server_states.len == registry.servers.len);
+        const entries = try allocator.alloc(RuntimeManifestEntry, registry.servers.len);
+        var initialized: usize = 0;
+        errdefer {
+            for (entries[0..initialized]) |entry| allocator.free(entry.id);
+            allocator.free(entries);
+        }
+        for (registry.servers, preparation.server_states, 0..) |server, state, index| {
+            entries[index] = .{
+                .id = try allocator.dupe(u8, server.id),
+                .state = switch (state) {
+                    .eligible => .{ .loaded = descriptorFingerprint(server) },
+                    .disabled => .{ .absent = .disabled },
+                    .needs_authentication => .{
+                        .absent = .{ .needs_authentication = authenticationFingerprint(server) },
+                    },
+                    .invalid_catalog => |problem| .{
+                        .absent = .{ .invalid_catalog = .{
+                            .problem = problem,
+                            .fingerprint = validationFingerprint(server),
+                        } },
+                    },
+                },
+            };
+            initialized += 1;
+        }
+        return .{ .allocator = allocator, .entries = entries };
+    }
+
+    pub fn deinit(self: *RuntimeManifest) void {
+        for (self.entries) |entry| self.allocator.free(entry.id);
+        self.allocator.free(self.entries);
+        self.* = undefined;
+    }
+
+    pub fn take(self: *RuntimeManifest) RuntimeManifest {
+        const moved = self.*;
+        self.* = undefined;
+        return moved;
+    }
+
+    pub fn alignment(
+        self: *const RuntimeManifest,
+        desired: ?RegistryWire,
+        limits: Limits,
+    ) RuntimeAlignment {
+        for (self.entries) |entry| {
+            const target = if (desired) |registry|
+                findServer(registry.servers, entry.id)
+            else
+                null;
+            if (!entryCompatible(entry, target, limits)) return .restart_required;
+        }
+        if (desired) |registry| {
+            for (registry.servers) |server| {
+                if (findManifestEntry(self.entries, server.id) != null) continue;
+                if (server.enabled) return .restart_required;
+            }
+        }
+        return .current;
+    }
+};
+
+fn entryCompatible(
+    entry: RuntimeManifestEntry,
+    target: ?ServerWire,
+    limits: Limits,
+) bool {
+    return switch (entry.state) {
+        .loaded => |fingerprint| if (target) |server|
+            server.enabled and
+                serverProblem(server, limits) == null and
+                std.mem.eql(u8, &fingerprint, &descriptorFingerprint(server))
+        else
+            false,
+        .absent => |proof| switch (proof) {
+            .disabled => if (target) |server| !server.enabled else true,
+            .needs_authentication => |fingerprint| if (target) |server|
+                !server.enabled or
+                    serverProblem(server, limits) != null or
+                    std.mem.eql(u8, &fingerprint, &authenticationFingerprint(server))
+            else
+                true,
+            .invalid_catalog => |invalid| if (target) |server| invalid_target: {
+                if (!server.enabled) break :invalid_target true;
+                if (serverProblem(server, limits) != null)
+                    break :invalid_target true;
+                break :invalid_target invalid.problem == .credential_capacity_exceeded and
+                    std.mem.eql(u8, &invalid.fingerprint, &validationFingerprint(server));
+            } else true,
+        },
+    };
+}
+
+fn findManifestEntry(
+    entries: []const RuntimeManifestEntry,
+    id: []const u8,
+) ?*const RuntimeManifestEntry {
+    for (entries) |*entry|
+        if (std.mem.eql(u8, entry.id, id)) return entry;
+    return null;
+}
+
+fn findServer(servers: []const ServerWire, id: []const u8) ?ServerWire {
+    for (servers) |server|
+        if (std.mem.eql(u8, server.id, id)) return server;
+    return null;
+}
+
+fn descriptorFingerprint(server: ServerWire) DescriptorFingerprint {
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    hashField(&hash, "metawork.mcp.runtime-descriptor/v1");
+    hashField(&hash, server.namespace);
+    hashField(&hash, server.negotiation);
+    hashInteger(&hash, server.timeout_ms);
+    hashTransport(&hash, server.transport);
+    var result: DescriptorFingerprint = undefined;
+    hash.final(&result);
+    return result;
+}
+
+fn validationFingerprint(server: ServerWire) DescriptorFingerprint {
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    hashField(&hash, "metawork.mcp.absence-proof/v1");
+    hashField(&hash, server.display_name);
+    hashField(&hash, server.namespace);
+    hashField(&hash, server.negotiation);
+    hashInteger(&hash, server.timeout_ms);
+    hashTransport(&hash, server.transport);
+    hashInteger(&hash, server.tools.len);
+    for (server.tools) |tool| hashField(&hash, tool);
+    var result: DescriptorFingerprint = undefined;
+    hash.final(&result);
+    return result;
+}
+
+fn authenticationFingerprint(server: ServerWire) DescriptorFingerprint {
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    hashField(&hash, "metawork.mcp.authentication-absence/v1");
+    var reference_count: usize = 0;
+    for (server.transport.arguments) |argument| {
+        if (argument.credential_ref != null) reference_count += 1;
+    }
+    for (server.transport.environment) |entry| {
+        if (entry.value.credential_ref != null) reference_count += 1;
+    }
+    for (server.transport.headers) |entry| {
+        if (entry.value.credential_ref != null) reference_count += 1;
+    }
+    hashInteger(&hash, reference_count);
+    for (server.transport.arguments) |argument| {
+        if (argument.credential_ref) |locator| hashField(&hash, locator);
+    }
+    for (server.transport.environment) |entry| {
+        if (entry.value.credential_ref) |locator| hashField(&hash, locator);
+    }
+    for (server.transport.headers) |entry| {
+        if (entry.value.credential_ref) |locator| hashField(&hash, locator);
+    }
+    var result: DescriptorFingerprint = undefined;
+    hash.final(&result);
+    return result;
+}
+
+const Sha256 = std.crypto.hash.sha2.Sha256;
+
+fn hashTransport(hash: *Sha256, transport: TransportWire) void {
+    hashField(hash, transport.kind);
+    hashOptionalField(hash, transport.command);
+    hashInteger(hash, transport.arguments.len);
+    for (transport.arguments) |argument| hashValueSource(hash, argument);
+    hashOptionalField(hash, transport.cwd);
+    hashInteger(hash, transport.environment.len);
+    for (transport.environment) |entry| {
+        hashField(hash, entry.name);
+        hashValueSource(hash, entry.value);
+    }
+    hashOptionalField(hash, transport.url);
+    hashInteger(hash, transport.headers.len);
+    for (transport.headers) |entry| {
+        hashField(hash, entry.name);
+        hashValueSource(hash, entry.value);
+    }
+}
+
+fn hashValueSource(hash: *Sha256, source: ValueSourceWire) void {
+    hashOptionalField(hash, source.literal);
+    hashOptionalField(hash, source.credential_ref);
+}
+
+fn hashOptionalField(hash: *Sha256, value: ?[]const u8) void {
+    if (value) |bytes| {
+        hash.update(&.{1});
+        hashField(hash, bytes);
+    } else {
+        hash.update(&.{0});
+    }
+}
+
+fn hashField(hash: *Sha256, bytes: []const u8) void {
+    hashInteger(hash, bytes.len);
+    hash.update(bytes);
+}
+
+fn hashInteger(hash: *Sha256, value: anytype) void {
+    var encoded: [8]u8 = undefined;
+    std.mem.writeInt(u64, &encoded, @intCast(value), .little);
+    hash.update(&encoded);
+}
 
 /// Restores a registry and resolves only credentials referenced by enabled,
 /// semantically valid servers. Expected MCP failures become typed state; only
@@ -2775,7 +3299,7 @@ test "management port owns fresh locators and keeps restart pending" {
         .value = .{ .replace = &secret },
     }};
     try std.testing.expectEqual(
-        ManagementOutcome.saved_restart_required,
+        ManagementOutcome.saved,
         try management.upsertServer(4, .{
             .id = "remote",
             .namespace = "remote",
@@ -2793,13 +3317,156 @@ test "management port owns fresh locators and keeps restart pending" {
     try std.testing.expect(fake.retired);
     try std.testing.expectEqualSlices(u8, &([_]u8{0} ** secret.len), &secret);
     const inspection = management.inspect();
-    try std.testing.expectEqual(@as(?u64, 4), inspection.startup_generation);
     try std.testing.expectEqual(@as(?u64, 5), inspection.desired_generation);
-    try std.testing.expect(inspection.pending_restart);
+    try std.testing.expectEqual(RuntimeAlignment.unknown, inspection.runtime_alignment);
     try std.testing.expectEqualStrings(
         "Remote updated",
         management.desired.?.value.servers[0].display_name,
     );
+}
+
+test "typed management creates default-disabled HTTP server and commits one target" {
+    const Fake = struct {
+        registry_commits: usize = 0,
+
+        fn journal(_: ?*anyopaque, _: []const u8) PersistenceEffect {
+            return .committed;
+        }
+        fn registry(context: ?*anyopaque, _: []const u8) PersistenceEffect {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.registry_commits += 1;
+            return .committed;
+        }
+        fn clear(_: ?*anyopaque) PersistenceEffect {
+            return .committed;
+        }
+        fn probe(_: ?*anyopaque, _: []const u8) CredentialPresence {
+            return .missing;
+        }
+        fn create(_: ?*anyopaque, _: []const u8, _: []const u8) bool {
+            return true;
+        }
+        fn delete(_: ?*anyopaque, _: []const u8) bool {
+            return true;
+        }
+        fn fill(_: ?*anyopaque, output: *[16]u8) bool {
+            @memset(output, 0xab);
+            return true;
+        }
+    };
+    var fake: Fake = .{};
+    var management = try ManagementPort.init(std.testing.allocator, null, .{
+        .persistence = .{
+            .context = &fake,
+            .available = true,
+            .commit_journal_fn = Fake.journal,
+            .commit_registry_fn = Fake.registry,
+            .clear_journal_fn = Fake.clear,
+        },
+        .credentials = .{
+            .context = &fake,
+            .available = true,
+            .probe_fn = Fake.probe,
+            .create_fn = Fake.create,
+            .delete_fn = Fake.delete,
+        },
+        .identity_generator = .{ .available = true, .fill_fn = Fake.fill },
+        .limits = test_limits,
+    });
+    defer management.deinit();
+
+    try std.testing.expect((try management.prepareCreateHttpServer(0, .{
+        .display_name = "Unsafe",
+        .url = "http://example.test/rpc",
+    })) == .rejected);
+    var preparation = try management.prepareCreateHttpServer(0, .{
+        .display_name = "Remote",
+        .url = "https://mcp.example.test/rpc",
+    });
+    switch (preparation) {
+        .prepared => |*mutation| {
+            defer mutation.deinit();
+            const target = mutation.target();
+            try std.testing.expectEqual(@as(u64, 1), target.generation);
+            try std.testing.expectEqual(@as(usize, 1), target.servers.len);
+            try std.testing.expectEqualStrings(
+                "mcp-abababababababababab",
+                target.servers[0].id,
+            );
+            try std.testing.expectEqualStrings(target.servers[0].id, target.servers[0].namespace);
+            try std.testing.expect(!target.servers[0].enabled);
+            try std.testing.expectEqual(@as(usize, 0), target.servers[0].tools.len);
+            try std.testing.expectEqual(
+                ManagementOutcome.saved,
+                try management.commitPreparedMutation(mutation),
+            );
+        },
+        .unchanged, .rejected => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 1), fake.registry_commits);
+    try std.testing.expectEqual(@as(?u64, 1), management.inspect().desired_generation);
+}
+
+test "typed management validates field transitions before persistence" {
+    const Fake = struct {
+        fn journal(_: ?*anyopaque, _: []const u8) PersistenceEffect {
+            return .committed;
+        }
+        fn registry(_: ?*anyopaque, _: []const u8) PersistenceEffect {
+            return .committed;
+        }
+        fn clear(_: ?*anyopaque) PersistenceEffect {
+            return .committed;
+        }
+        fn probe(_: ?*anyopaque, _: []const u8) CredentialPresence {
+            return .missing;
+        }
+        fn create(_: ?*anyopaque, _: []const u8, _: []const u8) bool {
+            return true;
+        }
+        fn delete(_: ?*anyopaque, _: []const u8) bool {
+            return true;
+        }
+    };
+    var parsed = try decode(
+        std.testing.allocator,
+        "{\"schema_version\":1,\"generation\":4,\"servers\":[{\"id\":\"remote\",\"namespace\":\"remote\",\"display_name\":\"Remote\",\"enabled\":true,\"negotiation\":\"automatic\",\"timeout_ms\":1000,\"transport\":{\"kind\":\"streamable_http\",\"url\":\"https://mcp.example.test/rpc\"},\"tools\":[\"read\"]}]}",
+        test_limits,
+    );
+    defer parsed.deinit();
+    var management = try ManagementPort.init(std.testing.allocator, parsed.value, .{
+        .persistence = .{
+            .available = true,
+            .commit_journal_fn = Fake.journal,
+            .commit_registry_fn = Fake.registry,
+            .clear_journal_fn = Fake.clear,
+        },
+        .credentials = .{
+            .available = true,
+            .probe_fn = Fake.probe,
+            .create_fn = Fake.create,
+            .delete_fn = Fake.delete,
+        },
+        .limits = test_limits,
+    });
+    defer management.deinit();
+
+    try std.testing.expect((try management.prepareRenameServer(3, .{
+        .server_id = "remote",
+        .display_name = "Stale",
+    })) == .rejected);
+    try std.testing.expect((try management.prepareRenameServer(4, .{
+        .server_id = "remote",
+        .display_name = "Remote",
+    })) == .unchanged);
+    try std.testing.expect((try management.prepareSetAllowedTools(4, .{
+        .server_id = "remote",
+        .tools = &.{ "read", "read" },
+    })) == .rejected);
+    try std.testing.expect((try management.prepareSetServerEnabled(4, .{
+        .server_id = "missing",
+        .enabled = false,
+    })) == .rejected);
 }
 
 test "management port repairs multiple invalid servers one transaction at a time" {
@@ -2854,7 +3521,7 @@ test "management port repairs multiple invalid servers one transaction at a time
     defer management.deinit();
 
     try std.testing.expectEqual(
-        ManagementOutcome.saved_restart_required,
+        ManagementOutcome.saved,
         try management.removeServer(3, "bad-name"),
     );
     try std.testing.expectEqual(@as(?u64, 4), management.inspect().desired_generation);
@@ -2863,7 +3530,7 @@ test "management port repairs multiple invalid servers one transaction at a time
         serverProblem(management.desired.?.value.servers[0], test_limits).?,
     );
     try std.testing.expectEqual(
-        ManagementOutcome.saved_restart_required,
+        ManagementOutcome.saved,
         try management.upsertServer(4, .{
             .id = "bad-negotiation",
             .namespace = "bad-negotiation",
@@ -3041,7 +3708,7 @@ test "saved desired registry becomes effective only through cold-start preparati
         .value = .{ .replace = &secret },
     }};
     try std.testing.expectEqual(
-        ManagementOutcome.saved_restart_required,
+        ManagementOutcome.saved,
         try management.upsertServer(0, .{
             .id = "remote",
             .namespace = "remote",
@@ -3055,8 +3722,11 @@ test "saved desired registry becomes effective only through cold-start preparati
             } },
         }),
     );
-    try std.testing.expect(management.inspect().startup_generation == null);
     try std.testing.expectEqual(@as(?u64, 1), management.inspect().desired_generation);
+    try std.testing.expectEqual(
+        RuntimeAlignment.unknown,
+        management.inspect().runtime_alignment,
+    );
 
     const restored = (try store.loadAlloc(std.testing.allocator)).?;
     defer std.testing.allocator.free(restored);
@@ -3358,4 +4028,206 @@ test "preparation does not retain partial credentials for ineligible servers" {
     defer prepared.deinit();
     try std.testing.expect(prepared.server_states[0] == .needs_authentication);
     try std.testing.expectEqual(@as(usize, 0), prepared.credentials.len);
+}
+
+fn expectRuntimeAlignment(
+    manifest: *const RuntimeManifest,
+    bytes: []const u8,
+    expected: RuntimeAlignment,
+) !void {
+    var desired = try decode(std.testing.allocator, bytes, test_limits);
+    defer desired.deinit();
+    try std.testing.expectEqual(expected, manifest.alignment(desired.value, test_limits));
+}
+
+test "runtime manifest derives compatibility from loaded and absence proofs" {
+    const Resolver = struct {
+        fn resolve(
+            _: ?*anyopaque,
+            _: std.mem.Allocator,
+            _: []const u8,
+        ) CredentialResolution {
+            return .missing;
+        }
+    };
+    const startup =
+        \\{"schema_version":1,"generation":7,"servers":[
+        \\{"id":"loaded","namespace":"loaded","display_name":"Loaded","enabled":true,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"streamable_http","url":"https://loaded.example.test/rpc"},"tools":["read"]},
+        \\{"id":"disabled","namespace":"disabled","display_name":"Disabled","enabled":false,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"streamable_http","url":"https://disabled.example.test/rpc"}},
+        \\{"id":"invalid","namespace":"invalid","display_name":"","enabled":true,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"streamable_http","url":"https://invalid.example.test/rpc"}},
+        \\{"id":"missing","namespace":"missing","display_name":"Missing","enabled":true,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"streamable_http","url":"https://missing.example.test/rpc","headers":[{"name":"Authorization","value":{"credential_ref":"missing/token"}}]}}
+        \\]}
+    ;
+    var preparation = try prepare(
+        std.testing.allocator,
+        startup,
+        true,
+        false,
+        .{ .available = true, .resolve_fn = Resolver.resolve },
+        test_limits,
+    );
+    defer preparation.deinit();
+    var manifest = (try RuntimeManifest.candidate(
+        std.testing.allocator,
+        &preparation,
+    )).?;
+    defer manifest.deinit();
+
+    try expectRuntimeAlignment(&manifest, startup, .current);
+    try expectRuntimeAlignment(
+        &manifest,
+        \\{"schema_version":1,"generation":8,"servers":[{"id":"loaded","namespace":"loaded","display_name":"Renamed","enabled":true,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"streamable_http","url":"https://loaded.example.test/rpc"},"tools":["read","write"]},{"id":"disabled","namespace":"disabled","display_name":"Disabled","enabled":false,"negotiation":"modern_only","timeout_ms":5000,"transport":{"kind":"streamable_http","url":"https://other.example.test/rpc"}},{"id":"missing","namespace":"missing","display_name":"Renamed missing","enabled":true,"negotiation":"modern_only","timeout_ms":5000,"transport":{"kind":"streamable_http","url":"https://changed.example.test/rpc","headers":[{"name":"Authorization","value":{"credential_ref":"missing/token"}}]}},{"id":"new-disabled","namespace":"new-disabled","display_name":"New disabled","enabled":false,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"streamable_http","url":"https://new.example.test/rpc"}}]}
+    ,
+        .current,
+    );
+    try expectRuntimeAlignment(
+        &manifest,
+        \\{"schema_version":1,"generation":8,"servers":[{"id":"loaded","namespace":"loaded","display_name":"Loaded","enabled":true,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"streamable_http","url":"https://changed.example.test/rpc"}}]}
+    ,
+        .restart_required,
+    );
+    try expectRuntimeAlignment(&manifest, startup, .current);
+}
+
+test "runtime manifest rejects enabled additions and invalidated absence proofs" {
+    const Resolver = struct {
+        fn resolve(
+            _: ?*anyopaque,
+            _: std.mem.Allocator,
+            _: []const u8,
+        ) CredentialResolution {
+            return .missing;
+        }
+    };
+    const startup =
+        \\{"schema_version":1,"generation":3,"servers":[{"id":"disabled","namespace":"disabled","display_name":"Disabled","enabled":false,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"streamable_http","url":"https://disabled.example.test/rpc"}},{"id":"invalid","namespace":"invalid","display_name":"","enabled":true,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"streamable_http","url":"https://invalid.example.test/rpc"}},{"id":"missing","namespace":"missing","display_name":"Missing","enabled":true,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"streamable_http","url":"https://missing.example.test/rpc","headers":[{"name":"Authorization","value":{"credential_ref":"missing/token"}}]}}]}
+    ;
+    var preparation = try prepare(
+        std.testing.allocator,
+        startup,
+        true,
+        false,
+        .{ .available = true, .resolve_fn = Resolver.resolve },
+        test_limits,
+    );
+    defer preparation.deinit();
+    var manifest = (try RuntimeManifest.candidate(
+        std.testing.allocator,
+        &preparation,
+    )).?;
+    defer manifest.deinit();
+
+    try expectRuntimeAlignment(
+        &manifest,
+        \\{"schema_version":1,"generation":4,"servers":[]}
+    ,
+        .current,
+    );
+    try expectRuntimeAlignment(
+        &manifest,
+        \\{"schema_version":1,"generation":4,"servers":[{"id":"invalid","namespace":"invalid","display_name":"Still invalid","enabled":true,"negotiation":"unsupported","timeout_ms":1000,"transport":{"kind":"streamable_http","url":"https://changed.example.test/rpc"}}]}
+    ,
+        .current,
+    );
+    try expectRuntimeAlignment(
+        &manifest,
+        \\{"schema_version":1,"generation":4,"servers":[{"id":"disabled","namespace":"disabled","display_name":"Disabled","enabled":true,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"streamable_http","url":"https://disabled.example.test/rpc"}}]}
+    ,
+        .restart_required,
+    );
+    try expectRuntimeAlignment(
+        &manifest,
+        \\{"schema_version":1,"generation":4,"servers":[{"id":"invalid","namespace":"invalid","display_name":"Fixed","enabled":true,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"streamable_http","url":"https://invalid.example.test/rpc"}}]}
+    ,
+        .restart_required,
+    );
+    try expectRuntimeAlignment(
+        &manifest,
+        \\{"schema_version":1,"generation":4,"servers":[{"id":"missing","namespace":"missing","display_name":"Missing","enabled":true,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"streamable_http","url":"https://changed.example.test/rpc","headers":[{"name":"Authorization","value":{"credential_ref":"missing/token"}}]}}]}
+    ,
+        .current,
+    );
+    try expectRuntimeAlignment(
+        &manifest,
+        \\{"schema_version":1,"generation":4,"servers":[{"id":"missing","namespace":"missing","display_name":"Missing","enabled":true,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"streamable_http","url":"https://changed.example.test/rpc","headers":[{"name":"Authorization","value":{"credential_ref":"other/token"}}]}}]}
+    ,
+        .restart_required,
+    );
+    try expectRuntimeAlignment(
+        &manifest,
+        \\{"schema_version":1,"generation":4,"servers":[{"id":"new","namespace":"new","display_name":"New","enabled":true,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"streamable_http","url":"https://new.example.test/rpc"}}]}
+    ,
+        .restart_required,
+    );
+}
+
+test "runtime manifest is unavailable when preparation facts are unavailable" {
+    var preparation = try prepare(
+        std.testing.allocator,
+        null,
+        false,
+        false,
+        .{},
+        test_limits,
+    );
+    defer preparation.deinit();
+    try std.testing.expect((try RuntimeManifest.candidate(
+        std.testing.allocator,
+        &preparation,
+    )) == null);
+}
+
+test "runtime manifest candidate stays unpublished until ownership commit" {
+    const bytes =
+        \\{"schema_version":1,"generation":2,"servers":[{"id":"remote","namespace":"remote","display_name":"Remote","enabled":true,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"streamable_http","url":"https://remote.example.test/rpc"}}]}
+    ;
+    var preparation = try prepare(
+        std.testing.allocator,
+        bytes,
+        true,
+        false,
+        .{},
+        test_limits,
+    );
+    defer preparation.deinit();
+
+    var abandoned = (try RuntimeManifest.candidate(
+        std.testing.allocator,
+        &preparation,
+    )).?;
+    abandoned.deinit();
+    var unknown = try ManagementPort.init(
+        std.testing.allocator,
+        preparation.registry.?.value,
+        .{
+            .persistence = .{},
+            .credentials = .{},
+            .limits = test_limits,
+        },
+    );
+    defer unknown.deinit();
+    try std.testing.expectEqual(
+        RuntimeAlignment.unknown,
+        unknown.inspect().runtime_alignment,
+    );
+
+    var committed = (try RuntimeManifest.candidate(
+        std.testing.allocator,
+        &preparation,
+    )).?;
+    var current = try ManagementPort.init(
+        std.testing.allocator,
+        preparation.registry.?.value,
+        .{
+            .persistence = .{},
+            .credentials = .{},
+            .limits = test_limits,
+            .runtime_manifest = &committed,
+        },
+    );
+    defer current.deinit();
+    try std.testing.expectEqual(
+        RuntimeAlignment.current,
+        current.inspect().runtime_alignment,
+    );
 }
