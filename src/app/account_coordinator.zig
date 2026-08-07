@@ -212,9 +212,9 @@ test "Application coordinator commits Account Runtime facts into Workbench" {
     defer account_runtime.deinit();
 
     var agent_runtime: agent.Runtime = undefined;
-    agent_runtime.io = std.testing.io;
     var workbench = try workbench_api.Workbench.init(
         std.testing.allocator,
+        std.testing.io,
         &agent_runtime,
         .{
             .worker_count = 1,
@@ -299,9 +299,9 @@ test "Application coordinator balances Workbench gate when Account effect admiss
     defer account_runtime.deinit();
 
     var agent_runtime: agent.Runtime = undefined;
-    agent_runtime.io = std.testing.io;
     var workbench = try workbench_api.Workbench.init(
         std.testing.allocator,
+        std.testing.io,
         &agent_runtime,
         .{
             .worker_count = 1,

@@ -47,6 +47,14 @@ function assertNoApplicationImplementationImports(files) {
   }
 }
 
+function sliceBetween(source, startMarker, endMarker, label) {
+  const start = source.indexOf(startMarker);
+  assert.ok(start >= 0, `${label} start marker must exist`);
+  const end = source.indexOf(endMarker, start + startMarker.length);
+  assert.ok(end > start, `${label} end marker must follow its start marker`);
+  return source.slice(start, end);
+}
+
 test("MetaWork product and package manifests share one release version", () => {
   const appVersion = read("app.zon").match(/\.version = "([^"]+)"/)?.[1];
   const zigVersion = read("build.zig.zon").match(/\.version = "([^"]+)"/)?.[1];
@@ -237,6 +245,51 @@ test("lower layers cannot reach composition or transport internals", () => {
   ];
   assertNoImports(lowerLayerFiles, ["metawork_app"]);
   assertNoApplicationImplementationImports(lowerLayerFiles);
+});
+
+test("Workbench receives IO independently from the Agent Runtime", () => {
+  const workbench = read("src/workbench/projection.zig");
+  const configuration = sliceBetween(
+    workbench,
+    "pub const Configuration = struct {",
+    "pub const McpStartupConfiguration = struct {",
+    "Workbench Configuration",
+  );
+  assert.doesNotMatch(configuration, /\bio:\s*std\.Io\b/);
+
+  const workbenchFields = sliceBetween(
+    workbench,
+    "pub const Workbench = struct {",
+    "    pub fn init(",
+    "Workbench fields",
+  );
+  assert.equal(
+    (workbenchFields.match(/^    io: std\.Io,$/gm) ?? []).length,
+    1,
+  );
+
+  const workbenchInit = sliceBetween(
+    workbench,
+    "    pub fn init(",
+    "    pub fn setScheduleBackgroundAvailableNoFail(",
+    "Workbench.init",
+  );
+  assert.match(
+    workbenchInit,
+    /allocator: std\.mem\.Allocator,\s*io: std\.Io,\s*agent_runtime: \*lifecycle\.Runtime/,
+  );
+  assert.match(workbenchInit, /Executor\.create\(io, allocator,/);
+  assert.match(workbenchInit, /\.io = io,/);
+
+  const production = workbench.slice(
+    0,
+    workbench.indexOf("var test_agent_runtime:"),
+  );
+  assert.doesNotMatch(production, /\b(?:self\.)?agent_runtime\.io\b/);
+  assert.doesNotMatch(
+    read("src/app/account_coordinator.zig"),
+    /agent_runtime\.io\s*=/,
+  );
 });
 
 test("only Agent implementation imports the AgentCore SDK", () => {

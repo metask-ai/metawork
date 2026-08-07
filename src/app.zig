@@ -139,6 +139,7 @@ const App = struct {
         };
         workbench_storage.* = try workbench_api.Workbench.init(
             std.heap.c_allocator,
+            self.io,
             agent_runtime,
             .{
                 .worker_count = host_worker_count,

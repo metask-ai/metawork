@@ -200,6 +200,7 @@ test "Workbench pins an async catalog and admits typed Skill through the existin
     defer std.testing.allocator.free(home);
     var workbench = try workbench_api.Workbench.init(
         std.testing.allocator,
+        std.testing.io,
         runtime,
         .{
             .worker_count = 1,
@@ -276,6 +277,7 @@ test "Manual Task persistence failure rolls back Workspace recent order" {
     configuration.task_persistence = persistence.capability();
     var workbench = try workbench_api.Workbench.init(
         std.testing.allocator,
+        std.testing.io,
         runtime,
         .{
             .worker_count = 1,
@@ -337,6 +339,7 @@ test "automatic Workspace admission is Task-owned and Text-only" {
     defer automatic_root.deinit();
     var workbench = try workbench_api.Workbench.init(
         std.testing.allocator,
+        std.testing.io,
         runtime,
         .{
             .worker_count = 1,
@@ -351,7 +354,7 @@ test "automatic Workspace admission is Task-owned and Text-only" {
     defer workbench.deinit();
     try installWorkbenchExecution(&workbench);
 
-    const manual_workspace_id = try workbench.openWorkspace(workbenchTaskInput());
+    _ = try workbench.openWorkspace(workbenchTaskInput());
     var user_projection_storage: [3]workbench_api.WorkspaceProjection = undefined;
     const before = try workbench.copyWorkspaceProjections(&user_projection_storage);
     const manual_recent_order = before[0].recent_order;
@@ -465,6 +468,7 @@ test "automatic Workspace creation rolls back record and empty directory on Sess
     defer automatic_root.deinit();
     var workbench = try workbench_api.Workbench.init(
         std.testing.allocator,
+        std.testing.io,
         runtime,
         .{
             .worker_count = 1,
@@ -513,6 +517,7 @@ test "Text schedule default creates a fresh automatic Workspace per occurrence" 
     var schedule_support: TestScheduleSupport = .{};
     var workbench = try workbench_api.Workbench.init(
         std.testing.allocator,
+        std.testing.io,
         runtime,
         .{
             .worker_count = 1,
@@ -612,6 +617,7 @@ test "schedule rejection retains the automatic Task created before a full Run qu
     var schedule_support: TestScheduleSupport = .{};
     var workbench = try workbench_api.Workbench.init(
         std.testing.allocator,
+        std.testing.io,
         runtime,
         .{
             .worker_count = 1,
@@ -682,6 +688,7 @@ test "Workspace reauthorization reschedules the latest catalog query" {
     defer std.testing.allocator.free(home);
     var workbench = try workbench_api.Workbench.init(
         std.testing.allocator,
+        std.testing.io,
         runtime,
         .{
             .worker_count = 1,
@@ -737,6 +744,7 @@ test "Workbench rejects stale Skill identity before Session or Run mutation and 
     defer std.testing.allocator.free(home);
     var workbench = try workbench_api.Workbench.init(
         std.testing.allocator,
+        std.testing.io,
         runtime,
         .{
             .worker_count = 1,
@@ -826,6 +834,7 @@ test "Workbench refreshes a Task only from the committed Workspace catalog while
     defer std.testing.allocator.free(home);
     var workbench = try workbench_api.Workbench.init(
         std.testing.allocator,
+        std.testing.io,
         runtime,
         .{
             .worker_count = 1,
@@ -890,7 +899,7 @@ test "Workbench closes off-thread and exposes retryable close failure" {
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
     }
-    var workbench = try workbench_api.Workbench.init(std.testing.allocator, runtime, .{
+    var workbench = try workbench_api.Workbench.init(std.testing.allocator, std.testing.io, runtime, .{
         .max_tasks = 2,
         .max_runs_per_task = 2,
         .max_tools_per_run = 2,
@@ -919,7 +928,7 @@ test "Workbench close cancels a queued Run without blocking the caller" {
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
     }
-    var workbench = try workbench_api.Workbench.init(std.testing.allocator, runtime, .{
+    var workbench = try workbench_api.Workbench.init(std.testing.allocator, std.testing.io, runtime, .{
         .max_tasks = 1,
         .max_runs_per_task = 1,
         .max_tools_per_run = 1,
@@ -947,7 +956,7 @@ test "Workspace removal interrupts live Runs without deleting Task history" {
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
     }
-    var workbench = try workbench_api.Workbench.init(std.testing.allocator, runtime, .{
+    var workbench = try workbench_api.Workbench.init(std.testing.allocator, std.testing.io, runtime, .{
         .worker_count = 1,
         .queue_capacity = 2,
         .max_workspaces = 1,
@@ -985,7 +994,7 @@ test "Workspace removal failure remains a retryable Workspace fact" {
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
     }
-    var workbench = try workbench_api.Workbench.init(std.testing.allocator, runtime, .{
+    var workbench = try workbench_api.Workbench.init(std.testing.allocator, std.testing.io, runtime, .{
         .worker_count = 1,
         .queue_capacity = 1,
         .max_workspaces = 1,
@@ -1023,7 +1032,7 @@ test "Workbench cancel of a completed Run is an idempotent no-op" {
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
     }
-    var workbench = try workbench_api.Workbench.init(std.testing.allocator, runtime, .{
+    var workbench = try workbench_api.Workbench.init(std.testing.allocator, std.testing.io, runtime, .{
         .worker_count = 1,
         .queue_capacity = 1,
         .max_tasks = 1,
@@ -1061,6 +1070,7 @@ test "Workbench manual compact uses the active operation lane and appends histor
     }
     var workbench = try workbench_api.Workbench.init(
         std.testing.allocator,
+        std.testing.io,
         runtime,
         .{
             .worker_count = 1,
@@ -1126,6 +1136,7 @@ test "Workbench compact cancellation and close wait for the Agent terminal resul
     }
     var workbench = try workbench_api.Workbench.init(
         std.testing.allocator,
+        std.testing.io,
         runtime,
         .{
             .worker_count = 1,
@@ -1179,6 +1190,7 @@ test "Workbench terminal compact result wins a too-late cancellation race" {
     }
     var workbench = try workbench_api.Workbench.init(
         std.testing.allocator,
+        std.testing.io,
         runtime,
         .{
             .worker_count = 1,
@@ -1228,6 +1240,7 @@ test "Workbench cancels a queued compact without entering AgentCore" {
     }
     var workbench = try workbench_api.Workbench.init(
         std.testing.allocator,
+        std.testing.io,
         runtime,
         .{
             .worker_count = 1,
@@ -1305,7 +1318,7 @@ test "Workbench shutdown terminates a waiting UI Run before joining workers" {
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
     }
-    var workbench = try workbench_api.Workbench.init(std.testing.allocator, runtime, .{
+    var workbench = try workbench_api.Workbench.init(std.testing.allocator, std.testing.io, runtime, .{
         .worker_count = 1,
         .queue_capacity = 2,
         .max_tasks = 1,
@@ -1330,7 +1343,7 @@ test "Workbench shutdown rejects new Task admission without creating product sta
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
     }
-    var workbench = try workbench_api.Workbench.init(std.testing.allocator, runtime, .{
+    var workbench = try workbench_api.Workbench.init(std.testing.allocator, std.testing.io, runtime, .{
         .worker_count = 1,
         .queue_capacity = 1,
         .max_tasks = 1,
@@ -1359,7 +1372,7 @@ test "late event from a finalized Run closes a Task with newer active work" {
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
     }
-    var workbench = try workbench_api.Workbench.init(std.testing.allocator, runtime, .{
+    var workbench = try workbench_api.Workbench.init(std.testing.allocator, std.testing.io, runtime, .{
         .worker_count = 1,
         .queue_capacity = 1,
         .max_tasks = 1,

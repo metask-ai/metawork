@@ -1842,6 +1842,7 @@ const ActiveExecution = struct {
 /// All methods currently run on the Native loop thread.
 pub const Workbench = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     agent_runtime: *lifecycle.Runtime,
     limits: Limits,
     workspaces: []?WorkspaceView,
@@ -1883,6 +1884,7 @@ pub const Workbench = struct {
 
     pub fn init(
         allocator: std.mem.Allocator,
+        io: std.Io,
         agent_runtime: *lifecycle.Runtime,
         limits: Limits,
         configuration: Configuration,
@@ -1918,7 +1920,7 @@ pub const Workbench = struct {
                 !std.unicode.utf8ValidateSlice(home))
                 return error.InvalidWorkspace;
             const resolved = std.Io.Dir.realPathFileAbsoluteAlloc(
-                agent_runtime.io,
+                io,
                 home,
                 allocator,
             ) catch return error.InvalidWorkspace;
@@ -2002,7 +2004,7 @@ pub const Workbench = struct {
         var skill_transactions: ?skill_management_impl.Transactions =
             if (configuration.skill_management.file_store) |file_store|
                 skill_management_impl.Transactions.init(
-                    agent_runtime.io,
+                    io,
                     allocator,
                     skill_inventory,
                     file_store,
@@ -2020,17 +2022,17 @@ pub const Workbench = struct {
                 break :root null;
             }
             const dir = std.Io.Dir.cwd().createDirPathOpen(
-                agent_runtime.io,
+                io,
                 configured,
                 .{ .open_options = .{ .follow_symlinks = false } },
             ) catch {
                 skill_management_health = .read_failed;
                 break :root null;
             };
-            defer dir.close(agent_runtime.io);
+            defer dir.close(io);
             var canonical_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
             const canonical_len = dir.realPath(
-                agent_runtime.io,
+                io,
                 &canonical_storage,
             ) catch {
                 skill_management_health = .read_failed;
@@ -2052,7 +2054,7 @@ pub const Workbench = struct {
             else
                 null;
         errdefer if (mcp_management) |*management| management.deinit();
-        const executor = executor_impl.Executor.create(agent_runtime.io, allocator, .{
+        const executor = executor_impl.Executor.create(io, allocator, .{
             .worker_count = limits.worker_count,
             .queue_capacity = limits.queue_capacity,
         }) catch |err| switch (err) {
@@ -2061,6 +2063,7 @@ pub const Workbench = struct {
         };
         var workbench: Workbench = .{
             .allocator = allocator,
+            .io = io,
             .agent_runtime = agent_runtime,
             .limits = limits,
             .workspaces = workspaces,
@@ -2163,13 +2166,13 @@ pub const Workbench = struct {
             !std.unicode.utf8ValidateSlice(absolute_path))
             return error.InvalidAsset;
         const source = std.Io.Dir.openDirAbsolute(
-            self.agent_runtime.io,
+            self.io,
             absolute_path,
             .{ .follow_symlinks = false, .iterate = true },
         ) catch return error.InvalidAsset;
-        defer source.close(self.agent_runtime.io);
+        defer source.close(self.io);
         return skill_package_impl.previewDirectory(
-            self.agent_runtime.io,
+            self.io,
             self.allocator,
             source,
             .{},
@@ -2187,13 +2190,13 @@ pub const Workbench = struct {
             !hasSkillArchiveExtension(absolute_path))
             return error.InvalidAsset;
         const archive = std.Io.Dir.openFileAbsolute(
-            self.agent_runtime.io,
+            self.io,
             absolute_path,
             .{ .follow_symlinks = false },
         ) catch return error.InvalidAsset;
-        defer archive.close(self.agent_runtime.io);
+        defer archive.close(self.io);
         const inspection = skill_package_impl.inspectArchive(
-            self.agent_runtime.io,
+            self.io,
             self.allocator,
             archive,
             .{},
@@ -2201,43 +2204,43 @@ pub const Workbench = struct {
         const staging_path = self.skill_staging_root orelse
             return error.PersistenceFailed;
         const staging = std.Io.Dir.openDirAbsolute(
-            self.agent_runtime.io,
+            self.io,
             staging_path,
             .{ .follow_symlinks = false },
         ) catch return error.PersistenceFailed;
-        defer staging.close(self.agent_runtime.io);
+        defer staging.close(self.io);
         var random: [16]u8 = undefined;
-        std.Io.randomSecure(self.agent_runtime.io, &random) catch
+        std.Io.randomSecure(self.io, &random) catch
             return error.PersistenceFailed;
         const hex = std.fmt.bytesToHex(random, .lower);
         var scratch_name: [47]u8 = undefined;
         @memcpy(scratch_name[0..15], ".skill-preview-");
         @memcpy(scratch_name[15..], &hex);
         staging.createDir(
-            self.agent_runtime.io,
+            self.io,
             &scratch_name,
             privateDirectoryPermissions(),
         ) catch return error.PersistenceFailed;
-        defer staging.deleteTree(self.agent_runtime.io, &scratch_name) catch {};
-        const scratch = staging.openDir(self.agent_runtime.io, &scratch_name, .{
+        defer staging.deleteTree(self.io, &scratch_name) catch {};
+        const scratch = staging.openDir(self.io, &scratch_name, .{
             .follow_symlinks = false,
         }) catch return error.PersistenceFailed;
-        defer scratch.close(self.agent_runtime.io);
+        defer scratch.close(self.io);
         skill_package_impl.extractArchive(
-            self.agent_runtime.io,
+            self.io,
             archive,
             scratch,
         ) catch return error.InvalidAsset;
         const source = if (inspection.wrapperName()) |wrapper|
-            scratch.openDir(self.agent_runtime.io, wrapper, .{
+            scratch.openDir(self.io, wrapper, .{
                 .follow_symlinks = false,
             }) catch return error.InvalidAsset
         else
             scratch;
         defer if (inspection.wrapperName() != null)
-            source.close(self.agent_runtime.io);
+            source.close(self.io);
         return skill_package_impl.previewDirectory(
-            self.agent_runtime.io,
+            self.io,
             self.allocator,
             source,
             .{},
@@ -2254,11 +2257,11 @@ pub const Workbench = struct {
             !std.unicode.utf8ValidateSlice(absolute_path))
             return error.InvalidAsset;
         const source = std.Io.Dir.openDirAbsolute(
-            self.agent_runtime.io,
+            self.io,
             absolute_path,
             .{ .follow_symlinks = false, .iterate = true },
         ) catch return error.InvalidAsset;
-        defer source.close(self.agent_runtime.io);
+        defer source.close(self.io);
         return self.installSkillSource(source, input);
     }
 
@@ -2273,13 +2276,13 @@ pub const Workbench = struct {
             !hasSkillArchiveExtension(absolute_path))
             return error.InvalidAsset;
         const archive = std.Io.Dir.openFileAbsolute(
-            self.agent_runtime.io,
+            self.io,
             absolute_path,
             .{ .follow_symlinks = false },
         ) catch return error.InvalidAsset;
-        defer archive.close(self.agent_runtime.io);
+        defer archive.close(self.io);
         const inspection = skill_package_impl.inspectArchive(
-            self.agent_runtime.io,
+            self.io,
             self.allocator,
             archive,
             .{},
@@ -2287,41 +2290,41 @@ pub const Workbench = struct {
         const staging_path = self.skill_staging_root orelse
             return error.PersistenceFailed;
         const staging = std.Io.Dir.openDirAbsolute(
-            self.agent_runtime.io,
+            self.io,
             staging_path,
             .{ .follow_symlinks = false },
         ) catch return error.PersistenceFailed;
-        defer staging.close(self.agent_runtime.io);
+        defer staging.close(self.io);
         var random: [16]u8 = undefined;
-        std.Io.randomSecure(self.agent_runtime.io, &random) catch
+        std.Io.randomSecure(self.io, &random) catch
             return error.PersistenceFailed;
         const hex = std.fmt.bytesToHex(random, .lower);
         var scratch_name: [46]u8 = undefined;
         @memcpy(scratch_name[0..14], ".skill-import-");
         @memcpy(scratch_name[14..], &hex);
         staging.createDir(
-            self.agent_runtime.io,
+            self.io,
             &scratch_name,
             privateDirectoryPermissions(),
         ) catch return error.PersistenceFailed;
-        defer staging.deleteTree(self.agent_runtime.io, &scratch_name) catch {};
-        const scratch = staging.openDir(self.agent_runtime.io, &scratch_name, .{
+        defer staging.deleteTree(self.io, &scratch_name) catch {};
+        const scratch = staging.openDir(self.io, &scratch_name, .{
             .follow_symlinks = false,
         }) catch return error.PersistenceFailed;
-        defer scratch.close(self.agent_runtime.io);
+        defer scratch.close(self.io);
         skill_package_impl.extractArchive(
-            self.agent_runtime.io,
+            self.io,
             archive,
             scratch,
         ) catch return error.InvalidAsset;
         const source = if (inspection.wrapperName()) |wrapper|
-            scratch.openDir(self.agent_runtime.io, wrapper, .{
+            scratch.openDir(self.io, wrapper, .{
                 .follow_symlinks = false,
             }) catch return error.InvalidAsset
         else
             scratch;
         defer if (inspection.wrapperName() != null)
-            source.close(self.agent_runtime.io);
+            source.close(self.io);
         return self.installSkillSource(source, input);
     }
 
@@ -2332,7 +2335,7 @@ pub const Workbench = struct {
     ) Error!SkillMutationResult {
         try self.requireSkillMutationAvailable(input.scope);
         var preview = try skill_package_impl.previewDirectory(
-            self.agent_runtime.io,
+            self.io,
             self.allocator,
             source,
             .{},
@@ -2346,7 +2349,7 @@ pub const Workbench = struct {
             ))
             return error.InvalidAsset;
         var manifest = try skill_package_impl.inspectDirectory(
-            self.agent_runtime.io,
+            self.io,
             self.allocator,
             source,
             .{},
@@ -2362,7 +2365,7 @@ pub const Workbench = struct {
         const now = self.schedule_timer.now() orelse return error.PersistenceFailed;
         if (now == 0) return error.PersistenceFailed;
         const install_id = skill_management_impl.generateInstallId(
-            self.agent_runtime.io,
+            self.io,
         ) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             else => error.PersistenceFailed,
@@ -2426,11 +2429,11 @@ pub const Workbench = struct {
             !std.unicode.utf8ValidateSlice(absolute_path))
             return error.InvalidAsset;
         const source = std.Io.Dir.openDirAbsolute(
-            self.agent_runtime.io,
+            self.io,
             absolute_path,
             .{ .follow_symlinks = false, .iterate = true },
         ) catch return error.InvalidAsset;
-        defer source.close(self.agent_runtime.io);
+        defer source.close(self.io);
         return self.reimportSkillSource(
             install_id,
             source,
@@ -2451,49 +2454,49 @@ pub const Workbench = struct {
             !hasSkillArchiveExtension(absolute_path))
             return error.InvalidAsset;
         const archive = std.Io.Dir.openFileAbsolute(
-            self.agent_runtime.io,
+            self.io,
             absolute_path,
             .{ .follow_symlinks = false },
         ) catch return error.InvalidAsset;
-        defer archive.close(self.agent_runtime.io);
+        defer archive.close(self.io);
         const inspection = skill_package_impl.inspectArchive(
-            self.agent_runtime.io,
+            self.io,
             self.allocator,
             archive,
             .{},
         ) catch return error.InvalidAsset;
         const staging = try self.openSkillStagingRoot();
-        defer staging.close(self.agent_runtime.io);
+        defer staging.close(self.io);
         var random: [16]u8 = undefined;
-        std.Io.randomSecure(self.agent_runtime.io, &random) catch
+        std.Io.randomSecure(self.io, &random) catch
             return error.PersistenceFailed;
         const hex = std.fmt.bytesToHex(random, .lower);
         var scratch_name: [48]u8 = undefined;
         @memcpy(scratch_name[0..16], ".skill-reimport-");
         @memcpy(scratch_name[16..], &hex);
         staging.createDir(
-            self.agent_runtime.io,
+            self.io,
             &scratch_name,
             privateDirectoryPermissions(),
         ) catch return error.PersistenceFailed;
-        defer staging.deleteTree(self.agent_runtime.io, &scratch_name) catch {};
-        const scratch = staging.openDir(self.agent_runtime.io, &scratch_name, .{
+        defer staging.deleteTree(self.io, &scratch_name) catch {};
+        const scratch = staging.openDir(self.io, &scratch_name, .{
             .follow_symlinks = false,
         }) catch return error.PersistenceFailed;
-        defer scratch.close(self.agent_runtime.io);
+        defer scratch.close(self.io);
         skill_package_impl.extractArchive(
-            self.agent_runtime.io,
+            self.io,
             archive,
             scratch,
         ) catch return error.InvalidAsset;
         const source = if (inspection.wrapperName()) |wrapper|
-            scratch.openDir(self.agent_runtime.io, wrapper, .{
+            scratch.openDir(self.io, wrapper, .{
                 .follow_symlinks = false,
             }) catch return error.InvalidAsset
         else
             scratch;
         defer if (inspection.wrapperName() != null)
-            source.close(self.agent_runtime.io);
+            source.close(self.io);
         return self.reimportSkillSource(
             install_id,
             source,
@@ -2516,7 +2519,7 @@ pub const Workbench = struct {
         defer self.allocator.free(target_entry);
         try self.requireSkillMutationAvailable(scope);
         var preview = try skill_package_impl.previewDirectory(
-            self.agent_runtime.io,
+            self.io,
             self.allocator,
             source,
             .{},
@@ -2527,7 +2530,7 @@ pub const Workbench = struct {
             !std.mem.eql(u8, &preview.content_hash, &expected_content_hash))
             return error.InvalidAsset;
         var manifest = try skill_package_impl.inspectDirectory(
-            self.agent_runtime.io,
+            self.io,
             self.allocator,
             source,
             .{},
@@ -2669,13 +2672,13 @@ pub const Workbench = struct {
         var root = try self.openSkillRoot(scope);
         defer root.deinit();
         const source = root.dir.openDir(
-            self.agent_runtime.io,
+            self.io,
             target_entry,
             .{ .follow_symlinks = false, .iterate = true },
         ) catch return error.TargetUnavailable;
-        defer source.close(self.agent_runtime.io);
+        defer source.close(self.io);
         return skill_package_impl.previewDirectory(
-            self.agent_runtime.io,
+            self.io,
             self.allocator,
             source,
             .{},
@@ -2701,24 +2704,24 @@ pub const Workbench = struct {
         var root = try self.openSkillRoot(scope);
         defer root.deinit();
         const source = root.dir.openDir(
-            self.agent_runtime.io,
+            self.io,
             target_entry,
             .{ .follow_symlinks = false, .iterate = true },
         ) catch return error.TargetUnavailable;
-        defer source.close(self.agent_runtime.io);
+        defer source.close(self.io);
         var manifest = try skill_package_impl.inspectDirectory(
-            self.agent_runtime.io,
+            self.io,
             self.allocator,
             source,
             .{},
         );
         defer manifest.deinit();
         const destination = std.Io.Dir.openDirAbsolute(
-            self.agent_runtime.io,
+            self.io,
             absolute_destination,
             .{ .follow_symlinks = false },
         ) catch return error.DestinationUnavailable;
-        defer destination.close(self.agent_runtime.io);
+        defer destination.close(self.io);
         var result: SkillExportResult = .{
             .file_name = undefined,
             .file_name_len = target_entry.len + ".skill".len,
@@ -2729,7 +2732,7 @@ pub const Workbench = struct {
             ".skill",
         );
         const output = destination.createFile(
-            self.agent_runtime.io,
+            self.io,
             result.fileName(),
             .{
                 .exclusive = true,
@@ -2743,18 +2746,18 @@ pub const Workbench = struct {
         var output_open = true;
         var output_exists = true;
         defer {
-            if (output_open) output.close(self.agent_runtime.io);
+            if (output_open) output.close(self.io);
             if (output_exists)
-                destination.deleteFile(self.agent_runtime.io, result.fileName()) catch {};
+                destination.deleteFile(self.io, result.fileName()) catch {};
         }
         skill_package_impl.exportArchive(
-            self.agent_runtime.io,
+            self.io,
             source,
             output,
             &manifest,
         ) catch return error.WriteFailed;
-        output.sync(self.agent_runtime.io) catch return error.WriteFailed;
-        output.close(self.agent_runtime.io);
+        output.sync(self.io) catch return error.WriteFailed;
+        output.close(self.io);
         output_open = false;
         output_exists = false;
         return result;
@@ -2763,7 +2766,7 @@ pub const Workbench = struct {
     fn openSkillStagingRoot(self: *Workbench) Error!std.Io.Dir {
         const path = self.skill_staging_root orelse return error.PersistenceFailed;
         return std.Io.Dir.openDirAbsolute(
-            self.agent_runtime.io,
+            self.io,
             path,
             .{ .follow_symlinks = false },
         ) catch error.PersistenceFailed;
@@ -7235,7 +7238,7 @@ pub const Workbench = struct {
         if (!std.fs.path.isAbsolute(input.workspace_root))
             return error.InvalidWorkspace;
         const canonical = std.Io.Dir.realPathFileAbsoluteAlloc(
-            self.agent_runtime.io,
+            self.io,
             input.workspace_root,
             self.allocator,
         ) catch return error.InvalidWorkspace;
@@ -7243,7 +7246,7 @@ pub const Workbench = struct {
         if (canonical.len > self.limits.max_workspace_bytes)
             return error.ProjectionCapacity;
         const workspace_stat = std.Io.Dir.cwd().statFile(
-            self.agent_runtime.io,
+            self.io,
             canonical,
             .{},
         ) catch return error.InvalidWorkspace;
@@ -7260,7 +7263,7 @@ pub const Workbench = struct {
                 if (!std.fs.path.isAbsolute(root))
                     return error.InvalidWorkspace;
                 const temporary = std.Io.Dir.realPathFileAbsoluteAlloc(
-                    self.agent_runtime.io,
+                    self.io,
                     root,
                     self.allocator,
                 ) catch return error.InvalidWorkspace;
@@ -7268,7 +7271,7 @@ pub const Workbench = struct {
                 if (temporary.len > self.limits.max_workspace_bytes)
                     return error.ProjectionCapacity;
                 const root_stat = std.Io.Dir.cwd().statFile(
-                    self.agent_runtime.io,
+                    self.io,
                     temporary,
                     .{},
                 ) catch return error.InvalidWorkspace;
@@ -7668,7 +7671,7 @@ pub const Workbench = struct {
         );
         defer self.allocator.free(root_path);
         return skill_management_impl.CanonicalRoot.open(
-            self.agent_runtime.io,
+            self.io,
             self.allocator,
             scope,
             root_path,
@@ -10694,6 +10697,7 @@ fn testWorkbench() !Workbench {
     test_agent_runtime.io = std.testing.io;
     var workbench = try Workbench.init(
         std.testing.allocator,
+        std.testing.io,
         &test_agent_runtime,
         testLimits(),
         .{},
@@ -10978,6 +10982,7 @@ test "automatic Workspace root is optional and reserved from user registration" 
     test_agent_runtime.io = std.testing.io;
     var unavailable = try Workbench.init(
         std.testing.allocator,
+        std.testing.io,
         &test_agent_runtime,
         testLimits(),
         .{},
@@ -11005,6 +11010,7 @@ test "automatic Workspace root is optional and reserved from user registration" 
     defer root.deinit();
     var workbench = try Workbench.init(
         std.testing.allocator,
+        std.testing.io,
         &test_agent_runtime,
         testLimits(),
         .{ .directories = .{ .automatic_workspace_root = &root } },
@@ -11052,6 +11058,7 @@ test "Workspace registry owns empty selection recent use authorization and capac
     defer std.testing.allocator.free(tests_path);
     var workbench = try Workbench.init(
         std.testing.allocator,
+        std.testing.io,
         &test_agent_runtime,
         .{
             .max_workspaces = 2,
@@ -11251,6 +11258,7 @@ test "Task state round trip restores product history without fabricating a Sessi
         );
         var terminal_restore = try Workbench.init(
             std.testing.allocator,
+            std.testing.io,
             &test_agent_runtime,
             testLimits(),
             .{
@@ -11272,6 +11280,7 @@ test "Task state round trip restores product history without fabricating a Sessi
 
     var restored = try Workbench.init(
         std.testing.allocator,
+        std.testing.io,
         &test_agent_runtime,
         testLimits(),
         .{
@@ -11322,6 +11331,7 @@ test "Task state round trip restores product history without fabricating a Sessi
 
     var closed_restore = try Workbench.init(
         std.testing.allocator,
+        std.testing.io,
         &test_agent_runtime,
         testLimits(),
         .{
@@ -11342,6 +11352,7 @@ test "Task state round trip restores product history without fabricating a Sessi
     try closed_restore.deleteTask(3);
     var deleted_restore = try Workbench.init(
         std.testing.allocator,
+        std.testing.io,
         &test_agent_runtime,
         testLimits(),
         .{
@@ -11375,6 +11386,7 @@ test "Automatic Workspace history survives an unavailable allocator" {
 
     var restored = try Workbench.init(
         std.testing.allocator,
+        std.testing.io,
         &test_agent_runtime,
         testLimits(),
         .{
@@ -11414,6 +11426,7 @@ test "Task persistence restore failure blocks product mutations" {
     test_agent_runtime.io = std.testing.io;
     var workbench = try Workbench.init(
         std.testing.allocator,
+        std.testing.io,
         &test_agent_runtime,
         testLimits(),
         .{ .task_persistence = .{ .restore_failed = true } },
@@ -11512,6 +11525,7 @@ test "Task persistence failure rolls back Workspace upsert candidates" {
     {
         var workbench = try Workbench.init(
             std.testing.allocator,
+            std.testing.io,
             &test_agent_runtime,
             testLimits(),
             .{ .task_persistence = persistence.capability(null) },
@@ -11534,6 +11548,7 @@ test "Task persistence failure rolls back Workspace upsert candidates" {
     persistence.result = .committed;
     var workbench = try Workbench.init(
         std.testing.allocator,
+        std.testing.io,
         &test_agent_runtime,
         .{ .max_workspaces = 1 },
         .{ .task_persistence = persistence.capability(null) },
@@ -11904,6 +11919,7 @@ test "Workbench starts without execution and fails Task admission closed" {
     test_agent_runtime.io = std.testing.io;
     var workbench = try Workbench.init(
         std.testing.allocator,
+        std.testing.io,
         &test_agent_runtime,
         .{
             .max_tasks = 1,
@@ -11927,6 +11943,7 @@ test "Account projection and execution install use preallocated no-fail storage"
     test_agent_runtime.io = std.testing.io;
     var workbench = try Workbench.init(
         std.testing.allocator,
+        std.testing.io,
         &test_agent_runtime,
         .{
             .max_tasks = 1,
@@ -12221,6 +12238,7 @@ test "clearing the last default execution scrubs its credential before secure ze
     test_agent_runtime.io = std.testing.io;
     var workbench = try Workbench.init(
         std.testing.allocator,
+        std.testing.io,
         &test_agent_runtime,
         .{
             .max_tasks = 1,
@@ -12914,6 +12932,7 @@ test "default snapshot budget contains the maximum structural projection" {
     test_agent_runtime.io = std.testing.io;
     var workbench = try Workbench.init(
         std.testing.allocator,
+        std.testing.io,
         &test_agent_runtime,
         limits,
         .{},
@@ -13632,6 +13651,7 @@ test "empty MCP startup commits a proven manageable runtime" {
     test_agent_runtime.io = std.testing.io;
     var workbench = try Workbench.init(
         std.testing.allocator,
+        std.testing.io,
         &test_agent_runtime,
         testLimits(),
         .{ .mcp = .{
@@ -13759,6 +13779,7 @@ test "MCP startup health commits a safe degraded Workbench projection" {
     test_agent_runtime.io = std.testing.io;
     var workbench = try Workbench.init(
         std.testing.allocator,
+        std.testing.io,
         &test_agent_runtime,
         testLimits(),
         .{ .mcp = .{
