@@ -48,25 +48,13 @@ fn waitCatalogReady(
 }
 
 fn waitTaskSnapshot(
-    runtime: *lifecycle.Runtime,
     workbench: *workbench_api.Workbench,
     task_marker: []const u8,
     needle: []const u8,
 ) !void {
     var output: [128 * 1024]u8 = undefined;
     for (0..10_000) |_| {
-        while (runtime.takeEvent()) |value| {
-            var envelope = value;
-            defer envelope.deinit();
-            try workbench.applyEvent(&envelope);
-        }
-        workbench.markTerminalRunsBeforeEventDrain();
-        while (runtime.takeEvent()) |value| {
-            var envelope = value;
-            defer envelope.deinit();
-            try workbench.applyEvent(&envelope);
-        }
-        workbench.finalizeMarkedTerminalRunsAfterEventDrain();
+        try workbench.drainAgentEvents();
         const snapshot = try workbench.writeSnapshot(&output);
         if (std.mem.indexOf(u8, snapshot, task_marker)) |start| {
             if (std.mem.indexOf(u8, snapshot[start..], needle) != null) return;
@@ -239,17 +227,14 @@ test "Workbench pins an async catalog and admits typed Skill through the existin
         .argument_values = &.{ "src/main.zig", "correctness" },
     } });
     try waitWorkbenchSnapshot(
-        runtime,
         &workbench,
         "\"lastRunOutcome\":\"completed\"",
     );
     try waitWorkbenchSnapshot(
-        runtime,
         &workbench,
         "\"skillCatalog\":{\"availability\":\"ready\"",
     );
     try waitWorkbenchSnapshot(
-        runtime,
         &workbench,
         "\"input\":{\"kind\":\"skill\"",
     );
@@ -426,9 +411,9 @@ test "automatic Workspace admission is Task-owned and Text-only" {
     try std.testing.expectEqual(@as(usize, 2), try directoryEntryCount(tmp.dir));
 
     _ = try workbench.runTask(first_task, .{ .text = "automatic text run" });
-    try waitWorkbenchSnapshot(runtime, &workbench, "\"lastRunOutcome\":\"completed\"");
+    try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
     try workbench.closeTask(first_task);
-    try waitWorkbenchSnapshot(runtime, &workbench, "\"lifecycle\":\"closed\"");
+    try waitWorkbenchSnapshot(&workbench, "\"lifecycle\":\"closed\"");
     try workbench.deleteTask(first_task);
     try std.testing.expectError(
         error.UnknownWorkspace,
@@ -564,7 +549,7 @@ test "Text schedule default creates a fresh automatic Workspace per occurrence" 
         workbench_api.WorkspaceKind.automatic,
         try workbench.workspaceKind(first_workspace),
     );
-    try waitWorkbenchSnapshot(runtime, &workbench, "\"taskOutcome\":\"completed\"");
+    try waitWorkbenchSnapshot(&workbench, "\"taskOutcome\":\"completed\"");
 
     const second_task = try workbench.runScheduledTaskNow(default_schedule, 1);
     const second_workspace = try workbench.taskWorkspaceId(second_task);
@@ -648,7 +633,6 @@ test "schedule rejection retains the automatic Task created before a full Run qu
     const queued_task = try workbench.createTaskForWorkspace(.automatic, 1, null);
     _ = try workbench.runTask(running_task, .{ .text = "hold worker" });
     try waitWorkbenchSnapshot(
-        runtime,
         &workbench,
         "\"currentRunPhase\":\"running\"",
     );
@@ -801,7 +785,6 @@ test "Workbench rejects stale Skill identity before Session or Run mutation and 
         .argument_values = &.{},
     } });
     try waitWorkbenchSnapshot(
-        runtime,
         &workbench,
         "\"cause\":\"stale_catalog\"",
     );
@@ -860,7 +843,6 @@ test "Workbench refreshes a Task only from the committed Workspace catalog while
     );
     _ = try workbench.runTask(task_id, .{ .text = "hold refresh" });
     try waitWorkbenchSnapshot(
-        runtime,
         &workbench,
         "\"currentRunPhase\":\"running\"",
     );
@@ -873,7 +855,6 @@ test "Workbench refreshes a Task only from the committed Workspace catalog while
     );
     fake_core.releaseControlled();
     try waitWorkbenchSnapshot(
-        runtime,
         &workbench,
         "\"lastRunOutcome\":\"completed\"",
     );
@@ -910,10 +891,10 @@ test "Workbench closes off-thread and exposes retryable close failure" {
     const task_id = try workbench.createTask(workbenchTaskInput());
     fake_core.failNextSessionDestroy();
     try workbench.closeTask(task_id);
-    try waitWorkbenchSnapshot(runtime, &workbench, "\"closeFailed\":true");
+    try waitWorkbenchSnapshot(&workbench, "\"closeFailed\":true");
 
     try workbench.closeTask(task_id);
-    try waitWorkbenchSnapshot(runtime, &workbench, "\"lifecycle\":\"closed\"");
+    try waitWorkbenchSnapshot(&workbench, "\"lifecycle\":\"closed\"");
     fake_core.lock();
     const destroyed = fake_core.session_destroyed;
     fake_core.unlock();
@@ -939,7 +920,7 @@ test "Workbench close cancels a queued Run without blocking the caller" {
     const task_id = try workbench.createTask(workbenchTaskInput());
     _ = try workbench.runTask(task_id, .{ .text = "close this run" });
     try workbench.closeTask(task_id);
-    try waitWorkbenchSnapshot(runtime, &workbench, "\"lifecycle\":\"closed\"");
+    try waitWorkbenchSnapshot(&workbench, "\"lifecycle\":\"closed\"");
     fake_core.lock();
     const abort_calls = fake_core.abort_calls;
     const destroyed = fake_core.session_destroyed;
@@ -973,11 +954,11 @@ test "Workspace removal interrupts live Runs without deleting Task history" {
         task_id,
         .{ .text = "stop when the workspace is removed" },
     );
-    try waitWorkbenchSnapshot(runtime, &workbench, "\"currentRunPhase\":\"running\"");
+    try waitWorkbenchSnapshot(&workbench, "\"currentRunPhase\":\"running\"");
 
     try workbench.removeWorkspace(workspace_id);
-    try waitWorkbenchSnapshot(runtime, &workbench, "\"lastRunOutcome\":\"interrupted\"");
-    try waitWorkbenchSnapshot(runtime, &workbench, "\"lifecycle\":\"closed\"");
+    try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"interrupted\"");
+    try waitWorkbenchSnapshot(&workbench, "\"lifecycle\":\"closed\"");
 
     var snapshot_storage: [128 * 1024]u8 = undefined;
     const snapshot = try workbench.writeSnapshot(&snapshot_storage);
@@ -1010,7 +991,6 @@ test "Workspace removal failure remains a retryable Workspace fact" {
     fake_core.failNextSessionDestroy();
     try workbench.removeWorkspace(workspace_id);
     try waitWorkbenchSnapshot(
-        runtime,
         &workbench,
         "\"lastRemovalFailure\":\"task_close_failed\"",
     );
@@ -1047,14 +1027,14 @@ test "Workbench cancel of a completed Run is an idempotent no-op" {
         task_id,
         .{ .text = "finish before cancel arrives" },
     );
-    try waitWorkbenchSnapshot(runtime, &workbench, "\"lastRunOutcome\":\"completed\"");
+    try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
     const revision = workbench.currentRevision();
     try workbench.cancel(task_id, run_id);
     try std.testing.expectEqual(revision, workbench.currentRevision());
-    try waitWorkbenchSnapshot(runtime, &workbench, "\"lastRunOutcome\":\"completed\"");
+    try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
 
     try workbench.closeTask(task_id);
-    try waitWorkbenchSnapshot(runtime, &workbench, "\"lifecycle\":\"closed\"");
+    try waitWorkbenchSnapshot(&workbench, "\"lifecycle\":\"closed\"");
 }
 
 test "Workbench manual compact uses the active operation lane and appends history" {
@@ -1091,12 +1071,12 @@ test "Workbench manual compact uses the active operation lane and appends histor
         workbench.compactTaskAtBinding(task_id, 1),
     );
     _ = try workbench.runTask(task_id, .{ .text = "establish conversation" });
-    try waitWorkbenchSnapshot(runtime, &workbench, "\"lastRunOutcome\":\"completed\"");
+    try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
 
     _ = try workbench.compactTaskAtBinding(task_id, 1);
-    try waitWorkbenchSnapshot(runtime, &workbench, "\"phase\":\"compacted\"");
+    try waitWorkbenchSnapshot(&workbench, "\"phase\":\"compacted\"");
     _ = try workbench.compactTaskAtBinding(task_id, 1);
-    try waitWorkbenchSnapshot(runtime, &workbench, "\"operationId\":\"2\"");
+    try waitWorkbenchSnapshot(&workbench, "\"operationId\":\"2\"");
     try std.testing.expectError(
         error.CompactCapacity,
         workbench.compactTaskAtBinding(task_id, 1),
@@ -1120,7 +1100,7 @@ test "Workbench manual compact uses the active operation lane and appends histor
     ) != null);
 
     try workbench.closeTask(task_id);
-    try waitWorkbenchSnapshot(runtime, &workbench, "\"lifecycle\":\"closed\"");
+    try waitWorkbenchSnapshot(&workbench, "\"lifecycle\":\"closed\"");
 }
 
 test "Workbench compact cancellation and close wait for the Agent terminal result" {
@@ -1153,24 +1133,24 @@ test "Workbench compact cancellation and close wait for the Agent terminal resul
 
     const task_id = try workbench.createTask(workbenchTaskInput());
     _ = try workbench.runTask(task_id, .{ .text = "establish conversation" });
-    try waitWorkbenchSnapshot(runtime, &workbench, "\"lastRunOutcome\":\"completed\"");
+    try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
     fake_core.setSessionPlan(.controlled);
     fake_core.rearmControlled();
     const operation_id = try workbench.compactTaskAtBinding(task_id, 1);
-    try waitWorkbenchSnapshot(runtime, &workbench, "\"phase\":\"compacting\"");
+    try waitWorkbenchSnapshot(&workbench, "\"phase\":\"compacting\"");
     try std.testing.expectError(
         error.TaskBusy,
         workbench.runTask(task_id, .{ .text = "must wait" }),
     );
     try workbench.cancelCompact(task_id, operation_id);
-    try waitWorkbenchSnapshot(runtime, &workbench, "\"phase\":\"aborted\"");
-    try waitWorkbenchSnapshot(runtime, &workbench, "\"activeOperation\":null");
+    try waitWorkbenchSnapshot(&workbench, "\"phase\":\"aborted\"");
+    try waitWorkbenchSnapshot(&workbench, "\"activeOperation\":null");
 
     fake_core.rearmControlled();
     _ = try workbench.compactTaskAtBinding(task_id, 1);
-    try waitWorkbenchSnapshot(runtime, &workbench, "\"phase\":\"compacting\"");
+    try waitWorkbenchSnapshot(&workbench, "\"phase\":\"compacting\"");
     try workbench.closeTask(task_id);
-    try waitWorkbenchSnapshot(runtime, &workbench, "\"lifecycle\":\"closed\"");
+    try waitWorkbenchSnapshot(&workbench, "\"lifecycle\":\"closed\"");
     fake_core.lock();
     const abort_calls = fake_core.compact_abort_calls;
     fake_core.unlock();
@@ -1207,24 +1187,24 @@ test "Workbench terminal compact result wins a too-late cancellation race" {
 
     const task_id = try workbench.createTask(workbenchTaskInput());
     _ = try workbench.runTask(task_id, .{ .text = "establish conversation" });
-    try waitWorkbenchSnapshot(runtime, &workbench, "\"lastRunOutcome\":\"completed\"");
+    try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
     fake_core.setSessionPlan(.controlled);
     fake_core.rearmControlled();
     fake_core.forceNextCompactAbortStatus(wire.STATUS_TOO_LATE);
     const operation_id = try workbench.compactTaskAtBinding(task_id, 1);
-    try waitWorkbenchSnapshot(runtime, &workbench, "\"phase\":\"compacting\"");
+    try waitWorkbenchSnapshot(&workbench, "\"phase\":\"compacting\"");
     try workbench.cancelCompact(task_id, operation_id);
-    try waitWorkbenchSnapshot(runtime, &workbench, "\"phase\":\"stopping\"");
+    try waitWorkbenchSnapshot(&workbench, "\"phase\":\"stopping\"");
     fake_core.releaseControlled();
-    try waitWorkbenchSnapshot(runtime, &workbench, "\"phase\":\"compacted\"");
-    try waitWorkbenchSnapshot(runtime, &workbench, "\"activeOperation\":null");
+    try waitWorkbenchSnapshot(&workbench, "\"phase\":\"compacted\"");
+    try waitWorkbenchSnapshot(&workbench, "\"activeOperation\":null");
     try std.testing.expectError(
         error.NoSuchCompact,
         workbench.cancelCompact(task_id, operation_id),
     );
 
     try workbench.closeTask(task_id);
-    try waitWorkbenchSnapshot(runtime, &workbench, "\"lifecycle\":\"closed\"");
+    try waitWorkbenchSnapshot(&workbench, "\"lifecycle\":\"closed\"");
 }
 
 test "Workbench cancels a queued compact without entering AgentCore" {
@@ -1261,14 +1241,12 @@ test "Workbench cancels a queued compact without entering AgentCore" {
     try workbench.renameTask(compact_task_id, "compact target");
     _ = try workbench.runTask(blocking_task_id, .{ .text = "first conversation" });
     try waitTaskSnapshot(
-        runtime,
         &workbench,
         "\"title\":\"blocking target\"",
         "\"lastRunOutcome\":\"completed\"",
     );
     _ = try workbench.runTask(compact_task_id, .{ .text = "second conversation" });
     try waitTaskSnapshot(
-        runtime,
         &workbench,
         "\"title\":\"compact target\"",
         "\"lastRunOutcome\":\"completed\"",
@@ -1280,11 +1258,11 @@ test "Workbench cancels a queued compact without entering AgentCore" {
         blocking_task_id,
         .{ .text = "occupy the only worker" },
     );
-    try waitWorkbenchSnapshot(runtime, &workbench, "\"currentRunPhase\":\"running\"");
+    try waitWorkbenchSnapshot(&workbench, "\"currentRunPhase\":\"running\"");
     const operation_id = try workbench.compactTaskAtBinding(compact_task_id, 1);
-    try waitWorkbenchSnapshot(runtime, &workbench, "\"phase\":\"queued\"");
+    try waitWorkbenchSnapshot(&workbench, "\"phase\":\"queued\"");
     try workbench.cancelCompact(compact_task_id, operation_id);
-    try waitWorkbenchSnapshot(runtime, &workbench, "\"phase\":\"aborted\"");
+    try waitWorkbenchSnapshot(&workbench, "\"phase\":\"aborted\"");
     fake_core.lock();
     const compact_calls = fake_core.compact_calls;
     const compact_abort_calls = fake_core.compact_abort_calls;
@@ -1293,17 +1271,15 @@ test "Workbench cancels a queued compact without entering AgentCore" {
     try std.testing.expectEqual(@as(usize, 0), compact_abort_calls);
 
     try workbench.cancel(blocking_task_id, blocking_run_id);
-    try waitWorkbenchSnapshot(runtime, &workbench, "\"lastRunOutcome\":\"cancelled\"");
+    try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"cancelled\"");
     try workbench.closeTask(blocking_task_id);
     try workbench.closeTask(compact_task_id);
     try waitTaskSnapshot(
-        runtime,
         &workbench,
         "\"title\":\"blocking target\"",
         "\"lifecycle\":\"closed\"",
     );
     try waitTaskSnapshot(
-        runtime,
         &workbench,
         "\"title\":\"compact target\"",
         "\"lifecycle\":\"closed\"",
@@ -1330,10 +1306,10 @@ test "Workbench shutdown terminates a waiting UI Run before joining workers" {
 
     const task_id = try workbench.createTask(workbenchTaskInput());
     _ = try workbench.runTask(task_id, .{ .text = "wait for shutdown" });
-    try waitWorkbenchSnapshot(runtime, &workbench, "\"currentRunPhase\":\"waiting_ui\"");
+    try waitWorkbenchSnapshot(&workbench, "\"currentRunPhase\":\"waiting_ui\"");
     workbench.shutdownExecutor();
-    try waitWorkbenchSnapshot(runtime, &workbench, "\"lastRunOutcome\":\"interrupted\"");
-    try waitWorkbenchSnapshot(runtime, &workbench, "\"continuationAvailable\":false");
+    try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"interrupted\"");
+    try waitWorkbenchSnapshot(&workbench, "\"continuationAvailable\":false");
 }
 
 test "Workbench shutdown rejects new Task admission without creating product state" {
@@ -1387,13 +1363,13 @@ test "late event from a finalized Run closes a Task with newer active work" {
         task_id,
         .{ .text = "finish first" },
     );
-    try waitWorkbenchSnapshot(runtime, &workbench, "\"currentRunPhase\":\"running\"");
+    try waitWorkbenchSnapshot(&workbench, "\"currentRunPhase\":\"running\"");
     fake_core.releaseControlled();
-    try waitWorkbenchSnapshot(runtime, &workbench, "\"lastRunOutcome\":\"completed\"");
+    try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
 
     fake_core.rearmControlled();
     _ = try workbench.runTask(task_id, .{ .text = "new active work" });
-    try waitWorkbenchSnapshot(runtime, &workbench, "\"currentRunPhase\":\"running\"");
+    try waitWorkbenchSnapshot(&workbench, "\"currentRunPhase\":\"running\"");
 
     const encoded = "{\"text_chunk\":\"late\"}";
     var late_event = lifecycle.OwnedCoreEvent{
@@ -1414,5 +1390,5 @@ test "late event from a finalized Run closes a Task with newer active work" {
     const closing_snapshot = try workbench.writeSnapshot(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, closing_snapshot, "\"lifecycle\":\"closing\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, closing_snapshot, "\"continuationAvailable\":false") != null);
-    try waitWorkbenchSnapshot(runtime, &workbench, "\"lifecycle\":\"closed\"");
+    try waitWorkbenchSnapshot(&workbench, "\"lifecycle\":\"closed\"");
 }

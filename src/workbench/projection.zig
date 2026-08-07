@@ -4560,6 +4560,47 @@ pub const Workbench = struct {
         if (changed) self.bumpRevision();
     }
 
+    /// Consumes the canonical Agent event stream and owns the complete product
+    /// terminal-publication barrier. This operation is main-loop-thread only.
+    /// It remains valid after Executor and Agent Runtime shutdown, does not
+    /// depend on Executor liveness, and must run before Agent Runtime deinit.
+    pub fn drainAgentEvents(self: *Workbench) Error!void {
+        var first_projection_error: ?Error = null;
+        self.drainAgentEventPass(&first_projection_error);
+        // Terminal publication happens after the synchronous AgentCore Run
+        // returns, so its acquire observes all callback event enqueues. Drain
+        // once more after that observation before exposing product terminal
+        // state and the final assistant suffix; otherwise a queued callback
+        // could lose the race to lifecycle publication or a snapshot.
+        self.markTerminalRunsBeforeEventDrain();
+        self.drainAgentEventPass(&first_projection_error);
+        self.finalizeMarkedTerminalRunsAfterEventDrain();
+        if (first_projection_error) |err| return err;
+    }
+
+    fn drainAgentEventPass(
+        self: *Workbench,
+        first_projection_error: *?Error,
+    ) void {
+        while (self.agent_runtime.takeEvent()) |value| {
+            var envelope = value;
+            defer envelope.deinit();
+            self.applyEvent(&envelope) catch |err| {
+                if (first_projection_error.* == null)
+                    first_projection_error.* = err;
+                self.recordEventProjectionFailure(
+                    envelope.session_id,
+                    envelope.run_id,
+                );
+                self.agent_runtime.requestRunTermination(
+                    envelope.session_id,
+                    envelope.run_id,
+                    .{ .event_pump_failure = .consumer_rejected },
+                ) catch {};
+            };
+        }
+    }
+
     pub fn applyEvent(self: *Workbench, envelope: *const lifecycle.OwnedCoreEvent) Error!void {
         const task = self.findTaskByRouteId(envelope.session_id) orelse return error.UnknownTask;
         const run = findRun(task.durable.runs, envelope.run_id) orelse return error.NoSuchRun;
@@ -4642,7 +4683,7 @@ pub const Workbench = struct {
     /// Records canonical event loss independently of Agent execution state.
     /// A termination request may arrive after Agent terminal publication, so
     /// it cannot be the only owner of this product failure fact.
-    pub fn recordEventProjectionFailure(
+    fn recordEventProjectionFailure(
         self: *Workbench,
         route_id: u64,
         run_id: u64,
@@ -4658,10 +4699,10 @@ pub const Workbench = struct {
         self.bumpRevision();
     }
 
-    /// Marks terminal Runs before the composition root performs one more
-    /// complete Agent event-pump drain. The acquire in `terminalPayload`
-    /// observes every callback enqueue that happened before Run completion.
-    pub fn markTerminalRunsBeforeEventDrain(self: *Workbench) void {
+    /// Marks terminal Runs before Workbench performs one more complete Agent
+    /// event-pump drain. The acquire in `terminalPayload` observes every
+    /// callback enqueue that happened before Run completion.
+    fn markTerminalRunsBeforeEventDrain(self: *Workbench) void {
         for (self.tasks) |*task_entry| {
             const task = &(task_entry.* orelse continue);
             for (task.durable.runs) |*run_entry| {
@@ -5150,10 +5191,10 @@ pub const Workbench = struct {
         writer.writeAll("]}") catch return error.SnapshotTooLarge;
     }
 
-    /// Commits the final assistant suffix only after the composition root has
-    /// drained the Agent event pump following `markTerminalRunsBeforeEventDrain`.
+    /// Commits the final assistant suffix only after Workbench has drained the
+    /// Agent event pump following `markTerminalRunsBeforeEventDrain`.
     /// Any later event for the Run is rejected by `applyEvent`.
-    pub fn finalizeMarkedTerminalRunsAfterEventDrain(self: *Workbench) void {
+    fn finalizeMarkedTerminalRunsAfterEventDrain(self: *Workbench) void {
         var changed = false;
         for (self.tasks) |*task_entry| {
             const task = &(task_entry.* orelse continue);

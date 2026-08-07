@@ -256,9 +256,8 @@ const App = struct {
     }
 
     fn drainAgentEvents(self: *@This()) void {
-        const agent_runtime = self.agent_runtime orelse return;
         const workbench = self.workbench orelse return;
-        self.agent_events.drain(agent_runtime, workbench);
+        self.agent_events.drain(workbench);
     }
 };
 
