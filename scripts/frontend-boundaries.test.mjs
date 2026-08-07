@@ -244,10 +244,10 @@ test("Renderer draws declarative titlebar controls while Bridge and Host own nat
   assert.match(chromeBridge, /commands\.windowChromeDisconnect/);
   assert.match(chromeBridge, /decodeWindowChromeEnvironment/);
   assert.match(chromeBridge, /document\.querySelectorAll\(exclusionSelector\)/);
-  assert.match(chromeBridge, /window\.addEventListener\("resize", refresh\)/);
+  assert.match(chromeBridge, /bridge\.on\("resize", scheduleSync\)/);
   assert.match(
     chromeBridge,
-    /async function refresh\(\)[\s\S]*commands\.windowChromeConnect[\s\S]*generation = value\.generation[\s\S]*syncAgain = true/,
+    /async function sync\(\)[\s\S]*commands\.windowChromeSync[\s\S]*generation === requestGeneration[\s\S]*value\.generation === requestGeneration/,
   );
   assert.match(
     chromeBridge,
@@ -255,8 +255,8 @@ test("Renderer draws declarative titlebar controls while Bridge and Host own nat
   );
   assert.match(
     chromeBridge,
-    /commands\.windowChromeControl[\s\S]*\.catch\(\(\) => refresh\(\)\)/,
-    "a transient button action failure must reconnect instead of permanently removing controls",
+    /commands\.windowChromeControl[\s\S]*\.catch\(\(\) => undefined\)/,
+    "a transient button action failure must preserve the current document session",
   );
   assert.match(
     chromeBridge,
@@ -264,7 +264,7 @@ test("Renderer draws declarative titlebar controls while Bridge and Host own nat
   );
   assert.doesNotMatch(
     chromeBridge,
-    /window\.addEventListener\("resize", scheduleSync\)/,
+    /window\.addEventListener\("resize"|async function refresh\(/,
   );
   assert.match(
     css,

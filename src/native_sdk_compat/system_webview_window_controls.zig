@@ -2,7 +2,8 @@
 //!
 //! Native SDK 0.8.0 owns the startup window and provides minimize through its
 //! Runtime API. It does not expose maximize/restore, user-close, or maximized
-//! state for that window. This seam supplies only those missing capabilities.
+//! state for that window. These independently removable capabilities share one
+//! narrow file only because they require the same startup-window binding.
 
 const builtin = @import("builtin");
 const native_sdk = @import("native_sdk");
@@ -21,8 +22,12 @@ const Platform = switch (builtin.os.tag) {
             _: native_sdk.platform.WindowId,
         ) !void {}
 
-        pub fn control(_: *@This().State, _: Action) !void {
-            return error.UnsupportedSystemWebViewWindowControl;
+        pub fn toggleMaximize(_: *@This().State) !void {
+            return error.UnsupportedSystemWebViewMaximize;
+        }
+
+        pub fn userClose(_: *@This().State) !void {
+            return error.UnsupportedSystemWebViewUserClose;
         }
 
         pub fn maximized(_: *const @This().State) bool {
@@ -31,11 +36,6 @@ const Platform = switch (builtin.os.tag) {
 
         pub fn deinit(_: *@This().State) void {}
     },
-};
-
-pub const Action = enum {
-    toggle_maximize,
-    user_close,
 };
 
 pub const State = struct {
@@ -60,9 +60,12 @@ pub const Capability = struct {
         try Platform.captureStartupWindow(&self.platform, self.window_id);
     }
 
-    pub fn control(self: *Capability, action: Action) !State {
-        try Platform.control(&self.platform, action);
-        return self.state();
+    pub fn toggleMaximize(self: *Capability) !void {
+        try Platform.toggleMaximize(&self.platform);
+    }
+
+    pub fn userClose(self: *Capability) !void {
+        try Platform.userClose(&self.platform);
     }
 
     pub fn state(self: *const Capability) State {

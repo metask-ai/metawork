@@ -1,7 +1,8 @@
 //! Native SDK 0.8.0 System WebView window-control compatibility for Windows.
 //!
 //! The SDK does not expose maximize/restore, user-close, or maximized state.
-//! This file captures only the startup HWND and owns exactly those Win32 calls.
+//! These capabilities share the startup HWND lifecycle but retain explicit
+//! entry points and independent removal conditions.
 
 const std = @import("std");
 const native_sdk = @import("native_sdk");
@@ -142,16 +143,18 @@ pub fn captureStartupWindow(
     state.root = try state.capture.take(window_id);
 }
 
-pub fn control(state: *State, action: anytype) !void {
+pub fn toggleMaximize(state: *State) !void {
     const root = state.root orelse return error.WindowUnavailable;
-    switch (action) {
-        .toggle_maximize => _ = ShowWindow(
-            root,
-            if (IsZoomed(root) != 0) sw_restore else sw_maximize,
-        ),
-        .user_close => if (PostMessageW(root, wm_close, 0, 0) == 0)
-            return error.SystemWebViewWindowControlFailed,
-    }
+    _ = ShowWindow(
+        root,
+        if (IsZoomed(root) != 0) sw_restore else sw_maximize,
+    );
+}
+
+pub fn userClose(state: *State) !void {
+    const root = state.root orelse return error.WindowUnavailable;
+    if (PostMessageW(root, wm_close, 0, 0) == 0)
+        return error.SystemWebViewUserCloseFailed;
 }
 
 pub fn maximized(state: *const State) bool {

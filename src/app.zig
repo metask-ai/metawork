@@ -9,7 +9,7 @@ const workbench_api = @import("metawork_workbench");
 const account_contract = @import("metawork_account_contract");
 const account_api = @import("metawork_account");
 const product_identity = @import("metawork_product_identity");
-const window_chrome = @import("native_sdk_compat/system_webview_drag_region.zig");
+const drag_region = @import("native_sdk_compat/system_webview_drag_region.zig");
 const window_controls = @import("native_sdk_compat/system_webview_window_controls.zig");
 
 pub const panic = std.debug.FullPanic(native_sdk.debug.capturePanic);
@@ -36,7 +36,7 @@ const tray_items = [_]native_sdk.platform.TrayMenuItem{
 const windows_data_directory_name = "MetaWork";
 
 fn bridgeWindowChromeEnvironment(
-    value: window_chrome.Environment,
+    value: drag_region.Environment,
     controls: window_controls.State,
 ) bridge_api.WindowChromePlatformEnvironment {
     return .{
@@ -268,7 +268,7 @@ const App = struct {
     agent_event_wake_pending: std.atomic.Value(bool) = .init(false),
     native_runtime: ?*native_sdk.Runtime = null,
     platform_services: ?native_sdk.platform.PlatformServices = null,
-    window_chrome_capability: window_chrome.Capability = window_chrome.Capability.init(main_window_id),
+    drag_region_capability: drag_region.Capability = drag_region.Capability.init(main_window_id),
     window_controls_capability: window_controls.Capability = window_controls.Capability.init(main_window_id),
     tray_installed: bool = false,
     account_coordinator: ?*AccountCoordinator = null,
@@ -298,13 +298,13 @@ const App = struct {
 
     fn start(context: *anyopaque, native_runtime: *native_sdk.Runtime) anyerror!void {
         const self: *@This() = @ptrCast(@alignCast(context));
-        try self.window_chrome_capability.captureStartupWindow();
+        try self.drag_region_capability.captureStartupWindow();
         try self.window_controls_capability.captureStartupWindow();
         self.native_runtime = native_runtime;
         self.platform_services = native_runtime.options.platform.services;
         if (self.platform_services) |services| {
-            try self.window_chrome_capability.requirePlatform(services);
-            self.window_chrome_capability.bindRoot();
+            try self.drag_region_capability.requirePlatform(services);
+            self.drag_region_capability.bindRoot();
         } else return error.SystemWebViewChromeUnavailable;
         try self.installScheduleHost();
         const coordinator = self.account_coordinator orelse
@@ -353,7 +353,7 @@ const App = struct {
             native_runtime.removeTray() catch {};
             self.tray_installed = false;
         }
-        self.window_chrome_capability.deinit();
+        self.drag_region_capability.deinit();
         self.window_controls_capability.deinit();
         self.workbench = null;
         self.platform_services = null;
@@ -654,7 +654,7 @@ const App = struct {
         const self: *@This() = @ptrCast(@alignCast(context.?));
         if (window_id != main_window_id) return error.WindowIdentityMismatch;
         return bridgeWindowChromeEnvironment(
-            try self.window_chrome_capability.connect(
+            try self.drag_region_capability.connect(
                 self.platform_services orelse return error.RuntimeUnavailable,
             ),
             self.window_controls_capability.state(),
@@ -669,9 +669,9 @@ const App = struct {
         regions: []const bridge_api.WindowChromeRegion,
     ) anyerror!bridge_api.WindowChromePlatformEnvironment {
         const self: *@This() = @ptrCast(@alignCast(context.?));
-        if (window_id != main_window_id or regions.len > window_chrome.max_regions)
+        if (window_id != main_window_id or regions.len > drag_region.max_regions)
             return error.WindowIdentityMismatch;
-        var chrome_regions: [window_chrome.max_regions]window_chrome.Region = undefined;
+        var chrome_regions: [drag_region.max_regions]drag_region.Region = undefined;
         for (regions, 0..) |region, index| chrome_regions[index] = .{
             .x = region.x,
             .y = region.y,
@@ -680,7 +680,7 @@ const App = struct {
             .exclusion = region.exclusion,
         };
         return bridgeWindowChromeEnvironment(
-            try self.window_chrome_capability.sync(
+            try self.drag_region_capability.sync(
                 self.platform_services orelse return error.RuntimeUnavailable,
                 viewport_width,
                 viewport_height,
@@ -699,7 +699,7 @@ const App = struct {
         const self: *@This() = @ptrCast(@alignCast(context.?));
         if (window_id != main_window_id) return error.WindowIdentityMismatch;
         return bridgeWindowChromeEnvironment(
-            try self.window_chrome_capability.beginLivePointerDrag(
+            try self.drag_region_capability.beginLivePointerDrag(
                 self.platform_services orelse return error.RuntimeUnavailable,
                 x,
                 y,
@@ -714,7 +714,7 @@ const App = struct {
     ) anyerror!void {
         const self: *@This() = @ptrCast(@alignCast(context.?));
         if (window_id != main_window_id) return error.WindowIdentityMismatch;
-        self.window_chrome_capability.disconnect();
+        self.drag_region_capability.disconnect();
     }
 
     fn platformWindowChromeControl(
@@ -728,13 +728,11 @@ const App = struct {
         const services = self.platform_services orelse return error.RuntimeUnavailable;
         switch (action) {
             .minimize => try runtime.minimizeWindow(main_window_id),
-            .toggle_maximize => _ = try self.window_controls_capability.control(
-                .toggle_maximize,
-            ),
-            .close => _ = try self.window_controls_capability.control(.user_close),
+            .toggle_maximize => try self.window_controls_capability.toggleMaximize(),
+            .close => try self.window_controls_capability.userClose(),
         }
         return bridgeWindowChromeEnvironment(
-            self.window_chrome_capability.current(services),
+            self.drag_region_capability.current(services),
             self.window_controls_capability.state(),
         );
     }
@@ -890,7 +888,7 @@ pub fn run(init: std.process.Init) !void {
         .main_thread_id = std.Thread.getCurrentId(),
         .automation = automation_api.Runtime.init(init.environ_map),
     };
-    defer app.window_chrome_capability.deinit();
+    defer app.drag_region_capability.deinit();
     defer app.window_controls_capability.deinit();
     defer app.automation.deinit();
     var data_dir_storage: [4096]u8 = undefined;
@@ -1107,7 +1105,7 @@ pub fn run(init: std.process.Init) !void {
     app.dispatcher = &dispatcher;
     const mode = frontendMode(init.environ_map);
 
-    try app.window_chrome_capability.prepareStartup();
+    try app.drag_region_capability.prepareStartup();
     try app.window_controls_capability.prepareStartup();
     try runner.runWithOptions(app.app(), .{
         .app_name = "MetaWork",
@@ -1132,7 +1130,7 @@ test "App remains a composition root with explicit platform limits" {
 }
 
 test {
-    _ = window_chrome;
+    _ = drag_region;
     _ = window_controls;
 }
 

@@ -1265,10 +1265,21 @@ test("Renderer declares window chrome UI while Desktop Host owns native behavior
   assert.match(app, /native_runtime\.showMessageDialog\(/);
   assert.match(app, /native_runtime\.closeWindow\(main_window_id\)/);
   assert.match(app, /runtime\.minimizeWindow\(main_window_id\)/);
+  assert.match(
+    app,
+    /\.toggle_maximize => try self\.window_controls_capability\.toggleMaximize\(\)/,
+  );
+  assert.match(
+    app,
+    /\.close => try self\.window_controls_capability\.userClose\(\)/,
+  );
   assert.match(controlsWindows, /PostMessageW\(root, wm_close/);
   assert.match(controlsWindows, /IsZoomed[\s\S]*ShowWindow/);
-  assert.match(controlsSeam, /toggle_maximize[\s\S]*user_close/);
-  assert.match(app, /defer app\.window_chrome_capability\.deinit\(\)/);
+  assert.match(controlsSeam, /pub fn toggleMaximize[\s\S]*pub fn userClose/);
+  assert.doesNotMatch(controlsSeam, /pub const Action|pub fn control\(/);
+  assert.match(controlsWindows, /pub fn toggleMaximize[\s\S]*pub fn userClose/);
+  assert.doesNotMatch(controlsWindows, /pub fn control\(|switch \(action\)/);
+  assert.match(app, /defer app\.drag_region_capability\.deinit\(\)/);
   assert.match(app, /defer app\.window_controls_capability\.deinit\(\)/);
   assert.doesNotMatch(app, /services\.closeWindow\(|windows_host/);
   assert.doesNotMatch(

@@ -112,7 +112,7 @@ Runtime API 已提供且可用时，绕过它调用低层函数属于架构违�
 - 写明 capability identity、对应 SDK 缺口、允许的低层调用、目标平台、调用者、验证方式和删除条件；优先推动 Native SDK 补齐 Runtime API，正式 API 经目标平台验收可用后原位替换并删除兼容 seam；
 - 多条 seam 只有共享同一资源、线程或生命周期不变量时才可共处一个窄 Host 文件，并且仍须独立登记、allowlist、验证和删除；禁止文件级或目录级宽泛放行，新增无直接关联的 capability 默认使用新的窄文件。
 
-当前 System WebView window chrome 明确登记为两条能力：`system_webview_drag_region` 只补 drag-region，`system_webview_window_controls` 只补 Native SDK 0.8.0 缺失的 maximize/restore、user-close 与 maximized state。`minimize` 已由 Runtime API 提供，必须保持正常 Runtime 路径，不得进入任一兼容 seam。两条 seam 可以在 Bridge 的同一个固定 window-chrome command 边界内组合结果，但不得互相持有 action/state、扩展为统一窗口 facade，或共享文件级低层 allowlist。
+当前 System WebView window chrome 按 SDK 缺口独立登记：`system_webview_drag_region` 只补 drag-region；按钮兼容文件因共享同一 startup HWND 生命周期而共置 maximize/restore、maximized state 与 user-close 三项能力，但使用明确入口、逐项 allowlist 和独立删除条件，不提供内部任意 action facade。`minimize` 已由 Runtime API 提供，必须保持正常 Runtime 路径，不得进入兼容 seam。这些能力可以在 Bridge 的同一个固定 window-chrome command 边界内组合结果，但不得互相持有职责或扩展为统一窗口 facade。
 
 获准兼容 seam 的当前文件、SDK 缺口、目标平台与删除条件由 [工程结构与所有权](project-structure.md)映射，合规状态和平台证据由 [验证规范](validation.md)维护；与 Renderer 交换的精确 wire 仍只由 [Renderer Bridge 合同](renderer-bridge-contract.md)定义。未登记的低层调用一律不构成兼容能力。
 
