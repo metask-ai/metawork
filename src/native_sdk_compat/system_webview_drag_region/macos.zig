@@ -1,6 +1,7 @@
 //! Native SDK 0.8.0 System WebView drag-region support for macOS.
 
 const native_sdk = @import("native_sdk");
+const startup_window = @import("../system_webview_startup_window.zig");
 
 pub const live_pointer_drag = true;
 pub const chrome_top_override: ?f64 = null;
@@ -9,7 +10,7 @@ pub const State = struct {};
 
 pub fn prepareStartup(_: *State, _: *const anyopaque, _: PointIsDraggableFn) !void {}
 
-pub fn captureStartupWindow(_: *State, _: native_sdk.platform.WindowId) !void {}
+pub fn captureStartupWindow(_: *State, _: startup_window.Binding) !void {}
 
 pub fn requirePlatform(services: native_sdk.platform.PlatformServices) !void {
     if (services.start_window_drag_fn == null)

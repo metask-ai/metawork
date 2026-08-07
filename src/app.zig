@@ -12,6 +12,7 @@ const product_identity = @import("metawork_product_identity");
 const mcp_platform = @import("metawork_mcp_platform");
 const drag_region = @import("native_sdk_compat/system_webview_drag_region.zig");
 const window_controls = @import("native_sdk_compat/system_webview_window_controls.zig");
+const startup_window = @import("native_sdk_compat/system_webview_startup_window.zig");
 
 pub const panic = std.debug.FullPanic(native_sdk.debug.capturePanic);
 
@@ -298,6 +299,7 @@ const App = struct {
     agent_event_wake_pending: std.atomic.Value(bool) = .init(false),
     native_runtime: ?*native_sdk.Runtime = null,
     platform_services: ?native_sdk.platform.PlatformServices = null,
+    startup_window_capture: startup_window.Capture = .{},
     drag_region_capability: drag_region.Capability = drag_region.Capability.init(main_window_id),
     window_controls_capability: window_controls.Capability = window_controls.Capability.init(main_window_id),
     tray_installed: bool = false,
@@ -334,8 +336,9 @@ const App = struct {
 
     fn start(context: *anyopaque, native_runtime: *native_sdk.Runtime) anyerror!void {
         const self: *@This() = @ptrCast(@alignCast(context));
-        try self.drag_region_capability.captureStartupWindow();
-        try self.window_controls_capability.captureStartupWindow();
+        const startup_binding = try self.startup_window_capture.take(main_window_id);
+        try self.drag_region_capability.captureStartupWindow(startup_binding);
+        try self.window_controls_capability.captureStartupWindow(startup_binding);
         self.native_runtime = native_runtime;
         self.platform_services = native_runtime.options.platform.services;
         if (self.platform_services) |services| {
@@ -1092,6 +1095,7 @@ pub fn run(init: std.process.Init) !void {
     };
     defer app.drag_region_capability.deinit();
     defer app.window_controls_capability.deinit();
+    defer app.startup_window_capture.deinit();
     defer app.automation.deinit();
     var data_dir_storage: [4096]u8 = undefined;
     const data_dir = try native_sdk.app_dirs.resolveOne(
@@ -1300,6 +1304,7 @@ pub fn run(init: std.process.Init) !void {
 
     try app.drag_region_capability.prepareStartup();
     try app.window_controls_capability.prepareStartup();
+    try app.startup_window_capture.prepare();
     try runner.runWithOptions(app.app(), .{
         .app_name = "MetaWork",
         .window_title = "MetaWork",
@@ -1325,6 +1330,7 @@ test "App remains a composition root with explicit platform limits" {
 test {
     _ = drag_region;
     _ = window_controls;
+    _ = startup_window;
 }
 
 test "MCP App composition keeps registry limits within AgentCore authority bounds" {

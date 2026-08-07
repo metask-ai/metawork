@@ -72,8 +72,26 @@ const exited = new Promise((resolve, reject) => {
 });
 
 try {
+  const rendererChromeReady = waitForRendererChromeReady();
   await waitForOutput(/metawork\.smoke\.event_ack sequence=1/);
-  await waitForRendererChromeReady();
+  await rendererChromeReady;
+  if (!resizeSessionOnly) {
+    await execFileAsync(
+      "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+      [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        hitTestProbe,
+        "-ProcessId",
+        String(app.pid),
+        "-Mode",
+        "drag",
+      ],
+      { timeout: timeoutMs, maxBuffer: 1024 * 1024 },
+    );
+  }
   await execFileAsync(
     "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
     [
@@ -124,113 +142,6 @@ try {
     [native, "automate", "tray-action", "1"],
     { cwd: appCwd, timeout: timeoutMs, maxBuffer: 1024 * 1024 },
   );
-  if (!resizeSessionOnly) {
-    const connected = await invokeBridge(
-      "window-chrome-connect",
-      "metawork.host.windowChrome.connect",
-      {},
-    );
-    if (
-      !/^[1-9][0-9]*$/.test(connected.generation) ||
-      !Number.isFinite(connected.insets?.top) ||
-      connected.insets.top <= 0 ||
-      !Number.isFinite(connected.buttons?.width) ||
-      connected.buttons.width <= 0
-    ) {
-      throw new Error(
-        `window chrome returned invalid native geometry: ${JSON.stringify(connected)}`,
-      );
-    }
-    const dragHeight = Math.min(connected.insets.top, 30);
-    const dragWidth = Math.min(600, connected.buttons.x);
-    if (dragHeight <= 0 || dragWidth < 300)
-      throw new Error(
-        `window chrome cannot host the probe regions: ${JSON.stringify(connected)}`,
-      );
-    const synced = await invokeBridge(
-      "window-chrome-sync",
-      "metawork.host.windowChrome.sync",
-      {
-        generation: connected.generation,
-        viewportWidth: Math.max(
-          800,
-          connected.buttons.x + connected.buttons.width,
-        ),
-        viewportHeight: 600,
-        regions: [
-          {
-            x: 0,
-            y: 0,
-            width: dragWidth,
-            height: dragHeight,
-            exclusion: false,
-          },
-          {
-            x: 20,
-            y: 0,
-            width: 80,
-            height: dragHeight,
-            exclusion: true,
-          },
-        ],
-      },
-    );
-    if (synced.generation !== connected.generation)
-      throw new Error(
-        `window chrome sync changed generation: ${synced.generation}`,
-      );
-    await execFileAsync(
-      "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
-      [
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        hitTestProbe,
-        "-ProcessId",
-        String(app.pid),
-        "-Mode",
-        "hit-test",
-        "-DragX",
-        "300",
-        "-DragY",
-        String(Math.max(1, Math.floor(dragHeight / 2))),
-        "-ExcludedX",
-        "40",
-        "-ExcludedY",
-        String(Math.max(1, Math.floor(dragHeight / 2))),
-      ],
-      { timeout: timeoutMs, maxBuffer: 1024 * 1024 },
-    );
-    await invokeBridge(
-      "window-chrome-disconnect",
-      "metawork.host.windowChrome.disconnect",
-      { generation: connected.generation },
-    );
-    await execFileAsync(
-      "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
-      [
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        hitTestProbe,
-        "-ProcessId",
-        String(app.pid),
-        "-Mode",
-        "hit-test-cleared",
-        "-DragX",
-        "300",
-        "-DragY",
-        String(Math.max(1, Math.floor(dragHeight / 2))),
-        "-ExcludedX",
-        "40",
-        "-ExcludedY",
-        String(Math.max(1, Math.floor(dragHeight / 2))),
-      ],
-      { timeout: timeoutMs, maxBuffer: 1024 * 1024 },
-    );
-  }
   await execFileAsync(
     process.execPath,
     [native, "automate", "tray-action", "2"],
@@ -244,7 +155,7 @@ try {
   process.stdout.write(
     resizeSessionOnly
       ? "Windows resize session, Renderer controls, close-policy hide/reopen, and clean Runtime shutdown passed.\n"
-      : "Windows Renderer controls, close-policy hide/reopen, drag-region binding, and clean Runtime shutdown passed.\n",
+      : "Windows Renderer controls, close-policy hide/reopen, ordinary drag, maximized drag restore, and clean Runtime shutdown passed.\n",
   );
 } catch (error) {
   process.stderr.write(output);
@@ -253,31 +164,6 @@ try {
   if (exitState === null) app.kill("SIGTERM");
   await withTimeout(exited, 5_000, "app exit").catch(() => {});
   await rm(fixtureRoot, { recursive: true, force: true });
-}
-
-async function invokeBridge(id, command, payload) {
-  const request = JSON.stringify({ id, command, payload });
-  const { stdout } = await execFileAsync(
-    process.execPath,
-    [native, "automate", "bridge", request],
-    { cwd: appCwd, timeout: timeoutMs, maxBuffer: 1024 * 1024 },
-  );
-  const response = stdout
-    .trim()
-    .split("\n")
-    .reverse()
-    .map((line) => {
-      try {
-        return JSON.parse(line);
-      } catch {
-        return null;
-      }
-    })
-    .find((value) => value?.id === id);
-  if (!response) throw new Error(`${command} returned no response`);
-  if (!response.ok)
-    throw new Error(`${command} failed: ${JSON.stringify(response.error)}`);
-  return response.result;
 }
 
 async function waitForRendererChromeReady() {

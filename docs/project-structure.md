@@ -38,11 +38,14 @@ metawork/
 │   ├── native_sdk_compat/ # 按已登记 capability 隔离的 Desktop Host 兼容实现
 │   │   ├── system_webview_drag_region.zig # 有界 System WebView drag-region contract/state
 │   │   ├── system_webview_drag_region/
-│   │       ├── windows.zig # 创建期 HWND 捕获与 root/WebView hit-test subclass
+│   │       ├── windows.zig # Host-authoritative live pointer 与 caption move-loop handoff
 │   │       └── macos.zig   # live-pointer drag 的公开 SDK 原语
 │   │   ├── system_webview_window_controls.zig # SDK 缺失按钮能力的窄 contract/state
-│   │   └── system_webview_window_controls/
-│   │       └── windows.zig # 最大化/还原、用户关闭与最大化状态
+│   │   ├── system_webview_window_controls/
+│   │   │   └── windows.zig # 最大化/还原、用户关闭与最大化状态
+│   │   ├── system_webview_startup_window.zig # 非 capability 的共享启动窗口 identity plumbing
+│   │   └── system_webview_startup_window/
+│   │       └── windows.zig # 唯一 CBT hook、候选校验与 opaque root binding
 │   ├── account.zig        # Account module entrypoint
 │   ├── account/           # Account Runtime、OAuth、catalog、credential 与状态机
 │   ├── bridge.zig         # Renderer Bridge module entrypoint
@@ -116,11 +119,11 @@ Renderer Bridge 的 identity、revision、command、event、snapshot 与兼容�
 
 `app/mcp_platform.zig` 只适配 MCP 系统 credential、stdio 与 Streamable HTTP mechanics，不解析 MCP JSON-RPC 或复制协商，也不形成新的产品 owner。
 
-`native_sdk_compat/system_webview_drag_region.zig` 是 Desktop Host-owned 的有界 System WebView drag-region capability seam。它只拥有有界 region 校验、root 平台 binding 与 drag 调用编排；document generation 和 source-window authority 归 Bridge `Dispatcher`，不进入该 seam。只有 `app.zig` 可以组装它；不拥有按钮 action、按钮 capability、窗口最大化状态或 resize。Windows 启动期精确捕获并绑定 root HWND，document `connect/disconnect` 只标记 Renderer 会话是否附着；`sync` 只事务式替换 region，不能安装、重装或销毁平台资源，也不得递归依赖 Chromium 跨进程 child HWND。`system_webview_drag_region/macos.zig` 只在 live pointer event 内调用 SDK 已有 `startWindowDrag` 原语并保留系统交通灯；Windows 在 Native SDK 提供正式 System WebView drag-region 能力前不发布 live-pointer drag。System WebView 隐藏标题栏的 resize hit surface 仍归 Native SDK，不由该 seam 模拟。平台文件独占对应 root hook、subclass 与 teardown，不创建覆盖 WebView 的辅助窗口。
+`native_sdk_compat/system_webview_drag_region.zig` 是 Desktop Host-owned 的有界 System WebView drag-region capability seam。它只拥有有界 region 校验、root 平台 binding 与 drag 调用编排；document generation 和 source-window authority 归 Bridge `Dispatcher`，不进入该 seam。只有 `app.zig` 可以组装它；不拥有按钮 action、按钮 capability、窗口最大化状态或 resize。Windows 消费共享 startup root binding；document `connect/disconnect` 只标记 Renderer 会话是否附着，`sync` 只事务式替换 region，不能安装、重装或销毁平台资源。`beginDrag` 不信任 Renderer 坐标授予执行权，而是重新观察逻辑主鼠标键、实际 OS 光标、光标下 HWND 的 root identity、root native hit 与当前 DPI，并只在实际点命中最新 candidate-minus-exclusions 时通过 `ReleaseCapture`/`PostMessageW(WM_NCLBUTTONDOWN, HTCAPTION)` 进入系统 move loop。它不递归依赖 Chromium 跨进程 child HWND，也不保留旧 root `WM_NCHITTEST` subclass 路径。`system_webview_drag_region/macos.zig` 只在 live pointer event 内调用 SDK 已有 `startWindowDrag` 原语并保留系统交通灯。System WebView 隐藏标题栏的 resize hit surface 仍归 Native SDK，不由该 seam 模拟；平台文件不创建覆盖 WebView 的辅助窗口。
 
-`native_sdk_compat/system_webview_window_controls.zig` 是 Desktop Host-owned 的窄共置边界：maximize/restore、maximized state 与 user-close 是三项独立登记、独立删除的 Native SDK 0.8.0 缺口，只因共享同一 startup HWND 生命周期而留在一个文件中，并分别暴露 `toggleMaximize`、`state` 与 `userClose`，不提供内部 action enum/facade。Windows 平台子文件独占 `IsZoomed`、`ShowWindow`、`PostMessageW(WM_CLOSE)` 及其创建期 HWND 绑定；非 Windows 不发布 Renderer controls。`minimize` 已有正式 Runtime API，必须由 `app.zig` 直接调用 `Runtime.minimizeWindow`，不得进入兼容层。Bridge 的 document generation 校验仍由既有 Host window-chrome command 边界完成，按钮兼容能力不持有 Bridge DTO 或 generation。
+`native_sdk_compat/system_webview_window_controls.zig` 是 Desktop Host-owned 的窄共置边界：maximize/restore、maximized state 与 user-close 是三项独立登记、独立删除的 Native SDK 0.8.0 缺口，只因共享同一 startup HWND 生命周期而留在一个文件中，并分别暴露 `toggleMaximize`、`state` 与 `userClose`，不提供内部 action enum/facade。Windows 平台子文件消费共享 startup root binding，并独占 `IsZoomed`、`ShowWindow` 与 `PostMessageW(WM_CLOSE)`；它不安装第二条创建 hook。非 Windows 不发布 Renderer controls。`minimize` 已有正式 Runtime API，必须由 `app.zig` 直接调用 `Runtime.minimizeWindow`，不得进入兼容层。Bridge 的 document generation 校验仍由既有 Host window-chrome command 边界完成，按钮兼容能力不持有 Bridge DTO 或 generation。
 
-Windows startup identity 不是独立 capability。Desktop Host 在进入 Native SDK runner 前为当前 UI 线程武装 CBT 创建 hook，并在 `app.start` 入口立即收口；该区间必须恰好产生一个无 parent 的 top-level HWND，随后还要通过 root、owner、thread 与 process 校验，零个或多个候选一律 fail closed。该机制不读取标题、焦点、前台窗口、`GWLP_USERDATA` 或 `PlatformServices.context`，也不解释 Native SDK 私有类型。显式退出不属于兼容层：确认对话框与主窗口关闭使用 Native SDK Runtime API，由 Runtime 维护窗口/View 状态并驱动正常 shutdown。
+Windows startup identity 不是独立 capability。`system_webview_startup_window` 是私有共享 lifecycle plumbing：Desktop Host 在进入 Native SDK runner 前只为当前 UI 线程武装一条 CBT 创建 hook，并在 `app.start` 入口立即收口；该区间必须恰好产生一个无 parent 的 top-level HWND，随后还要通过 root、owner、thread 与 process 校验，零个或多个候选一律 fail closed。结果是一个由 `app.zig` 注入 drag 与 controls seam 的 opaque binding；两条 seam 不得各自捕获或发现窗口。该机制不读取标题、焦点、前台窗口、`GWLP_USERDATA` 或 `PlatformServices.context`，也不解释 Native SDK 私有类型。显式退出不属于兼容层：确认对话框与主窗口关闭使用 Native SDK Runtime API，由 Runtime 维护窗口/View 状态并驱动正常 shutdown。
 
 整个 Host command 边界只接受绑定当前 document generation 的 `minimize | toggle_maximize | close` 固定 enum，不接受任意 action、window id、platform、活动窗口猜测或独立 state query；按钮 seam 只发布按钮呈现所需的 `rendererControls` 与 `maximized` 真值，不形成通用 Desktop Interface、Native SDK adapter、第二窗口 owner 或任意 action facade。Native SDK Runtime 对应能力经目标平台验收可用后，必须逐项原位替换：先移除对应按钮兼容 action/state，再删除不再需要的 HWND 绑定、低层调用、allowlist 与专用验证。
 

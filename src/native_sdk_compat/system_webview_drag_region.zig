@@ -9,6 +9,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const native_sdk = @import("native_sdk");
+const startup_window = @import("system_webview_startup_window.zig");
 
 const Platform = switch (builtin.os.tag) {
     .windows => @import("system_webview_drag_region/windows.zig"),
@@ -22,7 +23,7 @@ const Platform = switch (builtin.os.tag) {
             return error.SystemWebViewChromeUnavailable;
         }
 
-        pub fn captureStartupWindow(_: *State, _: native_sdk.platform.WindowId) !void {
+        pub fn captureStartupWindow(_: *State, _: startup_window.Binding) !void {
             return error.SystemWebViewChromeUnavailable;
         }
 
@@ -84,8 +85,11 @@ pub const Capability = struct {
         try Platform.prepareStartup(&self.platform, self, platformPointIsDraggable);
     }
 
-    pub fn captureStartupWindow(self: *Capability) !void {
-        try Platform.captureStartupWindow(&self.platform, self.window_id);
+    pub fn captureStartupWindow(
+        self: *Capability,
+        binding: startup_window.Binding,
+    ) !void {
+        try Platform.captureStartupWindow(&self.platform, binding);
     }
 
     pub fn requirePlatform(
