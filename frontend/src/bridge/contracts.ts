@@ -525,24 +525,71 @@ export type SkillManagementView = {
   }[];
 };
 
+export const mcpAvailabilities = ["unavailable", "ready", "degraded"] as const;
+export const mcpManagementHealthValues = [
+  "unavailable",
+  "ready",
+  "recovery_required",
+  "outcome_unknown",
+] as const;
+export const mcpRuntimeAlignmentValues = [
+  "current",
+  "restart_required",
+  "unknown",
+] as const;
+export const mcpRuntimeStatusValues = [
+  "not_loaded",
+  "ready",
+  "disabled",
+  "needs_authentication",
+  "unreachable",
+  "invalid_catalog",
+] as const;
+export const mcpNewTaskAccessValues = [
+  "available",
+  "not_allowed",
+  "restart_required",
+  "unavailable",
+] as const;
+
 export type McpManagementView = {
-  availability: "unavailable" | "ready" | "degraded";
+  availability: (typeof mcpAvailabilities)[number];
+  managementHealth: (typeof mcpManagementHealthValues)[number];
+  operation: "idle" | "saving" | "refreshing";
+  desiredGeneration: string | null;
+  runtimeAlignment: (typeof mcpRuntimeAlignmentValues)[number];
   redacted: boolean;
-  generation: string | null;
   servers: {
     id: string;
     displayName: string;
     namespace: string;
     transport: "stdio" | "streamable_http";
-    status:
-      | "ready"
-      | "disabled"
-      | "needs_authentication"
-      | "unreachable"
-      | "invalid_catalog";
+    desiredEnabled: boolean;
+    runtimeStatus: (typeof mcpRuntimeStatusValues)[number];
+    newTaskAccess: (typeof mcpNewTaskAccessValues)[number];
     safeDiagnostic: string;
-    tools: { name: string }[];
+    tools: {
+      name: string;
+      discovered: boolean;
+      desiredAllowed: boolean;
+      availableToNewTasks: boolean;
+    }[];
   }[];
+};
+
+export type McpMutationResult = {
+  outcome:
+    | "unchanged"
+    | "saved"
+    | "saved_recovery_required"
+    | "stale_generation"
+    | "rejected"
+    | "indeterminate";
+  desiredGeneration: string | null;
+};
+
+export type McpRefreshResult = {
+  outcome: "started" | "busy" | "unavailable" | "shutting_down" | "rejected";
 };
 
 export type WorkspaceMutationReason =

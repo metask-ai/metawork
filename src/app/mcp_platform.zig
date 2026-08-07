@@ -56,6 +56,14 @@ pub const CredentialStore = struct {
         };
     }
 
+    pub fn serverIdentityGenerator(self: *CredentialStore) workbench.McpFreshServerIdentityGenerator {
+        return .{
+            .context = self,
+            .available = true,
+            .fill_fn = fillLocatorEntropy,
+        };
+    }
+
     fn fillLocatorEntropy(context: ?*anyopaque, output: *[16]u8) bool {
         const self: *CredentialStore = @ptrCast(@alignCast(context orelse return false));
         if (std.Thread.getCurrentId() != self.main_thread_id) return false;

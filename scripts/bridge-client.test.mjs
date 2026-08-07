@@ -150,6 +150,65 @@ test("product BridgeClient exposes no native window actions or state", () => {
     assert.equal(client[method], undefined);
 });
 
+test("MCP management uses only typed revision 1 commands", async () => {
+  const calls = [];
+  const client = new BridgeClient({
+    bridge: bridgeWith(async (command, payload) => {
+      calls.push({ command, payload });
+      if (command === "metawork.mcp.refreshCatalog")
+        return { outcome: "started" };
+      return { outcome: "saved", desiredGeneration: "8" };
+    }),
+  });
+
+  await client.createMcpHttpServer("7", "Search", "https://mcp.example.test");
+  await client.renameMcpServer("7", "server-1", "Search API");
+  await client.setMcpServerEnabled("7", "server-1", true);
+  await client.setMcpAllowedTools("7", "server-1", ["search", "fetch"]);
+  await client.removeMcpServer("7", "server-1");
+  await client.refreshMcpCatalog();
+
+  assert.deepEqual(calls, [
+    {
+      command: "metawork.mcp.createHttpServer",
+      payload: {
+        expectedDesiredGeneration: "7",
+        displayName: "Search",
+        endpoint: "https://mcp.example.test",
+      },
+    },
+    {
+      command: "metawork.mcp.renameServer",
+      payload: {
+        expectedDesiredGeneration: "7",
+        serverId: "server-1",
+        displayName: "Search API",
+      },
+    },
+    {
+      command: "metawork.mcp.setServerEnabled",
+      payload: {
+        expectedDesiredGeneration: "7",
+        serverId: "server-1",
+        enabled: true,
+      },
+    },
+    {
+      command: "metawork.mcp.setAllowedTools",
+      payload: {
+        expectedDesiredGeneration: "7",
+        serverId: "server-1",
+        toolNames: ["search", "fetch"],
+      },
+    },
+    {
+      command: "metawork.mcp.removeServer",
+      payload: { expectedDesiredGeneration: "7", serverId: "server-1" },
+    },
+    { command: "metawork.mcp.refreshCatalog", payload: {} },
+  ]);
+});
+
 test("the fixed revision 1 contract carries Host-owned Workspace and generation identities", async () => {
   const calls = [];
   const client = new BridgeClient({

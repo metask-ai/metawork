@@ -654,7 +654,7 @@ test "task store rejects unknown schema fields and dangling workspace references
 
 test "task store preserves history bound to an older Workspace epoch" {
     const state =
-        \\{"schema_version":1,"next_workspace_id":2,"next_workspace_recent_order":2,"next_task_id":2,"next_task_recent_order":2,"workspaces":[{"id":1,"epoch":2,"kind":"manual","canonical_root":"C:\\\\repo","display_name":"repo","visible":true,"recent_order":1}],"tasks":[{"id":1,"recent_order":1,"workspace_id":1,"workspace_epoch":1,"workspace_root":"C:\\\\repo","title":"","title_redacted":false,"archived":false,"closed":false,"binding":{"epoch":1,"execution_generation":1,"provider":"openai","model":"m","account_id":"a","profile_id":"p","account_display_name":"","api_key_selection_id":"k","api_key_name":"","api_key_suffix":"","model_selection_id":"m","model_display_name":""},"next_run_generation":0,"active_operation":null,"runs":[],"compacts":[],"ui_history":[]}]}
+        \\{"schema_version":1,"next_workspace_id":2,"next_workspace_recent_order":2,"next_task_id":2,"next_task_recent_order":2,"workspaces":[{"id":1,"epoch":2,"kind":"manual","canonical_root":"/tmp/repo","display_name":"repo","visible":true,"recent_order":1}],"tasks":[{"id":1,"recent_order":1,"workspace_id":1,"workspace_epoch":1,"workspace_root":"/tmp/repo","title":"","title_redacted":false,"archived":false,"closed":false,"binding":{"epoch":1,"execution_generation":1,"provider":"openai","model":"m","account_id":"a","profile_id":"p","account_display_name":"","api_key_selection_id":"k","api_key_name":"","api_key_suffix":"","model_selection_id":"m","model_display_name":""},"next_run_generation":0,"active_operation":null,"runs":[],"compacts":[],"ui_history":[]}]}
     ;
     var parsed = try decode(std.testing.allocator, state, testLimits());
     defer parsed.deinit();
@@ -667,7 +667,7 @@ test "task store rejects states that would violate the Renderer contract" {
         .id = 1,
         .epoch = 1,
         .kind = "manual",
-        .canonical_root = "C:\\repo",
+        .canonical_root = "/tmp/repo",
         .display_name = "repo",
         .visible = true,
         .recent_order = 1,
@@ -755,7 +755,7 @@ test "task store rejects states that would violate the Renderer contract" {
         .recent_order = 1,
         .workspace_id = 1,
         .workspace_epoch = 1,
-        .workspace_root = "C:\\repo",
+        .workspace_root = "/tmp/repo",
         .title = "task",
         .title_redacted = false,
         .archived = false,

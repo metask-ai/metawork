@@ -170,7 +170,7 @@ test "MCP Runtime takes one complete input and activation publishes unavailable 
         lifecycle.McpActivationServerState.unavailable,
         activation.serverHealth()[0].state,
     );
-    try std.testing.expectEqual(@as(?*const lifecycle.McpSelection, null), activation.currentSelection());
+    try std.testing.expectEqual(@as(?*lifecycle.McpSelection, null), activation.takeSelection());
     fake_core.forceNextMcpRefreshStatus(wire.STATUS_CORE_ERROR);
     switch (try runtime.activateMcp()) {
         .unavailable => |reason| try std.testing.expectEqual(

@@ -42,6 +42,8 @@ import {
   decodeSkillMutationResult,
   decodeSkillExportResult,
   decodeSkillDetailResult,
+  decodeMcpMutationResult,
+  decodeMcpRefreshResult,
 } from "./decode-contracts.ts";
 import { RendererBridgeContractError } from "./contract-error.ts";
 import { fetchWorkbenchSnapshot } from "./snapshot/snapshot-client.ts";
@@ -256,6 +258,77 @@ export class BridgeClient {
   async skillDetail(installId: string) {
     return decodeSkillDetailResult(
       await this.invoke(commands.skillDetail, { installId }),
+    );
+  }
+
+  async createMcpHttpServer(
+    expectedDesiredGeneration: string,
+    displayName: string,
+    endpoint: string,
+  ) {
+    return decodeMcpMutationResult(
+      await this.invoke(commands.mcpCreateHttpServer, {
+        expectedDesiredGeneration,
+        displayName,
+        endpoint,
+      }),
+    );
+  }
+
+  async renameMcpServer(
+    expectedDesiredGeneration: string,
+    serverId: string,
+    displayName: string,
+  ) {
+    return decodeMcpMutationResult(
+      await this.invoke(commands.mcpRenameServer, {
+        expectedDesiredGeneration,
+        serverId,
+        displayName,
+      }),
+    );
+  }
+
+  async setMcpServerEnabled(
+    expectedDesiredGeneration: string,
+    serverId: string,
+    enabled: boolean,
+  ) {
+    return decodeMcpMutationResult(
+      await this.invoke(commands.mcpSetServerEnabled, {
+        expectedDesiredGeneration,
+        serverId,
+        enabled,
+      }),
+    );
+  }
+
+  async setMcpAllowedTools(
+    expectedDesiredGeneration: string,
+    serverId: string,
+    toolNames: string[],
+  ) {
+    return decodeMcpMutationResult(
+      await this.invoke(commands.mcpSetAllowedTools, {
+        expectedDesiredGeneration,
+        serverId,
+        toolNames,
+      }),
+    );
+  }
+
+  async removeMcpServer(expectedDesiredGeneration: string, serverId: string) {
+    return decodeMcpMutationResult(
+      await this.invoke(commands.mcpRemoveServer, {
+        expectedDesiredGeneration,
+        serverId,
+      }),
+    );
+  }
+
+  async refreshMcpCatalog() {
+    return decodeMcpRefreshResult(
+      await this.invoke(commands.mcpRefreshCatalog, {}),
     );
   }
 

@@ -524,7 +524,10 @@ test("Windows Account persistence is refresh-only and unversioned", () => {
   );
   assert.match(paths, /\.windows => env_map\.get\("USERPROFILE"\)/);
   assert.match(accountRuntime, /windows_store\.restore/);
-  assert.doesNotMatch(application, /windows_store\.restore|WindowsStore\.restore/);
+  assert.doesNotMatch(
+    application,
+    /windows_store\.restore|WindowsStore\.restore/,
+  );
   assert.doesNotMatch(application, /dev\.metawork\.desktop/);
   assert.match(paths, /const windows_data_directory_name = "MetaWork"/);
   assert.match(
@@ -928,7 +931,10 @@ test("Workbench owns Task lifecycle, continuation, and canonical redaction", () 
     /refreshSkillCatalog[\s\S]{0,500}session\.refreshSkillCatalog/,
   );
   assert.match(read("src/app/paths.zig"), /resolveCanonicalUserHome/);
-  assert.match(read("src/app.zig"), /\.canonical_user_home = paths_state\.canonical_user_home/);
+  assert.match(
+    read("src/app.zig"),
+    /\.canonical_user_home = paths_state\.canonical_user_home/,
+  );
   assert.doesNotMatch(read("src/bridge/dispatcher.zig"), /canonical_user_home/);
   assert.match(
     workbench,
@@ -992,8 +998,14 @@ test("Bridge owns ingress, Account owns validation, and Application coordinates 
     accountRuntime,
     /return \.\{ \.rejected = \.generation_mismatch \}/,
   );
-  assert.doesNotMatch(applicationSource(), /expected_catalog_generation|generation_mismatch/);
-  assert.match(accountCoordinator, /workbench\.commitAccountFactNoFail\(fact\)/);
+  assert.doesNotMatch(
+    applicationSource(),
+    /expected_catalog_generation|generation_mismatch/,
+  );
+  assert.match(
+    accountCoordinator,
+    /workbench\.commitAccountFactNoFail\(fact\)/,
+  );
   assert.match(accountCoordinator, /runtime\.commit\(&prepared\)/);
   assert.match(app, /bridge_api\.Dispatcher\.init/);
   assert.match(app, /\.register\(/);
@@ -1033,6 +1045,20 @@ test("Renderer Bridge fixed revision 1 owns the exact product wire catalog", () 
       "metawork.host.windowChrome.sync",
     ],
   );
+  assert.deepEqual(
+    catalog(zigCommands).filter((command) =>
+      command.startsWith("metawork.mcp."),
+    ),
+    [
+      "metawork.mcp.createHttpServer",
+      "metawork.mcp.refreshCatalog",
+      "metawork.mcp.removeServer",
+      "metawork.mcp.renameServer",
+      "metawork.mcp.setAllowedTools",
+      "metawork.mcp.setServerEnabled",
+    ],
+  );
+  assert.doesNotMatch(zigCommands, /mcp\.(?:upsert|configure|setCredential)/i);
   for (const source of [zigCommands, rendererCommands, appManifest])
     assert.doesNotMatch(
       source,
@@ -1067,6 +1093,8 @@ test("Renderer Bridge fixed revision 1 owns the exact product wire catalog", () 
   assert.match(handlers, /expectedExecutionGeneration/);
   assert.match(handlers, /expectedSkillCatalogRevision/);
   assert.match(handlers, /expectedBindingEpoch/);
+  assert.match(handlers, /expectedDesiredGeneration/);
+  assert.match(handlers, /toolNames/);
   assert.match(handlers, /parseTaskRunInput/);
   assert.doesNotMatch(handlers, /\bprompt\s*:/);
   assert.doesNotMatch(
@@ -1089,6 +1117,14 @@ test("Renderer Bridge fixed revision 1 owns the exact product wire catalog", () 
   assert.match(projection, /\\"tasks\\":\[/);
   assert.match(projection, /\\"skillCatalog\\":/);
   assert.match(projection, /\\"input\\":/);
+  const mcpProjection = projection.slice(
+    projection.indexOf("fn writeMcpProjection"),
+    projection.indexOf("pub fn finalizeMarkedTerminalRunsAfterEventDrain"),
+  );
+  assert.doesNotMatch(
+    mcpProjection,
+    /server\.transport\.(?:command|arguments|cwd|environment|url|headers)|catalogIssues|fingerprint|schema body|AgentCore/,
+  );
   assert.doesNotMatch(projection, /\\"user\\":/);
   assert.match(projection, /pub fn createTask/);
   assert.match(projection, /pub fn runTask/);
@@ -1249,9 +1285,7 @@ test("Renderer declares window chrome UI while Application owns native behavior"
   assert.match(manifest, /\.min_width = 320[\s\S]*\.min_height = 520/);
   assert.deepEqual(
     zigFiles("src/").filter((file) =>
-      read(file).includes(
-        'native_sdk_compat/system_webview_drag_region.zig")',
-      ),
+      read(file).includes('native_sdk_compat/system_webview_drag_region.zig")'),
     ),
     ["src/app/window.zig"],
   );
@@ -1417,7 +1451,10 @@ test("Renderer declares window chrome UI while Application owns native behavior"
     startupWindow,
     /lifecycle plumbing, not a window capability[\s\S]*pub const Binding[\s\S]*pub const Capture/,
   );
-  assert.doesNotMatch(applicationSource(), /services\.closeWindow\(|windows_host/);
+  assert.doesNotMatch(
+    applicationSource(),
+    /services\.closeWindow\(|windows_host/,
+  );
   assert.doesNotMatch(
     compatSource,
     /@import\("(?:bridge|workbench|account|agent)(?:\.zig|\/)|window\.zero|metawork\.host\./,

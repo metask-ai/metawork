@@ -15,6 +15,13 @@ import {
   type SkillCatalogView,
   type SkillManagementView,
   type McpManagementView,
+  type McpMutationResult,
+  type McpRefreshResult,
+  mcpAvailabilities,
+  mcpManagementHealthValues,
+  mcpRuntimeAlignmentValues,
+  mcpRuntimeStatusValues,
+  mcpNewTaskAccessValues,
   type SkillImportPreview,
   type SkillMutationResult,
   type SkillExportResult,
@@ -1724,19 +1731,37 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
 function decodeMcpManagement(value: unknown, path: string): McpManagementView {
   const item = object(value, path, [
     "availability",
+    "managementHealth",
+    "operation",
+    "desiredGeneration",
+    "runtimeAlignment",
     "redacted",
-    "generation",
     "servers",
   ]);
-  const availability = enumValue(item.availability, `${path}.availability`, [
-    "unavailable",
-    "ready",
-    "degraded",
+  const availability = enumValue(
+    item.availability,
+    `${path}.availability`,
+    mcpAvailabilities,
+  );
+  const managementHealth = enumValue(
+    item.managementHealth,
+    `${path}.managementHealth`,
+    mcpManagementHealthValues,
+  );
+  const operation = enumValue(item.operation, `${path}.operation`, [
+    "idle",
+    "saving",
+    "refreshing",
   ] as const);
-  const generation =
-    item.generation === null
+  const desiredGeneration =
+    item.desiredGeneration === null
       ? null
-      : wireId(item.generation, `${path}.generation`);
+      : wireId(item.desiredGeneration, `${path}.desiredGeneration`);
+  const runtimeAlignment = enumValue(
+    item.runtimeAlignment,
+    `${path}.runtimeAlignment`,
+    mcpRuntimeAlignmentValues,
+  );
   const servers = arrayValue(
     item.servers,
     `${path}.servers`,
@@ -1746,7 +1771,9 @@ function decodeMcpManagement(value: unknown, path: string): McpManagementView {
         "displayName",
         "namespace",
         "transport",
-        "status",
+        "desiredEnabled",
+        "runtimeStatus",
+        "newTaskAccess",
         "safeDiagnostic",
         "tools",
       ]);
@@ -1754,10 +1781,33 @@ function decodeMcpManagement(value: unknown, path: string): McpManagementView {
         server.tools,
         `${serverPath}.tools`,
         (value, toolPath) => {
-          const tool = object(value, toolPath, ["name"]);
-          return {
+          const tool = object(value, toolPath, [
+            "name",
+            "discovered",
+            "desiredAllowed",
+            "availableToNewTasks",
+          ]);
+          const decoded = {
             name: nonEmptyString(tool.name, `${toolPath}.name`),
+            discovered: booleanValue(tool.discovered, `${toolPath}.discovered`),
+            desiredAllowed: booleanValue(
+              tool.desiredAllowed,
+              `${toolPath}.desiredAllowed`,
+            ),
+            availableToNewTasks: booleanValue(
+              tool.availableToNewTasks,
+              `${toolPath}.availableToNewTasks`,
+            ),
           };
+          if (
+            decoded.availableToNewTasks &&
+            (!decoded.discovered || !decoded.desiredAllowed)
+          )
+            fail(
+              toolPath,
+              "new-task authority requires discovered allowed tool",
+            );
+          return decoded;
         },
       );
       if (new Set(tools.map((tool) => tool.name)).size !== tools.length)
@@ -1776,13 +1826,20 @@ function decodeMcpManagement(value: unknown, path: string): McpManagementView {
           "stdio",
           "streamable_http",
         ] as const),
-        status: enumValue(server.status, `${serverPath}.status`, [
-          "ready",
-          "disabled",
-          "needs_authentication",
-          "unreachable",
-          "invalid_catalog",
-        ] as const),
+        desiredEnabled: booleanValue(
+          server.desiredEnabled,
+          `${serverPath}.desiredEnabled`,
+        ),
+        runtimeStatus: enumValue(
+          server.runtimeStatus,
+          `${serverPath}.runtimeStatus`,
+          mcpRuntimeStatusValues,
+        ),
+        newTaskAccess: enumValue(
+          server.newTaskAccess,
+          `${serverPath}.newTaskAccess`,
+          mcpNewTaskAccessValues,
+        ),
         safeDiagnostic: stringValue(
           server.safeDiagnostic,
           `${serverPath}.safeDiagnostic`,
@@ -1798,25 +1855,58 @@ function decodeMcpManagement(value: unknown, path: string): McpManagementView {
   )
     fail(`${path}.servers`, "MCP server namespaces must be unique");
   if (
-    availability === "unavailable" &&
-    (generation !== null || servers.length !== 0)
+    desiredGeneration === null &&
+    (runtimeAlignment !== "unknown" || servers.length !== 0)
   )
-    fail(path, "unavailable MCP management cannot expose a catalog");
-  if (availability !== "unavailable" && generation === null)
-    fail(path, "available MCP management requires a catalog generation");
+    fail(path, "unknown desired state must hide alignment and servers");
+  if (
+    managementHealth === "outcome_unknown" &&
+    (desiredGeneration !== null ||
+      runtimeAlignment !== "unknown" ||
+      servers.length !== 0)
+  )
+    fail(path, "outcome-unknown management cannot claim desired state");
+  if (managementHealth === "ready" && desiredGeneration === null)
+    fail(path, "ready management requires a canonical desired generation");
   if (
     availability === "ready" &&
     servers.some((server) =>
       ["needs_authentication", "unreachable", "invalid_catalog"].includes(
-        server.status,
+        server.runtimeStatus,
       ),
     )
   )
-    fail(path, "ready MCP management cannot contain attention states");
+    fail(path, "ready MCP Runtime cannot contain attention states");
+  for (const [index, server] of servers.entries()) {
+    const availableTools = server.tools.filter(
+      (tool) => tool.availableToNewTasks,
+    ).length;
+    if ((server.newTaskAccess === "available") !== availableTools > 0)
+      fail(
+        `${path}.servers[${index}]`,
+        "server access must match selected tools",
+      );
+    if (server.newTaskAccess === "available" && !server.desiredEnabled)
+      fail(
+        `${path}.servers[${index}]`,
+        "disabled desired server cannot expose new-task authority",
+      );
+    if (
+      server.newTaskAccess !== "available" &&
+      server.tools.some((tool) => tool.availableToNewTasks)
+    )
+      fail(
+        `${path}.servers[${index}]`,
+        "blocked server cannot expose authority",
+      );
+  }
   return {
     availability,
+    managementHealth,
+    operation,
+    desiredGeneration,
+    runtimeAlignment,
     redacted: booleanValue(item.redacted, `${path}.redacted`),
-    generation,
     servers,
   };
 }
@@ -1961,11 +2051,20 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     decodeScheduledTask,
   );
   const mcp = decodeMcpManagement(root.mcp, "$.mcp");
-  if (capabilities.mcpManagement !== (mcp.availability !== "unavailable"))
-    fail(
-      "$.capabilities.mcpManagement",
-      "MCP management capability and availability must agree",
-    );
+  if (!capabilities.mcpManagement) {
+    if (
+      mcp.availability !== "unavailable" ||
+      mcp.managementHealth !== "unavailable" ||
+      mcp.operation !== "idle" ||
+      mcp.desiredGeneration !== null ||
+      mcp.runtimeAlignment !== "unknown" ||
+      mcp.redacted ||
+      mcp.servers.length !== 0
+    )
+      fail("$.mcp", "disabled MCP management must use the unavailable view");
+  } else if (mcp.managementHealth === "unavailable") {
+    fail("$.mcp.managementHealth", "enabled MCP management requires its owner");
+  }
   if (
     new Set(workspaces.map((workspace) => workspace.id)).size !==
     workspaces.length
@@ -2215,6 +2314,51 @@ export function decodeSkillImportPreview(value: unknown): SkillImportPreview {
     description: stringValue(item.description, "$.description"),
     fileCount: positiveNumber(item.fileCount, "$.fileCount"),
     totalBytes: positiveNumber(item.totalBytes, "$.totalBytes"),
+  };
+}
+
+export function decodeMcpMutationResult(value: unknown): McpMutationResult {
+  const item = object(value, "$", ["outcome", "desiredGeneration"]);
+  const outcome = enumValue(item.outcome, "$.outcome", [
+    "unchanged",
+    "saved",
+    "saved_recovery_required",
+    "stale_generation",
+    "rejected",
+    "indeterminate",
+  ] as const);
+  const desiredGeneration =
+    item.desiredGeneration === null
+      ? null
+      : wireId(item.desiredGeneration, "$.desiredGeneration");
+  if (outcome === "indeterminate" && desiredGeneration !== null)
+    fail(
+      "$.desiredGeneration",
+      "indeterminate outcome cannot claim generation",
+    );
+  if (
+    [
+      "unchanged",
+      "saved",
+      "saved_recovery_required",
+      "stale_generation",
+    ].includes(outcome) &&
+    desiredGeneration === null
+  )
+    fail("$.desiredGeneration", "known mutation outcome requires generation");
+  return { outcome, desiredGeneration };
+}
+
+export function decodeMcpRefreshResult(value: unknown): McpRefreshResult {
+  const item = object(value, "$", ["outcome"]);
+  return {
+    outcome: enumValue(item.outcome, "$.outcome", [
+      "started",
+      "busy",
+      "unavailable",
+      "shutting_down",
+      "rejected",
+    ] as const),
   };
 }
 

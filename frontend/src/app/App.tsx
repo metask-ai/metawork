@@ -89,6 +89,8 @@ import type {
   TaskCreateReason,
   TaskCompactReason,
   RunInputView,
+  McpMutationResult,
+  McpRefreshResult,
   SkillMutationResult,
   TaskRunReason,
   UiResponsePayload,
@@ -1216,6 +1218,30 @@ export default function App() {
     return result;
   }
 
+  async function commitMcpMutation(
+    mutation: () => Promise<McpMutationResult>,
+  ): Promise<McpMutationResult> {
+    try {
+      const result = await mutation();
+      if (result.outcome !== "unchanged") await refreshSnapshot();
+      return result;
+    } catch (error) {
+      await refreshSnapshot().catch(() => undefined);
+      throw error;
+    }
+  }
+
+  async function refreshMcpCatalog(): Promise<McpRefreshResult> {
+    try {
+      const result = await client.refreshMcpCatalog();
+      await refreshSnapshot();
+      return result;
+    } catch (error) {
+      await refreshSnapshot().catch(() => undefined);
+      throw error;
+    }
+  }
+
   function runSlashCommand(command: SlashCommandName) {
     switch (command) {
       case "new":
@@ -1960,7 +1986,34 @@ export default function App() {
         <McpPage
           management={snapshot.mcp}
           query={mcpQuery}
+          disabled={bridgeUnavailable || !snapshot.capabilities.mcpManagement}
           onQuery={setMcpQuery}
+          onCreate={(generation, displayName, endpoint) =>
+            commitMcpMutation(() =>
+              client.createMcpHttpServer(generation, displayName, endpoint),
+            )
+          }
+          onRename={(generation, serverId, displayName) =>
+            commitMcpMutation(() =>
+              client.renameMcpServer(generation, serverId, displayName),
+            )
+          }
+          onSetEnabled={(generation, serverId, enabled) =>
+            commitMcpMutation(() =>
+              client.setMcpServerEnabled(generation, serverId, enabled),
+            )
+          }
+          onSetAllowedTools={(generation, serverId, toolNames) =>
+            commitMcpMutation(() =>
+              client.setMcpAllowedTools(generation, serverId, toolNames),
+            )
+          }
+          onRemove={(generation, serverId) =>
+            commitMcpMutation(() =>
+              client.removeMcpServer(generation, serverId),
+            )
+          }
+          onRefresh={refreshMcpCatalog}
         />
       ) : route === "scheduled-tasks" ? (
         <ScheduledTasksPage

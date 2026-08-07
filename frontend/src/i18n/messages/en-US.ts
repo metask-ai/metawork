@@ -150,37 +150,128 @@ export const enUS = {
   "mcp.title": "MCP",
   "mcp.subtitle":
     "Review trusted servers and the tools they make available to MetaWork.",
-  "mcp.catalog_generation": "Catalog generation {generation}",
+  "mcp.desired_generation": "Desired · {generation}",
   "mcp.search_label": "Search MCP servers and tools",
   "mcp.search_placeholder": "Search servers and tools",
   "mcp.section.attention": "Needs attention",
   "mcp.section.available": "Available servers",
   "mcp.section.disabled": "Disabled",
   "mcp.status.ready": "Ready",
+  "mcp.status.not_loaded": "Not loaded",
   "mcp.status.disabled": "Disabled",
   "mcp.status.needs_authentication": "Sign-in required",
   "mcp.status.unreachable": "Cannot connect",
   "mcp.status.invalid_catalog": "Invalid tool catalog",
   "mcp.transport.stdio": "Local · stdio",
   "mcp.transport.streamable_http": "Remote · HTTP",
-  "mcp.tool_count.one": "{count} tool",
-  "mcp.tool_count.other": "{count} tools",
+  "mcp.tool_access_summary": "{available} of {total} for new tasks",
+  "mcp.access.available": "Available to new tasks",
+  "mcp.access.not_allowed": "Not allowed",
+  "mcp.access.restart_required": "Restart required",
+  "mcp.access.unavailable": "Unavailable to new tasks",
+  "mcp.banner.restart.title": "Restart MetaWork to apply connection changes",
+  "mcp.banner.restart.body":
+    "New tasks will not use MCP until restart. Open tasks keep their current access.",
+  "mcp.banner.alignment_unknown.title": "Runtime alignment cannot be verified",
+  "mcp.banner.alignment_unknown.body":
+    "Editing is paused because MetaWork cannot prove which configuration this Runtime loaded.",
+  "mcp.banner.recovery.title": "MCP management needs recovery",
+  "mcp.banner.recovery.body":
+    "The last known configuration is shown, but changes are paused until recovery completes.",
+  "mcp.banner.outcome_unknown.title": "The last save result is unknown",
+  "mcp.banner.outcome_unknown.body":
+    "MetaWork has hidden the unconfirmed configuration and blocked MCP access for new tasks. Restart to recover safely.",
+  "mcp.banner.runtime_unavailable.title":
+    "The current MCP Runtime is unavailable",
+  "mcp.banner.runtime_unavailable.body":
+    "You can still review desired settings. Ordinary tasks remain available without MCP.",
   "mcp.unavailable_title": "MCP management is unavailable",
   "mcp.unavailable_body":
     "MetaWork has not opened the MCP product path, so no servers or tools are shown.",
   "mcp.empty_title": "No MCP servers yet",
   "mcp.empty_body":
-    "Trusted servers will appear here after MetaWork admits and validates their tool catalogs.",
+    "Add a trusted HTTP server. It starts disabled with no tools allowed.",
   "mcp.no_results_title": "No matching servers or tools",
   "mcp.no_results_body": "Nothing matches “{query}”.",
   "mcp.detail.eyebrow": "MCP server",
   "mcp.detail.status": "Status",
+  "mcp.detail.desired": "Desired",
+  "mcp.detail.runtime": "Runtime",
+  "mcp.detail.new_tasks": "New tasks",
+  "mcp.detail.configuration": "Configuration",
+  "mcp.detail.display_name": "Display name",
   "mcp.detail.transport": "Connection",
   "mcp.detail.tools": "Tools",
   "mcp.detail.diagnostic": "Needs attention",
   "mcp.detail.tool_catalog": "Tool catalog",
+  "mcp.detail.tool_help":
+    "Choose the exact tools copied into new tasks. Newly discovered tools stay off.",
   "mcp.detail.no_tools": "This server has not published any usable tools.",
   "mcp.redacted": "Sensitive catalog text was removed by the Host.",
+  "mcp.desired.enabled": "Enabled",
+  "mcp.desired.disabled": "Disabled",
+  "mcp.alignment.current": "Desired settings match the current Runtime.",
+  "mcp.alignment.restart_required":
+    "Connection changes are waiting for restart.",
+  "mcp.alignment.unknown": "Runtime alignment is unknown.",
+  "mcp.existing_tasks_note":
+    "Open tasks keep the MCP access they received when they were created.",
+  "mcp.add.action": "Add server",
+  "mcp.add.eyebrow": "New MCP server",
+  "mcp.add.title": "Add an HTTP server",
+  "mcp.add.intro":
+    "Add one unauthenticated Streamable HTTP endpoint. MetaWork creates it disabled with no tools allowed.",
+  "mcp.add.name": "Display name",
+  "mcp.add.endpoint": "Endpoint",
+  "mcp.add.endpoint_help":
+    "Use HTTPS, or HTTP only for localhost, 127.0.0.1, or ::1. User info, query strings, and fragments are not accepted.",
+  "mcp.add.defaults":
+    "The server starts disabled with no tools allowed. Enable it and restart if requested; discovered tools stay unavailable until you allow them.",
+  "mcp.add.submit": "Add server",
+  "mcp.add.adding": "Adding…",
+  "mcp.rename.action": "Save name",
+  "mcp.enable.action": "Enable",
+  "mcp.disable.action": "Disable",
+  "mcp.delete.action": "Delete server",
+  "mcp.refresh.action": "Refresh",
+  "mcp.refresh.refreshing": "Refreshing…",
+  "mcp.refresh.started": "Refreshing the current Runtime catalog.",
+  "mcp.refresh.busy": "A catalog refresh is already running.",
+  "mcp.refresh.unavailable": "The current Runtime catalog is unavailable.",
+  "mcp.refresh.shutting_down": "MetaWork is shutting down.",
+  "mcp.refresh.rejected": "The catalog refresh was rejected.",
+  "mcp.refresh.failed":
+    "The catalog could not be refreshed. Host state was not guessed.",
+  "mcp.mutation.unchanged": "No configuration change was needed.",
+  "mcp.mutation.saved": "MCP settings saved.",
+  "mcp.mutation.saved_recovery_required":
+    "Settings saved, but management is paused until recovery completes.",
+  "mcp.mutation.stale_generation":
+    "The configuration changed elsewhere. The latest Host state was reloaded.",
+  "mcp.mutation.rejected": "The Host rejected this change.",
+  "mcp.mutation.indeterminate":
+    "The save result is unknown. MetaWork blocked MCP access for new tasks.",
+  "mcp.mutation.failed":
+    "The change could not be completed. Host state was not guessed.",
+  "mcp.tool.not_discovered":
+    "Configured, but not present in the current catalog",
+  "mcp.tool.available_to_new_tasks": "Allowed and available to new tasks",
+  "mcp.tool.allowed_not_available":
+    "Allowed, but unavailable in the current Runtime",
+  "mcp.tool.not_allowed": "Discovered, but not allowed",
+  "mcp.tool.toggle": "Allow {name} for new tasks",
+  "mcp.confirm.enable.title": "Enable this server?",
+  "mcp.confirm.enable.body":
+    "Connection changes may require restart. Open tasks keep their current access.",
+  "mcp.confirm.enable.action": "Enable server",
+  "mcp.confirm.disable.title": "Disable this server?",
+  "mcp.confirm.disable.body":
+    "New tasks may require restart before access is removed. Open tasks are not changed.",
+  "mcp.confirm.disable.action": "Disable server",
+  "mcp.confirm.delete.title": "Delete this server?",
+  "mcp.confirm.delete.body":
+    "This removes the desired configuration. Open tasks keep their current access, and loaded connections may require restart.",
+  "mcp.confirm.delete.action": "Delete server",
   "skills.subtitle": "Manage local Skills available to MetaWork.",
   "skills.import": "Import Skill",
   "skills.import_first": "Import your first Skill",

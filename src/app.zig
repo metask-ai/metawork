@@ -82,7 +82,11 @@ const App = struct {
         defer if (preparation_owned) preparation.deinit();
         var mcp_input: ?agent.McpRuntimeInput = null;
         defer if (mcp_input) |*input| input.deinit();
+        var runtime_manifest: ?workbench_api.McpRuntimeManifest = null;
+        var runtime_manifest_owned = false;
+        defer if (runtime_manifest_owned) runtime_manifest.?.deinit();
         var activation_failed = false;
+        var input_construction_succeeded = true;
         mcp_input = mcp_platform.buildRuntimeInput(
             self.io,
             std.heap.c_allocator,
@@ -91,9 +95,17 @@ const App = struct {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidConfig => failed: {
                 activation_failed = true;
+                input_construction_succeeded = false;
                 break :failed null;
             },
         };
+        if (input_construction_succeeded) {
+            runtime_manifest = try workbench_api.McpRuntimeManifest.candidate(
+                std.heap.c_allocator,
+                &preparation,
+            );
+            runtime_manifest_owned = runtime_manifest != null;
+        }
         const agent_runtime = try createAgentRuntime(
             self.io,
             self.agent_events.notifier(),
@@ -119,8 +131,10 @@ const App = struct {
                 .persistence = store.mutationPersistence(),
                 .credentials = self.mcp_credential_store.?.effects(),
                 .locator_generator = self.mcp_credential_store.?.locatorGenerator(),
+                .identity_generator = self.mcp_credential_store.?.serverIdentityGenerator(),
                 .limits = mcp_startup.configuration_limits,
                 .initial_health = startup_preparation.management_health,
+                .runtime_manifest = if (runtime_manifest) |*manifest| manifest else null,
             } else null,
         };
         workbench_storage.* = try workbench_api.Workbench.init(
@@ -138,6 +152,7 @@ const App = struct {
         );
         preparation_owned = false;
         activation = null;
+        if (configuration.mcp.management != null) runtime_manifest_owned = false;
         self.workbench = workbench_storage;
         self.workbench_initialized = true;
         try self.platform.installScheduleHost(workbench_storage);

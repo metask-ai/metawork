@@ -17,6 +17,8 @@ import {
   decodeSkillExportResult,
   decodeSkillImportPreview,
   decodeSkillMutationResult,
+  decodeMcpMutationResult,
+  decodeMcpRefreshResult,
   decodeWorkspaceMutationResult,
   decodeWorkbenchSnapshot,
 } from "../frontend/src/bridge/decode-contracts.ts";
@@ -250,24 +252,38 @@ test("MCP management is capability-gated and identity checked", () => {
   withMcp.capabilities.mcpManagement = true;
   withMcp.mcp = {
     availability: "degraded",
+    managementHealth: "ready",
+    operation: "idle",
+    desiredGeneration: "1",
+    runtimeAlignment: "current",
     redacted: false,
-    generation: "0",
     servers: [
       {
         id: "github-binding",
         displayName: "GitHub",
         namespace: "github",
         transport: "streamable_http",
-        status: "ready",
+        desiredEnabled: true,
+        runtimeStatus: "ready",
+        newTaskAccess: "available",
         safeDiagnostic: "",
-        tools: [{ name: "search_repositories" }],
+        tools: [
+          {
+            name: "search_repositories",
+            discovered: true,
+            desiredAllowed: true,
+            availableToNewTasks: true,
+          },
+        ],
       },
       {
         id: "notion-binding",
         displayName: "Notion",
         namespace: "notion",
         transport: "streamable_http",
-        status: "needs_authentication",
+        desiredEnabled: true,
+        runtimeStatus: "needs_authentication",
+        newTaskAccess: "unavailable",
         safeDiagnostic: "Sign in again.",
         tools: [],
       },
@@ -279,7 +295,7 @@ test("MCP management is capability-gated and identity checked", () => {
   hiddenCatalog.capabilities.mcpManagement = false;
   assert.throws(
     () => decodeWorkbenchSnapshot(hiddenCatalog),
-    /capability and availability must agree/,
+    /disabled MCP management must use the unavailable view/,
   );
 
   const duplicateServer = clone(withMcp);
@@ -308,10 +324,46 @@ test("MCP management is capability-gated and identity checked", () => {
   const unavailableLeak = clone(withMcp);
   unavailableLeak.capabilities.mcpManagement = false;
   unavailableLeak.mcp.availability = "unavailable";
-  unavailableLeak.mcp.generation = null;
   assert.throws(
     () => decodeWorkbenchSnapshot(unavailableLeak),
-    /cannot expose a catalog/,
+    /disabled MCP management must use the unavailable view/,
+  );
+
+  const unknownDesired = clone(withMcp);
+  unknownDesired.mcp.managementHealth = "outcome_unknown";
+  unknownDesired.mcp.desiredGeneration = null;
+  assert.throws(
+    () => decodeWorkbenchSnapshot(unknownDesired),
+    /unknown desired state must hide alignment and servers/,
+  );
+});
+
+test("MCP command results preserve persistence certainty and refresh admission", () => {
+  assert.deepEqual(
+    decodeMcpMutationResult({ outcome: "saved", desiredGeneration: "12" }),
+    { outcome: "saved", desiredGeneration: "12" },
+  );
+  assert.deepEqual(
+    decodeMcpMutationResult({
+      outcome: "indeterminate",
+      desiredGeneration: null,
+    }),
+    { outcome: "indeterminate", desiredGeneration: null },
+  );
+  assert.throws(
+    () =>
+      decodeMcpMutationResult({
+        outcome: "indeterminate",
+        desiredGeneration: "12",
+      }),
+    /cannot claim generation/,
+  );
+  assert.deepEqual(decodeMcpRefreshResult({ outcome: "started" }), {
+    outcome: "started",
+  });
+  assert.throws(
+    () => decodeMcpRefreshResult({ outcome: "started", generation: "1" }),
+    /expected keys/,
   );
 });
 
