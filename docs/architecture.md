@@ -7,62 +7,61 @@
 
 ## 1. 已确认的技术选型
 
-| 架构节点    | 选择                            | 定位                                                                   |
-| ----------- | ------------------------------- | ---------------------------------------------------------------------- |
-| Renderer    | React + Tailwind                | 唯一正式 UI；运行于 Desktop Host 通过 Native SDK 托管的 System WebView |
-| Bridge      | Zig                             | Renderer Bridge revision 1 的协议、验证和 ProductDelivery 边界         |
-| Product | Zig                             | MetaWork 产品事实、产品行为、执行协调和恢复语义的唯一边界              |
-| AgentCore   | Metask AgentCore library bundle | 外部执行依赖；独立构建和发布，MetaWork 只消费 canonical bundle         |
-| Native SDK  | Native SDK                      | 外部桌面依赖；由 Desktop Host 消费                                     |
+| 架构节点   | 选择                            | 定位                                                                   |
+| ---------- | ------------------------------- | ---------------------------------------------------------------------- |
+| Application | Zig                            | composition root、用例编排、平台 capability 适配与生命周期驱动        |
+| Renderer   | React + Tailwind                | 唯一正式 UI；运行于 Application 通过 Native SDK 托管的 System WebView  |
+| Bridge     | Zig                             | Renderer Bridge revision 1 的协议、验证和 ProductDelivery 边界         |
+| Product    | Zig                             | MetaWork 产品事实、产品行为和恢复语义的唯一边界                        |
+| AgentCore  | Metask AgentCore library bundle | 外部执行依赖；独立构建和发布，MetaWork 只消费 canonical bundle         |
+| Native SDK | Native SDK                      | 外部桌面依赖；由 Application 消费                                      |
 
 正式主路径不采用 Tauri + Rust，不建立第二套 Renderer，不以 PTY、xterm、终端字节流或 Provider SSE 作为 Agent UI 协议，不复制 AgentCore ABI 或实现源码，也不建立 Native SDK Adapter、通用 Desktop Interface 或可替换框架抽象。
 
-Renderer、Bridge 与 Product 是 MetaWork-owned 逻辑边界；Metask AgentCore 与 Native SDK 是外部依赖。MetaWork 采用 Desktop Host + WebUI 的桌面运行形态：由 Zig 实现的 `app.zig` 作为 Host composition root 组装 Bridge 与 Product，并消费 Native SDK 提供的原生应用生命周期、窗口和 System WebView 能力来托管 React Renderer。Desktop Host 是运行时容器，不是与这些架构节点并列的新模块。当前 `app.zig` 同时承载 Product 的主线程协调角色；这是源码共置，不把 Desktop Host 变成 Product，也不产生新的架构节点。
+Application、Renderer、Bridge 与 Product 是 MetaWork-owned 并列逻辑边界；Metask AgentCore 与 Native SDK 是外部依赖。Application 由 `src/app.zig` 和 `src/app/` 实现：代码组合类型名为 `App`，`app.zig` 是 composition root，具名适配、resolver、store 生命周期和跨 owner 用例编排位于 `app/`。Application 组装 Bridge 与 Product，消费 Native SDK 的原生应用生命周期、窗口和 System WebView 能力，并托管 React Renderer；它不是业务 owner，也不形成统一 facade。
 
-原生窗口机制由 Desktop Host 通过 Native SDK 执行，Desktop Host 控制窗口生命周期并托管 System WebView；React 只负责 WebUI。涉及产品语义的校验和决策归 Product 中对应 owner；Product 协调角色只执行这些 owner 已定义的跨 owner 提交与生命周期顺序，不复制 policy 或持有领域状态。`app.zig` 承载该协调角色不使它成为新的业务 owner。Renderer 可以呈现一体化标题/命令栏，但原生窗口行为、系统资源和真实状态始终属于 Desktop Host。菜单、托盘、全局快捷键或其他平台 capability 位于同一 owner 边界，不代表当前版本已经开放；实际可用性仍以能力合同与验证状态为准。
+原生窗口机制由 Application 通过 Native SDK 执行；React 只负责 WebUI。涉及产品语义的校验和决策归对应 owner；Application coordinator 只执行 owner 已定义的跨 owner 提交与生命周期顺序，不复制 policy 或持有领域状态。Renderer 可以呈现一体化标题/命令栏，但原生窗口行为、系统资源和真实状态始终属于 Application。菜单、托盘、全局快捷键或其他平台 capability 位于同一边界，不代表当前版本已经开放；实际可用性仍以能力合同与验证状态为准。
 
 ## 2. 顶层边界与运行时组合
 
 ```mermaid
 flowchart TB
     RENDERER["Renderer<br/>React + Tailwind"]
-
-    subgraph HOST["MetaWork Desktop Host<br/>Zig"]
-        APP["app.zig<br/>Host composition role"]
-        BRIDGE["Bridge<br/>协议、验证与 ProductDelivery"]
-        PRODUCT["Product<br/>owners、事务与协调角色"]
-        BRIDGE <-->|"产品命令与投影"| PRODUCT
-        APP -->|"compose"| BRIDGE
-        APP -->|"compose / capability injection"| PRODUCT
-    end
-
+    APPLICATION["Application<br/>app.zig + app/"]
+    BRIDGE["Bridge<br/>协议、验证与 ProductDelivery"]
+    PRODUCT["Product<br/>owners、事务与协调角色"]
     AGENTCORE["Metask AgentCore<br/>Agent 执行能力"]
-    NATIVE["Native SDK<br/>窗口、System WebView 与生命周期能力"]
+    NATIVE_RUNTIME["Native SDK Runtime API<br/>窗口、System WebView 与生命周期"]
+    NATIVE_COMPAT["Native Compat<br/>已登记 SDK 缺口"]
 
-    RENDERER <-->|"Renderer Bridge rev 1<br/>command / Snapshot / Event"| BRIDGE
+    APPLICATION -. "compose" .-> BRIDGE
+    APPLICATION -. "compose" .-> PRODUCT
+    BRIDGE <-->|"Renderer Bridge rev 1<br/>command / Snapshot / Event"| RENDERER
+    BRIDGE <-->|"typed command / projection"| PRODUCT
     PRODUCT <-->|"typed bundle ABI"| AGENTCORE
-    NATIVE -->|"desktop capabilities"| APP
-    APP -->|"hosts System WebView"| RENDERER
+    APPLICATION -->|"normal system path"| NATIVE_RUNTIME
+    APPLICATION -->|"registered compatibility path"| NATIVE_COMPAT
+    NATIVE_RUNTIME -->|"hosts System WebView"| RENDERER
 ```
 
 这是一张逻辑模块图，不等于进程图或源码目录图：
 
 1. Renderer 只通过 Renderer Bridge revision 1 访问产品路径；
-2. `app.zig` 作为 Desktop Host 的 composition root 组装 Bridge 与 Product，并消费 Native SDK 的窗口、System WebView、生命周期与窄平台 capability；
-3. Product 包含 `account`、`workbench` 与 `agent` 三个产品 owner，以及一个不持有领域状态的跨 owner 协调角色，不代表统一源码 module 或 facade；该协调角色当前与 Desktop Host composition root 共置于 `app.zig`，Bridge 把命令 dispatch 给 Product 中对应 owner；
-4. AgentCore 与 Native SDK 是两个并列外部依赖：前者提供 Agent 执行能力；Desktop Host 消费后者来托管 Renderer，并向 Bridge 与 Product 注入桌面平台能力；
-5. 当前 AgentCore bundle 链入同进程；未来单 Worker 只改变 Product 后方的部署、资源和故障域，不改变 Renderer Bridge 产品合同。
+2. `app.zig` 是 Application 的 composition root；`app/` 承载 Application 的具名实现，二者共同组装 Bridge 与 Product，并消费 Native SDK 的窗口、System WebView、生命周期与窄平台 capability；
+3. Product 包含 `account`、`workbench` 与 `agent` 三个产品 owner，不代表统一源码 module 或 facade；跨 owner 协调位于 Application，Bridge 把命令静态绑定到对应 owner 或具名 coordinator；
+4. Native SDK Runtime API 与 Native Compat 是 Application 消费系统能力的两条并列路径，Native Compat 只覆盖逐项登记的 SDK 缺口；
+5. AgentCore 与 Native SDK 是两个并列外部依赖；当前 AgentCore bundle 链入同进程，未来单 Worker 只改变 Product 后方的部署、资源和故障域，不改变 Renderer Bridge 产品合同。
 
 ### 词汇对账
 
-| 词           | 含义                                                                 | 图节点        | 所有权表行                                                 | 源码                                                   |
-| ------------ | -------------------------------------------------------------------- | ------------- | ---------------------------------------------------------- | ------------------------------------------------------ |
-| Desktop Host | 桌面运行形态与承载它的组合层（`app.zig` + `native_sdk_compat/`）     | HOST subgraph | Desktop Host composition                                   | `src/main.zig`、`src/app.zig`、`src/native_sdk_compat/` |
-| Product      | 产品逻辑边界；不是统一源码 module                                     | PRODUCT       | Account、Workbench、Agent 与 Product coordinator           | `src/account*`、`src/workbench*`、`src/agent*`         |
-| Bridge       | Renderer 与 Host 进程间的唯一通信边界                                 | BRIDGE        | Bridge                                                     | `src/bridge*`                                          |
-| Renderer     | 产品 WebUI 模块                                                       | RENDERER      | Renderer                                                   | `frontend/`（含 `bridge/` 合同实现层）                 |
+| 词          | 含义                                                                 | 图节点          | 所有权表行                                   | 源码                                                   |
+| ----------- | -------------------------------------------------------------------- | --------------- | -------------------------------------------- | ------------------------------------------------------ |
+| Application | 组合、用例编排、平台能力适配与生命周期边界                           | APPLICATION     | Application                                  | `src/main.zig`、`src/app.zig`、`src/app/`、`src/native_sdk_compat/` |
+| Product     | 产品逻辑边界；不是统一源码 module                                    | PRODUCT         | Account、Workbench、Agent                    | `src/account*`、`src/workbench*`、`src/agent*`         |
+| Bridge      | Renderer 与 Application 之间的唯一通信边界                           | BRIDGE          | Bridge                                       | `src/bridge*`                                          |
+| Renderer    | 产品 WebUI 模块                                                       | RENDERER        | Renderer                                     | `frontend/`（含 `bridge/` 合同实现层）                 |
 
-用法约定：`Desktop Host-owned` 指归组合层所有、不属于任何产品 owner；`Product 边界/Product 模块`指本节逻辑边界，不裸用 `Product`；`桌面产品`指整个交付物。`product_identity.zig`（交付物 Bundle ID）与 Bridge 的 `ProductDelivery`（产品数据运输）维持原名，词根含义不同，不指 Product 边界。
+用法约定：文档中的架构边界统一称为 Application，代码中的组合类型保持 `App`；不再另设 Desktop Host 或 Host infrastructure。`Product 边界/Product 模块`指本节逻辑边界，`桌面产品`指整个交付物。`product_identity.zig`（交付物 Bundle ID）与 Bridge 的 `ProductDelivery`（产品数据运输）维持原名，词根含义不同，不指 Product 边界。
 
 ## 3. 模块职责
 
@@ -74,7 +73,7 @@ Renderer 不直接加载 AgentCore，不访问任意文件或进程，不持有 
 
 ### 3.2 Bridge
 
-Bridge 是 Renderer 与 Host 进程之间的唯一通信边界，承运两类 surface：产品命令面把 typed 产品命令 dispatch 给 Product 中对应 owner，并运输 Snapshot/Event，不决定 Task admission、Workspace authority、Agent cancellation、credential replacement 或历史持久化；受限平台 capability 面只承运封闭枚举的 window-chrome bootstrap command，dispatch 给 Desktop Host 执行。两面共用 transport、origin policy 与 source/window authority，不共用数据面。
+Bridge 是 Renderer 与 Application 之间的唯一通信边界，承运两类 surface：产品命令面把 typed 产品命令 dispatch 给 Product 中对应 owner，并运输 Snapshot/Event，不决定 Task admission、Workspace authority、Agent cancellation、credential replacement 或历史持久化；受限平台 capability 面只承运封闭枚举的 window-chrome bootstrap command，dispatch 给 Application 执行。两面共用 transport、origin policy 与 source/window authority，不共用数据面。
 
 职责细节、封闭 command 枚举、连接、revision、snapshot identity、分块读取、retry 和 fail-closed 规则只由 [Renderer Bridge 合同](renderer-bridge-contract.md)定义。受限 window-chrome bootstrap session 的 source-window authority 与 document generation 同样归 Bridge：document attach 只建立一次 generation，Native SDK resize event 与 DOM layout observation 只驱动同 generation 的 geometry sync，不建立 resize command、第二 connection 或平台状态副本。
 
@@ -94,36 +93,36 @@ AgentCore 拥有 Provider 调用、agent loop、Conversation、built-in tools、
 
 ### 3.5 Native SDK
 
-Native SDK 是外部桌面依赖。Desktop Host 通过 Native SDK 执行桌面生命周期、原生窗口与 window chrome 行为、System WebView、菜单、托盘、全局快捷键及其他受限平台机制，并拥有对应系统资源和真实状态；它托管 React Renderer，为 Bridge 提供受限平台 seam。`app.zig` 的 Host composition 角色只把产品所需的窄 capability 注入 Product 并驱动平台生命周期；共置的 Product 协调角色执行已定义的跨 owner 顺序，但不持有产品 policy。Renderer 也不能把视觉呈现或交互命中升级为原生 owner。
+Native SDK 是外部桌面依赖。Application 通过 Native SDK 执行桌面生命周期、原生窗口与 window chrome 行为、System WebView、菜单、托盘、全局快捷键及其他受限平台机制，并拥有对应系统资源和真实状态；它托管 React Renderer，为 Bridge 提供受限平台 seam。Application 只把产品所需的窄 capability 注入对应 owner、驱动平台生命周期并执行已定义的跨 owner 顺序，不持有产品 policy。Renderer 也不能把视觉呈现或交互命中升级为原生 owner。
 
-从 MetaWork Desktop Host 作为 Native SDK consumer 的视角，对于窗口、WebView、生命周期、对话框、通知、计时器、凭据和其他系统 effect，只有 Native SDK Runtime API 才是 SDK 正式提供给应用的能力入口。这里的“应用”指整个 MetaWork executable，不表示 MetaWork 的 Product 逻辑边界可以依赖 Native SDK Runtime 类型；Product owner 只消费 MetaWork-owned 窄 capability，由 Desktop Host binding 映射到 Runtime API。SDK 内存在但尚未进入 Runtime API 的函数或平台实现只证明底层机制存在，不构成 MetaWork 可以长期依赖的系统能力合同。
+从 Application 作为 Native SDK consumer 的视角，对于窗口、WebView、生命周期、对话框、通知、计时器、凭据和其他系统 effect，只有 Native SDK Runtime API 才是 SDK 正式提供给应用的能力入口。这里的“应用”指整个 MetaWork executable，不表示 Product owner 可以依赖 Native SDK Runtime 类型；Product owner 只消费 MetaWork-owned 窄 capability，由 Application adapter 映射到 Runtime API。SDK 内存在但尚未进入 Runtime API 的函数或平台实现只证明底层机制存在，不构成 MetaWork 可以长期依赖的系统能力合同。
 
-Native SDK Bridge API 是独立的正式 transport surface，不属于系统能力入口。Bridge 可以使用完成 command ingress、source/window authority、handler 注册和 Host capability 调用所必需的 Native SDK Bridge contract、data-only DTO 与 opaque identifier；这些值本身不授予系统执行权。Product owner 不消费这些 SDK 类型，Renderer 只消费 Renderer Bridge wire。
+Native SDK Bridge API 是独立的正式 transport surface，不属于系统能力入口。Bridge 可以使用完成 command ingress、source/window authority、handler 注册和窄 Application capability 调用所必需的 Native SDK Bridge contract、data-only DTO 与 opaque identifier；这些值本身不授予系统执行权。Product owner 不消费这些 SDK 类型，Renderer 只消费 Renderer Bridge wire。
 
 | Native SDK surface                | MetaWork 消费者                  | 边界                                                                                        |
 | --------------------------------- | -------------------------------- | ------------------------------------------------------------------------------------------- |
-| Runtime API                       | Desktop Host                     | 执行系统 effect，并维护 Native SDK 的窗口、WebView、托盘和生命周期状态                      |
-| Bridge API                        | Bridge、Desktop Host composition | `Invocation`、`Source`、`Handler`、`BridgePolicy` 等正式 transport contract                 |
-| data-only DTO / opaque identifier | Bridge、Desktop Host binding     | `WindowId`、dialog options/result 等无执行 authority 的公开值；不得传播到 Product owner |
+| Runtime API                       | Application                      | 执行系统 effect，并维护 Native SDK 的窗口、WebView、托盘和生命周期状态                      |
+| Bridge API                        | Bridge、Application              | `Invocation`、`Source`、`Handler`、`BridgePolicy` 等正式 transport contract                 |
+| data-only DTO / opaque identifier | Bridge、Application adapter      | `WindowId`、dialog options/result 等无执行 authority 的公开值；不得传播到 Product owner |
 | `PlatformServices`                | 已登记的一级兼容 seam            | 可执行低层 SDK 原语的受限 authority，不是普通依赖                                           |
 | 具体平台实现类型与 OS handle      | 已登记的二级兼容 seam            | `WindowsPlatform`、`HWND`、AppKit/GTK 对象等平台 authority                                  |
 | `PlatformServices.context`        | 无                               | Native SDK 私有 opaque 数据，MetaWork 永不访问、解释或强转                                  |
 
-产品需要系统能力时，正常依赖链是 `Product owner → MetaWork-owned capability → Desktop Host binding → Native SDK Runtime API → SDK internals → OS`；Bridge 需要受限系统 effect 时经 Bridge-owned 窄 Host capability 进入同一 Runtime 路径；纯 Host 生命周期和窗口行为从 Desktop Host 直接进入 Runtime API。系统能力按以下三级 Host 调用路径消费：
+产品需要系统能力时，正常依赖链是 `Product owner → MetaWork-owned capability → Application adapter → Native SDK Runtime API → SDK internals → OS`；Bridge 需要受限系统 effect 时经窄 Application capability 进入同一 Runtime 路径；Application 自身的生命周期和窗口行为直接进入 Runtime API。系统能力按以下三级调用路径消费：
 
 | 路径     | 调用链                                                              | 适用条件                                                                         |
 | -------- | ------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| 正常路径 | Desktop Host → Native SDK Runtime API → SDK `PlatformServices` → OS | Runtime API 已提供完整能力；MetaWork 只调用 Runtime API，后两段属于 SDK 内部实现 |
-| 一级兼容 | Desktop Host 窄 seam → SDK `PlatformServices` 已有原语 → OS         | Runtime API 缺失或存在已确认的目标平台缺陷，但 SDK 底层已有所需原语              |
-| 二级兼容 | Desktop Host 窄平台 seam → Win32 / AppKit / GTK → OS                | SDK 连可用底层原语都缺失，MetaWork 必须暂时补齐平台实现                          |
+| 正常路径 | Application → Native SDK Runtime API → SDK `PlatformServices` → OS | Runtime API 已提供完整能力；MetaWork 只调用 Runtime API，后两段属于 SDK 内部实现 |
+| 一级兼容 | Application 窄 seam → SDK `PlatformServices` 已有原语 → OS         | Runtime API 缺失或存在已确认的目标平台缺陷，但 SDK 底层已有所需原语              |
+| 二级兼容 | Application 窄平台 seam → Win32 / AppKit / GTK → OS                | SDK 连可用底层原语都缺失，MetaWork 必须暂时补齐平台实现                          |
 
 Runtime API 已提供且可用时，绕过它调用低层函数属于架构违规，不得包装成“兼容”。兼容的治理单位是 capability seam，而不是文件；每条 seam 只补一个明确的 Runtime/SDK 缺口，并且必须同时满足：
 
-- 只存在于 Desktop Host-owned、按 capability 和平台收窄的兼容实现中；Product 和 Renderer 不得持有 Native SDK 系统能力类型，Bridge 不得持有原始 `PlatformServices`、具体平台实现类型、系统 handle 或底层调用权；Desktop Host 只能向 Bridge 或 Product 对应 owner 注入其职责所需的窄 capability；
+- 只存在于 Application-owned、按 capability 和平台收窄的兼容实现中；Product 和 Renderer 不得持有 Native SDK 系统能力类型，Bridge 不得持有原始 `PlatformServices`、具体平台实现类型、系统 handle 或底层调用权；Application 只能向 Bridge 或对应 owner 注入其职责所需的窄 capability；
 - 只调用 SDK 对外可见的低层原语或公开系统 API；`PlatformServices.context` 始终视为 Native SDK 私有 opaque 数据，MetaWork 不得访问、解释或强转为具体平台内部类型；
 - 明确线程、窗口身份、资源 ownership、失败和 shutdown 语义，不建立第二份窗口、WebView、托盘或生命周期状态，也不得使 OS 状态与 Runtime 状态静默分裂；
 - 写明 capability identity、对应 SDK 缺口、允许的低层调用、目标平台、调用者、验证方式和删除条件；优先推动 Native SDK 补齐 Runtime API，正式 API 经目标平台验收可用后原位替换并删除兼容 seam；
-- 多条 seam 只有共享同一资源、线程或生命周期不变量时才可共处一个窄 Host 文件，并且仍须独立登记、allowlist、验证和删除；禁止文件级或目录级宽泛放行，新增无直接关联的 capability 默认使用新的窄文件。
+- 多条 seam 只有共享同一资源、线程或生命周期不变量时才可共处一个窄 Application 文件，并且仍须独立登记、allowlist、验证和删除；禁止文件级或目录级宽泛放行，新增无直接关联的 capability 默认使用新的窄文件。
 
 当前 System WebView window chrome 按 SDK 缺口独立登记：`system_webview_drag_region` 只补 drag-region；按钮兼容文件因共享同一 startup HWND 生命周期而共置 maximize/restore、maximized state 与 user-close 三项能力，但使用明确入口、逐项 allowlist 和独立删除条件，不提供内部任意 action facade。`minimize` 已由 Runtime API 提供，必须保持正常 Runtime 路径，不得进入兼容 seam。这些能力可以在 Bridge 的同一个固定 window-chrome command 边界内组合结果，但不得互相持有职责或扩展为统一窗口 facade。
 
@@ -135,14 +134,14 @@ Runtime API 已提供且可用时，绕过它调用低层函数属于架构违�
 - Bridge → Product 只提交严格解码后的 typed command；业务拒绝由 Product 返回 typed result，malformed payload 与 authority failure 由 Bridge fail closed。
 - Product → Bridge 发布 canonical projection；Bridge 只拥有编码后的 transport bytes、connection generation 和 Snapshot transport state。
 - Product → AgentCore 只经内部 AgentCore 边界；Renderer、Bridge 与 Product 的其他 owner 只使用 MetaWork-owned 产品类型。
-- Native SDK → Desktop Host 的能力按调用边界和 owner 使用；Host composition 不产生新产品模块或 facade，不得用一个通用平台接口掩盖线程、ownership、deadline、容量和 shutdown 语义。
+- Native SDK → Application 的能力按调用边界和 owner 使用；Application 不产生新产品模块或 facade，不得用一个通用平台接口掩盖线程、ownership、deadline、容量和 shutdown 语义。
 - Renderer 断连、Snapshot 失败或 Bridge transport failure 默认不反向伪造 Agent Run cause，也不直接终止后台执行。
 
 当前 Renderer Bridge identity 是 `metawork.renderer-bridge` revision 1；兼容、hard-cut 与版本审批语义只由 [Renderer Bridge 合同](renderer-bridge-contract.md)定义。
 
 ## 5. 状态、恢复与故障域
 
-Product 在 Renderer 生命周期之外拥有产品状态。WebView reload 通过完整 Snapshot 重建视图；Host 重启只恢复经过校验的产品历史。AgentCore ABI v1 revision 6 已提供 checkpoint export/restore 原语，但 MetaWork 尚未完成其持久化、exclusive restore、execution binding 对账和故障恢复验收；因此当前历史 Task 不伪造 continuation，无法恢复的 non-terminal operation 保守收口为 interrupted。
+Product 在 Renderer 生命周期之外拥有产品状态。WebView reload 通过完整 Snapshot 重建视图；Application 重启只恢复经过校验的产品历史。AgentCore ABI v1 revision 6 已提供 checkpoint export/restore 原语，但 MetaWork 尚未完成其持久化、exclusive restore、execution binding 对账和故障恢复验收；因此当前历史 Task 不伪造 continuation，无法恢复的 non-terminal operation 保守收口为 interrupted。
 
 Bridge transport、Product 产品状态和 Agent execution terminal cause 是不同事实。Snapshot/Event 失败不覆盖产品历史；transport failure 不伪造用户取消；Agent terminal result 只有经 Product 提交后才成为 MetaWork 产品事实。详细线性化、持久化和恢复规则见 [Product 内部架构](product-architecture.md)，连接与 Snapshot transport 见 [Renderer Bridge 合同](renderer-bridge-contract.md)。
 

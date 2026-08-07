@@ -1,0 +1,300 @@
+const std = @import("std");
+const native_sdk = @import("native_sdk");
+const bridge_api = @import("metawork_bridge");
+const workbench_api = @import("metawork_workbench");
+const app_window = @import("window.zig");
+
+pub const scheduled_task_timer_id: u64 = 0x4d57_5343_4844_544b;
+
+// This is the single DispatcherPlatform vtable implementation. It owns the
+// Native SDK runtime/services references required by that vtable and delegates
+// window-system behavior to window.State; it is not a general platform module.
+pub const Adapter = struct {
+    io: std.Io,
+    main_thread_id: std.Thread.Id,
+    trace_product_delivery: bool = false,
+    native_runtime: ?*native_sdk.Runtime = null,
+    platform_services: ?native_sdk.platform.PlatformServices = null,
+    window: app_window.State = .{},
+
+    pub fn init(io: std.Io, main_thread_id: std.Thread.Id) Adapter {
+        return .{ .io = io, .main_thread_id = main_thread_id };
+    }
+
+    pub fn setProductDeliveryTrace(self: *Adapter, enabled: bool) void {
+        self.trace_product_delivery = enabled;
+    }
+
+    pub fn prepareStartup(self: *Adapter) !void {
+        try self.window.prepareStartup();
+    }
+
+    pub fn start(self: *Adapter, runtime: *native_sdk.Runtime) !void {
+        try self.window.captureStartupWindow();
+        self.native_runtime = runtime;
+        self.platform_services = runtime.options.platform.services;
+        const services_value = self.platform_services orelse
+            return error.SystemWebViewChromeUnavailable;
+        try self.window.bind(services_value);
+    }
+
+    pub fn stop(self: *Adapter, runtime: *native_sdk.Runtime) void {
+        self.window.removeTray(runtime);
+        self.window.deinit();
+        self.platform_services = null;
+        if (self.native_runtime == runtime) self.native_runtime = null;
+    }
+
+    pub fn deinit(self: *Adapter) void {
+        self.window.deinit();
+    }
+
+    pub fn services(self: *const Adapter) ?native_sdk.platform.PlatformServices {
+        return self.platform_services;
+    }
+
+    pub fn installScheduleHost(
+        self: *Adapter,
+        workbench: *workbench_api.Workbench,
+    ) !void {
+        try self.window.installTray(
+            self.native_runtime orelse return error.RuntimeUnavailable,
+            workbench,
+        );
+    }
+
+    pub fn handleTrayCommand(
+        self: *Adapter,
+        tray_item_id: native_sdk.platform.TrayItemId,
+        workbench: *workbench_api.Workbench,
+    ) void {
+        const runtime_value = self.native_runtime orelse return;
+        switch (tray_item_id) {
+            app_window.tray_open_id => self.window.showMainWindow(runtime_value),
+            app_window.tray_quit_id => self.window.requestExplicitQuit(runtime_value, workbench),
+            else => {},
+        }
+    }
+
+    pub fn dispatcherPlatform(self: *Adapter) bridge_api.DispatcherPlatform {
+        return .{
+            .context = self,
+            .wake_fn = wake,
+            .emit_fn = emit,
+            .start_timer_fn = startTimer,
+            .cancel_timer_fn = cancelTimer,
+            .show_open_dialog_fn = showOpenDialog,
+            .show_message_dialog_fn = showMessageDialog,
+            .window_chrome_connect_fn = windowChromeConnect,
+            .window_chrome_sync_fn = windowChromeSync,
+            .window_chrome_begin_drag_fn = windowChromeBeginDrag,
+            .window_chrome_control_fn = windowChromeControl,
+            .window_chrome_disconnect_fn = windowChromeDisconnect,
+            .now_fn = now,
+            .on_main_thread_fn = onMainThread,
+        };
+    }
+
+    pub fn notifyMainLoop(context: ?*anyopaque) bool {
+        const self: *Adapter = @ptrCast(@alignCast(context orelse return false));
+        const services_value = self.platform_services orelse return false;
+        services_value.wake() catch return false;
+        return true;
+    }
+
+    pub fn notifyRequired(context: *anyopaque) void {
+        if (!notifyMainLoop(context))
+            @panic("Account completion lost its required main-loop wake");
+    }
+
+    pub fn scheduledTaskNow(context: ?*anyopaque) ?u64 {
+        const self: *Adapter = @ptrCast(@alignCast(context.?));
+        const nanoseconds = std.Io.Timestamp.now(self.io, .real).nanoseconds;
+        if (nanoseconds < 0) return null;
+        const seconds = @divFloor(nanoseconds, std.time.ns_per_s);
+        if (seconds > std.math.maxInt(i64)) return null;
+        return @intCast(seconds);
+    }
+
+    pub fn armScheduledTaskTimer(
+        context: ?*anyopaque,
+        due_unix_seconds: u64,
+    ) bool {
+        const self: *Adapter = @ptrCast(@alignCast(context.?));
+        const current = scheduledTaskNow(context) orelse return false;
+        const delay_seconds = if (due_unix_seconds > current)
+            due_unix_seconds - current
+        else
+            1;
+        const delay_ns = std.math.mul(
+            u64,
+            delay_seconds,
+            std.time.ns_per_s,
+        ) catch return false;
+        (self.platform_services orelse return false).startTimer(
+            scheduled_task_timer_id,
+            delay_ns,
+            false,
+        ) catch return false;
+        return true;
+    }
+
+    pub fn cancelScheduledTaskTimer(context: ?*anyopaque) void {
+        const self: *Adapter = @ptrCast(@alignCast(context.?));
+        if (self.platform_services) |services_value|
+            services_value.cancelTimer(scheduled_task_timer_id) catch {};
+    }
+
+    pub fn notifyScheduledTask(
+        context: ?*anyopaque,
+        notification: workbench_api.ScheduleNotification,
+    ) bool {
+        const self: *Adapter = @ptrCast(@alignCast(context orelse return false));
+        const services_value = self.platform_services orelse return false;
+        return self.window.notifyScheduledTask(services_value, notification);
+    }
+
+    fn wake(context: ?*anyopaque) anyerror!void {
+        const self: *Adapter = @ptrCast(@alignCast(context.?));
+        try (self.platform_services orelse return error.RuntimeUnavailable).wake();
+    }
+
+    fn emit(
+        context: ?*anyopaque,
+        window_id: native_sdk.platform.WindowId,
+        name: []const u8,
+        detail: []const u8,
+    ) anyerror!void {
+        const self: *Adapter = @ptrCast(@alignCast(context.?));
+        if (self.trace_product_delivery and
+            std.mem.eql(u8, name, bridge_api.product_event_name))
+        {
+            std.debug.print("metawork.product_delivery.emit event={s} main_thread={}\n", .{
+                name,
+                std.Thread.getCurrentId() == self.main_thread_id,
+            });
+        }
+        try (self.native_runtime orelse return error.RuntimeUnavailable).emitWindowEvent(
+            window_id,
+            name,
+            detail,
+        );
+    }
+
+    fn startTimer(
+        context: ?*anyopaque,
+        timer_id: u64,
+        interval_ns: u64,
+        repeats: bool,
+    ) anyerror!void {
+        const self: *Adapter = @ptrCast(@alignCast(context.?));
+        try (self.platform_services orelse return error.RuntimeUnavailable).startTimer(
+            timer_id,
+            interval_ns,
+            repeats,
+        );
+    }
+
+    fn cancelTimer(context: ?*anyopaque, timer_id: u64) anyerror!void {
+        const self: *Adapter = @ptrCast(@alignCast(context.?));
+        try (self.platform_services orelse return error.RuntimeUnavailable).cancelTimer(timer_id);
+    }
+
+    fn showOpenDialog(
+        context: ?*anyopaque,
+        options: native_sdk.platform.OpenDialogOptions,
+        output: []u8,
+    ) anyerror!native_sdk.platform.OpenDialogResult {
+        const self: *Adapter = @ptrCast(@alignCast(context.?));
+        return self.window.showOpenDialog(
+            self.platform_services orelse return error.RuntimeUnavailable,
+            options,
+            output,
+        );
+    }
+
+    fn showMessageDialog(
+        context: ?*anyopaque,
+        options: native_sdk.platform.MessageDialogOptions,
+    ) anyerror!native_sdk.platform.MessageDialogResult {
+        const self: *Adapter = @ptrCast(@alignCast(context.?));
+        return self.window.showMessageDialog(
+            self.platform_services orelse return error.RuntimeUnavailable,
+            options,
+        );
+    }
+
+    fn windowChromeConnect(
+        context: ?*anyopaque,
+        window_id: native_sdk.platform.WindowId,
+    ) anyerror!bridge_api.WindowChromePlatformEnvironment {
+        const self: *Adapter = @ptrCast(@alignCast(context.?));
+        return self.window.connect(
+            self.platform_services orelse return error.RuntimeUnavailable,
+            window_id,
+        );
+    }
+
+    fn windowChromeSync(
+        context: ?*anyopaque,
+        window_id: native_sdk.platform.WindowId,
+        viewport_width: f64,
+        viewport_height: f64,
+        regions: []const bridge_api.WindowChromeRegion,
+    ) anyerror!bridge_api.WindowChromePlatformEnvironment {
+        const self: *Adapter = @ptrCast(@alignCast(context.?));
+        return self.window.sync(
+            self.platform_services orelse return error.RuntimeUnavailable,
+            window_id,
+            viewport_width,
+            viewport_height,
+            regions,
+        );
+    }
+
+    fn windowChromeBeginDrag(
+        context: ?*anyopaque,
+        window_id: native_sdk.platform.WindowId,
+        x: f64,
+        y: f64,
+    ) anyerror!bridge_api.WindowChromePlatformEnvironment {
+        const self: *Adapter = @ptrCast(@alignCast(context.?));
+        return self.window.beginLivePointerDrag(
+            self.platform_services orelse return error.RuntimeUnavailable,
+            window_id,
+            x,
+            y,
+        );
+    }
+
+    fn windowChromeDisconnect(
+        context: ?*anyopaque,
+        window_id: native_sdk.platform.WindowId,
+    ) anyerror!void {
+        const self: *Adapter = @ptrCast(@alignCast(context.?));
+        try self.window.disconnect(window_id);
+    }
+
+    fn windowChromeControl(
+        context: ?*anyopaque,
+        window_id: native_sdk.platform.WindowId,
+        action: bridge_api.WindowChromeControlAction,
+    ) anyerror!bridge_api.WindowChromePlatformEnvironment {
+        const self: *Adapter = @ptrCast(@alignCast(context.?));
+        return self.window.control(
+            self.native_runtime orelse return error.RuntimeUnavailable,
+            self.platform_services orelse return error.RuntimeUnavailable,
+            window_id,
+            action,
+        );
+    }
+
+    fn now(_: ?*anyopaque) u64 {
+        return native_sdk.monotonicNanoseconds();
+    }
+
+    fn onMainThread(context: ?*anyopaque) bool {
+        const self: *Adapter = @ptrCast(@alignCast(context.?));
+        return std.Thread.getCurrentId() == self.main_thread_id;
+    }
+};

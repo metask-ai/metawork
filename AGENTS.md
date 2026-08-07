@@ -36,8 +36,8 @@
 ### Renderer 与 Bridge
 
 - React + Tailwind 是唯一正式 Renderer；不建立 `.native` 替代层、第二套 Renderer 或通用 Desktop Interface。
-- Native SDK 与 Metask AgentCore 都是外部依赖。`app.zig` 是 Desktop Host 的 composition root，并在当前源码布局中承载 Product 的主线程协调角色：前者组装 Bridge 与 Product、注入 Native SDK capability 和驱动平台生命周期，后者只执行 Product 已定义的跨 owner 事务与生命周期顺序。两种角色都不成为新的业务 owner，也不增加统一 Host facade。
-- 原生窗口机制由 Desktop Host 通过 Native SDK 执行；React 只负责 WebUI，涉及产品语义的决策归 Product 中对应 owner。Renderer 可以呈现一体化标题/命令栏并提交白名单化意图，但不得持有原生窗口身份、模拟平台行为或把本地推测作为平台真相。
+- `src/app.zig` 与 `src/app/` 共同构成 Application；代码中的组合类型保持名为 `App`。`app.zig` 只保留 Native SDK `App` vtable、装配顺序、`run()` 与顶层生命周期顺序；平台适配、bootstrap resolver、store 生命周期和跨 owner 用例编排必须进入 `src/app/` 的具名实现。Application 不成为业务 owner，也不增加统一 facade。
+- Native SDK 与 Metask AgentCore 都是外部依赖。原生窗口机制由 Application 通过 Native SDK 执行；React 只负责 WebUI，涉及产品语义的决策归对应 owner。Renderer 可以呈现一体化标题/命令栏并提交白名单化意图，但不得持有原生窗口身份、模拟平台行为或把本地推测作为平台真相。
 - `src/native_sdk_compat/system_webview_drag_region.zig` 只是在 Native SDK 尚未提供官方 System WebView drag-region 时补齐单一启动窗口标题栏能力的窄 capability seam；其平台子文件独占对应低层调用、窗口身份与资源 teardown。该 seam 不得扩展成通用 Desktop Interface、第二套窗口 owner 或 Renderer 可调用的任意原生 API。官方 Runtime API 经目标平台验收可用后必须原位替换该 seam，并同步删除平台子文件及收口不再需要的专用 command、allowlist 和测试。
 - Renderer Bridge 产品合同是 `metawork.renderer-bridge` 固定 revision 1。快速开发阶段直接原地 hard cut command、event、payload 与 wire 语义；不得为临时合同形态递增 revision、保留兼容层或在 snapshot 内建立局部 schema version。`connect` 精确匹配 identity/revision 后才开放产品路径；任何 revision 变更必须先得到用户显式同意。
 - `app.zon`、Zig 和 TypeScript command catalog 必须完全一致。Renderer 对 Host payload 做 runtime decode；Host 执行 origin、command、payload、Workspace、Task 和权限校验。
@@ -46,8 +46,8 @@
 ### Native SDK 能力路径
 
 - 对窗口、WebView、生命周期和其他系统 effect，Native SDK Runtime API 已提供且可用时必须使用 Runtime API。Bridge 可以消费正式 Native SDK Bridge transport contract，以及完成 transport authority 和窄 Host capability 调用所必需的 data-only DTO/opaque identifier；这些值不得授予直接系统执行权或传播到 Product owner。
-- 低层 SDK 原语或 Win32/AppKit/GTK API 只能存在于 [高层架构](docs/architecture.md#35-native-sdk)和[验证规范](docs/validation.md#native-sdk-能力路径)逐项登记的 Desktop Host compatibility seam。每条 seam 只补一个 SDK 缺口，并独立 allowlist、验证和删除；禁止文件级或目录级宽泛放行，现存违规不得作为新增依赖的先例。
-- Product 和 Renderer 不得依赖 Native SDK 系统能力类型；Bridge 不得持有原始 `PlatformServices`、具体平台实现类型、系统 handle 或底层调用权。任何 MetaWork 代码都不得访问、解释或强转 `PlatformServices.context`。Desktop Host 只能向 Bridge 或 Product 对应 owner 注入其职责所需的 MetaWork-owned 窄 capability。
+- 低层 SDK 原语或 Win32/AppKit/GTK API 只能存在于 [高层架构](docs/architecture.md#35-native-sdk)和[验证规范](docs/validation.md#native-sdk-能力路径)逐项登记的 Application compatibility seam。每条 seam 只补一个 SDK 缺口，并独立 allowlist、验证和删除；禁止文件级或目录级宽泛放行，现存违规不得作为新增依赖的先例。
+- Product 和 Renderer 不得依赖 Native SDK 系统能力类型；Bridge 不得持有原始 `PlatformServices`、具体平台实现类型、系统 handle 或底层调用权。任何 MetaWork 代码都不得访问、解释或强转 `PlatformServices.context`。Application 只能向 Bridge 或对应 owner 注入其职责所需的 MetaWork-owned 窄 capability。
 
 ### AgentCore 依赖
 
@@ -58,7 +58,7 @@
 
 ### Owner、并发与生命周期
 
-- App 的 Host 角色只做 composition、平台 capability 注入与平台生命周期驱动；其 Product 协调角色不持有领域状态，只执行跨 owner 提交和生命周期顺序。Account 拥有 credential 与 ExecutionConfig；Workbench 拥有 Workspace/Task/Run、Executor 和产品历史；Agent 拥有 Runtime/Session/Conversation；Bridge 拥有 Renderer transport。
+- Application 只做 composition、平台 capability 注入、平台生命周期驱动和跨 owner 用例编排；编排实现不得持有领域状态或复制 owner policy。Account 拥有 credential 与 ExecutionConfig；Workbench 拥有 Workspace/Task/Run、Executor 和产品历史；Agent 拥有 Runtime/Session/Conversation；Bridge 拥有 Renderer transport。`src/agent/`、`src/workbench/`、`src/account/` 与 `src/bridge/` 不得反向导入 `src/app/` 实现。
 - Workbench 独占 executor、queue、workers、admission 和 shutdown。Agent Runtime 不接收 Scheduler capability，不反向 enqueue 或销毁 Workbench 资源。
 - 每个 Session 至多一个 in-flight Run；队列和 worker 数量必须有界。Conversation 与跨 Run 状态属于 Session，不能引用 run-scoped arena。
 - AgentCore/tool 线程不得调用 WebView。跨 callback 保留的 borrowed bytes 必须在返回前深拷贝；control event 不得静默丢弃。

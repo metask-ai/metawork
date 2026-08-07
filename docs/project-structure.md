@@ -32,10 +32,20 @@ metawork/
 │       └── platform/      # Renderer-only 本地偏好；不得包含原生窗口能力
 ├── src/
 │   ├── main.zig           # 进程入口
-│   ├── app.zig            # Desktop Host composition root；共置 Product coordinator
-│   ├── app/                # Desktop Host-owned 窄平台 capability composition
+│   ├── app.zig            # Application composition root；App vtable、装配、run 与顶层生命周期
+│   ├── app/               # Application 的具名适配、resolver、store 与用例编排实现
+│   │   ├── account_coordinator.zig   # Account/Workbench 跨 owner 提交编排
+│   │   ├── agent_event_coordinator.zig # Agent event 回流与终态 drain 屏障
+│   │   ├── automation.zig            # automation authority 与启动覆盖适配
+│   │   ├── frontend.zig              # frontend source 与 asset root resolver
+│   │   ├── mcp_platform.zig          # MCP credential/transport 平台 capability
+│   │   ├── mcp_startup.zig           # MCP 启动恢复与 preparation 编排
+│   │   ├── paths.zig                 # data directory 与 canonical home resolver
+│   │   ├── platform.zig              # DispatcherPlatform vtable 与 Native SDK 引用
+│   │   ├── stores.zig                # Application-created stores 与 restored bytes 生命周期
+│   │   └── window.zig                # window/tray/dialog/notification 与 compat capability
 │   ├── product_identity.zig # 从 app.zon 派生 development identity 与 macOS namespace
-│   ├── native_sdk_compat/ # 按已登记 capability 隔离的 Desktop Host 兼容实现
+│   ├── native_sdk_compat/ # 按已登记 capability 隔离的 Application 兼容实现
 │   │   ├── system_webview_drag_region.zig # 有界 System WebView drag-region contract/state
 │   │   ├── system_webview_drag_region/
 │   │       ├── windows.zig # 创建期 HWND 捕获与 root/WebView hit-test subclass
@@ -71,8 +81,7 @@ metawork/
 
 | Boundary / role          | 唯一职责                                                                                                           | 不拥有                                                                          |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------- |
-| Desktop Host composition | Native SDK composition、平台 capability 注入、平台资源与顶层 Bridge/Product/Native 生命周期顺序                | 产品 policy、Product 内部事务、第二套 Bridge transport                      |
-| Product coordinator          | Product 主线程跨 owner 提交、事件屏障与内部生命周期顺序                                                        | Account/Workbench 领域状态、Agent 调度策略、平台资源                            |
+| Application              | Native SDK composition、窄 capability 注入、平台资源、bootstrap resolver、store 生命周期、跨 owner 用例编排与顶层生命周期顺序 | owner 领域状态与 policy、Bridge transport、AgentCore 协议、Renderer 实现 |
 | Account                  | Runtime、OAuth/catalog 状态、credential、attempt/effect/mailbox、恢复、脱敏 Account view、ExecutionConfig transfer | Workbench Task、Renderer 状态、AgentCore Runtime                                |
 | Workbench                | Workspace/Task/Run 产品状态、Executor、admission、terminal product record、snapshot projection                     | AgentCore raw protocol、Native WebView、Account secret                          |
 | Agent                    | AgentCore Runtime/Session/Conversation、callback、event pump、Run terminal facts                                   | 产品队列、Task 历史、Bridge transport                                           |
@@ -112,15 +121,19 @@ metawork/
 
 ### `app.zig`、`app/` 与 module entrypoint
 
-`main.zig` 只调用 `metawork_app`。`app.zig` 物理上共置两个角色：Desktop Host composition root 组装 Bridge 与 Product、消费并注入 Native SDK 的窄平台 capability、驱动平台生命周期；Product coordinator 在主线程按规范协调 Account prepare/commit、MCP preparation/activation、Workbench no-fail install、Agent event drain 与 owner 生命周期。后者属于 Product 的事务协调但不持有领域状态或复制 owner policy；这种源码共置不产生新的模块、业务 owner 或统一 Host facade。
+`main.zig` 只调用 `metawork_app`。架构边界统一称为 Application，代码组合类型保持 `App`。`app.zig` 是 composition root，只保留 Native SDK `App` vtable、装配顺序、`run()` 与唯一的顶层启动/关闭顺序；Application 拥有的具体实现进入 `app/`，不得把实现重新堆回 root。
 
-`app/mcp_platform.zig` 只适配 MCP 系统 credential、stdio 与 Streamable HTTP mechanics，不解析 MCP JSON-RPC 或复制协商，也不形成新的产品 owner。
+`app/` 只接纳四类实现：平台适配、一次性 bootstrap resolver、Application 创建资源的生命周期，以及跨 owner 用例编排。适配按稳定资源类别分文件，编排按用例分文件；编排只安排 owner 调用顺序，不读取领域状态自行形成 policy。`agent/`、`workbench/`、`account/` 与 `bridge/` 不得反向导入 `app/`。
 
-`native_sdk_compat/system_webview_drag_region.zig` 是 Desktop Host-owned 的有界 System WebView drag-region capability seam。它只拥有有界 region 校验、root 平台 binding 与 drag 调用编排；document generation 和 source-window authority 归 Bridge `Dispatcher`，不进入该 seam。只有 `app.zig` 可以组装它；不拥有按钮 action、按钮 capability、窗口最大化状态或 resize。Windows 启动期精确捕获并绑定 root HWND，document `connect/disconnect` 只标记 Renderer 会话是否附着；`sync` 只事务式替换 region，不能安装、重装或销毁平台资源，也不得递归依赖 Chromium 跨进程 child HWND。`system_webview_drag_region/macos.zig` 只在 live pointer event 内调用 SDK 已有 `startWindowDrag` 原语并保留系统交通灯；Windows 在 Native SDK 提供正式 System WebView drag-region 能力前不发布 live-pointer drag。System WebView 隐藏标题栏的 resize hit surface 仍归 Native SDK，不由该 seam 模拟。平台文件独占对应 root hook、subclass 与 teardown，不创建覆盖 WebView 的辅助窗口。
+`app/platform.zig` 是唯一 `DispatcherPlatform` vtable 实现并持有 Native SDK runtime/services 引用；窗口系统行为委托给 `app/window.zig`。`app/window.zig` 拥有窗口、tray、notification、dialog 与两个已登记 compat capability，但不拥有 Bridge authority 或 Product policy。`app/paths.zig` 的 `Paths` 原位持有所有路径 buffer，只能按指针传递并由 `run()` 保持稳定地址。`app/stores.zig` 拥有 Application 创建的 store、单写锁与 restored bytes 生命周期。
 
-`native_sdk_compat/system_webview_window_controls.zig` 是 Desktop Host-owned 的窄共置边界：maximize/restore、maximized state 与 user-close 是三项独立登记、独立删除的 Native SDK 0.8.0 缺口，只因共享同一 startup HWND 生命周期而留在一个文件中，并分别暴露 `toggleMaximize`、`state` 与 `userClose`，不提供内部 action enum/facade。Windows 平台子文件独占 `IsZoomed`、`ShowWindow`、`PostMessageW(WM_CLOSE)` 及其创建期 HWND 绑定；非 Windows 不发布 Renderer controls。`minimize` 已有正式 Runtime API，必须由 `app.zig` 直接调用 `Runtime.minimizeWindow`，不得进入兼容层。Bridge 的 document generation 校验仍由既有 Host window-chrome command 边界完成，按钮兼容能力不持有 Bridge DTO 或 generation。
+`app/mcp_startup.zig` 负责启动期 registry load、credential transaction recovery 与 Workbench preparation 的线性编排；`app/mcp_platform.zig` 只适配 MCP 系统 credential、stdio 与 Streamable HTTP mechanics，不解析 MCP JSON-RPC 或复制协商，也不形成新的产品 owner。
 
-Windows startup identity 不是独立 capability。Desktop Host 在进入 Native SDK runner 前为当前 UI 线程武装 CBT 创建 hook，并在 `app.start` 入口立即收口；该区间必须恰好产生一个无 parent 的 top-level HWND，随后还要通过 root、owner、thread 与 process 校验，零个或多个候选一律 fail closed。该机制不读取标题、焦点、前台窗口、`GWLP_USERDATA` 或 `PlatformServices.context`，也不解释 Native SDK 私有类型。显式退出不属于兼容层：确认对话框与主窗口关闭使用 Native SDK Runtime API，由 Runtime 维护窗口/View 状态并驱动正常 shutdown。
+`native_sdk_compat/system_webview_drag_region.zig` 是 Application-owned 的有界 System WebView drag-region capability seam。它只拥有有界 region 校验、root 平台 binding 与 drag 调用编排；document generation 和 source-window authority 归 Bridge `Dispatcher`，不进入该 seam。只有 `app/window.zig` 可以组装它；不拥有按钮 action、按钮 capability、窗口最大化状态或 resize。Windows 启动期精确捕获并绑定 root HWND，document `connect/disconnect` 只标记 Renderer 会话是否附着；`sync` 只事务式替换 region，不能安装、重装或销毁平台资源，也不得递归依赖 Chromium 跨进程 child HWND。`system_webview_drag_region/macos.zig` 只在 live pointer event 内调用 SDK 已有 `startWindowDrag` 原语并保留系统交通灯；Windows 在 Native SDK 提供正式 System WebView drag-region 能力前不发布 live-pointer drag。System WebView 隐藏标题栏的 resize hit surface 仍归 Native SDK，不由该 seam 模拟。平台文件独占对应 root hook、subclass 与 teardown，不创建覆盖 WebView 的辅助窗口。
+
+`native_sdk_compat/system_webview_window_controls.zig` 是 Application-owned 的窄共置边界：maximize/restore、maximized state 与 user-close 是三项独立登记、独立删除的 Native SDK 0.8.0 缺口，只因共享同一 startup HWND 生命周期而留在一个文件中，并分别暴露 `toggleMaximize`、`state` 与 `userClose`，不提供内部 action enum/facade。Windows 平台子文件独占 `IsZoomed`、`ShowWindow`、`PostMessageW(WM_CLOSE)` 及其创建期 HWND 绑定；非 Windows 不发布 Renderer controls。`minimize` 已有正式 Runtime API，必须由 `app/window.zig` 直接调用 `Runtime.minimizeWindow`，不得进入兼容层。Bridge 的 document generation 校验仍由既有 window-chrome command 边界完成，按钮兼容能力不持有 Bridge DTO 或 generation。
+
+Windows startup identity 不是独立 capability。Application 在进入 Native SDK runner 前为当前 UI 线程武装 CBT 创建 hook，并在 `App.start` 入口立即收口；该区间必须恰好产生一个无 parent 的 top-level HWND，随后还要通过 root、owner、thread 与 process 校验，零个或多个候选一律 fail closed。该机制不读取标题、焦点、前台窗口、`GWLP_USERDATA` 或 `PlatformServices.context`，也不解释 Native SDK 私有类型。显式退出不属于兼容层：确认对话框与主窗口关闭使用 Native SDK Runtime API，由 Runtime 维护窗口/View 状态并驱动正常 shutdown。
 
 整个 Host command 边界只接受绑定当前 document generation 的 `minimize | toggle_maximize | close` 固定 enum，不接受任意 action、window id、platform、活动窗口猜测或独立 state query；按钮 seam 只发布按钮呈现所需的 `rendererControls` 与 `maximized` 真值，不形成通用 Desktop Interface、Native SDK adapter、第二窗口 owner 或任意 action facade。Native SDK Runtime 对应能力经目标平台验收可用后，必须逐项原位替换：先移除对应按钮兼容 action/state，再删除不再需要的 HWND 绑定、低层调用、allowlist 与专用验证。
 
@@ -130,7 +143,7 @@ Renderer 的 `components/ui/WindowTitlebar.tsx` 绘制产品 header，并通过 
 
 ### `account/`
 
-- `runtime.zig` 是 Account 长生命周期 owner，拥有状态机实例、private/public candidate catalog、credential、attempt、mailbox/effect queue、平台恢复状态、自动选择与 continuation；它不导入 Workbench，跨 owner 提交仍由 Product coordinator 协调；
+- `runtime.zig` 是 Account 长生命周期 owner，拥有状态机实例、private/public candidate catalog、credential、attempt、mailbox/effect queue、平台恢复状态、自动选择与 continuation；它不导入 Workbench，跨 owner 提交仍由 Application coordinator 协调；
 - `state.zig` 拥有 Account 状态机、attempt/generation 与 prepare/admit/commit；
 - `oauth.zig`、`loopback.zig`、`login_attempt.zig` 和 `network_attempt.zig` 拥有登录网络链路；
 - `metask_client.zig` 与 `catalog.zig` 消费锁定的 Metask production contract；
@@ -141,7 +154,7 @@ Renderer 的 `components/ui/WindowTitlebar.tsx` 绘制产品 header，并通过 
 - `platform.zig` 是当前 Account 平台实现中唯一导入 Native SDK 的过渡边界，分别适配 macOS 与 Windows 的 credential、URL、timer 与持久化能力；它仍让 Product owner 持有原始 `PlatformServices`，属于 [验证规范](validation.md#native-sdk-能力路径)登记的架构缺口，不是获准兼容 seam，也不得增加新的底层能力或消费者；
 - `credentials.zig` 管理 execution credential ownership/rotation。
 
-Account 与 Workbench 是同级 owner，只通过纯 `account/contract.zig` 和 Product coordinator 主线程提交链协作。Bridge 只消费脱敏 view/command contract，不导入 Account Runtime。Product coordinator 可以持有两个 owner 的实例引用以协调提交，但不得持有 Account catalog、credential、attempt、mailbox 或 continuation 状态。
+Account 与 Workbench 是同级 owner，只通过纯 `account/contract.zig` 和 Application coordinator 主线程提交链协作。Bridge 只消费脱敏 view/command contract，不导入 Account Runtime。Application coordinator 可以持有两个 owner 的实例引用以协调提交，但不得持有 Account catalog、credential、attempt、mailbox 或 continuation 状态。
 
 ### `bridge/`
 
@@ -175,11 +188,11 @@ Bridge handler 不能绕过 Workbench 操作 AgentCore handle。automation 只�
 
 ### `workbench/` 与 `agent/`
 
-`workbench/projection.zig` 当前拥有 Workspace current catalog、Task pinned catalog、typed Text/Skill admission 与 history、Workspace/Scheduled Task/Task/Run 产品状态、Task 唯一 active operation、stable Run/compact record、executor worker reference、write-once terminal publication 和 bounded snapshot writer。Manual compact 是 append-only Task maintenance history，不复用 Run identity。`workbench/task_persistence.zig` 拥有 schema 1 的无 secret Workspace/Task history codec、严格恢复校验、16 MiB 上限、进程级单写锁与同目录原子替换；当前文件为 `workbench-history.json`，旧 `workbench-state.json` 按 pre-release hard cut 忽略且不迁移。`workbench/mcp_configuration.zig` 拥有 `<MetaWork data dir>/mcp/registry.json` schema 1 的 bounded strict codec、稳定 server/namespace identity、desired mutation、fresh credential locator 引用差分、single-writer atomic commit 和基于 durable generation 的 journal recovery；它不保存 credential 原文、不解析 AgentCore catalog，也不形成新的 product owner。Workbench 的 current MCP projection 仍来自 effective startup preparation/activation，desired registry 只通过内部 management port 管理并统一要求重启应用。Desktop Host composition role 只打开 data root 并注入 load/commit/platform capability，Session/Conversation 不进入这些文件。`workbench/automatic_workspace_allocator.zig` 拥有 Desktop Host-opened automatic root capability、相对随机子目录分配、canonical containment 与发布前空目录回滚；它不扫描旧目录、不恢复 Task，也不递归删除目录。`workbench/scheduled_tasks.zig` 拥有 bounded definition/occurrence storage、结构化 recurrence、跨恢复 planned-time identity 和纯状态转换；`workbench/scheduled_task_persistence.zig` 拥有无 secret codec、candidate commit、恢复校验和 schema revision。`workbench/skill_package.zig` 拥有本地 Skill 目录与 ZIP 包的路径/资源上限预检、regular-bytes-only staging、内容摘要和 canonical `.skill` 导出，不执行包内容或访问网络；`workbench/skill_management.zig` 拥有独立 install identity、personal/project inventory、管理状态、未完成文件事务恢复事实和 schema 1 无 secret 原子持久化。它们都属于 Workbench owner，不是第二个执行器或 AgentCore scheduler。`workbench/executor.zig` 独占 catalog/Run/compact 与显式 MCP refresh 共用的单一队列、workers、admission 和 shutdown。
+`workbench/projection.zig` 当前拥有 Workspace current catalog、Task pinned catalog、typed Text/Skill admission 与 history、Workspace/Scheduled Task/Task/Run 产品状态、Task 唯一 active operation、stable Run/compact record、executor worker reference、write-once terminal publication 和 bounded snapshot writer。Manual compact 是 append-only Task maintenance history，不复用 Run identity。`workbench/task_persistence.zig` 拥有 schema 1 的无 secret Workspace/Task history codec、严格恢复校验、16 MiB 上限、进程级单写锁与同目录原子替换；当前文件为 `workbench-history.json`，旧 `workbench-state.json` 按 pre-release hard cut 忽略且不迁移。`workbench/mcp_configuration.zig` 拥有 `<MetaWork data dir>/mcp/registry.json` schema 1 的 bounded strict codec、稳定 server/namespace identity、desired mutation、fresh credential locator 引用差分、single-writer atomic commit 和基于 durable generation 的 journal recovery；它不保存 credential 原文、不解析 AgentCore catalog，也不形成新的 product owner。Workbench 的 current MCP projection 仍来自 effective startup preparation/activation，desired registry 只通过内部 management port 管理并统一要求重启应用。Application 只打开 data root 并注入 load/commit/platform capability，Session/Conversation 不进入这些文件。`workbench/automatic_workspace_allocator.zig` 拥有 Application-opened automatic root capability、相对随机子目录分配、canonical containment 与发布前空目录回滚；它不扫描旧目录、不恢复 Task，也不递归删除目录。`workbench/scheduled_tasks.zig` 拥有 bounded definition/occurrence storage、结构化 recurrence、跨恢复 planned-time identity 和纯状态转换；`workbench/scheduled_task_persistence.zig` 拥有无 secret codec、candidate commit、恢复校验和 schema revision。`workbench/skill_package.zig` 拥有本地 Skill 目录与 ZIP 包的路径/资源上限预检、regular-bytes-only staging、内容摘要和 canonical `.skill` 导出，不执行包内容或访问网络；`workbench/skill_management.zig` 拥有独立 install identity、personal/project inventory、管理状态、未完成文件事务恢复事实和 schema 1 无 secret 原子持久化。它们都属于 Workbench owner，不是第二个执行器或 AgentCore scheduler。`workbench/executor.zig` 独占 catalog/Run/compact 与显式 MCP refresh 共用的单一队列、workers、admission 和 shutdown。
 
-`app/mcp_platform.zig` 是系统 credential service、stdio process capability 与 Streamable HTTP mechanics 的 App composition seam；它只把惰性、opaque transport owner 注入 Agent，不解析 MCP JSON-RPC 或复制协商。`agent/catalog.zig` 拥有 AgentCore Skill catalog descriptor 的即时解码、MetaWork-owned 安全投影、opaque handle lease 与 root/home/epoch 绑定；raw handle、scope、物理来源和 policy 不离开 Agent。`agent/mcp_connector.zig` 是 Host transport capability 到官方 `McpConnectorV1` 的唯一映射点，只拥有 callback/status、取消借用、response ownership、bounded secret guard、transport owner 与连接引用，不解析 MCP JSON 或协商协议；`agent/mcp_stdio.zig` 以显式 argv/cwd/environment capability 提供 bounded 子进程与 pipe 生命周期，stderr 只做固定缓冲 drain 和清零，不形成诊断数据面；`agent/mcp_http.zig` 只持有 opaque preauthorized endpoint capability、bounded session token 与连接状态，credential/header/HTTP mechanics 留在 capability owner；`agent/mcp_runtime.zig` 以一次性 `McpRuntimeInput` 线性接管 transport owner、adapter、official server descriptor、稳定 binding identity 与 allowlist；`agent/mcp_catalog.zig` 只经官方 decoder 复制 bounded catalog authority，并原子构造 Runtime-bound selection 与 typed activation health。`agent/session.zig` 串行化 MCP refresh、立即 generation invalidation、activation、Session create/idle replacement 与 shutdown，并继续拥有 AgentCore Runtime/Session、Conversation、typed Run/compact、callback quiescence 和 immutable terminal result。`event_sink.zig` 与 `event_pump.zig` 管理 borrowed event 深拷贝、容量和通知。Agent 不接收 Scheduler capability，也不反向 enqueue Workbench。
+`app/mcp_platform.zig` 是系统 credential service、stdio process capability 与 Streamable HTTP mechanics 的 Application composition seam；它只把惰性、opaque transport owner 注入 Agent，不解析 MCP JSON-RPC 或复制协商。`agent/catalog.zig` 拥有 AgentCore Skill catalog descriptor 的即时解码、MetaWork-owned 安全投影、opaque handle lease 与 root/home/epoch 绑定；raw handle、scope、物理来源和 policy 不离开 Agent。`agent/mcp_connector.zig` 是 Application 注入的 transport capability 到官方 `McpConnectorV1` 的唯一映射点，只拥有 callback/status、取消借用、response ownership、bounded secret guard、transport owner 与连接引用，不解析 MCP JSON 或协商协议；`agent/mcp_stdio.zig` 以显式 argv/cwd/environment capability 提供 bounded 子进程与 pipe 生命周期，stderr 只做固定缓冲 drain 和清零，不形成诊断数据面；`agent/mcp_http.zig` 只持有 opaque preauthorized endpoint capability、bounded session token 与连接状态，credential/header/HTTP mechanics 留在 capability owner；`agent/mcp_runtime.zig` 以一次性 `McpRuntimeInput` 线性接管 transport owner、adapter、official server descriptor、稳定 binding identity 与 allowlist；`agent/mcp_catalog.zig` 只经官方 decoder 复制 bounded catalog authority，并原子构造 Runtime-bound selection 与 typed activation health。`agent/session.zig` 串行化 MCP refresh、立即 generation invalidation、activation、Session create/idle replacement 与 shutdown，并继续拥有 AgentCore Runtime/Session、Conversation、typed Run/compact、callback quiescence 和 immutable terminal result。`event_sink.zig` 与 `event_pump.zig` 管理 borrowed event 深拷贝、容量和通知。Agent 不接收 Scheduler capability，也不反向 enqueue Workbench。
 
-`app/mcp_platform.zig` 对 transport-facing credential bytes 做最终 fail-closed 校验，并按 Content-Type 有界读取 JSON 或增量剥离 SSE framing；它不解析 JSON-RPC identity/semantics。`agent/mcp_connector.zig` 的公开 runtime limits 经 App 注入 Workbench preparation，确保 `eligible` server 可直接构造正式 connector。
+`app/mcp_platform.zig` 对 transport-facing credential bytes 做最终 fail-closed 校验，并按 Content-Type 有界读取 JSON 或增量剥离 SSE framing；它不解析 JSON-RPC identity/semantics。`agent/mcp_connector.zig` 的公开 runtime limits 经 Application 注入 Workbench preparation，确保 `eligible` server 可直接构造正式 connector。
 
 正式允许的依赖方向固定为：
 
