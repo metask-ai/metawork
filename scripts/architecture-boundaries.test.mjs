@@ -21,6 +21,8 @@ function filesWithExtensions(directory, extensions) {
 }
 
 const zigFiles = (directory) => filesWithExtensions(directory, [".zig"]);
+const applicationFiles = () => ["src/app.zig", ...zigFiles("src/app/")];
+const applicationSource = () => applicationFiles().map(read).join("\n");
 
 function assertNoImports(files, forbidden) {
   for (const file of files) {
@@ -32,6 +34,16 @@ function assertNoImports(files, forbidden) {
         `${file} imports forbidden module ${name}`,
       );
     }
+  }
+}
+
+function assertNoApplicationImplementationImports(files) {
+  for (const file of files) {
+    assert.doesNotMatch(
+      read(file),
+      /@import\("(?:[^\"]*\/)?app(?:\/[^\"]+\.zig|\.zig)"\)/,
+      `${file} imports an Application implementation module`,
+    );
   }
 }
 
@@ -84,8 +96,8 @@ test("main only enters the named App module", () => {
   );
 });
 
-test("App consumes named public module roots", () => {
-  const source = read("src/app.zig");
+test("Application consumes named public module roots", () => {
+  const source = applicationSource();
   for (const name of [
     "metawork_agent",
     "metawork_workbench",
@@ -96,6 +108,55 @@ test("App consumes named public module roots", () => {
   }
   assert.doesNotMatch(source, /@import\("(?:agent|workbench|bridge)\//);
   assert.doesNotMatch(source, /@import\("bridge\.zig"\)/);
+});
+
+test("Application root delegates named implementation responsibilities", () => {
+  const app = read("src/app.zig");
+  for (const implementation of [
+    "account_coordinator",
+    "agent_event_coordinator",
+    "app_automation",
+    "frontend",
+    "mcp_startup",
+    "app_paths",
+    "app_platform",
+    "app_stores",
+    "app_window",
+  ]) {
+    assert.match(app, new RegExp(`const ${implementation} = @import\\(`));
+  }
+
+  assert.deepEqual(
+    [...app.matchAll(/^(?:pub )?fn ([A-Za-z_]\w*)\(/gm)]
+      .map((match) => match[1])
+      .sort(),
+    ["createAgentRuntime", "run"],
+  );
+  const appType = app.match(/const App = struct \{([\s\S]*?)^\};/m)?.[1] ?? "";
+  assert.deepEqual(
+    [...appType.matchAll(/^    fn ([A-Za-z_]\w*)\(/gm)]
+      .map((match) => match[1])
+      .sort(),
+    ["app", "bridge", "drainAgentEvents", "event", "source", "start", "stop"],
+  );
+
+  const mcpStartup = read("src/app/mcp_startup.zig");
+  assert.match(mcpStartup, /decodeMcpRegistry/);
+  assert.match(mcpStartup, /recoverPendingCredentialTransaction/);
+
+  const platform = read("src/app/platform.zig");
+  assert.doesNotMatch(platform, /@import\("automation\.zig"\)|app_automation/);
+});
+
+test("architecture names the Application boundary explicitly", () => {
+  const architecture = read("docs/architecture.md");
+  assert.equal(
+    (architecture.match(/Desktop Host/g) ?? []).length,
+    1,
+    "architecture.md may mention Desktop Host only in the explicit retired-term rule",
+  );
+  assert.match(architecture, /不再另设 Desktop Host 或 Host infrastructure/);
+  assert.match(architecture, /Bridge 是 Renderer 与 Application 之间/);
 });
 
 test("public module roots do not re-export implementation modules wholesale", () => {
@@ -114,6 +175,17 @@ test("public module roots do not re-export implementation modules wholesale", ()
 });
 
 test("lower layers cannot reach composition or transport internals", () => {
+  for (const importSource of [
+    '@import("app/paths.zig")',
+    '@import("../app.zig")',
+    '@import("../../src/app/paths.zig")',
+  ]) {
+    assert.match(
+      importSource,
+      /@import\("(?:[^"]*\/)?app(?:\/[^"]+\.zig|\.zig)"\)/,
+    );
+  }
+
   assertNoImports(zigFiles("src/agent/"), [
     "metawork_app",
     "metawork_workbench",
@@ -150,6 +222,21 @@ test("lower layers cannot reach composition or transport internals", () => {
     ["native_sdk"],
   );
   assert.match(read("src/account/platform.zig"), /@import\("native_sdk"\)/);
+  const lowerLayerFiles = [
+    "src/agent.zig",
+    "src/workbench.zig",
+    "src/account.zig",
+    "src/bridge.zig",
+    "src/automation.zig",
+    ...zigFiles("src/agent/"),
+    ...zigFiles("src/workbench/"),
+    ...zigFiles("src/account/"),
+    ...zigFiles("src/bridge/"),
+    ...zigFiles("src/automation/"),
+    ...zigFiles("src/native_sdk_compat/"),
+  ];
+  assertNoImports(lowerLayerFiles, ["metawork_app"]);
+  assertNoApplicationImplementationImports(lowerLayerFiles);
 });
 
 test("only Agent implementation imports the AgentCore SDK", () => {
@@ -276,8 +363,8 @@ test("build graph registers Account product and pure contract modules", () => {
   assert.doesNotMatch(source, /src\/agentcore(?:\/|\.zig)/);
 });
 
-test("Account Runtime owns policy while App installs execution explicitly", () => {
-  const app = read("src/app.zig");
+test("Account Runtime owns policy while Application installs execution explicitly", () => {
+  const app = applicationSource();
   const accountRuntime = read("src/account/runtime.zig");
   const workbench = read("src/workbench/projection.zig");
   for (const variable of [
@@ -347,7 +434,7 @@ test("Account Runtime owns policy while App installs execution explicitly", () =
 });
 
 test("cold Account restore preserves Task history without impersonating an identity switch", () => {
-  const app = read("src/app.zig");
+  const app = read("src/app/account_coordinator.zig");
   assert.match(
     app,
     /const ExecutionReplacement = enum \{ none, startup, default, identity \}/,
@@ -367,6 +454,7 @@ test("macOS development identity and Account manifest hard cut have one code own
   const build = read("build.zig");
   const identity = read("src/product_identity.zig");
   const app = read("src/app.zig");
+  const paths = read("src/app/paths.zig");
   const store = read("src/account/credential_store.zig");
   const platform = read("src/account/platform.zig");
   assert.match(appZon, /\.id = "com\.metask\.metawork\.dev"/);
@@ -400,7 +488,7 @@ test("macOS development identity and Account manifest hard cut have one code own
     mcpPlatform,
     /pub const credential_service = product_identity\.mcp_credential_service/,
   );
-  assert.match(app, /\.name = platformDataDirectoryName\(builtin\.os\.tag\)/);
+  assert.match(paths, /\.name = dataDirectoryName\(builtin\.os\.tag\)/);
   assert.match(app, /\.bundle_id = product_identity\.bundle_id/);
   assert.match(
     store,
@@ -421,7 +509,8 @@ test("macOS development identity and Account manifest hard cut have one code own
 
 test("Windows Account persistence is refresh-only and unversioned", () => {
   const store = read("src/account/windows_store.zig");
-  const app = read("src/app.zig");
+  const application = applicationSource();
+  const paths = read("src/app/paths.zig");
   const accountRuntime = read("src/account/runtime.zig");
   assert.match(store, /pub const service = "dev\.metawork\.account"/);
   assert.match(
@@ -433,13 +522,13 @@ test("Windows Account persistence is refresh-only and unversioned", () => {
     store,
     /manifest\.v[0-9]+|persistence_revision|CredentialStore|OwnedExecutionConfig|TokenSet/,
   );
-  assert.match(app, /builtin\.os\.tag == \.windows/);
+  assert.match(paths, /\.windows => env_map\.get\("USERPROFILE"\)/);
   assert.match(accountRuntime, /windows_store\.restore/);
-  assert.doesNotMatch(app, /windows_store\.restore|WindowsStore\.restore/);
-  assert.doesNotMatch(app, /dev\.metawork\.desktop/);
-  assert.match(app, /const windows_data_directory_name = "MetaWork"/);
+  assert.doesNotMatch(application, /windows_store\.restore|WindowsStore\.restore/);
+  assert.doesNotMatch(application, /dev\.metawork\.desktop/);
+  assert.match(paths, /const windows_data_directory_name = "MetaWork"/);
   assert.match(
-    app,
+    paths,
     /test "product identity does not unify macOS and Windows Account storage"/,
   );
 });
@@ -572,28 +661,23 @@ test("canonical notification and Renderer transport failures stay isolated", () 
   );
 
   const app = read("src/app.zig");
-  assert.doesNotMatch(app, /bridge_pipeline_failure/);
-  assert.match(app, /agent_event_wake_pending\.swap\(true, \.acq_rel\)/);
-  const clearWake = app.indexOf(
-    "self.agent_event_wake_pending.store(false, .release);",
+  const eventCoordinator = read("src/app/agent_event_coordinator.zig");
+  assert.doesNotMatch(applicationSource(), /bridge_pipeline_failure/);
+  assert.match(eventCoordinator, /wake_pending\.swap\(true, \.acq_rel\)/);
+  const clearWake = eventCoordinator.indexOf(
+    "self.wake_pending.store(false, .release);",
   );
-  const drainEvents = app.indexOf("while (agent_runtime.takeEvent())");
+  const drainEvents = eventCoordinator.indexOf("while (runtime.takeEvent())");
   assert.ok(clearWake >= 0 && clearWake < drainEvents);
-  const drainFunction = app.slice(
-    app.indexOf("fn drainAgentEvents("),
-    app.indexOf("fn drainAgentEventPass("),
-  );
-  const firstDrain = drainFunction.indexOf(
-    "self.drainAgentEventPass(agent_runtime);",
-  );
-  const markTerminal = drainFunction.indexOf(
+  const firstDrain = eventCoordinator.indexOf("drainPass(runtime, workbench);");
+  const markTerminal = eventCoordinator.indexOf(
     "workbench.markTerminalRunsBeforeEventDrain();",
   );
-  const secondDrain = drainFunction.indexOf(
-    "self.drainAgentEventPass(agent_runtime);",
+  const secondDrain = eventCoordinator.indexOf(
+    "drainPass(runtime, workbench);",
     firstDrain + 1,
   );
-  const finalizeTerminal = drainFunction.indexOf(
+  const finalizeTerminal = eventCoordinator.indexOf(
     "workbench.finalizeMarkedTerminalRunsAfterEventDrain();",
   );
   assert.ok(
@@ -634,14 +718,15 @@ test("Bridge owns the only Renderer product delivery state", () => {
   );
 
   const app = read("src/app.zig");
+  const application = applicationSource();
   assert.match(app, /dispatcher: \?\*bridge_api\.Dispatcher/);
-  assert.match(app, /automation: automation_api\.Runtime/);
+  assert.match(app, /automation: app_automation\.Adapter/);
   assert.doesNotMatch(
-    app,
+    application,
     /event_window_id|bridge_callbacks_active|revision_delivery:\s|snapshot_delivery:\s/,
   );
   assert.doesNotMatch(
-    app,
+    application,
     /renderer_bridge\.(?:revision_delivery|snapshot_delivery)/,
   );
 
@@ -774,7 +859,7 @@ test("Agent terminal facts have one immutable handoff and no legacy history latc
     /fn writeRun[\s\S]*const terminal = productTerminalFacts\(run\)/,
   );
   assert.match(workbench, /event_projection_failure: \?EventProjectionFailure/);
-  const app = read("src/app.zig");
+  const app = read("src/app/agent_event_coordinator.zig");
   assert.match(
     app,
     /applyEvent\(&envelope\) catch[\s\S]*recordEventProjectionFailure/,
@@ -842,10 +927,8 @@ test("Workbench owns Task lifecycle, continuation, and canonical redaction", () 
     workbench,
     /refreshSkillCatalog[\s\S]{0,500}session\.refreshSkillCatalog/,
   );
-  assert.match(
-    read("src/app.zig"),
-    /resolveCanonicalUserHome[\s\S]*\.canonical_user_home = canonical_user_home/,
-  );
+  assert.match(read("src/app/paths.zig"), /resolveCanonicalUserHome/);
+  assert.match(read("src/app.zig"), /\.canonical_user_home = paths_state\.canonical_user_home/);
   assert.doesNotMatch(read("src/bridge/dispatcher.zig"), /canonical_user_home/);
   assert.match(
     workbench,
@@ -877,7 +960,7 @@ test("Workbench owns Task lifecycle, continuation, and canonical redaction", () 
   assert.match(agent, /pub const CloseOutcome = union\(enum\)/);
 });
 
-test("Bridge owns ingress, Account owns validation, and App coordinates commits", () => {
+test("Bridge owns ingress, Account owns validation, and Application coordinates commits", () => {
   const build = read("build.zig");
   assert.match(build, /bridge\.addImport\("metawork_workbench", workbench\)/);
 
@@ -898,6 +981,8 @@ test("Bridge owns ingress, Account owns validation, and App coordinates commits"
   assert.doesNotMatch(dispatcher, /\.accountView\(\)/);
 
   const app = read("src/app.zig");
+  const application = applicationSource();
+  const accountCoordinator = read("src/app/account_coordinator.zig");
   const accountRuntime = read("src/account/runtime.zig");
   assert.match(
     accountRuntime,
@@ -907,16 +992,16 @@ test("Bridge owns ingress, Account owns validation, and App coordinates commits"
     accountRuntime,
     /return \.\{ \.rejected = \.generation_mismatch \}/,
   );
-  assert.doesNotMatch(app, /expected_catalog_generation|generation_mismatch/);
-  assert.match(app, /workbench\.commitAccountFactNoFail\(fact\)/);
-  assert.match(app, /runtime\.commit\(&prepared\)/);
+  assert.doesNotMatch(applicationSource(), /expected_catalog_generation|generation_mismatch/);
+  assert.match(accountCoordinator, /workbench\.commitAccountFactNoFail\(fact\)/);
+  assert.match(accountCoordinator, /runtime\.commit\(&prepared\)/);
   assert.match(app, /bridge_api\.Dispatcher\.init/);
   assert.match(app, /\.register\(/);
   assert.doesNotMatch(
-    app,
+    application,
     /fn (?:createTask|runTask|cancelTask|respondUi|closeTask|renameTask|archiveTask|deleteTask)\(/,
   );
-  assert.doesNotMatch(app, /parsePayload|parseWireId|workspaceGrant/);
+  assert.doesNotMatch(application, /parsePayload|parseWireId|workspaceGrant/);
 });
 
 test("Renderer Bridge fixed revision 1 owns the exact product wire catalog", () => {
@@ -1047,7 +1132,7 @@ test("Renderer Bridge fixed revision 1 owns the exact product wire catalog", () 
   );
 });
 
-test("Renderer declares window chrome UI while Desktop Host owns native behavior", () => {
+test("Renderer declares window chrome UI while Application owns native behavior", () => {
   const rendererFiles = filesWithExtensions("frontend/src/", [".ts", ".tsx"]);
   const chromeTransportOwners = rendererFiles.filter((file) =>
     read(file).includes("commands.windowChrome"),
@@ -1096,6 +1181,7 @@ test("Renderer declares window chrome UI while Desktop Host owns native behavior
   );
 
   const app = read("src/app.zig");
+  const window = read("src/app/window.zig");
   const policy = read("src/bridge/policy.zig");
   const dispatcher = read("src/bridge/dispatcher.zig");
   const rendererChrome = read("frontend/src/bridge/window-chrome.ts");
@@ -1140,8 +1226,8 @@ test("Renderer declares window chrome UI while Desktop Host owns native behavior
     /window_chrome_generation: u64[\s\S]*validateWindowChromeSession/,
   );
   assert.match(
-    app,
-    /startup_window_capture\.take\(main_window_id\)[\s\S]*captureStartupWindow\(startup_binding\)[\s\S]*bindRoot\(\)/,
+    window,
+    /startup_window_capture\.take\(main_window_id\)[\s\S]*drag_region_capability\.captureStartupWindow\(startup_binding\)[\s\S]*window_controls_capability\.captureStartupWindow\(startup_binding\)[\s\S]*bindRoot\(\)/,
   );
   assert.doesNotMatch(
     seam.match(/pub fn sync[\s\S]*?pub fn beginLivePointerDrag/)?.[0] ?? "",
@@ -1164,18 +1250,18 @@ test("Renderer declares window chrome UI while Desktop Host owns native behavior
   assert.deepEqual(
     zigFiles("src/").filter((file) =>
       read(file).includes(
-        '@import("native_sdk_compat/system_webview_drag_region.zig")',
+        'native_sdk_compat/system_webview_drag_region.zig")',
       ),
     ),
-    ["src/app.zig"],
+    ["src/app/window.zig"],
   );
   assert.deepEqual(
     zigFiles("src/").filter((file) =>
       read(file).includes(
-        '@import("native_sdk_compat/system_webview_window_controls.zig")',
+        'native_sdk_compat/system_webview_window_controls.zig")',
       ),
     ),
-    ["src/app.zig"],
+    ["src/app/window.zig"],
   );
   assert.deepEqual(
     compatFiles.filter((file) =>
@@ -1302,15 +1388,15 @@ test("Renderer declares window chrome UI while Desktop Host owns native behavior
       .sort(),
     allowedStartupWindowSymbols.sort(),
   );
-  assert.match(app, /native_runtime\.showMessageDialog\(/);
-  assert.match(app, /native_runtime\.closeWindow\(main_window_id\)/);
-  assert.match(app, /runtime\.minimizeWindow\(main_window_id\)/);
+  assert.match(window, /runtime\.showMessageDialog\(/);
+  assert.match(window, /runtime\.closeWindow\(main_window_id\)/);
+  assert.match(window, /runtime\.minimizeWindow\(main_window_id\)/);
   assert.match(
-    app,
+    window,
     /\.toggle_maximize => try self\.window_controls_capability\.toggleMaximize\(\)/,
   );
   assert.match(
-    app,
+    window,
     /\.close => try self\.window_controls_capability\.userClose\(\)/,
   );
   assert.match(controlsWindows, /PostMessageW\(root, wm_close/);
@@ -1319,9 +1405,10 @@ test("Renderer declares window chrome UI while Desktop Host owns native behavior
   assert.doesNotMatch(controlsSeam, /pub const Action|pub fn control\(/);
   assert.match(controlsWindows, /pub fn toggleMaximize[\s\S]*pub fn userClose/);
   assert.doesNotMatch(controlsWindows, /pub fn control\(|switch \(action\)/);
-  assert.match(app, /defer app\.drag_region_capability\.deinit\(\)/);
-  assert.match(app, /defer app\.window_controls_capability\.deinit\(\)/);
-  assert.match(app, /defer app\.startup_window_capture\.deinit\(\)/);
+  assert.match(app, /defer app\.platform\.deinit\(\)/);
+  assert.match(window, /self\.startup_window_capture\.deinit\(\)/);
+  assert.match(window, /self\.drag_region_capability\.deinit\(\)/);
+  assert.match(window, /self\.window_controls_capability\.deinit\(\)/);
   assert.doesNotMatch(
     windows + controlsWindows,
     /SetWindowsHookExW|armed_capture/,
@@ -1330,7 +1417,7 @@ test("Renderer declares window chrome UI while Desktop Host owns native behavior
     startupWindow,
     /lifecycle plumbing, not a window capability[\s\S]*pub const Binding[\s\S]*pub const Capture/,
   );
-  assert.doesNotMatch(app, /services\.closeWindow\(|windows_host/);
+  assert.doesNotMatch(applicationSource(), /services\.closeWindow\(|windows_host/);
   assert.doesNotMatch(
     compatSource,
     /@import\("(?:bridge|workbench|account|agent)(?:\.zig|\/)|window\.zero|metawork\.host\./,

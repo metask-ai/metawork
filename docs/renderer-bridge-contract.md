@@ -3,13 +3,13 @@
 > 状态：`metawork.renderer-bridge` 固定 revision 1
 > 日期：2026-08-05
 
-顶层模块职责见 [MetaWork 高层架构](architecture.md)。本文件是 Renderer 与 Application 之间 command、event、Snapshot、连接与运输语义的唯一架构真源；具体源码目录见 [工程结构与所有权](project-structure.md)，持续验收入口见 [验证规范](validation.md)。
+顶层模块职责见 [MetaWork 高层架构](architecture.md)。本文件是 Renderer 与 Product 之间 command、event、Snapshot、连接与运输语义的唯一架构真源；具体源码目录见 [工程结构与所有权](project-structure.md)，持续验收入口见 [验证规范](validation.md)。
 
 ## 1. Bridge 定位
 
-Bridge 是 Renderer 与 Application 之间的入站协议边界。它只负责验证调用来源与启动窗口 identity、严格解码 payload、把合法输入转换为产品命令、调用 Application、编码 typed result，并通过 Snapshot/Event 运输发布产品投影。Bridge 不决定 Task 是否可以运行、Workspace 是否有效、Agent 是否应取消、credential 是否可以替换或历史如何持久化；这些判断必须由 Application 内对应 owner 完成。
+Bridge 是 Renderer 与 Host 进程之间的唯一通信边界，承运两类 surface。产品命令面：验证调用来源与启动窗口 identity、严格解码 payload、把合法输入转换为产品命令、dispatch 给 Product 中对应 owner、编码 typed result，并通过 Snapshot/Event 运输发布产品投影；Bridge 不决定 Task 是否可以运行、Workspace 是否有效、Agent 是否应取消、credential 是否可以替换或历史如何持久化，这些判断必须由 Product 内对应 owner 完成。受限平台 capability 面：只承运 window-chrome bootstrap capability，当前封闭枚举为 `metawork.host.windowChrome.connect / sync / beginDrag / control / disconnect` 五个 command，dispatch 给 Desktop Host 执行，原生窗口行为与真实状态由 Native SDK/OS 拥有。两面共用同一 transport、origin policy 与 source/window authority，不共用数据面；新增平台面 command 必须与 capability seam 同级登记（identity、SDK 缺口、删除条件），不因该面已存在而豁免。
 
-Bridge 的唯一产品数据面由具体 `Dispatcher` 内部的 `ProductDelivery` 统一拥有：connection generation、revision retry/timer、snapshot identity 和 snapshot transport storage 都不再存放在 `app.zig`。Dispatcher 通过明确的 `*Workbench` 同步生成 snapshot；Desktop Host composition role 只注入 Native emit/timer/dialog/window-chrome/main-thread capability，并在顶层按 Bridge → Application → Native SDK 的依赖顺序组织 shutdown；Application 内部的 owner 收口与事件屏障仍由 App coordinator 执行。
+Bridge 的唯一产品数据面由具体 `Dispatcher` 内部的 `ProductDelivery` 统一拥有：connection generation、revision retry/timer、snapshot identity 和 snapshot transport storage 都不再存放在 `app.zig`。Dispatcher 通过明确的 `*Workbench` 同步生成 snapshot；Desktop Host composition role 只注入 Native emit/timer/dialog/window-chrome/main-thread capability，并在顶层按 Bridge → Product → Native SDK 的依赖顺序组织 shutdown；Product 内部的 owner 收口与事件屏障仍由 Product coordinator 执行。
 
 `hidden_inset_tall` 的 System WebView window chrome 是独立于 ProductDelivery connection 的受限 Host bootstrap capability。browser-side Bridge boundary 直接使用既有 `window.zero.invoke` transport 执行 `metawork.host.windowChrome.connect/sync/control/disconnect`，并且只有 Host 返回 `livePointerDrag = true` 时才可执行 `beginDrag`。`connect` 返回 document generation、可用 top band/safe insets、caption-button bounds、`rendererControls`、`maximized` 与 live-pointer capability；`sync` 只接受 viewport 和最多一个 top-band candidate 加 32 个 contained exclusions；`beginDrag` 只接受同 generation 的 Web client coordinate；`control` 只接受同 generation 的 `minimize | toggle_maximize | close`；`disconnect` 精确撤销同一 generation。所有响应在 browser-side Bridge runtime decode 后才写入 CSS variables/document dataset，React product component 只绘制 declarative controls，不消费 DTO、不调用 transport、不维护窗口状态。
 
@@ -17,7 +17,7 @@ Bridge policy 先约束 origin，Dispatcher 再校验 Desktop Host-owned 单一�
 
 ## 2. ProductDelivery 与 Snapshot transport
 
-Host view snapshot 使用 Bridge `Dispatcher` 内部 `ProductDelivery` 独占的 32 MiB 有界存储，不受 Bridge 单次 1 MiB result 上限反向约束。该容量覆盖 512 KiB Task projection、最大 Account API Key/model catalog、Workspace/Task Skill catalog 结构、JSON 最坏转义和全部结构上界。Dispatcher 同时拥有 callback gate、workspace grants、handler registry 和 `*Workbench`，产品 command 的 decode、authority、domain call 与 response encode 不再经过 `app.zig`。Workbench writer 只能在同步调用期间借用这块 output buffer；返回后 Bridge 独占 encoded bytes，禁止保存 Workbench borrowed view。Renderer 通过带 snapshot identity 的 256 KiB 分块读取完成 resync；begin 写入前先使旧 descriptor 失效，序列化失败后旧 identity 必须保持 stale，不能继续读取已被部分覆盖的 store。revision 通知和 snapshot 拉取分别保留 pending/retry 状态，瞬时发送或读取失败不能把旧视图标记为最新。revision retry 同时受 attempt 和 deadline 预算约束，耗尽或 retry timer 不可用时当前 event connection fail closed，但不终止后台 Agent Run。新 event generation 建立时会使旧 snapshot descriptor 失效；Renderer 若仍持有旧 generation Promise，必须在旧 Promise 退出后继续完成新 generation 的实际 resync，不能把等待旧 Promise 误判为同步成功。Bridge 异步保留的 payload 必须自有；Desktop Host composition role 在 shutdown 时先 stop Bridge ingress、关闭 delivery connection 并取消 timer，在 Native platform loop 上确认同步 handler quiescence，然后调用 Application 的收口路径、detach Workbench，最后才独立释放 delivery buffers。
+Host view snapshot 使用 Bridge `Dispatcher` 内部 `ProductDelivery` 独占的 32 MiB 有界存储，不受 Bridge 单次 1 MiB result 上限反向约束。该容量覆盖 512 KiB Task projection、最大 Account API Key/model catalog、Workspace/Task Skill catalog 结构、JSON 最坏转义和全部结构上界。Dispatcher 同时拥有 callback gate、workspace grants、handler registry 和 `*Workbench`，产品 command 的 decode、authority、domain call 与 response encode 不再经过 `app.zig`。Workbench writer 只能在同步调用期间借用这块 output buffer；返回后 Bridge 独占 encoded bytes，禁止保存 Workbench borrowed view。Renderer 通过带 snapshot identity 的 256 KiB 分块读取完成 resync；begin 写入前先使旧 descriptor 失效，序列化失败后旧 identity 必须保持 stale，不能继续读取已被部分覆盖的 store。revision 通知和 snapshot 拉取分别保留 pending/retry 状态，瞬时发送或读取失败不能把旧视图标记为最新。revision retry 同时受 attempt 和 deadline 预算约束，耗尽或 retry timer 不可用时当前 event connection fail closed，但不终止后台 Agent Run。新 event generation 建立时会使旧 snapshot descriptor 失效；Renderer 若仍持有旧 generation Promise，必须在旧 Promise 退出后继续完成新 generation 的实际 resync，不能把等待旧 Promise 误判为同步成功。Bridge 异步保留的 payload 必须自有；Desktop Host composition role 在 shutdown 时先 stop Bridge ingress、关闭 delivery connection 并取消 timer，在 Native platform loop 上确认同步 handler quiescence，然后调用 Product 的收口路径、detach Workbench，最后才独立释放 delivery buffers。
 
 ## 3. Renderer Bridge wire contract
 
@@ -35,7 +35,7 @@ Host 没有可用 registry/committed MCP state 时发布 `mcpManagement = false`
 
 Renderer 的 Slash Resolver 只在 Composer 首 token 处理 `/` 手势。单一 Command registry 当前只由 `App` action controller 复用既有 New task 动作；Command 原文在 Renderer 消费，不产生 Run。Skill 候选只来自当前 Workspace/Task catalog projection，选择后形成带稳定 identity、pinned revision 与 positional arguments 的 tagged draft，再沿唯一 `tasks.run` 路径提交。Command/Skill 同名时裸名称归 Command，Skill 使用 `/skill:name`；Renderer 不读取 Skill body、物理路径或 policy。
 
-Account API/model selection payload 携带脱敏 selection identifier、`expectedCatalogGeneration` 与 `expectedExecutionGeneration`。Bridge 只校验 identifier 的 wire 边界并把 generation 严格解析为 `u64`；单值 `"0"` 合法，前导零、非数字与 overflow 非法。generation 是否匹配以及 identifier 是否属于当前发布的 Account catalog 由 Application 判断，Bridge 不读取产品 `AccountView`。
+Account API/model selection payload 携带脱敏 selection identifier、`expectedCatalogGeneration` 与 `expectedExecutionGeneration`。Bridge 只校验 identifier 的 wire 边界并把 generation 严格解析为 `u64`；单值 `"0"` 合法，前导零、非数字与 overflow 非法。generation 是否匹配以及 identifier 是否属于当前发布的 Account catalog 由 Product 判断，Bridge 不读取产品 `AccountView`。
 
 `connect` 是 product delivery 的 bootstrap 边界。Host 必须在合同身份与 revision 校验成功后才建立 `ProductDelivery` connection；既有 `requireWindow()` 门禁随后统一保护 Account、Task、event 和 snapshot 产品路径。协商前只允许显式列出的无状态 bootstrap/smoke 命令，不得读取或修改产品状态。合同不匹配返回 typed terminal bootstrap error，Renderer 不把它当作瞬时断线重试。
 
