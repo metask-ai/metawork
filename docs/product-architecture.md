@@ -1,19 +1,20 @@
 # MetaWork Product 内部架构
 
-> 状态：Product 内部 owner、事务、并发与恢复的当前规范
+> 状态：Product owner、事务、并发、恢复及其与 Agent 执行边界协作的当前规范
 > 日期：2026-08-05
 
-顶层模块、进程方向和跨模块安全边界见 [MetaWork 高层架构](architecture.md)。本文件定义 Product 内部的 `account`、`workbench` 与 `agent` owner，以及由 Application 负责的跨 owner 协调；实际目录和依赖见 [工程结构与所有权](project-structure.md)，AgentCore 线程与 ABI 生命周期见 [AgentCore 集成契约](agentcore-integration.md)，Metask Account 外部合同见 [Metask Account API 合同](metask-account-contract.md)。
+顶层模块、进程方向和跨模块安全边界见 [MetaWork 高层架构](architecture.md)。本文件定义 Product 内部的 `account`、`workbench` owner、它们与相邻 Agent 执行边界的产品协作，以及由 Application 负责的跨 owner 协调和生命周期顺序；实际目录和依赖见 [工程结构与所有权](project-structure.md)，AgentCore 线程与 ABI 生命周期见 [AgentCore 集成契约](agentcore-integration.md)，Metask Account 外部合同见 [Metask Account API 合同](metask-account-contract.md)。
 
 ## 1. 模块与 owner
 
-Product 内部由三个 named product owners 组成；跨 owner 用例由 Application coordinator 编排：
+Product 内部由两个 named product owners 组成；跨 owner 用例由 Application coordinator 编排：
 
 - `account` 的 Runtime 负责 Metask 登录、catalog、credential、attempt/effect/mailbox、恢复与 ExecutionConfig generation；
-- `workbench` 拥有产品状态、Task、队列、投影与持久化语义；
-- `agent` 执行并收口一个真实 Agent Run。
+- `workbench` 拥有产品状态、Task、队列、投影与持久化语义，并直接消费相邻 Agent 的公共执行能力。
 
-Application coordinator 负责主线程跨 owner 提交与生命周期顺序，不持有领域运行状态，也不独立决定 Account、Workbench 或 Agent policy。它由 `src/app/` 下的具名 coordinator 实现，`app.zig` 只负责装配；这不产生新的产品 owner。Bridge 位于 Product 之外；`metawork_account_contract` 只承载 Account 发布给 Application/Bridge/Workbench 的有界纯合同。Application、Renderer 与原生窗口边界只由 [高层架构](architecture.md)定义。
+Agent 是 Product 之外的 MetaWork-owned 执行边界，拥有 AgentCore Runtime、Session、Conversation、callback、event pump 与 terminal execution facts。Application 创建并关闭 Agent、安排 event-ready 主线程 wake；Workbench 直接调用 Agent，但不管理 Agent Runtime 生命周期、不读取 Runtime 内部字段，也不借 Agent 获取通用 I/O。
+
+Application coordinator 负责 Account/Workbench 主线程跨 owner 提交与全局生命周期顺序，不持有领域运行状态，也不独立决定 Account、Workbench 或 Agent policy。它由 `src/app/` 下的具名 coordinator 实现，`app.zig` 只负责装配；这不产生新的产品 owner。Bridge 位于 Product 之外；`metawork_account_contract` 只承载 Account 发布给 Application/Bridge/Workbench 的有界纯合同。Application、Agent、Renderer 与原生窗口边界只由 [高层架构](architecture.md)定义。
 
 Product 内部负责：
 
@@ -21,16 +22,16 @@ Product 内部负责：
 - 由 Account Runtime 在 committed transition 之后产生有界 continuation，由 Application coordinator 将其重新送入同一提交链；登录后的确定性目录准备留在后台，并只把真实歧义投影成用户动作；
 - 由 Application coordinator 在同一主线程 turn 内协调 Account prepare、Workbench no-fail install 和 Account commit；
 - 由 Workbench 管理持久 Scheduled Task、触发游标、有界 occurrence history、Task、Run/maintenance record、唯一 active operation 槽、队列、取消协调和产品历史；
-- 由 Agent 管理 AgentCore Session、active Run/manual compact、callback binding 和有界事件泵；
+- 由 Workbench 调用相邻 Agent 管理的 AgentCore Session、active Run/manual compact、callback binding 和有界事件泵，并在主线程消费 Agent event 形成产品事实；
 - 管理跨会话产品状态，并向 Bridge 提供 canonical 产品 projection。
 
-Application 只向上述 Product 边界提供平台 capability：
+Application 只向上述 Product owner 与相邻 Agent 注入其职责所需的能力：
 
 - 在 `<MetaWork data dir>/workbench` 打开并持有 Task history 的进程级单写锁，把 bounded load/atomic replace capability 注入 Workbench；codec、恢复校验、candidate commit、持久化 health 和所有 Workspace/Task 产品事实仍归 Workbench；
 - 通过 Native SDK `.data` 规则解析并打开 `<MetaWork data dir>/workspaces`，只把可用或不可用的 automatic root capability 注入 Workbench；由 Workbench 独占目录分配、Workspace 注册、Task 创建事务与回滚；
 - 向 Workbench 注入原子 schedule persistence、wall clock、单一 Native timer、系统通知与后台窗口生命周期 capability；timer callback 只唤醒 Workbench due reconciliation，不直接调用 AgentCore。
 
-MCP 仍服从这四个 named modules：Workbench 通过 `workbench/mcp_configuration.zig` 独占 `<MetaWork data dir>/mcp/registry.json` schema 1 的严格 codec、单 writer lock、原子替换、Desired Registry、credential locator/窄事务恢复、server 产品状态与显式 tool allowlist；registry generation 只作为 desired commit identity 与 optimistic concurrency。Workbench 同时拥有当前 Runtime 对应的 immutable Runtime Manifest 和 Admission Authority；Agent 独占 stdio/Streamable HTTP backend、运行期 credential copy、connector/descriptor、official catalog/selection、Activation 与 health fact；Application 只打开目录并注入系统 credential/network capability。Account 与 MCP 没有 ownership 或 persistence 依赖，Bridge 只运输 typed field intent 和安全 projection，不参与配置、激活或 authority 事务。
+MCP 仍服从上述边界：Workbench 通过 `workbench/mcp_configuration.zig` 独占 `<MetaWork data dir>/mcp/registry.json` schema 1 的严格 codec、单 writer lock、原子替换、Desired Registry、credential locator/窄事务恢复、server 产品状态与显式 tool allowlist；registry generation 只作为 desired commit identity 与 optimistic concurrency。Workbench 同时拥有当前 Runtime 对应的 immutable Runtime Manifest 和 Admission Authority；Agent 独占 stdio/Streamable HTTP backend、运行期 credential copy、connector/descriptor、official catalog/selection、Activation 与 health fact；Application 只打开目录并注入系统 credential/network capability。Account 与 MCP 没有 ownership 或 persistence 依赖，Bridge 只运输 typed field intent 和安全 projection，不参与配置、激活或 authority 事务。
 
 Runtime Manifest 的 `loaded` entry 保存当前 Runtime 已完整接管的 descriptor fingerprint，`absent` entry 保存 disabled、structurally invalid、missing authentication 或 credential-invalid 等无 secret absence proof；成功接管空 input 形成零 entry Manifest，只有 preparation/input ownership 无法证明时才没有 Manifest。Workbench 不按 registry 结构相等或 generation 差值判断重启，而使用无副作用 compatibility 关系：target 必须保留每个 loaded descriptor 的 enabled 与 runtime 配置；target 中未加载 server 必须仍 disabled、已删除或继续由原 absence proof 证明不会进入 Runtime；新增 enabled server、启用未加载 server、移除/禁用/改变 loaded server 或使 absence proof 失效都形成 `restart_required`。普通 mutation 不重新读取 credential、不创建 transport、不重跑有外部 effect 的 preparation；恢复到 Manifest 可证明兼容的 target 会回到 `current`。Runtime Manifest、Agent Activation 与 Admission Authority 都不是第二份 durable truth。
 

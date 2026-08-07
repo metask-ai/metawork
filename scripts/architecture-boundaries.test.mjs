@@ -167,6 +167,33 @@ test("architecture names the Application boundary explicitly", () => {
   assert.match(architecture, /Bridge 是 Renderer 与 Application 之间/);
 });
 
+test("Agent is a peer execution boundary managed by Application", () => {
+  const architecture = read("docs/architecture.md");
+  assert.match(architecture, /AGENT\["Agent<br\/>Runtime、Session、Conversation 与 event pump"\]/);
+  assert.match(
+    architecture,
+    /APPLICATION -\. "compose \/ lifecycle" \.-> AGENT/,
+  );
+  assert.match(architecture, /PRODUCT -->\|"Workbench execution calls"\| AGENT/);
+  assert.match(architecture, /AGENT -->\|"typed bundle ABI"\| AGENTCORE/);
+  assert.match(architecture, /Product 包含 `account` 与 `workbench` 两个产品 owner/);
+  assert.doesNotMatch(
+    architecture,
+    /Product 包含 `account`、`workbench` 与 `agent`|Account、Workbench、Agent/,
+  );
+
+  const product = read("docs/product-architecture.md");
+  assert.match(product, /Product 内部由两个 named product owners 组成/);
+  assert.match(product, /Agent 是 Product 之外的 MetaWork-owned 执行边界/);
+
+  const integration = read("docs/agentcore-integration.md");
+  assert.match(integration, /Agent 与 Product 并列/);
+  assert.doesNotMatch(integration, /Desktop Host composition role|Product coordinator/);
+
+  const agents = read("AGENTS.md");
+  assert.match(agents, /Product owner、事务、并发、恢复及其与 Agent 的协作/);
+});
+
 test("public module roots do not re-export implementation modules wholesale", () => {
   for (const file of [
     "src/account.zig",

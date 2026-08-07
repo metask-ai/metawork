@@ -18,7 +18,7 @@
 
 正式主路径不采用 Tauri + Rust，不建立第二套 Renderer，不以 PTY、xterm、终端字节流或 Provider SSE 作为 Agent UI 协议，不复制 AgentCore ABI 或实现源码，也不建立 Native SDK Adapter、通用 Desktop Interface 或可替换框架抽象。
 
-Application、Renderer、Bridge 与 Product 是 MetaWork-owned 并列逻辑边界；Metask AgentCore 与 Native SDK 是外部依赖。Application 由 `src/app.zig` 和 `src/app/` 实现：代码组合类型名为 `App`，`app.zig` 是 composition root，具名适配、resolver、store 生命周期和跨 owner 用例编排位于 `app/`。Application 组装 Bridge 与 Product，消费 Native SDK 的原生应用生命周期、窗口和 System WebView 能力，并托管 React Renderer；它不是业务 owner，也不形成统一 facade。
+Application、Renderer、Bridge、Product 与 Agent 是 MetaWork-owned 并列逻辑边界；Metask AgentCore 与 Native SDK 是外部依赖。Application 由 `src/app.zig` 和 `src/app/` 实现：代码组合类型名为 `App`，`app.zig` 是 composition root，具名适配、resolver、store 生命周期和跨 owner 用例编排位于 `app/`。Application 组装 Bridge、Product 与 Agent，消费 Native SDK 的原生应用生命周期、窗口和 System WebView 能力，并托管 React Renderer；它不是业务 owner，也不形成统一 facade。
 
 原生窗口机制由 Application 通过 Native SDK 执行；React 只负责 WebUI。涉及产品语义的校验和决策归对应 owner；Application coordinator 只执行 owner 已定义的跨 owner 提交与生命周期顺序，不复制 policy 或持有领域状态。Renderer 可以呈现一体化标题/命令栏，但原生窗口行为、系统资源和真实状态始终属于 Application。菜单、托盘、全局快捷键或其他平台 capability 位于同一边界，不代表当前版本已经开放；实际可用性仍以能力合同与验证状态为准。
 
@@ -30,15 +30,18 @@ flowchart TB
     APPLICATION["Application<br/>app.zig + app/"]
     BRIDGE["Bridge<br/>协议、验证与 ProductDelivery"]
     PRODUCT["Product<br/>owners、事务与协调角色"]
-    AGENTCORE["Metask AgentCore<br/>Agent 执行能力"]
+    AGENT["Agent<br/>Runtime、Session、Conversation 与 event pump"]
+    AGENTCORE["Metask AgentCore<br/>外部执行依赖"]
     NATIVE_RUNTIME["Native SDK Runtime API<br/>窗口、System WebView 与生命周期"]
     NATIVE_COMPAT["Native Compat<br/>已登记 SDK 缺口"]
 
     APPLICATION -. "compose" .-> BRIDGE
     APPLICATION -. "compose" .-> PRODUCT
+    APPLICATION -. "compose / lifecycle" .-> AGENT
     BRIDGE <-->|"Renderer Bridge rev 1<br/>command / Snapshot / Event"| RENDERER
     BRIDGE <-->|"typed command / projection"| PRODUCT
-    PRODUCT <-->|"typed bundle ABI"| AGENTCORE
+    PRODUCT -->|"Workbench execution calls"| AGENT
+    AGENT -->|"typed bundle ABI"| AGENTCORE
     APPLICATION -->|"normal system path"| NATIVE_RUNTIME
     APPLICATION -->|"registered compatibility path"| NATIVE_COMPAT
     NATIVE_RUNTIME -->|"hosts System WebView"| RENDERER
@@ -47,17 +50,18 @@ flowchart TB
 这是一张逻辑模块图，不等于进程图或源码目录图：
 
 1. Renderer 只通过 Renderer Bridge revision 1 访问产品路径；
-2. `app.zig` 是 Application 的 composition root；`app/` 承载 Application 的具名实现，二者共同组装 Bridge 与 Product，并消费 Native SDK 的窗口、System WebView、生命周期与窄平台 capability；
-3. Product 包含 `account`、`workbench` 与 `agent` 三个产品 owner，不代表统一源码 module 或 facade；跨 owner 协调位于 Application，Bridge 把命令静态绑定到对应 owner 或具名 coordinator；
+2. `app.zig` 是 Application 的 composition root；`app/` 承载 Application 的具名实现，二者共同组装 Bridge、Product 与 Agent，并消费 Native SDK 的窗口、System WebView、生命周期与窄平台 capability；
+3. Product 包含 `account` 与 `workbench` 两个产品 owner，不代表统一源码 module 或 facade；Agent 是相邻的独立执行边界。Workbench 直接消费 Agent 公共执行能力，Application 只管理 Agent 的组装、生命周期与主线程 wake；
 4. Native SDK Runtime API 与 Native Compat 是 Application 消费系统能力的两条并列路径，Native Compat 只覆盖逐项登记的 SDK 缺口；
-5. AgentCore 与 Native SDK 是两个并列外部依赖；当前 AgentCore bundle 链入同进程，未来单 Worker 只改变 Product 后方的部署、资源和故障域，不改变 Renderer Bridge 产品合同。
+5. AgentCore 与 Native SDK 是两个并列外部依赖；当前 AgentCore bundle 由 Agent 链入同进程，未来单 Worker 只改变 Agent 后方的部署、资源和故障域，不改变 Renderer Bridge 产品合同。
 
 ### 词汇对账
 
 | 词          | 含义                                                                 | 图节点          | 所有权表行                                   | 源码                                                   |
 | ----------- | -------------------------------------------------------------------- | --------------- | -------------------------------------------- | ------------------------------------------------------ |
 | Application | 组合、用例编排、平台能力适配与生命周期边界                           | APPLICATION     | Application                                  | `src/main.zig`、`src/app.zig`、`src/app/`、`src/native_sdk_compat/` |
-| Product     | 产品逻辑边界；不是统一源码 module                                    | PRODUCT         | Account、Workbench、Agent                    | `src/account*`、`src/workbench*`、`src/agent*`         |
+| Product     | 产品逻辑边界；不是统一源码 module                                    | PRODUCT         | Account、Workbench                           | `src/account*`、`src/workbench*`                       |
+| Agent       | AgentCore 执行、Session/Conversation 与事件泵边界                     | AGENT           | Agent                                        | `src/agent.zig`、`src/agent/`                          |
 | Bridge      | Renderer 与 Application 之间的唯一通信边界                           | BRIDGE          | Bridge                                       | `src/bridge*`                                          |
 | Renderer    | 产品 WebUI 模块                                                       | RENDERER        | Renderer                                     | `frontend/`（含 `bridge/` 合同实现层）                 |
 
@@ -79,17 +83,19 @@ Bridge 是 Renderer 与 Application 之间的唯一通信边界，承运两类 s
 
 ### 3.3 Product
 
-Product 是 MetaWork 产品事实与行为的逻辑边界。它不是统一源码 module 或 facade；Bridge 把 typed 产品命令 dispatch 给内部对应 owner，由这些 owner 执行 admission，协调账号、Workspace、Task、Run、持久化、恢复与 Agent 执行，并共同生成 canonical 产品 projection。
+Product 是 MetaWork 产品事实与行为的逻辑边界。它不是统一源码 module 或 facade；Bridge 把 typed 产品命令 dispatch 给内部对应 owner，由这些 owner 执行 admission，协调账号、Workspace、Task、Run、持久化与恢复，并由 Workbench 直接调用相邻 Agent 边界完成执行，共同生成 canonical 产品 projection。
 
 Product 内部如何拆分 owner 不属于本图，见 [Product 内部架构](product-architecture.md)。Product 的产品 policy 不依赖 DOM、React tab、Toast、JSX state 或 WebView URL。
 
 MCP 不形成第五个 Product owner。Workbench 拥有 Desired Registry、credential locator/恢复、与当前 Agent Runtime 同寿命的 Runtime Manifest、产品状态、工具 policy、Admission Authority、Task binding 与安全 projection；Agent 拥有运行期 transport、secret copy、AgentCore descriptor/catalog/selection、Activation 与 typed health；Application 的 `app/mcp_platform.zig` 只注入 `<MetaWork data dir>/mcp` 的目录单写锁、独立系统 credential service、stdio/network capability并编排启动/关闭。Runtime Manifest 只记录已被当前 Runtime 接管的 descriptor fingerprint 或 disabled/invalid/missing-authentication 等安全 absence proof，不保存 secret、不进入 Bridge、不跨 Runtime 持久化；Workbench 用它与 target desired 的纯 compatibility 关系派生 `current | restart_required | unknown`，而不是比较 registry generation。新 Task 只消费 Workbench 原子提交的 Admission Authority，Bridge 与 Renderer 不得绕回 Agent current selection。Account 不参与 MCP，Bridge 仍只运输 Workbench projection 与 typed intent，AgentCore 继续唯一拥有 MCP 协议、JSON-RPC、协商和 tool binding 语义。
 
-### 3.4 AgentCore
+### 3.4 Agent 与 AgentCore
+
+Agent 是 MetaWork-owned 独立执行边界，拥有 Agent Runtime、Session、Conversation、callback、event pump 与 AgentCore terminal facts。Application 创建并关闭 Agent、注入其运行所需能力并把 event-ready wake 安排到主线程；Workbench 直接消费 Agent 公共执行类型和操作，但不管理 Agent Runtime 生命周期、不读取 Runtime 内部字段，也不借 Agent 获取通用 I/O。Agent 不拥有 Workspace、Task、产品 Run、Executor、持久化或 Bridge transport。
 
 AgentCore 拥有 Provider 调用、agent loop、Conversation、built-in tools、Session、结构化 CoreEvent、同步 UI request 和 RunResult。它不拥有 MetaWork 的 Workspace、Task、Run 产品历史、Renderer projection 或持久化 policy。
 
-只有 Product 内部的 Agent 边界可以消费官方 typed SDK 与 binary ABI；其他模块只使用 MetaWork-owned 产品类型。精确合同见 [AgentCore 集成契约](agentcore-integration.md)和 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。
+只有 Agent 边界可以消费官方 typed SDK 与 binary ABI；其他模块只使用 Agent 或对应 owner 暴露的 MetaWork-owned 类型。精确合同见 [AgentCore 集成契约](agentcore-integration.md)和 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。
 
 ### 3.5 Native SDK
 
@@ -133,7 +139,7 @@ Runtime API 已提供且可用时，绕过它调用低层函数属于架构违�
 - Renderer → Bridge 只提交产品语义命令；标题栏例外严格限于 browser-side Bridge 从 declarative DOM marker 计算出的有界 region mirror，以及 `minimize | toggle_maximize | close` 固定语义 intent。输入不包含平台名、任意 action、独立 state query 或原生窗口 identity/handle，也不得携带 React component state、任意路径、Provider 配置或完整 credential。
 - Bridge → Product 只提交严格解码后的 typed command；业务拒绝由 Product 返回 typed result，malformed payload 与 authority failure 由 Bridge fail closed。
 - Product → Bridge 发布 canonical projection；Bridge 只拥有编码后的 transport bytes、connection generation 和 Snapshot transport state。
-- Product → AgentCore 只经内部 AgentCore 边界；Renderer、Bridge 与 Product 的其他 owner 只使用 MetaWork-owned 产品类型。
+- Workbench → Agent 只经 Agent 公共执行表面，Agent → AgentCore 是唯一 typed SDK 与 binary ABI 路径；Application 只管理 Agent 生命周期与 event-ready wake，Renderer 和 Bridge 不调用 Agent。
 - Native SDK → Application 的能力按调用边界和 owner 使用；Application 不产生新产品模块或 facade，不得用一个通用平台接口掩盖线程、ownership、deadline、容量和 shutdown 语义。
 - Renderer 断连、Snapshot 失败或 Bridge transport failure 默认不反向伪造 Agent Run cause，也不直接终止后台执行。
 
