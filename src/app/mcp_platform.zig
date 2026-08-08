@@ -1010,9 +1010,58 @@ test "MCP platform bounds ignored SSE framing bytes" {
 }
 
 test "MCP platform builds lazy stdio and HTTP transport owners without opening them" {
-    const registry =
-        \\{"schema_version":1,"generation":3,"servers":[{"id":"stdio","namespace":"local","display_name":"Local","enabled":true,"negotiation":"modern_only","timeout_ms":1000,"transport":{"kind":"stdio","command":"/bin/echo","arguments":[],"environment":[]},"tools":[]},{"id":"http","namespace":"remote","display_name":"Remote","enabled":true,"negotiation":"compat_only","timeout_ms":1000,"transport":{"kind":"streamable_http","url":"https://example.test/mcp","headers":[]},"tools":[]}]}
-    ;
+    var servers = [_]workbench.McpServerConfigurationWire{
+        .{
+            .id = "stdio",
+            .namespace = "local",
+            .display_name = "Local",
+            .enabled = true,
+            .negotiation = "modern_only",
+            .timeout_ms = 1000,
+            .transport = .{ .kind = "stdio", .command = "/bin/echo" },
+            .auth = .{ .kind = "none", .oauth = null },
+            .connection_approval = null,
+            .tools = &.{},
+        },
+        .{
+            .id = "http",
+            .namespace = "remote",
+            .display_name = "Remote",
+            .enabled = true,
+            .negotiation = "compat_only",
+            .timeout_ms = 1000,
+            .transport = .{
+                .kind = "streamable_http",
+                .url = "https://example.test/mcp",
+            },
+            .auth = .{ .kind = "none", .oauth = null },
+            .connection_approval = null,
+            .tools = &.{},
+        },
+    };
+    var approvals: [servers.len][64]u8 = undefined;
+    for (&servers, 0..) |*server, index| {
+        approvals[index] = workbench.mcpConnectionFingerprint(server.*);
+        server.connection_approval = .{ .fingerprint = &approvals[index] };
+    }
+    var registry_buffer: [workbench.mcp_registry_max_bytes]u8 = undefined;
+    const registry = try workbench.encodeMcpRegistry(
+        &registry_buffer,
+        .{
+            .schema_version = 2,
+            .generation = 3,
+            .oauth_operation = null,
+            .servers = &servers,
+        },
+        .{
+            .max_servers = 8,
+            .max_tools_per_server = 32,
+            .max_namespace_bytes = 128,
+            .max_credential_locators = 64,
+            .max_runtime_secrets_per_server = (agent.McpRuntimeLimits{}).max_secrets,
+            .max_runtime_secret_bytes_per_server = (agent.McpRuntimeLimits{}).max_secret_bytes,
+        },
+    );
     var preparation = try workbench.prepareMcpConfiguration(
         std.testing.allocator,
         registry,

@@ -5,7 +5,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-pub const schema_version: u8 = 1;
+pub const schema_version: u8 = 2;
+pub const transaction_schema_version: u8 = 1;
 pub const file_name = "registry.json";
 pub const transaction_file_name = "transaction.json";
 pub const max_store_bytes: usize = 256 * 1024;
@@ -30,6 +31,10 @@ pub const Limits = struct {
     max_runtime_secrets_per_server: usize,
     max_runtime_secret_bytes_per_server: usize,
     max_tool_name_bytes: usize = 256,
+    max_oauth_scopes: usize = 128,
+    max_oauth_scope_bytes: usize = 256,
+    max_oauth_uri_bytes: usize = 4096,
+    max_oauth_client_id_bytes: usize = 4096,
 };
 
 pub const Error = error{
@@ -57,10 +62,81 @@ pub const FileStoreError = std.mem.Allocator.Error || error{
 pub const RegistryWire = struct {
     schema_version: u8,
     generation: u64,
+    oauth_operation: ?OauthOperationWire,
     servers: []ServerWire,
 };
 
 pub const ServerWire = struct {
+    id: []const u8,
+    namespace: []const u8,
+    display_name: []const u8,
+    enabled: bool,
+    negotiation: []const u8,
+    timeout_ms: u32,
+    transport: TransportWire,
+    auth: AuthWire,
+    connection_approval: ?ConnectionApprovalWire,
+    tools: []const []const u8,
+};
+
+pub const AuthWire = struct {
+    kind: []const u8,
+    oauth: ?OauthAuthorizationWire,
+};
+
+pub const ConnectionApprovalWire = struct {
+    fingerprint: []const u8,
+};
+
+pub const OauthAuthorizationWire = struct {
+    status: []const u8,
+    registration: OauthRegistrationWire,
+    consent: ?OauthConsentWire,
+    grant: ?OauthGrantWire,
+};
+
+pub const OauthRegistrationWire = struct {
+    kind: []const u8,
+    client_id: ?[]const u8,
+    client_secret_required: bool,
+    client_secret_ref: ?[]const u8,
+};
+
+pub const OauthConsentWire = struct {
+    epoch: u64,
+    fingerprint: []const u8,
+    resource: []const u8,
+    issuer: []const u8,
+    scopes: []const []const u8,
+    redirect_uri: []const u8,
+    client_credential_revision: u64,
+};
+
+pub const OauthGrantWire = struct {
+    consent_epoch: u64,
+    token_revision: u64,
+    access_token_ref: []const u8,
+    refresh_token_ref: ?[]const u8,
+    expires_at_unix_ms: ?u64,
+};
+
+pub const OauthOperationWire = struct {
+    id: []const u8,
+    kind: []const u8,
+    server_id: []const u8,
+    connection_fingerprint: []const u8,
+    consent_fingerprint: []const u8,
+    consent_epoch: u64,
+    token_revision: ?u64,
+};
+
+const LegacyRegistryWire = struct {
+    schema_version: u8,
+    generation: u64,
+    servers: []LegacyServerWire,
+};
+
+const LegacyServerWire = struct {
     id: []const u8,
     namespace: []const u8,
     display_name: []const u8,
@@ -112,7 +188,7 @@ pub const MutationPlan = struct {
     target: ?std.json.Parsed(RegistryWire),
     transaction: TransactionWire,
 
-    fn targetRegistry(self: *const MutationPlan) Error!RegistryWire {
+    pub fn targetRegistry(self: *const MutationPlan) Error!RegistryWire {
         return if (self.target) |target| target.value else error.InvalidMutation;
     }
 
@@ -125,6 +201,28 @@ pub const MutationPlan = struct {
     pub fn deinit(self: *MutationPlan) void {
         if (self.target) |*target| target.deinit();
         self.arena.deinit();
+        self.* = undefined;
+    }
+};
+
+/// Same-file state transition for the single durable OAuth operation marker.
+/// It deliberately carries no credential journal and does not advance the
+/// desired generation because no server target changed.
+pub const OauthOperationStatePlan = struct {
+    target: ?std.json.Parsed(RegistryWire),
+
+    pub fn targetRegistry(self: *const OauthOperationStatePlan) Error!RegistryWire {
+        return if (self.target) |target| target.value else error.InvalidMutation;
+    }
+
+    pub fn takeTarget(self: *OauthOperationStatePlan) std.json.Parsed(RegistryWire) {
+        const target = self.target.?;
+        self.target = null;
+        return target;
+    }
+
+    pub fn deinit(self: *OauthOperationStatePlan) void {
+        if (self.target) |*target| target.deinit();
         self.* = undefined;
     }
 };
@@ -427,6 +525,10 @@ pub const RenameServerInput = struct {
     display_name: []const u8,
 };
 
+pub const ApproveConnectionInput = struct {
+    server_id: []const u8,
+};
+
 pub const SetServerEnabledInput = struct {
     server_id: []const u8,
     enabled: bool,
@@ -614,6 +716,8 @@ pub const ManagementPort = struct {
                 .kind = "streamable_http",
                 .url = input.url,
             },
+            .auth = .{ .kind = "none", .oauth = null },
+            .connection_approval = null,
             .tools = &.{},
         };
         if (serverProblem(server, self.limits) != null) return .rejected;
@@ -624,6 +728,7 @@ pub const ManagementPort = struct {
         return try self.prepareTarget(expected_generation, .{
             .schema_version = schema_version,
             .generation = expected_generation + 1,
+            .oauth_operation = if (base) |registry| registry.oauth_operation else null,
             .servers = servers,
         });
     }
@@ -645,6 +750,31 @@ pub const ManagementPort = struct {
         return try self.prepareTarget(expected_generation, .{
             .schema_version = schema_version,
             .generation = expected_generation + 1,
+            .oauth_operation = base.oauth_operation,
+            .servers = servers,
+        });
+    }
+
+    pub fn prepareApproveConnection(
+        self: *ManagementPort,
+        expected_generation: u64,
+        input: ApproveConnectionInput,
+    ) std.mem.Allocator.Error!MutationPreparation {
+        if (!self.mutationReady(expected_generation)) return .rejected;
+        const base = if (self.desired) |registry| registry.value else return .rejected;
+        const index = findServerIndex(base.servers, input.server_id) orelse return .rejected;
+        if (serverProblem(base.servers[index], self.limits)) |problem|
+            if (problem != .invalid_connection_approval) return .rejected;
+        const fingerprint = connectionFingerprint(base.servers[index]);
+        if (base.servers[index].connection_approval) |approval|
+            if (std.mem.eql(u8, approval.fingerprint, &fingerprint)) return .unchanged;
+        const servers = try self.allocator.dupe(ServerWire, base.servers);
+        defer self.allocator.free(servers);
+        servers[index].connection_approval = .{ .fingerprint = &fingerprint };
+        return try self.prepareTarget(expected_generation, .{
+            .schema_version = schema_version,
+            .generation = expected_generation + 1,
+            .oauth_operation = base.oauth_operation,
             .servers = servers,
         });
     }
@@ -661,11 +791,13 @@ pub const ManagementPort = struct {
         const servers = try self.allocator.dupe(ServerWire, base.servers);
         defer self.allocator.free(servers);
         servers[index].enabled = input.enabled;
-        if (input.enabled and serverProblem(servers[index], self.limits) != null)
+        if (input.enabled and (serverProblem(servers[index], self.limits) != null or
+            servers[index].connection_approval == null))
             return .rejected;
         return try self.prepareTarget(expected_generation, .{
             .schema_version = schema_version,
             .generation = expected_generation + 1,
+            .oauth_operation = base.oauth_operation,
             .servers = servers,
         });
     }
@@ -686,6 +818,7 @@ pub const ManagementPort = struct {
         return try self.prepareTarget(expected_generation, .{
             .schema_version = schema_version,
             .generation = expected_generation + 1,
+            .oauth_operation = base.oauth_operation,
             .servers = servers,
         });
     }
@@ -705,6 +838,7 @@ pub const ManagementPort = struct {
         return try self.prepareTarget(expected_generation, .{
             .schema_version = schema_version,
             .generation = expected_generation + 1,
+            .oauth_operation = base.oauth_operation,
             .servers = servers,
         });
     }
@@ -817,6 +951,7 @@ pub const ManagementPort = struct {
         return self.commitTarget(.{
             .schema_version = schema_version,
             .generation = expected_generation + 1,
+            .oauth_operation = if (base) |registry| registry.oauth_operation else null,
             .servers = target_servers,
         }, candidates.items);
     }
@@ -840,6 +975,7 @@ pub const ManagementPort = struct {
         return self.commitTarget(.{
             .schema_version = schema_version,
             .generation = expected_generation + 1,
+            .oauth_operation = base.oauth_operation,
             .servers = target_servers,
         }, &.{});
     }
@@ -975,6 +1111,14 @@ fn buildManagedServer(
         .negotiation = input.negotiation,
         .timeout_ms = input.timeout_ms,
         .transport = transport,
+        .auth = .{
+            .kind = if (transportCredentialReferenceCount(transport) == 0)
+                "none"
+            else
+                "static",
+            .oauth = null,
+        },
+        .connection_approval = null,
         .tools = input.tools,
     };
     if (serverProblem(server, limits) != null) return error.InvalidMutation;
@@ -1088,6 +1232,8 @@ pub const ServerProblem = enum {
     invalid_negotiation,
     invalid_timeout,
     invalid_transport,
+    invalid_authentication,
+    invalid_connection_approval,
     invalid_allowlist,
     invalid_credential_locator,
     credential_capacity_exceeded,
@@ -1096,7 +1242,9 @@ pub const ServerProblem = enum {
 pub const ServerPreparationState = union(enum) {
     eligible,
     disabled,
+    unapproved,
     needs_authentication,
+    reauth_required,
     invalid_catalog: ServerProblem,
 };
 
@@ -1195,7 +1343,9 @@ const DescriptorFingerprint = [32]u8;
 
 const AbsenceProof = union(enum) {
     disabled,
+    unapproved,
     needs_authentication: DescriptorFingerprint,
+    reauth_required: DescriptorFingerprint,
     invalid_catalog: struct {
         problem: ServerProblem,
         fingerprint: DescriptorFingerprint,
@@ -1247,8 +1397,12 @@ pub const RuntimeManifest = struct {
                 .state = switch (state) {
                     .eligible => .{ .loaded = descriptorFingerprint(server) },
                     .disabled => .{ .absent = .disabled },
+                    .unapproved => .{ .absent = .unapproved },
                     .needs_authentication => .{
                         .absent = .{ .needs_authentication = authenticationFingerprint(server) },
+                    },
+                    .reauth_required => .{
+                        .absent = .{ .reauth_required = authenticationFingerprint(server) },
                     },
                     .invalid_catalog => |problem| .{
                         .absent = .{ .invalid_catalog = .{
@@ -1290,7 +1444,9 @@ pub const RuntimeManifest = struct {
         if (desired) |registry| {
             for (registry.servers) |server| {
                 if (findManifestEntry(self.entries, server.id) != null) continue;
-                if (server.enabled) return .restart_required;
+                if (server.enabled and serverRuntimeAuthorizationReady(server) and
+                    serverProblem(server, limits) == null)
+                    return .restart_required;
             }
         }
         return .current;
@@ -1305,13 +1461,24 @@ fn entryCompatible(
     return switch (entry.state) {
         .loaded => |fingerprint| if (target) |server|
             server.enabled and
+                serverRuntimeAuthorizationReady(server) and
                 serverProblem(server, limits) == null and
                 std.mem.eql(u8, &fingerprint, &descriptorFingerprint(server))
         else
             false,
         .absent => |proof| switch (proof) {
             .disabled => if (target) |server| !server.enabled else true,
+            .unapproved => if (target) |server|
+                !server.enabled or server.connection_approval == null
+            else
+                true,
             .needs_authentication => |fingerprint| if (target) |server|
+                !server.enabled or
+                    serverProblem(server, limits) != null or
+                    std.mem.eql(u8, &fingerprint, &authenticationFingerprint(server))
+            else
+                true,
+            .reauth_required => |fingerprint| if (target) |server|
                 !server.enabled or
                     serverProblem(server, limits) != null or
                     std.mem.eql(u8, &fingerprint, &authenticationFingerprint(server))
@@ -1326,6 +1493,13 @@ fn entryCompatible(
             } else true,
         },
     };
+}
+
+fn serverRuntimeAuthorizationReady(server: ServerWire) bool {
+    if (server.connection_approval == null) return false;
+    if (server.auth.oauth) |oauth|
+        return std.mem.eql(u8, oauth.status, "ready");
+    return true;
 }
 
 fn findManifestEntry(
@@ -1343,6 +1517,50 @@ fn findServer(servers: []const ServerWire, id: []const u8) ?ServerWire {
     return null;
 }
 
+pub fn connectionFingerprint(server: ServerWire) [64]u8 {
+    var hash = Sha256.init(.{});
+    hashField(&hash, "metawork.mcp.connection-approval/v1");
+    hashField(&hash, server.negotiation);
+    hashField(&hash, server.auth.kind);
+    hashField(&hash, server.transport.kind);
+    hashOptionalField(&hash, server.transport.command);
+    hashInteger(&hash, server.transport.arguments.len);
+    for (server.transport.arguments) |argument|
+        hashOptionalField(&hash, argument.literal);
+    hashOptionalField(&hash, server.transport.cwd);
+    hashInteger(&hash, server.transport.environment.len);
+    for (server.transport.environment) |entry| hashField(&hash, entry.name);
+    hashOptionalField(&hash, server.transport.url);
+    hashInteger(&hash, server.transport.headers.len);
+    for (server.transport.headers) |entry| hashField(&hash, entry.name);
+    var digest: [32]u8 = undefined;
+    hash.final(&digest);
+    return std.fmt.bytesToHex(digest, .lower);
+}
+
+pub fn oauthConsentFingerprint(
+    server: ServerWire,
+    consent: OauthConsentWire,
+) ?[64]u8 {
+    var hash = Sha256.init(.{});
+    hashField(&hash, "metawork.mcp.oauth-consent/v1");
+    const connection = connectionFingerprint(server);
+    hashField(&hash, &connection);
+    const oauth = server.auth.oauth orelse return null;
+    hashField(&hash, oauth.registration.kind);
+    hashOptionalField(&hash, oauth.registration.client_id);
+    hashInteger(&hash, @intFromBool(oauth.registration.client_secret_required));
+    hashInteger(&hash, consent.client_credential_revision);
+    hashField(&hash, consent.resource);
+    hashField(&hash, consent.issuer);
+    hashInteger(&hash, consent.scopes.len);
+    for (consent.scopes) |scope| hashField(&hash, scope);
+    hashField(&hash, consent.redirect_uri);
+    var digest: [32]u8 = undefined;
+    hash.final(&digest);
+    return std.fmt.bytesToHex(digest, .lower);
+}
+
 fn descriptorFingerprint(server: ServerWire) DescriptorFingerprint {
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
     hashField(&hash, "metawork.mcp.runtime-descriptor/v1");
@@ -1350,6 +1568,15 @@ fn descriptorFingerprint(server: ServerWire) DescriptorFingerprint {
     hashField(&hash, server.negotiation);
     hashInteger(&hash, server.timeout_ms);
     hashTransport(&hash, server.transport);
+    hashField(&hash, server.auth.kind);
+    if (server.auth.oauth) |oauth| {
+        hashField(&hash, oauth.registration.kind);
+        hashOptionalField(&hash, oauth.registration.client_id);
+        if (oauth.consent) |consent| {
+            hashInteger(&hash, consent.epoch);
+            hashField(&hash, consent.fingerprint);
+        }
+    }
     var result: DescriptorFingerprint = undefined;
     hash.final(&result);
     return result;
@@ -1373,17 +1600,8 @@ fn validationFingerprint(server: ServerWire) DescriptorFingerprint {
 fn authenticationFingerprint(server: ServerWire) DescriptorFingerprint {
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
     hashField(&hash, "metawork.mcp.authentication-absence/v1");
-    var reference_count: usize = 0;
-    for (server.transport.arguments) |argument| {
-        if (argument.credential_ref != null) reference_count += 1;
-    }
-    for (server.transport.environment) |entry| {
-        if (entry.value.credential_ref != null) reference_count += 1;
-    }
-    for (server.transport.headers) |entry| {
-        if (entry.value.credential_ref != null) reference_count += 1;
-    }
-    hashInteger(&hash, reference_count);
+    hashField(&hash, server.auth.kind);
+    hashInteger(&hash, credentialReferenceCount(server));
     for (server.transport.arguments) |argument| {
         if (argument.credential_ref) |locator| hashField(&hash, locator);
     }
@@ -1392,6 +1610,14 @@ fn authenticationFingerprint(server: ServerWire) DescriptorFingerprint {
     }
     for (server.transport.headers) |entry| {
         if (entry.value.credential_ref) |locator| hashField(&hash, locator);
+    }
+    if (server.auth.oauth) |oauth| {
+        hashField(&hash, oauth.status);
+        hashOptionalField(&hash, oauth.registration.client_secret_ref);
+        if (oauth.grant) |grant| {
+            hashField(&hash, grant.access_token_ref);
+            hashOptionalField(&hash, grant.refresh_token_ref);
+        }
     }
     var result: DescriptorFingerprint = undefined;
     hash.final(&result);
@@ -1483,6 +1709,26 @@ pub fn prepare(
             server_states[index] = .disabled;
             continue;
         }
+        if (registry.value.oauth_operation) |operation| {
+            if (std.mem.eql(u8, operation.server_id, server.id)) {
+                server_states[index] = .reauth_required;
+                continue;
+            }
+        }
+        if (server.connection_approval == null) {
+            server_states[index] = .unapproved;
+            continue;
+        }
+        if (server.auth.oauth) |oauth| {
+            if (std.mem.eql(u8, oauth.status, "reauth_required")) {
+                server_states[index] = .reauth_required;
+                continue;
+            }
+            if (!std.mem.eql(u8, oauth.status, "ready")) {
+                server_states[index] = .needs_authentication;
+                continue;
+            }
+        }
         const resolution = resolveServerCredentials(
             allocator,
             server,
@@ -1565,6 +1811,15 @@ fn serverReferencesCredential(server: ServerWire, locator: []const u8) bool {
     for (server.transport.headers) |entry|
         if (entry.value.credential_ref) |candidate|
             if (std.mem.eql(u8, candidate, locator)) return true;
+    if (server.auth.oauth) |oauth| {
+        if (oauth.registration.client_secret_ref) |candidate|
+            if (std.mem.eql(u8, candidate, locator)) return true;
+        if (oauth.grant) |grant| {
+            if (std.mem.eql(u8, grant.access_token_ref, locator)) return true;
+            if (grant.refresh_token_ref) |candidate|
+                if (std.mem.eql(u8, candidate, locator)) return true;
+        }
+    }
     return false;
 }
 
@@ -1591,6 +1846,33 @@ fn resolveServerCredentials(
     for (server.transport.headers) |entry| {
         if (entry.value.credential_ref) |locator| {
             ready = (try resolveCredential(allocator, locator, resolver, limits, credentials)) and ready;
+        }
+    }
+    if (server.auth.oauth) |oauth| {
+        if (oauth.registration.client_secret_ref) |locator|
+            ready = (try resolveCredential(
+                allocator,
+                locator,
+                resolver,
+                limits,
+                credentials,
+            )) and ready;
+        if (oauth.grant) |grant| {
+            ready = (try resolveCredential(
+                allocator,
+                grant.access_token_ref,
+                resolver,
+                limits,
+                credentials,
+            )) and ready;
+            if (grant.refresh_token_ref) |locator|
+                ready = (try resolveCredential(
+                    allocator,
+                    locator,
+                    resolver,
+                    limits,
+                    credentials,
+                )) and ready;
         }
     }
     return ready;
@@ -1655,6 +1937,32 @@ fn validateResolvedServerCredentials(
         }
     } else return .unusable;
 
+    if (server.auth.oauth) |oauth| {
+        if (oauth.registration.client_secret_ref) |locator| {
+            const secret = resolvedCredential(credentials, locator) orelse return .unusable;
+            if (!validHttpHeaderCredential(secret)) return .unusable;
+            if (try appendUniqueSecret(allocator, &unique_secrets, secret))
+                total_bytes = std.math.add(usize, total_bytes, secret.len) catch
+                    return .capacity_exceeded;
+        }
+        const grant = oauth.grant orelse return .unusable;
+        const access_token = resolvedCredential(
+            credentials,
+            grant.access_token_ref,
+        ) orelse return .unusable;
+        if (!validHttpHeaderCredential(access_token)) return .unusable;
+        if (try appendUniqueSecret(allocator, &unique_secrets, access_token))
+            total_bytes = std.math.add(usize, total_bytes, access_token.len) catch
+                return .capacity_exceeded;
+        if (grant.refresh_token_ref) |locator| {
+            const refresh_token = resolvedCredential(credentials, locator) orelse return .unusable;
+            if (!validHttpHeaderCredential(refresh_token)) return .unusable;
+            if (try appendUniqueSecret(allocator, &unique_secrets, refresh_token))
+                total_bytes = std.math.add(usize, total_bytes, refresh_token.len) catch
+                    return .capacity_exceeded;
+        }
+    }
+
     if (unique_secrets.items.len > limits.max_runtime_secrets_per_server or
         total_bytes > limits.max_runtime_secret_bytes_per_server)
         return .capacity_exceeded;
@@ -1702,8 +2010,35 @@ pub fn decode(
     input: []const u8,
     limits: Limits,
 ) (Error || std.mem.Allocator.Error)!std.json.Parsed(RegistryWire) {
+    return switch (try registrySourceSchemaVersion(allocator, input)) {
+        schema_version => decodeCurrent(allocator, input, limits),
+        1 => migrateLegacyRegistry(allocator, input, limits),
+        else => error.RegistryCorrupt,
+    };
+}
+
+pub fn registrySourceSchemaVersion(
+    allocator: std.mem.Allocator,
+    input: []const u8,
+) (Error || std.mem.Allocator.Error)!u8 {
     if (input.len == 0) return error.RegistryEmpty;
     if (input.len > max_store_bytes) return error.RegistryTooLarge;
+    const SchemaProbe = struct { schema_version: u8 };
+    var probe = std.json.parseFromSlice(
+        SchemaProbe,
+        allocator,
+        input,
+        .{ .ignore_unknown_fields = true },
+    ) catch return error.RegistryCorrupt;
+    defer probe.deinit();
+    return probe.value.schema_version;
+}
+
+fn decodeCurrent(
+    allocator: std.mem.Allocator,
+    input: []const u8,
+    limits: Limits,
+) (Error || std.mem.Allocator.Error)!std.json.Parsed(RegistryWire) {
     var parsed = std.json.parseFromSlice(
         RegistryWire,
         allocator,
@@ -1714,6 +2049,55 @@ pub fn decode(
     validateRegistryIdentity(&parsed.value, limits) catch
         return error.RegistryCorrupt;
     return parsed;
+}
+
+fn migrateLegacyRegistry(
+    allocator: std.mem.Allocator,
+    input: []const u8,
+    limits: Limits,
+) (Error || std.mem.Allocator.Error)!std.json.Parsed(RegistryWire) {
+    var legacy = std.json.parseFromSlice(
+        LegacyRegistryWire,
+        allocator,
+        input,
+        .{ .ignore_unknown_fields = false, .allocate = .alloc_always },
+    ) catch return error.RegistryCorrupt;
+    defer legacy.deinit();
+    if (legacy.value.schema_version != 1) return error.RegistryCorrupt;
+
+    const servers = try allocator.alloc(ServerWire, legacy.value.servers.len);
+    defer allocator.free(servers);
+    for (legacy.value.servers, 0..) |server, index| {
+        const has_credentials = transportCredentialReferenceCount(server.transport) != 0;
+        servers[index] = .{
+            .id = server.id,
+            .namespace = server.namespace,
+            .display_name = server.display_name,
+            .enabled = false,
+            .negotiation = server.negotiation,
+            .timeout_ms = server.timeout_ms,
+            .transport = server.transport,
+            .auth = .{
+                .kind = if (has_credentials) "static" else "none",
+                .oauth = null,
+            },
+            .connection_approval = null,
+            .tools = server.tools,
+        };
+    }
+    const migrated: RegistryWire = .{
+        .schema_version = schema_version,
+        .generation = legacy.value.generation,
+        .oauth_operation = null,
+        .servers = servers,
+    };
+    const buffer = try allocator.alloc(u8, max_store_bytes);
+    defer allocator.free(buffer);
+    const encoded = encode(buffer, migrated, limits) catch |err| switch (err) {
+        error.RegistryTooLarge => return error.RegistryTooLarge,
+        else => return error.RegistryCorrupt,
+    };
+    return decodeCurrent(allocator, encoded, limits);
 }
 
 pub fn encode(output: []u8, registry: RegistryWire, limits: Limits) Error![]const u8 {
@@ -1778,6 +2162,31 @@ pub fn planMutation(
     candidate_locators: []const []const u8,
     limits: Limits,
 ) (Error || std.mem.Allocator.Error)!?MutationPlan {
+    return planMutationWithMode(
+        allocator,
+        base,
+        target,
+        expected_generation,
+        candidate_locators,
+        limits,
+        .normal,
+    );
+}
+
+const MutationMode = enum {
+    normal,
+    oauth_recovery,
+};
+
+fn planMutationWithMode(
+    allocator: std.mem.Allocator,
+    base: ?RegistryWire,
+    target: RegistryWire,
+    expected_generation: u64,
+    candidate_locators: []const []const u8,
+    limits: Limits,
+    mode: MutationMode,
+) (Error || std.mem.Allocator.Error)!?MutationPlan {
     const base_generation = if (base) |registry| registry.generation else 0;
     if (base_generation != expected_generation) return error.GenerationMismatch;
     if (base_generation == std.math.maxInt(u64)) return error.GenerationExhausted;
@@ -1786,7 +2195,7 @@ pub fn planMutation(
     if (base) |registry| {
         validateRegistryIdentity(&registry, limits) catch return error.InvalidMutation;
     }
-    validateMutationTransition(base, &target, limits) catch
+    validateMutationTransition(base, &target, limits, mode) catch
         return error.InvalidMutation;
     if (base) |registry|
         if (registryContentEqual(registry, target) and candidate_locators.len == 0)
@@ -1848,7 +2257,7 @@ pub fn planMutation(
         retired_write += 1;
     }
     const transaction: TransactionWire = .{
-        .schema_version = schema_version,
+        .schema_version = transaction_schema_version,
         .base_generation = base_generation,
         .target_generation = target.generation,
         .candidate_locators = owned_candidates,
@@ -1866,8 +2275,35 @@ fn validateMutationTransition(
     base: ?RegistryWire,
     target: *const RegistryWire,
     limits: Limits,
+    mode: MutationMode,
 ) !void {
     try validateRegistryIdentity(target, limits);
+    if (base) |base_registry| {
+        switch (mode) {
+            .normal => {
+                if (!optionalOauthOperationEqual(
+                    base_registry.oauth_operation,
+                    target.oauth_operation,
+                )) return error.Invalid;
+                if (base_registry.oauth_operation) |operation| {
+                    const base_server = findServer(
+                        base_registry.servers,
+                        operation.server_id,
+                    ) orelse return error.Invalid;
+                    const target_server = findServer(
+                        target.servers,
+                        operation.server_id,
+                    ) orelse return error.Invalid;
+                    if (!serverWireEqual(base_server, target_server))
+                        return error.Invalid;
+                }
+            },
+            .oauth_recovery => try validateOauthRecoveryTransition(
+                base_registry,
+                target,
+            ),
+        }
+    } else if (target.oauth_operation != null) return error.Invalid;
     for (target.servers) |target_server| {
         if (serverProblem(target_server, limits) == null) continue;
         const base_registry = base orelse return error.Invalid;
@@ -1878,6 +2314,103 @@ fn validateMutationTransition(
         if (!serverWireEqual(base_registry.servers[base_index], target_server))
             return error.Invalid;
     }
+}
+
+fn validateOauthRecoveryTransition(
+    base: RegistryWire,
+    target: *const RegistryWire,
+) !void {
+    const operation = base.oauth_operation orelse return error.Invalid;
+    if (target.oauth_operation != null or base.servers.len != target.servers.len)
+        return error.Invalid;
+    for (base.servers) |base_server| {
+        const target_server = findServer(
+            target.servers,
+            base_server.id,
+        ) orelse return error.Invalid;
+        if (!std.mem.eql(u8, base_server.id, operation.server_id)) {
+            if (!serverWireEqual(base_server, target_server)) return error.Invalid;
+            continue;
+        }
+        var expected = base_server;
+        var expected_auth = base_server.auth;
+        var expected_oauth = expected_auth.oauth orelse return error.Invalid;
+        expected_oauth.status = "reauth_required";
+        expected_oauth.grant = null;
+        expected_auth.oauth = expected_oauth;
+        expected.auth = expected_auth;
+        if (!serverWireEqual(expected, target_server)) return error.Invalid;
+    }
+}
+
+pub fn planBeginOauthOperation(
+    allocator: std.mem.Allocator,
+    base: RegistryWire,
+    expected_generation: u64,
+    operation: OauthOperationWire,
+    limits: Limits,
+) (Error || std.mem.Allocator.Error)!OauthOperationStatePlan {
+    if (base.generation != expected_generation) return error.GenerationMismatch;
+    validateRegistryIdentity(&base, limits) catch return error.InvalidMutation;
+    if (base.oauth_operation != null) return error.InvalidMutation;
+    var target = base;
+    target.oauth_operation = operation;
+    validateRegistryIdentity(&target, limits) catch return error.InvalidMutation;
+    return .{ .target = try cloneRegistry(allocator, target, limits) };
+}
+
+pub fn planClearOauthOperation(
+    allocator: std.mem.Allocator,
+    base: RegistryWire,
+    expected_generation: u64,
+    expected_operation_id: []const u8,
+    limits: Limits,
+) (Error || std.mem.Allocator.Error)!OauthOperationStatePlan {
+    if (base.generation != expected_generation) return error.GenerationMismatch;
+    validateRegistryIdentity(&base, limits) catch return error.InvalidMutation;
+    const operation = base.oauth_operation orelse return error.InvalidMutation;
+    if (!std.mem.eql(u8, operation.id, expected_operation_id))
+        return error.InvalidMutation;
+    var target = base;
+    target.oauth_operation = null;
+    return .{ .target = try cloneRegistry(allocator, target, limits) };
+}
+
+/// Startup recovery for an OAuth request whose remote outcome cannot be
+/// proven. The marker is never replayed: the bound server loses its grant and
+/// moves to reauthorization while the ordinary credential journal retires any
+/// token locators no longer referenced by the new desired generation.
+pub fn planOauthOperationRecovery(
+    allocator: std.mem.Allocator,
+    base: RegistryWire,
+    limits: Limits,
+) (Error || std.mem.Allocator.Error)!MutationPlan {
+    const operation = base.oauth_operation orelse return error.InvalidMutation;
+    if (base.generation == std.math.maxInt(u64)) return error.GenerationExhausted;
+    const index = findServerIndex(base.servers, operation.server_id) orelse
+        return error.InvalidMutation;
+    const servers = try allocator.dupe(ServerWire, base.servers);
+    defer allocator.free(servers);
+    var auth = servers[index].auth;
+    var oauth = auth.oauth orelse return error.InvalidMutation;
+    oauth.status = "reauth_required";
+    oauth.grant = null;
+    auth.oauth = oauth;
+    servers[index].auth = auth;
+    return (try planMutationWithMode(
+        allocator,
+        base,
+        .{
+            .schema_version = schema_version,
+            .generation = base.generation + 1,
+            .oauth_operation = null,
+            .servers = servers,
+        },
+        base.generation,
+        &.{},
+        limits,
+        .oauth_recovery,
+    )) orelse return error.InvalidMutation;
 }
 
 fn collectCredentialReferences(
@@ -1899,6 +2432,20 @@ fn collectCredentialReferences(
             if (entry.value.credential_ref) |locator|
                 if (validCredentialLocator(locator, limits.max_credential_locator_bytes))
                     try appendUniqueText(allocator, references, locator);
+        if (server.auth.oauth) |oauth| {
+            if (oauth.registration.client_secret_ref) |locator|
+                if (validCredentialLocator(locator, limits.max_credential_locator_bytes))
+                    try appendUniqueText(allocator, references, locator);
+            if (oauth.grant) |grant| {
+                if (validCredentialLocator(
+                    grant.access_token_ref,
+                    limits.max_credential_locator_bytes,
+                )) try appendUniqueText(allocator, references, grant.access_token_ref);
+                if (grant.refresh_token_ref) |locator|
+                    if (validCredentialLocator(locator, limits.max_credential_locator_bytes))
+                        try appendUniqueText(allocator, references, locator);
+            }
+        }
     }
 }
 
@@ -1917,6 +2464,7 @@ fn containsText(values: []const []const u8, candidate: []const u8) bool {
 
 fn registryContentEqual(left: RegistryWire, right: RegistryWire) bool {
     if (left.schema_version != right.schema_version or
+        !optionalOauthOperationEqual(left.oauth_operation, right.oauth_operation) or
         left.servers.len != right.servers.len)
         return false;
     for (left.servers, right.servers) |left_server, right_server|
@@ -1932,11 +2480,100 @@ fn serverWireEqual(left: ServerWire, right: ServerWire) bool {
         !std.mem.eql(u8, left.negotiation, right.negotiation) or
         left.timeout_ms != right.timeout_ms or
         !transportWireEqual(left.transport, right.transport) or
+        !authWireEqual(left.auth, right.auth) or
+        !optionalConnectionApprovalEqual(
+            left.connection_approval,
+            right.connection_approval,
+        ) or
         left.tools.len != right.tools.len)
         return false;
     for (left.tools, right.tools) |left_tool, right_tool|
         if (!std.mem.eql(u8, left_tool, right_tool)) return false;
     return true;
+}
+
+fn optionalConnectionApprovalEqual(
+    left: ?ConnectionApprovalWire,
+    right: ?ConnectionApprovalWire,
+) bool {
+    if (left == null or right == null) return left == null and right == null;
+    return std.mem.eql(u8, left.?.fingerprint, right.?.fingerprint);
+}
+
+fn authWireEqual(left: AuthWire, right: AuthWire) bool {
+    return std.mem.eql(u8, left.kind, right.kind) and
+        optionalOauthAuthorizationEqual(left.oauth, right.oauth);
+}
+
+fn optionalOauthAuthorizationEqual(
+    left: ?OauthAuthorizationWire,
+    right: ?OauthAuthorizationWire,
+) bool {
+    if (left == null or right == null) return left == null and right == null;
+    const left_oauth = left.?;
+    const right_oauth = right.?;
+    return std.mem.eql(u8, left_oauth.status, right_oauth.status) and
+        oauthRegistrationEqual(left_oauth.registration, right_oauth.registration) and
+        optionalOauthConsentEqual(left_oauth.consent, right_oauth.consent) and
+        optionalOauthGrantEqual(left_oauth.grant, right_oauth.grant);
+}
+
+fn oauthRegistrationEqual(
+    left: OauthRegistrationWire,
+    right: OauthRegistrationWire,
+) bool {
+    return std.mem.eql(u8, left.kind, right.kind) and
+        optionalTextEqual(left.client_id, right.client_id) and
+        left.client_secret_required == right.client_secret_required and
+        optionalTextEqual(left.client_secret_ref, right.client_secret_ref);
+}
+
+fn optionalOauthConsentEqual(left: ?OauthConsentWire, right: ?OauthConsentWire) bool {
+    if (left == null or right == null) return left == null and right == null;
+    const left_consent = left.?;
+    const right_consent = right.?;
+    return left_consent.epoch == right_consent.epoch and
+        left_consent.client_credential_revision == right_consent.client_credential_revision and
+        std.mem.eql(u8, left_consent.fingerprint, right_consent.fingerprint) and
+        std.mem.eql(u8, left_consent.resource, right_consent.resource) and
+        std.mem.eql(u8, left_consent.issuer, right_consent.issuer) and
+        stringSlicesEqual(left_consent.scopes, right_consent.scopes) and
+        std.mem.eql(u8, left_consent.redirect_uri, right_consent.redirect_uri);
+}
+
+fn optionalOauthGrantEqual(left: ?OauthGrantWire, right: ?OauthGrantWire) bool {
+    if (left == null or right == null) return left == null and right == null;
+    const left_grant = left.?;
+    const right_grant = right.?;
+    return left_grant.consent_epoch == right_grant.consent_epoch and
+        left_grant.token_revision == right_grant.token_revision and
+        std.mem.eql(u8, left_grant.access_token_ref, right_grant.access_token_ref) and
+        optionalTextEqual(left_grant.refresh_token_ref, right_grant.refresh_token_ref) and
+        left_grant.expires_at_unix_ms == right_grant.expires_at_unix_ms;
+}
+
+fn optionalOauthOperationEqual(
+    left: ?OauthOperationWire,
+    right: ?OauthOperationWire,
+) bool {
+    if (left == null or right == null) return left == null and right == null;
+    const left_operation = left.?;
+    const right_operation = right.?;
+    return std.mem.eql(u8, left_operation.id, right_operation.id) and
+        std.mem.eql(u8, left_operation.kind, right_operation.kind) and
+        std.mem.eql(u8, left_operation.server_id, right_operation.server_id) and
+        std.mem.eql(
+            u8,
+            left_operation.connection_fingerprint,
+            right_operation.connection_fingerprint,
+        ) and
+        std.mem.eql(
+            u8,
+            left_operation.consent_fingerprint,
+            right_operation.consent_fingerprint,
+        ) and
+        left_operation.consent_epoch == right_operation.consent_epoch and
+        left_operation.token_revision == right_operation.token_revision;
 }
 
 fn transportWireEqual(left: TransportWire, right: TransportWire) bool {
@@ -1991,7 +2628,7 @@ pub fn recoverCredentialTransaction(
 }
 
 fn validateTransaction(transaction: *const TransactionWire, limits: Limits) !void {
-    if (transaction.schema_version != schema_version or
+    if (transaction.schema_version != transaction_schema_version or
         transaction.base_generation == std.math.maxInt(u64) or
         transaction.target_generation != transaction.base_generation + 1 or
         limits.max_credential_locators == 0 or
@@ -2031,7 +2668,14 @@ pub fn serverProblem(server: ServerWire, limits: Limits) ?ServerProblem {
         for (server.tools[0..index]) |previous|
             if (std.mem.eql(u8, previous, tool)) return .invalid_allowlist;
     }
-    return validateTransport(server.transport, limits);
+    if (validateTransport(server.transport, limits)) |problem| return problem;
+    if (validateAuth(server, limits)) |problem| return problem;
+    if (server.connection_approval) |approval| {
+        if (!validFingerprint(approval.fingerprint) or
+            !std.mem.eql(u8, approval.fingerprint, &connectionFingerprint(server)))
+            return .invalid_connection_approval;
+    }
+    return null;
 }
 
 fn validateRegistryIdentity(registry: *const RegistryWire, limits: Limits) !void {
@@ -2041,6 +2685,8 @@ fn validateRegistryIdentity(registry: *const RegistryWire, limits: Limits) !void
         limits.max_runtime_secrets_per_server == 0 or
         limits.max_runtime_secret_bytes_per_server == 0)
         return error.Invalid;
+    if (registry.oauth_operation) |operation|
+        try validateOauthOperation(operation, registry.servers, limits);
     for (registry.servers, 0..) |server, index| {
         if (!validIdentifier(server.id, limits.max_identity_bytes) or
             !validNamespace(server.namespace, limits.max_namespace_bytes) or
@@ -2063,15 +2709,198 @@ fn validateRegistryIdentity(registry: *const RegistryWire, limits: Limits) !void
     }
 }
 
+fn validateAuth(server: ServerWire, limits: Limits) ?ServerProblem {
+    const transport_credentials = transportCredentialReferenceCount(server.transport);
+    if (std.mem.eql(u8, server.auth.kind, "none")) {
+        if (server.auth.oauth != null or transport_credentials != 0)
+            return .invalid_authentication;
+        return null;
+    }
+    if (std.mem.eql(u8, server.auth.kind, "static")) {
+        if (server.auth.oauth != null or transport_credentials == 0)
+            return .invalid_authentication;
+        return null;
+    }
+    if (!std.mem.eql(u8, server.auth.kind, "oauth") or
+        !std.mem.eql(u8, server.transport.kind, "streamable_http") or
+        server.transport.headers.len != 0)
+        return .invalid_authentication;
+    const oauth = server.auth.oauth orelse return .invalid_authentication;
+    if (!validateOauthRegistration(oauth.registration, limits))
+        return .invalid_authentication;
+    if (oauth.consent != null and server.connection_approval == null)
+        return .invalid_authentication;
+    const consent_valid = if (oauth.consent) |consent|
+        validateOauthConsent(server, consent, limits)
+    else
+        true;
+    if (!consent_valid) return .invalid_authentication;
+    if (oauth.grant) |grant| {
+        const consent = oauth.consent orelse return .invalid_authentication;
+        if (grant.consent_epoch != consent.epoch or grant.token_revision == 0 or
+            !validCredentialLocator(
+                grant.access_token_ref,
+                limits.max_credential_locator_bytes,
+            ) or
+            (grant.refresh_token_ref != null and !validCredentialLocator(
+                grant.refresh_token_ref.?,
+                limits.max_credential_locator_bytes,
+            )) or
+            (grant.refresh_token_ref != null and std.mem.eql(
+                u8,
+                grant.access_token_ref,
+                grant.refresh_token_ref.?,
+            )) or
+            (grant.expires_at_unix_ms != null and grant.expires_at_unix_ms.? == 0))
+            return .invalid_authentication;
+    }
+    if (std.mem.eql(u8, oauth.status, "client_registration_required")) {
+        if (!std.mem.eql(u8, oauth.registration.kind, "dynamic_registration") or
+            oauth.registration.client_id != null or
+            oauth.registration.client_secret_required or
+            oauth.registration.client_secret_ref != null or
+            oauth.consent != null or oauth.grant != null)
+            return .invalid_authentication;
+    } else if (std.mem.eql(u8, oauth.status, "consent_required")) {
+        if (oauth.registration.client_id == null or
+            (oauth.registration.client_secret_required and
+                oauth.registration.client_secret_ref == null) or
+            oauth.consent != null or oauth.grant != null)
+            return .invalid_authentication;
+    } else if (std.mem.eql(u8, oauth.status, "awaiting_tokens")) {
+        if (oauth.consent == null or oauth.grant != null)
+            return .invalid_authentication;
+    } else if (std.mem.eql(u8, oauth.status, "ready")) {
+        if (oauth.consent == null or oauth.grant == null)
+            return .invalid_authentication;
+    } else if (std.mem.eql(u8, oauth.status, "reauth_required")) {
+        if (oauth.grant != null) return .invalid_authentication;
+    } else return .invalid_authentication;
+    return null;
+}
+
+fn validateOauthRegistration(
+    registration: OauthRegistrationWire,
+    limits: Limits,
+) bool {
+    if (registration.client_id) |client_id|
+        if (!validText(client_id, limits.max_oauth_client_id_bytes, false)) return false;
+    if (registration.client_secret_ref) |locator|
+        if (!validCredentialLocator(locator, limits.max_credential_locator_bytes)) return false;
+    if (!registration.client_secret_required and registration.client_secret_ref != null)
+        return false;
+    if (std.mem.eql(u8, registration.kind, "pre_registered"))
+        return registration.client_id != null;
+    if (std.mem.eql(u8, registration.kind, "dynamic_registration"))
+        return registration.client_secret_ref == null or registration.client_id != null;
+    return false;
+}
+
+fn validateOauthConsent(
+    server: ServerWire,
+    consent: OauthConsentWire,
+    limits: Limits,
+) bool {
+    const oauth = server.auth.oauth orelse return false;
+    if (oauth.registration.client_id == null or
+        (oauth.registration.client_secret_required and
+            oauth.registration.client_secret_ref == null))
+        return false;
+    if (consent.epoch == 0 or consent.client_credential_revision == 0 or
+        !validFingerprint(consent.fingerprint) or
+        !validEndpoint(consent.resource, limits.max_oauth_uri_bytes) or
+        !validHttpsUri(consent.issuer, limits.max_oauth_uri_bytes) or
+        !validEndpoint(consent.redirect_uri, limits.max_oauth_uri_bytes) or
+        consent.scopes.len > limits.max_oauth_scopes)
+        return false;
+    for (consent.scopes, 0..) |scope, index| {
+        if (!validOauthScope(scope, limits.max_oauth_scope_bytes)) return false;
+        if (index != 0 and std.mem.order(u8, consent.scopes[index - 1], scope) != .lt)
+            return false;
+    }
+    const fingerprint = oauthConsentFingerprint(server, consent) orelse return false;
+    return std.mem.eql(u8, consent.fingerprint, &fingerprint);
+}
+
+fn validateOauthOperation(
+    operation: OauthOperationWire,
+    servers: []const ServerWire,
+    limits: Limits,
+) !void {
+    if (!validIdentifier(operation.id, limits.max_identity_bytes) or
+        !validIdentifier(operation.server_id, limits.max_identity_bytes) or
+        !oneOf(
+            operation.kind,
+            &.{ "dynamic_registration", "code_exchange", "refresh" },
+        ) or
+        !validFingerprint(operation.connection_fingerprint) or
+        !validFingerprint(operation.consent_fingerprint) or
+        operation.consent_epoch == 0)
+        return error.Invalid;
+    const server = findServer(servers, operation.server_id) orelse return error.Invalid;
+    const approval = server.connection_approval orelse return error.Invalid;
+    const current_connection = connectionFingerprint(server);
+    if (!std.mem.eql(
+        u8,
+        operation.connection_fingerprint,
+        approval.fingerprint,
+    ) or !std.mem.eql(
+        u8,
+        approval.fingerprint,
+        &current_connection,
+    )) return error.Invalid;
+    const oauth = server.auth.oauth orelse return error.Invalid;
+    if (serverProblem(server, limits) != null) return error.Invalid;
+    if (std.mem.eql(u8, operation.kind, "dynamic_registration")) {
+        if (!std.mem.eql(u8, oauth.registration.kind, "dynamic_registration") or
+            oauth.registration.client_id != null or
+            oauth.registration.client_secret_required)
+            return error.Invalid;
+    } else if (std.mem.eql(u8, operation.kind, "code_exchange")) {
+        if (!std.mem.eql(u8, oauth.status, "awaiting_tokens"))
+            return error.Invalid;
+    } else if (!std.mem.eql(u8, oauth.status, "ready")) return error.Invalid;
+    if (std.mem.eql(u8, operation.kind, "refresh")) {
+        if (operation.token_revision == null or operation.token_revision.? == 0)
+            return error.Invalid;
+    } else if (operation.token_revision != null) return error.Invalid;
+    if (!std.mem.eql(u8, operation.kind, "dynamic_registration")) {
+        const consent = oauth.consent orelse return error.Invalid;
+        if (consent.epoch != operation.consent_epoch or
+            !std.mem.eql(
+                u8,
+                consent.fingerprint,
+                operation.consent_fingerprint,
+            )) return error.Invalid;
+        if (std.mem.eql(u8, operation.kind, "refresh")) {
+            const grant = oauth.grant orelse return error.Invalid;
+            if (grant.token_revision != operation.token_revision.?)
+                return error.Invalid;
+        }
+    }
+}
+
 fn credentialReferenceCount(server: ServerWire) usize {
+    var count = transportCredentialReferenceCount(server.transport);
+    if (server.auth.oauth) |oauth| {
+        if (oauth.registration.client_secret_ref != null) count += 1;
+        if (oauth.grant) |grant| {
+            count += 1;
+            if (grant.refresh_token_ref != null) count += 1;
+        }
+    }
+    return count;
+}
+
+fn transportCredentialReferenceCount(transport: TransportWire) usize {
     var count: usize = 0;
-    for (server.transport.arguments) |value| if (value.credential_ref != null) {
+    for (transport.arguments) |value| if (value.credential_ref != null) {
         count += 1;
     };
-    for (server.transport.environment) |entry| if (entry.value.credential_ref != null) {
+    for (transport.environment) |entry| if (entry.value.credential_ref != null) {
         count += 1;
     };
-    for (server.transport.headers) |entry| if (entry.value.credential_ref != null) {
+    for (transport.headers) |entry| if (entry.value.credential_ref != null) {
         count += 1;
     };
     return count;
@@ -2190,6 +3019,31 @@ fn validEndpoint(value: []const u8, max_bytes: usize) bool {
     return std.ascii.eqlIgnoreCase(authority.host, "localhost") or
         std.mem.eql(u8, authority.host, "127.0.0.1") or
         std.mem.eql(u8, authority.host, "[::1]");
+}
+
+fn validFingerprint(value: []const u8) bool {
+    if (value.len != 64) return false;
+    for (value) |byte| if (!std.ascii.isDigit(byte) and (byte < 'a' or byte > 'f'))
+        return false;
+    return true;
+}
+
+fn validOauthScope(value: []const u8, max_bytes: usize) bool {
+    if (value.len == 0 or value.len > max_bytes) return false;
+    for (value) |byte| if (byte != 0x21 and
+        (byte < 0x23 or byte > 0x5b) and
+        (byte < 0x5d or byte > 0x7e)) return false;
+    return true;
+}
+
+fn validHttpsUri(value: []const u8, max_bytes: usize) bool {
+    if (!validText(value, max_bytes, false)) return false;
+    for (value) |byte| if (byte <= 0x20 or byte == 0x7f or byte == '\\')
+        return false;
+    const uri = std.Uri.parse(value) catch return false;
+    return std.ascii.eqlIgnoreCase(uri.scheme, "https") and
+        uri.host != null and uri.user == null and uri.password == null and
+        uri.query == null and uri.fragment == null;
 }
 
 const EndpointAuthority = struct {
@@ -2549,6 +3403,36 @@ const test_limits: Limits = .{
     .max_runtime_secret_bytes_per_server = 16 * 1024,
 };
 
+fn approvedSchema2TestBytes(
+    allocator: std.mem.Allocator,
+    legacy_bytes: []const u8,
+) ![]u8 {
+    var legacy = try std.json.parseFromSlice(
+        LegacyRegistryWire,
+        allocator,
+        legacy_bytes,
+        .{ .ignore_unknown_fields = false, .allocate = .alloc_always },
+    );
+    defer legacy.deinit();
+    var migrated = try decode(allocator, legacy_bytes, test_limits);
+    defer migrated.deinit();
+    const fingerprints = try allocator.alloc([64]u8, migrated.value.servers.len);
+    defer allocator.free(fingerprints);
+    for (migrated.value.servers, legacy.value.servers, 0..) |*server, source, index| {
+        server.enabled = source.enabled;
+        if (source.enabled) {
+            fingerprints[index] = connectionFingerprint(server.*);
+            server.connection_approval = .{ .fingerprint = &fingerprints[index] };
+        }
+    }
+    const buffer = try allocator.alloc(u8, max_store_bytes);
+    defer allocator.free(buffer);
+    return try allocator.dupe(
+        u8,
+        try encode(buffer, migrated.value, test_limits),
+    );
+}
+
 test "registry strictly decodes valid stdio and HTTP configuration" {
     const bytes =
         \\{"schema_version":1,"generation":7,"servers":[{"id":"local-files","namespace":"files","display_name":"Files","enabled":true,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"stdio","command":"/usr/bin/files-mcp","arguments":[{"literal":"--root"},{"literal":"/tmp"}],"environment":[{"name":"FILES_TOKEN","value":{"credential_ref":"files/token"}}]},"tools":["read_file"]},{"id":"remote-search","namespace":"search","display_name":"Search","enabled":true,"negotiation":"compat_only","timeout_ms":2000,"transport":{"kind":"streamable_http","url":"https://mcp.example.test/rpc","headers":[{"name":"Authorization","value":{"credential_ref":"search/bearer"}}]},"tools":[]}]}
@@ -2626,6 +3510,14 @@ test "registry bounds the aggregate credential locator count" {
             std.testing.allocator,
             "{\"schema_version\":1,\"generation\":1,\"servers\":[{\"id\":\"env\",\"namespace\":\"env\",\"display_name\":\"Env\",\"enabled\":true,\"negotiation\":\"automatic\",\"timeout_ms\":1000,\"transport\":{\"kind\":\"stdio\",\"command\":\"tool\",\"environment\":[{\"name\":\"FIRST\",\"value\":{\"credential_ref\":\"secret/one\"}},{\"name\":\"SECOND\",\"value\":{\"credential_ref\":\"secret/two\"}}]}}]}",
             limits,
+        ),
+    );
+    try std.testing.expectError(
+        error.RegistryCorrupt,
+        decode(
+            std.testing.allocator,
+            "{\"schema_version\":2,\"generation\":1,\"servers\":[]}",
+            test_limits,
         ),
     );
 }
@@ -3831,6 +4723,18 @@ test "saved desired registry becomes effective only through cold-start preparati
         RuntimeAlignment.unknown,
         management.inspect().runtime_alignment,
     );
+    var approval = switch (try management.prepareApproveConnection(
+        1,
+        .{ .server_id = "remote" },
+    )) {
+        .prepared => |prepared| prepared,
+        else => return error.TestUnexpectedResult,
+    };
+    defer approval.deinit();
+    try std.testing.expectEqual(
+        ManagementOutcome.saved,
+        try management.commitPreparedMutation(&approval),
+    );
 
     const restored = (try store.loadAlloc(std.testing.allocator)).?;
     defer std.testing.allocator.free(restored);
@@ -3847,7 +4751,7 @@ test "saved desired registry becomes effective only through cold-start preparati
         test_limits,
     );
     defer restarted.deinit();
-    try std.testing.expectEqual(@as(?u64, 1), restarted.generation());
+    try std.testing.expectEqual(@as(?u64, 2), restarted.generation());
     try std.testing.expectEqual(PreparationState.available, restarted.state);
     try std.testing.expectEqual(
         ServerPreparationState.eligible,
@@ -3946,9 +4850,11 @@ test "preparation separates disabled invalid missing-auth and eligible servers" 
     const bytes =
         \\{"schema_version":1,"generation":9,"servers":[{"id":"disabled","namespace":"disabled","display_name":"Disabled","enabled":false,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"stdio","command":"tool"}},{"id":"invalid","namespace":"invalid","display_name":"Invalid","enabled":true,"negotiation":"automatic","timeout_ms":0,"transport":{"kind":"stdio","command":"tool"}},{"id":"missing","namespace":"missing","display_name":"Missing","enabled":true,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"stdio","command":"tool","environment":[{"name":"TOKEN","value":{"credential_ref":"missing/token"}}]}},{"id":"ready","namespace":"ready","display_name":"Ready","enabled":true,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"stdio","command":"tool","environment":[{"name":"TOKEN","value":{"credential_ref":"present/token"}}]}}]}
     ;
+    const current = try approvedSchema2TestBytes(std.testing.allocator, bytes);
+    defer std.testing.allocator.free(current);
     var prepared = try prepare(
         std.testing.allocator,
-        bytes,
+        current,
         true,
         false,
         .{ .available = true, .resolve_fn = Resolver.resolve },
@@ -3991,11 +4897,13 @@ test "preparation rejects unusable or over-capacity credentials per server" {
     const registry =
         \\{"schema_version":1,"generation":1,"servers":[{"id":"unsafe-http","namespace":"unsafe_http","display_name":"Unsafe HTTP","enabled":true,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"streamable_http","url":"https://mcp.example.test/rpc","headers":[{"name":"Authorization","value":{"credential_ref":"unsafe/header"}}]}},{"id":"unsafe-env","namespace":"unsafe_env","display_name":"Unsafe env","enabled":true,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"stdio","command":"tool","environment":[{"name":"TOKEN","value":{"credential_ref":"unsafe/environment"}}]}},{"id":"too-large","namespace":"too_large","display_name":"Too large","enabled":true,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"stdio","command":"tool","environment":[{"name":"ONE","value":{"credential_ref":"large/one"}},{"name":"TWO","value":{"credential_ref":"large/two"}}]}},{"id":"ready","namespace":"ready","display_name":"Ready","enabled":true,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"stdio","command":"tool"}}]}
     ;
+    const current = try approvedSchema2TestBytes(std.testing.allocator, registry);
+    defer std.testing.allocator.free(current);
     var limits = test_limits;
     limits.max_runtime_secret_bytes_per_server = 6;
     var prepared = try prepare(
         std.testing.allocator,
-        registry,
+        current,
         true,
         false,
         .{ .available = true, .resolve_fn = Resolver.resolve },
@@ -4046,9 +4954,11 @@ test "preparation keeps ordinary MCP empty or eligible without credential servic
     const bytes =
         \\{"schema_version":1,"generation":1,"servers":[{"id":"local","namespace":"local","display_name":"Local","enabled":true,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"stdio","command":"tool","arguments":[{"literal":"--safe"}]}}]}
     ;
+    const current = try approvedSchema2TestBytes(std.testing.allocator, bytes);
+    defer std.testing.allocator.free(current);
     var local = try prepare(
         std.testing.allocator,
-        bytes,
+        current,
         true,
         false,
         .{},
@@ -4063,9 +4973,11 @@ test "preparation makes credential backend failure globally unavailable" {
     const bytes =
         \\{"schema_version":1,"generation":1,"servers":[{"id":"remote","namespace":"remote","display_name":"Remote","enabled":true,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"streamable_http","url":"https://mcp.example.test/rpc","headers":[{"name":"Authorization","value":{"credential_ref":"remote/token"}}]}}]}
     ;
+    const current = try approvedSchema2TestBytes(std.testing.allocator, bytes);
+    defer std.testing.allocator.free(current);
     var prepared = try prepare(
         std.testing.allocator,
-        bytes,
+        current,
         true,
         false,
         .{},
@@ -4092,11 +5004,13 @@ test "preparation keeps resolver allocation failure fatal" {
     const bytes =
         \\{"schema_version":1,"generation":1,"servers":[{"id":"remote","namespace":"remote","display_name":"Remote","enabled":true,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"streamable_http","url":"https://mcp.example.test/rpc","headers":[{"name":"Authorization","value":{"credential_ref":"remote/token"}}]}}]}
     ;
+    const current = try approvedSchema2TestBytes(std.testing.allocator, bytes);
+    defer std.testing.allocator.free(current);
     try std.testing.expectError(
         error.OutOfMemory,
         prepare(
             std.testing.allocator,
-            bytes,
+            current,
             true,
             false,
             .{ .available = true, .resolve_fn = Resolver.resolve },
@@ -4121,9 +5035,11 @@ test "preparation does not retain partial credentials for ineligible servers" {
     const bytes =
         \\{"schema_version":1,"generation":1,"servers":[{"id":"partial","namespace":"partial","display_name":"Partial","enabled":true,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"stdio","command":"tool","environment":[{"name":"FIRST","value":{"credential_ref":"present/token"}},{"name":"SECOND","value":{"credential_ref":"missing/token"}}]}}]}
     ;
+    const current = try approvedSchema2TestBytes(std.testing.allocator, bytes);
+    defer std.testing.allocator.free(current);
     var prepared = try prepare(
         std.testing.allocator,
-        bytes,
+        current,
         true,
         false,
         .{ .available = true, .resolve_fn = Resolver.resolve },
@@ -4139,7 +5055,9 @@ fn expectRuntimeAlignment(
     bytes: []const u8,
     expected: RuntimeAlignment,
 ) !void {
-    var desired = try decode(std.testing.allocator, bytes, test_limits);
+    const current = try approvedSchema2TestBytes(std.testing.allocator, bytes);
+    defer std.testing.allocator.free(current);
+    var desired = try decode(std.testing.allocator, current, test_limits);
     defer desired.deinit();
     try std.testing.expectEqual(expected, manifest.alignment(desired.value, test_limits));
 }
@@ -4162,9 +5080,14 @@ test "runtime manifest derives compatibility from loaded and absence proofs" {
         \\{"id":"missing","namespace":"missing","display_name":"Missing","enabled":true,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"streamable_http","url":"https://missing.example.test/rpc","headers":[{"name":"Authorization","value":{"credential_ref":"missing/token"}}]}}
         \\]}
     ;
-    var preparation = try prepare(
+    const current_startup = try approvedSchema2TestBytes(
         std.testing.allocator,
         startup,
+    );
+    defer std.testing.allocator.free(current_startup);
+    var preparation = try prepare(
+        std.testing.allocator,
+        current_startup,
         true,
         false,
         .{ .available = true, .resolve_fn = Resolver.resolve },
@@ -4178,6 +5101,17 @@ test "runtime manifest derives compatibility from loaded and absence proofs" {
     defer manifest.deinit();
 
     try expectRuntimeAlignment(&manifest, startup, .current);
+    var approval_removed = try decode(
+        std.testing.allocator,
+        current_startup,
+        test_limits,
+    );
+    defer approval_removed.deinit();
+    approval_removed.value.servers[0].connection_approval = null;
+    try std.testing.expectEqual(
+        RuntimeAlignment.restart_required,
+        manifest.alignment(approval_removed.value, test_limits),
+    );
     try expectRuntimeAlignment(
         &manifest,
         \\{"schema_version":1,"generation":8,"servers":[{"id":"loaded","namespace":"loaded","display_name":"Renamed","enabled":true,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"streamable_http","url":"https://loaded.example.test/rpc"},"tools":["read","write"]},{"id":"disabled","namespace":"disabled","display_name":"Disabled","enabled":false,"negotiation":"modern_only","timeout_ms":5000,"transport":{"kind":"streamable_http","url":"https://other.example.test/rpc"}},{"id":"missing","namespace":"missing","display_name":"Renamed missing","enabled":true,"negotiation":"modern_only","timeout_ms":5000,"transport":{"kind":"streamable_http","url":"https://changed.example.test/rpc","headers":[{"name":"Authorization","value":{"credential_ref":"missing/token"}}]}},{"id":"new-disabled","namespace":"new-disabled","display_name":"New disabled","enabled":false,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"streamable_http","url":"https://new.example.test/rpc"}}]}
@@ -4206,9 +5140,14 @@ test "runtime manifest rejects enabled additions and invalidated absence proofs"
     const startup =
         \\{"schema_version":1,"generation":3,"servers":[{"id":"disabled","namespace":"disabled","display_name":"Disabled","enabled":false,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"streamable_http","url":"https://disabled.example.test/rpc"}},{"id":"invalid","namespace":"invalid","display_name":"","enabled":true,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"streamable_http","url":"https://invalid.example.test/rpc"}},{"id":"missing","namespace":"missing","display_name":"Missing","enabled":true,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"streamable_http","url":"https://missing.example.test/rpc","headers":[{"name":"Authorization","value":{"credential_ref":"missing/token"}}]}}]}
     ;
-    var preparation = try prepare(
+    const current_startup = try approvedSchema2TestBytes(
         std.testing.allocator,
         startup,
+    );
+    defer std.testing.allocator.free(current_startup);
+    var preparation = try prepare(
+        std.testing.allocator,
+        current_startup,
         true,
         false,
         .{ .available = true, .resolve_fn = Resolver.resolve },
@@ -4301,11 +5240,12 @@ test "runtime manifest proves a successfully prepared empty runtime" {
         RuntimeAlignment.current,
         manifest.alignment(null, test_limits),
     );
-    var enabled = try decode(
+    const enabled_bytes = try approvedSchema2TestBytes(
         std.testing.allocator,
         "{\"schema_version\":1,\"generation\":1,\"servers\":[{\"id\":\"new\",\"namespace\":\"new\",\"display_name\":\"New\",\"enabled\":true,\"negotiation\":\"automatic\",\"timeout_ms\":1000,\"transport\":{\"kind\":\"streamable_http\",\"url\":\"https://new.example.test/mcp\"}}]}",
-        test_limits,
     );
+    defer std.testing.allocator.free(enabled_bytes);
+    var enabled = try decode(std.testing.allocator, enabled_bytes, test_limits);
     defer enabled.deinit();
     try std.testing.expectEqual(
         RuntimeAlignment.restart_required,
@@ -4317,9 +5257,11 @@ test "runtime manifest candidate stays unpublished until ownership commit" {
     const bytes =
         \\{"schema_version":1,"generation":2,"servers":[{"id":"remote","namespace":"remote","display_name":"Remote","enabled":true,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"streamable_http","url":"https://remote.example.test/rpc"}}]}
     ;
+    const current_bytes = try approvedSchema2TestBytes(std.testing.allocator, bytes);
+    defer std.testing.allocator.free(current_bytes);
     var preparation = try prepare(
         std.testing.allocator,
-        bytes,
+        current_bytes,
         true,
         false,
         .{},
@@ -4366,4 +5308,470 @@ test "runtime manifest candidate stays unpublished until ownership commit" {
         RuntimeAlignment.current,
         current.inspect().runtime_alignment,
     );
+}
+
+test "schema 1 migration preserves identity but disables and unapproves every server" {
+    const bytes =
+        \\{"schema_version":1,"generation":7,"servers":[{"id":"local","namespace":"local","display_name":"Local","enabled":true,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"stdio","command":"tool"},"tools":["read"]},{"id":"remote","namespace":"remote","display_name":"Remote","enabled":true,"negotiation":"modern_only","timeout_ms":2000,"transport":{"kind":"streamable_http","url":"https://mcp.example.test/mcp","headers":[{"name":"Authorization","value":{"credential_ref":"remote/token"}}]}}]}
+    ;
+    var migrated = try decode(std.testing.allocator, bytes, test_limits);
+    defer migrated.deinit();
+    try std.testing.expectEqual(schema_version, migrated.value.schema_version);
+    try std.testing.expectEqual(@as(u64, 7), migrated.value.generation);
+    try std.testing.expect(migrated.value.oauth_operation == null);
+    try std.testing.expectEqual(@as(usize, 2), migrated.value.servers.len);
+    try std.testing.expectEqualStrings("local", migrated.value.servers[0].id);
+    try std.testing.expect(!migrated.value.servers[0].enabled);
+    try std.testing.expect(migrated.value.servers[0].connection_approval == null);
+    try std.testing.expectEqualStrings("none", migrated.value.servers[0].auth.kind);
+    try std.testing.expectEqualStrings("read", migrated.value.servers[0].tools[0]);
+    try std.testing.expect(!migrated.value.servers[1].enabled);
+    try std.testing.expect(migrated.value.servers[1].connection_approval == null);
+    try std.testing.expectEqualStrings("static", migrated.value.servers[1].auth.kind);
+    try std.testing.expectEqualStrings(
+        "remote/token",
+        migrated.value.servers[1].transport.headers[0].value.credential_ref.?,
+    );
+}
+
+test "schema 2 codec rejects unknown fields and inconsistent auth state" {
+    try std.testing.expectError(
+        error.RegistryCorrupt,
+        decode(
+            std.testing.allocator,
+            "{\"schema_version\":2,\"generation\":1,\"oauth_operation\":null,\"servers\":[],\"extra\":true}",
+            test_limits,
+        ),
+    );
+    var parsed = try decode(
+        std.testing.allocator,
+        "{\"schema_version\":2,\"generation\":1,\"oauth_operation\":null,\"servers\":[{\"id\":\"remote\",\"namespace\":\"remote\",\"display_name\":\"Remote\",\"enabled\":false,\"negotiation\":\"automatic\",\"timeout_ms\":1000,\"transport\":{\"kind\":\"streamable_http\",\"url\":\"https://mcp.example.test/mcp\",\"headers\":[{\"name\":\"Authorization\",\"value\":{\"credential_ref\":\"remote/token\"}}]},\"auth\":{\"kind\":\"none\",\"oauth\":null},\"connection_approval\":null,\"tools\":[]}]}",
+        test_limits,
+    );
+    defer parsed.deinit();
+    try std.testing.expectEqual(
+        ServerProblem.invalid_authentication,
+        serverProblem(parsed.value.servers[0], test_limits).?,
+    );
+}
+
+test "connection approval fingerprint binds only executable connection facts" {
+    var headers = [_]NamedValueWire{.{
+        .name = "Authorization",
+        .value = .{ .credential_ref = "secret/one" },
+    }};
+    const base: ServerWire = .{
+        .id = "remote",
+        .namespace = "remote",
+        .display_name = "Remote",
+        .enabled = false,
+        .negotiation = "automatic",
+        .timeout_ms = 1000,
+        .transport = .{
+            .kind = "streamable_http",
+            .url = "https://mcp.example.test/mcp",
+            .headers = &headers,
+        },
+        .auth = .{ .kind = "static", .oauth = null },
+        .connection_approval = null,
+        .tools = &.{},
+    };
+    const fingerprint = connectionFingerprint(base);
+    var presentation_change = base;
+    presentation_change.display_name = "Renamed";
+    presentation_change.enabled = true;
+    presentation_change.timeout_ms = 2000;
+    try std.testing.expectEqual(
+        fingerprint,
+        connectionFingerprint(presentation_change),
+    );
+    var changed_headers = [_]NamedValueWire{.{
+        .name = "Authorization",
+        .value = .{ .credential_ref = "secret/two" },
+    }};
+    var secret_rotation = base;
+    secret_rotation.transport.headers = &changed_headers;
+    try std.testing.expectEqual(fingerprint, connectionFingerprint(secret_rotation));
+    var endpoint_change = base;
+    endpoint_change.transport.url = "https://other.example.test/mcp";
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &fingerprint,
+        &connectionFingerprint(endpoint_change),
+    ));
+    var approved = base;
+    approved.connection_approval = .{ .fingerprint = &fingerprint };
+    approved.transport.url = "https://other.example.test/mcp";
+    try std.testing.expectEqual(
+        ServerProblem.invalid_connection_approval,
+        serverProblem(approved, test_limits).?,
+    );
+}
+
+test "OAuth consent fingerprint binds registration and authorization facts" {
+    var server: ServerWire = .{
+        .id = "oauth",
+        .namespace = "oauth",
+        .display_name = "OAuth",
+        .enabled = false,
+        .negotiation = "automatic",
+        .timeout_ms = 1000,
+        .transport = .{
+            .kind = "streamable_http",
+            .url = "https://mcp.example.test/mcp",
+        },
+        .auth = .{ .kind = "oauth", .oauth = .{
+            .status = "consent_required",
+            .registration = .{
+                .kind = "pre_registered",
+                .client_id = "client-one",
+                .client_secret_required = false,
+                .client_secret_ref = null,
+            },
+            .consent = null,
+            .grant = null,
+        } },
+        .connection_approval = null,
+        .tools = &.{},
+    };
+    const scopes = [_][]const u8{ "files.read", "files.write" };
+    var consent: OauthConsentWire = .{
+        .epoch = 1,
+        .fingerprint = "unused",
+        .resource = "https://mcp.example.test/mcp",
+        .issuer = "https://issuer.example.test",
+        .scopes = &scopes,
+        .redirect_uri = "http://127.0.0.1:43123/callback",
+        .client_credential_revision = 1,
+    };
+    const fingerprint = oauthConsentFingerprint(server, consent).?;
+    consent.client_credential_revision = 2;
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &fingerprint,
+        &oauthConsentFingerprint(server, consent).?,
+    ));
+    consent.client_credential_revision = 1;
+    var oauth = server.auth.oauth.?;
+    oauth.registration.client_id = "client-two";
+    server.auth.oauth = oauth;
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &fingerprint,
+        &oauthConsentFingerprint(server, consent).?,
+    ));
+}
+
+test "OAuth operation marker keeps generation and serializes only its server" {
+    var oauth_server: ServerWire = .{
+        .id = "oauth",
+        .namespace = "oauth",
+        .display_name = "OAuth",
+        .enabled = true,
+        .negotiation = "automatic",
+        .timeout_ms = 1000,
+        .transport = .{
+            .kind = "streamable_http",
+            .url = "https://mcp.example.test/mcp",
+        },
+        .auth = .{ .kind = "oauth", .oauth = .{
+            .status = "client_registration_required",
+            .registration = .{
+                .kind = "dynamic_registration",
+                .client_id = null,
+                .client_secret_required = false,
+                .client_secret_ref = null,
+            },
+            .consent = null,
+            .grant = null,
+        } },
+        .connection_approval = null,
+        .tools = &.{},
+    };
+    const connection = connectionFingerprint(oauth_server);
+    oauth_server.connection_approval = .{ .fingerprint = &connection };
+    const other: ServerWire = .{
+        .id = "other",
+        .namespace = "other",
+        .display_name = "Other",
+        .enabled = false,
+        .negotiation = "automatic",
+        .timeout_ms = 1000,
+        .transport = .{ .kind = "stdio", .command = "tool" },
+        .auth = .{ .kind = "none", .oauth = null },
+        .connection_approval = null,
+        .tools = &.{},
+    };
+    var servers = [_]ServerWire{ oauth_server, other };
+    const base: RegistryWire = .{
+        .schema_version = schema_version,
+        .generation = 4,
+        .oauth_operation = null,
+        .servers = &servers,
+    };
+    const operation: OauthOperationWire = .{
+        .id = "operation-1",
+        .kind = "dynamic_registration",
+        .server_id = "oauth",
+        .connection_fingerprint = &connection,
+        .consent_fingerprint = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        .consent_epoch = 1,
+        .token_revision = null,
+    };
+    var begin = try planBeginOauthOperation(
+        std.testing.allocator,
+        base,
+        4,
+        operation,
+        test_limits,
+    );
+    defer begin.deinit();
+    try std.testing.expectEqual(@as(u64, 4), (try begin.targetRegistry()).generation);
+
+    const marked = try begin.targetRegistry();
+    try std.testing.expectError(
+        error.InvalidMutation,
+        planMutation(
+            std.testing.allocator,
+            marked,
+            .{
+                .schema_version = schema_version,
+                .generation = 5,
+                .oauth_operation = null,
+                .servers = marked.servers,
+            },
+            4,
+            &.{},
+            test_limits,
+        ),
+    );
+    var same_server_changed = oauth_server;
+    same_server_changed.display_name = "Changed";
+    var blocked_servers = [_]ServerWire{ same_server_changed, other };
+    try std.testing.expectError(
+        error.InvalidMutation,
+        planMutation(
+            std.testing.allocator,
+            marked,
+            .{
+                .schema_version = schema_version,
+                .generation = 5,
+                .oauth_operation = marked.oauth_operation,
+                .servers = &blocked_servers,
+            },
+            4,
+            &.{},
+            test_limits,
+        ),
+    );
+    var other_changed = other;
+    other_changed.display_name = "Other renamed";
+    var allowed_servers = [_]ServerWire{ oauth_server, other_changed };
+    var allowed = (try planMutation(
+        std.testing.allocator,
+        marked,
+        .{
+            .schema_version = schema_version,
+            .generation = 5,
+            .oauth_operation = marked.oauth_operation,
+            .servers = &allowed_servers,
+        },
+        4,
+        &.{},
+        test_limits,
+    )).?;
+    allowed.deinit();
+    var clear = try planClearOauthOperation(
+        std.testing.allocator,
+        marked,
+        4,
+        "operation-1",
+        test_limits,
+    );
+    defer clear.deinit();
+    try std.testing.expectEqual(@as(u64, 4), (try clear.targetRegistry()).generation);
+    try std.testing.expect((try clear.targetRegistry()).oauth_operation == null);
+}
+
+test "OAuth operation recovery retires grant locators and never replays" {
+    var server: ServerWire = .{
+        .id = "oauth",
+        .namespace = "oauth",
+        .display_name = "OAuth",
+        .enabled = true,
+        .negotiation = "automatic",
+        .timeout_ms = 1000,
+        .transport = .{
+            .kind = "streamable_http",
+            .url = "https://mcp.example.test/mcp",
+        },
+        .auth = .{ .kind = "oauth", .oauth = .{
+            .status = "consent_required",
+            .registration = .{
+                .kind = "pre_registered",
+                .client_id = "client",
+                .client_secret_required = false,
+                .client_secret_ref = null,
+            },
+            .consent = null,
+            .grant = null,
+        } },
+        .connection_approval = null,
+        .tools = &.{},
+    };
+    const connection = connectionFingerprint(server);
+    server.connection_approval = .{ .fingerprint = &connection };
+    const scopes = [_][]const u8{"files.read"};
+    var consent: OauthConsentWire = .{
+        .epoch = 3,
+        .fingerprint = "unused",
+        .resource = "https://mcp.example.test/mcp",
+        .issuer = "https://issuer.example.test",
+        .scopes = &scopes,
+        .redirect_uri = "http://127.0.0.1:43123/callback",
+        .client_credential_revision = 1,
+    };
+    const consent_fingerprint = oauthConsentFingerprint(server, consent).?;
+    consent.fingerprint = &consent_fingerprint;
+    var oauth = server.auth.oauth.?;
+    oauth.status = "ready";
+    oauth.consent = consent;
+    oauth.grant = .{
+        .consent_epoch = 3,
+        .token_revision = 8,
+        .access_token_ref = "oauth/access-8",
+        .refresh_token_ref = "oauth/refresh-8",
+        .expires_at_unix_ms = null,
+    };
+    server.auth.oauth = oauth;
+    const operation: OauthOperationWire = .{
+        .id = "refresh-9",
+        .kind = "refresh",
+        .server_id = "oauth",
+        .connection_fingerprint = &connection,
+        .consent_fingerprint = &consent_fingerprint,
+        .consent_epoch = 3,
+        .token_revision = 8,
+    };
+    var servers = [_]ServerWire{server};
+    const registry: RegistryWire = .{
+        .schema_version = schema_version,
+        .generation = 11,
+        .oauth_operation = operation,
+        .servers = &servers,
+    };
+    var recovery = try planOauthOperationRecovery(
+        std.testing.allocator,
+        registry,
+        test_limits,
+    );
+    defer recovery.deinit();
+    const target = try recovery.targetRegistry();
+    try std.testing.expectEqual(@as(u64, 12), target.generation);
+    try std.testing.expect(target.oauth_operation == null);
+    try std.testing.expectEqualStrings(
+        "reauth_required",
+        target.servers[0].auth.oauth.?.status,
+    );
+    try std.testing.expect(target.servers[0].auth.oauth.?.grant == null);
+    try std.testing.expectEqual(@as(usize, 2), recovery.transaction.retired_locators.len);
+    try std.testing.expect(containsText(
+        recovery.transaction.retired_locators,
+        "oauth/access-8",
+    ));
+    try std.testing.expect(containsText(
+        recovery.transaction.retired_locators,
+        "oauth/refresh-8",
+    ));
+
+    const Effects = struct {
+        deleted: usize = 0,
+
+        fn probe(_: ?*anyopaque, _: []const u8) CredentialPresence {
+            return .missing;
+        }
+        fn create(_: ?*anyopaque, _: []const u8, _: []const u8) bool {
+            return false;
+        }
+        fn delete(context: ?*anyopaque, locator: []const u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            if (std.mem.eql(u8, locator, "oauth/access-8") or
+                std.mem.eql(u8, locator, "oauth/refresh-8"))
+                self.deleted += 1;
+            return true;
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const lock = try tmp.dir.createFile(std.testing.io, lock_file_name, .{
+        .read = true,
+        .truncate = false,
+    });
+    var store: FileStore = .{ .io = std.testing.io, .dir = tmp.dir, .lock_file = lock };
+    defer store.lock_file.close(std.testing.io);
+    var registry_buffer: [max_store_bytes]u8 = undefined;
+    try store.commit(try encode(&registry_buffer, registry, test_limits));
+    var effects: Effects = .{};
+    var coordinator: TransactionCoordinator = .{};
+    try std.testing.expectEqual(
+        MutationCommit.saved,
+        try coordinator.commit(
+            std.testing.allocator,
+            store.mutationPersistence(),
+            .{
+                .context = &effects,
+                .available = true,
+                .probe_fn = Effects.probe,
+                .create_fn = Effects.create,
+                .delete_fn = Effects.delete,
+            },
+            &recovery,
+            &.{},
+            test_limits,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 2), effects.deleted);
+    try std.testing.expect((try store.loadTransactionAlloc(std.testing.allocator)) == null);
+    const stored_bytes = (try store.loadAlloc(std.testing.allocator)).?;
+    defer std.testing.allocator.free(stored_bytes);
+    var stored = try decode(std.testing.allocator, stored_bytes, test_limits);
+    defer stored.deinit();
+    try std.testing.expectEqual(@as(u64, 12), stored.value.generation);
+    try std.testing.expect(stored.value.oauth_operation == null);
+    try std.testing.expectEqualStrings(
+        "reauth_required",
+        stored.value.servers[0].auth.oauth.?.status,
+    );
+}
+
+test "unapproved server never resolves credentials" {
+    const Resolver = struct {
+        var calls: usize = 0;
+
+        fn resolve(
+            _: ?*anyopaque,
+            allocator: std.mem.Allocator,
+            _: []const u8,
+        ) CredentialResolution {
+            calls += 1;
+            return .{ .value = allocator.dupe(u8, "secret") catch
+                return .out_of_memory };
+        }
+    };
+    Resolver.calls = 0;
+    const bytes =
+        \\{"schema_version":2,"generation":1,"oauth_operation":null,"servers":[{"id":"remote","namespace":"remote","display_name":"Remote","enabled":true,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"streamable_http","url":"https://mcp.example.test/mcp","headers":[{"name":"Authorization","value":{"credential_ref":"remote/token"}}]},"auth":{"kind":"static","oauth":null},"connection_approval":null,"tools":[]}]}
+    ;
+    var prepared = try prepare(
+        std.testing.allocator,
+        bytes,
+        true,
+        false,
+        .{ .available = true, .resolve_fn = Resolver.resolve },
+        test_limits,
+    );
+    defer prepared.deinit();
+    try std.testing.expect(prepared.server_states[0] == .unapproved);
+    try std.testing.expectEqual(@as(usize, 0), Resolver.calls);
+    try std.testing.expectEqual(@as(usize, 0), prepared.credentials.len);
 }

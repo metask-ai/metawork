@@ -4760,6 +4760,24 @@ pub const Workbench = struct {
         return try self.commitMcpMutation(mcp, &preparation);
     }
 
+    pub fn approveMcpConnection(
+        self: *Workbench,
+        expected_generation: u64,
+        input: mcp_configuration.ApproveConnectionInput,
+    ) Error!mcp_configuration.ManagementOutcome {
+        if (self.shutting_down) return .rejected;
+        const mcp = if (self.mcp) |*value| value else return .rejected;
+        if (mcp.refresh_job != null) return .rejected;
+        const management = if (mcp.management) |*value| value else return .rejected;
+        if (!mcpExpectedGenerationMatches(management, expected_generation))
+            return .stale_generation;
+        var preparation = try management.prepareApproveConnection(
+            expected_generation,
+            input,
+        );
+        return try self.commitMcpMutation(mcp, &preparation);
+    }
+
     pub fn setMcpServerEnabled(
         self: *Workbench,
         expected_generation: u64,
@@ -4952,7 +4970,7 @@ pub const Workbench = struct {
         _ = self;
         return switch (preparation) {
             .disabled => .disabled,
-            .needs_authentication => .needs_authentication,
+            .unapproved, .needs_authentication, .reauth_required => .needs_authentication,
             .invalid_catalog => .invalid_catalog,
             .eligible => status: {
                 if (mcp.activation_failed) break :status .@"unreachable";
@@ -13871,7 +13889,7 @@ test "MCP startup health commits a safe degraded Workbench projection" {
         u8,
         snapshot,
         "\"runtimeStatus\":\"unreachable\"",
-    ) != null);
+    ) == null);
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
@@ -13917,7 +13935,11 @@ test "MCP startup health commits a safe degraded Workbench projection" {
 
     try std.testing.expectEqual(
         mcp_configuration.ManagementOutcome.saved,
-        try workbench.setMcpServerEnabled(10, .{
+        try workbench.approveMcpConnection(10, .{ .server_id = "disabled" }),
+    );
+    try std.testing.expectEqual(
+        mcp_configuration.ManagementOutcome.saved,
+        try workbench.setMcpServerEnabled(11, .{
             .server_id = "disabled",
             .enabled = true,
         }),
@@ -13932,7 +13954,7 @@ test "MCP startup health commits a safe degraded Workbench projection" {
     );
     try std.testing.expectEqual(
         mcp_configuration.ManagementOutcome.saved,
-        try workbench.setMcpServerEnabled(11, .{
+        try workbench.setMcpServerEnabled(12, .{
             .server_id = "disabled",
             .enabled = false,
         }),
@@ -13949,13 +13971,13 @@ test "MCP startup health commits a safe degraded Workbench projection" {
         ManagementEffects.failRegistry;
     try std.testing.expectEqual(
         mcp_configuration.ManagementOutcome.rejected,
-        try workbench.setMcpServerEnabled(12, .{
+        try workbench.setMcpServerEnabled(13, .{
             .server_id = "disabled",
             .enabled = true,
         }),
     );
     try std.testing.expectEqual(
-        @as(?u64, 12),
+        @as(?u64, 13),
         workbench.inspectMcpDesiredConfiguration().?.desired_generation,
     );
     try std.testing.expectEqual(
@@ -13968,13 +13990,13 @@ test "MCP startup health commits a safe degraded Workbench projection" {
         ManagementEffects.unknownClear;
     try std.testing.expectEqual(
         mcp_configuration.ManagementOutcome.indeterminate,
-        try workbench.setMcpServerEnabled(12, .{
+        try workbench.setMcpServerEnabled(13, .{
             .server_id = "disabled",
             .enabled = true,
         }),
     );
     try std.testing.expectEqual(
-        @as(?u64, 13),
+        @as(?u64, 14),
         workbench.inspectMcpDesiredConfiguration().?.desired_generation,
     );
     try std.testing.expectEqual(
@@ -14017,7 +14039,7 @@ test "MCP startup health commits a safe degraded Workbench projection" {
     try std.testing.expect(workbench.mcp.?.refresh_job == null);
     try std.testing.expect(workbench.mcp.?.activation_failed);
     try std.testing.expectEqual(
-        @as(?u64, 13),
+        @as(?u64, 14),
         workbench.inspectMcpDesiredConfiguration().?.desired_generation,
     );
 
