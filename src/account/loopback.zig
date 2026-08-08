@@ -58,6 +58,23 @@ pub const Server = struct {
         expected_state: []const u8,
         deadline: std.Io.Clock.Timestamp,
     ) ServerError!oauth.Callback {
+        return self.waitValidated(
+            allocator,
+            expected_state,
+            .{},
+            deadline,
+        );
+    }
+
+    /// Shares the same single-use loopback listener with MCP while allowing
+    /// RFC 9207 issuer validation derived from validated AS metadata.
+    pub fn waitValidated(
+        self: *Server,
+        allocator: std.mem.Allocator,
+        expected_state: []const u8,
+        validation: oauth.CallbackValidation,
+        deadline: std.Io.Clock.Timestamp,
+    ) ServerError!oauth.Callback {
         var invalid_count: usize = 0;
         while (invalid_count < Limits.invalid_requests) {
             if (self.isStopRequested()) return error.Cancelled;
@@ -90,11 +107,20 @@ pub const Server = struct {
                 invalid_count += 1;
                 continue;
             }
-            var callback = oauth.parseCallbackTarget(
-                allocator,
-                request.head.target,
-                expected_state,
-            ) catch {
+            var callback = (if (validation.expected_issuer == null and
+                !validation.issuer_required)
+                oauth.parseCallbackTarget(
+                    allocator,
+                    request.head.target,
+                    expected_state,
+                )
+            else
+                oauth.parseCallbackTargetValidated(
+                    allocator,
+                    request.head.target,
+                    expected_state,
+                    validation,
+                )) catch {
                 respond(&request, .bad_request, "Invalid OAuth callback.") catch {};
                 invalid_count += 1;
                 continue;

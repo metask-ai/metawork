@@ -97,8 +97,10 @@ pub const OauthAuthorizationWire = struct {
 
 pub const OauthRegistrationWire = struct {
     kind: []const u8,
+    issuer: ?[]const u8,
     client_id: ?[]const u8,
-    client_secret_required: bool,
+    token_endpoint_auth_method: ?[]const u8,
+    client_credential_revision: u64,
     client_secret_ref: ?[]const u8,
 };
 
@@ -120,6 +122,13 @@ pub const OauthGrantWire = struct {
     expires_at_unix_ms: ?u64,
 };
 
+pub const OauthConsentDraftWire = struct {
+    resource: []const u8,
+    issuer: []const u8,
+    scopes: []const []const u8,
+    redirect_uri: []const u8,
+};
+
 pub const OauthOperationWire = struct {
     id: []const u8,
     kind: []const u8,
@@ -128,6 +137,7 @@ pub const OauthOperationWire = struct {
     consent_fingerprint: []const u8,
     consent_epoch: u64,
     token_revision: ?u64,
+    consent_draft: ?OauthConsentDraftWire = null,
 };
 
 const LegacyRegistryWire = struct {
@@ -224,6 +234,7 @@ pub const MutationPlan = struct {
 /// It deliberately carries no credential journal and does not advance the
 /// desired generation because no server target changed.
 pub const OauthOperationStatePlan = struct {
+    base: std.json.Parsed(RegistryWire),
     target: ?std.json.Parsed(RegistryWire),
 
     pub fn targetRegistry(self: *const OauthOperationStatePlan) Error!RegistryWire {
@@ -238,6 +249,7 @@ pub const OauthOperationStatePlan = struct {
 
     pub fn deinit(self: *OauthOperationStatePlan) void {
         if (self.target) |*target| target.deinit();
+        self.base.deinit();
         self.* = undefined;
     }
 };
@@ -494,6 +506,94 @@ pub const StaticAuthMode = enum {
     static,
 };
 
+pub const OauthClientPlan = union(enum) {
+    pre_registered: struct {
+        client_id: []const u8,
+        token_endpoint_auth_method: []const u8 = "none",
+    },
+    dynamic_registration,
+};
+
+pub const CreateOauthHttpServerInput = struct {
+    display_name: []const u8,
+    negotiation: []const u8 = "automatic",
+    timeout_ms: u32 = 30_000,
+    url: []const u8,
+    client: OauthClientPlan,
+};
+
+pub const UpdateOauthHttpConnectionInput = struct {
+    server_id: []const u8,
+    negotiation: []const u8,
+    timeout_ms: u32,
+    url: []const u8,
+    client: OauthClientPlan,
+};
+
+/// Host-only secure capture. Client secrets use the same locator journal as
+/// static credentials and are never accepted from Renderer or Bridge.
+pub const CaptureOauthClientSecretInput = struct {
+    server_id: []const u8,
+    secret: []u8,
+};
+
+/// Metadata-validated consent facts supplied by the Application OAuth owner.
+/// Scopes must already be a strictly sorted set.
+pub const OauthConsentInput = struct {
+    server_id: []const u8,
+    resource: []const u8,
+    issuer: []const u8,
+    scopes: []const []const u8,
+    redirect_uri: []const u8,
+};
+
+pub const CompleteDynamicRegistrationInput = struct {
+    operation_id: []const u8,
+    server_id: []const u8,
+    client_id: []const u8,
+    token_endpoint_auth_method: []const u8,
+    client_secret: ?[]u8 = null,
+};
+
+pub const CompleteCodeExchangeInput = struct {
+    operation_id: []const u8,
+    server_id: []const u8,
+    access_token: []u8,
+    refresh_token: ?[]u8 = null,
+    expires_at_unix_ms: ?u64 = null,
+};
+
+pub const BeginDynamicRegistrationInput = struct {
+    consent: OauthConsentInput,
+};
+
+pub const BeginCodeExchangeInput = struct {
+    server_id: []const u8,
+};
+
+pub const PreparedOauthOperationState = struct {
+    plan: OauthOperationStatePlan,
+
+    pub fn target(self: *const PreparedOauthOperationState) RegistryWire {
+        return self.plan.targetRegistry() catch unreachable;
+    }
+
+    pub fn deinit(self: *PreparedOauthOperationState) void {
+        self.plan.deinit();
+        self.* = undefined;
+    }
+};
+
+pub const OauthOperationPreparation = union(enum) {
+    rejected,
+    prepared: PreparedOauthOperationState,
+};
+
+const SecretCandidateSource = struct {
+    locator: []const u8,
+    secret: []const u8,
+};
+
 pub const CreateStdioServerInput = struct {
     display_name: []const u8,
     negotiation: []const u8 = "automatic",
@@ -729,6 +829,21 @@ pub const ManagementPort = struct {
         );
     }
 
+    pub fn prepareCreateOauthHttpServer(
+        self: *ManagementPort,
+        expected_generation: u64,
+        input: CreateOauthHttpServerInput,
+    ) std.mem.Allocator.Error!MutationPreparation {
+        return self.prepareCreateServerAuth(
+            expected_generation,
+            input.display_name,
+            input.negotiation,
+            input.timeout_ms,
+            .{ .kind = "streamable_http", .url = input.url },
+            oauthAuth(input.client),
+        );
+    }
+
     pub fn prepareCreateStdioServer(
         self: *ManagementPort,
         expected_generation: u64,
@@ -767,6 +882,25 @@ pub const ManagementPort = struct {
         transport: TransportWire,
         auth_mode: StaticAuthMode,
     ) std.mem.Allocator.Error!MutationPreparation {
+        return self.prepareCreateServerAuth(
+            expected_generation,
+            display_name,
+            negotiation,
+            timeout_ms,
+            transport,
+            staticAuth(auth_mode),
+        );
+    }
+
+    fn prepareCreateServerAuth(
+        self: *ManagementPort,
+        expected_generation: u64,
+        display_name: []const u8,
+        negotiation: []const u8,
+        timeout_ms: u32,
+        transport: TransportWire,
+        auth: AuthWire,
+    ) std.mem.Allocator.Error!MutationPreparation {
         const base = if (self.desired) |registry| registry.value else null;
         const base_servers = if (base) |registry| registry.servers else &.{};
         if (!self.mutationReady(expected_generation) or
@@ -797,7 +931,7 @@ pub const ManagementPort = struct {
             .negotiation = negotiation,
             .timeout_ms = timeout_ms,
             .transport = transport,
-            .auth = staticAuth(auth_mode),
+            .auth = auth,
             .connection_approval = null,
             .tools = &.{},
         };
@@ -839,6 +973,32 @@ pub const ManagementPort = struct {
             .headers = headers,
         };
         replacement.auth = staticAuth(input.auth_mode);
+        return self.prepareConnectionReplacement(
+            expected_generation,
+            base,
+            index,
+            replacement,
+        );
+    }
+
+    pub fn prepareUpdateOauthHttpConnection(
+        self: *ManagementPort,
+        expected_generation: u64,
+        input: UpdateOauthHttpConnectionInput,
+    ) std.mem.Allocator.Error!MutationPreparation {
+        if (!self.mutationReady(expected_generation)) return .rejected;
+        const base = if (self.desired) |registry| registry.value else return .rejected;
+        const index = findServerIndex(base.servers, input.server_id) orelse return .rejected;
+        if (!std.mem.eql(u8, base.servers[index].transport.kind, "streamable_http"))
+            return .rejected;
+        var replacement = base.servers[index];
+        replacement.negotiation = input.negotiation;
+        replacement.timeout_ms = input.timeout_ms;
+        replacement.transport = .{
+            .kind = "streamable_http",
+            .url = input.url,
+        };
+        replacement.auth = oauthAuth(input.client);
         return self.prepareConnectionReplacement(
             expected_generation,
             base,
@@ -1012,6 +1172,466 @@ pub const ManagementPort = struct {
         );
     }
 
+    pub fn prepareCaptureOauthClientSecret(
+        self: *ManagementPort,
+        expected_generation: u64,
+        input: CaptureOauthClientSecretInput,
+    ) std.mem.Allocator.Error!MutationPreparation {
+        defer std.crypto.secureZero(u8, input.secret);
+        if (!self.mutationReady(expected_generation) or input.secret.len == 0 or
+            input.secret.len > self.limits.max_credential_secret_bytes)
+            return .rejected;
+        const base = if (self.desired) |registry| registry.value else return .rejected;
+        const index = findServerIndex(base.servers, input.server_id) orelse return .rejected;
+        const existing = base.servers[index];
+        const oauth = existing.auth.oauth orelse return .rejected;
+        const method = oauth.registration.token_endpoint_auth_method orelse
+            return .rejected;
+        if (existing.connection_approval == null or
+            !std.mem.eql(u8, oauth.registration.kind, "pre_registered") or
+            std.mem.eql(u8, method, "none") or
+            base.oauth_operation != null)
+            return .rejected;
+        var locator_storage: [35]u8 = undefined;
+        const locator = self.freshCredentialLocator(base, &locator_storage) orelse
+            return .rejected;
+        if (oauth.registration.client_credential_revision == std.math.maxInt(u64))
+            return .rejected;
+        var replacement = existing;
+        var replacement_auth = existing.auth;
+        var replacement_oauth = oauth;
+        replacement_oauth.status = "consent_required";
+        replacement_oauth.registration.client_secret_ref = locator;
+        replacement_oauth.registration.client_credential_revision += 1;
+        replacement_oauth.consent = null;
+        replacement_oauth.grant = null;
+        replacement_auth.oauth = replacement_oauth;
+        replacement.auth = replacement_auth;
+        return self.prepareSecretTarget(
+            base,
+            index,
+            replacement,
+            locator,
+            input.secret,
+        );
+    }
+
+    pub fn prepareOauthConsent(
+        self: *ManagementPort,
+        expected_generation: u64,
+        input: OauthConsentInput,
+    ) std.mem.Allocator.Error!MutationPreparation {
+        if (!self.mutationReady(expected_generation)) return .rejected;
+        const base = if (self.desired) |registry| registry.value else return .rejected;
+        if (base.oauth_operation != null) return .rejected;
+        const index = findServerIndex(base.servers, input.server_id) orelse return .rejected;
+        const existing = base.servers[index];
+        const approval = existing.connection_approval orelse return .rejected;
+        if (!std.mem.eql(u8, approval.fingerprint, &connectionFingerprint(existing)))
+            return .rejected;
+        const oauth = existing.auth.oauth orelse return .rejected;
+        if (!std.mem.eql(u8, oauth.registration.kind, "pre_registered") or
+            oauth.registration.client_id == null)
+            return .rejected;
+        if (oauth.registration.issuer) |issuer|
+            if (!std.mem.eql(u8, issuer, input.issuer)) return .rejected;
+        const method = oauth.registration.token_endpoint_auth_method orelse
+            return .rejected;
+        if (!std.mem.eql(u8, method, "none") and
+            oauth.registration.client_secret_ref == null)
+            return .rejected;
+        const next_epoch = if (oauth.consent) |consent|
+            std.math.add(u64, consent.epoch, 1) catch return .rejected
+        else
+            1;
+        var replacement = existing;
+        var replacement_auth = existing.auth;
+        var replacement_oauth = oauth;
+        replacement_oauth.registration.issuer = input.issuer;
+        var consent: OauthConsentWire = .{
+            .epoch = next_epoch,
+            .fingerprint = "0000000000000000000000000000000000000000000000000000000000000000",
+            .resource = input.resource,
+            .issuer = input.issuer,
+            .scopes = input.scopes,
+            .redirect_uri = input.redirect_uri,
+            .client_credential_revision = oauth.registration.client_credential_revision,
+        };
+        replacement_oauth.status = "awaiting_tokens";
+        replacement_oauth.consent = consent;
+        replacement_oauth.grant = null;
+        replacement_auth.oauth = replacement_oauth;
+        replacement.auth = replacement_auth;
+        const fingerprint = oauthConsentFingerprint(replacement, consent) orelse
+            return .rejected;
+        consent.fingerprint = &fingerprint;
+        replacement_oauth.consent = consent;
+        replacement_auth.oauth = replacement_oauth;
+        replacement.auth = replacement_auth;
+        if (serverProblem(replacement, self.limits) != null) return .rejected;
+        const servers = try self.allocator.dupe(ServerWire, base.servers);
+        defer self.allocator.free(servers);
+        servers[index] = replacement;
+        return self.prepareTarget(expected_generation, .{
+            .schema_version = schema_version,
+            .generation = expected_generation + 1,
+            .oauth_operation = null,
+            .servers = servers,
+        });
+    }
+
+    pub fn prepareBeginDynamicRegistration(
+        self: *ManagementPort,
+        expected_generation: u64,
+        input: BeginDynamicRegistrationInput,
+    ) std.mem.Allocator.Error!OauthOperationPreparation {
+        if (!self.mutationReady(expected_generation)) return .rejected;
+        const base = if (self.desired) |registry| registry.value else return .rejected;
+        const index = findServerIndex(base.servers, input.consent.server_id) orelse return .rejected;
+        const server = base.servers[index];
+        const oauth = server.auth.oauth orelse return .rejected;
+        if (server.connection_approval == null or
+            !std.mem.eql(u8, oauth.status, "client_registration_required"))
+            return .rejected;
+        const draft: OauthConsentDraftWire = .{
+            .resource = input.consent.resource,
+            .issuer = input.consent.issuer,
+            .scopes = input.consent.scopes,
+            .redirect_uri = input.consent.redirect_uri,
+        };
+        if (!validateOauthConsentDraft(draft, self.limits)) return .rejected;
+        const epoch: u64 = 1;
+        const fingerprint = oauthConsentDraftFingerprint(server, epoch, draft) orelse
+            return .rejected;
+        var id_storage: [26]u8 = undefined;
+        const operation_id = self.freshOauthOperationId(&id_storage) orelse
+            return .rejected;
+        var plan = planBeginOauthOperation(
+            self.allocator,
+            base,
+            expected_generation,
+            .{
+                .id = operation_id,
+                .kind = "dynamic_registration",
+                .server_id = input.consent.server_id,
+                .connection_fingerprint = server.connection_approval.?.fingerprint,
+                .consent_fingerprint = &fingerprint,
+                .consent_epoch = epoch,
+                .token_revision = null,
+                .consent_draft = draft,
+            },
+            self.limits,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return .rejected,
+        };
+        errdefer plan.deinit();
+        return .{ .prepared = .{ .plan = plan } };
+    }
+
+    pub fn prepareBeginCodeExchange(
+        self: *ManagementPort,
+        expected_generation: u64,
+        input: BeginCodeExchangeInput,
+    ) std.mem.Allocator.Error!OauthOperationPreparation {
+        if (!self.mutationReady(expected_generation)) return .rejected;
+        const base = if (self.desired) |registry| registry.value else return .rejected;
+        const server = findServer(base.servers, input.server_id) orelse return .rejected;
+        const oauth = server.auth.oauth orelse return .rejected;
+        const consent = oauth.consent orelse return .rejected;
+        if (!std.mem.eql(u8, oauth.status, "awaiting_tokens") or
+            server.connection_approval == null)
+            return .rejected;
+        var id_storage: [26]u8 = undefined;
+        const operation_id = self.freshOauthOperationId(&id_storage) orelse
+            return .rejected;
+        var plan = planBeginOauthOperation(
+            self.allocator,
+            base,
+            expected_generation,
+            .{
+                .id = operation_id,
+                .kind = "code_exchange",
+                .server_id = input.server_id,
+                .connection_fingerprint = server.connection_approval.?.fingerprint,
+                .consent_fingerprint = consent.fingerprint,
+                .consent_epoch = consent.epoch,
+                .token_revision = null,
+                .consent_draft = null,
+            },
+            self.limits,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return .rejected,
+        };
+        errdefer plan.deinit();
+        return .{ .prepared = .{ .plan = plan } };
+    }
+
+    pub fn prepareCompleteDynamicRegistration(
+        self: *ManagementPort,
+        input: CompleteDynamicRegistrationInput,
+    ) std.mem.Allocator.Error!MutationPreparation {
+        defer if (input.client_secret) |secret| std.crypto.secureZero(u8, secret);
+        if (self.coordinator.health != .ready) return .rejected;
+        const base = if (self.desired) |registry| registry.value else return .rejected;
+        const operation = base.oauth_operation orelse return .rejected;
+        if (!std.mem.eql(u8, operation.id, input.operation_id) or
+            !std.mem.eql(u8, operation.kind, "dynamic_registration") or
+            !std.mem.eql(u8, operation.server_id, input.server_id))
+            return .rejected;
+        const draft = operation.consent_draft orelse return .rejected;
+        if (base.generation == std.math.maxInt(u64)) return .rejected;
+        const index = findServerIndex(base.servers, input.server_id) orelse return .rejected;
+        const existing = base.servers[index];
+        const method = input.token_endpoint_auth_method;
+        if (!oneOf(method, &.{ "none", "client_secret_basic", "client_secret_post" }) or
+            !validText(input.client_id, self.limits.max_oauth_client_id_bytes, false))
+            return .rejected;
+        const secret_required = !std.mem.eql(u8, method, "none");
+        if (secret_required != (input.client_secret != null)) return .rejected;
+        if (input.client_secret) |secret|
+            if (secret.len == 0 or secret.len > self.limits.max_credential_secret_bytes)
+                return .rejected;
+        var locator_storage: [35]u8 = undefined;
+        const secret_locator = if (input.client_secret != null)
+            self.freshCredentialLocator(base, &locator_storage) orelse return .rejected
+        else
+            null;
+        var replacement = existing;
+        var replacement_auth = existing.auth;
+        var oauth = existing.auth.oauth orelse return .rejected;
+        oauth.registration = .{
+            .kind = "dynamic_registration",
+            .issuer = draft.issuer,
+            .client_id = input.client_id,
+            .token_endpoint_auth_method = method,
+            .client_credential_revision = 1,
+            .client_secret_ref = secret_locator,
+        };
+        var consent: OauthConsentWire = .{
+            .epoch = operation.consent_epoch,
+            .fingerprint = "0000000000000000000000000000000000000000000000000000000000000000",
+            .resource = draft.resource,
+            .issuer = draft.issuer,
+            .scopes = draft.scopes,
+            .redirect_uri = draft.redirect_uri,
+            .client_credential_revision = 1,
+        };
+        oauth.status = "awaiting_tokens";
+        oauth.consent = consent;
+        oauth.grant = null;
+        replacement_auth.oauth = oauth;
+        replacement.auth = replacement_auth;
+        const fingerprint = oauthConsentFingerprint(replacement, consent) orelse
+            return .rejected;
+        consent.fingerprint = &fingerprint;
+        oauth.consent = consent;
+        replacement_auth.oauth = oauth;
+        replacement.auth = replacement_auth;
+        if (serverProblem(replacement, self.limits) != null) return .rejected;
+        const servers = try self.allocator.dupe(ServerWire, base.servers);
+        defer self.allocator.free(servers);
+        servers[index] = replacement;
+        var sources: [1]SecretCandidateSource = undefined;
+        const source_slice = if (input.client_secret) |secret| sources_slice: {
+            sources[0] = .{ .locator = secret_locator.?, .secret = secret };
+            break :sources_slice sources[0..1];
+        } else sources[0..0];
+        return self.prepareOauthResultTarget(base, servers, source_slice);
+    }
+
+    pub fn prepareCompleteCodeExchange(
+        self: *ManagementPort,
+        input: CompleteCodeExchangeInput,
+    ) std.mem.Allocator.Error!MutationPreparation {
+        defer std.crypto.secureZero(u8, input.access_token);
+        defer if (input.refresh_token) |secret| std.crypto.secureZero(u8, secret);
+        if (self.coordinator.health != .ready or input.access_token.len == 0 or
+            input.access_token.len > self.limits.max_credential_secret_bytes or
+            (input.expires_at_unix_ms != null and input.expires_at_unix_ms.? == 0))
+            return .rejected;
+        const base = if (self.desired) |registry| registry.value else return .rejected;
+        const operation = base.oauth_operation orelse return .rejected;
+        if (base.generation == std.math.maxInt(u64)) return .rejected;
+        if (!std.mem.eql(u8, operation.id, input.operation_id) or
+            !std.mem.eql(u8, operation.kind, "code_exchange") or
+            !std.mem.eql(u8, operation.server_id, input.server_id))
+            return .rejected;
+        if (input.refresh_token) |secret|
+            if (secret.len == 0 or secret.len > self.limits.max_credential_secret_bytes)
+                return .rejected;
+        const index = findServerIndex(base.servers, input.server_id) orelse return .rejected;
+        var replacement = base.servers[index];
+        var replacement_auth = replacement.auth;
+        var oauth = replacement.auth.oauth orelse return .rejected;
+        const consent = oauth.consent orelse return .rejected;
+        if (!std.mem.eql(u8, oauth.status, "awaiting_tokens") or
+            consent.epoch != operation.consent_epoch or
+            !std.mem.eql(u8, consent.fingerprint, operation.consent_fingerprint))
+            return .rejected;
+        var access_storage: [35]u8 = undefined;
+        const access_locator = self.freshCredentialLocator(base, &access_storage) orelse
+            return .rejected;
+        var refresh_storage: [35]u8 = undefined;
+        const refresh_locator = if (input.refresh_token != null)
+            self.freshCredentialLocatorExcluding(
+                base,
+                access_locator,
+                &refresh_storage,
+            ) orelse return .rejected
+        else
+            null;
+        oauth.status = "ready";
+        oauth.grant = .{
+            .consent_epoch = consent.epoch,
+            .token_revision = 1,
+            .access_token_ref = access_locator,
+            .refresh_token_ref = refresh_locator,
+            .expires_at_unix_ms = input.expires_at_unix_ms,
+        };
+        replacement_auth.oauth = oauth;
+        replacement.auth = replacement_auth;
+        if (serverProblem(replacement, self.limits) != null) return .rejected;
+        const servers = try self.allocator.dupe(ServerWire, base.servers);
+        defer self.allocator.free(servers);
+        servers[index] = replacement;
+        var sources: [2]SecretCandidateSource = undefined;
+        sources[0] = .{ .locator = access_locator, .secret = input.access_token };
+        var count: usize = 1;
+        if (input.refresh_token) |secret| {
+            sources[count] = .{ .locator = refresh_locator.?, .secret = secret };
+            count += 1;
+        }
+        return self.prepareOauthResultTarget(base, servers, sources[0..count]);
+    }
+
+    pub fn prepareClearOauthOperation(
+        self: *ManagementPort,
+        expected_operation_id: []const u8,
+    ) std.mem.Allocator.Error!OauthOperationPreparation {
+        if (self.coordinator.health != .ready) return .rejected;
+        const base = if (self.desired) |registry| registry.value else return .rejected;
+        var plan = planClearOauthOperation(
+            self.allocator,
+            base,
+            base.generation,
+            expected_operation_id,
+            self.limits,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return .rejected,
+        };
+        errdefer plan.deinit();
+        return .{ .prepared = .{ .plan = plan } };
+    }
+
+    pub fn prepareOauthOperationRecovery(
+        self: *ManagementPort,
+        expected_operation_id: []const u8,
+    ) std.mem.Allocator.Error!MutationPreparation {
+        if (self.coordinator.health != .ready) return .rejected;
+        const base = if (self.desired) |registry| registry.value else return .rejected;
+        const operation = base.oauth_operation orelse return .rejected;
+        if (!std.mem.eql(u8, operation.id, expected_operation_id)) return .rejected;
+        var plan = planOauthOperationRecovery(
+            self.allocator,
+            base,
+            self.limits,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return .rejected,
+        };
+        errdefer plan.deinit();
+        return .{ .prepared = .{ .allocator = self.allocator, .plan = plan } };
+    }
+
+    fn prepareOauthResultTarget(
+        self: *ManagementPort,
+        base: RegistryWire,
+        servers: []ServerWire,
+        sources: []const SecretCandidateSource,
+    ) std.mem.Allocator.Error!MutationPreparation {
+        const locators = try self.allocator.alloc([]const u8, sources.len);
+        defer self.allocator.free(locators);
+        for (sources, locators) |source, *locator| locator.* = source.locator;
+        var plan = (planMutationWithMode(
+            self.allocator,
+            base,
+            .{
+                .schema_version = schema_version,
+                .generation = base.generation + 1,
+                .oauth_operation = null,
+                .servers = servers,
+            },
+            base.generation,
+            locators,
+            self.limits,
+            .oauth_result,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return .rejected,
+        }) orelse return .unchanged;
+        errdefer plan.deinit();
+        const candidates = try self.allocator.alloc(CandidateCredential, sources.len);
+        var initialized: usize = 0;
+        errdefer {
+            for (candidates[0..initialized]) |candidate|
+                secureFree(self.allocator, candidate.secret);
+            self.allocator.free(candidates);
+        }
+        for (sources, candidates) |source, *candidate| {
+            const owned_locator = findText(plan.transaction.candidate_locators, source.locator) orelse
+                return .rejected;
+            candidate.* = .{
+                .locator = owned_locator,
+                .secret = try self.allocator.dupe(u8, source.secret),
+            };
+            initialized += 1;
+        }
+        return .{ .prepared = .{
+            .allocator = self.allocator,
+            .plan = plan,
+            .candidates = candidates,
+        } };
+    }
+
+    fn freshOauthOperationId(
+        self: *ManagementPort,
+        storage: *[26]u8,
+    ) ?[]const u8 {
+        var random: [16]u8 = undefined;
+        if (!self.identity_generator.fill(&random)) return null;
+        const hex = std.fmt.bytesToHex(random, .lower);
+        return std.fmt.bufPrint(storage, "oauth-{s}", .{hex[0..20]}) catch unreachable;
+    }
+
+    pub fn commitPreparedOauthOperationState(
+        self: *ManagementPort,
+        prepared: *PreparedOauthOperationState,
+    ) std.mem.Allocator.Error!ManagementOutcome {
+        const target = prepared.plan.targetRegistry() catch return .rejected;
+        if (self.coordinator.health != .ready) return .rejected;
+        const current = if (self.desired) |registry| registry.value else return .rejected;
+        if (current.generation != target.generation or
+            !registryContentEqual(current, prepared.plan.base.value))
+            return .rejected;
+        const buffer = try self.allocator.alloc(u8, max_store_bytes);
+        defer self.allocator.free(buffer);
+        const bytes = encode(buffer, target, self.limits) catch return .rejected;
+        return switch (self.persistence.commitRegistry(bytes)) {
+            .committed => saved: {
+                self.replaceDesired(prepared.plan.takeTarget());
+                break :saved .saved;
+            },
+            .failed => .rejected,
+            .outcome_unknown => unknown: {
+                self.coordinator.health = .outcome_unknown;
+                break :unknown .indeterminate;
+            },
+        };
+    }
+
     fn freshCredentialLocator(
         self: *ManagementPort,
         registry: RegistryWire,
@@ -1031,6 +1651,21 @@ pub const ManagementPort = struct {
                 break;
             }
             if (!referenced) return candidate;
+        }
+        return null;
+    }
+
+    fn freshCredentialLocatorExcluding(
+        self: *ManagementPort,
+        registry: RegistryWire,
+        excluded: []const u8,
+        storage: *[35]u8,
+    ) ?[]const u8 {
+        var attempts: usize = 0;
+        while (attempts < 8) : (attempts += 1) {
+            const candidate = self.freshCredentialLocator(registry, storage) orelse
+                return null;
+            if (!std.mem.eql(u8, candidate, excluded)) return candidate;
         }
         return null;
     }
@@ -1271,6 +1906,36 @@ fn staticAuth(mode: StaticAuthMode) AuthWire {
         },
         .oauth = null,
     };
+}
+
+fn oauthAuth(client: OauthClientPlan) AuthWire {
+    const registration: OauthRegistrationWire = switch (client) {
+        .pre_registered => |value| .{
+            .kind = "pre_registered",
+            .issuer = null,
+            .client_id = value.client_id,
+            .token_endpoint_auth_method = value.token_endpoint_auth_method,
+            .client_credential_revision = 1,
+            .client_secret_ref = null,
+        },
+        .dynamic_registration => .{
+            .kind = "dynamic_registration",
+            .issuer = null,
+            .client_id = null,
+            .token_endpoint_auth_method = null,
+            .client_credential_revision = 0,
+            .client_secret_ref = null,
+        },
+    };
+    return .{ .kind = "oauth", .oauth = .{
+        .status = switch (client) {
+            .pre_registered => "consent_required",
+            .dynamic_registration => "client_registration_required",
+        },
+        .registration = registration,
+        .consent = null,
+        .grant = null,
+    } };
 }
 
 fn findSecretSlot(slots: []const SecretSlotWire, name: []const u8) ?usize {
@@ -1638,14 +2303,37 @@ pub fn oauthConsentFingerprint(
     hashField(&hash, &connection);
     const oauth = server.auth.oauth orelse return null;
     hashField(&hash, oauth.registration.kind);
+    hashOptionalField(&hash, oauth.registration.issuer);
     hashOptionalField(&hash, oauth.registration.client_id);
-    hashInteger(&hash, @intFromBool(oauth.registration.client_secret_required));
-    hashInteger(&hash, consent.client_credential_revision);
+    hashOptionalField(&hash, oauth.registration.token_endpoint_auth_method);
+    hashInteger(&hash, oauth.registration.client_credential_revision);
     hashField(&hash, consent.resource);
     hashField(&hash, consent.issuer);
     hashInteger(&hash, consent.scopes.len);
     for (consent.scopes) |scope| hashField(&hash, scope);
     hashField(&hash, consent.redirect_uri);
+    var digest: [32]u8 = undefined;
+    hash.final(&digest);
+    return std.fmt.bytesToHex(digest, .lower);
+}
+
+pub fn oauthConsentDraftFingerprint(
+    server: ServerWire,
+    epoch: u64,
+    draft: OauthConsentDraftWire,
+) ?[64]u8 {
+    const oauth = server.auth.oauth orelse return null;
+    var hash = Sha256.init(.{});
+    hashField(&hash, "metawork.mcp.oauth-consent-draft/v1");
+    const connection = connectionFingerprint(server);
+    hashField(&hash, &connection);
+    hashField(&hash, oauth.registration.kind);
+    hashInteger(&hash, epoch);
+    hashField(&hash, draft.resource);
+    hashField(&hash, draft.issuer);
+    hashInteger(&hash, draft.scopes.len);
+    for (draft.scopes) |scope| hashField(&hash, scope);
+    hashField(&hash, draft.redirect_uri);
     var digest: [32]u8 = undefined;
     hash.final(&digest);
     return std.fmt.bytesToHex(digest, .lower);
@@ -2300,6 +2988,7 @@ pub fn planMutation(
 const MutationMode = enum {
     normal,
     oauth_recovery,
+    oauth_result,
 };
 
 fn planMutationWithMode(
@@ -2426,6 +3115,10 @@ fn validateMutationTransition(
                 base_registry,
                 target,
             ),
+            .oauth_result => try validateOauthResultTransition(
+                base_registry,
+                target,
+            ),
         }
     } else if (target.oauth_operation != null) return error.Invalid;
     for (target.servers) |target_server| {
@@ -2436,6 +3129,22 @@ fn validateMutationTransition(
             target_server.id,
         ) orelse return error.Invalid;
         if (!serverWireEqual(base_registry.servers[base_index], target_server))
+            return error.Invalid;
+    }
+}
+
+fn validateOauthResultTransition(
+    base: RegistryWire,
+    target: *const RegistryWire,
+) !void {
+    const operation = base.oauth_operation orelse return error.Invalid;
+    if (target.oauth_operation != null or base.servers.len != target.servers.len)
+        return error.Invalid;
+    for (base.servers) |base_server| {
+        const target_server = findServer(target.servers, base_server.id) orelse
+            return error.Invalid;
+        if (!std.mem.eql(u8, base_server.id, operation.server_id) and
+            !serverWireEqual(base_server, target_server))
             return error.Invalid;
     }
 }
@@ -2480,7 +3189,12 @@ pub fn planBeginOauthOperation(
     var target = base;
     target.oauth_operation = operation;
     validateRegistryIdentity(&target, limits) catch return error.InvalidMutation;
-    return .{ .target = try cloneRegistry(allocator, target, limits) };
+    var owned_base = try cloneRegistry(allocator, base, limits);
+    errdefer owned_base.deinit();
+    return .{
+        .base = owned_base,
+        .target = try cloneRegistry(allocator, target, limits),
+    };
 }
 
 pub fn planClearOauthOperation(
@@ -2497,7 +3211,12 @@ pub fn planClearOauthOperation(
         return error.InvalidMutation;
     var target = base;
     target.oauth_operation = null;
-    return .{ .target = try cloneRegistry(allocator, target, limits) };
+    var owned_base = try cloneRegistry(allocator, base, limits);
+    errdefer owned_base.deinit();
+    return .{
+        .base = owned_base,
+        .target = try cloneRegistry(allocator, target, limits),
+    };
 }
 
 /// Startup recovery for an OAuth request whose remote outcome cannot be
@@ -2586,6 +3305,11 @@ fn containsText(values: []const []const u8, candidate: []const u8) bool {
     return false;
 }
 
+fn findText(values: []const []const u8, candidate: []const u8) ?[]const u8 {
+    for (values) |value| if (std.mem.eql(u8, value, candidate)) return value;
+    return null;
+}
+
 fn registryContentEqual(left: RegistryWire, right: RegistryWire) bool {
     if (left.schema_version != right.schema_version or
         !optionalOauthOperationEqual(left.oauth_operation, right.oauth_operation) or
@@ -2647,8 +3371,13 @@ fn oauthRegistrationEqual(
     right: OauthRegistrationWire,
 ) bool {
     return std.mem.eql(u8, left.kind, right.kind) and
+        optionalTextEqual(left.issuer, right.issuer) and
         optionalTextEqual(left.client_id, right.client_id) and
-        left.client_secret_required == right.client_secret_required and
+        optionalTextEqual(
+            left.token_endpoint_auth_method,
+            right.token_endpoint_auth_method,
+        ) and
+        left.client_credential_revision == right.client_credential_revision and
         optionalTextEqual(left.client_secret_ref, right.client_secret_ref);
 }
 
@@ -2697,7 +3426,22 @@ fn optionalOauthOperationEqual(
             right_operation.consent_fingerprint,
         ) and
         left_operation.consent_epoch == right_operation.consent_epoch and
-        left_operation.token_revision == right_operation.token_revision;
+        left_operation.token_revision == right_operation.token_revision and
+        optionalOauthConsentDraftEqual(
+            left_operation.consent_draft,
+            right_operation.consent_draft,
+        );
+}
+
+fn optionalOauthConsentDraftEqual(
+    left: ?OauthConsentDraftWire,
+    right: ?OauthConsentDraftWire,
+) bool {
+    if (left == null or right == null) return left == null and right == null;
+    return std.mem.eql(u8, left.?.resource, right.?.resource) and
+        std.mem.eql(u8, left.?.issuer, right.?.issuer) and
+        stringSlicesEqual(left.?.scopes, right.?.scopes) and
+        std.mem.eql(u8, left.?.redirect_uri, right.?.redirect_uri);
 }
 
 fn transportWireEqual(left: TransportWire, right: TransportWire) bool {
@@ -2881,15 +3625,15 @@ fn validateAuth(server: ServerWire, limits: Limits) ?ServerProblem {
     }
     if (std.mem.eql(u8, oauth.status, "client_registration_required")) {
         if (!std.mem.eql(u8, oauth.registration.kind, "dynamic_registration") or
+            oauth.registration.issuer != null or
             oauth.registration.client_id != null or
-            oauth.registration.client_secret_required or
+            oauth.registration.token_endpoint_auth_method != null or
+            oauth.registration.client_credential_revision != 0 or
             oauth.registration.client_secret_ref != null or
             oauth.consent != null or oauth.grant != null)
             return .invalid_authentication;
     } else if (std.mem.eql(u8, oauth.status, "consent_required")) {
         if (oauth.registration.client_id == null or
-            (oauth.registration.client_secret_required and
-                oauth.registration.client_secret_ref == null) or
             oauth.consent != null or oauth.grant != null)
             return .invalid_authentication;
     } else if (std.mem.eql(u8, oauth.status, "awaiting_tokens")) {
@@ -2908,16 +3652,37 @@ fn validateOauthRegistration(
     registration: OauthRegistrationWire,
     limits: Limits,
 ) bool {
+    if (registration.issuer) |issuer|
+        if (!validHttpsUri(issuer, limits.max_oauth_uri_bytes)) return false;
     if (registration.client_id) |client_id|
         if (!validText(client_id, limits.max_oauth_client_id_bytes, false)) return false;
+    if (registration.token_endpoint_auth_method) |method|
+        if (!oneOf(method, &.{ "none", "client_secret_basic", "client_secret_post" }))
+            return false;
     if (registration.client_secret_ref) |locator|
         if (!validCredentialLocator(locator, limits.max_credential_locator_bytes)) return false;
-    if (!registration.client_secret_required and registration.client_secret_ref != null)
+    const secret_required = if (registration.token_endpoint_auth_method) |method|
+        !std.mem.eql(u8, method, "none")
+    else
+        false;
+    if ((!secret_required and registration.client_secret_ref != null) or
+        (registration.client_credential_revision == 0 and
+            registration.client_secret_ref != null))
         return false;
     if (std.mem.eql(u8, registration.kind, "pre_registered"))
-        return registration.client_id != null;
+        return registration.client_id != null and
+            registration.token_endpoint_auth_method != null and
+            registration.client_credential_revision != 0;
     if (std.mem.eql(u8, registration.kind, "dynamic_registration"))
-        return registration.client_secret_ref == null or registration.client_id != null;
+        return (registration.client_id == null and
+            registration.issuer == null and
+            registration.token_endpoint_auth_method == null and
+            registration.client_credential_revision == 0 and
+            registration.client_secret_ref == null) or
+            (registration.client_id != null and
+                registration.issuer != null and
+                registration.token_endpoint_auth_method != null and
+                registration.client_credential_revision != 0);
     return false;
 }
 
@@ -2928,7 +3693,11 @@ fn validateOauthConsent(
 ) bool {
     const oauth = server.auth.oauth orelse return false;
     if (oauth.registration.client_id == null or
-        (oauth.registration.client_secret_required and
+        oauth.registration.issuer == null or
+        !std.mem.eql(u8, oauth.registration.issuer.?, consent.issuer) or
+        oauth.registration.client_credential_revision != consent.client_credential_revision or
+        (oauth.registration.token_endpoint_auth_method != null and
+            !std.mem.eql(u8, oauth.registration.token_endpoint_auth_method.?, "none") and
             oauth.registration.client_secret_ref == null))
         return false;
     if (consent.epoch == 0 or consent.client_credential_revision == 0 or
@@ -2945,6 +3714,23 @@ fn validateOauthConsent(
     }
     const fingerprint = oauthConsentFingerprint(server, consent) orelse return false;
     return std.mem.eql(u8, consent.fingerprint, &fingerprint);
+}
+
+fn validateOauthConsentDraft(
+    draft: OauthConsentDraftWire,
+    limits: Limits,
+) bool {
+    if (!validEndpoint(draft.resource, limits.max_oauth_uri_bytes) or
+        !validHttpsUri(draft.issuer, limits.max_oauth_uri_bytes) or
+        !validEndpoint(draft.redirect_uri, limits.max_oauth_uri_bytes) or
+        draft.scopes.len > limits.max_oauth_scopes)
+        return false;
+    for (draft.scopes, 0..) |scope, index| {
+        if (!validOauthScope(scope, limits.max_oauth_scope_bytes)) return false;
+        if (index != 0 and std.mem.order(u8, draft.scopes[index - 1], scope) != .lt)
+            return false;
+    }
+    return true;
 }
 
 fn validateOauthOperation(
@@ -2979,7 +3765,16 @@ fn validateOauthOperation(
     if (std.mem.eql(u8, operation.kind, "dynamic_registration")) {
         if (!std.mem.eql(u8, oauth.registration.kind, "dynamic_registration") or
             oauth.registration.client_id != null or
-            oauth.registration.client_secret_required)
+            oauth.registration.client_credential_revision != 0)
+            return error.Invalid;
+        const draft = operation.consent_draft orelse return error.Invalid;
+        if (!validateOauthConsentDraft(draft, limits)) return error.Invalid;
+        const draft_fingerprint = oauthConsentDraftFingerprint(
+            server,
+            operation.consent_epoch,
+            draft,
+        ) orelse return error.Invalid;
+        if (!std.mem.eql(u8, operation.consent_fingerprint, &draft_fingerprint))
             return error.Invalid;
     } else if (std.mem.eql(u8, operation.kind, "code_exchange")) {
         if (!std.mem.eql(u8, oauth.status, "awaiting_tokens"))
@@ -2990,6 +3785,7 @@ fn validateOauthOperation(
             return error.Invalid;
     } else if (operation.token_revision != null) return error.Invalid;
     if (!std.mem.eql(u8, operation.kind, "dynamic_registration")) {
+        if (operation.consent_draft != null) return error.Invalid;
         const consent = oauth.consent orelse return error.Invalid;
         if (consent.epoch != operation.consent_epoch or
             !std.mem.eql(
@@ -5902,8 +6698,10 @@ test "OAuth consent fingerprint binds registration and authorization facts" {
             .status = "consent_required",
             .registration = .{
                 .kind = "pre_registered",
+                .issuer = "https://issuer.example.test",
                 .client_id = "client-one",
-                .client_secret_required = false,
+                .token_endpoint_auth_method = "none",
+                .client_credential_revision = 1,
                 .client_secret_ref = null,
             },
             .consent = null,
@@ -5923,14 +6721,18 @@ test "OAuth consent fingerprint binds registration and authorization facts" {
         .client_credential_revision = 1,
     };
     const fingerprint = oauthConsentFingerprint(server, consent).?;
+    var oauth = server.auth.oauth.?;
+    oauth.registration.client_credential_revision = 2;
+    server.auth.oauth = oauth;
     consent.client_credential_revision = 2;
     try std.testing.expect(!std.mem.eql(
         u8,
         &fingerprint,
         &oauthConsentFingerprint(server, consent).?,
     ));
+    oauth.registration.client_credential_revision = 1;
+    server.auth.oauth = oauth;
     consent.client_credential_revision = 1;
-    var oauth = server.auth.oauth.?;
     oauth.registration.client_id = "client-two";
     server.auth.oauth = oauth;
     try std.testing.expect(!std.mem.eql(
@@ -5956,8 +6758,10 @@ test "OAuth operation marker keeps generation and serializes only its server" {
             .status = "client_registration_required",
             .registration = .{
                 .kind = "dynamic_registration",
+                .issuer = null,
                 .client_id = null,
-                .client_secret_required = false,
+                .token_endpoint_auth_method = null,
+                .client_credential_revision = 0,
                 .client_secret_ref = null,
             },
             .consent = null,
@@ -5987,14 +6791,22 @@ test "OAuth operation marker keeps generation and serializes only its server" {
         .oauth_operation = null,
         .servers = &servers,
     };
+    const draft: OauthConsentDraftWire = .{
+        .resource = "https://mcp.example.test/mcp",
+        .issuer = "https://issuer.example.test",
+        .scopes = &.{"files.read"},
+        .redirect_uri = "http://127.0.0.1:43123/callback",
+    };
+    const draft_fingerprint = oauthConsentDraftFingerprint(oauth_server, 1, draft).?;
     const operation: OauthOperationWire = .{
         .id = "operation-1",
         .kind = "dynamic_registration",
         .server_id = "oauth",
         .connection_fingerprint = &connection,
-        .consent_fingerprint = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        .consent_fingerprint = &draft_fingerprint,
         .consent_epoch = 1,
         .token_revision = null,
+        .consent_draft = draft,
     };
     var begin = try planBeginOauthOperation(
         std.testing.allocator,
@@ -6087,8 +6899,10 @@ test "OAuth operation recovery retires grant locators and never replays" {
             .status = "consent_required",
             .registration = .{
                 .kind = "pre_registered",
+                .issuer = "https://issuer.example.test",
                 .client_id = "client",
-                .client_secret_required = false,
+                .token_endpoint_auth_method = "none",
+                .client_credential_revision = 1,
                 .client_secret_ref = null,
             },
             .consent = null,
@@ -6220,6 +7034,274 @@ test "OAuth operation recovery retires grant locators and never replays" {
         "reauth_required",
         stored.value.servers[0].auth.oauth.?.status,
     );
+}
+
+test "typed OAuth management commits consent marker and fresh token locators" {
+    const Harness = struct {
+        entropy: u8 = 0,
+
+        fn fill(context: ?*anyopaque, output: *[16]u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.entropy +%= 1;
+            @memset(output, self.entropy);
+            return true;
+        }
+
+        fn commit(_: ?*anyopaque, _: []const u8) PersistenceEffect {
+            return .committed;
+        }
+
+        fn clear(_: ?*anyopaque) PersistenceEffect {
+            return .committed;
+        }
+
+        fn probe(_: ?*anyopaque, _: []const u8) CredentialPresence {
+            return .missing;
+        }
+
+        fn create(_: ?*anyopaque, _: []const u8, _: []const u8) bool {
+            return true;
+        }
+
+        fn delete(_: ?*anyopaque, _: []const u8) bool {
+            return true;
+        }
+    };
+    var harness: Harness = .{};
+    var server: ServerWire = .{
+        .id = "oauth",
+        .namespace = "oauth",
+        .display_name = "OAuth",
+        .enabled = false,
+        .negotiation = "automatic",
+        .timeout_ms = 1000,
+        .transport = .{
+            .kind = "streamable_http",
+            .url = "https://mcp.example.test/mcp",
+        },
+        .auth = oauthAuth(.{ .pre_registered = .{
+            .client_id = "client",
+            .token_endpoint_auth_method = "none",
+        } }),
+        .connection_approval = null,
+        .tools = &.{},
+    };
+    const connection = connectionFingerprint(server);
+    server.connection_approval = .{ .fingerprint = &connection };
+    var servers = [_]ServerWire{server};
+    var management = try ManagementPort.init(std.testing.allocator, .{
+        .schema_version = schema_version,
+        .generation = 1,
+        .oauth_operation = null,
+        .servers = &servers,
+    }, .{
+        .persistence = .{
+            .context = &harness,
+            .available = true,
+            .commit_journal_fn = Harness.commit,
+            .commit_registry_fn = Harness.commit,
+            .clear_journal_fn = Harness.clear,
+        },
+        .credentials = .{
+            .context = &harness,
+            .available = true,
+            .probe_fn = Harness.probe,
+            .create_fn = Harness.create,
+            .delete_fn = Harness.delete,
+        },
+        .locator_generator = .{
+            .context = &harness,
+            .available = true,
+            .fill_fn = Harness.fill,
+        },
+        .identity_generator = .{
+            .context = &harness,
+            .available = true,
+            .fill_fn = Harness.fill,
+        },
+        .limits = test_limits,
+    });
+    defer management.deinit();
+    var consent = switch (try management.prepareOauthConsent(1, .{
+        .server_id = "oauth",
+        .resource = "https://mcp.example.test/mcp",
+        .issuer = "https://issuer.example.test",
+        .scopes = &.{ "files.read", "files.write" },
+        .redirect_uri = "http://127.0.0.1:43123/auth/callback",
+    })) {
+        .prepared => |prepared| prepared,
+        else => return error.TestUnexpectedResult,
+    };
+    defer consent.deinit();
+    try std.testing.expectEqual(
+        ManagementOutcome.saved,
+        try management.commitPreparedMutation(&consent),
+    );
+    var begin = switch (try management.prepareBeginCodeExchange(2, .{
+        .server_id = "oauth",
+    })) {
+        .prepared => |prepared| prepared,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    defer begin.deinit();
+    try std.testing.expectEqual(@as(u64, 2), begin.target().generation);
+    try std.testing.expectEqual(
+        ManagementOutcome.saved,
+        try management.commitPreparedOauthOperationState(&begin),
+    );
+    const operation_id = management.desiredRegistry().?.oauth_operation.?.id;
+    var access = [_]u8{ 'a', 'c', 'c', 'e', 's', 's' };
+    var refresh = [_]u8{ 'r', 'e', 'f', 'r', 'e', 's', 'h' };
+    var tokens = switch (try management.prepareCompleteCodeExchange(.{
+        .operation_id = operation_id,
+        .server_id = "oauth",
+        .access_token = &access,
+        .refresh_token = &refresh,
+        .expires_at_unix_ms = 9000,
+    })) {
+        .prepared => |prepared| prepared,
+        else => return error.TestUnexpectedResult,
+    };
+    defer tokens.deinit();
+    try std.testing.expectEqualSlices(u8, &@as([6]u8, @splat(0)), &access);
+    try std.testing.expectEqualSlices(u8, &@as([7]u8, @splat(0)), &refresh);
+    try std.testing.expectEqual(@as(usize, 2), tokens.candidates.len);
+    try std.testing.expect(tokens.target().oauth_operation == null);
+    try std.testing.expectEqualStrings(
+        "ready",
+        tokens.target().servers[0].auth.oauth.?.status,
+    );
+}
+
+test "dynamic registration marker durably binds draft before issued identity" {
+    const Entropy = struct {
+        value: u8 = 0,
+
+        fn fill(context: ?*anyopaque, output: *[16]u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.value +%= 1;
+            @memset(output, self.value);
+            return true;
+        }
+    };
+    var entropy: Entropy = .{};
+    var server: ServerWire = .{
+        .id = "oauth",
+        .namespace = "oauth",
+        .display_name = "OAuth",
+        .enabled = false,
+        .negotiation = "automatic",
+        .timeout_ms = 1000,
+        .transport = .{
+            .kind = "streamable_http",
+            .url = "https://mcp.example.test/mcp",
+        },
+        .auth = oauthAuth(.dynamic_registration),
+        .connection_approval = null,
+        .tools = &.{},
+    };
+    const connection = connectionFingerprint(server);
+    server.connection_approval = .{ .fingerprint = &connection };
+    const other: ServerWire = .{
+        .id = "other",
+        .namespace = "other",
+        .display_name = "Other",
+        .enabled = false,
+        .negotiation = "automatic",
+        .timeout_ms = 1000,
+        .transport = .{ .kind = "stdio", .command = "tool" },
+        .auth = .{ .kind = "none", .oauth = null },
+        .connection_approval = null,
+        .tools = &.{},
+    };
+    var servers = [_]ServerWire{ server, other };
+    var management = try ManagementPort.init(std.testing.allocator, .{
+        .schema_version = schema_version,
+        .generation = 3,
+        .oauth_operation = null,
+        .servers = &servers,
+    }, .{
+        .persistence = .{ .available = true },
+        .credentials = .{ .available = true },
+        .locator_generator = .{
+            .context = &entropy,
+            .available = true,
+            .fill_fn = Entropy.fill,
+        },
+        .identity_generator = .{
+            .context = &entropy,
+            .available = true,
+            .fill_fn = Entropy.fill,
+        },
+        .limits = test_limits,
+    });
+    defer management.deinit();
+    var begin = switch (try management.prepareBeginDynamicRegistration(3, .{
+        .consent = .{
+            .server_id = "oauth",
+            .resource = "https://mcp.example.test/mcp",
+            .issuer = "https://issuer.example.test",
+            .scopes = &.{"files.read"},
+            .redirect_uri = "http://127.0.0.1:43123/auth/callback",
+        },
+    })) {
+        .prepared => |prepared| prepared,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    defer begin.deinit();
+    const marked = begin.target();
+    const operation = marked.oauth_operation.?;
+    try std.testing.expectEqual(@as(u64, 3), marked.generation);
+    try std.testing.expect(operation.consent_draft != null);
+    var other_changed = marked.servers[1];
+    other_changed.display_name = "Other renamed concurrently";
+    var current_servers = [_]ServerWire{ marked.servers[0], other_changed };
+    var marked_management = try ManagementPort.init(std.testing.allocator, .{
+        .schema_version = schema_version,
+        .generation = 4,
+        .oauth_operation = operation,
+        .servers = &current_servers,
+    }, .{
+        .persistence = .{ .available = true },
+        .credentials = .{ .available = true },
+        .locator_generator = .{
+            .context = &entropy,
+            .available = true,
+            .fill_fn = Entropy.fill,
+        },
+        .identity_generator = .{
+            .context = &entropy,
+            .available = true,
+            .fill_fn = Entropy.fill,
+        },
+        .limits = test_limits,
+    });
+    defer marked_management.deinit();
+    var secret = [_]u8{ 's', 'e', 'c', 'r', 'e', 't' };
+    var completed = switch (try marked_management.prepareCompleteDynamicRegistration(.{
+        .operation_id = operation.id,
+        .server_id = "oauth",
+        .client_id = "issued-client",
+        .token_endpoint_auth_method = "client_secret_basic",
+        .client_secret = &secret,
+    })) {
+        .prepared => |prepared| prepared,
+        else => return error.TestUnexpectedResult,
+    };
+    defer completed.deinit();
+    try std.testing.expectEqualSlices(u8, &@as([6]u8, @splat(0)), &secret);
+    try std.testing.expectEqual(@as(u64, 5), completed.target().generation);
+    try std.testing.expectEqualStrings(
+        "Other renamed concurrently",
+        completed.target().servers[1].display_name,
+    );
+    const target_oauth = completed.target().servers[0].auth.oauth.?;
+    try std.testing.expectEqualStrings("awaiting_tokens", target_oauth.status);
+    try std.testing.expectEqualStrings(
+        "https://issuer.example.test",
+        target_oauth.registration.issuer.?,
+    );
+    try std.testing.expect(target_oauth.consent != null);
 }
 
 test "unapproved server never resolves credentials" {

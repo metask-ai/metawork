@@ -185,6 +185,31 @@ pub fn parseCallbackTarget(
     target: []const u8,
     expected_state: []const u8,
 ) (ProtocolError || std.mem.Allocator.Error)!Callback {
+    return parseCallbackTargetValidated(
+        allocator,
+        target,
+        expected_state,
+        .{},
+    );
+}
+
+/// Product-neutral RFC 9207 callback validation used by MCP after it has
+/// recorded an issuer from validated authorization-server metadata. Account
+/// keeps its previous additive-parameter behavior by calling
+/// `parseCallbackTarget`; it neither requests nor interprets `iss`.
+pub const CallbackValidation = struct {
+    expected_issuer: ?[]const u8 = null,
+    issuer_required: bool = false,
+};
+
+pub fn parseCallbackTargetValidated(
+    allocator: std.mem.Allocator,
+    target: []const u8,
+    expected_state: []const u8,
+    validation: CallbackValidation,
+) (ProtocolError || std.mem.Allocator.Error)!Callback {
+    if (validation.issuer_required and validation.expected_issuer == null)
+        return error.InvalidCallback;
     if (target.len == 0 or target.len > Limits.callback_target_bytes)
         return error.InvalidCallback;
     const query_index = std.mem.indexOfScalar(u8, target, '?') orelse
@@ -199,10 +224,13 @@ pub fn parseCallbackTarget(
     defer std.crypto.secureZero(u8, &code_storage);
     var state_storage: [Limits.state_bytes]u8 = undefined;
     defer std.crypto.secureZero(u8, &state_storage);
+    var issuer_storage: [Limits.authorization_url_bytes]u8 = undefined;
+    defer std.crypto.secureZero(u8, &issuer_storage);
     var error_seen = false;
     var error_description_seen = false;
     var code: ?[]const u8 = null;
     var state_value: ?[]const u8 = null;
+    var issuer_value: ?[]const u8 = null;
 
     var pairs = std.mem.splitScalar(u8, query, '&');
     while (pairs.next()) |pair| {
@@ -217,6 +245,11 @@ pub fn parseCallbackTarget(
         } else if (std.mem.eql(u8, key, "state")) {
             if (state_value != null) return error.InvalidCallback;
             state_value = try percentDecode(value, &state_storage);
+        } else if (std.mem.eql(u8, key, "iss")) {
+            if (validation.expected_issuer != null) {
+                if (issuer_value != null) return error.InvalidCallback;
+                issuer_value = try percentDecode(value, &issuer_storage);
+            }
         } else if (std.mem.eql(u8, key, "error")) {
             if (error_seen) return error.InvalidCallback;
             var error_storage: [256]u8 = undefined;
@@ -242,6 +275,10 @@ pub fn parseCallbackTarget(
         paddedState(expected_state),
         paddedState(actual_state),
     )) return error.StateMismatch;
+    if (issuer_value) |actual_issuer| {
+        if (!std.mem.eql(u8, validation.expected_issuer.?, actual_issuer))
+            return error.InvalidCallback;
+    } else if (validation.issuer_required) return error.InvalidCallback;
     if (error_seen) {
         if (code != null) return error.InvalidCallback;
         return .rejected;
@@ -648,6 +685,49 @@ test "callback parser rejects wrong path duplicates and state mismatch" {
             expected,
         ),
     );
+}
+
+test "callback parser validates RFC 9207 issuer without normalization" {
+    const expected_state = "0123456789012345678901234567890123456789012";
+    const issuer = "https://auth.example.test/tenant";
+    var callback = try parseCallbackTargetValidated(
+        std.testing.allocator,
+        callback_path ++
+            "?code=secret-code&state=" ++ expected_state ++
+            "&iss=https%3A%2F%2Fauth.example.test%2Ftenant",
+        expected_state,
+        .{ .expected_issuer = issuer, .issuer_required = true },
+    );
+    defer callback.deinit();
+    try std.testing.expectEqualStrings("secret-code", callback.code.view());
+    try std.testing.expectError(
+        error.InvalidCallback,
+        parseCallbackTargetValidated(
+            std.testing.allocator,
+            callback_path ++ "?code=secret-code&state=" ++ expected_state,
+            expected_state,
+            .{ .expected_issuer = issuer, .issuer_required = true },
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidCallback,
+        parseCallbackTargetValidated(
+            std.testing.allocator,
+            callback_path ++
+                "?error=access_denied&state=" ++ expected_state ++
+                "&iss=https%3A%2F%2FAUTH.example.test%2Ftenant",
+            expected_state,
+            .{ .expected_issuer = issuer },
+        ),
+    );
+    var legacy = try parseCallbackTarget(
+        std.testing.allocator,
+        callback_path ++
+            "?code=secret-code&state=" ++ expected_state ++
+            "&iss=https%3A%2F%2Fauth.example.test%2Ftenant",
+        expected_state,
+    );
+    legacy.deinit();
 }
 
 test "token decoder validates consumed fields and tolerates additive metadata" {

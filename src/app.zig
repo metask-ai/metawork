@@ -7,6 +7,7 @@ const workbench_api = @import("metawork_workbench");
 const account_api = @import("metawork_account");
 const product_identity = @import("metawork_product_identity");
 const mcp_platform = @import("metawork_mcp_platform");
+const mcp_oauth = @import("metawork_mcp_oauth");
 const account_coordinator = @import("app/account_coordinator.zig");
 const agent_event_coordinator = @import("app/agent_event_coordinator.zig");
 const app_automation = @import("app/automation.zig");
@@ -433,4 +434,5 @@ test "MCP Application composition imports the startup owner" {
     std.testing.refAllDecls(App);
     comptime _ = run;
     std.testing.refAllDecls(mcp_startup);
+    std.testing.refAllDecls(mcp_oauth);
 }
