@@ -4,13 +4,31 @@ MetaWork 是一款面向本地工作区的桌面 Agent Workbench。产品围绕 
 
 ## 当前基线
 
-```text
-Native SDK ── desktop capabilities ──> Desktop Host (Zig)
-                                      ├── React + Tailwind Renderer
-                                      ├── Renderer Bridge
-                                      └── Product
-                                          ├── Product coordinator + Account / Workbench
-                                          └── Agent ──> Metask AgentCore ABI v1 revision 6
+```mermaid
+flowchart LR
+    subgraph METAWORK["MetaWork"]
+        RENDERER["React + Tailwind<br/>Renderer"]
+        BRIDGE["Bridge"]
+        PRODUCT["Product<br/>Account + Workbench"]
+        AGENT["Agent"]
+        APPLICATION["Application"]
+        NATIVE_COMPAT["Application-owned<br/>Native Compat"]
+
+        RENDERER <-->|"Renderer Bridge revision 1"| BRIDGE
+        BRIDGE <-->|"typed commands / projections"| PRODUCT
+        PRODUCT -->|"Workbench execution"| AGENT
+
+        APPLICATION -. "compose / lifecycle" .-> BRIDGE
+        APPLICATION -. "compose / lifecycle" .-> PRODUCT
+        APPLICATION -. "compose / lifecycle" .-> AGENT
+        APPLICATION -->|"registered compatibility paths"| NATIVE_COMPAT
+    end
+
+    AGENTCORE["Metask AgentCore<br/>ABI v1 revision 6"]
+    NATIVE_RUNTIME["Native SDK<br/>Runtime API"]
+    AGENT -->|"typed ABI"| AGENTCORE
+    APPLICATION -->|"platform capabilities"| NATIVE_RUNTIME
+    NATIVE_RUNTIME -->|"hosts System WebView"| RENDERER
 ```
 
 当前应用是一条真实的同进程同步垂直链路，已经覆盖 Account、Task、typed Text/Skill Run、built-in Read/Bash/Edit、question/permission、取消、Renderer reload、bounded event delivery 和生命周期收口。正式 build 只消费 staged `.agentcore/bundle` 中的官方 Zig package。revision 6 提供 checkpoint、MCP 与 Permission provenance 等 ABI 原语，但未完成独立产品验收的能力保持关闭。

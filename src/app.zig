@@ -139,6 +139,7 @@ const App = struct {
         };
         workbench_storage.* = try workbench_api.Workbench.init(
             std.heap.c_allocator,
+            self.io,
             agent_runtime,
             .{
                 .worker_count = host_worker_count,
@@ -255,9 +256,8 @@ const App = struct {
     }
 
     fn drainAgentEvents(self: *@This()) void {
-        const agent_runtime = self.agent_runtime orelse return;
         const workbench = self.workbench orelse return;
-        self.agent_events.drain(agent_runtime, workbench);
+        self.agent_events.drain(workbench);
     }
 };
 

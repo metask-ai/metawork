@@ -23,6 +23,11 @@ function filesWithExtensions(directory, extensions) {
 const zigFiles = (directory) => filesWithExtensions(directory, [".zig"]);
 const applicationFiles = () => ["src/app.zig", ...zigFiles("src/app/")];
 const applicationSource = () => applicationFiles().map(read).join("\n");
+const boundaryDocs = [
+  "README.md",
+  "AGENTS.md",
+  ...filesWithExtensions("docs/", [".md"]),
+];
 
 function assertNoImports(files, forbidden) {
   for (const file of files) {
@@ -45,6 +50,14 @@ function assertNoApplicationImplementationImports(files) {
       `${file} imports an Application implementation module`,
     );
   }
+}
+
+function sliceBetween(source, startMarker, endMarker, label) {
+  const start = source.indexOf(startMarker);
+  assert.ok(start >= 0, `${label} start marker must exist`);
+  const end = source.indexOf(endMarker, start + startMarker.length);
+  assert.ok(end > start, `${label} end marker must follow its start marker`);
+  return source.slice(start, end);
 }
 
 test("MetaWork product and package manifests share one release version", () => {
@@ -148,15 +161,77 @@ test("Application root delegates named implementation responsibilities", () => {
   assert.doesNotMatch(platform, /@import\("automation\.zig"\)|app_automation/);
 });
 
-test("architecture names the Application boundary explicitly", () => {
+test("active documentation names the current architecture boundaries", () => {
   const architecture = read("docs/architecture.md");
-  assert.equal(
-    (architecture.match(/Desktop Host/g) ?? []).length,
-    1,
-    "architecture.md may mention Desktop Host only in the explicit retired-term rule",
-  );
+  for (const file of boundaryDocs) {
+    const source = read(file);
+    assert.equal(
+      (source.match(/Desktop Host/g) ?? []).length,
+      file === "docs/architecture.md" ? 1 : 0,
+      `${file} reintroduces the retired Desktop Host boundary`,
+    );
+    assert.doesNotMatch(
+      source,
+      /Product coordinator/,
+      `${file} reintroduces coordination inside Product`,
+    );
+  }
+
+  const compat = zigFiles("src/native_sdk_compat/").map(read).join("\n");
+  assert.doesNotMatch(compat, /Desktop Host|Product coordinator/);
   assert.match(architecture, /不再另设 Desktop Host 或 Host infrastructure/);
-  assert.match(architecture, /Bridge 是 Renderer 与 Application 之间/);
+  assert.match(architecture, /Bridge 是 Renderer 与 MetaWork 本地边界之间/);
+  assert.match(
+    architecture,
+    /产品命令面把 typed 产品命令直接 dispatch 给 Product[\s\S]*不经过 Application 代理/,
+  );
+
+  const readme = read("README.md");
+  const metawork = sliceBetween(
+    readme,
+    'subgraph METAWORK["MetaWork"]',
+    "    end",
+    "README MetaWork boundary",
+  );
+  assert.match(metawork, /APPLICATION\["Application"\]/);
+  assert.match(metawork, /PRODUCT\["Product<br\/>Account \+ Workbench"\]/);
+  assert.match(metawork, /AGENT\["Agent"\]/);
+  assert.match(
+    metawork,
+    /NATIVE_COMPAT\["Application-owned<br\/>Native Compat"\]/,
+  );
+  assert.doesNotMatch(metawork, /AGENTCORE|NATIVE_RUNTIME/);
+  assert.match(
+    readme.slice(readme.indexOf("    end")),
+    /AGENTCORE[\s\S]*NATIVE_RUNTIME/,
+  );
+});
+
+test("Agent is a peer execution boundary managed by Application", () => {
+  const architecture = read("docs/architecture.md");
+  assert.match(architecture, /AGENT\["Agent<br\/>Runtime、Session、Conversation 与 event pump"\]/);
+  assert.match(
+    architecture,
+    /APPLICATION -\. "compose \/ lifecycle" \.-> AGENT/,
+  );
+  assert.match(architecture, /PRODUCT -->\|"Workbench execution calls"\| AGENT/);
+  assert.match(architecture, /AGENT -->\|"typed bundle ABI"\| AGENTCORE/);
+  assert.match(architecture, /Product 包含 `account` 与 `workbench` 两个产品 owner/);
+  assert.doesNotMatch(
+    architecture,
+    /Product 包含 `account`、`workbench` 与 `agent`|Account、Workbench、Agent/,
+  );
+
+  const product = read("docs/product-architecture.md");
+  assert.match(product, /Product 内部由两个 named product owners 组成/);
+  assert.match(product, /Agent 是 Product 之外的 MetaWork-owned 执行边界/);
+
+  const integration = read("docs/agentcore-integration.md");
+  assert.match(integration, /Agent 与 Product 并列/);
+  assert.doesNotMatch(integration, /Desktop Host composition role|Product coordinator/);
+
+  const agents = read("AGENTS.md");
+  assert.match(agents, /Product owner、事务、并发、恢复及其与 Agent 的协作/);
 });
 
 test("public module roots do not re-export implementation modules wholesale", () => {
@@ -237,6 +312,51 @@ test("lower layers cannot reach composition or transport internals", () => {
   ];
   assertNoImports(lowerLayerFiles, ["metawork_app"]);
   assertNoApplicationImplementationImports(lowerLayerFiles);
+});
+
+test("Workbench receives IO independently from the Agent Runtime", () => {
+  const workbench = read("src/workbench/projection.zig");
+  const configuration = sliceBetween(
+    workbench,
+    "pub const Configuration = struct {",
+    "pub const McpStartupConfiguration = struct {",
+    "Workbench Configuration",
+  );
+  assert.doesNotMatch(configuration, /\bio:\s*std\.Io\b/);
+
+  const workbenchFields = sliceBetween(
+    workbench,
+    "pub const Workbench = struct {",
+    "    pub fn init(",
+    "Workbench fields",
+  );
+  assert.equal(
+    (workbenchFields.match(/^    io: std\.Io,$/gm) ?? []).length,
+    1,
+  );
+
+  const workbenchInit = sliceBetween(
+    workbench,
+    "    pub fn init(",
+    "    pub fn setScheduleBackgroundAvailableNoFail(",
+    "Workbench.init",
+  );
+  assert.match(
+    workbenchInit,
+    /allocator: std\.mem\.Allocator,\s*io: std\.Io,\s*agent_runtime: \*lifecycle\.Runtime/,
+  );
+  assert.match(workbenchInit, /Executor\.create\(io, allocator,/);
+  assert.match(workbenchInit, /\.io = io,/);
+
+  const production = workbench.slice(
+    0,
+    workbench.indexOf("var test_agent_runtime:"),
+  );
+  assert.doesNotMatch(production, /\b(?:self\.)?agent_runtime\.io\b/);
+  assert.doesNotMatch(
+    read("src/app/account_coordinator.zig"),
+    /agent_runtime\.io\s*=/,
+  );
 });
 
 test("only Agent implementation imports the AgentCore SDK", () => {
@@ -665,35 +785,138 @@ test("canonical notification and Renderer transport failures stay isolated", () 
 
   const app = read("src/app.zig");
   const eventCoordinator = read("src/app/agent_event_coordinator.zig");
+  const workbench = read("src/workbench/projection.zig");
   assert.doesNotMatch(applicationSource(), /bridge_pipeline_failure/);
   assert.match(eventCoordinator, /wake_pending\.swap\(true, \.acq_rel\)/);
-  const clearWake = eventCoordinator.indexOf(
+  const coordinatorDrain = sliceBetween(
+    eventCoordinator,
+    "    pub fn drain(",
+    "\n};",
+    "Coordinator.drain",
+  );
+  const clearWake = coordinatorDrain.indexOf(
     "self.wake_pending.store(false, .release);",
   );
-  const drainEvents = eventCoordinator.indexOf("while (runtime.takeEvent())");
-  assert.ok(clearWake >= 0 && clearWake < drainEvents);
-  const firstDrain = eventCoordinator.indexOf("drainPass(runtime, workbench);");
-  const markTerminal = eventCoordinator.indexOf(
-    "workbench.markTerminalRunsBeforeEventDrain();",
+  const drainEvents = coordinatorDrain.indexOf(
+    "workbench.drainAgentEvents() catch {};",
   );
-  const secondDrain = eventCoordinator.indexOf(
-    "drainPass(runtime, workbench);",
+  assert.ok(clearWake >= 0 && clearWake < drainEvents);
+  assert.doesNotMatch(
+    eventCoordinator,
+    /takeEvent|applyEvent|markTerminalRunsBeforeEventDrain|finalizeMarkedTerminalRunsAfterEventDrain|recordEventProjectionFailure|requestRunTermination/,
+  );
+
+  const workbenchDrain = sliceBetween(
+    workbench,
+    "    pub fn drainAgentEvents(",
+    "    fn drainAgentEventPass(",
+    "Workbench.drainAgentEvents",
+  );
+  const firstDrain = workbenchDrain.indexOf(
+    "self.drainAgentEventPass(&first_projection_error);",
+  );
+  const markTerminal = workbenchDrain.indexOf(
+    "self.markTerminalRunsBeforeEventDrain();",
+  );
+  const secondDrain = workbenchDrain.indexOf(
+    "self.drainAgentEventPass(&first_projection_error);",
     firstDrain + 1,
   );
-  const finalizeTerminal = eventCoordinator.indexOf(
-    "workbench.finalizeMarkedTerminalRunsAfterEventDrain();",
+  const finalizeTerminal = workbenchDrain.indexOf(
+    "self.finalizeMarkedTerminalRunsAfterEventDrain();",
+  );
+  const returnProjectionError = workbenchDrain.indexOf(
+    "if (first_projection_error) |err| return err;",
   );
   assert.ok(
     firstDrain >= 0 &&
       firstDrain < markTerminal &&
       markTerminal < secondDrain &&
-      secondDrain < finalizeTerminal,
+      secondDrain < finalizeTerminal &&
+      finalizeTerminal < returnProjectionError,
   );
-  const stopIngress = app.indexOf("dispatcher.stopIngress();");
-  const quiesceCallbacks = app.indexOf("dispatcher.assertQuiescent();");
-  const detachWorkbench = app.indexOf("dispatcher.detachWorkbench();");
+  assert.match(
+    workbench,
+    /main-loop-thread only\.[\s\S]{0,200}after Executor and Agent Runtime shutdown,[\s\S]{0,200}pub fn drainAgentEvents/,
+  );
+
+  const drainPass = sliceBetween(
+    workbench,
+    "    fn drainAgentEventPass(",
+    "    pub fn applyEvent(",
+    "Workbench.drainAgentEventPass",
+  );
+  const applyFailure = drainPass.indexOf(
+    "self.applyEvent(&envelope) catch |err| {",
+  );
+  const retainFailure = drainPass.indexOf(
+    "first_projection_error.* = err;",
+  );
+  const recordFailure = drainPass.indexOf("self.recordEventProjectionFailure(");
+  const requestTermination = drainPass.indexOf(
+    "self.agent_runtime.requestRunTermination(",
+  );
+  assert.ok(
+    applyFailure >= 0 &&
+      applyFailure < retainFailure &&
+      retainFailure < recordFailure &&
+      recordFailure < requestTermination,
+  );
+
+  const appStop = sliceBetween(
+    app,
+    "    fn stop(",
+    "    fn event(",
+    "App.stop",
+  );
+  const stopIngress = appStop.indexOf("dispatcher.stopIngress();");
+  const quiesceCallbacks = appStop.indexOf("dispatcher.assertQuiescent();");
+  const detachWorkbench = appStop.indexOf("dispatcher.detachWorkbench();");
   assert.ok(stopIngress >= 0 && stopIngress < quiesceCallbacks);
   assert.ok(quiesceCallbacks < detachWorkbench);
+  const shutdownRuntime = appStop.indexOf("try agent_runtime.shutdown();");
+  const drainAfterShutdown = appStop.indexOf("self.drainAgentEvents();");
+  const syncLifecycle = appStop.indexOf("workbench.syncLifecycle();");
+  assert.ok(
+    shutdownRuntime >= 0 &&
+      shutdownRuntime < drainAfterShutdown &&
+      drainAfterShutdown < syncLifecycle,
+  );
+  const allSource = zigFiles("src/").map(read).join("\n");
+  assert.equal(
+    (allSource.match(/workbench\.drainAgentEvents\(\)/g) ?? []).length,
+    1,
+    "Application coordinator must be the only production Workbench event-drain caller",
+  );
+  const workbenchProduction = workbench.slice(
+    0,
+    workbench.indexOf("var test_agent_runtime:"),
+  );
+  assert.doesNotMatch(
+    workbenchProduction,
+    /self\.drainAgentEvents\(\)/,
+    "Workbench workers must not invoke the main-loop-only event drain",
+  );
+
+  const lifecycleFixture = read("tests/support/lifecycle_fixture.zig");
+  const waitWorkbenchSnapshot = sliceBetween(
+    lifecycleFixture,
+    "pub fn waitWorkbenchSnapshot(",
+    "pub fn closeOnThread(",
+    "waitWorkbenchSnapshot",
+  );
+  assert.match(waitWorkbenchSnapshot, /try workbench\.drainAgentEvents\(\);/);
+  assert.doesNotMatch(waitWorkbenchSnapshot, /runtime: \*lifecycle\.Runtime/);
+
+  const executorLifecycle = read("tests/workbench/executor_lifecycle_test.zig");
+  const waitTaskSnapshot = sliceBetween(
+    executorLifecycle,
+    "fn waitTaskSnapshot(",
+    "fn waitCatalogUnavailable(",
+    "waitTaskSnapshot",
+  );
+  assert.match(waitTaskSnapshot, /try workbench\.drainAgentEvents\(\);/);
+  assert.doesNotMatch(waitTaskSnapshot, /runtime: \*lifecycle\.Runtime/);
 
   const dispatcher = read("src/bridge/dispatcher.zig");
   assert.match(dispatcher, /decideTransportFailure/);
@@ -862,9 +1085,14 @@ test("Agent terminal facts have one immutable handoff and no legacy history latc
     /fn writeRun[\s\S]*const terminal = productTerminalFacts\(run\)/,
   );
   assert.match(workbench, /event_projection_failure: \?EventProjectionFailure/);
-  const app = read("src/app/agent_event_coordinator.zig");
+  const drainPass = sliceBetween(
+    workbench,
+    "    fn drainAgentEventPass(",
+    "    pub fn applyEvent(",
+    "Workbench.drainAgentEventPass",
+  );
   assert.match(
-    app,
+    drainPass,
     /applyEvent\(&envelope\) catch[\s\S]*recordEventProjectionFailure/,
   );
   assert.doesNotMatch(workbench, /snapshot\.last_outcome|snapshot\.cause/);

@@ -2831,6 +2831,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
     const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
     var workbench = try workbench_api.Workbench.init(
         std.testing.allocator,
+        std.testing.io,
         runtime,
         .{ .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 },
         fixture.workbenchConfiguration(),

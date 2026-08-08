@@ -74,7 +74,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - 用户可以选择并打开本地 Workspace；
 - Host 校验并保存 Workspace 的规范路径；
 - Workspace 记录 immutable `kind = manual | automatic`。Manual Workspace 可承载多个 Task；Automatic Workspace 精确归属一个 Task，两种 kind 不允许对同一 canonical root 相互转换；
-- Desktop Host composition role 只通过 Native SDK `.data` 目录规则解析 `<MetaWork data dir>/workspaces` 并向 Workbench 注入可用或不可用 capability；Renderer、Bridge payload、cwd、home 和环境 fallback 都不能决定托管目录根；
+- Application 只通过 Native SDK `.data` 目录规则解析 `<MetaWork data dir>/workspaces` 并向 Workbench 注入可用或不可用 capability；Renderer、Bridge payload、cwd、home 和环境 fallback 都不能决定托管目录根；
 - 每个 automatic Task 使用 `<MetaWork data dir>/workspaces/<16 位随机小写 hex>` 独立目录，同一 Task 的后续 Run 复用该目录。分配必须 exclusive create、有界重试、校验 canonical containment；失败不能回退到共享目录；
 - automatic root 及其子目录是保留命名空间，不能注册为 Manual Workspace；用户明确选择 automatic root 的祖先仍服从当前 trust 语义，不因此获得 strict isolation；
 - Workbench projection 必须把 Workspace 作为独立对象发布，至少包含稳定 identity、kind、显示名称、规范路径、当前授权状态和可汇总的 Task 信号；每个被 Task 引用的 Automatic Workspace 必须出现在同一 canonical snapshot；
@@ -143,7 +143,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - 工具 permission 默认拒绝，只有明确授权才允许执行；
 - 用户可以回答 Agent 问题；计划批准或拒绝只有在 AgentCore 发布 typed control capability 后才显示；
 - 审批和回答必须绑定 Task、Run 和请求标识，拒绝过期或重复响应；
-- 同步等待必须支持 deadline、用户取消、Task close 和 Desktop Host shutdown 唤醒；
+- 同步等待必须支持 deadline、用户取消、Task close 和 Application shutdown 唤醒；
 - 同步等待区间发生 Host/Core crash 后，Run 标记 `interrupted`，工具不得自动执行；
 - 目标产品支持用户主动创建和撤销 Host-owned 持久权限规则，但 UI 只能在 Host 声明当前请求可形成安全、范围明确的规则时显示 `Always allow`；
 - 持久规则必须绑定稳定 Workspace identity、tool identity 与版本、operation 和规范化资源约束，并定义 Workspace、tool、脚本内容或安全能力变化时的失效规则；
@@ -173,7 +173,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 ### 5.8 桌面能力
 
 - 提供窗口与应用生命周期管理；
-- 一体化标题栏由 Renderer 绘制窗口按钮并提交固定语义意图，Desktop Host 校验后通过 Native SDK 或已登记兼容 seam 执行；Renderer 不持有原生窗口 identity、handle 或执行权；
+- 一体化标题栏由 Renderer 绘制窗口按钮并提交固定语义意图，Bridge 校验 transport authority 后交由 Application 通过 Native SDK Runtime API 或已登记 Native Compat seam 执行；Renderer 不持有原生窗口 identity、handle 或执行权；
 - 提供受控的文件/目录选择；
 - 为通知、更新和系统集成保留明确入口；
 - Renderer 只能调用 Host 显式开放的领域命令。
@@ -217,7 +217,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - MCP 配置是 Workbench-owned 的全局产品配置，不属于 Metask Account、Workspace 或 AgentCore 协议状态。Host 从 `<MetaWork data dir>/mcp/registry.json` schema 1 恢复稳定 server identity、namespace、启停、transport、timeout、协商策略、credential locator 与显式 tool allowlist；registry generation 只作为 desired commit identity 与 optimistic concurrency，不表示 Runtime 是否生效。allowlist 缺省为空，catalog 新增工具不得自动扩权。Registry 不保存 credential 原文；stdio 不接受 shell string 或继承整个进程环境，argv 只允许明确的公开 literal 且不得承载 credential，environment value 全部通过系统 credential locator 注入；Streamable HTTP 的明文 endpoint 只允许原始 authority 被完整、无歧义解析的 HTTPS 或精确 loopback HTTP，URL parser normalization 不得扩大 loopback 集合；userinfo、query、fragment、authority percent encoding、空白、控制字符和反斜杠不得进入 endpoint，所有自定义 header value 也必须引用系统 credential；
 - Runtime Manifest 只在内存中记录当前 Runtime 已接管的 loaded descriptor fingerprint，或 disabled、invalid、missing-authentication 等未加载 server 的安全 absence proof；成功接管零个 server 的 Runtime 必须提交零 entry Manifest，不能与无法证明 Runtime 状态的 unknown 混同。它不保存 secret、不进入 Bridge、不跨 Runtime 持久化。`runtimeAlignment = current | restart_required | unknown` 由 target desired 与 Manifest 的纯 compatibility 关系派生：loaded descriptor 必须保持 enabled 且 runtime 配置相同；未加载 server 只有在仍 disabled、被删除或原 absence proof 仍成立时兼容；新增 enabled server、启用未加载 server、移除/禁用/改变 loaded server 或使 absence proof 失效都要求重启。普通 mutation 不重新读取 credential、创建 transport 或执行有外部 effect 的 preparation；将 target 完整恢复到 Manifest 可证明的状态必须能够取消 restart required；
 - 每个 registry mutation 从 canonical desired 构建一份 immutable target，并携带 `expectedDesiredGeneration`。Runtime compatible 且 authority 变化时，Agent 必须先基于当前 catalog 构建 owned candidate selection；随后按现有 journal/credential/registry 顺序持久化，明确成功后才 no-fail 安装 target 与 candidate。Runtime 不兼容时安装 blocked admission；candidate 或明确 commit failure 不改变旧 desired/authority；saved recovery required 安装已知 target 后冻结后续 mutation；outcome unknown 不宣称 canonical desired/generation、冻结管理并阻止新 Task 取得 MCP。tool-only 变化因此可对后续新 Task 原子生效，无需重启；
-- MCP 配置准备、Agent Runtime 创建和 MCP 激活是三个不同失败边界：Registry/credential 等可归因 MCP 故障使用空 server Runtime 并发布 unavailable/degraded，普通 Task 仍可运行；Agent Runtime init 或 AgentCore `runtimeCreate` 失败是 App 启动失败，禁止用空 MCP 配置静默重试。Preparation 先构建 Manifest candidate；只有 transport/input 被 Agent Runtime 完整接管后才提交 Manifest。Refresh、mutation 与新 Task admission 由 Workbench 串行化；refresh 在进入 AgentCore 前使旧 catalog/Admission Authority 失效，只有当前 catalog、显式 allowlist 和 server binding 全部校验后才提交新 authority，失败不得恢复旧 selection。App 必须先提交产品状态再开放 Bridge ingress；关闭依次停止 ingress 与 admission、释放 Admission Authority 和 Activation、收口 callback，最后释放 transport 与 Runtime owner；
+- MCP 配置准备、Agent Runtime 创建和 MCP 激活是三个不同失败边界：Registry/credential 等可归因 MCP 故障使用空 server Runtime 并发布 unavailable/degraded，普通 Task 仍可运行；Agent Runtime init 或 AgentCore `runtimeCreate` 失败是 Application 启动失败，禁止用空 MCP 配置静默重试。Preparation 先构建 Manifest candidate；只有 transport/input 被 Agent Runtime 完整接管后才提交 Manifest。Refresh、mutation 与新 Task admission 由 Workbench 串行化；refresh 在进入 AgentCore 前使旧 catalog/Admission Authority 失效，只有当前 catalog、显式 allowlist 和 server binding 全部校验后才提交新 authority，失败不得恢复旧 selection。Application 必须先提交产品状态再开放 Bridge ingress；关闭依次停止 ingress 与 admission、释放 Admission Authority 和 Activation、收口 callback，最后释放 transport 与 Runtime owner；
 - Registry generation 仍是 desired 配置和系统 credential locator 引用切换的唯一持久化提交点。Registry 结构有效性与单个 server 的可运行有效性分离：mutation 可以原样保留、修复或删除既有 invalid server，但不得新增 invalid server 或把既有 server 改成另一份 invalid 配置，确保多个损坏项可以逐项收敛。Credential locator 由 Host 生成且不可原位覆盖；新 secret 使用 fresh locator，只有 base registry 引用且不再被 target registry 引用的语法有效 locator 才能退休，malformed locator 只作为 invalid 配置数据清除，不得进入系统 credential effect。Journal、candidate credential、registry commit、retired cleanup 与 journal clear 必须按固定顺序执行；journal 未收口或持久化结果不确定时，Host 必须冻结后续 MCP mutation，不能猜测 generation 或覆盖恢复证据。
 
 ### 5.11 定时任务
@@ -243,7 +243,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - Renderer 按不可信调用方处理；
 - Host 命令默认拒绝，只开放白名单；
 - 校验来源、payload、Workspace、Task/Run 归属和权限；
-- production 执行配置只由 Account 生成并由 Product coordinator 在主线程一致性提交链中安装到 Workbench；禁止环境默认值、Renderer 字段或 Bridge payload 注入 provider/base URL/credential。Renderer 只可提交 Host 当前脱敏 catalog 中的稳定 API/model selection identifier，Host 必须重新校验并从锁定合同生成配置；
+- production 执行配置只由 Account 生成并由 Application coordinator 在主线程一致性提交链中安装到 Workbench；禁止环境默认值、Renderer 字段或 Bridge payload 注入 provider/base URL/credential。Renderer 只可提交 Account 当前脱敏 catalog 中的稳定 API/model selection identifier，Account 必须重新校验并从锁定合同生成配置；
 - Provider credential 不得进入 Renderer、Bridge、日志、事件或视图 snapshot；
 - OAuth token、PKCE verifier、authorization code、完整 API Key 和 Authorization header 必须使用单 owner secret buffer，所有失败、取消、过期 completion、replacement 和 shutdown 路径都先不可消除地清零再释放；
 - Host 必须在形成产品 projection 前移除已知 Host-held credential 和 schema 标记的 secret 字段，并对命令与工具输出设置明确上限和 truncation 状态；不得把秘密过滤责任推给 Renderer；
@@ -255,7 +255,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - 高频事件不能造成无限内存增长；
 - 控制事件、工具结果和审批不能静默丢失；
 - 单个 Task 的事件不得串入其他 Task；
-- Task close 和 Desktop Host shutdown 必须等待 Run 与 callback 安全退出；
+- Task close 和 Application shutdown 必须等待 Run 与 callback 安全退出；
 - 进程模型必须通过故障注入和恢复数据选择。
 
 ### 性能
