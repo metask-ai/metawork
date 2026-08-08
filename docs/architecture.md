@@ -7,14 +7,14 @@
 
 ## 1. 已确认的技术选型
 
-| 架构节点   | 选择                            | 定位                                                                   |
-| ---------- | ------------------------------- | ---------------------------------------------------------------------- |
-| Application | Zig                            | composition root、用例编排、平台 capability 适配与生命周期驱动        |
-| Renderer   | React + Tailwind                | 唯一正式 UI；运行于 Application 通过 Native SDK 托管的 System WebView  |
-| Bridge     | Zig                             | Renderer Bridge revision 1 的协议、验证和 ProductDelivery 边界         |
-| Product    | Zig                             | MetaWork 产品事实、产品行为和恢复语义的唯一边界                        |
-| AgentCore  | Metask AgentCore library bundle | 外部执行依赖；独立构建和发布，MetaWork 只消费 canonical bundle         |
-| Native SDK | Native SDK                      | 外部桌面依赖；由 Application 消费                                      |
+| 架构节点    | 选择                            | 定位                                                                  |
+| ----------- | ------------------------------- | --------------------------------------------------------------------- |
+| Application | Zig                             | composition root、用例编排、平台 capability 适配与生命周期驱动        |
+| Renderer    | React + Tailwind                | 唯一正式 UI；运行于 Application 通过 Native SDK 托管的 System WebView |
+| Bridge      | Zig                             | Renderer Bridge revision 1 的协议、验证和 ProductDelivery 边界        |
+| Product     | Zig                             | MetaWork 产品事实、产品行为和恢复语义的唯一边界                       |
+| AgentCore   | Metask AgentCore library bundle | 外部执行依赖；独立构建和发布，MetaWork 只消费 canonical bundle        |
+| Native SDK  | Native SDK                      | 外部桌面依赖；由 Application 消费                                     |
 
 正式主路径不采用 Tauri + Rust，不建立第二套 Renderer，不以 PTY、xterm、终端字节流或 Provider SSE 作为 Agent UI 协议，不复制 AgentCore ABI 或实现源码，也不建立 Native SDK Adapter、通用 Desktop Interface 或可替换框架抽象。
 
@@ -57,13 +57,13 @@ flowchart TB
 
 ### 词汇对账
 
-| 词          | 含义                                                                 | 图节点          | 所有权表行                                   | 源码                                                   |
-| ----------- | -------------------------------------------------------------------- | --------------- | -------------------------------------------- | ------------------------------------------------------ |
-| Application | 组合、用例编排、平台能力适配与生命周期边界                           | APPLICATION     | Application                                  | `src/main.zig`、`src/app.zig`、`src/app/`、`src/native_sdk_compat/` |
-| Product     | 产品逻辑边界；不是统一源码 module                                    | PRODUCT         | Account、Workbench                           | `src/account*`、`src/workbench*`                       |
-| Agent       | AgentCore 执行、Session/Conversation 与事件泵边界                     | AGENT           | Agent                                        | `src/agent.zig`、`src/agent/`                          |
-| Bridge      | Renderer 与 MetaWork 本地边界之间的唯一通信边界                       | BRIDGE          | Bridge                                       | `src/bridge*`                                          |
-| Renderer    | 产品 WebUI 模块                                                       | RENDERER        | Renderer                                     | `frontend/`（含 `bridge/` 合同实现层）                 |
+| 词          | 含义                                              | 图节点      | 所有权表行         | 源码                                                                |
+| ----------- | ------------------------------------------------- | ----------- | ------------------ | ------------------------------------------------------------------- |
+| Application | 组合、用例编排、平台能力适配与生命周期边界        | APPLICATION | Application        | `src/main.zig`、`src/app.zig`、`src/app/`、`src/native_sdk_compat/` |
+| Product     | 产品逻辑边界；不是统一源码 module                 | PRODUCT     | Account、Workbench | `src/account*`、`src/workbench*`                                    |
+| Agent       | AgentCore 执行、Session/Conversation 与事件泵边界 | AGENT       | Agent              | `src/agent.zig`、`src/agent/`                                       |
+| Bridge      | Renderer 与 MetaWork 本地边界之间的唯一通信边界   | BRIDGE      | Bridge             | `src/bridge*`                                                       |
+| Renderer    | 产品 WebUI 模块                                   | RENDERER    | Renderer           | `frontend/`（含 `bridge/` 合同实现层）                              |
 
 用法约定：文档中的架构边界统一称为 Application，代码中的组合类型保持 `App`；不再另设 Desktop Host 或 Host infrastructure。`Product 边界/Product 模块`指本节逻辑边界，`桌面产品`指整个交付物。`product_identity.zig`（交付物 Bundle ID）与 Bridge 的 `ProductDelivery`（产品数据运输）维持原名，词根含义不同，不指 Product 边界。
 
@@ -87,7 +87,7 @@ Product 是 MetaWork 产品事实与行为的逻辑边界。它不是统一源�
 
 Product 内部如何拆分 owner 不属于本图，见 [Product 内部架构](product-architecture.md)。Product 的产品 policy 不依赖 DOM、React tab、Toast、JSX state 或 WebView URL。
 
-MCP 不形成第五个 Product owner。Workbench 拥有 Desired Registry、credential locator/恢复、与当前 Agent Runtime 同寿命的 Runtime Manifest、产品状态、工具 policy、Admission Authority、Task binding 与安全 projection；Agent 拥有运行期 transport、secret copy、AgentCore descriptor/catalog/selection、Activation 与 typed health；Application 的 `app/mcp_platform.zig` 只注入 `<MetaWork data dir>/mcp` 的目录单写锁、独立系统 credential service、stdio/network capability并编排启动/关闭。Runtime Manifest 只记录已被当前 Runtime 接管的 descriptor fingerprint 或 disabled/invalid/missing-authentication 等安全 absence proof，不保存 secret、不进入 Bridge、不跨 Runtime 持久化；Workbench 用它与 target desired 的纯 compatibility 关系派生 `current | restart_required | unknown`，而不是比较 registry generation。新 Task 只消费 Workbench 原子提交的 Admission Authority，Bridge 与 Renderer 不得绕回 Agent current selection。Account 不参与 MCP，Bridge 仍只运输 Workbench projection 与 typed intent，AgentCore 继续唯一拥有 MCP 协议、JSON-RPC、协商和 tool binding 语义。
+MCP 不形成第五个 Product owner。Workbench 拥有 schema 2 Desired Registry、两阶段信任与 OAuth 产品状态、credential locator/恢复、`oauth_operation`、与当前 Agent Runtime 同寿命的 Runtime Manifest、工具 policy、Admission Authority、Task binding 与安全 projection；Agent 继续拥有运行期 connector/backend 生命周期、AgentCore descriptor/catalog/selection、Activation 与 typed MCP health。Application 只注入 bounded child/network effect，并拥有系统 credential、earliest-expiry timer、ref-counted HTTP auth snapshot，以及标准 OAuth discovery、PKCE、browser/callback、registration 和 token HTTP effect；它不拥有 transport 产品状态、Agent Runtime 或 MCP JSON-RPC。Runtime Manifest 只记录已被当前 Runtime 接管的 descriptor fingerprint 或 disabled/invalid/unapproved/missing-authentication/reauth-required 等安全 absence proof，不保存 secret、不进入 Bridge、不跨 Runtime 持久化；Workbench 用它与 target desired 的纯 compatibility 关系派生 `current | restart_required | unknown`。新 Task 只消费 Workbench 原子提交的 Admission Authority，Bridge 与 Renderer 不得绕回 Agent current selection。Account 不参与 MCP；可以与 MCP 共同消费 Application-owned 的无产品语义 PKCE/loopback/HTTP primitives，但两者没有 state、credential service 或 persistence 依赖。Bridge 仍只运输 Workbench projection 与 typed intent；AgentCore 继续唯一拥有 MCP JSON-RPC、版本协商、catalog 与 tool binding，OAuth 是其收到 preauthorized Streamable HTTP capability 之前的 Host transport authorization，不要求 ABI revision 变化。
 
 ### 3.4 Agent 与 AgentCore
 
@@ -105,19 +105,19 @@ Native SDK 是外部桌面依赖。Application 通过 Native SDK 执行桌面生
 
 Native SDK Bridge API 是独立的正式 transport surface，不属于系统能力入口。Bridge 可以使用完成 command ingress、source/window authority、handler 注册和窄 Application capability 调用所必需的 Native SDK Bridge contract、data-only DTO 与 opaque identifier；这些值本身不授予系统执行权。Product owner 不消费这些 SDK 类型，Renderer 只消费 Renderer Bridge wire。
 
-| Native SDK surface                | MetaWork 消费者                  | 边界                                                                                        |
-| --------------------------------- | -------------------------------- | ------------------------------------------------------------------------------------------- |
-| Runtime API                       | Application                      | 执行系统 effect，并维护 Native SDK 的窗口、WebView、托盘和生命周期状态                      |
-| Bridge API                        | Bridge、Application              | `Invocation`、`Source`、`Handler`、`BridgePolicy` 等正式 transport contract                 |
-| data-only DTO / opaque identifier | Bridge、Application adapter      | `WindowId`、dialog options/result 等无执行 authority 的公开值；不得传播到 Product owner |
-| `PlatformServices`                | 已登记的一级兼容 seam            | 可执行低层 SDK 原语的受限 authority，不是普通依赖                                           |
-| 具体平台实现类型与 OS handle      | 已登记的二级兼容 seam            | `WindowsPlatform`、`HWND`、AppKit/GTK 对象等平台 authority                                  |
-| `PlatformServices.context`        | 无                               | Native SDK 私有 opaque 数据，MetaWork 永不访问、解释或强转                                  |
+| Native SDK surface                | MetaWork 消费者             | 边界                                                                                    |
+| --------------------------------- | --------------------------- | --------------------------------------------------------------------------------------- |
+| Runtime API                       | Application                 | 执行系统 effect，并维护 Native SDK 的窗口、WebView、托盘和生命周期状态                  |
+| Bridge API                        | Bridge、Application         | `Invocation`、`Source`、`Handler`、`BridgePolicy` 等正式 transport contract             |
+| data-only DTO / opaque identifier | Bridge、Application adapter | `WindowId`、dialog options/result 等无执行 authority 的公开值；不得传播到 Product owner |
+| `PlatformServices`                | 已登记的一级兼容 seam       | 可执行低层 SDK 原语的受限 authority，不是普通依赖                                       |
+| 具体平台实现类型与 OS handle      | 已登记的二级兼容 seam       | `WindowsPlatform`、`HWND`、AppKit/GTK 对象等平台 authority                              |
+| `PlatformServices.context`        | 无                          | Native SDK 私有 opaque 数据，MetaWork 永不访问、解释或强转                              |
 
 产品需要系统能力时，正常依赖链是 `Product owner → MetaWork-owned capability → Application adapter → Native SDK Runtime API → SDK internals → OS`；Bridge 需要受限系统 effect 时经窄 Application capability 进入同一 Runtime 路径；Application 自身的生命周期和窗口行为直接进入 Runtime API。系统能力按以下三级调用路径消费：
 
-| 路径     | 调用链                                                              | 适用条件                                                                         |
-| -------- | ------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| 路径     | 调用链                                                             | 适用条件                                                                         |
+| -------- | ------------------------------------------------------------------ | -------------------------------------------------------------------------------- |
 | 正常路径 | Application → Native SDK Runtime API → SDK `PlatformServices` → OS | Runtime API 已提供完整能力；MetaWork 只调用 Runtime API，后两段属于 SDK 内部实现 |
 | 一级兼容 | Application 窄 seam → SDK `PlatformServices` 已有原语 → OS         | Runtime API 缺失或存在已确认的目标平台缺陷，但 SDK 底层已有所需原语              |
 | 二级兼容 | Application 窄平台 seam → Win32 / AppKit / GTK → OS                | SDK 连可用底层原语都缺失，MetaWork 必须暂时补齐平台实现                          |
@@ -176,8 +176,8 @@ Renderer 按不可信调用方处理：
 - Host 校验 payload、Session/Run 归属和请求时效；
 - trusted Workspace 只能由 Host 原生目录选择与原生确认生成一次性 grant；Renderer 不能提交路径加 boolean 自行授信；
 - Provider credential 不进入 Bridge、事件、日志或 snapshot；
-- OAuth token、PKCE verifier、authorization code、完整 API Key 和 Authorization header 只能存在于 Product secret owner、系统凭据存储和受控 runtime copy；所有 owner 在释放前 secure-zero；
-- MCP credential 使用与 Metask Account 分离的 `<bundle-id>.mcp` 系统 credential service，只存在于系统凭据存储、Workbench preparation 的线性临时 copy 和 Agent runtime copy；`mcp/registry.json`、Bridge、Renderer、日志、产品历史和 raw diagnostic 均不得保存 credential 原文；
+- OAuth token、PKCE verifier、authorization code、完整 API Key 和 Authorization header 只能存在于对应 Product secret transaction、系统凭据存储和受控 runtime copy；所有 owner 在释放前 secure-zero；
+- MCP credential 使用与 Metask Account 分离的 `<bundle-id>.mcp` 系统 credential service，只存在于系统凭据存储、Workbench mutation/OAuth operation 的线性临时 copy 和 Application-owned transport auth snapshot；`mcp/registry.json`、Bridge、Renderer、日志、产品历史和 raw diagnostic 均不得保存 credential 原文。Renderer 不得提交 secret；static credential 与 OAuth client secret 采集必须通过独立 `mcp_secret_capture` 窄 Host capability 直接写入系统 credential service，能力不可用时 fail closed；
 - production provider/base URL/API Key 不从环境变量或 Renderer 注入，只能来自 Account 已锁定并验证的 Metask contract；Renderer 只能提交 Host 当前脱敏 catalog 中的稳定 API/model selection identifier，Host 必须重新校验 ownership、active 状态、API→model 归属并从锁定合同推导 typed provider/base URL；
 - Host 在形成产品 projection 前移除已知 Host-held credential 和 schema 标记的 secret 字段，并对命令与工具输出设置 byte 上限和 truncation 状态；Renderer 不是秘密过滤边界；
 - 当前不暴露通用 Host tool 或任意执行接口；
@@ -194,17 +194,17 @@ Renderer Bridge revision、Account persistence schema、AgentCore artifact versi
 
 ## 9. 主要风险
 
-| 风险                                   | 当前控制方式                                                              |
-| -------------------------------------- | ------------------------------------------------------------------------- |
-| Native SDK Zig → React 路径不符合预期  | 真实 dev/prod smoke                                                       |
-| typed SDK 与真实 producer wire 漂移    | source-free corpus + 真实 Host link/run 回归                              |
-| callback 数据返回后失效                | callback 内验证并深拷贝                                                   |
-| callback/close race 造成 UAF           | abort、join、callback quiescence 后 destroy                               |
-| callback identity race 泄漏 permission | UI request publication 与 response extraction 均在 Session lock 下复检    |
-| 同步 UI 耗尽 executor                  | bounded slots、deadline、cancel/close/shutdown 唤醒和压力测试             |
-| Bridge/event 造成无限内存              | count/byte/time 多维上限和公平调度                                        |
-| Run failure 被误报用户取消             | active first-writer cause 与 Product write-once terminal history 分层 |
-| Renderer 掉线杀死后台 Run              | typed transport policy 不向 Agent termination 反向泄漏                    |
-| v1 Workspace 被误报安全                | 只允许临时/trusted 验证并显式标注限制                                     |
-| 同进程 native crash 带走全部状态       | fault-domain 验证已选后续单 Worker；当前同进程应用仍是 prototype          |
-| 过早建设发布系统                       | baseline 通过后再做 cache 与 remote                                       |
+| 风险                                   | 当前控制方式                                                           |
+| -------------------------------------- | ---------------------------------------------------------------------- |
+| Native SDK Zig → React 路径不符合预期  | 真实 dev/prod smoke                                                    |
+| typed SDK 与真实 producer wire 漂移    | source-free corpus + 真实 Host link/run 回归                           |
+| callback 数据返回后失效                | callback 内验证并深拷贝                                                |
+| callback/close race 造成 UAF           | abort、join、callback quiescence 后 destroy                            |
+| callback identity race 泄漏 permission | UI request publication 与 response extraction 均在 Session lock 下复检 |
+| 同步 UI 耗尽 executor                  | bounded slots、deadline、cancel/close/shutdown 唤醒和压力测试          |
+| Bridge/event 造成无限内存              | count/byte/time 多维上限和公平调度                                     |
+| Run failure 被误报用户取消             | active first-writer cause 与 Product write-once terminal history 分层  |
+| Renderer 掉线杀死后台 Run              | typed transport policy 不向 Agent termination 反向泄漏                 |
+| v1 Workspace 被误报安全                | 只允许临时/trusted 验证并显式标注限制                                  |
+| 同进程 native crash 带走全部状态       | fault-domain 验证已选后续单 Worker；当前同进程应用仍是 prototype       |
+| 过早建设发布系统                       | baseline 通过后再做 cache 与 remote                                    |
