@@ -156,12 +156,20 @@ pub const StdHttpTransport = struct {
             return error.InvalidResponse;
         const uri = std.Uri.parse(request.url) catch return error.InvalidResponse;
         var headers: [8]std.http.Header = undefined;
-        for (request.headers, 0..) |header, index| {
+        var header_count: usize = 0;
+        var authorization: ?[]const u8 = null;
+        for (request.headers) |header| {
             if (header.name.len == 0 or
                 std.mem.indexOfAny(u8, header.name, "\r\n:") != null or
                 std.mem.indexOfAny(u8, header.value, "\r\n") != null)
                 return error.InvalidResponse;
-            headers[index] = .{ .name = header.name, .value = header.value };
+            if (std.ascii.eqlIgnoreCase(header.name, "Authorization")) {
+                if (authorization != null) return error.InvalidResponse;
+                authorization = header.value;
+                continue;
+            }
+            headers[header_count] = .{ .name = header.name, .value = header.value };
+            header_count += 1;
         }
         var client: std.http.Client = .{ .allocator = self.allocator, .io = self.io };
         defer client.deinit();
@@ -171,8 +179,14 @@ pub const StdHttpTransport = struct {
         };
         var http_request = client.request(method, uri, .{
             .redirect_behavior = .unhandled,
-            .headers = .{ .accept_encoding = .{ .override = "identity" } },
-            .privileged_headers = headers[0..request.headers.len],
+            .headers = .{
+                .accept_encoding = .{ .override = "identity" },
+                .authorization = if (authorization) |value|
+                    .{ .override = value }
+                else
+                    .default,
+            },
+            .extra_headers = headers[0..header_count],
         }) catch return error.Network;
         defer http_request.deinit();
         if (method == .POST) {
@@ -267,6 +281,15 @@ pub const TokenEndpointAuthMethod = enum {
             .client_secret_post => "client_secret_post",
         };
     }
+
+    pub fn fromWire(value: []const u8) ?TokenEndpointAuthMethod {
+        if (std.mem.eql(u8, value, "none")) return .none;
+        if (std.mem.eql(u8, value, "client_secret_basic"))
+            return .client_secret_basic;
+        if (std.mem.eql(u8, value, "client_secret_post"))
+            return .client_secret_post;
+        return null;
+    }
 };
 
 pub const AuthorizationServer = struct {
@@ -305,7 +328,8 @@ pub const Secret = struct {
     owned: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, value: []const u8) !Secret {
-        if (value.len == 0 or value.len > Limits.secret_bytes)
+        if (value.len == 0 or value.len > Limits.secret_bytes or
+            !validSecretValue(value))
             return error.InvalidTokenResponse;
         return .{
             .allocator = allocator,
@@ -333,6 +357,12 @@ pub const Secret = struct {
         self.* = .{};
     }
 };
+
+fn validSecretValue(value: []const u8) bool {
+    for (value) |byte|
+        if ((byte < 0x20 and byte != '\t') or byte == 0x7f) return false;
+    return true;
+}
 
 pub const Registration = struct {
     allocator: std.mem.Allocator,
@@ -548,7 +578,7 @@ const Challenge = struct {
     scope: ?[]const u8 = null,
 };
 
-fn discoverResourceEffect(
+pub fn discoverResourceEffect(
     allocator: std.mem.Allocator,
     transport: Transport,
     endpoint: []const u8,
@@ -1274,6 +1304,90 @@ fn exchangeAuthorizationCodeEffect(
         return error.TokenOutcomeUnknown;
 }
 
+pub const DurableRefreshRequest = struct {
+    issuer: []const u8,
+    client_id: []const u8,
+    token_endpoint_auth_method: TokenEndpointAuthMethod,
+    resource: []const u8,
+    consent_epoch: u64,
+    token_revision: u64,
+};
+
+/// Executes only the remote refresh effect for a binding returned after the
+/// Workbench marker/reduced-authority commit. It never retries. A cancellation
+/// or transport failure after the POST is admitted is outcome-unknown.
+pub fn refreshAccessTokenEffect(
+    allocator: std.mem.Allocator,
+    transport: Transport,
+    server: *const AuthorizationServer,
+    request: DurableRefreshRequest,
+    client_secret: ?[]const u8,
+    refresh_token: []const u8,
+    now_unix_ms: u64,
+) (Error || std.mem.Allocator.Error)!TokenSet {
+    if (!std.mem.eql(u8, request.issuer, server.issuer) or
+        !validClientId(request.client_id) or
+        !validHttpsUrl(request.resource) or
+        request.consent_epoch == 0 or request.token_revision == 0 or
+        refresh_token.len == 0 or refresh_token.len > Limits.secret_bytes or
+        ((request.token_endpoint_auth_method == .none) != (client_secret == null)) or
+        !containsAuthMethod(
+            server.token_endpoint_auth_methods,
+            request.token_endpoint_auth_method,
+        ))
+        return error.InvalidAuthorizationRequest;
+    var request_storage: [Limits.request_body_bytes]u8 = undefined;
+    defer std.crypto.secureZero(u8, &request_storage);
+    var writer = std.Io.Writer.fixed(&request_storage);
+    writeFormPairs(&writer, &.{
+        .{ "grant_type", "refresh_token" },
+        .{ "client_id", request.client_id },
+        .{ "refresh_token", refresh_token },
+        .{ "resource", request.resource },
+    }) catch return error.InvalidAuthorizationRequest;
+    if (request.token_endpoint_auth_method == .client_secret_post) {
+        writer.writeByte('&') catch return error.InvalidAuthorizationRequest;
+        writePair(&writer, "client_secret", client_secret.?) catch
+            return error.InvalidAuthorizationRequest;
+    }
+    var basic_storage: [4 * (Limits.client_id_bytes + Limits.secret_bytes) + 16]u8 =
+        undefined;
+    defer std.crypto.secureZero(u8, &basic_storage);
+    var headers: [3]Header = .{
+        .{ .name = "Accept", .value = "application/json" },
+        .{ .name = "Content-Type", .value = "application/x-www-form-urlencoded" },
+        .{ .name = "Authorization", .value = "" },
+    };
+    const header_count: usize = if (request.token_endpoint_auth_method == .client_secret_basic) basic: {
+        headers[2].value = buildBasicAuthorization(
+            &basic_storage,
+            request.client_id,
+            client_secret.?,
+        ) catch return error.InvalidAuthorizationRequest;
+        break :basic 3;
+    } else 2;
+    var body_buffer: [Limits.token_body_bytes]u8 = undefined;
+    defer std.crypto.secureZero(u8, &body_buffer);
+    var header_buffer: [Limits.header_bytes]u8 = undefined;
+    defer std.crypto.secureZero(u8, &header_buffer);
+    const response = transport.fetch(.{
+        .method = .post,
+        .url = server.token_endpoint,
+        .headers = headers[0..header_count],
+        .body = writer.buffered(),
+    }, &body_buffer, &header_buffer) catch |err| switch (err) {
+        error.CancelledBeforeSend => return error.CancelledBeforeSend,
+        else => return error.TokenOutcomeUnknown,
+    };
+    if (response.status == 400 and oauthErrorIs(response.body, "invalid_grant"))
+        return error.InvalidGrant;
+    if (response.status != 200 or !jsonContentType(response.content_type) or
+        response.body.len == 0 or response.body.len > Limits.token_body_bytes)
+        return error.TokenOutcomeUnknown;
+    return parseTokenResponse(allocator, response.body, now_unix_ms) catch
+        return error.TokenOutcomeUnknown;
+}
+
 fn parseTokenResponse(
     allocator: std.mem.Allocator,
     body: []const u8,
@@ -1582,10 +1696,7 @@ fn parseAuthMethods(
 }
 
 fn parseAuthMethod(value: []const u8) ?TokenEndpointAuthMethod {
-    if (std.mem.eql(u8, value, "none")) return .none;
-    if (std.mem.eql(u8, value, "client_secret_basic")) return .client_secret_basic;
-    if (std.mem.eql(u8, value, "client_secret_post")) return .client_secret_post;
-    return null;
+    return TokenEndpointAuthMethod.fromWire(value);
 }
 
 fn containsAuthMethod(
@@ -1742,6 +1853,17 @@ fn buildUrl(output: []u8, parts: []const []const u8) ![]const u8 {
 
 test "MCP OAuth declaration graph compiles" {
     std.testing.refAllDecls(@This());
+}
+
+test "MCP OAuth token secrets reject HTTP control bytes" {
+    try std.testing.expectError(
+        error.InvalidTokenResponse,
+        Secret.init(std.testing.allocator, "access\r\ninjected"),
+    );
+    try std.testing.expectError(
+        error.InvalidTokenResponse,
+        Secret.init(std.testing.allocator, "access\x7f"),
+    );
 }
 
 test "MCP OAuth discovery validates resource issuer PKCE and exact metadata" {
@@ -1948,6 +2070,78 @@ test "MCP OAuth DCR and code exchange are bounded and secret owned" {
     );
     defer tokens.deinit();
     try std.testing.expectEqualStrings("access-secret", tokens.access_token.view());
+    try std.testing.expectEqual(@as(?u64, 61_000), tokens.expires_at_unix_ms);
+}
+
+test "MCP OAuth refresh is single-shot and preserves optional refresh rotation" {
+    const Fake = struct {
+        calls: usize = 0,
+
+        fn fetch(
+            context: ?*anyopaque,
+            request: Request,
+            _: []u8,
+            _: []u8,
+        ) FetchError!Response {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.calls += 1;
+            if (std.mem.indexOf(u8, request.body, "grant_type=refresh_token") == null or
+                std.mem.indexOf(u8, request.body, "refresh_token=old-refresh") == null or
+                std.mem.indexOf(
+                    u8,
+                    request.body,
+                    "resource=https%3A%2F%2Fmcp.example.test%2Fmcp",
+                ) == null)
+                return .{ .status = 400, .body = "{\"error\":\"invalid_grant\"}" };
+            return .{
+                .status = 200,
+                .content_type = "application/json",
+                .body = "{\"access_token\":\"new-access\",\"refresh_token\":\"new-refresh\",\"token_type\":\"Bearer\",\"expires_in\":60}",
+            };
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    const methods = try arena.allocator().dupe(
+        TokenEndpointAuthMethod,
+        &.{.none},
+    );
+    var server: AuthorizationServer = .{
+        .arena = arena,
+        .issuer = "https://auth.example.test",
+        .authorization_endpoint = "https://auth.example.test/authorize",
+        .token_endpoint = "https://auth.example.test/token",
+        .registration_endpoint = null,
+        .scopes_supported = &.{},
+        .token_endpoint_auth_methods = methods,
+        .refresh_token_supported = false,
+        .authorization_response_issuer_required = false,
+        .client_id_metadata_document_supported = false,
+    };
+    defer server.deinit();
+    var fake: Fake = .{};
+    var tokens = try refreshAccessTokenEffect(
+        std.testing.allocator,
+        .{ .context = &fake, .fetch_fn = Fake.fetch },
+        &server,
+        .{
+            .issuer = "https://auth.example.test",
+            .client_id = "client",
+            .token_endpoint_auth_method = .none,
+            .resource = "https://mcp.example.test/mcp",
+            .consent_epoch = 3,
+            .token_revision = 8,
+        },
+        null,
+        "old-refresh",
+        1000,
+    );
+    defer tokens.deinit();
+    try std.testing.expectEqual(@as(usize, 1), fake.calls);
+    try std.testing.expectEqualStrings("new-access", tokens.access_token.view());
+    try std.testing.expectEqualStrings(
+        "new-refresh",
+        tokens.refresh_token.?.view(),
+    );
     try std.testing.expectEqual(@as(?u64, 61_000), tokens.expires_at_unix_ms);
 }
 

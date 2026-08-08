@@ -13,6 +13,7 @@ const agent_event_coordinator = @import("app/agent_event_coordinator.zig");
 const app_automation = @import("app/automation.zig");
 const frontend = @import("app/frontend.zig");
 const mcp_startup = @import("app/mcp_startup.zig");
+const mcp_oauth_coordinator = @import("app/mcp_oauth_coordinator.zig");
 const app_paths = @import("app/paths.zig");
 const app_platform = @import("app/platform.zig");
 const app_stores = @import("app/stores.zig");
@@ -45,6 +46,8 @@ const App = struct {
     workbench_initialized: bool = false,
     mcp_configuration_store: ?*workbench_api.McpConfigurationFileStore = null,
     mcp_credential_store: ?mcp_platform.CredentialStore = null,
+    mcp_authorizations: ?mcp_platform.HttpAuthorizations = null,
+    mcp_oauth_refresh: ?mcp_oauth_coordinator.Coordinator = null,
 
     fn app(self: *@This()) native_sdk.App {
         return .{
@@ -81,14 +84,15 @@ const App = struct {
         var preparation = startup_preparation.preparation;
         var preparation_owned = true;
         defer if (preparation_owned) preparation.deinit();
-        var mcp_input: ?agent.McpRuntimeInput = null;
-        defer if (mcp_input) |*input| input.deinit();
+        var mcp_build: mcp_platform.RuntimeBuild = undefined;
+        var mcp_build_initialized = false;
+        defer if (mcp_build_initialized) mcp_build.deinit();
         var runtime_manifest: ?workbench_api.McpRuntimeManifest = null;
         var runtime_manifest_owned = false;
         defer if (runtime_manifest_owned) runtime_manifest.?.deinit();
         var activation_failed = false;
         var input_construction_succeeded = true;
-        mcp_input = mcp_platform.buildRuntimeInput(
+        mcp_build = mcp_platform.buildRuntime(
             self.io,
             std.heap.c_allocator,
             &preparation,
@@ -97,9 +101,12 @@ const App = struct {
             error.InvalidConfig => failed: {
                 activation_failed = true;
                 input_construction_succeeded = false;
-                break :failed null;
+                break :failed .{
+                    .authorizations = .{ .allocator = std.heap.c_allocator },
+                };
             },
         };
+        mcp_build_initialized = true;
         if (input_construction_succeeded) {
             runtime_manifest = try workbench_api.McpRuntimeManifest.candidate(
                 std.heap.c_allocator,
@@ -110,9 +117,10 @@ const App = struct {
         const agent_runtime = try createAgentRuntime(
             self.io,
             self.agent_events.notifier(),
-            if (mcp_input) |*input| input else null,
+            if (mcp_build.input) |*input| input else null,
         );
         self.agent_runtime = agent_runtime;
+        self.mcp_authorizations = mcp_build.takeAuthorizations();
         var activation: ?*agent.McpActivation = null;
         defer if (activation) |value| value.deinit();
         switch (try agent_runtime.activateMcp()) {
@@ -158,6 +166,15 @@ const App = struct {
         self.workbench = workbench_storage;
         self.workbench_initialized = true;
         try self.platform.installScheduleHost(workbench_storage);
+        self.mcp_oauth_refresh = mcp_oauth_coordinator.Coordinator.init(
+            std.heap.c_allocator,
+            self.io,
+            workbench_storage,
+            &self.mcp_credential_store.?,
+            &self.mcp_authorizations.?,
+            mcp_oauth_coordinator.platformHost(&self.platform),
+        );
+        self.mcp_oauth_refresh.?.start();
         const coordinator = self.account_coordinator orelse
             @panic("Account coordinator is not composed");
         if (self.automation.active()) {
@@ -194,6 +211,7 @@ const App = struct {
             dispatcher.breakConnection();
             dispatcher.detachWorkbench();
         }
+        if (self.mcp_oauth_refresh) |*coordinator| coordinator.shutdown();
         if (self.account_started) if (self.account_coordinator) |coordinator| {
             coordinator.shutdown();
             coordinator.drain();
@@ -221,6 +239,8 @@ const App = struct {
             .effects_wake => {
                 if (self.account_coordinator) |coordinator|
                     coordinator.drain();
+                if (self.mcp_oauth_refresh) |*coordinator|
+                    if (!coordinator.drain()) coordinator.reconcileTimer();
                 self.drainAgentEvents();
                 if (self.dispatcher) |dispatcher| if (dispatcher.connectedWindow() != null) {
                     try dispatcher.emitWorkbenchChanged();
@@ -236,6 +256,11 @@ const App = struct {
                         if (self.dispatcher) |dispatcher|
                             try dispatcher.emitWorkbenchChanged();
                     }
+                    return;
+                }
+                if (timer.id == app_platform.mcp_oauth_timer_id) {
+                    if (self.mcp_oauth_refresh) |*coordinator|
+                        _ = coordinator.onTimer();
                     return;
                 }
                 if (self.dispatcher != null and
@@ -366,10 +391,18 @@ pub fn run(init: std.process.Init) !void {
         },
     };
     defer {
+        if (app.mcp_oauth_refresh) |*coordinator| {
+            coordinator.deinit();
+            app.mcp_oauth_refresh = null;
+        }
         if (app.workbench_initialized) workbench.shutdownExecutor();
         if (app.agent_runtime) |runtime| {
             if (!app.agent_shutdown) runtime.shutdown() catch {};
             if (app.workbench_initialized) workbench.deinit();
+            if (app.mcp_authorizations) |*authorizations| {
+                authorizations.deinit();
+                app.mcp_authorizations = null;
+            }
             runtime.deinit();
         }
     }

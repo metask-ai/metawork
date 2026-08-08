@@ -334,6 +334,50 @@ const McpAdmissionAuthority = union(enum) {
     }
 };
 
+pub const McpOauthRefreshBinding = struct {
+    arena: std.heap.ArenaAllocator,
+    operation_id: []const u8,
+    server_id: []const u8,
+    endpoint: []const u8,
+    resource: []const u8,
+    issuer: []const u8,
+    scopes: []const []const u8,
+    client_id: []const u8,
+    token_endpoint_auth_method: []const u8,
+    client_secret_ref: ?[]const u8,
+    refresh_token_ref: []const u8,
+    consent_epoch: u64,
+    token_revision: u64,
+
+    pub fn deinit(self: *McpOauthRefreshBinding) void {
+        self.arena.deinit();
+        self.* = undefined;
+    }
+};
+
+pub const McpOauthRefreshBeginOutcome = union(enum) {
+    started: McpOauthRefreshBinding,
+    rejected,
+    persistence_outcome_unknown,
+};
+
+pub const McpOauthExpiry = struct {
+    server_id: []const u8,
+    expires_at_unix_ms: u64,
+};
+
+/// A prebuilt Application-owned HTTP snapshot replacement. `commit_fn` must
+/// be allocation-free and is invoked exactly after the registry result is
+/// known durable but before restored Admission is installed.
+pub const McpOauthRuntimeCommit = struct {
+    context: *anyopaque,
+    commit_fn: *const fn (*anyopaque) void,
+
+    fn commit(self: McpOauthRuntimeCommit) void {
+        self.commit_fn(self.context);
+    }
+};
+
 const McpProductState = struct {
     preparation: mcp_configuration.Preparation,
     activation: ?*lifecycle.McpActivation,
@@ -407,6 +451,66 @@ fn findMcpServer(
     for (servers) |server|
         if (std.mem.eql(u8, server.id, id)) return server;
     return null;
+}
+
+fn mcpServerAdmittedByDesiredState(
+    server: mcp_configuration.ServerWire,
+) bool {
+    if (!server.enabled or server.connection_approval == null) return false;
+    if (std.mem.eql(u8, server.auth.kind, "oauth")) {
+        const oauth = server.auth.oauth orelse return false;
+        return std.mem.eql(u8, oauth.status, "ready") and oauth.grant != null;
+    }
+    return true;
+}
+
+fn mcpServerToolsForAdmission(
+    registry: mcp_configuration.RegistryWire,
+    server: mcp_configuration.ServerWire,
+) []const []const u8 {
+    if (registry.oauth_operation) |operation|
+        if (std.mem.eql(u8, operation.server_id, server.id)) return &.{};
+    if (!mcpServerAdmittedByDesiredState(server)) return &.{};
+    return server.tools;
+}
+
+fn buildMcpOauthRefreshBinding(
+    allocator: std.mem.Allocator,
+    registry: mcp_configuration.RegistryWire,
+) std.mem.Allocator.Error!McpOauthRefreshBinding {
+    const operation = registry.oauth_operation.?;
+    const server = findMcpServer(registry.servers, operation.server_id).?;
+    const oauth = server.auth.oauth.?;
+    const consent = oauth.consent.?;
+    const grant = oauth.grant.?;
+    const registration = oauth.registration;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const owned = arena.allocator();
+    const scopes = try owned.alloc([]const u8, consent.scopes.len);
+    for (consent.scopes, scopes) |scope, *owned_scope|
+        owned_scope.* = try owned.dupe(u8, scope);
+    return .{
+        .arena = arena,
+        .operation_id = try owned.dupe(u8, operation.id),
+        .server_id = try owned.dupe(u8, operation.server_id),
+        .endpoint = try owned.dupe(u8, server.transport.url.?),
+        .resource = try owned.dupe(u8, consent.resource),
+        .issuer = try owned.dupe(u8, consent.issuer),
+        .scopes = scopes,
+        .client_id = try owned.dupe(u8, registration.client_id.?),
+        .token_endpoint_auth_method = try owned.dupe(
+            u8,
+            registration.token_endpoint_auth_method.?,
+        ),
+        .client_secret_ref = if (registration.client_secret_ref) |locator|
+            try owned.dupe(u8, locator)
+        else
+            null,
+        .refresh_token_ref = try owned.dupe(u8, grant.refresh_token_ref.?),
+        .consent_epoch = operation.consent_epoch,
+        .token_revision = operation.token_revision.?,
+    };
 }
 
 fn buildMcpRefreshAllowlists(
@@ -4730,6 +4834,202 @@ pub const Workbench = struct {
         return management.inspect();
     }
 
+    /// Borrowed until the next Workbench mutation. Application stores only
+    /// the due time in its one-shot timer and asks again when it fires.
+    pub fn nextMcpOauthExpiry(self: *const Workbench) ?McpOauthExpiry {
+        if (self.shutting_down) return null;
+        const mcp = if (self.mcp) |*value| value else return null;
+        const management = if (mcp.management) |*value| value else return null;
+        if (management.inspect().health != .ready) return null;
+        const registry = management.desiredRegistry() orelse return null;
+        if (registry.oauth_operation != null) return null;
+        var earliest: ?McpOauthExpiry = null;
+        for (registry.servers) |server| {
+            if (!mcpServerAdmittedByDesiredState(server)) continue;
+            const oauth = server.auth.oauth orelse continue;
+            const grant = oauth.grant orelse continue;
+            if (grant.refresh_token_ref == null) continue;
+            const expires_at = grant.expires_at_unix_ms orelse continue;
+            if (earliest == null or expires_at < earliest.?.expires_at_unix_ms)
+                earliest = .{
+                    .server_id = server.id,
+                    .expires_at_unix_ms = expires_at,
+                };
+        }
+        return earliest;
+    }
+
+    /// Begins the global OAuth refresh operation as one Workbench short
+    /// transaction. Every fallible allocation, including the reduced
+    /// Admission selection and the detached network binding, completes before
+    /// the marker is persisted. A successful marker commit is followed only
+    /// by the no-fail authority swap.
+    pub fn beginMcpOauthRefresh(
+        self: *Workbench,
+        server_id: []const u8,
+    ) Error!McpOauthRefreshBeginOutcome {
+        if (self.shutting_down) return .rejected;
+        self.syncLifecycle();
+        const mcp = if (self.mcp) |*value| value else return .rejected;
+        if (!mcp.committed or mcp.refresh_job != null) return .rejected;
+        const management = if (mcp.management) |*value| value else return .rejected;
+        const inspection = management.inspect();
+        if (inspection.health != .ready or inspection.runtime_alignment != .current)
+            return .rejected;
+        if (mcp.activation_failed) return .rejected;
+        const activation = mcp.activation orelse return .rejected;
+        var runtime_loaded = false;
+        for (activation.serverHealth()) |server| {
+            if (!std.mem.eql(u8, server.id, server_id)) continue;
+            runtime_loaded = true;
+            break;
+        }
+        if (!runtime_loaded) return .rejected;
+        const desired = management.desiredRegistry() orelse return .rejected;
+        var preparation = switch (try management.prepareBeginRefresh(
+            desired.generation,
+            .{ .server_id = server_id },
+        )) {
+            .rejected => return .rejected,
+            .prepared => |prepared| prepared,
+        };
+        defer preparation.deinit();
+        var reduced = try self.mcpAdmissionForTarget(mcp, preparation.target());
+        var reduced_owned = true;
+        defer if (reduced_owned) reduced.deinit();
+        if (reduced != .ready) return .rejected;
+        var binding = try buildMcpOauthRefreshBinding(
+            self.allocator,
+            preparation.target(),
+        );
+        var binding_owned = true;
+        defer if (binding_owned) binding.deinit();
+        const outcome = try management.commitPreparedOauthOperationState(&preparation);
+        switch (outcome) {
+            .saved => {
+                self.replaceMcpAdmission(mcp, reduced);
+                reduced_owned = false;
+                binding_owned = false;
+                self.bumpRevision();
+                return .{ .started = binding };
+            },
+            .indeterminate => {
+                self.blockMcpAdmission(mcp, .persistence_outcome_unknown);
+                self.bumpRevision();
+                return .persistence_outcome_unknown;
+            },
+            .rejected => return .rejected,
+            .unchanged, .stale_generation, .saved_recovery_required => unreachable,
+        }
+    }
+
+    pub fn completeMcpOauthRefresh(
+        self: *Workbench,
+        input: mcp_configuration.CompleteRefreshInput,
+        runtime_commit: McpOauthRuntimeCommit,
+    ) Error!mcp_configuration.ManagementOutcome {
+        if (self.shutting_down) {
+            std.crypto.secureZero(u8, input.access_token);
+            if (input.refresh_token) |secret| std.crypto.secureZero(u8, secret);
+            return .rejected;
+        }
+        const mcp = if (self.mcp) |*value| value else {
+            std.crypto.secureZero(u8, input.access_token);
+            if (input.refresh_token) |secret| std.crypto.secureZero(u8, secret);
+            return .rejected;
+        };
+        if (mcp.refresh_job != null) {
+            std.crypto.secureZero(u8, input.access_token);
+            if (input.refresh_token) |secret| std.crypto.secureZero(u8, secret);
+            return .rejected;
+        }
+        const management = if (mcp.management) |*value| value else {
+            std.crypto.secureZero(u8, input.access_token);
+            if (input.refresh_token) |secret| std.crypto.secureZero(u8, secret);
+            return .rejected;
+        };
+        var preparation = try management.prepareCompleteRefresh(input);
+        switch (preparation) {
+            .unchanged, .rejected => return .rejected,
+            .prepared => |*mutation| {
+                defer mutation.deinit();
+                var candidate = try self.mcpAdmissionForTarget(mcp, mutation.target());
+                var candidate_owned = true;
+                defer if (candidate_owned) candidate.deinit();
+                if (candidate != .ready) return .rejected;
+                const outcome = try management.commitPreparedMutation(mutation);
+                const reported_outcome = if (outcome == .saved_recovery_required and
+                    management.inspect().health == .outcome_unknown)
+                    mcp_configuration.ManagementOutcome.indeterminate
+                else
+                    outcome;
+                switch (reported_outcome) {
+                    .saved, .saved_recovery_required => {
+                        runtime_commit.commit();
+                        self.replaceMcpAdmission(mcp, candidate);
+                        candidate_owned = false;
+                        self.bumpRevision();
+                    },
+                    .indeterminate => {
+                        self.blockMcpAdmission(mcp, .persistence_outcome_unknown);
+                        self.bumpRevision();
+                    },
+                    .rejected => if (management.inspect().health != .ready) {
+                        self.blockMcpAdmissionForCurrentState(mcp);
+                        self.bumpRevision();
+                    },
+                    .unchanged, .stale_generation => unreachable,
+                }
+                return reported_outcome;
+            },
+        }
+    }
+
+    pub fn clearMcpOauthOperation(
+        self: *Workbench,
+        operation_id: []const u8,
+    ) Error!mcp_configuration.ManagementOutcome {
+        if (self.shutting_down) return .rejected;
+        const mcp = if (self.mcp) |*value| value else return .rejected;
+        if (mcp.refresh_job != null) return .rejected;
+        const management = if (mcp.management) |*value| value else return .rejected;
+        var preparation = switch (try management.prepareClearOauthOperation(operation_id)) {
+            .rejected => return .rejected,
+            .prepared => |prepared| prepared,
+        };
+        defer preparation.deinit();
+        var candidate = try self.mcpAdmissionForTarget(mcp, preparation.target());
+        var candidate_owned = true;
+        defer if (candidate_owned) candidate.deinit();
+        const outcome = try management.commitPreparedOauthOperationState(&preparation);
+        switch (outcome) {
+            .saved => {
+                self.replaceMcpAdmission(mcp, candidate);
+                candidate_owned = false;
+                self.bumpRevision();
+            },
+            .indeterminate => {
+                self.blockMcpAdmission(mcp, .persistence_outcome_unknown);
+                self.bumpRevision();
+            },
+            .rejected => {},
+            .unchanged, .stale_generation, .saved_recovery_required => unreachable,
+        }
+        return outcome;
+    }
+
+    pub fn recoverMcpOauthOperation(
+        self: *Workbench,
+        operation_id: []const u8,
+    ) Error!mcp_configuration.ManagementOutcome {
+        if (self.shutting_down) return .rejected;
+        const mcp = if (self.mcp) |*value| value else return .rejected;
+        if (mcp.refresh_job != null) return .rejected;
+        const management = if (mcp.management) |*value| value else return .rejected;
+        var preparation = try management.prepareOauthOperationRecovery(operation_id);
+        return try self.commitMcpMutation(mcp, &preparation);
+    }
+
     pub fn createMcpHttpServer(
         self: *Workbench,
         expected_generation: u64,
@@ -4966,7 +5266,10 @@ pub const Workbench = struct {
                 for (health, allowlists) |server, *allowlist| {
                     const desired = findMcpServer(target.servers, server.id) orelse
                         return error.McpCatalogBindingMismatch;
-                    allowlist.* = .{ .id = server.id, .tools = desired.tools };
+                    allowlist.* = .{
+                        .id = server.id,
+                        .tools = mcpServerToolsForAdmission(target, desired),
+                    };
                 }
                 break :current .{ .ready = .{
                     .selection = try self.agent_runtime.createMcpAdmissionSelection(
@@ -13720,6 +14023,90 @@ test "Workbench outcomes map to truthful terminal product phases" {
     try std.testing.expectEqual(RunPhase.cancelled, phaseForOutcome(.cancelled));
     try std.testing.expectEqual(RunPhase.interrupted, phaseForOutcome(.interrupted));
     try std.testing.expectEqual(RunPhase.failed, phaseForOutcome(.dependency_contract_failure));
+}
+
+test "OAuth operation remains excluded from every rebuilt Admission target" {
+    var oauth_server: mcp_configuration.ServerWire = .{
+        .id = "oauth",
+        .namespace = "oauth",
+        .display_name = "OAuth",
+        .enabled = true,
+        .negotiation = "automatic",
+        .timeout_ms = 1000,
+        .transport = .{
+            .kind = "streamable_http",
+            .url = "https://mcp.example.test/mcp",
+        },
+        .auth = .{ .kind = "oauth", .oauth = .{
+            .status = "ready",
+            .registration = .{
+                .kind = "pre_registered",
+                .issuer = "https://auth.example.test",
+                .client_id = "client",
+                .token_endpoint_auth_method = "none",
+                .client_credential_revision = 1,
+                .client_secret_ref = null,
+            },
+            .consent = null,
+            .grant = .{
+                .consent_epoch = 3,
+                .token_revision = 8,
+                .access_token_ref = "oauth/access-8",
+                .refresh_token_ref = "oauth/refresh-8",
+                .expires_at_unix_ms = 1000,
+            },
+        } },
+        .connection_approval = .{ .fingerprint = "approved" },
+        .tools = &.{ "read", "write" },
+    };
+    const other: mcp_configuration.ServerWire = .{
+        .id = "other",
+        .namespace = "other",
+        .display_name = "Other",
+        .enabled = true,
+        .negotiation = "automatic",
+        .timeout_ms = 1000,
+        .transport = .{ .kind = "stdio", .command = "tool" },
+        .auth = .{ .kind = "none", .oauth = null },
+        .connection_approval = .{ .fingerprint = "approved" },
+        .tools = &.{"other.read"},
+    };
+    var servers = [_]mcp_configuration.ServerWire{ oauth_server, other };
+    var registry: mcp_configuration.RegistryWire = .{
+        .schema_version = 2,
+        .generation = 7,
+        .oauth_operation = .{
+            .id = "refresh-1",
+            .kind = "refresh",
+            .server_id = "oauth",
+            .connection_fingerprint = "approved",
+            .consent_fingerprint = "consent",
+            .consent_epoch = 3,
+            .token_revision = 8,
+        },
+        .servers = &servers,
+    };
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        mcpServerToolsForAdmission(registry, oauth_server).len,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        mcpServerToolsForAdmission(registry, other).len,
+    );
+    registry.oauth_operation = null;
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        mcpServerToolsForAdmission(registry, oauth_server).len,
+    );
+    var oauth = oauth_server.auth.oauth.?;
+    oauth.status = "reauth_required";
+    oauth.grant = null;
+    oauth_server.auth.oauth = oauth;
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        mcpServerToolsForAdmission(registry, oauth_server).len,
+    );
 }
 
 test "empty MCP startup commits a proven manageable runtime" {

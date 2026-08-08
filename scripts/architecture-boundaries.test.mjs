@@ -1347,7 +1347,7 @@ test("Renderer Bridge fixed revision 1 owns the exact product wire catalog", () 
   assert.match(projection, /\\"input\\":/);
   const mcpProjection = projection.slice(
     projection.indexOf("fn writeMcpProjection"),
-    projection.indexOf("pub fn finalizeMarkedTerminalRunsAfterEventDrain"),
+    projection.indexOf("fn finalizeMarkedTerminalRunsAfterEventDrain"),
   );
   assert.doesNotMatch(
     mcpProjection,

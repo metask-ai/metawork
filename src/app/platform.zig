@@ -5,6 +5,7 @@ const workbench_api = @import("metawork_workbench");
 const app_window = @import("window.zig");
 
 pub const scheduled_task_timer_id: u64 = 0x4d57_5343_4844_544b;
+pub const mcp_oauth_timer_id: u64 = 0x4d57_4d43_504f_4155;
 
 // This is the single DispatcherPlatform vtable implementation. It owns the
 // Native SDK runtime/services references required by that vtable and delegates
@@ -104,7 +105,7 @@ pub const Adapter = struct {
 
     pub fn notifyRequired(context: *anyopaque) void {
         if (!notifyMainLoop(context))
-            @panic("Account completion lost its required main-loop wake");
+            @panic("Application completion lost its required main-loop wake");
     }
 
     pub fn scheduledTaskNow(context: ?*anyopaque) ?u64 {
@@ -114,6 +115,33 @@ pub const Adapter = struct {
         const seconds = @divFloor(nanoseconds, std.time.ns_per_s);
         if (seconds > std.math.maxInt(i64)) return null;
         return @intCast(seconds);
+    }
+
+    pub fn nowUnixMilliseconds(self: *const Adapter) ?u64 {
+        const nanoseconds = std.Io.Timestamp.now(self.io, .real).nanoseconds;
+        if (nanoseconds < 0) return null;
+        return @intCast(@divFloor(nanoseconds, std.time.ns_per_ms));
+    }
+
+    pub fn armMcpOauthTimer(
+        self: *Adapter,
+        due_unix_ms: u64,
+    ) bool {
+        const current = self.nowUnixMilliseconds() orelse return false;
+        const delay_ms = if (due_unix_ms > current) due_unix_ms - current else 1;
+        const delay_ns = std.math.mul(u64, delay_ms, std.time.ns_per_ms) catch
+            std.math.maxInt(u64);
+        (self.platform_services orelse return false).startTimer(
+            mcp_oauth_timer_id,
+            delay_ns,
+            false,
+        ) catch return false;
+        return true;
+    }
+
+    pub fn cancelMcpOauthTimer(self: *Adapter) void {
+        if (self.platform_services) |services_value|
+            services_value.cancelTimer(mcp_oauth_timer_id) catch {};
     }
 
     pub fn armScheduledTaskTimer(
