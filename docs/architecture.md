@@ -29,7 +29,7 @@ flowchart TB
     RENDERER["Renderer<br/>React + Tailwind"]
     APPLICATION["Application<br/>app.zig + app/"]
     BRIDGE["Bridge<br/>协议、验证与 ProductDelivery"]
-    PRODUCT["Product<br/>owners、事务与协调角色"]
+    PRODUCT["Product<br/>Account + Workbench"]
     AGENT["Agent<br/>Runtime、Session、Conversation 与 event pump"]
     AGENTCORE["Metask AgentCore<br/>外部执行依赖"]
     NATIVE_RUNTIME["Native SDK Runtime API<br/>窗口、System WebView 与生命周期"]
@@ -62,7 +62,7 @@ flowchart TB
 | Application | 组合、用例编排、平台能力适配与生命周期边界                           | APPLICATION     | Application                                  | `src/main.zig`、`src/app.zig`、`src/app/`、`src/native_sdk_compat/` |
 | Product     | 产品逻辑边界；不是统一源码 module                                    | PRODUCT         | Account、Workbench                           | `src/account*`、`src/workbench*`                       |
 | Agent       | AgentCore 执行、Session/Conversation 与事件泵边界                     | AGENT           | Agent                                        | `src/agent.zig`、`src/agent/`                          |
-| Bridge      | Renderer 与 Application 之间的唯一通信边界                           | BRIDGE          | Bridge                                       | `src/bridge*`                                          |
+| Bridge      | Renderer 与 MetaWork 本地边界之间的唯一通信边界                       | BRIDGE          | Bridge                                       | `src/bridge*`                                          |
 | Renderer    | 产品 WebUI 模块                                                       | RENDERER        | Renderer                                     | `frontend/`（含 `bridge/` 合同实现层）                 |
 
 用法约定：文档中的架构边界统一称为 Application，代码中的组合类型保持 `App`；不再另设 Desktop Host 或 Host infrastructure。`Product 边界/Product 模块`指本节逻辑边界，`桌面产品`指整个交付物。`product_identity.zig`（交付物 Bundle ID）与 Bridge 的 `ProductDelivery`（产品数据运输）维持原名，词根含义不同，不指 Product 边界。
@@ -77,7 +77,7 @@ Renderer 不直接加载 AgentCore，不访问任意文件或进程，不持有 
 
 ### 3.2 Bridge
 
-Bridge 是 Renderer 与 Application 之间的唯一通信边界，承运两类 surface：产品命令面把 typed 产品命令 dispatch 给 Product 中对应 owner，并运输 Snapshot/Event，不决定 Task admission、Workspace authority、Agent cancellation、credential replacement 或历史持久化；受限平台 capability 面只承运封闭枚举的 window-chrome bootstrap command，dispatch 给 Application 执行。两面共用 transport、origin policy 与 source/window authority，不共用数据面。
+Bridge 是 Renderer 与 MetaWork 本地边界之间的唯一通信边界，承运两类 surface：产品命令面把 typed 产品命令直接 dispatch 给 Product 中对应 owner，并运输 Snapshot/Event，不经过 Application 代理，也不决定 Task admission、Workspace authority、Agent cancellation、credential replacement 或历史持久化；受限平台 capability 面只承运封闭枚举的 window-chrome bootstrap command，dispatch 给 Application 执行。两面共用 transport、origin policy 与 source/window authority，不共用数据面。
 
 职责细节、封闭 command 枚举、连接、revision、snapshot identity、分块读取、retry 和 fail-closed 规则只由 [Renderer Bridge 合同](renderer-bridge-contract.md)定义。受限 window-chrome bootstrap session 的 source-window authority 与 document generation 同样归 Bridge：document attach 只建立一次 generation，Native SDK resize event 与 DOM layout observation 只驱动同 generation 的 geometry sync，不建立 resize command、第二 connection 或平台状态副本。
 
@@ -184,7 +184,7 @@ Renderer 按不可信调用方处理：
 - built-in Bash 使用非交互子进程；
 - strict Workspace security 未通过前，只运行临时或明确 trusted Workspace。
 
-持久 permission 是 Host-owned 产品状态，不是 Renderer preference 或 AgentCore parallel protocol。规则必须绑定 stable Workspace identity、tool identity/version、operation、canonical resource constraint 和 rule schema version；canonical path 字符串本身不能充当 stable identity。Workspace、tool、script 或 capability 变化时规则 fail closed。Workspace 文件边界、process tree、network、environment、审计和撤销分别通过对应安全 Gate 前，UI 不得为相关能力提供 `Always allow` 或 `Full access`。
+持久 permission 是 Workbench-owned 产品状态，不是 Renderer preference 或 AgentCore parallel protocol。规则必须绑定 stable Workspace identity、tool identity/version、operation、canonical resource constraint 和 rule schema version；canonical path 字符串本身不能充当 stable identity。Workspace、tool、script 或 capability 变化时规则 fail closed。Workspace 文件边界、process tree、network、environment、审计和撤销分别通过对应安全 Gate 前，UI 不得为相关能力提供 `Always allow` 或 `Full access`。
 
 ## 8. Release 与合同 identity
 

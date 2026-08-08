@@ -181,7 +181,7 @@ Workspace
 - 异常状态按 connection、account、Workspace identity 或 Task identity 分域保存；并行 Task 的结果不得互相覆盖，命令栏只选择当前上下文中优先级最高的一项显示；
 - 每个已有 Task 的内容标题区右侧提供稳定的 Inspector 图标按钮，accessible name 随状态使用 `打开检查器 / 关闭检查器` 并发布 `aria-expanded`；New task、无 Task 或没有任何可检查事实时不显示该按钮；
 - 未登录界面的应用工具栏只保留产品 identity 与语言入口；语言不能藏进尚不可进入的设置；
-- Renderer 关闭按钮必须进入平台的 user-close 语义并遵循 manifest `close_policy = hide`，后台 Host 与计划任务继续运行；重新打开由 Native SDK 托盘菜单进入 Desktop Host 的 `showWindow`/`focusWindow` capability，显式 Quit 才进入应用 shutdown；
+- Renderer 关闭按钮必须进入平台的 user-close 语义并遵循 manifest `close_policy = hide`，后台 Application 与计划任务继续运行；重新打开由 Native SDK 托盘菜单进入 Application 的 `showWindow`/`focusWindow` capability，显式 Quit 才进入应用 shutdown；
 - 不使用 `chromeless`；系统 resize frame、Snap Layout、拖动、双击、系统菜单、DPI 与高对比行为只按真实平台验收声明，不由 WebUI 模拟。Renderer 只绘制按钮并提交固定语义意图，不复制这些底层行为；
 - 语言、API、模型和诊断进入设置或对应任务上下文，不常驻命令栏；
 - 不在命令栏放 ABI、Provider、Host mode 等工程状态。
@@ -203,7 +203,7 @@ Workspace
 - Workspace projection 的 `kind` 是 Host 事实；一个 Manual Workspace 可以承载多个 Task，Automatic Workspace 精确归属一个 Task；
 - Composer 的工作目录控件只选择、添加或重新授权 New task 路径；Manual Workspace 的完整列表、移除、移除失败重试和空目录记录管理归正式设置页。两处消费同一 Host projection 与 mutation，不复制 registry 或维护第二套 Renderer 状态；
 - 再次打开历史 Task 只保证可浏览记录；需要访问原目录时重新选择或授权，能否继续执行还必须服从 §6.4 的 Conversation 与 execution binding 规则；
-- Desktop Host 重启后，左栏直接使用 Host 恢复的 Task 列表和顺序；点击 Task 打开其已保存时间线，不自动创建新 Task、不重放最后一次输入，也不把恢复的 `interrupted` 显示成仍在运行；
+- MetaWork 重启后，左栏直接使用 Workbench 恢复的 Task 列表和顺序；点击 Task 打开其已保存时间线，不自动创建新 Task、不重放最后一次输入，也不把恢复的 `interrupted` 显示成仍在运行；
 - `taskHistoryPersistenceHealth = read_failed / corrupt / write_failed / outcome_unknown` 时，左栏在 Task 列表前显示一条紧凑、可读的错误提示。历史读取失败或损坏不得伪装成空列表；mutation 保持禁用，`outcome_unknown` 明确要求重启，Renderer 不提供盲目重试同一命令的入口；
 
 ### 5.2 全局能力入口

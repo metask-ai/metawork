@@ -1,4 +1,4 @@
-//! Desktop Host compatibility seam for System WebView window controls.
+//! Application-owned compatibility seam for System WebView window controls.
 //!
 //! Native SDK 0.8.0 owns the startup window and provides minimize through its
 //! Runtime API. It does not expose maximize/restore, user-close, or maximized

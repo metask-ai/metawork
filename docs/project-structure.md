@@ -207,7 +207,7 @@ account -> account contract
 automation -> bridge, account contract, Native SDK
 ```
 
-`bridge -> Native SDK` 只允许消费正式 Bridge transport contract，以及 transport authority 和窄 Host capability 调用所需的 data-only DTO/opaque identifier；它不允许 Bridge 持有 `PlatformServices`、具体平台实现、OS handle 或直接系统调用权。`automation -> bridge` 只消费 policy 类型；`automation -> Native SDK` 只消费同级 Bridge policy contract 类型，同样不得持有 `PlatformServices`、平台实现或系统调用权。当前 `account/platform.zig -> Native SDK` 是验证规范登记的非合规例外，不属于允许依赖图，也不能作为新增依赖的先例。禁止 `agent -> workbench/bridge/app`、`workbench -> bridge`、`bridge -> Account runtime` 和任何产品模块反向依赖 Renderer。
+`bridge -> Native SDK` 只允许消费正式 Bridge transport contract，以及 transport authority 和窄 Application capability 调用所需的 data-only DTO/opaque identifier；它不允许 Bridge 持有 `PlatformServices`、具体平台实现、OS handle 或直接系统调用权。`automation -> bridge` 只消费 policy 类型；`automation -> Native SDK` 只消费同级 Bridge policy contract 类型，同样不得持有 `PlatformServices`、平台实现或系统调用权。当前 `account/platform.zig -> Native SDK` 是验证规范登记的非合规例外，不属于允许依赖图，也不能作为新增依赖的先例。禁止 `agent -> workbench/bridge/app`、`workbench -> bridge`、`bridge -> Account runtime` 和任何产品模块反向依赖 Renderer。
 
 ## 6. 测试与构建资产
 

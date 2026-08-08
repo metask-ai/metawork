@@ -1,4 +1,4 @@
-//! Private startup-window identity acquisition shared by Windows compatibility seams.
+//! Application-owned startup-window identity acquisition shared by compatibility seams.
 //!
 //! This is lifecycle plumbing, not a window capability. It owns exactly one
 //! current-thread creation interval and hands one verified opaque binding to

@@ -23,6 +23,11 @@ function filesWithExtensions(directory, extensions) {
 const zigFiles = (directory) => filesWithExtensions(directory, [".zig"]);
 const applicationFiles = () => ["src/app.zig", ...zigFiles("src/app/")];
 const applicationSource = () => applicationFiles().map(read).join("\n");
+const boundaryDocs = [
+  "README.md",
+  "AGENTS.md",
+  ...filesWithExtensions("docs/", [".md"]),
+];
 
 function assertNoImports(files, forbidden) {
   for (const file of files) {
@@ -156,15 +161,50 @@ test("Application root delegates named implementation responsibilities", () => {
   assert.doesNotMatch(platform, /@import\("automation\.zig"\)|app_automation/);
 });
 
-test("architecture names the Application boundary explicitly", () => {
+test("active documentation names the current architecture boundaries", () => {
   const architecture = read("docs/architecture.md");
-  assert.equal(
-    (architecture.match(/Desktop Host/g) ?? []).length,
-    1,
-    "architecture.md may mention Desktop Host only in the explicit retired-term rule",
-  );
+  for (const file of boundaryDocs) {
+    const source = read(file);
+    assert.equal(
+      (source.match(/Desktop Host/g) ?? []).length,
+      file === "docs/architecture.md" ? 1 : 0,
+      `${file} reintroduces the retired Desktop Host boundary`,
+    );
+    assert.doesNotMatch(
+      source,
+      /Product coordinator/,
+      `${file} reintroduces coordination inside Product`,
+    );
+  }
+
+  const compat = zigFiles("src/native_sdk_compat/").map(read).join("\n");
+  assert.doesNotMatch(compat, /Desktop Host|Product coordinator/);
   assert.match(architecture, /不再另设 Desktop Host 或 Host infrastructure/);
-  assert.match(architecture, /Bridge 是 Renderer 与 Application 之间/);
+  assert.match(architecture, /Bridge 是 Renderer 与 MetaWork 本地边界之间/);
+  assert.match(
+    architecture,
+    /产品命令面把 typed 产品命令直接 dispatch 给 Product[\s\S]*不经过 Application 代理/,
+  );
+
+  const readme = read("README.md");
+  const metawork = sliceBetween(
+    readme,
+    'subgraph METAWORK["MetaWork"]',
+    "    end",
+    "README MetaWork boundary",
+  );
+  assert.match(metawork, /APPLICATION\["Application"\]/);
+  assert.match(metawork, /PRODUCT\["Product<br\/>Account \+ Workbench"\]/);
+  assert.match(metawork, /AGENT\["Agent"\]/);
+  assert.match(
+    metawork,
+    /NATIVE_COMPAT\["Application-owned<br\/>Native Compat"\]/,
+  );
+  assert.doesNotMatch(metawork, /AGENTCORE|NATIVE_RUNTIME/);
+  assert.match(
+    readme.slice(readme.indexOf("    end")),
+    /AGENTCORE[\s\S]*NATIVE_RUNTIME/,
+  );
 });
 
 test("Agent is a peer execution boundary managed by Application", () => {
