@@ -1242,7 +1242,8 @@ pub const ManagementPort = struct {
         if (!std.mem.eql(u8, approval.fingerprint, &connectionFingerprint(existing)))
             return .rejected;
         const oauth = existing.auth.oauth orelse return .rejected;
-        if (!std.mem.eql(u8, oauth.registration.kind, "pre_registered") or
+        if ((!std.mem.eql(u8, oauth.registration.kind, "pre_registered") and
+            !std.mem.eql(u8, oauth.registration.kind, "dynamic_registration")) or
             oauth.registration.client_id == null)
             return .rejected;
         if (oauth.registration.issuer) |issuer|
@@ -1302,8 +1303,16 @@ pub const ManagementPort = struct {
         const index = findServerIndex(base.servers, input.consent.server_id) orelse return .rejected;
         const server = base.servers[index];
         const oauth = server.auth.oauth orelse return .rejected;
+        const registration_needed = std.mem.eql(
+            u8,
+            oauth.status,
+            "client_registration_required",
+        ) or std.mem.eql(u8, oauth.status, "reauth_required");
         if (server.connection_approval == null or
-            !std.mem.eql(u8, oauth.status, "client_registration_required"))
+            !registration_needed or
+            !std.mem.eql(u8, oauth.registration.kind, "dynamic_registration") or
+            oauth.registration.client_id != null or
+            serverProblem(server, self.limits) != null)
             return .rejected;
         const draft: OauthConsentDraftWire = .{
             .resource = input.consent.resource,
@@ -7435,6 +7444,47 @@ test "dynamic registration marker durably binds draft before issued identity" {
         target_oauth.registration.issuer.?,
     );
     try std.testing.expect(target_oauth.consent != null);
+
+    var recovered_server = server;
+    var recovered_auth = recovered_server.auth;
+    var recovered_oauth = recovered_auth.oauth.?;
+    recovered_oauth.status = "reauth_required";
+    recovered_auth.oauth = recovered_oauth;
+    recovered_server.auth = recovered_auth;
+    var recovered_servers = [_]ServerWire{recovered_server};
+    var recovered_management = try ManagementPort.init(std.testing.allocator, .{
+        .schema_version = schema_version,
+        .generation = 9,
+        .oauth_operation = null,
+        .servers = &recovered_servers,
+    }, .{
+        .persistence = .{ .available = true },
+        .credentials = .{ .available = true },
+        .identity_generator = .{
+            .context = &entropy,
+            .available = true,
+            .fill_fn = Entropy.fill,
+        },
+        .limits = test_limits,
+    });
+    defer recovered_management.deinit();
+    var retry = switch (try recovered_management.prepareBeginDynamicRegistration(9, .{
+        .consent = .{
+            .server_id = "oauth",
+            .resource = "https://mcp.example.test/mcp",
+            .issuer = "https://issuer.example.test",
+            .scopes = &.{"files.read"},
+            .redirect_uri = "http://127.0.0.1:43124/auth/callback",
+        },
+    })) {
+        .prepared => |prepared| prepared,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    defer retry.deinit();
+    try std.testing.expectEqualStrings(
+        "dynamic_registration",
+        retry.target().oauth_operation.?.kind,
+    );
 }
 
 test "OAuth refresh rebases unrelated changes and rotates fresh token locators" {

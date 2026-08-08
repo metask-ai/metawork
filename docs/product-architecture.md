@@ -1,7 +1,7 @@
 # MetaWork Product 内部架构
 
 > 状态：Product owner、事务、并发、恢复及其与 Agent 执行边界协作的当前规范
-> 日期：2026-08-05
+> 日期：2026-08-08
 
 顶层模块、进程方向和跨模块安全边界见 [MetaWork 高层架构](architecture.md)。本文件定义 Product 内部的 `account`、`workbench` owner、它们与相邻 Agent 执行边界的产品协作，以及由 Application 负责的跨 owner 协调和生命周期顺序；实际目录和依赖见 [工程结构与所有权](project-structure.md)，AgentCore 线程与 ABI 生命周期见 [AgentCore 集成契约](agentcore-integration.md)，Metask Account 外部合同见 [Metask Account API 合同](metask-account-contract.md)。
 
@@ -32,6 +32,8 @@ Application 只向上述 Product owner 与相邻 Agent 注入其职责所需的�
 - 向 Workbench 注入原子 schedule persistence、wall clock、单一 Native timer、系统通知与后台窗口生命周期 capability；timer callback 只唤醒 Workbench due reconciliation，不直接调用 AgentCore。
 
 MCP 仍服从上述边界：Workbench 通过 `workbench/mcp_configuration.zig` 独占 `<MetaWork data dir>/mcp/registry.json` schema 2 的严格 codec、schema 1 hard migration、单 writer lock、原子替换、Desired Registry、两阶段信任、OAuth 非 secret 状态、credential locator、`oauth_operation`、窄事务恢复与显式 tool allowlist；registry generation 只作为 desired commit identity 与 optimistic concurrency。Workbench 同时拥有当前 Runtime 对应的 immutable Runtime Manifest 和 Admission Authority。Agent 继续拥有 stdio/Streamable HTTP connector/backend 生命周期、descriptor、official catalog/selection、Activation 与 typed health；Application 只注入 child/network mechanics，并拥有 secure secret capture、系统 credential、OAuth discovery/browser/callback/registration/token effect、earliest-expiry timer 与 Runtime HTTP auth snapshot。Account 与 MCP 没有 ownership、credential service 或 persistence 依赖；Bridge 只运输 typed field intent 和安全 projection，不参与配置、授权、激活或 authority 事务。
+
+MCP management coordinator 只编排上述既有 owner：连接审批从 Workbench 读取 canonical exact details，再由 Host 原生确认后回写 approval；首次 OAuth 依次执行 approval gate、无凭据 discovery、Host consent、可选 DCR、系统浏览器、loopback callback 与 code exchange。worker 只拥有有界网络输入/结果，不调用 Workbench 或 WebView；每次 completion 回到 Application 主线程，以 server-bound operation identity 驱动 Workbench transition。coordinator 保存的 phase、listener、PKCE 与 worker job 都是单次 attempt 的短期执行资源，不是第二份 registry、journal 或产品状态。Native SDK 没有安全文本输入 Runtime capability 时，Application 必须发布 secret-capture unavailable，static secret 与 OAuth client secret 动作 fail closed；不得改由 Renderer、Bridge 或普通文本对话框承载 secret。
 
 Runtime Manifest 的 `loaded` entry 保存当前 Runtime 已完整接管的 descriptor fingerprint，`absent` entry 保存 disabled、structurally invalid、missing authentication 或 credential-invalid 等无 secret absence proof；成功接管空 input 形成零 entry Manifest，只有 preparation/input ownership 无法证明时才没有 Manifest。Workbench 不按 registry 结构相等或 generation 差值判断重启，而使用无副作用 compatibility 关系：target 必须保留每个 loaded descriptor 的 enabled 与 runtime 配置；target 中未加载 server 必须仍 disabled、已删除或继续由原 absence proof 证明不会进入 Runtime；新增 enabled server、启用未加载 server、移除/禁用/改变 loaded server 或使 absence proof 失效都形成 `restart_required`。普通 mutation 不重新读取 credential、不创建 transport、不重跑有外部 effect 的 preparation；恢复到 Manifest 可证明兼容的 target 会回到 `current`。Runtime Manifest、Agent Activation 与 Admission Authority 都不是第二份 durable truth。
 

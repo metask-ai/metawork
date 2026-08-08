@@ -6,6 +6,8 @@ const std = @import("std");
 const account_oauth = @import("account_oauth");
 const account_loopback = @import("account_loopback");
 
+pub const AuthorizationCode = account_oauth.Secret;
+
 pub const Limits = struct {
     pub const url_bytes: usize = 4096;
     pub const header_bytes: usize = 16 * 1024;
@@ -417,7 +419,7 @@ pub const AuthorizationAttempt = struct {
     authorization_url_len: usize = 0,
     active: bool = false,
 
-    fn init(self: *AuthorizationAttempt, io: std.Io, attempt_id: u64) !void {
+    pub fn start(self: *AuthorizationAttempt, io: std.Io, attempt_id: u64) !void {
         if (self.active) return error.InvalidAuthorizationRequest;
         if (attempt_id == 0) return error.InvalidAuthorizationRequest;
         self.* = .{};
@@ -448,19 +450,34 @@ pub const AuthorizationAttempt = struct {
         resource: *const ResourceDiscovery,
         server: *const AuthorizationServer,
     ) (Error || StateError || account_loopback.ServerError)!void {
+        try self.start(io, attempt_id);
+        errdefer self.deinit();
+        try self.bind(state.authorizationPort(), server_id, resource, server);
+    }
+
+    /// Binds an already-open loopback attempt to Workbench-owned consent and
+    /// client identity. Keeping listener creation separate lets Application
+    /// display the exact redirect URI before any durable DCR or browser effect.
+    pub fn bind(
+        self: *AuthorizationAttempt,
+        state: AuthorizationPort,
+        server_id: []const u8,
+        resource: *const ResourceDiscovery,
+        server: *const AuthorizationServer,
+    ) (Error || StateError)!void {
+        if (!self.active or self.authorization_url_len != 0)
+            return error.InvalidAuthorizationRequest;
         if (!containsText(resource.authorization_servers, server.issuer))
             return error.InvalidAuthorizationRequest;
-        try self.init(io, attempt_id);
-        errdefer self.deinit();
         const binding = try state.authorize(.{
-            .attempt_id = attempt_id,
+            .attempt_id = self.attempt_id,
             .server_id = server_id,
             .issuer = server.issuer,
             .resource = resource.resource,
             .scopes = resource.requested_scopes,
             .redirect_uri = self.redirectUri(),
         });
-        if (binding.attempt_id != attempt_id or
+        if (binding.attempt_id != self.attempt_id or
             !std.mem.eql(u8, binding.server_id, server_id) or
             !std.mem.eql(u8, binding.issuer, server.issuer) or
             !std.mem.eql(u8, binding.resource, resource.resource) or
@@ -907,6 +924,21 @@ pub const StateError = error{
     StateOutcomeUnknown,
 };
 
+pub const AuthorizationPort = struct {
+    context: *anyopaque,
+    authorize_fn: *const fn (
+        *anyopaque,
+        AuthorizationPlan,
+    ) StateError!AuthorizationBinding,
+
+    fn authorize(
+        self: AuthorizationPort,
+        plan: AuthorizationPlan,
+    ) StateError!AuthorizationBinding {
+        return self.authorize_fn(self.context, plan);
+    }
+};
+
 /// Narrow Workbench seam used by Application OAuth flows. `begin_*` must
 /// durably commit the operation marker (and any reduced Admission candidate)
 /// before returning. `complete_*` must consume the remote result into fresh
@@ -942,6 +974,13 @@ pub const StatePort = struct {
     ) StateError!void,
     clear_fn: *const fn (*anyopaque, OperationHandle) StateError!void,
     uncertain_fn: *const fn (*anyopaque, OperationHandle) StateError!void,
+
+    pub fn authorizationPort(self: StatePort) AuthorizationPort {
+        return .{
+            .context = self.context,
+            .authorize_fn = self.authorize_fn,
+        };
+    }
 
     fn approvedEndpoint(
         self: StatePort,
@@ -1122,7 +1161,7 @@ pub fn performCodeExchange(
     return .completed;
 }
 
-fn registerDynamicClientEffect(
+pub fn registerDynamicClientEffect(
     allocator: std.mem.Allocator,
     transport: Transport,
     server: *const AuthorizationServer,
@@ -1230,7 +1269,7 @@ fn parseRegistrationResponse(
     return result;
 }
 
-fn exchangeAuthorizationCodeEffect(
+pub fn exchangeAuthorizationCodeEffect(
     allocator: std.mem.Allocator,
     transport: Transport,
     server: *const AuthorizationServer,

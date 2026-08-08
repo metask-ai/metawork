@@ -9,6 +9,7 @@ const workbench = @import("metawork_workbench");
 const product_identity = @import("metawork_product_identity");
 
 pub const credential_service = product_identity.mcp_credential_service;
+pub const max_credential_secret_bytes = native_sdk.platform.max_credential_secret_bytes;
 const client_name = "MetaWork";
 const client_version = product_identity.version;
 const max_custom_headers: usize = 128;

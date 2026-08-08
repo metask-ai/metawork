@@ -14,6 +14,7 @@ const app_automation = @import("app/automation.zig");
 const frontend = @import("app/frontend.zig");
 const mcp_startup = @import("app/mcp_startup.zig");
 const mcp_oauth_coordinator = @import("app/mcp_oauth_coordinator.zig");
+const mcp_management_coordinator = @import("app/mcp_management_coordinator.zig");
 const app_paths = @import("app/paths.zig");
 const app_platform = @import("app/platform.zig");
 const app_stores = @import("app/stores.zig");
@@ -47,6 +48,7 @@ const App = struct {
     mcp_configuration_store: ?*workbench_api.McpConfigurationFileStore = null,
     mcp_credential_store: ?mcp_platform.CredentialStore = null,
     mcp_authorizations: ?mcp_platform.HttpAuthorizations = null,
+    mcp_management: ?mcp_management_coordinator.Coordinator = null,
     mcp_oauth_refresh: ?mcp_oauth_coordinator.Coordinator = null,
 
     fn app(self: *@This()) native_sdk.App {
@@ -166,6 +168,13 @@ const App = struct {
         self.workbench = workbench_storage;
         self.workbench_initialized = true;
         try self.platform.installScheduleHost(workbench_storage);
+        self.mcp_management = mcp_management_coordinator.Coordinator.init(
+            std.heap.c_allocator,
+            self.io,
+            workbench_storage,
+            &self.mcp_credential_store.?,
+            mcp_management_coordinator.platformHost(&self.platform),
+        );
         self.mcp_oauth_refresh = mcp_oauth_coordinator.Coordinator.init(
             std.heap.c_allocator,
             self.io,
@@ -211,6 +220,7 @@ const App = struct {
             dispatcher.breakConnection();
             dispatcher.detachWorkbench();
         }
+        if (self.mcp_management) |*coordinator| coordinator.shutdown();
         if (self.mcp_oauth_refresh) |*coordinator| coordinator.shutdown();
         if (self.account_started) if (self.account_coordinator) |coordinator| {
             coordinator.shutdown();
@@ -241,6 +251,10 @@ const App = struct {
                     coordinator.drain();
                 if (self.mcp_oauth_refresh) |*coordinator|
                     if (!coordinator.drain()) coordinator.reconcileTimer();
+                if (self.mcp_management) |*coordinator|
+                    if (coordinator.drain())
+                        if (self.mcp_oauth_refresh) |*refresh|
+                            refresh.reconcileTimer();
                 self.drainAgentEvents();
                 if (self.dispatcher) |dispatcher| if (dispatcher.connectedWindow() != null) {
                     try dispatcher.emitWorkbenchChanged();
@@ -391,6 +405,10 @@ pub fn run(init: std.process.Init) !void {
         },
     };
     defer {
+        if (app.mcp_management) |*coordinator| {
+            coordinator.deinit();
+            app.mcp_management = null;
+        }
         if (app.mcp_oauth_refresh) |*coordinator| {
             coordinator.deinit();
             app.mcp_oauth_refresh = null;
@@ -468,4 +486,5 @@ test "MCP Application composition imports the startup owner" {
     comptime _ = run;
     std.testing.refAllDecls(mcp_startup);
     std.testing.refAllDecls(mcp_oauth);
+    std.testing.refAllDecls(mcp_management_coordinator);
 }

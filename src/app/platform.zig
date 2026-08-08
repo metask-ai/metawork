@@ -54,6 +54,18 @@ pub const Adapter = struct {
         return self.platform_services;
     }
 
+    pub fn supportsMcpConnectionApproval(self: *const Adapter) bool {
+        if (self.native_runtime == null) return false;
+        const services_value = self.platform_services orelse return false;
+        return services_value.show_message_dialog_fn != null;
+    }
+
+    pub fn supportsMcpExternalAuthorization(self: *const Adapter) bool {
+        if (self.native_runtime == null) return false;
+        const services_value = self.platform_services orelse return false;
+        return services_value.open_external_url_fn != null;
+    }
+
     pub fn installScheduleHost(
         self: *Adapter,
         workbench: *workbench_api.Workbench,
@@ -142,6 +154,50 @@ pub const Adapter = struct {
     pub fn cancelMcpOauthTimer(self: *Adapter) void {
         if (self.platform_services) |services_value|
             services_value.cancelTimer(mcp_oauth_timer_id) catch {};
+    }
+
+    /// Shows every byte of a Host-only MCP trust or OAuth consent document in
+    /// bounded native-dialog pages. Only the final page can approve; closing
+    /// or cancelling any page rejects the operation.
+    pub fn confirmMcpDetails(
+        self: *Adapter,
+        title: []const u8,
+        details: []const u8,
+        approval_label: []const u8,
+    ) ?bool {
+        const runtime = self.native_runtime orelse return null;
+        if (details.len == 0 or !std.unicode.utf8ValidateSlice(details) or
+            title.len == 0 or title.len > native_sdk.platform.max_dialog_title_bytes or
+            approval_label.len == 0 or
+            approval_label.len > native_sdk.platform.max_dialog_button_bytes)
+            return null;
+        var offset: usize = 0;
+        while (offset < details.len) {
+            var end = @min(
+                details.len,
+                offset + native_sdk.platform.max_dialog_message_bytes,
+            );
+            while (end > offset and !std.unicode.utf8ValidateSlice(details[offset..end]))
+                end -= 1;
+            if (end == offset) return null;
+            const final_page = end == details.len;
+            const result = runtime.showMessageDialog(.{
+                .style = .warning,
+                .title = title,
+                .message = details[offset..end],
+                .primary_button = if (final_page) approval_label else "Next",
+                .secondary_button = "Cancel",
+            }) catch return null;
+            if (result != .primary) return false;
+            offset = end;
+        }
+        return true;
+    }
+
+    pub fn openMcpAuthorizationUrl(self: *Adapter, url: []const u8) bool {
+        const runtime = self.native_runtime orelse return false;
+        runtime.openExternalUrl(url) catch return false;
+        return true;
     }
 
     pub fn armScheduledTaskTimer(

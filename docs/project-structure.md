@@ -39,6 +39,7 @@ metawork/
 │   │   ├── automation.zig            # automation authority 与启动覆盖适配
 │   │   ├── frontend.zig              # frontend source 与 asset root resolver
 │   │   ├── mcp_platform.zig          # MCP credential/transport 平台 capability
+│   │   ├── mcp_management_coordinator.zig # MCP 原生审批、首次 OAuth 与安全采集用例编排
 │   │   ├── mcp_startup.zig           # MCP 启动恢复与 preparation 编排
 │   │   ├── paths.zig                 # data directory 与 canonical home resolver
 │   │   ├── platform.zig              # DispatcherPlatform vtable 与 Native SDK 引用
@@ -127,7 +128,7 @@ metawork/
 
 `app/platform.zig` 是唯一 `DispatcherPlatform` vtable 实现并持有 Native SDK runtime/services 引用；窗口系统行为委托给 `app/window.zig`。`app/window.zig` 拥有窗口、tray、notification、dialog 与两个已登记 compat capability，但不拥有 Bridge authority 或 Product policy。`app/paths.zig` 的 `Paths` 原位持有所有路径 buffer，只能按指针传递并由 `run()` 保持稳定地址。`app/stores.zig` 拥有 Application 创建的 store、单写锁与 restored bytes 生命周期。
 
-`app/mcp_startup.zig` 负责启动期 registry load、credential transaction recovery 与 Workbench preparation 的线性编排；`app/mcp_platform.zig` 只适配 MCP 系统 credential、stdio 与 Streamable HTTP mechanics，不解析 MCP JSON-RPC 或复制协商，也不形成新的产品 owner。
+`app/mcp_startup.zig` 负责启动期 registry load、credential transaction recovery 与 Workbench preparation 的线性编排；`app/mcp_platform.zig` 只适配 MCP 系统 credential、stdio 与 Streamable HTTP mechanics，不解析 MCP JSON-RPC 或复制协商，也不形成新的产品 owner。`app/mcp_management_coordinator.zig` 只把 Workbench transaction seam 与原生确认、系统浏览器、loopback 和有界 OAuth worker 串成首次授权用例；它不拥有 registry、持久 operation、credential、Runtime authority 或 OAuth policy。当前 Native SDK 缺少安全文本输入 Runtime capability，因此正式 platform binding 的 secret capture 必须保持 unavailable，不能扩展 Renderer credential bridge。
 
 `native_sdk_compat/system_webview_drag_region.zig` 是 Application-owned 的有界 System WebView drag-region capability seam。它只拥有有界 region 校验、root 平台 binding 与 drag 调用编排；document generation 和 source-window authority 归 Bridge `Dispatcher`，不进入该 seam。只有 `app/window.zig` 可以组装它；不拥有按钮 action、按钮 capability、窗口最大化状态或 resize。Windows 消费共享 startup root binding；document `connect/disconnect` 只标记 Renderer 会话是否附着，`sync` 只事务式替换 region，不能安装、重装或销毁平台资源。`beginDrag` 不信任 Renderer 坐标授予执行权，而是重新观察逻辑主鼠标键、实际 OS 光标、光标下 HWND 的 root identity、root native hit 与当前 DPI，并只在实际点命中最新 candidate-minus-exclusions 时通过 `ReleaseCapture`/`PostMessageW(WM_NCLBUTTONDOWN, HTCAPTION)` 进入系统 move loop。它不递归依赖 Chromium 跨进程 child HWND，也不保留旧 root `WM_NCHITTEST` subclass 路径。`system_webview_drag_region/macos.zig` 只在 live pointer event 内调用 SDK 已有 `startWindowDrag` 原语并保留系统交通灯。System WebView 隐藏标题栏的 resize hit surface 仍归 Native SDK，不由该 seam 模拟；平台文件不创建覆盖 WebView 的辅助窗口。
 
