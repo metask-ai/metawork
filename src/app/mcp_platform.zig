@@ -247,7 +247,7 @@ fn serverSecrets(
     const values = try allocator.alloc([]const u8, count);
     var write: usize = 0;
     for (server.transport.environment) |entry| {
-        const locator = entry.value.credential_ref orelse return error.InvalidConfig;
+        const locator = entry.credential_ref orelse return error.InvalidConfig;
         const secret = resolvedCredential(preparation, locator) orelse
             return error.InvalidConfig;
         if (!containsSecret(values[0..write], secret)) {
@@ -256,7 +256,7 @@ fn serverSecrets(
         }
     }
     for (server.transport.headers) |entry| {
-        const locator = entry.value.credential_ref orelse return error.InvalidConfig;
+        const locator = entry.credential_ref orelse return error.InvalidConfig;
         const secret = resolvedCredential(preparation, locator) orelse
             return error.InvalidConfig;
         if (!containsSecret(values[0..write], secret)) {
@@ -313,7 +313,7 @@ fn createStdioOwner(
         target.* = try owned.dupe(u8, argument.literal orelse
             return error.InvalidConfig);
     for (server.transport.environment) |entry| {
-        const locator = entry.value.credential_ref orelse return error.InvalidConfig;
+        const locator = entry.credential_ref orelse return error.InvalidConfig;
         const secret = resolvedCredential(preparation, locator) orelse
             return error.InvalidConfig;
         if (!workbench.validMcpEnvironmentCredential(secret))
@@ -824,7 +824,7 @@ fn createHttpOwner(
     errdefer for (context.secret_values) |secret|
         if (secret.len != 0) std.crypto.secureZero(u8, secret);
     for (server.transport.headers, context.custom_headers, context.secret_values) |source, *header, *secret_value| {
-        const locator = source.value.credential_ref orelse return error.InvalidConfig;
+        const locator = source.credential_ref orelse return error.InvalidConfig;
         const secret = resolvedCredential(preparation, locator) orelse
             return error.InvalidConfig;
         if (!workbench.validMcpHttpHeaderCredential(secret))
@@ -1084,4 +1084,80 @@ test "MCP platform builds lazy stdio and HTTP transport owners without opening t
         &preparation,
     )).?;
     defer input.deinit();
+}
+
+test "MCP platform creates no owner and reads no credential before approval" {
+    const Resolver = struct {
+        calls: usize = 0,
+
+        fn resolve(
+            context: ?*anyopaque,
+            _: std.mem.Allocator,
+            _: []const u8,
+        ) workbench.McpCredentialResolution {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.calls += 1;
+            return .unavailable;
+        }
+    };
+    var server_environment = [_]workbench.McpSecretSlotWire{.{
+        .name = "MCP_TOKEN",
+        .credential_ref = null,
+    }};
+    var servers = [_]workbench.McpServerConfigurationWire{.{
+        .id = "unapproved",
+        .namespace = "unapproved",
+        .display_name = "Unapproved",
+        .enabled = true,
+        .negotiation = "automatic",
+        .timeout_ms = 1000,
+        .transport = .{
+            .kind = "stdio",
+            .command = "/bin/echo",
+            .environment = &server_environment,
+        },
+        .auth = .{ .kind = "static", .oauth = null },
+        .connection_approval = null,
+        .tools = &.{},
+    }};
+    var registry_buffer: [workbench.mcp_registry_max_bytes]u8 = undefined;
+    const limits: workbench.McpConfigurationLimits = .{
+        .max_servers = 8,
+        .max_tools_per_server = 32,
+        .max_namespace_bytes = 128,
+        .max_credential_locators = 64,
+        .max_runtime_secrets_per_server = (agent.McpRuntimeLimits{}).max_secrets,
+        .max_runtime_secret_bytes_per_server = (agent.McpRuntimeLimits{}).max_secret_bytes,
+    };
+    const registry = try workbench.encodeMcpRegistry(
+        &registry_buffer,
+        .{
+            .schema_version = 2,
+            .generation = 1,
+            .oauth_operation = null,
+            .servers = &servers,
+        },
+        limits,
+    );
+    var resolver: Resolver = .{};
+    var preparation = try workbench.prepareMcpConfiguration(
+        std.testing.allocator,
+        registry,
+        true,
+        false,
+        .{
+            .context = &resolver,
+            .available = true,
+            .resolve_fn = Resolver.resolve,
+        },
+        limits,
+    );
+    defer preparation.deinit();
+    try std.testing.expectEqual(workbench.McpServerPreparationState.unapproved, preparation.server_states[0]);
+    try std.testing.expectEqual(@as(usize, 0), resolver.calls);
+    try std.testing.expect((try buildRuntimeInput(
+        std.testing.io,
+        std.testing.allocator,
+        &preparation,
+    )) == null);
 }

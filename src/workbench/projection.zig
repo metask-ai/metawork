@@ -4745,6 +4745,69 @@ pub const Workbench = struct {
         return try self.commitMcpMutation(mcp, &preparation);
     }
 
+    pub fn createMcpStdioServer(
+        self: *Workbench,
+        expected_generation: u64,
+        input: mcp_configuration.CreateStdioServerInput,
+    ) Error!mcp_configuration.ManagementOutcome {
+        if (self.shutting_down) return .rejected;
+        const mcp = if (self.mcp) |*value| value else return .rejected;
+        if (mcp.refresh_job != null) return .rejected;
+        const management = if (mcp.management) |*value| value else return .rejected;
+        if (!mcpExpectedGenerationMatches(management, expected_generation))
+            return .stale_generation;
+        var preparation = try management.prepareCreateStdioServer(expected_generation, input);
+        return try self.commitMcpMutation(mcp, &preparation);
+    }
+
+    pub fn updateMcpHttpConnection(
+        self: *Workbench,
+        expected_generation: u64,
+        input: mcp_configuration.UpdateHttpConnectionInput,
+    ) Error!mcp_configuration.ManagementOutcome {
+        if (self.shutting_down) return .rejected;
+        const mcp = if (self.mcp) |*value| value else return .rejected;
+        if (mcp.refresh_job != null) return .rejected;
+        const management = if (mcp.management) |*value| value else return .rejected;
+        if (!mcpExpectedGenerationMatches(management, expected_generation))
+            return .stale_generation;
+        var preparation = try management.prepareUpdateHttpConnection(expected_generation, input);
+        return try self.commitMcpMutation(mcp, &preparation);
+    }
+
+    pub fn updateMcpStdioConnection(
+        self: *Workbench,
+        expected_generation: u64,
+        input: mcp_configuration.UpdateStdioConnectionInput,
+    ) Error!mcp_configuration.ManagementOutcome {
+        if (self.shutting_down) return .rejected;
+        const mcp = if (self.mcp) |*value| value else return .rejected;
+        if (mcp.refresh_job != null) return .rejected;
+        const management = if (mcp.management) |*value| value else return .rejected;
+        if (!mcpExpectedGenerationMatches(management, expected_generation))
+            return .stale_generation;
+        var preparation = try management.prepareUpdateStdioConnection(expected_generation, input);
+        return try self.commitMcpMutation(mcp, &preparation);
+    }
+
+    /// Host-only secure capture boundary. Renderer/Bridge commands must not
+    /// construct this input because it contains credential material.
+    pub fn captureMcpStaticSecret(
+        self: *Workbench,
+        expected_generation: u64,
+        input: mcp_configuration.CaptureStaticSecretInput,
+    ) Error!mcp_configuration.ManagementOutcome {
+        defer std.crypto.secureZero(u8, input.secret);
+        if (self.shutting_down) return .rejected;
+        const mcp = if (self.mcp) |*value| value else return .rejected;
+        if (mcp.refresh_job != null) return .rejected;
+        const management = if (mcp.management) |*value| value else return .rejected;
+        if (!mcpExpectedGenerationMatches(management, expected_generation))
+            return .stale_generation;
+        var preparation = try management.prepareCaptureStaticSecret(expected_generation, input);
+        return try self.commitMcpMutation(mcp, &preparation);
+    }
+
     pub fn renameMcpServer(
         self: *Workbench,
         expected_generation: u64,
