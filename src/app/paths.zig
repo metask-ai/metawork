@@ -14,12 +14,14 @@ pub const Paths = struct {
     automatic_workspace_buffer: [path_capacity]u8 = undefined,
     account_buffer: [path_capacity]u8 = undefined,
     workbench_buffer: [path_capacity]u8 = undefined,
+    checkpoints_buffer: [path_capacity]u8 = undefined,
     skill_staging_buffer: [path_capacity]u8 = undefined,
     mcp_buffer: [path_capacity]u8 = undefined,
     data_len: usize = 0,
     automatic_workspace_len: ?usize = null,
     account_len: usize = 0,
     workbench_len: usize = 0,
+    checkpoints_len: usize = 0,
     skill_staging_len: usize = 0,
     mcp_len: usize = 0,
     canonical_user_home: ?[]u8 = null,
@@ -58,6 +60,11 @@ pub const Paths = struct {
             native_sdk.app_dirs.currentPlatform(),
             &self.workbench_buffer,
             &.{ self.dataDir(), "workbench" },
+        )).len;
+        self.checkpoints_len = (try native_sdk.app_dirs.join(
+            native_sdk.app_dirs.currentPlatform(),
+            &self.checkpoints_buffer,
+            &.{ self.workbenchDir(), "checkpoints" },
         )).len;
         self.skill_staging_len = (try native_sdk.app_dirs.join(
             native_sdk.app_dirs.currentPlatform(),
@@ -100,6 +107,10 @@ pub const Paths = struct {
 
     pub fn skillStagingDir(self: *const Paths) []const u8 {
         return self.skill_staging_buffer[0..self.skill_staging_len];
+    }
+
+    pub fn checkpointsDir(self: *const Paths) []const u8 {
+        return self.checkpoints_buffer[0..self.checkpoints_len];
     }
 
     pub fn mcpDir(self: *const Paths) []const u8 {

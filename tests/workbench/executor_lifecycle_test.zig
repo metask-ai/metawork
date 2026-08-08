@@ -17,9 +17,18 @@ const installWorkbenchExecution = fixture.installWorkbenchExecution;
 
 const TaskPersistenceProbe = struct {
     result: workbench_api.TaskPersistenceCommit = .committed,
+    storage: ?[]u8 = null,
+    len: usize = 0,
+    commits: usize = 0,
 
-    fn commit(context: ?*anyopaque, _: []const u8) workbench_api.TaskPersistenceCommit {
+    fn commit(context: ?*anyopaque, bytes: []const u8) workbench_api.TaskPersistenceCommit {
         const self: *@This() = @ptrCast(@alignCast(context.?));
+        self.commits += 1;
+        if (self.result == .committed) if (self.storage) |storage| {
+            if (bytes.len > storage.len) return .failed;
+            @memcpy(storage[0..bytes.len], bytes);
+            self.len = bytes.len;
+        };
         return self.result;
     }
 
@@ -29,6 +38,15 @@ const TaskPersistenceProbe = struct {
             .enabled = true,
             .commit_fn = commit,
         };
+    }
+
+    fn capabilityRestored(
+        self: *@This(),
+        restored_bytes: []const u8,
+    ) workbench_api.TaskPersistence {
+        var result = self.capability();
+        result.restored_bytes = restored_bytes;
+        return result;
     }
 };
 
@@ -62,6 +80,417 @@ fn waitTaskSnapshot(
         std.Thread.yield() catch {};
     }
     return error.TestUnexpectedResult;
+}
+
+fn waitCheckpointDescriptor(
+    workbench: *workbench_api.Workbench,
+    persistence: *TaskPersistenceProbe,
+) !void {
+    var output: [128 * 1024]u8 = undefined;
+    for (0..10_000) |_| {
+        try workbench.drainAgentEvents();
+        _ = try workbench.writeSnapshot(&output);
+        if (persistence.len != 0 and
+            std.mem.indexOf(u8, persistence.storage.?[0..persistence.len], "\"checkpoint_health\":\"available\"") != null)
+            return;
+        std.Thread.yield() catch {};
+    }
+    return error.TestUnexpectedResult;
+}
+
+fn waitHistoryNeedle(
+    workbench: *workbench_api.Workbench,
+    persistence: *TaskPersistenceProbe,
+    needle: []const u8,
+) !void {
+    var output: [128 * 1024]u8 = undefined;
+    for (0..10_000) |_| {
+        try workbench.drainAgentEvents();
+        _ = try workbench.writeSnapshot(&output);
+        if (persistence.len != 0 and
+            std.mem.indexOf(u8, persistence.storage.?[0..persistence.len], needle) != null)
+            return;
+        std.Thread.yield() catch {};
+    }
+    return error.TestUnexpectedResult;
+}
+
+test "Run checkpoint commits immutable blob before durable descriptor" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 1,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
+    var checkpoint_store = try workbench_api.CheckpointFileStore.init(
+        std.testing.io,
+        root_storage[0..root_len],
+    );
+    defer checkpoint_store.deinit();
+    const persistence_storage = try std.testing.allocator.alloc(
+        u8,
+        workbench_api.task_store_max_bytes,
+    );
+    defer std.testing.allocator.free(persistence_storage);
+    var persistence = TaskPersistenceProbe{ .storage = persistence_storage };
+    var configuration = workbenchConfiguration();
+    configuration.task_persistence = persistence.capability();
+    configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
+    var workbench = try workbench_api.Workbench.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 1,
+            .max_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        configuration,
+    );
+    var workbench_initialized = true;
+    defer if (workbench_initialized) workbench.deinit();
+    try installWorkbenchExecution(&workbench);
+    const task_id = try workbench.createTask(workbenchTaskInput());
+    _ = try workbench.runTask(task_id, .{ .text = "persist checkpoint" });
+    try waitCheckpointDescriptor(&workbench, &persistence);
+
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash("fixture-checkpoint", &digest, .{});
+    const identity: workbench_api.CheckpointBlobIdentity = .{
+        .task_id = task_id,
+        .generation = 0,
+        .digest = digest,
+        .byte_size = "fixture-checkpoint".len,
+    };
+    try checkpoint_store.verify(identity);
+    const history = persistence_storage[0..persistence.len];
+    try std.testing.expect(std.mem.indexOf(u8, history, "\"generation\":0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, history, "\"session_id\":\"000000000000000000000001\"") != null);
+
+    fake_core.setCheckpointGeneration(1);
+    _ = try workbench.compactTaskAtBinding(
+        task_id,
+        try workbench.taskBindingEpoch(task_id),
+    );
+    try waitHistoryNeedle(&workbench, &persistence, "\"terminal_kind\":\"compact\"");
+    const compact_identity: workbench_api.CheckpointBlobIdentity = .{
+        .task_id = task_id,
+        .generation = 1,
+        .digest = digest,
+        .byte_size = "fixture-checkpoint".len,
+    };
+    try checkpoint_store.verify(compact_identity);
+    try std.testing.expectError(error.BlobMissing, checkpoint_store.verify(identity));
+
+    workbench.deinit();
+    workbench_initialized = false;
+    checkpoint_store.delete(compact_identity);
+    const restart_history = persistence_storage[0..persistence.len];
+    var restart_configuration = workbenchConfiguration();
+    restart_configuration.task_persistence = persistence.capabilityRestored(restart_history);
+    restart_configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
+    var restored = try workbench_api.Workbench.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 1,
+            .max_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        restart_configuration,
+    );
+    defer restored.deinit();
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        persistence_storage[0..persistence.len],
+        "\"checkpoint\":null,\"checkpoint_health\":\"blob_missing\"",
+    ) != null);
+    fake_core.lock();
+    const session_count = fake_core.session_created;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 1), session_count);
+}
+
+test "Task deletion is busy during checkpoint export and candidate publication" {
+    fake_core.reset();
+    fake_core.controlNextCheckpointExport();
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 1,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
+    var checkpoint_store = try workbench_api.CheckpointFileStore.init(
+        std.testing.io,
+        root_storage[0..root_len],
+    );
+    defer checkpoint_store.deinit();
+    const persistence_storage = try std.testing.allocator.alloc(
+        u8,
+        workbench_api.task_store_max_bytes,
+    );
+    defer std.testing.allocator.free(persistence_storage);
+    var persistence = TaskPersistenceProbe{ .storage = persistence_storage };
+    var configuration = workbenchConfiguration();
+    configuration.task_persistence = persistence.capability();
+    configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
+    var workbench = try workbench_api.Workbench.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 1,
+            .max_tasks = 1,
+            .max_runs_per_task = 2,
+            .max_tools_per_run = 1,
+        },
+        configuration,
+    );
+    defer workbench.deinit();
+    try installWorkbenchExecution(&workbench);
+    const task_id = try workbench.createTask(workbenchTaskInput());
+    _ = try workbench.runTask(task_id, .{ .text = "cancel checkpoint export" });
+    fake_core.waitCheckpointExportEntered();
+    try std.testing.expectError(error.TaskBusy, workbench.deleteTask(task_id));
+    fake_core.releaseCheckpointExport();
+    try waitHistoryNeedle(&workbench, &persistence, "\"checkpoint_health\":\"cancelled\"");
+
+    fake_core.setCheckpointGeneration(1);
+    _ = try workbench.runTask(task_id, .{ .text = "publish checkpoint candidate" });
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash("fixture-checkpoint", &digest, .{});
+    const identity: workbench_api.CheckpointBlobIdentity = .{
+        .task_id = task_id,
+        .generation = 1,
+        .digest = digest,
+        .byte_size = "fixture-checkpoint".len,
+    };
+    var blob_ready = false;
+    for (0..10_000) |_| {
+        checkpoint_store.verify(identity) catch {
+            std.Thread.yield() catch {};
+            continue;
+        };
+        blob_ready = true;
+        break;
+    }
+    try std.testing.expect(blob_ready);
+    try std.testing.expectError(error.TaskBusy, workbench.deleteTask(task_id));
+    try waitCheckpointDescriptor(&workbench, &persistence);
+    try workbench.closeTask(task_id);
+    try waitWorkbenchSnapshot(&workbench, "\"lifecycle\":\"closed\"");
+    try workbench.deleteTask(task_id);
+    try std.testing.expectError(error.BlobMissing, checkpoint_store.verify(identity));
+}
+
+test "definite descriptor failure preserves terminal history and leaves a recoverable orphan" {
+    fake_core.reset();
+    fake_core.controlNextCheckpointExport();
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 1,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
+    var checkpoint_store = try workbench_api.CheckpointFileStore.init(
+        std.testing.io,
+        root_storage[0..root_len],
+    );
+    defer checkpoint_store.deinit();
+    const persistence_storage = try std.testing.allocator.alloc(
+        u8,
+        workbench_api.task_store_max_bytes,
+    );
+    defer std.testing.allocator.free(persistence_storage);
+    var persistence = TaskPersistenceProbe{ .storage = persistence_storage };
+    var configuration = workbenchConfiguration();
+    configuration.task_persistence = persistence.capability();
+    configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
+    var workbench = try workbench_api.Workbench.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 },
+        configuration,
+    );
+    var initialized = true;
+    defer if (initialized) workbench.deinit();
+    try installWorkbenchExecution(&workbench);
+    const task_id = try workbench.createTask(workbenchTaskInput());
+    _ = try workbench.runTask(task_id, .{ .text = "descriptor commit fails" });
+    fake_core.waitCheckpointExportEntered();
+    try workbench.drainAgentEvents();
+    var snapshot: [128 * 1024]u8 = undefined;
+    _ = try workbench.writeSnapshot(&snapshot);
+    const terminal_commits = persistence.commits;
+    persistence.result = .failed;
+    fake_core.releaseCheckpointExport();
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash("fixture-checkpoint", &digest, .{});
+    const identity: workbench_api.CheckpointBlobIdentity = .{
+        .task_id = task_id,
+        .generation = 0,
+        .digest = digest,
+        .byte_size = "fixture-checkpoint".len,
+    };
+    var blob_ready = false;
+    for (0..10_000) |_| {
+        checkpoint_store.verify(identity) catch {
+            std.Thread.yield() catch {};
+            continue;
+        };
+        blob_ready = true;
+        break;
+    }
+    try std.testing.expect(blob_ready);
+    for (0..10_000) |_| {
+        _ = try workbench.writeSnapshot(&snapshot);
+        if (persistence.commits > terminal_commits) break;
+        std.Thread.yield() catch {};
+    }
+    try std.testing.expect(persistence.commits > terminal_commits);
+    try checkpoint_store.verify(identity);
+    const durable_terminal = persistence_storage[0..persistence.len];
+    try std.testing.expect(std.mem.indexOf(u8, durable_terminal, "\"phase\":\"completed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, durable_terminal, "\"checkpoint\":null") != null);
+
+    workbench.deinit();
+    initialized = false;
+    persistence.result = .committed;
+    var restart_configuration = workbenchConfiguration();
+    restart_configuration.task_persistence = persistence.capabilityRestored(durable_terminal);
+    restart_configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
+    var restored = try workbench_api.Workbench.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 },
+        restart_configuration,
+    );
+    defer restored.deinit();
+    try std.testing.expectEqual(
+        workbench_api.CheckpointStoreHealth.ready,
+        restored.checkpointStoreHealth(),
+    );
+    var restored_snapshot: [128 * 1024]u8 = undefined;
+    const restored_json = try restored.writeSnapshot(&restored_snapshot);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        restored_json,
+        "\"taskHistoryPersistenceHealth\":\"ready\"",
+    ) != null);
+    try std.testing.expectError(error.BlobMissing, checkpoint_store.verify(identity));
+}
+
+test "unknown descriptor commit freezes checkpoint transaction until shutdown" {
+    fake_core.reset();
+    fake_core.controlNextCheckpointExport();
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 1,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
+    var checkpoint_store = try workbench_api.CheckpointFileStore.init(
+        std.testing.io,
+        root_storage[0..root_len],
+    );
+    defer checkpoint_store.deinit();
+    const persistence_storage = try std.testing.allocator.alloc(
+        u8,
+        workbench_api.task_store_max_bytes,
+    );
+    defer std.testing.allocator.free(persistence_storage);
+    var persistence = TaskPersistenceProbe{ .storage = persistence_storage };
+    var configuration = workbenchConfiguration();
+    configuration.task_persistence = persistence.capability();
+    configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
+    var workbench = try workbench_api.Workbench.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 },
+        configuration,
+    );
+    var initialized = true;
+    defer if (initialized) workbench.deinit();
+    try installWorkbenchExecution(&workbench);
+    const task_id = try workbench.createTask(workbenchTaskInput());
+    _ = try workbench.runTask(task_id, .{ .text = "descriptor outcome is unknown" });
+    fake_core.waitCheckpointExportEntered();
+    try workbench.drainAgentEvents();
+    var snapshot: [128 * 1024]u8 = undefined;
+    _ = try workbench.writeSnapshot(&snapshot);
+    persistence.result = .outcome_unknown;
+    fake_core.releaseCheckpointExport();
+
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash("fixture-checkpoint", &digest, .{});
+    const identity: workbench_api.CheckpointBlobIdentity = .{
+        .task_id = task_id,
+        .generation = 0,
+        .digest = digest,
+        .byte_size = "fixture-checkpoint".len,
+    };
+    var transaction_frozen = false;
+    for (0..10_000) |_| {
+        checkpoint_store.verify(identity) catch {
+            std.Thread.yield() catch {};
+            continue;
+        };
+        const snapshot_json = try workbench.writeSnapshot(&snapshot);
+        if (std.mem.indexOf(u8, snapshot_json, "\"taskHistoryPersistenceHealth\":\"outcome_unknown\"") != null) {
+            transaction_frozen = true;
+            break;
+        }
+        std.Thread.yield() catch {};
+    }
+    try std.testing.expect(transaction_frozen);
+    try checkpoint_store.verify(identity);
+    try std.testing.expectError(error.TaskBusy, workbench.deleteTask(task_id));
+    try std.testing.expectError(
+        error.TaskPersistenceOutcomeUnknown,
+        workbench.setTaskArchived(task_id, true),
+    );
+
+    workbench.deinit();
+    initialized = false;
+    try checkpoint_store.verify(identity);
 }
 
 fn waitCatalogUnavailable(

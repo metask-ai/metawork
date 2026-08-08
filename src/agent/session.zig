@@ -9,6 +9,7 @@ const event_pump = @import("event_pump");
 const catalog = @import("agent_catalog");
 const mcp_runtime = @import("agent_mcp_runtime");
 const mcp_catalog = @import("agent_mcp_catalog");
+const checkpoint = @import("agent_checkpoint");
 
 var next_mcp_owner_id: std.atomic.Value(u64) = .init(1);
 
@@ -125,6 +126,7 @@ pub const SessionState = enum {
     waiting_ui,
     compact_queued,
     compacting,
+    checkpointing,
     poisoned,
     closing,
     closed,
@@ -174,6 +176,24 @@ pub const SessionDisposition = enum {
     closing,
 };
 
+pub const DurableBudgetObservation = struct {
+    durable_usage_bytes: u64,
+    required_checkpoint_bytes: u64,
+};
+
+pub const CheckpointLimits = checkpoint.Limits;
+pub const CheckpointSink = checkpoint.Sink;
+pub const CheckpointSinkWriteResult = checkpoint.SinkWriteResult;
+pub const CheckpointOutcome = checkpoint.Outcome;
+pub const CheckpointSuccess = checkpoint.Success;
+pub const CheckpointFailure = checkpoint.Failure;
+pub const CheckpointFailureReason = checkpoint.FailureReason;
+pub const CheckpointDescription = checkpoint.Description;
+pub const CheckpointLogicalSessionOrigin = checkpoint.LogicalSessionOrigin;
+pub const CheckpointSessionLifecycle = checkpoint.SessionLifecycle;
+pub const CheckpointDurableBudgetOutcome = checkpoint.DurableBudgetOutcome;
+pub const CheckpointRestoreHealth = checkpoint.RestoreHealth;
+
 pub const SessionRoute = struct {
     id: u64,
     session: *Session,
@@ -215,6 +235,7 @@ pub const TerminalResult = struct {
     termination_signal: ?TerminationSignal,
     failure: ?TerminalFailure,
     session_disposition_at_completion: SessionDisposition,
+    durable_budget: ?DurableBudgetObservation = null,
 
     pub fn diagnostic(self: *const TerminalResult) []const u8 {
         return self.diagnostic_storage[0..self.diagnostic_len];
@@ -1201,7 +1222,7 @@ pub const Runtime = struct {
         defer session.unlock();
         switch (session.state) {
             .idle => {},
-            .queued, .running, .waiting_ui, .compact_queued, .compacting => return error.SessionNotIdle,
+            .queued, .running, .waiting_ui, .compact_queued, .compacting, .checkpointing => return error.SessionNotIdle,
             .poisoned => return error.SessionPoisoned,
             .closing, .closed => return error.SessionClosing,
         }
@@ -1730,7 +1751,7 @@ pub const Session = struct {
             const begin_error: Error = switch (self.state) {
                 .poisoned => error.SessionPoisoned,
                 .closing, .closed => error.SessionClosing,
-                .idle, .running, .waiting_ui, .queued, .compact_queued, .compacting => error.NoSuchRun,
+                .idle, .running, .waiting_ui, .queued, .compact_queued, .compacting, .checkpointing => error.NoSuchRun,
             };
             if ((self.state == .closing or self.state == .closed) and !self.run_done and
                 !self.run_started)
@@ -1791,7 +1812,7 @@ pub const Session = struct {
             .idle => {},
             .poisoned => return error.SessionPoisoned,
             .closing, .closed => return error.SessionClosing,
-            .queued, .running, .waiting_ui, .compact_queued, .compacting => return error.SessionNotIdle,
+            .queued, .running, .waiting_ui, .compact_queued, .compacting, .checkpointing => return error.SessionNotIdle,
         }
         if (self.next_compact_id == std.math.maxInt(u64))
             return error.CompactIdExhausted;
@@ -1961,7 +1982,7 @@ pub const Session = struct {
             return error.RuntimeShuttingDown;
         switch (self.state) {
             .idle => {},
-            .queued, .running, .waiting_ui, .compact_queued, .compacting => return error.SessionNotIdle,
+            .queued, .running, .waiting_ui, .compact_queued, .compacting, .checkpointing => return error.SessionNotIdle,
             .poisoned => return error.SessionPoisoned,
             .closing, .closed => return error.SessionClosing,
         }
@@ -2242,6 +2263,113 @@ pub const Session = struct {
         return true;
     }
 
+    /// Runs the complete export -> describe Agent operation while holding the
+    /// Session's single-operation lane. The sink owns bytes only for the
+    /// duration of each callback; filesystem commit remains a Workbench fact.
+    pub fn exportCheckpoint(
+        self: *Session,
+        limits: CheckpointLimits,
+        sink: CheckpointSink,
+        expected_last_run_id: u64,
+        expected_last_compact_id: u64,
+        expected_model: []const u8,
+    ) Error!CheckpointOutcome {
+        try checkpoint.validateLimits(limits);
+        if (expected_model.len == 0 or !std.unicode.utf8ValidateSlice(expected_model))
+            return error.InvalidLimits;
+
+        self.lock();
+        if (self.agent_runtime.shutting_down.load(.acquire)) {
+            self.unlock();
+            return error.RuntimeShuttingDown;
+        }
+        switch (self.state) {
+            .idle => {},
+            .poisoned => {
+                self.unlock();
+                return error.SessionPoisoned;
+            },
+            .closing, .closed => {
+                self.unlock();
+                return error.SessionClosing;
+            },
+            .queued,
+            .running,
+            .waiting_ui,
+            .compact_queued,
+            .compacting,
+            .checkpointing,
+            => {
+                self.unlock();
+                return error.SessionNotIdle;
+            },
+        }
+        const raw_session = self.raw orelse {
+            self.unlock();
+            return error.SessionClosing;
+        };
+        self.state = .checkpointing;
+        self.active_refs += 1;
+        self.unlock();
+
+        var outcome = checkpoint.create(
+            self.agent_runtime.allocator,
+            self.agent_runtime.api,
+            raw_session,
+            limits,
+            sink,
+            expected_last_run_id,
+            expected_last_compact_id,
+            expected_model,
+        );
+
+        self.lock();
+        if (outcome == .success) {
+            const logical_id = outcome.success.description.session_id;
+            const identity_matches = switch (self.core_session_identity) {
+                .unbound => bind: {
+                    if (logical_id.len == 0 or logical_id.len > max_core_session_id_bytes) break :bind false;
+                    var binding = CoreSessionIdentity{ .bound = .{
+                        .len = logical_id.len,
+                        .bytes = [_]u8{0} ** max_core_session_id_bytes,
+                    } };
+                    @memcpy(binding.bound.bytes[0..logical_id.len], logical_id);
+                    self.core_session_identity = binding;
+                    break :bind true;
+                },
+                .bound => |binding| std.mem.eql(
+                    u8,
+                    binding.bytes[0..binding.len],
+                    logical_id,
+                ),
+                .failed => false,
+            };
+            if (!identity_matches) {
+                outcome.deinit();
+                outcome = .{ .failure = .{
+                    .stage = .describe,
+                    .reason = .dependency_contract,
+                    .disposition = .poisoned,
+                } };
+            }
+        }
+        std.debug.assert(self.active_refs > 0);
+        self.active_refs -= 1;
+        switch (outcome) {
+            .success => {},
+            .failure => |failure| if (failure.disposition == .poisoned) {
+                if (failure.reason == .dependency_contract)
+                    self.dependency_contract_failure = true;
+                if (self.state != .closing and self.state != .closed)
+                    self.state = .poisoned;
+            },
+        }
+        if (self.state == .checkpointing) self.state = .idle;
+        if (self.active_refs == 0) self.broadcast();
+        self.unlock();
+        return outcome;
+    }
+
     pub fn releaseReference(self: *Session) void {
         self.lock();
         defer self.unlock();
@@ -2446,6 +2574,7 @@ pub const Session = struct {
         var stop_reason: ?sdk.StopReason = null;
         var raw_stop_reason_code: ?u32 = null;
         var failure: ?TerminalFailure = null;
+        var durable_budget: ?DurableBudgetObservation = null;
         if (!diagnostic_valid) {
             self.dependency_contract_failure = true;
             failure = .dependency_contract;
@@ -2466,6 +2595,10 @@ pub const Session = struct {
                     failure = .dependency_contract;
                     self.state = .poisoned;
                 } else {
+                    durable_budget = .{
+                        .durable_usage_bytes = result.durable_usage_bytes,
+                        .required_checkpoint_bytes = result.required_checkpoint_bytes,
+                    };
                     raw_stop_reason_code = result.stop_reason_code;
                     if (sdk.StopReason.fromCode(result.stop_reason_code)) |reason| {
                         if (runCheckpointOutcomeMatchesStop(result.checkpoint_outcome_code, reason)) {
@@ -2491,6 +2624,10 @@ pub const Session = struct {
                     failure = .dependency_contract;
                     self.state = .poisoned;
                 } else {
+                    if (known_status == .checkpoint_budget_required) durable_budget = .{
+                        .durable_usage_bytes = result.durable_usage_bytes,
+                        .required_checkpoint_bytes = result.required_checkpoint_bytes,
+                    };
                     if (known_status == .callback_failed and self.termination_signal == null)
                         setTerminationSignalLocked(self, .{ .callback_failure = .event });
                     failure = .abi_status;
@@ -2515,6 +2652,7 @@ pub const Session = struct {
             stop_reason,
             raw_stop_reason_code,
             failure,
+            durable_budget,
         );
         self.broadcast();
         self.unlock();
@@ -2531,7 +2669,7 @@ pub const Session = struct {
         self.run_started = false;
         self.run_done = true;
         if (self.state != .closing and self.state != .poisoned) self.state = .idle;
-        const terminal = self.takeTerminalResultLocked(null, null, null, null, null);
+        const terminal = self.takeTerminalResultLocked(null, null, null, null, null, null);
         self.broadcast();
         return terminal;
     }
@@ -2688,6 +2826,7 @@ pub const Session = struct {
         stop_reason: ?sdk.StopReason,
         raw_stop_reason_code: ?u32,
         failure: ?TerminalFailure,
+        durable_budget: ?DurableBudgetObservation,
     ) TerminalResult {
         const storage = self.terminal_diagnostic orelse unreachable;
         self.terminal_diagnostic = null;
@@ -2708,6 +2847,7 @@ pub const Session = struct {
             else
                 failure,
             .session_disposition_at_completion = self.dispositionLocked(),
+            .durable_budget = durable_budget,
         };
     }
 
@@ -2715,7 +2855,7 @@ pub const Session = struct {
         return switch (self.state) {
             .poisoned => .poisoned,
             .closing, .closed => .closing,
-            .idle, .queued, .running, .waiting_ui, .compact_queued, .compacting => .reusable,
+            .idle, .queued, .running, .waiting_ui, .compact_queued, .compacting, .checkpointing => .reusable,
         };
     }
 
@@ -3052,6 +3192,7 @@ pub const Session = struct {
                     self.finishPreparedCompactLocked();
                 },
                 .poisoned, .closing, .closed => {},
+                .checkpointing => self.state = .poisoned,
                 .running, .waiting_ui, .compacting => unreachable,
             }
         }

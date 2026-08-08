@@ -209,14 +209,23 @@ test("active documentation names the current architecture boundaries", () => {
 
 test("Agent is a peer execution boundary managed by Application", () => {
   const architecture = read("docs/architecture.md");
-  assert.match(architecture, /AGENT\["Agent<br\/>Runtime、Session、Conversation 与 event pump"\]/);
+  assert.match(
+    architecture,
+    /AGENT\["Agent<br\/>Runtime、Session、Conversation 与 event pump"\]/,
+  );
   assert.match(
     architecture,
     /APPLICATION -\. "compose \/ lifecycle" \.-> AGENT/,
   );
-  assert.match(architecture, /PRODUCT -->\|"Workbench execution calls"\| AGENT/);
+  assert.match(
+    architecture,
+    /PRODUCT -->\|"Workbench execution calls"\| AGENT/,
+  );
   assert.match(architecture, /AGENT -->\|"typed bundle ABI"\| AGENTCORE/);
-  assert.match(architecture, /Product 包含 `account` 与 `workbench` 两个产品 owner/);
+  assert.match(
+    architecture,
+    /Product 包含 `account` 与 `workbench` 两个产品 owner/,
+  );
   assert.doesNotMatch(
     architecture,
     /Product 包含 `account`、`workbench` 与 `agent`|Account、Workbench、Agent/,
@@ -228,7 +237,10 @@ test("Agent is a peer execution boundary managed by Application", () => {
 
   const integration = read("docs/agentcore-integration.md");
   assert.match(integration, /Agent 与 Product 并列/);
-  assert.doesNotMatch(integration, /Desktop Host composition role|Product coordinator/);
+  assert.doesNotMatch(
+    integration,
+    /Desktop Host composition role|Product coordinator/,
+  );
 
   const agents = read("AGENTS.md");
   assert.match(agents, /Product owner、事务、并发、恢复及其与 Agent 的协作/);
@@ -330,10 +342,7 @@ test("Workbench receives IO independently from the Agent Runtime", () => {
     "    pub fn init(",
     "Workbench fields",
   );
-  assert.equal(
-    (workbenchFields.match(/^    io: std\.Io,$/gm) ?? []).length,
-    1,
-  );
+  assert.equal((workbenchFields.match(/^    io: std\.Io,$/gm) ?? []).length, 1);
 
   const workbenchInit = sliceBetween(
     workbench,
@@ -377,6 +386,7 @@ test("only Agent implementation imports the AgentCore SDK", () => {
     sdkImportReceivers,
     [
       "agent_catalog",
+      "agent_checkpoint",
       "agent_mcp_connector",
       "agent_mcp_catalog",
       "agent_mcp_runtime",
@@ -849,9 +859,7 @@ test("canonical notification and Renderer transport failures stay isolated", () 
   const applyFailure = drainPass.indexOf(
     "self.applyEvent(&envelope) catch |err| {",
   );
-  const retainFailure = drainPass.indexOf(
-    "first_projection_error.* = err;",
-  );
+  const retainFailure = drainPass.indexOf("first_projection_error.* = err;");
   const recordFailure = drainPass.indexOf("self.recordEventProjectionFailure(");
   const requestTermination = drainPass.indexOf(
     "self.agent_runtime.requestRunTermination(",
@@ -1725,9 +1733,9 @@ test("Renderer declares window chrome UI while Application owns native behavior"
 
 test("lifecycle tests are grouped by invariant", () => {
   const cases = [
-    ["tests/agent/lifecycle_test.zig", 49],
+    ["tests/agent/lifecycle_test.zig", 54],
     ["tests/agent/event_pump_test.zig", 5],
-    ["tests/workbench/executor_lifecycle_test.zig", 22],
+    ["tests/workbench/executor_lifecycle_test.zig", 26],
     ["tests/integration/lifecycle/lifecycle_test.zig", 4],
   ];
   for (const [path, expectedCount] of cases) {
