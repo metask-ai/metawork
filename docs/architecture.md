@@ -147,7 +147,7 @@ Runtime API 已提供且可用时，绕过它调用低层函数属于架构违�
 
 ## 5. 状态、恢复与故障域
 
-Product 在 Renderer 生命周期之外拥有产品状态。WebView reload 通过完整 Snapshot 重建视图；Application 重启只恢复经过校验的产品历史。AgentCore ABI v1 revision 6 已提供 checkpoint export/restore 原语，但 MetaWork 尚未完成其持久化、exclusive restore、execution binding 对账和故障恢复验收；因此当前历史 Task 不伪造 continuation，无法恢复的 non-terminal operation 保守收口为 interrupted。
+Product 在 Renderer 生命周期之外拥有产品状态。WebView reload 通过完整 Snapshot 重建视图；Application 重启只恢复经过校验的产品历史。Workbench 已拥有 checkpoint blob store、descriptor transaction 和启动对账；Application 只按既有 store 模式注入 `<MetaWork data dir>/workbench/checkpoints` 目录 capability 并持有进程级单写锁。AgentCore ABI v1 revision 6 的 restore、execution binding 对账和 terminal reconciliation 仍未接通，因此当前历史 Task 不伪造 continuation，无法恢复的 non-terminal operation 保守收口为 interrupted。
 
 Bridge transport、Product 产品状态和 Agent execution terminal cause 是不同事实。Snapshot/Event 失败不覆盖产品历史；transport failure 不伪造用户取消；Agent terminal result 只有经 Product 提交后才成为 MetaWork 产品事实。详细线性化、持久化和恢复规则见 [Product 内部架构](product-architecture.md)，连接与 Snapshot transport 见 [Renderer Bridge 合同](renderer-bridge-contract.md)。
 

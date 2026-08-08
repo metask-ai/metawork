@@ -166,6 +166,7 @@ pub const FakeSession = struct {
     allow_finish: bool = false,
     mutex: std.Io.Mutex = .init,
     condition: std.Io.Condition = .init,
+    description_buffer: [4096]u8 = [_]u8{0} ** 4096,
 
     pub fn lock(self: *FakeSession) void {
         self.mutex.lockUncancelable(std.testing.io);
@@ -187,6 +188,7 @@ pub const FakeSession = struct {
 pub const FakeCore = struct {
     mutex: std.Io.Mutex = .init,
     catalog_condition: std.Io.Condition = .init,
+    checkpoint_condition: std.Io.Condition = .init,
     runtime: FakeRuntime = .{},
     catalogs: [16]FakeCatalog = [_]FakeCatalog{.{}} ** 16,
     sessions: [16]FakeSession = [_]FakeSession{.{}} ** 16,
@@ -236,6 +238,18 @@ pub const FakeCore = struct {
     forced_compact_outcome: ?u32 = null,
     malformed_compact_result: bool = false,
     forced_session_destroy_status: ?u32 = null,
+    forced_checkpoint_export_status: ?u32 = null,
+    forced_checkpoint_describe_status: ?u32 = null,
+    checkpoint_generation: u64 = 0,
+    checkpoint_payload: []const u8 = "fixture-checkpoint",
+    malformed_checkpoint_result: bool = false,
+    malformed_checkpoint_description: bool = false,
+    checkpoint_description_session_id_mismatch: bool = false,
+    checkpoint_exports: usize = 0,
+    checkpoint_descriptions: usize = 0,
+    checkpoint_export_controlled: bool = false,
+    checkpoint_export_entered: bool = false,
+    allow_checkpoint_export: bool = false,
     ui_answered_callbacks: usize = 0,
     ui_fatal_callbacks: usize = 0,
     permission_response_valid: bool = false,
@@ -393,6 +407,64 @@ pub const FakeCore = struct {
     pub fn forceNextSessionDestroyStatus(self: *FakeCore, status: u32) void {
         self.lock();
         self.forced_session_destroy_status = status;
+        self.unlock();
+    }
+
+    pub fn forceNextCheckpointExportStatus(self: *FakeCore, status: u32) void {
+        self.lock();
+        self.forced_checkpoint_export_status = status;
+        self.unlock();
+    }
+
+    pub fn forceNextCheckpointDescribeStatus(self: *FakeCore, status: u32) void {
+        self.lock();
+        self.forced_checkpoint_describe_status = status;
+        self.unlock();
+    }
+
+    pub fn makeNextCheckpointResultMalformed(self: *FakeCore) void {
+        self.lock();
+        self.malformed_checkpoint_result = true;
+        self.unlock();
+    }
+
+    pub fn makeNextCheckpointDescriptionMalformed(self: *FakeCore) void {
+        self.lock();
+        self.malformed_checkpoint_description = true;
+        self.unlock();
+    }
+
+    pub fn mismatchNextCheckpointDescriptionSessionId(self: *FakeCore) void {
+        self.lock();
+        self.checkpoint_description_session_id_mismatch = true;
+        self.unlock();
+    }
+
+    pub fn setCheckpointGeneration(self: *FakeCore, generation: u64) void {
+        self.lock();
+        self.checkpoint_generation = generation;
+        self.unlock();
+    }
+
+    pub fn controlNextCheckpointExport(self: *FakeCore) void {
+        self.lock();
+        self.checkpoint_export_controlled = true;
+        self.checkpoint_export_entered = false;
+        self.allow_checkpoint_export = false;
+        self.unlock();
+    }
+
+    pub fn waitCheckpointExportEntered(self: *FakeCore) void {
+        self.lock();
+        defer self.unlock();
+        while (!self.checkpoint_export_entered)
+            self.checkpoint_condition.waitUncancelable(std.testing.io, &self.mutex);
+    }
+
+    pub fn releaseCheckpointExport(self: *FakeCore) void {
+        self.lock();
+        self.allow_checkpoint_export = true;
+        self.checkpoint_condition.broadcast(std.testing.io);
         self.unlock();
     }
 
@@ -890,12 +962,65 @@ pub fn sessionRestore(
 }
 
 pub fn sessionDescribe(
-    _: ?*wire.SessionHandle,
-    _: ?*wire.OwnedBytesV1,
+    handle: ?*wire.SessionHandle,
+    out_description: ?*wire.OwnedBytesV1,
     out_error: ?*wire.OwnedBytesV1,
 ) callconv(.c) u32 {
-    diagnostic(out_error);
-    return wire.STATUS_INVALID_STATE;
+    if (out_description) |out| out.* = .{ .ptr = null, .len = 0 };
+    if (out_error) |out| out.* = .{ .ptr = null, .len = 0 };
+    const session: *FakeSession = @ptrCast(@alignCast(handle orelse {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    }));
+    if (out_description == null) {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    }
+    fake_core.lock();
+    const forced_status = fake_core.forced_checkpoint_describe_status;
+    fake_core.forced_checkpoint_describe_status = null;
+    const malformed = fake_core.malformed_checkpoint_description;
+    fake_core.malformed_checkpoint_description = false;
+    const session_id_mismatch = fake_core.checkpoint_description_session_id_mismatch;
+    fake_core.checkpoint_description_session_id_mismatch = false;
+    const generation = fake_core.checkpoint_generation;
+    fake_core.checkpoint_descriptions += 1;
+    fake_core.unlock();
+    if (forced_status) |status| {
+        diagnostic(out_error);
+        return status;
+    }
+    session.lock();
+    defer session.unlock();
+    if (!session.in_use or session.destroyed) {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    }
+    const described_session_id: []const u8 = if (session_id_mismatch)
+        "ffffffffffffffffffffffff"
+    else
+        session.session_id[0..session.session_id_len];
+    const encoded = if (malformed)
+        std.fmt.bufPrint(&session.description_buffer, "{{}}", .{}) catch {
+            diagnostic(out_error);
+            return wire.STATUS_OUT_OF_MEMORY;
+        }
+    else
+        std.fmt.bufPrint(
+            &session.description_buffer,
+            "{{\"schema\":\"agentcore.session-description/v1\",\"session_id\":\"{s}\",\"origin\":\"fresh\",\"lifecycle\":\"idle\",\"registered\":true,\"last_run_id\":{d},\"last_compact_id\":{d},\"checkpoint_generation\":{d},\"policy_generation\":1,\"catalog_generation\":0,\"model\":\"fixture-model\",\"conversation\":{{\"message_count\":0,\"compact_boundary\":0}},\"skill\":{{\"catalog_revision\":null}},\"mcp\":{{\"selection_fingerprint\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"tools\":[]}},\"budget\":{{\"hard_bytes\":1024,\"soft_bytes\":512,\"durable_usage_bytes\":0,\"available_bytes\":1024,\"compaction_recommended\":false,\"last_outcome\":\"none\",\"required_bytes\":0}},\"restore\":{{\"health\":\"complete\",\"invalidated_skill_authority\":0,\"invalidated_permission_rules\":0,\"invalidated_mcp_bindings\":0,\"issues\":[]}}}}",
+            .{
+                described_session_id,
+                session.run_id,
+                session.compact_id,
+                generation,
+            },
+        ) catch {
+            diagnostic(out_error);
+            return wire.STATUS_OUT_OF_MEMORY;
+        };
+    out_description.?.* = .{ .ptr = @ptrCast(encoded.ptr), .len = encoded.len };
+    return wire.STATUS_OK;
 }
 
 pub fn sessionUpdateMcp(
@@ -944,13 +1069,96 @@ pub fn sessionUpdateMcp(
 }
 
 pub fn sessionExportCheckpoint(
-    _: ?*wire.SessionHandle,
-    _: ?*const wire.CheckpointExportConfigV1,
-    _: ?*wire.CheckpointExportResultV1,
+    handle: ?*wire.SessionHandle,
+    raw_config: ?*const wire.CheckpointExportConfigV1,
+    out_result: ?*wire.CheckpointExportResultV1,
     out_error: ?*wire.OwnedBytesV1,
 ) callconv(.c) u32 {
-    diagnostic(out_error);
-    return wire.STATUS_INVALID_STATE;
+    if (out_error) |out| out.* = .{ .ptr = null, .len = 0 };
+    const session: *FakeSession = @ptrCast(@alignCast(handle orelse {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    }));
+    const config = raw_config orelse {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    };
+    const limits = config.limits orelse {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    };
+    const sink = config.sink orelse {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    };
+    const write = sink.write orelse {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    };
+    if (out_result == null or
+        config.struct_size != @sizeOf(wire.CheckpointExportConfigV1) or
+        limits.struct_size != @sizeOf(wire.CheckpointLimitsV1) or
+        sink.struct_size != @sizeOf(wire.CheckpointSinkV1))
+    {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    }
+    session.lock();
+    const unavailable = !session.in_use or session.destroyed or session.running or session.compacting;
+    session.unlock();
+    if (unavailable) {
+        diagnostic(out_error);
+        return wire.STATUS_BUSY;
+    }
+    fake_core.lock();
+    const forced_status = fake_core.forced_checkpoint_export_status;
+    fake_core.forced_checkpoint_export_status = null;
+    const malformed = fake_core.malformed_checkpoint_result;
+    fake_core.malformed_checkpoint_result = false;
+    const generation = fake_core.checkpoint_generation;
+    const payload = fake_core.checkpoint_payload;
+    fake_core.checkpoint_exports += 1;
+    if (fake_core.checkpoint_export_controlled) {
+        fake_core.checkpoint_export_controlled = false;
+        fake_core.checkpoint_export_entered = true;
+        fake_core.checkpoint_condition.broadcast(std.testing.io);
+        while (!fake_core.allow_checkpoint_export)
+            fake_core.checkpoint_condition.waitUncancelable(
+                std.testing.io,
+                &fake_core.mutex,
+            );
+    }
+    fake_core.unlock();
+    if (forced_status) |status| {
+        diagnostic(out_error);
+        return status;
+    }
+    const split = payload.len / 2;
+    const chunk_count: u64 = if (split == 0) 1 else 2;
+    var index: u64 = 0;
+    while (index < chunk_count) : (index += 1) {
+        const chunk = if (chunk_count == 1)
+            payload
+        else if (index == 0)
+            payload[0..split]
+        else
+            payload[split..];
+        const io_status = write(sink.ctx, sdk.bytesView(chunk));
+        if (io_status != wire.CHECKPOINT_IO_OK) {
+            diagnostic(out_error);
+            return wire.STATUS_CHECKPOINT_IO;
+        }
+    }
+    out_result.?.* = std.mem.zeroes(wire.CheckpointExportResultV1);
+    out_result.?.struct_size = @sizeOf(wire.CheckpointExportResultV1);
+    out_result.?.checkpoint_generation = generation;
+    out_result.?.total_bytes = if (malformed) payload.len + 1 else payload.len;
+    out_result.?.chunk_count = chunk_count;
+    // The ABI does not define the digest algorithm. Keep this deliberately
+    // different from the payload SHA-256 so MetaWork tests prove that product
+    // integrity is derived from the streamed bytes instead of this field.
+    out_result.?.digest = [_]u8{0xa5} ** 32;
+    return wire.STATUS_OK;
 }
 
 pub fn sessionCompact(

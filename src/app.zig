@@ -352,6 +352,10 @@ pub fn run(init: std.process.Init) !void {
             .restore_failed = stores_state.task_restore_failed,
             .commit_fn = app_stores.commitTaskStore,
         },
+        .checkpoint_store = .{
+            .file_store = if (stores_state.checkpoint) |*store| store else null,
+            .restore_failed = stores_state.checkpoint_restore_failed,
+        },
         .schedule_notifier = .{
             .context = &app.platform,
             .enabled = true,

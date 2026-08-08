@@ -78,14 +78,14 @@ fresh Session 只使用 `SessionHostConfigV1` 与 `SessionCreateConfigV1`：
 - typed Text/Skill Run 与 abort；
 - built-in Read/Bash/Edit；
 - manual compact；
+- post-terminal checkpoint export 与 Session description；
 - synchronous AskUserQuestion 与 Permission；
 - typed Core event 和 Permission provenance。
 
 以下 revision 6 ABI 能力仍关闭，直到各自完成产品 owner、安全、持久化和恢复验收：
 
 - MCP server/catalog/selection 与 MCP tool execution；
-- checkpoint export/store/restore；
-- Session description 驱动的跨进程 recovery；
+- checkpoint restore 与 Session description 驱动的跨进程 recovery；
 - persistent Permission rules；
 - 正式 Host tools；
 - async UI continuation；
@@ -125,6 +125,10 @@ Host 先校验 function `Status`，再按 operation-specific status set 决定�
 - unknown status、属于其他 operation 的 known status、unknown StopReason/outcome/flag 或 StopReason 与 checkpoint outcome 不一致都属于 dependency contract failure。
 
 Run、manual compact 与 Session Skill mutation 分别维护 operation-specific status disposition，不能从“SDK 已知 status”推断某个 entry 接受该 status，也不能用一份全局 allowlist 代替。revision 6 的 `checkpoint_budget_required` 对这三条当前消费路径都是合法、可恢复的非 OK 结果：操作向上失败收口，但 Session 保持 reusable；只有不属于该 operation 的 known status 才按 dependency contract failure 处理。
+
+checkpoint export 与 Session describe 是另外两条 operation-specific 消费路径。export 中经本地 sink 原因验证的 `checkpoint_io` 不污染 Session；restore 侧 checkpoint status 不是 export 合法结果。`out_of_memory`、`core_error`、malformed OK 或 callback/dependency contract failure 保守关闭 Session admission。describe 的 resource/busy/argument failure 可重试，内部 fatal 与 malformed result 同样关闭 admission。`checkpoint_budget_required` 对这两个 entry 都不是合法结果，必须显式按 dependency contract failure 收口。export 的 generation 只按 opaque `u64` 保存，ABI 未定义非零或单调性，Host 不得自行断言。
+
+`CheckpointExportResultV1.digest` 的算法在 revision 6 合同中未定义，canonical bundle 的真实输出也不等于 streamed bytes 的 SHA-256。MetaWork 不把该字段冒充内容哈希或据此拒绝合法 export；checkpoint store 的文件名、descriptor 和启动校验统一使用 Host 在 sink 中对实际 bytes 独立计算的 SHA-256。若上游未来定义 raw digest 语义，须先补充 ABI 合同与 candidate probe，再决定是否增加独立校验，不能静默替换产品 content hash。
 
 八个 StopReason 必须无 `else` 穷尽映射：
 

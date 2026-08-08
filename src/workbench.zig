@@ -7,6 +7,7 @@ const skill_package = @import("workbench_skill_package");
 const skill_management = @import("workbench_skill_management");
 const mcp_configuration = @import("workbench_mcp_configuration");
 const task_persistence = @import("workbench_task_persistence");
+const checkpoint_store = @import("workbench_checkpoint_store");
 
 pub const Error = projection_impl.Error;
 pub const Limits = projection_impl.Limits;
@@ -100,6 +101,9 @@ pub const SkillMutationResult = projection_impl.SkillMutationResult;
 pub const SkillExportResult = projection_impl.SkillExportResult;
 pub const TaskFileStore = task_persistence.FileStore;
 pub const task_store_max_bytes = task_persistence.max_store_bytes;
+pub const CheckpointFileStore = checkpoint_store.FileStore;
+pub const CheckpointStoreHealth = checkpoint_store.Health;
+pub const CheckpointBlobIdentity = checkpoint_store.Identity;
 pub const TransportFailureStage = projection_impl.TransportFailureStage;
 pub const TransportFailureReport = projection_impl.TransportFailureReport;
 pub const TransportFailureDecision = projection_impl.TransportFailureDecision;

@@ -28,6 +28,34 @@ const cancelOnThread = fixture.cancelOnThread;
 const failPipelineOnThread = fixture.failPipelineOnThread;
 const CallbackSignal = fixture.CallbackSignal;
 
+const CheckpointCollector = struct {
+    bytes: [256]u8 = undefined,
+    len: usize = 0,
+    result: lifecycle.CheckpointSinkWriteResult = .ok,
+
+    fn sink(self: *CheckpointCollector) lifecycle.CheckpointSink {
+        return .{ .context = self, .write_fn = write };
+    }
+
+    fn write(context: ?*anyopaque, chunk: []const u8) lifecycle.CheckpointSinkWriteResult {
+        const self: *CheckpointCollector = @ptrCast(@alignCast(context orelse return .contract_failed));
+        if (self.result != .ok) return self.result;
+        if (chunk.len > self.bytes.len - self.len) return .io_failed;
+        @memcpy(self.bytes[self.len..][0..chunk.len], chunk);
+        self.len += chunk.len;
+        return .ok;
+    }
+};
+
+const checkpoint_test_limits: lifecycle.CheckpointLimits = .{
+    .hard_bytes = 1024,
+    .max_section_bytes = 1024,
+    .max_string_bytes = 512,
+    .max_messages = 32,
+    .max_blocks_per_message = 16,
+    .chunk_bytes = 512,
+};
+
 const McpFixtureTransport = struct {
     fn descriptor(self: *McpFixtureTransport) lifecycle.McpTransport {
         return .{ .context = self, .open_fn = open, .request_fn = request, .notify_fn = notify, .close_fn = close };
@@ -1664,6 +1692,12 @@ test "status is validated before RunResult and invalid results poison the Sessio
             @as(?lifecycle.TerminalFailure, .dependency_contract),
             terminal.failure,
         );
+        if (case.expected_status != wire.STATUS_OK and
+            case.expected_status != wire.STATUS_CHECKPOINT_BUDGET_REQUIRED)
+            try std.testing.expectEqual(
+                @as(?lifecycle.DurableBudgetObservation, null),
+                terminal.durable_budget,
+            );
         try std.testing.expectEqual(lifecycle.SessionState.poisoned, snapshot.state);
         try std.testing.expectError(error.SessionPoisoned, submitSession(session, "must not continue"));
         try closeSession(session, .session_close);
@@ -1692,6 +1726,13 @@ test "revision 6 checkpoint outcomes are typed and budget admission remains retr
         @as(?lifecycle.TerminalFailure, .abi_status),
         budget_terminal.failure,
     );
+    try std.testing.expectEqualDeep(
+        @as(?lifecycle.DurableBudgetObservation, .{
+            .durable_usage_bytes = 4096,
+            .required_checkpoint_bytes = 8192,
+        }),
+        budget_terminal.durable_budget,
+    );
     try std.testing.expectEqual(lifecycle.SessionState.idle, budget_session.snapshot().state);
     fake_core.setSessionPlan(.immediate);
     const retry_run = try submitSession(budget_session, "retry after product checkpoint handling");
@@ -1699,6 +1740,7 @@ test "revision 6 checkpoint outcomes are typed and budget admission remains retr
     var retry_terminal = takeTestTerminal(budget_session, retry_run);
     defer retry_terminal.deinit();
     try std.testing.expectEqual(@as(?sdk.StopReason, .end_turn), retry_terminal.stop_reason);
+    try std.testing.expect(retry_terminal.durable_budget != null);
     try closeSession(budget_session, .session_close);
 
     const terminal_cases = [_]struct {
@@ -1718,6 +1760,253 @@ test "revision 6 checkpoint outcomes are typed and budget admission remains retr
         try std.testing.expectEqual(@as(?sdk.StopReason, case.expected), terminal.stop_reason);
         try std.testing.expectEqual(@as(?lifecycle.TerminalFailure, null), terminal.failure);
         try closeSession(session, .session_close);
+    }
+}
+
+test "checkpoint export streams bytes and accepts opaque generation zero" {
+    fake_core.reset();
+    const runtime = try createTestRuntime(.{ .max_sessions = 1 });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const session = try openSession(runtime);
+    defer closeSession(session, .session_close) catch unreachable;
+    var collector = CheckpointCollector{};
+    var outcome = try session.exportCheckpoint(
+        checkpoint_test_limits,
+        collector.sink(),
+        0,
+        0,
+        "fixture-model",
+    );
+    defer outcome.deinit();
+    switch (outcome) {
+        .success => |success| {
+            try std.testing.expectEqual(@as(u64, 0), success.checkpoint.generation);
+            try std.testing.expectEqual(@as(u64, collector.len), success.checkpoint.total_bytes);
+            try std.testing.expectEqualStrings("fixture-checkpoint", collector.bytes[0..collector.len]);
+            try std.testing.expectEqualStrings("fixture-model", success.description.model);
+        },
+        .failure => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(lifecycle.SessionState.idle, session.snapshot().state);
+}
+
+test "checkpoint description cannot change the bound logical Session identity" {
+    fake_core.reset();
+    const runtime = try createTestRuntime(.{ .max_sessions = 1 });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const session = try openSession(runtime);
+    defer closeSession(session, .session_close) catch unreachable;
+    var collector = CheckpointCollector{};
+    var first = try session.exportCheckpoint(
+        checkpoint_test_limits,
+        collector.sink(),
+        0,
+        0,
+        "fixture-model",
+    );
+    switch (first) {
+        .success => {},
+        .failure => return error.TestUnexpectedResult,
+    }
+    first.deinit();
+
+    fake_core.setCheckpointGeneration(1);
+    fake_core.mismatchNextCheckpointDescriptionSessionId();
+    collector = .{};
+    var second = try session.exportCheckpoint(
+        checkpoint_test_limits,
+        collector.sink(),
+        0,
+        0,
+        "fixture-model",
+    );
+    defer second.deinit();
+    switch (second) {
+        .failure => |failure| try std.testing.expectEqual(
+            lifecycle.CheckpointFailureReason.dependency_contract,
+            failure.reason,
+        ),
+        .success => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(lifecycle.SessionState.poisoned, session.snapshot().state);
+}
+
+test "checkpoint IO and product limits keep Session reusable" {
+    const cases = [_]struct {
+        status: ?u32 = null,
+        sink_result: lifecycle.CheckpointSinkWriteResult,
+        expected: lifecycle.CheckpointFailureReason,
+    }{
+        .{ .sink_result = .cancelled, .expected = .cancelled },
+        .{ .sink_result = .io_failed, .expected = .io_failed },
+        .{ .status = wire.STATUS_INVALID_ARGUMENT, .sink_result = .ok, .expected = .invalid_argument },
+        .{ .status = wire.STATUS_RESOURCE_LIMIT, .sink_result = .ok, .expected = .resource_limit },
+        .{ .status = wire.STATUS_BUSY, .sink_result = .ok, .expected = .busy },
+    };
+    for (cases) |case| {
+        fake_core.reset();
+        if (case.status) |status| fake_core.forceNextCheckpointExportStatus(status);
+        const runtime = try createTestRuntime(.{ .max_sessions = 1 });
+        defer {
+            runtime.shutdown() catch unreachable;
+            runtime.deinit();
+        }
+        const session = try openSession(runtime);
+        defer closeSession(session, .session_close) catch unreachable;
+        var collector = CheckpointCollector{ .result = case.sink_result };
+        var outcome = try session.exportCheckpoint(
+            checkpoint_test_limits,
+            collector.sink(),
+            0,
+            0,
+            "fixture-model",
+        );
+        defer outcome.deinit();
+        switch (outcome) {
+            .failure => |failure| {
+                try std.testing.expectEqual(case.expected, failure.reason);
+                try std.testing.expectEqual(lifecycle.SessionState.idle, session.snapshot().state);
+            },
+            .success => return error.TestUnexpectedResult,
+        }
+    }
+}
+
+test "checkpoint Core fatal and entry-illegal budget status close Session admission" {
+    const statuses = [_]u32{
+        wire.STATUS_OUT_OF_MEMORY,
+        wire.STATUS_CORE_ERROR,
+        wire.STATUS_CHECKPOINT_BUDGET_REQUIRED,
+        wire.STATUS_CHECKPOINT_CORRUPT,
+        wire.STATUS_CHECKPOINT_UNSUPPORTED,
+        wire.STATUS_CHECKPOINT_INCOMPATIBLE,
+        wire.STATUS_LOGICAL_SESSION_CONFLICT,
+    };
+    for (statuses) |status| {
+        fake_core.reset();
+        fake_core.forceNextCheckpointExportStatus(status);
+        const runtime = try createTestRuntime(.{ .max_sessions = 1 });
+        defer {
+            runtime.shutdown() catch unreachable;
+            runtime.deinit();
+        }
+        const session = try openSession(runtime);
+        defer closeSession(session, .session_close) catch unreachable;
+        var collector = CheckpointCollector{};
+        var outcome = try session.exportCheckpoint(
+            checkpoint_test_limits,
+            collector.sink(),
+            0,
+            0,
+            "fixture-model",
+        );
+        defer outcome.deinit();
+        switch (outcome) {
+            .failure => |failure| {
+                if (status == wire.STATUS_CHECKPOINT_BUDGET_REQUIRED or
+                    status == wire.STATUS_CHECKPOINT_CORRUPT or
+                    status == wire.STATUS_CHECKPOINT_UNSUPPORTED or
+                    status == wire.STATUS_CHECKPOINT_INCOMPATIBLE or
+                    status == wire.STATUS_LOGICAL_SESSION_CONFLICT)
+                    try std.testing.expectEqual(lifecycle.CheckpointFailureReason.dependency_contract, failure.reason)
+                else
+                    try std.testing.expect(failure.reason == .out_of_memory or failure.reason == .core_error);
+                try std.testing.expectEqual(lifecycle.SessionState.poisoned, session.snapshot().state);
+            },
+            .success => return error.TestUnexpectedResult,
+        }
+    }
+}
+
+test "checkpoint describe has an independent conservative status disposition" {
+    const cases = [_]struct {
+        status: u32,
+        expected: lifecycle.CheckpointFailureReason,
+        state: lifecycle.SessionState,
+    }{
+        .{ .status = wire.STATUS_INVALID_ARGUMENT, .expected = .invalid_argument, .state = .idle },
+        .{ .status = wire.STATUS_RESOURCE_LIMIT, .expected = .resource_limit, .state = .idle },
+        .{ .status = wire.STATUS_BUSY, .expected = .busy, .state = .idle },
+        .{ .status = wire.STATUS_OUT_OF_MEMORY, .expected = .out_of_memory, .state = .poisoned },
+        .{ .status = wire.STATUS_CORE_ERROR, .expected = .core_error, .state = .poisoned },
+        .{ .status = wire.STATUS_CHECKPOINT_BUDGET_REQUIRED, .expected = .dependency_contract, .state = .poisoned },
+    };
+    for (cases) |case| {
+        fake_core.reset();
+        fake_core.forceNextCheckpointDescribeStatus(case.status);
+        const runtime = try createTestRuntime(.{ .max_sessions = 1 });
+        defer {
+            runtime.shutdown() catch unreachable;
+            runtime.deinit();
+        }
+        const session = try openSession(runtime);
+        defer closeSession(session, .session_close) catch unreachable;
+        var collector = CheckpointCollector{};
+        var outcome = try session.exportCheckpoint(
+            checkpoint_test_limits,
+            collector.sink(),
+            0,
+            0,
+            "fixture-model",
+        );
+        defer outcome.deinit();
+        switch (outcome) {
+            .failure => |failure| try std.testing.expectEqual(case.expected, failure.reason),
+            .success => return error.TestUnexpectedResult,
+        }
+        try std.testing.expectEqual(case.state, session.snapshot().state);
+    }
+}
+
+test "checkpoint malformed results and sink fatal are dependency contract failures" {
+    const cases = [_]enum { result, description, sink_fatal, sink_missing }{
+        .result,
+        .description,
+        .sink_fatal,
+        .sink_missing,
+    };
+    for (cases) |case| {
+        fake_core.reset();
+        switch (case) {
+            .result => fake_core.makeNextCheckpointResultMalformed(),
+            .description => fake_core.makeNextCheckpointDescriptionMalformed(),
+            .sink_fatal => {},
+            .sink_missing => fake_core.forceNextCheckpointExportStatus(
+                wire.STATUS_CHECKPOINT_IO,
+            ),
+        }
+        const runtime = try createTestRuntime(.{ .max_sessions = 1 });
+        defer {
+            runtime.shutdown() catch unreachable;
+            runtime.deinit();
+        }
+        const session = try openSession(runtime);
+        defer closeSession(session, .session_close) catch unreachable;
+        var collector = CheckpointCollector{
+            .result = if (case == .sink_fatal) .contract_failed else .ok,
+        };
+        var outcome = try session.exportCheckpoint(
+            checkpoint_test_limits,
+            collector.sink(),
+            0,
+            0,
+            "fixture-model",
+        );
+        defer outcome.deinit();
+        switch (outcome) {
+            .failure => |failure| try std.testing.expectEqual(
+                lifecycle.CheckpointFailureReason.dependency_contract,
+                failure.reason,
+            ),
+            .success => return error.TestUnexpectedResult,
+        }
+        try std.testing.expectEqual(lifecycle.SessionState.poisoned, session.snapshot().state);
     }
 }
 

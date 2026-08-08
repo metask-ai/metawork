@@ -9,6 +9,8 @@ pub const Stores = struct {
     task: ?workbench_api.TaskFileStore = null,
     task_restore_failed: bool = true,
     task_restored_bytes: ?[]u8 = null,
+    checkpoint: ?workbench_api.CheckpointFileStore = null,
+    checkpoint_restore_failed: bool = true,
     scheduled_task: ?workbench_api.ScheduledTaskFileStore = null,
     scheduled_task_restore_failed: bool = true,
     scheduled_task_restored_bytes: ?[]u8 = null,
@@ -46,6 +48,13 @@ pub const Stores = struct {
         else
             null;
 
+        // Lock order is Task history first, checkpoint store second.
+        self.checkpoint = workbench_api.CheckpointFileStore.init(
+            io,
+            paths.checkpointsDir(),
+        ) catch null;
+        self.checkpoint_restore_failed = self.checkpoint == null;
+
         self.scheduled_task = workbench_api.ScheduledTaskFileStore.init(
             io,
             paths.workbenchDir(),
@@ -80,6 +89,7 @@ pub const Stores = struct {
         if (self.scheduled_task_restored_bytes) |bytes| self.allocator.free(bytes);
         if (self.scheduled_task) |*store| store.deinit();
         if (self.task_restored_bytes) |bytes| self.allocator.free(bytes);
+        if (self.checkpoint) |*store| store.deinit();
         if (self.task) |*store| store.deinit();
         if (self.mcp_configuration) |*store| store.deinit();
         if (self.automatic_workspace_root) |*root| root.deinit();

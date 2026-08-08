@@ -75,6 +75,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-mcp-configuration", .root_module = test_modules.workbench_mcp_configuration },
         .{ .name = "metawork-mcp-platform", .root_module = test_modules.mcp_platform },
         .{ .name = "metawork-task-persistence", .root_module = test_modules.workbench_task_persistence },
+        .{ .name = "metawork-checkpoint-store", .root_module = test_modules.workbench_checkpoint_store },
     };
     for (module_tests) |spec| {
         spec.root_module.link_libc = bundle.link_libc;
@@ -165,6 +166,7 @@ const WiredModules = struct {
     workbench_skill_management: *std.Build.Module,
     workbench_mcp_configuration: *std.Build.Module,
     workbench_task_persistence: *std.Build.Module,
+    workbench_checkpoint_store: *std.Build.Module,
 };
 
 fn createLifecycleFixture(
@@ -408,6 +410,12 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .optimize = root_module.optimize,
     });
     agent_mcp_stdio.addImport("agent_mcp_connector", agent_mcp_connector);
+    const agent_checkpoint = b.createModule(.{
+        .root_source_file = b.path("src/agent/checkpoint.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    agent_checkpoint.addImport("metask_agentcore", sdk);
     const session = b.createModule(.{
         .root_source_file = b.path("src/agent/session.zig"),
         .target = target,
@@ -418,6 +426,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     session.addImport("agent_catalog", agent_catalog);
     session.addImport("agent_mcp_runtime", agent_mcp_runtime);
     session.addImport("agent_mcp_catalog", agent_mcp_catalog);
+    session.addImport("agent_checkpoint", agent_checkpoint);
     const agent = b.createModule(.{
         .root_source_file = b.path("src/agent.zig"),
         .target = target,
@@ -595,6 +604,11 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .target = target,
         .optimize = root_module.optimize,
     });
+    const checkpoint_store = b.createModule(.{
+        .root_source_file = b.path("src/workbench/checkpoint_store.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
     const mcp_configuration = b.createModule(.{
         .root_source_file = b.path("src/workbench/mcp_configuration.zig"),
         .target = target,
@@ -617,6 +631,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     projection.addImport("workbench_skill_management", skill_management);
     projection.addImport("workbench_skill_package", skill_package);
     projection.addImport("workbench_task_persistence", task_persistence);
+    projection.addImport("workbench_checkpoint_store", checkpoint_store);
     projection.addImport("workbench_mcp_configuration", mcp_configuration);
     projection.addImport(
         "build_options",
@@ -647,6 +662,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     workbench.addImport("workbench_skill_management", skill_management);
     workbench.addImport("workbench_mcp_configuration", mcp_configuration);
     workbench.addImport("workbench_task_persistence", task_persistence);
+    workbench.addImport("workbench_checkpoint_store", checkpoint_store);
 
     const bridge = b.createModule(.{
         .root_source_file = b.path("src/bridge.zig"),
@@ -746,6 +762,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .workbench_skill_management = skill_management,
         .workbench_mcp_configuration = mcp_configuration,
         .workbench_task_persistence = task_persistence,
+        .workbench_checkpoint_store = checkpoint_store,
     };
 }
 

@@ -209,14 +209,23 @@ test("active documentation names the current architecture boundaries", () => {
 
 test("Agent is a peer execution boundary managed by Application", () => {
   const architecture = read("docs/architecture.md");
-  assert.match(architecture, /AGENT\["Agent<br\/>Runtime、Session、Conversation 与 event pump"\]/);
+  assert.match(
+    architecture,
+    /AGENT\["Agent<br\/>Runtime、Session、Conversation 与 event pump"\]/,
+  );
   assert.match(
     architecture,
     /APPLICATION -\. "compose \/ lifecycle" \.-> AGENT/,
   );
-  assert.match(architecture, /PRODUCT -->\|"Workbench execution calls"\| AGENT/);
+  assert.match(
+    architecture,
+    /PRODUCT -->\|"Workbench execution calls"\| AGENT/,
+  );
   assert.match(architecture, /AGENT -->\|"typed bundle ABI"\| AGENTCORE/);
-  assert.match(architecture, /Product 包含 `account` 与 `workbench` 两个产品 owner/);
+  assert.match(
+    architecture,
+    /Product 包含 `account` 与 `workbench` 两个产品 owner/,
+  );
   assert.doesNotMatch(
     architecture,
     /Product 包含 `account`、`workbench` 与 `agent`|Account、Workbench、Agent/,
@@ -228,7 +237,10 @@ test("Agent is a peer execution boundary managed by Application", () => {
 
   const integration = read("docs/agentcore-integration.md");
   assert.match(integration, /Agent 与 Product 并列/);
-  assert.doesNotMatch(integration, /Desktop Host composition role|Product coordinator/);
+  assert.doesNotMatch(
+    integration,
+    /Desktop Host composition role|Product coordinator/,
+  );
 
   const agents = read("AGENTS.md");
   assert.match(agents, /Product owner、事务、并发、恢复及其与 Agent 的协作/);
@@ -330,10 +342,7 @@ test("Workbench receives IO independently from the Agent Runtime", () => {
     "    pub fn init(",
     "Workbench fields",
   );
-  assert.equal(
-    (workbenchFields.match(/^    io: std\.Io,$/gm) ?? []).length,
-    1,
-  );
+  assert.equal((workbenchFields.match(/^    io: std\.Io,$/gm) ?? []).length, 1);
 
   const workbenchInit = sliceBetween(
     workbench,
@@ -377,6 +386,7 @@ test("only Agent implementation imports the AgentCore SDK", () => {
     sdkImportReceivers,
     [
       "agent_catalog",
+      "agent_checkpoint",
       "agent_mcp_connector",
       "agent_mcp_catalog",
       "agent_mcp_runtime",
@@ -849,9 +859,7 @@ test("canonical notification and Renderer transport failures stay isolated", () 
   const applyFailure = drainPass.indexOf(
     "self.applyEvent(&envelope) catch |err| {",
   );
-  const retainFailure = drainPass.indexOf(
-    "first_projection_error.* = err;",
-  );
+  const retainFailure = drainPass.indexOf("first_projection_error.* = err;");
   const recordFailure = drainPass.indexOf("self.recordEventProjectionFailure(");
   const requestTermination = drainPass.indexOf(
     "self.agent_runtime.requestRunTermination(",
@@ -1031,6 +1039,91 @@ test("Workbench owns queue and worker lifecycle", () => {
   const stopExecutor = app.indexOf("workbench.shutdownExecutor();");
   const stopAgent = app.indexOf("agent_runtime.shutdown();");
   assert.ok(stopExecutor >= 0 && stopExecutor < stopAgent);
+});
+
+test("checkpoint persistence stays behind the Agent and Workbench owners", () => {
+  const prohibited = [
+    "src/bridge.zig",
+    ...zigFiles("src/bridge/"),
+    "src/account.zig",
+    ...zigFiles("src/account/"),
+    ...filesWithExtensions("frontend/src/", [".ts", ".tsx"]),
+  ];
+  for (const file of prohibited)
+    assert.doesNotMatch(
+      read(file),
+      /checkpoint/i,
+      `${file} must not gain checkpoint product or persistence surface`,
+    );
+
+  const agent = read("src/agent/session.zig");
+  assert.equal(
+    [...agent.matchAll(/durable_budget\s*=\s*null/g)].length,
+    1,
+    "durable budget must keep one canonical null/default source",
+  );
+  const productionCheckpointCallers = zigFiles("src/").filter((file) =>
+    /\.exportCheckpoint\(/.test(read(file)),
+  );
+  assert.deepEqual(productionCheckpointCallers, [
+    "src/workbench/projection.zig",
+  ]);
+
+  const workbench = read("src/workbench/projection.zig");
+  const workerPostprocess = sliceBetween(
+    workbench,
+    "fn postprocessCheckpoint(",
+    "fn publishCheckpointFailure(",
+    "checkpoint worker postprocess",
+  );
+  const blobCommit = workerPostprocess.indexOf("writer.commit(");
+  const candidatePublication = workerPostprocess.indexOf(
+    "postprocess.state.store(.candidate_ready",
+  );
+  assert.ok(blobCommit >= 0 && blobCommit < candidatePublication);
+
+  const mainCommit = sliceBetween(
+    workbench,
+    "fn commitCheckpointPostprocessNoFail(",
+    "pub fn drainAgentEvents(",
+    "checkpoint main-thread commit",
+  );
+  const candidateConsumption = mainCommit.indexOf(".candidate_ready =>");
+  const descriptorCommit = mainCommit.indexOf(
+    "self.commitTaskStateWithCheckpoint(",
+  );
+  const descriptorInstall = mainCommit.indexOf(
+    "task.durable.checkpoint = candidate.descriptor",
+  );
+  assert.ok(
+    candidateConsumption >= 0 &&
+      candidateConsumption < descriptorCommit &&
+      descriptorCommit < descriptorInstall,
+  );
+
+  const executeRun = sliceBetween(
+    workbench,
+    "fn executeRunJob(",
+    "fn executeCompactJob(",
+    "Run executor job",
+  );
+  const executeCompact = sliceBetween(
+    workbench,
+    "fn executeCompactJob(",
+    "const CheckpointSinkContext",
+    "compact executor job",
+  );
+  for (const [name, worker] of [
+    ["Run", executeRun],
+    ["compact", executeCompact],
+  ]) {
+    assert.match(worker, /checkpoint_export_context/);
+    assert.doesNotMatch(
+      worker,
+      /latestCompactId\(|lastFinalizedRunId\(|\.task\.durable/,
+      `${name} worker must consume admission-captured checkpoint facts instead of traversing Task durable state`,
+    );
+  }
 });
 
 test("Workbench hands running cancellation through generation-checked control", () => {
@@ -1725,9 +1818,9 @@ test("Renderer declares window chrome UI while Application owns native behavior"
 
 test("lifecycle tests are grouped by invariant", () => {
   const cases = [
-    ["tests/agent/lifecycle_test.zig", 49],
+    ["tests/agent/lifecycle_test.zig", 55],
     ["tests/agent/event_pump_test.zig", 5],
-    ["tests/workbench/executor_lifecycle_test.zig", 22],
+    ["tests/workbench/executor_lifecycle_test.zig", 28],
     ["tests/integration/lifecycle/lifecycle_test.zig", 4],
   ];
   for (const [path, expectedCount] of cases) {
