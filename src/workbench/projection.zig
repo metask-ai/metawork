@@ -296,6 +296,12 @@ pub const Configuration = struct {
     mcp: McpStartupConfiguration = .{},
 };
 
+pub const McpHostCapabilities = struct {
+    connection_approval: bool = false,
+    secret_capture: bool = false,
+    oauth: bool = false,
+};
+
 /// Successful Workbench initialization consumes `preparation` and
 /// `activation`; failure consumes neither. App clears its optional activation
 /// owner only after init returns successfully.
@@ -304,6 +310,7 @@ pub const McpStartupConfiguration = struct {
     activation: ?*lifecycle.McpActivation = null,
     activation_failed: bool = false,
     management: ?mcp_configuration.ManagementConfiguration = null,
+    host_capabilities: McpHostCapabilities = .{},
 };
 
 pub const McpAdmissionBlockReason = enum {
@@ -487,6 +494,7 @@ const McpProductState = struct {
     refresh_request_generation: u64 = 0,
     refresh_job: ?*McpRefreshJob = null,
     authorization_operation: ?McpAuthorizationOperation = null,
+    host_capabilities: McpHostCapabilities,
     committed: bool = false,
 
     fn deinit(self: *McpProductState) void {
@@ -2396,6 +2404,7 @@ pub const Workbench = struct {
                 .activation_failed = configuration.mcp.activation_failed,
                 .management = mcp_management,
                 .admission = admission,
+                .host_capabilities = configuration.mcp.host_capabilities,
             };
             mcp_management = null;
             _ = workbench.syncMcpHealthNoFail();
@@ -5002,6 +5011,18 @@ pub const Workbench = struct {
         };
     }
 
+    pub fn mcpServerOperationBusy(
+        self: *const Workbench,
+        server_id: []const u8,
+    ) bool {
+        const mcp = if (self.mcp) |*value| value else return false;
+        if (mcpServerMutationBusy(mcp, server_id)) return true;
+        const management = if (mcp.management) |*value| value else return false;
+        const registry = management.desiredRegistry() orelse return false;
+        const operation = registry.oauth_operation orelse return false;
+        return std.mem.eql(u8, operation.server_id, server_id);
+    }
+
     pub fn beginMcpAuthorization(
         self: *Workbench,
         expected_generation: u64,
@@ -5142,7 +5163,7 @@ pub const Workbench = struct {
         try writeQuotedField(&writer, "Protocol policy", server.negotiation);
         try writer.print("Timeout: {d} ms\n", .{server.timeout_ms});
         try writeQuotedField(&writer, "Authentication", server.auth.kind);
-        if (std.mem.eql(u8, server.transport.kind, "stdio")) {
+        if (!std.mem.eql(u8, server.transport.kind, "streamable_http")) {
             try writer.writeAll("Transport: STDIO\n");
             try writeQuotedField(&writer, "Executable", server.transport.command.?);
             try writer.writeAll("Arguments:\n");
@@ -6173,6 +6194,212 @@ pub const Workbench = struct {
         return false;
     }
 
+    fn mcpSecretSlotReady(
+        management: *const mcp_configuration.ManagementPort,
+        slot: mcp_configuration.SecretSlotWire,
+    ) bool {
+        const locator = slot.credential_ref orelse return false;
+        return management.credentialPresence(locator) == .present;
+    }
+
+    fn mcpStaticSecretsReady(
+        management: *const mcp_configuration.ManagementPort,
+        server: mcp_configuration.ServerWire,
+    ) bool {
+        const slots = if (std.mem.eql(u8, server.transport.kind, "stdio"))
+            server.transport.environment
+        else
+            server.transport.headers;
+        if (slots.len == 0) return false;
+        for (slots) |slot| if (!mcpSecretSlotReady(management, slot)) return false;
+        return true;
+    }
+
+    fn mcpAuthorizationStatus(
+        mcp: *const McpProductState,
+        management: *const mcp_configuration.ManagementPort,
+        server: mcp_configuration.ServerWire,
+    ) []const u8 {
+        if (std.mem.eql(u8, server.auth.kind, "none")) return "not_required";
+        if (std.mem.eql(u8, server.auth.kind, "static")) {
+            if (mcpStaticSecretsReady(management, server)) return "ready";
+            return if (mcp.host_capabilities.secret_capture)
+                "missing_static_secret"
+            else
+                "capability_unavailable";
+        }
+        if (mcpAuthorizationAt(mcp, server.id, &.{
+            .discovering,
+            .awaiting_consent,
+            .registering,
+            .awaiting_browser,
+            .exchanging,
+            .cancelling,
+        })) return "authorizing";
+        const oauth = server.auth.oauth orelse return "capability_unavailable";
+        if (std.mem.eql(u8, oauth.status, "ready") and oauth.grant != null)
+            return "ready";
+        if (std.mem.eql(u8, oauth.status, "reauth_required"))
+            return "reauth_required";
+        if (std.mem.eql(u8, oauth.registration.kind, "pre_registered")) {
+            const method = oauth.registration.token_endpoint_auth_method orelse
+                return "capability_unavailable";
+            if (!std.mem.eql(u8, method, "none")) {
+                const locator = oauth.registration.client_secret_ref orelse
+                    return if (mcp.host_capabilities.secret_capture)
+                        "missing_oauth_client_secret"
+                    else
+                        "capability_unavailable";
+                if (management.credentialPresence(locator) != .present)
+                    return if (mcp.host_capabilities.secret_capture)
+                        "missing_oauth_client_secret"
+                    else
+                        "capability_unavailable";
+            }
+        }
+        if (!mcp.host_capabilities.oauth) return "capability_unavailable";
+        if (std.mem.eql(u8, oauth.status, "client_registration_required"))
+            return "client_registration_required";
+        return "consent_required";
+    }
+
+    fn mcpEndpointOrigin(endpoint: []const u8) []const u8 {
+        const scheme_end = std.mem.indexOf(u8, endpoint, "://") orelse return endpoint;
+        const authority_start = scheme_end + 3;
+        const path_start = std.mem.indexOfScalarPos(u8, endpoint, authority_start, '/') orelse
+            endpoint.len;
+        return endpoint[0..path_start];
+    }
+
+    fn writeMcpSecretSlots(
+        self: *Workbench,
+        writer: *std.Io.Writer,
+        management: *const mcp_configuration.ManagementPort,
+        slots: []const mcp_configuration.SecretSlotWire,
+    ) Error!void {
+        writer.writeByte('[') catch return error.SnapshotTooLarge;
+        for (slots, 0..) |slot, index| {
+            if (index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+            writer.writeAll("{\"name\":") catch return error.SnapshotTooLarge;
+            try self.projectedJsonValueWithKnownCredentials(writer, slot.name);
+            writer.print(",\"status\":\"{s}\"}}", .{
+                if (mcpSecretSlotReady(management, slot)) "set" else "missing",
+            }) catch return error.SnapshotTooLarge;
+        }
+        writer.writeByte(']') catch return error.SnapshotTooLarge;
+    }
+
+    fn writeMcpSafeConnectionSummary(
+        self: *Workbench,
+        writer: *std.Io.Writer,
+        management: *const mcp_configuration.ManagementPort,
+        server: mcp_configuration.ServerWire,
+        connection_safe: bool,
+        projected_auth_mode: []const u8,
+    ) Error!void {
+        if (!std.mem.eql(u8, server.transport.kind, "streamable_http")) {
+            writer.writeAll("{\"kind\":\"stdio\",\"executableBasename\":") catch
+                return error.SnapshotTooLarge;
+            try self.projectedJsonValueWithKnownCredentials(
+                writer,
+                if (connection_safe)
+                    std.fs.path.basename(server.transport.command orelse "")
+                else
+                    "(invalid)",
+            );
+            writer.print(",\"argumentCount\":{d},\"cwdPresent\":{},\"environment\":", .{
+                if (connection_safe) server.transport.arguments.len else 0,
+                connection_safe and server.transport.cwd != null,
+            }) catch return error.SnapshotTooLarge;
+            if (connection_safe)
+                try self.writeMcpSecretSlots(
+                    writer,
+                    management,
+                    server.transport.environment,
+                )
+            else
+                writer.writeAll("[]") catch return error.SnapshotTooLarge;
+            writer.writeByte('}') catch return error.SnapshotTooLarge;
+            return;
+        }
+        writer.writeAll("{\"kind\":\"streamable_http\",\"endpointOrigin\":") catch
+            return error.SnapshotTooLarge;
+        try self.projectedJsonValueWithKnownCredentials(
+            writer,
+            if (connection_safe)
+                mcpEndpointOrigin(server.transport.url orelse "")
+            else
+                "(invalid)",
+        );
+        writer.writeAll(",\"headers\":") catch return error.SnapshotTooLarge;
+        if (connection_safe)
+            try self.writeMcpSecretSlots(writer, management, server.transport.headers)
+        else
+            writer.writeAll("[]") catch return error.SnapshotTooLarge;
+        const oauth = if (connection_safe and std.mem.eql(u8, projected_auth_mode, "oauth"))
+            server.auth.oauth
+        else
+            null;
+        writer.print(",\"registrationKind\":\"{s}\",\"clientIdPresent\":{},\"tokenEndpointAuthMethod\":", .{
+            if (oauth) |value| if (std.mem.eql(u8, value.registration.kind, "dynamic_registration"))
+                "automatic"
+            else
+                "pre_registered" else "none",
+            if (oauth) |value| value.registration.client_id != null else false,
+        }) catch return error.SnapshotTooLarge;
+        if (oauth) |value| if (value.registration.token_endpoint_auth_method) |method|
+            try self.projectedJsonValueWithKnownCredentials(writer, method)
+        else
+            writer.writeAll("null") catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.print(",\"clientSecretStatus\":\"{s}\"}}", .{
+            if (oauth) |value| if (value.registration.token_endpoint_auth_method) |method|
+                if (std.mem.eql(u8, method, "none"))
+                    "not_required"
+                else if (value.registration.client_secret_ref) |locator|
+                    if (management.credentialPresence(locator) == .present) "set" else "missing"
+                else
+                    "missing"
+            else
+                "not_required" else "not_required",
+        }) catch return error.SnapshotTooLarge;
+    }
+
+    fn writeMcpAuthorizationOperation(
+        writer: *std.Io.Writer,
+        mcp: *const McpProductState,
+        registry: ?mcp_configuration.RegistryWire,
+    ) Error!void {
+        if (mcp.authorization_operation) |operation| {
+            writer.print("{{\"kind\":\"{s}\",\"serverId\":", .{@tagName(operation.phase)}) catch
+                return error.SnapshotTooLarge;
+            std.json.Stringify.value(operation.server_id, .{}, writer) catch
+                return error.SnapshotTooLarge;
+            writer.writeAll(",\"operationId\":") catch return error.SnapshotTooLarge;
+            std.json.Stringify.value(operation.operation_id, .{}, writer) catch
+                return error.SnapshotTooLarge;
+            writer.writeByte('}') catch return error.SnapshotTooLarge;
+            return;
+        }
+        if (registry) |desired| if (desired.oauth_operation) |operation| {
+            const phase = if (std.mem.eql(u8, operation.kind, "refresh"))
+                "refreshing"
+            else if (std.mem.eql(u8, operation.kind, "dynamic_registration"))
+                "registering"
+            else
+                "exchanging";
+            writer.print("{{\"kind\":\"{s}\",\"serverId\":", .{phase}) catch
+                return error.SnapshotTooLarge;
+            std.json.Stringify.value(operation.server_id, .{}, writer) catch
+                return error.SnapshotTooLarge;
+            writer.writeAll(",\"operationId\":") catch return error.SnapshotTooLarge;
+            std.json.Stringify.value(operation.id, .{}, writer) catch
+                return error.SnapshotTooLarge;
+            writer.writeByte('}') catch return error.SnapshotTooLarge;
+            return;
+        };
+        writer.writeAll("{\"kind\":\"idle\"}") catch return error.SnapshotTooLarge;
+    }
+
     fn writeMcpTool(
         self: *Workbench,
         writer: *std.Io.Writer,
@@ -6195,12 +6422,12 @@ pub const Workbench = struct {
         writer: *std.Io.Writer,
     ) Error!void {
         const mcp = if (self.mcp) |*value| value else {
-            writer.writeAll("{\"availability\":\"unavailable\",\"managementHealth\":\"unavailable\",\"operation\":\"idle\",\"desiredGeneration\":null,\"runtimeAlignment\":\"unknown\",\"redacted\":false,\"servers\":[]}") catch
+            writer.writeAll("{\"availability\":\"unavailable\",\"managementHealth\":\"unavailable\",\"operation\":\"idle\",\"authorizationOperation\":{\"kind\":\"idle\"},\"desiredGeneration\":null,\"runtimeAlignment\":\"unknown\",\"redacted\":false,\"servers\":[]}") catch
                 return error.SnapshotTooLarge;
             return;
         };
         const management = if (mcp.management) |*value| value else {
-            writer.writeAll("{\"availability\":\"unavailable\",\"managementHealth\":\"unavailable\",\"operation\":\"idle\",\"desiredGeneration\":null,\"runtimeAlignment\":\"unknown\",\"redacted\":false,\"servers\":[]}") catch
+            writer.writeAll("{\"availability\":\"unavailable\",\"managementHealth\":\"unavailable\",\"operation\":\"idle\",\"authorizationOperation\":{\"kind\":\"idle\"},\"desiredGeneration\":null,\"runtimeAlignment\":\"unknown\",\"redacted\":false,\"servers\":[]}") catch
                 return error.SnapshotTooLarge;
             return;
         };
@@ -6208,21 +6435,35 @@ pub const Workbench = struct {
         const trusted = inspection.health != .outcome_unknown and
             (inspection.desired_generation != null or inspection.health == .ready);
         const registry = if (trusted) management.desiredRegistry() else null;
-        writer.print("{{\"availability\":\"{s}\",\"managementHealth\":\"{s}\",\"operation\":\"{s}\",\"desiredGeneration\":", .{
+        const projection_redacted = self.mcpProjectionRedacted(mcp, registry);
+        writer.print("{{\"availability\":\"{s}\",\"managementHealth\":\"{s}\",\"operation\":\"{s}\",\"authorizationOperation\":", .{
             @tagName(self.mcpAvailability()),
             @tagName(inspection.health),
             if (mcp.refresh_job != null) "refreshing" else "idle",
         }) catch return error.SnapshotTooLarge;
+        try writeMcpAuthorizationOperation(writer, mcp, registry);
+        writer.writeAll(",\"desiredGeneration\":") catch return error.SnapshotTooLarge;
         if (trusted) writer.print("\"{d}\"", .{inspection.desired_generation orelse 0}) catch
             return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.print(",\"runtimeAlignment\":\"{s}\",\"redacted\":{},\"servers\":[", .{
             if (trusted) @tagName(inspection.runtime_alignment) else "unknown",
-            self.mcpProjectionRedacted(mcp, registry),
+            projection_redacted,
         }) catch return error.SnapshotTooLarge;
         const servers = if (registry) |value| value.servers else &.{};
         for (servers, 0..) |server, index| {
             if (index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
             const status = self.mcpDesiredServerRuntimeStatus(mcp, server.id);
+            const problem = mcp_configuration.serverProblem(server, management.limits);
+            const connection_safe = !projection_redacted and
+                (problem == null or problem.? == .invalid_connection_approval);
+            const projected_auth_mode = if (connection_safe and
+                (std.mem.eql(u8, server.auth.kind, "none") or
+                    std.mem.eql(u8, server.auth.kind, "static") or
+                    (std.mem.eql(u8, server.auth.kind, "oauth") and
+                        std.mem.eql(u8, server.transport.kind, "streamable_http"))))
+                server.auth.kind
+            else
+                "none";
             writer.writeAll("{\"id\":") catch return error.SnapshotTooLarge;
             try self.projectedJsonValueWithKnownCredentials(writer, server.id);
             writer.writeAll(",\"displayName\":") catch return error.SnapshotTooLarge;
@@ -6235,11 +6476,31 @@ pub const Workbench = struct {
             );
             writer.writeAll(",\"namespace\":") catch return error.SnapshotTooLarge;
             try self.projectedJsonValueWithKnownCredentials(writer, server.namespace);
-            writer.print(",\"transport\":\"{s}\",\"desiredEnabled\":{},\"runtimeStatus\":\"{s}\",\"newTaskAccess\":\"{s}\",\"safeDiagnostic\":", .{
+            writer.print(",\"transport\":\"{s}\",\"authMode\":\"{s}\",\"negotiation\":\"{s}\",\"timeoutMs\":{d},\"safeConnectionSummary\":", .{
                 if (std.mem.eql(u8, server.transport.kind, "streamable_http"))
                     "streamable_http"
                 else
                     "stdio",
+                projected_auth_mode,
+                if (connection_safe) server.negotiation else "automatic",
+                if (connection_safe) server.timeout_ms else 1,
+            }) catch return error.SnapshotTooLarge;
+            try self.writeMcpSafeConnectionSummary(
+                writer,
+                management,
+                server,
+                connection_safe,
+                projected_auth_mode,
+            );
+            writer.print(",\"approvalStatus\":\"{s}\",\"authorizationStatus\":\"{s}\",\"desiredEnabled\":{},\"runtimeStatus\":\"{s}\",\"newTaskAccess\":\"{s}\",\"safeDiagnostic\":", .{
+                if (!connection_safe or server.connection_approval == null)
+                    "unapproved"
+                else
+                    "approved",
+                if (connection_safe)
+                    mcpAuthorizationStatus(mcp, management, server)
+                else
+                    "not_required",
                 server.enabled,
                 @tagName(status),
                 mcpNewTaskAccess(mcp, server.id),
@@ -6325,7 +6586,11 @@ pub const Workbench = struct {
             mcp.committed and mcp.management != null
         else
             false;
-        writer.print("{{\"revision\":\"{d}\",\"capabilities\":{{\"taskHistoryPersistence\":{},\"taskHistoryPersistenceHealth\":\"{s}\",\"conversationRecovery\":false,\"executionRebind\":false,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":false,\"persistentWorkspacePermissions\":false,\"automaticWorkspaces\":{},\"scheduledTasks\":{},\"scheduledTaskPersistence\":{},\"scheduledTaskPersistenceHealth\":\"{s}\",\"backgroundScheduleWake\":{},\"localSkillManagement\":{},\"skillManagementHealth\":\"{s}\",\"mcpManagement\":{}}},\"account\":", .{
+        const mcp_host_capabilities = if (self.mcp) |*mcp|
+            if (mcp_management) mcp.host_capabilities else McpHostCapabilities{}
+        else
+            McpHostCapabilities{};
+        writer.print("{{\"revision\":\"{d}\",\"capabilities\":{{\"taskHistoryPersistence\":{},\"taskHistoryPersistenceHealth\":\"{s}\",\"conversationRecovery\":false,\"executionRebind\":false,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":false,\"persistentWorkspacePermissions\":false,\"automaticWorkspaces\":{},\"scheduledTasks\":{},\"scheduledTaskPersistence\":{},\"scheduledTaskPersistenceHealth\":\"{s}\",\"backgroundScheduleWake\":{},\"localSkillManagement\":{},\"skillManagementHealth\":\"{s}\",\"mcpManagement\":{},\"mcpConnectionApproval\":{},\"mcpSecretCapture\":{},\"mcpOAuth\":{}}},\"account\":", .{
             self.revision,
             task_persistence_ready,
             @tagName(self.task_persistence_health),
@@ -6338,6 +6603,9 @@ pub const Workbench = struct {
             self.skill_management_health == .ready,
             @tagName(self.skill_management_health),
             mcp_management,
+            mcp_host_capabilities.connection_approval,
+            mcp_host_capabilities.secret_capture,
+            mcp_host_capabilities.oauth,
         }) catch
             return error.SnapshotTooLarge;
         try self.writeAccount(&writer);
@@ -14914,7 +15182,7 @@ test "empty MCP startup commits a proven manageable runtime" {
     try std.testing.expect(std.mem.indexOf(
         u8,
         empty_snapshot,
-        "\"availability\":\"ready\",\"managementHealth\":\"ready\",\"operation\":\"idle\",\"desiredGeneration\":\"0\",\"runtimeAlignment\":\"current\",\"redacted\":false,\"servers\":[]",
+        "\"availability\":\"ready\",\"managementHealth\":\"ready\",\"operation\":\"idle\",\"authorizationOperation\":{\"kind\":\"idle\"},\"desiredGeneration\":\"0\",\"runtimeAlignment\":\"current\",\"redacted\":false,\"servers\":[]",
     ) != null);
     try std.testing.expectEqual(
         mcp_configuration.ManagementOutcome.saved,
@@ -15191,7 +15459,7 @@ test "MCP startup health commits a safe degraded Workbench projection" {
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
-        "\"availability\":\"degraded\",\"managementHealth\":\"ready\",\"operation\":\"idle\",\"desiredGeneration\":\"9\",\"runtimeAlignment\":\"current\",\"redacted\":true",
+        "\"availability\":\"degraded\",\"managementHealth\":\"ready\",\"operation\":\"idle\",\"authorizationOperation\":{\"kind\":\"idle\"},\"desiredGeneration\":\"9\",\"runtimeAlignment\":\"current\",\"redacted\":true",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
@@ -15210,6 +15478,11 @@ test "MCP startup health commits a safe degraded Workbench projection" {
     ) != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "/private/hidden") == null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "private.example.test") == null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"endpointOrigin\":\"(invalid)\"",
+    ) != null);
 
     const before = workbench.inspectMcpDesiredConfiguration().?;
     try std.testing.expectEqual(@as(?u64, 9), before.desired_generation);
@@ -15316,7 +15589,7 @@ test "MCP startup health commits a safe degraded Workbench projection" {
     try std.testing.expect(std.mem.indexOf(
         u8,
         effective_snapshot,
-        "\"managementHealth\":\"outcome_unknown\",\"operation\":\"idle\",\"desiredGeneration\":null,\"runtimeAlignment\":\"unknown\",\"redacted\":false,\"servers\":[]",
+        "\"managementHealth\":\"outcome_unknown\",\"operation\":\"idle\",\"authorizationOperation\":{\"kind\":\"idle\"},\"desiredGeneration\":null,\"runtimeAlignment\":\"unknown\",\"redacted\":false,\"servers\":[]",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,

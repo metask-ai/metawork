@@ -250,10 +250,14 @@ test("Scheduled Task projection decodes recurrence and occurrence without secret
 test("MCP management is capability-gated and identity checked", () => {
   const withMcp = clone(fixture);
   withMcp.capabilities.mcpManagement = true;
+  withMcp.capabilities.mcpConnectionApproval = true;
+  withMcp.capabilities.mcpSecretCapture = true;
+  withMcp.capabilities.mcpOAuth = true;
   withMcp.mcp = {
     availability: "degraded",
     managementHealth: "ready",
     operation: "idle",
+    authorizationOperation: { kind: "idle" },
     desiredGeneration: "1",
     runtimeAlignment: "current",
     redacted: false,
@@ -263,6 +267,20 @@ test("MCP management is capability-gated and identity checked", () => {
         displayName: "GitHub",
         namespace: "github",
         transport: "streamable_http",
+        authMode: "oauth",
+        negotiation: "automatic",
+        timeoutMs: 30_000,
+        safeConnectionSummary: {
+          kind: "streamable_http",
+          endpointOrigin: "https://github.example",
+          headers: [],
+          registrationKind: "automatic",
+          clientIdPresent: true,
+          tokenEndpointAuthMethod: null,
+          clientSecretStatus: "not_required",
+        },
+        approvalStatus: "approved",
+        authorizationStatus: "ready",
         desiredEnabled: true,
         runtimeStatus: "ready",
         newTaskAccess: "available",
@@ -281,6 +299,20 @@ test("MCP management is capability-gated and identity checked", () => {
         displayName: "Notion",
         namespace: "notion",
         transport: "streamable_http",
+        authMode: "oauth",
+        negotiation: "automatic",
+        timeoutMs: 30_000,
+        safeConnectionSummary: {
+          kind: "streamable_http",
+          endpointOrigin: "https://notion.example",
+          headers: [],
+          registrationKind: "automatic",
+          clientIdPresent: true,
+          tokenEndpointAuthMethod: null,
+          clientSecretStatus: "not_required",
+        },
+        approvalStatus: "approved",
+        authorizationStatus: "reauth_required",
         desiredEnabled: true,
         runtimeStatus: "needs_authentication",
         newTaskAccess: "unavailable",

@@ -524,6 +524,7 @@ pub const CreateOauthHttpServerInput = struct {
 
 pub const UpdateOauthHttpConnectionInput = struct {
     server_id: []const u8,
+    display_name: []const u8,
     negotiation: []const u8,
     timeout_ms: u32,
     url: []const u8,
@@ -628,6 +629,7 @@ pub const CreateHttpServerInput = struct {
 
 pub const UpdateStdioConnectionInput = struct {
     server_id: []const u8,
+    display_name: []const u8,
     negotiation: []const u8,
     timeout_ms: u32,
     command: []const u8,
@@ -639,6 +641,7 @@ pub const UpdateStdioConnectionInput = struct {
 
 pub const UpdateHttpConnectionInput = struct {
     server_id: []const u8,
+    display_name: []const u8,
     negotiation: []const u8,
     timeout_ms: u32,
     url: []const u8,
@@ -816,6 +819,15 @@ pub const ManagementPort = struct {
         return if (self.desired) |registry| registry.value else null;
     }
 
+    /// Safe product-state query. This reveals only whether a referenced
+    /// credential slot can currently be resolved, never the credential.
+    pub fn credentialPresence(
+        self: *const ManagementPort,
+        locator: []const u8,
+    ) CredentialPresence {
+        return self.credentials.probe(locator);
+    }
+
     pub fn prepareCreateHttpServer(
         self: *ManagementPort,
         expected_generation: u64,
@@ -977,6 +989,7 @@ pub const ManagementPort = struct {
         );
         defer self.allocator.free(headers);
         var replacement = base.servers[index];
+        replacement.display_name = input.display_name;
         replacement.negotiation = input.negotiation;
         replacement.timeout_ms = input.timeout_ms;
         replacement.transport = .{
@@ -1004,6 +1017,7 @@ pub const ManagementPort = struct {
         if (!std.mem.eql(u8, base.servers[index].transport.kind, "streamable_http"))
             return .rejected;
         var replacement = base.servers[index];
+        replacement.display_name = input.display_name;
         replacement.negotiation = input.negotiation;
         replacement.timeout_ms = input.timeout_ms;
         replacement.transport = .{
@@ -1038,6 +1052,7 @@ pub const ManagementPort = struct {
         );
         defer self.allocator.free(environment);
         var replacement = base.servers[index];
+        replacement.display_name = input.display_name;
         replacement.negotiation = input.negotiation;
         replacement.timeout_ms = input.timeout_ms;
         replacement.transport = .{
@@ -5788,6 +5803,7 @@ test "typed management validates field transitions before persistence" {
         .connection_approval.?.fingerprint;
     var timeout_update = switch (try management.prepareUpdateHttpConnection(5, .{
         .server_id = "remote",
+        .display_name = "Remote",
         .negotiation = "automatic",
         .timeout_ms = 2000,
         .url = "https://mcp.example.test/rpc",
@@ -5807,6 +5823,7 @@ test "typed management validates field transitions before persistence" {
     );
     var endpoint_update = switch (try management.prepareUpdateHttpConnection(6, .{
         .server_id = "remote",
+        .display_name = "Remote",
         .negotiation = "automatic",
         .timeout_ms = 2000,
         .url = "https://other.example.test/rpc",
@@ -5886,6 +5903,7 @@ test "management port repairs multiple invalid servers one transaction at a time
     );
     var repair = switch (try management.prepareUpdateStdioConnection(4, .{
         .server_id = "bad-negotiation",
+        .display_name = "Broken",
         .negotiation = "automatic",
         .timeout_ms = 1000,
         .command = "tool",

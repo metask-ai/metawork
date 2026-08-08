@@ -2,14 +2,23 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import type {
   McpManagementView,
+  McpAuthorizationCancelResult,
+  McpAuthorizationResult,
+  McpHttpConnectionInput,
   McpMutationResult,
   McpRefreshResult,
+  McpSecretSlot,
+  McpStdioConnectionInput,
 } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { useI18n } from "../../i18n/context.ts";
 
 type McpServer = McpManagementView["servers"][number];
-type DrawerState = { kind: "add" } | { kind: "server"; id: string } | null;
+type DrawerState =
+  | { kind: "add" }
+  | { kind: "edit"; id: string }
+  | { kind: "server"; id: string }
+  | null;
 type ConfirmAction = "enable" | "disable" | "delete" | null;
 
 const attentionStatuses = new Set<McpServer["runtimeStatus"]>([
@@ -128,8 +137,26 @@ function validMcpDisplayName(value: string): boolean {
   );
 }
 
+function validMcpPublicText(value: string, required = true): boolean {
+  return (
+    (!required || value.trim().length > 0) &&
+    !/[\u0000-\u001f\u007f]/.test(value) &&
+    new TextEncoder().encode(value).length <= 4096
+  );
+}
+
+function validMcpNames(values: string[]): boolean {
+  const normalized = values.map((value) => value.trim().toLocaleLowerCase());
+  return (
+    normalized.every((value) => validMcpPublicText(value)) &&
+    new Set(normalized).size === normalized.length
+  );
+}
+
 function serverNeedsAttention(server: McpServer) {
   return (
+    server.approvalStatus === "unapproved" ||
+    !["not_required", "ready"].includes(server.authorizationStatus) ||
     attentionStatuses.has(server.runtimeStatus) ||
     server.newTaskAccess === "restart_required" ||
     server.newTaskAccess === "unavailable"
@@ -137,6 +164,10 @@ function serverNeedsAttention(server: McpServer) {
 }
 
 function serverStateKey(server: McpServer) {
+  if (server.approvalStatus === "unapproved")
+    return "mcp.approval.required" as const;
+  if (!["not_required", "ready"].includes(server.authorizationStatus))
+    return `mcp.authorization_status.${server.authorizationStatus}` as const;
   if (server.newTaskAccess === "restart_required")
     return "mcp.access.restart_required" as const;
   if (server.runtimeStatus !== "ready")
@@ -178,7 +209,8 @@ function McpServerRow({
           <span>{server.namespace}</span>
         </span>
         <span className="mcp-server-transport">
-          {t(`mcp.transport.${server.transport}`)}
+          {t(`mcp.transport.${server.transport}`)} ·{" "}
+          {t(`mcp.auth.${server.authMode}`)}
         </span>
         <span className="mcp-server-tools">
           {t("mcp.tool_access_summary", {
@@ -196,32 +228,127 @@ function McpServerRow({
   );
 }
 
+function McpTextRows({
+  label,
+  addLabel,
+  values,
+  onChange,
+}: {
+  label: string;
+  addLabel: string;
+  values: string[];
+  onChange: (values: string[]) => void;
+}) {
+  const { t } = useI18n();
+  return (
+    <fieldset className="mcp-text-rows">
+      <legend>{label}</legend>
+      {values.map((value, index) => (
+        <div key={index}>
+          <input
+            aria-label={`${label} ${index + 1}`}
+            value={value}
+            onChange={(event) =>
+              onChange(
+                values.map((candidate, candidateIndex) =>
+                  candidateIndex === index ? event.target.value : candidate,
+                ),
+              )
+            }
+          />
+          <button
+            type="button"
+            className="icon-button focus-ring"
+            aria-label={t("mcp.add.remove_row")}
+            onClick={() =>
+              onChange(
+                values.filter((_, candidateIndex) => candidateIndex !== index),
+              )
+            }
+          >
+            <Icon name="trash" />
+          </button>
+        </div>
+      ))}
+      <button
+        type="button"
+        className="mcp-add-row focus-ring"
+        onClick={() => onChange([...values, ""])}
+      >
+        <Icon name="plus" /> {addLabel}
+      </button>
+    </fieldset>
+  );
+}
+
 export function McpPage({
   management,
   query,
   disabled,
   onQuery,
-  onCreate,
+  capabilities,
+  onCreateStdio,
+  onCreateHttp,
+  onUpdateStdio,
+  onUpdateHttp,
   onRename,
+  onApprove,
+  onCaptureSecret,
+  onAuthorize,
+  onCancelAuthorization,
   onSetEnabled,
   onSetAllowedTools,
   onRemove,
   onRefresh,
 }: {
   management: McpManagementView;
+  capabilities: {
+    connectionApproval: boolean;
+    secretCapture: boolean;
+    oauth: boolean;
+  };
   query: string;
   disabled: boolean;
   onQuery: (query: string) => void;
-  onCreate: (
+  onCreateStdio: (
     expectedGeneration: string,
-    displayName: string,
-    endpoint: string,
+    input: McpStdioConnectionInput,
+  ) => Promise<McpMutationResult>;
+  onCreateHttp: (
+    expectedGeneration: string,
+    input: McpHttpConnectionInput,
+  ) => Promise<McpMutationResult>;
+  onUpdateStdio: (
+    expectedGeneration: string,
+    serverId: string,
+    input: McpStdioConnectionInput,
+  ) => Promise<McpMutationResult>;
+  onUpdateHttp: (
+    expectedGeneration: string,
+    serverId: string,
+    input: McpHttpConnectionInput,
   ) => Promise<McpMutationResult>;
   onRename: (
     expectedGeneration: string,
     serverId: string,
     displayName: string,
   ) => Promise<McpMutationResult>;
+  onApprove: (
+    expectedGeneration: string,
+    serverId: string,
+  ) => Promise<McpMutationResult>;
+  onCaptureSecret: (
+    expectedGeneration: string,
+    serverId: string,
+    slot: McpSecretSlot,
+  ) => Promise<McpMutationResult>;
+  onAuthorize: (
+    expectedGeneration: string,
+    serverId: string,
+  ) => Promise<McpAuthorizationResult>;
+  onCancelAuthorization: (
+    operationId: string,
+  ) => Promise<McpAuthorizationCancelResult>;
   onSetEnabled: (
     expectedGeneration: string,
     serverId: string,
@@ -251,8 +378,29 @@ export function McpPage({
   const [pendingServerId, setPendingServerId] = useState<string | null>(null);
   const [createPending, setCreatePending] = useState(false);
   const [refreshPending, setRefreshPending] = useState(false);
+  const [cancelPending, setCancelPending] = useState(false);
   const [displayName, setDisplayName] = useState("");
+  const [transport, setTransport] = useState<"stdio" | "streamable_http">(
+    "stdio",
+  );
+  const [negotiation, setNegotiation] = useState<
+    "automatic" | "modern_only" | "compat_only"
+  >("automatic");
+  const [timeoutMs, setTimeoutMs] = useState("30000");
+  const [command, setCommand] = useState("");
+  const [argumentsDraft, setArgumentsDraft] = useState<string[]>([]);
+  const [cwd, setCwd] = useState("");
+  const [environmentNames, setEnvironmentNames] = useState<string[]>([]);
   const [endpoint, setEndpoint] = useState("");
+  const [authMode, setAuthMode] = useState<"none" | "static" | "oauth">("none");
+  const [headerNames, setHeaderNames] = useState<string[]>([]);
+  const [registrationKind, setRegistrationKind] = useState<
+    "automatic" | "pre_registered"
+  >("automatic");
+  const [clientId, setClientId] = useState("");
+  const [tokenEndpointAuthMethod, setTokenEndpointAuthMethod] = useState<
+    "none" | "client_secret_basic" | "client_secret_post"
+  >("none");
   const [renameDraft, setRenameDraft] = useState("");
   const [notice, setNotice] = useState<{
     tone: "quiet" | "attention";
@@ -264,7 +412,7 @@ export function McpPage({
     [management.servers, query],
   );
   const selected =
-    drawerState?.kind === "server"
+    drawerState && drawerState.kind !== "add"
       ? (management.servers.find((server) => server.id === drawerState.id) ??
         null)
       : null;
@@ -290,9 +438,28 @@ export function McpPage({
     management.availability === "unavailable" ||
     refreshPending ||
     createPending ||
-    pendingServerId !== null;
+    pendingServerId !== null ||
+    management.authorizationOperation.kind !== "idle";
+  const selectedOperationBusy =
+    selected !== null &&
+    management.authorizationOperation.kind !== "idle" &&
+    management.authorizationOperation.serverId === selected.id;
   const addValid =
-    validMcpDisplayName(displayName) && validMcpHttpEndpoint(endpoint.trim());
+    validMcpDisplayName(displayName) &&
+    /^(?:[1-9][0-9]{0,8})$/.test(timeoutMs) &&
+    (transport === "stdio"
+      ? validMcpPublicText(command.trim()) &&
+        argumentsDraft.every((value) => validMcpPublicText(value, false)) &&
+        validMcpPublicText(cwd, false) &&
+        validMcpNames(environmentNames)
+      : validMcpHttpEndpoint(endpoint.trim()) &&
+        validMcpNames(headerNames) &&
+        ((authMode === "none" && headerNames.length === 0) ||
+          (authMode === "static" && headerNames.length > 0) ||
+          (authMode === "oauth" &&
+            headerNames.length === 0 &&
+            (registrationKind === "automatic" ||
+              validMcpPublicText(clientId.trim())))));
 
   useEffect(() => title.current?.focus(), []);
 
@@ -305,7 +472,8 @@ export function McpPage({
   }, [drawerState?.kind, selected?.id]);
 
   useEffect(() => {
-    if (drawerState?.kind === "server" && !selected) setDrawerState(null);
+    if (drawerState && drawerState.kind !== "add" && !selected)
+      setDrawerState(null);
   }, [drawerState, selected]);
 
   useEffect(() => {
@@ -359,9 +527,58 @@ export function McpPage({
   function openAdd(trigger: HTMLElement) {
     drawerTrigger.current = trigger;
     setDisplayName("");
+    setTransport("stdio");
+    setNegotiation("automatic");
+    setTimeoutMs("30000");
+    setCommand("");
+    setArgumentsDraft([]);
+    setCwd("");
+    setEnvironmentNames([]);
     setEndpoint("");
+    setAuthMode("none");
+    setHeaderNames([]);
+    setRegistrationKind("automatic");
+    setClientId("");
+    setTokenEndpointAuthMethod("none");
     setNotice(null);
     setDrawerState({ kind: "add" });
+  }
+
+  function openEdit(server: McpServer) {
+    setDisplayName(server.displayName);
+    setTransport(server.transport);
+    setNegotiation(server.negotiation);
+    setTimeoutMs(String(server.timeoutMs));
+    setCommand("");
+    setArgumentsDraft([]);
+    setCwd("");
+    setEnvironmentNames(
+      server.safeConnectionSummary.kind === "stdio"
+        ? server.safeConnectionSummary.environment.map((slot) => slot.name)
+        : [],
+    );
+    setEndpoint("");
+    setAuthMode(server.authMode);
+    setHeaderNames(
+      server.safeConnectionSummary.kind === "streamable_http"
+        ? server.safeConnectionSummary.headers.map((slot) => slot.name)
+        : [],
+    );
+    setRegistrationKind(
+      server.safeConnectionSummary.kind === "streamable_http" &&
+        server.safeConnectionSummary.registrationKind === "pre_registered"
+        ? "pre_registered"
+        : "automatic",
+    );
+    setClientId("");
+    setTokenEndpointAuthMethod(
+      server.safeConnectionSummary.kind === "streamable_http" &&
+        server.safeConnectionSummary.tokenEndpointAuthMethod !== null
+        ? server.safeConnectionSummary.tokenEndpointAuthMethod
+        : "none",
+    );
+    setNotice(null);
+    setDrawerState({ kind: "edit", id: server.id });
   }
 
   function closeDrawer() {
@@ -403,6 +620,8 @@ export function McpPage({
       "stale_generation",
       "rejected",
       "indeterminate",
+      "busy",
+      "capability_unavailable",
     ].includes(result.outcome);
     setNotice({
       tone: attention ? "attention" : "quiet",
@@ -416,11 +635,52 @@ export function McpPage({
     setCreatePending(true);
     setNotice(null);
     try {
-      const result = await onCreate(
-        generation,
-        displayName.trim(),
-        endpoint.trim(),
-      );
+      const shared = {
+        displayName: displayName.trim(),
+        negotiation,
+        timeoutMs: Number(timeoutMs),
+      };
+      const input =
+        transport === "stdio"
+          ? ({
+              ...shared,
+              command: command.trim(),
+              arguments: argumentsDraft,
+              cwd: cwd.trim() || null,
+              environmentNames: environmentNames.map((value) => value.trim()),
+            } satisfies McpStdioConnectionInput)
+          : ({
+              ...shared,
+              endpoint: endpoint.trim(),
+              authMode,
+              headerNames: headerNames.map((value) => value.trim()),
+              registration:
+                authMode !== "oauth"
+                  ? null
+                  : registrationKind === "automatic"
+                    ? { kind: "automatic" }
+                    : {
+                        kind: "pre_registered",
+                        clientId: clientId.trim(),
+                        tokenEndpointAuthMethod,
+                      },
+            } satisfies McpHttpConnectionInput);
+      const result =
+        drawerState?.kind === "edit" && selected
+          ? transport === "stdio"
+            ? await onUpdateStdio(
+                generation,
+                selected.id,
+                input as McpStdioConnectionInput,
+              )
+            : await onUpdateHttp(
+                generation,
+                selected.id,
+                input as McpHttpConnectionInput,
+              )
+          : transport === "stdio"
+            ? await onCreateStdio(generation, input as McpStdioConnectionInput)
+            : await onCreateHttp(generation, input as McpHttpConnectionInput);
       mutationNotice(result);
       if (
         result.outcome === "saved" ||
@@ -451,6 +711,40 @@ export function McpPage({
       return null;
     } finally {
       setPendingServerId(null);
+    }
+  }
+
+  async function authorizeServer(server: McpServer) {
+    const generation = management.desiredGeneration;
+    if (!generation || mutationLocked || pendingServerId === server.id) return;
+    setPendingServerId(server.id);
+    try {
+      const result = await onAuthorize(generation, server.id);
+      setNotice({
+        tone: result.outcome === "started" ? "quiet" : "attention",
+        text: t(`mcp.authorization.${result.outcome}`),
+      });
+    } catch {
+      setNotice({ tone: "attention", text: t("mcp.mutation.failed") });
+    } finally {
+      setPendingServerId(null);
+    }
+  }
+
+  async function cancelAuthorization() {
+    const operation = management.authorizationOperation;
+    if (operation.kind === "idle" || cancelPending) return;
+    setCancelPending(true);
+    try {
+      const result = await onCancelAuthorization(operation.operationId);
+      setNotice({
+        tone: result.outcome === "cancelled" ? "quiet" : "attention",
+        text: t(`mcp.cancel.${result.outcome}`),
+      });
+    } catch {
+      setNotice({ tone: "attention", text: t("mcp.mutation.failed") });
+    } finally {
+      setCancelPending(false);
     }
   }
 
@@ -677,12 +971,16 @@ export function McpPage({
                 <small>
                   {drawerState.kind === "add"
                     ? t("mcp.add.eyebrow")
-                    : t("mcp.detail.eyebrow")}
+                    : drawerState.kind === "edit"
+                      ? t("mcp.edit.eyebrow")
+                      : t("mcp.detail.eyebrow")}
                 </small>
                 <h2 id="mcp-drawer-title" ref={drawerHeading} tabIndex={-1}>
                   {drawerState.kind === "add"
                     ? t("mcp.add.title")
-                    : selected?.displayName}
+                    : drawerState.kind === "edit"
+                      ? t("mcp.edit.title")
+                      : selected?.displayName}
                 </h2>
                 {selected && <p>{selected.namespace}</p>}
               </div>
@@ -695,7 +993,7 @@ export function McpPage({
               </button>
             </header>
 
-            {drawerState.kind === "add" ? (
+            {drawerState.kind === "add" || drawerState.kind === "edit" ? (
               <form
                 className="mcp-add-form"
                 onSubmit={(event) => {
@@ -704,6 +1002,33 @@ export function McpPage({
                 }}
               >
                 <p className="mcp-form-intro">{t("mcp.add.intro")}</p>
+                <fieldset className="mcp-transport-choice">
+                  <legend>{t("mcp.add.transport")}</legend>
+                  <button
+                    type="button"
+                    data-selected={transport === "stdio"}
+                    disabled={drawerState.kind === "edit"}
+                    onClick={() => setTransport("stdio")}
+                  >
+                    <Icon name="mcp" />
+                    <span>
+                      <strong>STDIO</strong>
+                      <small>{t("mcp.add.stdio_help")}</small>
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    data-selected={transport === "streamable_http"}
+                    disabled={drawerState.kind === "edit"}
+                    onClick={() => setTransport("streamable_http")}
+                  >
+                    <Icon name="mcp" />
+                    <span>
+                      <strong>Streamable HTTP</strong>
+                      <small>{t("mcp.add.http_help")}</small>
+                    </span>
+                  </button>
+                </fieldset>
                 <label>
                   <span>{t("mcp.add.name")}</span>
                   <input
@@ -714,28 +1039,171 @@ export function McpPage({
                     onChange={(event) => setDisplayName(event.target.value)}
                   />
                 </label>
-                <label>
-                  <span id="mcp-add-endpoint-label">
-                    {t("mcp.add.endpoint")}
-                  </span>
-                  <input
-                    autoComplete="off"
-                    inputMode="url"
-                    placeholder="https://mcp.example.com"
-                    value={endpoint}
-                    maxLength={4096}
-                    disabled={createPending}
-                    aria-labelledby="mcp-add-endpoint-label"
-                    aria-describedby="mcp-add-endpoint-help"
-                    aria-invalid={
-                      endpoint.length > 0 && !validMcpHttpEndpoint(endpoint)
-                    }
-                    onChange={(event) => setEndpoint(event.target.value)}
-                  />
-                  <small id="mcp-add-endpoint-help">
-                    {t("mcp.add.endpoint_help")}
-                  </small>
-                </label>
+                <div className="mcp-form-pair">
+                  <label>
+                    <span>{t("mcp.add.protocol")}</span>
+                    <select
+                      value={negotiation}
+                      onChange={(event) =>
+                        setNegotiation(event.target.value as typeof negotiation)
+                      }
+                    >
+                      <option value="automatic">Automatic</option>
+                      <option value="modern_only">2026-07-28</option>
+                      <option value="compat_only">2025-11-25</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>{t("mcp.add.timeout")}</span>
+                    <input
+                      inputMode="numeric"
+                      value={timeoutMs}
+                      onChange={(event) => setTimeoutMs(event.target.value)}
+                    />
+                  </label>
+                </div>
+                {transport === "stdio" ? (
+                  <>
+                    <label>
+                      <span>{t("mcp.add.command")}</span>
+                      <input
+                        autoComplete="off"
+                        value={command}
+                        placeholder="npx"
+                        onChange={(event) => setCommand(event.target.value)}
+                      />
+                    </label>
+                    <McpTextRows
+                      label={t("mcp.add.arguments")}
+                      addLabel={t("mcp.add.argument")}
+                      values={argumentsDraft}
+                      onChange={setArgumentsDraft}
+                    />
+                    <label>
+                      <span>{t("mcp.add.cwd")}</span>
+                      <input
+                        autoComplete="off"
+                        value={cwd}
+                        onChange={(event) => setCwd(event.target.value)}
+                      />
+                    </label>
+                    <McpTextRows
+                      label={t("mcp.add.environment")}
+                      addLabel={t("mcp.add.environment_name")}
+                      values={environmentNames}
+                      onChange={setEnvironmentNames}
+                    />
+                  </>
+                ) : (
+                  <>
+                    <label>
+                      <span id="mcp-add-endpoint-label">
+                        {t("mcp.add.endpoint")}
+                      </span>
+                      <input
+                        autoComplete="off"
+                        inputMode="url"
+                        placeholder="https://mcp.example.com"
+                        value={endpoint}
+                        maxLength={4096}
+                        disabled={createPending}
+                        aria-labelledby="mcp-add-endpoint-label"
+                        aria-describedby="mcp-add-endpoint-help"
+                        aria-invalid={
+                          endpoint.length > 0 && !validMcpHttpEndpoint(endpoint)
+                        }
+                        onChange={(event) => setEndpoint(event.target.value)}
+                      />
+                      <small id="mcp-add-endpoint-help">
+                        {t("mcp.add.endpoint_help")}
+                      </small>
+                    </label>
+                    <fieldset className="mcp-auth-choice">
+                      <legend>{t("mcp.add.authentication")}</legend>
+                      {(["none", "static", "oauth"] as const).map((mode) => (
+                        <label key={mode}>
+                          <input
+                            type="radio"
+                            name="mcp-auth-mode"
+                            checked={authMode === mode}
+                            disabled={mode === "oauth" && !capabilities.oauth}
+                            onChange={() => {
+                              setAuthMode(mode);
+                              if (mode !== "static") setHeaderNames([]);
+                            }}
+                          />
+                          <span>{t(`mcp.auth.${mode}`)}</span>
+                        </label>
+                      ))}
+                    </fieldset>
+                    {authMode === "static" && (
+                      <McpTextRows
+                        label={t("mcp.add.headers")}
+                        addLabel={t("mcp.add.header_name")}
+                        values={headerNames}
+                        onChange={setHeaderNames}
+                      />
+                    )}
+                    {authMode === "oauth" && (
+                      <div className="mcp-oauth-fields">
+                        <label>
+                          <span>{t("mcp.add.registration")}</span>
+                          <select
+                            value={registrationKind}
+                            onChange={(event) =>
+                              setRegistrationKind(
+                                event.target.value as typeof registrationKind,
+                              )
+                            }
+                          >
+                            <option value="automatic">
+                              {t("mcp.add.registration.automatic")}
+                            </option>
+                            <option value="pre_registered">
+                              {t("mcp.add.registration.existing")}
+                            </option>
+                          </select>
+                        </label>
+                        {registrationKind === "pre_registered" && (
+                          <>
+                            <label>
+                              <span>{t("mcp.add.client_id")}</span>
+                              <input
+                                autoComplete="off"
+                                value={clientId}
+                                onChange={(event) =>
+                                  setClientId(event.target.value)
+                                }
+                              />
+                            </label>
+                            <label>
+                              <span>{t("mcp.add.client_auth_method")}</span>
+                              <select
+                                value={tokenEndpointAuthMethod}
+                                onChange={(event) =>
+                                  setTokenEndpointAuthMethod(
+                                    event.target
+                                      .value as typeof tokenEndpointAuthMethod,
+                                  )
+                                }
+                              >
+                                <option value="none">
+                                  {t("mcp.client_auth.none")}
+                                </option>
+                                <option value="client_secret_basic">
+                                  {t("mcp.client_auth.client_secret_basic")}
+                                </option>
+                                <option value="client_secret_post">
+                                  {t("mcp.client_auth.client_secret_post")}
+                                </option>
+                              </select>
+                            </label>
+                          </>
+                        )}
+                      </div>
+                    )}
+                  </>
+                )}
                 <div className="mcp-add-defaults">
                   <Icon name="check" />
                   <p>{t("mcp.add.defaults")}</p>
@@ -753,7 +1221,11 @@ export function McpPage({
                     className="primary-button focus-ring"
                     disabled={!addValid || mutationLocked || createPending}
                   >
-                    {createPending ? t("mcp.add.adding") : t("mcp.add.submit")}
+                    {createPending
+                      ? t("mcp.add.adding")
+                      : drawerState.kind === "edit"
+                        ? t("mcp.edit.submit")
+                        : t("mcp.add.submit")}
                   </button>
                 </footer>
               </form>
@@ -822,7 +1294,9 @@ export function McpPage({
                         value={renameDraft}
                         maxLength={256}
                         disabled={
-                          mutationLocked || pendingServerId === selected.id
+                          mutationLocked ||
+                          pendingServerId === selected.id ||
+                          selectedOperationBusy
                         }
                         onChange={(event) => setRenameDraft(event.target.value)}
                       />
@@ -832,6 +1306,7 @@ export function McpPage({
                       disabled={
                         mutationLocked ||
                         pendingServerId === selected.id ||
+                        selectedOperationBusy ||
                         !validMcpDisplayName(renameDraft) ||
                         renameDraft.trim() === selected.displayName
                       }
@@ -839,11 +1314,145 @@ export function McpPage({
                       {t("mcp.rename.action")}
                     </button>
                   </form>
+                  <dl className="mcp-connection-summary">
+                    <div>
+                      <dt>{t("mcp.detail.protocol")}</dt>
+                      <dd>{t(`mcp.negotiation.${selected.negotiation}`)}</dd>
+                    </div>
+                    <div>
+                      <dt>{t("mcp.add.timeout")}</dt>
+                      <dd>{selected.timeoutMs}</dd>
+                    </div>
+                    <div>
+                      <dt>{t("mcp.detail.authentication")}</dt>
+                      <dd>{t(`mcp.auth.${selected.authMode}`)}</dd>
+                    </div>
+                    {selected.safeConnectionSummary.kind === "stdio" ? (
+                      <>
+                        <div>
+                          <dt>{t("mcp.detail.executable")}</dt>
+                          <dd>
+                            <code>
+                              {
+                                selected.safeConnectionSummary
+                                  .executableBasename
+                              }
+                            </code>
+                          </dd>
+                        </div>
+                        <div>
+                          <dt>{t("mcp.detail.arguments")}</dt>
+                          <dd>
+                            {selected.safeConnectionSummary.argumentCount}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt>{t("mcp.detail.cwd")}</dt>
+                          <dd>
+                            {t(
+                              selected.safeConnectionSummary.cwdPresent
+                                ? "mcp.summary.configured"
+                                : "mcp.summary.not_configured",
+                            )}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt>{t("mcp.detail.environment_names")}</dt>
+                          <dd>
+                            {selected.safeConnectionSummary.environment.length}
+                          </dd>
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <div>
+                          <dt>{t("mcp.detail.endpoint_origin")}</dt>
+                          <dd>
+                            <code>
+                              {selected.safeConnectionSummary.endpointOrigin}
+                            </code>
+                          </dd>
+                        </div>
+                        <div>
+                          <dt>{t("mcp.detail.header_names")}</dt>
+                          <dd>{selected.safeConnectionSummary.headers.length}</dd>
+                        </div>
+                        {selected.authMode === "oauth" && (
+                          <>
+                            <div>
+                              <dt>{t("mcp.detail.registration")}</dt>
+                              <dd>
+                                {t(
+                                  `mcp.registration.${selected.safeConnectionSummary.registrationKind}`,
+                                )}
+                              </dd>
+                            </div>
+                            {selected.safeConnectionSummary
+                              .tokenEndpointAuthMethod !== null && (
+                              <div>
+                                <dt>{t("mcp.add.client_auth_method")}</dt>
+                                <dd>
+                                  {t(
+                                    `mcp.client_auth.${selected.safeConnectionSummary.tokenEndpointAuthMethod}`,
+                                  )}
+                                </dd>
+                              </div>
+                            )}
+                          </>
+                        )}
+                      </>
+                    )}
+                  </dl>
+                  {selected.approvalStatus === "unapproved" && (
+                    <div className="mcp-attention-action">
+                      <div>
+                        <strong>{t("mcp.approval.required")}</strong>
+                        <p>{t("mcp.approval.help")}</p>
+                      </div>
+                      {capabilities.connectionApproval ? (
+                        <button
+                          className="primary-button focus-ring"
+                          disabled={
+                            mutationLocked ||
+                            pendingServerId === selected.id ||
+                            selectedOperationBusy
+                          }
+                          onClick={() =>
+                            void mutateServer(selected, (generation) =>
+                              onApprove(generation, selected.id),
+                            )
+                          }
+                        >
+                          {t("mcp.approval.action")}
+                        </button>
+                      ) : (
+                        <span>{t("mcp.capability.approval_unavailable")}</span>
+                      )}
+                    </div>
+                  )}
                   <div className="mcp-configuration-actions">
                     <button
                       className="secondary-button focus-ring"
                       disabled={
-                        mutationLocked || pendingServerId === selected.id
+                        mutationLocked ||
+                        pendingServerId === selected.id ||
+                        selectedOperationBusy
+                      }
+                      onClick={() => openEdit(selected)}
+                    >
+                      {t("mcp.edit.action")}
+                    </button>
+                    <button
+                      className="secondary-button focus-ring"
+                      disabled={
+                        mutationLocked ||
+                        pendingServerId === selected.id ||
+                        selectedOperationBusy ||
+                        (!selected.desiredEnabled &&
+                          (selected.approvalStatus !== "approved" ||
+                            !["not_required", "ready"].includes(
+                              selected.authorizationStatus,
+                            )))
                       }
                       onClick={(event) =>
                         openConfirmation(
@@ -859,7 +1468,9 @@ export function McpPage({
                     <button
                       className="danger-button focus-ring"
                       disabled={
-                        mutationLocked || pendingServerId === selected.id
+                        mutationLocked ||
+                        pendingServerId === selected.id ||
+                        selectedOperationBusy
                       }
                       onClick={(event) =>
                         openConfirmation("delete", event.currentTarget)
@@ -869,6 +1480,148 @@ export function McpPage({
                       {t("mcp.delete.action")}
                     </button>
                   </div>
+                </section>
+
+                <section className="mcp-detail-section">
+                  <header>
+                    <div>
+                      <h3>{t("mcp.detail.authorization")}</h3>
+                      <p>
+                        {t(
+                          `mcp.authorization_status.${selected.authorizationStatus}`,
+                        )}
+                      </p>
+                    </div>
+                  </header>
+                  {selected.authMode === "static" && (
+                    <ul className="mcp-secret-slots">
+                      {(selected.safeConnectionSummary.kind === "stdio"
+                        ? selected.safeConnectionSummary.environment
+                        : selected.safeConnectionSummary.headers
+                      ).map((slot) => (
+                        <li key={slot.name}>
+                          <code>{slot.name}</code>
+                          <span>{t(`mcp.secret.${slot.status}`)}</span>
+                          {capabilities.secretCapture ? (
+                            <button
+                              className="secondary-button focus-ring"
+                              disabled={
+                                mutationLocked ||
+                                pendingServerId === selected.id ||
+                                selectedOperationBusy ||
+                                selected.approvalStatus !== "approved"
+                              }
+                              onClick={() =>
+                                void mutateServer(selected, (generation) =>
+                                  onCaptureSecret(generation, selected.id, {
+                                    kind:
+                                      selected.transport === "stdio"
+                                        ? "stdio_environment"
+                                        : "http_header",
+                                    name: slot.name,
+                                  }),
+                                )
+                              }
+                            >
+                              {slot.status === "set"
+                                ? t("mcp.secret.replace")
+                                : t("mcp.secret.set")}
+                            </button>
+                          ) : (
+                            <span>
+                              {t("mcp.capability.capture_unavailable")}
+                            </span>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {selected.authMode === "oauth" && (
+                    <div className="mcp-oauth-action">
+                      {selected.safeConnectionSummary.kind ===
+                        "streamable_http" &&
+                        selected.safeConnectionSummary.clientSecretStatus !==
+                          "not_required" && (
+                          <div className="mcp-client-secret-action">
+                            <span>
+                              {t(
+                                `mcp.secret.${selected.safeConnectionSummary.clientSecretStatus}`,
+                              )}
+                            </span>
+                            {capabilities.secretCapture ? (
+                              <button
+                                className="secondary-button focus-ring"
+                                disabled={
+                                  mutationLocked ||
+                                  pendingServerId === selected.id ||
+                                  selectedOperationBusy ||
+                                  selected.approvalStatus !== "approved"
+                                }
+                                onClick={() =>
+                                  void mutateServer(selected, (generation) =>
+                                    onCaptureSecret(generation, selected.id, {
+                                      kind: "oauth_client_secret",
+                                    }),
+                                  )
+                                }
+                              >
+                                {selected.safeConnectionSummary
+                                  .clientSecretStatus === "set"
+                                  ? t("mcp.secret.replace")
+                                  : t("mcp.secret.set")}
+                              </button>
+                            ) : (
+                              <span>
+                                {t("mcp.capability.capture_unavailable")}
+                              </span>
+                            )}
+                          </div>
+                        )}
+                      {management.authorizationOperation.kind !== "idle" &&
+                      management.authorizationOperation.serverId ===
+                        selected.id ? (
+                        <>
+                          <span>
+                            {t(
+                              `mcp.authorization_phase.${management.authorizationOperation.kind}`,
+                            )}
+                          </span>
+                          <button
+                            className="secondary-button focus-ring"
+                            disabled={cancelPending}
+                            onClick={() => void cancelAuthorization()}
+                          >
+                            {t("mcp.authorization.cancel")}
+                          </button>
+                        </>
+                      ) : management.authorizationOperation.kind !== "idle" ? (
+                        <span>{t("mcp.authorization.busy")}</span>
+                      ) : capabilities.oauth ? (
+                        <button
+                          className="primary-button focus-ring"
+                          disabled={
+                            mutationLocked ||
+                            selected.approvalStatus !== "approved" ||
+                            management.authorizationOperation.kind !== "idle" ||
+                            selected.authorizationStatus ===
+                              "capability_unavailable" ||
+                            (selected.safeConnectionSummary.kind ===
+                              "streamable_http" &&
+                              selected.safeConnectionSummary
+                                .clientSecretStatus === "missing") ||
+                            selected.authorizationStatus === "ready"
+                          }
+                          onClick={() => void authorizeServer(selected)}
+                        >
+                          {selected.authorizationStatus === "reauth_required"
+                            ? t("mcp.authorization.again")
+                            : t("mcp.authorization.action")}
+                        </button>
+                      ) : (
+                        <span>{t("mcp.capability.oauth_unavailable")}</span>
+                      )}
+                    </div>
+                  )}
                 </section>
 
                 <section className="mcp-detail-section">
@@ -926,7 +1679,8 @@ export function McpPage({
                               checked={tool.desiredAllowed}
                               disabled={
                                 mutationLocked ||
-                                pendingServerId === selected.id
+                                pendingServerId === selected.id ||
+                                selectedOperationBusy
                               }
                               onChange={() => {
                                 const names = selected.tools

@@ -58,6 +58,20 @@ const servers = [
     displayName: "GitHub",
     namespace: "github",
     transport: "streamable_http",
+    authMode: "oauth",
+    negotiation: "automatic",
+    timeoutMs: 30_000,
+    safeConnectionSummary: {
+      kind: "streamable_http",
+      endpointOrigin: "https://github.example",
+      headers: [],
+      registrationKind: "automatic",
+      clientIdPresent: true,
+      tokenEndpointAuthMethod: null,
+      clientSecretStatus: "not_required",
+    },
+    approvalStatus: "approved",
+    authorizationStatus: "ready",
     desiredEnabled: true,
     runtimeStatus: "ready",
     newTaskAccess: "available",
@@ -82,6 +96,20 @@ const servers = [
     displayName: "Notion",
     namespace: "notion",
     transport: "streamable_http",
+    authMode: "oauth",
+    negotiation: "automatic",
+    timeoutMs: 30_000,
+    safeConnectionSummary: {
+      kind: "streamable_http",
+      endpointOrigin: "https://notion.example",
+      headers: [],
+      registrationKind: "automatic",
+      clientIdPresent: true,
+      tokenEndpointAuthMethod: null,
+      clientSecretStatus: "not_required",
+    },
+    approvalStatus: "approved",
+    authorizationStatus: "reauth_required",
     desiredEnabled: true,
     runtimeStatus: "needs_authentication",
     newTaskAccess: "unavailable",
@@ -93,6 +121,18 @@ const servers = [
     displayName: "Filesystem",
     namespace: "local_files",
     transport: "stdio",
+    authMode: "none",
+    negotiation: "modern_only",
+    timeoutMs: 30_000,
+    safeConnectionSummary: {
+      kind: "stdio",
+      executableBasename: "filesystem-server",
+      argumentCount: 2,
+      cwdPresent: true,
+      environment: [],
+    },
+    approvalStatus: "approved",
+    authorizationStatus: "not_required",
     desiredEnabled: false,
     runtimeStatus: "disabled",
     newTaskAccess: "not_allowed",
@@ -122,12 +162,27 @@ function pageElement(management, query = "", overrides = {}) {
       },
     },
     createElement(McpPage, {
-      management,
+      management: {
+        authorizationOperation: { kind: "idle" },
+        ...management,
+      },
+      capabilities: {
+        connectionApproval: true,
+        secretCapture: true,
+        oauth: true,
+      },
       query,
       disabled: false,
       onQuery() {},
-      onCreate: unchangedMutation,
+      onCreateStdio: unchangedMutation,
+      onCreateHttp: unchangedMutation,
+      onUpdateStdio: unchangedMutation,
+      onUpdateHttp: unchangedMutation,
       onRename: unchangedMutation,
+      onApprove: unchangedMutation,
+      onCaptureSecret: unchangedMutation,
+      onAuthorize: async () => ({ outcome: "started", operationId: "op-1" }),
+      onCancelAuthorization: async () => ({ outcome: "cancelled" }),
       onSetEnabled: unchangedMutation,
       onSetAllowedTools: unchangedMutation,
       onRemove: unchangedMutation,
@@ -178,7 +233,7 @@ test("MCP detail exposes bounded product facts and the discovered tool catalog",
   assert.ok(dialog.textContent.includes("Remote · HTTP"));
   assert.ok(dialog.textContent.includes("search_repositories"));
   assert.ok(dialog.textContent.includes("create_issue"));
-  assert.equal(dialog.textContent.includes("Authorization"), false);
+  assert.equal(dialog.textContent.includes("Authorization"), true);
   fireEvent.click(screen.getByRole("button", { name: "Close" }));
   assert.equal(screen.queryByRole("dialog"), null);
 });
@@ -242,7 +297,7 @@ test("MCP search covers server identity, transport, and tool name", () => {
   );
 });
 
-test("MCP add accepts only the bounded HTTP surface and preserves exact input", async () => {
+test("MCP add selects Streamable HTTP and preserves its typed public input", async () => {
   const calls = [];
   render(
     pageElement(
@@ -257,7 +312,7 @@ test("MCP add accepts only the bounded HTTP surface and preserves exact input", 
       },
       "",
       {
-        onCreate: async (...args) => {
+        onCreateHttp: async (...args) => {
           calls.push(args);
           return { outcome: "saved" };
         },
@@ -266,11 +321,14 @@ test("MCP add accepts only the bounded HTTP surface and preserves exact input", 
   );
 
   fireEvent.click(screen.getAllByRole("button", { name: "Add server" })[0]);
-  const dialog = screen.getByRole("dialog", { name: "Add an HTTP server" });
+  const dialog = screen.getByRole("dialog", { name: "Add an MCP server" });
   assert.ok(
     dialog.textContent.includes(
-      "Enable it and restart if requested; discovered tools stay unavailable until you allow them.",
+      "Secrets are captured by the Host after save. Review the connection, complete authorization, then enable it and select tools.",
     ),
+  );
+  fireEvent.click(
+    within(dialog).getByRole("button", { name: /Streamable HTTP/ }),
   );
   const name = within(dialog).getByRole("textbox", { name: "Display name" });
   const endpoint = within(dialog).getByRole("textbox", { name: "Endpoint" });
@@ -293,10 +351,143 @@ test("MCP add accepts only the bounded HTTP surface and preserves exact input", 
   await waitFor(() => assert.equal(calls.length, 1));
   assert.deepEqual(calls[0], [
     "generation-9",
-    "Local Search",
-    "http://127.0.0.1:4312/mcp",
+    {
+      displayName: "Local Search",
+      negotiation: "automatic",
+      timeoutMs: 30000,
+      endpoint: "http://127.0.0.1:4312/mcp",
+      authMode: "none",
+      headerNames: [],
+      registration: null,
+    },
   ]);
   assert.equal(screen.queryByRole("dialog"), null);
+});
+
+test("MCP STDIO add preserves ordered argv and names without secret values", async () => {
+  const calls = [];
+  render(
+    pageElement(
+      {
+        availability: "ready",
+        managementHealth: "ready",
+        operation: "idle",
+        desiredGeneration: "11",
+        runtimeAlignment: "current",
+        redacted: false,
+        servers: [],
+      },
+      "",
+      {
+        onCreateStdio: async (...args) => {
+          calls.push(args);
+          return { outcome: "saved" };
+        },
+      },
+    ),
+  );
+
+  fireEvent.click(screen.getAllByRole("button", { name: "Add server" })[0]);
+  const dialog = screen.getByRole("dialog", { name: "Add an MCP server" });
+  fireEvent.change(within(dialog).getByRole("textbox", { name: "Display name" }), {
+    target: { value: "Local files" },
+  });
+  fireEvent.change(within(dialog).getByRole("textbox", { name: "Executable" }), {
+    target: { value: "/usr/local/bin/files-mcp" },
+  });
+  fireEvent.click(within(dialog).getByRole("button", { name: "Add argument" }));
+  fireEvent.change(within(dialog).getByRole("textbox", { name: "Ordered arguments 1" }), {
+    target: { value: "--readonly" },
+  });
+  fireEvent.click(
+    within(dialog).getByRole("button", { name: "Add environment name" }),
+  );
+  fireEvent.change(
+    within(dialog).getByRole("textbox", { name: "Environment variable names 1" }),
+    { target: { value: "FILES_TOKEN" } },
+  );
+  fireEvent.click(within(dialog).getByRole("button", { name: "Add server" }));
+
+  await waitFor(() => assert.equal(calls.length, 1));
+  assert.deepEqual(calls[0], [
+    "11",
+    {
+      displayName: "Local files",
+      negotiation: "automatic",
+      timeoutMs: 30000,
+      command: "/usr/local/bin/files-mcp",
+      arguments: ["--readonly"],
+      cwd: null,
+      environmentNames: ["FILES_TOKEN"],
+    },
+  ]);
+});
+
+test("MCP OAuth add carries an explicit client auth method and no secret", async () => {
+  const calls = [];
+  render(
+    pageElement(
+      {
+        availability: "ready",
+        managementHealth: "ready",
+        operation: "idle",
+        desiredGeneration: "12",
+        runtimeAlignment: "current",
+        redacted: false,
+        servers: [],
+      },
+      "",
+      {
+        onCreateHttp: async (...args) => {
+          calls.push(args);
+          return { outcome: "saved" };
+        },
+      },
+    ),
+  );
+
+  fireEvent.click(screen.getAllByRole("button", { name: "Add server" })[0]);
+  const dialog = screen.getByRole("dialog", { name: "Add an MCP server" });
+  fireEvent.click(within(dialog).getByRole("button", { name: /Streamable HTTP/ }));
+  fireEvent.change(within(dialog).getByRole("textbox", { name: "Display name" }), {
+    target: { value: "Remote OAuth" },
+  });
+  fireEvent.change(within(dialog).getByRole("textbox", { name: "Endpoint" }), {
+    target: { value: "https://mcp.example.test/mcp" },
+  });
+  fireEvent.click(within(dialog).getByRole("radio", { name: "OAuth" }));
+  fireEvent.change(within(dialog).getByRole("combobox", { name: "Client registration" }), {
+    target: { value: "pre_registered" },
+  });
+  fireEvent.change(within(dialog).getByRole("textbox", { name: "Client ID" }), {
+    target: { value: "desktop-client" },
+  });
+  fireEvent.change(
+    within(dialog).getByRole("combobox", {
+      name: "Token endpoint client authentication",
+    }),
+    { target: { value: "client_secret_basic" } },
+  );
+  fireEvent.click(within(dialog).getByRole("button", { name: "Add server" }));
+
+  await waitFor(() => assert.equal(calls.length, 1));
+  assert.deepEqual(calls[0], [
+    "12",
+    {
+      displayName: "Remote OAuth",
+      negotiation: "automatic",
+      timeoutMs: 30000,
+      endpoint: "https://mcp.example.test/mcp",
+      authMode: "oauth",
+      headerNames: [],
+      registration: {
+        kind: "pre_registered",
+        clientId: "desktop-client",
+        tokenEndpointAuthMethod: "client_secret_basic",
+      },
+    },
+  ]);
+  assert.equal(JSON.stringify(calls).includes("clientSecret"), false);
 });
 
 test("MCP endpoint validation matches the Host authority contract", () => {
@@ -335,6 +526,76 @@ test("MCP tool allowlist mutation sends exact desired tools and generation", asy
   );
   await waitFor(() => assert.equal(calls.length, 1));
   assert.deepEqual(calls[0], ["7", "github-binding", ["search_repositories"]]);
+});
+
+test("MCP approval and OAuth operation actions stay Host-owned and typed", async () => {
+  const approvals = [];
+  const cancellations = [];
+  const unapproved = {
+    ...servers[2],
+    approvalStatus: "unapproved",
+    desiredEnabled: false,
+    runtimeStatus: "needs_authentication",
+    newTaskAccess: "unavailable",
+  };
+  const view = render(
+    pageElement(
+      {
+        availability: "degraded",
+        managementHealth: "ready",
+        operation: "idle",
+        desiredGeneration: "13",
+        runtimeAlignment: "current",
+        redacted: false,
+        servers: [unapproved],
+      },
+      "",
+      {
+        onApprove: async (...args) => {
+          approvals.push(args);
+          return { outcome: "saved" };
+        },
+        onCancelAuthorization: async (...args) => {
+          cancellations.push(args);
+          return { outcome: "cancelled" };
+        },
+      },
+    ),
+  );
+  fireEvent.click(screen.getByRole("button", { name: /Filesystem/ }));
+  fireEvent.click(screen.getByRole("button", { name: "Review connection" }));
+  await waitFor(() => assert.deepEqual(approvals, [["13", "filesystem-binding"]]));
+  fireEvent.click(screen.getByRole("button", { name: "Close" }));
+
+  view.rerender(
+    pageElement(
+      {
+        availability: "degraded",
+        managementHealth: "ready",
+        operation: "idle",
+        authorizationOperation: {
+          kind: "awaiting_browser",
+          serverId: "notion-binding",
+          operationId: "oauth-op-7",
+        },
+        desiredGeneration: "14",
+        runtimeAlignment: "current",
+        redacted: false,
+        servers: [servers[1]],
+      },
+      "",
+      {
+        onCancelAuthorization: async (...args) => {
+          cancellations.push(args);
+          return { outcome: "cancelled" };
+        },
+      },
+    ),
+  );
+  fireEvent.click(screen.getByRole("button", { name: /Notion/ }));
+  assert.equal(screen.getByRole("button", { name: "Edit connection" }).disabled, true);
+  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  await waitFor(() => assert.deepEqual(cancellations, [["oauth-op-7"]]));
 });
 
 test("MCP destructive changes require an explicit confirmation", async () => {
@@ -445,6 +706,6 @@ test("MCP page stays inside the safe Renderer projection", async () => {
   assert.match(page, /aria-modal="true"/);
   assert.doesNotMatch(
     page,
-    /window\.zero|localStorage|Authorization|headers|apiKey|marketplace/i,
+    /window\.zero|localStorage|apiKey|marketplace|accessToken|refreshToken|clientSecretValue/i,
   );
 });

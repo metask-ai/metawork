@@ -39,6 +39,7 @@ metawork/
 │   │   ├── automation.zig            # automation authority 与启动覆盖适配
 │   │   ├── frontend.zig              # frontend source 与 asset root resolver
 │   │   ├── mcp_platform.zig          # MCP credential/transport 平台 capability
+│   │   ├── mcp_bridge_adapter.zig    # Renderer Bridge MCP typed port 到 Application coordinator 的窄适配
 │   │   ├── mcp_management_coordinator.zig # MCP 原生审批、首次 OAuth 与安全采集用例编排
 │   │   ├── mcp_startup.zig           # MCP 启动恢复与 preparation 编排
 │   │   ├── paths.zig                 # data directory 与 canonical home resolver

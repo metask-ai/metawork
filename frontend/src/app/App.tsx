@@ -1985,18 +1985,54 @@ export default function App() {
       ) : route === "mcp" ? (
         <McpPage
           management={snapshot.mcp}
+          capabilities={{
+            connectionApproval: snapshot.capabilities.mcpConnectionApproval,
+            secretCapture: snapshot.capabilities.mcpSecretCapture,
+            oauth: snapshot.capabilities.mcpOAuth,
+          }}
           query={mcpQuery}
           disabled={bridgeUnavailable || !snapshot.capabilities.mcpManagement}
           onQuery={setMcpQuery}
-          onCreate={(generation, displayName, endpoint) =>
+          onCreateStdio={(generation, input) =>
             commitMcpMutation(() =>
-              client.createMcpHttpServer(generation, displayName, endpoint),
+              client.createMcpStdioServer(generation, input),
+            )
+          }
+          onCreateHttp={(generation, input) =>
+            commitMcpMutation(() =>
+              client.createMcpHttpServer(generation, input),
+            )
+          }
+          onUpdateStdio={(generation, serverId, input) =>
+            commitMcpMutation(() =>
+              client.updateMcpStdioConnection(generation, serverId, input),
+            )
+          }
+          onUpdateHttp={(generation, serverId, input) =>
+            commitMcpMutation(() =>
+              client.updateMcpHttpConnection(generation, serverId, input),
             )
           }
           onRename={(generation, serverId, displayName) =>
             commitMcpMutation(() =>
               client.renameMcpServer(generation, serverId, displayName),
             )
+          }
+          onApprove={(generation, serverId) =>
+            commitMcpMutation(() =>
+              client.approveMcpConnection(generation, serverId),
+            )
+          }
+          onCaptureSecret={(generation, serverId, slot) =>
+            commitMcpMutation(() =>
+              client.captureMcpSecret(generation, serverId, slot),
+            )
+          }
+          onAuthorize={(generation, serverId) =>
+            client.authorizeMcpOAuth(generation, serverId)
+          }
+          onCancelAuthorization={(operationId) =>
+            client.cancelMcpAuthorization(operationId)
           }
           onSetEnabled={(generation, serverId, enabled) =>
             commitMcpMutation(() =>

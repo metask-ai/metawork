@@ -444,6 +444,9 @@ export type WorkbenchSnapshot = {
       | "write_failed"
       | "outcome_unknown";
     mcpManagement: boolean;
+    mcpConnectionApproval: boolean;
+    mcpSecretCapture: boolean;
+    mcpOAuth: boolean;
   };
   account: AccountView;
   skillCatalog: SkillCatalogView;
@@ -551,11 +554,72 @@ export const mcpNewTaskAccessValues = [
   "restart_required",
   "unavailable",
 ] as const;
+export const mcpAuthorizationStatusValues = [
+  "not_required",
+  "missing_static_secret",
+  "missing_oauth_client_secret",
+  "client_registration_required",
+  "consent_required",
+  "authorizing",
+  "ready",
+  "reauth_required",
+  "capability_unavailable",
+] as const;
+export const mcpAuthorizationPhaseValues = [
+  "discovering",
+  "awaiting_consent",
+  "registering",
+  "awaiting_browser",
+  "exchanging",
+  "refreshing",
+  "cancelling",
+] as const;
+
+export type McpSecretSlot =
+  | { kind: "stdio_environment" | "http_header"; name: string }
+  | { kind: "oauth_client_secret" };
+
+export type McpStdioConnectionInput = {
+  displayName: string;
+  negotiation: "automatic" | "modern_only" | "compat_only";
+  timeoutMs: number;
+  command: string;
+  arguments: string[];
+  cwd: string | null;
+  environmentNames: string[];
+};
+
+export type McpHttpConnectionInput = {
+  displayName: string;
+  negotiation: "automatic" | "modern_only" | "compat_only";
+  timeoutMs: number;
+  endpoint: string;
+  authMode: "none" | "static" | "oauth";
+  headerNames: string[];
+  registration:
+    | null
+    | { kind: "automatic" }
+    | {
+        kind: "pre_registered";
+        clientId: string;
+        tokenEndpointAuthMethod:
+          | "none"
+          | "client_secret_basic"
+          | "client_secret_post";
+      };
+};
 
 export type McpManagementView = {
   availability: (typeof mcpAvailabilities)[number];
   managementHealth: (typeof mcpManagementHealthValues)[number];
   operation: "idle" | "saving" | "refreshing";
+  authorizationOperation:
+    | { kind: "idle" }
+    | {
+        kind: (typeof mcpAuthorizationPhaseValues)[number];
+        serverId: string;
+        operationId: string;
+      };
   desiredGeneration: string | null;
   runtimeAlignment: (typeof mcpRuntimeAlignmentValues)[number];
   redacted: boolean;
@@ -564,6 +628,32 @@ export type McpManagementView = {
     displayName: string;
     namespace: string;
     transport: "stdio" | "streamable_http";
+    authMode: "none" | "static" | "oauth";
+    negotiation: "automatic" | "modern_only" | "compat_only";
+    timeoutMs: number;
+    safeConnectionSummary:
+      | {
+          kind: "stdio";
+          executableBasename: string;
+          argumentCount: number;
+          cwdPresent: boolean;
+          environment: { name: string; status: "missing" | "set" }[];
+        }
+      | {
+          kind: "streamable_http";
+          endpointOrigin: string;
+          headers: { name: string; status: "missing" | "set" }[];
+          registrationKind: "none" | "automatic" | "pre_registered";
+          clientIdPresent: boolean;
+          tokenEndpointAuthMethod:
+            | "none"
+            | "client_secret_basic"
+            | "client_secret_post"
+            | null;
+          clientSecretStatus: "not_required" | "missing" | "set";
+        };
+    approvalStatus: "unapproved" | "approved";
+    authorizationStatus: (typeof mcpAuthorizationStatusValues)[number];
     desiredEnabled: boolean;
     runtimeStatus: (typeof mcpRuntimeStatusValues)[number];
     newTaskAccess: (typeof mcpNewTaskAccessValues)[number];
@@ -584,8 +674,31 @@ export type McpMutationResult = {
     | "saved_recovery_required"
     | "stale_generation"
     | "rejected"
-    | "indeterminate";
+    | "indeterminate"
+    | "busy"
+    | "cancelled"
+    | "capability_unavailable";
   desiredGeneration: string | null;
+};
+
+export type McpAuthorizationResult = {
+  outcome:
+    | "started"
+    | "busy"
+    | "rejected"
+    | "stale_generation"
+    | "capability_unavailable";
+  operationId: string | null;
+};
+
+export type McpAuthorizationCancelResult = {
+  outcome:
+    | "cancelled"
+    | "saved"
+    | "saved_recovery_required"
+    | "rejected"
+    | "indeterminate"
+    | "capability_unavailable";
 };
 
 export type McpRefreshResult = {

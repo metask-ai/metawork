@@ -92,6 +92,7 @@ pub const McpSetAllowedToolsInput = mcp_configuration.SetAllowedToolsInput;
 pub const McpManagementConfiguration = mcp_configuration.ManagementConfiguration;
 pub const McpManagementInspection = mcp_configuration.ManagementInspection;
 pub const McpManagementOutcome = mcp_configuration.ManagementOutcome;
+pub const McpHostCapabilities = projection_impl.McpHostCapabilities;
 pub const McpRuntimeManifest = mcp_configuration.RuntimeManifest;
 pub const McpRuntimeAlignment = mcp_configuration.RuntimeAlignment;
 pub const McpOauthRefreshBinding = projection_impl.McpOauthRefreshBinding;

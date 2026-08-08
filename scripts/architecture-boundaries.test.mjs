@@ -209,14 +209,23 @@ test("active documentation names the current architecture boundaries", () => {
 
 test("Agent is a peer execution boundary managed by Application", () => {
   const architecture = read("docs/architecture.md");
-  assert.match(architecture, /AGENT\["Agent<br\/>Runtime、Session、Conversation 与 event pump"\]/);
+  assert.match(
+    architecture,
+    /AGENT\["Agent<br\/>Runtime、Session、Conversation 与 event pump"\]/,
+  );
   assert.match(
     architecture,
     /APPLICATION -\. "compose \/ lifecycle" \.-> AGENT/,
   );
-  assert.match(architecture, /PRODUCT -->\|"Workbench execution calls"\| AGENT/);
+  assert.match(
+    architecture,
+    /PRODUCT -->\|"Workbench execution calls"\| AGENT/,
+  );
   assert.match(architecture, /AGENT -->\|"typed bundle ABI"\| AGENTCORE/);
-  assert.match(architecture, /Product 包含 `account` 与 `workbench` 两个产品 owner/);
+  assert.match(
+    architecture,
+    /Product 包含 `account` 与 `workbench` 两个产品 owner/,
+  );
   assert.doesNotMatch(
     architecture,
     /Product 包含 `account`、`workbench` 与 `agent`|Account、Workbench、Agent/,
@@ -228,7 +237,10 @@ test("Agent is a peer execution boundary managed by Application", () => {
 
   const integration = read("docs/agentcore-integration.md");
   assert.match(integration, /Agent 与 Product 并列/);
-  assert.doesNotMatch(integration, /Desktop Host composition role|Product coordinator/);
+  assert.doesNotMatch(
+    integration,
+    /Desktop Host composition role|Product coordinator/,
+  );
 
   const agents = read("AGENTS.md");
   assert.match(agents, /Product owner、事务、并发、恢复及其与 Agent 的协作/);
@@ -330,10 +342,7 @@ test("Workbench receives IO independently from the Agent Runtime", () => {
     "    pub fn init(",
     "Workbench fields",
   );
-  assert.equal(
-    (workbenchFields.match(/^    io: std\.Io,$/gm) ?? []).length,
-    1,
-  );
+  assert.equal((workbenchFields.match(/^    io: std\.Io,$/gm) ?? []).length, 1);
 
   const workbenchInit = sliceBetween(
     workbench,
@@ -849,9 +858,7 @@ test("canonical notification and Renderer transport failures stay isolated", () 
   const applyFailure = drainPass.indexOf(
     "self.applyEvent(&envelope) catch |err| {",
   );
-  const retainFailure = drainPass.indexOf(
-    "first_projection_error.* = err;",
-  );
+  const retainFailure = drainPass.indexOf("first_projection_error.* = err;");
   const recordFailure = drainPass.indexOf("self.recordEventProjectionFailure(");
   const requestTermination = drainPass.indexOf(
     "self.agent_runtime.requestRunTermination(",
@@ -1278,12 +1285,19 @@ test("Renderer Bridge fixed revision 1 owns the exact product wire catalog", () 
       command.startsWith("metawork.mcp."),
     ),
     [
+      "metawork.mcp.approveConnection",
+      "metawork.mcp.authorizeOAuth",
+      "metawork.mcp.cancelAuthorization",
+      "metawork.mcp.captureSecret",
       "metawork.mcp.createHttpServer",
+      "metawork.mcp.createStdioServer",
       "metawork.mcp.refreshCatalog",
       "metawork.mcp.removeServer",
       "metawork.mcp.renameServer",
       "metawork.mcp.setAllowedTools",
       "metawork.mcp.setServerEnabled",
+      "metawork.mcp.updateHttpConnection",
+      "metawork.mcp.updateStdioConnection",
     ],
   );
   assert.doesNotMatch(zigCommands, /mcp\.(?:upsert|configure|setCredential)/i);

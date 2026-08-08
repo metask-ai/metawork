@@ -13,6 +13,7 @@ const agent_event_coordinator = @import("app/agent_event_coordinator.zig");
 const app_automation = @import("app/automation.zig");
 const frontend = @import("app/frontend.zig");
 const mcp_startup = @import("app/mcp_startup.zig");
+const mcp_bridge_adapter = @import("app/mcp_bridge_adapter.zig");
 const mcp_oauth_coordinator = @import("app/mcp_oauth_coordinator.zig");
 const mcp_management_coordinator = @import("app/mcp_management_coordinator.zig");
 const app_paths = @import("app/paths.zig");
@@ -79,6 +80,7 @@ const App = struct {
             .services = self.platform.services().?,
             .main_thread_id = self.main_thread_id,
         };
+        const mcp_management_host = mcp_management_coordinator.platformHost(&self.platform);
         const startup_preparation = try mcp_startup.prepare(
             self.mcp_configuration_store,
             if (self.mcp_credential_store) |*store| store else null,
@@ -147,6 +149,12 @@ const App = struct {
                 .initial_health = startup_preparation.management_health,
                 .runtime_manifest = if (runtime_manifest) |*manifest| manifest else null,
             } else null,
+            .host_capabilities = .{
+                .connection_approval = mcp_management_host.confirmation_available,
+                .secret_capture = mcp_management_host.capture_available,
+                .oauth = mcp_management_host.oauth_available and
+                    mcp_management_host.confirmation_available,
+            },
         };
         workbench_storage.* = try workbench_api.Workbench.init(
             std.heap.c_allocator,
@@ -173,7 +181,10 @@ const App = struct {
             self.io,
             workbench_storage,
             &self.mcp_credential_store.?,
-            mcp_management_coordinator.platformHost(&self.platform),
+            mcp_management_host,
+        );
+        (self.dispatcher orelse @panic("Bridge Dispatcher is not composed")).attachMcpManagementHost(
+            mcp_bridge_adapter.host(&self.mcp_management.?),
         );
         self.mcp_oauth_refresh = mcp_oauth_coordinator.Coordinator.init(
             std.heap.c_allocator,
