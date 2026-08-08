@@ -152,7 +152,7 @@ test "Run checkpoint commits immutable blob before durable descriptor" {
             .worker_count = 1,
             .queue_capacity = 1,
             .max_tasks = 1,
-            .max_runs_per_task = 1,
+            .max_runs_per_task = 2,
             .max_tools_per_run = 1,
         },
         configuration,
@@ -192,6 +192,33 @@ test "Run checkpoint commits immutable blob before durable descriptor" {
     try checkpoint_store.verify(compact_identity);
     try std.testing.expectError(error.BlobMissing, checkpoint_store.verify(identity));
 
+    fake_core.setCheckpointGeneration(2);
+    _ = try workbench.runTask(task_id, .{ .text = "checkpoint after compact" });
+    try waitHistoryNeedle(
+        &workbench,
+        &persistence,
+        "\"terminal_kind\":\"run\",\"terminal_id\":2",
+    );
+    const post_compact_run_identity: workbench_api.CheckpointBlobIdentity = .{
+        .task_id = task_id,
+        .generation = 2,
+        .digest = digest,
+        .byte_size = "fixture-checkpoint".len,
+    };
+    try checkpoint_store.verify(post_compact_run_identity);
+    try std.testing.expectError(error.BlobMissing, checkpoint_store.verify(compact_identity));
+    const post_compact_history = persistence_storage[0..persistence.len];
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        post_compact_history,
+        "\"last_run_id\":2,\"last_compact_id\":1",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        post_compact_history,
+        "\"terminal_kind\":\"run\",\"terminal_id\":2",
+    ) != null);
+
     workbench.deinit();
     workbench_initialized = false;
     const restart_history = try std.testing.allocator.dupe(
@@ -203,7 +230,7 @@ test "Run checkpoint commits immutable blob before durable descriptor" {
     var blob_path_storage: [160]u8 = undefined;
     const blob_path = try std.fmt.bufPrint(
         &blob_path_storage,
-        "{d}/1-{s}.ckpt",
+        "{d}/2-{s}.ckpt",
         .{ task_id, digest_hex },
     );
     try tmp.dir.writeFile(std.testing.io, .{
@@ -221,7 +248,7 @@ test "Run checkpoint commits immutable blob before durable descriptor" {
             .worker_count = 1,
             .queue_capacity = 1,
             .max_tasks = 1,
-            .max_runs_per_task = 1,
+            .max_runs_per_task = 2,
             .max_tools_per_run = 1,
         },
         restart_configuration,
@@ -231,16 +258,16 @@ test "Run checkpoint commits immutable blob before durable descriptor" {
         persistence_storage[0..persistence.len],
         "\"checkpoint\":null,\"checkpoint_health\":\"blob_mismatch\"",
     ) != null);
-    try std.testing.expectError(error.BlobMissing, checkpoint_store.verify(compact_identity));
+    try std.testing.expectError(error.BlobMissing, checkpoint_store.verify(post_compact_run_identity));
     restored.deinit();
 
     {
         var replacement_writer = try checkpoint_store.begin(task_id, 1024);
         defer replacement_writer.deinit();
         try replacement_writer.write("fixture-checkpoint");
-        _ = try replacement_writer.commit(1, digest, "fixture-checkpoint".len);
+        _ = try replacement_writer.commit(2, digest, "fixture-checkpoint".len);
     }
-    checkpoint_store.delete(compact_identity);
+    checkpoint_store.delete(post_compact_run_identity);
     var missing_configuration = workbenchConfiguration();
     missing_configuration.task_persistence = persistence.capabilityRestored(restart_history);
     missing_configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
@@ -252,7 +279,7 @@ test "Run checkpoint commits immutable blob before durable descriptor" {
             .worker_count = 1,
             .queue_capacity = 1,
             .max_tasks = 1,
-            .max_runs_per_task = 1,
+            .max_runs_per_task = 2,
             .max_tools_per_run = 1,
         },
         missing_configuration,
@@ -532,6 +559,11 @@ test "unknown descriptor commit freezes checkpoint transaction until shutdown" {
         error.TaskPersistenceOutcomeUnknown,
         workbench.setTaskArchived(task_id, true),
     );
+    const frozen_revision = workbench.currentRevision();
+    for (0..3) |_| {
+        _ = try workbench.writeSnapshot(&snapshot);
+        try std.testing.expectEqual(frozen_revision, workbench.currentRevision());
+    }
 
     workbench.deinit();
     initialized = false;

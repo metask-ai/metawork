@@ -1100,6 +1100,30 @@ test("checkpoint persistence stays behind the Agent and Workbench owners", () =>
       candidateConsumption < descriptorCommit &&
       descriptorCommit < descriptorInstall,
   );
+
+  const executeRun = sliceBetween(
+    workbench,
+    "fn executeRunJob(",
+    "fn executeCompactJob(",
+    "Run executor job",
+  );
+  const executeCompact = sliceBetween(
+    workbench,
+    "fn executeCompactJob(",
+    "const CheckpointSinkContext",
+    "compact executor job",
+  );
+  for (const [name, worker] of [
+    ["Run", executeRun],
+    ["compact", executeCompact],
+  ]) {
+    assert.match(worker, /checkpoint_export_context/);
+    assert.doesNotMatch(
+      worker,
+      /latestCompactId\(|lastFinalizedRunId\(|\.task\.durable/,
+      `${name} worker must consume admission-captured checkpoint facts instead of traversing Task durable state`,
+    );
+  }
 });
 
 test("Workbench hands running cancellation through generation-checked control", () => {

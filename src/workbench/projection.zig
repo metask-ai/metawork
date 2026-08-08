@@ -880,6 +880,20 @@ const RunInputRecord = union(enum) {
     },
 };
 
+/// Immutable checkpoint description facts captured by the main thread before
+/// the operation is enqueued. Executor workers must not derive these values by
+/// traversing Task-owned durable records after terminal publication: once the
+/// active operation clears, the main thread may admit the next Run or compact.
+const CheckpointExportContext = struct {
+    task_id: u64,
+    binding_epoch: u64,
+    terminal_kind: CheckpointTerminalKind,
+    terminal_id: u64,
+    last_run_id: u64,
+    last_compact_id: u64,
+    model: []const u8,
+};
+
 const RunRecord = struct {
     id: u64,
     generation: u64,
@@ -909,6 +923,7 @@ const RunRecord = struct {
     agent_handoff: std.atomic.Value(AgentHandoffState) = .init(.queued),
     pending_termination: std.atomic.Value(PendingInterruption) = .init(.none),
     run_control: lifecycle.RunControl = undefined,
+    checkpoint_export_context: CheckpointExportContext = undefined,
     checkpoint: CheckpointPostprocess = .{},
 };
 
@@ -927,6 +942,7 @@ const CompactRecord = struct {
     session: *lifecycle.Session = undefined,
     worker_reference_held: std.atomic.Value(bool) = .init(false),
     session_reference_held: std.atomic.Value(bool) = .init(false),
+    checkpoint_export_context: CheckpointExportContext = undefined,
     checkpoint: CheckpointPostprocess = .{},
 };
 
@@ -3803,6 +3819,15 @@ pub const Workbench = struct {
         run.workbench = self;
         run.task = view;
         run.session = session;
+        run.checkpoint_export_context = .{
+            .task_id = view.durable.id,
+            .binding_epoch = view.durable.binding_epoch,
+            .terminal_kind = .run,
+            .terminal_id = run_id,
+            .last_run_id = run_id,
+            .last_compact_id = latestCompactId(view),
+            .model = run.execution_model,
+        };
         const previous_active_run_id = view.runtime.active_run_id;
         const previous_active_operation = view.runtime.active_operation;
         const previous_task_recent_order = view.durable.recent_order;
@@ -3891,6 +3916,15 @@ pub const Workbench = struct {
         compact.workbench = self;
         compact.task = view;
         compact.session = session;
+        compact.checkpoint_export_context = .{
+            .task_id = view.durable.id,
+            .binding_epoch = view.durable.binding_epoch,
+            .terminal_kind = .compact,
+            .terminal_id = operation_id,
+            .last_run_id = after_run_id,
+            .last_compact_id = operation_id,
+            .model = view.durable.execution_model,
+        };
         const previous_active_operation = view.runtime.active_operation;
         const previous_task_recent_order = view.durable.recent_order;
         const previous_next_task_recent_order = self.next_task_recent_order;
@@ -4786,6 +4820,8 @@ pub const Workbench = struct {
                 return true;
             },
             .store_outcome_unknown => {
+                if (task.durable.checkpoint_health == .outcome_unknown)
+                    return false;
                 task.durable.checkpoint_health = .outcome_unknown;
                 return true;
             },
@@ -9838,14 +9874,9 @@ fn executeRunJob(context: *anyopaque) void {
     const notifier = run.workbench.change_notifier;
     if (!checkpoint_eligible or !postprocessCheckpoint(
         run.workbench,
-        run.task,
         run.session,
         &run.checkpoint,
-        .run,
-        run.id,
-        run.id,
-        latestCompactId(run.task),
-        run.execution_model,
+        run.checkpoint_export_context,
     )) releaseWorkerReference(run);
     _ = notifier.notify();
 }
@@ -9888,14 +9919,9 @@ fn executeCompactJob(context: *anyopaque) void {
     releaseCompactSessionReference(compact);
     if (!checkpoint_eligible or !postprocessCheckpoint(
         compact.workbench,
-        compact.task,
         compact.session,
         &compact.checkpoint,
-        .compact,
-        compact.id,
-        lastFinalizedRunId(compact.task) orelse 0,
-        compact.id,
-        compact.task.durable.execution_model,
+        compact.checkpoint_export_context,
     )) releaseCompactWorkerReference(compact);
     _ = notifier.notify();
 }
@@ -9922,14 +9948,9 @@ const CheckpointSinkContext = struct {
 
 fn postprocessCheckpoint(
     workbench: *Workbench,
-    task: *TaskView,
     session: *lifecycle.Session,
     postprocess: *CheckpointPostprocess,
-    terminal_kind: CheckpointTerminalKind,
-    terminal_id: u64,
-    last_run_id: u64,
-    last_compact_id: u64,
-    model: []const u8,
+    context: CheckpointExportContext,
 ) bool {
     if (workbench.checkpoint_store_health.load(.acquire) != .ready)
         return false;
@@ -9939,7 +9960,7 @@ fn postprocessCheckpoint(
         publishCheckpointFailure(postprocess, .cancelled);
         return true;
     }
-    var writer = store.begin(task.durable.id, checkpoint_export_limits.hard_bytes) catch {
+    var writer = store.begin(context.task_id, checkpoint_export_limits.hard_bytes) catch {
         publishCheckpointFailure(postprocess, .io_failed);
         return true;
     };
@@ -9952,9 +9973,9 @@ fn postprocessCheckpoint(
     var outcome = session.exportCheckpoint(
         checkpoint_export_limits,
         .{ .context = &sink_context, .write_fn = CheckpointSinkContext.write },
-        last_run_id,
-        last_compact_id,
-        model,
+        context.last_run_id,
+        context.last_compact_id,
+        context.model,
     ) catch {
         publishCheckpointFailure(postprocess, .export_failed);
         return true;
@@ -9971,16 +9992,16 @@ fn postprocessCheckpoint(
         .success => |*success| {
             var candidate = CheckpointCandidate{
                 .identity = .{
-                    .task_id = task.durable.id,
+                    .task_id = context.task_id,
                     .generation = success.checkpoint.generation,
                     .digest = success.checkpoint.digest,
                     .byte_size = success.checkpoint.total_bytes,
                 },
                 .descriptor = takeCheckpointDescriptor(
                     success,
-                    terminal_kind,
-                    terminal_id,
-                    task.durable.binding_epoch,
+                    context.terminal_kind,
+                    context.terminal_id,
+                    context.binding_epoch,
                 ),
                 .export_duration_ns = duration_ns,
             };
