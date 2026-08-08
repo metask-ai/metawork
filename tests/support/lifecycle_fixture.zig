@@ -1136,14 +1136,15 @@ pub fn sessionExportCheckpoint(
             return wire.STATUS_CHECKPOINT_IO;
         }
     }
-    var digest: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(payload, &digest, .{});
     out_result.?.* = std.mem.zeroes(wire.CheckpointExportResultV1);
     out_result.?.struct_size = @sizeOf(wire.CheckpointExportResultV1);
     out_result.?.checkpoint_generation = generation;
     out_result.?.total_bytes = if (malformed) payload.len + 1 else payload.len;
     out_result.?.chunk_count = chunk_count;
-    out_result.?.digest = digest;
+    // The ABI does not define the digest algorithm. Keep this deliberately
+    // different from the payload SHA-256 so MetaWork tests prove that product
+    // integrity is derived from the streamed bytes instead of this field.
+    out_result.?.digest = [_]u8{0xa5} ** 32;
     return wire.STATUS_OK;
 }
 

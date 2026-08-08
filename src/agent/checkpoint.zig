@@ -310,6 +310,8 @@ fn exportCheckpoint(
         return .{ .failure = dependencyFailure(.checkpoint_export) };
 
     if (status == .ok) {
+        var observed_digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+        adapter.digest.final(&observed_digest);
         if (adapter.failure != .none or
             result.struct_size != @sizeOf(wire.CheckpointExportResultV1) or
             result.reserved0 != 0 or
@@ -317,17 +319,20 @@ fn exportCheckpoint(
             result.total_bytes != adapter.total_bytes or
             result.chunk_count != adapter.chunk_count or
             result.total_bytes > limits.hard_bytes)
+        {
             return .{ .failure = dependencyFailure(.checkpoint_export) };
-        var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
-        adapter.digest.final(&digest);
-        if (!std.mem.eql(u8, &digest, &result.digest))
-            return .{ .failure = dependencyFailure(.checkpoint_export) };
-        return .{ .success = .{
-            .generation = result.checkpoint_generation,
-            .total_bytes = result.total_bytes,
-            .chunk_count = result.chunk_count,
-            .digest = result.digest,
-        } };
+        }
+        return .{
+            .success = .{
+                .generation = result.checkpoint_generation,
+                .total_bytes = result.total_bytes,
+                .chunk_count = result.chunk_count,
+                // The ABI exposes a fixed-width `digest` field but does not
+                // define its algorithm. Product integrity therefore uses the
+                // independently observed SHA-256 of the streamed bytes.
+                .digest = observed_digest,
+            },
+        };
     }
 
     if (status != .checkpoint_io and adapter.failure != .none)
@@ -441,7 +446,9 @@ fn describe(
         value.last_run_id != expectation.last_run_id or
         value.last_compact_id != expectation.last_compact_id or
         !std.mem.eql(u8, value.model, expectation.model))
+    {
         return .{ .failure = dependencyFailure(.describe) };
+    }
 
     const session_id = allocator.dupe(u8, value.session_id) catch
         return .{ .failure = reusableFailure(.describe, .host_out_of_memory) };

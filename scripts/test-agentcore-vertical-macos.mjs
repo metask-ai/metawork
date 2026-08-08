@@ -1,4 +1,5 @@
 import { execFile, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import {
   mkdir,
@@ -56,6 +57,16 @@ const commandTimeoutMs = 20_000;
 const runTimeoutMs = 60_000;
 const workspace = await mkdtemp(join(tmpdir(), "metawork-agentcore-vertical-"));
 const canonicalWorkspace = await realpath(workspace);
+const platformHome = join(workspace, "platform-home");
+await mkdir(platformHome, { recursive: true });
+const dataRoot =
+  process.platform === "win32"
+    ? join(platformHome, "MetaWork", "Data")
+    : join(platformHome, "Library", "Application Support", "MetaWork Dev");
+const isolatedPlatformEnv =
+  process.platform === "win32"
+    ? { LOCALAPPDATA: platformHome }
+    : { HOME: platformHome };
 const fixturePath = join(workspace, "fixture.txt");
 await writeFile(fixturePath, "agentcore-vertical-before\n", { mode: 0o600 });
 // This fixture targets an AgentCore-owned canonical project source. No
@@ -108,43 +119,23 @@ const responses = [
     ],
   }),
   textSse("m5", "metawork agentcore vertical complete"),
+  textSse("m6", "metawork text checkpoint complete"),
+  textSse("m7", "metawork compact checkpoint complete"),
 ];
 const provider = createProvider(responses, visualCaptureDir ? 1_500 : 0);
 const baseUrl = await provider.listen();
 
 let output = "";
 let exitState = null;
-const app = spawn(binary, [], {
-  cwd: appCwd,
-  env: {
-    ...process.env,
-    METAWORK_AUTOMATION: "1",
-    METAWORK_AUTOMATION_WORKSPACE: workspace,
-    METAWORK_AGENTCORE_VERTICAL_PROVIDER_BASE_URL: baseUrl,
-  },
-  stdio: ["ignore", "pipe", "pipe"],
-});
-app.stdout.setEncoding("utf8");
-app.stderr.setEncoding("utf8");
-app.stdout.on("data", (chunk) => {
-  output += chunk;
-});
-app.stderr.on("data", (chunk) => {
-  output += chunk;
-});
-const exited = new Promise((resolve, reject) => {
-  app.once("error", reject);
-  app.once("exit", (code, signal) => {
-    exitState = { code, signal };
-    resolve(exitState);
-  });
-});
+let lastCheckpointObservation = null;
+let app;
+let exited;
+startApplication();
 
 try {
   await waitForBridge();
   await captureVisual("new-task", 1320, 812);
-  await new Promise((resolve) => setTimeout(resolve, 1_000));
-  await probeWindowsWebViewFocus();
+  await probeWindowsWebViewFocusWithColdProfileRetry();
   await captureVisual("search-keyboard", 1320, 812, false, true);
   const staleVerticalWorkspaces = (await snapshot()).workspaces.filter(
     (item) =>
@@ -438,6 +429,10 @@ try {
 
   const task = finalSnapshot.tasks.find((item) => item.id === taskId);
   const run = task.runs.find((item) => item.id === runId);
+  if (finalSnapshot.capabilities?.conversationRecovery !== false)
+    throw new Error(
+      "checkpoint export incorrectly opened conversation recovery",
+    );
   if (task.continuationAvailable !== true)
     throw new Error("completed Task did not remain available for continuation");
   if (run.phase !== "completed" || run.outcome !== "completed")
@@ -450,6 +445,31 @@ try {
     );
   if (!run.assistant.includes("metawork agentcore vertical complete"))
     throw new Error("final assistant text was not projected");
+  const checkpointTerminalObservedAt = Date.now();
+  const checkpointEvidence = await poll(
+    async () =>
+      readCheckpointEvidence(taskId, "run", runId, expectedBindingEpoch),
+    commandTimeoutMs,
+    "durable checkpoint descriptor",
+  ).catch((error) => {
+    throw new Error(
+      `${error.message}: ${JSON.stringify(lastCheckpointObservation)}`,
+    );
+  });
+  checkpointEvidence.descriptorLatencyMs =
+    Date.now() - checkpointTerminalObservedAt;
+  const skillCommitMetrics = checkpointCommitMetrics(taskId, "run", runId);
+  process.stdout.write(
+    `AgentCore checkpoint evidence: ${JSON.stringify({
+      kind: "skill",
+      byteSize: checkpointEvidence.byteSize,
+      chunkCount: checkpointEvidence.chunkCount,
+      generation: checkpointEvidence.generation,
+      descriptorLatencyMs: checkpointEvidence.descriptorLatencyMs,
+      historyByteSize: checkpointEvidence.historyByteSize,
+      ...skillCommitMetrics,
+    })}\n`,
+  );
   const activityOrders = [];
   for (const [name, evidence] of [
     ["Read", "agentcore-vertical-before"],
@@ -519,6 +539,135 @@ try {
     throw new Error(
       `Edit did not update the workspace: ${JSON.stringify(edited)}`,
     );
+
+  const textRunResult = await invokeBridge("metawork.tasks.run", {
+    taskId,
+    expectedBindingEpoch,
+    input: {
+      kind: "text",
+      text: "Produce a short checkpoint validation response.",
+    },
+  });
+  if (
+    textRunResult?.accepted !== true ||
+    textRunResult.taskId !== taskId ||
+    !isWireId(textRunResult.runId)
+  )
+    throw new Error(
+      `Text checkpoint Run was not accepted: ${JSON.stringify(textRunResult)}`,
+    );
+  const textRunId = textRunResult.runId;
+  const textTerminal = await poll(
+    async () => {
+      const current = await snapshot();
+      const currentRun = current.tasks
+        .find((item) => item.id === taskId)
+        ?.runs.find((item) => item.id === textRunId);
+      return currentRun && terminal.has(currentRun.phase)
+        ? { current, run: currentRun }
+        : null;
+    },
+    runTimeoutMs,
+    "Text checkpoint Run",
+  );
+  if (
+    textTerminal.run.phase !== "completed" ||
+    !textTerminal.run.assistant.includes("metawork text checkpoint complete")
+  )
+    throw new Error(
+      `Text checkpoint Run did not complete: ${JSON.stringify(textTerminal.run)}`,
+    );
+  const textCheckpointObservedAt = Date.now();
+  const textCheckpoint = await poll(
+    async () =>
+      readCheckpointEvidence(taskId, "run", textRunId, expectedBindingEpoch),
+    commandTimeoutMs,
+    "Text durable checkpoint descriptor",
+  );
+  textCheckpoint.descriptorLatencyMs = Date.now() - textCheckpointObservedAt;
+  const textCommitMetrics = checkpointCommitMetrics(taskId, "run", textRunId);
+  await expectMissing(checkpointEvidence.blobPath);
+  process.stdout.write(
+    `AgentCore checkpoint evidence: ${JSON.stringify({
+      kind: "text",
+      byteSize: textCheckpoint.byteSize,
+      chunkCount: textCheckpoint.chunkCount,
+      generation: textCheckpoint.generation,
+      descriptorLatencyMs: textCheckpoint.descriptorLatencyMs,
+      historyByteSize: textCheckpoint.historyByteSize,
+      ...textCommitMetrics,
+    })}\n`,
+  );
+
+  const compactResult = await invokeBridge("metawork.tasks.compact", {
+    taskId,
+    expectedBindingEpoch,
+  });
+  if (
+    compactResult !== null &&
+    (compactResult.accepted !== true ||
+      compactResult.taskId !== taskId ||
+      !isWireId(compactResult.operationId))
+  )
+    throw new Error(
+      `checkpoint compact was not accepted: ${JSON.stringify(compactResult)}`,
+    );
+  const acceptedCompactId = compactResult?.operationId ?? null;
+  const compactTerminalResult = await poll(
+    async () => {
+      const current = await snapshot();
+      const compact = current.tasks
+        .find((item) => item.id === taskId)
+        ?.compacts.find((item) =>
+          acceptedCompactId
+            ? item.operationId === acceptedCompactId
+            : item.afterRunId === textRunId,
+        );
+      return compact &&
+        !["queued", "compacting", "stopping"].includes(compact.phase)
+        ? { current, compact }
+        : null;
+    },
+    runTimeoutMs,
+    "checkpoint compact",
+  );
+  const compactTerminal = compactTerminalResult.compact;
+  const compactId = compactTerminal.operationId;
+  if (!["compacted", "no_change", "degraded"].includes(compactTerminal.phase))
+    throw new Error(
+      `checkpoint compact failed: ${JSON.stringify(compactTerminal)}`,
+    );
+  const compactCheckpointObservedAt = Date.now();
+  const compactCheckpoint = await poll(
+    async () =>
+      readCheckpointEvidence(
+        taskId,
+        "compact",
+        compactId,
+        expectedBindingEpoch,
+      ),
+    commandTimeoutMs,
+    "Compact durable checkpoint descriptor",
+  );
+  compactCheckpoint.descriptorLatencyMs =
+    Date.now() - compactCheckpointObservedAt;
+  const compactCommitMetrics = checkpointCommitMetrics(
+    taskId,
+    "compact",
+    compactId,
+  );
+  await expectMissing(textCheckpoint.blobPath);
+  process.stdout.write(
+    `AgentCore checkpoint evidence: ${JSON.stringify({
+      kind: "compact",
+      byteSize: compactCheckpoint.byteSize,
+      chunkCount: compactCheckpoint.chunkCount,
+      generation: compactCheckpoint.generation,
+      descriptorLatencyMs: compactCheckpoint.descriptorLatencyMs,
+      historyByteSize: compactCheckpoint.historyByteSize,
+      ...compactCommitMetrics,
+    })}\n`,
+  );
   if (provider.served !== responses.length)
     throw new Error(
       `provider served ${provider.served}/${responses.length} responses`,
@@ -568,10 +717,40 @@ try {
     commandTimeoutMs,
     "Task close",
   );
+  await stopApplication("checkpoint restart stop");
+  await rm(compactCheckpoint.blobPath, { force: true });
+  await rm(automationDir, { recursive: true, force: true });
+  startApplication();
+  await waitForBridge();
+  const restoredSnapshot = await snapshot();
+  const restoredTask = restoredSnapshot.tasks.find(
+    (item) => item.id === taskId,
+  );
+  if (
+    restoredSnapshot.capabilities?.conversationRecovery !== false ||
+    restoredTask?.lifecycle !== "closed" ||
+    restoredTask.runs.length !== 2 ||
+    restoredTask.compacts.length !== 1
+  )
+    throw new Error(
+      `checkpoint restart changed product history or recovery gate: ${JSON.stringify(restoredTask)}`,
+    );
+  await poll(
+    async () => {
+      const health = await readCheckpointHealth(taskId);
+      return health?.checkpoint === null &&
+        health.checkpointHealth === "blob_missing"
+        ? health
+        : null;
+    },
+    commandTimeoutMs,
+    "missing checkpoint startup reconciliation",
+  );
   await invokeBridge("metawork.tasks.delete", { taskId });
   const afterDelete = await snapshot();
   if (afterDelete.tasks.some((item) => item.id === taskId))
     throw new Error("Deleted Task record remained in the projection");
+  await expectMissing(compactCheckpoint.blobPath);
   await invokeBridge("metawork.workspaces.remove", {
     workspaceId,
     expectedWorkspaceEpoch,
@@ -585,29 +764,12 @@ try {
     "vertical Workspace cleanup",
   );
 
-  if (process.platform === "win32") {
-    // This validates Native SDK Runtime state and MetaWork's real tray command
-    // routing. User-reachable Windows Shell chrome/tray remain separate
-    // platform acceptance gates.
-    await automate("tray-action", "2");
-    const final = await withTimeout(exited, commandTimeoutMs, "app stop");
-    if (final.code !== 0 || final.signal !== null)
-      throw new Error(`app exited abnormally: ${JSON.stringify(final)}`);
-    if (!/runtime\.event.*event="stop"/.test(output))
-      throw new Error("normal runtime stop was not observed");
-  } else {
-    await invokeBridge("native-sdk.window.close", { label: "main" });
-    const final = await withTimeout(exited, commandTimeoutMs, "app stop");
-    if (final.code !== 0 || final.signal !== null)
-      throw new Error(`app exited abnormally: ${JSON.stringify(final)}`);
-    if (!/runtime\.event.*event="stop"/.test(output))
-      throw new Error("normal runtime stop was not observed");
-  }
+  await stopApplication("app stop");
 
   process.stdout.write(
     process.platform === "win32"
-      ? "AgentCore Windows desktop vertical passed: real typed Skill catalog/run, main-thread ProductDelivery, Runtime-owned tray routing, and clean shutdown; Windows Shell chrome/tray remain separate non-blocking gates.\n"
-      : "AgentCore desktop vertical passed: real typed Skill catalog/run, materialized arguments without raw slash, main-thread ProductDelivery, Read/Bash/Edit, permission UI, duplicate UI-response rejection, reload-safe AskUserQuestion resume, Task metadata lifecycle, async close.\n",
+      ? "AgentCore Windows desktop vertical passed: real Skill/Text/compact checkpoints, hash/descriptor verification, missing-blob restart reconciliation, main-thread ProductDelivery, Runtime-owned tray routing, and clean shutdown; Windows Shell chrome/tray remain separate non-blocking gates.\n"
+      : "AgentCore desktop vertical passed: real Skill/Text/compact checkpoints, hash/descriptor verification, missing-blob restart reconciliation, materialized arguments without raw slash, main-thread ProductDelivery, Read/Bash/Edit, permission UI, duplicate UI-response rejection, reload-safe AskUserQuestion resume, Task metadata lifecycle, async close.\n",
   );
 } catch (error) {
   process.stderr.write(`${output}\n`);
@@ -622,6 +784,171 @@ try {
   }
   await provider.close();
   await rm(workspace, { recursive: true, force: true });
+}
+
+function startApplication() {
+  exitState = null;
+  app = spawn(binary, [], {
+    cwd: appCwd,
+    env: {
+      ...process.env,
+      ...isolatedPlatformEnv,
+      METAWORK_AUTOMATION: "1",
+      METAWORK_AUTOMATION_WORKSPACE: workspace,
+      METAWORK_AGENTCORE_VERTICAL_PROVIDER_BASE_URL: baseUrl,
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  app.stdout.setEncoding("utf8");
+  app.stderr.setEncoding("utf8");
+  app.stdout.on("data", (chunk) => {
+    output += chunk;
+  });
+  app.stderr.on("data", (chunk) => {
+    output += chunk;
+  });
+  exited = new Promise((resolve, reject) => {
+    app.once("error", reject);
+    app.once("exit", (code, signal) => {
+      exitState = { code, signal };
+      resolve(exitState);
+    });
+  });
+}
+
+async function stopApplication(label) {
+  const stopEventsBefore = (output.match(/runtime\.event.*event="stop"/g) ?? [])
+    .length;
+  if (process.platform === "win32") {
+    // This validates Native SDK Runtime state and MetaWork's real tray command
+    // routing. User-reachable Windows Shell chrome/tray remain separate gates.
+    await automate("tray-action", "2");
+  } else {
+    await invokeBridge("native-sdk.window.close", { label: "main" });
+  }
+  const final = await withTimeout(exited, commandTimeoutMs, label);
+  if (final.code !== 0 || final.signal !== null)
+    throw new Error(`app exited abnormally: ${JSON.stringify(final)}`);
+  const stopEventsAfter = (output.match(/runtime\.event.*event="stop"/g) ?? [])
+    .length;
+  if (stopEventsAfter !== stopEventsBefore + 1)
+    throw new Error("normal runtime stop was not observed");
+}
+
+async function readCheckpointHealth(taskId) {
+  const historyPath = join(dataRoot, "workbench", "workbench-history.json");
+  let bytes;
+  try {
+    bytes = await readFile(historyPath);
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+  const history = JSON.parse(bytes.toString("utf8"));
+  const task = history.tasks?.find((item) => String(item.id) === taskId);
+  return task
+    ? {
+        checkpoint: task.checkpoint,
+        checkpointHealth: task.checkpoint_health,
+      }
+    : null;
+}
+
+async function readCheckpointEvidence(
+  taskId,
+  terminalKind,
+  terminalId,
+  bindingEpoch,
+) {
+  const historyPath = join(dataRoot, "workbench", "workbench-history.json");
+  let historyBytes;
+  try {
+    historyBytes = await readFile(historyPath);
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+  const history = JSON.parse(historyBytes.toString("utf8"));
+  const task = history.tasks?.find((item) => String(item.id) === taskId);
+  lastCheckpointObservation = task
+    ? {
+        health: task.checkpoint_health,
+        hasDescriptor: task.checkpoint !== null,
+      }
+    : { task: "missing" };
+  if (!task || task.checkpoint_health !== "available" || !task.checkpoint)
+    return null;
+  const descriptor = task.checkpoint;
+  if (
+    descriptor.terminal_kind !== terminalKind ||
+    String(descriptor.terminal_id) !== terminalId ||
+    String(descriptor.binding_epoch) !== bindingEpoch ||
+    !Number.isSafeInteger(descriptor.generation) ||
+    descriptor.generation < 0 ||
+    !Number.isSafeInteger(descriptor.byte_size) ||
+    descriptor.byte_size <= 0 ||
+    !Number.isSafeInteger(descriptor.chunk_count) ||
+    descriptor.chunk_count <= 0 ||
+    !/^[0-9a-f]{64}$/.test(descriptor.digest)
+  )
+    throw new Error(
+      `checkpoint descriptor is malformed: ${JSON.stringify(descriptor)}`,
+    );
+  const blobPath = join(
+    dataRoot,
+    "workbench",
+    "checkpoints",
+    String(task.id),
+    `${descriptor.generation}-${descriptor.digest}.ckpt`,
+  );
+  let blob;
+  try {
+    blob = await readFile(blobPath);
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+  const digest = createHash("sha256").update(blob).digest("hex");
+  if (blob.length !== descriptor.byte_size || digest !== descriptor.digest)
+    throw new Error("checkpoint blob did not match its durable descriptor");
+  return {
+    blobPath,
+    byteSize: descriptor.byte_size,
+    chunkCount: descriptor.chunk_count,
+    generation: descriptor.generation,
+    historyByteSize: historyBytes.length,
+  };
+}
+
+async function expectMissing(filePath) {
+  try {
+    await readFile(filePath);
+  } catch (error) {
+    if (error?.code === "ENOENT") return;
+    throw error;
+  }
+  throw new Error(`checkpoint blob survived Task deletion: ${filePath}`);
+}
+
+function checkpointCommitMetrics(taskId, terminalKind, terminalId) {
+  const records = [
+    ...output.matchAll(
+      /checkpoint\.commit task_id=(\d+) terminal_kind=(run|compact) terminal_id=(\d+) byte_size=(\d+) chunk_count=(\d+) export_duration_ns=(\d+) history_commit_duration_ns=(\d+)/g,
+    ),
+  ];
+  const record = records.find(
+    (item) =>
+      item[1] === taskId && item[2] === terminalKind && item[3] === terminalId,
+  );
+  if (!record)
+    throw new Error(
+      `checkpoint commit metrics were not observed for ${terminalKind} ${terminalId}`,
+    );
+  return {
+    exportDurationNs: Number(record[6]),
+    historyCommitDurationNs: Number(record[7]),
+    additionalHistoryCommitCount: 1,
+  };
 }
 
 async function invokeBridge(command, payload) {
@@ -846,8 +1173,17 @@ async function probeWindowsWebViewFocus() {
     const child = spawn(
       "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
       args,
-      { stdio: "inherit", windowsHide: true },
+      { stdio: ["ignore", "pipe", "pipe"], windowsHide: true },
     );
+    let diagnostic = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      diagnostic += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      diagnostic += chunk;
+    });
     const timer = setTimeout(() => {
       child.kill();
       reject(new Error("Windows WebView focus probe timed out"));
@@ -862,11 +1198,26 @@ async function probeWindowsWebViewFocus() {
       else
         reject(
           new Error(
-            `Windows WebView focus probe failed: code=${code} signal=${signal}`,
+            `Windows WebView focus probe failed: code=${code} signal=${signal}\n${diagnostic}`,
           ),
         );
     });
   });
+}
+
+async function probeWindowsWebViewFocusWithColdProfileRetry() {
+  if (process.platform !== "win32") return;
+  let lastError;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    try {
+      await probeWindowsWebViewFocus();
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError;
 }
 
 async function waitForBridge() {

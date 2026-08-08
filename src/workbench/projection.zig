@@ -4741,6 +4741,7 @@ pub const Workbench = struct {
             },
             .candidate_ready => {
                 const candidate = &postprocess.payload.candidate;
+                const history_commit_started = std.Io.Timestamp.now(self.io, .awake);
                 self.commitTaskStateWithCheckpoint(.{
                     .task_id = task.durable.id,
                     .descriptor = &candidate.descriptor,
@@ -4756,6 +4757,19 @@ pub const Workbench = struct {
                     postprocess.state.store(.settled, .release);
                     return true;
                 };
+                const history_commit_finished = std.Io.Timestamp.now(self.io, .awake);
+                if (builtin.mode == .Debug) std.log.info(
+                    "checkpoint.commit task_id={d} terminal_kind={s} terminal_id={d} byte_size={d} chunk_count={d} export_duration_ns={d} history_commit_duration_ns={d}",
+                    .{
+                        task.durable.id,
+                        @tagName(candidate.descriptor.terminal_kind),
+                        candidate.descriptor.terminal_id,
+                        candidate.identity.byte_size,
+                        candidate.descriptor.chunk_count,
+                        candidate.export_duration_ns,
+                        history_commit_started.durationTo(history_commit_finished).nanoseconds,
+                    },
+                );
                 const old_identity = if (task.durable.checkpoint) |old|
                     checkpointIdentity(task.durable.id, old)
                 else

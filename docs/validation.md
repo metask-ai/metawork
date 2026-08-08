@@ -101,6 +101,12 @@ npm run test:agentcore-vertical:macos
 
 当前 macOS revision 6 lock 使用 clean `a5b3821c17b337d33f40f903df12484b01f92010` target artifact。Windows lock、staged artifact 和结果不能替代 macOS artifact identity 或平台证据；Windows 上的 cross build/checksum 只证明 artifact 可生成和锁定，不替代 macOS native probe、Debug/Release/package 与真实 vertical。AgentCore vertical 是真实桌面自动化入口，同时验证 `.agents/skills` typed catalog/run、真实 `ProductDelivery` 主线程 revision emit、Renderer reload、snapshot 恢复和 AgentCore Run。
 
+### Checkpoint export/store evidence
+
+Windows canonical staged bundle `0.1.0-dev+a5b3821c17b3` 的隔离数据根 vertical 已真实跑通 Skill Run、Text Run 与 manual compact，并逐次读取 `workbench-history.json`、定位不可变 blob、重算 streamed bytes 的 SHA-256、核对 descriptor 后再验证旧 blob/Task 删除清理。样本依次为：Skill `2452 bytes / 88 chunks / generation 1 / export 675900 ns`，Text `2560 / 98 / generation 2 / 879800 ns`，compact `2344 / 72 / generation 3 / 663900 ns`。terminal 可见到 descriptor durable 的观测延迟为 `1 / 1 / 0 ms`；对应 history 大小为 `5768 / 6513 / 6808 bytes`，每次 descriptor 固定增加一次 history 全文件提交，耗时 `22.2847 / 20.4396 / 23.385 ms`。vertical 随后关闭 Task、正常停止 Host、人工删除当前 blob、用同一隔离数据根重启，并确认两条 Run 与 compact 产品事实保留、`conversationRecovery = false`、descriptor 被清除且 typed health 为 `blob_missing`，最后删除 Task/Workspace 并正常退出。
+
+上述三类短会话样本的最大 blob 为 2560 bytes；产品 `hard_bytes = 64 MiB` 保留了约 2.6 万倍增长余量，同时仍只有 ABI 1 GiB 物理上界的 1/16。section/string/chunk 上限继续分别为 `16 MiB / 1 MiB / 256 KiB`，message 与 block 上限为 `4096 / 256`；命中任一产品上限只使本次 export 以可再生失败收口，不 poison Session。长会话分布仍需持续采样，但不以放大当前上限替代数据。真实结果还证明 revision 6 `CheckpointExportResultV1.digest` 未定义算法且不等于 blob SHA-256；产品 hash 因而只取 sink 对实际 bytes 的独立 SHA-256，raw digest 不离开 Agent。macOS 必须用其独立 lock 和本地 vertical 复验相同文件原语、数据与重启路径，Windows 结果不能替代该平台证据。
+
 ### Windows development baseline
 
 ```powershell
