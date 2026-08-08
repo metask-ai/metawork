@@ -244,6 +244,7 @@ pub const FakeCore = struct {
     checkpoint_payload: []const u8 = "fixture-checkpoint",
     malformed_checkpoint_result: bool = false,
     malformed_checkpoint_description: bool = false,
+    checkpoint_description_session_id_mismatch: bool = false,
     checkpoint_exports: usize = 0,
     checkpoint_descriptions: usize = 0,
     checkpoint_export_controlled: bool = false,
@@ -430,6 +431,12 @@ pub const FakeCore = struct {
     pub fn makeNextCheckpointDescriptionMalformed(self: *FakeCore) void {
         self.lock();
         self.malformed_checkpoint_description = true;
+        self.unlock();
+    }
+
+    pub fn mismatchNextCheckpointDescriptionSessionId(self: *FakeCore) void {
+        self.lock();
+        self.checkpoint_description_session_id_mismatch = true;
         self.unlock();
     }
 
@@ -974,6 +981,8 @@ pub fn sessionDescribe(
     fake_core.forced_checkpoint_describe_status = null;
     const malformed = fake_core.malformed_checkpoint_description;
     fake_core.malformed_checkpoint_description = false;
+    const session_id_mismatch = fake_core.checkpoint_description_session_id_mismatch;
+    fake_core.checkpoint_description_session_id_mismatch = false;
     const generation = fake_core.checkpoint_generation;
     fake_core.checkpoint_descriptions += 1;
     fake_core.unlock();
@@ -987,6 +996,10 @@ pub fn sessionDescribe(
         diagnostic(out_error);
         return wire.STATUS_INVALID_ARGUMENT;
     }
+    const described_session_id: []const u8 = if (session_id_mismatch)
+        "ffffffffffffffffffffffff"
+    else
+        session.session_id[0..session.session_id_len];
     const encoded = if (malformed)
         std.fmt.bufPrint(&session.description_buffer, "{{}}", .{}) catch {
             diagnostic(out_error);
@@ -997,7 +1010,7 @@ pub fn sessionDescribe(
             &session.description_buffer,
             "{{\"schema\":\"agentcore.session-description/v1\",\"session_id\":\"{s}\",\"origin\":\"fresh\",\"lifecycle\":\"idle\",\"registered\":true,\"last_run_id\":{d},\"last_compact_id\":{d},\"checkpoint_generation\":{d},\"policy_generation\":1,\"catalog_generation\":0,\"model\":\"fixture-model\",\"conversation\":{{\"message_count\":0,\"compact_boundary\":0}},\"skill\":{{\"catalog_revision\":null}},\"mcp\":{{\"selection_fingerprint\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"tools\":[]}},\"budget\":{{\"hard_bytes\":1024,\"soft_bytes\":512,\"durable_usage_bytes\":0,\"available_bytes\":1024,\"compaction_recommended\":false,\"last_outcome\":\"none\",\"required_bytes\":0}},\"restore\":{{\"health\":\"complete\",\"invalidated_skill_authority\":0,\"invalidated_permission_rules\":0,\"invalidated_mcp_bindings\":0,\"issues\":[]}}}}",
             .{
-                session.session_id[0..session.session_id_len],
+                described_session_id,
                 session.run_id,
                 session.compact_id,
                 generation,

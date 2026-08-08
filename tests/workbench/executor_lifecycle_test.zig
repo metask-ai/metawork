@@ -194,8 +194,22 @@ test "Run checkpoint commits immutable blob before durable descriptor" {
 
     workbench.deinit();
     workbench_initialized = false;
-    checkpoint_store.delete(compact_identity);
-    const restart_history = persistence_storage[0..persistence.len];
+    const restart_history = try std.testing.allocator.dupe(
+        u8,
+        persistence_storage[0..persistence.len],
+    );
+    defer std.testing.allocator.free(restart_history);
+    const digest_hex = std.fmt.bytesToHex(digest, .lower);
+    var blob_path_storage: [160]u8 = undefined;
+    const blob_path = try std.fmt.bufPrint(
+        &blob_path_storage,
+        "{d}/1-{s}.ckpt",
+        .{ task_id, digest_hex },
+    );
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = blob_path,
+        .data = "corrupt-checkpoint",
+    });
     var restart_configuration = workbenchConfiguration();
     restart_configuration.task_persistence = persistence.capabilityRestored(restart_history);
     restart_configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
@@ -212,7 +226,38 @@ test "Run checkpoint commits immutable blob before durable descriptor" {
         },
         restart_configuration,
     );
-    defer restored.deinit();
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        persistence_storage[0..persistence.len],
+        "\"checkpoint\":null,\"checkpoint_health\":\"blob_mismatch\"",
+    ) != null);
+    try std.testing.expectError(error.BlobMissing, checkpoint_store.verify(compact_identity));
+    restored.deinit();
+
+    {
+        var replacement_writer = try checkpoint_store.begin(task_id, 1024);
+        defer replacement_writer.deinit();
+        try replacement_writer.write("fixture-checkpoint");
+        _ = try replacement_writer.commit(1, digest, "fixture-checkpoint".len);
+    }
+    checkpoint_store.delete(compact_identity);
+    var missing_configuration = workbenchConfiguration();
+    missing_configuration.task_persistence = persistence.capabilityRestored(restart_history);
+    missing_configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
+    var missing_restored = try workbench_api.Workbench.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 1,
+            .max_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        missing_configuration,
+    );
+    defer missing_restored.deinit();
     try std.testing.expect(std.mem.indexOf(
         u8,
         persistence_storage[0..persistence.len],
@@ -491,6 +536,105 @@ test "unknown descriptor commit freezes checkpoint transaction until shutdown" {
     workbench.deinit();
     initialized = false;
     try checkpoint_store.verify(identity);
+}
+
+test "untrusted Task history never opens checkpoint orphan cleanup" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 1,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
+    var checkpoint_store = try workbench_api.CheckpointFileStore.init(
+        std.testing.io,
+        root_storage[0..root_len],
+    );
+    defer checkpoint_store.deinit();
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash("untrusted-history-orphan", &digest, .{});
+    const identity = block: {
+        var writer = try checkpoint_store.begin(91, 1024);
+        defer writer.deinit();
+        try writer.write("untrusted-history-orphan");
+        break :block try writer.commit(
+            7,
+            digest,
+            "untrusted-history-orphan".len,
+        );
+    };
+    var persistence = TaskPersistenceProbe{};
+    var configuration = workbenchConfiguration();
+    configuration.task_persistence = persistence.capabilityRestored("{");
+    configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
+    var workbench = try workbench_api.Workbench.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 1,
+            .max_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        configuration,
+    );
+    defer workbench.deinit();
+    var snapshot_storage: [128 * 1024]u8 = undefined;
+    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"taskHistoryPersistenceHealth\":\"corrupt\"",
+    ) != null);
+    try checkpoint_store.verify(identity);
+}
+
+test "unavailable checkpoint store does not close Task admission" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 1,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var configuration = workbenchConfiguration();
+    configuration.checkpoint_store = .{ .restore_failed = true };
+    var workbench = try workbench_api.Workbench.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 1,
+            .max_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        configuration,
+    );
+    defer workbench.deinit();
+    try std.testing.expectEqual(
+        workbench_api.CheckpointStoreHealth.unavailable,
+        workbench.checkpointStoreHealth(),
+    );
+    try installWorkbenchExecution(&workbench);
+    const task_id = try workbench.createTask(workbenchTaskInput());
+    _ = try workbench.runTask(task_id, .{ .text = "checkpoint store unavailable" });
+    try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
+    try std.testing.expectEqual(@as(usize, 1), fake_core.session_created);
+    try std.testing.expectEqual(@as(usize, 0), fake_core.checkpoint_exports);
 }
 
 fn waitCatalogUnavailable(

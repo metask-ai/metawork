@@ -1041,6 +1041,67 @@ test("Workbench owns queue and worker lifecycle", () => {
   assert.ok(stopExecutor >= 0 && stopExecutor < stopAgent);
 });
 
+test("checkpoint persistence stays behind the Agent and Workbench owners", () => {
+  const prohibited = [
+    "src/bridge.zig",
+    ...zigFiles("src/bridge/"),
+    "src/account.zig",
+    ...zigFiles("src/account/"),
+    ...filesWithExtensions("frontend/src/", [".ts", ".tsx"]),
+  ];
+  for (const file of prohibited)
+    assert.doesNotMatch(
+      read(file),
+      /checkpoint/i,
+      `${file} must not gain checkpoint product or persistence surface`,
+    );
+
+  const agent = read("src/agent/session.zig");
+  assert.equal(
+    [...agent.matchAll(/durable_budget\s*=\s*null/g)].length,
+    1,
+    "durable budget must keep one canonical null/default source",
+  );
+  const productionCheckpointCallers = zigFiles("src/").filter((file) =>
+    /\.exportCheckpoint\(/.test(read(file)),
+  );
+  assert.deepEqual(productionCheckpointCallers, [
+    "src/workbench/projection.zig",
+  ]);
+
+  const workbench = read("src/workbench/projection.zig");
+  const workerPostprocess = sliceBetween(
+    workbench,
+    "fn postprocessCheckpoint(",
+    "fn publishCheckpointFailure(",
+    "checkpoint worker postprocess",
+  );
+  const blobCommit = workerPostprocess.indexOf("writer.commit(");
+  const candidatePublication = workerPostprocess.indexOf(
+    "postprocess.state.store(.candidate_ready",
+  );
+  assert.ok(blobCommit >= 0 && blobCommit < candidatePublication);
+
+  const mainCommit = sliceBetween(
+    workbench,
+    "fn commitCheckpointPostprocessNoFail(",
+    "pub fn drainAgentEvents(",
+    "checkpoint main-thread commit",
+  );
+  const candidateConsumption = mainCommit.indexOf(".candidate_ready =>");
+  const descriptorCommit = mainCommit.indexOf(
+    "self.commitTaskStateWithCheckpoint(",
+  );
+  const descriptorInstall = mainCommit.indexOf(
+    "task.durable.checkpoint = candidate.descriptor",
+  );
+  assert.ok(
+    candidateConsumption >= 0 &&
+      candidateConsumption < descriptorCommit &&
+      descriptorCommit < descriptorInstall,
+  );
+});
+
 test("Workbench hands running cancellation through generation-checked control", () => {
   const agent = read("src/agent/session.zig");
   assert.match(agent, /const SessionControlBlock = struct/);
@@ -1733,9 +1794,9 @@ test("Renderer declares window chrome UI while Application owns native behavior"
 
 test("lifecycle tests are grouped by invariant", () => {
   const cases = [
-    ["tests/agent/lifecycle_test.zig", 54],
+    ["tests/agent/lifecycle_test.zig", 55],
     ["tests/agent/event_pump_test.zig", 5],
-    ["tests/workbench/executor_lifecycle_test.zig", 26],
+    ["tests/workbench/executor_lifecycle_test.zig", 28],
     ["tests/integration/lifecycle/lifecycle_test.zig", 4],
   ];
   for (const [path, expectedCount] of cases) {
