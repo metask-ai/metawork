@@ -483,7 +483,7 @@ Execution binding availability 是下一次 admission 的独立前置事实，�
 5. Task store read/corrupt/write/outcome-unknown health 由 Host snapshot 发布；Renderer 只解释该事实并停止 mutation，不自行清空、修复、迁移或重试持久数据；
 6. 当前界面不显示 `继续此 Task`、`使用当前配置继续` 或假的 resume；exact-match execution generation 也不能替代 Conversation 恢复证明。
 
-未来只有 Host 同时证明 account、API、model、generation 与 Task binding epoch 精确匹配，并且 AgentCore 提供已验收的 Session/Conversation 恢复时，continuation 才能变为 available。若另外交付 rebind，必须由用户明确发起，重新校验 Workspace 和 catalog ownership，创建新 binding epoch/Session，并以不可改写的配置边界保留旧 Run、usage 与模型归属；失败不得回退到静默默认值。
+未来只有 Host 同时证明 Workspace、Provider、model、generation 与 Task binding epoch 精确匹配，并且 AgentCore 提供已验收的 Session/Conversation 恢复时，continuation 才能变为 available。durable Task 不保存 account 或 API Key identity，恢复不能从当前 Account catalog 反推或补写这些字段。若另外交付 rebind，必须由用户明确发起，重新校验 Workspace 和当前 catalog ownership，创建新 binding epoch/Session，并以不可改写的配置边界保留旧 Run、usage 与模型归属；失败不得回退到静默默认值。
 
 ## 7. 中间区域：工作叙事
 

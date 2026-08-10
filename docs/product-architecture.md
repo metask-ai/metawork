@@ -121,7 +121,7 @@ Skill management persistence 是 Workbench-owned、无 secret、原子 candidate
 
 ### 2.5 Identity 与 credential redaction
 
-Workbench 单独分配稳定的产品 Task identity，并在 Task owner 内保存 Agent Session route identity；AgentCore event 与 event-projection failure 都只按 route identity 回到 owner，Bridge snapshot 与 mutation 只使用产品 Task identity，二者不共享生成器也不依赖数值相等。Task binding descriptor 包含无 secret 的 account、API、Provider、model、generation 与 binding epoch；内部执行使用的 raw model 与 Renderer projection 的 selection identity 分开持有。
+Workbench 单独分配稳定的产品 Task identity，并在 Task owner 内保存 Agent Session route identity；AgentCore event 与 event-projection failure 都只按 route identity 回到 owner，Bridge snapshot 与 mutation 只使用产品 Task identity，二者不共享生成器也不依赖数值相等。durable Task binding descriptor 只包含 Workspace/binding epoch、Provider、model 与 execution generation；account identity、API Key identity/metadata 和完整 ExecutionConfig 只属于对应 owner 的当前进程运行时，不进入 Task store、Bridge 或 Renderer。
 credential redaction 是 owner 释放协议的一部分，而不是 snapshot 时的偶然过滤。安装新 credential 前先永久清洗所有既有产品投影；替换或清空默认 execution、释放 quiescent Task-owned execution 前再次使用即将释放的 credential 清洗 Workspace、Task、Run、tool 与 UI history，然后才 secure-zero。序列化仍扫描所有 live credential，并在前缀重叠时采用最长匹配，作为释放前的第二道防线。credential 是 opaque bytes；若匹配发生在 UTF-8 codepoint 内部，所有 ingestion、流式跨 chunk 清洗与序列化路径都必须扩大到完整 codepoint，禁止为了替换 secret 产生非法 UTF-8 产品事实或 JSON。
 
 ## 3. 并发与生命周期

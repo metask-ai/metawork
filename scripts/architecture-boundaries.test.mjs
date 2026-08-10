@@ -1266,6 +1266,20 @@ test("Workbench owns Task lifecycle, continuation, and canonical redaction", () 
   assert.match(runtimeAttachment, /continuation: ContinuationCapability/);
   assert.match(taskRecord, /durable: DurableTaskRecord/);
   assert.match(taskRecord, /runtime: RuntimeAttachment/);
+  assert.doesNotMatch(
+    durableTaskRecord,
+    /account_id|account_name|api_key|selection_id|display_name/,
+  );
+  assert.match(
+    durableTaskRecord,
+    /execution_generation:[\s\S]*execution_provider:[\s\S]*execution_model:/,
+  );
+  const taskPersistence = read("src/workbench/task_persistence.zig");
+  const bindingWire = taskPersistence.slice(
+    taskPersistence.indexOf("pub const BindingWire = struct"),
+    taskPersistence.indexOf("pub const OperationWire = struct"),
+  );
+  assert.doesNotMatch(bindingWire, /account|api_key|selection|display_name/);
   assert.doesNotMatch(taskRecord, /SessionState/);
   assert.doesNotMatch(workbench, /session\.snapshot\(/);
   assert.match(workbench, /session_disposition_at_completion/);

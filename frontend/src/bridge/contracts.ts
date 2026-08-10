@@ -330,16 +330,10 @@ export type TaskView = {
   binding: {
     epoch: string;
     availability: "available" | "unavailable";
-    accountId: string;
-    accountDisplayName: string;
-    apiKeySelectionId: string;
-    apiKeyName: string;
-    apiKeySuffix: string;
     provider: Provider;
-    modelSelectionId: string;
-    modelDisplayName: string;
+    model: string;
     executionGeneration: string;
-    unavailableReason: "credential_released" | null;
+    unavailableReason: "runtime_detached" | null;
   };
   skillCatalog: SkillCatalogView;
   lifecycle: "open" | "closing" | "closed";

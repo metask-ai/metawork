@@ -282,13 +282,6 @@ pub const BindingWire = struct {
     execution_generation: u64,
     provider: []const u8,
     model: []const u8,
-    account_id: []const u8,
-    account_display_name: []const u8,
-    api_key_selection_id: []const u8,
-    api_key_name: []const u8,
-    api_key_suffix: []const u8,
-    model_selection_id: []const u8,
-    model_display_name: []const u8,
 };
 
 pub const OperationWire = struct { kind: []const u8, id: u64 };
@@ -626,14 +619,7 @@ fn validateRunInput(input: RunInputWire, limits: Limits) !void {
 }
 
 fn validBinding(binding: BindingWire, max: usize) bool {
-    return validText(binding.model, max, false) and
-        validText(binding.account_id, max, false) and
-        validText(binding.account_display_name, max, true) and
-        validText(binding.api_key_selection_id, max, false) and
-        validText(binding.api_key_name, max, true) and
-        validText(binding.api_key_suffix, max, true) and
-        validText(binding.model_selection_id, max, false) and
-        validText(binding.model_display_name, max, true);
+    return validText(binding.model, max, false);
 }
 
 fn validText(value: []const u8, max: usize, allow_empty: bool) bool {
@@ -678,8 +664,15 @@ test "task store rejects unknown schema fields and dangling workspace references
         error.TaskStoreCorrupt,
         decode(std.testing.allocator, unknown, limits),
     );
+    const retired_identity_binding =
+        \\{"schema_version":1,"next_workspace_id":2,"next_workspace_recent_order":2,"next_task_id":2,"next_task_recent_order":2,"workspaces":[{"id":1,"epoch":1,"kind":"manual","canonical_root":"/tmp/repo","display_name":"repo","visible":true,"recent_order":1}],"tasks":[{"id":1,"recent_order":1,"workspace_id":1,"workspace_epoch":1,"workspace_root":"/tmp/repo","title":"","title_redacted":false,"archived":false,"closed":false,"binding":{"epoch":1,"execution_generation":1,"provider":"openai","model":"m","account_id":"retired"},"next_run_generation":0,"active_operation":null,"runs":[],"compacts":[],"ui_history":[]}]}
+    ;
+    try std.testing.expectError(
+        error.TaskStoreCorrupt,
+        decode(std.testing.allocator, retired_identity_binding, limits),
+    );
     const dangling =
-        \\{"schema_version":1,"next_workspace_id":1,"next_workspace_recent_order":1,"next_task_id":2,"next_task_recent_order":2,"workspaces":[],"tasks":[{"id":1,"recent_order":1,"workspace_id":1,"workspace_epoch":1,"workspace_root":"C:\\\\repo","title":"","title_redacted":false,"archived":false,"closed":false,"binding":{"epoch":1,"execution_generation":1,"provider":"openai","model":"m","account_id":"a","account_display_name":"","api_key_selection_id":"k","api_key_name":"","api_key_suffix":"","model_selection_id":"m","model_display_name":""},"next_run_generation":0,"active_operation":null,"runs":[],"compacts":[],"ui_history":[]}]}
+        \\{"schema_version":1,"next_workspace_id":1,"next_workspace_recent_order":1,"next_task_id":2,"next_task_recent_order":2,"workspaces":[],"tasks":[{"id":1,"recent_order":1,"workspace_id":1,"workspace_epoch":1,"workspace_root":"C:\\\\repo","title":"","title_redacted":false,"archived":false,"closed":false,"binding":{"epoch":1,"execution_generation":1,"provider":"openai","model":"m"},"next_run_generation":0,"active_operation":null,"runs":[],"compacts":[],"ui_history":[]}]}
     ;
     try std.testing.expectError(
         error.TaskStoreCorrupt,
@@ -689,7 +682,7 @@ test "task store rejects unknown schema fields and dangling workspace references
 
 test "task store preserves history bound to an older Workspace epoch" {
     const state =
-        \\{"schema_version":1,"next_workspace_id":2,"next_workspace_recent_order":2,"next_task_id":2,"next_task_recent_order":2,"workspaces":[{"id":1,"epoch":2,"kind":"manual","canonical_root":"/tmp/repo","display_name":"repo","visible":true,"recent_order":1}],"tasks":[{"id":1,"recent_order":1,"workspace_id":1,"workspace_epoch":1,"workspace_root":"/tmp/repo","title":"","title_redacted":false,"archived":false,"closed":false,"binding":{"epoch":1,"execution_generation":1,"provider":"openai","model":"m","account_id":"a","account_display_name":"","api_key_selection_id":"k","api_key_name":"","api_key_suffix":"","model_selection_id":"m","model_display_name":""},"next_run_generation":0,"active_operation":null,"runs":[],"compacts":[],"ui_history":[]}]}
+        \\{"schema_version":1,"next_workspace_id":2,"next_workspace_recent_order":2,"next_task_id":2,"next_task_recent_order":2,"workspaces":[{"id":1,"epoch":2,"kind":"manual","canonical_root":"/tmp/repo","display_name":"repo","visible":true,"recent_order":1}],"tasks":[{"id":1,"recent_order":1,"workspace_id":1,"workspace_epoch":1,"workspace_root":"/tmp/repo","title":"","title_redacted":false,"archived":false,"closed":false,"binding":{"epoch":1,"execution_generation":1,"provider":"openai","model":"m"},"next_run_generation":0,"active_operation":null,"runs":[],"compacts":[],"ui_history":[]}]}
     ;
     var parsed = try decode(std.testing.allocator, state, testLimits());
     defer parsed.deinit();
@@ -800,13 +793,6 @@ test "task store rejects states that would violate the Renderer contract" {
             .execution_generation = 1,
             .provider = "openai",
             .model = "model",
-            .account_id = "account",
-            .account_display_name = "Account",
-            .api_key_selection_id = "key",
-            .api_key_name = "Key",
-            .api_key_suffix = "1234",
-            .model_selection_id = "model",
-            .model_display_name = "Model",
         },
         .next_run_generation = 1,
         .active_operation = null,

@@ -612,11 +612,6 @@ const ui_record_detail_capacity: usize = 512;
 const ui_record_snapshot_overhead: usize = 512;
 const tool_route_digest_bytes = std.crypto.hash.sha2.Sha256.digest_length;
 const tool_product_id_capacity = "tool-".len + 20;
-const binding_model_display_bytes = @max(
-    account_contract.Limits.model_id_bytes,
-    account_contract.Limits.model_display_name_bytes,
-);
-
 const ToolState = enum { running, completed, failed };
 const RunPhase = enum {
     queued,
@@ -985,13 +980,6 @@ const DurableTaskRecord = struct {
     execution_provider: Provider,
     execution_model: []u8,
     binding_epoch: u64 = 1,
-    binding_account_id: []u8,
-    binding_account_name: []u8,
-    binding_api_key_id: []u8,
-    binding_api_key_name: []u8,
-    binding_api_key_suffix: []u8,
-    binding_model_id: []u8,
-    binding_model_display_name: []u8,
     workspace_id: u64,
     workspace_epoch: u64 = 1,
     workspace_root: []u8,
@@ -1770,20 +1758,6 @@ const AccountProjection = struct {
             .catalog_generation = self.catalog_generation,
             .execution_generation = self.execution_generation,
         };
-    }
-
-    fn selectedApiKey(self: *const AccountProjection) ?account_contract.ApiKeyView {
-        for (self.api_key_views[0..self.api_key_count]) |candidate|
-            if (std.mem.eql(u8, candidate.id, self.selected_api_key_id.view()))
-                return candidate;
-        return null;
-    }
-
-    fn selectedModel(self: *const AccountProjection) ?account_contract.ModelView {
-        for (self.model_views[0..self.model_count]) |candidate|
-            if (std.mem.eql(u8, candidate.id, self.selected_model.view()))
-                return candidate;
-        return null;
     }
 };
 
@@ -3516,43 +3490,6 @@ pub const Workbench = struct {
             account_contract.Limits.model_id_bytes,
         );
         errdefer self.freeTracked(execution_model);
-        const binding_account_id = try self.copyBounded(
-            self.account.account_id.view(),
-            account_contract.Limits.account_id_bytes,
-        );
-        errdefer self.freeTracked(binding_account_id);
-        const binding_account_name = try self.copyBounded(
-            self.account.display_name.view(),
-            account_contract.Limits.display_name_bytes,
-        );
-        errdefer self.freeTracked(binding_account_name);
-        const binding_api_key_id = try self.copyBounded(
-            self.account.selected_api_key_id.view(),
-            account_contract.Limits.api_key_id_bytes,
-        );
-        errdefer self.freeTracked(binding_api_key_id);
-        const selected_api_key = self.account.selectedApiKey();
-        const binding_api_key_name = try self.copyBounded(
-            if (selected_api_key) |key| key.name else "",
-            account_contract.Limits.api_key_name_bytes,
-        );
-        errdefer self.freeTracked(binding_api_key_name);
-        const binding_api_key_suffix = try self.copyBounded(
-            if (selected_api_key) |key| key.suffix else "",
-            account_contract.Limits.api_key_suffix_bytes,
-        );
-        errdefer self.freeTracked(binding_api_key_suffix);
-        const selected_model = self.account.selectedModel();
-        const binding_model_id = try self.copyBounded(
-            task_execution_input.target.model,
-            account_contract.Limits.model_id_bytes,
-        );
-        errdefer self.freeTracked(binding_model_id);
-        const binding_model_display_name = try self.copyBounded(
-            if (selected_model) |model| model.display_name else task_execution_input.target.model,
-            binding_model_display_bytes,
-        );
-        errdefer self.freeTracked(binding_model_display_name);
         const runs = try self.allocator.alloc(?RunRecord, self.limits.max_runs_per_task);
         errdefer self.allocator.free(runs);
         @memset(runs, null);
@@ -3612,13 +3549,6 @@ pub const Workbench = struct {
                 .execution_generation = task_execution_input.execution_generation,
                 .execution_provider = accountProvider(task_execution_input.target.provider_kind),
                 .execution_model = execution_model,
-                .binding_account_id = binding_account_id,
-                .binding_account_name = binding_account_name,
-                .binding_api_key_id = binding_api_key_id,
-                .binding_api_key_name = binding_api_key_name,
-                .binding_api_key_suffix = binding_api_key_suffix,
-                .binding_model_id = binding_model_id,
-                .binding_model_display_name = binding_model_display_name,
                 .workspace_id = workspace_id,
                 .workspace_epoch = workspace_view.epoch,
                 .workspace_root = workspace,
@@ -5883,29 +5813,17 @@ pub const Workbench = struct {
             view.durable.recent_order,
         }) catch return error.SnapshotTooLarge;
         try self.projectedJsonValueWithKnownCredentials(writer, view.durable.title);
-        writer.print(",\"workspaceId\":\"{d}\",\"binding\":{{\"epoch\":\"{d}\",\"availability\":\"{s}\",\"accountId\":", .{
+        writer.print(",\"workspaceId\":\"{d}\",\"binding\":{{\"epoch\":\"{d}\",\"availability\":\"{s}\",\"provider\":\"{s}\",\"model\":", .{
             view.durable.workspace_id,
             view.durable.binding_epoch,
             if (view.runtime.execution == null) "unavailable" else "available",
+            @tagName(view.durable.execution_provider),
         }) catch return error.SnapshotTooLarge;
-        try self.projectedJsonValueWithKnownCredentials(writer, view.durable.binding_account_id);
-        writer.writeAll(",\"accountDisplayName\":") catch return error.SnapshotTooLarge;
-        try self.projectedJsonValueWithKnownCredentials(writer, view.durable.binding_account_name);
-        writer.writeAll(",\"apiKeySelectionId\":") catch return error.SnapshotTooLarge;
-        try self.projectedJsonValueWithKnownCredentials(writer, view.durable.binding_api_key_id);
-        writer.writeAll(",\"apiKeyName\":") catch return error.SnapshotTooLarge;
-        try self.projectedJsonValueWithKnownCredentials(writer, view.durable.binding_api_key_name);
-        writer.writeAll(",\"apiKeySuffix\":") catch return error.SnapshotTooLarge;
-        try self.projectedJsonValueWithKnownCredentials(writer, view.durable.binding_api_key_suffix);
-        writer.print(",\"provider\":\"{s}\",\"modelSelectionId\":", .{@tagName(view.durable.execution_provider)}) catch
-            return error.SnapshotTooLarge;
-        try self.projectedJsonValueWithKnownCredentials(writer, view.durable.binding_model_id);
-        writer.writeAll(",\"modelDisplayName\":") catch return error.SnapshotTooLarge;
-        try self.projectedJsonValueWithKnownCredentials(writer, view.durable.binding_model_display_name);
+        try self.projectedJsonValueWithKnownCredentials(writer, view.durable.execution_model);
         writer.print(",\"executionGeneration\":\"{d}\",\"unavailableReason\":", .{view.durable.execution_generation}) catch
             return error.SnapshotTooLarge;
         if (view.runtime.execution == null)
-            writer.writeAll("\"credential_released\"") catch return error.SnapshotTooLarge
+            writer.writeAll("\"runtime_detached\"") catch return error.SnapshotTooLarge
         else
             writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.writeByte('}') catch return error.SnapshotTooLarge;
@@ -6813,41 +6731,6 @@ pub const Workbench = struct {
             account_contract.Limits.model_id_bytes,
         );
         errdefer self.freeTracked(execution_model);
-        const binding_account_id = try self.copyBounded(
-            wire.binding.account_id,
-            account_contract.Limits.account_id_bytes,
-        );
-        errdefer self.freeTracked(binding_account_id);
-        const binding_account_name = try self.copyBounded(
-            wire.binding.account_display_name,
-            account_contract.Limits.display_name_bytes,
-        );
-        errdefer self.freeTracked(binding_account_name);
-        const binding_api_key_id = try self.copyBounded(
-            wire.binding.api_key_selection_id,
-            account_contract.Limits.api_key_id_bytes,
-        );
-        errdefer self.freeTracked(binding_api_key_id);
-        const binding_api_key_name = try self.copyBounded(
-            wire.binding.api_key_name,
-            account_contract.Limits.api_key_name_bytes,
-        );
-        errdefer self.freeTracked(binding_api_key_name);
-        const binding_api_key_suffix = try self.copyBounded(
-            wire.binding.api_key_suffix,
-            account_contract.Limits.api_key_suffix_bytes,
-        );
-        errdefer self.freeTracked(binding_api_key_suffix);
-        const binding_model_id = try self.copyBounded(
-            wire.binding.model_selection_id,
-            account_contract.Limits.model_id_bytes,
-        );
-        errdefer self.freeTracked(binding_model_id);
-        const binding_model_display_name = try self.copyBounded(
-            wire.binding.model_display_name,
-            binding_model_display_bytes,
-        );
-        errdefer self.freeTracked(binding_model_display_name);
         const workspace_root = try self.copyBounded(
             wire.workspace_root,
             self.limits.max_workspace_bytes,
@@ -6901,13 +6784,6 @@ pub const Workbench = struct {
                 .execution_provider = execution_provider,
                 .execution_model = execution_model,
                 .binding_epoch = wire.binding.epoch,
-                .binding_account_id = binding_account_id,
-                .binding_account_name = binding_account_name,
-                .binding_api_key_id = binding_api_key_id,
-                .binding_api_key_name = binding_api_key_name,
-                .binding_api_key_suffix = binding_api_key_suffix,
-                .binding_model_id = binding_model_id,
-                .binding_model_display_name = binding_model_display_name,
                 .workspace_id = wire.workspace_id,
                 .workspace_epoch = wire.workspace_epoch,
                 .workspace_root = workspace_root,
@@ -7462,13 +7338,6 @@ pub const Workbench = struct {
                 .execution_generation = task.durable.execution_generation,
                 .provider = @tagName(task.durable.execution_provider),
                 .model = task.durable.execution_model,
-                .account_id = task.durable.binding_account_id,
-                .account_display_name = task.durable.binding_account_name,
-                .api_key_selection_id = task.durable.binding_api_key_id,
-                .api_key_name = task.durable.binding_api_key_name,
-                .api_key_suffix = task.durable.binding_api_key_suffix,
-                .model_selection_id = task.durable.binding_model_id,
-                .model_display_name = task.durable.binding_model_display_name,
             },
             .next_run_generation = task.durable.next_run_generation,
             .active_operation = switch (task.runtime.active_operation) {
@@ -8845,13 +8714,7 @@ pub const Workbench = struct {
         task.durable.title_redacted = redactFixedWidthNoFail(task.durable.title, credential) or
             task.durable.title_redacted;
         _ = redactFixedWidthNoFail(task.durable.workspace_root, credential);
-        _ = redactFixedWidthNoFail(task.durable.binding_account_id, credential);
-        _ = redactFixedWidthNoFail(task.durable.binding_account_name, credential);
-        _ = redactFixedWidthNoFail(task.durable.binding_api_key_id, credential);
-        _ = redactFixedWidthNoFail(task.durable.binding_api_key_name, credential);
-        _ = redactFixedWidthNoFail(task.durable.binding_api_key_suffix, credential);
-        _ = redactFixedWidthNoFail(task.durable.binding_model_id, credential);
-        _ = redactFixedWidthNoFail(task.durable.binding_model_display_name, credential);
+        _ = redactFixedWidthNoFail(task.durable.execution_model, credential);
         for (task.durable.runs) |*run_entry| {
             const run = &(run_entry.* orelse continue);
             switch (run.input) {
@@ -9180,13 +9043,6 @@ pub const Workbench = struct {
         self.allocator.free(task.durable.compacts);
         self.allocator.free(task.durable.ui_history);
         self.freeTracked(task.durable.execution_model);
-        self.freeTracked(task.durable.binding_account_id);
-        self.freeTracked(task.durable.binding_account_name);
-        self.freeTracked(task.durable.binding_api_key_id);
-        self.freeTracked(task.durable.binding_api_key_name);
-        self.freeTracked(task.durable.binding_api_key_suffix);
-        self.freeTracked(task.durable.binding_model_id);
-        self.freeTracked(task.durable.binding_model_display_name);
         self.freeTracked(task.durable.workspace_root);
         if (task.runtime.pinned_catalog) |*snapshot| {
             self.projection_bytes -= snapshot.projected_bytes;
@@ -11556,34 +11412,6 @@ fn testWorkbench() !Workbench {
             .execution_generation = 1,
             .execution_provider = .anthropic,
             .execution_model = execution_model,
-            .binding_account_id = try workbench.copyBounded(
-                "account-1",
-                account_contract.Limits.account_id_bytes,
-            ),
-            .binding_account_name = try workbench.copyBounded(
-                "Metask User",
-                account_contract.Limits.display_name_bytes,
-            ),
-            .binding_api_key_id = try workbench.copyBounded(
-                "key-1",
-                account_contract.Limits.api_key_id_bytes,
-            ),
-            .binding_api_key_name = try workbench.copyBounded(
-                "Primary",
-                account_contract.Limits.api_key_name_bytes,
-            ),
-            .binding_api_key_suffix = try workbench.copyBounded(
-                "1234",
-                account_contract.Limits.api_key_suffix_bytes,
-            ),
-            .binding_model_id = try workbench.copyBounded(
-                "fixture-model",
-                account_contract.Limits.model_id_bytes,
-            ),
-            .binding_model_display_name = try workbench.copyBounded(
-                "Fixture model",
-                binding_model_display_bytes,
-            ),
             .workspace_id = 1,
             .workspace_root = workspace,
             .title = try workbench.copyBounded("", workbench.limits.max_task_title_bytes),
@@ -12983,11 +12811,6 @@ test "released Task credential is permanently scrubbed from every product projec
         workbench.limits.max_task_title_bytes,
     );
     try workbench.replaceTracked(
-        &task.durable.binding_model_id,
-        "model-SECRET-KEY",
-        account_contract.Limits.model_id_bytes,
-    );
-    try workbench.replaceTracked(
         &run.input.text.value,
         "prompt SECRET-KEY",
         workbench.limits.max_user_message_bytes,
@@ -13027,6 +12850,11 @@ test "released Task credential is permanently scrubbed from every product projec
     const compact_slot = try workbench.reserveCompactRecord(task, 9, run.id);
     const compact = &task.durable.compacts[compact_slot].?;
     try std.testing.expectEqualStrings("SECRET-KEY", compact.redaction_secret);
+    try workbench.replaceTracked(
+        &task.durable.execution_model,
+        "model-SECRET-KEY",
+        account_contract.Limits.model_id_bytes,
+    );
 
     run.active_phase = .completed;
     task.runtime.lifecycle = .closed;
@@ -13036,8 +12864,7 @@ test "released Task credential is permanently scrubbed from every product projec
     try std.testing.expect(task.runtime.execution == null);
     try std.testing.expectEqual(@as(usize, 0), run.redaction_secret.len);
     try std.testing.expectEqual(@as(usize, 0), compact.redaction_secret.len);
-    try std.testing.expectEqualStrings("fixture-model", task.durable.execution_model);
-    try std.testing.expect(std.mem.indexOf(u8, task.durable.binding_model_id, "SECRET-KEY") == null);
+    try std.testing.expect(std.mem.indexOf(u8, task.durable.execution_model, "SECRET-KEY") == null);
     var snapshot_storage: [96 * 1024]u8 = undefined;
     const snapshot = try workbench.writeSnapshot(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null);
@@ -13848,34 +13675,6 @@ test "default snapshot budget contains the maximum structural projection" {
                 .execution_generation = 1,
                 .execution_provider = .anthropic,
                 .execution_model = execution_model,
-                .binding_account_id = try workbench.copyBounded(
-                    "account",
-                    account_contract.Limits.account_id_bytes,
-                ),
-                .binding_account_name = try workbench.copyBounded(
-                    "",
-                    account_contract.Limits.display_name_bytes,
-                ),
-                .binding_api_key_id = try workbench.copyBounded(
-                    "key",
-                    account_contract.Limits.api_key_id_bytes,
-                ),
-                .binding_api_key_name = try workbench.copyBounded(
-                    "",
-                    account_contract.Limits.api_key_name_bytes,
-                ),
-                .binding_api_key_suffix = try workbench.copyBounded(
-                    "",
-                    account_contract.Limits.api_key_suffix_bytes,
-                ),
-                .binding_model_id = try workbench.copyBounded(
-                    "fixture-model",
-                    account_contract.Limits.model_id_bytes,
-                ),
-                .binding_model_display_name = try workbench.copyBounded(
-                    "",
-                    binding_model_display_bytes,
-                ),
                 .workspace_id = @intCast(task_index + 1),
                 .workspace_root = try workbench.copyBounded(root, limits.max_workspace_bytes),
                 .title = try workbench.copyBounded("", limits.max_task_title_bytes),

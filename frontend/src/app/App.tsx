@@ -1687,9 +1687,7 @@ export default function App() {
       modelLabel={
         newTaskDraftActive
           ? selectedModelLabel
-          : activeTask?.binding.modelDisplayName ||
-            activeTask?.binding.modelSelectionId ||
-            null
+          : activeTask?.binding.model || null
       }
       modelOptions={snapshot.account.models}
       selectedModelId={selectedModelId}

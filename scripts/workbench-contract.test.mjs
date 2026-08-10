@@ -683,10 +683,17 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   const unavailableContinuable = clone(fixture);
   unavailableContinuable.tasks[0].binding.availability = "unavailable";
   unavailableContinuable.tasks[0].binding.unavailableReason =
-    "credential_released";
+    "runtime_detached";
   assert.throws(
     () => decodeWorkbenchSnapshot(unavailableContinuable),
     /cannot accept future work/,
+  );
+
+  const leakedTaskIdentity = clone(fixture);
+  leakedTaskIdentity.tasks[0].binding.accountId = "retired-account";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(leakedTaskIdentity),
+    /expected keys/,
   );
 
   const orphanHistory = clone(fixture);

@@ -1089,14 +1089,8 @@ function decodeTask(value: unknown, path: string): TaskView {
   const bindingItem = object(item.binding, `${path}.binding`, [
     "epoch",
     "availability",
-    "accountId",
-    "accountDisplayName",
-    "apiKeySelectionId",
-    "apiKeyName",
-    "apiKeySuffix",
     "provider",
-    "modelSelectionId",
-    "modelDisplayName",
+    "model",
     "executionGeneration",
     "unavailableReason",
   ]);
@@ -1108,7 +1102,7 @@ function decodeTask(value: unknown, path: string): TaskView {
   const unavailableReason = nullableEnum(
     bindingItem.unavailableReason,
     `${path}.binding.unavailableReason`,
-    ["credential_released"] as const,
+    ["runtime_detached"] as const,
   );
   if ((availability === "available") !== (unavailableReason === null))
     fail(
@@ -1118,36 +1112,12 @@ function decodeTask(value: unknown, path: string): TaskView {
   const binding = {
     epoch: positiveWireId(bindingItem.epoch, `${path}.binding.epoch`),
     availability,
-    accountId: stringValue(bindingItem.accountId, `${path}.binding.accountId`),
-    accountDisplayName: stringValue(
-      bindingItem.accountDisplayName,
-      `${path}.binding.accountDisplayName`,
-    ),
-    apiKeySelectionId: stringValue(
-      bindingItem.apiKeySelectionId,
-      `${path}.binding.apiKeySelectionId`,
-    ),
-    apiKeyName: stringValue(
-      bindingItem.apiKeyName,
-      `${path}.binding.apiKeyName`,
-    ),
-    apiKeySuffix: stringValue(
-      bindingItem.apiKeySuffix,
-      `${path}.binding.apiKeySuffix`,
-    ),
     provider: enumValue(
       bindingItem.provider,
       `${path}.binding.provider`,
       providers,
     ),
-    modelSelectionId: stringValue(
-      bindingItem.modelSelectionId,
-      `${path}.binding.modelSelectionId`,
-    ),
-    modelDisplayName: stringValue(
-      bindingItem.modelDisplayName,
-      `${path}.binding.modelDisplayName`,
-    ),
+    model: stringValue(bindingItem.model, `${path}.binding.model`),
     executionGeneration: positiveWireId(
       bindingItem.executionGeneration,
       `${path}.binding.executionGeneration`,
