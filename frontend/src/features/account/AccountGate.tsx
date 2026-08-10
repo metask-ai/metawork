@@ -35,11 +35,11 @@ export function AccountGate({
   const { locale, setLocale, t } = useI18n();
   const authorizing = account.state === "authorizing";
   const title = authorizing
-    ? t("account.readiness.preparing.title")
-    : t("account.readiness.checking.title");
+    ? t("account.authorizing.title")
+    : t("account.checking.title");
   const body = authorizing
-    ? t("account.readiness.preparing.body")
-    : t("account.readiness.checking.body");
+    ? t("account.authorizing.body")
+    : t("account.checking.body");
 
   return (
     <main className="account-gate" data-readiness={account.state}>

@@ -109,7 +109,7 @@ Workspace
 | New task             | 新建任务     | 不使用 New session                 |
 | Skills               | 技能         | MetaWork 用户 Skill 目录与健康     |
 | MCP                  | MCP          | 可信服务、连接状态与已发现工具目录 |
-| Account & models     | 账号与模型   | API、默认模型、刷新与重新认证      |
+| Account & models     | 账号与模型   | 登录、API、默认模型与同步          |
 | Model                | 模型         | 新 Task 的执行模型，不称模式       |
 | Inspector            | 检查器       | 按需活动摘要与详情，不称 Monitor   |
 | Current activity     | 当前活动     | Agent 此刻正在进行的可观察动作     |
@@ -1161,7 +1161,7 @@ Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成
 ### 19.4 Account 与首次启动
 
 - cold restore 不闪现 disabled Workbench；
-- 首次 signed out：独立登录界面、唯一主动作、键盘可达且不显示 Workspace/Task/Composer；
+- 首次 signed out 且没有本地历史：Workbench shell 直接提供唯一登录动作；不得制造 saved account、上一次登录或 mismatch 分支；
 - OAuth 正常完成、浏览器未回调、重新打开、取消和 hard deadline；
 - 历史选择命中、唯一 Key/模型自动推进；
 - 多 API、多模型真实选择以及选择期间 reload；OAuth identity 成功后不退回未登录；

@@ -97,7 +97,7 @@ test("Renderer modules preserve the approved dependency direction", async () => 
   }
 });
 
-test("Account state gates authorization without hiding local Workbench history", async () => {
+test("transitional Account states never turn signed-out history into a security gate", async () => {
   const app = await readFile(resolve(sourceRoot, "app", "App.tsx"), "utf8");
   const gating = await readFile(
     resolve(sourceRoot, "features", "account", "gating.ts"),
@@ -111,6 +111,10 @@ test("Account state gates authorization without hiding local Workbench history",
     /state === "checking" \|\| account\.state === "authorizing"/,
   );
   assert.doesNotMatch(app, /workbenchEntered|setWorkbenchEntered/);
+  assert.match(
+    app,
+    /\(!newTaskDraftActive \|\| snapshot\.account\.canCreateTask\)/,
+  );
   assert.doesNotMatch(app, /setStatus\(\s*\{/);
   assert.doesNotMatch(app, /AccountPrerequisite|prerequisite=\{/);
   assert.doesNotMatch(

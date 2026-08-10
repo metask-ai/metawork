@@ -93,7 +93,7 @@ export function AccountIdentity({
             <span>
               {authenticated
                 ? t("account.connected")
-                : t("account.readiness.sign_in_required.title")}
+                : t("account.sign_in_required.title")}
             </span>
           </div>
           {!authenticated && (

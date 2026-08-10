@@ -42,14 +42,13 @@ export const zhCN: Record<MessageId, string> = {
   "account.gate.path": "Metask\n本地工作台",
   "account.gate.eyebrow": "Metask 访问",
   "account.gate.privacy": "API 凭据不会显示在此界面中。",
-  "account.readiness.checking.title": "正在恢复账号",
-  "account.readiness.checking.body": "MetaWork 正在检查这台设备上保存的账号。",
-  "account.readiness.sign_in_required.title": "登录 MetaWork",
-  "account.readiness.sign_in_required.body":
-    "使用 Metask 账号加载你可用的 API 和模型。",
-  "account.readiness.preparing.title": "正在准备模型",
-  "account.readiness.preparing.body":
-    "Metask 账号已连接，MetaWork 正在加载可用的 API 和模型。",
+  "account.checking.title": "正在检查登录状态",
+  "account.checking.body": "MetaWork 正在确认这台设备是否可以登录。",
+  "account.sign_in_required.title": "登录 MetaWork",
+  "account.sign_in_required.body": "使用 Metask 账号加载你可用的 API 和模型。",
+  "account.authorizing.title": "正在完成 Metask 登录",
+  "account.authorizing.body":
+    "如果浏览器中的授权页面仍然打开，请完成授权；MetaWork 随后会自动继续。",
   "account.action_failed": "账号操作需要处理",
   "account.error.no_api_keys":
     "这个 Metask 账号还没有可用的 API Key。请在 Metask 中添加后重试。",
@@ -58,12 +57,11 @@ export const zhCN: Record<MessageId, string> = {
   "account.error.deadline": "Metask 未能及时响应。请检查网络后重试。",
   "account.error.browser": "MetaWork 无法打开登录页面，请重新打开。",
   "account.error.authorization": "未能完成 Metask 登录，请重新登录。",
-  "account.error.session_expired": "登录已过期，请重新登录后继续。",
+  "account.error.session_expired": "登录已失效，请登录后继续。",
   "account.error.service": "Metask 暂时不可用，请稍后重试。",
   "account.error.metask_access":
     "登录已完成，但 Metask 拒绝了账户接口请求。授权信息已保留，请重试获取账户配置。",
-  "account.error.credentials":
-    "MetaWork 无法安全更新这台设备上保存的账号信息。",
+  "account.error.credentials": "MetaWork 无法确认这台设备上的凭据更新结果。",
   "account.error.local": "MetaWork 无法在这台设备上完成任务准备，请重试。",
   "account.error.generic": "MetaWork 无法完成账号准备。",
   "account.cancelled": "账号操作已取消。",

@@ -479,12 +479,12 @@ export function SettingsPage({
                 <strong title={account.displayName}>
                   {authenticated
                     ? account.displayName || t("account.signed_in")
-                    : t("account.readiness.sign_in_required.title")}
+                    : t("account.sign_in_required.title")}
                 </strong>
                 <span>
                   {authenticated
                     ? t("account.connected")
-                    : t("account.readiness.sign_in_required.body")}
+                    : t("account.sign_in_required.body")}
                 </span>
               </div>
               {!authenticated && (

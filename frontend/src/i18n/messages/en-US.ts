@@ -40,15 +40,15 @@ export const enUS = {
   "account.gate.path": "Metask\nLocal workbench",
   "account.gate.eyebrow": "Metask access",
   "account.gate.privacy": "Your API credentials are kept off this screen.",
-  "account.readiness.checking.title": "Restoring your account",
-  "account.readiness.checking.body":
-    "MetaWork is checking the account saved on this device.",
-  "account.readiness.sign_in_required.title": "Sign in to MetaWork",
-  "account.readiness.sign_in_required.body":
+  "account.checking.title": "Checking sign-in",
+  "account.checking.body":
+    "MetaWork is checking whether this device can sign in.",
+  "account.sign_in_required.title": "Sign in to MetaWork",
+  "account.sign_in_required.body":
     "Use your Metask account to load the APIs and models available to you.",
-  "account.readiness.preparing.title": "Preparing your models",
-  "account.readiness.preparing.body":
-    "Your Metask account is connected. MetaWork is loading your available APIs and models.",
+  "account.authorizing.title": "Finishing Metask sign-in",
+  "account.authorizing.body":
+    "Complete authorization in your browser if it is still open. MetaWork will continue automatically.",
   "account.action_failed": "Account action needs attention",
   "account.error.no_api_keys":
     "No API Keys are available for this Metask account. Add one in Metask, then try again.",
@@ -60,14 +60,13 @@ export const enUS = {
     "MetaWork could not open the sign-in page. Try opening it again.",
   "account.error.authorization":
     "The Metask sign-in could not be completed. Start sign-in again.",
-  "account.error.session_expired":
-    "Sign-in expired. Sign in again to continue.",
+  "account.error.session_expired": "Sign-in expired. Sign in to continue.",
   "account.error.service":
     "Metask is temporarily unavailable. Try again shortly.",
   "account.error.metask_access":
     "Sign-in completed, but Metask rejected the account API request. Your authorization was kept; retry loading the account configuration.",
   "account.error.credentials":
-    "MetaWork could not safely update the account saved on this device.",
+    "MetaWork could not confirm the credential update on this device.",
   "account.error.local":
     "MetaWork could not finish preparing this task on this device. Try again.",
   "account.error.generic": "MetaWork could not finish preparing this account.",

@@ -152,9 +152,12 @@ test("authorization has one cancel path and no reopen or reauthenticate branch",
     state: "authorizing",
     canCancel: true,
   });
-  assert.match(markup, /Preparing your models/);
+  assert.match(markup, /Finishing Metask sign-in/);
   assert.match(markup, /Cancel current action/);
-  assert.doesNotMatch(markup, /Open sign-in page again|Sign in again/);
+  assert.doesNotMatch(
+    markup,
+    /Open sign-in page again|Sign in again|saved account|previous account/,
+  );
 });
 
 test("signed-out settings keep local history reachable and expose sign-in", () => {
