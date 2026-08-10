@@ -8,6 +8,36 @@ const ApiKeyId = BoundedString(contract.Limits.api_key_id_bytes);
 const ModelId = BoundedString(contract.Limits.model_id_bytes);
 const SafeDiagnostic = BoundedString(contract.Limits.safe_diagnostic_bytes);
 
+const SessionState = enum {
+    restoring,
+    signed_out,
+    authorizing,
+    authenticated,
+    refreshing,
+    reauth_required,
+    shutting_down,
+};
+
+const ExecutionState = enum {
+    none,
+    preparing,
+    ready,
+    reconfiguring,
+    invalid,
+};
+
+const OperationKind = enum {
+    none,
+    oauth_callback,
+    token_exchange,
+    loading_keys,
+    selecting_key,
+    loading_models,
+    selecting_model,
+    persisting,
+    logging_out,
+};
+
 fn BoundedString(comptime capacity: usize) type {
     return struct {
         bytes: [capacity]u8 = undefined,
@@ -40,7 +70,6 @@ fn BoundedString(comptime capacity: usize) type {
 
 pub const Effect = union(enum) {
     begin_oauth,
-    reopen_oauth,
     refresh_token,
     load_api_keys,
     load_models: ApiKeyId,
@@ -62,7 +91,6 @@ pub const Effect = union(enum) {
 const AttemptKind = enum {
     none,
     login,
-    reauthenticate,
     refresh_token,
     catalog,
     logout,
@@ -82,9 +110,9 @@ pub const EffectSink = struct {
 };
 
 const CommittedState = struct {
-    session_state: contract.AccountSessionState = .restoring,
-    execution_state: contract.ExecutionState = .none,
-    operation: contract.OperationKind = .none,
+    session_state: SessionState = .restoring,
+    execution_state: ExecutionState = .none,
+    operation: OperationKind = .none,
     account_id: AccountId = .{},
     display_name: DisplayName = .{},
     selected_api_key_id: ApiKeyId = .{},
@@ -101,22 +129,40 @@ const CommittedState = struct {
     next_attempt_id: u64 = 1,
 
     fn view(self: *const CommittedState) contract.AccountView {
+        const state: contract.AccountState = switch (self.session_state) {
+            .restoring => .checking,
+            .signed_out, .reauth_required, .shutting_down => .signed_out,
+            .authorizing => .authorizing,
+            .authenticated, .refreshing => .authenticated,
+        };
+        const catalog_state: contract.CatalogState = if (state != .authenticated)
+            .unavailable
+        else switch (self.operation) {
+            .selecting_key, .selecting_model => .choosing,
+            .loading_keys, .loading_models, .persisting => .loading,
+            .none, .token_exchange => if (self.execution_state == .ready)
+                .ready
+            else if (self.error_code != .none)
+                .failed
+            else
+                .loading,
+            .oauth_callback, .logging_out => .unavailable,
+        };
+        const publish_account = state == .authenticated;
         return .{
-            .session_state = self.session_state,
-            .execution_state = self.execution_state,
-            .operation = self.operation,
-            .readiness = self.readiness(),
-            .primary_action = self.primaryAction(),
-            .can_cancel = self.operation != .none and
+            .state = state,
+            .catalog_state = catalog_state,
+            .can_cancel = (state == .authorizing or
+                (state == .authenticated and self.attempt_kind == .catalog)) and
                 self.operation != .logging_out and
                 self.operation != .persisting,
-            .account_id = self.account_id.view(),
-            .display_name = self.display_name.view(),
-            .selected_api_key_id = self.selected_api_key_id.view(),
-            .selected_model = self.selected_model.view(),
-            .candidate_api_key_id = self.pending_api_key_id.view(),
-            .candidate_model = self.pending_model.view(),
-            .model_catalog_api_key_id = switch (self.operation) {
+            .account_id = if (publish_account) self.account_id.view() else "",
+            .display_name = if (publish_account) self.display_name.view() else "",
+            .selected_api_key_id = if (publish_account) self.selected_api_key_id.view() else "",
+            .selected_model = if (publish_account) self.selected_model.view() else "",
+            .candidate_api_key_id = if (publish_account) self.pending_api_key_id.view() else "",
+            .candidate_model = if (publish_account) self.pending_model.view() else "",
+            .model_catalog_api_key_id = if (!publish_account) "" else switch (self.operation) {
                 .selecting_model, .persisting => self.pending_api_key_id.view(),
                 .loading_models => self.pending_api_key_id.view(),
                 .loading_keys => if (self.execution_state == .ready)
@@ -126,50 +172,14 @@ const CommittedState = struct {
                 .selecting_key => "",
                 else => self.selected_api_key_id.view(),
             },
-            .can_create_task = self.execution_state == .ready and
+            .can_create_task = state == .authenticated and
+                catalog_state == .ready and self.execution_state == .ready and
                 self.attempt_kind != .catalog and
                 self.operation != .logging_out,
             .error_code = self.error_code,
             .safe_diagnostic = self.safe_diagnostic.view(),
             .catalog_generation = self.catalog_generation,
-            .execution_generation = self.execution_generation,
-        };
-    }
-
-    fn readiness(self: *const CommittedState) contract.AccountReadiness {
-        if (self.session_state == .shutting_down) return .restart_required;
-        if (self.execution_state == .ready) return .ready;
-        if (self.session_state == .restoring) return .checking;
-        if (self.session_state == .signed_out) return .sign_in_required;
-        if (self.session_state == .reauth_required) return .needs_attention;
-        return switch (self.operation) {
-            .selecting_key, .selecting_model => .choice_required,
-            .none => .needs_attention,
-            else => .preparing,
-        };
-    }
-
-    fn primaryAction(
-        self: *const CommittedState,
-    ) contract.AccountPrimaryAction {
-        return switch (self.readiness()) {
-            .checking, .ready => .none,
-            .sign_in_required => .sign_in,
-            .restart_required => .restart,
-            .preparing => if (self.session_state == .authorizing and
-                self.operation == .oauth_callback)
-                .reopen_login
-            else
-                .none,
-            .choice_required => switch (self.operation) {
-                .selecting_key => .choose_api_key,
-                .selecting_model => .choose_model,
-                else => unreachable,
-            },
-            .needs_attention => if (self.session_state == .reauth_required)
-                .reauthenticate
-            else
-                .retry_catalog,
+            .execution_generation = if (publish_account) self.execution_generation else 0,
         };
     }
 
@@ -200,6 +210,14 @@ pub const Account = struct {
         return self.state.active_attempt_id;
     }
 
+    pub fn refreshInFlight(self: *const Account) bool {
+        return self.state.attempt_kind == .refresh_token;
+    }
+
+    pub fn catalogAttemptActive(self: *const Account) bool {
+        return self.state.attempt_kind == .catalog;
+    }
+
     pub fn currentIdentity(self: *const Account) ?AccountIdentity {
         if (self.state.account_id.len == 0) return null;
         return .{
@@ -212,6 +230,13 @@ pub const Account = struct {
         return self.state.execution_high_watermark;
     }
 
+    pub fn candidateCatalogActive(self: *const Account) bool {
+        return switch (self.state.operation) {
+            .selecting_key, .loading_models, .selecting_model, .persisting => true,
+            else => false,
+        };
+    }
+
     pub fn prepareCommand(
         self: *const Account,
         command: contract.AccountCommand,
@@ -219,12 +244,10 @@ pub const Account = struct {
         contract.validateCommand(command) catch
             return .{ .rejected = .invalid_command };
         if (self.state.session_state == .shutting_down)
-            return .{ .rejected = .shutting_down };
+            return .{ .rejected = .invalid_state };
 
         return switch (command) {
             .begin_login => self.prepareBeginLogin(),
-            .reopen_login => self.prepareReopenLogin(),
-            .reauthenticate => self.prepareReauthenticate(),
             .cancel_operation => self.prepareCancel(),
             .refresh_catalog => self.prepareRefreshCatalog(),
             .select_api_key => |selection| self.prepareSelectApiKey(
@@ -484,7 +507,9 @@ pub const Account = struct {
     }
 
     fn prepareBeginLogin(self: *const Account) PrepareResult {
-        if (self.state.session_state != .signed_out or
+        if ((self.state.session_state != .signed_out and
+            self.state.session_state != .reauth_required and
+            self.state.session_state != .authenticated) or
             self.state.operation != .none)
             return .{ .rejected = .invalid_state };
         const attempt = nextAttempt(self.state.next_attempt_id) orelse
@@ -499,37 +524,6 @@ pub const Account = struct {
         return transition(next, .session_changed, attempt.current, .begin_oauth);
     }
 
-    fn prepareReauthenticate(self: *const Account) PrepareResult {
-        if (self.state.session_state != .reauth_required or
-            self.state.operation != .none)
-            return .{ .rejected = .invalid_state };
-        const attempt = nextAttempt(self.state.next_attempt_id) orelse
-            return .{ .rejected = .generation_mismatch };
-        var next = self.state;
-        next.session_state = .authorizing;
-        next.operation = .oauth_callback;
-        next.active_attempt_id = attempt.current;
-        next.attempt_kind = .reauthenticate;
-        next.next_attempt_id = attempt.next;
-        next.clearError();
-        return transition(next, .session_changed, attempt.current, .begin_oauth);
-    }
-
-    fn prepareReopenLogin(self: *const Account) PrepareResult {
-        if (self.state.session_state != .authorizing or
-            self.state.operation != .oauth_callback or
-            self.state.active_attempt_id == null or
-            (self.state.attempt_kind != .login and
-                self.state.attempt_kind != .reauthenticate))
-            return .{ .rejected = .invalid_state };
-        return transition(
-            self.state,
-            .session_changed,
-            self.state.active_attempt_id.?,
-            .reopen_oauth,
-        );
-    }
-
     fn prepareCancel(self: *const Account) PrepareResult {
         if (self.state.operation == .persisting)
             return .{ .rejected = .invalid_state };
@@ -537,8 +531,8 @@ pub const Account = struct {
             return .{ .rejected = .invalid_state };
         var next = self.state;
         next.session_state = switch (next.attempt_kind) {
-            .login => .signed_out,
-            .reauthenticate, .refresh_token => .reauth_required,
+            .login => if (next.account_id.len == 0) .signed_out else .authenticated,
+            .refresh_token => .authenticated,
             .catalog => .authenticated,
             .logout, .none => next.session_state,
         };
@@ -686,8 +680,7 @@ pub const Account = struct {
 
     fn prepareLogout(self: *const Account) PrepareResult {
         if (self.state.operation != .none or
-            (self.state.session_state != .authenticated and
-                self.state.session_state != .reauth_required))
+            self.state.session_state != .authenticated)
             return .{ .rejected = .invalid_state };
         const attempt = nextAttempt(self.state.next_attempt_id) orelse
             return .{ .rejected = .generation_mismatch };
@@ -713,43 +706,26 @@ pub const Account = struct {
             self.state.operation != .token_exchange)
             return .{ .rejected = .invalid_state };
         var next = self.state;
-        switch (next.attempt_kind) {
-            .login => {
-                next.session_state = .authenticated;
-                next.operation = .none;
-                next.active_attempt_id = null;
-                next.attempt_kind = .none;
-                next.account_id = identity.account_id;
-                next.display_name = identity.display_name;
-                next.clearError();
-                return transitionNoEffect(
-                    next,
-                    .session_changed,
-                    self.state.active_attempt_id.?,
-                );
-            },
-            .reauthenticate => {
-                next.session_state = .authenticated;
-                next.execution_state = .none;
-                next.operation = .none;
-                next.active_attempt_id = null;
-                next.attempt_kind = .none;
-                next.account_id = identity.account_id;
-                next.display_name = identity.display_name;
-                next.selected_api_key_id.clear();
-                next.selected_model.clear();
-                next.pending_api_key_id.clear();
-                next.pending_model.clear();
-                next.execution_generation = 0;
-                next.clearError();
-                return transitionNoEffect(
-                    next,
-                    .session_changed,
-                    self.state.active_attempt_id.?,
-                );
-            },
-            else => return .{ .rejected = .invalid_state },
-        }
+        if (next.attempt_kind != .login)
+            return .{ .rejected = .invalid_state };
+        next.session_state = .authenticated;
+        next.execution_state = .none;
+        next.operation = .none;
+        next.active_attempt_id = null;
+        next.attempt_kind = .none;
+        next.account_id = identity.account_id;
+        next.display_name = identity.display_name;
+        next.selected_api_key_id.clear();
+        next.selected_model.clear();
+        next.pending_api_key_id.clear();
+        next.pending_model.clear();
+        next.execution_generation = 0;
+        next.clearError();
+        return transitionNoEffect(
+            next,
+            .session_changed,
+            self.state.active_attempt_id.?,
+        );
     }
 
     fn prepareTokenRefreshed(
@@ -764,7 +740,7 @@ pub const Account = struct {
                 u8,
                 refreshed.accountId(),
                 self.state.account_id.view(),
-            )) return .{ .rejected = .account_mismatch };
+            )) return .{ .rejected = .metask_unauthorized };
         }
         var next = self.state;
         if (identity) |refreshed| {
@@ -924,9 +900,22 @@ pub const Account = struct {
                 .signed_out
             else
                 next.session_state,
-            .reauthenticate, .refresh_token => .reauth_required,
+            .refresh_token => .authenticated,
             .catalog, .logout, .none => next.session_state,
         };
+        const authentication_invalid = self.state.attempt_kind == .refresh_token and
+            (normalized_failure.error_code == .token_refresh_failed or
+                normalized_failure.error_code == .metask_unauthorized);
+        if (authentication_invalid) {
+            next.session_state = .signed_out;
+            next.execution_state = .none;
+            next.account_id.clear();
+            next.display_name.clear();
+            next.selected_api_key_id.clear();
+            next.selected_model.clear();
+            next.catalog_generation = 0;
+            next.execution_generation = 0;
+        }
         if (next.execution_state == .preparing)
             next.execution_state = .none;
         if (next.execution_state == .reconfiguring)
@@ -1058,9 +1047,7 @@ fn stateIsValid(state: *const CommittedState) bool {
         },
         .authorizing => {
             if (state.operation != .oauth_callback) return false;
-            if (state.attempt_kind != .login and
-                state.attempt_kind != .reauthenticate)
-                return false;
+            if (state.attempt_kind != .login) return false;
         },
         .refreshing => {
             if (state.operation != .token_exchange or
@@ -1126,6 +1113,21 @@ pub const PreparedTransition = struct {
             .kind = self.fact_kind,
             .view = self.next.view(),
         };
+    }
+
+    pub fn candidateCatalogActive(self: *const PreparedTransition) bool {
+        return switch (self.next.operation) {
+            .selecting_key, .loading_models, .selecting_model, .persisting => true,
+            else => false,
+        };
+    }
+
+    pub fn operationComplete(self: *const PreparedTransition) bool {
+        return self.next.operation == .none;
+    }
+
+    pub fn clearsDefaultExecution(self: *const PreparedTransition) bool {
+        return self.next.operation == .none and self.next.execution_state == .none;
     }
 
     pub fn takeExecution(
@@ -1328,24 +1330,20 @@ test "command prepare does not mutate committed state before commit" {
     };
     defer prepared.deinit();
 
-    try std.testing.expectEqual(contract.AccountSessionState.signed_out, account.view().session_state);
-    try std.testing.expectEqual(contract.AccountSessionState.authorizing, prepared.fact().view.session_state);
+    try std.testing.expectEqual(contract.AccountState.signed_out, account.view().state);
+    try std.testing.expectEqual(contract.AccountState.authorizing, prepared.fact().view.state);
     try std.testing.expectEqual(@as(?u64, null), account.activeAttempt());
     _ = prepared.takeEffect();
     prepared.commit(&account);
-    try std.testing.expectEqual(contract.AccountSessionState.authorizing, account.view().session_state);
+    try std.testing.expectEqual(contract.AccountState.authorizing, account.view().state);
     try std.testing.expectEqual(@as(?u64, 1), account.activeAttempt());
 }
 
-test "Host product readiness exposes login recovery without Renderer inference" {
+test "public Account state exposes one cancellable authorization flow" {
     var account = Account.initSignedOutForTest();
     try std.testing.expectEqual(
-        contract.AccountReadiness.sign_in_required,
-        account.view().readiness,
-    );
-    try std.testing.expectEqual(
-        contract.AccountPrimaryAction.sign_in,
-        account.view().primary_action,
+        contract.AccountState.signed_out,
+        account.view().state,
     );
 
     var begin = switch (account.prepareCommand(.begin_login)) {
@@ -1355,21 +1353,10 @@ test "Host product readiness exposes login recovery without Renderer inference" 
     _ = begin.takeEffect();
     commitPrepared(&account, &begin);
     try std.testing.expectEqual(
-        contract.AccountReadiness.preparing,
-        account.view().readiness,
-    );
-    try std.testing.expectEqual(
-        contract.AccountPrimaryAction.reopen_login,
-        account.view().primary_action,
+        contract.AccountState.authorizing,
+        account.view().state,
     );
     try std.testing.expect(account.view().can_cancel);
-
-    var reopen = switch (account.prepareCommand(.reopen_login)) {
-        .transition => |value| value,
-        else => return error.TestUnexpectedResult,
-    };
-    try std.testing.expect(reopen.takeEffect().? == .reopen_oauth);
-    commitPrepared(&account, &reopen);
 
     var cancel = switch (account.prepareCommand(.cancel_operation)) {
         .transition => |value| value,
@@ -1378,8 +1365,8 @@ test "Host product readiness exposes login recovery without Renderer inference" 
     _ = cancel.takeEffect();
     commitPrepared(&account, &cancel);
     try std.testing.expectEqual(
-        contract.AccountReadiness.sign_in_required,
-        account.view().readiness,
+        contract.AccountState.signed_out,
+        account.view().state,
     );
     try std.testing.expect(!account.view().can_cancel);
 }
@@ -1404,8 +1391,8 @@ test "matching malformed completion fails the attempt instead of wedging it" {
     commitPrepared(&account, &failed);
 
     try std.testing.expectEqual(
-        contract.AccountSessionState.signed_out,
-        account.view().session_state,
+        contract.AccountState.signed_out,
+        account.view().state,
     );
     try std.testing.expectEqual(
         contract.ErrorCode.invalid_state,
@@ -1425,7 +1412,7 @@ test "fake browser client and store observe only committed effects" {
             const self: *@This() = @ptrCast(@alignCast(raw));
             if (!self.accept) return false;
             switch (effect) {
-                .begin_oauth, .reopen_oauth => self.browser_calls += 1,
+                .begin_oauth => self.browser_calls += 1,
                 .refresh_token => self.client_calls += 1,
                 .load_api_keys, .load_models => self.client_calls += 1,
                 .prepare_execution,
@@ -1473,8 +1460,8 @@ test "fake browser client and store observe only committed effects" {
         rejected.takeEffect().?,
     ));
     try std.testing.expectEqual(
-        contract.AccountSessionState.signed_out,
-        rejected_account.view().session_state,
+        contract.AccountState.signed_out,
+        rejected_account.view().state,
     );
 }
 
@@ -1498,7 +1485,7 @@ test "RestoreReady validation does not consume execution on failure" {
     try std.testing.expectEqualStrings("model-1", execution.input().target.model);
 }
 
-test "explicit reauthentication replaces identity and clears prior execution" {
+test "explicit login replaces identity and clears prior execution" {
     const allocator = std.testing.allocator;
     var account = Account.initRestoring();
     var restored_execution = try contract.OwnedExecutionConfig.initOwned(
@@ -1524,7 +1511,7 @@ test "explicit reauthentication replaces identity and clears prior execution" {
     defer installed.deinit();
     restored.commit(&account);
     restored.deinit();
-    try std.testing.expectEqual(contract.ExecutionState.ready, account.view().execution_state);
+    try std.testing.expectEqual(contract.CatalogState.ready, account.view().catalog_state);
     try std.testing.expectEqual(@as(u64, 9), account.view().execution_generation);
 
     var refresh = switch (account.prepareTokenRefresh()) {
@@ -1542,10 +1529,10 @@ test "explicit reauthentication replaces identity and clears prior execution" {
         else => return error.TestUnexpectedResult,
     };
     commitPrepared(&account, &failed);
-    try std.testing.expectEqual(contract.AccountSessionState.reauth_required, account.view().session_state);
-    try std.testing.expectEqual(contract.ExecutionState.ready, account.view().execution_state);
+    try std.testing.expectEqual(contract.AccountState.signed_out, account.view().state);
+    try std.testing.expectEqual(contract.CatalogState.unavailable, account.view().catalog_state);
 
-    var reauth = switch (account.prepareCommand(.reauthenticate)) {
+    var reauth = switch (account.prepareCommand(.begin_login)) {
         .transition => |value| value,
         else => return error.TestUnexpectedResult,
     };
@@ -1565,8 +1552,8 @@ test "explicit reauthentication replaces identity and clears prior execution" {
         else => return error.TestUnexpectedResult,
     };
     commitPrepared(&account, &replacement_transition);
-    try std.testing.expectEqual(contract.AccountSessionState.authenticated, account.view().session_state);
-    try std.testing.expectEqual(contract.ExecutionState.none, account.view().execution_state);
+    try std.testing.expectEqual(contract.AccountState.authenticated, account.view().state);
+    try std.testing.expectEqual(contract.CatalogState.loading, account.view().catalog_state);
     try std.testing.expectEqualStrings("account-2", account.view().account_id);
     try std.testing.expectEqualStrings("Other User", account.view().display_name);
     try std.testing.expectEqual(@as(u64, 0), account.view().execution_generation);
@@ -1670,7 +1657,7 @@ test "failed reconfiguration preserves committed selection and generation high w
     };
     _ = select_model.takeEffect();
     commitPrepared(&account, &select_model);
-    try std.testing.expectEqual(contract.ExecutionState.reconfiguring, account.view().execution_state);
+    try std.testing.expectEqual(contract.CatalogState.loading, account.view().catalog_state);
     try std.testing.expectEqualStrings("model-old", account.view().selected_model);
     try std.testing.expectEqualStrings("key-old", account.view().selected_api_key_id);
     try std.testing.expectEqualStrings("key-new", account.view().candidate_api_key_id);
@@ -1688,7 +1675,7 @@ test "failed reconfiguration preserves committed selection and generation high w
         else => return error.TestUnexpectedResult,
     };
     commitPrepared(&account, &failed);
-    try std.testing.expectEqual(contract.ExecutionState.ready, account.view().execution_state);
+    try std.testing.expectEqual(contract.CatalogState.ready, account.view().catalog_state);
     try std.testing.expectEqualStrings("model-old", account.view().selected_model);
     try std.testing.expectEqualStrings("key-old", account.view().selected_api_key_id);
     try std.testing.expectEqualStrings("", account.view().candidate_api_key_id);
@@ -1758,8 +1745,8 @@ test "ready execution reloads authenticated catalog before reconfiguration" {
     commitPrepared(&account, &select_api);
 
     var view = account.view();
-    try std.testing.expectEqual(contract.OperationKind.loading_keys, view.operation);
-    try std.testing.expectEqual(contract.ExecutionState.ready, view.execution_state);
+    try std.testing.expectEqual(OperationKind.loading_keys, account.state.operation);
+    try std.testing.expectEqual(contract.CatalogState.loading, view.catalog_state);
     try std.testing.expectEqualStrings("key-old", view.selected_api_key_id);
     try std.testing.expectEqualStrings("model-old", view.selected_model);
     try std.testing.expectEqualStrings("key-new", view.candidate_api_key_id);
@@ -1817,8 +1804,8 @@ test "ready execution reloads authenticated catalog before reconfiguration" {
     commitPrepared(&account, &models_ready);
 
     view = account.view();
-    try std.testing.expectEqual(contract.OperationKind.persisting, view.operation);
-    try std.testing.expectEqual(contract.ExecutionState.reconfiguring, view.execution_state);
+    try std.testing.expectEqual(OperationKind.persisting, account.state.operation);
+    try std.testing.expectEqual(contract.CatalogState.loading, view.catalog_state);
     try std.testing.expectEqualStrings("key-old", view.selected_api_key_id);
     try std.testing.expectEqualStrings("model-old", view.selected_model);
     try std.testing.expectEqualStrings("key-old", view.candidate_api_key_id);
@@ -1849,10 +1836,10 @@ test "shutdown invalidates active attempt and requires effect consumption" {
     try std.testing.expectEqual(account.activeAttempt(), effect.shutdown);
     shutdown.commit(&account);
     shutdown.deinit();
-    try std.testing.expectEqual(contract.AccountSessionState.shutting_down, account.view().session_state);
+    try std.testing.expectEqual(contract.AccountState.signed_out, account.view().state);
     try std.testing.expectEqual(@as(?u64, null), account.activeAttempt());
     try std.testing.expectEqual(
-        contract.ErrorCode.shutting_down,
+        contract.ErrorCode.invalid_state,
         account.prepareCommand(.begin_login).rejected,
     );
 }
@@ -1876,10 +1863,10 @@ test "shutdown revokes ready execution before publishing the terminal view" {
 
     const view = account.view();
     try std.testing.expectEqual(
-        contract.AccountSessionState.shutting_down,
-        view.session_state,
+        contract.AccountState.signed_out,
+        view.state,
     );
-    try std.testing.expectEqual(contract.ExecutionState.none, view.execution_state);
+    try std.testing.expectEqual(contract.CatalogState.unavailable, view.catalog_state);
     try std.testing.expectEqualStrings("", view.selected_api_key_id);
     try std.testing.expectEqualStrings("", view.selected_model);
     try std.testing.expectEqual(@as(u64, 0), view.execution_generation);
@@ -1898,8 +1885,8 @@ test "restore failure enters a terminal restart-required state" {
 
     const view = account.view();
     try std.testing.expectEqual(
-        contract.AccountSessionState.shutting_down,
-        view.session_state,
+        contract.AccountState.signed_out,
+        view.state,
     );
     try std.testing.expectEqual(
         contract.ErrorCode.credential_store_read_failed,
@@ -1911,7 +1898,7 @@ test "restore failure enters a terminal restart-required state" {
     );
     try std.testing.expect(!view.can_create_task);
     try std.testing.expectEqual(
-        contract.ErrorCode.shutting_down,
+        contract.ErrorCode.invalid_state,
         account.prepareCommand(.begin_login).rejected,
     );
 }
@@ -1927,16 +1914,8 @@ test "Windows restore failure returns to sign-in without restart semantics" {
     commitPrepared(&account, &prepared);
     const view = account.view();
     try std.testing.expectEqual(
-        contract.AccountSessionState.signed_out,
-        view.session_state,
-    );
-    try std.testing.expectEqual(
-        contract.AccountReadiness.sign_in_required,
-        view.readiness,
-    );
-    try std.testing.expectEqual(
-        contract.AccountPrimaryAction.sign_in,
-        view.primary_action,
+        contract.AccountState.signed_out,
+        view.state,
     );
     try std.testing.expectEqual(
         contract.ErrorCode.credential_store_read_failed,
@@ -1944,7 +1923,7 @@ test "Windows restore failure returns to sign-in without restart semantics" {
     );
 }
 
-test "restored refresh admission failure requires reauthentication" {
+test "restored refresh admission failure returns to signed out" {
     const identity = try AccountIdentity.init(
         "account-1",
         "MetaWork User",
@@ -1967,12 +1946,8 @@ test "restored refresh admission failure requires reauthentication" {
     commitPrepared(&account, &failed);
     const view = account.view();
     try std.testing.expectEqual(
-        contract.AccountSessionState.reauth_required,
-        view.session_state,
-    );
-    try std.testing.expectEqual(
-        contract.AccountPrimaryAction.reauthenticate,
-        view.primary_action,
+        contract.AccountState.signed_out,
+        view.state,
     );
 }
 
@@ -2001,12 +1976,12 @@ test "unknown logout persistence outcome cannot reopen ready execution" {
 
     const view = account.view();
     try std.testing.expectEqual(
-        contract.AccountSessionState.shutting_down,
-        view.session_state,
+        contract.AccountState.signed_out,
+        view.state,
     );
     try std.testing.expectEqual(
-        contract.ExecutionState.none,
-        view.execution_state,
+        contract.CatalogState.unavailable,
+        view.catalog_state,
     );
     try std.testing.expectEqual(
         contract.ErrorCode.recovery_state_invalid,
@@ -2074,12 +2049,12 @@ test "unknown execution persistence outcome clears old runtime identity" {
 
     const view = account.view();
     try std.testing.expectEqual(
-        contract.AccountSessionState.shutting_down,
-        view.session_state,
+        contract.AccountState.signed_out,
+        view.state,
     );
     try std.testing.expectEqual(
-        contract.ExecutionState.none,
-        view.execution_state,
+        contract.CatalogState.unavailable,
+        view.catalog_state,
     );
     try std.testing.expectEqualStrings("", view.selected_api_key_id);
     try std.testing.expectEqualStrings("", view.selected_model);
@@ -2111,7 +2086,7 @@ test "login commits account-only before a separate catalog generation" {
         else => return error.TestUnexpectedResult,
     };
     commitPrepared(&account, &auth_transition);
-    try std.testing.expectEqual(contract.OperationKind.none, account.view().operation);
+    try std.testing.expectEqual(OperationKind.none, account.state.operation);
     try std.testing.expectEqual(@as(?u64, null), account.activeAttempt());
 
     var begin_catalog = switch (account.prepareCommand(.refresh_catalog)) {
@@ -2186,8 +2161,8 @@ test "login commits account-only before a separate catalog generation" {
     ready_transition.deinit();
 
     const view = account.view();
-    try std.testing.expectEqual(contract.AccountSessionState.authenticated, view.session_state);
-    try std.testing.expectEqual(contract.ExecutionState.ready, view.execution_state);
+    try std.testing.expectEqual(contract.AccountState.authenticated, view.state);
+    try std.testing.expectEqual(contract.CatalogState.ready, view.catalog_state);
     try std.testing.expectEqual(@as(u64, 2), view.catalog_generation);
     try std.testing.expectEqual(@as(u64, 1), view.execution_generation);
     try std.testing.expectEqualStrings("model-1", view.selected_model);

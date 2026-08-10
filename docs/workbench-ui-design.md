@@ -96,7 +96,7 @@ Workspace
 - `Turn` 和 `Run` 通常不直接命名，用当前活动、排队、停止和结果表达。
 - 一项 Task 可以包含多次用户补充和多次执行；停止一次执行不会删除 Task。
 
-当前 Renderer 产品合同为 `metawork.renderer-bridge` 固定 revision 1：`connect` 精确协商后才开放产品路径，snapshot 根节点包含无 secret `capabilities`、`account`、`skillCatalog`、`skillManagement`、`mcp`、`workspaces`、`scheduledTasks` 与 `tasks` 且不维护局部版本；Account 直接发布 `readiness`、唯一 `primaryAction`、脱敏 catalog selection 与 generation，Workspace 独立于 Task 发布，Task 固化 binding epoch 与显示事实。快速开发阶段直接原地 hard cut 合同内容，不提供临时形态兼容层或可选字段退路；任何合同类版本标识变更必须先得到用户显式同意。Agent 内部 Session route identity 不属于 Renderer 产品模型。
+当前 Renderer 产品合同为 `metawork.renderer-bridge` 固定 revision 1：`connect` 精确协商后才开放产品路径，snapshot 根节点包含无 secret `capabilities`、`account`、`skillCatalog`、`skillManagement`、`mcp`、`workspaces`、`scheduledTasks` 与 `tasks` 且不维护局部版本；Account 只发布 `state`、`catalogState`、Host 判定的 `canCancel` / `canCreateTask`、脱敏 catalog selection 与 generation。Workspace 独立于 Task 发布，durable Task 不携带 Account identity 或 API Key 元数据。快速开发阶段直接原地 hard cut 合同内容，不提供临时形态兼容层或可选字段退路；任何合同类版本标识的变更必须先得到用户显式同意。Agent 内部 Session route identity 不属于 Renderer 产品模型。
 
 ### 3.2 规范术语
 
@@ -409,14 +409,12 @@ Recent
 Metask 已连接
 
 账号与模型设置
-重新认证          [仅需要时]
 退出登录
 ```
 
-- `reauth_required` 使用文字和图标共同标记，并把 `重新认证` 提升为菜单主动作；
 - 退出登录受 Host execution replacement gate 约束，不能只清 Renderer 状态；
 - 账号菜单只负责身份和导航，API/模型目录的完整管理进入设置页面；
-- 未登录时不渲染这张用户卡，因为未登录界面尚未进入 Workbench shell。
+- 未登录时保留本地 Workbench 历史，并把左栏账号入口切换成登录动作。
 
 ## 6. Task 生命周期
 
@@ -896,9 +894,9 @@ MetaWork
 [ 使用 Metask 登录 ]
 ```
 
-首次启动不显示四步进度条，不要求用户点击“加载 API Key”，不出现 C1/C2、Provider target、generation 或 Keychain 等技术术语。后台准备超过正常感知时长时说明正在等待什么，但不伪造百分比。OAuth 已成功而目录准备失败时必须保持已登录 identity，提供 `重试` 或 Host-owned `在 Metask 中管理`，不能退回未登录文案。Host 发布 `reauth_required` 时，身份行标为“已保存账号”并以“重新登录”为主动作；`token_refresh_failed` 或 `metask_unauthorized` 明确显示“登录已过期”，后台恢复发现 `account_mismatch` 时则说明本机登录状态需要更新。显式重新登录成功后以本次登录账号为准，界面不得要求用户匹配旧缓存账号。Gate 同时提供“退出登录”次动作，但删除本机凭据前必须二次确认，并支持 Escape 取消与焦点恢复。
+首次启动不显示四步进度条，不要求用户点击“加载 API Key”，不出现 C1/C2、Provider target、generation 或 Keychain 等技术术语。`checking` 只显示稳定的品牌与检查状态；`authorizing` 只显示等待和取消，不提供“重新打开登录页”。OAuth 已成功而目录准备失败时保持当前 identity，在设置中提供重试。登录无效直接成为 `signed_out`，左下角账号入口显示统一登录动作；不显示已保存账号、重新认证、账号不匹配或上一次登录信息。
 
-冷启动恢复期间使用稳定的品牌与恢复状态，不先渲染一套全部 disabled 的 Workbench。恢复确认 `signed_out` 后显示登录；确认 `execution_ready` 后直接进入 Workbench；确认 `account_only` 后继续目录准备。
+冷启动检查或 OAuth 授权期间使用稳定的品牌状态。确认 `signed_out` 后进入 Workbench shell并保留本地历史，只关闭 New task admission；确认 `authenticated` 后继续目录准备。任何 live Task 若仍在运行，必须继续可查看和停止。
 
 ### 14.2 设置结构
 
@@ -915,7 +913,7 @@ Account & models
 ├── Metask identity and connection status
 ├── API catalog and default API
 ├── Default model
-├── Refresh / reauthenticate
+├── Refresh or sign in
 └── Sign out and clear this device
 ```
 
@@ -936,10 +934,10 @@ Account & models
 - 进入该设置 route 的显式导航动作自动请求 Host 同步一次最新 API/模型目录；已有默认配置且 API 仍有效时，Host 自动沿用该 API 并加载其模型目录，默认模型下拉框不依赖一次 API 修改才能启用。已提交默认值在同步期间保持可读，手动 `重新同步` 只用于失败恢复或页面保持打开期间发生的 Metask 外部变更，不能成为打开下拉框或切换默认值的前置步骤；
 - API 列表显示 Metask 名称、Provider、尾号和可用/需要处理状态；不显示完整 secret；
 - Provider 是 Host 从 API catalog 确定的只读技术事实，只作为 API 名称下的次级元数据展示；Renderer 不提供 Provider、base URL 或 credential 编辑入口；
-- 切换默认 API 后加载其模型目录，并明确它只更新默认选择、不自动改绑已有 Task；符合 §6.4 条件的历史 Task 仍需单独确认 rebind；
+- 切换默认 API 后加载其模型目录，并明确它只更新默认选择、不改写 durable Task 历史或正在运行的 Session；
 - 默认模型选择与 New task Composer 使用同一 Host-owned selection，不维护两份互相漂移的 Renderer preference；
-- 既有 Task 显示当前 binding epoch 的 API/Provider/模型，旧 epoch 历史不被设置变化或 rebind 改写；
-- 跨重启历史 Task 的绑定不可恢复时，设置变化也不能使其静默采用当前默认值；只按 §6.4 提供显式 rebind 或从历史新建 Task；
+- 既有 Task 只显示解释历史所需的 Provider、模型与 generation；不显示或保存 Account identity 与 API Key 元数据；
+- 跨重启历史 Task 保持只读；设置变化不能使其静默采用当前默认值或伪造 Session；
 - `在 Metask 中管理` 只有在 Host 发布固定安全入口后才显示；当前没有该 capability 时不放置链接或假入口；
 - 只有 Task 仍持有 Session、Run、job、worker 或 credential 等真实运行时引用时，重新登录或退出登录才显示“任务仍在运行”；durable Task、只读历史和 `closed = false` 不得触发该提示。退出登录必须说明设备凭据清理和历史保留语义。
 
@@ -959,18 +957,14 @@ Account & models
 - 当前分区导航必须有持续可见的选中态和 `aria-current`，不能只在 hover 时出现；focus ring、菜单选中勾选、状态色和文字共同表达状态。
 - 桌面壳注册标准 `primary + ,` 设置快捷键，直接打开正式设置 route；快捷键只负责页面导航，不建立绕过 Account/Bridge gate 的第二命令面。
 
-Account operation 在设置中的投影如下：
+Account 状态在设置中的投影只遵循公开合同：
 
-| Host operation            | API 控件                                                           | 模型控件                                       | 状态与恢复                                                                         |
-| ------------------------- | ------------------------------------------------------------------ | ---------------------------------------------- | ---------------------------------------------------------------------------------- |
-| `none`                    | 显示当前默认 API，可选择                                           | 显示当前默认模型，可选择                       | 不常驻成功提示                                                                     |
-| `loading_keys`            | 有切换意图时显示 Host 候选 API 和 busy；普通刷新保留已提交默认 API | 模型切换时显示候选模型，否则保留已提交默认模型 | 明确候选仍在准备、当前默认仍有效；Host 允许时保留取消                              |
-| `loading_models`          | 显示候选 API 和 busy，不接收重复切换                               | 显示该 API 的模型加载状态                      | 明确旧默认配置仍然有效；Host 允许时保留取消                                        |
-| `selecting_model`         | 显示模型目录所属的候选 API                                         | 请求用户从 Host-validated 目录中选择           | 说明选择模型将完成新的默认配置；不得由 Renderer 自动选择                           |
-| `selecting_key`           | 显示真实 API 歧义并请求选择                                        | 不伪造模型入口                                 | 只在 Host 明确请求 API 选择时出现                                                  |
-| `persisting`              | 保持候选 API 可读并锁定相关 mutation                               | 保持候选模型可读并显示正在保存                 | credential persistence 已越过取消边界时不显示假取消，等待唯一 completion           |
-| cancel / terminal failure | 恢复已提交默认配置，不保留失效候选                                 | 恢复已提交默认配置，不保留失效候选             | 取消明确说明未应用更改；失败说明原因与旧默认仍有效，不能留下永久 disabled selector |
-| `reauth_required`         | 保留脱敏事实但禁用 catalog mutation                                | 保留脱敏事实但禁用 catalog mutation            | 把重新认证作为当前恢复动作，不能清空 Workspace、Task 或已有 execution 事实         |
+- `signed_out` 显示统一登录动作并禁用 API/模型 mutation；
+- `authenticated + loading` 保留已提交默认值，相关控件显示 busy，`canCancel=true` 时显示取消；
+- `authenticated + choosing` 只显示 Host 已发布的真实 API 或模型歧义；
+- `authenticated + ready` 显示当前默认值且不常驻成功提示；
+- `authenticated + failed` 保留 identity 和旧默认显示事实，提供重试并显示稳定错误；
+- Renderer 不从这些状态恢复内部 operation，也不区分或展示 credential persistence 子步骤。
 
 Skill 中心、MCP 与定时任务按 §5.2–§5.5 进入 Workbench 一级能力导航；MCP 使用稳定入口，并分别消费 Host-owned management health、Runtime/catalog availability 与 new Task access。空 registry 是可管理空状态，management capability 未接通或 outcome unknown 才进入对应不可用/恢复面；Renderer 不从 Runtime ready 推导管理动作。其他连接器和 IM 频道仍只有在真实接通并形成清晰产品 owner 后才进入导航，不照搬其他 Agent 产品的信息架构。
 
@@ -1105,7 +1099,7 @@ MetaWork 采用“明亮工作台 + 紫色任务流”的桌面工具方向。�
 3. 用户可以采取什么动作；
 4. 技术详情入口。
 
-首次启动 Account 错误必须保留已经完成的 OAuth identity，并提供与失败语义匹配的 `重试`、`重新登录`、`重新打开登录页面`、`取消`、`在 Metask 中管理` 或 `重启应用`。`authenticated` 下的目录失败显示“已登录”并提供重试；`reauth_required` 统一把 identity 标为“已保存账号”，凭据过期显示“登录已过期”，后台 identity 校验失败显示“登录状态需要更新”，两者都由显式重新登录替换为本次登录账号。进入 Workbench 后的重认证或目录错误不得清空 Workspace、Task 或草稿。普通异常不能留下无动作 spinner；只有持久化结果不确定等明确 fail-closed 边界可以要求重启。
+Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成时提供取消；已认证后的目录失败保持 `authenticated` 并提供重试；凭据失效直接进入 `signed_out`，由普通登录建立新 identity。错误动作必须与当前四态合同一致，普通异常不能留下无动作 spinner。
 
 工具失败但 Agent 已恢复时不能把整个 Task 标记为失败。任务级失败才进入左栏 Failed 状态。
 

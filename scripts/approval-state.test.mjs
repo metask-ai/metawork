@@ -20,11 +20,8 @@ import {
 const requestA = { taskId: "3", runId: "7", requestId: "11" };
 const requestB = { taskId: "4", runId: "8", requestId: "12" };
 const account = {
-  sessionState: "signed_out",
-  executionState: "none",
-  operation: "none",
-  readiness: "sign_in_required",
-  primaryAction: "sign_in",
+  state: "signed_out",
+  catalogState: "unavailable",
   canCancel: false,
   accountId: "",
   displayName: "",

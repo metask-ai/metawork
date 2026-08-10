@@ -1371,7 +1371,9 @@ test("Renderer Bridge fixed revision 1 owns the exact product wire catalog", () 
     ].sort();
   assert.deepEqual(catalog(rendererCommands), catalog(zigCommands));
   assert.deepEqual(catalog(appManifest), catalog(zigCommands));
-  assert.ok(catalog(zigCommands).includes("metawork.account.reopenLogin"));
+  assert.ok(catalog(zigCommands).includes("metawork.account.beginLogin"));
+  assert.ok(!catalog(zigCommands).includes("metawork.account.reopenLogin"));
+  assert.ok(!catalog(zigCommands).includes("metawork.account.reauthenticate"));
   assert.deepEqual(
     catalog(zigCommands).filter((command) =>
       command.startsWith("metawork.host."),
@@ -1483,8 +1485,9 @@ test("Renderer Bridge fixed revision 1 owns the exact product wire catalog", () 
 
   const contracts = read("frontend/src/bridge/contracts.ts");
   assert.doesNotMatch(contracts, /schemaVersion|WORKBENCH_SCHEMA_VERSION/);
-  assert.match(contracts, /readiness: AccountReadiness/);
-  assert.match(contracts, /primaryAction: AccountPrimaryAction/);
+  assert.match(contracts, /state: AccountState/);
+  assert.match(contracts, /catalogState: CatalogState/);
+  assert.doesNotMatch(contracts, /AccountReadiness|AccountPrimaryAction/);
   assert.match(contracts, /account: AccountView/);
   assert.match(contracts, /workspaces: WorkspaceView\[\]/);
   assert.match(contracts, /tasks: TaskView\[\]/);

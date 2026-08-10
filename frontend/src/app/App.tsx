@@ -142,7 +142,6 @@ export default function App() {
   const [route, setRoute] = useState<ShellRoute>("workbench");
   const [settingsFocus, setSettingsFocus] =
     useState<SettingsFocusTarget>("title");
-  const [workbenchEntered, setWorkbenchEntered] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [skillsQuery, setSkillsQuery] = useState("");
@@ -226,10 +225,7 @@ export default function App() {
     ? newTaskDrafts.updateDraft
     : taskDrafts.updateDraft;
   const bridgeUnavailable = viewSyncFailed || !bridgeReady;
-  const accountGateRequired = requiresAccountGate(
-    workbenchEntered,
-    snapshot.account,
-  );
+  const accountGateRequired = requiresAccountGate(snapshot.account);
   const workbenchMutationDisabled =
     bridgeUnavailable ||
     taskHistoryMutationBlocked(
@@ -366,14 +362,6 @@ export default function App() {
   }, [client, observeUiResponseSnapshot, taskDrafts.pruneDrafts]);
 
   useEffect(() => {
-    if (snapshot.account.readiness === "ready") setWorkbenchEntered(true);
-    if (snapshot.account.sessionState === "signed_out") {
-      setWorkbenchEntered(false);
-      setRoute("workbench");
-    }
-  }, [snapshot.account.readiness, snapshot.account.sessionState]);
-
-  useEffect(() => {
     const openSearch = (event: KeyboardEvent) => {
       if (!event.metaKey && !event.ctrlKey) return;
       const key = event.key.toLowerCase();
@@ -410,7 +398,7 @@ export default function App() {
 
   useEffect(() => {
     if (
-      snapshot.account.readiness !== "ready" ||
+      !snapshot.account.canCreateTask ||
       activeTask !== null ||
       workbench.draftOpen
     )
@@ -420,7 +408,7 @@ export default function App() {
       workspaceId: null,
     });
     window.requestAnimationFrame(() => composer.current?.focus());
-  }, [activeTask, snapshot.account.readiness, workbench.draftOpen]);
+  }, [activeTask, snapshot.account.canCreateTask, workbench.draftOpen]);
 
   function focusPendingRequest() {
     const requestId = activeTask?.pendingUi?.requestId;
@@ -842,8 +830,8 @@ export default function App() {
     if (
       bridgeUnavailable ||
       accountBusyRef.current ||
-      snapshot.account.sessionState !== "authenticated" ||
-      snapshot.account.operation !== "none"
+      snapshot.account.state !== "authenticated" ||
+      snapshot.account.catalogState === "loading"
     )
       return;
     void runAccountCommand(() => client.refreshAccountCatalog());
@@ -1578,7 +1566,6 @@ export default function App() {
     return (
       <AccountGate
         account={snapshot.account}
-        disabled={bridgeUnavailable || accountBusy}
         cancelDisabled={viewSyncFailed || !bridgeReady || accountCancelBusy}
         connectionFailed={viewSyncFailed}
         connectionRetryable={connectionRetryable}
@@ -1593,34 +1580,7 @@ export default function App() {
             : ""
         }
         onReconnect={() => void retryViewSynchronization()}
-        onBeginLogin={() => void runAccountCommand(() => client.beginLogin())}
-        onReopenLogin={() => void runAccountCommand(() => client.reopenLogin())}
-        onReauthenticate={() =>
-          void runAccountCommand(() => client.reauthenticate())
-        }
-        onLogout={() => void runAccountCommand(() => client.logout())}
         onCancel={() => void cancelAccountOperation()}
-        onRetry={() =>
-          void runAccountCommand(() => client.refreshAccountCatalog())
-        }
-        onSelectApiKey={(id) =>
-          void runAccountCommand(() =>
-            client.selectApiKey(
-              id,
-              snapshot.account.catalogGeneration,
-              snapshot.account.executionGeneration,
-            ),
-          )
-        }
-        onSelectModel={(id) =>
-          void runAccountCommand(() =>
-            client.selectModel(
-              id,
-              snapshot.account.catalogGeneration,
-              snapshot.account.executionGeneration,
-            ),
-          )
-        }
       />
     );
 
@@ -1737,11 +1697,11 @@ export default function App() {
       modelSelectionDisabled={
         bridgeUnavailable ||
         accountBusy ||
-        snapshot.account.operation !== "none" ||
+        snapshot.account.catalogState === "loading" ||
         snapshot.account.models.length === 0
       }
       modelSelectionPending={
-        accountBusy || snapshot.account.operation !== "none"
+        accountBusy || snapshot.account.catalogState === "loading"
       }
       modelContextTitle={
         newTaskDraftActive
@@ -1893,8 +1853,8 @@ export default function App() {
               active={false}
               disabled={bridgeUnavailable || accountBusy}
               onOpenSettings={openSettings}
-              onReauthenticate={() =>
-                void runAccountCommand(() => client.reauthenticate())
+              onBeginLogin={() =>
+                void runAccountCommand(() => client.beginLogin())
               }
             />
           </div>
@@ -1948,9 +1908,7 @@ export default function App() {
           }
           onChooseWorkspace={chooseWorkspaceForSettings}
           onRemoveWorkspace={removeWorkspaceById}
-          onReauthenticate={() =>
-            void runAccountCommand(() => client.reauthenticate())
-          }
+          onBeginLogin={() => void runAccountCommand(() => client.beginLogin())}
           onLogout={() => void runAccountCommand(() => client.logout())}
         />
       ) : route === "skills" ? (

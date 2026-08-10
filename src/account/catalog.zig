@@ -548,10 +548,7 @@ pub const PublicCatalog = struct {
             };
         }
         view.api_keys = self.api_key_views[0..self.api_key_count];
-        view.models = if (view.operation == .loading_models)
-            &.{}
-        else
-            self.model_views[0..self.model_count];
+        view.models = self.model_views[0..self.model_count];
     }
 };
 
@@ -999,23 +996,14 @@ test "live-shape catalogs expose only masked views and move one key owner" {
     );
     session.reset();
     var public_view: contract.AccountView = .{
-        .session_state = .authenticated,
-        .execution_state = .ready,
-        .operation = .none,
-        .readiness = .ready,
-        .primary_action = .none,
+        .state = .authenticated,
+        .catalog_state = .ready,
     };
     public_catalog.decorate(&public_view);
     try std.testing.expectEqual(@as(usize, 1), public_view.api_keys.len);
     try std.testing.expectEqualStrings("325", public_view.api_keys[0].id);
     try std.testing.expectEqual(@as(usize, 1), public_view.models.len);
     try std.testing.expectEqualStrings("model-1", public_view.models[0].id);
-    public_view.operation = .loading_models;
-    public_catalog.decorate(&public_view);
-    try std.testing.expectEqual(@as(usize, 0), public_view.models.len);
-    public_view.operation = .none;
-    public_catalog.decorate(&public_view);
-    try std.testing.expectEqual(@as(usize, 1), public_view.models.len);
 }
 
 test "catalog accepts additive metadata and rejects duplicate ids, pagination, and platforms" {

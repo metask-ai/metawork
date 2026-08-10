@@ -18,60 +18,19 @@ pub const Limits = struct {
     pub const model_entries: usize = 512;
 };
 
-pub const AccountSessionState = enum {
-    restoring,
+pub const AccountState = enum {
+    checking,
     signed_out,
     authorizing,
     authenticated,
-    refreshing,
-    reauth_required,
-    shutting_down,
 };
 
-pub const ExecutionState = enum {
-    none,
-    preparing,
+pub const CatalogState = enum {
+    unavailable,
+    loading,
+    choosing,
     ready,
-    reconfiguring,
-    invalid,
-};
-
-pub const OperationKind = enum {
-    none,
-    oauth_callback,
-    token_exchange,
-    loading_keys,
-    selecting_key,
-    loading_models,
-    selecting_model,
-    persisting,
-    logging_out,
-};
-
-/// User-facing readiness is published by the Host. The Renderer must not
-/// reconstruct it from AccountSessionState, ExecutionState, or OperationKind.
-pub const AccountReadiness = enum {
-    checking,
-    sign_in_required,
-    preparing,
-    choice_required,
-    ready,
-    needs_attention,
-    restart_required,
-};
-
-/// The one product action that may be visually primary for the current
-/// readiness state. Settings actions such as logout are intentionally outside
-/// this onboarding projection.
-pub const AccountPrimaryAction = enum {
-    none,
-    sign_in,
-    reopen_login,
-    choose_api_key,
-    choose_model,
-    retry_catalog,
-    reauthenticate,
-    restart,
+    failed,
 };
 
 pub const ProviderKind = enum {
@@ -101,7 +60,6 @@ pub const ErrorCode = enum {
     user_cancelled,
     deadline_exceeded,
     token_refresh_failed,
-    account_mismatch,
     metask_unauthorized,
     metask_rate_limited,
     metask_service_unavailable,
@@ -119,7 +77,6 @@ pub const ErrorCode = enum {
     recovery_state_invalid,
     local_resource_exhausted,
     dependency_contract_invalid,
-    shutting_down,
 };
 
 pub const ApiKeyView = struct {
@@ -143,11 +100,8 @@ pub const ExecutionTarget = struct {
 /// Borrowed, secret-free product projection. Its slices are valid only for the
 /// synchronous call that receives it; Workbench must copy into owned storage.
 pub const AccountView = struct {
-    session_state: AccountSessionState,
-    execution_state: ExecutionState,
-    operation: OperationKind,
-    readiness: AccountReadiness,
-    primary_action: AccountPrimaryAction,
+    state: AccountState,
+    catalog_state: CatalogState,
     can_cancel: bool = false,
     account_id: []const u8 = "",
     display_name: []const u8 = "",
@@ -189,8 +143,6 @@ pub const AccountSelectionCommand = struct {
 
 pub const AccountCommand = union(enum) {
     begin_login,
-    reopen_login,
-    reauthenticate,
     cancel_operation,
     refresh_catalog,
     select_api_key: AccountSelectionCommand,
@@ -450,23 +402,14 @@ pub fn validateView(view: AccountView) ValidationError!void {
             if (std.mem.eql(u8, prior.id, model.id))
                 return error.InconsistentState;
     }
-    const candidate_allowed = switch (view.operation) {
-        .loading_keys, .loading_models, .selecting_model, .persisting => true,
-        else => false,
-    };
+    const candidate_allowed = view.state == .authenticated and
+        (view.catalog_state == .loading or view.catalog_state == .choosing);
     if (!candidate_allowed and
         (view.candidate_api_key_id.len != 0 or view.candidate_model.len != 0))
         return error.InconsistentState;
     if (view.candidate_model.len != 0 and view.candidate_api_key_id.len == 0)
         return error.InconsistentState;
-    if ((view.operation == .loading_models or
-        view.operation == .selecting_model or
-        view.operation == .persisting) and
-        view.candidate_api_key_id.len == 0)
-        return error.InconsistentState;
-    if (view.operation == .persisting and view.candidate_model.len == 0)
-        return error.InconsistentState;
-    if (view.candidate_api_key_id.len != 0 and view.operation != .loading_keys) {
+    if (view.candidate_api_key_id.len != 0 and view.catalog_state == .choosing) {
         var candidate_api_matches: usize = 0;
         for (view.api_keys) |key| {
             if (std.mem.eql(u8, key.id, view.candidate_api_key_id))
@@ -474,7 +417,7 @@ pub fn validateView(view: AccountView) ValidationError!void {
         }
         if (candidate_api_matches != 1) return error.InconsistentState;
     }
-    if (view.candidate_model.len != 0 and view.operation == .persisting) {
+    if (view.candidate_model.len != 0) {
         var candidate_model_matches: usize = 0;
         for (view.models) |model| {
             if (std.mem.eql(u8, model.id, view.candidate_model))
@@ -483,7 +426,7 @@ pub fn validateView(view: AccountView) ValidationError!void {
         if (candidate_model_matches != 1) return error.InconsistentState;
     }
 
-    if (view.execution_state == .ready) {
+    if (view.catalog_state == .ready) {
         if (view.execution_generation == 0 or
             view.account_id.len == 0 or
             view.selected_api_key_id.len == 0 or
@@ -499,26 +442,13 @@ pub fn validateView(view: AccountView) ValidationError!void {
             if (std.mem.eql(u8, model.id, view.selected_model))
                 model_matches += 1;
         }
-        const catalog_reconfiguration = switch (view.operation) {
-            .loading_keys,
-            .selecting_key,
-            .loading_models,
-            .selecting_model,
-            .persisting,
-            => true,
-            else => false,
-        };
-        if (!catalog_reconfiguration and
-            (api_key_matches != 1 or model_matches != 1))
-            return error.InconsistentState;
-        if (catalog_reconfiguration and view.can_create_task)
+        if (api_key_matches != 1 or model_matches != 1)
             return error.InconsistentState;
     } else if (view.can_create_task) {
         return error.InconsistentState;
     }
     if (view.models.len == 0) {
-        if (view.model_catalog_api_key_id.len != 0 and
-            view.operation != .loading_models)
+        if (view.model_catalog_api_key_id.len != 0)
             return error.InconsistentState;
     } else {
         if (view.model_catalog_api_key_id.len == 0)
@@ -532,54 +462,36 @@ pub fn validateView(view: AccountView) ValidationError!void {
     }
     if (view.error_code == .none and view.safe_diagnostic.len != 0)
         return error.InconsistentState;
-    const expected_can_cancel = view.operation != .none and
-        view.operation != .logging_out and
-        view.operation != .persisting;
-    if (view.can_cancel != expected_can_cancel)
+    if (view.can_cancel and view.state != .authorizing and
+        view.catalog_state != .loading and view.catalog_state != .choosing)
         return error.InconsistentState;
-    switch (view.readiness) {
-        .checking => if (view.primary_action != .none or
-            view.session_state != .restoring)
-            return error.InconsistentState,
-        .sign_in_required => if (view.primary_action != .sign_in or
-            view.session_state != .signed_out or
-            view.operation != .none)
-            return error.InconsistentState,
-        .preparing => if ((view.primary_action != .none and
-            view.primary_action != .reopen_login) or
-            view.operation == .none or
-            view.operation == .selecting_key or
-            view.operation == .selecting_model)
-            return error.InconsistentState,
-        .choice_required => switch (view.primary_action) {
-            .choose_api_key => if (view.operation != .selecting_key or
-                view.api_keys.len == 0)
-                return error.InconsistentState,
-            .choose_model => if (view.operation != .selecting_model or
-                view.models.len == 0)
-                return error.InconsistentState,
-            else => return error.InconsistentState,
+    switch (view.state) {
+        .checking, .signed_out, .authorizing => {
+            if (view.catalog_state != .unavailable or
+                view.account_id.len != 0 or view.display_name.len != 0 or
+                view.api_keys.len != 0 or view.models.len != 0 or
+                view.selected_api_key_id.len != 0 or
+                view.selected_model.len != 0 or
+                view.candidate_api_key_id.len != 0 or
+                view.candidate_model.len != 0 or
+                view.model_catalog_api_key_id.len != 0 or
+                view.execution_generation != 0 or view.can_create_task)
+                return error.InconsistentState;
+            if (view.state == .authorizing and !view.can_cancel)
+                return error.InconsistentState;
+            if (view.state != .authorizing and view.can_cancel)
+                return error.InconsistentState;
         },
-        .ready => if (view.primary_action != .none or
-            view.execution_state != .ready)
-            return error.InconsistentState,
-        .needs_attention => switch (view.primary_action) {
-            .retry_catalog => if (view.session_state != .authenticated or
-                view.operation != .none)
-                return error.InconsistentState,
-            .reauthenticate => if (view.session_state != .reauth_required or
-                view.operation != .none)
-                return error.InconsistentState,
-            else => return error.InconsistentState,
+        .authenticated => {
+            if (view.account_id.len == 0 or view.display_name.len == 0 or
+                view.catalog_state == .unavailable)
+                return error.InconsistentState;
+            if (view.catalog_state == .choosing and view.api_keys.len == 0)
+                return error.InconsistentState;
+            if (view.catalog_state == .failed and view.error_code == .none)
+                return error.InconsistentState;
         },
-        .restart_required => if (view.primary_action != .restart or
-            view.session_state != .shutting_down)
-            return error.InconsistentState,
     }
-    if (view.primary_action == .reopen_login and
-        (view.session_state != .authorizing or
-            view.operation != .oauth_callback))
-        return error.InconsistentState;
 }
 
 fn validateRequired(value: []const u8, max_bytes: usize) ValidationError!void {
@@ -625,11 +537,10 @@ test "AccountCommandSink returns only public acceptance metadata" {
 
 test "AccountView rejects ready execution without committed generation" {
     try std.testing.expectError(error.InconsistentState, validateView(.{
-        .session_state = .authenticated,
-        .execution_state = .ready,
-        .operation = .none,
-        .readiness = .ready,
-        .primary_action = .none,
+        .state = .authenticated,
+        .catalog_state = .ready,
+        .account_id = "account-1",
+        .display_name = "User",
         .selected_model = "metask-model",
         .can_create_task = true,
     }));
@@ -637,19 +548,10 @@ test "AccountView rejects ready execution without committed generation" {
 
 test "AccountView rejects an actionless catalog choice" {
     try std.testing.expectError(error.InconsistentState, validateView(.{
-        .session_state = .authenticated,
-        .execution_state = .preparing,
-        .operation = .selecting_key,
-        .readiness = .choice_required,
-        .primary_action = .choose_api_key,
-        .can_cancel = true,
-    }));
-    try std.testing.expectError(error.InconsistentState, validateView(.{
-        .session_state = .authenticated,
-        .execution_state = .preparing,
-        .operation = .selecting_model,
-        .readiness = .choice_required,
-        .primary_action = .choose_model,
+        .state = .authenticated,
+        .catalog_state = .choosing,
+        .account_id = "account-1",
+        .display_name = "User",
         .can_cancel = true,
     }));
 }

@@ -34,9 +34,11 @@ pub const Coordinator = struct {
     ) account_contract.AccountCommandResult {
         const self: *Coordinator = @ptrCast(@alignCast(context));
         self.assertMainThread();
+        const current = self.runtime.view();
         const replacement: ExecutionReplacement = switch (command) {
             .select_model => .default,
-            .reauthenticate, .logout => .identity,
+            .begin_login => if (current.state == .authenticated) .identity else .none,
+            .logout => .identity,
             else => .none,
         };
         return switch (self.runtime.prepareCommand(command)) {
@@ -136,14 +138,13 @@ pub const Coordinator = struct {
             var execution = execution_value;
             self.workbench.installExecutionNoFail(&execution);
         } else if (self.workbench.executionReplacementPending() and
-            fact.view.operation == .none and
-            fact.view.execution_state == .none)
+            prepared.clearsDefaultExecution())
         {
             self.workbench.clearExecutionNoFail();
         }
         self.runtime.commit(&prepared);
         if (self.workbench.executionReplacementPending() and
-            fact.view.operation == .none)
+            prepared.operationComplete())
             self.workbench.endExecutionReplacementNoFail();
         self.workbench.finishAccountCommitNoFail();
 
@@ -250,31 +251,31 @@ test "Application coordinator commits Account Runtime facts into Workbench" {
     );
     try std.testing.expect(restored.accepted);
     try std.testing.expectEqual(
-        account_contract.AccountSessionState.authenticated,
-        account_runtime.view().session_state,
+        account_contract.AccountState.authenticated,
+        account_runtime.view().state,
     );
     try std.testing.expectEqual(
-        account_contract.ExecutionState.ready,
-        account_runtime.view().execution_state,
+        account_contract.CatalogState.ready,
+        account_runtime.view().catalog_state,
     );
     try std.testing.expectEqual(
-        account_contract.AccountSessionState.authenticated,
-        workbench.accountView().session_state,
+        account_contract.AccountState.authenticated,
+        workbench.accountView().state,
     );
     try std.testing.expect(workbench.accountView().can_create_task);
 
     coordinator.shutdown();
     try std.testing.expectEqual(
-        account_contract.AccountSessionState.shutting_down,
-        account_runtime.view().session_state,
+        account_contract.AccountState.signed_out,
+        account_runtime.view().state,
     );
     try std.testing.expectEqual(
-        account_contract.AccountSessionState.shutting_down,
-        workbench.accountView().session_state,
+        account_contract.AccountState.signed_out,
+        workbench.accountView().state,
     );
     try std.testing.expectEqual(
-        account_contract.ExecutionState.none,
-        workbench.accountView().execution_state,
+        account_contract.CatalogState.unavailable,
+        workbench.accountView().catalog_state,
     );
     try std.testing.expectEqual(@as(usize, 0), workbench.accountView().api_keys.len);
     try std.testing.expectEqual(@as(usize, 0), workbench.accountView().models.len);
@@ -346,8 +347,8 @@ test "Application coordinator balances Workbench gate when Account effect admiss
         rejected.error_code,
     );
     try std.testing.expectEqual(
-        account_contract.AccountSessionState.authenticated,
-        account_runtime.view().session_state,
+        account_contract.AccountState.authenticated,
+        account_runtime.view().state,
     );
     try std.testing.expect(workbench.accountView().can_create_task);
     try std.testing.expectEqual(revision, workbench.currentRevision());

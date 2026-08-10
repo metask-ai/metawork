@@ -591,7 +591,7 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   invalidReadyAccount.account.executionGeneration = "0";
   assert.throws(
     () => decodeWorkbenchSnapshot(invalidReadyAccount),
-    /ready execution requires/,
+    /ready catalog requires/,
   );
 
   const keyOutsideCatalog = clone(fixture);
@@ -608,28 +608,15 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     /selected catalog membership/,
   );
 
-  const refreshingReadyAccount = clone(fixture);
-  refreshingReadyAccount.account.sessionState = "refreshing";
-  assert.doesNotThrow(() => decodeWorkbenchSnapshot(refreshingReadyAccount));
-
-  const mismatchedPrimaryAction = clone(fixture);
-  mismatchedPrimaryAction.account.primaryAction = "sign_in";
-  assert.throws(
-    () => decodeWorkbenchSnapshot(mismatchedPrimaryAction),
-    /readiness and primary action disagree/,
-  );
-
   const mismatchedCancellation = clone(fixture);
   mismatchedCancellation.account.canCancel = true;
   assert.throws(
     () => decodeWorkbenchSnapshot(mismatchedCancellation),
-    /cancellation availability disagrees/,
+    /cancellation requires active authorization or catalog work/,
   );
 
   const persistenceCommitted = clone(fixture);
-  persistenceCommitted.account.executionState = "reconfiguring";
-  persistenceCommitted.account.operation = "persisting";
-  persistenceCommitted.account.readiness = "preparing";
+  persistenceCommitted.account.catalogState = "loading";
   persistenceCommitted.account.canCreateTask = false;
   persistenceCommitted.account.candidateApiKeySelectionId = "key-1";
   persistenceCommitted.account.candidateModelSelectionId = "fixture-model";
@@ -637,10 +624,7 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
 
   const cancellablePersistence = clone(persistenceCommitted);
   cancellablePersistence.account.canCancel = true;
-  assert.throws(
-    () => decodeWorkbenchSnapshot(cancellablePersistence),
-    /cancellation availability disagrees/,
-  );
+  assert.doesNotThrow(() => decodeWorkbenchSnapshot(cancellablePersistence));
 
   const candidateAtRest = clone(fixture);
   candidateAtRest.account.candidateApiKeySelectionId = "key-1";
@@ -650,8 +634,7 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   );
 
   const unresolvedCandidate = clone(fixture);
-  unresolvedCandidate.account.operation = "loading_keys";
-  unresolvedCandidate.account.readiness = "preparing";
+  unresolvedCandidate.account.catalogState = "loading";
   unresolvedCandidate.account.canCancel = true;
   unresolvedCandidate.account.canCreateTask = false;
   unresolvedCandidate.account.candidateApiKeySelectionId = "key-pending";
@@ -659,16 +642,10 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
 
   const incompletePersistence = clone(persistenceCommitted);
   incompletePersistence.account.candidateModelSelectionId = "";
-  assert.throws(
-    () => decodeWorkbenchSnapshot(incompletePersistence),
-    /persistence requires a complete candidate execution target/,
-  );
+  assert.doesNotThrow(() => decodeWorkbenchSnapshot(incompletePersistence));
 
   const emptyKeyChoice = clone(fixture);
-  emptyKeyChoice.account.executionState = "reconfiguring";
-  emptyKeyChoice.account.operation = "selecting_key";
-  emptyKeyChoice.account.readiness = "choice_required";
-  emptyKeyChoice.account.primaryAction = "choose_api_key";
+  emptyKeyChoice.account.catalogState = "choosing";
   emptyKeyChoice.account.canCancel = true;
   emptyKeyChoice.account.canCreateTask = false;
   emptyKeyChoice.account.apiKeys = [];
@@ -676,19 +653,14 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   emptyKeyChoice.account.modelCatalogApiKeySelectionId = "";
   assert.throws(
     () => decodeWorkbenchSnapshot(emptyKeyChoice),
-    /choice requires at least one candidate/,
+    /catalog choice requires at least one API/,
   );
 
   const emptyModelChoice = clone(emptyKeyChoice);
-  emptyModelChoice.account.operation = "selecting_model";
-  emptyModelChoice.account.primaryAction = "choose_model";
   emptyModelChoice.account.apiKeys = fixture.account.apiKeys;
   emptyModelChoice.account.models = [];
   emptyModelChoice.account.candidateApiKeySelectionId = "key-1";
-  assert.throws(
-    () => decodeWorkbenchSnapshot(emptyModelChoice),
-    /choice requires at least one candidate/,
-  );
+  assert.doesNotThrow(() => decodeWorkbenchSnapshot(emptyModelChoice));
 
   const duplicateModel = clone(fixture);
   duplicateModel.account.models = [

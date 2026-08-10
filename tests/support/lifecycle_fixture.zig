@@ -2098,11 +2098,8 @@ pub fn installWorkbenchExecution(
     workbench.commitAccountFactNoFail(.{
         .kind = .execution_changed,
         .view = .{
-            .session_state = .authenticated,
-            .execution_state = .ready,
-            .operation = .none,
-            .readiness = .ready,
-            .primary_action = .none,
+            .state = .authenticated,
+            .catalog_state = .ready,
             .account_id = "account-1",
             .display_name = "Fixture User",
             .api_keys = &api_keys,

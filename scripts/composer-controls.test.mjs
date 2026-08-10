@@ -284,11 +284,8 @@ test("SelectionMenu exposes a visible busy state without a false chevron", () =>
 });
 
 const readySettingsAccount = {
-  sessionState: "authenticated",
-  executionState: "ready",
-  operation: "none",
-  readiness: "ready",
-  primaryAction: "none",
+  state: "authenticated",
+  catalogState: "ready",
   canCancel: false,
   accountId: "account-1",
   displayName: "Metask User",
@@ -352,7 +349,7 @@ function settingsElement(account, overrides = {}) {
       async onRemoveWorkspace() {
         return { kind: "accepted" };
       },
-      onReauthenticate() {},
+      onBeginLogin() {},
       onLogout() {},
       ...overrides,
     }),
@@ -417,7 +414,7 @@ test("Settings completes the API transaction before replacing committed defaults
 
   view.rerenderAccount({
     ...readySettingsAccount,
-    operation: "loading_keys",
+    catalogState: "loading",
     candidateApiKeySelectionId: "key-2",
     canCreateTask: false,
     canCancel: true,
@@ -434,7 +431,7 @@ test("Settings completes the API transaction before replacing committed defaults
 
   view.rerenderAccount({
     ...readySettingsAccount,
-    operation: "loading_models",
+    catalogState: "loading",
     candidateApiKeySelectionId: "key-2",
     modelCatalogApiKeySelectionId: "key-2",
     models: [],
@@ -451,9 +448,7 @@ test("Settings completes the API transaction before replacing committed defaults
 
   view.rerenderAccount({
     ...readySettingsAccount,
-    operation: "selecting_model",
-    readiness: "choice_required",
-    primaryAction: "choose_model",
+    catalogState: "choosing",
     candidateApiKeySelectionId: "key-2",
     modelCatalogApiKeySelectionId: "key-2",
     models: [{ selectionId: "model-2", displayName: "Model Two" }],
@@ -476,9 +471,7 @@ test("Settings completes the API transaction before replacing committed defaults
 
   view.rerenderAccount({
     ...readySettingsAccount,
-    executionState: "reconfiguring",
-    operation: "persisting",
-    readiness: "preparing",
+    catalogState: "loading",
     candidateApiKeySelectionId: "key-2",
     candidateModelSelectionId: "model-2",
     modelCatalogApiKeySelectionId: "key-2",
@@ -486,11 +479,7 @@ test("Settings completes the API transaction before replacing committed defaults
     canCreateTask: false,
     canCancel: false,
   });
-  assert.match(
-    screen.getByRole("status").textContent,
-    /Saving the new default/,
-  );
-  assert.match(screen.getByRole("status").textContent, /Backup · Model Two/);
+  assert.match(screen.getByRole("status").textContent, /Preparing Model Two/);
   assert.equal(screen.queryByRole("button", { name: "Cancel" }), null);
 
   view.rerenderAccount({
@@ -534,7 +523,7 @@ test("Settings limits API transaction locking and keeps a real cancel path", asy
   renderSettings(
     {
       ...readySettingsAccount,
-      operation: "loading_models",
+      catalogState: "loading",
       candidateApiKeySelectionId: "key-2",
       modelCatalogApiKeySelectionId: "key-2",
       models: [],

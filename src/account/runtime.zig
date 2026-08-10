@@ -282,28 +282,6 @@ const Effects = struct {
         self.replaceWithFailure(attempt_id, error_code);
     }
 
-    fn reopenLogin(
-        self: *Effects,
-        attempt_id: u64,
-        platform: *platform_impl.NativeBackend,
-    ) void {
-        if (!self.login_active or
-            !self.login_attempt.matches(attempt_id))
-        {
-            self.failLoginAttempt(
-                attempt_id,
-                .dependency_contract_invalid,
-            );
-            return;
-        }
-        platform.openAuthorizationUrl(
-            self.login_attempt.authorizationUrl(),
-        ) catch self.failLoginAttempt(
-            attempt_id,
-            .oauth_browser_open_failed,
-        );
-    }
-
     fn startRefresh(
         self: *Effects,
         attempt_id: u64,
@@ -480,6 +458,14 @@ pub const Prepared = struct {
 
     pub fn attemptId(self: *const Prepared) ?u64 {
         return self.transition.attempt_id;
+    }
+
+    pub fn operationComplete(self: *const Prepared) bool {
+        return self.transition.operationComplete();
+    }
+
+    pub fn clearsDefaultExecution(self: *const Prepared) bool {
+        return self.transition.clearsDefaultExecution();
     }
 
     pub fn deinit(self: *Prepared) void {
@@ -749,15 +735,15 @@ pub const Runtime = struct {
     ) contract.AccountFact {
         self.assertMainThread();
         var fact = prepared.fact();
-        if (fact.view.session_state == .signed_out or
-            fact.view.session_state == .shutting_down or
-            (fact.view.operation == .none and
-                fact.view.execution_state == .none))
+        if (fact.view.state != .authenticated or
+            fact.view.catalog_state == .unavailable)
             return fact;
         const catalog = if (completesCatalogTransaction(fact))
             &self.candidate_public_catalog
+        else if (prepared.transition.candidateCatalogActive())
+            &self.candidate_public_catalog
         else
-            self.catalogForOperation(fact.view.operation);
+            &self.effects.public_catalog;
         catalog.decorate(&fact.view);
         return fact;
     }
@@ -784,10 +770,8 @@ pub const Runtime = struct {
             );
             self.candidate_public_catalog.clear();
         }
-        if (fact.view.session_state == .signed_out or
-            fact.view.session_state == .shutting_down or
-            (fact.view.operation == .none and
-                fact.view.execution_state == .none))
+        if (fact.view.state != .authenticated or
+            prepared.clearsDefaultExecution())
         {
             self.effects.public_catalog.clear();
             self.candidate_public_catalog.clear();
@@ -852,13 +836,11 @@ pub const Runtime = struct {
         completion: *state_impl.WorkerCompletion,
         collision: bool,
     ) PrepareResult {
-        const operation = self.account.view().operation;
         if (self.catalog_after_refresh and
-            operation == .token_exchange and
+            self.account.refreshInFlight() and
             completion.payload == .failed)
             self.catalog_after_refresh = false;
-        const catalog_attempt = operation == .loading_keys or
-            operation == .loading_models;
+        const catalog_attempt = self.account.catalogAttemptActive();
         self.effects.joinNetwork(completion.attempt_id);
         if (collision and
             self.account.activeAttempt() == completion.attempt_id)
@@ -987,7 +969,7 @@ pub const Runtime = struct {
                 identity.accountId(),
             )) return self.prepareFailure(
                 attempt_id,
-                .account_mismatch,
+                .metask_unauthorized,
             );
             refreshed_identity = discovered_identity;
         }
@@ -997,7 +979,7 @@ pub const Runtime = struct {
             identity.accountId(),
         )) return self.prepareFailure(
             attempt_id,
-            .account_mismatch,
+            .metask_unauthorized,
         );
         const platform = if (self.platform) |*value| value else return self.prepareFailure(
             attempt_id,
@@ -1120,18 +1102,6 @@ pub const Runtime = struct {
                     return;
                 };
                 self.effects.startLogin(attempt_id, platform, now);
-            },
-            .reopen_oauth => {
-                const attempt_id = entry.attempt_id orelse
-                    @panic("OAuth reopen effect has no attempt");
-                const platform = if (self.platform) |*value| value else {
-                    self.effects.failLoginAttempt(
-                        attempt_id,
-                        .credential_store_read_failed,
-                    );
-                    return;
-                };
-                self.effects.reopenLogin(attempt_id, platform);
             },
             .cancel_attempt => |attempt_id| self.effects.cancelAttemptAndDiscard(
                 attempt_id,
@@ -1397,13 +1367,12 @@ pub const Runtime = struct {
         catalog: *const catalog_impl.CatalogSession,
         account_view: contract.AccountView,
     ) ?[]const u8 {
-        if (account_view.execution_state == .ready) {
+        if (account_view.execution_generation != 0) {
             if (account_view.candidate_api_key_id.len != 0) return null;
             if (catalog.hasApiKey(account_view.selected_api_key_id))
                 return account_view.selected_api_key_id;
             return null;
         }
-        if (account_view.execution_state != .none) return null;
         if (builtin.os.tag == .windows) if (self.windows_public_state) |*saved| {
             const id = saved.apiKeyId();
             if (id.len > 0 and catalog.hasApiKey(id)) return id;
@@ -1416,7 +1385,7 @@ pub const Runtime = struct {
         catalog: *const catalog_impl.CatalogSession,
         account_view: contract.AccountView,
     ) ?[]const u8 {
-        if (account_view.execution_state == .ready) {
+        if (account_view.execution_generation != 0) {
             if (account_view.candidate_model.len != 0 or
                 !std.mem.eql(
                     u8,
@@ -1427,7 +1396,6 @@ pub const Runtime = struct {
                 return account_view.selected_model;
             return null;
         }
-        if (account_view.execution_state != .none) return null;
         if (builtin.os.tag == .windows) if (self.windows_public_state) |*saved| {
             const id = saved.modelId();
             if (id.len > 0 and
@@ -1479,21 +1447,11 @@ pub const Runtime = struct {
         self: *Runtime,
         account_view: *contract.AccountView,
     ) void {
-        self.catalogForOperation(account_view.operation).decorate(account_view);
-    }
-
-    fn catalogForOperation(
-        self: *Runtime,
-        operation: contract.OperationKind,
-    ) *catalog_impl.PublicCatalog {
-        return switch (operation) {
-            .selecting_key,
-            .loading_models,
-            .selecting_model,
-            .persisting,
-            => &self.candidate_public_catalog,
-            else => &self.effects.public_catalog,
-        };
+        const catalog = if (self.account.candidateCatalogActive())
+            &self.candidate_public_catalog
+        else
+            &self.effects.public_catalog;
+        catalog.decorate(account_view);
     }
 
     fn assertMainThread(self: *const Runtime) void {
@@ -1647,8 +1605,7 @@ pub const Runtime = struct {
 };
 
 fn completesCatalogTransaction(fact: contract.AccountFact) bool {
-    if (fact.view.operation != .none or
-        fact.view.execution_state != .ready)
+    if (fact.view.catalog_state != .ready)
         return false;
     return fact.kind == .catalog_changed or fact.kind == .execution_changed;
 }
@@ -1730,7 +1687,7 @@ fn prepareCatalogExecution(
     execution_generation: u64,
 ) CatalogExecutionPreparation {
     if (!std.mem.eql(u8, catalog.ownerAccountId(), identity.accountId()))
-        return .{ .rejected = .account_mismatch };
+        return .{ .rejected = .metask_unauthorized };
     if (!catalog.ownsExecutionSelection(
         identity.accountId(),
         model_catalog_api_key_id,
@@ -1841,28 +1798,25 @@ test "Account Runtime owns automatic catalog selection policy" {
         "other-secret",
     );
     const ready_view: contract.AccountView = .{
-        .session_state = .authenticated,
-        .execution_state = .ready,
-        .operation = .loading_keys,
-        .readiness = .ready,
-        .primary_action = .none,
+        .state = .authenticated,
+        .catalog_state = .loading,
         .selected_api_key_id = "key-current",
         .selected_model = "model-current",
+        .execution_generation = 1,
     };
     try std.testing.expectEqualStrings(
         "key-current",
         runtime.automaticApiSelection(&catalog, ready_view).?,
     );
     var first_login_view = ready_view;
-    first_login_view.execution_state = .none;
     first_login_view.selected_api_key_id = "";
     first_login_view.selected_model = "";
+    first_login_view.execution_generation = 0;
     try std.testing.expect(
         runtime.automaticApiSelection(&catalog, first_login_view) == null,
     );
 
     var loading_models_view = ready_view;
-    loading_models_view.operation = .loading_models;
     loading_models_view.candidate_api_key_id = "key-current";
     try std.testing.expectEqualStrings(
         "model-current",
@@ -2115,8 +2069,8 @@ test "Account Runtime rejects effect admission without committing state" {
     defer prepared.deinit();
     try std.testing.expect(!runtime.admitEffect(&prepared));
     try std.testing.expectEqual(
-        contract.AccountSessionState.signed_out,
-        runtime.view().session_state,
+        contract.AccountState.signed_out,
+        runtime.view().state,
     );
 }
 
@@ -2131,13 +2085,13 @@ test "Account Runtime dispatches an admitted effect only after state commit" {
     try std.testing.expect(runtime.admitEffect(&prepared));
     try std.testing.expect(runtime.effects.queue.entry != null);
     try std.testing.expectEqual(
-        contract.AccountSessionState.signed_out,
-        runtime.view().session_state,
+        contract.AccountState.signed_out,
+        runtime.view().state,
     );
     runtime.commit(&prepared);
     try std.testing.expectEqual(
-        contract.AccountSessionState.shutting_down,
-        runtime.view().session_state,
+        contract.AccountState.signed_out,
+        runtime.view().state,
     );
     try std.testing.expect(runtime.effects.queue.entry != null);
     runtime.dispatchCommitted(&prepared);
@@ -2171,12 +2125,12 @@ test "Account Runtime fails closed when logout persistence is unknown" {
     runtime.commit(&failed);
     runtime.dispatchCommitted(&failed);
     try std.testing.expectEqual(
-        contract.AccountSessionState.shutting_down,
-        runtime.view().session_state,
+        contract.AccountState.signed_out,
+        runtime.view().state,
     );
     try std.testing.expectEqual(
-        contract.ExecutionState.none,
-        runtime.view().execution_state,
+        contract.CatalogState.unavailable,
+        runtime.view().catalog_state,
     );
 }
 
@@ -2186,8 +2140,8 @@ test "Account Runtime shutdown clears a ready public view" {
     defer runtime.deinit();
     try commitReadyRestoreForTest(&runtime);
     try std.testing.expectEqual(
-        contract.ExecutionState.ready,
-        runtime.view().execution_state,
+        contract.CatalogState.ready,
+        runtime.view().catalog_state,
     );
 
     var prepared = runtime.prepareShutdown();
@@ -2197,10 +2151,10 @@ test "Account Runtime shutdown clears a ready public view" {
     runtime.dispatchCommitted(&prepared);
     const view = runtime.view();
     try std.testing.expectEqual(
-        contract.AccountSessionState.shutting_down,
-        view.session_state,
+        contract.AccountState.signed_out,
+        view.state,
     );
-    try std.testing.expectEqual(contract.ExecutionState.none, view.execution_state);
+    try std.testing.expectEqual(contract.CatalogState.unavailable, view.catalog_state);
     try std.testing.expectEqual(@as(usize, 0), view.api_keys.len);
     try std.testing.expectEqual(@as(usize, 0), view.models.len);
     try std.testing.expect(!view.can_create_task);

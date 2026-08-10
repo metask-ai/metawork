@@ -45,7 +45,6 @@ pub const commands = struct {
     pub const snapshot = commands_impl.snapshot;
     pub const snapshot_chunk = commands_impl.snapshot_chunk;
     pub const account_begin_login = commands_impl.account_begin_login;
-    pub const account_reauthenticate = commands_impl.account_reauthenticate;
     pub const account_cancel_operation = commands_impl.account_cancel_operation;
     pub const account_refresh_catalog = commands_impl.account_refresh_catalog;
     pub const account_select_api_key = commands_impl.account_select_api_key;

@@ -348,18 +348,6 @@ export class BridgeClient {
     );
   }
 
-  async reopenLogin() {
-    return decodeAccountCommandResult(
-      await this.invoke(commands.accountReopenLogin, {}),
-    );
-  }
-
-  async reauthenticate() {
-    return decodeAccountCommandResult(
-      await this.invoke(commands.accountReauthenticate, {}),
-    );
-  }
-
   async cancelAccountOperation() {
     return decodeAccountCommandResult(
       await this.invoke(commands.accountCancelOperation, {}),

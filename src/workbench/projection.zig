@@ -1628,11 +1628,8 @@ const ModelProjection = struct {
 
 const AccountProjection = struct {
     allocator: std.mem.Allocator,
-    session_state: account_contract.AccountSessionState = .restoring,
-    execution_state: account_contract.ExecutionState = .none,
-    operation: account_contract.OperationKind = .none,
-    readiness: account_contract.AccountReadiness = .checking,
-    primary_action: account_contract.AccountPrimaryAction = .none,
+    state: account_contract.AccountState = .checking,
+    catalog_state: account_contract.CatalogState = .unavailable,
     can_cancel: bool = false,
     account_id: FixedText(account_contract.Limits.account_id_bytes) = .{},
     display_name: FixedText(account_contract.Limits.display_name_bytes) = .{},
@@ -1701,11 +1698,8 @@ const AccountProjection = struct {
             @panic("Account published an invalid AccountView");
         std.debug.assert(source_view.api_keys.len <= self.api_keys.len);
         std.debug.assert(source_view.models.len <= self.models.len);
-        self.session_state = source_view.session_state;
-        self.execution_state = source_view.execution_state;
-        self.operation = source_view.operation;
-        self.readiness = source_view.readiness;
-        self.primary_action = source_view.primary_action;
+        self.state = source_view.state;
+        self.catalog_state = source_view.catalog_state;
         self.can_cancel = source_view.can_cancel;
         self.account_id.setNoFail(source_view.account_id);
         self.display_name.setNoFail(source_view.display_name);
@@ -1758,11 +1752,8 @@ const AccountProjection = struct {
         can_create_task: bool,
     ) account_contract.AccountView {
         return .{
-            .session_state = self.session_state,
-            .execution_state = self.execution_state,
-            .operation = self.operation,
-            .readiness = self.readiness,
-            .primary_action = self.primary_action,
+            .state = self.state,
+            .catalog_state = self.catalog_state,
             .can_cancel = self.can_cancel,
             .account_id = self.account_id.view(),
             .display_name = self.display_name.view(),
@@ -2943,7 +2934,7 @@ pub const Workbench = struct {
     ) void {
         std.debug.assert(self.execution_replacement_pending);
         const input = execution.input();
-        std.debug.assert(self.account.execution_state == .ready);
+        std.debug.assert(self.account.catalog_state == .ready);
         std.debug.assert(
             self.account.execution_generation == input.execution_generation,
         );
@@ -2959,7 +2950,7 @@ pub const Workbench = struct {
 
     pub fn clearExecutionNoFail(self: *Workbench) void {
         std.debug.assert(self.execution_replacement_pending);
-        std.debug.assert(self.account.execution_state != .ready);
+        std.debug.assert(self.account.execution_generation == 0);
         self.redactAllProductProjectionsNoFail(self.execution.credential());
         self.execution.clearNoFail();
     }
@@ -3012,11 +3003,8 @@ pub const Workbench = struct {
         self.commitAccountFactNoFail(.{
             .kind = .execution_changed,
             .view = .{
-                .session_state = .authenticated,
-                .execution_state = .ready,
-                .operation = .none,
-                .readiness = .ready,
-                .primary_action = .none,
+                .state = .authenticated,
+                .catalog_state = .ready,
                 .account_id = "automation-account",
                 .display_name = "Automation",
                 .api_keys = &api_keys,
@@ -5643,13 +5631,10 @@ pub const Workbench = struct {
     ) Error!void {
         const view = self.accountView();
         writer.print(
-            "{{\"sessionState\":\"{s}\",\"executionState\":\"{s}\",\"operation\":\"{s}\",\"readiness\":\"{s}\",\"primaryAction\":\"{s}\",\"canCancel\":{},\"accountId\":",
+            "{{\"state\":\"{s}\",\"catalogState\":\"{s}\",\"canCancel\":{},\"accountId\":",
             .{
-                @tagName(view.session_state),
-                @tagName(view.execution_state),
-                @tagName(view.operation),
-                @tagName(view.readiness),
-                @tagName(view.primary_action),
+                @tagName(view.state),
+                @tagName(view.catalog_state),
                 view.can_cancel,
             },
         ) catch return error.SnapshotTooLarge;
@@ -6406,7 +6391,7 @@ pub const Workbench = struct {
         return !self.shutting_down and
             !self.execution_replacement_pending and
             self.account.account_can_create_task and
-            self.account.execution_state == .ready and
+            self.account.catalog_state == .ready and
             self.execution.ready() and
             self.account.execution_generation == self.execution.generation;
     }
@@ -11465,11 +11450,8 @@ fn installTestExecution(workbench: *Workbench) !void {
     workbench.commitAccountFactNoFail(.{
         .kind = .execution_changed,
         .view = .{
-            .session_state = .authenticated,
-            .execution_state = .ready,
-            .operation = .none,
-            .readiness = .ready,
-            .primary_action = .none,
+            .state = .authenticated,
+            .catalog_state = .ready,
             .account_id = "account-1",
             .display_name = "Metask User",
             .api_keys = &api_keys,
@@ -12769,11 +12751,8 @@ test "Account projection and execution install use preallocated no-fail storage"
     workbench.commitAccountFactNoFail(.{
         .kind = .execution_changed,
         .view = .{
-            .session_state = .authenticated,
-            .execution_state = .ready,
-            .operation = .none,
-            .readiness = .ready,
-            .primary_action = .none,
+            .state = .authenticated,
+            .catalog_state = .ready,
             .account_id = "account-1",
             .display_name = "Metask User",
             .api_keys = &api_keys,
@@ -12880,11 +12859,8 @@ test "default replacement preserves Task generation and installs the next admiss
     workbench.commitAccountFactNoFail(.{
         .kind = .execution_changed,
         .view = .{
-            .session_state = .authenticated,
-            .execution_state = .ready,
-            .operation = .none,
-            .readiness = .ready,
-            .primary_action = .none,
+            .state = .authenticated,
+            .catalog_state = .ready,
             .account_id = "account-1",
             .display_name = "Metask User",
             .api_keys = &replacement_api_keys,
@@ -13063,11 +13039,8 @@ test "clearing the last default execution scrubs its credential before secure ze
     workbench.commitAccountFactNoFail(.{
         .kind = .signed_out,
         .view = .{
-            .session_state = .signed_out,
-            .execution_state = .none,
-            .operation = .none,
-            .readiness = .sign_in_required,
-            .primary_action = .sign_in,
+            .state = .signed_out,
+            .catalog_state = .unavailable,
         },
     });
     workbench.clearExecutionNoFail();
@@ -13272,11 +13245,8 @@ test "Workbench shutdown releases current and Task-owned execution generations" 
     workbench.commitAccountFactNoFail(.{
         .kind = .execution_changed,
         .view = .{
-            .session_state = .authenticated,
-            .execution_state = .ready,
-            .operation = .none,
-            .readiness = .ready,
-            .primary_action = .none,
+            .state = .authenticated,
+            .catalog_state = .ready,
             .account_id = "account-1",
             .display_name = "Metask User",
             .api_keys = &replacement_api_keys,
@@ -13695,11 +13665,8 @@ fn installMaximumAccountProjection(workbench: *Workbench) !void {
     workbench.commitAccountFactNoFail(.{
         .kind = .catalog_changed,
         .view = .{
-            .session_state = .authenticated,
-            .execution_state = .ready,
-            .operation = .none,
-            .readiness = .ready,
-            .primary_action = .none,
+            .state = .authenticated,
+            .catalog_state = .ready,
             .account_id = &account_id,
             .display_name = &display_name,
             .api_keys = api_keys,

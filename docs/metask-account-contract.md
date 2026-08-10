@@ -35,7 +35,7 @@ Metask 产品 owner 已确认 MetaWork 作为 Metask 第一方客户端复用当
 - callback 只绑定 IPv4 loopback 动态端口，不依赖 `localhost` DNS，不绑定 wildcard；
 - callback 只接受单次 `GET /auth/callback`，严格解析 query、拒绝重复/unknown 参数，并对 `state` 做 constant-time 比较；
 - token response 有界解码并严格校验 MetaWork 实际消费的字段：`access_token`、每次必需的新 `refresh_token`、Bearer `token_type`、正整数 `expires_in`、精确 `metawork:use` scope 和非空 `account_id`；OAuth 服务允许增加未消费的 metadata，新增字段不得破坏客户端；
-- refresh token 每次成功刷新都轮换；token response 成功即形成 rotation commit 边界，新 generation 必须先于后续 catalog 结果持久化。response 缺少新 refresh token 或新本地 generation 无法提交时进入 `reauth_required`，不得继续使用已作废的旧 refresh token；后续 catalog 失败不得回滚已成功的轮换；
+- refresh token 每次成功刷新都轮换；token response 成功即形成 rotation commit 边界，新 generation 必须先于后续 catalog 结果持久化。response 缺少新 refresh token 或新本地 generation 无法提交时进入 `signed_out`，不得继续使用已作废的旧 refresh token；后续 catalog 失败不得回滚已成功的轮换；
 - 用户明确登录或冷启动恢复身份校验时，Account 使用同一 OAuth access token 单次读取 current user compatibility endpoint。只有响应 `code = 0`、数值 `data.id` 的十进制文本精确匹配 token `account_id`，且 `data.username` 为非空、有界 UTF-8 时才将用户名作为 display name；接口缺失、拒绝、超时、响应非法或 identity 不匹配都回退 `account_id`，不得撤销登录、回滚 refresh rotation 或阻断 catalog。同账号重新认证以本次 display name 为准；Windows 冷启动先验证同一 account，再更新无 secret public identity。该接口不进入普通 token refresh、catalog refresh 或后台定时路径。2026-08-10 已用 production `metawork-app` / `metawork:use` refresh generation 验证：`/api/v1/auth/me` 返回 HTTP 200 与匹配用户；错误的 `/api/v1/auth/oauth/userinfo` 返回 HTTP 400 `invalid scope`，不得再作为客户端路径；
 - token、verifier、authorization code、完整 authorize URL 和 Authorization header 不进入 Renderer、Bridge、日志、snapshot 或持久化产品视图。
 
@@ -77,7 +77,7 @@ Windows 使用一条直接、无版本的恢复路径：
 - `account.json` 只保存 account/display name 与最近一次已提交的 API/model selection identifier，不含 schema/revision 字段；
 - access token、Provider API Key、base URL、provider、execution generation 和完整 execution config 都不跨进程持久化；
 - 冷启动只有同时取得 refresh token 与合法 `account.json` 才恢复 `account_only`，随后先刷新 OAuth、精确核对必需的 `account_id` 并提交轮换后的 refresh token，再拉取 API/model catalog；账号不一致时不得复用历史选择。历史选择仍属于当前 catalog 时才在内存重建 execution；
-- 历史选择失效时保持登录并请求用户重新选择，不从文件重建 Provider、base URL 或 credential；refresh 无效进入 `reauth_required`，网络失败保留可重试状态；
+- 历史选择失效时保持登录并请求用户重新选择，不从文件重建 Provider、base URL 或 credential；refresh 无效进入 `signed_out`，网络失败保留可重试状态；
 - 登录先原子替换 `account.json`，再写单个 refresh token；任一步失败都不提交内存登录事实。刷新只替换 refresh token，选择变更只替换 `account.json`；
 - logout 先删除 refresh token，再删除 `account.json`，任一步失败都不声称退出成功；
 - macOS 当前 `com.metask.metawork.dev.account`、`MetaWork Dev/account/manifest.json` 以及旧 `dev.metawork.account.v2`、`MetaWork/account/manifest.v2` 条目都由 Windows 完全忽略，不做兼容读取、迁移或静默清理。用户在 Windows hard cut 后只需重新登录一次；

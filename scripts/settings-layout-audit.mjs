@@ -13,11 +13,8 @@ const outputDir = await mkdtemp(join(tmpdir(), "metawork-settings-layout-"));
 const profileDir = await mkdtemp(join(tmpdir(), "metawork-settings-chrome-"));
 const auditModuleId = "/virtual-settings-layout-audit.tsx";
 const account = {
-  sessionState: "authenticated",
-  executionState: "ready",
-  operation: "none",
-  readiness: "ready",
-  primaryAction: "none",
+  state: "authenticated",
+  catalogState: "ready",
   canCancel: false,
   accountId: "account-1",
   displayName: "deepseek (DeepSeek-V4-Pro)",
@@ -115,12 +112,21 @@ function AuditApp() {
         }
       : account;
   const accountView =
-    query.get("session") === "reauth"
+    query.get("session") === "signedout"
       ? {
           ...catalogAccount,
-          sessionState: "reauth_required",
-          readiness: "needs_attention",
-          primaryAction: "reauthenticate",
+          state: "signed_out",
+          catalogState: "unavailable",
+          accountId: "",
+          displayName: "",
+          apiKeys: [],
+          models: [],
+          selectedApiKeySelectionId: "",
+          selectedModelSelectionId: "",
+          modelCatalogApiKeySelectionId: "",
+          canCreateTask: false,
+          catalogGeneration: "0",
+          executionGeneration: "0",
         }
       : catalogAccount;
 
@@ -269,7 +275,7 @@ function AuditApp() {
               }
               onChooseWorkspace={async () => ({ kind: "cancelled" })}
               onRemoveWorkspace={async () => ({ kind: "accepted" })}
-              onReauthenticate={() => undefined}
+              onBeginLogin={() => undefined}
               onLogout={() => window.__auditEvents.push({ type: "logout" })}
             />
           </section>
@@ -534,7 +540,7 @@ async function auditInteractions(origin) {
     "getComputedStyle(document.querySelector('.settings-identity-copy span'), '::before').backgroundColor",
   );
   await chromeClient.call("Page.navigate", {
-    url: `${origin}/?locale=zh-CN&session=reauth`,
+    url: `${origin}/?locale=zh-CN&session=signedout`,
   });
   await waitForAudit();
   const attentionStatusColor = await evaluate(

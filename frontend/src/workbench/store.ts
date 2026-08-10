@@ -36,11 +36,8 @@ export const initialWorkbenchState: WorkbenchState = {
       mcpManagement: false,
     },
     account: {
-      sessionState: "restoring",
-      executionState: "none",
-      operation: "none",
-      readiness: "checking",
-      primaryAction: "none",
+      state: "checking",
+      catalogState: "unavailable",
       canCancel: false,
       accountId: "",
       displayName: "",

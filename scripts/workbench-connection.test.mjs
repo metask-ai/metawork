@@ -17,11 +17,8 @@ function snapshot(revision) {
   return {
     revision,
     account: {
-      sessionState: "signed_out",
-      executionState: "none",
-      operation: "none",
-      readiness: "sign_in_required",
-      primaryAction: "sign_in",
+      state: "signed_out",
+      catalogState: "unavailable",
       canCancel: false,
       accountId: "",
       displayName: "",
