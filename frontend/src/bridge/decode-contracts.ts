@@ -19,6 +19,7 @@ import {
   type McpAuthorizationResult,
   type McpAuthorizationCancelResult,
   type McpRefreshResult,
+  type McpConnectionTestResult,
   mcpAvailabilities,
   mcpManagementHealthValues,
   mcpRuntimeAlignmentValues,
@@ -1829,6 +1830,7 @@ function decodeMcpManagement(value: unknown, path: string): McpManagementView {
         "runtimeStatus",
         "newTaskAccess",
         "safeDiagnostic",
+        "connectionTest",
         "tools",
       ]);
       const tools = arrayValue(
@@ -1980,6 +1982,26 @@ function decodeMcpManagement(value: unknown, path: string): McpManagementView {
                 ),
               };
             })();
+      const connectionTestItem = object(
+        server.connectionTest,
+        `${serverPath}.connectionTest`,
+        ["status", "toolCount", "issueCount"],
+      );
+      const connectionTest = {
+        status: enumValue(
+          connectionTestItem.status,
+          `${serverPath}.connectionTest.status`,
+          ["untested", "testing", "connected", "failed"] as const,
+        ),
+        toolCount: nonNegativeNumber(
+          connectionTestItem.toolCount,
+          `${serverPath}.connectionTest.toolCount`,
+        ),
+        issueCount: nonNegativeNumber(
+          connectionTestItem.issueCount,
+          `${serverPath}.connectionTest.issueCount`,
+        ),
+      };
       const authMode = enumValue(server.authMode, `${serverPath}.authMode`, [
         "none",
         "static",
@@ -2067,6 +2089,7 @@ function decodeMcpManagement(value: unknown, path: string): McpManagementView {
           server.safeDiagnostic,
           `${serverPath}.safeDiagnostic`,
         ),
+        connectionTest,
         tools,
       };
     },
@@ -2615,6 +2638,22 @@ export function decodeMcpRefreshResult(value: unknown): McpRefreshResult {
       "unavailable",
       "shutting_down",
       "rejected",
+    ] as const),
+  };
+}
+
+export function decodeMcpConnectionTestResult(
+  value: unknown,
+): McpConnectionTestResult {
+  const item = object(value, "$", ["outcome"]);
+  return {
+    outcome: enumValue(item.outcome, "$.outcome", [
+      "started",
+      "busy",
+      "stale_generation",
+      "needs_authentication",
+      "rejected",
+      "unavailable",
     ] as const),
   };
 }

@@ -212,7 +212,7 @@ export const enUS = {
   "mcp.desired.disabled": "Disabled",
   "mcp.alignment.current": "Desired settings match the current Runtime.",
   "mcp.alignment.restart_required":
-    "Connection changes are waiting for restart.",
+    "You can test this connection now. Restart to make the change available to new tasks.",
   "mcp.alignment.unknown": "Runtime alignment is unknown.",
   "mcp.existing_tasks_note":
     "Open tasks keep the MCP access they received when they were created.",
@@ -220,11 +220,11 @@ export const enUS = {
   "mcp.add.eyebrow": "New MCP server",
   "mcp.add.title": "Add an MCP server",
   "mcp.add.intro":
-    "Choose a transport and save only public connection settings. MetaWork creates it disabled, unapproved, and with no tools allowed.",
+    "Choose a transport and save the public connection settings. Adding the server authorizes and enables the connection; tools stay off by default.",
   "mcp.edit.eyebrow": "Replace MCP connection",
   "mcp.edit.title": "Enter the complete connection again",
   "mcp.edit.intro":
-    "Enter the complete public connection again. Secrets are kept only when the receiving executable or endpoint is unchanged; connection changes require review again.",
+    "Enter the complete public connection again. Secrets are kept only when the receiving executable or endpoint is unchanged; replacing it authorizes the new connection.",
   "mcp.edit.action": "Replace connection",
   "mcp.edit.submit": "Replace connection",
   "mcp.add.name": "Display name",
@@ -255,8 +255,8 @@ export const enUS = {
   "mcp.add.endpoint_help":
     "Use HTTPS, or HTTP only for localhost, 127.0.0.1, or ::1. User info, query strings, and fragments are not accepted.",
   "mcp.add.defaults":
-    "Secrets are captured by the Host after save. Review the connection, complete authorization, then enable it and select tools.",
-  "mcp.add.submit": "Add server",
+    "Secrets are captured securely by the Host after save. You can test immediately, then choose which tools tasks may use after authentication.",
+  "mcp.add.submit": "Add and enable",
   "mcp.add.adding": "Adding…",
   "mcp.rename.action": "Save name",
   "mcp.enable.action": "Enable",
@@ -271,6 +271,20 @@ export const enUS = {
   "mcp.refresh.rejected": "The catalog refresh was rejected.",
   "mcp.refresh.failed":
     "The catalog could not be refreshed. Host state was not guessed.",
+  "mcp.test.action": "Test connection",
+  "mcp.test.testing": "Testing…",
+  "mcp.test.started": "Opening an isolated test connection.",
+  "mcp.test.busy": "Another connection test is already running.",
+  "mcp.test.stale_generation":
+    "The configuration changed. Retry with the latest settings.",
+  "mcp.test.needs_authentication":
+    "Finish secret setup or OAuth authorization first.",
+  "mcp.test.rejected": "The current configuration cannot be tested.",
+  "mcp.test.unavailable": "Connection testing is temporarily unavailable.",
+  "mcp.test.failed":
+    "Connection failed. Check the endpoint, authentication, and server status.",
+  "mcp.test.connected":
+    "Connected. Found {tools} tools and {issues} catalog issues.",
   "mcp.mutation.unchanged": "No configuration change was needed.",
   "mcp.mutation.saved": "MCP settings saved.",
   "mcp.mutation.saved_recovery_required":
@@ -874,10 +888,10 @@ export const enUS = {
   "mcp.registration.automatic": "Automatic (DCR)",
   "mcp.registration.pre_registered": "Existing client",
   "mcp.detail.authorization": "Authorization",
-  "mcp.approval.required": "Connection review required",
+  "mcp.approval.required": "Legacy connection is not authorized",
   "mcp.approval.help":
-    "The Host will show the complete connection details before trusting it.",
-  "mcp.approval.action": "Review connection",
+    "This setting was saved by an older version. Connect it once to continue.",
+  "mcp.approval.action": "Connect and enable",
   "mcp.capability.approval_unavailable":
     "Native connection review is unavailable.",
   "mcp.capability.capture_unavailable":

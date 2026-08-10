@@ -1382,6 +1382,7 @@ test("Renderer Bridge fixed revision 1 owns the exact product wire catalog", () 
       "metawork.mcp.renameServer",
       "metawork.mcp.setAllowedTools",
       "metawork.mcp.setServerEnabled",
+      "metawork.mcp.testConnection",
       "metawork.mcp.updateHttpConnection",
       "metawork.mcp.updateStdioConnection",
     ],

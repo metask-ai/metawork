@@ -8,10 +8,25 @@ const mcp_management_coordinator = @import("mcp_management_coordinator.zig");
 pub fn host(coordinator: *mcp_management_coordinator.Coordinator) bridge_api.McpManagementHost {
     return .{
         .context = coordinator,
+        .test_fn = testConnection,
         .approve_fn = approveConnection,
         .capture_fn = captureSecret,
         .authorize_fn = authorizeOauth,
         .cancel_fn = cancelAuthorization,
+    };
+}
+
+fn testConnection(
+    context: *anyopaque,
+    expected_generation: u64,
+    server_id: []const u8,
+) anyerror!bridge_api.McpConnectionTestStartOutcome {
+    const coordinator: *mcp_management_coordinator.Coordinator = @ptrCast(@alignCast(context));
+    return switch (try coordinator.testConnection(expected_generation, server_id)) {
+        inline else => |result| @field(
+            bridge_api.McpConnectionTestStartOutcome,
+            @tagName(result),
+        ),
     };
 }
 

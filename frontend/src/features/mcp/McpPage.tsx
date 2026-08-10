@@ -4,6 +4,7 @@ import type {
   McpManagementView,
   McpAuthorizationCancelResult,
   McpAuthorizationResult,
+  McpConnectionTestResult,
   McpHttpConnectionInput,
   McpMutationResult,
   McpRefreshResult,
@@ -299,6 +300,7 @@ export function McpPage({
   onSetEnabled,
   onSetAllowedTools,
   onRemove,
+  onTest,
   onRefresh,
 }: {
   management: McpManagementView;
@@ -363,6 +365,10 @@ export function McpPage({
     expectedGeneration: string,
     serverId: string,
   ) => Promise<McpMutationResult>;
+  onTest: (
+    expectedGeneration: string,
+    serverId: string,
+  ) => Promise<McpConnectionTestResult>;
   onRefresh: () => Promise<McpRefreshResult>;
 }) {
   const { t } = useI18n();
@@ -442,8 +448,9 @@ export function McpPage({
     management.authorizationOperation.kind !== "idle";
   const selectedOperationBusy =
     selected !== null &&
-    management.authorizationOperation.kind !== "idle" &&
-    management.authorizationOperation.serverId === selected.id;
+    ((management.authorizationOperation.kind !== "idle" &&
+      management.authorizationOperation.serverId === selected.id) ||
+      selected.connectionTest.status === "testing");
   const addValid =
     validMcpDisplayName(displayName) &&
     /^(?:[1-9][0-9]{0,8})$/.test(timeoutMs) &&
@@ -726,6 +733,24 @@ export function McpPage({
       });
     } catch {
       setNotice({ tone: "attention", text: t("mcp.mutation.failed") });
+    } finally {
+      setPendingServerId(null);
+    }
+  }
+
+  async function testConnection(server: McpServer) {
+    const generation = management.desiredGeneration;
+    if (!generation || mutationLocked || pendingServerId === server.id) return;
+    setPendingServerId(server.id);
+    setNotice(null);
+    try {
+      const result = await onTest(generation, server.id);
+      setNotice({
+        tone: result.outcome === "started" ? "quiet" : "attention",
+        text: t(`mcp.test.${result.outcome}`),
+      });
+    } catch {
+      setNotice({ tone: "attention", text: t("mcp.test.failed") });
     } finally {
       setPendingServerId(null);
     }
@@ -1636,14 +1661,42 @@ export function McpPage({
                       <p>{t(`mcp.alignment.${management.runtimeAlignment}`)}</p>
                     </div>
                     <button
-                      className="secondary-button focus-ring"
-                      disabled={refreshLocked}
-                      onClick={() => void refreshCatalog()}
+                      className="primary-button focus-ring"
+                      disabled={
+                        mutationLocked ||
+                        pendingServerId === selected.id ||
+                        selectedOperationBusy ||
+                        !selected.desiredEnabled ||
+                        selected.approvalStatus !== "approved"
+                      }
+                      onClick={() => void testConnection(selected)}
                     >
-                      <Icon name="refresh" />
-                      {t("mcp.refresh.action")}
+                      <Icon name="mcp" />
+                      {selected.connectionTest.status === "testing"
+                        ? t("mcp.test.testing")
+                        : t("mcp.test.action")}
                     </button>
                   </header>
+                  {selected.connectionTest.status !== "untested" && (
+                    <p
+                      className="mcp-operation-notice"
+                      data-tone={
+                        selected.connectionTest.status === "connected"
+                          ? "quiet"
+                          : selected.connectionTest.status === "failed"
+                            ? "attention"
+                            : "quiet"
+                      }
+                      aria-live="polite"
+                    >
+                      {selected.connectionTest.status === "connected"
+                        ? t("mcp.test.connected", {
+                            tools: selected.connectionTest.toolCount,
+                            issues: selected.connectionTest.issueCount,
+                          })
+                        : t(`mcp.test.${selected.connectionTest.status}`)}
+                    </p>
+                  )}
                   <p className="mcp-existing-task-note">
                     {t("mcp.existing_tasks_note")}
                   </p>

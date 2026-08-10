@@ -504,7 +504,7 @@ test "canonical AgentCore executes a selected Streamable HTTP tool" {
     try std.testing.expect(std.mem.indexOf(u8, trace, "echo-from-agentcore") != null);
 }
 
-test "MCP product chain reaches new Task authority only after restart refresh and allowlist" {
+test "MCP product chain reaches new Task authority after add restart refresh and allowlist" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_storage: [std.fs.max_path_bytes]u8 = undefined;
@@ -590,17 +590,6 @@ test "MCP product chain reaches new Task authority only after restart refresh an
     created.deinit();
     defer std.testing.allocator.free(server_id);
     try std.testing.expectEqual(
-        workbench.McpManagementOutcome.saved,
-        try initial_workbench.approveMcpConnection(1, .{ .server_id = server_id }),
-    );
-    try std.testing.expectEqual(
-        workbench.McpManagementOutcome.saved,
-        try initial_workbench.setMcpServerEnabled(2, .{
-            .server_id = server_id,
-            .enabled = true,
-        }),
-    );
-    try std.testing.expectEqual(
         workbench.McpRuntimeAlignment.restart_required,
         initial_workbench.inspectMcpDesiredConfiguration().?.runtime_alignment,
     );
@@ -681,7 +670,7 @@ test "MCP product chain reaches new Task authority only after restart refresh an
     );
     try std.testing.expectEqual(
         workbench.McpManagementOutcome.saved,
-        try restarted_workbench.setMcpAllowedTools(3, .{
+        try restarted_workbench.setMcpAllowedTools(1, .{
             .server_id = server_id,
             .tools = &.{"echo"},
         }),

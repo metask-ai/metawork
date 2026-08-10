@@ -603,9 +603,7 @@ export type McpHttpConnectionInput = {
         kind: "pre_registered";
         clientId: string;
         tokenEndpointAuthMethod:
-          | "none"
-          | "client_secret_basic"
-          | "client_secret_post";
+          "none" | "client_secret_basic" | "client_secret_post";
       };
 };
 
@@ -646,10 +644,7 @@ export type McpManagementView = {
           registrationKind: "none" | "automatic" | "pre_registered";
           clientIdPresent: boolean;
           tokenEndpointAuthMethod:
-            | "none"
-            | "client_secret_basic"
-            | "client_secret_post"
-            | null;
+            "none" | "client_secret_basic" | "client_secret_post" | null;
           clientSecretStatus: "not_required" | "missing" | "set";
         };
     approvalStatus: "unapproved" | "approved";
@@ -658,6 +653,11 @@ export type McpManagementView = {
     runtimeStatus: (typeof mcpRuntimeStatusValues)[number];
     newTaskAccess: (typeof mcpNewTaskAccessValues)[number];
     safeDiagnostic: string;
+    connectionTest: {
+      status: "untested" | "testing" | "connected" | "failed";
+      toolCount: number;
+      issueCount: number;
+    };
     tools: {
       name: string;
       discovered: boolean;
@@ -703,6 +703,16 @@ export type McpAuthorizationCancelResult = {
 
 export type McpRefreshResult = {
   outcome: "started" | "busy" | "unavailable" | "shutting_down" | "rejected";
+};
+
+export type McpConnectionTestResult = {
+  outcome:
+    | "started"
+    | "busy"
+    | "stale_generation"
+    | "needs_authentication"
+    | "rejected"
+    | "unavailable";
 };
 
 export type WorkspaceMutationReason =

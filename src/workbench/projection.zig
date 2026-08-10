@@ -469,6 +469,31 @@ pub const McpAuthorizationPhase = enum {
     cancelling,
 };
 
+pub const McpConnectionTestOutcome = enum {
+    connected,
+    failed,
+};
+
+const McpConnectionTest = struct {
+    server_id_storage: [64]u8 = undefined,
+    server_id_len: usize = 0,
+    state: enum { testing, connected, failed },
+    tool_count: u32 = 0,
+    issue_count: u32 = 0,
+
+    fn init(server_id: []const u8) ?McpConnectionTest {
+        if (server_id.len == 0 or server_id.len > 64) return null;
+        var result: McpConnectionTest = .{ .state = .testing };
+        @memcpy(result.server_id_storage[0..server_id.len], server_id);
+        result.server_id_len = server_id.len;
+        return result;
+    }
+
+    fn serverId(self: *const McpConnectionTest) []const u8 {
+        return self.server_id_storage[0..self.server_id_len];
+    }
+};
+
 pub const McpAuthorizationOperationView = struct {
     phase: McpAuthorizationPhase,
     server_id: []const u8,
@@ -598,6 +623,7 @@ const McpProductState = struct {
     admission: McpAdmissionAuthority,
     refresh_request_generation: u64 = 0,
     refresh_job: ?*McpRefreshJob = null,
+    connection_test: ?McpConnectionTest = null,
     authorization_operation: ?McpAuthorizationOperation = null,
     pending_reauthorizations: std.ArrayList(McpPendingReauthorization) = .empty,
     runtime_auth_failure_blocked: bool = false,
@@ -711,6 +737,9 @@ fn validMcpAuthorizationTransition(
 }
 
 fn mcpServerMutationBusy(mcp: *const McpProductState, server_id: []const u8) bool {
+    if (mcp.connection_test) |test_state|
+        if (test_state.state == .testing and
+            std.mem.eql(u8, test_state.serverId(), server_id)) return true;
     const operation = mcp.authorization_operation orelse return false;
     return std.mem.eql(u8, operation.server_id, server_id);
 }
@@ -5465,6 +5494,66 @@ pub const Workbench = struct {
         return management.inspect();
     }
 
+    /// Host-only copy used to construct an isolated connection-test Runtime.
+    /// The bytes never cross Bridge and contain no resolved credential values.
+    pub fn writeMcpDesiredConfiguration(
+        self: *const Workbench,
+        expected_generation: u64,
+        output: []u8,
+    ) Error![]const u8 {
+        const mcp = if (self.mcp) |*value| value else return error.McpManagementUnavailable;
+        const management = if (mcp.management) |*value| value else return error.McpManagementUnavailable;
+        const inspection = management.inspect();
+        if (inspection.health != .ready or
+            inspection.desired_generation != expected_generation)
+            return error.McpManagementUnavailable;
+        const registry = management.desiredRegistry() orelse
+            return error.McpManagementUnavailable;
+        return mcp_configuration.encode(
+            output,
+            registry,
+            management.limits,
+        ) catch return error.McpManagementUnavailable;
+    }
+
+    pub fn beginMcpConnectionTest(
+        self: *Workbench,
+        server_id: []const u8,
+    ) Error!void {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        const mcp = if (self.mcp) |*value| value else return error.McpManagementUnavailable;
+        if (mcp.connection_test) |test_state|
+            if (test_state.state == .testing) return error.CatalogLoading;
+        const management = if (mcp.management) |*value| value else return error.McpManagementUnavailable;
+        const registry = management.desiredRegistry() orelse
+            return error.McpManagementUnavailable;
+        if (findMcpServer(registry.servers, server_id) == null)
+            return error.McpManagementUnavailable;
+        mcp.connection_test = McpConnectionTest.init(server_id) orelse
+            return error.McpManagementUnavailable;
+        self.bumpRevision();
+    }
+
+    pub fn completeMcpConnectionTest(
+        self: *Workbench,
+        server_id: []const u8,
+        outcome: McpConnectionTestOutcome,
+        tool_count: u32,
+        issue_count: u32,
+    ) void {
+        const mcp = if (self.mcp) |*value| value else return;
+        const test_state = if (mcp.connection_test) |*value| value else return;
+        if (test_state.state != .testing or
+            !std.mem.eql(u8, test_state.serverId(), server_id)) return;
+        test_state.state = switch (outcome) {
+            .connected => .connected,
+            .failed => .failed,
+        };
+        test_state.tool_count = tool_count;
+        test_state.issue_count = issue_count;
+        self.bumpRevision();
+    }
+
     pub fn mcpAuthorizationOperation(
         self: *const Workbench,
     ) ?McpAuthorizationOperationView {
@@ -6525,10 +6614,12 @@ pub const Workbench = struct {
                 switch (reported_outcome) {
                     .saved, .saved_recovery_required => {
                         self.installMcpCommittedDesiredState(mcp, management, candidate);
+                        mcp.connection_test = null;
                         candidate_owned = false;
                         changed = true;
                     },
                     .indeterminate => {
+                        mcp.connection_test = null;
                         self.blockMcpAdmission(mcp, .persistence_outcome_unknown);
                         changed = true;
                     },
@@ -7114,6 +7205,19 @@ pub const Workbench = struct {
                 .@"unreachable" => "Server is unavailable",
                 .invalid_catalog => "Configuration or catalog is invalid",
             });
+            const connection_test = if (mcp.connection_test) |test_state|
+                if (std.mem.eql(u8, test_state.serverId(), server.id)) test_state else null
+            else
+                null;
+            if (connection_test) |test_state|
+                writer.print(",\"connectionTest\":{{\"status\":\"{s}\",\"toolCount\":{d},\"issueCount\":{d}}}", .{
+                    @tagName(test_state.state),
+                    test_state.tool_count,
+                    test_state.issue_count,
+                }) catch return error.SnapshotTooLarge
+            else
+                writer.writeAll(",\"connectionTest\":{\"status\":\"untested\",\"toolCount\":0,\"issueCount\":0}") catch
+                    return error.SnapshotTooLarge;
             writer.writeAll(",\"tools\":[") catch return error.SnapshotTooLarge;
             var tool_count: usize = 0;
             const activation_server = if (mcp.activation) |activation|
@@ -16546,20 +16650,38 @@ test "empty MCP startup commits a proven manageable runtime" {
     const inspection = workbench.inspectMcpDesiredConfiguration().?;
     try std.testing.expectEqual(@as(?u64, 1), inspection.desired_generation);
     try std.testing.expectEqual(
-        mcp_configuration.RuntimeAlignment.current,
+        mcp_configuration.RuntimeAlignment.restart_required,
         inspection.runtime_alignment,
     );
-    try std.testing.expect(workbench.mcp.?.admission == .ready);
+    try std.testing.expectEqual(
+        McpAdmissionBlockReason.pending_restart,
+        workbench.mcp.?.admission.blocked,
+    );
     const created_snapshot = try workbench.writeSnapshot(&output);
     try std.testing.expect(std.mem.indexOf(
         u8,
         created_snapshot,
-        "\"desiredGeneration\":\"1\",\"runtimeAlignment\":\"current\"",
+        "\"desiredGeneration\":\"1\",\"runtimeAlignment\":\"restart_required\"",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
         created_snapshot,
-        "\"desiredEnabled\":false,\"runtimeStatus\":\"not_loaded\",\"newTaskAccess\":\"not_allowed\"",
+        "\"desiredEnabled\":true,\"runtimeStatus\":\"not_loaded\",\"newTaskAccess\":\"restart_required\"",
+    ) != null);
+    const server_id = workbench.mcp.?.management.?.desiredRegistry().?.servers[0].id;
+    try workbench.beginMcpConnectionTest(server_id);
+    const testing_snapshot = try workbench.writeSnapshot(&output);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        testing_snapshot,
+        "\"connectionTest\":{\"status\":\"testing\",\"toolCount\":0,\"issueCount\":0}",
+    ) != null);
+    workbench.completeMcpConnectionTest(server_id, .connected, 3, 1);
+    const connected_snapshot = try workbench.writeSnapshot(&output);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        connected_snapshot,
+        "\"connectionTest\":{\"status\":\"connected\",\"toolCount\":3,\"issueCount\":1}",
     ) != null);
 }
 
@@ -16650,11 +16772,7 @@ test "MCP authorization operation owns product phase and durable token boundary"
         }),
     );
     const server_id = workbench.mcp.?.management.?.desiredRegistry().?.servers[0].id;
-    try std.testing.expectEqual(
-        mcp_configuration.ManagementOutcome.saved,
-        try workbench.approveMcpConnection(1, .{ .server_id = server_id }),
-    );
-    var start = (try workbench.beginMcpAuthorization(2, server_id)).?;
+    var start = (try workbench.beginMcpAuthorization(1, server_id)).?;
     defer start.deinit();
     try std.testing.expectEqual(
         McpAuthorizationPhase.discovering,
@@ -16666,7 +16784,7 @@ test "MCP authorization operation owns product phase and durable token boundary"
     );
     try std.testing.expectEqual(
         mcp_configuration.ManagementOutcome.rejected,
-        try workbench.renameMcpServer(2, .{
+        try workbench.renameMcpServer(1, .{
             .server_id = server_id,
             .display_name = "Blocked while authorizing",
         }),

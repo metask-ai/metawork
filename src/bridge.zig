@@ -17,6 +17,7 @@ pub const DispatcherAutomationAuthority = dispatcher_impl.AutomationAuthority;
 pub const McpManagementHost = dispatcher_impl.McpManagementHost;
 pub const McpHostOutcome = dispatcher_impl.McpHostOutcome;
 pub const McpAuthorizationStartOutcome = dispatcher_impl.McpAuthorizationStartOutcome;
+pub const McpConnectionTestStartOutcome = dispatcher_impl.McpConnectionTestStartOutcome;
 pub const McpSecretSlot = dispatcher_impl.McpSecretSlot;
 pub const WindowChromeRegion = dispatcher_impl.WindowChromeRegion;
 pub const WindowChromePlatformEnvironment = dispatcher_impl.WindowChromePlatformEnvironment;

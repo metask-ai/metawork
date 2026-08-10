@@ -76,6 +76,7 @@ const servers = [
     runtimeStatus: "ready",
     newTaskAccess: "available",
     safeDiagnostic: "",
+    connectionTest: { status: "untested", toolCount: 0, issueCount: 0 },
     tools: [
       {
         name: "search_repositories",
@@ -114,6 +115,7 @@ const servers = [
     runtimeStatus: "needs_authentication",
     newTaskAccess: "unavailable",
     safeDiagnostic: "Sign in again to refresh this server's tools.",
+    connectionTest: { status: "untested", toolCount: 0, issueCount: 0 },
     tools: [],
   },
   {
@@ -137,6 +139,7 @@ const servers = [
     runtimeStatus: "disabled",
     newTaskAccess: "not_allowed",
     safeDiagnostic: "",
+    connectionTest: { status: "untested", toolCount: 0, issueCount: 0 },
     tools: [
       {
         name: "read_file",
@@ -186,6 +189,7 @@ function pageElement(management, query = "", overrides = {}) {
       onSetEnabled: unchangedMutation,
       onSetAllowedTools: unchangedMutation,
       onRemove: unchangedMutation,
+      onTest: async () => ({ outcome: "started" }),
       onRefresh: refreshStarted,
       ...overrides,
     }),
@@ -236,6 +240,35 @@ test("MCP detail exposes bounded product facts and the discovered tool catalog",
   assert.equal(dialog.textContent.includes("Authorization"), true);
   fireEvent.click(screen.getByRole("button", { name: "Close" }));
   assert.equal(screen.queryByRole("dialog"), null);
+});
+
+test("MCP tests a saved connection without refreshing the current Runtime", async () => {
+  const calls = [];
+  render(
+    pageElement(
+      {
+        availability: "degraded",
+        managementHealth: "ready",
+        operation: "idle",
+        desiredGeneration: "7",
+        runtimeAlignment: "restart_required",
+        redacted: false,
+        servers,
+      },
+      "",
+      {
+        onTest: async (...args) => {
+          calls.push(args);
+          return { outcome: "started" };
+        },
+      },
+    ),
+  );
+
+  fireEvent.click(screen.getByRole("button", { name: /GitHub/ }));
+  fireEvent.click(screen.getByRole("button", { name: "Test connection" }));
+  await waitFor(() => assert.deepEqual(calls, [["7", "github-binding"]]));
+  assert.ok(screen.getByText("Opening an isolated test connection."));
 });
 
 test("MCP page distinguishes unavailable, empty, filtered, and redacted states", () => {
@@ -324,7 +357,7 @@ test("MCP add selects Streamable HTTP and preserves its typed public input", asy
   const dialog = screen.getByRole("dialog", { name: "Add an MCP server" });
   assert.ok(
     dialog.textContent.includes(
-      "Secrets are captured by the Host after save. Review the connection, complete authorization, then enable it and select tools.",
+      "Secrets are captured securely by the Host after save. You can test immediately, then choose which tools tasks may use after authentication.",
     ),
   );
   fireEvent.click(
@@ -332,7 +365,7 @@ test("MCP add selects Streamable HTTP and preserves its typed public input", asy
   );
   const name = within(dialog).getByRole("textbox", { name: "Display name" });
   const endpoint = within(dialog).getByRole("textbox", { name: "Endpoint" });
-  const submit = within(dialog).getByRole("button", { name: "Add server" });
+  const submit = within(dialog).getByRole("button", { name: "Add and enable" });
 
   fireEvent.change(name, { target: { value: "Local Search" } });
   fireEvent.change(endpoint, {
@@ -417,7 +450,9 @@ test("MCP STDIO add preserves ordered argv and names without secret values", asy
     }),
     { target: { value: "FILES_TOKEN" } },
   );
-  fireEvent.click(within(dialog).getByRole("button", { name: "Add server" }));
+  fireEvent.click(
+    within(dialog).getByRole("button", { name: "Add and enable" }),
+  );
 
   await waitFor(() => assert.equal(calls.length, 1));
   assert.deepEqual(calls[0], [
@@ -487,7 +522,9 @@ test("MCP OAuth add carries an explicit client auth method and no secret", async
     }),
     { target: { value: "client_secret_basic" } },
   );
-  fireEvent.click(within(dialog).getByRole("button", { name: "Add server" }));
+  fireEvent.click(
+    within(dialog).getByRole("button", { name: "Add and enable" }),
+  );
 
   await waitFor(() => assert.equal(calls.length, 1));
   assert.deepEqual(calls[0], [
@@ -691,7 +728,7 @@ test("MCP approval and OAuth operation actions stay Host-owned and typed", async
     ),
   );
   fireEvent.click(screen.getByRole("button", { name: /Filesystem/ }));
-  fireEvent.click(screen.getByRole("button", { name: "Review connection" }));
+  fireEvent.click(screen.getByRole("button", { name: "Connect and enable" }));
   await waitFor(() =>
     assert.deepEqual(approvals, [["13", "filesystem-binding"]]),
   );

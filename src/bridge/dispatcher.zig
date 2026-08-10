@@ -126,16 +126,26 @@ pub const McpAuthorizationStartOutcome = union(enum) {
     capability_unavailable,
 };
 
+pub const McpConnectionTestStartOutcome = enum {
+    started,
+    busy,
+    stale_generation,
+    needs_authentication,
+    rejected,
+    unavailable,
+};
+
 pub const McpSecretSlot = union(enum) {
     stdio_environment: []const u8,
     http_header: []const u8,
     oauth_client_secret,
 };
 
-/// Narrow Application effect port. It grants only the four MCP management
+/// Narrow Application effect port. It grants only the MCP management
 /// sequences owned by the Application coordinator, never platform authority.
 pub const McpManagementHost = struct {
     context: *anyopaque,
+    test_fn: *const fn (*anyopaque, u64, []const u8) anyerror!McpConnectionTestStartOutcome,
     approve_fn: *const fn (*anyopaque, u64, []const u8) anyerror!McpHostOutcome,
     capture_fn: *const fn (*anyopaque, u64, []const u8, McpSecretSlot) anyerror!McpHostOutcome,
     authorize_fn: *const fn (*anyopaque, u64, []const u8) anyerror!McpAuthorizationStartOutcome,
@@ -232,6 +242,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.mcp_set_server_enabled, .function = setMcpServerEnabled },
             .{ .name = commands.mcp_set_allowed_tools, .function = setMcpAllowedTools },
             .{ .name = commands.mcp_remove_server, .function = removeMcpServer },
+            .{ .name = commands.mcp_test_connection, .function = testMcpConnection },
             .{ .name = commands.mcp_refresh_catalog, .function = refreshMcpCatalog },
             .{ .name = commands.snapshot, .function = beginSnapshot },
             .{ .name = commands.snapshot_chunk, .function = fetchSnapshotChunk },
@@ -1983,6 +1994,28 @@ pub const Dispatcher = struct {
         };
         self.notifyCommitted();
         return std.fmt.bufPrint(output, "{{\"outcome\":\"started\"}}", .{});
+    }
+
+    fn testMcpConnection(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(
+            handlers.McpServerIdentity,
+            invocation.request.payload,
+        );
+        defer parsed.deinit();
+        const expected = try handlers.parseWireId(parsed.value.expectedDesiredGeneration);
+        const host = self.mcp_management_host orelse
+            return std.fmt.bufPrint(output, "{{\"outcome\":\"unavailable\"}}", .{});
+        const outcome = try host.test_fn(host.context, expected, parsed.value.serverId);
+        if (outcome == .started) self.notifyCommitted();
+        return std.fmt.bufPrint(output, "{{\"outcome\":\"{s}\"}}", .{@tagName(outcome)});
     }
 
     fn finishMcpMutation(

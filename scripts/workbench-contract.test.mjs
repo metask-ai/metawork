@@ -285,6 +285,7 @@ test("MCP management is capability-gated and identity checked", () => {
         runtimeStatus: "ready",
         newTaskAccess: "available",
         safeDiagnostic: "",
+        connectionTest: { status: "untested", toolCount: 0, issueCount: 0 },
         tools: [
           {
             name: "search_repositories",
@@ -317,6 +318,7 @@ test("MCP management is capability-gated and identity checked", () => {
         runtimeStatus: "needs_authentication",
         newTaskAccess: "unavailable",
         safeDiagnostic: "Sign in again.",
+        connectionTest: { status: "untested", toolCount: 0, issueCount: 0 },
         tools: [],
       },
     ],
