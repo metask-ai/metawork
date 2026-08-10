@@ -913,10 +913,7 @@ pub const Runtime = struct {
             attempt_id,
             .credential_store_write_failed,
         );
-        const identity = retainedProfileIdentity(
-            self.account.currentIdentity(),
-            login.identity,
-        );
+        const identity = login.identity;
         var cleanup_pending = false;
         if (builtin.os.tag == .windows) {
             self.windows_public_state = windows_store.commitAuthenticated(
@@ -956,32 +953,13 @@ pub const Runtime = struct {
         return switch (self.account.prepareCompletion(&completion)) {
             .transition => |transition| .{ .prepared = .{
                 .transition = transition,
-                .follow_up = if (identity.profileId().len > 0)
-                    .refresh_catalog
-                else
-                    null,
+                .follow_up = .refresh_catalog,
                 .cleanup_after_commit = builtin.os.tag != .windows,
                 .schedule_refresh_after_commit = true,
             } },
             .rejected => |error_code| .{ .rejected = error_code },
             .ignored_stale => .ignored_stale,
         };
-    }
-
-    fn retainedProfileIdentity(
-        previous: ?state_impl.AccountIdentity,
-        replacement: state_impl.AccountIdentity,
-    ) state_impl.AccountIdentity {
-        if (replacement.profileId().len != 0) return replacement;
-        const current = previous orelse return replacement;
-        if (current.profileId().len == 0 or
-            !std.mem.eql(u8, current.accountId(), replacement.accountId()))
-            return replacement;
-        return state_impl.AccountIdentity.init(
-            replacement.accountId(),
-            current.profileId(),
-            replacement.displayName(),
-        ) catch unreachable;
     }
 
     fn prepareRefreshedTokens(
@@ -1003,23 +981,15 @@ pub const Runtime = struct {
                     attempt_id,
                     .dependency_contract_invalid,
                 );
-            const merged_identity = retainedProfileIdentity(
-                identity,
-                discovered_identity,
-            );
             if (!std.mem.eql(
                 u8,
-                merged_identity.accountId(),
+                discovered_identity.accountId(),
                 identity.accountId(),
-            ) or !std.mem.eql(
-                u8,
-                merged_identity.profileId(),
-                identity.profileId(),
             )) return self.prepareFailure(
                 attempt_id,
                 .account_mismatch,
             );
-            refreshed_identity = merged_identity;
+            refreshed_identity = discovered_identity;
         }
         if (!std.mem.eql(
             u8,
@@ -1089,7 +1059,7 @@ pub const Runtime = struct {
         return switch (self.account.prepareCompletion(&completion)) {
             .transition => |transition| .{ .prepared = .{
                 .transition = transition,
-                .follow_up = if (continue_catalog and identity.profileId().len > 0)
+                .follow_up = if (continue_catalog)
                     .refresh_catalog
                 else
                     null,
@@ -1390,7 +1360,6 @@ pub const Runtime = struct {
                 platform.backend(),
                 generation,
                 identity.accountId(),
-                identity.profileId(),
                 self.effects.catalog.selectedApiKeyId(),
                 &execution,
             ) catch |err| {
@@ -1690,7 +1659,7 @@ pub const TestSupport = if (builtin.is_test) struct {
         execution: *contract.OwnedExecutionConfig,
     ) !Prepared {
         const ready = try state_impl.RestoreReady.init(
-            try .init("account-1", "profile-1", "Metask User"),
+            try .init("account-1", "Metask User"),
             "key-1",
             execution,
         );
@@ -1760,12 +1729,10 @@ fn prepareCatalogExecution(
     model: []const u8,
     execution_generation: u64,
 ) CatalogExecutionPreparation {
-    if (!std.mem.eql(u8, catalog.ownerAccountId(), identity.accountId()) or
-        !std.mem.eql(u8, catalog.ownerProfileId(), identity.profileId()))
+    if (!std.mem.eql(u8, catalog.ownerAccountId(), identity.accountId()))
         return .{ .rejected = .account_mismatch };
     if (!catalog.ownsExecutionSelection(
         identity.accountId(),
-        identity.profileId(),
         model_catalog_api_key_id,
         model,
     )) return .{ .rejected = .dependency_contract_invalid };
@@ -1851,7 +1818,6 @@ test "Account Runtime owns automatic catalog selection policy" {
     try catalog_impl.TestSupport.replaceOwnedSelection(
         &catalog,
         "account-1",
-        "profile-1",
         .{
             .id = "key-current",
             .name = "Current",
@@ -2028,7 +1994,6 @@ test "Account Runtime rejects cross-API model selection before persistence" {
     try catalog_impl.TestSupport.replaceOwnedSelection(
         &candidate,
         "account-1",
-        "profile-1",
         .{
             .id = "key-b",
             .name = "Secondary",
@@ -2040,7 +2005,6 @@ test "Account Runtime rejects cross-API model selection before persistence" {
     );
     const identity = try state_impl.AccountIdentity.init(
         "account-1",
-        "profile-1",
         "Metask User",
     );
 
@@ -2064,7 +2028,6 @@ test "Account Runtime rejects cross-API model selection before persistence" {
 
     try std.testing.expect(candidate.ownsExecutionSelection(
         "account-1",
-        "profile-1",
         "key-b",
         "same-model",
     ));
@@ -2104,7 +2067,7 @@ fn commitReadyRestoreForTest(runtime: *Runtime) !void {
     );
     var restored: state_impl.RestoreResult = .{
         .execution_ready = try .init(
-            try .init("account-1", "profile-1", "Metask User"),
+            try .init("account-1", "Metask User"),
             "key-1",
             &execution,
         ),
@@ -2179,31 +2142,6 @@ test "Account Runtime dispatches an admitted effect only after state commit" {
     try std.testing.expect(runtime.effects.queue.entry != null);
     runtime.dispatchCommitted(&prepared);
     try std.testing.expect(runtime.effects.queue.entry == null);
-}
-
-test "reauthentication retains a prior profile only for the same account" {
-    const previous = try state_impl.AccountIdentity.init(
-        "acct-1",
-        "profile-1",
-        "Previous account",
-    );
-    const same_account = try state_impl.AccountIdentity.init(
-        "acct-1",
-        "",
-        "acct-1",
-    );
-    const retained = Runtime.retainedProfileIdentity(previous, same_account);
-    try std.testing.expectEqualStrings("profile-1", retained.profileId());
-    try std.testing.expectEqualStrings("acct-1", retained.displayName());
-
-    const other_account = try state_impl.AccountIdentity.init(
-        "acct-2",
-        "",
-        "acct-2",
-    );
-    const replaced = Runtime.retainedProfileIdentity(previous, other_account);
-    try std.testing.expectEqualStrings("acct-2", replaced.accountId());
-    try std.testing.expectEqualStrings("", replaced.profileId());
 }
 
 test "Account Runtime fails closed when logout persistence is unknown" {

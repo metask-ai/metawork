@@ -594,13 +594,6 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     /ready execution requires/,
   );
 
-  const missingReadyProfile = clone(fixture);
-  missingReadyProfile.account.profileId = "";
-  assert.throws(
-    () => decodeWorkbenchSnapshot(missingReadyProfile),
-    /ready execution requires/,
-  );
-
   const keyOutsideCatalog = clone(fixture);
   keyOutsideCatalog.account.selectedApiKeySelectionId = "missing-key";
   assert.throws(
@@ -613,13 +606,6 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   assert.throws(
     () => decodeWorkbenchSnapshot(modelOutsideCatalog),
     /selected catalog membership/,
-  );
-
-  const missingBindingProfile = clone(fixture);
-  delete missingBindingProfile.tasks[0].binding.profileId;
-  assert.throws(
-    () => decodeWorkbenchSnapshot(missingBindingProfile),
-    /expected keys/,
   );
 
   const refreshingReadyAccount = clone(fixture);

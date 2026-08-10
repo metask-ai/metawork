@@ -2104,7 +2104,6 @@ pub fn installWorkbenchExecution(
             .readiness = .ready,
             .primary_action = .none,
             .account_id = "account-1",
-            .profile_id = "profile-1",
             .display_name = "Fixture User",
             .api_keys = &api_keys,
             .models = &models,

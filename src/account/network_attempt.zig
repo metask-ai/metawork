@@ -337,12 +337,10 @@ const RefreshTransport = struct {
         output: []u8,
     ) metask.TransportError!metask.Response {
         const self: *RefreshTransport = @ptrCast(@alignCast(context));
-        if (request.kind == .profiles) {
-            const body =
-                \\{"data":[{"id":"profile-1","display_name":"MetaWork User","status":"active","is_default":true}]}
-            ;
+        if (request.kind == .current_user) {
+            const body = "{}";
             @memcpy(output[0..body.len], body);
-            return .{ .status = 200, .body = output[0..body.len] };
+            return .{ .status = 404, .body = output[0..body.len] };
         }
         if (request.kind != .refresh_token) return error.ProtocolFailed;
         if (self.blocking) {
@@ -431,7 +429,7 @@ test "refresh attempt transfers one opaque generation and cancels cleanly" {
     );
 }
 
-test "refresh-only Windows restore revalidates account and profile identity" {
+test "refresh-only Windows restore revalidates account identity" {
     var refresh = try oauth.Secret.init(
         std.testing.allocator,
         "old-refresh",
@@ -451,7 +449,6 @@ test "refresh-only Windows restore revalidates account and profile identity" {
         &credential_owner,
         try state.AccountIdentity.init(
             "acct-1",
-            "profile-1",
             "Stored User",
         ),
         capture.sink(),
@@ -465,5 +462,4 @@ test "refresh-only Windows restore revalidates account and profile identity" {
     const identity = refreshed.refresh.refreshedIdentity() orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("acct-1", identity.accountId());
-    try std.testing.expectEqualStrings("profile-1", identity.profileId());
 }

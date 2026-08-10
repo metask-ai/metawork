@@ -11,7 +11,6 @@ pub const current_user_url = "https://napi.metask-ai.com/api/v1/auth/me";
 pub const RequestKind = enum {
     exchange_code,
     refresh_token,
-    profiles,
     current_user,
     keys,
     models,
@@ -21,7 +20,6 @@ pub const Request = struct {
     kind: RequestKind,
     body: []const u8 = "",
     bearer: ?[]const u8 = null,
-    profile_id: ?[]const u8 = null,
     control: ?RequestControl = null,
 };
 
@@ -171,8 +169,7 @@ pub fn exchangeAndIdentify(
     errdefer tokens.deinit();
     const identity = fetchIdentity(transport, &tokens, control, true) catch |err| {
         // Exchanging the authorization code is the OAuth commit boundary.
-        // Profile discovery is a subsequent business API call, so a gateway
-        // failure must not discard a newly issued refresh token.
+        // The compatibility user read must not discard newly issued tokens.
         if (err == error.Cancelled) return err;
         const account_only = accountOnlyIdentity(&tokens) catch
             return error.ProtocolInvalid;
@@ -184,7 +181,6 @@ pub fn exchangeAndIdentify(
 pub fn accountOnlyIdentity(tokens: *const oauth.TokenSet) !state.AccountIdentity {
     return state.AccountIdentity.init(
         tokens.accountId(),
-        "",
         tokens.accountId(),
     );
 }
@@ -239,28 +235,6 @@ pub fn fetchIdentity(
     control: ?RequestControl,
     fetch_current_user: bool,
 ) ClientError!state.AccountIdentity {
-    var profile_storage: [oauth.Limits.profiles_body_bytes]u8 = undefined;
-    defer std.crypto.secureZero(u8, &profile_storage);
-    var selected_profile: ?oauth.Profile = null;
-    profile: {
-        const response = transport.perform(
-            .{
-                .kind = .profiles,
-                .bearer = tokens.access_token.view(),
-                .control = control,
-            },
-            &profile_storage,
-        ) catch |err| {
-            const failure = transportFailure(err);
-            if (failure == error.Cancelled) return failure;
-            break :profile;
-        };
-        if (response.status != 200) break :profile;
-        selected_profile = oauth.parseFirstProfile(response.body) catch
-            break :profile;
-    }
-    const profile_id = if (selected_profile) |*value| value.idView() else "";
-
     var selected_current_user: ?oauth.CurrentUser = null;
     if (fetch_current_user) {
         var current_user_storage: [oauth.Limits.current_user_body_bytes]u8 = undefined;
@@ -291,7 +265,6 @@ pub fn fetchIdentity(
         tokens.accountId();
     return state.AccountIdentity.init(
         tokens.accountId(),
-        profile_id,
         display_name,
     ) catch return error.ProtocolInvalid;
 }
@@ -450,7 +423,6 @@ pub const StdHttpTransport = struct {
 
         const endpoint, const method: std.http.Method = switch (request.kind) {
             .exchange_code, .refresh_token => .{ oauth.token_url, .POST },
-            .profiles => .{ oauth.profiles_url, .GET },
             .current_user => .{ current_user_url, .GET },
             .keys => .{ api_keys_url, .GET },
             .models => .{ models_url, .GET },
@@ -479,24 +451,6 @@ pub const StdHttpTransport = struct {
         } else if (request.bearer != null) {
             return .protocol_failed;
         }
-        switch (request.kind) {
-            .keys, .models => {
-                const profile_id = request.profile_id orelse
-                    return .protocol_failed;
-                if (profile_id.len == 0 or
-                    profile_id.len > contract.Limits.profile_id_bytes or
-                    std.mem.indexOfAny(u8, profile_id, "\r\n") != null)
-                    return .protocol_failed;
-                headers[header_count] = .{
-                    .name = "X-Profile-ID",
-                    .value = profile_id,
-                };
-                header_count += 1;
-            },
-            else => if (request.profile_id != null)
-                return .protocol_failed,
-        }
-
         const result = client.fetch(.{
             .location = .{ .url = endpoint },
             .method = method,
@@ -553,14 +507,6 @@ const FakeTransport = struct {
                 ;
             },
             1 => blk: {
-                if (request.kind != .profiles or
-                    !std.mem.eql(u8, request.bearer orelse "", "access"))
-                    return error.ProtocolFailed;
-                break :blk
-                \\{"data":[{"id":"profile-1","name":"main","display_name":"Main","status":"active","platform":"anthropic","group_id":1,"group_name":"Main","expires_at":null,"is_default":true}]}
-                ;
-            },
-            2 => blk: {
                 if (request.kind != .current_user or
                     !std.mem.eql(u8, request.bearer orelse "", "access"))
                     return error.ProtocolFailed;
@@ -600,110 +546,10 @@ test "login exchanges the code then resolves a secret-free identity" {
         result.identity.accountId(),
     );
     try std.testing.expectEqualStrings(
-        "profile-1",
-        result.identity.profileId(),
-    );
-    try std.testing.expectEqualStrings(
         "Meta User",
         result.identity.displayName(),
     );
-    try std.testing.expectEqual(@as(usize, 3), fake.step);
-}
-
-test "login remains authenticated when the documented profile list is empty" {
-    var fake = struct {
-        step: usize = 0,
-
-        fn perform(
-            context: *anyopaque,
-            request: Request,
-            response_buffer: []u8,
-        ) TransportError!Response {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            const body = switch (self.step) {
-                0 => blk: {
-                    if (request.kind != .exchange_code) return error.ProtocolFailed;
-                    break :blk
-                    \\{"access_token":"access","refresh_token":"refresh","token_type":"Bearer","expires_in":3600,"scope":"metawork:use","account_id":"acct-1"}
-                    ;
-                },
-                1 => blk: {
-                    if (request.kind != .profiles) return error.ProtocolFailed;
-                    break :blk "{\"data\":[]}";
-                },
-                else => return error.ProtocolFailed,
-            };
-            if (body.len > response_buffer.len) return error.ResponseTooLarge;
-            @memcpy(response_buffer[0..body.len], body);
-            self.step += 1;
-            return .{ .status = 200, .body = response_buffer[0..body.len] };
-        }
-    }{};
-    var code = try oauth.Secret.init(std.testing.allocator, "authorization-code");
-    defer code.deinit();
-    var result = try exchangeAndIdentify(
-        std.testing.allocator,
-        .{ .context = &fake, .perform_fn = @TypeOf(fake).perform },
-        &code,
-        "verifier",
-        40123,
-        100,
-        null,
-    );
-    defer result.deinit();
-    try std.testing.expectEqualStrings("acct-1", result.identity.accountId());
-    try std.testing.expectEqualStrings("", result.identity.profileId());
-    try std.testing.expectEqualStrings("acct-1", result.identity.displayName());
-}
-
-test "login keeps issued tokens when profile discovery rejects the new scope" {
-    var fake = struct {
-        step: usize = 0,
-
-        fn perform(
-            context: *anyopaque,
-            request: Request,
-            response_buffer: []u8,
-        ) TransportError!Response {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            defer self.step += 1;
-            return switch (self.step) {
-                0 => blk: {
-                    if (request.kind != .exchange_code) return error.ProtocolFailed;
-                    const body =
-                        \\{"access_token":"new-access","refresh_token":"new-refresh","token_type":"Bearer","expires_in":3600,"scope":"metawork:use","account_id":"acct-1"}
-                    ;
-                    @memcpy(response_buffer[0..body.len], body);
-                    break :blk .{ .status = 200, .body = response_buffer[0..body.len] };
-                },
-                1 => blk: {
-                    if (request.kind != .profiles or
-                        !std.mem.eql(u8, request.bearer orelse "", "new-access"))
-                        return error.ProtocolFailed;
-                    const body = "{\"code\":\"INVALID_API_KEY\"}";
-                    @memcpy(response_buffer[0..body.len], body);
-                    break :blk .{ .status = 401, .body = response_buffer[0..body.len] };
-                },
-                else => return error.ProtocolFailed,
-            };
-        }
-    }{};
-    var code = try oauth.Secret.init(std.testing.allocator, "authorization-code");
-    defer code.deinit();
-    var result = try exchangeAndIdentify(
-        std.testing.allocator,
-        .{ .context = &fake, .perform_fn = @TypeOf(fake).perform },
-        &code,
-        "verifier",
-        40123,
-        100,
-        null,
-    );
-    defer result.deinit();
-    try std.testing.expectEqualStrings("new-refresh", result.tokens.refresh_token.view());
-    try std.testing.expectEqualStrings("acct-1", result.identity.accountId());
-    try std.testing.expectEqualStrings("", result.identity.profileId());
-    try std.testing.expectEqual(@as(usize, 3), fake.step);
+    try std.testing.expectEqual(@as(usize, 2), fake.step);
 }
 
 test "refresh requires and installs the rotated refresh token" {

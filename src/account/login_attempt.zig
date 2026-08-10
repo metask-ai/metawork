@@ -292,10 +292,10 @@ const FakeTransport = struct {
                 ;
             },
             1 => blk: {
-                if (request.kind != .profiles)
+                if (request.kind != .current_user)
                     return error.ProtocolFailed;
                 break :blk
-                \\{"data":[{"id":"profile-1","name":"main","display_name":"Metask User","status":"active","platform":"anthropic","group_id":1,"group_name":"Main","expires_at":null,"is_default":true}]}
+                \\{"code":0,"message":"success","data":{"id":1,"username":"Metask User"}}
                 ;
             },
             else => return error.ProtocolFailed,

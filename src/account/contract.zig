@@ -4,7 +4,6 @@ const std = @import("std");
 /// clients may use tighter limits, but may never widen these product bounds.
 pub const Limits = struct {
     pub const account_id_bytes: usize = 256;
-    pub const profile_id_bytes: usize = 256;
     pub const display_name_bytes: usize = 256;
     pub const api_key_id_bytes: usize = 128;
     pub const api_key_name_bytes: usize = 256;
@@ -151,7 +150,6 @@ pub const AccountView = struct {
     primary_action: AccountPrimaryAction,
     can_cancel: bool = false,
     account_id: []const u8 = "",
-    profile_id: []const u8 = "",
     display_name: []const u8 = "",
     api_keys: []const ApiKeyView = &.{},
     models: []const ModelView = &.{},
@@ -424,7 +422,6 @@ pub fn validateExecutionConfig(input: ExecutionConfigInput) ValidationError!void
 
 pub fn validateView(view: AccountView) ValidationError!void {
     try validateOptional(view.account_id, Limits.account_id_bytes);
-    try validateOptional(view.profile_id, Limits.profile_id_bytes);
     try validateOptional(view.display_name, Limits.display_name_bytes);
     try validateOptional(view.selected_api_key_id, Limits.api_key_id_bytes);
     try validateOptional(view.selected_model, Limits.model_id_bytes);
@@ -489,7 +486,6 @@ pub fn validateView(view: AccountView) ValidationError!void {
     if (view.execution_state == .ready) {
         if (view.execution_generation == 0 or
             view.account_id.len == 0 or
-            view.profile_id.len == 0 or
             view.selected_api_key_id.len == 0 or
             view.selected_model.len == 0)
             return error.InconsistentState;

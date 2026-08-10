@@ -489,7 +489,6 @@ pub fn cancelTimer(backend: *NativeBackend, timer_id: u64) !void {
 
 const WindowsPublicStateWire = struct {
     account_id: []const u8,
-    profile_id: []const u8,
     display_name: []const u8,
     api_key_id: ?[]const u8,
     model_id: ?[]const u8,
@@ -504,7 +503,6 @@ pub fn encodeWindowsPublicState(
         return error.InvalidData;
     const wire: WindowsPublicStateWire = .{
         .account_id = value.account_id.view(),
-        .profile_id = value.profile_id.view(),
         .display_name = value.display_name.view(),
         .api_key_id = if (value.apiKeyId().len == 0)
             null
@@ -538,7 +536,6 @@ pub fn decodeWindowsPublicState(
         (parsed.value.model_id == null)) return error.InvalidData;
     const identity = account_state.AccountIdentity.init(
         parsed.value.account_id,
-        parsed.value.profile_id,
         parsed.value.display_name,
     ) catch return error.InvalidData;
     return windows_store.PublicState.init(
@@ -570,7 +567,6 @@ const ManifestWire = struct {
     expires_at: i64,
     scope: ?[]const u8,
     account_id: ?[]const u8,
-    profile_id: ?[]const u8,
     display_name: ?[]const u8,
     execution_slot: ?[]const u8,
     execution_credential_generation: ?[]const u8,
@@ -600,7 +596,6 @@ pub fn encodeManifest(
         .expires_at = manifest.expires_at,
         .scope = if (manifest.scope_len > 0) manifest.scopeView() else null,
         .account_id = if (manifest.account_id_len > 0) manifest.accountId() else null,
-        .profile_id = if (manifest.profile_id_len > 0) manifest.profileId() else null,
         .display_name = if (manifest.display_name_len > 0)
             manifest.displayName()
         else
@@ -663,7 +658,7 @@ pub fn decodeManifest(input: []const u8) store.StoreError!store.Manifest {
     if (manifest_state == .signed_out) {
         if (wire.active_slot != null or wire.generation != null or
             wire.scope != null or wire.account_id != null or
-            wire.profile_id != null or wire.display_name != null or
+            wire.display_name != null or
             wire.execution_slot != null or
             wire.execution_credential_generation != null or
             wire.api_key_id != null or wire.provider_kind != null or
@@ -689,19 +684,15 @@ pub fn decodeManifest(input: []const u8) store.StoreError!store.Manifest {
     result.expires_at = wire.expires_at;
     const stored_scope = wire.scope orelse return error.ManifestCorrupt;
     const account_id = wire.account_id orelse return error.ManifestCorrupt;
-    const profile_id = wire.profile_id orelse "";
     const display_name = wire.display_name orelse return error.ManifestCorrupt;
     if (stored_scope.len > result.scope_value.len or
         account_id.len > result.account_id.len or
-        profile_id.len > result.profile_id.len or
         display_name.len > result.display_name.len)
         return error.ManifestCorrupt;
     @memcpy(result.scope_value[0..stored_scope.len], stored_scope);
     result.scope_len = stored_scope.len;
     @memcpy(result.account_id[0..account_id.len], account_id);
     result.account_id_len = account_id.len;
-    @memcpy(result.profile_id[0..profile_id.len], profile_id);
-    result.profile_id_len = profile_id.len;
     @memcpy(result.display_name[0..display_name.len], display_name);
     result.display_name_len = display_name.len;
     if (manifest_state == .execution_ready) {
@@ -761,7 +752,6 @@ test "manifest codec is strict and round trips account-only state" {
     defer tokens.deinit();
     const identity = try state.AccountIdentity.init(
         "acct-1",
-        "profile-1",
         "Metask User",
     );
     const manifest = try store.Manifest.accountOnly(
@@ -807,7 +797,6 @@ test "manifest codec round trips one atomic execution-ready pointer" {
     defer tokens.deinit();
     const identity = try state.AccountIdentity.init(
         "acct-1",
-        "profile-1",
         "Metask User",
     );
     const account_manifest = try store.Manifest.accountOnly(
@@ -845,7 +834,6 @@ test "manifest codec round trips one atomic execution-ready pointer" {
     );
     try std.testing.expectEqual(store.Slot.A, decoded.active_slot.?);
     try std.testing.expectEqual(store.Slot.B, decoded.execution_slot.?);
-    try std.testing.expectEqualStrings("profile-1", decoded.profileId());
     try std.testing.expectEqualStrings("325", decoded.apiKeyId());
     try std.testing.expectEqual(
         contract.ProviderKind.openai,
@@ -863,7 +851,6 @@ test "manifest codec accepts worst-case JSON escaping within contract bounds" {
     const state = @import("account_state");
     const contract = @import("metawork_account_contract");
     const account_id: [contract.Limits.account_id_bytes]u8 = @splat(0x01);
-    const profile_id: [contract.Limits.profile_id_bytes]u8 = @splat(0x02);
     const display_name: [contract.Limits.display_name_bytes]u8 = @splat(0x03);
     const api_key_id: [contract.Limits.api_key_id_bytes]u8 = @splat(0x04);
     const model: [contract.Limits.model_id_bytes]u8 = @splat(0x05);
@@ -878,7 +865,6 @@ test "manifest codec accepts worst-case JSON escaping within contract bounds" {
     defer tokens.deinit();
     const identity = try state.AccountIdentity.init(
         &account_id,
-        &profile_id,
         &display_name,
     );
     const account_manifest = try store.Manifest.accountOnly(
@@ -911,7 +897,6 @@ test "manifest codec accepts worst-case JSON escaping within contract bounds" {
     const encoded = try encodeManifest(&encoded_storage, manifest);
     const decoded = try decodeManifest(encoded);
     try std.testing.expectEqualStrings(&account_id, decoded.accountId());
-    try std.testing.expectEqualStrings(&profile_id, decoded.profileId());
     try std.testing.expectEqualStrings(&display_name, decoded.displayName());
     try std.testing.expectEqualStrings(&api_key_id, decoded.apiKeyId());
     try std.testing.expectEqualStrings(&model, decoded.modelView());
@@ -920,7 +905,6 @@ test "manifest codec accepts worst-case JSON escaping within contract bounds" {
 test "Windows public state codec is unversioned and secret-free" {
     const identity = try account_state.AccountIdentity.init(
         "account-1",
-        "profile-1",
         "MetaWork User",
     );
     const public_state = try windows_store.PublicState.init(
@@ -942,10 +926,9 @@ test "Windows public state codec is unversioned and secret-free" {
     try std.testing.expectEqualStrings("model-7", decoded.modelId());
 }
 
-test "account-only codecs preserve an empty execution profile" {
+test "account-only codecs preserve public identity" {
     const identity = try account_state.AccountIdentity.init(
         "account-1",
-        "",
         "account-1",
     );
     const public_state = try windows_store.PublicState.init(identity, "", "");
@@ -955,7 +938,7 @@ test "account-only codecs preserve an empty execution profile" {
         public_state,
     );
     const public_decoded = try decodeWindowsPublicState(public_encoded);
-    try std.testing.expectEqualStrings("", public_decoded.profile_id.view());
+    try std.testing.expectEqualStrings("account-1", public_decoded.account_id.view());
 
     var tokens = try oauth.TokenSet.fromStored(
         std.testing.allocator,
@@ -976,7 +959,7 @@ test "account-only codecs preserve an empty execution profile" {
     var manifest_storage: [manifest_bytes]u8 = undefined;
     const manifest_encoded = try encodeManifest(&manifest_storage, manifest);
     const manifest_decoded = try decodeManifest(manifest_encoded);
-    try std.testing.expectEqualStrings("", manifest_decoded.profileId());
+    try std.testing.expectEqualStrings("account-1", manifest_decoded.accountId());
 }
 
 test "Windows public state codec rejects versions and partial selections" {
@@ -989,7 +972,7 @@ test "Windows public state codec rejects versions and partial selections" {
     try std.testing.expectError(
         error.InvalidData,
         decodeWindowsPublicState(
-            \\{"account_id":"account-1","profile_id":"profile-1","display_name":"User","api_key_id":"api-1","model_id":null}
+            \\{"account_id":"account-1","display_name":"User","api_key_id":"api-1","model_id":null}
         ),
     );
 }
@@ -1005,7 +988,6 @@ test "Windows public state cold-start read ignores the macOS manifest" {
     };
     const identity = try account_state.AccountIdentity.init(
         "account-1",
-        "profile-1",
         "MetaWork User",
     );
     const first = try windows_store.PublicState.init(

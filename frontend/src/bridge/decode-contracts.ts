@@ -634,7 +634,6 @@ function decodeAccount(value: unknown, path: string): AccountView {
     "primaryAction",
     "canCancel",
     "accountId",
-    "profileId",
     "displayName",
     "apiKeys",
     "models",
@@ -709,7 +708,6 @@ function decodeAccount(value: unknown, path: string): AccountView {
   );
   const canCancel = booleanValue(item.canCancel, `${path}.canCancel`);
   const accountId = stringValue(item.accountId, `${path}.accountId`);
-  const profileId = stringValue(item.profileId, `${path}.profileId`);
   const displayName = stringValue(item.displayName, `${path}.displayName`);
   const selectedApiKeySelectionId = stringValue(
     item.selectedApiKeySelectionId,
@@ -755,7 +753,6 @@ function decodeAccount(value: unknown, path: string): AccountView {
   if (
     executionState === "ready" &&
     (accountId.length === 0 ||
-      profileId.length === 0 ||
       selectedApiKeySelectionId.length === 0 ||
       selectedModelSelectionId.length === 0 ||
       executionGeneration === "0")
@@ -835,7 +832,6 @@ function decodeAccount(value: unknown, path: string): AccountView {
     (executionState !== "none" ||
       operation !== "none" ||
       accountId.length !== 0 ||
-      profileId.length !== 0 ||
       displayName.length !== 0 ||
       apiKeys.length !== 0 ||
       models.length !== 0 ||
@@ -889,7 +885,6 @@ function decodeAccount(value: unknown, path: string): AccountView {
     primaryAction,
     canCancel,
     accountId,
-    profileId,
     displayName,
     apiKeys,
     models,
@@ -1203,7 +1198,6 @@ function decodeTask(value: unknown, path: string): TaskView {
     "epoch",
     "availability",
     "accountId",
-    "profileId",
     "accountDisplayName",
     "apiKeySelectionId",
     "apiKeyName",
@@ -1233,7 +1227,6 @@ function decodeTask(value: unknown, path: string): TaskView {
     epoch: positiveWireId(bindingItem.epoch, `${path}.binding.epoch`),
     availability,
     accountId: stringValue(bindingItem.accountId, `${path}.binding.accountId`),
-    profileId: stringValue(bindingItem.profileId, `${path}.binding.profileId`),
     accountDisplayName: stringValue(
       bindingItem.accountDisplayName,
       `${path}.binding.accountDisplayName`,

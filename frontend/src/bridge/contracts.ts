@@ -84,7 +84,6 @@ export type AccountView = {
   primaryAction: AccountPrimaryAction;
   canCancel: boolean;
   accountId: string;
-  profileId: string;
   displayName: string;
   apiKeys: {
     selectionId: string;
@@ -373,7 +372,6 @@ export type TaskView = {
     epoch: string;
     availability: "available" | "unavailable";
     accountId: string;
-    profileId: string;
     accountDisplayName: string;
     apiKeySelectionId: string;
     apiKeyName: string;

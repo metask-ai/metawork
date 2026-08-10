@@ -5,7 +5,6 @@ pub const authority = "https://napi.metask-ai.com";
 pub const authorize_url = authority ++ "/oauth/authorize";
 pub const token_url = authority ++ "/oauth/token";
 pub const revoke_url = authority ++ "/oauth/revoke";
-pub const profiles_url = authority ++ "/v1/profiles";
 pub const client_id = "metawork-app";
 pub const scope = "metawork:use";
 pub const callback_path = "/auth/callback";
@@ -18,9 +17,7 @@ pub const Limits = struct {
     pub const authorization_url_bytes: usize = 4096;
     pub const callback_target_bytes: usize = 8192;
     pub const token_body_bytes: usize = 16 * 1024;
-    pub const profiles_body_bytes: usize = 64 * 1024;
     pub const current_user_body_bytes: usize = 16 * 1024;
-    pub const profile_entries: usize = 64;
     pub const scope_bytes: usize = 256;
 };
 
@@ -31,10 +28,8 @@ pub const ProtocolError = error{
     StateMismatch,
     AuthorizationRejected,
     InvalidTokenResponse,
-    InvalidProfileResponse,
     InvalidCurrentUserResponse,
     FieldTooLarge,
-    TooManyProfiles,
     ExpiryOverflow,
     MissingRefreshToken,
 };
@@ -394,78 +389,6 @@ pub fn parseTokenResponse(
     return result;
 }
 
-pub const Profile = struct {
-    id: [contract.Limits.profile_id_bytes]u8 = undefined,
-    id_len: usize = 0,
-    display_name: [contract.Limits.display_name_bytes]u8 = undefined,
-    display_name_len: usize = 0,
-
-    pub fn idView(self: *const Profile) []const u8 {
-        return self.id[0..self.id_len];
-    }
-
-    pub fn displayName(self: *const Profile) []const u8 {
-        return self.display_name[0..self.display_name_len];
-    }
-};
-
-const ProfilesResponse = struct {
-    data: []const ProfileResponse,
-};
-
-const ProfileResponse = struct {
-    id: []const u8,
-    name: ?[]const u8 = null,
-    display_name: ?[]const u8 = null,
-    status: []const u8,
-    is_default: bool,
-};
-
-pub fn parseFirstProfile(body: []const u8) ProtocolError!?Profile {
-    if (body.len == 0 or body.len > Limits.profiles_body_bytes)
-        return error.InvalidProfileResponse;
-    var scratch: [Limits.profiles_body_bytes * 2]u8 = undefined;
-    defer std.crypto.secureZero(u8, &scratch);
-    var fba = std.heap.FixedBufferAllocator.init(&scratch);
-    var parsed = std.json.parseFromSlice(
-        ProfilesResponse,
-        fba.allocator(),
-        body,
-        .{ .ignore_unknown_fields = true },
-    ) catch return error.InvalidProfileResponse;
-    defer parsed.deinit();
-    if (parsed.value.data.len > Limits.profile_entries)
-        return error.TooManyProfiles;
-    var first_active: ?ProfileResponse = null;
-    var default_active: ?ProfileResponse = null;
-    for (parsed.value.data) |entry| {
-        if (entry.id.len == 0 or
-            !std.mem.eql(u8, entry.status, "active"))
-            continue;
-        if (first_active == null) first_active = entry;
-        if (entry.is_default) {
-            if (default_active != null)
-                return error.InvalidProfileResponse;
-            default_active = entry;
-        }
-    }
-    const selected = default_active orelse first_active orelse return null;
-    const display =
-        selected.display_name orelse selected.name orelse selected.id;
-    if (selected.id.len > contract.Limits.profile_id_bytes or
-        display.len > contract.Limits.display_name_bytes)
-        return error.FieldTooLarge;
-    if (!std.unicode.utf8ValidateSlice(selected.id) or
-        !std.unicode.utf8ValidateSlice(display))
-        return error.InvalidEncoding;
-    var result: Profile = .{};
-    @memcpy(result.id[0..selected.id.len], selected.id);
-    result.id_len = selected.id.len;
-    @memcpy(result.display_name[0..display.len], display);
-    result.display_name_len = display.len;
-    return result;
-}
-
 pub const CurrentUser = struct {
     username: [contract.Limits.display_name_bytes]u8 = undefined,
     username_len: usize = 0,
@@ -725,28 +648,6 @@ test "token decoder validates consumed fields and tolerates additive metadata" {
             0,
         ),
     );
-}
-
-test "profile decoder selects one active default and tolerates additive metadata" {
-    const profile = (try parseFirstProfile(
-        \\{"data":[
-        \\{"id":"profile-1","name":"first","display_name":"First",
-        \\"status":"active","platform":"anthropic","group_id":1,
-        \\"group_name":"First","expires_at":null,"is_default":false},
-        \\{"id":"profile-2","name":"main","display_name":"Main",
-        \\"status":"active","platform":"anthropic","group_id":2,
-        \\"group_name":"Main","expires_at":null,"is_default":true}]}
-    )).?;
-    try std.testing.expectEqualStrings("profile-2", profile.idView());
-    try std.testing.expectEqualStrings("Main", profile.displayName());
-    const extended = (try parseFirstProfile(
-        \\{"data":[{"id":"profile-1","name":"main",
-        \\"display_name":"Main","status":"active",
-        \\"platform":"anthropic","group_id":1,"group_name":"Main",
-        \\"expires_at":null,"is_default":true,"extra":"allowed"}]}
-    )).?;
-    try std.testing.expectEqualStrings("profile-1", extended.idView());
-    try std.testing.expect((try parseFirstProfile("{\"data\":[]}")) == null);
 }
 
 test "current user decoder binds username to the token account" {

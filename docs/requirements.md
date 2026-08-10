@@ -59,7 +59,7 @@ Turn 是用户提交的一次交互；Run 是 AgentCore 为该交互进行的一
 
 ### Account 与 ExecutionConfig
 
-Account 是 MetaWork 的 Metask 账号控制面，负责 OAuth 登录、账号/API Key/模型目录、凭据安全存储和默认执行配置代际。API Key 是低频账号资源，模型是创建 Task 时必须可见的执行上下文。Account 发布一个当前默认 `ExecutionConfig`，包含 typed `provider_kind + model + base_url`、API Key 和 `execution_generation`；Workbench 在 Task 创建时取得 owned copy，建立第一个 execution binding epoch，并把不含 secret 的 account/profile、generation、API/Provider 与模型事实固化到 Task。后续默认 API 或模型变化默认只影响新 Task admission，不静默修改既有 binding epoch；既有 Agent Session 继续使用当前 epoch 的配置，直到其全部 Task/Run/Session 引用安全释放。只有 §5.2 定义的显式历史 rebind 可以为既有 Task 创建新 epoch。
+Account 是 MetaWork 的 Metask 账号控制面，负责 OAuth 登录、账号/API Key/模型目录、凭据安全存储和默认执行配置代际。API Key 是低频账号资源，模型是创建 Task 时必须可见的执行上下文。Account 发布一个当前默认 `ExecutionConfig`，包含 typed `provider_kind + model + base_url`、API Key 和 `execution_generation`；Workbench 在 Task 创建时取得 owned copy，建立第一个 execution binding epoch，并把不含 secret 的 account、generation、API/Provider 与模型事实固化到 Task。后续默认 API 或模型变化默认只影响新 Task admission，不静默修改既有 binding epoch；既有 Agent Session 继续使用当前 epoch 的配置，直到其全部 Task/Run/Session 引用安全释放。只有 §5.2 定义的显式历史 rebind 可以为既有 Task 创建新 epoch。
 
 ### Scheduled Task
 
@@ -104,12 +104,12 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - Renderer 只能看到脱敏账号、Key 尾号、模型、稳定错误码和状态，不得接触 OAuth token、完整 API Key、Authorization header、临时 OAuth URL 或凭据存储 locator；
 - Account 只维护一个当前默认 ExecutionConfig，但 Workbench 可以保留被既有 Task 引用的旧 generation owned copy。切换默认 API 或模型不得篡改、停止或重新配置既有 Task；旧 generation 只有在对应 Task、Agent Session、Run、executor job 与真实 worker reference 全部释放后才能清零；
 - Workbench 必须为 Task persistence 保存不含 secret 的 execution binding descriptor 和 epoch history；macOS Account `manifest.json` schema 1 仍只保存一个默认 execution family，不为每个 Task 复制 credential。Windows 只持久化一个 Metask refresh token 与无 secret 的 account/API/model 选择，access token、Provider API Key 和 execution config 不跨进程；
-- 跨 Host 重启恢复历史 Task 时，只有 Host 证明 restored account/profile、API、model 与 generation 精确匹配且 Conversation 可以安全恢复，才能把 binding 标记为 available；否则 Task 只读并进入 `rebind_required` 或 `unavailable`，不得静默采用当前默认配置；
+- 跨 Host 重启恢复历史 Task 时，只有 Host 证明 restored account、API、model 与 generation 精确匹配且 Conversation 可以安全恢复，才能把 binding 标记为 available；否则 Task 只读并进入 `rebind_required` 或 `unavailable`，不得静默采用当前默认配置；
 - 目标 rebind 流程必须展示旧配置与当前候选的脱敏差异，并在用户明确确认后由 Host 原子创建新 binding epoch 和新 Agent Session；旧 Run 历史、usage 和模型归属保持不可改写。如果只读 Task history persistence 先于跨进程 Conversation 恢复落地，该阶段只提供 `从此历史新建任务`；
-- 显式重新登录、切换账号、退出登录或清除设备凭据必须取得 Workbench execution replacement gate，并证明所有 credential、Agent Session、Run、executor job 与真实 worker reference 已安全终止；durable Task、历史记录及 `closed = false` 本身不参与 gate，没有运行时引用的恢复 Task 不得阻止操作。OAuth 成功后以本次 token 返回的 `account_id` 替换本机账号，profile 只作为可选执行选择器，旧缓存 identity 不得否决显式登录，旧默认 execution、API/model selection 与 catalog 必须先清除再按新账号重建；
-- OAuth refresh token exchange 失败只进入 `reauth_required`，不自动判定现有 API Key 失效；refresh token 成功轮换后必须先提交新 generation，后续 profile/catalog 失败不得回滚到已作废的旧 refresh token。只有 Metask 明确撤销/禁用或锁定 credential probe 返回确定鉴权拒绝，才关闭既有执行配置；
+- 显式重新登录、切换账号、退出登录或清除设备凭据必须取得 Workbench execution replacement gate，并证明所有 credential、Agent Session、Run、executor job 与真实 worker reference 已安全终止；durable Task、历史记录及 `closed = false` 本身不参与 gate，没有运行时引用的恢复 Task 不得阻止操作。OAuth 成功后以本次 token 返回的 `account_id` 替换本机账号，旧缓存 identity 不得否决显式登录，旧默认 execution、API/model selection 与 catalog 必须先清除再按新账号重建；
+- OAuth refresh token exchange 失败只进入 `reauth_required`，不自动判定现有 API Key 失效；refresh token 成功轮换后必须先提交新 generation，后续 catalog 失败不得回滚到已作废的旧 refresh token。只有 Metask 明确撤销/禁用或锁定 credential probe 返回确定鉴权拒绝，才关闭既有执行配置；
 - New Task admission 必须同时满足 Account execution state 为 ready、Workbench 已安装所选默认 generation、Workspace intent 可解析且默认安装/identity replacement gate 未开启，并在创建 Task 时固化第一个 binding epoch；Automatic intent 要求 automatic root capability 并在首次发送时分配 Workspace，Manual intent 要求目标 Manual Workspace grant 与 epoch 有效。既有 Task 的新 Run admission 改为校验其当前 binding `available`、owned generation 仍有效、Workspace grant 有效、没有 non-terminal Run 且 identity replacement 或该 Task 的 rebind gate 未开启，不能强迫它跟随 Account 当前默认 generation，也不能被无关的默认切换冻结；
-- production Account 接入必须符合 [Metask Account API 合同](metask-account-contract.md)。C1 OAuth/login 独立交付 `account_only`；C2 只从 profile-aware API Key/model catalog 与精确 `group.platform` 形成 fixed ExecutionTarget。Account 提交 `execution_ready` 且 Workbench 安装同一默认 generation 前禁止进入 Workbench 或创建新 Task；既有 Task 的后续 Run 服从其 binding epoch，不与默认 generation 做错误等值比较。
+- production Account 接入必须符合 [Metask Account API 合同](metask-account-contract.md)。C1 OAuth/login 独立交付 `account_only`；C2 使用无 Profile header 的 OAuth API Key catalog 与直接 API Key model catalog，并从精确 `group.platform` 形成 fixed ExecutionTarget。Account 提交 `execution_ready` 且 Workbench 安装同一默认 generation 前禁止进入 Workbench 或创建新 Task；既有 Task 的后续 Run 服从其 binding epoch，不与默认 generation 做错误等值比较。
 
 ### 5.3 Task
 
@@ -119,7 +119,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - 多个 Task 可以同时存在；
 - 后台 Task 的运行状态不能因 UI 切换而丢失；
 - 每条事件、审批和工具结果必须路由到正确 Task/Run；
-- 每个 Task 在创建时建立 execution binding epoch，固化 account/profile、generation、Provider/API identity 与模型；全局默认变化不改写当前 epoch、Task 历史或 live Agent Session；显式 rebind 只能在没有 non-terminal Run 且 Conversation capability 已验收时创建新的可审计 epoch；
+- 每个 Task 在创建时建立 execution binding epoch，固化 account、generation、Provider/API identity 与模型；全局默认变化不改写当前 epoch、Task 历史或 live Agent Session；显式 rebind 只能在没有 non-terminal Run 且 Conversation capability 已验收时创建新的可审计 epoch；
 - 每个 Task 至多一个 active operation：当前可以是 non-terminal Run 或 manual compact，包括 executor 中的 `queued` 状态；Run 与 compact 互斥，当前 operation 结束前 Workbench 拒绝新的 Run、compact 和其他 Session mutation，Renderer 只能保留未提交草稿；
 - Renderer 产品合同为 `metawork.renderer-bridge` 固定 revision 1：`connect` 精确协商后才开放产品路径，snapshot 根节点由严格的无 secret `capabilities`、`account`、`skillCatalog`、`skillManagement`、`mcp`、`workspaces`、`scheduledTasks` 与 `tasks` 组成且不维护第二个局部版本；Account 发布脱敏 catalog selection identifier 与 generation，Workspace 由 Host 独立发布，Task 固化 binding epoch 与显示事实；Renderer 只为 New task draft 保存可空 Manual Workspace identity，Host 不发布全局 selected Workspace；`tasks.create` 提交严格的 `automatic | manual(workspaceId, expectedWorkspaceEpoch)` Workspace intent，Account、Workspace 和 Task mutation 均提交对应 expected generation/epoch，Host 重新校验 window、ownership、catalog membership 与 admission；快速开发阶段的合同内容直接原地 hard cut，不接受或双写被取代的临时 payload；
 - 预期的 Task/Workspace admission 拒绝必须作为严格 typed result 返回并由 Renderer 映射为产品文案；非法 payload、伪造 ownership 与不可信 origin 仍 fail closed 为 Bridge error，不得把内部 error name 显示给用户；
@@ -300,7 +300,7 @@ Metask 登录 → Host 后台恢复或加载 API Key/模型
 → Composer 确认模型 → Task admission → 既有同步 macOS baseline
 ```
 
-Metask C1 OAuth/login 已按 `metawork-app` / `metawork:use` 发布合同锁定；现有 C2 API Key 兼容接口在新 scope 下仍需真实服务复核。登录先独立提交 `account_only`；只有 `/v1/profiles` 返回可执行 profile 时产品编排才启动 C2 continuation。合法空 profile 或 C2 失败不得抹除已完成登录。Workbench 首屏仍以完整 `execution_ready` 为进入条件，不能把 `account_only` 误报成已经可以工作。
+Metask C1 OAuth/login 已按 `metawork-app` / `metawork:use` 发布合同锁定；C2 使用已通过 production 复核的无 Profile-ID 通用路径。登录先独立提交 `account_only`，随后直接启动 API Key/model catalog continuation；C2 失败不得抹除已完成登录。Workbench 首屏仍以完整 `execution_ready` 为进入条件，不能把 `account_only` 误报成已经可以工作。
 
 ### 7.3 Fault-domain 结论
 

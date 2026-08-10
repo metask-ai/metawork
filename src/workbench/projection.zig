@@ -986,7 +986,6 @@ const DurableTaskRecord = struct {
     execution_model: []u8,
     binding_epoch: u64 = 1,
     binding_account_id: []u8,
-    binding_profile_id: []u8,
     binding_account_name: []u8,
     binding_api_key_id: []u8,
     binding_api_key_name: []u8,
@@ -1636,7 +1635,6 @@ const AccountProjection = struct {
     primary_action: account_contract.AccountPrimaryAction = .none,
     can_cancel: bool = false,
     account_id: FixedText(account_contract.Limits.account_id_bytes) = .{},
-    profile_id: FixedText(account_contract.Limits.profile_id_bytes) = .{},
     display_name: FixedText(account_contract.Limits.display_name_bytes) = .{},
     selected_api_key_id: FixedText(account_contract.Limits.api_key_id_bytes) = .{},
     selected_model: FixedText(account_contract.Limits.model_id_bytes) = .{},
@@ -1710,7 +1708,6 @@ const AccountProjection = struct {
         self.primary_action = source_view.primary_action;
         self.can_cancel = source_view.can_cancel;
         self.account_id.setNoFail(source_view.account_id);
-        self.profile_id.setNoFail(source_view.profile_id);
         self.display_name.setNoFail(source_view.display_name);
         self.selected_api_key_id.setNoFail(source_view.selected_api_key_id);
         self.selected_model.setNoFail(source_view.selected_model);
@@ -1768,7 +1765,6 @@ const AccountProjection = struct {
             .primary_action = self.primary_action,
             .can_cancel = self.can_cancel,
             .account_id = self.account_id.view(),
-            .profile_id = self.profile_id.view(),
             .display_name = self.display_name.view(),
             .api_keys = self.api_key_views[0..self.api_key_count],
             .models = self.model_views[0..self.model_count],
@@ -3022,7 +3018,6 @@ pub const Workbench = struct {
                 .readiness = .ready,
                 .primary_action = .none,
                 .account_id = "automation-account",
-                .profile_id = "automation-profile",
                 .display_name = "Automation",
                 .api_keys = &api_keys,
                 .models = &models,
@@ -3528,11 +3523,6 @@ pub const Workbench = struct {
             account_contract.Limits.account_id_bytes,
         );
         errdefer self.freeTracked(binding_account_id);
-        const binding_profile_id = try self.copyBounded(
-            self.account.profile_id.view(),
-            account_contract.Limits.profile_id_bytes,
-        );
-        errdefer self.freeTracked(binding_profile_id);
         const binding_account_name = try self.copyBounded(
             self.account.display_name.view(),
             account_contract.Limits.display_name_bytes,
@@ -3625,7 +3615,6 @@ pub const Workbench = struct {
                 .execution_provider = accountProvider(task_execution_input.target.provider_kind),
                 .execution_model = execution_model,
                 .binding_account_id = binding_account_id,
-                .binding_profile_id = binding_profile_id,
                 .binding_account_name = binding_account_name,
                 .binding_api_key_id = binding_api_key_id,
                 .binding_api_key_name = binding_api_key_name,
@@ -5665,9 +5654,6 @@ pub const Workbench = struct {
             },
         ) catch return error.SnapshotTooLarge;
         try self.projectedJsonValue(writer, view.account_id);
-        writer.writeAll(",\"profileId\":") catch
-            return error.SnapshotTooLarge;
-        try self.projectedJsonValue(writer, view.profile_id);
         writer.writeAll(",\"displayName\":") catch
             return error.SnapshotTooLarge;
         try self.projectedJsonValue(writer, view.display_name);
@@ -5908,8 +5894,6 @@ pub const Workbench = struct {
             if (view.runtime.execution == null) "unavailable" else "available",
         }) catch return error.SnapshotTooLarge;
         try self.projectedJsonValueWithKnownCredentials(writer, view.durable.binding_account_id);
-        writer.writeAll(",\"profileId\":") catch return error.SnapshotTooLarge;
-        try self.projectedJsonValueWithKnownCredentials(writer, view.durable.binding_profile_id);
         writer.writeAll(",\"accountDisplayName\":") catch return error.SnapshotTooLarge;
         try self.projectedJsonValueWithKnownCredentials(writer, view.durable.binding_account_name);
         writer.writeAll(",\"apiKeySelectionId\":") catch return error.SnapshotTooLarge;
@@ -6839,11 +6823,6 @@ pub const Workbench = struct {
             account_contract.Limits.account_id_bytes,
         );
         errdefer self.freeTracked(binding_account_id);
-        const binding_profile_id = try self.copyBounded(
-            wire.binding.profile_id,
-            account_contract.Limits.profile_id_bytes,
-        );
-        errdefer self.freeTracked(binding_profile_id);
         const binding_account_name = try self.copyBounded(
             wire.binding.account_display_name,
             account_contract.Limits.display_name_bytes,
@@ -6928,7 +6907,6 @@ pub const Workbench = struct {
                 .execution_model = execution_model,
                 .binding_epoch = wire.binding.epoch,
                 .binding_account_id = binding_account_id,
-                .binding_profile_id = binding_profile_id,
                 .binding_account_name = binding_account_name,
                 .binding_api_key_id = binding_api_key_id,
                 .binding_api_key_name = binding_api_key_name,
@@ -7490,7 +7468,6 @@ pub const Workbench = struct {
                 .provider = @tagName(task.durable.execution_provider),
                 .model = task.durable.execution_model,
                 .account_id = task.durable.binding_account_id,
-                .profile_id = task.durable.binding_profile_id,
                 .account_display_name = task.durable.binding_account_name,
                 .api_key_selection_id = task.durable.binding_api_key_id,
                 .api_key_name = task.durable.binding_api_key_name,
@@ -8874,7 +8851,6 @@ pub const Workbench = struct {
             task.durable.title_redacted;
         _ = redactFixedWidthNoFail(task.durable.workspace_root, credential);
         _ = redactFixedWidthNoFail(task.durable.binding_account_id, credential);
-        _ = redactFixedWidthNoFail(task.durable.binding_profile_id, credential);
         _ = redactFixedWidthNoFail(task.durable.binding_account_name, credential);
         _ = redactFixedWidthNoFail(task.durable.binding_api_key_id, credential);
         _ = redactFixedWidthNoFail(task.durable.binding_api_key_name, credential);
@@ -9210,7 +9186,6 @@ pub const Workbench = struct {
         self.allocator.free(task.durable.ui_history);
         self.freeTracked(task.durable.execution_model);
         self.freeTracked(task.durable.binding_account_id);
-        self.freeTracked(task.durable.binding_profile_id);
         self.freeTracked(task.durable.binding_account_name);
         self.freeTracked(task.durable.binding_api_key_id);
         self.freeTracked(task.durable.binding_api_key_name);
@@ -11496,7 +11471,6 @@ fn installTestExecution(workbench: *Workbench) !void {
             .readiness = .ready,
             .primary_action = .none,
             .account_id = "account-1",
-            .profile_id = "profile-1",
             .display_name = "Metask User",
             .api_keys = &api_keys,
             .models = &models,
@@ -11593,10 +11567,6 @@ fn testWorkbench() !Workbench {
             .binding_account_id = try workbench.copyBounded(
                 "account-1",
                 account_contract.Limits.account_id_bytes,
-            ),
-            .binding_profile_id = try workbench.copyBounded(
-                "profile-1",
-                account_contract.Limits.profile_id_bytes,
             ),
             .binding_account_name = try workbench.copyBounded(
                 "Metask User",
@@ -12805,7 +12775,6 @@ test "Account projection and execution install use preallocated no-fail storage"
             .readiness = .ready,
             .primary_action = .none,
             .account_id = "account-1",
-            .profile_id = "profile-1",
             .display_name = "Metask User",
             .api_keys = &api_keys,
             .models = &models,
@@ -12917,7 +12886,6 @@ test "default replacement preserves Task generation and installs the next admiss
             .readiness = .ready,
             .primary_action = .none,
             .account_id = "account-1",
-            .profile_id = "profile-1",
             .display_name = "Metask User",
             .api_keys = &replacement_api_keys,
             .models = &replacement_models,
@@ -13310,7 +13278,6 @@ test "Workbench shutdown releases current and Task-owned execution generations" 
             .readiness = .ready,
             .primary_action = .none,
             .account_id = "account-1",
-            .profile_id = "profile-1",
             .display_name = "Metask User",
             .api_keys = &replacement_api_keys,
             .models = &replacement_models,
@@ -13669,8 +13636,6 @@ test "Workbench snapshot budget includes JSON escaping and structural overhead" 
 fn installMaximumAccountProjection(workbench: *Workbench) !void {
     const account_id: [account_contract.Limits.account_id_bytes]u8 =
         @splat('a');
-    const profile_id: [account_contract.Limits.profile_id_bytes]u8 =
-        @splat('p');
     const display_name: [account_contract.Limits.display_name_bytes]u8 =
         @splat('d');
     const api_key_name: [account_contract.Limits.api_key_name_bytes]u8 =
@@ -13736,7 +13701,6 @@ fn installMaximumAccountProjection(workbench: *Workbench) !void {
             .readiness = .ready,
             .primary_action = .none,
             .account_id = &account_id,
-            .profile_id = &profile_id,
             .display_name = &display_name,
             .api_keys = api_keys,
             .models = models,
@@ -13880,10 +13844,6 @@ test "default snapshot budget contains the maximum structural projection" {
                 .binding_account_id = try workbench.copyBounded(
                     "account",
                     account_contract.Limits.account_id_bytes,
-                ),
-                .binding_profile_id = try workbench.copyBounded(
-                    "profile",
-                    account_contract.Limits.profile_id_bytes,
                 ),
                 .binding_account_name = try workbench.copyBounded(
                     "",

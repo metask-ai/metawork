@@ -3,7 +3,6 @@ const builtin = @import("builtin");
 const contract = @import("metawork_account_contract");
 
 const AccountId = BoundedString(contract.Limits.account_id_bytes);
-const ProfileId = BoundedString(contract.Limits.profile_id_bytes);
 const DisplayName = BoundedString(contract.Limits.display_name_bytes);
 const ApiKeyId = BoundedString(contract.Limits.api_key_id_bytes);
 const ModelId = BoundedString(contract.Limits.model_id_bytes);
@@ -87,7 +86,6 @@ const CommittedState = struct {
     execution_state: contract.ExecutionState = .none,
     operation: contract.OperationKind = .none,
     account_id: AccountId = .{},
-    profile_id: ProfileId = .{},
     display_name: DisplayName = .{},
     selected_api_key_id: ApiKeyId = .{},
     selected_model: ModelId = .{},
@@ -113,7 +111,6 @@ const CommittedState = struct {
                 self.operation != .logging_out and
                 self.operation != .persisting,
             .account_id = self.account_id.view(),
-            .profile_id = self.profile_id.view(),
             .display_name = self.display_name.view(),
             .selected_api_key_id = self.selected_api_key_id.view(),
             .selected_model = self.selected_model.view(),
@@ -207,7 +204,6 @@ pub const Account = struct {
         if (self.state.account_id.len == 0) return null;
         return .{
             .account_id = self.state.account_id,
-            .profile_id = self.state.profile_id,
             .display_name = self.state.display_name,
         };
     }
@@ -262,7 +258,6 @@ pub const Account = struct {
                 var next = self.state;
                 next.session_state = .authenticated;
                 next.account_id = account_only.identity.account_id;
-                next.profile_id = account_only.identity.profile_id;
                 next.display_name = account_only.identity.display_name;
                 next.execution_high_watermark =
                     account_only.execution_high_watermark;
@@ -725,7 +720,6 @@ pub const Account = struct {
                 next.active_attempt_id = null;
                 next.attempt_kind = .none;
                 next.account_id = identity.account_id;
-                next.profile_id = identity.profile_id;
                 next.display_name = identity.display_name;
                 next.clearError();
                 return transitionNoEffect(
@@ -741,7 +735,6 @@ pub const Account = struct {
                 next.active_attempt_id = null;
                 next.attempt_kind = .none;
                 next.account_id = identity.account_id;
-                next.profile_id = identity.profile_id;
                 next.display_name = identity.display_name;
                 next.selected_api_key_id.clear();
                 next.selected_model.clear();
@@ -775,7 +768,6 @@ pub const Account = struct {
         }
         var next = self.state;
         if (identity) |refreshed| {
-            next.profile_id = refreshed.profile_id;
             next.display_name = refreshed.display_name;
         }
         next.session_state = .authenticated;
@@ -900,7 +892,6 @@ pub const Account = struct {
         next.execution_state = .none;
         next.operation = .none;
         next.account_id.clear();
-        next.profile_id.clear();
         next.display_name.clear();
         next.selected_api_key_id.clear();
         next.selected_model.clear();
@@ -970,7 +961,6 @@ pub const Account = struct {
         next.session_state = .authenticated;
         next.execution_state = .ready;
         next.account_id = ready.identity.account_id;
-        next.profile_id = ready.identity.profile_id;
         next.display_name = ready.identity.display_name;
         next.selected_api_key_id = ready.api_key_id;
         next.selected_model.set(input.target.model) catch {
@@ -1186,7 +1176,6 @@ pub const TestSupport = if (builtin.is_test) struct {
             .next_attempt_id = 2,
         };
         next.account_id.set("account-1") catch unreachable;
-        next.profile_id.set("profile-1") catch unreachable;
         next.display_name.set("Metask User") catch unreachable;
         next.pending_api_key_id.set(api_key_id) catch unreachable;
         next.pending_model.set(model_id) catch unreachable;
@@ -1197,18 +1186,15 @@ pub const TestSupport = if (builtin.is_test) struct {
 
 pub const AccountIdentity = struct {
     account_id: AccountId,
-    profile_id: ProfileId,
     display_name: DisplayName,
 
     pub fn init(
         account_id: []const u8,
-        profile_id: []const u8,
         display_name: []const u8,
     ) contract.ValidationError!AccountIdentity {
         if (account_id.len == 0) return error.FieldEmpty;
         return .{
             .account_id = try .init(account_id),
-            .profile_id = try .init(profile_id),
             .display_name = try .init(display_name),
         };
     }
@@ -1219,10 +1205,6 @@ pub const AccountIdentity = struct {
 
     pub fn displayName(self: *const AccountIdentity) []const u8 {
         return self.display_name.view();
-    }
-
-    pub fn profileId(self: *const AccountIdentity) []const u8 {
-        return self.profile_id.view();
     }
 };
 
@@ -1509,7 +1491,7 @@ test "RestoreReady validation does not consume execution on failure" {
     defer execution.deinit();
 
     try std.testing.expectError(error.FieldEmpty, RestoreReady.init(
-        try .init("account-1", "profile-1", "Metask User"),
+        try .init("account-1", "Metask User"),
         "",
         &execution,
     ));
@@ -1529,7 +1511,7 @@ test "explicit reauthentication replaces identity and clears prior execution" {
     );
     defer restored_execution.deinit();
     var restore: RestoreResult = .{ .execution_ready = try .init(
-        try .init("account-1", "profile-1", "Metask User"),
+        try .init("account-1", "Metask User"),
         "key-1",
         &restored_execution,
     ) };
@@ -1574,7 +1556,6 @@ test "explicit reauthentication replaces identity and clears prior execution" {
         .payload = .{
             .authenticated = try .init(
                 "account-2",
-                "profile-2",
                 "Other User",
             ),
         },
@@ -1587,7 +1568,6 @@ test "explicit reauthentication replaces identity and clears prior execution" {
     try std.testing.expectEqual(contract.AccountSessionState.authenticated, account.view().session_state);
     try std.testing.expectEqual(contract.ExecutionState.none, account.view().execution_state);
     try std.testing.expectEqualStrings("account-2", account.view().account_id);
-    try std.testing.expectEqualStrings("profile-2", account.view().profile_id);
     try std.testing.expectEqualStrings("Other User", account.view().display_name);
     try std.testing.expectEqual(@as(u64, 0), account.view().execution_generation);
     try std.testing.expectEqual(contract.ErrorCode.none, account.view().error_code);
@@ -1596,7 +1576,7 @@ test "explicit reauthentication replaces identity and clears prior execution" {
 test "cold refresh can replace only the verified public identity" {
     var account = Account.initRestoring();
     var restore: RestoreResult = .{ .account_only = .{
-        .identity = try .init("22", "569", "Stored profile name"),
+        .identity = try .init("22", "Stored account name"),
     } };
     var restored = switch (account.prepareRestore(&restore)) {
         .transition => |value| value,
@@ -1612,7 +1592,7 @@ test "cold refresh can replace only the verified public identity" {
     commitPrepared(&account, &refresh);
     var completion: WorkerCompletion = .{
         .attempt_id = account.activeAttempt().?,
-        .payload = .{ .token_refreshed = try .init("22", "569", "朱健") },
+        .payload = .{ .token_refreshed = try .init("22", "朱健") },
     };
     var completed = switch (account.prepareCompletion(&completion)) {
         .transition => |value| value,
@@ -1620,7 +1600,6 @@ test "cold refresh can replace only the verified public identity" {
     };
     commitPrepared(&account, &completed);
     try std.testing.expectEqualStrings("22", account.view().account_id);
-    try std.testing.expectEqualStrings("569", account.view().profile_id);
     try std.testing.expectEqualStrings("朱健", account.view().display_name);
 }
 
@@ -1637,7 +1616,7 @@ test "failed reconfiguration preserves committed selection and generation high w
     );
     defer restored_execution.deinit();
     var restore: RestoreResult = .{ .execution_ready = try .init(
-        try .init("account-1", "profile-1", "Metask User"),
+        try .init("account-1", "Metask User"),
         "key-old",
         &restored_execution,
     ) };
@@ -1761,7 +1740,6 @@ test "ready execution reloads authenticated catalog before reconfiguration" {
         .execution_state = .ready,
         .operation = .none,
         .account_id = try .init("account-1"),
-        .profile_id = try .init("profile-1"),
         .display_name = try .init("Metask User"),
         .selected_api_key_id = try .init("key-old"),
         .selected_model = try .init("model-old"),
@@ -1884,7 +1862,6 @@ test "shutdown revokes ready execution before publishing the terminal view" {
         .session_state = .authenticated,
         .execution_state = .ready,
         .account_id = try .init("account-1"),
-        .profile_id = try .init("profile-1"),
         .display_name = try .init("Metask User"),
         .selected_api_key_id = try .init("key-1"),
         .selected_model = try .init("model-1"),
@@ -1970,7 +1947,6 @@ test "Windows restore failure returns to sign-in without restart semantics" {
 test "restored refresh admission failure requires reauthentication" {
     const identity = try AccountIdentity.init(
         "account-1",
-        "profile-1",
         "MetaWork User",
     );
     var account: Account = .{};
@@ -2005,7 +1981,6 @@ test "unknown logout persistence outcome cannot reopen ready execution" {
         .session_state = .authenticated,
         .execution_state = .ready,
         .account_id = try .init("account-1"),
-        .profile_id = try .init("profile-1"),
         .display_name = try .init("Metask User"),
         .selected_api_key_id = try .init("key-1"),
         .selected_model = try .init("model-1"),
@@ -2045,7 +2020,6 @@ test "unknown execution persistence outcome clears old runtime identity" {
         .session_state = .authenticated,
         .execution_state = .ready,
         .account_id = try .init("account-1"),
-        .profile_id = try .init("profile-1"),
         .display_name = try .init("Metask User"),
         .selected_api_key_id = try .init("key-old"),
         .selected_model = try .init("model-old"),
@@ -2128,7 +2102,6 @@ test "login commits account-only before a separate catalog generation" {
         .payload = .{
             .authenticated = try .init(
                 "account-1",
-                "profile-1",
                 "Metask User",
             ),
         },
@@ -2140,10 +2113,6 @@ test "login commits account-only before a separate catalog generation" {
     commitPrepared(&account, &auth_transition);
     try std.testing.expectEqual(contract.OperationKind.none, account.view().operation);
     try std.testing.expectEqual(@as(?u64, null), account.activeAttempt());
-    try std.testing.expectEqualStrings(
-        "profile-1",
-        account.currentIdentity().?.profileId(),
-    );
 
     var begin_catalog = switch (account.prepareCommand(.refresh_catalog)) {
         .transition => |value| value,

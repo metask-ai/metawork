@@ -291,7 +291,6 @@ const readySettingsAccount = {
   primaryAction: "none",
   canCancel: false,
   accountId: "account-1",
-  profileId: "profile-1",
   displayName: "Metask User",
   apiKeys: [
     {

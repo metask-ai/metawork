@@ -46,7 +46,6 @@ fn PublicText(comptime capacity: usize) type {
 /// changes hard-cut this file in place instead of accumulating parsers.
 pub const PublicState = struct {
     account_id: PublicText(contract.Limits.account_id_bytes) = .{},
-    profile_id: PublicText(contract.Limits.profile_id_bytes) = .{},
     display_name: PublicText(contract.Limits.display_name_bytes) = .{},
     api_key_id: PublicText(contract.Limits.api_key_id_bytes) = .{},
     model_id: PublicText(contract.Limits.model_id_bytes) = .{},
@@ -58,7 +57,6 @@ pub const PublicState = struct {
     ) StoreError!PublicState {
         var result: PublicState = .{};
         try result.account_id.set(account_identity.accountId());
-        try result.profile_id.setOptional(account_identity.profileId());
         try result.display_name.set(account_identity.displayName());
         try result.api_key_id.setOptional(api_key_id);
         try result.model_id.setOptional(model_id);
@@ -70,7 +68,6 @@ pub const PublicState = struct {
     pub fn identity(self: *const PublicState) StoreError!state.AccountIdentity {
         return state.AccountIdentity.init(
             self.account_id.view(),
-            self.profile_id.view(),
             self.display_name.view(),
         ) catch error.InvalidData;
     }
@@ -263,7 +260,6 @@ const FakeBackend = struct {
 test "Windows restore requires one refresh token and matching public state" {
     const identity = try state.AccountIdentity.init(
         "account-1",
-        "profile-1",
         "MetaWork User",
     );
     var fake: FakeBackend = .{};
@@ -295,7 +291,6 @@ test "Windows restore requires one refresh token and matching public state" {
 test "Windows persistence stores no access token or provider credential" {
     const identity = try state.AccountIdentity.init(
         "account-1",
-        "profile-1",
         "MetaWork User",
     );
     var refresh = try oauth.Secret.init(std.testing.allocator, "refresh-only");
@@ -320,20 +315,18 @@ test "Windows persistence stores no access token or provider credential" {
     );
 }
 
-test "Windows account-only persistence accepts an empty execution profile" {
+test "Windows account-only persistence stores public identity" {
     const identity = try state.AccountIdentity.init(
         "account-1",
-        "",
         "account-1",
     );
     var refresh = try oauth.Secret.init(std.testing.allocator, "refresh-only");
     defer refresh.deinit();
     var fake: FakeBackend = .{};
     const committed = try commitAuthenticated(fake.backend(), &refresh, identity);
-    try std.testing.expectEqualStrings("", committed.profile_id.view());
     const restored = try committed.identity();
     try std.testing.expectEqualStrings("account-1", restored.accountId());
-    try std.testing.expectEqualStrings("", restored.profileId());
+    try std.testing.expectEqualStrings("account-1", restored.displayName());
 }
 
 test "Windows logout removes the refresh token before public state" {

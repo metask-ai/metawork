@@ -372,7 +372,6 @@ test("reauth-required gate replaces stale saved identity with the next explicit 
     readiness: "needs_attention",
     primaryAction: "reauthenticate",
     accountId: "account-1",
-    profileId: "profile-1",
     displayName: "Metask User",
     errorCode: "account_mismatch",
   });
@@ -470,7 +469,6 @@ test("settings keep APIs and models identifiable when display names are absent",
     readiness: "ready",
     primaryAction: "none",
     accountId: "account-1",
-    profileId: "profile-1",
     displayName: "Metask User",
     apiKeys: [
       {

@@ -43,7 +43,6 @@ export const initialWorkbenchState: WorkbenchState = {
       primaryAction: "none",
       canCancel: false,
       accountId: "",
-      profileId: "",
       displayName: "",
       apiKeys: [],
       models: [],

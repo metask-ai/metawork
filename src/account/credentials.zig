@@ -153,7 +153,7 @@ pub const CredentialOwner = struct {
                 true,
             ) catch |err| {
                 // Refresh-token rotation has already succeeded. Keep the new
-                // generation even when the subsequent profile lookup fails;
+                // generation even when the subsequent compatibility read fails;
                 // otherwise the now-used previous refresh token is restored
                 // on the next cold start.
                 if (err == error.Cancelled) return err;
@@ -183,7 +183,6 @@ pub const CredentialOwner = struct {
             transport,
             current.access_token.view(),
             identity.accountId(),
-            identity.profileId(),
             control,
         );
     }
@@ -259,7 +258,7 @@ test "CredentialOwner can restore a refresh-only Windows session" {
     try std.testing.expect(!owner.refreshAvailable());
 }
 
-test "refresh keeps the rotated token when profile discovery is rejected" {
+test "refresh keeps the rotated token when the current-user read is rejected" {
     var owner: CredentialOwner = .{};
     defer owner.deinit();
     try owner.installStored(
@@ -289,7 +288,7 @@ test "refresh keeps the rotated token when profile discovery is rejected" {
                     break :blk .{ .status = 200, .body = output[0..body.len] };
                 },
                 1 => blk: {
-                    if (request.kind != .profiles or
+                    if (request.kind != .current_user or
                         !std.mem.eql(u8, request.bearer orelse "", "new-access"))
                         return error.ProtocolFailed;
                     const body = "{\"code\":\"INVALID_API_KEY\"}";
@@ -302,7 +301,6 @@ test "refresh keeps the rotated token when profile discovery is rejected" {
     }{};
     const expected = try state.AccountIdentity.init(
         "account-1",
-        "profile-1",
         "Stored account",
     );
     var rotation = try owner.refresh(
@@ -320,6 +318,5 @@ test "refresh keeps the rotated token when profile discovery is rejected" {
     const discovered = rotation.refreshedIdentity() orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("account-1", discovered.accountId());
-    try std.testing.expectEqualStrings("", discovered.profileId());
-    try std.testing.expectEqual(@as(usize, 3), fake.step);
+    try std.testing.expectEqual(@as(usize, 2), fake.step);
 }

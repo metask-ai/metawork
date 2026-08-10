@@ -88,8 +88,6 @@ pub const Manifest = struct {
     scope_len: usize = 0,
     account_id: [contract.Limits.account_id_bytes]u8 = undefined,
     account_id_len: usize = 0,
-    profile_id: [contract.Limits.profile_id_bytes]u8 = undefined,
-    profile_id_len: usize = 0,
     display_name: [contract.Limits.display_name_bytes]u8 = undefined,
     display_name_len: usize = 0,
     execution_slot: ?Slot = null,
@@ -119,12 +117,10 @@ pub const Manifest = struct {
         execution_high_watermark: u64,
     ) StoreError!Manifest {
         const account_id = identity.accountId();
-        const profile_id = identity.profileId();
         const display_name = identity.displayName();
         const token_scope = tokens.scopeView();
         if (account_id.len == 0 or
             account_id.len > contract.Limits.account_id_bytes or
-            profile_id.len > contract.Limits.profile_id_bytes or
             display_name.len > contract.Limits.display_name_bytes or
             token_scope.len == 0 or token_scope.len > oauth.Limits.scope_bytes)
             return error.InvalidData;
@@ -141,8 +137,6 @@ pub const Manifest = struct {
         result.scope_len = token_scope.len;
         @memcpy(result.account_id[0..account_id.len], account_id);
         result.account_id_len = account_id.len;
-        @memcpy(result.profile_id[0..profile_id.len], profile_id);
-        result.profile_id_len = profile_id.len;
         @memcpy(result.display_name[0..display_name.len], display_name);
         result.display_name_len = display_name.len;
         try result.validate();
@@ -168,12 +162,7 @@ pub const Manifest = struct {
         if (execution_high_watermark != prior.execution_high_watermark)
             return error.InvalidData;
         if (prior.state != .signed_out and
-            (!std.mem.eql(u8, prior.accountId(), identity.accountId()) or
-                !std.mem.eql(
-                    u8,
-                    prior.profileId(),
-                    identity.profileId(),
-                )))
+            !std.mem.eql(u8, prior.accountId(), identity.accountId()))
             return error.InvalidData;
         if (prior.state != .execution_ready) return result;
         result.copyExecutionFrom(prior);
@@ -257,7 +246,7 @@ pub const Manifest = struct {
                 if (self.active_slot != null or
                     !std.mem.allEqual(u8, &self.generation, 0) or
                     self.expires_at != 0 or self.scope_len != 0 or
-                    self.account_id_len != 0 or self.profile_id_len != 0 or
+                    self.account_id_len != 0 or
                     self.display_name_len != 0 or
                     !self.executionFieldsEmpty())
                     return error.ManifestCorrupt;
@@ -307,13 +296,9 @@ pub const Manifest = struct {
             !std.mem.eql(u8, self.scopeView(), oauth.scope) or
             self.account_id_len == 0 or
             self.account_id_len > self.account_id.len or
-            self.profile_id_len > self.profile_id.len or
             self.display_name_len > self.display_name.len)
             return false;
-        if (self.state == .execution_ready and self.profile_id_len == 0)
-            return false;
         return std.unicode.utf8ValidateSlice(self.accountId()) and
-            std.unicode.utf8ValidateSlice(self.profileId()) and
             std.unicode.utf8ValidateSlice(self.displayName());
     }
 
@@ -337,10 +322,6 @@ pub const Manifest = struct {
 
     pub fn displayName(self: *const Manifest) []const u8 {
         return self.display_name[0..self.display_name_len];
-    }
-
-    pub fn profileId(self: *const Manifest) []const u8 {
-        return self.profile_id[0..self.profile_id_len];
     }
 
     pub fn apiKeyId(self: *const Manifest) []const u8 {
@@ -487,7 +468,6 @@ pub fn commitExecutionReady(
     backend: Backend,
     credential_generation: Generation,
     owner_account_id: []const u8,
-    owner_profile_id: []const u8,
     api_key_id: []const u8,
     execution: *const contract.OwnedExecutionConfig,
 ) StoreError!CommitResult {
@@ -497,8 +477,7 @@ pub fn commitExecutionReady(
         return error.InvalidData;
     try previous.validate();
     if (previous.state == .signed_out) return error.InvalidData;
-    if (!std.mem.eql(u8, previous.accountId(), owner_account_id) or
-        !std.mem.eql(u8, previous.profileId(), owner_profile_id))
+    if (!std.mem.eql(u8, previous.accountId(), owner_account_id))
         return error.InvalidData;
     const old_slot = if (previous.state == .execution_ready)
         previous.execution_slot
@@ -662,7 +641,6 @@ pub fn restore(
     errdefer tokens.deinit();
     const identity = state.AccountIdentity.init(
         manifest.accountId(),
-        manifest.profileId(),
         manifest.displayName(),
     ) catch return error.ManifestCorrupt;
     var cleanup_pending = false;
@@ -1031,7 +1009,6 @@ test "account-only commit stages fixed inactive slot then restores it" {
     defer tokens.deinit();
     const identity = try state.AccountIdentity.init(
         "acct-1",
-        "profile-1",
         "Metask User",
     );
     const generation: Generation = @splat(0x2a);
@@ -1066,7 +1043,6 @@ test "restore retires credentials issued for the replaced OAuth scope" {
     defer tokens.deinit();
     const identity = try state.AccountIdentity.init(
         "acct-1",
-        "profile-1",
         "Metask User",
     );
     _ = try commitAccountOnly(
@@ -1093,12 +1069,11 @@ test "restore retires credentials issued for the replaced OAuth scope" {
     try std.testing.expectEqual(ManifestState.signed_out, fake.manifest.?.state);
 }
 
-test "account-only manifest permits no executable profile" {
+test "account-only manifest validates public identity" {
     var tokens = try testTokens("access", "refresh");
     defer tokens.deinit();
     const identity = try state.AccountIdentity.init(
         "acct-1",
-        "",
         "acct-1",
     );
     const manifest = try Manifest.accountOnly(
@@ -1109,7 +1084,7 @@ test "account-only manifest permits no executable profile" {
         0,
     );
     try manifest.validate();
-    try std.testing.expectEqualStrings("", manifest.profileId());
+    try std.testing.expectEqualStrings("acct-1", manifest.accountId());
 }
 
 test "failed staging cannot replace the previous committed slot" {
@@ -1118,7 +1093,6 @@ test "failed staging cannot replace the previous committed slot" {
     defer old_tokens.deinit();
     const identity = try state.AccountIdentity.init(
         "acct-1",
-        "profile-1",
         "Metask User",
     );
     _ = try commitAccountOnly(
@@ -1156,7 +1130,6 @@ test "unknown manifest outcome retains the staged slot for restore reconciliatio
     defer tokens.deinit();
     const identity = try state.AccountIdentity.init(
         "acct-1",
-        "profile-1",
         "Metask User",
     );
     try std.testing.expectError(
@@ -1186,7 +1159,6 @@ test "logout tombstone wins even when credential cleanup fails" {
     defer tokens.deinit();
     const identity = try state.AccountIdentity.init(
         "acct-1",
-        "profile-1",
         "Metask User",
     );
     _ = try commitAccountOnly(
@@ -1220,7 +1192,6 @@ test "execution commit atomically restores OAuth identity and AgentCore target" 
     defer tokens.deinit();
     const identity = try state.AccountIdentity.init(
         "acct-1",
-        "profile-1",
         "Metask User",
     );
     _ = try commitAccountOnly(
@@ -1236,7 +1207,6 @@ test "execution commit atomically restores OAuth identity and AgentCore target" 
         fake.backend(),
         @splat(0x22),
         "acct-1",
-        "profile-1",
         "325",
         &execution,
     );
@@ -1253,8 +1223,8 @@ test "execution commit atomically restores OAuth identity and AgentCore target" 
         restored.execution_ready.tokens.access_token.view(),
     );
     try std.testing.expectEqualStrings(
-        "profile-1",
-        restored.execution_ready.identity.profileId(),
+        "acct-1",
+        restored.execution_ready.identity.accountId(),
     );
     try std.testing.expectEqualStrings(
         "325",
@@ -1274,7 +1244,6 @@ test "OAuth rotation preserves the committed execution family" {
     var fake: FakeBackend = .{};
     const identity = try state.AccountIdentity.init(
         "acct-1",
-        "profile-1",
         "Metask User",
     );
     var old_tokens = try testTokens("old-access", "old-refresh");
@@ -1292,7 +1261,6 @@ test "OAuth rotation preserves the committed execution family" {
         fake.backend(),
         @splat(0x22),
         "acct-1",
-        "profile-1",
         "325",
         &execution,
     );
@@ -1333,7 +1301,6 @@ test "failed execution staging cannot replace committed generation" {
     defer tokens.deinit();
     const identity = try state.AccountIdentity.init(
         "acct-1",
-        "profile-1",
         "Metask User",
     );
     _ = try commitAccountOnly(
@@ -1349,7 +1316,6 @@ test "failed execution staging cannot replace committed generation" {
         fake.backend(),
         @splat(0x22),
         "acct-1",
-        "profile-1",
         "325",
         &old_execution,
     );
@@ -1362,7 +1328,6 @@ test "failed execution staging cannot replace committed generation" {
             fake.backend(),
             @splat(0x33),
             "acct-1",
-            "profile-1",
             "326",
             &new_execution,
         ),
@@ -1385,7 +1350,6 @@ test "unknown execution manifest outcome retains staged slot" {
     defer tokens.deinit();
     const identity = try state.AccountIdentity.init(
         "acct-1",
-        "profile-1",
         "Metask User",
     );
     _ = try commitAccountOnly(
@@ -1404,7 +1368,6 @@ test "unknown execution manifest outcome retains staged slot" {
             fake.backend(),
             @splat(0x22),
             "acct-1",
-            "profile-1",
             "325",
             &execution,
         ),
@@ -1423,7 +1386,6 @@ test "restore rejects partial committed execution slot" {
     defer tokens.deinit();
     const identity = try state.AccountIdentity.init(
         "acct-1",
-        "profile-1",
         "Metask User",
     );
     _ = try commitAccountOnly(
@@ -1439,7 +1401,6 @@ test "restore rejects partial committed execution slot" {
         fake.backend(),
         @splat(0x22),
         "acct-1",
-        "profile-1",
         "325",
         &execution,
     );
@@ -1460,7 +1421,6 @@ test "store rejects identity mixing and generation rollback before staging" {
     defer tokens.deinit();
     const identity = try state.AccountIdentity.init(
         "acct-1",
-        "profile-1",
         "Metask User",
     );
     _ = try commitAccountOnly(
@@ -1481,18 +1441,23 @@ test "store rejects identity mixing and generation rollback before staging" {
             6,
         ),
     );
-    const other_profile = try state.AccountIdentity.init(
-        "acct-1",
-        "profile-2",
-        "Other Profile",
+    var other_tokens = try oauth.TokenSet.fromStored(
+        std.testing.allocator,
+        "access-2",
+        "refresh-2",
+        100,
+        oauth.scope,
+        "acct-2",
     );
+    defer other_tokens.deinit();
+    const other_account = try state.AccountIdentity.init("acct-2", "Other Account");
     try std.testing.expectError(
         error.InvalidData,
         commitAccountOnly(
             fake.backend(),
             @splat(0x22),
-            &tokens,
-            &other_profile,
+            &other_tokens,
+            &other_account,
             7,
         ),
     );
@@ -1509,8 +1474,7 @@ test "store rejects identity mixing and generation rollback before staging" {
         commitExecutionReady(
             fake.backend(),
             @splat(0x33),
-            "acct-1",
-            "profile-2",
+            "acct-2",
             "325",
             &execution,
         ),
@@ -1524,7 +1488,6 @@ test "logout tombstone retires both committed credential families" {
     defer tokens.deinit();
     const identity = try state.AccountIdentity.init(
         "acct-1",
-        "profile-1",
         "Metask User",
     );
     _ = try commitAccountOnly(
@@ -1540,7 +1503,6 @@ test "logout tombstone retires both committed credential families" {
         fake.backend(),
         @splat(0x22),
         "acct-1",
-        "profile-1",
         "325",
         &execution,
     );
@@ -1569,7 +1531,6 @@ test "retired cleanup never deletes the committed OAuth slot" {
     defer tokens.deinit();
     const identity = try state.AccountIdentity.init(
         "acct-1",
-        "profile-1",
         "Metask User",
     );
     _ = try commitAccountOnly(
