@@ -68,12 +68,13 @@ pub fn platformHost(platform: *app_platform.Adapter) Host {
     return .{
         .context = platform,
         .confirmation_available = platform.supportsMcpConnectionApproval(),
+        // TODO(mcp-secret-capture, TinyKG 403): decide and approve the final
+        // secret-input trust boundary, then replace this fail-closed binding
+        // with the chosen Host capability. Do not introduce a Renderer/Bridge
+        // secret payload as an interim implementation.
         .capture_available = false,
         .oauth_available = platform.supportsMcpExternalAuthorization(),
         .confirm_fn = platformConfirm,
-        // Native SDK 0.8.0 has no secure text-entry Runtime primitive. Keep
-        // the product capability false instead of routing secrets through the
-        // Renderer credential bridge.
         .capture_fn = captureUnavailable,
         .open_url_fn = platformOpenUrl,
         .now_unix_ms_fn = platformNowUnixMs,

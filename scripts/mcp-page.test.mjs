@@ -389,21 +389,32 @@ test("MCP STDIO add preserves ordered argv and names without secret values", asy
 
   fireEvent.click(screen.getAllByRole("button", { name: "Add server" })[0]);
   const dialog = screen.getByRole("dialog", { name: "Add an MCP server" });
-  fireEvent.change(within(dialog).getByRole("textbox", { name: "Display name" }), {
-    target: { value: "Local files" },
-  });
-  fireEvent.change(within(dialog).getByRole("textbox", { name: "Executable" }), {
-    target: { value: "/usr/local/bin/files-mcp" },
-  });
+  fireEvent.change(
+    within(dialog).getByRole("textbox", { name: "Display name" }),
+    {
+      target: { value: "Local files" },
+    },
+  );
+  fireEvent.change(
+    within(dialog).getByRole("textbox", { name: "Executable" }),
+    {
+      target: { value: "/usr/local/bin/files-mcp" },
+    },
+  );
   fireEvent.click(within(dialog).getByRole("button", { name: "Add argument" }));
-  fireEvent.change(within(dialog).getByRole("textbox", { name: "Ordered arguments 1" }), {
-    target: { value: "--readonly" },
-  });
+  fireEvent.change(
+    within(dialog).getByRole("textbox", { name: "Ordered arguments 1" }),
+    {
+      target: { value: "--readonly" },
+    },
+  );
   fireEvent.click(
     within(dialog).getByRole("button", { name: "Add environment name" }),
   );
   fireEvent.change(
-    within(dialog).getByRole("textbox", { name: "Environment variable names 1" }),
+    within(dialog).getByRole("textbox", {
+      name: "Environment variable names 1",
+    }),
     { target: { value: "FILES_TOKEN" } },
   );
   fireEvent.click(within(dialog).getByRole("button", { name: "Add server" }));
@@ -448,17 +459,25 @@ test("MCP OAuth add carries an explicit client auth method and no secret", async
 
   fireEvent.click(screen.getAllByRole("button", { name: "Add server" })[0]);
   const dialog = screen.getByRole("dialog", { name: "Add an MCP server" });
-  fireEvent.click(within(dialog).getByRole("button", { name: /Streamable HTTP/ }));
-  fireEvent.change(within(dialog).getByRole("textbox", { name: "Display name" }), {
-    target: { value: "Remote OAuth" },
-  });
+  fireEvent.click(
+    within(dialog).getByRole("button", { name: /Streamable HTTP/ }),
+  );
+  fireEvent.change(
+    within(dialog).getByRole("textbox", { name: "Display name" }),
+    {
+      target: { value: "Remote OAuth" },
+    },
+  );
   fireEvent.change(within(dialog).getByRole("textbox", { name: "Endpoint" }), {
     target: { value: "https://mcp.example.test/mcp" },
   });
   fireEvent.click(within(dialog).getByRole("radio", { name: "OAuth" }));
-  fireEvent.change(within(dialog).getByRole("combobox", { name: "Client registration" }), {
-    target: { value: "pre_registered" },
-  });
+  fireEvent.change(
+    within(dialog).getByRole("combobox", { name: "Client registration" }),
+    {
+      target: { value: "pre_registered" },
+    },
+  );
   fireEvent.change(within(dialog).getByRole("textbox", { name: "Client ID" }), {
     target: { value: "desktop-client" },
   });
@@ -528,6 +547,115 @@ test("MCP tool allowlist mutation sends exact desired tools and generation", asy
   assert.deepEqual(calls[0], ["7", "github-binding", ["search_repositories"]]);
 });
 
+test("MCP replacement requires the complete public destination again", async () => {
+  const calls = [];
+  render(
+    pageElement(
+      {
+        availability: "ready",
+        managementHealth: "ready",
+        operation: "idle",
+        desiredGeneration: "replacement-generation",
+        runtimeAlignment: "current",
+        redacted: false,
+        servers: [servers[0]],
+      },
+      "",
+      {
+        onUpdateHttp: async (...args) => {
+          calls.push(args);
+          return { outcome: "saved" };
+        },
+      },
+    ),
+  );
+
+  fireEvent.click(screen.getByRole("button", { name: /GitHub/ }));
+  fireEvent.click(screen.getByRole("button", { name: "Replace connection" }));
+  const dialog = screen.getByRole("dialog", {
+    name: "Enter the complete connection again",
+  });
+  assert.ok(dialog.textContent.includes("Secrets are kept only when"));
+  const endpoint = within(dialog).getByRole("textbox", { name: "Endpoint" });
+  const submit = within(dialog).getByRole("button", {
+    name: "Replace connection",
+  });
+  assert.equal(endpoint.value, "");
+  assert.equal(submit.disabled, true);
+
+  fireEvent.change(endpoint, {
+    target: { value: "https://github.example/mcp" },
+  });
+  assert.equal(submit.disabled, false);
+  fireEvent.click(submit);
+
+  await waitFor(() => assert.equal(calls.length, 1));
+  assert.deepEqual(calls[0], [
+    "replacement-generation",
+    "github-binding",
+    {
+      displayName: "GitHub",
+      negotiation: "automatic",
+      timeoutMs: 30000,
+      endpoint: "https://github.example/mcp",
+      authMode: "oauth",
+      headerNames: [],
+      registration: { kind: "automatic" },
+    },
+  ]);
+});
+
+test("MCP keeps approved enable intent separate from authentication readiness", async () => {
+  const calls = [];
+  const awaitingSecret = {
+    ...servers[2],
+    authMode: "static",
+    safeConnectionSummary: {
+      ...servers[2].safeConnectionSummary,
+      environment: [{ name: "TOKEN", status: "missing" }],
+    },
+    approvalStatus: "approved",
+    authorizationStatus: "missing_static_secret",
+    desiredEnabled: false,
+    runtimeStatus: "needs_authentication",
+    newTaskAccess: "unavailable",
+  };
+  render(
+    pageElement(
+      {
+        availability: "degraded",
+        managementHealth: "ready",
+        operation: "idle",
+        desiredGeneration: "auth-generation",
+        runtimeAlignment: "current",
+        redacted: false,
+        servers: [awaitingSecret],
+      },
+      "",
+      {
+        onSetEnabled: async (...args) => {
+          calls.push(args);
+          return { outcome: "saved" };
+        },
+      },
+    ),
+  );
+
+  fireEvent.click(screen.getByRole("button", { name: /Filesystem/ }));
+  const enable = screen.getByRole("button", { name: "Enable" });
+  assert.equal(enable.disabled, false);
+  fireEvent.click(enable);
+  const confirmation = screen.getByRole("alertdialog", {
+    name: "Enable this server?",
+  });
+  fireEvent.click(
+    within(confirmation).getByRole("button", { name: "Enable server" }),
+  );
+  await waitFor(() =>
+    assert.deepEqual(calls, [["auth-generation", "filesystem-binding", true]]),
+  );
+});
+
 test("MCP approval and OAuth operation actions stay Host-owned and typed", async () => {
   const approvals = [];
   const cancellations = [];
@@ -564,7 +692,9 @@ test("MCP approval and OAuth operation actions stay Host-owned and typed", async
   );
   fireEvent.click(screen.getByRole("button", { name: /Filesystem/ }));
   fireEvent.click(screen.getByRole("button", { name: "Review connection" }));
-  await waitFor(() => assert.deepEqual(approvals, [["13", "filesystem-binding"]]));
+  await waitFor(() =>
+    assert.deepEqual(approvals, [["13", "filesystem-binding"]]),
+  );
   fireEvent.click(screen.getByRole("button", { name: "Close" }));
 
   view.rerender(
@@ -593,7 +723,10 @@ test("MCP approval and OAuth operation actions stay Host-owned and typed", async
     ),
   );
   fireEvent.click(screen.getByRole("button", { name: /Notion/ }));
-  assert.equal(screen.getByRole("button", { name: "Edit connection" }).disabled, true);
+  assert.equal(
+    screen.getByRole("button", { name: "Replace connection" }).disabled,
+    true,
+  );
   fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
   await waitFor(() => assert.deepEqual(cancellations, [["oauth-op-7"]]));
 });

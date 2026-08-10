@@ -16,7 +16,7 @@ import { useI18n } from "../../i18n/context.ts";
 type McpServer = McpManagementView["servers"][number];
 type DrawerState =
   | { kind: "add" }
-  | { kind: "edit"; id: string }
+  | { kind: "replace"; id: string }
   | { kind: "server"; id: string }
   | null;
 type ConfirmAction = "enable" | "disable" | "delete" | null;
@@ -544,7 +544,7 @@ export function McpPage({
     setDrawerState({ kind: "add" });
   }
 
-  function openEdit(server: McpServer) {
+  function openReplacement(server: McpServer) {
     setDisplayName(server.displayName);
     setTransport(server.transport);
     setNegotiation(server.negotiation);
@@ -578,7 +578,7 @@ export function McpPage({
         : "none",
     );
     setNotice(null);
-    setDrawerState({ kind: "edit", id: server.id });
+    setDrawerState({ kind: "replace", id: server.id });
   }
 
   function closeDrawer() {
@@ -666,7 +666,7 @@ export function McpPage({
                       },
             } satisfies McpHttpConnectionInput);
       const result =
-        drawerState?.kind === "edit" && selected
+        drawerState?.kind === "replace" && selected
           ? transport === "stdio"
             ? await onUpdateStdio(
                 generation,
@@ -971,14 +971,14 @@ export function McpPage({
                 <small>
                   {drawerState.kind === "add"
                     ? t("mcp.add.eyebrow")
-                    : drawerState.kind === "edit"
+                    : drawerState.kind === "replace"
                       ? t("mcp.edit.eyebrow")
                       : t("mcp.detail.eyebrow")}
                 </small>
                 <h2 id="mcp-drawer-title" ref={drawerHeading} tabIndex={-1}>
                   {drawerState.kind === "add"
                     ? t("mcp.add.title")
-                    : drawerState.kind === "edit"
+                    : drawerState.kind === "replace"
                       ? t("mcp.edit.title")
                       : selected?.displayName}
                 </h2>
@@ -993,7 +993,7 @@ export function McpPage({
               </button>
             </header>
 
-            {drawerState.kind === "add" || drawerState.kind === "edit" ? (
+            {drawerState.kind === "add" || drawerState.kind === "replace" ? (
               <form
                 className="mcp-add-form"
                 onSubmit={(event) => {
@@ -1001,13 +1001,19 @@ export function McpPage({
                   void createServer();
                 }}
               >
-                <p className="mcp-form-intro">{t("mcp.add.intro")}</p>
+                <p className="mcp-form-intro">
+                  {t(
+                    drawerState.kind === "replace"
+                      ? "mcp.edit.intro"
+                      : "mcp.add.intro",
+                  )}
+                </p>
                 <fieldset className="mcp-transport-choice">
                   <legend>{t("mcp.add.transport")}</legend>
                   <button
                     type="button"
                     data-selected={transport === "stdio"}
-                    disabled={drawerState.kind === "edit"}
+                    disabled={drawerState.kind === "replace"}
                     onClick={() => setTransport("stdio")}
                   >
                     <Icon name="mcp" />
@@ -1019,7 +1025,7 @@ export function McpPage({
                   <button
                     type="button"
                     data-selected={transport === "streamable_http"}
-                    disabled={drawerState.kind === "edit"}
+                    disabled={drawerState.kind === "replace"}
                     onClick={() => setTransport("streamable_http")}
                   >
                     <Icon name="mcp" />
@@ -1223,7 +1229,7 @@ export function McpPage({
                   >
                     {createPending
                       ? t("mcp.add.adding")
-                      : drawerState.kind === "edit"
+                      : drawerState.kind === "replace"
                         ? t("mcp.edit.submit")
                         : t("mcp.add.submit")}
                   </button>
@@ -1375,7 +1381,9 @@ export function McpPage({
                         </div>
                         <div>
                           <dt>{t("mcp.detail.header_names")}</dt>
-                          <dd>{selected.safeConnectionSummary.headers.length}</dd>
+                          <dd>
+                            {selected.safeConnectionSummary.headers.length}
+                          </dd>
                         </div>
                         {selected.authMode === "oauth" && (
                           <>
@@ -1438,7 +1446,7 @@ export function McpPage({
                         pendingServerId === selected.id ||
                         selectedOperationBusy
                       }
-                      onClick={() => openEdit(selected)}
+                      onClick={() => openReplacement(selected)}
                     >
                       {t("mcp.edit.action")}
                     </button>
@@ -1449,10 +1457,7 @@ export function McpPage({
                         pendingServerId === selected.id ||
                         selectedOperationBusy ||
                         (!selected.desiredEnabled &&
-                          (selected.approvalStatus !== "approved" ||
-                            !["not_required", "ready"].includes(
-                              selected.authorizationStatus,
-                            )))
+                          selected.approvalStatus !== "approved")
                       }
                       onClick={(event) =>
                         openConfirmation(

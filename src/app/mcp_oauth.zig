@@ -2168,6 +2168,157 @@ test "MCP OAuth DCR and code exchange are bounded and secret owned" {
     try std.testing.expectEqual(@as(?u64, 61_000), tokens.expires_at_unix_ms);
 }
 
+test "MCP OAuth binds confidential DCR results to token authentication" {
+    const Case = struct {
+        method: TokenEndpointAuthMethod,
+        registration_response: []const u8,
+    };
+    const Fake = struct {
+        case: Case,
+        calls: usize = 0,
+
+        fn fetch(
+            context: ?*anyopaque,
+            request: Request,
+            _: []u8,
+            _: []u8,
+        ) FetchError!Response {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.calls += 1;
+            if (std.mem.endsWith(u8, request.url, "/register")) {
+                if (std.mem.indexOf(u8, request.body, self.case.method.wire()) == null)
+                    return error.InvalidResponse;
+                return .{
+                    .status = 201,
+                    .content_type = "application/json",
+                    .body = self.case.registration_response,
+                };
+            }
+            if (!std.mem.endsWith(u8, request.url, "/token"))
+                return error.InvalidResponse;
+            var authorization: ?[]const u8 = null;
+            for (request.headers) |header| {
+                if (std.ascii.eqlIgnoreCase(header.name, "Authorization"))
+                    authorization = header.value;
+            }
+            switch (self.case.method) {
+                .client_secret_basic => if (authorization == null or
+                    !std.mem.eql(
+                        u8,
+                        authorization.?,
+                        "Basic aXNzdWVkLWNsaWVudDppc3N1ZWQtc2VjcmV0",
+                    ) or
+                    std.mem.indexOf(u8, request.body, "client_secret=") != null)
+                    return error.InvalidResponse,
+                .client_secret_post => if (authorization != null or
+                    std.mem.indexOf(u8, request.body, "client_id=issued-client") == null or
+                    std.mem.indexOf(u8, request.body, "client_secret=issued-secret") == null)
+                    return error.InvalidResponse,
+                .none => return error.InvalidResponse,
+            }
+            return .{
+                .status = 200,
+                .content_type = "application/json",
+                .body = "{\"access_token\":\"access-secret\",\"token_type\":\"Bearer\"}",
+            };
+        }
+    };
+    const cases = [_]Case{
+        .{
+            .method = .client_secret_basic,
+            .registration_response = "{\"client_id\":\"issued-client\",\"client_secret\":\"issued-secret\",\"client_secret_expires_at\":0,\"redirect_uris\":[\"http://127.0.0.1:49152/auth/callback\"],\"grant_types\":[\"authorization_code\"],\"response_types\":[\"code\"],\"token_endpoint_auth_method\":\"client_secret_basic\"}",
+        },
+        .{
+            .method = .client_secret_post,
+            .registration_response = "{\"client_id\":\"issued-client\",\"client_secret\":\"issued-secret\",\"client_secret_expires_at\":0,\"redirect_uris\":[\"http://127.0.0.1:49152/auth/callback\"],\"grant_types\":[\"authorization_code\"],\"response_types\":[\"code\"],\"token_endpoint_auth_method\":\"client_secret_post\"}",
+        },
+    };
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        const methods = try arena.allocator().dupe(
+            TokenEndpointAuthMethod,
+            &.{case.method},
+        );
+        var server: AuthorizationServer = .{
+            .arena = arena,
+            .issuer = "https://auth.example.test",
+            .authorization_endpoint = "https://auth.example.test/authorize",
+            .token_endpoint = "https://auth.example.test/token",
+            .registration_endpoint = "https://auth.example.test/register",
+            .scopes_supported = &.{},
+            .token_endpoint_auth_methods = methods,
+            .refresh_token_supported = false,
+            .authorization_response_issuer_required = false,
+            .client_id_metadata_document_supported = false,
+        };
+        defer server.deinit();
+        var fake: Fake = .{ .case = case };
+        const transport: Transport = .{ .context = &fake, .fetch_fn = Fake.fetch };
+        var registration = try registerDynamicClientEffect(
+            std.testing.allocator,
+            transport,
+            &server,
+            "http://127.0.0.1:49152/auth/callback",
+        );
+        defer registration.deinit();
+        try std.testing.expectEqual(case.method, registration.token_endpoint_auth_method);
+        try std.testing.expectEqualStrings(
+            "issued-secret",
+            registration.client_secret.?.view(),
+        );
+        var code = try account_oauth.Secret.init(std.testing.allocator, "auth-code");
+        defer code.deinit();
+        var tokens = try exchangeAuthorizationCodeEffect(
+            std.testing.allocator,
+            transport,
+            &server,
+            registration.client_id,
+            registration.client_secret.?.view(),
+            case.method,
+            &code,
+            "0123456789012345678901234567890123456789012",
+            "http://127.0.0.1:49152/auth/callback",
+            "https://mcp.example.test/mcp",
+            1000,
+        );
+        defer tokens.deinit();
+        try std.testing.expectEqualStrings("access-secret", tokens.access_token.view());
+        try std.testing.expectEqual(@as(usize, 2), fake.calls);
+    }
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    const methods = try arena.allocator().dupe(
+        TokenEndpointAuthMethod,
+        &.{.client_secret_basic},
+    );
+    var server: AuthorizationServer = .{
+        .arena = arena,
+        .issuer = "https://auth.example.test",
+        .authorization_endpoint = "https://auth.example.test/authorize",
+        .token_endpoint = "https://auth.example.test/token",
+        .registration_endpoint = "https://auth.example.test/register",
+        .scopes_supported = &.{},
+        .token_endpoint_auth_methods = methods,
+        .refresh_token_supported = false,
+        .authorization_response_issuer_required = false,
+        .client_id_metadata_document_supported = false,
+    };
+    defer server.deinit();
+    var expiring: Fake = .{ .case = .{
+        .method = .client_secret_basic,
+        .registration_response = "{\"client_id\":\"issued-client\",\"client_secret\":\"issued-secret\",\"client_secret_expires_at\":2000,\"token_endpoint_auth_method\":\"client_secret_basic\"}",
+    } };
+    try std.testing.expectError(
+        error.RegistrationOutcomeUnknown,
+        registerDynamicClientEffect(
+            std.testing.allocator,
+            .{ .context = &expiring, .fetch_fn = Fake.fetch },
+            &server,
+            "http://127.0.0.1:49152/auth/callback",
+        ),
+    );
+}
+
 test "MCP OAuth refresh is single-shot and preserves optional refresh rotation" {
     const Fake = struct {
         calls: usize = 0,

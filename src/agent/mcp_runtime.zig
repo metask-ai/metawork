@@ -200,12 +200,10 @@ fn validate(configs: []const ServerInput) Error!void {
             config.allowed_tools.len,
         ) catch return error.InvalidConfig;
         if (config.id.len == 0 or config.id.len > 128 or
-            config.timeout_ms == 0 or config.namespace.len == 0 or
-            config.namespace.len > wire.MAX_MCP_NAMESPACE_BYTES_V1 or
+            config.timeout_ms == 0 or !validNamespace(config.namespace) or
             config.client_name.len == 0 or config.client_version.len == 0 or
             config.allowed_tools.len > wire.MAX_MCP_TOOLS_V1 or
             !std.unicode.utf8ValidateSlice(config.id) or
-            !std.unicode.utf8ValidateSlice(config.namespace) or
             !std.unicode.utf8ValidateSlice(config.client_name) or
             !std.unicode.utf8ValidateSlice(config.client_version))
             return error.InvalidConfig;
@@ -224,6 +222,15 @@ fn validate(configs: []const ServerInput) Error!void {
                 return error.InvalidConfig;
         }
     }
+}
+
+fn validNamespace(value: []const u8) bool {
+    if (value.len == 0 or value.len > wire.MAX_MCP_NAMESPACE_BYTES_V1 or
+        !std.ascii.isAlphabetic(value[0]))
+        return false;
+    for (value[1..]) |byte|
+        if (!std.ascii.isAlphanumeric(byte) and byte != '_') return false;
+    return true;
 }
 
 const FakeTransport = struct {
@@ -300,6 +307,31 @@ test "Runtime input rejects moving one transport owner twice" {
         .{ .id = "one", .transport_owner = &owner, .transport = .stdio, .namespace = "one", .client_name = "MetaWork", .client_version = "1", .timeout_ms = 1000 },
         .{ .id = "two", .transport_owner = &owner, .transport = .stdio, .namespace = "two", .client_name = "MetaWork", .client_version = "1", .timeout_ms = 1000 },
     }));
+}
+
+test "Runtime input rejects namespaces outside the AgentCore identifier grammar" {
+    for ([_][]const u8{ "mcp-server", "1server", "server.name" }) |namespace| {
+        var transport: FakeTransport = .{};
+        var owner = connector.TransportOwner.init(
+            transport.descriptor(),
+            FakeTransport.deinit,
+        );
+        try std.testing.expectError(
+            error.InvalidConfig,
+            Servers.init(std.testing.allocator, &.{.{
+                .id = "server-id",
+                .transport_owner = &owner,
+                .transport = .stdio,
+                .namespace = namespace,
+                .client_name = "MetaWork",
+                .client_version = "1",
+                .timeout_ms = 1000,
+            }}),
+        );
+        try std.testing.expect(!transport.deinitialized);
+        owner.deinit();
+        try std.testing.expect(transport.deinitialized);
+    }
 }
 
 test "Runtime input failure consumes no transport ownership" {
