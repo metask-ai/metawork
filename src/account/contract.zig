@@ -477,8 +477,6 @@ pub fn validateView(view: AccountView) ValidationError!void {
                 view.model_catalog_api_key_id.len != 0 or
                 view.execution_generation != 0 or view.can_create_task)
                 return error.InconsistentState;
-            if (view.state == .authorizing and !view.can_cancel)
-                return error.InconsistentState;
             if (view.state != .authorizing and view.can_cancel)
                 return error.InconsistentState;
         },

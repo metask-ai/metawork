@@ -56,7 +56,7 @@ Account 和 Workbench 是同级 owner，彼此不导入 runtime。Account Runtim
 - 默认 API/模型切换可以安装新 generation，既有 Task 继续引用旧 generation，且其 admission 不被无关的默认切换冻结；默认安装只在新配置无法安全安装、目标 catalog 已失效或同一 generation 提交仍未收口时拒绝；
 - 账号 identity 切换、退出登录和设备 credential 清理必须等待所有 credential、Session、Run、job 与 worker reference 归零，不能借默认切换绕过 secret lifetime。durable Task、历史记录和 `closed` 产品状态不持有 credential，因而不参与 gate；无运行时 attachment 的恢复 Task 必须直接放行。
 
-冷启动恢复不是运行中的 identity 切换：新进程尚未持有可被替换的 Account credential，因而启动事务使用 default-execution transaction boundary 安装或清空当前默认执行配置，并保留已恢复的 Task history；不得让未关闭但无运行时 attachment 的 Task 触发 identity replacement rejection。运行中的显式重新登录或 logout 必须经过 identity gate。
+冷启动恢复不是运行中的 identity 切换：新进程尚未持有可被替换的 Account credential，因而启动事务使用 default-execution transaction boundary 安装或清空当前默认执行配置，并保留已恢复的 Task history；不得让未关闭但无运行时 attachment 的 Task 触发 identity replacement rejection。运行中的显式重新登录或 logout 必须经过 identity gate。该 gate 从命令 admission 覆盖到唯一 identity terminal boundary：token 提交前取消或失败保留旧默认配置，verified identity、token 已提交后的失败或成功退出清空旧默认配置；边界提交后立即释放 gate，后续 catalog/default generation 使用独立 default transaction。后台 refresh 判定凭据无效时只用短 default transaction 清除新 admission 的默认配置，live Task/Run 已拥有的 ExecutionConfig 按原生命周期收口。
 
 唯一 committed-state 写路径为：
 
@@ -71,7 +71,7 @@ Account Runtime.prepare(command | completion)
 
 前五步由 Application coordinator 在主线程同一 turn 内完成，effect 只有在 committed swap 后才能启动；worker completion 再经主循环进入同一条链。任何校验或内部不变量失败都保留旧 committed state，并清零 staged secret；Bridge 不参与 prepare/commit，也不接触 credential。C1 登录只依赖锁定的 OAuth client/scope/loopback、token rotation 和严格 `/me` identity，不等待 API Key 或模型目录。授权码交换产生新 token 后先提交 refresh token，再以已提交 generation 读取 `/me`；两步不得合成一个可回退结果。
 
-Renderer catalog selection 的同步拒绝顺序固定为：Bridge authority/wire validation，Account Runtime generation 与 published membership validation，Account prepare，Workbench default replacement gate，最后进入上述 commit 链。Account 独占 identity、selection、catalog 与 attempt 合法性；Workbench 独占 replacement gate；Application coordinator 只安排顺序。`prepare` 成功但 gate 拒绝时必须销毁 prepared transition，不能提交 Account fact 或启动 effect；gate 打开后的 effect admission 失败必须平衡关闭。
+Renderer catalog selection 的同步拒绝顺序固定为：Bridge authority/wire validation，Account Runtime generation 与 published membership validation，Account prepare，Workbench default replacement gate，最后进入上述 commit 链。Account 独占 identity、selection、catalog 与 attempt 合法性；Workbench 独占 replacement gate；Application coordinator 只安排顺序。`prepare` 成功但 gate 拒绝时必须销毁 prepared transition，不能提交 Account fact 或启动 effect。初始 effect admission 失败直接回滚并关闭新开的 gate；异步 continuation 的 effect admission 失败必须先提交已经观察到的前一步外部结果，再从该 committed phase 生成 terminal failure，确保 token 已提交后的失败不会错误恢复旧 identity/default，并在所有路径释放对应 gate。
 
 verified identity commit 是 C1 完成边界，不是 Workbench 可见性门槛，也不要求用户手动启动 C2。C1 完成后 Account Runtime 直接产生 catalog command；catalog 失败保持 `authenticated + failed`，不回滚登录。历史选择仍存在且匹配当前 account/catalog 时优先恢复，单一候选自动采用，只有真实歧义才进入 `choosing`。Renderer 不观察状态后发送隐藏命令。
 

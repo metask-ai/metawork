@@ -1944,6 +1944,8 @@ const ActiveExecution = struct {
 /// Workbench-owned product projection. AgentCore protocol is interpreted only
 /// through the bundle SDK; the Renderer receives this bounded domain view.
 /// All methods currently run on the Native loop thread.
+const ExecutionReplacementKind = enum { none, default, identity };
+
 pub const Workbench = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -1981,7 +1983,7 @@ pub const Workbench = struct {
     skill_catalog_job: ?*CatalogJob = null,
     skill_catalog_lease: ?*lifecycle.CatalogLease = null,
     skill_catalog: ?CatalogSnapshot = null,
-    execution_replacement_pending: bool = false,
+    execution_replacement: ExecutionReplacementKind = .none,
     mcp: ?McpProductState = null,
     next_workspace_id: u64 = 1,
     next_workspace_recent_order: u64 = 1,
@@ -2932,7 +2934,7 @@ pub const Workbench = struct {
         self: *Workbench,
         execution: *account_contract.OwnedExecutionConfig,
     ) void {
-        std.debug.assert(self.execution_replacement_pending);
+        std.debug.assert(self.execution_replacement != .none);
         const input = execution.input();
         std.debug.assert(self.account.catalog_state == .ready);
         std.debug.assert(
@@ -2949,7 +2951,7 @@ pub const Workbench = struct {
     }
 
     pub fn clearExecutionNoFail(self: *Workbench) void {
-        std.debug.assert(self.execution_replacement_pending);
+        std.debug.assert(self.execution_replacement != .none);
         std.debug.assert(self.account.execution_generation == 0);
         self.redactAllProductProjectionsNoFail(self.execution.credential());
         self.execution.clearNoFail();
@@ -3027,11 +3029,11 @@ pub const Workbench = struct {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
         self.releaseQuiescentTaskExecutions();
-        if (self.execution_replacement_pending)
+        if (self.execution_replacement != .none)
             return error.ExecutionInUse;
-        self.execution_replacement_pending = true;
+        self.execution_replacement = .identity;
         if (!self.executionQuiescent()) {
-            self.execution_replacement_pending = false;
+            self.execution_replacement = .none;
             return error.ExecutionInUse;
         }
     }
@@ -3039,18 +3041,26 @@ pub const Workbench = struct {
     pub fn beginDefaultExecutionReplacement(self: *Workbench) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
-        if (self.execution_replacement_pending)
+        if (self.execution_replacement != .none)
             return error.ExecutionInUse;
-        self.execution_replacement_pending = true;
+        self.execution_replacement = .default;
     }
 
     pub fn endExecutionReplacementNoFail(self: *Workbench) void {
-        std.debug.assert(self.execution_replacement_pending);
-        self.execution_replacement_pending = false;
+        std.debug.assert(self.execution_replacement != .none);
+        self.execution_replacement = .none;
     }
 
     pub fn executionReplacementPending(self: *const Workbench) bool {
-        return self.execution_replacement_pending;
+        return self.execution_replacement != .none;
+    }
+
+    pub fn identityReplacementPending(self: *const Workbench) bool {
+        return self.execution_replacement == .identity;
+    }
+
+    pub fn defaultExecutionReplacementPending(self: *const Workbench) bool {
+        return self.execution_replacement == .default;
     }
 
     /// Registers or reauthorizes a manually selected Workspace.
@@ -3370,7 +3380,7 @@ pub const Workbench = struct {
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
-        if (self.execution_replacement_pending)
+        if (self.execution_replacement != .none)
             return error.ExecutionInUse;
         if (!self.canCreateTask())
             return error.ExecutionUnavailable;
@@ -3433,7 +3443,7 @@ pub const Workbench = struct {
         if (self.mcp) |*mcp|
             if (mcp.refresh_job != null) return error.CatalogLoading;
         try self.requireTaskPersistenceMutation();
-        if (self.execution_replacement_pending)
+        if (self.execution_replacement != .none)
             return error.ExecutionInUse;
         if (!self.canCreateTask())
             return error.ExecutionUnavailable;
@@ -3655,7 +3665,7 @@ pub const Workbench = struct {
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
-        if (self.execution_replacement_pending)
+        if (self.execution_replacement != .none)
             return error.ExecutionInUse;
         if (!self.canCreateTask())
             return error.ExecutionUnavailable;
@@ -6389,7 +6399,7 @@ pub const Workbench = struct {
 
     fn canCreateTask(self: *const Workbench) bool {
         return !self.shutting_down and
-            !self.execution_replacement_pending and
+            self.execution_replacement == .none and
             self.account.account_can_create_task and
             self.account.catalog_state == .ready and
             self.execution.ready() and
@@ -12929,6 +12939,36 @@ test "default replacement preserves Task generation and installs the next admiss
         ),
     );
     task.durable.execution_generation = 1;
+}
+
+test "clearing the admission default preserves active Task execution" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+
+    const task = &workbench.tasks[0].?;
+    const task_execution = try Workbench.taskExecutionInput(task);
+    try std.testing.expectEqualStrings("SECRET-KEY", task_execution.api_key);
+
+    try workbench.beginDefaultExecutionReplacement();
+    workbench.commitAccountFactNoFail(.{
+        .kind = .signed_out,
+        .view = .{
+            .state = .signed_out,
+            .catalog_state = .unavailable,
+            .can_create_task = false,
+            .execution_generation = 0,
+        },
+    });
+    workbench.clearExecutionNoFail();
+    workbench.endExecutionReplacementNoFail();
+    workbench.finishAccountCommitNoFail();
+
+    try std.testing.expect(!workbench.execution.ready());
+    try std.testing.expect(!workbench.accountView().can_create_task);
+    const preserved = try Workbench.taskExecutionInput(task);
+    try std.testing.expectEqual(@as(u64, 1), preserved.execution_generation);
+    try std.testing.expectEqualStrings("fixture-model", preserved.target.model);
+    try std.testing.expectEqualStrings("SECRET-KEY", preserved.api_key);
 }
 
 test "released Task credential is permanently scrubbed from every product projection" {

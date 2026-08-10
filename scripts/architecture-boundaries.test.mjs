@@ -575,8 +575,18 @@ test("cold Account restore preserves Task history without impersonating an ident
   );
   assert.match(
     app,
-    /\.startup => self\.workbench\.beginDefaultExecutionReplacement\(\)/,
+    /\.startup, \.default => \{[\s\S]*?self\.workbench\.beginDefaultExecutionReplacement\(\)/,
   );
+  assert.match(
+    app,
+    /\.identity => \{[\s\S]*?self\.workbench\.beginExecutionReplacement\(\)/,
+  );
+  const workbench = read("src/workbench/projection.zig");
+  assert.match(
+    workbench,
+    /const ExecutionReplacementKind = enum \{ none, default, identity \}/,
+  );
+  assert.doesNotMatch(app, /active_replacement:/);
 });
 
 test("Account persistence has one refresh-only cross-platform owner", () => {

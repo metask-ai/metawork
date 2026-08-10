@@ -472,6 +472,12 @@ pub const Prepared = struct {
         return self.transition.operationComplete();
     }
 
+    pub fn identityReplacementBoundary(
+        self: *const Prepared,
+    ) state_impl.IdentityReplacementBoundary {
+        return self.transition.identityReplacementBoundary();
+    }
+
     pub fn clearsDefaultExecution(self: *const Prepared) bool {
         return self.transition.clearsDefaultExecution();
     }
@@ -665,6 +671,20 @@ pub const Runtime = struct {
         return preparedFromState(self.account.prepareIdleFailure(error_code));
     }
 
+    pub fn prepareActiveAttemptFailure(
+        self: *Runtime,
+        error_code: contract.ErrorCode,
+    ) Prepared {
+        self.assertMainThread();
+        const attempt_id = self.account.activeAttempt() orelse
+            @panic("Account effect admission failed without an active attempt");
+        var completion: state_impl.WorkerCompletion = .{
+            .attempt_id = attempt_id,
+            .payload = .{ .failed = .fromCode(error_code) },
+        };
+        return preparedFromState(self.account.prepareCompletion(&completion));
+    }
+
     pub fn prepareShutdown(self: *Runtime) Prepared {
         self.assertMainThread();
         return .{ .transition = self.account.prepareShutdown() };
@@ -772,9 +792,7 @@ pub const Runtime = struct {
             );
             self.candidate_public_catalog.clear();
         }
-        if (fact.view.state != .authenticated or
-            prepared.clearsDefaultExecution())
-        {
+        if (prepared.clearsDefaultExecution()) {
             self.effects.public_catalog.clear();
             self.candidate_public_catalog.clear();
         }
@@ -1460,6 +1478,20 @@ pub const TestSupport = if (builtin.is_test) struct {
 
     pub fn clearEffectQueue(runtime: *Runtime) void {
         _ = runtime.effects.queue.take();
+    }
+
+    pub fn discardMailbox(runtime: *Runtime) void {
+        var mailbox = runtime.effects.takeMailbox() orelse return;
+        mailbox.deinit();
+    }
+
+    pub fn prepareTokensPersisted(runtime: *Runtime) Prepared {
+        var completion: state_impl.WorkerCompletion = .{
+            .attempt_id = runtime.account.activeAttempt() orelse
+                @panic("test Account has no active login"),
+            .payload = .tokens_persisted,
+        };
+        return preparedFromState(runtime.account.prepareCompletion(&completion));
     }
 } else struct {};
 

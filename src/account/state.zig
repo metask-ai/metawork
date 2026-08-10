@@ -438,6 +438,10 @@ pub const Account = struct {
             .fact_kind = .session_changed,
             .attempt_id = active_attempt,
             .effect = .{ .shutdown = active_attempt },
+            .identity_replacement_boundary = switch (self.state.attempt_kind) {
+                .login, .logout => .clear_default,
+                else => .none,
+            },
         };
     }
 
@@ -501,12 +505,18 @@ pub const Account = struct {
         next.pending_model.clear();
         next.error_code = .user_cancelled;
         next.safe_diagnostic.clear();
-        return transition(
+        var result = transition(
             next,
             .operation_failed,
             attempt,
             .{ .cancel_attempt = attempt },
         );
+        result.transition.identity_replacement_boundary =
+            switch (self.state.attempt_kind) {
+                .login, .logout => .preserve_default,
+                else => .none,
+            };
+        return result;
     }
 
     fn prepareRefreshCatalog(self: *const Account) PrepareResult {
@@ -682,11 +692,14 @@ pub const Account = struct {
         next.pending_api_key_id.clear();
         next.pending_model.clear();
         next.clearError();
-        return transitionNoEffect(
+        var result = transitionNoEffect(
             next,
             .session_changed,
             self.state.active_attempt_id.?,
         );
+        if (self.state.attempt_kind == .login)
+            result.transition.identity_replacement_boundary = .clear_default;
+        return result;
     }
 
     fn prepareTokensPersisted(self: *const Account) PrepareResult {
@@ -838,11 +851,13 @@ pub const Account = struct {
         next.active_attempt_id = null;
         next.attempt_kind = .none;
         next.clearError();
-        return transitionNoEffect(
+        var result = transitionNoEffect(
             next,
             .signed_out,
             self.state.active_attempt_id.?,
         );
+        result.transition.identity_replacement_boundary = .clear_default;
+        return result;
     }
 
     fn prepareFailure(
@@ -894,11 +909,21 @@ pub const Account = struct {
         next.attempt_kind = .none;
         next.error_code = normalized_failure.error_code;
         next.safe_diagnostic = normalized_failure.safe_diagnostic;
-        return transitionNoEffect(
+        var result = transitionNoEffect(
             next,
             .operation_failed,
             self.state.active_attempt_id.?,
         );
+        result.transition.identity_replacement_boundary =
+            switch (self.state.attempt_kind) {
+                .login => if (login_replaced)
+                    .clear_default
+                else
+                    .preserve_default,
+                .logout => .preserve_default,
+                else => .none,
+            };
+        return result;
     }
 };
 
@@ -1041,6 +1066,7 @@ pub const PreparedTransition = struct {
     attempt_id: ?u64,
     effect: ?Effect = null,
     execution: ?contract.OwnedExecutionConfig = null,
+    identity_replacement_boundary: IdentityReplacementBoundary = .none,
     committed: bool = false,
 
     pub fn fact(self: *const PreparedTransition) contract.AccountFact {
@@ -1059,6 +1085,12 @@ pub const PreparedTransition = struct {
 
     pub fn operationComplete(self: *const PreparedTransition) bool {
         return self.next.operation == .none;
+    }
+
+    pub fn identityReplacementBoundary(
+        self: *const PreparedTransition,
+    ) IdentityReplacementBoundary {
+        return self.identity_replacement_boundary;
     }
 
     pub fn clearsDefaultExecution(self: *const PreparedTransition) bool {
@@ -1095,6 +1127,12 @@ pub const PreparedTransition = struct {
         if (self.execution) |*execution| execution.deinit();
         self.execution = null;
     }
+};
+
+pub const IdentityReplacementBoundary = enum {
+    none,
+    preserve_default,
+    clear_default,
 };
 
 pub const TestSupport = if (builtin.is_test) struct {
@@ -1430,6 +1468,10 @@ test "explicit login persists tokens before publishing identity" {
         .transition => |value| value,
         else => return error.TestUnexpectedResult,
     };
+    try std.testing.expectEqual(
+        IdentityReplacementBoundary.clear_default,
+        completed.identityReplacementBoundary(),
+    );
     commitPrepared(&account, &completed);
     try std.testing.expectEqual(contract.AccountState.authenticated, account.view().state);
     try std.testing.expectEqualStrings("account-2", account.view().account_id);
@@ -1492,6 +1534,10 @@ test "failed replacement before token commit preserves the current identity" {
         .transition => |value| value,
         else => return error.TestUnexpectedResult,
     };
+    try std.testing.expectEqual(
+        IdentityReplacementBoundary.preserve_default,
+        failed.identityReplacementBoundary(),
+    );
     commitPrepared(&account, &failed);
     try std.testing.expectEqual(contract.AccountState.authenticated, account.view().state);
     try std.testing.expectEqualStrings("account-1", account.view().account_id);
