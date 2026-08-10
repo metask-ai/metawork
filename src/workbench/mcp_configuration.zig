@@ -843,6 +843,7 @@ pub const ManagementPort = struct {
             self.allocator,
             input.header_names,
             &.{},
+            .http_header,
         );
         defer self.allocator.free(headers);
         return self.prepareCreateServer(
@@ -885,6 +886,7 @@ pub const ManagementPort = struct {
             self.allocator,
             input.environment_names,
             &.{},
+            .exact,
         );
         defer self.allocator.free(environment);
         return self.prepareCreateServer(
@@ -988,13 +990,20 @@ pub const ManagementPort = struct {
         const index = findServerIndex(base.servers, input.server_id) orelse return .rejected;
         if (!std.mem.eql(u8, base.servers[index].transport.kind, "streamable_http"))
             return .rejected;
+        const existing = base.servers[index];
+        const preserve_credentials =
+            staticCredentialDestinationEqual(existing, .{
+                .kind = "streamable_http",
+                .url = input.url,
+            }, input.auth_mode);
         const headers = try secretSlotsFromNames(
             self.allocator,
             input.header_names,
-            base.servers[index].transport.headers,
+            if (preserve_credentials) existing.transport.headers else &.{},
+            .http_header,
         );
         defer self.allocator.free(headers);
-        var replacement = base.servers[index];
+        var replacement = existing;
         replacement.display_name = input.display_name;
         replacement.negotiation = input.negotiation;
         replacement.timeout_ms = input.timeout_ms;
@@ -1051,13 +1060,26 @@ pub const ManagementPort = struct {
             return .rejected;
         const arguments = try literalArguments(self.allocator, input.arguments);
         defer self.allocator.free(arguments);
+        const existing = base.servers[index];
+        const replacement_destination: TransportWire = .{
+            .kind = "stdio",
+            .command = input.command,
+            .arguments = arguments,
+            .cwd = input.cwd,
+        };
+        const preserve_credentials = staticCredentialDestinationEqual(
+            existing,
+            replacement_destination,
+            input.auth_mode,
+        );
         const environment = try secretSlotsFromNames(
             self.allocator,
             input.environment_names,
-            base.servers[index].transport.environment,
+            if (preserve_credentials) existing.transport.environment else &.{},
+            .exact,
         );
         defer self.allocator.free(environment);
-        var replacement = base.servers[index];
+        var replacement = existing;
         replacement.display_name = input.display_name;
         replacement.negotiation = input.negotiation;
         replacement.timeout_ms = input.timeout_ms;
@@ -2090,12 +2112,17 @@ fn secretSlotsFromNames(
     allocator: std.mem.Allocator,
     names: []const []const u8,
     existing: []const SecretSlotWire,
+    semantics: enum { exact, http_header },
 ) std.mem.Allocator.Error![]SecretSlotWire {
     const slots = try allocator.alloc(SecretSlotWire, names.len);
     for (names, slots) |name, *slot| {
         slot.* = .{ .name = name, .credential_ref = null };
         for (existing) |candidate| {
-            if (!std.ascii.eqlIgnoreCase(candidate.name, name)) continue;
+            const same_name = switch (semantics) {
+                .exact => std.mem.eql(u8, candidate.name, name),
+                .http_header => std.ascii.eqlIgnoreCase(candidate.name, name),
+            };
+            if (!same_name) continue;
             slot.credential_ref = candidate.credential_ref;
             break;
         }
@@ -2111,6 +2138,33 @@ fn staticAuth(mode: StaticAuthMode) AuthWire {
         },
         .oauth = null,
     };
+}
+
+/// Static credentials belong to the process or endpoint that receives them,
+/// not to an environment/header name in isolation. Presentation, timeout and
+/// negotiation changes do not move that destination; executable/argv/cwd,
+/// endpoint or auth-mode changes do.
+fn staticCredentialDestinationEqual(
+    existing: ServerWire,
+    replacement: TransportWire,
+    replacement_auth: StaticAuthMode,
+) bool {
+    if (replacement_auth != .static or
+        !std.mem.eql(u8, existing.auth.kind, "static") or
+        !std.mem.eql(u8, existing.transport.kind, replacement.kind))
+        return false;
+    if (std.mem.eql(u8, replacement.kind, "streamable_http"))
+        return optionalTextEqual(existing.transport.url, replacement.url);
+    if (!std.mem.eql(u8, replacement.kind, "stdio") or
+        !optionalTextEqual(existing.transport.command, replacement.command) or
+        !optionalTextEqual(existing.transport.cwd, replacement.cwd) or
+        existing.transport.arguments.len != replacement.arguments.len)
+        return false;
+    for (existing.transport.arguments, replacement.arguments) |left, right|
+        if (!optionalTextEqual(left.literal, right.literal) or
+            !optionalTextEqual(left.credential_ref, right.credential_ref))
+            return false;
+    return true;
 }
 
 fn oauthAuth(client: OauthClientPlan) AuthWire {
@@ -5899,6 +5953,279 @@ test "typed management validates field transitions before persistence" {
     };
     defer endpoint_update.deinit();
     try std.testing.expect(endpoint_update.target().servers[0].connection_approval == null);
+}
+
+test "connection replacement retains static credentials only for the same destination" {
+    const Fake = struct {
+        fn commit(_: ?*anyopaque, _: []const u8) PersistenceEffect {
+            return .committed;
+        }
+        fn clear(_: ?*anyopaque) PersistenceEffect {
+            return .committed;
+        }
+        fn probe(_: ?*anyopaque, _: []const u8) CredentialPresence {
+            return .present;
+        }
+        fn create(_: ?*anyopaque, _: []const u8, _: []const u8) bool {
+            return true;
+        }
+        fn delete(_: ?*anyopaque, _: []const u8) bool {
+            return true;
+        }
+    };
+    var http_headers = [_]SecretSlotWire{.{
+        .name = "Authorization",
+        .credential_ref = "secret/http",
+    }};
+    var stdio_arguments = [_]ValueSourceWire{
+        .{ .literal = "--mode" },
+        .{ .literal = "safe" },
+    };
+    var stdio_environment = [_]SecretSlotWire{.{
+        .name = "TOKEN",
+        .credential_ref = "secret/stdio",
+    }};
+    var servers = [_]ServerWire{
+        .{
+            .id = "remote",
+            .namespace = "remote",
+            .display_name = "Remote",
+            .enabled = false,
+            .negotiation = "automatic",
+            .timeout_ms = 1000,
+            .transport = .{
+                .kind = "streamable_http",
+                .url = "https://mcp.example.test/rpc",
+                .headers = &http_headers,
+            },
+            .auth = .{ .kind = "static", .oauth = null },
+            .connection_approval = null,
+            .tools = &.{},
+        },
+        .{
+            .id = "local",
+            .namespace = "local",
+            .display_name = "Local",
+            .enabled = false,
+            .negotiation = "automatic",
+            .timeout_ms = 1000,
+            .transport = .{
+                .kind = "stdio",
+                .command = "/usr/bin/local-mcp",
+                .arguments = &stdio_arguments,
+                .cwd = "/tmp/workspace",
+                .environment = &stdio_environment,
+            },
+            .auth = .{ .kind = "static", .oauth = null },
+            .connection_approval = null,
+            .tools = &.{},
+        },
+    };
+    var management = try ManagementPort.init(std.testing.allocator, .{
+        .schema_version = schema_version,
+        .generation = 1,
+        .oauth_operation = null,
+        .servers = &servers,
+    }, .{
+        .persistence = .{
+            .available = true,
+            .commit_journal_fn = Fake.commit,
+            .commit_registry_fn = Fake.commit,
+            .clear_journal_fn = Fake.clear,
+        },
+        .credentials = .{
+            .available = true,
+            .probe_fn = Fake.probe,
+            .create_fn = Fake.create,
+            .delete_fn = Fake.delete,
+        },
+        .limits = test_limits,
+    });
+    defer management.deinit();
+
+    var http_same = switch (try management.prepareUpdateHttpConnection(1, .{
+        .server_id = "remote",
+        .display_name = "Remote renamed",
+        .negotiation = "modern_only",
+        .timeout_ms = 2000,
+        .url = "https://mcp.example.test/rpc",
+        .auth_mode = .static,
+        .header_names = &.{"Authorization"},
+    })) {
+        .prepared => |prepared| prepared,
+        else => return error.TestUnexpectedResult,
+    };
+    defer http_same.deinit();
+    try std.testing.expectEqualStrings(
+        "secret/http",
+        http_same.target().servers[0].transport.headers[0].credential_ref.?,
+    );
+    try std.testing.expectEqual(@as(usize, 0), http_same.plan.transaction.retired_locators.len);
+
+    var http_header_case = switch (try management.prepareUpdateHttpConnection(1, .{
+        .server_id = "remote",
+        .display_name = "Remote",
+        .negotiation = "automatic",
+        .timeout_ms = 1000,
+        .url = "https://mcp.example.test/rpc",
+        .auth_mode = .static,
+        .header_names = &.{"authorization"},
+    })) {
+        .prepared => |prepared| prepared,
+        else => return error.TestUnexpectedResult,
+    };
+    defer http_header_case.deinit();
+    try std.testing.expectEqualStrings(
+        "secret/http",
+        http_header_case.target().servers[0].transport.headers[0].credential_ref.?,
+    );
+
+    var http_slot_added = switch (try management.prepareUpdateHttpConnection(1, .{
+        .server_id = "remote",
+        .display_name = "Remote",
+        .negotiation = "automatic",
+        .timeout_ms = 1000,
+        .url = "https://mcp.example.test/rpc",
+        .auth_mode = .static,
+        .header_names = &.{ "Authorization", "X-Trace-Token" },
+    })) {
+        .prepared => |prepared| prepared,
+        else => return error.TestUnexpectedResult,
+    };
+    defer http_slot_added.deinit();
+    try std.testing.expectEqualStrings(
+        "secret/http",
+        http_slot_added.target().servers[0].transport.headers[0].credential_ref.?,
+    );
+    try std.testing.expect(http_slot_added.target().servers[0].transport.headers[1].credential_ref == null);
+    try std.testing.expectEqual(@as(usize, 0), http_slot_added.plan.transaction.retired_locators.len);
+
+    var http_slot_renamed = switch (try management.prepareUpdateHttpConnection(1, .{
+        .server_id = "remote",
+        .display_name = "Remote",
+        .negotiation = "automatic",
+        .timeout_ms = 1000,
+        .url = "https://mcp.example.test/rpc",
+        .auth_mode = .static,
+        .header_names = &.{"X-Authorization"},
+    })) {
+        .prepared => |prepared| prepared,
+        else => return error.TestUnexpectedResult,
+    };
+    defer http_slot_renamed.deinit();
+    try std.testing.expect(http_slot_renamed.target().servers[0].transport.headers[0].credential_ref == null);
+    try std.testing.expectEqual(@as(usize, 1), http_slot_renamed.plan.transaction.retired_locators.len);
+    try std.testing.expectEqualStrings(
+        "secret/http",
+        http_slot_renamed.plan.transaction.retired_locators[0],
+    );
+
+    var http_moved = switch (try management.prepareUpdateHttpConnection(1, .{
+        .server_id = "remote",
+        .display_name = "Remote",
+        .negotiation = "automatic",
+        .timeout_ms = 1000,
+        .url = "https://other.example.test/rpc",
+        .auth_mode = .static,
+        .header_names = &.{"Authorization"},
+    })) {
+        .prepared => |prepared| prepared,
+        else => return error.TestUnexpectedResult,
+    };
+    defer http_moved.deinit();
+    try std.testing.expect(http_moved.target().servers[0].transport.headers[0].credential_ref == null);
+    try std.testing.expectEqual(@as(usize, 1), http_moved.plan.transaction.retired_locators.len);
+    try std.testing.expectEqualStrings(
+        "secret/http",
+        http_moved.plan.transaction.retired_locators[0],
+    );
+
+    var stdio_same = switch (try management.prepareUpdateStdioConnection(1, .{
+        .server_id = "local",
+        .display_name = "Local renamed",
+        .negotiation = "compat_only",
+        .timeout_ms = 2000,
+        .command = "/usr/bin/local-mcp",
+        .arguments = &.{ "--mode", "safe" },
+        .cwd = "/tmp/workspace",
+        .auth_mode = .static,
+        .environment_names = &.{"TOKEN"},
+    })) {
+        .prepared => |prepared| prepared,
+        else => return error.TestUnexpectedResult,
+    };
+    defer stdio_same.deinit();
+    try std.testing.expectEqualStrings(
+        "secret/stdio",
+        stdio_same.target().servers[1].transport.environment[0].credential_ref.?,
+    );
+
+    var stdio_environment_case = switch (try management.prepareUpdateStdioConnection(1, .{
+        .server_id = "local",
+        .display_name = "Local",
+        .negotiation = "automatic",
+        .timeout_ms = 1000,
+        .command = "/usr/bin/local-mcp",
+        .arguments = &.{ "--mode", "safe" },
+        .cwd = "/tmp/workspace",
+        .auth_mode = .static,
+        .environment_names = &.{"token"},
+    })) {
+        .prepared => |prepared| prepared,
+        else => return error.TestUnexpectedResult,
+    };
+    defer stdio_environment_case.deinit();
+    try std.testing.expect(stdio_environment_case.target().servers[1].transport.environment[0].credential_ref == null);
+    try std.testing.expectEqual(@as(usize, 1), stdio_environment_case.plan.transaction.retired_locators.len);
+
+    const changed_stdio_destinations = [_]UpdateStdioConnectionInput{
+        .{
+            .server_id = "local",
+            .display_name = "Local",
+            .negotiation = "automatic",
+            .timeout_ms = 1000,
+            .command = "/usr/bin/other-mcp",
+            .arguments = &.{ "--mode", "safe" },
+            .cwd = "/tmp/workspace",
+            .auth_mode = .static,
+            .environment_names = &.{"TOKEN"},
+        },
+        .{
+            .server_id = "local",
+            .display_name = "Local",
+            .negotiation = "automatic",
+            .timeout_ms = 1000,
+            .command = "/usr/bin/local-mcp",
+            .arguments = &.{ "--mode", "unsafe" },
+            .cwd = "/tmp/workspace",
+            .auth_mode = .static,
+            .environment_names = &.{"TOKEN"},
+        },
+        .{
+            .server_id = "local",
+            .display_name = "Local",
+            .negotiation = "automatic",
+            .timeout_ms = 1000,
+            .command = "/usr/bin/local-mcp",
+            .arguments = &.{ "--mode", "safe" },
+            .cwd = "/tmp/other",
+            .auth_mode = .static,
+            .environment_names = &.{"TOKEN"},
+        },
+    };
+    for (changed_stdio_destinations) |input| {
+        var moved = switch (try management.prepareUpdateStdioConnection(1, input)) {
+            .prepared => |prepared| prepared,
+            else => return error.TestUnexpectedResult,
+        };
+        defer moved.deinit();
+        try std.testing.expect(moved.target().servers[1].transport.environment[0].credential_ref == null);
+        try std.testing.expectEqual(@as(usize, 1), moved.plan.transaction.retired_locators.len);
+        try std.testing.expectEqualStrings(
+            "secret/stdio",
+            moved.plan.transaction.retired_locators[0],
+        );
+    }
 }
 
 test "management port repairs multiple invalid servers one transaction at a time" {

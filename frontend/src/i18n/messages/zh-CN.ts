@@ -209,8 +209,10 @@ export const zhCN: Record<MessageId, string> = {
     "选择连接方式并只保存公开配置。MetaWork 会以停用、未审批且未授权工具的状态创建它。",
   "mcp.edit.eyebrow": "替换 MCP 连接",
   "mcp.edit.title": "重新输入完整连接配置",
-  "mcp.edit.action": "编辑连接",
-  "mcp.edit.submit": "保存连接",
+  "mcp.edit.intro":
+    "重新输入完整的公开连接配置。只有接收密钥的可执行程序或 Endpoint 未改变时才会保留密钥；连接变化后需要重新审查。",
+  "mcp.edit.action": "替换连接",
+  "mcp.edit.submit": "替换连接",
   "mcp.add.name": "显示名称",
   "mcp.add.transport": "连接类型",
   "mcp.add.stdio_help": "以结构化参数启动本地进程。",
@@ -810,7 +812,8 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.capability.oauth_unavailable": "当前 Host 不支持 OAuth。",
   "mcp.authorization_status.not_required": "无需授权",
   "mcp.authorization_status.missing_static_secret": "缺少一个或多个密钥",
-  "mcp.authorization_status.missing_oauth_client_secret": "缺少 OAuth Client Secret",
+  "mcp.authorization_status.missing_oauth_client_secret":
+    "缺少 OAuth Client Secret",
   "mcp.authorization_status.client_registration_required": "需要客户端注册",
   "mcp.authorization_status.consent_required": "需要用户同意",
   "mcp.authorization_status.authorizing": "正在授权",

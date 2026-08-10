@@ -223,8 +223,10 @@ export const enUS = {
     "Choose a transport and save only public connection settings. MetaWork creates it disabled, unapproved, and with no tools allowed.",
   "mcp.edit.eyebrow": "Replace MCP connection",
   "mcp.edit.title": "Enter the complete connection again",
-  "mcp.edit.action": "Edit connection",
-  "mcp.edit.submit": "Save connection",
+  "mcp.edit.intro":
+    "Enter the complete public connection again. Secrets are kept only when the receiving executable or endpoint is unchanged; connection changes require review again.",
+  "mcp.edit.action": "Replace connection",
+  "mcp.edit.submit": "Replace connection",
   "mcp.add.name": "Display name",
   "mcp.add.transport": "Connection type",
   "mcp.add.stdio_help": "Run a local process with structured arguments.",
