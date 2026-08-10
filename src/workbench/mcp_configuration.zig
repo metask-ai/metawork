@@ -939,25 +939,42 @@ pub const ManagementPort = struct {
             base_servers.len >= self.limits.max_servers)
             return .rejected;
         var identity_storage: [24]u8 = undefined;
-        const identity = identity: {
+        var namespace_storage: [24]u8 = undefined;
+        const generated = generated: {
             var attempts: usize = 0;
             while (attempts < 8) : (attempts += 1) {
                 var entropy: [16]u8 = undefined;
                 if (!self.identity_generator.fill(&entropy)) return .rejected;
                 const hex = std.fmt.bytesToHex(entropy, .lower);
-                const candidate = std.fmt.bufPrint(
+                const identity = std.fmt.bufPrint(
                     &identity_storage,
                     "mcp-{s}",
                     .{hex[0..20]},
                 ) catch unreachable;
-                if (findServerIndex(base_servers, candidate) == null)
-                    break :identity candidate;
+                const namespace = std.fmt.bufPrint(
+                    &namespace_storage,
+                    "mcp_{s}",
+                    .{hex[0..20]},
+                ) catch unreachable;
+                var collision = false;
+                for (base_servers) |existing| {
+                    if (std.mem.eql(u8, existing.id, identity) or
+                        std.mem.eql(u8, existing.namespace, namespace))
+                    {
+                        collision = true;
+                        break;
+                    }
+                }
+                if (!collision) break :generated .{
+                    .identity = identity,
+                    .namespace = namespace,
+                };
             }
             return .rejected;
         };
         const server: ServerWire = .{
-            .id = identity,
-            .namespace = identity,
+            .id = generated.identity,
+            .namespace = generated.namespace,
             .display_name = display_name,
             .enabled = false,
             .negotiation = negotiation,
@@ -2242,6 +2259,7 @@ fn deleteAll(credentials: CredentialEffects, locators: []const []const u8) bool 
 }
 
 pub const ServerProblem = enum {
+    invalid_namespace,
     invalid_display_name,
     invalid_negotiation,
     invalid_timeout,
@@ -3786,6 +3804,8 @@ fn validateTransaction(transaction: *const TransactionWire, limits: Limits) !voi
 /// Server-local semantic failures remain classifiable product state instead
 /// of making the complete registry unreadable.
 pub fn serverProblem(server: ServerWire, limits: Limits) ?ServerProblem {
+    if (!validRuntimeNamespace(server.namespace, limits.max_namespace_bytes))
+        return .invalid_namespace;
     if (server.display_name.len > limits.max_display_name_bytes or
         !publishableProductText(server.display_name))
         return .invalid_display_name;
@@ -3820,7 +3840,7 @@ fn validateRegistryIdentity(registry: *const RegistryWire, limits: Limits) !void
         try validateOauthOperation(operation, registry.servers, limits);
     for (registry.servers, 0..) |server, index| {
         if (!validIdentifier(server.id, limits.max_identity_bytes) or
-            !validNamespace(server.namespace, limits.max_namespace_bytes) or
+            !validStoredNamespace(server.namespace, limits.max_namespace_bytes) or
             server.tools.len > limits.max_tools_per_server)
             return error.Invalid;
         for (registry.servers[0..index]) |previous|
@@ -4311,11 +4331,20 @@ fn validIdentifier(value: []const u8, max_bytes: usize) bool {
     return true;
 }
 
-fn validNamespace(value: []const u8, max_bytes: usize) bool {
+fn validStoredNamespace(value: []const u8, max_bytes: usize) bool {
     if (value.len == 0 or value.len > max_bytes) return false;
     for (value) |byte|
         if (!std.ascii.isAlphanumeric(byte) and byte != '-' and byte != '_')
             return false;
+    return true;
+}
+
+fn validRuntimeNamespace(value: []const u8, max_bytes: usize) bool {
+    if (value.len == 0 or value.len > max_bytes or
+        !std.ascii.isAlphabetic(value[0]))
+        return false;
+    for (value[1..]) |byte|
+        if (!std.ascii.isAlphanumeric(byte) and byte != '_') return false;
     return true;
 }
 
@@ -4748,6 +4777,29 @@ test "registry rejects ambiguous identity and unknown fields" {
         decode(
             std.testing.allocator,
             "{\"schema_version\":1,\"generation\":1,\"servers\":[{\"id\":\"same\",\"namespace\":\"one\",\"display_name\":\"One\",\"enabled\":false,\"negotiation\":\"automatic\",\"timeout_ms\":1,\"transport\":{\"kind\":\"stdio\",\"command\":\"tool\"}},{\"id\":\"same\",\"namespace\":\"two\",\"display_name\":\"Two\",\"enabled\":false,\"negotiation\":\"automatic\",\"timeout_ms\":1,\"transport\":{\"kind\":\"stdio\",\"command\":\"tool\"}}]}",
+            test_limits,
+        ),
+    );
+    inline for (.{ "mcp-server", "1server" }) |namespace| {
+        const bytes = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "{{\"schema_version\":1,\"generation\":1,\"servers\":[{{\"id\":\"server\",\"namespace\":\"{s}\",\"display_name\":\"Server\",\"enabled\":false,\"negotiation\":\"automatic\",\"timeout_ms\":1,\"transport\":{{\"kind\":\"stdio\",\"command\":\"tool\"}}}}]}}",
+            .{namespace},
+        );
+        defer std.testing.allocator.free(bytes);
+        var parsed = try decode(std.testing.allocator, bytes, test_limits);
+        defer parsed.deinit();
+        try std.testing.expectEqual(
+            ServerProblem.invalid_namespace,
+            serverProblem(parsed.value.servers[0], test_limits).?,
+        );
+        try std.testing.expect(!parsed.value.servers[0].enabled);
+    }
+    try std.testing.expectError(
+        error.RegistryCorrupt,
+        decode(
+            std.testing.allocator,
+            "{\"schema_version\":1,\"generation\":1,\"servers\":[{\"id\":\"server\",\"namespace\":\"server.name\",\"display_name\":\"Server\",\"enabled\":false,\"negotiation\":\"automatic\",\"timeout_ms\":1,\"transport\":{\"kind\":\"stdio\",\"command\":\"tool\"}}]}",
             test_limits,
         ),
     );
@@ -5622,7 +5674,10 @@ test "typed management creates default-disabled HTTP server and commits one targ
                 "mcp-abababababababababab",
                 target.servers[0].id,
             );
-            try std.testing.expectEqualStrings(target.servers[0].id, target.servers[0].namespace);
+            try std.testing.expectEqualStrings(
+                "mcp_abababababababababab",
+                target.servers[0].namespace,
+            );
             try std.testing.expect(!target.servers[0].enabled);
             try std.testing.expectEqualStrings("streamable_http", target.servers[0].transport.kind);
             try std.testing.expectEqualStrings("none", target.servers[0].auth.kind);
@@ -6255,7 +6310,7 @@ test "management port repairs multiple invalid servers one transaction at a time
     };
     var parsed = try decode(
         std.testing.allocator,
-        "{\"schema_version\":1,\"generation\":3,\"servers\":[{\"id\":\"bad-name\",\"namespace\":\"bad-name\",\"display_name\":\"\",\"enabled\":true,\"negotiation\":\"automatic\",\"timeout_ms\":1000,\"transport\":{\"kind\":\"stdio\",\"command\":\"tool\"},\"tools\":[]},{\"id\":\"bad-negotiation\",\"namespace\":\"bad-negotiation\",\"display_name\":\"Broken\",\"enabled\":true,\"negotiation\":\"unsupported\",\"timeout_ms\":1000,\"transport\":{\"kind\":\"stdio\",\"command\":\"tool\"},\"tools\":[]}]}",
+        "{\"schema_version\":1,\"generation\":3,\"servers\":[{\"id\":\"bad-name\",\"namespace\":\"bad_name\",\"display_name\":\"\",\"enabled\":true,\"negotiation\":\"automatic\",\"timeout_ms\":1000,\"transport\":{\"kind\":\"stdio\",\"command\":\"tool\"},\"tools\":[]},{\"id\":\"bad-negotiation\",\"namespace\":\"bad_negotiation\",\"display_name\":\"Broken\",\"enabled\":true,\"negotiation\":\"unsupported\",\"timeout_ms\":1000,\"transport\":{\"kind\":\"stdio\",\"command\":\"tool\"},\"tools\":[]}]}",
         test_limits,
     );
     defer parsed.deinit();
@@ -6940,7 +6995,7 @@ test "runtime manifest derives compatibility from loaded and absence proofs" {
     );
     try expectRuntimeAlignment(
         &manifest,
-        \\{"schema_version":1,"generation":8,"servers":[{"id":"loaded","namespace":"loaded","display_name":"Renamed","enabled":true,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"streamable_http","url":"https://loaded.example.test/rpc"},"tools":["read","write"]},{"id":"disabled","namespace":"disabled","display_name":"Disabled","enabled":false,"negotiation":"modern_only","timeout_ms":5000,"transport":{"kind":"streamable_http","url":"https://other.example.test/rpc"}},{"id":"missing","namespace":"missing","display_name":"Renamed missing","enabled":true,"negotiation":"modern_only","timeout_ms":5000,"transport":{"kind":"streamable_http","url":"https://changed.example.test/rpc","headers":[{"name":"Authorization","value":{"credential_ref":"missing/token"}}]}},{"id":"new-disabled","namespace":"new-disabled","display_name":"New disabled","enabled":false,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"streamable_http","url":"https://new.example.test/rpc"}}]}
+        \\{"schema_version":1,"generation":8,"servers":[{"id":"loaded","namespace":"loaded","display_name":"Renamed","enabled":true,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"streamable_http","url":"https://loaded.example.test/rpc"},"tools":["read","write"]},{"id":"disabled","namespace":"disabled","display_name":"Disabled","enabled":false,"negotiation":"modern_only","timeout_ms":5000,"transport":{"kind":"streamable_http","url":"https://other.example.test/rpc"}},{"id":"missing","namespace":"missing","display_name":"Renamed missing","enabled":true,"negotiation":"modern_only","timeout_ms":5000,"transport":{"kind":"streamable_http","url":"https://changed.example.test/rpc","headers":[{"name":"Authorization","value":{"credential_ref":"missing/token"}}]}},{"id":"new-disabled","namespace":"new_disabled","display_name":"New disabled","enabled":false,"negotiation":"automatic","timeout_ms":1000,"transport":{"kind":"streamable_http","url":"https://new.example.test/rpc"}}]}
     ,
         .current,
     );

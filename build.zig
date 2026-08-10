@@ -41,6 +41,11 @@ pub fn build(b: *std.Build) void {
     addMcpOauthTests(b, test_modules, bundle.link_libc);
     addMcpAppTests(b, test_modules, bundle.link_libc);
     addWorkbenchMcpTests(b, test_modules, bundle.link_libc);
+    artifacts.tests.step.dependOn(addMcpInteropTests(
+        b,
+        test_modules,
+        bundle.link_libc,
+    ));
     const module_tests = [_]struct {
         name: []const u8,
         root_module: *std.Build.Module,
@@ -356,6 +361,43 @@ fn addMcpAppTests(
         .filters = &.{"MCP"},
     });
     step.dependOn(&b.addRunArtifact(tests).step);
+}
+
+fn addMcpInteropTests(
+    b: *std.Build,
+    modules: WiredModules,
+    link_libc: bool,
+) *std.Build.Step {
+    const node_path = b.findProgram(&.{"node"}, &.{}) catch
+        @panic("Node.js is required for deterministic MCP interoperability tests");
+    const fixture_options = b.addOptions();
+    fixture_options.addOption([]const u8, "node_path", node_path);
+    fixture_options.addOption(
+        []const u8,
+        "fixture_path",
+        b.pathFromRoot("tests/fixtures/mcp_server.mjs"),
+    );
+    const cases = b.createModule(.{
+        .root_source_file = b.path("tests/agent/mcp_interop_test.zig"),
+        .target = modules.app.resolved_target,
+        .optimize = modules.app.optimize,
+        .link_libc = link_libc,
+    });
+    cases.addImport("metawork_agent", modules.agent);
+    cases.addImport("metawork_account_contract", modules.account_contract);
+    cases.addImport("metawork_mcp_platform", modules.mcp_platform);
+    cases.addImport("metawork_workbench", modules.workbench);
+    cases.addOptions("mcp_interop_options", fixture_options);
+    const tests = b.addTest(.{
+        .name = "metawork-mcp-interop",
+        .root_module = cases,
+    });
+    const run = b.addRunArtifact(tests);
+    b.step(
+        "test-mcp-interop",
+        "Run deterministic real-server MCP interoperability tests",
+    ).dependOn(&run.step);
+    return &run.step;
 }
 
 fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcore_bundle.Bundle) WiredModules {
