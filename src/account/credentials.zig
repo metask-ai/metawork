@@ -145,21 +145,14 @@ pub const CredentialOwner = struct {
             );
         };
         errdefer refreshed.deinit();
-        const identity = if (expected_identity) |expected| identity: {
-            const remote = try metask.fetchIdentity(
+        const identity = if (expected_identity != null)
+            try metask.fetchIdentity(
                 transport,
                 &refreshed,
                 control,
-            );
-            break :identity state.AccountIdentity.init(
-                if (refreshed.accountId().len > 0)
-                    remote.accountId()
-                else
-                    expected.accountId(),
-                remote.profileId(),
-                remote.displayName(),
-            ) catch return error.ProtocolInvalid;
-        } else null;
+            )
+        else
+            null;
         return .{
             .tokens = refreshed.take(),
             .identity = identity,

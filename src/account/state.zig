@@ -204,9 +204,7 @@ pub const Account = struct {
     }
 
     pub fn currentIdentity(self: *const Account) ?AccountIdentity {
-        if (self.state.account_id.len == 0 or
-            self.state.profile_id.len == 0)
-            return null;
+        if (self.state.account_id.len == 0) return null;
         return .{
             .account_id = self.state.account_id,
             .profile_id = self.state.profile_id,
@@ -1193,8 +1191,7 @@ pub const AccountIdentity = struct {
         profile_id: []const u8,
         display_name: []const u8,
     ) contract.ValidationError!AccountIdentity {
-        if (account_id.len == 0 or profile_id.len == 0)
-            return error.FieldEmpty;
+        if (account_id.len == 0) return error.FieldEmpty;
         return .{
             .account_id = try .init(account_id),
             .profile_id = try .init(profile_id),

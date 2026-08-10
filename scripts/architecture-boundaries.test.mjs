@@ -1017,6 +1017,24 @@ test("automation code is compile-time selected and absent from product modules",
   );
 });
 
+test("AgentCore vertical owns an isolated platform data root", () => {
+  const vertical = read("scripts/test-agentcore-vertical-macos.mjs");
+  assert.match(
+    vertical,
+    /mkdtemp\(join\(tmpdir\(\), "metawork-agentcore-vertical-"\)\)/,
+  );
+  assert.match(
+    vertical,
+    /\{ APPDATA: platformHome, LOCALAPPDATA: platformHome \}/,
+  );
+  assert.match(vertical, /path\.relative\(canonicalWorkspace, dataRoot\)/);
+  assert.match(vertical, /vertical data root escaped its fixture/);
+  assert.match(
+    vertical,
+    /env:\s*\{[\s\S]*?\.\.\.process\.env,[\s\S]*?\.\.\.isolatedPlatformEnv,/,
+  );
+});
+
 test("Workbench owns queue and worker lifecycle", () => {
   const agent = read("src/agent/session.zig");
   assert.doesNotMatch(

@@ -586,7 +586,9 @@ export default function App() {
           attentionStatus(
             result.errorCode === "generation_mismatch"
               ? "account.options_updated"
-              : "account.command_rejected",
+              : result.errorCode === "execution_in_use"
+                ? "account.task_running"
+                : "account.command_rejected",
             { scope: "account" },
           ),
         );

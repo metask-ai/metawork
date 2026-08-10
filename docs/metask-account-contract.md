@@ -1,14 +1,14 @@
 # MetaWork 消费的 Metask Account API 合同状态
 
-> 状态：**C1 OAuth 登录与 C2 执行目录合同均已确认**
-> 日期：2026-07-22
+> 状态：**C1 OAuth 登录按 Metask 2026-08 发布合同锁定；现有 C2 API Key 兼容路径等待真实服务复核**
+> 日期：2026-08-10
 > 范围：MetaWork Account 的 OAuth/account lifecycle，以及后续 API Key/model/ExecutionTarget
 
 ## 1. 边界
 
 登录与执行配置是两个独立门槛：
 
-- **C1 登录**：OAuth、profile identity、token 恢复/刷新、退出和本地安全存储。当前信息已经足够实现，不依赖模型、API Key 或 AgentCore。
+- **C1 登录**：OAuth、token `account_id` identity、可为空的 profile 查询、token 恢复/刷新、退出和本地安全存储。当前信息已经足够实现，不依赖非空 profile、模型、API Key 或 AgentCore。
 - **C2 执行配置**：API Key catalog、model catalog 和 typed/fixed `ExecutionTarget { provider_kind, base_url, model }`。只有平台对应的持久化边界完成后，Account 才能发布 `execution_ready`；Workbench 安装同一 generation 后才能创建 Agent Task。macOS 的边界是 execution credential 与 `manifest.json` schema 1 原子提交；Windows 的边界只提交无 secret 的 API/model 选择，execution credential 保持进程内。
 
 MetaWork 只作为 Metask Account API 和 AgentCore bundle 的消费方。本文档不要求、也不授权修改 Metask 内部实现仓库（精确路径标识为 `cc-t2z/metacodes`）。
@@ -24,8 +24,8 @@ Metask 产品 owner 已确认 MetaWork 作为 Metask 第一方客户端复用当
 | Authorize | `https://napi.metask-ai.com/oauth/authorize` |
 | Token | `https://napi.metask-ai.com/oauth/token` |
 | Revoke | `https://napi.metask-ai.com/oauth/revoke`；C1 本地退出不依赖 remote revoke 成功 |
-| Client ID | `metacode-cli`，Metask 第一方 public client identity |
-| Scope | `metacode:use` |
+| Client ID | `metawork-app`，无 `client_secret` 的 public client |
+| Scope | `metawork:use`，唯一可申请 scope |
 | Redirect | `http://127.0.0.1:{dynamic_port}/auth/callback` |
 | Profile | bearer `GET https://napi.metask-ai.com/v1/profiles` |
 
@@ -34,9 +34,9 @@ Metask 产品 owner 已确认 MetaWork 作为 Metask 第一方客户端复用当
 - 只生成 CSPRNG `state` 与 PKCE verifier，只接受 `code_challenge_method=S256`；
 - callback 只绑定 IPv4 loopback 动态端口，不依赖 `localhost` DNS，不绑定 wildcard；
 - callback 只接受单次 `GET /auth/callback`，严格解析 query、拒绝重复/unknown 参数，并对 `state` 做 constant-time 比较；
-- token response 有界解码并严格校验 MetaWork 实际消费的字段：`access_token`、可选/轮换的 `refresh_token`、Bearer `token_type`、正整数 `expires_in`、可选 `scope` 和 `account_id`；OAuth 服务允许增加未消费的 metadata，新增字段不得破坏客户端；
-- refresh response 未返回新 refresh token 时保留旧 token；如果服务端已轮换但新本地 generation 未提交，则进入 `reauth_required`，不声称 refresh 成功；
-- profile response 有界解码并校验 MetaWork 消费的 `id/name/display_name/status/is_default`；`platform/group/group_name/expires_at` 等未消费 metadata 允许服务端演进。从 `status = active` 中选择唯一 `is_default = true` 的 profile，没有默认项时才回退第一个 active profile，多个 active default 则 fail closed；
+- token response 有界解码并严格校验 MetaWork 实际消费的字段：`access_token`、每次必需的新 `refresh_token`、Bearer `token_type`、正整数 `expires_in`、精确 `metawork:use` scope 和非空 `account_id`；OAuth 服务允许增加未消费的 metadata，新增字段不得破坏客户端；
+- refresh token 每次成功刷新都轮换；response 缺少新 refresh token 或新本地 generation 未提交时进入 `reauth_required`，不得继续使用已作废的旧 refresh token；
+- profile response 有界解码并校验 MetaWork 消费的 `id/name/display_name/status/is_default`；`platform/group/group_name/expires_at` 等未消费 metadata 允许服务端演进。从 `status = active` 中选择唯一 `is_default = true` 的 profile，没有默认项时才回退第一个 active profile，多个 active default 则 fail closed。`data: []` 是合法的 `account_only`，不撤销已经完成的 OAuth 登录；profile 只表示执行选择器，不作为用户 identity 或 display name；
 - token、verifier、authorization code、完整 authorize URL 和 Authorization header 不进入 Renderer、Bridge、日志、snapshot 或持久化产品视图。
 
 ## 3. C1 本地持久化合同
@@ -53,7 +53,8 @@ macOS 使用 MetaWork 自己的命名空间，不读取或共享 `~/.metacode/au
 - 真实 macOS Account development/package 使用 Apple-signed development identity，使 Keychain authorization 绑定稳定 Team 与 designated requirement；签名流程本身不改变本节的 service、slot 或 manifest 合同；
 - 固定 OAuth slot：`oauth/A/*` 与 `oauth/B/*`；
 - 每个 slot 分别保存 access、refresh 和最后写入的 generation marker；
-- 非秘密 `manifest.json` schema 1 是 OAuth 与 execution 两个 credential family 的唯一 committed pointer，使用 `signed_out`、`account_only` 或 `execution_ready` 状态；
+- 非秘密 `manifest.json` schema 1 是 OAuth 与 execution 两个 credential family 的唯一 committed pointer，使用 `signed_out`、`account_only` 或 `execution_ready` 状态；`account_only` 允许没有 profile，`execution_ready` 仍必须绑定非空 profile；
+- 冷启动发现已被替换的 `metacode:use` scope 时，先提交 `signed_out` tombstone 再清除旧 OAuth/execution slot；该分支只负责安全退役旧凭据，不继续旧授权协议；
 - 写新 inactive slot、读回校验、原子提交 manifest 后，才清理旧 slot；
 - logout 先原子提交 `signed_out` tombstone，再清理 Keychain；清理失败不能复活旧账号；
 - Keychain/open-browser 操作只能在 Native SDK 主线程执行；网络与 loopback wait 在有界 Account worker 上执行；
@@ -75,18 +76,20 @@ Windows 使用一条直接、无版本的恢复路径：
 - Windows Credential Manager 的 service 为 `dev.metawork.account`，只保存一个 `metask-refresh-token`；
 - `account.json` 只保存 account/profile/display name 与最近一次已提交的 API/model selection identifier，不含 schema/revision 字段；
 - access token、Provider API Key、base URL、provider、execution generation 和完整 execution config 都不跨进程持久化；
-- 冷启动只有同时取得 refresh token 与合法 `account.json` 才恢复 `account_only`，随后先刷新 OAuth 并重新读取 Metask profile identity；profile 必须与公共状态精确一致，refresh response 提供 `account_id` 时也必须精确一致。response 省略可选 `account_id` 时沿用已保存 account id 仅用于组成 identity，仍必须完成远端 profile 验证，不能直接信任磁盘。验证通过后再拉取 API/model catalog，并在历史选择仍属于当前 catalog 时于内存重建 execution；
+- 冷启动只有同时取得 refresh token 与合法 `account.json` 才恢复 `account_only`，随后先刷新 OAuth 并精确核对必需的 `account_id`，再重新读取 Metask profile。profile 为空时保持 `account_only`；profile 可用且与已提交执行选择一致后才拉取 API/model catalog，并在历史选择仍属于当前 catalog 时于内存重建 execution；
 - 历史选择失效时保持登录并请求用户重新选择，不从文件重建 Provider、base URL 或 credential；refresh 无效进入 `reauth_required`，网络失败保留可重试状态；
 - 登录先原子替换 `account.json`，再写单个 refresh token；任一步失败都不提交内存登录事实。刷新只替换 refresh token，选择变更只替换 `account.json`；
 - logout 先删除 refresh token，再删除 `account.json`，任一步失败都不声称退出成功；
 - macOS 当前 `com.metask.metawork.dev.account`、`MetaWork Dev/account/manifest.json` 以及旧 `dev.metawork.account.v2`、`MetaWork/account/manifest.v2` 条目都由 Windows 完全忽略，不做兼容读取、迁移或静默清理。用户在 Windows hard cut 后只需重新登录一次；
 - 快速开发阶段若 Windows 布局需要改变，直接原地 hard cut；不得自行增加版本号。任何合同类版本标识变更仍必须先得到用户显式同意。
 
-## 4. C2 已锁定的目录合同
+## 4. C2 现有兼容目录路径
+
+本节是 MetaWork 当前用于向未修改的 AgentCore 提供普通 Provider API Key 的既有接口。它未出现在 2026-08 发布的 Metawork App OAuth 文档中；切换到 `metawork:use` 后必须通过真实服务验证，不能仅凭本地 fixture 宣称可用。接口返回 `401`、`403`、遮蔽 secret 或 profile/API Key 归属无法精确证明时，Account 保持 `account_only`，不得建立本地代理或绕过 AgentCore。
 
 API Key catalog：
 
-- 使用 OAuth access token 作为 Bearer，并携带当前 `profile.id` 的 `X-Metacode-Profile-ID`；
+- 使用 OAuth access token 作为 Bearer，并携带当前 `profile.id` 的 `X-Profile-ID`；
 - 固定请求 `GET https://napi.metask-ai.com/api/v1/keys?page=1&page_size=100`；
 - 成功响应严格为 `code = 0`、`message = "success"` 和 `data { items, total, page, page_size, pages }`；
 - 当前只接受 `page = 1`、`page_size = 100`、`pages = 1` 且 `total == items.len`，不发布不完整分页；
@@ -96,7 +99,7 @@ API Key catalog：
 
 Model catalog：
 
-- 选中 API Key 后，以该 Key 作为 Bearer，并携带同一 `X-Metacode-Profile-ID`；
+- 选中 API Key 后，以该 Key 作为 Bearer，并携带同一 `X-Profile-ID`；
 - 固定请求 `GET https://napi.metask-ai.com/v1/models`；
 - 成功响应严格读取消费的 list 根字段和 `data[]`；拒绝缺失/非法消费字段、重复 model id、`has_more = true`、超限字段和超限集合，但允许服务端增加未消费 metadata；
 - model 只向产品投影有界 `id` 与可选 `display_name`；投影同时发布已提交的 API/model identity、当前模型目录所属的脱敏 API Key selection identity，以及仅在重配置期间存在的 `candidateApiKeySelectionId` / `candidateModelSelectionId`。候选字段只表示 Host 已接收的进行中意图，不表示已通过目录校验或已经提交：`loading_keys` 时候选可能尚未属于刚刷新的目录，`loading_models` 后候选 API 才可作为模型目录 owner，`persisting` 时才形成完整且已验证的候选 execution target；成功后候选原子成为已提交默认值，取消或失败时候选必须清空。Renderer 不得把候选 API 的 model id 与已提交默认 API 混用，也不得以本地状态冒充提交结果；
@@ -115,7 +118,7 @@ Model catalog：
 
 其他 platform 当前 fail closed。production 不接受 Renderer、环境变量或任意 URL 覆盖。
 
-Account 同时保存 token 的 `account_id` 与当前 `profile.id`。macOS 将其写入 committed manifest；Windows 只将无 secret identity 写入 `account.json`。后者用于请求 header、catalog ownership 和 execution credential 归属。自动 refresh 与冷启动恢复必须用已提交 identity 校验远端结果，防止后台静默切换账号；用户显式完成 OAuth 重认证时则以本次 OAuth 返回的 token 与 profile identity 为准，不得再用旧 identity 否决登录。显式重认证通过 identity replacement gate 后原子替换本机 identity 和 token，清除旧默认 execution、API/model selection 与 catalog，再按新 identity 重新准备目录；旧 execution 不得与新账号混用。
+Account 必须保存 token 的 `account_id`，并在存在执行 profile 时同时保存当前 `profile.id`。macOS 将其写入 committed manifest；Windows 只将无 secret identity 写入 `account.json`。profile 用于请求 header、catalog ownership 和 execution credential 归属，不构成用户 identity。自动 refresh 与冷启动恢复必须精确核对 `account_id`，防止后台静默切换账号；用户显式完成 OAuth 重认证时以本次 OAuth token 的 `account_id` 为准。显式重认证通过 identity replacement gate 后原子替换本机 identity 和 token，清除旧默认 execution、API/model selection 与 catalog，再按新的 profile 可用性准备目录；旧 execution 不得与新账号混用。
 
 ## 6. macOS 双 family 崩溃一致性
 

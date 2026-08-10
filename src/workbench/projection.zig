@@ -7759,8 +7759,7 @@ pub const Workbench = struct {
     fn executionQuiescent(self: *const Workbench) bool {
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
-            if (task.runtime.lifecycle != .closed or
-                task.runtime.execution != null or
+            if (task.runtime.execution != null or
                 task.runtime.session != null or
                 task.runtime.closing_session != null or
                 task.runtime.close_thread != null or
@@ -7774,7 +7773,7 @@ pub const Workbench = struct {
     fn releaseQuiescentTaskExecutions(self: *Workbench) void {
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
-            if (task.runtime.lifecycle != .closed or task.runtime.execution == null or
+            if (task.runtime.execution == null or
                 task.runtime.session != null or task.runtime.closing_session != null or
                 task.runtime.close_thread != null or
                 task.runtime.worker_references.load(.acquire) != 0 or
@@ -12829,7 +12828,7 @@ test "Account projection and execution install use preallocated no-fail storage"
     try std.testing.expectEqual(@as(u64, 1), workbench.currentRevision());
 }
 
-test "execution replacement gate rejects live Task state and admits closed history" {
+test "execution replacement gate rejects runtime references and admits durable history" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
     try workbench.beginDefaultExecutionReplacement();
@@ -12843,12 +12842,18 @@ test "execution replacement gate rejects live Task state and admits closed histo
     try std.testing.expect(!workbench.executionReplacementPending());
     const task = &workbench.tasks[0].?;
     task.durable.runs[0].?.active_phase = .completed;
-    task.runtime.lifecycle = .closed;
-    task.runtime.continuation = .{ .unavailable = .closed };
     task.runtime.active_run_id = 0;
+    task.runtime.worker_references.store(1, .release);
+    try std.testing.expectError(
+        error.ExecutionInUse,
+        workbench.beginExecutionReplacement(),
+    );
+    task.runtime.worker_references.store(0, .release);
     try workbench.beginExecutionReplacement();
     try std.testing.expect(workbench.executionReplacementPending());
     try std.testing.expect(task.runtime.execution == null);
+    try std.testing.expectEqual(TaskLifecycle.open, task.runtime.lifecycle);
+    try std.testing.expect(!task.durable.closed);
     try std.testing.expectEqualStrings("fixture-model", task.durable.execution_model);
     try std.testing.expect(!workbench.accountView().can_create_task);
     workbench.endExecutionReplacementNoFail();

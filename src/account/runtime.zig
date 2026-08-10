@@ -913,12 +913,16 @@ pub const Runtime = struct {
             attempt_id,
             .credential_store_write_failed,
         );
+        const identity = retainedProfileIdentity(
+            self.account.currentIdentity(),
+            login.identity,
+        );
         var cleanup_pending = false;
         if (builtin.os.tag == .windows) {
             self.windows_public_state = windows_store.commitAuthenticated(
                 platform.backend(),
                 &login.tokens.refresh_token,
-                login.identity,
+                identity,
             ) catch |err| return self.prepareFailure(
                 attempt_id,
                 accountStoreError(err),
@@ -934,7 +938,7 @@ pub const Runtime = struct {
                 platform.backend(),
                 generation,
                 &login.tokens,
-                &login.identity,
+                &identity,
                 self.account.executionHighWatermark(),
             ) catch |err| return self.prepareFailure(
                 attempt_id,
@@ -946,19 +950,34 @@ pub const Runtime = struct {
         self.credentials.setCleanupPending(cleanup_pending);
         var completion: state_impl.WorkerCompletion = .{
             .attempt_id = attempt_id,
-            .payload = .{ .authenticated = login.identity },
+            .payload = .{ .authenticated = identity },
         };
         defer completion.deinit();
         return switch (self.account.prepareCompletion(&completion)) {
             .transition => |transition| .{ .prepared = .{
                 .transition = transition,
-                .follow_up = .refresh_catalog,
+                .follow_up = if (identity.profileId().len > 0)
+                    .refresh_catalog
+                else
+                    null,
                 .cleanup_after_commit = builtin.os.tag != .windows,
                 .schedule_refresh_after_commit = true,
             } },
             .rejected => |error_code| .{ .rejected = error_code },
             .ignored_stale => .ignored_stale,
         };
+    }
+
+    fn retainedProfileIdentity(
+        previous: ?state_impl.AccountIdentity,
+        replacement: state_impl.AccountIdentity,
+    ) state_impl.AccountIdentity {
+        if (replacement.profileId().len != 0) return replacement;
+        const current = previous orelse return replacement;
+        if (current.profileId().len == 0 or
+            !std.mem.eql(u8, current.accountId(), replacement.accountId()))
+            return replacement;
+        return current;
     }
 
     fn prepareRefreshedTokens(
@@ -992,12 +1011,11 @@ pub const Runtime = struct {
                 .account_mismatch,
             );
         }
-        if (rotation.accountId().len > 0 and
-            !std.mem.eql(
-                u8,
-                rotation.accountId(),
-                identity.accountId(),
-            )) return self.prepareFailure(
+        if (!std.mem.eql(
+            u8,
+            rotation.accountId(),
+            identity.accountId(),
+        )) return self.prepareFailure(
             attempt_id,
             .account_mismatch,
         );
@@ -1045,7 +1063,7 @@ pub const Runtime = struct {
         return switch (self.account.prepareCompletion(&completion)) {
             .transition => |transition| .{ .prepared = .{
                 .transition = transition,
-                .follow_up = if (continue_catalog)
+                .follow_up = if (continue_catalog and identity.profileId().len > 0)
                     .refresh_catalog
                 else
                     null,
@@ -2135,6 +2153,31 @@ test "Account Runtime dispatches an admitted effect only after state commit" {
     try std.testing.expect(runtime.effects.queue.entry != null);
     runtime.dispatchCommitted(&prepared);
     try std.testing.expect(runtime.effects.queue.entry == null);
+}
+
+test "reauthentication retains a prior profile only for the same account" {
+    const previous = try state_impl.AccountIdentity.init(
+        "acct-1",
+        "profile-1",
+        "Previous account",
+    );
+    const same_account = try state_impl.AccountIdentity.init(
+        "acct-1",
+        "",
+        "acct-1",
+    );
+    const retained = Runtime.retainedProfileIdentity(previous, same_account);
+    try std.testing.expectEqualStrings("profile-1", retained.profileId());
+    try std.testing.expectEqualStrings("Previous account", retained.displayName());
+
+    const other_account = try state_impl.AccountIdentity.init(
+        "acct-2",
+        "",
+        "acct-2",
+    );
+    const replaced = Runtime.retainedProfileIdentity(previous, other_account);
+    try std.testing.expectEqualStrings("acct-2", replaced.accountId());
+    try std.testing.expectEqualStrings("", replaced.profileId());
 }
 
 test "Account Runtime fails closed when logout persistence is unknown" {

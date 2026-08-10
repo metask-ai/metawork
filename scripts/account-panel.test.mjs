@@ -349,6 +349,22 @@ test("reauth-required gate presents a saved identity instead of a signed-in acco
   );
 });
 
+test("identity replacement rejection names a running Task", async () => {
+  const source = await readFile(
+    join(process.cwd(), "frontend/src/app/App.tsx"),
+    "utf8",
+  );
+  assert.match(
+    source,
+    /result\.errorCode === "execution_in_use"[\s\S]*?"account\.task_running"/,
+  );
+  assert.match(
+    translate("en-US", "account.task_running"),
+    /task is still running/i,
+  );
+  assert.match(translate("zh-CN", "account.task_running"), /任务正在运行/);
+});
+
 test("reauth-required gate replaces stale saved identity with the next explicit sign-in", () => {
   const markup = renderGate({
     ...signedOut,

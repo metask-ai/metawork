@@ -54,7 +54,7 @@ Account 使用 `AccountSessionState` 与 `ExecutionState` 两个正交状态。O
 `execution replacement gate` 区分两类操作：
 
 - 默认 API/模型切换可以安装新 generation，既有 Task 继续引用旧 generation，且其 admission 不被无关的默认切换冻结；默认安装只在新配置无法安全安装、目标 catalog 已失效或同一 generation 提交仍未收口时拒绝；
-- 账号 identity 切换、退出登录和设备 credential 清理必须等待所有引用该账号 credential 的 Task/Session/Run/job/worker reference 归零，不能借默认切换绕过 secret lifetime。
+- 账号 identity 切换、退出登录和设备 credential 清理必须等待所有 credential、Session、Run、job 与 worker reference 归零，不能借默认切换绕过 secret lifetime。durable Task、历史记录和 `closed` 产品状态不持有 credential，因而不参与 gate；无运行时 attachment 的恢复 Task 必须直接放行。
 
 冷启动恢复不是运行中的 identity 切换：新进程尚未持有可被替换的 Account credential，因而启动事务使用 default-execution transaction boundary 安装或清空当前默认执行配置，并保留已恢复的 Task history；不得让持久化但尚未重新绑定 execution 的未关闭 Task 触发 identity replacement rejection。运行中的 reauthenticate/logout 仍必须经过 identity gate。
 
@@ -69,15 +69,15 @@ Account Runtime.prepare(command | completion)
 → dispatch committed Account effect
 ```
 
-前五步由 Application coordinator 在主线程同一 turn 内完成，effect 只有在 committed swap 后才能启动；worker completion 再经主循环进入同一条链。任何校验或内部不变量失败都保留旧 committed state，并清零 staged secret；Bridge 不参与 prepare/commit，也不接触 credential。C1 登录只依赖锁定的 OAuth client/scope/loopback/profile 合同，成功先提交 `account_only`，不等待 API Key 或模型目录。
+前五步由 Application coordinator 在主线程同一 turn 内完成，effect 只有在 committed swap 后才能启动；worker completion 再经主循环进入同一条链。任何校验或内部不变量失败都保留旧 committed state，并清零 staged secret；Bridge 不参与 prepare/commit，也不接触 credential。C1 登录只依赖锁定的 OAuth client/scope/loopback/token `account_id` 与 profile 查询合同；profile 列表为空仍可成功提交 `account_only`，不等待 API Key 或模型目录。
 
 Renderer catalog selection 的同步拒绝顺序固定为：Bridge authority/wire validation，Account Runtime generation 与 published membership validation，Account state-machine prepare，Workbench execution replacement gate，最后进入上述 commit 链。Account 独占 selection、session、operation 与 attempt 的状态合法性；Workbench 独占 replacement gate；Application coordinator 只安排顺序。`prepare` 成功但 gate 拒绝时必须销毁 prepared transition，不能提交 Account fact 或启动 effect；gate 打开后的 effect admission 失败必须平衡关闭。
 
-`account_only` 是安全与持久化提交边界，不是可进入 Workbench 的产品 readiness，也不是要求用户手动启动 C2 的边界。C1 commit 完成后，Account Runtime 产生新的 catalog command，Application coordinator 将其重新送入相同 prepare/admit/commit 链；历史选择仍存在且匹配当前 catalog 时优先恢复，单一候选自动采用，只有无法由锁定合同确定的多候选才进入 waiting-for-user。Renderer 不观察状态后发送隐藏命令。
+`account_only` 是安全与持久化提交边界，不是可进入 Workbench 的产品 readiness，也不是要求用户手动启动 C2 的边界。C1 commit 完成且 `/v1/profiles` 提供可执行 profile 后，Account Runtime 才产生新的 catalog command，Application coordinator 将其重新送入相同 prepare/admit/commit 链；合法空 profile 列表保持 `account_only`，不回滚登录。历史选择仍存在且匹配当前 catalog 时优先恢复，单一候选自动采用，只有无法由锁定合同确定的多候选才进入 waiting-for-user。Renderer 不观察状态后发送隐藏命令。
 
 每个 Account attempt 都有 Host-owned deadline、attempt identity 和唯一 terminal completion。浏览器未回调、网络悬挂、effect 启动失败和取消都必须收口到可恢复 committed state。幂等 catalog read 可以有限重试；OAuth code exchange、凭据持久化和结果不确定 mutation 不得自动重放。进入 credential persistence 前允许取消；持久化 effect 开始后撤销 cancel admission，直到 main thread 原子消费 completion，避免磁盘已提交而内存被取消回滚。Renderer command timeout 只释放本地交互并触发 snapshot resync，不能代表 Host mutation 失败。
 
-production 网络接入受 [Metask Account API 合同](metask-account-contract.md)约束。C1 OAuth/login 独立提交 `account_only`，不打开 Workbench 或 Task admission；C2 使用 profile-aware API Key/model catalog，从精确 `group.platform` 生成固定 Metask AgentCore target。macOS 通过 OAuth/execution 双 family A/B slot 与单一 `manifest.json` schema 1 提交 `execution_ready`；Windows 只在 Credential Manager 保存一个 refresh token，在无版本 `account.json` 保存无 secret identity/API/model 选择，access token 与 Provider API Key 不跨进程。Windows 冷启动恢复 `account_only` 后必须先刷新 OAuth、重新读取 profile 并精确核对 profile；refresh response 提供 `account_id` 时也必须精确核对，省略时只能沿用已保存 account id 组成 identity，不能跳过远端 profile 验证。identity 验证通过后才重新加载 catalog，并只在历史选择仍受当前 catalog ownership 证明时于内存重建 execution。只有 Workbench 安装同一默认 execution generation 后才进入 Workbench。macOS manifest 仍只持久化一个默认 execution family；Windows 不消费该 schema。被既有 Task 引用的旧 generation secret 仅在当前进程由 Workbench/Agent Session own。Task persistence 只能另存不含 secret 的 binding descriptor/epoch history，不能据此重建 credential。Metask 内部实现只作为外部合同确认的证据，MetaWork 不修改其代码。
+production 网络接入受 [Metask Account API 合同](metask-account-contract.md)约束。C1 OAuth/login 独立提交 `account_only`，不打开 Workbench 或 Task admission；C2 使用 profile-aware API Key/model catalog，从精确 `group.platform` 生成固定 Metask AgentCore target。macOS 通过 OAuth/execution 双 family A/B slot 与单一 `manifest.json` schema 1 提交 `execution_ready`；Windows 只在 Credential Manager 保存一个 refresh token，在无版本 `account.json` 保存无 secret identity/API/model 选择，access token 与 Provider API Key 不跨进程。Windows 冷启动恢复 `account_only` 后必须先刷新 OAuth、精确核对 token 必需的 `account_id`，再重新读取 profile；profile 为空时保持 `account_only`，profile 可用且 identity 精确匹配后才重新加载 catalog，并只在历史选择仍受当前 catalog ownership 证明时于内存重建 execution。只有 Workbench 安装同一默认 execution generation 后才进入 Workbench。macOS manifest 仍只持久化一个默认 execution family；Windows 不消费该 schema。被既有 Task 引用的旧 generation secret 仅在当前进程由 Workbench/Agent Session own。Task persistence 只能另存不含 secret 的 binding descriptor/epoch history，不能据此重建 credential。Metask 内部实现只作为外部合同确认的证据，MetaWork 不修改其代码。
 
 进入 Workbench 后的 API/模型切换仍由 Account owner 执行，不是 Renderer preference。每次 steady selection 都用当前 OAuth/profile 重新加载 authenticated API catalog，不能复用已 secure-zero 的旧 private catalog。candidate private/public catalog 与 committed public catalog 分槽；Account projection 发布候选目录所属的脱敏 API selection identity，Renderer 只能从该 owned catalog 选择模型。加载、取消、选择或持久化期间继续保留已提交 execution，成功后才原子安装新的默认 generation 并提交候选目录；其他 terminal outcome 丢弃候选并回到旧默认配置。Workbench 只用新 generation 接纳之后创建的 Task，既有 Task 继续使用自身 binding epoch。
 

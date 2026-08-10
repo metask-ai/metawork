@@ -76,6 +76,8 @@ export const zhCN: Record<MessageId, string> = {
   "account.error.browser": "MetaWork 无法打开登录页面，请重新打开。",
   "account.error.authorization": "未能完成 Metask 登录，请重新登录。",
   "account.error.service": "Metask 暂时不可用，请稍后重试。",
+  "account.error.metask_access":
+    "登录已完成，但 Metask 拒绝了账户接口请求。授权信息已保留，请重试获取账户配置。",
   "account.error.credentials":
     "MetaWork 无法安全更新这台设备上保存的账号信息。",
   "account.error.local": "MetaWork 无法在这台设备上完成任务准备，请重试。",
@@ -104,6 +106,8 @@ export const zhCN: Record<MessageId, string> = {
   "account.logout_confirm": "MetaWork 将请求 Host 清理这台设备，是否继续？",
   "account.command_rejected":
     "该账号操作已不可用，MetaWork 已保留最新账号状态。",
+  "account.task_running":
+    "仍有任务正在运行。请等待任务结束后再重新登录或退出账号。",
   "account.command_failed":
     "MetaWork 无法完成该账号操作，请使用此处显示的恢复操作。",
   "account.cancel_rejected": "该账号操作已经结束，MetaWork 已检查最新状态。",

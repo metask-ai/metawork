@@ -65,8 +65,16 @@ const dataRoot =
     : join(platformHome, "Library", "Application Support", "MetaWork Dev");
 const isolatedPlatformEnv =
   process.platform === "win32"
-    ? { LOCALAPPDATA: platformHome }
+    ? { APPDATA: platformHome, LOCALAPPDATA: platformHome }
     : { HOME: platformHome };
+const relativeDataRoot = path.relative(canonicalWorkspace, dataRoot);
+if (
+  relativeDataRoot === "" ||
+  relativeDataRoot === ".." ||
+  relativeDataRoot.startsWith(`..${path.sep}`) ||
+  path.isAbsolute(relativeDataRoot)
+)
+  throw new Error(`vertical data root escaped its fixture: ${dataRoot}`);
 const fixturePath = join(workspace, "fixture.txt");
 await writeFile(fixturePath, "agentcore-vertical-before\n", { mode: 0o600 });
 // This fixture targets an AgentCore-owned canonical project source. No

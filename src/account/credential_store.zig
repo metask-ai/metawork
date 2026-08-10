@@ -124,13 +124,11 @@ pub const Manifest = struct {
         const token_scope = tokens.scopeView();
         if (account_id.len == 0 or
             account_id.len > contract.Limits.account_id_bytes or
-            profile_id.len == 0 or
             profile_id.len > contract.Limits.profile_id_bytes or
             display_name.len > contract.Limits.display_name_bytes or
             token_scope.len == 0 or token_scope.len > oauth.Limits.scope_bytes)
             return error.InvalidData;
-        if (tokens.accountId().len > 0 and
-            !std.mem.eql(u8, tokens.accountId(), account_id))
+        if (!std.mem.eql(u8, tokens.accountId(), account_id))
             return error.InvalidData;
         var result: Manifest = .{
             .state = .account_only,
@@ -309,9 +307,10 @@ pub const Manifest = struct {
             !std.mem.eql(u8, self.scopeView(), oauth.scope) or
             self.account_id_len == 0 or
             self.account_id_len > self.account_id.len or
-            self.profile_id_len == 0 or
             self.profile_id_len > self.profile_id.len or
             self.display_name_len > self.display_name.len)
+            return false;
+        if (self.state == .execution_ready and self.profile_id_len == 0)
             return false;
         return std.unicode.utf8ValidateSlice(self.accountId()) and
             std.unicode.utf8ValidateSlice(self.profileId()) and
@@ -370,6 +369,8 @@ pub const StoreError = error{
     InvalidData,
     VerificationFailed,
 };
+
+const retired_oauth_scope = "metacode:use";
 
 pub const Backend = struct {
     context: *anyopaque,
@@ -609,6 +610,17 @@ pub fn restore(
         } };
     }
     const manifest = loaded.?;
+    if (manifest.state != .signed_out and
+        std.mem.eql(u8, manifest.scopeView(), retired_oauth_scope))
+    {
+        try backend.commitManifest(Manifest.signedOut(
+            manifest.execution_high_watermark,
+        ));
+        return .{ .signed_out = .{
+            .execution_high_watermark = manifest.execution_high_watermark,
+            .cleanup_pending = clearAll(backend),
+        } };
+    }
     try manifest.validate();
     if (manifest.state == .signed_out) {
         return .{ .signed_out = .{
@@ -1046,6 +1058,58 @@ test "account-only commit stages fixed inactive slot then restores it" {
         restored.account_only.identity.accountId(),
     );
     try std.testing.expectEqual(@as(u64, 7), restored.account_only.execution_high_watermark);
+}
+
+test "restore retires credentials issued for the replaced OAuth scope" {
+    var fake: FakeBackend = .{};
+    var tokens = try testTokens("access", "refresh");
+    defer tokens.deinit();
+    const identity = try state.AccountIdentity.init(
+        "acct-1",
+        "profile-1",
+        "Metask User",
+    );
+    _ = try commitAccountOnly(
+        fake.backend(),
+        @splat(0x2a),
+        &tokens,
+        &identity,
+        7,
+    );
+    @memcpy(
+        fake.manifest.?.scope_value[0..retired_oauth_scope.len],
+        retired_oauth_scope,
+    );
+    fake.manifest.?.scope_len = retired_oauth_scope.len;
+
+    const restored = try restore(std.testing.allocator, fake.backend());
+
+    try std.testing.expectEqual(
+        std.meta.Tag(RestoreResult).signed_out,
+        std.meta.activeTag(restored),
+    );
+    try std.testing.expectEqual(@as(u64, 7), restored.signed_out.execution_high_watermark);
+    try std.testing.expect(!restored.signed_out.cleanup_pending);
+    try std.testing.expectEqual(ManifestState.signed_out, fake.manifest.?.state);
+}
+
+test "account-only manifest permits no executable profile" {
+    var tokens = try testTokens("access", "refresh");
+    defer tokens.deinit();
+    const identity = try state.AccountIdentity.init(
+        "acct-1",
+        "",
+        "acct-1",
+    );
+    const manifest = try Manifest.accountOnly(
+        .A,
+        @splat(0x4a),
+        &tokens,
+        &identity,
+        0,
+    );
+    try manifest.validate();
+    try std.testing.expectEqualStrings("", manifest.profileId());
 }
 
 test "failed staging cannot replace the previous committed slot" {

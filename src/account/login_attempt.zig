@@ -288,7 +288,7 @@ const FakeTransport = struct {
                 if (request.kind != .exchange_code)
                     return error.ProtocolFailed;
                 break :blk
-                \\{"access_token":"access","refresh_token":"refresh","token_type":"Bearer","expires_in":3600,"scope":"metacode:use","account_id":"acct-1"}
+                \\{"access_token":"access","refresh_token":"refresh","token_type":"Bearer","expires_in":3600,"scope":"metawork:use","account_id":"acct-1"}
                 ;
             },
             1 => blk: {

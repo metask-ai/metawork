@@ -58,7 +58,7 @@ pub const PublicState = struct {
     ) StoreError!PublicState {
         var result: PublicState = .{};
         try result.account_id.set(account_identity.accountId());
-        try result.profile_id.set(account_identity.profileId());
+        try result.profile_id.setOptional(account_identity.profileId());
         try result.display_name.set(account_identity.displayName());
         try result.api_key_id.setOptional(api_key_id);
         try result.model_id.setOptional(model_id);
@@ -318,6 +318,22 @@ test "Windows persistence stores no access token or provider credential" {
         "model-public-id",
         fake.public_state.?.modelId(),
     );
+}
+
+test "Windows account-only persistence accepts an empty execution profile" {
+    const identity = try state.AccountIdentity.init(
+        "account-1",
+        "",
+        "account-1",
+    );
+    var refresh = try oauth.Secret.init(std.testing.allocator, "refresh-only");
+    defer refresh.deinit();
+    var fake: FakeBackend = .{};
+    const committed = try commitAuthenticated(fake.backend(), &refresh, identity);
+    try std.testing.expectEqualStrings("", committed.profile_id.view());
+    const restored = try committed.identity();
+    try std.testing.expectEqualStrings("account-1", restored.accountId());
+    try std.testing.expectEqualStrings("", restored.profileId());
 }
 
 test "Windows logout removes the refresh token before public state" {

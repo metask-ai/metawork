@@ -80,6 +80,8 @@ export const enUS = {
     "The Metask sign-in could not be completed. Start sign-in again.",
   "account.error.service":
     "Metask is temporarily unavailable. Try again shortly.",
+  "account.error.metask_access":
+    "Sign-in completed, but Metask rejected the account API request. Your authorization was kept; retry loading the account configuration.",
   "account.error.credentials":
     "MetaWork could not safely update the account saved on this device.",
   "account.error.local":
@@ -110,6 +112,8 @@ export const enUS = {
     "MetaWork will ask the Host to clear this device. Continue?",
   "account.command_rejected":
     "That account action is no longer available. MetaWork kept the latest account state.",
+  "account.task_running":
+    "A task is still running. Wait for it to finish before signing in again or signing out.",
   "account.command_failed":
     "MetaWork could not complete that account action. Use the recovery action shown here.",
   "account.cancel_rejected":

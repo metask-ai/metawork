@@ -358,7 +358,7 @@ const RefreshTransport = struct {
             return error.Cancelled;
         }
         const body =
-            \\{"access_token":"fresh-access","refresh_token":"fresh-refresh","token_type":"Bearer","expires_in":3600,"scope":"metacode:use","account_id":"acct-1"}
+            \\{"access_token":"fresh-access","refresh_token":"fresh-refresh","token_type":"Bearer","expires_in":3600,"scope":"metawork:use","account_id":"acct-1"}
         ;
         @memcpy(output[0..body.len], body);
         return .{ .status = 200, .body = output[0..body.len] };

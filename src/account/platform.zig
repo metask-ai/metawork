@@ -689,7 +689,7 @@ pub fn decodeManifest(input: []const u8) store.StoreError!store.Manifest {
     result.expires_at = wire.expires_at;
     const stored_scope = wire.scope orelse return error.ManifestCorrupt;
     const account_id = wire.account_id orelse return error.ManifestCorrupt;
-    const profile_id = wire.profile_id orelse return error.ManifestCorrupt;
+    const profile_id = wire.profile_id orelse "";
     const display_name = wire.display_name orelse return error.ManifestCorrupt;
     if (stored_scope.len > result.scope_value.len or
         account_id.len > result.account_id.len or
@@ -940,6 +940,43 @@ test "Windows public state codec is unversioned and secret-free" {
     try std.testing.expectEqualStrings("account-1", decoded.account_id.view());
     try std.testing.expectEqualStrings("api-42", decoded.apiKeyId());
     try std.testing.expectEqualStrings("model-7", decoded.modelId());
+}
+
+test "account-only codecs preserve an empty execution profile" {
+    const identity = try account_state.AccountIdentity.init(
+        "account-1",
+        "",
+        "account-1",
+    );
+    const public_state = try windows_store.PublicState.init(identity, "", "");
+    var public_storage: [public_state_bytes]u8 = undefined;
+    const public_encoded = try encodeWindowsPublicState(
+        &public_storage,
+        public_state,
+    );
+    const public_decoded = try decodeWindowsPublicState(public_encoded);
+    try std.testing.expectEqualStrings("", public_decoded.profile_id.view());
+
+    var tokens = try oauth.TokenSet.fromStored(
+        std.testing.allocator,
+        "access",
+        "refresh",
+        1234,
+        oauth.scope,
+        "account-1",
+    );
+    defer tokens.deinit();
+    const manifest = try store.Manifest.accountOnly(
+        .A,
+        @splat(0x3c),
+        &tokens,
+        &identity,
+        0,
+    );
+    var manifest_storage: [manifest_bytes]u8 = undefined;
+    const manifest_encoded = try encodeManifest(&manifest_storage, manifest);
+    const manifest_decoded = try decodeManifest(manifest_encoded);
+    try std.testing.expectEqualStrings("", manifest_decoded.profileId());
 }
 
 test "Windows public state codec rejects versions and partial selections" {
