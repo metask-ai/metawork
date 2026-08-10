@@ -548,6 +548,12 @@ pub const OauthConsentInput = struct {
     redirect_uri: []const u8,
 };
 
+pub const RequireOauthReauthorizationInput = struct {
+    server_id: []const u8,
+    consent_epoch: u64,
+    token_revision: u64,
+};
+
 pub const CompleteDynamicRegistrationInput = struct {
     operation_id: []const u8,
     server_id: []const u8,
@@ -1304,6 +1310,48 @@ pub const ManagementPort = struct {
             .schema_version = schema_version,
             .generation = expected_generation + 1,
             .oauth_operation = null,
+            .servers = servers,
+        });
+    }
+
+    pub fn prepareRequireOauthReauthorization(
+        self: *ManagementPort,
+        expected_generation: u64,
+        input: RequireOauthReauthorizationInput,
+    ) std.mem.Allocator.Error!MutationPreparation {
+        if (!self.mutationReady(expected_generation)) return .rejected;
+        const base = if (self.desired) |registry| registry.value else return .rejected;
+        if (base.oauth_operation) |operation|
+            if (std.mem.eql(u8, operation.server_id, input.server_id))
+                return .rejected;
+        const index = findServerIndex(base.servers, input.server_id) orelse
+            return .rejected;
+        const existing = base.servers[index];
+        const oauth = existing.auth.oauth orelse return .rejected;
+        const consent = oauth.consent orelse return .rejected;
+        const grant = oauth.grant orelse return .rejected;
+        if (!existing.enabled or
+            !std.mem.eql(u8, existing.transport.kind, "streamable_http") or
+            !std.mem.eql(u8, existing.auth.kind, "oauth") or
+            !std.mem.eql(u8, oauth.status, "ready") or
+            consent.epoch != input.consent_epoch or
+            grant.consent_epoch != input.consent_epoch or
+            grant.token_revision != input.token_revision)
+            return .rejected;
+        const servers = try self.allocator.dupe(ServerWire, base.servers);
+        defer self.allocator.free(servers);
+        var replacement = existing;
+        var replacement_auth = existing.auth;
+        var replacement_oauth = oauth;
+        replacement_oauth.status = "reauth_required";
+        replacement_oauth.grant = null;
+        replacement_auth.oauth = replacement_oauth;
+        replacement.auth = replacement_auth;
+        servers[index] = replacement;
+        return self.prepareTarget(expected_generation, .{
+            .schema_version = schema_version,
+            .generation = expected_generation + 1,
+            .oauth_operation = base.oauth_operation,
             .servers = servers,
         });
     }
@@ -2373,9 +2421,13 @@ fn entryCompatible(
     return switch (entry.state) {
         .loaded => |fingerprint| if (target) |server|
             server.enabled and
-                serverRuntimeAuthorizationReady(server) and
                 serverProblem(server, limits) == null and
-                std.mem.eql(u8, &fingerprint, &descriptorFingerprint(server))
+                std.mem.eql(u8, &fingerprint, &descriptorFingerprint(server)) and
+                (serverRuntimeAuthorizationReady(server) or
+                    if (server.auth.oauth) |oauth|
+                        std.mem.eql(u8, oauth.status, "reauth_required")
+                    else
+                        false)
         else
             false,
         .absent => |proof| switch (proof) {
@@ -4113,6 +4165,19 @@ fn validOauthScope(value: []const u8, max_bytes: usize) bool {
     for (value) |byte| if (byte != 0x21 and
         (byte < 0x23 or byte > 0x5b) and
         (byte < 0x5d or byte > 0x7e)) return false;
+    return true;
+}
+
+pub fn validOauthScopeSet(
+    scopes: []const []const u8,
+    limits: Limits,
+) bool {
+    if (scopes.len > limits.max_oauth_scopes) return false;
+    for (scopes, 0..) |scope, index| {
+        if (!validOauthScope(scope, limits.max_oauth_scope_bytes)) return false;
+        if (index != 0 and std.mem.order(u8, scopes[index - 1], scope) != .lt)
+            return false;
+    }
     return true;
 }
 
@@ -7194,6 +7259,122 @@ test "OAuth operation recovery retires grant locators and never replays" {
         "reauth_required",
         stored.value.servers[0].auth.oauth.?.status,
     );
+}
+
+test "runtime OAuth rejection retires the grant without invalidating its loaded descriptor" {
+    const Effects = struct {
+        fn commit(_: ?*anyopaque, _: []const u8) PersistenceEffect {
+            return .committed;
+        }
+        fn clear(_: ?*anyopaque) PersistenceEffect {
+            return .committed;
+        }
+        fn probe(_: ?*anyopaque, _: []const u8) CredentialPresence {
+            return .present;
+        }
+        fn create(_: ?*anyopaque, _: []const u8, _: []const u8) bool {
+            return true;
+        }
+        fn delete(_: ?*anyopaque, _: []const u8) bool {
+            return true;
+        }
+    };
+    var server: ServerWire = .{
+        .id = "oauth",
+        .namespace = "oauth",
+        .display_name = "OAuth",
+        .enabled = true,
+        .negotiation = "automatic",
+        .timeout_ms = 1000,
+        .transport = .{
+            .kind = "streamable_http",
+            .url = "https://mcp.example.test/mcp",
+        },
+        .auth = .{ .kind = "oauth", .oauth = .{
+            .status = "ready",
+            .registration = .{
+                .kind = "pre_registered",
+                .issuer = "https://auth.example.test",
+                .client_id = "client",
+                .token_endpoint_auth_method = "none",
+                .client_credential_revision = 1,
+                .client_secret_ref = null,
+            },
+            .consent = .{
+                .epoch = 3,
+                .fingerprint = "pending",
+                .resource = "https://mcp.example.test/mcp",
+                .issuer = "https://auth.example.test",
+                .scopes = &.{"files.read"},
+                .redirect_uri = "http://127.0.0.1:49152/auth/callback",
+                .client_credential_revision = 1,
+            },
+            .grant = .{
+                .consent_epoch = 3,
+                .token_revision = 8,
+                .access_token_ref = "oauth/access-8",
+                .refresh_token_ref = "oauth/refresh-8",
+                .expires_at_unix_ms = null,
+            },
+        } },
+        .connection_approval = null,
+        .tools = &.{"files.read"},
+    };
+    const approval = connectionFingerprint(server);
+    server.connection_approval = .{ .fingerprint = &approval };
+    const consent_fingerprint = oauthConsentFingerprint(
+        server,
+        server.auth.oauth.?.consent.?,
+    ).?;
+    server.auth.oauth.?.consent.?.fingerprint = &consent_fingerprint;
+    var servers = [_]ServerWire{server};
+    const registry: RegistryWire = .{
+        .schema_version = schema_version,
+        .generation = 4,
+        .oauth_operation = null,
+        .servers = &servers,
+    };
+    var management = try ManagementPort.init(
+        std.testing.allocator,
+        registry,
+        .{
+            .persistence = .{
+                .available = true,
+                .commit_journal_fn = Effects.commit,
+                .commit_registry_fn = Effects.commit,
+                .clear_journal_fn = Effects.clear,
+            },
+            .credentials = .{
+                .available = true,
+                .probe_fn = Effects.probe,
+                .create_fn = Effects.create,
+                .delete_fn = Effects.delete,
+            },
+            .limits = test_limits,
+        },
+    );
+    defer management.deinit();
+    var preparation = try management.prepareRequireOauthReauthorization(4, .{
+        .server_id = "oauth",
+        .consent_epoch = 3,
+        .token_revision = 8,
+    });
+    defer switch (preparation) {
+        .prepared => |*mutation| mutation.deinit(),
+        .unchanged, .rejected => {},
+    };
+    try std.testing.expect(preparation == .prepared);
+    const target = preparation.prepared.target();
+    try std.testing.expectEqualStrings(
+        "reauth_required",
+        target.servers[0].auth.oauth.?.status,
+    );
+    try std.testing.expect(target.servers[0].auth.oauth.?.grant == null);
+    try std.testing.expectEqual(@as(usize, 2), preparation.prepared.plan.transaction.retired_locators.len);
+    try std.testing.expect(entryCompatible(.{
+        .id = "oauth",
+        .state = .{ .loaded = descriptorFingerprint(server) },
+    }, target.servers[0], test_limits));
 }
 
 test "typed OAuth management commits consent marker and fresh token locators" {

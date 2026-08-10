@@ -269,7 +269,63 @@ pub const ResourceDiscovery = struct {
         self.arena.deinit();
         self.* = undefined;
     }
+
+    pub fn mergeRequestedScopes(
+        self: *ResourceDiscovery,
+        additional: []const []const u8,
+    ) (Error || std.mem.Allocator.Error)!void {
+        if (additional.len == 0) return;
+        const owned = self.arena.allocator();
+        const merged = try owned.alloc(
+            []const u8,
+            std.math.add(usize, self.requested_scopes.len, additional.len) catch
+                return error.InvalidChallenge,
+        );
+        var count: usize = 0;
+        for (self.requested_scopes) |scope| {
+            if (!validScope(scope)) return error.InvalidChallenge;
+            merged[count] = scope;
+            count += 1;
+        }
+        for (additional) |scope| {
+            if (!validScope(scope)) return error.InvalidChallenge;
+            if (containsText(merged[0..count], scope)) continue;
+            if (count == Limits.scopes) return error.InvalidChallenge;
+            merged[count] = try owned.dupe(u8, scope);
+            count += 1;
+        }
+        std.mem.sort([]const u8, merged[0..count], {}, lessText);
+        self.requested_scopes = merged[0..count];
+    }
 };
+
+pub const RuntimeBearerChallenge = struct {
+    arena: std.heap.ArenaAllocator,
+    scopes: []const []const u8,
+
+    pub fn deinit(self: *RuntimeBearerChallenge) void {
+        self.arena.deinit();
+        self.* = undefined;
+    }
+};
+
+/// Converts one bounded WWW-Authenticate field into the only runtime OAuth
+/// fact the product consumes. Raw challenge text never crosses this module.
+pub fn parseRuntimeBearerChallenge(
+    allocator: std.mem.Allocator,
+    input: []const u8,
+) (error{InvalidChallenge} || std.mem.Allocator.Error)!RuntimeBearerChallenge {
+    const bearer = selectBearerChallenge(input) orelse
+        return error.InvalidChallenge;
+    const challenge = try parseBearerChallenge(bearer);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const scopes = if (challenge.scope) |scope|
+        try parseScopeSet(arena.allocator(), scope)
+    else
+        &.{};
+    return .{ .arena = arena, .scopes = scopes };
+}
 
 pub const TokenEndpointAuthMethod = enum {
     none,
@@ -2483,6 +2539,33 @@ test "MCP OAuth selects Bearer from combined challenges" {
             "Basic realm=\"legacy\", Bearer resource_metadata=\"https://mcp.example.test/prm\", scope=\"a b\", DPoP realm=\"future\"",
         ).?,
     );
+}
+
+test "MCP OAuth runtime challenge publishes a sorted typed scope set" {
+    var challenge = try parseRuntimeBearerChallenge(
+        std.testing.allocator,
+        "Basic realm=\"legacy\", Bearer error=\"insufficient_scope\", scope=\"files.write files.read\"",
+    );
+    defer challenge.deinit();
+    try std.testing.expectEqual(@as(usize, 2), challenge.scopes.len);
+    try std.testing.expectEqualStrings("files.read", challenge.scopes[0]);
+    try std.testing.expectEqualStrings("files.write", challenge.scopes[1]);
+}
+
+test "MCP OAuth resource discovery unions runtime challenge scopes" {
+    const arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    var resource: ResourceDiscovery = .{
+        .arena = arena,
+        .resource = "https://mcp.example.test/mcp",
+        .authorization_servers = &.{"https://auth.example.test"},
+        .scopes_supported = &.{},
+        .requested_scopes = &.{"files.read"},
+    };
+    defer resource.deinit();
+    try resource.mergeRequestedScopes(&.{ "files.write", "files.read" });
+    try std.testing.expectEqual(@as(usize, 2), resource.requested_scopes.len);
+    try std.testing.expectEqualStrings("files.read", resource.requested_scopes[0]);
+    try std.testing.expectEqualStrings("files.write", resource.requested_scopes[1]);
 }
 
 test "MCP OAuth cancellation stops discovery fallback and POST is outcome unknown" {

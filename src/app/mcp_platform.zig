@@ -6,6 +6,7 @@ const std = @import("std");
 const native_sdk = @import("native_sdk");
 const agent = @import("metawork_agent");
 const workbench = @import("metawork_workbench");
+const mcp_oauth = @import("metawork_mcp_oauth");
 const product_identity = @import("metawork_product_identity");
 
 pub const credential_service = product_identity.mcp_credential_service;
@@ -195,6 +196,97 @@ const HttpAuthSnapshot = struct {
     }
 };
 
+const OwnedRuntimeScopes = struct {
+    arena: std.heap.ArenaAllocator,
+    values: []const []const u8,
+
+    fn deinit(self: *OwnedRuntimeScopes) void {
+        self.arena.deinit();
+        self.* = undefined;
+    }
+};
+
+fn ownRuntimeScopes(
+    allocator: std.mem.Allocator,
+    first: []const []const u8,
+    second: []const []const u8,
+) (std.mem.Allocator.Error || error{ScopeCapacity})!OwnedRuntimeScopes {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const owned = arena.allocator();
+    const values = try owned.alloc([]const u8, mcp_oauth.Limits.scopes);
+    var count: usize = 0;
+    for (first) |scope| {
+        if (count == values.len) return error.ScopeCapacity;
+        values[count] = try owned.dupe(u8, scope);
+        count += 1;
+    }
+    for (second) |scope| {
+        var duplicate = false;
+        for (values[0..count]) |existing| if (std.mem.eql(u8, existing, scope)) {
+            duplicate = true;
+            break;
+        };
+        if (duplicate) continue;
+        if (count == values.len) return error.ScopeCapacity;
+        values[count] = try owned.dupe(u8, scope);
+        count += 1;
+    }
+    std.mem.sort([]const u8, values[0..count], {}, struct {
+        fn lessThan(_: void, left: []const u8, right: []const u8) bool {
+            return std.mem.order(u8, left, right) == .lt;
+        }
+    }.lessThan);
+    return .{ .arena = arena, .values = values[0..count] };
+}
+
+const PendingRuntimeAuthFailure = struct {
+    consent_epoch: u64,
+    token_revision: u64,
+    scopes: ?OwnedRuntimeScopes = null,
+    scopes_complete: bool = true,
+
+    fn deinit(self: *PendingRuntimeAuthFailure) void {
+        if (self.scopes) |*scopes| scopes.deinit();
+        self.* = undefined;
+    }
+};
+
+pub const RuntimeAuthFailure = struct {
+    server_id: []const u8,
+    consent_epoch: u64,
+    token_revision: u64,
+    challenge_scopes: []const []const u8,
+    challenge_scopes_complete: bool,
+    scopes_owner: ?OwnedRuntimeScopes = null,
+
+    pub fn deinit(self: *RuntimeAuthFailure) void {
+        if (self.scopes_owner) |*scopes| scopes.deinit();
+        self.* = undefined;
+    }
+};
+
+pub const RuntimeAuthFailureBatch = struct {
+    allocator: std.mem.Allocator,
+    storage: []RuntimeAuthFailure,
+    values: []RuntimeAuthFailure,
+
+    pub fn deinit(self: *RuntimeAuthFailureBatch) void {
+        for (self.values) |*failure| failure.deinit();
+        if (self.storage.len != 0) self.allocator.free(self.storage);
+        self.* = undefined;
+    }
+};
+
+pub const RuntimeAuthFailureNotifier = struct {
+    context: *anyopaque,
+    notify_fn: *const fn (*anyopaque) void,
+
+    fn notify(self: RuntimeAuthFailureNotifier) void {
+        self.notify_fn(self.context);
+    }
+};
+
 const HttpAuthSlot = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -202,6 +294,8 @@ const HttpAuthSlot = struct {
     mutex: std.Io.Mutex = .init,
     server_id: []u8,
     current: *HttpAuthSnapshot,
+    pending_failure: ?PendingRuntimeAuthFailure = null,
+    failure_notifier: ?RuntimeAuthFailureNotifier = null,
 
     fn create(
         allocator: std.mem.Allocator,
@@ -238,6 +332,7 @@ const HttpAuthSlot = struct {
         const previous = self.references.fetchSub(1, .acq_rel);
         std.debug.assert(previous != 0);
         if (previous != 1) return;
+        if (self.pending_failure) |*failure| failure.deinit();
         self.current.release();
         self.allocator.free(self.server_id);
         const allocator = self.allocator;
@@ -250,6 +345,108 @@ const HttpAuthSlot = struct {
         defer self.mutex.unlock(self.io);
         self.current.retain();
         return .{ .snapshot = self.current };
+    }
+
+    fn setFailureNotifier(
+        self: *HttpAuthSlot,
+        notifier: ?RuntimeAuthFailureNotifier,
+    ) void {
+        self.mutex.lockUncancelable(self.io);
+        self.failure_notifier = notifier;
+        self.mutex.unlock(self.io);
+    }
+
+    fn recordRuntimeAuthFailure(
+        self: *HttpAuthSlot,
+        auth_lease: *const HttpAuthLease,
+        challenge_scopes: []const []const u8,
+    ) void {
+        self.mutex.lockUncancelable(self.io);
+        const epoch = auth_lease.snapshot.consent_epoch;
+        const revision = auth_lease.snapshot.token_revision;
+        if (self.pending_failure) |*pending| {
+            if (pending.consent_epoch != epoch) {
+                pending.deinit();
+                var scopes_complete = true;
+                const scopes = ownRuntimeScopes(
+                    self.allocator,
+                    &.{},
+                    challenge_scopes,
+                ) catch scopes: {
+                    scopes_complete = false;
+                    break :scopes null;
+                };
+                pending.* = .{
+                    .consent_epoch = epoch,
+                    .token_revision = revision,
+                    .scopes = scopes,
+                    .scopes_complete = scopes_complete,
+                };
+            } else {
+                pending.token_revision = @max(pending.token_revision, revision);
+                if (pending.scopes_complete and challenge_scopes.len != 0) {
+                    const existing = if (pending.scopes) |*scopes|
+                        scopes.values
+                    else
+                        &.{};
+                    if (ownRuntimeScopes(
+                        self.allocator,
+                        existing,
+                        challenge_scopes,
+                    )) |replacement| {
+                        if (pending.scopes) |*scopes| scopes.deinit();
+                        pending.scopes = replacement;
+                    } else |_| {
+                        if (pending.scopes) |*scopes| scopes.deinit();
+                        pending.scopes = null;
+                        pending.scopes_complete = false;
+                    }
+                }
+            }
+        } else {
+            var scopes_complete = true;
+            const scopes = ownRuntimeScopes(
+                self.allocator,
+                &.{},
+                challenge_scopes,
+            ) catch scopes: {
+                scopes_complete = false;
+                break :scopes null;
+            };
+            self.pending_failure = .{
+                .consent_epoch = epoch,
+                .token_revision = revision,
+                .scopes = scopes,
+                .scopes_complete = scopes_complete,
+            };
+        }
+        const notifier = self.failure_notifier;
+        self.mutex.unlock(self.io);
+        if (notifier) |value| value.notify();
+    }
+
+    fn takeRuntimeAuthFailure(self: *HttpAuthSlot) ?RuntimeAuthFailure {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        var pending = self.pending_failure orelse return null;
+        self.pending_failure = null;
+        const scopes = if (pending.scopes) |*owner| owner.values else &.{};
+        const result: RuntimeAuthFailure = .{
+            .server_id = self.server_id,
+            .consent_epoch = pending.consent_epoch,
+            .token_revision = pending.token_revision,
+            .challenge_scopes = scopes,
+            .challenge_scopes_complete = pending.scopes_complete,
+            .scopes_owner = pending.scopes,
+        };
+        pending.scopes = null;
+        return result;
+    }
+
+    fn hasRuntimeAuthFailure(self: *HttpAuthSlot) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.pending_failure != null;
     }
 
     fn replace(
@@ -335,6 +532,41 @@ pub const HttpAuthorizations = struct {
         for (self.slots) |slot| slot.release();
         if (self.slots.len != 0) self.allocator.free(self.slots);
         self.* = undefined;
+    }
+
+    pub fn setRuntimeAuthFailureNotifier(
+        self: *HttpAuthorizations,
+        notifier: ?RuntimeAuthFailureNotifier,
+    ) void {
+        for (self.slots) |slot| slot.setFailureNotifier(notifier);
+    }
+
+    pub fn takeRuntimeAuthFailures(
+        self: *HttpAuthorizations,
+    ) std.mem.Allocator.Error!RuntimeAuthFailureBatch {
+        var pending_count: usize = 0;
+        for (self.slots) |slot| {
+            if (slot.hasRuntimeAuthFailure()) pending_count += 1;
+        }
+        if (pending_count == 0) return .{
+            .allocator = self.allocator,
+            .storage = &.{},
+            .values = &.{},
+        };
+        const storage = try self.allocator.alloc(RuntimeAuthFailure, pending_count);
+        var count: usize = 0;
+        for (self.slots) |slot| {
+            if (count == storage.len) break;
+            if (slot.takeRuntimeAuthFailure()) |failure| {
+                storage[count] = failure;
+                count += 1;
+            }
+        }
+        return .{
+            .allocator = self.allocator,
+            .storage = storage,
+            .values = storage[0..count],
+        };
     }
 
     pub fn rotate(
@@ -886,9 +1118,28 @@ const HttpContext = struct {
             .body = &.{},
         };
         var media_type: ?ResponseMediaType = null;
+        var authenticate_storage: [mcp_oauth.Limits.header_bytes]u8 = undefined;
+        var authenticate_writer = std.Io.Writer.fixed(&authenticate_storage);
+        var authenticate_invalid = false;
         var iterator = response.head.iterateHeaders();
         while (iterator.next()) |header| {
-            if (result.status < 200 or result.status >= 300) continue;
+            if (result.status < 200 or result.status >= 300) {
+                if ((result.status == 401 or result.status == 403) and
+                    std.ascii.eqlIgnoreCase(header.name, "WWW-Authenticate") and
+                    !authenticate_invalid)
+                {
+                    if (authenticate_writer.buffered().len != 0)
+                        authenticate_writer.writeAll(", ") catch {
+                            authenticate_invalid = true;
+                            continue;
+                        };
+                    authenticate_writer.writeAll(header.value) catch {
+                        authenticate_invalid = true;
+                        continue;
+                    };
+                }
+                continue;
+            }
             if (std.ascii.eqlIgnoreCase(header.name, "Mcp-Session-Id")) {
                 if (result.session_token_len != 0 or header.value.len == 0 or
                     header.value.len > result.session_token.len)
@@ -906,7 +1157,22 @@ const HttpContext = struct {
         }
         var transfer_buffer: [4096]u8 = undefined;
         const reader = response.reader(&transfer_buffer);
-        if (result.status == 401 or result.status == 403) return error.Auth;
+        if (result.status == 401 or result.status == 403) {
+            if (self.authorization) |authorization| if (authorization_lease) |*lease| {
+                var challenge = if (!authenticate_invalid and
+                    authenticate_writer.buffered().len != 0)
+                    mcp_oauth.parseRuntimeBearerChallenge(
+                        self.allocator,
+                        authenticate_writer.buffered(),
+                    ) catch null
+                else
+                    null;
+                defer if (challenge) |*value| value.deinit();
+                if (challenge) |*value|
+                    authorization.recordRuntimeAuthFailure(lease, value.scopes);
+            };
+            return error.Auth;
+        }
         if (result.status < 200 or result.status >= 300) return error.Server;
         result.body = switch (kind) {
             .request => switch (media_type orelse return error.InvalidResponse) {
@@ -1276,6 +1542,59 @@ test "OAuth HTTP authorization rotates only by same-epoch revision CAS" {
     );
 }
 
+test "OAuth HTTP authorization publishes the exact rejected snapshot fact" {
+    const Wake = struct {
+        calls: usize = 0,
+
+        fn notify(context: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+        }
+    };
+    const slot = try HttpAuthSlot.create(
+        std.testing.allocator,
+        std.testing.io,
+        "oauth-server",
+        4,
+        7,
+        "old-access-token",
+    );
+    defer slot.release();
+    const slots = try std.testing.allocator.alloc(*HttpAuthSlot, 1);
+    slots[0] = slot;
+    slot.retain();
+    var authorizations: HttpAuthorizations = .{
+        .allocator = std.testing.allocator,
+        .slots = slots,
+    };
+    defer authorizations.deinit();
+    var wake: Wake = .{};
+    authorizations.setRuntimeAuthFailureNotifier(.{
+        .context = &wake,
+        .notify_fn = Wake.notify,
+    });
+
+    var rejected = slot.lease();
+    defer rejected.deinit();
+    try std.testing.expectEqual(
+        HttpAuthRotationOutcome.replaced,
+        try authorizations.rotate("oauth-server", 4, 7, "new-access-token"),
+    );
+    slot.recordRuntimeAuthFailure(&rejected, &.{ "files.write", "files.read" });
+    try std.testing.expectEqual(@as(usize, 1), wake.calls);
+
+    var batch = try authorizations.takeRuntimeAuthFailures();
+    defer batch.deinit();
+    try std.testing.expectEqual(@as(usize, 1), batch.values.len);
+    const failure = batch.values[0];
+    try std.testing.expectEqualStrings("oauth-server", failure.server_id);
+    try std.testing.expectEqual(@as(u64, 4), failure.consent_epoch);
+    try std.testing.expectEqual(@as(u64, 7), failure.token_revision);
+    try std.testing.expect(failure.challenge_scopes_complete);
+    try std.testing.expectEqualStrings("files.read", failure.challenge_scopes[0]);
+    try std.testing.expectEqualStrings("files.write", failure.challenge_scopes[1]);
+}
+
 test "MCP platform classifies JSON and event-stream response media types" {
     try std.testing.expectEqual(
         ResponseMediaType.json,
@@ -1417,6 +1736,118 @@ test "MCP platform returns a loopback SSE response before the stream closes" {
         "{\"jsonrpc\":\"2.0\",\"id\":1}",
         (try result).body,
     );
+}
+
+test "MCP platform publishes only a valid HTTP Bearer challenge" {
+    const TestServer = struct {
+        io: std.Io,
+        listener: *std.Io.net.Server,
+        failure: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.serve() catch |err| {
+                self.failure = err;
+            };
+        }
+
+        fn serve(self: *@This()) !void {
+            try self.serveOne(true);
+            try self.serveOne(false);
+        }
+
+        fn serveOne(self: *@This(), include_challenge: bool) !void {
+            var connection = try self.listener.accept(self.io);
+            defer connection.close(self.io);
+            var read_buffer: [4096]u8 = undefined;
+            var write_buffer: [4096]u8 = undefined;
+            var stream_reader = connection.reader(self.io, &read_buffer);
+            var stream_writer = connection.writer(self.io, &write_buffer);
+            var server: std.http.Server = .init(
+                &stream_reader.interface,
+                &stream_writer.interface,
+            );
+            var request = try server.receiveHead();
+            if (include_challenge)
+                try request.respond("", .{
+                    .status = .unauthorized,
+                    .extra_headers = &.{.{
+                        .name = "WWW-Authenticate",
+                        .value = "Bearer error=\"insufficient_scope\", scope=\"files.write files.read\"",
+                    }},
+                })
+            else
+                try request.respond("", .{ .status = .forbidden });
+        }
+    };
+
+    const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var listener = try address.listen(std.testing.io, .{
+        .kernel_backlog = 1,
+        .reuse_address = false,
+    });
+    defer listener.deinit(std.testing.io);
+    var server: TestServer = .{ .io = std.testing.io, .listener = &listener };
+    const url = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "http://127.0.0.1:{d}/mcp",
+        .{listener.socket.address.getPort()},
+    );
+    defer std.testing.allocator.free(url);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const authorization = try HttpAuthSlot.create(
+        std.testing.allocator,
+        std.testing.io,
+        "remote",
+        3,
+        8,
+        "runtime-access-token",
+    );
+    defer authorization.release();
+    var context: HttpContext = .{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+        .arena = arena,
+        .url = url,
+        .custom_headers = &.{},
+        .secret_values = &.{},
+        .authorization = authorization,
+        .backend = undefined,
+    };
+    var output: [1024]u8 = undefined;
+    const thread = try std.Thread.spawn(.{}, TestServer.run, .{&server});
+    try std.testing.expectError(error.Auth, context.fetch(
+        .POST,
+        .request,
+        .modern_2026_07_28,
+        "",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}",
+        1000,
+        .{},
+        &output,
+    ));
+    {
+        var failure = authorization.takeRuntimeAuthFailure().?;
+        defer failure.deinit();
+        try std.testing.expectEqual(@as(u64, 3), failure.consent_epoch);
+        try std.testing.expectEqual(@as(u64, 8), failure.token_revision);
+        try std.testing.expect(failure.challenge_scopes_complete);
+        try std.testing.expectEqualStrings("files.read", failure.challenge_scopes[0]);
+        try std.testing.expectEqualStrings("files.write", failure.challenge_scopes[1]);
+    }
+    try std.testing.expectError(error.Auth, context.fetch(
+        .POST,
+        .notification,
+        .modern_2026_07_28,
+        "",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}",
+        1000,
+        .{},
+        &output,
+    ));
+    thread.join();
+    try std.testing.expectEqual(@as(?anyerror, null), server.failure);
+    try std.testing.expect(authorization.takeRuntimeAuthFailure() == null);
 }
 
 test "MCP platform rejects an SSE payload beyond the response bound" {

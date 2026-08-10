@@ -232,6 +232,11 @@ pub const Coordinator = struct {
     }
 
     pub fn start(self: *Coordinator) void {
+        self.authorizations.setRuntimeAuthFailureNotifier(.{
+            .context = self.host.context,
+            .notify_fn = self.host.notify_fn,
+        });
+        _ = self.drainRuntimeAuthFailures();
         self.armEarliest();
     }
 
@@ -262,32 +267,37 @@ pub const Coordinator = struct {
     }
 
     pub fn drain(self: *Coordinator) bool {
-        const job = self.job orelse return false;
-        if (!job.finished.load(.acquire)) return false;
-        job.join();
-        switch (job.result) {
-            .pending => unreachable,
-            .tokens => |*tokens| self.commitTokens(job, tokens) catch
-                self.recover(job.binding.operation_id),
-            .clear_marker => {
-                self.clear(job.binding.operation_id);
-                if (!self.stopping) self.deferRetry(self.host.nowRequired());
-            },
-            .recover => {
-                self.retry_not_before_unix_ms = null;
-                self.recover(job.binding.operation_id);
-            },
+        var changed = false;
+        if (self.job) |job| {
+            if (!job.finished.load(.acquire)) return false;
+            job.join();
+            switch (job.result) {
+                .pending => unreachable,
+                .tokens => |*tokens| self.commitTokens(job, tokens) catch
+                    self.recover(job.binding.operation_id),
+                .clear_marker => {
+                    self.clear(job.binding.operation_id);
+                    if (!self.stopping) self.deferRetry(self.host.nowRequired());
+                },
+                .recover => {
+                    self.retry_not_before_unix_ms = null;
+                    self.recover(job.binding.operation_id);
+                },
+            }
+            job.deinit();
+            self.allocator.destroy(job);
+            self.job = null;
+            changed = true;
         }
-        job.deinit();
-        self.allocator.destroy(job);
-        self.job = null;
+        changed = self.drainRuntimeAuthFailures() or changed;
         if (!self.stopping) self.armEarliest();
-        return true;
+        return changed;
     }
 
     pub fn shutdown(self: *Coordinator) void {
         if (self.stopping) return;
         self.stopping = true;
+        self.authorizations.setRuntimeAuthFailureNotifier(null);
         self.host.cancel();
         if (self.job) |job| {
             job.cancel();
@@ -298,6 +308,7 @@ pub const Coordinator = struct {
             }
             _ = self.drain();
         }
+        _ = self.drainRuntimeAuthFailures();
     }
 
     pub fn deinit(self: *Coordinator) void {
@@ -415,6 +426,33 @@ pub const Coordinator = struct {
             .indeterminate => {},
             .unchanged, .stale_generation => unreachable,
         }
+    }
+
+    fn drainRuntimeAuthFailures(self: *Coordinator) bool {
+        var batch = self.authorizations.takeRuntimeAuthFailures() catch {
+            self.workbench_owner.blockMcpAdmissionAfterRuntimeAuthFailure();
+            return true;
+        };
+        defer batch.deinit();
+        var changed = false;
+        for (batch.values) |failure| {
+            const outcome = self.workbench_owner.requireMcpOauthReauthorization(.{
+                .server_id = failure.server_id,
+                .consent_epoch = failure.consent_epoch,
+                .token_revision = failure.token_revision,
+                .challenge_scopes = failure.challenge_scopes,
+                .challenge_scopes_complete = failure.challenge_scopes_complete,
+            }) catch {
+                self.workbench_owner.blockMcpAdmissionAfterRuntimeAuthFailure();
+                changed = true;
+                continue;
+            };
+            changed = switch (outcome) {
+                .applied, .persistence_outcome_unknown => true,
+                .stale, .rejected => changed,
+            };
+        }
+        return changed;
     }
 
     fn resolveSecret(self: *Coordinator, locator: []const u8) ![]u8 {

@@ -718,6 +718,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     });
     mcp_oauth.addImport("account_oauth", account_oauth);
     mcp_oauth.addImport("account_loopback", account_loopback);
+    mcp_platform.addImport("metawork_mcp_oauth", mcp_oauth);
 
     const app = b.createModule(.{
         .root_source_file = b.path("src/app.zig"),

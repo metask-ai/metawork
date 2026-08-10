@@ -692,7 +692,15 @@ pub const Coordinator = struct {
             return;
         }
         switch (result) {
-            .discovery => |discovery| {
+            .discovery => |discovery_value| {
+                var discovery = discovery_value;
+                discovery.resource.mergeRequestedScopes(
+                    flow.start.additional_scopes,
+                ) catch {
+                    discovery.deinit();
+                    self.finishFlow(flow);
+                    return;
+                };
                 flow.discovery = discovery;
                 self.presentConsent(flow) catch self.finishFlow(flow);
             },
