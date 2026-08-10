@@ -19,6 +19,7 @@ pub const Limits = struct {
     pub const callback_target_bytes: usize = 8192;
     pub const token_body_bytes: usize = 16 * 1024;
     pub const profiles_body_bytes: usize = 64 * 1024;
+    pub const current_user_body_bytes: usize = 16 * 1024;
     pub const profile_entries: usize = 64;
     pub const scope_bytes: usize = 256;
 };
@@ -31,6 +32,7 @@ pub const ProtocolError = error{
     AuthorizationRejected,
     InvalidTokenResponse,
     InvalidProfileResponse,
+    InvalidCurrentUserResponse,
     FieldTooLarge,
     TooManyProfiles,
     ExpiryOverflow,
@@ -464,6 +466,60 @@ pub fn parseFirstProfile(body: []const u8) ProtocolError!?Profile {
     return result;
 }
 
+pub const CurrentUser = struct {
+    username: [contract.Limits.display_name_bytes]u8 = undefined,
+    username_len: usize = 0,
+
+    pub fn usernameView(self: *const CurrentUser) []const u8 {
+        return self.username[0..self.username_len];
+    }
+};
+
+const CurrentUserEnvelope = struct {
+    code: i64,
+    data: CurrentUserResponse,
+};
+
+const CurrentUserResponse = struct {
+    id: i64,
+    username: []const u8,
+};
+
+pub fn parseCurrentUser(
+    body: []const u8,
+    expected_account_id: []const u8,
+) ProtocolError!CurrentUser {
+    if (body.len == 0 or body.len > Limits.current_user_body_bytes)
+        return error.InvalidCurrentUserResponse;
+    var scratch: [Limits.current_user_body_bytes * 2]u8 = undefined;
+    defer std.crypto.secureZero(u8, &scratch);
+    var fba = std.heap.FixedBufferAllocator.init(&scratch);
+    var parsed = std.json.parseFromSlice(
+        CurrentUserEnvelope,
+        fba.allocator(),
+        body,
+        .{ .ignore_unknown_fields = true },
+    ) catch return error.InvalidCurrentUserResponse;
+    defer parsed.deinit();
+    const raw = parsed.value;
+    var account_id_storage: [32]u8 = undefined;
+    const account_id = std.fmt.bufPrint(
+        &account_id_storage,
+        "{d}",
+        .{raw.data.id},
+    ) catch return error.InvalidCurrentUserResponse;
+    if (raw.code != 0 or raw.data.id <= 0 or
+        !std.mem.eql(u8, account_id, expected_account_id) or
+        raw.data.username.len == 0 or
+        raw.data.username.len > contract.Limits.display_name_bytes or
+        !std.unicode.utf8ValidateSlice(raw.data.username))
+        return error.InvalidCurrentUserResponse;
+    var result: CurrentUser = .{};
+    @memcpy(result.username[0..raw.data.username.len], raw.data.username);
+    result.username_len = raw.data.username.len;
+    return result;
+}
+
 pub fn buildAuthorizationCodeBody(
     output: []u8,
     code: *const Secret,
@@ -691,6 +747,31 @@ test "profile decoder selects one active default and tolerates additive metadata
     )).?;
     try std.testing.expectEqualStrings("profile-1", extended.idView());
     try std.testing.expect((try parseFirstProfile("{\"data\":[]}")) == null);
+}
+
+test "current user decoder binds username to the token account" {
+    const info = try parseCurrentUser(
+        \\{"code":0,"message":"success","data":{"id":42,"email":"user@example.com","username":"Meta User","role":"user","unknown":true}}
+    ,
+        "42",
+    );
+    try std.testing.expectEqualStrings("Meta User", info.usernameView());
+    try std.testing.expectError(
+        error.InvalidCurrentUserResponse,
+        parseCurrentUser(
+            \\{"code":0,"data":{"id":43,"username":"Meta User"}}
+        ,
+            "42",
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidCurrentUserResponse,
+        parseCurrentUser(
+            \\{"code":0,"data":{"id":42,"username":""}}
+        ,
+            "42",
+        ),
+    );
 }
 
 test "authorization code and refresh bodies do not widen client contract" {

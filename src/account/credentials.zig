@@ -150,6 +150,7 @@ pub const CredentialOwner = struct {
                 transport,
                 &refreshed,
                 control,
+                true,
             ) catch |err| {
                 // Refresh-token rotation has already succeeded. Keep the new
                 // generation even when the subsequent profile lookup fails;
@@ -320,5 +321,5 @@ test "refresh keeps the rotated token when profile discovery is rejected" {
         return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("account-1", discovered.accountId());
     try std.testing.expectEqualStrings("", discovered.profileId());
-    try std.testing.expectEqual(@as(usize, 2), fake.step);
+    try std.testing.expectEqual(@as(usize, 3), fake.step);
 }

@@ -414,7 +414,7 @@ pub const Account = struct {
 
         const result = switch (completion.payload) {
             .authenticated => |identity| self.prepareAuthenticated(identity),
-            .token_refreshed => self.prepareTokenRefreshed(),
+            .token_refreshed => |identity| self.prepareTokenRefreshed(identity),
             .api_keys_loaded => self.prepareApiKeysLoaded(),
             .models_loaded => self.prepareModelsLoaded(),
             .execution_ready => self.prepareExecutionReady(completion),
@@ -759,11 +759,25 @@ pub const Account = struct {
         }
     }
 
-    fn prepareTokenRefreshed(self: *const Account) PrepareResult {
+    fn prepareTokenRefreshed(
+        self: *const Account,
+        identity: ?AccountIdentity,
+    ) PrepareResult {
         if (self.state.attempt_kind != .refresh_token or
             self.state.operation != .token_exchange)
             return .{ .rejected = .invalid_state };
+        if (identity) |refreshed| {
+            if (!std.mem.eql(
+                u8,
+                refreshed.accountId(),
+                self.state.account_id.view(),
+            )) return .{ .rejected = .account_mismatch };
+        }
         var next = self.state;
+        if (identity) |refreshed| {
+            next.profile_id = refreshed.profile_id;
+            next.display_name = refreshed.display_name;
+        }
         next.session_state = .authenticated;
         next.operation = .none;
         next.active_attempt_id = null;
@@ -1243,7 +1257,7 @@ pub const WorkerCompletion = struct {
 
     pub const Payload = union(enum) {
         authenticated: AccountIdentity,
-        token_refreshed,
+        token_refreshed: ?AccountIdentity,
         api_keys_loaded,
         models_loaded,
         execution_ready: contract.OwnedExecutionConfig,
@@ -1577,6 +1591,37 @@ test "explicit reauthentication replaces identity and clears prior execution" {
     try std.testing.expectEqualStrings("Other User", account.view().display_name);
     try std.testing.expectEqual(@as(u64, 0), account.view().execution_generation);
     try std.testing.expectEqual(contract.ErrorCode.none, account.view().error_code);
+}
+
+test "cold refresh can replace only the verified public identity" {
+    var account = Account.initRestoring();
+    var restore: RestoreResult = .{ .account_only = .{
+        .identity = try .init("22", "569", "Stored profile name"),
+    } };
+    var restored = switch (account.prepareRestore(&restore)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    commitPrepared(&account, &restored);
+
+    var refresh = switch (account.prepareTokenRefresh()) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    _ = refresh.takeEffect();
+    commitPrepared(&account, &refresh);
+    var completion: WorkerCompletion = .{
+        .attempt_id = account.activeAttempt().?,
+        .payload = .{ .token_refreshed = try .init("22", "569", "朱健") },
+    };
+    var completed = switch (account.prepareCompletion(&completion)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    commitPrepared(&account, &completed);
+    try std.testing.expectEqualStrings("22", account.view().account_id);
+    try std.testing.expectEqualStrings("569", account.view().profile_id);
+    try std.testing.expectEqualStrings("朱健", account.view().display_name);
 }
 
 test "failed reconfiguration preserves committed selection and generation high watermark" {

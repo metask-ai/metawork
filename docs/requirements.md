@@ -96,7 +96,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - 自动 continuation 不能把 C2 失败回滚成未登录，也不能根据显示名称、列表顺序或模型名猜测默认值、Provider 或 target；
 - 没有可用 API Key 或模型时必须保持已登录状态，说明缺少什么并提供 `重试`；只有 Host 拥有固定、安全的 Metask 管理入口时才显示 `在 Metask 中管理`，Renderer 不拼接外部 URL；
 - 登录、目录加载、模型加载和持久化是 Host-owned 操作。Renderer 只渲染 Host 发布的 readiness、当前可用动作和脱敏候选，不通过 `useEffect`、隐藏点击或本地定时器推进产品状态；
-- 首次 readiness 完成后才进入 Workbench；账号身份固定显示在左栏底部，点击后进入账号与模型设置、重新认证或退出，不能再次隐藏到 Composer prerequisite；
+- 首次 readiness 完成后才进入 Workbench；账号身份固定显示在左栏底部，点击后进入账号与模型设置、重新认证或退出，不能再次隐藏到 Composer prerequisite。Host 在明确登录或冷启动恢复身份校验时可以单次读取并验证 Metask 用户名，成功则显示并持久化用户名，接口不可用或响应不可信时显示 token `account_id`；不得由 Renderer 推断，也不得在普通 token refresh、catalog refresh 或后台定时路径主动更新；
 - API Key 切换属于 `账号与模型` 设置。Renderer 只显示 Metask 返回的脱敏名称、Provider 与尾号；API 创建、秘密查看和管理仍由 Metask 完成；
 - 当前模型必须显示在 New task Composer 附近，并可从当前 API 的已验证模型目录快速选择。该选择更新后续新 Task 的默认执行配置；已有 Task 显示当前 binding epoch 的模型，历史按 epoch 保留原事实，不提供虚假的 live Session 热切换；
 - 进入账号与模型设置时，显式导航动作自动请求 Host 同步一次最新 API/模型目录；已有默认配置时 Host 必须优先复用并验证当前 API，再自动加载它的模型目录，不能要求用户先重新选择或切换 API 才能修改默认模型。页面直接使用 Host 已发布的脱敏目录和提交态，手动重新同步只作为网络失败、页面持续打开期间 Metask 外部目录变化等恢复动作。设置页同时提供可独立修改的默认 API、默认模型和与错误语义匹配的恢复动作；后续通用、Workspace、通知、外观和高级设置共享同一设置框架；

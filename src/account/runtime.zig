@@ -977,7 +977,11 @@ pub const Runtime = struct {
         if (current.profileId().len == 0 or
             !std.mem.eql(u8, current.accountId(), replacement.accountId()))
             return replacement;
-        return current;
+        return state_impl.AccountIdentity.init(
+            replacement.accountId(),
+            current.profileId(),
+            replacement.displayName(),
+        ) catch unreachable;
     }
 
     fn prepareRefreshedTokens(
@@ -992,28 +996,30 @@ pub const Runtime = struct {
                 attempt_id,
                 .dependency_contract_invalid,
             );
+        var refreshed_identity: ?state_impl.AccountIdentity = null;
         if (continue_catalog) {
             const discovered_identity = rotation.refreshedIdentity() orelse
                 return self.prepareFailure(
                     attempt_id,
                     .dependency_contract_invalid,
                 );
-            const refreshed_identity = retainedProfileIdentity(
+            const merged_identity = retainedProfileIdentity(
                 identity,
                 discovered_identity,
             );
             if (!std.mem.eql(
                 u8,
-                refreshed_identity.accountId(),
+                merged_identity.accountId(),
                 identity.accountId(),
             ) or !std.mem.eql(
                 u8,
-                refreshed_identity.profileId(),
+                merged_identity.profileId(),
                 identity.profileId(),
             )) return self.prepareFailure(
                 attempt_id,
                 .account_mismatch,
             );
+            refreshed_identity = merged_identity;
         }
         if (!std.mem.eql(
             u8,
@@ -1029,6 +1035,22 @@ pub const Runtime = struct {
         );
         var cleanup_pending = false;
         if (builtin.os.tag == .windows) {
+            if (refreshed_identity) |refreshed| {
+                const previous_public = self.windows_public_state orelse
+                    return self.prepareFailure(
+                        attempt_id,
+                        .recovery_state_invalid,
+                    );
+                self.windows_public_state = windows_store.commitSelection(
+                    platform.backend(),
+                    refreshed,
+                    previous_public.apiKeyId(),
+                    previous_public.modelId(),
+                ) catch |err| return self.prepareFailure(
+                    attempt_id,
+                    accountStoreError(err),
+                );
+            }
             windows_store.commitRefresh(
                 platform.backend(),
                 &rotation.persistenceInput().refresh_token,
@@ -1061,7 +1083,7 @@ pub const Runtime = struct {
         );
         var completion: state_impl.WorkerCompletion = .{
             .attempt_id = attempt_id,
-            .payload = .token_refreshed,
+            .payload = .{ .token_refreshed = refreshed_identity },
         };
         defer completion.deinit();
         return switch (self.account.prepareCompletion(&completion)) {
@@ -2172,7 +2194,7 @@ test "reauthentication retains a prior profile only for the same account" {
     );
     const retained = Runtime.retainedProfileIdentity(previous, same_account);
     try std.testing.expectEqualStrings("profile-1", retained.profileId());
-    try std.testing.expectEqualStrings("Previous account", retained.displayName());
+    try std.testing.expectEqualStrings("acct-1", retained.displayName());
 
     const other_account = try state_impl.AccountIdentity.init(
         "acct-2",

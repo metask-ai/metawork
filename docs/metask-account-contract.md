@@ -28,6 +28,7 @@ Metask 产品 owner 已确认 MetaWork 作为 Metask 第一方客户端复用当
 | Scope | `metawork:use`，唯一可申请 scope |
 | Redirect | `http://127.0.0.1:{dynamic_port}/auth/callback` |
 | Profile | bearer `GET https://napi.metask-ai.com/v1/profiles` |
+| Current user compatibility read | bearer `GET https://napi.metask-ai.com/api/v1/auth/me`；未进入 2026-08 发布文档，不作为登录门槛 |
 
 固定行为：
 
@@ -37,6 +38,7 @@ Metask 产品 owner 已确认 MetaWork 作为 Metask 第一方客户端复用当
 - token response 有界解码并严格校验 MetaWork 实际消费的字段：`access_token`、每次必需的新 `refresh_token`、Bearer `token_type`、正整数 `expires_in`、精确 `metawork:use` scope 和非空 `account_id`；OAuth 服务允许增加未消费的 metadata，新增字段不得破坏客户端；
 - refresh token 每次成功刷新都轮换；token response 成功即形成 rotation commit 边界，新 generation 必须先于后续 profile/catalog 结果持久化。response 缺少新 refresh token 或新本地 generation 无法提交时进入 `reauth_required`，不得继续使用已作废的旧 refresh token；`/v1/profiles` 失败不得回滚已成功的轮换；
 - profile response 有界解码并校验 MetaWork 消费的 `id/name/display_name/status/is_default`；`platform/group/group_name/expires_at` 等未消费 metadata 允许服务端演进。从 `status = active` 中选择唯一 `is_default = true` 的 profile，没有默认项时才回退第一个 active profile，多个 active default 则 fail closed。`data: []` 是合法的 `account_only`，不撤销已经完成的 OAuth 登录；profile 只表示执行选择器，不作为用户 identity 或 display name；
+- 用户明确登录或冷启动恢复身份校验时，Account 使用同一 OAuth access token 单次读取 current user compatibility endpoint。只有响应 `code = 0`、数值 `data.id` 的十进制文本精确匹配 token `account_id`，且 `data.username` 为非空、有界 UTF-8 时才将用户名作为 display name；接口缺失、拒绝、超时、响应非法或 identity 不匹配都回退 `account_id`，不得撤销登录、回滚 refresh rotation 或阻断 profile/catalog。同账号重新认证只保留仍适用的 execution profile，display name 以本次登录结果为准；Windows 冷启动先验证同一 account/profile，再更新无 secret public identity。该接口不进入普通 token refresh、catalog refresh 或后台定时路径。2026-08-10 已用 production `metawork-app` / `metawork:use` refresh generation 验证：`/api/v1/auth/me` 返回 HTTP 200 与匹配用户；错误的 `/api/v1/auth/oauth/userinfo` 返回 HTTP 400 `invalid scope`，不得再作为客户端路径；
 - token、verifier、authorization code、完整 authorize URL 和 Authorization header 不进入 Renderer、Bridge、日志、snapshot 或持久化产品视图。
 
 ## 3. C1 本地持久化合同
