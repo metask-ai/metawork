@@ -655,6 +655,23 @@ test("Account persistence has one refresh-only cross-platform owner", () => {
     `${store}\n${platform}`,
     /manifest|active_slot|execution_slot|account\.json|access_token|display_name/,
   );
+  assert.doesNotMatch(`${store}\n${platform}`, /dev\.metawork\.account/);
+  assert.equal(
+    existsSync(
+      new URL("../scripts/cleanup-legacy-macos-account.mjs", import.meta.url),
+    ),
+    false,
+  );
+  assert.equal(
+    existsSync(
+      new URL("../scripts/macos-account-cleanup.test.mjs", import.meta.url),
+    ),
+    false,
+  );
+  assert.equal(
+    JSON.parse(read("package.json")).scripts["account:cleanup-legacy:macos"],
+    undefined,
+  );
   const accountRuntime = read("src/account/runtime.zig");
   assert.match(accountRuntime, /credential_store\.restore/);
   assert.doesNotMatch(
@@ -719,10 +736,6 @@ test("macOS Apple Development signing is explicit and isolated", () => {
     packageJson.scripts["setup:macos-signing:clear"],
     "node scripts/setup-macos-local-signing.mjs clear",
   );
-  assert.equal(
-    packageJson.scripts["account:cleanup-legacy:macos"],
-    "node scripts/cleanup-legacy-macos-account.mjs",
-  );
   for (const script of ["check", "test", "build:debug", "build:release"]) {
     assert.doesNotMatch(
       packageJson.scripts[script],
@@ -752,13 +765,9 @@ test("macOS Apple Development signing is explicit and isolated", () => {
   assert.match(setup, /add-certificates/u);
   assert.doesNotMatch(setup, /delete-generic-password|cleanup-legacy/u);
 
-  const cleanup = read("scripts/cleanup-legacy-macos-account.mjs");
-  assert.match(cleanup, /delete-generic-password/u);
-  assert.match(cleanup, /dev\.metawork\.account\.v2/u);
-  assert.match(cleanup, /manifest\.v2/u);
   for (const forbidden of ["openssl", "add-trusted-cert", "delete-identity"]) {
     assert.doesNotMatch(
-      `${setup}\n${cleanup}`,
+      setup,
       new RegExp(forbidden, "u"),
       `local setup must not generate, override trust for, or delete a signing identity: ${forbidden}`,
     );

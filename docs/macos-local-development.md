@@ -56,16 +56,6 @@ npm run setup:macos-signing:clear
 
 该命令不会修改或删除钥匙串中的 Apple Development identity。
 
-## 显式清理旧开发账号
-
-确认不再需要 hard cut 前的本机试验账号后，可以执行：
-
-```bash
-npm run account:cleanup-legacy:macos
-```
-
-该命令只幂等删除旧 `dev.metawork.account.v2` service 下十个已知 OAuth/execution slot，以及 `~/Library/Application Support/MetaWork/account/manifest.v2`。它不读取或迁移旧 secret，不删除 Apple Development identity，也不触碰当前 `com.metask.metawork.dev.account`。普通 setup、dev、package 和应用启动都不会自动执行该清理。
-
 ## 开发入口
 
 ```bash

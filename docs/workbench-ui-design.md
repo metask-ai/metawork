@@ -69,7 +69,7 @@ MetaWork 的视觉记忆点不是装饰性的暖色、通用衬线大标题、�
 
 ## 3. 用户可见对象与术语
 
-> Capability：**混合**。Task/Run、Account readiness 与当前事件对象已经存在；独立 Workspace、binding epoch history 和 typed Outputs 按各自目标 capability 落地。
+> Capability：**混合**。Task/Run、Account 状态与当前事件对象已经存在；独立 Workspace、binding epoch history 和 typed Outputs 按各自目标 capability 落地。
 
 ### 3.1 对象关系
 
