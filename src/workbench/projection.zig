@@ -12288,6 +12288,55 @@ test "Scheduled Task admission is bounded redacted and arms the Workbench clock"
     );
 }
 
+test "Scheduled Task execution drift becomes needs attention without blocking Account" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    var automatic_tmp = std.testing.tmpDir(.{});
+    defer automatic_tmp.cleanup();
+    var automatic_root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const automatic_root_len = try automatic_tmp.dir.realPath(
+        std.testing.io,
+        &automatic_root_storage,
+    );
+    var automatic_root = try automatic_workspace_allocator.Root.open(
+        std.testing.io,
+        std.testing.allocator,
+        automatic_root_storage[0..automatic_root_len],
+    );
+    defer automatic_root.deinit();
+    var clock: TestScheduleClock = .{ .now = 1_000 };
+    var persistence: TestSchedulePersistence = .{};
+    workbench.schedule_timer = clock.timer();
+    workbench.schedule_persistence = persistence.capability();
+    workbench.schedule_persistence_health = .ready;
+    workbench.automatic_workspaces = automatic_workspace_allocator.Allocator.init(
+        &automatic_root,
+    );
+    workbench.setScheduleBackgroundAvailableNoFail(true);
+    const id = try workbench.createScheduledTask(.{
+        .title = "Review current work",
+        .expected_execution_generation = 1,
+        .input = "Review current work",
+        .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
+    });
+    try std.testing.expectEqual(@as(u64, 2_000), clock.armed_at.?);
+
+    workbench.execution.generation = 2;
+    workbench.account.execution_generation = 2;
+    try std.testing.expect(workbench.reconcileScheduledTaskBindingsNoFail());
+
+    const item = workbench.scheduled_tasks.find(id).?;
+    try std.testing.expect(!item.enabled);
+    try std.testing.expectEqual(scheduled_tasks_impl.Health.needs_attention, item.health);
+    try std.testing.expectEqual(
+        scheduled_tasks_impl.FailureReason.execution_changed,
+        item.failure_reason,
+    );
+    try std.testing.expect(item.next_run_at_unix_seconds == null);
+    try std.testing.expect(clock.armed_at == null);
+    try std.testing.expectEqual(@as(usize, 2), persistence.commits);
+}
+
 test "Skill catalog snapshot reports redaction without exposing credential bytes" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
