@@ -2,6 +2,7 @@ const std = @import("std");
 const native_sdk = @import("native_sdk");
 const bridge_api = @import("metawork_bridge");
 const workbench_api = @import("metawork_workbench");
+const automation_api = @import("metawork_automation");
 const app_window = @import("window.zig");
 
 pub const scheduled_task_timer_id: u64 = 0x4d57_5343_4844_544b;
@@ -250,13 +251,15 @@ pub const Adapter = struct {
         detail: []const u8,
     ) anyerror!void {
         const self: *Adapter = @ptrCast(@alignCast(context.?));
-        if (self.trace_product_delivery and
-            std.mem.eql(u8, name, bridge_api.product_event_name))
-        {
-            std.debug.print("metawork.product_delivery.emit event={s} main_thread={}\n", .{
-                name,
-                std.Thread.getCurrentId() == self.main_thread_id,
-            });
+        if (comptime automation_api.enabled) {
+            if (self.trace_product_delivery and
+                std.mem.eql(u8, name, bridge_api.product_event_name))
+            {
+                std.debug.print("metawork.product_delivery.emit event={s} main_thread={}\n", .{
+                    name,
+                    std.Thread.getCurrentId() == self.main_thread_id,
+                });
+            }
         }
         try (self.native_runtime orelse return error.RuntimeUnavailable).emitWindowEvent(
             window_id,
