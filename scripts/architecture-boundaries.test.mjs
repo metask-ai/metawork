@@ -579,7 +579,7 @@ test("cold Account restore preserves Task history without impersonating an ident
   );
 });
 
-test("macOS development identity and Account manifest hard cut have one code owner", () => {
+test("Account persistence has one refresh-only cross-platform owner", () => {
   const appZon = read("app.zon");
   const build = read("build.zig");
   const identity = read("src/product_identity.zig");
@@ -595,11 +595,7 @@ test("macOS development identity and Account manifest hard cut have one code own
     identity,
     /pub const macos_data_directory_name = "MetaWork Dev"/,
   );
-  assert.match(
-    identity,
-    /pub const macos_account_keychain_service = bundle_id \+\+ "\.account"/,
-  );
-  assert.doesNotMatch(identity, /manifest_name|manifest_schema_version/);
+  assert.doesNotMatch(identity, /account_keychain_service|manifest_name/);
   assert.match(build, /existingImport\(runner, "app_manifest_zon"\)/);
   assert.equal(
     (
@@ -622,47 +618,38 @@ test("macOS development identity and Account manifest hard cut have one code own
   assert.match(app, /\.bundle_id = product_identity\.bundle_id/);
   assert.match(
     store,
-    /pub const service = product_identity\.macos_account_keychain_service/,
+    /product_identity\.bundle_id \+\+ "\.automation\.account"/,
   );
-  assert.match(store, /pub const manifest_name = "manifest\.json"/);
-  assert.match(store, /pub const manifest_schema_version: u8 = 1/);
-  assert.match(store, /schema_version: u8 = manifest_schema_version/);
-  assert.match(store, /self\.schema_version != manifest_schema_version/);
-  assert.match(platform, /const manifest_name = store\.manifest_name/);
-  assert.match(platform, /schema_version: u8/);
-  assert.doesNotMatch(
-    `${identity}\n${store}\n${platform}`,
-    /dev\.metawork\.account\.v2|manifest\.v[0-9]+/,
-  );
-  assert.doesNotMatch(store, /persistence_revision/);
-});
-
-test("Windows Account persistence is refresh-only and unversioned", () => {
-  const store = read("src/account/windows_store.zig");
-  const application = applicationSource();
-  const paths = read("src/app/paths.zig");
-  const accountRuntime = read("src/account/runtime.zig");
-  assert.match(store, /pub const service = "dev\.metawork\.account"/);
+  assert.match(store, /product_identity\.bundle_id \+\+ "\.account"/);
   assert.match(
     store,
     /pub const refresh_token_account = "metask-refresh-token"/,
   );
-  assert.match(store, /pub const public_state_name = "account\.json"/);
-  assert.doesNotMatch(
-    store,
-    /manifest\.v[0-9]+|persistence_revision|CredentialStore|OwnedExecutionConfig|TokenSet/,
+  assert.match(store, /pub const preference_name = "preferences\.json"/);
+  assert.match(store, /selection_owner_account_id/);
+  assert.match(store, /execution_generation: u64/);
+  assert.match(platform, /pub const NativeBackend = struct/);
+  assert.equal(
+    existsSync(new URL("../src/account/windows_store.zig", import.meta.url)),
+    false,
   );
-  assert.match(paths, /\.windows => env_map\.get\("USERPROFILE"\)/);
-  assert.match(accountRuntime, /windows_store\.restore/);
-  assert.doesNotMatch(
-    application,
-    /windows_store\.restore|WindowsStore\.restore/,
-  );
-  assert.doesNotMatch(application, /dev\.metawork\.desktop/);
-  assert.match(paths, /const windows_data_directory_name = "MetaWork"/);
+  assert.match(platform, /\.service = store\.service/);
+  assert.match(platform, /\.account = store\.refresh_token_account/);
+  assert.match(platform, /ignore_unknown_fields = false/);
   assert.match(
     paths,
-    /test "product identity does not unify macOS and Windows Account storage"/,
+    /const automation_data_directory_name = "MetaWork Automation"/,
+  );
+  assert.match(paths, /if \(build_options\.automation\)/);
+  assert.doesNotMatch(
+    `${store}\n${platform}`,
+    /manifest|active_slot|execution_slot|account\.json|access_token|display_name/,
+  );
+  const accountRuntime = read("src/account/runtime.zig");
+  assert.match(accountRuntime, /credential_store\.restore/);
+  assert.doesNotMatch(
+    accountRuntime,
+    /windows_store|prepareWindowsRestore|prepareMacosRestore/,
   );
 });
 
@@ -744,7 +731,6 @@ test("formal Native test graph runs every product module test root", () => {
       "metawork-account-credential-store",
       "test_modules.account_credential_store",
     ],
-    ["metawork-account-windows-store", "test_modules.account_windows_store"],
     ["metawork-account-platform", "test_modules.account_platform"],
     ["metawork-account-loopback", "test_modules.account_loopback"],
     ["metawork-account-login-attempt", "test_modules.account_login_attempt"],

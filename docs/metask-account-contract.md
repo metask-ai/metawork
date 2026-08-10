@@ -9,7 +9,7 @@
 登录与执行配置是两个独立门槛：
 
 - **C1 登录**：OAuth、token `account_id` identity、token 恢复/刷新、退出和本地安全存储。当前信息已经足够实现，不依赖模型、API Key 或 AgentCore。
-- **C2 执行配置**：API Key catalog、model catalog 和 typed/fixed `ExecutionTarget { provider_kind, base_url, model }`。只有平台对应的持久化边界完成后，Account 才能发布 `execution_ready`；Workbench 安装同一 generation 后才能创建 Agent Task。macOS 的边界是 execution credential 与 `manifest.json` schema 1 原子提交；Windows 的边界只提交无 secret 的 API/model 选择，execution credential 保持进程内。
+- **C2 执行配置**：API Key catalog、model catalog 和 typed/fixed `ExecutionTarget { provider_kind, base_url, model }`。Account 只原子持久化无 secret 的默认选择；完整 ExecutionConfig 和 Provider API Key 始终留在当前进程。Workbench 安装对应 generation 后才能创建 Agent Task。
 
 MetaWork 只作为 Metask Account API 和 AgentCore bundle 的消费方。本文档不要求、也不授权修改 Metask 内部实现仓库（精确路径标识为 `cc-t2z/metacodes`）。
 
@@ -36,52 +36,23 @@ Metask 产品 owner 已确认 MetaWork 作为 Metask 第一方客户端复用当
 - callback 只接受单次 `GET /auth/callback`，严格解析 query、拒绝重复/unknown 参数，并对 `state` 做 constant-time 比较；
 - token response 有界解码并严格校验 MetaWork 实际消费的字段：`access_token`、每次必需的新 `refresh_token`、Bearer `token_type`、正整数 `expires_in`、精确 `metawork:use` scope 和非空 `account_id`；OAuth 服务允许增加未消费的 metadata，新增字段不得破坏客户端；
 - refresh token 每次成功刷新都轮换；token response 成功即形成 rotation commit 边界，新 generation 必须先于后续 catalog 结果持久化。response 缺少新 refresh token 或新本地 generation 无法提交时进入 `signed_out`，不得继续使用已作废的旧 refresh token；后续 catalog 失败不得回滚已成功的轮换；
-- 用户明确登录或冷启动恢复身份校验时，Account 使用同一 OAuth access token 单次读取 current user compatibility endpoint。只有响应 `code = 0`、数值 `data.id` 的十进制文本精确匹配 token `account_id`，且 `data.username` 为非空、有界 UTF-8 时才将用户名作为 display name；接口缺失、拒绝、超时、响应非法或 identity 不匹配都回退 `account_id`，不得撤销登录、回滚 refresh rotation 或阻断 catalog。同账号重新认证以本次 display name 为准；Windows 冷启动先验证同一 account，再更新无 secret public identity。该接口不进入普通 token refresh、catalog refresh 或后台定时路径。2026-08-10 已用 production `metawork-app` / `metawork:use` refresh generation 验证：`/api/v1/auth/me` 返回 HTTP 200 与匹配用户；错误的 `/api/v1/auth/oauth/userinfo` 返回 HTTP 400 `invalid scope`，不得再作为客户端路径；
+- 用户明确登录或冷启动恢复时，Account 使用同一 OAuth access token 单次读取 current user compatibility endpoint。只有响应 `code = 0`、数值 `data.id` 的十进制文本精确匹配 token `account_id`，且 `data.username` 为非空、有界 UTF-8 时才提交 authenticated identity；失败时不得发布持久化的旧 identity。refresh token 已轮换成功但随后 `/me` 失败时，仍必须先可靠保存新 refresh token，再发布可重试失败。该接口不进入普通后台定时 refresh 或 catalog refresh。2026-08-10 已用 production `metawork-app` / `metawork:use` refresh generation 验证：`/api/v1/auth/me` 返回 HTTP 200 与匹配用户；错误的 `/api/v1/auth/oauth/userinfo` 返回 HTTP 400 `invalid scope`，不得再作为客户端路径；
 - token、verifier、authorization code、完整 authorize URL 和 Authorization header 不进入 Renderer、Bridge、日志、snapshot 或持久化产品视图。
 
 ## 3. C1 本地持久化合同
 
-两条平台路径独立拥有自己的存储语义。`manifest.json`、双 slot、marker 和 manifest schema 只属于 macOS；Windows 不读取、迁移、删除或解释这些数据。
+所有桌面平台使用同一个无版本 hard-cut 布局：
 
-### 3.1 macOS
-
-macOS 使用 MetaWork 自己的命名空间，不读取或共享 `~/.metacode/auth.json`：
-
-- development Bundle/runtime identity：`com.metask.metawork.dev`；
-- 非秘密 Account 文件：`~/Library/Application Support/MetaWork Dev/account/manifest.json`；
-- Keychain service：`com.metask.metawork.dev.account`；
-- 真实 macOS Account development/package 使用 Apple-signed development identity，使 Keychain authorization 绑定稳定 Team 与 designated requirement；签名流程本身不改变本节的 service、slot 或 manifest 合同；
-- 固定 OAuth slot：`oauth/A/*` 与 `oauth/B/*`；
-- 每个 slot 分别保存 access、refresh 和最后写入的 generation marker；
-- 非秘密 `manifest.json` schema 1 是 OAuth 与 execution 两个 credential family 的唯一 committed pointer，使用 `signed_out`、`account_only` 或 `execution_ready` 状态；
-- 冷启动发现已被替换的 `metacode:use` scope 时，先提交 `signed_out` tombstone 再清除旧 OAuth/execution slot；该分支只负责安全退役旧凭据，不继续旧授权协议；
-- 写新 inactive slot、读回校验、原子提交 manifest 后，才清理旧 slot；
-- logout 先原子提交 `signed_out` tombstone，再清理 Keychain；清理失败不能复活旧账号；
-- Keychain/open-browser 操作只能在 Native SDK 主线程执行；网络与 loopback wait 在有界 Account worker 上执行；
-- cancel、deadline、superseding attempt 和 shutdown 必须关闭 listener、停止网络操作并 join worker。
-
-#### macOS manifest schema 策略
-
-Account manifest schema 与 Renderer Bridge revision、AgentCore ABI 和 bundle manifest schema 相互独立。当前固定文件名 `manifest.json` 与 body schema 1 是一次 pre-release hard cut；旧 `manifest.v2` 不构成兼容输入，也不能被解释为当前 committed state。
-
-- `app.zon` 单一拥有 development 产品 Bundle ID；`src/product_identity.zig` 从该 manifest 派生 Bundle ID 及 macOS 数据目录与 Keychain service；`account/credential_store.zig` 独立拥有固定 manifest 文件名、body schema 与原子提交语义；
-- schema 只在 manifest 布局、原子提交语义或安全解释发生不兼容变化时升级；增加内存字段、UI 字段或未持久化能力不升级；
-- pre-1.0 不维护多版本 parser、静默迁移或 fallback。旧 `dev.metawork.desktop`、`dev.metawork.account.v2`、`MetaWork/account/manifest.v2` 均不作为输入；开发环境重新登录后可显式执行 Account-owned `npm run account:cleanup-legacy:macos`，幂等删除精确的旧 Keychain slot 与旧 manifest，不触碰当前 macOS namespace、Apple Development identity 或 Windows storage；
-- macOS 代码只接受 schema 1。未来若没有真实不兼容的 macOS manifest 变化，不得因为产品版本、Bridge revision、Windows 存储布局或 AgentCore ABI 变化联动升级。
-
-### 3.2 Windows
-
-Windows 使用一条直接、无版本的恢复路径：
-
-- Windows Credential Manager 的 service 为 `dev.metawork.account`，只保存一个 `metask-refresh-token`；
-- `account.json` 只保存 account/display name 与最近一次已提交的 API/model selection identifier，不含 schema/revision 字段；
-- access token、Provider API Key、base URL、provider、execution generation 和完整 execution config 都不跨进程持久化；
-- 冷启动只有同时取得 refresh token 与合法 `account.json` 才恢复 `account_only`，随后先刷新 OAuth、精确核对必需的 `account_id` 并提交轮换后的 refresh token，再拉取 API/model catalog；账号不一致时不得复用历史选择。历史选择仍属于当前 catalog 时才在内存重建 execution；
-- 历史选择失效时保持登录并请求用户重新选择，不从文件重建 Provider、base URL 或 credential；refresh 无效进入 `signed_out`，网络失败保留可重试状态；
-- 登录先原子替换 `account.json`，再写单个 refresh token；任一步失败都不提交内存登录事实。刷新只替换 refresh token，选择变更只替换 `account.json`；
-- logout 先删除 refresh token，再删除 `account.json`，任一步失败都不声称退出成功；
-- macOS 当前 `com.metask.metawork.dev.account`、`MetaWork Dev/account/manifest.json` 以及旧 `dev.metawork.account.v2`、`MetaWork/account/manifest.v2` 条目都由 Windows 完全忽略，不做兼容读取、迁移或静默清理。用户在 Windows hard cut 后只需重新登录一次；
-- 快速开发阶段若 Windows 布局需要改变，直接原地 hard cut；不得自行增加版本号。任何合同类版本标识变更仍必须先得到用户显式同意。
+- secure credential service 为产品 Bundle ID 加 `.account`，只保存 `metask-refresh-token`；automation 构建在编译期改用 `.automation.account`，不得访问 production credential；
+- Account 数据目录只保存原子 `preferences.json`，字段精确为 `selection_owner_account_id`、`api_key_id`、`model_id` 和 `execution_generation`；不保存 display name、access token、Provider API Key、base URL、provider 或完整 ExecutionConfig；
+- production 与 automation 数据根在编译期固定隔离，automation Task、Schedule、Account preference 和 credential 不得进入 production 目录或 service；
+- 冷启动只依赖 refresh token。不存在 token 时直接 `signed_out`；存在 token 时先 refresh，并用 `/me` 建立当前 identity，再决定 preference 能否复用；
+- preference 缺失、损坏、owner 不同或 catalog membership 失效只清空默认选择，不影响登录，也不能制造 account mismatch；
+- refresh response 成功后先替换 secure refresh token，随后 `/me`、catalog 或 preference 失败都不得恢复已作废的旧 token；
+- 默认选择使用同目录临时文件写入、文件 sync、原子 rename 和提交确认；结果不确定时 fail closed，不发布未确认 generation；
+- logout 先删除 refresh token，再删除无 secret preference。durable Task、Run 和 Schedule 不参与 credential 删除 gate；
+- credential/open-browser effect 只在 Native SDK 主线程执行；网络与 loopback wait 在有界 Account worker 上执行；cancel、deadline、superseding attempt 和 shutdown 必须收口并 join；
+- 不读取、迁移、清理或兼容旧 manifest、slot、`account.json` 或旧 credential family；旧开发数据由 hard-cut 开发流程在运行新构建前直接移除。
 
 ## 4. C2 现有兼容目录路径
 
@@ -95,7 +66,7 @@ API Key catalog：
 - 当前只接受 `page = 1`、`page_size = 100`、`pages = 1` 且 `total == items.len`，不发布不完整分页；
 - item 必须包含数值 `id`、`name`、完整 secret `key`、`status`、`group_id` 和完整 group；只发布 item 与 group 均为精确 `active` 的条目；
 - decoder 严格校验上述消费字段、类型、语义和 byte/entry bound；服务端新增的未消费 metadata 不属于产品合同，不得破坏客户端；
-- API Key secret 只由 Account catalog 与 execution staging/runtime ownership 链持有；macOS 可按本合同进入 Keychain execution family，Windows 始终只在当前进程持有。Renderer 只能看到十进制 id、name 和最后四位。
+- API Key secret 只由 Account catalog 与 execution staging/runtime ownership 链在当前进程持有。Renderer 只能看到十进制 id、name 和最后四位。
 
 Model catalog：
 
@@ -118,15 +89,12 @@ Model catalog：
 
 其他 platform 当前 fail closed。production 不接受 Renderer、环境变量或任意 URL 覆盖。
 
-Account 必须保存 token 的 `account_id`，并以 `account_id + API Key id` 证明 catalog 与 execution credential 归属。自动 refresh 与冷启动恢复必须精确核对 `account_id`，防止后台静默切换账号；用户显式完成 OAuth 重认证时以本次 OAuth token 的 `account_id` 为准。显式重认证通过 identity replacement gate 后原子替换本机 identity 和 token，清除旧默认 execution、API/model selection 与 catalog，再为新账号准备目录；旧 execution 不得与新账号混用。`profile_id`、`/v1/profiles` 与 Profile header 不属于 MetaWork runtime、persistence、Bridge 或 AgentCore 合同。
+Account 必须在当前会话持有 token 的 `account_id`，并以 `account_id + API Key id` 证明 catalog 与 execution credential 归属。自动 refresh 与冷启动恢复必须精确核对 `account_id`，防止后台静默切换账号；用户显式完成 OAuth 时以本次 OAuth token 与 `/me` 共同验证的 identity 为准。identity replacement gate 通过后原子替换本机 identity 和 token，清除 owner 不匹配的默认 selection 与 catalog，再为新账号准备目录；旧 execution 不得与新账号混用。`profile_id`、`/v1/profiles` 与 Profile header 不属于 MetaWork runtime、persistence、Bridge 或 AgentCore 合同。
 
-## 6. macOS 双 family 崩溃一致性
+## 6. 持久化崩溃一致性
 
-- OAuth family 使用 `oauth/{A,B}/{access,refresh,marker}`；
-- execution family 使用 `execution/{A,B}/{api-key,marker}`；
-- 每个 family 都先写 inactive slot、最后写 marker、读回校验，再通过一次 `manifest.json` 原子提交；
-- `execution_ready` manifest 同时指向 OAuth slot 与 execution slot，并记录 account、API Key id、typed provider、model、固定 base URL、execution generation 和 high watermark；
-- OAuth refresh 只轮换 OAuth slot，必须保留已提交 execution family；
-- execution 重配置只轮换 execution slot，必须保留已提交 OAuth family；
-- rename 后目录 fsync 结果不确定时保留 staged slot，重启后以 manifest 为唯一 committed pointer；
-- logout 先提交 `signed_out` tombstone，再清理两个 family；清理失败不能复活账号或 execution。
+- refresh rotation 与 preference 是两个独立 commit：refresh token 先提交，preference 后提交；
+- refresh token 提交失败不得安装新内存 identity；提交成功后任何后续失败都不得回滚到旧 refresh token；
+- preference 只描述默认选择，丢失或损坏最多导致重新选择，不能影响 OAuth identity；
+- preference 写入采用同目录临时文件、文件 sync、原子 rename 和提交确认；rename 后结果不确定时不得发布新 generation；
+- logout 删除顺序固定为 refresh token → preference；refresh token 已删除后，即使 preference 删除失败也不能继续使用旧 identity。

@@ -4,7 +4,6 @@ const contract = @import("metawork_account_contract");
 const state_impl = @import("account_state");
 const metask_client = @import("metask_client");
 const credential_store = @import("account_credential_store");
-const windows_store = @import("account_windows_store");
 const platform_impl = @import("account_platform");
 const login_attempt = @import("account_login_attempt");
 const catalog_impl = @import("account_catalog");
@@ -288,6 +287,7 @@ const Effects = struct {
         credentials: *const credentials_impl.CredentialOwner,
         now_unix_seconds: i64,
         expected_identity: ?state_impl.AccountIdentity,
+        load_identity: bool,
     ) void {
         self.network_attempt.startRefresh(
             self.allocator,
@@ -296,6 +296,7 @@ const Effects = struct {
             self.clientTransport(),
             credentials,
             expected_identity,
+            load_identity,
             self.networkSink(),
             now_unix_seconds,
         ) catch self.publishCompletion(.{
@@ -443,7 +444,6 @@ pub const Prepared = struct {
     follow_up: ?contract.AccountCommand = null,
     automatic_selection: AutomaticSelection = .none,
     refresh_after_commit: bool = false,
-    cleanup_after_commit: bool = false,
     schedule_refresh_after_commit: bool = false,
 
     pub fn fact(self: *const Prepared) contract.AccountFact {
@@ -473,7 +473,6 @@ pub const Prepared = struct {
         self.follow_up = null;
         self.automatic_selection = .none;
         self.refresh_after_commit = false;
-        self.cleanup_after_commit = false;
         self.schedule_refresh_after_commit = false;
     }
 };
@@ -499,7 +498,7 @@ pub const Runtime = struct {
     candidate_public_catalog: catalog_impl.PublicCatalog = .{},
     platform: ?platform_impl.NativeBackend = null,
     credentials: credentials_impl.CredentialOwner = .{},
-    windows_public_state: ?windows_store.PublicState = null,
+    saved_preference: ?credential_store.Preference = null,
     catalog_after_refresh: bool = false,
 
     pub fn init(
@@ -529,7 +528,7 @@ pub const Runtime = struct {
         std.debug.assert(self.platform == null);
         self.effects.deinit();
         self.credentials.deinit();
-        self.windows_public_state = null;
+        self.saved_preference = null;
         self.catalog_after_refresh = false;
         self.candidate_public_catalog.clear();
         self.* = undefined;
@@ -549,10 +548,7 @@ pub const Runtime = struct {
         ) catch |err| return self.preparedRestoreFailure(
             accountRestoreError(err),
         );
-        return if (builtin.os.tag == .windows)
-            self.prepareWindowsRestore()
-        else
-            self.prepareMacosRestore();
+        return self.prepareRestore();
     }
 
     pub fn prepareAutomationStart(self: *Runtime) Prepared {
@@ -641,7 +637,7 @@ pub const Runtime = struct {
 
     pub fn prepareRestoredRefresh(self: *Runtime) Prepared {
         self.assertMainThread();
-        return switch (self.account.prepareTokenRefresh()) {
+        return switch (self.account.prepareRestoredTokenRefresh()) {
             .transition => |transition| .{ .transition = transition },
             .rejected => |error_code| preparedFromState(
                 self.account.prepareRestoredRefreshAdmissionFailure(
@@ -818,7 +814,6 @@ pub const Runtime = struct {
 
     pub fn dispatchCommitted(self: *Runtime, prepared: *Prepared) void {
         self.assertMainThread();
-        if (prepared.cleanup_after_commit) self.retryCleanup();
         if (prepared.schedule_refresh_after_commit)
             self.scheduleRefresh();
         const entry = self.effects.queue.take() orelse return;
@@ -896,37 +891,15 @@ pub const Runtime = struct {
             .credential_store_write_failed,
         );
         const identity = login.identity;
-        var cleanup_pending = false;
-        if (builtin.os.tag == .windows) {
-            self.windows_public_state = windows_store.commitAuthenticated(
-                platform.backend(),
-                &login.tokens.refresh_token,
-                identity,
-            ) catch |err| return self.prepareFailure(
-                attempt_id,
-                accountStoreError(err),
-            );
-        } else {
-            var generation: credential_store.Generation = undefined;
-            std.Io.randomSecure(self.io, &generation) catch
-                return self.prepareFailure(
-                    attempt_id,
-                    .local_resource_exhausted,
-                );
-            const committed = credential_store.commitAccountOnly(
-                platform.backend(),
-                generation,
-                &login.tokens,
-                &identity,
-                self.account.executionHighWatermark(),
-            ) catch |err| return self.prepareFailure(
-                attempt_id,
-                accountStoreError(err),
-            );
-            cleanup_pending = committed.retired_cleanup_pending;
-        }
+        credential_store.commitRefresh(
+            platform.backend(),
+            &login.tokens.refresh_token,
+        ) catch |err| return self.prepareFailure(
+            attempt_id,
+            accountStoreError(err),
+        );
+        self.discardForeignPreference(platform, identity.accountId());
         self.credentials.replace(&login.tokens);
-        self.credentials.setCleanupPending(cleanup_pending);
         var completion: state_impl.WorkerCompletion = .{
             .attempt_id = attempt_id,
             .payload = .{ .authenticated = identity },
@@ -936,7 +909,6 @@ pub const Runtime = struct {
             .transition => |transition| .{ .prepared = .{
                 .transition = transition,
                 .follow_up = .refresh_catalog,
-                .cleanup_after_commit = builtin.os.tag != .windows,
                 .schedule_refresh_after_commit = true,
             } },
             .rejected => |error_code| .{ .rejected = error_code },
@@ -951,88 +923,43 @@ pub const Runtime = struct {
     ) PrepareResult {
         const continue_catalog = self.catalog_after_refresh;
         self.catalog_after_refresh = false;
-        const identity = self.account.currentIdentity() orelse
-            return self.prepareFailure(
-                attempt_id,
-                .dependency_contract_invalid,
-            );
-        var refreshed_identity: ?state_impl.AccountIdentity = null;
-        if (continue_catalog) {
-            const discovered_identity = rotation.refreshedIdentity() orelse
-                return self.prepareFailure(
-                    attempt_id,
-                    .dependency_contract_invalid,
-                );
-            if (!std.mem.eql(
-                u8,
-                discovered_identity.accountId(),
-                identity.accountId(),
-            )) return self.prepareFailure(
-                attempt_id,
-                .metask_unauthorized,
-            );
-            refreshed_identity = discovered_identity;
-        }
-        if (!std.mem.eql(
-            u8,
-            rotation.accountId(),
-            identity.accountId(),
-        )) return self.prepareFailure(
-            attempt_id,
-            .metask_unauthorized,
-        );
+        const identity = self.account.currentIdentity();
         const platform = if (self.platform) |*value| value else return self.prepareFailure(
             attempt_id,
             .credential_store_write_failed,
         );
-        var cleanup_pending = false;
-        if (builtin.os.tag == .windows) {
-            if (refreshed_identity) |refreshed| {
-                const previous_public = self.windows_public_state orelse
-                    return self.prepareFailure(
-                        attempt_id,
-                        .recovery_state_invalid,
-                    );
-                self.windows_public_state = windows_store.commitSelection(
-                    platform.backend(),
-                    refreshed,
-                    previous_public.apiKeyId(),
-                    previous_public.modelId(),
-                ) catch |err| return self.prepareFailure(
-                    attempt_id,
-                    accountStoreError(err),
-                );
-            }
-            windows_store.commitRefresh(
-                platform.backend(),
-                &rotation.persistenceInput().refresh_token,
-            ) catch |err| return self.prepareFailure(
-                attempt_id,
-                accountStoreError(err),
-            );
-        } else {
-            var generation: credential_store.Generation = undefined;
-            std.Io.randomSecure(self.io, &generation) catch
-                return self.prepareFailure(
-                    attempt_id,
-                    .local_resource_exhausted,
-                );
-            const committed = credential_store.commitAccountOnly(
-                platform.backend(),
-                generation,
-                rotation.persistenceInput(),
-                &identity,
-                self.account.executionHighWatermark(),
-            ) catch |err| return self.prepareFailure(
-                attempt_id,
-                accountStoreError(err),
-            );
-            cleanup_pending = committed.retired_cleanup_pending;
-        }
-        self.credentials.replaceRotation(rotation);
-        self.credentials.setCleanupPending(
-            self.credentials.cleanupPending() or cleanup_pending,
+        credential_store.commitRefresh(
+            platform.backend(),
+            &rotation.persistenceInput().refresh_token,
+        ) catch |err| return self.prepareFailure(
+            attempt_id,
+            accountStoreError(err),
         );
+        const refreshed_identity = rotation.refreshedIdentity();
+        const identity_error = rotation.identityError();
+        const rotated_account_id = rotation.accountId();
+        self.credentials.replaceRotation(rotation);
+        if (identity_error) |error_code|
+            return self.prepareFailure(attempt_id, error_code);
+        if (continue_catalog and refreshed_identity == null)
+            return self.prepareFailure(
+                attempt_id,
+                .dependency_contract_invalid,
+            );
+        if (identity) |current| if (!std.mem.eql(
+            u8,
+            rotated_account_id,
+            current.accountId(),
+        )) return self.prepareFailure(attempt_id, .metask_unauthorized);
+        if (identity) |current| if (refreshed_identity) |discovered| {
+            if (!std.mem.eql(
+                u8,
+                discovered.accountId(),
+                current.accountId(),
+            )) return self.prepareFailure(attempt_id, .metask_unauthorized);
+        };
+        if (refreshed_identity) |refreshed|
+            self.discardForeignPreference(platform, refreshed.accountId());
         var completion: state_impl.WorkerCompletion = .{
             .attempt_id = attempt_id,
             .payload = .{ .token_refreshed = refreshed_identity },
@@ -1045,7 +972,6 @@ pub const Runtime = struct {
                     .refresh_catalog
                 else
                     null,
-                .cleanup_after_commit = builtin.os.tag != .windows,
                 .schedule_refresh_after_commit = true,
             } },
             .rejected => |error_code| .{ .rejected = error_code },
@@ -1110,7 +1036,6 @@ pub const Runtime = struct {
                 entry.attempt_id orelse
                     @panic("logout effect has no attempt"),
             ),
-            .delete_retired_credentials => self.retryCleanup(),
             .shutdown => {
                 self.cancelRefreshTimer();
                 self.effects.cancelJoinAndDiscard();
@@ -1146,6 +1071,7 @@ pub const Runtime = struct {
                         self.account.currentIdentity()
                     else
                         null,
+                    self.catalog_after_refresh,
                 );
             },
             .load_api_keys => {
@@ -1200,32 +1126,7 @@ pub const Runtime = struct {
             });
             return;
         };
-        const cleanup_pending = if (builtin.os.tag == .windows) blk: {
-            windows_store.commitSignedOut(platform.backend()) catch |err| {
-                self.effects.publishCompletion(.{
-                    .attempt_id = attempt_id,
-                    .payload = .{ .failed = .fromCode(
-                        accountStoreError(err),
-                    ) },
-                });
-                return;
-            };
-            self.windows_public_state = null;
-            break :blk false;
-        } else credential_store.commitSignedOut(
-            platform.backend(),
-            self.account.executionHighWatermark(),
-        ) catch |err| {
-            if (err == error.PersistenceOutcomeUnknown) {
-                self.credentials.clear();
-                self.credentials.setCleanupPending(true);
-                self.effects.publishPersistenceUnknown(
-                    attempt_id,
-                    .logout,
-                );
-                self.retryCleanup();
-                return;
-            }
+        credential_store.commitSignedOut(platform.backend()) catch |err| {
             self.effects.publishCompletion(.{
                 .attempt_id = attempt_id,
                 .payload = .{ .failed = .fromCode(
@@ -1234,11 +1135,11 @@ pub const Runtime = struct {
             });
             return;
         };
+        self.saved_preference = null;
         self.credentials.clear();
         self.cancelRefreshTimer();
         self.effects.clearCatalog();
         self.candidate_public_catalog.clear();
-        self.credentials.setCleanupPending(cleanup_pending);
         self.effects.publishCompletion(.{
             .attempt_id = attempt_id,
             .payload = .logged_out,
@@ -1300,66 +1201,34 @@ pub const Runtime = struct {
             },
         };
         defer execution.deinit();
-        if (builtin.os.tag == .windows) {
-            self.windows_public_state = windows_store.commitSelection(
-                platform.backend(),
-                identity,
-                self.effects.catalog.selectedApiKeyId(),
-                model,
-            ) catch |err| {
-                self.effects.publishCompletion(.{
-                    .attempt_id = attempt_id,
-                    .payload = .{ .failed = .fromCode(
-                        accountStoreError(err),
-                    ) },
-                });
+        self.saved_preference = credential_store.commitPreference(
+            platform.backend(),
+            identity.accountId(),
+            self.effects.catalog.selectedApiKeyId(),
+            model,
+            execution_generation,
+        ) catch |err| {
+            if (err == error.PersistenceOutcomeUnknown) {
+                self.effects.public_catalog.clear();
+                self.candidate_public_catalog.clear();
+                self.effects.publishPersistenceUnknown(
+                    attempt_id,
+                    .execution,
+                );
                 return;
-            };
-        } else {
-            var generation: credential_store.Generation = undefined;
-            std.Io.randomSecure(self.io, &generation) catch {
-                self.effects.publishCompletion(.{
-                    .attempt_id = attempt_id,
-                    .payload = .{ .failed = .fromCode(
-                        .local_resource_exhausted,
-                    ) },
-                });
-                return;
-            };
-            const committed = credential_store.commitExecutionReady(
-                platform.backend(),
-                generation,
-                identity.accountId(),
-                self.effects.catalog.selectedApiKeyId(),
-                &execution,
-            ) catch |err| {
-                if (err == error.PersistenceOutcomeUnknown) {
-                    self.effects.public_catalog.clear();
-                    self.candidate_public_catalog.clear();
-                    self.effects.publishPersistenceUnknown(
-                        attempt_id,
-                        .execution,
-                    );
-                    return;
-                }
-                self.effects.publishCompletion(.{
-                    .attempt_id = attempt_id,
-                    .payload = .{ .failed = .fromCode(
-                        accountStoreError(err),
-                    ) },
-                });
-                return;
-            };
-            self.credentials.setCleanupPending(
-                self.credentials.cleanupPending() or
-                    committed.retired_cleanup_pending,
-            );
-        }
+            }
+            self.effects.publishCompletion(.{
+                .attempt_id = attempt_id,
+                .payload = .{ .failed = .fromCode(
+                    accountStoreError(err),
+                ) },
+            });
+            return;
+        };
         self.effects.publishCompletion(.{
             .attempt_id = attempt_id,
             .payload = .{ .execution_ready = execution.take() },
         });
-        if (builtin.os.tag != .windows) self.retryCleanup();
     }
 
     fn automaticApiSelection(
@@ -1373,10 +1242,10 @@ pub const Runtime = struct {
                 return account_view.selected_api_key_id;
             return null;
         }
-        if (builtin.os.tag == .windows) if (self.windows_public_state) |*saved| {
+        if (self.savedPreferenceFor(account_view.account_id)) |saved| {
             const id = saved.apiKeyId();
-            if (id.len > 0 and catalog.hasApiKey(id)) return id;
-        };
+            if (catalog.hasApiKey(id)) return id;
+        }
         return catalog.uniqueApiKeyId();
     }
 
@@ -1396,15 +1265,14 @@ pub const Runtime = struct {
                 return account_view.selected_model;
             return null;
         }
-        if (builtin.os.tag == .windows) if (self.windows_public_state) |*saved| {
+        if (self.savedPreferenceFor(account_view.account_id)) |saved| {
             const id = saved.modelId();
-            if (id.len > 0 and
-                std.mem.eql(
-                    u8,
-                    catalog.selectedApiKeyId(),
-                    saved.apiKeyId(),
-                ) and catalog.hasModel(id)) return id;
-        };
+            if (std.mem.eql(
+                u8,
+                catalog.selectedApiKeyId(),
+                saved.apiKeyId(),
+            ) and catalog.hasModel(id)) return id;
+        }
         return catalog.uniqueModelId();
     }
 
@@ -1432,15 +1300,24 @@ pub const Runtime = struct {
         ) catch {};
     }
 
-    fn retryCleanup(self: *Runtime) void {
-        if (builtin.os.tag == .windows) return;
-        if (!self.credentials.cleanupPending()) return;
-        const platform = if (self.platform) |*value| value else return;
-        self.credentials.setCleanupPending(
-            credential_store.cleanupRetiredCredentials(
-                platform.backend(),
-            ) catch true,
-        );
+    fn savedPreferenceFor(
+        self: *const Runtime,
+        account_id: []const u8,
+    ) ?*const credential_store.Preference {
+        const saved = if (self.saved_preference) |*value| value else return null;
+        if (!std.mem.eql(u8, saved.ownerAccountId(), account_id)) return null;
+        return saved;
+    }
+
+    fn discardForeignPreference(
+        self: *Runtime,
+        platform: *platform_impl.NativeBackend,
+        account_id: []const u8,
+    ) void {
+        const saved = self.saved_preference orelse return;
+        if (std.mem.eql(u8, saved.ownerAccountId(), account_id)) return;
+        self.saved_preference = null;
+        credential_store.clearPreference(platform.backend()) catch {};
     }
 
     fn decorateView(
@@ -1458,13 +1335,13 @@ pub const Runtime = struct {
         std.debug.assert(std.Thread.getCurrentId() == self.main_thread_id);
     }
 
-    fn prepareWindowsRestore(self: *Runtime) Prepared {
-        var restored = windows_store.restore(
+    fn prepareRestore(self: *Runtime) Prepared {
+        var restored = credential_store.restore(
             self.allocator,
             self.platform.?.backend(),
         ) catch |err| {
             self.credentials.clear();
-            self.windows_public_state = null;
+            self.saved_preference = null;
             return self.preparedSignedOutRestoreFailure(
                 accountRestoreError(err),
             );
@@ -1473,7 +1350,7 @@ pub const Runtime = struct {
         return switch (restored) {
             .signed_out => blk: {
                 self.credentials.clear();
-                self.windows_public_state = null;
+                self.saved_preference = null;
                 var value: state_impl.RestoreResult = .{
                     .signed_out = .{},
                 };
@@ -1482,22 +1359,12 @@ pub const Runtime = struct {
                 );
             },
             .account => |*account| blk: {
-                const identity = account.public_state.identity() catch {
-                    self.credentials.clear();
-                    self.windows_public_state = null;
-                    var value: state_impl.RestoreResult = .{
-                        .signed_out = .{},
-                    };
-                    break :blk preparedFromState(
-                        self.account.prepareRestore(&value),
-                    );
-                };
-                self.windows_public_state = account.public_state;
+                self.saved_preference = account.preference;
                 self.credentials.installRefreshToken(
                     &account.refresh_token,
                 );
                 var value: state_impl.RestoreResult = .{
-                    .account_only = .{ .identity = identity },
+                    .refresh_only = {},
                 };
                 var prepared = preparedFromState(
                     self.account.prepareRestore(&value),
@@ -1507,80 +1374,6 @@ pub const Runtime = struct {
                 break :blk prepared;
             },
         };
-    }
-
-    fn prepareMacosRestore(self: *Runtime) Prepared {
-        var restored = credential_store.restore(
-            self.allocator,
-            self.platform.?.backend(),
-        ) catch |err| return self.preparedRestoreFailure(
-            accountRestoreError(err),
-        );
-        var prepared: Prepared = switch (restored) {
-            .signed_out => |signed_out| blk: {
-                self.credentials.setCleanupPending(
-                    signed_out.cleanup_pending,
-                );
-                self.credentials.clear();
-                var value: state_impl.RestoreResult = .{
-                    .signed_out = .{
-                        .execution_high_watermark = signed_out.execution_high_watermark,
-                    },
-                };
-                break :blk preparedFromState(
-                    self.account.prepareRestore(&value),
-                );
-            },
-            .account_only => |*account_only| blk: {
-                self.credentials.setCleanupPending(
-                    account_only.cleanup_pending,
-                );
-                self.credentials.replace(&account_only.tokens);
-                var value: state_impl.RestoreResult = .{
-                    .account_only = .{
-                        .identity = account_only.identity,
-                        .execution_high_watermark = account_only.execution_high_watermark,
-                    },
-                };
-                account_only.deinit();
-                var result = preparedFromState(
-                    self.account.prepareRestore(&value),
-                );
-                result.follow_up = .refresh_catalog;
-                break :blk result;
-            },
-            .execution_ready => |*execution_ready| blk: {
-                self.credentials.setCleanupPending(
-                    execution_ready.cleanup_pending,
-                );
-                self.credentials.replace(&execution_ready.tokens);
-                const ready = state_impl.RestoreReady.init(
-                    execution_ready.identity,
-                    execution_ready.apiKeyId(),
-                    &execution_ready.execution,
-                ) catch {
-                    execution_ready.deinit();
-                    break :blk self.preparedRestoreFailure(
-                        .recovery_state_invalid,
-                    );
-                };
-                execution_ready.deinit();
-                self.effects.public_catalog.replaceRestoredSelection(
-                    ready.apiKeyId(),
-                    ready.execution.input().target.provider_kind,
-                    ready.execution.input().target.model,
-                );
-                var value: state_impl.RestoreResult = .{
-                    .execution_ready = ready,
-                };
-                break :blk preparedFromState(
-                    self.account.prepareRestore(&value),
-                );
-            },
-        };
-        prepared.cleanup_after_commit = true;
-        prepared.schedule_refresh_after_commit = true;
-        return prepared;
     }
 
     fn preparedRestoreFailure(
@@ -1707,7 +1500,6 @@ fn accountRestoreError(err: anyerror) contract.ErrorCode {
         error.AccountDirectoryUnavailable,
         => .credential_store_read_failed,
         error.DeleteFailed => .credential_store_delete_failed,
-        error.ManifestCorrupt,
         error.InvalidData,
         error.VerificationFailed,
         error.PersistenceOutcomeUnknown,
@@ -1726,7 +1518,6 @@ fn accountStoreError(err: anyerror) contract.ErrorCode {
         error.PersistenceOutcomeUnknown,
         => .credential_store_write_failed,
         error.DeleteFailed => .credential_store_delete_failed,
-        error.ManifestCorrupt,
         error.InvalidData,
         error.VerificationFailed,
         => .recovery_state_invalid,

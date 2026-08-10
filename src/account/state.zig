@@ -76,7 +76,6 @@ pub const Effect = union(enum) {
     prepare_execution: ModelId,
     cancel_attempt: u64,
     persist_signed_out_tombstone,
-    delete_retired_credentials,
     shutdown: ?u64,
 
     pub fn argument(self: *const Effect) ?[]const u8 {
@@ -133,7 +132,11 @@ const CommittedState = struct {
             .restoring => .checking,
             .signed_out, .reauth_required, .shutting_down => .signed_out,
             .authorizing => .authorizing,
-            .authenticated, .refreshing => .authenticated,
+            .authenticated => .authenticated,
+            .refreshing => if (self.account_id.len == 0)
+                .checking
+            else
+                .authenticated,
         };
         const catalog_state: contract.CatalogState = if (state != .authenticated)
             .unavailable
@@ -287,6 +290,11 @@ pub const Account = struct {
                 next.clearError();
                 break :blk transitionNoAttempt(next, .restored);
             },
+            .refresh_only => blk: {
+                var next = self.state;
+                next.clearError();
+                break :blk transitionNoAttempt(next, .restored);
+            },
             .execution_ready => |*ready| self.prepareRestoreReady(restore, ready),
         };
     }
@@ -397,6 +405,28 @@ pub const Account = struct {
     pub fn prepareTokenRefresh(self: *const Account) PrepareResult {
         if ((self.state.session_state != .authenticated and
             self.state.session_state != .reauth_required) or
+            self.state.operation != .none or
+            self.state.active_attempt_id != null)
+            return .{ .rejected = .invalid_state };
+        const attempt = nextAttempt(self.state.next_attempt_id) orelse
+            return .{ .rejected = .generation_mismatch };
+        var next = self.state;
+        next.session_state = .refreshing;
+        next.operation = .token_exchange;
+        next.active_attempt_id = attempt.current;
+        next.attempt_kind = .refresh_token;
+        next.next_attempt_id = attempt.next;
+        next.clearError();
+        return transition(
+            next,
+            .session_changed,
+            attempt.current,
+            .refresh_token,
+        );
+    }
+
+    pub fn prepareRestoredTokenRefresh(self: *const Account) PrepareResult {
+        if (self.state.session_state != .restoring or
             self.state.operation != .none or
             self.state.active_attempt_id != null)
             return .{ .rejected = .invalid_state };
@@ -736,7 +766,7 @@ pub const Account = struct {
             self.state.operation != .token_exchange)
             return .{ .rejected = .invalid_state };
         if (identity) |refreshed| {
-            if (!std.mem.eql(
+            if (self.state.account_id.len != 0 and !std.mem.eql(
                 u8,
                 refreshed.accountId(),
                 self.state.account_id.view(),
@@ -744,7 +774,10 @@ pub const Account = struct {
         }
         var next = self.state;
         if (identity) |refreshed| {
+            next.account_id = refreshed.account_id;
             next.display_name = refreshed.display_name;
+        } else if (next.account_id.len == 0) {
+            return .{ .rejected = .metask_unauthorized };
         }
         next.session_state = .authenticated;
         next.operation = .none;
@@ -878,11 +911,10 @@ pub const Account = struct {
         next.active_attempt_id = null;
         next.attempt_kind = .none;
         next.clearError();
-        return transition(
+        return transitionNoEffect(
             next,
             .signed_out,
             self.state.active_attempt_id.?,
-            .delete_retired_credentials,
         );
     }
 
@@ -915,6 +947,11 @@ pub const Account = struct {
             next.selected_model.clear();
             next.catalog_generation = 0;
             next.execution_generation = 0;
+        }
+        if (self.state.attempt_kind == .refresh_token and
+            self.state.account_id.len == 0)
+        {
+            next.session_state = .signed_out;
         }
         if (next.execution_state == .preparing)
             next.execution_state = .none;
@@ -1293,6 +1330,7 @@ pub const RestoreAccountOnly = struct {
 
 pub const RestoreResult = union(enum) {
     signed_out: RestoreSignedOut,
+    refresh_only: void,
     account_only: RestoreAccountOnly,
     execution_ready: RestoreReady,
 
@@ -1417,7 +1455,6 @@ test "fake browser client and store observe only committed effects" {
                 .load_api_keys, .load_models => self.client_calls += 1,
                 .prepare_execution,
                 .persist_signed_out_tombstone,
-                .delete_retired_credentials,
                 => self.store_calls += 1,
                 .cancel_attempt, .shutdown => {},
             }
@@ -1699,9 +1736,7 @@ test "failed reconfiguration preserves committed selection and generation high w
         .transition => |value| value,
         else => return error.TestUnexpectedResult,
     };
-    try std.testing.expect(
-        logout_done.takeEffect().? == .delete_retired_credentials,
-    );
+    try std.testing.expect(logout_done.takeEffect() == null);
     commitPrepared(&account, &logout_done);
     try std.testing.expectEqual(@as(u64, 0), account.view().execution_generation);
     try std.testing.expectEqual(@as(u64, 9), account.state.execution_high_watermark);

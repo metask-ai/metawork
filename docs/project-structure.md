@@ -147,11 +147,10 @@ Renderer 的 `components/ui/WindowTitlebar.tsx` 绘制产品 header，并通过 
 - `state.zig` 拥有 Account 状态机、attempt/generation 与 prepare/admit/commit；
 - `oauth.zig`、`loopback.zig`、`login_attempt.zig` 和 `network_attempt.zig` 拥有登录网络链路；
 - `metask_client.zig` 与 `catalog.zig` 消费锁定的 Metask production contract；
-- `app.zon` 单一拥有 development 产品 Bundle ID；`product_identity.zig` 派生该值及 macOS 数据目录与 Keychain service，不定义或统一 Windows storage；
-- `credential_store.zig` 独立拥有 macOS 双 family slot、固定 `manifest.json` schema 与原子提交语义；
+- `app.zon` 单一拥有 development 产品 Bundle ID；`product_identity.zig` 派生该值及 macOS 数据目录；
+- `credential_store.zig` 独立拥有跨平台 Account persistence 合同：secure store 中唯一的 refresh token，以及原子、无 secret 的 `preferences.json`；production 与 automation service 在编译期隔离；
 - `scripts/cleanup-legacy-macos-account.mjs` 是 Account-owned、只由开发者显式执行的一次性 legacy maintenance 入口；签名 setup 不拥有或删除 Account credential；
-- `windows_store.zig` 拥有 Windows 单 refresh token 与无版本、无 secret `account.json` 状态；不读取 macOS manifest，也不持久化 access token 或 Provider API Key；
-- `platform.zig` 是当前 Account 平台实现中唯一导入 Native SDK 的过渡边界，分别适配 macOS 与 Windows 的 credential、URL、timer 与持久化能力；它仍让 Product owner 持有原始 `PlatformServices`，属于 [验证规范](validation.md#native-sdk-能力路径)登记的架构缺口，不是获准兼容 seam，也不得增加新的底层能力或消费者；
+- `platform.zig` 是当前 Account 平台实现中唯一导入 Native SDK 的过渡边界，以同一 backend 适配各平台 credential、URL、timer 与 preference 持久化能力；它仍让 Product owner 持有原始 `PlatformServices`，属于 [验证规范](validation.md#native-sdk-能力路径)登记的架构缺口，不是获准兼容 seam，也不得增加新的底层能力或消费者；
 - `credentials.zig` 管理 execution credential ownership/rotation。
 
 Account 与 Workbench 是同级 owner，只通过纯 `account/contract.zig` 和 Application coordinator 主线程提交链协作。Bridge 只消费脱敏 view/command contract，不导入 Account Runtime。Application coordinator 可以持有两个 owner 的实例引用以协调提交，但不得持有 Account catalog、credential、attempt、mailbox 或 continuation 状态。

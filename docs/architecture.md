@@ -190,7 +190,7 @@ Renderer 按不可信调用方处理：
 
 MetaWork 桌面产品、根 npm workspace、Renderer workspace 和 Zig package 随同一仓库原子发布，共用一个 release version。`app.zon` 是产品版本与 Bundle ID 真源；根 npm、Renderer 与 Zig manifest 必须精确镜像，派生 lock 只保存工具生成结果。实际源码 owner 见 [工程结构与所有权](project-structure.md)。
 
-Renderer Bridge revision、Account persistence schema、AgentCore artifact version、AgentCore ABI version/revision 和 bundle manifest schema 各自保护不同合同，不得随 MetaWork release version 自动升降。精确账号存储身份见 [Metask Account API 合同](metask-account-contract.md)，macOS 签名规则见 [macOS 本地开发签名](macos-local-development.md)；任何合同类版本标识的变更都必须先得到用户显式同意。
+Renderer Bridge revision、Account persistence layout、AgentCore artifact version、AgentCore ABI version/revision 和 bundle manifest schema 各自保护不同合同，不得随 MetaWork release version 自动升降。Account persistence 采用无版本 hard cut，精确账号存储身份见 [Metask Account API 合同](metask-account-contract.md)；macOS 签名规则见 [macOS 本地开发签名](macos-local-development.md)。任何合同类版本标识的变更都必须先得到用户显式同意。
 
 ## 9. 主要风险
 

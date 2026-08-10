@@ -77,6 +77,7 @@ pub const NetworkAttempt = struct {
     transport: metask.Transport = undefined,
     credential_owner: ?*const credentials.CredentialOwner = null,
     identity: ?state.AccountIdentity = null,
+    load_identity: bool = false,
     catalog_session: ?*catalog.CatalogSession = null,
     api_key_storage: [contract.Limits.api_key_id_bytes]u8 = undefined,
     api_key_len: usize = 0,
@@ -96,6 +97,7 @@ pub const NetworkAttempt = struct {
         transport: metask.Transport,
         credential_owner: *const credentials.CredentialOwner,
         expected_identity: ?state.AccountIdentity,
+        load_identity: bool,
         sink: ResultSink,
         now_unix_seconds: i64,
     ) !void {
@@ -107,6 +109,7 @@ pub const NetworkAttempt = struct {
             transport,
             credential_owner,
             expected_identity,
+            load_identity,
             null,
             "",
             sink,
@@ -133,6 +136,7 @@ pub const NetworkAttempt = struct {
             transport,
             credential_owner,
             identity,
+            false,
             catalog_session,
             "",
             sink,
@@ -161,6 +165,7 @@ pub const NetworkAttempt = struct {
             transport,
             null,
             null,
+            false,
             catalog_session,
             api_key_id,
             sink,
@@ -205,6 +210,7 @@ pub const NetworkAttempt = struct {
         transport: metask.Transport,
         credential_owner: ?*const credentials.CredentialOwner,
         identity: ?state.AccountIdentity,
+        load_identity: bool,
         catalog_session: ?*catalog.CatalogSession,
         api_key_id: []const u8,
         sink: ResultSink,
@@ -221,6 +227,7 @@ pub const NetworkAttempt = struct {
             .transport = transport,
             .credential_owner = credential_owner,
             .identity = identity,
+            .load_identity = load_identity,
             .catalog_session = catalog_session,
             .now_unix_seconds = now_unix_seconds,
             .sink = sink,
@@ -248,6 +255,7 @@ pub const NetworkAttempt = struct {
                     self.now_unix_seconds,
                     control,
                     self.identity,
+                    self.load_identity,
                 ) catch |err| {
                     self.publishFailure(metask.errorCode(err));
                     return;
@@ -389,6 +397,7 @@ test "refresh attempt transfers one opaque generation and cancels cleanly" {
         transport.transport(),
         &credential_owner,
         null,
+        false,
         capture.sink(),
         100,
     );
@@ -413,6 +422,7 @@ test "refresh attempt transfers one opaque generation and cancels cleanly" {
         blocking.transport(),
         &credential_owner,
         null,
+        false,
         cancelled_capture.sink(),
         100,
     );
@@ -429,7 +439,7 @@ test "refresh attempt transfers one opaque generation and cancels cleanly" {
     );
 }
 
-test "refresh-only Windows restore revalidates account identity" {
+test "refresh-only restore resolves the current identity" {
     var refresh = try oauth.Secret.init(
         std.testing.allocator,
         "old-refresh",
@@ -451,6 +461,7 @@ test "refresh-only Windows restore revalidates account identity" {
             "acct-1",
             "Stored User",
         ),
+        true,
         capture.sink(),
         100,
     );
