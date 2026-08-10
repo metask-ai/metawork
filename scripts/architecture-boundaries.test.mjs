@@ -1074,6 +1074,14 @@ test("AgentCore vertical owns an isolated platform data root", () => {
   assert.match(vertical, /vertical data root escaped its fixture/);
   assert.match(
     vertical,
+    /const automationDataDirectoryName = "MetaWork Automation"/,
+  );
+  assert.doesNotMatch(
+    vertical,
+    /join\(platformHome, "MetaWork", "Data"\)|"MetaWork Dev"/,
+  );
+  assert.match(
+    vertical,
     /env:\s*\{[\s\S]*?\.\.\.process\.env,[\s\S]*?\.\.\.isolatedPlatformEnv,/,
   );
 });

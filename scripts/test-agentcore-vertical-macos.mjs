@@ -59,10 +59,16 @@ const workspace = await mkdtemp(join(tmpdir(), "metawork-agentcore-vertical-"));
 const canonicalWorkspace = await realpath(workspace);
 const platformHome = join(workspace, "platform-home");
 await mkdir(platformHome, { recursive: true });
+const automationDataDirectoryName = "MetaWork Automation";
 const dataRoot =
   process.platform === "win32"
-    ? join(platformHome, "MetaWork", "Data")
-    : join(platformHome, "Library", "Application Support", "MetaWork Dev");
+    ? join(platformHome, automationDataDirectoryName, "Data")
+    : join(
+        platformHome,
+        "Library",
+        "Application Support",
+        automationDataDirectoryName,
+      );
 const isolatedPlatformEnv =
   process.platform === "win32"
     ? { APPDATA: platformHome, LOCALAPPDATA: platformHome }
