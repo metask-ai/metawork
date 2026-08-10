@@ -16,12 +16,16 @@ import {
   type SkillManagementView,
   type McpManagementView,
   type McpMutationResult,
+  type McpAuthorizationResult,
+  type McpAuthorizationCancelResult,
   type McpRefreshResult,
   mcpAvailabilities,
   mcpManagementHealthValues,
   mcpRuntimeAlignmentValues,
   mcpRuntimeStatusValues,
   mcpNewTaskAccessValues,
+  mcpAuthorizationStatusValues,
+  mcpAuthorizationPhaseValues,
   type SkillImportPreview,
   type SkillMutationResult,
   type SkillExportResult,
@@ -269,10 +273,13 @@ function fail(path: string, message: string): never {
   throw new Error(`Invalid Host contract at ${path}: ${message}`);
 }
 
-function object(value: unknown, path: string, keys: readonly string[]) {
+function record(value: unknown, path: string): JsonObject {
   if (typeof value !== "object" || value === null || Array.isArray(value))
     fail(path, "expected object");
-  const result = value as JsonObject;
+  return value as JsonObject;
+}
+
+function exactKeys(result: JsonObject, path: string, keys: readonly string[]) {
   const actual = Object.keys(result).sort();
   const expected = [...keys].sort();
   if (
@@ -280,6 +287,11 @@ function object(value: unknown, path: string, keys: readonly string[]) {
     actual.some((key, index) => key !== expected[index])
   )
     fail(path, `expected keys ${expected.join(", ")}`);
+}
+
+function object(value: unknown, path: string, keys: readonly string[]) {
+  const result = record(value, path);
+  exactKeys(result, path, keys);
   return result;
 }
 
@@ -1733,6 +1745,7 @@ function decodeMcpManagement(value: unknown, path: string): McpManagementView {
     "availability",
     "managementHealth",
     "operation",
+    "authorizationOperation",
     "desiredGeneration",
     "runtimeAlignment",
     "redacted",
@@ -1753,6 +1766,41 @@ function decodeMcpManagement(value: unknown, path: string): McpManagementView {
     "saving",
     "refreshing",
   ] as const);
+  const authorizationItem = record(
+    item.authorizationOperation,
+    `${path}.authorizationOperation`,
+  );
+  const authorizationKind = enumValue(
+    authorizationItem.kind,
+    `${path}.authorizationOperation.kind`,
+    ["idle", ...mcpAuthorizationPhaseValues] as const,
+  );
+  const authorizationOperation =
+    authorizationKind === "idle"
+      ? (() => {
+          exactKeys(authorizationItem, `${path}.authorizationOperation`, [
+            "kind",
+          ]);
+          return { kind: "idle" as const };
+        })()
+      : (() => {
+          exactKeys(authorizationItem, `${path}.authorizationOperation`, [
+            "kind",
+            "serverId",
+            "operationId",
+          ]);
+          return {
+            kind: authorizationKind,
+            serverId: nonEmptyString(
+              authorizationItem.serverId,
+              `${path}.authorizationOperation.serverId`,
+            ),
+            operationId: nonEmptyString(
+              authorizationItem.operationId,
+              `${path}.authorizationOperation.operationId`,
+            ),
+          };
+        })();
   const desiredGeneration =
     item.desiredGeneration === null
       ? null
@@ -1771,6 +1819,12 @@ function decodeMcpManagement(value: unknown, path: string): McpManagementView {
         "displayName",
         "namespace",
         "transport",
+        "authMode",
+        "negotiation",
+        "timeoutMs",
+        "safeConnectionSummary",
+        "approvalStatus",
+        "authorizationStatus",
         "desiredEnabled",
         "runtimeStatus",
         "newTaskAccess",
@@ -1815,6 +1869,160 @@ function decodeMcpManagement(value: unknown, path: string): McpManagementView {
           `${serverPath}.tools`,
           "MCP tool names must be unique within a server",
         );
+      const transport = enumValue(server.transport, `${serverPath}.transport`, [
+        "stdio",
+        "streamable_http",
+      ] as const);
+      const summary = record(
+        server.safeConnectionSummary,
+        `${serverPath}.safeConnectionSummary`,
+      );
+      const summaryKind = enumValue(
+        summary.kind,
+        `${serverPath}.safeConnectionSummary.kind`,
+        ["stdio", "streamable_http"] as const,
+      );
+      if (summaryKind !== transport)
+        fail(serverPath, "MCP transport and safe summary disagree");
+      const decodeSlots = (slotValue: unknown, slotPath: string) => {
+        const slots = arrayValue(slotValue, slotPath, (value, itemPath) => {
+          const slot = object(value, itemPath, ["name", "status"]);
+          return {
+            name: nonEmptyString(slot.name, `${itemPath}.name`),
+            status: enumValue(slot.status, `${itemPath}.status`, [
+              "missing",
+              "set",
+            ] as const),
+          };
+        });
+        if (
+          new Set(slots.map((slot) => slot.name.toLowerCase())).size !==
+          slots.length
+        )
+          fail(slotPath, "MCP secret slot names must be unique");
+        return slots;
+      };
+      const safeConnectionSummary =
+        summaryKind === "stdio"
+          ? (() => {
+              exactKeys(summary, `${serverPath}.safeConnectionSummary`, [
+                "kind",
+                "executableBasename",
+                "argumentCount",
+                "cwdPresent",
+                "environment",
+              ]);
+              return {
+                kind: "stdio" as const,
+                executableBasename: nonEmptyString(
+                  summary.executableBasename,
+                  `${serverPath}.safeConnectionSummary.executableBasename`,
+                ),
+                argumentCount: nonNegativeNumber(
+                  summary.argumentCount,
+                  `${serverPath}.safeConnectionSummary.argumentCount`,
+                ),
+                cwdPresent: booleanValue(
+                  summary.cwdPresent,
+                  `${serverPath}.safeConnectionSummary.cwdPresent`,
+                ),
+                environment: decodeSlots(
+                  summary.environment,
+                  `${serverPath}.safeConnectionSummary.environment`,
+                ),
+              };
+            })()
+          : (() => {
+              exactKeys(summary, `${serverPath}.safeConnectionSummary`, [
+                "kind",
+                "endpointOrigin",
+                "headers",
+                "registrationKind",
+                "clientIdPresent",
+                "tokenEndpointAuthMethod",
+                "clientSecretStatus",
+              ]);
+              return {
+                kind: "streamable_http" as const,
+                endpointOrigin: nonEmptyString(
+                  summary.endpointOrigin,
+                  `${serverPath}.safeConnectionSummary.endpointOrigin`,
+                ),
+                headers: decodeSlots(
+                  summary.headers,
+                  `${serverPath}.safeConnectionSummary.headers`,
+                ),
+                registrationKind: enumValue(
+                  summary.registrationKind,
+                  `${serverPath}.safeConnectionSummary.registrationKind`,
+                  ["none", "automatic", "pre_registered"] as const,
+                ),
+                clientIdPresent: booleanValue(
+                  summary.clientIdPresent,
+                  `${serverPath}.safeConnectionSummary.clientIdPresent`,
+                ),
+                tokenEndpointAuthMethod:
+                  summary.tokenEndpointAuthMethod === null
+                    ? null
+                    : enumValue(
+                        summary.tokenEndpointAuthMethod,
+                        `${serverPath}.safeConnectionSummary.tokenEndpointAuthMethod`,
+                        [
+                          "none",
+                          "client_secret_basic",
+                          "client_secret_post",
+                        ] as const,
+                      ),
+                clientSecretStatus: enumValue(
+                  summary.clientSecretStatus,
+                  `${serverPath}.safeConnectionSummary.clientSecretStatus`,
+                  ["not_required", "missing", "set"] as const,
+                ),
+              };
+            })();
+      const authMode = enumValue(server.authMode, `${serverPath}.authMode`, [
+        "none",
+        "static",
+        "oauth",
+      ] as const);
+      if (
+        (authMode === "oauth") !==
+        (transport === "streamable_http" &&
+          safeConnectionSummary.kind === "streamable_http" &&
+          safeConnectionSummary.registrationKind !== "none")
+      )
+        fail(serverPath, "OAuth registration summary must match auth mode");
+      if (
+        safeConnectionSummary.kind === "streamable_http" &&
+        safeConnectionSummary.registrationKind === "pre_registered" &&
+        safeConnectionSummary.tokenEndpointAuthMethod === null
+      )
+        fail(
+          serverPath,
+          "pre-registered OAuth client must expose its auth method",
+        );
+      if (safeConnectionSummary.kind === "streamable_http") {
+        const summary = safeConnectionSummary;
+        if (
+          authMode !== "oauth" &&
+          (summary.registrationKind !== "none" ||
+            summary.clientIdPresent ||
+            summary.tokenEndpointAuthMethod !== null ||
+            summary.clientSecretStatus !== "not_required")
+        )
+          fail(serverPath, "non-OAuth server cannot expose OAuth client state");
+        if (
+          summary.tokenEndpointAuthMethod === "none" &&
+          summary.clientSecretStatus !== "not_required"
+        )
+          fail(serverPath, "public OAuth client cannot expose a client secret");
+        if (
+          (summary.tokenEndpointAuthMethod === "client_secret_basic" ||
+            summary.tokenEndpointAuthMethod === "client_secret_post") &&
+          summary.clientSecretStatus === "not_required"
+        )
+          fail(serverPath, "confidential OAuth client requires a secret state");
+      }
       return {
         id: nonEmptyString(server.id, `${serverPath}.id`),
         displayName: nonEmptyString(
@@ -1822,10 +2030,25 @@ function decodeMcpManagement(value: unknown, path: string): McpManagementView {
           `${serverPath}.displayName`,
         ),
         namespace: nonEmptyString(server.namespace, `${serverPath}.namespace`),
-        transport: enumValue(server.transport, `${serverPath}.transport`, [
-          "stdio",
-          "streamable_http",
-        ] as const),
+        transport,
+        authMode,
+        negotiation: enumValue(
+          server.negotiation,
+          `${serverPath}.negotiation`,
+          ["automatic", "modern_only", "compat_only"] as const,
+        ),
+        timeoutMs: positiveNumber(server.timeoutMs, `${serverPath}.timeoutMs`),
+        safeConnectionSummary,
+        approvalStatus: enumValue(
+          server.approvalStatus,
+          `${serverPath}.approvalStatus`,
+          ["unapproved", "approved"] as const,
+        ),
+        authorizationStatus: enumValue(
+          server.authorizationStatus,
+          `${serverPath}.authorizationStatus`,
+          mcpAuthorizationStatusValues,
+        ),
         desiredEnabled: booleanValue(
           server.desiredEnabled,
           `${serverPath}.desiredEnabled`,
@@ -1856,18 +2079,26 @@ function decodeMcpManagement(value: unknown, path: string): McpManagementView {
     fail(`${path}.servers`, "MCP server namespaces must be unique");
   if (
     desiredGeneration === null &&
-    (runtimeAlignment !== "unknown" || servers.length !== 0)
+    (runtimeAlignment !== "unknown" ||
+      servers.length !== 0 ||
+      authorizationOperation.kind !== "idle")
   )
     fail(path, "unknown desired state must hide alignment and servers");
   if (
     managementHealth === "outcome_unknown" &&
     (desiredGeneration !== null ||
       runtimeAlignment !== "unknown" ||
-      servers.length !== 0)
+      servers.length !== 0 ||
+      authorizationOperation.kind !== "idle")
   )
     fail(path, "outcome-unknown management cannot claim desired state");
   if (managementHealth === "ready" && desiredGeneration === null)
     fail(path, "ready management requires a canonical desired generation");
+  if (
+    authorizationOperation.kind !== "idle" &&
+    !servers.some((server) => server.id === authorizationOperation.serverId)
+  )
+    fail(path, "MCP authorization operation must bind a published server");
   if (
     availability === "ready" &&
     servers.some((server) =>
@@ -1904,6 +2135,7 @@ function decodeMcpManagement(value: unknown, path: string): McpManagementView {
     availability,
     managementHealth,
     operation,
+    authorizationOperation,
     desiredGeneration,
     runtimeAlignment,
     redacted: booleanValue(item.redacted, `${path}.redacted`),
@@ -1940,6 +2172,9 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     "localSkillManagement",
     "skillManagementHealth",
     "mcpManagement",
+    "mcpConnectionApproval",
+    "mcpSecretCapture",
+    "mcpOAuth",
   ]);
   const capabilities = {
     taskHistoryPersistence: booleanValue(
@@ -2030,6 +2265,15 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
       capabilityItem.mcpManagement,
       "$.capabilities.mcpManagement",
     ),
+    mcpConnectionApproval: booleanValue(
+      capabilityItem.mcpConnectionApproval,
+      "$.capabilities.mcpConnectionApproval",
+    ),
+    mcpSecretCapture: booleanValue(
+      capabilityItem.mcpSecretCapture,
+      "$.capabilities.mcpSecretCapture",
+    ),
+    mcpOAuth: booleanValue(capabilityItem.mcpOAuth, "$.capabilities.mcpOAuth"),
   };
   if (
     capabilities.taskHistoryPersistence !==
@@ -2056,12 +2300,22 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
       mcp.availability !== "unavailable" ||
       mcp.managementHealth !== "unavailable" ||
       mcp.operation !== "idle" ||
+      mcp.authorizationOperation.kind !== "idle" ||
       mcp.desiredGeneration !== null ||
       mcp.runtimeAlignment !== "unknown" ||
       mcp.redacted ||
       mcp.servers.length !== 0
     )
       fail("$.mcp", "disabled MCP management must use the unavailable view");
+    if (
+      capabilities.mcpConnectionApproval ||
+      capabilities.mcpSecretCapture ||
+      capabilities.mcpOAuth
+    )
+      fail(
+        "$.capabilities",
+        "disabled MCP management cannot expose Host MCP effects",
+      );
   } else if (mcp.managementHealth === "unavailable") {
     fail("$.mcp.managementHealth", "enabled MCP management requires its owner");
   }
@@ -2326,6 +2580,9 @@ export function decodeMcpMutationResult(value: unknown): McpMutationResult {
     "stale_generation",
     "rejected",
     "indeterminate",
+    "busy",
+    "cancelled",
+    "capability_unavailable",
   ] as const);
   const desiredGeneration =
     item.desiredGeneration === null
@@ -2358,6 +2615,42 @@ export function decodeMcpRefreshResult(value: unknown): McpRefreshResult {
       "unavailable",
       "shutting_down",
       "rejected",
+    ] as const),
+  };
+}
+
+export function decodeMcpAuthorizationResult(
+  value: unknown,
+): McpAuthorizationResult {
+  const item = object(value, "$", ["outcome", "operationId"]);
+  const outcome = enumValue(item.outcome, "$.outcome", [
+    "started",
+    "busy",
+    "rejected",
+    "stale_generation",
+    "capability_unavailable",
+  ] as const);
+  const operationId =
+    item.operationId === null
+      ? null
+      : nonEmptyString(item.operationId, "$.operationId");
+  if ((outcome === "started") !== (operationId !== null))
+    fail("$.operationId", "only a started authorization has an operation id");
+  return { outcome, operationId };
+}
+
+export function decodeMcpAuthorizationCancelResult(
+  value: unknown,
+): McpAuthorizationCancelResult {
+  const item = object(value, "$", ["outcome"]);
+  return {
+    outcome: enumValue(item.outcome, "$.outcome", [
+      "cancelled",
+      "saved",
+      "saved_recovery_required",
+      "rejected",
+      "indeterminate",
+      "capability_unavailable",
     ] as const),
   };
 }

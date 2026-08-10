@@ -34,6 +34,9 @@ export const initialWorkbenchState: WorkbenchState = {
       localSkillManagement: false,
       skillManagementHealth: "unavailable",
       mcpManagement: false,
+      mcpConnectionApproval: false,
+      mcpSecretCapture: false,
+      mcpOAuth: false,
     },
     account: {
       sessionState: "restoring",
@@ -73,6 +76,7 @@ export const initialWorkbenchState: WorkbenchState = {
       availability: "unavailable",
       managementHealth: "unavailable",
       operation: "idle",
+      authorizationOperation: { kind: "idle" },
       desiredGeneration: null,
       runtimeAlignment: "unknown",
       redacted: false,

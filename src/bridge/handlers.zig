@@ -61,10 +61,52 @@ pub const SkillReimport = struct {
     previewId: []const u8,
 };
 pub const SkillIdentity = struct { installId: []const u8 };
+pub const McpCreateStdioServer = struct {
+    expectedDesiredGeneration: []const u8,
+    displayName: []const u8,
+    negotiation: []const u8,
+    timeoutMs: u32,
+    command: []const u8,
+    arguments: []const []const u8,
+    cwd: ?[]const u8,
+    environmentNames: []const []const u8,
+};
+pub const McpOauthRegistration = struct {
+    kind: []const u8,
+    clientId: ?[]const u8 = null,
+    tokenEndpointAuthMethod: ?[]const u8 = null,
+};
 pub const McpCreateHttpServer = struct {
     expectedDesiredGeneration: []const u8,
     displayName: []const u8,
+    negotiation: []const u8,
+    timeoutMs: u32,
     endpoint: []const u8,
+    authMode: []const u8,
+    headerNames: []const []const u8,
+    registration: ?McpOauthRegistration = null,
+};
+pub const McpUpdateStdioConnection = struct {
+    expectedDesiredGeneration: []const u8,
+    serverId: []const u8,
+    displayName: []const u8,
+    negotiation: []const u8,
+    timeoutMs: u32,
+    command: []const u8,
+    arguments: []const []const u8,
+    cwd: ?[]const u8,
+    environmentNames: []const []const u8,
+};
+pub const McpUpdateHttpConnection = struct {
+    expectedDesiredGeneration: []const u8,
+    serverId: []const u8,
+    displayName: []const u8,
+    negotiation: []const u8,
+    timeoutMs: u32,
+    endpoint: []const u8,
+    authMode: []const u8,
+    headerNames: []const []const u8,
+    registration: ?McpOauthRegistration = null,
 };
 pub const McpServerRename = struct {
     expectedDesiredGeneration: []const u8,
@@ -84,6 +126,18 @@ pub const McpAllowedTools = struct {
 pub const McpServerIdentity = struct {
     expectedDesiredGeneration: []const u8,
     serverId: []const u8,
+};
+pub const McpSecretSlot = struct {
+    kind: []const u8,
+    name: ?[]const u8 = null,
+};
+pub const McpCaptureSecret = struct {
+    expectedDesiredGeneration: []const u8,
+    serverId: []const u8,
+    slot: McpSecretSlot,
+};
+pub const McpCancelAuthorization = struct {
+    operationId: []const u8,
 };
 pub const TaskWorkspaceIntent = struct {
     kind: []const u8,

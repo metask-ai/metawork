@@ -38,6 +38,7 @@ pub fn build(b: *std.Build) void {
     addMcpCatalogTests(b, test_modules, bundle.link_libc);
     addMcpConfigurationTests(b, test_modules, bundle.link_libc);
     addMcpPlatformTests(b, test_modules, bundle.link_libc);
+    addMcpOauthTests(b, test_modules, bundle.link_libc);
     addMcpAppTests(b, test_modules, bundle.link_libc);
     addWorkbenchMcpTests(b, test_modules, bundle.link_libc);
     const module_tests = [_]struct {
@@ -74,6 +75,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-skill-management", .root_module = test_modules.workbench_skill_management },
         .{ .name = "metawork-mcp-configuration", .root_module = test_modules.workbench_mcp_configuration },
         .{ .name = "metawork-mcp-platform", .root_module = test_modules.mcp_platform },
+        .{ .name = "metawork-mcp-oauth", .root_module = test_modules.mcp_oauth },
         .{ .name = "metawork-task-persistence", .root_module = test_modules.workbench_task_persistence },
         .{ .name = "metawork-checkpoint-store", .root_module = test_modules.workbench_checkpoint_store },
     };
@@ -147,6 +149,7 @@ const WiredModules = struct {
     metask_client: *std.Build.Module,
     app: *std.Build.Module,
     mcp_platform: *std.Build.Module,
+    mcp_oauth: *std.Build.Module,
     agent: *std.Build.Module,
     agent_mcp_connector: *std.Build.Module,
     agent_mcp_catalog: *std.Build.Module,
@@ -316,6 +319,23 @@ fn addMcpPlatformTests(
     const tests = b.addTest(.{
         .name = "metawork-mcp-platform",
         .root_module = modules.mcp_platform,
+    });
+    step.dependOn(&b.addRunArtifact(tests).step);
+}
+
+fn addMcpOauthTests(
+    b: *std.Build,
+    modules: WiredModules,
+    link_libc: bool,
+) void {
+    const step = b.step(
+        "test-mcp-oauth",
+        "Run App-owned MCP OAuth protocol and boundary tests",
+    );
+    modules.mcp_oauth.link_libc = link_libc;
+    const tests = b.addTest(.{
+        .name = "metawork-mcp-oauth",
+        .root_module = modules.mcp_oauth,
     });
     step.dependOn(&b.addRunArtifact(tests).step);
 }
@@ -707,6 +727,14 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     mcp_platform.addImport("metawork_agent", agent);
     mcp_platform.addImport("metawork_workbench", workbench);
     mcp_platform.addImport("metawork_product_identity", product_identity);
+    const mcp_oauth = b.createModule(.{
+        .root_source_file = b.path("src/app/mcp_oauth.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    mcp_oauth.addImport("account_oauth", account_oauth);
+    mcp_oauth.addImport("account_loopback", account_loopback);
+    mcp_platform.addImport("metawork_mcp_oauth", mcp_oauth);
 
     const app = b.createModule(.{
         .root_source_file = b.path("src/app.zig"),
@@ -723,6 +751,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     app.addImport("metawork_account", account);
     app.addImport("metawork_product_identity", product_identity);
     app.addImport("metawork_mcp_platform", mcp_platform);
+    app.addImport("metawork_mcp_oauth", mcp_oauth);
 
     root_module.addImport("metawork_app", app);
     root_module.link_libc = bundle.link_libc;
@@ -743,6 +772,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .metask_client = metask_client,
         .app = app,
         .mcp_platform = mcp_platform,
+        .mcp_oauth = mcp_oauth,
         .agent = agent,
         .agent_mcp_connector = agent_mcp_connector,
         .agent_mcp_catalog = agent_mcp_catalog,

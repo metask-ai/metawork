@@ -37,7 +37,7 @@ pub fn prepare(
             ),
             .management_health = .recovery_required,
         };
-    const restored_bytes = configuration_store.loadAlloc(std.heap.c_allocator) catch |err| switch (err) {
+    var restored_bytes = configuration_store.loadAlloc(std.heap.c_allocator) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return .{
             .preparation = try workbench_api.prepareMcpConfiguration(
@@ -53,7 +53,18 @@ pub fn prepare(
     };
     defer if (restored_bytes) |bytes| std.heap.c_allocator.free(bytes);
     var registry_corrupt = false;
+    var source_schema_version: ?u8 = null;
     const generation: u64 = if (restored_bytes) |bytes| generation: {
+        source_schema_version = workbench_api.mcpRegistrySourceSchemaVersion(
+            std.heap.c_allocator,
+            bytes,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                registry_corrupt = true;
+                break :generation 0;
+            },
+        };
         var decoded = workbench_api.decodeMcpRegistry(
             std.heap.c_allocator,
             bytes,
@@ -90,6 +101,89 @@ pub fn prepare(
             },
         };
     }
+    if (!recovery_failed and restored_bytes != null and source_schema_version == 1) {
+        var migrated = workbench_api.decodeMcpRegistry(
+            std.heap.c_allocator,
+            restored_bytes.?,
+            configuration_limits,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => unreachable,
+        };
+        defer migrated.deinit();
+        const buffer = try std.heap.c_allocator.alloc(
+            u8,
+            workbench_api.mcp_registry_max_bytes,
+        );
+        defer std.heap.c_allocator.free(buffer);
+        const migrated_bytes = workbench_api.encodeMcpRegistry(
+            buffer,
+            migrated.value,
+            configuration_limits,
+        ) catch unreachable;
+        configuration_store.commit(migrated_bytes) catch |err| {
+            management_health = if (err == error.PersistenceOutcomeUnknown)
+                .outcome_unknown
+            else
+                .recovery_required;
+        };
+        try replaceRestoredBytes(&restored_bytes, migrated_bytes);
+    }
+    if (!recovery_failed and restored_bytes != null) {
+        var current = workbench_api.decodeMcpRegistry(
+            std.heap.c_allocator,
+            restored_bytes.?,
+            configuration_limits,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => unreachable,
+        };
+        defer current.deinit();
+        if (current.value.oauth_operation != null) {
+            var plan = try workbench_api.planMcpOauthOperationRecovery(
+                std.heap.c_allocator,
+                current.value,
+                configuration_limits,
+            );
+            defer plan.deinit();
+            var coordinator: workbench_api.McpTransactionCoordinator = .{};
+            const commit = try coordinator.commit(
+                std.heap.c_allocator,
+                configuration_store.mutationPersistence(),
+                credential_store.effects(),
+                &plan,
+                &.{},
+                configuration_limits,
+            );
+            switch (commit) {
+                .saved, .saved_recovery_required => {
+                    const buffer = try std.heap.c_allocator.alloc(
+                        u8,
+                        workbench_api.mcp_registry_max_bytes,
+                    );
+                    defer std.heap.c_allocator.free(buffer);
+                    const recovered_bytes = workbench_api.encodeMcpRegistry(
+                        buffer,
+                        try plan.targetRegistry(),
+                        configuration_limits,
+                    ) catch unreachable;
+                    try replaceRestoredBytes(&restored_bytes, recovered_bytes);
+                    if (commit == .saved_recovery_required)
+                        management_health = coordinator.health;
+                },
+                .registry_outcome_unknown => {
+                    recovery_failed = true;
+                    management_health = .outcome_unknown;
+                },
+                .not_saved, .not_saved_recovery_required, .blocked => {
+                    management_health = if (coordinator.health == .outcome_unknown)
+                        .outcome_unknown
+                    else
+                        .recovery_required;
+                },
+            }
+        }
+    }
     const preparation = try workbench_api.prepareMcpConfiguration(
         std.heap.c_allocator,
         restored_bytes,
@@ -105,6 +199,12 @@ pub fn prepare(
             management_health,
         ),
     };
+}
+
+fn replaceRestoredBytes(slot: *?[]u8, bytes: []const u8) std.mem.Allocator.Error!void {
+    const replacement = try std.heap.c_allocator.dupe(u8, bytes);
+    if (slot.*) |previous| std.heap.c_allocator.free(previous);
+    slot.* = replacement;
 }
 
 fn managementHealthAfterPreparation(

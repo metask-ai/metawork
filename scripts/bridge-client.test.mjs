@@ -157,12 +157,41 @@ test("MCP management uses only typed revision 1 commands", async () => {
       calls.push({ command, payload });
       if (command === "metawork.mcp.refreshCatalog")
         return { outcome: "started" };
+      if (command === "metawork.mcp.authorizeOAuth")
+        return { outcome: "started", operationId: "oauth-op" };
+      if (command === "metawork.mcp.cancelAuthorization")
+        return { outcome: "cancelled" };
       return { outcome: "saved", desiredGeneration: "8" };
     }),
   });
 
-  await client.createMcpHttpServer("7", "Search", "https://mcp.example.test");
+  const http = {
+    displayName: "Search",
+    negotiation: "automatic",
+    timeoutMs: 30000,
+    endpoint: "https://mcp.example.test",
+    authMode: "oauth",
+    headerNames: [],
+    registration: { kind: "automatic" },
+  };
+  await client.createMcpStdioServer("7", {
+    displayName: "Files",
+    negotiation: "modern_only",
+    timeoutMs: 5000,
+    command: "mcp-files",
+    arguments: ["--safe"],
+    cwd: null,
+    environmentNames: ["TOKEN"],
+  });
+  await client.createMcpHttpServer("7", http);
+  await client.updateMcpHttpConnection("7", "server-1", http);
   await client.renameMcpServer("7", "server-1", "Search API");
+  await client.approveMcpConnection("7", "server-1");
+  await client.captureMcpSecret("7", "server-1", {
+    kind: "oauth_client_secret",
+  });
+  await client.authorizeMcpOAuth("7", "server-1");
+  await client.cancelMcpAuthorization("oauth-op");
   await client.setMcpServerEnabled("7", "server-1", true);
   await client.setMcpAllowedTools("7", "server-1", ["search", "fetch"]);
   await client.removeMcpServer("7", "server-1");
@@ -170,11 +199,31 @@ test("MCP management uses only typed revision 1 commands", async () => {
 
   assert.deepEqual(calls, [
     {
+      command: "metawork.mcp.createStdioServer",
+      payload: {
+        expectedDesiredGeneration: "7",
+        displayName: "Files",
+        negotiation: "modern_only",
+        timeoutMs: 5000,
+        command: "mcp-files",
+        arguments: ["--safe"],
+        cwd: null,
+        environmentNames: ["TOKEN"],
+      },
+    },
+    {
       command: "metawork.mcp.createHttpServer",
       payload: {
         expectedDesiredGeneration: "7",
-        displayName: "Search",
-        endpoint: "https://mcp.example.test",
+        ...http,
+      },
+    },
+    {
+      command: "metawork.mcp.updateHttpConnection",
+      payload: {
+        expectedDesiredGeneration: "7",
+        serverId: "server-1",
+        ...http,
       },
     },
     {
@@ -184,6 +233,26 @@ test("MCP management uses only typed revision 1 commands", async () => {
         serverId: "server-1",
         displayName: "Search API",
       },
+    },
+    {
+      command: "metawork.mcp.approveConnection",
+      payload: { expectedDesiredGeneration: "7", serverId: "server-1" },
+    },
+    {
+      command: "metawork.mcp.captureSecret",
+      payload: {
+        expectedDesiredGeneration: "7",
+        serverId: "server-1",
+        slot: { kind: "oauth_client_secret" },
+      },
+    },
+    {
+      command: "metawork.mcp.authorizeOAuth",
+      payload: { expectedDesiredGeneration: "7", serverId: "server-1" },
+    },
+    {
+      command: "metawork.mcp.cancelAuthorization",
+      payload: { operationId: "oauth-op" },
     },
     {
       command: "metawork.mcp.setServerEnabled",

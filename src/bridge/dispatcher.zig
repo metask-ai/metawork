@@ -109,11 +109,45 @@ pub const AutomationAuthority = struct {
     }
 };
 
+pub const McpHostOutcome = enum {
+    saved,
+    saved_recovery_required,
+    stale_generation,
+    rejected,
+    indeterminate,
+    cancelled,
+    capability_unavailable,
+};
+
+pub const McpAuthorizationStartOutcome = union(enum) {
+    started: []const u8,
+    rejected,
+    stale_generation,
+    capability_unavailable,
+};
+
+pub const McpSecretSlot = union(enum) {
+    stdio_environment: []const u8,
+    http_header: []const u8,
+    oauth_client_secret,
+};
+
+/// Narrow Application effect port. It grants only the four MCP management
+/// sequences owned by the Application coordinator, never platform authority.
+pub const McpManagementHost = struct {
+    context: *anyopaque,
+    approve_fn: *const fn (*anyopaque, u64, []const u8) anyerror!McpHostOutcome,
+    capture_fn: *const fn (*anyopaque, u64, []const u8, McpSecretSlot) anyerror!McpHostOutcome,
+    authorize_fn: *const fn (*anyopaque, u64, []const u8) anyerror!McpAuthorizationStartOutcome,
+    cancel_fn: *const fn (*anyopaque, []const u8) McpHostOutcome,
+};
+
 pub const Dispatcher = struct {
     workbench: ?*workbench_api.Workbench,
     account_commands: account_contract.AccountCommandSink,
     platform: Platform,
     automation: AutomationAuthority,
+    mcp_management_host: ?McpManagementHost = null,
     bootstrap_window_id: native_sdk.platform.WindowId,
     delivery: product_delivery.Delivery,
     callbacks: callback_gate.State = .{},
@@ -186,8 +220,15 @@ pub const Dispatcher = struct {
             .{ .name = commands.retry_skill, .function = retrySkill },
             .{ .name = commands.export_skill, .function = exportSkill },
             .{ .name = commands.skill_detail, .function = skillDetail },
+            .{ .name = commands.mcp_create_stdio_server, .function = createMcpStdioServer },
             .{ .name = commands.mcp_create_http_server, .function = createMcpHttpServer },
+            .{ .name = commands.mcp_update_stdio_connection, .function = updateMcpStdioConnection },
+            .{ .name = commands.mcp_update_http_connection, .function = updateMcpHttpConnection },
             .{ .name = commands.mcp_rename_server, .function = renameMcpServer },
+            .{ .name = commands.mcp_approve_connection, .function = approveMcpConnection },
+            .{ .name = commands.mcp_capture_secret, .function = captureMcpSecret },
+            .{ .name = commands.mcp_authorize_oauth, .function = authorizeMcpOauth },
+            .{ .name = commands.mcp_cancel_authorization, .function = cancelMcpAuthorization },
             .{ .name = commands.mcp_set_server_enabled, .function = setMcpServerEnabled },
             .{ .name = commands.mcp_set_allowed_tools, .function = setMcpAllowedTools },
             .{ .name = commands.mcp_remove_server, .function = removeMcpServer },
@@ -246,7 +287,17 @@ pub const Dispatcher = struct {
     }
 
     pub fn detachWorkbench(self: *Dispatcher) void {
+        self.mcp_management_host = null;
         self.workbench = null;
+    }
+
+    pub fn attachMcpManagementHost(
+        self: *Dispatcher,
+        host: McpManagementHost,
+    ) void {
+        std.debug.assert(self.workbench != null);
+        std.debug.assert(self.mcp_management_host == null);
+        self.mcp_management_host = host;
     }
 
     pub fn breakConnection(self: *Dispatcher) void {
@@ -1505,6 +1556,42 @@ pub const Dispatcher = struct {
         return writer.buffered();
     }
 
+    fn createMcpStdioServer(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayloadWithLimit(
+            handlers.McpCreateStdioServer,
+            invocation.request.payload,
+            256 * 1024,
+        );
+        defer parsed.deinit();
+        try validateMcpConnectionFields(
+            parsed.value.negotiation,
+            parsed.value.timeoutMs,
+            parsed.value.arguments,
+            parsed.value.environmentNames,
+        );
+        const expected = try handlers.parseWireId(parsed.value.expectedDesiredGeneration);
+        const workbench = try self.requireWorkbench();
+        const outcome = try workbench.createMcpStdioServer(expected, .{
+            .display_name = parsed.value.displayName,
+            .negotiation = parsed.value.negotiation,
+            .timeout_ms = parsed.value.timeoutMs,
+            .command = parsed.value.command,
+            .arguments = parsed.value.arguments,
+            .cwd = parsed.value.cwd,
+            .auth_mode = if (parsed.value.environmentNames.len == 0) .none else .static,
+            .environment_names = parsed.value.environmentNames,
+        });
+        return self.finishMcpMutation(workbench, output, outcome);
+    }
+
     fn createMcpHttpServer(
         context: *anyopaque,
         invocation: native_sdk.bridge.Invocation,
@@ -1520,11 +1607,124 @@ pub const Dispatcher = struct {
             8 * 1024,
         );
         defer parsed.deinit();
+        try validateMcpConnectionFields(
+            parsed.value.negotiation,
+            parsed.value.timeoutMs,
+            &.{},
+            parsed.value.headerNames,
+        );
         const expected = try handlers.parseWireId(parsed.value.expectedDesiredGeneration);
         const workbench = try self.requireWorkbench();
-        const outcome = try workbench.createMcpHttpServer(expected, .{
+        const outcome = if (std.mem.eql(u8, parsed.value.authMode, "oauth")) oauth: {
+            if (parsed.value.headerNames.len != 0) return error.InvalidBridgePayload;
+            break :oauth try workbench.createMcpOauthHttpServer(expected, .{
+                .display_name = parsed.value.displayName,
+                .negotiation = parsed.value.negotiation,
+                .timeout_ms = parsed.value.timeoutMs,
+                .url = parsed.value.endpoint,
+                .client = try mcpOauthClientPlan(parsed.value.registration),
+            });
+        } else try workbench.createMcpHttpServer(expected, .{
             .display_name = parsed.value.displayName,
+            .negotiation = parsed.value.negotiation,
+            .timeout_ms = parsed.value.timeoutMs,
             .url = parsed.value.endpoint,
+            .auth_mode = try mcpStaticAuthMode(
+                parsed.value.authMode,
+                parsed.value.registration,
+                parsed.value.headerNames,
+            ),
+            .header_names = parsed.value.headerNames,
+        });
+        return self.finishMcpMutation(workbench, output, outcome);
+    }
+
+    fn updateMcpStdioConnection(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayloadWithLimit(
+            handlers.McpUpdateStdioConnection,
+            invocation.request.payload,
+            256 * 1024,
+        );
+        defer parsed.deinit();
+        try validateMcpConnectionFields(
+            parsed.value.negotiation,
+            parsed.value.timeoutMs,
+            parsed.value.arguments,
+            parsed.value.environmentNames,
+        );
+        const expected = try handlers.parseWireId(parsed.value.expectedDesiredGeneration);
+        const workbench = try self.requireWorkbench();
+        if (workbench.mcpServerOperationBusy(parsed.value.serverId))
+            return encodeMcpTypedOutcome(output, "busy", null);
+        const outcome = try workbench.updateMcpStdioConnection(expected, .{
+            .server_id = parsed.value.serverId,
+            .display_name = parsed.value.displayName,
+            .negotiation = parsed.value.negotiation,
+            .timeout_ms = parsed.value.timeoutMs,
+            .command = parsed.value.command,
+            .arguments = parsed.value.arguments,
+            .cwd = parsed.value.cwd,
+            .auth_mode = if (parsed.value.environmentNames.len == 0) .none else .static,
+            .environment_names = parsed.value.environmentNames,
+        });
+        return self.finishMcpMutation(workbench, output, outcome);
+    }
+
+    fn updateMcpHttpConnection(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayloadWithLimit(
+            handlers.McpUpdateHttpConnection,
+            invocation.request.payload,
+            256 * 1024,
+        );
+        defer parsed.deinit();
+        try validateMcpConnectionFields(
+            parsed.value.negotiation,
+            parsed.value.timeoutMs,
+            &.{},
+            parsed.value.headerNames,
+        );
+        const expected = try handlers.parseWireId(parsed.value.expectedDesiredGeneration);
+        const workbench = try self.requireWorkbench();
+        if (workbench.mcpServerOperationBusy(parsed.value.serverId))
+            return encodeMcpTypedOutcome(output, "busy", null);
+        const outcome = if (std.mem.eql(u8, parsed.value.authMode, "oauth")) oauth: {
+            if (parsed.value.headerNames.len != 0) return error.InvalidBridgePayload;
+            break :oauth try workbench.updateMcpOauthHttpConnection(expected, .{
+                .server_id = parsed.value.serverId,
+                .display_name = parsed.value.displayName,
+                .negotiation = parsed.value.negotiation,
+                .timeout_ms = parsed.value.timeoutMs,
+                .url = parsed.value.endpoint,
+                .client = try mcpOauthClientPlan(parsed.value.registration),
+            });
+        } else try workbench.updateMcpHttpConnection(expected, .{
+            .server_id = parsed.value.serverId,
+            .display_name = parsed.value.displayName,
+            .negotiation = parsed.value.negotiation,
+            .timeout_ms = parsed.value.timeoutMs,
+            .url = parsed.value.endpoint,
+            .auth_mode = try mcpStaticAuthMode(
+                parsed.value.authMode,
+                parsed.value.registration,
+                parsed.value.headerNames,
+            ),
+            .header_names = parsed.value.headerNames,
         });
         return self.finishMcpMutation(workbench, output, outcome);
     }
@@ -1545,11 +1745,137 @@ pub const Dispatcher = struct {
         defer parsed.deinit();
         const expected = try handlers.parseWireId(parsed.value.expectedDesiredGeneration);
         const workbench = try self.requireWorkbench();
+        if (workbench.mcpServerOperationBusy(parsed.value.serverId))
+            return encodeMcpTypedOutcome(output, "busy", null);
         const outcome = try workbench.renameMcpServer(expected, .{
             .server_id = parsed.value.serverId,
             .display_name = parsed.value.displayName,
         });
         return self.finishMcpMutation(workbench, output, outcome);
+    }
+
+    fn approveMcpConnection(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(handlers.McpServerIdentity, invocation.request.payload);
+        defer parsed.deinit();
+        const expected = try handlers.parseWireId(parsed.value.expectedDesiredGeneration);
+        const workbench = try self.requireWorkbench();
+        if (workbench.mcpServerOperationBusy(parsed.value.serverId))
+            return encodeMcpTypedOutcome(output, "busy", null);
+        const host = self.mcp_management_host orelse
+            return self.finishMcpHostMutation(workbench, output, .capability_unavailable);
+        const outcome = try host.approve_fn(host.context, expected, parsed.value.serverId);
+        return self.finishMcpHostMutation(workbench, output, outcome);
+    }
+
+    fn captureMcpSecret(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayloadWithLimit(
+            handlers.McpCaptureSecret,
+            invocation.request.payload,
+            8 * 1024,
+        );
+        defer parsed.deinit();
+        const expected = try handlers.parseWireId(parsed.value.expectedDesiredGeneration);
+        const workbench = try self.requireWorkbench();
+        if (workbench.mcpServerOperationBusy(parsed.value.serverId))
+            return encodeMcpTypedOutcome(output, "busy", null);
+        const slot: McpSecretSlot = if (std.mem.eql(u8, parsed.value.slot.kind, "stdio_environment"))
+            .{ .stdio_environment = parsed.value.slot.name orelse return error.InvalidBridgePayload }
+        else if (std.mem.eql(u8, parsed.value.slot.kind, "http_header"))
+            .{ .http_header = parsed.value.slot.name orelse return error.InvalidBridgePayload }
+        else if (std.mem.eql(u8, parsed.value.slot.kind, "oauth_client_secret") and
+            parsed.value.slot.name == null)
+            .oauth_client_secret
+        else
+            return error.InvalidBridgePayload;
+        const host = self.mcp_management_host orelse
+            return self.finishMcpHostMutation(workbench, output, .capability_unavailable);
+        const outcome = try host.capture_fn(
+            host.context,
+            expected,
+            parsed.value.serverId,
+            slot,
+        );
+        return self.finishMcpHostMutation(workbench, output, outcome);
+    }
+
+    fn authorizeMcpOauth(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(handlers.McpServerIdentity, invocation.request.payload);
+        defer parsed.deinit();
+        const expected = try handlers.parseWireId(parsed.value.expectedDesiredGeneration);
+        const workbench = try self.requireWorkbench();
+        if (workbench.mcpServerOperationBusy(parsed.value.serverId)) return std.fmt.bufPrint(
+            output,
+            "{{\"outcome\":\"busy\",\"operationId\":null}}",
+            .{},
+        );
+        const host = self.mcp_management_host orelse return std.fmt.bufPrint(
+            output,
+            "{{\"outcome\":\"capability_unavailable\",\"operationId\":null}}",
+            .{},
+        );
+        return switch (try host.authorize_fn(host.context, expected, parsed.value.serverId)) {
+            .started => |operation_id| started: {
+                self.notifyCommitted();
+                break :started std.fmt.bufPrint(
+                    output,
+                    "{{\"outcome\":\"started\",\"operationId\":{f}}}",
+                    .{std.json.fmt(operation_id, .{})},
+                );
+            },
+            .rejected => std.fmt.bufPrint(output, "{{\"outcome\":\"rejected\",\"operationId\":null}}", .{}),
+            .stale_generation => std.fmt.bufPrint(output, "{{\"outcome\":\"stale_generation\",\"operationId\":null}}", .{}),
+            .capability_unavailable => std.fmt.bufPrint(output, "{{\"outcome\":\"capability_unavailable\",\"operationId\":null}}", .{}),
+        };
+    }
+
+    fn cancelMcpAuthorization(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(
+            handlers.McpCancelAuthorization,
+            invocation.request.payload,
+        );
+        defer parsed.deinit();
+        const host = self.mcp_management_host orelse return std.fmt.bufPrint(
+            output,
+            "{{\"outcome\":\"capability_unavailable\"}}",
+            .{},
+        );
+        const outcome = host.cancel_fn(host.context, parsed.value.operationId);
+        if (outcome == .cancelled or outcome == .saved or
+            outcome == .saved_recovery_required or outcome == .indeterminate)
+            self.notifyCommitted();
+        return std.fmt.bufPrint(output, "{{\"outcome\":\"{s}\"}}", .{@tagName(outcome)});
     }
 
     fn setMcpServerEnabled(
@@ -1568,6 +1894,8 @@ pub const Dispatcher = struct {
         defer parsed.deinit();
         const expected = try handlers.parseWireId(parsed.value.expectedDesiredGeneration);
         const workbench = try self.requireWorkbench();
+        if (workbench.mcpServerOperationBusy(parsed.value.serverId))
+            return encodeMcpTypedOutcome(output, "busy", null);
         const outcome = try workbench.setMcpServerEnabled(expected, .{
             .server_id = parsed.value.serverId,
             .enabled = parsed.value.enabled,
@@ -1593,6 +1921,8 @@ pub const Dispatcher = struct {
         try validateMcpToolNames(parsed.value.toolNames);
         const expected = try handlers.parseWireId(parsed.value.expectedDesiredGeneration);
         const workbench = try self.requireWorkbench();
+        if (workbench.mcpServerOperationBusy(parsed.value.serverId))
+            return encodeMcpTypedOutcome(output, "busy", null);
         const outcome = try workbench.setMcpAllowedTools(expected, .{
             .server_id = parsed.value.serverId,
             .tools = parsed.value.toolNames,
@@ -1616,6 +1946,8 @@ pub const Dispatcher = struct {
         defer parsed.deinit();
         const expected = try handlers.parseWireId(parsed.value.expectedDesiredGeneration);
         const workbench = try self.requireWorkbench();
+        if (workbench.mcpServerOperationBusy(parsed.value.serverId))
+            return encodeMcpTypedOutcome(output, "busy", null);
         const outcome = try workbench.removeMcpServer(expected, parsed.value.serverId);
         return self.finishMcpMutation(workbench, output, outcome);
     }
@@ -1685,6 +2017,108 @@ pub const Dispatcher = struct {
             "{{\"outcome\":\"{s}\",\"desiredGeneration\":null}}",
             .{@tagName(outcome)},
         );
+    }
+
+    fn finishMcpHostMutation(
+        self: *Dispatcher,
+        workbench: *workbench_api.Workbench,
+        output: []u8,
+        outcome: McpHostOutcome,
+    ) ![]const u8 {
+        if (outcome == .saved or outcome == .saved_recovery_required or
+            outcome == .indeterminate)
+            self.notifyCommitted();
+        const inspection = workbench.inspectMcpDesiredConfiguration();
+        const generation: ?u64 = if (outcome == .indeterminate)
+            null
+        else if (inspection) |value|
+            if (value.health == .outcome_unknown)
+                null
+            else
+                value.desired_generation orelse if (value.health == .ready) 0 else null
+        else
+            null;
+        return encodeMcpTypedOutcome(output, @tagName(outcome), generation);
+    }
+
+    fn encodeMcpTypedOutcome(
+        output: []u8,
+        outcome: []const u8,
+        generation: ?u64,
+    ) ![]const u8 {
+        if (generation) |value| return std.fmt.bufPrint(
+            output,
+            "{{\"outcome\":\"{s}\",\"desiredGeneration\":\"{d}\"}}",
+            .{ outcome, value },
+        );
+        return std.fmt.bufPrint(
+            output,
+            "{{\"outcome\":\"{s}\",\"desiredGeneration\":null}}",
+            .{outcome},
+        );
+    }
+
+    fn mcpStaticAuthMode(
+        value: []const u8,
+        registration: ?handlers.McpOauthRegistration,
+        slot_names: []const []const u8,
+    ) !workbench_api.McpStaticAuthMode {
+        if (registration != null) return error.InvalidBridgePayload;
+        if (std.mem.eql(u8, value, "none")) {
+            if (slot_names.len != 0) return error.InvalidBridgePayload;
+            return .none;
+        }
+        if (std.mem.eql(u8, value, "static")) {
+            if (slot_names.len == 0) return error.InvalidBridgePayload;
+            return .static;
+        }
+        return error.InvalidBridgePayload;
+    }
+
+    fn mcpOauthClientPlan(
+        registration: ?handlers.McpOauthRegistration,
+    ) !workbench_api.McpOauthClientPlan {
+        const value = registration orelse return error.InvalidBridgePayload;
+        if (std.mem.eql(u8, value.kind, "automatic")) {
+            if (value.clientId != null or value.tokenEndpointAuthMethod != null)
+                return error.InvalidBridgePayload;
+            return .dynamic_registration;
+        }
+        if (!std.mem.eql(u8, value.kind, "pre_registered"))
+            return error.InvalidBridgePayload;
+        const client_id = value.clientId orelse return error.InvalidBridgePayload;
+        if (client_id.len == 0) return error.InvalidBridgePayload;
+        const method = value.tokenEndpointAuthMethod orelse
+            return error.InvalidBridgePayload;
+        if (!std.mem.eql(u8, method, "none") and
+            !std.mem.eql(u8, method, "client_secret_basic") and
+            !std.mem.eql(u8, method, "client_secret_post"))
+            return error.InvalidBridgePayload;
+        return .{ .pre_registered = .{
+            .client_id = client_id,
+            .token_endpoint_auth_method = method,
+        } };
+    }
+
+    fn validateMcpConnectionFields(
+        negotiation: []const u8,
+        timeout_ms: u32,
+        arguments: []const []const u8,
+        slot_names: []const []const u8,
+    ) !void {
+        if ((!std.mem.eql(u8, negotiation, "automatic") and
+            !std.mem.eql(u8, negotiation, "modern_only") and
+            !std.mem.eql(u8, negotiation, "compat_only")) or timeout_ms == 0 or
+            arguments.len > 256 or slot_names.len > 256)
+            return error.InvalidBridgePayload;
+        for (arguments) |argument| if (argument.len > 4096 or
+            !std.unicode.utf8ValidateSlice(argument)) return error.InvalidBridgePayload;
+        for (slot_names, 0..) |name, index| {
+            if (name.len == 0 or name.len > 256 or !std.unicode.utf8ValidateSlice(name))
+                return error.InvalidBridgePayload;
+            for (slot_names[0..index]) |previous|
+                if (std.ascii.eqlIgnoreCase(previous, name)) return error.InvalidBridgePayload;
+        }
     }
 
     fn validateMcpToolNames(names: []const []const u8) !void {
@@ -2519,6 +2953,55 @@ fn decodeUiResponse(request: handlers.UiResponseRequest) !workbench_api.UiRespon
         } };
     }
     return error.InvalidUiResponse;
+}
+
+test "MCP Bridge keeps OAuth client authentication explicit and bounded" {
+    try std.testing.expectError(
+        error.InvalidBridgePayload,
+        Dispatcher.mcpOauthClientPlan(.{
+            .kind = "automatic",
+            .clientId = "renderer-must-not-supply-this",
+        }),
+    );
+    try std.testing.expectError(
+        error.InvalidBridgePayload,
+        Dispatcher.mcpOauthClientPlan(.{
+            .kind = "pre_registered",
+            .clientId = "client-1",
+        }),
+    );
+    try std.testing.expectError(
+        error.InvalidBridgePayload,
+        Dispatcher.mcpOauthClientPlan(.{
+            .kind = "pre_registered",
+            .clientId = "client-1",
+            .tokenEndpointAuthMethod = "guess",
+        }),
+    );
+    const basic = try Dispatcher.mcpOauthClientPlan(.{
+        .kind = "pre_registered",
+        .clientId = "client-1",
+        .tokenEndpointAuthMethod = "client_secret_basic",
+    });
+    switch (basic) {
+        .pre_registered => |client| {
+            try std.testing.expectEqualStrings("client-1", client.client_id);
+            try std.testing.expectEqualStrings(
+                "client_secret_basic",
+                client.token_endpoint_auth_method,
+            );
+        },
+        .dynamic_registration => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectError(
+        error.InvalidBridgePayload,
+        Dispatcher.validateMcpConnectionFields(
+            "automatic",
+            30_000,
+            &.{},
+            &.{ "Authorization", "authorization" },
+        ),
+    );
 }
 
 test "permission command ingress rejects unsupported persistent choices" {

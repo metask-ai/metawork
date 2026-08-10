@@ -296,13 +296,13 @@ Skills                                                              10
 
 ### 5.4 MCP 服务
 
-> Capability：**当前**。Renderer 通过 revision 1 strict snapshot 与 typed command 管理 Workbench-owned Desired Registry；Runtime/catalog availability 和 Admission Authority 仍是独立 Host 事实。管理 temporarily frozen、Runtime unavailable 或 registry 为空时页面保持可达并呈现真实恢复面，不能隐藏成没有服务或自行猜测可用动作。
+> Capability：**目标合同**。Renderer 通过 revision 1 strict snapshot 与 transport-discriminated typed command 管理 Workbench-owned Desired Registry；Runtime/catalog availability、secure secret capture、OAuth operation 和 Admission Authority 是彼此独立的 Host capability/state。任一能力不可用时页面保持可达并只呈现真实可用动作。
 
 MCP 页面沿用 Skill 中心约 944 px 的内容宽度、24–28 px 标题尺度、搜索和行动优先分组，但对象密度不同：Skill 是需要辨识内容的资产卡片，MCP server 是需要快速扫描连接状态的单列连续行。
 
 ```text
 MCP                                                        [ Add server ]
-Manage servers and the tools available to new tasks.
+Connect trusted servers and choose tools available to new tasks.
 
 [ Search servers and tools                              ] [ Refresh ]
 
@@ -310,26 +310,27 @@ Restart MetaWork to apply connection changes.
 New tasks will not use MCP until restart. Open tasks keep their current access.
 
 Needs attention
-┃ Search             search          HTTP       Restart required
+┃ Search             search          HTTP · OAuth       Sign in
+┃ Filesystem         local_files     stdio              Review connection
 
 Available servers
-┃ GitHub             github          HTTP       2 of 5 tools available
+┃ GitHub             github          HTTP · OAuth       2 of 5 tools available
 
 Disabled
-┃ Filesystem         local_files     stdio      Disabled
+┃ Local database     local_db        stdio · static      Disabled
 ```
 
-- Header 只有 `Add server` 主动作与 `Refresh` 次级动作。Add drawer 第一阶段只接受 display name 与无认证 HTTPS/精确 loopback HTTP endpoint；Host 生成 identity/namespace，新 server 默认 disabled、allowlist 为空。页面不接受自定义 header、secret、OAuth、任意 stdio command/argv 或完整配置导入；
-- 分组顺序固定为 `Needs attention / Available servers / Disabled`，空分组不渲染；状态同时使用细色轨、文字和语义图标，不能只靠颜色。`needs_authentication / unreachable / invalid_catalog / restart_required / management recovery` 进入 attention；
-- 每行以服务 display name 为主标题，namespace 使用 monospace，右侧依次放连接类型、工具授权摘要和结构化状态。desired enabled、Runtime health 与 new Task access 必须分开；搜索只覆盖 display name、namespace、transport 与 Host 发布的 canonical tool name，不检索 Renderer 不持有的 schema 或原始配置；
-- 点击行打开右侧详情 drawer，窄窗为整页。详情按 `Configuration / Runtime / Tools` 排列：Configuration 只显示安全 desired facts 与 Rename、Enable/Disable、Delete；Runtime 显示 typed health、safe diagnostic、runtime alignment 和 Refresh；Tools 显示 discovered、desired allowed 与 available to new tasks 三个事实并提供逐项开关。新发现工具默认关闭，配置中保留但当前未发现的工具必须明确标记 unavailable，不能静默丢失；
+- Header 只有 `Add server` 主动作与 `Refresh` 次级动作。Add drawer 第一步必须显式选择 `STDIO` 或 `Streamable HTTP`，随后使用不同表单，不能在同一字段组里用 URL/command 的可空组合猜 transport。两种表单都提供 name、协议策略（Automatic / 2026-07-28 / 2025-11-25）和 timeout；STDIO 额外提供 executable、ordered arguments、可选 cwd 与 environment rows，Streamable HTTP 额外提供 endpoint、`None / Static / OAuth` auth mode 与 header names。OAuth 的 `Client registration` 提供 `Automatic` 与 `Existing client`：Automatic 只在 discovery metadata 明确支持 DCR 时继续；Existing client 接受公开 client id，并显式选择 `none | client_secret_basic | client_secret_post` token endpoint auth method；需要的 client secret 在保存后走 Host secure capture。没有 stable HTTPS client metadata capability 时不显示 CIMD。OAuth 不出现在 STDIO；不提供 legacy SSE、JSON import 或 generic advanced blob。
+- Add 只保存默认 disabled、unapproved、空 allowlist 的公开配置，不产生 child/network/credential/browser effect。保存后进入 `Review connection`：Renderer 只读展示不含完整连接的安全摘要，Host 原生 approval surface 展示 canonical executable/argv/cwd/env names 或 endpoint/header names、auth mode 与协议策略，并通过单一 `Approve connection` 动作持久化 fingerprint。任何被绑定字段变化都会回到 unapproved；Renderer 不自行比较 fingerprint。
+- Connection approval 后按 auth mode 收敛：None 进入 ready-to-enable；Static 对每个 secret slot 只显示 `Set / Replace / Missing` 和 Host secure-capture 动作，secret 从不进入 DOM、Bridge payload 或 snapshot，`mcpSecretCapture = false` 时动作隐藏且状态明确为 Host capability unavailable；OAuth 先显示 discovery progress，再由 Host-owned consent 展示 canonical resource、exact issuer、requested scopes、redirect 与 registration plan，用户确认后才打开系统浏览器。缺少 DCR 与 pre-registered client 时回到可操作的 `Existing client required`，不泛化成 unreachable。OAuth operation 全局占用时，其他 OAuth action 显示 busy，目标 server 的编辑/删除/授权动作禁用；其他 server 管理和普通 Task 不被冻结。
+- 分组顺序固定为 `Needs attention / Available servers / Disabled`，空分组不渲染；状态同时使用细色轨、文字和语义图标。`unapproved / missing_static_secret / missing_oauth_client_secret / oauth_consent_required / oauth_in_progress / reauth_required / unreachable / invalid_catalog / restart_required / management recovery` 进入 attention；每行以 display name 为主标题，namespace 使用 monospace，右侧依次显示 transport + auth、工具授权摘要和结构化状态。desired enabled、approval/auth、Runtime health 与 new Task access 必须分开。
+- 点击行打开右侧详情 drawer，窄窗为整页。详情按 `Connection / Authorization / Runtime / Tools` 排列：Connection 显示安全配置摘要和 Rename/Edit/Review；Authorization 显示 approval/consent/credential 状态与当前唯一动作；Runtime 显示 typed health、safe diagnostic、runtime alignment 和 Refresh；Tools 显示 discovered、desired allowed 与 available to new tasks 三个事实并提供逐项开关。新发现工具默认关闭，配置中保留但当前未发现的工具明确标记 unavailable。
 - `runtimeAlignment = current` 时，Rename 和 tool-only mutation 可以在 Host 成功提交后立即影响页面与后续新 Task；loaded server 的启停、删除或连接配置变化进入 `restart_required`。新增/删除 disabled server 或删除仍 invalid/missing-auth 的未加载 server 不得错误关闭其他 MCP。配置完整恢复到当前 Runtime Manifest 可证明的状态时，restart banner 必须消失；
 - `restart_required` banner 必须说明“重启前新任务不会使用 MCP；已打开任务保持当前权限”。Enable/Disable/Delete 确认不得暗示既有 Task 已撤权；本期没有既有 Session 热更新或紧急撤权能力。`runtimeAlignment = unknown` 或 management outcome unknown 时禁用普通编辑，隐藏未经确认的 desired 列表并提供重启/恢复说明；
-- Refresh 只刷新当前 Runtime catalog，不应用 pending connection configuration。refreshing 时禁用会与 catalog/authority 冲突的动作；失败保持 fail-closed new Task access，不恢复旧 catalog selection。页面导航与普通 Task 不被冻结；
-- `redacted = true` 时详情明确说明 Host 移除了敏感文本；Renderer 不展示或重建 command、args、environment、完整 URL、headers、credential、OAuth 数据、raw diagnostic、schema body、Runtime/absence fingerprint 或 AgentCore handle；
-- Rename、Enable/Disable、Delete 与工具开关都使用当前 `expectedDesiredGeneration`，stale result 触发完整 snapshot resync，不在 Renderer 合并 registry。command pending 只禁用同一 server 的冲突动作；outcome unknown 由顶层 management health 接管，不能盲目重试；
-- 空 registry 是可管理的正常空状态，显示 Add server；management capability 未接通才显示不可用说明。没有 MetaWork-owned 可信 catalog、签名与 publisher verification 前不显示 marketplace、推荐、publisher trust、Resources、Prompts、Apps 或占位入口；
-- 交互基线参考 VS Code、Claude、Cursor、Continue 与 Hermes Desktop 的成熟 MCP 组织方式。配置/目录/工具分层、默认关闭新服务、逐服务工具范围与显式 reload 被吸收为约束；MetaWork 不复制其配置格式、市场数据或 publisher 信任结论。
+- Refresh 只刷新当前 Runtime catalog，不应用 pending connection configuration，也不隐式发起 OAuth。refreshing 时禁用会与 catalog/authority 冲突的动作；失败保持 fail-closed new Task access，不恢复旧 catalog selection。OAuth success/refresh 只有同一 consent epoch 的 token revision 可以原子替换 Runtime HTTP auth snapshot；已开始的请求完成后才释放旧 snapshot，既有 Session 的 tool selection 不变。`reauth_required` 禁止新 Task 获得该 server，但不宣称已撤销既有 Session authority。401/403 scope challenge 进入 `Sign in again`，consent 显示原 scopes 与新 challenge scopes 的 union，不自动循环重试失败 tool call。
+- Host projection 只发布 executable basename 或 endpoint origin 等安全摘要、environment/header names、协议/auth 类型和 typed 状态。`redacted = true` 时明确说明 Host 移除了敏感文本；Renderer 不展示或重建完整 command/argv/cwd、environment/header value、完整 URL、credential、token、code、PKCE、raw OAuth document、schema、fingerprint 或 AgentCore handle。
+- 所有 mutation 使用当前 `expectedDesiredGeneration`，长 OAuth 流程额外使用 opaque server-bound operation id；无关 server mutation 不使 operation stale，Renderer 不参与 rebase。outcome unknown 由顶层 management health 接管，不能盲目重试；启动发现遗留 OAuth operation 时只提供 `Sign in again`，不提供 Resume。Cancel 若发生在 DCR/token request 可能发送之后，结果必须显示 `Sign in again` 而不是 `Cancelled`。DCR outcome unknown 的说明必须明确再次尝试可能在远端创建另一个 client，不能暗示 MetaWork 已撤销或复用了未知 registration。
+- 空 registry 是可管理的正常空状态，显示 Add server；management capability 未接通才显示不可用说明。没有 MetaWork-owned 可信 catalog、签名与 publisher verification 前不显示 marketplace、推荐、publisher trust、Resources、Prompts、Apps、Tasks、Workspace override 或占位入口。交互基线参考 VS Code、Claude、Cursor、Continue 与 Hermes Desktop，但不复制其配置格式、市场数据或信任结论。
 
 ### 5.5 定时任务
 

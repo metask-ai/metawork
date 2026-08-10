@@ -23,8 +23,15 @@ pub const uninstall_skill = "metawork.skills.uninstall";
 pub const retry_skill = "metawork.skills.retry";
 pub const export_skill = "metawork.skills.export";
 pub const skill_detail = "metawork.skills.detail";
+pub const mcp_create_stdio_server = "metawork.mcp.createStdioServer";
 pub const mcp_create_http_server = "metawork.mcp.createHttpServer";
+pub const mcp_update_stdio_connection = "metawork.mcp.updateStdioConnection";
+pub const mcp_update_http_connection = "metawork.mcp.updateHttpConnection";
 pub const mcp_rename_server = "metawork.mcp.renameServer";
+pub const mcp_approve_connection = "metawork.mcp.approveConnection";
+pub const mcp_capture_secret = "metawork.mcp.captureSecret";
+pub const mcp_authorize_oauth = "metawork.mcp.authorizeOAuth";
+pub const mcp_cancel_authorization = "metawork.mcp.cancelAuthorization";
 pub const mcp_set_server_enabled = "metawork.mcp.setServerEnabled";
 pub const mcp_set_allowed_tools = "metawork.mcp.setAllowedTools";
 pub const mcp_remove_server = "metawork.mcp.removeServer";
@@ -77,8 +84,15 @@ pub const product = [_][]const u8{
     retry_skill,
     export_skill,
     skill_detail,
+    mcp_create_stdio_server,
     mcp_create_http_server,
+    mcp_update_stdio_connection,
+    mcp_update_http_connection,
     mcp_rename_server,
+    mcp_approve_connection,
+    mcp_capture_secret,
+    mcp_authorize_oauth,
+    mcp_cancel_authorization,
     mcp_set_server_enabled,
     mcp_set_allowed_tools,
     mcp_remove_server,

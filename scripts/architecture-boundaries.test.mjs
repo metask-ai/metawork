@@ -1371,12 +1371,19 @@ test("Renderer Bridge fixed revision 1 owns the exact product wire catalog", () 
       command.startsWith("metawork.mcp."),
     ),
     [
+      "metawork.mcp.approveConnection",
+      "metawork.mcp.authorizeOAuth",
+      "metawork.mcp.cancelAuthorization",
+      "metawork.mcp.captureSecret",
       "metawork.mcp.createHttpServer",
+      "metawork.mcp.createStdioServer",
       "metawork.mcp.refreshCatalog",
       "metawork.mcp.removeServer",
       "metawork.mcp.renameServer",
       "metawork.mcp.setAllowedTools",
       "metawork.mcp.setServerEnabled",
+      "metawork.mcp.updateHttpConnection",
+      "metawork.mcp.updateStdioConnection",
     ],
   );
   assert.doesNotMatch(zigCommands, /mcp\.(?:upsert|configure|setCredential)/i);
@@ -1440,7 +1447,7 @@ test("Renderer Bridge fixed revision 1 owns the exact product wire catalog", () 
   assert.match(projection, /\\"input\\":/);
   const mcpProjection = projection.slice(
     projection.indexOf("fn writeMcpProjection"),
-    projection.indexOf("pub fn finalizeMarkedTerminalRunsAfterEventDrain"),
+    projection.indexOf("fn finalizeMarkedTerminalRunsAfterEventDrain"),
   );
   assert.doesNotMatch(
     mcpProjection,

@@ -7,6 +7,9 @@ import {
 import type { NativeSdkJson, NativeSdkShortcutDetail } from "@native-sdk/cli";
 import type {
   HostSignal,
+  McpHttpConnectionInput,
+  McpSecretSlot,
+  McpStdioConnectionInput,
   ScheduledTaskMutation,
   TaskRunInput,
   TaskWorkspaceIntent,
@@ -44,6 +47,8 @@ import {
   decodeSkillDetailResult,
   decodeMcpMutationResult,
   decodeMcpRefreshResult,
+  decodeMcpAuthorizationResult,
+  decodeMcpAuthorizationCancelResult,
 } from "./decode-contracts.ts";
 import { RendererBridgeContractError } from "./contract-error.ts";
 import { fetchWorkbenchSnapshot } from "./snapshot/snapshot-client.ts";
@@ -261,16 +266,54 @@ export class BridgeClient {
     );
   }
 
+  async createMcpStdioServer(
+    expectedDesiredGeneration: string,
+    input: McpStdioConnectionInput,
+  ) {
+    return decodeMcpMutationResult(
+      await this.invoke(commands.mcpCreateStdioServer, {
+        expectedDesiredGeneration,
+        ...input,
+      }),
+    );
+  }
+
   async createMcpHttpServer(
     expectedDesiredGeneration: string,
-    displayName: string,
-    endpoint: string,
+    input: McpHttpConnectionInput,
   ) {
     return decodeMcpMutationResult(
       await this.invoke(commands.mcpCreateHttpServer, {
         expectedDesiredGeneration,
-        displayName,
-        endpoint,
+        ...input,
+      }),
+    );
+  }
+
+  async updateMcpStdioConnection(
+    expectedDesiredGeneration: string,
+    serverId: string,
+    input: McpStdioConnectionInput,
+  ) {
+    return decodeMcpMutationResult(
+      await this.invoke(commands.mcpUpdateStdioConnection, {
+        expectedDesiredGeneration,
+        serverId,
+        ...input,
+      }),
+    );
+  }
+
+  async updateMcpHttpConnection(
+    expectedDesiredGeneration: string,
+    serverId: string,
+    input: McpHttpConnectionInput,
+  ) {
+    return decodeMcpMutationResult(
+      await this.invoke(commands.mcpUpdateHttpConnection, {
+        expectedDesiredGeneration,
+        serverId,
+        ...input,
       }),
     );
   }
@@ -300,6 +343,47 @@ export class BridgeClient {
         serverId,
         enabled,
       }),
+    );
+  }
+
+  async approveMcpConnection(
+    expectedDesiredGeneration: string,
+    serverId: string,
+  ) {
+    return decodeMcpMutationResult(
+      await this.invoke(commands.mcpApproveConnection, {
+        expectedDesiredGeneration,
+        serverId,
+      }),
+    );
+  }
+
+  async captureMcpSecret(
+    expectedDesiredGeneration: string,
+    serverId: string,
+    slot: McpSecretSlot,
+  ) {
+    return decodeMcpMutationResult(
+      await this.invoke(commands.mcpCaptureSecret, {
+        expectedDesiredGeneration,
+        serverId,
+        slot,
+      }),
+    );
+  }
+
+  async authorizeMcpOAuth(expectedDesiredGeneration: string, serverId: string) {
+    return decodeMcpAuthorizationResult(
+      await this.invoke(commands.mcpAuthorizeOAuth, {
+        expectedDesiredGeneration,
+        serverId,
+      }),
+    );
+  }
+
+  async cancelMcpAuthorization(operationId: string) {
+    return decodeMcpAuthorizationCancelResult(
+      await this.invoke(commands.mcpCancelAuthorization, { operationId }),
     );
   }
 
