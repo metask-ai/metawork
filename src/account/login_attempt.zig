@@ -6,14 +6,14 @@ const loopback = @import("account_loopback");
 const metask = @import("metask_client");
 
 pub const WorkerResult = union(enum) {
-    authenticated: metask.LoginResult,
+    authorized: oauth.TokenSet,
     failed: state.WorkerFailure,
     consumed,
 
     pub fn take(self: *WorkerResult) WorkerResult {
         const result: WorkerResult = switch (self.*) {
-            .authenticated => |*login| .{
-                .authenticated = login.take(),
+            .authorized => |*tokens| .{
+                .authorized = tokens.take(),
             },
             .failed => |failure| .{ .failed = failure },
             .consumed => .consumed,
@@ -24,7 +24,7 @@ pub const WorkerResult = union(enum) {
 
     pub fn deinit(self: *WorkerResult) void {
         switch (self.*) {
-            .authenticated => |*login| login.deinit(),
+            .authorized => |*tokens| tokens.deinit(),
             .failed, .consumed => {},
         }
         self.* = .consumed;
@@ -203,7 +203,7 @@ pub const LoginAttempt = struct {
                 self.sink.publish(self.attempt_id, &failure);
             },
             .code => |*code| {
-                var result = metask.exchangeAndIdentify(
+                var tokens = metask.exchangeAuthorizationCode(
                     self.allocator,
                     self.transport,
                     code,
@@ -224,9 +224,9 @@ pub const LoginAttempt = struct {
                     );
                     return;
                 };
-                defer result.deinit();
+                defer tokens.deinit();
                 var worker_result: WorkerResult = .{
-                    .authenticated = result.take(),
+                    .authorized = tokens.take(),
                 };
                 self.sink.publish(
                     self.attempt_id,
@@ -340,7 +340,7 @@ const BlockingTransport = struct {
     }
 };
 
-test "login attempt owns callback worker and publishes authenticated result once" {
+test "login attempt publishes exchanged tokens before identity lookup" {
     var fake_transport: FakeTransport = .{};
     var capture: CaptureSink = .{};
     var attempt: LoginAttempt = .{};
@@ -381,8 +381,9 @@ test "login attempt owns callback worker and publishes authenticated result once
     defer result.deinit();
     try std.testing.expectEqualStrings(
         "acct-1",
-        result.authenticated.identity.accountId(),
+        result.authorized.accountId(),
     );
+    try std.testing.expectEqual(@as(usize, 1), fake_transport.step);
 }
 
 test "cancel plus join publishes one typed cancellation" {

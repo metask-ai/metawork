@@ -97,6 +97,8 @@ pub const ClientError = error{
     DeadlineExceeded,
 };
 
+pub const AuthorizationResult = oauth.TokenSet;
+
 pub fn workerFailure(client_error: ClientError) state.WorkerFailure {
     return .fromCode(errorCode(client_error));
 }
@@ -114,29 +116,7 @@ pub fn errorCode(client_error: ClientError) contract.ErrorCode {
     };
 }
 
-pub const LoginResult = struct {
-    tokens: oauth.TokenSet,
-    identity: state.AccountIdentity,
-    owned: bool = true,
-
-    pub fn deinit(self: *LoginResult) void {
-        if (!self.owned) return;
-        self.tokens.deinit();
-        self.owned = false;
-    }
-
-    pub fn take(self: *LoginResult) LoginResult {
-        std.debug.assert(self.owned);
-        const result: LoginResult = .{
-            .tokens = self.tokens.take(),
-            .identity = self.identity,
-        };
-        self.owned = false;
-        return result;
-    }
-};
-
-pub fn exchangeAndIdentify(
+pub fn exchangeAuthorizationCode(
     allocator: std.mem.Allocator,
     transport: Transport,
     code: *const oauth.Secret,
@@ -144,7 +124,7 @@ pub fn exchangeAndIdentify(
     callback_port: u16,
     now_unix_seconds: i64,
     control: ?RequestControl,
-) ClientError!LoginResult {
+) ClientError!oauth.TokenSet {
     var request_body: [oauth.Limits.token_body_bytes]u8 = undefined;
     defer std.crypto.secureZero(u8, &request_body);
     const body = oauth.buildAuthorizationCodeBody(
@@ -161,28 +141,11 @@ pub fn exchangeAndIdentify(
     ) catch |err| return transportFailure(err);
     if (response.status != 200)
         return classifyStatus(response.status, true);
-    var tokens = oauth.parseTokenResponse(
+    return oauth.parseTokenResponse(
         allocator,
         response.body,
         now_unix_seconds,
     ) catch return error.ProtocolInvalid;
-    errdefer tokens.deinit();
-    const identity = fetchIdentity(transport, &tokens, control, true) catch |err| {
-        // Exchanging the authorization code is the OAuth commit boundary.
-        // The compatibility user read must not discard newly issued tokens.
-        if (err == error.Cancelled) return err;
-        const account_only = accountOnlyIdentity(&tokens) catch
-            return error.ProtocolInvalid;
-        return .{ .tokens = tokens.take(), .identity = account_only };
-    };
-    return .{ .tokens = tokens.take(), .identity = identity };
-}
-
-pub fn accountOnlyIdentity(tokens: *const oauth.TokenSet) !state.AccountIdentity {
-    return state.AccountIdentity.init(
-        tokens.accountId(),
-        tokens.accountId(),
-    );
 }
 
 pub fn refresh(
@@ -233,39 +196,26 @@ pub fn fetchIdentity(
     transport: Transport,
     tokens: *const oauth.TokenSet,
     control: ?RequestControl,
-    fetch_current_user: bool,
 ) ClientError!state.AccountIdentity {
-    var selected_current_user: ?oauth.CurrentUser = null;
-    if (fetch_current_user) {
-        var current_user_storage: [oauth.Limits.current_user_body_bytes]u8 = undefined;
-        defer std.crypto.secureZero(u8, &current_user_storage);
-        current_user: {
-            const response = transport.perform(
-                .{
-                    .kind = .current_user,
-                    .bearer = tokens.access_token.view(),
-                    .control = control,
-                },
-                &current_user_storage,
-            ) catch |err| {
-                const failure = transportFailure(err);
-                if (failure == error.Cancelled) return failure;
-                break :current_user;
-            };
-            if (response.status != 200) break :current_user;
-            selected_current_user = oauth.parseCurrentUser(
-                response.body,
-                tokens.accountId(),
-            ) catch break :current_user;
-        }
-    }
-    const display_name = if (selected_current_user) |*value|
-        value.usernameView()
-    else
-        tokens.accountId();
+    var current_user_storage: [oauth.Limits.current_user_body_bytes]u8 = undefined;
+    defer std.crypto.secureZero(u8, &current_user_storage);
+    const response = transport.perform(
+        .{
+            .kind = .current_user,
+            .bearer = tokens.access_token.view(),
+            .control = control,
+        },
+        &current_user_storage,
+    ) catch |err| return transportFailure(err);
+    if (response.status != 200)
+        return classifyStatus(response.status, false);
+    const current_user = oauth.parseCurrentUser(
+        response.body,
+        tokens.accountId(),
+    ) catch return error.ProtocolInvalid;
     return state.AccountIdentity.init(
         tokens.accountId(),
-        display_name,
+        current_user.usernameView(),
     ) catch return error.ProtocolInvalid;
 }
 
@@ -523,14 +473,14 @@ const FakeTransport = struct {
     }
 };
 
-test "login exchanges the code then resolves a secret-free identity" {
+test "login exchanges tokens before resolving a strict identity" {
     var fake: FakeTransport = .{};
     var code = try oauth.Secret.init(
         std.testing.allocator,
         "authorization-code",
     );
     defer code.deinit();
-    var result = try exchangeAndIdentify(
+    var tokens = try exchangeAuthorizationCode(
         std.testing.allocator,
         fake.transport(),
         &code,
@@ -539,17 +489,51 @@ test "login exchanges the code then resolves a secret-free identity" {
         100,
         null,
     );
-    defer result.deinit();
-    try std.testing.expectEqualStrings("access", result.tokens.access_token.view());
+    defer tokens.deinit();
+    try std.testing.expectEqualStrings("access", tokens.access_token.view());
+    try std.testing.expectEqual(@as(usize, 1), fake.step);
+    const identity = try fetchIdentity(fake.transport(), &tokens, null);
     try std.testing.expectEqualStrings(
         "1",
-        result.identity.accountId(),
+        identity.accountId(),
     );
     try std.testing.expectEqualStrings(
         "Meta User",
-        result.identity.displayName(),
+        identity.displayName(),
     );
     try std.testing.expectEqual(@as(usize, 2), fake.step);
+}
+
+test "current-user failure never falls back to the token account id" {
+    var tokens = try oauth.TokenSet.fromStored(
+        std.testing.allocator,
+        "access",
+        "refresh",
+        100,
+        oauth.scope,
+        "1",
+    );
+    defer tokens.deinit();
+    var failing = struct {
+        fn perform(
+            _: *anyopaque,
+            request: Request,
+            output: []u8,
+        ) TransportError!Response {
+            if (request.kind != .current_user) return error.ProtocolFailed;
+            const body = "{}";
+            @memcpy(output[0..body.len], body);
+            return .{ .status = 503, .body = output[0..body.len] };
+        }
+    }{};
+    try std.testing.expectError(
+        error.ServiceUnavailable,
+        fetchIdentity(
+            .{ .context = &failing, .perform_fn = @TypeOf(failing).perform },
+            &tokens,
+            null,
+        ),
+    );
 }
 
 test "refresh requires and installs the rotated refresh token" {

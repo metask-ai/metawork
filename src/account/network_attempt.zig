@@ -66,6 +66,7 @@ pub const NetworkAttempt = struct {
 
     const Kind = enum {
         refresh,
+        load_identity,
         load_api_keys,
         load_models,
     };
@@ -77,7 +78,6 @@ pub const NetworkAttempt = struct {
     transport: metask.Transport = undefined,
     credential_owner: ?*const credentials.CredentialOwner = null,
     identity: ?state.AccountIdentity = null,
-    load_identity: bool = false,
     catalog_session: ?*catalog.CatalogSession = null,
     api_key_storage: [contract.Limits.api_key_id_bytes]u8 = undefined,
     api_key_len: usize = 0,
@@ -96,8 +96,6 @@ pub const NetworkAttempt = struct {
         attempt_id: u64,
         transport: metask.Transport,
         credential_owner: *const credentials.CredentialOwner,
-        expected_identity: ?state.AccountIdentity,
-        load_identity: bool,
         sink: ResultSink,
         now_unix_seconds: i64,
     ) !void {
@@ -108,12 +106,35 @@ pub const NetworkAttempt = struct {
             .refresh,
             transport,
             credential_owner,
-            expected_identity,
-            load_identity,
+            null,
             null,
             "",
             sink,
             now_unix_seconds,
+        );
+    }
+
+    pub fn startLoadIdentity(
+        self: *NetworkAttempt,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        attempt_id: u64,
+        transport: metask.Transport,
+        credential_owner: *const credentials.CredentialOwner,
+        sink: ResultSink,
+    ) !void {
+        try self.start(
+            allocator,
+            io,
+            attempt_id,
+            .load_identity,
+            transport,
+            credential_owner,
+            null,
+            null,
+            "",
+            sink,
+            0,
         );
     }
 
@@ -136,7 +157,6 @@ pub const NetworkAttempt = struct {
             transport,
             credential_owner,
             identity,
-            false,
             catalog_session,
             "",
             sink,
@@ -165,7 +185,6 @@ pub const NetworkAttempt = struct {
             transport,
             null,
             null,
-            false,
             catalog_session,
             api_key_id,
             sink,
@@ -210,7 +229,6 @@ pub const NetworkAttempt = struct {
         transport: metask.Transport,
         credential_owner: ?*const credentials.CredentialOwner,
         identity: ?state.AccountIdentity,
-        load_identity: bool,
         catalog_session: ?*catalog.CatalogSession,
         api_key_id: []const u8,
         sink: ResultSink,
@@ -227,7 +245,6 @@ pub const NetworkAttempt = struct {
             .transport = transport,
             .credential_owner = credential_owner,
             .identity = identity,
-            .load_identity = load_identity,
             .catalog_session = catalog_session,
             .now_unix_seconds = now_unix_seconds,
             .sink = sink,
@@ -254,8 +271,6 @@ pub const NetworkAttempt = struct {
                     self.transport,
                     self.now_unix_seconds,
                     control,
-                    self.identity,
-                    self.load_identity,
                 ) catch |err| {
                     self.publishFailure(metask.errorCode(err));
                     return;
@@ -263,6 +278,16 @@ pub const NetworkAttempt = struct {
                 defer refreshed.deinit();
                 var result: Result = .{ .refresh = refreshed.take() };
                 self.sink.publish(self.attempt_id, &result);
+            },
+            .load_identity => {
+                const identity = self.credential_owner.?.fetchIdentity(
+                    self.transport,
+                    control,
+                ) catch |err| {
+                    self.publishFailure(metask.errorCode(err));
+                    return;
+                };
+                self.publishCompletion(.{ .identity_loaded = identity });
             },
             .load_api_keys => {
                 self.credential_owner.?.loadApiKeys(
@@ -346,9 +371,11 @@ const RefreshTransport = struct {
     ) metask.TransportError!metask.Response {
         const self: *RefreshTransport = @ptrCast(@alignCast(context));
         if (request.kind == .current_user) {
-            const body = "{}";
+            const body =
+                \\{"code":0,"message":"success","data":{"id":1,"username":"Stored User"}}
+            ;
             @memcpy(output[0..body.len], body);
-            return .{ .status = 404, .body = output[0..body.len] };
+            return .{ .status = 200, .body = output[0..body.len] };
         }
         if (request.kind != .refresh_token) return error.ProtocolFailed;
         if (self.blocking) {
@@ -364,7 +391,7 @@ const RefreshTransport = struct {
             return error.Cancelled;
         }
         const body =
-            \\{"access_token":"fresh-access","refresh_token":"fresh-refresh","token_type":"Bearer","expires_in":3600,"scope":"metawork:use","account_id":"acct-1"}
+            \\{"access_token":"fresh-access","refresh_token":"fresh-refresh","token_type":"Bearer","expires_in":3600,"scope":"metawork:use","account_id":"1"}
         ;
         @memcpy(output[0..body.len], body);
         return .{ .status = 200, .body = output[0..body.len] };
@@ -396,8 +423,6 @@ test "refresh attempt transfers one opaque generation and cancels cleanly" {
         9,
         transport.transport(),
         &credential_owner,
-        null,
-        false,
         capture.sink(),
         100,
     );
@@ -408,7 +433,7 @@ test "refresh attempt transfers one opaque generation and cancels cleanly" {
     defer refreshed.deinit();
     try std.testing.expectEqual(@as(u64, 9), capture.attempt_id);
     try std.testing.expectEqualStrings(
-        "acct-1",
+        "1",
         refreshed.refresh.accountId(),
     );
     try std.testing.expectEqual(@as(?i64, 10), credential_owner.expiresAt());
@@ -421,8 +446,6 @@ test "refresh attempt transfers one opaque generation and cancels cleanly" {
         10,
         blocking.transport(),
         &credential_owner,
-        null,
-        false,
         cancelled_capture.sink(),
         100,
     );
@@ -439,7 +462,7 @@ test "refresh attempt transfers one opaque generation and cancels cleanly" {
     );
 }
 
-test "refresh-only restore resolves the current identity" {
+test "refresh-only restore commits rotation before loading identity" {
     var refresh = try oauth.Secret.init(
         std.testing.allocator,
         "old-refresh",
@@ -457,11 +480,6 @@ test "refresh-only restore resolves the current identity" {
         11,
         transport.transport(),
         &credential_owner,
-        try state.AccountIdentity.init(
-            "acct-1",
-            "Stored User",
-        ),
-        true,
         capture.sink(),
         100,
     );
@@ -469,8 +487,23 @@ test "refresh-only restore resolves the current identity" {
     attempt.deinit();
     var refreshed = capture.result orelse
         return error.TestUnexpectedResult;
+    capture.result = null;
     defer refreshed.deinit();
-    const identity = refreshed.refresh.refreshedIdentity() orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("acct-1", identity.accountId());
+    credential_owner.replaceRotation(&refreshed.refresh);
+
+    try attempt.startLoadIdentity(
+        std.testing.allocator,
+        std.testing.io,
+        12,
+        transport.transport(),
+        &credential_owner,
+        capture.sink(),
+    );
+    attempt.join();
+    attempt.deinit();
+    var identified = capture.result orelse return error.TestUnexpectedResult;
+    capture.result = null;
+    defer identified.deinit();
+    const identity = identified.completion.payload.identity_loaded;
+    try std.testing.expectEqualStrings("1", identity.accountId());
 }

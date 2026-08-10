@@ -1,5 +1,4 @@
 const std = @import("std");
-const contract = @import("metawork_account_contract");
 const state = @import("account_state");
 const oauth = @import("account_oauth");
 const metask = @import("metask_client");
@@ -9,8 +8,6 @@ const catalog = @import("account_catalog");
 /// it, but token bytes remain owned and interpreted by Account.
 pub const CredentialRotation = struct {
     tokens: oauth.TokenSet,
-    identity: ?state.AccountIdentity = null,
-    identity_error: ?contract.ErrorCode = null,
     owned: bool = true,
 
     pub fn deinit(self: *CredentialRotation) void {
@@ -35,8 +32,6 @@ pub const CredentialRotation = struct {
         std.debug.assert(self.owned);
         const result: CredentialRotation = .{
             .tokens = self.tokens.take(),
-            .identity = self.identity,
-            .identity_error = self.identity_error,
         };
         self.owned = false;
         return result;
@@ -47,18 +42,6 @@ pub const CredentialRotation = struct {
         const result = self.tokens.take();
         self.owned = false;
         return result;
-    }
-
-    pub fn refreshedIdentity(
-        self: *const CredentialRotation,
-    ) ?state.AccountIdentity {
-        std.debug.assert(self.owned);
-        return self.identity;
-    }
-
-    pub fn identityError(self: *const CredentialRotation) ?contract.ErrorCode {
-        std.debug.assert(self.owned);
-        return self.identity_error;
     }
 };
 
@@ -130,8 +113,6 @@ pub const CredentialOwner = struct {
         transport: metask.Transport,
         now_unix_seconds: i64,
         control: ?metask.RequestControl,
-        expected_identity: ?state.AccountIdentity,
-        load_identity: bool,
     ) metask.ClientError!CredentialRotation {
         var refreshed = if (self.tokens) |*current| try metask.refresh(
             allocator,
@@ -152,35 +133,19 @@ pub const CredentialOwner = struct {
                 control,
             );
         };
-        errdefer refreshed.deinit();
-        var identity_error: ?contract.ErrorCode = null;
-        const identity = if (load_identity) blk: {
-            const discovered = metask.fetchIdentity(
-                transport,
-                &refreshed,
-                control,
-                true,
-            ) catch |err| {
-                identity_error = metask.errorCode(err);
-                break :blk null;
-            };
-            if (expected_identity) |expected| {
-                if (!std.mem.eql(
-                    u8,
-                    discovered.accountId(),
-                    expected.accountId(),
-                )) {
-                    identity_error = .metask_unauthorized;
-                    break :blk null;
-                }
-            }
-            break :blk discovered;
-        } else null;
-        return .{
-            .tokens = refreshed.take(),
-            .identity = identity,
-            .identity_error = identity_error,
-        };
+        return .{ .tokens = refreshed.take() };
+    }
+
+    pub fn fetchIdentity(
+        self: *const CredentialOwner,
+        transport: metask.Transport,
+        control: ?metask.RequestControl,
+    ) metask.ClientError!state.AccountIdentity {
+        const current = if (self.tokens) |*value|
+            value
+        else
+            return error.Unauthorized;
+        return metask.fetchIdentity(transport, current, control);
     }
 
     pub fn loadApiKeys(
@@ -244,7 +209,7 @@ test "CredentialOwner replaces and clears OAuth secret ownership" {
     try std.testing.expect(!owner.available());
 }
 
-test "CredentialOwner can restore a refresh-only Windows session" {
+test "CredentialOwner can restore a refresh-only session" {
     var refresh = try oauth.Secret.init(
         std.testing.allocator,
         "refresh-only",
@@ -259,7 +224,7 @@ test "CredentialOwner can restore a refresh-only Windows session" {
     try std.testing.expect(!owner.refreshAvailable());
 }
 
-test "refresh keeps the rotated token when the current-user read is rejected" {
+test "refresh rotation is available before strict identity lookup" {
     var owner: CredentialOwner = .{};
     defer owner.deinit();
     try owner.installStored(
@@ -300,25 +265,25 @@ test "refresh keeps the rotated token when the current-user read is rejected" {
             };
         }
     }{};
-    const expected = try state.AccountIdentity.init(
-        "account-1",
-        "Stored account",
-    );
     var rotation = try owner.refresh(
         std.testing.allocator,
         .{ .context = &fake, .perform_fn = @TypeOf(fake).perform },
         100,
         null,
-        expected,
-        true,
     );
     defer rotation.deinit();
     try std.testing.expectEqualStrings(
         "new-refresh",
         rotation.persistenceInput().refresh_token.view(),
     );
-    const discovered = rotation.refreshedIdentity() orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("account-1", discovered.accountId());
+    try std.testing.expectEqual(@as(usize, 1), fake.step);
+    owner.replaceRotation(&rotation);
+    try std.testing.expectError(
+        error.Unauthorized,
+        owner.fetchIdentity(
+            .{ .context = &fake, .perform_fn = @TypeOf(fake).perform },
+            null,
+        ),
+    );
     try std.testing.expectEqual(@as(usize, 2), fake.step);
 }

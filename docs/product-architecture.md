@@ -69,15 +69,15 @@ Account Runtime.prepare(command | completion)
 → dispatch committed Account effect
 ```
 
-前五步由 Application coordinator 在主线程同一 turn 内完成，effect 只有在 committed swap 后才能启动；worker completion 再经主循环进入同一条链。任何校验或内部不变量失败都保留旧 committed state，并清零 staged secret；Bridge 不参与 prepare/commit，也不接触 credential。C1 登录只依赖锁定的 OAuth client/scope/loopback/token `account_id`，可独立提交 `account_only`，不等待 API Key 或模型目录。
+前五步由 Application coordinator 在主线程同一 turn 内完成，effect 只有在 committed swap 后才能启动；worker completion 再经主循环进入同一条链。任何校验或内部不变量失败都保留旧 committed state，并清零 staged secret；Bridge 不参与 prepare/commit，也不接触 credential。C1 登录只依赖锁定的 OAuth client/scope/loopback、token rotation 和严格 `/me` identity，不等待 API Key 或模型目录。授权码交换产生新 token 后先提交 refresh token，再以已提交 generation 读取 `/me`；两步不得合成一个可回退结果。
 
 Renderer catalog selection 的同步拒绝顺序固定为：Bridge authority/wire validation，Account Runtime generation 与 published membership validation，Account prepare，Workbench default replacement gate，最后进入上述 commit 链。Account 独占 identity、selection、catalog 与 attempt 合法性；Workbench 独占 replacement gate；Application coordinator 只安排顺序。`prepare` 成功但 gate 拒绝时必须销毁 prepared transition，不能提交 Account fact 或启动 effect；gate 打开后的 effect admission 失败必须平衡关闭。
 
-`account_only` 是 identity 与 refresh-token 提交边界，不是 Workbench 可见性门槛，也不是要求用户手动启动 C2 的边界。C1 commit 完成后 Account Runtime 直接产生 catalog command；catalog 失败保持 `authenticated + failed`，不回滚登录。历史选择仍存在且匹配当前 account/catalog 时优先恢复，单一候选自动采用，只有真实歧义才进入 `choosing`。Renderer 不观察状态后发送隐藏命令。
+verified identity commit 是 C1 完成边界，不是 Workbench 可见性门槛，也不要求用户手动启动 C2。C1 完成后 Account Runtime 直接产生 catalog command；catalog 失败保持 `authenticated + failed`，不回滚登录。历史选择仍存在且匹配当前 account/catalog 时优先恢复，单一候选自动采用，只有真实歧义才进入 `choosing`。Renderer 不观察状态后发送隐藏命令。
 
 每个 Account attempt 都有 Host-owned deadline、attempt identity 和唯一 terminal completion。浏览器未回调、网络悬挂、effect 启动失败和取消都必须收口到可恢复 committed state。幂等 catalog read 可以有限重试；OAuth code exchange、凭据持久化和结果不确定 mutation 不得自动重放。进入 credential persistence 前允许取消；持久化 effect 开始后撤销 cancel admission，直到 main thread 原子消费 completion，避免磁盘已提交而内存被取消回滚。Renderer command timeout 只释放本地交互并触发 snapshot resync，不能代表 Host mutation 失败。
 
-production 网络接入受 [Metask Account API 合同](metask-account-contract.md)约束。C1 OAuth/login 独立提交 `account_only`；C2 使用无 Profile header 的 OAuth API Key catalog 与直接 API Key model catalog，从精确 `group.platform` 生成固定 Metask AgentCore target。持久化只允许 secure store 中的 refresh token，以及原子、无 secret 的 `selection_owner_account_id + api_key_id + model_id + execution_generation` preference。access token、Provider API Key、display name、saved identity 和 execution config 不跨进程。冷启动先刷新 OAuth 并以当前 token `/me` 结果建立 identity，再决定是否复用 preference；owner 不匹配只清空旧选择，绝不形成登录 mismatch。
+production 网络接入受 [Metask Account API 合同](metask-account-contract.md)约束。C1 OAuth/login 先独立提交 token rotation，再严格提交 `/me` identity；C2 使用无 Profile header 的 OAuth API Key catalog 与直接 API Key model catalog，从精确 `group.platform` 生成固定 Metask AgentCore target。持久化只允许 secure store 中的 refresh token，以及原子、无 secret 的 `selection_owner_account_id + api_key_id + model_id + execution_generation` preference。access token、Provider API Key、display name、saved identity 和 execution config 不跨进程。冷启动先刷新 OAuth、提交 rotation，再以当前 token `/me` 结果建立 identity，最后决定是否复用 preference；owner 不匹配只清空旧选择，绝不形成登录 mismatch。
 
 进入 Workbench 后的 API/模型切换仍由 Account owner 执行，不是 Renderer preference。每次 steady selection 都用当前 OAuth 重新加载 authenticated API catalog，不能复用已 secure-zero 的旧 private catalog。candidate private/public catalog 与 committed public catalog 分槽；Account projection 发布候选目录所属的脱敏 API selection identity，Renderer 只能从该 owned catalog 选择模型。加载、取消、选择或持久化期间继续保留已提交 execution，成功后才原子安装新的默认 generation 并提交候选目录；其他 terminal outcome 丢弃候选并回到旧默认配置。Workbench 只用新 generation 接纳之后创建的 Task，既有 Task 继续使用自身 binding epoch。
 

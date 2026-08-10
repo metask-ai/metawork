@@ -94,11 +94,11 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - `checking` 与 `authorizing` 可以暂时占用登录表面；`signed_out` 只禁止新 Task admission，不隐藏 Workspace、durable Task 或历史记录。已有 live Task 仍必须可查看和停止；
 - 登录无效即进入 `signed_out`。Renderer 只提供统一的 `beginLogin`，不保留“重新认证”“重新打开登录页”“匹配上次账号”等分支；
 - OAuth 浏览器授权、identity 提交和执行目录准备不得暴露内部 C1/C2、operation、generation 或凭据存储步骤；
-- OAuth 成功提交 `account_only` 后，Host 必须以独立、有界的 continuation 自动加载 API Key 和模型目录。仍有效的历史选择优先恢复；没有历史选择时，唯一候选自动采用；只有多个候选且没有合同明确的默认项时才请求用户选择；
+- OAuth 成功提交 token rotation 并以 `/me` 验证 authenticated identity 后，Host 必须以独立、有界的 continuation 自动加载 API Key 和模型目录。仍有效的历史选择优先恢复；没有历史选择时，唯一候选自动采用；只有多个候选且没有合同明确的默认项时才请求用户选择；
 - 自动 continuation 不能把 C2 失败回滚成未登录，也不能根据显示名称、列表顺序或模型名猜测默认值、Provider 或 target；
 - 没有可用 API Key 或模型时必须保持已登录状态，说明缺少什么并提供 `重试`；只有 Host 拥有固定、安全的 Metask 管理入口时才显示 `在 Metask 中管理`，Renderer 不拼接外部 URL；
 - 登录、目录加载、模型加载和持久化是 Host-owned 操作。Renderer 只渲染 Host 发布的状态和脱敏候选，不通过 `useEffect`、隐藏点击或本地定时器推进产品状态；
-- 账号入口固定显示在左栏底部：已登录时显示当前 OAuth `/me` 验证的用户名，未登录时显示登录动作。接口不可用或响应不可信时回退 token `account_id`；不得由 Renderer 推断，也不得在普通 catalog refresh 或后台定时路径主动更新；
+- 账号入口固定显示在左栏底部：已登录时只显示当前 OAuth `/me` 严格验证的用户名，未登录时显示登录动作。接口不可用、账号不匹配或响应不可信时不得回退 token `account_id` 或旧 identity；不得由 Renderer 推断，也不得在普通 catalog refresh 或后台定时路径主动更新；
 - API Key 切换属于 `账号与模型` 设置。Renderer 只显示 Metask 返回的脱敏名称、Provider 与尾号；API 创建、秘密查看和管理仍由 Metask 完成；
 - 当前模型必须显示在 New task Composer 附近，并可从当前 API 的已验证模型目录快速选择。该选择更新后续新 Task 的默认执行配置；已有 Task 显示当前 binding epoch 的模型，历史按 epoch 保留原事实，不提供虚假的 live Session 热切换；
 - 进入账号与模型设置时，显式导航动作自动请求 Host 同步一次最新 API/模型目录；已有默认配置时 Host 必须优先复用并验证当前 API，再自动加载它的模型目录，不能要求用户先重新选择或切换 API 才能修改默认模型。页面直接使用 Host 已发布的脱敏目录和提交态，手动重新同步只作为网络失败、页面持续打开期间 Metask 外部目录变化等恢复动作。设置页同时提供可独立修改的默认 API、默认模型和与错误语义匹配的恢复动作；后续通用、Workspace、通知、外观和高级设置共享同一设置框架；
@@ -109,7 +109,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - 显式重新登录、切换账号、退出登录或清除设备凭据必须取得 Workbench execution replacement gate，并证明所有 credential、Agent Session、Run、executor job 与真实 worker reference 已安全终止；durable Task、历史记录及 `closed = false` 本身不参与 gate，没有运行时引用的恢复 Task 不得阻止操作。OAuth 成功后以本次 token 返回的 `account_id` 替换本机账号，旧缓存 identity 不得否决显式登录，旧默认 execution、API/model selection 与 catalog 必须先清除再按新账号重建；
 - refresh token 成功轮换后必须先原子提交新 token，后续 catalog 失败不得回滚到已作废的旧 token；明确鉴权无效关闭新的执行 admission，但已被 live Run 拥有的配置按其生命周期正常收口；
 - New Task admission 必须同时满足 Account `authenticated + catalogState=ready`、Workbench 已安装所选默认 generation、Workspace intent 可解析且 replacement gate 未开启。Automatic intent 要求 automatic root capability；Manual intent 要求目标 Manual Workspace grant 与 epoch 有效；
-- production Account 接入必须符合 [Metask Account API 合同](metask-account-contract.md)。C1 OAuth/login 独立交付 `account_only`；C2 使用无 Profile header 的 OAuth API Key catalog 与直接 API Key model catalog，并从精确 `group.platform` 形成 fixed ExecutionTarget。Account 提交 `execution_ready` 且 Workbench 安装同一默认 generation 前禁止创建新 Task，但不能隐藏 durable history；既有 live Task 的后续 Run 服从其已拥有的运行时配置，不与当前默认 generation 做错误等值比较。
+- production Account 接入必须符合 [Metask Account API 合同](metask-account-contract.md)。C1 OAuth/login 先独立提交 token rotation，再以严格 `/me` 交付 authenticated identity；C2 使用无 Profile header 的 OAuth API Key catalog 与直接 API Key model catalog，并从精确 `group.platform` 形成 fixed ExecutionTarget。Account 提交 `execution_ready` 且 Workbench 安装同一默认 generation 前禁止创建新 Task，但不能隐藏 durable history；既有 live Task 的后续 Run 服从其已拥有的运行时配置，不与当前默认 generation 做错误等值比较。
 
 ### 5.3 Task
 
@@ -159,8 +159,8 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 
 ### 5.7 状态与恢复
 
-- 每个 Account attempt 必须拥有 Host deadline，并最终进入成功、可重试失败、用户取消或明确的 restart-required 边界；浏览器未回调、网络悬挂、worker 启动失败和 completion/notification 异常不得永久保留 active operation；
-- OAuth 等待超过正常感知时长时，界面必须提供 Host-owned `重新打开登录页面` 与 `取消登录`；Renderer 不接触授权 URL。目录等幂读取可以有限自动重试，OAuth code exchange、持久化 mutation 和其他结果不确定操作不得盲目重放；
+- 每个 Account attempt 必须拥有 Host deadline，并最终进入成功、可重试失败、用户取消或明确失败；浏览器未回调、网络悬挂、worker 启动失败和 completion/notification 异常不得永久保留 active operation；
+- OAuth 等待超过正常感知时长时，界面只提供 Host-owned `取消登录`；Renderer 不接触授权 URL。目录等幂读取和已保存 refresh token 的瞬时失败可以有限重试，OAuth code exchange、持久化 mutation 和其他结果不确定操作不得盲目重放；
 - Bridge command 或 view refresh 超时必须释放 Renderer 本地 busy 状态并进入 snapshot resync；结果不确定的 mutation 只能依据 Host snapshot 决定后续动作，不能由 Renderer 自动重复；
 - Account cancel 是独立逃生动作，不能因普通 mutation busy 被禁用；但 credential persistence 一旦开始提交就跨过取消边界，Host 必须暂时撤销 cancel 并等待唯一 terminal completion，不能在磁盘已提交、main-thread completion 尚未消费的窗口把内存回滚到旧 generation。Bridge 暂不可用时 Host deadline 仍必须收口 attempt，Renderer reload 后从 snapshot 恢复可用动作；
 - 用户消息、已完成 assistant 消息、工具结果、审批决策、关键 Run 状态和改变 Conversation 的 manual compact 应形成可靠状态边界；Run/compact admission 必须先建立稳定的 Workbench record，terminal payload 一经发布不可变，内部 Agent Session 关闭或销毁后 Task 历史仍可独立生成 snapshot；compact history 有界且 append-only，容量耗尽时拒绝新 compact，不覆盖既有 Conversation 边界；
@@ -180,7 +180,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 
 ### 5.9 Workbench 界面与任务组织
 
-- 未登录与 Workbench 是两个明确界面阶段：首次启动只突出登录及其恢复动作；`execution_ready` 后才展示 Workspace、Task、Composer 和执行历史；
+- 未登录只禁止创建和发送新 Task；Workbench 仍展示 Workspace、durable Task 与执行历史，并允许查看和停止真实 live Run；默认执行配置 ready 后才开放 Composer admission；
 - Workbench 左栏承担稳定 New task、已接通的全局能力入口、全局 Task 列表与左下角账号入口；`新建任务`、`技能`、`MCP` 与 `定时任务` 使用同一紧凑一级菜单的相同行高、缩进和 active 语义，不用额外留白或独立大按钮制造虚假层级；只有真实接通的 capability 才显示对应入口，Task 按 `需要处理 / 正在运行 / 最近` 等行动优先级组织；
 - New task 中央区域始终以 Composer 为主，当前模型和 Workspace 在发送前可见；API 管理不进入 Composer，模型与 Workspace 也不得混成不透明的单一“模式”；
 - Task 启动后中央区域转为可追溯工作轨迹，Composer 固定在底部；审批、当前活动、工具详情、usage 或真实结果只决定 Inspector 模块是否可用，不因普通 Run 开始或结束自动开合。只有新的待处理请求可以自动打开一次；打开后保持到用户关闭或切换 Task；
@@ -300,7 +300,7 @@ Metask 登录 → Host 后台恢复或加载 API Key/模型
 → Composer 确认模型 → Task admission → 既有同步 macOS baseline
 ```
 
-Metask C1 OAuth/login 已按 `metawork-app` / `metawork:use` 发布合同锁定；C2 使用已通过 production 复核的无 Profile-ID 通用路径。登录先独立提交 `account_only`，随后直接启动 API Key/model catalog continuation；C2 失败不得抹除已完成登录。Workbench 首屏仍以完整 `execution_ready` 为进入条件，不能把 `account_only` 误报成已经可以工作。
+Metask C1 OAuth/login 已按 `metawork-app` / `metawork:use` 发布合同锁定；C2 使用已通过 production 复核的无 Profile-ID 通用路径。登录先提交 token rotation，再严格验证并提交 `/me` identity，随后直接启动 API Key/model catalog continuation；C2 失败不得抹除已完成登录。Workbench 的新 Task admission 仍以完整 `execution_ready` 为条件，不能把仅有 authenticated identity 误报成已经可以执行。
 
 ### 7.3 Fault-domain 结论
 

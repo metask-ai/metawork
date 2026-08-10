@@ -201,7 +201,7 @@ pub fn clearPreference(backend: Backend) StoreError!void {
 
 pub fn commitSignedOut(backend: Backend) StoreError!void {
     try backend.deleteRefreshToken();
-    try backend.deletePreference();
+    backend.deletePreference() catch {};
 }
 
 const FakeBackend = struct {
@@ -209,6 +209,7 @@ const FakeBackend = struct {
     preference: ?Preference = null,
     preference_corrupt: bool = false,
     fail_preference_write: bool = false,
+    fail_preference_delete: bool = false,
     delete_order: [2]u8 = .{ 0, 0 },
     delete_count: usize = 0,
 
@@ -258,6 +259,7 @@ const FakeBackend = struct {
 
     fn deletePreference(context: *anyopaque) StoreError!void {
         const self: *FakeBackend = @ptrCast(@alignCast(context));
+        if (self.fail_preference_delete) return error.DeleteFailed;
         self.preference = null;
         self.preference_corrupt = false;
         if (self.delete_count < self.delete_order.len) {
@@ -313,6 +315,17 @@ test "logout deletes the refresh token before non-secret preference" {
     };
     try commitSignedOut(fake.backend());
     try std.testing.expectEqualSlices(u8, &.{ 1, 2 }, &fake.delete_order);
+}
+
+test "optional preference deletion cannot block logout" {
+    var fake: FakeBackend = .{
+        .refresh_token = "refresh-only",
+        .preference = try .init("account-1", "api-1", "model-1", 1),
+        .fail_preference_delete = true,
+    };
+    try commitSignedOut(fake.backend());
+    try std.testing.expectEqual(@as(?[]const u8, null), fake.refresh_token);
+    try std.testing.expect(fake.preference != null);
 }
 
 test "automation credential namespace is compile-time isolated" {

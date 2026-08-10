@@ -528,10 +528,10 @@ test("Account Runtime owns policy while Application installs execution explicitl
   assert.match(accountRuntime, /fn automaticApiSelection\(/);
   assert.match(accountRuntime, /fn automaticModelSelection\(/);
   assert.match(accountRuntime, /fn prepareAndPersistExecution\(/);
-  assert.match(accountRuntime, /catalog_after_refresh:/);
+  assert.match(accountRuntime, /fn startLoadIdentity\(/);
   assert.doesNotMatch(
     app,
-    /CredentialOwner|automaticApiSelection|automaticModelSelection|prepareAndPersistExecution|catalog_after_refresh|mailbox_mutex/,
+    /CredentialOwner|automaticApiSelection|automaticModelSelection|prepareAndPersistExecution|startLoadIdentity|mailbox_mutex/,
   );
   assert.doesNotMatch(app, /account_api\.OAuth\.TokenSet/);
 
@@ -651,6 +651,44 @@ test("Account persistence has one refresh-only cross-platform owner", () => {
     accountRuntime,
     /windows_store|prepareWindowsRestore|prepareMacosRestore/,
   );
+});
+
+test("Account commits OAuth rotation before strict current-user identity", () => {
+  const login = read("src/account/login_attempt.zig");
+  const client = read("src/account/metask_client.zig");
+  const runtime = read("src/account/runtime.zig");
+  const state = read("src/account/state.zig");
+  const store = read("src/account/credential_store.zig");
+  assert.match(login, /exchangeAuthorizationCode/);
+  assert.doesNotMatch(login, /fetchIdentity|exchangeAndIdentify/);
+  const authorizationCommit = runtime.slice(
+    runtime.indexOf("fn prepareAuthorizedLogin("),
+    runtime.indexOf("fn prepareRefreshedTokens("),
+  );
+  assert.ok(
+    authorizationCommit.indexOf("credential_store.commitRefresh(") <
+      authorizationCommit.indexOf("self.credentials.replace(tokens)"),
+  );
+  assert.match(authorizationCommit, /\.payload = \.tokens_persisted/);
+  assert.match(state, /\.tokens_persisted => self\.prepareTokensPersisted\(\)/);
+  assert.match(state, /\.load_identity/);
+  assert.match(
+    client,
+    /if \(response\.status != 200\)\s*return classifyStatus/,
+  );
+  assert.match(
+    runtime,
+    /error_code == \.metask_unauthorized[\s\S]*self\.deleteInvalidCredential\(\)/,
+  );
+  assert.match(
+    runtime,
+    /state == \.signed_out[\s\S]*self\.credentials\.refreshAvailable\(\)/,
+  );
+  assert.doesNotMatch(
+    `${client}\n${state}`,
+    /accountOnlyIdentity|exchangeAndIdentify|account_only|reauth_required/,
+  );
+  assert.match(store, /backend\.deletePreference\(\) catch \{\}/);
 });
 
 test("macOS Apple Development signing is explicit and isolated", () => {

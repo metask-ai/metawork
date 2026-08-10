@@ -65,7 +65,6 @@ const Effects = struct {
             rotation: credentials_impl.CredentialRotation,
         },
         completion: state_impl.WorkerCompletion,
-        logout_persistence_unknown: u64,
         execution_persistence_unknown: u64,
 
         fn deinit(self: *MailboxResult) void {
@@ -73,7 +72,6 @@ const Effects = struct {
                 .login => |*entry| entry.result.deinit(),
                 .refresh => |*entry| entry.rotation.deinit(),
                 .completion => |*completion| completion.deinit(),
-                .logout_persistence_unknown,
                 .execution_persistence_unknown,
                 => {},
             }
@@ -84,7 +82,6 @@ const Effects = struct {
                 .login => |entry| entry.attempt_id,
                 .refresh => |entry| entry.attempt_id,
                 .completion => |completion| completion.attempt_id,
-                .logout_persistence_unknown,
                 .execution_persistence_unknown,
                 => |attempt_id| attempt_id,
             };
@@ -168,7 +165,6 @@ const Effects = struct {
     fn publishPersistenceUnknown(
         self: *Effects,
         attempt_id: u64,
-        kind: enum { logout, execution },
     ) void {
         self.lockMailbox();
         if (self.mailbox != null) {
@@ -176,10 +172,7 @@ const Effects = struct {
             self.unlockMailbox();
             return;
         }
-        self.mailbox = switch (kind) {
-            .logout => .{ .logout_persistence_unknown = attempt_id },
-            .execution => .{ .execution_persistence_unknown = attempt_id },
-        };
+        self.mailbox = .{ .execution_persistence_unknown = attempt_id };
         self.unlockMailbox();
         self.notify();
     }
@@ -286,8 +279,6 @@ const Effects = struct {
         attempt_id: u64,
         credentials: *const credentials_impl.CredentialOwner,
         now_unix_seconds: i64,
-        expected_identity: ?state_impl.AccountIdentity,
-        load_identity: bool,
     ) void {
         self.network_attempt.startRefresh(
             self.allocator,
@@ -295,10 +286,26 @@ const Effects = struct {
             attempt_id,
             self.clientTransport(),
             credentials,
-            expected_identity,
-            load_identity,
             self.networkSink(),
             now_unix_seconds,
+        ) catch self.publishCompletion(.{
+            .attempt_id = attempt_id,
+            .payload = .{ .failed = .fromCode(.local_resource_exhausted) },
+        });
+    }
+
+    fn startLoadIdentity(
+        self: *Effects,
+        attempt_id: u64,
+        credentials: *const credentials_impl.CredentialOwner,
+    ) void {
+        self.network_attempt.startLoadIdentity(
+            self.allocator,
+            self.io,
+            attempt_id,
+            self.clientTransport(),
+            credentials,
+            self.networkSink(),
         ) catch self.publishCompletion(.{
             .attempt_id = attempt_id,
             .payload = .{ .failed = .fromCode(.local_resource_exhausted) },
@@ -445,6 +452,7 @@ pub const Prepared = struct {
     automatic_selection: AutomaticSelection = .none,
     refresh_after_commit: bool = false,
     schedule_refresh_after_commit: bool = false,
+    retry_refresh_after_commit: bool = false,
 
     pub fn fact(self: *const Prepared) contract.AccountFact {
         return self.transition.fact();
@@ -474,6 +482,7 @@ pub const Prepared = struct {
         self.automatic_selection = .none;
         self.refresh_after_commit = false;
         self.schedule_refresh_after_commit = false;
+        self.retry_refresh_after_commit = false;
     }
 };
 
@@ -499,7 +508,6 @@ pub const Runtime = struct {
     platform: ?platform_impl.NativeBackend = null,
     credentials: credentials_impl.CredentialOwner = .{},
     saved_preference: ?credential_store.Preference = null,
-    catalog_after_refresh: bool = false,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -529,7 +537,6 @@ pub const Runtime = struct {
         self.effects.deinit();
         self.credentials.deinit();
         self.saved_preference = null;
-        self.catalog_after_refresh = false;
         self.candidate_public_catalog.clear();
         self.* = undefined;
     }
@@ -545,7 +552,7 @@ pub const Runtime = struct {
             self.io,
             self.main_thread_id,
             self.account_path_storage[0..self.account_path_len],
-        ) catch |err| return self.preparedRestoreFailure(
+        ) catch |err| return self.preparedSignedOutRestoreFailure(
             accountRestoreError(err),
         );
         return self.prepareRestore();
@@ -561,7 +568,7 @@ pub const Runtime = struct {
 
     pub fn prepareStartUnavailable(self: *Runtime) Prepared {
         self.assertMainThread();
-        return self.preparedRestoreFailure(
+        return self.preparedSignedOutRestoreFailure(
             .credential_store_read_failed,
         );
     }
@@ -572,6 +579,16 @@ pub const Runtime = struct {
     ) PrepareResult {
         self.assertMainThread();
         const account_view = self.view();
+        switch (command) {
+            .begin_login => {
+                if (account_view.state == .signed_out and
+                    self.credentials.refreshAvailable())
+                    return wrapPrepareResult(
+                        self.account.prepareRestoredTokenRefresh(),
+                    );
+            },
+            else => {},
+        }
         switch (command) {
             .select_api_key => |selection| {
                 if (selection.expected_catalog_generation !=
@@ -637,15 +654,7 @@ pub const Runtime = struct {
 
     pub fn prepareRestoredRefresh(self: *Runtime) Prepared {
         self.assertMainThread();
-        return switch (self.account.prepareRestoredTokenRefresh()) {
-            .transition => |transition| .{ .transition = transition },
-            .rejected => |error_code| preparedFromState(
-                self.account.prepareRestoredRefreshAdmissionFailure(
-                    error_code,
-                ),
-            ),
-            .ignored_stale => unreachable,
-        };
+        return preparedFromState(self.account.prepareRestoredTokenRefresh());
     }
 
     pub fn prepareContinuationFailure(
@@ -678,9 +687,9 @@ pub const Runtime = struct {
                         .dependency_contract_invalid,
                     );
                 break :result switch (entry.result) {
-                    .authenticated => |*login| self.prepareAuthenticatedLogin(
+                    .authorized => |*tokens| self.prepareAuthorizedLogin(
                         entry.attempt_id,
-                        login,
+                        tokens,
                     ),
                     .failed => |failure| self.prepareFailureValue(
                         entry.attempt_id,
@@ -708,9 +717,6 @@ pub const Runtime = struct {
             .completion => |*completion| self.prepareWorkerCompletion(
                 completion,
                 collision,
-            ),
-            .logout_persistence_unknown => wrapPrepareResult(
-                self.account.prepareLogoutPersistenceUnknown(),
             ),
             .execution_persistence_unknown => wrapPrepareResult(
                 self.account.prepareExecutionPersistenceUnknown(),
@@ -816,6 +822,15 @@ pub const Runtime = struct {
         self.assertMainThread();
         if (prepared.schedule_refresh_after_commit)
             self.scheduleRefresh();
+        if (prepared.retry_refresh_after_commit) {
+            if (self.platform) |*platform|
+                platform_impl.startTimer(
+                    platform,
+                    refresh_timer_id,
+                    refresh_retry_ns,
+                    false,
+                ) catch {};
+        }
         const entry = self.effects.queue.take() orelse return;
         self.dispatchEffect(entry);
     }
@@ -831,11 +846,8 @@ pub const Runtime = struct {
         completion: *state_impl.WorkerCompletion,
         collision: bool,
     ) PrepareResult {
-        if (self.catalog_after_refresh and
-            self.account.refreshInFlight() and
-            completion.payload == .failed)
-            self.catalog_after_refresh = false;
         const catalog_attempt = self.account.catalogAttemptActive();
+        const refresh_attempt = self.account.refreshInFlight();
         self.effects.joinNetwork(completion.attempt_id);
         if (collision and
             self.account.activeAttempt() == completion.attempt_id)
@@ -850,6 +862,26 @@ pub const Runtime = struct {
         }
         if (catalog_attempt and completion.payload == .failed)
             self.effects.catalog.reset();
+
+        if (completion.payload == .failed and
+            completion.payload.failed.error_code == .metask_unauthorized and
+            self.account.credentialValidationInFlight())
+            completion.payload.failed.error_code =
+                self.deleteInvalidCredential();
+
+        const loaded_identity: ?state_impl.AccountIdentity = switch (completion.payload) {
+            .identity_loaded => |identity| identity,
+            else => null,
+        };
+        const retry_refresh = refresh_attempt and
+            completion.payload == .failed and
+            completion.payload.failed.error_code != .metask_unauthorized and
+            completion.payload.failed.error_code != .credential_store_delete_failed and
+            self.account.currentIdentity() != null;
+        if (loaded_identity) |identity| {
+            if (self.platform) |*platform|
+                self.discardForeignPreference(platform, identity.accountId());
+        }
 
         const current_view = self.account.view();
         const automatic_selection: AutomaticSelection = switch (completion.payload) {
@@ -875,41 +907,57 @@ pub const Runtime = struct {
             .transition => |transition| .{ .prepared = .{
                 .transition = transition,
                 .automatic_selection = automatic_selection,
+                .follow_up = if (loaded_identity != null)
+                    .refresh_catalog
+                else
+                    null,
+                .schedule_refresh_after_commit = loaded_identity != null,
+                .retry_refresh_after_commit = retry_refresh,
             } },
             .rejected => |error_code| .{ .rejected = error_code },
             .ignored_stale => .ignored_stale,
         };
     }
 
-    fn prepareAuthenticatedLogin(
+    fn deleteInvalidCredential(self: *Runtime) contract.ErrorCode {
+        const result: contract.ErrorCode = if (self.platform) |*platform| blk: {
+            credential_store.commitSignedOut(platform.backend()) catch |err|
+                break :blk accountStoreError(err);
+            break :blk .metask_unauthorized;
+        } else .credential_store_delete_failed;
+        self.credentials.clear();
+        self.saved_preference = null;
+        self.cancelRefreshTimer();
+        self.effects.clearCatalog();
+        self.candidate_public_catalog.clear();
+        return result;
+    }
+
+    fn prepareAuthorizedLogin(
         self: *Runtime,
         attempt_id: u64,
-        login: *metask_client.LoginResult,
+        tokens: *metask_client.AuthorizationResult,
     ) PrepareResult {
         const platform = if (self.platform) |*value| value else return self.prepareFailure(
             attempt_id,
             .credential_store_write_failed,
         );
-        const identity = login.identity;
         credential_store.commitRefresh(
             platform.backend(),
-            &login.tokens.refresh_token,
+            &tokens.refresh_token,
         ) catch |err| return self.prepareFailure(
             attempt_id,
             accountStoreError(err),
         );
-        self.discardForeignPreference(platform, identity.accountId());
-        self.credentials.replace(&login.tokens);
+        self.credentials.replace(tokens);
         var completion: state_impl.WorkerCompletion = .{
             .attempt_id = attempt_id,
-            .payload = .{ .authenticated = identity },
+            .payload = .tokens_persisted,
         };
         defer completion.deinit();
         return switch (self.account.prepareCompletion(&completion)) {
             .transition => |transition| .{ .prepared = .{
                 .transition = transition,
-                .follow_up = .refresh_catalog,
-                .schedule_refresh_after_commit = true,
             } },
             .rejected => |error_code| .{ .rejected = error_code },
             .ignored_stale => .ignored_stale,
@@ -921,8 +969,6 @@ pub const Runtime = struct {
         attempt_id: u64,
         rotation: *credentials_impl.CredentialRotation,
     ) PrepareResult {
-        const continue_catalog = self.catalog_after_refresh;
-        self.catalog_after_refresh = false;
         const identity = self.account.currentIdentity();
         const platform = if (self.platform) |*value| value else return self.prepareFailure(
             attempt_id,
@@ -935,44 +981,25 @@ pub const Runtime = struct {
             attempt_id,
             accountStoreError(err),
         );
-        const refreshed_identity = rotation.refreshedIdentity();
-        const identity_error = rotation.identityError();
         const rotated_account_id = rotation.accountId();
         self.credentials.replaceRotation(rotation);
-        if (identity_error) |error_code|
-            return self.prepareFailure(attempt_id, error_code);
-        if (continue_catalog and refreshed_identity == null)
-            return self.prepareFailure(
-                attempt_id,
-                .dependency_contract_invalid,
-            );
         if (identity) |current| if (!std.mem.eql(
             u8,
             rotated_account_id,
             current.accountId(),
-        )) return self.prepareFailure(attempt_id, .metask_unauthorized);
-        if (identity) |current| if (refreshed_identity) |discovered| {
-            if (!std.mem.eql(
-                u8,
-                discovered.accountId(),
-                current.accountId(),
-            )) return self.prepareFailure(attempt_id, .metask_unauthorized);
+        )) {
+            const error_code = self.deleteInvalidCredential();
+            return self.prepareFailure(attempt_id, error_code);
         };
-        if (refreshed_identity) |refreshed|
-            self.discardForeignPreference(platform, refreshed.accountId());
         var completion: state_impl.WorkerCompletion = .{
             .attempt_id = attempt_id,
-            .payload = .{ .token_refreshed = refreshed_identity },
+            .payload = .tokens_persisted,
         };
         defer completion.deinit();
         return switch (self.account.prepareCompletion(&completion)) {
             .transition => |transition| .{ .prepared = .{
                 .transition = transition,
-                .follow_up = if (continue_catalog)
-                    .refresh_catalog
-                else
-                    null,
-                .schedule_refresh_after_commit = true,
+                .schedule_refresh_after_commit = identity != null,
             } },
             .rejected => |error_code| .{ .rejected = error_code },
             .ignored_stale => .ignored_stale,
@@ -1032,7 +1059,7 @@ pub const Runtime = struct {
             .cancel_attempt => |attempt_id| self.effects.cancelAttemptAndDiscard(
                 attempt_id,
             ),
-            .persist_signed_out_tombstone => self.persistSignedOut(
+            .delete_credential => self.persistSignedOut(
                 entry.attempt_id orelse
                     @panic("logout effect has no attempt"),
             ),
@@ -1067,11 +1094,23 @@ pub const Runtime = struct {
                     attempt_id,
                     &self.credentials,
                     now,
-                    if (self.catalog_after_refresh)
-                        self.account.currentIdentity()
-                    else
-                        null,
-                    self.catalog_after_refresh,
+                );
+            },
+            .load_identity => {
+                const attempt_id = entry.attempt_id orelse
+                    @panic("identity effect has no attempt");
+                if (!self.credentials.available()) {
+                    self.effects.publishCompletion(.{
+                        .attempt_id = attempt_id,
+                        .payload = .{ .failed = .fromCode(
+                            .credential_store_read_failed,
+                        ) },
+                    });
+                    return;
+                }
+                self.effects.startLoadIdentity(
+                    attempt_id,
+                    &self.credentials,
                 );
             },
             .load_api_keys => {
@@ -1213,7 +1252,6 @@ pub const Runtime = struct {
                 self.candidate_public_catalog.clear();
                 self.effects.publishPersistenceUnknown(
                     attempt_id,
-                    .execution,
                 );
                 return;
             }
@@ -1370,19 +1408,9 @@ pub const Runtime = struct {
                     self.account.prepareRestore(&value),
                 );
                 prepared.refresh_after_commit = true;
-                self.catalog_after_refresh = true;
                 break :blk prepared;
             },
         };
-    }
-
-    fn preparedRestoreFailure(
-        self: *Runtime,
-        error_code: contract.ErrorCode,
-    ) Prepared {
-        return preparedFromState(self.account.prepareRestoreFailure(
-            .fromCode(error_code),
-        ));
     }
 
     fn preparedSignedOutRestoreFailure(
@@ -1408,20 +1436,18 @@ pub const TestSupport = if (builtin.is_test) struct {
         runtime: *Runtime,
         execution: *contract.OwnedExecutionConfig,
     ) !Prepared {
-        const ready = try state_impl.RestoreReady.init(
+        const input = execution.input();
+        runtime.effects.public_catalog.replaceRestoredSelection(
+            "key-1",
+            input.target.provider_kind,
+            input.target.model,
+        );
+        return .{ .transition = try state_impl.TestSupport.prepareReady(
+            &runtime.account,
             try .init("account-1", "Metask User"),
             "key-1",
             execution,
-        );
-        runtime.effects.public_catalog.replaceRestoredSelection(
-            ready.apiKeyId(),
-            ready.execution.input().target.provider_kind,
-            ready.execution.input().target.model,
-        );
-        var restored: state_impl.RestoreResult = .{
-            .execution_ready = ready,
-        };
-        return preparedFromState(runtime.account.prepareRestore(&restored));
+        ) };
     }
 
     pub fn occupyEffectQueue(runtime: *Runtime) void {
@@ -1810,15 +1836,13 @@ fn commitReadyRestoreForTest(runtime: *Runtime) !void {
         1,
         try std.testing.allocator.dupe(u8, "secret-key"),
     );
-    var restored: state_impl.RestoreResult = .{
-        .execution_ready = try .init(
-            try .init("account-1", "Metask User"),
-            "key-1",
-            &execution,
-        ),
-    };
+    var prepared: Prepared = .{ .transition = try state_impl.TestSupport.prepareReady(
+        &runtime.account,
+        try .init("account-1", "Metask User"),
+        "key-1",
+        &execution,
+    ) };
     execution.deinit();
-    var prepared = preparedFromState(runtime.account.prepareRestore(&restored));
     defer prepared.deinit();
     try std.testing.expect(runtime.admitEffect(&prepared));
     if (prepared.takeExecution()) |execution_value| {
@@ -1865,6 +1889,30 @@ test "Account Runtime rejects effect admission without committing state" {
     );
 }
 
+test "Account Runtime retries a retained credential before opening OAuth" {
+    var wake_context: u8 = 0;
+    var runtime = try initRuntimeForTest(&wake_context);
+    defer runtime.deinit();
+    commitAutomationRestoreForTest(&runtime);
+    try runtime.credentials.installStored(
+        std.testing.allocator,
+        "access",
+        "refresh",
+        10,
+        "account-1",
+    );
+
+    var prepared = switch (runtime.prepareCommand(.begin_login)) {
+        .prepared => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer prepared.deinit();
+    try std.testing.expect(runtime.admitEffect(&prepared));
+    const entry = runtime.effects.queue.take() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(entry.effect == .refresh_token);
+}
+
 test "Account Runtime dispatches an admitted effect only after state commit" {
     var wake_context: u8 = 0;
     var runtime = try initRuntimeForTest(&wake_context);
@@ -1887,42 +1935,6 @@ test "Account Runtime dispatches an admitted effect only after state commit" {
     try std.testing.expect(runtime.effects.queue.entry != null);
     runtime.dispatchCommitted(&prepared);
     try std.testing.expect(runtime.effects.queue.entry == null);
-}
-
-test "Account Runtime fails closed when logout persistence is unknown" {
-    var wake_context: u8 = 0;
-    var runtime = try initRuntimeForTest(&wake_context);
-    defer runtime.deinit();
-    try commitReadyRestoreForTest(&runtime);
-
-    var logout = switch (runtime.prepareCommand(.logout)) {
-        .prepared => |value| value,
-        else => return error.TestUnexpectedResult,
-    };
-    defer logout.deinit();
-    try std.testing.expect(runtime.admitEffect(&logout));
-    runtime.commit(&logout);
-    const entry = runtime.effects.queue.take() orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expect(entry.effect == .persist_signed_out_tombstone);
-    runtime.effects.publishPersistenceUnknown(entry.attempt_id.?, .logout);
-
-    var failed = switch (runtime.prepareNextCompletion().?) {
-        .prepared => |value| value,
-        else => return error.TestUnexpectedResult,
-    };
-    defer failed.deinit();
-    try std.testing.expect(runtime.admitEffect(&failed));
-    runtime.commit(&failed);
-    runtime.dispatchCommitted(&failed);
-    try std.testing.expectEqual(
-        contract.AccountState.signed_out,
-        runtime.view().state,
-    );
-    try std.testing.expectEqual(
-        contract.CatalogState.unavailable,
-        runtime.view().catalog_state,
-    );
 }
 
 test "Account Runtime shutdown clears a ready public view" {

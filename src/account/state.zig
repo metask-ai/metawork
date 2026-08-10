@@ -14,7 +14,6 @@ const SessionState = enum {
     authorizing,
     authenticated,
     refreshing,
-    reauth_required,
     shutting_down,
 };
 
@@ -30,6 +29,7 @@ const OperationKind = enum {
     none,
     oauth_callback,
     token_exchange,
+    loading_identity,
     loading_keys,
     selecting_key,
     loading_models,
@@ -71,11 +71,12 @@ fn BoundedString(comptime capacity: usize) type {
 pub const Effect = union(enum) {
     begin_oauth,
     refresh_token,
+    load_identity,
     load_api_keys,
     load_models: ApiKeyId,
     prepare_execution: ModelId,
     cancel_attempt: u64,
-    persist_signed_out_tombstone,
+    delete_credential,
     shutdown: ?u64,
 
     pub fn argument(self: *const Effect) ?[]const u8 {
@@ -130,7 +131,7 @@ const CommittedState = struct {
     fn view(self: *const CommittedState) contract.AccountView {
         const state: contract.AccountState = switch (self.session_state) {
             .restoring => .checking,
-            .signed_out, .reauth_required, .shutting_down => .signed_out,
+            .signed_out, .shutting_down => .signed_out,
             .authorizing => .authorizing,
             .authenticated => .authenticated,
             .refreshing => if (self.account_id.len == 0)
@@ -143,7 +144,7 @@ const CommittedState = struct {
         else switch (self.operation) {
             .selecting_key, .selecting_model => .choosing,
             .loading_keys, .loading_models, .persisting => .loading,
-            .none, .token_exchange => if (self.execution_state == .ready)
+            .none, .token_exchange, .loading_identity => if (self.execution_state == .ready)
                 .ready
             else if (self.error_code != .none)
                 .failed
@@ -155,7 +156,8 @@ const CommittedState = struct {
         return .{
             .state = state,
             .catalog_state = catalog_state,
-            .can_cancel = (state == .authorizing or
+            .can_cancel = ((state == .authorizing and
+                self.operation == .oauth_callback) or
                 (state == .authenticated and self.attempt_kind == .catalog)) and
                 self.operation != .logging_out and
                 self.operation != .persisting,
@@ -221,6 +223,11 @@ pub const Account = struct {
         return self.state.attempt_kind == .catalog;
     }
 
+    pub fn credentialValidationInFlight(self: *const Account) bool {
+        return self.state.attempt_kind == .login or
+            self.state.attempt_kind == .refresh_token;
+    }
+
     pub fn currentIdentity(self: *const Account) ?AccountIdentity {
         if (self.state.account_id.len == 0) return null;
         return .{
@@ -280,45 +287,14 @@ pub const Account = struct {
                 next.clearError();
                 break :blk transitionNoAttempt(next, .restored);
             },
-            .account_only => |account_only| blk: {
-                var next = self.state;
-                next.session_state = .authenticated;
-                next.account_id = account_only.identity.account_id;
-                next.display_name = account_only.identity.display_name;
-                next.execution_high_watermark =
-                    account_only.execution_high_watermark;
-                next.clearError();
-                break :blk transitionNoAttempt(next, .restored);
-            },
             .refresh_only => blk: {
                 var next = self.state;
                 next.clearError();
                 break :blk transitionNoAttempt(next, .restored);
             },
-            .execution_ready => |*ready| self.prepareRestoreReady(restore, ready),
         };
     }
 
-    pub fn prepareRestoreFailure(
-        self: *const Account,
-        failure: WorkerFailure,
-    ) PrepareResult {
-        if (self.state.session_state != .restoring)
-            return .{ .rejected = .invalid_state };
-        var next = self.state;
-        next.session_state = .shutting_down;
-        next.error_code = if (failure.error_code == .none)
-            .recovery_state_invalid
-        else
-            failure.error_code;
-        next.safe_diagnostic = failure.safe_diagnostic;
-        return transitionNoAttempt(next, .operation_failed);
-    }
-
-    /// Windows has no multi-record commit whose outcome requires a process
-    /// restart to adjudicate. A local read/codec failure therefore returns to
-    /// the login surface with an explicit error instead of manufacturing the
-    /// macOS manifest recovery state.
     pub fn prepareSignedOutRestoreFailure(
         self: *const Account,
         failure: WorkerFailure,
@@ -335,43 +311,8 @@ pub const Account = struct {
         return transitionNoAttempt(next, .operation_failed);
     }
 
-    /// A logout manifest rename may have committed even when the filesystem
-    /// cannot report the outcome. Continuing with the old in-memory execution
-    /// would violate the tombstone boundary, so this state is deliberately
-    /// non-recoverable in-process. Startup restore is the only authority that
-    /// may decide which manifest won.
-    pub fn prepareLogoutPersistenceUnknown(
-        self: *const Account,
-    ) PrepareResult {
-        if (self.state.attempt_kind != .logout or
-            self.state.operation != .logging_out or
-            self.state.active_attempt_id == null)
-            return .{ .rejected = .invalid_state };
-        const attempt_id = self.state.active_attempt_id.?;
-        var next = self.state;
-        next.session_state = .shutting_down;
-        next.execution_state = .none;
-        next.operation = .none;
-        next.active_attempt_id = null;
-        next.attempt_kind = .none;
-        next.selected_api_key_id.clear();
-        next.selected_model.clear();
-        next.pending_api_key_id.clear();
-        next.pending_model.clear();
-        next.execution_generation = 0;
-        next.error_code = .recovery_state_invalid;
-        next.safe_diagnostic.clear();
-        return transitionNoEffect(
-            next,
-            .operation_failed,
-            attempt_id,
-        );
-    }
-
-    /// The execution manifest rename may have committed even when directory
-    /// fsync could not report the result. The Host cannot safely choose either
-    /// the old runtime generation or the staged one in-process, so it clears
-    /// admission and requires startup restore to resolve the manifest.
+    /// A preference rename whose outcome cannot be observed invalidates the
+    /// in-process default execution until the next startup.
     pub fn prepareExecutionPersistenceUnknown(
         self: *const Account,
     ) PrepareResult {
@@ -403,8 +344,7 @@ pub const Account = struct {
     }
 
     pub fn prepareTokenRefresh(self: *const Account) PrepareResult {
-        if ((self.state.session_state != .authenticated and
-            self.state.session_state != .reauth_required) or
+        if (self.state.session_state != .authenticated or
             self.state.operation != .none or
             self.state.active_attempt_id != null)
             return .{ .rejected = .invalid_state };
@@ -426,7 +366,8 @@ pub const Account = struct {
     }
 
     pub fn prepareRestoredTokenRefresh(self: *const Account) PrepareResult {
-        if (self.state.session_state != .restoring or
+        if ((self.state.session_state != .restoring and
+            self.state.session_state != .signed_out) or
             self.state.operation != .none or
             self.state.active_attempt_id != null)
             return .{ .rejected = .invalid_state };
@@ -461,8 +402,8 @@ pub const Account = struct {
         }
 
         const result = switch (completion.payload) {
-            .authenticated => |identity| self.prepareAuthenticated(identity),
-            .token_refreshed => |identity| self.prepareTokenRefreshed(identity),
+            .identity_loaded => |identity| self.prepareIdentityLoaded(identity),
+            .tokens_persisted => self.prepareTokensPersisted(),
             .api_keys_loaded => self.prepareApiKeysLoaded(),
             .models_loaded => self.prepareModelsLoaded(),
             .execution_ready => self.prepareExecutionReady(completion),
@@ -519,26 +460,8 @@ pub const Account = struct {
         return transitionNoAttempt(next, .operation_failed);
     }
 
-    pub fn prepareRestoredRefreshAdmissionFailure(
-        self: *const Account,
-        error_code: contract.ErrorCode,
-    ) PrepareResult {
-        if (error_code == .none or
-            self.state.session_state != .authenticated or
-            self.state.execution_state != .none or
-            self.state.operation != .none or
-            self.state.active_attempt_id != null)
-            return .{ .rejected = .invalid_state };
-        var next = self.state;
-        next.session_state = .reauth_required;
-        next.error_code = error_code;
-        next.safe_diagnostic.clear();
-        return transitionNoAttempt(next, .operation_failed);
-    }
-
     fn prepareBeginLogin(self: *const Account) PrepareResult {
         if ((self.state.session_state != .signed_out and
-            self.state.session_state != .reauth_required and
             self.state.session_state != .authenticated) or
             self.state.operation != .none)
             return .{ .rejected = .invalid_state };
@@ -555,7 +478,8 @@ pub const Account = struct {
     }
 
     fn prepareCancel(self: *const Account) PrepareResult {
-        if (self.state.operation == .persisting)
+        if (self.state.operation == .persisting or
+            self.state.operation == .loading_identity)
             return .{ .rejected = .invalid_state };
         const attempt = self.state.active_attempt_id orelse
             return .{ .rejected = .invalid_state };
@@ -724,32 +648,39 @@ pub const Account = struct {
             next,
             .session_changed,
             attempt.current,
-            .persist_signed_out_tombstone,
+            .delete_credential,
         );
     }
 
-    fn prepareAuthenticated(
+    fn prepareIdentityLoaded(
         self: *const Account,
         identity: AccountIdentity,
     ) PrepareResult {
-        if (self.state.operation != .oauth_callback and
-            self.state.operation != .token_exchange)
+        if (self.state.operation != .loading_identity or
+            (self.state.attempt_kind != .login and
+                self.state.attempt_kind != .refresh_token))
             return .{ .rejected = .invalid_state };
+        if (self.state.attempt_kind == .refresh_token and
+            self.state.account_id.len != 0 and !std.mem.eql(
+            u8,
+            identity.accountId(),
+            self.state.account_id.view(),
+        )) return .{ .rejected = .metask_unauthorized };
         var next = self.state;
-        if (next.attempt_kind != .login)
-            return .{ .rejected = .invalid_state };
         next.session_state = .authenticated;
-        next.execution_state = .none;
+        if (next.attempt_kind == .login) {
+            next.execution_state = .none;
+            next.selected_api_key_id.clear();
+            next.selected_model.clear();
+            next.execution_generation = 0;
+        }
         next.operation = .none;
         next.active_attempt_id = null;
         next.attempt_kind = .none;
         next.account_id = identity.account_id;
         next.display_name = identity.display_name;
-        next.selected_api_key_id.clear();
-        next.selected_model.clear();
         next.pending_api_key_id.clear();
         next.pending_model.clear();
-        next.execution_generation = 0;
         next.clearError();
         return transitionNoEffect(
             next,
@@ -758,26 +689,22 @@ pub const Account = struct {
         );
     }
 
-    fn prepareTokenRefreshed(
-        self: *const Account,
-        identity: ?AccountIdentity,
-    ) PrepareResult {
-        if (self.state.attempt_kind != .refresh_token or
-            self.state.operation != .token_exchange)
+    fn prepareTokensPersisted(self: *const Account) PrepareResult {
+        if ((self.state.attempt_kind != .login or
+            self.state.operation != .oauth_callback) and
+            (self.state.attempt_kind != .refresh_token or
+                self.state.operation != .token_exchange))
             return .{ .rejected = .invalid_state };
-        if (identity) |refreshed| {
-            if (self.state.account_id.len != 0 and !std.mem.eql(
-                u8,
-                refreshed.accountId(),
-                self.state.account_id.view(),
-            )) return .{ .rejected = .metask_unauthorized };
-        }
         var next = self.state;
-        if (identity) |refreshed| {
-            next.account_id = refreshed.account_id;
-            next.display_name = refreshed.display_name;
-        } else if (next.account_id.len == 0) {
-            return .{ .rejected = .metask_unauthorized };
+        if (next.attempt_kind == .login or next.account_id.len == 0) {
+            next.operation = .loading_identity;
+            next.clearError();
+            return transition(
+                next,
+                .session_changed,
+                self.state.active_attempt_id.?,
+                .load_identity,
+            );
         }
         next.session_state = .authenticated;
         next.operation = .none;
@@ -926,19 +853,27 @@ pub const Account = struct {
             WorkerFailure.fromCode(.dependency_contract_invalid)
         else
             failure;
+        const login_replaced = self.state.attempt_kind == .login and
+            self.state.operation == .loading_identity;
         var next = self.state;
         next.session_state = switch (next.attempt_kind) {
-            .login => if (next.session_state == .authorizing)
+            .login => if (login_replaced or next.account_id.len == 0)
                 .signed_out
             else
-                next.session_state,
-            .refresh_token => .authenticated,
+                .authenticated,
+            .refresh_token => if (next.account_id.len == 0)
+                .signed_out
+            else
+                .authenticated,
             .catalog, .logout, .none => next.session_state,
         };
         const authentication_invalid = self.state.attempt_kind == .refresh_token and
-            (normalized_failure.error_code == .token_refresh_failed or
-                normalized_failure.error_code == .metask_unauthorized);
-        if (authentication_invalid) {
+            (normalized_failure.error_code == .metask_unauthorized or
+                normalized_failure.error_code == .credential_store_delete_failed);
+        if (authentication_invalid or login_replaced or
+            (self.state.attempt_kind == .login and
+                self.state.account_id.len == 0))
+        {
             next.session_state = .signed_out;
             next.execution_state = .none;
             next.account_id.clear();
@@ -947,11 +882,6 @@ pub const Account = struct {
             next.selected_model.clear();
             next.catalog_generation = 0;
             next.execution_generation = 0;
-        }
-        if (self.state.attempt_kind == .refresh_token and
-            self.state.account_id.len == 0)
-        {
-            next.session_state = .signed_out;
         }
         if (next.execution_state == .preparing)
             next.execution_state = .none;
@@ -969,41 +899,6 @@ pub const Account = struct {
             .operation_failed,
             self.state.active_attempt_id.?,
         );
-    }
-
-    fn prepareRestoreReady(
-        self: *const Account,
-        restore: *RestoreResult,
-        ready: *RestoreReady,
-    ) PrepareResult {
-        var execution = ready.execution.take();
-        const input = execution.input();
-        if (input.execution_generation == 0) {
-            execution.deinit();
-            restore.* = emptyRestore();
-            return .{ .rejected = .generation_mismatch };
-        }
-        var next = self.state;
-        next.session_state = .authenticated;
-        next.execution_state = .ready;
-        next.account_id = ready.identity.account_id;
-        next.display_name = ready.identity.display_name;
-        next.selected_api_key_id = ready.api_key_id;
-        next.selected_model.set(input.target.model) catch {
-            execution.deinit();
-            restore.* = emptyRestore();
-            return .{ .rejected = .execution_config_invalid };
-        };
-        next.execution_generation = input.execution_generation;
-        next.execution_high_watermark = input.execution_generation;
-        next.clearError();
-        restore.* = emptyRestore();
-        return .{ .transition = .{
-            .next = next,
-            .fact_kind = .restored,
-            .attempt_id = null,
-            .execution = execution,
-        } };
     }
 };
 
@@ -1079,15 +974,18 @@ fn stateIsValid(state: *const CommittedState) bool {
         return false;
 
     switch (state.session_state) {
-        .restoring, .signed_out, .reauth_required, .shutting_down => {
+        .restoring, .signed_out, .shutting_down => {
             if (state.operation != .none) return false;
         },
         .authorizing => {
-            if (state.operation != .oauth_callback) return false;
+            if (state.operation != .oauth_callback and
+                state.operation != .loading_identity)
+                return false;
             if (state.attempt_kind != .login) return false;
         },
         .refreshing => {
-            if (state.operation != .token_exchange or
+            if ((state.operation != .token_exchange and
+                state.operation != .loading_identity) or
                 state.attempt_kind != .refresh_token)
                 return false;
         },
@@ -1200,6 +1098,36 @@ pub const PreparedTransition = struct {
 };
 
 pub const TestSupport = if (builtin.is_test) struct {
+    pub fn prepareReady(
+        account: *const Account,
+        identity: AccountIdentity,
+        api_key_id: []const u8,
+        execution_value: *contract.OwnedExecutionConfig,
+    ) !PreparedTransition {
+        if (account.state.session_state != .restoring or api_key_id.len == 0)
+            return error.InvalidState;
+        var execution = execution_value.take();
+        errdefer execution.deinit();
+        const input = execution.input();
+        if (input.execution_generation == 0) return error.InvalidGeneration;
+        var next = account.state;
+        next.session_state = .authenticated;
+        next.execution_state = .ready;
+        next.account_id = identity.account_id;
+        next.display_name = identity.display_name;
+        next.selected_api_key_id = try ApiKeyId.init(api_key_id);
+        try next.selected_model.set(input.target.model);
+        next.execution_generation = input.execution_generation;
+        next.execution_high_watermark = input.execution_generation;
+        next.clearError();
+        return .{
+            .next = next,
+            .fact_kind = .restored,
+            .attempt_id = null,
+            .execution = execution,
+        };
+    }
+
     pub fn installInitialExecutionPreparation(
         account: *Account,
         api_key_id: []const u8,
@@ -1277,8 +1205,8 @@ pub const WorkerCompletion = struct {
     payload: Payload,
 
     pub const Payload = union(enum) {
-        authenticated: AccountIdentity,
-        token_refreshed: ?AccountIdentity,
+        identity_loaded: AccountIdentity,
+        tokens_persisted,
         api_keys_loaded,
         models_loaded,
         execution_ready: contract.OwnedExecutionConfig,
@@ -1295,50 +1223,15 @@ pub const WorkerCompletion = struct {
     }
 };
 
-pub const RestoreReady = struct {
-    identity: AccountIdentity,
-    api_key_id: ApiKeyId,
-    execution: contract.OwnedExecutionConfig,
-
-    pub fn init(
-        identity: AccountIdentity,
-        api_key_id: []const u8,
-        execution: *contract.OwnedExecutionConfig,
-    ) contract.ValidationError!RestoreReady {
-        if (api_key_id.len == 0) return error.FieldEmpty;
-        const validated_api_key_id = try ApiKeyId.init(api_key_id);
-        return .{
-            .identity = identity,
-            .api_key_id = validated_api_key_id,
-            .execution = execution.take(),
-        };
-    }
-
-    pub fn apiKeyId(self: *const RestoreReady) []const u8 {
-        return self.api_key_id.view();
-    }
-};
-
 pub const RestoreSignedOut = struct {
-    execution_high_watermark: u64 = 0,
-};
-
-pub const RestoreAccountOnly = struct {
-    identity: AccountIdentity,
     execution_high_watermark: u64 = 0,
 };
 
 pub const RestoreResult = union(enum) {
     signed_out: RestoreSignedOut,
     refresh_only: void,
-    account_only: RestoreAccountOnly,
-    execution_ready: RestoreReady,
 
     pub fn deinit(self: *RestoreResult) void {
-        switch (self.*) {
-            .execution_ready => |*ready| ready.execution.deinit(),
-            else => {},
-        }
         self.* = emptyRestore();
     }
 };
@@ -1451,10 +1344,10 @@ test "fake browser client and store observe only committed effects" {
             if (!self.accept) return false;
             switch (effect) {
                 .begin_oauth => self.browser_calls += 1,
-                .refresh_token => self.client_calls += 1,
+                .refresh_token, .load_identity => self.client_calls += 1,
                 .load_api_keys, .load_models => self.client_calls += 1,
                 .prepare_execution,
-                .persist_signed_out_tombstone,
+                .delete_credential,
                 => self.store_calls += 1,
                 .cancel_attempt, .shutdown => {},
             }
@@ -1502,121 +1395,139 @@ test "fake browser client and store observe only committed effects" {
     );
 }
 
-test "RestoreReady validation does not consume execution on failure" {
-    const allocator = std.testing.allocator;
-    var execution = try contract.OwnedExecutionConfig.initOwned(
-        allocator,
-        .anthropic,
-        try allocator.dupe(u8, "model-1"),
-        try allocator.dupe(u8, contract.metask_anthropic_messages_url),
-        1,
-        try allocator.dupe(u8, "secret"),
-    );
-    defer execution.deinit();
+test "explicit login persists tokens before publishing identity" {
+    var account = Account.initSignedOutForTest();
+    var begin = switch (account.prepareCommand(.begin_login)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    _ = begin.takeEffect();
+    commitPrepared(&account, &begin);
 
-    try std.testing.expectError(error.FieldEmpty, RestoreReady.init(
-        try .init("account-1", "Metask User"),
-        "",
-        &execution,
-    ));
-    try std.testing.expectEqualStrings("model-1", execution.input().target.model);
+    var persisted: WorkerCompletion = .{
+        .attempt_id = account.activeAttempt().?,
+        .payload = .tokens_persisted,
+    };
+    var load_identity = switch (account.prepareCompletion(&persisted)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(load_identity.takeEffect().? == .load_identity);
+    commitPrepared(&account, &load_identity);
+    try std.testing.expectEqual(contract.AccountState.authorizing, account.view().state);
+    try std.testing.expectEqualStrings("", account.view().account_id);
+    try std.testing.expect(!account.view().can_cancel);
+    try std.testing.expectEqual(
+        contract.ErrorCode.invalid_state,
+        account.prepareCommand(.cancel_operation).rejected,
+    );
+
+    var identified: WorkerCompletion = .{
+        .attempt_id = account.activeAttempt().?,
+        .payload = .{ .identity_loaded = try .init("account-2", "Other User") },
+    };
+    var completed = switch (account.prepareCompletion(&identified)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    commitPrepared(&account, &completed);
+    try std.testing.expectEqual(contract.AccountState.authenticated, account.view().state);
+    try std.testing.expectEqualStrings("account-2", account.view().account_id);
+    try std.testing.expectEqualStrings("Other User", account.view().display_name);
+    try std.testing.expectEqual(@as(u64, 0), account.view().execution_generation);
 }
 
-test "explicit login replaces identity and clears prior execution" {
-    const allocator = std.testing.allocator;
-    var account = Account.initRestoring();
-    var restored_execution = try contract.OwnedExecutionConfig.initOwned(
-        allocator,
-        .anthropic,
-        try allocator.dupe(u8, "model-1"),
-        try allocator.dupe(u8, contract.metask_anthropic_messages_url),
-        9,
-        try allocator.dupe(u8, "secret"),
-    );
-    defer restored_execution.deinit();
-    var restore: RestoreResult = .{ .execution_ready = try .init(
-        try .init("account-1", "Metask User"),
-        "key-1",
-        &restored_execution,
-    ) };
-    defer restore.deinit();
-    var restored = switch (account.prepareRestore(&restore)) {
+test "explicit login accepts the newly verified identity" {
+    var account = Account{ .state = .{
+        .session_state = .authenticated,
+        .account_id = try .init("account-1"),
+        .display_name = try .init("Old User"),
+    } };
+    var begin = switch (account.prepareCommand(.begin_login)) {
         .transition => |value| value,
         else => return error.TestUnexpectedResult,
     };
-    var installed = restored.takeExecution().?;
-    defer installed.deinit();
-    restored.commit(&account);
-    restored.deinit();
-    try std.testing.expectEqual(contract.CatalogState.ready, account.view().catalog_state);
-    try std.testing.expectEqual(@as(u64, 9), account.view().execution_generation);
-
-    var refresh = switch (account.prepareTokenRefresh()) {
-        .transition => |value| value,
-        else => return error.TestUnexpectedResult,
-    };
-    _ = refresh.takeEffect();
-    commitPrepared(&account, &refresh);
-    var refresh_failed: WorkerCompletion = .{
+    _ = begin.takeEffect();
+    commitPrepared(&account, &begin);
+    var persisted: WorkerCompletion = .{
         .attempt_id = account.activeAttempt().?,
-        .payload = .{ .failed = try .init(.token_refresh_failed, "reauth required") },
+        .payload = .tokens_persisted,
     };
-    var failed = switch (account.prepareCompletion(&refresh_failed)) {
+    var identity_request = switch (account.prepareCompletion(&persisted)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    _ = identity_request.takeEffect();
+    commitPrepared(&account, &identity_request);
+    var identified: WorkerCompletion = .{
+        .attempt_id = account.activeAttempt().?,
+        .payload = .{ .identity_loaded = try .init("account-2", "New User") },
+    };
+    var committed = switch (account.prepareCompletion(&identified)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    commitPrepared(&account, &committed);
+    try std.testing.expectEqualStrings("account-2", account.view().account_id);
+    try std.testing.expectEqualStrings("New User", account.view().display_name);
+}
+
+test "failed replacement before token commit preserves the current identity" {
+    var account = Account{ .state = .{
+        .session_state = .authenticated,
+        .account_id = try .init("account-1"),
+        .display_name = try .init("Current User"),
+    } };
+    var begin = switch (account.prepareCommand(.begin_login)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    _ = begin.takeEffect();
+    commitPrepared(&account, &begin);
+    var failure: WorkerCompletion = .{
+        .attempt_id = account.activeAttempt().?,
+        .payload = .{ .failed = .fromCode(.oauth_exchange_failed) },
+    };
+    var failed = switch (account.prepareCompletion(&failure)) {
         .transition => |value| value,
         else => return error.TestUnexpectedResult,
     };
     commitPrepared(&account, &failed);
-    try std.testing.expectEqual(contract.AccountState.signed_out, account.view().state);
-    try std.testing.expectEqual(contract.CatalogState.unavailable, account.view().catalog_state);
-
-    var reauth = switch (account.prepareCommand(.begin_login)) {
-        .transition => |value| value,
-        else => return error.TestUnexpectedResult,
-    };
-    _ = reauth.takeEffect();
-    commitPrepared(&account, &reauth);
-    var replacement: WorkerCompletion = .{
-        .attempt_id = account.activeAttempt().?,
-        .payload = .{
-            .authenticated = try .init(
-                "account-2",
-                "Other User",
-            ),
-        },
-    };
-    var replacement_transition = switch (account.prepareCompletion(&replacement)) {
-        .transition => |value| value,
-        else => return error.TestUnexpectedResult,
-    };
-    commitPrepared(&account, &replacement_transition);
     try std.testing.expectEqual(contract.AccountState.authenticated, account.view().state);
-    try std.testing.expectEqual(contract.CatalogState.loading, account.view().catalog_state);
-    try std.testing.expectEqualStrings("account-2", account.view().account_id);
-    try std.testing.expectEqualStrings("Other User", account.view().display_name);
-    try std.testing.expectEqual(@as(u64, 0), account.view().execution_generation);
-    try std.testing.expectEqual(contract.ErrorCode.none, account.view().error_code);
+    try std.testing.expectEqualStrings("account-1", account.view().account_id);
+    try std.testing.expectEqualStrings("Current User", account.view().display_name);
 }
 
-test "cold refresh can replace only the verified public identity" {
+test "cold refresh publishes only the verified current identity" {
     var account = Account.initRestoring();
-    var restore: RestoreResult = .{ .account_only = .{
-        .identity = try .init("22", "Stored account name"),
-    } };
+    var restore: RestoreResult = .{ .refresh_only = {} };
     var restored = switch (account.prepareRestore(&restore)) {
         .transition => |value| value,
         else => return error.TestUnexpectedResult,
     };
     commitPrepared(&account, &restored);
 
-    var refresh = switch (account.prepareTokenRefresh()) {
+    var refresh = switch (account.prepareRestoredTokenRefresh()) {
         .transition => |value| value,
         else => return error.TestUnexpectedResult,
     };
     _ = refresh.takeEffect();
     commitPrepared(&account, &refresh);
+    var persisted: WorkerCompletion = .{
+        .attempt_id = account.activeAttempt().?,
+        .payload = .tokens_persisted,
+    };
+    var load_identity = switch (account.prepareCompletion(&persisted)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    _ = load_identity.takeEffect();
+    commitPrepared(&account, &load_identity);
+    try std.testing.expectEqual(contract.AccountState.checking, account.view().state);
+
     var completion: WorkerCompletion = .{
         .attempt_id = account.activeAttempt().?,
-        .payload = .{ .token_refreshed = try .init("22", "朱健") },
+        .payload = .{ .identity_loaded = try .init("22", "朱健") },
     };
     var completed = switch (account.prepareCompletion(&completion)) {
         .transition => |value| value,
@@ -1625,6 +1536,65 @@ test "cold refresh can replace only the verified public identity" {
     commitPrepared(&account, &completed);
     try std.testing.expectEqualStrings("22", account.view().account_id);
     try std.testing.expectEqualStrings("朱健", account.view().display_name);
+}
+
+test "refresh failure matrix distinguishes retryable and invalid credentials" {
+    var cold = Account.initRestoring();
+    var restored: RestoreResult = .{ .refresh_only = {} };
+    var restore = switch (cold.prepareRestore(&restored)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    commitPrepared(&cold, &restore);
+    var cold_refresh = switch (cold.prepareRestoredTokenRefresh()) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    _ = cold_refresh.takeEffect();
+    commitPrepared(&cold, &cold_refresh);
+    var unavailable: WorkerCompletion = .{
+        .attempt_id = cold.activeAttempt().?,
+        .payload = .{ .failed = .fromCode(.metask_service_unavailable) },
+    };
+    var retryable = switch (cold.prepareCompletion(&unavailable)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    commitPrepared(&cold, &retryable);
+    try std.testing.expectEqual(contract.AccountState.signed_out, cold.view().state);
+    try std.testing.expectEqual(
+        contract.ErrorCode.metask_service_unavailable,
+        cold.view().error_code,
+    );
+    var retry = switch (cold.prepareRestoredTokenRefresh()) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(retry.takeEffect().? == .refresh_token);
+    retry.deinit();
+
+    var active = Account{ .state = .{
+        .session_state = .authenticated,
+        .account_id = try .init("account-1"),
+        .display_name = try .init("Metask User"),
+    } };
+    var active_refresh = switch (active.prepareTokenRefresh()) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    _ = active_refresh.takeEffect();
+    commitPrepared(&active, &active_refresh);
+    var unauthorized: WorkerCompletion = .{
+        .attempt_id = active.activeAttempt().?,
+        .payload = .{ .failed = .fromCode(.metask_unauthorized) },
+    };
+    var invalid = switch (active.prepareCompletion(&unauthorized)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    commitPrepared(&active, &invalid);
+    try std.testing.expectEqual(contract.AccountState.signed_out, active.view().state);
+    try std.testing.expectEqualStrings("", active.view().account_id);
 }
 
 test "failed reconfiguration preserves committed selection and generation high watermark" {
@@ -1639,16 +1609,12 @@ test "failed reconfiguration preserves committed selection and generation high w
         try allocator.dupe(u8, "secret"),
     );
     defer restored_execution.deinit();
-    var restore: RestoreResult = .{ .execution_ready = try .init(
+    var restored = try TestSupport.prepareReady(
+        &account,
         try .init("account-1", "Metask User"),
         "key-old",
         &restored_execution,
-    ) };
-    defer restore.deinit();
-    var restored = switch (account.prepareRestore(&restore)) {
-        .transition => |value| value,
-        else => return error.TestUnexpectedResult,
-    };
+    );
     var installed = restored.takeExecution().?;
     installed.deinit();
     restored.commit(&account);
@@ -1724,7 +1690,7 @@ test "failed reconfiguration preserves committed selection and generation high w
         else => return error.TestUnexpectedResult,
     };
     try std.testing.expect(
-        logout.takeEffect().? == .persist_signed_out_tombstone,
+        logout.takeEffect().? == .delete_credential,
     );
     commitPrepared(&account, &logout);
     try std.testing.expect(!account.view().can_create_task);
@@ -1908,37 +1874,7 @@ test "shutdown revokes ready execution before publishing the terminal view" {
     try std.testing.expect(!view.can_create_task);
 }
 
-test "restore failure enters a terminal restart-required state" {
-    var account: Account = .{};
-    var failure = WorkerFailure.fromCode(.credential_store_read_failed);
-    failure.safe_diagnostic = try .init("Keychain read failed");
-    var prepared = switch (account.prepareRestoreFailure(failure)) {
-        .transition => |value| value,
-        else => return error.TestUnexpectedResult,
-    };
-    commitPrepared(&account, &prepared);
-
-    const view = account.view();
-    try std.testing.expectEqual(
-        contract.AccountState.signed_out,
-        view.state,
-    );
-    try std.testing.expectEqual(
-        contract.ErrorCode.credential_store_read_failed,
-        view.error_code,
-    );
-    try std.testing.expectEqualStrings(
-        "Keychain read failed",
-        view.safe_diagnostic,
-    );
-    try std.testing.expect(!view.can_create_task);
-    try std.testing.expectEqual(
-        contract.ErrorCode.invalid_state,
-        account.prepareCommand(.begin_login).rejected,
-    );
-}
-
-test "Windows restore failure returns to sign-in without restart semantics" {
+test "restore failure returns to sign-in without restart semantics" {
     var account: Account = .{};
     var prepared = switch (account.prepareSignedOutRestoreFailure(
         WorkerFailure.fromCode(.credential_store_read_failed),
@@ -1956,73 +1892,6 @@ test "Windows restore failure returns to sign-in without restart semantics" {
         contract.ErrorCode.credential_store_read_failed,
         view.error_code,
     );
-}
-
-test "restored refresh admission failure returns to signed out" {
-    const identity = try AccountIdentity.init(
-        "account-1",
-        "MetaWork User",
-    );
-    var account: Account = .{};
-    var restored: RestoreResult = .{
-        .account_only = .{ .identity = identity },
-    };
-    var restore = switch (account.prepareRestore(&restored)) {
-        .transition => |value| value,
-        else => return error.TestUnexpectedResult,
-    };
-    commitPrepared(&account, &restore);
-    var failed = switch (account.prepareRestoredRefreshAdmissionFailure(
-        .local_resource_exhausted,
-    )) {
-        .transition => |value| value,
-        else => return error.TestUnexpectedResult,
-    };
-    commitPrepared(&account, &failed);
-    const view = account.view();
-    try std.testing.expectEqual(
-        contract.AccountState.signed_out,
-        view.state,
-    );
-}
-
-test "unknown logout persistence outcome cannot reopen ready execution" {
-    var account = Account{ .state = .{
-        .session_state = .authenticated,
-        .execution_state = .ready,
-        .account_id = try .init("account-1"),
-        .display_name = try .init("Metask User"),
-        .selected_api_key_id = try .init("key-1"),
-        .selected_model = try .init("model-1"),
-        .execution_generation = 1,
-        .execution_high_watermark = 1,
-    } };
-    var logout = switch (account.prepareCommand(.logout)) {
-        .transition => |value| value,
-        else => return error.TestUnexpectedResult,
-    };
-    _ = logout.takeEffect();
-    commitPrepared(&account, &logout);
-    var unknown = switch (account.prepareLogoutPersistenceUnknown()) {
-        .transition => |value| value,
-        else => return error.TestUnexpectedResult,
-    };
-    commitPrepared(&account, &unknown);
-
-    const view = account.view();
-    try std.testing.expectEqual(
-        contract.AccountState.signed_out,
-        view.state,
-    );
-    try std.testing.expectEqual(
-        contract.CatalogState.unavailable,
-        view.catalog_state,
-    );
-    try std.testing.expectEqual(
-        contract.ErrorCode.recovery_state_invalid,
-        view.error_code,
-    );
-    try std.testing.expect(!view.can_create_task);
 }
 
 test "unknown execution persistence outcome clears old runtime identity" {
@@ -2107,16 +1976,24 @@ test "login commits account-only before a separate catalog generation" {
     _ = begin.takeEffect();
     commitPrepared(&account, &begin);
 
-    var authenticated: WorkerCompletion = .{
+    var persisted: WorkerCompletion = .{
         .attempt_id = account.activeAttempt().?,
-        .payload = .{
-            .authenticated = try .init(
-                "account-1",
-                "Metask User",
-            ),
-        },
+        .payload = .tokens_persisted,
     };
-    var auth_transition = switch (account.prepareCompletion(&authenticated)) {
+    var identity_request = switch (account.prepareCompletion(&persisted)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    _ = identity_request.takeEffect();
+    commitPrepared(&account, &identity_request);
+    var identified: WorkerCompletion = .{
+        .attempt_id = account.activeAttempt().?,
+        .payload = .{ .identity_loaded = try .init(
+            "account-1",
+            "Metask User",
+        ) },
+    };
+    var auth_transition = switch (account.prepareCompletion(&identified)) {
         .transition => |value| value,
         else => return error.TestUnexpectedResult,
     };

@@ -8,7 +8,7 @@
 
 登录与执行配置是两个独立门槛：
 
-- **C1 登录**：OAuth、token `account_id` identity、token 恢复/刷新、退出和本地安全存储。当前信息已经足够实现，不依赖模型、API Key 或 AgentCore。
+- **C1 登录**：OAuth、token rotation、严格 `/me` identity、token 恢复/刷新、退出和本地安全存储。当前信息已经足够实现，不依赖模型、API Key 或 AgentCore。
 - **C2 执行配置**：API Key catalog、model catalog 和 typed/fixed `ExecutionTarget { provider_kind, base_url, model }`。Account 只原子持久化无 secret 的默认选择；完整 ExecutionConfig 和 Provider API Key 始终留在当前进程。Workbench 安装对应 generation 后才能创建 Agent Task。
 
 MetaWork 只作为 Metask Account API 和 AgentCore bundle 的消费方。本文档不要求、也不授权修改 Metask 内部实现仓库（精确路径标识为 `cc-t2z/metacodes`）。
@@ -27,7 +27,7 @@ Metask 产品 owner 已确认 MetaWork 作为 Metask 第一方客户端复用当
 | Client ID | `metawork-app`，无 `client_secret` 的 public client |
 | Scope | `metawork:use`，唯一可申请 scope |
 | Redirect | `http://127.0.0.1:{dynamic_port}/auth/callback` |
-| Current user compatibility read | bearer `GET https://napi.metask-ai.com/api/v1/auth/me`；未进入 2026-08 发布文档，不作为登录门槛 |
+| Current user identity read | bearer `GET https://napi.metask-ai.com/api/v1/auth/me`；未进入 2026-08 发布文档，但当前 MetaWork 以 production 实测合同严格验证 authenticated identity |
 
 固定行为：
 
@@ -49,6 +49,7 @@ Metask 产品 owner 已确认 MetaWork 作为 Metask 第一方客户端复用当
 - 冷启动只依赖 refresh token。不存在 token 时直接 `signed_out`；存在 token 时先 refresh，并用 `/me` 建立当前 identity，再决定 preference 能否复用；
 - preference 缺失、损坏、owner 不同或 catalog membership 失效只清空默认选择，不影响登录，也不能制造 account mismatch；
 - refresh response 成功后先替换 secure refresh token，随后 `/me`、catalog 或 preference 失败都不得恢复已作废的旧 token；
+- refresh 或 `/me` 明确返回 `401/403` 时删除无效 refresh token 并进入 `signed_out`；网络、deadline、`429` 或 `5xx` 保留当前 refresh token 和明确重试入口，冷启动不得因此发布旧 identity；
 - 默认选择使用同目录临时文件写入、文件 sync、原子 rename 和提交确认；结果不确定时 fail closed，不发布未确认 generation；
 - logout 先删除 refresh token，再删除无 secret preference。durable Task、Run 和 Schedule 不参与 credential 删除 gate；
 - credential/open-browser effect 只在 Native SDK 主线程执行；网络与 loopback wait 在有界 Account worker 上执行；cancel、deadline、superseding attempt 和 shutdown 必须收口并 join；
@@ -56,7 +57,7 @@ Metask 产品 owner 已确认 MetaWork 作为 Metask 第一方客户端复用当
 
 ## 4. C2 现有兼容目录路径
 
-本节是 MetaWork 用于向未修改的 AgentCore 提供普通 Provider API Key 的通用接口。2026-08-10 已用 production `metawork:use` OAuth generation 验证 API Key catalog 和 API Key bearer model catalog 均无需 Profile header。接口返回 `401`、`403`、遮蔽 secret 或 API Key 归属无法精确证明时，Account 保持 `account_only`，不得建立本地代理或绕过 AgentCore。
+本节是 MetaWork 用于向未修改的 AgentCore 提供普通 Provider API Key 的通用接口。2026-08-10 已用 production `metawork:use` OAuth generation 验证 API Key catalog 和 API Key bearer model catalog 均无需 Profile header。接口返回 `401`、`403`、遮蔽 secret 或 API Key 归属无法精确证明时，Account 保持已验证的 authenticated identity，但 catalog 进入失败状态；不得建立本地代理或绕过 AgentCore。
 
 API Key catalog：
 
