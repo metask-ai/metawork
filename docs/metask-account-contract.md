@@ -35,7 +35,7 @@ Metask 产品 owner 已确认 MetaWork 作为 Metask 第一方客户端复用当
 - callback 只绑定 IPv4 loopback 动态端口，不依赖 `localhost` DNS，不绑定 wildcard；
 - callback 只接受单次 `GET /auth/callback`，严格解析 query、拒绝重复/unknown 参数，并对 `state` 做 constant-time 比较；
 - token response 有界解码并严格校验 MetaWork 实际消费的字段：`access_token`、每次必需的新 `refresh_token`、Bearer `token_type`、正整数 `expires_in`、精确 `metawork:use` scope 和非空 `account_id`；OAuth 服务允许增加未消费的 metadata，新增字段不得破坏客户端；
-- refresh token 每次成功刷新都轮换；response 缺少新 refresh token 或新本地 generation 未提交时进入 `reauth_required`，不得继续使用已作废的旧 refresh token；
+- refresh token 每次成功刷新都轮换；token response 成功即形成 rotation commit 边界，新 generation 必须先于后续 profile/catalog 结果持久化。response 缺少新 refresh token 或新本地 generation 无法提交时进入 `reauth_required`，不得继续使用已作废的旧 refresh token；`/v1/profiles` 失败不得回滚已成功的轮换；
 - profile response 有界解码并校验 MetaWork 消费的 `id/name/display_name/status/is_default`；`platform/group/group_name/expires_at` 等未消费 metadata 允许服务端演进。从 `status = active` 中选择唯一 `is_default = true` 的 profile，没有默认项时才回退第一个 active profile，多个 active default 则 fail closed。`data: []` 是合法的 `account_only`，不撤销已经完成的 OAuth 登录；profile 只表示执行选择器，不作为用户 identity 或 display name；
 - token、verifier、authorization code、完整 authorize URL 和 Authorization header 不进入 Renderer、Bridge、日志、snapshot 或持久化产品视图。
 
@@ -76,7 +76,7 @@ Windows 使用一条直接、无版本的恢复路径：
 - Windows Credential Manager 的 service 为 `dev.metawork.account`，只保存一个 `metask-refresh-token`；
 - `account.json` 只保存 account/profile/display name 与最近一次已提交的 API/model selection identifier，不含 schema/revision 字段；
 - access token、Provider API Key、base URL、provider、execution generation 和完整 execution config 都不跨进程持久化；
-- 冷启动只有同时取得 refresh token 与合法 `account.json` 才恢复 `account_only`，随后先刷新 OAuth 并精确核对必需的 `account_id`，再重新读取 Metask profile。profile 为空时保持 `account_only`；profile 可用且与已提交执行选择一致后才拉取 API/model catalog，并在历史选择仍属于当前 catalog 时于内存重建 execution；
+- 冷启动只有同时取得 refresh token 与合法 `account.json` 才恢复 `account_only`，随后先刷新 OAuth、精确核对必需的 `account_id` 并提交轮换后的 refresh token，再重新读取 Metask profile。profile 查询失败不得恢复已被服务端作废的旧 refresh token；同一 `account_id` 可以保留已提交 profile 继续验证现有目录，账号不一致时不得复用。profile 为空时保持 `account_only`；profile 可用且与已提交执行选择一致后才拉取 API/model catalog，并在历史选择仍属于当前 catalog 时于内存重建 execution；
 - 历史选择失效时保持登录并请求用户重新选择，不从文件重建 Provider、base URL 或 credential；refresh 无效进入 `reauth_required`，网络失败保留可重试状态；
 - 登录先原子替换 `account.json`，再写单个 refresh token；任一步失败都不提交内存登录事实。刷新只替换 refresh token，选择变更只替换 `account.json`；
 - logout 先删除 refresh token，再删除 `account.json`，任一步失败都不声称退出成功；

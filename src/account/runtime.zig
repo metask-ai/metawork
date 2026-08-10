@@ -993,11 +993,15 @@ pub const Runtime = struct {
                 .dependency_contract_invalid,
             );
         if (continue_catalog) {
-            const refreshed_identity = rotation.refreshedIdentity() orelse
+            const discovered_identity = rotation.refreshedIdentity() orelse
                 return self.prepareFailure(
                     attempt_id,
                     .dependency_contract_invalid,
                 );
+            const refreshed_identity = retainedProfileIdentity(
+                identity,
+                discovered_identity,
+            );
             if (!std.mem.eql(
                 u8,
                 refreshed_identity.accountId(),

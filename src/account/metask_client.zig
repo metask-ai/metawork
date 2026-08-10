@@ -179,7 +179,7 @@ pub fn exchangeAndIdentify(
     return .{ .tokens = tokens.take(), .identity = identity };
 }
 
-fn accountOnlyIdentity(tokens: *const oauth.TokenSet) !state.AccountIdentity {
+pub fn accountOnlyIdentity(tokens: *const oauth.TokenSet) !state.AccountIdentity {
     return state.AccountIdentity.init(
         tokens.accountId(),
         "",

@@ -145,14 +145,22 @@ pub const CredentialOwner = struct {
             );
         };
         errdefer refreshed.deinit();
-        const identity = if (expected_identity != null)
-            try metask.fetchIdentity(
+        const identity = if (expected_identity != null) blk: {
+            const discovered = metask.fetchIdentity(
                 transport,
                 &refreshed,
                 control,
-            )
-        else
-            null;
+            ) catch |err| {
+                // Refresh-token rotation has already succeeded. Keep the new
+                // generation even when the subsequent profile lookup fails;
+                // otherwise the now-used previous refresh token is restored
+                // on the next cold start.
+                if (err == error.Cancelled) return err;
+                break :blk metask.accountOnlyIdentity(&refreshed) catch
+                    return error.ProtocolInvalid;
+            };
+            break :blk discovered;
+        } else null;
         return .{
             .tokens = refreshed.take(),
             .identity = identity,
@@ -248,4 +256,69 @@ test "CredentialOwner can restore a refresh-only Windows session" {
     try std.testing.expect(!owner.available());
     owner.clear();
     try std.testing.expect(!owner.refreshAvailable());
+}
+
+test "refresh keeps the rotated token when profile discovery is rejected" {
+    var owner: CredentialOwner = .{};
+    defer owner.deinit();
+    try owner.installStored(
+        std.testing.allocator,
+        "old-access",
+        "old-refresh",
+        10,
+        "account-1",
+    );
+    var fake = struct {
+        step: usize = 0,
+
+        fn perform(
+            context: *anyopaque,
+            request: metask.Request,
+            output: []u8,
+        ) metask.TransportError!metask.Response {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            defer self.step += 1;
+            return switch (self.step) {
+                0 => blk: {
+                    if (request.kind != .refresh_token) return error.ProtocolFailed;
+                    const body =
+                        \\{"access_token":"new-access","refresh_token":"new-refresh","token_type":"Bearer","expires_in":3600,"scope":"metawork:use","account_id":"account-1"}
+                    ;
+                    @memcpy(output[0..body.len], body);
+                    break :blk .{ .status = 200, .body = output[0..body.len] };
+                },
+                1 => blk: {
+                    if (request.kind != .profiles or
+                        !std.mem.eql(u8, request.bearer orelse "", "new-access"))
+                        return error.ProtocolFailed;
+                    const body = "{\"code\":\"INVALID_API_KEY\"}";
+                    @memcpy(output[0..body.len], body);
+                    break :blk .{ .status = 401, .body = output[0..body.len] };
+                },
+                else => return error.ProtocolFailed,
+            };
+        }
+    }{};
+    const expected = try state.AccountIdentity.init(
+        "account-1",
+        "profile-1",
+        "Stored account",
+    );
+    var rotation = try owner.refresh(
+        std.testing.allocator,
+        .{ .context = &fake, .perform_fn = @TypeOf(fake).perform },
+        100,
+        null,
+        expected,
+    );
+    defer rotation.deinit();
+    try std.testing.expectEqualStrings(
+        "new-refresh",
+        rotation.persistenceInput().refresh_token.view(),
+    );
+    const discovered = rotation.refreshedIdentity() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("account-1", discovered.accountId());
+    try std.testing.expectEqualStrings("", discovered.profileId());
+    try std.testing.expectEqual(@as(usize, 2), fake.step);
 }
