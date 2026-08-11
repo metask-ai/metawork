@@ -6028,6 +6028,59 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   margin: 0 auto;
 }
 
+.conversation-recovery {
+  display: flex;
+  min-height: 68px;
+  margin-bottom: 8px;
+  padding: 11px 12px 11px 14px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  border: 1px solid var(--color-brand-200);
+  border-radius: 10px;
+  background: var(--color-brand-50);
+}
+
+.conversation-recovery[data-state="failed"] {
+  border-color: #e2b7bb;
+  background: #fdf7f7;
+}
+
+.conversation-recovery strong {
+  display: block;
+  color: var(--color-graphite);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.conversation-recovery p {
+  margin: 3px 0 0;
+  color: var(--color-muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.recovery-action {
+  min-width: 150px;
+  min-height: 44px;
+  padding: 0 14px;
+  flex: 0 0 auto;
+  border: 1px solid var(--color-brand-600);
+  border-radius: 7px;
+  color: #fff;
+  background: var(--color-brand-600);
+  font-size: 12px;
+  font-weight: 680;
+}
+
+.recovery-action:hover:not(:disabled) {
+  background: var(--color-brand-700);
+}
+
+.recovery-action:disabled {
+  opacity: 0.48;
+}
+
 .slash-menu {
   max-height: min(420px, 48vh);
   margin-bottom: 8px;
@@ -6542,6 +6595,16 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 @media (max-width: 620px) {
+  .conversation-recovery {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .recovery-action {
+    width: 100%;
+  }
+
   .slash-option {
     grid-template-columns: minmax(82px, 0.4fr) minmax(0, 1fr);
   }

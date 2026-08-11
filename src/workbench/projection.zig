@@ -7136,7 +7136,7 @@ pub const Workbench = struct {
             if (mcp_management) mcp.host_capabilities else McpHostCapabilities{}
         else
             McpHostCapabilities{};
-        writer.print("{{\"revision\":\"{d}\",\"capabilities\":{{\"taskHistoryPersistence\":{},\"taskHistoryPersistenceHealth\":\"{s}\",\"conversationRecovery\":false,\"executionRebind\":false,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":false,\"persistentWorkspacePermissions\":false,\"automaticWorkspaces\":{},\"scheduledTasks\":{},\"scheduledTaskPersistence\":{},\"scheduledTaskPersistenceHealth\":\"{s}\",\"backgroundScheduleWake\":{},\"localSkillManagement\":{},\"skillManagementHealth\":\"{s}\",\"mcpManagement\":{},\"mcpConnectionApproval\":{},\"mcpSecretCapture\":{},\"mcpOAuth\":{}}},\"account\":", .{
+        writer.print("{{\"revision\":\"{d}\",\"capabilities\":{{\"taskHistoryPersistence\":{},\"taskHistoryPersistenceHealth\":\"{s}\",\"conversationRecovery\":true,\"executionRebind\":false,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":false,\"persistentWorkspacePermissions\":false,\"automaticWorkspaces\":{},\"scheduledTasks\":{},\"scheduledTaskPersistence\":{},\"scheduledTaskPersistenceHealth\":\"{s}\",\"backgroundScheduleWake\":{},\"localSkillManagement\":{},\"skillManagementHealth\":\"{s}\",\"mcpManagement\":{},\"mcpConnectionApproval\":{},\"mcpSecretCapture\":{},\"mcpOAuth\":{}}},\"account\":", .{
             self.revision,
             task_persistence_ready,
             @tagName(self.task_persistence_health),
@@ -13780,7 +13780,7 @@ test "Task state round trip restores product history without fabricating a Sessi
         std.mem.indexOf(u8, snapshot, "\"taskHistoryPersistence\":true") != null,
     );
     try std.testing.expect(
-        std.mem.indexOf(u8, snapshot, "\"conversationRecovery\":false") != null,
+        std.mem.indexOf(u8, snapshot, "\"conversationRecovery\":true") != null,
     );
     try std.testing.expect(
         std.mem.indexOf(u8, snapshot, "\"continuationUnavailableReason\":\"checkpoint_unavailable\"") != null,

@@ -66,7 +66,8 @@ export function taskGroups(
             task.currentRunPhase === "running" ||
             task.currentRunPhase === "stopping" ||
             compact?.phase === "compacting" ||
-            compact?.phase === "stopping"
+            compact?.phase === "stopping" ||
+            task.activeOperation?.kind === "restore"
           );
         })
         .sort(byRecent),
@@ -106,6 +107,7 @@ export type TaskDisplayState =
     }
   | { kind: "lifecycle"; value: Exclude<TaskView["lifecycle"], "open"> }
   | { kind: "compact_phase"; value: "queued" | "compacting" | "stopping" }
+  | { kind: "recovery" }
   | { kind: "archived" }
   | { kind: "outcome"; value: NonNullable<TaskView["lastRunOutcome"]> }
   | { kind: "ready" };
@@ -120,6 +122,7 @@ export function taskDisplayState(task: TaskView): TaskDisplayState {
     compact?.phase === "stopping"
   )
     return { kind: "compact_phase", value: compact.phase };
+  if (task.activeOperation?.kind === "restore") return { kind: "recovery" };
   if (task.lifecycle !== "open")
     return { kind: "lifecycle", value: task.lifecycle };
   if (task.archived) return { kind: "archived" };
@@ -138,7 +141,8 @@ export function taskSignals(task: TaskView): TaskSignals {
       task.currentRunPhase === "stopping" ||
       compact?.phase === "queued" ||
       compact?.phase === "compacting" ||
-      compact?.phase === "stopping",
+      compact?.phase === "stopping" ||
+      task.activeOperation?.kind === "restore",
     attention: task.currentRunPhase === "waiting_ui",
     failed:
       task.lastRunOutcome === "failed" ||

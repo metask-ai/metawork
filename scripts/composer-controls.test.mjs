@@ -813,6 +813,10 @@ function renderComposer(overrides = {}) {
       closing: false,
       closed: false,
       unavailable: false,
+      unavailableReason: null,
+      recoveryAvailable: false,
+      recoveryInProgress: false,
+      recoveryDisabled: false,
       draft,
       skillCatalog: {
         availability: "ready",
@@ -843,6 +847,7 @@ function renderComposer(overrides = {}) {
       onSubmit() {
         submissions += 1;
       },
+      onRestore() {},
       onSlashCommand() {},
       onRefreshSkillCatalog() {},
       onConfirmAccess() {},
@@ -874,6 +879,24 @@ function renderComposer(overrides = {}) {
     submissions: () => submissions,
   };
 }
+
+test("Conversation recovery invokes only its explicit Composer action", async () => {
+  let restores = 0;
+  const user = userEvent.setup({ document: dom.window.document });
+  renderComposer({
+    unavailable: true,
+    unavailableReason: "session_recovery_required",
+    recoveryAvailable: true,
+    composeDisabled: true,
+    onRestore() {
+      restores += 1;
+    },
+  });
+  await user.click(
+    screen.getByRole("button", { name: "Restore conversation" }),
+  );
+  assert.equal(restores, 1);
+});
 
 test("Composer Enter handling does not submit an active IME composition", () => {
   const composer = renderComposer();

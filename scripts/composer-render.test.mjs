@@ -41,6 +41,9 @@ const base = {
   closed: false,
   unavailable: false,
   unavailableReason: null,
+  recoveryAvailable: false,
+  recoveryInProgress: false,
+  recoveryDisabled: false,
   draft: { kind: "text", text: "" },
   skillCatalog: {
     availability: "ready",
@@ -78,12 +81,34 @@ const base = {
   actionDisabled: false,
   onDraftChange() {},
   onSubmit() {},
+  onRestore() {},
   onSlashCommand() {},
   onRefreshSkillCatalog() {},
   onConfirmAccess() {},
   onSelectWorkspace() {},
   onSelectModel() {},
 };
+
+test("Conversation recovery is an explicit accessible Composer action", () => {
+  const required = render({
+    unavailable: true,
+    unavailableReason: "session_recovery_required",
+    recoveryAvailable: true,
+  });
+  assert.match(required, /role="status"/);
+  assert.match(required, /aria-live="polite"/);
+  assert.match(required, />Continue this conversation</);
+  assert.match(required, />Restore conversation</);
+
+  const restoring = render({
+    unavailable: true,
+    unavailableReason: "session_recovery_in_progress",
+    recoveryInProgress: true,
+  });
+  assert.match(restoring, /data-state="in-progress"/);
+  assert.match(restoring, /disabled=""/);
+  assert.match(restoring, />Restoring…</);
+});
 
 function relativeLuminance(hex) {
   const channels = hex
@@ -649,17 +674,16 @@ test("a poisoned Task explains why continuation is unavailable", () => {
   assert.match(markup, /End this task and start a new one to continue/);
 });
 
-test("a restored Task explains the Metask AgentCore conversation recovery limit", () => {
+test("a restart-detached Task offers explicit conversation recovery", () => {
   const markup = render({
     unavailable: true,
-    unavailableReason: "session_recovery_unsupported",
+    unavailableReason: "session_recovery_required",
+    recoveryAvailable: true,
     composeDisabled: true,
   });
   assert.match(markup.match(/<textarea[^>]*>/)?.[0] ?? "", /disabled/);
-  assert.match(
-    markup,
-    /restored for reading, but this Metask AgentCore version cannot continue its conversation/,
-  );
+  assert.match(markup, /Restore this conversation to continue/);
+  assert.match(markup, />Restore conversation</);
   assert.doesNotMatch(markup, /start a new one to continue/);
 });
 

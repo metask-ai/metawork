@@ -89,6 +89,7 @@ import { WorkbenchConnection } from "../bridge/connection.ts";
 import type {
   TaskCreateReason,
   TaskCompactReason,
+  TaskRestoreReason,
   RunInputView,
   McpMutationResult,
   McpRefreshResult,
@@ -125,6 +126,7 @@ function errorText(error: unknown) {
 type MutationReason =
   | TaskCreateReason
   | TaskCompactReason
+  | TaskRestoreReason
   | TaskRunReason
   | WorkspaceMutationReason;
 
@@ -1066,6 +1068,64 @@ export default function App() {
     }
   }
 
+  async function restoreConversation() {
+    if (
+      viewSyncFailed ||
+      !bridgeReady ||
+      !activeTask ||
+      !snapshot.capabilities.conversationRecovery ||
+      activeTask.lifecycle !== "open" ||
+      activeTask.archived ||
+      activeTask.activeOperation !== null ||
+      !activeTask.continuationRecoveryAvailable
+    )
+      return;
+    const taskId = activeTask.id;
+    const scope = `task:${taskId}`;
+    if (!beginTaskPendingOperation(scope, "restore")) return;
+    try {
+      try {
+        const result = await client.restoreTask(
+          taskId,
+          activeTask.binding.epoch,
+        );
+        if (!result.accepted) {
+          await refreshSnapshot().catch(() => undefined);
+          setStatus(
+            attentionStatus(mutationReasonMessageId(result.reason), {
+              scope: "task",
+              taskId,
+            }),
+          );
+          return;
+        }
+      } catch (error) {
+        if (
+          await reconcileCommandTimeout(error, "operation.restore", {
+            scope: "task",
+            taskId,
+          })
+        )
+          return;
+        await refreshSnapshot().catch(() => undefined);
+        setStatus(
+          attentionStatus(
+            "recovery.start_failed",
+            { scope: "task", taskId },
+            { diagnostic: errorText(error) },
+          ),
+        );
+        return;
+      }
+      await refreshAfterCommit("recovery.started", "operation.restore", {
+        scope: "task",
+        taskId,
+      });
+    } finally {
+      endTaskPendingOperation(scope);
+    }
+  }
+
   async function cancelCompact() {
     if (
       viewSyncFailed ||
@@ -1626,13 +1686,15 @@ export default function App() {
       ? t(`task.phase.${currentTaskState.value}`)
       : currentTaskState.kind === "compact_phase"
         ? t(`compact.phase.${currentTaskState.value}`)
-        : currentTaskState.kind === "lifecycle"
-          ? t(`task.lifecycle.${currentTaskState.value}`)
-          : currentTaskState.kind === "archived"
-            ? t("task.archived")
-            : currentTaskState.kind === "outcome"
-              ? t(`outcome.${currentTaskState.value}`)
-              : t("task.ready");
+        : currentTaskState.kind === "recovery"
+          ? t("recovery.status")
+          : currentTaskState.kind === "lifecycle"
+            ? t(`task.lifecycle.${currentTaskState.value}`)
+            : currentTaskState.kind === "archived"
+              ? t("task.archived")
+              : currentTaskState.kind === "outcome"
+                ? t(`outcome.${currentTaskState.value}`)
+                : t("task.ready");
   const activeTaskTitle = activeTask
     ? activeTask.title || t("task.item", { id: activeTask.id })
     : t(newTaskDraftActive ? "task.new" : "task.open");
@@ -1667,6 +1729,15 @@ export default function App() {
         !activeTask.continuationAvailable,
       )}
       unavailableReason={activeTask?.continuationUnavailableReason ?? null}
+      recoveryAvailable={Boolean(
+        snapshot.capabilities.conversationRecovery &&
+        activeTask?.continuationRecoveryAvailable,
+      )}
+      recoveryInProgress={Boolean(
+        snapshot.capabilities.conversationRecovery &&
+        activeTask?.activeOperation?.kind === "restore",
+      )}
+      recoveryDisabled={taskMutationDisabled}
       draft={composerDraft}
       skillCatalog={skillCatalog}
       slashCommands={slashCommands}
@@ -1744,6 +1815,7 @@ export default function App() {
       actionDisabled={workbenchMutationDisabled || workspaceBusy}
       onDraftChange={updateComposerDraft}
       onSubmit={() => void submitRun()}
+      onRestore={() => void restoreConversation()}
       onSlashCommand={runSlashCommand}
       onRefreshSkillCatalog={() => void refreshComposerSkillCatalog()}
       onConfirmAccess={() => void chooseWorkspaceForDraft()}
@@ -2123,6 +2195,7 @@ export default function App() {
               <div className="task-actions">
                 {activeTask &&
                   activeTask.activeOperation !== null &&
+                  activeTask.activeOperation.kind !== "restore" &&
                   !(activeTask.activeOperation.kind === "run"
                     ? activeTask.currentRunPhase === "stopping"
                     : activeTask.compacts.find(

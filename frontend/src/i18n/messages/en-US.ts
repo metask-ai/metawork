@@ -433,6 +433,22 @@ export const enUS = {
   "compact.phase.queued": "Compaction queued",
   "compact.phase.compacting": "Compacting context",
   "compact.phase.stopping": "Stopping compaction",
+  "recovery.status": "Restoring conversation",
+  "recovery.title_required": "Continue this conversation",
+  "recovery.help_required":
+    "Restore the saved conversation before sending another message.",
+  "recovery.action": "Restore conversation",
+  "recovery.title_in_progress": "Restoring conversation",
+  "recovery.help_in_progress":
+    "Rebuilding the Agent session from the last verified save.",
+  "recovery.progress": "Restoring…",
+  "recovery.title_failed": "Conversation restore failed",
+  "recovery.help_failed":
+    "The saved conversation is still available. Check the current configuration and try again.",
+  "recovery.retry": "Try again",
+  "recovery.started": "Conversation restore started.",
+  "recovery.start_failed":
+    "Conversation restore could not start. Refresh and try again.",
   "task.create_failed":
     "The task could not be created. Check your connection and try again.",
   "task.created": "Task created.",
@@ -567,6 +583,7 @@ export const enUS = {
   "operation.run_stop": "Stopping work",
   "operation.compact": "Compacting context",
   "operation.compact_stop": "Stopping context compaction",
+  "operation.restore": "Restoring the conversation",
   "operation.ui_response": "Sending the response",
   "operation.task_close": "Ending the task",
   "operation.task_rename": "Renaming the task",
@@ -722,6 +739,8 @@ export const enUS = {
   "mutation.reason.binding_unavailable":
     "This task's execution setup is no longer available.",
   "mutation.reason.task_unavailable": "This task is no longer available.",
+  "mutation.reason.recovery_unavailable":
+    "This conversation can no longer be restored from the current saved state.",
   "mutation.reason.task_busy": "This task is already working.",
   "mutation.reason.no_history": "Run this task once before compacting context.",
   "mutation.reason.catalog_loading":
