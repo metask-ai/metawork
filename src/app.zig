@@ -408,7 +408,7 @@ pub fn run(init: std.process.Init) !void {
         },
         .checkpoint_store = .{
             .file_store = if (stores_state.checkpoint) |*store| store else null,
-            .restore_failed = stores_state.checkpoint_restore_failed,
+            .open_failed = stores_state.checkpoint_open_failed,
         },
         .schedule_notifier = .{
             .context = &app.platform,

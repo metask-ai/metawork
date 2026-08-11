@@ -82,7 +82,7 @@ fn waitTaskSnapshot(
     return error.TestUnexpectedResult;
 }
 
-fn waitCheckpointDescriptor(
+fn waitCheckpointRecord(
     workbench: *workbench_api.Workbench,
     persistence: *TaskPersistenceProbe,
 ) !void {
@@ -162,7 +162,7 @@ test "Run checkpoint commits immutable blob before durable descriptor" {
     try installWorkbenchExecution(&workbench);
     const task_id = try workbench.createTask(workbenchTaskInput());
     _ = try workbench.runTask(task_id, .{ .text = "persist checkpoint" });
-    try waitCheckpointDescriptor(&workbench, &persistence);
+    try waitCheckpointRecord(&workbench, &persistence);
 
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash("fixture-checkpoint", &digest, .{});
@@ -369,7 +369,7 @@ test "Task deletion is busy during checkpoint export and candidate publication" 
     }
     try std.testing.expect(blob_ready);
     try std.testing.expectError(error.TaskBusy, workbench.deleteTask(task_id));
-    try waitCheckpointDescriptor(&workbench, &persistence);
+    try waitCheckpointRecord(&workbench, &persistence);
     try workbench.closeTask(task_id);
     try waitWorkbenchSnapshot(&workbench, "\"lifecycle\":\"closed\"");
     try workbench.deleteTask(task_id);
@@ -642,7 +642,7 @@ test "unavailable checkpoint store does not close Task admission" {
         deinitTestComposition(runtime);
     }
     var configuration = workbenchConfiguration();
-    configuration.checkpoint_store = .{ .restore_failed = true };
+    configuration.checkpoint_store = .{ .open_failed = true };
     var workbench = try workbench_api.Workbench.init(
         std.testing.allocator,
         std.testing.io,

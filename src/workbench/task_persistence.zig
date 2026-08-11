@@ -243,39 +243,48 @@ pub const TaskWire = struct {
 };
 
 pub const CheckpointWire = struct {
-    logical_id: []const u8,
+    blob: CheckpointBlobWire,
+    session: CheckpointSessionWire,
+    anchor: CheckpointAnchorWire,
+};
+
+pub const CheckpointBlobWire = struct {
     generation: u64,
     byte_size: u64,
     digest: []const u8,
-    chunk_count: u64,
-    session_id: []const u8,
-    origin: []const u8,
-    lifecycle: []const u8,
-    registered: bool,
+};
+
+pub const CheckpointSessionWire = struct {
+    logical_session_id: []const u8,
     last_run_id: u64,
     last_compact_id: u64,
-    policy_generation: u64,
-    catalog_generation: u64,
     model: []const u8,
-    message_count: u64,
-    compact_boundary: u64,
-    skill_catalog_revision: ?[]const u8,
-    mcp_selection_fingerprint: []const u8,
-    budget_hard_bytes: u64,
-    budget_soft_bytes: u64,
-    durable_usage_bytes: u64,
-    available_bytes: u64,
-    compaction_recommended: bool,
-    budget_outcome: []const u8,
-    required_bytes: u64,
-    restore_health: []const u8,
-    invalidated_skill_authority: u32,
-    invalidated_permission_rules: u32,
-    invalidated_mcp_bindings: u32,
-    terminal_kind: []const u8,
-    terminal_id: u64,
+};
+
+pub const CheckpointAnchorWire = struct {
+    terminal: CheckpointTerminalWire,
     binding_epoch: u64,
 };
+
+pub const CheckpointTerminalWire = struct {
+    kind: []const u8,
+    id: u64,
+};
+
+test "checkpoint wire contains only blob, session binding, and commit anchor" {
+    const record_fields = std.meta.fields(CheckpointWire);
+    try std.testing.expectEqual(@as(usize, 3), record_fields.len);
+    try std.testing.expectEqualStrings("blob", record_fields[0].name);
+    try std.testing.expectEqualStrings("session", record_fields[1].name);
+    try std.testing.expectEqualStrings("anchor", record_fields[2].name);
+
+    const session_fields = std.meta.fields(CheckpointSessionWire);
+    try std.testing.expectEqual(@as(usize, 4), session_fields.len);
+    inline for (
+        session_fields,
+        .{ "logical_session_id", "last_run_id", "last_compact_id", "model" },
+    ) |field, expected| try std.testing.expectEqualStrings(expected, field.name);
+}
 
 pub const BindingWire = struct {
     epoch: u64,

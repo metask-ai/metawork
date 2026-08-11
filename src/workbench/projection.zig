@@ -10,6 +10,8 @@ const skill_management_impl = @import("workbench_skill_management");
 const skill_package_impl = @import("workbench_skill_package");
 const task_persistence = @import("workbench_task_persistence");
 const checkpoint_store = @import("workbench_checkpoint_store");
+const checkpoint_record = @import("workbench_checkpoint_record");
+const owned_task_execution = @import("workbench_owned_task_execution");
 const mcp_configuration = @import("workbench_mcp_configuration");
 const contract_fixture = @import("workbench_contract_fixture");
 const build_options = @import("build_options");
@@ -314,7 +316,7 @@ pub const Configuration = struct {
 
 pub const CheckpointStoreConfiguration = struct {
     file_store: ?*checkpoint_store.FileStore = null,
-    restore_failed: bool = false,
+    open_failed: bool = false,
 };
 
 pub const McpHostCapabilities = struct {
@@ -1379,7 +1381,7 @@ const RunInputRecord = union(enum) {
 const CheckpointExportContext = struct {
     task_id: u64,
     binding_epoch: u64,
-    terminal_kind: CheckpointTerminalKind,
+    terminal_kind: std.meta.Tag(checkpoint_record.Terminal),
     terminal_id: u64,
     last_run_id: u64,
     last_compact_id: u64,
@@ -1490,7 +1492,7 @@ const DurableTaskRecord = struct {
     ui_history: []?UiRecord,
     ui_history_count: usize = 0,
     ui_history_next: usize = 0,
-    checkpoint: ?CheckpointDescriptor = null,
+    checkpoint: ?checkpoint_record.Record = null,
     checkpoint_health: CheckpointHealth = .none,
 };
 
@@ -1508,43 +1510,6 @@ const CheckpointHealth = enum {
     dependency_contract,
 };
 
-const CheckpointTerminalKind = enum { run, compact };
-
-const CheckpointDescriptor = struct {
-    logical_id: [checkpoint_store.digest_bytes * 2]u8,
-    generation: u64,
-    byte_size: u64,
-    digest: [checkpoint_store.digest_bytes]u8,
-    chunk_count: u64,
-    session_id: []u8,
-    origin: lifecycle.CheckpointLogicalSessionOrigin,
-    lifecycle_state: lifecycle.CheckpointSessionLifecycle,
-    registered: bool,
-    last_run_id: u64,
-    last_compact_id: u64,
-    policy_generation: u64,
-    catalog_generation: u64,
-    model: []u8,
-    message_count: u64,
-    compact_boundary: u64,
-    skill_catalog_revision: ?[]u8,
-    mcp_selection_fingerprint: []u8,
-    budget_hard_bytes: u64,
-    budget_soft_bytes: u64,
-    durable_usage_bytes: u64,
-    available_bytes: u64,
-    compaction_recommended: bool,
-    budget_outcome: lifecycle.CheckpointDurableBudgetOutcome,
-    required_bytes: u64,
-    restore_health: lifecycle.CheckpointRestoreHealth,
-    invalidated_skill_authority: u32,
-    invalidated_permission_rules: u32,
-    invalidated_mcp_bindings: u32,
-    terminal_kind: CheckpointTerminalKind,
-    terminal_id: u64,
-    binding_epoch: u64,
-};
-
 const CheckpointPostprocessState = enum(u8) {
     none,
     exporting,
@@ -1555,9 +1520,11 @@ const CheckpointPostprocessState = enum(u8) {
 };
 
 const CheckpointCandidate = struct {
-    identity: checkpoint_store.Identity,
-    descriptor: CheckpointDescriptor,
-    export_duration_ns: i128,
+    record: checkpoint_record.Record,
+    metrics: struct {
+        chunk_count: u64,
+        export_duration_ns: i128,
+    },
 };
 
 const CheckpointPostprocessPayload = union(enum) {
@@ -1612,6 +1579,8 @@ const TaskStateWireScratch = struct {
             self.allocator.free(task.runs);
             self.allocator.free(task.compacts);
             self.allocator.free(task.ui_history);
+            if (task.checkpoint) |checkpoint|
+                self.allocator.free(@constCast(checkpoint.blob.digest));
         }
         self.allocator.free(self.state.tasks);
         self.allocator.free(self.state.workspaces);
@@ -1648,88 +1617,7 @@ test "Task aggregate separates Task runtime ownership from product history" {
     }
 }
 
-/// Process-local execution material owned by a Task after Workbench admission.
-/// Production values have already crossed the strict Account contract before
-/// they reach ActiveExecution. Automation builds may instead bind a loopback
-/// fixture endpoint, so Task continuation must validate its stable identity,
-/// not reinterpret this owned runtime copy as fresh Account input.
-const OwnedTaskExecution = struct {
-    allocator: std.mem.Allocator,
-    provider_kind: account_contract.ProviderKind,
-    model: []u8,
-    base_url: []u8,
-    execution_generation: u64,
-    secret: []u8,
-    owned: bool = true,
-
-    fn clone(
-        allocator: std.mem.Allocator,
-        provider_kind: account_contract.ProviderKind,
-        model: []const u8,
-        base_url: []const u8,
-        execution_generation: u64,
-        api_key: []const u8,
-    ) std.mem.Allocator.Error!OwnedTaskExecution {
-        std.debug.assert(model.len != 0);
-        std.debug.assert(base_url.len != 0);
-        std.debug.assert(execution_generation != 0);
-        std.debug.assert(api_key.len != 0);
-        const owned_model = try allocator.dupe(u8, model);
-        errdefer allocator.free(owned_model);
-        const owned_base_url = try allocator.dupe(u8, base_url);
-        errdefer allocator.free(owned_base_url);
-        const owned_secret = try allocator.dupe(u8, api_key);
-        errdefer {
-            std.crypto.secureZero(u8, owned_secret);
-            allocator.free(owned_secret);
-        }
-        return .{
-            .allocator = allocator,
-            .provider_kind = provider_kind,
-            .model = owned_model,
-            .base_url = owned_base_url,
-            .execution_generation = execution_generation,
-            .secret = owned_secret,
-        };
-    }
-
-    fn take(self: *OwnedTaskExecution) OwnedTaskExecution {
-        std.debug.assert(self.owned);
-        const result = self.*;
-        self.owned = false;
-        self.model = &.{};
-        self.base_url = &.{};
-        self.secret = &.{};
-        self.execution_generation = 0;
-        return result;
-    }
-
-    fn input(self: *const OwnedTaskExecution) account_contract.ExecutionConfigInput {
-        std.debug.assert(self.owned);
-        return .{
-            .target = .{
-                .provider_kind = self.provider_kind,
-                .model = self.model,
-                .base_url = self.base_url,
-            },
-            .api_key = self.secret,
-            .execution_generation = self.execution_generation,
-        };
-    }
-
-    fn deinit(self: *OwnedTaskExecution) void {
-        if (!self.owned) return;
-        std.crypto.secureZero(u8, self.secret);
-        self.allocator.free(self.secret);
-        self.allocator.free(self.base_url);
-        self.allocator.free(self.model);
-        self.owned = false;
-        self.model = &.{};
-        self.base_url = &.{};
-        self.secret = &.{};
-        self.execution_generation = 0;
-    }
-};
+const OwnedTaskExecution = owned_task_execution.OwnedTaskExecution;
 
 const WorkspaceTrust = union(enum) {
     explicitly_trusted,
@@ -2527,7 +2415,7 @@ pub const Workbench = struct {
             task_persistence_health = .read_failed;
         const checkpoint_store_health: checkpoint_store.Health =
             if (configuration.checkpoint_store.file_store != null and
-            !configuration.checkpoint_store.restore_failed)
+            !configuration.checkpoint_store.open_failed)
                 .ready
             else
                 .unavailable;
@@ -5194,7 +5082,7 @@ pub const Workbench = struct {
                 const history_commit_started = std.Io.Timestamp.now(self.io, .awake);
                 self.commitTaskStateWithCheckpoint(.{
                     .task_id = task.durable.id,
-                    .descriptor = &candidate.descriptor,
+                    .record = &candidate.record,
                     .health = .available,
                 }) catch |err| {
                     if (err == error.TaskPersistenceOutcomeUnknown) {
@@ -5202,7 +5090,7 @@ pub const Workbench = struct {
                         postprocess.state.store(.store_outcome_unknown, .release);
                         return true;
                     }
-                    self.deinitCheckpointDescriptor(&candidate.descriptor);
+                    candidate.record.deinit(self.allocator);
                     postprocess.payload = .none;
                     postprocess.state.store(.settled, .release);
                     return true;
@@ -5212,22 +5100,19 @@ pub const Workbench = struct {
                     "checkpoint.commit task_id={d} terminal_kind={s} terminal_id={d} byte_size={d} chunk_count={d} export_duration_ns={d} history_commit_duration_ns={d}",
                     .{
                         task.durable.id,
-                        @tagName(candidate.descriptor.terminal_kind),
-                        candidate.descriptor.terminal_id,
-                        candidate.identity.byte_size,
-                        candidate.descriptor.chunk_count,
-                        candidate.export_duration_ns,
+                        @tagName(candidate.record.anchor.terminal),
+                        candidate.record.anchor.terminal.id(),
+                        candidate.record.blob.byte_size,
+                        candidate.metrics.chunk_count,
+                        candidate.metrics.export_duration_ns,
                         history_commit_started.durationTo(history_commit_finished).nanoseconds,
                     },
                 );
-                const old_identity = if (task.durable.checkpoint) |old|
-                    checkpointIdentity(task.durable.id, old)
-                else
-                    null;
+                const old_identity = if (task.durable.checkpoint) |old| old.blob else null;
                 if (task.durable.checkpoint) |*old|
-                    self.deinitCheckpointDescriptor(old);
-                task.durable.checkpoint = candidate.descriptor;
-                candidate.descriptor = undefined;
+                    old.deinit(self.allocator);
+                task.durable.checkpoint = candidate.record;
+                candidate.record = undefined;
                 task.durable.checkpoint_health = .available;
                 postprocess.payload = .none;
                 postprocess.state.store(.settled, .release);
@@ -7632,8 +7517,8 @@ pub const Workbench = struct {
         postprocess: *CheckpointPostprocess,
     ) void {
         switch (postprocess.payload) {
-            .candidate => |*candidate| self.deinitCheckpointDescriptor(&candidate.descriptor),
-            .store_outcome_unknown => |*candidate| self.deinitCheckpointDescriptor(&candidate.descriptor),
+            .candidate => |*candidate| candidate.record.deinit(self.allocator),
+            .store_outcome_unknown => |*candidate| candidate.record.deinit(self.allocator),
             .none, .failure => {},
         }
         postprocess.payload = .none;
@@ -8530,27 +8415,24 @@ pub const Workbench = struct {
         const checkpoint_health = parsePersistedEnum(CheckpointHealth, wire.checkpoint_health) orelse
             return error.TaskStoreCorrupt;
         var checkpoint = if (wire.checkpoint) |value|
-            try self.restoreCheckpointDescriptor(value)
+            try self.restoreCheckpointRecord(wire.id, value)
         else
             null;
-        errdefer if (checkpoint) |*value| self.deinitCheckpointDescriptor(value);
+        errdefer if (checkpoint) |*value| value.deinit(self.allocator);
         if ((checkpoint == null and checkpoint_health == .available) or
             (checkpoint != null and checkpoint_health == .none))
             return error.TaskStoreCorrupt;
         if (checkpoint) |value| {
-            if (value.binding_epoch != wire.binding.epoch or
-                !std.mem.eql(u8, value.model, wire.binding.model))
+            value.validateBinding(wire.id, wire.binding.epoch, wire.binding.model) catch
                 return error.TaskStoreCorrupt;
-            const terminal_found = switch (value.terminal_kind) {
-                .run => blk: {
-                    if (value.last_run_id != value.terminal_id) break :blk false;
-                    for (wire.runs) |run| if (run.id == value.terminal_id)
+            const terminal_found = switch (value.anchor.terminal) {
+                .run => |terminal_id| blk: {
+                    for (wire.runs) |run| if (run.id == terminal_id)
                         break :blk persistedTerminalRunPhase(run.phase);
                     break :blk false;
                 },
-                .compact => blk: {
-                    if (value.last_compact_id != value.terminal_id) break :blk false;
-                    for (wire.compacts) |compact| if (compact.id == value.terminal_id)
+                .compact => |terminal_id| blk: {
+                    for (wire.compacts) |compact| if (compact.id == terminal_id)
                         break :blk persistedTerminalCompactPhase(compact.phase);
                     break :blk false;
                 },
@@ -8643,73 +8525,58 @@ pub const Workbench = struct {
         };
     }
 
-    fn restoreCheckpointDescriptor(
+    fn restoreCheckpointRecord(
         self: *Workbench,
+        task_id: u64,
         wire: task_persistence.CheckpointWire,
-    ) Error!CheckpointDescriptor {
+    ) Error!checkpoint_record.Record {
         var digest: [checkpoint_store.digest_bytes]u8 = undefined;
-        if (wire.digest.len != digest.len * 2 or
-            !std.mem.eql(u8, wire.logical_id, wire.digest))
-            return error.TaskStoreCorrupt;
-        _ = std.fmt.hexToBytes(&digest, wire.digest) catch return error.TaskStoreCorrupt;
+        if (wire.blob.digest.len != digest.len * 2) return error.TaskStoreCorrupt;
+        _ = std.fmt.hexToBytes(&digest, wire.blob.digest) catch return error.TaskStoreCorrupt;
         const canonical_digest = std.fmt.bytesToHex(digest, .lower);
-        if (!std.mem.eql(u8, &canonical_digest, wire.digest)) return error.TaskStoreCorrupt;
-        if (wire.session_id.len == 0 or wire.session_id.len > 4096 or
-            wire.model.len == 0 or wire.model.len > account_contract.Limits.model_id_bytes or
-            wire.mcp_selection_fingerprint.len != 64)
+        if (!std.mem.eql(u8, &canonical_digest, wire.blob.digest)) return error.TaskStoreCorrupt;
+        if (wire.blob.byte_size == 0 or
+            wire.session.logical_session_id.len == 0 or
+            wire.session.logical_session_id.len > 4096 or
+            wire.session.model.len == 0 or
+            wire.session.model.len > account_contract.Limits.model_id_bytes or
+            wire.anchor.binding_epoch == 0 or
+            wire.anchor.terminal.id == 0)
             return error.TaskStoreCorrupt;
-        const session_id = try self.allocator.dupe(u8, wire.session_id);
-        errdefer self.allocator.free(session_id);
-        const model = try self.allocator.dupe(u8, wire.model);
+        const logical_session_id = try self.allocator.dupe(
+            u8,
+            wire.session.logical_session_id,
+        );
+        errdefer self.allocator.free(logical_session_id);
+        const model = try self.allocator.dupe(u8, wire.session.model);
         errdefer self.allocator.free(model);
-        const skill_revision = if (wire.skill_catalog_revision) |revision| blk: {
-            if (revision.len != 64) return error.TaskStoreCorrupt;
-            break :blk try self.allocator.dupe(u8, revision);
-        } else null;
-        errdefer if (skill_revision) |value| self.allocator.free(value);
-        const mcp_fingerprint = try self.allocator.dupe(u8, wire.mcp_selection_fingerprint);
-        errdefer self.allocator.free(mcp_fingerprint);
-        if (wire.compact_boundary > wire.message_count or
-            wire.binding_epoch == 0 or wire.terminal_id == 0)
+        const terminal: checkpoint_record.Terminal = if (std.mem.eql(
+            u8,
+            wire.anchor.terminal.kind,
+            "run",
+        ))
+            .{ .run = wire.anchor.terminal.id }
+        else if (std.mem.eql(u8, wire.anchor.terminal.kind, "compact"))
+            .{ .compact = wire.anchor.terminal.id }
+        else
             return error.TaskStoreCorrupt;
         return .{
-            .logical_id = canonical_digest,
-            .generation = wire.generation,
-            .byte_size = wire.byte_size,
-            .digest = digest,
-            .chunk_count = wire.chunk_count,
-            .session_id = session_id,
-            .origin = parsePersistedEnum(lifecycle.CheckpointLogicalSessionOrigin, wire.origin) orelse
-                return error.TaskStoreCorrupt,
-            .lifecycle_state = parsePersistedEnum(lifecycle.CheckpointSessionLifecycle, wire.lifecycle) orelse
-                return error.TaskStoreCorrupt,
-            .registered = wire.registered,
-            .last_run_id = wire.last_run_id,
-            .last_compact_id = wire.last_compact_id,
-            .policy_generation = wire.policy_generation,
-            .catalog_generation = wire.catalog_generation,
-            .model = model,
-            .message_count = wire.message_count,
-            .compact_boundary = wire.compact_boundary,
-            .skill_catalog_revision = skill_revision,
-            .mcp_selection_fingerprint = mcp_fingerprint,
-            .budget_hard_bytes = wire.budget_hard_bytes,
-            .budget_soft_bytes = wire.budget_soft_bytes,
-            .durable_usage_bytes = wire.durable_usage_bytes,
-            .available_bytes = wire.available_bytes,
-            .compaction_recommended = wire.compaction_recommended,
-            .budget_outcome = parsePersistedEnum(lifecycle.CheckpointDurableBudgetOutcome, wire.budget_outcome) orelse
-                return error.TaskStoreCorrupt,
-            .required_bytes = wire.required_bytes,
-            .restore_health = parsePersistedEnum(lifecycle.CheckpointRestoreHealth, wire.restore_health) orelse
-                return error.TaskStoreCorrupt,
-            .invalidated_skill_authority = wire.invalidated_skill_authority,
-            .invalidated_permission_rules = wire.invalidated_permission_rules,
-            .invalidated_mcp_bindings = wire.invalidated_mcp_bindings,
-            .terminal_kind = parsePersistedEnum(CheckpointTerminalKind, wire.terminal_kind) orelse
-                return error.TaskStoreCorrupt,
-            .terminal_id = wire.terminal_id,
-            .binding_epoch = wire.binding_epoch,
+            .blob = .{
+                .task_id = task_id,
+                .generation = wire.blob.generation,
+                .byte_size = wire.blob.byte_size,
+                .digest = digest,
+            },
+            .session = .{
+                .logical_session_id = logical_session_id,
+                .last_run_id = wire.session.last_run_id,
+                .last_compact_id = wire.session.last_compact_id,
+                .model = model,
+            },
+            .anchor = .{
+                .terminal = terminal,
+                .binding_epoch = wire.anchor.binding_epoch,
+            },
         };
     }
 
@@ -8720,8 +8587,8 @@ pub const Workbench = struct {
         const store = self.checkpoint_store orelse return;
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
-            const descriptor = task.durable.checkpoint orelse continue;
-            store.verify(checkpointIdentity(task.durable.id, descriptor)) catch |err| {
+            const record = task.durable.checkpoint orelse continue;
+            store.verify(record.blob) catch |err| {
                 const health: CheckpointHealth = switch (err) {
                     error.BlobMissing => .blob_missing,
                     error.BlobMismatch => .blob_mismatch,
@@ -8739,7 +8606,7 @@ pub const Workbench = struct {
                     task.durable.checkpoint_health = previous_health;
                     return;
                 };
-                self.deinitCheckpointDescriptor(&removed);
+                removed.deinit(self.allocator);
             };
         }
         var reference_count: usize = 0;
@@ -8757,8 +8624,8 @@ pub const Workbench = struct {
         defer self.allocator.free(references);
         var index: usize = 0;
         for (self.tasks) |entry| if (entry) |task|
-            if (task.durable.checkpoint) |descriptor| {
-                references[index] = checkpointIdentity(task.durable.id, descriptor);
+            if (task.durable.checkpoint) |record| {
+                references[index] = record.blob;
                 index += 1;
             };
         store.cleanupOrphans(self.allocator, references) catch |err| {
@@ -9001,7 +8868,7 @@ pub const Workbench = struct {
 
     const CheckpointPersistenceOverride = struct {
         task_id: u64,
-        descriptor: *const CheckpointDescriptor,
+        record: *const checkpoint_record.Record,
         health: CheckpointHealth,
     };
 
@@ -9047,6 +8914,8 @@ pub const Workbench = struct {
                 self.allocator.free(task.runs);
                 self.allocator.free(task.compacts);
                 self.allocator.free(task.ui_history);
+                if (task.checkpoint) |checkpoint|
+                    self.allocator.free(@constCast(checkpoint.blob.digest));
             }
         }
         for (self.tasks) |*entry| {
@@ -9073,9 +8942,9 @@ pub const Workbench = struct {
         task: *TaskView,
         checkpoint_override: ?CheckpointPersistenceOverride,
     ) Error!task_persistence.TaskWire {
-        const checkpoint: ?*const CheckpointDescriptor = if (checkpoint_override) |override|
+        const checkpoint: ?*const checkpoint_record.Record = if (checkpoint_override) |override|
             if (override.task_id == task.durable.id)
-                override.descriptor
+                override.record
             else if (task.durable.checkpoint) |*value| value else null
         else if (task.durable.checkpoint) |*value| value else null;
         const checkpoint_health = if (checkpoint_override) |override|
@@ -9085,6 +8954,13 @@ pub const Workbench = struct {
                 task.durable.checkpoint_health
         else
             task.durable.checkpoint_health;
+        const checkpoint_digest = if (checkpoint) |value| blk: {
+            const digest = try self.allocator.alloc(u8, checkpoint_store.digest_bytes * 2);
+            const encoded = std.fmt.bytesToHex(value.blob.digest, .lower);
+            @memcpy(digest, &encoded);
+            break :blk digest;
+        } else null;
+        errdefer if (checkpoint_digest) |digest| self.allocator.free(digest);
         const run_count = countPresent(RunRecord, task.durable.runs);
         const runs = try self.allocator.alloc(task_persistence.RunWire, run_count);
         errdefer self.allocator.free(runs);
@@ -9182,38 +9058,24 @@ pub const Workbench = struct {
             .compacts = compacts,
             .ui_history = ui_history,
             .checkpoint = if (checkpoint) |value| .{
-                .logical_id = value.logical_id[0..],
-                .generation = value.generation,
-                .byte_size = value.byte_size,
-                .digest = value.logical_id[0..],
-                .chunk_count = value.chunk_count,
-                .session_id = value.session_id,
-                .origin = @tagName(value.origin),
-                .lifecycle = @tagName(value.lifecycle_state),
-                .registered = value.registered,
-                .last_run_id = value.last_run_id,
-                .last_compact_id = value.last_compact_id,
-                .policy_generation = value.policy_generation,
-                .catalog_generation = value.catalog_generation,
-                .model = value.model,
-                .message_count = value.message_count,
-                .compact_boundary = value.compact_boundary,
-                .skill_catalog_revision = value.skill_catalog_revision,
-                .mcp_selection_fingerprint = value.mcp_selection_fingerprint,
-                .budget_hard_bytes = value.budget_hard_bytes,
-                .budget_soft_bytes = value.budget_soft_bytes,
-                .durable_usage_bytes = value.durable_usage_bytes,
-                .available_bytes = value.available_bytes,
-                .compaction_recommended = value.compaction_recommended,
-                .budget_outcome = @tagName(value.budget_outcome),
-                .required_bytes = value.required_bytes,
-                .restore_health = @tagName(value.restore_health),
-                .invalidated_skill_authority = value.invalidated_skill_authority,
-                .invalidated_permission_rules = value.invalidated_permission_rules,
-                .invalidated_mcp_bindings = value.invalidated_mcp_bindings,
-                .terminal_kind = @tagName(value.terminal_kind),
-                .terminal_id = value.terminal_id,
-                .binding_epoch = value.binding_epoch,
+                .blob = .{
+                    .generation = value.blob.generation,
+                    .byte_size = value.blob.byte_size,
+                    .digest = checkpoint_digest.?,
+                },
+                .session = .{
+                    .logical_session_id = value.session.logical_session_id,
+                    .last_run_id = value.session.last_run_id,
+                    .last_compact_id = value.session.last_compact_id,
+                    .model = value.session.model,
+                },
+                .anchor = .{
+                    .terminal = .{
+                        .kind = @tagName(value.anchor.terminal),
+                        .id = value.anchor.terminal.id(),
+                    },
+                    .binding_epoch = value.anchor.binding_epoch,
+                },
             } else null,
             .checkpoint_health = @tagName(checkpoint_health),
         };
@@ -10888,19 +10750,8 @@ pub const Workbench = struct {
         }
         self.freeTracked(task.durable.title);
         if (task.durable.checkpoint) |*checkpoint|
-            self.deinitCheckpointDescriptor(checkpoint);
+            checkpoint.deinit(self.allocator);
         task.* = undefined;
-    }
-
-    fn deinitCheckpointDescriptor(
-        self: *Workbench,
-        checkpoint: *CheckpointDescriptor,
-    ) void {
-        self.allocator.free(checkpoint.session_id);
-        self.allocator.free(checkpoint.model);
-        if (checkpoint.skill_catalog_revision) |value| self.allocator.free(value);
-        self.allocator.free(checkpoint.mcp_selection_fingerprint);
-        checkpoint.* = undefined;
     }
 
     fn copyBounded(self: *Workbench, value: []const u8, max: usize) Error![]u8 {
@@ -11653,26 +11504,25 @@ fn postprocessCheckpoint(
             return true;
         },
         .success => |*success| {
+            const chunk_count = success.checkpoint.chunk_count;
             var candidate = CheckpointCandidate{
-                .identity = .{
-                    .task_id = context.task_id,
-                    .generation = success.checkpoint.generation,
-                    .digest = success.checkpoint.digest,
-                    .byte_size = success.checkpoint.total_bytes,
-                },
-                .descriptor = takeCheckpointDescriptor(
+                .record = takeCheckpointRecord(
                     success,
+                    context.task_id,
                     context.terminal_kind,
                     context.terminal_id,
                     context.binding_epoch,
                 ),
-                .export_duration_ns = duration_ns,
+                .metrics = .{
+                    .chunk_count = chunk_count,
+                    .export_duration_ns = duration_ns,
+                },
             };
             outcome = undefined;
             const identity = writer.commit(
-                candidate.identity.generation,
-                candidate.identity.digest,
-                candidate.identity.byte_size,
+                candidate.record.blob.generation,
+                candidate.record.blob.digest,
+                candidate.record.blob.byte_size,
             ) catch |err| {
                 if (err == error.PersistenceOutcomeUnknown) {
                     workbench.checkpoint_store_health.store(.outcome_unknown, .release);
@@ -11680,11 +11530,11 @@ fn postprocessCheckpoint(
                     postprocess.state.store(.store_outcome_unknown, .release);
                     return true;
                 }
-                workbench.deinitCheckpointDescriptor(&candidate.descriptor);
+                candidate.record.deinit(workbench.allocator);
                 publishCheckpointFailure(postprocess, .io_failed);
                 return true;
             };
-            candidate.identity = identity;
+            candidate.record.blob = identity;
             postprocess.payload = .{ .candidate = candidate };
             postprocess.state.store(.candidate_ready, .release);
             return true;
@@ -11710,46 +11560,37 @@ fn checkpointFailureHealth(failure: lifecycle.CheckpointFailure) CheckpointHealt
     };
 }
 
-fn takeCheckpointDescriptor(
+fn takeCheckpointRecord(
     success: *lifecycle.CheckpointSuccess,
-    terminal_kind: CheckpointTerminalKind,
+    task_id: u64,
+    terminal_kind: std.meta.Tag(checkpoint_record.Terminal),
     terminal_id: u64,
     binding_epoch: u64,
-) CheckpointDescriptor {
-    const description = success.description;
-    const result = CheckpointDescriptor{
-        .logical_id = std.fmt.bytesToHex(success.checkpoint.digest, .lower),
-        .generation = success.checkpoint.generation,
-        .byte_size = success.checkpoint.total_bytes,
-        .digest = success.checkpoint.digest,
-        .chunk_count = success.checkpoint.chunk_count,
-        .session_id = description.session_id,
-        .origin = description.origin,
-        .lifecycle_state = description.lifecycle,
-        .registered = description.registered,
-        .last_run_id = description.last_run_id,
-        .last_compact_id = description.last_compact_id,
-        .policy_generation = description.policy_generation,
-        .catalog_generation = description.catalog_generation,
-        .model = description.model,
-        .message_count = description.message_count,
-        .compact_boundary = description.compact_boundary,
-        .skill_catalog_revision = description.skill_catalog_revision,
-        .mcp_selection_fingerprint = description.mcp_selection_fingerprint,
-        .budget_hard_bytes = description.budget_hard_bytes,
-        .budget_soft_bytes = description.budget_soft_bytes,
-        .durable_usage_bytes = description.durable_usage_bytes,
-        .available_bytes = description.available_bytes,
-        .compaction_recommended = description.compaction_recommended,
-        .budget_outcome = description.budget_outcome,
-        .required_bytes = description.required_bytes,
-        .restore_health = description.restore_health,
-        .invalidated_skill_authority = description.invalidated_skill_authority,
-        .invalidated_permission_rules = description.invalidated_permission_rules,
-        .invalidated_mcp_bindings = description.invalidated_mcp_bindings,
-        .terminal_kind = terminal_kind,
-        .terminal_id = terminal_id,
-        .binding_epoch = binding_epoch,
+) checkpoint_record.Record {
+    const description = &success.description;
+    if (description.skill_catalog_revision) |value| description.allocator.free(value);
+    description.allocator.free(description.mcp_selection_fingerprint);
+    const terminal: checkpoint_record.Terminal = switch (terminal_kind) {
+        .run => .{ .run = terminal_id },
+        .compact => .{ .compact = terminal_id },
+    };
+    const result = checkpoint_record.Record{
+        .blob = .{
+            .task_id = task_id,
+            .generation = success.checkpoint.generation,
+            .byte_size = success.checkpoint.total_bytes,
+            .digest = success.checkpoint.digest,
+        },
+        .session = .{
+            .logical_session_id = description.session_id,
+            .last_run_id = description.last_run_id,
+            .last_compact_id = description.last_compact_id,
+            .model = description.model,
+        },
+        .anchor = .{
+            .terminal = terminal,
+            .binding_epoch = binding_epoch,
+        },
     };
     success.* = undefined;
     return result;
@@ -12470,18 +12311,6 @@ fn latestCompactId(view: *const TaskView) u64 {
         latest = @max(latest, compact.id);
     }
     return latest;
-}
-
-fn checkpointIdentity(
-    task_id: u64,
-    descriptor: CheckpointDescriptor,
-) checkpoint_store.Identity {
-    return .{
-        .task_id = task_id,
-        .generation = descriptor.generation,
-        .digest = descriptor.digest,
-        .byte_size = descriptor.byte_size,
-    };
 }
 
 fn cancelTaskCheckpoints(task: *TaskView) void {
