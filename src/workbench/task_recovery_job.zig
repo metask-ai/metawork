@@ -340,3 +340,22 @@ fn discardRoute(runtime: *agent.Runtime, route: agent.SessionRestoreRoute) bool 
     runtime.releaseClosedSession(route.session) catch return false;
     return true;
 }
+
+test "restore authority failures remain retryable job outcomes" {
+    try std.testing.expectEqual(
+        Failure.mcp_authority_stale,
+        mapRestoreError(error.StaleMcpSelection),
+    );
+    try std.testing.expectEqual(
+        Failure.mcp_authority_stale,
+        mapRestoreError(error.McpRefreshInProgress),
+    );
+    try std.testing.expectEqual(
+        Failure.runtime_unavailable,
+        mapRestoreError(error.RuntimeShuttingDown),
+    );
+    try std.testing.expectEqual(
+        Failure.session_capacity,
+        mapRestoreError(error.SessionCapacity),
+    );
+}

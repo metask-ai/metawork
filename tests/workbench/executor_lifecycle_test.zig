@@ -15,6 +15,14 @@ const workbenchTaskInput = fixture.workbenchTaskInput;
 const waitWorkbenchSnapshot = fixture.waitWorkbenchSnapshot;
 const installWorkbenchExecution = fixture.installWorkbenchExecution;
 
+const ShutdownContext = struct {
+    workbench: *workbench_api.Workbench,
+
+    fn run(self: *@This()) void {
+        self.workbench.shutdownExecutor();
+    }
+};
+
 const TaskPersistenceProbe = struct {
     result: workbench_api.TaskPersistenceCommit = .committed,
     storage: ?[]u8 = null,
@@ -408,7 +416,8 @@ test "restart restores a Task attachment and continues the same Conversation" {
         },
         second_configuration,
     );
-    defer restored.deinit();
+    var restored_live = true;
+    defer if (restored_live) restored.deinit();
     try installWorkbenchExecution(&restored);
     // A persisted manual Workspace deliberately restarts without authority.
     // Reopening it models the user's explicit reauthorization action.
@@ -422,6 +431,17 @@ test "restart restores a Task attachment and continues the same Conversation" {
         "\"id\":\"1\"",
         "\"continuationRecoveryAvailable\":true",
     );
+    fake_core.setCatalogPlan(.query_failure);
+    _ = try restored.restoreTaskConversation(
+        task_id,
+        try restored.taskBindingEpoch(task_id),
+    );
+    try waitTaskSnapshot(
+        &restored,
+        "\"id\":\"1\"",
+        "\"continuationUnavailableReason\":\"session_recovery_failed\"",
+    );
+    fake_core.setCatalogPlan(.healthy);
     fake_core.forceNextCheckpointRestoreStatus(wire.STATUS_CHECKPOINT_CORRUPT);
     _ = try restored.restoreTaskConversation(
         task_id,
@@ -467,6 +487,83 @@ test "restart restores a Task attachment and continues the same Conversation" {
     try std.testing.expectEqual(@as(usize, 2), restore_calls);
     try std.testing.expectEqual(@as(usize, 1), run_calls);
     try std.testing.expect(credential_seen);
+
+    try restored.closeTask(task_id);
+    try waitTaskSnapshot(&restored, "\"id\":\"1\"", "\"lifecycle\":\"closed\"");
+    restored.shutdownExecutor();
+    restored.deinit();
+    restored_live = false;
+
+    var third_configuration = workbenchConfiguration();
+    third_configuration.directories.canonical_user_home = home;
+    third_configuration.task_persistence = persistence.capabilityRestored(restart_history);
+    third_configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
+    var shutdown_restore = try workbench_api.Workbench.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 2,
+            .max_workspaces = 1,
+            .max_tasks = 1,
+            .max_runs_per_task = 3,
+            .max_tools_per_run = 1,
+        },
+        third_configuration,
+    );
+    defer shutdown_restore.deinit();
+    try installWorkbenchExecution(&shutdown_restore);
+    try std.testing.expectEqual(
+        workspace_id,
+        try shutdown_restore.openWorkspace(workbenchTaskInput()),
+    );
+    _ = try waitCatalogReady(&shutdown_restore, workspace_id);
+    try waitTaskSnapshot(
+        &shutdown_restore,
+        "\"id\":\"1\"",
+        "\"continuationRecoveryAvailable\":true",
+    );
+
+    fake_core.armControlledRestore();
+    _ = try shutdown_restore.restoreTaskConversation(
+        task_id,
+        try shutdown_restore.taskBindingEpoch(task_id),
+    );
+    fake_core.waitUntilRestoreEntered();
+    const restore_job = shutdown_restore.tasks[0].?.runtime.restore_job.?;
+    var shutdown_context = ShutdownContext{ .workbench = &shutdown_restore };
+    const shutdown_thread = try std.Thread.spawn(
+        .{},
+        ShutdownContext.run,
+        .{&shutdown_context},
+    );
+    var shutdown_joined = false;
+    defer if (!shutdown_joined) {
+        fake_core.releaseControlledRestore();
+        shutdown_thread.join();
+    };
+    for (0..10_000) |_| {
+        if (restore_job.cancellation.load(.acquire)) break;
+        std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+    } else return error.TestUnexpectedResult;
+    fake_core.releaseControlledRestore();
+    shutdown_thread.join();
+    shutdown_joined = true;
+    var shutdown_snapshot_storage: [128 * 1024]u8 = undefined;
+    const shutdown_snapshot = try shutdown_restore.writeSnapshot(
+        &shutdown_snapshot_storage,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(u8, shutdown_snapshot, "\"kind\":\"restore\"") == null,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            shutdown_snapshot,
+            "\"continuationRecoveryAvailable\":false",
+        ) != null,
+    );
 }
 
 test "Task deletion is busy during checkpoint export and candidate publication" {
