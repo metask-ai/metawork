@@ -61,12 +61,12 @@ const servers = [
     authMode: "oauth",
     negotiation: "automatic",
     timeoutMs: 30_000,
-    safeConnectionSummary: {
+    connection: {
       kind: "streamable_http",
-      endpointOrigin: "https://github.example",
+      endpoint: "https://github.example/mcp",
       headers: [],
       registrationKind: "automatic",
-      clientIdPresent: true,
+      clientId: null,
       tokenEndpointAuthMethod: null,
       clientSecretStatus: "not_required",
     },
@@ -100,12 +100,12 @@ const servers = [
     authMode: "oauth",
     negotiation: "automatic",
     timeoutMs: 30_000,
-    safeConnectionSummary: {
+    connection: {
       kind: "streamable_http",
-      endpointOrigin: "https://notion.example",
+      endpoint: "https://notion.example/mcp",
       headers: [],
       registrationKind: "automatic",
-      clientIdPresent: true,
+      clientId: null,
       tokenEndpointAuthMethod: null,
       clientSecretStatus: "not_required",
     },
@@ -126,11 +126,11 @@ const servers = [
     authMode: "none",
     negotiation: "modern_only",
     timeoutMs: 30_000,
-    safeConnectionSummary: {
+    connection: {
       kind: "stdio",
-      executableBasename: "filesystem-server",
-      argumentCount: 2,
-      cwdPresent: true,
+      command: "/usr/local/bin/filesystem-server",
+      arguments: ["--root", "/workspace"],
+      cwd: "/workspace",
       environment: [],
     },
     approvalStatus: "approved",
@@ -219,7 +219,7 @@ test("MCP page groups verified server state without presenting a marketplace", (
   assert.equal(screen.queryByText(/marketplace|install/i), null);
 });
 
-test("MCP detail exposes bounded product facts and the discovered tool catalog", () => {
+test("MCP detail exposes complete non-secret configuration and the tool catalog", () => {
   render(
     pageElement({
       availability: "degraded",
@@ -235,11 +235,55 @@ test("MCP detail exposes bounded product facts and the discovered tool catalog",
   fireEvent.click(screen.getByRole("button", { name: /GitHub/ }));
   const dialog = screen.getByRole("dialog", { name: "GitHub" });
   assert.ok(dialog.textContent.includes("Remote · HTTP"));
+  assert.ok(dialog.textContent.includes("https://github.example/mcp"));
   assert.ok(dialog.textContent.includes("search_repositories"));
   assert.ok(dialog.textContent.includes("create_issue"));
   assert.equal(dialog.textContent.includes("Authorization"), true);
   fireEvent.click(screen.getByRole("button", { name: "Close" }));
   assert.equal(screen.queryByRole("dialog"), null);
+});
+
+test("MCP STDIO detail and edit preserve command, ordered arguments, and cwd", () => {
+  render(
+    pageElement({
+      availability: "ready",
+      managementHealth: "ready",
+      operation: "idle",
+      desiredGeneration: "7",
+      runtimeAlignment: "current",
+      redacted: false,
+      servers: [servers[2]],
+    }),
+  );
+
+  fireEvent.click(screen.getByRole("button", { name: /Filesystem/ }));
+  let dialog = screen.getByRole("dialog", { name: "Filesystem" });
+  assert.ok(dialog.textContent.includes("/usr/local/bin/filesystem-server"));
+  assert.ok(dialog.textContent.includes("--root"));
+  assert.ok(dialog.textContent.includes("/workspace"));
+
+  fireEvent.click(
+    within(dialog).getByRole("button", { name: "Edit connection" }),
+  );
+  dialog = screen.getByRole("dialog", { name: "Edit connection settings" });
+  assert.equal(
+    within(dialog).getByRole("textbox", { name: "Executable" }).value,
+    "/usr/local/bin/filesystem-server",
+  );
+  assert.equal(
+    within(dialog).getByLabelText("Ordered arguments 1").value,
+    "--root",
+  );
+  assert.equal(
+    within(dialog).getByLabelText("Ordered arguments 2").value,
+    "/workspace",
+  );
+  assert.equal(
+    within(dialog).getByRole("textbox", {
+      name: "Working directory (optional)",
+    }).value,
+    "/workspace",
+  );
 });
 
 test("MCP tests a saved connection without refreshing the current Runtime", async () => {
@@ -357,7 +401,7 @@ test("MCP add selects Streamable HTTP and preserves its typed public input", asy
   const dialog = screen.getByRole("dialog", { name: "Add an MCP server" });
   assert.ok(
     dialog.textContent.includes(
-      "Secrets are captured securely by the Host after save. You can test immediately, then choose which tools tasks may use after authentication.",
+      "Non-secret settings stay visible and editable. The Host captures secrets securely, and you can test immediately after saving.",
     ),
   );
   fireEvent.click(
@@ -584,7 +628,7 @@ test("MCP tool allowlist mutation sends exact desired tools and generation", asy
   assert.deepEqual(calls[0], ["7", "github-binding", ["search_repositories"]]);
 });
 
-test("MCP replacement requires the complete public destination again", async () => {
+test("MCP edit preloads and preserves the complete public destination", async () => {
   const calls = [];
   render(
     pageElement(
@@ -608,21 +652,18 @@ test("MCP replacement requires the complete public destination again", async () 
   );
 
   fireEvent.click(screen.getByRole("button", { name: /GitHub/ }));
-  fireEvent.click(screen.getByRole("button", { name: "Replace connection" }));
+  fireEvent.click(screen.getByRole("button", { name: "Edit connection" }));
   const dialog = screen.getByRole("dialog", {
-    name: "Enter the complete connection again",
+    name: "Edit connection settings",
   });
-  assert.ok(dialog.textContent.includes("Secrets are kept only when"));
+  assert.ok(
+    dialog.textContent.includes("Change the saved non-secret settings"),
+  );
   const endpoint = within(dialog).getByRole("textbox", { name: "Endpoint" });
   const submit = within(dialog).getByRole("button", {
-    name: "Replace connection",
+    name: "Save connection",
   });
-  assert.equal(endpoint.value, "");
-  assert.equal(submit.disabled, true);
-
-  fireEvent.change(endpoint, {
-    target: { value: "https://github.example/mcp" },
-  });
+  assert.equal(endpoint.value, "https://github.example/mcp");
   assert.equal(submit.disabled, false);
   fireEvent.click(submit);
 
@@ -647,8 +688,8 @@ test("MCP keeps approved enable intent separate from authentication readiness", 
   const awaitingSecret = {
     ...servers[2],
     authMode: "static",
-    safeConnectionSummary: {
-      ...servers[2].safeConnectionSummary,
+    connection: {
+      ...servers[2].connection,
       environment: [{ name: "TOKEN", status: "missing" }],
     },
     approvalStatus: "approved",
@@ -761,7 +802,7 @@ test("MCP approval and OAuth operation actions stay Host-owned and typed", async
   );
   fireEvent.click(screen.getByRole("button", { name: /Notion/ }));
   assert.equal(
-    screen.getByRole("button", { name: "Replace connection" }).disabled,
+    screen.getByRole("button", { name: "Edit connection" }).disabled,
     true,
   );
   fireEvent.click(screen.getByRole("button", { name: "Cancel" }));

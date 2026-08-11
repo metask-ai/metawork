@@ -270,12 +270,12 @@ test("MCP management is capability-gated and identity checked", () => {
         authMode: "oauth",
         negotiation: "automatic",
         timeoutMs: 30_000,
-        safeConnectionSummary: {
+        connection: {
           kind: "streamable_http",
-          endpointOrigin: "https://github.example",
+          endpoint: "https://github.example/mcp",
           headers: [],
           registrationKind: "automatic",
-          clientIdPresent: true,
+          clientId: null,
           tokenEndpointAuthMethod: null,
           clientSecretStatus: "not_required",
         },
@@ -303,12 +303,12 @@ test("MCP management is capability-gated and identity checked", () => {
         authMode: "oauth",
         negotiation: "automatic",
         timeoutMs: 30_000,
-        safeConnectionSummary: {
+        connection: {
           kind: "streamable_http",
-          endpointOrigin: "https://notion.example",
+          endpoint: "https://notion.example/mcp",
           headers: [],
           registrationKind: "automatic",
-          clientIdPresent: true,
+          clientId: null,
           tokenEndpointAuthMethod: null,
           clientSecretStatus: "not_required",
         },

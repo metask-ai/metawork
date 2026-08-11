@@ -6861,6 +6861,29 @@ pub const Workbench = struct {
         return null;
     }
 
+    fn mcpConnectionContainsKnownCredential(
+        self: *const Workbench,
+        server: mcp_configuration.ServerWire,
+    ) bool {
+        if (server.transport.command) |command|
+            if (self.containsKnownCredential(command)) return true;
+        for (server.transport.arguments) |argument|
+            if (argument.literal) |literal|
+                if (self.containsKnownCredential(literal)) return true;
+        if (server.transport.cwd) |cwd|
+            if (self.containsKnownCredential(cwd)) return true;
+        for (server.transport.environment) |slot|
+            if (self.containsKnownCredential(slot.name)) return true;
+        if (server.transport.url) |url|
+            if (self.containsKnownCredential(url)) return true;
+        for (server.transport.headers) |slot|
+            if (self.containsKnownCredential(slot.name)) return true;
+        if (server.auth.oauth) |oauth|
+            if (oauth.registration.client_id) |client_id|
+                if (self.containsKnownCredential(client_id)) return true;
+        return false;
+    }
+
     fn mcpProjectionRedacted(
         self: *const Workbench,
         mcp: *const McpProductState,
@@ -6872,6 +6895,7 @@ pub const Workbench = struct {
                 self.containsKnownCredential(server.id) or
                 self.containsKnownCredential(server.namespace) or
                 self.containsKnownCredential(server.display_name)) return true;
+            if (self.mcpConnectionContainsKnownCredential(server)) return true;
             for (server.tools) |tool|
                 if (!mcp_configuration.publishableProductText(tool) or
                     self.containsKnownCredential(tool)) return true;
@@ -6957,14 +6981,6 @@ pub const Workbench = struct {
         return "consent_required";
     }
 
-    fn mcpEndpointOrigin(endpoint: []const u8) []const u8 {
-        const scheme_end = std.mem.indexOf(u8, endpoint, "://") orelse return endpoint;
-        const authority_start = scheme_end + 3;
-        const path_start = std.mem.indexOfScalarPos(u8, endpoint, authority_start, '/') orelse
-            endpoint.len;
-        return endpoint[0..path_start];
-    }
-
     fn writeMcpSecretSlots(
         self: *Workbench,
         writer: *std.Io.Writer,
@@ -6983,7 +6999,7 @@ pub const Workbench = struct {
         writer.writeByte(']') catch return error.SnapshotTooLarge;
     }
 
-    fn writeMcpSafeConnectionSummary(
+    fn writeMcpConnection(
         self: *Workbench,
         writer: *std.Io.Writer,
         management: *const mcp_configuration.ManagementPort,
@@ -6991,56 +7007,68 @@ pub const Workbench = struct {
         connection_safe: bool,
         projected_auth_mode: []const u8,
     ) Error!void {
+        if (!connection_safe) {
+            writer.writeAll("null") catch return error.SnapshotTooLarge;
+            return;
+        }
         if (!std.mem.eql(u8, server.transport.kind, "streamable_http")) {
-            writer.writeAll("{\"kind\":\"stdio\",\"executableBasename\":") catch
+            writer.writeAll("{\"kind\":\"stdio\",\"command\":") catch
                 return error.SnapshotTooLarge;
             try self.projectedJsonValueWithKnownCredentials(
                 writer,
-                if (connection_safe)
-                    std.fs.path.basename(server.transport.command orelse "")
-                else
-                    "(invalid)",
+                server.transport.command orelse "",
             );
-            writer.print(",\"argumentCount\":{d},\"cwdPresent\":{},\"environment\":", .{
-                if (connection_safe) server.transport.arguments.len else 0,
-                connection_safe and server.transport.cwd != null,
-            }) catch return error.SnapshotTooLarge;
-            if (connection_safe)
-                try self.writeMcpSecretSlots(
+            writer.writeAll(",\"arguments\":[") catch return error.SnapshotTooLarge;
+            for (server.transport.arguments, 0..) |argument, index| {
+                if (index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+                try self.projectedJsonValueWithKnownCredentials(
                     writer,
-                    management,
-                    server.transport.environment,
-                )
+                    argument.literal orelse "",
+                );
+            }
+            writer.writeAll("],\"cwd\":") catch return error.SnapshotTooLarge;
+            if (server.transport.cwd) |cwd|
+                try self.projectedJsonValueWithKnownCredentials(writer, cwd)
             else
-                writer.writeAll("[]") catch return error.SnapshotTooLarge;
+                writer.writeAll("null") catch return error.SnapshotTooLarge;
+            writer.writeAll(",\"environment\":") catch return error.SnapshotTooLarge;
+            try self.writeMcpSecretSlots(
+                writer,
+                management,
+                server.transport.environment,
+            );
             writer.writeByte('}') catch return error.SnapshotTooLarge;
             return;
         }
-        writer.writeAll("{\"kind\":\"streamable_http\",\"endpointOrigin\":") catch
+        writer.writeAll("{\"kind\":\"streamable_http\",\"endpoint\":") catch
             return error.SnapshotTooLarge;
         try self.projectedJsonValueWithKnownCredentials(
             writer,
-            if (connection_safe)
-                mcpEndpointOrigin(server.transport.url orelse "")
-            else
-                "(invalid)",
+            server.transport.url orelse "",
         );
         writer.writeAll(",\"headers\":") catch return error.SnapshotTooLarge;
-        if (connection_safe)
-            try self.writeMcpSecretSlots(writer, management, server.transport.headers)
-        else
-            writer.writeAll("[]") catch return error.SnapshotTooLarge;
-        const oauth = if (connection_safe and std.mem.eql(u8, projected_auth_mode, "oauth"))
+        try self.writeMcpSecretSlots(writer, management, server.transport.headers);
+        const oauth = if (std.mem.eql(u8, projected_auth_mode, "oauth"))
             server.auth.oauth
         else
             null;
-        writer.print(",\"registrationKind\":\"{s}\",\"clientIdPresent\":{},\"tokenEndpointAuthMethod\":", .{
+        writer.print(",\"registrationKind\":\"{s}\",\"clientId\":", .{
             if (oauth) |value| if (std.mem.eql(u8, value.registration.kind, "dynamic_registration"))
                 "automatic"
             else
                 "pre_registered" else "none",
-            if (oauth) |value| value.registration.client_id != null else false,
         }) catch return error.SnapshotTooLarge;
+        if (oauth) |value| {
+            if (std.mem.eql(u8, value.registration.kind, "pre_registered"))
+                try self.projectedJsonValueWithKnownCredentials(
+                    writer,
+                    value.registration.client_id orelse "",
+                )
+            else
+                writer.writeAll("null") catch return error.SnapshotTooLarge;
+        } else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeAll(",\"tokenEndpointAuthMethod\":") catch
+            return error.SnapshotTooLarge;
         if (oauth) |value| if (value.registration.token_endpoint_auth_method) |method|
             try self.projectedJsonValueWithKnownCredentials(writer, method)
         else
@@ -7148,7 +7176,7 @@ pub const Workbench = struct {
             if (index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
             const status = self.mcpDesiredServerRuntimeStatus(mcp, server.id);
             const problem = mcp_configuration.serverProblem(server, management.limits);
-            const connection_safe = !projection_redacted and
+            const connection_safe = !self.mcpConnectionContainsKnownCredential(server) and
                 (problem == null or problem.? == .invalid_connection_approval);
             const projected_auth_mode = if (connection_safe and
                 (std.mem.eql(u8, server.auth.kind, "none") or
@@ -7170,7 +7198,7 @@ pub const Workbench = struct {
             );
             writer.writeAll(",\"namespace\":") catch return error.SnapshotTooLarge;
             try self.projectedJsonValueWithKnownCredentials(writer, server.namespace);
-            writer.print(",\"transport\":\"{s}\",\"authMode\":\"{s}\",\"negotiation\":\"{s}\",\"timeoutMs\":{d},\"safeConnectionSummary\":", .{
+            writer.print(",\"transport\":\"{s}\",\"authMode\":\"{s}\",\"negotiation\":\"{s}\",\"timeoutMs\":{d},\"connection\":", .{
                 if (std.mem.eql(u8, server.transport.kind, "streamable_http"))
                     "streamable_http"
                 else
@@ -7179,7 +7207,7 @@ pub const Workbench = struct {
                 if (connection_safe) server.negotiation else "automatic",
                 if (connection_safe) server.timeout_ms else 1,
             }) catch return error.SnapshotTooLarge;
-            try self.writeMcpSafeConnectionSummary(
+            try self.writeMcpConnection(
                 writer,
                 management,
                 server,
@@ -16946,12 +16974,20 @@ test "MCP startup health commits a safe degraded Workbench projection" {
         snapshot,
         "\"displayName\":\"broken\"",
     ) != null);
-    try std.testing.expect(std.mem.indexOf(u8, snapshot, "/private/hidden") == null);
-    try std.testing.expect(std.mem.indexOf(u8, snapshot, "private.example.test") == null);
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
-        "\"endpointOrigin\":\"(invalid)\"",
+        "\"command\":\"/private/hidden/mcp-server\",\"arguments\":[\"--serve\"],\"cwd\":null",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"endpoint\":\"https://private.example.test/mcp\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"connection\":null",
     ) != null);
 
     const before = workbench.inspectMcpDesiredConfiguration().?;

@@ -1823,7 +1823,7 @@ function decodeMcpManagement(value: unknown, path: string): McpManagementView {
         "authMode",
         "negotiation",
         "timeoutMs",
-        "safeConnectionSummary",
+        "connection",
         "approvalStatus",
         "authorizationStatus",
         "desiredEnabled",
@@ -1875,17 +1875,6 @@ function decodeMcpManagement(value: unknown, path: string): McpManagementView {
         "stdio",
         "streamable_http",
       ] as const);
-      const summary = record(
-        server.safeConnectionSummary,
-        `${serverPath}.safeConnectionSummary`,
-      );
-      const summaryKind = enumValue(
-        summary.kind,
-        `${serverPath}.safeConnectionSummary.kind`,
-        ["stdio", "streamable_http"] as const,
-      );
-      if (summaryKind !== transport)
-        fail(serverPath, "MCP transport and safe summary disagree");
       const decodeSlots = (slotValue: unknown, slotPath: string) => {
         const slots = arrayValue(slotValue, slotPath, (value, itemPath) => {
           const slot = object(value, itemPath, ["name", "status"]);
@@ -1904,71 +1893,90 @@ function decodeMcpManagement(value: unknown, path: string): McpManagementView {
           fail(slotPath, "MCP secret slot names must be unique");
         return slots;
       };
-      const safeConnectionSummary =
-        summaryKind === "stdio"
-          ? (() => {
-              exactKeys(summary, `${serverPath}.safeConnectionSummary`, [
-                "kind",
-                "executableBasename",
-                "argumentCount",
-                "cwdPresent",
-                "environment",
-              ]);
-              return {
-                kind: "stdio" as const,
-                executableBasename: nonEmptyString(
-                  summary.executableBasename,
-                  `${serverPath}.safeConnectionSummary.executableBasename`,
-                ),
-                argumentCount: nonNegativeNumber(
-                  summary.argumentCount,
-                  `${serverPath}.safeConnectionSummary.argumentCount`,
-                ),
-                cwdPresent: booleanValue(
-                  summary.cwdPresent,
-                  `${serverPath}.safeConnectionSummary.cwdPresent`,
-                ),
-                environment: decodeSlots(
-                  summary.environment,
-                  `${serverPath}.safeConnectionSummary.environment`,
-                ),
-              };
-            })()
+      const connection =
+        server.connection === null
+          ? null
           : (() => {
-              exactKeys(summary, `${serverPath}.safeConnectionSummary`, [
+              const item = record(
+                server.connection,
+                `${serverPath}.connection`,
+              );
+              const kind = enumValue(
+                item.kind,
+                `${serverPath}.connection.kind`,
+                ["stdio", "streamable_http"] as const,
+              );
+              if (kind !== transport)
+                fail(serverPath, "MCP transport and connection disagree");
+              if (kind === "stdio") {
+                exactKeys(item, `${serverPath}.connection`, [
+                  "kind",
+                  "command",
+                  "arguments",
+                  "cwd",
+                  "environment",
+                ]);
+                return {
+                  kind: "stdio" as const,
+                  command: nonEmptyString(
+                    item.command,
+                    `${serverPath}.connection.command`,
+                  ),
+                  arguments: arrayValue(
+                    item.arguments,
+                    `${serverPath}.connection.arguments`,
+                    (value, path) => stringValue(value, path),
+                  ),
+                  cwd:
+                    item.cwd === null
+                      ? null
+                      : nonEmptyString(
+                          item.cwd,
+                          `${serverPath}.connection.cwd`,
+                        ),
+                  environment: decodeSlots(
+                    item.environment,
+                    `${serverPath}.connection.environment`,
+                  ),
+                };
+              }
+              exactKeys(item, `${serverPath}.connection`, [
                 "kind",
-                "endpointOrigin",
+                "endpoint",
                 "headers",
                 "registrationKind",
-                "clientIdPresent",
+                "clientId",
                 "tokenEndpointAuthMethod",
                 "clientSecretStatus",
               ]);
               return {
                 kind: "streamable_http" as const,
-                endpointOrigin: nonEmptyString(
-                  summary.endpointOrigin,
-                  `${serverPath}.safeConnectionSummary.endpointOrigin`,
+                endpoint: nonEmptyString(
+                  item.endpoint,
+                  `${serverPath}.connection.endpoint`,
                 ),
                 headers: decodeSlots(
-                  summary.headers,
-                  `${serverPath}.safeConnectionSummary.headers`,
+                  item.headers,
+                  `${serverPath}.connection.headers`,
                 ),
                 registrationKind: enumValue(
-                  summary.registrationKind,
-                  `${serverPath}.safeConnectionSummary.registrationKind`,
+                  item.registrationKind,
+                  `${serverPath}.connection.registrationKind`,
                   ["none", "automatic", "pre_registered"] as const,
                 ),
-                clientIdPresent: booleanValue(
-                  summary.clientIdPresent,
-                  `${serverPath}.safeConnectionSummary.clientIdPresent`,
-                ),
+                clientId:
+                  item.clientId === null
+                    ? null
+                    : nonEmptyString(
+                        item.clientId,
+                        `${serverPath}.connection.clientId`,
+                      ),
                 tokenEndpointAuthMethod:
-                  summary.tokenEndpointAuthMethod === null
+                  item.tokenEndpointAuthMethod === null
                     ? null
                     : enumValue(
-                        summary.tokenEndpointAuthMethod,
-                        `${serverPath}.safeConnectionSummary.tokenEndpointAuthMethod`,
+                        item.tokenEndpointAuthMethod,
+                        `${serverPath}.connection.tokenEndpointAuthMethod`,
                         [
                           "none",
                           "client_secret_basic",
@@ -1976,8 +1984,8 @@ function decodeMcpManagement(value: unknown, path: string): McpManagementView {
                         ] as const,
                       ),
                 clientSecretStatus: enumValue(
-                  summary.clientSecretStatus,
-                  `${serverPath}.safeConnectionSummary.clientSecretStatus`,
+                  item.clientSecretStatus,
+                  `${serverPath}.connection.clientSecretStatus`,
                   ["not_required", "missing", "set"] as const,
                 ),
               };
@@ -2007,44 +2015,44 @@ function decodeMcpManagement(value: unknown, path: string): McpManagementView {
         "static",
         "oauth",
       ] as const);
-      if (
-        (authMode === "oauth") !==
-        (transport === "streamable_http" &&
-          safeConnectionSummary.kind === "streamable_http" &&
-          safeConnectionSummary.registrationKind !== "none")
-      )
-        fail(serverPath, "OAuth registration summary must match auth mode");
-      if (
-        safeConnectionSummary.kind === "streamable_http" &&
-        safeConnectionSummary.registrationKind === "pre_registered" &&
-        safeConnectionSummary.tokenEndpointAuthMethod === null
-      )
-        fail(
-          serverPath,
-          "pre-registered OAuth client must expose its auth method",
-        );
-      if (safeConnectionSummary.kind === "streamable_http") {
-        const summary = safeConnectionSummary;
+      if (connection !== null && connection.kind === "streamable_http") {
+        if ((authMode === "oauth") !== (connection.registrationKind !== "none"))
+          fail(serverPath, "OAuth registration must match auth mode");
+        if (
+          connection.registrationKind === "pre_registered" &&
+          (connection.clientId === null ||
+            connection.tokenEndpointAuthMethod === null)
+        )
+          fail(
+            serverPath,
+            "pre-registered OAuth client must expose its public configuration",
+          );
         if (
           authMode !== "oauth" &&
-          (summary.registrationKind !== "none" ||
-            summary.clientIdPresent ||
-            summary.tokenEndpointAuthMethod !== null ||
-            summary.clientSecretStatus !== "not_required")
+          (connection.registrationKind !== "none" ||
+            connection.clientId !== null ||
+            connection.tokenEndpointAuthMethod !== null ||
+            connection.clientSecretStatus !== "not_required")
         )
           fail(serverPath, "non-OAuth server cannot expose OAuth client state");
         if (
-          summary.tokenEndpointAuthMethod === "none" &&
-          summary.clientSecretStatus !== "not_required"
+          connection.tokenEndpointAuthMethod === "none" &&
+          connection.clientSecretStatus !== "not_required"
         )
           fail(serverPath, "public OAuth client cannot expose a client secret");
         if (
-          (summary.tokenEndpointAuthMethod === "client_secret_basic" ||
-            summary.tokenEndpointAuthMethod === "client_secret_post") &&
-          summary.clientSecretStatus === "not_required"
+          (connection.tokenEndpointAuthMethod === "client_secret_basic" ||
+            connection.tokenEndpointAuthMethod === "client_secret_post") &&
+          connection.clientSecretStatus === "not_required"
         )
           fail(serverPath, "confidential OAuth client requires a secret state");
       }
+      if (
+        connection !== null &&
+        connection.kind === "stdio" &&
+        authMode === "oauth"
+      )
+        fail(serverPath, "STDIO cannot use OAuth");
       return {
         id: nonEmptyString(server.id, `${serverPath}.id`),
         displayName: nonEmptyString(
@@ -2060,7 +2068,7 @@ function decodeMcpManagement(value: unknown, path: string): McpManagementView {
           ["automatic", "modern_only", "compat_only"] as const,
         ),
         timeoutMs: positiveNumber(server.timeoutMs, `${serverPath}.timeoutMs`),
-        safeConnectionSummary,
+        connection,
         approvalStatus: enumValue(
           server.approvalStatus,
           `${serverPath}.approvalStatus`,

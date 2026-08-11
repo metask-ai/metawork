@@ -179,7 +179,7 @@ export const zhCN: Record<MessageId, string> = {
     "MetaWork 尚未开放 MCP 产品路径，因此不会显示服务或工具。",
   "mcp.empty_title": "还没有 MCP 服务",
   "mcp.empty_body":
-    "添加一个受信任的 HTTP 服务。它会以停用且未允许任何工具的状态开始。",
+    "添加一个受信任的 STDIO 或 Streamable HTTP 服务。连接会启用，但工具默认不向任务开放。",
   "mcp.no_results_title": "没有匹配的服务或工具",
   "mcp.no_results_body": "没有与“{query}”匹配的内容。",
   "mcp.detail.eyebrow": "MCP 服务",
@@ -208,12 +208,12 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.add.title": "添加 MCP 服务",
   "mcp.add.intro":
     "选择连接方式并保存公开配置。添加操作会同时授权并启用连接，工具仍默认关闭。",
-  "mcp.edit.eyebrow": "替换 MCP 连接",
-  "mcp.edit.title": "重新输入完整连接配置",
+  "mcp.edit.eyebrow": "编辑 MCP 连接",
+  "mcp.edit.title": "编辑连接配置",
   "mcp.edit.intro":
-    "重新输入完整的公开连接配置。只有接收密钥的可执行程序或 Endpoint 未改变时才会保留密钥；替换操作会授权新连接。",
-  "mcp.edit.action": "替换连接",
-  "mcp.edit.submit": "替换连接",
+    "修改已保存的非敏感配置。密钥值不会显示；只有可执行文件或 Endpoint 未改变时，已有密钥才会保留。",
+  "mcp.edit.action": "编辑连接",
+  "mcp.edit.submit": "保存连接",
   "mcp.add.name": "显示名称",
   "mcp.add.transport": "连接类型",
   "mcp.add.stdio_help": "以结构化参数启动本地进程。",
@@ -242,7 +242,7 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.add.endpoint_help":
     "使用 HTTPS；HTTP 仅允许 localhost、127.0.0.1 或 ::1。不接受用户信息、查询参数和 fragment。",
   "mcp.add.defaults":
-    "密钥在保存后由 Host 安全采集。保存后可立即测试连接；完成认证后再选择允许给任务使用的工具。",
+    "非敏感配置会完整保存并可随时编辑。密钥由 Host 安全采集，保存后可立即测试连接。",
   "mcp.add.submit": "添加并启用",
   "mcp.add.adding": "正在添加…",
   "mcp.rename.action": "保存名称",
@@ -803,11 +803,14 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.detail.protocol": "协议策略",
   "mcp.detail.authentication": "身份认证",
   "mcp.detail.executable": "可执行文件",
-  "mcp.detail.arguments": "参数数量",
+  "mcp.detail.arguments": "有序参数",
   "mcp.detail.cwd": "工作目录",
   "mcp.detail.environment_names": "环境变量名称",
   "mcp.detail.endpoint_origin": "Endpoint Origin",
   "mcp.detail.header_names": "Header 名称",
+  "mcp.detail.connection_unavailable": "连接配置不可显示",
+  "mcp.detail.connection_unavailable_help":
+    "配置无效或包含已识别的敏感文本。请删除后重新添加。",
   "mcp.detail.registration": "客户端注册",
   "mcp.summary.configured": "已配置",
   "mcp.summary.not_configured": "未配置",

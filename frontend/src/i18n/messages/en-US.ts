@@ -190,7 +190,7 @@ export const enUS = {
     "MetaWork has not opened the MCP product path, so no servers or tools are shown.",
   "mcp.empty_title": "No MCP servers yet",
   "mcp.empty_body":
-    "Add a trusted HTTP server. It starts disabled with no tools allowed.",
+    "Add a trusted STDIO or Streamable HTTP server. The connection starts enabled, while tools stay unavailable to tasks by default.",
   "mcp.no_results_title": "No matching servers or tools",
   "mcp.no_results_body": "Nothing matches “{query}”.",
   "mcp.detail.eyebrow": "MCP server",
@@ -221,12 +221,12 @@ export const enUS = {
   "mcp.add.title": "Add an MCP server",
   "mcp.add.intro":
     "Choose a transport and save the public connection settings. Adding the server authorizes and enables the connection; tools stay off by default.",
-  "mcp.edit.eyebrow": "Replace MCP connection",
-  "mcp.edit.title": "Enter the complete connection again",
+  "mcp.edit.eyebrow": "Edit MCP connection",
+  "mcp.edit.title": "Edit connection settings",
   "mcp.edit.intro":
-    "Enter the complete public connection again. Secrets are kept only when the receiving executable or endpoint is unchanged; replacing it authorizes the new connection.",
-  "mcp.edit.action": "Replace connection",
-  "mcp.edit.submit": "Replace connection",
+    "Change the saved non-secret settings. Secret values stay hidden and are preserved only while the executable or endpoint remains unchanged.",
+  "mcp.edit.action": "Edit connection",
+  "mcp.edit.submit": "Save connection",
   "mcp.add.name": "Display name",
   "mcp.add.transport": "Connection type",
   "mcp.add.stdio_help": "Run a local process with structured arguments.",
@@ -255,7 +255,7 @@ export const enUS = {
   "mcp.add.endpoint_help":
     "Use HTTPS, or HTTP only for localhost, 127.0.0.1, or ::1. User info, query strings, and fragments are not accepted.",
   "mcp.add.defaults":
-    "Secrets are captured securely by the Host after save. You can test immediately, then choose which tools tasks may use after authentication.",
+    "Non-secret settings stay visible and editable. The Host captures secrets securely, and you can test immediately after saving.",
   "mcp.add.submit": "Add and enable",
   "mcp.add.adding": "Adding…",
   "mcp.rename.action": "Save name",
@@ -881,6 +881,9 @@ export const enUS = {
   "mcp.detail.environment_names": "Environment names",
   "mcp.detail.endpoint_origin": "Endpoint origin",
   "mcp.detail.header_names": "Header names",
+  "mcp.detail.connection_unavailable": "Connection settings unavailable",
+  "mcp.detail.connection_unavailable_help":
+    "The configuration is invalid or contains recognized sensitive text. Remove the server and add it again.",
   "mcp.detail.registration": "Client registration",
   "mcp.summary.configured": "Configured",
   "mcp.summary.not_configured": "Not configured",

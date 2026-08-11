@@ -1447,12 +1447,16 @@ test("Renderer Bridge fixed revision 1 owns the exact product wire catalog", () 
   assert.match(projection, /\\"skillCatalog\\":/);
   assert.match(projection, /\\"input\\":/);
   const mcpProjection = projection.slice(
-    projection.indexOf("fn writeMcpProjection"),
+    projection.indexOf("fn writeMcpSecretSlots"),
     projection.indexOf("fn finalizeMarkedTerminalRunsAfterEventDrain"),
+  );
+  assert.match(
+    mcpProjection,
+    /server\.transport\.command[\s\S]*server\.transport\.arguments[\s\S]*server\.transport\.cwd[\s\S]*server\.transport\.url/,
   );
   assert.doesNotMatch(
     mcpProjection,
-    /server\.transport\.(?:command|arguments|cwd|environment|url|headers)|catalogIssues|fingerprint|schema body|AgentCore/,
+    /\\"(?:credentialLocator|credentialRef|clientSecret|accessToken|refreshToken|authorizationCode|pkce|fingerprint)\\"|catalogIssues|schema body|AgentCore/,
   );
   assert.doesNotMatch(projection, /\\"user\\":/);
   assert.match(projection, /pub fn createTask/);

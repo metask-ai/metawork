@@ -629,20 +629,21 @@ export type McpManagementView = {
     authMode: "none" | "static" | "oauth";
     negotiation: "automatic" | "modern_only" | "compat_only";
     timeoutMs: number;
-    safeConnectionSummary:
+    connection:
+      | null
       | {
           kind: "stdio";
-          executableBasename: string;
-          argumentCount: number;
-          cwdPresent: boolean;
+          command: string;
+          arguments: string[];
+          cwd: string | null;
           environment: { name: string; status: "missing" | "set" }[];
         }
       | {
           kind: "streamable_http";
-          endpointOrigin: string;
+          endpoint: string;
           headers: { name: string; status: "missing" | "set" }[];
           registrationKind: "none" | "automatic" | "pre_registered";
-          clientIdPresent: boolean;
+          clientId: string | null;
           tokenEndpointAuthMethod:
             "none" | "client_secret_basic" | "client_secret_post" | null;
           clientSecretStatus: "not_required" | "missing" | "set";

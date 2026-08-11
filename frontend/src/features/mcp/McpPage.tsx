@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 
 import type {
   McpManagementView,
@@ -241,9 +241,12 @@ function McpTextRows({
   onChange: (values: string[]) => void;
 }) {
   const { t } = useI18n();
+  const labelId = useId();
   return (
-    <fieldset className="mcp-text-rows">
-      <legend>{label}</legend>
+    <div className="mcp-text-rows" role="group" aria-labelledby={labelId}>
+      <span className="mcp-field-label" id={labelId}>
+        {label}
+      </span>
       {values.map((value, index) => (
         <div key={index}>
           <input
@@ -278,7 +281,20 @@ function McpTextRows({
       >
         <Icon name="plus" /> {addLabel}
       </button>
-    </fieldset>
+    </div>
+  );
+}
+
+function McpCodeValues({ values, empty }: { values: string[]; empty: string }) {
+  if (values.length === 0) return <span>{empty}</span>;
+  return (
+    <ul className="mcp-config-values">
+      {values.map((value, index) => (
+        <li key={`${index}:${value}`}>
+          <code>{value}</code>
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -552,36 +568,46 @@ export function McpPage({
   }
 
   function openReplacement(server: McpServer) {
+    const connection = server.connection;
+    if (connection === null) return;
     setDisplayName(server.displayName);
     setTransport(server.transport);
     setNegotiation(server.negotiation);
     setTimeoutMs(String(server.timeoutMs));
-    setCommand("");
-    setArgumentsDraft([]);
-    setCwd("");
+    setCommand(connection.kind === "stdio" ? connection.command : "");
+    setArgumentsDraft(
+      connection.kind === "stdio" ? [...connection.arguments] : [],
+    );
+    setCwd(connection.kind === "stdio" ? (connection.cwd ?? "") : "");
     setEnvironmentNames(
-      server.safeConnectionSummary.kind === "stdio"
-        ? server.safeConnectionSummary.environment.map((slot) => slot.name)
+      connection.kind === "stdio"
+        ? connection.environment.map((slot) => slot.name)
         : [],
     );
-    setEndpoint("");
+    setEndpoint(
+      connection.kind === "streamable_http" ? connection.endpoint : "",
+    );
     setAuthMode(server.authMode);
     setHeaderNames(
-      server.safeConnectionSummary.kind === "streamable_http"
-        ? server.safeConnectionSummary.headers.map((slot) => slot.name)
+      connection.kind === "streamable_http"
+        ? connection.headers.map((slot) => slot.name)
         : [],
     );
     setRegistrationKind(
-      server.safeConnectionSummary.kind === "streamable_http" &&
-        server.safeConnectionSummary.registrationKind === "pre_registered"
+      connection.kind === "streamable_http" &&
+        connection.registrationKind === "pre_registered"
         ? "pre_registered"
         : "automatic",
     );
-    setClientId("");
+    setClientId(
+      connection.kind === "streamable_http" && connection.clientId !== null
+        ? connection.clientId
+        : "",
+    );
     setTokenEndpointAuthMethod(
-      server.safeConnectionSummary.kind === "streamable_http" &&
-        server.safeConnectionSummary.tokenEndpointAuthMethod !== null
-        ? server.safeConnectionSummary.tokenEndpointAuthMethod
+      connection.kind === "streamable_http" &&
+        connection.tokenEndpointAuthMethod !== null
+        ? connection.tokenEndpointAuthMethod
         : "none",
     );
     setNotice(null);
@@ -1358,56 +1384,62 @@ export function McpPage({
                       <dt>{t("mcp.detail.authentication")}</dt>
                       <dd>{t(`mcp.auth.${selected.authMode}`)}</dd>
                     </div>
-                    {selected.safeConnectionSummary.kind === "stdio" ? (
+                    {selected.connection?.kind === "stdio" ? (
                       <>
                         <div>
                           <dt>{t("mcp.detail.executable")}</dt>
                           <dd>
-                            <code>
-                              {
-                                selected.safeConnectionSummary
-                                  .executableBasename
-                              }
-                            </code>
+                            <code>{selected.connection.command}</code>
                           </dd>
                         </div>
                         <div>
                           <dt>{t("mcp.detail.arguments")}</dt>
                           <dd>
-                            {selected.safeConnectionSummary.argumentCount}
+                            <McpCodeValues
+                              values={selected.connection.arguments}
+                              empty={t("mcp.summary.not_configured")}
+                            />
                           </dd>
                         </div>
                         <div>
                           <dt>{t("mcp.detail.cwd")}</dt>
                           <dd>
-                            {t(
-                              selected.safeConnectionSummary.cwdPresent
-                                ? "mcp.summary.configured"
-                                : "mcp.summary.not_configured",
+                            {selected.connection.cwd === null ? (
+                              t("mcp.summary.not_configured")
+                            ) : (
+                              <code>{selected.connection.cwd}</code>
                             )}
                           </dd>
                         </div>
                         <div>
                           <dt>{t("mcp.detail.environment_names")}</dt>
                           <dd>
-                            {selected.safeConnectionSummary.environment.length}
+                            <McpCodeValues
+                              values={selected.connection.environment.map(
+                                (slot) => slot.name,
+                              )}
+                              empty={t("mcp.summary.not_configured")}
+                            />
                           </dd>
                         </div>
                       </>
-                    ) : (
+                    ) : selected.connection?.kind === "streamable_http" ? (
                       <>
                         <div>
-                          <dt>{t("mcp.detail.endpoint_origin")}</dt>
+                          <dt>{t("mcp.add.endpoint")}</dt>
                           <dd>
-                            <code>
-                              {selected.safeConnectionSummary.endpointOrigin}
-                            </code>
+                            <code>{selected.connection.endpoint}</code>
                           </dd>
                         </div>
                         <div>
                           <dt>{t("mcp.detail.header_names")}</dt>
                           <dd>
-                            {selected.safeConnectionSummary.headers.length}
+                            <McpCodeValues
+                              values={selected.connection.headers.map(
+                                (slot) => slot.name,
+                              )}
+                              empty={t("mcp.summary.not_configured")}
+                            />
                           </dd>
                         </div>
                         {selected.authMode === "oauth" && (
@@ -1416,17 +1448,25 @@ export function McpPage({
                               <dt>{t("mcp.detail.registration")}</dt>
                               <dd>
                                 {t(
-                                  `mcp.registration.${selected.safeConnectionSummary.registrationKind}`,
+                                  `mcp.registration.${selected.connection.registrationKind}`,
                                 )}
                               </dd>
                             </div>
-                            {selected.safeConnectionSummary
-                              .tokenEndpointAuthMethod !== null && (
+                            {selected.connection.clientId !== null && (
+                              <div>
+                                <dt>{t("mcp.add.client_id")}</dt>
+                                <dd>
+                                  <code>{selected.connection.clientId}</code>
+                                </dd>
+                              </div>
+                            )}
+                            {selected.connection.tokenEndpointAuthMethod !==
+                              null && (
                               <div>
                                 <dt>{t("mcp.add.client_auth_method")}</dt>
                                 <dd>
                                   {t(
-                                    `mcp.client_auth.${selected.safeConnectionSummary.tokenEndpointAuthMethod}`,
+                                    `mcp.client_auth.${selected.connection.tokenEndpointAuthMethod}`,
                                   )}
                                 </dd>
                               </div>
@@ -1434,6 +1474,11 @@ export function McpPage({
                           </>
                         )}
                       </>
+                    ) : (
+                      <div className="mcp-configuration-unavailable">
+                        <dt>{t("mcp.detail.connection_unavailable")}</dt>
+                        <dd>{t("mcp.detail.connection_unavailable_help")}</dd>
+                      </div>
                     )}
                   </dl>
                   {selected.approvalStatus === "unapproved" && (
@@ -1469,7 +1514,8 @@ export function McpPage({
                       disabled={
                         mutationLocked ||
                         pendingServerId === selected.id ||
-                        selectedOperationBusy
+                        selectedOperationBusy ||
+                        selected.connection === null
                       }
                       onClick={() => openReplacement(selected)}
                     >
@@ -1525,9 +1571,11 @@ export function McpPage({
                   </header>
                   {selected.authMode === "static" && (
                     <ul className="mcp-secret-slots">
-                      {(selected.safeConnectionSummary.kind === "stdio"
-                        ? selected.safeConnectionSummary.environment
-                        : selected.safeConnectionSummary.headers
+                      {(selected.connection?.kind === "stdio"
+                        ? selected.connection.environment
+                        : selected.connection?.kind === "streamable_http"
+                          ? selected.connection.headers
+                          : []
                       ).map((slot) => (
                         <li key={slot.name}>
                           <code>{slot.name}</code>
@@ -1568,14 +1616,15 @@ export function McpPage({
                   )}
                   {selected.authMode === "oauth" && (
                     <div className="mcp-oauth-action">
-                      {selected.safeConnectionSummary.kind ===
-                        "streamable_http" &&
-                        selected.safeConnectionSummary.clientSecretStatus !==
+                      {selected.connection?.kind === "streamable_http" &&
+                        selected.connection.registrationKind ===
+                          "pre_registered" &&
+                        selected.connection.clientSecretStatus !==
                           "not_required" && (
                           <div className="mcp-client-secret-action">
                             <span>
                               {t(
-                                `mcp.secret.${selected.safeConnectionSummary.clientSecretStatus}`,
+                                `mcp.secret.${selected.connection.clientSecretStatus}`,
                               )}
                             </span>
                             {capabilities.secretCapture ? (
@@ -1595,8 +1644,8 @@ export function McpPage({
                                   )
                                 }
                               >
-                                {selected.safeConnectionSummary
-                                  .clientSecretStatus === "set"
+                                {selected.connection.clientSecretStatus ===
+                                "set"
                                   ? t("mcp.secret.replace")
                                   : t("mcp.secret.set")}
                               </button>
@@ -1635,10 +1684,11 @@ export function McpPage({
                             management.authorizationOperation.kind !== "idle" ||
                             selected.authorizationStatus ===
                               "capability_unavailable" ||
-                            (selected.safeConnectionSummary.kind ===
-                              "streamable_http" &&
-                              selected.safeConnectionSummary
-                                .clientSecretStatus === "missing") ||
+                            (selected.connection?.kind === "streamable_http" &&
+                              selected.connection.registrationKind ===
+                                "pre_registered" &&
+                              selected.connection.clientSecretStatus ===
+                                "missing") ||
                             selected.authorizationStatus === "ready"
                           }
                           onClick={() => void authorizeServer(selected)}

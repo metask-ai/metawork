@@ -182,7 +182,7 @@ Bridge handler 不能绕过 Workbench 操作 AgentCore handle。automation 只�
 
 ### `frontend/src/features/mcp/`
 
-`McpPage.tsx` 是具有稳定左栏入口的 MCP 全局管理视图，拥有搜索、行动优先分组、空/不可用/恢复状态、transport-discriminated Add/Replace、detail drawer、即时测试、正式 Runtime refresh、启停/删除和逐工具 allowlist。Add/Replace 的显式提交就是连接授权，正常流程不再追加一次自我审核；legacy unapproved 配置才显示连接动作。页面只消费 Bridge 已严格解码并清洗的顶层 `mcp` projection，并通过 `frontend/src/bridge` 的 field-level typed command 提交 intent；不得维护 registry 镜像、直接调用 AgentCore 或读取 command、arguments、environment、完整 URL、header、schema、credential、Runtime fingerprint 与 raw diagnostic。Replace 不从安全摘要重建旧连接，而要求完整公开输入。marketplace/trust 与 Task-level override 不进入该目录。
+`McpPage.tsx` 是具有稳定左栏入口的 MCP 全局管理视图，拥有搜索、行动优先分组、空/不可用/恢复状态、transport-discriminated Add/Edit、detail drawer、即时测试、正式 Runtime refresh、启停/删除和逐工具 allowlist。Add/Edit 的显式提交就是连接授权，正常流程不再追加一次自我审核；legacy unapproved 配置才显示连接动作。页面只消费 Bridge 已严格解码并清洗的顶层 `mcp` projection，并通过 `frontend/src/bridge` 的 field-level typed command 提交 intent；它可以查看和预填 Host 发布的完整非敏感 typed connection，但不得维护 registry 镜像、直接调用 AgentCore 或读取 environment/header value、credential、schema、Runtime fingerprint 与 raw diagnostic。marketplace/trust 与 Task-level override 不进入该目录。
 
 ### `frontend/src/features/scheduled-tasks/`
 
