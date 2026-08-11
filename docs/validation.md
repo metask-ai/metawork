@@ -46,7 +46,7 @@ MCP Host 与管理控制面按失败模式运行最小验证：`test-mcp-configu
 
 MCP cold-start/crash matrix 必须证明：schema 1 迁移不产生外部 effect；unapproved server 不触发 child/network/credential；loaded Manifest 只在 Runtime input 完整接管后提交；connection facts 变化使 approval/consent 失效；OAuth discovery 先于 consent 但晚于 connection approval；manual pre-registration 与 metadata-advertised DCR 精确分流；任何 non-idempotent request 前 marker durable 且目标 server 已从 new Task authority 排除，其他 server/普通 Task 继续可用；success 后 issued client/fresh locator/registry/auth snapshot/admission 原子安装；`invalid_grant`、响应丢失、落盘失败、outcome unknown 和启动遗留 marker 一律 `reauth_required`、保持 reduced authority 且不重放；request 发送前/后的 cancel 分别验证 clean cancel 与 `reauth_required`；同 server mutation busy、无关 server mutation 保留 marker，远端结果按 operation id/fingerprint rebase 到当前 generation；callback 固定 state、PKCE S256、redirect 与 exact issuer validation；同 consent epoch token revision 只替换 HTTP auth snapshot 且 in-flight lease 延迟清零旧 token；scope step-up 取旧 consent、当前 discovery 与 challenge 的有界 union，累计超限 fail closed，且不递归重试；tool-only mutation 只影响后续新 Task；既有 Session 保持旧 authority；shutdown 先停止 timer/callback/operation 再释放 transport。两种 transport、三类 auth 与两个协议版本需要定向真实 server 互操作；自动化不能替代平台 credential、secure capture、browser/callback 与第三方 issuer 人工验收。
 
-`npm run test:renderer-runtime` 中的 `scripts/scheduled-tasks.test.mjs` 持续固定定时任务一级入口、同级紧凑菜单、名称优先的 Text 编辑器、无 Workspace/Skill 配置、状态分区、detail/editor drawer、无 Manual Workspace 时的 Automatic Workspace 创建和 Bridge exact mutation payload；正式 Zig test graph 持续固定 recurrence、持久 store candidate commit/恢复、schema 1 definition 原地 hard cut、旧 shape 判损坏、timer/missed-run 调度、binding 校验、凭据清洗，以及 occurrence 复用真实 Task/Run admission 的边界。
+`npm test` 中的 `scripts/scheduled-tasks.test.mjs` 持续固定定时任务一级入口、同级紧凑菜单、名称优先的 Text 编辑器、无 Workspace/Skill 配置、状态分区、detail/editor drawer、无 Manual Workspace 时的 Automatic Workspace 创建和 Bridge exact mutation payload；正式 Zig test graph 持续固定 recurrence、持久 store candidate commit/恢复、schema 1 definition 原地 hard cut、旧 shape 判损坏、timer/missed-run 调度、binding 校验、凭据清洗，以及 occurrence 复用真实 Task/Run admission 的边界。
 
 手动 `/compact` 的持续回归由同一正式 graph 负责：Agent lifecycle 固定 typed compact/abort、accepted abort 必须对应 `STATUS_OK + COMPACT_ABORTED`、Run/compact/Skill mutation operation-specific status disposition、checkpoint budget rejection 后 Session reuse；Workbench lifecycle 固定与 Run 互斥的 active-operation lane、共享有界 executor、allocation-free write-once terminal publication、append-only history、capacity rejection、Executor claim/queued cancel、cancel/terminal、checkpoint resource cause 映射、snapshot/publication 和 close/shutdown quiescence；Bridge module tests 与 `scripts/bridge-client.test.mjs` 固定 `tasks.compact` / `tasks.cancelCompact` 的 exact payload；跨语言 snapshot fixture 与 `scripts/workbench-contract.test.mjs` 固定 compact history、active-operation 引用、Run/Compact 互斥、`resource_limit` Run cause runtime decode，并拒绝 closed/archived Task 的 active compact；`scripts/composer-slash.test.mjs` 与 `scripts/composer-render.test.mjs` 固定 V1 registry 只有 `/new`、`/compact`、两者复用现有 product action、raw Slash 不进入 Run，以及 Timeline system event。真实 provider 的长 Conversation 压缩质量、token estimate 准确性和 Native 窗口交互仍需独立平台验收，普通自动化不替代该证据。
 
@@ -80,7 +80,7 @@ Automatic Workspace 的正式 Zig graph 持续固定 Native SDK `.data/workspace
 首次使用真实 Account 前，按 [macOS 本地开发签名](macos-local-development.md)选择 Apple Development identity：
 
 ```bash
-npm run setup:macos-signing
+node scripts/setup-macos-local-signing.mjs setup
 ```
 
 ```bash
@@ -96,9 +96,9 @@ Keychain 跨重建授权稳定性属于真实系统 UI 行为，不能由 `codes
 涉及 AgentCore candidate、正式 Host、Renderer reload、产品数据面或生命周期时，按变更范围增加：
 
 ```bash
-AGENTCORE_BUNDLE_ROOT=/absolute/path/to/bundle npm run probe:agentcore
-npm run test:lifecycle
-npm run test:agentcore-vertical:macos
+AGENTCORE_BUNDLE_ROOT=/absolute/path/to/bundle node scripts/run-agentcore-probe.mjs
+node scripts/run-lifecycle-tests.mjs
+node scripts/test-agentcore-vertical-macos.mjs
 ```
 
 当前 macOS revision 6 lock 使用 clean `a5b3821c17b337d33f40f903df12484b01f92010` target artifact。Windows lock、staged artifact 和结果不能替代 macOS artifact identity 或平台证据；Windows 上的 cross build/checksum 只证明 artifact 可生成和锁定，不替代 macOS native probe、Debug/Release/package 与真实 vertical。AgentCore vertical 是真实桌面自动化入口，同时验证 `.agents/skills` typed catalog/run、真实 `ProductDelivery` 主线程 revision emit、Renderer reload、snapshot 恢复和 AgentCore Run。
@@ -112,15 +112,15 @@ Windows canonical staged bundle `0.1.0-dev+a5b3821c17b3` 的隔离数据根 vert
 ### Windows development baseline
 
 ```powershell
-npm run agentcore:stage -- C:\absolute\path\to\x86_64-windows.win10...win11_dt-gnu
-npm run test:windows:bringup
-npm run test:window-chrome:resize-windows
-npm run test:window-chrome:windows
+node scripts/stage-agentcore-bundle.mjs C:\absolute\path\to\x86_64-windows.win10...win11_dt-gnu
+node scripts/run-windows-bringup.mjs
+node scripts/test-window-chrome-windows.mjs --resize-session-only
+node scripts/test-window-chrome-windows.mjs
 ```
 
-Windows owner 只锁定并验证 Windows x86_64 GNU artifact；当前 exact lock 使用 clean `a5b3821c17b337d33f40f903df12484b01f92010` source artifact。candidate 先通过 `AGENTCORE_BUNDLE_ROOT=<absolute-path> npm run probe:agentcore`，`test:windows:bringup` 再覆盖 staged verifier/probe、bundle 与 lifecycle tests、正式 test graph、Debug/Release build 和真实 Windows vertical，并必须明确报告 revision 6。macOS 与 Windows 结果不能互相替代。安装器、签名、更新、file dialog、process tree、timeout 和完整 security matrix 需要独立证据。
+Windows owner 只锁定并验证 Windows x86_64 GNU artifact；当前 exact lock 使用 clean `a5b3821c17b337d33f40f903df12484b01f92010` source artifact。candidate 先通过 `AGENTCORE_BUNDLE_ROOT=<absolute-path> node scripts/run-agentcore-probe.mjs`，`run-windows-bringup.mjs` 再覆盖 staged verifier/probe、bundle 与 lifecycle tests、正式 test graph、Debug/Release build 和真实 Windows vertical，并必须明确报告 revision 6。macOS 与 Windows 结果不能互相替代。安装器、签名、更新、file dialog、process tree、timeout 和完整 security matrix 需要独立证据。
 
-`test:window-chrome:resize-windows` 使用隔离数据根启动真实 System WebView；`resize` probe 先通过真实 `SetWindowPos` 连续改变 Native window size，并验证 `app.zon` 的 320 × 520 logical px 原生最小尺寸，随后 `controls` probe 通过仍可见的 Renderer 按钮验证同一 document generation 下 `minimize` Runtime 路径和 maximize/restore seam；`close` probe 验证 `close_policy = hide` 后窗口与进程仍存活，随后通过 Native SDK 托盘 Open 验证窗口恢复和 clean `stop`。该 gate 不读取 Native SDK automation 的单槽 `bridge-response.txt` 推断 Renderer 就绪；连续 resize 后按钮仍可用才是 session 未被 resize 替换的真实证据。`test:window-chrome:windows` 在此前提上追加真实 primary pointer drag、Native SDK chrome geometry、drag candidate 的 `HTCAPTION`、交互排除区的非 caption hit 和 disconnect teardown 验证；拖拽能力可以独立验收，不能掩盖 resize/session gate 的结果。Windows 真实 desktop vertical 还必须在 Bridge 连接后通过 UI Automation 点击 Composer、发送真实键盘输入并清理临时内容，证明 window-chrome 同步没有把焦点从 WebView 抢回 Native 顶层窗口；该 UIA 焦点 gate 与 System WebView window-chrome seam 分开报告。
+`test-window-chrome-windows.mjs --resize-session-only` 使用隔离数据根启动真实 System WebView；`resize` probe 先通过真实 `SetWindowPos` 连续改变 Native window size，并验证 `app.zon` 的 320 × 520 logical px 原生最小尺寸，随后 `controls` probe 通过仍可见的 Renderer 按钮验证同一 document generation 下 `minimize` Runtime 路径和 maximize/restore seam；`close` probe 验证 `close_policy = hide` 后窗口与进程仍存活，随后通过 Native SDK 托盘 Open 验证窗口恢复和 clean `stop`。该 gate 不读取 Native SDK automation 的单槽 `bridge-response.txt` 推断 Renderer 就绪；连续 resize 后按钮仍可用才是 session 未被 resize 替换的真实证据。不带该 flag 的同一 harness 在此前提上追加真实 primary pointer drag、Native SDK chrome geometry、drag candidate 的 `HTCAPTION`、交互排除区的非 caption hit 和 disconnect teardown 验证；拖拽能力可以独立验收，不能掩盖 resize/session gate 的结果。Windows 真实 desktop vertical 还必须在 Bridge 连接后通过 UI Automation 点击 Composer、发送真实键盘输入并清理临时内容，证明 window-chrome 同步没有把焦点从 WebView 抢回 Native 顶层窗口；该 UIA 焦点 gate 与 System WebView window-chrome seam 分开报告。
 
 MCP 定向验证中，`test-mcp-configuration` 还固定 transport-facing credential byte validation、每服务 aggregate runtime secret limit、单服务失败隔离，以及 static locator 对 STDIO command/ordered argv/cwd 与 HTTP endpoint 的目标绑定、slot add/rename/retire；`scripts/mcp-page.test.mjs` 固定详情完整显示且 Edit 原样预填 Host 发布的非敏感连接，同时固定已批准但缺 credential 时 desired enabled 与 Runtime/Admission readiness 分离；`test-mcp-platform` 固定 HTTP Content-Type 分流、bounded SSE framing、完整事件后不等待 EOF、OAuth metadata/token response 上限与超限拒绝。Canonical staged bundle verifier 必须证明 revision 6 的 MCP negotiation/catalog/selection surface 存在，同时明确 OAuth discovery/PKCE/registration/token API 不在 ABI 内；不得把 symbol 缺失伪装成跳过或要求修改外部 AgentCore。
 

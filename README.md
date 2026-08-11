@@ -43,8 +43,8 @@ macOS：
 
 ```bash
 npm ci
-npm run agentcore:stage -- /absolute/path/to/metacodes/zig-out/agentcore/aarch64-macos
-npm run setup:macos-signing
+node scripts/stage-agentcore-bundle.mjs /absolute/path/to/metacodes/zig-out/agentcore/aarch64-macos
+node scripts/setup-macos-local-signing.mjs setup
 npm run dev
 ```
 
@@ -52,7 +52,7 @@ Windows：
 
 ```powershell
 npm ci
-npm run agentcore:stage -- C:\absolute\path\to\x86_64-windows.win10...win11_dt-gnu
+node scripts/stage-agentcore-bundle.mjs C:\absolute\path\to\x86_64-windows.win10...win11_dt-gnu
 npm run dev
 ```
 
@@ -66,16 +66,18 @@ npm run build:debug
 npm run build:release
 ```
 
-macOS 的 Apple Development identity 只需在每台开发机选择一次，具体要求见 [macOS 本地开发签名](docs/macos-local-development.md)。macOS package 使用 `npm run package:macos`；Windows development baseline 使用 `npm run test:windows:bringup`。完整验证范围与按变更选择的命令见 [验证规范](docs/validation.md)。
+上面五条是 `package.json` 的全部工程入口，再加上 `npm run dev` 与 `npm run package:macos`。一次性平台准备、平台验收 harness 和 probe 不是入口，直接以 `node scripts/<name>.mjs` 调用。
+
+macOS 的 Apple Development identity 只需在每台开发机选择一次，具体要求见 [macOS 本地开发签名](docs/macos-local-development.md)。macOS package 使用 `npm run package:macos`；Windows development baseline 使用 `node scripts/run-windows-bringup.mjs`。完整验证范围与按变更选择的命令见 [验证规范](docs/validation.md)。
 
 ## AgentCore 输入边界
 
-`agentcore:stage` 校验 candidate 的 identity、target、manifest bytes、checksum 和必要 symbol，再把白名单内容复制到 canonical `.agentcore/bundle`。正式 build、test 和 package 不直接读取 Metask AgentCore 源码树，也不从环境变量寻找替代实现。
+`stage-agentcore-bundle.mjs` 校验 candidate 的 identity、target、manifest bytes、checksum 和必要 symbol，再把白名单内容复制到 canonical `.agentcore/bundle`。正式 build、test 和 package 不直接读取 Metask AgentCore 源码树，也不从环境变量寻找替代实现。
 
 需要验证未 staged candidate 时，可运行：
 
 ```bash
-AGENTCORE_BUNDLE_ROOT=/absolute/path/to/bundle npm run probe:agentcore
+AGENTCORE_BUNDLE_ROOT=/absolute/path/to/bundle node scripts/run-agentcore-probe.mjs
 ```
 
 probe 使用临时 source-free SDK consumer，不进入正式产品 build graph。详细规则见 [AgentCore ABI 消费合同](docs/agentcore-abi-v1.md)和 [AgentCore 集成契约](docs/agentcore-integration.md)。

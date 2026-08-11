@@ -1,44 +1,38 @@
-import { spawn } from "node:child_process";
 import path from "node:path";
+import process from "node:process";
 import { fileURLToPath } from "node:url";
+import { runChild } from "./run-child-process.mjs";
 
 if (process.platform !== "win32") {
-  throw new Error("test:windows:bringup requires Windows");
+  throw new Error("run-windows-bringup.mjs requires Windows");
 }
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const environment = { ...process.env };
 
-for (const script of [
-  "test",
-  "test:lifecycle",
-  "build:debug",
-  "probe:agentcore:staged",
-  "test:agentcore-vertical:windows",
-  "build:release",
-]) {
-  await runNpm(script);
+// Steps are script paths, not npm script names: package.json stays a thin entry
+// surface instead of being this orchestrator's runtime dependency, and renaming
+// an entry can no longer break the baseline at run time.
+const steps = [
+  ["run-tests.mjs", []],
+  ["run-lifecycle-tests.mjs", []],
+  ["build.mjs", ["debug"]],
+  ["run-agentcore-probe.mjs", ["--staged"]],
+  ["run-agentcore-vertical-windows.mjs", []],
+  ["build.mjs", ["release"]],
+];
+
+for (const [script, args] of steps) {
+  await runChild(
+    process.execPath,
+    [path.join(root, "scripts", script), ...args],
+    {
+      cwd: root,
+      label: `Windows bring-up step ${[script, ...args].join(" ")}`,
+      timeoutMs: null,
+    },
+  );
 }
 
 console.log(
   "Windows integration baseline passed: staged revision 6 bundle, bundle guards, staged SDK probe, lifecycle, Native Debug/Release, and AgentCore vertical automation.",
 );
-
-function runNpm(script) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(
-      process.env.ComSpec ?? "C:\\Windows\\System32\\cmd.exe",
-      ["/d", "/s", "/c", `npm run ${script}`],
-      { cwd: root, env: environment, stdio: "inherit" },
-    );
-    child.once("error", reject);
-    child.once("exit", (code, signal) => {
-      if (code === 0 && signal === null) resolve();
-      else {
-        reject(
-          new Error(`npm run ${script} failed: code=${code} signal=${signal}`),
-        );
-      }
-    });
-  });
-}

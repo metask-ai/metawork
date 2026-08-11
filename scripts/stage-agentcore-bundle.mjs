@@ -168,7 +168,7 @@ if (isMain) {
   const [source] = process.argv.slice(2);
   if (!source || process.argv.length !== 3 || !path.isAbsolute(source)) {
     throw new Error(
-      "usage: npm run agentcore:stage -- /absolute/path/to/validated/bundle",
+      "usage: node scripts/stage-agentcore-bundle.mjs /absolute/path/to/validated/bundle",
     );
   }
   const repositoryRoot = path.resolve(

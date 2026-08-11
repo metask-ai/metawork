@@ -12,6 +12,9 @@ export function configuredChildTimeout(environment = process.env) {
   return value;
 }
 
+// Compilation and packaging have no meaningful upper bound on developer
+// machines, so they pass timeoutMs: null and stay unbounded like the signing
+// script's spawnSync calls. Everything else keeps the bounded default.
 export async function runChild(
   command,
   arguments_,
@@ -24,15 +27,18 @@ export async function runChild(
     detached,
   });
   let timedOut = false;
-  const timeout = setTimeout(() => {
-    timedOut = true;
-    try {
-      if (detached && child.pid) process.kill(-child.pid, "SIGKILL");
-      else child.kill("SIGKILL");
-    } catch {
-      child.kill("SIGKILL");
-    }
-  }, timeoutMs);
+  const timeout =
+    timeoutMs === null
+      ? null
+      : setTimeout(() => {
+          timedOut = true;
+          try {
+            if (detached && child.pid) process.kill(-child.pid, "SIGKILL");
+            else child.kill("SIGKILL");
+          } catch {
+            child.kill("SIGKILL");
+          }
+        }, timeoutMs);
   let outcome;
   try {
     outcome = await new Promise((resolve, reject) => {
@@ -40,7 +46,7 @@ export async function runChild(
       child.once("exit", (code, signal) => resolve({ code, signal }));
     });
   } finally {
-    clearTimeout(timeout);
+    if (timeout !== null) clearTimeout(timeout);
   }
   if (timedOut) throw new Error(`${label} exceeded ${timeoutMs} milliseconds`);
   if (outcome.code !== 0)

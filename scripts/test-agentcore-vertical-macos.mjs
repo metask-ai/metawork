@@ -14,6 +14,7 @@ import path from "node:path";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { buildAutomationDebugArtifact } from "./build.mjs";
 
 const execFileAsync = promisify(execFile);
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -53,6 +54,13 @@ const windowsWebViewFocusProbeScript = path.join(
   "scripts",
   "probe-windows-webview-focus.ps1",
 );
+
+// This harness owns the artifact it drives. run-agentcore-vertical-windows.mjs
+// builds the same artifact before importing this module and sets the flag so
+// the automation Debug build does not run twice.
+if (!process.env.METAWORK_VERTICAL_PREBUILT)
+  await buildAutomationDebugArtifact(root);
+
 const commandTimeoutMs = 20_000;
 const runTimeoutMs = 60_000;
 const workspace = await mkdtemp(join(tmpdir(), "metawork-agentcore-vertical-"));

@@ -30,13 +30,13 @@ security find-identity -v -p codesigning ~/Library/Keychains/login.keychain-db
 执行：
 
 ```bash
-npm run setup:macos-signing
+node scripts/setup-macos-local-signing.mjs setup
 ```
 
 如果存在多个 Apple Development identity，命令会 fail closed。将 `security find-identity` 输出中的 40 位 fingerprint 显式传入：
 
 ```bash
-npm run setup:macos-signing -- 0123456789ABCDEF0123456789ABCDEF01234567
+node scripts/setup-macos-local-signing.mjs setup 0123456789ABCDEF0123456789ABCDEF01234567
 ```
 
 setup 只做以下操作：
@@ -51,7 +51,7 @@ setup 只做以下操作：
 清除项目的本机选择使用：
 
 ```bash
-npm run setup:macos-signing:clear
+node scripts/setup-macos-local-signing.mjs clear
 ```
 
 该命令不会修改或删除钥匙串中的 Apple Development identity。
