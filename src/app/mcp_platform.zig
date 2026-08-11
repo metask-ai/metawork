@@ -1522,6 +1522,7 @@ fn protocolVersion(era: agent.McpEra) []const u8 {
     return switch (era) {
         .modern_2026_07_28 => "2026-07-28",
         .compat_2025_11_25 => "2025-11-25",
+        .compat_2025_06_18 => "2025-06-18",
     };
 }
 
@@ -1558,6 +1559,7 @@ test "Windows STDIO receives only the required host process baseline" {
 test "MCP platform protocol versions remain AgentCore era facts" {
     try std.testing.expectEqualStrings("2026-07-28", protocolVersion(.modern_2026_07_28));
     try std.testing.expectEqualStrings("2025-11-25", protocolVersion(.compat_2025_11_25));
+    try std.testing.expectEqualStrings("2025-06-18", protocolVersion(.compat_2025_06_18));
 }
 
 test "OAuth HTTP authorization rotates only by same-epoch revision CAS" {

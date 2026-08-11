@@ -64,6 +64,7 @@ fresh Session 只使用 `SessionHostConfigV1` 与 `SessionCreateConfigV1`：
 - Skill catalog 与显式 all-enabled selection 成对传入；无 catalog 时 selection 必须为 null；
 - MCP authority 是完整 replacement：create config 的 `mcp_selection = null` 表示 empty view；`sessionUpdateMcp` 的 selection pointer 必须非 null，合法的零 selector descriptor 表示清空当前 view；
 - 每个 `McpServerV1` 必须携带非零、非 secret 的 `configuration_fingerprint`；`McpConnectorV1` 必须提供成对的 `retain_connector` / `release_connector`，Host owner 只有在全部 Core retain 与 active connection 都释放后才可销毁；
+- Host transport 支持 `2026-07-28`、`2025-11-25` 与 `2025-06-18` 三个 exact era；`automatic` 可以由 AgentCore 协商并 exact reopen，MetaWork 不把 MCP era 当作 ABI revision 兼容；
 - 当前正式 Application 仍使用 `permission_rules = null` 与 `durable_budget = null`；新 Session 的 `mcp_selection` 来自 Workbench 当前 committed opaque activation 或为 null，既有 Session 不因启动期产品状态变化被替换；null durable budget 使用 AgentCore canonical defaults；
 - 每个 Session 至多一个 in-flight Run/compact/mutation；Runtime 必须活得比全部 Session 和 catalog lease 长。
 
@@ -189,7 +190,7 @@ staged Host gate：
 
 - staged verifier 与 bundle guard；
 - mandatory function-table discovery；
-- mandatory Runtime MCP apply entry、connector retain/release、非零 configuration fingerprint 与两个 exact MCP era 的 interop；
+- mandatory Runtime MCP apply entry、connector retain/release、非零 configuration fingerprint 与三个 exact MCP era 的 interop；
 - Session create config、Permission identity/response echo/provenance 测试；
 - status-before-result、checkpoint partial-result、八个 StopReason 与 unknown/mismatch fail-closed 测试；
 - Run、manual compact 与 Session Skill mutation 的 operation-specific status disposition，以及 budget rejection 后 Session reuse 测试；

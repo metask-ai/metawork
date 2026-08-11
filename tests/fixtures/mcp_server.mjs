@@ -205,6 +205,10 @@ async function handle(message, send) {
 
   switch (message.method) {
     case "server/discover": {
+      if (options.protocolVersion === "2025-06-18") {
+        respondError(send, message.id, -32601, "method not found");
+        return;
+      }
       requireModernMetadata(message);
       respond(
         send,
@@ -219,7 +223,13 @@ async function handle(message, send) {
     }
     case "initialize": {
       if (options.protocolVersion === "2026-07-28") process.exit(75);
-      if (message.params?.protocolVersion !== options.protocolVersion)
+      if (
+        message.params?.protocolVersion !== options.protocolVersion &&
+        !(
+          options.protocolVersion === "2025-06-18" &&
+          message.params?.protocolVersion === "2025-11-25"
+        )
+      )
         process.exit(74);
       respond(send, message.id, {
         protocolVersion: options.protocolVersion,
@@ -374,7 +384,7 @@ function parseOptions(args) {
     }
   }
   if (
-    !["2026-07-28", "2025-11-25"].includes(protocolVersion) ||
+    !["2026-07-28", "2025-11-25", "2025-06-18"].includes(protocolVersion) ||
     !["stdio", "http"].includes(transport) ||
     !["json", "sse"].includes(framing) ||
     !Number.isSafeInteger(delayMs) ||

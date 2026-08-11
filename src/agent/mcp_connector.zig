@@ -14,6 +14,7 @@ pub const Purpose = enum {
 pub const Era = enum {
     modern_2026_07_28,
     compat_2025_11_25,
+    compat_2025_06_18,
 };
 
 pub const Failure = enum {
@@ -238,6 +239,7 @@ pub const Adapter = struct {
         const era: Era = switch (era_code) {
             wire.MCP_ERA_2026_07_28 => .modern_2026_07_28,
             wire.MCP_ERA_2025_11_25 => .compat_2025_11_25,
+            wire.MCP_ERA_2025_06_18 => .compat_2025_06_18,
             else => return wire.MCP_OPEN_FATAL,
         };
         return switch (self.transport.open_fn(

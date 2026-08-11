@@ -331,6 +331,25 @@ fn activateHttpFixture(protocol_version: []const u8, framing: []const u8) !void 
     try std.testing.expectEqual(@as(usize, 1), activation.selectedTools().len);
 }
 
+fn initializeRequestOffset(trace: []const u8, protocol_version: []const u8) ?usize {
+    var version_storage: [64]u8 = undefined;
+    const version_field = std.fmt.bufPrint(
+        &version_storage,
+        "\"protocolVersion\":\"{s}\"",
+        .{protocol_version},
+    ) catch return null;
+    var offset: usize = 0;
+    var lines = std.mem.splitScalar(u8, trace, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.indexOf(u8, line, "\"direction\":\"request\"") != null and
+            std.mem.indexOf(u8, line, "\"method\":\"initialize\"") != null and
+            std.mem.indexOf(u8, line, version_field) != null)
+            return offset;
+        offset += line.len + 1;
+    }
+    return null;
+}
+
 fn runCatalogInterop(
     negotiation: agent.McpNegotiationPolicy,
     protocol_version: []const u8,
@@ -409,6 +428,20 @@ fn runCatalogInterop(
     try std.testing.expectEqualStrings("echo", activation.catalogTools()[0].name);
     try std.testing.expectEqual(@as(usize, 0), activation.catalogIssues().len);
     try std.testing.expectEqual(@as(usize, 1), activation.selectedTools().len);
+    if (std.mem.eql(u8, protocol_version, "2025-06-18")) {
+        const trace = try tmp.dir.readFileAlloc(
+            std.testing.io,
+            "trace.jsonl",
+            std.testing.allocator,
+            .limited(1024 * 1024),
+        );
+        defer std.testing.allocator.free(trace);
+        const initial = initializeRequestOffset(trace, "2025-11-25");
+        const exact = initializeRequestOffset(trace, "2025-06-18");
+        const exact_reopen = initial != null and exact != null and initial.? < exact.?;
+        if (!exact_reopen) std.debug.print("MCP fixture trace:\n{s}\n", .{trace});
+        try std.testing.expect(exact_reopen);
+    }
 }
 
 test "canonical AgentCore negotiates the 2026-07-28 stdio fixture" {
@@ -417,6 +450,10 @@ test "canonical AgentCore negotiates the 2026-07-28 stdio fixture" {
 
 test "canonical AgentCore negotiates the 2025-11-25 stdio fixture" {
     try runCatalogInterop(.compat_only, "2025-11-25");
+}
+
+test "canonical AgentCore reopens the exact 2025-06-18 stdio era" {
+    try runCatalogInterop(.automatic, "2025-06-18");
 }
 
 test "canonical AgentCore negotiates 2026 Streamable HTTP JSON framing" {
