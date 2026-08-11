@@ -3,6 +3,7 @@
 //! preauthorized HTTP transport owners. It does not interpret MCP payloads.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const native_sdk = @import("native_sdk");
 const agent = @import("metawork_agent");
 const workbench = @import("metawork_workbench");
@@ -634,6 +635,19 @@ pub const RuntimeBuild = struct {
     }
 };
 
+pub const HostEnvironment = struct {
+    windows_system_root: ?[]const u8 = null,
+
+    pub fn fromProcess(environ_map: *const std.process.Environ.Map) HostEnvironment {
+        return .{
+            .windows_system_root = if (builtin.os.tag == .windows)
+                environ_map.get("SystemRoot")
+            else
+                null,
+        };
+    }
+};
+
 /// Builds a single-use Agent input from eligible servers only. On failure no
 /// transport owner is consumed; successful Agent input construction takes all
 /// concrete contexts as one commit.
@@ -641,8 +655,9 @@ pub fn buildRuntimeInput(
     io: std.Io,
     allocator: std.mem.Allocator,
     preparation: *const workbench.McpPreparedConfiguration,
+    host_environment: HostEnvironment,
 ) BuildError!?agent.McpRuntimeInput {
-    var build = try buildRuntime(io, allocator, preparation);
+    var build = try buildRuntime(io, allocator, preparation, host_environment);
     defer build.authorizations.deinit();
     return build.input;
 }
@@ -651,6 +666,7 @@ pub fn buildRuntime(
     io: std.Io,
     allocator: std.mem.Allocator,
     preparation: *const workbench.McpPreparedConfiguration,
+    host_environment: HostEnvironment,
 ) BuildError!RuntimeBuild {
     var authorization_list: std.ArrayList(*HttpAuthSlot) = .empty;
     defer authorization_list.deinit(allocator);
@@ -682,7 +698,7 @@ pub fn buildRuntime(
         const owner = try allocator.create(agent.McpTransportOwner);
         var authorization: ?*HttpAuthSlot = null;
         owner.* = (if (std.mem.eql(u8, server.transport.kind, "stdio"))
-            createStdioOwner(io, allocator, server, preparation)
+            createStdioOwner(io, allocator, server, preparation, host_environment)
         else if (std.mem.eql(u8, server.transport.kind, "streamable_http"))
             createHttpOwner(io, allocator, server, preparation, &authorization)
         else
@@ -852,6 +868,7 @@ fn createStdioOwner(
     allocator: std.mem.Allocator,
     server: workbench.McpServerConfigurationWire,
     preparation: *const workbench.McpPreparedConfiguration,
+    host_environment: HostEnvironment,
 ) BuildError!agent.McpTransportOwner {
     const context = try allocator.create(StdioContext);
     errdefer allocator.destroy(context);
@@ -863,6 +880,7 @@ fn createStdioOwner(
     };
     errdefer context.arena.deinit();
     errdefer secureEnvironmentDeinit(&context.environment);
+    try installStdioHostEnvironment(&context.environment, host_environment);
     const owned = context.arena.allocator();
     const argv = try owned.alloc([]const u8, server.transport.arguments.len + 1);
     argv[0] = try owned.dupe(u8, server.transport.command orelse
@@ -871,6 +889,7 @@ fn createStdioOwner(
         target.* = try owned.dupe(u8, argument.literal orelse
             return error.InvalidConfig);
     for (server.transport.environment) |entry| {
+        if (reservedStdioEnvironmentName(entry.name)) return error.InvalidConfig;
         const locator = entry.credential_ref orelse return error.InvalidConfig;
         const secret = resolvedCredential(preparation, locator) orelse
             return error.InvalidConfig;
@@ -890,6 +909,23 @@ fn createStdioOwner(
         .environ_map = &context.environment,
     }) catch return error.InvalidConfig;
     return agent.McpTransportOwner.init(context.backend.transport(), StdioContext.destroy);
+}
+
+fn installStdioHostEnvironment(
+    environment: *std.process.Environ.Map,
+    host_environment: HostEnvironment,
+) BuildError!void {
+    if (builtin.os.tag != .windows) return;
+    const system_root = host_environment.windows_system_root orelse
+        return error.InvalidConfig;
+    if (system_root.len == 0 or std.mem.indexOfScalar(u8, system_root, 0) != null)
+        return error.InvalidConfig;
+    try environment.put("SystemRoot", system_root);
+}
+
+fn reservedStdioEnvironmentName(name: []const u8) bool {
+    return builtin.os.tag == .windows and
+        std.ascii.eqlIgnoreCase(name, "SystemRoot");
 }
 
 const HttpContext = struct {
@@ -1494,6 +1530,30 @@ fn secureEnvironmentDeinit(environment: *std.process.Environ.Map) void {
     environment.deinit();
 }
 
+test "Windows STDIO receives only the required host process baseline" {
+    var environment = std.process.Environ.Map.init(std.testing.allocator);
+    defer secureEnvironmentDeinit(&environment);
+    if (builtin.os.tag == .windows) {
+        try std.testing.expectError(
+            error.InvalidConfig,
+            installStdioHostEnvironment(&environment, .{}),
+        );
+        try installStdioHostEnvironment(&environment, .{
+            .windows_system_root = "C:\\Windows",
+        });
+        try std.testing.expectEqual(@as(usize, 1), environment.count());
+        try std.testing.expectEqualStrings(
+            "C:\\Windows",
+            environment.get("SystemRoot").?,
+        );
+        try std.testing.expect(reservedStdioEnvironmentName("SYSTEMROOT"));
+    } else {
+        try installStdioHostEnvironment(&environment, .{});
+        try std.testing.expectEqual(@as(usize, 0), environment.count());
+        try std.testing.expect(!reservedStdioEnvironmentName("SystemRoot"));
+    }
+}
+
 test "MCP platform protocol versions remain AgentCore era facts" {
     try std.testing.expectEqualStrings("2026-07-28", protocolVersion(.modern_2026_07_28));
     try std.testing.expectEqualStrings("2025-11-25", protocolVersion(.compat_2025_11_25));
@@ -1948,6 +2008,7 @@ test "MCP platform builds lazy stdio and HTTP transport owners without opening t
         std.testing.io,
         std.testing.allocator,
         &preparation,
+        testHostEnvironment(),
     )).?;
     defer input.deinit();
 }
@@ -2025,5 +2086,15 @@ test "MCP platform creates no owner and reads no credential before approval" {
         std.testing.io,
         std.testing.allocator,
         &preparation,
+        testHostEnvironment(),
     )) == null);
+}
+
+fn testHostEnvironment() HostEnvironment {
+    return .{
+        .windows_system_root = if (builtin.os.tag == .windows)
+            "C:\\Windows"
+        else
+            null,
+    };
 }

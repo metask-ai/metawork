@@ -371,6 +371,11 @@ fn addMcpInteropTests(
     const fixture_options = b.addOptions();
     fixture_options.addOption([]const u8, "node_path", node_path);
     fixture_options.addOption(
+        ?[]const u8,
+        "windows_system_root",
+        b.graph.environ_map.get("SystemRoot"),
+    );
+    fixture_options.addOption(
         []const u8,
         "fixture_path",
         b.pathFromRoot("tests/fixtures/mcp_server.mjs"),

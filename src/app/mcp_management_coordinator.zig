@@ -491,6 +491,7 @@ pub const Coordinator = struct {
     workbench_owner: *workbench.Workbench,
     credential_store: *mcp_platform.CredentialStore,
     host: Host,
+    host_environment: mcp_platform.HostEnvironment,
     transport_override: ?mcp_oauth.Transport = null,
     flow: ?*Flow = null,
     connection_test_job: ?*ConnectionTestJob = null,
@@ -503,6 +504,7 @@ pub const Coordinator = struct {
         workbench_owner: *workbench.Workbench,
         credential_store: *mcp_platform.CredentialStore,
         host: Host,
+        host_environment: mcp_platform.HostEnvironment,
     ) Coordinator {
         return .{
             .allocator = allocator,
@@ -510,6 +512,7 @@ pub const Coordinator = struct {
             .workbench_owner = workbench_owner,
             .credential_store = credential_store,
             .host = host,
+            .host_environment = host_environment,
         };
     }
 
@@ -642,6 +645,7 @@ pub const Coordinator = struct {
             self.io,
             self.allocator,
             &preparation,
+            self.host_environment,
         ) catch return .unavailable;
         defer runtime_build.deinit();
         const input = if (runtime_build.input) |*value| value else return .unavailable;
@@ -1617,6 +1621,7 @@ test "MCP Application coordinator completes dynamic registration and OAuth loopb
             .now_unix_ms_fn = FakeHost.now,
             .notify_fn = FakeHost.notify,
         },
+        .{},
     );
     coordinator.transport_override = .{ .context = &fake_http, .fetch_fn = FakeHttp.fetch };
     defer coordinator.deinit();
