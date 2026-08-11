@@ -81,6 +81,17 @@ test("package.json stays a thin entry surface instead of an internal call graph"
   const chainedNpmScript = new RegExp(String.raw`\bnpm\s+run\b`);
   const packageJson = JSON.parse(read("package.json"));
 
+  assert.deepEqual(Object.keys(packageJson.scripts).sort(), [
+    "build:debug",
+    "build:release",
+    "check",
+    "dev",
+    "format",
+    "format:check",
+    "package:macos",
+    "test",
+  ]);
+
   for (const [name, command] of Object.entries(packageJson.scripts)) {
     assert.doesNotMatch(
       command,

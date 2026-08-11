@@ -66,7 +66,7 @@ npm run build:debug
 npm run build:release
 ```
 
-上面五条是 `package.json` 的全部工程入口，再加上 `npm run dev` 与 `npm run package:macos`。一次性平台准备、平台验收 harness 和 probe 不是入口，直接以 `node scripts/<name>.mjs` 调用。
+`package.json` 只保留八个工程入口：`dev`、`check`、`test`、`format`、`format:check`、`build:debug`、`build:release` 与 `package:macos`。一次性平台准备、平台验收 harness 和 probe 不是入口，直接以 `node scripts/<name>.mjs` 调用。
 
 macOS 的 Apple Development identity 只需在每台开发机选择一次，具体要求见 [macOS 本地开发签名](docs/macos-local-development.md)。macOS package 使用 `npm run package:macos`；Windows development baseline 使用 `node scripts/run-windows-bringup.mjs`。完整验证范围与按变更选择的命令见 [验证规范](docs/validation.md)。
 

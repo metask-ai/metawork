@@ -219,6 +219,9 @@ automation -> bridge, account contract, Native SDK
 - `tests/agent/` 验证 Session/callback/quiescence，`tests/workbench/` 验证 Executor/admission/shutdown，`tests/integration/` 只保留跨边界竞态；
 - `tests/support/` 的 fake 和 fixture 不得升级为产品 owner；
 - `scripts/` 可以编排真实应用、Renderer runtime 和 artifact 校验，但不能建立测试专用产品协议；
+- 根 `package.json` 只保留 `dev`、`check`、`test`、`format`、`format:check`、`build:debug`、`build:release` 与 `package:macos` 八个工程入口，不登记内部步骤、单项测试、probe 或平台验收 harness；
+- `scripts/*.test.mjs` 是默认 `npm test` 自动发现的长期回归；新增文件必须绑定当前可观察不变量，不得用该后缀保存一次性诊断；
+- 平台验收 harness 只有在绑定当前能力缺口、真实失败模式和明确删除条件时才进入 active tree，并由验证规范直接引用；一次性 audit、仅为单次证据服务的截图生成器和问题定位 probe 在完成验收后删除，Git 历史负责保存一次性事实；
 - `build_support/agentcore_bundle.zig` 与 target lock 是正式信任边界；candidate probe 只使用临时 source-free SDK consumer；
 - `app.zon`、Zig commands 和 TypeScript commands 的完整目录必须由集合等式测试保持一致；
 - release artifact 必须继续证明 automation credential、origin 和证据 token 被裁掉。
