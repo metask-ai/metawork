@@ -112,7 +112,7 @@ AgentCore/tool thread
 - `RunContext` 及其 session ID 也只在 callback 内借用，禁止保存 slice；
 - Session handle、active run ID、Session-lifetime session ID 的首次绑定/比较与 callback ref admission 必须在同一 Session lock 内完成；
 - invalid layout、错误 handle/run ID、同 Run 或跨 Run session ID 漂移均为 dependency contract failure，返回 fatal 并 poison Session；
-- 校验和深拷贝必须在 callback 内完成；
+- 整段 `CoreEvent` / `UiRequest` JSON 必须先通过严格 UTF-8 校验；官方 typed decoder 返回后，所有进入产品 projection 的文本字段还必须逐项验证，拒绝由合法 JSON byte array 解出的非 UTF-8 `[]u8`；校验和深拷贝必须在 callback 内完成；
 - callback 可能来自不同 Session 的并发线程；
 - 同一 Run 的事件顺序必须保留；
 - 无法验证、复制或接收关键事件时返回 callback fatal；

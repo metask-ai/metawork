@@ -71,14 +71,94 @@ pub fn decodeUiRequest(
     allocator: std.mem.Allocator,
     encoded: []const u8,
 ) sdk.DecodeError!ParsedUiRequest {
-    return sdk.decodeUiRequest(allocator, encoded);
+    if (!std.unicode.utf8ValidateSlice(encoded)) return error.MalformedJson;
+    var parsed = try sdk.decodeUiRequest(allocator, encoded);
+    errdefer parsed.deinit();
+    if (!uiRequestTextValid(parsed.value)) return error.InvalidPayload;
+    return parsed;
 }
 
 pub fn decodeCoreEvent(
     allocator: std.mem.Allocator,
     encoded: []const u8,
 ) sdk.DecodeError!sdk.ParsedCoreEvent {
-    return sdk.decodeCoreEvent(allocator, encoded);
+    if (!std.unicode.utf8ValidateSlice(encoded)) return error.MalformedJson;
+    var parsed = try sdk.decodeCoreEvent(allocator, encoded);
+    errdefer parsed.deinit();
+    if (!coreEventTextValid(parsed.value)) return error.InvalidPayload;
+    return parsed;
+}
+
+fn coreEventTextValid(event: sdk.DecodedCoreEvent) bool {
+    return switch (event) {
+        .unknown => |unknown| validUtf8(&.{ unknown.tag, unknown.payload_json }),
+        .known => |known| switch (known) {
+            .text_chunk => |text| std.unicode.utf8ValidateSlice(text),
+            .tool_start => |tool| validUtf8(&.{ tool.id, tool.name, tool.input }),
+            .tool_progress => |progress| validUtf8(&.{ progress.id, progress.text }),
+            .progress => |progress| validUtf8(&.{ progress.tool_name, progress.tool_input }),
+            .tool_result => |result| validUtf8(&.{ result.id, result.name, result.input, result.content }),
+            .usage, .retry_notice, .stream_done => true,
+            .context_warning => |warning| std.unicode.utf8ValidateSlice(warning.level),
+            .auto_compact => |compact| std.unicode.utf8ValidateSlice(compact.cause),
+            .permission_provenance => |value| validUtf8(&.{
+                value.matched_rule_id orelse "",
+                value.session_id,
+                value.tool_call_id,
+                value.request_id orelse "",
+                value.tool.name,
+                value.tool.binding,
+                value.canonical_arguments_digest,
+            }),
+        },
+    };
+}
+
+fn uiRequestTextValid(request: sdk.UiRequest) bool {
+    return switch (request) {
+        .ask_question => |questions| questions: {
+            for (questions) |question| {
+                if (!validUtf8(&.{ question.question, question.header })) break :questions false;
+                for (question.options) |option|
+                    if (!validUtf8(&.{ option.label, option.description, option.preview }))
+                        break :questions false;
+            }
+            break :questions true;
+        },
+        .permission => |permission| validUtf8(&.{
+            permission.type,
+            permission.request_id,
+            permission.session_id,
+            permission.tool_call_id,
+            permission.tool.name,
+            permission.tool.binding,
+            permission.canonical_arguments_digest,
+            permission.arguments_json,
+            if (permission.candidate) |candidate| candidate.rule_id else "",
+        }),
+    };
+}
+
+fn validUtf8(values: []const []const u8) bool {
+    for (values) |value|
+        if (!std.unicode.utf8ValidateSlice(value)) return false;
+    return true;
+}
+
+test "AgentCore JSON callbacks reject invalid UTF-8 at the ownership boundary" {
+    const invalid_event =
+        "{\"tool_result\":{\"id\":\"tool-1\",\"name\":\"Bash\",\"input\":\"{}\",\"content\":[203],\"is_error\":false,\"elapsed_ms\":1}}";
+    try std.testing.expectError(
+        error.InvalidPayload,
+        decodeCoreEvent(std.testing.allocator, invalid_event),
+    );
+
+    const invalid_ui =
+        "{\"ask_question\":[{\"question\":[203],\"header\":\"Choice\",\"multi\":false,\"options\":[]}]}";
+    try std.testing.expectError(
+        error.InvalidPayload,
+        decodeUiRequest(std.testing.allocator, invalid_ui),
+    );
 }
 
 const default_builtin_tools = [_][]const u8{ "Read", "Bash", "Edit", "AskUserQuestion" };
@@ -2894,7 +2974,7 @@ pub const Session = struct {
             self.recordTerminationSignal(.{ .event_pump_failure = .event_too_large });
             return wire.EVENT_FATAL;
         }
-        var parsed = sdk.decodeCoreEvent(self.agent_runtime.allocator, encoded) catch {
+        var parsed = decodeCoreEvent(self.agent_runtime.allocator, encoded) catch {
             self.recordTerminationSignal(.{ .event_pump_failure = .invalid_event });
             return wire.EVENT_FATAL;
         };
@@ -2967,7 +3047,7 @@ pub const Session = struct {
             self.recordTerminationSignal(.{ .event_pump_failure = .event_too_large });
             return wire.UI_FATAL;
         }
-        var parsed = sdk.decodeUiRequest(self.agent_runtime.allocator, encoded_request) catch {
+        var parsed = decodeUiRequest(self.agent_runtime.allocator, encoded_request) catch {
             self.recordTerminationSignal(.{ .callback_failure = .ui });
             return wire.UI_FATAL;
         };

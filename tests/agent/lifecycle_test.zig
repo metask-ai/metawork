@@ -1184,6 +1184,30 @@ test "malformed Core events fail the Run instead of entering the bounded sink" {
     try std.testing.expectEqual(@as(usize, 1), releases);
 }
 
+test "non-UTF-8 Core events fail the Run before entering the bounded sink" {
+    fake_core.reset();
+    fake_core.setNextPlan(.invalid_utf8_event_callback);
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    const session = try openSession(runtime);
+    const run_id = try submitSession(session, "emit non-UTF-8 event");
+    try session.waitRun(run_id);
+    var terminal = takeTestTerminal(session, run_id);
+    defer terminal.deinit();
+    const snapshot = session.snapshot();
+    try std.testing.expectEqual(@as(?u32, wire.STATUS_CALLBACK_FAILED), terminal.raw_status_code);
+    try std.testing.expectEqual(
+        lifecycle.TerminationSignal{ .event_pump_failure = .invalid_event },
+        terminal.termination_signal.?,
+    );
+    try std.testing.expectEqual(lifecycle.SessionState.poisoned, snapshot.state);
+    try std.testing.expect(runtime.takeEvent() == null);
+    try closeSession(session, .session_close);
+}
+
 test "RunContext identity violations fail closed and poison the Session" {
     fake_core.reset();
     const runtime = try createTestComposition(.{
