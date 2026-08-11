@@ -150,8 +150,14 @@ test("only checking and authorizing replace the Workbench surface", () => {
 });
 
 test("Account runtime blockers keep running tasks distinct from idle sessions", () => {
-  assert.equal(accountErrorMessageId("execution_in_use"), "account.task_running");
-  assert.equal(accountErrorMessageId("session_in_use"), "account.session_in_use");
+  assert.equal(
+    accountErrorMessageId("execution_in_use"),
+    "account.task_running",
+  );
+  assert.equal(
+    accountErrorMessageId("session_in_use"),
+    "account.session_in_use",
+  );
 });
 
 test("authorization has one cancel path and no reopen or reauthenticate branch", () => {
