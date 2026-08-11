@@ -91,6 +91,7 @@ import type {
   RunInputView,
   McpMutationResult,
   McpRefreshResult,
+  McpConnectionTestResult,
   SkillMutationResult,
   TaskRunReason,
   UiResponsePayload,
@@ -1242,6 +1243,23 @@ export default function App() {
     }
   }
 
+  async function testMcpConnection(
+    expectedGeneration: string,
+    serverId: string,
+  ): Promise<McpConnectionTestResult> {
+    try {
+      const result = await client.testMcpConnection(
+        expectedGeneration,
+        serverId,
+      );
+      await refreshSnapshot();
+      return result;
+    } catch (error) {
+      await refreshSnapshot().catch(() => undefined);
+      throw error;
+    }
+  }
+
   function runSlashCommand(command: SlashCommandName) {
     switch (command) {
       case "new":
@@ -2049,6 +2067,7 @@ export default function App() {
               client.removeMcpServer(generation, serverId),
             )
           }
+          onTest={testMcpConnection}
           onRefresh={refreshMcpCatalog}
         />
       ) : route === "scheduled-tasks" ? (

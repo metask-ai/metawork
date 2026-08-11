@@ -603,9 +603,7 @@ export type McpHttpConnectionInput = {
         kind: "pre_registered";
         clientId: string;
         tokenEndpointAuthMethod:
-          | "none"
-          | "client_secret_basic"
-          | "client_secret_post";
+          "none" | "client_secret_basic" | "client_secret_post";
       };
 };
 
@@ -631,25 +629,23 @@ export type McpManagementView = {
     authMode: "none" | "static" | "oauth";
     negotiation: "automatic" | "modern_only" | "compat_only";
     timeoutMs: number;
-    safeConnectionSummary:
+    connection:
+      | null
       | {
           kind: "stdio";
-          executableBasename: string;
-          argumentCount: number;
-          cwdPresent: boolean;
+          command: string;
+          arguments: string[];
+          cwd: string | null;
           environment: { name: string; status: "missing" | "set" }[];
         }
       | {
           kind: "streamable_http";
-          endpointOrigin: string;
+          endpoint: string;
           headers: { name: string; status: "missing" | "set" }[];
           registrationKind: "none" | "automatic" | "pre_registered";
-          clientIdPresent: boolean;
+          clientId: string | null;
           tokenEndpointAuthMethod:
-            | "none"
-            | "client_secret_basic"
-            | "client_secret_post"
-            | null;
+            "none" | "client_secret_basic" | "client_secret_post" | null;
           clientSecretStatus: "not_required" | "missing" | "set";
         };
     approvalStatus: "unapproved" | "approved";
@@ -658,6 +654,11 @@ export type McpManagementView = {
     runtimeStatus: (typeof mcpRuntimeStatusValues)[number];
     newTaskAccess: (typeof mcpNewTaskAccessValues)[number];
     safeDiagnostic: string;
+    connectionTest: {
+      status: "untested" | "testing" | "connected" | "failed";
+      toolCount: number;
+      issueCount: number;
+    };
     tools: {
       name: string;
       discovered: boolean;
@@ -703,6 +704,16 @@ export type McpAuthorizationCancelResult = {
 
 export type McpRefreshResult = {
   outcome: "started" | "busy" | "unavailable" | "shutting_down" | "rejected";
+};
+
+export type McpConnectionTestResult = {
+  outcome:
+    | "started"
+    | "busy"
+    | "stale_generation"
+    | "needs_authentication"
+    | "rejected"
+    | "unavailable";
 };
 
 export type WorkspaceMutationReason =

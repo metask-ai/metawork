@@ -34,6 +34,7 @@ export const commands = {
   mcpSetServerEnabled: "metawork.mcp.setServerEnabled",
   mcpSetAllowedTools: "metawork.mcp.setAllowedTools",
   mcpRemoveServer: "metawork.mcp.removeServer",
+  mcpTestConnection: "metawork.mcp.testConnection",
   mcpRefreshCatalog: "metawork.mcp.refreshCatalog",
   snapshot: "metawork.workbench.snapshot",
   snapshotChunk: "metawork.workbench.snapshot.chunk",

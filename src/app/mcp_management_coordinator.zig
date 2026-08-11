@@ -1,13 +1,14 @@
 //! Application-owned MCP management effects. Workbench remains the sole
 //! product-state owner; this coordinator sequences native confirmation,
-//! secure capture, browser, loopback and bounded network workers around the
-//! Workbench transaction seams.
+//! secure capture, browser, loopback, bounded network workers and isolated
+//! connection-test Runtimes around the Workbench transaction seams.
 
 const std = @import("std");
 const agent = @import("metawork_agent");
 const workbench = @import("metawork_workbench");
 const mcp_oauth = @import("metawork_mcp_oauth");
 const mcp_platform = @import("metawork_mcp_platform");
+const mcp_startup = @import("mcp_startup.zig");
 const app_platform = @import("platform.zig");
 
 const connection_approval_details_bytes: usize = workbench.mcp_registry_max_bytes * 6 + 4096;
@@ -133,6 +134,15 @@ pub const AuthorizationStartOutcome = union(enum) {
     rejected,
     stale_generation,
     capability_unavailable,
+};
+
+pub const ConnectionTestStartOutcome = enum {
+    started,
+    busy,
+    stale_generation,
+    needs_authentication,
+    rejected,
+    unavailable,
 };
 
 pub const SecretSlot = workbench.McpSecretCaptureTarget;
@@ -411,6 +421,70 @@ const Flow = struct {
     }
 };
 
+const ConnectionTestResult = struct {
+    outcome: workbench.McpConnectionTestOutcome = .failed,
+    tool_count: u32 = 0,
+    issue_count: u32 = 0,
+};
+
+const ConnectionTestJob = struct {
+    allocator: std.mem.Allocator,
+    host: Host,
+    server_id: []u8,
+    runtime: ?*agent.Runtime,
+    authorizations: mcp_platform.HttpAuthorizations,
+    result: ConnectionTestResult = .{},
+    finished: std.atomic.Value(bool) = .init(false),
+    thread: ?std.Thread = null,
+
+    fn start(self: *ConnectionTestJob) std.Thread.SpawnError!void {
+        self.thread = try std.Thread.spawn(.{}, run, .{self});
+    }
+
+    fn run(self: *ConnectionTestJob) void {
+        const runtime = self.runtime.?;
+        if (runtime.activateMcp()) |activation_outcome| switch (activation_outcome) {
+            .activated => |activation| {
+                defer activation.deinit();
+                if (activation.serverHealth().len == 1 and
+                    activation.serverHealth()[0].state != .unavailable)
+                {
+                    self.result = .{
+                        .outcome = .connected,
+                        .tool_count = std.math.cast(u32, activation.catalogTools().len) orelse
+                            std.math.maxInt(u32),
+                        .issue_count = std.math.cast(u32, activation.catalogIssues().len) orelse
+                            std.math.maxInt(u32),
+                    };
+                }
+            },
+            .empty, .unavailable => {},
+        } else |_| {}
+        runtime.shutdown() catch {
+            self.result.outcome = .failed;
+        };
+        runtime.deinit();
+        self.runtime = null;
+        self.authorizations.deinit();
+        self.finished.store(true, .release);
+        self.host.notify();
+    }
+
+    fn join(self: *ConnectionTestJob) void {
+        const thread = self.thread orelse return;
+        thread.join();
+        self.thread = null;
+    }
+
+    fn deinit(self: *ConnectionTestJob) void {
+        std.debug.assert(self.thread == null and self.runtime == null);
+        self.allocator.free(self.server_id);
+        const allocator = self.allocator;
+        self.* = undefined;
+        allocator.destroy(self);
+    }
+};
+
 pub const Coordinator = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -419,6 +493,7 @@ pub const Coordinator = struct {
     host: Host,
     transport_override: ?mcp_oauth.Transport = null,
     flow: ?*Flow = null,
+    connection_test_job: ?*ConnectionTestJob = null,
     last_cancel_outcome: ?Outcome = null,
     stopping: bool = false,
 
@@ -455,7 +530,8 @@ pub const Coordinator = struct {
         expected_generation: u64,
         server_id: []const u8,
     ) !AuthorizationStartOutcome {
-        if (self.stopping or self.flow != null) return .rejected;
+        if (self.stopping or self.flow != null or self.connection_test_job != null)
+            return .rejected;
         self.last_cancel_outcome = null;
         if (!self.oauthAvailable()) return .capability_unavailable;
         const inspection = self.workbench_owner.inspectMcpDesiredConfiguration() orelse
@@ -514,10 +590,118 @@ pub const Coordinator = struct {
         return outcome;
     }
 
+    pub fn testConnection(
+        self: *Coordinator,
+        expected_generation: u64,
+        server_id: []const u8,
+    ) !ConnectionTestStartOutcome {
+        if (self.stopping) return .unavailable;
+        if (self.connection_test_job != null or self.flow != null) return .busy;
+        const inspection = self.workbench_owner.inspectMcpDesiredConfiguration() orelse
+            return .unavailable;
+        if (inspection.desired_generation != expected_generation)
+            return .stale_generation;
+
+        const registry_storage = try self.allocator.alloc(
+            u8,
+            workbench.mcp_registry_max_bytes,
+        );
+        defer self.allocator.free(registry_storage);
+        const registry_bytes = self.workbench_owner.writeMcpDesiredConfiguration(
+            expected_generation,
+            registry_storage,
+        ) catch return .unavailable;
+        var preparation = try workbench.prepareMcpConfiguration(
+            self.allocator,
+            registry_bytes,
+            true,
+            false,
+            self.credential_store.resolver(),
+            mcp_startup.configuration_limits,
+        );
+        defer preparation.deinit();
+        const registry = preparation.registry orelse return .unavailable;
+        var selected_index: ?usize = null;
+        for (registry.value.servers, 0..) |server, index| {
+            if (std.mem.eql(u8, server.id, server_id)) {
+                selected_index = index;
+                break;
+            }
+        }
+        const index = selected_index orelse return .rejected;
+        switch (preparation.server_states[index]) {
+            .eligible => {},
+            .needs_authentication, .reauth_required => return .needs_authentication,
+            .disabled, .unapproved, .invalid_catalog => return .rejected,
+        }
+        for (preparation.server_states, 0..) |*state, state_index| {
+            if (state_index != index) state.* = .disabled;
+        }
+
+        var runtime_build = mcp_platform.buildRuntime(
+            self.io,
+            self.allocator,
+            &preparation,
+        ) catch return .unavailable;
+        defer runtime_build.deinit();
+        const input = if (runtime_build.input) |*value| value else return .unavailable;
+        const runtime = agent.Runtime.init(self.io, self.allocator, .{
+            .max_sessions = 1,
+            .mcp_input = input,
+        }) catch return .unavailable;
+        var authorizations = runtime_build.takeAuthorizations();
+        var runtime_owned = true;
+        defer if (runtime_owned) {
+            runtime.shutdown() catch {};
+            runtime.deinit();
+            authorizations.deinit();
+        };
+        const job = try self.allocator.create(ConnectionTestJob);
+        errdefer self.allocator.destroy(job);
+        job.* = .{
+            .allocator = self.allocator,
+            .host = self.host,
+            .server_id = try self.allocator.dupe(u8, server_id),
+            .runtime = runtime,
+            .authorizations = authorizations,
+        };
+        errdefer self.allocator.free(job.server_id);
+        try self.workbench_owner.beginMcpConnectionTest(server_id);
+        job.start() catch {
+            self.workbench_owner.completeMcpConnectionTest(
+                server_id,
+                .failed,
+                0,
+                0,
+            );
+            self.allocator.free(job.server_id);
+            self.allocator.destroy(job);
+            return .unavailable;
+        };
+        runtime_owned = false;
+        self.connection_test_job = job;
+        return .started;
+    }
+
     pub fn drain(self: *Coordinator) bool {
-        const flow = self.flow orelse return false;
-        const job = flow.job orelse return false;
-        if (!job.finished.load(.acquire)) return false;
+        var changed = false;
+        if (self.connection_test_job) |test_job| {
+            if (test_job.finished.load(.acquire)) {
+                test_job.join();
+                self.workbench_owner.completeMcpConnectionTest(
+                    test_job.server_id,
+                    test_job.result.outcome,
+                    test_job.result.tool_count,
+                    test_job.result.issue_count,
+                );
+                self.connection_test_job = null;
+                test_job.deinit();
+                changed = true;
+            }
+        }
+        const flow = self.flow orelse return changed;
+        const job = flow.job orelse return changed;
+        if (!job.finished.load(.acquire)) return changed;
         job.join();
         switch (job.input) {
             .discovery => self.completeDiscovery(flow, job),
@@ -531,6 +715,10 @@ pub const Coordinator = struct {
     pub fn shutdown(self: *Coordinator) void {
         if (self.stopping) return;
         self.stopping = true;
+        if (self.connection_test_job) |test_job| {
+            test_job.join();
+            _ = self.drain();
+        }
         const flow = self.flow orelse return;
         flow.cancelling = true;
         if (flow.job) |job| {
@@ -1433,12 +1621,8 @@ test "MCP Application coordinator completes dynamic registration and OAuth loopb
     coordinator.transport_override = .{ .context = &fake_http, .fetch_fn = FakeHttp.fetch };
     defer coordinator.deinit();
     try std.testing.expectEqual(
-        Outcome.saved,
-        try coordinator.approveConnection(1, canonical_server_id),
-    );
-    try std.testing.expectEqual(
         workbench.McpManagementOutcome.saved,
-        try workbench_owner.createMcpOauthHttpServer(2, .{
+        try workbench_owner.createMcpOauthHttpServer(1, .{
             .display_name = "Remote to cancel",
             .url = "https://mcp.example.test/mcp",
             .client = .dynamic_registration,
@@ -1447,14 +1631,14 @@ test "MCP Application coordinator completes dynamic registration and OAuth loopb
     const cancelled_server_id = "mcp-7d7d7d7d7d7d7d7d7d7d";
     try std.testing.expectEqual(
         workbench.McpManagementOutcome.saved,
-        try workbench_owner.createMcpOauthHttpServer(3, .{
+        try workbench_owner.createMcpOauthHttpServer(2, .{
             .display_name = "Remote with uncertain cancel",
             .url = "https://mcp.example.test/mcp",
             .client = .dynamic_registration,
         }),
     );
     const uncertain_server_id = "mcp-7e7e7e7e7e7e7e7e7e7e";
-    const started = try coordinator.authorizeOauth(4, canonical_server_id);
+    const started = try coordinator.authorizeOauth(3, canonical_server_id);
     try std.testing.expect(started == .started);
     waitForCoordinatorJob(&coordinator);
     try std.testing.expect(coordinator.drain());
@@ -1489,14 +1673,10 @@ test "MCP Application coordinator completes dynamic registration and OAuth loopb
     try std.testing.expect(coordinator.flow == null);
     try std.testing.expectEqual(@as(usize, 5), fake_http.calls.load(.acquire));
     try std.testing.expect(workbench_owner.mcpAuthorizationOperation() == null);
-    try std.testing.expectEqual(@as(usize, 2), host_context.confirmations.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), host_context.confirmations.load(.acquire));
 
-    try std.testing.expectEqual(
-        Outcome.saved,
-        try coordinator.approveConnection(6, cancelled_server_id),
-    );
     fake_http.registration_failure.store(1, .release);
-    const cancelled_start = try coordinator.authorizeOauth(7, cancelled_server_id);
+    const cancelled_start = try coordinator.authorizeOauth(5, cancelled_server_id);
     try std.testing.expect(cancelled_start == .started);
     waitForCoordinatorJob(&coordinator);
     try std.testing.expect(coordinator.drain());
@@ -1508,14 +1688,10 @@ test "MCP Application coordinator completes dynamic registration and OAuth loopb
     );
     try std.testing.expect(coordinator.flow == null);
     try std.testing.expect(workbench_owner.mcpAuthorizationOperation() == null);
-    try std.testing.expectEqual(@as(usize, 4), host_context.confirmations.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 2), host_context.confirmations.load(.acquire));
 
-    try std.testing.expectEqual(
-        Outcome.saved,
-        try coordinator.approveConnection(7, uncertain_server_id),
-    );
     fake_http.registration_failure.store(2, .release);
-    const uncertain_start = try coordinator.authorizeOauth(8, uncertain_server_id);
+    const uncertain_start = try coordinator.authorizeOauth(5, uncertain_server_id);
     try std.testing.expect(uncertain_start == .started);
     waitForCoordinatorJob(&coordinator);
     try std.testing.expect(coordinator.drain());
@@ -1526,10 +1702,10 @@ test "MCP Application coordinator completes dynamic registration and OAuth loopb
     );
     try std.testing.expect(coordinator.flow == null);
     try std.testing.expect(workbench_owner.mcpAuthorizationOperation() == null);
-    try std.testing.expectEqual(@as(usize, 6), host_context.confirmations.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 3), host_context.confirmations.load(.acquire));
 
     fake_http.registration_failure.store(1, .release);
-    const retry_start = try coordinator.authorizeOauth(9, uncertain_server_id);
+    const retry_start = try coordinator.authorizeOauth(6, uncertain_server_id);
     try std.testing.expect(retry_start == .started);
     waitForCoordinatorJob(&coordinator);
     try std.testing.expect(coordinator.drain());
@@ -1540,9 +1716,9 @@ test "MCP Application coordinator completes dynamic registration and OAuth loopb
         Outcome.cancelled,
         coordinator.cancelAuthorization(retry_start.started),
     );
-    try std.testing.expectEqual(@as(usize, 7), host_context.confirmations.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 4), host_context.confirmations.load(.acquire));
 
-    const shutdown_start = try coordinator.authorizeOauth(9, uncertain_server_id);
+    const shutdown_start = try coordinator.authorizeOauth(6, uncertain_server_id);
     try std.testing.expect(shutdown_start == .started);
     waitForCoordinatorJob(&coordinator);
     try std.testing.expect(coordinator.drain());
@@ -1550,7 +1726,7 @@ test "MCP Application coordinator completes dynamic registration and OAuth loopb
     coordinator.shutdown();
     try std.testing.expect(coordinator.flow == null);
     try std.testing.expect(workbench_owner.mcpAuthorizationOperation() == null);
-    try std.testing.expectEqual(@as(usize, 8), host_context.confirmations.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 5), host_context.confirmations.load(.acquire));
 }
 
 fn waitForCoordinatorJob(coordinator: *Coordinator) void {

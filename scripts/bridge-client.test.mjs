@@ -157,6 +157,8 @@ test("MCP management uses only typed revision 1 commands", async () => {
       calls.push({ command, payload });
       if (command === "metawork.mcp.refreshCatalog")
         return { outcome: "started" };
+      if (command === "metawork.mcp.testConnection")
+        return { outcome: "started" };
       if (command === "metawork.mcp.authorizeOAuth")
         return { outcome: "started", operationId: "oauth-op" };
       if (command === "metawork.mcp.cancelAuthorization")
@@ -195,6 +197,7 @@ test("MCP management uses only typed revision 1 commands", async () => {
   await client.setMcpServerEnabled("7", "server-1", true);
   await client.setMcpAllowedTools("7", "server-1", ["search", "fetch"]);
   await client.removeMcpServer("7", "server-1");
+  await client.testMcpConnection("7", "server-1");
   await client.refreshMcpCatalog();
 
   assert.deepEqual(calls, [
@@ -272,6 +275,10 @@ test("MCP management uses only typed revision 1 commands", async () => {
     },
     {
       command: "metawork.mcp.removeServer",
+      payload: { expectedDesiredGeneration: "7", serverId: "server-1" },
+    },
+    {
+      command: "metawork.mcp.testConnection",
       payload: { expectedDesiredGeneration: "7", serverId: "server-1" },
     },
     { command: "metawork.mcp.refreshCatalog", payload: {} },

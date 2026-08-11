@@ -47,6 +47,7 @@ import {
   decodeSkillDetailResult,
   decodeMcpMutationResult,
   decodeMcpRefreshResult,
+  decodeMcpConnectionTestResult,
   decodeMcpAuthorizationResult,
   decodeMcpAuthorizationCancelResult,
 } from "./decode-contracts.ts";
@@ -413,6 +414,15 @@ export class BridgeClient {
   async refreshMcpCatalog() {
     return decodeMcpRefreshResult(
       await this.invoke(commands.mcpRefreshCatalog, {}),
+    );
+  }
+
+  async testMcpConnection(expectedDesiredGeneration: string, serverId: string) {
+    return decodeMcpConnectionTestResult(
+      await this.invoke(commands.mcpTestConnection, {
+        expectedDesiredGeneration,
+        serverId,
+      }),
     );
   }
 

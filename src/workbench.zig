@@ -108,6 +108,7 @@ pub const McpOauthCodeExchangeBinding = projection_impl.McpOauthCodeExchangeBind
 pub const McpOauthOperationBeginOutcome = projection_impl.McpOauthOperationBeginOutcome;
 pub const McpOauthCodeExchangeBeginOutcome = projection_impl.McpOauthCodeExchangeBeginOutcome;
 pub const McpAuthorizationPhase = projection_impl.McpAuthorizationPhase;
+pub const McpConnectionTestOutcome = projection_impl.McpConnectionTestOutcome;
 pub const McpAuthorizationOperationView = projection_impl.McpAuthorizationOperationView;
 pub const McpAuthorizationStart = projection_impl.McpAuthorizationStart;
 pub const McpSecretCaptureTarget = projection_impl.McpSecretCaptureTarget;

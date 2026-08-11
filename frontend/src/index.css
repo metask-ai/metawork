@@ -3229,7 +3229,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .mcp-drawer {
   display: flex;
-  width: min(540px, calc(100% - 28px));
+  width: min(620px, calc(100% - 28px));
   min-width: 0;
   flex-direction: column;
   border-left: 1px solid var(--color-rule);
@@ -3429,6 +3429,14 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   font-size: 12px;
 }
 
+.mcp-add-form select {
+  padding-right: 34px;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 14 14'%3E%3Cpath d='m4 5.5 3 3 3-3' fill='none' stroke='%23625b69' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.4'/%3E%3C/svg%3E");
+  background-position: right 10px center;
+  background-repeat: no-repeat;
+}
+
 .mcp-add-form input:focus,
 .mcp-add-form select:focus,
 .mcp-rename-form input:focus {
@@ -3567,6 +3575,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .mcp-add-form {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   min-height: 0;
   padding: 20px;
   overflow: hidden auto;
@@ -3597,11 +3606,13 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .mcp-transport-choice > legend,
 .mcp-auth-choice > legend,
-.mcp-text-rows > legend {
+.mcp-field-label {
+  display: block;
   margin-bottom: 7px;
   color: #625b69;
   font-size: 11px;
   font-weight: 680;
+  white-space: nowrap;
 }
 
 .mcp-transport-choice {
@@ -3679,6 +3690,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .mcp-text-rows {
   display: grid;
+  width: 100%;
   gap: 7px;
 }
 
@@ -3737,6 +3749,28 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   overflow-wrap: anywhere;
   color: #4d4654;
   font-size: 11px;
+}
+
+.mcp-connection-summary code {
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  white-space: pre-wrap;
+}
+
+.mcp-config-values {
+  display: grid;
+  padding: 0;
+  margin: 0;
+  gap: 4px;
+  list-style: none;
+}
+
+.mcp-config-values li {
+  min-width: 0;
+}
+
+.mcp-configuration-unavailable {
+  grid-column: 1 / -1;
 }
 
 .mcp-attention-action {

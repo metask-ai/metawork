@@ -270,12 +270,12 @@ test("MCP management is capability-gated and identity checked", () => {
         authMode: "oauth",
         negotiation: "automatic",
         timeoutMs: 30_000,
-        safeConnectionSummary: {
+        connection: {
           kind: "streamable_http",
-          endpointOrigin: "https://github.example",
+          endpoint: "https://github.example/mcp",
           headers: [],
           registrationKind: "automatic",
-          clientIdPresent: true,
+          clientId: null,
           tokenEndpointAuthMethod: null,
           clientSecretStatus: "not_required",
         },
@@ -285,6 +285,7 @@ test("MCP management is capability-gated and identity checked", () => {
         runtimeStatus: "ready",
         newTaskAccess: "available",
         safeDiagnostic: "",
+        connectionTest: { status: "untested", toolCount: 0, issueCount: 0 },
         tools: [
           {
             name: "search_repositories",
@@ -302,12 +303,12 @@ test("MCP management is capability-gated and identity checked", () => {
         authMode: "oauth",
         negotiation: "automatic",
         timeoutMs: 30_000,
-        safeConnectionSummary: {
+        connection: {
           kind: "streamable_http",
-          endpointOrigin: "https://notion.example",
+          endpoint: "https://notion.example/mcp",
           headers: [],
           registrationKind: "automatic",
-          clientIdPresent: true,
+          clientId: null,
           tokenEndpointAuthMethod: null,
           clientSecretStatus: "not_required",
         },
@@ -317,6 +318,7 @@ test("MCP management is capability-gated and identity checked", () => {
         runtimeStatus: "needs_authentication",
         newTaskAccess: "unavailable",
         safeDiagnostic: "Sign in again.",
+        connectionTest: { status: "untested", toolCount: 0, issueCount: 0 },
         tools: [],
       },
     ],

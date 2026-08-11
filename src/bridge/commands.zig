@@ -35,6 +35,7 @@ pub const mcp_cancel_authorization = "metawork.mcp.cancelAuthorization";
 pub const mcp_set_server_enabled = "metawork.mcp.setServerEnabled";
 pub const mcp_set_allowed_tools = "metawork.mcp.setAllowedTools";
 pub const mcp_remove_server = "metawork.mcp.removeServer";
+pub const mcp_test_connection = "metawork.mcp.testConnection";
 pub const mcp_refresh_catalog = "metawork.mcp.refreshCatalog";
 pub const snapshot = "metawork.workbench.snapshot";
 pub const snapshot_chunk = "metawork.workbench.snapshot.chunk";
@@ -96,6 +97,7 @@ pub const product = [_][]const u8{
     mcp_set_server_enabled,
     mcp_set_allowed_tools,
     mcp_remove_server,
+    mcp_test_connection,
     mcp_refresh_catalog,
     snapshot,
     snapshot_chunk,

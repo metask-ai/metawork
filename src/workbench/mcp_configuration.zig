@@ -972,7 +972,7 @@ pub const ManagementPort = struct {
             }
             return .rejected;
         };
-        const server: ServerWire = .{
+        var server: ServerWire = .{
             .id = generated.identity,
             .namespace = generated.namespace,
             .display_name = display_name,
@@ -984,6 +984,10 @@ pub const ManagementPort = struct {
             .connection_approval = null,
             .tools = &.{},
         };
+        if (serverProblem(server, self.limits) != null) return .rejected;
+        const fingerprint = connectionFingerprint(server);
+        server.connection_approval = .{ .fingerprint = &fingerprint };
+        server.enabled = true;
         if (serverProblem(server, self.limits) != null) return .rejected;
         const servers = try self.allocator.alloc(ServerWire, base_servers.len + 1);
         defer self.allocator.free(servers);
@@ -1127,7 +1131,7 @@ pub const ManagementPort = struct {
         const existing_connection = connectionFingerprint(base.servers[index]);
         const replacement_connection = connectionFingerprint(replacement);
         if (!std.mem.eql(u8, &existing_connection, &replacement_connection))
-            replacement.connection_approval = null;
+            replacement.connection_approval = .{ .fingerprint = &replacement_connection };
         if (serverWireEqual(base.servers[index], replacement)) return .unchanged;
         if (serverProblem(replacement, self.limits) != null) return .rejected;
         const servers = try self.allocator.dupe(ServerWire, base.servers);
@@ -5576,7 +5580,7 @@ test "management port owns fresh locators and keeps restart pending" {
     );
 }
 
-test "typed management creates default-disabled HTTP server and commits one target" {
+test "typed management creates approved enabled servers with an empty allowlist" {
     const Fake = struct {
         registry_commits: usize = 0,
 
@@ -5655,8 +5659,8 @@ test "typed management creates default-disabled HTTP server and commits one targ
             try std.testing.expectEqualStrings("LOCAL_TOKEN", server.transport.environment[0].name);
             try std.testing.expect(server.transport.environment[0].credential_ref == null);
             try std.testing.expectEqualStrings("static", server.auth.kind);
-            try std.testing.expect(server.connection_approval == null);
-            try std.testing.expect(!server.enabled);
+            try std.testing.expect(server.connection_approval != null);
+            try std.testing.expect(server.enabled);
         },
         .unchanged, .rejected => return error.TestUnexpectedResult,
     }
@@ -5678,10 +5682,10 @@ test "typed management creates default-disabled HTTP server and commits one targ
                 "mcp_abababababababababab",
                 target.servers[0].namespace,
             );
-            try std.testing.expect(!target.servers[0].enabled);
+            try std.testing.expect(target.servers[0].enabled);
             try std.testing.expectEqualStrings("streamable_http", target.servers[0].transport.kind);
             try std.testing.expectEqualStrings("none", target.servers[0].auth.kind);
-            try std.testing.expect(target.servers[0].connection_approval == null);
+            try std.testing.expect(target.servers[0].connection_approval != null);
             try std.testing.expectEqual(@as(usize, 0), target.servers[0].tools.len);
             try std.testing.expectEqual(
                 ManagementOutcome.saved,
@@ -6007,7 +6011,14 @@ test "typed management validates field transitions before persistence" {
         else => return error.TestUnexpectedResult,
     };
     defer endpoint_update.deinit();
-    try std.testing.expect(endpoint_update.target().servers[0].connection_approval == null);
+    try std.testing.expect(
+        endpoint_update.target().servers[0].connection_approval != null,
+    );
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        approved_fingerprint,
+        endpoint_update.target().servers[0].connection_approval.?.fingerprint,
+    ));
 }
 
 test "connection replacement retains static credentials only for the same destination" {
@@ -6550,20 +6561,8 @@ test "saved desired registry becomes effective only through cold-start preparati
         management.inspect().runtime_alignment,
     );
     const server_id = management.desired.?.value.servers[0].id;
-    var approval = switch (try management.prepareApproveConnection(
-        1,
-        .{ .server_id = server_id },
-    )) {
-        .prepared => |prepared| prepared,
-        else => return error.TestUnexpectedResult,
-    };
-    defer approval.deinit();
-    try std.testing.expectEqual(
-        ManagementOutcome.saved,
-        try management.commitPreparedMutation(&approval),
-    );
     var secret = [_]u8{ 'c', 'o', 'l', 'd', '-', 's', 't', 'a', 'r', 't' };
-    var capture = switch (try management.prepareCaptureStaticSecret(2, .{
+    var capture = switch (try management.prepareCaptureStaticSecret(1, .{
         .server_id = server_id,
         .slot_name = "Authorization",
         .secret = &secret,
@@ -6576,19 +6575,6 @@ test "saved desired registry becomes effective only through cold-start preparati
         ManagementOutcome.saved,
         try management.commitPreparedMutation(&capture),
     );
-    var enabling = switch (try management.prepareSetServerEnabled(3, .{
-        .server_id = server_id,
-        .enabled = true,
-    })) {
-        .prepared => |prepared| prepared,
-        else => return error.TestUnexpectedResult,
-    };
-    defer enabling.deinit();
-    try std.testing.expectEqual(
-        ManagementOutcome.saved,
-        try management.commitPreparedMutation(&enabling),
-    );
-
     const restored = (try store.loadAlloc(std.testing.allocator)).?;
     defer std.testing.allocator.free(restored);
     var restarted = try prepare(
@@ -6604,7 +6590,7 @@ test "saved desired registry becomes effective only through cold-start preparati
         test_limits,
     );
     defer restarted.deinit();
-    try std.testing.expectEqual(@as(?u64, 4), restarted.generation());
+    try std.testing.expectEqual(@as(?u64, 2), restarted.generation());
     try std.testing.expectEqual(PreparationState.available, restarted.state);
     try std.testing.expectEqual(
         ServerPreparationState.eligible,

@@ -469,6 +469,31 @@ pub const McpAuthorizationPhase = enum {
     cancelling,
 };
 
+pub const McpConnectionTestOutcome = enum {
+    connected,
+    failed,
+};
+
+const McpConnectionTest = struct {
+    server_id_storage: [64]u8 = undefined,
+    server_id_len: usize = 0,
+    state: enum { testing, connected, failed },
+    tool_count: u32 = 0,
+    issue_count: u32 = 0,
+
+    fn init(server_id: []const u8) ?McpConnectionTest {
+        if (server_id.len == 0 or server_id.len > 64) return null;
+        var result: McpConnectionTest = .{ .state = .testing };
+        @memcpy(result.server_id_storage[0..server_id.len], server_id);
+        result.server_id_len = server_id.len;
+        return result;
+    }
+
+    fn serverId(self: *const McpConnectionTest) []const u8 {
+        return self.server_id_storage[0..self.server_id_len];
+    }
+};
+
 pub const McpAuthorizationOperationView = struct {
     phase: McpAuthorizationPhase,
     server_id: []const u8,
@@ -598,6 +623,7 @@ const McpProductState = struct {
     admission: McpAdmissionAuthority,
     refresh_request_generation: u64 = 0,
     refresh_job: ?*McpRefreshJob = null,
+    connection_test: ?McpConnectionTest = null,
     authorization_operation: ?McpAuthorizationOperation = null,
     pending_reauthorizations: std.ArrayList(McpPendingReauthorization) = .empty,
     runtime_auth_failure_blocked: bool = false,
@@ -711,6 +737,9 @@ fn validMcpAuthorizationTransition(
 }
 
 fn mcpServerMutationBusy(mcp: *const McpProductState, server_id: []const u8) bool {
+    if (mcp.connection_test) |test_state|
+        if (test_state.state == .testing and
+            std.mem.eql(u8, test_state.serverId(), server_id)) return true;
     const operation = mcp.authorization_operation orelse return false;
     return std.mem.eql(u8, operation.server_id, server_id);
 }
@@ -5465,6 +5494,66 @@ pub const Workbench = struct {
         return management.inspect();
     }
 
+    /// Host-only copy used to construct an isolated connection-test Runtime.
+    /// The bytes never cross Bridge and contain no resolved credential values.
+    pub fn writeMcpDesiredConfiguration(
+        self: *const Workbench,
+        expected_generation: u64,
+        output: []u8,
+    ) Error![]const u8 {
+        const mcp = if (self.mcp) |*value| value else return error.McpManagementUnavailable;
+        const management = if (mcp.management) |*value| value else return error.McpManagementUnavailable;
+        const inspection = management.inspect();
+        if (inspection.health != .ready or
+            inspection.desired_generation != expected_generation)
+            return error.McpManagementUnavailable;
+        const registry = management.desiredRegistry() orelse
+            return error.McpManagementUnavailable;
+        return mcp_configuration.encode(
+            output,
+            registry,
+            management.limits,
+        ) catch return error.McpManagementUnavailable;
+    }
+
+    pub fn beginMcpConnectionTest(
+        self: *Workbench,
+        server_id: []const u8,
+    ) Error!void {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        const mcp = if (self.mcp) |*value| value else return error.McpManagementUnavailable;
+        if (mcp.connection_test) |test_state|
+            if (test_state.state == .testing) return error.CatalogLoading;
+        const management = if (mcp.management) |*value| value else return error.McpManagementUnavailable;
+        const registry = management.desiredRegistry() orelse
+            return error.McpManagementUnavailable;
+        if (findMcpServer(registry.servers, server_id) == null)
+            return error.McpManagementUnavailable;
+        mcp.connection_test = McpConnectionTest.init(server_id) orelse
+            return error.McpManagementUnavailable;
+        self.bumpRevision();
+    }
+
+    pub fn completeMcpConnectionTest(
+        self: *Workbench,
+        server_id: []const u8,
+        outcome: McpConnectionTestOutcome,
+        tool_count: u32,
+        issue_count: u32,
+    ) void {
+        const mcp = if (self.mcp) |*value| value else return;
+        const test_state = if (mcp.connection_test) |*value| value else return;
+        if (test_state.state != .testing or
+            !std.mem.eql(u8, test_state.serverId(), server_id)) return;
+        test_state.state = switch (outcome) {
+            .connected => .connected,
+            .failed => .failed,
+        };
+        test_state.tool_count = tool_count;
+        test_state.issue_count = issue_count;
+        self.bumpRevision();
+    }
+
     pub fn mcpAuthorizationOperation(
         self: *const Workbench,
     ) ?McpAuthorizationOperationView {
@@ -6525,10 +6614,12 @@ pub const Workbench = struct {
                 switch (reported_outcome) {
                     .saved, .saved_recovery_required => {
                         self.installMcpCommittedDesiredState(mcp, management, candidate);
+                        mcp.connection_test = null;
                         candidate_owned = false;
                         changed = true;
                     },
                     .indeterminate => {
+                        mcp.connection_test = null;
                         self.blockMcpAdmission(mcp, .persistence_outcome_unknown);
                         changed = true;
                     },
@@ -6770,6 +6861,29 @@ pub const Workbench = struct {
         return null;
     }
 
+    fn mcpConnectionContainsKnownCredential(
+        self: *const Workbench,
+        server: mcp_configuration.ServerWire,
+    ) bool {
+        if (server.transport.command) |command|
+            if (self.containsKnownCredential(command)) return true;
+        for (server.transport.arguments) |argument|
+            if (argument.literal) |literal|
+                if (self.containsKnownCredential(literal)) return true;
+        if (server.transport.cwd) |cwd|
+            if (self.containsKnownCredential(cwd)) return true;
+        for (server.transport.environment) |slot|
+            if (self.containsKnownCredential(slot.name)) return true;
+        if (server.transport.url) |url|
+            if (self.containsKnownCredential(url)) return true;
+        for (server.transport.headers) |slot|
+            if (self.containsKnownCredential(slot.name)) return true;
+        if (server.auth.oauth) |oauth|
+            if (oauth.registration.client_id) |client_id|
+                if (self.containsKnownCredential(client_id)) return true;
+        return false;
+    }
+
     fn mcpProjectionRedacted(
         self: *const Workbench,
         mcp: *const McpProductState,
@@ -6781,6 +6895,7 @@ pub const Workbench = struct {
                 self.containsKnownCredential(server.id) or
                 self.containsKnownCredential(server.namespace) or
                 self.containsKnownCredential(server.display_name)) return true;
+            if (self.mcpConnectionContainsKnownCredential(server)) return true;
             for (server.tools) |tool|
                 if (!mcp_configuration.publishableProductText(tool) or
                     self.containsKnownCredential(tool)) return true;
@@ -6866,14 +6981,6 @@ pub const Workbench = struct {
         return "consent_required";
     }
 
-    fn mcpEndpointOrigin(endpoint: []const u8) []const u8 {
-        const scheme_end = std.mem.indexOf(u8, endpoint, "://") orelse return endpoint;
-        const authority_start = scheme_end + 3;
-        const path_start = std.mem.indexOfScalarPos(u8, endpoint, authority_start, '/') orelse
-            endpoint.len;
-        return endpoint[0..path_start];
-    }
-
     fn writeMcpSecretSlots(
         self: *Workbench,
         writer: *std.Io.Writer,
@@ -6892,7 +6999,7 @@ pub const Workbench = struct {
         writer.writeByte(']') catch return error.SnapshotTooLarge;
     }
 
-    fn writeMcpSafeConnectionSummary(
+    fn writeMcpConnection(
         self: *Workbench,
         writer: *std.Io.Writer,
         management: *const mcp_configuration.ManagementPort,
@@ -6900,56 +7007,68 @@ pub const Workbench = struct {
         connection_safe: bool,
         projected_auth_mode: []const u8,
     ) Error!void {
+        if (!connection_safe) {
+            writer.writeAll("null") catch return error.SnapshotTooLarge;
+            return;
+        }
         if (!std.mem.eql(u8, server.transport.kind, "streamable_http")) {
-            writer.writeAll("{\"kind\":\"stdio\",\"executableBasename\":") catch
+            writer.writeAll("{\"kind\":\"stdio\",\"command\":") catch
                 return error.SnapshotTooLarge;
             try self.projectedJsonValueWithKnownCredentials(
                 writer,
-                if (connection_safe)
-                    std.fs.path.basename(server.transport.command orelse "")
-                else
-                    "(invalid)",
+                server.transport.command orelse "",
             );
-            writer.print(",\"argumentCount\":{d},\"cwdPresent\":{},\"environment\":", .{
-                if (connection_safe) server.transport.arguments.len else 0,
-                connection_safe and server.transport.cwd != null,
-            }) catch return error.SnapshotTooLarge;
-            if (connection_safe)
-                try self.writeMcpSecretSlots(
+            writer.writeAll(",\"arguments\":[") catch return error.SnapshotTooLarge;
+            for (server.transport.arguments, 0..) |argument, index| {
+                if (index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+                try self.projectedJsonValueWithKnownCredentials(
                     writer,
-                    management,
-                    server.transport.environment,
-                )
+                    argument.literal orelse "",
+                );
+            }
+            writer.writeAll("],\"cwd\":") catch return error.SnapshotTooLarge;
+            if (server.transport.cwd) |cwd|
+                try self.projectedJsonValueWithKnownCredentials(writer, cwd)
             else
-                writer.writeAll("[]") catch return error.SnapshotTooLarge;
+                writer.writeAll("null") catch return error.SnapshotTooLarge;
+            writer.writeAll(",\"environment\":") catch return error.SnapshotTooLarge;
+            try self.writeMcpSecretSlots(
+                writer,
+                management,
+                server.transport.environment,
+            );
             writer.writeByte('}') catch return error.SnapshotTooLarge;
             return;
         }
-        writer.writeAll("{\"kind\":\"streamable_http\",\"endpointOrigin\":") catch
+        writer.writeAll("{\"kind\":\"streamable_http\",\"endpoint\":") catch
             return error.SnapshotTooLarge;
         try self.projectedJsonValueWithKnownCredentials(
             writer,
-            if (connection_safe)
-                mcpEndpointOrigin(server.transport.url orelse "")
-            else
-                "(invalid)",
+            server.transport.url orelse "",
         );
         writer.writeAll(",\"headers\":") catch return error.SnapshotTooLarge;
-        if (connection_safe)
-            try self.writeMcpSecretSlots(writer, management, server.transport.headers)
-        else
-            writer.writeAll("[]") catch return error.SnapshotTooLarge;
-        const oauth = if (connection_safe and std.mem.eql(u8, projected_auth_mode, "oauth"))
+        try self.writeMcpSecretSlots(writer, management, server.transport.headers);
+        const oauth = if (std.mem.eql(u8, projected_auth_mode, "oauth"))
             server.auth.oauth
         else
             null;
-        writer.print(",\"registrationKind\":\"{s}\",\"clientIdPresent\":{},\"tokenEndpointAuthMethod\":", .{
+        writer.print(",\"registrationKind\":\"{s}\",\"clientId\":", .{
             if (oauth) |value| if (std.mem.eql(u8, value.registration.kind, "dynamic_registration"))
                 "automatic"
             else
                 "pre_registered" else "none",
-            if (oauth) |value| value.registration.client_id != null else false,
         }) catch return error.SnapshotTooLarge;
+        if (oauth) |value| {
+            if (std.mem.eql(u8, value.registration.kind, "pre_registered"))
+                try self.projectedJsonValueWithKnownCredentials(
+                    writer,
+                    value.registration.client_id orelse "",
+                )
+            else
+                writer.writeAll("null") catch return error.SnapshotTooLarge;
+        } else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeAll(",\"tokenEndpointAuthMethod\":") catch
+            return error.SnapshotTooLarge;
         if (oauth) |value| if (value.registration.token_endpoint_auth_method) |method|
             try self.projectedJsonValueWithKnownCredentials(writer, method)
         else
@@ -7057,7 +7176,7 @@ pub const Workbench = struct {
             if (index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
             const status = self.mcpDesiredServerRuntimeStatus(mcp, server.id);
             const problem = mcp_configuration.serverProblem(server, management.limits);
-            const connection_safe = !projection_redacted and
+            const connection_safe = !self.mcpConnectionContainsKnownCredential(server) and
                 (problem == null or problem.? == .invalid_connection_approval);
             const projected_auth_mode = if (connection_safe and
                 (std.mem.eql(u8, server.auth.kind, "none") or
@@ -7079,7 +7198,7 @@ pub const Workbench = struct {
             );
             writer.writeAll(",\"namespace\":") catch return error.SnapshotTooLarge;
             try self.projectedJsonValueWithKnownCredentials(writer, server.namespace);
-            writer.print(",\"transport\":\"{s}\",\"authMode\":\"{s}\",\"negotiation\":\"{s}\",\"timeoutMs\":{d},\"safeConnectionSummary\":", .{
+            writer.print(",\"transport\":\"{s}\",\"authMode\":\"{s}\",\"negotiation\":\"{s}\",\"timeoutMs\":{d},\"connection\":", .{
                 if (std.mem.eql(u8, server.transport.kind, "streamable_http"))
                     "streamable_http"
                 else
@@ -7088,7 +7207,7 @@ pub const Workbench = struct {
                 if (connection_safe) server.negotiation else "automatic",
                 if (connection_safe) server.timeout_ms else 1,
             }) catch return error.SnapshotTooLarge;
-            try self.writeMcpSafeConnectionSummary(
+            try self.writeMcpConnection(
                 writer,
                 management,
                 server,
@@ -7114,6 +7233,19 @@ pub const Workbench = struct {
                 .@"unreachable" => "Server is unavailable",
                 .invalid_catalog => "Configuration or catalog is invalid",
             });
+            const connection_test = if (mcp.connection_test) |test_state|
+                if (std.mem.eql(u8, test_state.serverId(), server.id)) test_state else null
+            else
+                null;
+            if (connection_test) |test_state|
+                writer.print(",\"connectionTest\":{{\"status\":\"{s}\",\"toolCount\":{d},\"issueCount\":{d}}}", .{
+                    @tagName(test_state.state),
+                    test_state.tool_count,
+                    test_state.issue_count,
+                }) catch return error.SnapshotTooLarge
+            else
+                writer.writeAll(",\"connectionTest\":{\"status\":\"untested\",\"toolCount\":0,\"issueCount\":0}") catch
+                    return error.SnapshotTooLarge;
             writer.writeAll(",\"tools\":[") catch return error.SnapshotTooLarge;
             var tool_count: usize = 0;
             const activation_server = if (mcp.activation) |activation|
@@ -16546,20 +16678,38 @@ test "empty MCP startup commits a proven manageable runtime" {
     const inspection = workbench.inspectMcpDesiredConfiguration().?;
     try std.testing.expectEqual(@as(?u64, 1), inspection.desired_generation);
     try std.testing.expectEqual(
-        mcp_configuration.RuntimeAlignment.current,
+        mcp_configuration.RuntimeAlignment.restart_required,
         inspection.runtime_alignment,
     );
-    try std.testing.expect(workbench.mcp.?.admission == .ready);
+    try std.testing.expectEqual(
+        McpAdmissionBlockReason.pending_restart,
+        workbench.mcp.?.admission.blocked,
+    );
     const created_snapshot = try workbench.writeSnapshot(&output);
     try std.testing.expect(std.mem.indexOf(
         u8,
         created_snapshot,
-        "\"desiredGeneration\":\"1\",\"runtimeAlignment\":\"current\"",
+        "\"desiredGeneration\":\"1\",\"runtimeAlignment\":\"restart_required\"",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
         created_snapshot,
-        "\"desiredEnabled\":false,\"runtimeStatus\":\"not_loaded\",\"newTaskAccess\":\"not_allowed\"",
+        "\"desiredEnabled\":true,\"runtimeStatus\":\"not_loaded\",\"newTaskAccess\":\"restart_required\"",
+    ) != null);
+    const server_id = workbench.mcp.?.management.?.desiredRegistry().?.servers[0].id;
+    try workbench.beginMcpConnectionTest(server_id);
+    const testing_snapshot = try workbench.writeSnapshot(&output);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        testing_snapshot,
+        "\"connectionTest\":{\"status\":\"testing\",\"toolCount\":0,\"issueCount\":0}",
+    ) != null);
+    workbench.completeMcpConnectionTest(server_id, .connected, 3, 1);
+    const connected_snapshot = try workbench.writeSnapshot(&output);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        connected_snapshot,
+        "\"connectionTest\":{\"status\":\"connected\",\"toolCount\":3,\"issueCount\":1}",
     ) != null);
 }
 
@@ -16650,11 +16800,7 @@ test "MCP authorization operation owns product phase and durable token boundary"
         }),
     );
     const server_id = workbench.mcp.?.management.?.desiredRegistry().?.servers[0].id;
-    try std.testing.expectEqual(
-        mcp_configuration.ManagementOutcome.saved,
-        try workbench.approveMcpConnection(1, .{ .server_id = server_id }),
-    );
-    var start = (try workbench.beginMcpAuthorization(2, server_id)).?;
+    var start = (try workbench.beginMcpAuthorization(1, server_id)).?;
     defer start.deinit();
     try std.testing.expectEqual(
         McpAuthorizationPhase.discovering,
@@ -16666,7 +16812,7 @@ test "MCP authorization operation owns product phase and durable token boundary"
     );
     try std.testing.expectEqual(
         mcp_configuration.ManagementOutcome.rejected,
-        try workbench.renameMcpServer(2, .{
+        try workbench.renameMcpServer(1, .{
             .server_id = server_id,
             .display_name = "Blocked while authorizing",
         }),
@@ -16828,12 +16974,20 @@ test "MCP startup health commits a safe degraded Workbench projection" {
         snapshot,
         "\"displayName\":\"broken\"",
     ) != null);
-    try std.testing.expect(std.mem.indexOf(u8, snapshot, "/private/hidden") == null);
-    try std.testing.expect(std.mem.indexOf(u8, snapshot, "private.example.test") == null);
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
-        "\"endpointOrigin\":\"(invalid)\"",
+        "\"command\":\"/private/hidden/mcp-server\",\"arguments\":[\"--serve\"],\"cwd\":null",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"endpoint\":\"https://private.example.test/mcp\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"connection\":null",
     ) != null);
 
     const before = workbench.inspectMcpDesiredConfiguration().?;
