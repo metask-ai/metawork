@@ -4,6 +4,7 @@ const std = @import("std");
 const agent = @import("metawork_agent");
 const catalog_snapshot = @import("workbench_catalog_snapshot");
 const owned_execution = @import("workbench_owned_task_execution");
+const recovery_job = @import("workbench_task_recovery_job");
 
 pub const DetachmentCause = enum {
     cold_start,
@@ -63,6 +64,8 @@ pub const State = struct {
     pending_ui_order: u64 = 0,
     active_run_id: u64 = 0,
     active_operation: ActiveOperation = .none,
+    restore_job: ?*recovery_job.Job = null,
+    last_restore_failure: ?recovery_job.Failure = null,
     close_thread: ?std.Thread = null,
     close_completion: std.atomic.Value(CloseCompletion) = .init(.none),
     close_failed: bool = false,

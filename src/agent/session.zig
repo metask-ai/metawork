@@ -1390,6 +1390,21 @@ pub const Runtime = struct {
         return (try self.createSessionRoute(options)).session;
     }
 
+    /// Lightweight observation used only to project recovery eligibility.
+    /// restoreSessionRoute revalidates under the same mutex and remains the
+    /// admission linearization point.
+    pub fn restoreAdmissionAvailable(self: *Runtime) bool {
+        self.sessions_mutex.lockUncancelable(self.io);
+        defer self.sessions_mutex.unlock(self.io);
+        if (self.shutting_down.load(.acquire) or
+            self.runtime == null or
+            self.mcp_refresh_running)
+            return false;
+        for (self.sessions, self.session_reservations) |entry, reserved|
+            if (entry == null and !reserved) return true;
+        return false;
+    }
+
     /// Creates one Agent Session and returns its canonical routing identity in
     /// the same operation. Product owners must not reconstruct this identity
     /// from a live Session snapshot.

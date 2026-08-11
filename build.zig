@@ -86,6 +86,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-checkpoint-record", .root_module = test_modules.workbench_checkpoint_record },
         .{ .name = "metawork-task-runtime", .root_module = test_modules.workbench_task_runtime },
         .{ .name = "metawork-task-recovery", .root_module = test_modules.workbench_task_recovery },
+        .{ .name = "metawork-task-recovery-job", .root_module = test_modules.workbench_task_recovery_job },
     };
     for (module_tests) |spec| {
         spec.root_module.link_libc = bundle.link_libc;
@@ -183,6 +184,7 @@ const WiredModules = struct {
     workbench_owned_task_execution: *std.Build.Module,
     workbench_task_runtime: *std.Build.Module,
     workbench_task_recovery: *std.Build.Module,
+    workbench_task_recovery_job: *std.Build.Module,
 };
 
 fn createLifecycleFixture(
@@ -714,6 +716,17 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .target = target,
         .optimize = root_module.optimize,
     });
+    const task_recovery_job = b.createModule(.{
+        .root_source_file = b.path("src/workbench/task_recovery_job.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    task_recovery_job.addImport("metawork_agent", agent);
+    task_recovery_job.addImport("workbench_checkpoint_record", checkpoint_record);
+    task_recovery_job.addImport("workbench_checkpoint_store", checkpoint_store);
+    task_recovery_job.addImport("workbench_catalog_snapshot", catalog_snapshot);
+    task_recovery_job.addImport("workbench_owned_task_execution", owned_task_execution);
+    task_runtime.addImport("workbench_task_recovery_job", task_recovery_job);
     const mcp_configuration = b.createModule(.{
         .root_source_file = b.path("src/workbench/mcp_configuration.zig"),
         .target = target,
@@ -742,6 +755,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     projection.addImport("workbench_owned_task_execution", owned_task_execution);
     projection.addImport("workbench_task_runtime", task_runtime);
     projection.addImport("workbench_task_recovery", task_recovery);
+    projection.addImport("workbench_task_recovery_job", task_recovery_job);
     projection.addImport("workbench_mcp_configuration", mcp_configuration);
     projection.addImport(
         "build_options",
@@ -890,6 +904,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .workbench_owned_task_execution = owned_task_execution,
         .workbench_task_runtime = task_runtime,
         .workbench_task_recovery = task_recovery,
+        .workbench_task_recovery_job = task_recovery_job,
     };
 }
 
