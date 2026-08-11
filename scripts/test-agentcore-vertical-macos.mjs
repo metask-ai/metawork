@@ -562,6 +562,7 @@ try {
       `Edit did not update the workspace: ${JSON.stringify(edited)}`,
     );
 
+  const priorRunIds = new Set(task.runs.map((run) => run.id));
   const textRunResult = await invokeBridge("metawork.tasks.run", {
     taskId,
     expectedBindingEpoch,
@@ -571,14 +572,34 @@ try {
     },
   });
   if (
-    textRunResult?.accepted !== true ||
-    textRunResult.taskId !== taskId ||
-    !isWireId(textRunResult.runId)
+    textRunResult !== null &&
+    (textRunResult.accepted !== true ||
+      textRunResult.taskId !== taskId ||
+      !isWireId(textRunResult.runId))
   )
     throw new Error(
       `Text checkpoint Run was not accepted: ${JSON.stringify(textRunResult)}`,
     );
-  const textRunId = textRunResult.runId;
+  const acceptedTextRunId = textRunResult?.runId ?? null;
+  const submittedTextRun = await poll(
+    async () => {
+      const current = await snapshot();
+      return (
+        current.tasks
+          .find((item) => item.id === taskId)
+          ?.runs.find((item) => !priorRunIds.has(item.id)) ?? null
+      );
+    },
+    commandTimeoutMs,
+    "Text checkpoint Run submission",
+  );
+  const textRunId = submittedTextRun.id;
+  if (!isWireId(textRunId))
+    throw new Error("Text checkpoint Run omitted its identity");
+  if (acceptedTextRunId !== null && textRunId !== acceptedTextRunId)
+    throw new Error(
+      "Text checkpoint Run snapshot disagrees with its accepted identity",
+    );
   const textTerminal = await poll(
     async () => {
       const current = await snapshot();
