@@ -2431,7 +2431,7 @@ pub const RuntimeManifest = struct {
             entries[index] = .{
                 .id = try allocator.dupe(u8, server.id),
                 .state = switch (state) {
-                    .eligible => .{ .loaded = descriptorFingerprint(server) },
+                    .eligible => .{ .loaded = runtimeDescriptorFingerprint(server) },
                     .disabled => .{ .absent = .disabled },
                     .unapproved => .{ .absent = .unapproved },
                     .needs_authentication => .{
@@ -2498,7 +2498,7 @@ fn entryCompatible(
         .loaded => |fingerprint| if (target) |server|
             server.enabled and
                 serverProblem(server, limits) == null and
-                std.mem.eql(u8, &fingerprint, &descriptorFingerprint(server)) and
+                std.mem.eql(u8, &fingerprint, &runtimeDescriptorFingerprint(server)) and
                 (serverRuntimeAuthorizationReady(server) or
                     if (server.auth.oauth) |oauth|
                         std.mem.eql(u8, oauth.status, "reauth_required")
@@ -2624,7 +2624,7 @@ pub fn oauthConsentDraftFingerprint(
     return std.fmt.bytesToHex(digest, .lower);
 }
 
-fn descriptorFingerprint(server: ServerWire) DescriptorFingerprint {
+pub fn runtimeDescriptorFingerprint(server: ServerWire) DescriptorFingerprint {
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
     hashField(&hash, "metawork.mcp.runtime-descriptor/v1");
     hashField(&hash, server.namespace);
@@ -7741,7 +7741,7 @@ test "runtime OAuth rejection retires the grant without invalidating its loaded 
     try std.testing.expectEqual(@as(usize, 2), preparation.prepared.plan.transaction.retired_locators.len);
     try std.testing.expect(entryCompatible(.{
         .id = "oauth",
-        .state = .{ .loaded = descriptorFingerprint(server) },
+        .state = .{ .loaded = runtimeDescriptorFingerprint(server) },
     }, target.servers[0], test_limits));
 }
 

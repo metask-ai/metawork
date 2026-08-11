@@ -47,7 +47,7 @@ MetaWork 的视觉记忆点不是装饰性的暖色、通用衬线大标题、�
 
 ### 2.1 当前 ABI v1 capability profile
 
-当前锁定的 development ABI v1 revision 6 已为以下既有界面提供可验证数据；Skill catalog、typed Skill Run 与 Composer Slash 使用同一 Workspace/Task snapshot 和 Run product path：
+当前锁定的 development ABI v1 revision 7 已为以下既有界面提供可验证数据；Skill catalog、typed Skill Run 与 Composer Slash 使用同一 Workspace/Task snapshot 和 Run product path：
 
 - 文本流、工具开始/进度/结果、Run progress、usage、context warning、auto compact、retry 和 stream done；
 - Ask question 与 permission 两类同步用户请求；
@@ -190,7 +190,7 @@ Workspace
 
 ## 5. 左栏：能力与 Task
 
-> Capability：**部分当前、部分目标**。Renderer 合同已提供 MetaWork 顶层与 Workspace/Task 分离的 revision 6 Skill catalog projection；本地 package/inventory、详情与管理 mutation 是本次目标合同。shell 已提供稳定 New task、全局 Task 导航、行动优先分组和左下角账号入口；Skill 中心、消费 Host-owned management/Runtime/admission 事实的 MCP 页面与持久定时任务都作为同级全局能力进入该 shell。
+> Capability：**部分当前、部分目标**。Renderer 合同已提供 MetaWork 顶层与 Workspace/Task 分离的 revision 7 Skill catalog projection；本地 package/inventory、详情与管理 mutation 是本次目标合同。shell 已提供稳定 New task、全局 Task 导航、行动优先分组和左下角账号入口；Skill 中心、消费 Host-owned management/Runtime/admission 事实的 MCP 页面与持久定时任务都作为同级全局能力进入该 shell。
 
 ### 5.1 Task 列表与路径上下文
 
@@ -208,7 +208,7 @@ Workspace
 
 ### 5.2 全局能力入口
 
-> Capability：**当前与受 gate 目标**。Skill 入口只依赖现有 AgentCore revision 6 discovery/catalog；定时任务入口依赖 Workbench-owned 持久 schedule projection、后台 Host timer/notification 与真实 Task admission。MCP 入口与 route 已进入稳定 shell；当前合同由 Workbench typed 管理能力、Runtime/catalog availability 与新 Task authority 三类事实共同驱动，页面不得把其中任何一个状态冒充另一个。
+> Capability：**当前与受 gate 目标**。Skill 入口只依赖现有 AgentCore revision 7 discovery/catalog；定时任务入口依赖 Workbench-owned 持久 schedule projection、后台 Host timer/notification 与真实 Task admission。MCP 入口与 route 已进入稳定 shell；当前合同由 Workbench typed 管理能力、Runtime/catalog availability 与新 Task authority 三类事实共同驱动，页面不得把其中任何一个状态冒充另一个。
 
 `新建任务`、`技能`、`MCP` 与 `定时任务` 位于 Task 列表上方的同一个纵向紧凑菜单，不使用窄侧栏中的卡片宫格，也不通过额外分组间距制造父子关系：
 
@@ -231,7 +231,7 @@ Tasks
 
 ### 5.3 Skill 中心
 
-> Capability：**目标合同**。页面在现有 revision 6 catalog/health projection 之上增加 Workbench-owned 本地 package、inventory 与管理 mutation；不要求 AgentCore 增加安装 API，也不把管理 projection 当作 Session execution binding。
+> Capability：**目标合同**。页面在现有 revision 7 catalog/health projection 之上增加 Workbench-owned 本地 package、inventory 与管理 mutation；不要求 AgentCore 增加安装 API，也不把管理 projection 当作 Session execution binding。
 
 Skill 中心只有一个工作：管理 MetaWork 已知的本地 Skill 资产。创建和修改仍属于普通 Task；在线市场、远程更新、启用开关、Preset、标签、排序、中央仓库和多 Agent 同步当前不存在，也不显示占位入口。
 
@@ -473,7 +473,7 @@ Execution binding availability 是下一次 admission 的独立前置事实，�
 
 ### 6.4 跨重启历史与 execution rebind
 
-> Capability：**混合**。Workbench 只读 Task history persistence 已接通；AgentCore revision 6 已提供 checkpoint 原语，但 MetaWork 尚未接通并验收跨进程 Session/Conversation 恢复，显式 rebind 与 continuation 仍是目标能力。
+> Capability：**混合**。Workbench 只读 Task history persistence 已接通；AgentCore revision 7 已提供 checkpoint 原语，但 MetaWork 尚未接通并验收跨进程 Session/Conversation 恢复，显式 rebind 与 continuation 仍是目标能力。
 
 当前恢复规则：
 
@@ -1179,7 +1179,7 @@ Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成
 - 当前 API 模型列表、模型切换 pending/error、设置与 Composer 默认值一致；
 - 设置页切换默认 API 后加载对应模型，默认只影响新 Task admission，不自动改绑已有 Task；
 - 已有 Task 保留当前 execution binding epoch，默认变化不改写历史或 live Session；只有 §6.4 的显式 rebind 可以建立新 epoch；
-- Host 重启后历史 Task 只读恢复；点击左栏 Task 可浏览已保存时间线，未完成 operation 显示 `Interrupted`，Composer 以 `session_recovery_unsupported` 说明当前尚未完成 revision 6 checkpoint 产品接入。不得显示假的 resume/rebind，也不得因当前默认配置恰好匹配而开放发送；
+- Host 重启后历史 Task 只读恢复；点击左栏 Task 可浏览已保存时间线，未完成 operation 显示 `Interrupted`，Composer 以 `session_recovery_unsupported` 说明当前尚未完成 revision 7 checkpoint 产品接入。不得显示假的 resume/rebind，也不得因当前默认配置恰好匹配而开放发送；
 - API 只在设置中显示脱敏名称、Provider 和尾号；完整 secret 不进入 DOM、snapshot、日志或错误；
 - 左下账号入口在窄窗口、长姓名、重认证和 200% text 下仍可用。
 

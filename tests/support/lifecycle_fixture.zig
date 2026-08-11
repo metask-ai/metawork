@@ -950,6 +950,16 @@ pub fn runtimeDescribeMcp(
     return wire.STATUS_OK;
 }
 
+pub fn runtimeApplyMcpConfiguration(
+    _: ?*wire.RuntimeHandle,
+    _: ?*const wire.McpConfigurationV1,
+    _: ?*wire.McpApplyReportV1,
+    out_error: ?*wire.OwnedBytesV1,
+) callconv(.c) u32 {
+    diagnostic(out_error);
+    return wire.STATUS_INVALID_ARGUMENT;
+}
+
 pub fn sessionRestore(
     _: ?*wire.RuntimeHandle,
     _: ?*const wire.SessionRestoreConfigV1,
@@ -1663,6 +1673,7 @@ pub const fake_api = wire.ApiV1{
     .skill_catalog_release = skillCatalogRelease,
     .runtime_refresh_mcp = runtimeRefreshMcp,
     .runtime_describe_mcp = runtimeDescribeMcp,
+    .runtime_apply_mcp_configuration = runtimeApplyMcpConfiguration,
     .session_create = sessionCreate,
     .session_restore = sessionRestore,
     .session_destroy = sessionDestroy,
@@ -1677,7 +1688,7 @@ pub const fake_api = wire.ApiV1{
     .session_abort_compact = sessionAbortCompact,
     .session_export_checkpoint = sessionExportCheckpoint,
     .buffer_release = bufferRelease,
-    .reserved = [_]u64{0} ** 4,
+    .reserved = [_]u64{0} ** 3,
 };
 
 fn allSkillsEnabled(selection: *const wire.SkillSelectionV1) bool {

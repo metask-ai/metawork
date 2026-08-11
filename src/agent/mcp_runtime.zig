@@ -25,6 +25,9 @@ pub const ServerInput = struct {
     client_name: []const u8,
     client_version: []const u8,
     timeout_ms: u32,
+    /// Non-secret Workbench Runtime Manifest identity. It is scoped to the
+    /// current immutable Runtime; live configuration apply remains disabled.
+    configuration_fingerprint: [32]u8,
     allowed_tools: []const []const u8 = &.{},
 };
 
@@ -100,7 +103,7 @@ pub const Servers = struct {
                 .reserved1 = 0,
                 .connector = std.mem.zeroes(wire.McpConnectorV1),
                 .protocol_limits = null,
-                .reserved = [_]u64{0} ** 4,
+                .configuration_fingerprint = config.configuration_fingerprint,
             };
         }
         for (configs, 0..) |config, index| {
@@ -109,7 +112,7 @@ pub const Servers = struct {
                 .secrets = config.secrets,
             }) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                error.InvalidConfig, error.ConnectionsActive => return error.InvalidConfig,
+                error.InvalidConfig => return error.InvalidConfig,
             };
             self.initialized_adapters += 1;
             self.descriptors[index].connector = self.adapters[index].descriptor();
@@ -137,8 +140,10 @@ pub const Servers = struct {
         var index = self.initialized_adapters;
         while (index != 0) {
             index -= 1;
-            self.adapters[index].deinit() catch
-                @panic("MCP Runtime released an adapter with live connections");
+            self.adapters[index].deinit() catch |err| switch (err) {
+                error.ConnectionsActive => @panic("MCP Runtime released an adapter with live connections"),
+                error.ConnectorRetained => @panic("MCP Runtime released an adapter still retained by AgentCore"),
+            };
         }
         index = self.initialized_transport_owners;
         while (index != 0) {
@@ -202,6 +207,7 @@ fn validate(configs: []const ServerInput) Error!void {
         if (config.id.len == 0 or config.id.len > 128 or
             config.timeout_ms == 0 or !validNamespace(config.namespace) or
             config.client_name.len == 0 or config.client_version.len == 0 or
+            std.mem.allEqual(u8, &config.configuration_fingerprint, 0) or
             config.allowed_tools.len > wire.MAX_MCP_TOOLS_V1 or
             !std.unicode.utf8ValidateSlice(config.id) or
             !std.unicode.utf8ValidateSlice(config.client_name) or
@@ -266,6 +272,7 @@ test "Runtime input derives authority and consumes transport ownership linearly"
         .client_name = "MetaWork",
         .client_version = "1",
         .timeout_ms = 1000,
+        .configuration_fingerprint = [_]u8{1} ** 32,
         .allowed_tools = &.{"read_file"},
     }});
     defer input.deinit();
@@ -294,8 +301,8 @@ test "Runtime input rejects duplicate stable authority identities" {
     var second = connector.TransportOwner.init(second_transport.descriptor(), FakeTransport.deinit);
     defer second.deinit();
     try std.testing.expectError(error.InvalidConfig, Servers.init(std.testing.allocator, &.{
-        .{ .id = "same", .transport_owner = &first, .transport = .stdio, .namespace = "one", .client_name = "MetaWork", .client_version = "1", .timeout_ms = 1000 },
-        .{ .id = "same", .transport_owner = &second, .transport = .streamable_http, .namespace = "two", .client_name = "MetaWork", .client_version = "1", .timeout_ms = 1000 },
+        .{ .id = "same", .transport_owner = &first, .transport = .stdio, .namespace = "one", .client_name = "MetaWork", .client_version = "1", .timeout_ms = 1000, .configuration_fingerprint = [_]u8{1} ** 32 },
+        .{ .id = "same", .transport_owner = &second, .transport = .streamable_http, .namespace = "two", .client_name = "MetaWork", .client_version = "1", .timeout_ms = 1000, .configuration_fingerprint = [_]u8{2} ** 32 },
     }));
 }
 
@@ -304,8 +311,8 @@ test "Runtime input rejects moving one transport owner twice" {
     var owner = connector.TransportOwner.init(transport.descriptor(), FakeTransport.deinit);
     defer owner.deinit();
     try std.testing.expectError(error.InvalidConfig, Servers.init(std.testing.allocator, &.{
-        .{ .id = "one", .transport_owner = &owner, .transport = .stdio, .namespace = "one", .client_name = "MetaWork", .client_version = "1", .timeout_ms = 1000 },
-        .{ .id = "two", .transport_owner = &owner, .transport = .stdio, .namespace = "two", .client_name = "MetaWork", .client_version = "1", .timeout_ms = 1000 },
+        .{ .id = "one", .transport_owner = &owner, .transport = .stdio, .namespace = "one", .client_name = "MetaWork", .client_version = "1", .timeout_ms = 1000, .configuration_fingerprint = [_]u8{1} ** 32 },
+        .{ .id = "two", .transport_owner = &owner, .transport = .stdio, .namespace = "two", .client_name = "MetaWork", .client_version = "1", .timeout_ms = 1000, .configuration_fingerprint = [_]u8{2} ** 32 },
     }));
 }
 
@@ -326,6 +333,7 @@ test "Runtime input rejects namespaces outside the AgentCore identifier grammar"
                 .client_name = "MetaWork",
                 .client_version = "1",
                 .timeout_ms = 1000,
+                .configuration_fingerprint = [_]u8{1} ** 32,
             }}),
         );
         try std.testing.expect(!transport.deinitialized);
@@ -346,6 +354,25 @@ test "Runtime input failure consumes no transport ownership" {
         .client_name = "MetaWork",
         .client_version = "1",
         .timeout_ms = 1000,
+        .configuration_fingerprint = [_]u8{1} ** 32,
+    }}));
+    try std.testing.expect(!transport.deinitialized);
+    owner.deinit();
+    try std.testing.expect(transport.deinitialized);
+}
+
+test "Runtime input rejects an absent configuration fingerprint" {
+    var transport: FakeTransport = .{};
+    var owner = connector.TransportOwner.init(transport.descriptor(), FakeTransport.deinit);
+    try std.testing.expectError(error.InvalidConfig, Servers.init(std.testing.allocator, &.{.{
+        .id = "server-id",
+        .transport_owner = &owner,
+        .transport = .stdio,
+        .namespace = "server",
+        .client_name = "MetaWork",
+        .client_version = "1",
+        .timeout_ms = 1000,
+        .configuration_fingerprint = [_]u8{0} ** 32,
     }}));
     try std.testing.expect(!transport.deinitialized);
     owner.deinit();

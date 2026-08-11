@@ -126,6 +126,7 @@ pub const planMcpOauthOperationRecovery = mcp_configuration.planOauthOperationRe
 pub const classifyMcpServerConfiguration = mcp_configuration.serverProblem;
 pub const mcpConnectionFingerprint = mcp_configuration.connectionFingerprint;
 pub const prepareMcpConfiguration = mcp_configuration.prepare;
+pub const runtimeMcpDescriptorFingerprint = mcp_configuration.runtimeDescriptorFingerprint;
 pub const validMcpEnvironmentCredential = mcp_configuration.validEnvironmentCredential;
 pub const validMcpHttpHeaderCredential = mcp_configuration.validHttpHeaderCredential;
 pub const SkillImportPreview = skill_package.Preview;
