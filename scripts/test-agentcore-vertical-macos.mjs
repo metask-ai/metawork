@@ -65,7 +65,7 @@ const commandTimeoutMs = 20_000;
 const runTimeoutMs = 60_000;
 const workspace = await mkdtemp(join(tmpdir(), "metawork-agentcore-vertical-"));
 const canonicalWorkspace = await realpath(workspace);
-const platformHome = join(workspace, "platform-home");
+const platformHome = join(canonicalWorkspace, "platform-home");
 await mkdir(platformHome, { recursive: true });
 const automationDataDirectoryName = "MetaWork Automation";
 const dataRoot =
@@ -812,7 +812,7 @@ try {
   process.stdout.write(
     process.platform === "win32"
       ? "AgentCore Windows desktop vertical passed: real Skill/Text/compact checkpoints, hash/descriptor verification, missing-blob restart reconciliation, main-thread ProductDelivery, Runtime-owned tray routing, and clean shutdown; Windows Shell chrome/tray remain separate non-blocking gates.\n"
-      : "AgentCore desktop vertical passed: real Skill/Text/compact checkpoints, hash/descriptor verification, missing-blob restart reconciliation, materialized arguments without raw slash, main-thread ProductDelivery, Read/Bash/Edit, permission UI, duplicate UI-response rejection, reload-safe AskUserQuestion resume, Task metadata lifecycle, async close.\n",
+      : "AgentCore macOS desktop vertical passed: real Skill/Text/compact checkpoints, hash/descriptor verification, missing-blob restart reconciliation, materialized arguments without raw slash, main-thread ProductDelivery, Read/Bash/Edit, permission UI, duplicate UI-response rejection, reload-safe AskUserQuestion resume, Task metadata lifecycle, Runtime-owned tray routing, and clean shutdown.\n",
   );
 } catch (error) {
   process.stderr.write(`${output}\n`);
@@ -862,13 +862,10 @@ function startApplication() {
 async function stopApplication(label) {
   const stopEventsBefore = (output.match(/runtime\.event.*event="stop"/g) ?? [])
     .length;
-  if (process.platform === "win32") {
-    // This validates Native SDK Runtime state and MetaWork's real tray command
-    // routing. User-reachable Windows Shell chrome/tray remain separate gates.
-    await automate("tray-action", "2");
-  } else {
-    await invokeBridge("native-sdk.window.close", { label: "main" });
-  }
+  // Exercise the product's explicit Quit route on both platforms. The
+  // built-in window Bridge is intentionally disabled, and closing a main
+  // window whose policy is `hide` is not an application shutdown request.
+  await automate("tray-action", "2");
   const final = await withTimeout(exited, commandTimeoutMs, label);
   if (final.code !== 0 || final.signal !== null)
     throw new Error(`app exited abnormally: ${JSON.stringify(final)}`);

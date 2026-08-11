@@ -1120,10 +1120,16 @@ test("AgentCore vertical owns an isolated platform data root", () => {
   );
   assert.match(
     vertical,
+    /const platformHome = join\(canonicalWorkspace, "platform-home"\)/,
+  );
+  assert.match(
+    vertical,
     /\{ APPDATA: platformHome, LOCALAPPDATA: platformHome \}/,
   );
   assert.match(vertical, /path\.relative\(canonicalWorkspace, dataRoot\)/);
   assert.match(vertical, /vertical data root escaped its fixture/);
+  assert.match(vertical, /await automate\("tray-action", "2"\)/);
+  assert.doesNotMatch(vertical, /native-sdk\.window\.close/);
   assert.match(
     vertical,
     /const automationDataDirectoryName = "MetaWork Automation"/,
