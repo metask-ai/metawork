@@ -20,11 +20,8 @@ import {
 const requestA = { taskId: "3", runId: "7", requestId: "11" };
 const requestB = { taskId: "4", runId: "8", requestId: "12" };
 const account = {
-  sessionState: "signed_out",
-  executionState: "none",
-  operation: "none",
-  readiness: "sign_in_required",
-  primaryAction: "sign_in",
+  state: "signed_out",
+  catalogState: "unavailable",
   canCancel: false,
   accountId: "",
   displayName: "",
@@ -62,14 +59,8 @@ function task(identity, pendingUi = pending(identity)) {
     binding: {
       epoch: "1",
       availability: "available",
-      accountId: "account-1",
-      accountDisplayName: "Metask User",
-      apiKeySelectionId: "key-1",
-      apiKeyName: "Primary",
-      apiKeySuffix: "1234",
       provider: "anthropic",
-      modelSelectionId: "model-1",
-      modelDisplayName: "Model One",
+      model: "model-1",
       executionGeneration: "1",
       unavailableReason: null,
     },

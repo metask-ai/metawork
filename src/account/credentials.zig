@@ -8,7 +8,6 @@ const catalog = @import("account_catalog");
 /// it, but token bytes remain owned and interpreted by Account.
 pub const CredentialRotation = struct {
     tokens: oauth.TokenSet,
-    identity: ?state.AccountIdentity = null,
     owned: bool = true,
 
     pub fn deinit(self: *CredentialRotation) void {
@@ -22,6 +21,13 @@ pub const CredentialRotation = struct {
         return self.tokens.accountId();
     }
 
+    pub fn belongsToAccount(
+        self: *const CredentialRotation,
+        account_id: []const u8,
+    ) bool {
+        return std.mem.eql(u8, self.accountId(), account_id);
+    }
+
     pub fn persistenceInput(
         self: *const CredentialRotation,
     ) *const oauth.TokenSet {
@@ -33,7 +39,6 @@ pub const CredentialRotation = struct {
         std.debug.assert(self.owned);
         const result: CredentialRotation = .{
             .tokens = self.tokens.take(),
-            .identity = self.identity,
         };
         self.owned = false;
         return result;
@@ -45,13 +50,6 @@ pub const CredentialRotation = struct {
         self.owned = false;
         return result;
     }
-
-    pub fn refreshedIdentity(
-        self: *const CredentialRotation,
-    ) ?state.AccountIdentity {
-        std.debug.assert(self.owned);
-        return self.identity;
-    }
 };
 
 /// Concrete Account-owned secret lifetime. App may compose this owner and
@@ -60,7 +58,6 @@ pub const CredentialRotation = struct {
 pub const CredentialOwner = struct {
     tokens: ?oauth.TokenSet = null,
     stored_refresh_token: ?oauth.Secret = null,
-    cleanup_pending: bool = false,
 
     pub fn installRefreshToken(
         self: *CredentialOwner,
@@ -123,7 +120,6 @@ pub const CredentialOwner = struct {
         transport: metask.Transport,
         now_unix_seconds: i64,
         control: ?metask.RequestControl,
-        expected_identity: ?state.AccountIdentity,
     ) metask.ClientError!CredentialRotation {
         var refreshed = if (self.tokens) |*current| try metask.refresh(
             allocator,
@@ -144,26 +140,19 @@ pub const CredentialOwner = struct {
                 control,
             );
         };
-        errdefer refreshed.deinit();
-        const identity = if (expected_identity) |expected| identity: {
-            const remote = try metask.fetchIdentity(
-                transport,
-                &refreshed,
-                control,
-            );
-            break :identity state.AccountIdentity.init(
-                if (refreshed.accountId().len > 0)
-                    remote.accountId()
-                else
-                    expected.accountId(),
-                remote.profileId(),
-                remote.displayName(),
-            ) catch return error.ProtocolInvalid;
-        } else null;
-        return .{
-            .tokens = refreshed.take(),
-            .identity = identity,
-        };
+        return .{ .tokens = refreshed.take() };
+    }
+
+    pub fn fetchIdentity(
+        self: *const CredentialOwner,
+        transport: metask.Transport,
+        control: ?metask.RequestControl,
+    ) metask.ClientError!state.AccountIdentity {
+        const current = if (self.tokens) |*value|
+            value
+        else
+            return error.Unauthorized;
+        return metask.fetchIdentity(transport, current, control);
     }
 
     pub fn loadApiKeys(
@@ -181,7 +170,6 @@ pub const CredentialOwner = struct {
             transport,
             current.access_token.view(),
             identity.accountId(),
-            identity.profileId(),
             control,
         );
     }
@@ -193,20 +181,8 @@ pub const CredentialOwner = struct {
         self.stored_refresh_token = null;
     }
 
-    pub fn setCleanupPending(
-        self: *CredentialOwner,
-        pending: bool,
-    ) void {
-        self.cleanup_pending = pending;
-    }
-
-    pub fn cleanupPending(self: *const CredentialOwner) bool {
-        return self.cleanup_pending;
-    }
-
     pub fn deinit(self: *CredentialOwner) void {
         self.clear();
-        self.cleanup_pending = false;
     }
 };
 
@@ -236,13 +212,11 @@ test "CredentialOwner replaces and clears OAuth secret ownership" {
     try std.testing.expect(owner.available());
     owner.replace(&second);
     try std.testing.expect(owner.available());
-    owner.setCleanupPending(true);
-    try std.testing.expect(owner.cleanupPending());
     owner.clear();
     try std.testing.expect(!owner.available());
 }
 
-test "CredentialOwner can restore a refresh-only Windows session" {
+test "CredentialOwner can restore a refresh-only session" {
     var refresh = try oauth.Secret.init(
         std.testing.allocator,
         "refresh-only",
@@ -255,4 +229,98 @@ test "CredentialOwner can restore a refresh-only Windows session" {
     try std.testing.expect(!owner.available());
     owner.clear();
     try std.testing.expect(!owner.refreshAvailable());
+}
+
+test "refresh rotation is available before strict identity lookup" {
+    var owner: CredentialOwner = .{};
+    defer owner.deinit();
+    try owner.installStored(
+        std.testing.allocator,
+        "old-access",
+        "old-refresh",
+        10,
+        "account-1",
+    );
+    var fake = struct {
+        step: usize = 0,
+
+        fn perform(
+            context: *anyopaque,
+            request: metask.Request,
+            output: []u8,
+        ) metask.TransportError!metask.Response {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            defer self.step += 1;
+            return switch (self.step) {
+                0 => blk: {
+                    if (request.kind != .refresh_token) return error.ProtocolFailed;
+                    const body =
+                        \\{"access_token":"new-access","refresh_token":"new-refresh","token_type":"Bearer","expires_in":3600,"scope":"metawork:use","account_id":"account-1"}
+                    ;
+                    @memcpy(output[0..body.len], body);
+                    break :blk .{ .status = 200, .body = output[0..body.len] };
+                },
+                1 => blk: {
+                    if (request.kind != .current_user or
+                        !std.mem.eql(u8, request.bearer orelse "", "new-access"))
+                        return error.ProtocolFailed;
+                    const body = "{\"code\":\"INVALID_API_KEY\"}";
+                    @memcpy(output[0..body.len], body);
+                    break :blk .{ .status = 401, .body = output[0..body.len] };
+                },
+                else => return error.ProtocolFailed,
+            };
+        }
+    }{};
+    var rotation = try owner.refresh(
+        std.testing.allocator,
+        .{ .context = &fake, .perform_fn = @TypeOf(fake).perform },
+        100,
+        null,
+    );
+    defer rotation.deinit();
+    try std.testing.expectEqualStrings(
+        "new-refresh",
+        rotation.persistenceInput().refresh_token.view(),
+    );
+    try std.testing.expectEqual(@as(usize, 1), fake.step);
+    owner.replaceRotation(&rotation);
+    try std.testing.expectError(
+        error.Unauthorized,
+        owner.fetchIdentity(
+            .{ .context = &fake, .perform_fn = @TypeOf(fake).perform },
+            null,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 2), fake.step);
+}
+
+test "refresh rotation identity is captured before ownership transfer" {
+    var owner: CredentialOwner = .{};
+    defer owner.deinit();
+    try owner.installStored(
+        std.testing.allocator,
+        "old-access",
+        "old-refresh",
+        10,
+        "account-1",
+    );
+    var rotated_tokens = try oauth.TokenSet.fromStored(
+        std.testing.allocator,
+        "new-access",
+        "new-refresh",
+        20,
+        oauth.scope,
+        "account-1",
+    );
+    var rotation: CredentialRotation = .{
+        .tokens = rotated_tokens.take(),
+    };
+    defer rotation.deinit();
+
+    const belongs_to_current_account = rotation.belongsToAccount("account-1");
+    owner.replaceRotation(&rotation);
+
+    try std.testing.expect(belongs_to_current_account);
+    try std.testing.expect(owner.available());
 }

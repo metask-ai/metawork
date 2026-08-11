@@ -69,7 +69,7 @@ export function SettingsPage({
   onSelectModel,
   onChooseWorkspace,
   onRemoveWorkspace,
-  onReauthenticate,
+  onBeginLogin,
   onLogout,
 }: {
   account: AccountView;
@@ -89,7 +89,7 @@ export function SettingsPage({
     intent: WorkspaceChoiceIntent,
   ) => Promise<WorkspaceChoiceResult>;
   onRemoveWorkspace: (workspaceId: string) => Promise<WorkspaceRemovalResult>;
-  onReauthenticate: () => void;
+  onBeginLogin: () => void;
   onLogout: () => void;
 }) {
   const { locale, setLocale, t } = useI18n();
@@ -139,18 +139,14 @@ export function SettingsPage({
     hostCandidateModel ??
     account.models.find((model) => model.selectionId === candidateModelId) ??
     null;
-  const modelCatalogLoading = account.operation === "loading_models";
-  const apiBusy = ["loading_keys", "loading_models", "persisting"].includes(
-    account.operation,
-  );
-  const modelBusy = ["loading_models", "persisting"].includes(
-    account.operation,
-  );
-  const authenticated = account.sessionState === "authenticated";
-  const canChooseApi =
-    authenticated && ["none", "selecting_key"].includes(account.operation);
-  const canChooseModel =
-    authenticated && ["none", "selecting_model"].includes(account.operation);
+  const modelCatalogLoading =
+    account.catalogState === "loading" &&
+    account.candidateApiKeySelectionId.length > 0;
+  const apiBusy = account.catalogState === "loading";
+  const modelBusy = account.catalogState === "loading";
+  const authenticated = account.state === "authenticated";
+  const canChooseApi = authenticated && account.catalogState !== "loading";
+  const canChooseModel = authenticated && account.catalogState !== "loading";
   const languageOptions = useMemo<SelectionMenuOption[]>(
     () => [
       { value: "en-US", label: t("app.language.en-US") },
@@ -214,7 +210,7 @@ export function SettingsPage({
     !modelHasAlternative;
   const modelPlaceholder = modelCatalogLoading
     ? t("settings.model_loading")
-    : account.operation === "selecting_key"
+    : account.catalogState === "choosing" && candidateApiId.length === 0
       ? t("settings.model_waiting_api")
       : t("account.choose_model");
   const committedApiName = committedApi
@@ -243,8 +239,8 @@ export function SettingsPage({
     candidateModelId.length > 0 &&
     candidateModelId !== account.selectedModelSelectionId;
   const transactionStatus = (() => {
-    switch (account.operation) {
-      case "loading_keys":
+    switch (account.catalogState) {
+      case "loading":
         if (modelHasPendingChange) {
           return {
             title: t("settings.switch.preparing_model", {
@@ -271,43 +267,22 @@ export function SettingsPage({
           title: t("account.operation.loading_keys"),
           detail: t("settings.switch.refreshing"),
         };
-      case "loading_models":
-        return {
-          title: t("settings.switch.loading_models", {
-            api: candidateApiName,
-          }),
-          detail: t("settings.switch.current_preserved", {
-            api: committedApiName,
-            model: committedModelName,
-          }),
-        };
-      case "selecting_model":
-        return {
-          title: t("settings.switch.choose_model", {
-            api: candidateApiName,
-          }),
-          detail: t("settings.switch.choose_model_help"),
-        };
-      case "persisting":
-        return {
-          title: t("settings.switch.saving"),
-          detail: t("settings.switch.saving_detail", {
-            api: candidateApiName,
-            model: candidateModelName,
-          }),
-        };
-      case "selecting_key":
-        return {
-          title: t("account.operation.selecting_key"),
-          detail: t("settings.switch.choose_api_help"),
-        };
-      case "none":
+      case "choosing":
+        return candidateApiId
+          ? {
+              title: t("settings.switch.choose_model", {
+                api: candidateApiName,
+              }),
+              detail: t("settings.switch.choose_model_help"),
+            }
+          : {
+              title: t("account.operation.selecting_key"),
+              detail: t("settings.switch.choose_api_help"),
+            };
+      case "unavailable":
+      case "ready":
+      case "failed":
         return null;
-      default:
-        return {
-          title: t(`account.operation.${account.operation}`),
-          detail: t("settings.switch.working"),
-        };
     }
   })();
 
@@ -328,17 +303,17 @@ export function SettingsPage({
   useEffect(() => {
     if (
       account.errorCode !== "none" ||
-      account.sessionState === "reauth_required" ||
-      (account.operation === "none" && !disabled)
+      account.state !== "authenticated" ||
+      (account.catalogState === "ready" && !disabled)
     ) {
       setRequestedApi(null);
       setRequestedModel(null);
     }
   }, [
     account.errorCode,
-    account.operation,
+    account.catalogState,
     account.selectedModelSelectionId,
-    account.sessionState,
+    account.state,
     disabled,
   ]);
 
@@ -495,28 +470,30 @@ export function SettingsPage({
 
             <div
               className="settings-identity-row"
-              data-session-state={account.sessionState}
+              data-session-state={account.state}
             >
               <span className="settings-avatar" aria-hidden="true">
                 {[...(account.displayName || "M")][0]?.toLocaleUpperCase()}
               </span>
               <div className="settings-identity-copy">
                 <strong title={account.displayName}>
-                  {account.displayName || t("account.signed_in")}
+                  {authenticated
+                    ? account.displayName || t("account.signed_in")
+                    : t("account.sign_in_required.title")}
                 </strong>
                 <span>
-                  {account.sessionState === "reauth_required"
-                    ? t("account.connection_attention")
-                    : t("account.connected")}
+                  {authenticated
+                    ? t("account.connected")
+                    : t("account.sign_in_required.body")}
                 </span>
               </div>
-              {account.sessionState === "reauth_required" && (
+              {!authenticated && (
                 <button
                   className="secondary-button focus-ring"
                   disabled={disabled}
-                  onClick={onReauthenticate}
+                  onClick={onBeginLogin}
                 >
-                  {t("account.reauthenticate")}
+                  {t("account.login")}
                 </button>
               )}
             </div>
@@ -539,9 +516,7 @@ export function SettingsPage({
                   </span>
                   <button
                     className="settings-refresh-button focus-ring"
-                    disabled={
-                      disabled || !authenticated || account.operation !== "none"
-                    }
+                    disabled={disabled || !authenticated || apiBusy}
                     onClick={onRefresh}
                   >
                     <Icon name="refresh" />
@@ -605,11 +580,7 @@ export function SettingsPage({
                   {apiHasPendingChange && (
                     <span className="settings-pending-label">
                       <span aria-hidden="true" />
-                      {t(
-                        account.operation === "persisting"
-                          ? "settings.switch.saving_label"
-                          : "settings.switch.pending_label",
-                      )}
+                      {t("settings.switch.pending_label")}
                     </span>
                   )}
                 </div>
@@ -675,11 +646,7 @@ export function SettingsPage({
                   {modelHasPendingChange && (
                     <span className="settings-pending-label">
                       <span aria-hidden="true" />
-                      {t(
-                        account.operation === "persisting"
-                          ? "settings.switch.saving_label"
-                          : "settings.switch.pending_label",
-                      )}
+                      {t("settings.switch.pending_label")}
                     </span>
                   )}
                 </div>
@@ -710,7 +677,7 @@ export function SettingsPage({
             </div>
 
             {account.errorCode === "user_cancelled" &&
-              account.executionState === "ready" && (
+              account.catalogState === "ready" && (
                 <p className="settings-outcome" role="status">
                   <Icon name="check" />
                   {t("settings.switch.cancelled", {
@@ -732,7 +699,7 @@ export function SettingsPage({
                   <span className="settings-error-copy">
                     <strong>{t("account.action_failed")}</strong>
                     <span>{accountErrorText(account.errorCode, t)}</span>
-                    {account.executionState === "ready" && (
+                    {account.catalogState === "ready" && (
                       <span>
                         {t("settings.switch.failure_preserved", {
                           api: committedApiName,
@@ -744,56 +711,60 @@ export function SettingsPage({
                 </div>
               )}
 
-            <div className="settings-danger-zone">
-              <div>
-                <h3 id="settings-signout-title">
-                  {t("settings.signout_title")}
-                </h3>
-                <p>{t("settings.signout_help")}</p>
-              </div>
-              {!confirmSignOut ? (
-                <button
-                  ref={signOut}
-                  className="danger-button focus-ring"
-                  disabled={disabled || account.operation !== "none"}
-                  onClick={() => setConfirmSignOut(true)}
-                >
-                  {t("account.logout_short")}
-                </button>
-              ) : (
-                <div
-                  className="settings-signout-confirmation"
-                  role="group"
-                  aria-labelledby="settings-signout-title"
-                  aria-describedby="settings-signout-confirmation-copy"
-                  onKeyDown={(event) => {
-                    if (event.key !== "Escape") return;
-                    event.preventDefault();
-                    closeSignOutConfirmation();
-                  }}
-                >
-                  <p id="settings-signout-confirmation-copy">
-                    {t("account.logout_confirm")}
-                  </p>
-                  <span>
-                    <button
-                      ref={signOutCancel}
-                      className="secondary-button focus-ring"
-                      onClick={closeSignOutConfirmation}
-                    >
-                      {t("common.cancel")}
-                    </button>
-                    <button
-                      className="danger-button focus-ring"
-                      disabled={disabled || account.operation !== "none"}
-                      onClick={onLogout}
-                    >
-                      {t("account.logout")}
-                    </button>
-                  </span>
+            {authenticated && (
+              <div className="settings-danger-zone">
+                <div>
+                  <h3 id="settings-signout-title">
+                    {t("settings.signout_title")}
+                  </h3>
+                  <p>{t("settings.signout_help")}</p>
                 </div>
-              )}
-            </div>
+                {!confirmSignOut ? (
+                  <button
+                    ref={signOut}
+                    className="danger-button focus-ring"
+                    disabled={disabled || account.catalogState === "loading"}
+                    onClick={() => setConfirmSignOut(true)}
+                  >
+                    {t("account.logout_short")}
+                  </button>
+                ) : (
+                  <div
+                    className="settings-signout-confirmation"
+                    role="group"
+                    aria-labelledby="settings-signout-title"
+                    aria-describedby="settings-signout-confirmation-copy"
+                    onKeyDown={(event) => {
+                      if (event.key !== "Escape") return;
+                      event.preventDefault();
+                      closeSignOutConfirmation();
+                    }}
+                  >
+                    <p id="settings-signout-confirmation-copy">
+                      {t("account.logout_confirm")}
+                    </p>
+                    <span>
+                      <button
+                        ref={signOutCancel}
+                        className="secondary-button focus-ring"
+                        onClick={closeSignOutConfirmation}
+                      >
+                        {t("common.cancel")}
+                      </button>
+                      <button
+                        className="danger-button focus-ring"
+                        disabled={
+                          disabled || account.catalogState === "loading"
+                        }
+                        onClick={onLogout}
+                      >
+                        {t("account.logout")}
+                      </button>
+                    </span>
+                  </div>
+                )}
+              </div>
+            )}
           </section>
         </div>
       </div>

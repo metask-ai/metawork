@@ -71,7 +71,7 @@ flowchart TB
 
 ### 3.1 Renderer
 
-Renderer 负责产品 WebUI 的页面、布局、交互、结构化 Agent 工作展示和纯 UI 临时状态。它可以呈现与 WebUI 一体化的标题/命令栏，以单一 declarative marker 声明可拖动候选区，并绘制带固定语义 marker 的窗口按钮；React component 不直接调用 transport；`frontend/src/bridge/` 是 Renderer 模块内的合同实现层（browser-side Bridge），由它把这些声明转换为受限 Host intent，并 runtime decode Host 发布的 geometry/capability/state。Renderer 不执行原生窗口动作、不持有原生 identity/handle，也不成为窗口真实状态 owner。Renderer 可以缓存 Product projection，但不能成为 Workspace、Task、Run、Account readiness、Agent 执行状态、持久化历史、权限决策或窗口真实状态的唯一 owner。WebView reload 或重连后，Renderer 必须能够从完整 Snapshot 重建产品界面。
+Renderer 负责产品 WebUI 的页面、布局、交互、结构化 Agent 工作展示和纯 UI 临时状态。它可以呈现与 WebUI 一体化的标题/命令栏，以单一 declarative marker 声明可拖动候选区，并绘制带固定语义 marker 的窗口按钮；React component 不直接调用 transport；`frontend/src/bridge/` 是 Renderer 模块内的合同实现层（browser-side Bridge），由它把这些声明转换为受限 Host intent，并 runtime decode Host 发布的 geometry/capability/state。Renderer 不执行原生窗口动作、不持有原生 identity/handle，也不成为窗口真实状态 owner。Renderer 可以缓存 Product projection，但不能成为 Workspace、Task、Run、Account 状态、Agent 执行状态、持久化历史、权限决策或窗口真实状态的唯一 owner。WebView reload 或重连后，Renderer 必须能够从完整 Snapshot 重建产品界面。
 
 Renderer 不直接加载 AgentCore，不访问任意文件或进程，不持有 Provider credential 或原生窗口身份，不实现或模拟系统拖动循环、窗口状态、系统菜单、托盘、全局快捷键等平台行为，也不作为权限或安全边界。
 
@@ -190,7 +190,7 @@ Renderer 按不可信调用方处理：
 
 MetaWork 桌面产品、根 npm workspace、Renderer workspace 和 Zig package 随同一仓库原子发布，共用一个 release version。`app.zon` 是产品版本与 Bundle ID 真源；根 npm、Renderer 与 Zig manifest 必须精确镜像，派生 lock 只保存工具生成结果。实际源码 owner 见 [工程结构与所有权](project-structure.md)。
 
-Renderer Bridge revision、Account persistence schema、AgentCore artifact version、AgentCore ABI version/revision 和 bundle manifest schema 各自保护不同合同，不得随 MetaWork release version 自动升降。精确账号存储身份见 [Metask Account API 合同](metask-account-contract.md)，macOS 签名规则见 [macOS 本地开发签名](macos-local-development.md)；任何合同类版本标识的变更都必须先得到用户显式同意。
+Renderer Bridge revision、Account persistence layout、AgentCore artifact version、AgentCore ABI version/revision 和 bundle manifest schema 各自保护不同合同，不得随 MetaWork release version 自动升降。Account persistence 采用无版本 hard cut，精确账号存储身份见 [Metask Account API 合同](metask-account-contract.md)；macOS 签名规则见 [macOS 本地开发签名](macos-local-development.md)。任何合同类版本标识的变更都必须先得到用户显式同意。
 
 ## 9. 主要风险
 

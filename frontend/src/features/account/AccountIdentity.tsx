@@ -11,21 +11,23 @@ export function AccountIdentity({
   active,
   disabled,
   onOpenSettings,
-  onReauthenticate,
+  onBeginLogin,
 }: {
   account: AccountView;
   active: boolean;
   disabled: boolean;
   onOpenSettings: (target: SettingsTarget) => void;
-  onReauthenticate: () => void;
+  onBeginLogin: () => void;
 }) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
-  const displayName = account.displayName || t("account.signed_in");
+  const authenticated = account.state === "authenticated";
+  const displayName = authenticated
+    ? account.displayName || t("account.signed_in")
+    : t("account.login");
   const initial = [...displayName.trim()][0]?.toLocaleUpperCase() || "M";
-  const needsAttention = account.sessionState === "reauth_required";
 
   useEffect(() => {
     if (!open) return;
@@ -89,22 +91,22 @@ export function AccountIdentity({
           <div className="account-menu-heading">
             <strong title={displayName}>{displayName}</strong>
             <span>
-              {needsAttention
-                ? t("account.connection_attention")
-                : t("account.connected")}
+              {authenticated
+                ? t("account.connected")
+                : t("account.sign_in_required.title")}
             </span>
           </div>
-          {needsAttention && (
+          {!authenticated && (
             <button
               role="menuitem"
               className="account-menu-item is-attention focus-ring"
               disabled={disabled}
               onClick={() => {
                 close(false);
-                onReauthenticate();
+                onBeginLogin();
               }}
             >
-              {t("account.reauthenticate")}
+              {t("account.login")}
             </button>
           )}
           <button
@@ -118,16 +120,18 @@ export function AccountIdentity({
             <Icon name="settings" />
             {t("settings.account_models")}
           </button>
-          <button
-            role="menuitem"
-            className="account-menu-item is-danger focus-ring"
-            onClick={() => {
-              close(false);
-              onOpenSettings("signout");
-            }}
-          >
-            {t("account.logout_short")}
-          </button>
+          {authenticated && (
+            <button
+              role="menuitem"
+              className="account-menu-item is-danger focus-ring"
+              onClick={() => {
+                close(false);
+                onOpenSettings("signout");
+              }}
+            >
+              {t("account.logout_short")}
+            </button>
+          )}
         </div>
       )}
       <button
@@ -143,10 +147,8 @@ export function AccountIdentity({
         </span>
         <span className="account-identity-copy">
           <strong title={displayName}>{displayName}</strong>
-          <small data-attention={needsAttention}>
-            {needsAttention
-              ? t("account.connection_attention")
-              : t("account.connected")}
+          <small>
+            {authenticated ? t("account.connected") : t("account.login")}
           </small>
         </span>
         <Icon name="chevron" />

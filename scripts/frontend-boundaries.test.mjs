@@ -97,13 +97,24 @@ test("Renderer modules preserve the approved dependency direction", async () => 
   }
 });
 
-test("login-first composition gates every Workbench surface on Host readiness", async () => {
+test("transitional Account states never turn signed-out history into a security gate", async () => {
   const app = await readFile(resolve(sourceRoot, "app", "App.tsx"), "utf8");
-  const gate = app.indexOf('snapshot.account.readiness !== "ready"');
-  const shell = app.indexOf("<AppShell");
-  assert.ok(gate >= 0 && shell > gate);
+  const gating = await readFile(
+    resolve(sourceRoot, "features", "account", "gating.ts"),
+    "utf8",
+  );
   assert.match(app, /<AccountGate/);
+  assert.match(app, /requiresAccountGate\(snapshot\.account\)/);
   assert.match(app, /selectAccountGateStatus\(statuses\)/);
+  assert.match(
+    gating,
+    /state === "checking" \|\| account\.state === "authorizing"/,
+  );
+  assert.doesNotMatch(app, /workbenchEntered|setWorkbenchEntered/);
+  assert.match(
+    app,
+    /\(!newTaskDraftActive \|\| snapshot\.account\.canCreateTask\)/,
+  );
   assert.doesNotMatch(app, /setStatus\(\s*\{/);
   assert.doesNotMatch(app, /AccountPrerequisite|prerequisite=\{/);
   assert.doesNotMatch(

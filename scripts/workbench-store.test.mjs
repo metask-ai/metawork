@@ -90,6 +90,38 @@ test("account mutations block only New task admission", () => {
   assert.equal(accountMutationBlocksTaskAdmission(true, false), false);
 });
 
+test("a signed-out Host snapshot restores an active Run instead of hiding it", () => {
+  const running = {
+    ...task("2", "1"),
+    currentRunId: "7",
+    currentRunPhase: "running",
+    activeOperation: { kind: "run", id: "7" },
+  };
+  const restored = workbenchReducer(initialWorkbenchState, {
+    type: "snapshot.accepted",
+    snapshot: snapshot("1", [running]),
+  });
+  const signedOutSnapshot = {
+    ...snapshot("2", [running]),
+    account: {
+      ...initialWorkbenchState.snapshot.account,
+      state: "signed_out",
+    },
+  };
+  const signedOut = workbenchReducer(restored, {
+    type: "snapshot.accepted",
+    snapshot: signedOutSnapshot,
+  });
+
+  assert.equal(signedOut.activeTaskId, "2");
+  assert.equal(signedOut.snapshot.account.canCreateTask, false);
+  assert.equal(signedOut.snapshot.tasks[0]?.currentRunPhase, "running");
+  assert.deepEqual(signedOut.snapshot.tasks[0]?.activeOperation, {
+    kind: "run",
+    id: "7",
+  });
+});
+
 test("the Workbench store selects the first Task and preserves a valid choice", () => {
   const accepted = workbenchReducer(initialWorkbenchState, {
     type: "snapshot.accepted",

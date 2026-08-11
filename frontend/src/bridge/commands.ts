@@ -39,8 +39,6 @@ export const commands = {
   snapshot: "metawork.workbench.snapshot",
   snapshotChunk: "metawork.workbench.snapshot.chunk",
   accountBeginLogin: "metawork.account.beginLogin",
-  accountReopenLogin: "metawork.account.reopenLogin",
-  accountReauthenticate: "metawork.account.reauthenticate",
   accountCancelOperation: "metawork.account.cancelOperation",
   accountRefreshCatalog: "metawork.account.refreshCatalog",
   accountSelectApiKey: "metawork.account.selectApiKey",

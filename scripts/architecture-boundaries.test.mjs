@@ -528,10 +528,10 @@ test("Account Runtime owns policy while Application installs execution explicitl
   assert.match(accountRuntime, /fn automaticApiSelection\(/);
   assert.match(accountRuntime, /fn automaticModelSelection\(/);
   assert.match(accountRuntime, /fn prepareAndPersistExecution\(/);
-  assert.match(accountRuntime, /catalog_after_refresh:/);
+  assert.match(accountRuntime, /fn startLoadIdentity\(/);
   assert.doesNotMatch(
     app,
-    /CredentialOwner|automaticApiSelection|automaticModelSelection|prepareAndPersistExecution|catalog_after_refresh|mailbox_mutex/,
+    /CredentialOwner|automaticApiSelection|automaticModelSelection|prepareAndPersistExecution|startLoadIdentity|mailbox_mutex/,
   );
   assert.doesNotMatch(app, /account_api\.OAuth\.TokenSet/);
 
@@ -575,11 +575,21 @@ test("cold Account restore preserves Task history without impersonating an ident
   );
   assert.match(
     app,
-    /\.startup => self\.workbench\.beginDefaultExecutionReplacement\(\)/,
+    /\.startup, \.default => \{[\s\S]*?self\.workbench\.beginDefaultExecutionReplacement\(\)/,
   );
+  assert.match(
+    app,
+    /\.identity => \{[\s\S]*?self\.workbench\.beginExecutionReplacement\(\)/,
+  );
+  const workbench = read("src/workbench/projection.zig");
+  assert.match(
+    workbench,
+    /const ExecutionReplacementKind = enum \{ none, default, identity \}/,
+  );
+  assert.doesNotMatch(app, /active_replacement:/);
 });
 
-test("macOS development identity and Account manifest hard cut have one code owner", () => {
+test("Account persistence has one refresh-only cross-platform owner", () => {
   const appZon = read("app.zon");
   const build = read("build.zig");
   const identity = read("src/product_identity.zig");
@@ -587,6 +597,9 @@ test("macOS development identity and Account manifest hard cut have one code own
   const paths = read("src/app/paths.zig");
   const store = read("src/account/credential_store.zig");
   const platform = read("src/account/platform.zig");
+  const accountRuntime = read("src/account/runtime.zig");
+  const accountState = read("src/account/state.zig");
+  const workbench = read("src/workbench/projection.zig");
   assert.match(appZon, /\.id = "com\.metask\.metawork\.dev"/);
   assert.match(identity, /const app_manifest = @import\("app_manifest_zon"\)/);
   assert.match(identity, /pub const bundle_id = app_manifest\.id/);
@@ -595,11 +608,7 @@ test("macOS development identity and Account manifest hard cut have one code own
     identity,
     /pub const macos_data_directory_name = "MetaWork Dev"/,
   );
-  assert.match(
-    identity,
-    /pub const macos_account_keychain_service = bundle_id \+\+ "\.account"/,
-  );
-  assert.doesNotMatch(identity, /manifest_name|manifest_schema_version/);
+  assert.doesNotMatch(identity, /account_keychain_service|manifest_name/);
   assert.match(build, /existingImport\(runner, "app_manifest_zon"\)/);
   assert.equal(
     (
@@ -622,48 +631,99 @@ test("macOS development identity and Account manifest hard cut have one code own
   assert.match(app, /\.bundle_id = product_identity\.bundle_id/);
   assert.match(
     store,
-    /pub const service = product_identity\.macos_account_keychain_service/,
+    /product_identity\.bundle_id \+\+ "\.automation\.account"/,
   );
-  assert.match(store, /pub const manifest_name = "manifest\.json"/);
-  assert.match(store, /pub const manifest_schema_version: u8 = 1/);
-  assert.match(store, /schema_version: u8 = manifest_schema_version/);
-  assert.match(store, /self\.schema_version != manifest_schema_version/);
-  assert.match(platform, /const manifest_name = store\.manifest_name/);
-  assert.match(platform, /schema_version: u8/);
-  assert.doesNotMatch(
-    `${identity}\n${store}\n${platform}`,
-    /dev\.metawork\.account\.v2|manifest\.v[0-9]+/,
-  );
-  assert.doesNotMatch(store, /persistence_revision/);
-});
-
-test("Windows Account persistence is refresh-only and unversioned", () => {
-  const store = read("src/account/windows_store.zig");
-  const application = applicationSource();
-  const paths = read("src/app/paths.zig");
-  const accountRuntime = read("src/account/runtime.zig");
-  assert.match(store, /pub const service = "dev\.metawork\.account"/);
+  assert.match(store, /product_identity\.bundle_id \+\+ "\.account"/);
   assert.match(
     store,
     /pub const refresh_token_account = "metask-refresh-token"/,
   );
-  assert.match(store, /pub const public_state_name = "account\.json"/);
-  assert.doesNotMatch(
-    store,
-    /manifest\.v[0-9]+|persistence_revision|CredentialStore|OwnedExecutionConfig|TokenSet/,
+  assert.match(store, /pub const preference_name = "preferences\.json"/);
+  assert.match(store, /selection_owner_account_id/);
+  assert.match(store, /execution_generation: u64/);
+  assert.match(accountRuntime, /std\.Io\.randomSecure\(io, &bytes\)/);
+  assert.match(accountRuntime, /fn savedExecutionGenerationFor\(/);
+  assert.match(platform, /pub const NativeBackend = struct/);
+  assert.equal(
+    existsSync(new URL("../src/account/windows_store.zig", import.meta.url)),
+    false,
   );
-  assert.match(paths, /\.windows => env_map\.get\("USERPROFILE"\)/);
-  assert.match(accountRuntime, /windows_store\.restore/);
-  assert.doesNotMatch(
-    application,
-    /windows_store\.restore|WindowsStore\.restore/,
-  );
-  assert.doesNotMatch(application, /dev\.metawork\.desktop/);
-  assert.match(paths, /const windows_data_directory_name = "MetaWork"/);
+  assert.match(platform, /\.service = store\.service/);
+  assert.match(platform, /\.account = store\.refresh_token_account/);
+  assert.match(platform, /ignore_unknown_fields = false/);
   assert.match(
     paths,
-    /test "product identity does not unify macOS and Windows Account storage"/,
+    /const automation_data_directory_name = "MetaWork Automation"/,
   );
+  assert.match(paths, /if \(build_options\.automation\)/);
+  assert.doesNotMatch(
+    `${store}\n${platform}`,
+    /manifest|active_slot|execution_slot|account\.json|access_token|display_name/,
+  );
+  assert.doesNotMatch(
+    `${store}\n${platform}\n${accountRuntime}\n${accountState}\n${workbench}`,
+    /execution[_-]watermark|ExecutionGenerationFloor|execution_generation_floor|execution_high_watermark|scheduledExecutionGenerationFloor/,
+  );
+  assert.doesNotMatch(`${store}\n${platform}`, /dev\.metawork\.account/);
+  assert.equal(
+    existsSync(
+      new URL("../scripts/cleanup-legacy-macos-account.mjs", import.meta.url),
+    ),
+    false,
+  );
+  assert.equal(
+    existsSync(
+      new URL("../scripts/macos-account-cleanup.test.mjs", import.meta.url),
+    ),
+    false,
+  );
+  assert.equal(
+    JSON.parse(read("package.json")).scripts["account:cleanup-legacy:macos"],
+    undefined,
+  );
+  assert.match(accountRuntime, /credential_store\.restore/);
+  assert.doesNotMatch(
+    accountRuntime,
+    /windows_store|prepareWindowsRestore|prepareMacosRestore/,
+  );
+});
+
+test("Account commits OAuth rotation before strict current-user identity", () => {
+  const login = read("src/account/login_attempt.zig");
+  const client = read("src/account/metask_client.zig");
+  const runtime = read("src/account/runtime.zig");
+  const state = read("src/account/state.zig");
+  const store = read("src/account/credential_store.zig");
+  assert.match(login, /exchangeAuthorizationCode/);
+  assert.doesNotMatch(login, /fetchIdentity|exchangeAndIdentify/);
+  const authorizationCommit = runtime.slice(
+    runtime.indexOf("fn prepareAuthorizedLogin("),
+    runtime.indexOf("fn prepareRefreshedTokens("),
+  );
+  assert.ok(
+    authorizationCommit.indexOf("credential_store.commitRefresh(") <
+      authorizationCommit.indexOf("self.credentials.replace(tokens)"),
+  );
+  assert.match(authorizationCommit, /\.payload = \.tokens_persisted/);
+  assert.match(state, /\.tokens_persisted => self\.prepareTokensPersisted\(\)/);
+  assert.match(state, /\.load_identity/);
+  assert.match(
+    client,
+    /if \(response\.status != 200\)\s*return classifyStatus/,
+  );
+  assert.match(
+    runtime,
+    /error_code == \.metask_unauthorized[\s\S]*self\.deleteInvalidCredential\(\)/,
+  );
+  assert.match(
+    runtime,
+    /state == \.signed_out[\s\S]*self\.credentials\.refreshAvailable\(\)/,
+  );
+  assert.doesNotMatch(
+    `${client}\n${state}`,
+    /accountOnlyIdentity|exchangeAndIdentify|account_only|reauth_required/,
+  );
+  assert.match(store, /backend\.deletePreference\(\) catch \{\}/);
 });
 
 test("macOS Apple Development signing is explicit and isolated", () => {
@@ -683,10 +743,6 @@ test("macOS Apple Development signing is explicit and isolated", () => {
   assert.equal(
     packageJson.scripts["setup:macos-signing:clear"],
     "node scripts/setup-macos-local-signing.mjs clear",
-  );
-  assert.equal(
-    packageJson.scripts["account:cleanup-legacy:macos"],
-    "node scripts/cleanup-legacy-macos-account.mjs",
   );
   for (const script of ["check", "test", "build:debug", "build:release"]) {
     assert.doesNotMatch(
@@ -717,13 +773,9 @@ test("macOS Apple Development signing is explicit and isolated", () => {
   assert.match(setup, /add-certificates/u);
   assert.doesNotMatch(setup, /delete-generic-password|cleanup-legacy/u);
 
-  const cleanup = read("scripts/cleanup-legacy-macos-account.mjs");
-  assert.match(cleanup, /delete-generic-password/u);
-  assert.match(cleanup, /dev\.metawork\.account\.v2/u);
-  assert.match(cleanup, /manifest\.v2/u);
   for (const forbidden of ["openssl", "add-trusted-cert", "delete-identity"]) {
     assert.doesNotMatch(
-      `${setup}\n${cleanup}`,
+      setup,
       new RegExp(forbidden, "u"),
       `local setup must not generate, override trust for, or delete a signing identity: ${forbidden}`,
     );
@@ -744,7 +796,6 @@ test("formal Native test graph runs every product module test root", () => {
       "metawork-account-credential-store",
       "test_modules.account_credential_store",
     ],
-    ["metawork-account-windows-store", "test_modules.account_windows_store"],
     ["metawork-account-platform", "test_modules.account_platform"],
     ["metawork-account-loopback", "test_modules.account_loopback"],
     ["metawork-account-login-attempt", "test_modules.account_login_attempt"],
@@ -1017,6 +1068,32 @@ test("automation code is compile-time selected and absent from product modules",
   );
 });
 
+test("AgentCore vertical owns an isolated platform data root", () => {
+  const vertical = read("scripts/test-agentcore-vertical-macos.mjs");
+  assert.match(
+    vertical,
+    /mkdtemp\(join\(tmpdir\(\), "metawork-agentcore-vertical-"\)\)/,
+  );
+  assert.match(
+    vertical,
+    /\{ APPDATA: platformHome, LOCALAPPDATA: platformHome \}/,
+  );
+  assert.match(vertical, /path\.relative\(canonicalWorkspace, dataRoot\)/);
+  assert.match(vertical, /vertical data root escaped its fixture/);
+  assert.match(
+    vertical,
+    /const automationDataDirectoryName = "MetaWork Automation"/,
+  );
+  assert.doesNotMatch(
+    vertical,
+    /join\(platformHome, "MetaWork", "Data"\)|"MetaWork Dev"/,
+  );
+  assert.match(
+    vertical,
+    /env:\s*\{[\s\S]*?\.\.\.process\.env,[\s\S]*?\.\.\.isolatedPlatformEnv,/,
+  );
+});
+
 test("Workbench owns queue and worker lifecycle", () => {
   const agent = read("src/agent/session.zig");
   assert.doesNotMatch(
@@ -1214,6 +1291,20 @@ test("Workbench owns Task lifecycle, continuation, and canonical redaction", () 
   assert.match(runtimeAttachment, /continuation: ContinuationCapability/);
   assert.match(taskRecord, /durable: DurableTaskRecord/);
   assert.match(taskRecord, /runtime: RuntimeAttachment/);
+  assert.doesNotMatch(
+    durableTaskRecord,
+    /account_id|account_name|api_key|selection_id|display_name/,
+  );
+  assert.match(
+    durableTaskRecord,
+    /execution_generation:[\s\S]*execution_provider:[\s\S]*execution_model:/,
+  );
+  const taskPersistence = read("src/workbench/task_persistence.zig");
+  const bindingWire = taskPersistence.slice(
+    taskPersistence.indexOf("pub const BindingWire = struct"),
+    taskPersistence.indexOf("pub const OperationWire = struct"),
+  );
+  assert.doesNotMatch(bindingWire, /account|api_key|selection|display_name/);
   assert.doesNotMatch(taskRecord, /SessionState/);
   assert.doesNotMatch(workbench, /session\.snapshot\(/);
   assert.match(workbench, /session_disposition_at_completion/);
@@ -1353,7 +1444,9 @@ test("Renderer Bridge fixed revision 1 owns the exact product wire catalog", () 
     ].sort();
   assert.deepEqual(catalog(rendererCommands), catalog(zigCommands));
   assert.deepEqual(catalog(appManifest), catalog(zigCommands));
-  assert.ok(catalog(zigCommands).includes("metawork.account.reopenLogin"));
+  assert.ok(catalog(zigCommands).includes("metawork.account.beginLogin"));
+  assert.ok(!catalog(zigCommands).includes("metawork.account.reopenLogin"));
+  assert.ok(!catalog(zigCommands).includes("metawork.account.reauthenticate"));
   assert.deepEqual(
     catalog(zigCommands).filter((command) =>
       command.startsWith("metawork.host."),
@@ -1477,8 +1570,9 @@ test("Renderer Bridge fixed revision 1 owns the exact product wire catalog", () 
 
   const contracts = read("frontend/src/bridge/contracts.ts");
   assert.doesNotMatch(contracts, /schemaVersion|WORKBENCH_SCHEMA_VERSION/);
-  assert.match(contracts, /readiness: AccountReadiness/);
-  assert.match(contracts, /primaryAction: AccountPrimaryAction/);
+  assert.match(contracts, /state: AccountState/);
+  assert.match(contracts, /catalogState: CatalogState/);
+  assert.doesNotMatch(contracts, /AccountReadiness|AccountPrimaryAction/);
   assert.match(contracts, /account: AccountView/);
   assert.match(contracts, /workspaces: WorkspaceView\[\]/);
   assert.match(contracts, /tasks: TaskView\[\]/);

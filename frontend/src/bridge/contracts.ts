@@ -1,44 +1,8 @@
-export type AccountSessionState =
-  | "restoring"
-  | "signed_out"
-  | "authorizing"
-  | "authenticated"
-  | "refreshing"
-  | "reauth_required"
-  | "shutting_down";
+export type AccountState =
+  "checking" | "signed_out" | "authorizing" | "authenticated";
 
-export type ExecutionState =
-  "none" | "preparing" | "ready" | "reconfiguring" | "invalid";
-
-export type AccountOperation =
-  | "none"
-  | "oauth_callback"
-  | "token_exchange"
-  | "loading_keys"
-  | "selecting_key"
-  | "loading_models"
-  | "selecting_model"
-  | "persisting"
-  | "logging_out";
-
-export type AccountReadiness =
-  | "checking"
-  | "sign_in_required"
-  | "preparing"
-  | "choice_required"
-  | "ready"
-  | "needs_attention"
-  | "restart_required";
-
-export type AccountPrimaryAction =
-  | "none"
-  | "sign_in"
-  | "reopen_login"
-  | "choose_api_key"
-  | "choose_model"
-  | "retry_catalog"
-  | "reauthenticate"
-  | "restart";
+export type CatalogState =
+  "unavailable" | "loading" | "choosing" | "ready" | "failed";
 
 export type AccountErrorCode =
   | "none"
@@ -46,6 +10,7 @@ export type AccountErrorCode =
   | "invalid_state"
   | "operation_in_progress"
   | "execution_in_use"
+  | "session_in_use"
   | "oauth_bind_failed"
   | "oauth_browser_open_failed"
   | "oauth_callback_rejected"
@@ -54,7 +19,6 @@ export type AccountErrorCode =
   | "user_cancelled"
   | "deadline_exceeded"
   | "token_refresh_failed"
-  | "account_mismatch"
   | "metask_unauthorized"
   | "metask_rate_limited"
   | "metask_service_unavailable"
@@ -71,20 +35,15 @@ export type AccountErrorCode =
   | "generation_mismatch"
   | "recovery_state_invalid"
   | "local_resource_exhausted"
-  | "dependency_contract_invalid"
-  | "shutting_down";
+  | "dependency_contract_invalid";
 
 export type Provider = "anthropic" | "openai";
 
 export type AccountView = {
-  sessionState: AccountSessionState;
-  executionState: ExecutionState;
-  operation: AccountOperation;
-  readiness: AccountReadiness;
-  primaryAction: AccountPrimaryAction;
+  state: AccountState;
+  catalogState: CatalogState;
   canCancel: boolean;
   accountId: string;
-  profileId: string;
   displayName: string;
   apiKeys: {
     selectionId: string;
@@ -372,17 +331,10 @@ export type TaskView = {
   binding: {
     epoch: string;
     availability: "available" | "unavailable";
-    accountId: string;
-    profileId: string;
-    accountDisplayName: string;
-    apiKeySelectionId: string;
-    apiKeyName: string;
-    apiKeySuffix: string;
     provider: Provider;
-    modelSelectionId: string;
-    modelDisplayName: string;
+    model: string;
     executionGeneration: string;
-    unavailableReason: "credential_released" | null;
+    unavailableReason: "runtime_detached" | null;
   };
   skillCatalog: SkillCatalogView;
   lifecycle: "open" | "closing" | "closed";

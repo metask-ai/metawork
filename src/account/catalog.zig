@@ -85,7 +85,6 @@ fn BoundedString(comptime capacity: usize) type {
 
 const ApiKeyId = BoundedString(contract.Limits.api_key_id_bytes);
 const AccountId = BoundedString(contract.Limits.account_id_bytes);
-const ProfileId = BoundedString(contract.Limits.profile_id_bytes);
 const ApiKeyName = BoundedString(contract.Limits.api_key_name_bytes);
 const ApiKeySuffix = BoundedString(contract.Limits.api_key_suffix_bytes);
 const ModelId = BoundedString(contract.Limits.model_id_bytes);
@@ -155,7 +154,6 @@ pub const CatalogSession = struct {
     models: std.ArrayList(ModelEntry) = .empty,
     selected_key_index: ?usize = null,
     owner_account_id: AccountId = .{},
-    owner_profile_id: ProfileId = .{},
 
     pub fn init(allocator: std.mem.Allocator) CatalogSession {
         return .{ .allocator = allocator };
@@ -177,16 +175,13 @@ pub const CatalogSession = struct {
         transport: metask.Transport,
         oauth_access_token: []const u8,
         account_id: []const u8,
-        profile_id: []const u8,
         control: ?metask.RequestControl,
     ) Error!void {
         const validated_account_id = try AccountId.init(account_id);
-        const validated_profile_id = try ProfileId.init(profile_id);
         var replacement = try fetchApiKeys(
             self.allocator,
             transport,
             oauth_access_token,
-            profile_id,
             control,
         );
         errdefer replacement.deinit();
@@ -196,7 +191,6 @@ pub const CatalogSession = struct {
         replacement.entries = .empty;
         self.selected_key_index = null;
         self.owner_account_id = validated_account_id;
-        self.owner_profile_id = validated_profile_id;
     }
 
     pub fn selectApiKey(
@@ -240,13 +234,10 @@ pub const CatalogSession = struct {
     ) Error!void {
         const credential = self.api_keys.items[index].secret.view();
         if (credential.len == 0) return error.ApiKeyNotFound;
-        const profile_id = self.owner_profile_id.view();
-        if (profile_id.len == 0) return error.ProtocolInvalid;
         var replacement = try fetchModels(
             self.allocator,
             transport,
             credential,
-            profile_id,
             control,
         );
         errdefer replacement.deinit();
@@ -344,12 +335,10 @@ pub const CatalogSession = struct {
     pub fn ownsExecutionSelection(
         self: *const CatalogSession,
         account_id: []const u8,
-        profile_id: []const u8,
         api_key_id: []const u8,
         model_id: []const u8,
     ) bool {
         if (!std.mem.eql(u8, self.ownerAccountId(), account_id) or
-            !std.mem.eql(u8, self.ownerProfileId(), profile_id) or
             !std.mem.eql(u8, self.selectedApiKeyId(), api_key_id) or
             self.findModel(model_id) == null)
             return false;
@@ -381,10 +370,6 @@ pub const CatalogSession = struct {
         return self.owner_account_id.view();
     }
 
-    pub fn ownerProfileId(self: *const CatalogSession) []const u8 {
-        return self.owner_profile_id.view();
-    }
-
     fn findApiKey(self: *const CatalogSession, id: []const u8) ?usize {
         for (self.api_keys.items, 0..) |*entry, index| {
             if (std.mem.eql(u8, entry.id.view(), id)) return index;
@@ -405,7 +390,6 @@ pub const CatalogSession = struct {
         self.models.clearRetainingCapacity();
         self.selected_key_index = null;
         self.owner_account_id = .{};
-        self.owner_profile_id = .{};
     }
 };
 
@@ -564,10 +548,7 @@ pub const PublicCatalog = struct {
             };
         }
         view.api_keys = self.api_key_views[0..self.api_key_count];
-        view.models = if (view.operation == .loading_models)
-            &.{}
-        else
-            self.model_views[0..self.model_count];
+        view.models = self.model_views[0..self.model_count];
     }
 };
 
@@ -575,14 +556,12 @@ pub const TestSupport = if (builtin.is_test) struct {
     pub fn replaceOwnedSelection(
         session: *CatalogSession,
         account_id: []const u8,
-        profile_id: []const u8,
         api_key: contract.ApiKeyView,
         secret_value: []const u8,
         models: []const contract.ModelView,
     ) Error!void {
         session.reset();
         session.owner_account_id = try .init(account_id);
-        session.owner_profile_id = try .init(profile_id);
         var secret = try Secret.init(session.allocator, secret_value);
         errdefer secret.deinit();
         session.api_keys.append(session.allocator, .{
@@ -666,7 +645,6 @@ fn fetchApiKeys(
     allocator: std.mem.Allocator,
     transport: metask.Transport,
     oauth_access_token: []const u8,
-    profile_id: []const u8,
     control: ?metask.RequestControl,
 ) Error!ParsedApiKeys {
     const response_buffer = allocator.alloc(
@@ -680,7 +658,6 @@ fn fetchApiKeys(
     const response = transport.perform(.{
         .kind = .keys,
         .bearer = oauth_access_token,
-        .profile_id = profile_id,
         .control = control,
     }, response_buffer) catch |err| return transportError(err);
     try requireSuccess(response.status);
@@ -691,7 +668,6 @@ fn fetchModels(
     allocator: std.mem.Allocator,
     transport: metask.Transport,
     api_key: []const u8,
-    profile_id: []const u8,
     control: ?metask.RequestControl,
 ) Error!ParsedModels {
     const response_buffer = allocator.alloc(
@@ -705,7 +681,6 @@ fn fetchModels(
     const response = transport.perform(.{
         .kind = .models,
         .bearer = api_key,
-        .profile_id = profile_id,
         .control = control,
     }, response_buffer) catch |err| return transportError(err);
     try requireSuccess(response.status);
@@ -1021,23 +996,14 @@ test "live-shape catalogs expose only masked views and move one key owner" {
     );
     session.reset();
     var public_view: contract.AccountView = .{
-        .session_state = .authenticated,
-        .execution_state = .ready,
-        .operation = .none,
-        .readiness = .ready,
-        .primary_action = .none,
+        .state = .authenticated,
+        .catalog_state = .ready,
     };
     public_catalog.decorate(&public_view);
     try std.testing.expectEqual(@as(usize, 1), public_view.api_keys.len);
     try std.testing.expectEqualStrings("325", public_view.api_keys[0].id);
     try std.testing.expectEqual(@as(usize, 1), public_view.models.len);
     try std.testing.expectEqualStrings("model-1", public_view.models[0].id);
-    public_view.operation = .loading_models;
-    public_catalog.decorate(&public_view);
-    try std.testing.expectEqual(@as(usize, 0), public_view.models.len);
-    public_view.operation = .none;
-    public_catalog.decorate(&public_view);
-    try std.testing.expectEqual(@as(usize, 1), public_view.models.len);
 }
 
 test "catalog accepts additive metadata and rejects duplicate ids, pagination, and platforms" {
@@ -1138,7 +1104,7 @@ test "catalog accepts additive metadata and rejects duplicate ids, pagination, a
     );
 }
 
-test "catalog request flow binds OAuth and API key credentials to profile" {
+test "catalog request flow uses OAuth then direct API key credentials" {
     const Fake = struct {
         step: usize = 0,
 
@@ -1151,31 +1117,13 @@ test "catalog request flow binds OAuth and API key credentials to profile" {
             const body = switch (self.step) {
                 0 => blk: {
                     if (request.kind != .keys or
-                        !std.mem.eql(
-                            u8,
-                            request.bearer orelse "",
-                            "oauth-access",
-                        ) or
-                        !std.mem.eql(
-                            u8,
-                            request.profile_id orelse "",
-                            "profile-1",
-                        ))
+                        !std.mem.eql(u8, request.bearer orelse "", "oauth-access"))
                         return error.ProtocolFailed;
                     break :blk key_fixture;
                 },
                 1 => blk: {
                     if (request.kind != .models or
-                        !std.mem.eql(
-                            u8,
-                            request.bearer orelse "",
-                            "test-api-key-1234",
-                        ) or
-                        !std.mem.eql(
-                            u8,
-                            request.profile_id orelse "",
-                            "profile-1",
-                        ))
+                        !std.mem.eql(u8, request.bearer orelse "", "test-api-key-1234"))
                         return error.ProtocolFailed;
                     break :blk model_fixture;
                 },
@@ -1203,7 +1151,6 @@ test "catalog request flow binds OAuth and API key credentials to profile" {
         transport,
         "oauth-access",
         "account-1",
-        "profile-1",
         null,
     );
     try session.selectApiKey("325");
@@ -1211,10 +1158,6 @@ test "catalog request flow binds OAuth and API key credentials to profile" {
     try std.testing.expectEqualStrings(
         "account-1",
         session.ownerAccountId(),
-    );
-    try std.testing.expectEqualStrings(
-        "profile-1",
-        session.ownerProfileId(),
     );
     try std.testing.expectEqual(@as(usize, 2), fake.step);
 }
@@ -1248,7 +1191,6 @@ test "failed model reload preserves the committed private catalog" {
     session.api_keys = keys.entries;
     keys.entries = .empty;
     session.owner_account_id = try .init("account-1");
-    session.owner_profile_id = try .init("profile-1");
     var fake: Fake = .{};
     const transport: metask.Transport = .{
         .context = &fake,

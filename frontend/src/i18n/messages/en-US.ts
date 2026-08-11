@@ -36,37 +36,19 @@ export const enUS = {
   "connection.refresh_failed": "The latest Workbench view could not be loaded.",
   "account.label": "Metask account",
   "account.signed_in": "Signed in",
-  "account.saved_account": "Saved account",
   "account.ready": "Ready",
   "account.gate.path": "Metask\nLocal workbench",
   "account.gate.eyebrow": "Metask access",
   "account.gate.privacy": "Your API credentials are kept off this screen.",
-  "account.readiness.checking.title": "Restoring your account",
-  "account.readiness.checking.body":
-    "MetaWork is checking the account saved on this device.",
-  "account.readiness.sign_in_required.title": "Sign in to MetaWork",
-  "account.readiness.sign_in_required.body":
+  "account.checking.title": "Checking sign-in",
+  "account.checking.body":
+    "MetaWork is checking whether this device can sign in.",
+  "account.sign_in_required.title": "Sign in to MetaWork",
+  "account.sign_in_required.body":
     "Use your Metask account to load the APIs and models available to you.",
-  "account.readiness.preparing.title": "Preparing your models",
-  "account.readiness.preparing.body":
-    "Your Metask account is connected. MetaWork is loading your available APIs and models.",
-  "account.readiness.choice_required.title": "Choose your default setup",
-  "account.readiness.choice_required.body":
-    "Choose the API or model new tasks should use.",
-  "account.readiness.ready.title": "Ready to work",
-  "account.readiness.ready.body": "This task can be sent.",
-  "account.readiness.needs_attention.title": "Account setup needs attention",
-  "account.readiness.needs_attention.body":
-    "Your Metask account is still connected. Use the action below to continue.",
-  "account.reauthentication.title": "Sign-in expired",
-  "account.reauthentication.body":
-    "This account is saved on this device, but its sign-in credential is no longer valid. Sign in again to continue.",
-  "account.reauthentication_stale.title": "Sign in again",
-  "account.reauthentication_stale.body":
-    "The saved sign-in no longer matches the current Metask session. Sign in again; MetaWork will use the account from the new sign-in.",
-  "account.readiness.restart_required.title": "Restart MetaWork to continue",
-  "account.readiness.restart_required.body":
-    "Close and reopen MetaWork. No account action will be retried automatically.",
+  "account.authorizing.title": "Finishing Metask sign-in",
+  "account.authorizing.body":
+    "Complete authorization in your browser if it is still open. MetaWork will continue automatically.",
   "account.action_failed": "Account action needs attention",
   "account.error.no_api_keys":
     "No API Keys are available for this Metask account. Add one in Metask, then try again.",
@@ -78,28 +60,21 @@ export const enUS = {
     "MetaWork could not open the sign-in page. Try opening it again.",
   "account.error.authorization":
     "The Metask sign-in could not be completed. Start sign-in again.",
+  "account.error.session_expired": "Sign-in expired. Sign in to continue.",
   "account.error.service":
     "Metask is temporarily unavailable. Try again shortly.",
+  "account.error.metask_access":
+    "Sign-in completed, but Metask rejected the account API request. Your authorization was kept; retry loading the account configuration.",
   "account.error.credentials":
-    "MetaWork could not safely update the account saved on this device.",
+    "MetaWork could not confirm the credential update on this device.",
   "account.error.local":
     "MetaWork could not finish preparing this task on this device. Try again.",
   "account.error.generic": "MetaWork could not finish preparing this account.",
   "account.cancelled": "The account action was cancelled.",
-  "account.operation.oauth_callback": "Waiting for Metask authorization",
-  "account.operation.token_exchange": "Completing Metask sign-in",
   "account.operation.loading_keys": "Loading API Keys",
   "account.operation.selecting_key": "Choose an API Key",
-  "account.operation.loading_models": "Loading available models",
-  "account.operation.selecting_model": "Choose a model",
-  "account.operation.persisting": "Saving execution settings",
-  "account.operation.logging_out": "Signing out and clearing this device",
   "account.login": "Sign in with Metask",
-  "account.reopen_login": "Open sign-in page again",
-  "account.retry_preparation": "Try again",
-  "account.reauthenticate": "Sign in again",
   "account.api_key": "API Key",
-  "account.saved_key": "Saved API Key",
   "account.model": "Model",
   "account.choose_key": "Choose an API Key",
   "account.choose_model": "Choose a model",
@@ -110,6 +85,10 @@ export const enUS = {
     "MetaWork will ask the Host to clear this device. Continue?",
   "account.command_rejected":
     "That account action is no longer available. MetaWork kept the latest account state.",
+  "account.task_running":
+    "A task is still running. Wait for it to finish before signing in again or signing out.",
+  "account.session_in_use":
+    "A task still has an active session. Close that task before signing in again or signing out.",
   "account.command_failed":
     "MetaWork could not complete that account action. Use the recovery action shown here.",
   "account.cancel_rejected":

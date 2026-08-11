@@ -5,9 +5,8 @@ pub const authority = "https://napi.metask-ai.com";
 pub const authorize_url = authority ++ "/oauth/authorize";
 pub const token_url = authority ++ "/oauth/token";
 pub const revoke_url = authority ++ "/oauth/revoke";
-pub const profiles_url = authority ++ "/v1/profiles";
-pub const client_id = "metacode-cli";
-pub const scope = "metacode:use";
+pub const client_id = "metawork-app";
+pub const scope = "metawork:use";
 pub const callback_path = "/auth/callback";
 
 pub const Limits = struct {
@@ -18,8 +17,7 @@ pub const Limits = struct {
     pub const authorization_url_bytes: usize = 4096;
     pub const callback_target_bytes: usize = 8192;
     pub const token_body_bytes: usize = 16 * 1024;
-    pub const profiles_body_bytes: usize = 64 * 1024;
-    pub const profile_entries: usize = 64;
+    pub const current_user_body_bytes: usize = 16 * 1024;
     pub const scope_bytes: usize = 256;
 };
 
@@ -30,10 +28,8 @@ pub const ProtocolError = error{
     StateMismatch,
     AuthorizationRejected,
     InvalidTokenResponse,
-    InvalidProfileResponse,
-    NoProfiles,
+    InvalidCurrentUserResponse,
     FieldTooLarge,
-    TooManyProfiles,
     ExpiryOverflow,
     MissingRefreshToken,
 };
@@ -299,11 +295,6 @@ fn paddedState(value: []const u8) [Limits.state_bytes]u8 {
     return padded;
 }
 
-pub const RefreshPolicy = union(enum) {
-    require_new,
-    retain_previous: *const Secret,
-};
-
 pub const TokenSet = struct {
     access_token: Secret,
     refresh_token: Secret,
@@ -353,6 +344,7 @@ pub const TokenSet = struct {
     ) (ProtocolError || std.mem.Allocator.Error)!TokenSet {
         if (expires_at < 0 or
             !std.mem.eql(u8, stored_scope, scope) or
+            stored_account_id.len == 0 or
             stored_account_id.len > contract.Limits.account_id_bytes)
             return error.InvalidTokenResponse;
         var result: TokenSet = .{
@@ -373,18 +365,17 @@ pub const TokenSet = struct {
 
 const TokenResponse = struct {
     access_token: []const u8,
-    refresh_token: ?[]const u8 = null,
+    refresh_token: []const u8,
     token_type: []const u8,
     expires_in: u64,
     scope: ?[]const u8 = null,
-    account_id: ?[]const u8 = null,
+    account_id: []const u8,
 };
 
 pub fn parseTokenResponse(
     allocator: std.mem.Allocator,
     body: []const u8,
     now_unix_seconds: i64,
-    refresh_policy: RefreshPolicy,
 ) (ProtocolError || std.mem.Allocator.Error)!TokenSet {
     if (body.len == 0 or body.len > Limits.token_body_bytes)
         return error.InvalidTokenResponse;
@@ -417,16 +408,8 @@ pub fn parseTokenResponse(
         .expires_at = expires_at,
     };
     errdefer result.access_token.deinit();
-    result.refresh_token = if (raw.refresh_token) |value| blk: {
-        if (value.len == 0) return error.InvalidTokenResponse;
-        break :blk try Secret.init(allocator, value);
-    } else switch (refresh_policy) {
-        .require_new => return error.MissingRefreshToken,
-        .retain_previous => |previous| try Secret.init(
-            allocator,
-            previous.view(),
-        ),
-    };
+    if (raw.refresh_token.len == 0) return error.MissingRefreshToken;
+    result.refresh_token = try Secret.init(allocator, raw.refresh_token);
     errdefer result.refresh_token.deinit();
 
     const response_scope = raw.scope orelse scope;
@@ -434,87 +417,66 @@ pub fn parseTokenResponse(
         return error.InvalidTokenResponse;
     @memcpy(result.scope_value[0..response_scope.len], response_scope);
     result.scope_len = response_scope.len;
-    if (raw.account_id) |account_id| {
-        if (account_id.len == 0 or account_id.len > result.account_id.len)
-            return error.FieldTooLarge;
-        if (!std.unicode.utf8ValidateSlice(account_id))
-            return error.InvalidEncoding;
-        @memcpy(result.account_id[0..account_id.len], account_id);
-        result.account_id_len = account_id.len;
-    }
+    if (raw.account_id.len == 0 or raw.account_id.len > result.account_id.len)
+        return error.FieldTooLarge;
+    if (!std.unicode.utf8ValidateSlice(raw.account_id))
+        return error.InvalidEncoding;
+    @memcpy(result.account_id[0..raw.account_id.len], raw.account_id);
+    result.account_id_len = raw.account_id.len;
     return result;
 }
 
-pub const Profile = struct {
-    id: [contract.Limits.profile_id_bytes]u8 = undefined,
-    id_len: usize = 0,
-    display_name: [contract.Limits.display_name_bytes]u8 = undefined,
-    display_name_len: usize = 0,
+pub const CurrentUser = struct {
+    username: [contract.Limits.display_name_bytes]u8 = undefined,
+    username_len: usize = 0,
 
-    pub fn idView(self: *const Profile) []const u8 {
-        return self.id[0..self.id_len];
-    }
-
-    pub fn displayName(self: *const Profile) []const u8 {
-        return self.display_name[0..self.display_name_len];
+    pub fn usernameView(self: *const CurrentUser) []const u8 {
+        return self.username[0..self.username_len];
     }
 };
 
-const ProfilesResponse = struct {
-    data: []const ProfileResponse,
+const CurrentUserEnvelope = struct {
+    code: i64,
+    data: CurrentUserResponse,
 };
 
-const ProfileResponse = struct {
-    id: []const u8,
-    name: ?[]const u8 = null,
-    display_name: ?[]const u8 = null,
-    status: []const u8,
-    is_default: bool,
+const CurrentUserResponse = struct {
+    id: i64,
+    username: []const u8,
 };
 
-pub fn parseFirstProfile(body: []const u8) ProtocolError!Profile {
-    if (body.len == 0 or body.len > Limits.profiles_body_bytes)
-        return error.InvalidProfileResponse;
-    var scratch: [Limits.profiles_body_bytes * 2]u8 = undefined;
+pub fn parseCurrentUser(
+    body: []const u8,
+    expected_account_id: []const u8,
+) ProtocolError!CurrentUser {
+    if (body.len == 0 or body.len > Limits.current_user_body_bytes)
+        return error.InvalidCurrentUserResponse;
+    var scratch: [Limits.current_user_body_bytes * 2]u8 = undefined;
     defer std.crypto.secureZero(u8, &scratch);
     var fba = std.heap.FixedBufferAllocator.init(&scratch);
     var parsed = std.json.parseFromSlice(
-        ProfilesResponse,
+        CurrentUserEnvelope,
         fba.allocator(),
         body,
         .{ .ignore_unknown_fields = true },
-    ) catch return error.InvalidProfileResponse;
+    ) catch return error.InvalidCurrentUserResponse;
     defer parsed.deinit();
-    if (parsed.value.data.len > Limits.profile_entries)
-        return error.TooManyProfiles;
-    var first_active: ?ProfileResponse = null;
-    var default_active: ?ProfileResponse = null;
-    for (parsed.value.data) |entry| {
-        if (entry.id.len == 0 or
-            !std.mem.eql(u8, entry.status, "active"))
-            continue;
-        if (first_active == null) first_active = entry;
-        if (entry.is_default) {
-            if (default_active != null)
-                return error.InvalidProfileResponse;
-            default_active = entry;
-        }
-    }
-    const selected = default_active orelse first_active orelse
-        return error.NoProfiles;
-    const display =
-        selected.display_name orelse selected.name orelse selected.id;
-    if (selected.id.len > contract.Limits.profile_id_bytes or
-        display.len > contract.Limits.display_name_bytes)
-        return error.FieldTooLarge;
-    if (!std.unicode.utf8ValidateSlice(selected.id) or
-        !std.unicode.utf8ValidateSlice(display))
-        return error.InvalidEncoding;
-    var result: Profile = .{};
-    @memcpy(result.id[0..selected.id.len], selected.id);
-    result.id_len = selected.id.len;
-    @memcpy(result.display_name[0..display.len], display);
-    result.display_name_len = display.len;
+    const raw = parsed.value;
+    var account_id_storage: [32]u8 = undefined;
+    const account_id = std.fmt.bufPrint(
+        &account_id_storage,
+        "{d}",
+        .{raw.data.id},
+    ) catch return error.InvalidCurrentUserResponse;
+    if (raw.code != 0 or raw.data.id <= 0 or
+        !std.mem.eql(u8, account_id, expected_account_id) or
+        raw.data.username.len == 0 or
+        raw.data.username.len > contract.Limits.display_name_bytes or
+        !std.unicode.utf8ValidateSlice(raw.data.username))
+        return error.InvalidCurrentUserResponse;
+    var result: CurrentUser = .{};
+    @memcpy(result.username[0..raw.data.username.len], raw.data.username);
+    result.username_len = raw.data.username.len;
     return result;
 }
 
@@ -544,7 +506,6 @@ pub fn buildRefreshBody(
         .{ "grant_type", "refresh_token" },
         .{ "client_id", client_id },
         .{ "refresh_token", refresh_token.view() },
-        .{ "scope", scope },
     });
 }
 
@@ -731,59 +692,67 @@ test "callback parser validates RFC 9207 issuer without normalization" {
 }
 
 test "token decoder validates consumed fields and tolerates additive metadata" {
-    var old_refresh = try Secret.init(std.testing.allocator, "old-refresh");
-    defer old_refresh.deinit();
     var tokens = try parseTokenResponse(
         std.testing.allocator,
-        \\{"access_token":"new-access","token_type":"Bearer","expires_in":3600,"scope":"metacode:use","account_id":"acct-1"}
+        \\{"access_token":"new-access","refresh_token":"new-refresh","token_type":"Bearer","expires_in":3600,"scope":"metawork:use","account_id":"acct-1"}
     ,
         100,
-        .{ .retain_previous = &old_refresh },
     );
     defer tokens.deinit();
     try std.testing.expectEqualStrings("new-access", tokens.access_token.view());
-    try std.testing.expectEqualStrings("old-refresh", tokens.refresh_token.view());
+    try std.testing.expectEqualStrings("new-refresh", tokens.refresh_token.view());
     try std.testing.expectEqual(@as(i64, 3700), tokens.expires_at);
     try std.testing.expectEqualStrings("acct-1", tokens.accountId());
     var extended = try parseTokenResponse(
         std.testing.allocator,
-        \\{"access_token":"a","token_type":"Bearer","expires_in":1,"unknown":true}
+        \\{"access_token":"a","refresh_token":"r","token_type":"Bearer","expires_in":1,"account_id":"acct-1","unknown":true}
     ,
         0,
-        .{ .retain_previous = &old_refresh },
     );
     extended.deinit();
     try std.testing.expectError(
         error.InvalidTokenResponse,
         parseTokenResponse(
             std.testing.allocator,
-            \\{"access_token":"a","token_type":"Bearer","expires_in":1,"scope":"unexpected"}
+            \\{"access_token":"a","refresh_token":"r","token_type":"Bearer","expires_in":1,"scope":"unexpected","account_id":"acct-1"}
         ,
             0,
-            .{ .retain_previous = &old_refresh },
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidTokenResponse,
+        parseTokenResponse(
+            std.testing.allocator,
+            \\{"access_token":"a","refresh_token":"r","token_type":"Bearer","expires_in":1,"scope":"metawork:use"}
+        ,
+            0,
         ),
     );
 }
 
-test "profile decoder selects one active default and tolerates additive metadata" {
-    const profile = try parseFirstProfile(
-        \\{"data":[
-        \\{"id":"profile-1","name":"first","display_name":"First",
-        \\"status":"active","platform":"anthropic","group_id":1,
-        \\"group_name":"First","expires_at":null,"is_default":false},
-        \\{"id":"profile-2","name":"main","display_name":"Main",
-        \\"status":"active","platform":"anthropic","group_id":2,
-        \\"group_name":"Main","expires_at":null,"is_default":true}]}
+test "current user decoder binds username to the token account" {
+    const info = try parseCurrentUser(
+        \\{"code":0,"message":"success","data":{"id":42,"email":"user@example.com","username":"Meta User","role":"user","unknown":true}}
+    ,
+        "42",
     );
-    try std.testing.expectEqualStrings("profile-2", profile.idView());
-    try std.testing.expectEqualStrings("Main", profile.displayName());
-    const extended = try parseFirstProfile(
-        \\{"data":[{"id":"profile-1","name":"main",
-        \\"display_name":"Main","status":"active",
-        \\"platform":"anthropic","group_id":1,"group_name":"Main",
-        \\"expires_at":null,"is_default":true,"extra":"allowed"}]}
+    try std.testing.expectEqualStrings("Meta User", info.usernameView());
+    try std.testing.expectError(
+        error.InvalidCurrentUserResponse,
+        parseCurrentUser(
+            \\{"code":0,"data":{"id":43,"username":"Meta User"}}
+        ,
+            "42",
+        ),
     );
-    try std.testing.expectEqualStrings("profile-1", extended.idView());
+    try std.testing.expectError(
+        error.InvalidCurrentUserResponse,
+        parseCurrentUser(
+            \\{"code":0,"data":{"id":42,"username":""}}
+        ,
+            "42",
+        ),
+    );
 }
 
 test "authorization code and refresh bodies do not widen client contract" {
@@ -799,7 +768,7 @@ test "authorization code and refresh bodies do not widen client contract" {
     try std.testing.expect(std.mem.indexOf(
         u8,
         body,
-        "client_id=metacode-cli",
+        "client_id=metawork-app",
     ) != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "code=abc%20%2F%3F") != null);
     try std.testing.expect(std.mem.indexOf(
@@ -807,4 +776,12 @@ test "authorization code and refresh bodies do not widen client contract" {
         body,
         "redirect_uri=http%3A%2F%2F127.0.0.1%3A12345%2Fauth%2Fcallback",
     ) != null);
+
+    var refresh = try Secret.init(std.testing.allocator, "refresh-token");
+    defer refresh.deinit();
+    const refresh_body = try buildRefreshBody(&body_storage, &refresh);
+    try std.testing.expectEqualStrings(
+        "grant_type=refresh_token&client_id=metawork-app&refresh_token=refresh-token",
+        refresh_body,
+    );
 }

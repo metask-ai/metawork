@@ -54,7 +54,6 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-account-oauth", .root_module = test_modules.account_oauth },
         .{ .name = "metawork-metask-client", .root_module = test_modules.metask_client },
         .{ .name = "metawork-account-credential-store", .root_module = test_modules.account_credential_store },
-        .{ .name = "metawork-account-windows-store", .root_module = test_modules.account_windows_store },
         .{ .name = "metawork-account-platform", .root_module = test_modules.account_platform },
         .{ .name = "metawork-account-loopback", .root_module = test_modules.account_loopback },
         .{ .name = "metawork-account-login-attempt", .root_module = test_modules.account_login_attempt },
@@ -144,7 +143,6 @@ const WiredModules = struct {
     account_credentials_runtime: *std.Build.Module,
     account_contract: *std.Build.Module,
     account_credential_store: *std.Build.Module,
-    account_windows_store: *std.Build.Module,
     account_loopback: *std.Build.Module,
     account_login_attempt: *std.Build.Module,
     account_network_attempt: *std.Build.Module,
@@ -553,6 +551,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     });
     account_credentials_runtime.addImport("account_state", account_state);
     account_credentials_runtime.addImport("account_oauth", account_oauth);
+    account_credentials_runtime.addImport("metawork_account_contract", account_contract);
     account_credentials_runtime.addImport("metask_client", metask_client);
     account_credentials_runtime.addImport("account_catalog", account_catalog);
     const account_network_attempt = b.createModule(.{
@@ -572,28 +571,20 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .optimize = root_module.optimize,
     });
     account_credential_store.addImport("metawork_account_contract", account_contract);
-    account_credential_store.addImport("account_state", account_state);
     account_credential_store.addImport("account_oauth", account_oauth);
     account_credential_store.addImport("metawork_product_identity", product_identity);
-    const account_windows_store = b.createModule(.{
-        .root_source_file = b.path("src/account/windows_store.zig"),
-        .target = root_module.resolved_target,
-        .optimize = root_module.optimize,
-    });
-    account_windows_store.addImport("metawork_account_contract", account_contract);
-    account_windows_store.addImport("account_state", account_state);
-    account_windows_store.addImport("account_oauth", account_oauth);
+    account_credential_store.addImport(
+        "build_options",
+        existingImport(runner, "build_options"),
+    );
     const account_platform = b.createModule(.{
         .root_source_file = b.path("src/account/platform.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     account_platform.addImport("native_sdk", existingImport(root_module, "native_sdk"));
-    account_platform.addImport("metawork_account_contract", account_contract);
-    account_platform.addImport("account_state", account_state);
     account_platform.addImport("account_oauth", account_oauth);
     account_platform.addImport("account_credential_store", account_credential_store);
-    account_platform.addImport("account_windows_store", account_windows_store);
     const account_runtime = b.createModule(.{
         .root_source_file = b.path("src/account/runtime.zig"),
         .target = target,
@@ -603,7 +594,6 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     account_runtime.addImport("account_state", account_state);
     account_runtime.addImport("metask_client", metask_client);
     account_runtime.addImport("account_credential_store", account_credential_store);
-    account_runtime.addImport("account_windows_store", account_windows_store);
     account_runtime.addImport("account_platform", account_platform);
     account_runtime.addImport("account_login_attempt", account_login_attempt);
     account_runtime.addImport("account_catalog", account_catalog);
@@ -618,7 +608,6 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     account.addImport("account_oauth", account_oauth);
     account.addImport("metask_client", metask_client);
     account.addImport("account_credential_store", account_credential_store);
-    account.addImport("account_windows_store", account_windows_store);
     account.addImport("account_platform", account_platform);
     account.addImport("account_loopback", account_loopback);
     account.addImport("account_login_attempt", account_login_attempt);
@@ -784,6 +773,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .optimize = root_module.optimize,
     });
     app.addImport("runner", runner);
+    app.addImport("build_options", existingImport(runner, "build_options"));
     app.addImport("native_sdk", existingImport(root_module, "native_sdk"));
     app.addImport("metawork_agent", agent);
     app.addImport("metawork_workbench", workbench);
@@ -804,7 +794,6 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .account_credentials_runtime = account_credentials_runtime,
         .account_contract = account_contract,
         .account_credential_store = account_credential_store,
-        .account_windows_store = account_windows_store,
         .account_loopback = account_loopback,
         .account_login_attempt = account_login_attempt,
         .account_network_attempt = account_network_attempt,

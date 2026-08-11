@@ -1118,12 +1118,6 @@ summary::-webkit-details-marker {
   content: "";
 }
 
-.settings-identity-row[data-session-state="reauth_required"]
-  .settings-identity-copy
-  span::before {
-  background: #b7791f;
-}
-
 .settings-execution-group {
   position: relative;
   margin-top: 14px;

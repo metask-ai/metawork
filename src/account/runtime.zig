@@ -4,7 +4,6 @@ const contract = @import("metawork_account_contract");
 const state_impl = @import("account_state");
 const metask_client = @import("metask_client");
 const credential_store = @import("account_credential_store");
-const windows_store = @import("account_windows_store");
 const platform_impl = @import("account_platform");
 const login_attempt = @import("account_login_attempt");
 const catalog_impl = @import("account_catalog");
@@ -66,7 +65,6 @@ const Effects = struct {
             rotation: credentials_impl.CredentialRotation,
         },
         completion: state_impl.WorkerCompletion,
-        logout_persistence_unknown: u64,
         execution_persistence_unknown: u64,
 
         fn deinit(self: *MailboxResult) void {
@@ -74,7 +72,6 @@ const Effects = struct {
                 .login => |*entry| entry.result.deinit(),
                 .refresh => |*entry| entry.rotation.deinit(),
                 .completion => |*completion| completion.deinit(),
-                .logout_persistence_unknown,
                 .execution_persistence_unknown,
                 => {},
             }
@@ -85,7 +82,6 @@ const Effects = struct {
                 .login => |entry| entry.attempt_id,
                 .refresh => |entry| entry.attempt_id,
                 .completion => |completion| completion.attempt_id,
-                .logout_persistence_unknown,
                 .execution_persistence_unknown,
                 => |attempt_id| attempt_id,
             };
@@ -169,7 +165,6 @@ const Effects = struct {
     fn publishPersistenceUnknown(
         self: *Effects,
         attempt_id: u64,
-        kind: enum { logout, execution },
     ) void {
         self.lockMailbox();
         if (self.mailbox != null) {
@@ -177,10 +172,7 @@ const Effects = struct {
             self.unlockMailbox();
             return;
         }
-        self.mailbox = switch (kind) {
-            .logout => .{ .logout_persistence_unknown = attempt_id },
-            .execution => .{ .execution_persistence_unknown = attempt_id },
-        };
+        self.mailbox = .{ .execution_persistence_unknown = attempt_id };
         self.unlockMailbox();
         self.notify();
     }
@@ -282,34 +274,11 @@ const Effects = struct {
         self.replaceWithFailure(attempt_id, error_code);
     }
 
-    fn reopenLogin(
-        self: *Effects,
-        attempt_id: u64,
-        platform: *platform_impl.NativeBackend,
-    ) void {
-        if (!self.login_active or
-            !self.login_attempt.matches(attempt_id))
-        {
-            self.failLoginAttempt(
-                attempt_id,
-                .dependency_contract_invalid,
-            );
-            return;
-        }
-        platform.openAuthorizationUrl(
-            self.login_attempt.authorizationUrl(),
-        ) catch self.failLoginAttempt(
-            attempt_id,
-            .oauth_browser_open_failed,
-        );
-    }
-
     fn startRefresh(
         self: *Effects,
         attempt_id: u64,
         credentials: *const credentials_impl.CredentialOwner,
         now_unix_seconds: i64,
-        expected_identity: ?state_impl.AccountIdentity,
     ) void {
         self.network_attempt.startRefresh(
             self.allocator,
@@ -317,9 +286,26 @@ const Effects = struct {
             attempt_id,
             self.clientTransport(),
             credentials,
-            expected_identity,
             self.networkSink(),
             now_unix_seconds,
+        ) catch self.publishCompletion(.{
+            .attempt_id = attempt_id,
+            .payload = .{ .failed = .fromCode(.local_resource_exhausted) },
+        });
+    }
+
+    fn startLoadIdentity(
+        self: *Effects,
+        attempt_id: u64,
+        credentials: *const credentials_impl.CredentialOwner,
+    ) void {
+        self.network_attempt.startLoadIdentity(
+            self.allocator,
+            self.io,
+            attempt_id,
+            self.clientTransport(),
+            credentials,
+            self.networkSink(),
         ) catch self.publishCompletion(.{
             .attempt_id = attempt_id,
             .payload = .{ .failed = .fromCode(.local_resource_exhausted) },
@@ -465,8 +451,8 @@ pub const Prepared = struct {
     follow_up: ?contract.AccountCommand = null,
     automatic_selection: AutomaticSelection = .none,
     refresh_after_commit: bool = false,
-    cleanup_after_commit: bool = false,
     schedule_refresh_after_commit: bool = false,
+    retry_refresh_after_commit: bool = false,
 
     pub fn fact(self: *const Prepared) contract.AccountFact {
         return self.transition.fact();
@@ -482,13 +468,27 @@ pub const Prepared = struct {
         return self.transition.attempt_id;
     }
 
+    pub fn operationComplete(self: *const Prepared) bool {
+        return self.transition.operationComplete();
+    }
+
+    pub fn identityReplacementBoundary(
+        self: *const Prepared,
+    ) state_impl.IdentityReplacementBoundary {
+        return self.transition.identityReplacementBoundary();
+    }
+
+    pub fn clearsDefaultExecution(self: *const Prepared) bool {
+        return self.transition.clearsDefaultExecution();
+    }
+
     pub fn deinit(self: *Prepared) void {
         self.transition.deinit();
         self.follow_up = null;
         self.automatic_selection = .none;
         self.refresh_after_commit = false;
-        self.cleanup_after_commit = false;
         self.schedule_refresh_after_commit = false;
+        self.retry_refresh_after_commit = false;
     }
 };
 
@@ -513,8 +513,7 @@ pub const Runtime = struct {
     candidate_public_catalog: catalog_impl.PublicCatalog = .{},
     platform: ?platform_impl.NativeBackend = null,
     credentials: credentials_impl.CredentialOwner = .{},
-    windows_public_state: ?windows_store.PublicState = null,
-    catalog_after_refresh: bool = false,
+    saved_preference: ?credential_store.Preference = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -543,8 +542,7 @@ pub const Runtime = struct {
         std.debug.assert(self.platform == null);
         self.effects.deinit();
         self.credentials.deinit();
-        self.windows_public_state = null;
-        self.catalog_after_refresh = false;
+        self.saved_preference = null;
         self.candidate_public_catalog.clear();
         self.* = undefined;
     }
@@ -560,13 +558,10 @@ pub const Runtime = struct {
             self.io,
             self.main_thread_id,
             self.account_path_storage[0..self.account_path_len],
-        ) catch |err| return self.preparedRestoreFailure(
+        ) catch |err| return self.preparedSignedOutRestoreFailure(
             accountRestoreError(err),
         );
-        return if (builtin.os.tag == .windows)
-            self.prepareWindowsRestore()
-        else
-            self.prepareMacosRestore();
+        return self.prepareRestore();
     }
 
     pub fn prepareAutomationStart(self: *Runtime) Prepared {
@@ -579,7 +574,7 @@ pub const Runtime = struct {
 
     pub fn prepareStartUnavailable(self: *Runtime) Prepared {
         self.assertMainThread();
-        return self.preparedRestoreFailure(
+        return self.preparedSignedOutRestoreFailure(
             .credential_store_read_failed,
         );
     }
@@ -590,6 +585,16 @@ pub const Runtime = struct {
     ) PrepareResult {
         self.assertMainThread();
         const account_view = self.view();
+        switch (command) {
+            .begin_login => {
+                if (account_view.state == .signed_out and
+                    self.credentials.refreshAvailable())
+                    return wrapPrepareResult(
+                        self.account.prepareRestoredTokenRefresh(),
+                    );
+            },
+            else => {},
+        }
         switch (command) {
             .select_api_key => |selection| {
                 if (selection.expected_catalog_generation !=
@@ -655,15 +660,7 @@ pub const Runtime = struct {
 
     pub fn prepareRestoredRefresh(self: *Runtime) Prepared {
         self.assertMainThread();
-        return switch (self.account.prepareTokenRefresh()) {
-            .transition => |transition| .{ .transition = transition },
-            .rejected => |error_code| preparedFromState(
-                self.account.prepareRestoredRefreshAdmissionFailure(
-                    error_code,
-                ),
-            ),
-            .ignored_stale => unreachable,
-        };
+        return preparedFromState(self.account.prepareRestoredTokenRefresh());
     }
 
     pub fn prepareContinuationFailure(
@@ -672,6 +669,20 @@ pub const Runtime = struct {
     ) Prepared {
         self.assertMainThread();
         return preparedFromState(self.account.prepareIdleFailure(error_code));
+    }
+
+    pub fn prepareActiveAttemptFailure(
+        self: *Runtime,
+        error_code: contract.ErrorCode,
+    ) Prepared {
+        self.assertMainThread();
+        const attempt_id = self.account.activeAttempt() orelse
+            @panic("Account effect admission failed without an active attempt");
+        var completion: state_impl.WorkerCompletion = .{
+            .attempt_id = attempt_id,
+            .payload = .{ .failed = .fromCode(error_code) },
+        };
+        return preparedFromState(self.account.prepareCompletion(&completion));
     }
 
     pub fn prepareShutdown(self: *Runtime) Prepared {
@@ -696,9 +707,9 @@ pub const Runtime = struct {
                         .dependency_contract_invalid,
                     );
                 break :result switch (entry.result) {
-                    .authenticated => |*login| self.prepareAuthenticatedLogin(
+                    .authorized => |*tokens| self.prepareAuthorizedLogin(
                         entry.attempt_id,
-                        login,
+                        tokens,
                     ),
                     .failed => |failure| self.prepareFailureValue(
                         entry.attempt_id,
@@ -727,9 +738,6 @@ pub const Runtime = struct {
                 completion,
                 collision,
             ),
-            .logout_persistence_unknown => wrapPrepareResult(
-                self.account.prepareLogoutPersistenceUnknown(),
-            ),
             .execution_persistence_unknown => wrapPrepareResult(
                 self.account.prepareExecutionPersistenceUnknown(),
             ),
@@ -749,15 +757,15 @@ pub const Runtime = struct {
     ) contract.AccountFact {
         self.assertMainThread();
         var fact = prepared.fact();
-        if (fact.view.session_state == .signed_out or
-            fact.view.session_state == .shutting_down or
-            (fact.view.operation == .none and
-                fact.view.execution_state == .none))
+        if (fact.view.state != .authenticated or
+            fact.view.catalog_state == .unavailable)
             return fact;
         const catalog = if (completesCatalogTransaction(fact))
             &self.candidate_public_catalog
+        else if (prepared.transition.candidateCatalogActive())
+            &self.candidate_public_catalog
         else
-            self.catalogForOperation(fact.view.operation);
+            &self.effects.public_catalog;
         catalog.decorate(&fact.view);
         return fact;
     }
@@ -784,11 +792,7 @@ pub const Runtime = struct {
             );
             self.candidate_public_catalog.clear();
         }
-        if (fact.view.session_state == .signed_out or
-            fact.view.session_state == .shutting_down or
-            (fact.view.operation == .none and
-                fact.view.execution_state == .none))
-        {
+        if (prepared.clearsDefaultExecution()) {
             self.effects.public_catalog.clear();
             self.candidate_public_catalog.clear();
         }
@@ -834,9 +838,17 @@ pub const Runtime = struct {
 
     pub fn dispatchCommitted(self: *Runtime, prepared: *Prepared) void {
         self.assertMainThread();
-        if (prepared.cleanup_after_commit) self.retryCleanup();
         if (prepared.schedule_refresh_after_commit)
             self.scheduleRefresh();
+        if (prepared.retry_refresh_after_commit) {
+            if (self.platform) |*platform|
+                platform_impl.startTimer(
+                    platform,
+                    refresh_timer_id,
+                    refresh_retry_ns,
+                    false,
+                ) catch {};
+        }
         const entry = self.effects.queue.take() orelse return;
         self.dispatchEffect(entry);
     }
@@ -852,13 +864,8 @@ pub const Runtime = struct {
         completion: *state_impl.WorkerCompletion,
         collision: bool,
     ) PrepareResult {
-        const operation = self.account.view().operation;
-        if (self.catalog_after_refresh and
-            operation == .token_exchange and
-            completion.payload == .failed)
-            self.catalog_after_refresh = false;
-        const catalog_attempt = operation == .loading_keys or
-            operation == .loading_models;
+        const catalog_attempt = self.account.catalogAttemptActive();
+        const refresh_attempt = self.account.refreshInFlight();
         self.effects.joinNetwork(completion.attempt_id);
         if (collision and
             self.account.activeAttempt() == completion.attempt_id)
@@ -873,6 +880,26 @@ pub const Runtime = struct {
         }
         if (catalog_attempt and completion.payload == .failed)
             self.effects.catalog.reset();
+
+        if (completion.payload == .failed and
+            completion.payload.failed.error_code == .metask_unauthorized and
+            self.account.credentialValidationInFlight())
+            completion.payload.failed.error_code =
+                self.deleteInvalidCredential();
+
+        const loaded_identity: ?state_impl.AccountIdentity = switch (completion.payload) {
+            .identity_loaded => |identity| identity,
+            else => null,
+        };
+        const retry_refresh = refresh_attempt and
+            completion.payload == .failed and
+            completion.payload.failed.error_code != .metask_unauthorized and
+            completion.payload.failed.error_code != .credential_store_delete_failed and
+            self.account.currentIdentity() != null;
+        if (loaded_identity) |identity| {
+            if (self.platform) |*platform|
+                self.discardForeignPreference(platform, identity.accountId());
+        }
 
         const current_view = self.account.view();
         const automatic_selection: AutomaticSelection = switch (completion.payload) {
@@ -898,63 +925,57 @@ pub const Runtime = struct {
             .transition => |transition| .{ .prepared = .{
                 .transition = transition,
                 .automatic_selection = automatic_selection,
+                .follow_up = if (loaded_identity != null)
+                    .refresh_catalog
+                else
+                    null,
+                .schedule_refresh_after_commit = loaded_identity != null,
+                .retry_refresh_after_commit = retry_refresh,
             } },
             .rejected => |error_code| .{ .rejected = error_code },
             .ignored_stale => .ignored_stale,
         };
     }
 
-    fn prepareAuthenticatedLogin(
+    fn deleteInvalidCredential(self: *Runtime) contract.ErrorCode {
+        const result: contract.ErrorCode = if (self.platform) |*platform| blk: {
+            credential_store.commitSignedOut(platform.backend()) catch |err|
+                break :blk accountStoreError(err);
+            break :blk .metask_unauthorized;
+        } else .credential_store_delete_failed;
+        self.credentials.clear();
+        self.saved_preference = null;
+        self.cancelRefreshTimer();
+        self.effects.clearCatalog();
+        self.candidate_public_catalog.clear();
+        return result;
+    }
+
+    fn prepareAuthorizedLogin(
         self: *Runtime,
         attempt_id: u64,
-        login: *metask_client.LoginResult,
+        tokens: *metask_client.AuthorizationResult,
     ) PrepareResult {
         const platform = if (self.platform) |*value| value else return self.prepareFailure(
             attempt_id,
             .credential_store_write_failed,
         );
-        var cleanup_pending = false;
-        if (builtin.os.tag == .windows) {
-            self.windows_public_state = windows_store.commitAuthenticated(
-                platform.backend(),
-                &login.tokens.refresh_token,
-                login.identity,
-            ) catch |err| return self.prepareFailure(
-                attempt_id,
-                accountStoreError(err),
-            );
-        } else {
-            var generation: credential_store.Generation = undefined;
-            std.Io.randomSecure(self.io, &generation) catch
-                return self.prepareFailure(
-                    attempt_id,
-                    .local_resource_exhausted,
-                );
-            const committed = credential_store.commitAccountOnly(
-                platform.backend(),
-                generation,
-                &login.tokens,
-                &login.identity,
-                self.account.executionHighWatermark(),
-            ) catch |err| return self.prepareFailure(
-                attempt_id,
-                accountStoreError(err),
-            );
-            cleanup_pending = committed.retired_cleanup_pending;
-        }
-        self.credentials.replace(&login.tokens);
-        self.credentials.setCleanupPending(cleanup_pending);
+        credential_store.commitRefresh(
+            platform.backend(),
+            &tokens.refresh_token,
+        ) catch |err| return self.prepareFailure(
+            attempt_id,
+            accountStoreError(err),
+        );
+        self.credentials.replace(tokens);
         var completion: state_impl.WorkerCompletion = .{
             .attempt_id = attempt_id,
-            .payload = .{ .authenticated = login.identity },
+            .payload = .tokens_persisted,
         };
         defer completion.deinit();
         return switch (self.account.prepareCompletion(&completion)) {
             .transition => |transition| .{ .prepared = .{
                 .transition = transition,
-                .follow_up = .refresh_catalog,
-                .cleanup_after_commit = builtin.os.tag != .windows,
-                .schedule_refresh_after_commit = true,
             } },
             .rejected => |error_code| .{ .rejected = error_code },
             .ignored_stale => .ignored_stale,
@@ -966,91 +987,36 @@ pub const Runtime = struct {
         attempt_id: u64,
         rotation: *credentials_impl.CredentialRotation,
     ) PrepareResult {
-        const continue_catalog = self.catalog_after_refresh;
-        self.catalog_after_refresh = false;
-        const identity = self.account.currentIdentity() orelse
-            return self.prepareFailure(
-                attempt_id,
-                .dependency_contract_invalid,
-            );
-        if (continue_catalog) {
-            const refreshed_identity = rotation.refreshedIdentity() orelse
-                return self.prepareFailure(
-                    attempt_id,
-                    .dependency_contract_invalid,
-                );
-            if (!std.mem.eql(
-                u8,
-                refreshed_identity.accountId(),
-                identity.accountId(),
-            ) or !std.mem.eql(
-                u8,
-                refreshed_identity.profileId(),
-                identity.profileId(),
-            )) return self.prepareFailure(
-                attempt_id,
-                .account_mismatch,
-            );
-        }
-        if (rotation.accountId().len > 0 and
-            !std.mem.eql(
-                u8,
-                rotation.accountId(),
-                identity.accountId(),
-            )) return self.prepareFailure(
-            attempt_id,
-            .account_mismatch,
-        );
+        const identity = self.account.currentIdentity();
+        const belongs_to_current_account = if (identity) |current|
+            rotation.belongsToAccount(current.accountId())
+        else
+            true;
         const platform = if (self.platform) |*value| value else return self.prepareFailure(
             attempt_id,
             .credential_store_write_failed,
         );
-        var cleanup_pending = false;
-        if (builtin.os.tag == .windows) {
-            windows_store.commitRefresh(
-                platform.backend(),
-                &rotation.persistenceInput().refresh_token,
-            ) catch |err| return self.prepareFailure(
-                attempt_id,
-                accountStoreError(err),
-            );
-        } else {
-            var generation: credential_store.Generation = undefined;
-            std.Io.randomSecure(self.io, &generation) catch
-                return self.prepareFailure(
-                    attempt_id,
-                    .local_resource_exhausted,
-                );
-            const committed = credential_store.commitAccountOnly(
-                platform.backend(),
-                generation,
-                rotation.persistenceInput(),
-                &identity,
-                self.account.executionHighWatermark(),
-            ) catch |err| return self.prepareFailure(
-                attempt_id,
-                accountStoreError(err),
-            );
-            cleanup_pending = committed.retired_cleanup_pending;
-        }
-        self.credentials.replaceRotation(rotation);
-        self.credentials.setCleanupPending(
-            self.credentials.cleanupPending() or cleanup_pending,
+        credential_store.commitRefresh(
+            platform.backend(),
+            &rotation.persistenceInput().refresh_token,
+        ) catch |err| return self.prepareFailure(
+            attempt_id,
+            accountStoreError(err),
         );
+        self.credentials.replaceRotation(rotation);
+        if (!belongs_to_current_account) {
+            const error_code = self.deleteInvalidCredential();
+            return self.prepareFailure(attempt_id, error_code);
+        }
         var completion: state_impl.WorkerCompletion = .{
             .attempt_id = attempt_id,
-            .payload = .token_refreshed,
+            .payload = .tokens_persisted,
         };
         defer completion.deinit();
         return switch (self.account.prepareCompletion(&completion)) {
             .transition => |transition| .{ .prepared = .{
                 .transition = transition,
-                .follow_up = if (continue_catalog)
-                    .refresh_catalog
-                else
-                    null,
-                .cleanup_after_commit = builtin.os.tag != .windows,
-                .schedule_refresh_after_commit = true,
+                .schedule_refresh_after_commit = identity != null,
             } },
             .rejected => |error_code| .{ .rejected = error_code },
             .ignored_stale => .ignored_stale,
@@ -1107,26 +1073,13 @@ pub const Runtime = struct {
                 };
                 self.effects.startLogin(attempt_id, platform, now);
             },
-            .reopen_oauth => {
-                const attempt_id = entry.attempt_id orelse
-                    @panic("OAuth reopen effect has no attempt");
-                const platform = if (self.platform) |*value| value else {
-                    self.effects.failLoginAttempt(
-                        attempt_id,
-                        .credential_store_read_failed,
-                    );
-                    return;
-                };
-                self.effects.reopenLogin(attempt_id, platform);
-            },
             .cancel_attempt => |attempt_id| self.effects.cancelAttemptAndDiscard(
                 attempt_id,
             ),
-            .persist_signed_out_tombstone => self.persistSignedOut(
+            .delete_credential => self.persistSignedOut(
                 entry.attempt_id orelse
                     @panic("logout effect has no attempt"),
             ),
-            .delete_retired_credentials => self.retryCleanup(),
             .shutdown => {
                 self.cancelRefreshTimer();
                 self.effects.cancelJoinAndDiscard();
@@ -1158,10 +1111,23 @@ pub const Runtime = struct {
                     attempt_id,
                     &self.credentials,
                     now,
-                    if (self.catalog_after_refresh)
-                        self.account.currentIdentity()
-                    else
-                        null,
+                );
+            },
+            .load_identity => {
+                const attempt_id = entry.attempt_id orelse
+                    @panic("identity effect has no attempt");
+                if (!self.credentials.available()) {
+                    self.effects.publishCompletion(.{
+                        .attempt_id = attempt_id,
+                        .payload = .{ .failed = .fromCode(
+                            .credential_store_read_failed,
+                        ) },
+                    });
+                    return;
+                }
+                self.effects.startLoadIdentity(
+                    attempt_id,
+                    &self.credentials,
                 );
             },
             .load_api_keys => {
@@ -1216,32 +1182,7 @@ pub const Runtime = struct {
             });
             return;
         };
-        const cleanup_pending = if (builtin.os.tag == .windows) blk: {
-            windows_store.commitSignedOut(platform.backend()) catch |err| {
-                self.effects.publishCompletion(.{
-                    .attempt_id = attempt_id,
-                    .payload = .{ .failed = .fromCode(
-                        accountStoreError(err),
-                    ) },
-                });
-                return;
-            };
-            self.windows_public_state = null;
-            break :blk false;
-        } else credential_store.commitSignedOut(
-            platform.backend(),
-            self.account.executionHighWatermark(),
-        ) catch |err| {
-            if (err == error.PersistenceOutcomeUnknown) {
-                self.credentials.clear();
-                self.credentials.setCleanupPending(true);
-                self.effects.publishPersistenceUnknown(
-                    attempt_id,
-                    .logout,
-                );
-                self.retryCleanup();
-                return;
-            }
+        credential_store.commitSignedOut(platform.backend()) catch |err| {
             self.effects.publishCompletion(.{
                 .attempt_id = attempt_id,
                 .payload = .{ .failed = .fromCode(
@@ -1250,11 +1191,11 @@ pub const Runtime = struct {
             });
             return;
         };
+        self.saved_preference = null;
         self.credentials.clear();
         self.cancelRefreshTimer();
         self.effects.clearCatalog();
         self.candidate_public_catalog.clear();
-        self.credentials.setCleanupPending(cleanup_pending);
         self.effects.publishCompletion(.{
             .attempt_id = attempt_id,
             .payload = .logged_out,
@@ -1266,15 +1207,6 @@ pub const Runtime = struct {
         attempt_id: u64,
         model: []const u8,
     ) void {
-        const platform = if (self.platform) |*value| value else {
-            self.effects.publishCompletion(.{
-                .attempt_id = attempt_id,
-                .payload = .{ .failed = .fromCode(
-                    .credential_store_write_failed,
-                ) },
-            });
-            return;
-        };
         const identity = self.account.currentIdentity() orelse {
             self.effects.publishCompletion(.{
                 .attempt_id = attempt_id,
@@ -1286,15 +1218,21 @@ pub const Runtime = struct {
         };
         const account_view = self.account.view();
         defer self.effects.catalog.reset();
-        const execution_generation = std.math.add(
-            u64,
-            self.account.executionHighWatermark(),
-            1,
-        ) catch {
+        const restored_generation = self.savedExecutionGenerationFor(
+            identity.accountId(),
+            self.effects.catalog.selectedApiKeyId(),
+            model,
+            account_view.execution_generation,
+        );
+        const execution_generation = restored_generation orelse
+            generateExecutionGeneration(
+                self.io,
+                account_view.execution_generation,
+            ) catch {
             self.effects.publishCompletion(.{
                 .attempt_id = attempt_id,
                 .payload = .{ .failed = .fromCode(
-                    .generation_mismatch,
+                    .local_resource_exhausted,
                 ) },
             });
             return;
@@ -1316,46 +1254,28 @@ pub const Runtime = struct {
             },
         };
         defer execution.deinit();
-        if (builtin.os.tag == .windows) {
-            self.windows_public_state = windows_store.commitSelection(
+        if (restored_generation == null) {
+            const platform = if (self.platform) |*value| value else {
+                self.effects.publishCompletion(.{
+                    .attempt_id = attempt_id,
+                    .payload = .{ .failed = .fromCode(
+                        .credential_store_write_failed,
+                    ) },
+                });
+                return;
+            };
+            self.saved_preference = credential_store.commitPreference(
                 platform.backend(),
-                identity,
+                identity.accountId(),
                 self.effects.catalog.selectedApiKeyId(),
                 model,
-            ) catch |err| {
-                self.effects.publishCompletion(.{
-                    .attempt_id = attempt_id,
-                    .payload = .{ .failed = .fromCode(
-                        accountStoreError(err),
-                    ) },
-                });
-                return;
-            };
-        } else {
-            var generation: credential_store.Generation = undefined;
-            std.Io.randomSecure(self.io, &generation) catch {
-                self.effects.publishCompletion(.{
-                    .attempt_id = attempt_id,
-                    .payload = .{ .failed = .fromCode(
-                        .local_resource_exhausted,
-                    ) },
-                });
-                return;
-            };
-            const committed = credential_store.commitExecutionReady(
-                platform.backend(),
-                generation,
-                identity.accountId(),
-                identity.profileId(),
-                self.effects.catalog.selectedApiKeyId(),
-                &execution,
+                execution_generation,
             ) catch |err| {
                 if (err == error.PersistenceOutcomeUnknown) {
                     self.effects.public_catalog.clear();
                     self.candidate_public_catalog.clear();
                     self.effects.publishPersistenceUnknown(
                         attempt_id,
-                        .execution,
                     );
                     return;
                 }
@@ -1367,16 +1287,11 @@ pub const Runtime = struct {
                 });
                 return;
             };
-            self.credentials.setCleanupPending(
-                self.credentials.cleanupPending() or
-                    committed.retired_cleanup_pending,
-            );
         }
         self.effects.publishCompletion(.{
             .attempt_id = attempt_id,
             .payload = .{ .execution_ready = execution.take() },
         });
-        if (builtin.os.tag != .windows) self.retryCleanup();
     }
 
     fn automaticApiSelection(
@@ -1384,17 +1299,16 @@ pub const Runtime = struct {
         catalog: *const catalog_impl.CatalogSession,
         account_view: contract.AccountView,
     ) ?[]const u8 {
-        if (account_view.execution_state == .ready) {
+        if (account_view.execution_generation != 0) {
             if (account_view.candidate_api_key_id.len != 0) return null;
             if (catalog.hasApiKey(account_view.selected_api_key_id))
                 return account_view.selected_api_key_id;
             return null;
         }
-        if (account_view.execution_state != .none) return null;
-        if (builtin.os.tag == .windows) if (self.windows_public_state) |*saved| {
+        if (self.savedPreferenceFor(account_view.account_id)) |saved| {
             const id = saved.apiKeyId();
-            if (id.len > 0 and catalog.hasApiKey(id)) return id;
-        };
+            if (catalog.hasApiKey(id)) return id;
+        }
         return catalog.uniqueApiKeyId();
     }
 
@@ -1403,7 +1317,7 @@ pub const Runtime = struct {
         catalog: *const catalog_impl.CatalogSession,
         account_view: contract.AccountView,
     ) ?[]const u8 {
-        if (account_view.execution_state == .ready) {
+        if (account_view.execution_generation != 0) {
             if (account_view.candidate_model.len != 0 or
                 !std.mem.eql(
                     u8,
@@ -1414,16 +1328,14 @@ pub const Runtime = struct {
                 return account_view.selected_model;
             return null;
         }
-        if (account_view.execution_state != .none) return null;
-        if (builtin.os.tag == .windows) if (self.windows_public_state) |*saved| {
+        if (self.savedPreferenceFor(account_view.account_id)) |saved| {
             const id = saved.modelId();
-            if (id.len > 0 and
-                std.mem.eql(
-                    u8,
-                    catalog.selectedApiKeyId(),
-                    saved.apiKeyId(),
-                ) and catalog.hasModel(id)) return id;
-        };
+            if (std.mem.eql(
+                u8,
+                catalog.selectedApiKeyId(),
+                saved.apiKeyId(),
+            ) and catalog.hasModel(id)) return id;
+        }
         return catalog.uniqueModelId();
     }
 
@@ -1451,49 +1363,62 @@ pub const Runtime = struct {
         ) catch {};
     }
 
-    fn retryCleanup(self: *Runtime) void {
-        if (builtin.os.tag == .windows) return;
-        if (!self.credentials.cleanupPending()) return;
-        const platform = if (self.platform) |*value| value else return;
-        self.credentials.setCleanupPending(
-            credential_store.cleanupRetiredCredentials(
-                platform.backend(),
-            ) catch true,
-        );
+    fn savedPreferenceFor(
+        self: *const Runtime,
+        account_id: []const u8,
+    ) ?*const credential_store.Preference {
+        const saved = if (self.saved_preference) |*value| value else return null;
+        if (!std.mem.eql(u8, saved.ownerAccountId(), account_id)) return null;
+        return saved;
+    }
+
+    fn savedExecutionGenerationFor(
+        self: *const Runtime,
+        account_id: []const u8,
+        api_key_id: []const u8,
+        model_id: []const u8,
+        current_execution_generation: u64,
+    ) ?u64 {
+        if (current_execution_generation != 0) return null;
+        const saved = self.savedPreferenceFor(account_id) orelse return null;
+        if (!std.mem.eql(u8, saved.apiKeyId(), api_key_id) or
+            !std.mem.eql(u8, saved.modelId(), model_id)) return null;
+        return saved.execution_generation;
+    }
+
+    fn discardForeignPreference(
+        self: *Runtime,
+        platform: *platform_impl.NativeBackend,
+        account_id: []const u8,
+    ) void {
+        const saved = self.saved_preference orelse return;
+        if (std.mem.eql(u8, saved.ownerAccountId(), account_id)) return;
+        self.saved_preference = null;
+        credential_store.clearPreference(platform.backend()) catch {};
     }
 
     fn decorateView(
         self: *Runtime,
         account_view: *contract.AccountView,
     ) void {
-        self.catalogForOperation(account_view.operation).decorate(account_view);
-    }
-
-    fn catalogForOperation(
-        self: *Runtime,
-        operation: contract.OperationKind,
-    ) *catalog_impl.PublicCatalog {
-        return switch (operation) {
-            .selecting_key,
-            .loading_models,
-            .selecting_model,
-            .persisting,
-            => &self.candidate_public_catalog,
-            else => &self.effects.public_catalog,
-        };
+        const catalog = if (self.account.candidateCatalogActive())
+            &self.candidate_public_catalog
+        else
+            &self.effects.public_catalog;
+        catalog.decorate(account_view);
     }
 
     fn assertMainThread(self: *const Runtime) void {
         std.debug.assert(std.Thread.getCurrentId() == self.main_thread_id);
     }
 
-    fn prepareWindowsRestore(self: *Runtime) Prepared {
-        var restored = windows_store.restore(
+    fn prepareRestore(self: *Runtime) Prepared {
+        var restored = credential_store.restore(
             self.allocator,
             self.platform.?.backend(),
         ) catch |err| {
             self.credentials.clear();
-            self.windows_public_state = null;
+            self.saved_preference = null;
             return self.preparedSignedOutRestoreFailure(
                 accountRestoreError(err),
             );
@@ -1502,7 +1427,7 @@ pub const Runtime = struct {
         return switch (restored) {
             .signed_out => blk: {
                 self.credentials.clear();
-                self.windows_public_state = null;
+                self.saved_preference = null;
                 var value: state_impl.RestoreResult = .{
                     .signed_out = .{},
                 };
@@ -1511,114 +1436,20 @@ pub const Runtime = struct {
                 );
             },
             .account => |*account| blk: {
-                const identity = account.public_state.identity() catch {
-                    self.credentials.clear();
-                    self.windows_public_state = null;
-                    var value: state_impl.RestoreResult = .{
-                        .signed_out = .{},
-                    };
-                    break :blk preparedFromState(
-                        self.account.prepareRestore(&value),
-                    );
-                };
-                self.windows_public_state = account.public_state;
+                self.saved_preference = account.preference;
                 self.credentials.installRefreshToken(
                     &account.refresh_token,
                 );
                 var value: state_impl.RestoreResult = .{
-                    .account_only = .{ .identity = identity },
+                    .refresh_only = {},
                 };
                 var prepared = preparedFromState(
                     self.account.prepareRestore(&value),
                 );
                 prepared.refresh_after_commit = true;
-                self.catalog_after_refresh = true;
                 break :blk prepared;
             },
         };
-    }
-
-    fn prepareMacosRestore(self: *Runtime) Prepared {
-        var restored = credential_store.restore(
-            self.allocator,
-            self.platform.?.backend(),
-        ) catch |err| return self.preparedRestoreFailure(
-            accountRestoreError(err),
-        );
-        var prepared: Prepared = switch (restored) {
-            .signed_out => |signed_out| blk: {
-                self.credentials.setCleanupPending(
-                    signed_out.cleanup_pending,
-                );
-                self.credentials.clear();
-                var value: state_impl.RestoreResult = .{
-                    .signed_out = .{
-                        .execution_high_watermark = signed_out.execution_high_watermark,
-                    },
-                };
-                break :blk preparedFromState(
-                    self.account.prepareRestore(&value),
-                );
-            },
-            .account_only => |*account_only| blk: {
-                self.credentials.setCleanupPending(
-                    account_only.cleanup_pending,
-                );
-                self.credentials.replace(&account_only.tokens);
-                var value: state_impl.RestoreResult = .{
-                    .account_only = .{
-                        .identity = account_only.identity,
-                        .execution_high_watermark = account_only.execution_high_watermark,
-                    },
-                };
-                account_only.deinit();
-                var result = preparedFromState(
-                    self.account.prepareRestore(&value),
-                );
-                result.follow_up = .refresh_catalog;
-                break :blk result;
-            },
-            .execution_ready => |*execution_ready| blk: {
-                self.credentials.setCleanupPending(
-                    execution_ready.cleanup_pending,
-                );
-                self.credentials.replace(&execution_ready.tokens);
-                const ready = state_impl.RestoreReady.init(
-                    execution_ready.identity,
-                    execution_ready.apiKeyId(),
-                    &execution_ready.execution,
-                ) catch {
-                    execution_ready.deinit();
-                    break :blk self.preparedRestoreFailure(
-                        .recovery_state_invalid,
-                    );
-                };
-                execution_ready.deinit();
-                self.effects.public_catalog.replaceRestoredSelection(
-                    ready.apiKeyId(),
-                    ready.execution.input().target.provider_kind,
-                    ready.execution.input().target.model,
-                );
-                var value: state_impl.RestoreResult = .{
-                    .execution_ready = ready,
-                };
-                break :blk preparedFromState(
-                    self.account.prepareRestore(&value),
-                );
-            },
-        };
-        prepared.cleanup_after_commit = true;
-        prepared.schedule_refresh_after_commit = true;
-        return prepared;
-    }
-
-    fn preparedRestoreFailure(
-        self: *Runtime,
-        error_code: contract.ErrorCode,
-    ) Prepared {
-        return preparedFromState(self.account.prepareRestoreFailure(
-            .fromCode(error_code),
-        ));
     }
 
     fn preparedSignedOutRestoreFailure(
@@ -1633,9 +1464,21 @@ pub const Runtime = struct {
     }
 };
 
+fn generateExecutionGeneration(
+    io: std.Io,
+    current_generation: u64,
+) !u64 {
+    while (true) {
+        var bytes: [@sizeOf(u64)]u8 = undefined;
+        try std.Io.randomSecure(io, &bytes);
+        const generation = std.mem.readInt(u64, &bytes, .big);
+        if (generation != 0 and generation != current_generation)
+            return generation;
+    }
+}
+
 fn completesCatalogTransaction(fact: contract.AccountFact) bool {
-    if (fact.view.operation != .none or
-        fact.view.execution_state != .ready)
+    if (fact.view.catalog_state != .ready)
         return false;
     return fact.kind == .catalog_changed or fact.kind == .execution_changed;
 }
@@ -1645,20 +1488,18 @@ pub const TestSupport = if (builtin.is_test) struct {
         runtime: *Runtime,
         execution: *contract.OwnedExecutionConfig,
     ) !Prepared {
-        const ready = try state_impl.RestoreReady.init(
-            try .init("account-1", "profile-1", "Metask User"),
+        const input = execution.input();
+        runtime.effects.public_catalog.replaceRestoredSelection(
+            "key-1",
+            input.target.provider_kind,
+            input.target.model,
+        );
+        return .{ .transition = try state_impl.TestSupport.prepareReady(
+            &runtime.account,
+            try .init("account-1", "Metask User"),
             "key-1",
             execution,
-        );
-        runtime.effects.public_catalog.replaceRestoredSelection(
-            ready.apiKeyId(),
-            ready.execution.input().target.provider_kind,
-            ready.execution.input().target.model,
-        );
-        var restored: state_impl.RestoreResult = .{
-            .execution_ready = ready,
-        };
-        return preparedFromState(runtime.account.prepareRestore(&restored));
+        ) };
     }
 
     pub fn occupyEffectQueue(runtime: *Runtime) void {
@@ -1671,6 +1512,20 @@ pub const TestSupport = if (builtin.is_test) struct {
 
     pub fn clearEffectQueue(runtime: *Runtime) void {
         _ = runtime.effects.queue.take();
+    }
+
+    pub fn discardMailbox(runtime: *Runtime) void {
+        var mailbox = runtime.effects.takeMailbox() orelse return;
+        mailbox.deinit();
+    }
+
+    pub fn prepareTokensPersisted(runtime: *Runtime) Prepared {
+        var completion: state_impl.WorkerCompletion = .{
+            .attempt_id = runtime.account.activeAttempt() orelse
+                @panic("test Account has no active login"),
+            .payload = .tokens_persisted,
+        };
+        return preparedFromState(runtime.account.prepareCompletion(&completion));
     }
 } else struct {};
 
@@ -1716,12 +1571,10 @@ fn prepareCatalogExecution(
     model: []const u8,
     execution_generation: u64,
 ) CatalogExecutionPreparation {
-    if (!std.mem.eql(u8, catalog.ownerAccountId(), identity.accountId()) or
-        !std.mem.eql(u8, catalog.ownerProfileId(), identity.profileId()))
-        return .{ .rejected = .account_mismatch };
+    if (!std.mem.eql(u8, catalog.ownerAccountId(), identity.accountId()))
+        return .{ .rejected = .metask_unauthorized };
     if (!catalog.ownsExecutionSelection(
         identity.accountId(),
-        identity.profileId(),
         model_catalog_api_key_id,
         model,
     )) return .{ .rejected = .dependency_contract_invalid };
@@ -1739,7 +1592,6 @@ fn accountRestoreError(err: anyerror) contract.ErrorCode {
         error.AccountDirectoryUnavailable,
         => .credential_store_read_failed,
         error.DeleteFailed => .credential_store_delete_failed,
-        error.ManifestCorrupt,
         error.InvalidData,
         error.VerificationFailed,
         error.PersistenceOutcomeUnknown,
@@ -1758,7 +1610,6 @@ fn accountStoreError(err: anyerror) contract.ErrorCode {
         error.PersistenceOutcomeUnknown,
         => .credential_store_write_failed,
         error.DeleteFailed => .credential_store_delete_failed,
-        error.ManifestCorrupt,
         error.InvalidData,
         error.VerificationFailed,
         => .recovery_state_invalid,
@@ -1807,7 +1658,6 @@ test "Account Runtime owns automatic catalog selection policy" {
     try catalog_impl.TestSupport.replaceOwnedSelection(
         &catalog,
         "account-1",
-        "profile-1",
         .{
             .id = "key-current",
             .name = "Current",
@@ -1831,28 +1681,58 @@ test "Account Runtime owns automatic catalog selection policy" {
         "other-secret",
     );
     const ready_view: contract.AccountView = .{
-        .session_state = .authenticated,
-        .execution_state = .ready,
-        .operation = .loading_keys,
-        .readiness = .ready,
-        .primary_action = .none,
+        .state = .authenticated,
+        .catalog_state = .loading,
         .selected_api_key_id = "key-current",
         .selected_model = "model-current",
+        .execution_generation = 1,
     };
     try std.testing.expectEqualStrings(
         "key-current",
         runtime.automaticApiSelection(&catalog, ready_view).?,
     );
     var first_login_view = ready_view;
-    first_login_view.execution_state = .none;
     first_login_view.selected_api_key_id = "";
     first_login_view.selected_model = "";
+    first_login_view.execution_generation = 0;
     try std.testing.expect(
         runtime.automaticApiSelection(&catalog, first_login_view) == null,
     );
+    runtime.saved_preference = try .init(
+        "account-1",
+        "key-current",
+        "model-current",
+        0x1020_3040_5060_7080,
+    );
+    try std.testing.expectEqual(
+        @as(?u64, 0x1020_3040_5060_7080),
+        runtime.savedExecutionGenerationFor(
+            "account-1",
+            "key-current",
+            "model-current",
+            0,
+        ),
+    );
+    try std.testing.expect(runtime.savedExecutionGenerationFor(
+        "account-2",
+        "key-current",
+        "model-current",
+        0,
+    ) == null);
+    try std.testing.expect(runtime.savedExecutionGenerationFor(
+        "account-1",
+        "key-current",
+        "model-other",
+        0,
+    ) == null);
+    try std.testing.expect(runtime.savedExecutionGenerationFor(
+        "account-1",
+        "key-current",
+        "model-current",
+        1,
+    ) == null);
 
     var loading_models_view = ready_view;
-    loading_models_view.operation = .loading_models;
     loading_models_view.candidate_api_key_id = "key-current";
     try std.testing.expectEqualStrings(
         "model-current",
@@ -1861,6 +1741,97 @@ test "Account Runtime owns automatic catalog selection policy" {
     loading_models_view.candidate_model = "model-other";
     try std.testing.expect(
         runtime.automaticModelSelection(&catalog, loading_models_view) == null,
+    );
+}
+
+fn installExecutionPreparationForTest(runtime: *Runtime) !void {
+    state_impl.TestSupport.installInitialExecutionPreparation(
+        &runtime.account,
+        "key-1",
+        "model-1",
+    );
+    try catalog_impl.TestSupport.replaceOwnedSelection(
+        &runtime.effects.catalog,
+        "account-1",
+        .{
+            .id = "key-1",
+            .name = "Primary",
+            .suffix = "1234",
+            .provider_kind = .anthropic,
+        },
+        "secret-key",
+        &.{.{ .id = "model-1", .display_name = "Model 1" }},
+    );
+}
+
+test "Account Runtime restores an exact persisted execution nonce" {
+    var wake_context: u8 = 0;
+    var runtime = try initRuntimeForTest(&wake_context);
+    defer runtime.deinit();
+    runtime.saved_preference = try .init(
+        "account-1",
+        "key-1",
+        "model-1",
+        0x1020_3040_5060_7080,
+    );
+    try installExecutionPreparationForTest(&runtime);
+
+    runtime.prepareAndPersistExecution(1, "model-1");
+    var mailbox = runtime.effects.takeMailbox() orelse
+        return error.TestUnexpectedResult;
+    defer mailbox.deinit();
+    switch (mailbox) {
+        .completion => |completion| switch (completion.payload) {
+            .execution_ready => |execution| try std.testing.expectEqual(
+                @as(u64, 0x1020_3040_5060_7080),
+                execution.input().execution_generation,
+            ),
+            else => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "Account Runtime persists a nonzero nonce for a new execution" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var account_path_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const account_path_len = try tmp.dir.realPath(
+        std.testing.io,
+        &account_path_storage,
+    );
+    var wake_context: u8 = 0;
+    var runtime = try Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        std.Thread.getCurrentId(),
+        account_path_storage[0..account_path_len],
+        .{ .context = &wake_context, .notify_fn = testingWake },
+    );
+    defer runtime.deinit();
+    defer if (runtime.platform) |*platform| {
+        platform.deinit();
+        runtime.platform = null;
+    };
+    var startup = runtime.prepareStart(.{});
+    defer startup.deinit();
+    try installExecutionPreparationForTest(&runtime);
+
+    runtime.prepareAndPersistExecution(1, "model-1");
+    var mailbox = runtime.effects.takeMailbox() orelse
+        return error.TestUnexpectedResult;
+    defer mailbox.deinit();
+    const generation = switch (mailbox) {
+        .completion => |completion| switch (completion.payload) {
+            .execution_ready => |execution| execution.input().execution_generation,
+            else => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(generation != 0);
+    try std.testing.expectEqual(
+        generation,
+        runtime.saved_preference.?.execution_generation,
     );
 }
 
@@ -1984,7 +1955,6 @@ test "Account Runtime rejects cross-API model selection before persistence" {
     try catalog_impl.TestSupport.replaceOwnedSelection(
         &candidate,
         "account-1",
-        "profile-1",
         .{
             .id = "key-b",
             .name = "Secondary",
@@ -1996,7 +1966,6 @@ test "Account Runtime rejects cross-API model selection before persistence" {
     );
     const identity = try state_impl.AccountIdentity.init(
         "account-1",
-        "profile-1",
         "Metask User",
     );
 
@@ -2020,7 +1989,6 @@ test "Account Runtime rejects cross-API model selection before persistence" {
 
     try std.testing.expect(candidate.ownsExecutionSelection(
         "account-1",
-        "profile-1",
         "key-b",
         "same-model",
     ));
@@ -2058,15 +2026,13 @@ fn commitReadyRestoreForTest(runtime: *Runtime) !void {
         1,
         try std.testing.allocator.dupe(u8, "secret-key"),
     );
-    var restored: state_impl.RestoreResult = .{
-        .execution_ready = try .init(
-            try .init("account-1", "profile-1", "Metask User"),
-            "key-1",
-            &execution,
-        ),
-    };
+    var prepared: Prepared = .{ .transition = try state_impl.TestSupport.prepareReady(
+        &runtime.account,
+        try .init("account-1", "Metask User"),
+        "key-1",
+        &execution,
+    ) };
     execution.deinit();
-    var prepared = preparedFromState(runtime.account.prepareRestore(&restored));
     defer prepared.deinit();
     try std.testing.expect(runtime.admitEffect(&prepared));
     if (prepared.takeExecution()) |execution_value| {
@@ -2108,9 +2074,33 @@ test "Account Runtime rejects effect admission without committing state" {
     defer prepared.deinit();
     try std.testing.expect(!runtime.admitEffect(&prepared));
     try std.testing.expectEqual(
-        contract.AccountSessionState.signed_out,
-        runtime.view().session_state,
+        contract.AccountState.signed_out,
+        runtime.view().state,
     );
+}
+
+test "Account Runtime retries a retained credential before opening OAuth" {
+    var wake_context: u8 = 0;
+    var runtime = try initRuntimeForTest(&wake_context);
+    defer runtime.deinit();
+    commitAutomationRestoreForTest(&runtime);
+    try runtime.credentials.installStored(
+        std.testing.allocator,
+        "access",
+        "refresh",
+        10,
+        "account-1",
+    );
+
+    var prepared = switch (runtime.prepareCommand(.begin_login)) {
+        .prepared => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer prepared.deinit();
+    try std.testing.expect(runtime.admitEffect(&prepared));
+    const entry = runtime.effects.queue.take() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(entry.effect == .refresh_token);
 }
 
 test "Account Runtime dispatches an admitted effect only after state commit" {
@@ -2124,53 +2114,17 @@ test "Account Runtime dispatches an admitted effect only after state commit" {
     try std.testing.expect(runtime.admitEffect(&prepared));
     try std.testing.expect(runtime.effects.queue.entry != null);
     try std.testing.expectEqual(
-        contract.AccountSessionState.signed_out,
-        runtime.view().session_state,
+        contract.AccountState.signed_out,
+        runtime.view().state,
     );
     runtime.commit(&prepared);
     try std.testing.expectEqual(
-        contract.AccountSessionState.shutting_down,
-        runtime.view().session_state,
+        contract.AccountState.signed_out,
+        runtime.view().state,
     );
     try std.testing.expect(runtime.effects.queue.entry != null);
     runtime.dispatchCommitted(&prepared);
     try std.testing.expect(runtime.effects.queue.entry == null);
-}
-
-test "Account Runtime fails closed when logout persistence is unknown" {
-    var wake_context: u8 = 0;
-    var runtime = try initRuntimeForTest(&wake_context);
-    defer runtime.deinit();
-    try commitReadyRestoreForTest(&runtime);
-
-    var logout = switch (runtime.prepareCommand(.logout)) {
-        .prepared => |value| value,
-        else => return error.TestUnexpectedResult,
-    };
-    defer logout.deinit();
-    try std.testing.expect(runtime.admitEffect(&logout));
-    runtime.commit(&logout);
-    const entry = runtime.effects.queue.take() orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expect(entry.effect == .persist_signed_out_tombstone);
-    runtime.effects.publishPersistenceUnknown(entry.attempt_id.?, .logout);
-
-    var failed = switch (runtime.prepareNextCompletion().?) {
-        .prepared => |value| value,
-        else => return error.TestUnexpectedResult,
-    };
-    defer failed.deinit();
-    try std.testing.expect(runtime.admitEffect(&failed));
-    runtime.commit(&failed);
-    runtime.dispatchCommitted(&failed);
-    try std.testing.expectEqual(
-        contract.AccountSessionState.shutting_down,
-        runtime.view().session_state,
-    );
-    try std.testing.expectEqual(
-        contract.ExecutionState.none,
-        runtime.view().execution_state,
-    );
 }
 
 test "Account Runtime shutdown clears a ready public view" {
@@ -2179,8 +2133,8 @@ test "Account Runtime shutdown clears a ready public view" {
     defer runtime.deinit();
     try commitReadyRestoreForTest(&runtime);
     try std.testing.expectEqual(
-        contract.ExecutionState.ready,
-        runtime.view().execution_state,
+        contract.CatalogState.ready,
+        runtime.view().catalog_state,
     );
 
     var prepared = runtime.prepareShutdown();
@@ -2190,10 +2144,10 @@ test "Account Runtime shutdown clears a ready public view" {
     runtime.dispatchCommitted(&prepared);
     const view = runtime.view();
     try std.testing.expectEqual(
-        contract.AccountSessionState.shutting_down,
-        view.session_state,
+        contract.AccountState.signed_out,
+        view.state,
     );
-    try std.testing.expectEqual(contract.ExecutionState.none, view.execution_state);
+    try std.testing.expectEqual(contract.CatalogState.unavailable, view.catalog_state);
     try std.testing.expectEqual(@as(usize, 0), view.api_keys.len);
     try std.testing.expectEqual(@as(usize, 0), view.models.len);
     try std.testing.expect(!view.can_create_task);

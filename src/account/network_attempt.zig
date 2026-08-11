@@ -66,6 +66,7 @@ pub const NetworkAttempt = struct {
 
     const Kind = enum {
         refresh,
+        load_identity,
         load_api_keys,
         load_models,
     };
@@ -95,7 +96,6 @@ pub const NetworkAttempt = struct {
         attempt_id: u64,
         transport: metask.Transport,
         credential_owner: *const credentials.CredentialOwner,
-        expected_identity: ?state.AccountIdentity,
         sink: ResultSink,
         now_unix_seconds: i64,
     ) !void {
@@ -106,11 +106,35 @@ pub const NetworkAttempt = struct {
             .refresh,
             transport,
             credential_owner,
-            expected_identity,
+            null,
             null,
             "",
             sink,
             now_unix_seconds,
+        );
+    }
+
+    pub fn startLoadIdentity(
+        self: *NetworkAttempt,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        attempt_id: u64,
+        transport: metask.Transport,
+        credential_owner: *const credentials.CredentialOwner,
+        sink: ResultSink,
+    ) !void {
+        try self.start(
+            allocator,
+            io,
+            attempt_id,
+            .load_identity,
+            transport,
+            credential_owner,
+            null,
+            null,
+            "",
+            sink,
+            0,
         );
     }
 
@@ -247,7 +271,6 @@ pub const NetworkAttempt = struct {
                     self.transport,
                     self.now_unix_seconds,
                     control,
-                    self.identity,
                 ) catch |err| {
                     self.publishFailure(metask.errorCode(err));
                     return;
@@ -255,6 +278,16 @@ pub const NetworkAttempt = struct {
                 defer refreshed.deinit();
                 var result: Result = .{ .refresh = refreshed.take() };
                 self.sink.publish(self.attempt_id, &result);
+            },
+            .load_identity => {
+                const identity = self.credential_owner.?.fetchIdentity(
+                    self.transport,
+                    control,
+                ) catch |err| {
+                    self.publishFailure(metask.errorCode(err));
+                    return;
+                };
+                self.publishCompletion(.{ .identity_loaded = identity });
             },
             .load_api_keys => {
                 self.credential_owner.?.loadApiKeys(
@@ -337,9 +370,9 @@ const RefreshTransport = struct {
         output: []u8,
     ) metask.TransportError!metask.Response {
         const self: *RefreshTransport = @ptrCast(@alignCast(context));
-        if (request.kind == .profiles) {
+        if (request.kind == .current_user) {
             const body =
-                \\{"data":[{"id":"profile-1","display_name":"MetaWork User","status":"active","is_default":true}]}
+                \\{"code":0,"message":"success","data":{"id":1,"username":"Stored User"}}
             ;
             @memcpy(output[0..body.len], body);
             return .{ .status = 200, .body = output[0..body.len] };
@@ -358,7 +391,7 @@ const RefreshTransport = struct {
             return error.Cancelled;
         }
         const body =
-            \\{"access_token":"fresh-access","refresh_token":"fresh-refresh","token_type":"Bearer","expires_in":3600,"scope":"metacode:use","account_id":"acct-1"}
+            \\{"access_token":"fresh-access","refresh_token":"fresh-refresh","token_type":"Bearer","expires_in":3600,"scope":"metawork:use","account_id":"1"}
         ;
         @memcpy(output[0..body.len], body);
         return .{ .status = 200, .body = output[0..body.len] };
@@ -390,7 +423,6 @@ test "refresh attempt transfers one opaque generation and cancels cleanly" {
         9,
         transport.transport(),
         &credential_owner,
-        null,
         capture.sink(),
         100,
     );
@@ -401,7 +433,7 @@ test "refresh attempt transfers one opaque generation and cancels cleanly" {
     defer refreshed.deinit();
     try std.testing.expectEqual(@as(u64, 9), capture.attempt_id);
     try std.testing.expectEqualStrings(
-        "acct-1",
+        "1",
         refreshed.refresh.accountId(),
     );
     try std.testing.expectEqual(@as(?i64, 10), credential_owner.expiresAt());
@@ -414,7 +446,6 @@ test "refresh attempt transfers one opaque generation and cancels cleanly" {
         10,
         blocking.transport(),
         &credential_owner,
-        null,
         cancelled_capture.sink(),
         100,
     );
@@ -431,7 +462,7 @@ test "refresh attempt transfers one opaque generation and cancels cleanly" {
     );
 }
 
-test "refresh-only Windows restore revalidates account and profile identity" {
+test "refresh-only restore commits rotation before loading identity" {
     var refresh = try oauth.Secret.init(
         std.testing.allocator,
         "old-refresh",
@@ -449,11 +480,6 @@ test "refresh-only Windows restore revalidates account and profile identity" {
         11,
         transport.transport(),
         &credential_owner,
-        try state.AccountIdentity.init(
-            "acct-1",
-            "profile-1",
-            "Stored User",
-        ),
         capture.sink(),
         100,
     );
@@ -461,9 +487,23 @@ test "refresh-only Windows restore revalidates account and profile identity" {
     attempt.deinit();
     var refreshed = capture.result orelse
         return error.TestUnexpectedResult;
+    capture.result = null;
     defer refreshed.deinit();
-    const identity = refreshed.refresh.refreshedIdentity() orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("acct-1", identity.accountId());
-    try std.testing.expectEqualStrings("profile-1", identity.profileId());
+    credential_owner.replaceRotation(&refreshed.refresh);
+
+    try attempt.startLoadIdentity(
+        std.testing.allocator,
+        std.testing.io,
+        12,
+        transport.transport(),
+        &credential_owner,
+        capture.sink(),
+    );
+    attempt.join();
+    attempt.deinit();
+    var identified = capture.result orelse return error.TestUnexpectedResult;
+    capture.result = null;
+    defer identified.deinit();
+    const identity = identified.completion.payload.identity_loaded;
+    try std.testing.expectEqualStrings("1", identity.accountId());
 }

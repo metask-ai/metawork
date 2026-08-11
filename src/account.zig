@@ -3,7 +3,6 @@ const state_impl = @import("account_state");
 const oauth_impl = @import("account_oauth");
 const metask_client_impl = @import("metask_client");
 const credential_store_impl = @import("account_credential_store");
-const windows_store_impl = @import("account_windows_store");
 const platform_impl = @import("account_platform");
 const loopback_impl = @import("account_loopback");
 const login_attempt_impl = @import("account_login_attempt");
@@ -22,7 +21,6 @@ test {
     _ = oauth_impl;
     _ = metask_client_impl;
     _ = credential_store_impl;
-    _ = windows_store_impl;
     _ = platform_impl;
     _ = loopback_impl;
     _ = login_attempt_impl;

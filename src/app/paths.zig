@@ -1,10 +1,12 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const build_options = @import("build_options");
 const native_sdk = @import("native_sdk");
 const product_identity = @import("metawork_product_identity");
 
 const path_capacity = 4096;
 const windows_data_directory_name = "MetaWork";
+const automation_data_directory_name = "MetaWork Automation";
 
 // Paths owns the backing storage for every returned slice. Keep this value at
 // one stable address for its full lifetime and pass it only by pointer.
@@ -119,6 +121,7 @@ pub const Paths = struct {
 };
 
 pub fn dataDirectoryName(os_tag: @TypeOf(builtin.os.tag)) []const u8 {
+    if (build_options.automation) return automation_data_directory_name;
     return if (os_tag == .macos)
         product_identity.macos_data_directory_name
     else
@@ -161,17 +164,28 @@ fn resolveCanonicalDirectory(
     return canonical;
 }
 
-test "product identity does not unify macOS and Windows Account storage" {
+test "product and automation data roots are compile-time isolated" {
     try std.testing.expectEqualStrings(
         "com.metask.metawork.dev",
         product_identity.bundle_id,
     );
-    try std.testing.expectEqualStrings(
-        product_identity.macos_data_directory_name,
-        dataDirectoryName(.macos),
-    );
-    try std.testing.expectEqualStrings(
-        windows_data_directory_name,
-        dataDirectoryName(.windows),
-    );
+    if (build_options.automation) {
+        try std.testing.expectEqualStrings(
+            automation_data_directory_name,
+            dataDirectoryName(.macos),
+        );
+        try std.testing.expectEqualStrings(
+            automation_data_directory_name,
+            dataDirectoryName(.windows),
+        );
+    } else {
+        try std.testing.expectEqualStrings(
+            product_identity.macos_data_directory_name,
+            dataDirectoryName(.macos),
+        );
+        try std.testing.expectEqualStrings(
+            windows_data_directory_name,
+            dataDirectoryName(.windows),
+        );
+    }
 }

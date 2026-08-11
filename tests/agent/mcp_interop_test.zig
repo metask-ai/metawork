@@ -216,13 +216,9 @@ fn installExecution(workbench_value: *workbench.Workbench) !void {
     workbench_value.commitAccountFactNoFail(.{
         .kind = .execution_changed,
         .view = .{
-            .session_state = .authenticated,
-            .execution_state = .ready,
-            .operation = .none,
-            .readiness = .ready,
-            .primary_action = .none,
+            .state = .authenticated,
+            .catalog_state = .ready,
             .account_id = "account-1",
-            .profile_id = "profile-1",
             .display_name = "Fixture",
             .api_keys = &api_keys,
             .models = &models,

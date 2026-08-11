@@ -2,7 +2,7 @@
 
 MetaWork 的真实 Account 开发流程使用 Apple 签发、带稳定 `TeamIdentifier` 的 `Apple Development` Code Signing identity。它只解决同一台开发机上重新构建后的 macOS Keychain 身份稳定性，不是 `Developer ID`，也不用于向测试人员或用户分发应用。
 
-签名流程直接读取 `app.zon` 中现有的 Bundle ID 与 executable name；当前分别是 `com.metask.metawork.dev` 和 `metawork`。`app.zon` 是跨平台 development 产品 Bundle ID 唯一真源，Application 通过 `src/product_identity.zig` 消费同一个 Native SDK manifest module；macOS Account 使用 `MetaWork Dev`、`com.metask.metawork.dev.account` 和 `manifest.json` schema 1。旧开发命名空间不迁移、不 fallback。Windows 使用同一产品 Bundle ID，但继续使用原有 `MetaWork` 数据根目录、Credential Manager 和无版本 `account.json`，不复用 macOS 存储协议。
+签名流程直接读取 `app.zon` 中现有的 Bundle ID 与 executable name；当前分别是 `com.metask.metawork.dev` 和 `metawork`。`app.zon` 是跨平台 development 产品 Bundle ID 唯一真源，Application 通过 `src/product_identity.zig` 消费同一个 Native SDK manifest module。Account 在所有平台使用同一 persistence 合同：`com.metask.metawork.dev.account` secure service 只保存 refresh token，`preferences.json` 只保存无 secret 的当前选择；旧开发命名空间不迁移、不 fallback。
 
 自签名证书不是可接受的替代品。真实复验证明，即使自签名证书和 designated requirement 保持不变，签名报告仍是 `TeamIdentifier=not set`；Keychain partition 会继续绑定随构建变化的 CDHash，用户选择“始终允许”后，下一次构建仍可能再次弹出授权框。
 
@@ -55,16 +55,6 @@ npm run setup:macos-signing:clear
 ```
 
 该命令不会修改或删除钥匙串中的 Apple Development identity。
-
-## 显式清理旧开发账号
-
-确认不再需要 hard cut 前的本机试验账号后，可以执行：
-
-```bash
-npm run account:cleanup-legacy:macos
-```
-
-该命令只幂等删除旧 `dev.metawork.account.v2` service 下十个已知 OAuth/execution slot，以及 `~/Library/Application Support/MetaWork/account/manifest.v2`。它不读取或迁移旧 secret，不删除 Apple Development identity，不触碰当前 `com.metask.metawork.dev.account`，也不修改 Windows Credential Manager 或 `account.json`。普通 setup、dev、package 和应用启动都不会自动执行该清理。
 
 ## 开发入口
 

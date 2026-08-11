@@ -129,7 +129,7 @@ pub const Server = struct {
                 .code => respond(
                     &request,
                     .ok,
-                    "Authentication complete. You may close this window and return to MetaWork.",
+                    "Authorization returned to MetaWork. You may close this window and wait for MetaWork to finish signing in.",
                 ) catch {
                     callback.deinit();
                     return error.IoFailed;

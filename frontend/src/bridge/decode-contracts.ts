@@ -92,51 +92,18 @@ const uiRecordStates = [
   "denied_session",
   "cancelled",
 ] as const;
-const accountSessionStates = [
-  "restoring",
+const accountStates = [
+  "checking",
   "signed_out",
   "authorizing",
   "authenticated",
-  "refreshing",
-  "reauth_required",
-  "shutting_down",
 ] as const;
-const executionStates = [
-  "none",
-  "preparing",
+const catalogStates = [
+  "unavailable",
+  "loading",
+  "choosing",
   "ready",
-  "reconfiguring",
-  "invalid",
-] as const;
-const accountOperations = [
-  "none",
-  "oauth_callback",
-  "token_exchange",
-  "loading_keys",
-  "selecting_key",
-  "loading_models",
-  "selecting_model",
-  "persisting",
-  "logging_out",
-] as const;
-const accountReadiness = [
-  "checking",
-  "sign_in_required",
-  "preparing",
-  "choice_required",
-  "ready",
-  "needs_attention",
-  "restart_required",
-] as const;
-const accountPrimaryActions = [
-  "none",
-  "sign_in",
-  "reopen_login",
-  "choose_api_key",
-  "choose_model",
-  "retry_catalog",
-  "reauthenticate",
-  "restart",
+  "failed",
 ] as const;
 const accountErrorCodes = [
   "none",
@@ -144,6 +111,7 @@ const accountErrorCodes = [
   "invalid_state",
   "operation_in_progress",
   "execution_in_use",
+  "session_in_use",
   "oauth_bind_failed",
   "oauth_browser_open_failed",
   "oauth_callback_rejected",
@@ -152,7 +120,6 @@ const accountErrorCodes = [
   "user_cancelled",
   "deadline_exceeded",
   "token_refresh_failed",
-  "account_mismatch",
   "metask_unauthorized",
   "metask_rate_limited",
   "metask_service_unavailable",
@@ -170,7 +137,6 @@ const accountErrorCodes = [
   "recovery_state_invalid",
   "local_resource_exhausted",
   "dependency_contract_invalid",
-  "shutting_down",
 ] as const;
 const rendererBridgeConnectErrors = [
   "identity_mismatch",
@@ -640,14 +606,10 @@ function decodeSkillManagement(
 
 function decodeAccount(value: unknown, path: string): AccountView {
   const item = object(value, path, [
-    "sessionState",
-    "executionState",
-    "operation",
-    "readiness",
-    "primaryAction",
+    "state",
+    "catalogState",
     "canCancel",
     "accountId",
-    "profileId",
     "displayName",
     "apiKeys",
     "models",
@@ -695,34 +657,14 @@ function decodeAccount(value: unknown, path: string): AccountView {
     fail(`${path}.apiKeys`, "API Key identities must be unique");
   if (new Set(models.map((model) => model.selectionId)).size !== models.length)
     fail(`${path}.models`, "model identities must be unique");
-  const sessionState = enumValue(
-    item.sessionState,
-    `${path}.sessionState`,
-    accountSessionStates,
-  );
-  const executionState = enumValue(
-    item.executionState,
-    `${path}.executionState`,
-    executionStates,
-  );
-  const operation = enumValue(
-    item.operation,
-    `${path}.operation`,
-    accountOperations,
-  );
-  const readiness = enumValue(
-    item.readiness,
-    `${path}.readiness`,
-    accountReadiness,
-  );
-  const primaryAction = enumValue(
-    item.primaryAction,
-    `${path}.primaryAction`,
-    accountPrimaryActions,
+  const state = enumValue(item.state, `${path}.state`, accountStates);
+  const catalogState = enumValue(
+    item.catalogState,
+    `${path}.catalogState`,
+    catalogStates,
   );
   const canCancel = booleanValue(item.canCancel, `${path}.canCancel`);
   const accountId = stringValue(item.accountId, `${path}.accountId`);
-  const profileId = stringValue(item.profileId, `${path}.profileId`);
   const displayName = stringValue(item.displayName, `${path}.displayName`);
   const selectedApiKeySelectionId = stringValue(
     item.selectedApiKeySelectionId,
@@ -756,30 +698,19 @@ function decodeAccount(value: unknown, path: string): AccountView {
     item.executionGeneration,
     `${path}.executionGeneration`,
   );
-  if (executionState !== "ready" && canCreateTask)
-    fail(path, "a non-ready execution cannot admit Tasks");
+  if (catalogState !== "ready" && canCreateTask)
+    fail(path, "a non-ready catalog cannot admit Tasks");
   if (
-    canCancel !==
-    (operation !== "none" &&
-      operation !== "logging_out" &&
-      operation !== "persisting")
-  )
-    fail(path, "cancellation availability disagrees with the active operation");
-  if (
-    executionState === "ready" &&
+    catalogState === "ready" &&
     (accountId.length === 0 ||
-      profileId.length === 0 ||
       selectedApiKeySelectionId.length === 0 ||
       selectedModelSelectionId.length === 0 ||
       executionGeneration === "0")
   )
-    fail(path, "a ready execution requires selected identities and generation");
-  const candidateAllowed = [
-    "loading_keys",
-    "loading_models",
-    "selecting_model",
-    "persisting",
-  ].includes(operation);
+    fail(path, "a ready catalog requires selected identities and generation");
+  const candidateAllowed =
+    state === "authenticated" &&
+    (catalogState === "loading" || catalogState === "choosing");
   if (
     !candidateAllowed &&
     (candidateApiKeySelectionId.length > 0 ||
@@ -792,44 +723,27 @@ function decodeAccount(value: unknown, path: string): AccountView {
   )
     fail(path, "a candidate model requires its candidate API");
   if (
-    ["loading_models", "selecting_model", "persisting"].includes(operation) &&
-    candidateApiKeySelectionId.length === 0
-  )
-    fail(path, "the active model flow requires a candidate API");
-  if (operation === "persisting" && candidateModelSelectionId.length === 0)
-    fail(path, "persistence requires a complete candidate execution target");
-  if (
     candidateApiKeySelectionId.length > 0 &&
-    operation !== "loading_keys" &&
+    catalogState === "choosing" &&
     !apiKeys.some((key) => key.selectionId === candidateApiKeySelectionId)
   )
     fail(path, "candidate API must belong to the API catalog");
   if (
     candidateModelSelectionId.length > 0 &&
-    operation === "persisting" &&
+    models.length > 0 &&
     !models.some((model) => model.selectionId === candidateModelSelectionId)
   )
     fail(path, "candidate model must belong to the model catalog");
-  const catalogReconfiguration = [
-    "loading_keys",
-    "selecting_key",
-    "loading_models",
-    "selecting_model",
-    "persisting",
-  ].includes(operation);
-  if (catalogReconfiguration && canCreateTask)
-    fail(path, "catalog reconfiguration cannot admit a new Task");
   if (
-    executionState === "ready" &&
-    !catalogReconfiguration &&
+    catalogState === "ready" &&
     (!apiKeys.some((key) => key.selectionId === selectedApiKeySelectionId) ||
       !models.some((model) => model.selectionId === selectedModelSelectionId))
   )
-    fail(path, "a ready execution requires selected catalog membership");
+    fail(path, "a ready catalog requires selected catalog membership");
   if (
     models.length === 0 &&
     modelCatalogApiKeySelectionId.length > 0 &&
-    operation !== "loading_models"
+    catalogState !== "loading"
   )
     fail(path, "an empty model catalog can only name its owner while loading");
   if (models.length > 0 && modelCatalogApiKeySelectionId.length === 0)
@@ -839,16 +753,10 @@ function decodeAccount(value: unknown, path: string): AccountView {
     !apiKeys.some((key) => key.selectionId === modelCatalogApiKeySelectionId)
   )
     fail(path, "model catalog owner must belong to the API catalog");
-  if (primaryAction === "choose_api_key" && apiKeys.length === 0)
-    fail(path, "API Key choice requires at least one candidate");
-  if (primaryAction === "choose_model" && models.length === 0)
-    fail(path, "model choice requires at least one candidate");
   if (
-    sessionState === "signed_out" &&
-    (executionState !== "none" ||
-      operation !== "none" ||
+    state !== "authenticated" &&
+    (catalogState !== "unavailable" ||
       accountId.length !== 0 ||
-      profileId.length !== 0 ||
       displayName.length !== 0 ||
       apiKeys.length !== 0 ||
       models.length !== 0 ||
@@ -860,49 +768,25 @@ function decodeAccount(value: unknown, path: string): AccountView {
       executionGeneration !== "0" ||
       canCreateTask)
   )
-    fail(path, "signed-out Account state must be empty and fail closed");
-  const actionMatchesReadiness =
-    (readiness === "checking" &&
-      primaryAction === "none" &&
-      sessionState === "restoring") ||
-    (readiness === "sign_in_required" &&
-      primaryAction === "sign_in" &&
-      sessionState === "signed_out") ||
-    (readiness === "preparing" &&
-      operation !== "none" &&
-      operation !== "selecting_key" &&
-      operation !== "selecting_model" &&
-      (primaryAction === "none" ||
-        (primaryAction === "reopen_login" &&
-          sessionState === "authorizing" &&
-          operation === "oauth_callback"))) ||
-    (readiness === "choice_required" &&
-      ((primaryAction === "choose_api_key" && operation === "selecting_key") ||
-        (primaryAction === "choose_model" &&
-          operation === "selecting_model"))) ||
-    (readiness === "ready" &&
-      primaryAction === "none" &&
-      executionState === "ready") ||
-    (readiness === "needs_attention" &&
-      operation === "none" &&
-      ((primaryAction === "retry_catalog" &&
-        sessionState === "authenticated") ||
-        (primaryAction === "reauthenticate" &&
-          sessionState === "reauth_required"))) ||
-    (readiness === "restart_required" &&
-      primaryAction === "restart" &&
-      sessionState === "shutting_down");
-  if (!actionMatchesReadiness)
-    fail(path, "Account readiness and primary action disagree");
+    fail(path, "a non-authenticated Account must hide identity and catalog");
+  if (state === "authenticated" && accountId.length === 0)
+    fail(path, "an authenticated Account requires identity");
+  if (
+    canCancel &&
+    state !== "authorizing" &&
+    !(
+      state === "authenticated" &&
+      (catalogState === "loading" || catalogState === "choosing")
+    )
+  )
+    fail(path, "cancellation requires active authorization or catalog work");
+  if (catalogState === "choosing" && apiKeys.length === 0)
+    fail(path, "catalog choice requires at least one API");
   return {
-    sessionState,
-    executionState,
-    operation,
-    readiness,
-    primaryAction,
+    state,
+    catalogState,
     canCancel,
     accountId,
-    profileId,
     displayName,
     apiKeys,
     models,
@@ -1215,15 +1099,8 @@ function decodeTask(value: unknown, path: string): TaskView {
   const bindingItem = object(item.binding, `${path}.binding`, [
     "epoch",
     "availability",
-    "accountId",
-    "profileId",
-    "accountDisplayName",
-    "apiKeySelectionId",
-    "apiKeyName",
-    "apiKeySuffix",
     "provider",
-    "modelSelectionId",
-    "modelDisplayName",
+    "model",
     "executionGeneration",
     "unavailableReason",
   ]);
@@ -1235,7 +1112,7 @@ function decodeTask(value: unknown, path: string): TaskView {
   const unavailableReason = nullableEnum(
     bindingItem.unavailableReason,
     `${path}.binding.unavailableReason`,
-    ["credential_released"] as const,
+    ["runtime_detached"] as const,
   );
   if ((availability === "available") !== (unavailableReason === null))
     fail(
@@ -1245,37 +1122,12 @@ function decodeTask(value: unknown, path: string): TaskView {
   const binding = {
     epoch: positiveWireId(bindingItem.epoch, `${path}.binding.epoch`),
     availability,
-    accountId: stringValue(bindingItem.accountId, `${path}.binding.accountId`),
-    profileId: stringValue(bindingItem.profileId, `${path}.binding.profileId`),
-    accountDisplayName: stringValue(
-      bindingItem.accountDisplayName,
-      `${path}.binding.accountDisplayName`,
-    ),
-    apiKeySelectionId: stringValue(
-      bindingItem.apiKeySelectionId,
-      `${path}.binding.apiKeySelectionId`,
-    ),
-    apiKeyName: stringValue(
-      bindingItem.apiKeyName,
-      `${path}.binding.apiKeyName`,
-    ),
-    apiKeySuffix: stringValue(
-      bindingItem.apiKeySuffix,
-      `${path}.binding.apiKeySuffix`,
-    ),
     provider: enumValue(
       bindingItem.provider,
       `${path}.binding.provider`,
       providers,
     ),
-    modelSelectionId: stringValue(
-      bindingItem.modelSelectionId,
-      `${path}.binding.modelSelectionId`,
-    ),
-    modelDisplayName: stringValue(
-      bindingItem.modelDisplayName,
-      `${path}.binding.modelDisplayName`,
-    ),
+    model: stringValue(bindingItem.model, `${path}.binding.model`),
     executionGeneration: positiveWireId(
       bindingItem.executionGeneration,
       `${path}.binding.executionGeneration`,

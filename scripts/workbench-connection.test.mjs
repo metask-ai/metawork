@@ -13,15 +13,12 @@ globalThis.window ??= {
   clearTimeout: globalThis.clearTimeout,
 };
 
-function snapshot(revision) {
+function snapshot(revision, tasks = []) {
   return {
     revision,
     account: {
-      sessionState: "signed_out",
-      executionState: "none",
-      operation: "none",
-      readiness: "sign_in_required",
-      primaryAction: "sign_in",
+      state: "signed_out",
+      catalogState: "unavailable",
       canCancel: false,
       accountId: "",
       displayName: "",
@@ -48,8 +45,33 @@ function snapshot(revision) {
       persistentWorkspacePermissions: false,
       automaticWorkspaces: false,
     },
-    workspaces: [],
-    tasks: [],
+    workspaces:
+      tasks.length === 0
+        ? []
+        : [
+            {
+              id: "1",
+              kind: "manual",
+              displayName: "repo",
+              canonicalRoot: "/repo",
+              redacted: false,
+              authorization: "available",
+              recentOrder: "1",
+              signals: { running: 1, attention: 0, failedOrInterrupted: 0 },
+            },
+          ],
+    tasks,
+  };
+}
+
+function runningTask() {
+  return {
+    id: "2",
+    workspaceId: "1",
+    lifecycle: "open",
+    currentRunId: "7",
+    currentRunPhase: "running",
+    activeOperation: { kind: "run", id: "7" },
   };
 }
 
@@ -192,6 +214,7 @@ test("explicit recovery replaces a generation whose snapshots stay unavailable",
   const disconnected = [];
   let active = "0";
   const snapshots = [];
+  const published = [];
   const ready = [];
   const client = {
     available: () => true,
@@ -207,7 +230,7 @@ test("explicit recovery replaces a generation whose snapshots stay unavailable",
     },
     fetchSnapshot: async () => {
       if (active === "1" && snapshots.length > 0) return snapshot("0");
-      const next = snapshot(active);
+      const next = snapshot(active, active === "2" ? [runningTask()] : []);
       snapshots.push(next);
       return next;
     },
@@ -215,7 +238,7 @@ test("explicit recovery replaces a generation whose snapshots stay unavailable",
     acknowledgeSignal: async () => undefined,
   };
   const connection = new WorkbenchConnection(client, {
-    onSnapshot: () => undefined,
+    onSnapshot: (value) => published.push(value),
     onStatus: () => undefined,
     onReady: (value) => ready.push(value),
     onViewSyncFailed: () => undefined,
@@ -230,6 +253,12 @@ test("explicit recovery replaces a generation whose snapshots stay unavailable",
   );
   assert.ok(ready.includes(false));
   assert.equal(ready.at(-1), true);
+  assert.equal(published.at(-1)?.account.state, "signed_out");
+  assert.equal(published.at(-1)?.tasks[0]?.currentRunPhase, "running");
+  assert.deepEqual(published.at(-1)?.tasks[0]?.activeOperation, {
+    kind: "run",
+    id: "7",
+  });
   await connection.stop();
   assert.deepEqual(disconnected, ["1", "2"]);
 });

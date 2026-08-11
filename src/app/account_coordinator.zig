@@ -34,9 +34,11 @@ pub const Coordinator = struct {
     ) account_contract.AccountCommandResult {
         const self: *Coordinator = @ptrCast(@alignCast(context));
         self.assertMainThread();
+        const current = self.runtime.view();
         const replacement: ExecutionReplacement = switch (command) {
             .select_model => .default,
-            .reauthenticate, .logout => .identity,
+            .begin_login => if (current.state == .authenticated) .identity else .none,
+            .logout => .identity,
             else => .none,
         };
         return switch (self.runtime.prepareCommand(command)) {
@@ -111,45 +113,80 @@ pub const Coordinator = struct {
         var prepared = prepared_value;
         defer prepared.deinit();
 
+        var started_replacement = false;
         switch (replacement) {
             .none => {},
             // A cold process has no live Account-owned identity or credential
             // to replace. Restored Task history must not be mistaken for an
             // in-process identity switch, but installation still needs the
             // Workbench's default-execution transaction boundary.
-            .startup => self.workbench.beginDefaultExecutionReplacement() catch
-                return .rejected(.execution_in_use),
-            .default => self.workbench.beginDefaultExecutionReplacement() catch
-                return .rejected(.execution_in_use),
-            .identity => self.workbench.beginExecutionReplacement() catch
-                return .rejected(.execution_in_use),
+            .startup, .default => {
+                if (self.workbench.executionReplacementPending())
+                    return .rejected(.operation_in_progress);
+                self.workbench.beginDefaultExecutionReplacement() catch |err|
+                    return .rejected(replacementErrorCode(err));
+                started_replacement = true;
+            },
+            .identity => {
+                if (self.workbench.executionReplacementPending())
+                    return .rejected(.operation_in_progress);
+                self.workbench.beginExecutionReplacement() catch |err|
+                    return .rejected(replacementErrorCode(err));
+                started_replacement = true;
+            },
         }
-        if (!self.runtime.admitEffect(&prepared)) {
-            if (self.workbench.executionReplacementPending())
-                self.workbench.endExecutionReplacementNoFail();
-            return .rejected(.local_resource_exhausted);
+        const effect_admitted = self.runtime.admitEffect(&prepared);
+        if (!effect_admitted) {
+            if (started_replacement) {
+                self.endActiveReplacementNoFail();
+                return .rejected(.local_resource_exhausted);
+            }
+            if (!self.workbench.executionReplacementPending())
+                return .rejected(.local_resource_exhausted);
         }
 
         const fact = self.runtime.preparedFact(&prepared);
+        const identity_boundary = prepared.identityReplacementBoundary();
         self.workbench.commitAccountFactNoFail(fact);
         if (prepared.takeExecution()) |execution_value| {
             var execution = execution_value;
+            if (!self.workbench.executionReplacementPending()) {
+                self.workbench.beginDefaultExecutionReplacement() catch
+                    unreachable;
+            }
             self.workbench.installExecutionNoFail(&execution);
-        } else if (self.workbench.executionReplacementPending() and
-            fact.view.operation == .none and
-            fact.view.execution_state == .none)
-        {
+        } else if (prepared.clearsDefaultExecution()) {
+            if (!self.workbench.executionReplacementPending()) {
+                self.workbench.beginDefaultExecutionReplacement() catch
+                    unreachable;
+            }
             self.workbench.clearExecutionNoFail();
         }
         self.runtime.commit(&prepared);
-        if (self.workbench.executionReplacementPending() and
-            fact.view.operation == .none)
-            self.workbench.endExecutionReplacementNoFail();
-        self.workbench.finishAccountCommitNoFail();
+
+        // A continuation effect can fail admission only after its preceding
+        // external step has completed. Commit that observed step first, then
+        // terminate the still-active transaction from the resulting state.
+        if (!effect_admitted)
+            return self.commitPrepared(
+                self.runtime.prepareActiveAttemptFailure(
+                    .local_resource_exhausted,
+                ),
+                .none,
+            );
 
         const refresh_after_commit = self.runtime.takeRefreshAfterCommit(&prepared);
         const follow_up = self.runtime.takeFollowUpCommand(&prepared);
         self.runtime.dispatchCommitted(&prepared);
+        if (self.workbench.identityReplacementPending()) {
+            if (identity_boundary != .none)
+                self.endActiveReplacementNoFail();
+        } else if (self.workbench.defaultExecutionReplacementPending() and
+            prepared.operationComplete())
+        {
+            self.endActiveReplacementNoFail();
+        }
+        self.workbench.finishAccountCommitNoFail();
 
         if (refresh_after_commit) {
             const refreshed = self.commitPrepared(
@@ -160,6 +197,10 @@ pub const Coordinator = struct {
         }
         if (follow_up) |command| self.submitFollowUp(command);
         return .acceptedAttempt(prepared.attemptId());
+    }
+
+    fn endActiveReplacementNoFail(self: *Coordinator) void {
+        self.workbench.endExecutionReplacementNoFail();
     }
 
     fn submitFollowUp(
@@ -193,6 +234,30 @@ pub const Coordinator = struct {
         std.debug.assert(std.Thread.getCurrentId() == self.main_thread_id);
     }
 };
+
+fn replacementErrorCode(err: anyerror) account_contract.ErrorCode {
+    return switch (err) {
+        error.TaskRunning => .execution_in_use,
+        error.TaskSessionInUse => .session_in_use,
+        error.ExecutionInUse => .operation_in_progress,
+        else => .local_resource_exhausted,
+    };
+}
+
+test "Application maps identity replacement blockers precisely" {
+    try std.testing.expectEqual(
+        account_contract.ErrorCode.execution_in_use,
+        replacementErrorCode(error.TaskRunning),
+    );
+    try std.testing.expectEqual(
+        account_contract.ErrorCode.session_in_use,
+        replacementErrorCode(error.TaskSessionInUse),
+    );
+    try std.testing.expectEqual(
+        account_contract.ErrorCode.operation_in_progress,
+        replacementErrorCode(error.ExecutionInUse),
+    );
+}
 
 test "Application coordinator commits Account Runtime facts into Workbench" {
     const TestWake = struct {
@@ -246,35 +311,76 @@ test "Application coordinator commits Account Runtime facts into Workbench" {
     defer execution.deinit();
     const restored = coordinator.commitPrepared(
         try account_api.TestSupport.prepareReadyRestore(&account_runtime, &execution),
-        .identity,
+        .startup,
     );
     try std.testing.expect(restored.accepted);
     try std.testing.expectEqual(
-        account_contract.AccountSessionState.authenticated,
-        account_runtime.view().session_state,
+        account_contract.AccountState.authenticated,
+        account_runtime.view().state,
     );
     try std.testing.expectEqual(
-        account_contract.ExecutionState.ready,
-        account_runtime.view().execution_state,
+        account_contract.CatalogState.ready,
+        account_runtime.view().catalog_state,
     );
     try std.testing.expectEqual(
-        account_contract.AccountSessionState.authenticated,
-        workbench.accountView().session_state,
+        account_contract.AccountState.authenticated,
+        workbench.accountView().state,
     );
     try std.testing.expect(workbench.accountView().can_create_task);
 
+    const login = coordinator.commandSink().submit(.begin_login);
+    try std.testing.expect(login.accepted);
+    try std.testing.expect(workbench.executionReplacementPending());
+    try std.testing.expect(!workbench.accountView().can_create_task);
+    coordinator.drain();
+    try std.testing.expectEqual(
+        account_contract.AccountState.authenticated,
+        account_runtime.view().state,
+    );
+    try std.testing.expect(!workbench.executionReplacementPending());
+    try std.testing.expect(workbench.accountView().can_create_task);
+
+    const cancelled_login = coordinator.commandSink().submit(.begin_login);
+    try std.testing.expect(cancelled_login.accepted);
+    try std.testing.expect(workbench.executionReplacementPending());
+    const cancelled = coordinator.commandSink().submit(.cancel_operation);
+    try std.testing.expect(cancelled.accepted);
+    try std.testing.expect(!workbench.executionReplacementPending());
+    try std.testing.expect(workbench.accountView().can_create_task);
+    coordinator.drain();
+    try std.testing.expectEqual(
+        account_contract.AccountState.authenticated,
+        account_runtime.view().state,
+    );
+
+    const logout = coordinator.commandSink().submit(.logout);
+    try std.testing.expect(logout.accepted);
+    try std.testing.expectEqual(
+        account_contract.AccountState.authenticated,
+        account_runtime.view().state,
+    );
+    try std.testing.expectEqual(
+        account_contract.CatalogState.unavailable,
+        account_runtime.view().catalog_state,
+    );
+    try std.testing.expectEqual(
+        account_contract.CatalogState.unavailable,
+        workbench.accountView().catalog_state,
+    );
+    try std.testing.expect(!account_runtime.view().can_cancel);
+
     coordinator.shutdown();
     try std.testing.expectEqual(
-        account_contract.AccountSessionState.shutting_down,
-        account_runtime.view().session_state,
+        account_contract.AccountState.signed_out,
+        account_runtime.view().state,
     );
     try std.testing.expectEqual(
-        account_contract.AccountSessionState.shutting_down,
-        workbench.accountView().session_state,
+        account_contract.AccountState.signed_out,
+        workbench.accountView().state,
     );
     try std.testing.expectEqual(
-        account_contract.ExecutionState.none,
-        workbench.accountView().execution_state,
+        account_contract.CatalogState.unavailable,
+        workbench.accountView().catalog_state,
     );
     try std.testing.expectEqual(@as(usize, 0), workbench.accountView().api_keys.len);
     try std.testing.expectEqual(@as(usize, 0), workbench.accountView().models.len);
@@ -333,7 +439,7 @@ test "Application coordinator balances Workbench gate when Account effect admiss
     defer execution.deinit();
     const restored = coordinator.commitPrepared(
         try account_api.TestSupport.prepareReadyRestore(&account_runtime, &execution),
-        .identity,
+        .startup,
     );
     try std.testing.expect(restored.accepted);
     const revision = workbench.currentRevision();
@@ -346,13 +452,34 @@ test "Application coordinator balances Workbench gate when Account effect admiss
         rejected.error_code,
     );
     try std.testing.expectEqual(
-        account_contract.AccountSessionState.authenticated,
-        account_runtime.view().session_state,
+        account_contract.AccountState.authenticated,
+        account_runtime.view().state,
     );
     try std.testing.expect(workbench.accountView().can_create_task);
     try std.testing.expectEqual(revision, workbench.currentRevision());
     try std.testing.expect(!workbench.executionReplacementPending());
 
+    account_api.TestSupport.clearEffectQueue(&account_runtime);
+    const login = coordinator.commandSink().submit(.begin_login);
+    try std.testing.expect(login.accepted);
+    try std.testing.expect(workbench.executionReplacementPending());
+    account_api.TestSupport.discardMailbox(&account_runtime);
+    account_api.TestSupport.occupyEffectQueue(&account_runtime);
+    const continuation = coordinator.commitPrepared(
+        account_api.TestSupport.prepareTokensPersisted(&account_runtime),
+        .none,
+    );
+    try std.testing.expect(continuation.accepted);
+    try std.testing.expectEqual(
+        account_contract.AccountState.signed_out,
+        account_runtime.view().state,
+    );
+    try std.testing.expectEqual(
+        account_contract.ErrorCode.local_resource_exhausted,
+        account_runtime.view().error_code,
+    );
+    try std.testing.expect(!workbench.executionReplacementPending());
+    try std.testing.expect(!workbench.accountView().can_create_task);
     account_api.TestSupport.clearEffectQueue(&account_runtime);
     coordinator.shutdown();
 }
