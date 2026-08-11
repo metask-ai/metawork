@@ -71,6 +71,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-agent-mcp-http", .root_module = test_modules.agent_mcp_http },
         .{ .name = "metawork-agent-mcp-runtime", .root_module = test_modules.agent_mcp_runtime },
         .{ .name = "metawork-agent-mcp-stdio", .root_module = test_modules.agent_mcp_stdio },
+        .{ .name = "metawork-agent-checkpoint-restore", .root_module = test_modules.agent_checkpoint_restore },
         .{ .name = "metawork-workbench", .root_module = test_modules.workbench_projection },
         .{ .name = "metawork-workbench-executor", .root_module = test_modules.workbench_executor },
         .{ .name = "metawork-automatic-workspace-allocator", .root_module = test_modules.workbench_automatic_workspace_allocator },
@@ -161,6 +162,7 @@ const WiredModules = struct {
     agent_mcp_http: *std.Build.Module,
     agent_mcp_runtime: *std.Build.Module,
     agent_mcp_stdio: *std.Build.Module,
+    agent_checkpoint_restore: *std.Build.Module,
     automation_enabled: *std.Build.Module,
     bridge: *std.Build.Module,
     event_pump: *std.Build.Module,
@@ -487,6 +489,13 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .optimize = root_module.optimize,
     });
     agent_checkpoint.addImport("metask_agentcore", sdk);
+    const agent_checkpoint_restore = b.createModule(.{
+        .root_source_file = b.path("src/agent/checkpoint_restore.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    agent_checkpoint_restore.addImport("metask_agentcore", sdk);
+    agent_checkpoint_restore.addImport("agent_checkpoint", agent_checkpoint);
     const session = b.createModule(.{
         .root_source_file = b.path("src/agent/session.zig"),
         .target = target,
@@ -498,6 +507,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     session.addImport("agent_mcp_runtime", agent_mcp_runtime);
     session.addImport("agent_mcp_catalog", agent_mcp_catalog);
     session.addImport("agent_checkpoint", agent_checkpoint);
+    session.addImport("agent_checkpoint_restore", agent_checkpoint_restore);
     const agent = b.createModule(.{
         .root_source_file = b.path("src/agent.zig"),
         .target = target,
@@ -852,6 +862,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .agent_mcp_http = agent_mcp_http,
         .agent_mcp_runtime = agent_mcp_runtime,
         .agent_mcp_stdio = agent_mcp_stdio,
+        .agent_checkpoint_restore = agent_checkpoint_restore,
         .automation_enabled = automation_enabled,
         .bridge = bridge,
         .event_pump = event_pump,

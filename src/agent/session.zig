@@ -10,6 +10,7 @@ const catalog = @import("agent_catalog");
 const mcp_runtime = @import("agent_mcp_runtime");
 const mcp_catalog = @import("agent_mcp_catalog");
 const checkpoint = @import("agent_checkpoint");
+const checkpoint_restore = @import("agent_checkpoint_restore");
 
 var next_mcp_owner_id: std.atomic.Value(u64) = .init(1);
 
@@ -273,6 +274,10 @@ pub const CheckpointLogicalSessionOrigin = checkpoint.LogicalSessionOrigin;
 pub const CheckpointSessionLifecycle = checkpoint.SessionLifecycle;
 pub const CheckpointDurableBudgetOutcome = checkpoint.DurableBudgetOutcome;
 pub const CheckpointRestoreHealth = checkpoint.RestoreHealth;
+pub const CheckpointSource = checkpoint_restore.Source;
+pub const CheckpointSourceReadResult = checkpoint_restore.SourceReadResult;
+pub const CheckpointRestoreExpectation = checkpoint_restore.Expectation;
+pub const CheckpointRestoreReport = checkpoint_restore.Report;
 
 pub const SessionRoute = struct {
     id: u64,
@@ -757,6 +762,19 @@ pub const SessionOpenOptions = struct {
     allowed_tools: []const []const u8 = &default_builtin_tools,
 };
 
+pub const SessionRestoreOptions = struct {
+    session: SessionOpenOptions,
+    checkpoint_limits: CheckpointLimits,
+    source: CheckpointSource,
+    expectation: CheckpointRestoreExpectation,
+};
+
+pub const SessionRestoreRoute = struct {
+    id: u64,
+    session: *Session,
+    report: CheckpointRestoreReport,
+};
+
 pub const Limits = struct {
     max_sessions: usize,
     /// Consumed exactly once during successful Agent Runtime construction.
@@ -853,6 +871,16 @@ pub const Error = error{
     StateNotReached,
     SessionDestroyFailed,
     RuntimeDestroyFailed,
+    RestoreInvalid,
+    RestoreBusy,
+    RestoreFailed,
+    RestoreCancelled,
+    RestoreIoFailed,
+    RestoreContractFailed,
+    CheckpointCorrupt,
+    CheckpointUnsupported,
+    CheckpointIncompatible,
+    LogicalSessionConflict,
 };
 
 pub const Runtime = struct {
@@ -874,6 +902,7 @@ pub const Runtime = struct {
     sessions_mutex: std.Io.Mutex = .init,
     shutdown_condition: std.Io.Condition = .init,
     sessions: []?*Session,
+    session_reservations: []bool,
     shutting_down: std.atomic.Value(bool) = .init(false),
     shutdown_running: bool = false,
     shutdown_complete: bool = false,
@@ -881,6 +910,7 @@ pub const Runtime = struct {
     active_catalog_calls: usize = 0,
     active_catalog_leases: usize = 0,
     active_mcp_calls: usize = 0,
+    active_restore_calls: usize = 0,
     mcp_refresh_running: bool = false,
     mcp_catalog_generation: ?u64 = null,
     mcp_registry_generation: ?u64,
@@ -931,6 +961,9 @@ pub const Runtime = struct {
         const sessions = try allocator.alloc(?*Session, limits.max_sessions);
         errdefer allocator.free(sessions);
         @memset(sessions, null);
+        const session_reservations = try allocator.alloc(bool, limits.max_sessions);
+        errdefer allocator.free(session_reservations);
+        @memset(session_reservations, false);
         var events = try event_pump.EventPump.init(
             io,
             allocator,
@@ -1000,6 +1033,7 @@ pub const Runtime = struct {
             .event_ready_timeout = limits.event_ready_timeout,
             .events = events,
             .sessions = sessions,
+            .session_reservations = session_reservations,
             .mcp_owner_id = mcp_owner_id,
             .mcp_registry_generation = mcp_registry_generation,
             .mcp_servers = mcp_servers,
@@ -1395,8 +1429,8 @@ pub const Runtime = struct {
                 return error.StaleMcpSelection;
         }
         var slot: ?usize = null;
-        for (self.sessions, 0..) |entry, index| {
-            if (entry == null) {
+        for (self.sessions, self.session_reservations, 0..) |entry, reserved, index| {
+            if (entry == null and !reserved) {
                 slot = index;
                 break;
             }
@@ -1501,6 +1535,282 @@ pub const Runtime = struct {
         return .{ .id = session_id, .session = session };
     }
 
+    /// Restores one Session without holding `sessions_mutex` across the
+    /// streaming AgentCore call. The reservation and in-flight fence keep the
+    /// route slot and Runtime handle valid until the candidate is either
+    /// installed or destroyed.
+    pub fn restoreSessionRoute(
+        self: *Runtime,
+        options: SessionRestoreOptions,
+    ) (Error || std.mem.Allocator.Error)!SessionRestoreRoute {
+        const session_options = options.session;
+        try validateWorkspace(session_options.workspace);
+        try checkpoint.validateLimits(options.checkpoint_limits);
+        if (session_options.credential.len == 0 or
+            session_options.model.len == 0 or
+            !std.mem.eql(u8, session_options.model, options.expectation.model) or
+            options.expectation.logical_session_id.len == 0 or
+            options.expectation.logical_session_id.len > max_core_session_id_bytes or
+            options.expectation.checkpoint_generation == 0)
+            return error.RestoreInvalid;
+        if (session_options.canonical_user_home.len != 0)
+            try validateCanonicalDirectory(
+                self.io,
+                self.allocator,
+                session_options.canonical_user_home,
+            );
+        if (session_options.skill_catalog) |lease| {
+            if (!catalog.belongsTo(lease, self) or
+                !catalog.matches(
+                    lease,
+                    session_options.workspace.canonical_root,
+                    session_options.canonical_user_home,
+                    session_options.workspace_epoch,
+                ))
+                return error.CatalogBindingMismatch;
+        }
+
+        const session = try self.allocator.create(Session);
+        var session_installed = false;
+        defer if (!session_installed) self.allocator.destroy(session);
+        const control_block = try self.allocator.create(SessionControlBlock);
+        var control_installed = false;
+        defer if (!control_installed) self.allocator.destroy(control_block);
+        const workspace_root = try self.allocator.dupe(
+            u8,
+            session_options.workspace.canonical_root,
+        );
+        var workspace_root_installed = false;
+        defer if (!workspace_root_installed) self.allocator.free(workspace_root);
+        const workspace_home = try self.allocator.dupe(
+            u8,
+            session_options.canonical_user_home,
+        );
+        var workspace_home_installed = false;
+        defer if (!workspace_home_installed) self.allocator.free(workspace_home);
+        const workspace_epoch = try self.allocator.dupe(
+            u8,
+            session_options.workspace_epoch,
+        );
+        var workspace_epoch_installed = false;
+        defer if (!workspace_epoch_installed) self.allocator.free(workspace_epoch);
+        const secret = try self.allocator.dupe(u8, session_options.credential);
+        defer {
+            secureZero(secret);
+            self.allocator.free(secret);
+        }
+        const allowed_views = try self.allocator.alloc(
+            wire.BytesViewV1,
+            session_options.allowed_tools.len,
+        );
+        defer self.allocator.free(allowed_views);
+        for (session_options.allowed_tools, 0..) |name, index|
+            allowed_views[index] = sdk.bytesView(name);
+
+        self.sessions_mutex.lockUncancelable(self.io);
+        if (self.shutting_down.load(.acquire)) {
+            self.sessions_mutex.unlock(self.io);
+            return error.RuntimeShuttingDown;
+        }
+        const raw_runtime = self.runtime orelse {
+            self.sessions_mutex.unlock(self.io);
+            return error.RuntimeShuttingDown;
+        };
+        if (self.mcp_refresh_running) {
+            self.sessions_mutex.unlock(self.io);
+            return error.McpRefreshInProgress;
+        }
+        if (session_options.mcp_selection) |selection| {
+            if (!mcp_catalog.belongsTo(selection, self.mcp_owner_id)) {
+                self.sessions_mutex.unlock(self.io);
+                return error.McpCatalogBindingMismatch;
+            }
+            if (self.mcp_catalog_generation == null or
+                mcp_catalog.selectionGeneration(selection) != self.mcp_catalog_generation.?)
+            {
+                self.sessions_mutex.unlock(self.io);
+                return error.StaleMcpSelection;
+            }
+        }
+        var slot: ?usize = null;
+        for (self.sessions, self.session_reservations, 0..) |entry, reserved, index| {
+            if (entry == null and !reserved) {
+                slot = index;
+                break;
+            }
+        }
+        const session_slot = slot orelse {
+            self.sessions_mutex.unlock(self.io);
+            return error.SessionCapacity;
+        };
+        if (self.next_session_id == std.math.maxInt(u64)) {
+            self.sessions_mutex.unlock(self.io);
+            return error.SessionIdExhausted;
+        }
+        self.next_session_id += 1;
+        const route_id = self.next_session_id;
+        self.session_reservations[session_slot] = true;
+        self.active_restore_calls += 1;
+        self.sessions_mutex.unlock(self.io);
+
+        var identity = CoreSessionIdentity{ .bound = .{
+            .len = options.expectation.logical_session_id.len,
+            .bytes = [_]u8{0} ** max_core_session_id_bytes,
+        } };
+        @memcpy(
+            identity.bound.bytes[0..options.expectation.logical_session_id.len],
+            options.expectation.logical_session_id,
+        );
+        session.* = .{
+            .agent_runtime = self,
+            .id = route_id,
+            .workspace_root = workspace_root,
+            .workspace_home = workspace_home,
+            .workspace_epoch = workspace_epoch,
+            .control_block = control_block,
+            .next_run_id = options.expectation.last_run_id,
+            .next_compact_id = options.expectation.last_compact_id,
+            .core_session_identity = identity,
+        };
+        control_block.* = .{ .session = session };
+
+        var callbacks = std.mem.zeroes(wire.SessionCallbacksV1);
+        callbacks.struct_size = @sizeOf(wire.SessionCallbacksV1);
+        callbacks.ctx = session;
+        callbacks.on_event = Session.onEvent;
+        callbacks.on_ui_request = Session.onUiRequest;
+        callbacks.release_response = Session.releaseUiResponse;
+        var host_config = std.mem.zeroes(wire.SessionHostConfigV1);
+        host_config.struct_size = @sizeOf(wire.SessionHostConfigV1);
+        host_config.provider_kind_code = providerKindCode(session_options.provider);
+        host_config.permission_mode_code = permissionModeCode(session_options.permission_mode);
+        host_config.shell_policy_code = shellPolicyCode(session_options.shell_policy);
+        host_config.api_key = sdk.bytesView(secret);
+        host_config.base_url = sdk.bytesView(session_options.base_url);
+        host_config.workspace_root = sdk.bytesView(workspace_root);
+        host_config.workspace_home = sdk.bytesView(workspace_home);
+        const skill_selection = allSkillsEnabledSelection();
+        host_config.skill_catalog = if (session_options.skill_catalog) |lease|
+            catalog.rawHandle(lease)
+        else
+            null;
+        host_config.skill_selection = if (session_options.skill_catalog != null)
+            &skill_selection
+        else
+            null;
+        host_config.permission_rules = null;
+        const raw_mcp_selection = if (session_options.mcp_selection != null)
+            mcp_catalog.rawSelectionReplacement(session_options.mcp_selection)
+        else
+            undefined;
+        host_config.mcp_selection = if (session_options.mcp_selection != null)
+            &raw_mcp_selection
+        else
+            null;
+        host_config.durable_budget = null;
+        host_config.allowed_tools = if (allowed_views.len == 0) null else allowed_views.ptr;
+        host_config.allowed_tool_count = allowed_views.len;
+
+        const outcome = checkpoint_restore.restore(
+            self.allocator,
+            self.api,
+            raw_runtime,
+            &host_config,
+            &callbacks,
+            options.checkpoint_limits,
+            options.source,
+            options.expectation,
+        );
+        switch (outcome) {
+            .failure => |failure| {
+                if (failure.retained_candidate) |candidate| {
+                    self.retainFailedRestoreCandidate(session_slot, session, candidate);
+                    session_installed = true;
+                    control_installed = true;
+                    workspace_root_installed = true;
+                    workspace_home_installed = true;
+                    workspace_epoch_installed = true;
+                } else {
+                    self.finishRestoreReservation(session_slot);
+                }
+                return mapRestoreFailure(failure);
+            },
+            .success => {},
+        }
+        var success = outcome.success;
+        var metadata_live = true;
+        defer if (metadata_live) success.deinitMetadata();
+
+        self.sessions_mutex.lockUncancelable(self.io);
+        std.debug.assert(self.active_restore_calls > 0);
+        std.debug.assert(self.session_reservations[session_slot]);
+        std.debug.assert(self.sessions[session_slot] == null);
+        const reject = self.shutting_down.load(.acquire) or self.runtime != raw_runtime;
+        if (!reject) {
+            session.raw = success.raw_session;
+            self.sessions[session_slot] = session;
+            self.session_reservations[session_slot] = false;
+            self.active_restore_calls -= 1;
+            self.shutdown_condition.broadcast(self.io);
+            self.sessions_mutex.unlock(self.io);
+            const report = success.report;
+            success.deinitMetadata();
+            metadata_live = false;
+            session_installed = true;
+            control_installed = true;
+            workspace_root_installed = true;
+            workspace_home_installed = true;
+            workspace_epoch_installed = true;
+            return .{ .id = route_id, .session = session, .report = report };
+        }
+        self.sessions_mutex.unlock(self.io);
+
+        const destroyed = checkpoint_restore.destroyCandidate(self.api, success.raw_session);
+        if (!destroyed) {
+            // A non-OK destroy status keeps the handle valid. Install the
+            // poisoned candidate so Runtime.shutdown owns the final retry.
+            self.retainFailedRestoreCandidate(session_slot, session, success.raw_session);
+            session_installed = true;
+            control_installed = true;
+            workspace_root_installed = true;
+            workspace_home_installed = true;
+            workspace_epoch_installed = true;
+        } else {
+            self.finishRestoreReservation(session_slot);
+        }
+        return error.RuntimeShuttingDown;
+    }
+
+    fn retainFailedRestoreCandidate(
+        self: *Runtime,
+        session_slot: usize,
+        session: *Session,
+        candidate: *wire.SessionHandle,
+    ) void {
+        self.sessions_mutex.lockUncancelable(self.io);
+        std.debug.assert(self.active_restore_calls > 0);
+        std.debug.assert(self.session_reservations[session_slot]);
+        std.debug.assert(self.sessions[session_slot] == null);
+        session.raw = candidate;
+        session.state = .poisoned;
+        self.sessions[session_slot] = session;
+        self.session_reservations[session_slot] = false;
+        self.active_restore_calls -= 1;
+        self.shutdown_condition.broadcast(self.io);
+        self.sessions_mutex.unlock(self.io);
+    }
+
+    fn finishRestoreReservation(self: *Runtime, session_slot: usize) void {
+        self.sessions_mutex.lockUncancelable(self.io);
+        std.debug.assert(self.active_restore_calls > 0);
+        std.debug.assert(self.session_reservations[session_slot]);
+        std.debug.assert(self.sessions[session_slot] == null);
+        self.session_reservations[session_slot] = false;
+        self.active_restore_calls -= 1;
+        self.shutdown_condition.broadcast(self.io);
+        self.sessions_mutex.unlock(self.io);
+    }
+
     pub fn shutdown(self: *Runtime) Error!void {
         self.sessions_mutex.lockUncancelable(self.io);
         var waited = false;
@@ -1521,7 +1831,8 @@ pub const Runtime = struct {
         self.shutdown_running = true;
         self.last_shutdown_error = null;
         self.shutting_down.store(true, .release);
-        while (self.active_catalog_calls != 0 or self.active_mcp_calls != 0)
+        while (self.active_catalog_calls != 0 or self.active_mcp_calls != 0 or
+            self.active_restore_calls != 0)
             self.shutdown_condition.waitUncancelable(
                 self.io,
                 &self.sessions_mutex,
@@ -1642,6 +1953,8 @@ pub const Runtime = struct {
         std.debug.assert(self.active_catalog_calls == 0);
         std.debug.assert(self.active_catalog_leases == 0);
         std.debug.assert(self.active_mcp_calls == 0);
+        std.debug.assert(self.active_restore_calls == 0);
+        for (self.session_reservations) |reserved| std.debug.assert(!reserved);
         for (self.sessions) |entry| {
             if (entry) |session| {
                 session.deinit();
@@ -1650,6 +1963,7 @@ pub const Runtime = struct {
         }
         self.events.deinit();
         self.mcp_servers.deinit();
+        self.allocator.free(self.session_reservations);
         self.allocator.free(self.sessions);
         const allocator = self.allocator;
         allocator.destroy(self);
@@ -3607,6 +3921,26 @@ fn mcpUpdateStatusDisposition(status: sdk.Status) ?SessionStatusDisposition {
 fn allZero(values: []const u64) bool {
     for (values) |value| if (value != 0) return false;
     return true;
+}
+
+fn mapRestoreFailure(failure: checkpoint_restore.Failure) Error {
+    return switch (failure.reason) {
+        .invalid_argument => error.RestoreInvalid,
+        .busy => error.RestoreBusy,
+        .checkpoint_corrupt => error.CheckpointCorrupt,
+        .checkpoint_unsupported => error.CheckpointUnsupported,
+        .checkpoint_incompatible => error.CheckpointIncompatible,
+        .logical_session_conflict => error.LogicalSessionConflict,
+        .cancelled => error.RestoreCancelled,
+        .io_failed => error.RestoreIoFailed,
+        .dependency_contract => error.RestoreContractFailed,
+        .out_of_memory,
+        .resource_limit,
+        .core_error,
+        .invalid_state,
+        .host_out_of_memory,
+        => error.RestoreFailed,
+    };
 }
 
 fn mapMcpCatalogError(err: anyerror) Error {
