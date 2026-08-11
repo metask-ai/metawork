@@ -14,6 +14,8 @@ const checkpoint_record = @import("workbench_checkpoint_record");
 const catalog_snapshot = @import("workbench_catalog_snapshot");
 const owned_task_execution = @import("workbench_owned_task_execution");
 const task_runtime = @import("workbench_task_runtime");
+const task_recovery = @import("workbench_task_recovery");
+const task_recovery_job = @import("workbench_task_recovery_job");
 const mcp_configuration = @import("workbench_mcp_configuration");
 const contract_fixture = @import("workbench_contract_fixture");
 const build_options = @import("build_options");
@@ -67,6 +69,8 @@ pub const Error = lifecycle.Error || scheduled_tasks_impl.Error || scheduled_tas
     SkillNotFound,
     InvalidSkillArguments,
     EventAfterTerminalDrain,
+    RecoveryUnavailable,
+    RestoreAttemptExhausted,
 };
 
 pub const Limits = struct {
@@ -339,6 +343,16 @@ const McpAdmissionAuthority = union(enum) {
             .ready => |ready| if (ready.selection) |selection| selection.deinit(),
             .blocked => {},
         }
+        self.* = undefined;
+    }
+};
+
+const RecoveryMcpAuthority = struct {
+    selection: ?*lifecycle.McpSelection,
+    catalog_generation: ?u64,
+
+    fn deinit(self: *RecoveryMcpAuthority) void {
+        if (self.selection) |selection| selection.deinit();
         self.* = undefined;
     }
 };
@@ -1162,18 +1176,8 @@ const RunCause = enum {
 
 const TaskLifecycle = enum { open, closing, closed };
 
-const ContinuationUnavailableReason = enum {
-    session_poisoned,
-    event_projection_failure,
-    closing,
-    closed,
-    session_recovery_unsupported,
-};
-
-const ContinuationCapability = union(enum) {
-    available,
-    unavailable: ContinuationUnavailableReason,
-};
+const ContinuationUnavailableReason = task_recovery.UnavailableReason;
+const ContinuationCapability = task_recovery.Capability;
 
 const CloseCompletion = task_runtime.CloseCompletion;
 
@@ -2089,6 +2093,8 @@ pub const Workbench = struct {
     next_workspace_recent_order: u64 = 1,
     next_task_id: u64 = 1,
     next_task_recent_order: u64 = 1,
+    next_restore_attempt_id: u64 = 1,
+    recovery_poisoned: bool = false,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -3757,6 +3763,108 @@ pub const Workbench = struct {
         return task_id;
     }
 
+    /// Admits an explicit attachment reconstruction. Success means only that
+    /// the bounded recovery attempt was enqueued; the canonical Snapshot owns
+    /// publication of the eventual result.
+    pub fn restoreTaskConversation(
+        self: *Workbench,
+        task_id: u64,
+        expected_binding_epoch: u64,
+    ) Error!u64 {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        self.syncLifecycle();
+        const task = self.findTask(task_id) orelse return error.UnknownTask;
+        if (expected_binding_epoch == 0 or
+            expected_binding_epoch != task.durable.binding_epoch)
+            return error.BindingEpochMismatch;
+        if (!self.taskRecoveryProjection(task).recovery_available)
+            return error.RecoveryUnavailable;
+        const checkpoint = task.durable.checkpoint orelse
+            return error.RecoveryUnavailable;
+        const workspace = self.findWorkspace(task.durable.workspace_id) orelse
+            return error.WorkspaceUnavailable;
+        const canonical_user_home = self.canonical_user_home orelse
+            return error.WorkspaceUnavailable;
+        if (self.next_restore_attempt_id == 0)
+            return error.RestoreAttemptExhausted;
+        const attempt_id = self.next_restore_attempt_id;
+
+        var checkpoint_copy = try checkpoint.clone(self.allocator);
+        var checkpoint_copy_live = true;
+        errdefer if (checkpoint_copy_live) checkpoint_copy.deinit(self.allocator);
+        var epoch_storage: [32]u8 = undefined;
+        const epoch_token = std.fmt.bufPrint(
+            &epoch_storage,
+            "{d}",
+            .{workspace.epoch},
+        ) catch unreachable;
+        var workspace_copy = try task_recovery_job.OwnedWorkspaceBinding.init(
+            self.allocator,
+            workspace.canonical_root,
+            canonical_user_home,
+            epoch_token,
+            switch (workspace.trust) {
+                .explicitly_trusted => .explicitly_trusted,
+                .temporary => .temporary,
+            },
+        );
+        var workspace_copy_live = true;
+        errdefer if (workspace_copy_live) workspace_copy.deinit();
+        var execution = try self.execution.cloneOwned(self.allocator);
+        errdefer execution.deinit();
+        var mcp = try self.createRecoveryMcpAuthority();
+        errdefer mcp.deinit();
+        const job = try self.allocator.create(task_recovery_job.Job);
+        errdefer self.allocator.destroy(job);
+        job.* = .{
+            .allocator = self.allocator,
+            .runtime = self.agent_runtime,
+            .store = self.checkpoint_store orelse return error.RecoveryUnavailable,
+            .notifier = .{
+                .context = self.change_notifier.context,
+                .notify_fn = self.change_notifier.wake,
+            },
+            .catalog_limits = catalogSnapshotLimits(self.limits),
+            .available_projection_bytes = self.limits.max_projection_bytes - self.projection_bytes,
+            .checkpoint_limits = checkpoint_export_limits,
+            .attempt = .{
+                .attempt_id = attempt_id,
+                .task_id = task_id,
+                .binding_epoch = expected_binding_epoch,
+                .checkpoint = checkpoint_copy,
+                .workspace = workspace_copy,
+                .execution = execution.take(),
+                .provider = agentProvider(task.durable.execution_provider),
+                .mcp_selection = mcp.selection,
+                .mcp_catalog_generation = mcp.catalog_generation,
+            },
+        };
+        checkpoint_copy_live = false;
+        workspace_copy_live = false;
+        mcp.selection = null;
+        task.runtime.active_operation = .{ .restore = .{ .id = attempt_id } };
+        task.runtime.restore_job = job;
+        task.runtime.last_restore_failure = null;
+        _ = task.runtime.worker_references.fetchAdd(1, .acq_rel);
+        self.executor.enqueue(.{
+            .context = job,
+            .execute_fn = task_recovery_job.Job.execute,
+            .cancel_fn = task_recovery_job.Job.cancelQueued,
+        }) catch |err| {
+            task.runtime.restore_job = null;
+            task.runtime.active_operation = .none;
+            const previous = task.runtime.worker_references.fetchSub(1, .release);
+            std.debug.assert(previous != 0);
+            job.outcome = .{ .failure = .cancelled };
+            job.state.store(.cancelled, .release);
+            job.deinit();
+            return err;
+        };
+        self.next_restore_attempt_id +%= 1;
+        self.bumpRevision();
+        return attempt_id;
+    }
+
     pub fn runTask(
         self: *Workbench,
         task_id: u64,
@@ -4276,7 +4384,10 @@ pub const Workbench = struct {
             return error.TaskBusy;
         }
         if (view.runtime.close_completion.load(.acquire) == .running) return error.CloseInProgress;
-        const session = view.runtime.session() orelse {
+        const retrying_closing_session = view.runtime.close_failed and
+            view.runtime.closingSession() != null;
+        const session = view.runtime.session() orelse
+            view.runtime.closingSession() orelse {
             if (view.durable.closed) return;
             switch (view.runtime.attachment) {
                 .detached => {},
@@ -4298,7 +4409,10 @@ pub const Workbench = struct {
             self.bumpRevision();
             return;
         };
-        const prior_health = view.runtime.attached().?.health;
+        const prior_health = if (view.runtime.attached()) |attached|
+            attached.health
+        else
+            task_runtime.AttachedHealth.available;
         if (switch (view.runtime.active_operation) {
             .compact => true,
             .none, .run, .restore => false,
@@ -4343,7 +4457,8 @@ pub const Workbench = struct {
                 run.id,
             );
         }
-        std.debug.assert(view.runtime.beginClosing());
+        if (!retrying_closing_session)
+            std.debug.assert(view.runtime.beginClosing());
         view.runtime.cancel_requested = switch (view.runtime.active_operation) {
             .run => true,
             .none, .compact, .restore => false,
@@ -4360,7 +4475,10 @@ pub const Workbench = struct {
             self.change_notifier,
         }) catch |err| {
             view.runtime.close_completion.store(.none, .release);
-            view.runtime.restoreCloseFailure(prior_health);
+            if (retrying_closing_session)
+                view.runtime.close_failed = true
+            else
+                view.runtime.restoreCloseFailure(prior_health);
             return err;
         };
         if (cancelled_ui) |record|
@@ -4634,6 +4752,9 @@ pub const Workbench = struct {
         var durable_changed = false;
         for (self.tasks) |*entry| {
             const view = &(entry.* orelse continue);
+            const recovery_commit = self.commitRecoveryJobNoFail(view);
+            changed = recovery_commit.changed or changed;
+            durable_changed = recovery_commit.durable_changed or durable_changed;
             const close_completion = view.runtime.close_completion.load(.acquire);
             // Session close may finish after Agent execution but before the
             // main thread has drained callbacks already enqueued for the Run.
@@ -4769,6 +4890,84 @@ pub const Workbench = struct {
             if (self.commitCheckpointPostprocessesNoFail(view)) changed = true;
         }
         if (changed) self.bumpRevision();
+    }
+
+    const RecoveryCommit = struct {
+        changed: bool = false,
+        durable_changed: bool = false,
+    };
+
+    fn commitRecoveryJobNoFail(
+        self: *Workbench,
+        task: *TaskView,
+    ) RecoveryCommit {
+        const job = task.runtime.restore_job orelse return .{};
+        if (!job.completionReady()) return .{};
+        const operation_matches = switch (task.runtime.active_operation) {
+            .restore => |attempt| attempt.id == job.attempt.attempt_id,
+            .none, .run, .compact => false,
+        };
+        var durable_changed = false;
+        if (job.takeCandidate()) |candidate_value| {
+            var candidate = candidate_value;
+            const workspace = self.findWorkspace(task.durable.workspace_id);
+            const record_matches = if (task.durable.checkpoint) |record|
+                checkpointIdentityEqual(record.blob, job.attempt.checkpoint.blob)
+            else
+                false;
+            const commit_allowed = operation_matches and
+                !self.shutting_down and
+                !task.durable.closed and
+                !task.durable.archived and
+                task.runtime.attachment == .detached and
+                task.durable.binding_epoch == job.attempt.binding_epoch and
+                record_matches and
+                self.recoveryExecutionExact(task) and
+                self.recoveryAuthorityStable(workspace) and
+                optionalU64Equal(
+                    self.recoveryMcpGeneration(),
+                    job.attempt.mcp_catalog_generation,
+                ) and
+                candidate.pinned_catalog.projected_bytes <=
+                    self.limits.max_projection_bytes - self.projection_bytes;
+            if (commit_allowed) {
+                self.projection_bytes += candidate.pinned_catalog.projected_bytes;
+                task.runtime.attachment = .{ .attached = .{
+                    .session = candidate.route.session,
+                    .execution = candidate.takeExecution(),
+                    .route_id = candidate.route.id,
+                    .pinned_catalog = candidate.takeCatalog(),
+                } };
+                task.runtime.last_restore_failure = null;
+            } else if (!candidate.discard()) {
+                self.recovery_poisoned = true;
+                task.runtime.last_restore_failure = .candidate_cleanup_failed;
+            }
+        } else if (job.failure()) |failure| {
+            task.runtime.last_restore_failure = failure;
+            switch (failure) {
+                .checkpoint_missing => {
+                    task.durable.checkpoint_health = .blob_missing;
+                    durable_changed = true;
+                },
+                .checkpoint_mismatch => {
+                    task.durable.checkpoint_health = .blob_mismatch;
+                    durable_changed = true;
+                },
+                .checkpoint_io => {
+                    task.durable.checkpoint_health = .io_failed;
+                    durable_changed = true;
+                },
+                .candidate_cleanup_failed => self.recovery_poisoned = true,
+                else => {},
+            }
+        }
+        task.runtime.restore_job = null;
+        task.runtime.active_operation = .none;
+        const references = task.runtime.worker_references.fetchSub(1, .release);
+        std.debug.assert(references != 0);
+        job.deinit();
+        return .{ .changed = true, .durable_changed = durable_changed };
     }
 
     fn commitCheckpointPostprocessesNoFail(
@@ -4917,7 +5116,7 @@ pub const Workbench = struct {
                 const current = self.findTask(task_id) orelse
                     return error.EventAfterTerminalDrain;
                 if (taskLifecycle(current) == .open and
-                    continuationAvailable(taskContinuation(current)))
+                    continuationAvailable(self.taskContinuation(current)))
                 {
                     if (current.runtime.attached()) |attached|
                         attached.health = .session_poisoned;
@@ -6283,6 +6482,70 @@ pub const Workbench = struct {
         };
     }
 
+    fn createRecoveryMcpAuthority(self: *Workbench) Error!RecoveryMcpAuthority {
+        const mcp = if (self.mcp) |*value| value else return .{
+            .selection = null,
+            .catalog_generation = null,
+        };
+        if (!mcp.committed or mcp.refresh_job != null or
+            mcp.authorization_operation != null or
+            mcp.runtime_auth_failure_blocked)
+            return error.RecoveryUnavailable;
+        const ready = switch (mcp.admission) {
+            .ready => |value| value,
+            .blocked => return error.RecoveryUnavailable,
+        };
+        const activation = mcp.activation orelse {
+            if (ready.catalog_generation != null) return error.RecoveryUnavailable;
+            return .{ .selection = null, .catalog_generation = null };
+        };
+        if (ready.catalog_generation == null or
+            ready.catalog_generation.? != activation.catalogGeneration())
+            return error.RecoveryUnavailable;
+        const registry = if (mcp.management) |*management|
+            management.desiredRegistry() orelse return error.RecoveryUnavailable
+        else if (mcp.preparation.registry) |registry|
+            registry.value
+        else
+            return error.RecoveryUnavailable;
+        const health = activation.serverHealth();
+        const allowlists = try self.allocator.alloc(
+            lifecycle.McpServerAllowlist,
+            health.len,
+        );
+        defer self.allocator.free(allowlists);
+        for (health, allowlists) |server, *allowlist| {
+            const desired = findMcpServer(registry.servers, server.id) orelse
+                return error.RecoveryUnavailable;
+            allowlist.* = .{
+                .id = server.id,
+                .tools = mcpServerToolsForAdmission(registry, desired),
+            };
+        }
+        return .{
+            .selection = self.agent_runtime.createMcpAdmissionSelection(
+                activation,
+                allowlists,
+            ) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.RecoveryUnavailable,
+            },
+            .catalog_generation = activation.catalogGeneration(),
+        };
+    }
+
+    fn recoveryMcpGeneration(self: *const Workbench) ?u64 {
+        const mcp = if (self.mcp) |*value| value else return null;
+        if (!mcp.committed or mcp.refresh_job != null or
+            mcp.authorization_operation != null or
+            mcp.runtime_auth_failure_blocked)
+            return null;
+        return switch (mcp.admission) {
+            .ready => |ready| ready.catalog_generation,
+            .blocked => null,
+        };
+    }
+
     fn mcpAvailability(self: *const Workbench) McpAvailability {
         const mcp = if (self.mcp) |*value| value else return .unavailable;
         if (!mcp.committed) return .unavailable;
@@ -7189,10 +7452,16 @@ pub const Workbench = struct {
             const view = &(entry.* orelse continue);
             cancelTaskCheckpoints(view);
             if (view.runtime.worker_references.load(.acquire) == 0) continue;
+            if (view.runtime.active_operation == .restore) {
+                const job = view.runtime.restore_job orelse continue;
+                job.requestCancellation();
+                _ = self.executor.cancel(job);
+                continue;
+            }
             const session = view.runtime.session() orelse continue;
             switch (view.runtime.active_operation) {
                 .none => {},
-                .restore => {},
+                .restore => unreachable,
                 .compact => |operation_id| {
                     const compact = findCompact(view.durable.compacts, operation_id) orelse
                         continue;
@@ -7296,16 +7565,19 @@ pub const Workbench = struct {
             writer,
             taskCatalogProjection(view),
         );
+        const recovery = self.taskRecoveryProjection(view);
         writer.print(",\"lifecycle\":\"{s}\",\"continuationAvailable\":{},\"continuationUnavailableReason\":", .{
             @tagName(taskLifecycle(view)),
-            self.taskContinuationAvailable(view),
+            !self.shutting_down and taskLifecycle(view) == .open and
+                continuationAvailable(recovery.continuation),
         }) catch return error.SnapshotTooLarge;
-        switch (taskContinuation(view)) {
+        switch (recovery.continuation) {
             .available => writer.writeAll("null") catch return error.SnapshotTooLarge,
             .unavailable => |reason| jsonValue(writer, @tagName(reason)) catch
                 return error.SnapshotTooLarge,
         }
-        writer.print(",\"archived\":{},\"closeFailed\":{},\"activeOperation\":", .{
+        writer.print(",\"continuationRecoveryAvailable\":{},\"archived\":{},\"closeFailed\":{},\"activeOperation\":", .{
+            recovery.recovery_available,
             view.durable.archived,
             view.runtime.close_failed,
         }) catch return error.SnapshotTooLarge;
@@ -7768,10 +8040,93 @@ pub const Workbench = struct {
         return &run.tools[slot].?;
     }
 
-    fn taskContinuationAvailable(self: *const Workbench, task: *const TaskView) bool {
+    fn taskContinuationAvailable(self: *Workbench, task: *const TaskView) bool {
         return !self.shutting_down and
             taskLifecycle(task) == .open and
-            continuationAvailable(taskContinuation(task));
+            continuationAvailable(self.taskContinuation(task));
+    }
+
+    fn taskContinuation(
+        self: *Workbench,
+        task: *const TaskView,
+    ) ContinuationCapability {
+        return self.taskRecoveryProjection(task).continuation;
+    }
+
+    fn taskRecoveryProjection(
+        self: *Workbench,
+        task: *const TaskView,
+    ) task_recovery.Projection {
+        const checkpoint = task.durable.checkpoint;
+        const workspace = self.findWorkspace(task.durable.workspace_id);
+        const checkpoint_binding_valid = if (checkpoint) |record| binding: {
+            if (record.blob.generation == 0) break :binding false;
+            record.validateBinding(
+                task.durable.id,
+                task.durable.binding_epoch,
+                task.durable.execution_model,
+            ) catch break :binding false;
+            break :binding true;
+        } else false;
+        const checkpoint_history_current = if (checkpoint) |record|
+            checkpointMatchesCurrentHistory(task, record)
+        else
+            false;
+        const workspace_authorized = if (workspace) |value|
+            value.visible and value.authorization == .available and
+                value.epoch == task.durable.workspace_epoch and
+                std.mem.eql(u8, value.canonical_root, task.durable.workspace_root)
+        else
+            false;
+        return task_recovery.project(.{
+            .closed = task.durable.closed,
+            .archived = task.durable.archived,
+            .attachment = recoveryAttachment(task.runtime.attachment),
+            .operation = recoveryOperation(task.runtime.active_operation),
+            .task_persistence_ready = self.task_persistence_health == .ready,
+            .checkpoint_store_ready = self.checkpoint_store != null and
+                self.checkpoint_store_health.load(.acquire) == .ready,
+            .checkpoint_available = checkpoint != null and
+                task.durable.checkpoint_health == .available,
+            .checkpoint_binding_valid = checkpoint_binding_valid,
+            .checkpoint_history_current = checkpoint_history_current,
+            .execution_exact = self.recoveryExecutionExact(task),
+            .workspace_authorized = workspace_authorized,
+            .runtime_admission_available = self.agent_runtime.restoreAdmissionAvailable(),
+            .authority_stable = !self.recovery_poisoned and
+                self.recoveryAuthorityStable(workspace),
+            .recovery_failed = task.runtime.last_restore_failure != null,
+        });
+    }
+
+    fn recoveryExecutionExact(self: *const Workbench, task: *const TaskView) bool {
+        return self.execution_replacement == .none and
+            self.account.account_can_create_task and
+            self.account.catalog_state == .ready and
+            self.execution.ready() and
+            self.account.execution_generation == self.execution.generation and
+            task.durable.execution_generation == self.execution.generation and
+            task.durable.execution_provider == self.execution.provider.? and
+            std.mem.eql(u8, task.durable.execution_model, self.execution.model());
+    }
+
+    fn recoveryAuthorityStable(
+        self: *const Workbench,
+        workspace: ?*const WorkspaceView,
+    ) bool {
+        if (self.shutting_down or self.canonical_user_home == null or
+            self.skill_reconciliation != null)
+            return false;
+        const value = workspace orelse return false;
+        if (value.catalog_availability != .ready or value.catalog_job != null or
+            value.catalog == null)
+            return false;
+        const mcp = if (self.mcp) |*state| state else return true;
+        if (!mcp.committed or mcp.refresh_job != null or
+            mcp.authorization_operation != null or
+            mcp.runtime_auth_failure_blocked)
+            return false;
+        return mcp.admission == .ready;
     }
 
     fn taskExecutionInput(
@@ -9139,7 +9494,13 @@ pub const Workbench = struct {
                 return error.WorkspaceRemovalInProgress;
             const reauthorizing = !workspace.visible or
                 workspace.authorization == .reauthorization_required;
-            if (reauthorizing and workspace.epoch == std.math.maxInt(u64))
+            // Startup deliberately forgets the Host authority while retaining
+            // the durable Workspace identity. Confirming that same visible
+            // Workspace restores authority without changing its epoch. A
+            // hidden Workspace was explicitly removed; reopening it creates a
+            // new authority epoch so old Task bindings remain invalid.
+            const reopening_removed_workspace = !workspace.visible;
+            if (reopening_removed_workspace and workspace.epoch == std.math.maxInt(u64))
                 return error.WorkspaceEpochExhausted;
             const next_temporary = if (canonical_temporary) |root|
                 try self.copyBounded(root, self.limits.max_workspace_bytes)
@@ -9158,7 +9519,7 @@ pub const Workbench = struct {
                 .explicitly_trusted;
             workspace.authorization = .available;
             workspace.visible = true;
-            if (reauthorizing) workspace.epoch += 1;
+            if (reopening_removed_workspace) workspace.epoch += 1;
             return .{
                 .index = index,
                 .reauthorizing = reauthorizing,
@@ -10469,6 +10830,7 @@ pub const Workbench = struct {
 
     fn deinitTaskView(self: *Workbench, task: *TaskView) void {
         std.debug.assert(task.runtime.worker_references.load(.acquire) == 0);
+        std.debug.assert(task.runtime.restore_job == null);
         self.releaseTaskAttachmentNoFail(task, if (task.durable.closed) .closed else .cold_start);
         for (task.durable.runs) |*run_entry| {
             const run = &(run_entry.* orelse continue);
@@ -12145,17 +12507,53 @@ fn taskLifecycle(task: *const TaskView) TaskLifecycle {
     };
 }
 
-fn taskContinuation(task: *const TaskView) ContinuationCapability {
-    if (task.durable.closed) return .{ .unavailable = .closed };
-    return switch (task.runtime.attachment) {
-        .detached => .{ .unavailable = .session_recovery_unsupported },
-        .closing => .{ .unavailable = .closing },
+fn recoveryAttachment(attachment: task_runtime.Attachment) task_recovery.Attachment {
+    return switch (attachment) {
+        .detached => .detached,
+        .closing => .closing,
         .attached => |attached| switch (attached.health) {
-            .available => .available,
-            .session_poisoned => .{ .unavailable = .session_poisoned },
-            .event_projection_failure => .{ .unavailable = .event_projection_failure },
+            .available => .attached_available,
+            .session_poisoned => .attached_session_poisoned,
+            .event_projection_failure => .attached_event_projection_failure,
         },
     };
+}
+
+fn recoveryOperation(operation: ActiveOperation) task_recovery.Operation {
+    return switch (operation) {
+        .none => .none,
+        .run => .run,
+        .compact => .compact,
+        .restore => .restore,
+    };
+}
+
+fn checkpointMatchesCurrentHistory(
+    task: *const TaskView,
+    record: checkpoint_record.Record,
+) bool {
+    if (record.session.last_run_id != (lastFinalizedRunId(task) orelse 0) or
+        record.session.last_compact_id != latestCompactId(task))
+        return false;
+    return switch (record.anchor.terminal) {
+        .run => |id| id == record.session.last_run_id,
+        .compact => |id| id == record.session.last_compact_id,
+    };
+}
+
+fn checkpointIdentityEqual(
+    left: checkpoint_store.Identity,
+    right: checkpoint_store.Identity,
+) bool {
+    return left.task_id == right.task_id and
+        left.generation == right.generation and
+        left.byte_size == right.byte_size and
+        std.mem.eql(u8, &left.digest, &right.digest);
+}
+
+fn optionalU64Equal(left: ?u64, right: ?u64) bool {
+    if (left == null or right == null) return left == null and right == null;
+    return left.? == right.?;
 }
 
 fn foldTerminalDisposition(
@@ -13354,8 +13752,12 @@ test "Task state round trip restores product history without fabricating a Sessi
     try std.testing.expect(task.runtime.executionConst() == null);
     try std.testing.expectEqual(ActiveOperation.none, task.runtime.active_operation);
     try std.testing.expectEqual(
-        ContinuationUnavailableReason.session_recovery_unsupported,
-        taskContinuation(task).unavailable,
+        ContinuationUnavailableReason.checkpoint_unavailable,
+        restored.taskContinuation(task).unavailable,
+    );
+    try std.testing.expectError(
+        error.RecoveryUnavailable,
+        restored.restoreTaskConversation(3, task.durable.binding_epoch),
     );
     const run = findRun(task.durable.runs, 7) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(RunPhase.interrupted, runPhase(run));
@@ -13381,7 +13783,7 @@ test "Task state round trip restores product history without fabricating a Sessi
         std.mem.indexOf(u8, snapshot, "\"conversationRecovery\":false") != null,
     );
     try std.testing.expect(
-        std.mem.indexOf(u8, snapshot, "\"continuationUnavailableReason\":\"session_recovery_unsupported\"") != null,
+        std.mem.indexOf(u8, snapshot, "\"continuationUnavailableReason\":\"checkpoint_unavailable\"") != null,
     );
 
     try restored.closeTask(3);
@@ -13405,7 +13807,7 @@ test "Task state round trip restores product history without fabricating a Sessi
     try std.testing.expectEqual(TaskLifecycle.closed, taskLifecycle(closed_task));
     try std.testing.expectEqual(
         ContinuationUnavailableReason.closed,
-        taskContinuation(closed_task).unavailable,
+        closed_restore.taskContinuation(closed_task).unavailable,
     );
 
     try closed_restore.deleteTask(3);
@@ -13467,8 +13869,8 @@ test "Automatic Workspace history survives an unavailable allocator" {
     try std.testing.expectEqual(WorkspaceAuthorization.available, workspaces[0].authorization);
     const task = restored.findTask(3) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(
-        ContinuationUnavailableReason.session_recovery_unsupported,
-        taskContinuation(task).unavailable,
+        ContinuationUnavailableReason.checkpoint_unavailable,
+        restored.taskContinuation(task).unavailable,
     );
 
     var snapshot_storage: [96 * 1024]u8 = undefined;
@@ -14744,7 +15146,7 @@ test "terminal disposition folds exactly once without reopening a closing Task" 
     try std.testing.expectEqual(TaskLifecycle.open, taskLifecycle(task));
     try std.testing.expectEqual(
         ContinuationUnavailableReason.session_poisoned,
-        taskContinuation(task).unavailable,
+        workbench.taskContinuation(task).unavailable,
     );
 
     try std.testing.expect(task.runtime.beginClosing());
@@ -14752,7 +15154,7 @@ test "terminal disposition folds exactly once without reopening a closing Task" 
     try std.testing.expectEqual(TaskLifecycle.closing, taskLifecycle(task));
     try std.testing.expectEqual(
         ContinuationUnavailableReason.closing,
-        taskContinuation(task).unavailable,
+        workbench.taskContinuation(task).unavailable,
     );
 
     task.durable.closed = true;
@@ -14760,7 +15162,7 @@ test "terminal disposition folds exactly once without reopening a closing Task" 
     try std.testing.expectEqual(TaskLifecycle.closed, taskLifecycle(task));
     try std.testing.expectEqual(
         ContinuationUnavailableReason.closed,
-        taskContinuation(task).unavailable,
+        workbench.taskContinuation(task).unavailable,
     );
 }
 
@@ -15475,7 +15877,7 @@ test "assistant credential redaction finalizes ordinary chunks without rescannin
         workbench.applyEvent(&late_event),
     );
     try std.testing.expectEqual(revision_before_late_event, workbench.revision);
-    try std.testing.expect(!continuationAvailable(taskContinuation(&workbench.tasks[0].?)));
+    try std.testing.expect(!continuationAvailable(workbench.taskContinuation(&workbench.tasks[0].?)));
 }
 
 test "projection failure after Agent terminal becomes a product failure" {
@@ -15517,7 +15919,7 @@ test "projection failure after Agent terminal becomes a product failure" {
     const product = productTerminalFacts(run).?;
     try std.testing.expectEqual(RunOutcome.failed, product.outcome);
     try std.testing.expectEqual(RunCause.event_pipeline_failure, product.cause.?);
-    try std.testing.expect(!continuationAvailable(taskContinuation(&workbench.tasks[0].?)));
+    try std.testing.expect(!continuationAvailable(workbench.taskContinuation(&workbench.tasks[0].?)));
 
     var snapshot_storage: [96 * 1024]u8 = undefined;
     const snapshot = try workbench.writeSnapshot(&snapshot_storage);

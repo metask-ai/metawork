@@ -28,6 +28,7 @@ pub const UnavailableReason = enum {
     task_archived,
     session_recovery_required,
     session_recovery_in_progress,
+    session_recovery_failed,
     persistence_unavailable,
     checkpoint_unavailable,
     execution_mismatch,
@@ -60,6 +61,7 @@ pub const Facts = struct {
     workspace_authorized: bool = false,
     runtime_admission_available: bool = false,
     authority_stable: bool = false,
+    recovery_failed: bool = false,
 };
 
 pub fn project(facts: Facts) Projection {
@@ -90,7 +92,10 @@ fn projectDetached(facts: Facts) Projection {
     if (!facts.runtime_admission_available) return unavailable(.runtime_unavailable);
     if (!facts.authority_stable) return unavailable(.authority_unavailable);
     return .{
-        .continuation = .{ .unavailable = .session_recovery_required },
+        .continuation = .{ .unavailable = if (facts.recovery_failed)
+            .session_recovery_failed
+        else
+            .session_recovery_required },
         .recovery_available = true,
     };
 }
@@ -136,6 +141,17 @@ test "attached and restoring tasks cannot expose a second recovery state" {
     try std.testing.expectEqual(
         UnavailableReason.session_recovery_in_progress,
         in_progress.continuation.unavailable,
+    );
+}
+
+test "failed recovery remains one retryable continuation state" {
+    var facts = eligibleFacts();
+    facts.recovery_failed = true;
+    const result = project(facts);
+    try std.testing.expect(result.recovery_available);
+    try std.testing.expectEqual(
+        UnavailableReason.session_recovery_failed,
+        result.continuation.unavailable,
     );
 }
 

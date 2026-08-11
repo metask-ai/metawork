@@ -462,6 +462,12 @@ pub const FakeCore = struct {
         self.restore_last_compact_id = last_compact_id;
     }
 
+    pub fn forceNextCheckpointRestoreStatus(self: *FakeCore, status: u32) void {
+        self.lock();
+        defer self.unlock();
+        self.forced_checkpoint_restore_status = status;
+    }
+
     pub fn armControlledRestore(self: *FakeCore) void {
         self.lock();
         defer self.unlock();

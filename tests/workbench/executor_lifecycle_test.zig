@@ -59,7 +59,10 @@ fn waitCatalogReady(
         switch (projection.availability) {
             .ready, .degraded => return projection,
             .unavailable => return error.TestUnexpectedResult,
-            .uninitialized, .loading => std.Thread.yield() catch {},
+            .uninitialized, .loading => std.testing.io.sleep(
+                .fromMilliseconds(1),
+                .awake,
+            ) catch {},
         }
     }
     return error.TestUnexpectedResult;
@@ -77,7 +80,7 @@ fn waitTaskSnapshot(
         if (std.mem.indexOf(u8, snapshot, task_marker)) |start| {
             if (std.mem.indexOf(u8, snapshot[start..], needle) != null) return;
         }
-        std.Thread.yield() catch {};
+        std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
     }
     return error.TestUnexpectedResult;
 }
@@ -93,7 +96,7 @@ fn waitCheckpointRecord(
         if (persistence.len != 0 and
             std.mem.indexOf(u8, persistence.storage.?[0..persistence.len], "\"checkpoint_health\":\"available\"") != null)
             return;
-        std.Thread.yield() catch {};
+        std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
     }
     return error.TestUnexpectedResult;
 }
@@ -110,7 +113,7 @@ fn waitHistoryNeedle(
         if (persistence.len != 0 and
             std.mem.indexOf(u8, persistence.storage.?[0..persistence.len], needle) != null)
             return;
-        std.Thread.yield() catch {};
+        std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
     }
     return error.TestUnexpectedResult;
 }
@@ -175,14 +178,22 @@ test "Run checkpoint commits immutable blob before durable descriptor" {
     try checkpoint_store.verify(identity);
     const history = persistence_storage[0..persistence.len];
     try std.testing.expect(std.mem.indexOf(u8, history, "\"generation\":0") != null);
-    try std.testing.expect(std.mem.indexOf(u8, history, "\"session_id\":\"000000000000000000000001\"") != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        history,
+        "\"logical_session_id\":\"000000000000000000000001\"",
+    ) != null);
 
     fake_core.setCheckpointGeneration(1);
     _ = try workbench.compactTaskAtBinding(
         task_id,
         try workbench.taskBindingEpoch(task_id),
     );
-    try waitHistoryNeedle(&workbench, &persistence, "\"terminal_kind\":\"compact\"");
+    try waitHistoryNeedle(
+        &workbench,
+        &persistence,
+        "\"terminal\":{\"kind\":\"compact\",\"id\":1}",
+    );
     const compact_identity: workbench_api.CheckpointBlobIdentity = .{
         .task_id = task_id,
         .generation = 1,
@@ -197,7 +208,7 @@ test "Run checkpoint commits immutable blob before durable descriptor" {
     try waitHistoryNeedle(
         &workbench,
         &persistence,
-        "\"terminal_kind\":\"run\",\"terminal_id\":2",
+        "\"terminal\":{\"kind\":\"run\",\"id\":2}",
     );
     const post_compact_run_identity: workbench_api.CheckpointBlobIdentity = .{
         .task_id = task_id,
@@ -216,7 +227,7 @@ test "Run checkpoint commits immutable blob before durable descriptor" {
     try std.testing.expect(std.mem.indexOf(
         u8,
         post_compact_history,
-        "\"terminal_kind\":\"run\",\"terminal_id\":2",
+        "\"terminal\":{\"kind\":\"run\",\"id\":2}",
     ) != null);
 
     workbench.deinit();
@@ -294,6 +305,168 @@ test "Run checkpoint commits immutable blob before durable descriptor" {
     const session_count = fake_core.session_created;
     fake_core.unlock();
     try std.testing.expectEqual(@as(usize, 1), session_count);
+}
+
+test "restart restores a Task attachment and continues the same Conversation" {
+    fake_core.reset();
+    fake_core.setCheckpointGeneration(1);
+    const home = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        ".",
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(home);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
+    var checkpoint_store = try workbench_api.CheckpointFileStore.init(
+        std.testing.io,
+        root_storage[0..root_len],
+    );
+    defer checkpoint_store.deinit();
+    const persistence_storage = try std.testing.allocator.alloc(
+        u8,
+        workbench_api.task_store_max_bytes,
+    );
+    defer std.testing.allocator.free(persistence_storage);
+    var persistence = TaskPersistenceProbe{ .storage = persistence_storage };
+
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_sessions = 1,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var first_configuration = workbenchConfiguration();
+    first_configuration.directories.canonical_user_home = home;
+    first_configuration.task_persistence = persistence.capability();
+    first_configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
+    var first = try workbench_api.Workbench.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 2,
+            .max_workspaces = 1,
+            .max_tasks = 1,
+            .max_runs_per_task = 3,
+            .max_tools_per_run = 1,
+        },
+        first_configuration,
+    );
+    var first_workbench_live = true;
+    defer if (first_workbench_live) first.deinit();
+    try installWorkbenchExecution(&first);
+    const workspace_id = try first.openWorkspace(workbenchTaskInput());
+    const catalog = try waitCatalogReady(&first, workspace_id);
+    const task_id = try first.createTaskInWorkspace(
+        workspace_id,
+        try first.workspaceEpoch(workspace_id),
+        1,
+        catalog.revision,
+    );
+    _ = try first.runTask(task_id, .{ .text = "remember restart nonce" });
+    try waitCheckpointRecord(&first, &persistence);
+    const restart_history = try std.testing.allocator.dupe(
+        u8,
+        persistence_storage[0..persistence.len],
+    );
+    defer std.testing.allocator.free(restart_history);
+    try first.closeTask(task_id);
+    try waitTaskSnapshot(&first, "\"id\":\"1\"", "\"lifecycle\":\"closed\"");
+    first.shutdownExecutor();
+    first.deinit();
+    first_workbench_live = false;
+    fake_core.lock();
+    fake_core.session_created = 0;
+    fake_core.checkpoint_restores = 0;
+    fake_core.run_calls = 0;
+    fake_core.credential_seen = false;
+    fake_core.restore_last_run_id = 1;
+    fake_core.restore_last_compact_id = 0;
+    fake_core.unlock();
+    var second_configuration = workbenchConfiguration();
+    second_configuration.directories.canonical_user_home = home;
+    second_configuration.task_persistence = persistence.capabilityRestored(restart_history);
+    second_configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
+    var restored = try workbench_api.Workbench.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 2,
+            .max_workspaces = 1,
+            .max_tasks = 1,
+            .max_runs_per_task = 3,
+            .max_tools_per_run = 1,
+        },
+        second_configuration,
+    );
+    defer restored.deinit();
+    try installWorkbenchExecution(&restored);
+    // A persisted manual Workspace deliberately restarts without authority.
+    // Reopening it models the user's explicit reauthorization action.
+    try std.testing.expectEqual(
+        workspace_id,
+        try restored.openWorkspace(workbenchTaskInput()),
+    );
+    _ = try waitCatalogReady(&restored, workspace_id);
+    try waitTaskSnapshot(
+        &restored,
+        "\"id\":\"1\"",
+        "\"continuationRecoveryAvailable\":true",
+    );
+    fake_core.forceNextCheckpointRestoreStatus(wire.STATUS_CHECKPOINT_CORRUPT);
+    _ = try restored.restoreTaskConversation(
+        task_id,
+        try restored.taskBindingEpoch(task_id),
+    );
+    try waitTaskSnapshot(
+        &restored,
+        "\"id\":\"1\"",
+        "\"continuationUnavailableReason\":\"session_recovery_failed\"",
+    );
+    fake_core.armControlledRestore();
+    defer fake_core.releaseControlledRestore();
+    _ = try restored.restoreTaskConversation(
+        task_id,
+        try restored.taskBindingEpoch(task_id),
+    );
+    fake_core.waitUntilRestoreEntered();
+    try std.testing.expectError(
+        error.RecoveryUnavailable,
+        restored.restoreTaskConversation(
+            task_id,
+            try restored.taskBindingEpoch(task_id),
+        ),
+    );
+    fake_core.releaseControlledRestore();
+    try waitTaskSnapshot(
+        &restored,
+        "\"id\":\"1\"",
+        "\"continuationAvailable\":true",
+    );
+
+    _ = try restored.runTask(task_id, .{ .text = "continue after restart" });
+    try waitTaskSnapshot(
+        &restored,
+        "\"id\":\"2\"",
+        "\"phase\":\"completed\"",
+    );
+    fake_core.lock();
+    const restore_calls = fake_core.checkpoint_restores;
+    const run_calls = fake_core.run_calls;
+    const credential_seen = fake_core.credential_seen;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 2), restore_calls);
+    try std.testing.expectEqual(@as(usize, 1), run_calls);
+    try std.testing.expect(credential_seen);
 }
 
 test "Task deletion is busy during checkpoint export and candidate publication" {
