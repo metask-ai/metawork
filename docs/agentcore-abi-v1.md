@@ -83,19 +83,19 @@ fresh Session 只使用 `SessionHostConfigV1` 与 `SessionCreateConfigV1`：
 - built-in Read/Bash/Edit；
 - manual compact；
 - post-terminal checkpoint export 与 Session description；
+- verified checkpoint source 驱动的 Session restore 与 restore report/description 对账；
 - synchronous AskUserQuestion 与 Permission；
 - typed Core event 和 Permission provenance。
 
 以下 revision 7 ABI 能力仍关闭，直到各自完成产品 owner、安全、持久化和恢复验收：
 
 - Runtime MCP configuration live apply；
-- checkpoint restore 与 Session description 驱动的跨进程 recovery；
 - persistent Permission rules；
 - 正式 Host tools；
 - async UI continuation；
 - Worker crash recovery。
 
-因此 Bridge 继续发布 `conversationRecovery = false` 和 `session_recovery_unsupported`。ABI 已具备 checkpoint 原语并不等于 MetaWork 已具备 Conversation recovery。
+当前 restore 只用于正常 Application 重启后重建 finalized Conversation 的 Session attachment。`SessionRestoreConfigV1` 不携带 model，Host 因而必须在调用前证明持久化 model 与当前 ExecutionConfig 精确一致；Host 不向 restore 提供 logical Session ID。AgentCore 将当前 authority 与 checkpoint state 取交集，Host 只能提交重新取得且不宽于历史事实的 Skill/MCP authority。该消费不声明 Worker crash、in-flight Run、async pending 或 suspend/resume recovery。
 
 ## 6. Callback、事件与 Permission
 
@@ -132,7 +132,9 @@ Run、manual compact 与 Session Skill mutation 分别维护 operation-specific 
 
 checkpoint export 与 Session describe 是另外两条 operation-specific 消费路径。export 中经本地 sink 原因验证的 `checkpoint_io` 不污染 Session；restore 侧 checkpoint status 不是 export 合法结果。`out_of_memory`、`core_error`、malformed OK 或 callback/dependency contract failure 保守关闭 Session admission。describe 的 resource/busy/argument failure 可重试，内部 fatal 与 malformed result 同样关闭 admission。`checkpoint_budget_required` 对这两个 entry 都不是合法结果，必须显式按 dependency contract failure 收口。export 的 generation 只按 opaque `u64` 保存，ABI 未定义非零或单调性，Host 不得自行断言。
 
-`CheckpointExportResultV1.digest` 的算法在 revision 7 合同中未定义，canonical bundle 的真实输出也不等于 streamed bytes 的 SHA-256。MetaWork 不把该字段冒充内容哈希或据此拒绝合法 export；checkpoint store 的文件名、descriptor 和启动校验统一使用 Host 在 sink 中对实际 bytes 独立计算的 SHA-256。若上游未来定义 raw digest 语义，须先补充 ABI 合同与 candidate probe，再决定是否增加独立校验，不能静默替换产品 content hash。
+checkpoint restore 是第三条独立 disposition。`checkpoint_corrupt`、`checkpoint_unsupported`、`checkpoint_incompatible`、`logical_session_conflict` 与 verified source 的 I/O failure 只失败本次 candidate；unknown/malformed OK、restore report 与持久 expectation 不一致或依赖合同失败必须 fail closed 并销毁 candidate。source `read_fn` 允许短读；canonical revision 7 probe 已确认 Core 持续读取到 EOF。启动 size/hash verify 是 eligibility 事实，job 内同一 source handle 的再校验是 commit 前的权威检查，流式 digest 只作为完整消费时的额外交叉验证。
+
+`CheckpointExportResultV1.digest` 的算法在 revision 7 合同中未定义，canonical bundle 的真实输出也不等于 streamed bytes 的 SHA-256。MetaWork 不把该字段冒充内容哈希或据此拒绝合法 export；checkpoint store 的文件名、`CheckpointRecord.blob` 和启动校验统一使用 Host 在 sink 中对实际 bytes 独立计算的 SHA-256。若上游未来定义 raw digest 语义，须先补充 ABI 合同与 candidate probe，再决定是否增加独立校验，不能静默替换产品 content hash。
 
 八个 StopReason 必须无 `else` 穷尽映射：
 

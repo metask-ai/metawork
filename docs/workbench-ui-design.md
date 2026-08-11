@@ -423,7 +423,7 @@ Metask 已连接
 
 ### 6.1 核心规则
 
-- 每个 Task 同时最多一个 active operation；当前 operation 可以是 Run 或 manual compact，二者不能并发；
+- 每个 Task 同时最多一个 active operation；当前 operation 可以是 Run、manual compact 或 Conversation restore，三者不能并发；
 - 每个 Task 创建时建立第一个 execution binding epoch，固化不含 secret 的 generation、account、Provider/API identity 和模型事实，并让对应 Agent Session 持有 owned ExecutionConfig；默认 API/模型变化不修改当前 epoch；
 - 多个 Task 可以后台运行，超过 Host executor 能力时明确排队；
 - 切换 Task 不停止执行；
@@ -446,7 +446,7 @@ Metask 已连接
 | Last Run outcome     | `none / completed / cancelled / failed / interrupted` | 最近一次 terminal Run 的结果，不关闭 Task       |
 | View sync            | `ready / syncing / failed`                            | Renderer 是否拥有可安全 mutation 的最新投影视图 |
 
-`draft` 是进入 Workbench 后、尚未创建真实 Task 的 Renderer 临时页面，不进入 Host Task lifecycle。它默认持有 Automatic Workspace intent，也可以切换到 Manual Workspace identity；发送前必须同时满足相应 Workspace admission 与默认执行配置。一次 Run 完成后 `Active operation` 与 `Active Run phase` 回到 `none`，`Last Run outcome` 保留结果。Manual compact 完成后 active operation 同样回到 `none`，其 outcome 进入独立、有界、append-only 的 maintenance history，不改写最近一次 Run outcome。
+`draft` 是进入 Workbench 后、尚未创建真实 Task 的 Renderer 临时页面，不进入 Host Task lifecycle。它默认持有 Automatic Workspace intent，也可以切换到 Manual Workspace identity；发送前必须同时满足相应 Workspace admission 与默认执行配置。一次 Run 完成后 `Active operation` 与 `Active Run phase` 回到 `none`，`Last Run outcome` 保留结果。Manual compact 完成后 active operation 同样回到 `none`，其 outcome 进入独立、有界、append-only 的 maintenance history，不改写最近一次 Run outcome。Conversation restore 完成后 active operation 回到 `none`；成功只改变 runtime attachment/continuation，失败只改变派生的 unavailable reason，二者都不新增 Run、消息或 maintenance history。
 
 Execution binding availability 是下一次 admission 的独立前置事实，不得塞入上述四个状态轴或改写最近一次 Run 结果。Host projection 只发布 `available / rebind_required / unavailable` 及脱敏原因；Renderer 不根据当前默认模型自行判断能否继续。
 
@@ -471,20 +471,22 @@ Execution binding availability 是下一次 admission 的独立前置事实，�
 
 没有 active Run 且 execution binding 为 `rebind_required` 或 `unavailable` 时，左栏仍保留最近一次 Run 的 outcome；Composer 区域另外显示 `需要确认执行配置` 或 `当前无法继续`。不得用 binding 问题把历史结果改标成 Failed，也不得继续显示可发送输入造成错误暗示。
 
-### 6.4 跨重启历史与 execution rebind
+### 6.4 跨重启 Conversation 恢复与 execution rebind
 
-> Capability：**混合**。Workbench 只读 Task history persistence 已接通；AgentCore revision 7 已提供 checkpoint 原语，但 MetaWork 尚未接通并验收跨进程 Session/Conversation 恢复，显式 rebind 与 continuation 仍是目标能力。
+> Capability：**已接通**。Workbench 可以从最新 finalized checkpoint 恢复原 Conversation attachment；这只覆盖正常 Application 重启，不代表独立 AgentCore Worker crash、in-flight Run 或 suspend/resume 已可恢复。显式 execution rebind 仍是未来能力。
 
 当前恢复规则：
 
-1. Host 从 bounded Workbench store 恢复 Workspace/Task、消息、Run/tool/UI 决策和 compact 历史，以及不含 secret 的 execution binding descriptor；不得把当前默认配置静默写入历史 Task；
+1. Host 从 bounded Workbench store 恢复 Workspace/Task、消息、Run/tool/UI 决策、compact 历史、无 secret execution binding 与 checkpoint record；不得把当前默认配置静默写入历史 Task；
 2. 没有 live owner 的 non-terminal Run 或 compact 显示为 `Interrupted`，不显示 Running/Stopping，不自动重放输入、工具或 permission；
-3. 恢复 Task 发布 `conversationRecovery = false` 和 `continuationUnavailableReason = session_recovery_unsupported`。左栏仍可选择，时间线仍可阅读，Composer 禁用并明确说明“当前 Metask AgentCore 版本无法继续原会话”；
-4. open 的恢复 Task 虽无 Session，仍可执行真实的 Host-owned 结束动作；成功后 `lifecycle = closed` 必须写入同一 store，删除入口随 canonical snapshot 开放，再次重启不得复活。Renderer 不能把无状态变化的 acknowledgement 当成已结束；
-5. Task store read/corrupt/write/outcome-unknown health 由 Host snapshot 发布；Renderer 只解释该事实并停止 mutation，不自行清空、修复、迁移或重试持久数据；
-6. 当前界面不显示 `继续此 Task`、`使用当前配置继续` 或假的 resume；exact-match execution generation 也不能替代 Conversation 恢复证明。
+3. 点击左栏 Task 始终只是导航。满足资格的 detached open Task 在 Composer 上方显示单一显式主动作 `Restore conversation / 恢复对话`；Renderer 不在选择、reload 或 timeout 后自动触发 restore；
+4. restore 期间显示 `Restoring conversation / 正在恢复对话`，禁用发送、compact 和重复 restore。左栏把该 Task 归入正在运行分组，但不能伪造 Agent Run 或 Stop 按钮；
+5. restore 失败时保留可阅读历史与稳定原因；Host 仍发布 `continuationRecoveryAvailable = true` 时显示 `Try again / 重试`。timeout 只触发 canonical snapshot resync，绝不重放 restore command；
+6. 成功后 Host 原子发布 attachment 与 `continuationAvailable = true`，Composer 才重新开放发送。`continuationAvailable`、`continuationUnavailableReason` 和 `continuationRecoveryAvailable` 是同一 continuation 模型；不得建立第二个 `recovery.state` 或由 Renderer 猜测资格；
+7. checkpoint、Workspace、execution、catalog/MCP authority、Runtime 或持久化任一 gate 不满足时只显示对应 unavailable 说明，不显示恢复按钮。Task store read/corrupt/write/outcome-unknown health 由 Host 发布；Renderer 不自行清空、修复、迁移或重试持久数据；
+8. open 的 detached Task 仍可执行真实的 Host-owned 结束动作；成功后 `lifecycle = closed` 必须写入同一 store，删除入口随 canonical snapshot 开放，再次重启不得复活。
 
-未来只有 Host 同时证明 Workspace、Provider、model、generation 与 Task binding epoch 精确匹配，并且 AgentCore 提供已验收的 Session/Conversation 恢复时，continuation 才能变为 available。durable Task 不保存 account 或 API Key identity，恢复不能从当前 Account catalog 反推或补写这些字段。若另外交付 rebind，必须由用户明确发起，重新校验 Workspace 和当前 catalog ownership，创建新 binding epoch/Session，并以不可改写的配置边界保留旧 Run、usage 与模型归属；失败不得回退到静默默认值。
+恢复要求 checkpoint record 与 Task execution binding 共同证明 Provider、model、execution generation、Task binding epoch 与当前可用 authority 精确匹配；durable Task 不保存 account 或 API Key identity，恢复不能从当前 Account catalog 反推或补写这些字段。若未来交付 rebind，必须由用户明确发起，重新校验 Workspace 和当前 catalog ownership，创建新 binding epoch/Session，并以不可改写的配置边界保留旧 Run、usage 与模型归属；失败不得回退到静默默认值。
 
 ## 7. 中间区域：工作叙事
 
@@ -1179,7 +1181,7 @@ Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成
 - 当前 API 模型列表、模型切换 pending/error、设置与 Composer 默认值一致；
 - 设置页切换默认 API 后加载对应模型，默认只影响新 Task admission，不自动改绑已有 Task；
 - 已有 Task 保留当前 execution binding epoch，默认变化不改写历史或 live Session；只有 §6.4 的显式 rebind 可以建立新 epoch；
-- Host 重启后历史 Task 只读恢复；点击左栏 Task 可浏览已保存时间线，未完成 operation 显示 `Interrupted`，Composer 以 `session_recovery_unsupported` 说明当前尚未完成 revision 7 checkpoint 产品接入。不得显示假的 resume/rebind，也不得因当前默认配置恰好匹配而开放发送；
+- Host 重启后点击左栏 Task 只浏览已保存时间线，未完成 operation 显示 `Interrupted`；满足 Host 恢复资格时 Composer 显示显式恢复动作，覆盖 required、restoring、failed/retry 和成功后重新发送。不得自动 restore、伪造 Run/Stop、显示假的 rebind，或仅因当前默认配置看似匹配而开放发送；
 - API 只在设置中显示脱敏名称、Provider 和尾号；完整 secret 不进入 DOM、snapshot、日志或错误；
 - 左下账号入口在窄窗口、长姓名、重认证和 200% text 下仍可用。
 

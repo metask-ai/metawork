@@ -147,7 +147,7 @@ Runtime API 已提供且可用时，绕过它调用低层函数属于架构违�
 
 ## 5. 状态、恢复与故障域
 
-Product 在 Renderer 生命周期之外拥有产品状态。WebView reload 通过完整 Snapshot 重建视图；Application 重启只恢复经过校验的产品历史。Workbench 已拥有 checkpoint blob store、descriptor transaction 和启动对账；Application 只按既有 store 模式注入 `<MetaWork data dir>/workbench/checkpoints` 目录 capability 并持有进程级单写锁。AgentCore ABI v1 revision 7 的 restore、execution binding 对账和 terminal reconciliation 仍未接通，因此当前历史 Task 不伪造 continuation，无法恢复的 non-terminal operation 保守收口为 interrupted。
+Product 在 Renderer 生命周期之外拥有产品状态。WebView reload 通过完整 Snapshot 重建视图；Application 重启先恢复经过校验的产品历史，再由用户显式触发 Conversation attachment 重建。Workbench 拥有 checkpoint blob store、record transaction、恢复资格、bounded recovery job 与主线程 commit；Agent 只拥有 AgentCore restore adapter、Session slot 和 Runtime shutdown fence；Application 只按既有 store 模式注入 `<MetaWork data dir>/workbench/checkpoints` 目录 capability、持有进程级单写锁并维持 owner 关闭顺序。恢复不重放历史输入、工具或 permission，无法恢复的 non-terminal operation 仍保守收口为 interrupted。精确事务见 [Product 内部架构](product-architecture.md)。
 
 Bridge transport、Product 产品状态和 Agent execution terminal cause 是不同事实。Snapshot/Event 失败不覆盖产品历史；transport failure 不伪造用户取消；Agent terminal result 只有经 Product 提交后才成为 MetaWork 产品事实。详细线性化、持久化和恢复规则见 [Product 内部架构](product-architecture.md)，连接与 Snapshot transport 见 [Renderer Bridge 合同](renderer-bridge-contract.md)。
 
@@ -163,7 +163,7 @@ Bridge transport、Product 产品状态和 Agent execution terminal cause 是不
 
 当前正式 AgentCore baseline 是 ABI v1 revision 7。MetaWork 只消费经 verifier 接收并 stage 到 `.agentcore/bundle` 的 canonical bundle；缺失、identity、checksum、target、ABI 或 symbol 校验失败必须明确失败，不允许旧 revision、`latest`、可变 tag、implementation source fallback 或静默降级。精确 bundle 规则见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。
 
-当前 baseline 不包含 async pending、suspend/resume、跨进程 Conversation 恢复、strict Workspace security、正式 Host tools、typed Output/FileChange、plan progress/approval、custom UI 或 Windows 安装签名更新。存在 ABI entry 不代表产品能力已经开放；能力状态只以 [验证规范](validation.md)为准。
+当前 baseline 已包含同一桌面 Application 正常重启后、由 durable checkpoint 驱动的显式 Conversation 恢复，但不包含 async pending、suspend/resume、独立 AgentCore Worker crash recovery、跨进程 in-flight Run 恢复、strict Workspace security、正式 Host tools、typed Output/FileChange、plan progress/approval、custom UI 或 Windows 安装签名更新。当前仍是同进程 prototype；存在 ABI entry 不代表更宽的进程隔离或恢复能力已经开放，能力状态只以 [验证规范](validation.md)为准。
 
 Native SDK 的平台支持矩阵、真实 WebView 路径、构建与分发证据只在 [验证规范](validation.md)维护。架构不预设未经验证的 push、poll 或自制 `events.drain` 协议，也不从一个平台的结果推断另一个平台已经可用。
 
