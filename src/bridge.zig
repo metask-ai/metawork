@@ -57,6 +57,7 @@ pub const commands = struct {
     pub const account_logout = commands_impl.account_logout;
     pub const create_task = commands_impl.create_task;
     pub const run = commands_impl.run;
+    pub const restore_task = commands_impl.restore_task;
     pub const cancel = commands_impl.cancel;
     pub const respond_ui = commands_impl.respond_ui;
     pub const close_task = commands_impl.close_task;

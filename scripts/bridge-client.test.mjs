@@ -313,6 +313,13 @@ test("the fixed revision 1 contract carries Host-owned Workspace and generation 
           operationId: "19",
           reason: null,
         };
+      if (command === "metawork.tasks.restore")
+        return {
+          accepted: true,
+          taskId: "11",
+          attemptId: "23",
+          reason: null,
+        };
       if (command === "metawork.tasks.cancelCompact")
         return {
           taskId: "11",
@@ -371,6 +378,12 @@ test("the fixed revision 1 contract carries Host-owned Workspace and generation 
     operationId: "19",
     reason: null,
   });
+  assert.deepEqual(await client.restoreTask("11", "13"), {
+    accepted: true,
+    taskId: "11",
+    attemptId: "23",
+    reason: null,
+  });
   await client.cancelCompact("11", "19");
   assert.deepEqual(await client.refreshWorkspaceSkillCatalog("7", "29"), {
     accepted: true,
@@ -422,6 +435,10 @@ test("the fixed revision 1 contract carries Host-owned Workspace and generation 
     },
     {
       command: "metawork.tasks.compact",
+      payload: { taskId: "11", expectedBindingEpoch: "13" },
+    },
+    {
+      command: "metawork.tasks.restore",
       payload: { taskId: "11", expectedBindingEpoch: "13" },
     },
     {

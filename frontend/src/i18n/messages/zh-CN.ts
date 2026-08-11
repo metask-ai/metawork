@@ -426,8 +426,7 @@ export const zhCN: Record<MessageId, string> = {
   "run.placeholder_closing": "此任务正在结束",
   "run.placeholder_closed": "此任务已结束",
   "run.placeholder_unavailable": "结束此任务并新建任务后才能继续",
-  "run.placeholder_recovery_unsupported":
-    "此任务已恢复为只读历史，但当前 Metask AgentCore 版本无法继续原会话",
+  "run.placeholder_recovery_required": "恢复此会话后继续",
   "run.draft_only": "已在本地保存为草稿。当前工作结束后即可发送。",
   "run.started": "工作已开始。",
   "run.start_failed": "未能开始工作，请检查连接后重试。",

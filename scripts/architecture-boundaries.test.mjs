@@ -428,6 +428,7 @@ test("only Agent implementation imports the AgentCore SDK", () => {
     [
       "agent_catalog",
       "agent_checkpoint",
+      "agent_checkpoint_restore",
       "agent_mcp_connector",
       "agent_mcp_catalog",
       "agent_mcp_runtime",
@@ -472,9 +473,14 @@ test("candidate validation keeps only repository locks and the official SDK cons
   }
   const probeRunner = read("scripts/run-agentcore-probe.mjs");
   assert.match(probeRunner, /bundle\/bindings\/zig/);
-  assert.match(probeRunner, /agentcore\.Api\.discover\(\)/);
+  assert.match(probeRunner, /agentcore-restore-probe\.zig/);
   assert.match(probeRunner, /addRunArtifact/);
   assert.match(probeRunner, /source-free AgentCore Zig package consumer/);
+  const restoreProbe = read("scripts/probes/agentcore-restore-probe.zig");
+  assert.match(restoreProbe, /agentcore\.Api\.discover\(\)/);
+  assert.match(restoreProbe, /sessionRestore\(\)/);
+  assert.match(restoreProbe, /short_read_limit/);
+  assert.match(restoreProbe, /eof_calls/);
   assert.match(
     read("scripts/agentcore-bundle.mjs"),
     /manifest\.source\.dirty === false/,
@@ -1176,18 +1182,20 @@ test("checkpoint persistence stays behind the Agent and Workbench owners", () =>
     ...zigFiles("src/account/"),
     ...filesWithExtensions("frontend/src/", [".ts", ".tsx"]),
   ];
-  for (const file of prohibited)
+  for (const file of prohibited) {
+    const source = read(file).replaceAll("checkpoint_unavailable", "");
     assert.doesNotMatch(
-      read(file),
+      source,
       /checkpoint/i,
       `${file} must not gain checkpoint product or persistence surface`,
     );
+  }
 
   const agent = read("src/agent/session.zig");
   assert.equal(
     [...agent.matchAll(/durable_budget\s*=\s*null/g)].length,
-    1,
-    "durable budget must keep one canonical null/default source",
+    2,
+    "create and restore must both leave the AgentCore-owned durable budget unset",
   );
   const productionCheckpointCallers = zigFiles("src/").filter((file) =>
     /\.exportCheckpoint\(/.test(read(file)),
@@ -1220,7 +1228,7 @@ test("checkpoint persistence stays behind the Agent and Workbench owners", () =>
     "self.commitTaskStateWithCheckpoint(",
   );
   const descriptorInstall = mainCommit.indexOf(
-    "task.durable.checkpoint = candidate.descriptor",
+    "task.durable.checkpoint = candidate.record",
   );
   assert.ok(
     candidateConsumption >= 0 &&
@@ -1320,25 +1328,24 @@ test("Agent terminal facts have one immutable handoff and no legacy history latc
 
 test("Workbench owns Task lifecycle, continuation, and canonical redaction", () => {
   const workbench = read("src/workbench/projection.zig");
+  const taskRuntime = read("src/workbench/task_runtime.zig");
   const taskRecord = workbench.slice(
     workbench.indexOf("const DurableTaskRecord = struct"),
     workbench.indexOf("fn FixedText"),
   );
   const durableTaskRecord = taskRecord.slice(
     taskRecord.indexOf("const DurableTaskRecord = struct"),
-    taskRecord.indexOf("const RuntimeAttachment = struct"),
-  );
-  const runtimeAttachment = taskRecord.slice(
-    taskRecord.indexOf("const RuntimeAttachment = struct"),
-    taskRecord.indexOf("const TaskView = struct"),
+    taskRecord.indexOf("const CheckpointHealth = enum"),
   );
   assert.doesNotMatch(durableTaskRecord, /lifecycle: TaskLifecycle/);
   assert.doesNotMatch(
     durableTaskRecord,
     /continuation: ContinuationCapability/,
   );
-  assert.match(runtimeAttachment, /lifecycle: TaskLifecycle/);
-  assert.match(runtimeAttachment, /continuation: ContinuationCapability/);
+  assert.match(taskRuntime, /pub const Attachment = union\(enum\)/);
+  assert.match(taskRuntime, /pub const ActiveOperation = union\(enum\)/);
+  assert.match(workbench, /fn taskLifecycle[\s\S]*task\.durable\.closed/);
+  assert.match(workbench, /fn taskRecoveryProjection/);
   assert.match(taskRecord, /durable: DurableTaskRecord/);
   assert.match(taskRecord, /runtime: RuntimeAttachment/);
   assert.doesNotMatch(
@@ -1402,14 +1409,20 @@ test("Workbench owns Task lifecycle, continuation, and canonical redaction", () 
     workbench,
     /pub fn renameTask[\s\S]*copyProjected\([\s\S]*execution\.input\(\)\.api_key[\s\S]*view\.durable\.title_redacted = projected\.redacted/,
   );
-  assert.match(taskRecord, /execution: \?OwnedTaskExecution/);
-  assert.match(workbench, /const OwnedTaskExecution = struct/);
+  assert.match(taskRuntime, /execution: owned_execution\.OwnedTaskExecution/);
+  assert.match(
+    workbench,
+    /const OwnedTaskExecution = owned_task_execution\.OwnedTaskExecution/,
+  );
+  assert.match(
+    read("src/workbench/owned_task_execution.zig"),
+    /pub const OwnedTaskExecution = struct/,
+  );
   assert.match(workbench, /account_contract\.validateExecutionConfig\(input\)/);
   assert.match(workbench, /redaction_secret = execution\.api_key/);
-  assert.match(workbench, /releaseQuiescentTaskExecutions/);
-  assert.match(workbench, /fn releaseTaskExecutionNoFail/);
+  assert.match(workbench, /fn releaseExecutionValueNoFail/);
   const releaseTaskExecution = workbench.slice(
-    workbench.indexOf("fn releaseTaskExecutionNoFail"),
+    workbench.indexOf("fn releaseExecutionValueNoFail"),
     workbench.indexOf("fn upsertWorkspace"),
   );
   assert.match(
@@ -1974,9 +1987,9 @@ test("Renderer declares window chrome UI while Application owns native behavior"
 
 test("lifecycle tests are grouped by invariant", () => {
   const cases = [
-    ["tests/agent/lifecycle_test.zig", 56],
+    ["tests/agent/lifecycle_test.zig", 59],
     ["tests/agent/event_pump_test.zig", 5],
-    ["tests/workbench/executor_lifecycle_test.zig", 28],
+    ["tests/workbench/executor_lifecycle_test.zig", 29],
     ["tests/integration/lifecycle/lifecycle_test.zig", 4],
   ];
   for (const [path, expectedCount] of cases) {

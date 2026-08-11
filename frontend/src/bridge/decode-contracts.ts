@@ -35,6 +35,7 @@ import {
   type TaskView,
   type TaskCreateResult,
   type TaskCompactResult,
+  type TaskRestoreResult,
   type TaskRunResult,
   type ToolView,
   type UiRecord,
@@ -220,6 +221,13 @@ const taskCompactReasons = [
   "task_unavailable",
   "task_busy",
   "no_history",
+  "capacity_reached",
+  "shutting_down",
+] as const;
+const taskRestoreReasons = [
+  "binding_changed",
+  "task_unavailable",
+  "recovery_unavailable",
   "capacity_reached",
   "shutting_down",
 ] as const;
@@ -1084,6 +1092,7 @@ function decodeTask(value: unknown, path: string): TaskView {
     "lifecycle",
     "continuationAvailable",
     "continuationUnavailableReason",
+    "continuationRecoveryAvailable",
     "archived",
     "closeFailed",
     "activeOperation",
@@ -1153,12 +1162,25 @@ function decodeTask(value: unknown, path: string): TaskView {
       "event_projection_failure",
       "closing",
       "closed",
-      "session_recovery_unsupported",
+      "task_archived",
+      "session_recovery_required",
+      "session_recovery_in_progress",
+      "session_recovery_failed",
+      "persistence_unavailable",
+      "checkpoint_unavailable",
+      "execution_mismatch",
+      "workspace_unavailable",
+      "authority_unavailable",
+      "runtime_unavailable",
     ] as const,
   );
   if (continuationAvailable !== (continuationUnavailableReason === null))
     fail(path, "continuation availability and unavailable reason must agree");
   const archived = booleanValue(item.archived, `${path}.archived`);
+  const continuationRecoveryAvailable = booleanValue(
+    item.continuationRecoveryAvailable,
+    `${path}.continuationRecoveryAvailable`,
+  );
   const currentRunId = wireId(item.currentRunId, `${path}.currentRunId`);
   const currentRunPhase = nullableEnum(
     item.currentRunPhase,
@@ -1178,6 +1200,7 @@ function decodeTask(value: unknown, path: string): TaskView {
             kind: enumValue(operation.kind, `${path}.activeOperation.kind`, [
               "run",
               "compact",
+              "restore",
             ] as const),
             id: positiveWireId(operation.id, `${path}.activeOperation.id`),
           };
@@ -1241,6 +1264,13 @@ function decodeTask(value: unknown, path: string): TaskView {
       currentRunPhase !== null
     )
       fail(path, "active Compact operation must be the only active Task work");
+  } else if (activeOperation?.kind === "restore") {
+    if (archived || lifecycle !== "open")
+      fail(path, "only an open visible Task can restore its conversation");
+    if (currentRunPhase !== null || activeCompacts.length !== 0)
+      fail(path, "active recovery must be the only active Task work");
+    if (continuationUnavailableReason !== "session_recovery_in_progress")
+      fail(path, "active recovery must project recovery in progress");
   } else if (currentRunPhase !== null || activeCompacts.length !== 0) {
     fail(path, "active Task work must have an active operation identity");
   }
@@ -1284,6 +1314,27 @@ function decodeTask(value: unknown, path: string): TaskView {
     fail(path, "a non-open Task cannot accept future work");
   if (continuationAvailable && binding.availability !== "available")
     fail(path, "a Task without an available binding cannot accept future work");
+  if (
+    continuationUnavailableReason === "session_recovery_in_progress" &&
+    activeOperation?.kind !== "restore"
+  )
+    fail(path, "recovery in progress requires an active recovery operation");
+  if (continuationRecoveryAvailable) {
+    if (
+      lifecycle !== "open" ||
+      archived ||
+      activeOperation !== null ||
+      continuationAvailable ||
+      (continuationUnavailableReason !== "session_recovery_required" &&
+        continuationUnavailableReason !== "session_recovery_failed")
+    )
+      fail(
+        path,
+        "recovery availability must describe an eligible detached Task",
+      );
+  }
+  if (continuationAvailable && continuationRecoveryAvailable)
+    fail(path, "continuation and recovery cannot both be available");
   return {
     id: positiveWireId(item.id, `${path}.id`),
     recentOrder: positiveWireId(item.recentOrder, `${path}.recentOrder`),
@@ -1294,6 +1345,7 @@ function decodeTask(value: unknown, path: string): TaskView {
     lifecycle,
     continuationAvailable,
     continuationUnavailableReason,
+    continuationRecoveryAvailable,
     archived,
     closeFailed: booleanValue(item.closeFailed, `${path}.closeFailed`),
     activeOperation,
@@ -2762,6 +2814,37 @@ export function decodeTaskCompactResult(
     taskId,
     operationId: null,
     reason: enumValue(item.reason, "$.reason", taskCompactReasons),
+  };
+}
+
+export function decodeTaskRestoreResult(
+  value: unknown,
+  expectedTaskId: string,
+): TaskRestoreResult {
+  const item = object(value, "$", [
+    "accepted",
+    "taskId",
+    "attemptId",
+    "reason",
+  ]);
+  const accepted = booleanValue(item.accepted, "$.accepted");
+  const taskId = positiveWireId(item.taskId, "$.taskId");
+  if (taskId !== expectedTaskId) fail("$.taskId", "response identity mismatch");
+  if (accepted) {
+    if (item.reason !== null) fail("$.reason", "expected null");
+    return {
+      accepted: true,
+      taskId,
+      attemptId: positiveWireId(item.attemptId, "$.attemptId"),
+      reason: null,
+    };
+  }
+  if (item.attemptId !== null) fail("$.attemptId", "expected null");
+  return {
+    accepted: false,
+    taskId,
+    attemptId: null,
+    reason: enumValue(item.reason, "$.reason", taskRestoreReasons),
   };
 }
 

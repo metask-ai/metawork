@@ -254,6 +254,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.account_logout, .function = accountLogout },
             .{ .name = commands.create_task, .function = createTask },
             .{ .name = commands.run, .function = runTask },
+            .{ .name = commands.restore_task, .function = restoreTask },
             .{ .name = commands.compact, .function = compactTask },
             .{ .name = commands.cancel_compact, .function = cancelCompact },
             .{ .name = commands.refresh_task_skill_catalog, .function = refreshTaskSkillCatalog },
@@ -1055,6 +1056,48 @@ pub const Dispatcher = struct {
             true,
             task_id,
             operation_id,
+            null,
+        );
+    }
+
+    fn restoreTask(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(
+            handlers.TaskRestore,
+            invocation.request.payload,
+        );
+        defer parsed.deinit();
+        const task_id = try handlers.parseWireId(parsed.value.taskId);
+        const binding_epoch = try handlers.parseWireId(
+            parsed.value.expectedBindingEpoch,
+        );
+        const attempt_id = (try self.requireWorkbench()).restoreTaskConversation(
+            task_id,
+            binding_epoch,
+        ) catch |err| {
+            if (taskRestoreRejection(err)) |reason|
+                return encodeTaskRestoreResult(
+                    output,
+                    false,
+                    task_id,
+                    null,
+                    reason,
+                );
+            return err;
+        };
+        self.notifyCommitted();
+        return encodeTaskRestoreResult(
+            output,
+            true,
+            task_id,
+            attempt_id,
             null,
         );
     }
@@ -2591,6 +2634,21 @@ fn taskCompactRejection(err: anyerror) ?[]const u8 {
     };
 }
 
+fn taskRestoreRejection(err: anyerror) ?[]const u8 {
+    return switch (err) {
+        error.BindingEpochMismatch => "binding_changed",
+        error.UnknownTask => "task_unavailable",
+        error.RecoveryUnavailable => "recovery_unavailable",
+        error.RestoreAttemptExhausted,
+        error.QueueFull,
+        error.ProjectionCapacity,
+        error.OutOfMemory,
+        => "capacity_reached",
+        error.ExecutorShuttingDown => "shutting_down",
+        else => null,
+    };
+}
+
 fn catalogRefreshRejection(err: anyerror) ?[]const u8 {
     return switch (err) {
         error.WorkspaceEpochMismatch => "workspace_changed",
@@ -2792,6 +2850,36 @@ fn encodeTaskCompactResult(
         task_id,
     }) catch return error.NoSpaceLeft;
     if (operation_id) |value|
+        writer.print("\"{d}\"", .{value}) catch return error.NoSpaceLeft
+    else
+        writer.writeAll("null") catch return error.NoSpaceLeft;
+    writer.writeAll(",\"reason\":") catch return error.NoSpaceLeft;
+    if (reason) |value|
+        std.json.Stringify.value(value, .{}, &writer) catch return error.NoSpaceLeft
+    else
+        writer.writeAll("null") catch return error.NoSpaceLeft;
+    writer.writeByte('}') catch return error.NoSpaceLeft;
+    return writer.buffered();
+}
+
+fn encodeTaskRestoreResult(
+    output: []u8,
+    accepted: bool,
+    task_id: u64,
+    attempt_id: ?u64,
+    reason: ?[]const u8,
+) ![]const u8 {
+    const valid = task_id != 0 and if (accepted)
+        attempt_id != null and attempt_id.? != 0 and reason == null
+    else
+        attempt_id == null and reason != null;
+    if (!valid) return error.InvalidTaskRestoreResult;
+    var writer = std.Io.Writer.fixed(output);
+    writer.print("{{\"accepted\":{},\"taskId\":\"{d}\",\"attemptId\":", .{
+        accepted,
+        task_id,
+    }) catch return error.NoSpaceLeft;
+    if (attempt_id) |value|
         writer.print("\"{d}\"", .{value}) catch return error.NoSpaceLeft
     else
         writer.writeAll("null") catch return error.NoSpaceLeft;
@@ -3130,6 +3218,22 @@ test "mutation response encoders reject every inconsistent success and rejection
     try std.testing.expectError(
         error.InvalidTaskCompactResult,
         encodeTaskCompactResult(&output, true, 1, 0, null),
+    );
+    try std.testing.expectError(
+        error.InvalidTaskRestoreResult,
+        encodeTaskRestoreResult(&output, false, 1, 9, "recovery_unavailable"),
+    );
+    try std.testing.expectError(
+        error.InvalidTaskRestoreResult,
+        encodeTaskRestoreResult(&output, false, 1, null, null),
+    );
+    try std.testing.expectError(
+        error.InvalidTaskRestoreResult,
+        encodeTaskRestoreResult(&output, true, 0, 9, null),
+    );
+    try std.testing.expectError(
+        error.InvalidTaskRestoreResult,
+        encodeTaskRestoreResult(&output, true, 1, 0, null),
     );
     try std.testing.expectError(
         error.InvalidWorkspaceMutationResult,

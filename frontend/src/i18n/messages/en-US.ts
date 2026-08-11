@@ -457,8 +457,7 @@ export const enUS = {
   "run.placeholder_closed": "This task has ended",
   "run.placeholder_unavailable":
     "End this task and start a new one to continue",
-  "run.placeholder_recovery_unsupported":
-    "This task was restored for reading, but this Metask AgentCore version cannot continue its conversation",
+  "run.placeholder_recovery_required": "Restore this conversation to continue",
   "run.draft_only":
     "Saved locally as a draft. You can send it after the current work finishes.",
   "run.started": "Work started.",

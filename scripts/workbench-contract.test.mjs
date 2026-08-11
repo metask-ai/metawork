@@ -12,6 +12,7 @@ import {
   decodePingResponse,
   decodeTaskCreateResult,
   decodeTaskCompactResult,
+  decodeTaskRestoreResult,
   decodeTaskRunResult,
   decodeSkillDetailResult,
   decodeSkillExportResult,
@@ -484,6 +485,53 @@ test("Task metadata mutation acknowledgements are identity-checked and exact", (
     },
   );
   assert.deepEqual(
+    decodeTaskRestoreResult(
+      {
+        accepted: true,
+        taskId: "3",
+        attemptId: "12",
+        reason: null,
+      },
+      "3",
+    ),
+    {
+      accepted: true,
+      taskId: "3",
+      attemptId: "12",
+      reason: null,
+    },
+  );
+  assert.deepEqual(
+    decodeTaskRestoreResult(
+      {
+        accepted: false,
+        taskId: "3",
+        attemptId: null,
+        reason: "recovery_unavailable",
+      },
+      "3",
+    ),
+    {
+      accepted: false,
+      taskId: "3",
+      attemptId: null,
+      reason: "recovery_unavailable",
+    },
+  );
+  assert.throws(
+    () =>
+      decodeTaskRestoreResult(
+        {
+          accepted: true,
+          taskId: "3",
+          attemptId: null,
+          reason: null,
+        },
+        "3",
+      ),
+    /expected string/,
+  );
+  assert.deepEqual(
     decodeWorkspaceMutationResult(
       {
         accepted: false,
@@ -521,6 +569,49 @@ test("Task metadata mutation acknowledgements are identity-checked and exact", (
         true,
       ),
     /expected keys/,
+  );
+});
+
+test("Conversation recovery projection is one coherent continuation state", () => {
+  const recoverable = clone(fixture);
+  const task = recoverable.tasks[0];
+  task.activeOperation = null;
+  task.currentRunId = "0";
+  task.currentRunPhase = null;
+  task.runs[0].phase = "interrupted";
+  task.runs[0].outcome = "interrupted";
+  task.runs[0].cause = "app_shutdown";
+  task.lastRunOutcome = "interrupted";
+  task.cause = "app_shutdown";
+  task.binding.availability = "unavailable";
+  task.binding.unavailableReason = "runtime_detached";
+  task.continuationAvailable = false;
+  task.continuationUnavailableReason = "session_recovery_required";
+  task.continuationRecoveryAvailable = true;
+  assert.deepEqual(decodeWorkbenchSnapshot(recoverable), recoverable);
+
+  const restoring = clone(recoverable);
+  restoring.tasks[0].activeOperation = { kind: "restore", id: "12" };
+  restoring.tasks[0].continuationUnavailableReason =
+    "session_recovery_in_progress";
+  restoring.tasks[0].continuationRecoveryAvailable = false;
+  assert.deepEqual(decodeWorkbenchSnapshot(restoring), restoring);
+
+  const missingOperation = clone(restoring);
+  missingOperation.tasks[0].activeOperation = null;
+  assert.throws(
+    () => decodeWorkbenchSnapshot(missingOperation),
+    /requires an active recovery operation/,
+  );
+
+  const contradictory = clone(recoverable);
+  contradictory.tasks[0].continuationAvailable = true;
+  contradictory.tasks[0].continuationUnavailableReason = null;
+  contradictory.tasks[0].binding.availability = "available";
+  contradictory.tasks[0].binding.unavailableReason = null;
+  assert.throws(
+    () => decodeWorkbenchSnapshot(contradictory),
+    /recovery availability must describe an eligible detached Task/,
   );
 });
 

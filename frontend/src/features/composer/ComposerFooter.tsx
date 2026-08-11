@@ -311,8 +311,11 @@ export function ComposerFooter({
                     ? t("run.placeholder_closing")
                     : unavailable
                       ? t(
-                          unavailableReason === "session_recovery_unsupported"
-                            ? "run.placeholder_recovery_unsupported"
+                          unavailableReason === "session_recovery_required" ||
+                            unavailableReason ===
+                              "session_recovery_in_progress" ||
+                            unavailableReason === "session_recovery_failed"
+                            ? "run.placeholder_recovery_required"
                             : "run.placeholder_unavailable",
                         )
                       : archived
