@@ -300,9 +300,13 @@ export default function App() {
     const errorCode = snapshot.account.errorCode;
     if (errorCode === "none" || errorCode === "user_cancelled") return;
     setStatus(
-      attentionStatus(accountErrorMessageId(errorCode), { scope: "account" }, {
-        diagnostic: snapshot.account.safeDiagnostic || undefined,
-      }),
+      attentionStatus(
+        accountErrorMessageId(errorCode),
+        { scope: "account" },
+        {
+          diagnostic: snapshot.account.safeDiagnostic || undefined,
+        },
+      ),
     );
   }, [snapshot.account.errorCode, snapshot.account.safeDiagnostic]);
 
@@ -590,7 +594,7 @@ export default function App() {
                 ? "account.task_running"
                 : result.errorCode === "session_in_use"
                   ? "account.session_in_use"
-                : "account.command_rejected",
+                  : "account.command_rejected",
             { scope: "account" },
           ),
         );

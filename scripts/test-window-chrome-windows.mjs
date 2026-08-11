@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { buildAutomationDebugArtifact } from "./build.mjs";
 
 if (process.platform !== "win32") {
   throw new Error("test-window-chrome-windows requires Windows");
@@ -32,6 +33,11 @@ const automationDir = path.join(appCwd, ".zig-cache", "native-sdk-automation");
 const bridgeResponsePath = path.join(automationDir, "bridge-response.txt");
 const timeoutMs = 20_000;
 const resizeSessionOnly = process.argv.includes("--resize-session-only");
+
+// This harness owns the automation Debug artifact it drives; build before the
+// fixture directory exists so a build failure leaves nothing to clean up.
+await buildAutomationDebugArtifact(root);
+
 const fixtureRoot = await mkdtemp(
   path.join(tmpdir(), "metawork-window-chrome-"),
 );

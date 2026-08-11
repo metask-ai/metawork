@@ -23,7 +23,7 @@ export async function verifyStagedAgentCoreBundle(
   } catch (error) {
     if (error?.code === "ENOENT")
       throw new Error(
-        "staged AgentCore bundle is missing; run npm run agentcore:stage first",
+        "staged AgentCore bundle is missing; run node scripts/stage-agentcore-bundle.mjs <absolute-bundle-path> first",
         { cause: error },
       );
     throw error;

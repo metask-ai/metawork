@@ -14,6 +14,7 @@ import path from "node:path";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { buildAutomationDebugArtifact } from "./build.mjs";
 
 const execFileAsync = promisify(execFile);
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -53,6 +54,13 @@ const windowsWebViewFocusProbeScript = path.join(
   "scripts",
   "probe-windows-webview-focus.ps1",
 );
+
+// This harness owns the artifact it drives. run-agentcore-vertical-windows.mjs
+// builds the same artifact before importing this module and sets the flag so
+// the automation Debug build does not run twice.
+if (!process.env.METAWORK_VERTICAL_PREBUILT)
+  await buildAutomationDebugArtifact(root);
+
 const commandTimeoutMs = 20_000;
 const runTimeoutMs = 60_000;
 const workspace = await mkdtemp(join(tmpdir(), "metawork-agentcore-vertical-"));
@@ -554,6 +562,7 @@ try {
       `Edit did not update the workspace: ${JSON.stringify(edited)}`,
     );
 
+  const priorRunIds = new Set(task.runs.map((run) => run.id));
   const textRunResult = await invokeBridge("metawork.tasks.run", {
     taskId,
     expectedBindingEpoch,
@@ -563,14 +572,34 @@ try {
     },
   });
   if (
-    textRunResult?.accepted !== true ||
-    textRunResult.taskId !== taskId ||
-    !isWireId(textRunResult.runId)
+    textRunResult !== null &&
+    (textRunResult.accepted !== true ||
+      textRunResult.taskId !== taskId ||
+      !isWireId(textRunResult.runId))
   )
     throw new Error(
       `Text checkpoint Run was not accepted: ${JSON.stringify(textRunResult)}`,
     );
-  const textRunId = textRunResult.runId;
+  const acceptedTextRunId = textRunResult?.runId ?? null;
+  const submittedTextRun = await poll(
+    async () => {
+      const current = await snapshot();
+      return (
+        current.tasks
+          .find((item) => item.id === taskId)
+          ?.runs.find((item) => !priorRunIds.has(item.id)) ?? null
+      );
+    },
+    commandTimeoutMs,
+    "Text checkpoint Run submission",
+  );
+  const textRunId = submittedTextRun.id;
+  if (!isWireId(textRunId))
+    throw new Error("Text checkpoint Run omitted its identity");
+  if (acceptedTextRunId !== null && textRunId !== acceptedTextRunId)
+    throw new Error(
+      "Text checkpoint Run snapshot disagrees with its accepted identity",
+    );
   const textTerminal = await poll(
     async () => {
       const current = await snapshot();

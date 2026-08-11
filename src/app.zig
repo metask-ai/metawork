@@ -81,6 +81,7 @@ const App = struct {
             .main_thread_id = self.main_thread_id,
         };
         const mcp_management_host = mcp_management_coordinator.platformHost(&self.platform);
+        const mcp_host_environment = mcp_platform.HostEnvironment.fromProcess(self.env_map);
         const startup_preparation = try mcp_startup.prepare(
             self.mcp_configuration_store,
             if (self.mcp_credential_store) |*store| store else null,
@@ -100,6 +101,7 @@ const App = struct {
             self.io,
             std.heap.c_allocator,
             &preparation,
+            mcp_host_environment,
         ) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidConfig => failed: {
@@ -182,6 +184,7 @@ const App = struct {
             workbench_storage,
             &self.mcp_credential_store.?,
             mcp_management_host,
+            mcp_host_environment,
         );
         (self.dispatcher orelse @panic("Bridge Dispatcher is not composed")).attachMcpManagementHost(
             mcp_bridge_adapter.host(&self.mcp_management.?),

@@ -55,6 +55,7 @@ pub const Plan = enum {
     event_callback,
     unknown_event_callback,
     malformed_event_callback,
+    invalid_utf8_event_callback,
     wrong_event_session_handle,
     wrong_event_run_id,
     same_run_session_id_mismatch,
@@ -1361,7 +1362,8 @@ pub fn sessionRunInput(
     }
 
     if (plan == .event_callback or plan == .unknown_event_callback or
-        plan == .malformed_event_callback or plan == .wrong_event_session_handle or
+        plan == .malformed_event_callback or plan == .invalid_utf8_event_callback or
+        plan == .wrong_event_session_handle or
         plan == .wrong_event_run_id or plan == .same_run_session_id_mismatch or
         plan == .concurrent_session_id_mismatch or plan == .cross_run_session_id_mismatch)
     {
@@ -1370,10 +1372,13 @@ pub fn sessionRunInput(
             return wire.STATUS_CALLBACK_FAILED;
         };
         var event_buffer = "{\"text_chunk\":\"typed event\"}".*;
+        const invalid_utf8_event =
+            "{\"tool_result\":{\"id\":\"tool-1\",\"name\":\"Bash\",\"input\":\"{}\",\"content\":[203],\"is_error\":false,\"elapsed_ms\":1}}";
         const event_json: []const u8 = switch (plan) {
             .event_callback => &event_buffer,
             .unknown_event_callback => "{\"future_observation\":{\"answer\":42}}",
             .malformed_event_callback => "{}",
+            .invalid_utf8_event_callback => invalid_utf8_event,
             else => &event_buffer,
         };
         var run = std.mem.zeroes(wire.RunContextV1);

@@ -238,7 +238,7 @@ export function resolveIdentity() {
   requireMacos();
   if (!existsSync(localSigningConfigPath)) {
     throw new Error(
-      `local signing selection is missing: ${localSigningConfigPath}. Run npm run setup:macos-signing.`,
+      `local signing selection is missing: ${localSigningConfigPath}. Run node scripts/setup-macos-local-signing.mjs setup.`,
     );
   }
   const config = parseLocalSigningConfig(
@@ -255,7 +255,7 @@ export function resolveIdentity() {
   );
   if (identity.name !== config.name) {
     throw new Error(
-      "configured Apple Development identity metadata changed; rerun npm run setup:macos-signing",
+      "configured Apple Development identity metadata changed; rerun node scripts/setup-macos-local-signing.mjs setup",
     );
   }
   return { ...identity, teamId: config.teamId };
@@ -377,12 +377,8 @@ function runNative(args) {
   run(process.execPath, [nativeDispatcher, ...args]);
 }
 
-function runNpm(args) {
-  run(process.platform === "win32" ? "npm.cmd" : "npm", args);
-}
-
-function runNode(script) {
-  run(process.execPath, [path.join(repositoryRoot, script)]);
+function runNode(script, args = []) {
+  run(process.execPath, [path.join(repositoryRoot, script), ...args]);
 }
 
 function runDevelopment() {
@@ -402,7 +398,7 @@ function runDevelopment() {
 function packageMacos() {
   requireMacos();
   const identity = resolveIdentity();
-  runNpm(["run", "build:release"]);
+  runNode("scripts/build.mjs", ["release"]);
   runNode("scripts/clean-macos-package.mjs");
   runNative([
     "package",

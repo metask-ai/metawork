@@ -10,8 +10,11 @@ const Fixture = struct {
     backend: agent.McpStdioBackend,
     released: bool = false,
 
-    fn init() Fixture {
-        const environment = std.process.Environ.Map.init(std.testing.allocator);
+    fn init() !Fixture {
+        var environment = std.process.Environ.Map.init(std.testing.allocator);
+        errdefer environment.deinit();
+        if (options.windows_system_root) |system_root|
+            try environment.put("SystemRoot", system_root);
         return .{
             .environment = environment,
             .backend = undefined,
@@ -306,6 +309,7 @@ fn activateHttpFixture(protocol_version: []const u8, framing: []const u8) !void 
         std.testing.io,
         std.testing.allocator,
         &preparation,
+        .{},
     );
     defer runtime_build.deinit();
     const runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, .{
@@ -349,7 +353,7 @@ fn runCatalogInterop(
         "--trace",
         trace_path,
     };
-    var fixture = Fixture.init();
+    var fixture = try Fixture.init();
     try fixture.bind(&arguments);
     var owner = fixture.owner();
     var input = try agent.McpRuntimeInput.init(std.testing.allocator, 1, &.{.{
@@ -441,6 +445,7 @@ test "canonical AgentCore executes a selected Streamable HTTP tool" {
         std.testing.io,
         std.testing.allocator,
         &preparation,
+        .{},
     );
     defer runtime_build.deinit();
     const runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, .{
@@ -606,6 +611,7 @@ test "MCP product chain reaches new Task authority after add restart refresh and
         std.testing.io,
         std.testing.allocator,
         &restarted_preparation,
+        .{},
     );
     defer runtime_build.deinit();
     var restarted_manifest = (try workbench.McpRuntimeManifest.candidate(
@@ -711,7 +717,7 @@ test "canonical AgentCore contains an invalid real-server catalog" {
         "2026-07-28",
         "--invalid-catalog",
     };
-    var fixture = Fixture.init();
+    var fixture = try Fixture.init();
     try fixture.bind(&arguments);
     var owner = fixture.owner();
     var input = try agent.McpRuntimeInput.init(std.testing.allocator, 1, &.{.{
@@ -752,7 +758,7 @@ test "stdio real-server timeout and cancellation terminate the child" {
         "--delay-ms",
         "250",
     };
-    var fixture = Fixture.init();
+    var fixture = try Fixture.init();
     try fixture.bind(&arguments);
     defer if (!fixture.released) {
         fixture.backend.deinit() catch unreachable;

@@ -76,6 +76,47 @@ test("MetaWork product and package manifests share one release version", () => {
   assert.equal(lock.packages.frontend.version, appVersion);
 });
 
+test("package.json stays a thin entry surface instead of an internal call graph", () => {
+  // Built from parts so this guard cannot match its own source text.
+  const chainedNpmScript = new RegExp(String.raw`\bnpm\s+run\b`);
+  const packageJson = JSON.parse(read("package.json"));
+
+  assert.deepEqual(Object.keys(packageJson.scripts).sort(), [
+    "build:debug",
+    "build:release",
+    "check",
+    "dev",
+    "format",
+    "format:check",
+    "package:macos",
+    "test",
+  ]);
+
+  for (const [name, command] of Object.entries(packageJson.scripts)) {
+    assert.doesNotMatch(
+      command,
+      chainedNpmScript,
+      `${name} chains another root script instead of invoking its implementation`,
+    );
+  }
+
+  for (const file of filesWithExtensions("scripts/", [".mjs"])) {
+    assert.doesNotMatch(
+      read(file),
+      chainedNpmScript,
+      `${file} depends on a package.json script name at run time`,
+    );
+  }
+
+  // Test files are discovered from scripts/, never registered, so no manifest
+  // can silently drift out of date.
+  assert.doesNotMatch(
+    JSON.stringify(packageJson.scripts),
+    /\.test\.mjs/,
+    "package.json must not enumerate individual test files",
+  );
+});
+
 test("module roots and Agent directory use product semantics", () => {
   for (const path of [
     "src/app.zig",
@@ -728,27 +769,30 @@ test("Account commits OAuth rotation before strict current-user identity", () =>
 
 test("macOS Apple Development signing is explicit and isolated", () => {
   const packageJson = JSON.parse(read("package.json"));
-  assert.equal(
-    packageJson.scripts.dev,
-    "npm run agentcore:verify-staged && node scripts/macos-local-signing.mjs dev",
-  );
-  assert.equal(
-    packageJson.scripts["package:macos"],
-    "node scripts/macos-local-signing.mjs package",
-  );
-  assert.equal(
-    packageJson.scripts["setup:macos-signing"],
-    "node scripts/setup-macos-local-signing.mjs setup",
-  );
-  assert.equal(
-    packageJson.scripts["setup:macos-signing:clear"],
-    "node scripts/setup-macos-local-signing.mjs clear",
+  // The invariant is which entries reach the signing script, not how each one
+  // spells its command line. One-time identity selection is a documented script
+  // invocation and must not reappear as an entry.
+  assert.deepEqual(
+    Object.entries(packageJson.scripts)
+      .filter(([, command]) => command.includes("macos-local-signing"))
+      .map(([name]) => name)
+      .sort(),
+    ["dev", "package:macos"],
   );
   for (const script of ["check", "test", "build:debug", "build:release"]) {
     assert.doesNotMatch(
       packageJson.scripts[script],
       /codesign|macos-local-signing/u,
       `${script} must not depend on a developer's local certificate`,
+    );
+  }
+  // Those entries now delegate to scripts, so the isolation has to hold one
+  // level down as well.
+  for (const entry of ["scripts/build.mjs", "scripts/run-tests.mjs"]) {
+    assert.doesNotMatch(
+      read(entry),
+      /codesign|macos-local-signing/u,
+      `${entry} must not reach local signing on the ordinary build or test path`,
     );
   }
 
@@ -1924,7 +1968,7 @@ test("Renderer declares window chrome UI while Application owns native behavior"
 
 test("lifecycle tests are grouped by invariant", () => {
   const cases = [
-    ["tests/agent/lifecycle_test.zig", 55],
+    ["tests/agent/lifecycle_test.zig", 56],
     ["tests/agent/event_pump_test.zig", 5],
     ["tests/workbench/executor_lifecycle_test.zig", 28],
     ["tests/integration/lifecycle/lifecycle_test.zig", 4],
@@ -1952,12 +1996,6 @@ test("lifecycle tests are grouped by invariant", () => {
     assert.ok(build.includes(`"${filter}"`));
   }
 
-  const packageManifest = read("package.json");
-  assert.match(
-    packageManifest,
-    /"test:lifecycle": "node scripts\/run-lifecycle-tests\.mjs"/,
-  );
-  assert.doesNotMatch(packageManifest, /test:host-lifecycle/);
   const runner = read("scripts/run-lifecycle-tests.mjs");
   assert.match(runner, /"test-lifecycle"/);
   assert.match(runner, /cwd: repositoryRoot/);
