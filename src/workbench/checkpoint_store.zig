@@ -29,6 +29,7 @@ pub const Error = error{
     BlobAlreadyExists,
     BlobMissing,
     BlobMismatch,
+    Cancelled,
 };
 
 pub const Identity = struct {
@@ -119,6 +120,15 @@ pub const FileStore = struct {
     }
 
     pub fn verify(self: *FileStore, identity: Identity) Error!void {
+        var source = try self.openVerified(identity, null);
+        source.deinit();
+    }
+
+    pub fn openVerified(
+        self: *FileStore,
+        identity: Identity,
+        cancellation: ?*const std.atomic.Value(bool),
+    ) Error!VerifiedSource {
         try validateIdentity(identity);
         var task_name_storage: [32]u8 = undefined;
         const task_name = try taskDirectoryName(identity.task_id, &task_name_storage);
@@ -142,13 +152,15 @@ pub const FileStore = struct {
             else => return error.WriteFailed,
         };
         if (builtin.os.tag == .windows) file.flags.nonblocking = true;
-        defer file.close(self.io);
+        errdefer file.close(self.io);
         const length = file.length(self.io) catch return error.WriteFailed;
         if (length != identity.byte_size) return error.BlobMismatch;
         var digest = std.crypto.hash.sha2.Sha256.init(.{});
         var offset: u64 = 0;
         var buffer: [256 * 1024]u8 = undefined;
         while (offset < length) {
+            if (cancellation) |value| if (value.load(.acquire))
+                return error.Cancelled;
             const remaining: usize = @intCast(@min(length - offset, buffer.len));
             const read = file.readPositionalAll(
                 self.io,
@@ -162,6 +174,12 @@ pub const FileStore = struct {
         var actual: [digest_bytes]u8 = undefined;
         digest.final(&actual);
         if (!std.mem.eql(u8, &actual, &identity.digest)) return error.BlobMismatch;
+        return .{
+            .io = self.io,
+            .file = file,
+            .byte_size = length,
+            .cancellation = cancellation,
+        };
     }
 
     pub fn delete(self: *FileStore, identity: Identity) void {
@@ -269,6 +287,46 @@ pub const FileStore = struct {
         self.root.deleteDir(self.io, task_name) catch return error.WriteFailed;
         if (!syncDirectory(self.io, self.root, null))
             return error.PersistenceOutcomeUnknown;
+    }
+};
+
+pub const SourceReadResult = union(enum) {
+    bytes: usize,
+    eof,
+    cancelled,
+    io_failed,
+};
+
+pub const VerifiedSource = struct {
+    io: std.Io,
+    file: std.Io.File,
+    byte_size: u64,
+    offset: u64 = 0,
+    cancellation: ?*const std.atomic.Value(bool),
+
+    pub fn read(self: *VerifiedSource, destination: []u8) SourceReadResult {
+        if (self.cancellation) |value| if (value.load(.acquire))
+            return .cancelled;
+        if (self.offset == self.byte_size) return .eof;
+        if (destination.len == 0 or self.offset > self.byte_size)
+            return .io_failed;
+        const count: usize = @intCast(@min(
+            @min(self.byte_size - self.offset, destination.len),
+            256 * 1024,
+        ));
+        const bytes_read = self.file.readPositionalAll(
+            self.io,
+            destination[0..count],
+            self.offset,
+        ) catch return .io_failed;
+        if (bytes_read != count) return .io_failed;
+        self.offset += bytes_read;
+        return .{ .bytes = bytes_read };
+    }
+
+    pub fn deinit(self: *VerifiedSource) void {
+        self.file.close(self.io);
+        self.* = undefined;
     }
 };
 
@@ -551,6 +609,22 @@ test "checkpoint store is immutable, exclusive, and cleans only unreferenced blo
     try first_writer.write("first");
     const first = try first_writer.commit(0, first_digest, 5);
     try store.verify(first);
+    var source = try store.openVerified(first, null);
+    defer source.deinit();
+    var restored: [5]u8 = undefined;
+    switch (source.read(restored[0..2])) {
+        .bytes => |count| try std.testing.expectEqual(@as(usize, 2), count),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (source.read(restored[2..])) {
+        .bytes => |count| try std.testing.expectEqual(@as(usize, 3), count),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqualStrings("first", &restored);
+    try std.testing.expectEqual(SourceReadResult.eof, source.read(&restored));
+
+    var cancelled = std.atomic.Value(bool).init(true);
+    try std.testing.expectError(error.Cancelled, store.openVerified(first, &cancelled));
 
     var duplicate_writer = try store.begin(7, 1024);
     defer duplicate_writer.deinit();
