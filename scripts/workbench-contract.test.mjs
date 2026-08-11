@@ -662,6 +662,36 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   emptyModelChoice.account.candidateApiKeySelectionId = "key-1";
   assert.doesNotThrow(() => decodeWorkbenchSnapshot(emptyModelChoice));
 
+  const loadingModelCandidate = clone(fixture);
+  loadingModelCandidate.account.catalogState = "loading";
+  loadingModelCandidate.account.canCreateTask = false;
+  loadingModelCandidate.account.models = [];
+  loadingModelCandidate.account.candidateApiKeySelectionId = "key-1";
+  loadingModelCandidate.account.candidateModelSelectionId = "model-pending";
+  assert.doesNotThrow(() => decodeWorkbenchSnapshot(loadingModelCandidate));
+
+  const loadingIdentity = clone(fixture);
+  loadingIdentity.account.state = "authorizing";
+  loadingIdentity.account.catalogState = "unavailable";
+  loadingIdentity.account.canCancel = false;
+  loadingIdentity.account.accountId = "";
+  loadingIdentity.account.displayName = "";
+  loadingIdentity.account.apiKeys = [];
+  loadingIdentity.account.models = [];
+  loadingIdentity.account.selectedApiKeySelectionId = "";
+  loadingIdentity.account.selectedModelSelectionId = "";
+  loadingIdentity.account.modelCatalogApiKeySelectionId = "";
+  loadingIdentity.account.canCreateTask = false;
+  loadingIdentity.account.executionGeneration = "0";
+  assert.doesNotThrow(() => decodeWorkbenchSnapshot(loadingIdentity));
+
+  const loggingOut = clone(fixture);
+  loggingOut.account.catalogState = "unavailable";
+  loggingOut.account.models = [];
+  loggingOut.account.modelCatalogApiKeySelectionId = "";
+  loggingOut.account.canCreateTask = false;
+  assert.doesNotThrow(() => decodeWorkbenchSnapshot(loggingOut));
+
   const duplicateModel = clone(fixture);
   duplicateModel.account.models = [
     { selectionId: "model-1", displayName: "One" },

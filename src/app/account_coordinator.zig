@@ -122,16 +122,16 @@ pub const Coordinator = struct {
             // Workbench's default-execution transaction boundary.
             .startup, .default => {
                 if (self.workbench.executionReplacementPending())
-                    return .rejected(.execution_in_use);
-                self.workbench.beginDefaultExecutionReplacement() catch
-                    return .rejected(.execution_in_use);
+                    return .rejected(.operation_in_progress);
+                self.workbench.beginDefaultExecutionReplacement() catch |err|
+                    return .rejected(replacementErrorCode(err));
                 started_replacement = true;
             },
             .identity => {
                 if (self.workbench.executionReplacementPending())
-                    return .rejected(.execution_in_use);
-                self.workbench.beginExecutionReplacement() catch
-                    return .rejected(.execution_in_use);
+                    return .rejected(.operation_in_progress);
+                self.workbench.beginExecutionReplacement() catch |err|
+                    return .rejected(replacementErrorCode(err));
                 started_replacement = true;
             },
         }
@@ -235,6 +235,30 @@ pub const Coordinator = struct {
     }
 };
 
+fn replacementErrorCode(err: anyerror) account_contract.ErrorCode {
+    return switch (err) {
+        error.TaskRunning => .execution_in_use,
+        error.TaskSessionInUse => .session_in_use,
+        error.ExecutionInUse => .operation_in_progress,
+        else => .local_resource_exhausted,
+    };
+}
+
+test "Application maps identity replacement blockers precisely" {
+    try std.testing.expectEqual(
+        account_contract.ErrorCode.execution_in_use,
+        replacementErrorCode(error.TaskRunning),
+    );
+    try std.testing.expectEqual(
+        account_contract.ErrorCode.session_in_use,
+        replacementErrorCode(error.TaskSessionInUse),
+    );
+    try std.testing.expectEqual(
+        account_contract.ErrorCode.operation_in_progress,
+        replacementErrorCode(error.ExecutionInUse),
+    );
+}
+
 test "Application coordinator commits Account Runtime facts into Workbench" {
     const TestWake = struct {
         fn notify(_: *anyopaque) void {}
@@ -328,6 +352,22 @@ test "Application coordinator commits Account Runtime facts into Workbench" {
         account_contract.AccountState.authenticated,
         account_runtime.view().state,
     );
+
+    const logout = coordinator.commandSink().submit(.logout);
+    try std.testing.expect(logout.accepted);
+    try std.testing.expectEqual(
+        account_contract.AccountState.authenticated,
+        account_runtime.view().state,
+    );
+    try std.testing.expectEqual(
+        account_contract.CatalogState.unavailable,
+        account_runtime.view().catalog_state,
+    );
+    try std.testing.expectEqual(
+        account_contract.CatalogState.unavailable,
+        workbench.accountView().catalog_state,
+    );
+    try std.testing.expect(!account_runtime.view().can_cancel);
 
     coordinator.shutdown();
     try std.testing.expectEqual(

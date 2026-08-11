@@ -10,6 +10,7 @@ export type AccountErrorCode =
   | "invalid_state"
   | "operation_in_progress"
   | "execution_in_use"
+  | "session_in_use"
   | "oauth_bind_failed"
   | "oauth_browser_open_failed"
   | "oauth_callback_rejected"

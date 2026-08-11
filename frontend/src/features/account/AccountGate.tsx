@@ -111,7 +111,8 @@ export function AccountGate({
                   : t("connection.retry")}
               </button>
             ) : (
-              authorizing && (
+              authorizing &&
+              account.canCancel && (
                 <button
                   className="text-button focus-ring"
                   disabled={cancelDisabled}

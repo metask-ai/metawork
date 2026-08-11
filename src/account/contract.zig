@@ -52,6 +52,7 @@ pub const ErrorCode = enum {
     invalid_state,
     operation_in_progress,
     execution_in_use,
+    session_in_use,
     oauth_bind_failed,
     oauth_browser_open_failed,
     oauth_callback_rejected,
@@ -417,7 +418,7 @@ pub fn validateView(view: AccountView) ValidationError!void {
         }
         if (candidate_api_matches != 1) return error.InconsistentState;
     }
-    if (view.candidate_model.len != 0) {
+    if (view.candidate_model.len != 0 and view.models.len != 0) {
         var candidate_model_matches: usize = 0;
         for (view.models) |model| {
             if (std.mem.eql(u8, model.id, view.candidate_model))
@@ -448,7 +449,8 @@ pub fn validateView(view: AccountView) ValidationError!void {
         return error.InconsistentState;
     }
     if (view.models.len == 0) {
-        if (view.model_catalog_api_key_id.len != 0)
+        if (view.model_catalog_api_key_id.len != 0 and
+            view.catalog_state != .loading)
             return error.InconsistentState;
     } else {
         if (view.model_catalog_api_key_id.len == 0)
@@ -481,8 +483,7 @@ pub fn validateView(view: AccountView) ValidationError!void {
                 return error.InconsistentState;
         },
         .authenticated => {
-            if (view.account_id.len == 0 or view.display_name.len == 0 or
-                view.catalog_state == .unavailable)
+            if (view.account_id.len == 0 or view.display_name.len == 0)
                 return error.InconsistentState;
             if (view.catalog_state == .choosing and view.api_keys.len == 0)
                 return error.InconsistentState;
@@ -552,6 +553,37 @@ test "AccountView rejects an actionless catalog choice" {
         .display_name = "User",
         .can_cancel = true,
     }));
+}
+
+test "AccountView accepts the published logout transition" {
+    try validateView(.{
+        .state = .authenticated,
+        .catalog_state = .unavailable,
+        .account_id = "account-1",
+        .display_name = "User",
+        .selected_api_key_id = "key-1",
+        .selected_model = "model-1",
+        .execution_generation = 7,
+    });
+}
+
+test "AccountView accepts an unresolved model candidate while loading" {
+    const api_keys = [_]ApiKeyView{.{
+        .id = "key-1",
+        .name = "Primary",
+        .suffix = "1234",
+        .provider_kind = .anthropic,
+    }};
+    try validateView(.{
+        .state = .authenticated,
+        .catalog_state = .loading,
+        .account_id = "account-1",
+        .display_name = "User",
+        .api_keys = &api_keys,
+        .candidate_api_key_id = "key-1",
+        .candidate_model = "model-pending",
+        .model_catalog_api_key_id = "key-1",
+    });
 }
 
 test "execution config requires typed HTTPS target and bounded secret" {

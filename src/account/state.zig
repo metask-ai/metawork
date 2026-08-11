@@ -123,7 +123,6 @@ const CommittedState = struct {
     safe_diagnostic: SafeDiagnostic = .{},
     catalog_generation: u64 = 0,
     execution_generation: u64 = 0,
-    execution_high_watermark: u64 = 0,
     active_attempt_id: ?u64 = null,
     attempt_kind: AttemptKind = .none,
     next_attempt_id: u64 = 1,
@@ -156,11 +155,7 @@ const CommittedState = struct {
         return .{
             .state = state,
             .catalog_state = catalog_state,
-            .can_cancel = ((state == .authorizing and
-                self.operation == .oauth_callback) or
-                (state == .authenticated and self.attempt_kind == .catalog)) and
-                self.operation != .logging_out and
-                self.operation != .persisting,
+            .can_cancel = self.canCancelOperation(),
             .account_id = if (publish_account) self.account_id.view() else "",
             .display_name = if (publish_account) self.display_name.view() else "",
             .selected_api_key_id = if (publish_account) self.selected_api_key_id.view() else "",
@@ -175,6 +170,7 @@ const CommittedState = struct {
                 else
                     "",
                 .selecting_key => "",
+                .logging_out => "",
                 else => self.selected_api_key_id.view(),
             },
             .can_create_task = state == .authenticated and
@@ -191,6 +187,19 @@ const CommittedState = struct {
     fn clearError(self: *CommittedState) void {
         self.error_code = .none;
         self.safe_diagnostic.clear();
+    }
+
+    fn canCancelOperation(self: *const CommittedState) bool {
+        if (self.active_attempt_id == null) return false;
+        return switch (self.attempt_kind) {
+            .login => self.session_state == .authorizing and
+                self.operation == .oauth_callback,
+            .catalog => self.session_state == .authenticated and switch (self.operation) {
+                .loading_keys, .selecting_key, .loading_models, .selecting_model => true,
+                else => false,
+            },
+            .refresh_token, .logout, .none => false,
+        };
     }
 };
 
@@ -236,10 +245,6 @@ pub const Account = struct {
         };
     }
 
-    pub fn executionHighWatermark(self: *const Account) u64 {
-        return self.state.execution_high_watermark;
-    }
-
     pub fn candidateCatalogActive(self: *const Account) bool {
         return switch (self.state.operation) {
             .selecting_key, .loading_models, .selecting_model, .persisting => true,
@@ -279,11 +284,9 @@ pub const Account = struct {
             return .{ .rejected = .invalid_state };
         }
         return switch (restore.*) {
-            .signed_out => |signed_out| blk: {
+            .signed_out => blk: {
                 var next = self.state;
                 next.session_state = .signed_out;
-                next.execution_high_watermark =
-                    signed_out.execution_high_watermark;
                 next.clearError();
                 break :blk transitionNoAttempt(next, .restored);
             },
@@ -482,8 +485,7 @@ pub const Account = struct {
     }
 
     fn prepareCancel(self: *const Account) PrepareResult {
-        if (self.state.operation == .persisting or
-            self.state.operation == .loading_identity)
+        if (!self.state.canCancelOperation())
             return .{ .rejected = .invalid_state };
         const attempt = self.state.active_attempt_id orelse
             return .{ .rejected = .invalid_state };
@@ -797,12 +799,7 @@ pub const Account = struct {
             else => unreachable,
         };
         const input = execution.input();
-        const expected = incrementGeneration(self.state.execution_high_watermark) orelse {
-            execution.deinit();
-            completion.payload = dependencyFailure();
-            return .{ .rejected = .generation_mismatch };
-        };
-        if (input.execution_generation != expected or
+        if (input.execution_generation == 0 or
             !std.mem.eql(u8, input.target.model, self.state.pending_model.view()) or
             self.state.pending_api_key_id.len == 0)
         {
@@ -815,7 +812,6 @@ pub const Account = struct {
         next.execution_state = .ready;
         next.operation = .none;
         next.execution_generation = input.execution_generation;
-        next.execution_high_watermark = input.execution_generation;
         next.selected_api_key_id = next.pending_api_key_id;
         next.selected_model = next.pending_model;
         next.pending_api_key_id.clear();
@@ -989,8 +985,6 @@ fn transitionNoAttempt(
 }
 
 fn stateIsValid(state: *const CommittedState) bool {
-    if (state.execution_generation > state.execution_high_watermark)
-        return false;
     if ((state.active_attempt_id == null) != (state.attempt_kind == .none))
         return false;
     if (state.active_attempt_id == null and state.operation != .none)
@@ -1156,7 +1150,6 @@ pub const TestSupport = if (builtin.is_test) struct {
         next.selected_api_key_id = try ApiKeyId.init(api_key_id);
         try next.selected_model.set(input.target.model);
         next.execution_generation = input.execution_generation;
-        next.execution_high_watermark = input.execution_generation;
         next.clearError();
         return .{
             .next = next,
@@ -1261,9 +1254,7 @@ pub const WorkerCompletion = struct {
     }
 };
 
-pub const RestoreSignedOut = struct {
-    execution_high_watermark: u64 = 0,
-};
+pub const RestoreSignedOut = struct {};
 
 pub const RestoreResult = union(enum) {
     signed_out: RestoreSignedOut,
@@ -1643,7 +1634,7 @@ test "refresh failure matrix distinguishes retryable and invalid credentials" {
     try std.testing.expectEqualStrings("", active.view().account_id);
 }
 
-test "failed reconfiguration preserves committed selection and generation high watermark" {
+test "failed reconfiguration preserves the committed selection" {
     const allocator = std.testing.allocator;
     var account = Account.initRestoring();
     var restored_execution = try contract.OwnedExecutionConfig.initOwned(
@@ -1740,6 +1731,14 @@ test "failed reconfiguration preserves committed selection and generation high w
     );
     commitPrepared(&account, &logout);
     try std.testing.expect(!account.view().can_create_task);
+    try std.testing.expect(!account.view().can_cancel);
+    switch (account.prepareCommand(.cancel_operation)) {
+        .rejected => |error_code| try std.testing.expectEqual(
+            contract.ErrorCode.invalid_state,
+            error_code,
+        ),
+        else => return error.TestUnexpectedResult,
+    }
     var logged_out: WorkerCompletion = .{
         .attempt_id = account.activeAttempt().?,
         .payload = .logged_out,
@@ -1751,21 +1750,6 @@ test "failed reconfiguration preserves committed selection and generation high w
     try std.testing.expect(logout_done.takeEffect() == null);
     commitPrepared(&account, &logout_done);
     try std.testing.expectEqual(@as(u64, 0), account.view().execution_generation);
-    try std.testing.expectEqual(@as(u64, 9), account.state.execution_high_watermark);
-
-    var restarted = Account.initRestoring();
-    var tombstone_restore: RestoreResult = .{ .signed_out = .{
-        .execution_high_watermark = account.state.execution_high_watermark,
-    } };
-    var restored_tombstone = switch (restarted.prepareRestore(&tombstone_restore)) {
-        .transition => |value| value,
-        else => return error.TestUnexpectedResult,
-    };
-    commitPrepared(&restarted, &restored_tombstone);
-    try std.testing.expectEqual(
-        @as(u64, 9),
-        restarted.state.execution_high_watermark,
-    );
 }
 
 test "ready execution reloads authenticated catalog before reconfiguration" {
@@ -1779,7 +1763,6 @@ test "ready execution reloads authenticated catalog before reconfiguration" {
         .selected_model = try .init("model-old"),
         .catalog_generation = 4,
         .execution_generation = 9,
-        .execution_high_watermark = 9,
     } };
 
     var select_api = switch (account.prepareCommand(.{
@@ -1900,7 +1883,6 @@ test "shutdown revokes ready execution before publishing the terminal view" {
         .selected_api_key_id = try .init("key-1"),
         .selected_model = try .init("model-1"),
         .execution_generation = 3,
-        .execution_high_watermark = 3,
     } };
 
     var shutdown = account.prepareShutdown();
@@ -1949,7 +1931,6 @@ test "unknown execution persistence outcome clears old runtime identity" {
         .selected_api_key_id = try .init("key-old"),
         .selected_model = try .init("model-old"),
         .execution_generation = 1,
-        .execution_high_watermark = 1,
     } };
     var refresh = switch (account.prepareCommand(.refresh_catalog)) {
         .transition => |value| value,
@@ -2008,7 +1989,6 @@ test "unknown execution persistence outcome clears old runtime identity" {
     );
     try std.testing.expectEqualStrings("", view.selected_api_key_id);
     try std.testing.expectEqualStrings("", view.selected_model);
-    try std.testing.expectEqual(@as(u64, 1), account.executionHighWatermark());
     try std.testing.expect(!view.can_create_task);
 }
 
@@ -2105,7 +2085,7 @@ test "login commits account-only before a separate catalog generation" {
             .anthropic,
             model,
             base_url,
-            1,
+            0x9e37_79b9_7f4a_7c15,
             secret,
         ) },
     };
@@ -2122,7 +2102,10 @@ test "login commits account-only before a separate catalog generation" {
     try std.testing.expectEqual(contract.AccountState.authenticated, view.state);
     try std.testing.expectEqual(contract.CatalogState.ready, view.catalog_state);
     try std.testing.expectEqual(@as(u64, 2), view.catalog_generation);
-    try std.testing.expectEqual(@as(u64, 1), view.execution_generation);
+    try std.testing.expectEqual(
+        @as(u64, 0x9e37_79b9_7f4a_7c15),
+        view.execution_generation,
+    );
     try std.testing.expectEqualStrings("model-1", view.selected_model);
     try std.testing.expect(view.can_create_task);
 }

@@ -80,6 +80,8 @@ export const zhCN: Record<MessageId, string> = {
     "该账号操作已不可用，MetaWork 已保留最新账号状态。",
   "account.task_running":
     "仍有任务正在运行。请等待任务结束后再重新登录或退出账号。",
+  "account.session_in_use":
+    "仍有任务持有活动会话。请先关闭该任务，再重新登录或退出账号。",
   "account.command_failed":
     "MetaWork 无法完成该账号操作，请使用此处显示的恢复操作。",
   "account.cancel_rejected": "该账号操作已经结束，MetaWork 已检查最新状态。",

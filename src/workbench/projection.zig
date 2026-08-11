@@ -44,6 +44,8 @@ pub const Error = lifecycle.Error || scheduled_tasks_impl.Error || scheduled_tas
     TaskClosing,
     ExecutionUnavailable,
     ExecutionInUse,
+    TaskRunning,
+    TaskSessionInUse,
     ExecutionGenerationMismatch,
     BindingEpochMismatch,
     InvalidAutomationExecution,
@@ -3005,11 +3007,12 @@ pub const Workbench = struct {
         self.releaseQuiescentTaskExecutions();
         if (self.execution_replacement != .none)
             return error.ExecutionInUse;
+        if (self.identityReplacementBlocker()) |blocker|
+            return switch (blocker) {
+                .running => error.TaskRunning,
+                .session => error.TaskSessionInUse,
+            };
         self.execution_replacement = .identity;
-        if (!self.executionQuiescent()) {
-            self.execution_replacement = .none;
-            return error.ExecutionInUse;
-        }
     }
 
     pub fn beginDefaultExecutionReplacement(self: *Workbench) Error!void {
@@ -7597,18 +7600,23 @@ pub const Workbench = struct {
         candidate.* = undefined;
     }
 
-    fn executionQuiescent(self: *const Workbench) bool {
+    const IdentityReplacementBlocker = enum { running, session };
+
+    fn identityReplacementBlocker(
+        self: *const Workbench,
+    ) ?IdentityReplacementBlocker {
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
-            if (task.runtime.execution != null or
-                task.runtime.session != null or
+            if (hasActiveOperation(task) or
+                task.runtime.worker_references.load(.acquire) != 0)
+                return .running;
+            if (task.runtime.session != null or
                 task.runtime.closing_session != null or
                 task.runtime.close_thread != null or
-                task.runtime.worker_references.load(.acquire) != 0 or
-                hasActiveOperation(task))
-                return false;
+                task.runtime.execution != null)
+                return .session;
         }
-        return true;
+        return null;
     }
 
     fn releaseQuiescentTaskExecutions(self: *Workbench) void {
@@ -12671,7 +12679,7 @@ test "execution replacement gate rejects runtime references and admits durable h
     try std.testing.expect(!workbench.accountView().can_create_task);
     workbench.endExecutionReplacementNoFail();
     try std.testing.expectError(
-        error.ExecutionInUse,
+        error.TaskRunning,
         workbench.beginExecutionReplacement(),
     );
     try std.testing.expect(!workbench.executionReplacementPending());
@@ -12680,10 +12688,17 @@ test "execution replacement gate rejects runtime references and admits durable h
     task.runtime.active_run_id = 0;
     task.runtime.worker_references.store(1, .release);
     try std.testing.expectError(
-        error.ExecutionInUse,
+        error.TaskRunning,
         workbench.beginExecutionReplacement(),
     );
     task.runtime.worker_references.store(0, .release);
+    var retained_session: lifecycle.Session = undefined;
+    task.runtime.session = &retained_session;
+    try std.testing.expectEqual(
+        Workbench.IdentityReplacementBlocker.session,
+        workbench.identityReplacementBlocker().?,
+    );
+    task.runtime.session = null;
     try workbench.beginExecutionReplacement();
     try std.testing.expect(workbench.executionReplacementPending());
     try std.testing.expect(task.runtime.execution == null);

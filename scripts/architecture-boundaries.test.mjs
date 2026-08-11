@@ -597,6 +597,9 @@ test("Account persistence has one refresh-only cross-platform owner", () => {
   const paths = read("src/app/paths.zig");
   const store = read("src/account/credential_store.zig");
   const platform = read("src/account/platform.zig");
+  const accountRuntime = read("src/account/runtime.zig");
+  const accountState = read("src/account/state.zig");
+  const workbench = read("src/workbench/projection.zig");
   assert.match(appZon, /\.id = "com\.metask\.metawork\.dev"/);
   assert.match(identity, /const app_manifest = @import\("app_manifest_zon"\)/);
   assert.match(identity, /pub const bundle_id = app_manifest\.id/);
@@ -638,6 +641,8 @@ test("Account persistence has one refresh-only cross-platform owner", () => {
   assert.match(store, /pub const preference_name = "preferences\.json"/);
   assert.match(store, /selection_owner_account_id/);
   assert.match(store, /execution_generation: u64/);
+  assert.match(accountRuntime, /std\.Io\.randomSecure\(io, &bytes\)/);
+  assert.match(accountRuntime, /fn savedExecutionGenerationFor\(/);
   assert.match(platform, /pub const NativeBackend = struct/);
   assert.equal(
     existsSync(new URL("../src/account/windows_store.zig", import.meta.url)),
@@ -654,6 +659,10 @@ test("Account persistence has one refresh-only cross-platform owner", () => {
   assert.doesNotMatch(
     `${store}\n${platform}`,
     /manifest|active_slot|execution_slot|account\.json|access_token|display_name/,
+  );
+  assert.doesNotMatch(
+    `${store}\n${platform}\n${accountRuntime}\n${accountState}\n${workbench}`,
+    /execution[_-]watermark|ExecutionGenerationFloor|execution_generation_floor|execution_high_watermark|scheduledExecutionGenerationFloor/,
   );
   assert.doesNotMatch(`${store}\n${platform}`, /dev\.metawork\.account/);
   assert.equal(
@@ -672,7 +681,6 @@ test("Account persistence has one refresh-only cross-platform owner", () => {
     JSON.parse(read("package.json")).scripts["account:cleanup-legacy:macos"],
     undefined,
   );
-  const accountRuntime = read("src/account/runtime.zig");
   assert.match(accountRuntime, /credential_store\.restore/);
   assert.doesNotMatch(
     accountRuntime,

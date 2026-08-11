@@ -21,6 +21,13 @@ pub const CredentialRotation = struct {
         return self.tokens.accountId();
     }
 
+    pub fn belongsToAccount(
+        self: *const CredentialRotation,
+        account_id: []const u8,
+    ) bool {
+        return std.mem.eql(u8, self.accountId(), account_id);
+    }
+
     pub fn persistenceInput(
         self: *const CredentialRotation,
     ) *const oauth.TokenSet {
@@ -286,4 +293,34 @@ test "refresh rotation is available before strict identity lookup" {
         ),
     );
     try std.testing.expectEqual(@as(usize, 2), fake.step);
+}
+
+test "refresh rotation identity is captured before ownership transfer" {
+    var owner: CredentialOwner = .{};
+    defer owner.deinit();
+    try owner.installStored(
+        std.testing.allocator,
+        "old-access",
+        "old-refresh",
+        10,
+        "account-1",
+    );
+    var rotated_tokens = try oauth.TokenSet.fromStored(
+        std.testing.allocator,
+        "new-access",
+        "new-refresh",
+        20,
+        oauth.scope,
+        "account-1",
+    );
+    var rotation: CredentialRotation = .{
+        .tokens = rotated_tokens.take(),
+    };
+    defer rotation.deinit();
+
+    const belongs_to_current_account = rotation.belongsToAccount("account-1");
+    owner.replaceRotation(&rotation);
+
+    try std.testing.expect(belongs_to_current_account);
+    try std.testing.expect(owner.available());
 }

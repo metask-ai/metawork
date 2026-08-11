@@ -21,6 +21,9 @@ const { SettingsPage } = await vite.ssrLoadModule(
 const { requiresAccountGate } = await vite.ssrLoadModule(
   "/src/features/account/gating.ts",
 );
+const { accountErrorMessageId } = await vite.ssrLoadModule(
+  "/src/i18n/account-error.ts",
+);
 const { I18nContext } = await vite.ssrLoadModule("/src/i18n/context.ts");
 const { translate } = await vite.ssrLoadModule("/src/i18n/runtime.ts");
 
@@ -144,6 +147,11 @@ test("only checking and authorizing replace the Workbench surface", () => {
   assert.equal(requiresAccountGate({ state: "authorizing" }), true);
   assert.equal(requiresAccountGate({ state: "signed_out" }), false);
   assert.equal(requiresAccountGate({ state: "authenticated" }), false);
+});
+
+test("Account runtime blockers keep running tasks distinct from idle sessions", () => {
+  assert.equal(accountErrorMessageId("execution_in_use"), "account.task_running");
+  assert.equal(accountErrorMessageId("session_in_use"), "account.session_in_use");
 });
 
 test("authorization has one cancel path and no reopen or reauthenticate branch", () => {

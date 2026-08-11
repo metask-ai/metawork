@@ -27,6 +27,7 @@ import { Icon } from "../components/ui/Icon.tsx";
 import { AccountIdentity } from "../features/account/AccountIdentity.tsx";
 import { AccountGate } from "../features/account/AccountGate.tsx";
 import { requiresAccountGate } from "../features/account/gating.ts";
+import { accountErrorMessageId } from "../i18n/account-error.ts";
 import {
   SettingsPage,
   type SettingsFocusTarget,
@@ -293,6 +294,16 @@ export default function App() {
     const current = connection.current;
     return current ? current.refresh() : Promise.resolve();
   }, []);
+
+  useEffect(() => {
+    const errorCode = snapshot.account.errorCode;
+    if (errorCode === "none" || errorCode === "user_cancelled") return;
+    setStatus(
+      attentionStatus(accountErrorMessageId(errorCode), { scope: "account" }, {
+        diagnostic: snapshot.account.safeDiagnostic || undefined,
+      }),
+    );
+  }, [snapshot.account.errorCode, snapshot.account.safeDiagnostic]);
 
   useEffect(() => {
     let cancelled = false;
@@ -576,6 +587,8 @@ export default function App() {
               ? "account.options_updated"
               : result.errorCode === "execution_in_use"
                 ? "account.task_running"
+                : result.errorCode === "session_in_use"
+                  ? "account.session_in_use"
                 : "account.command_rejected",
             { scope: "account" },
           ),

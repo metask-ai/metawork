@@ -988,6 +988,10 @@ pub const Runtime = struct {
         rotation: *credentials_impl.CredentialRotation,
     ) PrepareResult {
         const identity = self.account.currentIdentity();
+        const belongs_to_current_account = if (identity) |current|
+            rotation.belongsToAccount(current.accountId())
+        else
+            true;
         const platform = if (self.platform) |*value| value else return self.prepareFailure(
             attempt_id,
             .credential_store_write_failed,
@@ -999,16 +1003,11 @@ pub const Runtime = struct {
             attempt_id,
             accountStoreError(err),
         );
-        const rotated_account_id = rotation.accountId();
         self.credentials.replaceRotation(rotation);
-        if (identity) |current| if (!std.mem.eql(
-            u8,
-            rotated_account_id,
-            current.accountId(),
-        )) {
+        if (!belongs_to_current_account) {
             const error_code = self.deleteInvalidCredential();
             return self.prepareFailure(attempt_id, error_code);
-        };
+        }
         var completion: state_impl.WorkerCompletion = .{
             .attempt_id = attempt_id,
             .payload = .tokens_persisted,
@@ -1208,15 +1207,6 @@ pub const Runtime = struct {
         attempt_id: u64,
         model: []const u8,
     ) void {
-        const platform = if (self.platform) |*value| value else {
-            self.effects.publishCompletion(.{
-                .attempt_id = attempt_id,
-                .payload = .{ .failed = .fromCode(
-                    .credential_store_write_failed,
-                ) },
-            });
-            return;
-        };
         const identity = self.account.currentIdentity() orelse {
             self.effects.publishCompletion(.{
                 .attempt_id = attempt_id,
@@ -1228,15 +1218,21 @@ pub const Runtime = struct {
         };
         const account_view = self.account.view();
         defer self.effects.catalog.reset();
-        const execution_generation = std.math.add(
-            u64,
-            self.account.executionHighWatermark(),
-            1,
-        ) catch {
+        const restored_generation = self.savedExecutionGenerationFor(
+            identity.accountId(),
+            self.effects.catalog.selectedApiKeyId(),
+            model,
+            account_view.execution_generation,
+        );
+        const execution_generation = restored_generation orelse
+            generateExecutionGeneration(
+                self.io,
+                account_view.execution_generation,
+            ) catch {
             self.effects.publishCompletion(.{
                 .attempt_id = attempt_id,
                 .payload = .{ .failed = .fromCode(
-                    .generation_mismatch,
+                    .local_resource_exhausted,
                 ) },
             });
             return;
@@ -1258,29 +1254,40 @@ pub const Runtime = struct {
             },
         };
         defer execution.deinit();
-        self.saved_preference = credential_store.commitPreference(
-            platform.backend(),
-            identity.accountId(),
-            self.effects.catalog.selectedApiKeyId(),
-            model,
-            execution_generation,
-        ) catch |err| {
-            if (err == error.PersistenceOutcomeUnknown) {
-                self.effects.public_catalog.clear();
-                self.candidate_public_catalog.clear();
-                self.effects.publishPersistenceUnknown(
-                    attempt_id,
-                );
+        if (restored_generation == null) {
+            const platform = if (self.platform) |*value| value else {
+                self.effects.publishCompletion(.{
+                    .attempt_id = attempt_id,
+                    .payload = .{ .failed = .fromCode(
+                        .credential_store_write_failed,
+                    ) },
+                });
                 return;
-            }
-            self.effects.publishCompletion(.{
-                .attempt_id = attempt_id,
-                .payload = .{ .failed = .fromCode(
-                    accountStoreError(err),
-                ) },
-            });
-            return;
-        };
+            };
+            self.saved_preference = credential_store.commitPreference(
+                platform.backend(),
+                identity.accountId(),
+                self.effects.catalog.selectedApiKeyId(),
+                model,
+                execution_generation,
+            ) catch |err| {
+                if (err == error.PersistenceOutcomeUnknown) {
+                    self.effects.public_catalog.clear();
+                    self.candidate_public_catalog.clear();
+                    self.effects.publishPersistenceUnknown(
+                        attempt_id,
+                    );
+                    return;
+                }
+                self.effects.publishCompletion(.{
+                    .attempt_id = attempt_id,
+                    .payload = .{ .failed = .fromCode(
+                        accountStoreError(err),
+                    ) },
+                });
+                return;
+            };
+        }
         self.effects.publishCompletion(.{
             .attempt_id = attempt_id,
             .payload = .{ .execution_ready = execution.take() },
@@ -1365,6 +1372,20 @@ pub const Runtime = struct {
         return saved;
     }
 
+    fn savedExecutionGenerationFor(
+        self: *const Runtime,
+        account_id: []const u8,
+        api_key_id: []const u8,
+        model_id: []const u8,
+        current_execution_generation: u64,
+    ) ?u64 {
+        if (current_execution_generation != 0) return null;
+        const saved = self.savedPreferenceFor(account_id) orelse return null;
+        if (!std.mem.eql(u8, saved.apiKeyId(), api_key_id) or
+            !std.mem.eql(u8, saved.modelId(), model_id)) return null;
+        return saved.execution_generation;
+    }
+
     fn discardForeignPreference(
         self: *Runtime,
         platform: *platform_impl.NativeBackend,
@@ -1442,6 +1463,19 @@ pub const Runtime = struct {
         );
     }
 };
+
+fn generateExecutionGeneration(
+    io: std.Io,
+    current_generation: u64,
+) !u64 {
+    while (true) {
+        var bytes: [@sizeOf(u64)]u8 = undefined;
+        try std.Io.randomSecure(io, &bytes);
+        const generation = std.mem.readInt(u64, &bytes, .big);
+        if (generation != 0 and generation != current_generation)
+            return generation;
+    }
+}
 
 fn completesCatalogTransaction(fact: contract.AccountFact) bool {
     if (fact.view.catalog_state != .ready)
@@ -1664,6 +1698,39 @@ test "Account Runtime owns automatic catalog selection policy" {
     try std.testing.expect(
         runtime.automaticApiSelection(&catalog, first_login_view) == null,
     );
+    runtime.saved_preference = try .init(
+        "account-1",
+        "key-current",
+        "model-current",
+        0x1020_3040_5060_7080,
+    );
+    try std.testing.expectEqual(
+        @as(?u64, 0x1020_3040_5060_7080),
+        runtime.savedExecutionGenerationFor(
+            "account-1",
+            "key-current",
+            "model-current",
+            0,
+        ),
+    );
+    try std.testing.expect(runtime.savedExecutionGenerationFor(
+        "account-2",
+        "key-current",
+        "model-current",
+        0,
+    ) == null);
+    try std.testing.expect(runtime.savedExecutionGenerationFor(
+        "account-1",
+        "key-current",
+        "model-other",
+        0,
+    ) == null);
+    try std.testing.expect(runtime.savedExecutionGenerationFor(
+        "account-1",
+        "key-current",
+        "model-current",
+        1,
+    ) == null);
 
     var loading_models_view = ready_view;
     loading_models_view.candidate_api_key_id = "key-current";
@@ -1674,6 +1741,97 @@ test "Account Runtime owns automatic catalog selection policy" {
     loading_models_view.candidate_model = "model-other";
     try std.testing.expect(
         runtime.automaticModelSelection(&catalog, loading_models_view) == null,
+    );
+}
+
+fn installExecutionPreparationForTest(runtime: *Runtime) !void {
+    state_impl.TestSupport.installInitialExecutionPreparation(
+        &runtime.account,
+        "key-1",
+        "model-1",
+    );
+    try catalog_impl.TestSupport.replaceOwnedSelection(
+        &runtime.effects.catalog,
+        "account-1",
+        .{
+            .id = "key-1",
+            .name = "Primary",
+            .suffix = "1234",
+            .provider_kind = .anthropic,
+        },
+        "secret-key",
+        &.{.{ .id = "model-1", .display_name = "Model 1" }},
+    );
+}
+
+test "Account Runtime restores an exact persisted execution nonce" {
+    var wake_context: u8 = 0;
+    var runtime = try initRuntimeForTest(&wake_context);
+    defer runtime.deinit();
+    runtime.saved_preference = try .init(
+        "account-1",
+        "key-1",
+        "model-1",
+        0x1020_3040_5060_7080,
+    );
+    try installExecutionPreparationForTest(&runtime);
+
+    runtime.prepareAndPersistExecution(1, "model-1");
+    var mailbox = runtime.effects.takeMailbox() orelse
+        return error.TestUnexpectedResult;
+    defer mailbox.deinit();
+    switch (mailbox) {
+        .completion => |completion| switch (completion.payload) {
+            .execution_ready => |execution| try std.testing.expectEqual(
+                @as(u64, 0x1020_3040_5060_7080),
+                execution.input().execution_generation,
+            ),
+            else => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "Account Runtime persists a nonzero nonce for a new execution" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var account_path_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const account_path_len = try tmp.dir.realPath(
+        std.testing.io,
+        &account_path_storage,
+    );
+    var wake_context: u8 = 0;
+    var runtime = try Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        std.Thread.getCurrentId(),
+        account_path_storage[0..account_path_len],
+        .{ .context = &wake_context, .notify_fn = testingWake },
+    );
+    defer runtime.deinit();
+    defer if (runtime.platform) |*platform| {
+        platform.deinit();
+        runtime.platform = null;
+    };
+    var startup = runtime.prepareStart(.{});
+    defer startup.deinit();
+    try installExecutionPreparationForTest(&runtime);
+
+    runtime.prepareAndPersistExecution(1, "model-1");
+    var mailbox = runtime.effects.takeMailbox() orelse
+        return error.TestUnexpectedResult;
+    defer mailbox.deinit();
+    const generation = switch (mailbox) {
+        .completion => |completion| switch (completion.payload) {
+            .execution_ready => |execution| execution.input().execution_generation,
+            else => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(generation != 0);
+    try std.testing.expectEqual(
+        generation,
+        runtime.saved_preference.?.execution_generation,
     );
 }
 

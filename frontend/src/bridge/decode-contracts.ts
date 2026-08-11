@@ -106,6 +106,7 @@ const accountErrorCodes = [
   "invalid_state",
   "operation_in_progress",
   "execution_in_use",
+  "session_in_use",
   "oauth_bind_failed",
   "oauth_browser_open_failed",
   "oauth_callback_rejected",
@@ -757,10 +758,6 @@ function decodeAccount(value: unknown, path: string): AccountView {
     fail(path, "a non-authenticated Account must hide identity and catalog");
   if (state === "authenticated" && accountId.length === 0)
     fail(path, "an authenticated Account requires identity");
-  if (state === "authenticated" && catalogState === "unavailable")
-    fail(path, "an authenticated Account requires a catalog state");
-  if (state === "authorizing" && !canCancel)
-    fail(path, "authorization must remain cancellable");
   if (
     canCancel &&
     state !== "authorizing" &&

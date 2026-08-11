@@ -35,7 +35,7 @@ Metask 产品 owner 已确认 MetaWork 作为 Metask 第一方客户端复用当
 - callback 只绑定 IPv4 loopback 动态端口，不依赖 `localhost` DNS，不绑定 wildcard；
 - callback 只接受单次 `GET /auth/callback`，严格解析 query、拒绝重复/unknown 参数，并对 `state` 做 constant-time 比较；
 - token response 有界解码并严格校验 MetaWork 实际消费的字段：`access_token`、每次必需的新 `refresh_token`、Bearer `token_type`、正整数 `expires_in`、精确 `metawork:use` scope 和非空 `account_id`；OAuth 服务允许增加未消费的 metadata，新增字段不得破坏客户端；
-- refresh token 每次成功刷新都轮换；token response 成功即形成 rotation commit 边界，新 generation 必须先于后续 catalog 结果持久化。response 缺少新 refresh token 或新本地 generation 无法提交时进入 `signed_out`，不得继续使用已作废的旧 refresh token；后续 catalog 失败不得回滚已成功的轮换；
+- refresh token 每次成功刷新都轮换；token response 成功即形成独立 rotation commit 边界。response 缺少新 refresh token 时进入 `signed_out`，不得继续使用已作废的旧 refresh token；后续 identity、catalog、execution nonce 或 preference 失败不得回滚已成功的轮换；
 - 用户明确登录或冷启动恢复时，Account 使用同一 OAuth access token 单次读取 current user compatibility endpoint。只有响应 `code = 0`、数值 `data.id` 的十进制文本精确匹配 token `account_id`，且 `data.username` 为非空、有界 UTF-8 时才提交 authenticated identity；失败时不得发布持久化的旧 identity。refresh token 已轮换成功但随后 `/me` 失败时，仍必须先可靠保存新 refresh token，再发布可重试失败。该接口不进入普通后台定时 refresh 或 catalog refresh。2026-08-10 已用 production `metawork-app` / `metawork:use` refresh generation 验证：`/api/v1/auth/me` 返回 HTTP 200 与匹配用户；错误的 `/api/v1/auth/oauth/userinfo` 返回 HTTP 400 `invalid scope`，不得再作为客户端路径；
 - token、verifier、authorization code、完整 authorize URL 和 Authorization header 不进入 Renderer、Bridge、日志、snapshot 或持久化产品视图。
 
@@ -44,14 +44,14 @@ Metask 产品 owner 已确认 MetaWork 作为 Metask 第一方客户端复用当
 所有桌面平台使用同一个无版本 hard-cut 布局：
 
 - secure credential service 为产品 Bundle ID 加 `.account`，只保存 `metask-refresh-token`；automation 构建在编译期改用 `.automation.account`，不得访问 production credential；
-- Account 数据目录只保存原子 `preferences.json`，字段精确为 `selection_owner_account_id`、`api_key_id`、`model_id` 和 `execution_generation`；不保存 display name、access token、Provider API Key、base URL、provider 或完整 ExecutionConfig；
+- Account 数据目录只保存原子 `preferences.json`，字段精确为 `selection_owner_account_id`、`api_key_id`、`model_id` 和 `execution_generation`；`execution_generation` 是 CSPRNG 生成的非零不透明 nonce，只用于相等性判别，没有顺序或计数语义。文件不保存 display name、access token、Provider API Key、base URL、provider 或完整 ExecutionConfig；
 - production 与 automation 数据根在编译期固定隔离，automation Task、Schedule、Account preference 和 credential 不得进入 production 目录或 service；
 - 冷启动只依赖 refresh token。不存在 token 时直接 `signed_out`；存在 token 时先 refresh，并用 `/me` 建立当前 identity，再决定 preference 能否复用；
-- preference 缺失、损坏、owner 不同或 catalog membership 失效只清空默认选择，不影响登录，也不能制造 account mismatch；
+- preference 缺失、损坏、owner 不同或 catalog membership 失效只清空默认选择，不影响登录，也不能制造 account mismatch；冷启动且当前进程尚未安装 execution 时，只有 owner、API Key 和 model 全部精确匹配才复用已保存 nonce；显式配置提交生成新 nonce；
 - refresh response 成功后先替换 secure refresh token，随后 `/me`、catalog 或 preference 失败都不得恢复已作废的旧 token；
 - refresh 或 `/me` 明确返回 `401/403` 时删除无效 refresh token 并进入 `signed_out`；网络、deadline、`429` 或 `5xx` 保留当前 refresh token 和明确重试入口，冷启动不得因此发布旧 identity；
-- 默认选择使用同目录临时文件写入、文件 sync、原子 rename 和提交确认；结果不确定时 fail closed，不发布未确认 generation；
-- logout 先删除 refresh token，再删除无 secret preference。durable Task、Run 和 Schedule 不参与 credential 删除 gate；
+- 默认选择在候选 execution preparation 期间生成新 nonce，并使用同目录临时文件、文件 sync、原子 rename 和提交确认；只有 catalog ownership 校验与 preference 持久化全部成功后才安装 execution；熵源失败或结果不确定时 fail closed，不发布未确认 execution；
+- logout 先删除 refresh token，再删除无 secret preference。后续选择生成的新 nonce 不会复用旧 binding；durable Task、Run 和 Schedule 不参与 credential 删除 gate，旧 Schedule 仅因 nonce 不匹配进入 `needs_attention`；
 - credential/open-browser effect 只在 Native SDK 主线程执行；网络与 loopback wait 在有界 Account worker 上执行；cancel、deadline、superseding attempt 和 shutdown 必须收口并 join；
 - 不读取、迁移、清理或兼容旧 manifest、slot、`account.json` 或旧 credential family；旧开发数据由 hard-cut 开发流程在运行新构建前直接移除。
 
@@ -96,6 +96,6 @@ Account 必须在当前会话持有 token 的 `account_id`，并以 `account_id 
 
 - refresh rotation 与 preference 是两个独立 commit：refresh token 先提交，preference 后提交；
 - refresh token 提交失败不得安装新内存 identity；提交成功后任何后续失败都不得回滚到旧 refresh token；
-- preference 只描述默认选择，丢失或损坏最多导致重新选择，不能影响 OAuth identity；
-- preference 写入采用同目录临时文件、文件 sync、原子 rename 和提交确认；rename 后结果不确定时不得发布新 generation；
+- preference 只描述默认选择及其不透明 nonce，丢失或损坏最多导致重新选择，不能影响 OAuth identity；
+- preference 写入采用同目录临时文件、文件 sync、原子 rename 和提交确认；rename 后结果不确定时不得发布新 execution；
 - logout 删除顺序固定为 refresh token → preference；refresh token 已删除后，即使 preference 删除失败也不能继续使用旧 identity。
