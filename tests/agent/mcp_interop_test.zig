@@ -364,6 +364,7 @@ fn runCatalogInterop(
         .client_name = "MetaWork",
         .client_version = "test",
         .timeout_ms = 2000,
+        .configuration_fingerprint = [_]u8{1} ** 32,
         .negotiation = negotiation,
         .allowed_tools = &.{"echo"},
     }});
@@ -728,6 +729,7 @@ test "canonical AgentCore contains an invalid real-server catalog" {
         .client_name = "MetaWork",
         .client_version = "test",
         .timeout_ms = 2000,
+        .configuration_fingerprint = [_]u8{1} ** 32,
         .negotiation = .modern_only,
     }});
     defer input.deinit();

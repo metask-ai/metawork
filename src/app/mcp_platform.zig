@@ -731,6 +731,7 @@ pub fn buildRuntime(
             .client_name = client_name,
             .client_version = client_version,
             .timeout_ms = server.timeout_ms,
+            .configuration_fingerprint = workbench.runtimeMcpDescriptorFingerprint(server),
             .allowed_tools = server.tools,
         };
         write += 1;

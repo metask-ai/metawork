@@ -1,13 +1,13 @@
-# MetaWork AgentCore ABI v1 revision 6 消费合同
+# MetaWork AgentCore ABI v1 revision 7 消费合同
 
-> 状态：revision 6 已作为唯一 development baseline hard cut；不声明 stable support policy
+> 状态：revision 7 已作为唯一 development baseline hard cut；不声明 stable support policy
 > 所有者：Metask AgentCore 负责 facade、bindings、bundle 和 ABI 政策；MetaWork 负责 exact artifact 消费、Host 生命周期和产品 capability gate
 
-本文定义 MetaWork 对 Metask AgentCore binary ABI version 1 revision 6 的唯一有效消费边界。线程、事件泵和 Host 生命周期见 [AgentCore 集成契约](agentcore-integration.md)，验证入口见 [验证规范](validation.md)。
+本文定义 MetaWork 对 Metask AgentCore binary ABI version 1 revision 7 的唯一有效消费边界。线程、事件泵和 Host 生命周期见 [AgentCore 集成契约](agentcore-integration.md)，验证入口见 [验证规范](validation.md)。
 
 ## 1. 唯一 baseline
 
-两个 target 都锁定 clean source commit `a5b3821c17b337d33f40f903df12484b01f92010`，package version 为 `0.1.0-dev+a5b3821c17b3`，Zig 0.16.0、strip=true、requires C runtime：
+两个 target 都锁定 clean source commit `57253dc23b0a5127d21f4871ee7a58a513815ff2`，package version 为 `0.1.0-dev+57253dc23b0a`，Zig 0.16.0、strip=true、requires C runtime：
 
 | Target                       | Build        | Link input                  | Repository lock                                    |
 | ---------------------------- | ------------ | --------------------------- | -------------------------------------------------- |
@@ -17,7 +17,7 @@
 固定合同为：
 
 - `binary_abi_version = 1`；
-- `binary_abi_revision = 6`；
+- `binary_abi_revision = 7`；
 - `binary_abi_table_size = 216`；
 - `capabilities = 524287`（`0x7ffff`）；
 - 唯一 discovery symbol 为 `metask_agentcore_get_api`；
@@ -39,12 +39,12 @@ MetaWork 不接受其他 ABI revision，不保留 function-table 分流、旧类
 
 MetaWork 不复制 header、raw enum、event tag、Permission/Skill/MCP JSON schema、facade code 或 SDK validation。官方 SDK 是 `Status`、`StopReason`、`CoreEvent`、`UiRequest`、`UiResponse`、Permission、Skill、MCP、Session description 与 restore report 的唯一协议来源。
 
-## 3. revision 6 function table
+## 3. revision 7 function table
 
 `ApiV1` 的全部非可选 entry 都必须存在并通过 SDK discovery：
 
 - Runtime create/destroy、Skill catalog query/release；
-- Runtime MCP refresh/describe；
+- Runtime MCP refresh/describe/configuration apply；
 - Session create/restore/destroy/describe；
 - model、Skill、Permission rules 与 MCP selection replacement；
 - typed Text/Skill Run、Run abort；
@@ -52,7 +52,7 @@ MetaWork 不复制 header、raw enum、event tag、Permission/Skill/MCP JSON sch
 - checkpoint export；
 - owned buffer release。
 
-必需 entry 不等于 MetaWork 产品自动开放对应能力。未消费的 entry 在 production 不被调用；测试 fake 仍必须提供签名正确、明确失败的 stub，确保 function-table 校验真实覆盖 revision 6。
+必需 entry 不等于 MetaWork 产品自动开放对应能力。`runtime_apply_mcp_configuration` 在 revision 7 table 中必须存在，但当前产品保持 immutable Runtime Manifest 与 `restart_required` 语义，不调用该 entry；测试 fake 必须提供签名正确、明确失败的 stub，确保 function-table 校验真实覆盖 revision 7。
 
 ## 4. Runtime 与 Session create
 
@@ -63,16 +63,19 @@ fresh Session 只使用 `SessionHostConfigV1` 与 `SessionCreateConfigV1`：
 - credential、root/home、model 和 allowlist 在同步 create 边界内借用，AgentCore 按合同复制；
 - Skill catalog 与显式 all-enabled selection 成对传入；无 catalog 时 selection 必须为 null；
 - MCP authority 是完整 replacement：create config 的 `mcp_selection = null` 表示 empty view；`sessionUpdateMcp` 的 selection pointer 必须非 null，合法的零 selector descriptor 表示清空当前 view；
+- 每个 `McpServerV1` 必须携带非零、非 secret 的 `configuration_fingerprint`；`McpConnectorV1` 必须提供成对的 `retain_connector` / `release_connector`，Host owner 只有在全部 Core retain 与 active connection 都释放后才可销毁；
 - 当前正式 Application 仍使用 `permission_rules = null` 与 `durable_budget = null`；新 Session 的 `mcp_selection` 来自 Workbench 当前 committed opaque activation 或为 null，既有 Session 不因启动期产品状态变化被替换；null durable budget 使用 AgentCore canonical defaults；
 - 每个 Session 至多一个 in-flight Run/compact/mutation；Runtime 必须活得比全部 Session 和 catalog lease 长。
 
-旧 AgentCore Session/Conversation 不迁移、不打开，也不通过重新提交历史文本伪造恢复。升级后只创建 revision 6 Session。
+旧 AgentCore Session/Conversation 不迁移、不打开，也不通过重新提交历史文本伪造恢复。升级后只创建 revision 7 Session，不存在任何旧 revision 的 discovery、加载或回退路径。
 
 ## 5. 当前消费与 capability gate
 
 当前正式产品消费：
 
 - shared Runtime；
+- Runtime-owned MCP server descriptors、connector 生命周期与 catalog refresh/describe；
+- 新 Session 的 MCP selection 与经 AgentCore Run 执行的 MCP tools；
 - immutable Skill catalog query/lease；
 - fresh Session create/destroy；
 - typed Text/Skill Run 与 abort；
@@ -82,9 +85,9 @@ fresh Session 只使用 `SessionHostConfigV1` 与 `SessionCreateConfigV1`：
 - synchronous AskUserQuestion 与 Permission；
 - typed Core event 和 Permission provenance。
 
-以下 revision 6 ABI 能力仍关闭，直到各自完成产品 owner、安全、持久化和恢复验收：
+以下 revision 7 ABI 能力仍关闭，直到各自完成产品 owner、安全、持久化和恢复验收：
 
-- MCP server/catalog/selection 与 MCP tool execution；
+- Runtime MCP configuration live apply；
 - checkpoint restore 与 Session description 驱动的跨进程 recovery；
 - persistent Permission rules；
 - 正式 Host tools；
@@ -124,11 +127,11 @@ Host 先校验 function `Status`，再按 operation-specific status set 决定�
 - 其他非 OK status：不得读取 `RunResultV1` 的结果字段，只读取并释放 diagnostic；
 - unknown status、属于其他 operation 的 known status、unknown StopReason/outcome/flag 或 StopReason 与 checkpoint outcome 不一致都属于 dependency contract failure。
 
-Run、manual compact 与 Session Skill mutation 分别维护 operation-specific status disposition，不能从“SDK 已知 status”推断某个 entry 接受该 status，也不能用一份全局 allowlist 代替。revision 6 的 `checkpoint_budget_required` 对这三条当前消费路径都是合法、可恢复的非 OK 结果：操作向上失败收口，但 Session 保持 reusable；只有不属于该 operation 的 known status 才按 dependency contract failure 处理。
+Run、manual compact 与 Session Skill mutation 分别维护 operation-specific status disposition，不能从“SDK 已知 status”推断某个 entry 接受该 status，也不能用一份全局 allowlist 代替。revision 7 的 `checkpoint_budget_required` 对这三条当前消费路径都是合法、可恢复的非 OK 结果：操作向上失败收口，但 Session 保持 reusable；只有不属于该 operation 的 known status 才按 dependency contract failure 处理。
 
 checkpoint export 与 Session describe 是另外两条 operation-specific 消费路径。export 中经本地 sink 原因验证的 `checkpoint_io` 不污染 Session；restore 侧 checkpoint status 不是 export 合法结果。`out_of_memory`、`core_error`、malformed OK 或 callback/dependency contract failure 保守关闭 Session admission。describe 的 resource/busy/argument failure 可重试，内部 fatal 与 malformed result 同样关闭 admission。`checkpoint_budget_required` 对这两个 entry 都不是合法结果，必须显式按 dependency contract failure 收口。export 的 generation 只按 opaque `u64` 保存，ABI 未定义非零或单调性，Host 不得自行断言。
 
-`CheckpointExportResultV1.digest` 的算法在 revision 6 合同中未定义，canonical bundle 的真实输出也不等于 streamed bytes 的 SHA-256。MetaWork 不把该字段冒充内容哈希或据此拒绝合法 export；checkpoint store 的文件名、descriptor 和启动校验统一使用 Host 在 sink 中对实际 bytes 独立计算的 SHA-256。若上游未来定义 raw digest 语义，须先补充 ABI 合同与 candidate probe，再决定是否增加独立校验，不能静默替换产品 content hash。
+`CheckpointExportResultV1.digest` 的算法在 revision 7 合同中未定义，canonical bundle 的真实输出也不等于 streamed bytes 的 SHA-256。MetaWork 不把该字段冒充内容哈希或据此拒绝合法 export；checkpoint store 的文件名、descriptor 和启动校验统一使用 Host 在 sink 中对实际 bytes 独立计算的 SHA-256。若上游未来定义 raw digest 语义，须先补充 ABI 合同与 candidate probe，再决定是否增加独立校验，不能静默替换产品 content hash。
 
 八个 StopReason 必须无 `else` 穷尽映射：
 
@@ -186,6 +189,7 @@ staged Host gate：
 
 - staged verifier 与 bundle guard；
 - mandatory function-table discovery；
+- mandatory Runtime MCP apply entry、connector retain/release、非零 configuration fingerprint 与两个 exact MCP era 的 interop；
 - Session create config、Permission identity/response echo/provenance 测试；
 - status-before-result、checkpoint partial-result、八个 StopReason 与 unknown/mismatch fail-closed 测试；
 - Run、manual compact 与 Session Skill mutation 的 operation-specific status disposition，以及 budget rejection 后 Session reuse 测试；
@@ -194,4 +198,4 @@ staged Host gate：
 - 当前平台真实 AgentCore vertical；
 - architecture guard 证明正式 build 只消费 canonical bundle，且只有 `agent/` import SDK。
 
-Linux 或其他 target 必须新增独立 policy、lock、artifact 和平台验证。缺少目标 revision 6 artifact 时直接失败，不得保留旧 ABI 作为替代。
+Linux 或其他 target 必须新增独立 policy、lock、artifact 和平台验证。缺少目标 revision 7 artifact 时直接失败，不得保留旧 ABI 作为替代。

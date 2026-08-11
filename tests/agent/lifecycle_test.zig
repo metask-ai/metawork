@@ -108,6 +108,7 @@ test "canonical AgentCore refresh invokes the Host MCP connector and returns a b
         .client_name = "MetaWork",
         .client_version = "test",
         .timeout_ms = 100,
+        .configuration_fingerprint = [_]u8{1} ** 32,
     }});
     defer input.deinit();
     const runtime = try lifecycle.Runtime.init(std.testing.io, std.testing.allocator, .{
@@ -181,6 +182,7 @@ test "MCP Runtime takes one complete input and activation publishes unavailable 
         .client_name = "MetaWork",
         .client_version = "test",
         .timeout_ms = 1000,
+        .configuration_fingerprint = [_]u8{1} ** 32,
     }});
     defer input.deinit();
     const runtime = try createTestRuntime(.{
@@ -508,7 +510,7 @@ test "malformed compact result poisons Session and queued compact can be cancell
     try closeSession(session, .session_close);
 }
 
-test "Runtime rejects tables missing required revision 6 capabilities" {
+test "Runtime rejects tables missing required revision 7 capabilities" {
     var api = fake_api;
     api.capabilities &= ~wire.CAP_SKILL_CATALOG;
     try std.testing.expectError(
@@ -523,6 +525,18 @@ test "Runtime rejects tables missing required revision 6 capabilities" {
 
     api = fake_api;
     api.capabilities &= ~wire.CAP_TYPED_RUN_INPUT;
+    try std.testing.expectError(
+        error.UnsupportedAbi,
+        lifecycle.Runtime.initWithApi(
+            std.testing.io,
+            std.testing.allocator,
+            &api,
+            .{ .max_sessions = 1 },
+        ),
+    );
+
+    api = fake_api;
+    api.runtime_apply_mcp_configuration = null;
     try std.testing.expectError(
         error.UnsupportedAbi,
         lifecycle.Runtime.initWithApi(
@@ -1728,7 +1742,7 @@ test "status is validated before RunResult and invalid results poison the Sessio
     }
 }
 
-test "revision 6 checkpoint outcomes are typed and budget admission remains retryable" {
+test "revision 7 checkpoint outcomes are typed and budget admission remains retryable" {
     fake_core.reset();
     const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 3 });
     defer {

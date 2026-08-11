@@ -117,7 +117,6 @@ pub const Config = struct {
 
 pub const Error = error{
     InvalidConfig,
-    ConnectionsActive,
 };
 
 pub const Adapter = struct {
@@ -126,6 +125,7 @@ pub const Adapter = struct {
     secrets: [][]u8,
     max_response_bytes: usize,
     active_connections: std.atomic.Value(usize) = .init(0),
+    connector_references: std.atomic.Value(usize) = .init(1),
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -153,29 +153,17 @@ pub const Adapter = struct {
         };
     }
 
-    pub fn deinit(self: *Adapter) Error!void {
+    pub fn deinit(self: *Adapter) error{ ConnectionsActive, ConnectorRetained }!void {
         if (self.active_connections.load(.acquire) != 0)
             return error.ConnectionsActive;
+        if (self.connector_references.load(.acquire) != 1)
+            return error.ConnectorRetained;
         for (self.secrets) |secret| {
             std.crypto.secureZero(u8, secret);
             self.allocator.free(secret);
         }
         self.allocator.free(self.secrets);
         self.* = undefined;
-    }
-
-    /// Transfers this quiescent adapter into a wider Runtime owner. On
-    /// success the source is invalid and must not be used or deinitialized.
-    pub fn take(self: *Adapter) Error!Adapter {
-        if (self.active_connections.load(.acquire) != 0)
-            return error.ConnectionsActive;
-        const moved = self.*;
-        self.* = undefined;
-        return moved;
-    }
-
-    pub fn isQuiescent(self: *const Adapter) bool {
-        return self.active_connections.load(.acquire) == 0;
     }
 
     pub fn descriptor(self: *Adapter) wire.McpConnectorV1 {
@@ -188,8 +176,28 @@ pub const Adapter = struct {
             .notify = notify,
             .close = close,
             .release_response = releaseResponse,
-            .reserved = [_]u64{0} ** 3,
+            .retain_connector = retainConnector,
+            .release_connector = releaseConnector,
+            .reserved = [_]u64{0},
         };
+    }
+
+    fn retainConnector(context: ?*anyopaque) callconv(.c) void {
+        const self: *Adapter = @ptrCast(@alignCast(
+            context orelse @panic("AgentCore retained a null MCP connector"),
+        ));
+        const previous = self.connector_references.fetchAdd(1, .acq_rel);
+        if (previous == 0 or previous == std.math.maxInt(usize))
+            @panic("AgentCore MCP connector retain overflow");
+    }
+
+    fn releaseConnector(context: ?*anyopaque) callconv(.c) void {
+        const self: *Adapter = @ptrCast(@alignCast(
+            context orelse @panic("AgentCore released a null MCP connector"),
+        ));
+        const previous = self.connector_references.fetchSub(1, .acq_rel);
+        if (previous <= 1)
+            @panic("AgentCore released an unretained MCP connector");
     }
 
     fn containsSecret(self: *const Adapter, bytes: []const u8) bool {
@@ -570,11 +578,16 @@ test "adapter exports the complete official connector descriptor" {
     defer adapter.deinit() catch unreachable;
     const descriptor = adapter.descriptor();
     try std.testing.expectEqual(@as(u32, @sizeOf(wire.McpConnectorV1)), descriptor.struct_size);
+    try std.testing.expectEqual(@as(u32, 0), descriptor.reserved0);
+    try std.testing.expect(descriptor.ctx != null);
     try std.testing.expect(descriptor.open != null);
     try std.testing.expect(descriptor.request != null);
     try std.testing.expect(descriptor.notify != null);
     try std.testing.expect(descriptor.close != null);
     try std.testing.expect(descriptor.release_response != null);
+    try std.testing.expect(descriptor.retain_connector != null);
+    try std.testing.expect(descriptor.release_connector != null);
+    try std.testing.expectEqual([_]u64{0}, descriptor.reserved);
 }
 
 test "response ownership transfers once and release clears the descriptor" {
@@ -753,6 +766,18 @@ test "active connection prevents adapter destruction" {
     const connection = try openTestConnection(descriptor);
     try std.testing.expectError(error.ConnectionsActive, adapter.deinit());
     descriptor.close.?(descriptor.ctx, connection);
+    try adapter.deinit();
+}
+
+test "AgentCore connector retains block owner destruction until release" {
+    var fake = FakeTransport{};
+    var adapter = try Adapter.init(std.testing.allocator, .{
+        .transport = fake.capability(),
+    });
+    const descriptor = adapter.descriptor();
+    descriptor.retain_connector.?(descriptor.ctx);
+    try std.testing.expectError(error.ConnectorRetained, adapter.deinit());
+    descriptor.release_connector.?(descriptor.ctx);
     try adapter.deinit();
 }
 
