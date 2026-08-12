@@ -7,7 +7,7 @@
 
 ## 1. 唯一 baseline
 
-macOS 继续锁定 clean source commit `57253dc23b0a5127d21f4871ee7a58a513815ff2`；Windows 更新为 clean source commit `c2e6f52cb4ce8e440a675dcc9e8517b1f8a4eb73`、package version `0.1.0-dev+c2e6f52cb4ce`。两者均使用 Zig 0.16.0、strip=true、requires C runtime：
+两个 target 独立锁定 clean source artifact。macOS 与 Windows 均使用 commit `c2e6f52cb4ce8e440a675dcc9e8517b1f8a4eb73`、package version `0.1.0-dev+c2e6f52cb4ce`。两者均为 Zig 0.16.0、strip=true、requires C runtime：
 
 | Target                       | Build        | Link input                  | Repository lock                                    |
 | ---------------------------- | ------------ | --------------------------- | -------------------------------------------------- |
