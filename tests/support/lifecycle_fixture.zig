@@ -50,6 +50,7 @@ pub const Plan = enum {
     immediate,
     controlled,
     ui_wait,
+    ui_wait_twice,
     callback_failed,
     controlled_callback_failed,
     event_callback,
@@ -169,6 +170,7 @@ pub const FakeSession = struct {
     mutex: std.Io.Mutex = .init,
     condition: std.Io.Condition = .init,
     description_buffer: [4096]u8 = [_]u8{0} ** 4096,
+    permission_session_granted: bool = false,
 
     pub fn lock(self: *FakeSession) void {
         self.mutex.lockUncancelable(std.testing.io);
@@ -260,6 +262,7 @@ pub const FakeCore = struct {
     checkpoint_export_entered: bool = false,
     allow_checkpoint_export: bool = false,
     ui_answered_callbacks: usize = 0,
+    permission_callback_count: usize = 0,
     ui_fatal_callbacks: usize = 0,
     permission_response_valid: bool = false,
     callback_signal: ?*CallbackSignal = null,
@@ -1576,7 +1579,9 @@ pub fn sessionRunInput(
         }
     }
 
-    if (plan == .ui_wait or plan == .malformed_ui_callback or
+    if ((plan == .ui_wait or plan == .ui_wait_twice) and
+        !(plan == .ui_wait_twice and session.permission_session_granted) or
+        plan == .malformed_ui_callback or
         plan == .wrong_ui_request_run_id or plan == .wrong_ui_request_session_id)
     {
         var response = wire.OwnedBytesV1{ .ptr = null, .len = 0 };
@@ -1615,6 +1620,8 @@ pub fn sessionRunInput(
         fake_core.lock();
         if (callback_status == wire.UI_ANSWERED)
             fake_core.ui_answered_callbacks += 1;
+        if (callback_status == wire.UI_ANSWERED)
+            fake_core.permission_callback_count += 1;
         if (callback_status == wire.UI_FATAL)
             fake_core.ui_fatal_callbacks += 1;
         fake_core.unlock();
@@ -1637,22 +1644,29 @@ pub fn sessionRunInput(
             };
             defer decoded_response.deinit();
             const response_valid = switch (decoded_response.value) {
-                .permission => |permission| std.mem.eql(
-                    u8,
-                    permission.request_id,
-                    "1111111111111111111111111111111111111111111111111111111111111111",
-                ) and permission.policy_generation == 1 and
-                    switch (permission.permission) {
-                        .allow_session, .deny_session => if (permission.rule_id) |rule_id|
-                            std.mem.eql(
-                                u8,
-                                rule_id,
-                                "2222222222222222222222222222222222222222222222222222222222222222",
-                            )
-                        else
-                            false,
-                        .allow_once, .deny_once => permission.rule_id == null,
-                    },
+                .permission => |permission| blk: {
+                    const valid = std.mem.eql(
+                        u8,
+                        permission.request_id,
+                        "1111111111111111111111111111111111111111111111111111111111111111",
+                    ) and permission.policy_generation == 1 and
+                        switch (permission.permission) {
+                            .allow_session, .deny_session => if (permission.rule_id) |rule_id|
+                                std.mem.eql(
+                                    u8,
+                                    rule_id,
+                                    "2222222222222222222222222222222222222222222222222222222222222222",
+                                )
+                            else
+                                false,
+                            .allow_once, .deny_once => permission.rule_id == null,
+                        };
+                    if (valid and plan == .ui_wait_twice) switch (permission.permission) {
+                        .allow_session, .deny_session => session.permission_session_granted = true,
+                        .allow_once, .deny_once => {},
+                    };
+                    break :blk valid;
+                },
                 .answers => false,
             };
             fake_core.lock();
@@ -1678,7 +1692,7 @@ pub fn sessionRunInput(
     }
 
     session.lock();
-    while ((plan == .controlled or plan == .controlled_callback_failed or plan == .ui_wait) and
+    while ((plan == .controlled or plan == .controlled_callback_failed or plan == .ui_wait or plan == .ui_wait_twice) and
         !session.allow_finish and !session.abort_requested)
         session.wait();
     const aborted = session.abort_requested;

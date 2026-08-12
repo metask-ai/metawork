@@ -6,7 +6,9 @@ const max_skill_argument_values: usize = 64;
 
 pub const PermissionChoice = enum {
     allow_once,
+    allow_session,
     deny_once,
+    deny_session,
 };
 
 pub const RendererBridgeConnect = struct {
@@ -369,7 +371,9 @@ pub fn acknowledgementSequence(payload: []const u8) !u64 {
 
 pub fn permissionChoice(value: []const u8) ?PermissionChoice {
     if (std.mem.eql(u8, value, "allow_once")) return .allow_once;
+    if (std.mem.eql(u8, value, "allow_session")) return .allow_session;
     if (std.mem.eql(u8, value, "deny_once")) return .deny_once;
+    if (std.mem.eql(u8, value, "deny_session")) return .deny_session;
     return null;
 }
 

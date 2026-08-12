@@ -3042,7 +3042,9 @@ fn decodeUiResponse(request: handlers.UiResponseRequest) !workbench_api.UiRespon
             return error.InvalidUiResponse;
         return .{ .permission = switch (choice) {
             .allow_once => .allow_once,
+            .allow_session => .allow_session,
             .deny_once => .deny_once,
+            .deny_session => .deny_session,
         } };
     }
     return error.InvalidUiResponse;
@@ -3097,7 +3099,7 @@ test "MCP Bridge keeps OAuth client authentication explicit and bounded" {
     );
 }
 
-test "permission command ingress rejects unsupported persistent choices" {
+test "permission command ingress accepts AgentCore Session choices" {
     const allow_once = try decodeUiResponse(.{
         .taskId = "1",
         .runId = "2",
@@ -3108,6 +3110,18 @@ test "permission command ingress rejects unsupported persistent choices" {
     try std.testing.expectEqual(
         workbench_api.PermissionChoice.allow_once,
         allow_once.permission,
+    );
+
+    const allow_session = try decodeUiResponse(.{
+        .taskId = "1",
+        .runId = "2",
+        .requestId = "3",
+        .kind = "permission",
+        .permission = "allow_session",
+    });
+    try std.testing.expectEqual(
+        workbench_api.PermissionChoice.allow_session,
+        allow_session.permission,
     );
 
     const deny_once = try decodeUiResponse(.{
@@ -3122,10 +3136,19 @@ test "permission command ingress rejects unsupported persistent choices" {
         deny_once.permission,
     );
 
+    const deny_session = try decodeUiResponse(.{
+        .taskId = "1",
+        .runId = "2",
+        .requestId = "3",
+        .kind = "permission",
+        .permission = "deny_session",
+    });
+    try std.testing.expectEqual(
+        workbench_api.PermissionChoice.deny_session,
+        deny_session.permission,
+    );
+
     for ([_][]const u8{
-        "allow_always",
-        "deny_tool_session",
-        "deny_session",
         "full_access",
     }) |permission| {
         try std.testing.expectError(error.InvalidUiResponse, decodeUiResponse(.{
