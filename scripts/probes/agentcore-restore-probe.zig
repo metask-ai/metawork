@@ -302,6 +302,62 @@ pub fn main() !void {
     try destroyRuntime(api, restored_runtime);
     restored_runtime_live = false;
 
+    // Failure-path observation. `agent/checkpoint_restore.zig` classifies a
+    // non-OK restore by its typed status, but only when the call left the
+    // session handle and the restore report empty. The ABI defines neither
+    // output on a failure status, so pin the canonical behavior here: if the
+    // bundle populates the report alongside a failure, every typed checkpoint
+    // failure would collapse into an untyped dependency contract failure.
+    const corrupt_runtime = try makeRuntime(api);
+    var corrupt_runtime_live = true;
+    defer if (corrupt_runtime_live) destroyRuntime(api, corrupt_runtime) catch {};
+
+    // Truncation rather than a flipped byte: a premature EOF is invalid for
+    // any checkpoint encoding, so this stays deterministic without depending
+    // on where the format keeps integrity-relevant bytes.
+    var corrupt_source_context = Source{ .bytes = sink_context.bytes[0 .. sink_context.len / 2] };
+    var corrupt_source = std.mem.zeroes(wire.CheckpointSourceV1);
+    corrupt_source.struct_size = @sizeOf(wire.CheckpointSourceV1);
+    corrupt_source.ctx = &corrupt_source_context;
+    corrupt_source.read = Source.read;
+    var corrupt_config = std.mem.zeroes(wire.SessionRestoreConfigV1);
+    corrupt_config.struct_size = @sizeOf(wire.SessionRestoreConfigV1);
+    corrupt_config.host = &host;
+    corrupt_config.source = &corrupt_source;
+    corrupt_config.limits = &limits;
+    var corrupt_session: ?*wire.SessionHandle = null;
+    var corrupt_report = emptyOwnedBytes();
+    defer releaseOwned(api, &corrupt_report);
+    var corrupt_diagnostic = emptyOwnedBytes();
+    defer releaseOwned(api, &corrupt_diagnostic);
+    const corrupt_status_code = api.sessionRestore()(
+        corrupt_runtime,
+        &corrupt_config,
+        &callbacks,
+        &corrupt_session,
+        &corrupt_report,
+        &corrupt_diagnostic,
+    );
+    defer if (corrupt_session) |value| destroySession(api, value) catch {};
+    const corrupt_status = agentcore.Status.fromCode(corrupt_status_code) catch
+        return error.UnknownTruncatedRestoreStatus;
+    const corrupt_report_empty = corrupt_report.ptr == null and corrupt_report.len == 0;
+    std.debug.print(
+        "AgentCore truncated restore observed: status={s} session_returned={} report_empty={} diagnostic_empty={}\n",
+        .{
+            @tagName(corrupt_status),
+            corrupt_session != null,
+            corrupt_report_empty,
+            corrupt_diagnostic.ptr == null and corrupt_diagnostic.len == 0,
+        },
+    );
+    if (corrupt_status == .ok) return error.TruncatedCheckpointAccepted;
+    if (corrupt_session != null) return error.FailedRestoreRetainedSession;
+    if (!corrupt_report_empty) return error.FailedRestoreEmittedReport;
+
+    try destroyRuntime(api, corrupt_runtime);
+    corrupt_runtime_live = false;
+
     std.debug.print(
         "AgentCore restore probe passed: bytes={d} export_chunks={d} source_calls={d} eof_calls={d} short_read_limit={d}\n",
         .{

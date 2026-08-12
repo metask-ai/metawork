@@ -465,3 +465,26 @@ test "source adapter preserves short reads EOF and local failures" {
     try std.testing.expectEqualStrings("checkpoint", harness.bytes[0..harness.offset]);
     try std.testing.expectEqual(@as(u64, harness.bytes.len), adapter.total_bytes);
 }
+
+test "restore status mapping keeps checkpoint failures retryable" {
+    const cases = [_]struct {
+        status: sdk.Status,
+        reason: FailureReason,
+    }{
+        .{ .status = .checkpoint_corrupt, .reason = .checkpoint_corrupt },
+        .{ .status = .checkpoint_unsupported, .reason = .checkpoint_unsupported },
+        .{ .status = .checkpoint_incompatible, .reason = .checkpoint_incompatible },
+        .{ .status = .logical_session_conflict, .reason = .logical_session_conflict },
+    };
+    for (cases) |case| {
+        const failure = failureForStatus(case.status, .none);
+        try std.testing.expectEqual(Stage.restore, failure.stage);
+        try std.testing.expectEqual(case.reason, failure.reason);
+        try std.testing.expect(failure.retained_candidate == null);
+    }
+
+    const cancelled = failureForStatus(.checkpoint_io, .cancelled);
+    try std.testing.expectEqual(FailureReason.cancelled, cancelled.reason);
+    const io_failed = failureForStatus(.checkpoint_io, .io_failed);
+    try std.testing.expectEqual(FailureReason.io_failed, io_failed.reason);
+}

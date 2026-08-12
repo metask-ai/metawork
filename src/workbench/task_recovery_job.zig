@@ -102,17 +102,21 @@ pub const Candidate = struct {
         return value;
     }
 
+    /// Releases every candidate-owned resource on all paths. A failed close or
+    /// release leaves the Session owned by the Agent Runtime, but the execution
+    /// secret and catalog projection must never survive that failure.
     pub fn discard(self: *Candidate) bool {
-        const closed = switch (self.route.session.closeOutcome(.session_close)) {
+        var released = switch (self.route.session.closeOutcome(.session_close)) {
             .closed => true,
             .failure => false,
         };
-        if (closed)
-            self.runtime.releaseClosedSession(self.route.session) catch return false;
+        if (released) self.runtime.releaseClosedSession(self.route.session) catch {
+            released = false;
+        };
         self.execution.deinit();
         self.pinned_catalog.deinit();
         self.* = undefined;
-        return closed;
+        return released;
     }
 };
 

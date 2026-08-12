@@ -28,14 +28,6 @@ pub const CommitAnchor = struct {
     binding_epoch: u64,
 };
 
-pub const RestoreExpectation = struct {
-    logical_session_id: []const u8,
-    checkpoint_generation: u64,
-    last_run_id: u64,
-    last_compact_id: u64,
-    model: []const u8,
-};
-
 pub const Record = struct {
     blob: checkpoint_store.Identity,
     session: SessionBinding,
@@ -83,16 +75,6 @@ pub const Record = struct {
             .compact => |id| if (self.session.last_compact_id != id) return error.InvalidRecord,
         }
     }
-
-    pub fn restoreExpectation(self: Record) RestoreExpectation {
-        return .{
-            .logical_session_id = self.session.logical_session_id,
-            .checkpoint_generation = self.blob.generation,
-            .last_run_id = self.session.last_run_id,
-            .last_compact_id = self.session.last_compact_id,
-            .model = self.session.model,
-        };
-    }
 };
 
 test "record owns exactly blob, session binding, and commit anchor facts" {
@@ -114,7 +96,4 @@ test "record owns exactly blob, session binding, and commit anchor facts" {
     };
     defer record.deinit(allocator);
     try record.validateBinding(9, 3, "model-id");
-    const expectation = record.restoreExpectation();
-    try std.testing.expectEqualStrings("logical-session", expectation.logical_session_id);
-    try std.testing.expectEqual(@as(u64, 4), expectation.checkpoint_generation);
 }
