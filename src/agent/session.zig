@@ -3,6 +3,7 @@
 //! feed a bounded sink. No callback calls WebView or registers desktop tools.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const sdk = @import("metask_agentcore");
 const wire = sdk.types;
 const event_pump = @import("event_pump");
@@ -167,7 +168,49 @@ test "AgentCore JSON callbacks reject invalid UTF-8 at the ownership boundary" {
     );
 }
 
+pub const BuiltinToolProfile = enum {
+    local,
+    network,
+};
+
 const default_builtin_tools = [_][]const u8{ "Read", "Bash", "Edit", "AskUserQuestion" };
+pub const windows_builtin_tools = [_][]const u8{
+    "Read",
+    "Write",
+    "Edit",
+    "Glob",
+    "Grep",
+    "Bash",
+    "BashOutput",
+    "KillShell",
+    "AskUserQuestion",
+    "WebSearch",
+    "WebFetch",
+};
+pub const local_builtin_tools = [_][]const u8{
+    "Read",
+    "Write",
+    "Edit",
+    "Glob",
+    "Grep",
+    "Bash",
+    "BashOutput",
+    "KillShell",
+    "AskUserQuestion",
+};
+pub const network_builtin_tools = [_][]const u8{ "WebSearch", "WebFetch" };
+
+pub const registered_builtin_tools = if (builtin.os.tag == .windows)
+    windows_builtin_tools
+else
+    default_builtin_tools;
+
+pub fn builtinToolsForProfile(profile: BuiltinToolProfile) []const []const u8 {
+    return switch (profile) {
+        .local => &local_builtin_tools,
+        .network => &network_builtin_tools,
+    };
+}
 
 fn providerKindCode(value: ProviderKind) u32 {
     return switch (value) {
@@ -989,8 +1032,8 @@ pub const Runtime = struct {
 
         var runtime_config = std.mem.zeroes(wire.RuntimeConfigV1);
         runtime_config.struct_size = @sizeOf(wire.RuntimeConfigV1);
-        var builtin_views: [default_builtin_tools.len]wire.BytesViewV1 = undefined;
-        for (default_builtin_tools, 0..) |name, index|
+        var builtin_views: [registered_builtin_tools.len]wire.BytesViewV1 = undefined;
+        for (registered_builtin_tools, 0..) |name, index|
             builtin_views[index] = sdk.bytesView(name);
         runtime_config.builtin_tools = &builtin_views;
         runtime_config.builtin_tool_count = builtin_views.len;

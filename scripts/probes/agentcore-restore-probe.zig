@@ -93,7 +93,19 @@ fn releaseResponse(_: ?*anyopaque, response: ?*wire.OwnedBytesV1) callconv(.c) v
 }
 
 fn makeRuntime(api: agentcore.Api) !*wire.RuntimeHandle {
-    const builtin_names = [_][]const u8{ "Read", "Bash", "Edit", "AskUserQuestion" };
+    const builtin_names = [_][]const u8{
+        "Read",
+        "Write",
+        "Edit",
+        "Glob",
+        "Grep",
+        "Bash",
+        "BashOutput",
+        "KillShell",
+        "AskUserQuestion",
+        "WebSearch",
+        "WebFetch",
+    };
     var builtin_views: [builtin_names.len]wire.BytesViewV1 = undefined;
     for (builtin_names, 0..) |name, index| builtin_views[index] = agentcore.bytesView(name);
     var config = std.mem.zeroes(wire.RuntimeConfigV1);

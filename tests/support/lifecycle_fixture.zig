@@ -601,7 +601,7 @@ pub fn runtimeCreate(
     fake_core.zero_host_tools_seen = config.?.host_tools == null and
         config.?.host_tool_count == 0 and
         config.?.builtin_tools != null and
-        config.?.builtin_tool_count == 4;
+        config.?.builtin_tool_count == lifecycle.registered_builtin_tools.len;
     fake_core.mcp_server_count = @intCast(config.?.mcp_server_count);
     fake_core.mcp_descriptor_valid = if (config.?.mcp_server_count == 0)
         config.?.mcp_servers == null
