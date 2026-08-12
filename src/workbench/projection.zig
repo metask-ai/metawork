@@ -1301,6 +1301,23 @@ const PermissionSummary = struct {
     }
 };
 
+fn permissionSummaryWire(
+    permission: *const PermissionSummary,
+) task_persistence.PermissionSummaryWire {
+    return .{
+        .request_id = permission.requestId(),
+        .matched_rule_id = permission.matchedRuleId(),
+        .tool_namespace = @tagName(permission.tool_namespace),
+        .tool_name = permission.toolName(),
+        .tool_binding = permission.toolBinding(),
+        .decision = @tagName(permission.decision),
+        .source = @tagName(permission.source),
+        .policy_generation = permission.policy_generation,
+        .used_session_rule = permission.used_session_rule,
+        .callback_outcome = if (permission.callback_outcome) |outcome| @tagName(outcome) else null,
+    };
+}
+
 const ToolView = struct {
     /// One-way correlation key for SDK tool events. The raw AgentCore tool ID
     /// is not retained in Workbench product history.
@@ -9208,18 +9225,7 @@ pub const Workbench = struct {
                 .detail_truncated = record.detail_truncated,
                 .redacted = record.redacted,
                 .agent_request_id = record.agent_request_id[0..record.agent_request_id_len],
-                .permission = if (record.permission) |permission| .{
-                    .request_id = permission.requestId(),
-                    .matched_rule_id = permission.matchedRuleId(),
-                    .tool_namespace = @tagName(permission.tool_namespace),
-                    .tool_name = permission.toolName(),
-                    .tool_binding = permission.toolBinding(),
-                    .decision = @tagName(permission.decision),
-                    .source = @tagName(permission.source),
-                    .policy_generation = permission.policy_generation,
-                    .used_session_rule = permission.used_session_rule,
-                    .callback_outcome = if (permission.callback_outcome) |outcome| @tagName(outcome) else null,
-                } else null,
+                .permission = if (record.permission) |*permission| permissionSummaryWire(permission) else null,
             };
         }
         return .{
