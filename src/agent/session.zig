@@ -173,7 +173,7 @@ pub const BuiltinToolProfile = enum {
     network,
 };
 
-const default_builtin_tools = [_][]const u8{ "Read", "Bash", "Edit", "AskUserQuestion" };
+pub const default_builtin_tools = [_][]const u8{ "Read", "Bash", "Edit", "AskUserQuestion" };
 pub const windows_builtin_tools = [_][]const u8{
     "Read",
     "Write",

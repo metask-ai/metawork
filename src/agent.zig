@@ -99,6 +99,7 @@ pub const ProviderKind = session_impl.ProviderKind;
 pub const PermissionMode = session_impl.PermissionMode;
 pub const ShellPolicy = session_impl.ShellPolicy;
 pub const BuiltinToolProfile = session_impl.BuiltinToolProfile;
+pub const default_builtin_tools = session_impl.default_builtin_tools;
 pub const windows_builtin_tools = session_impl.windows_builtin_tools;
 pub const local_builtin_tools = session_impl.local_builtin_tools;
 pub const network_builtin_tools = session_impl.network_builtin_tools;

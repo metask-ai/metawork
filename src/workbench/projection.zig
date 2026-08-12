@@ -286,7 +286,7 @@ const SkillReconciliation = struct {
 
 pub const Configuration = struct {
     change_notifier: ChangeNotifier = .{},
-    builtin_tool_profile: lifecycle.BuiltinToolProfile = .local,
+    builtin_tool_profile: ?lifecycle.BuiltinToolProfile = null,
     directories: AppDirectories = .{},
     schedule_timer: ScheduleTimer = .{},
     schedule_persistence: SchedulePersistence = .{},
@@ -2134,7 +2134,7 @@ pub const Workbench = struct {
     skill_catalog: ?CatalogSnapshot = null,
     execution_replacement: ExecutionReplacementKind = .none,
     mcp: ?McpProductState = null,
-    builtin_tool_profile: lifecycle.BuiltinToolProfile,
+    builtin_tool_profile: ?lifecycle.BuiltinToolProfile,
     next_workspace_id: u64 = 1,
     next_workspace_recent_order: u64 = 1,
     next_task_id: u64 = 1,
@@ -3717,7 +3717,10 @@ pub const Workbench = struct {
                 "",
             .skill_catalog = catalog_lease,
             .mcp_selection = self.mcpSelectionForNewTask(),
-            .allowed_tools = lifecycle.builtinToolsForProfile(self.builtin_tool_profile),
+            .allowed_tools = if (self.builtin_tool_profile) |profile|
+                lifecycle.builtinToolsForProfile(profile)
+            else
+                &lifecycle.default_builtin_tools,
         }) catch |err| switch (err) {
             error.SessionCapacity => return error.TaskCapacity,
             else => return err,
