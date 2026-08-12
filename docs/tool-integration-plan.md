@@ -110,7 +110,10 @@ Profile 不是新的执行层。Workbench 在创建 Task 时选择已通过 Wind
 - [会话权限系统重构方案](permission-system-refactor-plan.md)
 - [Renderer Bridge 合同](renderer-bridge-contract.md)
 - [验证规范](validation.md)
+
 ## Verification note
 
 Phase 0 implementation evidence (Windows staged bundle, 2026-08-12): `node scripts/run-agentcore-probe.mjs --staged` verifies the locked bundle and creates a Session for each of the 11 names. The probe uses `shell_policy=unrestricted` because AgentCore correctly rejects shell names when shell policy is disabled. This proves name admission under the required shell condition; it does not replace per-tool execution evidence.
 - The Windows Application now selects `local` for production Workbench configuration. macOS remains unconfigured, and `network` remains an explicit profile option rather than an implicit shared-Runtime capability.
+- The real Windows vertical now exercises `Write`, `Glob`, `Grep`, `BashOutput`, and `KillShell` in one AgentCore Run; `Write` materialization and tool projection are asserted. `WebSearch` and `WebFetch` remain name-admitted and explicitly network-profile scoped, without a second executor or provider-specific MetaWork implementation.
+- The same vertical currently fails closed during post-restart Task history restore (`taskHistoryPersistenceHealth=corrupt`) after the tool run. This is recorded as a separate persistence/permission-history gate and is not treated as tool execution success.
