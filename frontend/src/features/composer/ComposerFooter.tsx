@@ -45,6 +45,9 @@ export function ComposerFooter({
   closed,
   unavailable,
   unavailableReason,
+  recoveryAvailable,
+  recoveryInProgress,
+  recoveryDisabled,
   draft,
   skillCatalog,
   slashCommands,
@@ -68,6 +71,7 @@ export function ComposerFooter({
   actionDisabled,
   onDraftChange,
   onSubmit,
+  onRestore,
   onSlashCommand,
   onRefreshSkillCatalog,
   onConfirmAccess,
@@ -80,6 +84,9 @@ export function ComposerFooter({
   closed: boolean;
   unavailable: boolean;
   unavailableReason: TaskView["continuationUnavailableReason"];
+  recoveryAvailable: boolean;
+  recoveryInProgress: boolean;
+  recoveryDisabled: boolean;
   draft: ComposerDraft;
   skillCatalog: SkillCatalogView;
   slashCommands: readonly SlashCommandState[];
@@ -109,6 +116,7 @@ export function ComposerFooter({
   actionDisabled: boolean;
   onDraftChange: (value: ComposerDraft) => void;
   onSubmit: () => void;
+  onRestore: () => void;
   onSlashCommand: (command: SlashCommandName) => void;
   onRefreshSkillCatalog: () => void;
   onConfirmAccess: () => void;
@@ -123,6 +131,8 @@ export function ComposerFooter({
   const [composing, setComposing] = useState(false);
   const firstSkillArgumentRef = useRef<HTMLInputElement>(null);
   const skillRemoveButtonRef = useRef<HTMLButtonElement>(null);
+  const recoveryFailed = unavailableReason === "session_recovery_failed";
+  const recoveryVisible = recoveryAvailable || recoveryInProgress;
   const sendButtonRef = useRef<HTMLButtonElement>(null);
   const text = draft.kind === "text" ? draft.text : "";
   const draftFocusIdentity =
@@ -276,6 +286,55 @@ export function ComposerFooter({
   return (
     <footer className="composer-bar">
       <div className="composer-shell">
+        {recoveryVisible && (
+          <section
+            className="conversation-recovery"
+            data-state={
+              recoveryInProgress
+                ? "in-progress"
+                : recoveryFailed
+                  ? "failed"
+                  : "required"
+            }
+            role="status"
+            aria-live="polite"
+          >
+            <div>
+              <strong>
+                {t(
+                  recoveryInProgress
+                    ? "recovery.title_in_progress"
+                    : recoveryFailed
+                      ? "recovery.title_failed"
+                      : "recovery.title_required",
+                )}
+              </strong>
+              <p>
+                {t(
+                  recoveryInProgress
+                    ? "recovery.help_in_progress"
+                    : recoveryFailed
+                      ? "recovery.help_failed"
+                      : "recovery.help_required",
+                )}
+              </p>
+            </div>
+            <button
+              type="button"
+              className="recovery-action focus-ring"
+              disabled={recoveryDisabled || recoveryInProgress}
+              onClick={onRestore}
+            >
+              {t(
+                recoveryInProgress
+                  ? "recovery.progress"
+                  : recoveryFailed
+                    ? "recovery.retry"
+                    : "recovery.action",
+              )}
+            </button>
+          </section>
+        )}
         {menuOpen && slashInput && (
           <SlashMenu
             input={slashInput}
@@ -311,8 +370,11 @@ export function ComposerFooter({
                     ? t("run.placeholder_closing")
                     : unavailable
                       ? t(
-                          unavailableReason === "session_recovery_unsupported"
-                            ? "run.placeholder_recovery_unsupported"
+                          unavailableReason === "session_recovery_required" ||
+                            unavailableReason ===
+                              "session_recovery_in_progress" ||
+                            unavailableReason === "session_recovery_failed"
+                            ? "run.placeholder_recovery_required"
                             : "run.placeholder_unavailable",
                         )
                       : archived

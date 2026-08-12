@@ -34,6 +34,7 @@ import {
   decodeRevisionNotification,
   decodeTaskCreateResult,
   decodeTaskCompactResult,
+  decodeTaskRestoreResult,
   decodeTaskRunResult,
   decodeScheduledTaskMutationResult,
   decodeScheduledTaskEnabledResult,
@@ -512,6 +513,13 @@ export class BridgeClient {
   async compact(taskId: string, expectedBindingEpoch: string) {
     return decodeTaskCompactResult(
       await this.invoke(commands.compact, { taskId, expectedBindingEpoch }),
+      taskId,
+    );
+  }
+
+  async restoreTask(taskId: string, expectedBindingEpoch: string) {
+    return decodeTaskRestoreResult(
+      await this.invoke(commands.restoreTask, { taskId, expectedBindingEpoch }),
       taskId,
     );
   }

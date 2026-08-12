@@ -154,6 +154,7 @@ pub const FakeSession = struct {
     in_use: bool = false,
     running: bool = false,
     destroyed: bool = false,
+    restored: bool = false,
     plan: Plan = .immediate,
     callbacks: wire.SessionCallbacksV1 = std.mem.zeroes(wire.SessionCallbacksV1),
     session_id: [wire.MAX_SESSION_ID_BYTES_V1]u8 = [_]u8{0} ** wire.MAX_SESSION_ID_BYTES_V1,
@@ -241,6 +242,7 @@ pub const FakeCore = struct {
     forced_session_destroy_status: ?u32 = null,
     forced_checkpoint_export_status: ?u32 = null,
     forced_checkpoint_describe_status: ?u32 = null,
+    forced_checkpoint_restore_status: ?u32 = null,
     checkpoint_generation: u64 = 0,
     checkpoint_payload: []const u8 = "fixture-checkpoint",
     malformed_checkpoint_result: bool = false,
@@ -248,6 +250,12 @@ pub const FakeCore = struct {
     checkpoint_description_session_id_mismatch: bool = false,
     checkpoint_exports: usize = 0,
     checkpoint_descriptions: usize = 0,
+    checkpoint_restores: usize = 0,
+    restore_last_run_id: u64 = 0,
+    restore_last_compact_id: u64 = 0,
+    restore_controlled: bool = false,
+    restore_entered: bool = false,
+    allow_restore: bool = false,
     checkpoint_export_controlled: bool = false,
     checkpoint_export_entered: bool = false,
     allow_checkpoint_export: bool = false,
@@ -445,6 +453,41 @@ pub const FakeCore = struct {
         self.lock();
         self.checkpoint_generation = generation;
         self.unlock();
+    }
+
+    pub fn setRestoreHistory(self: *FakeCore, last_run_id: u64, last_compact_id: u64) void {
+        self.lock();
+        defer self.unlock();
+        self.restore_last_run_id = last_run_id;
+        self.restore_last_compact_id = last_compact_id;
+    }
+
+    pub fn forceNextCheckpointRestoreStatus(self: *FakeCore, status: u32) void {
+        self.lock();
+        defer self.unlock();
+        self.forced_checkpoint_restore_status = status;
+    }
+
+    pub fn armControlledRestore(self: *FakeCore) void {
+        self.lock();
+        defer self.unlock();
+        self.restore_controlled = true;
+        self.restore_entered = false;
+        self.allow_restore = false;
+    }
+
+    pub fn waitUntilRestoreEntered(self: *FakeCore) void {
+        self.lock();
+        defer self.unlock();
+        while (!self.restore_entered)
+            self.checkpoint_condition.waitUncancelable(std.testing.io, &self.mutex);
+    }
+
+    pub fn releaseControlledRestore(self: *FakeCore) void {
+        self.lock();
+        defer self.unlock();
+        self.allow_restore = true;
+        self.checkpoint_condition.broadcast(std.testing.io);
     }
 
     pub fn controlNextCheckpointExport(self: *FakeCore) void {
@@ -961,15 +1004,119 @@ pub fn runtimeApplyMcpConfiguration(
 }
 
 pub fn sessionRestore(
-    _: ?*wire.RuntimeHandle,
-    _: ?*const wire.SessionRestoreConfigV1,
-    _: ?*const wire.SessionCallbacksV1,
-    _: ?*?*wire.SessionHandle,
-    _: ?*wire.OwnedBytesV1,
+    runtime: ?*wire.RuntimeHandle,
+    config: ?*const wire.SessionRestoreConfigV1,
+    callbacks: ?*const wire.SessionCallbacksV1,
+    out_session: ?*?*wire.SessionHandle,
+    out_report: ?*wire.OwnedBytesV1,
     out_error: ?*wire.OwnedBytesV1,
 ) callconv(.c) u32 {
+    if (out_error) |out| out.* = .{ .ptr = null, .len = 0 };
+    if (out_report) |out| out.* = .{ .ptr = null, .len = 0 };
+    if (out_session) |out| out.* = null;
+    const input = config orelse {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    };
+    const host = input.host orelse {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    };
+    const source = input.source orelse {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    };
+    if (runtime == null or callbacks == null or out_session == null or out_report == null or
+        input.struct_size != @sizeOf(wire.SessionRestoreConfigV1) or
+        input.limits == null or source.struct_size != @sizeOf(wire.CheckpointSourceV1) or
+        source.read == null or host.struct_size != @sizeOf(wire.SessionHostConfigV1))
+    {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    }
+
+    fake_core.lock();
+    fake_core.checkpoint_restores += 1;
+    const forced_status = fake_core.forced_checkpoint_restore_status;
+    fake_core.forced_checkpoint_restore_status = null;
+    if (fake_core.restore_controlled) {
+        fake_core.restore_controlled = false;
+        fake_core.restore_entered = true;
+        fake_core.checkpoint_condition.broadcast(std.testing.io);
+        while (!fake_core.allow_restore)
+            fake_core.checkpoint_condition.waitUncancelable(std.testing.io, &fake_core.mutex);
+    }
+    const generation = fake_core.checkpoint_generation;
+    const last_run_id = fake_core.restore_last_run_id;
+    const last_compact_id = fake_core.restore_last_compact_id;
+    fake_core.unlock();
+    if (forced_status) |status| {
+        diagnostic(out_error);
+        return status;
+    }
+
+    var source_buffer: [5]u8 = undefined;
+    while (true) {
+        var read_len: u64 = 0;
+        const io_status = source.read.?(
+            source.ctx,
+            &source_buffer,
+            source_buffer.len,
+            &read_len,
+        );
+        if (io_status != wire.CHECKPOINT_IO_OK) {
+            diagnostic(out_error);
+            return wire.STATUS_CHECKPOINT_IO;
+        }
+        if (read_len == 0) break;
+        if (read_len > source_buffer.len) {
+            diagnostic(out_error);
+            return wire.STATUS_CHECKPOINT_IO;
+        }
+    }
+
+    const key = sdk.borrowedBytes(host.api_key) catch {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    };
+    fake_core.lock();
+    defer fake_core.unlock();
+    for (&fake_core.sessions) |*session| {
+        if (session.in_use) continue;
+        var session_id = [_]u8{0} ** wire.MAX_SESSION_ID_BYTES_V1;
+        const id = std.fmt.bufPrint(
+            &session_id,
+            "{d:0>24}",
+            .{fake_core.session_created + 1},
+        ) catch {
+            diagnostic(out_error);
+            return wire.STATUS_OUT_OF_MEMORY;
+        };
+        session.* = .{
+            .in_use = true,
+            .restored = true,
+            .callbacks = callbacks.?.*,
+            .session_id = session_id,
+            .session_id_len = id.len,
+            .run_id = last_run_id,
+            .compact_id = last_compact_id,
+        };
+        const encoded = std.fmt.bufPrint(
+            &session.description_buffer,
+            "{{\"schema\":\"agentcore.restore-report/v1\",\"health\":\"complete\",\"session_id\":\"{s}\",\"checkpoint_generation\":{d},\"policy_generation\":1,\"catalog_generation\":0,\"skill\":{{\"disposition\":\"not_bound\",\"checkpoint_enabled\":0,\"restored_enabled\":0,\"invalidated\":0}},\"permission\":{{\"restored_rules\":0,\"invalidated_rules\":0}},\"mcp\":{{\"restored_bindings\":0,\"invalidated_bindings\":0}},\"issues\":[]}}",
+            .{ id, generation },
+        ) catch {
+            diagnostic(out_error);
+            return wire.STATUS_OUT_OF_MEMORY;
+        };
+        fake_core.session_created += 1;
+        fake_core.credential_seen = std.mem.eql(u8, key, "fixture-secret");
+        out_session.?.* = @ptrCast(session);
+        out_report.?.* = .{ .ptr = @ptrCast(encoded.ptr), .len = encoded.len };
+        return wire.STATUS_OK;
+    }
     diagnostic(out_error);
-    return wire.STATUS_INVALID_STATE;
+    return wire.STATUS_OUT_OF_MEMORY;
 }
 
 pub fn sessionDescribe(
@@ -1019,9 +1166,10 @@ pub fn sessionDescribe(
     else
         std.fmt.bufPrint(
             &session.description_buffer,
-            "{{\"schema\":\"agentcore.session-description/v1\",\"session_id\":\"{s}\",\"origin\":\"fresh\",\"lifecycle\":\"idle\",\"registered\":true,\"last_run_id\":{d},\"last_compact_id\":{d},\"checkpoint_generation\":{d},\"policy_generation\":1,\"catalog_generation\":0,\"model\":\"fixture-model\",\"conversation\":{{\"message_count\":0,\"compact_boundary\":0}},\"skill\":{{\"catalog_revision\":null}},\"mcp\":{{\"selection_fingerprint\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"tools\":[]}},\"budget\":{{\"hard_bytes\":1024,\"soft_bytes\":512,\"durable_usage_bytes\":0,\"available_bytes\":1024,\"compaction_recommended\":false,\"last_outcome\":\"none\",\"required_bytes\":0}},\"restore\":{{\"health\":\"complete\",\"invalidated_skill_authority\":0,\"invalidated_permission_rules\":0,\"invalidated_mcp_bindings\":0,\"issues\":[]}}}}",
+            "{{\"schema\":\"agentcore.session-description/v1\",\"session_id\":\"{s}\",\"origin\":\"{s}\",\"lifecycle\":\"idle\",\"registered\":true,\"last_run_id\":{d},\"last_compact_id\":{d},\"checkpoint_generation\":{d},\"policy_generation\":1,\"catalog_generation\":0,\"model\":\"fixture-model\",\"conversation\":{{\"message_count\":0,\"compact_boundary\":0}},\"skill\":{{\"catalog_revision\":null}},\"mcp\":{{\"selection_fingerprint\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"tools\":[]}},\"budget\":{{\"hard_bytes\":1024,\"soft_bytes\":512,\"durable_usage_bytes\":0,\"available_bytes\":1024,\"compaction_recommended\":false,\"last_outcome\":\"none\",\"required_bytes\":0}},\"restore\":{{\"health\":\"complete\",\"invalidated_skill_authority\":0,\"invalidated_permission_rules\":0,\"invalidated_mcp_bindings\":0,\"issues\":[]}}}}",
             .{
                 described_session_id,
+                if (session.restored) "restored" else "fresh",
                 session.run_id,
                 session.compact_id,
                 generation,

@@ -154,6 +154,10 @@ pub const TaskRun = struct {
     expectedBindingEpoch: []const u8,
     input: std.json.Value,
 };
+pub const TaskRestore = struct {
+    taskId: []const u8,
+    expectedBindingEpoch: []const u8,
+};
 pub const TaskCompact = struct {
     taskId: []const u8,
     expectedBindingEpoch: []const u8,

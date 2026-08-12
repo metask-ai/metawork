@@ -1,0 +1,294 @@
+//! Workbench-owned immutable Skill catalog snapshot.
+
+const std = @import("std");
+const lifecycle = @import("metawork_agent");
+
+pub const CatalogAvailability = enum { uninitialized, loading, ready, degraded, unavailable };
+
+pub const SkillProjection = struct {
+    skill_id: []const u8,
+    invocation_name: []const u8,
+    display_name: []const u8,
+    description: []const u8,
+    argument_names: []const []const u8,
+    max_values: u32,
+};
+
+pub const CatalogIssueProjection = struct {
+    code: lifecycle.CatalogIssueCode,
+    invocation_name: ?[]const u8,
+};
+
+pub const CatalogProjection = struct {
+    availability: CatalogAvailability,
+    redacted: bool = false,
+    revision: []const u8 = "",
+    skills: []const SkillProjection = &.{},
+    issues: []const CatalogIssueProjection = &.{},
+};
+
+pub const Limits = struct {
+    max_catalog_skills: usize,
+    max_catalog_issues: usize,
+    max_skill_arguments: usize,
+    max_catalog_projection_bytes: usize,
+};
+
+pub const Error = std.mem.Allocator.Error || error{ProjectionCapacity};
+
+pub const Snapshot = struct {
+    arena: std.heap.ArenaAllocator,
+    revision: []const u8,
+    health: lifecycle.CatalogHealth,
+    skills: []const SkillProjection,
+    issues: []const CatalogIssueProjection,
+    projected_bytes: usize,
+    redacted: bool = false,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        source: lifecycle.CatalogProjection,
+        limits: Limits,
+        available_projection_bytes: usize,
+    ) Error!Snapshot {
+        if (source.skills.len > limits.max_catalog_skills or
+            source.issues.len > limits.max_catalog_issues)
+            return error.ProjectionCapacity;
+        var projected_bytes = source.revision.len;
+        for (source.skills) |skill| {
+            if (skill.argument_names.len > limits.max_skill_arguments)
+                return error.ProjectionCapacity;
+            inline for (.{
+                skill.skill_id,
+                skill.invocation_name,
+                skill.display_name,
+                skill.description,
+            }) |field| {
+                projected_bytes = try addCatalogProjectionBytes(
+                    projected_bytes,
+                    field.len,
+                    limits,
+                    available_projection_bytes,
+                );
+            }
+            for (skill.argument_names) |name|
+                projected_bytes = try addCatalogProjectionBytes(
+                    projected_bytes,
+                    name.len,
+                    limits,
+                    available_projection_bytes,
+                );
+        }
+        for (source.issues) |issue| {
+            if (issue.invocation_name) |name|
+                projected_bytes = try addCatalogProjectionBytes(
+                    projected_bytes,
+                    name.len,
+                    limits,
+                    available_projection_bytes,
+                );
+        }
+        if (projected_bytes > limits.max_catalog_projection_bytes or
+            projected_bytes > available_projection_bytes)
+            return error.ProjectionCapacity;
+
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        errdefer arena.deinit();
+        const owned = arena.allocator();
+        const skills = try owned.alloc(SkillProjection, source.skills.len);
+        for (source.skills, skills) |skill, *target| {
+            const argument_names = try owned.alloc(
+                []const u8,
+                skill.argument_names.len,
+            );
+            for (skill.argument_names, argument_names) |name, *target_name|
+                target_name.* = try owned.dupe(u8, name);
+            target.* = .{
+                .skill_id = try owned.dupe(u8, skill.skill_id),
+                .invocation_name = try owned.dupe(u8, skill.invocation_name),
+                .display_name = try owned.dupe(u8, skill.display_name),
+                .description = try owned.dupe(u8, skill.description),
+                .argument_names = argument_names,
+                .max_values = skill.max_values,
+            };
+        }
+        const issues = try owned.alloc(
+            CatalogIssueProjection,
+            source.issues.len,
+        );
+        for (source.issues, issues) |issue, *target| target.* = .{
+            .code = issue.code,
+            .invocation_name = if (issue.invocation_name) |name|
+                try owned.dupe(u8, name)
+            else
+                null,
+        };
+        return .{
+            .arena = arena,
+            .revision = try owned.dupe(u8, source.revision),
+            .health = source.health,
+            .skills = skills,
+            .issues = issues,
+            .projected_bytes = projected_bytes,
+        };
+    }
+
+    pub fn clone(
+        self: *const Snapshot,
+        allocator: std.mem.Allocator,
+        limits: Limits,
+        available_projection_bytes: usize,
+    ) Error!Snapshot {
+        if (self.projected_bytes > limits.max_catalog_projection_bytes or
+            self.projected_bytes > available_projection_bytes)
+            return error.ProjectionCapacity;
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        errdefer arena.deinit();
+        const owned = arena.allocator();
+        const skills = try owned.alloc(SkillProjection, self.skills.len);
+        for (self.skills, skills) |skill, *target| {
+            const argument_names = try owned.alloc(
+                []const u8,
+                skill.argument_names.len,
+            );
+            for (skill.argument_names, argument_names) |name, *target_name|
+                target_name.* = try owned.dupe(u8, name);
+            target.* = .{
+                .skill_id = try owned.dupe(u8, skill.skill_id),
+                .invocation_name = try owned.dupe(u8, skill.invocation_name),
+                .display_name = try owned.dupe(u8, skill.display_name),
+                .description = try owned.dupe(u8, skill.description),
+                .argument_names = argument_names,
+                .max_values = skill.max_values,
+            };
+        }
+        const issues = try owned.alloc(CatalogIssueProjection, self.issues.len);
+        for (self.issues, issues) |issue, *target| target.* = .{
+            .code = issue.code,
+            .invocation_name = if (issue.invocation_name) |name|
+                try owned.dupe(u8, name)
+            else
+                null,
+        };
+        return .{
+            .arena = arena,
+            .revision = try owned.dupe(u8, self.revision),
+            .health = self.health,
+            .skills = skills,
+            .issues = issues,
+            .projected_bytes = self.projected_bytes,
+            .redacted = self.redacted,
+        };
+    }
+
+    pub fn view(self: *const Snapshot) CatalogProjection {
+        return .{
+            .availability = switch (self.health) {
+                .healthy => .ready,
+                .degraded => .degraded,
+            },
+            .redacted = self.redacted,
+            .revision = self.revision,
+            .skills = self.skills,
+            .issues = self.issues,
+        };
+    }
+
+    pub fn findSkill(
+        self: *const Snapshot,
+        skill_id: []const u8,
+    ) ?*const SkillProjection {
+        for (self.skills) |*skill|
+            if (std.mem.eql(u8, skill.skill_id, skill_id)) return skill;
+        return null;
+    }
+
+    pub fn identityContainsCredential(
+        self: *const Snapshot,
+        credential: []const u8,
+    ) bool {
+        if (credential.len == 0) return false;
+        if (std.mem.indexOf(u8, self.revision, credential) != null) return true;
+        for (self.skills) |skill|
+            if (std.mem.indexOf(u8, skill.skill_id, credential) != null or
+                std.mem.indexOf(u8, skill.invocation_name, credential) != null)
+                return true;
+        return false;
+    }
+
+    pub fn redactPresentationNoFail(
+        self: *Snapshot,
+        credential: []const u8,
+    ) void {
+        var redacted = false;
+        for (self.skills) |*skill| {
+            redacted = redactFixedWidthNoFail(
+                @constCast(skill.display_name),
+                credential,
+            ) or redacted;
+            redacted = redactFixedWidthNoFail(
+                @constCast(skill.description),
+                credential,
+            ) or redacted;
+            for (skill.argument_names) |name| {
+                redacted = redactFixedWidthNoFail(
+                    @constCast(name),
+                    credential,
+                ) or redacted;
+            }
+        }
+        for (self.issues) |*issue| {
+            if (issue.invocation_name) |name| {
+                redacted = redactFixedWidthNoFail(
+                    @constCast(name),
+                    credential,
+                ) or redacted;
+            }
+        }
+        self.redacted = self.redacted or redacted;
+    }
+
+    pub fn deinit(self: *Snapshot) void {
+        self.arena.deinit();
+        self.* = undefined;
+    }
+};
+
+fn addCatalogProjectionBytes(
+    current: usize,
+    added: usize,
+    limits: Limits,
+    available_projection_bytes: usize,
+) error{ProjectionCapacity}!usize {
+    const total = std.math.add(usize, current, added) catch
+        return error.ProjectionCapacity;
+    if (total > limits.max_catalog_projection_bytes or
+        total > available_projection_bytes)
+        return error.ProjectionCapacity;
+    return total;
+}
+
+fn redactFixedWidthNoFail(storage: []u8, credential: []const u8) bool {
+    if (credential.len == 0 or storage.len < credential.len) return false;
+    var cursor: usize = 0;
+    var redacted = false;
+    while (cursor <= storage.len - credential.len) {
+        const relative = std.mem.indexOf(u8, storage[cursor..], credential) orelse break;
+        const match_start = cursor + relative;
+        const bounds = utf8RedactionBounds(storage, match_start, credential.len);
+        @memset(storage[bounds.start..bounds.end], '*');
+        cursor = bounds.end;
+        redacted = true;
+    }
+    return redacted;
+}
+
+const RedactionBounds = struct { start: usize, end: usize };
+
+fn utf8RedactionBounds(value: []const u8, match_start: usize, match_len: usize) RedactionBounds {
+    var bounds_start = match_start;
+    while (bounds_start > 0 and value[bounds_start] & 0xc0 == 0x80) bounds_start -= 1;
+    var bounds_end = @min(value.len, match_start + match_len);
+    while (bounds_end < value.len and value[bounds_end] & 0xc0 == 0x80) bounds_end += 1;
+    return .{ .start = bounds_start, .end = bounds_end };
+}

@@ -47,6 +47,30 @@ const CheckpointCollector = struct {
     }
 };
 
+const CheckpointRestoreSource = struct {
+    bytes: []const u8,
+    offset: usize = 0,
+    max_read: usize = 3,
+    cancelled: bool = false,
+
+    fn source(self: *CheckpointRestoreSource) lifecycle.CheckpointSource {
+        return .{ .context = self, .read_fn = read };
+    }
+
+    fn read(context: ?*anyopaque, destination: []u8) lifecycle.CheckpointSourceReadResult {
+        const self: *CheckpointRestoreSource = @ptrCast(@alignCast(context.?));
+        if (self.cancelled) return .cancelled;
+        if (self.offset == self.bytes.len) return .eof;
+        const count = @min(
+            @min(destination.len, self.max_read),
+            self.bytes.len - self.offset,
+        );
+        @memcpy(destination[0..count], self.bytes[self.offset..][0..count]);
+        self.offset += count;
+        return .{ .bytes = count };
+    }
+};
+
 const checkpoint_test_limits: lifecycle.CheckpointLimits = .{
     .hard_bytes = 1024,
     .max_section_bytes = 1024,
@@ -55,6 +79,38 @@ const checkpoint_test_limits: lifecycle.CheckpointLimits = .{
     .max_blocks_per_message = 16,
     .chunk_bytes = 512,
 };
+
+fn restoreOptions(
+    source: lifecycle.CheckpointSource,
+    logical_session_id: []const u8,
+    last_run_id: u64,
+    last_compact_id: u64,
+) lifecycle.SessionRestoreOptions {
+    const workspace_root = if (std.fs.path.sep == '\\') "C:\\tmp\\metawork-gate2" else "/tmp/metawork-gate2";
+    const temporary_root = if (std.fs.path.sep == '\\') "C:\\tmp" else "/tmp";
+    return .{
+        .session = .{
+            .provider = .anthropic,
+            .permission_mode = .default,
+            .shell_policy = .disabled,
+            .credential = "fixture-secret",
+            .model = "fixture-model",
+            .workspace = .{
+                .canonical_root = workspace_root,
+                .trust = .{ .temporary = temporary_root },
+            },
+        },
+        .checkpoint_limits = checkpoint_test_limits,
+        .source = source,
+        .expectation = .{
+            .logical_session_id = logical_session_id,
+            .checkpoint_generation = 3,
+            .last_run_id = last_run_id,
+            .last_compact_id = last_compact_id,
+            .model = "fixture-model",
+        },
+    };
+}
 
 const McpFixtureTransport = struct {
     fn descriptor(self: *McpFixtureTransport) lifecycle.McpTransport {
@@ -1829,6 +1885,139 @@ test "checkpoint export streams bytes and accepts opaque generation zero" {
         .failure => return error.TestUnexpectedResult,
     }
     try std.testing.expectEqual(lifecycle.SessionState.idle, session.snapshot().state);
+}
+
+test "checkpoint restore installs one exact logical Session and continues identities" {
+    fake_core.reset();
+    fake_core.setCheckpointGeneration(3);
+    fake_core.setRestoreHistory(7, 2);
+    const runtime = try createTestRuntime(.{ .max_sessions = 2 });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    var source = CheckpointRestoreSource{ .bytes = "fixture-checkpoint" };
+    const route = try runtime.restoreSessionRoute(restoreOptions(
+        source.source(),
+        "000000000000000000000001",
+        7,
+        2,
+    ));
+    try std.testing.expectEqual(@as(u64, 1), route.id);
+    try std.testing.expectEqual(lifecycle.CheckpointRestoreHealth.complete, route.report.health);
+    try std.testing.expectEqual(@as(u64, 3), route.report.checkpoint_generation);
+    try std.testing.expectEqual(source.bytes.len, source.offset);
+    const next_run_id = try route.session.prepareRun(.{ .text = "continue" });
+    try std.testing.expectEqual(@as(u64, 8), next_run_id);
+    try route.session.cancelPreparedRun(next_run_id);
+    try closeSession(route.session, .session_close);
+    try runtime.releaseClosedSession(route.session);
+}
+
+test "Runtime shutdown waits for restore and rejects its late candidate" {
+    const RestoreHarness = struct {
+        runtime: *lifecycle.Runtime,
+        source: *CheckpointRestoreSource,
+        result: std.atomic.Value(enum(u8) { pending, rejected, unexpected }) = .init(.pending),
+
+        fn run(self: *@This()) void {
+            _ = self.runtime.restoreSessionRoute(restoreOptions(
+                self.source.source(),
+                "000000000000000000000001",
+                0,
+                0,
+            )) catch |err| {
+                self.result.store(
+                    if (err == error.RuntimeShuttingDown) .rejected else .unexpected,
+                    .release,
+                );
+                return;
+            };
+            self.result.store(.unexpected, .release);
+        }
+    };
+    const ShutdownHarness = struct {
+        runtime: *lifecycle.Runtime,
+        failed: std.atomic.Value(bool) = .init(false),
+
+        fn run(self: *@This()) void {
+            self.runtime.shutdown() catch self.failed.store(true, .release);
+        }
+    };
+
+    fake_core.reset();
+    fake_core.setCheckpointGeneration(3);
+    fake_core.setRestoreHistory(0, 0);
+    fake_core.armControlledRestore();
+    const runtime = try createTestRuntime(.{ .max_sessions = 1 });
+    var runtime_live = true;
+    defer if (runtime_live) {
+        runtime.shutdown() catch {};
+        runtime.deinit();
+    };
+    var source = CheckpointRestoreSource{ .bytes = "fixture-checkpoint" };
+    var restore_harness = RestoreHarness{ .runtime = runtime, .source = &source };
+    const restore_thread = try std.Thread.spawn(.{}, RestoreHarness.run, .{&restore_harness});
+    fake_core.waitUntilRestoreEntered();
+    try std.testing.expectError(error.SessionCapacity, openSession(runtime));
+
+    var shutdown_harness = ShutdownHarness{ .runtime = runtime };
+    const shutdown_thread = try std.Thread.spawn(.{}, ShutdownHarness.run, .{&shutdown_harness});
+    for (0..100) |_| std.Thread.yield() catch {};
+    fake_core.lock();
+    const destroyed_while_restore_blocked = fake_core.runtime_destroyed;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 0), destroyed_while_restore_blocked);
+
+    fake_core.releaseControlledRestore();
+    restore_thread.join();
+    shutdown_thread.join();
+    try std.testing.expectEqual(.rejected, restore_harness.result.load(.acquire));
+    try std.testing.expect(!shutdown_harness.failed.load(.acquire));
+    fake_core.lock();
+    const restored = fake_core.checkpoint_restores;
+    const sessions_destroyed = fake_core.session_destroyed;
+    const runtimes_destroyed = fake_core.runtime_destroyed;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 1), restored);
+    try std.testing.expectEqual(@as(usize, 1), sessions_destroyed);
+    try std.testing.expectEqual(@as(usize, 1), runtimes_destroyed);
+    runtime.deinit();
+    runtime_live = false;
+}
+
+test "restore cleanup failure remains Runtime-owned until shutdown" {
+    fake_core.reset();
+    fake_core.setCheckpointGeneration(3);
+    fake_core.setRestoreHistory(0, 0);
+    fake_core.forceNextSessionDestroyStatus(wire.STATUS_BUSY);
+    const runtime = try createTestRuntime(.{ .max_sessions = 1 });
+    var runtime_live = true;
+    defer if (runtime_live) {
+        runtime.shutdown() catch {};
+        runtime.deinit();
+    };
+    var source = CheckpointRestoreSource{ .bytes = "fixture-checkpoint" };
+    try std.testing.expectError(
+        error.RestoreContractFailed,
+        runtime.restoreSessionRoute(restoreOptions(
+            source.source(),
+            "ffffffffffffffffffffffff",
+            0,
+            0,
+        )),
+    );
+    fake_core.lock();
+    const destroyed_before_shutdown = fake_core.session_destroyed;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 0), destroyed_before_shutdown);
+    try runtime.shutdown();
+    fake_core.lock();
+    const destroyed_after_shutdown = fake_core.session_destroyed;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 1), destroyed_after_shutdown);
+    runtime.deinit();
+    runtime_live = false;
 }
 
 test "checkpoint description cannot change the bound logical Session identity" {

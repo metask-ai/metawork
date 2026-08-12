@@ -372,12 +372,12 @@ fn exportCheckpoint(
     } };
 }
 
-const DescriptionOutcome = union(enum) {
+pub const DescriptionOutcome = union(enum) {
     success: Description,
     failure: Failure,
 };
 
-fn describe(
+pub fn describe(
     allocator: std.mem.Allocator,
     api: sdk.Api,
     raw_session: *wire.SessionHandle,

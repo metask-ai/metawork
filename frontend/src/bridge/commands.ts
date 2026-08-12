@@ -46,6 +46,7 @@ export const commands = {
   accountLogout: "metawork.account.logout",
   createTask: "metawork.tasks.create",
   run: "metawork.tasks.run",
+  restoreTask: "metawork.tasks.restore",
   compact: "metawork.tasks.compact",
   cancelCompact: "metawork.tasks.cancelCompact",
   refreshTaskSkillCatalog: "metawork.tasks.refreshSkillCatalog",

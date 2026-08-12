@@ -10,7 +10,7 @@ pub const Stores = struct {
     task_restore_failed: bool = true,
     task_restored_bytes: ?[]u8 = null,
     checkpoint: ?workbench_api.CheckpointFileStore = null,
-    checkpoint_restore_failed: bool = true,
+    checkpoint_open_failed: bool = true,
     scheduled_task: ?workbench_api.ScheduledTaskFileStore = null,
     scheduled_task_restore_failed: bool = true,
     scheduled_task_restored_bytes: ?[]u8 = null,
@@ -53,7 +53,7 @@ pub const Stores = struct {
             io,
             paths.checkpointsDir(),
         ) catch null;
-        self.checkpoint_restore_failed = self.checkpoint == null;
+        self.checkpoint_open_failed = self.checkpoint == null;
 
         self.scheduled_task = workbench_api.ScheduledTaskFileStore.init(
             io,

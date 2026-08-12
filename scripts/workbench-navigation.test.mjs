@@ -229,6 +229,21 @@ test("manual Compact participates in Task action grouping without becoming a Run
   assert.equal(taskSignals(compacting).running, true);
 });
 
+test("Conversation recovery remains visible as Task work without becoming a Run", () => {
+  const restoring = task({
+    continuationAvailable: false,
+    continuationUnavailableReason: "session_recovery_in_progress",
+    continuationRecoveryAvailable: false,
+    activeOperation: { kind: "restore", id: "12" },
+  });
+  assert.equal(isRunInFlight(restoring), false);
+  assert.deepEqual(taskDisplayState(restoring), { kind: "recovery" });
+  assert.deepEqual(taskGroups([restoring], false), [
+    { kind: "running", tasks: [restoring] },
+  ]);
+  assert.equal(taskSignals(restoring).running, true);
+});
+
 test("a new Task draft is not mistaken for an in-flight Run", () => {
   assert.equal(isRunInFlight(null), false);
   assert.equal(isRunInFlight(task({ currentRunPhase: null })), false);

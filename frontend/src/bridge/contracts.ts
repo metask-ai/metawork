@@ -271,7 +271,9 @@ export type CompactView = {
 };
 
 export type ActiveOperation =
-  { kind: "run"; id: string } | { kind: "compact"; id: string };
+  | { kind: "run"; id: string }
+  | { kind: "compact"; id: string }
+  | { kind: "restore"; id: string };
 
 export type AskOption = {
   label: string;
@@ -344,8 +346,18 @@ export type TaskView = {
     | "event_projection_failure"
     | "closing"
     | "closed"
-    | "session_recovery_unsupported"
+    | "task_archived"
+    | "session_recovery_required"
+    | "session_recovery_in_progress"
+    | "session_recovery_failed"
+    | "persistence_unavailable"
+    | "checkpoint_unavailable"
+    | "execution_mismatch"
+    | "workspace_unavailable"
+    | "authority_unavailable"
+    | "runtime_unavailable"
     | null;
+  continuationRecoveryAvailable: boolean;
   archived: boolean;
   closeFailed: boolean;
   activeOperation: ActiveOperation | null;
@@ -773,6 +785,27 @@ export type TaskCompactResult =
       taskId: string;
       operationId: null;
       reason: TaskCompactReason;
+    };
+
+export type TaskRestoreReason =
+  | "binding_changed"
+  | "task_unavailable"
+  | "recovery_unavailable"
+  | "capacity_reached"
+  | "shutting_down";
+
+export type TaskRestoreResult =
+  | {
+      accepted: true;
+      taskId: string;
+      attemptId: string;
+      reason: null;
+    }
+  | {
+      accepted: false;
+      taskId: string;
+      attemptId: null;
+      reason: TaskRestoreReason;
     };
 
 export type CatalogRefreshReason =

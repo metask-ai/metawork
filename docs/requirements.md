@@ -41,7 +41,7 @@ MetaWork 当前不定义为：
 
 ### Task 与内部 Agent Session
 
-Task 是用户可持续补充的产品工作上下文，归属于 Workspace，拥有消息、运行状态、Run 历史、Session maintenance 历史和不含 secret 的 execution binding 历史。每个 live Task 在当前进程中持有一个内部 Agent Session 与 Conversation；Session 是执行生命周期术语，不是第二个产品对象或 Renderer 身份。Run 与会改变 Conversation 的 maintenance operation 共用一个 Workbench-owned active operation 槽，不能并发进入同一 Session。历史 Task 可以跨重启恢复为只读记录；跨进程 Conversation 恢复或安全重建属于后续能力，未通过验收前不得显示虚假的“继续此 Task”。
+Task 是用户可持续补充的产品工作上下文，归属于 Workspace，拥有消息、运行状态、Run 历史、Session maintenance 历史和不含 secret 的 execution binding 历史。attached Task 在当前进程中持有一个内部 Agent Session 与 Conversation；Session 是执行生命周期术语，不是第二个产品对象或 Renderer 身份。Run、会改变 Conversation 的 maintenance operation 与 Conversation restore 共用一个 Workbench-owned active operation 槽，不能并发进入同一 Session。历史 Task 可以跨重启恢复为 detached 记录；只有 Host 证明最新 checkpoint、execution binding 与全部 authority 精确可用时，用户才能显式重建原 Conversation attachment。
 
 ### Turn / Run
 
@@ -120,7 +120,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - 后台 Task 的运行状态不能因 UI 切换而丢失；
 - 每条事件、审批和工具结果必须路由到正确 Task/Run；
 - 每个 Task 在创建时记录无 secret 的 generation、Provider 与模型历史事实；不得固化 Account identity 或 API Key 元数据。全局默认变化不改写 Task 历史或 live Agent Session；
-- 每个 Task 至多一个 active operation：当前可以是 non-terminal Run 或 manual compact，包括 executor 中的 `queued` 状态；Run 与 compact 互斥，当前 operation 结束前 Workbench 拒绝新的 Run、compact 和其他 Session mutation，Renderer 只能保留未提交草稿；
+- 每个 Task 至多一个 active operation：当前可以是 non-terminal Run、manual compact 或 Conversation restore，包括 executor 中的 `queued` 状态；Run、compact 与 restore 互斥，当前 operation 结束前 Workbench 拒绝新的 Run、compact、restore 和其他 Session mutation，Renderer 只能保留未提交草稿；
 - Renderer 产品合同为 `metawork.renderer-bridge` 固定 revision 1：`connect` 精确协商后才开放产品路径，snapshot 根节点由严格的无 secret `capabilities`、`account`、`skillCatalog`、`skillManagement`、`mcp`、`workspaces`、`scheduledTasks` 与 `tasks` 组成且不维护第二个局部版本；Account 发布脱敏 catalog selection identifier 与 generation，Workspace 由 Host 独立发布，Task 固化 binding epoch 与显示事实；Renderer 只为 New task draft 保存可空 Manual Workspace identity，Host 不发布全局 selected Workspace；`tasks.create` 提交严格的 `automatic | manual(workspaceId, expectedWorkspaceEpoch)` Workspace intent，Account、Workspace 和 Task mutation 均提交对应 expected generation/epoch，Host 重新校验 window、ownership、catalog membership 与 admission；快速开发阶段的合同内容直接原地 hard cut，不接受或双写被取代的临时 payload；
 - 预期的 Task/Workspace admission 拒绝必须作为严格 typed result 返回并由 Renderer 映射为产品文案；非法 payload、伪造 ownership 与不可信 origin 仍 fail closed 为 Bridge error，不得把内部 error name 显示给用户；
 - 当前固定 revision 1 合同原子提供独立 Workspace projection 与 Task execution binding。一次性目录能力必须由选择命令在 Host 内创建并消费，Renderer 不接收路径授权 token，不从 Task 反推 Workspace，也不能通过可选字段继续发送被取代的临时 payload；
@@ -137,6 +137,8 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - manual compact 必须发布真实的 queued/compacting/stopping 与 terminal outcome；`compacted / no_change / degraded / aborted` 保持各自语义，before/after context token 只作为估算展示，compact provider usage 与 Run usage 分开记录；
 - 用户可以取消当前 Run；
 - 用户可以取消 active compact；Run 或 compact 的取消都必须等待 AgentCore 给出真实终止结果，不能只在 UI 中停止渲染。
+- Application 重启后，满足恢复资格的 open Task 必须在 Composer 中提供显式“恢复对话”动作；点击左栏 Task 只负责导航和阅读历史，不得隐式恢复 Session、启动 Run 或重放任何输入；
+- Conversation 恢复只从最新已提交 checkpoint 重建 Agent Session attachment。恢复完成前禁止新 Run 和其他 Session mutation；失败必须保留历史、给出稳定原因并仅在 Host 再次证明资格后允许用户重试。
 
 ### 5.5 审批与输入
 
@@ -167,7 +169,8 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - 当前 baseline 的 Renderer reload 只能从仍存活的 Host 恢复视图；
 - Host 或 AgentCore 进程退出时，当前同步 Run 标记 `interrupted`，不得伪装完成；
 - 崩溃后不得自动重放可能产生副作用的工具；
-- AgentCore revision 7 checkpoint export/restore 的产品接入、可恢复 suspend/resume 和跨进程 Conversation 恢复属于后续 capability；
+- AgentCore revision 7 checkpoint export/restore 已接入 Application 重启后的 Conversation 恢复；它不是 transcript 重放，不恢复 checkpoint 之后未完成的 Run，不自动重放工具、permission 或结果不确定的 mutation；
+- async pending、可恢复 suspend/resume、独立 AgentCore Worker crash recovery 和跨进程 in-flight Run 恢复仍属于后续 capability；
 - 成本预算、轮数上限或工具循环熔断后，Task 进入等待用户状态，只有用户明确继续后才创建新 Run。
 
 ### 5.8 桌面能力

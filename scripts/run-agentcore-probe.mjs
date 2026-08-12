@@ -1,4 +1,11 @@
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -85,12 +92,10 @@ pub fn build(b: *std.Build) void {
   );
   await writeFile(
     path.join(zigConsumerRoot, "main.zig"),
-    `const agentcore = @import("metask_agentcore");
-
-pub fn main() !void {
-    _ = try agentcore.Api.discover();
-}
-`,
+    await readFile(
+      path.join(repositoryRoot, "scripts", "probes", "agentcore-restore-probe.zig"),
+      "utf8",
+    ),
   );
   await runChild(
     "zig",
