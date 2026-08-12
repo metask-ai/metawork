@@ -71,6 +71,7 @@ pub const Error = lifecycle.Error || scheduled_tasks_impl.Error || scheduled_tas
     EventAfterTerminalDrain,
     RecoveryUnavailable,
     RestoreAttemptExhausted,
+    UnsupportedBuiltinProfile,
 };
 
 pub const Limits = struct {
@@ -2149,6 +2150,8 @@ pub const Workbench = struct {
         limits: Limits,
         configuration: Configuration,
     ) Error!Workbench {
+        if (configuration.builtin_tool_profile != null and builtin.os.tag != .windows)
+            return error.UnsupportedBuiltinProfile;
         if (limits.worker_count == 0 or limits.queue_capacity == 0 or
             limits.max_tasks == 0 or limits.max_workspaces == 0 or
             limits.max_scheduled_tasks == 0 or
