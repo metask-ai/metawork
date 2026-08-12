@@ -683,7 +683,7 @@ Skill draft 与 Text draft 一样按 Task/New-task scope 保存在 Renderer sess
 
 以下请求使用不同语义和组件：
 
-- Tool permission：`Deny / Allow once / Always allow…`；
+- Tool permission：由 AgentCore request 的 `responses[]` 驱动，当前可取 `Deny once / Deny for this session / Allow once / Allow for this session`；
 - Question：选项或文本回答，使用 `Continue`；
 - Plan approval：`Request changes / Start work`；
 - 应用级危险操作：使用原生确认窗口或应用级 sheet。
@@ -697,7 +697,7 @@ Skill draft 与 Text draft 一样按 Task/New-task scope 保存在 Renderer sess
 - Waiting for your approval；
 - Sending your decision；
 - Allowed once；
-- Allowed by saved permission；
+- Allowed for this session；
 - Denied；
 - Expired；
 - Cancelled because the task stopped；
@@ -713,15 +713,15 @@ Skill draft 与 Text draft 一样按 Task/New-task scope 保存在 Renderer sess
 
 ### 10.1 基本原则
 
-MetaWork 支持永久权限，但“永久”表示直到用户撤销，并且必须形成范围明确、可审计的 Host-owned 规则。
+MetaWork 的持久权限仍是未来 capability；当前 AgentCore 只提供 Run once 与 Session scope choice，Renderer 不得把 Session grant 显示成永久规则。
 
-审批卡片提供：
+持久权限 capability 完成验收后，审批卡片才可提供：
 
 ```text
 Deny    Allow once    Always allow…
 ```
 
-点击 `Always allow…` 后显示实际作用域，不能直接永久放行所有操作。
+点击 `Always allow…` 后显示实际作用域，不能直接永久放行所有操作。当前版本不显示该入口。
 
 `Always allow…` 不是固定出现的按钮。只有 Host 对当前请求返回可持久化的 rule candidate，并且对应 Workspace security、匹配器、存储和审计 capability 已通过验证时才显示；否则审批卡片只提供 `Deny / Allow once`。Renderer 不得自行把一次性请求扩展成持久规则。
 
