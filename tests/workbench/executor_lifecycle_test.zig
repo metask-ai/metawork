@@ -126,6 +126,49 @@ fn waitHistoryNeedle(
     return error.TestUnexpectedResult;
 }
 
+test "Workbench Task admission forwards the configured built-in profile" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 1,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var configuration = workbenchConfiguration();
+    configuration.builtin_tool_profile = .local;
+    var workbench = try workbench_api.Workbench.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 1,
+            .max_tasks = 1,
+            .max_workspaces = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        configuration,
+    );
+    defer workbench.deinit();
+    try installWorkbenchExecution(&workbench);
+    _ = try workbench.createTask(workbenchTaskInput());
+
+    try std.testing.expectEqual(
+        lifecycle.local_builtin_tools.len,
+        fake_core.last_allowed_tool_count,
+    );
+    for (lifecycle.local_builtin_tools, 0..) |name, index| {
+        try std.testing.expectEqualStrings(
+            name,
+            fake_core.last_allowed_tool_names[index][0..name.len],
+        );
+    }
+}
+
 test "Run checkpoint commits immutable blob before durable descriptor" {
     fake_core.reset();
     const runtime = try createTestComposition(.{

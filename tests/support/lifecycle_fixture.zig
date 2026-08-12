@@ -223,6 +223,8 @@ pub const FakeCore = struct {
     credential_seen: bool = false,
     zero_host_tools_seen: bool = false,
     builtin_allowlist_seen: bool = false,
+    last_allowed_tool_count: usize = 0,
+    last_allowed_tool_names: [16][32]u8 = [_][32]u8{.{0} ** 32} ** 16,
     workspace_home_seen: bool = false,
     workspace_epoch_seen: bool = false,
     skill_session_bound: bool = false,
@@ -732,7 +734,17 @@ pub fn sessionCreate(
             fake_core.session_created += 1;
             fake_core.credential_seen = std.mem.eql(u8, key, "fixture-secret");
             fake_core.builtin_allowlist_seen = host.allowed_tools != null and
-                host.allowed_tool_count == 4;
+                host.allowed_tool_count == lifecycle.default_builtin_tools.len;
+            const allowed_count: usize = @intCast(host.allowed_tool_count);
+            fake_core.last_allowed_tool_count = allowed_count;
+            if (host.allowed_tools) |allowed_tools| {
+                for (allowed_tools[0..allowed_count], 0..) |name, index| {
+                    const bytes = sdk.borrowedBytes(name) catch continue;
+                    if (bytes.len <= fake_core.last_allowed_tool_names[index].len) {
+                        @memcpy(fake_core.last_allowed_tool_names[index][0..bytes.len], bytes);
+                    }
+                }
+            }
             fake_core.workspace_home_seen = workspace_home.len != 0;
             fake_core.skill_session_bound = bound_catalog != null;
             fake_core.skill_selection_seen = bound_catalog != null and selection_valid;
