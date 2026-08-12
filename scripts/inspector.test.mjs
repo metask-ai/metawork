@@ -248,6 +248,7 @@ test("approval cards never expose internal Run identity", () => {
           kind: "permission",
           tool: "Bash",
           args: "npm test",
+          availableChoices: ["deny_once", "allow_once"],
         },
         busy: false,
         responsePhase: "idle",

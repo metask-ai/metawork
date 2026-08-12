@@ -305,7 +305,11 @@ export type PendingUi =
       kind: "permission";
       tool: string;
       args: string;
+      availableChoices: PermissionChoice[];
     };
+
+export type PermissionChoice =
+  "deny_once" | "deny_session" | "allow_once" | "allow_session";
 
 export type UiRecord = {
   requestId: string;
@@ -319,10 +323,36 @@ export type UiRecord = {
     | "denied"
     | "denied_session"
     | "cancelled";
+  agentRequestId: string;
+  permission: PermissionHistory | null;
   detail: string;
   itemCount: number;
   detailTruncated: boolean;
   redacted: boolean;
+};
+
+export type PermissionHistory = {
+  requestId: string;
+  matchedRuleId: string;
+  toolNamespace: "builtin" | "host" | "mcp";
+  toolName: string;
+  toolBinding: string;
+  decision: "allow" | "ask" | "deny";
+  source:
+    | "core_safety"
+    | "active_skill"
+    | "explicit_deny"
+    | "session_deny"
+    | "explicit_ask"
+    | "explicit_allow"
+    | "session_allow"
+    | "builtin_classification"
+    | "mode_fallback"
+    | "callback";
+  policyGeneration: string;
+  usedSessionRule: boolean;
+  callbackOutcome:
+    "answered" | "user_cancelled" | "unavailable" | "contract_failure" | null;
 };
 
 export type TaskView = {
@@ -360,6 +390,10 @@ export type TaskView = {
   continuationRecoveryAvailable: boolean;
   archived: boolean;
   closeFailed: boolean;
+  restorePermission: {
+    restoredRules: string;
+    invalidatedRules: string;
+  } | null;
   activeOperation: ActiveOperation | null;
   currentRunId: string;
   currentRunPhase: NonTerminalRunPhase | null;
@@ -900,5 +934,5 @@ export type SkillDetailResult =
     };
 
 export type UiResponsePayload =
-  | { kind: "permission"; permission: "deny_once" | "allow_once" }
+  | { kind: "permission"; permission: PermissionChoice }
   | { kind: "answers"; answers: string[][] };

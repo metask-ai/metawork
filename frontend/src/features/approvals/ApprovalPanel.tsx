@@ -67,23 +67,28 @@ export function ApprovalPanel({
           </h3>
           <CodeBlock label={t("approval.arguments")} value={pending.args} />
           <div className="mt-4 grid grid-cols-2 gap-2">
-            <DecisionButton
-              disabled={actionDisabled}
-              onClick={() =>
-                respond({ kind: "permission", permission: "deny_once" })
-              }
-            >
-              {t("approval.deny")}
-            </DecisionButton>
-            <DecisionButton
-              primary
-              disabled={actionDisabled}
-              onClick={() =>
-                respond({ kind: "permission", permission: "allow_once" })
-              }
-            >
-              {t("approval.allow_once")}
-            </DecisionButton>
+            {(pending.availableChoices ?? ["deny_once", "allow_once"]).map(
+              (choice) => (
+                <DecisionButton
+                  key={choice}
+                  primary={
+                    choice === "allow_once" || choice === "allow_session"
+                  }
+                  disabled={actionDisabled}
+                  onClick={() =>
+                    respond({ kind: "permission", permission: choice })
+                  }
+                >
+                  {choice === "deny_once"
+                    ? t("approval.deny")
+                    : choice === "allow_once"
+                      ? t("approval.allow_once")
+                      : choice === "allow_session"
+                        ? t("approval.allow_session")
+                        : t("approval.deny_session")}
+                </DecisionButton>
+              ),
+            )}
           </div>
         </div>
       )}
