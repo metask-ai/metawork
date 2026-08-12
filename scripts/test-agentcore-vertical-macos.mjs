@@ -141,7 +141,15 @@ const responses = [
     pattern: "agentcore-vertical-after",
     path: workspace,
   }),
-  toolSse("m7", "ask-1", "AskUserQuestion", {
+  toolSse("m7", "bash-background-1", "Bash", {
+    command: 'powershell -NoProfile -Command "Start-Sleep -Seconds 30"',
+    description: "background lifecycle fixture",
+  }),
+  toolSseFromBackgroundJob("m8", "bash-output-1", "BashOutput", {
+    max_bytes: 1024,
+  }),
+  toolSseFromBackgroundJob("m9", "kill-shell-1", "KillShell"),
+  toolSse("m10", "ask-1", "AskUserQuestion", {
     questions: [
       {
         question: "Continue the AgentCore vertical run?",
@@ -153,9 +161,9 @@ const responses = [
       },
     ],
   }),
-  textSse("m8", "metawork agentcore vertical complete"),
-  textSse("m9", "metawork text checkpoint complete"),
-  textSse("m10", "metawork compact checkpoint complete"),
+  textSse("m11", "metawork agentcore vertical complete"),
+  textSse("m12", "metawork text checkpoint complete"),
+  textSse("m13", "metawork compact checkpoint complete"),
 ];
 const provider = createProvider(responses, visualCaptureDir ? 1_500 : 0);
 const baseUrl = await provider.listen();
@@ -511,6 +519,8 @@ try {
     ["Write", ""],
     ["Glob", ""],
     ["Grep", ""],
+    ["BashOutput", ""],
+    ["KillShell", ""],
   ]) {
     const tool = run.tools.find((item) => item.name === name);
     if (!tool || tool.state !== "completed" || tool.isError)
@@ -842,7 +852,7 @@ try {
     });
   }
   await provider.close();
-  await rm(workspace, { recursive: true, force: true });
+  await removeWorkspaceWithRetry();
 }
 
 function startApplication() {
@@ -1318,6 +1328,20 @@ async function poll(operation, milliseconds, label) {
   );
 }
 
+async function removeWorkspaceWithRetry() {
+  let lastError = null;
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    try {
+      await rm(workspace, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  }
+  throw lastError;
+}
+
 function createProvider(queue, responseDelayMs = 0) {
   let served = 0;
   let providerError = null;
@@ -1346,7 +1370,9 @@ function createProvider(queue, responseDelayMs = 0) {
         requests.push(payload);
         if (payload.model !== "metawork-agentcore-vertical-fixture-model")
           throw new Error("Host model did not reach AgentCore correctly");
-        const body = queue[served];
+        const queued = queue[served];
+        const body =
+          typeof queued === "function" ? queued(payload, requests) : queued;
         if (!body) throw new Error("unexpected extra provider request");
         served += 1;
         response.writeHead(200, {
@@ -1418,6 +1444,41 @@ function toolSse(messageId, toolId, name, input) {
     },
     { type: "message_stop" },
   ]);
+}
+
+function toolSseFromBackgroundJob(messageId, toolId, name, input = {}) {
+  return (payload) => {
+    const jobId = findJsonField(payload, "job_id");
+    if (typeof jobId !== "string" || jobId.length === 0)
+      throw new Error(`provider fixture did not receive a background job id for ${name}`);
+    return toolSse(messageId, toolId, name, { job_id: jobId, ...input });
+  };
+}
+
+function findJsonField(value, field) {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findJsonField(item, field);
+      if (found !== undefined) return found;
+    }
+    return undefined;
+  }
+  if (value && typeof value === "object") {
+    if (field in value) return value[field];
+    for (const item of Object.values(value)) {
+      const found = findJsonField(item, field);
+      if (found !== undefined) return found;
+    }
+    return undefined;
+  }
+  if (typeof value === "string") {
+    try {
+      return findJsonField(JSON.parse(value), field);
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
 }
 
 function textSse(messageId, text) {
