@@ -212,6 +212,25 @@ pub fn builtinToolsForProfile(profile: BuiltinToolProfile) []const []const u8 {
     };
 }
 
+test "Windows built-in profiles cover the verified name set without overlap" {
+    const local = builtinToolsForProfile(.local);
+    const network = builtinToolsForProfile(.network);
+    try std.testing.expectEqual(windows_builtin_tools.len, local.len + network.len);
+    for (local) |name| {
+        for (network) |other| try std.testing.expect(!std.mem.eql(u8, name, other));
+    }
+    for (windows_builtin_tools) |name| {
+        var found = false;
+        for (local) |candidate| {
+            if (std.mem.eql(u8, name, candidate)) found = true;
+        }
+        for (network) |candidate| {
+            if (std.mem.eql(u8, name, candidate)) found = true;
+        }
+        try std.testing.expect(found);
+    }
+}
+
 fn providerKindCode(value: ProviderKind) u32 {
     return switch (value) {
         .anthropic => wire.PROVIDER_ANTHROPIC,
