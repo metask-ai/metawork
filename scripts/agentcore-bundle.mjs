@@ -38,7 +38,7 @@ const targetPolicies = [
     rustTarget: "x86_64-pc-windows-gnu",
     zigTarget: /^x86_64-windows\.[a-z0-9_]+\.\.\.[a-z0-9_]+-gnu$/,
     library: "lib/metask_agentcore.lib",
-    optimize: "ReleaseSmall",
+    optimize: "ReleaseSafe",
     systemLibraries: ["advapi32", "crypt32"],
     lock: path.join("build_support", "agentcore-bundle.windows.lock.json"),
   },

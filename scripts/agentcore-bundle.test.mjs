@@ -150,7 +150,7 @@ test("accepts a complete pinned Windows x64 GNU revision 7 bundle", async (t) =>
     zig_target: "x86_64-windows.win10...win11_dt-gnu",
     rust_target: "x86_64-pc-windows-gnu",
   };
-  manifest.build.optimize = "ReleaseSmall";
+  manifest.build.optimize = "ReleaseSafe";
   manifest.link.system_libraries = ["advapi32", "crypt32"];
   await writeFile(path.join(root, "manifest.json"), JSON.stringify(manifest));
   const result = await validateAgentCoreBundle(root, {

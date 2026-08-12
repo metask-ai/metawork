@@ -99,7 +99,7 @@ fn expectedOptimizeForTarget(target_id: []const u8) []const u8 {
     if (std.mem.eql(u8, target_id, "aarch64-macos"))
         return "ReleaseSafe";
     if (std.mem.eql(u8, target_id, "x86_64-windows-gnu"))
-        return "ReleaseSmall";
+        return "ReleaseSafe";
     @panic("unsupported AgentCore bundle target");
 }
 

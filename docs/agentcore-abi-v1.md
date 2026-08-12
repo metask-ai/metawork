@@ -7,12 +7,12 @@
 
 ## 1. 唯一 baseline
 
-两个 target 都锁定 clean source commit `57253dc23b0a5127d21f4871ee7a58a513815ff2`，package version 为 `0.1.0-dev+57253dc23b0a`，Zig 0.16.0、strip=true、requires C runtime：
+macOS 继续锁定 clean source commit `57253dc23b0a5127d21f4871ee7a58a513815ff2`；Windows 更新为 clean source commit `c2e6f52cb4ce8e440a675dcc9e8517b1f8a4eb73`、package version `0.1.0-dev+c2e6f52cb4ce`。两者均使用 Zig 0.16.0、strip=true、requires C runtime：
 
 | Target                       | Build        | Link input                  | Repository lock                                    |
 | ---------------------------- | ------------ | --------------------------- | -------------------------------------------------- |
 | macOS arm64，最低 macOS 13.0 | ReleaseSafe  | 无 system library/framework | `build_support/agentcore-bundle.macos.lock.json`   |
-| Windows x86_64 GNU           | ReleaseSmall | `advapi32`、`crypt32`       | `build_support/agentcore-bundle.windows.lock.json` |
+| Windows x86_64 GNU           | ReleaseSafe  | `advapi32`、`crypt32`       | `build_support/agentcore-bundle.windows.lock.json` |
 
 固定合同为：
 
