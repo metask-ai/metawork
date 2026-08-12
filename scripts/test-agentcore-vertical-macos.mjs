@@ -111,13 +111,14 @@ await writeFile(
     "disable-model-invocation: true",
     "---",
     "METAWORK_TYPED_SKILL_VERTICAL",
-    "Review $target. Exercise Read, Bash, Edit, and AskUserQuestion, then finish.",
+    "Review $target. Exercise Read, Write, Glob, Grep, Bash, Edit, and AskUserQuestion, then finish.",
     "",
   ].join("\n"),
   { mode: 0o600 },
 );
 await rm(automationDir, { recursive: true, force: true });
 
+const writtenPath = join(workspace, "agentcore-vertical-write.txt");
 const responses = [
   toolSse("m1", "read-1", "Read", { file_path: fixturePath }),
   toolSse("m2", "bash-1", "Bash", {
@@ -128,7 +129,19 @@ const responses = [
     old_string: "agentcore-vertical-before",
     new_string: "agentcore-vertical-after",
   }),
-  toolSse("m4", "ask-1", "AskUserQuestion", {
+  toolSse("m4", "write-1", "Write", {
+    file_path: writtenPath,
+    content: "agentcore-vertical-write\n",
+  }),
+  toolSse("m5", "glob-1", "Glob", {
+    pattern: "*.txt",
+    path: workspace,
+  }),
+  toolSse("m6", "grep-1", "Grep", {
+    pattern: "agentcore-vertical-after",
+    path: workspace,
+  }),
+  toolSse("m7", "ask-1", "AskUserQuestion", {
     questions: [
       {
         question: "Continue the AgentCore vertical run?",
@@ -140,9 +153,9 @@ const responses = [
       },
     ],
   }),
-  textSse("m5", "metawork agentcore vertical complete"),
-  textSse("m6", "metawork text checkpoint complete"),
-  textSse("m7", "metawork compact checkpoint complete"),
+  textSse("m8", "metawork agentcore vertical complete"),
+  textSse("m9", "metawork text checkpoint complete"),
+  textSse("m10", "metawork compact checkpoint complete"),
 ];
 const provider = createProvider(responses, visualCaptureDir ? 1_500 : 0);
 const baseUrl = await provider.listen();
@@ -495,6 +508,9 @@ try {
     ["Read", "agentcore-vertical-before"],
     ["Bash", "agentcore-vertical-bash-ok"],
     ["Edit", ""],
+    ["Write", ""],
+    ["Glob", ""],
+    ["Grep", ""],
   ]) {
     const tool = run.tools.find((item) => item.name === name);
     if (!tool || tool.state !== "completed" || tool.isError)
@@ -513,6 +529,8 @@ try {
     if (evidence && !tool.content.includes(evidence))
       throw new Error(`${name} result omitted ${evidence}`);
   }
+  if ((await readFile(writtenPath, "utf8")) !== "agentcore-vertical-write\n")
+    throw new Error("Write did not materialize the expected file");
   if (reloadedRequest === null)
     throw new Error("AskUserQuestion did not exercise reload-safe resume");
   if (
