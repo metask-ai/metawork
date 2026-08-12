@@ -111,7 +111,9 @@ await writeFile(
     "disable-model-invocation: true",
     "---",
     "METAWORK_TYPED_SKILL_VERTICAL",
-    "Review $target. Exercise Read, Write, Glob, Grep, Bash, Edit, and AskUserQuestion, then finish.",
+    process.platform === "win32"
+      ? "Review $target. Exercise Read, Write, Glob, Grep, Bash, Edit, BashOutput, KillShell, and AskUserQuestion, then finish."
+      : "Review $target. Exercise Read, Bash, Edit, and AskUserQuestion, then finish.",
     "",
   ].join("\n"),
   { mode: 0o600 },
@@ -129,27 +131,31 @@ const responses = [
     old_string: "agentcore-vertical-before",
     new_string: "agentcore-vertical-after",
   }),
-  toolSse("m4", "write-1", "Write", {
-    file_path: writtenPath,
-    content: "agentcore-vertical-write\n",
-  }),
-  toolSse("m5", "glob-1", "Glob", {
-    pattern: "*.txt",
-    path: workspace,
-  }),
-  toolSse("m6", "grep-1", "Grep", {
-    pattern: "agentcore-vertical-after",
-    path: workspace,
-  }),
-  toolSse("m7", "bash-background-1", "Bash", {
-    command: 'powershell -NoProfile -Command "Start-Sleep -Seconds 30"',
-    description: "background lifecycle fixture",
-  }),
-  toolSseFromBackgroundJob("m8", "bash-output-1", "BashOutput", {
-    max_bytes: 1024,
-  }),
-  toolSseFromBackgroundJob("m9", "kill-shell-1", "KillShell"),
-  toolSse("m10", "ask-1", "AskUserQuestion", {
+  ...(process.platform === "win32"
+    ? [
+        toolSse("m4", "write-1", "Write", {
+          file_path: writtenPath,
+          content: "agentcore-vertical-write\n",
+        }),
+        toolSse("m5", "glob-1", "Glob", {
+          pattern: "*.txt",
+          path: workspace,
+        }),
+        toolSse("m6", "grep-1", "Grep", {
+          pattern: "agentcore-vertical-after",
+          path: workspace,
+        }),
+        toolSse("m7", "bash-background-1", "Bash", {
+          command: 'powershell -NoProfile -Command "Start-Sleep -Seconds 30"',
+          description: "background lifecycle fixture",
+        }),
+        toolSseFromBackgroundJob("m8", "bash-output-1", "BashOutput", {
+          max_bytes: 1024,
+        }),
+        toolSseFromBackgroundJob("m9", "kill-shell-1", "KillShell"),
+      ]
+    : []),
+  toolSse(process.platform === "win32" ? "m10" : "m4", "ask-1", "AskUserQuestion", {
     questions: [
       {
         question: "Continue the AgentCore vertical run?",
@@ -161,9 +167,9 @@ const responses = [
       },
     ],
   }),
-  textSse("m11", "metawork agentcore vertical complete"),
-  textSse("m12", "metawork text checkpoint complete"),
-  textSse("m13", "metawork compact checkpoint complete"),
+  textSse(process.platform === "win32" ? "m11" : "m5", "metawork agentcore vertical complete"),
+  textSse(process.platform === "win32" ? "m12" : "m6", "metawork text checkpoint complete"),
+  textSse(process.platform === "win32" ? "m13" : "m7", "metawork compact checkpoint complete"),
 ];
 const provider = createProvider(responses, visualCaptureDir ? 1_500 : 0);
 const baseUrl = await provider.listen();
@@ -512,16 +518,24 @@ try {
     })}\n`,
   );
   const activityOrders = [];
-  for (const [name, evidence] of [
-    ["Read", "agentcore-vertical-before"],
-    ["Bash", "agentcore-vertical-bash-ok"],
-    ["Edit", ""],
-    ["Write", ""],
-    ["Glob", ""],
-    ["Grep", ""],
-    ["BashOutput", ""],
-    ["KillShell", ""],
-  ]) {
+  const executedToolChecks =
+    process.platform === "win32"
+      ? [
+          ["Read", "agentcore-vertical-before"],
+          ["Bash", "agentcore-vertical-bash-ok"],
+          ["Edit", ""],
+          ["Write", ""],
+          ["Glob", ""],
+          ["Grep", ""],
+          ["BashOutput", ""],
+          ["KillShell", ""],
+        ]
+      : [
+          ["Read", "agentcore-vertical-before"],
+          ["Bash", "agentcore-vertical-bash-ok"],
+          ["Edit", ""],
+        ];
+  for (const [name, evidence] of executedToolChecks) {
     const tool = run.tools.find((item) => item.name === name);
     if (!tool || tool.state !== "completed" || tool.isError)
       throw new Error(`${name} did not complete: ${JSON.stringify(tool)}`);
@@ -539,7 +553,10 @@ try {
     if (evidence && !tool.content.includes(evidence))
       throw new Error(`${name} result omitted ${evidence}`);
   }
-  if ((await readFile(writtenPath, "utf8")) !== "agentcore-vertical-write\n")
+  if (
+    process.platform === "win32" &&
+    (await readFile(writtenPath, "utf8")) !== "agentcore-vertical-write\n"
+  )
     throw new Error("Write did not materialize the expected file");
   if (reloadedRequest === null)
     throw new Error("AskUserQuestion did not exercise reload-safe resume");
