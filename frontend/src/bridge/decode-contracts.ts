@@ -7,6 +7,8 @@ import {
   type AskQuestion,
   type HostSignal,
   type PendingUi,
+  type PermissionHistory,
+  type PermissionChoice,
   type CatalogRefreshResult,
   type CompactView,
   type RunInputView,
@@ -93,6 +95,30 @@ const uiRecordStates = [
   "denied_session",
   "cancelled",
 ] as const;
+const permissionDecisionSources = [
+  "core_safety",
+  "active_skill",
+  "explicit_deny",
+  "session_deny",
+  "explicit_ask",
+  "explicit_allow",
+  "session_allow",
+  "builtin_classification",
+  "mode_fallback",
+  "callback",
+] as const;
+const permissionCallbackOutcomes = [
+  "answered",
+  "user_cancelled",
+  "unavailable",
+  "contract_failure",
+] as const;
+const permissionChoices = [
+  "deny_once",
+  "deny_session",
+  "allow_once",
+  "allow_session",
+] as const satisfies readonly PermissionChoice[];
 const accountStates = [
   "checking",
   "signed_out",
@@ -984,6 +1010,51 @@ function validateRunTerminalState(
   }
 }
 
+function decodePermissionHistory(
+  value: unknown,
+  path: string,
+): PermissionHistory {
+  const item = object(value, path, [
+    "requestId",
+    "matchedRuleId",
+    "toolNamespace",
+    "toolName",
+    "toolBinding",
+    "decision",
+    "source",
+    "policyGeneration",
+    "usedSessionRule",
+    "callbackOutcome",
+  ]);
+  return {
+    requestId: nonEmptyString(item.requestId, `${path}.requestId`),
+    matchedRuleId: stringValue(item.matchedRuleId, `${path}.matchedRuleId`),
+    toolNamespace: enumValue(item.toolNamespace, `${path}.toolNamespace`, [
+      "builtin",
+      "host",
+      "mcp",
+    ] as const),
+    toolName: nonEmptyString(item.toolName, `${path}.toolName`),
+    toolBinding: nonEmptyString(item.toolBinding, `${path}.toolBinding`),
+    decision: enumValue(item.decision, `${path}.decision`, [
+      "allow",
+      "ask",
+      "deny",
+    ] as const),
+    source: enumValue(item.source, `${path}.source`, permissionDecisionSources),
+    policyGeneration: wireId(item.policyGeneration, `${path}.policyGeneration`),
+    usedSessionRule: booleanValue(
+      item.usedSessionRule,
+      `${path}.usedSessionRule`,
+    ),
+    callbackOutcome: nullableEnum(
+      item.callbackOutcome,
+      `${path}.callbackOutcome`,
+      permissionCallbackOutcomes,
+    ),
+  };
+}
+
 function decodeUiRecord(value: unknown, path: string): UiRecord {
   const item = object(value, path, [
     "requestId",
@@ -991,17 +1062,37 @@ function decodeUiRecord(value: unknown, path: string): UiRecord {
     "order",
     "kind",
     "state",
+    "agentRequestId",
+    "permission",
     "detail",
     "itemCount",
     "detailTruncated",
     "redacted",
   ]);
+  const kind = enumValue(item.kind, `${path}.kind`, uiRecordKinds);
+  const agentRequestId = stringValue(
+    item.agentRequestId,
+    `${path}.agentRequestId`,
+  );
+  const permission =
+    item.permission === null
+      ? null
+      : decodePermissionHistory(item.permission, `${path}.permission`);
+  if (kind === "ask_question" && permission !== null)
+    fail(
+      `${path}.permission`,
+      "ask_question record cannot contain permission provenance",
+    );
+  if (permission !== null && permission.requestId !== agentRequestId)
+    fail(`${path}.permission`, "permission request identity must match record");
   return {
     requestId: positiveWireId(item.requestId, `${path}.requestId`),
     runId: positiveWireId(item.runId, `${path}.runId`),
     order: positiveWireId(item.order, `${path}.order`),
-    kind: enumValue(item.kind, `${path}.kind`, uiRecordKinds),
+    kind,
     state: enumValue(item.state, `${path}.state`, uiRecordStates),
+    agentRequestId,
+    permission,
     detail: stringValue(item.detail, `${path}.detail`),
     itemCount: nonNegativeNumber(item.itemCount, `${path}.itemCount`),
     detailTruncated: booleanValue(
@@ -1067,7 +1158,20 @@ function decodePendingUi(value: unknown, path: string): PendingUi | null {
       "kind",
       "tool",
       "args",
+      "availableChoices",
     ]);
+    const availableChoices = arrayValue(
+      item.availableChoices,
+      `${path}.availableChoices`,
+      (choice, choicePath) => enumValue(choice, choicePath, permissionChoices),
+    );
+    if (availableChoices.length === 0)
+      fail(
+        `${path}.availableChoices`,
+        "permission request must expose a choice",
+      );
+    if (new Set(availableChoices).size !== availableChoices.length)
+      fail(`${path}.availableChoices`, "permission choices must be unique");
     return {
       requestId: positiveWireId(item.requestId, `${path}.requestId`),
       runId: positiveWireId(item.runId, `${path}.runId`),
@@ -1076,6 +1180,7 @@ function decodePendingUi(value: unknown, path: string): PendingUi | null {
       kind,
       tool: stringValue(item.tool, `${path}.tool`),
       args: stringValue(item.args, `${path}.args`),
+      availableChoices,
     };
   }
   return fail(`${path}.kind`, `unexpected request kind ${kind}`);
@@ -1095,6 +1200,7 @@ function decodeTask(value: unknown, path: string): TaskView {
     "continuationRecoveryAvailable",
     "archived",
     "closeFailed",
+    "restorePermission",
     "activeOperation",
     "currentRunId",
     "currentRunPhase",
@@ -1177,6 +1283,26 @@ function decodeTask(value: unknown, path: string): TaskView {
   if (continuationAvailable !== (continuationUnavailableReason === null))
     fail(path, "continuation availability and unavailable reason must agree");
   const archived = booleanValue(item.archived, `${path}.archived`);
+  const restorePermission =
+    item.restorePermission === null
+      ? null
+      : (() => {
+          const summary = object(
+            item.restorePermission,
+            `${path}.restorePermission`,
+            ["restoredRules", "invalidatedRules"],
+          );
+          return {
+            restoredRules: wireId(
+              summary.restoredRules,
+              `${path}.restorePermission.restoredRules`,
+            ),
+            invalidatedRules: wireId(
+              summary.invalidatedRules,
+              `${path}.restorePermission.invalidatedRules`,
+            ),
+          };
+        })();
   const continuationRecoveryAvailable = booleanValue(
     item.continuationRecoveryAvailable,
     `${path}.continuationRecoveryAvailable`,
@@ -1348,6 +1474,7 @@ function decodeTask(value: unknown, path: string): TaskView {
     continuationRecoveryAvailable,
     archived,
     closeFailed: booleanValue(item.closeFailed, `${path}.closeFailed`),
+    restorePermission,
     activeOperation,
     currentRunId,
     currentRunPhase,

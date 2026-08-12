@@ -219,9 +219,9 @@ pub const AutomationExecutionInput = struct {
 
 pub const PermissionChoice = enum {
     allow_once,
-    allow_always,
+    allow_session,
     deny_once,
-    deny_tool_session,
+    deny_session,
 };
 
 pub const UiResponse = union(enum) {
@@ -1100,7 +1100,7 @@ const catalog_issue_snapshot_overhead: usize = 128;
 const tool_snapshot_overhead: usize = 512;
 const pending_ui_snapshot_overhead: usize = 8 * 1024;
 const ui_record_detail_capacity: usize = 512;
-const ui_record_snapshot_overhead: usize = 512;
+const ui_record_snapshot_overhead: usize = 1024;
 const tool_route_digest_bytes = std.crypto.hash.sha2.Sha256.digest_length;
 const tool_product_id_capacity = "tool-".len + 20;
 const ToolState = enum { running, completed, failed };
@@ -1261,6 +1261,44 @@ const TrackedText = struct {
     committed_len: usize = 0,
 };
 
+const permission_summary_field_capacity: usize = 128;
+
+/// A bounded, redaction-safe permission decision summary. It is copied from
+/// AgentCore provenance and may be attached to both the live Run and the
+/// existing UI occurrence history. It contains no raw arguments or response.
+const PermissionSummary = struct {
+    decision: lifecycle.PermissionDecision,
+    source: lifecycle.PermissionDecisionSource,
+    policy_generation: u64,
+    used_session_rule: bool,
+    callback_outcome: ?lifecycle.PermissionCallbackOutcome,
+    tool_namespace: lifecycle.PermissionToolNamespace,
+    request_id: [permission_summary_field_capacity]u8 = undefined,
+    request_id_len: usize = 0,
+    matched_rule_id: [permission_summary_field_capacity]u8 = undefined,
+    matched_rule_id_len: usize = 0,
+    tool_name: [permission_summary_field_capacity]u8 = undefined,
+    tool_name_len: usize = 0,
+    tool_binding: [permission_summary_field_capacity]u8 = undefined,
+    tool_binding_len: usize = 0,
+
+    fn toolName(self: *const PermissionSummary) []const u8 {
+        return self.tool_name[0..self.tool_name_len];
+    }
+
+    fn toolBinding(self: *const PermissionSummary) []const u8 {
+        return self.tool_binding[0..self.tool_binding_len];
+    }
+
+    fn requestId(self: *const PermissionSummary) []const u8 {
+        return self.request_id[0..self.request_id_len];
+    }
+
+    fn matchedRuleId(self: *const PermissionSummary) []const u8 {
+        return self.matched_rule_id[0..self.matched_rule_id_len];
+    }
+};
+
 const ToolView = struct {
     /// One-way correlation key for SDK tool events. The raw AgentCore tool ID
     /// is not retained in Workbench product history.
@@ -1372,6 +1410,7 @@ const RunRecord = struct {
     tools: []?ToolView,
     usage: UsageView = .{},
     status_text: []u8,
+    permission_provenance: ?PermissionSummary = null,
     terminal_publication: std.atomic.Value(TerminalPublication) = .init(.open),
     terminal_payload: TerminalPayload = undefined,
     terminal_observed: bool = false,
@@ -1416,6 +1455,8 @@ const UiRecordKind = enum { ask_question, permission };
 const UiRecordState = enum {
     answered,
     allowed_once,
+    // Persisted history wire name is retained for existing Task records; the
+    // request/response choice exposed to users is now `allow_session`.
     allowed_always,
     denied,
     denied_session,
@@ -1428,6 +1469,9 @@ const UiRecord = struct {
     order: u64 = 0,
     kind: UiRecordKind,
     state: UiRecordState,
+    agent_request_id: [permission_summary_field_capacity]u8 = undefined,
+    agent_request_id_len: usize = 0,
+    permission: ?PermissionSummary = null,
     detail: [ui_record_detail_capacity]u8 = undefined,
     detail_len: usize = 0,
     item_count: u32 = 0,
@@ -4932,6 +4976,10 @@ pub const Workbench = struct {
                     self.limits.max_projection_bytes - self.projection_bytes;
             if (commit_allowed) {
                 self.projection_bytes += candidate.pinned_catalog.projected_bytes;
+                task.runtime.last_restore_permission = .{
+                    .restored_rules = candidate.route.report.restored_permission_rules,
+                    .invalidated_rules = candidate.route.report.invalidated_permission_rules,
+                };
                 task.runtime.attachment = .{ .attached = .{
                     .session = candidate.route.session,
                     .execution = candidate.takeExecution(),
@@ -5170,6 +5218,13 @@ pub const Workbench = struct {
             .auto_compact => _ = try self.replaceTrackedProjected(&run.status_text, "Context compacted", self.limits.max_tool_field_bytes, run.redaction_secret),
             .retry_notice => _ = try self.replaceTrackedProjected(&run.status_text, "Retrying provider", self.limits.max_tool_field_bytes, run.redaction_secret),
             .permission_provenance => |provenance| {
+                const summary = try permissionSummary(provenance);
+                run.permission_provenance = summary;
+                if (provenance.request_id) |request_id|
+                    if (findUiRecordByAgentRequestId(task.durable.ui_history, request_id, run.id)) |record| {
+                        record.permission = summary;
+                        self.commitTaskStateNoFail();
+                    };
                 const status = switch (provenance.decision) {
                     .allow => "Permission allowed",
                     .ask => "Permission requested",
@@ -7576,11 +7631,19 @@ pub const Workbench = struct {
             .unavailable => |reason| jsonValue(writer, @tagName(reason)) catch
                 return error.SnapshotTooLarge,
         }
-        writer.print(",\"continuationRecoveryAvailable\":{},\"archived\":{},\"closeFailed\":{},\"activeOperation\":", .{
+        writer.print(",\"continuationRecoveryAvailable\":{},\"archived\":{},\"closeFailed\":{}", .{
             recovery.recovery_available,
             view.durable.archived,
             view.runtime.close_failed,
         }) catch return error.SnapshotTooLarge;
+        writer.writeAll(",\"restorePermission\":") catch return error.SnapshotTooLarge;
+        if (view.runtime.last_restore_permission) |summary| {
+            writer.print("{{\"restoredRules\":\"{d}\",\"invalidatedRules\":\"{d}\"}}", .{
+                summary.restored_rules,
+                summary.invalidated_rules,
+            }) catch return error.SnapshotTooLarge;
+        } else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeAll(",\"activeOperation\":") catch return error.SnapshotTooLarge;
         switch (view.runtime.active_operation) {
             .none => writer.writeAll("null") catch return error.SnapshotTooLarge,
             .run => |id| writer.print("{{\"kind\":\"run\",\"id\":\"{d}\"}}", .{id}) catch
@@ -9134,6 +9197,19 @@ pub const Workbench = struct {
                 .item_count = record.item_count,
                 .detail_truncated = record.detail_truncated,
                 .redacted = record.redacted,
+                .agent_request_id = record.agent_request_id[0..record.agent_request_id_len],
+                .permission = if (record.permission) |permission| .{
+                    .request_id = permission.requestId(),
+                    .matched_rule_id = permission.matchedRuleId(),
+                    .tool_namespace = @tagName(permission.tool_namespace),
+                    .tool_name = permission.toolName(),
+                    .tool_binding = permission.toolBinding(),
+                    .decision = @tagName(permission.decision),
+                    .source = @tagName(permission.source),
+                    .policy_generation = permission.policy_generation,
+                    .used_session_rule = permission.used_session_rule,
+                    .callback_outcome = if (permission.callback_outcome) |outcome| @tagName(outcome) else null,
+                } else null,
             };
         }
         return .{
@@ -10876,6 +10952,35 @@ pub const Workbench = struct {
         return result;
     }
 
+    fn permissionSummary(value: lifecycle.PermissionProvenance) Error!PermissionSummary {
+        if (value.tool.name.len > permission_summary_field_capacity or
+            value.tool.binding.len > permission_summary_field_capacity or
+            (if (value.request_id) |request_id| request_id.len else 0) > permission_summary_field_capacity or
+            (if (value.matched_rule_id) |rule_id| rule_id.len else 0) > permission_summary_field_capacity)
+            return error.ProjectionCapacity;
+        var summary = PermissionSummary{
+            .decision = value.decision,
+            .source = value.source,
+            .policy_generation = value.policy_generation,
+            .used_session_rule = value.used_session_rule,
+            .callback_outcome = value.callback_outcome,
+            .tool_namespace = value.tool.namespace,
+        };
+        if (value.request_id) |request_id| {
+            @memcpy(summary.request_id[0..request_id.len], request_id);
+            summary.request_id_len = request_id.len;
+        }
+        if (value.matched_rule_id) |rule_id| {
+            @memcpy(summary.matched_rule_id[0..rule_id.len], rule_id);
+            summary.matched_rule_id_len = rule_id.len;
+        }
+        @memcpy(summary.tool_name[0..value.tool.name.len], value.tool.name);
+        summary.tool_name_len = value.tool.name.len;
+        @memcpy(summary.tool_binding[0..value.tool.binding.len], value.tool.binding);
+        summary.tool_binding_len = value.tool.binding.len;
+        return summary;
+    }
+
     fn allocTrackedCapacity(self: *Workbench, capacity: usize) Error![]u8 {
         if (capacity > self.limits.max_projection_bytes - self.projection_bytes)
             return error.ProjectionCapacity;
@@ -11168,6 +11273,17 @@ pub const Workbench = struct {
                 try self.projectedJsonValueWithKnownCredentials(writer, permission.tool.name);
                 writer.writeAll(",\"args\":") catch return error.SnapshotTooLarge;
                 try self.projectedJsonValueWithKnownCredentials(writer, permission.arguments_json);
+                writer.writeAll(",\"availableChoices\":[") catch return error.SnapshotTooLarge;
+                var wrote_choice = false;
+                for (permission.responses) |choice| {
+                    if (choice == .allow_session or choice == .deny_session) {
+                        if (permission.candidate == null) continue;
+                    }
+                    if (wrote_choice) writer.writeByte(',') catch return error.SnapshotTooLarge;
+                    jsonValue(writer, @tagName(choice)) catch return error.SnapshotTooLarge;
+                    wrote_choice = true;
+                }
+                writer.writeByte(']') catch return error.SnapshotTooLarge;
             },
         }
         writer.writeByte('}') catch return error.SnapshotTooLarge;
@@ -11360,6 +11476,15 @@ pub const Workbench = struct {
             },
             .permission => |permission| permission.arguments_json,
         };
+        switch (request) {
+            .permission => |permission| {
+                if (permission.request_id.len <= permission_summary_field_capacity) {
+                    @memcpy(record.agent_request_id[0..permission.request_id.len], permission.request_id);
+                    record.agent_request_id_len = permission.request_id.len;
+                }
+            },
+            .ask_question => {},
+        }
         const result = sanitizeInto(
             &record.detail,
             value,
@@ -11388,11 +11513,42 @@ pub const Workbench = struct {
                 @tagName(record.state),
             }) catch return error.SnapshotTooLarge;
             try self.projectedJsonValueWithKnownCredentials(writer, record.detailSlice());
-            writer.print(",\"itemCount\":{d},\"detailTruncated\":{},\"redacted\":{}}}", .{
+            writer.print(",\"itemCount\":{d},\"detailTruncated\":{},\"redacted\":{},\"agentRequestId\":", .{
                 record.item_count,
                 record.detail_truncated,
                 record.redacted,
             }) catch return error.SnapshotTooLarge;
+            try self.projectedJsonValueWithKnownCredentials(
+                writer,
+                record.agent_request_id[0..record.agent_request_id_len],
+            );
+            writer.writeAll(",\"permission\":") catch return error.SnapshotTooLarge;
+            if (record.permission) |permission| {
+                writer.writeAll("{\"requestId\":") catch return error.SnapshotTooLarge;
+                jsonValue(writer, permission.requestId()) catch return error.SnapshotTooLarge;
+                writer.writeAll(",\"matchedRuleId\":") catch return error.SnapshotTooLarge;
+                jsonValue(writer, permission.matchedRuleId()) catch return error.SnapshotTooLarge;
+                writer.writeAll(",\"toolNamespace\":") catch return error.SnapshotTooLarge;
+                jsonValue(writer, @tagName(permission.tool_namespace)) catch return error.SnapshotTooLarge;
+                writer.writeAll(",\"toolName\":") catch return error.SnapshotTooLarge;
+                jsonValue(writer, permission.toolName()) catch return error.SnapshotTooLarge;
+                writer.writeAll(",\"toolBinding\":") catch return error.SnapshotTooLarge;
+                jsonValue(writer, permission.toolBinding()) catch return error.SnapshotTooLarge;
+                writer.writeAll(",\"decision\":") catch return error.SnapshotTooLarge;
+                jsonValue(writer, @tagName(permission.decision)) catch return error.SnapshotTooLarge;
+                writer.writeAll(",\"source\":") catch return error.SnapshotTooLarge;
+                jsonValue(writer, @tagName(permission.source)) catch return error.SnapshotTooLarge;
+                writer.print(",\"policyGeneration\":\"{d}\",\"usedSessionRule\":{},\"callbackOutcome\":", .{
+                    permission.policy_generation,
+                    permission.used_session_rule,
+                }) catch return error.SnapshotTooLarge;
+                if (permission.callback_outcome) |outcome|
+                    jsonValue(writer, @tagName(outcome)) catch return error.SnapshotTooLarge
+                else
+                    writer.writeAll("null") catch return error.SnapshotTooLarge;
+                writer.writeByte('}') catch return error.SnapshotTooLarge;
+            } else writer.writeAll("null") catch return error.SnapshotTooLarge;
+            writer.writeByte('}') catch return error.SnapshotTooLarge;
         }
     }
 
@@ -11400,6 +11556,14 @@ pub const Workbench = struct {
         for (view.durable.ui_history) |entry| if (entry) |existing|
             if (existing.request_id == record.request_id) return;
         var stored = record;
+        if (stored.permission == null and stored.agent_request_id_len != 0) {
+            if (findRun(view.durable.runs, stored.run_id)) |run| {
+                if (run.permission_provenance) |summary| {
+                    if (std.mem.eql(u8, stored.agent_request_id[0..stored.agent_request_id_len], summary.requestId()))
+                        stored.permission = summary;
+                }
+            }
+        }
         if (view.runtime.pending_ui_request_id == stored.request_id and view.runtime.pending_ui_order != 0) {
             stored.order = view.runtime.pending_ui_order;
             view.runtime.pending_ui_request_id = 0;
@@ -12115,9 +12279,9 @@ fn agentAnswers(
 fn agentPermissionChoice(choice: PermissionChoice) lifecycle.PermissionChoice {
     return switch (choice) {
         .allow_once => .allow_once,
-        .allow_always => .allow_session,
+        .allow_session => .allow_session,
         .deny_once => .deny_once,
-        .deny_tool_session => .deny_session,
+        .deny_session => .deny_session,
     };
 }
 
@@ -12750,9 +12914,9 @@ fn stateForResponse(response: UiResponse) UiRecordState {
         .answers => .answered,
         .permission => |permission| switch (permission) {
             .allow_once => .allowed_once,
-            .allow_always => .allowed_always,
+            .allow_session => .allowed_always,
             .deny_once => .denied,
-            .deny_tool_session => .denied_session,
+            .deny_session => .denied_session,
         },
     };
 }
@@ -12803,6 +12967,30 @@ fn restoreUiRecord(wire: task_persistence.UiRecordWire) UiRecord {
         .detail_truncated = wire.detail_truncated,
         .redacted = wire.redacted,
     };
+    @memcpy(result.agent_request_id[0..wire.agent_request_id.len], wire.agent_request_id);
+    result.agent_request_id_len = wire.agent_request_id.len;
+    if (wire.permission) |permission| {
+        var summary = PermissionSummary{
+            .decision = parsePersistedEnum(lifecycle.PermissionDecision, permission.decision) orelse unreachable,
+            .source = parsePersistedEnum(lifecycle.PermissionDecisionSource, permission.source) orelse unreachable,
+            .policy_generation = permission.policy_generation,
+            .used_session_rule = permission.used_session_rule,
+            .callback_outcome = if (permission.callback_outcome) |outcome|
+                parsePersistedEnum(lifecycle.PermissionCallbackOutcome, outcome) orelse unreachable
+            else
+                null,
+            .tool_namespace = parsePersistedEnum(lifecycle.PermissionToolNamespace, permission.tool_namespace) orelse unreachable,
+        };
+        @memcpy(summary.request_id[0..permission.request_id.len], permission.request_id);
+        summary.request_id_len = permission.request_id.len;
+        @memcpy(summary.matched_rule_id[0..permission.matched_rule_id.len], permission.matched_rule_id);
+        summary.matched_rule_id_len = permission.matched_rule_id.len;
+        @memcpy(summary.tool_name[0..permission.tool_name.len], permission.tool_name);
+        summary.tool_name_len = permission.tool_name.len;
+        @memcpy(summary.tool_binding[0..permission.tool_binding.len], permission.tool_binding);
+        summary.tool_binding_len = permission.tool_binding.len;
+        result.permission = summary;
+    }
     @memcpy(result.detail[0..wire.detail.len], wire.detail);
     result.detail_len = wire.detail.len;
     return result;
@@ -12825,6 +13013,20 @@ fn persistedTerminalCompactPhase(value: []const u8) bool {
 fn findRun(entries: []?RunRecord, run_id: u64) ?*RunRecord {
     if (run_id == 0) return null;
     for (entries) |*entry| if (entry.*) |*run| if (run.id == run_id) return run;
+    return null;
+}
+
+fn findUiRecordByAgentRequestId(
+    entries: []?UiRecord,
+    request_id: []const u8,
+    run_id: u64,
+) ?*UiRecord {
+    for (entries) |*entry| {
+        const record = &(entry.* orelse continue);
+        if (record.run_id == run_id and
+            std.mem.eql(u8, record.agent_request_id[0..record.agent_request_id_len], request_id))
+            return record;
+    }
     return null;
 }
 
@@ -13641,6 +13843,21 @@ test "Workbench snapshot serializer matches the Renderer contract fixture" {
     try std.testing.expect(
         std.mem.indexOf(u8, snapshot, "\"baseUrl\"") == null,
     );
+}
+
+test "Restore permission stats are projected as runtime health" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    workbench.tasks[0].?.runtime.last_restore_permission = .{
+        .restored_rules = 2,
+        .invalidated_rules = 1,
+    };
+    var storage: [8192]u8 = undefined;
+    const snapshot = try workbench.writeSnapshot(&storage);
+    try std.testing.expect(
+        std.mem.indexOf(u8, snapshot, "\"restorePermission\":{\"restoredRules\":\"2\",\"invalidatedRules\":\"1\"}") != null,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"permission_provenance\"") == null);
 }
 
 test "Task state round trip restores product history without fabricating a Session" {
@@ -15718,6 +15935,80 @@ test "pending UI re-encoding remains inside its concurrent snapshot allowance" {
         request,
     );
     try std.testing.expect(writer.buffered().len <= allowance);
+}
+
+test "permission pending projection follows responses and candidate scope" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    const with_candidate = lifecycle.UiRequest{ .permission = .{
+        .type = "permission",
+        .request_id = "1111111111111111111111111111111111111111111111111111111111111111",
+        .session_id = "000000000000000000000001",
+        .run_id = 1,
+        .tool_call_id = "tool-1",
+        .tool = .{
+            .namespace = .builtin,
+            .name = "Bash",
+            .binding = "0000000000000000000000000000000000000000000000000000000000000000",
+        },
+        .canonical_arguments_digest = "3333333333333333333333333333333333333333333333333333333333333333",
+        .policy_generation = 1,
+        .arguments_json = "{}",
+        .responses = &.{ .deny_once, .deny_session, .allow_once, .allow_session },
+        .candidate = .{
+            .rule_id = "2222222222222222222222222222222222222222222222222222222222222222",
+            .scope = .exact_arguments,
+        },
+    } };
+    var candidate_storage: [4096]u8 = undefined;
+    var candidate_writer = std.Io.Writer.fixed(&candidate_storage);
+    try workbench.writePendingUiProjection(
+        &candidate_writer,
+        1,
+        1,
+        1,
+        with_candidate,
+    );
+    const candidate_json = candidate_writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, candidate_json, "allow_session") != null);
+    try std.testing.expect(std.mem.indexOf(u8, candidate_json, "deny_session") != null);
+
+    const once_only = testPermissionRequest("Bash", "{}");
+    var once_storage: [4096]u8 = undefined;
+    var once_writer = std.Io.Writer.fixed(&once_storage);
+    try workbench.writePendingUiProjection(&once_writer, 1, 1, 1, once_only);
+    const once_json = once_writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, once_json, "allow_session") == null);
+    try std.testing.expect(std.mem.indexOf(u8, once_json, "deny_session") == null);
+}
+
+test "permission provenance projection keeps typed fields bounded and non-persistent" {
+    const value: lifecycle.PermissionProvenance = .{
+        .decision = .allow,
+        .source = .session_allow,
+        .matched_rule_id = "2222222222222222222222222222222222222222222222222222222222222222",
+        .session_id = "000000000000000000000001",
+        .run_id = 1,
+        .tool_call_id = "tool-1",
+        .request_id = "1111111111111111111111111111111111111111111111111111111111111111",
+        .tool = .{
+            .namespace = .builtin,
+            .name = "Bash",
+            .binding = "0000000000000000000000000000000000000000000000000000000000000000",
+        },
+        .canonical_arguments_digest = "3333333333333333333333333333333333333333333333333333333333333333",
+        .policy_generation = 7,
+        .used_session_rule = true,
+        .callback_outcome = .answered,
+        .response = .allow_session,
+    };
+    const projected = try Workbench.permissionSummary(value);
+    try std.testing.expectEqual(lifecycle.PermissionDecision.allow, projected.decision);
+    try std.testing.expectEqual(lifecycle.PermissionDecisionSource.session_allow, projected.source);
+    try std.testing.expectEqual(@as(u64, 7), projected.policy_generation);
+    try std.testing.expect(projected.used_session_rule);
+    try std.testing.expectEqualStrings("Bash", projected.toolName());
+    try std.testing.expect(!@hasField(task_persistence.RunWire, "permission_provenance"));
 }
 
 test "Workbench projects tools and full-width usage without parsing protocol in Renderer" {

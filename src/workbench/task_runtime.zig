@@ -41,6 +41,14 @@ pub const RestoreAttempt = struct {
     id: u64,
 };
 
+/// Typed permission accounting returned by AgentCore checkpoint restore.
+/// This is runtime health state only: it is never persisted as a permission
+/// rule and cannot be used to recreate or replay a prior response.
+pub const RestorePermissionSummary = struct {
+    restored_rules: u32 = 0,
+    invalidated_rules: u32 = 0,
+};
+
 pub const ActiveOperation = union(enum) {
     none,
     run: u64,
@@ -66,6 +74,7 @@ pub const State = struct {
     active_operation: ActiveOperation = .none,
     restore_job: ?*recovery_job.Job = null,
     last_restore_failure: ?recovery_job.Failure = null,
+    last_restore_permission: ?RestorePermissionSummary = null,
     close_thread: ?std.Thread = null,
     close_completion: std.atomic.Value(CloseCompletion) = .init(.none),
     close_failed: bool = false,

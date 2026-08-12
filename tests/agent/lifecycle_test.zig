@@ -1540,6 +1540,52 @@ test "UI request validates identity and close wakes a suspended callback" {
     try closeSession(cancelled, .session_close);
 }
 
+test "Session permission grants are reused only by AgentCore within that Session" {
+    fake_core.reset();
+    fake_core.setNextPlan(.ui_wait_twice);
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 3 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+
+    const session = try openSession(runtime);
+    const first_run = try submitSession(session, "grant session permission");
+    try session.waitForState(.waiting_ui);
+    const first_request = session.pendingUiRequest().?;
+    try session.respondPermission(first_run, first_request, .allow_session);
+    fake_core.releaseControlled();
+    try session.waitRun(first_run);
+    var first_terminal = takeTestTerminal(session, first_run);
+    first_terminal.deinit();
+
+    const second_run = try submitSession(session, "reuse session permission");
+    try session.waitRun(second_run);
+    var second_terminal = takeTestTerminal(session, second_run);
+    second_terminal.deinit();
+    fake_core.lock();
+    const same_session_callbacks = fake_core.permission_callback_count;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 1), same_session_callbacks);
+    try closeSession(session, .session_close);
+
+    fake_core.setNextPlan(.ui_wait_twice);
+    const fresh_session = try openSession(runtime);
+    const fresh_run = try submitSession(fresh_session, "fresh session permission");
+    try fresh_session.waitForState(.waiting_ui);
+    const fresh_request = fresh_session.pendingUiRequest().?;
+    try fresh_session.respondPermission(fresh_run, fresh_request, .allow_session);
+    fake_core.releaseControlled();
+    try fresh_session.waitRun(fresh_run);
+    var fresh_terminal = takeTestTerminal(fresh_session, fresh_run);
+    fresh_terminal.deinit();
+    fake_core.lock();
+    const cross_session_callbacks = fake_core.permission_callback_count;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 2), cross_session_callbacks);
+    try closeSession(fresh_session, .session_close);
+}
+
 test "permission callback request identity mismatch fails closed" {
     fake_core.reset();
     const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 2 });

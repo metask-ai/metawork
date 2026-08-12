@@ -66,6 +66,7 @@ pub const Report = struct {
     policy_generation: u64,
     catalog_generation: u64,
     invalidated_skill_authority: u32,
+    restored_permission_rules: u32,
     invalidated_permission_rules: u32,
     invalidated_mcp_bindings: u32,
 };
@@ -317,6 +318,7 @@ pub fn restore(
             .policy_generation = report.policy_generation,
             .catalog_generation = report.catalog_generation,
             .invalidated_skill_authority = report.skill.invalidated,
+            .restored_permission_rules = report.permission.restored_rules,
             .invalidated_permission_rules = report.permission.invalidated_rules,
             .invalidated_mcp_bindings = report.mcp.invalidated_bindings,
         },

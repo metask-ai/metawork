@@ -961,6 +961,7 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     kind: "permission",
     tool: "Bash",
     args: "***",
+    availableChoices: ["deny_once", "allow_once"],
   };
   assert.throws(
     () => decodeWorkbenchSnapshot(closingWithRequest),
@@ -978,6 +979,8 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     itemCount: 0,
     detailTruncated: false,
     redacted: false,
+    agentRequestId: "",
+    permission: null,
   });
   assert.throws(
     () => decodeWorkbenchSnapshot(foreignUiHistory),
@@ -995,6 +998,8 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     itemCount: 0,
     detailTruncated: false,
     redacted: false,
+    agentRequestId: "",
+    permission: null,
   };
   duplicateUiHistory.tasks[0].uiHistory.push(record, { ...record });
   assert.throws(
@@ -1013,6 +1018,7 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     kind: "permission",
     tool: "Bash",
     args: "***",
+    availableChoices: ["deny_once", "allow_once"],
   };
   assert.doesNotThrow(() => decodeWorkbenchSnapshot(pendingPermission));
   delete pendingPermission.tasks[0].pendingUi.redacted;
@@ -1047,10 +1053,44 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     itemCount: 0,
     detailTruncated: false,
     redacted: false,
+    agentRequestId: "",
+    permission: null,
   });
   assert.throws(
     () => decodeWorkbenchSnapshot(duplicateActivityOrder),
     /activity order must be unique/,
+  );
+
+  const permissionHistory = clone(fixture);
+  permissionHistory.tasks[0].uiHistory.push({
+    requestId: "11",
+    runId: "7",
+    order: "2",
+    kind: "permission",
+    state: "allowed_always",
+    detail: "{}",
+    itemCount: 0,
+    detailTruncated: false,
+    redacted: false,
+    agentRequestId: "agent-request-11",
+    permission: {
+      requestId: "agent-request-11",
+      matchedRuleId: "rule-11",
+      toolNamespace: "builtin",
+      toolName: "Bash",
+      toolBinding: "binding-11",
+      decision: "allow",
+      source: "session_allow",
+      policyGeneration: "7",
+      usedSessionRule: true,
+      callbackOutcome: "answered",
+    },
+  });
+  assert.doesNotThrow(() => decodeWorkbenchSnapshot(permissionHistory));
+  permissionHistory.tasks[0].uiHistory[0].permission.requestId = "other-request";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(permissionHistory),
+    /permission request identity must match record/,
   );
 
   const duplicateToolIdentity = clone(fixture);

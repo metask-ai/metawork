@@ -374,6 +374,21 @@ pub const UiRecordWire = struct {
     item_count: u32,
     detail_truncated: bool,
     redacted: bool,
+    agent_request_id: []const u8 = "",
+    permission: ?PermissionSummaryWire = null,
+};
+
+pub const PermissionSummaryWire = struct {
+    request_id: []const u8,
+    matched_rule_id: []const u8,
+    tool_namespace: []const u8,
+    tool_name: []const u8,
+    tool_binding: []const u8,
+    decision: []const u8,
+    source: []const u8,
+    policy_generation: u64,
+    used_session_rule: bool,
+    callback_outcome: ?[]const u8,
 };
 
 pub fn encode(output: []u8, state: StateWire) Error![]const u8 {
@@ -575,6 +590,27 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
             !oneOf(record.state, &.{ "answered", "allowed_once", "allowed_always", "denied", "denied_session", "cancelled" }) or
             !validText(record.detail, 512, true) or findRun(task.runs, record.run_id) == null)
             return error.Invalid;
+        if (!validText(record.agent_request_id, 128, true)) return error.Invalid;
+        if (std.mem.eql(u8, record.kind, "ask_question") and record.permission != null)
+            return error.Invalid;
+        if (record.permission) |permission| {
+            if (!std.mem.eql(u8, record.kind, "permission") or
+                !std.mem.eql(u8, record.agent_request_id, permission.request_id) or
+                !validText(permission.request_id, 128, false) or
+                !validText(permission.matched_rule_id, 128, true) or
+                !validText(permission.tool_namespace, 32, false) or
+                !validText(permission.tool_name, 128, false) or
+                !validText(permission.tool_binding, 128, false) or
+                !validText(permission.decision, 16, false) or
+                !validText(permission.source, 64, false) or
+                !oneOf(permission.tool_namespace, &.{ "builtin", "host", "mcp" }) or
+                !oneOf(permission.decision, &.{ "allow", "ask", "deny" }) or
+                !oneOf(permission.source, &.{ "core_safety", "active_skill", "explicit_deny", "session_deny", "explicit_ask", "explicit_allow", "session_allow", "builtin_classification", "mode_fallback", "callback" }))
+                return error.Invalid;
+            if (permission.callback_outcome) |outcome|
+                if (!oneOf(outcome, &.{ "answered", "user_cancelled", "unavailable", "contract_failure" }))
+                    return error.Invalid;
+        }
         for (task.ui_history[0..index]) |previous|
             if (previous.request_id == record.request_id or
                 (previous.run_id == record.run_id and previous.order == record.order))
