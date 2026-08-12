@@ -1,6 +1,6 @@
 # MetaWork Windows 核心工具接入方案
 
-> 状态：方案稿（Windows 目标；运行探针与产品接入尚未完成）
+> 状态：Windows 实施已完成；持续回归按本方案与验证规范执行
 >
 > 范围：将 Windows 新版 AgentCore bundle 的 built-in 工具名称接入现有 MetaWork Runtime/Session 路径
 >
@@ -115,5 +115,5 @@ Profile 不是新的执行层。Workbench 在创建 Task 时选择已通过 Wind
 
 Phase 0 implementation evidence (Windows staged bundle, 2026-08-12): `node scripts/run-agentcore-probe.mjs --staged` verifies the locked bundle and creates a Session for each of the 11 names. The probe uses `shell_policy=unrestricted` because AgentCore correctly rejects shell names when shell policy is disabled. This proves name admission under the required shell condition; it does not replace per-tool execution evidence.
 - The Windows Application now selects `local` for production Workbench configuration. macOS remains unconfigured, and `network` remains an explicit profile option rather than an implicit shared-Runtime capability.
-- The real Windows vertical now exercises `Write`, `Glob`, `Grep`, `BashOutput`, and `KillShell` in one AgentCore Run; `Write` materialization and tool projection are asserted. `WebSearch` and `WebFetch` remain name-admitted and explicitly network-profile scoped, without a second executor or provider-specific MetaWork implementation.
-- The same vertical currently fails closed during post-restart Task history restore (`taskHistoryPersistenceHealth=corrupt`) after the tool run. This is recorded as a separate persistence/permission-history gate and is not treated as tool execution success.
+- The real Windows vertical exercises `Read`, `Bash`, `Edit`, `Write`, `Glob`, `Grep`, `BashOutput`, and `KillShell` in one AgentCore Run; `Write` materialization, tool projection, checkpoint commit, and restart recovery are asserted. `WebSearch` and `WebFetch` remain name-admitted and explicitly network-profile scoped, without a second executor or provider-specific MetaWork implementation.
+- The restart corruption found during the vertical was caused by the persistence projection serializing bounded permission buffers as JSON arrays. `permissionSummaryWire` now returns the typed wire struct and preserves slices; `zig build test-lifecycle -Doptimize=Debug` and the Windows vertical both pass.
