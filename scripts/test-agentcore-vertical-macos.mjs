@@ -451,10 +451,8 @@ try {
 
   const task = finalSnapshot.tasks.find((item) => item.id === taskId);
   const run = task.runs.find((item) => item.id === runId);
-  if (finalSnapshot.capabilities?.conversationRecovery !== false)
-    throw new Error(
-      "checkpoint export incorrectly opened conversation recovery",
-    );
+  if (finalSnapshot.capabilities?.conversationRecovery !== true)
+    throw new Error("checkpoint export did not expose conversation recovery");
   if (task.continuationAvailable !== true)
     throw new Error("completed Task did not remain available for continuation");
   if (run.phase !== "completed" || run.outcome !== "completed")
@@ -770,13 +768,13 @@ try {
     (item) => item.id === taskId,
   );
   if (
-    restoredSnapshot.capabilities?.conversationRecovery !== false ||
+    restoredSnapshot.capabilities?.conversationRecovery !== true ||
     restoredTask?.lifecycle !== "closed" ||
     restoredTask.runs.length !== 2 ||
     restoredTask.compacts.length !== 1
   )
     throw new Error(
-      `checkpoint restart changed product history or recovery gate: ${JSON.stringify(restoredTask)}`,
+      `checkpoint restart changed product history or recovery gate: ${JSON.stringify({ restoredTask, tasks: restoredSnapshot.tasks, capabilities: restoredSnapshot.capabilities })}`,
     );
   await poll(
     async () => {
@@ -919,17 +917,20 @@ async function readCheckpointEvidence(
   if (!task || task.checkpoint_health !== "available" || !task.checkpoint)
     return null;
   const descriptor = task.checkpoint;
+  const blobDescriptor = descriptor.blob;
+  const terminal = descriptor.anchor?.terminal;
   if (
-    descriptor.terminal_kind !== terminalKind ||
-    String(descriptor.terminal_id) !== terminalId ||
-    String(descriptor.binding_epoch) !== bindingEpoch ||
-    !Number.isSafeInteger(descriptor.generation) ||
-    descriptor.generation < 0 ||
-    !Number.isSafeInteger(descriptor.byte_size) ||
-    descriptor.byte_size <= 0 ||
-    !Number.isSafeInteger(descriptor.chunk_count) ||
-    descriptor.chunk_count <= 0 ||
-    !/^[0-9a-f]{64}$/.test(descriptor.digest)
+    !blobDescriptor ||
+    !descriptor.session ||
+    !descriptor.anchor ||
+    terminal?.kind !== terminalKind ||
+    String(terminal.id) !== terminalId ||
+    String(descriptor.anchor.binding_epoch) !== bindingEpoch ||
+    !Number.isSafeInteger(blobDescriptor.generation) ||
+    blobDescriptor.generation < 0 ||
+    !Number.isSafeInteger(blobDescriptor.byte_size) ||
+    blobDescriptor.byte_size <= 0 ||
+    !/^[0-9a-f]{64}$/.test(blobDescriptor.digest)
   )
     throw new Error(
       `checkpoint descriptor is malformed: ${JSON.stringify(descriptor)}`,
@@ -939,7 +940,7 @@ async function readCheckpointEvidence(
     "workbench",
     "checkpoints",
     String(task.id),
-    `${descriptor.generation}-${descriptor.digest}.ckpt`,
+    `${blobDescriptor.generation}-${blobDescriptor.digest}.ckpt`,
   );
   let blob;
   try {
@@ -949,13 +950,16 @@ async function readCheckpointEvidence(
     throw error;
   }
   const digest = createHash("sha256").update(blob).digest("hex");
-  if (blob.length !== descriptor.byte_size || digest !== descriptor.digest)
+  if (
+    blob.length !== blobDescriptor.byte_size ||
+    digest !== blobDescriptor.digest
+  )
     throw new Error("checkpoint blob did not match its durable descriptor");
   return {
     blobPath,
-    byteSize: descriptor.byte_size,
-    chunkCount: descriptor.chunk_count,
-    generation: descriptor.generation,
+    byteSize: blobDescriptor.byte_size,
+    chunkCount: null,
+    generation: blobDescriptor.generation,
     historyByteSize: historyBytes.length,
   };
 }
