@@ -7,7 +7,7 @@
 
 ## 1. 唯一 baseline
 
-两个 target 独立锁定 clean source artifact。macOS 与 Windows 均使用 commit `c2e6f52cb4ce8e440a675dcc9e8517b1f8a4eb73`、package version `0.1.0-dev+c2e6f52cb4ce`。两者均为 Zig 0.16.0、strip=true、requires C runtime：
+两个 target 独立锁定 clean source artifact。Windows 当前使用 commit `5f45e15dc1c63561b423ace51a1e6f05831b583a`、package version `0.1.0-dev+5f45e15dc1c6`；macOS 仍使用 commit `c2e6f52cb4ce8e440a675dcc9e8517b1f8a4eb73`、package version `0.1.0-dev+c2e6f52cb4ce`。两者均为 Zig 0.16.0、strip=true、requires C runtime：
 
 | Target                       | Build        | Link input                  | Repository lock                                    |
 | ---------------------------- | ------------ | --------------------------- | -------------------------------------------------- |
@@ -80,7 +80,7 @@ fresh Session 只使用 `SessionHostConfigV1` 与 `SessionCreateConfigV1`：
 - immutable Skill catalog query/lease；
 - fresh Session create/destroy；
 - typed Text/Skill Run 与 abort；
-- built-in Read/Bash/Edit；
+- built-in Read/Bash/Edit/AskUserQuestion；
 - manual compact；
 - post-terminal checkpoint export 与 Session description；
 - verified checkpoint source 驱动的 Session restore 与 restore report/description 对账；

@@ -149,7 +149,7 @@ Agent Session 的公开回答入口只有 answers-only `respondAnswers` 与 choi
 
 ### Host tools
 
-目标 revision 7 的 Host tool callback 同样携带 validated `RunContext`，但这只补齐 wire identity，不自动建立 MetaWork 的产品工具、安全与路由政策。当前产品 Runtime 配置仍必须保持 `host_tool_count = 0`，Read/Bash/Edit 使用 built-in tool catalog；启用正式 Host tools 属于独立 capability Gate，不在本次 ABI 迁移中顺带开放。
+目标 revision 7 的 Host tool callback 同样携带 validated `RunContext`，但这只补齐 wire identity，不自动建立 MetaWork 的产品工具、安全与路由政策。当前产品 Runtime 配置仍必须保持 `host_tool_count = 0`，Read/Bash/Edit/AskUserQuestion 使用 built-in tool names；启用正式 Host tools 属于独立 capability Gate，不在本次 ABI 迁移中顺带开放。
 
 ## 5. Host envelope 与产品状态
 
