@@ -9,10 +9,13 @@
     "check": "tsc --noEmit"
   },
   "dependencies": {
+    "@base-ui/react": "1.6.0",
     "@radix-ui/react-select": "2.2.6",
+    "clsx": "2.1.1",
     "lucide-react": "1.28.0",
     "react": "19.2.6",
-    "react-dom": "19.2.6"
+    "react-dom": "19.2.6",
+    "tailwind-merge": "3.4.0"
   },
   "devDependencies": {
     "@native-sdk/cli": "0.8.0",
