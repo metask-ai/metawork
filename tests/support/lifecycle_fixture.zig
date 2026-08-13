@@ -225,6 +225,8 @@ pub const FakeCore = struct {
     builtin_allowlist_seen: bool = false,
     last_allowed_tool_count: usize = 0,
     last_allowed_tool_names: [16][32]u8 = [_][32]u8{.{0} ** 32} ** 16,
+    last_restored_allowed_tool_count: usize = 0,
+    last_restored_allowed_tool_names: [16][32]u8 = [_][32]u8{.{0} ** 32} ** 16,
     workspace_home_seen: bool = false,
     workspace_epoch_seen: bool = false,
     skill_session_bound: bool = false,
@@ -587,6 +589,22 @@ pub fn diagnostic(out: ?*wire.OwnedBytesV1) void {
     if (out) |value| value.* = .{ .ptr = @ptrCast(&diagnostic_byte), .len = 1 };
 }
 
+fn recordAllowedTools(
+    host: *const wire.SessionHostConfigV1,
+    count: *usize,
+    names: *[16][32]u8,
+) void {
+    const allowed_count: usize = @intCast(host.allowed_tool_count);
+    count.* = allowed_count;
+    if (host.allowed_tools) |allowed_tools| {
+        for (allowed_tools[0..allowed_count], 0..) |name, index| {
+            const bytes = sdk.borrowedBytes(name) catch continue;
+            if (bytes.len <= names[index].len)
+                @memcpy(names[index][0..bytes.len], bytes);
+        }
+    }
+}
+
 pub fn runtimeCreate(
     config: ?*const wire.RuntimeConfigV1,
     out_runtime: ?*?*wire.RuntimeHandle,
@@ -735,16 +753,11 @@ pub fn sessionCreate(
             fake_core.credential_seen = std.mem.eql(u8, key, "fixture-secret");
             fake_core.builtin_allowlist_seen = host.allowed_tools != null and
                 host.allowed_tool_count == lifecycle.default_builtin_tools.len;
-            const allowed_count: usize = @intCast(host.allowed_tool_count);
-            fake_core.last_allowed_tool_count = allowed_count;
-            if (host.allowed_tools) |allowed_tools| {
-                for (allowed_tools[0..allowed_count], 0..) |name, index| {
-                    const bytes = sdk.borrowedBytes(name) catch continue;
-                    if (bytes.len <= fake_core.last_allowed_tool_names[index].len) {
-                        @memcpy(fake_core.last_allowed_tool_names[index][0..bytes.len], bytes);
-                    }
-                }
-            }
+            recordAllowedTools(
+                host,
+                &fake_core.last_allowed_tool_count,
+                &fake_core.last_allowed_tool_names,
+            );
             fake_core.workspace_home_seen = workspace_home.len != 0;
             fake_core.skill_session_bound = bound_catalog != null;
             fake_core.skill_selection_seen = bound_catalog != null and selection_valid;
@@ -1126,6 +1139,11 @@ pub fn sessionRestore(
         };
         fake_core.session_created += 1;
         fake_core.credential_seen = std.mem.eql(u8, key, "fixture-secret");
+        recordAllowedTools(
+            host,
+            &fake_core.last_restored_allowed_tool_count,
+            &fake_core.last_restored_allowed_tool_names,
+        );
         out_session.?.* = @ptrCast(session);
         out_report.?.* = .{ .ptr = @ptrCast(encoded.ptr), .len = encoded.len };
         return wire.STATUS_OK;

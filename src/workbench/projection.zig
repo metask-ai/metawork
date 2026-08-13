@@ -3906,6 +3906,7 @@ pub const Workbench = struct {
                 .workspace = workspace_copy,
                 .execution = execution.take(),
                 .provider = agentProvider(task.durable.execution_provider),
+                .builtin_tool_profile = self.builtin_tool_profile,
                 .mcp_selection = mcp.selection,
                 .mcp_catalog_generation = mcp.catalog_generation,
             },
