@@ -9,6 +9,7 @@
     "check": "tsc --noEmit"
   },
   "dependencies": {
+    "@base-ui/react": "1.6.0",
     "@radix-ui/react-select": "2.2.6",
     "lucide-react": "1.28.0",
     "react": "19.2.6",

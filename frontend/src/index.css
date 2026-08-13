@@ -1,3 +1,4 @@
+@import "./styles/metask-tokens.css";
 @import "tailwindcss";
 
 @theme {
