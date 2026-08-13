@@ -1,4 +1,5 @@
 import { Icon } from "../../components/ui/Icon.tsx";
+import { Button } from "../../components/ui/button.tsx";
 import { SelectionMenu } from "../../components/ui/SelectionMenu.tsx";
 import { useI18n } from "../../i18n/context.ts";
 
@@ -80,8 +81,10 @@ export function WorkspaceContextSelector({
         </strong>
       )}
       {editable && (
-        <button
-          className="composer-workspace-action focus-ring"
+        <Button
+          variant="ghost"
+          size="sm"
+          className="composer-workspace-action"
           data-emphasis={accessRequired}
           aria-label={
             accessRequired ? t("workspace.confirm_access") : t("workspace.add")
@@ -94,7 +97,7 @@ export function WorkspaceContextSelector({
         >
           <Icon name={accessRequired ? "warning" : "plus"} />
           {accessRequired && <span>{t("workspace.confirm_access")}</span>}
-        </button>
+        </Button>
       )}
     </div>
   );

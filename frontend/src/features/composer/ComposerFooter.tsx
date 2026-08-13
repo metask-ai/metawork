@@ -10,6 +10,7 @@ import {
 
 import type { SkillCatalogView, TaskView } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
+import { Button } from "../../components/ui/button.tsx";
 import { useI18n } from "../../i18n/context.ts";
 import { maxComposerCharacters } from "./drafts.ts";
 import { ModelSelector } from "./ModelSelector.tsx";
@@ -319,9 +320,11 @@ export function ComposerFooter({
                 )}
               </p>
             </div>
-            <button
+            <Button
               type="button"
-              className="recovery-action focus-ring"
+              variant="primary"
+              size="md"
+              className="recovery-action"
               disabled={recoveryDisabled || recoveryInProgress}
               onClick={onRestore}
             >
@@ -332,7 +335,7 @@ export function ComposerFooter({
                     ? "recovery.retry"
                     : "recovery.action",
               )}
-            </button>
+            </Button>
           </section>
         )}
         {menuOpen && slashInput && (
@@ -405,15 +408,17 @@ export function ComposerFooter({
                   <strong>{draft.displayName || draft.invocationName}</strong>
                   <small>/skill:{draft.invocationName}</small>
                 </span>
-                <button
-                  ref={skillRemoveButtonRef}
+                <Button
                   type="button"
-                  className="skill-draft-remove focus-ring"
+                  variant="ghost"
+                  size="icon"
+                  ref={skillRemoveButtonRef}
+                  className="skill-draft-remove"
                   aria-label={t("slash.remove_skill")}
                   onClick={() => onDraftChange(emptyComposerDraft())}
                 >
                   <Icon name="close" />
-                </button>
+                </Button>
               </div>
               {skillDraftVisibleArgumentCount(draft) > 0 && (
                 <div
@@ -455,25 +460,29 @@ export function ComposerFooter({
                   <div className="skill-argument-actions">
                     {skillDraftVisibleArgumentCount(draft) <
                       draft.maxValues && (
-                      <button
+                      <Button
                         type="button"
-                        className="slash-refresh focus-ring"
+                        variant="secondary"
+                        size="sm"
+                        className="slash-refresh"
                         disabled={composeDisabled}
                         onClick={() => appendSkillArgument(draft)}
                       >
                         {t("slash.add_argument")}
-                      </button>
+                      </Button>
                     )}
                     {draft.argumentValues.length >
                       draft.argumentNames.length && (
-                      <button
+                      <Button
                         type="button"
-                        className="slash-refresh focus-ring"
+                        variant="secondary"
+                        size="sm"
+                        className="slash-refresh"
                         disabled={composeDisabled}
                         onClick={() => removeLastSkillArgument(draft)}
                       >
                         {t("slash.remove_argument")}
-                      </button>
+                      </Button>
                     )}
                   </div>
                 </div>
@@ -481,13 +490,15 @@ export function ComposerFooter({
               {!skillDraftCurrent && (
                 <div className="skill-draft-warning" role="status">
                   <span>{t("slash.skill_stale")}</span>
-                  <button
+                  <Button
                     type="button"
-                    className="slash-refresh focus-ring"
+                    variant="secondary"
+                    size="sm"
+                    className="slash-refresh"
                     onClick={onRefreshSkillCatalog}
                   >
                     {t("slash.refresh")}
-                  </button>
+                  </Button>
                 </div>
               )}
               {!draftWithinLimits && (
@@ -517,16 +528,19 @@ export function ComposerFooter({
                 />
               </span>
             )}
-            <button
+            <Button
+              type="button"
+              variant="primary"
+              size="icon"
               ref={sendButtonRef}
-              className="composer-send focus-ring"
+              className="composer-send"
               aria-label={t("run.submit")}
               title={t("run.submit")}
               disabled={!sendEnabled}
               onClick={onSubmit}
             >
               <Icon name="send" />
-            </button>
+            </Button>
           </div>
         </div>
         <WorkspaceContextSelector
