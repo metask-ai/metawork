@@ -114,7 +114,7 @@ test("a signed-out Host snapshot restores an active Run instead of hiding it", (
     snapshot: signedOutSnapshot,
   });
 
-  assert.equal(signedOut.activeTaskId, "2");
+  assert.equal(signedOut.activeTaskId, null);
   assert.equal(signedOut.snapshot.account.canCreateTask, false);
   assert.equal(signedOut.snapshot.tasks[0]?.currentRunPhase, "running");
   assert.deepEqual(signedOut.snapshot.tasks[0]?.activeOperation, {
@@ -123,12 +123,12 @@ test("a signed-out Host snapshot restores an active Run instead of hiding it", (
   });
 });
 
-test("the Workbench store selects the first Task and preserves a valid choice", () => {
+test("snapshot hydration stays on New task until the user selects a Task", () => {
   const accepted = workbenchReducer(initialWorkbenchState, {
     type: "snapshot.accepted",
     snapshot: snapshot("1", [task("2", "1"), task("3", "2")]),
   });
-  assert.equal(accepted.activeTaskId, "2");
+  assert.equal(accepted.activeTaskId, null);
   assert.equal("activeWorkspaceId" in accepted, false);
 
   const selected = workbenchReducer(accepted, {
@@ -178,23 +178,32 @@ test("an automatic Task route survives refresh independently of the draft Worksp
   assert.equal(refreshed.activeTaskId, "3");
 });
 
-test("the Workbench store rejects unknown Tasks and falls back to the first global Task", () => {
+test("the Workbench store rejects unknown Tasks and never switches history implicitly", () => {
   const accepted = workbenchReducer(initialWorkbenchState, {
     type: "snapshot.accepted",
     snapshot: snapshot("1", [task("2", "1"), task("3", "1"), task("4", "2")]),
   });
+  const selected = workbenchReducer(accepted, {
+    type: "task.selected",
+    taskId: "3",
+  });
   assert.equal(
-    workbenchReducer(accepted, {
+    workbenchReducer(selected, {
       type: "task.selected",
       taskId: "99",
     }),
-    accepted,
+    selected,
   );
-  const removed = workbenchReducer(accepted, {
+  const removed = workbenchReducer(selected, {
     type: "snapshot.accepted",
     snapshot: snapshot("2", [task("4", "2"), task("3", "1")]),
   });
-  assert.equal(removed.activeTaskId, "4");
+  assert.equal(removed.activeTaskId, "3");
+  const disappeared = workbenchReducer(selected, {
+    type: "snapshot.accepted",
+    snapshot: snapshot("3", [task("4", "2")]),
+  });
+  assert.equal(disappeared.activeTaskId, null);
 });
 
 test("a new Task stays a Renderer draft until first send creates an authoritative Task", () => {

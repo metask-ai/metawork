@@ -491,15 +491,23 @@ pub fn decodeRecovering(
     var dropped_failures: usize = 0;
     var degraded = false;
     var metadata_seen = false;
-    var valid_frame_count: usize = 0;
+    var saw_frame = false;
     var offset: usize = 0;
     while (offset < input.len) {
-        if (input.len - offset < frame_header_bytes or
-            !std.mem.eql(u8, input[offset .. offset + frame_magic.len], frame_magic))
-        {
+        const has_magic = input.len - offset >= frame_magic.len and
+            std.mem.eql(u8, input[offset .. offset + frame_magic.len], frame_magic);
+        if (!has_magic) {
             degraded = true;
             offset = findNextFrame(input, offset + 1) orelse break;
             continue;
+        }
+        // A recognizable current-format frame is enough to establish that
+        // this is a salvageable store, even when its header or payload is
+        // damaged. Unknown/retired formats still fail closed below.
+        saw_frame = true;
+        if (input.len - offset < frame_header_bytes) {
+            degraded = true;
+            break;
         }
         const header = input[offset .. offset + frame_header_bytes];
         const kind = header[5];
@@ -542,21 +550,20 @@ pub fn decodeRecovering(
                 record_workspace => dropped_workspaces += 1,
                 record_task => {
                     dropped_tasks += 1;
-                    if (failure_values.items.len < max_failure_records)
-                        try failure_values.append(arena_allocator, .{
-                            .task_id = id,
-                            .recent_order = order,
-                            .reason = "payload_checksum",
-                        })
-                    else
-                        dropped_failures += 1;
+                    try appendTaskFailure(
+                        arena_allocator,
+                        &failure_values,
+                        &dropped_failures,
+                        id,
+                        order,
+                        "payload_checksum",
+                    );
                 },
                 else => {},
             }
             offset = payload_end;
             continue;
         }
-        valid_frame_count += 1;
         switch (kind) {
             record_meta => {
                 const meta = std.json.parseFromSliceLeaky(
@@ -606,28 +613,28 @@ pub fn decodeRecovering(
                 ) catch {
                     dropped_tasks += 1;
                     degraded = true;
-                    if (failure_values.items.len < max_failure_records)
-                        try failure_values.append(arena_allocator, .{
-                            .task_id = id,
-                            .recent_order = order,
-                            .reason = "task_payload_decode",
-                        })
-                    else
-                        dropped_failures += 1;
+                    try appendTaskFailure(
+                        arena_allocator,
+                        &failure_values,
+                        &dropped_failures,
+                        id,
+                        order,
+                        "task_payload_decode",
+                    );
                     offset = payload_end;
                     continue;
                 };
                 if (task.id != id or task.recent_order != order) {
                     dropped_tasks += 1;
                     degraded = true;
-                    if (failure_values.items.len < max_failure_records)
-                        try failure_values.append(arena_allocator, .{
-                            .task_id = id,
-                            .recent_order = order,
-                            .reason = "task_identity_mismatch",
-                        })
-                    else
-                        dropped_failures += 1;
+                    try appendTaskFailure(
+                        arena_allocator,
+                        &failure_values,
+                        &dropped_failures,
+                        id,
+                        order,
+                        "task_identity_mismatch",
+                    );
                     offset = payload_end;
                     continue;
                 }
@@ -667,8 +674,12 @@ pub fn decodeRecovering(
         offset = payload_end;
     }
 
-    if (valid_frame_count == 0) return error.TaskStoreCorrupt;
-    if (!metadata_seen) return error.TaskStoreCorrupt;
+    // Metadata is an optimization for the next-id counters, not the
+    // authority for the recovered projection. Derive counters from valid
+    // record high-water marks when metadata is missing or damaged. A store
+    // with no recognizable current-format frame remains an unknown/retired
+    // format and is rejected rather than silently treated as empty.
+    if (!saw_frame) return error.TaskStoreCorrupt;
     const workspace_storage = workspace_values.items;
     const task_storage = task_values.items;
     var workspace_len: usize = 0;
@@ -766,6 +777,29 @@ pub fn decodeRecovering(
         .dropped_tasks = dropped_tasks,
         .degraded = degraded or dropped_failures != 0 or failure_values.items.len != 0,
     };
+}
+
+fn appendTaskFailure(
+    allocator: std.mem.Allocator,
+    failures: *std.ArrayList(TaskFailureWire),
+    dropped_failures: *usize,
+    task_id: u64,
+    recent_order: u64,
+    reason: []const u8,
+) !void {
+    // A failure record is itself a Task-scoped fact. If the damaged frame no
+    // longer carries a trustworthy identity, retain only degraded health and
+    // never manufacture an invalid record that could poison restore.
+    if (task_id == 0 or recent_order == 0) return;
+    if (failures.items.len < max_failure_records) {
+        try failures.append(allocator, .{
+            .task_id = task_id,
+            .recent_order = recent_order,
+            .reason = reason,
+        });
+    } else {
+        dropped_failures.* += 1;
+    }
 }
 
 fn appendRecord(
@@ -1184,6 +1218,111 @@ test "task store preserves history bound to an older Workspace epoch" {
     try std.testing.expectEqual(@as(u64, 1), parsed.value.tasks[0].workspace_epoch);
 }
 
+test "damaged metadata does not block valid Task recovery" {
+    var workspaces = [_]WorkspaceWire{.{
+        .id = 1,
+        .epoch = 1,
+        .kind = "manual",
+        .canonical_root = "/tmp/repo",
+        .display_name = "repo",
+        .visible = true,
+        .recent_order = 1,
+    }};
+    var tasks = [_]TaskWire{.{
+        .id = 1,
+        .recent_order = 1,
+        .workspace_id = 1,
+        .workspace_epoch = 1,
+        .workspace_root = "/tmp/repo",
+        .title = "task",
+        .title_redacted = false,
+        .archived = false,
+        .closed = false,
+        .binding = .{ .epoch = 1, .execution_generation = 1, .provider = "openai", .model = "m" },
+        .next_run_generation = 0,
+        .active_operation = null,
+        .runs = &.{},
+        .compacts = &.{},
+        .ui_history = &.{},
+    }};
+    var bytes: [64 * 1024]u8 = undefined;
+    const encoded = try encode(&bytes, .{
+        .next_workspace_id = 2,
+        .next_workspace_recent_order = 2,
+        .next_task_id = 2,
+        .next_task_recent_order = 2,
+        .workspaces = &workspaces,
+        .tasks = &tasks,
+    });
+    const metadata_payload_start = frame_header_bytes;
+    bytes[metadata_payload_start] ^= 0xff;
+
+    var recovered = try decodeRecovering(std.testing.allocator, bytes[0..encoded.len], testLimits());
+    defer recovered.deinit();
+    try std.testing.expectEqual(@as(usize, 1), recovered.value.workspaces.len);
+    try std.testing.expectEqual(@as(usize, 1), recovered.value.tasks.len);
+    try std.testing.expectEqual(@as(u64, 2), recovered.value.next_task_id);
+    try std.testing.expect(recovered.degraded);
+}
+
+test "damaged current-format frames recover an empty projection" {
+    var workspaces = [_]WorkspaceWire{.{
+        .id = 1,
+        .epoch = 1,
+        .kind = "manual",
+        .canonical_root = "/tmp/repo",
+        .display_name = "repo",
+        .visible = true,
+        .recent_order = 1,
+    }};
+    var tasks = [_]TaskWire{.{
+        .id = 1,
+        .recent_order = 1,
+        .workspace_id = 1,
+        .workspace_epoch = 1,
+        .workspace_root = "/tmp/repo",
+        .title = "task",
+        .title_redacted = false,
+        .archived = false,
+        .closed = false,
+        .binding = .{ .epoch = 1, .execution_generation = 1, .provider = "openai", .model = "m" },
+        .next_run_generation = 0,
+        .active_operation = null,
+        .runs = &.{},
+        .compacts = &.{},
+        .ui_history = &.{},
+    }};
+    var bytes: [64 * 1024]u8 = undefined;
+    const encoded = try encode(&bytes, .{
+        .next_workspace_id = 2,
+        .next_workspace_recent_order = 2,
+        .next_task_id = 2,
+        .next_task_recent_order = 2,
+        .workspaces = &workspaces,
+        .tasks = &tasks,
+    });
+    var cursor: usize = 0;
+    while (cursor < encoded.len) {
+        try std.testing.expectEqualStrings(frame_magic, encoded[cursor .. cursor + 4]);
+        const payload_len = std.mem.readInt(
+            u32,
+            @as(*const [4]u8, @ptrCast(encoded[cursor + 24 .. cursor + 28].ptr)),
+            .little,
+        );
+        bytes[cursor + frame_header_bytes] ^= 0xff;
+        cursor += frame_header_bytes + payload_len;
+    }
+
+    var recovered = try decodeRecovering(std.testing.allocator, bytes[0..encoded.len], testLimits());
+    defer recovered.deinit();
+    try std.testing.expectEqual(@as(usize, 0), recovered.value.workspaces.len);
+    try std.testing.expectEqual(@as(usize, 0), recovered.value.tasks.len);
+    try std.testing.expectEqual(@as(u64, 2), recovered.value.next_task_id);
+    try std.testing.expect(recovered.degraded);
+    try std.testing.expectEqual(@as(usize, 1), recovered.dropped_workspaces);
+    try std.testing.expectEqual(@as(usize, 1), recovered.dropped_tasks);
+}
+
 test "one damaged Task frame does not poison surviving history" {
     var workspaces = [_]WorkspaceWire{.{
         .id = 1,
@@ -1272,7 +1411,7 @@ test "one damaged Task frame does not poison surviving history" {
     try std.testing.expectEqualStrings("payload_checksum", recovered.value.failures[0].reason);
 }
 
-test "corrupt Task header cannot poison high water or surviving history" {
+test "corrupt Task identity cannot manufacture a global failure" {
     var workspaces = [_]WorkspaceWire{.{
         .id = 1,
         .epoch = 1,
@@ -1317,7 +1456,18 @@ test "corrupt Task header cannot poison high water or surviving history" {
             .little,
         );
         if (kind == record_task) {
-            bytes[cursor + 8] ^= 0xff;
+            std.mem.writeInt(
+                u64,
+                @as(*[8]u8, @ptrCast(bytes[cursor + 8 .. cursor + 16].ptr)),
+                0,
+                .little,
+            );
+            std.mem.writeInt(
+                u32,
+                @as(*[4]u8, @ptrCast(bytes[cursor + 28 .. cursor + 32].ptr)),
+                std.hash.Crc32.hash(bytes[cursor .. cursor + 28]),
+                .little,
+            );
             break;
         }
         cursor += frame_header_bytes + payload_len;
@@ -1327,7 +1477,8 @@ test "corrupt Task header cannot poison high water or surviving history" {
     try std.testing.expectEqual(@as(usize, 0), recovered.value.tasks.len);
     try std.testing.expectEqual(@as(u64, 2), recovered.value.next_task_id);
     try std.testing.expect(recovered.degraded);
-    try std.testing.expectEqual(@as(usize, 0), recovered.dropped_tasks);
+    try std.testing.expectEqual(@as(usize, 1), recovered.dropped_tasks);
+    try std.testing.expectEqual(@as(usize, 0), recovered.value.failures.len);
 }
 
 test "task store rejects states that would violate the Renderer contract" {
