@@ -406,7 +406,7 @@ export const zhCN: Record<MessageId, string> = {
   "compact.phase.stopping": "正在停止压缩",
   "recovery.status": "正在恢复会话",
   "recovery.title_required": "继续此会话",
-  "recovery.help_required": "发送新消息前，请先恢复已保存的会话。",
+  "recovery.help_required": "历史记录已准备好，发送消息时会先恢复此会话。",
   "recovery.action": "恢复会话",
   "recovery.title_in_progress": "正在恢复会话",
   "recovery.help_in_progress": "正在从最近一次已验证的保存重建 Agent 会话。",
@@ -438,7 +438,7 @@ export const zhCN: Record<MessageId, string> = {
   "run.placeholder_closing": "此任务正在结束",
   "run.placeholder_closed": "此任务已结束",
   "run.placeholder_unavailable": "结束此任务并新建任务后才能继续",
-  "run.placeholder_recovery_required": "恢复此会话后继续",
+  "run.placeholder_recovery_required": "输入消息，发送时会恢复此会话",
   "run.draft_only": "已在本地保存为草稿。当前工作结束后即可发送。",
   "run.started": "工作已开始。",
   "run.start_failed": "未能开始工作，请检查连接后重试。",
@@ -778,6 +778,7 @@ export const zhCN: Record<MessageId, string> = {
     "无法确认最近的更改是否保存。为避免重复运行，自动触发已停止。",
   "scheduled.persistence.ready": "定时任务存储已就绪。",
   "task.persistence.read_failed": "无法读取已保存的任务历史。",
+  "task.persistence.degraded": "部分已保存任务无法恢复，其他任务仍可继续使用。",
   "task.persistence.corrupt":
     "已保存的任务历史无效。MetaWork 已保留原文件并禁用任务更改。",
   "task.persistence.write_failed":

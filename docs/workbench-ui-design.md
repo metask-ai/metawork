@@ -204,7 +204,7 @@ Workspace
 - Composer 的工作目录控件只选择、添加或重新授权 New task 路径；Manual Workspace 的完整列表、移除、移除失败重试和空目录记录管理归正式设置页。两处消费同一 Host projection 与 mutation，不复制 registry 或维护第二套 Renderer 状态；
 - 再次打开历史 Task 只保证可浏览记录；需要访问原目录时重新选择或授权，能否继续执行还必须服从 §6.4 的 Conversation 与 execution binding 规则；
 - MetaWork 重启后，左栏直接使用 Workbench 恢复的 Task 列表和顺序；点击 Task 打开其已保存时间线，不自动创建新 Task、不重放最后一次输入，也不把恢复的 `interrupted` 显示成仍在运行；
-- `taskHistoryPersistenceHealth = read_failed / corrupt / write_failed / outcome_unknown` 时，左栏在 Task 列表前显示一条紧凑、可读的错误提示。历史读取失败或损坏不得伪装成空列表；mutation 保持禁用，`outcome_unknown` 明确要求重启，Renderer 不提供盲目重试同一命令的入口；
+- `taskHistoryPersistenceHealth = degraded` 时，左栏在 Task 列表前显示一条紧凑、可读的部分恢复提示，但新 Task 和其他有效历史仍可用；只有 `read_failed / corrupt / write_failed / outcome_unknown` 这类 canonical store 或提交状态不可相信时才禁用 mutation。历史读取失败或整体损坏不得伪装成空列表，`outcome_unknown` 明确要求重启，Renderer 不提供盲目重试同一命令的入口；
 
 ### 5.2 全局能力入口
 
@@ -479,10 +479,10 @@ Execution binding availability 是下一次 admission 的独立前置事实，�
 
 1. Host 从 bounded Workbench store 恢复 Workspace/Task、消息、Run/tool/UI 决策、compact 历史、无 secret execution binding 与 checkpoint record；不得把当前默认配置静默写入历史 Task；
 2. 没有 live owner 的 non-terminal Run 或 compact 显示为 `Interrupted`，不显示 Running/Stopping，不自动重放输入、工具或 permission；
-3. 点击左栏 Task 始终只是导航。满足资格的 detached open Task 在 Composer 上方显示单一显式主动作 `Restore conversation / 恢复对话`；Renderer 不在选择、reload 或 timeout 后自动触发 restore；
+3. 点击左栏 Task 始终只是导航。满足资格的 detached open Task 在 Composer 上方显示历史已准备提示；用户发送第一条新消息时，Renderer 才提交现有 restore，并等待 Host snapshot 确认 attachment 后继续提交该条 Run；选择、reload 或 timeout 不会自动触发 restore；
 4. restore 期间显示 `Restoring conversation / 正在恢复对话`，禁用发送、compact 和重复 restore。左栏把该 Task 归入正在运行分组，但不能伪造 Agent Run 或 Stop 按钮；
-5. restore 失败时保留可阅读历史与稳定原因；Host 仍发布 `continuationRecoveryAvailable = true` 时显示 `Try again / 重试`。timeout 只触发 canonical snapshot resync，绝不重放 restore command；
-6. 成功后 Host 原子发布 attachment 与 `continuationAvailable = true`，Composer 才重新开放发送。`continuationAvailable`、`continuationUnavailableReason` 和 `continuationRecoveryAvailable` 是同一 continuation 模型；不得建立第二个 `recovery.state` 或由 Renderer 猜测资格；
+5. restore 失败时保留可阅读历史、用户草稿与稳定原因；Host 仍发布 `continuationRecoveryAvailable = true` 时显示 `Try again / 重试`。timeout 只触发 canonical snapshot resync，绝不重放 restore 或 Run；
+6. 成功后 Host 原子发布 attachment 与 `continuationAvailable = true`，Renderer 只在这一状态确认后提交一次 Run。`continuationAvailable`、`continuationUnavailableReason` 和 `continuationRecoveryAvailable` 是同一 continuation 模型；不得建立第二个 `recovery.state` 或由 Renderer 猜测资格；
 7. checkpoint、Workspace、execution、catalog/MCP authority、Runtime 或持久化任一 gate 不满足时只显示对应 unavailable 说明，不显示恢复按钮。Task store read/corrupt/write/outcome-unknown health 由 Host 发布；Renderer 不自行清空、修复、迁移或重试持久数据；
 8. open 的 detached Task 仍可执行真实的 Host-owned 结束动作；成功后 `lifecycle = closed` 必须写入同一 store，删除入口随 canonical snapshot 开放，再次重启不得复活。
 

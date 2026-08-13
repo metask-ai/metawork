@@ -90,7 +90,9 @@ export const initialWorkbenchState: WorkbenchState = {
 export function taskHistoryMutationBlocked(
   health: WorkbenchSnapshot["capabilities"]["taskHistoryPersistenceHealth"],
 ) {
-  return health !== "ready" && health !== "unavailable";
+  return (
+    health !== "ready" && health !== "degraded" && health !== "unavailable"
+  );
 }
 
 export function workbenchReducer(
@@ -138,11 +140,11 @@ export function workbenchReducer(
   const activeTaskStillExists = availableTasks.some(
     (task) => task.id === state.activeTaskId,
   );
-  const activeTaskId = activeTaskStillExists
-    ? state.activeTaskId
-    : (availableTasks.find((task) => !task.archived)?.id ??
-      availableTasks[0]?.id ??
-      null);
+  // Snapshot hydration restores the history list, not the current
+  // conversation route. A Task becomes active only after an explicit user
+  // selection; if that selection disappears, return to New task instead of
+  // silently opening another historical conversation.
+  const activeTaskId = activeTaskStillExists ? state.activeTaskId : null;
   return {
     snapshot: action.snapshot,
     activeTaskId,

@@ -412,6 +412,7 @@ export type WorkbenchSnapshot = {
     taskHistoryPersistenceHealth:
       | "unavailable"
       | "ready"
+      | "degraded"
       | "read_failed"
       | "corrupt"
       | "write_failed"

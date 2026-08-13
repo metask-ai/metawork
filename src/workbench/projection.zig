@@ -986,6 +986,7 @@ pub const TaskPersistence = struct {
 pub const TaskPersistenceHealth = enum {
     unavailable,
     ready,
+    degraded,
     read_failed,
     corrupt,
     write_failed,
@@ -1581,9 +1582,18 @@ const TaskView = struct {
     runtime: RuntimeAttachment,
 };
 
+const TaskFailureRecord = struct {
+    task_id: u64,
+    recent_order: u64,
+    reason: []u8,
+};
+
 const TaskStateWireScratch = struct {
     allocator: std.mem.Allocator,
     state: task_persistence.StateWire,
+    allocated_workspaces: []task_persistence.WorkspaceWire,
+    allocated_tasks: []task_persistence.TaskWire,
+    allocated_failures: []task_persistence.TaskFailureWire,
 
     fn deinit(self: *TaskStateWireScratch) void {
         for (self.state.tasks) |task| {
@@ -1597,8 +1607,9 @@ const TaskStateWireScratch = struct {
             if (task.checkpoint) |checkpoint|
                 self.allocator.free(@constCast(checkpoint.blob.digest));
         }
-        self.allocator.free(self.state.tasks);
-        self.allocator.free(self.state.workspaces);
+        self.allocator.free(self.allocated_tasks);
+        self.allocator.free(self.allocated_workspaces);
+        self.allocator.free(self.allocated_failures);
         self.* = undefined;
     }
 };
@@ -2120,6 +2131,7 @@ pub const Workbench = struct {
     limits: Limits,
     workspaces: []?WorkspaceView,
     tasks: []?TaskView,
+    task_failures: std.ArrayList(TaskFailureRecord),
     task_persistence: TaskPersistence,
     task_persistence_health: TaskPersistenceHealth,
     checkpoint_store: ?*checkpoint_store.FileStore,
@@ -2354,6 +2366,7 @@ pub const Workbench = struct {
             .limits = limits,
             .workspaces = workspaces,
             .tasks = tasks,
+            .task_failures = .empty,
             .task_persistence = configuration.task_persistence,
             .task_persistence_health = task_persistence_health,
             .checkpoint_store = configuration.checkpoint_store.file_store,
@@ -2380,7 +2393,8 @@ pub const Workbench = struct {
         };
         if (workbench.skill_inventory != null) skill_inventory_owned = false;
         skill_transactions = null;
-        if (workbench.task_persistence_health == .ready and
+        if ((workbench.task_persistence_health == .ready or
+            workbench.task_persistence_health == .degraded) and
             configuration.task_persistence.restored_bytes != null)
         {
             workbench.restoreTaskState(
@@ -7209,7 +7223,7 @@ pub const Workbench = struct {
         var writer = std.Io.Writer.fixed(output);
         const schedule_persistence_ready =
             self.schedule_persistence_health == .ready;
-        const task_persistence_ready = self.task_persistence_health == .ready;
+        const task_persistence_ready = taskPersistenceOperational(self.task_persistence_health);
         const background_schedule_wake = self.schedule_background_available;
         const mcp_management = if (self.mcp) |*mcp|
             mcp.committed and mcp.management != null
@@ -7502,6 +7516,8 @@ pub const Workbench = struct {
             entry.* = null;
         }
         self.allocator.free(self.tasks);
+        for (self.task_failures.items) |failure| self.allocator.free(failure.reason);
+        self.task_failures.deinit(self.allocator);
         for (self.workspaces) |*entry| {
             const workspace = &(entry.* orelse continue);
             self.deinitWorkspaceView(workspace);
@@ -8174,7 +8190,7 @@ pub const Workbench = struct {
             .archived = task.durable.archived,
             .attachment = recoveryAttachment(task.runtime.attachment),
             .operation = recoveryOperation(task.runtime.active_operation),
-            .task_persistence_ready = self.task_persistence_health == .ready,
+            .task_persistence_ready = taskPersistenceOperational(self.task_persistence_health),
             .checkpoint_store_ready = self.checkpoint_store != null and
                 self.checkpoint_store_health.load(.acquire) == .ready,
             .checkpoint_available = checkpoint != null and
@@ -8548,24 +8564,83 @@ pub const Workbench = struct {
     fn restoreTaskState(self: *Workbench, bytes: []const u8) Error!void {
         std.debug.assert(countPresent(WorkspaceView, self.workspaces) == 0);
         std.debug.assert(countPresent(TaskView, self.tasks) == 0);
-        var parsed = try task_persistence.decode(
+        var recovered = try task_persistence.decodeRecovering(
             self.allocator,
             bytes,
             self.taskPersistenceLimits(),
         );
-        defer parsed.deinit();
-        for (parsed.value.workspaces, 0..) |workspace, index|
-            self.workspaces[index] = try self.restoreWorkspace(workspace);
-        for (parsed.value.tasks, 0..) |task, index| {
-            self.tasks[index] = try self.restoreTask(task);
+        defer recovered.deinit();
+        for (recovered.value.failures) |failure|
+            try self.recordTaskFailure(failure.task_id, failure.recent_order, failure.reason);
+        var restored_workspace_count: usize = 0;
+        for (recovered.value.workspaces) |workspace| {
+            const restored = self.restoreWorkspace(workspace) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => {
+                    recovered.dropped_workspaces += 1;
+                    continue;
+                },
+            };
+            self.workspaces[restored_workspace_count] = restored;
+            restored_workspace_count += 1;
+        }
+        var restored_task_count: usize = 0;
+        for (recovered.value.tasks) |task| {
+            const restored = self.restoreTask(task) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => {
+                    recovered.dropped_tasks += 1;
+                    try self.recordTaskFailure(task.id, task.recent_order, "task_restore");
+                    continue;
+                },
+            };
+            self.tasks[restored_task_count] = restored;
             if (self.findWorkspace(task.workspace_id)) |workspace| {
                 if (workspace.kind == .automatic) workspace.automatic_task_id = task.id;
             }
+            restored_task_count += 1;
         }
-        self.next_workspace_id = parsed.value.next_workspace_id;
-        self.next_workspace_recent_order = parsed.value.next_workspace_recent_order;
-        self.next_task_id = parsed.value.next_task_id;
-        self.next_task_recent_order = parsed.value.next_task_recent_order;
+        for (self.workspaces) |*entry| {
+            const workspace = &(entry.* orelse continue);
+            if (workspace.kind != .automatic) continue;
+            var owned_task_count: usize = 0;
+            for (self.tasks) |task_entry| {
+                if (task_entry) |task| {
+                    if (task.durable.workspace_id == workspace.id) {
+                        owned_task_count += 1;
+                    }
+                }
+            }
+            if (owned_task_count == 1) continue;
+            self.deinitWorkspaceView(workspace);
+            entry.* = null;
+            recovered.dropped_workspaces += 1;
+        }
+        self.next_workspace_id = recovered.value.next_workspace_id;
+        self.next_workspace_recent_order = recovered.value.next_workspace_recent_order;
+        self.next_task_id = recovered.value.next_task_id;
+        self.next_task_recent_order = recovered.value.next_task_recent_order;
+        if (recovered.degraded or recovered.dropped_workspaces != 0 or recovered.dropped_tasks != 0)
+            self.task_persistence_health = .degraded;
+    }
+
+    fn recordTaskFailure(
+        self: *Workbench,
+        task_id: u64,
+        recent_order: u64,
+        reason: []const u8,
+    ) Error!void {
+        if (task_id == 0 or reason.len == 0 or reason.len > task_persistence.max_failure_reason_bytes)
+            return error.TaskStoreCorrupt;
+        for (self.task_failures.items) |failure|
+            if (failure.task_id == task_id and std.mem.eql(u8, failure.reason, reason)) return;
+        const owned_reason = try self.allocator.dupe(u8, reason);
+        errdefer self.allocator.free(owned_reason);
+        try self.task_failures.append(self.allocator, .{
+            .task_id = task_id,
+            .recent_order = recent_order,
+            .reason = owned_reason,
+        });
     }
 
     fn restoreWorkspace(
@@ -9118,16 +9193,29 @@ pub const Workbench = struct {
             tasks[task_index] = try self.taskWireWithCheckpoint(task, checkpoint_override);
             task_index += 1;
         }
+        const failures = try self.allocator.alloc(
+            task_persistence.TaskFailureWire,
+            self.task_failures.items.len,
+        );
+        errdefer self.allocator.free(failures);
+        for (self.task_failures.items, failures) |failure, *target| target.* = .{
+            .task_id = failure.task_id,
+            .recent_order = failure.recent_order,
+            .reason = failure.reason,
+        };
         return .{
             .allocator = self.allocator,
+            .allocated_workspaces = workspaces,
+            .allocated_tasks = tasks,
+            .allocated_failures = failures,
             .state = .{
-                .schema_version = task_persistence.schema_version,
                 .next_workspace_id = self.next_workspace_id,
                 .next_workspace_recent_order = self.next_workspace_recent_order,
                 .next_task_id = self.next_task_id,
                 .next_task_recent_order = self.next_task_recent_order,
-                .workspaces = workspaces,
-                .tasks = tasks,
+                .workspaces = workspaces[0..workspace_index],
+                .tasks = tasks[0..task_index],
+                .failures = failures,
             },
         };
     }
@@ -9366,6 +9454,7 @@ pub const Workbench = struct {
     fn requireTaskPersistenceMutation(self: *const Workbench) Error!void {
         return switch (self.task_persistence_health) {
             .ready => {},
+            .degraded => {},
             // Unit-level Workbench users may deliberately omit persistence.
             // Production startup converts every store initialization/read
             // failure into a typed non-ready health instead.
@@ -9375,6 +9464,10 @@ pub const Workbench = struct {
             .outcome_unknown => error.TaskPersistenceOutcomeUnknown,
             .read_failed, .corrupt, .write_failed => error.TaskPersistenceUnavailable,
         };
+    }
+
+    fn taskPersistenceOperational(health: TaskPersistenceHealth) bool {
+        return health == .ready or health == .degraded;
     }
 
     fn commitTaskStateIfConfigured(self: *Workbench) Error!void {
@@ -9392,7 +9485,7 @@ pub const Workbench = struct {
             error.TaskPersistenceFailed,
             => {},
             else => {
-                if (self.task_persistence_health == .ready) {
+                if (taskPersistenceOperational(self.task_persistence_health)) {
                     self.task_persistence_health = .write_failed;
                     self.bumpRevision();
                 }
@@ -9416,8 +9509,10 @@ pub const Workbench = struct {
     ) Error!void {
         switch (self.task_persistence_health) {
             .ready => {},
+            .degraded => {},
             .outcome_unknown => return error.TaskPersistenceOutcomeUnknown,
-            else => return error.TaskPersistenceUnavailable,
+            .read_failed, .corrupt, .write_failed => return error.TaskPersistenceUnavailable,
+            .unavailable => return error.TaskPersistenceUnavailable,
         }
         var scratch = self.buildTaskStateWireWithCheckpoint(checkpoint_override) catch {
             self.markTaskPersistenceWriteFailed();
@@ -14060,6 +14155,50 @@ test "Task state round trip restores product history without fabricating a Sessi
     try std.testing.expect(deleted_restore.findTask(3) == null);
 }
 
+test "one damaged Task record does not poison surviving history" {
+    var source = try testWorkbench();
+    defer source.deinit();
+    var scratch = try source.buildTaskStateWire();
+    defer scratch.deinit();
+    const mixed_tasks = try std.testing.allocator.alloc(
+        task_persistence.TaskWire,
+        scratch.state.tasks.len + 1,
+    );
+    defer std.testing.allocator.free(mixed_tasks);
+    mixed_tasks[0] = scratch.state.tasks[0];
+    mixed_tasks[1] = scratch.state.tasks[0];
+    mixed_tasks[1].id = 0;
+    var mixed_state = scratch.state;
+    mixed_state.tasks = mixed_tasks;
+    var bytes_storage: [64 * 1024]u8 = undefined;
+    const bytes = try task_persistence.encode(&bytes_storage, mixed_state);
+
+    var persistence = TestTaskPersistence{
+        .storage = try std.testing.allocator.alloc(u8, task_persistence.max_store_bytes),
+    };
+    defer std.testing.allocator.free(persistence.storage);
+    var restored = try Workbench.init(
+        std.testing.allocator,
+        std.testing.io,
+        &test_agent_runtime,
+        testLimits(),
+        .{ .task_persistence = persistence.capability(bytes) },
+    );
+    defer restored.deinit();
+    try std.testing.expect(restored.findTask(3) != null);
+    try std.testing.expectEqual(TaskPersistenceHealth.degraded, restored.task_persistence_health);
+    var snapshot_storage: [96 * 1024]u8 = undefined;
+    const snapshot = try restored.writeSnapshot(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"taskHistoryPersistence\":true,\"taskHistoryPersistenceHealth\":\"degraded\"",
+    ) != null);
+
+    try installTestExecution(&restored);
+    try restored.requireTaskPersistenceMutation();
+}
+
 test "Automatic Workspace history survives an unavailable allocator" {
     const persistence_storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
     defer std.testing.allocator.free(persistence_storage);
@@ -15890,11 +16029,10 @@ test "default snapshot budget contains the maximum structural projection" {
         task_state.state,
     );
     try std.testing.expect(persisted.len <= task_persistence.max_store_bytes);
-    var raw = try std.json.parseFromSlice(
-        task_persistence.StateWire,
+    var raw = try task_persistence.decode(
         std.testing.allocator,
         persisted,
-        .{ .ignore_unknown_fields = false },
+        workbench.taskPersistenceLimits(),
     );
     defer raw.deinit();
     for (raw.value.tasks) |task| {
