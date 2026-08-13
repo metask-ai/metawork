@@ -28,6 +28,22 @@ const targetPolicies = [
     capabilities: 0xfffff,
     lock: path.join("build_support", "agentcore-bundle.windows.lock.json"),
   },
+  {
+    hostPlatform: "darwin",
+    hostArchitecture: "arm64",
+    id: "aarch64-macos",
+    architecture: "aarch64",
+    os: "macos",
+    abi: "none",
+    rustTarget: "aarch64-apple-darwin",
+    zigTarget: /^aarch64-macos\.([0-9]+\.[0-9]+)\.\.\.[0-9]+\.[0-9]+-none$/,
+    library: "lib/libmetask_agentcore.a",
+    optimize: "ReleaseSafe",
+    systemLibraries: [],
+    abiRevision: 8,
+    capabilities: 0xfffff,
+    lock: path.join("build_support", "agentcore-bundle.macos.lock.json"),
+  },
 ];
 
 function requireValue(condition, message) {

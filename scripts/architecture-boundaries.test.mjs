@@ -465,7 +465,10 @@ test("only Agent implementation imports the AgentCore SDK", () => {
 });
 
 test("candidate validation keeps only repository locks and the official SDK consumer", () => {
-  for (const lock of ["build_support/agentcore-bundle.windows.lock.json"]) {
+  for (const lock of [
+    "build_support/agentcore-bundle.windows.lock.json",
+    "build_support/agentcore-bundle.macos.lock.json",
+  ]) {
     assert.equal(existsSync(new URL(lock, root)), true);
   }
   const probeRunner = read("scripts/run-agentcore-probe.mjs");

@@ -566,7 +566,7 @@ test "malformed compact result poisons Session and queued compact can be cancell
     try closeSession(session, .session_close);
 }
 
-test "Runtime rejects tables missing required revision 7 capabilities" {
+test "Runtime rejects tables missing required revision 8 capabilities" {
     var api = fake_api;
     api.capabilities &= ~wire.CAP_SKILL_CATALOG;
     try std.testing.expectError(
@@ -581,6 +581,18 @@ test "Runtime rejects tables missing required revision 7 capabilities" {
 
     api = fake_api;
     api.capabilities &= ~wire.CAP_TYPED_RUN_INPUT;
+    try std.testing.expectError(
+        error.UnsupportedAbi,
+        lifecycle.Runtime.initWithApi(
+            std.testing.io,
+            std.testing.allocator,
+            &api,
+            .{ .max_sessions = 1 },
+        ),
+    );
+
+    api = fake_api;
+    api.capabilities &= ~wire.CAP_RUN_STATE_OBSERVATION;
     try std.testing.expectError(
         error.UnsupportedAbi,
         lifecycle.Runtime.initWithApi(
@@ -1888,7 +1900,7 @@ test "status is validated before RunResult and invalid results poison the Sessio
     }
 }
 
-test "revision 7 checkpoint outcomes are typed and budget admission remains retryable" {
+test "revision 8 checkpoint outcomes are typed and budget admission remains retryable" {
     fake_core.reset();
     const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 3 });
     defer {

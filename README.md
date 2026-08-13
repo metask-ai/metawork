@@ -24,16 +24,16 @@ flowchart LR
         APPLICATION -->|"registered compatibility paths"| NATIVE_COMPAT
     end
 
-    AGENTCORE["Metask AgentCore<br/>ABI v1 revision 8 (Windows x64 GNU)"]
+    AGENTCORE["Metask AgentCore<br/>ABI v1 revision 8 (Windows x64 GNU / macOS arm64)"]
     NATIVE_RUNTIME["Native SDK<br/>Runtime API"]
     AGENT -->|"typed ABI"| AGENTCORE
     APPLICATION -->|"platform capabilities"| NATIVE_RUNTIME
     NATIVE_RUNTIME -->|"hosts System WebView"| RENDERER
 ```
 
-当前应用是一条真实的同进程同步垂直链路，已经覆盖 Account、Task、typed Text/Skill Run、built-in Read/Bash/Edit、question/permission、取消、Renderer reload、bounded event delivery 和生命周期收口。正式 build 只消费 staged `.agentcore/bundle` 中的官方 Zig package。Windows revision 8 在 revision 7 能力之上提供结构化 `run_state` 事件；未完成独立产品验收的能力保持关闭。
+当前应用是一条真实的同进程同步垂直链路，已经覆盖 Account、Task、typed Text/Skill Run、built-in Read/Bash/Edit、question/permission、取消、Renderer reload、bounded event delivery 和生命周期收口。正式 build 只消费 staged `.agentcore/bundle` 中的官方 Zig package。Windows 与 macOS arm64 均锁定 AgentCore ABI v1 revision 8；该 revision 提供结构化 `run_state` 事件，未完成独立产品验收的能力保持关闭。
 
-Windows revision 8 development bundle 已锁定；macOS revision 7 artifact 仍独立锁定，待 macOS native probe/build/vertical 复验。当前仍是同进程 prototype，不具备 AgentCore 进程隔离、crash recovery、跨进程 Conversation 恢复、strict Workspace security 或正式安装/更新能力。精确证据与尚未验证的能力见 [验证规范](docs/validation.md)。
+Windows x86_64 GNU 与 macOS arm64 revision 8 development bundle 已分别独立锁定，并通过 staged verifier、source-free SDK probe 与 macOS run-state probe。当前仍是同进程 prototype，不具备 AgentCore 进程隔离、crash recovery、跨进程 Conversation 恢复、strict Workspace security 或正式安装/更新能力。精确证据与尚未验证的能力见 [验证规范](docs/validation.md)。
 
 ## 快速开始
 
