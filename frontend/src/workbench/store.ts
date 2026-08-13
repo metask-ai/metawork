@@ -90,7 +90,7 @@ export const initialWorkbenchState: WorkbenchState = {
 export function taskHistoryMutationBlocked(
   health: WorkbenchSnapshot["capabilities"]["taskHistoryPersistenceHealth"],
 ) {
-  return health !== "ready" && health !== "unavailable";
+  return health !== "ready" && health !== "degraded" && health !== "unavailable";
 }
 
 export function workbenchReducer(

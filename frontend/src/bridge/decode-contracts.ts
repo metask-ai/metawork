@@ -2122,6 +2122,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
       [
         "unavailable",
         "ready",
+        "degraded",
         "read_failed",
         "corrupt",
         "write_failed",
@@ -2212,7 +2213,8 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
   };
   if (
     capabilities.taskHistoryPersistence !==
-    (capabilities.taskHistoryPersistenceHealth === "ready")
+    (capabilities.taskHistoryPersistenceHealth === "ready" ||
+      capabilities.taskHistoryPersistenceHealth === "degraded")
   )
     fail(
       "$.capabilities.taskHistoryPersistence",

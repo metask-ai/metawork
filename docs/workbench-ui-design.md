@@ -204,7 +204,7 @@ Workspace
 - Composer 的工作目录控件只选择、添加或重新授权 New task 路径；Manual Workspace 的完整列表、移除、移除失败重试和空目录记录管理归正式设置页。两处消费同一 Host projection 与 mutation，不复制 registry 或维护第二套 Renderer 状态；
 - 再次打开历史 Task 只保证可浏览记录；需要访问原目录时重新选择或授权，能否继续执行还必须服从 §6.4 的 Conversation 与 execution binding 规则；
 - MetaWork 重启后，左栏直接使用 Workbench 恢复的 Task 列表和顺序；点击 Task 打开其已保存时间线，不自动创建新 Task、不重放最后一次输入，也不把恢复的 `interrupted` 显示成仍在运行；
-- `taskHistoryPersistenceHealth = read_failed / corrupt / write_failed / outcome_unknown` 时，左栏在 Task 列表前显示一条紧凑、可读的错误提示。历史读取失败或损坏不得伪装成空列表；mutation 保持禁用，`outcome_unknown` 明确要求重启，Renderer 不提供盲目重试同一命令的入口；
+- `taskHistoryPersistenceHealth = degraded` 时，左栏在 Task 列表前显示一条紧凑、可读的部分恢复提示，但新 Task 和其他有效历史仍可用；只有 `read_failed / corrupt / write_failed / outcome_unknown` 这类 canonical store 或提交状态不可相信时才禁用 mutation。历史读取失败或整体损坏不得伪装成空列表，`outcome_unknown` 明确要求重启，Renderer 不提供盲目重试同一命令的入口；
 
 ### 5.2 全局能力入口
 

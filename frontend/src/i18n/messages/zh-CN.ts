@@ -776,6 +776,8 @@ export const zhCN: Record<MessageId, string> = {
     "无法确认最近的更改是否保存。为避免重复运行，自动触发已停止。",
   "scheduled.persistence.ready": "定时任务存储已就绪。",
   "task.persistence.read_failed": "无法读取已保存的任务历史。",
+  "task.persistence.degraded":
+    "部分已保存任务无法恢复，其他任务仍可继续使用。",
   "task.persistence.corrupt":
     "已保存的任务历史无效。MetaWork 已保留原文件并禁用任务更改。",
   "task.persistence.write_failed":

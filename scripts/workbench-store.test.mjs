@@ -62,6 +62,7 @@ test("task history persistence health blocks only unsafe mutations", () => {
   assert.equal(taskHistoryMutationBlocked("read_failed"), true);
   assert.equal(taskHistoryMutationBlocked("corrupt"), true);
   assert.equal(taskHistoryMutationBlocked("write_failed"), true);
+  assert.equal(taskHistoryMutationBlocked("degraded"), false);
   assert.equal(taskHistoryMutationBlocked("outcome_unknown"), true);
 });
 
