@@ -1,14 +1,22 @@
-type ClassName = string | false | null | undefined | ((state: any) => string | undefined);
+import { clsx, type ClassValue } from "clsx";
+import { twMerge } from "tailwind-merge";
 
-export function cn(...inputs: ClassName[]): any {
+type ClassName = ClassValue | ((state: any) => ClassValue);
+
+export function cn(...inputs: ClassValue[]): string;
+export function cn(...inputs: ClassName[]): string | ((state: any) => string);
+export function cn(...inputs: ClassName[]): string | ((state: any) => string) {
   if (inputs.some((input) => typeof input === "function")) {
     return (state: any) =>
-      inputs
-        .map((input) => (typeof input === "function" ? input(state) : input))
-        .filter(Boolean)
-        .join(" ");
+      twMerge(
+        clsx(
+          inputs.map((input) =>
+            typeof input === "function" ? input(state) : input,
+          ),
+        ),
+      );
   }
-  return inputs.filter(Boolean).join(" ");
+  return twMerge(clsx(inputs));
 }
 
 export const focusRing =
