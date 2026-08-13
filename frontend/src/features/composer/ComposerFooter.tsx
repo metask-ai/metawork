@@ -11,6 +11,8 @@ import {
 import type { SkillCatalogView, TaskView } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { Button } from "../../components/ui/button.tsx";
+import { Input } from "../../components/ui/input.tsx";
+import { Textarea } from "../../components/ui/textarea.tsx";
 import { useI18n } from "../../i18n/context.ts";
 import { maxComposerCharacters } from "./drafts.ts";
 import { ModelSelector } from "./ModelSelector.tsx";
@@ -352,7 +354,7 @@ export function ComposerFooter({
         )}
         <div className="composer">
           {draft.kind === "text" ? (
-            <textarea
+            <Textarea
               ref={textareaRef}
               value={draft.text}
               maxLength={maxComposerCharacters}
@@ -436,7 +438,7 @@ export function ComposerFooter({
                         {draft.argumentNames[index] ||
                           t("slash.argument", { index: String(index + 1) })}
                       </span>
-                      <input
+                      <Input
                         ref={index === 0 ? firstSkillArgumentRef : undefined}
                         value={draft.argumentValues[index] ?? ""}
                         maxLength={maxComposerCharacters}

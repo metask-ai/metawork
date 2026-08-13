@@ -24,7 +24,10 @@ import {
   connectionStatus,
 } from "./connection-status.ts";
 import { Icon } from "../components/ui/Icon.tsx";
+import { AlertDialog } from "../components/ui/alert-dialog.tsx";
+import { Button } from "../components/ui/button.tsx";
 import { Menu } from "../components/ui/menu.tsx";
+import { Input } from "../components/ui/input.tsx";
 import { AccountIdentity } from "../features/account/AccountIdentity.tsx";
 import { AccountGate } from "../features/account/AccountGate.tsx";
 import { requiresAccountGate } from "../features/account/gating.ts";
@@ -2339,7 +2342,7 @@ export default function App() {
                       void renameTask();
                     }}
                   >
-                    <input
+                    <Input
                       autoFocus
                       maxLength={120}
                       value={titleDraft}
@@ -2519,42 +2522,43 @@ export default function App() {
             </header>
           )}
 
-          {activeTask && confirmDelete && (
-            <section
-              className="delete-confirmation"
-              role="alertdialog"
-              aria-labelledby="task-delete-title"
-              aria-describedby="task-delete-description"
-              onKeyDown={(event) => {
-                if (event.key !== "Escape") return;
-                event.preventDefault();
-                event.stopPropagation();
-                closeDeleteConfirmation();
-              }}
+          {activeTask && (
+            <AlertDialog.Root
+              open={confirmDelete}
+              onOpenChange={(open) => !open && closeDeleteConfirmation()}
             >
-              <div>
-                <strong id="task-delete-title">
-                  {t("task.delete_confirm_title")}
-                </strong>
-                <span id="task-delete-description">
-                  {t("task.delete_confirm_body")}
-                </span>
-              </div>
-              <button
-                autoFocus
-                className="secondary-button focus-ring"
-                onClick={closeDeleteConfirmation}
-              >
-                {t("common.cancel")}
-              </button>
-              <button
-                className="danger-button focus-ring"
-                disabled={taskMutationDisabled}
-                onClick={() => void deleteTask()}
-              >
-                {t("task.delete")}
-              </button>
-            </section>
+              <AlertDialog.Portal>
+                <AlertDialog.Backdrop />
+                <AlertDialog.Popup>
+                  <AlertDialog.Title id="task-delete-title">
+                    {t("task.delete_confirm_title")}
+                  </AlertDialog.Title>
+                  <AlertDialog.Description id="task-delete-description">
+                    {t("task.delete_confirm_body")}
+                  </AlertDialog.Description>
+                  <div className="delete-confirmation-actions">
+                    <Button
+                      autoFocus
+                      type="button"
+                      variant="secondary"
+                      size="md"
+                      onClick={closeDeleteConfirmation}
+                    >
+                      {t("common.cancel")}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="danger"
+                      size="md"
+                      disabled={taskMutationDisabled}
+                      onClick={() => void deleteTask()}
+                    >
+                      {t("task.delete")}
+                    </Button>
+                  </div>
+                </AlertDialog.Popup>
+              </AlertDialog.Portal>
+            </AlertDialog.Root>
           )}
 
           {viewSyncFailed && (
