@@ -1,6 +1,7 @@
 import type {
   TaskCreateReason,
   TaskCreateResult,
+  TaskRestoreReason,
   TaskRunInput,
   TaskRunReason,
   TaskRunResult,
@@ -20,6 +21,11 @@ export type TaskSubmissionClient = {
   ) => Promise<TaskRunResult>;
 };
 
+export type EnsureTaskContinuationResult =
+  | { kind: "ready" }
+  | { kind: "rejected"; reason: TaskRestoreReason }
+  | { kind: "failed"; error: unknown };
+
 export type TaskSubmissionResult =
   | { kind: "started"; taskId: string; created: boolean }
   | { kind: "create_rejected"; reason: TaskCreateReason }
@@ -30,6 +36,18 @@ export type TaskSubmissionResult =
       created: boolean;
       reason: TaskRunReason;
     }
+  | {
+      kind: "continuation_rejected";
+      taskId: string;
+      created: boolean;
+      reason: TaskRestoreReason;
+    }
+  | {
+      kind: "continuation_failed";
+      taskId: string;
+      created: boolean;
+      error: unknown;
+    }
   | { kind: "run_failed"; taskId: string; created: boolean; error: unknown };
 
 export async function submitTaskInstruction({
@@ -39,6 +57,8 @@ export async function submitTaskInstruction({
   expectedExecutionGeneration,
   expectedBindingEpoch,
   input,
+  continuationRecoveryAvailable = false,
+  ensureContinuation,
   onTaskCreated,
 }: {
   client: TaskSubmissionClient;
@@ -47,6 +67,11 @@ export async function submitTaskInstruction({
   expectedExecutionGeneration: string;
   expectedBindingEpoch: string | null;
   input: TaskRunInput;
+  continuationRecoveryAvailable?: boolean;
+  ensureContinuation?: (
+    taskId: string,
+    expectedBindingEpoch: string,
+  ) => Promise<EnsureTaskContinuationResult>;
   onTaskCreated: (taskId: string) => void;
 }): Promise<TaskSubmissionResult> {
   let targetTaskId = taskId;
@@ -77,6 +102,40 @@ export async function submitTaskInstruction({
       created,
       error: new Error("Task execution binding is unavailable"),
     };
+  if (continuationRecoveryAvailable) {
+    if (!ensureContinuation)
+      return {
+        kind: "continuation_failed",
+        taskId: targetTaskId,
+        created,
+        error: new Error("Task continuation recovery is unavailable"),
+      };
+    let continuation: EnsureTaskContinuationResult;
+    try {
+      continuation = await ensureContinuation(targetTaskId, targetBindingEpoch);
+    } catch (error) {
+      return {
+        kind: "continuation_failed",
+        taskId: targetTaskId,
+        created,
+        error,
+      };
+    }
+    if (continuation.kind === "rejected")
+      return {
+        kind: "continuation_rejected",
+        taskId: targetTaskId,
+        created,
+        reason: continuation.reason,
+      };
+    if (continuation.kind === "failed")
+      return {
+        kind: "continuation_failed",
+        taskId: targetTaskId,
+        created,
+        error: continuation.error,
+      };
+  }
   try {
     const run = await client.run(targetTaskId, targetBindingEpoch, input);
     if (!run.accepted)

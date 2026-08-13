@@ -674,15 +674,18 @@ test("a poisoned Task explains why continuation is unavailable", () => {
   assert.match(markup, /End this task and start a new one to continue/);
 });
 
-test("a restart-detached Task offers explicit conversation recovery", () => {
+test("a restart-detached Task keeps the Composer ready for send-time recovery", () => {
   const markup = render({
     unavailable: true,
     unavailableReason: "session_recovery_required",
     recoveryAvailable: true,
-    composeDisabled: true,
+    composeDisabled: false,
   });
-  assert.match(markup.match(/<textarea[^>]*>/)?.[0] ?? "", /disabled/);
-  assert.match(markup, /Restore this conversation to continue/);
+  assert.doesNotMatch(markup.match(/<textarea[^>]*>/)?.[0] ?? "", /disabled/);
+  assert.match(
+    markup,
+    /Type a message; the conversation will restore when you send/,
+  );
   assert.match(markup, />Restore conversation</);
   assert.doesNotMatch(markup, /start a new one to continue/);
 });

@@ -66,7 +66,10 @@ import {
   prepareRetryDraft,
   unscopedNewTaskDraftId,
 } from "../features/composer/drafts.ts";
-import { submitTaskInstruction } from "../features/composer/submitTaskInstruction.ts";
+import {
+  submitTaskInstruction,
+  type EnsureTaskContinuationResult,
+} from "../features/composer/submitTaskInstruction.ts";
 import {
   composerDraftHasContent,
   composerDraftToRunInput,
@@ -96,6 +99,7 @@ import type {
   McpConnectionTestResult,
   SkillMutationResult,
   TaskRunReason,
+  WorkbenchSnapshot,
   UiResponsePayload,
   WorkspaceMutationReason,
 } from "../bridge/contracts.ts";
@@ -135,6 +139,21 @@ function mutationReasonMessageId(reason: MutationReason): MessageId {
 }
 
 const automaticWorkspaceOptionId = "automatic";
+const continuationWaitTimeoutMs = 10_000;
+
+type ContinuationWaitResult =
+  | { kind: "ready" }
+  | { kind: "cancelled"; error: Error }
+  | { kind: "failed"; error: Error }
+  | { kind: "timeout"; error: Error };
+
+type ContinuationWaiter = {
+  taskId: string;
+  bindingEpoch: string;
+  attemptId: string;
+  resolve: (result: ContinuationWaitResult) => void;
+  timeout: ReturnType<typeof setTimeout>;
+};
 
 export default function App() {
   const { t } = useI18n();
@@ -194,6 +213,7 @@ export default function App() {
   const inspectorOpener = useRef<HTMLButtonElement | null>(null);
   const inspectorFocusSequence = useRef(0);
   const composer = useRef<HTMLTextAreaElement>(null);
+  const continuationWaiters = useRef(new Map<string, ContinuationWaiter>());
 
   function setStatus(status: ShellStatus) {
     setStatuses((current) => publishStatus(current, status));
@@ -201,6 +221,8 @@ export default function App() {
 
   const snapshot = workbench.snapshot;
   const activeTask = useMemo(() => selectActiveTask(workbench), [workbench]);
+  const activeTaskIdRef = useRef<string | null>(null);
+  activeTaskIdRef.current = activeTask?.id ?? null;
   const inspector = useInspectorSession(activeTask);
   const manualWorkspaces = useMemo(
     () =>
@@ -241,7 +263,8 @@ export default function App() {
   const taskCanCompose =
     newTaskDraftActive ||
     (activeTask?.lifecycle === "open" &&
-      activeTask.continuationAvailable &&
+      (activeTask.continuationAvailable ||
+        activeTask.continuationRecoveryAvailable) &&
       !activeTask.archived);
   const taskOperationInFlight = Boolean(activeTask?.activeOperation);
   const composerWorkspaceId =
@@ -298,6 +321,108 @@ export default function App() {
     return current ? current.refresh() : Promise.resolve();
   }, []);
 
+  function settleContinuationWaiter(
+    key: string,
+    result: ContinuationWaitResult,
+  ) {
+    const waiter = continuationWaiters.current.get(key);
+    if (!waiter) return;
+    continuationWaiters.current.delete(key);
+    clearTimeout(waiter.timeout);
+    waiter.resolve(result);
+  }
+
+  function observeContinuationSnapshot(next: WorkbenchSnapshot) {
+    for (const [key, waiter] of continuationWaiters.current) {
+      const task = next.tasks.find(
+        (candidate) => candidate.id === waiter.taskId,
+      );
+      if (!task) {
+        settleContinuationWaiter(key, {
+          kind: "failed",
+          error: new Error("The Task disappeared during conversation restore"),
+        });
+        continue;
+      }
+      if (task.binding.epoch !== waiter.bindingEpoch) {
+        settleContinuationWaiter(key, {
+          kind: "failed",
+          error: new Error(
+            "The Task binding changed during conversation restore",
+          ),
+        });
+        continue;
+      }
+      if (task.activeOperation?.kind === "restore") {
+        if (task.activeOperation.id !== waiter.attemptId)
+          settleContinuationWaiter(key, {
+            kind: "failed",
+            error: new Error("A different conversation restore is active"),
+          });
+        continue;
+      }
+      if (task.continuationAvailable && !task.continuationRecoveryAvailable) {
+        settleContinuationWaiter(key, { kind: "ready" });
+        continue;
+      }
+      if (
+        task.continuationUnavailableReason !== "session_recovery_required" &&
+        task.continuationUnavailableReason !== "session_recovery_in_progress"
+      ) {
+        settleContinuationWaiter(key, {
+          kind: "failed",
+          error: new Error(
+            task.continuationUnavailableReason ??
+              "Conversation restore did not produce a usable Session",
+          ),
+        });
+      }
+    }
+  }
+
+  function waitForTaskContinuation(
+    taskId: string,
+    bindingEpoch: string,
+    attemptId: string,
+  ): Promise<ContinuationWaitResult> {
+    const key = `${taskId}:${attemptId}`;
+    const existing = continuationWaiters.current.get(key);
+    if (existing)
+      return new Promise((resolve) => {
+        const previousResolve = existing.resolve;
+        existing.resolve = (result) => {
+          previousResolve(result);
+          resolve(result);
+        };
+      });
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        settleContinuationWaiter(key, {
+          kind: "timeout",
+          error: new Error("Timed out waiting for conversation restore"),
+        });
+      }, continuationWaitTimeoutMs);
+      continuationWaiters.current.set(key, {
+        taskId,
+        bindingEpoch,
+        attemptId,
+        resolve,
+        timeout,
+      });
+      observeContinuationSnapshot(workbench.snapshot);
+    });
+  }
+
+  function cancelContinuationWaitersForTask(taskId: string | null) {
+    for (const [key, waiter] of continuationWaiters.current) {
+      if (taskId !== null && waiter.taskId === taskId) continue;
+      settleContinuationWaiter(key, {
+        kind: "cancelled",
+        error: new Error("The active Task changed during conversation restore"),
+      });
+    }
+  }
+
   useEffect(() => {
     const errorCode = snapshot.account.errorCode;
     if (errorCode === "none" || errorCode === "user_cancelled") return;
@@ -317,6 +442,7 @@ export default function App() {
     const current = new WorkbenchConnection(client, {
       onSnapshot: (next) => {
         if (!cancelled) {
+          observeContinuationSnapshot(next);
           observeUiResponseSnapshot(next);
           const projectedTaskIds = next.tasks.map((task) => task.id);
           taskDrafts.pruneDrafts([
@@ -412,7 +538,10 @@ export default function App() {
     setTaskMenuOpen(false);
     setInspectorFocusRequest(null);
     inspectorOpener.current = null;
+    cancelContinuationWaitersForTask(activeTask?.id ?? null);
   }, [activeTask?.id]);
+
+  useEffect(() => () => cancelContinuationWaitersForTask(null), []);
 
   useEffect(() => {
     if (
@@ -857,6 +986,55 @@ export default function App() {
     void runAccountCommand(() => client.refreshAccountCatalog());
   }
 
+  async function ensureTaskContinuation(
+    taskId: string,
+    bindingEpoch: string,
+  ): Promise<EnsureTaskContinuationResult> {
+    if (activeTaskIdRef.current !== taskId)
+      return {
+        kind: "failed",
+        error: new Error("The active Task changed before conversation restore"),
+      };
+    const task = workbench.snapshot.tasks.find(
+      (candidate) => candidate.id === taskId,
+    );
+    if (!task || task.binding.epoch !== bindingEpoch)
+      return {
+        kind: "failed",
+        error: new Error("The Task binding is no longer current"),
+      };
+    if (task.continuationAvailable) return { kind: "ready" };
+    if (task.continuationUnavailableReason !== "session_recovery_required")
+      return {
+        kind: "failed",
+        error: new Error("Conversation restore requires an explicit retry"),
+      };
+    let restored;
+    try {
+      restored = await client.restoreTask(taskId, bindingEpoch);
+    } catch (error) {
+      return { kind: "failed", error };
+    }
+    if (!restored.accepted)
+      return { kind: "rejected", reason: restored.reason };
+    const completion = await waitForTaskContinuation(
+      taskId,
+      bindingEpoch,
+      restored.attemptId,
+    );
+    if (completion.kind === "ready") {
+      if (activeTaskIdRef.current !== taskId)
+        return {
+          kind: "failed",
+          error: new Error(
+            "The active Task changed after conversation restore",
+          ),
+        };
+      return { kind: "ready" };
+    }
+    return { kind: "failed", error: completion.error };
+  }
+
   async function submitRun() {
     if (!canSubmit) return;
     const submitted = composerDraft;
@@ -885,6 +1063,10 @@ export default function App() {
         expectedExecutionGeneration: snapshot.account.executionGeneration,
         expectedBindingEpoch: activeTask?.binding.epoch ?? null,
         input,
+        continuationRecoveryAvailable: Boolean(
+          activeTask?.continuationRecoveryAvailable,
+        ),
+        ensureContinuation: ensureTaskContinuation,
         onTaskCreated: (taskId) => {
           pendingTaskSelection.current = taskId;
           pendingTaskDraftRetention.current.add(taskId);
@@ -927,6 +1109,36 @@ export default function App() {
             workspaceId: composerWorkspaceId,
           }),
         );
+        return;
+      }
+      if (result.kind === "continuation_rejected") {
+        taskDrafts.setDraft(result.taskId, submitted);
+        await refreshSnapshot().catch(() => undefined);
+        setStatus(
+          attentionStatus(mutationReasonMessageId(result.reason), {
+            scope: "task",
+            taskId: result.taskId,
+          }),
+        );
+        return;
+      }
+      if (result.kind === "continuation_failed") {
+        taskDrafts.setDraft(result.taskId, submitted);
+        if (
+          await reconcileCommandTimeout(result.error, "operation.restore", {
+            scope: "task",
+            taskId: result.taskId,
+          })
+        )
+          return;
+        setStatus(
+          attentionStatus(
+            "recovery.start_failed",
+            { scope: "task", taskId: result.taskId },
+            { diagnostic: errorText(result.error) },
+          ),
+        );
+        await refreshSnapshot().catch(() => undefined);
         return;
       }
       if (result.kind === "run_failed") {

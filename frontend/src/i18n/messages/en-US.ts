@@ -436,7 +436,7 @@ export const enUS = {
   "recovery.status": "Restoring conversation",
   "recovery.title_required": "Continue this conversation",
   "recovery.help_required":
-    "Restore the saved conversation before sending another message.",
+    "Your history is ready. Sending a message will restore this conversation first.",
   "recovery.action": "Restore conversation",
   "recovery.title_in_progress": "Restoring conversation",
   "recovery.help_in_progress":
@@ -473,7 +473,8 @@ export const enUS = {
   "run.placeholder_closed": "This task has ended",
   "run.placeholder_unavailable":
     "End this task and start a new one to continue",
-  "run.placeholder_recovery_required": "Restore this conversation to continue",
+  "run.placeholder_recovery_required":
+    "Type a message; the conversation will restore when you send",
   "run.draft_only":
     "Saved locally as a draft. You can send it after the current work finishes.",
   "run.started": "Work started.",

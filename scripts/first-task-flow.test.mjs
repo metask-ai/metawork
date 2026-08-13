@@ -294,6 +294,70 @@ test("sending on an existing Task uses its binding epoch and never creates", asy
   assert.deepEqual(result, { kind: "started", taskId: "9", created: false });
 });
 
+test("a detached Task restores before its first continued Run", async () => {
+  const calls = [];
+  const result = await submitTaskInstruction({
+    client: {
+      async createTask() {
+        assert.fail("existing Task must not create a Task");
+      },
+      async run(taskId, expectedBindingEpoch, input) {
+        calls.push(["run", taskId, expectedBindingEpoch, input]);
+        return { accepted: true, taskId, runId: "11", reason: null };
+      },
+    },
+    taskId: "9",
+    workspace: { kind: "automatic" },
+    expectedExecutionGeneration: "19",
+    expectedBindingEpoch: "12",
+    input: { kind: "text", text: "Continue after restart" },
+    continuationRecoveryAvailable: true,
+    ensureContinuation: async (taskId, bindingEpoch) => {
+      calls.push(["restore", taskId, bindingEpoch]);
+      return { kind: "ready" };
+    },
+    onTaskCreated() {
+      assert.fail("existing Task must not create a Task");
+    },
+  });
+  assert.deepEqual(calls, [
+    ["restore", "9", "12"],
+    ["run", "9", "12", { kind: "text", text: "Continue after restart" }],
+  ]);
+  assert.deepEqual(result, { kind: "started", taskId: "9", created: false });
+});
+
+test("a failed detached restore never sends the pending Run", async () => {
+  let runCalled = false;
+  const failure = new Error("restore failed");
+  const result = await submitTaskInstruction({
+    client: {
+      async createTask() {
+        assert.fail("existing Task must not create a Task");
+      },
+      async run() {
+        runCalled = true;
+        return { accepted: true, taskId: "9", runId: "11", reason: null };
+      },
+    },
+    taskId: "9",
+    workspace: { kind: "automatic" },
+    expectedExecutionGeneration: "19",
+    expectedBindingEpoch: "12",
+    input: { kind: "text", text: "Keep this draft" },
+    continuationRecoveryAvailable: true,
+    ensureContinuation: async () => ({ kind: "failed", error: failure }),
+    onTaskCreated() {},
+  });
+  assert.deepEqual(result, {
+    kind: "continuation_failed",
+    taskId: "9",
+    created: false,
+    error: failure,
+  });
+  assert.equal(runCalled, false);
+});
+
 test("a Host-rejected Run preserves the structured product reason", async () => {
   const result = await submitTaskInstruction({
     client: {
