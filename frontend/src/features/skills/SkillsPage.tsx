@@ -9,6 +9,9 @@ import type {
   WorkspaceView,
 } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
+import { Dialog } from "../../components/ui/dialog.tsx";
+import { Input } from "../../components/ui/input.tsx";
+import { SelectField } from "../../components/ui/select.tsx";
 import { useI18n } from "../../i18n/context.ts";
 
 type Asset = SkillManagementView["assets"][number];
@@ -140,7 +143,7 @@ export function SkillsPage({
   const { t } = useI18n();
   const title = useRef<HTMLHeadingElement>(null);
   const drawerHeading = useRef<HTMLHeadingElement>(null);
-  const drawer = useRef<HTMLElement>(null);
+  const drawer = useRef<HTMLDivElement>(null);
   const drawerTrigger = useRef<HTMLElement | null>(null);
   const [scopeFilter, setScopeFilter] = useState<ScopeFilter>("all");
   const [selected, setSelected] = useState<Asset | null>(null);
@@ -433,7 +436,7 @@ export function SkillsPage({
           <label className="skills-search">
             <Icon name="search" />
             <span className="sr-only">{t("skills.search_label")}</span>
-            <input
+            <Input
               type="search"
               value={query}
               placeholder={t("skills.search_placeholder")}
@@ -497,19 +500,17 @@ export function SkillsPage({
         )}
       </div>
 
-      {drawerOpen && (
-        <div
-          className="skill-drawer-backdrop"
-          role="presentation"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget && !busy) closeDrawer();
-          }}
-        >
-          <aside
+      <Dialog.Root
+        open={drawerOpen}
+        onOpenChange={(open) => {
+          if (!open && !busy) closeDrawer();
+        }}
+      >
+        <Dialog.Portal>
+          <Dialog.Backdrop className="skill-drawer-backdrop" />
+          <Dialog.Popup
             ref={drawer}
             className="skill-drawer"
-            role="dialog"
-            aria-modal="true"
             aria-labelledby="skill-drawer-title"
           >
             <header>
@@ -590,21 +591,21 @@ export function SkillsPage({
                       {!reimportTarget && (
                         <label className="skill-import-scope">
                           <span>{t("skills.install_scope")}</span>
-                          <select
+                          <SelectField
                             value={importScope}
-                            onChange={(event) =>
-                              setImportScope(event.target.value)
-                            }
-                          >
-                            <option value="personal">
-                              {t("skills.scope.personal")}
-                            </option>
-                            {manualWorkspaces.map((workspace) => (
-                              <option key={workspace.id} value={workspace.id}>
-                                {workspace.displayName}
-                              </option>
-                            ))}
-                          </select>
+                            onValueChange={setImportScope}
+                            options={[
+                              {
+                                value: "personal",
+                                label: t("skills.scope.personal"),
+                              },
+                              ...manualWorkspaces.map((workspace) => ({
+                                value: workspace.id,
+                                label: workspace.displayName,
+                              })),
+                            ]}
+                            aria-label={t("skills.install_scope")}
+                          />
                         </label>
                       )}
                       {replaceRequired && (
@@ -808,9 +809,9 @@ export function SkillsPage({
                 </>
               )}
             </footer>
-          </aside>
-        </div>
-      )}
+          </Dialog.Popup>
+        </Dialog.Portal>
+      </Dialog.Root>
     </section>
   );
 }

@@ -1,4 +1,6 @@
 import type { AccountView } from "../../bridge/contracts.ts";
+import { Button } from "../../components/ui/button.tsx";
+import { SelectionMenu } from "../../components/ui/SelectionMenu.tsx";
 import { WindowControls } from "../../components/ui/WindowControls.tsx";
 import { WindowTitlebar } from "../../components/ui/WindowTitlebar.tsx";
 import { useI18n, type Locale, type MessageId } from "../../i18n/context.ts";
@@ -53,18 +55,22 @@ export function AccountGate({
         <div className="account-gate-toolbar-actions">
           <label className="locale-control">
             <span className="sr-only">{t("app.language")}</span>
-            <select
-              className="focus-ring"
-              aria-label={t("app.language")}
+            <SelectionMenu
+              ariaLabel={t("app.language")}
               value={locale}
-              onChange={(event) => setLocale(event.target.value as Locale)}
-            >
-              <option value="en-US">{t("app.language.en-US")}</option>
-              <option value="zh-CN">{t("app.language.zh-CN")}</option>
-              {import.meta.env.DEV && (
-                <option value="pseudo">{t("app.language.pseudo")}</option>
-              )}
-            </select>
+              placeholder={t("app.language")}
+              disabled={false}
+              triggerClassName="account-gate-locale-trigger"
+              contentClassName="account-gate-locale-menu"
+              options={[
+                { value: "en-US", label: t("app.language.en-US") },
+                { value: "zh-CN", label: t("app.language.zh-CN") },
+                ...(import.meta.env.DEV
+                  ? [{ value: "pseudo", label: t("app.language.pseudo") }]
+                  : []),
+              ]}
+              onValueChange={(nextLocale) => setLocale(nextLocale as Locale)}
+            />
           </label>
           <WindowControls
             labels={{
@@ -100,26 +106,32 @@ export function AccountGate({
 
           <div className="account-gate-actions">
             {connectionFailed && connectionRetryable ? (
-              <button
+              <Button
                 autoFocus
-                className="primary-button focus-ring"
+                type="button"
+                variant="primary"
+                size="lg"
+                className="primary-button"
                 disabled={reconnecting}
                 onClick={onReconnect}
               >
                 {reconnecting
                   ? t("connection.retrying")
                   : t("connection.retry")}
-              </button>
+              </Button>
             ) : (
               authorizing &&
               account.canCancel && (
-                <button
-                  className="text-button focus-ring"
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="md"
+                  className="text-button"
                   disabled={cancelDisabled}
                   onClick={onCancel}
                 >
                   {t("account.cancel")}
-                </button>
+                </Button>
               )
             )}
           </div>

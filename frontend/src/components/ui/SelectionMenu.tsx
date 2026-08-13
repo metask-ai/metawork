@@ -1,7 +1,7 @@
-import * as Select from "@radix-ui/react-select";
 import type { ReactNode } from "react";
 
 import { Icon } from "./Icon.tsx";
+import { Select } from "./select.tsx";
 
 export type SelectionMenuOption = {
   value: string;
@@ -51,7 +51,9 @@ export function SelectionMenu({
     <Select.Root
       value={value}
       disabled={disabled}
-      onValueChange={onValueChange}
+      onValueChange={(nextValue) => {
+        if (nextValue !== null) onValueChange(nextValue);
+      }}
     >
       <Select.Trigger
         id={triggerId}
@@ -106,59 +108,55 @@ export function SelectionMenu({
         )}
       </Select.Trigger>
       <Select.Portal>
-        <Select.Content
-          className={`selection-menu-content ${contentClassName}`.trim()}
-          position="popper"
+        <Select.Positioner
           side="bottom"
           align="start"
           sideOffset={6}
           collisionPadding={12}
         >
-          <Select.ScrollUpButton className="selection-menu-scroll">
-            <Icon name="chevron" />
-          </Select.ScrollUpButton>
-          <Select.Viewport className="selection-menu-viewport">
-            <Select.Group>
-              {helper && (
-                <Select.Label className="selection-menu-label">
-                  {helper}
-                </Select.Label>
-              )}
-              {options.map((option) => (
-                <Select.Item
-                  key={option.value}
-                  className="selection-menu-item focus-ring"
-                  value={option.value}
-                  disabled={option.disabled}
-                  textValue={option.label}
-                >
-                  <Select.ItemIndicator className="selection-menu-indicator">
-                    <Icon name="check" />
-                  </Select.ItemIndicator>
-                  <span className="selection-menu-item-copy">
-                    <Select.ItemText>{option.label}</Select.ItemText>
-                    {option.description && (
-                      <small
-                        data-kind={option.descriptionKind ?? "code"}
-                        title={option.description}
-                      >
-                        {option.description}
-                      </small>
-                    )}
-                  </span>
-                  {option.trailing && (
-                    <span className="selection-menu-item-trailing">
-                      {option.trailing}
+          <Select.Popup
+            className={`selection-menu-content ${contentClassName}`.trim()}
+          >
+            <Select.List className="selection-menu-viewport">
+              <Select.Group>
+                {helper && (
+                  <Select.GroupLabel className="selection-menu-label">
+                    {helper}
+                  </Select.GroupLabel>
+                )}
+                {options.map((option) => (
+                  <Select.Item
+                    key={option.value}
+                    className="selection-menu-item focus-ring"
+                    value={option.value}
+                    disabled={option.disabled}
+                    label={option.label}
+                  >
+                    <Select.ItemIndicator className="selection-menu-indicator">
+                      <Icon name="check" />
+                    </Select.ItemIndicator>
+                    <span className="selection-menu-item-copy">
+                      <Select.ItemText>{option.label}</Select.ItemText>
+                      {option.description && (
+                        <small
+                          data-kind={option.descriptionKind ?? "code"}
+                          title={option.description}
+                        >
+                          {option.description}
+                        </small>
+                      )}
                     </span>
-                  )}
-                </Select.Item>
-              ))}
-            </Select.Group>
-          </Select.Viewport>
-          <Select.ScrollDownButton className="selection-menu-scroll is-down">
-            <Icon name="chevron" />
-          </Select.ScrollDownButton>
-        </Select.Content>
+                    {option.trailing && (
+                      <span className="selection-menu-item-trailing">
+                        {option.trailing}
+                      </span>
+                    )}
+                  </Select.Item>
+                ))}
+              </Select.Group>
+            </Select.List>
+          </Select.Popup>
+        </Select.Positioner>
       </Select.Portal>
     </Select.Root>
   );

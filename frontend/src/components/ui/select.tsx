@@ -1,6 +1,7 @@
 import { Select as BaseSelect } from "@base-ui/react/select";
 import type { ComponentProps, ReactNode } from "react";
 
+import { Icon } from "./Icon.tsx";
 import { cn, controlBase, focusRing } from "./utils.ts";
 
 export type SelectOption = {
@@ -8,6 +9,59 @@ export type SelectOption = {
   label: ReactNode;
   disabled?: boolean;
 };
+
+export function SelectField({
+  value,
+  options,
+  placeholder,
+  disabled,
+  className,
+  onValueChange,
+  "aria-label": ariaLabel,
+}: {
+  value: string;
+  options: SelectOption[];
+  placeholder?: ReactNode;
+  disabled?: boolean;
+  className?: string;
+  onValueChange: (value: string) => void;
+  "aria-label"?: string;
+}) {
+  return (
+    <Select.Root
+      value={value}
+      disabled={disabled}
+      onValueChange={(nextValue) => {
+        if (nextValue !== null) onValueChange(nextValue);
+      }}
+    >
+      <Select.Trigger className={className} aria-label={ariaLabel}>
+        <Select.Value placeholder={placeholder} />
+        <Select.Icon>
+          <Icon name="chevron" />
+        </Select.Icon>
+      </Select.Trigger>
+      <Select.Portal>
+        <Select.Positioner>
+          <Select.Popup>
+            <Select.List>
+              {options.map((option) => (
+                <Select.Item
+                  key={option.value}
+                  value={option.value}
+                  disabled={option.disabled}
+                >
+                  <Select.ItemText>{option.label}</Select.ItemText>
+                  <Select.ItemIndicator>✓</Select.ItemIndicator>
+                </Select.Item>
+              ))}
+            </Select.List>
+          </Select.Popup>
+        </Select.Positioner>
+      </Select.Portal>
+    </Select.Root>
+  );
+}
 
 export const Select = {
   Root: BaseSelect.Root,

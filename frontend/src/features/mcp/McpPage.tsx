@@ -12,6 +12,10 @@ import type {
   McpStdioConnectionInput,
 } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
+import { Dialog } from "../../components/ui/dialog.tsx";
+import { Checkbox } from "../../components/ui/checkbox.tsx";
+import { Input } from "../../components/ui/input.tsx";
+import { SelectField } from "../../components/ui/select.tsx";
 import { useI18n } from "../../i18n/context.ts";
 
 type McpServer = McpManagementView["servers"][number];
@@ -249,7 +253,7 @@ function McpTextRows({
       </span>
       {values.map((value, index) => (
         <div key={index}>
-          <input
+          <Input
             aria-label={`${label} ${index + 1}`}
             value={value}
             onChange={(event) =>
@@ -389,7 +393,7 @@ export function McpPage({
 }) {
   const { t } = useI18n();
   const title = useRef<HTMLHeadingElement>(null);
-  const drawer = useRef<HTMLElement>(null);
+  const drawer = useRef<HTMLDivElement>(null);
   const drawerHeading = useRef<HTMLHeadingElement>(null);
   const confirmPanel = useRef<HTMLDivElement>(null);
   const confirmHeading = useRef<HTMLHeadingElement>(null);
@@ -941,7 +945,7 @@ export function McpPage({
               <label className="mcp-search">
                 <Icon name="search" />
                 <span className="sr-only">{t("mcp.search_label")}</span>
-                <input
+                <Input
                   type="search"
                   value={query}
                   placeholder={t("mcp.search_placeholder")}
@@ -1002,19 +1006,18 @@ export function McpPage({
         )}
       </div>
 
-      {drawerState && (
-        <div
-          className="mcp-drawer-backdrop"
-          role="presentation"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) closeDrawer();
-          }}
-        >
-          <aside
+      <Dialog.Root
+        open={drawerState !== null}
+        onOpenChange={(open) => {
+          if (!open) closeDrawer();
+        }}
+      >
+        <Dialog.Portal>
+          <Dialog.Backdrop className="mcp-drawer-backdrop" />
+          {drawerState && (
+          <Dialog.Popup
             ref={drawer}
             className="mcp-drawer"
-            role="dialog"
-            aria-modal="true"
             aria-labelledby="mcp-drawer-title"
           >
             <header>
@@ -1088,7 +1091,7 @@ export function McpPage({
                 </fieldset>
                 <label>
                   <span>{t("mcp.add.name")}</span>
-                  <input
+                  <Input
                     autoComplete="off"
                     value={displayName}
                     maxLength={256}
@@ -1099,20 +1102,22 @@ export function McpPage({
                 <div className="mcp-form-pair">
                   <label>
                     <span>{t("mcp.add.protocol")}</span>
-                    <select
+                    <SelectField
                       value={negotiation}
-                      onChange={(event) =>
-                        setNegotiation(event.target.value as typeof negotiation)
+                      onValueChange={(value) =>
+                        setNegotiation(value as typeof negotiation)
                       }
-                    >
-                      <option value="automatic">Automatic</option>
-                      <option value="modern_only">2026-07-28</option>
-                      <option value="compat_only">2025-11-25</option>
-                    </select>
+                      options={[
+                        { value: "automatic", label: "Automatic" },
+                        { value: "modern_only", label: "2026-07-28" },
+                        { value: "compat_only", label: "2025-11-25" },
+                      ]}
+                      aria-label={t("mcp.add.protocol")}
+                    />
                   </label>
                   <label>
                     <span>{t("mcp.add.timeout")}</span>
-                    <input
+                    <Input
                       inputMode="numeric"
                       value={timeoutMs}
                       onChange={(event) => setTimeoutMs(event.target.value)}
@@ -1123,7 +1128,7 @@ export function McpPage({
                   <>
                     <label>
                       <span>{t("mcp.add.command")}</span>
-                      <input
+                      <Input
                         autoComplete="off"
                         value={command}
                         placeholder="npx"
@@ -1138,7 +1143,7 @@ export function McpPage({
                     />
                     <label>
                       <span>{t("mcp.add.cwd")}</span>
-                      <input
+                      <Input
                         autoComplete="off"
                         value={cwd}
                         onChange={(event) => setCwd(event.target.value)}
@@ -1157,7 +1162,7 @@ export function McpPage({
                       <span id="mcp-add-endpoint-label">
                         {t("mcp.add.endpoint")}
                       </span>
-                      <input
+                      <Input
                         autoComplete="off"
                         inputMode="url"
                         placeholder="https://mcp.example.com"
@@ -1179,7 +1184,7 @@ export function McpPage({
                       <legend>{t("mcp.add.authentication")}</legend>
                       {(["none", "static", "oauth"] as const).map((mode) => (
                         <label key={mode}>
-                          <input
+                          <Input
                             type="radio"
                             name="mcp-auth-mode"
                             checked={authMode === mode}
@@ -1205,27 +1210,31 @@ export function McpPage({
                       <div className="mcp-oauth-fields">
                         <label>
                           <span>{t("mcp.add.registration")}</span>
-                          <select
+                          <SelectField
                             value={registrationKind}
-                            onChange={(event) =>
+                            onValueChange={(value) =>
                               setRegistrationKind(
-                                event.target.value as typeof registrationKind,
+                                value as typeof registrationKind,
                               )
                             }
-                          >
-                            <option value="automatic">
-                              {t("mcp.add.registration.automatic")}
-                            </option>
-                            <option value="pre_registered">
-                              {t("mcp.add.registration.existing")}
-                            </option>
-                          </select>
+                            options={[
+                              {
+                                value: "automatic",
+                                label: t("mcp.add.registration.automatic"),
+                              },
+                              {
+                                value: "pre_registered",
+                                label: t("mcp.add.registration.existing"),
+                              },
+                            ]}
+                            aria-label={t("mcp.add.registration")}
+                          />
                         </label>
                         {registrationKind === "pre_registered" && (
                           <>
                             <label>
                               <span>{t("mcp.add.client_id")}</span>
-                              <input
+                              <Input
                                 autoComplete="off"
                                 value={clientId}
                                 onChange={(event) =>
@@ -1235,25 +1244,29 @@ export function McpPage({
                             </label>
                             <label>
                               <span>{t("mcp.add.client_auth_method")}</span>
-                              <select
+                              <SelectField
                                 value={tokenEndpointAuthMethod}
-                                onChange={(event) =>
+                                onValueChange={(value) =>
                                   setTokenEndpointAuthMethod(
-                                    event.target
-                                      .value as typeof tokenEndpointAuthMethod,
+                                    value as typeof tokenEndpointAuthMethod,
                                   )
                                 }
-                              >
-                                <option value="none">
-                                  {t("mcp.client_auth.none")}
-                                </option>
-                                <option value="client_secret_basic">
-                                  {t("mcp.client_auth.client_secret_basic")}
-                                </option>
-                                <option value="client_secret_post">
-                                  {t("mcp.client_auth.client_secret_post")}
-                                </option>
-                              </select>
+                                options={[
+                                  {
+                                    value: "none",
+                                    label: t("mcp.client_auth.none"),
+                                  },
+                                  {
+                                    value: "client_secret_basic",
+                                    label: t("mcp.client_auth.client_secret_basic"),
+                                  },
+                                  {
+                                    value: "client_secret_post",
+                                    label: t("mcp.client_auth.client_secret_post"),
+                                  },
+                                ]}
+                                aria-label={t("mcp.add.client_auth_method")}
+                              />
                             </label>
                           </>
                         )}
@@ -1347,7 +1360,7 @@ export function McpPage({
                   >
                     <label>
                       <span>{t("mcp.detail.display_name")}</span>
-                      <input
+                      <Input
                         value={renameDraft}
                         maxLength={256}
                         disabled={
@@ -1782,15 +1795,14 @@ export function McpPage({
                             <span className="sr-only">
                               {t("mcp.tool.toggle", { name: tool.name })}
                             </span>
-                            <input
-                              type="checkbox"
+                            <Checkbox.Root
                               checked={tool.desiredAllowed}
                               disabled={
                                 mutationLocked ||
                                 pendingServerId === selected.id ||
                                 selectedOperationBusy
                               }
-                              onChange={() => {
+                              onCheckedChange={() => {
                                 const names = selected.tools
                                   .filter((candidate) =>
                                     candidate.name === tool.name
@@ -1806,8 +1818,9 @@ export function McpPage({
                                   ),
                                 );
                               }}
-                            />
-                            <span aria-hidden="true" />
+                            >
+                              <Checkbox.Indicator>✓</Checkbox.Indicator>
+                            </Checkbox.Root>
                           </label>
                         </li>
                       ))}
@@ -1874,9 +1887,10 @@ export function McpPage({
                 )}
               </div>
             ) : null}
-          </aside>
-        </div>
-      )}
+          </Dialog.Popup>
+          )}
+        </Dialog.Portal>
+      </Dialog.Root>
     </section>
   );
 }

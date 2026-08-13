@@ -1,6 +1,11 @@
-import { useState, type ButtonHTMLAttributes } from "react";
+import { useState } from "react";
 
 import { CodeBlock } from "../../components/ui/CodeBlock.tsx";
+import { Checkbox } from "../../components/ui/checkbox.tsx";
+import { Button } from "../../components/ui/button.tsx";
+import { Icon } from "../../components/ui/Icon.tsx";
+import { Input } from "../../components/ui/input.tsx";
+import { Select } from "../../components/ui/select.tsx";
 import type {
   AskOption,
   PendingUi,
@@ -52,7 +57,7 @@ export function ApprovalPanel({
       className="inline-request"
       aria-busy={responseInFlight}
     >
-      <p className="font-mono text-[10px] tracking-[0.14em] text-amber-ink uppercase">
+      <p className="font-mono text-[10px] tracking-[0.14em] text-ui-warning uppercase">
         {t("approval.response_required")}
       </p>
       {pending.redacted && (
@@ -69,11 +74,16 @@ export function ApprovalPanel({
           <div className="mt-4 grid grid-cols-2 gap-2">
             {(pending.availableChoices ?? ["deny_once", "allow_once"]).map(
               (choice) => (
-                <DecisionButton
+                <Button
                   key={choice}
-                  primary={
+                  variant={
                     choice === "allow_once" || choice === "allow_session"
+                      ? "primary"
+                      : "secondary"
                   }
+                  size="md"
+                  className="decision-button"
+                  data-primary={choice === "allow_once" || choice === "allow_session"}
                   disabled={actionDisabled}
                   onClick={() =>
                     respond({ kind: "permission", permission: choice })
@@ -86,7 +96,7 @@ export function ApprovalPanel({
                       : choice === "allow_session"
                         ? t("approval.allow_session")
                         : t("approval.deny_session")}
-                </DecisionButton>
+                </Button>
               ),
             )}
           </div>
@@ -124,37 +134,37 @@ export function ApprovalPanel({
                   {question.options.map((option, optionIndex) => (
                     <label
                       key={`${option.label}-${optionIndex}`}
-                      className="flex items-start gap-3 rounded-lg border border-rule bg-paper px-3 py-2 text-sm"
+                      className="flex items-start gap-3 rounded-lg border border-ui-border bg-ui-panel px-3 py-2 text-sm"
                     >
-                      <input
-                        className="mt-1 accent-brand-600"
-                        type="checkbox"
+                      <Checkbox.Root
                         checked={optionAnswerSelected(
                           answers,
                           index,
                           optionIndex,
                         )}
-                        onChange={(event) => {
+                        onCheckedChange={(checked) => {
                           setAnswers(
                             updateOptionAnswer(
                               answers,
                               index,
                               optionIndex,
                               true,
-                              event.target.checked,
+                              checked,
                             ),
                           );
                         }}
-                      />
+                      >
+                        <Checkbox.Indicator>✓</Checkbox.Indicator>
+                      </Checkbox.Root>
                       <span>
                         <span className="font-medium">{option.label}</span>
                         {option.description && (
-                          <span className="mt-0.5 block text-xs leading-5 text-muted">
+                          <span className="mt-0.5 block text-xs leading-5 text-ui-muted">
                             {option.description}
                           </span>
                         )}
                         {option.preview && (
-                          <span className="approval-option-preview mt-1 block font-mono text-[10px] leading-5 text-muted">
+                          <span className="approval-option-preview mt-1 block font-mono text-[10px] leading-5 text-ui-muted">
                             {option.preview}
                           </span>
                         )}
@@ -164,12 +174,10 @@ export function ApprovalPanel({
                 </div>
               ) : question.options.length > 0 ? (
                 <>
-                  <select
-                    className="focus-ring mt-2 w-full rounded-lg border border-rule bg-paper px-3 py-2 text-sm"
-                    aria-labelledby={`ui-question-${pending.requestId}-${index}`}
-                    value={selectedOptionIndex(answers, index) + 1}
-                    onChange={(event) => {
-                      const optionIndex = Number(event.target.value) - 1;
+                  <Select.Root
+                    value={String(selectedOptionIndex(answers, index) + 1)}
+                    onValueChange={(nextValue) => {
+                      const optionIndex = Number(nextValue) - 1;
                       setAnswers(
                         updateOptionAnswer(
                           answers,
@@ -181,24 +189,45 @@ export function ApprovalPanel({
                       );
                     }}
                   >
-                    <option value="0">{t("approval.choose")}</option>
-                    {question.options.map((option, optionIndex) => (
-                      <option
-                        key={`${option.label}-${optionIndex}`}
-                        value={optionIndex + 1}
-                      >
-                        {option.label}
-                      </option>
-                    ))}
-                  </select>
+                    <Select.Trigger
+                      className="mt-2 w-full"
+                      aria-labelledby={`ui-question-${pending.requestId}-${index}`}
+                    >
+                      <Select.Value
+                        placeholder={t("approval.choose")}
+                        children={
+                          selectedOptionIndex(answers, index) >= 0
+                            ? question.options[selectedOptionIndex(answers, index)]?.label
+                            : t("approval.choose")
+                        }
+                      />
+                      <Select.Icon><Icon name="chevron" /></Select.Icon>
+                    </Select.Trigger>
+                    <Select.Portal>
+                      <Select.Positioner>
+                        <Select.Popup>
+                          <Select.List>
+                            <Select.Item value="0">
+                              <Select.ItemText>{t("approval.choose")}</Select.ItemText>
+                            </Select.Item>
+                            {question.options.map((option, optionIndex) => (
+                              <Select.Item key={`${option.label}-${optionIndex}`} value={String(optionIndex + 1)}>
+                                <Select.ItemText>{option.label}</Select.ItemText>
+                              </Select.Item>
+                            ))}
+                          </Select.List>
+                        </Select.Popup>
+                      </Select.Positioner>
+                    </Select.Portal>
+                  </Select.Root>
                   {selectedOptionIndex(answers, index) >= 0 &&
                     optionDetail(
                       question.options[selectedOptionIndex(answers, index)],
                     )}
                 </>
               ) : (
-                <input
-                  className="focus-ring mt-2 w-full rounded-lg border border-rule bg-paper px-3 py-2 text-sm"
+                <Input
+                  className="mt-2"
                   aria-labelledby={`ui-question-${pending.requestId}-${index}`}
                   value={textAnswerValue(answers, index)}
                   onChange={(event) => {
@@ -210,13 +239,15 @@ export function ApprovalPanel({
               )}
             </div>
           ))}
-          <DecisionButton
-            primary
+          <Button
+            variant="primary"
+            size="md"
+            className="decision-button"
             disabled={actionDisabled || !serializedAnswers}
             onClick={submitAnswers}
           >
             {t("approval.send_answers")}
-          </DecisionButton>
+          </Button>
           <p className="approval-shortcut">{t("approval.submit_shortcut")}</p>
         </div>
       )}
@@ -245,18 +276,5 @@ function optionDetail(option: AskOption | undefined) {
       {option.description && <p>{option.description}</p>}
       {option.preview && <code>{option.preview}</code>}
     </div>
-  );
-}
-
-function DecisionButton({
-  primary = false,
-  ...props
-}: ButtonHTMLAttributes<HTMLButtonElement> & { primary?: boolean }) {
-  return (
-    <button
-      {...props}
-      className="decision-button focus-ring"
-      data-primary={primary}
-    />
   );
 }

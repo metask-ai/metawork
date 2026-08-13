@@ -3,7 +3,6 @@ import {
   useMemo,
   useRef,
   useState,
-  type ComponentProps,
 } from "react";
 
 import type {
@@ -12,6 +11,10 @@ import type {
   WorkbenchSnapshot,
 } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
+import { Dialog } from "../../components/ui/dialog.tsx";
+import { Input } from "../../components/ui/input.tsx";
+import { SelectField, type SelectOption } from "../../components/ui/select.tsx";
+import { Textarea } from "../../components/ui/textarea.tsx";
 import { useI18n } from "../../i18n/context.ts";
 
 type Draft = {
@@ -25,11 +28,25 @@ type Draft = {
 
 type SuggestionKind = "daily" | "weekly" | "followup";
 
-function ScheduledSelect({ children, ...props }: ComponentProps<"select">) {
+function ScheduledSelect({
+  value,
+  options,
+  onValueChange,
+  ariaLabel,
+}: {
+  value: string;
+  options: SelectOption[];
+  onValueChange: (value: string) => void;
+  ariaLabel: string;
+}) {
   return (
     <span className="scheduled-select">
-      <select {...props}>{children}</select>
-      <Icon name="chevron" />
+      <SelectField
+        value={value}
+        options={options}
+        onValueChange={onValueChange}
+        aria-label={ariaLabel}
+      />
     </span>
   );
 }
@@ -482,7 +499,7 @@ export function ScheduledTasksPage({
                 <span className="sr-only">
                   {t("scheduled.search_placeholder")}
                 </span>
-                <input
+                <Input
                   type="search"
                   value={query}
                   placeholder={t("scheduled.search_placeholder")}
@@ -620,25 +637,17 @@ export function ScheduledTasksPage({
         )}
       </div>
 
-      {editorOpen && (
-        <div
-          className="scheduled-editor-backdrop"
-          onMouseDown={() => {
-            if (busy) return;
-            closeEditor();
-          }}
-          onKeyDown={(event) => {
-            if (event.key !== "Escape" || busy) return;
-            event.preventDefault();
-            closeEditor();
-          }}
-        >
-          <aside
+      <Dialog.Root
+        open={editorOpen}
+        onOpenChange={(open) => {
+          if (!open && !busy) closeEditor();
+        }}
+      >
+        <Dialog.Portal>
+          <Dialog.Backdrop className="scheduled-editor-backdrop" />
+          <Dialog.Popup
             className="scheduled-editor"
-            role="dialog"
-            aria-modal="true"
             aria-label={t("scheduled.editor")}
-            onMouseDown={(event) => event.stopPropagation()}
           >
             <header>
               <div>
@@ -666,7 +675,7 @@ export function ScheduledTasksPage({
             <div className="scheduled-editor-scroll">
               <label className="scheduled-editor-name">
                 <span>{t("scheduled.name")}</span>
-                <input
+                <Input
                   autoFocus={creating}
                   value={draft.title}
                   maxLength={120}
@@ -705,7 +714,7 @@ export function ScheduledTasksPage({
                 <h3 id="scheduled-editor-content-title">
                   {t("scheduled.what")}
                 </h3>
-                <textarea
+                <Textarea
                   aria-label={t("scheduled.instruction")}
                   rows={6}
                   value={draft.text}
@@ -745,7 +754,7 @@ export function ScheduledTasksPage({
                 </div>
                 <label>
                   <span>{t("scheduled.starts")}</span>
-                  <input
+                  <Input
                     type="datetime-local"
                     value={draft.start}
                     onChange={(event) =>
@@ -760,7 +769,7 @@ export function ScheduledTasksPage({
                   <label>
                     <span>{t("scheduled.every")}</span>
                     <div className="scheduled-interval">
-                      <input
+                      <Input
                         type="number"
                         aria-label={t("scheduled.every")}
                         min="1"
@@ -774,21 +783,20 @@ export function ScheduledTasksPage({
                         }
                       />
                       <ScheduledSelect
-                        aria-label={t("scheduled.interval_unit")}
+                        ariaLabel={t("scheduled.interval_unit")}
                         value={draft.unit}
-                        onChange={(event) =>
+                        onValueChange={(unit) =>
                           setDraft((value) => ({
                             ...value,
-                            unit: event.target.value as Draft["unit"],
+                            unit: unit as Draft["unit"],
                           }))
                         }
-                      >
-                        <option value="minutes">
-                          {t("scheduled.minutes")}
-                        </option>
-                        <option value="hours">{t("scheduled.hours")}</option>
-                        <option value="days">{t("scheduled.days")}</option>
-                      </ScheduledSelect>
+                        options={[
+                          { value: "minutes", label: t("scheduled.minutes") },
+                          { value: "hours", label: t("scheduled.hours") },
+                          { value: "days", label: t("scheduled.days") },
+                        ]}
+                      />
                     </div>
                   </label>
                 )}
@@ -913,9 +921,9 @@ export function ScheduledTasksPage({
                 {t(busy ? "scheduled.saving" : "common.save")}
               </button>
             </footer>
-          </aside>
-        </div>
-      )}
+          </Dialog.Popup>
+        </Dialog.Portal>
+      </Dialog.Root>
     </section>
   );
 }
