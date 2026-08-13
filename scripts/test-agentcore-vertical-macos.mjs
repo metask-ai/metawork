@@ -111,13 +111,16 @@ await writeFile(
     "disable-model-invocation: true",
     "---",
     "METAWORK_TYPED_SKILL_VERTICAL",
-    "Review $target. Exercise Read, Bash, Edit, and AskUserQuestion, then finish.",
+    process.platform === "win32"
+      ? "Review $target. Exercise Read, Write, Glob, Grep, Bash, Edit, BashOutput, KillShell, and AskUserQuestion, then finish."
+      : "Review $target. Exercise Read, Bash, Edit, and AskUserQuestion, then finish.",
     "",
   ].join("\n"),
   { mode: 0o600 },
 );
 await rm(automationDir, { recursive: true, force: true });
 
+const writtenPath = join(workspace, "agentcore-vertical-write.txt");
 const responses = [
   toolSse("m1", "read-1", "Read", { file_path: fixturePath }),
   toolSse("m2", "bash-1", "Bash", {
@@ -128,7 +131,31 @@ const responses = [
     old_string: "agentcore-vertical-before",
     new_string: "agentcore-vertical-after",
   }),
-  toolSse("m4", "ask-1", "AskUserQuestion", {
+  ...(process.platform === "win32"
+    ? [
+        toolSse("m4", "write-1", "Write", {
+          file_path: writtenPath,
+          content: "agentcore-vertical-write\n",
+        }),
+        toolSse("m5", "glob-1", "Glob", {
+          pattern: "*.txt",
+          path: workspace,
+        }),
+        toolSse("m6", "grep-1", "Grep", {
+          pattern: "agentcore-vertical-after",
+          path: workspace,
+        }),
+        toolSse("m7", "bash-background-1", "Bash", {
+          command: 'powershell -NoProfile -Command "Start-Sleep -Seconds 30"',
+          description: "background lifecycle fixture",
+        }),
+        toolSseFromBackgroundJob("m8", "bash-output-1", "BashOutput", {
+          max_bytes: 1024,
+        }),
+        toolSseFromBackgroundJob("m9", "kill-shell-1", "KillShell"),
+      ]
+    : []),
+  toolSse(process.platform === "win32" ? "m10" : "m4", "ask-1", "AskUserQuestion", {
     questions: [
       {
         question: "Continue the AgentCore vertical run?",
@@ -140,9 +167,9 @@ const responses = [
       },
     ],
   }),
-  textSse("m5", "metawork agentcore vertical complete"),
-  textSse("m6", "metawork text checkpoint complete"),
-  textSse("m7", "metawork compact checkpoint complete"),
+  textSse(process.platform === "win32" ? "m11" : "m5", "metawork agentcore vertical complete"),
+  textSse(process.platform === "win32" ? "m12" : "m6", "metawork text checkpoint complete"),
+  textSse(process.platform === "win32" ? "m13" : "m7", "metawork compact checkpoint complete"),
 ];
 const provider = createProvider(responses, visualCaptureDir ? 1_500 : 0);
 const baseUrl = await provider.listen();
@@ -451,10 +478,8 @@ try {
 
   const task = finalSnapshot.tasks.find((item) => item.id === taskId);
   const run = task.runs.find((item) => item.id === runId);
-  if (finalSnapshot.capabilities?.conversationRecovery !== false)
-    throw new Error(
-      "checkpoint export incorrectly opened conversation recovery",
-    );
+  if (finalSnapshot.capabilities?.conversationRecovery !== true)
+    throw new Error("checkpoint export did not expose conversation recovery");
   if (task.continuationAvailable !== true)
     throw new Error("completed Task did not remain available for continuation");
   if (run.phase !== "completed" || run.outcome !== "completed")
@@ -493,11 +518,24 @@ try {
     })}\n`,
   );
   const activityOrders = [];
-  for (const [name, evidence] of [
-    ["Read", "agentcore-vertical-before"],
-    ["Bash", "agentcore-vertical-bash-ok"],
-    ["Edit", ""],
-  ]) {
+  const executedToolChecks =
+    process.platform === "win32"
+      ? [
+          ["Read", "agentcore-vertical-before"],
+          ["Bash", "agentcore-vertical-bash-ok"],
+          ["Edit", ""],
+          ["Write", ""],
+          ["Glob", ""],
+          ["Grep", ""],
+          ["BashOutput", ""],
+          ["KillShell", ""],
+        ]
+      : [
+          ["Read", "agentcore-vertical-before"],
+          ["Bash", "agentcore-vertical-bash-ok"],
+          ["Edit", ""],
+        ];
+  for (const [name, evidence] of executedToolChecks) {
     const tool = run.tools.find((item) => item.name === name);
     if (!tool || tool.state !== "completed" || tool.isError)
       throw new Error(`${name} did not complete: ${JSON.stringify(tool)}`);
@@ -515,6 +553,11 @@ try {
     if (evidence && !tool.content.includes(evidence))
       throw new Error(`${name} result omitted ${evidence}`);
   }
+  if (
+    process.platform === "win32" &&
+    (await readFile(writtenPath, "utf8")) !== "agentcore-vertical-write\n"
+  )
+    throw new Error("Write did not materialize the expected file");
   if (reloadedRequest === null)
     throw new Error("AskUserQuestion did not exercise reload-safe resume");
   if (
@@ -724,6 +767,14 @@ try {
     throw new Error("provider did not receive the materialized Skill input");
   if (providerInput.includes("/review"))
     throw new Error("raw slash syntax reached the AgentCore provider");
+  if (
+    process.platform === "win32" &&
+    (!providerInput.includes('"name":"WebSearch"') ||
+      !providerInput.includes('"name":"WebFetch"'))
+  )
+    throw new Error(
+      "Windows full profile did not expose WebSearch/WebFetch to AgentCore",
+    );
 
   await invokeBridge("metawork.tasks.rename", {
     taskId,
@@ -770,13 +821,13 @@ try {
     (item) => item.id === taskId,
   );
   if (
-    restoredSnapshot.capabilities?.conversationRecovery !== false ||
+    restoredSnapshot.capabilities?.conversationRecovery !== true ||
     restoredTask?.lifecycle !== "closed" ||
     restoredTask.runs.length !== 2 ||
     restoredTask.compacts.length !== 1
   )
     throw new Error(
-      `checkpoint restart changed product history or recovery gate: ${JSON.stringify(restoredTask)}`,
+      `checkpoint restart changed product history or recovery gate: ${JSON.stringify({ restoredTask, tasks: restoredSnapshot.tasks, capabilities: restoredSnapshot.capabilities })}`,
     );
   await poll(
     async () => {
@@ -826,7 +877,7 @@ try {
     });
   }
   await provider.close();
-  await rm(workspace, { recursive: true, force: true });
+  await removeWorkspaceWithRetry();
 }
 
 function startApplication() {
@@ -919,17 +970,20 @@ async function readCheckpointEvidence(
   if (!task || task.checkpoint_health !== "available" || !task.checkpoint)
     return null;
   const descriptor = task.checkpoint;
+  const blobDescriptor = descriptor.blob;
+  const terminal = descriptor.anchor?.terminal;
   if (
-    descriptor.terminal_kind !== terminalKind ||
-    String(descriptor.terminal_id) !== terminalId ||
-    String(descriptor.binding_epoch) !== bindingEpoch ||
-    !Number.isSafeInteger(descriptor.generation) ||
-    descriptor.generation < 0 ||
-    !Number.isSafeInteger(descriptor.byte_size) ||
-    descriptor.byte_size <= 0 ||
-    !Number.isSafeInteger(descriptor.chunk_count) ||
-    descriptor.chunk_count <= 0 ||
-    !/^[0-9a-f]{64}$/.test(descriptor.digest)
+    !blobDescriptor ||
+    !descriptor.session ||
+    !descriptor.anchor ||
+    terminal?.kind !== terminalKind ||
+    String(terminal.id) !== terminalId ||
+    String(descriptor.anchor.binding_epoch) !== bindingEpoch ||
+    !Number.isSafeInteger(blobDescriptor.generation) ||
+    blobDescriptor.generation < 0 ||
+    !Number.isSafeInteger(blobDescriptor.byte_size) ||
+    blobDescriptor.byte_size <= 0 ||
+    !/^[0-9a-f]{64}$/.test(blobDescriptor.digest)
   )
     throw new Error(
       `checkpoint descriptor is malformed: ${JSON.stringify(descriptor)}`,
@@ -939,7 +993,7 @@ async function readCheckpointEvidence(
     "workbench",
     "checkpoints",
     String(task.id),
-    `${descriptor.generation}-${descriptor.digest}.ckpt`,
+    `${blobDescriptor.generation}-${blobDescriptor.digest}.ckpt`,
   );
   let blob;
   try {
@@ -949,13 +1003,16 @@ async function readCheckpointEvidence(
     throw error;
   }
   const digest = createHash("sha256").update(blob).digest("hex");
-  if (blob.length !== descriptor.byte_size || digest !== descriptor.digest)
+  if (
+    blob.length !== blobDescriptor.byte_size ||
+    digest !== blobDescriptor.digest
+  )
     throw new Error("checkpoint blob did not match its durable descriptor");
   return {
     blobPath,
-    byteSize: descriptor.byte_size,
-    chunkCount: descriptor.chunk_count,
-    generation: descriptor.generation,
+    byteSize: blobDescriptor.byte_size,
+    chunkCount: null,
+    generation: blobDescriptor.generation,
     historyByteSize: historyBytes.length,
   };
 }
@@ -1296,6 +1353,20 @@ async function poll(operation, milliseconds, label) {
   );
 }
 
+async function removeWorkspaceWithRetry() {
+  let lastError = null;
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    try {
+      await rm(workspace, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  }
+  throw lastError;
+}
+
 function createProvider(queue, responseDelayMs = 0) {
   let served = 0;
   let providerError = null;
@@ -1324,7 +1395,9 @@ function createProvider(queue, responseDelayMs = 0) {
         requests.push(payload);
         if (payload.model !== "metawork-agentcore-vertical-fixture-model")
           throw new Error("Host model did not reach AgentCore correctly");
-        const body = queue[served];
+        const queued = queue[served];
+        const body =
+          typeof queued === "function" ? queued(payload, requests) : queued;
         if (!body) throw new Error("unexpected extra provider request");
         served += 1;
         response.writeHead(200, {
@@ -1396,6 +1469,41 @@ function toolSse(messageId, toolId, name, input) {
     },
     { type: "message_stop" },
   ]);
+}
+
+function toolSseFromBackgroundJob(messageId, toolId, name, input = {}) {
+  return (payload) => {
+    const jobId = findJsonField(payload, "job_id");
+    if (typeof jobId !== "string" || jobId.length === 0)
+      throw new Error(`provider fixture did not receive a background job id for ${name}`);
+    return toolSse(messageId, toolId, name, { job_id: jobId, ...input });
+  };
+}
+
+function findJsonField(value, field) {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findJsonField(item, field);
+      if (found !== undefined) return found;
+    }
+    return undefined;
+  }
+  if (value && typeof value === "object") {
+    if (field in value) return value[field];
+    for (const item of Object.values(value)) {
+      const found = findJsonField(item, field);
+      if (found !== undefined) return found;
+    }
+    return undefined;
+  }
+  if (typeof value === "string") {
+    try {
+      return findJsonField(JSON.parse(value), field);
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
 }
 
 function textSse(messageId, text) {

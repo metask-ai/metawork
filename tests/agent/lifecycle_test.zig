@@ -1099,6 +1099,50 @@ test "Agent Runtime creates and destroys an idle Session" {
     try std.testing.expectEqual(@as(usize, 1), fake_core.session_destroyed);
 }
 
+test "Agent Runtime passes the selected Windows built-in profile to Session" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 1,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
+    const workspace_root = root_storage[0..root_len];
+    const session = try runtime.createSession(.{
+        .provider = .anthropic,
+        .permission_mode = .default,
+        .shell_policy = .unrestricted,
+        .credential = "fixture-secret",
+        .model = "fixture-model",
+        .workspace = .{
+            .canonical_root = workspace_root,
+            .trust = .{ .temporary = workspace_root },
+        },
+        .canonical_user_home = workspace_root,
+        .workspace_epoch = "profile-test",
+        .allowed_tools = lifecycle.builtinToolsForProfile(.local),
+    });
+    defer closeSession(session, .session_close) catch {};
+
+    try std.testing.expectEqual(
+        lifecycle.local_builtin_tools.len,
+        fake_core.last_allowed_tool_count,
+    );
+    for (lifecycle.local_builtin_tools, 0..) |name, index| {
+        try std.testing.expectEqualStrings(
+            name,
+            fake_core.last_allowed_tool_names[index][0..name.len],
+        );
+    }
+}
+
 test "Workspace requires an absolute temporary or explicit trusted root" {
     fake_core.reset();
     const outside_temporary = if (std.fs.path.sep == '\\') "C:\\var\\not-temp" else "/var/not-temp";

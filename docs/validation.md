@@ -2,7 +2,7 @@
 
 > 状态：初始技术验证已经收口；本文维护当前验证状态、可复现命令、证据索引和覆盖缺口
 
-本文是验证控制面，不是产品或技术设计文档。它只回答四个问题：验证什么、依据哪份规范、证据在哪里、还缺什么。产品行为以 [产品需求](requirements.md) 为准，系统决策以 [高层架构](architecture.md) 为准，AgentCore 生命周期和 ABI 分别以 [AgentCore 集成契约](agentcore-integration.md)与 [ABI v1 消费合同](agentcore-abi-v1.md)为准。
+本文是验证控制面，不是产品或技术设计文档。它只回答四个问题：验证什么、依据哪份规范、证据在哪里、还缺什么。产品行为以 [产品需求](requirements.md) 为准，系统决策以 [高层架构](architecture.md) 为准，AgentCore 生命周期和 ABI 分别以 [AgentCore 集成契约](agentcore-integration.md)与 [ABI v1 消费合同](agentcore-abi-v1.md)为准；核心工具目标范围和 Gate 以 [核心工具接入方案](tool-integration-plan.md) 为准。
 
 ## 1. 状态含义
 
@@ -22,7 +22,7 @@
 | 验证对象                                  | 规范来源                                                                           | 可定位证据                                                                                                  | 已验证结论与限制                                                                                                                                                                                                                                                            |
 | ----------------------------------------- | ---------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Metask Account 与真实 AgentCore Run       | [产品需求](requirements.md)、[Metask Account API 合同](metask-account-contract.md) | `git show dbaaf81b0217d4016944960ee8621e9a23274f05:docs/phase-0-validation.md` 中 2026-07-20 的真实链路记录 | 打包 `.app` 完成 OAuth、profile、API Key/model catalog、execution persistence，以及 `gpt-5.5`、`deepseek-v4-pro` AgentCore Run；不证明登录优先、设置、模型选择或成熟 Workbench 人工交互完成                                                                                 |
-| AgentCore revision 7 development baseline | [高层架构](architecture.md)、[ABI v1 消费合同](agentcore-abi-v1.md)                | macOS/Windows lock source `c2e6f52cb4ce8e440a675dcc9e8517b1f8a4eb73` | Windows 与 macOS 已锁定同一 clean source artifact，ABI v1 revision 7、216-byte table、required capabilities `0x7ffff`；两个 target 的 candidate/staged probe、lifecycle、正式 test graph、Debug/Release 与真实 vertical 仍须按各平台独立验证，任一平台结果不能替代另一平台的平台证据 |
+| AgentCore revision 7 development baseline | [高层架构](architecture.md)、[ABI v1 消费合同](agentcore-abi-v1.md)                | Windows lock source `5f45e15dc1c63561b423ace51a1e6f05831b583a`；staged verifier `scripts/verify-staged-agentcore-bundle.mjs`；`node scripts/run-agentcore-probe.mjs --staged`；`node scripts/run-agentcore-vertical-windows.mjs` | Windows ABI v1 revision 7、216-byte table、required capabilities `0x7ffff`，staged manifest/payload verification、11 个 built-in 名称 Session probe、Windows vertical 与重启恢复均已通过；本证据只声明 Windows，不推断 macOS 可用性 |
 | fault-domain 方向                         | [高层架构](architecture.md)                                                        | `git show dbaaf81b0217d4016944960ee8621e9a23274f05:docs/phase-0-gate-7-report.md`                           | 独立 crash 对照证明同进程为零进程级隔离，并选择单 AgentCore Worker；该一次性 harness 不进入 active tree，产品 Worker 尚未实现                                                                                                                                               |
 
 Git object 只保存一次性执行事实；当前行为与边界始终以 active source of truth 为准。若规范与旧证据冲突，旧证据不得覆盖当前规范，也不得被当作新代码已经回归的证明。
@@ -103,11 +103,11 @@ node scripts/run-lifecycle-tests.mjs
 node scripts/test-agentcore-vertical-macos.mjs
 ```
 
-当前 macOS revision 7 lock 使用与 Windows 一致的 clean `c2e6f52cb4ce8e440a675dcc9e8517b1f8a4eb73` target artifact。Windows lock、staged artifact 和结果不能替代 macOS native probe、Debug/Release/package 与真实 vertical；AgentCore vertical 是真实桌面自动化入口，同时验证 `.agents/skills` typed catalog/run、真实 `ProductDelivery` 主线程 revision emit、Renderer reload、snapshot 恢复和 AgentCore Run。
+当前 macOS revision 7 lock 仍使用 clean `c2e6f52cb4ce8e440a675dcc9e8517b1f8a4eb73` target artifact；Windows 已切换到 clean `5f45e15dc1c63561b423ace51a1e6f05831b583a` artifact。Windows lock、staged artifact 和结果不能替代 macOS native probe、Debug/Release/package 与真实 vertical；AgentCore vertical 是真实桌面自动化入口，同时验证 `.agents/skills` typed catalog/run、真实 `ProductDelivery` 主线程 revision emit、Renderer reload、snapshot 恢复和 AgentCore Run。
 
 ### Checkpoint export/store evidence
 
-revision 7 不继承任何旧 artifact 的 checkpoint 样本或通过结论。Windows 与 macOS 已切换到同一 `c2e6f52cb4ce` source artifact；平台 vertical 结果仍须分别重新采集，旧版本样本不能冒充新版本证据。产品继续以 sink 对实际 bytes 独立计算的 SHA-256 作为 content hash，不把 ABI 未定义算法的 raw `CheckpointExportResultV1.digest` 当作内容哈希。
+revision 7 不继承任何旧 artifact 的 checkpoint 样本或通过结论。Windows 使用 `5f45e15dc1c6`、macOS 使用 `c2e6f52cb4ce` source artifact；平台 vertical 结果仍须分别重新采集，旧版本样本不能冒充新版本证据。产品继续以 sink 对实际 bytes 独立计算的 SHA-256 作为 content hash，不把 ABI 未定义算法的 raw `CheckpointExportResultV1.digest` 当作内容哈希。
 
 Checkpoint 产品上限固定为 `hard_bytes = 64 MiB`、section `16 MiB`、string `1 MiB`、chunk `256 KiB`、message `4096` 和 block `256`。命中任一产品上限只使本次 export 以可再生失败收口，不 poison Session；长会话分布仍需持续采样，但不得用放大上限替代证据。
 
@@ -120,7 +120,7 @@ node scripts/test-window-chrome-windows.mjs --resize-session-only
 node scripts/test-window-chrome-windows.mjs
 ```
 
-Windows owner 只锁定并验证 Windows x86_64 GNU artifact；当前 exact lock 使用 clean `c2e6f52cb4ce8e440a675dcc9e8517b1f8a4eb73` source artifact。candidate 先通过 `AGENTCORE_BUNDLE_ROOT=<absolute-path> node scripts/run-agentcore-probe.mjs`，`run-windows-bringup.mjs` 再覆盖 staged verifier/probe、bundle 与 lifecycle tests、正式 test graph、Debug/Release build 和真实 Windows vertical，并必须明确报告 revision 7。macOS 与 Windows 结果不能互相替代。安装器、签名、更新、file dialog、process tree、timeout 和完整 security matrix 需要独立证据。
+Windows owner 只锁定并验证 Windows x86_64 GNU artifact；当前 exact lock 使用 clean `5f45e15dc1c63561b423ace51a1e6f05831b583a` source artifact。candidate 先通过 `AGENTCORE_BUNDLE_ROOT=<absolute-path> node scripts/run-agentcore-probe.mjs`，`run-windows-bringup.mjs` 再覆盖 staged verifier/probe、bundle 与 lifecycle tests、正式 test graph、Debug/Release build 和真实 Windows vertical，并必须明确报告 revision 7。macOS 与 Windows 结果不能互相替代。安装器、签名、更新、file dialog、process tree、timeout 和完整 security matrix 需要独立证据。
 
 `test-window-chrome-windows.mjs --resize-session-only` 使用隔离数据根启动真实 System WebView；`resize` probe 先通过真实 `SetWindowPos` 连续改变 Native window size，并验证 `app.zon` 的 320 × 520 logical px 原生最小尺寸，随后 `controls` probe 通过仍可见的 Renderer 按钮验证同一 document generation 下 `minimize` Runtime 路径和 maximize/restore seam；`close` probe 验证 `close_policy = hide` 后窗口与进程仍存活，随后通过 Native SDK 托盘 Open 验证窗口恢复和 clean `stop`。该 gate 不读取 Native SDK automation 的单槽 `bridge-response.txt` 推断 Renderer 就绪；连续 resize 后按钮仍可用才是 session 未被 resize 替换的真实证据。不带该 flag 的同一 harness 在此前提上追加真实 primary pointer drag、Native SDK chrome geometry、drag candidate 的 `HTCAPTION`、交互排除区的非 caption hit 和 disconnect teardown 验证；拖拽能力可以独立验收，不能掩盖 resize/session gate 的结果。Windows 真实 desktop vertical 还必须在 Bridge 连接后通过 UI Automation 点击 Composer、发送真实键盘输入并清理临时内容，证明 window-chrome 同步没有把焦点从 WebView 抢回 Native 顶层窗口；该 UIA 焦点 gate 与 System WebView window-chrome seam 分开报告。
 

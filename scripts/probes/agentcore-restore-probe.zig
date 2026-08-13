@@ -93,7 +93,19 @@ fn releaseResponse(_: ?*anyopaque, response: ?*wire.OwnedBytesV1) callconv(.c) v
 }
 
 fn makeRuntime(api: agentcore.Api) !*wire.RuntimeHandle {
-    const builtin_names = [_][]const u8{ "Read", "Bash", "Edit", "AskUserQuestion" };
+    const builtin_names = [_][]const u8{
+        "Read",
+        "Write",
+        "Edit",
+        "Glob",
+        "Grep",
+        "Bash",
+        "BashOutput",
+        "KillShell",
+        "AskUserQuestion",
+        "WebSearch",
+        "WebFetch",
+    };
     var builtin_views: [builtin_names.len]wire.BytesViewV1 = undefined;
     for (builtin_names, 0..) |name, index| builtin_views[index] = agentcore.bytesView(name);
     var config = std.mem.zeroes(wire.RuntimeConfigV1);
@@ -198,6 +210,34 @@ pub fn main() !void {
     const first_runtime = try makeRuntime(api);
     var first_runtime_live = true;
     defer if (first_runtime_live) destroyRuntime(api, first_runtime) catch {};
+
+    var probe_host = host;
+    probe_host.shell_policy_code = wire.SHELL_UNRESTRICTED;
+    const probe_names = [_][]const u8{
+        "Read", "Write", "Edit", "Glob", "Grep", "Bash", "BashOutput",
+        "KillShell", "AskUserQuestion", "WebSearch", "WebFetch",
+    };
+    var probe_view: [1]wire.BytesViewV1 = undefined;
+    for (probe_names) |name| {
+        probe_view[0] = agentcore.bytesView(name);
+        probe_host.allowed_tools = &probe_view;
+        probe_host.allowed_tool_count = 1;
+        var probe_config = std.mem.zeroes(wire.SessionCreateConfigV1);
+        probe_config.struct_size = @sizeOf(wire.SessionCreateConfigV1);
+        probe_config.host = &probe_host;
+        probe_config.model = agentcore.bytesView("gpt-5-mini");
+        var probe_session: ?*wire.SessionHandle = null;
+        const status = agentcore.Status.fromCode(api.sessionCreate()(
+            first_runtime,
+            &probe_config,
+            &callbacks,
+            &probe_session,
+            null,
+        )) catch .invalid_argument;
+        std.debug.print("allowlist {s}: {s}\n", .{ name, @tagName(status) });
+        if (status != .ok) return error.BuiltinToolRejected;
+        if (probe_session) |value| try destroySession(api, value);
+    }
 
     var create_config = std.mem.zeroes(wire.SessionCreateConfigV1);
     create_config.struct_size = @sizeOf(wire.SessionCreateConfigV1);

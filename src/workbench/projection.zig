@@ -71,6 +71,7 @@ pub const Error = lifecycle.Error || scheduled_tasks_impl.Error || scheduled_tas
     EventAfterTerminalDrain,
     RecoveryUnavailable,
     RestoreAttemptExhausted,
+    UnsupportedBuiltinProfile,
 };
 
 pub const Limits = struct {
@@ -286,6 +287,7 @@ const SkillReconciliation = struct {
 
 pub const Configuration = struct {
     change_notifier: ChangeNotifier = .{},
+    builtin_tool_profile: ?lifecycle.BuiltinToolProfile = null,
     directories: AppDirectories = .{},
     schedule_timer: ScheduleTimer = .{},
     schedule_persistence: SchedulePersistence = .{},
@@ -1299,6 +1301,23 @@ const PermissionSummary = struct {
     }
 };
 
+fn permissionSummaryWire(
+    permission: *const PermissionSummary,
+) task_persistence.PermissionSummaryWire {
+    return .{
+        .request_id = permission.requestId(),
+        .matched_rule_id = permission.matchedRuleId(),
+        .tool_namespace = @tagName(permission.tool_namespace),
+        .tool_name = permission.toolName(),
+        .tool_binding = permission.toolBinding(),
+        .decision = @tagName(permission.decision),
+        .source = @tagName(permission.source),
+        .policy_generation = permission.policy_generation,
+        .used_session_rule = permission.used_session_rule,
+        .callback_outcome = if (permission.callback_outcome) |outcome| @tagName(outcome) else null,
+    };
+}
+
 const ToolView = struct {
     /// One-way correlation key for SDK tool events. The raw AgentCore tool ID
     /// is not retained in Workbench product history.
@@ -2133,6 +2152,7 @@ pub const Workbench = struct {
     skill_catalog: ?CatalogSnapshot = null,
     execution_replacement: ExecutionReplacementKind = .none,
     mcp: ?McpProductState = null,
+    builtin_tool_profile: ?lifecycle.BuiltinToolProfile,
     next_workspace_id: u64 = 1,
     next_workspace_recent_order: u64 = 1,
     next_task_id: u64 = 1,
@@ -2147,6 +2167,8 @@ pub const Workbench = struct {
         limits: Limits,
         configuration: Configuration,
     ) Error!Workbench {
+        if (configuration.builtin_tool_profile != null and builtin.os.tag != .windows)
+            return error.UnsupportedBuiltinProfile;
         if (limits.worker_count == 0 or limits.queue_capacity == 0 or
             limits.max_tasks == 0 or limits.max_workspaces == 0 or
             limits.max_scheduled_tasks == 0 or
@@ -2354,6 +2376,7 @@ pub const Workbench = struct {
             .execution = execution,
             .canonical_user_home = canonical_user_home,
             .automatic_workspaces = automatic_workspaces,
+            .builtin_tool_profile = configuration.builtin_tool_profile,
         };
         if (workbench.skill_inventory != null) skill_inventory_owned = false;
         skill_transactions = null;
@@ -3714,6 +3737,10 @@ pub const Workbench = struct {
                 "",
             .skill_catalog = catalog_lease,
             .mcp_selection = self.mcpSelectionForNewTask(),
+            .allowed_tools = if (self.builtin_tool_profile) |profile|
+                lifecycle.builtinToolsForProfile(profile)
+            else
+                &lifecycle.default_builtin_tools,
         }) catch |err| switch (err) {
             error.SessionCapacity => return error.TaskCapacity,
             else => return err,
@@ -3879,6 +3906,7 @@ pub const Workbench = struct {
                 .workspace = workspace_copy,
                 .execution = execution.take(),
                 .provider = agentProvider(task.durable.execution_provider),
+                .builtin_tool_profile = self.builtin_tool_profile,
                 .mcp_selection = mcp.selection,
                 .mcp_catalog_generation = mcp.catalog_generation,
             },
@@ -9198,18 +9226,7 @@ pub const Workbench = struct {
                 .detail_truncated = record.detail_truncated,
                 .redacted = record.redacted,
                 .agent_request_id = record.agent_request_id[0..record.agent_request_id_len],
-                .permission = if (record.permission) |permission| .{
-                    .request_id = permission.requestId(),
-                    .matched_rule_id = permission.matchedRuleId(),
-                    .tool_namespace = @tagName(permission.tool_namespace),
-                    .tool_name = permission.toolName(),
-                    .tool_binding = permission.toolBinding(),
-                    .decision = @tagName(permission.decision),
-                    .source = @tagName(permission.source),
-                    .policy_generation = permission.policy_generation,
-                    .used_session_rule = permission.used_session_rule,
-                    .callback_outcome = if (permission.callback_outcome) |outcome| @tagName(outcome) else null,
-                } else null,
+                .permission = if (record.permission) |*permission| permissionSummaryWire(permission) else null,
             };
         }
         return .{
