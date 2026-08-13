@@ -95,6 +95,7 @@ pub fn main() !void {
     const allocator = std.heap.c_allocator;
     const api = try agentcore.Api.discover();
     var probe = Probe{ .allocator = allocator };
+    const workspace_path = if (@import("builtin").os.tag == .windows) "C:\\" else "/";
 
     var callbacks = std.mem.zeroes(wire.SessionCallbacksV1);
     callbacks.struct_size = @sizeOf(wire.SessionCallbacksV1);
@@ -117,8 +118,8 @@ pub fn main() !void {
     host.shell_policy_code = wire.SHELL_DISABLED;
     host.api_key = agentcore.bytesView("run-state-probe-key");
     host.base_url = agentcore.bytesView("__BASE_URL__");
-    host.workspace_root = agentcore.bytesView("C:\\");
-    host.workspace_home = agentcore.bytesView("C:\\");
+    host.workspace_root = agentcore.bytesView(workspace_path);
+    host.workspace_home = agentcore.bytesView(workspace_path);
 
     var config = std.mem.zeroes(wire.SessionCreateConfigV1);
     config.struct_size = @sizeOf(wire.SessionCreateConfigV1);

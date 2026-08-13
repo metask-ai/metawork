@@ -28,8 +28,13 @@ const bundle = await validateAgentCoreBundle(bundleRoot, {
   expectedManifest: lock.manifest,
   expectedManifestBytes: lock.bytes,
 });
-if (process.platform !== "win32" || process.arch !== "x64")
-  throw new Error("run_state probe is Windows x64 only");
+if (
+  !(
+    (process.platform === "win32" && process.arch === "x64") ||
+    (process.platform === "darwin" && process.arch === "arm64")
+  )
+)
+  throw new Error("run_state probe requires Windows x64 or macOS arm64");
 
 const sse = [
   {
