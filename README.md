@@ -24,16 +24,16 @@ flowchart LR
         APPLICATION -->|"registered compatibility paths"| NATIVE_COMPAT
     end
 
-    AGENTCORE["Metask AgentCore<br/>ABI v1 revision 7"]
+    AGENTCORE["Metask AgentCore<br/>ABI v1 revision 8 (Windows x64 GNU)"]
     NATIVE_RUNTIME["Native SDK<br/>Runtime API"]
     AGENT -->|"typed ABI"| AGENTCORE
     APPLICATION -->|"platform capabilities"| NATIVE_RUNTIME
     NATIVE_RUNTIME -->|"hosts System WebView"| RENDERER
 ```
 
-当前应用是一条真实的同进程同步垂直链路，已经覆盖 Account、Task、typed Text/Skill Run、built-in Read/Bash/Edit、question/permission、取消、Renderer reload、bounded event delivery 和生命周期收口。正式 build 只消费 staged `.agentcore/bundle` 中的官方 Zig package。revision 7 提供 checkpoint、MCP、Runtime MCP configuration apply 与 Permission provenance 等 ABI 原语，但未完成独立产品验收的能力保持关闭。
+当前应用是一条真实的同进程同步垂直链路，已经覆盖 Account、Task、typed Text/Skill Run、built-in Read/Bash/Edit、question/permission、取消、Renderer reload、bounded event delivery 和生命周期收口。正式 build 只消费 staged `.agentcore/bundle` 中的官方 Zig package。Windows revision 8 在 revision 7 能力之上提供结构化 `run_state` 事件；未完成独立产品验收的能力保持关闭。
 
-Windows revision 7 development baseline 已通过；macOS revision 7 artifact 已独立锁定，仍待 macOS native probe/build/vertical 复验。当前仍是同进程 prototype，不具备 AgentCore 进程隔离、crash recovery、跨进程 Conversation 恢复、strict Workspace security 或正式安装/更新能力。精确证据与尚未验证的能力见 [验证规范](docs/validation.md)。
+Windows revision 8 development bundle 已锁定；macOS revision 7 artifact 仍独立锁定，待 macOS native probe/build/vertical 复验。当前仍是同进程 prototype，不具备 AgentCore 进程隔离、crash recovery、跨进程 Conversation 恢复、strict Workspace security 或正式安装/更新能力。精确证据与尚未验证的能力见 [验证规范](docs/validation.md)。
 
 ## 快速开始
 
@@ -41,12 +41,6 @@ Windows revision 7 development baseline 已通过；macOS revision 7 artifact �
 
 macOS：
 
-```bash
-npm ci
-node scripts/stage-agentcore-bundle.mjs /absolute/path/to/metacodes/zig-out/agentcore/aarch64-macos
-node scripts/setup-macos-local-signing.mjs setup
-npm run dev
-```
 
 Windows：
 
@@ -91,7 +85,7 @@ probe 使用临时 source-free SDK consumer，不进入正式产品 build graph�
 - [Renderer Bridge 合同](docs/renderer-bridge-contract.md)：command、event、Snapshot 与运输语义
 - [工程结构与所有权](docs/project-structure.md)：active tree、owner 与依赖方向
 - [AgentCore 集成契约](docs/agentcore-integration.md)：线程、事件、所有权和生命周期
-- [AgentCore ABI v1 revision 7 消费合同](docs/agentcore-abi-v1.md)：锁定 bundle 的机器合同与能力边界
+- [AgentCore ABI v1 消费合同](docs/agentcore-abi-v1.md)：锁定各 target bundle 的机器合同与能力边界
 - [Metask Account API 合同](docs/metask-account-contract.md)：OAuth、catalog、ExecutionTarget 与持久化
 - [macOS 本地开发签名](docs/macos-local-development.md)：Apple Development identity 与 Keychain 稳定性
 - [验证规范](docs/validation.md)：证据、持续回归和未验证能力

@@ -52,7 +52,9 @@ pub fn verify(b: *std.Build, root: []const u8) Bundle {
     const manifest_path = b.pathJoin(&.{ root, "manifest.json" });
     const manifest_bytes = readFile(b, manifest_path, 1024 * 1024, "cannot read AgentCore bundle manifest");
     const manifest = parseManifest(b, manifest_bytes);
-    const lock_path = lockPathForTarget(manifest.target.id);
+    if (!std.mem.eql(u8, manifest.target.id, "x86_64-windows-gnu"))
+        @panic("unsupported AgentCore bundle target");
+    const lock_path = "build_support/agentcore-bundle.windows.lock.json";
     const lock_bytes = readFile(b, lock_path, 1024 * 1024, "cannot read AgentCore bundle lock");
     if (!std.mem.eql(u8, lock_bytes, manifest_bytes))
         @panic("AgentCore manifest bytes do not match the repository lock");
@@ -65,12 +67,12 @@ pub fn verify(b: *std.Build, root: []const u8) Bundle {
         lock.source.dirty or
         !std.mem.eql(u8, lock.toolchain.zig_version, @import("builtin").zig_version_string) or
         lock.contract.binary_abi_version != 1 or
-        lock.contract.binary_abi_revision != 7 or
+        lock.contract.binary_abi_revision != 8 or
         lock.contract.binary_abi_table_size != 216 or
-        lock.contract.capabilities != 0x7ffff or
+        lock.contract.capabilities != 0xfffff or
         !std.mem.eql(u8, lock.contract.binary_abi_status, "experimental"))
         @panic("unsupported locked AgentCore bundle contract");
-    if (!std.mem.eql(u8, lock.build.optimize, expectedOptimizeForTarget(lock.target.id)) or !lock.build.strip)
+    if (!std.mem.eql(u8, lock.build.optimize, "ReleaseSafe") or !lock.build.strip)
         @panic("unsupported locked AgentCore build identity");
     const deployment_target = validateTarget(lock);
     if (lock.files.len == 0 or lock.files.len > 256)
@@ -87,37 +89,9 @@ pub fn verify(b: *std.Build, root: []const u8) Bundle {
     };
 }
 
-fn lockPathForTarget(target_id: []const u8) []const u8 {
-    if (std.mem.eql(u8, target_id, "aarch64-macos"))
-        return "build_support/agentcore-bundle.macos.lock.json";
-    if (std.mem.eql(u8, target_id, "x86_64-windows-gnu"))
-        return "build_support/agentcore-bundle.windows.lock.json";
-    @panic("unsupported AgentCore bundle target");
-}
-
-fn expectedOptimizeForTarget(target_id: []const u8) []const u8 {
-    if (std.mem.eql(u8, target_id, "aarch64-macos"))
-        return "ReleaseSafe";
-    if (std.mem.eql(u8, target_id, "x86_64-windows-gnu"))
-        return "ReleaseSafe";
-    @panic("unsupported AgentCore bundle target");
-}
-
 fn validateTarget(manifest: Manifest) ?std.SemanticVersion {
     if (!manifest.link.requires_c_runtime or manifest.link.system_frameworks.len != 0)
         @panic("unsupported AgentCore system link inputs");
-    if (std.mem.eql(u8, manifest.target.id, "aarch64-macos") and
-        std.mem.eql(u8, manifest.target.os, "macos") and
-        std.mem.eql(u8, manifest.target.architecture, "aarch64") and
-        std.mem.eql(u8, manifest.target.abi, "none") and
-        std.mem.eql(u8, manifest.target.rust_target, "aarch64-apple-darwin") and
-        manifest.link.system_libraries.len == 0)
-    {
-        return deploymentTargetFromZigTarget(
-            manifest.target.zig_target,
-            manifest.target.architecture,
-        );
-    }
     if (std.mem.eql(u8, manifest.target.id, "x86_64-windows-gnu") and
         std.mem.eql(u8, manifest.target.os, "windows") and
         std.mem.eql(u8, manifest.target.architecture, "x86_64") and
@@ -176,29 +150,6 @@ fn verifyPayloadPath(path: []const u8) void {
                 @panic("unsupported AgentCore manifest payload path character");
         }
     }
-}
-
-fn deploymentTargetFromZigTarget(
-    zig_target: []const u8,
-    architecture: []const u8,
-) std.SemanticVersion {
-    var prefix_storage: [64]u8 = undefined;
-    const prefix = std.fmt.bufPrint(&prefix_storage, "{s}-macos.", .{architecture}) catch
-        @panic("AgentCore architecture is too long");
-    if (!std.mem.startsWith(u8, zig_target, prefix) or
-        !std.mem.endsWith(u8, zig_target, "-none"))
-        @panic("invalid AgentCore resolved macOS target");
-    const range_start = std.mem.indexOfPos(u8, zig_target, prefix.len, "...") orelse
-        @panic("AgentCore resolved target is missing its supported OS range");
-    const minimum = zig_target[prefix.len..range_start];
-    var semantic_storage: [32]u8 = undefined;
-    const semantic = if (std.mem.count(u8, minimum, ".") == 1)
-        std.fmt.bufPrint(&semantic_storage, "{s}.0", .{minimum}) catch
-            @panic("AgentCore deployment target is too long")
-    else
-        minimum;
-    return std.SemanticVersion.parse(semantic) catch
-        @panic("invalid AgentCore resolved macOS deployment target");
 }
 
 fn stringListsEqual(left: []const []const u8, right: []const []const u8) bool {

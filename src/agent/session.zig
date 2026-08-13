@@ -26,6 +26,8 @@ pub const PermissionDecisionSource = sdk.protocol.PermissionDecisionSource;
 pub const PermissionCallbackOutcome = sdk.protocol.PermissionCallbackOutcome;
 pub const PermissionProvenance = sdk.protocol.PermissionProvenance;
 pub const PermissionToolNamespace = sdk.protocol.PermissionToolNamespace;
+pub const RunState = sdk.protocol.RunState;
+pub const RunStatePhase = sdk.protocol.RunStatePhase;
 pub const ParsedUiRequest = sdk.ParsedUiRequest;
 pub const CatalogHealth = catalog.Health;
 pub const CatalogIssueCode = catalog.IssueCode;
@@ -106,6 +108,12 @@ fn coreEventTextValid(event: sdk.DecodedCoreEvent) bool {
             .progress => |progress| validUtf8(&.{ progress.tool_name, progress.tool_input }),
             .tool_result => |result| validUtf8(&.{ result.id, result.name, result.input, result.content }),
             .usage, .retry_notice, .stream_done => true,
+            .run_state => |state| {
+                if (state.run_id == 0) return false;
+                for (state.in_flight_tools) |tool|
+                    if (!validUtf8(&.{ tool.tool_call_id, tool.name })) return false;
+                return true;
+            },
             .context_warning => |warning| std.unicode.utf8ValidateSlice(warning.level),
             .auto_compact => |compact| std.unicode.utf8ValidateSlice(compact.cause),
             .permission_provenance => |value| validUtf8(&.{

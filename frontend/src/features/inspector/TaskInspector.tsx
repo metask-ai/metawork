@@ -29,6 +29,17 @@ function isActiveRun(run: RunView): boolean {
   );
 }
 
+const safeRunStatusLabels = new Set([
+  "Queued",
+  "Starting",
+  "Generating response",
+  "Executing tools",
+  "Waiting for your input",
+  "Retrying provider",
+  "Compacting context",
+  "Finishing",
+]);
+
 function runLabel(run: RunView): MessageId {
   switch (run.phase) {
     case "queued":
@@ -156,6 +167,9 @@ export function TaskInspector({
               <span className="inspector-state-line" aria-hidden="true" />
               <div>
                 <strong>{t(runLabel(run))}</strong>
+                {isActiveRun(run) && safeRunStatusLabels.has(run.status) && (
+                  <span>{run.status}</span>
+                )}
                 {run.cause && <small>{t(`cause.${run.cause}`)}</small>}
               </div>
             </div>

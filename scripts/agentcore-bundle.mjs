@@ -9,25 +9,9 @@ const maxManifestBytes = 1024 * 1024;
 const maxPayloadBytes = 128 * 1024 * 1024;
 const maxPayloadFiles = 256;
 const supportedAbiVersion = 1;
-const supportedAbiRevision = 7;
 const supportedAbiTableSize = 216;
-const supportedCapabilities = 0x7ffff;
 
 const targetPolicies = [
-  {
-    hostPlatform: "darwin",
-    hostArchitecture: "arm64",
-    id: "aarch64-macos",
-    architecture: "aarch64",
-    os: "macos",
-    abi: "none",
-    rustTarget: "aarch64-apple-darwin",
-    zigTarget: /^aarch64-macos\.(\d+\.\d+(?:\.\d+)?)\.\.\.[^-]+-none$/,
-    library: "lib/libmetask_agentcore.a",
-    optimize: "ReleaseSafe",
-    systemLibraries: [],
-    lock: path.join("build_support", "agentcore-bundle.macos.lock.json"),
-  },
   {
     hostPlatform: "win32",
     hostArchitecture: "x64",
@@ -40,6 +24,8 @@ const targetPolicies = [
     library: "lib/metask_agentcore.lib",
     optimize: "ReleaseSafe",
     systemLibraries: ["advapi32", "crypt32"],
+    abiRevision: 8,
+    capabilities: 0xfffff,
     lock: path.join("build_support", "agentcore-bundle.windows.lock.json"),
   },
 ];
@@ -358,16 +344,16 @@ export async function validateAgentCoreBundle(bundleRoot, options = {}) {
     "unsupported AgentCore binary ABI",
   );
   requireValue(
-    manifest.contract.binary_abi_revision === supportedAbiRevision,
-    "unsupported AgentCore binary ABI revision",
+    manifest.contract.binary_abi_revision === policy.abiRevision,
+    `unsupported AgentCore binary ABI revision for ${policy.id}`,
   );
   requireValue(
     manifest.contract.binary_abi_table_size === supportedAbiTableSize,
     "unsupported AgentCore binary ABI table size",
   );
   requireValue(
-    manifest.contract.capabilities === supportedCapabilities,
-    "unsupported AgentCore capability set",
+    manifest.contract.capabilities === policy.capabilities,
+    `unsupported AgentCore capability set for ${policy.id}`,
   );
 
   requireValue(
@@ -423,21 +409,13 @@ export async function validateAgentCoreBundle(bundleRoot, options = {}) {
     `bundle Zig ${zigVersion} does not match host Zig ${actualZigVersion}`,
   );
 
-  let symbols = options.symbols;
-  if (symbols === undefined && policy.os === "macos") {
-    symbols = (
-      await execFileAsync("nm", ["-gU", path.join(root, policy.library)], {
-        encoding: "utf8",
-        maxBuffer: 16 * 1024 * 1024,
-      })
-    ).stdout;
-  }
+  const symbols = options.symbols;
   if (symbols !== undefined) {
     const discoveryMatches =
       symbols.match(/\b_?metask_agentcore_get_api\b/g) ?? [];
     requireValue(
       discoveryMatches.length === 1,
-      "AgentCore bundle must expose exactly one revision 7 discovery symbol",
+      "AgentCore bundle must expose exactly one pinned discovery symbol",
     );
     requireValue(
       !/\b_?metacodes_agentcore_get_api\b/.test(symbols),

@@ -25,8 +25,8 @@ WebSearch / WebFetch
 
 ## 2. 本次不处理的内容
 
-- macOS bundle、macOS lock 和 macOS 工具可用性；由 macOS 独立交付面处理；
-- AgentCore catalog、binding identity 或 ABI revision 变更；revision 7 现有名称数组已足够完成本次名称接入；
+- 非 Windows bundle 与其他平台工具可用性；本 hard cut 不建立第二交付面；
+- AgentCore catalog、binding identity 或 ABI revision 变更；当前 revision 8 名称数组已足够完成本次名称接入；
 - ABI Host tools、MCP 工具合并、第二套 ToolManager 或 MetaWork 自建进程/网络执行器；
 - permission contract 重构；沿用 [会话权限系统重构方案](permission-system-refactor-plan.md)；
 - WebSearch 的 provider 差异、网络策略和外部服务可用性；这些不是本次 Windows 工具名称接入的身份问题；
@@ -42,7 +42,7 @@ WebSearch / WebFetch
 - `src/workbench/projection.zig` 创建正式 Task Session 时没有传入新的工具选择，因此始终依赖四工具默认值；
 - Runtime 级集合必须是 Windows 已验证工具的并集，Session 级 `allowed_tools` 只能在其内收窄；只改 Session 名称而不扩充 Runtime 集合不会完成接入。
 
-当前 Windows bundle 的静态证据来自 `.agentcore/bundle/lib/metask_agentcore.lib`，对应 lock source `5f45e15dc1c63561b423ace51a1e6f05831b583a`。该证据不替代真实 Session 运行证据。
+当前 Windows bundle 的静态证据来自 `.agentcore/bundle/lib/metask_agentcore.lib`，对应 lock source `78fe89e47d56df8fd3e76f8b289a0017bf2ff783`（ABI v1 revision 8）。该证据不替代真实 Session 运行证据。
 
 ## 4. 最小架构
 
@@ -101,7 +101,7 @@ WebSearch / WebFetch
 - `WebSearch` 在 MetaWork wire 层仍只有一个工具名，不产生 provider-specific identity；
 - unknown name、未验证名称和空选择 fail closed；
 - `host_tool_count` 保持 0，MCP、permission、shutdown 和 AgentCore 协议继续使用各自 source of truth；
-- Windows 通过结果不推断 macOS 可用性，macOS 由其独立交付面验证；
+- 验证只声明 Windows x86_64 GNU 可用性；不推断其他平台可用性；
 - Renderer/Bridge 只显示 Windows verified set 中的真实 capability。
 
 ## 7. 依赖文档
@@ -115,7 +115,7 @@ WebSearch / WebFetch
 ## Verification note
 
 Phase 0 implementation evidence (Windows staged bundle, 2026-08-12): `node scripts/run-agentcore-probe.mjs --staged` verifies the locked bundle and creates a Session for each of the 11 names. The probe uses `shell_policy=unrestricted` because AgentCore correctly rejects shell names when shell policy is disabled. This proves name admission under the required shell condition; it does not replace per-tool execution evidence.
-- The Windows Application now selects `full` for ordinary production Workbench Tasks, so the 11 verified built-ins are exposed to the model. macOS remains unconfigured; `local` and `network` remain explicit restricted profile options.
+- The Windows Application now selects `full` for ordinary production Workbench Tasks, so the 11 verified built-ins are exposed to the model. `local` and `network` remain explicit restricted profile options.
 - The Windows restore path carries the same profile as fresh Task creation, so restart cannot silently fall back to the four-name default set.
 - The real Windows vertical exercises `Read`, `Bash`, `Edit`, `Write`, `Glob`, `Grep`, `BashOutput`, and `KillShell` in one AgentCore Run; `Write` materialization, tool projection, checkpoint commit, and restart recovery are asserted. `WebSearch` and `WebFetch` are exposed by the ordinary `full` profile as AgentCore built-in names, without a second executor or provider-specific MetaWork implementation.
 - The restart corruption found during the vertical was caused by the persistence projection serializing bounded permission buffers as JSON arrays. `permissionSummaryWire` now returns the typed wire struct and preserves slices; `zig build test-lifecycle -Doptimize=Debug` and the Windows vertical both pass.
