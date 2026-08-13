@@ -606,23 +606,19 @@ summary::-webkit-details-marker {
 }
 
 .account-menu {
-  position: absolute;
-  z-index: 60;
-  right: 10px;
-  bottom: calc(100% - 4px);
-  left: 10px;
   display: grid;
+  width: min(280px, calc(100vw - 24px));
   padding: 5px;
-  border: 1px solid var(--color-rule);
+  border: 1px solid var(--ui-border);
   border-radius: 10px;
-  background: var(--color-canvas);
-  box-shadow: 0 16px 36px rgba(37, 34, 45, 0.15);
+  background: var(--ui-surface-panel);
+  box-shadow: var(--ui-shadow-overlay);
 }
 
 .account-menu-heading {
   min-width: 0;
   padding: 8px 9px 9px;
-  border-bottom: 1px solid var(--color-rule);
+  border-bottom: 1px solid var(--ui-border);
 }
 
 .account-menu-heading strong,
@@ -639,7 +635,7 @@ summary::-webkit-details-marker {
 
 .account-menu-heading span {
   margin-top: 3px;
-  color: var(--color-muted);
+  color: var(--ui-content-muted);
   font-size: 9px;
 }
 
@@ -652,14 +648,18 @@ summary::-webkit-details-marker {
   gap: 8px;
   border: 0;
   border-radius: 6px;
-  color: var(--color-graphite);
+  color: var(--ui-content-primary);
   background: transparent;
   font-size: 11px;
   text-align: left;
 }
 
 .account-menu-item:hover:not(:disabled) {
-  background: var(--color-brand-50);
+  background: var(--metask-primary-soft);
+}
+
+.account-menu-item[data-highlighted] {
+  background: var(--metask-primary-soft);
 }
 
 .account-menu-item.is-attention {
@@ -667,7 +667,7 @@ summary::-webkit-details-marker {
 }
 
 .account-menu-item.is-danger {
-  color: var(--color-danger);
+  color: var(--metask-state-error);
 }
 
 /* Formal Settings route */
@@ -5233,39 +5233,37 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .task-menu-popover {
-  position: absolute;
-  z-index: 25;
-  top: calc(100% + 5px);
-  right: 0;
   display: grid;
   width: 180px;
   padding: 5px;
-  border: 1px solid #b9c7c8;
+  border: 1px solid var(--ui-border);
   border-radius: 10px;
-  background: var(--color-canvas);
-  box-shadow: 0 14px 30px rgba(24, 50, 71, 0.16);
+  background: var(--ui-surface-panel);
+  box-shadow: var(--ui-shadow-overlay);
 }
 
-.task-menu-popover button {
+.task-menu-item {
   min-height: 32px;
   padding: 0 9px;
   border: 0;
   border-radius: 6px;
-  color: var(--color-graphite);
+  color: var(--ui-content-primary);
   background: transparent;
   font-size: 11px;
   text-align: left;
 }
 
-.task-menu-popover button:hover:not(:disabled) {
-  background: #eef3f3;
+.task-menu-item:hover:not(:disabled),
+.task-menu-item[data-highlighted] {
+  background: var(--metask-primary-soft);
 }
 
-.task-menu-popover button.is-danger {
-  color: var(--color-danger);
+.task-menu-item.is-danger {
+  color: var(--metask-state-error);
 }
 
-.task-menu-popover button:disabled {
+.task-menu-item:disabled,
+.task-menu-item[data-disabled] {
   opacity: 0.4;
 }
 

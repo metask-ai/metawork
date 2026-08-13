@@ -24,6 +24,7 @@ import {
   connectionStatus,
 } from "./connection-status.ts";
 import { Icon } from "../components/ui/Icon.tsx";
+import { Menu } from "../components/ui/menu.tsx";
 import { AccountIdentity } from "../features/account/AccountIdentity.tsx";
 import { AccountGate } from "../features/account/AccountGate.tsx";
 import { requiresAccountGate } from "../features/account/gating.ts";
@@ -208,7 +209,7 @@ export default function App() {
   const accountCancelBusyRef = useRef(false);
   const workspaceBusyRef = useRef(false);
   const connectionBusyRef = useRef(false);
-  const taskMenu = useRef<HTMLDivElement>(null);
+  const taskMenuTrigger = useRef<HTMLButtonElement>(null);
   const inspectorToggle = useRef<HTMLButtonElement>(null);
   const inspectorOpener = useRef<HTMLButtonElement | null>(null);
   const inspectorFocusSequence = useRef(0);
@@ -599,36 +600,10 @@ export default function App() {
     window.requestAnimationFrame(focusPendingRequest);
   }
 
-  useEffect(() => {
-    if (!taskMenuOpen) return;
-    const dismiss = (event: MouseEvent) => {
-      if (!taskMenu.current?.contains(event.target as Node))
-        setTaskMenuOpen(false);
-    };
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      setTaskMenuOpen(false);
-      taskMenu.current?.querySelector<HTMLButtonElement>("button")?.focus();
-    };
-    document.addEventListener("mousedown", dismiss);
-    window.addEventListener("keydown", closeOnEscape);
-    return () => {
-      document.removeEventListener("mousedown", dismiss);
-      window.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [taskMenuOpen]);
-
-  function closeTaskMenuAndRestoreFocus() {
-    setTaskMenuOpen(false);
-    window.requestAnimationFrame(() =>
-      taskMenu.current?.querySelector<HTMLButtonElement>("button")?.focus(),
-    );
-  }
-
   function closeDeleteConfirmation() {
     setConfirmDelete(false);
     window.requestAnimationFrame(() =>
-      taskMenu.current?.querySelector<HTMLButtonElement>("button")?.focus(),
+      taskMenuTrigger.current?.focus(),
     );
   }
 
@@ -2461,108 +2436,84 @@ export default function App() {
                   </button>
                 )}
                 {activeTask && (
-                  <div className="task-menu" ref={taskMenu}>
-                    <button
-                      className="secondary-button focus-ring"
-                      aria-expanded={taskMenuOpen}
-                      aria-haspopup="menu"
-                      onClick={() => setTaskMenuOpen((open) => !open)}
-                    >
-                      {t("task.actions")}
-                    </button>
-                    {taskMenuOpen && (
-                      <div
-                        className="task-menu-popover"
-                        role="menu"
-                        onKeyDown={(event) => {
-                          if (
-                            event.key !== "ArrowDown" &&
-                            event.key !== "ArrowUp"
-                          )
-                            return;
-                          const items = [
-                            ...event.currentTarget.querySelectorAll<HTMLButtonElement>(
-                              "button:not([disabled])",
-                            ),
-                          ];
-                          if (items.length === 0) return;
-                          event.preventDefault();
-                          const index = items.indexOf(
-                            document.activeElement as HTMLButtonElement,
-                          );
-                          const offset = event.key === "ArrowDown" ? 1 : -1;
-                          const next =
-                            index < 0
-                              ? event.key === "ArrowDown"
-                                ? 0
-                                : items.length - 1
-                              : (index + offset + items.length) % items.length;
-                          items[next].focus();
-                        }}
+                  <Menu.Root
+                    open={taskMenuOpen}
+                    onOpenChange={setTaskMenuOpen}
+                  >
+                    <div className="task-menu">
+                      <Menu.Trigger
+                        ref={taskMenuTrigger}
+                        className="secondary-button focus-ring"
                       >
-                        <button
-                          role="menuitem"
-                          disabled={taskMutationDisabled}
-                          onClick={() => {
-                            setTitleDraft(activeTask.title);
-                            setEditingTitle(true);
-                            setTaskMenuOpen(false);
-                          }}
+                        {t("task.actions")}
+                      </Menu.Trigger>
+                      <Menu.Portal>
+                        <Menu.Positioner
+                          side="bottom"
+                          align="end"
+                          sideOffset={5}
                         >
-                          {t("task.rename")}
-                        </button>
-                        <button
-                          role="menuitem"
-                          disabled={
-                            taskMutationDisabled ||
-                            taskOperationInFlight ||
-                            activeTask.lifecycle === "closing"
-                          }
-                          onClick={() => {
-                            closeTaskMenuAndRestoreFocus();
-                            void setArchived(!activeTask.archived);
-                          }}
-                        >
-                          {activeTask.archived
-                            ? t("task.restore")
-                            : t("task.archive")}
-                        </button>
-                        <button
-                          role="menuitem"
-                          disabled={
-                            (activeTask.lifecycle === "closing" &&
-                              !activeTask.closeFailed) ||
-                            activeTask.lifecycle === "closed" ||
-                            taskMutationDisabled
-                          }
-                          onClick={() => {
-                            closeTaskMenuAndRestoreFocus();
-                            void closeTask();
-                          }}
-                        >
-                          {activeTask.closeFailed
-                            ? t("task.end_retry")
-                            : activeTask.lifecycle === "closing"
-                              ? t("task.ending")
-                              : t("task.end")}
-                        </button>
-                        <button
-                          role="menuitem"
-                          className="is-danger"
-                          disabled={
-                            activeTask.lifecycle !== "closed" ||
-                            taskMutationDisabled
-                          }
-                          onClick={() => {
-                            setTaskMenuOpen(false);
-                            setConfirmDelete(true);
-                          }}
-                        >
-                          {t("task.delete")}
-                        </button>
-                      </div>
-                    )}
-                  </div>
+                          <Menu.Popup className="task-menu-popover">
+                            <Menu.Item
+                              className="task-menu-item"
+                              disabled={taskMutationDisabled}
+                              onClick={() => {
+                                setTitleDraft(activeTask.title);
+                                setEditingTitle(true);
+                              }}
+                            >
+                              {t("task.rename")}
+                            </Menu.Item>
+                            <Menu.Item
+                              className="task-menu-item"
+                              disabled={
+                                taskMutationDisabled ||
+                                taskOperationInFlight ||
+                                activeTask.lifecycle === "closing"
+                              }
+                              onClick={() => {
+                                void setArchived(!activeTask.archived);
+                              }}
+                            >
+                              {activeTask.archived
+                                ? t("task.restore")
+                                : t("task.archive")}
+                            </Menu.Item>
+                            <Menu.Item
+                              className="task-menu-item"
+                              disabled={
+                                (activeTask.lifecycle === "closing" &&
+                                  !activeTask.closeFailed) ||
+                                activeTask.lifecycle === "closed" ||
+                                taskMutationDisabled
+                              }
+                              onClick={() => {
+                                void closeTask();
+                              }}
+                            >
+                              {activeTask.closeFailed
+                                ? t("task.end_retry")
+                                : activeTask.lifecycle === "closing"
+                                  ? t("task.ending")
+                                  : t("task.end")}
+                            </Menu.Item>
+                            <Menu.Item
+                              className="task-menu-item is-danger"
+                              disabled={
+                                activeTask.lifecycle !== "closed" ||
+                                taskMutationDisabled
+                              }
+                              onClick={() => {
+                                setConfirmDelete(true);
+                              }}
+                            >
+                              {t("task.delete")}
+                            </Menu.Item>
+                          </Menu.Popup>
+                        </Menu.Positioner>
+                      </Menu.Portal>
+                    </div>
+                  </Menu.Root>
                 )}
               </div>
             </header>
