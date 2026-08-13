@@ -1,30 +1,32 @@
-# MetaWork AgentCore ABI v1 revision 7 消费合同
+# MetaWork AgentCore ABI v1 消费合同
 
-> 状态：revision 7 已作为唯一 development baseline hard cut；不声明 stable support policy
+> 状态：Windows x86_64 GNU revision 8 是唯一 exact development baseline hard cut；不声明 stable support policy
 > 所有者：Metask AgentCore 负责 facade、bindings、bundle 和 ABI 政策；MetaWork 负责 exact artifact 消费、Host 生命周期和产品 capability gate
 
-本文定义 MetaWork 对 Metask AgentCore binary ABI version 1 revision 7 的唯一有效消费边界。线程、事件泵和 Host 生命周期见 [AgentCore 集成契约](agentcore-integration.md)，验证入口见 [验证规范](validation.md)。
+本文定义 MetaWork 对 Metask AgentCore binary ABI version 1 的 target-specific 消费边界。线程、事件泵和 Host 生命周期见 [AgentCore 集成契约](agentcore-integration.md)，验证入口见 [验证规范](validation.md)。
 
 ## 1. 唯一 baseline
 
-两个 target 独立锁定 clean source artifact。Windows 当前使用 commit `5f45e15dc1c63561b423ace51a1e6f05831b583a`、package version `0.1.0-dev+5f45e15dc1c6`；macOS 仍使用 commit `c2e6f52cb4ce8e440a675dcc9e8517b1f8a4eb73`、package version `0.1.0-dev+c2e6f52cb4ce`。两者均为 Zig 0.16.0、strip=true、requires C runtime：
+Windows 锁定 clean source artifact，commit `78fe89e47d56df8fd3e76f8b289a0017bf2ff783`、package version `0.1.0-dev+78fe89e47d56`，使用 Zig 0.16.0、strip=true、requires C runtime：
 
 | Target                       | Build        | Link input                  | Repository lock                                    |
 | ---------------------------- | ------------ | --------------------------- | -------------------------------------------------- |
-| macOS arm64，最低 macOS 13.0 | ReleaseSafe  | 无 system library/framework | `build_support/agentcore-bundle.macos.lock.json`   |
 | Windows x86_64 GNU           | ReleaseSafe  | `advapi32`、`crypt32`       | `build_support/agentcore-bundle.windows.lock.json` |
 
-固定合同为：
+固定合同按 target 为：
 
 - `binary_abi_version = 1`；
-- `binary_abi_revision = 7`；
-- `binary_abi_table_size = 216`；
-- `capabilities = 524287`（`0x7ffff`）；
+- Windows：`binary_abi_revision = 8`，`capabilities = 1048575`（`0xfffff`）；
+- 两者的 `binary_abi_table_size` 都是 `216`；
 - 唯一 discovery symbol 为 `metask_agentcore_get_api`；
 - struct size 必须精确匹配，Host 提供的 reserved 字段必须全部为零；
 - 每个平台按完整 manifest bytes 和 payload checksum 独立锁定，不能用 source commit 推断 artifact bytes 可互换。
 
-MetaWork 不接受其他 ABI revision，不保留 function-table 分流、旧类型别名、shim、兼容 parser、双 bundle 或静默 fallback。需要回退时只能回退整个 MetaWork 变更和对应 exact artifact，运行时没有降级路径。
+MetaWork 不接受目标 policy 之外的 ABI revision，不保留 function-table 分流、旧类型别名、shim、兼容 parser、双 bundle 或静默 fallback。需要回退时只能回退整个 MetaWork 变更和对应 exact artifact，运行时没有降级路径。
+
+### Windows revision 8 的执行状态事件
+
+revision 8 新增 `CAP_RUN_STATE_OBSERVATION` 和 `CoreEvent.run_state`。事件携带单调 `transition_seq`、`phase`（starting、generating、executing_tools、waiting_ui、retrying、compacting、finalizing、completed、failed、aborted、poisoned）、turn、累计 tool call 数及当前 in-flight tool 数组。MetaWork 只接受与 envelope Run identity 相同且序号递增的观察，将其投影为 Workbench 的运行时状态与现有 `status` 文案；状态不是持久终态，重启后仍按未完成 Run 的既有恢复规则收口。
 
 ## 2. Bundle 与 SDK 边界
 
@@ -39,7 +41,7 @@ MetaWork 不接受其他 ABI revision，不保留 function-table 分流、旧类
 
 MetaWork 不复制 header、raw enum、event tag、Permission/Skill/MCP JSON schema、facade code 或 SDK validation。官方 SDK 是 `Status`、`StopReason`、`CoreEvent`、`UiRequest`、`UiResponse`、Permission、Skill、MCP、Session description 与 restore report 的唯一协议来源。
 
-## 3. revision 7 function table
+## 3. Target function table
 
 `ApiV1` 的全部非可选 entry 都必须存在并通过 SDK discovery：
 
@@ -68,7 +70,7 @@ fresh Session 只使用 `SessionHostConfigV1` 与 `SessionCreateConfigV1`：
 - 当前正式 Application 仍使用 `permission_rules = null` 与 `durable_budget = null`；新 Session 的 `mcp_selection` 来自 Workbench 当前 committed opaque activation 或为 null，既有 Session 不因启动期产品状态变化被替换；null durable budget 使用 AgentCore canonical defaults；
 - 每个 Session 至多一个 in-flight Run/compact/mutation；Runtime 必须活得比全部 Session 和 catalog lease 长。
 
-旧 AgentCore Session/Conversation 不迁移、不打开，也不通过重新提交历史文本伪造恢复。升级后只创建 revision 7 Session，不存在任何旧 revision 的 discovery、加载或回退路径。
+旧 AgentCore Session/Conversation 不迁移、不打开，也不通过重新提交历史文本伪造恢复。升级后按 target 创建对应 revision 的 Session，不存在任何旧 revision 的 discovery、加载或回退路径。
 
 ## 5. 当前消费与 capability gate
 

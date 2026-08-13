@@ -47,6 +47,7 @@ pub const Error = lifecycle.Error || scheduled_tasks_impl.Error || scheduled_tas
     WorkspaceOrderExhausted,
     UnknownTask,
     UnknownWorkspace,
+    InvalidRunState,
     TaskClosing,
     ExecutionUnavailable,
     ExecutionInUse,
@@ -1429,6 +1430,13 @@ const RunRecord = struct {
     tools: []?ToolView,
     usage: UsageView = .{},
     status_text: []u8,
+    /// Latest monotonic AgentCore execution observation. These fields are
+    /// runtime-only: an interrupted process never persists in-flight state.
+    agent_phase: ?lifecycle.RunStatePhase = null,
+    agent_transition_seq: u64 = 0,
+    agent_turn: u32 = 0,
+    agent_tool_calls: u32 = 0,
+    agent_in_flight_tools: u32 = 0,
     permission_provenance: ?PermissionSummary = null,
     terminal_publication: std.atomic.Value(TerminalPublication) = .init(.open),
     terminal_payload: TerminalPayload = undefined,
@@ -5245,6 +5253,31 @@ pub const Workbench = struct {
             .context_warning => |warning| _ = try self.replaceTrackedProjected(&run.status_text, warning.level, self.limits.max_tool_field_bytes, run.redaction_secret),
             .auto_compact => _ = try self.replaceTrackedProjected(&run.status_text, "Context compacted", self.limits.max_tool_field_bytes, run.redaction_secret),
             .retry_notice => _ = try self.replaceTrackedProjected(&run.status_text, "Retrying provider", self.limits.max_tool_field_bytes, run.redaction_secret),
+            .run_state => |state| {
+                if (state.run_id != run.id) return error.InvalidRunState;
+                if (state.transition_seq <= run.agent_transition_seq) return;
+                run.agent_transition_seq = state.transition_seq;
+                run.agent_phase = state.phase;
+                run.agent_turn = state.turn;
+                run.agent_tool_calls = state.tool_calls;
+                run.agent_in_flight_tools = std.math.cast(u32, state.in_flight_tools.len) orelse
+                    return error.InvalidRunState;
+                _ = try self.replaceTrackedProjected(
+                    &run.status_text,
+                    agentRunStateStatus(state.phase),
+                    self.limits.max_tool_field_bytes,
+                    run.redaction_secret,
+                );
+                switch (state.phase) {
+                    .waiting_ui => {
+                        if (run.active_phase != .stopping) _ = setActivePhase(run, .waiting_ui);
+                    },
+                    .starting, .generating, .executing_tools, .retrying, .compacting, .finalizing => {
+                        if (run.active_phase != .stopping) _ = setActivePhase(run, .running);
+                    },
+                    .completed, .failed, .aborted, .poisoned => {},
+                }
+            },
             .permission_provenance => |provenance| {
                 const summary = try permissionSummary(provenance);
                 run.permission_provenance = summary;
@@ -11640,6 +11673,22 @@ fn closeWorker(
     _ = notifier.notify();
 }
 
+fn agentRunStateStatus(phase: lifecycle.RunStatePhase) []const u8 {
+    return switch (phase) {
+        .starting => "Starting",
+        .generating => "Generating response",
+        .executing_tools => "Executing tools",
+        .waiting_ui => "Waiting for your input",
+        .retrying => "Retrying provider",
+        .compacting => "Compacting context",
+        .finalizing => "Finishing",
+        .completed => "Completed",
+        .failed => "Failed",
+        .aborted => "Stopped",
+        .poisoned => "Session unavailable",
+    };
+}
+
 fn executeRunJob(context: *anyopaque) void {
     const run: *RunRecord = @ptrCast(@alignCast(context));
     const claimed = run.agent_handoff.cmpxchgStrong(
@@ -15207,6 +15256,48 @@ test "streaming Run events do not reorder Task navigation" {
     defer usage.deinit();
     try workbench.applyEvent(&usage);
     try std.testing.expectEqual(before, workbench.tasks[0].?.durable.recent_order);
+}
+
+test "AgentCore RunState refines live status and rejects stale transitions" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    const task = &workbench.tasks[0].?;
+    const route = task.runtime.routeId();
+
+    var starting = try testEnvelope(
+        route,
+        7,
+        "{\"run_state\":{\"run_id\":7,\"transition_seq\":1,\"phase\":\"starting\",\"turn\":0,\"tool_calls\":0,\"in_flight_tools\":[]}}",
+    );
+    defer starting.deinit();
+    try workbench.applyEvent(&starting);
+    const run = &task.durable.runs[0].?;
+    try std.testing.expectEqual(lifecycle.RunStatePhase.starting, run.agent_phase.?);
+    try std.testing.expectEqual(@as(u64, 1), run.agent_transition_seq);
+    try std.testing.expectEqualStrings("Starting", run.status_text);
+
+    var executing = try testEnvelope(
+        route,
+        7,
+        "{\"run_state\":{\"run_id\":7,\"transition_seq\":2,\"phase\":\"executing_tools\",\"turn\":1,\"tool_calls\":2,\"in_flight_tools\":[{\"tool_call_id\":\"tool-1\",\"name\":\"Read\"},{\"tool_call_id\":\"tool-2\",\"name\":\"Bash\"}]}}",
+    );
+    defer executing.deinit();
+    try workbench.applyEvent(&executing);
+    try std.testing.expectEqual(lifecycle.RunStatePhase.executing_tools, run.agent_phase.?);
+    try std.testing.expectEqual(@as(u32, 1), run.agent_turn);
+    try std.testing.expectEqual(@as(u32, 2), run.agent_tool_calls);
+    try std.testing.expectEqual(@as(u32, 2), run.agent_in_flight_tools);
+    try std.testing.expectEqualStrings("Executing tools", run.status_text);
+
+    var stale = try testEnvelope(
+        route,
+        7,
+        "{\"run_state\":{\"run_id\":7,\"transition_seq\":1,\"phase\":\"failed\",\"turn\":9,\"tool_calls\":9,\"in_flight_tools\":[]}}",
+    );
+    defer stale.deinit();
+    try workbench.applyEvent(&stale);
+    try std.testing.expectEqual(lifecycle.RunStatePhase.executing_tools, run.agent_phase.?);
+    try std.testing.expectEqualStrings("Executing tools", run.status_text);
 }
 
 test "event projection failure routes by Agent Session identity not product Task identity" {

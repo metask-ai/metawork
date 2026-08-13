@@ -266,6 +266,7 @@ pub fn classify(event: sdk.DecodedCoreEvent) EventClass {
             .context_warning,
             .auto_compact,
             .retry_notice,
+            .run_state,
             .stream_done,
             .permission_provenance,
             => .control,

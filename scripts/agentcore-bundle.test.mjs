@@ -20,7 +20,7 @@ import { stageAgentCoreBundle } from "./stage-agentcore-bundle.mjs";
 import { verifyStagedAgentCoreBundle } from "./verify-staged-agentcore-bundle.mjs";
 
 const fixtureFiles = [
-  "lib/libmetask_agentcore.a",
+  "lib/metask_agentcore.lib",
   "include/metask/agentcore.h",
   "bindings/zig/build.zig",
   "bindings/zig/build.zig.zon",
@@ -64,12 +64,12 @@ async function fixture(t, mutateManifest = () => {}) {
     },
     toolchain: { zig_version: "0.16.0" },
     target: {
-      id: "aarch64-macos",
-      architecture: "aarch64",
-      os: "macos",
-      abi: "none",
-      zig_target: "aarch64-macos.13.0...15.6-none",
-      rust_target: "aarch64-apple-darwin",
+      id: "x86_64-windows-gnu",
+      architecture: "x86_64",
+      os: "windows",
+      abi: "gnu",
+      zig_target: "x86_64-windows.win10...win11_dt-gnu",
+      rust_target: "x86_64-pc-windows-gnu",
     },
     build: {
       optimize: "ReleaseSafe",
@@ -77,15 +77,15 @@ async function fixture(t, mutateManifest = () => {}) {
     },
     link: {
       requires_c_runtime: true,
-      system_libraries: [],
+      system_libraries: ["advapi32", "crypt32"],
       system_frameworks: [],
     },
     contract: {
       binary_abi_status: "experimental",
       binary_abi_version: 1,
-      binary_abi_revision: 7,
+      binary_abi_revision: 8,
       binary_abi_table_size: 216,
-      capabilities: 0x7ffff,
+      capabilities: 0xfffff,
     },
     files,
   };
@@ -100,7 +100,7 @@ async function repository(t, manifest) {
   const lockPath = path.join(
     root,
     "build_support",
-    "agentcore-bundle.macos.lock.json",
+    "agentcore-bundle.windows.lock.json",
   );
   await mkdir(path.dirname(lockPath), { recursive: true });
   await writeFile(lockPath, JSON.stringify(manifest));
@@ -108,10 +108,10 @@ async function repository(t, manifest) {
 }
 
 const injectedChecks = {
-  platform: "darwin",
-  architecture: "arm64",
+  platform: "win32",
+  architecture: "x64",
   zigVersion: "0.16.0",
-  symbols: "0000000000000000 T _metask_agentcore_get_api\n",
+  symbols: "00000000 T metask_agentcore_get_api\n",
 };
 
 function injectedFileOperations(overrides = {}) {
@@ -126,42 +126,14 @@ async function seedCanonicalBundle(repositoryRoot) {
   return { storageRoot, target };
 }
 
-test("accepts a complete pinned macOS arm64 revision 7 bundle", async (t) => {
+test("accepts a complete pinned Windows x64 GNU revision 8 bundle", async (t) => {
   const { root, manifest } = await fixture(t);
   const result = await validateAgentCoreBundle(root, {
     ...injectedChecks,
     expectedManifest: manifest,
   });
-  assert.equal(result.target, "aarch64-macos.13.0...15.6-none");
-  assert.deepEqual(result.payloadFiles, fixtureFiles);
-});
-
-test("accepts a complete pinned Windows x64 GNU revision 7 bundle", async (t) => {
-  const { root, manifest } = await fixture(t);
-  const oldLibrary = fixtureFiles[0];
-  const newLibrary = "lib/metask_agentcore.lib";
-  await rename(path.join(root, oldLibrary), path.join(root, newLibrary));
-  manifest.files.find((file) => file.path === oldLibrary).path = newLibrary;
-  manifest.target = {
-    id: "x86_64-windows-gnu",
-    architecture: "x86_64",
-    os: "windows",
-    abi: "gnu",
-    zig_target: "x86_64-windows.win10...win11_dt-gnu",
-    rust_target: "x86_64-pc-windows-gnu",
-  };
-  manifest.build.optimize = "ReleaseSafe";
-  manifest.link.system_libraries = ["advapi32", "crypt32"];
-  await writeFile(path.join(root, "manifest.json"), JSON.stringify(manifest));
-  const result = await validateAgentCoreBundle(root, {
-    platform: "win32",
-    architecture: "x64",
-    zigVersion: "0.16.0",
-    symbols: "00000000 T metask_agentcore_get_api\n",
-    expectedManifest: manifest,
-  });
   assert.equal(result.target, "x86_64-windows.win10...win11_dt-gnu");
-  assert.equal(result.libraryPath, path.join(await realpath(root), newLibrary));
+  assert.deepEqual(result.payloadFiles, fixtureFiles);
 });
 
 test("rejects a checksum mismatch", async (t) => {
@@ -243,7 +215,7 @@ test("rejects a bundle for another target", async (t) => {
   await assert.rejects(
     validateAgentCoreBundle(root, {
       ...injectedChecks,
-      architecture: "x64",
+      platform: "darwin",
     }),
     /unsupported AgentCore host target/,
   );
@@ -389,14 +361,14 @@ test("rejects missing, duplicated, and obsolete discovery symbols", async (t) =>
   const { root } = await fixture(t);
   await assert.rejects(
     validateAgentCoreBundle(root, { ...injectedChecks, symbols: "" }),
-    /exactly one revision 7 discovery symbol/,
+    /exactly one pinned discovery symbol/,
   );
   await assert.rejects(
     validateAgentCoreBundle(root, {
       ...injectedChecks,
       symbols: "T _metask_agentcore_get_api\nT _metask_agentcore_get_api\n",
     }),
-    /exactly one revision 7 discovery symbol/,
+    /exactly one pinned discovery symbol/,
   );
   await assert.rejects(
     validateAgentCoreBundle(root, {

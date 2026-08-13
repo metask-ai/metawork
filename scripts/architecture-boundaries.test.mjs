@@ -465,10 +465,7 @@ test("only Agent implementation imports the AgentCore SDK", () => {
 });
 
 test("candidate validation keeps only repository locks and the official SDK consumer", () => {
-  for (const lock of [
-    "build_support/agentcore-bundle.macos.lock.json",
-    "build_support/agentcore-bundle.windows.lock.json",
-  ]) {
+  for (const lock of ["build_support/agentcore-bundle.windows.lock.json"]) {
     assert.equal(existsSync(new URL(lock, root)), true);
   }
   const probeRunner = read("scripts/run-agentcore-probe.mjs");
@@ -1987,9 +1984,9 @@ test("Renderer declares window chrome UI while Application owns native behavior"
 
 test("lifecycle tests are grouped by invariant", () => {
   const cases = [
-    ["tests/agent/lifecycle_test.zig", 60],
+    ["tests/agent/lifecycle_test.zig", 61],
     ["tests/agent/event_pump_test.zig", 5],
-    ["tests/workbench/executor_lifecycle_test.zig", 29],
+    ["tests/workbench/executor_lifecycle_test.zig", 31],
     ["tests/integration/lifecycle/lifecycle_test.zig", 4],
   ];
   for (const [path, expectedCount] of cases) {
