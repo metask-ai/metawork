@@ -1,17 +1,29 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-pub const schema_version: u8 = 1;
+// Hard-cut persistence format. This deliberately has no migration/version
+// contract: the fixed frame layout and magic identify the sole active format.
 pub const max_store_bytes: usize = 16 * 1024 * 1024;
-pub const file_name = "workbench-history.json";
+pub const max_failure_records: usize = 1024;
+pub const max_failure_reason_bytes: usize = 256;
+pub const file_name = "workbench-history.store";
 const lock_file_name = ".workbench-history.lock";
+const frame_magic = "MWTF";
+const frame_header_bytes: usize = 36;
+const record_meta: u8 = 1;
+const record_workspace: u8 = 2;
+const record_task: u8 = 3;
+const record_task_failure: u8 = 4;
 
 pub const Error = error{
     TaskStoreEmpty,
     TaskStoreTooLarge,
     TaskStoreCorrupt,
     TaskStoreEncodeFailed,
+    TaskIdentityExhausted,
 };
+
+pub const RecoveryError = Error || std.mem.Allocator.Error;
 
 pub const FileStoreError = std.mem.Allocator.Error || error{
     DirectoryUnavailable,
@@ -203,13 +215,34 @@ pub const Limits = struct {
 };
 
 pub const StateWire = struct {
-    schema_version: u8,
     next_workspace_id: u64,
     next_workspace_recent_order: u64,
     next_task_id: u64,
     next_task_recent_order: u64,
     workspaces: []WorkspaceWire,
     tasks: []TaskWire,
+    failures: []TaskFailureWire = &.{},
+};
+
+pub const TaskFailureWire = struct {
+    task_id: u64,
+    recent_order: u64,
+    reason: []const u8,
+};
+
+pub const RecoveredState = struct {
+    arena: *std.heap.ArenaAllocator,
+    value: StateWire,
+    dropped_workspaces: usize = 0,
+    dropped_tasks: usize = 0,
+    degraded: bool = false,
+
+    pub fn deinit(self: *@This()) void {
+        const allocator = self.arena.child_allocator;
+        self.arena.deinit();
+        allocator.destroy(self.arena);
+        self.* = undefined;
+    }
 };
 
 pub const WorkspaceWire = struct {
@@ -376,37 +409,475 @@ pub const UiRecordWire = struct {
     redacted: bool,
 };
 
+const MetaWire = struct {
+    next_workspace_id: u64,
+    next_workspace_recent_order: u64,
+    next_task_id: u64,
+    next_task_recent_order: u64,
+};
+
 pub fn encode(output: []u8, state: StateWire) Error![]const u8 {
     if (output.len == 0) return error.TaskStoreEncodeFailed;
-    var writer = std.Io.Writer.fixed(output);
-    std.json.Stringify.value(state, .{}, &writer) catch
-        return error.TaskStoreEncodeFailed;
-    const encoded = writer.buffered();
-    if (encoded.len > max_store_bytes) return error.TaskStoreTooLarge;
-    return encoded;
+    var offset: usize = 0;
+    appendRecord(output, &offset, record_meta, 0, 0, MetaWire{
+        .next_workspace_id = state.next_workspace_id,
+        .next_workspace_recent_order = state.next_workspace_recent_order,
+        .next_task_id = state.next_task_id,
+        .next_task_recent_order = state.next_task_recent_order,
+    }) catch |err| return err;
+    for (state.workspaces) |workspace|
+        appendRecord(output, &offset, record_workspace, workspace.id, workspace.recent_order, workspace) catch |err|
+            return err;
+    for (state.tasks) |task|
+        appendRecord(output, &offset, record_task, task.id, task.recent_order, task) catch |err|
+            return err;
+    if (state.failures.len > max_failure_records) return error.TaskStoreTooLarge;
+    for (state.failures) |failure| {
+        if (failure.task_id == 0 or failure.recent_order == 0 or
+            !validText(failure.reason, max_failure_reason_bytes, false))
+            return error.TaskStoreEncodeFailed;
+        appendRecord(output, &offset, record_task_failure, failure.task_id, failure.recent_order, failure) catch |err|
+            return err;
+    }
+    if (offset > max_store_bytes) return error.TaskStoreTooLarge;
+    return output[0..offset];
 }
 
 pub fn decode(
     allocator: std.mem.Allocator,
     input: []const u8,
     limits: Limits,
-) Error!std.json.Parsed(StateWire) {
+) RecoveryError!RecoveredState {
+    var recovered = decodeRecovering(allocator, input, limits) catch |err| return err;
+    if (recovered.degraded or recovered.dropped_workspaces != 0 or recovered.dropped_tasks != 0) {
+        recovered.deinit();
+        return error.TaskStoreCorrupt;
+    }
+    validate(&recovered.value, limits) catch {
+        recovered.deinit();
+        return error.TaskStoreCorrupt;
+    };
+    return recovered;
+}
+
+pub fn decodeRecovering(
+    allocator: std.mem.Allocator,
+    input: []const u8,
+    limits: Limits,
+) RecoveryError!RecoveredState {
     if (input.len == 0) return error.TaskStoreEmpty;
     if (input.len > max_store_bytes) return error.TaskStoreTooLarge;
-    var parsed = std.json.parseFromSlice(
-        StateWire,
-        allocator,
-        input,
-        .{ .ignore_unknown_fields = false },
-    ) catch return error.TaskStoreCorrupt;
-    errdefer parsed.deinit();
-    validate(&parsed.value, limits) catch return error.TaskStoreCorrupt;
-    return parsed;
+
+    const arena = try allocator.create(std.heap.ArenaAllocator);
+    arena.* = std.heap.ArenaAllocator.init(allocator);
+    errdefer {
+        arena.deinit();
+        allocator.destroy(arena);
+    }
+    const arena_allocator = arena.allocator();
+    var workspace_values: std.ArrayList(WorkspaceWire) = .empty;
+    var task_values: std.ArrayList(TaskWire) = .empty;
+    var failure_values: std.ArrayList(TaskFailureWire) = .empty;
+    var next_workspace_id: u64 = 1;
+    var next_workspace_recent_order: u64 = 1;
+    var next_task_id: u64 = 1;
+    var next_task_recent_order: u64 = 1;
+    var max_workspace_id: u64 = 0;
+    var max_workspace_recent_order: u64 = 0;
+    var max_task_id: u64 = 0;
+    var max_task_recent_order: u64 = 0;
+    var dropped_workspaces: usize = 0;
+    var dropped_tasks: usize = 0;
+    var dropped_failures: usize = 0;
+    var degraded = false;
+    var metadata_seen = false;
+    var valid_frame_count: usize = 0;
+    var offset: usize = 0;
+    while (offset < input.len) {
+        if (input.len - offset < frame_header_bytes or
+            !std.mem.eql(u8, input[offset .. offset + frame_magic.len], frame_magic))
+        {
+            degraded = true;
+            offset = findNextFrame(input, offset + 1) orelse break;
+            continue;
+        }
+        const header = input[offset .. offset + frame_header_bytes];
+        const kind = header[5];
+        const id = std.mem.readInt(u64, header[8..16], .little);
+        const order = std.mem.readInt(u64, header[16..24], .little);
+        const payload_len = std.mem.readInt(u32, header[24..28], .little);
+        const header_checksum = std.mem.readInt(u32, header[28..32], .little);
+        const payload_checksum = std.mem.readInt(u32, header[32..36], .little);
+        if (std.hash.Crc32.hash(header[0..28]) != header_checksum) {
+            degraded = true;
+            offset = findNextFrame(input, offset + 1) orelse break;
+            continue;
+        }
+        switch (kind) {
+            record_workspace => {
+                max_workspace_id = @max(max_workspace_id, id);
+                max_workspace_recent_order = @max(max_workspace_recent_order, order);
+            },
+            record_task => {
+                max_task_id = @max(max_task_id, id);
+                max_task_recent_order = @max(max_task_recent_order, order);
+            },
+            else => {},
+        }
+        const payload_start = offset + frame_header_bytes;
+        const payload_end = std.math.add(usize, payload_start, payload_len) catch {
+            degraded = true;
+            offset = findNextFrame(input, offset + 1) orelse break;
+            continue;
+        };
+        if (header[4] != 0 or payload_len > max_store_bytes or payload_end > input.len) {
+            degraded = true;
+            if (payload_end <= input.len) offset = payload_end else offset = findNextFrame(input, offset + 1) orelse break;
+            continue;
+        }
+        const payload = input[payload_start..payload_end];
+        if (std.hash.Crc32.hash(payload) != payload_checksum) {
+            degraded = true;
+            switch (kind) {
+                record_workspace => dropped_workspaces += 1,
+                record_task => {
+                    dropped_tasks += 1;
+                    if (failure_values.items.len < max_failure_records)
+                        try failure_values.append(arena_allocator, .{
+                            .task_id = id,
+                            .recent_order = order,
+                            .reason = "payload_checksum",
+                        })
+                    else
+                        dropped_failures += 1;
+                },
+                else => {},
+            }
+            offset = payload_end;
+            continue;
+        }
+        valid_frame_count += 1;
+        switch (kind) {
+            record_meta => {
+                const meta = std.json.parseFromSliceLeaky(
+                    MetaWire,
+                    arena_allocator,
+                    payload,
+                    .{ .ignore_unknown_fields = false },
+                ) catch {
+                    degraded = true;
+                    offset = payload_end;
+                    continue;
+                };
+                if (metadata_seen or
+                    meta.next_workspace_id == 0 or meta.next_workspace_recent_order == 0 or
+                    meta.next_task_id == 0 or meta.next_task_recent_order == 0)
+                {
+                    degraded = true;
+                    offset = payload_end;
+                    continue;
+                }
+                metadata_seen = true;
+                next_workspace_id = meta.next_workspace_id;
+                next_workspace_recent_order = meta.next_workspace_recent_order;
+                next_task_id = meta.next_task_id;
+                next_task_recent_order = meta.next_task_recent_order;
+            },
+            record_workspace => {
+                const workspace = std.json.parseFromSliceLeaky(
+                    WorkspaceWire,
+                    arena_allocator,
+                    payload,
+                    .{ .ignore_unknown_fields = false },
+                ) catch {
+                    dropped_workspaces += 1;
+                    degraded = true;
+                    offset = payload_end;
+                    continue;
+                };
+                try workspace_values.append(arena_allocator, workspace);
+            },
+            record_task => {
+                const task = std.json.parseFromSliceLeaky(
+                    TaskWire,
+                    arena_allocator,
+                    payload,
+                    .{ .ignore_unknown_fields = false },
+                ) catch {
+                    dropped_tasks += 1;
+                    degraded = true;
+                    if (failure_values.items.len < max_failure_records)
+                        try failure_values.append(arena_allocator, .{
+                            .task_id = id,
+                            .recent_order = order,
+                            .reason = "task_payload_decode",
+                        })
+                    else
+                        dropped_failures += 1;
+                    offset = payload_end;
+                    continue;
+                };
+                if (task.id != id or task.recent_order != order) {
+                    dropped_tasks += 1;
+                    degraded = true;
+                    if (failure_values.items.len < max_failure_records)
+                        try failure_values.append(arena_allocator, .{
+                            .task_id = id,
+                            .recent_order = order,
+                            .reason = "task_identity_mismatch",
+                        })
+                    else
+                        dropped_failures += 1;
+                    offset = payload_end;
+                    continue;
+                }
+                try task_values.append(arena_allocator, task);
+            },
+            record_task_failure => {
+                if (failure_values.items.len >= max_failure_records) {
+                    dropped_failures += 1;
+                    degraded = true;
+                    offset = payload_end;
+                    continue;
+                }
+                const failure = std.json.parseFromSliceLeaky(
+                    TaskFailureWire,
+                    arena_allocator,
+                    payload,
+                    .{ .ignore_unknown_fields = false },
+                ) catch {
+                    dropped_failures += 1;
+                    degraded = true;
+                    offset = payload_end;
+                    continue;
+                };
+                if (failure.task_id == 0 or failure.task_id != id or
+                    failure.recent_order != order or
+                    !validText(failure.reason, max_failure_reason_bytes, false))
+                {
+                    dropped_failures += 1;
+                    degraded = true;
+                    offset = payload_end;
+                    continue;
+                }
+                try failure_values.append(arena_allocator, failure);
+            },
+            else => degraded = true,
+        }
+        offset = payload_end;
+    }
+
+    if (valid_frame_count == 0) return error.TaskStoreCorrupt;
+    if (!metadata_seen) return error.TaskStoreCorrupt;
+    const workspace_storage = workspace_values.items;
+    const task_storage = task_values.items;
+    var workspace_len: usize = 0;
+    for (workspace_storage) |workspace| {
+        if (workspace_len >= limits.max_workspaces) {
+            dropped_workspaces += 1;
+            degraded = true;
+            continue;
+        }
+        validateRecoveredWorkspace(workspace, limits, workspace_storage[0..workspace_len]) catch {
+            dropped_workspaces += 1;
+            degraded = true;
+            continue;
+        };
+        workspace_storage[workspace_len] = workspace;
+        workspace_len += 1;
+    }
+    var task_len: usize = 0;
+    for (task_storage) |task| {
+        if (task_len >= limits.max_tasks) {
+            dropped_tasks += 1;
+            degraded = true;
+            continue;
+        }
+        validateRecoveredTask(task, limits, workspace_storage[0..workspace_len], task_storage[0..task_len]) catch {
+            dropped_tasks += 1;
+            degraded = true;
+            // A validation failure can itself carry an unusable identity. In
+            // that case there is no safe Task to quarantine; retain only the
+            // degraded store state instead of turning the recovery into a
+            // global failure while manufacturing an id-less failure record.
+            if (task.id != 0 and task.recent_order != 0) {
+                if (failure_values.items.len < max_failure_records)
+                    try failure_values.append(arena_allocator, .{
+                        .task_id = task.id,
+                        .recent_order = task.recent_order,
+                        .reason = "task_validation",
+                    })
+                else
+                    dropped_failures += 1;
+            }
+            continue;
+        };
+        task_storage[task_len] = task;
+        task_len += 1;
+    }
+
+    // Automatic Workspaces are valid only with exactly one surviving Task.
+    // Remove the whole automatic scope when its owner Task was the damaged
+    // record; this preserves the existing Workspace/Task ownership invariant.
+    var filtered_workspace_len: usize = 0;
+    for (workspace_storage[0..workspace_len]) |workspace| {
+        if (std.mem.eql(u8, workspace.kind, "automatic")) {
+            var count: usize = 0;
+            for (task_storage[0..task_len]) |task| {
+                if (task.workspace_id == workspace.id) count += 1;
+            }
+            if (count != 1) {
+                dropped_workspaces += 1;
+                for (task_storage[0..task_len]) |task| {
+                    if (task.workspace_id == workspace.id) dropped_tasks += 1;
+                }
+                continue;
+            }
+        }
+        workspace_storage[filtered_workspace_len] = workspace;
+        filtered_workspace_len += 1;
+    }
+    workspace_len = filtered_workspace_len;
+
+    var filtered_task_len: usize = 0;
+    for (task_storage[0..task_len]) |task| {
+        if (findRecoveredWorkspace(workspace_storage[0..workspace_len], task.workspace_id) == null) {
+            dropped_tasks += 1;
+            continue;
+        }
+        task_storage[filtered_task_len] = task;
+        filtered_task_len += 1;
+    }
+    task_len = filtered_task_len;
+
+    const state = StateWire{
+        .next_workspace_id = try nextFromHighWater(next_workspace_id, max_workspace_id),
+        .next_workspace_recent_order = try nextFromHighWater(next_workspace_recent_order, max_workspace_recent_order),
+        .next_task_id = try nextFromHighWater(next_task_id, max_task_id),
+        .next_task_recent_order = try nextFromHighWater(next_task_recent_order, max_task_recent_order),
+        .workspaces = workspace_storage[0..workspace_len],
+        .tasks = task_storage[0..task_len],
+        .failures = failure_values.items,
+    };
+    return .{
+        .arena = arena,
+        .value = state,
+        .dropped_workspaces = dropped_workspaces,
+        .dropped_tasks = dropped_tasks,
+        .degraded = degraded or dropped_failures != 0 or failure_values.items.len != 0,
+    };
+}
+
+fn appendRecord(
+    output: []u8,
+    offset: *usize,
+    kind: u8,
+    id: u64,
+    order: u64,
+    value: anytype,
+) Error!void {
+    if (output.len -| offset.* < frame_header_bytes) return error.TaskStoreTooLarge;
+    const header_start = offset.*;
+    offset.* += frame_header_bytes;
+    var writer = std.Io.Writer.fixed(output[offset.*..]);
+    std.json.Stringify.value(value, .{}, &writer) catch return error.TaskStoreEncodeFailed;
+    const payload = writer.buffered();
+    if (payload.len > max_store_bytes or payload.len > std.math.maxInt(u32))
+        return error.TaskStoreTooLarge;
+    const header = output[header_start .. header_start + frame_header_bytes];
+    @memcpy(header[0..4], frame_magic);
+    header[4] = 0;
+    header[5] = kind;
+    std.mem.writeInt(u16, header[6..8], 0, .little);
+    std.mem.writeInt(u64, header[8..16], id, .little);
+    std.mem.writeInt(u64, header[16..24], order, .little);
+    std.mem.writeInt(u32, header[24..28], @intCast(payload.len), .little);
+    std.mem.writeInt(u32, header[28..32], std.hash.Crc32.hash(header[0..28]), .little);
+    std.mem.writeInt(u32, header[32..36], std.hash.Crc32.hash(payload), .little);
+    offset.* += payload.len;
+}
+
+fn findNextFrame(input: []const u8, start: usize) ?usize {
+    if (start >= input.len) return null;
+    const relative = std.mem.indexOf(u8, input[start..], frame_magic) orelse return null;
+    return start + relative;
+}
+
+fn nextFromHighWater(current: u64, max_seen: u64) Error!u64 {
+    if (max_seen == std.math.maxInt(u64)) return error.TaskIdentityExhausted;
+    if (current == 0) return if (max_seen == 0) 1 else max_seen + 1;
+    return if (max_seen >= current) max_seen + 1 else current;
+}
+
+fn validateRecoveredWorkspace(
+    workspace: WorkspaceWire,
+    limits: Limits,
+    previous: []const WorkspaceWire,
+) !void {
+    if (workspace.id == 0 or workspace.epoch == 0 or
+        !oneOf(workspace.kind, &.{ "manual", "automatic" }) or
+        (std.mem.eql(u8, workspace.kind, "manual") and workspace.recent_order == 0) or
+        !validText(workspace.canonical_root, limits.max_workspace_bytes, false) or
+        !std.fs.path.isAbsolute(workspace.canonical_root) or
+        !validText(workspace.display_name, limits.max_workspace_bytes, false))
+        return error.Invalid;
+    for (previous) |value|
+        if (value.id == workspace.id or
+            std.mem.eql(u8, value.canonical_root, workspace.canonical_root))
+            return error.Invalid;
+}
+
+fn validateRecoveredTask(
+    task: TaskWire,
+    limits: Limits,
+    workspaces: []const WorkspaceWire,
+    previous: []const TaskWire,
+) !void {
+    if (task.id == 0 or task.recent_order == 0 or task.workspace_id == 0 or
+        task.workspace_epoch == 0 or
+        !validText(task.workspace_root, limits.max_workspace_bytes, false) or
+        !validText(task.title, limits.max_task_title_bytes, true) or
+        task.binding.epoch == 0 or task.binding.execution_generation == 0 or
+        !oneOf(task.binding.provider, &.{ "anthropic", "openai" }) or
+        !validBinding(task.binding, limits.max_tool_field_bytes) or
+        task.runs.len > limits.max_runs_per_task or
+        task.compacts.len > limits.max_compacts_per_task or
+        task.ui_history.len > limits.max_ui_history_per_task)
+        return error.Invalid;
+    const workspace = findRecoveredWorkspace(workspaces, task.workspace_id) orelse
+        return error.Invalid;
+    if (task.workspace_epoch > workspace.epoch or
+        !std.mem.eql(u8, workspace.canonical_root, task.workspace_root))
+        return error.Invalid;
+    for (previous) |value| if (value.id == task.id) return error.Invalid;
+    try validateTask(task, limits);
+}
+
+fn findRecoveredWorkspace(workspaces: []const WorkspaceWire, id: u64) ?WorkspaceWire {
+    for (workspaces) |workspace| if (workspace.id == id) return workspace;
+    return null;
+}
+
+fn nextAfter(current: u64, workspaces: []const WorkspaceWire, ids: bool) u64 {
+    var result = current;
+    for (workspaces) |workspace| {
+        const value = if (ids) workspace.id else workspace.recent_order;
+        if (value >= result) result = value +| 1;
+    }
+    return if (result == 0) 1 else result;
+}
+
+fn nextAfterTask(current: u64, tasks: []const TaskWire, ids: bool) u64 {
+    var result = current;
+    for (tasks) |task| {
+        const value = if (ids) task.id else task.recent_order;
+        if (value >= result) result = value +| 1;
+    }
+    return if (result == 0) 1 else result;
 }
 
 fn validate(state: *const StateWire, limits: Limits) !void {
-    if (state.schema_version != schema_version or state.next_workspace_id == 0 or
-        state.next_workspace_recent_order == 0 or state.next_task_id == 0 or
+    if (state.next_workspace_id == 0 or state.next_workspace_recent_order == 0 or state.next_task_id == 0 or
         state.next_task_recent_order == 0 or state.workspaces.len > limits.max_workspaces or
         state.tasks.len > limits.max_tasks)
         return error.Invalid;
@@ -664,39 +1135,199 @@ fn findCompact(items: []const CompactWire, id: u64) ?CompactWire {
     return null;
 }
 
-test "task store rejects unknown schema fields and dangling workspace references" {
-    const limits = testLimits();
-    const unknown =
-        \\{"schema_version":1,"next_workspace_id":1,"next_workspace_recent_order":1,"next_task_id":1,"next_task_recent_order":1,"workspaces":[],"tasks":[],"extra":true}
+test "task store hard cut rejects retired JSON envelopes" {
+    const retired =
+        \\{"schema_version":1,"next_workspace_id":1,"next_workspace_recent_order":1,"next_task_id":1,"next_task_recent_order":1,"workspaces":[],"tasks":[]}
     ;
-    try std.testing.expectError(
-        error.TaskStoreCorrupt,
-        decode(std.testing.allocator, unknown, limits),
-    );
-    const retired_identity_binding =
-        \\{"schema_version":1,"next_workspace_id":2,"next_workspace_recent_order":2,"next_task_id":2,"next_task_recent_order":2,"workspaces":[{"id":1,"epoch":1,"kind":"manual","canonical_root":"/tmp/repo","display_name":"repo","visible":true,"recent_order":1}],"tasks":[{"id":1,"recent_order":1,"workspace_id":1,"workspace_epoch":1,"workspace_root":"/tmp/repo","title":"","title_redacted":false,"archived":false,"closed":false,"binding":{"epoch":1,"execution_generation":1,"provider":"openai","model":"m","account_id":"retired"},"next_run_generation":0,"active_operation":null,"runs":[],"compacts":[],"ui_history":[]}]}
-    ;
-    try std.testing.expectError(
-        error.TaskStoreCorrupt,
-        decode(std.testing.allocator, retired_identity_binding, limits),
-    );
-    const dangling =
-        \\{"schema_version":1,"next_workspace_id":1,"next_workspace_recent_order":1,"next_task_id":2,"next_task_recent_order":2,"workspaces":[],"tasks":[{"id":1,"recent_order":1,"workspace_id":1,"workspace_epoch":1,"workspace_root":"C:\\\\repo","title":"","title_redacted":false,"archived":false,"closed":false,"binding":{"epoch":1,"execution_generation":1,"provider":"openai","model":"m"},"next_run_generation":0,"active_operation":null,"runs":[],"compacts":[],"ui_history":[]}]}
-    ;
-    try std.testing.expectError(
-        error.TaskStoreCorrupt,
-        decode(std.testing.allocator, dangling, limits),
-    );
+    try std.testing.expectError(error.TaskStoreCorrupt, decode(std.testing.allocator, retired, testLimits()));
 }
 
 test "task store preserves history bound to an older Workspace epoch" {
-    const state =
-        \\{"schema_version":1,"next_workspace_id":2,"next_workspace_recent_order":2,"next_task_id":2,"next_task_recent_order":2,"workspaces":[{"id":1,"epoch":2,"kind":"manual","canonical_root":"/tmp/repo","display_name":"repo","visible":true,"recent_order":1}],"tasks":[{"id":1,"recent_order":1,"workspace_id":1,"workspace_epoch":1,"workspace_root":"/tmp/repo","title":"","title_redacted":false,"archived":false,"closed":false,"binding":{"epoch":1,"execution_generation":1,"provider":"openai","model":"m"},"next_run_generation":0,"active_operation":null,"runs":[],"compacts":[],"ui_history":[]}]}
-    ;
+    var workspaces = [_]WorkspaceWire{.{
+        .id = 1,
+        .epoch = 2,
+        .kind = "manual",
+        .canonical_root = "/tmp/repo",
+        .display_name = "repo",
+        .visible = true,
+        .recent_order = 1,
+    }};
+    var tasks = [_]TaskWire{.{
+        .id = 1,
+        .recent_order = 1,
+        .workspace_id = 1,
+        .workspace_epoch = 1,
+        .workspace_root = "/tmp/repo",
+        .title = "",
+        .title_redacted = false,
+        .archived = false,
+        .closed = false,
+        .binding = .{ .epoch = 1, .execution_generation = 1, .provider = "openai", .model = "m" },
+        .next_run_generation = 0,
+        .active_operation = null,
+        .runs = &.{},
+        .compacts = &.{},
+        .ui_history = &.{},
+    }};
+    var output: [64 * 1024]u8 = undefined;
+    const state = try encode(&output, .{
+        .next_workspace_id = 2,
+        .next_workspace_recent_order = 2,
+        .next_task_id = 2,
+        .next_task_recent_order = 2,
+        .workspaces = &workspaces,
+        .tasks = &tasks,
+    });
     var parsed = try decode(std.testing.allocator, state, testLimits());
     defer parsed.deinit();
     try std.testing.expectEqual(@as(u64, 2), parsed.value.workspaces[0].epoch);
     try std.testing.expectEqual(@as(u64, 1), parsed.value.tasks[0].workspace_epoch);
+}
+
+test "one damaged Task frame does not poison surviving history" {
+    var workspaces = [_]WorkspaceWire{.{
+        .id = 1,
+        .epoch = 1,
+        .kind = "manual",
+        .canonical_root = "/tmp/repo",
+        .display_name = "repo",
+        .visible = true,
+        .recent_order = 1,
+    }};
+    var tasks = [_]TaskWire{
+        .{
+            .id = 1,
+            .recent_order = 1,
+            .workspace_id = 1,
+            .workspace_epoch = 1,
+            .workspace_root = "/tmp/repo",
+            .title = "first",
+            .title_redacted = false,
+            .archived = false,
+            .closed = false,
+            .binding = .{ .epoch = 1, .execution_generation = 1, .provider = "openai", .model = "m" },
+            .next_run_generation = 0,
+            .active_operation = null,
+            .runs = &.{},
+            .compacts = &.{},
+            .ui_history = &.{},
+        },
+        .{
+            .id = 2,
+            .recent_order = 2,
+            .workspace_id = 1,
+            .workspace_epoch = 1,
+            .workspace_root = "/tmp/repo",
+            .title = "second",
+            .title_redacted = false,
+            .archived = false,
+            .closed = false,
+            .binding = .{ .epoch = 1, .execution_generation = 1, .provider = "openai", .model = "m" },
+            .next_run_generation = 0,
+            .active_operation = null,
+            .runs = &.{},
+            .compacts = &.{},
+            .ui_history = &.{},
+        },
+    };
+    var bytes: [64 * 1024]u8 = undefined;
+    const encoded = try encode(&bytes, .{
+        .next_workspace_id = 2,
+        .next_workspace_recent_order = 2,
+        .next_task_id = 3,
+        .next_task_recent_order = 3,
+        .workspaces = &workspaces,
+        .tasks = &tasks,
+    });
+    var task_frame_count: usize = 0;
+    var cursor: usize = 0;
+    while (cursor < encoded.len) {
+        try std.testing.expectEqualStrings(frame_magic, encoded[cursor .. cursor + 4]);
+        const kind = encoded[cursor + 5];
+        const payload_len = std.mem.readInt(
+            u32,
+            @as(*const [4]u8, @ptrCast(encoded[cursor + 24 .. cursor + 28].ptr)),
+            .little,
+        );
+        if (kind == record_task) {
+            task_frame_count += 1;
+            if (task_frame_count == 2) {
+                const payload_start = cursor + frame_header_bytes;
+                bytes[payload_start] ^= 0xff;
+                break;
+            }
+        }
+        cursor += frame_header_bytes + payload_len;
+    }
+    try std.testing.expectEqual(@as(usize, 2), task_frame_count);
+    var recovered = try decodeRecovering(std.testing.allocator, bytes[0..encoded.len], testLimits());
+    defer recovered.deinit();
+    try std.testing.expectEqual(@as(usize, 1), recovered.value.tasks.len);
+    try std.testing.expectEqual(@as(u64, 1), recovered.value.tasks[0].id);
+    try std.testing.expectEqual(@as(u64, 3), recovered.value.next_task_id);
+    try std.testing.expect(recovered.degraded);
+    try std.testing.expectEqual(@as(usize, 1), recovered.dropped_tasks);
+    try std.testing.expectEqual(@as(usize, 1), recovered.value.failures.len);
+    try std.testing.expectEqual(@as(u64, 2), recovered.value.failures[0].task_id);
+    try std.testing.expectEqualStrings("payload_checksum", recovered.value.failures[0].reason);
+}
+
+test "corrupt Task header cannot poison high water or surviving history" {
+    var workspaces = [_]WorkspaceWire{.{
+        .id = 1,
+        .epoch = 1,
+        .kind = "manual",
+        .canonical_root = "/tmp/repo",
+        .display_name = "repo",
+        .visible = true,
+        .recent_order = 1,
+    }};
+    var tasks = [_]TaskWire{.{
+        .id = 1,
+        .recent_order = 1,
+        .workspace_id = 1,
+        .workspace_epoch = 1,
+        .workspace_root = "/tmp/repo",
+        .title = "first",
+        .title_redacted = false,
+        .archived = false,
+        .closed = false,
+        .binding = .{ .epoch = 1, .execution_generation = 1, .provider = "openai", .model = "m" },
+        .next_run_generation = 0,
+        .active_operation = null,
+        .runs = &.{},
+        .compacts = &.{},
+        .ui_history = &.{},
+    }};
+    var bytes: [64 * 1024]u8 = undefined;
+    const encoded = try encode(&bytes, .{
+        .next_workspace_id = 2,
+        .next_workspace_recent_order = 2,
+        .next_task_id = 2,
+        .next_task_recent_order = 2,
+        .workspaces = &workspaces,
+        .tasks = &tasks,
+    });
+    var cursor: usize = 0;
+    while (cursor < encoded.len) {
+        const kind = encoded[cursor + 5];
+        const payload_len = std.mem.readInt(
+            u32,
+            @as(*const [4]u8, @ptrCast(encoded[cursor + 24 .. cursor + 28].ptr)),
+            .little,
+        );
+        if (kind == record_task) {
+            bytes[cursor + 8] ^= 0xff;
+            break;
+        }
+        cursor += frame_header_bytes + payload_len;
+    }
+    var recovered = try decodeRecovering(std.testing.allocator, bytes[0..encoded.len], testLimits());
+    defer recovered.deinit();
+    try std.testing.expectEqual(@as(usize, 0), recovered.value.tasks.len);
+    try std.testing.expectEqual(@as(u64, 2), recovered.value.next_task_id);
+    try std.testing.expect(recovered.degraded);
+    try std.testing.expectEqual(@as(usize, 0), recovered.dropped_tasks);
 }
 
 test "task store rejects states that would violate the Renderer contract" {
@@ -810,7 +1441,6 @@ test "task store rejects states that would violate the Renderer contract" {
         .ui_history = &ui_history,
     }};
     var state: StateWire = .{
-        .schema_version = schema_version,
         .next_workspace_id = 2,
         .next_workspace_recent_order = 2,
         .next_task_id = 2,
@@ -819,6 +1449,21 @@ test "task store rejects states that would violate the Renderer contract" {
         .tasks = &tasks,
     };
     try validate(&state, testLimits());
+
+    var mixed_tasks = [_]TaskWire{ tasks[0], tasks[0] };
+    mixed_tasks[1].id = 0;
+    state.tasks = &mixed_tasks;
+    var mixed_output: [64 * 1024]u8 = undefined;
+    const mixed_bytes = try encode(&mixed_output, state);
+    var recovered = try decodeRecovering(
+        std.testing.allocator,
+        mixed_bytes,
+        testLimits(),
+    );
+    defer recovered.deinit();
+    try std.testing.expectEqual(@as(usize, 1), recovered.value.tasks.len);
+    try std.testing.expectEqual(@as(usize, 1), recovered.dropped_tasks);
+    state.tasks = &tasks;
 
     workspaces[0].recent_order = 0;
     try std.testing.expectError(error.Invalid, validate(&state, testLimits()));

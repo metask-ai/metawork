@@ -29,6 +29,8 @@ Git object 只保存一次性执行事实；当前行为与边界始终以 activ
 
 普通自动化结果可由当前 test graph 重现，不进入长期证据账本，也不冠以会在下一次代码提交后立即失真的“当前回归”状态。提交是否通过由对应 commit 的真实执行结果负责；只有稳定发布、artifact migration 或无法由普通自动化重现的平台/外部服务事实保留在上表。
 
+Task history recovery additionally requires record isolation: a malformed Workspace/Task frame must produce `degraded` health, preserve every valid record, and leave new Task admission open. The hard-cut store has no legacy envelope reader, migration, dual-write, or fallback; an unrecognized store format is rejected as obsolete. Store initialization failure, definite write failure, and unresolved commit outcome remain global persistence failures and keep the mutation fence.
+
 ## 3. 持续回归入口
 
 ### 平台无关与当前开发环境

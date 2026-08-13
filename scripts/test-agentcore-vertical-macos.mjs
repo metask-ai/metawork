@@ -875,8 +875,46 @@ async function stopApplication(label) {
     throw new Error("normal runtime stop was not observed");
 }
 
+function decodeTaskStore(bytes) {
+  const magic = Buffer.from("MWTF");
+  const headerBytes = 36;
+  const records = { workspaces: [], tasks: [] };
+  let offset = 0;
+  while (offset < bytes.length) {
+    if (offset + headerBytes > bytes.length || !bytes.subarray(offset, offset + 4).equals(magic))
+      throw new Error("invalid hard-cut Task store frame");
+    if (bytes[offset + 4] !== 0) throw new Error("invalid Task store frame flags");
+    const kind = bytes[offset + 5];
+    const payloadLength = bytes.readUInt32LE(offset + 24);
+    const payloadStart = offset + headerBytes;
+    const payloadEnd = payloadStart + payloadLength;
+    if (payloadEnd > bytes.length) throw new Error("truncated Task store frame");
+    const headerChecksum = bytes.readUInt32LE(offset + 28);
+    const payloadChecksum = bytes.readUInt32LE(offset + 32);
+    if (crc32(bytes.subarray(offset, offset + 28)) !== headerChecksum)
+      throw new Error("invalid Task store header checksum");
+    if (crc32(bytes.subarray(payloadStart, payloadEnd)) !== payloadChecksum)
+      throw new Error("invalid Task store payload checksum");
+    const value = JSON.parse(bytes.subarray(payloadStart, payloadEnd).toString("utf8"));
+    if (kind === 2) records.workspaces.push(value);
+    if (kind === 3) records.tasks.push(value);
+    offset = payloadEnd;
+  }
+  return records;
+}
+
+function crc32(bytes) {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit++)
+      crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
 async function readCheckpointHealth(taskId) {
-  const historyPath = join(dataRoot, "workbench", "workbench-history.json");
+  const historyPath = join(dataRoot, "workbench", "workbench-history.store");
   let bytes;
   try {
     bytes = await readFile(historyPath);
@@ -884,7 +922,7 @@ async function readCheckpointHealth(taskId) {
     if (error?.code === "ENOENT") return null;
     throw error;
   }
-  const history = JSON.parse(bytes.toString("utf8"));
+  const history = decodeTaskStore(bytes);
   const task = history.tasks?.find((item) => String(item.id) === taskId);
   return task
     ? {
@@ -900,7 +938,7 @@ async function readCheckpointEvidence(
   terminalId,
   bindingEpoch,
 ) {
-  const historyPath = join(dataRoot, "workbench", "workbench-history.json");
+  const historyPath = join(dataRoot, "workbench", "workbench-history.store");
   let historyBytes;
   try {
     historyBytes = await readFile(historyPath);
@@ -908,7 +946,7 @@ async function readCheckpointEvidence(
     if (error?.code === "ENOENT") return null;
     throw error;
   }
-  const history = JSON.parse(historyBytes.toString("utf8"));
+  const history = decodeTaskStore(historyBytes);
   const task = history.tasks?.find((item) => String(item.id) === taskId);
   lastCheckpointObservation = task
     ? {
