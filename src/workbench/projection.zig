@@ -47,7 +47,6 @@ pub const Error = lifecycle.Error || scheduled_tasks_impl.Error || scheduled_tas
     WorkspaceOrderExhausted,
     UnknownTask,
     UnknownWorkspace,
-    InvalidRunState,
     TaskClosing,
     ExecutionUnavailable,
     ExecutionInUse,
@@ -1433,10 +1432,11 @@ const RunRecord = struct {
     /// Latest monotonic AgentCore execution observation. These fields are
     /// runtime-only: an interrupted process never persists in-flight state.
     agent_phase: ?lifecycle.RunStatePhase = null,
-    agent_transition_seq: u64 = 0,
+    agent_transition_seq: ?u64 = null,
     agent_turn: u32 = 0,
     agent_tool_calls: u32 = 0,
     agent_in_flight_tools: u32 = 0,
+    agent_observation_degraded: bool = false,
     permission_provenance: ?PermissionSummary = null,
     terminal_publication: std.atomic.Value(TerminalPublication) = .init(.open),
     terminal_payload: TerminalPayload = undefined,
@@ -5254,29 +5254,27 @@ pub const Workbench = struct {
             .auto_compact => _ = try self.replaceTrackedProjected(&run.status_text, "Context compacted", self.limits.max_tool_field_bytes, run.redaction_secret),
             .retry_notice => _ = try self.replaceTrackedProjected(&run.status_text, "Retrying provider", self.limits.max_tool_field_bytes, run.redaction_secret),
             .run_state => |state| {
-                if (state.run_id != run.id) return error.InvalidRunState;
-                if (state.transition_seq <= run.agent_transition_seq) return;
+                if (state.run_id != run.id) {
+                    run.agent_observation_degraded = true;
+                    return;
+                }
+                if (run.agent_transition_seq) |last| {
+                    if (state.transition_seq <= last) return;
+                }
                 run.agent_transition_seq = state.transition_seq;
                 run.agent_phase = state.phase;
                 run.agent_turn = state.turn;
                 run.agent_tool_calls = state.tool_calls;
-                run.agent_in_flight_tools = std.math.cast(u32, state.in_flight_tools.len) orelse
-                    return error.InvalidRunState;
+                run.agent_in_flight_tools = std.math.cast(u32, state.in_flight_tools.len) orelse {
+                    run.agent_observation_degraded = true;
+                    return;
+                };
                 _ = try self.replaceTrackedProjected(
                     &run.status_text,
                     agentRunStateStatus(state.phase),
                     self.limits.max_tool_field_bytes,
                     run.redaction_secret,
                 );
-                switch (state.phase) {
-                    .waiting_ui => {
-                        if (run.active_phase != .stopping) _ = setActivePhase(run, .waiting_ui);
-                    },
-                    .starting, .generating, .executing_tools, .retrying, .compacting, .finalizing => {
-                        if (run.active_phase != .stopping) _ = setActivePhase(run, .running);
-                    },
-                    .completed, .failed, .aborted, .poisoned => {},
-                }
             },
             .permission_provenance => |provenance| {
                 const summary = try permissionSummary(provenance);
@@ -15258,7 +15256,7 @@ test "streaming Run events do not reorder Task navigation" {
     try std.testing.expectEqual(before, workbench.tasks[0].?.durable.recent_order);
 }
 
-test "AgentCore RunState refines live status and rejects stale transitions" {
+test "AgentCore RunState refines status without owning RunPhase and rejects stale transitions" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
     const task = &workbench.tasks[0].?;
@@ -15270,10 +15268,13 @@ test "AgentCore RunState refines live status and rejects stale transitions" {
         "{\"run_state\":{\"run_id\":7,\"transition_seq\":1,\"phase\":\"starting\",\"turn\":0,\"tool_calls\":0,\"in_flight_tools\":[]}}",
     );
     defer starting.deinit();
-    try workbench.applyEvent(&starting);
     const run = &task.durable.runs[0].?;
+    run.active_phase = .queued;
+    const host_phase = run.active_phase;
+    try workbench.applyEvent(&starting);
     try std.testing.expectEqual(lifecycle.RunStatePhase.starting, run.agent_phase.?);
-    try std.testing.expectEqual(@as(u64, 1), run.agent_transition_seq);
+    try std.testing.expectEqual(@as(u64, 1), run.agent_transition_seq.?);
+    try std.testing.expectEqual(host_phase, run.active_phase);
     try std.testing.expectEqualStrings("Starting", run.status_text);
 
     var executing = try testEnvelope(
@@ -15298,6 +15299,34 @@ test "AgentCore RunState refines live status and rejects stale transitions" {
     try workbench.applyEvent(&stale);
     try std.testing.expectEqual(lifecycle.RunStatePhase.executing_tools, run.agent_phase.?);
     try std.testing.expectEqualStrings("Executing tools", run.status_text);
+
+    var cross_run = try testEnvelope(
+        route,
+        7,
+        "{\"run_state\":{\"run_id\":99,\"transition_seq\":3,\"phase\":\"failed\",\"turn\":9,\"tool_calls\":9,\"in_flight_tools\":[]}}",
+    );
+    defer cross_run.deinit();
+    try workbench.applyEvent(&cross_run);
+    try std.testing.expect(run.agent_observation_degraded);
+    try std.testing.expectEqual(lifecycle.RunStatePhase.executing_tools, run.agent_phase.?);
+    try std.testing.expectEqual(host_phase, run.active_phase);
+}
+
+test "AgentCore RunState accepts a zero first transition sequence" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    const task = &workbench.tasks[0].?;
+    const route = task.runtime.routeId();
+    var first = try testEnvelope(
+        route,
+        7,
+        "{\"run_state\":{\"run_id\":7,\"transition_seq\":0,\"phase\":\"starting\",\"turn\":0,\"tool_calls\":0,\"in_flight_tools\":[]}}",
+    );
+    defer first.deinit();
+    try workbench.applyEvent(&first);
+    const run = &task.durable.runs[0].?;
+    try std.testing.expectEqual(@as(u64, 0), run.agent_transition_seq.?);
+    try std.testing.expectEqual(lifecycle.RunStatePhase.starting, run.agent_phase.?);
 }
 
 test "event projection failure routes by Agent Session identity not product Task identity" {
