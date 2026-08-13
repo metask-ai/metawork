@@ -28,7 +28,7 @@
 - [Product requirements](requirements.md)
 - canonical `.agentcore/bundle/bindings/zig/src/protocol.zig`、`types.zig` 和 `include/metask/agentcore.h`
 
-当前 revision 7 的事实包括：
+当前 revision 8 的事实包括：
 
 - Permission request 携带 request/session/run/tool identity、canonical arguments digest、`policy_generation`、`responses[]` 和可选 candidate。
 - candidate scope 当前只有 `exact_arguments`。
@@ -136,7 +136,7 @@ callback_outcome?
 | 拒绝一次 | `deny_once` | 当前 request | 只拒绝这次调用 |
 | 本会话拒绝 | `deny_session` | 当前 Session + candidate | 本会话内拒绝相同参数的调用 |
 
-`allow_session` / `deny_session` 只有在 request 带 candidate 且 `responses[]` 包含对应 choice 时可用。revision 7 的 candidate scope 恒为 `exact_arguments`；未知 scope 按 SDK 规则 fail closed。
+`allow_session` / `deny_session` 只有在 request 带 candidate 且 `responses[]` 包含对应 choice 时可用。revision 8 的 candidate scope 恒为 `exact_arguments`；未知 scope 按 SDK 规则 fail closed。
 
 Renderer 不接收或提交：
 
@@ -176,7 +176,7 @@ MetaWork 不维护“已允许工具”缓存。用户选择 `allow_session` / `
 成功标准是：
 
 - 同一 AgentCore Session；
-- 同一 candidate（revision 7 即相同 exact arguments 范围）；
+- 同一 candidate（revision 8 即相同 exact arguments 范围）；
 - 后续调用由 AgentCore 直接决策；
 - 不再发起重复 UI request。
 

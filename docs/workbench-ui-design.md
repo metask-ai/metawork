@@ -47,13 +47,13 @@ MetaWork 的视觉记忆点不是装饰性的暖色、通用衬线大标题、�
 
 ### 2.1 当前 ABI v1 capability profile
 
-Windows 当前锁定的 development ABI v1 revision 8（macOS 独立 revision 7）已为以下既有界面提供可验证数据；Skill catalog、typed Skill Run 与 Composer Slash 使用同一 Workspace/Task snapshot 和 Run product path：
+Windows 与 macOS 当前锁定的 development ABI v1 revision 8 已为以下既有界面提供可验证数据；Skill catalog、typed Skill Run 与 Composer Slash 使用同一 Workspace/Task snapshot 和 Run product path：
 
 - 文本流、工具开始/进度/结果、Run progress、usage、context warning、auto compact、retry 和 stream done；
 - Ask question 与 permission 两类同步用户请求；
 - Workspace current / Task pinned Skill catalog、typed Skill Run 与独立 Skill rejection；
 - Run 状态、六种终止原因，以及 Session 是否仍可继续。
-- Windows revision 8 的 `run_state` 阶段观察；Workbench 将其投影为 Current activity 文案，并按 transition sequence 丢弃过期观察。
+- revision 8 的 `run_state` 阶段观察；Workbench 将其投影为 Current activity 文案，并按 transition sequence 丢弃过期观察。
 
 因此当前产品只显示时间线、工具活动、问题/权限卡片、Current activity 和真实 usage。Plan、plan approval、Outputs、Files changed、持久权限管理和 custom UI 均保持隐藏；它们在本文档中的设计是后续 capability 到位后的产品规范，不是当前实现承诺。Renderer 不解析工具参数、stdout 或普通文本来猜测这些状态；Current activity 的细粒度文案只来自 Host 对 AgentCore `run_state` 的受序列保护投影。当前 Renderer 合同已提供独立 Workspace projection、Task-bound ExecutionConfig facts、正式设置 route，以及设置与 New task 共享的默认 API/模型选择；跨重启 rebind 等仍须等对应 capability 落地后才能宣称可用，差距由 [验证规范](validation.md)明确记录。
 
@@ -191,7 +191,7 @@ Workspace
 
 ## 5. 左栏：能力与 Task
 
-> Capability：**部分当前、部分目标**。Renderer 合同已提供 MetaWork 顶层与 Workspace/Task 分离的 revision 7 Skill catalog projection；本地 package/inventory、详情与管理 mutation 是本次目标合同。shell 已提供稳定 New task、全局 Task 导航、行动优先分组和左下角账号入口；Skill 中心、消费 Host-owned management/Runtime/admission 事实的 MCP 页面与持久定时任务都作为同级全局能力进入该 shell。
+> Capability：**部分当前、部分目标**。Renderer 合同已提供 MetaWork 顶层与 Workspace/Task 分离的 revision 8 Skill catalog projection；本地 package/inventory、详情与管理 mutation 是本次目标合同。shell 已提供稳定 New task、全局 Task 导航、行动优先分组和左下角账号入口；Skill 中心、消费 Host-owned management/Runtime/admission 事实的 MCP 页面与持久定时任务都作为同级全局能力进入该 shell。
 
 ### 5.1 Task 列表与路径上下文
 
@@ -209,7 +209,7 @@ Workspace
 
 ### 5.2 全局能力入口
 
-> Capability：**当前与受 gate 目标**。Skill 入口只依赖现有 AgentCore revision 7 discovery/catalog；定时任务入口依赖 Workbench-owned 持久 schedule projection、后台 Host timer/notification 与真实 Task admission。MCP 入口与 route 已进入稳定 shell；当前合同由 Workbench typed 管理能力、Runtime/catalog availability 与新 Task authority 三类事实共同驱动，页面不得把其中任何一个状态冒充另一个。
+> Capability：**当前与受 gate 目标**。Skill 入口只依赖现有 AgentCore revision 8 discovery/catalog；定时任务入口依赖 Workbench-owned 持久 schedule projection、后台 Host timer/notification 与真实 Task admission。MCP 入口与 route 已进入稳定 shell；当前合同由 Workbench typed 管理能力、Runtime/catalog availability 与新 Task authority 三类事实共同驱动，页面不得把其中任何一个状态冒充另一个。
 
 `新建任务`、`技能`、`MCP` 与 `定时任务` 位于 Task 列表上方的同一个纵向紧凑菜单，不使用窄侧栏中的卡片宫格，也不通过额外分组间距制造父子关系：
 
@@ -232,7 +232,7 @@ Tasks
 
 ### 5.3 Skill 中心
 
-> Capability：**目标合同**。页面在现有 revision 7 catalog/health projection 之上增加 Workbench-owned 本地 package、inventory 与管理 mutation；不要求 AgentCore 增加安装 API，也不把管理 projection 当作 Session execution binding。
+> Capability：**目标合同**。页面在现有 revision 8 catalog/health projection 之上增加 Workbench-owned 本地 package、inventory 与管理 mutation；不要求 AgentCore 增加安装 API，也不把管理 projection 当作 Session execution binding。
 
 Skill 中心只有一个工作：管理 MetaWork 已知的本地 Skill 资产。创建和修改仍属于普通 Task；在线市场、远程更新、启用开关、Preset、标签、排序、中央仓库和多 Agent 同步当前不存在，也不显示占位入口。
 

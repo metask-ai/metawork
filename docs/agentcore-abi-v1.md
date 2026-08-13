@@ -1,22 +1,23 @@
 # MetaWork AgentCore ABI v1 消费合同
 
-> 状态：Windows x86_64 GNU revision 8 是唯一 exact development baseline hard cut；不声明 stable support policy
+> 状态：Windows x86_64 GNU 与 macOS arm64 revision 8 是 target-specific exact development baseline hard cut；不声明 stable support policy
 > 所有者：Metask AgentCore 负责 facade、bindings、bundle 和 ABI 政策；MetaWork 负责 exact artifact 消费、Host 生命周期和产品 capability gate
 
 本文定义 MetaWork 对 Metask AgentCore binary ABI version 1 的 target-specific 消费边界。线程、事件泵和 Host 生命周期见 [AgentCore 集成契约](agentcore-integration.md)，验证入口见 [验证规范](validation.md)。
 
 ## 1. 唯一 baseline
 
-Windows 锁定 clean source artifact，commit `78fe89e47d56df8fd3e76f8b289a0017bf2ff783`、package version `0.1.0-dev+78fe89e47d56`，使用 Zig 0.16.0、strip=true、requires C runtime：
+Windows 与 macOS 都锁定 clean source artifact，commit `78fe89e47d56df8fd3e76f8b289a0017bf2ff783`、package version `0.1.0-dev+78fe89e47d56`，使用 Zig 0.16.0、strip=true、requires C runtime：
 
 | Target                       | Build        | Link input                  | Repository lock                                    |
 | ---------------------------- | ------------ | --------------------------- | -------------------------------------------------- |
 | Windows x86_64 GNU           | ReleaseSafe  | `advapi32`、`crypt32`       | `build_support/agentcore-bundle.windows.lock.json` |
+| macOS arm64                  | ReleaseSafe  | 无                          | `build_support/agentcore-bundle.macos.lock.json`   |
 
 固定合同按 target 为：
 
 - `binary_abi_version = 1`；
-- Windows：`binary_abi_revision = 8`，`capabilities = 1048575`（`0xfffff`）；
+- Windows 与 macOS：`binary_abi_revision = 8`，`capabilities = 1048575`（`0xfffff`）；
 - 两者的 `binary_abi_table_size` 都是 `216`；
 - 唯一 discovery symbol 为 `metask_agentcore_get_api`；
 - struct size 必须精确匹配，Host 提供的 reserved 字段必须全部为零；
@@ -24,9 +25,9 @@ Windows 锁定 clean source artifact，commit `78fe89e47d56df8fd3e76f8b289a0017b
 
 MetaWork 不接受目标 policy 之外的 ABI revision，不保留 function-table 分流、旧类型别名、shim、兼容 parser、双 bundle 或静默 fallback。需要回退时只能回退整个 MetaWork 变更和对应 exact artifact，运行时没有降级路径。
 
-### Windows revision 8 的执行状态事件
+### revision 8 的执行状态事件
 
-revision 8 新增 `CAP_RUN_STATE_OBSERVATION` 和 `CoreEvent.run_state`。事件携带单调 `transition_seq`、`phase`（starting、generating、executing_tools、waiting_ui、retrying、compacting、finalizing、completed、failed、aborted、poisoned）、turn、累计 tool call 数及当前 in-flight tool 数组。Windows staged probe 已使用非首值 Host Run ID `7` 确认 callback envelope 的 Run identity 与 `run_state.run_id` 一致，首个观测序号为 `1`，当前 text vertical 观察到 `starting → generating → finalizing → completed`。MetaWork 将该事件限制为 runtime-only observation/status 投影，不写入或决定 Workbench `RunPhase`，不产生持久终态；projection 层重复/过期或关联/边界校验失败只丢弃该 observation 并标记 runtime-only degraded，不以 `consumer_rejected` 终止用户 Run。callback 边界的非法 wire/UTF-8、`run_id == 0` 或无法安全解码的文本仍按既有 `invalid_event` 合同失败当前 Run。重启后仍按未完成 Run 的既有恢复规则收口。
+revision 8 新增 `CAP_RUN_STATE_OBSERVATION` 和 `CoreEvent.run_state`。事件携带单调 `transition_seq`、`phase`（starting、generating、executing_tools、waiting_ui、retrying、compacting、finalizing、completed、failed、aborted、poisoned）、turn、累计 tool call 数及当前 in-flight tool 数组。Windows 与 macOS 的 staged probe 都使用非首值 Host Run ID `7` 确认 callback envelope 的 Run identity 与 `run_state.run_id` 一致，首个观测序号为 `1`。MetaWork 将该事件限制为 runtime-only observation/status 投影，不写入或决定 Workbench `RunPhase`，不产生持久终态；projection 层重复/过期或关联/边界校验失败只丢弃该 observation 并标记 runtime-only degraded，不以 `consumer_rejected` 终止用户 Run。callback 边界的非法 wire/UTF-8、`run_id == 0` 或无法安全解码的文本仍按既有 `invalid_event` 合同失败当前 Run。重启后仍按未完成 Run 的既有恢复规则收口。
 
 ## 2. Bundle 与 SDK 边界
 
@@ -54,7 +55,7 @@ MetaWork 不复制 header、raw enum、event tag、Permission/Skill/MCP JSON sch
 - checkpoint export；
 - owned buffer release。
 
-必需 entry 不等于 MetaWork 产品自动开放对应能力。`runtime_apply_mcp_configuration` 在 revision 7 table 中必须存在，但当前产品保持 immutable Runtime Manifest 与 `restart_required` 语义，不调用该 entry；测试 fake 必须提供签名正确、明确失败的 stub，确保 function-table 校验真实覆盖 revision 7。
+必需 entry 不等于 MetaWork 产品自动开放对应能力。`runtime_apply_mcp_configuration` 在 revision 8 table 中必须存在，但当前产品保持 immutable Runtime Manifest 与 `restart_required` 语义，不调用该 entry；测试 fake 必须提供签名正确、明确失败的 stub，确保 function-table 校验真实覆盖 revision 8。
 
 ## 4. Runtime 与 Session create
 
@@ -89,7 +90,7 @@ fresh Session 只使用 `SessionHostConfigV1` 与 `SessionCreateConfigV1`：
 - synchronous AskUserQuestion 与 Permission；
 - typed Core event 和 Permission provenance。
 
-以下 revision 7 ABI 能力仍关闭，直到各自完成产品 owner、安全、持久化和恢复验收：
+以下 revision 8 ABI 能力仍关闭，直到各自完成产品 owner、安全、持久化和恢复验收：
 
 - Runtime MCP configuration live apply；
 - persistent Permission rules；
@@ -130,13 +131,13 @@ Host 先校验 function `Status`，再按 operation-specific status set 决定�
 - 其他非 OK status：不得读取 `RunResultV1` 的结果字段，只读取并释放 diagnostic；
 - unknown status、属于其他 operation 的 known status、unknown StopReason/outcome/flag 或 StopReason 与 checkpoint outcome 不一致都属于 dependency contract failure。
 
-Run、manual compact 与 Session Skill mutation 分别维护 operation-specific status disposition，不能从“SDK 已知 status”推断某个 entry 接受该 status，也不能用一份全局 allowlist 代替。revision 7 的 `checkpoint_budget_required` 对这三条当前消费路径都是合法、可恢复的非 OK 结果：操作向上失败收口，但 Session 保持 reusable；只有不属于该 operation 的 known status 才按 dependency contract failure 处理。
+Run、manual compact 与 Session Skill mutation 分别维护 operation-specific status disposition，不能从“SDK 已知 status”推断某个 entry 接受该 status，也不能用一份全局 allowlist 代替。revision 8 的 `checkpoint_budget_required` 对这三条当前消费路径都是合法、可恢复的非 OK 结果：操作向上失败收口，但 Session 保持 reusable；只有不属于该 operation 的 known status 才按 dependency contract failure 处理。
 
 checkpoint export 与 Session describe 是另外两条 operation-specific 消费路径。export 中经本地 sink 原因验证的 `checkpoint_io` 不污染 Session；restore 侧 checkpoint status 不是 export 合法结果。`out_of_memory`、`core_error`、malformed OK 或 callback/dependency contract failure 保守关闭 Session admission。describe 的 resource/busy/argument failure 可重试，内部 fatal 与 malformed result 同样关闭 admission。`checkpoint_budget_required` 对这两个 entry 都不是合法结果，必须显式按 dependency contract failure 收口。export 的 generation 只按 opaque `u64` 保存，ABI 未定义非零或单调性，Host 不得自行断言。
 
-checkpoint restore 是第三条独立 disposition。`checkpoint_corrupt`、`checkpoint_unsupported`、`checkpoint_incompatible`、`logical_session_conflict` 与 verified source 的 I/O failure 只失败本次 candidate；unknown/malformed OK、restore report 与持久 expectation 不一致或依赖合同失败必须 fail closed 并销毁 candidate。source `read_fn` 允许短读；canonical revision 7 probe 已确认 Core 持续读取到 EOF。启动 size/hash verify 是 eligibility 事实，job 内同一 source handle 的再校验是 commit 前的权威检查，流式 digest 只作为完整消费时的额外交叉验证。
+checkpoint restore 是第三条独立 disposition。`checkpoint_corrupt`、`checkpoint_unsupported`、`checkpoint_incompatible`、`logical_session_conflict` 与 verified source 的 I/O failure 只失败本次 candidate；unknown/malformed OK、restore report 与持久 expectation 不一致或依赖合同失败必须 fail closed 并销毁 candidate。source `read_fn` 允许短读；canonical revision 8 probe 已确认 Core 持续读取到 EOF。启动 size/hash verify 是 eligibility 事实，job 内同一 source handle 的再校验是 commit 前的权威检查，流式 digest 只作为完整消费时的额外交叉验证。
 
-`CheckpointExportResultV1.digest` 的算法在 revision 7 合同中未定义，canonical bundle 的真实输出也不等于 streamed bytes 的 SHA-256。MetaWork 不把该字段冒充内容哈希或据此拒绝合法 export；checkpoint store 的文件名、`CheckpointRecord.blob` 和启动校验统一使用 Host 在 sink 中对实际 bytes 独立计算的 SHA-256。若上游未来定义 raw digest 语义，须先补充 ABI 合同与 candidate probe，再决定是否增加独立校验，不能静默替换产品 content hash。
+`CheckpointExportResultV1.digest` 的算法在 revision 8 合同中未定义，canonical bundle 的真实输出也不等于 streamed bytes 的 SHA-256。MetaWork 不把该字段冒充内容哈希或据此拒绝合法 export；checkpoint store 的文件名、`CheckpointRecord.blob` 和启动校验统一使用 Host 在 sink 中对实际 bytes 独立计算的 SHA-256。若上游未来定义 raw digest 语义，须先补充 ABI 合同与 candidate probe，再决定是否增加独立校验，不能静默替换产品 content hash。
 
 八个 StopReason 必须无 `else` 穷尽映射：
 
@@ -203,4 +204,4 @@ staged Host gate：
 - 当前平台真实 AgentCore vertical；
 - architecture guard 证明正式 build 只消费 canonical bundle，且只有 `agent/` import SDK。
 
-Linux 或其他 target 必须新增独立 policy、lock、artifact 和平台验证。缺少目标 revision 7 artifact 时直接失败，不得保留旧 ABI 作为替代。
+Linux 或其他 target 必须新增独立 policy、lock、artifact 和平台验证。缺少目标 revision 8 artifact 时直接失败，不得保留旧 ABI 作为替代。
