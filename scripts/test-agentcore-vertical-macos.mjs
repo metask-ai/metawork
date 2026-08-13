@@ -767,6 +767,14 @@ try {
     throw new Error("provider did not receive the materialized Skill input");
   if (providerInput.includes("/review"))
     throw new Error("raw slash syntax reached the AgentCore provider");
+  if (
+    process.platform === "win32" &&
+    (!providerInput.includes('"name":"WebSearch"') ||
+      !providerInput.includes('"name":"WebFetch"'))
+  )
+    throw new Error(
+      "Windows full profile did not expose WebSearch/WebFetch to AgentCore",
+    );
 
   await invokeBridge("metawork.tasks.rename", {
     taskId,

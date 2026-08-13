@@ -1,6 +1,6 @@
 # MetaWork Windows 核心工具接入方案
 
-> 状态：Windows 实施已完成；持续回归按本方案与验证规范执行
+> 状态：Windows 普通 Task 的完整工具集合已接入；受限 profile 的 Session 收窄否定侧探针仍是独立证据项
 >
 > 范围：将 Windows 新版 AgentCore bundle 的 built-in 工具名称接入现有 MetaWork Runtime/Session 路径
 >
@@ -55,14 +55,15 @@ WebSearch / WebFetch
 | Application | 创建共享 Agent Runtime 并注入现有生命周期 capability |
 | Bridge/Renderer | 展示已验证的 capability，提交白名单化 intent |
 
-产品只定义两个名称集合：
+产品定义一个普通 Task 的完整集合，以及两个受限集合：
 
 | Profile | Windows 工具名称 |
 | --- | --- |
+| `full` | `Read`、`Write`、`Edit`、`Glob`、`Grep`、`Bash`、`BashOutput`、`KillShell`、`AskUserQuestion`、`WebSearch`、`WebFetch` |
 | `local` | `Read`、`Write`、`Edit`、`Glob`、`Grep`、`Bash`、`BashOutput`、`KillShell`、`AskUserQuestion` |
 | `network` | `WebSearch`、`WebFetch` |
 
-Profile 不是新的执行层。Workbench 在创建 Task 时选择已通过 Windows 探针的名称集合，并通过 Session `allowed_tools` 传入；Application 创建的共享 Runtime 注册已验证名称并集。由于 revision 7 header 没有说明 Session 收窄的执行语义，local/network 隔离在得到否定侧运行证据前不能视为成立。未知名称、未验证名称和空选择都必须阻止 admission，不能静默降级或把空集合编码成 `allowed_tools = null`。
+普通 Windows Task 使用 `full` profile，因此能看到本次已接入的 11 个 built-in 名称；`local` / `network` 只用于明确的受限 Task。Profile 不是新的执行层。Workbench 在创建 Task 时选择已通过 Windows 探针的名称集合，并通过 Session `allowed_tools` 传入；Application 创建的共享 Runtime 注册已验证名称并集。受限 profile 的收窄语义仍需独立否定侧证据。未知名称、未验证名称和空选择都必须阻止 admission，不能静默降级或把空集合编码成 `allowed_tools = null`。
 
 ## 5. 分阶段实施
 
@@ -95,7 +96,7 @@ Profile 不是新的执行层。Workbench 在创建 Task 时选择已通过 Wind
 
 - Windows staged bundle 与 Windows lock 完全匹配，且 verifier 通过；
 - Windows 11 个名称的 verified set 有可定位的 Session 探针结果；
-- Runtime `builtin_tools` 是 verified set 的并集，Session `allowed_tools` 只做收窄，并有 local 排除 `WebFetch` 的否定侧运行证据；
+- Runtime `builtin_tools` 是 verified set 的并集，Session `allowed_tools` 只做收窄；local 排除 `WebFetch` 的否定侧运行证据仍是 network profile 正式开放前的独立 Gate；
 - Workbench 不再依赖四工具默认值，profile 选择通过真实 Task admission 进入 Session；
 - `WebSearch` 在 MetaWork wire 层仍只有一个工具名，不产生 provider-specific identity；
 - unknown name、未验证名称和空选择 fail closed；
@@ -114,6 +115,8 @@ Profile 不是新的执行层。Workbench 在创建 Task 时选择已通过 Wind
 ## Verification note
 
 Phase 0 implementation evidence (Windows staged bundle, 2026-08-12): `node scripts/run-agentcore-probe.mjs --staged` verifies the locked bundle and creates a Session for each of the 11 names. The probe uses `shell_policy=unrestricted` because AgentCore correctly rejects shell names when shell policy is disabled. This proves name admission under the required shell condition; it does not replace per-tool execution evidence.
-- The Windows Application now selects `local` for production Workbench configuration. macOS remains unconfigured, and `network` remains an explicit profile option rather than an implicit shared-Runtime capability.
-- The real Windows vertical exercises `Read`, `Bash`, `Edit`, `Write`, `Glob`, `Grep`, `BashOutput`, and `KillShell` in one AgentCore Run; `Write` materialization, tool projection, checkpoint commit, and restart recovery are asserted. `WebSearch` and `WebFetch` remain name-admitted and explicitly network-profile scoped, without a second executor or provider-specific MetaWork implementation.
+- The Windows Application now selects `full` for ordinary production Workbench Tasks, so the 11 verified built-ins are exposed to the model. macOS remains unconfigured; `local` and `network` remain explicit restricted profile options.
+- The Windows restore path carries the same profile as fresh Task creation, so restart cannot silently fall back to the four-name default set.
+- The real Windows vertical exercises `Read`, `Bash`, `Edit`, `Write`, `Glob`, `Grep`, `BashOutput`, and `KillShell` in one AgentCore Run; `Write` materialization, tool projection, checkpoint commit, and restart recovery are asserted. `WebSearch` and `WebFetch` are exposed by the ordinary `full` profile as AgentCore built-in names, without a second executor or provider-specific MetaWork implementation.
 - The restart corruption found during the vertical was caused by the persistence projection serializing bounded permission buffers as JSON arrays. `permissionSummaryWire` now returns the typed wire struct and preserves slices; `zig build test-lifecycle -Doptimize=Debug` and the Windows vertical both pass.
+- The name probe remains positive-side evidence for all 11 names. No provider fixture or second executor is added merely to manufacture a WebFetch denial; the negative-side Session narrowing probe remains a separately tracked network-profile gate.

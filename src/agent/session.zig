@@ -169,6 +169,7 @@ test "AgentCore JSON callbacks reject invalid UTF-8 at the ownership boundary" {
 }
 
 pub const BuiltinToolProfile = enum {
+    full,
     local,
     network,
 };
@@ -207,6 +208,10 @@ else
 
 pub fn builtinToolsForProfile(profile: BuiltinToolProfile) []const []const u8 {
     return switch (profile) {
+        .full => if (builtin.os.tag == .windows)
+            &windows_builtin_tools
+        else
+            &default_builtin_tools,
         .local => &local_builtin_tools,
         .network => &network_builtin_tools,
     };
