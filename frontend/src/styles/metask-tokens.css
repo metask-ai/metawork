@@ -7,6 +7,8 @@
   --metask-primary-deep: #4b2db5;
   --metask-primary-soft: #e9e6ff;
   --metask-accent: #b35be8;
+  --metask-state-warning: #9c5b10;
+  --metask-state-warning-ink: #7d4308;
 
   --metask-state-running: #b35be8;
   --metask-state-complete: #4c9a72;
@@ -39,6 +41,12 @@
   --ui-border: var(--metask-light-border);
   --ui-action-primary: var(--metask-primary);
   --ui-action-primary-hover: var(--metask-primary-deep);
+  --ui-action-primary-border: color-mix(
+    in srgb,
+    var(--ui-action-primary) 42%,
+    var(--ui-border)
+  );
+  --ui-content-warning: var(--metask-state-warning-ink);
   --ui-focus-ring: var(--metask-primary);
   --ui-shadow-overlay: 0 18px 48px rgb(25 27 33 / 16%);
 }
@@ -61,6 +69,8 @@
   --color-metask-primary-deep: var(--metask-primary-deep);
   --color-metask-primary-soft: var(--metask-primary-soft);
   --color-metask-accent: var(--metask-accent);
+  --color-metask-warning: var(--metask-state-warning);
+  --color-metask-warning-ink: var(--metask-state-warning-ink);
   --color-metask-running: var(--metask-state-running);
   --color-metask-complete: var(--metask-state-complete);
   --color-metask-error: var(--metask-state-error);
@@ -70,6 +80,8 @@
   --color-ui-content: var(--ui-content-primary);
   --color-ui-muted: var(--ui-content-muted);
   --color-ui-border: var(--ui-border);
+  --color-ui-primary-border: var(--ui-action-primary-border);
+  --color-ui-warning: var(--ui-content-warning);
   --font-metask-sans: var(--metask-font-sans);
   --font-metask-mono: var(--metask-font-mono);
 }

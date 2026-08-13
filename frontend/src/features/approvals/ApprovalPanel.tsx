@@ -57,7 +57,7 @@ export function ApprovalPanel({
       className="inline-request"
       aria-busy={responseInFlight}
     >
-      <p className="font-mono text-[10px] tracking-[0.14em] text-amber-ink uppercase">
+      <p className="font-mono text-[10px] tracking-[0.14em] text-ui-warning uppercase">
         {t("approval.response_required")}
       </p>
       {pending.redacted && (
@@ -134,7 +134,7 @@ export function ApprovalPanel({
                   {question.options.map((option, optionIndex) => (
                     <label
                       key={`${option.label}-${optionIndex}`}
-                      className="flex items-start gap-3 rounded-lg border border-rule bg-paper px-3 py-2 text-sm"
+                      className="flex items-start gap-3 rounded-lg border border-ui-border bg-ui-panel px-3 py-2 text-sm"
                     >
                       <Checkbox.Root
                         checked={optionAnswerSelected(
@@ -159,12 +159,12 @@ export function ApprovalPanel({
                       <span>
                         <span className="font-medium">{option.label}</span>
                         {option.description && (
-                          <span className="mt-0.5 block text-xs leading-5 text-muted">
+                          <span className="mt-0.5 block text-xs leading-5 text-ui-muted">
                             {option.description}
                           </span>
                         )}
                         {option.preview && (
-                          <span className="approval-option-preview mt-1 block font-mono text-[10px] leading-5 text-muted">
+                          <span className="approval-option-preview mt-1 block font-mono text-[10px] leading-5 text-ui-muted">
                             {option.preview}
                           </span>
                         )}

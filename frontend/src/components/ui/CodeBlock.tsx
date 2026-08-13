@@ -6,7 +6,7 @@ export function CodeBlock({ label, value }: { label: string; value: string }) {
     <div>
       <p
         id={labelId}
-        className="mb-1 font-mono text-[9px] tracking-[0.14em] text-muted uppercase"
+        className="mb-1 font-mono text-[9px] tracking-[0.14em] text-ui-muted uppercase"
       >
         {label}
       </p>
