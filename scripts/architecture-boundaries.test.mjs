@@ -1987,9 +1987,9 @@ test("Renderer declares window chrome UI while Application owns native behavior"
 
 test("lifecycle tests are grouped by invariant", () => {
   const cases = [
-    ["tests/agent/lifecycle_test.zig", 60],
+    ["tests/agent/lifecycle_test.zig", 61],
     ["tests/agent/event_pump_test.zig", 5],
-    ["tests/workbench/executor_lifecycle_test.zig", 29],
+    ["tests/workbench/executor_lifecycle_test.zig", 31],
     ["tests/integration/lifecycle/lifecycle_test.zig", 4],
   ];
   for (const [path, expectedCount] of cases) {
