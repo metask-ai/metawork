@@ -33,7 +33,7 @@ import { projectConversation } from "./conversation-projection.ts";
 import { formatInteger, formatMilliseconds } from "../../i18n/formatters.ts";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
 
-type TimelineDetailSection = "tools" | "usage";
+type AgentDetailSection = "tools" | "usage";
 
 function tokenTotal(usage: RunView["usage"]): bigint | null {
   try {
@@ -74,7 +74,7 @@ function isNonTerminalRun(phase: RunView["phase"]): boolean {
   );
 }
 
-function CompactTimelineEvent({ compact }: { compact: CompactView }) {
+function CompactConversationEvent({ compact }: { compact: CompactView }) {
   const { locale, t } = useI18n();
   const values = {
     before: formatInteger(locale, BigInt(compact.beforeContextTokens)),
@@ -90,14 +90,14 @@ function CompactTimelineEvent({ compact }: { compact: CompactView }) {
         : t(`compact.timeline.${compact.phase}`);
   return (
     <div
-      className="timeline-system-event"
+      className="conversation-compaction"
       data-active={
         compact.phase === "queued" ||
         compact.phase === "compacting" ||
         compact.phase === "stopping"
       }
     >
-      <span className="timeline-system-mark" aria-hidden="true" />
+      <span className="conversation-compaction-mark" aria-hidden="true" />
       <p>{message}</p>
     </div>
   );
@@ -146,10 +146,7 @@ export function AgentWorkSurface({
   retryAvailable: boolean;
   responseDisabled: boolean;
   onPrepareRetry: (input: RunInputView) => void;
-  onInspect: (
-    section: TimelineDetailSection,
-    opener: HTMLButtonElement,
-  ) => void;
+  onInspect: (section: AgentDetailSection, opener: HTMLButtonElement) => void;
   onRespond: (payload: UiResponsePayload) => void;
   renderPendingUi: (props: {
     taskId: string;
@@ -161,7 +158,7 @@ export function AgentWorkSurface({
 }) {
   const { locale, t } = useI18n();
   const [showJumpLatest, setShowJumpLatest] = useState(false);
-  const timelineScroll = useRef<HTMLDivElement>(null);
+  const conversationScroll = useRef<HTMLDivElement>(null);
   const followingLatest = useRef(true);
   const entries = projectConversation(task);
   const latestRunId = task?.runs.at(-1)?.id ?? null;
@@ -172,7 +169,7 @@ export function AgentWorkSurface({
   }, [task?.id]);
 
   useLayoutEffect(() => {
-    const viewport = timelineScroll.current;
+    const viewport = conversationScroll.current;
     if (!viewport) return;
     if (!task) {
       viewport.scrollTop = 0;
@@ -185,7 +182,7 @@ export function AgentWorkSurface({
   }, [task?.id, revision]);
 
   function updateFollowState() {
-    const viewport = timelineScroll.current;
+    const viewport = conversationScroll.current;
     if (!viewport) return;
     const distance =
       viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
@@ -194,7 +191,7 @@ export function AgentWorkSurface({
   }
 
   function jumpToLatest() {
-    const viewport = timelineScroll.current;
+    const viewport = conversationScroll.current;
     if (!viewport) return;
     followingLatest.current = true;
     viewport.scrollTo({ top: viewport.scrollHeight, behavior: "smooth" });
@@ -202,17 +199,20 @@ export function AgentWorkSurface({
   }
 
   return (
-    <Conversation className="timeline-region">
+    <Conversation className="agent-surface">
       <div
-        className="timeline-scroll"
-        ref={timelineScroll}
+        className="agent-surface-scroll"
+        ref={conversationScroll}
         onScroll={updateFollowState}
       >
-        <ConversationContent className="timeline">
+        <ConversationContent className="agent-surface-content">
           {entries.map((entry) => {
             if (entry.kind === "compact") {
               return (
-                <CompactTimelineEvent key={entry.id} compact={entry.compact} />
+                <CompactConversationEvent
+                  key={entry.id}
+                  compact={entry.compact}
+                />
               );
             }
             const run = entry;
@@ -220,7 +220,7 @@ export function AgentWorkSurface({
             return (
               <Fragment key={run.runId}>
                 <article
-                  className="timeline-run"
+                  className="agent-run"
                   data-active={
                     run.phase === "queued" ||
                     run.phase === "running" ||
@@ -228,10 +228,10 @@ export function AgentWorkSurface({
                     run.phase === "stopping"
                   }
                 >
-                  <div className="workline-node" aria-hidden="true" />
-                  <header className="run-heading">
+                  <header className="agent-run-header">
+                    <span className="agent-run-state" aria-hidden="true" />
                     <p>{runPhaseLabel(t, run.phase)}</p>
-                    <div className="run-heading-meta">
+                    <div className="agent-run-meta">
                       {total !== null && (
                         <span>
                           {t("run.tokens", {
@@ -253,7 +253,7 @@ export function AgentWorkSurface({
                         )}
                     </div>
                   </header>
-                  <div className="run-content">
+                  <div className="agent-run-content">
                     <RunInputMessage input={run.input} />
                     {run.activities.map((activity) => {
                       if (activity.kind === "tool")
@@ -290,7 +290,7 @@ export function AgentWorkSurface({
                       <div className="run-delivery">
                         <Message
                           from="assistant"
-                          className="timeline-message is-agent"
+                          className="agent-message is-agent"
                         >
                           <MessageContent>
                             <MessageResponse
@@ -375,14 +375,17 @@ function RunOutcome({
 }) {
   const { t } = useI18n();
   return (
-    <section className="run-outcome" data-phase={phase}>
-      <div className="run-outcome-copy" role={latest ? "status" : undefined}>
+    <section className="agent-run-outcome" data-phase={phase}>
+      <div
+        className="agent-run-outcome-copy"
+        role={latest ? "status" : undefined}
+      >
         <p>{t(terminalMessageId(outcome))}</p>
         {cause && <span>{t(`cause.${cause}`)}</span>}
       </div>
       {retryAvailable && retryableOutcome(outcome) && (
         <button
-          className="outcome-action focus-ring"
+          className="agent-outcome-action focus-ring"
           title={
             composerHasDraft ? t("run.review_draft_help") : t("run.retry_help")
           }
@@ -399,22 +402,22 @@ function RunInputMessage({ input }: { input: RunInputView }) {
   const { t } = useI18n();
   if (input.kind === "text")
     return (
-      <Message from="user" className="timeline-message is-user">
+      <Message from="user" className="agent-user-message">
         <MessageContent>
           <p className="message-body">{input.text}</p>
         </MessageContent>
       </Message>
     );
   return (
-    <Message from="user" className="timeline-message is-user is-skill">
+    <Message from="user" className="agent-user-message agent-skill-message">
       <MessageContent>
-        <div className="timeline-skill-input">
-          <span className="timeline-skill-token">
+        <div className="agent-skill-input">
+          <span className="agent-skill-token">
             /{input.invocationName}
             <small>{t("slash.group.skills")}</small>
           </span>
           {input.argumentValues.length > 0 && (
-            <span className="timeline-skill-arguments">
+            <span className="agent-skill-arguments">
               {input.argumentValues.map((value, index) => (
                 <code key={index}>{value}</code>
               ))}
@@ -446,13 +449,14 @@ function ToolCard({
   );
   return (
     <Tool
-      className="tool-card"
+      className="agent-tool"
       state={tool.state}
       open={tool.state === "running" || tool.state === "failed"}
     >
       <ToolHeader
-        className="tool-card-summary"
+        className="agent-tool-summary"
         name={tool.name}
+        state={tool.state}
         status={state}
         meta={
           duration !== null && duration > 0n ? (
@@ -464,7 +468,7 @@ function ToolCard({
           ) : undefined
         }
       />
-      <ToolContent className="tool-card-body">
+      <ToolContent className="agent-tool-body">
         {(tool.redacted ||
           tool.inputTruncated ||
           tool.progressTruncated ||

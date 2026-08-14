@@ -184,7 +184,7 @@ function renderShell(
   );
 }
 
-function renderCompletedTimeline(
+function renderCompletedSurface(
   assistant = "Release is ready",
   input = {
     kind: "text",
@@ -429,20 +429,23 @@ test("Settings uses the global stage without retaining the Task sidebar", () => 
 });
 
 test("terminal delivery follows tool activity and precedes the outcome", () => {
-  const markup = renderCompletedTimeline();
+  const markup = renderCompletedSurface();
   assert.ok(markup.indexOf("Read") < markup.indexOf("Release is ready"));
   assert.ok(
     markup.indexOf("Release is ready") < markup.indexOf("Work completed"),
   );
-  assert.match(renderCompletedTimeline(""), /did not return a final response/);
+  assert.match(renderCompletedSurface(""), /did not return a final response/);
 });
 
 test("each typed Tool stays an independent bounded detail card", async () => {
   const [markup, css, timeline, approval] = await Promise.all([
-    Promise.resolve(renderCompletedTimeline()),
+    Promise.resolve(renderCompletedSurface()),
     readFile(join(process.cwd(), "frontend/src/index.css"), "utf8"),
     readFile(
-      join(process.cwd(), "frontend/src/features/agent-surface/AgentWorkSurface.tsx"),
+      join(
+        process.cwd(),
+        "frontend/src/features/agent-surface/AgentWorkSurface.tsx",
+      ),
       "utf8",
     ),
     readFile(
@@ -450,16 +453,17 @@ test("each typed Tool stays an independent bounded detail card", async () => {
       "utf8",
     ),
   ]);
-  assert.equal(markup.match(/class="ai-tool tool-card"/g)?.length, 1);
-  assert.match(markup, /class="ai-tool tool-card" data-state="completed"/);
+  assert.equal(markup.match(/class="ai-tool agent-tool"/g)?.length, 1);
+  assert.match(markup, /class="ai-tool agent-tool" data-state="completed"/);
   assert.match(css, /\.code-block-preview\s*\{[\s\S]*?max-height:\s*240px/);
   assert.match(timeline, /key=\{`tool:\$\{activity\.id\}`\}/);
+  assert.match(timeline, /state=\{tool\.state\}/);
   assert.doesNotMatch(timeline, /bg-cobalt/);
   assert.doesNotMatch(approval, /accent-cobalt/);
 });
 
-test("Timeline preserves typed Skill identity and positional arguments", () => {
-  const markup = renderCompletedTimeline("Review complete", {
+test("Agent Work Surface preserves typed Skill identity and positional arguments", () => {
+  const markup = renderCompletedSurface("Review complete", {
     kind: "skill",
     skillId: "builtin.review",
     catalogRevision: "17",
@@ -468,13 +472,13 @@ test("Timeline preserves typed Skill identity and positional arguments", () => {
     argumentValues: ["src/main.zig"],
     redacted: false,
   });
-  assert.match(markup, /timeline-skill-token/);
+  assert.match(markup, /agent-skill-token/);
   assert.match(markup, />\/review/);
   assert.match(markup, />src\/main\.zig</);
 });
 
-test("Timeline projects manual Compact as a lightweight system event", () => {
-  const markup = renderCompletedTimeline("Release is ready", undefined, [
+test("Agent Work Surface projects manual Compact as a lightweight system event", () => {
+  const markup = renderCompletedSurface("Release is ready", undefined, [
     {
       operationId: "11",
       afterRunId: "9",
@@ -485,7 +489,7 @@ test("Timeline projects manual Compact as a lightweight system event", () => {
       usage: { input: "5", output: "2", cacheRead: "0", cacheCreation: "0" },
     },
   ]);
-  assert.match(markup, /timeline-system-event/);
+  assert.match(markup, /conversation-compaction/);
   assert.match(markup, /Context compacted/);
   assert.match(markup, /100/);
   assert.match(markup, /40/);

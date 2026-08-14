@@ -320,11 +320,14 @@ test("Escape dismissal and focus return preserve the real Inspector opener", () 
 });
 
 test("Inspector has one controlled panel and the central narrative is not chat", async () => {
-  const [app, shell, timeline, css] = await Promise.all([
+  const [app, shell, surface, css] = await Promise.all([
     readFile(join(process.cwd(), "frontend/src/app/App.tsx"), "utf8"),
     readFile(join(process.cwd(), "frontend/src/app/AppShell.tsx"), "utf8"),
     readFile(
-      join(process.cwd(), "frontend/src/features/agent-surface/AgentWorkSurface.tsx"),
+      join(
+        process.cwd(),
+        "frontend/src/features/agent-surface/AgentWorkSurface.tsx",
+      ),
       "utf8",
     ),
     readFile(join(process.cwd(), "frontend/src/index.css"), "utf8"),
@@ -336,26 +339,26 @@ test("Inspector has one controlled panel and the central narrative is not chat",
   assert.match(app, /inspectorFocusReturnTarget/);
   assert.match(shell, /id="task-inspector"/);
   assert.doesNotMatch(shell, /rightPreference|setRightOpen|aria-modal/);
-  assert.doesNotMatch(timeline, /run\.label|Work item/);
+  assert.doesNotMatch(surface, /run\.label|Work item/);
   const userMessageRule = css.match(
-    /\.timeline-message\.is-user\s*\{([^}]*)\}/,
+    /\.ai-message\.agent-user-message\s*\{([^}]*)\}/,
   )?.[1];
   assert.ok(userMessageRule);
   assert.match(userMessageRule, /width:\s*fit-content/);
-  assert.match(userMessageRule, /max-width:\s*min\(72%, 620px\)/);
+  assert.match(userMessageRule, /max-width:\s*min\(78%, 660px\)/);
   assert.match(userMessageRule, /margin-left:\s*auto/);
-  assert.match(userMessageRule, /border-radius:\s*12px/);
-  assert.doesNotMatch(timeline, /message\.(?:you|agent)/);
-  assert.doesNotMatch(timeline, /message-role/);
-  const runOutcomeRule = css.match(/\.run-outcome\s*\{([^}]*)\}/)?.[1];
+  assert.match(userMessageRule, /border-radius:\s*14px 14px 4px 14px/);
+  assert.doesNotMatch(surface, /message\.(?:you|agent)/);
+  assert.doesNotMatch(surface, /message-role/);
+  const runOutcomeRule = css.match(/\.agent-run-outcome\s*\{([^}]*)\}/)?.[1];
   assert.ok(runOutcomeRule);
   assert.match(runOutcomeRule, /border-top:\s*1px solid var\(--ui-border\)/);
   assert.doesNotMatch(runOutcomeRule, /border-radius|background:/);
   assert.match(
     css,
-    /@media \(max-width: 560px\)[\s\S]*?\.timeline-message\.is-user\s*\{[^}]*max-width:\s*88%/,
+    /@media \(max-width: 560px\)[\s\S]*?\.ai-message\.agent-user-message\s*\{[^}]*max-width:\s*88%/,
   );
-  assert.doesNotMatch(css, /\.timeline-message\.is-user::(?:before|after)/);
+  assert.doesNotMatch(css, /\.ai-message\.agent-user-message::(?:before|after)/);
 });
 
 test("Inspector breakpoint changes presentation without creating a modal or second state owner", async () => {
