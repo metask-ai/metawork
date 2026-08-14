@@ -5871,6 +5871,100 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   line-height: 1.72;
 }
 
+.ai-message-response .ai-markdown {
+  white-space: normal;
+}
+
+.ai-markdown > :first-child {
+  margin-top: 0;
+}
+
+.ai-markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.ai-markdown p,
+.ai-markdown ul,
+.ai-markdown ol,
+.ai-markdown blockquote,
+.ai-markdown table {
+  margin: 0 0 12px;
+}
+
+.ai-markdown h1,
+.ai-markdown h2,
+.ai-markdown h3,
+.ai-markdown h4 {
+  margin: 18px 0 8px;
+  color: var(--ui-content-primary);
+  font-weight: 650;
+  line-height: 1.3;
+}
+
+.ai-markdown h1 {
+  font-size: 18px;
+}
+
+.ai-markdown h2 {
+  font-size: 16px;
+}
+
+.ai-markdown h3,
+.ai-markdown h4 {
+  font-size: 14px;
+}
+
+.ai-markdown ul,
+.ai-markdown ol {
+  padding-left: 22px;
+}
+
+.ai-markdown li + li {
+  margin-top: 4px;
+}
+
+.ai-markdown blockquote {
+  padding-left: 12px;
+  border-left: 2px solid var(--ui-border);
+  color: var(--ui-content-muted);
+}
+
+.ai-markdown :not(pre) > code {
+  padding: 2px 5px;
+  border: 1px solid var(--ui-border);
+  border-radius: 5px;
+  background: var(--ui-surface-panel);
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+}
+
+.ai-markdown a {
+  color: var(--ui-action-primary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.ai-markdown table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.ai-markdown th,
+.ai-markdown td {
+  padding: 7px 9px;
+  border: 1px solid var(--ui-border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.ai-markdown th {
+  background: var(--ui-surface-panel);
+  font-weight: 650;
+}
+
 .ai-message-response[data-streaming="true"]::after {
   display: inline-block;
   width: 5px;

@@ -3,6 +3,7 @@ import { memo } from "react";
 
 import { Button, type ButtonProps } from "../ui/button.tsx";
 import { cn } from "../ui/utils.ts";
+import { Markdown } from "./Markdown.tsx";
 
 export type AiMessageRole = "user" | "assistant" | "system";
 
@@ -89,9 +90,8 @@ export type MessageResponseProps = HTMLAttributes<HTMLDivElement> & {
 };
 
 /**
- * The upstream component delegates Markdown to Streamdown. MetaWork keeps
- * this baseline dependency-free and text-oriented; a Markdown renderer can
- * be introduced behind the same component contract later.
+ * Markdown rendering stays product-owned. It uses the AI UI component
+ * baseline without introducing AI SDK transport or provider runtime.
  */
 export const MessageResponse = memo(function MessageResponse({
   className,
@@ -105,7 +105,11 @@ export const MessageResponse = memo(function MessageResponse({
       data-streaming={streaming}
       {...props}
     >
-      {children}
+      {typeof children === "string" ? (
+        <Markdown>{children}</Markdown>
+      ) : (
+        children
+      )}
     </div>
   );
 });
