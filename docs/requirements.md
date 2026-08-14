@@ -41,7 +41,7 @@ MetaWork 当前不定义为：
 
 ### Task 与内部 Agent Session
 
-Task 是用户可持续补充的产品工作上下文，归属于 Workspace，拥有消息、运行状态、Run 历史、Session maintenance 历史和不含 secret 的 execution binding 历史。attached Task 在当前进程中持有一个内部 Agent Session 与 Conversation；Session 是执行生命周期术语，不是第二个产品对象或 Renderer 身份。Run、会改变 Conversation 的 maintenance operation 与 Conversation restore 共用一个 Workbench-owned active operation 槽，不能并发进入同一 Session。历史 Task 可以跨重启恢复为 detached 记录；只有 Host 证明最新 checkpoint、execution binding 与全部 authority 精确可用时，用户才能显式重建原 Conversation attachment。
+Task 是用户可持续补充的产品工作上下文，归属于 Workspace，拥有消息、运行状态、Run 历史、Session maintenance 历史和不含 secret 的 execution binding 历史。Task 的模型 binding 独立于 Account 默认模型：设置页模型只作为新建 Task 默认值，已有 Task 可在 Composer 选择下一轮模型。attached Task 在当前进程中持有一个内部 Agent Session 与 Conversation；Session 是执行生命周期术语，不是第二个产品对象或 Renderer 身份。Run、会改变 Conversation 的 maintenance operation 与 Conversation restore 共用一个 Workbench-owned active operation 槽，不能并发进入同一 Session。历史 Task 可以跨重启恢复为 detached 记录；只有 Host 证明最新 checkpoint、execution binding 与全部 authority 精确可用时，用户才能显式重建原 Conversation attachment。
 
 ### Turn / Run
 
