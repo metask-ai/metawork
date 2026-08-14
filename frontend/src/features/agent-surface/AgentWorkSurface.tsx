@@ -7,8 +7,18 @@ import {
   type ReactNode,
 } from "react";
 
-import { CodeBlock } from "../../components/ui/CodeBlock.tsx";
-import { Icon } from "../../components/ui/Icon.tsx";
+import {
+  CodeBlock,
+  Conversation,
+  ConversationContent,
+  Message,
+  MessageContent,
+  MessageResponse,
+  Tool,
+  ToolContent,
+  ToolField,
+  ToolHeader,
+} from "../../components/ai/index.ts";
 import type {
   PendingUi,
   CompactView,
@@ -20,14 +30,16 @@ import type {
   UiRecord,
   UiResponsePayload,
 } from "../../bridge/contracts.ts";
+import { projectConversation } from "./conversation-projection.ts";
 import { formatInteger, formatMilliseconds } from "../../i18n/formatters.ts";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
+import { Icon } from "../../components/ui/Icon.tsx";
 
-type TimelineDetailSection = "tools" | "usage";
+type AgentDetailSection = "tools" | "usage";
 
-function tokenTotal(run: RunView): bigint | null {
+function tokenTotal(usage: RunView["usage"]): bigint | null {
   try {
-    return BigInt(run.usage.input) + BigInt(run.usage.output);
+    return BigInt(usage.input) + BigInt(usage.output);
   } catch {
     return null;
   }
@@ -89,7 +101,7 @@ function filePreviewStatusLabel(
   }
 }
 
-function CompactTimelineEvent({ compact }: { compact: CompactView }) {
+function CompactConversationEvent({ compact }: { compact: CompactView }) {
   const { locale, t } = useI18n();
   const values = {
     before: formatInteger(locale, BigInt(compact.beforeContextTokens)),
@@ -105,14 +117,14 @@ function CompactTimelineEvent({ compact }: { compact: CompactView }) {
         : t(`compact.timeline.${compact.phase}`);
   return (
     <div
-      className="timeline-system-event"
+      className="conversation-compaction"
       data-active={
         compact.phase === "queued" ||
         compact.phase === "compacting" ||
         compact.phase === "stopping"
       }
     >
-      <span className="timeline-system-mark" aria-hidden="true" />
+      <span className="conversation-compaction-mark" aria-hidden="true" />
       <p>{message}</p>
     </div>
   );
@@ -143,40 +155,7 @@ function retryableOutcome(outcome: NonNullable<RunView["outcome"]>): boolean {
   );
 }
 
-type RunActivity =
-  | { kind: "tool"; order: string; value: ToolView }
-  | { kind: "resolved_ui"; order: string; value: UiRecord }
-  | { kind: "pending_ui"; order: string; value: PendingUi };
-
-function orderedActivity(run: RunView, task: TaskView): RunActivity[] {
-  const items: RunActivity[] = [
-    ...run.tools.map((value) => ({
-      kind: "tool" as const,
-      order: value.order,
-      value,
-    })),
-    ...task.uiHistory
-      .filter((record) => record.runId === run.id)
-      .map((value) => ({
-        kind: "resolved_ui" as const,
-        order: value.order,
-        value,
-      })),
-  ];
-  if (task.pendingUi?.runId === run.id)
-    items.push({
-      kind: "pending_ui",
-      order: task.pendingUi.order,
-      value: task.pendingUi,
-    });
-  return items.sort((left, right) => {
-    const leftOrder = BigInt(left.order);
-    const rightOrder = BigInt(right.order);
-    return leftOrder < rightOrder ? -1 : leftOrder > rightOrder ? 1 : 0;
-  });
-}
-
-export function TaskTimeline({
+export function AgentWorkSurface({
   task,
   revision,
   composerHasDraft,
@@ -195,10 +174,7 @@ export function TaskTimeline({
   retryAvailable: boolean;
   responseDisabled: boolean;
   onPrepareRetry: (input: RunInputView) => void;
-  onInspect: (
-    section: TimelineDetailSection,
-    opener: HTMLButtonElement,
-  ) => void;
+  onInspect: (section: AgentDetailSection, opener: HTMLButtonElement) => void;
   onRespond: (payload: UiResponsePayload) => void;
   renderPendingUi: (props: {
     taskId: string;
@@ -214,8 +190,9 @@ export function TaskTimeline({
   const [filePreview, setFilePreview] = useState<FilePreview | null>(null);
   const [filePreviewBusy, setFilePreviewBusy] = useState(false);
   const filePreviewRequest = useRef(0);
-  const timelineScroll = useRef<HTMLDivElement>(null);
+  const conversationScroll = useRef<HTMLDivElement>(null);
   const followingLatest = useRef(true);
+  const entries = projectConversation(task);
   const latestRunId = task?.runs.at(-1)?.id ?? null;
 
   useEffect(() => {
@@ -227,7 +204,7 @@ export function TaskTimeline({
   }, [task?.id]);
 
   useLayoutEffect(() => {
-    const viewport = timelineScroll.current;
+    const viewport = conversationScroll.current;
     if (!viewport) return;
     if (!task) {
       viewport.scrollTop = 0;
@@ -240,7 +217,7 @@ export function TaskTimeline({
   }, [task?.id, revision]);
 
   function updateFollowState() {
-    const viewport = timelineScroll.current;
+    const viewport = conversationScroll.current;
     if (!viewport) return;
     const distance =
       viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
@@ -249,7 +226,7 @@ export function TaskTimeline({
   }
 
   function jumpToLatest() {
-    const viewport = timelineScroll.current;
+    const viewport = conversationScroll.current;
     if (!viewport) return;
     followingLatest.current = true;
     viewport.scrollTo({ top: viewport.scrollHeight, behavior: "smooth" });
@@ -287,20 +264,28 @@ export function TaskTimeline({
   }
 
   return (
-    <div className="timeline-region">
+    <Conversation className="agent-surface">
       <div
-        className="timeline-scroll"
-        ref={timelineScroll}
+        className="agent-surface-scroll"
+        ref={conversationScroll}
         onScroll={updateFollowState}
       >
-        <div className="timeline">
-          {task?.runs.map((run) => {
-            const total = tokenTotal(run);
-            const activities = orderedActivity(run, task);
+        <ConversationContent className="agent-surface-content">
+          {entries.map((entry) => {
+            if (entry.kind === "compact") {
+              return (
+                <CompactConversationEvent
+                  key={entry.id}
+                  compact={entry.compact}
+                />
+              );
+            }
+            const run = entry;
+            const total = tokenTotal(run.usage);
             return (
-              <Fragment key={run.id}>
+              <Fragment key={run.runId}>
                 <article
-                  className="timeline-run"
+                  className="agent-run"
                   data-active={
                     run.phase === "queued" ||
                     run.phase === "running" ||
@@ -308,10 +293,10 @@ export function TaskTimeline({
                     run.phase === "stopping"
                   }
                 >
-                  <div className="workline-node" aria-hidden="true" />
-                  <header className="run-heading">
+                  <header className="agent-run-header">
+                    <span className="agent-run-state" aria-hidden="true" />
                     <p>{runPhaseLabel(t, run.phase)}</p>
-                    <div className="run-heading-meta">
+                    <div className="agent-run-meta">
                       {total !== null && (
                         <span>
                           {t("run.tokens", {
@@ -319,7 +304,7 @@ export function TaskTimeline({
                           })}
                         </span>
                       )}
-                      {run.id === latestRunId &&
+                      {run.runId === latestRunId &&
                         total !== null &&
                         total > 0n && (
                           <button
@@ -333,17 +318,17 @@ export function TaskTimeline({
                         )}
                     </div>
                   </header>
-                  <div className="run-content">
+                  <div className="agent-run-content">
                     <RunInputMessage input={run.input} />
-                    {activities.map((activity) => {
+                    {run.activities.map((activity) => {
                       if (activity.kind === "tool")
                         return (
                           <ToolCard
-                            key={`tool:${activity.value.id}`}
+                            key={`tool:${activity.id}`}
                             tool={activity.value}
                             onPreviewFile={openFilePreview}
                             onInspect={
-                              run.id === latestRunId
+                              run.runId === latestRunId
                                 ? (opener) => onInspect("tools", opener)
                                 : null
                             }
@@ -356,7 +341,7 @@ export function TaskTimeline({
                           </Fragment>
                         );
                       const pending = activity.value;
-                      return (
+                      return task ? (
                         <Fragment key={`ui:${pending.requestId}`}>
                           {renderPendingUi({
                             taskId: task.id,
@@ -365,52 +350,58 @@ export function TaskTimeline({
                             respond: onRespond,
                           })}
                         </Fragment>
-                      );
+                      ) : null;
                     })}
                     {run.assistant && (
                       <div className="run-delivery">
-                        <section className="timeline-message is-agent">
-                          <p className="message-body">{run.assistant}</p>
-                        </section>
-                        {run.assistantRedacted && (
+                        <Message
+                          from="assistant"
+                          className="agent-message is-agent"
+                        >
+                          <MessageContent>
+                            <MessageResponse
+                              streaming={run.assistant.streaming}
+                            >
+                              {run.assistant.markdown}
+                            </MessageResponse>
+                          </MessageContent>
+                        </Message>
+                        {run.assistant.redacted && (
                           <p className="projection-note">
                             {t("privacy.sensitive_hidden")}
                           </p>
                         )}
                       </div>
                     )}
-                    {!run.assistant && !isNonTerminalRun(run.phase) && (
-                      <p className="run-no-final">
-                        {t("run.no_final_response")}
-                      </p>
-                    )}
                     {!run.assistant &&
-                      run.tools.length === 0 &&
+                      !isNonTerminalRun(run.phase) &&
+                      run.outcome !== "failed" &&
+                      run.outcome !== "dependency_contract_failure" && (
+                        <p className="run-no-final">
+                          {t("run.no_final_response")}
+                        </p>
+                      )}
+                    {!run.assistant &&
+                      run.activities.length === 0 &&
                       isNonTerminalRun(run.phase) && (
                         <p className="preparing-copy">{t("run.preparing")}</p>
                       )}
                     {run.outcome && (
                       <RunOutcome
-                        run={run}
+                        phase={run.phase}
+                        cause={run.cause}
+                        input={run.input}
                         outcome={run.outcome}
                         composerHasDraft={composerHasDraft}
-                        latest={run.id === latestRunId}
+                        latest={run.runId === latestRunId}
                         retryAvailable={
-                          retryAvailable && run.id === latestRunId
+                          retryAvailable && run.runId === latestRunId
                         }
                         onPrepareRetry={onPrepareRetry}
                       />
                     )}
                   </div>
                 </article>
-                {task.compacts
-                  .filter((compact) => compact.afterRunId === run.id)
-                  .map((compact) => (
-                    <CompactTimelineEvent
-                      key={compact.operationId}
-                      compact={compact}
-                    />
-                  ))}
               </Fragment>
             );
           })}
@@ -420,7 +411,7 @@ export function TaskTimeline({
               <p>{t("task.created_empty_body")}</p>
             </div>
           )}
-        </div>
+        </ConversationContent>
       </div>
       {(filePreviewBusy || filePreview) && (
         <aside
@@ -462,19 +453,23 @@ export function TaskTimeline({
           {t("timeline.jump_latest")}
         </button>
       )}
-    </div>
+    </Conversation>
   );
 }
 
 function RunOutcome({
-  run,
+  phase,
+  cause,
+  input,
   outcome,
   composerHasDraft,
   latest,
   retryAvailable,
   onPrepareRetry,
 }: {
-  run: RunView;
+  phase: RunView["phase"];
+  cause: RunView["cause"];
+  input: RunView["input"];
   outcome: NonNullable<RunView["outcome"]>;
   composerHasDraft: boolean;
   latest: boolean;
@@ -483,18 +478,21 @@ function RunOutcome({
 }) {
   const { t } = useI18n();
   return (
-    <section className="run-outcome" data-phase={run.phase}>
-      <div className="run-outcome-copy" role={latest ? "status" : undefined}>
+    <section className="agent-run-outcome" data-phase={phase}>
+      <div
+        className="agent-run-outcome-copy"
+        role={latest ? "status" : undefined}
+      >
         <p>{t(terminalMessageId(outcome))}</p>
-        {run.cause && <span>{t(`cause.${run.cause}`)}</span>}
+        {cause && <span>{t(`cause.${cause}`)}</span>}
       </div>
       {retryAvailable && retryableOutcome(outcome) && (
         <button
-          className="outcome-action focus-ring"
+          className="agent-outcome-action focus-ring"
           title={
             composerHasDraft ? t("run.review_draft_help") : t("run.retry_help")
           }
-          onClick={() => onPrepareRetry(run.input)}
+          onClick={() => onPrepareRetry(input)}
         >
           {composerHasDraft ? t("run.review_draft") : t("run.prepare_retry")}
         </button>
@@ -507,26 +505,30 @@ function RunInputMessage({ input }: { input: RunInputView }) {
   const { t } = useI18n();
   if (input.kind === "text")
     return (
-      <section className="timeline-message is-user">
-        <p className="message-body">{input.text}</p>
-      </section>
+      <Message from="user" className="agent-user-message">
+        <MessageContent>
+          <p className="message-body">{input.text}</p>
+        </MessageContent>
+      </Message>
     );
   return (
-    <section className="timeline-message is-user is-skill">
-      <div className="timeline-skill-input">
-        <span className="timeline-skill-token">
-          /{input.invocationName}
-          <small>{t("slash.group.skills")}</small>
-        </span>
-        {input.argumentValues.length > 0 && (
-          <span className="timeline-skill-arguments">
-            {input.argumentValues.map((value, index) => (
-              <code key={index}>{value}</code>
-            ))}
+    <Message from="user" className="agent-user-message agent-skill-message">
+      <MessageContent>
+        <div className="agent-skill-input">
+          <span className="agent-skill-token">
+            /{input.invocationName}
+            <small>{t("slash.group.skills")}</small>
           </span>
-        )}
-      </div>
-    </section>
+          {input.argumentValues.length > 0 && (
+            <span className="agent-skill-arguments">
+              {input.argumentValues.map((value, index) => (
+                <code key={index}>{value}</code>
+              ))}
+            </span>
+          )}
+        </div>
+      </MessageContent>
+    </Message>
   );
 }
 
@@ -551,37 +553,23 @@ function ToolCard({
     tool.state === "completed" ? "completed" : tool.state,
   );
   return (
-    <details
-      className="tool-card"
-      data-state={tool.state}
-      open={tool.state === "running" || tool.state === "failed"}
-    >
-      <summary className="tool-card-summary">
-        <span className="tool-card-identity">
-          <span
-            className="tool-state-dot"
-            data-state={tool.state}
-            aria-hidden="true"
-          />
-          <span className="tool-card-name">{tool.name}</span>
-        </span>
-        <span className="tool-card-meta">
-          <span className="tool-summary-state" data-state={tool.state}>
-            <strong>{state}</strong>
-            {duration !== null && duration > 0n && (
-              <span>
-                {t("tool.duration_ms", {
-                  count: formatMilliseconds(locale, duration),
-                })}
-              </span>
-            )}
-          </span>
-          <span className="tool-disclosure" aria-hidden="true">
-            <Icon name="chevron" />
-          </span>
-        </span>
-      </summary>
-      <div className="tool-card-body">
+    <Tool className="agent-tool" state={tool.state}>
+      <ToolHeader
+        className="agent-tool-summary"
+        name={tool.name}
+        state={tool.state}
+        status={state}
+        meta={
+          duration !== null && duration > 0n ? (
+            <span>
+              {t("tool.duration_ms", {
+                count: formatMilliseconds(locale, duration),
+              })}
+            </span>
+          ) : undefined
+        }
+      />
+      <ToolContent className="agent-tool-body">
         {(tool.redacted ||
           tool.inputTruncated ||
           tool.progressTruncated ||
@@ -595,15 +583,18 @@ function ToolCard({
             )}
           </div>
         )}
-        <CodeBlock label={t("tool.input")} value={tool.input} />
+        <ToolField label={t("tool.input")}>
+          <CodeBlock value={tool.input} />
+        </ToolField>
         {tool.progress && (
-          <CodeBlock label={t("tool.progress")} value={tool.progress} />
+          <ToolField label={t("tool.progress")}>
+            <CodeBlock value={tool.progress} />
+          </ToolField>
         )}
         {tool.content && (
-          <CodeBlock
-            label={tool.isError ? t("tool.error") : t("tool.result")}
-            value={tool.content}
-          />
+          <ToolField label={tool.isError ? t("tool.error") : t("tool.result")}>
+            <CodeBlock value={tool.content} />
+          </ToolField>
         )}
         {tool.fileRefs.length > 0 && (
           <div
@@ -641,7 +632,7 @@ function ToolCard({
             {t("inspector.view_details")}
           </button>
         )}
-      </div>
-    </details>
+      </ToolContent>
+    </Tool>
   );
 }

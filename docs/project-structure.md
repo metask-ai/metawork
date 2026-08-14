@@ -27,7 +27,8 @@ metawork/
 │       ├── bridge/        # Renderer Bridge client、runtime decoder 与 snapshot transport
 │       ├── workbench/     # canonical snapshot store、selector 与纯派生状态
 │       ├── features/      # 用户可见 feature
-│       ├── components/ui/ # 无业务语义的 UI primitive 与 declarative window controls
+│       ├── components/ui/ # Foundation UI primitive 与 declarative window controls
+│       ├── components/ai/ # AI UI presentation primitive；不拥有 MetaWork 产品语义
 │       ├── i18n/          # message catalog、formatter 与 locale runtime
 │       └── platform/      # Renderer-only 本地偏好；不得包含原生窗口能力
 ├── src/
@@ -113,7 +114,13 @@ metawork/
 
 `workbench/` 只保存 canonical Host snapshot、selector 和无副作用派生状态。Workspace/Task 生命周期仍由 Host 决定；Renderer 只持有选择、折叠、输入草稿等纯 UI 状态。
 
-`features/` 按用户可见能力分区。feature 通过 `workbench/` selector 消费产品状态，不读取其他 feature 的内部文件。带业务语义的 Timeline、Approval、Composer、Task list、Workspace path selection、Search 和 Task activity 保留在各自 feature；真正无业务语义的 primitive 才进入 `components/ui/`。
+`features/` 按用户可见能力分区。feature 通过 `workbench/` selector 消费产品状态，不读取其他 feature 的内部文件。Agent 工作面的 projection、布局和交互编排归 `features/agent-surface/`；Approval、Composer、Task list、Workspace path selection、Search 等独立语义仍保留在各自 feature。真正无业务语义的 Foundation primitive 进入 `components/ui/`，面向 AI 对话的可复用 presentation primitive 进入 `components/ai/`。`components/ai/` 可以借鉴或 vendoring AI Elements 的源代码，但不得拥有 Task/Run/Workspace、Bridge command、capability gate 或 AgentCore 语义；这些由 `features/` 中的 Coding Agent product component 负责。
+
+`components/ai/` 只能向下依赖 `components/ui/`、共享 renderer 工具和已锁定的通用前端依赖；AI 组件必须复用 Foundation UI 的交互原语与 Design Tokens，不得在自身目录重建 Button、Input、Popover 等基础控件，也不得反向导入 `features/`、`bridge/`、`workbench/` 或 `app/`。
+
+### `frontend/src/features/agent-surface/`
+
+`conversation-projection.ts` 将 Workbench 的 Task/Run/Tool/UI/Compact projection 整理为保留输入类型、redaction、活动数量和稳定顺序的可渲染模型；它不创建新的 Bridge 合同或事实来源。`AgentWorkSurface.tsx` 负责工作面布局、流式回复、滚动跟随、Tool/Attention/Compact 组合和现有 Composer 的布局，不拥有输入草稿、Run admission、retry policy 或 AgentCore 语义。旧 Timeline 路径不得与该 feature 并存为第二条 active rendering path。
 
 `features/settings/WorkspaceSettings.tsx` 是 Manual Workspace 的低频 lifecycle 视图，消费已解码 projection 并通过 App action controller 调用现有 choose/remove command；它不拥有 registry、authority、Task 导航或 Host removal 状态机。已有 Task 的 Workspace 只从 Task projection 推导，New task 只持有 `draftWorkspaceId`，Renderer 不保存 `activeWorkspaceId` 镜像。
 

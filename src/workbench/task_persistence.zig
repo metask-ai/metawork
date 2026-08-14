@@ -1081,6 +1081,7 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
             "event_pipeline_failure",
             "queue_capacity_failure",
             "ui_pipeline_failure",
+            "agent_failure",
             "dependency_contract_failure",
             "stale_catalog",
             "skill_not_found",

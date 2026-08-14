@@ -752,7 +752,7 @@ pub fn sessionCreate(
             fake_core.session_created += 1;
             fake_core.credential_seen = std.mem.eql(u8, key, "fixture-secret");
             fake_core.builtin_allowlist_seen = host.allowed_tools != null and
-                host.allowed_tool_count == lifecycle.default_builtin_tools.len;
+                host.allowed_tool_count == lifecycle.desktop_builtin_tools.len;
             recordAllowedTools(
                 host,
                 &fake_core.last_allowed_tool_count,

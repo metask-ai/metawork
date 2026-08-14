@@ -97,6 +97,37 @@ test("Renderer modules preserve the approved dependency direction", async () => 
   }
 });
 
+test("AI UI stays above Foundation UI and below product features", async () => {
+  const aiRoot = resolve(sourceRoot, "components", "ai");
+  const files = await sourceFiles(aiRoot);
+
+  for (const file of files) {
+    const source = await readFile(file, "utf8");
+    const path = relative(sourceRoot, file);
+
+    assert.doesNotMatch(
+      source,
+      /from\s+["']\.\.\/(?:features|bridge|workbench|app)\//,
+      `${path} must not import product or transport owners`,
+    );
+    assert.doesNotMatch(
+      source,
+      /<(?:button|input|textarea)\b/,
+      `${path} must compose Foundation controls instead of recreating them`,
+    );
+
+    for (const specifier of relativeImports(source)) {
+      if (specifier.startsWith("../")) {
+        assert.match(
+          specifier,
+          /^\.\.\/ui(?:\/|$)/,
+          `${path} may only reach Foundation UI through ../ui/*`,
+        );
+      }
+    }
+  }
+});
+
 test("transitional Account states never turn signed-out history into a security gate", async () => {
   const app = await readFile(resolve(sourceRoot, "app", "App.tsx"), "utf8");
   const gating = await readFile(

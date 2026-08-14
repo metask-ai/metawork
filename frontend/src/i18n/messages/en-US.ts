@@ -720,6 +720,8 @@ export const enUS = {
   "cause.event_pipeline_failure": "Activity delivery failed",
   "cause.queue_capacity_failure": "Workbench capacity reached",
   "cause.ui_pipeline_failure": "Response delivery failed",
+  "cause.agent_failure":
+    "Agent execution failed. Check the model or network configuration.",
   "cause.dependency_contract_failure": "Task runtime became incompatible",
   "cause.stale_catalog":
     "Skill execution did not start because the catalog is out of date",

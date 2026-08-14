@@ -58,7 +58,7 @@ import {
 import { inspectorFocusReturnTarget } from "../features/inspector/inspector-interaction.ts";
 import type { InspectorSection } from "../features/inspector/inspector-state.ts";
 import { useInspectorSession } from "../features/inspector/useInspectorSession.ts";
-import { TaskTimeline } from "../features/timeline/TaskTimeline.tsx";
+import { AgentWorkSurface } from "../features/agent-surface/AgentWorkSurface.tsx";
 import { TaskList, TaskSignals } from "../features/tasks/TaskList.tsx";
 import { NewTaskView } from "../features/tasks/NewTaskView.tsx";
 import {
@@ -2600,7 +2600,7 @@ export default function App() {
             />
           ) : (
             <>
-              <TaskTimeline
+              <AgentWorkSurface
                 task={activeTask}
                 revision={snapshot.revision}
                 composerHasDraft={composerDraftHasContent(composerDraft)}

@@ -128,7 +128,6 @@ fn waitHistoryNeedle(
 }
 
 test "Workbench Task admission forwards the configured built-in profile" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
     fake_core.reset();
     const runtime = try createTestComposition(.{
         .worker_count = 1,
@@ -171,8 +170,7 @@ test "Workbench Task admission forwards the configured built-in profile" {
     }
 }
 
-test "Workbench rejects a built-in profile on non-Windows targets" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+test "Workbench accepts the full built-in profile on desktop targets" {
     fake_core.reset();
     const runtime = try createTestComposition(.{
         .worker_count = 1,
@@ -184,24 +182,35 @@ test "Workbench rejects a built-in profile on non-Windows targets" {
         deinitTestComposition(runtime);
     }
     var configuration = workbenchConfiguration();
-    configuration.builtin_tool_profile = .local;
-    try std.testing.expectError(
-        error.UnsupportedBuiltinProfile,
-        workbench_api.Workbench.init(
-            std.testing.allocator,
-            std.testing.io,
-            runtime,
-            .{
-                .worker_count = 1,
-                .queue_capacity = 1,
-                .max_tasks = 1,
-                .max_workspaces = 1,
-                .max_runs_per_task = 1,
-                .max_tools_per_run = 1,
-            },
-            configuration,
-        ),
+    configuration.builtin_tool_profile = .full;
+    var workbench = try workbench_api.Workbench.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 1,
+            .max_tasks = 1,
+            .max_workspaces = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        configuration,
     );
+    defer workbench.deinit();
+    try installWorkbenchExecution(&workbench);
+    _ = try workbench.createTask(workbenchTaskInput());
+
+    try std.testing.expectEqual(
+        lifecycle.desktop_builtin_tools.len,
+        fake_core.last_allowed_tool_count,
+    );
+    for (lifecycle.desktop_builtin_tools, 0..) |name, index| {
+        try std.testing.expectEqualStrings(
+            name,
+            fake_core.last_allowed_tool_names[index][0..name.len],
+        );
+    }
 }
 
 test "Run checkpoint commits immutable blob before durable descriptor" {

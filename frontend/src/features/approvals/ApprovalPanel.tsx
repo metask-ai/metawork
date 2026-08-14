@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-import { CodeBlock } from "../../components/ui/CodeBlock.tsx";
+import { CodeBlock, ToolField } from "../../components/ai/index.ts";
 import { Checkbox } from "../../components/ui/checkbox.tsx";
 import { Button } from "../../components/ui/button.tsx";
 import { Icon } from "../../components/ui/Icon.tsx";
@@ -70,7 +70,9 @@ export function ApprovalPanel({
           <h3 className="font-semibold">
             {t("approval.allow_tool", { tool: pending.tool })}
           </h3>
-          <CodeBlock label={t("approval.arguments")} value={pending.args} />
+          <ToolField label={t("approval.arguments")}>
+            <CodeBlock value={pending.args} />
+          </ToolField>
           <div className="mt-4 grid grid-cols-2 gap-2">
             {(pending.availableChoices ?? ["deny_once", "allow_once"]).map(
               (choice) => (
@@ -83,7 +85,9 @@ export function ApprovalPanel({
                   }
                   size="md"
                   className="decision-button"
-                  data-primary={choice === "allow_once" || choice === "allow_session"}
+                  data-primary={
+                    choice === "allow_once" || choice === "allow_session"
+                  }
                   disabled={actionDisabled}
                   onClick={() =>
                     respond({ kind: "permission", permission: choice })
@@ -197,22 +201,33 @@ export function ApprovalPanel({
                         placeholder={t("approval.choose")}
                         children={
                           selectedOptionIndex(answers, index) >= 0
-                            ? question.options[selectedOptionIndex(answers, index)]?.label
+                            ? question.options[
+                                selectedOptionIndex(answers, index)
+                              ]?.label
                             : t("approval.choose")
                         }
                       />
-                      <Select.Icon><Icon name="chevron" /></Select.Icon>
+                      <Select.Icon>
+                        <Icon name="chevron" />
+                      </Select.Icon>
                     </Select.Trigger>
                     <Select.Portal>
                       <Select.Positioner>
                         <Select.Popup>
                           <Select.List>
                             <Select.Item value="0">
-                              <Select.ItemText>{t("approval.choose")}</Select.ItemText>
+                              <Select.ItemText>
+                                {t("approval.choose")}
+                              </Select.ItemText>
                             </Select.Item>
                             {question.options.map((option, optionIndex) => (
-                              <Select.Item key={`${option.label}-${optionIndex}`} value={String(optionIndex + 1)}>
-                                <Select.ItemText>{option.label}</Select.ItemText>
+                              <Select.Item
+                                key={`${option.label}-${optionIndex}`}
+                                value={String(optionIndex + 1)}
+                              >
+                                <Select.ItemText>
+                                  {option.label}
+                                </Select.ItemText>
                               </Select.Item>
                             ))}
                           </Select.List>

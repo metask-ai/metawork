@@ -1178,6 +1178,7 @@ const RunCause = enum {
     event_pipeline_failure,
     queue_capacity_failure,
     ui_pipeline_failure,
+    agent_failure,
     stale_catalog,
     skill_not_found,
     invalid_skill_arguments,
@@ -2317,8 +2318,6 @@ pub const Workbench = struct {
         limits: Limits,
         configuration: Configuration,
     ) Error!Workbench {
-        if (configuration.builtin_tool_profile != null and builtin.os.tag != .windows)
-            return error.UnsupportedBuiltinProfile;
         if (limits.worker_count == 0 or limits.queue_capacity == 0 or
             limits.max_tasks == 0 or limits.max_workspaces == 0 or
             limits.max_scheduled_tasks == 0 or
@@ -4037,7 +4036,7 @@ pub const Workbench = struct {
             .allowed_tools = if (self.builtin_tool_profile) |profile|
                 lifecycle.builtinToolsForProfile(profile)
             else
-                &lifecycle.default_builtin_tools,
+                &lifecycle.desktop_builtin_tools,
         }) catch |err| switch (err) {
             error.SessionCapacity => return error.TaskCapacity,
             else => return err,
@@ -5531,9 +5530,13 @@ pub const Workbench = struct {
                 tool.is_error = result.is_error;
                 tool.elapsed_ms = result.elapsed_ms;
                 tool.state = if (result.is_error) .failed else .completed;
+                const file_refs = if (comptime @hasField(@TypeOf(result), "file_refs"))
+                    result.file_refs
+                else
+                    null;
                 try self.replaceFileReferences(
                     tool,
-                    result.file_refs,
+                    file_refs,
                     run.redaction_secret,
                     task.durable.id,
                     run.generation,
@@ -13035,7 +13038,7 @@ fn classifyAgentTerminal(result: *const lifecycle.TerminalResult) TerminalDecisi
         .tool_error, .api_error => .{
             .phase = .failed,
             .outcome = .failed,
-            .cause = if (result.termination_signal) |signal| causeForSignal(signal) else null,
+            .cause = if (result.termination_signal) |signal| causeForSignal(signal) else .agent_failure,
         },
         .checkpoint_budget_exhausted, .checkpoint_resource_limit => .{
             .phase = .stopped,
@@ -16264,6 +16267,15 @@ test "Agent terminal facts map once into Workbench product outcomes" {
         },
         classifyAgentTerminal(&terminal),
     );
+
+    terminal.failure = null;
+    terminal.stop_reason = .api_error;
+    terminal.raw_stop_reason_code = @intFromEnum(lifecycle.StopReason.api_error);
+    terminal.termination_signal = null;
+    try std.testing.expectEqual(
+        TerminalDecision{ .phase = .failed, .outcome = .failed, .cause = .agent_failure },
+        classifyAgentTerminal(&terminal),
+    );
 }
 
 test "Renderer transport failures never own Agent Run termination" {
@@ -16810,6 +16822,7 @@ test "Workbench projects tools and full-width usage without parsing protocol in 
 }
 
 test "Workbench projects typed AgentCore file references into bounded tool entries" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
     var workbench = try testWorkbench();
     defer workbench.deinit();
 
