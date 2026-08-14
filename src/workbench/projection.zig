@@ -72,6 +72,11 @@ pub const Error = lifecycle.Error || scheduled_tasks_impl.Error || scheduled_tas
     RecoveryUnavailable,
     RestoreAttemptExhausted,
     UnsupportedBuiltinProfile,
+    FileReferenceNotFound,
+    FilePreviewMissing,
+    FilePreviewRestricted,
+    FilePreviewUnsupported,
+    FilePreviewReadFailed,
 };
 
 pub const Limits = struct {
@@ -95,6 +100,11 @@ pub const Limits = struct {
     max_user_message_bytes: usize = 64 * 1024,
     max_assistant_message_bytes: usize = 256 * 1024,
     max_tool_field_bytes: usize = 256 * 1024,
+    max_file_refs_per_tool: usize = 32,
+    max_file_ref_field_bytes: usize = 8192,
+    max_file_preview_bytes: usize = 256 * 1024,
+    max_file_preview_line_bytes: usize = 8192,
+    max_file_preview_lines: usize = 5000,
     max_pending_ui_json_bytes: usize = 256 * 1024,
     max_pending_ui_requests: usize = 4,
     max_ui_history_per_task: usize = 8,
@@ -1336,6 +1346,104 @@ const ToolView = struct {
     progress_truncated: bool = false,
     content_truncated: bool = false,
     redacted: bool = false,
+    file_refs: ?[]?FileReferenceView = null,
+};
+
+pub const FileReferencePositionView = struct {
+    line: u32,
+    column: u32,
+};
+
+pub const FileReferenceRangeView = struct {
+    start: FileReferencePositionView,
+    end: FileReferencePositionView,
+};
+
+fn formatFileReferenceId(
+    storage: []u8,
+    task_id: u64,
+    run_generation: u64,
+    tool_order: u64,
+    index: usize,
+) []const u8 {
+    return std.fmt.bufPrint(
+        storage,
+        "file-{d}-{d}-{d}-{d}",
+        .{ task_id, run_generation, tool_order, index },
+    ) catch unreachable;
+}
+
+const FileReferenceLocatorKind = enum { workspace_path, absolute_path, uri };
+
+fn absoluteReferenceRelativePath(
+    root: []const u8,
+    absolute: []const u8,
+    storage: []u8,
+) ?[]const u8 {
+    if (!std.fs.path.isAbsolute(absolute) or absolute.len <= root.len) return null;
+    const same = if (builtin.os.tag == .windows)
+        std.ascii.eqlIgnoreCase(root, absolute[0..root.len])
+    else
+        std.mem.eql(u8, root, absolute[0..root.len]);
+    if (!same) return null;
+    const separator = absolute[root.len];
+    if (separator != '/' and separator != '\\') return null;
+    const relative = absolute[root.len + 1 ..];
+    if (relative.len == 0 or relative.len > storage.len) return null;
+    @memcpy(storage[0..relative.len], relative);
+    return storage[0..relative.len];
+}
+
+fn boundedPreviewCutoff(bytes: []const u8, max_lines: usize, max_line_bytes: usize) usize {
+    var lines: usize = 1;
+    var line_bytes: usize = 0;
+    for (bytes, 0..) |byte, index| {
+        if (byte == '\n') {
+            lines += 1;
+            line_bytes = 0;
+            if (lines > max_lines) return index;
+        } else {
+            line_bytes += 1;
+            if (line_bytes > max_line_bytes) return index;
+        }
+    }
+    return bytes.len;
+}
+
+/// Workbench-owned projection of AgentCore's typed file reference. The raw
+/// locator is retained only on the Host side; snapshot serialization uses the
+/// safe display path and opaque product id below.
+const FileReferenceView = struct {
+    id: []u8,
+    title: []u8,
+    display_path: []u8,
+    kind: []u8,
+    locator_kind: FileReferenceLocatorKind,
+    locator: []u8,
+    range: ?FileReferenceRangeView = null,
+};
+
+pub const FilePreviewState = enum { ready, truncated, missing, restricted, unsupported, failed };
+
+pub const FilePreview = struct {
+    id: []u8,
+    title: []u8,
+    display_path: []u8,
+    language: []u8,
+    content: []u8,
+    truncated: bool,
+    range: ?FileReferenceRangeView,
+    state: FilePreviewState,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *FilePreview) void {
+        self.allocator.free(self.id);
+        self.allocator.free(self.title);
+        self.allocator.free(self.display_path);
+        self.allocator.free(self.language);
+        self.allocator.free(self.content);
+        self.* = undefined;
+    }
 };
 
 const UsageView = struct {
@@ -1607,6 +1715,7 @@ const TaskStateWireScratch = struct {
         for (self.state.tasks) |task| {
             for (task.runs) |run| {
                 if (run.input.argument_values) |values| self.allocator.free(values);
+                for (run.tools) |tool| if (tool.file_refs) |references| self.allocator.free(references);
                 self.allocator.free(run.tools);
             }
             self.allocator.free(task.runs);
@@ -2454,6 +2563,145 @@ pub const Workbench = struct {
             _ = workbench.syncMcpHealthNoFail();
         }
         return workbench;
+    }
+
+    /// Re-authorizes a projected file reference and returns a bounded UTF-8
+    /// preview. Renderer callers only provide the opaque product id; locator
+    /// and workspace ownership remain inside Workbench.
+    pub fn previewFileReference(self: *Workbench, reference_id: []const u8) Error!FilePreview {
+        const Match = struct { reference: *const FileReferenceView, task: *const TaskView };
+        var match: ?Match = null;
+        for (self.tasks) |*task_entry| {
+            const task = &(task_entry.* orelse continue);
+            for (task.durable.runs) |*run_entry| {
+                const run = &(run_entry.* orelse continue);
+                for (run.tools) |*tool_entry| {
+                    const tool = &(tool_entry.* orelse continue);
+                    const references = tool.file_refs orelse continue;
+                    for (references) |*reference_entry| {
+                        if (reference_entry.*) |*reference|
+                            if (std.mem.eql(u8, reference.id, reference_id)) {
+                                match = .{ .reference = reference, .task = task };
+                                break;
+                            };
+                    }
+                    if (match != null) break;
+                }
+                if (match != null) break;
+            }
+            if (match != null) break;
+        }
+        const found = match orelse return error.FileReferenceNotFound;
+        const reference = found.reference;
+        var workspace_valid = false;
+        for (self.workspaces) |*workspace_entry| {
+            const workspace = workspace_entry.* orelse continue;
+            if (workspace.id == found.task.durable.workspace_id) {
+                workspace_valid = workspace.epoch == found.task.durable.workspace_epoch and
+                    std.mem.eql(u8, workspace.canonical_root, found.task.durable.workspace_root);
+                break;
+            }
+        }
+        if (!workspace_valid) return error.FilePreviewRestricted;
+        if (reference.locator_kind == .uri) return error.FilePreviewUnsupported;
+
+        var relative_storage: [4096]u8 = undefined;
+        const relative = switch (reference.locator_kind) {
+            .workspace_path => reference.locator,
+            .absolute_path => absoluteReferenceRelativePath(
+                found.task.durable.workspace_root,
+                reference.locator,
+                &relative_storage,
+            ) orelse return error.FilePreviewRestricted,
+            .uri => unreachable,
+        };
+        if (relative.len == 0 or relative.len > relative_storage.len)
+            return error.FilePreviewRestricted;
+
+        var root = std.Io.Dir.openDirAbsolute(self.io, found.task.durable.workspace_root, .{
+            .access_sub_paths = true,
+            .follow_symlinks = false,
+        }) catch return error.FilePreviewRestricted;
+        defer root.close(self.io);
+        var file = root.openFile(self.io, relative, .{
+            .allow_directory = false,
+            .follow_symlinks = false,
+            .resolve_beneath = true,
+        }) catch |err| return switch (err) {
+            error.FileNotFound, error.NotDir => error.FilePreviewMissing,
+            else => error.FilePreviewRestricted,
+        };
+        defer file.close(self.io);
+        if (builtin.os.tag == .windows) file.flags.nonblocking = true;
+        const length = file.length(self.io) catch return error.FilePreviewReadFailed;
+        if (length > self.limits.max_file_preview_bytes) {
+            const bytes = try self.allocator.alloc(u8, self.limits.max_file_preview_bytes);
+            var bytes_owned = true;
+            defer if (bytes_owned) self.allocator.free(bytes);
+            const read = file.readPositionalAll(self.io, bytes, 0) catch return error.FilePreviewReadFailed;
+            if (read != bytes.len or !std.unicode.utf8ValidateSlice(bytes))
+                return error.FilePreviewUnsupported;
+            const preview = try self.finishFilePreview(reference, bytes, true);
+            if (preview.content.ptr == bytes.ptr) bytes_owned = false;
+            return preview;
+        }
+        const bytes = try self.allocator.alloc(u8, @intCast(length));
+        var bytes_owned = true;
+        defer if (bytes_owned) self.allocator.free(bytes);
+        const read = file.readPositionalAll(self.io, bytes, 0) catch return error.FilePreviewReadFailed;
+        if (read != bytes.len or !std.unicode.utf8ValidateSlice(bytes))
+            return error.FilePreviewUnsupported;
+        const preview = try self.finishFilePreview(reference, bytes, false);
+        if (preview.content.ptr == bytes.ptr) bytes_owned = false;
+        return preview;
+    }
+
+    fn finishFilePreview(
+        self: *Workbench,
+        reference: *const FileReferenceView,
+        bytes: []u8,
+        truncated: bool,
+    ) Error!FilePreview {
+        const cutoff = boundedPreviewCutoff(
+            bytes,
+            self.limits.max_file_preview_lines,
+            self.limits.max_file_preview_line_bytes,
+        );
+        var content = bytes;
+        var content_truncated = truncated;
+        var content_is_owned = false;
+        errdefer if (content_is_owned) self.allocator.free(content);
+        if (cutoff < bytes.len) {
+            content = try self.allocator.alloc(u8, cutoff);
+            @memcpy(content, bytes[0..cutoff]);
+            content_is_owned = true;
+            content_truncated = true;
+        }
+        const id = try self.copyPreviewBounded(reference.id, self.limits.max_file_ref_field_bytes);
+        errdefer self.allocator.free(id);
+        const title = try self.copyPreviewBounded(reference.title, self.limits.max_file_ref_field_bytes);
+        errdefer self.allocator.free(title);
+        const display_path = try self.copyPreviewBounded(
+            reference.display_path,
+            self.limits.max_file_ref_field_bytes,
+        );
+        errdefer self.allocator.free(display_path);
+        const extension = std.fs.path.extension(reference.display_path);
+        const language = if (extension.len > 1) extension[1..] else "text";
+        const language_copy = try self.copyPreviewBounded(language, 64);
+        errdefer self.allocator.free(language_copy);
+        content_is_owned = false;
+        return .{
+            .id = id,
+            .title = title,
+            .display_path = display_path,
+            .language = language_copy,
+            .content = content,
+            .truncated = content_truncated,
+            .range = reference.range,
+            .state = if (content_truncated) .truncated else .ready,
+            .allocator = self.allocator,
+        };
     }
 
     pub fn setScheduleBackgroundAvailableNoFail(
@@ -5256,6 +5504,13 @@ pub const Workbench = struct {
                 tool.is_error = result.is_error;
                 tool.elapsed_ms = result.elapsed_ms;
                 tool.state = if (result.is_error) .failed else .completed;
+                try self.replaceFileReferences(
+                    tool,
+                    result.file_refs,
+                    run.redaction_secret,
+                    task.durable.id,
+                    run.generation,
+                );
                 durable_boundary = true;
             },
             .usage => |usage| {
@@ -8138,6 +8393,127 @@ pub const Workbench = struct {
         );
     }
 
+    fn deinitFileReference(self: *Workbench, reference: *FileReferenceView) void {
+        self.freeTracked(reference.id);
+        self.freeTracked(reference.title);
+        self.freeTracked(reference.display_path);
+        self.freeTracked(reference.kind);
+        self.freeTracked(reference.locator);
+        reference.* = undefined;
+    }
+
+    fn clearFileReferences(self: *Workbench, tool: *ToolView) void {
+        if (tool.file_refs) |refs| {
+            for (refs) |*entry| {
+                if (entry.*) |*reference| self.deinitFileReference(reference);
+                entry.* = null;
+            }
+        }
+    }
+
+    fn deinitToolView(self: *Workbench, tool: *ToolView) void {
+        self.freeTracked(tool.id);
+        self.freeTracked(tool.name);
+        self.freeTracked(tool.input);
+        self.freeTracked(tool.progress);
+        self.freeTracked(tool.content);
+        self.clearFileReferences(tool);
+        if (tool.file_refs) |refs| self.allocator.free(refs);
+        tool.* = undefined;
+    }
+
+    fn replaceFileReferences(
+        self: *Workbench,
+        tool: *ToolView,
+        refs: anytype,
+        credential: []const u8,
+        task_id: u64,
+        run_generation: u64,
+    ) Error!void {
+        self.clearFileReferences(tool);
+        const values = refs orelse return;
+        if (values.len > self.limits.max_file_refs_per_tool)
+            return error.ToolCapacity;
+        if (tool.file_refs == null) {
+            const refs_storage = try self.allocator.alloc(?FileReferenceView, self.limits.max_file_refs_per_tool);
+            @memset(refs_storage, null);
+            tool.file_refs = refs_storage;
+        }
+        errdefer self.clearFileReferences(tool);
+        for (values, 0..) |reference, index| {
+            var locator_kind: FileReferenceLocatorKind = undefined;
+            var locator_value: []const u8 = undefined;
+            switch (reference.locator) {
+                .workspace_path => |value| {
+                    locator_kind = .workspace_path;
+                    locator_value = value;
+                },
+                .absolute_path => |value| {
+                    locator_kind = .absolute_path;
+                    locator_value = value;
+                },
+                .uri => |value| {
+                    locator_kind = .uri;
+                    locator_value = value;
+                },
+            }
+            if (locator_value.len > self.limits.max_file_ref_field_bytes or
+                reference.title.len > self.limits.max_file_ref_field_bytes or
+                reference.kind.len > self.limits.max_file_ref_field_bytes)
+                return error.ToolCapacity;
+            var id_storage: [96]u8 = undefined;
+            const id = formatFileReferenceId(
+                &id_storage,
+                task_id,
+                run_generation,
+                tool.order,
+                index + 1,
+            );
+            var owned = FileReferenceView{
+                .id = try self.copyBounded(id, id.len),
+                .title = undefined,
+                .display_path = undefined,
+                .kind = undefined,
+                .locator_kind = locator_kind,
+                .locator = undefined,
+                .range = if (reference.range) |range| .{
+                    .start = .{ .line = range.start.line, .column = range.start.column },
+                    .end = .{ .line = range.end.line, .column = range.end.column },
+                } else null,
+            };
+            errdefer self.deinitFileReference(&owned);
+            const title_projection = try self.copyProjected(
+                reference.title,
+                self.limits.max_file_ref_field_bytes,
+                credential,
+            );
+            owned.title = title_projection.value;
+            const display_source = if (locator_kind == .workspace_path)
+                locator_value
+            else if (reference.title.len != 0)
+                reference.title
+            else
+                "file";
+            const display_projection = try self.copyProjected(
+                display_source,
+                self.limits.max_file_ref_field_bytes,
+                credential,
+            );
+            owned.display_path = display_projection.value;
+            const kind_projection = try self.copyProjected(
+                reference.kind,
+                self.limits.max_file_ref_field_bytes,
+                credential,
+            );
+            owned.kind = kind_projection.value;
+            owned.locator = try self.copyBounded(locator_value, self.limits.max_file_ref_field_bytes);
+            tool.file_refs.?[index] = owned;
+            owned = undefined;
+            tool.redacted = tool.redacted or title_projection.redacted or
+                display_projection.redacted or kind_projection.redacted;
+        }
+    }
+
     fn findOrCreateTool(
         self: *Workbench,
         run: *RunRecord,
@@ -8162,6 +8538,10 @@ pub const Workbench = struct {
         const progress = try self.copyBounded("", self.limits.max_tool_field_bytes);
         errdefer self.freeTracked(progress);
         const content = try self.copyBounded("", self.limits.max_tool_field_bytes);
+        errdefer self.freeTracked(content);
+        const file_refs = try self.allocator.alloc(?FileReferenceView, self.limits.max_file_refs_per_tool);
+        errdefer self.allocator.free(file_refs);
+        @memset(file_refs, null);
         run.tools[slot] = .{
             .route_digest = route_digest,
             .id = owned_id,
@@ -8170,6 +8550,7 @@ pub const Workbench = struct {
             .input = owned_input,
             .progress = progress,
             .content = content,
+            .file_refs = file_refs,
             .state = .running,
             .input_truncated = input_projection.truncated,
             .redacted = name_projection.redacted or
@@ -8588,6 +8969,7 @@ pub const Workbench = struct {
             .max_user_message_bytes = self.limits.max_user_message_bytes,
             .max_assistant_message_bytes = self.limits.max_assistant_message_bytes,
             .max_tool_field_bytes = self.limits.max_tool_field_bytes,
+            .max_file_ref_field_bytes = self.limits.max_file_ref_field_bytes,
             .max_terminal_diagnostic_bytes = self.limits.max_terminal_diagnostic_bytes,
         };
     }
@@ -8972,11 +9354,7 @@ pub const Workbench = struct {
         var restored_tools: usize = 0;
         errdefer for (tools[0..restored_tools]) |*entry| {
             const tool = &(entry.* orelse continue);
-            self.freeTracked(tool.id);
-            self.freeTracked(tool.name);
-            self.freeTracked(tool.input);
-            self.freeTracked(tool.progress);
-            self.freeTracked(tool.content);
+            self.deinitToolView(tool);
         };
         for (wire.tools) |tool| {
             if (std.mem.eql(u8, tool.state, "running"))
@@ -9093,6 +9471,19 @@ pub const Workbench = struct {
         errdefer self.freeTracked(progress);
         const content = try self.copyBounded(wire.content, self.limits.max_tool_field_bytes);
         errdefer self.freeTracked(content);
+        const state = parsePersistedEnum(ToolState, wire.state) orelse return error.TaskStoreCorrupt;
+        const file_refs = try self.allocator.alloc(?FileReferenceView, self.limits.max_file_refs_per_tool);
+        errdefer {
+            for (file_refs) |*entry| if (entry.*) |*reference| self.deinitFileReference(reference);
+            self.allocator.free(file_refs);
+        }
+        @memset(file_refs, null);
+        if (wire.file_refs) |references| {
+            if (references.len > self.limits.max_file_refs_per_tool) return error.TaskStoreCorrupt;
+            for (references, 0..) |reference, index| {
+                file_refs[index] = try self.restoreFileReference(reference);
+            }
+        }
         return .{
             .route_digest = [_]u8{0} ** tool_route_digest_bytes,
             .id = id,
@@ -9101,8 +9492,8 @@ pub const Workbench = struct {
             .input = input,
             .progress = progress,
             .content = content,
-            .state = parsePersistedEnum(ToolState, wire.state) orelse
-                return error.TaskStoreCorrupt,
+            .file_refs = file_refs,
+            .state = state,
             .is_error = wire.is_error,
             .elapsed_ms = wire.elapsed_ms,
             .input_truncated = wire.input_truncated,
@@ -9110,6 +9501,36 @@ pub const Workbench = struct {
             .content_truncated = wire.content_truncated,
             .redacted = wire.redacted,
         };
+    }
+
+    fn restoreFileReference(
+        self: *Workbench,
+        wire: task_persistence.FileReferenceWire,
+    ) Error!FileReferenceView {
+        const locator_kind = parsePersistedEnum(FileReferenceLocatorKind, wire.locator_kind) orelse
+            return error.TaskStoreCorrupt;
+        var reference = FileReferenceView{
+            .id = undefined,
+            .title = undefined,
+            .display_path = undefined,
+            .kind = undefined,
+            .locator_kind = locator_kind,
+            .locator = undefined,
+            .range = if (wire.range) |range| .{
+                .start = .{ .line = range.start.line, .column = range.start.column },
+                .end = .{ .line = range.end.line, .column = range.end.column },
+            } else null,
+        };
+        reference.id = try self.copyBounded(wire.id, self.limits.max_file_ref_field_bytes);
+        errdefer self.freeTracked(reference.id);
+        reference.title = try self.copyBounded(wire.title, self.limits.max_file_ref_field_bytes);
+        errdefer self.freeTracked(reference.title);
+        reference.display_path = try self.copyBounded(wire.display_path, self.limits.max_file_ref_field_bytes);
+        errdefer self.freeTracked(reference.display_path);
+        reference.kind = try self.copyBounded(wire.kind, self.limits.max_file_ref_field_bytes);
+        errdefer self.freeTracked(reference.kind);
+        reference.locator = try self.copyBounded(wire.locator, self.limits.max_file_ref_field_bytes);
+        return reference;
     }
 
     fn restoreCompact(
@@ -9210,6 +9631,7 @@ pub const Workbench = struct {
             for (tasks[0..task_index]) |task| {
                 for (task.runs) |run| {
                     if (run.input.argument_values) |values| self.allocator.free(values);
+                    for (run.tools) |tool| if (tool.file_refs) |references| self.allocator.free(references);
                     self.allocator.free(run.tools);
                 }
                 self.allocator.free(task.runs);
@@ -9281,6 +9703,7 @@ pub const Workbench = struct {
         var run_index: usize = 0;
         errdefer for (runs[0..run_index]) |run| {
             if (run.input.argument_values) |values| self.allocator.free(values);
+            for (run.tools) |tool| if (tool.file_refs) |references| self.allocator.free(references);
             self.allocator.free(run.tools);
         };
         for (task.durable.runs) |*entry| {
@@ -9405,6 +9828,28 @@ pub const Workbench = struct {
         var tool_index: usize = 0;
         for (run.tools) |entry| {
             const tool = entry orelse continue;
+            const file_ref_count = if (tool.file_refs) |references| countPresent(FileReferenceView, references) else 0;
+            const file_refs = if (file_ref_count != 0) try self.allocator.alloc(task_persistence.FileReferenceWire, file_ref_count) else null;
+            errdefer if (file_refs) |references| self.allocator.free(references);
+            if (file_refs) |references| {
+                var file_ref_index: usize = 0;
+                for (tool.file_refs.?) |reference_entry| {
+                    const reference = reference_entry orelse continue;
+                    references[file_ref_index] = .{
+                        .id = reference.id,
+                        .title = reference.title,
+                        .display_path = reference.display_path,
+                        .kind = reference.kind,
+                        .locator_kind = @tagName(reference.locator_kind),
+                        .locator = reference.locator,
+                        .range = if (reference.range) |range| .{
+                            .start = .{ .line = range.start.line, .column = range.start.column },
+                            .end = .{ .line = range.end.line, .column = range.end.column },
+                        } else null,
+                    };
+                    file_ref_index += 1;
+                }
+            }
             tools[tool_index] = .{
                 .id = tool.id,
                 .order = tool.order,
@@ -9419,6 +9864,7 @@ pub const Workbench = struct {
                 .progress_truncated = tool.progress_truncated,
                 .content_truncated = tool.content_truncated,
                 .redacted = tool.redacted,
+                .file_refs = file_refs,
             };
             tool_index += 1;
         }
@@ -11033,11 +11479,7 @@ pub const Workbench = struct {
     fn deinitRunRecord(self: *Workbench, run: *RunRecord) void {
         for (run.tools) |*tool_entry| {
             const tool = &(tool_entry.* orelse continue);
-            self.freeTracked(tool.id);
-            self.freeTracked(tool.name);
-            self.freeTracked(tool.input);
-            self.freeTracked(tool.progress);
-            self.freeTracked(tool.content);
+            self.deinitToolView(tool);
         }
         self.allocator.free(run.tools);
         self.deinitRunInputRecord(&run.input);
@@ -11093,6 +11535,11 @@ pub const Workbench = struct {
         const result = try self.allocator.dupe(u8, value);
         self.projection_bytes += result.len;
         return result;
+    }
+
+    fn copyPreviewBounded(self: *Workbench, value: []const u8, max: usize) Error![]u8 {
+        if (value.len > max) return error.ProjectionCapacity;
+        return self.allocator.dupe(u8, value);
     }
 
     fn permissionSummary(value: lifecycle.PermissionProvenance) Error!PermissionSummary {
@@ -11547,7 +11994,7 @@ pub const Workbench = struct {
             try self.projectedJsonValueWithKnownCredentials(writer, tool.progress);
             writer.writeAll(",\"content\":") catch return error.SnapshotTooLarge;
             try self.projectedJsonValueWithKnownCredentials(writer, tool.content);
-            writer.print(",\"state\":\"{s}\",\"isError\":{},\"elapsedMs\":\"{d}\",\"inputTruncated\":{},\"progressTruncated\":{},\"contentTruncated\":{},\"redacted\":{}}}", .{
+            writer.print(",\"state\":\"{s}\",\"isError\":{},\"elapsedMs\":\"{d}\",\"inputTruncated\":{},\"progressTruncated\":{},\"contentTruncated\":{},\"redacted\":{},\"fileRefs\":[", .{
                 @tagName(tool.state),
                 tool.is_error,
                 tool.elapsed_ms,
@@ -11556,6 +12003,31 @@ pub const Workbench = struct {
                 tool.content_truncated,
                 tool.redacted,
             }) catch return error.SnapshotTooLarge;
+            var file_ref_count: usize = 0;
+            if (tool.file_refs) |refs| for (refs) |*file_ref_entry| {
+                const reference = file_ref_entry.* orelse continue;
+                if (file_ref_count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+                file_ref_count += 1;
+                writer.writeAll("{\"id\":") catch return error.SnapshotTooLarge;
+                try self.projectedJsonValueWithKnownCredentials(writer, reference.id);
+                writer.writeAll(",\"title\":") catch return error.SnapshotTooLarge;
+                try self.projectedJsonValueWithKnownCredentials(writer, reference.title);
+                writer.writeAll(",\"displayPath\":") catch return error.SnapshotTooLarge;
+                try self.projectedJsonValueWithKnownCredentials(writer, reference.display_path);
+                writer.writeAll(",\"kind\":") catch return error.SnapshotTooLarge;
+                try self.projectedJsonValueWithKnownCredentials(writer, reference.kind);
+                writer.writeAll(",\"range\":") catch return error.SnapshotTooLarge;
+                if (reference.range) |range| {
+                    writer.print("{{\"start\":{{\"line\":\"{d}\",\"column\":\"{d}\"}},\"end\":{{\"line\":\"{d}\",\"column\":\"{d}\"}}}}", .{
+                        range.start.line,
+                        range.start.column,
+                        range.end.line,
+                        range.end.column,
+                    }) catch return error.SnapshotTooLarge;
+                } else writer.writeAll("null") catch return error.SnapshotTooLarge;
+                writer.writeByte('}') catch return error.SnapshotTooLarge;
+            };
+            writer.writeAll("]}") catch return error.SnapshotTooLarge;
         }
         writer.writeAll("]}") catch return error.SnapshotTooLarge;
     }
@@ -16308,6 +16780,65 @@ test "Workbench projects tools and full-width usage without parsing protocol in 
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "stdout\\nexit 0") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"elapsedMs\":\"18446744073709551615\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"input\":\"18446744073709551615\"") != null);
+}
+
+test "Workbench projects typed AgentCore file references into bounded tool entries" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+
+    const encoded = "{\"tool_result\":{\"id\":\"tool-1\",\"name\":\"Read\",\"input\":\"{}\",\"content\":\"ok\",\"is_error\":false,\"elapsed_ms\":1,\"file_refs\":[{\"locator\":{\"workspace_path\":\"src/main.zig\"},\"title\":\"main.zig\",\"kind\":\"read\",\"range\":{\"start\":{\"line\":1,\"column\":1},\"end\":{\"line\":2,\"column\":1}}}]}}";
+    var envelope = try testEnvelope(3, 7, encoded);
+    defer envelope.deinit();
+    try workbench.applyEvent(&envelope);
+
+    var snapshot_storage: [96 * 1024]u8 = undefined;
+    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"fileRefs\":[{\"id\":\"file-3-1-1-1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"displayPath\":\"src/main.zig\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"kind\":\"read\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"line\":\"2\"") != null);
+}
+
+test "file reference ids use durable task and run identities" {
+    var first_storage: [96]u8 = undefined;
+    var second_storage: [96]u8 = undefined;
+    var other_task_storage: [96]u8 = undefined;
+    const first = formatFileReferenceId(&first_storage, 3, 1, 1, 1);
+    const second = formatFileReferenceId(&second_storage, 3, 2, 1, 1);
+    const other_task = formatFileReferenceId(&other_task_storage, 4, 1, 1, 1);
+    try std.testing.expectEqualStrings("file-3-1-1-1", first);
+    try std.testing.expect(!std.mem.eql(u8, first, second));
+    try std.testing.expect(!std.mem.eql(u8, first, other_task));
+}
+
+test "file preview allocation rollback does not touch projection budget" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    var reference = FileReferenceView{
+        .id = @constCast("file-3-1-1-1"),
+        .title = @constCast("main.zig"),
+        .display_path = @constCast("src/main.zig"),
+        .kind = @constCast("read"),
+        .locator_kind = .workspace_path,
+        .locator = @constCast("src/main.zig"),
+    };
+    const tracked_before = workbench.projection_bytes;
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    const allocator = workbench.allocator;
+    workbench.allocator = failing.allocator();
+    const bytes = try allocator.dupe(u8, "preview");
+    try std.testing.expectError(
+        error.OutOfMemory,
+        workbench.finishFilePreview(&reference, bytes, false),
+    );
+    workbench.allocator = allocator;
+    allocator.free(bytes);
+    try std.testing.expectEqual(tracked_before, workbench.projection_bytes);
+
+    const success_bytes = try allocator.dupe(u8, "preview");
+    var preview = try workbench.finishFilePreview(&reference, success_bytes, false);
+    defer preview.deinit();
+    try std.testing.expectEqual(tracked_before, workbench.projection_bytes);
 }
 
 test "known Host credentials are removed from assistant, tool, and UI projections" {

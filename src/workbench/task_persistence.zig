@@ -211,6 +211,7 @@ pub const Limits = struct {
     max_user_message_bytes: usize,
     max_assistant_message_bytes: usize,
     max_tool_field_bytes: usize,
+    max_file_ref_field_bytes: usize,
     max_terminal_diagnostic_bytes: usize,
 };
 
@@ -375,6 +376,27 @@ pub const ToolWire = struct {
     progress_truncated: bool,
     content_truncated: bool,
     redacted: bool,
+    file_refs: ?[]FileReferenceWire = null,
+};
+
+pub const FileReferencePositionWire = struct {
+    line: u32,
+    column: u32,
+};
+
+pub const FileReferenceRangeWire = struct {
+    start: FileReferencePositionWire,
+    end: FileReferencePositionWire,
+};
+
+pub const FileReferenceWire = struct {
+    id: []const u8,
+    title: []const u8,
+    display_path: []const u8,
+    kind: []const u8,
+    locator_kind: []const u8,
+    locator: []const u8,
+    range: ?FileReferenceRangeWire = null,
 };
 
 pub const UsageWire = struct {
@@ -1018,6 +1040,25 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
                 !oneOf(tool.state, &.{ "running", "completed", "failed" }) or
                 (std.mem.eql(u8, tool.state, "failed") != tool.is_error))
                 return error.Invalid;
+            if (tool.file_refs) |references| {
+                if (references.len > 32) return error.Invalid;
+                for (references) |reference| {
+                    if (!validText(reference.id, limits.max_file_ref_field_bytes, false) or
+                        !validText(reference.title, limits.max_file_ref_field_bytes, true) or
+                        !validText(reference.display_path, limits.max_file_ref_field_bytes, true) or
+                        !validText(reference.kind, limits.max_file_ref_field_bytes, true) or
+                        !oneOf(reference.locator_kind, &.{ "workspace_path", "absolute_path", "uri" }) or
+                        !validText(reference.locator, limits.max_file_ref_field_bytes, false))
+                        return error.Invalid;
+                    if (reference.range) |range| {
+                        if (range.start.line == 0 or range.start.column == 0 or
+                            range.end.line == 0 or range.end.column == 0 or
+                            range.end.line < range.start.line or
+                            (range.end.line == range.start.line and range.end.column < range.start.column))
+                            return error.Invalid;
+                    }
+                }
+            }
             for (run.tools[0..tool_index]) |previous|
                 if (std.mem.eql(u8, previous.id, tool.id) or previous.order == tool.order)
                     return error.Invalid;
@@ -1730,6 +1771,7 @@ fn testLimits() Limits {
         .max_user_message_bytes = 4096,
         .max_assistant_message_bytes = 4096,
         .max_tool_field_bytes = 4096,
+        .max_file_ref_field_bytes = 1024,
         .max_terminal_diagnostic_bytes = 512,
     };
 }
