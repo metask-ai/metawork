@@ -55,6 +55,12 @@
   --ui-content-on-primary: var(--metask-light-panel);
   --ui-action-hover-surface: var(--ui-surface-panel-2);
   --ui-action-hover-content: var(--ui-content-primary);
+  --ui-action-selected-surface: color-mix(
+    in srgb,
+    var(--ui-surface-panel) 32%,
+    var(--metask-primary-soft) 68%
+  );
+  --ui-action-selected-content: var(--metask-primary-deep);
   --ui-action-danger-surface: color-mix(
     in srgb,
     var(--ui-surface-panel) 92%,
@@ -86,6 +92,12 @@
   --ui-content-primary: var(--metask-dark-text);
   --ui-content-muted: var(--metask-dark-text-muted);
   --ui-border: var(--metask-dark-border);
+  --ui-action-selected-surface: color-mix(
+    in srgb,
+    var(--ui-surface-panel) 70%,
+    var(--metask-primary) 30%
+  );
+  --ui-action-selected-content: var(--metask-primary-soft);
   --ui-content-warning: color-mix(
     in srgb,
     var(--metask-dark-text) 26%,
@@ -137,6 +149,8 @@
   --color-ui-on-primary: var(--ui-content-on-primary);
   --color-ui-hover-surface: var(--ui-action-hover-surface);
   --color-ui-hover-content: var(--ui-action-hover-content);
+  --color-ui-selected-surface: var(--ui-action-selected-surface);
+  --color-ui-selected-content: var(--ui-action-selected-content);
   --color-ui-danger-surface: var(--ui-action-danger-surface);
   --color-ui-danger-hover-surface: var(--ui-action-danger-hover-surface);
   --color-ui-danger-border: var(--ui-action-danger-border);

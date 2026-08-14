@@ -68,7 +68,7 @@ summary::-webkit-details-marker {
 }
 
 .focus-ring:focus-visible {
-  outline: 2px solid var(--ui-action-primary);
+  outline: 2px solid var(--ui-focus-ring);
   outline-offset: 2px;
 }
 
@@ -1466,11 +1466,15 @@ summary::-webkit-details-marker {
   text-align: left;
 }
 
-.selection-trigger:hover:not(:disabled),
+.selection-trigger:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--ui-action-primary) 48%, var(--ui-border));
+  background: var(--ui-action-hover-surface);
+}
+
 .selection-trigger[data-state="open"],
 .selection-trigger[data-popup-open] {
-  border-color: color-mix(in srgb, var(--ui-action-primary) 48%, var(--ui-border));
-  background: color-mix(in srgb, var(--metask-primary-soft) 56%, var(--ui-surface-panel));
+  border-color: var(--ui-action-primary);
+  background: var(--ui-action-selected-surface);
 }
 
 .selection-trigger:disabled,
@@ -1535,8 +1539,8 @@ summary::-webkit-details-marker {
   min-height: 26px;
   padding: 0 8px;
   border-radius: 7px;
-  color: var(--ui-action-primary-hover);
-  background: color-mix(in srgb, var(--metask-primary-soft) 72%, transparent);
+  color: var(--ui-action-selected-content);
+  background: var(--ui-action-selected-surface);
   font-size: 11px;
   font-weight: 700;
   white-space: nowrap;
@@ -1607,11 +1611,15 @@ summary::-webkit-details-marker {
   user-select: none;
 }
 
-.selection-menu-item[data-highlighted],
+.selection-menu-item[data-highlighted] {
+  background: var(--ui-action-hover-surface);
+  color: var(--ui-action-hover-content);
+}
+
 .selection-menu-item[data-state="checked"],
 .selection-menu-item[data-selected] {
-  background: color-mix(in srgb, var(--metask-primary-soft) 68%, var(--ui-surface-panel));
-  color: var(--ui-action-primary-hover);
+  background: var(--ui-action-selected-surface);
+  color: var(--ui-action-selected-content);
 }
 
 .selection-menu-item[data-disabled] {
@@ -1960,28 +1968,28 @@ html[data-metawork-renderer-window-controls="true"]
   place-items: center;
   border: 0;
   border-radius: 0;
-  color: #46545a;
+  color: var(--ui-content-muted);
   background: transparent;
   font-size: 15px;
 }
 
 .window-controls button:hover,
 .window-controls button:focus-visible {
-  color: #18262c;
-  background: rgba(24, 38, 44, 0.08);
+  color: var(--ui-content-primary);
+  background: var(--ui-action-hover-surface);
 }
 
 .window-controls button:focus-visible {
   position: relative;
   z-index: 1;
-  outline: 2px solid var(--ui-action-primary);
+  outline: 2px solid var(--ui-focus-ring);
   outline-offset: -3px;
 }
 
 .window-controls .window-control-close:hover,
 .window-controls .window-control-close:focus-visible {
-  color: #fff;
-  background: #c42b1c;
+  color: var(--ui-content-error);
+  background: var(--ui-action-danger-surface);
 }
 
 .window-controls button:disabled {
