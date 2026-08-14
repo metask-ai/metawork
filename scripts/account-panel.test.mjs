@@ -18,7 +18,7 @@ const { AccountGate } = await vite.ssrLoadModule(
 const { SettingsPage } = await vite.ssrLoadModule(
   "/src/features/settings/SettingsPage.tsx",
 );
-const { requiresAccountGate } = await vite.ssrLoadModule(
+const { requiresAccountGate, requiresAccountSetup } = await vite.ssrLoadModule(
   "/src/features/account/gating.ts",
 );
 const { accountErrorMessageId } = await vite.ssrLoadModule(
@@ -147,6 +147,49 @@ test("only checking and authorizing replace the Workbench surface", () => {
   assert.equal(requiresAccountGate({ state: "authorizing" }), true);
   assert.equal(requiresAccountGate({ state: "signed_out" }), false);
   assert.equal(requiresAccountGate({ state: "authenticated" }), false);
+});
+
+test("unresolved authenticated catalog opens account setup", () => {
+  assert.equal(
+    requiresAccountSetup({
+      state: "authenticated",
+      catalogState: "choosing",
+      canCreateTask: false,
+    }),
+    true,
+  );
+  assert.equal(
+    requiresAccountSetup({
+      state: "authenticated",
+      catalogState: "failed",
+      canCreateTask: false,
+    }),
+    true,
+  );
+  assert.equal(
+    requiresAccountSetup({
+      state: "authenticated",
+      catalogState: "loading",
+      canCreateTask: false,
+    }),
+    true,
+  );
+  assert.equal(
+    requiresAccountSetup({
+      state: "authenticated",
+      catalogState: "ready",
+      canCreateTask: true,
+    }),
+    false,
+  );
+  assert.equal(
+    requiresAccountSetup({
+      state: "authenticated",
+      catalogState: "ready",
+      canCreateTask: false,
+    }),
+    false,
+  );
 });
 
 test("Account runtime blockers keep running tasks distinct from idle sessions", () => {

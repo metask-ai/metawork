@@ -30,7 +30,10 @@ import { Menu } from "../components/ui/menu.tsx";
 import { Input } from "../components/ui/input.tsx";
 import { AccountIdentity } from "../features/account/AccountIdentity.tsx";
 import { AccountGate } from "../features/account/AccountGate.tsx";
-import { requiresAccountGate } from "../features/account/gating.ts";
+import {
+  requiresAccountGate,
+  requiresAccountSetup,
+} from "../features/account/gating.ts";
 import { accountErrorMessageId } from "../i18n/account-error.ts";
 import {
   SettingsPage,
@@ -169,6 +172,7 @@ export default function App() {
   const [route, setRoute] = useState<ShellRoute>("workbench");
   const [settingsFocus, setSettingsFocus] =
     useState<SettingsFocusTarget>("title");
+  const [accountSetupRedirected, setAccountSetupRedirected] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [skillsQuery, setSkillsQuery] = useState("");
@@ -256,6 +260,42 @@ export default function App() {
     : taskDrafts.updateDraft;
   const bridgeUnavailable = viewSyncFailed || !bridgeReady;
   const accountGateRequired = requiresAccountGate(snapshot.account);
+  const accountSetupRequired = requiresAccountSetup(snapshot.account);
+
+  useEffect(() => {
+    if (
+      accountSetupRedirected &&
+      snapshot.account.state !== "authenticated"
+    ) {
+      setAccountSetupRedirected(false);
+      return;
+    }
+    if (accountSetupRequired && route === "workbench") {
+      setAccountSetupRedirected(true);
+      setSettingsFocus("account");
+      setRoute("settings");
+      return;
+    }
+    if (
+      !accountSetupRedirected ||
+      accountSetupRequired ||
+      route !== "settings" ||
+      snapshot.account.state !== "authenticated" ||
+      !snapshot.account.canCreateTask
+    )
+      return;
+    setAccountSetupRedirected(false);
+    setSettingsFocus("title");
+    setRoute("workbench");
+    window.requestAnimationFrame(() => composer.current?.focus());
+  }, [
+    accountSetupRedirected,
+    accountSetupRequired,
+    route,
+    snapshot.account.canCreateTask,
+    snapshot.account.state,
+  ]);
+
   const workbenchMutationDisabled =
     bridgeUnavailable ||
     taskHistoryMutationBlocked(
