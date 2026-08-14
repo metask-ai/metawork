@@ -448,11 +448,7 @@ function ToolCard({
     tool.state === "completed" ? "completed" : tool.state,
   );
   return (
-    <Tool
-      className="agent-tool"
-      state={tool.state}
-      open={tool.state === "running" || tool.state === "failed"}
-    >
+    <Tool className="agent-tool" state={tool.state}>
       <ToolHeader
         className="agent-tool-summary"
         name={tool.name}
@@ -483,19 +479,16 @@ function ToolCard({
           </div>
         )}
         <ToolField label={t("tool.input")}>
-          <CodeBlock label={t("tool.input")} value={tool.input} />
+          <CodeBlock value={tool.input} />
         </ToolField>
         {tool.progress && (
           <ToolField label={t("tool.progress")}>
-            <CodeBlock label={t("tool.progress")} value={tool.progress} />
+            <CodeBlock value={tool.progress} />
           </ToolField>
         )}
         {tool.content && (
           <ToolField label={tool.isError ? t("tool.error") : t("tool.result")}>
-            <CodeBlock
-              label={tool.isError ? t("tool.error") : t("tool.result")}
-              value={tool.content}
-            />
+            <CodeBlock value={tool.content} />
           </ToolField>
         )}
         {onInspect && (

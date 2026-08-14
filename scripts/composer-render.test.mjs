@@ -455,9 +455,21 @@ test("each typed Tool stays an independent bounded detail card", async () => {
   ]);
   assert.equal(markup.match(/class="ai-tool agent-tool"/g)?.length, 1);
   assert.match(markup, /class="ai-tool agent-tool" data-state="completed"/);
+  assert.doesNotMatch(markup, /class="ai-tool agent-tool"[^>]*open/);
+  assert.equal(
+    markup.match(/class="ai-tool-field-label">Input<\/p>/g)?.length,
+    1,
+  );
+  assert.equal(
+    markup.match(/class="ai-tool-field-label">Result<\/p>/g)?.length,
+    1,
+  );
+  assert.doesNotMatch(markup, /class="mb-1[^\"]*">Input<\/p>/);
   assert.match(css, /\.code-block-preview\s*\{[\s\S]*?max-height:\s*240px/);
   assert.match(timeline, /key=\{`tool:\$\{activity\.id\}`\}/);
   assert.match(timeline, /state=\{tool\.state\}/);
+  assert.doesNotMatch(timeline, /<CodeBlock[^>]+label=/);
+  assert.doesNotMatch(approval, /<CodeBlock[^>]+label=/);
   assert.doesNotMatch(timeline, /bg-cobalt/);
   assert.doesNotMatch(approval, /accent-cobalt/);
 });

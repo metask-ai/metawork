@@ -1892,21 +1892,33 @@ summary::-webkit-details-marker {
 }
 
 .ai-tool.agent-tool {
-  border-color: color-mix(in srgb, var(--ui-action-primary) 16%, var(--ui-border));
-  background: color-mix(in srgb, var(--ui-surface-panel) 66%, var(--ui-surface-canvas));
+  border: 0;
+  border-top: 1px solid var(--ui-border);
+  border-radius: 0;
+  background: transparent;
   box-shadow: none;
 }
 
 .ai-tool.agent-tool[data-state="running"] {
-  border-color: var(--ui-action-primary-border);
+  border-top-color: var(--ui-action-primary-border);
 }
 
 .ai-tool.agent-tool[data-state="failed"] {
-  border-color: color-mix(in srgb, var(--metask-state-error) 34%, transparent);
+  border-top-color: color-mix(in srgb, var(--metask-state-error) 34%, transparent);
+}
+
+.ai-tool.agent-tool .agent-tool-summary {
+  min-height: 34px;
+  padding: 6px 0;
 }
 
 .ai-tool.agent-tool .agent-tool-summary:hover {
-  background: color-mix(in srgb, var(--ui-action-primary) 5%, var(--ui-surface-panel));
+  background: transparent;
+}
+
+.ai-tool.agent-tool .ai-tool-content {
+  padding: 12px 0 2px;
+  background: transparent;
 }
 
 .conversation-compaction {
