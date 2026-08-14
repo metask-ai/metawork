@@ -6,6 +6,7 @@ import type {
   WorkspaceView,
 } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
+import { Button } from "../../components/ui/button.tsx";
 import {
   SelectionMenu,
   type SelectionMenuOption,
@@ -488,13 +489,14 @@ export function SettingsPage({
                 </span>
               </div>
               {!authenticated && (
-                <button
-                  className="secondary-button focus-ring"
+                <Button
+                  variant="secondary"
+                  size="sm"
                   disabled={disabled}
                   onClick={onBeginLogin}
                 >
                   {t("account.login")}
-                </button>
+                </Button>
               )}
             </div>
 
@@ -720,14 +722,15 @@ export function SettingsPage({
                   <p>{t("settings.signout_help")}</p>
                 </div>
                 {!confirmSignOut ? (
-                  <button
+                  <Button
+                    variant="danger"
+                    size="sm"
                     ref={signOut}
-                    className="danger-button focus-ring"
                     disabled={disabled || account.catalogState === "loading"}
                     onClick={() => setConfirmSignOut(true)}
                   >
                     {t("account.logout_short")}
-                  </button>
+                  </Button>
                 ) : (
                   <div
                     className="settings-signout-confirmation"
@@ -744,22 +747,24 @@ export function SettingsPage({
                       {t("account.logout_confirm")}
                     </p>
                     <span>
-                      <button
+                      <Button
+                        variant="secondary"
+                        size="sm"
                         ref={signOutCancel}
-                        className="secondary-button focus-ring"
                         onClick={closeSignOutConfirmation}
                       >
                         {t("common.cancel")}
-                      </button>
-                      <button
-                        className="danger-button focus-ring"
+                      </Button>
+                      <Button
+                        variant="danger"
+                        size="sm"
                         disabled={
                           disabled || account.catalogState === "loading"
                         }
                         onClick={onLogout}
                       >
                         {t("account.logout")}
-                      </button>
+                      </Button>
                     </span>
                   </div>
                 )}

@@ -111,7 +111,6 @@ export function AccountGate({
                 type="button"
                 variant="primary"
                 size="lg"
-                className="primary-button"
                 disabled={reconnecting}
                 onClick={onReconnect}
               >

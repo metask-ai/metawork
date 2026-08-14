@@ -242,18 +242,18 @@ test("Skills route uses the canonical management commands and no policy path", a
     assert.match(commands, new RegExp(`skills\\.${command}`));
   }
   assert.match(page, /title\.current\?\.focus\(\)/);
-  assert.match(page, /aria-modal="true"/);
+  assert.match(page, /<Dialog\.Root[\s\S]*?<Dialog\.Popup/);
   assert.doesNotMatch(
     page,
     /window\.zero|window\.confirm|localStorage|FileSystem|toggle|switch/i,
   );
   assert.match(
     css,
-    /\.skill-center \.primary-button \{[\s\S]*?display: inline-flex;[\s\S]*?width: auto;[\s\S]*?margin-top: 0;[\s\S]*?gap: 6px;/,
+    /\.skill-header-actions > button \{[\s\S]*?display: inline-flex;[\s\S]*?width: auto;[\s\S]*?margin-top: 0;[\s\S]*?gap: 6px;/,
   );
   assert.match(
     css,
-    /\.skill-empty-state > \.primary-button \{\s*min-width: 168px;/,
+    /\.skill-empty-state > button \{\s*min-width: 168px;/,
   );
 });
 

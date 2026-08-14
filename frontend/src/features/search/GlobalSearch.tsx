@@ -39,6 +39,7 @@ export function GlobalSearch({
         <Dialog.Popup
           className="search-dialog"
           aria-labelledby="search-title"
+          initialFocus={() => input.current ?? false}
         >
           <Dialog.Title id="search-title" className="sr-only">
             {t("search.title")}

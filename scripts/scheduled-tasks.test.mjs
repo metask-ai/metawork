@@ -14,6 +14,7 @@ const dom = new JSDOM("<!doctype html><html><body></body></html>", {
   pretendToBeVisual: true,
   url: "http://localhost/",
 });
+if (!dom.window.PointerEvent) dom.window.PointerEvent = dom.window.MouseEvent;
 Object.assign(globalThis, {
   window: dom.window,
   document: dom.window.document,
@@ -22,6 +23,9 @@ Object.assign(globalThis, {
   Element: dom.window.Element,
   HTMLElement: dom.window.HTMLElement,
   MutationObserver: dom.window.MutationObserver,
+  requestAnimationFrame: dom.window.requestAnimationFrame.bind(dom.window),
+  cancelAnimationFrame: dom.window.cancelAnimationFrame.bind(dom.window),
+  PointerEvent: dom.window.PointerEvent,
   getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
 });
 Object.defineProperty(globalThis, "navigator", {
@@ -280,14 +284,15 @@ test("schedule editor controls have explicit semantics and no native chrome", ()
   fireEvent.click(screen.getByRole("button", { name: "Repeat" }));
   assert.ok(screen.getByLabelText("Every"));
   assert.ok(screen.getByLabelText("Interval unit"));
-  for (const select of dialog.querySelectorAll("select"))
-    assert.equal(select.parentElement.className, "scheduled-select");
+  assert.equal(dialog.querySelectorAll("select").length, 0);
+  assert.ok(dialog.querySelector('[role="combobox"]'));
 
   const css = readFileSync(
     join(process.cwd(), "frontend/src/index.css"),
     "utf8",
   );
-  assert.match(css, /\.scheduled-select select \{[\s\S]*?appearance: none;/);
+  assert.match(css, /\.scheduled-select \{[\s\S]*?position: relative;/);
+  assert.match(css, /\.scheduled-select \[data-popup-open\]/);
   assert.match(css, /input\[type="number"\][\s\S]*?appearance: textfield;/);
   assert.match(css, /::-webkit-search-cancel-button/);
   assert.match(css, /resize: none;/);

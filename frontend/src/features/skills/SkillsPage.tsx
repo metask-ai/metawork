@@ -9,6 +9,7 @@ import type {
   WorkspaceView,
 } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
+import { Button } from "../../components/ui/button.tsx";
 import { Dialog } from "../../components/ui/dialog.tsx";
 import { Input } from "../../components/ui/input.tsx";
 import { SelectField } from "../../components/ui/select.tsx";
@@ -413,22 +414,24 @@ export function SkillsPage({
             <p>{t("skills.subtitle")}</p>
           </div>
           <div className="skill-header-actions">
-            <button
-              className="secondary-button focus-ring"
+            <Button
+              variant="secondary"
+              size="sm"
               disabled={disabled || refreshing}
               onClick={onRefresh}
             >
               <Icon name="refresh" />
               {t(refreshing ? "skills.refreshing" : "skills.refresh")}
-            </button>
-            <button
-              className="primary-button focus-ring"
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
               disabled={disabled || unavailable}
               onClick={(event) => beginImport(event.currentTarget)}
             >
               <Icon name="upload" />
               {t("skills.import")}
-            </button>
+            </Button>
           </div>
         </header>
 
@@ -475,14 +478,15 @@ export function SkillsPage({
             </span>
             <h2>{t("skills.empty_title")}</h2>
             <p>{t("skills.empty_body")}</p>
-            <button
-              className="primary-button focus-ring"
+            <Button
+              variant="primary"
+              size="sm"
               disabled={disabled}
               onClick={(event) => beginImport(event.currentTarget)}
             >
               <Icon name="upload" />
               {t("skills.import_first")}
-            </button>
+            </Button>
           </div>
         ) : noResults ? (
           <div className="skill-empty-state skill-empty-state-compact">
@@ -707,16 +711,18 @@ export function SkillsPage({
                     </button>
                   )}
                   <span />
-                  <button
-                    className="secondary-button focus-ring"
+                  <Button
+                    variant="secondary"
+                    size="sm"
                     disabled={busy}
                     onClick={() => closeDrawer()}
                   >
                     {t("common.cancel")}
-                  </button>
+                  </Button>
                   {preview?.selected && (
-                    <button
-                      className="primary-button focus-ring"
+                    <Button
+                      variant="primary"
+                      size="sm"
                       disabled={busy}
                       onClick={() => void commitImport(replaceRequired)}
                     >
@@ -727,7 +733,7 @@ export function SkillsPage({
                           : reimportTarget
                             ? t("skills.reimport")
                             : t("skills.install")}
-                    </button>
+                    </Button>
                   )}
                 </>
               ) : selected?.installId ? (
@@ -767,15 +773,17 @@ export function SkillsPage({
                   {selected.canUninstall &&
                     (confirmUninstall ? (
                       <>
-                        <button
-                          className="secondary-button focus-ring"
+                        <Button
+                          variant="secondary"
+                          size="sm"
                           disabled={busy}
                           onClick={() => setConfirmUninstall(false)}
                         >
                           {t("common.cancel")}
-                        </button>
-                        <button
-                          className="danger-button focus-ring"
+                        </Button>
+                        <Button
+                          variant="danger"
+                          size="sm"
                           disabled={busy}
                           onClick={() =>
                             void runMutation(
@@ -785,27 +793,29 @@ export function SkillsPage({
                           }
                         >
                           <Icon name="trash" /> {t("skills.uninstall")}
-                        </button>
+                        </Button>
                       </>
                     ) : (
-                      <button
-                        className="danger-button focus-ring"
+                      <Button
+                        variant="danger"
+                        size="sm"
                         disabled={busy}
                         onClick={() => setConfirmUninstall(true)}
                       >
                         <Icon name="trash" /> {t("skills.uninstall")}
-                      </button>
+                      </Button>
                     ))}
                 </>
               ) : (
                 <>
                   <span />
-                  <button
-                    className="secondary-button focus-ring"
+                  <Button
+                    variant="secondary"
+                    size="sm"
                     onClick={() => closeDrawer()}
                   >
                     {t("common.close")}
-                  </button>
+                  </Button>
                 </>
               )}
             </footer>

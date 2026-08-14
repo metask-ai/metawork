@@ -10,6 +10,7 @@ const dom = new JSDOM("<!doctype html><html><body></body></html>", {
   pretendToBeVisual: true,
   url: "http://localhost/",
 });
+if (!dom.window.PointerEvent) dom.window.PointerEvent = dom.window.MouseEvent;
 
 Object.assign(globalThis, {
   window: dom.window,
@@ -26,7 +27,7 @@ Object.assign(globalThis, {
   getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
   requestAnimationFrame: dom.window.requestAnimationFrame.bind(dom.window),
   cancelAnimationFrame: dom.window.cancelAnimationFrame.bind(dom.window),
-  PointerEvent: dom.window.MouseEvent,
+  PointerEvent: dom.window.PointerEvent,
 });
 const resizeObservers = [];
 globalThis.ResizeObserver = class {
@@ -142,13 +143,13 @@ test("SelectionMenu uses combobox semantics and keyboard selection", async () =>
   assert.equal(trigger.getAttribute("aria-expanded"), "true");
   assert.ok(listbox);
 
-  await user.keyboard("{ArrowDown}{Enter}");
+  await user.keyboard("{ArrowDown}{ArrowDown}{Enter}");
   assert.deepEqual(selected, ["bravo"]);
   assert.equal(trigger.getAttribute("aria-expanded"), "false");
   assert.equal(document.activeElement, trigger);
 });
 
-test("Global search keeps focus in its combobox and restores the opener", () => {
+test("Global search keeps focus in its combobox and restores the opener", async () => {
   const selected = [];
   let closed = 0;
   const opener = document.createElement("button");
@@ -185,7 +186,7 @@ test("Global search keeps focus in its combobox and restores the opener", () => 
   };
   const view = render(searchElement(props));
   const combobox = screen.getByRole("combobox", { name: "Search MetaWork" });
-  assert.equal(document.activeElement, combobox);
+  await waitFor(() => assert.ok(document.activeElement === combobox));
   const options = screen.getAllByRole("option");
   assert.deepEqual(
     options.map((option) => option.tabIndex),
@@ -198,10 +199,11 @@ test("Global search keeps focus in its combobox and restores the opener", () => 
   );
   fireEvent.keyDown(combobox, { key: "Enter" });
   assert.deepEqual(selected, ["task:2"]);
-  fireEvent.keyDown(window, { key: "Escape" });
+  fireEvent.keyDown(document, { key: "Escape" });
   assert.equal(closed, 1);
   view.rerender(searchElement({ ...props, open: false }));
-  assert.equal(document.activeElement, opener);
+  await waitFor(() => assert.ok(document.activeElement === opener));
+  view.unmount();
   opener.remove();
 });
 
@@ -225,7 +227,7 @@ test("SelectionMenu exposes disabled options without admitting them", async () =
   renderMenu((value) => selected.push(value));
 
   await user.click(screen.getByRole("combobox", { name: "Switch workspace" }));
-  const blocked = screen.getByRole("option", { name: "Blocked" });
+  const blocked = await screen.findByRole("option", { name: "Blocked" });
   assert.equal(blocked.getAttribute("data-disabled"), "");
 
   await user.click(blocked);
@@ -239,12 +241,12 @@ test("SelectionMenu stays controlled while the Host selection is empty", async (
 
   const trigger = screen.getByRole("combobox", { name: "Switch workspace" });
   await user.click(trigger);
-  await user.click(screen.getByRole("option", { name: /Bravo/ }));
+  await user.click(await screen.findByRole("option", { name: /Bravo/ }));
   assert.deepEqual(selected, ["bravo"]);
   assert.match(trigger.textContent, /Choose workspace/);
 
   await user.click(trigger);
-  await user.click(screen.getByRole("option", { name: /Bravo/ }));
+  await user.click(await screen.findByRole("option", { name: /Bravo/ }));
   assert.deepEqual(selected, ["bravo", "bravo"]);
   assert.match(trigger.textContent, /Choose workspace/);
 });
@@ -404,7 +406,7 @@ test("Settings completes the API transaction before replacing committed defaults
   const view = renderSettings(readySettingsAccount);
 
   await user.click(screen.getByRole("combobox", { name: "Default API" }));
-  await user.click(screen.getByRole("option", { name: "Backup" }));
+  await user.click(await screen.findByRole("option", { name: /Backup/ }));
   assert.deepEqual(view.selections.api, ["key-2"]);
   assert.match(
     screen.getByRole("combobox", { name: "Default API" }).textContent,
@@ -466,7 +468,7 @@ test("Settings completes the API transaction before replacing committed defaults
     false,
   );
   await user.click(screen.getByRole("combobox", { name: "Default model" }));
-  await user.click(screen.getByRole("option", { name: "Model Two" }));
+  await user.click(await screen.findByRole("option", { name: /Model Two/ }));
   assert.deepEqual(view.selections.model, ["model-2"]);
 
   view.rerenderAccount({
@@ -507,7 +509,7 @@ test("Settings keeps a model choice visibly pending without declaring it committ
   const view = renderSettings(readySettingsAccount);
 
   await user.click(screen.getByRole("combobox", { name: "Default model" }));
-  await user.click(screen.getByRole("option", { name: "Model Two" }));
+  await user.click(await screen.findByRole("option", { name: /Model Two/ }));
 
   assert.deepEqual(view.selections.model, ["model-2"]);
   assert.match(

@@ -2355,12 +2355,13 @@ export default function App() {
                         setEditingTitle(false);
                       }}
                     />
-                    <button
-                      className="secondary-button focus-ring"
+                    <Button
+                      variant="secondary"
+                      size="sm"
                       disabled={!titleDraft.trim() || taskMutationDisabled}
                     >
                       {t("common.save")}
-                    </button>
+                    </Button>
                     <button
                       type="button"
                       className="text-button focus-ring"
@@ -2393,8 +2394,9 @@ export default function App() {
                           compact.operationId ===
                           activeTask.activeOperation?.id,
                       )?.phase === "stopping") && (
-                    <button
-                      className="danger-button focus-ring"
+                    <Button
+                      variant="danger"
+                      size="sm"
                       disabled={
                         bridgeUnavailable || activeTask.id in cancelPending
                       }
@@ -2410,7 +2412,7 @@ export default function App() {
                           ? "compact.stop"
                           : "task.stop",
                       )}
-                    </button>
+                    </Button>
                   )}
                 {activeTask && inspector.available && (
                   <button
@@ -2446,7 +2448,7 @@ export default function App() {
                     <div className="task-menu">
                       <Menu.Trigger
                         ref={taskMenuTrigger}
-                        className="secondary-button focus-ring"
+                        className="task-menu-trigger"
                       >
                         {t("task.actions")}
                       </Menu.Trigger>
@@ -2566,15 +2568,16 @@ export default function App() {
               <h3>{t(connectionFailure.titleId)}</h3>
               <p>{t(connectionFailure.helpId)}</p>
               {connectionRetryable && (
-                <button
-                  className="secondary-button focus-ring"
+                <Button
+                  variant="secondary"
+                  size="sm"
                   disabled={connectionBusy}
                   onClick={() => void retryViewSynchronization()}
                 >
                   {connectionBusy
                     ? t("connection.retrying")
                     : t("connection.retry")}
-                </button>
+                </Button>
               )}
               {connectionShellStatus?.diagnostic && (
                 <details>
