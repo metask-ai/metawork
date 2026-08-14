@@ -64,6 +64,31 @@ function isNonTerminalRun(phase: RunView["phase"]): boolean {
   );
 }
 
+function filePreviewStatusLabel(
+  t: (
+    id: MessageId,
+    values?: Record<string, string | number | bigint>,
+  ) => string,
+  state: FilePreview["state"],
+) {
+  switch (state) {
+    case "loading":
+      return t("file_preview.loading");
+    case "ready":
+      return t("file_preview.ready");
+    case "truncated":
+      return t("file_preview.state.truncated");
+    case "missing":
+      return t("file_preview.state.missing");
+    case "restricted":
+      return t("file_preview.state.restricted");
+    case "unsupported":
+      return t("file_preview.state.unsupported");
+    case "error":
+      return t("file_preview.state.error");
+  }
+}
+
 function CompactTimelineEvent({ compact }: { compact: CompactView }) {
   const { locale, t } = useI18n();
   const values = {
@@ -188,6 +213,7 @@ export function TaskTimeline({
   const [showJumpLatest, setShowJumpLatest] = useState(false);
   const [filePreview, setFilePreview] = useState<FilePreview | null>(null);
   const [filePreviewBusy, setFilePreviewBusy] = useState(false);
+  const filePreviewRequest = useRef(0);
   const timelineScroll = useRef<HTMLDivElement>(null);
   const followingLatest = useRef(true);
   const latestRunId = task?.runs.at(-1)?.id ?? null;
@@ -195,7 +221,9 @@ export function TaskTimeline({
   useEffect(() => {
     followingLatest.current = true;
     setShowJumpLatest(false);
+    filePreviewRequest.current += 1;
     setFilePreview(null);
+    setFilePreviewBusy(false);
   }, [task?.id]);
 
   useLayoutEffect(() => {
@@ -229,12 +257,33 @@ export function TaskTimeline({
   }
 
   async function openFilePreview(fileReferenceId: string) {
+    const requestId = ++filePreviewRequest.current;
     setFilePreviewBusy(true);
     try {
-      setFilePreview(await previewFile(fileReferenceId));
+      const preview = await previewFile(fileReferenceId);
+      if (requestId === filePreviewRequest.current) setFilePreview(preview);
+    } catch {
+      if (requestId === filePreviewRequest.current) {
+        setFilePreview({
+          state: "error",
+          id: fileReferenceId,
+          title: "",
+          displayPath: "",
+          language: "text",
+          content: "",
+          truncated: false,
+          range: null,
+        });
+      }
     } finally {
-      setFilePreviewBusy(false);
+      if (requestId === filePreviewRequest.current) setFilePreviewBusy(false);
     }
+  }
+
+  function closeFilePreview() {
+    filePreviewRequest.current += 1;
+    setFilePreview(null);
+    setFilePreviewBusy(false);
   }
 
   return (
@@ -374,26 +423,35 @@ export function TaskTimeline({
         </div>
       </div>
       {(filePreviewBusy || filePreview) && (
-        <aside className="file-preview-pane" aria-label="File preview">
+        <aside
+          className="file-preview-pane"
+          aria-label={t("file_preview.title")}
+          aria-live="polite"
+        >
           <header className="file-preview-header">
-            <strong>{filePreview?.displayPath ?? "Loading preview..."}</strong>
+            <strong>
+              {filePreview?.displayPath ||
+                (filePreviewBusy
+                  ? t("file_preview.loading_title")
+                  : t("file_preview.title"))}
+            </strong>
             <button
               className="file-preview-close focus-ring"
               type="button"
-              onClick={() => setFilePreview(null)}
-              aria-label="Close file preview"
+              onClick={closeFilePreview}
+              aria-label={t("file_preview.close")}
             >
-              x
+              <Icon name="close" />
             </button>
           </header>
           {filePreviewBusy ? (
-            <p className="file-preview-status">Loading...</p>
+            <p className="file-preview-status">{t("file_preview.loading")}</p>
           ) : filePreview?.state === "ready" ||
             filePreview?.state === "truncated" ? (
             <pre className="file-preview-content">{filePreview.content}</pre>
           ) : (
             <p className="file-preview-status">
-              {filePreview?.state ?? "error"}
+              {filePreviewStatusLabel(t, filePreview?.state ?? "error")}
             </p>
           )}
         </aside>
@@ -548,21 +606,31 @@ function ToolCard({
           />
         )}
         {tool.fileRefs.length > 0 && (
-          <div className="tool-file-references" aria-label="Referenced files">
-            {tool.fileRefs.map((reference) => (
-              <button
-                key={reference.id}
-                type="button"
-                className="tool-file-chip focus-ring"
-                onClick={() => onPreviewFile(reference.id)}
-              >
-                <span aria-hidden="true">📄</span>
-                <span>{reference.displayPath || reference.title}</span>
-                {reference.range && (
-                  <small>:{reference.range.start.line}</small>
-                )}
-              </button>
-            ))}
+          <div
+            className="tool-file-references"
+            aria-label={t("file_preview.references")}
+          >
+            {tool.fileRefs.map((reference) => {
+              const displayPath = reference.displayPath || reference.title;
+              const location = reference.range
+                ? `${displayPath}:${reference.range.start.line}`
+                : displayPath;
+              return (
+                <button
+                  key={reference.id}
+                  type="button"
+                  className="tool-file-chip focus-ring"
+                  onClick={() => onPreviewFile(reference.id)}
+                  aria-label={t("file_preview.open", { path: location })}
+                >
+                  <Icon name="skill-file" />
+                  <span>{displayPath}</span>
+                  {reference.range && (
+                    <small>:{reference.range.start.line}</small>
+                  )}
+                </button>
+              );
+            })}
           </div>
         )}
         {onInspect && (

@@ -1410,6 +1410,27 @@ fn boundedPreviewCutoff(bytes: []const u8, max_lines: usize, max_line_bytes: usi
     return bytes.len;
 }
 
+fn trimIncompleteUtf8Tail(bytes: []u8) []u8 {
+    if (std.unicode.utf8ValidateSlice(bytes) or bytes.len == 0) return bytes;
+
+    var suffix_start = bytes.len;
+    var continuation_count: usize = 0;
+    while (suffix_start > 0 and continuation_count < 3 and
+        (bytes[suffix_start - 1] & 0xc0) == 0x80)
+    {
+        suffix_start -= 1;
+        continuation_count += 1;
+    }
+    if (suffix_start == 0) return bytes;
+
+    const lead_index = suffix_start - 1;
+    const lead = bytes[lead_index];
+    if (lead < 0xc2 or lead > 0xf4) return bytes;
+    const sequence_len = std.unicode.utf8ByteSequenceLength(lead) catch return bytes;
+    if (bytes.len - lead_index < sequence_len) return bytes[0..lead_index];
+    return bytes;
+}
+
 /// Workbench-owned projection of AgentCore's typed file reference. The raw
 /// locator is retained only on the Host side; snapshot serialization uses the
 /// safe display path and opaque product id below.
@@ -2639,9 +2660,11 @@ pub const Workbench = struct {
             var bytes_owned = true;
             defer if (bytes_owned) self.allocator.free(bytes);
             const read = file.readPositionalAll(self.io, bytes, 0) catch return error.FilePreviewReadFailed;
-            if (read != bytes.len or !std.unicode.utf8ValidateSlice(bytes))
+            if (read != bytes.len) return error.FilePreviewUnsupported;
+            const complete_bytes = trimIncompleteUtf8Tail(bytes);
+            if (!std.unicode.utf8ValidateSlice(complete_bytes))
                 return error.FilePreviewUnsupported;
-            const preview = try self.finishFilePreview(reference, bytes, true);
+            const preview = try self.finishFilePreview(reference, complete_bytes, true);
             if (preview.content.ptr == bytes.ptr) bytes_owned = false;
             return preview;
         }
@@ -2667,13 +2690,17 @@ pub const Workbench = struct {
             self.limits.max_file_preview_lines,
             self.limits.max_file_preview_line_bytes,
         );
+        const safe_cutoff = if (cutoff < bytes.len)
+            trimIncompleteUtf8Tail(bytes[0..cutoff]).len
+        else
+            cutoff;
         var content = bytes;
         var content_truncated = truncated;
         var content_is_owned = false;
         errdefer if (content_is_owned) self.allocator.free(content);
-        if (cutoff < bytes.len) {
-            content = try self.allocator.alloc(u8, cutoff);
-            @memcpy(content, bytes[0..cutoff]);
+        if (safe_cutoff < bytes.len) {
+            content = try self.allocator.alloc(u8, safe_cutoff);
+            @memcpy(content, bytes[0..safe_cutoff]);
             content_is_owned = true;
             content_truncated = true;
         }
@@ -16839,6 +16866,16 @@ test "file preview allocation rollback does not touch projection budget" {
     var preview = try workbench.finishFilePreview(&reference, success_bytes, false);
     defer preview.deinit();
     try std.testing.expectEqual(tracked_before, workbench.projection_bytes);
+}
+
+test "truncated file preview keeps a complete UTF-8 prefix" {
+    var bytes = [_]u8{ 'a', 0xe4, 0xb8, 0xad, 0xe4, 0xb8 };
+    const complete = trimIncompleteUtf8Tail(&bytes);
+    try std.testing.expectEqual(@as(usize, 4), complete.len);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(complete));
+
+    var invalid = [_]u8{ 'a', 0xf5 };
+    try std.testing.expectEqual(invalid.len, trimIncompleteUtf8Tail(&invalid).len);
 }
 
 test "known Host credentials are removed from assistant, tool, and UI projections" {
