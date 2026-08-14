@@ -2513,6 +2513,48 @@ pub const Session = struct {
         };
     }
 
+    /// Rebinds the model of this Session while it is idle. AgentCore rejects
+    /// the same operation while a Run is active; Workbench uses that busy
+    /// result to keep model changes out of the in-flight Run path.
+    pub fn setModel(self: *Session, model: []const u8) Error!void {
+        if (model.len == 0 or !std.unicode.utf8ValidateSlice(model))
+            return error.CoreCallFailed;
+        self.lock();
+        defer self.unlock();
+        if (self.agent_runtime.shutting_down.load(.acquire))
+            return error.RuntimeShuttingDown;
+        switch (self.state) {
+            .idle => {},
+            .queued, .running, .waiting_ui, .compact_queued, .compacting, .checkpointing =>
+                return error.SessionNotIdle,
+            .poisoned => return error.SessionPoisoned,
+            .closing, .closed => return error.SessionClosing,
+        }
+        var diagnostic = emptyOwnedBytes();
+        const status_code = self.agent_runtime.api.sessionSetModel()(
+            self.raw,
+            sdk.bytesView(model),
+            &diagnostic,
+        );
+        releaseOwned(self.agent_runtime.api, &diagnostic);
+        const status = sdk.Status.fromCode(status_code) catch
+            return self.failModelUpdateContract();
+        return switch (status) {
+            .ok => {},
+            .busy => error.SessionNotIdle,
+            .invalid_argument => error.CoreCallFailed,
+            .invalid_state => self.failModelUpdateContract(),
+            else => error.CoreCallFailed,
+        };
+    }
+
+    fn failModelUpdateContract(self: *Session) Error {
+        self.dependency_contract_failure = true;
+        self.state = .poisoned;
+        self.broadcast();
+        return error.CoreCallFailed;
+    }
+
     /// Applies a complete replacement of this idle Session's MCP authority.
     pub fn updateMcpSelection(
         self: *Session,
