@@ -7,12 +7,14 @@ export type ButtonVariant = "primary" | "secondary" | "ghost" | "danger";
 export type ButtonSize = "sm" | "md" | "lg" | "icon";
 
 const variants: Record<ButtonVariant, string> = {
-  primary: "bg-(--ui-action-primary) text-white hover:bg-(--ui-action-primary-hover) active:translate-y-px",
+  primary:
+    "bg-(--ui-action-primary) text-(--ui-content-on-primary) hover:bg-(--ui-action-primary-hover) active:translate-y-px",
   secondary:
     "border border-(--ui-border) bg-(--ui-surface-panel) text-(--ui-content-primary) hover:bg-(--ui-surface-panel-2)",
   ghost:
     "bg-transparent text-(--ui-content-primary) hover:bg-(--ui-surface-panel-2)",
-  danger: "bg-(--metask-state-error) text-white hover:brightness-95 active:translate-y-px",
+  danger:
+    "border border-(--ui-action-danger-border) bg-(--ui-action-danger-surface) text-(--ui-content-error) hover:bg-(--ui-action-danger-hover-surface) active:translate-y-px",
 };
 
 const sizes: Record<ButtonSize, string> = {

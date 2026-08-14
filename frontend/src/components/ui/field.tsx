@@ -17,6 +17,6 @@ export const Field = {
     <BaseField.Description className={cn("text-xs text-(--ui-content-muted)", className)} {...props} />
   ),
   Error: ({ className, ...props }: ComponentProps<typeof BaseField.Error>) => (
-    <BaseField.Error className={cn("text-xs text-(--metask-state-error)", className)} {...props} />
+    <BaseField.Error className={cn("text-xs text-(--ui-content-error)", className)} {...props} />
   ),
 };

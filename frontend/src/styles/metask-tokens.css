@@ -47,6 +47,31 @@
     var(--ui-border)
   );
   --ui-content-warning: var(--metask-state-warning-ink);
+  --ui-content-error: color-mix(
+    in srgb,
+    var(--metask-light-text) 28%,
+    var(--metask-state-error) 72%
+  );
+  --ui-content-on-primary: var(--metask-light-panel);
+  --ui-action-hover-surface: var(--ui-surface-panel-2);
+  --ui-action-hover-content: var(--ui-content-primary);
+  --ui-action-danger-surface: color-mix(
+    in srgb,
+    var(--ui-surface-panel) 92%,
+    var(--metask-state-error) 8%
+  );
+  --ui-action-danger-hover-surface: color-mix(
+    in srgb,
+    var(--ui-surface-panel) 86%,
+    var(--metask-state-error) 14%
+  );
+  --ui-action-danger-border: color-mix(
+    in srgb,
+    var(--ui-border) 58%,
+    var(--metask-state-error) 42%
+  );
+  --ui-overlay-scrim: rgb(15 17 21 / 45%);
+  --ui-control-thumb: var(--metask-light-panel);
   --ui-focus-ring: var(--metask-primary);
   --ui-shadow-overlay: 0 18px 48px rgb(25 27 33 / 16%);
 }
@@ -61,6 +86,32 @@
   --ui-content-primary: var(--metask-dark-text);
   --ui-content-muted: var(--metask-dark-text-muted);
   --ui-border: var(--metask-dark-border);
+  --ui-content-warning: color-mix(
+    in srgb,
+    var(--metask-dark-text) 26%,
+    var(--metask-state-warning) 74%
+  );
+  --ui-content-error: color-mix(
+    in srgb,
+    var(--metask-dark-text) 28%,
+    var(--metask-state-error) 72%
+  );
+  --ui-action-danger-surface: color-mix(
+    in srgb,
+    var(--ui-surface-panel) 85%,
+    var(--metask-state-error) 15%
+  );
+  --ui-action-danger-hover-surface: color-mix(
+    in srgb,
+    var(--ui-surface-panel) 76%,
+    var(--metask-state-error) 24%
+  );
+  --ui-action-danger-border: color-mix(
+    in srgb,
+    var(--ui-border) 45%,
+    var(--metask-state-error) 55%
+  );
+  --ui-overlay-scrim: rgb(0 0 0 / 56%);
   --ui-shadow-overlay: 0 20px 56px rgb(0 0 0 / 42%);
 }
 
@@ -82,6 +133,15 @@
   --color-ui-border: var(--ui-border);
   --color-ui-primary-border: var(--ui-action-primary-border);
   --color-ui-warning: var(--ui-content-warning);
+  --color-ui-error: var(--ui-content-error);
+  --color-ui-on-primary: var(--ui-content-on-primary);
+  --color-ui-hover-surface: var(--ui-action-hover-surface);
+  --color-ui-hover-content: var(--ui-action-hover-content);
+  --color-ui-danger-surface: var(--ui-action-danger-surface);
+  --color-ui-danger-hover-surface: var(--ui-action-danger-hover-surface);
+  --color-ui-danger-border: var(--ui-action-danger-border);
+  --color-ui-overlay-scrim: var(--ui-overlay-scrim);
+  --color-ui-control-thumb: var(--ui-control-thumb);
   --font-sans: var(--metask-font-sans);
   --font-mono: var(--metask-font-mono);
   --font-display: var(--metask-font-sans);

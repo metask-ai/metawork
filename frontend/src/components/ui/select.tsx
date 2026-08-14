@@ -122,7 +122,7 @@ export const Select = {
   }: ComponentProps<typeof BaseSelect.Item>) => (
     <BaseSelect.Item
       className={cn(
-        "relative flex min-h-8 cursor-default items-center rounded-[5px] px-2 py-1.5 outline-none data-highlighted:bg-(--metask-primary-soft) data-highlighted:text-(--metask-primary-deep) data-disabled:pointer-events-none data-disabled:opacity-40",
+        "relative flex min-h-8 cursor-default items-center rounded-[5px] px-2 py-1.5 outline-none data-highlighted:bg-(--ui-action-hover-surface) data-highlighted:text-(--ui-action-hover-content) data-disabled:pointer-events-none data-disabled:opacity-40",
         className,
       )}
       {...props}

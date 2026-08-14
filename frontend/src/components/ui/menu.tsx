@@ -16,7 +16,7 @@ export const Menu = {
     <BaseMenu.Popup className={cn("min-w-40 rounded-[8px] border border-(--ui-border) bg-(--ui-surface-panel) p-1 text-sm text-(--ui-content-primary) shadow-(--ui-shadow-overlay) outline-none", className)} {...props} />
   ),
   Item: ({ className, ...props }: ComponentProps<typeof BaseMenu.Item>) => (
-    <BaseMenu.Item className={cn("flex min-h-8 cursor-default items-center rounded-[5px] px-2 py-1.5 outline-none data-highlighted:bg-(--metask-primary-soft) data-highlighted:text-(--metask-primary-deep) data-disabled:pointer-events-none data-disabled:opacity-40", focusRing, className)} {...props} />
+    <BaseMenu.Item className={cn("flex min-h-8 cursor-default items-center rounded-[5px] px-2 py-1.5 outline-none data-highlighted:bg-(--ui-action-hover-surface) data-highlighted:text-(--ui-action-hover-content) data-disabled:pointer-events-none data-disabled:opacity-40", focusRing, className)} {...props} />
   ),
   Group: BaseMenu.Group,
   GroupLabel: ({ className, ...props }: ComponentProps<typeof BaseMenu.GroupLabel>) => (
