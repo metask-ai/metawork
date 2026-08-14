@@ -9,8 +9,6 @@
   --metawork-window-chrome-buttons-x: 0px;
   --metawork-window-chrome-buttons-width: 0px;
   --content-measure: 760px;
-  --shadow-soft: 0 10px 30px rgba(37, 34, 45, 0.08);
-  --shadow-raised: 0 20px 54px rgba(37, 34, 45, 0.14);
   font-family: var(--font-sans);
   background: var(--ui-surface-canvas);
   color: var(--ui-content-primary);
@@ -2822,7 +2820,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   overflow: hidden auto;
   background: var(--ui-surface-canvas);
   --mcp-border: var(--ui-border);
-  --mcp-panel: color-mix(in srgb, var(--ui-surface-panel) 84%, transparent);
 }
 
 .mcp-page-inner {
