@@ -29,14 +29,15 @@ import type {
   UiRecord,
   UiResponsePayload,
 } from "../../bridge/contracts.ts";
+import { projectConversation } from "./conversation-projection.ts";
 import { formatInteger, formatMilliseconds } from "../../i18n/formatters.ts";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
 
 type TimelineDetailSection = "tools" | "usage";
 
-function tokenTotal(run: RunView): bigint | null {
+function tokenTotal(usage: RunView["usage"]): bigint | null {
   try {
-    return BigInt(run.usage.input) + BigInt(run.usage.output);
+    return BigInt(usage.input) + BigInt(usage.output);
   } catch {
     return null;
   }
@@ -127,40 +128,7 @@ function retryableOutcome(outcome: NonNullable<RunView["outcome"]>): boolean {
   );
 }
 
-type RunActivity =
-  | { kind: "tool"; order: string; value: ToolView }
-  | { kind: "resolved_ui"; order: string; value: UiRecord }
-  | { kind: "pending_ui"; order: string; value: PendingUi };
-
-function orderedActivity(run: RunView, task: TaskView): RunActivity[] {
-  const items: RunActivity[] = [
-    ...run.tools.map((value) => ({
-      kind: "tool" as const,
-      order: value.order,
-      value,
-    })),
-    ...task.uiHistory
-      .filter((record) => record.runId === run.id)
-      .map((value) => ({
-        kind: "resolved_ui" as const,
-        order: value.order,
-        value,
-      })),
-  ];
-  if (task.pendingUi?.runId === run.id)
-    items.push({
-      kind: "pending_ui",
-      order: task.pendingUi.order,
-      value: task.pendingUi,
-    });
-  return items.sort((left, right) => {
-    const leftOrder = BigInt(left.order);
-    const rightOrder = BigInt(right.order);
-    return leftOrder < rightOrder ? -1 : leftOrder > rightOrder ? 1 : 0;
-  });
-}
-
-export function TaskTimeline({
+export function AgentWorkSurface({
   task,
   revision,
   composerHasDraft,
@@ -195,6 +163,7 @@ export function TaskTimeline({
   const [showJumpLatest, setShowJumpLatest] = useState(false);
   const timelineScroll = useRef<HTMLDivElement>(null);
   const followingLatest = useRef(true);
+  const entries = projectConversation(task);
   const latestRunId = task?.runs.at(-1)?.id ?? null;
 
   useEffect(() => {
@@ -240,11 +209,16 @@ export function TaskTimeline({
         onScroll={updateFollowState}
       >
         <ConversationContent className="timeline">
-          {task?.runs.map((run) => {
-            const total = tokenTotal(run);
-            const activities = orderedActivity(run, task);
+          {entries.map((entry) => {
+            if (entry.kind === "compact") {
+              return (
+                <CompactTimelineEvent key={entry.id} compact={entry.compact} />
+              );
+            }
+            const run = entry;
+            const total = tokenTotal(run.usage);
             return (
-              <Fragment key={run.id}>
+              <Fragment key={run.runId}>
                 <article
                   className="timeline-run"
                   data-active={
@@ -265,7 +239,7 @@ export function TaskTimeline({
                           })}
                         </span>
                       )}
-                      {run.id === latestRunId &&
+                      {run.runId === latestRunId &&
                         total !== null &&
                         total > 0n && (
                           <button
@@ -281,14 +255,14 @@ export function TaskTimeline({
                   </header>
                   <div className="run-content">
                     <RunInputMessage input={run.input} />
-                    {activities.map((activity) => {
+                    {run.activities.map((activity) => {
                       if (activity.kind === "tool")
                         return (
                           <ToolCard
-                            key={`tool:${activity.value.id}`}
+                            key={`tool:${activity.id}`}
                             tool={activity.value}
                             onInspect={
-                              run.id === latestRunId
+                              run.runId === latestRunId
                                 ? (opener) => onInspect("tools", opener)
                                 : null
                             }
@@ -301,7 +275,7 @@ export function TaskTimeline({
                           </Fragment>
                         );
                       const pending = activity.value;
-                      return (
+                      return task ? (
                         <Fragment key={`ui:${pending.requestId}`}>
                           {renderPendingUi({
                             taskId: task.id,
@@ -310,18 +284,23 @@ export function TaskTimeline({
                             respond: onRespond,
                           })}
                         </Fragment>
-                      );
+                      ) : null;
                     })}
                     {run.assistant && (
                       <div className="run-delivery">
-                        <Message from="assistant" className="timeline-message is-agent">
+                        <Message
+                          from="assistant"
+                          className="timeline-message is-agent"
+                        >
                           <MessageContent>
-                            <MessageResponse streaming={isNonTerminalRun(run.phase)}>
-                              {run.assistant}
+                            <MessageResponse
+                              streaming={run.assistant.streaming}
+                            >
+                              {run.assistant.markdown}
                             </MessageResponse>
                           </MessageContent>
                         </Message>
-                        {run.assistantRedacted && (
+                        {run.assistant.redacted && (
                           <p className="projection-note">
                             {t("privacy.sensitive_hidden")}
                           </p>
@@ -334,32 +313,26 @@ export function TaskTimeline({
                       </p>
                     )}
                     {!run.assistant &&
-                      run.tools.length === 0 &&
+                      run.activities.length === 0 &&
                       isNonTerminalRun(run.phase) && (
                         <p className="preparing-copy">{t("run.preparing")}</p>
                       )}
                     {run.outcome && (
                       <RunOutcome
-                        run={run}
+                        phase={run.phase}
+                        cause={run.cause}
+                        input={run.input}
                         outcome={run.outcome}
                         composerHasDraft={composerHasDraft}
-                        latest={run.id === latestRunId}
+                        latest={run.runId === latestRunId}
                         retryAvailable={
-                          retryAvailable && run.id === latestRunId
+                          retryAvailable && run.runId === latestRunId
                         }
                         onPrepareRetry={onPrepareRetry}
                       />
                     )}
                   </div>
                 </article>
-                {task.compacts
-                  .filter((compact) => compact.afterRunId === run.id)
-                  .map((compact) => (
-                    <CompactTimelineEvent
-                      key={compact.operationId}
-                      compact={compact}
-                    />
-                  ))}
               </Fragment>
             );
           })}
@@ -382,14 +355,18 @@ export function TaskTimeline({
 }
 
 function RunOutcome({
-  run,
+  phase,
+  cause,
+  input,
   outcome,
   composerHasDraft,
   latest,
   retryAvailable,
   onPrepareRetry,
 }: {
-  run: RunView;
+  phase: RunView["phase"];
+  cause: RunView["cause"];
+  input: RunView["input"];
   outcome: NonNullable<RunView["outcome"]>;
   composerHasDraft: boolean;
   latest: boolean;
@@ -398,10 +375,10 @@ function RunOutcome({
 }) {
   const { t } = useI18n();
   return (
-    <section className="run-outcome" data-phase={run.phase}>
+    <section className="run-outcome" data-phase={phase}>
       <div className="run-outcome-copy" role={latest ? "status" : undefined}>
         <p>{t(terminalMessageId(outcome))}</p>
-        {run.cause && <span>{t(`cause.${run.cause}`)}</span>}
+        {cause && <span>{t(`cause.${cause}`)}</span>}
       </div>
       {retryAvailable && retryableOutcome(outcome) && (
         <button
@@ -409,7 +386,7 @@ function RunOutcome({
           title={
             composerHasDraft ? t("run.review_draft_help") : t("run.retry_help")
           }
-          onClick={() => onPrepareRetry(run.input)}
+          onClick={() => onPrepareRetry(input)}
         >
           {composerHasDraft ? t("run.review_draft") : t("run.prepare_retry")}
         </button>

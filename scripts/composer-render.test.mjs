@@ -18,8 +18,8 @@ const { ComposerFooter } = await vite.ssrLoadModule(
   "/src/features/composer/ComposerFooter.tsx",
 );
 const { AppShell } = await vite.ssrLoadModule("/src/app/AppShell.tsx");
-const { TaskTimeline } = await vite.ssrLoadModule(
-  "/src/features/timeline/TaskTimeline.tsx",
+const { AgentWorkSurface } = await vite.ssrLoadModule(
+  "/src/features/agent-surface/AgentWorkSurface.tsx",
 );
 const { NewTaskView } = await vite.ssrLoadModule(
   "/src/features/tasks/NewTaskView.tsx",
@@ -238,7 +238,7 @@ function renderCompletedTimeline(
           t: (id, values) => translate("en-US", id, values),
         },
       },
-      createElement(TaskTimeline, {
+      createElement(AgentWorkSurface, {
         task,
         revision: "1",
         composerHasDraft: false,
@@ -442,7 +442,7 @@ test("each typed Tool stays an independent bounded detail card", async () => {
     Promise.resolve(renderCompletedTimeline()),
     readFile(join(process.cwd(), "frontend/src/index.css"), "utf8"),
     readFile(
-      join(process.cwd(), "frontend/src/features/timeline/TaskTimeline.tsx"),
+      join(process.cwd(), "frontend/src/features/agent-surface/AgentWorkSurface.tsx"),
       "utf8",
     ),
     readFile(
@@ -453,7 +453,7 @@ test("each typed Tool stays an independent bounded detail card", async () => {
   assert.equal(markup.match(/class="ai-tool tool-card"/g)?.length, 1);
   assert.match(markup, /class="ai-tool tool-card" data-state="completed"/);
   assert.match(css, /\.code-block-preview\s*\{[\s\S]*?max-height:\s*240px/);
-  assert.match(timeline, /key=\{`tool:\$\{activity\.value\.id\}`\}/);
+  assert.match(timeline, /key=\{`tool:\$\{activity\.id\}`\}/);
   assert.doesNotMatch(timeline, /bg-cobalt/);
   assert.doesNotMatch(approval, /accent-cobalt/);
 });

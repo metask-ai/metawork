@@ -324,7 +324,7 @@ test("Inspector has one controlled panel and the central narrative is not chat",
     readFile(join(process.cwd(), "frontend/src/app/App.tsx"), "utf8"),
     readFile(join(process.cwd(), "frontend/src/app/AppShell.tsx"), "utf8"),
     readFile(
-      join(process.cwd(), "frontend/src/features/timeline/TaskTimeline.tsx"),
+      join(process.cwd(), "frontend/src/features/agent-surface/AgentWorkSurface.tsx"),
       "utf8",
     ),
     readFile(join(process.cwd(), "frontend/src/index.css"), "utf8"),
