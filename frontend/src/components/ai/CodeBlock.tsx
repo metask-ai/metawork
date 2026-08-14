@@ -1,28 +1,27 @@
-import { useId } from "react";
+import type { ComponentPropsWithoutRef } from "react";
+
+import { cn } from "../ui/utils.ts";
 
 /**
  * AI-facing code and tool-output presentation primitive.
  *
- * Product features own the labels and the source of the already projected
- * value; this component only owns bounded, accessible presentation.
+ * This is deliberately a leaf: field labels belong to the surrounding
+ * semantic field component, not to the code surface itself.
  */
-export function CodeBlock({ label, value }: { label: string; value: string }) {
-  const labelId = useId();
+export function CodeBlock({
+  className,
+  value,
+  ...props
+}: Omit<ComponentPropsWithoutRef<"pre">, "children"> & {
+  value: string;
+}) {
   return (
-    <div>
-      <p
-        id={labelId}
-        className="mb-1 font-mono text-[9px] tracking-[0.14em] text-ui-muted uppercase"
-      >
-        {label}
-      </p>
-      <pre
-        className="code-block-preview"
-        tabIndex={0}
-        aria-labelledby={labelId}
-      >
-        {value}
-      </pre>
-    </div>
+    <pre
+      className={cn("code-block-preview", className)}
+      tabIndex={0}
+      {...props}
+    >
+      {value}
+    </pre>
   );
 }

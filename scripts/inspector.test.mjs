@@ -257,6 +257,8 @@ test("approval cards never expose internal Run identity", () => {
     ),
   );
   assert.match(markup, />Response required</);
+  assert.match(markup, /class="ai-tool-field-label">Arguments<\/p>/);
+  assert.match(markup, /class="code-block-preview"/);
   assert.doesNotMatch(markup, /8472|work item/i);
 });
 

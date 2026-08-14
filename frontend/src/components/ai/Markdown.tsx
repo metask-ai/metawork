@@ -40,7 +40,12 @@ export function Markdown({
                 </code>
               );
             }
-            return <CodeBlock label={language ?? "code"} value={value} />;
+            return (
+              <CodeBlock
+                aria-label={language ? `${language} code` : "Code block"}
+                value={value}
+              />
+            );
           },
           a: ({ href, children: content, ...props }) => {
             const hrefValue = safeHref(href);

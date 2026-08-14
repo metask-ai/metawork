@@ -1,4 +1,4 @@
-import type { HTMLAttributes, ReactNode } from "react";
+import { useId, type HTMLAttributes, type ReactNode } from "react";
 import {
   CheckCircle,
   ChevronDown,
@@ -94,7 +94,11 @@ export function ToolHeader({
   children?: ReactNode;
 }) {
   const resolvedStatus = status ?? (state ? statusMap[state].label : "");
-  const statusIcon = state ? statusMap[state].icon : <Wrench aria-hidden="true" />;
+  const statusIcon = state ? (
+    statusMap[state].icon
+  ) : (
+    <Wrench aria-hidden="true" />
+  );
 
   return (
     <summary className={cn("ai-tool-header", className)} {...props}>
@@ -137,9 +141,17 @@ export function ToolField({
   label: string;
   children: ReactNode;
 }) {
+  const labelId = useId();
   return (
-    <div className={cn("ai-tool-field", className)} {...props}>
-      <p className="ai-tool-field-label">{label}</p>
+    <div
+      className={cn("ai-tool-field", className)}
+      role="group"
+      aria-labelledby={labelId}
+      {...props}
+    >
+      <p id={labelId} className="ai-tool-field-label">
+        {label}
+      </p>
       {children}
     </div>
   );

@@ -32,6 +32,13 @@ CommonMark and GFM through `react-markdown` and `remark-gfm`, disables raw HTML,
 and passes links through a safe protocol boundary. It does not add an AI SDK
 transport or provider runtime.
 
+`CodeBlock.tsx` is a leaf presentation primitive: it renders bounded code or
+tool output and never owns a visible field label. `ToolField` is the semantic
+label owner for tool details. Feature-level compositions such as
+`AgentWorkSurface` decide whether a `Tool` is shown as a compact activity row
+or an expanded detail surface; the AI primitives do not decide product
+visibility policy.
+
 `index.ts` is the only public import surface for feature code. Foundation UI
 remains the lower-level dependency and product semantics remain in
 `features/`.
