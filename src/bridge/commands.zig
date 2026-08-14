@@ -48,6 +48,7 @@ pub const account_select_model = "metawork.account.selectModel";
 pub const account_logout = "metawork.account.logout";
 pub const create_task = "metawork.tasks.create";
 pub const run = "metawork.tasks.run";
+pub const select_task_model = "metawork.tasks.selectModel";
 pub const restore_task = "metawork.tasks.restore";
 pub const compact = "metawork.tasks.compact";
 pub const cancel_compact = "metawork.tasks.cancelCompact";
@@ -110,6 +111,7 @@ pub const product = [_][]const u8{
     account_logout,
     create_task,
     run,
+    select_task_model,
     restore_task,
     compact,
     cancel_compact,

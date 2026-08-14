@@ -39,6 +39,7 @@ import {
   type TaskCompactResult,
   type TaskRestoreResult,
   type TaskRunResult,
+  type TaskModelSelectionResult,
   type ToolView,
   type FileReferenceRangeView,
   type FileReferenceView,
@@ -243,6 +244,14 @@ const taskRunReasons = [
   "invalid_skill_arguments",
   "capacity_reached",
   "shutting_down",
+] as const;
+const taskModelSelectionReasons = [
+  "model_changed",
+  "stale_catalog",
+  "task_unavailable",
+  "task_busy",
+  "shutting_down",
+  "capacity_reached",
 ] as const;
 const taskCompactReasons = [
   "binding_changed",
@@ -3006,6 +3015,32 @@ export function decodeTaskRunResult(
     taskId,
     runId: null,
     reason: enumValue(item.reason, "$.reason", taskRunReasons),
+  };
+}
+
+export function decodeTaskModelSelectionResult(
+  value: unknown,
+  expectedTaskId: string,
+): TaskModelSelectionResult {
+  const item = object(value, "$", ["accepted", "taskId", "model", "reason"]);
+  const accepted = booleanValue(item.accepted, "$.accepted");
+  const taskId = positiveWireId(item.taskId, "$.taskId");
+  if (taskId !== expectedTaskId) fail("$.taskId", "response identity mismatch");
+  if (accepted) {
+    if (item.reason !== null) fail("$.reason", "expected null");
+    return {
+      accepted: true,
+      taskId,
+      model: stringValue(item.model, "$.model"),
+      reason: null,
+    };
+  }
+  if (item.model !== null) fail("$.model", "expected null");
+  return {
+    accepted: false,
+    taskId,
+    model: null,
+    reason: enumValue(item.reason, "$.reason", taskModelSelectionReasons),
   };
 }
 

@@ -30,7 +30,10 @@ import { Menu } from "../components/ui/menu.tsx";
 import { Input } from "../components/ui/input.tsx";
 import { AccountIdentity } from "../features/account/AccountIdentity.tsx";
 import { AccountGate } from "../features/account/AccountGate.tsx";
-import { requiresAccountGate } from "../features/account/gating.ts";
+import {
+  requiresAccountGate,
+  requiresAccountSetup,
+} from "../features/account/gating.ts";
 import { accountErrorMessageId } from "../i18n/account-error.ts";
 import {
   SettingsPage,
@@ -103,6 +106,7 @@ import type {
   McpConnectionTestResult,
   SkillMutationResult,
   TaskRunReason,
+  TaskModelSelectionReason,
   WorkbenchSnapshot,
   UiResponsePayload,
   WorkspaceMutationReason,
@@ -136,6 +140,7 @@ type MutationReason =
   | TaskCompactReason
   | TaskRestoreReason
   | TaskRunReason
+  | TaskModelSelectionReason
   | WorkspaceMutationReason;
 
 function mutationReasonMessageId(reason: MutationReason): MessageId {
@@ -169,6 +174,7 @@ export default function App() {
   const [route, setRoute] = useState<ShellRoute>("workbench");
   const [settingsFocus, setSettingsFocus] =
     useState<SettingsFocusTarget>("title");
+  const [accountSetupRedirected, setAccountSetupRedirected] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [skillsQuery, setSkillsQuery] = useState("");
@@ -187,6 +193,9 @@ export default function App() {
   const [workspaceBusy, setWorkspaceBusy] = useState(false);
   const [skillCatalogBusy, setSkillCatalogBusy] = useState(false);
   const [taskPending, setTaskPending] = useState<Record<string, string>>({});
+  const [pendingTaskModels, setPendingTaskModels] = useState<
+    Record<string, string>
+  >({});
   const [cancelPending, setCancelPending] = useState<Record<string, true>>({});
   const [connectionBusy, setConnectionBusy] = useState(false);
   const [accountCancelBusy, setAccountCancelBusy] = useState(false);
@@ -225,6 +234,20 @@ export default function App() {
 
   const snapshot = workbench.snapshot;
   const activeTask = useMemo(() => selectActiveTask(workbench), [workbench]);
+  useEffect(() => {
+    setPendingTaskModels((current) => {
+      let changed = false;
+      const next = { ...current };
+      for (const [taskId, model] of Object.entries(current)) {
+        const task = snapshot.tasks.find((candidate) => candidate.id === taskId);
+        if (!task || task.binding.model === model) {
+          delete next[taskId];
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [snapshot.tasks]);
   const activeTaskIdRef = useRef<string | null>(null);
   activeTaskIdRef.current = activeTask?.id ?? null;
   const inspector = useInspectorSession(activeTask);
@@ -256,6 +279,42 @@ export default function App() {
     : taskDrafts.updateDraft;
   const bridgeUnavailable = viewSyncFailed || !bridgeReady;
   const accountGateRequired = requiresAccountGate(snapshot.account);
+  const accountSetupRequired = requiresAccountSetup(snapshot.account);
+
+  useEffect(() => {
+    if (
+      accountSetupRedirected &&
+      snapshot.account.state !== "authenticated"
+    ) {
+      setAccountSetupRedirected(false);
+      return;
+    }
+    if (accountSetupRequired && route === "workbench") {
+      setAccountSetupRedirected(true);
+      setSettingsFocus("account");
+      setRoute("settings");
+      return;
+    }
+    if (
+      !accountSetupRedirected ||
+      accountSetupRequired ||
+      route !== "settings" ||
+      snapshot.account.state !== "authenticated" ||
+      !snapshot.account.canCreateTask
+    )
+      return;
+    setAccountSetupRedirected(false);
+    setSettingsFocus("title");
+    setRoute("workbench");
+    window.requestAnimationFrame(() => composer.current?.focus());
+  }, [
+    accountSetupRedirected,
+    accountSetupRequired,
+    route,
+    snapshot.account.canCreateTask,
+    snapshot.account.state,
+  ]);
+
   const workbenchMutationDisabled =
     bridgeUnavailable ||
     taskHistoryMutationBlocked(
@@ -319,6 +378,27 @@ export default function App() {
     selectedModel?.selectionId ||
     t("account.choose_model");
   const selectedModelId = selectedModel?.selectionId ?? "";
+  const taskModelId = activeTask?.binding.model ?? "";
+  const pendingTaskModelId = activeTask
+    ? pendingTaskModels[activeTask.id] ?? null
+    : null;
+  const pendingTaskModel = pendingTaskModelId
+    ? snapshot.account.models.find(
+        (model) => model.selectionId === pendingTaskModelId,
+      )
+    : null;
+  const taskModelLabel = pendingTaskModel
+    ? t("task.model_pending", {
+        model:
+          pendingTaskModel.displayName || pendingTaskModel.selectionId,
+      })
+    : activeTask?.binding.model ?? selectedModelLabel;
+  const displayedTaskModelId = pendingTaskModelId ?? taskModelId;
+  const taskModelInCatalog =
+    activeTask === null ||
+    snapshot.account.models.some(
+      (model) => model.selectionId === activeTask.binding.model,
+    );
 
   const refreshSnapshot = useCallback(() => {
     const current = connection.current;
@@ -726,6 +806,52 @@ export default function App() {
     } finally {
       accountBusyRef.current = false;
       setAccountBusy(false);
+    }
+  }
+
+  async function selectModelForTask(selectionId: string) {
+    const task = activeTask;
+    if (!task || bridgeUnavailable) return;
+    const wasBusy = task.activeOperation !== null;
+    const scope = `task:${task.id}`;
+    if (!beginTaskPendingOperation(scope, "model")) return;
+    try {
+      const result = await client.selectTaskModel(
+        task.id,
+        task.binding.model,
+        snapshot.account.catalogGeneration,
+        selectionId,
+      );
+      if (!result.accepted) {
+        await refreshSnapshot().catch(() => undefined);
+        setStatus(
+          attentionStatus(mutationReasonMessageId(result.reason), {
+            scope: "task",
+            taskId: task.id,
+          }),
+        );
+        return;
+      }
+      setPendingTaskModels((current) => {
+        const next = { ...current };
+        if (wasBusy) next[task.id] = result.model;
+        else delete next[task.id];
+        return next;
+      });
+      await refreshAfterCommit("task.model.updated", "operation.account", {
+        scope: "task",
+        taskId: task.id,
+      });
+    } catch (error) {
+      await refreshSnapshot().catch(() => undefined);
+      setStatus(
+        attentionStatus("mutation.reason.task_unavailable", {
+          scope: "task",
+          taskId: task.id,
+        }, { diagnostic: errorText(error) }),
+      );
+    } finally {
+      endTaskPendingOperation(scope);
     }
   }
 
@@ -1980,19 +2106,18 @@ export default function App() {
           : ""
       }
       workspaceEditable={newTaskDraftActive}
-      modelLabel={
-        newTaskDraftActive
-          ? selectedModelLabel
-          : activeTask?.binding.model || null
-      }
+      modelLabel={newTaskDraftActive ? selectedModelLabel : taskModelLabel || null}
       modelOptions={snapshot.account.models}
-      selectedModelId={selectedModelId}
-      modelEditable={newTaskDraftActive}
+      selectedModelId={
+        newTaskDraftActive ? selectedModelId : displayedTaskModelId
+      }
+      modelEditable={newTaskDraftActive || activeTask !== null}
       modelSelectionDisabled={
         bridgeUnavailable ||
         accountBusy ||
         snapshot.account.catalogState === "loading" ||
-        snapshot.account.models.length === 0
+        snapshot.account.models.length === 0 ||
+        !taskModelInCatalog
       }
       modelSelectionPending={
         accountBusy || snapshot.account.catalogState === "loading"
@@ -2011,13 +2136,15 @@ export default function App() {
       onConfirmAccess={() => void chooseWorkspaceForDraft()}
       onSelectWorkspace={(workspaceId) => setDraftWorkspaceById(workspaceId)}
       onSelectModel={(id) =>
-        void runAccountCommand(() =>
-          client.selectModel(
-            id,
-            snapshot.account.catalogGeneration,
-            snapshot.account.executionGeneration,
-          ),
-        )
+        newTaskDraftActive
+          ? void runAccountCommand(() =>
+              client.selectModel(
+                id,
+                snapshot.account.catalogGeneration,
+                snapshot.account.executionGeneration,
+              ),
+            )
+          : void selectModelForTask(id)
       }
     />
   );

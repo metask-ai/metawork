@@ -98,7 +98,7 @@ fresh Session 只使用 `SessionHostConfigV1` 与 `SessionCreateConfigV1`：
 - async UI continuation；
 - Worker crash recovery。
 
-当前 restore 只用于正常 Application 重启后重建 finalized Conversation 的 Session attachment。`SessionRestoreConfigV1` 不携带 model，Host 因而必须在调用前证明持久化 model 与当前 ExecutionConfig 精确一致；Host 不向 restore 提供 logical Session ID。AgentCore 将当前 authority 与 checkpoint state 取交集，Host 只能提交重新取得且不宽于历史事实的 Skill/MCP authority。该消费不声明 Worker crash、in-flight Run、async pending 或 suspend/resume recovery。
+当前 restore 只用于正常 Application 重启后重建 finalized Conversation 的 Session attachment。`SessionRestoreConfigV1` 不携带 model，因此 Host 首先以 Checkpoint 自己的 `SessionBinding.model` 满足 AgentCore restore expectation；restore 产出 candidate 后，Host 在 commit 前再以当前 Task model binding 调用 idle-only `session_set_model`。Checkpoint 模型是历史事实，不与当前 Account 默认模型或 Task 当前模型做全局相等比较；candidate 的模型设置失败必须销毁 candidate 并把本次 restore 作为可重试失败收口。Host 不向 restore 提供 logical Session ID。AgentCore 将当前 authority 与 checkpoint state 取交集，Host 只能提交重新取得且不宽于历史事实的 Skill/MCP authority。该消费不声明 Worker crash、in-flight Run、async pending 或 suspend/resume recovery。
 
 ## 6. Callback、事件与 Permission
 

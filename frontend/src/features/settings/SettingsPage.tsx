@@ -26,7 +26,7 @@ export type {
   WorkspaceRemovalResult,
 } from "./WorkspaceSettings.tsx";
 
-export type SettingsFocusTarget = "title" | "signout";
+export type SettingsFocusTarget = "title" | "account" | "signout";
 type SettingsSection = "general" | "workspaces" | "account";
 type RequestedSelection = {
   selectionId: string;
@@ -106,7 +106,7 @@ export function SettingsPage({
   const title = useRef<HTMLHeadingElement>(null);
   const workspaceSection = useRef<HTMLElement>(null);
   const accountSection = useRef<HTMLElement>(null);
-  const accountHeading = useRef<HTMLDivElement>(null);
+  const accountHeading = useRef<HTMLHeadingElement>(null);
   const signOut = useRef<HTMLButtonElement>(null);
   const signOutCancel = useRef<HTMLButtonElement>(null);
   const modelCatalogApi = useMemo(
@@ -288,9 +288,21 @@ export function SettingsPage({
   })();
 
   useEffect(() => {
-    window.requestAnimationFrame(() => {
+    const frame = window.requestAnimationFrame(() => {
+      if (focusTarget === "account") {
+        setActiveSection("account");
+        if (content.current && accountSection.current) {
+          content.current.scrollTo({
+            top: contentTop(accountSection.current) - 18,
+            behavior: "auto",
+          });
+        }
+        accountHeading.current?.focus();
+        return;
+      }
       (focusTarget === "signout" ? signOut.current : title.current)?.focus();
     });
+    return () => window.cancelAnimationFrame(frame);
   }, [focusTarget]);
 
   useEffect(() => {
@@ -464,9 +476,11 @@ export function SettingsPage({
             id="settings-account"
             className="settings-section"
           >
-            <div ref={accountHeading} className="settings-section-heading">
+            <div className="settings-section-heading">
               <p>{t("settings.section_label")}</p>
-              <h2>{t("settings.account_models")}</h2>
+              <h2 ref={accountHeading} tabIndex={-1}>
+                {t("settings.account_models")}
+              </h2>
             </div>
 
             <div

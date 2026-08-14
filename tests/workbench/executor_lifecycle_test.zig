@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const std = fixture.std;
 const lifecycle = fixture.lifecycle;
 const workbench_api = fixture.workbench_api;
+const account_contract = fixture.account_contract;
 const wire = fixture.wire;
 const fake_core = &fixture.fake_core;
 const openSession = fixture.openSession;
@@ -58,6 +59,44 @@ const TaskPersistenceProbe = struct {
         return result;
     }
 };
+
+fn expectFakeSessionModel(index: usize, expected: []const u8) !void {
+    const session = &fake_core.sessions[index];
+    session.lock();
+    defer session.unlock();
+    try std.testing.expectEqualStrings(expected, session.model[0..session.model_len]);
+}
+
+fn installTwoModelCatalog(workbench: *workbench_api.Workbench) void {
+    const api_keys = [_]account_contract.ApiKeyView{.{
+        .id = "key-1",
+        .name = "Fixture API",
+        .suffix = "ture",
+        .provider_kind = .anthropic,
+    }};
+    const models = [_]account_contract.ModelView{
+        .{ .id = "fixture-model", .display_name = "Fixture model" },
+        .{ .id = "fixture-model-2", .display_name = "Fixture model 2" },
+    };
+    workbench.commitAccountFactNoFail(.{
+        .kind = .catalog_changed,
+        .view = .{
+            .state = .authenticated,
+            .catalog_state = .ready,
+            .account_id = "account-1",
+            .display_name = "Fixture User",
+            .api_keys = &api_keys,
+            .models = &models,
+            .selected_api_key_id = "key-1",
+            .selected_model = "fixture-model",
+            .model_catalog_api_key_id = "key-1",
+            .can_create_task = true,
+            .catalog_generation = 2,
+            .execution_generation = 1,
+        },
+    });
+    workbench.finishAccountCommitNoFail();
+}
 
 fn waitCatalogReady(
     workbench: *workbench_api.Workbench,
@@ -1277,6 +1316,104 @@ test "Manual Task persistence failure rolls back Workspace recent order" {
     var snapshot_storage: [128 * 1024]u8 = undefined;
     const snapshot = try workbench.writeSnapshot(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"tasks\":[]") != null);
+}
+
+test "Idle Task model persistence failure restores Session and detaches on unknown outcome" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 2,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    const persistence_storage = try std.testing.allocator.alloc(
+        u8,
+        workbench_api.task_store_max_bytes,
+    );
+    defer std.testing.allocator.free(persistence_storage);
+    var persistence = TaskPersistenceProbe{ .storage = persistence_storage };
+    {
+        var configuration = workbenchConfiguration();
+        configuration.task_persistence = persistence.capability();
+        var workbench = try workbench_api.Workbench.init(
+            std.testing.allocator,
+            std.testing.io,
+            runtime,
+            .{
+                .worker_count = 1,
+                .queue_capacity = 1,
+                .max_workspaces = 1,
+                .max_tasks = 1,
+                .max_runs_per_task = 1,
+                .max_tools_per_run = 1,
+            },
+            configuration,
+        );
+        defer workbench.deinit();
+        try installWorkbenchExecution(&workbench);
+        installTwoModelCatalog(&workbench);
+        const task_id = try workbench.createTask(workbenchTaskInput());
+        const before = try workbench.taskExecutionIdentity(task_id);
+        const projection_before = workbench.projectionBytesForTest();
+        try expectFakeSessionModel(0, "fixture-model");
+        persistence.result = .failed;
+        try std.testing.expectError(
+            error.TaskPersistenceFailed,
+            workbench.selectTaskModel(task_id, before.model, 2, "fixture-model-2"),
+        );
+        const after = try workbench.taskExecutionIdentity(task_id);
+        try std.testing.expectEqualStrings("fixture-model", after.model);
+        try expectFakeSessionModel(0, "fixture-model");
+        try std.testing.expectEqual(projection_before, workbench.projectionBytesForTest());
+    }
+
+    persistence.result = .committed;
+    {
+        var configuration = workbenchConfiguration();
+        configuration.task_persistence = persistence.capability();
+        var workbench = try workbench_api.Workbench.init(
+            std.testing.allocator,
+            std.testing.io,
+            runtime,
+            .{
+                .worker_count = 1,
+                .queue_capacity = 1,
+                .max_workspaces = 1,
+                .max_tasks = 1,
+                .max_runs_per_task = 1,
+                .max_tools_per_run = 1,
+            },
+            configuration,
+        );
+        defer workbench.deinit();
+        try installWorkbenchExecution(&workbench);
+        installTwoModelCatalog(&workbench);
+        const task_id = try workbench.createTask(workbenchTaskInput());
+        const before = try workbench.taskExecutionIdentity(task_id);
+        const projection_before = workbench.projectionBytesForTest();
+        persistence.result = .outcome_unknown;
+        try std.testing.expectError(
+            error.TaskPersistenceOutcomeUnknown,
+            workbench.selectTaskModel(task_id, before.model, 2, "fixture-model-2"),
+        );
+        const after = try workbench.taskExecutionIdentity(task_id);
+        try std.testing.expectEqualStrings("fixture-model", after.model);
+        try std.testing.expectEqual(projection_before, workbench.projectionBytesForTest());
+        var snapshot_storage: [128 * 1024]u8 = undefined;
+        const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+        const task_start = std.mem.indexOf(u8, snapshot, "\"id\":\"1\"") orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expect(
+            std.mem.indexOf(
+                u8,
+                snapshot[task_start..],
+                "\"unavailableReason\":\"runtime_detached\"",
+            ) != null,
+        );
+    }
 }
 
 test "automatic Workspace admission is Task-owned and Text-only" {

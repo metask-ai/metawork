@@ -36,7 +36,9 @@ pub const Coordinator = struct {
         self.assertMainThread();
         const current = self.runtime.view();
         const replacement: ExecutionReplacement = switch (command) {
-            .select_model => .default,
+            // Account model selection changes only the default for future
+            // Tasks. Credential/provider execution generations stay intact.
+            .select_model => .none,
             .begin_login => if (current.state == .authenticated) .identity else .none,
             .logout => .identity,
             else => .none,

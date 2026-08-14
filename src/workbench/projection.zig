@@ -53,6 +53,8 @@ pub const Error = lifecycle.Error || scheduled_tasks_impl.Error || scheduled_tas
     TaskRunning,
     TaskSessionInUse,
     ExecutionGenerationMismatch,
+    TaskModelMismatch,
+    InvalidTaskModel,
     BindingEpochMismatch,
     InvalidAutomationExecution,
     InvalidWorkspace,
@@ -1553,6 +1555,7 @@ const RunRecord = struct {
     execution_generation: u64,
     execution_provider: Provider,
     execution_model: []const u8,
+    execution_model_owned: bool = false,
     input: RunInputRecord,
     assistant: TrackedText = .{},
     assistant_redacted: bool = false,
@@ -3982,7 +3985,7 @@ pub const Workbench = struct {
         const title = try self.copyBounded("", self.limits.max_task_title_bytes);
         errdefer self.freeTracked(title);
         const execution_model = try self.copyBounded(
-            task_execution_input.target.model,
+            self.account.selected_model.view(),
             account_contract.Limits.model_id_bytes,
         );
         errdefer self.freeTracked(execution_model);
@@ -4020,7 +4023,7 @@ pub const Workbench = struct {
             .permission_mode = .default,
             .shell_policy = .unrestricted,
             .credential = task_execution_input.api_key,
-            .model = task_execution_input.target.model,
+            .model = self.account.selected_model.view(),
             .base_url = task_execution_input.target.base_url,
             .workspace = .{
                 .canonical_root = canonical,
@@ -4179,6 +4182,11 @@ pub const Workbench = struct {
         errdefer if (workspace_copy_live) workspace_copy.deinit();
         var execution = try self.execution.cloneOwned(self.allocator);
         errdefer execution.deinit();
+        const target_model = try self.allocator.dupe(
+            u8,
+            task.durable.execution_model,
+        );
+        errdefer self.allocator.free(target_model);
         var mcp = try self.createRecoveryMcpAuthority();
         errdefer mcp.deinit();
         const job = try self.allocator.create(task_recovery_job.Job);
@@ -4201,6 +4209,7 @@ pub const Workbench = struct {
                 .checkpoint = checkpoint_copy,
                 .workspace = workspace_copy,
                 .execution = execution.take(),
+                .model = target_model,
                 .provider = agentProvider(task.durable.execution_provider),
                 .builtin_tool_profile = self.builtin_tool_profile,
                 .mcp_selection = mcp.selection,
@@ -4249,6 +4258,75 @@ pub const Workbench = struct {
         return (self.findTask(task_id) orelse return error.UnknownTask).durable.binding_epoch;
     }
 
+    /// Selects the model for one Task. Credentials and their execution
+    /// generation remain pinned; only the Task model binding changes. A
+    /// request received during a Run is kept in runtime-only pending state
+    /// and applied before the next Run.
+    pub fn selectTaskModel(
+        self: *Workbench,
+        task_id: u64,
+        expected_model: []const u8,
+        expected_catalog_generation: u64,
+        model: []const u8,
+    ) Error!void {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        self.syncLifecycle();
+        try self.requireTaskPersistenceMutation();
+        const task = self.findTask(task_id) orelse return error.UnknownTask;
+        if (expected_model.len == 0 or model.len == 0 or
+            expected_model.len > account_contract.Limits.model_id_bytes or
+            model.len > account_contract.Limits.model_id_bytes or
+            !std.unicode.utf8ValidateSlice(expected_model) or
+            !std.unicode.utf8ValidateSlice(model))
+            return error.InvalidTaskModel;
+        if (!std.mem.eql(u8, expected_model, task.durable.execution_model))
+            return error.TaskModelMismatch;
+        if (self.account.catalog_state != .ready or
+            expected_catalog_generation == 0 or
+            expected_catalog_generation != self.account.catalog_generation)
+            return error.StaleCatalog;
+        var found = false;
+        for (self.account.model_views[0..self.account.model_count]) |candidate| {
+            if (std.mem.eql(u8, candidate.id, model)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return error.StaleCatalog;
+        if (hasActiveOperation(task)) {
+            const replacement = try self.allocator.dupe(u8, model);
+            if (task.runtime.pending_model) |old| self.allocator.free(old);
+            task.runtime.pending_model = replacement;
+            self.bumpRevision();
+            return;
+        }
+        if (self.checkpointMutationPending(task)) return error.TaskBusy;
+        const session = task.runtime.session() orelse return error.TaskClosing;
+        try session.setModel(model);
+        const replacement = self.copyBounded(
+            model,
+            account_contract.Limits.model_id_bytes,
+        ) catch |err| {
+            _ = self.restoreTaskModelOrDetach(task, session, expected_model);
+            return err;
+        };
+        const previous = task.durable.execution_model;
+        task.durable.execution_model = replacement;
+        self.commitTaskStateIfConfigured() catch |err| {
+            // Keep the durable binding and live Session coherent if the
+            // persistence commit fails after AgentCore accepted the change.
+            if (err == error.TaskPersistenceOutcomeUnknown)
+                self.releaseTaskAttachmentNoFail(task, .cold_start)
+            else
+                _ = self.restoreTaskModelOrDetach(task, session, expected_model);
+            self.freeTracked(task.durable.execution_model);
+            task.durable.execution_model = previous;
+            return err;
+        };
+        self.freeTracked(previous);
+        self.bumpRevision();
+    }
+
     pub fn runTaskAtBinding(
         self: *Workbench,
         task_id: u64,
@@ -4281,6 +4359,8 @@ pub const Workbench = struct {
         if (hasActiveOperation(view)) return error.TaskBusy;
         if (self.checkpointMutationPending(view)) return error.TaskBusy;
         const session = view.runtime.session() orelse return error.TaskClosing;
+        try self.applyPendingTaskModel(view, session);
+        _ = try taskExecutionInput(view);
         const agent_input: lifecycle.RunInput = switch (input) {
             .text => |text| .{ .text = text },
             .skill => |skill_input| skill_admission: {
@@ -4402,6 +4482,54 @@ pub const Workbench = struct {
         record_owned = false;
         self.bumpRevision();
         return run_id;
+    }
+
+    fn applyPendingTaskModel(
+        self: *Workbench,
+        task: *TaskView,
+        session: *lifecycle.Session,
+    ) Error!void {
+        const pending = task.runtime.pending_model orelse return;
+        const previous = task.durable.execution_model;
+        try session.setModel(pending);
+        const replacement = self.copyBounded(
+            pending,
+            account_contract.Limits.model_id_bytes,
+        ) catch |err| {
+            _ = self.restoreTaskModelOrDetach(task, session, previous);
+            return err;
+        };
+        task.durable.execution_model = replacement;
+        self.commitTaskStateIfConfigured() catch |err| {
+            const coherent = if (err == error.TaskPersistenceOutcomeUnknown) blk: {
+                self.releaseTaskAttachmentNoFail(task, .cold_start);
+                break :blk false;
+            } else self.restoreTaskModelOrDetach(task, session, previous);
+            self.freeTracked(task.durable.execution_model);
+            task.durable.execution_model = previous;
+            if (coherent) task.runtime.pending_model = pending;
+            return err;
+        };
+        task.runtime.pending_model = null;
+        self.freeTracked(previous);
+        self.allocator.free(pending);
+    }
+
+    /// If AgentCore cannot return to the durable model after a failed model
+    /// mutation, detach the Session so no caller can continue with an
+    /// ambiguous model binding. The Task remains recoverable only through its
+    /// normal persisted checkpoint path.
+    fn restoreTaskModelOrDetach(
+        self: *Workbench,
+        task: *TaskView,
+        session: *lifecycle.Session,
+        model: []const u8,
+    ) bool {
+        session.setModel(model) catch {
+            self.releaseTaskAttachmentNoFail(task, .cold_start);
+            return false;
+        };
+        return true;
     }
 
     pub fn compactTaskAtBinding(
@@ -4618,6 +4746,12 @@ pub const Workbench = struct {
             .provider = run.execution_provider,
             .model = run.execution_model,
         };
+    }
+
+    /// Lifecycle tests use this read-only counter to verify ownership rollback
+    /// without exposing projection accounting through the Renderer contract.
+    pub fn projectionBytesForTest(self: *const Workbench) usize {
+        return self.projection_bytes;
     }
 
     pub fn cancel(self: *Workbench, task_id: u64, run_id: u64) Error!void {
@@ -8613,7 +8747,6 @@ pub const Workbench = struct {
             record.validateBinding(
                 task.durable.id,
                 task.durable.binding_epoch,
-                task.durable.execution_model,
             ) catch break :binding false;
             break :binding true;
         } else false;
@@ -8656,7 +8789,13 @@ pub const Workbench = struct {
             self.account.execution_generation == self.execution.generation and
             task.durable.execution_generation == self.execution.generation and
             task.durable.execution_provider == self.execution.provider.? and
-            std.mem.eql(u8, task.durable.execution_model, self.execution.model());
+            self.accountHasModel(task.durable.execution_model);
+    }
+
+    fn accountHasModel(self: *const Workbench, model: []const u8) bool {
+        for (self.account.model_views[0..self.account.model_count]) |candidate|
+            if (std.mem.eql(u8, candidate.id, model)) return true;
+        return false;
     }
 
     fn recoveryAuthorityStable(
@@ -8684,8 +8823,7 @@ pub const Workbench = struct {
         const execution = task.runtime.executionConst() orelse return error.ExecutionUnavailable;
         const input = execution.input();
         if (input.execution_generation != task.durable.execution_generation or
-            accountProvider(input.target.provider_kind) != task.durable.execution_provider or
-            !std.mem.eql(u8, input.target.model, task.durable.execution_model))
+            accountProvider(input.target.provider_kind) != task.durable.execution_provider)
             return error.ExecutionGenerationMismatch;
         return input;
     }
@@ -8725,7 +8863,7 @@ pub const Workbench = struct {
             .title = title,
             .execution_generation = self.execution.generation,
             .execution_provider = scheduledProvider(self.execution.provider.?),
-            .execution_model = self.execution.model(),
+            .execution_model = self.account.selected_model.view(),
             .input = scheduled_input,
             .recurrence = input.recurrence,
         };
@@ -8972,7 +9110,7 @@ pub const Workbench = struct {
                     item.execution_generation != self.execution.generation or
                     item.execution_provider != scheduledProvider(self.execution.provider orelse
                         break :binding .execution_changed) or
-                    !std.mem.eql(u8, item.execution_model, self.execution.model()))
+                    !std.mem.eql(u8, item.execution_model, self.account.selected_model.view()))
                     break :binding .execution_changed;
                 if (self.automatic_workspaces == null)
                     break :binding .workspace_unavailable;
@@ -9140,12 +9278,20 @@ pub const Workbench = struct {
             (checkpoint != null and checkpoint_health == .none))
             return error.TaskStoreCorrupt;
         if (checkpoint) |value| {
-            value.validateBinding(wire.id, wire.binding.epoch, wire.binding.model) catch
+            value.validateBinding(wire.id, wire.binding.epoch) catch
                 return error.TaskStoreCorrupt;
             const terminal_found = switch (value.anchor.terminal) {
                 .run => |terminal_id| blk: {
-                    for (wire.runs) |run| if (run.id == terminal_id)
-                        break :blk persistedTerminalRunPhase(run.phase);
+                    for (wire.runs) |run| {
+                        if (run.id != terminal_id) continue;
+                        // A checkpoint records the model used to create its
+                        // historical Session state. Keep that fact coherent
+                        // with the terminal Run, while deliberately not
+                        // comparing either value with the Task's current
+                        // model binding.
+                        break :blk persistedTerminalRunPhase(run.phase) and
+                            std.mem.eql(u8, run.execution_model, value.session.model);
+                    }
                     break :blk false;
                 },
                 .compact => |terminal_id| blk: {
@@ -9180,7 +9326,7 @@ pub const Workbench = struct {
             self.deinitRunRecord(run);
         };
         for (wire.runs, 0..) |run, index| {
-            runs[index] = try self.restoreRun(run, execution_model);
+            runs[index] = try self.restoreRun(run);
             restored_runs += 1;
         }
 
@@ -9355,7 +9501,6 @@ pub const Workbench = struct {
     fn restoreRun(
         self: *Workbench,
         wire: task_persistence.RunWire,
-        execution_model: []u8,
     ) Error!RunRecord {
         var input = try self.restoreRunInput(wire.input);
         errdefer self.deinitRunInputRecord(&input);
@@ -9405,6 +9550,11 @@ pub const Workbench = struct {
             null
         else
             parsePersistedEnum(RunCause, wire.cause.?) orelse return error.TaskStoreCorrupt;
+        const execution_model = try self.copyBounded(
+            wire.execution_model,
+            account_contract.Limits.model_id_bytes,
+        );
+        errdefer self.freeTracked(execution_model);
         return .{
             .id = wire.id,
             .generation = wire.generation,
@@ -9412,6 +9562,7 @@ pub const Workbench = struct {
             .execution_provider = parsePersistedEnum(Provider, wire.execution_provider) orelse
                 return error.TaskStoreCorrupt,
             .execution_model = execution_model,
+            .execution_model_owned = true,
             .input = input,
             .assistant = assistant,
             .assistant_redacted = wire.assistant_redacted,
@@ -11441,13 +11592,19 @@ pub const Workbench = struct {
         @memset(tools, null);
         const terminal_diagnostic = try self.allocTrackedCapacity(self.limits.max_terminal_diagnostic_bytes);
         errdefer self.freeTracked(terminal_diagnostic);
+        const execution_model = try self.copyBounded(
+            task.durable.execution_model,
+            account_contract.Limits.model_id_bytes,
+        );
+        errdefer self.freeTracked(execution_model);
         task.durable.next_run_generation += 1;
         task.durable.runs[slot] = .{
             .id = 0,
             .generation = task.durable.next_run_generation,
             .execution_generation = task.durable.execution_generation,
             .execution_provider = task.durable.execution_provider,
-            .execution_model = task.durable.execution_model,
+            .execution_model = execution_model,
+            .execution_model_owned = true,
             .input = input_record,
             .tools = tools,
             .status_text = status_text,
@@ -11514,6 +11671,8 @@ pub const Workbench = struct {
         self.allocator.free(run.tools);
         self.deinitRunInputRecord(&run.input);
         self.freeTrackedText(&run.assistant);
+        if (run.execution_model_owned)
+            self.freeTracked(@constCast(run.execution_model));
         self.freeTracked(run.status_text);
         self.freeTracked(run.terminal_diagnostic);
         run.* = undefined;
@@ -11539,6 +11698,7 @@ pub const Workbench = struct {
         self.freeTracked(task.durable.title);
         if (task.durable.checkpoint) |*checkpoint|
             checkpoint.deinit(self.allocator);
+        if (task.runtime.pending_model) |model| self.allocator.free(model);
         task.* = undefined;
     }
 
@@ -11547,6 +11707,10 @@ pub const Workbench = struct {
         task: *TaskView,
         cause: task_runtime.DetachmentCause,
     ) void {
+        if (task.runtime.pending_model) |model| {
+            self.allocator.free(model);
+            task.runtime.pending_model = null;
+        }
         if (task.runtime.live() == null) {
             task.runtime.attachment = .{ .detached = cause };
             return;
@@ -15597,6 +15761,95 @@ test "default replacement preserves Task generation and installs the next admiss
         ),
     );
     task.durable.execution_generation = 1;
+}
+
+test "Account default model changes do not bump credentials" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+
+    const api_keys = [_]account_contract.ApiKeyView{.{
+        .id = "key-1",
+        .name = "Primary",
+        .suffix = "1234",
+        .provider_kind = .anthropic,
+    }};
+    const models = [_]account_contract.ModelView{
+        .{ .id = "fixture-model", .display_name = "Fixture model" },
+        .{ .id = "fixture-model-2", .display_name = "Fixture model 2" },
+    };
+    workbench.commitAccountFactNoFail(.{
+        .kind = .catalog_changed,
+        .view = .{
+            .state = .authenticated,
+            .catalog_state = .ready,
+            .account_id = "account-1",
+            .display_name = "Metask User",
+            .api_keys = &api_keys,
+            .models = &models,
+            .selected_api_key_id = "key-1",
+            .selected_model = "fixture-model-2",
+            .model_catalog_api_key_id = "key-1",
+            .can_create_task = true,
+            .execution_generation = 1,
+        },
+    });
+    workbench.finishAccountCommitNoFail();
+
+    try std.testing.expectEqual(@as(u64, 1), workbench.execution.generation);
+    try std.testing.expectEqualStrings(
+        "fixture-model-2",
+        workbench.accountView().selected_model,
+    );
+}
+
+test "busy Task model selection keeps only the last runtime pending model" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+
+    const api_keys = [_]account_contract.ApiKeyView{.{
+        .id = "key-1",
+        .name = "Primary",
+        .suffix = "1234",
+        .provider_kind = .anthropic,
+    }};
+    const models = [_]account_contract.ModelView{
+        .{ .id = "fixture-model", .display_name = "Fixture model" },
+        .{ .id = "fixture-model-2", .display_name = "Fixture model 2" },
+        .{ .id = "fixture-model-3", .display_name = "Fixture model 3" },
+    };
+    workbench.commitAccountFactNoFail(.{
+        .kind = .catalog_changed,
+        .view = .{
+            .state = .authenticated,
+            .catalog_state = .ready,
+            .account_id = "account-1",
+            .display_name = "Metask User",
+            .api_keys = &api_keys,
+            .models = &models,
+            .selected_api_key_id = "key-1",
+            .selected_model = "fixture-model",
+            .model_catalog_api_key_id = "key-1",
+            .can_create_task = true,
+            .catalog_generation = 2,
+            .execution_generation = 1,
+        },
+    });
+
+    const task = &workbench.tasks[0].?;
+    const binding_epoch = task.durable.binding_epoch;
+    try workbench.selectTaskModel(task.durable.id, "fixture-model", 2, "fixture-model-2");
+    try std.testing.expectEqualStrings("fixture-model", task.durable.execution_model);
+    try std.testing.expectEqualStrings("fixture-model-2", task.runtime.pending_model.?);
+    try std.testing.expectEqual(binding_epoch, task.durable.binding_epoch);
+    try std.testing.expectEqual(@as(u64, 1), task.durable.execution_generation);
+
+    try workbench.selectTaskModel(task.durable.id, "fixture-model", 2, "fixture-model-3");
+    try std.testing.expectEqualStrings("fixture-model-3", task.runtime.pending_model.?);
+    try std.testing.expectEqualStrings("fixture-model", task.durable.execution_model);
+    try std.testing.expectError(
+        error.TaskModelMismatch,
+        workbench.selectTaskModel(task.durable.id, "fixture-model-2", 2, "fixture-model"),
+    );
 }
 
 test "clearing the admission default preserves active Task execution" {

@@ -837,6 +837,28 @@ export type TaskRunResult =
       reason: TaskRunReason;
     };
 
+export type TaskModelSelectionReason =
+  | "model_changed"
+  | "stale_catalog"
+  | "task_unavailable"
+  | "task_busy"
+  | "shutting_down"
+  | "capacity_reached";
+
+export type TaskModelSelectionResult =
+  | {
+      accepted: true;
+      taskId: string;
+      model: string;
+      reason: null;
+    }
+  | {
+      accepted: false;
+      taskId: string;
+      model: null;
+      reason: TaskModelSelectionReason;
+    };
+
 export type TaskCompactReason =
   | "binding_changed"
   | "binding_unavailable"

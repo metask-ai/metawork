@@ -425,7 +425,7 @@ Metask 已连接
 ### 6.1 核心规则
 
 - 每个 Task 同时最多一个 active operation；当前 operation 可以是 Run、manual compact 或 Conversation restore，三者不能并发；
-- 每个 Task 创建时建立第一个 execution binding epoch，固化不含 secret 的 generation、account、Provider/API identity 和模型事实，并让对应 Agent Session 持有 owned ExecutionConfig；默认 API/模型变化不修改当前 epoch；
+- 每个 Task 创建时建立第一个 execution binding epoch，固化不含 secret 的 credential generation 与 Provider/API identity，并让对应 Agent Session 持有 owned ExecutionConfig；模型是独立的 Task binding，可在 Composer 为下一轮切换，切换不修改 `binding.epoch`；默认 API/模型变化不静默改写已有 Task；
 - 多个 Task 可以后台运行，超过 Host executor 能力时明确排队；
 - 切换 Task 不停止执行；
 - `Stop task` 只停止当前执行，不删除历史、输入或已有文件；
@@ -487,7 +487,7 @@ Execution binding availability 是下一次 admission 的独立前置事实，�
 7. checkpoint、Workspace、execution、catalog/MCP authority、Runtime 或持久化任一 gate 不满足时只显示对应 unavailable 说明，不显示恢复按钮。Task store read/corrupt/write/outcome-unknown health 由 Host 发布；Renderer 不自行清空、修复、迁移或重试持久数据；
 8. open 的 detached Task 仍可执行真实的 Host-owned 结束动作；成功后 `lifecycle = closed` 必须写入同一 store，删除入口随 canonical snapshot 开放，再次重启不得复活。
 
-恢复要求 checkpoint record 与 Task execution binding 共同证明 Provider、model、execution generation、Task binding epoch 与当前可用 authority 精确匹配；durable Task 不保存 account 或 API Key identity，恢复不能从当前 Account catalog 反推或补写这些字段。若未来交付 rebind，必须由用户明确发起，重新校验 Workspace 和当前 catalog ownership，创建新 binding epoch/Session，并以不可改写的配置边界保留旧 Run、usage 与模型归属；失败不得回退到静默默认值。
+恢复要求 checkpoint record 与 Task execution binding 共同证明 credential/provider、execution generation、Task binding epoch 与当前可用 authority 精确匹配；checkpoint 的 model 只用于满足 AgentCore restore expectation，并与其 terminal Run 的历史 model 自洽校验。candidate 提交前由 Host 以 Task 当前 model binding 调用 `session_set_model`，不能把 checkpoint 的旧 model 或 Account 当前默认 model 静默写回 Task。durable Task 不保存 account 或 API Key identity，恢复不能从当前 Account catalog 反推或补写这些字段；Task 当前 pinned model 不在当前 catalog 时，恢复 gate 保持 unavailable。若未来交付 rebind，必须由用户明确发起，重新校验 Workspace 和当前 catalog ownership，创建新 binding epoch/Session，并以不可改写的配置边界保留旧 Run、usage 与模型归属；失败不得回退到静默默认值。
 
 ## 7. 中间区域：工作叙事
 

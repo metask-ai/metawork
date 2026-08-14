@@ -37,6 +37,7 @@ import {
   decodeTaskCompactResult,
   decodeTaskRestoreResult,
   decodeTaskRunResult,
+  decodeTaskModelSelectionResult,
   decodeScheduledTaskMutationResult,
   decodeScheduledTaskEnabledResult,
   decodeScheduledTaskRunResult,
@@ -514,6 +515,23 @@ export class BridgeClient {
   async run(taskId: string, expectedBindingEpoch: string, input: TaskRunInput) {
     return decodeTaskRunResult(
       await this.invoke(commands.run, { taskId, expectedBindingEpoch, input }),
+      taskId,
+    );
+  }
+
+  async selectTaskModel(
+    taskId: string,
+    expectedModel: string,
+    expectedCatalogGeneration: string,
+    selectionId: string,
+  ) {
+    return decodeTaskModelSelectionResult(
+      await this.invoke(commands.selectTaskModel, {
+        taskId,
+        expectedModel,
+        expectedCatalogGeneration,
+        selectionId,
+      }),
       taskId,
     );
   }

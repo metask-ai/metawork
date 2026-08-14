@@ -47,7 +47,7 @@ candidate probe 只用于证明锁定 artifact 与官方 Zig package 可以 sour
 - 不能注册到 React/Native SDK 正式链路；
 - 不维护上游 ABI facade 或 SDK 行为的平行测试套件。
 
-当前 bundle 提供完整 typed status、八个 StopReason、known/unknown observation decoder、Permission provenance、`UiRequest` decoder、request-aware `UiResponse` encoder、Skill/MCP catalog decoder、Session description/restore/checkpoint entry、Runtime MCP configuration apply，以及 callback-scoped validated `RunContext`。revision 8 额外提供结构化 `CoreEvent.run_state`；正式 `agent/` 直接使用官方 `bindings/zig` package 暴露的表面，Workbench 只保存受限运行时投影；MetaWork 不手写 raw enum、tag switch、identity layout、Permission/Skill/MCP schema 或 SDK module/link graph。
+当前 bundle 提供完整 typed status、八个 StopReason、known/unknown observation decoder、Permission provenance、`UiRequest` decoder、request-aware `UiResponse` encoder、Skill/MCP catalog decoder、Session description/restore/checkpoint entry、idle-only Session model mutation、Runtime MCP configuration apply，以及 callback-scoped validated `RunContext`。revision 8 额外提供结构化 `CoreEvent.run_state`；正式 `agent/` 直接使用官方 `bindings/zig` package 暴露的表面，Workbench 只保存受限运行时投影；MetaWork 不手写 raw enum、tag switch、identity layout、Permission/Skill/MCP schema 或 SDK module/link graph。
 
 ### MetaWork module boundary
 
