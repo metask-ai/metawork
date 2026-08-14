@@ -16,6 +16,7 @@ import type {
   RunView,
   TaskView,
   ToolView,
+  FilePreview,
   UiRecord,
   UiResponsePayload,
 } from "../../bridge/contracts.ts";
@@ -61,6 +62,31 @@ function isNonTerminalRun(phase: RunView["phase"]): boolean {
     phase === "waiting_ui" ||
     phase === "stopping"
   );
+}
+
+function filePreviewStatusLabel(
+  t: (
+    id: MessageId,
+    values?: Record<string, string | number | bigint>,
+  ) => string,
+  state: FilePreview["state"],
+) {
+  switch (state) {
+    case "loading":
+      return t("file_preview.loading");
+    case "ready":
+      return t("file_preview.ready");
+    case "truncated":
+      return t("file_preview.state.truncated");
+    case "missing":
+      return t("file_preview.state.missing");
+    case "restricted":
+      return t("file_preview.state.restricted");
+    case "unsupported":
+      return t("file_preview.state.unsupported");
+    case "error":
+      return t("file_preview.state.error");
+  }
 }
 
 function CompactTimelineEvent({ compact }: { compact: CompactView }) {
@@ -161,6 +187,7 @@ export function TaskTimeline({
   onRespond,
   renderPendingUi,
   renderUiRecord,
+  previewFile,
 }: {
   task: TaskView | null;
   revision: string;
@@ -180,9 +207,13 @@ export function TaskTimeline({
     respond: (payload: UiResponsePayload) => void;
   }) => ReactNode;
   renderUiRecord: (record: UiRecord) => ReactNode;
+  previewFile: (fileReferenceId: string) => Promise<FilePreview>;
 }) {
   const { locale, t } = useI18n();
   const [showJumpLatest, setShowJumpLatest] = useState(false);
+  const [filePreview, setFilePreview] = useState<FilePreview | null>(null);
+  const [filePreviewBusy, setFilePreviewBusy] = useState(false);
+  const filePreviewRequest = useRef(0);
   const timelineScroll = useRef<HTMLDivElement>(null);
   const followingLatest = useRef(true);
   const latestRunId = task?.runs.at(-1)?.id ?? null;
@@ -190,6 +221,9 @@ export function TaskTimeline({
   useEffect(() => {
     followingLatest.current = true;
     setShowJumpLatest(false);
+    filePreviewRequest.current += 1;
+    setFilePreview(null);
+    setFilePreviewBusy(false);
   }, [task?.id]);
 
   useLayoutEffect(() => {
@@ -220,6 +254,36 @@ export function TaskTimeline({
     followingLatest.current = true;
     viewport.scrollTo({ top: viewport.scrollHeight, behavior: "smooth" });
     setShowJumpLatest(false);
+  }
+
+  async function openFilePreview(fileReferenceId: string) {
+    const requestId = ++filePreviewRequest.current;
+    setFilePreviewBusy(true);
+    try {
+      const preview = await previewFile(fileReferenceId);
+      if (requestId === filePreviewRequest.current) setFilePreview(preview);
+    } catch {
+      if (requestId === filePreviewRequest.current) {
+        setFilePreview({
+          state: "error",
+          id: fileReferenceId,
+          title: "",
+          displayPath: "",
+          language: "text",
+          content: "",
+          truncated: false,
+          range: null,
+        });
+      }
+    } finally {
+      if (requestId === filePreviewRequest.current) setFilePreviewBusy(false);
+    }
+  }
+
+  function closeFilePreview() {
+    filePreviewRequest.current += 1;
+    setFilePreview(null);
+    setFilePreviewBusy(false);
   }
 
   return (
@@ -277,6 +341,7 @@ export function TaskTimeline({
                           <ToolCard
                             key={`tool:${activity.value.id}`}
                             tool={activity.value}
+                            onPreviewFile={openFilePreview}
                             onInspect={
                               run.id === latestRunId
                                 ? (opener) => onInspect("tools", opener)
@@ -357,6 +422,40 @@ export function TaskTimeline({
           )}
         </div>
       </div>
+      {(filePreviewBusy || filePreview) && (
+        <aside
+          className="file-preview-pane"
+          aria-label={t("file_preview.title")}
+          aria-live="polite"
+        >
+          <header className="file-preview-header">
+            <strong>
+              {filePreview?.displayPath ||
+                (filePreviewBusy
+                  ? t("file_preview.loading_title")
+                  : t("file_preview.title"))}
+            </strong>
+            <button
+              className="file-preview-close focus-ring"
+              type="button"
+              onClick={closeFilePreview}
+              aria-label={t("file_preview.close")}
+            >
+              <Icon name="close" />
+            </button>
+          </header>
+          {filePreviewBusy ? (
+            <p className="file-preview-status">{t("file_preview.loading")}</p>
+          ) : filePreview?.state === "ready" ||
+            filePreview?.state === "truncated" ? (
+            <pre className="file-preview-content">{filePreview.content}</pre>
+          ) : (
+            <p className="file-preview-status">
+              {filePreviewStatusLabel(t, filePreview?.state ?? "error")}
+            </p>
+          )}
+        </aside>
+      )}
 
       {showJumpLatest && (
         <button className="jump-latest focus-ring" onClick={jumpToLatest}>
@@ -434,9 +533,11 @@ function RunInputMessage({ input }: { input: RunInputView }) {
 function ToolCard({
   tool,
   onInspect,
+  onPreviewFile,
 }: {
   tool: ToolView;
   onInspect: ((opener: HTMLButtonElement) => void) | null;
+  onPreviewFile: (fileReferenceId: string) => void;
 }) {
   const { locale, t } = useI18n();
   let duration: bigint | null = null;
@@ -503,6 +604,34 @@ function ToolCard({
             label={tool.isError ? t("tool.error") : t("tool.result")}
             value={tool.content}
           />
+        )}
+        {tool.fileRefs.length > 0 && (
+          <div
+            className="tool-file-references"
+            aria-label={t("file_preview.references")}
+          >
+            {tool.fileRefs.map((reference) => {
+              const displayPath = reference.displayPath || reference.title;
+              const location = reference.range
+                ? `${displayPath}:${reference.range.start.line}`
+                : displayPath;
+              return (
+                <button
+                  key={reference.id}
+                  type="button"
+                  className="tool-file-chip focus-ring"
+                  onClick={() => onPreviewFile(reference.id)}
+                  aria-label={t("file_preview.open", { path: location })}
+                >
+                  <Icon name="skill-file" />
+                  <span>{displayPath}</span>
+                  {reference.range && (
+                    <small>:{reference.range.start.line}</small>
+                  )}
+                </button>
+              );
+            })}
+          </div>
         )}
         {onInspect && (
           <button

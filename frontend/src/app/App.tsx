@@ -2623,6 +2623,9 @@ export default function App() {
                   );
                 }}
                 renderUiRecord={(record) => <UiRecordCard record={record} />}
+                previewFile={(fileReferenceId) =>
+                  client.previewFile(fileReferenceId)
+                }
               />
               {composerFooter}
             </>

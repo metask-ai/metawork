@@ -2,9 +2,9 @@
   "schema_version": 1,
   "vendor": "metask",
   "name": "agentcore",
-  "version": "0.1.0-dev+78fe89e47d56",
+  "version": "0.1.0-dev+55f76601ee6f",
   "source": {
-    "commit": "78fe89e47d56df8fd3e76f8b289a0017bf2ff783",
+    "commit": "55f76601ee6f90f60c513dbef20a21c904dcbd78",
     "dirty": false
   },
   "toolchain": {
@@ -40,7 +40,7 @@
   "files": [
     {
       "path": "lib/metask_agentcore.lib",
-      "sha256": "6695dede5032a2b16b94dc850ccc74c960b71cb44bba94bb6fbb918d0684587a"
+      "sha256": "e5d97be5820092c88e18c2cf3f2aeed93f09d57f545c5900f6ad083baf44a842"
     },
     {
       "path": "include/metask/agentcore.h",
@@ -52,15 +52,15 @@
     },
     {
       "path": "bindings/zig/build.zig.zon",
-      "sha256": "f7eb8ef1133ab027bb93c99d09f35488171140bed81e24ad93e09f5cfff5cc0d"
+      "sha256": "876b1a3602fd10b8408f74e8a1a91d3a7b9b8e08b4463f47d7126652768572ea"
     },
     {
       "path": "bindings/zig/src/root.zig",
-      "sha256": "636cd2715e40070560f11899c94dd87ac9ace9128857c498c0309f15ecbe62c7"
+      "sha256": "45f4984006a4caae9e778af4f970392e6d19caf42f5fa7ab70f6c15005525a65"
     },
     {
       "path": "bindings/zig/src/protocol.zig",
-      "sha256": "3354ca760a0dc4b814af29e11d8fed1d47c856bba55f06454736acbfbe0330a6"
+      "sha256": "2455ba303d5713b64324880f1dcf6665cc181e190816c3e105f9cde2553a9883"
     },
     {
       "path": "bindings/zig/src/types.zig",
@@ -68,11 +68,11 @@
     },
     {
       "path": "bindings/rust/Cargo.toml",
-      "sha256": "a72e45899af5c022ee2bb87db4556c994271ae21524c614393106f28eb6c1e70"
+      "sha256": "0fb7d61fc73a6ced6159b699039180bed2474df35cee59b698d95534701eecc0"
     },
     {
       "path": "bindings/rust/Cargo.lock",
-      "sha256": "af10ad8c636a0214d8cb50b450777f6718dacd498d3564dd556668753721b4ef"
+      "sha256": "a1171c1576f9c7889cf67b262cddd10d145b2e87cd58113a4626b4a50f321791"
     },
     {
       "path": "bindings/rust/link.cfg",
@@ -96,7 +96,7 @@
     },
     {
       "path": "README.md",
-      "sha256": "ae0208d1c1b29d019fa7d77aa859b57b699b002771e665f3321a2c4185445b93"
+      "sha256": "8f2943ab55cf0f509295b5abd2bc9f56fcc7c7817f1ad3b94ef96f45daa05e27"
     }
   ]
 }

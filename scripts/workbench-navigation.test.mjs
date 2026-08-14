@@ -61,6 +61,7 @@ function run(id, text, assistant, outcome, toolContent = "") {
             progressTruncated: false,
             contentTruncated: false,
             redacted: false,
+            fileRefs: [],
           },
         ]
       : [],

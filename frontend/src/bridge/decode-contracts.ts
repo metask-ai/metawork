@@ -40,6 +40,9 @@ import {
   type TaskRestoreResult,
   type TaskRunResult,
   type ToolView,
+  type FileReferenceRangeView,
+  type FileReferenceView,
+  type FilePreview,
   type UiRecord,
   type WorkbenchSnapshot,
   type WorkspaceChoice,
@@ -355,6 +358,14 @@ function arrayValue<T>(
 ) {
   if (!Array.isArray(value)) fail(path, "expected array");
   return value.map((item, index) => decode(item, `${path}[${index}]`));
+}
+
+function nullableObject<T>(
+  value: unknown,
+  path: string,
+  decode: (item: unknown, path: string) => T,
+): T | null {
+  return value === null ? null : decode(value, path);
 }
 
 function enumValue<const T extends readonly string[]>(
@@ -841,6 +852,83 @@ function decodeAccount(value: unknown, path: string): AccountView {
   };
 }
 
+function decodeFileReferenceRange(
+  value: unknown,
+  path: string,
+): FileReferenceRangeView {
+  const item = object(value, path, ["start", "end"]);
+  const start = object(item.start, `${path}.start`, ["line", "column"]);
+  const end = object(item.end, `${path}.end`, ["line", "column"]);
+  const result = {
+    start: {
+      line: positiveWireId(start.line, `${path}.start.line`),
+      column: positiveWireId(start.column, `${path}.start.column`),
+    },
+    end: {
+      line: positiveWireId(end.line, `${path}.end.line`),
+      column: positiveWireId(end.column, `${path}.end.column`),
+    },
+  };
+  if (
+    BigInt(result.end.line) < BigInt(result.start.line) ||
+    (result.end.line === result.start.line &&
+      BigInt(result.end.column) < BigInt(result.start.column))
+  )
+    fail(path, "range end must not precede start");
+  return result;
+}
+
+function decodeFileReference(value: unknown, path: string): FileReferenceView {
+  const item = object(value, path, [
+    "id",
+    "title",
+    "displayPath",
+    "kind",
+    "range",
+  ]);
+  return {
+    id: stringValue(item.id, `${path}.id`),
+    title: stringValue(item.title, `${path}.title`),
+    displayPath: stringValue(item.displayPath, `${path}.displayPath`),
+    kind: stringValue(item.kind, `${path}.kind`),
+    range: nullableObject(
+      item.range,
+      `${path}.range`,
+      decodeFileReferenceRange,
+    ),
+  };
+}
+
+export function decodeFilePreview(value: unknown): FilePreview {
+  const item = object(value, "$", [
+    "state",
+    "id",
+    "title",
+    "displayPath",
+    "language",
+    "content",
+    "truncated",
+    "range",
+  ]);
+  return {
+    state: enumValue(item.state, "$.state", [
+      "ready",
+      "truncated",
+      "missing",
+      "restricted",
+      "unsupported",
+      "error",
+    ] as const),
+    id: stringValue(item.id, "$.id"),
+    title: stringValue(item.title, "$.title"),
+    displayPath: stringValue(item.displayPath, "$.displayPath"),
+    language: stringValue(item.language, "$.language"),
+    content: stringValue(item.content, "$.content"),
+    truncated: booleanValue(item.truncated, "$.truncated"),
+    range: nullableObject(item.range, "$.range", decodeFileReferenceRange),
+  };
+}
+
 function decodeTool(value: unknown, path: string): ToolView {
   const item = object(value, path, [
     "id",
@@ -856,6 +944,7 @@ function decodeTool(value: unknown, path: string): ToolView {
     "progressTruncated",
     "contentTruncated",
     "redacted",
+    "fileRefs",
   ]);
   const state = enumValue(item.state, `${path}.state`, [
     "running",
@@ -885,6 +974,11 @@ function decodeTool(value: unknown, path: string): ToolView {
       `${path}.contentTruncated`,
     ),
     redacted: booleanValue(item.redacted, `${path}.redacted`),
+    fileRefs: arrayValue(
+      item.fileRefs,
+      `${path}.fileRefs`,
+      decodeFileReference,
+    ),
   };
 }
 

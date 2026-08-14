@@ -106,7 +106,21 @@ fn coreEventTextValid(event: sdk.DecodedCoreEvent) bool {
             .tool_start => |tool| validUtf8(&.{ tool.id, tool.name, tool.input }),
             .tool_progress => |progress| validUtf8(&.{ progress.id, progress.text }),
             .progress => |progress| validUtf8(&.{ progress.tool_name, progress.tool_input }),
-            .tool_result => |result| validUtf8(&.{ result.id, result.name, result.input, result.content }),
+            .tool_result => |result| {
+                if (!validUtf8(&.{ result.id, result.name, result.input, result.content })) return false;
+                if (result.file_refs) |refs| {
+                    for (refs) |reference| {
+                        if (!std.unicode.utf8ValidateSlice(reference.title) or
+                            !std.unicode.utf8ValidateSlice(reference.kind)) return false;
+                        switch (reference.locator) {
+                            .workspace_path => |path| if (!std.unicode.utf8ValidateSlice(path)) return false,
+                            .absolute_path => |path| if (!std.unicode.utf8ValidateSlice(path)) return false,
+                            .uri => |uri| if (!std.unicode.utf8ValidateSlice(uri)) return false,
+                        }
+                    }
+                }
+                return true;
+            },
             .usage, .retry_notice, .stream_done => true,
             .run_state => |state| {
                 if (state.run_id == 0) return false;

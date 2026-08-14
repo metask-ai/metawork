@@ -246,6 +246,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.mcp_refresh_catalog, .function = refreshMcpCatalog },
             .{ .name = commands.snapshot, .function = beginSnapshot },
             .{ .name = commands.snapshot_chunk, .function = fetchSnapshotChunk },
+            .{ .name = commands.preview_file, .function = previewFile },
             .{ .name = commands.account_begin_login, .function = accountBeginLogin },
             .{ .name = commands.account_cancel_operation, .function = accountCancelOperation },
             .{ .name = commands.account_refresh_catalog, .function = accountRefreshCatalog },
@@ -666,6 +667,58 @@ pub const Dispatcher = struct {
         ) catch return error.NoSpaceLeft;
         std.base64.standard.Encoder.encodeWriter(&writer, chunk) catch return error.NoSpaceLeft;
         writer.writeAll("\"}") catch return error.NoSpaceLeft;
+        return writer.buffered();
+    }
+
+    fn previewFile(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(handlers.FilePreviewRequest, invocation.request.payload);
+        defer parsed.deinit();
+        if (parsed.value.fileReferenceId.len == 0 or parsed.value.fileReferenceId.len > 128)
+            return error.InvalidBridgePayload;
+        const workbench = try self.requireWorkbench();
+        var preview = workbench.previewFileReference(parsed.value.fileReferenceId) catch |err| {
+            const state: []const u8 = switch (err) {
+                error.FileReferenceNotFound, error.FilePreviewMissing => "missing",
+                error.FilePreviewRestricted => "restricted",
+                error.FilePreviewUnsupported => "unsupported",
+                else => "error",
+            };
+            var writer = std.Io.Writer.fixed(output);
+            writer.writeAll("{\"state\":\"") catch return error.NoSpaceLeft;
+            writer.writeAll(state) catch return error.NoSpaceLeft;
+            writer.writeAll("\",\"id\":") catch return error.NoSpaceLeft;
+            std.json.Stringify.value(parsed.value.fileReferenceId, .{}, &writer) catch return error.NoSpaceLeft;
+            writer.writeAll(",\"title\":\"\",\"displayPath\":\"\",\"language\":\"\",\"content\":\"\",\"truncated\":false,\"range\":null}") catch return error.NoSpaceLeft;
+            return writer.buffered();
+        };
+        defer preview.deinit();
+        var writer = std.Io.Writer.fixed(output);
+        writer.writeAll("{\"state\":\"") catch return error.NoSpaceLeft;
+        writer.writeAll(if (preview.state == .truncated) "truncated" else "ready") catch return error.NoSpaceLeft;
+        writer.writeAll("\",\"id\":") catch return error.NoSpaceLeft;
+        std.json.Stringify.value(preview.id, .{}, &writer) catch return error.NoSpaceLeft;
+        writer.writeAll(",\"title\":") catch return error.NoSpaceLeft;
+        std.json.Stringify.value(preview.title, .{}, &writer) catch return error.NoSpaceLeft;
+        writer.writeAll(",\"displayPath\":") catch return error.NoSpaceLeft;
+        std.json.Stringify.value(preview.display_path, .{}, &writer) catch return error.NoSpaceLeft;
+        writer.writeAll(",\"language\":") catch return error.NoSpaceLeft;
+        std.json.Stringify.value(preview.language, .{}, &writer) catch return error.NoSpaceLeft;
+        writer.writeAll(",\"content\":") catch return error.NoSpaceLeft;
+        std.json.Stringify.value(preview.content, .{}, &writer) catch return error.NoSpaceLeft;
+        writer.print(",\"truncated\":{},\"range\":", .{preview.truncated}) catch return error.NoSpaceLeft;
+        if (preview.range) |range| {
+            writer.print("{{\"start\":{{\"line\":\"{d}\",\"column\":\"{d}\"}},\"end\":{{\"line\":\"{d}\",\"column\":\"{d}\"}}}}", .{
+                range.start.line,
+                range.start.column,
+                range.end.line,
+                range.end.column,
+            }) catch return error.NoSpaceLeft;
+        } else writer.writeAll("null") catch return error.NoSpaceLeft;
+        writer.writeByte('}') catch return error.NoSpaceLeft;
         return writer.buffered();
     }
 

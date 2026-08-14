@@ -38,6 +38,7 @@ export const commands = {
   mcpRefreshCatalog: "metawork.mcp.refreshCatalog",
   snapshot: "metawork.workbench.snapshot",
   snapshotChunk: "metawork.workbench.snapshot.chunk",
+  previewFile: "metawork.files.preview",
   accountBeginLogin: "metawork.account.beginLogin",
   accountCancelOperation: "metawork.account.cancelOperation",
   accountRefreshCatalog: "metawork.account.refreshCatalog",

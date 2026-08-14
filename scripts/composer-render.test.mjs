@@ -220,6 +220,7 @@ function renderCompletedTimeline(
             inputTruncated: false,
             progressTruncated: false,
             contentTruncated: false,
+            fileRefs: [],
           },
         ],
       },

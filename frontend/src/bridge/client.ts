@@ -15,6 +15,7 @@ import type {
   TaskWorkspaceIntent,
   UiResponsePayload,
   WorkspaceChoice,
+  FilePreview,
 } from "./contracts.ts";
 import {
   assertCancelAccepted,
@@ -51,6 +52,7 @@ import {
   decodeMcpConnectionTestResult,
   decodeMcpAuthorizationResult,
   decodeMcpAuthorizationCancelResult,
+  decodeFilePreview,
 } from "./decode-contracts.ts";
 import { RendererBridgeContractError } from "./contract-error.ts";
 import { fetchWorkbenchSnapshot } from "./snapshot/snapshot-client.ts";
@@ -187,6 +189,12 @@ export class BridgeClient {
   fetchSnapshot() {
     return fetchWorkbenchSnapshot((command, payload) =>
       this.invoke(command, payload),
+    );
+  }
+
+  async previewFile(fileReferenceId: string): Promise<FilePreview> {
+    return decodeFilePreview(
+      await this.invoke(commands.previewFile, { fileReferenceId }),
     );
   }
 
