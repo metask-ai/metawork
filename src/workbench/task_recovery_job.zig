@@ -277,7 +277,7 @@ pub const Job = struct {
                 .allowed_tools = if (self.attempt.builtin_tool_profile) |profile|
                     agent.builtinToolsForProfile(profile)
                 else
-                    &agent.default_builtin_tools,
+                    &agent.desktop_builtin_tools,
                 .skill_catalog = acquisition.lease,
                 .mcp_selection = self.attempt.mcp_selection,
             },

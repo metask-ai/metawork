@@ -71,7 +71,6 @@ pub const Error = lifecycle.Error || scheduled_tasks_impl.Error || scheduled_tas
     EventAfterTerminalDrain,
     RecoveryUnavailable,
     RestoreAttemptExhausted,
-    UnsupportedBuiltinProfile,
 };
 
 pub const Limits = struct {
@@ -2187,8 +2186,6 @@ pub const Workbench = struct {
         limits: Limits,
         configuration: Configuration,
     ) Error!Workbench {
-        if (configuration.builtin_tool_profile != null and builtin.os.tag != .windows)
-            return error.UnsupportedBuiltinProfile;
         if (limits.worker_count == 0 or limits.queue_capacity == 0 or
             limits.max_tasks == 0 or limits.max_workspaces == 0 or
             limits.max_scheduled_tasks == 0 or
@@ -3762,7 +3759,7 @@ pub const Workbench = struct {
             .allowed_tools = if (self.builtin_tool_profile) |profile|
                 lifecycle.builtinToolsForProfile(profile)
             else
-                &lifecycle.default_builtin_tools,
+                &lifecycle.desktop_builtin_tools,
         }) catch |err| switch (err) {
             error.SessionCapacity => return error.TaskCapacity,
             else => return err,

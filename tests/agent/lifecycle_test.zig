@@ -1111,7 +1111,7 @@ test "Agent Runtime creates and destroys an idle Session" {
     try std.testing.expectEqual(@as(usize, 1), fake_core.session_destroyed);
 }
 
-test "Agent Runtime passes the selected Windows built-in profile to Session" {
+test "Agent Runtime passes the selected desktop built-in profile to Session" {
     fake_core.reset();
     const runtime = try createTestComposition(.{
         .worker_count = 1,

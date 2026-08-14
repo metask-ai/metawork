@@ -182,8 +182,7 @@ pub const BuiltinToolProfile = enum {
     network,
 };
 
-pub const default_builtin_tools = [_][]const u8{ "Read", "Bash", "Edit", "AskUserQuestion" };
-pub const windows_builtin_tools = [_][]const u8{
+pub const desktop_builtin_tools = [_][]const u8{
     "Read",
     "Write",
     "Edit",
@@ -209,30 +208,24 @@ pub const local_builtin_tools = [_][]const u8{
 };
 pub const network_builtin_tools = [_][]const u8{ "WebSearch", "WebFetch" };
 
-pub const registered_builtin_tools = if (builtin.os.tag == .windows)
-    windows_builtin_tools
-else
-    default_builtin_tools;
+pub const registered_builtin_tools = desktop_builtin_tools;
 
 pub fn builtinToolsForProfile(profile: BuiltinToolProfile) []const []const u8 {
     return switch (profile) {
-        .full => if (builtin.os.tag == .windows)
-            &windows_builtin_tools
-        else
-            &default_builtin_tools,
+        .full => &desktop_builtin_tools,
         .local => &local_builtin_tools,
         .network => &network_builtin_tools,
     };
 }
 
-test "Windows built-in profiles cover the verified name set without overlap" {
+test "Desktop built-in profiles cover the verified name set without overlap" {
     const local = builtinToolsForProfile(.local);
     const network = builtinToolsForProfile(.network);
-    try std.testing.expectEqual(windows_builtin_tools.len, local.len + network.len);
+    try std.testing.expectEqual(desktop_builtin_tools.len, local.len + network.len);
     for (local) |name| {
         for (network) |other| try std.testing.expect(!std.mem.eql(u8, name, other));
     }
-    for (windows_builtin_tools) |name| {
+    for (desktop_builtin_tools) |name| {
         var found = false;
         for (local) |candidate| {
             if (std.mem.eql(u8, name, candidate)) found = true;
@@ -839,7 +832,7 @@ pub const SessionOpenOptions = struct {
     workspace_epoch: []const u8 = "",
     skill_catalog: ?*CatalogLease = null,
     mcp_selection: ?*const McpSelection = null,
-    allowed_tools: []const []const u8 = &default_builtin_tools,
+    allowed_tools: []const []const u8 = &desktop_builtin_tools,
 };
 
 pub const SessionRestoreOptions = struct {
