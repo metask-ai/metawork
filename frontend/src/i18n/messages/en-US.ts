@@ -753,6 +753,10 @@ export const enUS = {
     "This task's execution setup changed. Review it before continuing.",
   "mutation.reason.binding_unavailable":
     "This task's execution setup is no longer available.",
+  "mutation.reason.model_changed":
+    "This task's model changed elsewhere. Refresh and choose again.",
+  "task.model.updated": "Task model updated.",
+  "task.model_pending": "Next run: {model}",
   "mutation.reason.task_unavailable": "This task is no longer available.",
   "mutation.reason.recovery_unavailable":
     "This conversation can no longer be restored from the current saved state.",

@@ -57,6 +57,7 @@
             .{ .name = "metawork.account.logout", .origins = .{"zero://app"} },
             .{ .name = "metawork.tasks.create", .origins = .{"zero://app"} },
             .{ .name = "metawork.tasks.run", .origins = .{"zero://app"} },
+            .{ .name = "metawork.tasks.selectModel", .origins = .{"zero://app"} },
             .{ .name = "metawork.tasks.restore", .origins = .{"zero://app"} },
             .{ .name = "metawork.tasks.compact", .origins = .{"zero://app"} },
             .{ .name = "metawork.tasks.cancelCompact", .origins = .{"zero://app"} },

@@ -255,6 +255,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.account_logout, .function = accountLogout },
             .{ .name = commands.create_task, .function = createTask },
             .{ .name = commands.run, .function = runTask },
+            .{ .name = commands.select_task_model, .function = selectTaskModel },
             .{ .name = commands.restore_task, .function = restoreTask },
             .{ .name = commands.compact, .function = compactTask },
             .{ .name = commands.cancel_compact, .function = cancelCompact },
@@ -1067,6 +1068,57 @@ pub const Dispatcher = struct {
             true,
             task_id,
             run_id,
+            null,
+        );
+    }
+
+    fn selectTaskModel(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(
+            handlers.TaskModelSelection,
+            invocation.request.payload,
+        );
+        defer parsed.deinit();
+        if (parsed.value.expectedModel.len == 0 or
+            parsed.value.expectedModel.len > account_contract.Limits.model_id_bytes or
+            !std.unicode.utf8ValidateSlice(parsed.value.expectedModel) or
+            parsed.value.selectionId.len == 0 or
+            parsed.value.selectionId.len > account_contract.Limits.model_id_bytes or
+            !std.unicode.utf8ValidateSlice(parsed.value.selectionId))
+            return error.InvalidBridgePayload;
+        const task_id = try handlers.parseWireId(parsed.value.taskId);
+        const catalog_generation = try handlers.parseWireId(
+            parsed.value.expectedCatalogGeneration,
+        );
+        (try self.requireWorkbench()).selectTaskModel(
+            task_id,
+            parsed.value.expectedModel,
+            catalog_generation,
+            parsed.value.selectionId,
+        ) catch |err| {
+            if (taskModelSelectionRejection(err)) |reason|
+                return encodeTaskModelSelectionResult(
+                    output,
+                    false,
+                    task_id,
+                    null,
+                    reason,
+                );
+            return err;
+        };
+        self.notifyCommitted();
+        return encodeTaskModelSelectionResult(
+            output,
+            true,
+            task_id,
+            parsed.value.selectionId,
             null,
         );
     }
@@ -2670,6 +2722,18 @@ fn taskRunRejection(err: anyerror) ?[]const u8 {
     };
 }
 
+fn taskModelSelectionRejection(err: anyerror) ?[]const u8 {
+    return switch (err) {
+        error.TaskModelMismatch => "model_changed",
+        error.StaleCatalog => "stale_catalog",
+        error.UnknownTask, error.TaskClosing => "task_unavailable",
+        error.TaskBusy, error.SessionNotIdle => "task_busy",
+        error.ExecutorShuttingDown => "shutting_down",
+        error.ProjectionCapacity, error.OutOfMemory => "capacity_reached",
+        else => null,
+    };
+}
+
 fn taskCompactRejection(err: anyerror) ?[]const u8 {
     return switch (err) {
         error.BindingEpochMismatch => "binding_changed",
@@ -2881,6 +2945,34 @@ fn encodeTaskRunResult(
         std.json.Stringify.value(value, .{}, &writer) catch return error.NoSpaceLeft
     else
         writer.writeAll("null") catch return error.NoSpaceLeft;
+    writer.writeByte('}') catch return error.NoSpaceLeft;
+    return writer.buffered();
+}
+
+fn encodeTaskModelSelectionResult(
+    output: []u8,
+    accepted: bool,
+    task_id: u64,
+    model: ?[]const u8,
+    reason: ?[]const u8,
+) ![]const u8 {
+    const valid = if (accepted)
+        model != null and model.?.len != 0 and reason == null
+    else
+        model == null and reason != null;
+    if (!valid) return error.InvalidTaskModelSelectionResult;
+    var writer = std.Io.Writer.fixed(output);
+    writer.print("{{\"accepted\":{},\"taskId\":\"{d}\",\"model\":", .{
+        accepted,
+        task_id,
+    }) catch return error.NoSpaceLeft;
+    if (model) |value|
+        std.json.Stringify.value(value, .{}, &writer) catch return error.NoSpaceLeft
+    else writer.writeAll("null") catch return error.NoSpaceLeft;
+    writer.writeAll(",\"reason\":") catch return error.NoSpaceLeft;
+    if (reason) |value|
+        std.json.Stringify.value(value, .{}, &writer) catch return error.NoSpaceLeft
+    else writer.writeAll("null") catch return error.NoSpaceLeft;
     writer.writeByte('}') catch return error.NoSpaceLeft;
     return writer.buffered();
 }

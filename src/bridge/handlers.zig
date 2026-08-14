@@ -156,6 +156,12 @@ pub const TaskRun = struct {
     expectedBindingEpoch: []const u8,
     input: std.json.Value,
 };
+pub const TaskModelSelection = struct {
+    taskId: []const u8,
+    expectedModel: []const u8,
+    expectedCatalogGeneration: []const u8,
+    selectionId: []const u8,
+};
 pub const TaskRestore = struct {
     taskId: []const u8,
     expectedBindingEpoch: []const u8,
