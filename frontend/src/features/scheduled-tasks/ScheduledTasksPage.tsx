@@ -11,6 +11,7 @@ import type {
   WorkbenchSnapshot,
 } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
+import { Button } from "../../components/ui/button.tsx";
 import { Dialog } from "../../components/ui/dialog.tsx";
 import { Input } from "../../components/ui/input.tsx";
 import { SelectField, type SelectOption } from "../../components/ui/select.tsx";
@@ -432,15 +433,16 @@ export function ScheduledTasksPage({
               </span>
             )}
           </div>
-          <button
+          <Button
             type="button"
-            className="primary-button focus-ring"
+            variant="primary"
+            size="sm"
             disabled={disabled}
             onClick={() => beginCreate()}
           >
             <Icon name="plus" />
             {t("scheduled.new")}
-          </button>
+          </Button>
         </header>
 
         {snapshot.capabilities.scheduledTaskPersistenceHealth !== "ready" && (
@@ -912,14 +914,15 @@ export function ScheduledTasksPage({
                   </button>
                 </>
               )}
-              <button
+              <Button
                 type="button"
-                className="primary-button focus-ring"
+                variant="primary"
+                size="sm"
                 disabled={disabled || busy || mutation === null}
                 onClick={() => void submit()}
               >
                 {t(busy ? "scheduled.saving" : "common.save")}
-              </button>
+              </Button>
             </footer>
           </Dialog.Popup>
         </Dialog.Portal>

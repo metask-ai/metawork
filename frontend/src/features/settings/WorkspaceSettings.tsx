@@ -6,6 +6,7 @@ import type {
   WorkspaceView,
 } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
+import { Button } from "../../components/ui/button.tsx";
 import { taskCountMessageId } from "../../i18n/formatters.ts";
 import { useI18n } from "../../i18n/context.ts";
 
@@ -149,14 +150,15 @@ export function WorkspaceSettings({
             {t("settings.workspaces")}
           </h2>
         </div>
-        <button
-          className="secondary-button focus-ring"
+        <Button
+          variant="secondary"
+          size="sm"
           disabled={disabled || busy}
           onClick={() => void chooseWorkspace({ kind: "add" })}
         >
           <Icon name="plus" />
           {t("settings.workspace_add")}
-        </button>
+        </Button>
       </div>
       <p className="settings-workspace-intro">
         {t("settings.workspaces_help")}
@@ -222,20 +224,22 @@ export function WorkspaceSettings({
                       {t("settings.workspace_remove_confirm_body", { count })}
                     </p>
                     <span>
-                      <button
+                      <Button
+                        variant="secondary"
+                        size="sm"
                         ref={removalCancel}
-                        className="secondary-button focus-ring"
                         onClick={() => closeRemovalConfirmation(true)}
                       >
                         {t("common.cancel")}
-                      </button>
-                      <button
-                        className="danger-button focus-ring"
+                      </Button>
+                      <Button
+                        variant="danger"
+                        size="sm"
                         disabled={disabled || busy}
                         onClick={() => void removeWorkspace(workspace.id)}
                       >
                         {t("settings.workspace_remove_confirm_action")}
-                      </button>
+                      </Button>
                     </span>
                   </div>
                 ) : (

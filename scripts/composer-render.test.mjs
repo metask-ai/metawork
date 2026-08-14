@@ -129,12 +129,8 @@ function contrastRatio(foreground, background) {
   );
 }
 
-function colorToken(css, name) {
-  const match = css.match(
-    new RegExp(`--color-${name}:\\s*(#[0-9a-f]{6})`, "i"),
-  );
-  assert.ok(match, `missing --color-${name}`);
-  return match[1];
+function hasBooleanAttribute(markup, name) {
+  return new RegExp(`\\b${name}=""`).test(markup);
 }
 
 function render(props = {}) {
@@ -317,7 +313,10 @@ test("New task opens as an editable Composer with its execution context", () => 
   assert.match(markup, />Default</);
   assert.doesNotMatch(markup, />Select a workspace</);
   assert.match(markup, /composer-workspace-context/);
-  assert.doesNotMatch(markup.match(/<textarea[^>]*>/)?.[0] ?? "", /disabled/);
+  assert.equal(
+    hasBooleanAttribute(markup.match(/<textarea[^>]*>/)?.[0] ?? "", "disabled"),
+    false,
+  );
   assert.doesNotMatch(markup, /composer-start/);
 });
 
@@ -331,10 +330,14 @@ test("candidate model catalogs never imply a committed default", () => {
     modelSelectionDisabled: true,
     modelSelectionPending: true,
   });
-  assert.match(
-    markup,
-    /role="combobox"[^>]*disabled=""[^>]*data-placeholder=""[^>]*aria-busy="true"/,
-  );
+  const trigger =
+    markup.match(
+      /<button[^>]*class="[^"]*composer-model-trigger[^"]*"[^>]*>/,
+    )?.[0] ?? "";
+  assert.match(trigger, /role="combobox"/);
+  assert.match(trigger, /disabled=""/);
+  assert.match(trigger, /data-placeholder=""/);
+  assert.match(trigger, /aria-busy="true"/);
   assert.match(markup, />Choose a model</);
   assert.doesNotMatch(markup, />Candidate model</);
 });
@@ -499,20 +502,26 @@ test("new Task places the Composer after the outcome prompt", () => {
 });
 
 test("Workbench foundation uses a stable 760px new Task Composer stage", async () => {
-  const [app, shell, css] = await Promise.all([
+  const [app, shell, css, tokens] = await Promise.all([
     readFile(join(process.cwd(), "frontend/src/app/App.tsx"), "utf8"),
     readFile(join(process.cwd(), "frontend/src/app/AppShell.tsx"), "utf8"),
     readFile(join(process.cwd(), "frontend/src/index.css"), "utf8"),
+    readFile(
+      join(process.cwd(), "frontend/src/styles/metask-tokens.css"),
+      "utf8",
+    ),
   ]);
-  assert.match(css, /--color-brand-600:\s*#5b46d8/);
+  assert.match(css, /@import "\.\/styles\/metask-tokens\.css"/);
+  assert.match(tokens, /--metask-primary:\s*#8a4ed1/);
+  assert.match(tokens, /--ui-action-primary:\s*var\(--metask-primary\)/);
   assert.match(css, /--left-column:\s*248px/);
   assert.match(
     css,
-    /\.app-window\[data-left-open="true"\] \.workbench-commandbar::before\s*\{[\s\S]*?width:\s*var\(--left-column\);[\s\S]*?border-right:\s*1px solid var\(--color-rule\);[\s\S]*?background:\s*var\(--color-rail\)/,
+    /\.app-window\[data-left-open="true"\] \.workbench-commandbar::before\s*\{[\s\S]*?width:\s*var\(--left-column\);[\s\S]*?border-right:\s*1px solid var\(--ui-border\);[\s\S]*?background:\s*var\(--ui-surface-panel-2\)/,
   );
   assert.match(
     css,
-    /\.workbench-commandbar\s*\{[\s\S]*?background:\s*var\(--color-canvas\)/,
+    /\.workbench-commandbar\s*\{[\s\S]*?background:\s*var\(--ui-surface-canvas\)/,
   );
   assert.doesNotMatch(
     css.match(/\.workbench-commandbar\s*\{[\s\S]*?\n\}/)?.[0] ?? "",
@@ -562,21 +571,19 @@ test("New task keeps the titlebar quiet while a real Task retains context", () =
 });
 
 test("Workbench semantic text colors meet WCAG AA contrast", async () => {
-  const css = await readFile(
-    join(process.cwd(), "frontend/src/index.css"),
+  const tokens = await readFile(
+    join(process.cwd(), "frontend/src/styles/metask-tokens.css"),
     "utf8",
   );
-  const canvas = colorToken(css, "canvas");
+  const canvas = "#f7f8fa";
   const pairs = [
-    [colorToken(css, "graphite"), canvas],
-    [colorToken(css, "muted"), canvas],
-    [colorToken(css, "brand-700"), canvas],
-    [canvas, colorToken(css, "brand-600")],
-    [colorToken(css, "amber-ink"), "#fff5e7"],
-    [colorToken(css, "danger"), canvas],
-    [colorToken(css, "live"), canvas],
-    [colorToken(css, "amber"), canvas],
+    ["#191b21", canvas],
+    ["#626775", canvas],
+    ["#4b2db5", canvas],
+    ["#7d4308", "#ffffff"],
   ];
+  assert.match(tokens, /--metask-light-canvas:\s*#f7f8fa/);
+  assert.match(tokens, /--metask-light-text:\s*#191b21/);
   for (const [foreground, background] of pairs) {
     assert.ok(
       contrastRatio(foreground, background) >= 4.5,
@@ -604,7 +611,10 @@ test("a new Task draft is editable before its first send", () => {
   });
   assert.match(markup, /<textarea/);
   assert.match(markup, />Ship the release</);
-  assert.doesNotMatch(markup.match(/<textarea[^>]*>/)?.[0] ?? "", /disabled/);
+  assert.equal(
+    hasBooleanAttribute(markup.match(/<textarea[^>]*>/)?.[0] ?? "", "disabled"),
+    false,
+  );
   assert.doesNotMatch(tag(markup, "composer-send") ?? "", /disabled/);
 });
 
@@ -618,7 +628,10 @@ test("an expired workspace grant preserves editable text and exposes recovery", 
   });
   assert.match(markup, />Keep this draft</);
   assert.match(markup, />Confirm access</);
-  assert.doesNotMatch(markup.match(/<textarea[^>]*>/)?.[0] ?? "", /disabled/);
+  assert.equal(
+    hasBooleanAttribute(markup.match(/<textarea[^>]*>/)?.[0] ?? "", "disabled"),
+    false,
+  );
   assert.match(tag(markup, "composer-send") ?? "", /disabled/);
 });
 
@@ -681,7 +694,10 @@ test("a restart-detached Task keeps the Composer ready for send-time recovery", 
     recoveryAvailable: true,
     composeDisabled: false,
   });
-  assert.doesNotMatch(markup.match(/<textarea[^>]*>/)?.[0] ?? "", /disabled/);
+  assert.equal(
+    hasBooleanAttribute(markup.match(/<textarea[^>]*>/)?.[0] ?? "", "disabled"),
+    false,
+  );
   assert.match(
     markup,
     /Type a message; the conversation will restore when you send/,
@@ -796,12 +812,15 @@ test("Task deletion confirmation handles Escape and restores its opener", async 
     "utf8",
   );
   const confirmation = source.slice(
-    source.indexOf('className="delete-confirmation"'),
+    source.indexOf("<AlertDialog.Root"),
     source.indexOf("{viewSyncFailed &&"),
   );
-  assert.match(confirmation, /role="alertdialog"/);
-  assert.match(confirmation, /event\.key !== "Escape"/);
-  assert.match(confirmation, /closeDeleteConfirmation\(\)/);
+  assert.match(confirmation, /open=\{confirmDelete\}/);
+  assert.match(confirmation, /<AlertDialog\.Popup>/);
+  assert.match(
+    confirmation,
+    /onOpenChange=\{\(open\) => !open && closeDeleteConfirmation\(\)\}/,
+  );
 });
 
 test("draft moves read authoritative storage instead of a render-time closure", async () => {

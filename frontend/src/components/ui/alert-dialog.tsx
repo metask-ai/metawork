@@ -10,7 +10,7 @@ export const AlertDialog = {
   ),
   Portal: BaseAlertDialog.Portal,
   Backdrop: ({ className, ...props }: ComponentProps<typeof BaseAlertDialog.Backdrop>) => (
-    <BaseAlertDialog.Backdrop className={cn("fixed inset-0 z-50 bg-black/45", className)} {...props} />
+    <BaseAlertDialog.Backdrop className={cn("fixed inset-0 z-50 bg-(--ui-overlay-scrim)", className)} {...props} />
   ),
   Popup: ({ className, ...props }: ComponentProps<typeof BaseAlertDialog.Popup>) => (
     <BaseAlertDialog.Popup className={cn("fixed top-1/2 left-1/2 z-50 flex w-[min(28rem,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 flex-col gap-4 rounded-[12px] border border-(--ui-border) bg-(--ui-surface-panel) p-6 text-(--ui-content-primary) shadow-(--ui-shadow-overlay) outline-none", className)} {...props} />

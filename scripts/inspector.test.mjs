@@ -349,7 +349,7 @@ test("Inspector has one controlled panel and the central narrative is not chat",
   assert.doesNotMatch(timeline, /message-role/);
   const runOutcomeRule = css.match(/\.run-outcome\s*\{([^}]*)\}/)?.[1];
   assert.ok(runOutcomeRule);
-  assert.match(runOutcomeRule, /border-top:\s*1px solid var\(--color-rule\)/);
+  assert.match(runOutcomeRule, /border-top:\s*1px solid var\(--ui-border\)/);
   assert.doesNotMatch(runOutcomeRule, /border-radius|background:/);
   assert.match(
     css,

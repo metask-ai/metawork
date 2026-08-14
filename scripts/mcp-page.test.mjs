@@ -11,6 +11,7 @@ const dom = new JSDOM("<!doctype html><html><body></body></html>", {
   pretendToBeVisual: true,
   url: "http://localhost/",
 });
+if (!dom.window.PointerEvent) dom.window.PointerEvent = dom.window.MouseEvent;
 Object.assign(globalThis, {
   window: dom.window,
   document: dom.window.document,
@@ -19,6 +20,8 @@ Object.assign(globalThis, {
   Element: dom.window.Element,
   HTMLElement: dom.window.HTMLElement,
   MutationObserver: dom.window.MutationObserver,
+  requestAnimationFrame: dom.window.requestAnimationFrame.bind(dom.window),
+  cancelAnimationFrame: dom.window.cancelAnimationFrame.bind(dom.window),
   getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
 });
 Object.defineProperty(globalThis, "navigator", {
@@ -551,21 +554,28 @@ test("MCP OAuth add carries an explicit client auth method and no secret", async
     target: { value: "https://mcp.example.test/mcp" },
   });
   fireEvent.click(within(dialog).getByRole("radio", { name: "OAuth" }));
-  fireEvent.change(
+  fireEvent.click(
     within(dialog).getByRole("combobox", { name: "Client registration" }),
-    {
-      target: { value: "pre_registered" },
-    },
   );
+  const existingClientOption = await screen.findByRole("option", {
+    name: "Existing client",
+  });
+  fireEvent.pointerDown(existingClientOption);
+  fireEvent.click(existingClientOption);
+  await waitFor(() => within(dialog).getByRole("textbox", { name: "Client ID" }));
   fireEvent.change(within(dialog).getByRole("textbox", { name: "Client ID" }), {
     target: { value: "desktop-client" },
   });
-  fireEvent.change(
+  fireEvent.click(
     within(dialog).getByRole("combobox", {
       name: "Token endpoint client authentication",
     }),
-    { target: { value: "client_secret_basic" } },
   );
+  const clientSecretBasicOption = await screen.findByRole("option", {
+    name: "Client secret (HTTP Basic)",
+  });
+  fireEvent.pointerDown(clientSecretBasicOption);
+  fireEvent.click(clientSecretBasicOption);
   fireEvent.click(
     within(dialog).getByRole("button", { name: "Add and enable" }),
   );
@@ -622,7 +632,7 @@ test("MCP tool allowlist mutation sends exact desired tools and generation", asy
 
   fireEvent.click(screen.getByRole("button", { name: /GitHub/ }));
   fireEvent.click(
-    screen.getByRole("checkbox", { name: "Allow create_issue for new tasks" }),
+    screen.getByRole("checkbox", { name: /Allow create_issue for new tasks/ }),
   );
   await waitFor(() => assert.equal(calls.length, 1));
   assert.deepEqual(calls[0], ["7", "github-binding", ["search_repositories"]]);
@@ -914,7 +924,7 @@ test("MCP page stays inside the safe Renderer projection", async () => {
     join(process.cwd(), "frontend/src/features/mcp/McpPage.tsx"),
     "utf8",
   );
-  assert.match(page, /aria-modal="true"/);
+  assert.match(page, /<Dialog\.Root[\s\S]*?<Dialog\.Popup/);
   assert.doesNotMatch(
     page,
     /window\.zero|localStorage|apiKey|marketplace|accessToken|refreshToken|clientSecretValue/i,

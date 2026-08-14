@@ -29,7 +29,7 @@ export const Tooltip = {
   }: ComponentProps<typeof BaseTooltip.Popup>) => (
     <BaseTooltip.Popup
       className={cn(
-        "rounded-[6px] bg-(--ui-content-primary) px-2 py-1 text-xs text-(--ui-surface-panel) shadow-lg",
+        "rounded-[6px] bg-(--ui-content-primary) px-2 py-1 text-xs text-(--ui-surface-panel) shadow-(--ui-shadow-overlay)",
         className,
       )}
       {...props}

@@ -12,6 +12,7 @@ import type {
   McpStdioConnectionInput,
 } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
+import { Button } from "../../components/ui/button.tsx";
 import { Dialog } from "../../components/ui/dialog.tsx";
 import { Checkbox } from "../../components/ui/checkbox.tsx";
 import { Input } from "../../components/ui/input.tsx";
@@ -915,14 +916,15 @@ export function McpPage({
                 })}
               </span>
             )}
-            <button
-              className="primary-button focus-ring"
+            <Button
+              variant="primary"
+              size="sm"
               disabled={mutationLocked}
               onClick={(event) => openAdd(event.currentTarget)}
             >
               <Icon name="plus" />
               {t("mcp.add.action")}
-            </button>
+            </Button>
           </div>
         </header>
 
@@ -952,8 +954,9 @@ export function McpPage({
                   onChange={(event) => onQuery(event.target.value)}
                 />
               </label>
-              <button
-                className="secondary-button focus-ring"
+              <Button
+                variant="secondary"
+                size="sm"
                 disabled={refreshLocked}
                 onClick={() => void refreshCatalog()}
               >
@@ -961,7 +964,7 @@ export function McpPage({
                 {refreshPending || management.operation === "refreshing"
                   ? t("mcp.refresh.refreshing")
                   : t("mcp.refresh.action")}
-              </button>
+              </Button>
             </div>
           )}
 
@@ -980,14 +983,15 @@ export function McpPage({
             </span>
             <h2>{t("mcp.empty_title")}</h2>
             <p>{t("mcp.empty_body")}</p>
-            <button
-              className="primary-button focus-ring"
+            <Button
+              variant="primary"
+              size="sm"
               disabled={mutationLocked}
               onClick={(event) => openAdd(event.currentTarget)}
             >
               <Icon name="plus" />
               {t("mcp.add.action")}
-            </button>
+            </Button>
           </div>
         ) : noResults ? (
           <div className="mcp-empty-state mcp-empty-state-compact">
@@ -1279,16 +1283,18 @@ export function McpPage({
                   <p>{t("mcp.add.defaults")}</p>
                 </div>
                 <footer>
-                  <button
+                  <Button
                     type="button"
-                    className="secondary-button focus-ring"
+                    variant="secondary"
+                    size="sm"
                     onClick={closeDrawer}
                   >
                     {t("common.cancel")}
-                  </button>
-                  <button
+                  </Button>
+                  <Button
                     type="submit"
-                    className="primary-button focus-ring"
+                    variant="primary"
+                    size="sm"
                     disabled={!addValid || mutationLocked || createPending}
                   >
                     {createPending
@@ -1296,7 +1302,7 @@ export function McpPage({
                       : drawerState.kind === "replace"
                         ? t("mcp.edit.submit")
                         : t("mcp.add.submit")}
-                  </button>
+                  </Button>
                 </footer>
               </form>
             ) : selected ? (
@@ -1371,8 +1377,10 @@ export function McpPage({
                         onChange={(event) => setRenameDraft(event.target.value)}
                       />
                     </label>
-                    <button
-                      className="secondary-button focus-ring"
+                    <Button
+                      type="submit"
+                      variant="secondary"
+                      size="sm"
                       disabled={
                         mutationLocked ||
                         pendingServerId === selected.id ||
@@ -1382,7 +1390,7 @@ export function McpPage({
                       }
                     >
                       {t("mcp.rename.action")}
-                    </button>
+                    </Button>
                   </form>
                   <dl className="mcp-connection-summary">
                     <div>
@@ -1501,8 +1509,9 @@ export function McpPage({
                         <p>{t("mcp.approval.help")}</p>
                       </div>
                       {capabilities.connectionApproval ? (
-                        <button
-                          className="primary-button focus-ring"
+                        <Button
+                          variant="primary"
+                          size="sm"
                           disabled={
                             mutationLocked ||
                             pendingServerId === selected.id ||
@@ -1515,15 +1524,16 @@ export function McpPage({
                           }
                         >
                           {t("mcp.approval.action")}
-                        </button>
+                        </Button>
                       ) : (
                         <span>{t("mcp.capability.approval_unavailable")}</span>
                       )}
                     </div>
                   )}
                   <div className="mcp-configuration-actions">
-                    <button
-                      className="secondary-button focus-ring"
+                    <Button
+                      variant="secondary"
+                      size="sm"
                       disabled={
                         mutationLocked ||
                         pendingServerId === selected.id ||
@@ -1533,9 +1543,10 @@ export function McpPage({
                       onClick={() => openReplacement(selected)}
                     >
                       {t("mcp.edit.action")}
-                    </button>
-                    <button
-                      className="secondary-button focus-ring"
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      size="sm"
                       disabled={
                         mutationLocked ||
                         pendingServerId === selected.id ||
@@ -1553,9 +1564,10 @@ export function McpPage({
                       {selected.desiredEnabled
                         ? t("mcp.disable.action")
                         : t("mcp.enable.action")}
-                    </button>
-                    <button
-                      className="danger-button focus-ring"
+                    </Button>
+                    <Button
+                      variant="danger"
+                      size="sm"
                       disabled={
                         mutationLocked ||
                         pendingServerId === selected.id ||
@@ -1567,7 +1579,7 @@ export function McpPage({
                     >
                       <Icon name="trash" />
                       {t("mcp.delete.action")}
-                    </button>
+                    </Button>
                   </div>
                 </section>
 
@@ -1594,8 +1606,9 @@ export function McpPage({
                           <code>{slot.name}</code>
                           <span>{t(`mcp.secret.${slot.status}`)}</span>
                           {capabilities.secretCapture ? (
-                            <button
-                              className="secondary-button focus-ring"
+                            <Button
+                              variant="secondary"
+                              size="sm"
                               disabled={
                                 mutationLocked ||
                                 pendingServerId === selected.id ||
@@ -1617,7 +1630,7 @@ export function McpPage({
                               {slot.status === "set"
                                 ? t("mcp.secret.replace")
                                 : t("mcp.secret.set")}
-                            </button>
+                            </Button>
                           ) : (
                             <span>
                               {t("mcp.capability.capture_unavailable")}
@@ -1641,8 +1654,9 @@ export function McpPage({
                               )}
                             </span>
                             {capabilities.secretCapture ? (
-                              <button
-                                className="secondary-button focus-ring"
+                              <Button
+                                variant="secondary"
+                                size="sm"
                                 disabled={
                                   mutationLocked ||
                                   pendingServerId === selected.id ||
@@ -1661,7 +1675,7 @@ export function McpPage({
                                 "set"
                                   ? t("mcp.secret.replace")
                                   : t("mcp.secret.set")}
-                              </button>
+                              </Button>
                             ) : (
                               <span>
                                 {t("mcp.capability.capture_unavailable")}
@@ -1678,19 +1692,21 @@ export function McpPage({
                               `mcp.authorization_phase.${management.authorizationOperation.kind}`,
                             )}
                           </span>
-                          <button
-                            className="secondary-button focus-ring"
+                          <Button
+                            variant="secondary"
+                            size="sm"
                             disabled={cancelPending}
                             onClick={() => void cancelAuthorization()}
                           >
                             {t("mcp.authorization.cancel")}
-                          </button>
+                          </Button>
                         </>
                       ) : management.authorizationOperation.kind !== "idle" ? (
                         <span>{t("mcp.authorization.busy")}</span>
                       ) : capabilities.oauth ? (
-                        <button
-                          className="primary-button focus-ring"
+                        <Button
+                          variant="primary"
+                          size="sm"
                           disabled={
                             mutationLocked ||
                             selected.approvalStatus !== "approved" ||
@@ -1709,7 +1725,7 @@ export function McpPage({
                           {selected.authorizationStatus === "reauth_required"
                             ? t("mcp.authorization.again")
                             : t("mcp.authorization.action")}
-                        </button>
+                        </Button>
                       ) : (
                         <span>{t("mcp.capability.oauth_unavailable")}</span>
                       )}
@@ -1723,8 +1739,9 @@ export function McpPage({
                       <h3>{t("mcp.detail.runtime")}</h3>
                       <p>{t(`mcp.alignment.${management.runtimeAlignment}`)}</p>
                     </div>
-                    <button
-                      className="primary-button focus-ring"
+                    <Button
+                      variant="primary"
+                      size="sm"
                       disabled={
                         mutationLocked ||
                         pendingServerId === selected.id ||
@@ -1738,7 +1755,7 @@ export function McpPage({
                       {selected.connectionTest.status === "testing"
                         ? t("mcp.test.testing")
                         : t("mcp.test.action")}
-                    </button>
+                    </Button>
                   </header>
                   {selected.connectionTest.status !== "untested" && (
                     <p
@@ -1847,18 +1864,16 @@ export function McpPage({
                       {t(`mcp.confirm.${confirmAction}.body`)}
                     </p>
                     <div>
-                      <button
-                        className="secondary-button focus-ring"
+                      <Button
+                        variant="secondary"
+                        size="sm"
                         onClick={closeConfirmation}
                       >
                         {t("common.cancel")}
-                      </button>
-                      <button
-                        className={
-                          confirmAction === "delete"
-                            ? "danger-button focus-ring"
-                            : "primary-button focus-ring"
-                        }
+                      </Button>
+                      <Button
+                        variant={confirmAction === "delete" ? "danger" : "primary"}
+                        size="sm"
                         onClick={() => {
                           const action = confirmAction;
                           acceptConfirmation();
@@ -1881,7 +1896,7 @@ export function McpPage({
                         }}
                       >
                         {t(`mcp.confirm.${confirmAction}.action`)}
-                      </button>
+                      </Button>
                     </div>
                   </div>
                 )}
