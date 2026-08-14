@@ -648,6 +648,7 @@ export const zhCN: Record<MessageId, string> = {
   "cause.event_pipeline_failure": "活动传递失败",
   "cause.queue_capacity_failure": "工作台容量已满",
   "cause.ui_pipeline_failure": "回复传递失败",
+  "cause.agent_failure": "Agent 执行失败，请检查模型或网络配置",
   "cause.dependency_contract_failure": "任务运行环境已不兼容",
   "cause.stale_catalog": "Skill 未开始执行：所选目录已过期",
   "cause.skill_not_found": "Skill 未开始执行：所选 Skill 已不可用",

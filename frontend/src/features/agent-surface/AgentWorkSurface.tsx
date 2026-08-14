@@ -307,11 +307,14 @@ export function AgentWorkSurface({
                         )}
                       </div>
                     )}
-                    {!run.assistant && !isNonTerminalRun(run.phase) && (
-                      <p className="run-no-final">
-                        {t("run.no_final_response")}
-                      </p>
-                    )}
+                    {!run.assistant &&
+                      !isNonTerminalRun(run.phase) &&
+                      run.outcome !== "failed" &&
+                      run.outcome !== "dependency_contract_failure" && (
+                        <p className="run-no-final">
+                          {t("run.no_final_response")}
+                        </p>
+                      )}
                     {!run.assistant &&
                       run.activities.length === 0 &&
                       isNonTerminalRun(run.phase) && (

@@ -64,6 +64,21 @@ test("resource-limited Run terminal crosses the Host to Renderer contract", () =
   assert.deepEqual(decodeWorkbenchSnapshot(resourceLimited), resourceLimited);
 });
 
+test("Agent execution failure crosses the Host to Renderer contract", () => {
+  const agentFailure = clone(fixture);
+  const task = agentFailure.tasks[0];
+  task.activeOperation = null;
+  task.currentRunId = "0";
+  task.currentRunPhase = null;
+  task.lastRunOutcome = "failed";
+  task.cause = "agent_failure";
+  task.runs[0].phase = "failed";
+  task.runs[0].outcome = "failed";
+  task.runs[0].cause = "agent_failure";
+
+  assert.deepEqual(decodeWorkbenchSnapshot(agentFailure), agentFailure);
+});
+
 test("automatic Workspace projection is one-to-one and capability-gated", () => {
   const automatic = clone(fixture);
   automatic.capabilities.automaticWorkspaces = true;

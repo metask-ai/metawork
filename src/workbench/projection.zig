@@ -1167,6 +1167,7 @@ const RunCause = enum {
     event_pipeline_failure,
     queue_capacity_failure,
     ui_pipeline_failure,
+    agent_failure,
     stale_catalog,
     skill_not_found,
     invalid_skill_arguments,
@@ -12533,7 +12534,7 @@ fn classifyAgentTerminal(result: *const lifecycle.TerminalResult) TerminalDecisi
         .tool_error, .api_error => .{
             .phase = .failed,
             .outcome = .failed,
-            .cause = if (result.termination_signal) |signal| causeForSignal(signal) else null,
+            .cause = if (result.termination_signal) |signal| causeForSignal(signal) else .agent_failure,
         },
         .checkpoint_budget_exhausted, .checkpoint_resource_limit => .{
             .phase = .stopped,
@@ -15760,6 +15761,15 @@ test "Agent terminal facts map once into Workbench product outcomes" {
             .outcome = .dependency_contract_failure,
             .cause = .dependency_contract_failure,
         },
+        classifyAgentTerminal(&terminal),
+    );
+
+    terminal.failure = null;
+    terminal.stop_reason = .api_error;
+    terminal.raw_stop_reason_code = @intFromEnum(lifecycle.StopReason.api_error);
+    terminal.termination_signal = null;
+    try std.testing.expectEqual(
+        TerminalDecision{ .phase = .failed, .outcome = .failed, .cause = .agent_failure },
         classifyAgentTerminal(&terminal),
     );
 }
