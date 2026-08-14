@@ -1020,7 +1020,6 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
             !validText(run.execution_model, limits.max_tool_field_bytes, false) or
             run.execution_generation != task.binding.execution_generation or
             !std.mem.eql(u8, run.execution_provider, task.binding.provider) or
-            !std.mem.eql(u8, run.execution_model, task.binding.model) or
             !validText(run.assistant, limits.max_assistant_message_bytes, true) or
             !validText(run.status, limits.max_tool_field_bytes, true) or
             !validText(run.diagnostic, limits.max_terminal_diagnostic_bytes, true) or

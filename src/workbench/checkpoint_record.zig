@@ -59,7 +59,6 @@ pub const Record = struct {
         self: Record,
         task_id: u64,
         binding_epoch: u64,
-        execution_model: []const u8,
     ) error{InvalidRecord}!void {
         if (self.blob.task_id != task_id or
             self.blob.byte_size == 0 or
@@ -67,7 +66,6 @@ pub const Record = struct {
             self.session.model.len == 0 or
             self.anchor.binding_epoch == 0 or
             self.anchor.binding_epoch != binding_epoch or
-            !std.mem.eql(u8, self.session.model, execution_model) or
             self.anchor.terminal.id() == 0)
             return error.InvalidRecord;
         switch (self.anchor.terminal) {
@@ -95,5 +93,5 @@ test "record owns exactly blob, session binding, and commit anchor facts" {
         .anchor = .{ .terminal = .{ .run = 7 }, .binding_epoch = 3 },
     };
     defer record.deinit(allocator);
-    try record.validateBinding(9, 3, "model-id");
+    try record.validateBinding(9, 3);
 }

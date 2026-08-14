@@ -171,6 +171,8 @@ pub const FakeSession = struct {
     condition: std.Io.Condition = .init,
     description_buffer: [4096]u8 = [_]u8{0} ** 4096,
     permission_session_granted: bool = false,
+    model: [256]u8 = [_]u8{0} ** 256,
+    model_len: usize = 0,
 
     pub fn lock(self: *FakeSession) void {
         self.mutex.lockUncancelable(std.testing.io);
@@ -691,6 +693,14 @@ pub fn sessionCreate(
         diagnostic(out_error);
         return wire.STATUS_INVALID_ARGUMENT;
     };
+    const model = sdk.borrowedBytes(config.?.model) catch {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    };
+    if (model.len == 0 or model.len > 256) {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    }
     const workspace_home = sdk.borrowedBytes(host.workspace_home) catch {
         diagnostic(out_error);
         return wire.STATUS_INVALID_ARGUMENT;
@@ -748,6 +758,8 @@ pub fn sessionCreate(
                 .session_id_len = id.len,
                 .catalog = bound_catalog,
             };
+            @memcpy(session.model[0..model.len], model);
+            session.model_len = model.len;
             fake_core.next_plan = .immediate;
             fake_core.session_created += 1;
             fake_core.credential_seen = std.mem.eql(u8, key, "fixture-secret");
@@ -907,13 +919,36 @@ pub fn sessionDestroy(
 }
 
 pub fn sessionSetModel(
-    _: ?*wire.SessionHandle,
-    _: wire.BytesViewV1,
+    handle: ?*wire.SessionHandle,
+    value: wire.BytesViewV1,
     out_error: ?*wire.OwnedBytesV1,
 ) callconv(.c) u32 {
     if (out_error) |out| out.* = .{ .ptr = null, .len = 0 };
-    diagnostic(out_error);
-    return wire.STATUS_INVALID_STATE;
+    const session: *FakeSession = @ptrCast(@alignCast(handle orelse {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    }));
+    const model = sdk.borrowedBytes(value) catch {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    };
+    if (model.len == 0 or model.len > session.model.len) {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    }
+    session.lock();
+    defer session.unlock();
+    if (!session.in_use or session.destroyed) {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    }
+    if (session.running or session.compacting) {
+        diagnostic(out_error);
+        return wire.STATUS_BUSY;
+    }
+    @memcpy(session.model[0..model.len], model);
+    session.model_len = model.len;
+    return wire.STATUS_OK;
 }
 
 pub fn sessionUpdateSkills(

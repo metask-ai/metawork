@@ -66,6 +66,7 @@ pub const PreparedAttempt = struct {
     checkpoint: checkpoint_record.Record,
     workspace: OwnedWorkspaceBinding,
     execution: owned_execution.OwnedTaskExecution,
+    model: []u8,
     provider: agent.ProviderKind,
     builtin_tool_profile: ?agent.BuiltinToolProfile,
     mcp_selection: ?*agent.McpSelection,
@@ -210,6 +211,7 @@ pub const Job = struct {
             .none, .failure => {},
         }
         if (self.attempt.mcp_selection) |selection| selection.deinit();
+        self.allocator.free(self.attempt.model);
         self.attempt.execution.deinit();
         self.attempt.workspace.deinit();
         self.attempt.checkpoint.deinit(self.allocator);
@@ -263,7 +265,7 @@ pub const Job = struct {
                 .permission_mode = .default,
                 .shell_policy = .unrestricted,
                 .credential = execution.api_key,
-                .model = execution.target.model,
+                .model = self.attempt.checkpoint.session.model,
                 .base_url = execution.target.base_url,
                 .workspace = .{
                     .canonical_root = self.attempt.workspace.canonical_root,
@@ -304,6 +306,13 @@ pub const Job = struct {
                 .degraded
             else
                 .candidate_cleanup_failed };
+
+        route.session.setModel(self.attempt.model) catch {
+            return .{ .failure = if (discardRoute(self.runtime, route))
+                .restore_rejected
+            else
+                .candidate_cleanup_failed };
+        };
 
         snapshot_live = false;
         return .{ .candidate = .{

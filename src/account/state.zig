@@ -584,22 +584,14 @@ pub const Account = struct {
         if (self.state.operation == .none and
             self.state.execution_state == .ready)
         {
-            const attempt = nextAttempt(self.state.next_attempt_id) orelse
-                return .{ .rejected = .generation_mismatch };
             var next = self.state;
-            next.pending_api_key_id = next.selected_api_key_id;
-            next.pending_model.set(model) catch
+            next.selected_model.set(model) catch
                 return .{ .rejected = .invalid_command };
-            next.operation = .loading_keys;
-            next.active_attempt_id = attempt.current;
-            next.attempt_kind = .catalog;
-            next.next_attempt_id = attempt.next;
+            next.operation = .none;
             next.clearError();
-            return transition(
+            return transitionNoAttempt(
                 next,
-                .session_changed,
-                attempt.current,
-                .load_api_keys,
+                .catalog_changed,
             );
         }
         if (self.state.operation != .selecting_model or
@@ -614,6 +606,29 @@ pub const Account = struct {
             ) and
             std.mem.eql(u8, model, next.selected_model.view()))
         {
+            next.operation = .none;
+            next.active_attempt_id = null;
+            next.attempt_kind = .none;
+            next.pending_api_key_id.clear();
+            next.pending_model.clear();
+            next.clearError();
+            return transitionNoEffect(
+                next,
+                .catalog_changed,
+                self.state.active_attempt_id.?,
+            );
+        }
+        // A model-only change updates the Account default for future Tasks.
+        // It must not create a new credential execution generation or replace
+        // the Workbench's live credential owner.
+        if (next.execution_state == .ready and
+            std.mem.eql(
+                u8,
+                next.pending_api_key_id.view(),
+                next.selected_api_key_id.view(),
+            )) {
+            next.selected_model.set(model) catch
+                return .{ .rejected = .invalid_command };
             next.operation = .none;
             next.active_attempt_id = null;
             next.attempt_kind = .none;
@@ -1752,7 +1767,7 @@ test "failed reconfiguration preserves the committed selection" {
     try std.testing.expectEqual(@as(u64, 0), account.view().execution_generation);
 }
 
-test "ready execution reloads authenticated catalog before reconfiguration" {
+test "ready execution model selection updates the default without reconfiguration" {
     var account: Account = .{ .state = .{
         .session_state = .authenticated,
         .execution_state = .ready,
@@ -1797,59 +1812,15 @@ test "ready execution reloads authenticated catalog before reconfiguration" {
         .transition => |value| value,
         else => return error.TestUnexpectedResult,
     };
-    try std.testing.expect(select_model.takeEffect().? == .load_api_keys);
+    try std.testing.expect(select_model.takeEffect() == null);
     commitPrepared(&account, &select_model);
     view = account.view();
-    try std.testing.expectEqualStrings("key-old", view.candidate_api_key_id);
-    try std.testing.expectEqualStrings("model-new", view.candidate_model);
-
-    var keys_loaded: WorkerCompletion = .{
-        .attempt_id = account.activeAttempt().?,
-        .payload = .api_keys_loaded,
-    };
-    var keys_ready = switch (account.prepareCompletion(&keys_loaded)) {
-        .transition => |value| value,
-        else => return error.TestUnexpectedResult,
-    };
-    const models_effect = keys_ready.takeEffect();
-    try std.testing.expectEqualStrings(
-        "key-old",
-        models_effect.?.load_models.view(),
-    );
-    commitPrepared(&account, &keys_ready);
-
-    var models_loaded: WorkerCompletion = .{
-        .attempt_id = account.activeAttempt().?,
-        .payload = .models_loaded,
-    };
-    var models_ready = switch (account.prepareCompletion(&models_loaded)) {
-        .transition => |value| value,
-        else => return error.TestUnexpectedResult,
-    };
-    const model_effect = models_ready.takeEffect();
-    try std.testing.expectEqualStrings(
-        "model-new",
-        model_effect.?.prepare_execution.view(),
-    );
-    commitPrepared(&account, &models_ready);
-
-    view = account.view();
-    try std.testing.expectEqual(OperationKind.persisting, account.state.operation);
-    try std.testing.expectEqual(contract.CatalogState.loading, view.catalog_state);
+    try std.testing.expectEqual(OperationKind.none, account.state.operation);
+    try std.testing.expectEqual(contract.CatalogState.ready, view.catalog_state);
     try std.testing.expectEqualStrings("key-old", view.selected_api_key_id);
-    try std.testing.expectEqualStrings("model-old", view.selected_model);
-    try std.testing.expectEqualStrings("key-old", view.candidate_api_key_id);
-    try std.testing.expectEqualStrings("model-new", view.candidate_model);
-    try std.testing.expectEqualStrings("key-old", view.model_catalog_api_key_id);
-    try std.testing.expect(!view.can_create_task);
-    try std.testing.expect(!view.can_cancel);
-    switch (account.prepareCommand(.cancel_operation)) {
-        .rejected => |error_code| try std.testing.expectEqual(
-            contract.ErrorCode.invalid_state,
-            error_code,
-        ),
-        else => return error.TestUnexpectedResult,
-    }
+    try std.testing.expectEqualStrings("model-new", view.selected_model);
+    try std.testing.expectEqual(@as(u64, 9), view.execution_generation);
+    try std.testing.expect(view.can_create_task);
 }
 
 test "shutdown invalidates active attempt and requires effect consumption" {

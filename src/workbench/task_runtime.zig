@@ -79,6 +79,10 @@ pub const State = struct {
     close_completion: std.atomic.Value(CloseCompletion) = .init(.none),
     close_failed: bool = false,
     cancel_requested: bool = false,
+    /// Runtime-only model selection requested while the Session is busy.
+    /// It is deliberately not part of task persistence and is dropped on
+    /// restart/detach.
+    pending_model: ?[]u8 = null,
 
     pub fn attached(self: *State) ?*LiveAttachment {
         return switch (self.attachment) {
