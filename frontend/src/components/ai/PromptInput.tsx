@@ -1,12 +1,8 @@
-import type {
-  ButtonHTMLAttributes,
-  FormHTMLAttributes,
-  HTMLAttributes,
-  ReactNode,
-  TextareaHTMLAttributes,
-} from "react";
+import type { ComponentProps, FormHTMLAttributes, HTMLAttributes, ReactNode } from "react";
 
-import { cn, focusRing } from "../ui/utils.ts";
+import { Button, type ButtonProps } from "../ui/button.tsx";
+import { Textarea } from "../ui/textarea.tsx";
+import { cn } from "../ui/utils.ts";
 
 export function PromptInput({
   className,
@@ -23,13 +19,8 @@ export function PromptInput({
 export function PromptInputTextarea({
   className,
   ...props
-}: TextareaHTMLAttributes<HTMLTextAreaElement>) {
-  return (
-    <textarea
-      className={cn("ai-prompt-input-textarea", focusRing, className)}
-      {...props}
-    />
-  );
+}: ComponentProps<typeof Textarea>) {
+  return <Textarea className={cn("ai-prompt-input-textarea", className)} {...props} />;
 }
 
 export function PromptInputFooter({
@@ -49,18 +40,20 @@ export function PromptInputSubmit({
   className,
   children,
   ...props
-}: ButtonHTMLAttributes<HTMLButtonElement> & {
+}: ButtonProps & {
   label: string;
   children?: ReactNode;
 }) {
   return (
-    <button
+    <Button
       type="submit"
+      variant="primary"
+      size="sm"
       aria-label={label}
-      className={cn("ai-prompt-input-submit", focusRing, className)}
+      className={cn("ai-prompt-input-submit", className)}
       {...props}
     >
       {children ?? label}
-    </button>
+    </Button>
   );
 }

@@ -8,21 +8,17 @@ import {
 } from "react";
 
 import {
+  CodeBlock,
   Conversation,
   ConversationContent,
-} from "../../components/ai/Conversation.tsx";
-import { CodeBlock } from "../../components/ai/CodeBlock.tsx";
-import {
   Message,
   MessageContent,
   MessageResponse,
-} from "../../components/ai/Message.tsx";
-import {
   Tool,
   ToolContent,
   ToolField,
   ToolHeader,
-} from "../../components/ai/Tool.tsx";
+} from "../../components/ai/index.ts";
 import type {
   PendingUi,
   CompactView,
