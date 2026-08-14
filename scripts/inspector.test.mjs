@@ -210,6 +210,7 @@ test("Inspector shows latest canonical run facts without copying raw output", ()
               progressTruncated: false,
               contentTruncated: false,
               redacted: false,
+              fileRefs: [],
             },
           ],
         }),
