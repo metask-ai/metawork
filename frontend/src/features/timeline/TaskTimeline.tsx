@@ -7,8 +7,22 @@ import {
   type ReactNode,
 } from "react";
 
-import { CodeBlock } from "../../components/ui/CodeBlock.tsx";
-import { Icon } from "../../components/ui/Icon.tsx";
+import {
+  Conversation,
+  ConversationContent,
+} from "../../components/ai/Conversation.tsx";
+import { CodeBlock } from "../../components/ai/CodeBlock.tsx";
+import {
+  Message,
+  MessageContent,
+  MessageResponse,
+} from "../../components/ai/Message.tsx";
+import {
+  Tool,
+  ToolContent,
+  ToolField,
+  ToolHeader,
+} from "../../components/ai/Tool.tsx";
 import type {
   PendingUi,
   CompactView,
@@ -223,13 +237,13 @@ export function TaskTimeline({
   }
 
   return (
-    <div className="timeline-region">
+    <Conversation className="timeline-region">
       <div
         className="timeline-scroll"
         ref={timelineScroll}
         onScroll={updateFollowState}
       >
-        <div className="timeline">
+        <ConversationContent className="timeline">
           {task?.runs.map((run) => {
             const total = tokenTotal(run);
             const activities = orderedActivity(run, task);
@@ -304,9 +318,13 @@ export function TaskTimeline({
                     })}
                     {run.assistant && (
                       <div className="run-delivery">
-                        <section className="timeline-message is-agent">
-                          <p className="message-body">{run.assistant}</p>
-                        </section>
+                        <Message from="assistant" className="timeline-message is-agent">
+                          <MessageContent>
+                            <MessageResponse streaming={isNonTerminalRun(run.phase)}>
+                              {run.assistant}
+                            </MessageResponse>
+                          </MessageContent>
+                        </Message>
                         {run.assistantRedacted && (
                           <p className="projection-note">
                             {t("privacy.sensitive_hidden")}
@@ -355,7 +373,7 @@ export function TaskTimeline({
               <p>{t("task.created_empty_body")}</p>
             </div>
           )}
-        </div>
+        </ConversationContent>
       </div>
 
       {showJumpLatest && (
@@ -363,7 +381,7 @@ export function TaskTimeline({
           {t("timeline.jump_latest")}
         </button>
       )}
-    </div>
+    </Conversation>
   );
 }
 
@@ -408,26 +426,30 @@ function RunInputMessage({ input }: { input: RunInputView }) {
   const { t } = useI18n();
   if (input.kind === "text")
     return (
-      <section className="timeline-message is-user">
-        <p className="message-body">{input.text}</p>
-      </section>
+      <Message from="user" className="timeline-message is-user">
+        <MessageContent>
+          <p className="message-body">{input.text}</p>
+        </MessageContent>
+      </Message>
     );
   return (
-    <section className="timeline-message is-user is-skill">
-      <div className="timeline-skill-input">
-        <span className="timeline-skill-token">
-          /{input.invocationName}
-          <small>{t("slash.group.skills")}</small>
-        </span>
-        {input.argumentValues.length > 0 && (
-          <span className="timeline-skill-arguments">
-            {input.argumentValues.map((value, index) => (
-              <code key={index}>{value}</code>
-            ))}
+    <Message from="user" className="timeline-message is-user is-skill">
+      <MessageContent>
+        <div className="timeline-skill-input">
+          <span className="timeline-skill-token">
+            /{input.invocationName}
+            <small>{t("slash.group.skills")}</small>
           </span>
-        )}
-      </div>
-    </section>
+          {input.argumentValues.length > 0 && (
+            <span className="timeline-skill-arguments">
+              {input.argumentValues.map((value, index) => (
+                <code key={index}>{value}</code>
+              ))}
+            </span>
+          )}
+        </div>
+      </MessageContent>
+    </Message>
   );
 }
 
@@ -450,37 +472,26 @@ function ToolCard({
     tool.state === "completed" ? "completed" : tool.state,
   );
   return (
-    <details
+    <Tool
       className="tool-card"
-      data-state={tool.state}
+      state={tool.state}
       open={tool.state === "running" || tool.state === "failed"}
     >
-      <summary className="tool-card-summary">
-        <span className="tool-card-identity">
-          <span
-            className="tool-state-dot"
-            data-state={tool.state}
-            aria-hidden="true"
-          />
-          <span className="tool-card-name">{tool.name}</span>
-        </span>
-        <span className="tool-card-meta">
-          <span className="tool-summary-state" data-state={tool.state}>
-            <strong>{state}</strong>
-            {duration !== null && duration > 0n && (
-              <span>
-                {t("tool.duration_ms", {
-                  count: formatMilliseconds(locale, duration),
-                })}
-              </span>
-            )}
-          </span>
-          <span className="tool-disclosure" aria-hidden="true">
-            <Icon name="chevron" />
-          </span>
-        </span>
-      </summary>
-      <div className="tool-card-body">
+      <ToolHeader
+        className="tool-card-summary"
+        name={tool.name}
+        status={state}
+        meta={
+          duration !== null && duration > 0n ? (
+            <span>
+              {t("tool.duration_ms", {
+                count: formatMilliseconds(locale, duration),
+              })}
+            </span>
+          ) : undefined
+        }
+      />
+      <ToolContent className="tool-card-body">
         {(tool.redacted ||
           tool.inputTruncated ||
           tool.progressTruncated ||
@@ -494,15 +505,21 @@ function ToolCard({
             )}
           </div>
         )}
-        <CodeBlock label={t("tool.input")} value={tool.input} />
+        <ToolField label={t("tool.input")}>
+          <CodeBlock label={t("tool.input")} value={tool.input} />
+        </ToolField>
         {tool.progress && (
-          <CodeBlock label={t("tool.progress")} value={tool.progress} />
+          <ToolField label={t("tool.progress")}>
+            <CodeBlock label={t("tool.progress")} value={tool.progress} />
+          </ToolField>
         )}
         {tool.content && (
-          <CodeBlock
-            label={tool.isError ? t("tool.error") : t("tool.result")}
-            value={tool.content}
-          />
+          <ToolField label={tool.isError ? t("tool.error") : t("tool.result")}>
+            <CodeBlock
+              label={tool.isError ? t("tool.error") : t("tool.result")}
+              value={tool.content}
+            />
+          </ToolField>
         )}
         {onInspect && (
           <button
@@ -512,7 +529,7 @@ function ToolCard({
             {t("inspector.view_details")}
           </button>
         )}
-      </div>
-    </details>
+      </ToolContent>
+    </Tool>
   );
 }

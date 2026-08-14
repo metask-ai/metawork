@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-import { CodeBlock } from "../../components/ui/CodeBlock.tsx";
+import { CodeBlock } from "../../components/ai/CodeBlock.tsx";
 import { Checkbox } from "../../components/ui/checkbox.tsx";
 import { Button } from "../../components/ui/button.tsx";
 import { Icon } from "../../components/ui/Icon.tsx";

@@ -1,5 +1,11 @@
 import { useId } from "react";
 
+/**
+ * AI-facing code and tool-output presentation primitive.
+ *
+ * Product features own the labels and the source of the already projected
+ * value; this component only owns bounded, accessible presentation.
+ */
 export function CodeBlock({ label, value }: { label: string; value: string }) {
   const labelId = useId();
   return (
