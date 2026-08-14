@@ -49,6 +49,44 @@ test("the canonical Workbench fixture decodes without normalization", () => {
   );
 });
 
+test("ranged file references use canonical decimal wire strings", () => {
+  const ranged = clone(fixture);
+  ranged.tasks[0].runs[0].tools = [
+    {
+      id: "tool-1",
+      order: "1",
+      name: "Read",
+      input: "{}",
+      progress: "",
+      content: "ok",
+      state: "completed",
+      isError: false,
+      elapsedMs: "1",
+      inputTruncated: false,
+      progressTruncated: false,
+      contentTruncated: false,
+      redacted: false,
+      fileRefs: [
+        {
+          id: "file-3-1-1-1",
+          title: "main.zig",
+          displayPath: "src/main.zig",
+          kind: "read",
+          range: {
+            start: { line: "1", column: "1" },
+            end: { line: "2", column: "1" },
+          },
+        },
+      ],
+    },
+  ];
+  assert.deepEqual(decodeWorkbenchSnapshot(ranged), ranged);
+
+  const numericRange = clone(ranged);
+  numericRange.tasks[0].runs[0].tools[0].fileRefs[0].range.start.line = 1;
+  assert.throws(() => decodeWorkbenchSnapshot(numericRange), /expected string/);
+});
+
 test("resource-limited Run terminal crosses the Host to Renderer contract", () => {
   const resourceLimited = clone(fixture);
   const task = resourceLimited.tasks[0];
@@ -912,6 +950,7 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     progressTruncated: false,
     contentTruncated: false,
     redacted: false,
+    fileRefs: [],
   });
   assert.throws(
     () => decodeWorkbenchSnapshot(mismatchedToolFailure),
@@ -1042,6 +1081,7 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     progressTruncated: false,
     contentTruncated: false,
     redacted: false,
+    fileRefs: [],
   });
   duplicateActivityOrder.tasks[0].uiHistory.push({
     requestId: "10",
@@ -1087,7 +1127,8 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     },
   });
   assert.doesNotThrow(() => decodeWorkbenchSnapshot(permissionHistory));
-  permissionHistory.tasks[0].uiHistory[0].permission.requestId = "other-request";
+  permissionHistory.tasks[0].uiHistory[0].permission.requestId =
+    "other-request";
   assert.throws(
     () => decodeWorkbenchSnapshot(permissionHistory),
     /permission request identity must match record/,
@@ -1108,6 +1149,7 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     progressTruncated: false,
     contentTruncated: false,
     redacted: false,
+    fileRefs: [],
   };
   duplicateToolIdentity.tasks[0].runs[0].tools.push(firstDuplicateTool, {
     ...firstDuplicateTool,

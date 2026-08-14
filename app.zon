@@ -48,6 +48,7 @@
             .{ .name = "metawork.mcp.refreshCatalog", .origins = .{"zero://app"} },
             .{ .name = "metawork.workbench.snapshot", .origins = .{"zero://app"} },
             .{ .name = "metawork.workbench.snapshot.chunk", .origins = .{"zero://app"} },
+            .{ .name = "metawork.files.preview", .origins = .{"zero://app"} },
             .{ .name = "metawork.account.beginLogin", .origins = .{"zero://app"} },
             .{ .name = "metawork.account.cancelOperation", .origins = .{"zero://app"} },
             .{ .name = "metawork.account.refreshCatalog", .origins = .{"zero://app"} },

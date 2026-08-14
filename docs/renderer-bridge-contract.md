@@ -27,6 +27,34 @@ Host 与 Renderer 随同一应用包原子发布，不承担旧 Renderer/新 Hos
 
 Renderer Bridge 使用独立合同身份 `metawork.renderer-bridge`，快速开发阶段固定 revision 为 `1`。Host 与 Renderer 随同一应用包原子发布，任何 command、event、payload 字段或 wire 语义变化都直接原地 hard cut，不为临时合同形态递增 revision、不维护兼容层，也不在 snapshot 内维护第二个局部版本。`contractRevision` 仍精确匹配，用于拒绝非当前固定标识，但不承诺识别同 revision 的开发产物错配。任何合同类版本标识的变更都必须先得到用户显式同意；对本文件即包括 Renderer Bridge revision。
 
+## File preview command (v1)
+
+`metawork.files.preview` accepts exactly `{ "fileReferenceId": string }`. The
+Renderer never submits a filesystem path, URI, shell command, or AgentCore
+handle. The Host resolves the opaque id against Workbench history, rechecks
+workspace containment and no-follow file access, and returns a bounded UTF-8
+preview:
+
+```json
+{
+  "state": "ready | truncated | missing | restricted | unsupported | error",
+  "id": "file-id",
+  "title": "main.zig",
+  "displayPath": "src/main.zig",
+  "language": "zig",
+  "content": "...",
+  "truncated": false,
+  "range": null
+}
+```
+
+Line and column values in `range` are canonical decimal strings in both the
+`metawork.files.preview` response and Snapshot `tools[].fileRefs[]` entries.
+The Host converts AgentCore's typed numeric positions at this wire boundary;
+Renderer decoders do not accept a second numeric representation. Preview
+content is bounded by the Workbench limits and is never persisted as a second
+product state; the file reference metadata is persisted with Task history.
+
 当前 `metawork.tasks.run` 只有 `input.kind = text | skill` 的 tagged payload，旧 `prompt` 不兼容；`tasks.create` 必须携带 `workspace = { kind: "automatic" } | { kind: "manual", workspaceId, expectedWorkspaceEpoch }` 和 nullable `expectedSkillCatalogRevision`。Bridge 与 Workbench 直接使用同一组 `manual | automatic` admission 语义；混合、缺字段或未知 kind 的 payload 一律 fail closed。不存在 `workspaces.select` 命令或 Snapshot 级 selected Workspace；Manual 选择只属于 Renderer New task draft，真正的 epoch、authorization 与 recent order 在 `tasks.create(manual)` 事务中校验和提交。`automaticWorkspaces` 只声明新 Automatic Workspace 的分配能力；capability 不可用时，已恢复的 Automatic Workspace 与 owning Task 历史仍可出现在 snapshot 中。Skill 没有 `runSkill` 第二入口。Workspace/Task catalog、typed Run history 和 Skill terminal cause 只从 Workbench snapshot 发布；显式 catalog refresh 也只通过 Bridge 调用 Workbench transaction，Bridge 不持有 catalog lease、不解析 slash、不读取 Skill body。
 
 Conversation recovery 使用同一 revision 1 数据面上的 `metawork.tasks.restore`。payload 精确为 `{ taskId, expectedBindingEpoch }`，结果精确为 `{ accepted, taskId, attemptId, reason }`；`attemptId` 仅在 accepted 时为 canonical decimal `u64`，reason 仅在 rejected 时取 `binding_changed | task_unavailable | recovery_unavailable | capacity_reached | shutting_down`。Bridge 只负责严格 decode、Task authority 与结果 encode，不读取 checkpoint、不决定 eligibility、不调用 Agent。该 command 可由用户 Retry 或发送路径内部调用；accepted 只表示恢复 job 已入队，Renderer 必须等待同一 Task 的 canonical snapshot 确认 attachment 后才能提交 `tasks.run`。结果不确定或 Renderer timeout 时只能 resync snapshot，不能自动重放。
