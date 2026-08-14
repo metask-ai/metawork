@@ -82,6 +82,7 @@
   --color-ui-border: var(--ui-border);
   --color-ui-primary-border: var(--ui-action-primary-border);
   --color-ui-warning: var(--ui-content-warning);
-  --font-metask-sans: var(--metask-font-sans);
-  --font-metask-mono: var(--metask-font-mono);
+  --font-sans: var(--metask-font-sans);
+  --font-mono: var(--metask-font-mono);
+  --font-display: var(--metask-font-sans);
 }

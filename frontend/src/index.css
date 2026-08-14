@@ -1,31 +1,5 @@
-@import "./styles/metask-tokens.css";
 @import "tailwindcss";
-
-@theme {
-  --ui-surface-canvas: #ffffff;
-  --ui-surface-panel: #faf9fc;
-  --ui-surface-panel-2: #f3f1f8;
-  --ui-surface-panel-2: #f7f6fa;
-  --ui-content-primary: #25222d;
-  --ui-content-muted: #6e6879;
-  --ui-border: #e3e0e9;
-  --ui-action-primary-hover: #4e38c2;
-  --ui-action-primary: #5b46d8;
-  --ui-action-primary: #6c5cff;
-  --ui-action-primary-border: #cbc4fa;
-  --metask-primary-soft: #eae7ff;
-  --metask-primary-soft: #f6f4ff;
-  --metask-state-complete: #287a54;
-  --metask-state-warning: #9c5b10;
-  --ui-content-warning: #7d4308;
-  --metask-state-error: #b6424c;
-  --font-display: var(--font-sans);
-  --font-sans:
-    -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "PingFang SC",
-    "Microsoft YaHei", sans-serif;
-  --font-mono:
-    "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-}
+@import "./styles/metask-tokens.css";
 
 :root {
   --window-bar-height: 52px;
