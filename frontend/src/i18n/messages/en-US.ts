@@ -129,7 +129,6 @@ export const enUS = {
   "mcp.title": "MCP",
   "mcp.subtitle":
     "Review trusted servers and the tools they make available to MetaWork.",
-  "mcp.desired_generation": "Desired · {generation}",
   "mcp.search_label": "Search MCP servers and tools",
   "mcp.search_placeholder": "Search servers and tools",
   "mcp.section.attention": "Needs attention",
@@ -282,6 +281,18 @@ export const enUS = {
     "Allowed, but unavailable in the current Runtime",
   "mcp.tool.not_allowed": "Discovered, but not allowed",
   "mcp.tool.toggle": "Allow {name} for new tasks",
+  "mcp.pipeline.label": "Setup progress",
+  "mcp.pipeline.test_pending": "Test connection",
+  "mcp.pipeline.test_connected": "Connected · {tools} tools",
+  "mcp.pipeline.test_failed": "Connection failed · {issues} issues",
+  "mcp.pipeline.tools": "{allowed}/{total} tools allowed",
+  "mcp.pipeline.restart_hint": "After restarting, new tasks can use this connection; existing tasks are unaffected",
+  "mcp.detail.allow_all": "Allow all {count}",
+  "mcp.confirm.allow_all.title": "Allow every discovered tool?",
+  "mcp.confirm.allow_all.body":
+    "All currently discovered tools will be allowed; tools discovered later stay excluded by default.",
+  "mcp.confirm.allow_all.action": "Allow all",
+  "mcp.auth.static_locked": " (unavailable: secure input required)",
   "mcp.confirm.enable.title": "Enable this server?",
   "mcp.confirm.enable.body":
     "Connection changes may require restart. Open tasks keep their current access.",
