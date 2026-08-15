@@ -220,7 +220,6 @@ pub const Dispatcher = struct {
             .{ .name = commands.window_chrome_control, .function = controlWindowChrome },
             .{ .name = commands.window_chrome_disconnect, .function = disconnectWindowChrome },
             .{ .name = commands.choose_workspace, .function = chooseWorkspace },
-            .{ .name = commands.remove_workspace, .function = removeWorkspace },
             .{ .name = commands.refresh_workspace_skill_catalog, .function = refreshWorkspaceSkillCatalog },
             .{ .name = commands.refresh_skill_catalog, .function = refreshSkillCatalog },
             .{ .name = commands.choose_skill_import, .function = chooseSkillImport },
@@ -931,41 +930,6 @@ pub const Dispatcher = struct {
             output,
             "{{\"selected\":true,\"workspaceId\":\"{d}\"}}",
             .{workspace_id},
-        );
-    }
-
-    fn removeWorkspace(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
-        const self: *Dispatcher = @ptrCast(@alignCast(context));
-        var callback = try self.callbacks.enter();
-        defer callback.deinit();
-        try self.requireWindow(invocation.source.window_id);
-        var parsed = try handlers.parsePayload(handlers.WorkspaceIdentity, invocation.request.payload);
-        defer parsed.deinit();
-        const workspace_id = try handlers.parseWireId(parsed.value.workspaceId);
-        const expected_epoch = try handlers.parseWireId(parsed.value.expectedWorkspaceEpoch);
-        const workbench = try self.requireWorkbench();
-        workbench.removeWorkspaceAtEpoch(workspace_id, expected_epoch) catch |err| {
-            if (workspaceRemovalRejection(err)) |reason| {
-                if (std.mem.eql(u8, reason, "removal_failed"))
-                    self.notifyCommitted();
-                return encodeWorkspaceMutationResult(
-                    output,
-                    false,
-                    workspace_id,
-                    null,
-                    reason,
-                );
-            }
-            return err;
-        };
-        const workspace_epoch = try workbench.workspaceEpoch(workspace_id);
-        self.notifyCommitted();
-        return encodeWorkspaceMutationResult(
-            output,
-            true,
-            workspace_id,
-            workspace_epoch,
-            null,
         );
     }
 
@@ -2856,19 +2820,6 @@ fn skillMutationMayHaveCommitted(err: anyerror) bool {
     };
 }
 
-fn workspaceRemovalRejection(err: anyerror) ?[]const u8 {
-    return switch (err) {
-        error.WorkspaceEpochMismatch => "workspace_changed",
-        error.UnknownWorkspace => "workspace_unavailable",
-        error.WorkspaceRemovalInProgress => "workspace_removing",
-        error.WorkspaceEpochExhausted => "capacity_reached",
-        // Every other error here is produced after removal admission while
-        // starting Task shutdown. Workbench has already restored the
-        // Workspace and published `lastRemovalFailure` for snapshot recovery.
-        else => "removal_failed",
-    };
-}
-
 fn encodeTaskCreateResult(
     output: []u8,
     accepted: bool,
@@ -2968,11 +2919,13 @@ fn encodeTaskModelSelectionResult(
     }) catch return error.NoSpaceLeft;
     if (model) |value|
         std.json.Stringify.value(value, .{}, &writer) catch return error.NoSpaceLeft
-    else writer.writeAll("null") catch return error.NoSpaceLeft;
+    else
+        writer.writeAll("null") catch return error.NoSpaceLeft;
     writer.writeAll(",\"reason\":") catch return error.NoSpaceLeft;
     if (reason) |value|
         std.json.Stringify.value(value, .{}, &writer) catch return error.NoSpaceLeft
-    else writer.writeAll("null") catch return error.NoSpaceLeft;
+    else
+        writer.writeAll("null") catch return error.NoSpaceLeft;
     writer.writeByte('}') catch return error.NoSpaceLeft;
     return writer.buffered();
 }
@@ -3139,37 +3092,6 @@ fn encodeSkillDetailUnavailable(output: []u8, reason: []const u8) ![]const u8 {
     writer.writeAll("{\"available\":false,\"definition\":null,\"fileCount\":0,\"totalBytes\":0,\"reason\":") catch
         return error.NoSpaceLeft;
     std.json.Stringify.value(reason, .{}, &writer) catch return error.NoSpaceLeft;
-    writer.writeByte('}') catch return error.NoSpaceLeft;
-    return writer.buffered();
-}
-
-fn encodeWorkspaceMutationResult(
-    output: []u8,
-    accepted: bool,
-    workspace_id: u64,
-    workspace_epoch: ?u64,
-    reason: ?[]const u8,
-) ![]const u8 {
-    const valid = workspace_id != 0 and if (accepted)
-        workspace_epoch != null and workspace_epoch.? != 0 and reason == null
-    else
-        workspace_epoch == null and reason != null;
-    if (!valid)
-        return error.InvalidWorkspaceMutationResult;
-    var writer = std.Io.Writer.fixed(output);
-    writer.print("{{\"accepted\":{},\"workspaceId\":\"{d}\",\"workspaceEpoch\":", .{
-        accepted,
-        workspace_id,
-    }) catch return error.NoSpaceLeft;
-    if (workspace_epoch) |value|
-        writer.print("\"{d}\"", .{value}) catch return error.NoSpaceLeft
-    else
-        writer.writeAll("null") catch return error.NoSpaceLeft;
-    writer.writeAll(",\"reason\":") catch return error.NoSpaceLeft;
-    if (reason) |value|
-        std.json.Stringify.value(value, .{}, &writer) catch return error.NoSpaceLeft
-    else
-        writer.writeAll("null") catch return error.NoSpaceLeft;
     writer.writeByte('}') catch return error.NoSpaceLeft;
     return writer.buffered();
 }
@@ -3402,22 +3324,6 @@ test "mutation response encoders reject every inconsistent success and rejection
     try std.testing.expectError(
         error.InvalidTaskRestoreResult,
         encodeTaskRestoreResult(&output, true, 1, 0, null),
-    );
-    try std.testing.expectError(
-        error.InvalidWorkspaceMutationResult,
-        encodeWorkspaceMutationResult(&output, false, 1, 2, "workspace_changed"),
-    );
-    try std.testing.expectError(
-        error.InvalidWorkspaceMutationResult,
-        encodeWorkspaceMutationResult(&output, false, 1, null, null),
-    );
-    try std.testing.expectError(
-        error.InvalidWorkspaceMutationResult,
-        encodeWorkspaceMutationResult(&output, true, 0, 2, null),
-    );
-    try std.testing.expectError(
-        error.InvalidWorkspaceMutationResult,
-        encodeWorkspaceMutationResult(&output, true, 1, 0, null),
     );
 }
 

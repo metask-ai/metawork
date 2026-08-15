@@ -42,7 +42,6 @@ import {
   decodeScheduledTaskEnabledResult,
   decodeScheduledTaskRunResult,
   assertScheduledTaskDeleted,
-  decodeWorkspaceMutationResult,
   decodeWorkspaceChoice,
   decodeSkillImportPreview,
   decodeSkillMutationResult,
@@ -433,16 +432,6 @@ export class BridgeClient {
         expectedDesiredGeneration,
         serverId,
       }),
-    );
-  }
-
-  async removeWorkspace(workspaceId: string, expectedWorkspaceEpoch: string) {
-    return decodeWorkspaceMutationResult(
-      await this.invoke(commands.removeWorkspace, {
-        workspaceId,
-        expectedWorkspaceEpoch,
-      }),
-      workspaceId,
     );
   }
 

@@ -83,19 +83,6 @@ const callbacks = {
   onBack() {},
 };
 
-const workspaceSettingsProps = {
-  manualWorkspaces: [],
-  tasks: [],
-  workspaceDisabled: false,
-  workspaceBusy: false,
-  async onChooseWorkspace() {
-    return { kind: "cancelled" };
-  },
-  async onRemoveWorkspace() {
-    return { kind: "accepted" };
-  },
-};
-
 function withI18n(child) {
   return renderToStaticMarkup(
     createElement(
@@ -136,7 +123,6 @@ function renderSettings(account) {
       focusTarget: "title",
       disabled: false,
       cancelDisabled: false,
-      ...workspaceSettingsProps,
       ...callbacks,
     }),
   );

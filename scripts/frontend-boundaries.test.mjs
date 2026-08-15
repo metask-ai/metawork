@@ -176,7 +176,8 @@ test("Task persistence failure disables mutations without hiding Task history", 
     /actionDisabled=\{workbenchMutationDisabled \|\| workspaceBusy\}/,
   );
   assert.match(app, /<TaskList[\s\S]*tasks=\{navigableTaskItems\}/);
-  assert.doesNotMatch(taskList, /disabled=/);
+  assert.match(taskList, /className="task-list-item focus-ring"/);
+  assert.match(taskList, /disabled=\{taskMutationDisabled/);
 });
 
 test("draft Workspace selection stays local until Task creation", async () => {
@@ -206,25 +207,68 @@ test("Task and draft contexts do not recreate a global active Workspace", async 
   );
 });
 
-test("Workspace lifecycle recovery lives in Settings with explicit focus handling", async () => {
-  const [app, settings] = await Promise.all([
+test("Settings is a full content overlay that preserves the Workbench mount", async () => {
+  const [app, shell, status, css] = await Promise.all([
     readFile(resolve(sourceRoot, "app", "App.tsx"), "utf8"),
-    readFile(
-      resolve(sourceRoot, "features", "settings", "WorkspaceSettings.tsx"),
-      "utf8",
-    ),
+    readFile(resolve(sourceRoot, "app", "AppShell.tsx"), "utf8"),
+    readFile(resolve(sourceRoot, "app", "command-bar-status.ts"), "utf8"),
+    readFile(resolve(sourceRoot, "index.css"), "utf8"),
   ]);
-  assert.match(app, /workspace\.kind === "manual"/);
-  assert.match(settings, /manualWorkspaces: WorkspaceView\[\]/);
-  assert.match(settings, /lastRemovalFailure/);
-  assert.match(settings, /removalCancel\.current\?\.focus\(\)/);
-  assert.match(settings, /event\.key !== "Escape"/);
-  assert.match(settings, /onRemoveWorkspace\(workspaceId\)/);
   assert.match(
     app,
-    /intent\.kind === "reauthorize"[\s\S]*result\.workspaceId !== intent\.workspaceId[\s\S]*kind: "target_mismatch"/,
+    /const \[settingsOpen, setSettingsOpen\] = useState\(false\)/,
   );
-  assert.doesNotMatch(settings, /dispatchWorkbench|selectWorkspace/);
+  assert.match(
+    app,
+    /settingsRestoreFocus = useRef<HTMLElement \| null>\(null\)/,
+  );
+  assert.match(
+    app,
+    /settingsRestoreFocus\.current\?\.focus\(\);[\s\S]*settingsRestoreFocus\.current = null/,
+  );
+  assert.match(app, /overlay=\{\s*settingsOpen \?/);
+  assert.doesNotMatch(app, /route === "settings" \?\s*\(/);
+  assert.doesNotMatch(app, /settingsOpen \? "settings" : route/);
+  assert.doesNotMatch(status, /export type ShellRoute\s*=[^;]*"settings"/);
+  assert.match(
+    shell,
+    /className="commandbar-leading-actions"[\s\S]*?inert=\{overlay \? true : undefined\}/,
+  );
+  assert.match(
+    shell,
+    /className="commandbar-context"[\s\S]*?inert=\{overlay \? true : undefined\}/,
+  );
+  assert.match(
+    shell,
+    /className="commandbar-alert-slot"[\s\S]*?inert=\{overlay \? true : undefined\}/,
+  );
+  assert.match(
+    shell,
+    /if \(overlay && attentionDetails\.current\)[\s\S]*?attentionDetails\.current\.open = false/,
+  );
+  assert.match(
+    shell,
+    /className="commandbar-alert-slot"[\s\S]*?<\/div>\s*<WindowControls/,
+  );
+  assert.match(
+    shell,
+    /className="app-columns" inert=\{overlay \? true : undefined\}/,
+  );
+  assert.match(
+    css,
+    /\.app-overlay-layer\s*\{[\s\S]*inset: var\(--window-bar-height\) 0 0;/,
+  );
+  assert.match(
+    css,
+    /\.settings-header,\s*\.settings-layout\s*\{[\s\S]*width: 100%;/,
+  );
+  const settings = await readFile(
+    resolve(sourceRoot, "features", "settings", "SettingsPage.tsx"),
+    "utf8",
+  );
+  assert.match(settings, /role="dialog"/);
+  assert.match(settings, /aria-modal="true"/);
+  assert.doesNotMatch(settings, /settings-workspaces|WorkspaceSettings/);
 });
 
 test("Renderer draws declarative titlebar controls while Bridge and Host own native behavior", async () => {

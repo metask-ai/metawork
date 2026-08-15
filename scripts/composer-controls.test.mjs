@@ -333,24 +333,14 @@ function settingsElement(account, overrides = {}) {
     },
     createElement(SettingsPage, {
       account,
-      manualWorkspaces: [],
-      tasks: [],
       focusTarget: "title",
       disabled: false,
-      workspaceDisabled: false,
-      workspaceBusy: false,
       cancelDisabled: false,
       onBack() {},
       onRefresh() {},
       onCancel() {},
       onSelectApiKey() {},
       onSelectModel() {},
-      async onChooseWorkspace() {
-        return { kind: "cancelled" };
-      },
-      async onRemoveWorkspace() {
-        return { kind: "accepted" };
-      },
       onBeginLogin() {},
       onLogout() {},
       ...overrides,
@@ -376,28 +366,6 @@ function renderSettings(account, overrides = {}) {
     rerenderAccount(nextAccount) {
       view.rerender(settingsElement(nextAccount, callbacks));
     },
-  };
-}
-
-function settingsWorkspace(id, authorization, lastRemovalFailure = null) {
-  return {
-    id,
-    epoch: "3",
-    kind: "manual",
-    displayName: id,
-    canonicalRoot: `/repo/${id}`,
-    redacted: false,
-    authorization,
-    lastRemovalFailure,
-    skillCatalog: {
-      availability: "ready",
-      redacted: false,
-      revision: "1",
-      skills: [],
-      issues: [],
-    },
-    recentOrder: id,
-    signals: { running: 0, attention: 0, failedOrInterrupted: 0 },
   };
 }
 
@@ -596,16 +564,12 @@ test("Settings keeps section navigation fixed while content scrolls independentl
   renderSettings(readySettingsAccount);
   const page = document.querySelector(".settings-page");
   const content = document.querySelector(".settings-content");
-  const workspaceSection = document.querySelector("#settings-workspaces");
   const accountSection = document.querySelector("#settings-account");
   Object.defineProperty(content, "clientHeight", {
     configurable: true,
     value: 680,
   });
   content.getBoundingClientRect = () => ({ top: 100 });
-  workspaceSection.getBoundingClientRect = () => ({
-    top: 360 - content.scrollTop,
-  });
   accountSection.getBoundingClientRect = () => ({
     top: 520 - content.scrollTop,
   });
@@ -634,170 +598,17 @@ test("Settings keeps section navigation fixed while content scrolls independentl
   );
 });
 
-test(
-  "Settings owns Workspace lifecycle without restoring sidebar navigation",
-  { timeout: 2_000 },
-  async () => {
-    const removals = [];
-    renderSettings(readySettingsAccount, {
-      manualWorkspaces: [
-        {
-          id: "workspace-1",
-          epoch: "3",
-          kind: "manual",
-          displayName: "metawork",
-          canonicalRoot: "/Users/example/Projects/metawork",
-          redacted: false,
-          authorization: "available",
-          lastRemovalFailure: null,
-          skillCatalog: {
-            availability: "ready",
-            redacted: false,
-            revision: "1",
-            skills: [],
-            issues: [],
-          },
-          recentOrder: "1",
-          signals: { running: 0, attention: 0, failedOrInterrupted: 0 },
-        },
-      ],
-      tasks: [],
-      async onRemoveWorkspace(workspaceId) {
-        removals.push(workspaceId);
-        return { kind: "accepted" };
-      },
-    });
-
-    assert.equal(
-      screen.getByRole("link", { name: "Work directories" }) != null,
-      true,
-    );
-    assert.match(
-      screen.getByText("/Users/example/Projects/metawork").textContent,
-      /metawork/,
-    );
-    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
-    assert.match(
-      screen.getByRole("group", { name: "Remove this work directory?" })
-        .textContent,
-      /local files will remain/,
-    );
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-    assert.equal(screen.queryByText("Remove this work directory?"), null);
-    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
-    fireEvent.click(screen.getByRole("button", { name: "Remove directory" }));
-    await Promise.resolve();
-    assert.deepEqual(removals, ["workspace-1"]);
-  },
-);
-
-test("Workspace settings expose canonical removal and authorization recovery states", () => {
+test("Settings closes on Escape at the surface boundary", () => {
+  let closed = 0;
   renderSettings(readySettingsAccount, {
-    manualWorkspaces: [
-      settingsWorkspace("reauthorize", "reauthorization_required"),
-      settingsWorkspace("failed", "available", "task_close_failed"),
-      settingsWorkspace("removing", "removing"),
-    ],
-  });
-
-  assert.equal(
-    screen.getByRole("button", { name: "Confirm access" }) != null,
-    true,
-  );
-  assert.equal(
-    screen.getByRole("button", { name: "Retry removal" }) != null,
-    true,
-  );
-  assert.equal(screen.getByText("Removing") != null, true);
-});
-
-test("Workspace reauthorization preserves the target Host identity", async () => {
-  const intents = [];
-  renderSettings(readySettingsAccount, {
-    manualWorkspaces: [settingsWorkspace("target", "reauthorization_required")],
-    async onChooseWorkspace(intent) {
-      intents.push(intent);
-      return {
-        kind: "target_mismatch",
-        chosenWorkspaceId: "different",
-      };
+    onBack() {
+      closed += 1;
     },
   });
-
-  fireEvent.click(screen.getByRole("button", { name: "Confirm access" }));
-  await waitFor(() =>
-    assert.match(
-      screen.getByRole("alert").textContent,
-      /selected directory was added.*still needs access/i,
-    ),
-  );
-  assert.deepEqual(intents, [{ kind: "reauthorize", workspaceId: "target" }]);
-  const row = screen
-    .getByText("/repo/target")
-    .closest(".settings-workspace-row");
-  assert.equal(row.contains(screen.getByRole("alert")), true);
+  const page = screen.getByRole("dialog", { name: "Settings" });
+  fireEvent.keyDown(page, { key: "Escape" });
+  assert.equal(closed, 1);
 });
-
-test(
-  "Workspace mutation rejection stays with the affected directory",
-  { timeout: 2_000 },
-  async () => {
-    renderSettings(readySettingsAccount, {
-      manualWorkspaces: [
-        settingsWorkspace("target", "available"),
-        settingsWorkspace("other", "available"),
-      ],
-      async onRemoveWorkspace() {
-        return { kind: "rejected", reason: "workspace_changed" };
-      },
-    });
-
-    const targetRow = screen
-      .getByText("/repo/target")
-      .closest(".settings-workspace-row");
-    fireEvent.click(within(targetRow).getByRole("button", { name: "Remove" }));
-    fireEvent.click(screen.getByRole("button", { name: "Remove directory" }));
-    await waitFor(() =>
-      assert.equal(targetRow.querySelector('[role="alert"]') != null, true),
-    );
-    assert.equal(
-      screen
-        .getByText("/repo/other")
-        .closest(".settings-workspace-row")
-        .querySelector('[role="alert"]'),
-      null,
-    );
-  },
-);
-
-test(
-  "canonical Workspace removal closes confirmation onto stable focus",
-  { timeout: 2_000 },
-  async () => {
-    const available = settingsWorkspace("target", "available");
-    const view = renderSettings(readySettingsAccount, {
-      manualWorkspaces: [available],
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
-    await new Promise((resolve) => window.requestAnimationFrame(resolve));
-    assert.equal(
-      document.activeElement,
-      screen.getByRole("button", { name: "Cancel" }),
-    );
-
-    view.rerender(
-      settingsElement(readySettingsAccount, {
-        manualWorkspaces: [{ ...available, authorization: "removing" }],
-      }),
-    );
-    await new Promise((resolve) => window.requestAnimationFrame(resolve));
-    assert.equal(screen.queryByText("Remove this work directory?"), null);
-    assert.equal(
-      document.activeElement,
-      screen.getByRole("heading", { name: "Work directories" }),
-    );
-  },
-);
 
 function renderComposer(overrides = {}) {
   const textareaRef = createRef();

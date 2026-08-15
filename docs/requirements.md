@@ -78,8 +78,8 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - 每个 automatic Task 使用 `<MetaWork data dir>/workspaces/<16 位随机小写 hex>` 独立目录，同一 Task 的后续 Run 复用该目录。分配必须 exclusive create、有界重试、校验 canonical containment；失败不能回退到共享目录；
 - automatic root 及其子目录是保留命名空间，不能注册为 Manual Workspace；用户明确选择 automatic root 的祖先仍服从当前 trust 语义，不因此获得 strict isolation；
 - Workbench projection 必须把 Workspace 作为独立对象发布，至少包含稳定 identity、kind、显示名称、规范路径、当前授权状态和可汇总的 Task 信号；每个被 Task 引用的 Automatic Workspace 必须出现在同一 canonical snapshot；
-- 没有 Task 的 Manual Workspace 仍然存在于 New task 的路径选择器与设置中；最近使用、重新授权和移除不能依赖 Renderer 从 Task 列表猜测。Automatic Workspace 不进入普通选择器、recent、重新授权或移除入口，但其 owning Task 仍可导航；
-- New task 路径控件只负责选择、添加和重新授权；低频 Workspace 生命周期管理进入正式设置页，显示 Manual Workspace 的 canonical path、授权/移除状态、Task 记录数，并提供带明确文件与历史保留语义的移除确认和失败重试。设置操作不得改变当前 Task；Renderer 不维护全局 active Workspace 镜像；
+- 没有 Task 的 Manual Workspace 仍然存在于 New task 的路径选择器中；最近使用与重新授权不能依赖 Renderer 从 Task 列表猜测。Automatic Workspace 不进入普通选择器、recent 或重新授权入口，但其 owning Task 仍可导航；
+- New task 路径控件负责选择、添加和重新授权；设置页不再承担 Workspace 生命周期管理。设置以覆盖 Workbench 内容区的长期 surface 呈现，保留窗口壳层和底层 Workbench 挂载，关闭后恢复原 Task、草稿、滚动和焦点；Renderer 不维护全局 active Workspace 镜像；
 - 后台创建 Automatic Workspace 不修改 Manual Workspace recent order 或 Renderer New task draft scope；manual 与 automatic record 使用独立容量，后台 Task 不得耗尽用户打开 Workspace 的能力；
 - automatic root 无法初始化时只关闭 `automaticWorkspaces` capability，并对 automatic admission 返回 typed unavailable；Account、显式 Manual Workspace 和普通 Workbench 仍可运行；
 - bounded Task/Workspace 产品历史跨 Host 重启恢复，但恢复后的 Task 只读且不得伪造 Agent Session 或 Conversation；Run、Task 删除、shutdown 和重启后 Automatic Workspace 目录保留，但不扫描目录恢复或猜测 Task/Workspace，目录浏览和磁盘清理属于后续独立能力；
@@ -101,7 +101,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - 账号入口固定显示在左栏底部：已登录时只显示当前 OAuth `/me` 严格验证的用户名，未登录时显示登录动作。接口不可用、账号不匹配或响应不可信时不得回退 token `account_id` 或旧 identity；不得由 Renderer 推断，也不得在普通 catalog refresh 或后台定时路径主动更新；
 - API Key 切换属于 `账号与模型` 设置。Renderer 只显示 Metask 返回的脱敏名称、Provider 与尾号；API 创建、秘密查看和管理仍由 Metask 完成；
 - 当前模型必须显示在 New task Composer 附近，并可从当前 API 的已验证模型目录快速选择。该选择更新后续新 Task 的默认执行配置；已有 Task 显示当前 binding epoch 的模型，历史按 epoch 保留原事实，不提供虚假的 live Session 热切换；
-- 进入账号与模型设置时，显式导航动作自动请求 Host 同步一次最新 API/模型目录；已有默认配置时 Host 必须优先复用并验证当前 API，再自动加载它的模型目录，不能要求用户先重新选择或切换 API 才能修改默认模型。页面直接使用 Host 已发布的脱敏目录和提交态，手动重新同步只作为网络失败、页面持续打开期间 Metask 外部目录变化等恢复动作。设置页同时提供可独立修改的默认 API、默认模型和与错误语义匹配的恢复动作；后续通用、Workspace、通知、外观和高级设置共享同一设置框架；
+- 进入账号与模型设置时，显式导航动作自动请求 Host 同步一次最新 API/模型目录；已有默认配置时 Host 必须优先复用并验证当前 API，再自动加载它的模型目录，不能要求用户先重新选择或切换 API 才能修改默认模型。页面直接使用 Host 已发布的脱敏目录和提交态，手动重新同步只作为网络失败、页面持续打开期间 Metask 外部目录变化等恢复动作。设置页同时提供可独立修改的默认 API、默认模型和与错误语义匹配的恢复动作；后续通用、通知、外观和高级设置共享同一设置框架，Workspace 生命周期仍由 New task 路径控件负责；
 - OAuth token 只访问 Metask 账号 API；选定 API Key 才作为 AgentCore 模型调用凭据；
 - Renderer 只能看到脱敏账号、Key 尾号、模型、稳定错误码和状态，不得接触 OAuth token、完整 API Key、Authorization header、临时 OAuth URL 或凭据存储 locator；
 - Account 只维护一个当前默认 ExecutionConfig；Workbench 可以在 live Session、Run、job 或 worker 中保留必要的 owned copy。切换默认 API 或模型不得篡改或停止既有运行；最后一个真实运行时引用释放后必须 secure-zero；

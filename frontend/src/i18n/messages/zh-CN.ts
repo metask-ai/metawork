@@ -582,27 +582,6 @@ export const zhCN: Record<MessageId, string> = {
   "settings.sections": "设置分区",
   "settings.section_label": "设置",
   "settings.general": "通用",
-  "settings.workspaces": "工作目录",
-  "settings.workspaces_help":
-    "这些已信任目录可用于新建任务。移除目录不会删除本地文件和任务历史。",
-  "settings.workspace_add": "添加目录",
-  "settings.workspace_empty_title": "还没有工作目录",
-  "settings.workspace_empty_help":
-    "添加一个已信任的本地目录后，即可让任务处理其中的文件。",
-  "settings.workspace_action_failed": "工作目录操作失败",
-  "settings.workspace_status.available": "可用",
-  "settings.workspace_status.removing": "正在移除",
-  "settings.workspace_status.reauthorization_required": "需要访问权限",
-  "settings.workspace_status.removal_failed": "移除未完成",
-  "settings.workspace_reauthorize": "确认访问权限",
-  "settings.workspace_reauthorize_mismatch":
-    "已添加所选目录，但当前目录仍需要重新确认访问权限。",
-  "settings.workspace_remove": "移除",
-  "settings.workspace_retry_removal": "重试移除",
-  "settings.workspace_remove_confirm_title": "移除这个工作目录？",
-  "settings.workspace_remove_confirm_body":
-    "其中 {count} 条任务记录和本地文件会保留；该目录中正在运行的工作将停止。",
-  "settings.workspace_remove_confirm_action": "移除目录",
   "settings.account_models": "账号与模型",
   "settings.execution_defaults": "执行默认配置",
   "settings.catalog_count": "API {apis} · 模型 {models}",
@@ -679,12 +658,11 @@ export const zhCN: Record<MessageId, string> = {
     "工作区状态已变化，请确认最新状态后重试。",
   "mutation.reason.workspace_unavailable": "该工作区已不可用。",
   "mutation.reason.workspace_removing": "该工作区正在移除，请等待操作完成。",
-  "mutation.reason.removal_failed":
-    "未能移除该工作区，部分任务可能已经停止。本地文件和任务记录仍然保留。",
   "mutation.reason.binding_changed": "任务的执行配置已变化，请确认后继续。",
   "mutation.reason.binding_unavailable": "任务的执行配置已不可用。",
   "mutation.reason.task_unavailable": "该任务已不可用。",
-  "mutation.reason.model_changed": "任务模型已在其他位置更新，请刷新后重新选择。",
+  "mutation.reason.model_changed":
+    "任务模型已在其他位置更新，请刷新后重新选择。",
   "task.model.updated": "任务模型已更新。",
   "task.model_pending": "下一轮使用：{model}",
   "mutation.reason.recovery_unavailable": "当前保存状态已无法恢复此会话。",

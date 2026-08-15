@@ -252,14 +252,30 @@ test("a new Task draft is not mistaken for an in-flight Run", () => {
 });
 
 test("command bar attention is explicit and cannot leak across product identity", () => {
-  const taskA = { route: "workbench", workspaceId: "ws-1", taskId: "task-a" };
-  const taskB = { route: "workbench", workspaceId: "ws-1", taskId: "task-b" };
+  const taskA = {
+    route: "workbench",
+    settingsOpen: false,
+    workspaceId: "ws-1",
+    taskId: "task-a",
+  };
+  const taskB = {
+    route: "workbench",
+    settingsOpen: false,
+    workspaceId: "ws-1",
+    taskId: "task-b",
+  };
   const otherWorkspace = {
     route: "workbench",
+    settingsOpen: false,
     workspaceId: "ws-2",
     taskId: null,
   };
-  const settings = { route: "settings", workspaceId: "ws-1", taskId: null };
+  const settings = {
+    route: "skills",
+    settingsOpen: true,
+    workspaceId: "ws-1",
+    taskId: null,
+  };
 
   assert.equal(
     statusVisibleInCommandBar(

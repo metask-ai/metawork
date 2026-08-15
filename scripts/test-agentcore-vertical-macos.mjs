@@ -155,21 +155,35 @@ const responses = [
         toolSseFromBackgroundJob("m9", "kill-shell-1", "KillShell"),
       ]
     : []),
-  toolSse(process.platform === "win32" ? "m10" : "m4", "ask-1", "AskUserQuestion", {
-    questions: [
-      {
-        question: "Continue the AgentCore vertical run?",
-        header: "Continue",
-        options: [
-          { label: "Yes", description: "Finish the run" },
-          { label: "No", description: "Stop here" },
-        ],
-      },
-    ],
-  }),
-  textSse(process.platform === "win32" ? "m11" : "m5", "metawork agentcore vertical complete"),
-  textSse(process.platform === "win32" ? "m12" : "m6", "metawork text checkpoint complete"),
-  textSse(process.platform === "win32" ? "m13" : "m7", "metawork compact checkpoint complete"),
+  toolSse(
+    process.platform === "win32" ? "m10" : "m4",
+    "ask-1",
+    "AskUserQuestion",
+    {
+      questions: [
+        {
+          question: "Continue the AgentCore vertical run?",
+          header: "Continue",
+          options: [
+            { label: "Yes", description: "Finish the run" },
+            { label: "No", description: "Stop here" },
+          ],
+        },
+      ],
+    },
+  ),
+  textSse(
+    process.platform === "win32" ? "m11" : "m5",
+    "metawork agentcore vertical complete",
+  ),
+  textSse(
+    process.platform === "win32" ? "m12" : "m6",
+    "metawork text checkpoint complete",
+  ),
+  textSse(
+    process.platform === "win32" ? "m13" : "m7",
+    "metawork compact checkpoint complete",
+  ),
 ];
 const provider = createProvider(responses, visualCaptureDir ? 1_500 : 0);
 const baseUrl = await provider.listen();
@@ -186,34 +200,6 @@ try {
   await captureVisual("new-task", 1320, 812);
   await probeWindowsWebViewFocusWithColdProfileRetry();
   await captureVisual("search-keyboard", 1320, 812, false, true);
-  const staleVerticalWorkspaces = (await snapshot()).workspaces.filter(
-    (item) =>
-      item.kind === "manual" &&
-      typeof item.canonicalRoot === "string" &&
-      path
-        .basename(item.canonicalRoot)
-        .startsWith("metawork-agentcore-vertical-"),
-  );
-  for (const stale of staleVerticalWorkspaces) {
-    if (!isWireId(stale.id) || !isWireId(stale.epoch)) continue;
-    await invokeBridge("metawork.workspaces.remove", {
-      workspaceId: stale.id,
-      expectedWorkspaceEpoch: stale.epoch,
-    });
-  }
-  if (staleVerticalWorkspaces.length > 0)
-    await poll(
-      async () => {
-        const current = await snapshot();
-        return current.workspaces.some((item) =>
-          staleVerticalWorkspaces.some((stale) => stale.id === item.id),
-        )
-          ? null
-          : current;
-      },
-      commandTimeoutMs,
-      "stale vertical Workspace cleanup",
-    );
   const chosenWorkspace = await invokeBridge("metawork.workspaces.choose", {});
   let workspaceId;
   if (chosenWorkspace === null) {
@@ -844,19 +830,6 @@ try {
   if (afterDelete.tasks.some((item) => item.id === taskId))
     throw new Error("Deleted Task record remained in the projection");
   await expectMissing(compactCheckpoint.blobPath);
-  await invokeBridge("metawork.workspaces.remove", {
-    workspaceId,
-    expectedWorkspaceEpoch,
-  });
-  await poll(
-    async () =>
-      (await snapshot()).workspaces.some((item) => item.id === workspaceId)
-        ? null
-        : true,
-    commandTimeoutMs,
-    "vertical Workspace cleanup",
-  );
-
   await stopApplication("app stop");
 
   process.stdout.write(
@@ -931,21 +904,28 @@ function decodeTaskStore(bytes) {
   const records = { workspaces: [], tasks: [] };
   let offset = 0;
   while (offset < bytes.length) {
-    if (offset + headerBytes > bytes.length || !bytes.subarray(offset, offset + 4).equals(magic))
+    if (
+      offset + headerBytes > bytes.length ||
+      !bytes.subarray(offset, offset + 4).equals(magic)
+    )
       throw new Error("invalid hard-cut Task store frame");
-    if (bytes[offset + 4] !== 0) throw new Error("invalid Task store frame flags");
+    if (bytes[offset + 4] !== 0)
+      throw new Error("invalid Task store frame flags");
     const kind = bytes[offset + 5];
     const payloadLength = bytes.readUInt32LE(offset + 24);
     const payloadStart = offset + headerBytes;
     const payloadEnd = payloadStart + payloadLength;
-    if (payloadEnd > bytes.length) throw new Error("truncated Task store frame");
+    if (payloadEnd > bytes.length)
+      throw new Error("truncated Task store frame");
     const headerChecksum = bytes.readUInt32LE(offset + 28);
     const payloadChecksum = bytes.readUInt32LE(offset + 32);
     if (crc32(bytes.subarray(offset, offset + 28)) !== headerChecksum)
       throw new Error("invalid Task store header checksum");
     if (crc32(bytes.subarray(payloadStart, payloadEnd)) !== payloadChecksum)
       throw new Error("invalid Task store payload checksum");
-    const value = JSON.parse(bytes.subarray(payloadStart, payloadEnd).toString("utf8"));
+    const value = JSON.parse(
+      bytes.subarray(payloadStart, payloadEnd).toString("utf8"),
+    );
     if (kind === 2) records.workspaces.push(value);
     if (kind === 3) records.tasks.push(value);
     offset = payloadEnd;
@@ -1512,7 +1492,9 @@ function toolSseFromBackgroundJob(messageId, toolId, name, input = {}) {
   return (payload) => {
     const jobId = findJsonField(payload, "job_id");
     if (typeof jobId !== "string" || jobId.length === 0)
-      throw new Error(`provider fixture did not receive a background job id for ${name}`);
+      throw new Error(
+        `provider fixture did not receive a background job id for ${name}`,
+      );
     return toolSse(messageId, toolId, name, { job_id: jobId, ...input });
   };
 }

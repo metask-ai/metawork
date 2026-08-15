@@ -20,7 +20,6 @@ import {
   decodeSkillMutationResult,
   decodeMcpMutationResult,
   decodeMcpRefreshResult,
-  decodeWorkspaceMutationResult,
   decodeWorkbenchSnapshot,
 } from "../frontend/src/bridge/decode-contracts.ts";
 
@@ -583,23 +582,6 @@ test("Task metadata mutation acknowledgements are identity-checked and exact", (
         "3",
       ),
     /expected string/,
-  );
-  assert.deepEqual(
-    decodeWorkspaceMutationResult(
-      {
-        accepted: false,
-        workspaceId: "5",
-        workspaceEpoch: null,
-        reason: "workspace_changed",
-      },
-      "5",
-    ),
-    {
-      accepted: false,
-      workspaceId: "5",
-      workspaceEpoch: null,
-      reason: "workspace_changed",
-    },
   );
   assert.doesNotThrow(() =>
     assertTaskFlag({ taskId: "3", renamed: true }, "3", "renamed"),
