@@ -242,7 +242,7 @@ test("Skills route uses the canonical management commands and no policy path", a
     assert.match(commands, new RegExp(`skills\\.${command}`));
   }
   assert.match(page, /title\.current\?\.focus\(\)/);
-  assert.match(page, /<Dialog\.Root[\s\S]*?<Dialog\.Popup/);
+  assert.match(page, /<Drawer\.Root[\s\S]*?<Drawer\.Popup/);
   assert.doesNotMatch(
     page,
     /window\.zero|window\.confirm|localStorage|FileSystem|toggle|switch/i,
@@ -251,10 +251,7 @@ test("Skills route uses the canonical management commands and no policy path", a
     css,
     /\.skill-header-actions > button \{[\s\S]*?display: inline-flex;[\s\S]*?width: auto;[\s\S]*?margin-top: 0;[\s\S]*?gap: 6px;/,
   );
-  assert.match(
-    css,
-    /\.skill-empty-state > button \{\s*min-width: 168px;/,
-  );
+  assert.match(css, /\.skill-empty-state > button \{\s*min-width: 168px;/);
 });
 
 test("Skills route sees global Skill attention without leaking Task attention", () => {

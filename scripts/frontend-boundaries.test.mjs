@@ -343,3 +343,17 @@ test("timed-out mutations resync from Host state without automatic replay", asyn
     /runAccountCommand\(\(\) => client\.cancelAccountOperation\(\)\)/,
   );
 });
+
+test("product CSS never overrides foundation popup geometry", async () => {
+  const css = await readFile(resolve(sourceRoot, "index.css"), "utf8");
+  // Popup resting geometry belongs to the ui presets (Dialog/Drawer). Product
+  // stylesheets adapt through className utilities so tailwind-merge resolves
+  // conflicts; custom-class geometry overrides depend on which CSS properties
+  // the default utilities compile to, which is a library-internal detail.
+  assert.doesNotMatch(
+    css,
+    /\.skill-drawer \{|\.mcp-drawer \{|\.scheduled-editor \{|\.search-dialog \{/,
+  );
+  assert.doesNotMatch(css, /translate: none/);
+  assert.doesNotMatch(css, /(?<!text-)transform: none/);
+});

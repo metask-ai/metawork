@@ -26,10 +26,10 @@ export const Drawer = {
   ),
   Portal: BaseDialog.Portal,
   Backdrop: ({ className, ...props }: ComponentProps<typeof BaseDialog.Backdrop>) => (
-    <BaseDialog.Backdrop className={cn("fixed inset-0 z-50 bg-(--ui-overlay-scrim) transition-opacity data-ending-style:opacity-0 data-starting-style:opacity-0", className)} {...props} />
+    <BaseDialog.Backdrop className={cn("fixed inset-0 z-50 bg-(--ui-overlay-scrim) transition-opacity motion-reduce:transition-none data-ending-style:opacity-0 data-starting-style:opacity-0", className)} {...props} />
   ),
   Popup: ({ className, side = "right", ...props }: DrawerPopupProps) => (
-    <BaseDialog.Popup className={cn("fixed inset-y-0 z-50 flex h-full w-[min(28rem,calc(100vw-2rem))] translate-none flex-col overflow-hidden border-(--ui-border) bg-(--ui-surface-panel) text-(--ui-content-primary) shadow-(--ui-shadow-overlay) outline-none transition-[translate,opacity] data-ending-style:opacity-0 data-starting-style:opacity-0", drawerSides[side], className)} {...props} />
+    <BaseDialog.Popup className={cn("fixed inset-y-0 z-50 flex h-full w-[min(28rem,calc(100vw-2rem))] translate-none flex-col overflow-hidden border-(--ui-border) bg-(--ui-surface-panel) text-(--ui-content-primary) shadow-(--ui-shadow-overlay) outline-none transition-[translate,opacity] motion-reduce:transition-none data-ending-style:opacity-0 data-starting-style:opacity-0", drawerSides[side], className)} {...props} />
   ),
   Header: ({ className, ...props }: ComponentProps<"header">) => (
     <header className={cn("flex items-start justify-between gap-4 border-b border-(--ui-border) p-6", className)} {...props} />

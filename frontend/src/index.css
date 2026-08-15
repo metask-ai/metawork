@@ -2820,27 +2820,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   animation: scheduled-backdrop-in 140ms ease-out;
 }
 
-.skill-drawer {
-  position: fixed;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  left: auto;
-  max-height: none;
-  padding: 0;
-  border-radius: 0;
-  transform: none;
-  translate: none;
-  display: flex;
-  width: min(500px, calc(100% - 28px));
-  min-width: 0;
-  flex-direction: column;
-  border-left: 1px solid var(--ui-border);
-  background: var(--ui-surface-canvas);
-  box-shadow: -18px 0 54px rgba(37, 34, 45, 0.13);
-  animation: scheduled-drawer-in 180ms ease-out;
-}
-
 .skill-drawer > header {
   display: flex;
   min-height: 78px;
@@ -2872,6 +2851,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .skill-drawer-scroll {
+  flex: 1;
   min-height: 0;
   padding: 20px;
   overflow: hidden auto;
@@ -3513,27 +3493,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   animation: scheduled-backdrop-in 140ms ease-out;
 }
 
-.mcp-drawer {
-  position: fixed;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  left: auto;
-  max-height: none;
-  padding: 0;
-  border-radius: 0;
-  transform: none;
-  translate: none;
-  display: flex;
-  width: min(620px, calc(100% - 28px));
-  min-width: 0;
-  flex-direction: column;
-  border-left: 1px solid var(--ui-border);
-  background: var(--ui-surface-canvas);
-  box-shadow: -18px 0 54px rgba(37, 34, 45, 0.13);
-  animation: scheduled-drawer-in 180ms ease-out;
-}
-
 .mcp-drawer > header {
   display: flex;
   min-height: 88px;
@@ -3572,6 +3531,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .mcp-detail-body {
+  flex: 1;
   min-height: 0;
   padding: 20px;
   overflow: hidden auto;
@@ -3872,6 +3832,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .mcp-add-form {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
+  flex: 1;
   min-height: 0;
   padding: 20px;
   overflow: hidden auto;
@@ -4651,27 +4612,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   animation: scheduled-backdrop-in 140ms ease-out;
 }
 
-.scheduled-editor {
-  position: fixed;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  left: auto;
-  max-height: none;
-  padding: 0;
-  border-radius: 0;
-  transform: none;
-  translate: none;
-  display: flex;
-  width: min(472px, calc(100% - 28px));
-  min-width: 0;
-  flex-direction: column;
-  border-left: 1px solid var(--ui-border);
-  background: var(--ui-surface-canvas);
-  box-shadow: -18px 0 54px rgba(37, 34, 45, 0.13);
-  animation: scheduled-drawer-in 180ms ease-out;
-}
-
 .scheduled-editor > header {
   display: flex;
   min-height: 78px;
@@ -4704,6 +4644,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .scheduled-editor-scroll {
+  flex: 1;
   min-height: 0;
   padding: 20px;
   overflow: hidden auto;
@@ -5026,16 +4967,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   }
 }
 
-@keyframes scheduled-drawer-in {
-  from {
-    transform: translateX(22px);
-    opacity: 0.7;
-  }
-}
-
 @media (prefers-reduced-motion: reduce) {
-  .scheduled-editor-backdrop,
-  .scheduled-editor {
+  .scheduled-editor-backdrop {
     animation: none;
   }
   .scheduled-suggestion,
@@ -5091,21 +5024,12 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
     display: none;
   }
 
-  .scheduled-editor {
-    width: 100%;
-  }
-
   .scheduled-editor > footer {
     flex-wrap: wrap;
   }
 }
 
 @media (max-width: 620px) {
-  .mcp-drawer {
-    width: 100%;
-    border-left: 0;
-  }
-
   .mcp-page-inner {
     padding: 28px 16px 48px;
   }
@@ -5209,18 +5133,13 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .skill-drawer {
-    width: 100%;
-  }
-
   .skill-drawer > footer {
     flex-wrap: wrap;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .mcp-drawer-backdrop,
-  .mcp-drawer {
+  .mcp-drawer-backdrop {
     animation: none;
   }
 
@@ -7221,22 +7140,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .search-scrim {
   background: var(--ui-overlay-scrim);
   backdrop-filter: blur(4px);
-}
-
-.search-dialog {
-  top: max(72px, 10vh);
-  right: auto;
-  bottom: auto;
-  left: 50%;
-  max-height: min(76vh, 680px);
-  padding: 0;
-  border-radius: 16px;
-  background: var(--ui-surface-panel);
-  transform: translateX(-50%);
-  width: min(620px, 100%);
-  overflow: hidden;
-  border: 1px solid var(--ui-border);
-  box-shadow: var(--ui-shadow-overlay);
 }
 
 .search-input-row {

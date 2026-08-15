@@ -33,11 +33,14 @@ export function GlobalSearch({
   }, [open]);
 
   return (
-    <Dialog.Root open={open} onOpenChange={(nextOpen) => !nextOpen && onClose()}>
+    <Dialog.Root
+      open={open}
+      onOpenChange={(nextOpen) => !nextOpen && onClose()}
+    >
       <Dialog.Portal>
         <Dialog.Backdrop className="search-scrim" />
         <Dialog.Popup
-          className="search-dialog"
+          className="search-dialog top-[max(72px,10vh)] bottom-auto left-1/2 -translate-x-1/2 translate-y-0 max-h-[min(76vh,680px)] w-[min(620px,100%)] gap-0 overflow-hidden rounded-[16px] p-0"
           aria-labelledby="search-title"
           initialFocus={() => input.current ?? false}
         >

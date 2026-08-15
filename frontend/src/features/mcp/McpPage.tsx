@@ -13,7 +13,7 @@ import type {
 } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { Button } from "../../components/ui/button.tsx";
-import { Dialog } from "../../components/ui/dialog.tsx";
+import { Drawer } from "../../components/ui/drawer.tsx";
 import { Checkbox } from "../../components/ui/checkbox.tsx";
 import { Input } from "../../components/ui/input.tsx";
 import { SelectField } from "../../components/ui/select.tsx";
@@ -1010,18 +1010,18 @@ export function McpPage({
         )}
       </div>
 
-      <Dialog.Root
+      <Drawer.Root
         open={drawerState !== null}
         onOpenChange={(open) => {
           if (!open) closeDrawer();
         }}
       >
-        <Dialog.Portal>
-          <Dialog.Backdrop className="mcp-drawer-backdrop" />
+        <Drawer.Portal>
+          <Drawer.Backdrop className="mcp-drawer-backdrop" />
           {drawerState && (
-          <Dialog.Popup
+          <Drawer.Popup
             ref={drawer}
-            className="mcp-drawer"
+            className="mcp-drawer w-[min(620px,calc(100vw-28px))] max-[620px]:w-full max-[620px]:border-l-0 bg-(--ui-surface-canvas) shadow-[-18px_0_54px_rgba(37,34,45,0.13)]"
             aria-labelledby="mcp-drawer-title"
           >
             <header>
@@ -1902,10 +1902,10 @@ export function McpPage({
                 )}
               </div>
             ) : null}
-          </Dialog.Popup>
+          </Drawer.Popup>
           )}
-        </Dialog.Portal>
-      </Dialog.Root>
+        </Drawer.Portal>
+      </Drawer.Root>
     </section>
   );
 }
