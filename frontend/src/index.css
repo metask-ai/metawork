@@ -2830,6 +2830,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   padding: 0;
   border-radius: 0;
   transform: none;
+  translate: none;
   display: flex;
   width: min(500px, calc(100% - 28px));
   min-width: 0;
@@ -3522,6 +3523,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   padding: 0;
   border-radius: 0;
   transform: none;
+  translate: none;
   display: flex;
   width: min(620px, calc(100% - 28px));
   min-width: 0;
@@ -4659,6 +4661,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   padding: 0;
   border-radius: 0;
   transform: none;
+  translate: none;
   display: flex;
   width: min(472px, calc(100% - 28px));
   min-width: 0;
