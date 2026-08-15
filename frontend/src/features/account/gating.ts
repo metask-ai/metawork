@@ -7,10 +7,11 @@ export function requiresAccountGate(
 }
 
 /**
- * An authenticated account whose execution configuration is still being
- * prepared must use the Host-owned account settings surface. API/model
- * candidates are only actionable there; keeping the Workbench visible would
- * leave the user with a disabled Agent entry point and no next step.
+ * An authenticated account that needs a user decision must use the Host-owned
+ * account settings surface: `choosing` requires an API/model pick and `failed`
+ * owns the retry action. `loading` is deliberately excluded — post-login
+ * continuation resolves it automatically, and redirecting on a transient
+ * state flashes the settings page on every startup while the catalog loads.
  */
 export function requiresAccountSetup(
   account: Pick<AccountView, "state" | "catalogState" | "canCreateTask">,
@@ -18,8 +19,7 @@ export function requiresAccountSetup(
   return (
     account.state === "authenticated" &&
     !account.canCreateTask &&
-    (account.catalogState === "loading" ||
-      account.catalogState === "choosing" ||
+    (account.catalogState === "choosing" ||
       account.catalogState === "failed")
   );
 }
