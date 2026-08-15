@@ -1255,6 +1255,11 @@ test "Workbench pins an async catalog and admits typed Skill through the existin
         &workbench,
         "\"input\":{\"kind\":\"skill\"",
     );
+    var skill_title_snapshot: [128 * 1024]u8 = undefined;
+    const skill_title_snapshot_bytes = try workbench.writeSnapshot(&skill_title_snapshot);
+    try std.testing.expect(
+        std.mem.indexOf(u8, skill_title_snapshot_bytes, "\"title\":\"Review\"") != null,
+    );
     fake_core.lock();
     const skill_seen = fake_core.skill_run_seen;
     const input_matches = fake_core.skill_input_matches;
@@ -1525,8 +1530,22 @@ test "automatic Workspace admission is Task-owned and Text-only" {
     try std.testing.expect(first_workspace != second_workspace);
     try std.testing.expectEqual(@as(usize, 2), try directoryEntryCount(tmp.dir));
 
+    try workbench.renameTask(second_task, "Preset title");
+    _ = try workbench.runTask(second_task, .{ .text = "must not replace preset" });
+    try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
+    var preset_title_snapshot: [128 * 1024]u8 = undefined;
+    const preset_title_snapshot_bytes = try workbench.writeSnapshot(&preset_title_snapshot);
+    try std.testing.expect(
+        std.mem.indexOf(u8, preset_title_snapshot_bytes, "\"title\":\"Preset title\"") != null,
+    );
+
     _ = try workbench.runTask(first_task, .{ .text = "automatic text run" });
     try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
+    var title_snapshot: [128 * 1024]u8 = undefined;
+    const title_snapshot_bytes = try workbench.writeSnapshot(&title_snapshot);
+    try std.testing.expect(
+        std.mem.indexOf(u8, title_snapshot_bytes, "\"title\":\"automatic text run\"") != null,
+    );
     try workbench.closeTask(first_task);
     try waitWorkbenchSnapshot(&workbench, "\"lifecycle\":\"closed\"");
     try workbench.deleteTask(first_task);

@@ -125,6 +125,11 @@ const checkpoint_export_limits: lifecycle.CheckpointLimits = .{
     .chunk_bytes = 256 * 1024,
 };
 
+// Automatic titles are intentionally shorter than the durable Task title
+// limit. This is a local fallback only; model-generated metadata will have a
+// separate contract when AgentCore exposes that capability.
+const automatic_title_max_codepoints: usize = 32;
+
 pub const Provider = enum {
     anthropic,
     openai,
@@ -4429,6 +4434,9 @@ pub const Workbench = struct {
             .last_compact_id = latestCompactId(view),
             .model = run.execution_model,
         };
+        const previous_title = view.durable.title;
+        const previous_title_redacted = view.durable.title_redacted;
+        const automatic_title_applied = self.applyAutomaticTaskTitle(view, run);
         const previous_active_run_id = view.runtime.active_run_id;
         const previous_active_operation = view.runtime.active_operation;
         const previous_task_recent_order = view.durable.recent_order;
@@ -4449,8 +4457,15 @@ pub const Workbench = struct {
                 self.next_workspace_recent_order = recent_order;
             }
             view.durable.next_run_generation -= 1;
+            if (automatic_title_applied)
+                self.rollbackAutomaticTaskTitle(
+                    view,
+                    previous_title,
+                    previous_title_redacted,
+                );
             return err;
         };
+        if (automatic_title_applied) self.allocator.free(previous_title);
         _ = view.runtime.worker_references.fetchAdd(1, .acq_rel);
         run.worker_reference_held.store(true, .release);
         self.executor.enqueue(.{
@@ -11551,6 +11566,183 @@ pub const Workbench = struct {
                 } };
             },
         };
+    }
+
+    fn automaticTitleCandidate(input: *const RunInputRecord) ?[]const u8 {
+        return switch (input.*) {
+            .text => |text| firstAutomaticTitleLine(text.value),
+            .skill => |skill| blk: {
+                const display_name = std.mem.trim(u8, skill.display_name, " \t\r\n");
+                if (display_name.len == 0 or !validAutomaticTitleText(display_name))
+                    break :blk null;
+                break :blk display_name;
+            },
+        };
+    }
+
+    fn firstAutomaticTitleLine(value: []const u8) ?[]const u8 {
+        if (value.len == 0 or !std.unicode.utf8ValidateSlice(value)) return null;
+        var cursor: usize = 0;
+        var in_fence = false;
+        while (cursor < value.len) {
+            const line_end = std.mem.indexOfScalarPos(u8, value, cursor, '\n') orelse value.len;
+            var line = std.mem.trim(u8, value[cursor..line_end], " \t\r");
+            const fence = std.mem.startsWith(u8, line, "```") or
+                std.mem.startsWith(u8, line, "~~~");
+            if (fence) {
+                in_fence = !in_fence;
+            } else if (!in_fence) {
+                while (line.len != 0 and line[0] == '#')
+                    line = std.mem.trim(u8, line[1..], " \t");
+                if (std.mem.startsWith(u8, line, "- ") or
+                    std.mem.startsWith(u8, line, "* ") or
+                    std.mem.startsWith(u8, line, "+ "))
+                    line = std.mem.trim(u8, line[2..], " \t");
+                if (line.len != 0 and validAutomaticTitleText(line)) return line;
+            }
+            if (line_end == value.len) break;
+            cursor = line_end + 1;
+        }
+        return null;
+    }
+
+    fn validAutomaticTitleText(value: []const u8) bool {
+        if (value.len == 0) return false;
+        for (value) |byte| if (byte < 0x20) return false;
+        return true;
+    }
+
+    fn boundAutomaticTitle(value: []const u8) []const u8 {
+        var cursor: usize = 0;
+        var codepoints: usize = 0;
+        var preferred_boundary: usize = 0;
+        while (cursor < value.len and codepoints < automatic_title_max_codepoints) {
+            const start = cursor;
+            cursor += utf8CodepointLen(value, cursor);
+            codepoints += 1;
+            if (isAutomaticTitleBoundary(value[start..cursor]))
+                preferred_boundary = start;
+        }
+        if (cursor == value.len) return value;
+        const boundary = if (preferred_boundary > 0) preferred_boundary else cursor;
+        var bounded = value[0..boundary];
+        while (bounded.len != 0 and (bounded[bounded.len - 1] == ' ' or
+            bounded[bounded.len - 1] == '\t'))
+            bounded = bounded[0 .. bounded.len - 1];
+        return bounded;
+    }
+
+    fn isAutomaticTitleBoundary(codepoint: []const u8) bool {
+        if (codepoint.len == 1) {
+            return switch (codepoint[0]) {
+                ' ', '\t', ',', '.', ';', ':', '!', '?' => true,
+                else => false,
+            };
+        }
+        return std.mem.eql(u8, codepoint, "，") or
+            std.mem.eql(u8, codepoint, "。") or
+            std.mem.eql(u8, codepoint, "；") or
+            std.mem.eql(u8, codepoint, "：") or
+            std.mem.eql(u8, codepoint, "！") or
+            std.mem.eql(u8, codepoint, "？") or
+            std.mem.eql(u8, codepoint, "、");
+    }
+
+    fn applyAutomaticTaskTitle(
+        self: *Workbench,
+        task: *TaskView,
+        run: *const RunRecord,
+    ) bool {
+        // This gate must run before writing the fallback. Existing Task and
+        // scheduled-task titles are product facts, not candidates for auto naming.
+        if (task.durable.title.len != 0 or run.generation != 1) return false;
+        const candidate = automaticTitleCandidate(&run.input) orelse return false;
+        const bounded_candidate = boundAutomaticTitle(candidate);
+        const execution = taskExecutionInput(task) catch return false;
+        const projected = self.copyProjected(
+            bounded_candidate,
+            self.limits.max_task_title_bytes,
+            execution.api_key,
+        ) catch return false;
+        if (projected.value.len == 0) {
+            self.freeTracked(projected.value);
+            return false;
+        }
+        const previous_title = task.durable.title;
+        self.projection_bytes -= previous_title.len;
+        task.durable.title = projected.value;
+        task.durable.title_redacted = projected.redacted;
+        return true;
+    }
+
+    fn rollbackAutomaticTaskTitle(
+        self: *Workbench,
+        task: *TaskView,
+        previous_title: []u8,
+        previous_redacted: bool,
+    ) void {
+        const current_title = task.durable.title;
+        self.freeTracked(current_title);
+        task.durable.title = previous_title;
+        self.projection_bytes += previous_title.len;
+        task.durable.title_redacted = previous_redacted;
+    }
+
+    test "automatic title fallback extracts text and skill display names" {
+        var text_input: RunInputRecord = .{ .text = .{
+            .value = @constCast("\n```text\nignored\n```\n### Review the AgentCore lifecycle\nmore detail"),
+        } };
+        const text_title = automaticTitleCandidate(&text_input) orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expectEqualStrings(
+            "Review the AgentCore lifecycle",
+            text_title,
+        );
+        const long_title = boundAutomaticTitle(
+            "请分析 AgentCore Conversation 生命周期以及它和 Workbench 的边界并给出迁移建议",
+        );
+        try std.testing.expectEqualStrings(
+            "请分析 AgentCore Conversation",
+            long_title,
+        );
+        try std.testing.expect(
+            boundAutomaticTitle("Review this long task title should stop at a word boundary").len <
+                "Review this long task title should stop at a word boundary".len,
+        );
+
+        var skill_input: RunInputRecord = .{ .skill = .{
+            .skill_id = @constCast("skill"),
+            .catalog_revision = @constCast("revision"),
+            .invocation_name = @constCast("review"),
+            .display_name = @constCast("Review workspace"),
+            .argument_values = &.{},
+        } };
+        const skill_title = automaticTitleCandidate(&skill_input) orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expectEqualStrings("Review workspace", skill_title);
+
+        var empty_skill: RunInputRecord = .{ .skill = .{
+            .skill_id = @constCast("skill"),
+            .catalog_revision = @constCast("revision"),
+            .invocation_name = @constCast("review"),
+            .display_name = @constCast(""),
+            .argument_values = &.{},
+        } };
+        try std.testing.expect(automaticTitleCandidate(&empty_skill) == null);
+    }
+
+    test "automatic title allocation failure does not escape the fallback" {
+        var workbench = try testWorkbench();
+        defer workbench.deinit();
+
+        const remaining = workbench.limits.max_projection_bytes - workbench.projection_bytes;
+        const reservation = try workbench.allocTrackedCapacity(remaining);
+        defer workbench.freeTracked(reservation);
+
+        const task = &workbench.tasks[0].?;
+        const run = &task.durable.runs[0].?;
+        try std.testing.expect(!workbench.applyAutomaticTaskTitle(task, run));
+        try std.testing.expectEqualStrings("", task.durable.title);
     }
 
     fn deinitRunInputRecord(
