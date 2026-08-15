@@ -26,7 +26,6 @@ import {
 import { Icon } from "../components/ui/Icon.tsx";
 import { AlertDialog } from "../components/ui/alert-dialog.tsx";
 import { Button } from "../components/ui/button.tsx";
-import { Menu } from "../components/ui/menu.tsx";
 import { Input } from "../components/ui/input.tsx";
 import { AccountIdentity } from "../features/account/AccountIdentity.tsx";
 import { AccountGate } from "../features/account/AccountGate.tsx";
@@ -62,7 +61,11 @@ import { inspectorFocusReturnTarget } from "../features/inspector/inspector-inte
 import type { InspectorSection } from "../features/inspector/inspector-state.ts";
 import { useInspectorSession } from "../features/inspector/useInspectorSession.ts";
 import { AgentWorkSurface } from "../features/agent-surface/AgentWorkSurface.tsx";
-import { TaskList, TaskSignals } from "../features/tasks/TaskList.tsx";
+import {
+  TaskList,
+  TaskSignals,
+  type TaskMenuAction,
+} from "../features/tasks/TaskList.tsx";
 import { NewTaskView } from "../features/tasks/NewTaskView.tsx";
 import {
   useNewTaskDrafts,
@@ -107,6 +110,7 @@ import type {
   SkillMutationResult,
   TaskRunReason,
   TaskModelSelectionReason,
+  TaskView,
   WorkbenchSnapshot,
   UiResponsePayload,
   WorkspaceMutationReason,
@@ -182,7 +186,6 @@ export default function App() {
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [taskMenuOpen, setTaskMenuOpen] = useState(false);
   const [statuses, setStatuses] = useState<ShellStatusState>(() =>
     publishStatus(
       {},
@@ -221,7 +224,6 @@ export default function App() {
   const accountCancelBusyRef = useRef(false);
   const workspaceBusyRef = useRef(false);
   const connectionBusyRef = useRef(false);
-  const taskMenuTrigger = useRef<HTMLButtonElement>(null);
   const inspectorToggle = useRef<HTMLButtonElement>(null);
   const inspectorOpener = useRef<HTMLButtonElement | null>(null);
   const inspectorFocusSequence = useRef(0);
@@ -619,7 +621,6 @@ export default function App() {
   useEffect(() => {
     setEditingTitle(false);
     setConfirmDelete(false);
-    setTaskMenuOpen(false);
     setInspectorFocusRequest(null);
     inspectorOpener.current = null;
     cancelContinuationWaitersForTask(activeTask?.id ?? null);
@@ -685,9 +686,12 @@ export default function App() {
 
   function closeDeleteConfirmation() {
     setConfirmDelete(false);
-    window.requestAnimationFrame(() =>
-      taskMenuTrigger.current?.focus(),
-    );
+    window.requestAnimationFrame(() => {
+      const taskRow = document.querySelector<HTMLElement>(
+        `[data-task-id="${CSS.escape(activeTaskIdRef.current ?? "")}"]`,
+      );
+      taskRow?.focus();
+    });
   }
 
   function beginTaskPendingOperation(scope: string, operation: string) {
@@ -1654,22 +1658,23 @@ export default function App() {
     }
   }
 
-  async function closeTask() {
+  async function closeTask(task = activeTask) {
     if (
       viewSyncFailed ||
       !bridgeReady ||
-      taskMutationDisabled ||
-      !activeTask ||
-      (activeTask.lifecycle === "closing" && !activeTask.closeFailed) ||
-      activeTask.lifecycle === "closed"
+      !task ||
+      workbenchMutationDisabled ||
+      task.id in taskPending ||
+      (task.lifecycle === "closing" && !task.closeFailed) ||
+      task.lifecycle === "closed"
     )
       return;
-    const taskId = activeTask.id;
+    const taskId = task.id;
     const scope = `task:${taskId}`;
     if (!beginTaskPendingOperation(scope, "close")) return;
     try {
       try {
-        await client.closeTask(activeTask.id);
+        await client.closeTask(task.id);
       } catch (error) {
         if (
           await reconcileCommandTimeout(error, "operation.task_close", {
@@ -1697,14 +1702,20 @@ export default function App() {
     }
   }
 
-  async function renameTask() {
-    if (!activeTask || taskMutationDisabled || !titleDraft.trim()) return;
-    const taskId = activeTask.id;
+  async function renameTask(task = activeTask) {
+    if (
+      !task ||
+      workbenchMutationDisabled ||
+      task.id in taskPending ||
+      !titleDraft.trim()
+    )
+      return;
+    const taskId = task.id;
     const scope = `task:${taskId}`;
     if (!beginTaskPendingOperation(scope, "rename")) return;
     try {
       try {
-        await client.renameTask(activeTask.id, titleDraft.trim());
+        await client.renameTask(task.id, titleDraft.trim());
       } catch (error) {
         if (
           await reconcileCommandTimeout(error, "operation.task_rename", {
@@ -1733,19 +1744,20 @@ export default function App() {
     }
   }
 
-  async function setArchived(archived: boolean) {
+  async function setArchived(archived: boolean, task = activeTask) {
     if (
-      !activeTask ||
-      taskMutationDisabled ||
-      activeTask.activeOperation !== null
+      !task ||
+      workbenchMutationDisabled ||
+      task.id in taskPending ||
+      task.activeOperation !== null
     )
       return;
-    const taskId = activeTask.id;
+    const taskId = task.id;
     const scope = `task:${taskId}`;
     if (!beginTaskPendingOperation(scope, "archive")) return;
     try {
       try {
-        await client.setTaskArchived(activeTask.id, archived);
+        await client.setTaskArchived(task.id, archived);
       } catch (error) {
         if (
           await reconcileCommandTimeout(
@@ -1776,19 +1788,20 @@ export default function App() {
     }
   }
 
-  async function deleteTask() {
+  async function deleteTask(task = activeTask) {
     if (
-      !activeTask ||
-      taskMutationDisabled ||
-      activeTask.lifecycle !== "closed"
+      !task ||
+      workbenchMutationDisabled ||
+      task.id in taskPending ||
+      task.lifecycle !== "closed"
     )
       return;
-    const taskId = activeTask.id;
+    const taskId = task.id;
     const scope = `task:${taskId}`;
     if (!beginTaskPendingOperation(scope, "delete")) return;
     try {
       try {
-        await client.deleteTask(activeTask.id);
+        await client.deleteTask(task.id);
       } catch (error) {
         if (
           await reconcileCommandTimeout(error, "operation.task_delete", {
@@ -1807,7 +1820,7 @@ export default function App() {
         );
         return;
       }
-      taskDrafts.clearDraft(activeTask.id);
+      taskDrafts.clearDraft(task.id);
       setConfirmDelete(false);
       await refreshAfterCommit("task.deleted", "operation.task_delete", {
         scope: "task",
@@ -1822,6 +1835,24 @@ export default function App() {
     openTask(result.taskId);
     setSearchOpen(false);
     setSearchQuery("");
+  }
+
+  function handleTaskAction(task: TaskView, action: TaskMenuAction) {
+    openTask(task.id);
+    if (action === "rename") {
+      setTitleDraft(task.title);
+      window.requestAnimationFrame(() => setEditingTitle(true));
+      return;
+    }
+    if (action === "archive") {
+      void setArchived(!task.archived, task);
+      return;
+    }
+    if (action === "close") {
+      void closeTask(task);
+      return;
+    }
+    window.requestAnimationFrame(() => setConfirmDelete(true));
   }
 
   async function respondUi(payload: UiResponsePayload) {
@@ -2266,6 +2297,8 @@ export default function App() {
                   showArchived={showArchived}
                   onSelectTask={openTask}
                   onToggleArchived={() => setShowArchived((shown) => !shown)}
+                  onTaskAction={handleTaskAction}
+                  taskMutationDisabled={workbenchMutationDisabled}
                 />
               </div>
             </div>
@@ -2568,86 +2601,6 @@ export default function App() {
                   >
                     <Icon name="activity" />
                   </button>
-                )}
-                {activeTask && (
-                  <Menu.Root
-                    open={taskMenuOpen}
-                    onOpenChange={setTaskMenuOpen}
-                  >
-                    <div className="task-menu">
-                      <Menu.Trigger
-                        ref={taskMenuTrigger}
-                        className="task-menu-trigger"
-                      >
-                        {t("task.actions")}
-                      </Menu.Trigger>
-                      <Menu.Portal>
-                        <Menu.Positioner
-                          side="bottom"
-                          align="end"
-                          sideOffset={5}
-                        >
-                          <Menu.Popup className="task-menu-popover">
-                            <Menu.Item
-                              className="task-menu-item"
-                              disabled={taskMutationDisabled}
-                              onClick={() => {
-                                setTitleDraft(activeTask.title);
-                                setEditingTitle(true);
-                              }}
-                            >
-                              {t("task.rename")}
-                            </Menu.Item>
-                            <Menu.Item
-                              className="task-menu-item"
-                              disabled={
-                                taskMutationDisabled ||
-                                taskOperationInFlight ||
-                                activeTask.lifecycle === "closing"
-                              }
-                              onClick={() => {
-                                void setArchived(!activeTask.archived);
-                              }}
-                            >
-                              {activeTask.archived
-                                ? t("task.restore")
-                                : t("task.archive")}
-                            </Menu.Item>
-                            <Menu.Item
-                              className="task-menu-item"
-                              disabled={
-                                (activeTask.lifecycle === "closing" &&
-                                  !activeTask.closeFailed) ||
-                                activeTask.lifecycle === "closed" ||
-                                taskMutationDisabled
-                              }
-                              onClick={() => {
-                                void closeTask();
-                              }}
-                            >
-                              {activeTask.closeFailed
-                                ? t("task.end_retry")
-                                : activeTask.lifecycle === "closing"
-                                  ? t("task.ending")
-                                  : t("task.end")}
-                            </Menu.Item>
-                            <Menu.Item
-                              className="task-menu-item is-danger"
-                              disabled={
-                                activeTask.lifecycle !== "closed" ||
-                                taskMutationDisabled
-                              }
-                              onClick={() => {
-                                setConfirmDelete(true);
-                              }}
-                            >
-                              {t("task.delete")}
-                            </Menu.Item>
-                          </Menu.Popup>
-                        </Menu.Positioner>
-                      </Menu.Portal>
-                    </div>
-                  </Menu.Root>
                 )}
               </div>
             </header>

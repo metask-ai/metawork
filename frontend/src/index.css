@@ -5496,32 +5496,10 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   background: color-mix(in srgb, var(--ui-action-primary) 8%, transparent);
 }
 
-.task-menu {
-  position: relative;
-}
-
-.task-menu-trigger {
-  display: inline-flex;
-  min-height: 32px;
-  padding: 0 11px;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  border: 1px solid var(--ui-border);
-  border-radius: 7px;
-  color: var(--ui-content-primary);
-  background: var(--ui-surface-panel);
-  font-size: 12px;
-  font-weight: 500;
-}
-
-.task-menu-trigger:hover:not(:disabled) {
-  background: var(--ui-action-hover-surface);
-}
-
 .task-menu-popover {
   display: grid;
   width: 180px;
+  z-index: 50;
   padding: 5px;
   border: 1px solid var(--ui-border);
   border-radius: 10px;

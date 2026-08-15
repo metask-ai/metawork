@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, type MouseEvent } from "react";
 
 import type { TaskView, WorkspaceView } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
+import { Menu } from "../../components/ui/menu.tsx";
 import { taskCountMessageId } from "../../i18n/formatters.ts";
 import { useI18n } from "../../i18n/context.ts";
 import {
@@ -12,6 +13,8 @@ import {
   workspaceDirectoryLabel,
 } from "../../workbench/selectors.ts";
 
+export type TaskMenuAction = "rename" | "archive" | "close" | "delete";
+
 export function TaskList({
   tasks,
   workspaces,
@@ -19,6 +22,8 @@ export function TaskList({
   showArchived,
   onSelectTask,
   onToggleArchived,
+  onTaskAction,
+  taskMutationDisabled,
 }: {
   tasks: TaskView[];
   workspaces: WorkspaceView[];
@@ -26,11 +31,15 @@ export function TaskList({
   showArchived: boolean;
   onSelectTask: (id: string) => void;
   onToggleArchived: () => void;
+  onTaskAction: (task: TaskView, action: TaskMenuAction) => void;
+  taskMutationDisabled: boolean;
 }) {
   const { locale, t } = useI18n();
   const [seenCompletionKeys, setSeenCompletionKeys] = useState<Set<string>>(
     () => new Set(),
   );
+  const [menuTaskId, setMenuTaskId] = useState<string | null>(null);
+  const menuAnchor = useRef<HTMLElement | null>(null);
   const groupedTasks = taskGroups(tasks, showArchived);
   const visibleTaskCount = groupedTasks.reduce(
     (count, group) => count + group.tasks.length,
@@ -55,6 +64,17 @@ export function TaskList({
       task.id,
       workspaceDirectoryLabel(workspace, t("workspace.default_directory")),
     );
+  }
+
+  const menuTask =
+    menuTaskId === null
+      ? null
+      : tasks.find((task) => task.id === menuTaskId) ?? null;
+
+  function openTaskMenu(event: MouseEvent<HTMLButtonElement>, taskId: string) {
+    event.preventDefault();
+    menuAnchor.current = event.currentTarget;
+    setMenuTaskId(taskId);
   }
 
   useEffect(() => {
@@ -100,9 +120,11 @@ export function TaskList({
           {group.tasks.map((task) => (
             <button
               key={task.id}
+              data-task-id={task.id}
               className="task-list-item focus-ring"
               aria-current={activeTaskId === task.id ? "page" : undefined}
               onClick={() => onSelectTask(task.id)}
+              onContextMenu={(event) => openTaskMenu(event, task.id)}
             >
               <span className="task-list-row">
                 <span>{task.title || t("task.item", { id: task.id })}</span>
@@ -140,6 +162,72 @@ export function TaskList({
             : t("task.show_archived", { count: archivedCount })}
         </button>
       )}
+      <Menu.Root
+        open={menuTask !== null}
+        onOpenChange={(open) => {
+          if (open) return;
+          setMenuTaskId(null);
+          menuAnchor.current = null;
+        }}
+      >
+        <Menu.Portal>
+          <Menu.Positioner
+            anchor={menuAnchor.current}
+            side="right"
+            align="start"
+            sideOffset={5}
+            collisionPadding={8}
+          >
+            {menuTask && (
+              <Menu.Popup
+                className="task-menu-popover"
+                aria-label={t("task.actions")}
+              >
+                <Menu.Item
+                  className="task-menu-item"
+                  disabled={taskMutationDisabled}
+                  onClick={() => onTaskAction(menuTask, "rename")}
+                >
+                  {t("task.rename")}
+                </Menu.Item>
+                <Menu.Item
+                  className="task-menu-item"
+                  disabled={
+                    taskMutationDisabled ||
+                    menuTask.activeOperation !== null ||
+                    menuTask.lifecycle === "closing"
+                  }
+                  onClick={() => onTaskAction(menuTask, "archive")}
+                >
+                  {menuTask.archived ? t("task.restore") : t("task.archive")}
+                </Menu.Item>
+                <Menu.Item
+                  className="task-menu-item"
+                  disabled={
+                    taskMutationDisabled ||
+                    menuTask.lifecycle === "closed" ||
+                    (menuTask.lifecycle === "closing" && !menuTask.closeFailed)
+                  }
+                  onClick={() => onTaskAction(menuTask, "close")}
+                >
+                  {menuTask.closeFailed
+                    ? t("task.end_retry")
+                    : menuTask.lifecycle === "closing"
+                      ? t("task.ending")
+                      : t("task.end")}
+                </Menu.Item>
+                <Menu.Item
+                  className="task-menu-item is-danger"
+                  disabled={taskMutationDisabled || menuTask.lifecycle !== "closed"}
+                  onClick={() => onTaskAction(menuTask, "delete")}
+                >
+                  {t("task.delete")}
+                </Menu.Item>
+              </Menu.Popup>
+            )}
+          </Menu.Positioner>
+        </Menu.Portal>
+      </Menu.Root>
     </nav>
   );
 }
