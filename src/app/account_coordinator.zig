@@ -35,16 +35,28 @@ pub const Coordinator = struct {
         const self: *Coordinator = @ptrCast(@alignCast(context));
         self.assertMainThread();
         const current = self.runtime.view();
-        const replacement: ExecutionReplacement = switch (command) {
-            // Account model selection changes only the default for future
-            // Tasks. Credential/provider execution generations stay intact.
-            .select_model => .none,
-            .begin_login => if (current.state == .authenticated) .identity else .none,
-            .logout => .identity,
-            else => .none,
-        };
         return switch (self.runtime.prepareCommand(command)) {
-            .prepared => |prepared| self.commitPrepared(prepared, replacement),
+            .prepared => |prepared| self.commitPrepared(prepared, replacement: {
+                // The replacement window must follow the prepared transition,
+                // not the command name: select_model on a ready execution is a
+                // model-only default change, but the same command inside a
+                // parked reconfiguration still rebuilds the execution config
+                // and therefore still needs the Workbench replacement window.
+                if (prepared.transition.effect) |effect| switch (effect) {
+                    .prepare_execution => break :replacement .default,
+                    else => {},
+                };
+                const kind: ExecutionReplacement = switch (command) {
+                    .select_model => .none,
+                    .begin_login => if (current.state == .authenticated)
+                        .identity
+                    else
+                        .none,
+                    .logout => .identity,
+                    else => .none,
+                };
+                break :replacement kind;
+            }),
             .rejected => |error_code| .rejected(error_code),
             .ignored_stale => unreachable,
         };
