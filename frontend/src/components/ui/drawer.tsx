@@ -35,7 +35,7 @@ export const Drawer = {
     <header className={cn("flex items-start justify-between gap-4 border-b border-(--ui-border) p-6", className)} {...props} />
   ),
   Body: ({ className, ...props }: ComponentProps<"div">) => (
-    <div className={cn("flex-1 overflow-y-auto p-6", className)} {...props} />
+    <div className={cn("flex-1 overflow-y-auto p-6 [scrollbar-gutter:stable]", className)} {...props} />
   ),
   Footer: ({ className, ...props }: ComponentProps<"footer">) => (
     <footer className={cn("flex items-center justify-end gap-3 border-t border-(--ui-border) p-6", className)} {...props} />

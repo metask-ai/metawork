@@ -52,6 +52,11 @@
     var(--metask-light-text) 28%,
     var(--metask-state-error) 72%
   );
+  --ui-content-success: color-mix(
+    in srgb,
+    var(--metask-light-text) 22%,
+    var(--metask-state-complete) 78%
+  );
   --ui-content-on-primary: var(--metask-light-panel);
   --ui-action-hover-surface: var(--ui-surface-panel-2);
   --ui-action-hover-content: var(--ui-content-primary);
@@ -107,6 +112,11 @@
     in srgb,
     var(--metask-dark-text) 28%,
     var(--metask-state-error) 72%
+  );
+  --ui-content-success: color-mix(
+    in srgb,
+    var(--metask-dark-text) 22%,
+    var(--metask-state-complete) 78%
   );
   --ui-action-danger-surface: color-mix(
     in srgb,

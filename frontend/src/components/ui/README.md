@@ -25,3 +25,11 @@ library, not the other way around.
 - `AlertDialog` — centered confirmation, no light dismiss.
 - `Drawer` — edge-anchored panel (`side="right" | "left"`), translate
   transition, `Header`/`Body`/`Footer` slots own the scroll layout.
+
+## Field and status presets
+
+- `SearchField` — framed search input; container owns the frame and focus
+  formula, consumers size it through `className` utilities.
+- `Alert` — inline status surface with `variant="neutral" | "warning" |
+  "danger"`; the variant owns tone surface/border/content, consumers own
+  layout.
