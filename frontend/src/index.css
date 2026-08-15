@@ -2355,6 +2355,10 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .commandbar-alert-slot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
   grid-column: 3;
   min-width: 0;
 }
@@ -5424,50 +5428,15 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   line-height: 1.6;
 }
 
-.task-header {
+.commandbar-task-editor {
   display: flex;
-  min-height: 64px;
-  padding: 13px 24px;
-  align-items: center;
-  justify-content: space-between;
-  gap: 20px;
-  border-bottom: 1px solid var(--ui-border);
-  background: color-mix(in srgb, var(--ui-surface-panel) 96%, transparent);
-}
-
-.task-header h1 {
-  margin: 0;
-}
-
-.task-header h1 {
-  font-size: 17px;
-  font-weight: 700;
-  letter-spacing: -0.02em;
-}
-
-.task-title-row {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 9px;
-}
-
-.task-title-row h1 {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.task-title-editor {
-  display: flex;
-  margin-top: 3px;
   align-items: center;
   gap: 6px;
 }
 
-.task-title-editor input {
-  width: min(340px, 38vw);
-  min-height: 32px;
+.commandbar-task-editor input {
+  width: min(260px, 38vw);
+  min-height: 28px;
   padding: 0 8px;
   border: 1px solid var(--ui-action-primary);
   border-radius: 7px;
@@ -5476,24 +5445,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   background: var(--ui-surface-canvas);
   font-size: 13px;
   font-weight: 650;
-}
-
-.task-actions {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
-.inspector-toggle {
-  border: 1px solid var(--ui-border);
-  background: var(--ui-surface-panel);
-}
-
-.inspector-toggle[data-active="true"] {
-  border-color: color-mix(in srgb, var(--ui-action-primary) 42%, transparent);
-  color: var(--ui-action-primary);
-  background: color-mix(in srgb, var(--ui-action-primary) 8%, transparent);
 }
 
 .task-menu-popover {
@@ -7765,10 +7716,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
     width: auto;
   }
 
-  .task-header {
-    padding-inline: 16px;
-  }
-
   .agent-surface-content,
   .composer-bar {
     padding-inline: 16px;
@@ -7793,15 +7740,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
     grid-template-columns: 72px minmax(0, 1fr) 30px auto;
   }
 
-  .task-header {
-    align-items: flex-start;
-  }
-
-  .task-actions {
-    max-width: 148px;
-  }
-
-  .task-title-editor input {
+  .commandbar-task-editor input {
     width: min(180px, 42vw);
   }
 

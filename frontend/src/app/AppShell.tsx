@@ -20,6 +20,8 @@ function initialPanel(key: string, minimumWidth: number) {
 export function AppShell({
   taskTitle,
   contextVisible,
+  contextContent,
+  headerActions,
   attentionNotice,
   onSearch,
   left,
@@ -30,6 +32,8 @@ export function AppShell({
 }: {
   taskTitle: string;
   contextVisible: boolean;
+  contextContent?: ReactNode;
+  headerActions?: ReactNode;
   attentionNotice: string | null;
   onSearch: () => void;
   left: ReactNode | null;
@@ -116,10 +120,13 @@ export function AppShell({
         </div>
         <div className="commandbar-context" data-visible={contextVisible}>
           {contextVisible && (
-            <span className="commandbar-task">{taskTitle}</span>
+            contextContent ?? (
+              <span className="commandbar-task">{taskTitle}</span>
+            )
           )}
         </div>
         <div className="commandbar-alert-slot">
+          {headerActions}
           <span
             className="sr-only"
             role="status"

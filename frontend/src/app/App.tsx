@@ -26,7 +26,6 @@ import {
 import { Icon } from "../components/ui/Icon.tsx";
 import { AlertDialog } from "../components/ui/alert-dialog.tsx";
 import { Button } from "../components/ui/button.tsx";
-import { Input } from "../components/ui/input.tsx";
 import { AccountIdentity } from "../features/account/AccountIdentity.tsx";
 import { AccountGate } from "../features/account/AccountGate.tsx";
 import {
@@ -63,7 +62,6 @@ import { useInspectorSession } from "../features/inspector/useInspectorSession.t
 import { AgentWorkSurface } from "../features/agent-surface/AgentWorkSurface.tsx";
 import {
   TaskList,
-  TaskSignals,
   type TaskMenuAction,
 } from "../features/tasks/TaskList.tsx";
 import { NewTaskView } from "../features/tasks/NewTaskView.tsx";
@@ -2194,6 +2192,104 @@ export default function App() {
                 : activeTaskTitle
       }
       contextVisible={route === "workbench" && activeTask !== null}
+      contextContent={
+        route === "workbench" && activeTask && editingTitle ? (
+          <form
+            className="commandbar-task-editor"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void renameTask();
+            }}
+          >
+            <input
+              autoFocus
+              maxLength={120}
+              value={titleDraft}
+              aria-label={t("task.rename")}
+              placeholder={t("task.item", { id: activeTask.id })}
+              onChange={(event) => setTitleDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key !== "Escape") return;
+                event.preventDefault();
+                setEditingTitle(false);
+              }}
+            />
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={!titleDraft.trim() || taskMutationDisabled}
+            >
+              {t("common.save")}
+            </Button>
+            <button
+              type="button"
+              className="text-button focus-ring"
+              onClick={() => setEditingTitle(false)}
+            >
+              {t("common.cancel")}
+            </button>
+          </form>
+        ) : undefined
+      }
+      headerActions={
+        route === "workbench" && activeTask ? (
+          <>
+            {activeTask.activeOperation !== null &&
+              activeTask.activeOperation.kind !== "restore" &&
+              !(activeTask.activeOperation.kind === "run"
+                ? activeTask.currentRunPhase === "stopping"
+                : activeTask.compacts.find(
+                    (compact) =>
+                      compact.operationId === activeTask.activeOperation?.id,
+                  )?.phase === "stopping") && (
+                <Button
+                  variant="danger"
+                  size="sm"
+                  disabled={
+                    bridgeUnavailable || activeTask.id in cancelPending
+                  }
+                  onClick={() =>
+                    void (activeTask.activeOperation?.kind === "compact"
+                      ? cancelCompact()
+                      : cancelRun())
+                  }
+                >
+                  <Icon name="stop" />
+                  {t(
+                    activeTask.activeOperation.kind === "compact"
+                      ? "compact.stop"
+                      : "task.stop",
+                  )}
+                </Button>
+              )}
+            {inspector.available && (
+              <button
+                ref={inspectorToggle}
+                className="icon-button focus-ring"
+                aria-controls="task-inspector"
+                aria-expanded={inspector.open}
+                aria-label={t(
+                  inspector.open ? "inspector.close" : "inspector.open",
+                )}
+                title={t(
+                  inspector.open ? "inspector.close" : "inspector.open",
+                )}
+                onClick={(event) => {
+                  setInspectorFocusRequest(null);
+                  if (inspector.open) {
+                    dismissInspector(false);
+                    return;
+                  }
+                  inspectorOpener.current = event.currentTarget;
+                  inspector.show();
+                }}
+              >
+                <Icon name="sidebar-right" />
+              </button>
+            )}
+          </>
+        ) : null
+      }
       onSearch={() => setSearchOpen(true)}
       attentionNotice={
         commandBarStatus
@@ -2491,121 +2587,6 @@ export default function App() {
           className="workbench-view"
           data-view={newTaskDraftActive ? "new-task" : "task"}
         >
-          {!newTaskDraftActive && (
-            <header className="task-header">
-              <div className="min-w-0">
-                {activeTask && editingTitle ? (
-                  <form
-                    className="task-title-editor"
-                    onSubmit={(event) => {
-                      event.preventDefault();
-                      void renameTask();
-                    }}
-                  >
-                    <Input
-                      autoFocus
-                      maxLength={120}
-                      value={titleDraft}
-                      aria-label={t("task.rename")}
-                      placeholder={t("task.item", { id: activeTask.id })}
-                      onChange={(event) => setTitleDraft(event.target.value)}
-                      onKeyDown={(event) => {
-                        if (event.key !== "Escape") return;
-                        event.preventDefault();
-                        setEditingTitle(false);
-                      }}
-                    />
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      disabled={!titleDraft.trim() || taskMutationDisabled}
-                    >
-                      {t("common.save")}
-                    </Button>
-                    <button
-                      type="button"
-                      className="text-button focus-ring"
-                      onClick={() => setEditingTitle(false)}
-                    >
-                      {t("common.cancel")}
-                    </button>
-                  </form>
-                ) : (
-                  <div className="task-title-row">
-                    <h1>
-                      {activeTask
-                        ? activeTaskTitle
-                        : newTaskDraftActive
-                          ? t("task.new")
-                          : t("task.open")}
-                    </h1>
-                    {activeTask && (
-                      <TaskSignals task={activeTask} showCompleted={false} />
-                    )}
-                  </div>
-                )}
-              </div>
-              <div className="task-actions">
-                {activeTask &&
-                  activeTask.activeOperation !== null &&
-                  activeTask.activeOperation.kind !== "restore" &&
-                  !(activeTask.activeOperation.kind === "run"
-                    ? activeTask.currentRunPhase === "stopping"
-                    : activeTask.compacts.find(
-                        (compact) =>
-                          compact.operationId ===
-                          activeTask.activeOperation?.id,
-                      )?.phase === "stopping") && (
-                    <Button
-                      variant="danger"
-                      size="sm"
-                      disabled={
-                        bridgeUnavailable || activeTask.id in cancelPending
-                      }
-                      onClick={() =>
-                        void (activeTask.activeOperation?.kind === "compact"
-                          ? cancelCompact()
-                          : cancelRun())
-                      }
-                    >
-                      <Icon name="stop" />
-                      {t(
-                        activeTask.activeOperation.kind === "compact"
-                          ? "compact.stop"
-                          : "task.stop",
-                      )}
-                    </Button>
-                  )}
-                {activeTask && inspector.available && (
-                  <button
-                    ref={inspectorToggle}
-                    className="inspector-toggle icon-button focus-ring"
-                    data-active={inspector.open}
-                    aria-controls="task-inspector"
-                    aria-expanded={inspector.open}
-                    aria-label={t(
-                      inspector.open ? "inspector.close" : "inspector.open",
-                    )}
-                    title={t(
-                      inspector.open ? "inspector.close" : "inspector.open",
-                    )}
-                    onClick={(event) => {
-                      setInspectorFocusRequest(null);
-                      if (inspector.open) {
-                        dismissInspector(false);
-                        return;
-                      }
-                      inspectorOpener.current = event.currentTarget;
-                      inspector.show();
-                    }}
-                  >
-                    <Icon name="activity" />
-                  </button>
-                )}
-              </div>
-            </header>
-          )}
-
           {activeTask && (
             <AlertDialog.Root
               open={confirmDelete}
