@@ -2418,7 +2418,6 @@ export default function App() {
           <TaskInspector
             task={activeTask}
             focusRequest={inspectorFocusRequest}
-            onClose={() => dismissInspector()}
             onFocusPending={focusPendingFromInspector}
           />
         ) : null

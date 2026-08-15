@@ -7338,32 +7338,21 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   z-index: 2;
   top: 0;
   display: flex;
-  min-height: 64px;
-  padding: 15px 16px 12px 20px;
+  min-height: 48px;
+  padding: 8px 16px 8px 20px;
   align-items: center;
-  justify-content: space-between;
-  gap: 16px;
+  justify-content: flex-start;
   border-bottom: 1px solid var(--ui-border);
   background: color-mix(in srgb, var(--ui-surface-panel) 96%, transparent);
   backdrop-filter: blur(12px);
 }
 
-.inspector-header p,
 .inspector-header h2 {
   margin: 0;
 }
 
-.inspector-header p {
-  color: var(--ui-content-muted);
-  font-size: 9px;
-  font-weight: 720;
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
-}
-
 .inspector-header h2 {
-  margin-top: 3px;
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 720;
   letter-spacing: -0.01em;
 }

@@ -112,7 +112,7 @@ Workspace
 | MCP                  | MCP          | 可信服务、连接状态与已发现工具目录 |
 | Account & models     | 账号与模型   | 登录、API、默认模型与同步          |
 | Model                | 模型         | 新 Task 的执行模型，不称模式       |
-| Inspector            | 检查器       | 按需活动摘要与详情，不称 Monitor   |
+| Task overview       | 任务概览     | 按需活动摘要与详情，不称 Monitor   |
 | Current activity     | 当前活动     | Agent 此刻正在进行的可观察动作     |
 | Plan                 | 计划         | 只在有真实结构化计划时显示         |
 | Outputs              | 结果文件     | 用户关心的最终交付，不称 Artifacts |
@@ -127,7 +127,7 @@ Workspace
 
 ## 4. 主窗口信息架构
 
-> Capability：**当前**。登录优先 gate、独立 Workspace projection、左栏、New task、设置 route、工作轨迹与按需 Inspector 已进入当前 shell；未通过 capability gate 的 Inspector 模块仍必须隐藏。
+> Capability：**当前**。登录优先 gate、独立 Workspace projection、左栏、New task、设置 route、工作轨迹与按需 Task overview 已进入当前 shell；未通过 capability gate 的 Task overview 模块仍必须隐藏。
 
 ### 4.1 总体布局
 
@@ -135,7 +135,7 @@ Workspace
 ┌───────────────────────────────────────────────────────────────┐
 │ Integrated title/command bar · context · search · controls    │
 ├──────────────┬────────────────────────────────┬───────────────┤
-│ New task     │ New task Composer              │ Inspector     │
+│ New task     │ New task Composer              │ Task overview │
 │ Workspaces   │ or Task work trace             │ when useful   │
 │ Task groups  │                                │               │
 │              ├────────────────────────────────┤               │
@@ -148,14 +148,14 @@ Workspace
 - 一体化命令栏：默认 52 px 产品视觉基线；Windows 沿用历史实现的 40 px 标题栏，macOS 交通灯安全区由 Host geometry 注入；
 - 左栏：248 px；
 - 左栏品牌区使用紧凑单行，只显示 `MetaWork` 字样，不把品牌区表现成第二层标题栏，也不重复使用首字母图标、产品说明或宣传副标题；
-- Inspector：打开时 304 px；审批、活动详情、usage 或真实结果只决定模块是否可用，不触发普通 Run 的自动开合。除新的 `Needs your attention` 可自动打开一次外，显隐由用户控制并在 Run terminal 后保持稳定；
+- Task overview：打开时 304 px；审批、活动详情、usage 或真实结果只决定模块是否可用，不触发普通 Run 的自动开合。除新的 `Needs your attention` 可自动打开一次外，显隐由用户控制并在 Run terminal 后保持稳定；
 - 已有 Task 不额外占用独立内容标题区；Task 名称只在顶部命令栏显示；
 - 中间正文推荐最大宽度：760 px；
 - 表格、diff、日志和文件预览可以使用中间区域的可用宽度；
 - Native 主窗口声明 320 × 520 logical px 的系统最小尺寸，保证窗口不能被缩到 Renderer 已定义布局下限之外；960 × 680 仍只是窄窗口回归样本，不是固定设计画布；
-- 低于约 1100 px 时 Inspector 使用右侧非模态覆盖层或保持关闭；低于约 820 px 时左栏和 Inspector 都使用互斥覆盖层；低于约 560 px 时命令栏隐藏次级文字。
+- 低于约 1100 px 时 Task overview 使用右侧非模态覆盖层或保持关闭；低于约 820 px 时左栏和 Task overview 都使用互斥覆盖层；低于约 560 px 时命令栏隐藏次级文字。
 
-左栏折叠后完全隐藏并把宽度归还中央工作面，不保留 56 px 图标栏，也不用匿名图标映射任意 Task。命令栏左侧始终保留打开/关闭入口，折叠状态按用户偏好保存。Inspector 内容只决定模块和入口是否可用；显隐只由用户动作、Task 切换或新的 `Needs your attention` 单次自动打开改变，并按 Task 保留当前应用会话内状态，不持久化为空面板偏好。折叠只改变视图，不改变 Task、审批或运行状态。
+左栏折叠后完全隐藏并把宽度归还中央工作面，不保留 56 px 图标栏，也不用匿名图标映射任意 Task。命令栏左侧始终保留打开/关闭入口，折叠状态按用户偏好保存。Task overview 内容只决定模块和入口是否可用；显隐只由用户动作、Task 切换或新的 `Needs your attention` 单次自动打开改变，并按 Task 保留当前应用会话内状态，不持久化为空面板偏好。折叠只改变视图，不改变 Task、审批或运行状态。
 
 ### 4.2 窗口模型
 
@@ -180,7 +180,7 @@ Workspace
 - window-chrome bootstrap capability 不依赖 ProductDelivery connection，使登录/连接失败页仍保留系统窗口行为。它只接受 connect/sync/disconnect、Host capability gate 控制的 live-pointer drag，以及绑定当前 document generation 的 `minimize | toggle_maximize | close` 固定语义动作；不接受 window id、任意 action 或独立 state query；
 - 正常连接、恢复成功和普通操作成功不持续占据命令栏；只有同步失败、命令失败或其他确实需要用户行动的异常才显示状态入口；
 - 异常状态按 connection、account、Workspace identity 或 Task identity 分域保存；并行 Task 的结果不得互相覆盖，命令栏只选择当前上下文中优先级最高的一项显示；
-- 顶部命令栏在已有 Task 且 Inspector 可用时提供稳定的 Inspector 图标按钮，accessible name 随状态使用 `打开检查器 / 关闭检查器` 并发布 `aria-expanded`；New task、无 Task 或没有任何可检查事实时不显示该按钮；
+- 顶部命令栏在已有 Task 且 Task overview 可用时提供稳定的入口图标，accessible name 随状态使用 `打开任务概览 / 关闭任务概览` 并发布 `aria-expanded`；New task、无 Task 或没有任何可检查事实时不显示该按钮；
 - 未登录界面的应用工具栏只保留产品 identity 与语言入口；语言不能藏进尚不可进入的设置；
 - Renderer 关闭按钮必须进入平台的 user-close 语义并遵循 manifest `close_policy = hide`，后台 Application 与计划任务继续运行；重新打开由 Native SDK 托盘菜单进入 Application 的 `showWindow`/`focusWindow` capability，显式 Quit 才进入应用 shutdown；
 - 不使用 `chromeless`；系统 resize frame、Snap Layout、拖动、双击、系统菜单、DPI 与高对比行为只按真实平台验收声明，不由 WebUI 模拟。Renderer 只绘制按钮并提交固定语义意图，不复制这些底层行为；
@@ -775,13 +775,13 @@ Full access
 
 `Full access` 只能在 Workspace 设置中单独开启，不能在普通审批卡片中顺手授予。它不是绕过边界的总开关：只有所有已启用 tool 都能被 Host 强制限制在已验证 capability 范围内时才允许出现；strict Workspace security、process 和 network 边界未真实成立前不得开放。
 
-## 11. 按需 Inspector
+## 11. 按需 Task overview
 
-> Capability：**混合**。按需 Inspector shell，以及 Needs your attention、Current activity / Last run、Tools and connections 与真实 usage 已进入当前实现；Plan 与 Outputs 仍是未来项。
+> Capability：**混合**。按需 Task overview shell，以及 Needs your attention、Current activity / Last run、Tools and connections 与真实 usage 已进入当前实现；Plan 与 Outputs 仍是未来项。
 
-Inspector 是当前 Task 的按需结构化摘要与详情面板，不是固定存在的第三栏、第二份聊天记录或日志面板。New task、无 Task 和没有有效模块的普通 idle Task 默认不占用右侧列宽。模块变为可用不等于自动打开面板：普通 Current activity、usage 和工具活动只更新入口或已打开面板，不能在 Run 开始时挤压正文。
+Task overview 是当前 Task 的按需结构化摘要与详情面板，不是固定存在的第三栏、第二份聊天记录或日志面板。New task、无 Task 和没有有效模块的普通 idle Task 默认不占用右侧列宽。模块变为可用不等于自动打开面板：普通 Current activity、usage 和工具活动只更新入口或已打开面板，不能在 Run 开始时挤压正文。
 
-用户通过顶部命令栏右侧的 Inspector 按钮稳定打开或关闭面板；工具卡、diff、结果和 usage 的 `查看详情` 是直接打开并定位具体模块的上下文入口。两类入口控制同一个 Inspector 状态，不建立第二套详情面板。
+用户通过顶部命令栏右侧的 Task overview 按钮稳定打开或关闭面板；工具卡、diff、结果和 usage 的 `查看详情` 是直接打开并定位具体模块的上下文入口。两类入口控制同一个 Task overview 状态，不建立第二套详情面板。
 
 出现内容时模块优先级为：
 
@@ -1223,7 +1223,7 @@ Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成
 - 状态在无颜色条件下仍可识别；
 - 长英文、中文和 pseudo-locale 不溢出；
 - `queued / running / waiting_user` 的可见 Stop 只出现在顶部命令栏；Composer 不出现第二入口，`stopping` 阻止重复请求并等待真实 terminal；
-- 顶部命令栏 Inspector 按钮可由键盘操作，`打开检查器 / 关闭检查器` 与 `aria-expanded` 始终匹配真实面板状态；
+- 顶部命令栏 Task overview 按钮可由键盘操作，`打开任务概览 / 关闭任务概览` 与 `aria-expanded` 始终匹配真实面板状态；
 - 普通 Run start/terminal 不改变 Inspector 列宽；新的待处理请求只自动打开一次，terminal 后保留 Last run summary，切换 Task 不泄漏旧详情；
 - 左栏折叠后完全隐藏且命令栏入口仍可达；Inspector 关闭或覆盖显示后功能不丢失。
 - Windows Renderer 窗口按钮在登录页与 Workbench 均可见、键盘可达；最小化、最大化/还原和遵循 `close_policy = hide` 的关闭命中真实窗口，按钮区域不进入 drag candidate；
