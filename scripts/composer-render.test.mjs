@@ -568,11 +568,7 @@ test("Workbench foundation uses a stable 760px new Task Composer stage", async (
   assert.doesNotMatch(app, /draftComposer=/);
   assert.match(
     app,
-    /!newTaskDraftActive && \(\s*<header className="task-header">/,
-  );
-  assert.match(
-    app,
-    /contextVisible=\{route === "workbench" && activeTask !== null\}/,
+    /contextVisible=\{\s*!settingsOpen && route === "workbench" && activeTask !== null\s*\}/,
   );
   assert.doesNotMatch(shell, /commandbar-workspace|commandbar-separator/);
   assert.match(shell, /commandbar-task/);

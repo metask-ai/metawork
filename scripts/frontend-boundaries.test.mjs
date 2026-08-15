@@ -176,7 +176,8 @@ test("Task persistence failure disables mutations without hiding Task history", 
     /actionDisabled=\{workbenchMutationDisabled \|\| workspaceBusy\}/,
   );
   assert.match(app, /<TaskList[\s\S]*tasks=\{navigableTaskItems\}/);
-  assert.doesNotMatch(taskList, /disabled=/);
+  assert.match(taskList, /className="task-list-item focus-ring"/);
+  assert.match(taskList, /disabled=\{taskMutationDisabled/);
 });
 
 test("draft Workspace selection stays local until Task creation", async () => {
@@ -225,6 +226,46 @@ test("Workspace lifecycle recovery lives in Settings with explicit focus handlin
     /intent\.kind === "reauthorize"[\s\S]*result\.workspaceId !== intent\.workspaceId[\s\S]*kind: "target_mismatch"/,
   );
   assert.doesNotMatch(settings, /dispatchWorkbench|selectWorkspace/);
+});
+
+test("Settings is a full content overlay that preserves the Workbench mount", async () => {
+  const [app, shell, settings, css] = await Promise.all([
+    readFile(resolve(sourceRoot, "app", "App.tsx"), "utf8"),
+    readFile(resolve(sourceRoot, "app", "AppShell.tsx"), "utf8"),
+    readFile(
+      resolve(sourceRoot, "features", "settings", "SettingsPage.tsx"),
+      "utf8",
+    ),
+    readFile(resolve(sourceRoot, "index.css"), "utf8"),
+  ]);
+  assert.match(
+    app,
+    /const \[settingsOpen, setSettingsOpen\] = useState\(false\)/,
+  );
+  assert.match(
+    app,
+    /settingsRestoreFocus = useRef<HTMLElement \| null>\(null\)/,
+  );
+  assert.match(
+    app,
+    /settingsRestoreFocus\.current\?\.focus\(\);[\s\S]*settingsRestoreFocus\.current = null/,
+  );
+  assert.match(app, /overlay=\{\s*settingsOpen \?/);
+  assert.doesNotMatch(app, /route === "settings" \?\s*\(/);
+  assert.match(
+    shell,
+    /className="app-columns" inert=\{overlay \? true : undefined\}/,
+  );
+  assert.match(
+    css,
+    /\.app-overlay-layer\s*\{[\s\S]*inset: var\(--window-bar-height\) 0 0;/,
+  );
+  assert.match(
+    css,
+    /\.settings-header,\s*\.settings-layout\s*\{[\s\S]*width: 100%;/,
+  );
+  assert.match(settings, /role="dialog"/);
+  assert.match(settings, /aria-modal="true"/);
 });
 
 test("Renderer draws declarative titlebar controls while Bridge and Host own native behavior", async () => {

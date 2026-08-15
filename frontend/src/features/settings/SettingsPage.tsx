@@ -362,14 +362,29 @@ export function SettingsPage({
   }
 
   return (
-    <div className="settings-page">
+    <div
+      className="settings-page"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="settings-page-title"
+      tabIndex={-1}
+      onKeyDown={(event) => {
+        if (event.key !== "Escape" || event.defaultPrevented) return;
+        const nestedOverlay = (event.target as HTMLElement).closest(
+          '[role="menu"], [role="listbox"], [role="dialog"], [role="alertdialog"]',
+        );
+        if (nestedOverlay && nestedOverlay !== event.currentTarget) return;
+        event.preventDefault();
+        onBack();
+      }}
+    >
       <header className="settings-header">
         <button className="settings-back focus-ring" onClick={onBack}>
           <Icon name="arrow-left" />
           {t("settings.back")}
         </button>
         <div className="settings-header-copy">
-          <h1 ref={title} tabIndex={-1}>
+          <h1 id="settings-page-title" ref={title} tabIndex={-1}>
             {t("settings.title")}
           </h1>
           <p>{t("settings.intro")}</p>

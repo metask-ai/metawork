@@ -28,6 +28,7 @@ export function AppShell({
   inspector,
   inspectorOpen,
   onDismissInspector,
+  overlay,
   children,
 }: {
   taskTitle: string;
@@ -40,6 +41,7 @@ export function AppShell({
   inspector: ReactNode | null;
   inspectorOpen: boolean;
   onDismissInspector: (restoreFocus?: boolean) => void;
+  overlay?: ReactNode;
   children: ReactNode;
 }) {
   const { t } = useI18n();
@@ -119,11 +121,10 @@ export function AppShell({
           </button>
         </div>
         <div className="commandbar-context" data-visible={contextVisible}>
-          {contextVisible && (
-            contextContent ?? (
+          {contextVisible &&
+            (contextContent ?? (
               <span className="commandbar-task">{taskTitle}</span>
-            )
-          )}
+            ))}
         </div>
         <div className="commandbar-alert-slot">
           {headerActions}
@@ -156,7 +157,7 @@ export function AppShell({
         />
       </WindowTitlebar>
 
-      <div className="app-columns">
+      <div className="app-columns" inert={overlay ? true : undefined}>
         {leftAvailable && (
           <aside
             id="workspace-sidebar"
@@ -181,7 +182,9 @@ export function AppShell({
         )}
       </div>
 
-      {effectiveLeftOpen && (
+      {overlay && <div className="app-overlay-layer">{overlay}</div>}
+
+      {effectiveLeftOpen && !overlay && (
         <button
           className="panel-scrim"
           aria-label={t("app.dismiss_panels")}

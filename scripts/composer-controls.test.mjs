@@ -799,6 +799,18 @@ test(
   },
 );
 
+test("Settings closes on Escape at the surface boundary", () => {
+  let closed = 0;
+  renderSettings(readySettingsAccount, {
+    onBack() {
+      closed += 1;
+    },
+  });
+  const page = screen.getByRole("dialog", { name: "Settings" });
+  fireEvent.keyDown(page, { key: "Escape" });
+  assert.equal(closed, 1);
+});
+
 function renderComposer(overrides = {}) {
   const textareaRef = createRef();
   let submissions = 0;

@@ -60,10 +60,7 @@ import { inspectorFocusReturnTarget } from "../features/inspector/inspector-inte
 import type { InspectorSection } from "../features/inspector/inspector-state.ts";
 import { useInspectorSession } from "../features/inspector/useInspectorSession.ts";
 import { AgentWorkSurface } from "../features/agent-surface/AgentWorkSurface.tsx";
-import {
-  TaskList,
-  type TaskMenuAction,
-} from "../features/tasks/TaskList.tsx";
+import { TaskList, type TaskMenuAction } from "../features/tasks/TaskList.tsx";
 import { NewTaskView } from "../features/tasks/NewTaskView.tsx";
 import {
   useNewTaskDrafts,
@@ -174,6 +171,8 @@ export default function App() {
   );
   const [showArchived, setShowArchived] = useState(false);
   const [route, setRoute] = useState<ShellRoute>("workbench");
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const settingsRestoreFocus = useRef<HTMLElement | null>(null);
   const [settingsFocus, setSettingsFocus] =
     useState<SettingsFocusTarget>("title");
   const [accountSetupRedirected, setAccountSetupRedirected] = useState(false);
@@ -239,7 +238,9 @@ export default function App() {
       let changed = false;
       const next = { ...current };
       for (const [taskId, model] of Object.entries(current)) {
-        const task = snapshot.tasks.find((candidate) => candidate.id === taskId);
+        const task = snapshot.tasks.find(
+          (candidate) => candidate.id === taskId,
+        );
         if (!task || task.binding.model === model) {
           delete next[taskId];
           changed = true;
@@ -282,35 +283,32 @@ export default function App() {
   const accountSetupRequired = requiresAccountSetup(snapshot.account);
 
   useEffect(() => {
-    if (
-      accountSetupRedirected &&
-      snapshot.account.state !== "authenticated"
-    ) {
+    if (accountSetupRedirected && snapshot.account.state !== "authenticated") {
       setAccountSetupRedirected(false);
       return;
     }
-    if (accountSetupRequired && route === "workbench") {
+    if (accountSetupRequired && route === "workbench" && !settingsOpen) {
       setAccountSetupRedirected(true);
-      setSettingsFocus("account");
-      setRoute("settings");
+      openSettings("account");
       return;
     }
     if (
       !accountSetupRedirected ||
       accountSetupRequired ||
-      route !== "settings" ||
+      route !== "workbench" ||
       snapshot.account.state !== "authenticated" ||
       !snapshot.account.canCreateTask
     )
       return;
     setAccountSetupRedirected(false);
     setSettingsFocus("title");
-    setRoute("workbench");
+    setSettingsOpen(false);
     window.requestAnimationFrame(() => composer.current?.focus());
   }, [
     accountSetupRedirected,
     accountSetupRequired,
     route,
+    settingsOpen,
     snapshot.account.canCreateTask,
     snapshot.account.state,
   ]);
@@ -380,7 +378,7 @@ export default function App() {
   const selectedModelId = selectedModel?.selectionId ?? "";
   const taskModelId = activeTask?.binding.model ?? "";
   const pendingTaskModelId = activeTask
-    ? pendingTaskModels[activeTask.id] ?? null
+    ? (pendingTaskModels[activeTask.id] ?? null)
     : null;
   const pendingTaskModel = pendingTaskModelId
     ? snapshot.account.models.find(
@@ -389,10 +387,9 @@ export default function App() {
     : null;
   const taskModelLabel = pendingTaskModel
     ? t("task.model_pending", {
-        model:
-          pendingTaskModel.displayName || pendingTaskModel.selectionId,
+        model: pendingTaskModel.displayName || pendingTaskModel.selectionId,
       })
-    : activeTask?.binding.model ?? selectedModelLabel;
+    : (activeTask?.binding.model ?? selectedModelLabel);
   const displayedTaskModelId = pendingTaskModelId ?? taskModelId;
   const taskModelInCatalog =
     activeTask === null ||
@@ -847,10 +844,14 @@ export default function App() {
     } catch (error) {
       await refreshSnapshot().catch(() => undefined);
       setStatus(
-        attentionStatus("mutation.reason.task_unavailable", {
-          scope: "task",
-          taskId: task.id,
-        }, { diagnostic: errorText(error) }),
+        attentionStatus(
+          "mutation.reason.task_unavailable",
+          {
+            scope: "task",
+            taskId: task.id,
+          },
+          { diagnostic: errorText(error) },
+        ),
       );
     } finally {
       endTaskPendingOperation(scope);
@@ -1080,8 +1081,14 @@ export default function App() {
   }
 
   function openSettings(target: SettingsFocusTarget = "title") {
+    if (!settingsOpen) {
+      settingsRestoreFocus.current =
+        document.activeElement instanceof HTMLElement
+          ? document.activeElement
+          : null;
+    }
     setSettingsFocus(target);
-    setRoute("settings");
+    setSettingsOpen(true);
     if (
       bridgeUnavailable ||
       accountBusyRef.current ||
@@ -1090,6 +1097,14 @@ export default function App() {
     )
       return;
     void runAccountCommand(() => client.refreshAccountCatalog());
+  }
+
+  function closeSettings() {
+    setSettingsOpen(false);
+    window.requestAnimationFrame(() => {
+      settingsRestoreFocus.current?.focus();
+      settingsRestoreFocus.current = null;
+    });
   }
 
   async function ensureTaskContinuation(
@@ -2058,7 +2073,7 @@ export default function App() {
       : null,
   });
   const commandBarStatus = selectCommandBarStatus(statuses, {
-    route,
+    route: settingsOpen ? "settings" : route,
     workspaceId: composerWorkspaceId ?? null,
     taskId: activeTask?.id ?? null,
   });
@@ -2135,7 +2150,9 @@ export default function App() {
           : ""
       }
       workspaceEditable={newTaskDraftActive}
-      modelLabel={newTaskDraftActive ? selectedModelLabel : taskModelLabel || null}
+      modelLabel={
+        newTaskDraftActive ? selectedModelLabel : taskModelLabel || null
+      }
       modelOptions={snapshot.account.models}
       selectedModelId={
         newTaskDraftActive ? selectedModelId : displayedTaskModelId
@@ -2181,7 +2198,7 @@ export default function App() {
   return (
     <AppShell
       taskTitle={
-        route === "settings"
+        settingsOpen
           ? t("settings.title")
           : route === "skills"
             ? t("skills.title")
@@ -2191,9 +2208,11 @@ export default function App() {
                 ? t("scheduled.title")
                 : activeTaskTitle
       }
-      contextVisible={route === "workbench" && activeTask !== null}
+      contextVisible={
+        !settingsOpen && route === "workbench" && activeTask !== null
+      }
       contextContent={
-        route === "workbench" && activeTask && editingTitle ? (
+        !settingsOpen && route === "workbench" && activeTask && editingTitle ? (
           <form
             className="commandbar-task-editor"
             onSubmit={(event) => {
@@ -2232,7 +2251,7 @@ export default function App() {
         ) : undefined
       }
       headerActions={
-        route === "workbench" && activeTask ? (
+        !settingsOpen && route === "workbench" && activeTask ? (
           <>
             {activeTask.activeOperation !== null &&
               activeTask.activeOperation.kind !== "restore" &&
@@ -2245,9 +2264,7 @@ export default function App() {
                 <Button
                   variant="danger"
                   size="sm"
-                  disabled={
-                    bridgeUnavailable || activeTask.id in cancelPending
-                  }
+                  disabled={bridgeUnavailable || activeTask.id in cancelPending}
                   onClick={() =>
                     void (activeTask.activeOperation?.kind === "compact"
                       ? cancelCompact()
@@ -2271,9 +2288,7 @@ export default function App() {
                 aria-label={t(
                   inspector.open ? "inspector.close" : "inspector.open",
                 )}
-                title={t(
-                  inspector.open ? "inspector.close" : "inspector.open",
-                )}
+                title={t(inspector.open ? "inspector.close" : "inspector.open")}
                 onClick={(event) => {
                   setInspectorFocusRequest(null);
                   if (inspector.open) {
@@ -2297,124 +2312,121 @@ export default function App() {
           : null
       }
       left={
-        route === "settings" ? null : (
-          <div className="sidebar-frame">
-            <div className="sidebar-primary">
-              <p className="brand-name">{t("app.name")}</p>
-              <nav
-                className="sidebar-capabilities"
-                aria-label={t("skills.navigation_label")}
+        <div className="sidebar-frame">
+          <div className="sidebar-primary">
+            <p className="brand-name">{t("app.name")}</p>
+            <nav
+              className="sidebar-capabilities"
+              aria-label={t("skills.navigation_label")}
+            >
+              <button
+                className="sidebar-capability focus-ring"
+                data-active={route === "workbench" && newTaskDraftActive}
+                disabled={viewSyncFailed || !bridgeReady}
+                onClick={beginNewTask}
               >
+                <span className="sidebar-capability-mark" aria-hidden="true">
+                  <Icon name="new-task" />
+                </span>
+                <span>{t("task.new")}</span>
+              </button>
+              <button
+                className="sidebar-capability focus-ring"
+                data-active={route === "skills"}
+                aria-current={route === "skills" ? "page" : undefined}
+                onClick={() => {
+                  pendingTaskSelection.current = null;
+                  setRoute("skills");
+                }}
+              >
+                <span className="sidebar-capability-mark" aria-hidden="true">
+                  <Icon name="skills" />
+                </span>
+                <span>{t("skills.title")}</span>
+              </button>
+              <button
+                className="sidebar-capability focus-ring"
+                data-active={route === "mcp"}
+                aria-current={route === "mcp" ? "page" : undefined}
+                onClick={() => {
+                  pendingTaskSelection.current = null;
+                  setRoute("mcp");
+                }}
+              >
+                <span className="sidebar-capability-mark" aria-hidden="true">
+                  <Icon name="mcp" />
+                </span>
+                <span>{t("mcp.title")}</span>
+              </button>
+              {snapshot.capabilities.scheduledTaskPersistenceHealth !==
+                "unavailable" && (
                 <button
                   className="sidebar-capability focus-ring"
-                  data-active={route === "workbench" && newTaskDraftActive}
-                  disabled={viewSyncFailed || !bridgeReady}
-                  onClick={beginNewTask}
-                >
-                  <span className="sidebar-capability-mark" aria-hidden="true">
-                    <Icon name="new-task" />
-                  </span>
-                  <span>{t("task.new")}</span>
-                </button>
-                <button
-                  className="sidebar-capability focus-ring"
-                  data-active={route === "skills"}
-                  aria-current={route === "skills" ? "page" : undefined}
-                  onClick={() => {
-                    pendingTaskSelection.current = null;
-                    setRoute("skills");
-                  }}
-                >
-                  <span className="sidebar-capability-mark" aria-hidden="true">
-                    <Icon name="skills" />
-                  </span>
-                  <span>{t("skills.title")}</span>
-                </button>
-                <button
-                  className="sidebar-capability focus-ring"
-                  data-active={route === "mcp"}
-                  aria-current={route === "mcp" ? "page" : undefined}
-                  onClick={() => {
-                    pendingTaskSelection.current = null;
-                    setRoute("mcp");
-                  }}
-                >
-                  <span className="sidebar-capability-mark" aria-hidden="true">
-                    <Icon name="mcp" />
-                  </span>
-                  <span>{t("mcp.title")}</span>
-                </button>
-                {snapshot.capabilities.scheduledTaskPersistenceHealth !==
-                  "unavailable" && (
-                  <button
-                    className="sidebar-capability focus-ring"
-                    data-active={route === "scheduled-tasks"}
-                    aria-current={
-                      route === "scheduled-tasks" ? "page" : undefined
-                    }
-                    onClick={() => {
-                      pendingTaskSelection.current = null;
-                      setRoute("scheduled-tasks");
-                    }}
-                  >
-                    <span
-                      className="sidebar-capability-mark"
-                      aria-hidden="true"
-                    >
-                      <Icon name="scheduled-tasks" />
-                    </span>
-                    <span>{t("scheduled.title")}</span>
-                  </button>
-                )}
-              </nav>
-
-              <div className="sidebar-navigation">
-                {snapshot.capabilities.taskHistoryPersistenceHealth !==
-                  "ready" &&
-                  snapshot.capabilities.taskHistoryPersistenceHealth !==
-                    "unavailable" && (
-                    <div className="task-persistence-error" role="alert">
-                      <Icon name="warning" />
-                      <span>
-                        {t(
-                          `task.persistence.${snapshot.capabilities.taskHistoryPersistenceHealth}`,
-                        )}
-                      </span>
-                    </div>
-                  )}
-                <TaskList
-                  tasks={navigableTaskItems}
-                  workspaces={snapshot.workspaces}
-                  activeTaskId={
-                    route === "workbench" && activeTask !== null
-                      ? activeTask.id
-                      : null
+                  data-active={route === "scheduled-tasks"}
+                  aria-current={
+                    route === "scheduled-tasks" ? "page" : undefined
                   }
-                  showArchived={showArchived}
-                  onSelectTask={openTask}
-                  onToggleArchived={() => setShowArchived((shown) => !shown)}
-                  onTaskAction={handleTaskAction}
-                  taskMutationDisabled={workbenchMutationDisabled}
-                />
-              </div>
-            </div>
+                  onClick={() => {
+                    pendingTaskSelection.current = null;
+                    setRoute("scheduled-tasks");
+                  }}
+                >
+                  <span className="sidebar-capability-mark" aria-hidden="true">
+                    <Icon name="scheduled-tasks" />
+                  </span>
+                  <span>{t("scheduled.title")}</span>
+                </button>
+              )}
+            </nav>
 
-            <AccountIdentity
-              account={snapshot.account}
-              active={false}
-              disabled={bridgeUnavailable || accountBusy}
-              onOpenSettings={openSettings}
-              onBeginLogin={() =>
-                void runAccountCommand(() => client.beginLogin())
-              }
-            />
+            <div className="sidebar-navigation">
+              {snapshot.capabilities.taskHistoryPersistenceHealth !== "ready" &&
+                snapshot.capabilities.taskHistoryPersistenceHealth !==
+                  "unavailable" && (
+                  <div className="task-persistence-error" role="alert">
+                    <Icon name="warning" />
+                    <span>
+                      {t(
+                        `task.persistence.${snapshot.capabilities.taskHistoryPersistenceHealth}`,
+                      )}
+                    </span>
+                  </div>
+                )}
+              <TaskList
+                tasks={navigableTaskItems}
+                workspaces={snapshot.workspaces}
+                activeTaskId={
+                  route === "workbench" && activeTask !== null
+                    ? activeTask.id
+                    : null
+                }
+                showArchived={showArchived}
+                onSelectTask={openTask}
+                onToggleArchived={() => setShowArchived((shown) => !shown)}
+                onTaskAction={handleTaskAction}
+                taskMutationDisabled={workbenchMutationDisabled}
+              />
+            </div>
           </div>
-        )
+
+          <AccountIdentity
+            account={snapshot.account}
+            active={settingsOpen}
+            disabled={bridgeUnavailable || accountBusy}
+            onOpenSettings={openSettings}
+            onBeginLogin={() =>
+              void runAccountCommand(() => client.beginLogin())
+            }
+          />
+        </div>
       }
-      inspectorOpen={route === "workbench" && inspector.open}
+      inspectorOpen={route === "workbench" && inspector.open && !settingsOpen}
       onDismissInspector={dismissInspector}
       inspector={
-        route === "workbench" && activeTask && inspector.available ? (
+        route === "workbench" &&
+        !settingsOpen &&
+        activeTask &&
+        inspector.available ? (
           <TaskInspector
             task={activeTask}
             focusRequest={inspectorFocusRequest}
@@ -2422,46 +2434,51 @@ export default function App() {
           />
         ) : null
       }
+      overlay={
+        settingsOpen ? (
+          <SettingsPage
+            account={snapshot.account}
+            manualWorkspaces={manualWorkspaces}
+            tasks={snapshot.tasks}
+            focusTarget={settingsFocus}
+            disabled={bridgeUnavailable || accountBusy}
+            workspaceDisabled={workbenchMutationDisabled}
+            workspaceBusy={workspaceBusy}
+            cancelDisabled={viewSyncFailed || !bridgeReady || accountCancelBusy}
+            onBack={closeSettings}
+            onRefresh={() =>
+              void runAccountCommand(() => client.refreshAccountCatalog())
+            }
+            onCancel={() => void cancelAccountOperation()}
+            onSelectApiKey={(id) =>
+              void runAccountCommand(() =>
+                client.selectApiKey(
+                  id,
+                  snapshot.account.catalogGeneration,
+                  snapshot.account.executionGeneration,
+                ),
+              )
+            }
+            onSelectModel={(id) =>
+              void runAccountCommand(() =>
+                client.selectModel(
+                  id,
+                  snapshot.account.catalogGeneration,
+                  snapshot.account.executionGeneration,
+                ),
+              )
+            }
+            onChooseWorkspace={chooseWorkspaceForSettings}
+            onRemoveWorkspace={removeWorkspaceById}
+            onBeginLogin={() =>
+              void runAccountCommand(() => client.beginLogin())
+            }
+            onLogout={() => void runAccountCommand(() => client.logout())}
+          />
+        ) : null
+      }
     >
-      {route === "settings" ? (
-        <SettingsPage
-          account={snapshot.account}
-          manualWorkspaces={manualWorkspaces}
-          tasks={snapshot.tasks}
-          focusTarget={settingsFocus}
-          disabled={bridgeUnavailable || accountBusy}
-          workspaceDisabled={workbenchMutationDisabled}
-          workspaceBusy={workspaceBusy}
-          cancelDisabled={viewSyncFailed || !bridgeReady || accountCancelBusy}
-          onBack={() => setRoute("workbench")}
-          onRefresh={() =>
-            void runAccountCommand(() => client.refreshAccountCatalog())
-          }
-          onCancel={() => void cancelAccountOperation()}
-          onSelectApiKey={(id) =>
-            void runAccountCommand(() =>
-              client.selectApiKey(
-                id,
-                snapshot.account.catalogGeneration,
-                snapshot.account.executionGeneration,
-              ),
-            )
-          }
-          onSelectModel={(id) =>
-            void runAccountCommand(() =>
-              client.selectModel(
-                id,
-                snapshot.account.catalogGeneration,
-                snapshot.account.executionGeneration,
-              ),
-            )
-          }
-          onChooseWorkspace={chooseWorkspaceForSettings}
-          onRemoveWorkspace={removeWorkspaceById}
-          onBeginLogin={() => void runAccountCommand(() => client.beginLogin())}
-          onLogout={() => void runAccountCommand(() => client.logout())}
-        />
-      ) : route === "skills" ? (
+      {route === "skills" ? (
         <SkillsPage
           management={snapshot.skillManagement}
           workspaces={snapshot.workspaces}

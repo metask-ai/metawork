@@ -121,8 +121,12 @@ summary::-webkit-details-marker {
   font-size: 12px;
 }
 
-.account-gate-toolbar .locale-control .account-gate-locale-trigger:hover:not(:disabled),
-.account-gate-toolbar .locale-control .account-gate-locale-trigger[data-popup-open] {
+.account-gate-toolbar
+  .locale-control
+  .account-gate-locale-trigger:hover:not(:disabled),
+.account-gate-toolbar
+  .locale-control
+  .account-gate-locale-trigger[data-popup-open] {
   border-color: var(--ui-border);
   color: var(--ui-content-primary);
   background: var(--ui-surface-panel-2);
@@ -175,7 +179,8 @@ summary::-webkit-details-marker {
   border-radius: 13px;
   color: var(--ui-content-on-primary);
   background: var(--ui-action-primary);
-  box-shadow: 0 8px 22px color-mix(in srgb, var(--ui-action-primary) 20%, transparent);
+  box-shadow: 0 8px 22px
+    color-mix(in srgb, var(--ui-action-primary) 20%, transparent);
   font-size: 17px;
   font-weight: 760;
 }
@@ -412,7 +417,11 @@ summary::-webkit-details-marker {
 
 .sidebar-capability:hover:not(:disabled) {
   color: var(--ui-content-primary);
-  background: color-mix(in srgb, var(--ui-action-primary-hover) 6%, transparent);
+  background: color-mix(
+    in srgb,
+    var(--ui-action-primary-hover) 6%,
+    transparent
+  );
 }
 
 .sidebar-capability[data-active="true"] {
@@ -446,7 +455,8 @@ summary::-webkit-details-marker {
   padding: 9px 10px;
   align-items: flex-start;
   gap: 8px;
-  border: 1px solid color-mix(in srgb, var(--metask-state-warning) 18%, transparent);
+  border: 1px solid
+    color-mix(in srgb, var(--metask-state-warning) 18%, transparent);
   border-radius: 9px;
   color: var(--ui-content-warning);
   background: color-mix(in srgb, var(--metask-state-warning) 6%, transparent);
@@ -641,7 +651,7 @@ summary::-webkit-details-marker {
   color: var(--metask-state-error);
 }
 
-/* Formal Settings route */
+/* Long-lived Settings surface */
 .settings-page {
   --settings-frost: var(--ui-surface-canvas);
   --settings-paper: var(--ui-surface-panel);
@@ -653,6 +663,8 @@ summary::-webkit-details-marker {
   --settings-line: var(--ui-border);
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
+  width: 100%;
+  height: 100%;
   min-height: 0;
   overflow: hidden;
   color: var(--settings-ink);
@@ -661,15 +673,15 @@ summary::-webkit-details-marker {
 
 .settings-header,
 .settings-layout {
-  width: min(100% - 64px, 1080px);
-  margin-inline: auto;
+  width: 100%;
+  padding-inline: 32px;
 }
 
 .settings-header {
   display: grid;
   grid-template-columns: 184px minmax(0, 1fr);
   min-height: 64px;
-  padding: 10px 0;
+  padding: 10px 32px;
   align-items: center;
   gap: 32px;
   border-bottom: 1px solid var(--settings-line);
@@ -728,7 +740,7 @@ summary::-webkit-details-marker {
   display: grid;
   grid-template-columns: 184px minmax(0, 1fr);
   min-height: 0;
-  padding: 22px 0 0;
+  padding-top: 22px;
   gap: 32px;
 }
 
@@ -1230,7 +1242,8 @@ summary::-webkit-details-marker {
 .selection-trigger.settings-control[data-popup-open] {
   border-color: var(--ui-action-primary);
   background: var(--ui-surface-panel);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ui-focus-ring) 14%, transparent);
+  box-shadow: 0 0 0 3px
+    color-mix(in srgb, var(--ui-focus-ring) 14%, transparent);
 }
 
 .selection-trigger.settings-control:disabled,
@@ -1464,7 +1477,11 @@ summary::-webkit-details-marker {
 }
 
 .selection-trigger:hover:not(:disabled) {
-  border-color: color-mix(in srgb, var(--ui-action-primary) 48%, var(--ui-border));
+  border-color: color-mix(
+    in srgb,
+    var(--ui-action-primary) 48%,
+    var(--ui-border)
+  );
   background: var(--ui-action-hover-surface);
 }
 
@@ -1559,7 +1576,8 @@ summary::-webkit-details-marker {
   width: 14px;
   height: 14px;
   margin-left: auto;
-  border: 1.5px solid color-mix(in srgb, var(--ui-action-primary) 26%, transparent);
+  border: 1.5px solid
+    color-mix(in srgb, var(--ui-action-primary) 26%, transparent);
   border-top-color: var(--ui-action-primary);
   border-radius: 50%;
   animation: selection-trigger-spin 720ms linear infinite;
@@ -1766,7 +1784,8 @@ summary::-webkit-details-marker {
 .agent-run[data-active="true"] .agent-run-state {
   border-color: var(--ui-action-primary);
   background: var(--ui-action-primary);
-  box-shadow: 0 0 0 4px color-mix(in srgb, var(--ui-action-primary) 12%, transparent);
+  box-shadow: 0 0 0 4px
+    color-mix(in srgb, var(--ui-action-primary) 12%, transparent);
   animation: agent-state-pulse 1.8s ease-in-out infinite;
 }
 
@@ -1815,10 +1834,15 @@ summary::-webkit-details-marker {
   max-width: min(78%, 660px);
   margin-left: auto;
   padding: 12px 15px;
-  border: 1px solid color-mix(in srgb, var(--ui-action-primary) 14%, var(--ui-border));
+  border: 1px solid
+    color-mix(in srgb, var(--ui-action-primary) 14%, var(--ui-border));
   border-radius: 14px 14px 4px 14px;
   color: var(--ui-content-primary);
-  background: color-mix(in srgb, var(--ui-action-primary) 9%, var(--ui-surface-panel));
+  background: color-mix(
+    in srgb,
+    var(--ui-action-primary) 9%,
+    var(--ui-surface-panel)
+  );
 }
 
 .ai-message.agent-user-message .message-body {
@@ -1827,7 +1851,8 @@ summary::-webkit-details-marker {
 
 .agent-message.is-agent {
   padding: 1px 0 3px 16px;
-  border-left: 2px solid color-mix(in srgb, var(--ui-action-primary) 38%, var(--ui-border));
+  border-left: 2px solid
+    color-mix(in srgb, var(--ui-action-primary) 38%, var(--ui-border));
 }
 
 .agent-run-outcome {
@@ -1903,7 +1928,11 @@ summary::-webkit-details-marker {
 }
 
 .ai-tool.agent-tool[data-state="failed"] {
-  border-top-color: color-mix(in srgb, var(--metask-state-error) 34%, transparent);
+  border-top-color: color-mix(
+    in srgb,
+    var(--metask-state-error) 34%,
+    transparent
+  );
 }
 
 .ai-tool.agent-tool .agent-tool-summary {
@@ -1995,11 +2024,15 @@ summary::-webkit-details-marker {
 @keyframes agent-state-pulse {
   0%,
   100% {
-    box-shadow: 0 0 0 1px var(--ui-action-primary), 0 0 0 4px color-mix(in srgb, var(--ui-action-primary) 10%, transparent);
+    box-shadow:
+      0 0 0 1px var(--ui-action-primary),
+      0 0 0 4px color-mix(in srgb, var(--ui-action-primary) 10%, transparent);
   }
 
   50% {
-    box-shadow: 0 0 0 1px var(--ui-action-primary), 0 0 0 7px color-mix(in srgb, var(--ui-action-primary) 4%, transparent);
+    box-shadow:
+      0 0 0 1px var(--ui-action-primary),
+      0 0 0 7px color-mix(in srgb, var(--ui-action-primary) 4%, transparent);
   }
 }
 
@@ -2051,13 +2084,13 @@ summary::-webkit-details-marker {
 @media (max-width: 620px) {
   .settings-header,
   .settings-layout {
-    width: min(100% - 28px, 920px);
+    padding-inline: 14px;
   }
 
   .settings-header {
     grid-template-columns: 1fr;
     min-height: 0;
-    padding: 10px 0 12px;
+    padding: 10px 14px 12px;
     gap: 4px;
   }
 
@@ -2169,6 +2202,7 @@ summary::-webkit-details-marker {
   grid-template-rows: var(--window-bar-height) minmax(0, 1fr);
   width: 100%;
   height: 100dvh;
+  position: relative;
   padding-top: env(safe-area-inset-top, 0px);
   background: var(--ui-surface-canvas);
   isolation: isolate;
@@ -2401,7 +2435,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   width: min(340px, calc(100vw - 20px));
   margin: 0;
   padding: 10px 12px;
-  border: 1px solid color-mix(in srgb, var(--metask-state-warning) 38%, transparent);
+  border: 1px solid
+    color-mix(in srgb, var(--metask-state-warning) 38%, transparent);
   border-radius: 8px;
   color: var(--ui-content-primary);
   background: var(--ui-surface-canvas);
@@ -2418,6 +2453,23 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   grid-template-columns: var(--left-column) minmax(0, 1fr) var(--right-column);
   min-height: 0;
   transition: grid-template-columns 160ms ease;
+}
+
+.app-overlay-layer {
+  position: absolute;
+  z-index: 55;
+  inset: var(--window-bar-height) 0 0;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--ui-surface-canvas);
+}
+
+.app-overlay-layer > * {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
 }
 
 .workspace-sidebar,
@@ -2580,7 +2632,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .skill-toolbar .skills-search:focus-within {
   border-color: color-mix(in srgb, var(--ui-action-primary) 42%, transparent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ui-action-primary) 8%, transparent);
+  box-shadow: 0 0 0 3px
+    color-mix(in srgb, var(--ui-action-primary) 8%, transparent);
 }
 
 .skill-toolbar .skills-search input {
@@ -2681,7 +2734,11 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .skill-card[data-attention="true"] {
-  border-color: color-mix(in srgb, var(--metask-state-warning) 27%, transparent);
+  border-color: color-mix(
+    in srgb,
+    var(--metask-state-warning) 27%,
+    transparent
+  );
   background: color-mix(in srgb, var(--ui-surface-panel) 88%, transparent);
 }
 
@@ -2690,10 +2747,15 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   width: 38px;
   height: 38px;
   place-items: center;
-  border: 1px solid color-mix(in srgb, var(--ui-action-primary) 11%, transparent);
+  border: 1px solid
+    color-mix(in srgb, var(--ui-action-primary) 11%, transparent);
   border-radius: 10px;
   color: var(--ui-content-muted);
-  background: linear-gradient(145deg, var(--ui-surface-canvas), var(--ui-surface-canvas));
+  background: linear-gradient(
+    145deg,
+    var(--ui-surface-canvas),
+    var(--ui-surface-canvas)
+  );
 }
 
 .skill-card-icon svg {
@@ -2763,7 +2825,11 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .skill-card-meta > .skill-card-attention {
-  border-color: color-mix(in srgb, var(--metask-state-warning) 20%, transparent);
+  border-color: color-mix(
+    in srgb,
+    var(--metask-state-warning) 20%,
+    transparent
+  );
   color: var(--ui-content-warning);
   background: color-mix(in srgb, var(--metask-state-warning) 8%, transparent);
 }
@@ -3008,7 +3074,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .skill-drawer-notice {
   padding: 12px 13px;
   margin-top: 16px;
-  border: 1px solid color-mix(in srgb, var(--metask-state-warning) 24%, transparent);
+  border: 1px solid
+    color-mix(in srgb, var(--metask-state-warning) 24%, transparent);
   border-radius: 9px;
   color: var(--ui-content-warning);
   background: color-mix(in srgb, var(--metask-state-warning) 7%, transparent);
@@ -3214,7 +3281,11 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .mcp-state-banner[data-tone="warning"] {
-  border-color: color-mix(in srgb, var(--metask-state-warning) 25%, transparent);
+  border-color: color-mix(
+    in srgb,
+    var(--metask-state-warning) 25%,
+    transparent
+  );
   color: var(--ui-content-warning);
   background: color-mix(in srgb, var(--metask-state-warning) 7%, transparent);
 }
@@ -3285,7 +3356,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .mcp-search:focus-within {
   border-color: color-mix(in srgb, var(--ui-action-primary) 42%, transparent);
   color: var(--ui-action-primary);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ui-action-primary) 8%, transparent);
+  box-shadow: 0 0 0 3px
+    color-mix(in srgb, var(--ui-action-primary) 8%, transparent);
 }
 
 .mcp-search svg {
@@ -3481,7 +3553,11 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   border: 1px solid var(--mcp-border);
   border-radius: 12px;
   color: var(--ui-content-muted);
-  background: linear-gradient(145deg, var(--ui-surface-canvas), var(--ui-surface-canvas));
+  background: linear-gradient(
+    145deg,
+    var(--ui-surface-canvas),
+    var(--ui-surface-canvas)
+  );
 }
 
 .mcp-empty-state h2 {
@@ -3627,7 +3703,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .mcp-redaction-notice {
   padding: 11px 12px;
   margin: 14px 0 0;
-  border: 1px solid color-mix(in srgb, var(--metask-state-warning) 22%, transparent);
+  border: 1px solid
+    color-mix(in srgb, var(--metask-state-warning) 22%, transparent);
   border-radius: 9px;
   color: var(--ui-content-warning);
   background: color-mix(in srgb, var(--metask-state-warning) 7%, transparent);
@@ -3735,7 +3812,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .mcp-add-form select:focus,
 .mcp-rename-form input:focus {
   border-color: var(--ui-action-primary);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ui-focus-ring) 14%, transparent);
+  box-shadow: 0 0 0 3px
+    color-mix(in srgb, var(--ui-focus-ring) 14%, transparent);
 }
 
 .mcp-add-form input[aria-invalid="true"] {
@@ -4130,7 +4208,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   grid-template-columns: 16px minmax(0, 1fr);
   align-items: flex-start;
   gap: 8px;
-  border: 1px solid color-mix(in srgb, var(--metask-state-complete) 18%, transparent);
+  border: 1px solid
+    color-mix(in srgb, var(--metask-state-complete) 18%, transparent);
   border-radius: 9px;
   color: var(--metask-state-complete);
   background: color-mix(in srgb, var(--metask-state-complete) 5%, transparent);
@@ -4155,7 +4234,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   bottom: -1px;
   padding: 15px;
   margin: 20px -4px -1px;
-  border: 1px solid color-mix(in srgb, var(--metask-state-error) 25%, transparent);
+  border: 1px solid
+    color-mix(in srgb, var(--metask-state-error) 25%, transparent);
   border-radius: 10px;
   background: var(--ui-surface-canvas);
   box-shadow: 0 -8px 28px rgba(37, 34, 45, 0.08);
@@ -4259,7 +4339,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   height: 6px;
   border-radius: 999px;
   background: var(--metask-state-complete);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--metask-state-complete) 10%, transparent);
+  box-shadow: 0 0 0 3px
+    color-mix(in srgb, var(--metask-state-complete) 10%, transparent);
 }
 
 .scheduled-background-state svg {
@@ -4274,7 +4355,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   padding: 9px 12px;
   align-items: center;
   gap: 9px;
-  border: 1px solid color-mix(in srgb, var(--metask-state-warning) 18%, transparent);
+  border: 1px solid
+    color-mix(in srgb, var(--metask-state-warning) 18%, transparent);
   border-radius: 9px;
   color: var(--ui-content-warning);
   background: color-mix(in srgb, var(--metask-state-warning) 6%, transparent);
@@ -4538,12 +4620,14 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .scheduled-list > li[data-health="paused"] .scheduled-row-status,
 .scheduled-list > li[data-health="completed"] .scheduled-row-status {
   background: var(--ui-border);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ui-content-muted) 8%, transparent);
+  box-shadow: 0 0 0 3px
+    color-mix(in srgb, var(--ui-content-muted) 8%, transparent);
 }
 
 .scheduled-list > li[data-health="needs_attention"] .scheduled-row-status {
   background: color-mix(in srgb, var(--metask-state-warning) 8%, transparent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--metask-state-warning) 10%, transparent);
+  box-shadow: 0 0 0 3px
+    color-mix(in srgb, var(--metask-state-warning) 10%, transparent);
 }
 
 .scheduled-row-copy {
@@ -4829,7 +4913,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .scheduled-editor select:focus,
 .scheduled-editor textarea:focus {
   border-color: var(--ui-action-primary);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ui-focus-ring) 14%, transparent);
+  box-shadow: 0 0 0 3px
+    color-mix(in srgb, var(--ui-focus-ring) 14%, transparent);
 }
 
 .scheduled-segments {
@@ -4942,7 +5027,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   grid-template-columns: 22px minmax(0, 1fr);
   align-items: flex-start;
   gap: 10px;
-  border: 1px solid color-mix(in srgb, var(--ui-action-primary) 14%, transparent);
+  border: 1px solid
+    color-mix(in srgb, var(--ui-action-primary) 14%, transparent);
   border-radius: 10px;
   color: var(--ui-action-selected-content);
   background: color-mix(in srgb, var(--ui-action-primary) 5%, transparent);
@@ -4982,7 +5068,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .scheduled-error {
   margin: 0;
   padding: 9px 10px;
-  border: 1px solid color-mix(in srgb, var(--metask-state-error) 18%, transparent);
+  border: 1px solid
+    color-mix(in srgb, var(--metask-state-error) 18%, transparent);
   border-radius: 7px;
   color: var(--metask-state-error);
   background: color-mix(in srgb, var(--metask-state-error) 5%, transparent);
@@ -5235,7 +5322,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   border-radius: 9px 9px 9px 3px;
   color: white;
   background: var(--ui-action-primary);
-  box-shadow: 0 7px 18px color-mix(in srgb, var(--ui-action-primary) 20%, transparent);
+  box-shadow: 0 7px 18px
+    color-mix(in srgb, var(--ui-action-primary) 20%, transparent);
   font-size: 13px;
   font-weight: 750;
   letter-spacing: -0.03em;
@@ -5373,8 +5461,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   height: 8px;
   border-radius: 999px;
   background: currentColor;
-  box-shadow: 0 0 0 2px
-    color-mix(in srgb, currentColor 14%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 14%, transparent);
 }
 
 .task-signal[data-signal="running"] {
@@ -5440,7 +5527,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   padding: 0 8px;
   border: 1px solid var(--ui-action-primary);
   border-radius: 7px;
-  outline: 3px solid color-mix(in srgb, var(--ui-action-primary) 10%, transparent);
+  outline: 3px solid
+    color-mix(in srgb, var(--ui-action-primary) 10%, transparent);
   color: var(--ui-content-primary);
   background: var(--ui-surface-canvas);
   font-size: 13px;
@@ -5539,7 +5627,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .inline-request {
   position: relative;
   padding: 18px 20px 20px;
-  border: 1px solid color-mix(in srgb, var(--metask-state-warning) 34%, transparent);
+  border: 1px solid
+    color-mix(in srgb, var(--metask-state-warning) 34%, transparent);
   border-left: 3px solid var(--metask-state-warning);
   border-radius: 14px;
   background: var(--ui-surface-canvas);
@@ -5548,7 +5637,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .inline-request:focus-visible {
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--metask-state-warning) 16%, transparent);
+  box-shadow: 0 0 0 3px
+    color-mix(in srgb, var(--metask-state-warning) 16%, transparent);
 }
 
 .inline-request .projection-note {
@@ -5565,7 +5655,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .decision-button {
   min-height: 38px;
   padding: 8px 12px;
-  border: 1px solid color-mix(in srgb, var(--metask-state-warning) 42%, transparent);
+  border: 1px solid
+    color-mix(in srgb, var(--metask-state-warning) 42%, transparent);
   border-radius: 9px;
   color: var(--ui-content-warning);
   background: color-mix(in srgb, var(--ui-surface-panel) 66%, transparent);
@@ -5849,7 +5940,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .tool-state-dot[data-state="running"] {
   background: var(--ui-action-primary);
-  box-shadow: 0 0 0 4px color-mix(in srgb, var(--ui-action-primary) 10%, transparent);
+  box-shadow: 0 0 0 4px
+    color-mix(in srgb, var(--ui-action-primary) 10%, transparent);
 }
 
 .tool-state-dot[data-state="failed"] {
@@ -7387,7 +7479,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   margin-top: 11px;
   padding: 11px 12px;
   gap: 5px;
-  border: 1px solid color-mix(in srgb, var(--metask-state-warning) 38%, transparent);
+  border: 1px solid
+    color-mix(in srgb, var(--metask-state-warning) 38%, transparent);
   border-radius: 10px;
   color: var(--ui-content-primary);
   background: color-mix(in srgb, var(--metask-state-warning) 8%, transparent);
@@ -7454,7 +7547,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .inspector-tool-list li[data-state="running"] .inspector-tool-state {
   background: var(--ui-action-primary);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ui-action-primary) 10%, transparent);
+  box-shadow: 0 0 0 3px
+    color-mix(in srgb, var(--ui-action-primary) 10%, transparent);
 }
 
 .inspector-tool-list li[data-state="failed"] .inspector-tool-state {
@@ -7477,7 +7571,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .inspector-run-summary[data-active="true"] .inspector-state-line {
   background: var(--ui-action-primary);
-  box-shadow: 0 0 0 4px color-mix(in srgb, var(--ui-action-primary) 8%, transparent);
+  box-shadow: 0 0 0 4px
+    color-mix(in srgb, var(--ui-action-primary) 8%, transparent);
 }
 
 .inspector-run-state strong,
@@ -7666,7 +7761,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
     inset: calc(var(--window-bar-height) + env(safe-area-inset-top, 0px)) 0 0;
     display: block;
     border: 0;
-  background: var(--ui-overlay-scrim);
+    background: var(--ui-overlay-scrim);
   }
 
   .workbench-commandbar {
@@ -7685,7 +7780,11 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
   .commandbar-alert summary:hover,
   .commandbar-alert summary:focus-visible {
-    background: color-mix(in srgb, var(--metask-state-warning) 10%, transparent);
+    background: color-mix(
+      in srgb,
+      var(--metask-state-warning) 10%,
+      transparent
+    );
   }
 
   .commandbar-alert summary span {
@@ -7753,7 +7852,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   .new-task-view {
     padding: 36px 16px;
   }
-
 }
 
 @media (prefers-reduced-motion: reduce) {

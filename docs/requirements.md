@@ -79,7 +79,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - automatic root 及其子目录是保留命名空间，不能注册为 Manual Workspace；用户明确选择 automatic root 的祖先仍服从当前 trust 语义，不因此获得 strict isolation；
 - Workbench projection 必须把 Workspace 作为独立对象发布，至少包含稳定 identity、kind、显示名称、规范路径、当前授权状态和可汇总的 Task 信号；每个被 Task 引用的 Automatic Workspace 必须出现在同一 canonical snapshot；
 - 没有 Task 的 Manual Workspace 仍然存在于 New task 的路径选择器与设置中；最近使用、重新授权和移除不能依赖 Renderer 从 Task 列表猜测。Automatic Workspace 不进入普通选择器、recent、重新授权或移除入口，但其 owning Task 仍可导航；
-- New task 路径控件只负责选择、添加和重新授权；低频 Workspace 生命周期管理进入正式设置页，显示 Manual Workspace 的 canonical path、授权/移除状态、Task 记录数，并提供带明确文件与历史保留语义的移除确认和失败重试。设置操作不得改变当前 Task；Renderer 不维护全局 active Workspace 镜像；
+- New task 路径控件只负责选择、添加和重新授权；低频 Workspace 生命周期管理进入正式设置页，显示 Manual Workspace 的 canonical path、授权/移除状态、Task 记录数，并提供带明确文件与历史保留语义的移除确认和失败重试。设置以覆盖 Workbench 内容区的长期 surface 呈现，保留窗口壳层和底层 Workbench 挂载，关闭后恢复原 Task、草稿、滚动和焦点；设置操作不得改变当前 Task，Renderer 不维护全局 active Workspace 镜像；
 - 后台创建 Automatic Workspace 不修改 Manual Workspace recent order 或 Renderer New task draft scope；manual 与 automatic record 使用独立容量，后台 Task 不得耗尽用户打开 Workspace 的能力；
 - automatic root 无法初始化时只关闭 `automaticWorkspaces` capability，并对 automatic admission 返回 typed unavailable；Account、显式 Manual Workspace 和普通 Workbench 仍可运行；
 - bounded Task/Workspace 产品历史跨 Host 重启恢复，但恢复后的 Task 只读且不得伪造 Agent Session 或 Conversation；Run、Task 删除、shutdown 和重启后 Automatic Workspace 目录保留，但不扫描目录恢复或猜测 Task/Workspace，目录浏览和磁盘清理属于后续独立能力；
