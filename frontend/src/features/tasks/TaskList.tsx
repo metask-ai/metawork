@@ -69,7 +69,7 @@ export function TaskList({
   const menuTask =
     menuTaskId === null
       ? null
-      : tasks.find((task) => task.id === menuTaskId) ?? null;
+      : (tasks.find((task) => task.id === menuTaskId) ?? null);
 
   function openTaskMenu(event: MouseEvent<HTMLButtonElement>, taskId: string) {
     event.preventDefault();
@@ -86,7 +86,7 @@ export function TaskList({
     const activeTask =
       activeTaskId === null
         ? null
-        : tasks.find((task) => task.id === activeTaskId) ?? null;
+        : (tasks.find((task) => task.id === activeTaskId) ?? null);
     const activeCompletionKey =
       activeTask === null ? null : taskCompletionNotificationKey(activeTask);
 
@@ -178,53 +178,58 @@ export function TaskList({
             sideOffset={5}
             collisionPadding={8}
           >
-            {menuTask && (
-              <Menu.Popup
-                className="task-menu-popover"
-                aria-label={t("task.actions")}
-              >
-                <Menu.Item
-                  className="task-menu-item"
-                  disabled={taskMutationDisabled}
-                  onClick={() => onTaskAction(menuTask, "rename")}
-                >
-                  {t("task.rename")}
-                </Menu.Item>
-                <Menu.Item
-                  className="task-menu-item"
-                  disabled={
-                    taskMutationDisabled ||
-                    menuTask.activeOperation !== null ||
-                    menuTask.lifecycle === "closing"
-                  }
-                  onClick={() => onTaskAction(menuTask, "archive")}
-                >
-                  {menuTask.archived ? t("task.restore") : t("task.archive")}
-                </Menu.Item>
-                <Menu.Item
-                  className="task-menu-item"
-                  disabled={
-                    taskMutationDisabled ||
-                    menuTask.lifecycle === "closed" ||
-                    (menuTask.lifecycle === "closing" && !menuTask.closeFailed)
-                  }
-                  onClick={() => onTaskAction(menuTask, "close")}
-                >
-                  {menuTask.closeFailed
-                    ? t("task.end_retry")
-                    : menuTask.lifecycle === "closing"
-                      ? t("task.ending")
-                      : t("task.end")}
-                </Menu.Item>
-                <Menu.Item
-                  className="task-menu-item is-danger"
-                  disabled={taskMutationDisabled || menuTask.lifecycle !== "closed"}
-                  onClick={() => onTaskAction(menuTask, "delete")}
-                >
-                  {t("task.delete")}
-                </Menu.Item>
-              </Menu.Popup>
-            )}
+            <Menu.Popup
+              className="task-menu-popover"
+              aria-label={t("task.actions")}
+            >
+              {menuTask && (
+                <>
+                  <Menu.Item
+                    className="task-menu-item"
+                    disabled={taskMutationDisabled}
+                    onClick={() => onTaskAction(menuTask, "rename")}
+                  >
+                    {t("task.rename")}
+                  </Menu.Item>
+                  <Menu.Item
+                    className="task-menu-item"
+                    disabled={
+                      taskMutationDisabled ||
+                      menuTask.activeOperation !== null ||
+                      menuTask.lifecycle === "closing"
+                    }
+                    onClick={() => onTaskAction(menuTask, "archive")}
+                  >
+                    {menuTask.archived ? t("task.restore") : t("task.archive")}
+                  </Menu.Item>
+                  <Menu.Item
+                    className="task-menu-item"
+                    disabled={
+                      taskMutationDisabled ||
+                      menuTask.lifecycle === "closed" ||
+                      (menuTask.lifecycle === "closing" &&
+                        !menuTask.closeFailed)
+                    }
+                    onClick={() => onTaskAction(menuTask, "close")}
+                  >
+                    {menuTask.closeFailed
+                      ? t("task.end_retry")
+                      : menuTask.lifecycle === "closing"
+                        ? t("task.ending")
+                        : t("task.end")}
+                  </Menu.Item>
+                  <Menu.Item
+                    className="task-menu-item is-danger"
+                    disabled={
+                      taskMutationDisabled || menuTask.lifecycle !== "closed"
+                    }
+                    onClick={() => onTaskAction(menuTask, "delete")}
+                  >
+                    {t("task.delete")}
+                  </Menu.Item>
+                </>
+              )}
+            </Menu.Popup>
           </Menu.Positioner>
         </Menu.Portal>
       </Menu.Root>

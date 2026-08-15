@@ -19,6 +19,15 @@ library, not the other way around.
   as a preset (`Dialog` is the centered modal, `Drawer` the edge panel) rather
   than bending an existing preset from product CSS.
 
+## Overlay lifecycle contract
+
+Base UI unmounts an overlay portal only after the popup's exit transition
+finishes. Conditionally rendering the Popup (or Backdrop) inside the portal
+removes the element in the same commit that closes the root, the exit
+detection bails on the missing element, and the faded backdrop stays in the
+DOM as an invisible click shield. Always render the Popup; condition its
+content. `frontend-boundaries` enforces this.
+
 ## Overlay presets
 
 - `Dialog` — centered modal, scale/opacity transition.
