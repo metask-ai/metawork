@@ -658,8 +658,6 @@ export const zhCN: Record<MessageId, string> = {
     "工作区状态已变化，请确认最新状态后重试。",
   "mutation.reason.workspace_unavailable": "该工作区已不可用。",
   "mutation.reason.workspace_removing": "该工作区正在移除，请等待操作完成。",
-  "mutation.reason.removal_failed":
-    "未能移除该工作区，部分任务可能已经停止。本地文件和任务记录仍然保留。",
   "mutation.reason.binding_changed": "任务的执行配置已变化，请确认后继续。",
   "mutation.reason.binding_unavailable": "任务的执行配置已不可用。",
   "mutation.reason.task_unavailable": "该任务已不可用。",

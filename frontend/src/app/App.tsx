@@ -1987,7 +1987,8 @@ export default function App() {
       : null,
   });
   const commandBarStatus = selectCommandBarStatus(statuses, {
-    route: settingsOpen ? "settings" : route,
+    route,
+    settingsOpen,
     workspaceId: composerWorkspaceId ?? null,
     taskId: activeTask?.id ?? null,
   });

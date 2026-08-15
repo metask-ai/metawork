@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { Icon } from "../components/ui/Icon.tsx";
 import { WindowControls } from "../components/ui/WindowControls.tsx";
@@ -52,6 +52,7 @@ export function AppShell({
   const effectiveLeftOpen = leftAvailable && leftOpen;
   const inspectorAvailable = inspector !== null;
   const effectiveInspectorOpen = inspectorAvailable && inspectorOpen;
+  const attentionDetails = useRef<HTMLDetailsElement>(null);
 
   useEffect(() => {
     const narrow = window.matchMedia("(max-width: 819px)");
@@ -67,6 +68,11 @@ export function AppShell({
   useEffect(() => {
     if (effectiveInspectorOpen && window.innerWidth < 820) setLeftOpen(false);
   }, [effectiveInspectorOpen]);
+
+  useEffect(() => {
+    if (overlay && attentionDetails.current)
+      attentionDetails.current.open = false;
+  }, [overlay]);
 
   function toggleLeft() {
     const next = !leftOpen;
@@ -99,7 +105,10 @@ export function AppShell({
       }}
     >
       <WindowTitlebar className="workbench-commandbar">
-        <div className="commandbar-leading-actions">
+        <div
+          className="commandbar-leading-actions"
+          inert={overlay ? true : undefined}
+        >
           {leftAvailable && (
             <button
               className="icon-button focus-ring"
@@ -120,13 +129,20 @@ export function AppShell({
             <Icon name="search" />
           </button>
         </div>
-        <div className="commandbar-context" data-visible={contextVisible}>
+        <div
+          className="commandbar-context"
+          data-visible={contextVisible}
+          inert={overlay ? true : undefined}
+        >
           {contextVisible &&
             (contextContent ?? (
               <span className="commandbar-task">{taskTitle}</span>
             ))}
         </div>
-        <div className="commandbar-alert-slot">
+        <div
+          className="commandbar-alert-slot"
+          inert={overlay ? true : undefined}
+        >
           {headerActions}
           <span
             className="sr-only"
@@ -137,7 +153,7 @@ export function AppShell({
             {attentionNotice ?? ""}
           </span>
           {attentionNotice && (
-            <details className="commandbar-alert">
+            <details ref={attentionDetails} className="commandbar-alert">
               <summary aria-label={attentionNotice}>
                 <Icon name="warning" />
                 <span>{attentionNotice}</span>

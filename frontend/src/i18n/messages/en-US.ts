@@ -728,8 +728,6 @@ export const enUS = {
     "This workspace is no longer available.",
   "mutation.reason.workspace_removing":
     "This workspace is being removed. Wait for it to finish.",
-  "mutation.reason.removal_failed":
-    "This workspace could not be removed. Some tasks may have stopped. Local files and task records are still preserved.",
   "mutation.reason.binding_changed":
     "This task's execution setup changed. Review it before continuing.",
   "mutation.reason.binding_unavailable":

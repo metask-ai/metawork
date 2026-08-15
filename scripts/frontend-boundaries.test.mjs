@@ -208,9 +208,10 @@ test("Task and draft contexts do not recreate a global active Workspace", async 
 });
 
 test("Settings is a full content overlay that preserves the Workbench mount", async () => {
-  const [app, shell, css] = await Promise.all([
+  const [app, shell, status, css] = await Promise.all([
     readFile(resolve(sourceRoot, "app", "App.tsx"), "utf8"),
     readFile(resolve(sourceRoot, "app", "AppShell.tsx"), "utf8"),
+    readFile(resolve(sourceRoot, "app", "command-bar-status.ts"), "utf8"),
     readFile(resolve(sourceRoot, "index.css"), "utf8"),
   ]);
   assert.match(
@@ -227,6 +228,28 @@ test("Settings is a full content overlay that preserves the Workbench mount", as
   );
   assert.match(app, /overlay=\{\s*settingsOpen \?/);
   assert.doesNotMatch(app, /route === "settings" \?\s*\(/);
+  assert.doesNotMatch(app, /settingsOpen \? "settings" : route/);
+  assert.doesNotMatch(status, /export type ShellRoute\s*=[^;]*"settings"/);
+  assert.match(
+    shell,
+    /className="commandbar-leading-actions"[\s\S]*?inert=\{overlay \? true : undefined\}/,
+  );
+  assert.match(
+    shell,
+    /className="commandbar-context"[\s\S]*?inert=\{overlay \? true : undefined\}/,
+  );
+  assert.match(
+    shell,
+    /className="commandbar-alert-slot"[\s\S]*?inert=\{overlay \? true : undefined\}/,
+  );
+  assert.match(
+    shell,
+    /if \(overlay && attentionDetails\.current\)[\s\S]*?attentionDetails\.current\.open = false/,
+  );
+  assert.match(
+    shell,
+    /className="commandbar-alert-slot"[\s\S]*?<\/div>\s*<WindowControls/,
+  );
   assert.match(
     shell,
     /className="app-columns" inert=\{overlay \? true : undefined\}/,
