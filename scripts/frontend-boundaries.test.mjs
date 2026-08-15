@@ -401,3 +401,31 @@ test("product CSS never overrides foundation popup geometry", async () => {
   assert.doesNotMatch(css, /translate: none/);
   assert.doesNotMatch(css, /(?<!text-)transform: none/);
 });
+
+test("overlay popups stay mounted while their root can animate closed", async () => {
+  // Conditionally rendering a Base UI Popup inside its Portal removes the
+  // element in the same commit that flips open to false. Base UI's exit
+  // detection (useAnimationsFinished) bails out on a null element, the portal
+  // subtree never unmounts, and the faded backdrop stays behind as an
+  // invisible click shield. Condition the popup content, never the popup.
+  const roots = ["features", "app", "components"];
+  for (const root of roots) {
+    const entries = await readdir(resolve(sourceRoot, root), {
+      recursive: true,
+    });
+    for (const entry of entries) {
+      if (!entry.endsWith(".tsx")) continue;
+      const source = await readFile(resolve(sourceRoot, root, entry), "utf8");
+      assert.doesNotMatch(
+        source,
+        /&&\s*\(\s*<[A-Z][A-Za-z]*\.(Popup|Backdrop)\b/,
+        `${root}/${entry}: render the popup unconditionally and gate its content instead`,
+      );
+      assert.doesNotMatch(
+        source,
+        /\?\s*\(\s*<[A-Z][A-Za-z]*\.Popup\b[\s\S]{0,400}?:\s*null/,
+        `${root}/${entry}: render the popup unconditionally and gate its content instead`,
+      );
+    }
+  }
+});

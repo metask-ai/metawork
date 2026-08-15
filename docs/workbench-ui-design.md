@@ -303,6 +303,8 @@ Skills                                                              10
 
 MCP 页面沿用 Skill 中心约 944 px 的内容宽度、24–28 px 标题尺度、搜索和行动优先分组，但对象密度不同：Skill 是需要辨识内容的资产卡片，MCP server 是需要快速扫描连接状态的单列连续行。
 
+接入旅程以详情抽屉顶部的三节点流水线引导：测试连接（结果与工具数常驻，不用瞬时提示）→ 放行工具（支持对当前已发现工具的一次显式批量放行）→ 重启生效（文案精确到"新任务可用、现有任务不受影响"）。保存成功后自动进入测试节点。列表行以状态点常驻最近一次连接测试结果。secret capture capability 缺失时，static 认证在新建/切换入口即禁用并说明原因；编辑既有 static server 不受拦截。needs_authentication 的行进入详情时自动定位到凭证区。
+
 ```text
 MCP                                                        [ Add server ]
 Connect trusted servers and choose tools available to new tasks.

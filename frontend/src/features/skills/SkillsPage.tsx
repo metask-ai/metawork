@@ -12,6 +12,7 @@ import { Icon } from "../../components/ui/Icon.tsx";
 import { Button } from "../../components/ui/button.tsx";
 import { Drawer } from "../../components/ui/drawer.tsx";
 import { Input } from "../../components/ui/input.tsx";
+import { SearchField } from "../../components/ui/search-field.tsx";
 import { SelectField } from "../../components/ui/select.tsx";
 import { useI18n } from "../../i18n/context.ts";
 
@@ -436,16 +437,13 @@ export function SkillsPage({
         </header>
 
         <div className="skill-toolbar">
-          <label className="skills-search">
-            <Icon name="search" />
-            <span className="sr-only">{t("skills.search_label")}</span>
-            <Input
-              type="search"
-              value={query}
-              placeholder={t("skills.search_placeholder")}
-              onChange={(event) => onQuery(event.target.value)}
-            />
-          </label>
+          <SearchField
+            className="max-w-[360px] flex-1"
+            label={t("skills.search_label")}
+            value={query}
+            placeholder={t("skills.search_placeholder")}
+            onChange={(event) => onQuery(event.target.value)}
+          />
           <div
             className="skill-scope-filter"
             aria-label={t("skills.filter.label")}

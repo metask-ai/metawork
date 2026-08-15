@@ -12,10 +12,12 @@ import type {
   McpStdioConnectionInput,
 } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
+import { Alert } from "../../components/ui/alert.tsx";
 import { Button } from "../../components/ui/button.tsx";
 import { Drawer } from "../../components/ui/drawer.tsx";
 import { Checkbox } from "../../components/ui/checkbox.tsx";
 import { Input } from "../../components/ui/input.tsx";
+import { SearchField } from "../../components/ui/search-field.tsx";
 import { SelectField } from "../../components/ui/select.tsx";
 import { useI18n } from "../../i18n/context.ts";
 
@@ -25,7 +27,7 @@ type DrawerState =
   | { kind: "replace"; id: string }
   | { kind: "server"; id: string }
   | null;
-type ConfirmAction = "enable" | "disable" | "delete" | null;
+type ConfirmAction = "enable" | "disable" | "delete" | "allow_all" | null;
 
 const attentionStatuses = new Set<McpServer["runtimeStatus"]>([
   "not_loaded",
@@ -225,8 +227,24 @@ function McpServerRow({
           })}
         </span>
         <span className="mcp-server-state">
-          <Icon name={serverStateIcon(server)} />
-          {t(serverStateKey(server))}
+          <span
+            className="mcp-state-dot"
+            data-state={
+              server.connectionTest.status !== "untested"
+                ? server.connectionTest.status
+                : server.newTaskAccess
+            }
+            aria-hidden="true"
+          />
+          {server.connectionTest.status === "connected"
+            ? t("mcp.pipeline.test_connected", {
+                tools: server.connectionTest.toolCount,
+              })
+            : server.connectionTest.status === "failed"
+              ? t("mcp.pipeline.test_failed", {
+                  issues: server.connectionTest.issueCount,
+                })
+              : t(serverStateKey(server))}
         </span>
         <Icon name="chevron-right" />
       </button>
@@ -619,6 +637,34 @@ export function McpPage({
     setDrawerState({ kind: "replace", id: server.id });
   }
 
+  const autoTest = useRef<{ id: string } | { ids: Set<string> } | null>(null);
+  const authorizationSection = useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    // Needs-authentication servers land the user on the credential section
+    // instead of asking them to hunt through the drawer.
+    if (
+      drawerState?.kind === "server" &&
+      selected?.runtimeStatus === "needs_authentication"
+    )
+      authorizationSection.current?.scrollIntoView({ block: "start" });
+  }, [drawerState?.kind, selected?.id, selected?.runtimeStatus]);
+
+  useEffect(() => {
+    // Save-and-test: once the saved server is visible in the refreshed
+    // projection, land its detail view and start the side-effect-free test.
+    const pending = autoTest.current;
+    if (!pending || !management.desiredGeneration) return;
+    const server =
+      "id" in pending
+        ? management.servers.find((entry) => entry.id === pending.id)
+        : management.servers.find((entry) => !pending.ids.has(entry.id));
+    if (!server) return;
+    autoTest.current = null;
+    setDrawerState({ kind: "server", id: server.id });
+    void testConnection(server);
+  });
+
   function closeDrawer() {
     const trigger = drawerTrigger.current;
     setDrawerState(null);
@@ -720,11 +766,12 @@ export function McpPage({
             ? await onCreateStdio(generation, input as McpStdioConnectionInput)
             : await onCreateHttp(generation, input as McpHttpConnectionInput);
       mutationNotice(result);
-      if (
-        result.outcome === "saved" ||
-        result.outcome === "saved_recovery_required"
-      )
-        closeDrawer();
+      if (result.outcome === "saved") {
+        autoTest.current =
+          drawerState?.kind === "replace" && selected
+            ? { id: selected.id }
+            : { ids: new Set(management.servers.map((server) => server.id)) };
+      } else if (result.outcome === "saved_recovery_required") closeDrawer();
     } catch {
       setNotice({ tone: "attention", text: t("mcp.mutation.failed") });
     } finally {
@@ -841,53 +888,53 @@ export function McpPage({
   function renderBanner() {
     if (management.managementHealth === "outcome_unknown")
       return (
-        <div className="mcp-state-banner" data-tone="danger">
+        <Alert variant="danger" className="mcp-state-banner">
           <Icon name="warning" />
           <div>
             <strong>{t("mcp.banner.outcome_unknown.title")}</strong>
             <p>{t("mcp.banner.outcome_unknown.body")}</p>
           </div>
-        </div>
+        </Alert>
       );
     if (management.managementHealth === "recovery_required")
       return (
-        <div className="mcp-state-banner" data-tone="warning">
+        <Alert variant="warning" className="mcp-state-banner">
           <Icon name="warning" />
           <div>
             <strong>{t("mcp.banner.recovery.title")}</strong>
             <p>{t("mcp.banner.recovery.body")}</p>
           </div>
-        </div>
+        </Alert>
       );
     if (management.runtimeAlignment === "restart_required")
       return (
-        <div className="mcp-state-banner" data-tone="warning">
+        <Alert variant="warning" className="mcp-state-banner">
           <Icon name="warning" />
           <div>
             <strong>{t("mcp.banner.restart.title")}</strong>
             <p>{t("mcp.banner.restart.body")}</p>
           </div>
-        </div>
+        </Alert>
       );
     if (management.runtimeAlignment === "unknown" && managementReady)
       return (
-        <div className="mcp-state-banner" data-tone="warning">
+        <Alert variant="warning" className="mcp-state-banner">
           <Icon name="warning" />
           <div>
             <strong>{t("mcp.banner.alignment_unknown.title")}</strong>
             <p>{t("mcp.banner.alignment_unknown.body")}</p>
           </div>
-        </div>
+        </Alert>
       );
     if (management.availability === "unavailable" && managementReady)
       return (
-        <div className="mcp-state-banner" data-tone="neutral">
+        <Alert variant="neutral" className="mcp-state-banner">
           <Icon name="mcp" />
           <div>
             <strong>{t("mcp.banner.runtime_unavailable.title")}</strong>
             <p>{t("mcp.banner.runtime_unavailable.body")}</p>
           </div>
-        </div>
+        </Alert>
       );
     return null;
   }
@@ -909,22 +956,17 @@ export function McpPage({
             <p>{t("mcp.subtitle")}</p>
           </div>
           <div className="mcp-header-actions">
-            {management.desiredGeneration && (
-              <span className="mcp-catalog-revision">
-                {t("mcp.desired_generation", {
-                  generation: management.desiredGeneration,
-                })}
-              </span>
+            {!empty && (
+              <Button
+                variant="primary"
+                size="sm"
+                disabled={mutationLocked}
+                onClick={(event) => openAdd(event.currentTarget)}
+              >
+                <Icon name="plus" />
+                {t("mcp.add.action")}
+              </Button>
             )}
-            <Button
-              variant="primary"
-              size="sm"
-              disabled={mutationLocked}
-              onClick={(event) => openAdd(event.currentTarget)}
-            >
-              <Icon name="plus" />
-              {t("mcp.add.action")}
-            </Button>
           </div>
         </header>
 
@@ -940,33 +982,28 @@ export function McpPage({
           </p>
         )}
 
-        {!unavailable &&
-          !frozenWithoutDesired &&
-          (!empty || managementReady) && (
-            <div className="mcp-toolbar">
-              <label className="mcp-search">
-                <Icon name="search" />
-                <span className="sr-only">{t("mcp.search_label")}</span>
-                <Input
-                  type="search"
-                  value={query}
-                  placeholder={t("mcp.search_placeholder")}
-                  onChange={(event) => onQuery(event.target.value)}
-                />
-              </label>
-              <Button
-                variant="secondary"
-                size="sm"
-                disabled={refreshLocked}
-                onClick={() => void refreshCatalog()}
-              >
-                <Icon name="refresh" />
-                {refreshPending || management.operation === "refreshing"
-                  ? t("mcp.refresh.refreshing")
-                  : t("mcp.refresh.action")}
-              </Button>
-            </div>
-          )}
+        {!unavailable && !frozenWithoutDesired && !empty && (
+          <div className="mcp-toolbar">
+            <SearchField
+              className="w-[min(100%,420px)]"
+              label={t("mcp.search_label")}
+              value={query}
+              placeholder={t("mcp.search_placeholder")}
+              onChange={(event) => onQuery(event.target.value)}
+            />
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={refreshLocked}
+              onClick={() => void refreshCatalog()}
+            >
+              <Icon name="refresh" />
+              {refreshPending || management.operation === "refreshing"
+                ? t("mcp.refresh.refreshing")
+                : t("mcp.refresh.action")}
+            </Button>
+          </div>
+        )}
 
         {unavailable ? (
           <div className="mcp-empty-state">
@@ -1018,7 +1055,6 @@ export function McpPage({
       >
         <Drawer.Portal>
           <Drawer.Backdrop className="mcp-drawer-backdrop" />
-          {drawerState && (
           <Drawer.Popup
             ref={drawer}
             className="mcp-drawer w-[min(620px,calc(100vw-28px))] max-[620px]:w-full max-[620px]:border-l-0 bg-(--ui-surface-canvas) shadow-[-18px_0_54px_rgba(37,34,45,0.13)]"
@@ -1027,16 +1063,16 @@ export function McpPage({
             <header>
               <div>
                 <small>
-                  {drawerState.kind === "add"
+                  {drawerState?.kind === "add"
                     ? t("mcp.add.eyebrow")
-                    : drawerState.kind === "replace"
+                    : drawerState?.kind === "replace"
                       ? t("mcp.edit.eyebrow")
                       : t("mcp.detail.eyebrow")}
                 </small>
                 <h2 id="mcp-drawer-title" ref={drawerHeading} tabIndex={-1}>
-                  {drawerState.kind === "add"
+                  {drawerState?.kind === "add"
                     ? t("mcp.add.title")
-                    : drawerState.kind === "replace"
+                    : drawerState?.kind === "replace"
                       ? t("mcp.edit.title")
                       : selected?.displayName}
                 </h2>
@@ -1051,7 +1087,7 @@ export function McpPage({
               </button>
             </header>
 
-            {drawerState.kind === "add" || drawerState.kind === "replace" ? (
+            {drawerState?.kind === "add" || drawerState?.kind === "replace" ? (
               <form
                 className="mcp-add-form"
                 onSubmit={(event) => {
@@ -1061,7 +1097,7 @@ export function McpPage({
               >
                 <p className="mcp-form-intro">
                   {t(
-                    drawerState.kind === "replace"
+                    drawerState?.kind === "replace"
                       ? "mcp.edit.intro"
                       : "mcp.add.intro",
                   )}
@@ -1071,7 +1107,7 @@ export function McpPage({
                   <button
                     type="button"
                     data-selected={transport === "stdio"}
-                    disabled={drawerState.kind === "replace"}
+                    disabled={drawerState?.kind === "replace"}
                     onClick={() => setTransport("stdio")}
                   >
                     <Icon name="mcp" />
@@ -1083,7 +1119,7 @@ export function McpPage({
                   <button
                     type="button"
                     data-selected={transport === "streamable_http"}
-                    disabled={drawerState.kind === "replace"}
+                    disabled={drawerState?.kind === "replace"}
                     onClick={() => setTransport("streamable_http")}
                   >
                     <Icon name="mcp" />
@@ -1192,13 +1228,29 @@ export function McpPage({
                             type="radio"
                             name="mcp-auth-mode"
                             checked={authMode === mode}
-                            disabled={mode === "oauth" && !capabilities.oauth}
+                            disabled={
+                              (mode === "oauth" && !capabilities.oauth) ||
+                              (mode === "static" &&
+                                !capabilities.secretCapture &&
+                                !(
+                                  drawerState?.kind === "replace" &&
+                                  selected?.authMode === "static"
+                                ))
+                            }
                             onChange={() => {
                               setAuthMode(mode);
                               if (mode !== "static") setHeaderNames([]);
                             }}
                           />
-                          <span>{t(`mcp.auth.${mode}`)}</span>
+                          <span>
+                            {t(`mcp.auth.${mode}`)}
+                            {mode === "static" &&
+                              !capabilities.secretCapture &&
+                              !(
+                                drawerState?.kind === "replace" &&
+                                selected?.authMode === "static"
+                              ) && <small>{t("mcp.auth.static_locked")}</small>}
+                          </span>
                         </label>
                       ))}
                     </fieldset>
@@ -1262,11 +1314,15 @@ export function McpPage({
                                   },
                                   {
                                     value: "client_secret_basic",
-                                    label: t("mcp.client_auth.client_secret_basic"),
+                                    label: t(
+                                      "mcp.client_auth.client_secret_basic",
+                                    ),
                                   },
                                   {
                                     value: "client_secret_post",
-                                    label: t("mcp.client_auth.client_secret_post"),
+                                    label: t(
+                                      "mcp.client_auth.client_secret_post",
+                                    ),
                                   },
                                 ]}
                                 aria-label={t("mcp.add.client_auth_method")}
@@ -1299,7 +1355,7 @@ export function McpPage({
                   >
                     {createPending
                       ? t("mcp.add.adding")
-                      : drawerState.kind === "replace"
+                      : drawerState?.kind === "replace"
                         ? t("mcp.edit.submit")
                         : t("mcp.add.submit")}
                   </Button>
@@ -1307,6 +1363,47 @@ export function McpPage({
               </form>
             ) : selected ? (
               <div className="mcp-detail-body">
+                <ol
+                  className="mcp-pipeline"
+                  aria-label={t("mcp.pipeline.label")}
+                >
+                  <li data-state={selected.connectionTest.status}>
+                    {selected.connectionTest.status === "connected"
+                      ? t("mcp.pipeline.test_connected", {
+                          tools: selected.connectionTest.toolCount,
+                        })
+                      : selected.connectionTest.status === "failed"
+                        ? t("mcp.pipeline.test_failed", {
+                            issues: selected.connectionTest.issueCount,
+                          })
+                        : t("mcp.pipeline.test_pending")}
+                  </li>
+                  <li
+                    data-state={
+                      selected.tools.some((tool) => tool.desiredAllowed)
+                        ? "connected"
+                        : "untested"
+                    }
+                  >
+                    {t("mcp.pipeline.tools", {
+                      allowed: selected.tools.filter(
+                        (tool) => tool.desiredAllowed,
+                      ).length,
+                      total: selected.tools.length,
+                    })}
+                  </li>
+                  <li
+                    data-state={
+                      selected.newTaskAccess === "available"
+                        ? "connected"
+                        : "untested"
+                    }
+                  >
+                    {selected.newTaskAccess === "restart_required"
+                      ? t("mcp.pipeline.restart_hint")
+                      : t(`mcp.access.${selected.newTaskAccess}`)}
+                  </li>
+                </ol>
                 <dl className="mcp-authority-strip">
                   <div>
                     <dt>{t("mcp.detail.desired")}</dt>
@@ -1583,7 +1680,10 @@ export function McpPage({
                   </div>
                 </section>
 
-                <section className="mcp-detail-section">
+                <section
+                  className="mcp-detail-section"
+                  ref={authorizationSection}
+                >
                   <header>
                     <div>
                       <h3>{t("mcp.detail.authorization")}</h3>
@@ -1788,6 +1888,26 @@ export function McpPage({
                       <h3>{t("mcp.detail.tool_catalog")}</h3>
                       <p>{t("mcp.detail.tool_help")}</p>
                     </div>
+                    {selected.tools.some(
+                      (tool) => tool.discovered && !tool.desiredAllowed,
+                    ) && (
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        disabled={
+                          mutationLocked ||
+                          pendingServerId === selected.id ||
+                          selectedOperationBusy
+                        }
+                        onClick={() => setConfirmAction("allow_all")}
+                      >
+                        {t("mcp.detail.allow_all", {
+                          count: selected.tools.filter(
+                            (tool) => tool.discovered && !tool.desiredAllowed,
+                          ).length,
+                        })}
+                      </Button>
+                    )}
                     <span>{selected.tools.length}</span>
                   </header>
                   {selected.tools.length === 0 ? (
@@ -1872,7 +1992,9 @@ export function McpPage({
                         {t("common.cancel")}
                       </Button>
                       <Button
-                        variant={confirmAction === "delete" ? "danger" : "primary"}
+                        variant={
+                          confirmAction === "delete" ? "danger" : "primary"
+                        }
                         size="sm"
                         onClick={() => {
                           const action = confirmAction;
@@ -1880,11 +2002,23 @@ export function McpPage({
                           void mutateServer(selected, (generation) =>
                             action === "delete"
                               ? onRemove(generation, selected.id)
-                              : onSetEnabled(
-                                  generation,
-                                  selected.id,
-                                  action === "enable",
-                                ),
+                              : action === "allow_all"
+                                ? onSetAllowedTools(
+                                    generation,
+                                    selected.id,
+                                    selected.tools
+                                      .filter(
+                                        (tool) =>
+                                          tool.desiredAllowed ||
+                                          tool.discovered,
+                                      )
+                                      .map((tool) => tool.name),
+                                  )
+                                : onSetEnabled(
+                                    generation,
+                                    selected.id,
+                                    action === "enable",
+                                  ),
                           ).then((result) => {
                             if (
                               action === "delete" &&
@@ -1903,7 +2037,6 @@ export function McpPage({
               </div>
             ) : null}
           </Drawer.Popup>
-          )}
         </Drawer.Portal>
       </Drawer.Root>
     </section>

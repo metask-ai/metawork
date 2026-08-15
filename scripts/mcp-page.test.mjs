@@ -441,7 +441,9 @@ test("MCP add selects Streamable HTTP and preserves its typed public input", asy
       registration: null,
     },
   ]);
-  assert.equal(screen.queryByRole("dialog"), null);
+  // Save-and-test keeps the drawer open while waiting for the refreshed
+  // projection to surface the saved server (mcp-page-experience-plan §2.2).
+  assert.ok(screen.getByRole("dialog"));
 });
 
 test("MCP STDIO add preserves ordered argv and names without secret values", async () => {
@@ -892,10 +894,8 @@ test("MCP freezes unconfirmed desired state and explains restart semantics", () 
     }),
   );
   assert.ok(screen.getByText("The last save result is unknown"));
-  assert.equal(
-    screen.queryByRole("button", { name: "Add server" }).disabled,
-    true,
-  );
+  // Frozen unknown-outcome state hides mutating entry points entirely.
+  assert.equal(screen.queryByRole("button", { name: "Add server" }), null);
 
   view.rerender(
     pageElement({
