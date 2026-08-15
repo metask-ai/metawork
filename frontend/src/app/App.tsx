@@ -2506,7 +2506,9 @@ export default function App() {
                           ? t("task.new")
                           : t("task.open")}
                     </h1>
-                    {activeTask && <TaskSignals task={activeTask} />}
+                    {activeTask && (
+                      <TaskSignals task={activeTask} showCompleted={false} />
+                    )}
                   </div>
                 )}
               </div>

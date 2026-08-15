@@ -11,6 +11,7 @@ import {
   FolderUp,
   FileText,
   Layers3,
+  LoaderCircle,
   Minus,
   PanelLeft,
   Plus,
@@ -39,6 +40,7 @@ type IconName =
   | "maximize"
   | "restore"
   | "activity"
+  | "loading"
   | "chevron"
   | "chevron-right"
   | "stop"
@@ -75,6 +77,7 @@ const icons: Record<IconName, LucideIcon> = {
   maximize: Square,
   restore: Copy,
   activity: Activity,
+  loading: LoaderCircle,
   chevron: ChevronDown,
   "chevron-right": ChevronRight,
   stop: Square,

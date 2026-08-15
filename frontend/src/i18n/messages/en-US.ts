@@ -401,6 +401,7 @@ export const enUS = {
   "task.signal.running": "Working",
   "task.signal.attention": "Attention",
   "task.signal.failed": "Failed",
+  "task.signal.completed": "New completion",
   "task.actions": "Task actions",
   "task.rename": "Rename",
   "task.archive": "Archive",

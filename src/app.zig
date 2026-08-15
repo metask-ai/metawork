@@ -165,6 +165,7 @@ const App = struct {
             .{
                 .worker_count = host_worker_count,
                 .queue_capacity = 8,
+                .max_tasks = 50,
                 .max_pending_ui_json_bytes = pending_ui_json_capacity,
                 .max_pending_ui_requests = host_worker_count,
                 .max_terminal_diagnostic_bytes = terminal_diagnostic_capacity,
@@ -321,7 +322,7 @@ fn createAgentRuntime(
     mcp_input: ?*agent.McpRuntimeInput,
 ) !*agent.Runtime {
     return agent.Runtime.init(io, std.heap.c_allocator, .{
-        .max_sessions = 8,
+        .max_sessions = 50,
         .mcp_input = mcp_input,
         .max_ui_request_bytes = pending_ui_json_capacity,
         .max_terminal_diagnostic_bytes = terminal_diagnostic_capacity,

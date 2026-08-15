@@ -1,8 +1,12 @@
+import { useEffect, useState } from "react";
+
 import type { TaskView, WorkspaceView } from "../../bridge/contracts.ts";
+import { Icon } from "../../components/ui/Icon.tsx";
 import { taskCountMessageId } from "../../i18n/formatters.ts";
 import { useI18n } from "../../i18n/context.ts";
 import {
   taskGroups,
+  taskCompletionNotificationKey,
   taskDisplayState,
   taskSignals,
   workspaceDirectoryLabel,
@@ -24,6 +28,9 @@ export function TaskList({
   onToggleArchived: () => void;
 }) {
   const { locale, t } = useI18n();
+  const [seenCompletionKeys, setSeenCompletionKeys] = useState<Set<string>>(
+    () => new Set(),
+  );
   const groupedTasks = taskGroups(tasks, showArchived);
   const visibleTaskCount = groupedTasks.reduce(
     (count, group) => count + group.tasks.length,
@@ -50,6 +57,33 @@ export function TaskList({
     );
   }
 
+  useEffect(() => {
+    const currentCompletionKeys = new Set(
+      tasks
+        .map(taskCompletionNotificationKey)
+        .filter((key): key is string => key !== null),
+    );
+    const activeTask =
+      activeTaskId === null
+        ? null
+        : tasks.find((task) => task.id === activeTaskId) ?? null;
+    const activeCompletionKey =
+      activeTask === null ? null : taskCompletionNotificationKey(activeTask);
+
+    setSeenCompletionKeys((previous) => {
+      const next = new Set(
+        [...previous].filter((key) => currentCompletionKeys.has(key)),
+      );
+      if (activeCompletionKey !== null) next.add(activeCompletionKey);
+      if (
+        next.size === previous.size &&
+        [...next].every((key) => previous.has(key))
+      )
+        return previous;
+      return next;
+    });
+  }, [activeTaskId, tasks]);
+
   return (
     <nav className="task-list" aria-label={t("task.list")}>
       <div className="task-list-heading">
@@ -72,16 +106,21 @@ export function TaskList({
             >
               <span className="task-list-row">
                 <span>{task.title || t("task.item", { id: task.id })}</span>
-                <TaskSignals task={task} />
+                <TaskSignals
+                  task={task}
+                  completionSeen={seenCompletionKeys.has(
+                    taskCompletionNotificationKey(task) ?? "",
+                  )}
+                />
               </span>
-              <span className="task-list-meta">
-                {task.archived ? t("task.archived") : taskStateLabel(task, t)}
-                {workspaceContextByTaskId.has(task.id) && (
-                  <span title={workspaceContextByTaskId.get(task.id)}>
-                    {` · ${workspaceContextByTaskId.get(task.id)}`}
-                  </span>
-                )}
-              </span>
+              {workspaceContextByTaskId.has(task.id) && (
+                <span
+                  className="task-list-meta"
+                  title={workspaceContextByTaskId.get(task.id)}
+                >
+                  {workspaceContextByTaskId.get(task.id)}
+                </span>
+              )}
             </button>
           ))}
         </section>
@@ -105,32 +144,47 @@ export function TaskList({
   );
 }
 
-export function TaskSignals({ task }: { task: TaskView }) {
+export function TaskSignals({
+  task,
+  completionSeen = false,
+  showCompleted = true,
+}: {
+  task: TaskView;
+  completionSeen?: boolean;
+  showCompleted?: boolean;
+}) {
   const { t } = useI18n();
   const signals = taskSignals(task);
+  const state = taskDisplayState(task);
   const signal = signals.attention
     ? "attention"
     : signals.running
       ? "running"
       : signals.failed
         ? "failed"
-        : null;
-  if (!signal) return null;
+        : state.kind === "outcome" &&
+            state.value === "completed" &&
+            showCompleted &&
+            !completionSeen
+          ? "completed"
+          : null;
+  if (signal === null) return null;
+
+  const label = t(`task.signal.${signal}`);
+
   return (
-    <span className="task-signal" data-signal={signal}>
-      {t(`task.signal.${signal}`)}
+    <span
+      className="task-signal"
+      data-signal={signal}
+      role="img"
+      aria-label={label}
+      title={label}
+    >
+      {signal === "completed" ? (
+        <span className="task-notification-dot" aria-hidden="true" />
+      ) : (
+        <Icon name={signal === "running" ? "loading" : "warning"} />
+      )}
     </span>
   );
-}
-
-function taskStateLabel(task: TaskView, t: ReturnType<typeof useI18n>["t"]) {
-  const state = taskDisplayState(task);
-  if (state.kind === "phase") return t(`task.phase.${state.value}`);
-  if (state.kind === "lifecycle") return t(`task.lifecycle.${state.value}`);
-  if (state.kind === "archived") return t("task.archived");
-  if (state.kind === "outcome")
-    return t("task.last_result", {
-      result: t(`outcome.${state.value}`),
-    });
-  return t("task.ready");
 }

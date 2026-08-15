@@ -374,6 +374,7 @@ export const zhCN: Record<MessageId, string> = {
   "task.signal.running": "工作中",
   "task.signal.attention": "待处理",
   "task.signal.failed": "失败",
+  "task.signal.completed": "有新的完成结果",
   "task.actions": "任务操作",
   "task.rename": "重命名",
   "task.archive": "归档",

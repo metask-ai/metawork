@@ -468,23 +468,22 @@ summary::-webkit-details-marker {
 }
 
 .task-group {
-  margin-top: 18px;
+  margin-top: 14px;
 }
 
 .task-group h3 {
-  margin: 0 8px 5px;
+  margin: 0 8px 6px;
   color: var(--ui-content-muted);
-  font-size: 9px;
-  font-weight: 720;
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
+  font-size: 10px;
+  font-weight: 680;
+  letter-spacing: 0.04em;
 }
 
 .task-group .task-list-item {
   position: relative;
   margin-top: 2px;
-  padding: 8px 9px 8px 12px;
-  border-radius: 7px;
+  padding: 8px 10px 8px 12px;
+  border-radius: 8px;
 }
 
 .task-group .task-list-item::before {
@@ -5282,18 +5281,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   background: color-mix(in srgb, var(--metask-primary-soft) 64%, transparent);
 }
 
-.task-signal[data-signal="attention"] {
-  color: var(--ui-content-warning);
-}
-
-.task-signal[data-signal="running"] {
-  color: var(--ui-action-primary);
-}
-
-.task-signal[data-signal="failed"] {
-  color: var(--metask-state-error);
-}
-
 .workspace-grant {
   margin: 8px 2px 0;
   color: var(--ui-content-muted);
@@ -5306,7 +5293,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .task-list {
-  margin-top: 30px;
+  margin-top: 24px;
 }
 
 .task-list-heading,
@@ -5325,10 +5312,10 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .task-list-item {
   display: block;
   width: 100%;
-  margin-top: 7px;
-  padding: 10px 9px;
+  margin-top: 4px;
+  padding: 9px 10px;
   border: 1px solid transparent;
-  border-radius: 9px;
+  border-radius: 8px;
   color: var(--ui-content-primary);
   background: transparent;
   text-align: left;
@@ -5339,9 +5326,9 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .task-list-item[aria-current="page"] {
-  border-color: var(--ui-border);
-  background: var(--ui-surface-canvas);
-  box-shadow: inset 3px 0 var(--ui-action-primary);
+  border-color: transparent;
+  background: var(--ui-surface-panel);
+  box-shadow: inset 2px 0 var(--ui-action-primary);
 }
 
 .task-list-row > span:first-child {
@@ -5355,7 +5342,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .task-list-meta {
   display: block;
   overflow: hidden;
-  margin-top: 5px;
+  margin-top: 4px;
   color: var(--ui-content-muted);
   font-size: 10px;
   text-overflow: ellipsis;
@@ -5363,16 +5350,55 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .task-signal {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
   flex: 0 0 auto;
-  padding: 2px 5px;
-  border: 0;
-  border-radius: 4px;
-  background: color-mix(in srgb, currentColor 9%, transparent);
-  font-family: var(--font-mono);
-  font-size: 7px;
-  font-weight: 700;
-  letter-spacing: 0.03em;
-  text-transform: uppercase;
+  color: var(--ui-content-muted);
+  font-size: 14px;
+}
+
+.task-signal[data-signal="completed"] {
+  color: var(--ui-action-primary);
+}
+
+.task-notification-dot {
+  display: block;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: currentColor;
+  box-shadow: 0 0 0 2px
+    color-mix(in srgb, currentColor 14%, transparent);
+}
+
+.task-signal[data-signal="running"] {
+  color: var(--ui-action-primary);
+}
+
+.task-signal[data-signal="running"] svg {
+  animation: task-signal-spin 900ms linear infinite;
+}
+
+.task-signal[data-signal="attention"] {
+  color: var(--ui-content-warning);
+}
+
+.task-signal[data-signal="failed"] {
+  color: var(--metask-state-error);
+}
+
+@keyframes task-signal-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .task-signal[data-signal="running"] svg {
+    animation: none;
+  }
 }
 
 .archived-toggle {
