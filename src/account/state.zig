@@ -879,6 +879,30 @@ pub const Account = struct {
             WorkerFailure.fromCode(.dependency_contract_invalid)
         else
             failure;
+        // A key with an empty model catalog is a durable fact about that key,
+        // not a catalog-transaction failure. Tearing the transaction down
+        // would discard the successfully loaded key list and leave retry
+        // deterministically re-selecting the same key: a bricked account
+        // whose only exit is logout. Park back in choosing instead, with the
+        // key list intact and the error surfaced, so the user re-picks.
+        if (self.state.attempt_kind == .catalog and
+            self.state.operation == .loading_models and
+            normalized_failure.error_code == .no_models)
+        {
+            var parked = self.state;
+            parked.pending_api_key_id.clear();
+            parked.pending_model.clear();
+            if (parked.execution_state == .reconfiguring)
+                parked.execution_state = .ready;
+            parked.operation = .selecting_key;
+            parked.error_code = normalized_failure.error_code;
+            parked.safe_diagnostic = normalized_failure.safe_diagnostic;
+            return transitionNoEffect(
+                parked,
+                .catalog_changed,
+                self.state.active_attempt_id.?,
+            );
+        }
         const login_replaced = self.state.attempt_kind == .login and
             self.state.operation == .loading_identity;
         var next = self.state;
@@ -1647,6 +1671,97 @@ test "refresh failure matrix distinguishes retryable and invalid credentials" {
     commitPrepared(&active, &invalid);
     try std.testing.expectEqual(contract.AccountState.signed_out, active.view().state);
     try std.testing.expectEqualStrings("", active.view().account_id);
+}
+
+test "empty model catalog parks back in choosing with the key list intact" {
+    const allocator = std.testing.allocator;
+    var account = Account.initRestoring();
+    var restored_execution = try contract.OwnedExecutionConfig.initOwned(
+        allocator,
+        .anthropic,
+        try allocator.dupe(u8, "model-old"),
+        try allocator.dupe(u8, contract.metask_anthropic_messages_url),
+        9,
+        try allocator.dupe(u8, "secret"),
+    );
+    defer restored_execution.deinit();
+    var restored = try TestSupport.prepareReady(
+        &account,
+        try .init("account-1", "Metask User"),
+        "key-old",
+        &restored_execution,
+    );
+    var installed = restored.takeExecution().?;
+    installed.deinit();
+    restored.commit(&account);
+    restored.deinit();
+
+    var refresh = switch (account.prepareCommand(.refresh_catalog)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    _ = refresh.takeEffect();
+    commitPrepared(&account, &refresh);
+    var keys: WorkerCompletion = .{
+        .attempt_id = account.activeAttempt().?,
+        .payload = .api_keys_loaded,
+    };
+    var keys_ready = switch (account.prepareCompletion(&keys)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    commitPrepared(&account, &keys_ready);
+    var select_key = switch (account.prepareCommand(.{
+        .select_api_key = testSelection("key-exhausted"),
+    })) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    _ = select_key.takeEffect();
+    commitPrepared(&account, &select_key);
+
+    // The selected key answers with an empty model catalog (for example a
+    // quota-exhausted key). The transaction must park back in choosing with
+    // the attempt alive instead of tearing down into a retry loop that
+    // deterministically re-selects the same key.
+    var empty_models: WorkerCompletion = .{
+        .attempt_id = account.activeAttempt().?,
+        .payload = .{ .failed = .fromCode(.no_models) },
+    };
+    var parked = switch (account.prepareCompletion(&empty_models)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(parked.takeEffect() == null);
+    commitPrepared(&account, &parked);
+
+    const view = account.view();
+    try std.testing.expectEqual(contract.CatalogState.choosing, view.catalog_state);
+    try std.testing.expectEqual(contract.ErrorCode.no_models, view.error_code);
+    try std.testing.expect(account.activeAttempt() != null);
+    try std.testing.expect(view.can_cancel);
+    // The committed execution keeps working; nothing was torn down.
+    try std.testing.expectEqualStrings("key-old", view.selected_api_key_id);
+    try std.testing.expectEqualStrings("model-old", view.selected_model);
+    try std.testing.expectEqual(@as(u64, 9), view.execution_generation);
+    // Admission stays closed while the catalog transaction is open; it
+    // reopens when the user completes the re-pick. The point of parking is
+    // that the re-pick is possible at all.
+    try std.testing.expect(!view.can_create_task);
+
+    // Re-picking a key continues inside the same parked transaction.
+    var reselect = switch (account.prepareCommand(.{
+        .select_api_key = testSelection("key-good"),
+    })) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(reselect.takeEffect() != null);
+    commitPrepared(&account, &reselect);
+    try std.testing.expectEqual(
+        contract.CatalogState.loading,
+        account.view().catalog_state,
+    );
 }
 
 test "failed reconfiguration preserves the committed selection" {

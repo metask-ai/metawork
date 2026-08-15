@@ -53,7 +53,7 @@ export const enUS = {
   "account.error.no_api_keys":
     "No API Keys are available for this Metask account. Add one in Metask, then try again.",
   "account.error.no_models":
-    "No supported models are available for the selected API Key. Check it in Metask, then try again.",
+    "The selected API Key has no available models (its quota may be exhausted). Pick another API Key, or check it in Metask and retry.",
   "account.error.deadline":
     "Metask did not respond in time. Check your connection and try again.",
   "account.error.browser":

@@ -53,7 +53,7 @@ export const zhCN: Record<MessageId, string> = {
   "account.error.no_api_keys":
     "这个 Metask 账号还没有可用的 API Key。请在 Metask 中添加后重试。",
   "account.error.no_models":
-    "所选 API Key 没有可用的受支持模型。请在 Metask 中检查后重试。",
+    "所选 API Key 没有可用模型（可能配额已用尽）。请换一个 API Key，或在 Metask 中检查后重试。",
   "account.error.deadline": "Metask 未能及时响应。请检查网络后重试。",
   "account.error.browser": "MetaWork 无法打开登录页面，请重新打开。",
   "account.error.authorization": "未能完成 Metask 登录，请重新登录。",
