@@ -7169,6 +7169,18 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   opacity: 1;
 }
 
+.composer-stop {
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border-radius: 50%;
+  font-size: 16px;
+}
+
+.composer-stop:disabled {
+  opacity: 0.5;
+}
+
 .composer-draft-note {
   width: min(100%, 760px);
   margin: 7px auto 0;

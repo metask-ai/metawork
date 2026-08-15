@@ -610,12 +610,12 @@ Composer 布局与输入规则：
 - 输入框不允许用户拖拽改变大小。它随内容自动增高，达到约 7–8 行或视口高度的 28% 后改为内部滚动；
 - Automatic intent 不是 Workspace 缺失；`automaticWorkspaces` 可用时普通 Text 可以直接发送。只有所选 Manual Workspace 缺失或授权失效时发送才保持禁用，并在 breadcrumb 中提供明确恢复动作；Workspace 选择和发送是两个独立动作。
 
-顶部命令栏是唯一 active operation 停止入口：
+Composer 是唯一 active operation 停止入口：
 
-- `queued / running / waiting_user` 时在顶部命令栏显示 `Stop task`；
-- manual compact 为 `queued / compacting` 时显示 `Stop compacting`；
-- `stopping` 时替换为不可重复点击的 `Stopping…`；
-- Composer 不显示第二个 Stop，也不通过 Send 按钮变形制造另一入口；
+- `queued / running / waiting_user` 时在 Composer 发送位置显示 `Stop task`，替换发送按钮；
+- manual compact 为 `queued / compacting` 时在同一位置显示 `Stop compacting`，替换发送按钮；
+- `stopping` 时保留该位置的禁用停止按钮，阻止重复请求并等待真实结果；
+- 顶部命令栏不重复显示 Task Stop，窗口控制和检查器入口保持全局职责；
 - Stop acknowledgement 只表示请求已接受，界面继续等待 canonical snapshot 的真实 terminal；transport failure 不得伪造 `Stopped`。
 
 ### 8.1 Slash、Command 与 Skill draft
@@ -636,11 +636,11 @@ Skill draft 与 Text draft 一样按 Task/New-task scope 保存在 Renderer sess
 | Task state             | Composer behavior                                                                 |
 | ---------------------- | --------------------------------------------------------------------------------- |
 | draft / idle           | 文本、附件、发送                                                                  |
-| queued                 | 允许草拟但禁止发送；停止入口只在 Task Header                                      |
-| running                | 允许草拟下一条指令但禁止发送，显示 `当前任务结束后发送`；停止入口只在 Task Header |
+| queued                 | 允许草拟但禁止发送；Composer 发送位置替换为停止入口                                      |
+| running                | 允许草拟下一条指令但禁止发送，显示 `当前任务结束后发送`；Composer 发送位置替换为停止入口 |
 | waiting_user           | 普通输入让位于时间线请求，底部提示 `Respond above to continue` 并保留本地草稿     |
 | stopping               | 禁用输入，显示 `Stopping…`                                                        |
-| compact queued/running | 允许编辑本地草稿但禁止发送；唯一停止入口在 Task Header                            |
+| compact queued/running | 允许编辑本地草稿但禁止发送；Composer 发送位置替换为停止入口                            |
 | failed / interrupted   | 恢复输入，提供针对性的重试或继续动作                                              |
 
 表中的 `idle` 仍受 execution binding availability 约束；`rebind_required / unavailable` 时以 §6.4 的只读说明和动作替代发送控件。
@@ -1222,7 +1222,7 @@ Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成
 - reduced motion；
 - 状态在无颜色条件下仍可识别；
 - 长英文、中文和 pseudo-locale 不溢出；
-- `queued / running / waiting_user` 的可见 Stop 只出现在顶部命令栏；Composer 不出现第二入口，`stopping` 阻止重复请求并等待真实 terminal；
+- `queued / running / waiting_user` 的可见 Stop 只出现在 Composer 发送位置；顶部命令栏不重复出现，`stopping` 阻止重复请求并等待真实 terminal；
 - 顶部命令栏 Task overview 按钮可由键盘操作，`打开任务概览 / 关闭任务概览` 与 `aria-expanded` 始终匹配真实面板状态；
 - 普通 Run start/terminal 不改变 Inspector 列宽；新的待处理请求只自动打开一次，terminal 后保留 Last run summary，切换 Task 不泄漏旧详情；
 - 左栏折叠后完全隐藏且命令栏入口仍可达；Inspector 关闭或覆盖显示后功能不丢失。

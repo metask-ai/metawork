@@ -72,8 +72,11 @@ export function ComposerFooter({
   modelSelectionPending,
   modelContextTitle,
   actionDisabled,
+  stopAction,
+  stopDisabled,
   onDraftChange,
   onSubmit,
+  onStop,
   onRestore,
   onSlashCommand,
   onRefreshSkillCatalog,
@@ -117,8 +120,11 @@ export function ComposerFooter({
   modelSelectionPending: boolean;
   modelContextTitle: string;
   actionDisabled: boolean;
+  stopAction: "run" | "compact" | null;
+  stopDisabled: boolean;
   onDraftChange: (value: ComposerDraft) => void;
   onSubmit: () => void;
+  onStop: () => void;
   onRestore: () => void;
   onSlashCommand: (command: SlashCommandName) => void;
   onRefreshSkillCatalog: () => void;
@@ -137,6 +143,7 @@ export function ComposerFooter({
   const recoveryFailed = unavailableReason === "session_recovery_failed";
   const recoveryVisible = recoveryAvailable || recoveryInProgress;
   const sendButtonRef = useRef<HTMLButtonElement>(null);
+  const stopButtonRef = useRef<HTMLButtonElement>(null);
   const text = draft.kind === "text" ? draft.text : "";
   const draftFocusIdentity =
     draft.kind === "skill"
@@ -193,9 +200,13 @@ export function ComposerFooter({
         draft.kind === "skill"
           ? firstArgument && !firstArgument.disabled
             ? firstArgument
-            : sendButton && !sendButton.disabled
-              ? sendButton
-              : skillRemoveButtonRef.current
+            : stopAction &&
+                stopButtonRef.current &&
+                !stopButtonRef.current.disabled
+              ? stopButtonRef.current
+              : sendButton && !sendButton.disabled
+                ? sendButton
+                : skillRemoveButtonRef.current
           : textareaRef.current;
       target?.focus();
     });
@@ -530,19 +541,39 @@ export function ComposerFooter({
                 />
               </span>
             )}
-            <Button
-              type="button"
-              variant="primary"
-              size="icon"
-              ref={sendButtonRef}
-              className="composer-send"
-              aria-label={t("run.submit")}
-              title={t("run.submit")}
-              disabled={!sendEnabled}
-              onClick={onSubmit}
-            >
-              <Icon name="send" />
-            </Button>
+            {stopAction ? (
+              <Button
+                type="button"
+                variant="danger"
+                size="icon"
+                ref={stopButtonRef}
+                className="composer-stop"
+                aria-label={t(
+                  stopAction === "compact" ? "compact.stop" : "task.stop",
+                )}
+                title={t(
+                  stopAction === "compact" ? "compact.stop" : "task.stop",
+                )}
+                disabled={stopDisabled}
+                onClick={onStop}
+              >
+                <Icon name="stop" />
+              </Button>
+            ) : (
+              <Button
+                type="button"
+                variant="primary"
+                size="icon"
+                ref={sendButtonRef}
+                className="composer-send"
+                aria-label={t("run.submit")}
+                title={t("run.submit")}
+                disabled={!sendEnabled}
+                onClick={onSubmit}
+              >
+                <Icon name="send" />
+              </Button>
+            )}
           </div>
         </div>
         <WorkspaceContextSelector
