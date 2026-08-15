@@ -176,7 +176,7 @@ test("Skills center renders a compact local management surface", () => {
   assert.match(markup, /Review code changes/);
   assert.match(markup, /Check before release/);
   assert.match(markup, /Release notes/);
-  assert.match(markup, /Personal/);
+  assert.match(markup, /User/);
   assert.match(markup, /MetaWork/);
   assert.doesNotMatch(markup, />\/<|installed|checkbox|switch/i);
 });
