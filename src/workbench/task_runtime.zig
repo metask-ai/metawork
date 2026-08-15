@@ -10,13 +10,11 @@ pub const DetachmentCause = enum {
     cold_start,
     closed,
     session_poisoned,
-    event_projection_failure,
 };
 
 pub const AttachedHealth = enum {
     available,
     session_poisoned,
-    event_projection_failure,
 };
 
 pub const LiveAttachment = struct {

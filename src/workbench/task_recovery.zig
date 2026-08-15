@@ -9,7 +9,6 @@ pub const Attachment = enum {
     detached,
     attached_available,
     attached_session_poisoned,
-    attached_event_projection_failure,
     closing,
 };
 
@@ -22,7 +21,6 @@ pub const Operation = enum {
 
 pub const UnavailableReason = enum {
     session_poisoned,
-    event_projection_failure,
     closing,
     closed,
     task_archived,
@@ -70,7 +68,6 @@ pub fn project(facts: Facts) Projection {
         .closing => unavailable(.closing),
         .attached_available => .{ .continuation = .available },
         .attached_session_poisoned => unavailable(.session_poisoned),
-        .attached_event_projection_failure => unavailable(.event_projection_failure),
         .detached => projectDetached(facts),
     };
 }

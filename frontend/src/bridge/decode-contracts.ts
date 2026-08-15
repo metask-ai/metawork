@@ -1368,7 +1368,6 @@ function decodeTask(value: unknown, path: string): TaskView {
     `${path}.continuationUnavailableReason`,
     [
       "session_poisoned",
-      "event_projection_failure",
       "closing",
       "closed",
       "task_archived",

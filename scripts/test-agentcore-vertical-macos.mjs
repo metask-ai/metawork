@@ -977,7 +977,7 @@ async function readCheckpointHealth(taskId) {
   return task
     ? {
         checkpoint: task.checkpoint,
-        checkpointHealth: task.checkpoint_health,
+        checkpointAnchor: task.checkpoint_anchor,
       }
     : null;
 }
@@ -1000,11 +1000,11 @@ async function readCheckpointEvidence(
   const task = history.tasks?.find((item) => String(item.id) === taskId);
   lastCheckpointObservation = task
     ? {
-        health: task.checkpoint_health,
+        anchor: task.checkpoint_anchor,
         hasDescriptor: task.checkpoint !== null,
       }
     : { task: "missing" };
-  if (!task || task.checkpoint_health !== "available" || !task.checkpoint)
+  if (!task || task.checkpoint_anchor !== "available" || !task.checkpoint)
     return null;
   const descriptor = task.checkpoint;
   const blobDescriptor = descriptor.blob;

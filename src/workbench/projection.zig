@@ -70,7 +70,6 @@ pub const Error = lifecycle.Error || scheduled_tasks_impl.Error || scheduled_tas
     StaleCatalog,
     SkillNotFound,
     InvalidSkillArguments,
-    EventAfterTerminalDrain,
     RecoveryUnavailable,
     RestoreAttemptExhausted,
     UnsupportedBuiltinProfile,
@@ -1674,19 +1673,29 @@ const DurableTaskRecord = struct {
     ui_history_count: usize = 0,
     ui_history_next: usize = 0,
     checkpoint: ?checkpoint_record.Record = null,
-    checkpoint_health: CheckpointHealth = .none,
+    checkpoint_anchor: CheckpointAnchor = .none,
+    checkpoint_attempt: CheckpointAttempt = .none,
 };
 
-const CheckpointHealth = enum {
+/// Validity of the durable recovery anchor itself. Only facts about the
+/// stored record/blob may invalidate it; a failed later export attempt must
+/// never demote an existing valid anchor.
+const CheckpointAnchor = enum {
     none,
     available,
+    blob_missing,
+    blob_mismatch,
+};
+
+/// Outcome of the most recent checkpoint export/describe/store attempt.
+/// This is diagnostic state about the attempt, not about the anchor.
+const CheckpointAttempt = enum {
+    none,
     export_failed,
     describe_failed,
     cancelled,
     resource_limit,
     io_failed,
-    blob_missing,
-    blob_mismatch,
     outcome_unknown,
     dependency_contract,
 };
@@ -1710,7 +1719,7 @@ const CheckpointCandidate = struct {
 
 const CheckpointPostprocessPayload = union(enum) {
     none,
-    failure: CheckpointHealth,
+    failure: CheckpointAttempt,
     candidate: CheckpointCandidate,
     store_outcome_unknown: CheckpointCandidate,
 };
@@ -2281,6 +2290,10 @@ pub const Workbench = struct {
     task_failures: std.ArrayList(TaskFailureRecord),
     task_persistence: TaskPersistence,
     task_persistence_health: TaskPersistenceHealth,
+    /// Bounded diagnostic count of canonical Agent events that arrived after
+    /// their Run's terminal drain was finalized. Runtime-only evidence for
+    /// the Stop-barrier investigation; never persisted or published.
+    late_terminal_event_count: u64 = 0,
     checkpoint_store: ?*checkpoint_store.FileStore,
     checkpoint_store_health: std.atomic.Value(checkpoint_store.Health),
     scheduled_tasks: scheduled_tasks_impl.Store,
@@ -5372,11 +5385,6 @@ pub const Workbench = struct {
                 }
                 if (!run.terminal_observed) {
                     foldTerminalDisposition(view, terminal.session_disposition_at_completion);
-                    if (run.event_projection_failure != null) {
-                        if (view.runtime.attached()) |attached| {
-                            attached.health = .event_projection_failure;
-                        }
-                    }
                     run.terminal_observed = true;
                     changed = true;
                     terminal_durable_changed = true;
@@ -5468,15 +5476,17 @@ pub const Workbench = struct {
             task.runtime.last_restore_failure = failure;
             switch (failure) {
                 .checkpoint_missing => {
-                    task.durable.checkpoint_health = .blob_missing;
+                    task.durable.checkpoint_anchor = .blob_missing;
                     durable_changed = true;
                 },
                 .checkpoint_mismatch => {
-                    task.durable.checkpoint_health = .blob_mismatch;
+                    task.durable.checkpoint_anchor = .blob_mismatch;
                     durable_changed = true;
                 },
                 .checkpoint_io => {
-                    task.durable.checkpoint_health = .io_failed;
+                    // A transient blob read failure is an attempt fact; the
+                    // durable anchor stays valid and recovery stays retryable.
+                    task.durable.checkpoint_attempt = .io_failed;
                     durable_changed = true;
                 },
                 .candidate_cleanup_failed => self.recovery_poisoned = true,
@@ -5524,11 +5534,11 @@ pub const Workbench = struct {
         switch (postprocess.state.load(.acquire)) {
             .none, .exporting, .settled => return false,
             .failure_ready => {
-                const health = postprocess.payload.failure;
-                const previous = task.durable.checkpoint_health;
-                task.durable.checkpoint_health = health;
+                const attempt = postprocess.payload.failure;
+                const previous = task.durable.checkpoint_attempt;
+                task.durable.checkpoint_attempt = attempt;
                 self.commitTaskStateIfConfigured() catch {
-                    task.durable.checkpoint_health = previous;
+                    task.durable.checkpoint_attempt = previous;
                 };
                 postprocess.payload = .none;
                 postprocess.state.store(.settled, .release);
@@ -5540,10 +5550,10 @@ pub const Workbench = struct {
                 self.commitTaskStateWithCheckpoint(.{
                     .task_id = task.durable.id,
                     .record = &candidate.record,
-                    .health = .available,
+                    .anchor = .available,
                 }) catch |err| {
                     if (err == error.TaskPersistenceOutcomeUnknown) {
-                        task.durable.checkpoint_health = .outcome_unknown;
+                        task.durable.checkpoint_attempt = .outcome_unknown;
                         postprocess.state.store(.store_outcome_unknown, .release);
                         return true;
                     }
@@ -5570,7 +5580,8 @@ pub const Workbench = struct {
                     old.deinit(self.allocator);
                 task.durable.checkpoint = candidate.record;
                 candidate.record = undefined;
-                task.durable.checkpoint_health = .available;
+                task.durable.checkpoint_anchor = .available;
+                task.durable.checkpoint_attempt = .none;
                 postprocess.payload = .none;
                 postprocess.state.store(.settled, .release);
                 if (old_identity) |identity|
@@ -5578,9 +5589,9 @@ pub const Workbench = struct {
                 return true;
             },
             .store_outcome_unknown => {
-                if (task.durable.checkpoint_health == .outcome_unknown)
+                if (task.durable.checkpoint_attempt == .outcome_unknown)
                     return false;
-                task.durable.checkpoint_health = .outcome_unknown;
+                task.durable.checkpoint_attempt = .outcome_unknown;
                 return true;
             },
         }
@@ -5631,20 +5642,16 @@ pub const Workbench = struct {
         const task = self.findTaskByRouteId(envelope.session_id) orelse return error.UnknownTask;
         const run = findRun(task.durable.runs, envelope.run_id) orelse return error.NoSuchRun;
         if (run.event_stream_finalized) {
-            if (taskLifecycle(task) == .open) {
-                const task_id = task.durable.id;
-                try self.closeTask(task_id);
-                const current = self.findTask(task_id) orelse
-                    return error.EventAfterTerminalDrain;
-                if (taskLifecycle(current) == .open and
-                    continuationAvailable(self.taskContinuation(current)))
-                {
-                    if (current.runtime.attached()) |attached|
-                        attached.health = .session_poisoned;
-                    self.bumpRevision();
-                }
-            }
-            return error.EventAfterTerminalDrain;
+            // A late event cannot change a published product terminal, and it
+            // is not by itself proof of an AgentCore contract violation. Drop
+            // it and keep a bounded runtime-only count as diagnostic evidence;
+            // Session poisoning stays owned by the real Session disposition.
+            self.late_terminal_event_count +|= 1;
+            if (builtin.mode == .Debug) std.log.warn(
+                "workbench.late_terminal_event task_id={d} run_id={d} count={d}",
+                .{ task.durable.id, envelope.run_id, self.late_terminal_event_count },
+            );
+            return;
         }
         const event = switch (envelope.event.value) {
             .unknown => return,
@@ -5762,11 +5769,6 @@ pub const Workbench = struct {
         const run = findRun(task.durable.runs, run_id) orelse return;
         if (run.event_projection_failure != null) return;
         run.event_projection_failure = .consumer_rejected;
-        if (taskLifecycle(task) == .open) {
-            if (task.runtime.attached()) |attached| {
-                attached.health = .event_projection_failure;
-            }
-        }
         self.touchTask(task);
         self.commitTaskStateNoFail();
         self.bumpRevision();
@@ -8784,7 +8786,7 @@ pub const Workbench = struct {
             .checkpoint_store_ready = self.checkpoint_store != null and
                 self.checkpoint_store_health.load(.acquire) == .ready,
             .checkpoint_available = checkpoint != null and
-                task.durable.checkpoint_health == .available,
+                task.durable.checkpoint_anchor == .available,
             .checkpoint_binding_valid = checkpoint_binding_valid,
             .checkpoint_history_current = checkpoint_history_current,
             .execution_exact = self.recoveryExecutionExact(task),
@@ -9282,15 +9284,17 @@ pub const Workbench = struct {
     }
 
     fn restoreTask(self: *Workbench, wire: task_persistence.TaskWire) Error!TaskView {
-        const checkpoint_health = parsePersistedEnum(CheckpointHealth, wire.checkpoint_health) orelse
+        const checkpoint_anchor = parsePersistedEnum(CheckpointAnchor, wire.checkpoint_anchor) orelse
+            return error.TaskStoreCorrupt;
+        const checkpoint_attempt = parsePersistedEnum(CheckpointAttempt, wire.checkpoint_attempt) orelse
             return error.TaskStoreCorrupt;
         var checkpoint = if (wire.checkpoint) |value|
             try self.restoreCheckpointRecord(wire.id, value)
         else
             null;
         errdefer if (checkpoint) |*value| value.deinit(self.allocator);
-        if ((checkpoint == null and checkpoint_health == .available) or
-            (checkpoint != null and checkpoint_health == .none))
+        if ((checkpoint == null and checkpoint_anchor == .available) or
+            (checkpoint != null and checkpoint_anchor == .none))
             return error.TaskStoreCorrupt;
         if (checkpoint) |value| {
             value.validateBinding(wire.id, wire.binding.epoch) catch
@@ -9391,7 +9395,8 @@ pub const Workbench = struct {
                 .ui_history_count = wire.ui_history.len,
                 .ui_history_next = wire.ui_history.len % ui_history.len,
                 .checkpoint = checkpoint,
-                .checkpoint_health = checkpoint_health,
+                .checkpoint_anchor = checkpoint_anchor,
+                .checkpoint_attempt = checkpoint_attempt,
             },
             .runtime = .{
                 .attachment = .{ .detached = if (wire.closed) .closed else .cold_start },
@@ -9463,7 +9468,7 @@ pub const Workbench = struct {
             const task = &(entry.* orelse continue);
             const record = task.durable.checkpoint orelse continue;
             store.verify(record.blob) catch |err| {
-                const health: CheckpointHealth = switch (err) {
+                const health: CheckpointAnchor = switch (err) {
                     error.BlobMissing => .blob_missing,
                     error.BlobMismatch => .blob_mismatch,
                     else => {
@@ -9472,12 +9477,12 @@ pub const Workbench = struct {
                     },
                 };
                 var removed = task.durable.checkpoint.?;
-                const previous_health = task.durable.checkpoint_health;
+                const previous_anchor = task.durable.checkpoint_anchor;
                 task.durable.checkpoint = null;
-                task.durable.checkpoint_health = health;
+                task.durable.checkpoint_anchor = health;
                 self.commitTaskState() catch {
                     task.durable.checkpoint = removed;
-                    task.durable.checkpoint_health = previous_health;
+                    task.durable.checkpoint_anchor = previous_anchor;
                     return;
                 };
                 removed.deinit(self.allocator);
@@ -9787,7 +9792,7 @@ pub const Workbench = struct {
     const CheckpointPersistenceOverride = struct {
         task_id: u64,
         record: *const checkpoint_record.Record,
-        health: CheckpointHealth,
+        anchor: CheckpointAnchor,
     };
 
     fn buildTaskStateWire(self: *Workbench) Error!TaskStateWireScratch {
@@ -9879,13 +9884,18 @@ pub const Workbench = struct {
                 override.record
             else if (task.durable.checkpoint) |*value| value else null
         else if (task.durable.checkpoint) |*value| value else null;
-        const checkpoint_health = if (checkpoint_override) |override|
-            if (override.task_id == task.durable.id)
-                override.health
-            else
-                task.durable.checkpoint_health
+        const override_applies = if (checkpoint_override) |override|
+            override.task_id == task.durable.id
         else
-            task.durable.checkpoint_health;
+            false;
+        const checkpoint_anchor = if (override_applies)
+            checkpoint_override.?.anchor
+        else
+            task.durable.checkpoint_anchor;
+        const checkpoint_attempt = if (override_applies)
+            CheckpointAttempt.none
+        else
+            task.durable.checkpoint_attempt;
         const checkpoint_digest = if (checkpoint) |value| blk: {
             const digest = try self.allocator.alloc(u8, checkpoint_store.digest_bytes * 2);
             const encoded = std.fmt.bytesToHex(value.blob.digest, .lower);
@@ -10013,7 +10023,8 @@ pub const Workbench = struct {
                     .binding_epoch = value.anchor.binding_epoch,
                 },
             } else null,
-            .checkpoint_health = @tagName(checkpoint_health),
+            .checkpoint_anchor = @tagName(checkpoint_anchor),
+            .checkpoint_attempt = @tagName(checkpoint_attempt),
         };
     }
 
@@ -12793,9 +12804,9 @@ fn postprocessCheckpoint(
     const duration_ns: i128 = @intCast(started.durationTo(finished).nanoseconds);
     switch (outcome) {
         .failure => |failure| {
-            const health = checkpointFailureHealth(failure);
+            const attempt = checkpointFailureAttempt(failure);
             outcome.deinit();
-            publishCheckpointFailure(postprocess, health);
+            publishCheckpointFailure(postprocess, attempt);
             return true;
         },
         .success => |*success| {
@@ -12839,13 +12850,13 @@ fn postprocessCheckpoint(
 
 fn publishCheckpointFailure(
     postprocess: *CheckpointPostprocess,
-    health: CheckpointHealth,
+    attempt: CheckpointAttempt,
 ) void {
-    postprocess.payload = .{ .failure = health };
+    postprocess.payload = .{ .failure = attempt };
     postprocess.state.store(.failure_ready, .release);
 }
 
-fn checkpointFailureHealth(failure: lifecycle.CheckpointFailure) CheckpointHealth {
+fn checkpointFailureAttempt(failure: lifecycle.CheckpointFailure) CheckpointAttempt {
     return switch (failure.reason) {
         .cancelled => .cancelled,
         .resource_limit => .resource_limit,
@@ -13695,7 +13706,6 @@ fn recoveryAttachment(attachment: task_runtime.Attachment) task_recovery.Attachm
         .attached => |attached| switch (attached.health) {
             .available => .attached_available,
             .session_poisoned => .attached_session_poisoned,
-            .event_projection_failure => .attached_event_projection_failure,
         },
     };
 }
@@ -16430,7 +16440,9 @@ test "event projection failure routes by Agent Session identity not product Task
         EventProjectionFailure.consumer_rejected,
         task.durable.runs[0].?.event_projection_failure.?,
     );
-    try std.testing.expect(!workbench.taskContinuationAvailable(task));
+    // The projection failure is a Run-level product fact. Continuation is
+    // owned by the Session disposition and stays available.
+    try std.testing.expect(workbench.taskContinuationAvailable(task));
 }
 
 test "Workbench shutdown releases current and Task-owned execution generations" {
@@ -17463,13 +17475,13 @@ test "assistant credential redaction finalizes ordinary chunks without rescannin
     var late_event = try testEnvelope(3, 7, "{\"text_chunk\":\"late\"}");
     defer late_event.deinit();
     const revision_before_late_event = workbench.revision;
-    try std.testing.expect(workbench.tasks[0].?.runtime.beginClosing());
-    try std.testing.expectError(
-        error.EventAfterTerminalDrain,
-        workbench.applyEvent(&late_event),
-    );
+    const late_count_before = workbench.late_terminal_event_count;
+    try workbench.applyEvent(&late_event);
+    try std.testing.expectEqual(late_count_before + 1, workbench.late_terminal_event_count);
     try std.testing.expectEqual(revision_before_late_event, workbench.revision);
-    try std.testing.expect(!continuationAvailable(workbench.taskContinuation(&workbench.tasks[0].?)));
+    try std.testing.expect(
+        std.mem.indexOf(u8, workbench.tasks[0].?.durable.runs[0].?.assistant.list.items, "late") == null,
+    );
 }
 
 test "projection failure after Agent terminal becomes a product failure" {
@@ -17511,14 +17523,16 @@ test "projection failure after Agent terminal becomes a product failure" {
     const product = productTerminalFacts(run).?;
     try std.testing.expectEqual(RunOutcome.failed, product.outcome);
     try std.testing.expectEqual(RunCause.event_pipeline_failure, product.cause.?);
-    try std.testing.expect(!continuationAvailable(workbench.taskContinuation(&workbench.tasks[0].?)));
+    // Continuation stays with the Session disposition; the projection loss is
+    // a Run-level product fact only.
+    try std.testing.expect(continuationAvailable(workbench.taskContinuation(&workbench.tasks[0].?)));
 
     var snapshot_storage: [96 * 1024]u8 = undefined;
     const snapshot = try workbench.writeSnapshot(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"phase\":\"failed\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"lastRunOutcome\":\"failed\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"cause\":\"event_pipeline_failure\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"continuationAvailable\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"continuationAvailable\":true") != null);
 }
 
 test "event drain barrier atomically publishes terminal product state" {

@@ -142,7 +142,7 @@ fn waitCheckpointRecord(
         try workbench.drainAgentEvents();
         _ = try workbench.writeSnapshot(&output);
         if (persistence.len != 0 and
-            std.mem.indexOf(u8, persistence.storage.?[0..persistence.len], "\"checkpoint_health\":\"available\"") != null)
+            std.mem.indexOf(u8, persistence.storage.?[0..persistence.len], "\"checkpoint_anchor\":\"available\"") != null)
             return;
         std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
     }
@@ -401,7 +401,7 @@ test "Run checkpoint commits immutable blob before durable descriptor" {
     try std.testing.expect(std.mem.indexOf(
         u8,
         persistence_storage[0..persistence.len],
-        "\"checkpoint\":null,\"checkpoint_health\":\"blob_mismatch\"",
+        "\"checkpoint\":null,\"checkpoint_anchor\":\"blob_mismatch\"",
     ) != null);
     try std.testing.expectError(error.BlobMissing, checkpoint_store.verify(post_compact_run_identity));
     restored.deinit();
@@ -433,7 +433,7 @@ test "Run checkpoint commits immutable blob before durable descriptor" {
     try std.testing.expect(std.mem.indexOf(
         u8,
         persistence_storage[0..persistence.len],
-        "\"checkpoint\":null,\"checkpoint_health\":\"blob_missing\"",
+        "\"checkpoint\":null,\"checkpoint_anchor\":\"blob_missing\"",
     ) != null);
     fake_core.lock();
     const session_count = fake_core.session_created;
@@ -758,7 +758,7 @@ test "Task deletion is busy during checkpoint export and candidate publication" 
     fake_core.waitCheckpointExportEntered();
     try std.testing.expectError(error.TaskBusy, workbench.deleteTask(task_id));
     fake_core.releaseCheckpointExport();
-    try waitHistoryNeedle(&workbench, &persistence, "\"checkpoint_health\":\"cancelled\"");
+    try waitHistoryNeedle(&workbench, &persistence, "\"checkpoint_attempt\":\"cancelled\"");
 
     fake_core.setCheckpointGeneration(1);
     _ = try workbench.runTask(task_id, .{ .text = "publish checkpoint candidate" });
@@ -2474,7 +2474,7 @@ test "Workbench shutdown rejects new Task admission without creating product sta
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"tasks\":[]") != null);
 }
 
-test "late event from a finalized Run closes a Task with newer active work" {
+test "late event from a finalized Run is dropped and newer active work continues" {
     fake_core.reset();
     fake_core.setNextPlan(.controlled);
     const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
@@ -2515,14 +2515,13 @@ test "late event from a finalized Run closes a Task with newer active work" {
         .allocator = std.testing.allocator,
     };
     defer late_event.deinit();
-    try std.testing.expectError(
-        error.EventAfterTerminalDrain,
-        workbench.applyEvent(&late_event),
-    );
+    try workbench.applyEvent(&late_event);
+    try std.testing.expectEqual(@as(u64, 1), workbench.late_terminal_event_count);
 
     var snapshot_storage: [128 * 1024]u8 = undefined;
-    const closing_snapshot = try workbench.writeSnapshot(&snapshot_storage);
-    try std.testing.expect(std.mem.indexOf(u8, closing_snapshot, "\"lifecycle\":\"closing\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, closing_snapshot, "\"continuationAvailable\":false") != null);
-    try waitWorkbenchSnapshot(&workbench, "\"lifecycle\":\"closed\"");
+    const open_snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(u8, open_snapshot, "\"lifecycle\":\"open\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, open_snapshot, "\"currentRunPhase\":\"running\"") != null);
+    fake_core.releaseControlled();
+    try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
 }
