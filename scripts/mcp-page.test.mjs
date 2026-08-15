@@ -562,7 +562,9 @@ test("MCP OAuth add carries an explicit client auth method and no secret", async
   });
   fireEvent.pointerDown(existingClientOption);
   fireEvent.click(existingClientOption);
-  await waitFor(() => within(dialog).getByRole("textbox", { name: "Client ID" }));
+  await waitFor(() =>
+    within(dialog).getByRole("textbox", { name: "Client ID" }),
+  );
   fireEvent.change(within(dialog).getByRole("textbox", { name: "Client ID" }), {
     target: { value: "desktop-client" },
   });
@@ -924,7 +926,7 @@ test("MCP page stays inside the safe Renderer projection", async () => {
     join(process.cwd(), "frontend/src/features/mcp/McpPage.tsx"),
     "utf8",
   );
-  assert.match(page, /<Dialog\.Root[\s\S]*?<Dialog\.Popup/);
+  assert.match(page, /<Drawer\.Root[\s\S]*?<Drawer\.Popup/);
   assert.doesNotMatch(
     page,
     /window\.zero|localStorage|apiKey|marketplace|accessToken|refreshToken|clientSecretValue/i,

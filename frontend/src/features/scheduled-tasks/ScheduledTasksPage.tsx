@@ -1,9 +1,4 @@
-import {
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import type {
   ScheduledTaskMutation,
@@ -12,7 +7,7 @@ import type {
 } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { Button } from "../../components/ui/button.tsx";
-import { Dialog } from "../../components/ui/dialog.tsx";
+import { Drawer } from "../../components/ui/drawer.tsx";
 import { Input } from "../../components/ui/input.tsx";
 import { SelectField, type SelectOption } from "../../components/ui/select.tsx";
 import { Textarea } from "../../components/ui/textarea.tsx";
@@ -639,16 +634,16 @@ export function ScheduledTasksPage({
         )}
       </div>
 
-      <Dialog.Root
+      <Drawer.Root
         open={editorOpen}
         onOpenChange={(open) => {
           if (!open && !busy) closeEditor();
         }}
       >
-        <Dialog.Portal>
-          <Dialog.Backdrop className="scheduled-editor-backdrop" />
-          <Dialog.Popup
-            className="scheduled-editor"
+        <Drawer.Portal>
+          <Drawer.Backdrop className="scheduled-editor-backdrop" />
+          <Drawer.Popup
+            className="scheduled-editor w-[min(472px,calc(100vw-28px))] max-[920px]:w-full bg-(--ui-surface-canvas) shadow-[-18px_0_54px_rgba(37,34,45,0.13)]"
             aria-label={t("scheduled.editor")}
           >
             <header>
@@ -924,9 +919,9 @@ export function ScheduledTasksPage({
                 {t(busy ? "scheduled.saving" : "common.save")}
               </Button>
             </footer>
-          </Dialog.Popup>
-        </Dialog.Portal>
-      </Dialog.Root>
+          </Drawer.Popup>
+        </Drawer.Portal>
+      </Drawer.Root>
     </section>
   );
 }

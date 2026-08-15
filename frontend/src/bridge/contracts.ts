@@ -411,7 +411,6 @@ export type TaskView = {
   continuationAvailable: boolean;
   continuationUnavailableReason:
     | "session_poisoned"
-    | "event_projection_failure"
     | "closing"
     | "closed"
     | "task_archived"

@@ -10,10 +10,10 @@ export const Dialog = {
   ),
   Portal: BaseDialog.Portal,
   Backdrop: ({ className, ...props }: ComponentProps<typeof BaseDialog.Backdrop>) => (
-    <BaseDialog.Backdrop className={cn("fixed inset-0 z-50 bg-(--ui-overlay-scrim) transition-opacity data-ending-style:opacity-0 data-starting-style:opacity-0", className)} {...props} />
+    <BaseDialog.Backdrop className={cn("fixed inset-0 z-50 bg-(--ui-overlay-scrim) transition-opacity motion-reduce:transition-none data-ending-style:opacity-0 data-starting-style:opacity-0", className)} {...props} />
   ),
   Popup: ({ className, ...props }: ComponentProps<typeof BaseDialog.Popup>) => (
-    <BaseDialog.Popup className={cn("fixed top-1/2 left-1/2 z-50 flex max-h-[calc(100dvh-2rem)] w-[min(32rem,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 flex-col gap-4 overflow-y-auto rounded-[12px] border border-(--ui-border) bg-(--ui-surface-panel) p-6 text-(--ui-content-primary) shadow-(--ui-shadow-overlay) outline-none transition-[scale,opacity] data-ending-style:scale-95 data-ending-style:opacity-0 data-starting-style:scale-95 data-starting-style:opacity-0", className)} {...props} />
+    <BaseDialog.Popup className={cn("fixed top-1/2 left-1/2 z-50 flex max-h-[calc(100dvh-2rem)] w-[min(32rem,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 flex-col gap-4 overflow-y-auto rounded-[12px] border border-(--ui-border) bg-(--ui-surface-panel) p-6 text-(--ui-content-primary) shadow-(--ui-shadow-overlay) outline-none transition-[scale,opacity] motion-reduce:transition-none data-ending-style:scale-95 data-ending-style:opacity-0 data-starting-style:scale-95 data-starting-style:opacity-0", className)} {...props} />
   ),
   Title: ({ className, ...props }: ComponentProps<typeof BaseDialog.Title>) => (
     <BaseDialog.Title className={cn("text-base font-semibold", className)} {...props} />

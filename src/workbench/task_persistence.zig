@@ -273,7 +273,8 @@ pub const TaskWire = struct {
     compacts: []CompactWire,
     ui_history: []UiRecordWire,
     checkpoint: ?CheckpointWire = null,
-    checkpoint_health: []const u8 = "none",
+    checkpoint_anchor: []const u8 = "none",
+    checkpoint_attempt: []const u8 = "none",
 };
 
 pub const CheckpointWire = struct {

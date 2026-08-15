@@ -10,7 +10,7 @@ import type {
 } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { Button } from "../../components/ui/button.tsx";
-import { Dialog } from "../../components/ui/dialog.tsx";
+import { Drawer } from "../../components/ui/drawer.tsx";
 import { Input } from "../../components/ui/input.tsx";
 import { SelectField } from "../../components/ui/select.tsx";
 import { useI18n } from "../../i18n/context.ts";
@@ -504,17 +504,17 @@ export function SkillsPage({
         )}
       </div>
 
-      <Dialog.Root
+      <Drawer.Root
         open={drawerOpen}
         onOpenChange={(open) => {
           if (!open && !busy) closeDrawer();
         }}
       >
-        <Dialog.Portal>
-          <Dialog.Backdrop className="skill-drawer-backdrop" />
-          <Dialog.Popup
+        <Drawer.Portal>
+          <Drawer.Backdrop className="skill-drawer-backdrop" />
+          <Drawer.Popup
             ref={drawer}
-            className="skill-drawer"
+            className="skill-drawer w-[min(500px,calc(100vw-28px))] max-[620px]:w-full bg-(--ui-surface-canvas) shadow-[-18px_0_54px_rgba(37,34,45,0.13)]"
             aria-labelledby="skill-drawer-title"
           >
             <header>
@@ -819,9 +819,9 @@ export function SkillsPage({
                 </>
               )}
             </footer>
-          </Dialog.Popup>
-        </Dialog.Portal>
-      </Dialog.Root>
+          </Drawer.Popup>
+        </Drawer.Portal>
+      </Drawer.Root>
     </section>
   );
 }

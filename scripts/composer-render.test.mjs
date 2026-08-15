@@ -79,8 +79,11 @@ const base = {
   modelSelectionPending: false,
   modelContextTitle: "Default model",
   actionDisabled: false,
+  stopAction: null,
+  stopDisabled: false,
   onDraftChange() {},
   onSubmit() {},
+  onStop() {},
   onRestore() {},
   onSlashCommand() {},
   onRefreshSkillCatalog() {},
@@ -566,10 +569,9 @@ test("Workbench foundation uses a stable 760px new Task Composer stage", async (
   assert.doesNotMatch(css, /color-cobalt|settings-teal|35,\s*109,\s*100/);
   assert.match(app, /<NewTaskView[\s\S]*?composer=\{composerFooter\}/);
   assert.doesNotMatch(app, /draftComposer=/);
-  assert.match(
-    app,
-    /!newTaskDraftActive && \(\s*<header className="task-header">/,
-  );
+  // Task identity lives in the shared titlebar context; the workbench body
+  // should not reintroduce a second task header below the native chrome.
+  assert.doesNotMatch(app, /className="task-header"/);
   assert.match(
     app,
     /contextVisible=\{route === "workbench" && activeTask !== null\}/,
@@ -633,6 +635,16 @@ test("a new Task draft is editable before its first send", () => {
     false,
   );
   assert.doesNotMatch(tag(markup, "composer-send") ?? "", /disabled/);
+});
+
+test("an active run replaces the send action with stop in the Composer", () => {
+  const markup = render({
+    draft: { kind: "text", text: "Keep working" },
+    stopAction: "run",
+  });
+  assert.match(markup, /aria-label="Stop task"/);
+  assert.match(markup, /class="[^\"]*composer-stop/);
+  assert.doesNotMatch(markup, /class="[^\"]*composer-send/);
 });
 
 test("an expired workspace grant preserves editable text and exposes recovery", () => {

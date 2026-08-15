@@ -2157,8 +2157,30 @@ export default function App() {
           : t("settings.task_binding_model")
       }
       actionDisabled={workbenchMutationDisabled || workspaceBusy}
+      stopAction={
+        activeTask?.activeOperation?.kind === "run" ||
+        activeTask?.activeOperation?.kind === "compact"
+          ? activeTask.activeOperation.kind
+          : null
+      }
+      stopDisabled={
+        bridgeUnavailable ||
+        Boolean(activeTask && activeTask.id in cancelPending) ||
+        activeTask?.currentRunPhase === "stopping" ||
+        Boolean(
+          activeTask?.activeOperation?.kind === "compact" &&
+          activeTask.compacts.find(
+            (compact) => compact.operationId === activeTask.activeOperation?.id,
+          )?.phase === "stopping",
+        )
+      }
       onDraftChange={updateComposerDraft}
       onSubmit={() => void submitRun()}
+      onStop={() =>
+        void (activeTask?.activeOperation?.kind === "compact"
+          ? cancelCompact()
+          : cancelRun())
+      }
       onRestore={() => void restoreConversation()}
       onSlashCommand={runSlashCommand}
       onRefreshSkillCatalog={() => void refreshComposerSkillCatalog()}
@@ -2234,34 +2256,6 @@ export default function App() {
       headerActions={
         route === "workbench" && activeTask ? (
           <>
-            {activeTask.activeOperation !== null &&
-              activeTask.activeOperation.kind !== "restore" &&
-              !(activeTask.activeOperation.kind === "run"
-                ? activeTask.currentRunPhase === "stopping"
-                : activeTask.compacts.find(
-                    (compact) =>
-                      compact.operationId === activeTask.activeOperation?.id,
-                  )?.phase === "stopping") && (
-                <Button
-                  variant="danger"
-                  size="sm"
-                  disabled={
-                    bridgeUnavailable || activeTask.id in cancelPending
-                  }
-                  onClick={() =>
-                    void (activeTask.activeOperation?.kind === "compact"
-                      ? cancelCompact()
-                      : cancelRun())
-                  }
-                >
-                  <Icon name="stop" />
-                  {t(
-                    activeTask.activeOperation.kind === "compact"
-                      ? "compact.stop"
-                      : "task.stop",
-                  )}
-                </Button>
-              )}
             {inspector.available && (
               <button
                 ref={inspectorToggle}
