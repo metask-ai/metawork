@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef } from "react";
 
 import type { RunView, TaskView, ToolView } from "../../bridge/contracts.ts";
-import { Icon } from "../../components/ui/Icon.tsx";
 import { formatInteger, formatMilliseconds } from "../../i18n/formatters.ts";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
 import type { InspectorSection } from "./inspector-state.ts";
@@ -75,12 +74,10 @@ function wireInteger(value: string): bigint {
 export function TaskInspector({
   task,
   focusRequest,
-  onClose,
   onFocusPending,
 }: {
   task: TaskView;
   focusRequest: InspectorFocusRequest;
-  onClose: () => void;
   onFocusPending: () => void;
 }) {
   const { locale, t } = useI18n();
@@ -113,18 +110,7 @@ export function TaskInspector({
   return (
     <div className="inspector-frame">
       <header className="inspector-header">
-        <div>
-          <p>{t("inspector.eyebrow")}</p>
-          <h2 id="task-inspector-title">{t("inspector.title")}</h2>
-        </div>
-        <button
-          className="icon-button focus-ring"
-          aria-label={t("inspector.close")}
-          title={t("inspector.close")}
-          onClick={onClose}
-        >
-          <Icon name="close" />
-        </button>
+        <h2 id="task-inspector-title">{t("inspector.title")}</h2>
       </header>
 
       <div className="inspector-sections">

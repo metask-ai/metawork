@@ -84,7 +84,7 @@ pub const Error = lifecycle.Error || scheduled_tasks_impl.Error || scheduled_tas
 pub const Limits = struct {
     worker_count: usize = 4,
     queue_capacity: usize = 16,
-    max_tasks: usize = 8,
+    max_tasks: usize = 50,
     max_workspaces: usize = 16,
     max_scheduled_tasks: usize = 16,
     max_skill_assets: usize = 256,
@@ -111,7 +111,7 @@ pub const Limits = struct {
     max_pending_ui_requests: usize = 4,
     max_ui_history_per_task: usize = 8,
     max_terminal_diagnostic_bytes: usize = 512,
-    max_snapshot_bytes: usize = 32 * 1024 * 1024,
+    max_snapshot_bytes: usize = 64 * 1024 * 1024,
 };
 
 // Single Workbench-owned production source. Agent validates these product

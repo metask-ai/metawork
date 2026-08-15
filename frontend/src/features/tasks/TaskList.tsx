@@ -1,12 +1,19 @@
+import { useEffect, useRef, useState, type MouseEvent } from "react";
+
 import type { TaskView, WorkspaceView } from "../../bridge/contracts.ts";
+import { Icon } from "../../components/ui/Icon.tsx";
+import { Menu } from "../../components/ui/menu.tsx";
 import { taskCountMessageId } from "../../i18n/formatters.ts";
 import { useI18n } from "../../i18n/context.ts";
 import {
   taskGroups,
+  taskCompletionNotificationKey,
   taskDisplayState,
   taskSignals,
   workspaceDirectoryLabel,
 } from "../../workbench/selectors.ts";
+
+export type TaskMenuAction = "rename" | "archive" | "close" | "delete";
 
 export function TaskList({
   tasks,
@@ -15,6 +22,8 @@ export function TaskList({
   showArchived,
   onSelectTask,
   onToggleArchived,
+  onTaskAction,
+  taskMutationDisabled,
 }: {
   tasks: TaskView[];
   workspaces: WorkspaceView[];
@@ -22,8 +31,15 @@ export function TaskList({
   showArchived: boolean;
   onSelectTask: (id: string) => void;
   onToggleArchived: () => void;
+  onTaskAction: (task: TaskView, action: TaskMenuAction) => void;
+  taskMutationDisabled: boolean;
 }) {
   const { locale, t } = useI18n();
+  const [seenCompletionKeys, setSeenCompletionKeys] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [menuTaskId, setMenuTaskId] = useState<string | null>(null);
+  const menuAnchor = useRef<HTMLElement | null>(null);
   const groupedTasks = taskGroups(tasks, showArchived);
   const visibleTaskCount = groupedTasks.reduce(
     (count, group) => count + group.tasks.length,
@@ -50,6 +66,44 @@ export function TaskList({
     );
   }
 
+  const menuTask =
+    menuTaskId === null
+      ? null
+      : tasks.find((task) => task.id === menuTaskId) ?? null;
+
+  function openTaskMenu(event: MouseEvent<HTMLButtonElement>, taskId: string) {
+    event.preventDefault();
+    menuAnchor.current = event.currentTarget;
+    setMenuTaskId(taskId);
+  }
+
+  useEffect(() => {
+    const currentCompletionKeys = new Set(
+      tasks
+        .map(taskCompletionNotificationKey)
+        .filter((key): key is string => key !== null),
+    );
+    const activeTask =
+      activeTaskId === null
+        ? null
+        : tasks.find((task) => task.id === activeTaskId) ?? null;
+    const activeCompletionKey =
+      activeTask === null ? null : taskCompletionNotificationKey(activeTask);
+
+    setSeenCompletionKeys((previous) => {
+      const next = new Set(
+        [...previous].filter((key) => currentCompletionKeys.has(key)),
+      );
+      if (activeCompletionKey !== null) next.add(activeCompletionKey);
+      if (
+        next.size === previous.size &&
+        [...next].every((key) => previous.has(key))
+      )
+        return previous;
+      return next;
+    });
+  }, [activeTaskId, tasks]);
+
   return (
     <nav className="task-list" aria-label={t("task.list")}>
       <div className="task-list-heading">
@@ -66,22 +120,29 @@ export function TaskList({
           {group.tasks.map((task) => (
             <button
               key={task.id}
+              data-task-id={task.id}
               className="task-list-item focus-ring"
               aria-current={activeTaskId === task.id ? "page" : undefined}
               onClick={() => onSelectTask(task.id)}
+              onContextMenu={(event) => openTaskMenu(event, task.id)}
             >
               <span className="task-list-row">
                 <span>{task.title || t("task.item", { id: task.id })}</span>
-                <TaskSignals task={task} />
+                <TaskSignals
+                  task={task}
+                  completionSeen={seenCompletionKeys.has(
+                    taskCompletionNotificationKey(task) ?? "",
+                  )}
+                />
               </span>
-              <span className="task-list-meta">
-                {task.archived ? t("task.archived") : taskStateLabel(task, t)}
-                {workspaceContextByTaskId.has(task.id) && (
-                  <span title={workspaceContextByTaskId.get(task.id)}>
-                    {` · ${workspaceContextByTaskId.get(task.id)}`}
-                  </span>
-                )}
-              </span>
+              {workspaceContextByTaskId.has(task.id) && (
+                <span
+                  className="task-list-meta"
+                  title={workspaceContextByTaskId.get(task.id)}
+                >
+                  {workspaceContextByTaskId.get(task.id)}
+                </span>
+              )}
             </button>
           ))}
         </section>
@@ -101,36 +162,117 @@ export function TaskList({
             : t("task.show_archived", { count: archivedCount })}
         </button>
       )}
+      <Menu.Root
+        open={menuTask !== null}
+        onOpenChange={(open) => {
+          if (open) return;
+          setMenuTaskId(null);
+          menuAnchor.current = null;
+        }}
+      >
+        <Menu.Portal>
+          <Menu.Positioner
+            anchor={menuAnchor.current}
+            side="right"
+            align="start"
+            sideOffset={5}
+            collisionPadding={8}
+          >
+            {menuTask && (
+              <Menu.Popup
+                className="task-menu-popover"
+                aria-label={t("task.actions")}
+              >
+                <Menu.Item
+                  className="task-menu-item"
+                  disabled={taskMutationDisabled}
+                  onClick={() => onTaskAction(menuTask, "rename")}
+                >
+                  {t("task.rename")}
+                </Menu.Item>
+                <Menu.Item
+                  className="task-menu-item"
+                  disabled={
+                    taskMutationDisabled ||
+                    menuTask.activeOperation !== null ||
+                    menuTask.lifecycle === "closing"
+                  }
+                  onClick={() => onTaskAction(menuTask, "archive")}
+                >
+                  {menuTask.archived ? t("task.restore") : t("task.archive")}
+                </Menu.Item>
+                <Menu.Item
+                  className="task-menu-item"
+                  disabled={
+                    taskMutationDisabled ||
+                    menuTask.lifecycle === "closed" ||
+                    (menuTask.lifecycle === "closing" && !menuTask.closeFailed)
+                  }
+                  onClick={() => onTaskAction(menuTask, "close")}
+                >
+                  {menuTask.closeFailed
+                    ? t("task.end_retry")
+                    : menuTask.lifecycle === "closing"
+                      ? t("task.ending")
+                      : t("task.end")}
+                </Menu.Item>
+                <Menu.Item
+                  className="task-menu-item is-danger"
+                  disabled={taskMutationDisabled || menuTask.lifecycle !== "closed"}
+                  onClick={() => onTaskAction(menuTask, "delete")}
+                >
+                  {t("task.delete")}
+                </Menu.Item>
+              </Menu.Popup>
+            )}
+          </Menu.Positioner>
+        </Menu.Portal>
+      </Menu.Root>
     </nav>
   );
 }
 
-export function TaskSignals({ task }: { task: TaskView }) {
+export function TaskSignals({
+  task,
+  completionSeen = false,
+  showCompleted = true,
+}: {
+  task: TaskView;
+  completionSeen?: boolean;
+  showCompleted?: boolean;
+}) {
   const { t } = useI18n();
   const signals = taskSignals(task);
+  const state = taskDisplayState(task);
   const signal = signals.attention
     ? "attention"
     : signals.running
       ? "running"
       : signals.failed
         ? "failed"
-        : null;
-  if (!signal) return null;
+        : state.kind === "outcome" &&
+            state.value === "completed" &&
+            showCompleted &&
+            !completionSeen
+          ? "completed"
+          : null;
+  if (signal === null) return null;
+
+  const label = t(`task.signal.${signal}`);
+
   return (
-    <span className="task-signal" data-signal={signal}>
-      {t(`task.signal.${signal}`)}
+    <span
+      className="task-signal"
+      data-signal={signal}
+      role="img"
+      aria-label={label}
+      title={label}
+    >
+      {signal === "completed" ? (
+        <span className="task-notification-dot" aria-hidden="true" />
+      ) : (
+        <Icon name={signal === "running" ? "loading" : "warning"} />
+      )}
     </span>
   );
-}
-
-function taskStateLabel(task: TaskView, t: ReturnType<typeof useI18n>["t"]) {
-  const state = taskDisplayState(task);
-  if (state.kind === "phase") return t(`task.phase.${state.value}`);
-  if (state.kind === "lifecycle") return t(`task.lifecycle.${state.value}`);
-  if (state.kind === "archived") return t("task.archived");
-  if (state.kind === "outcome")
-    return t("task.last_result", {
-      result: t(`outcome.${state.value}`),
-    });
-  return t("task.ready");
 }
