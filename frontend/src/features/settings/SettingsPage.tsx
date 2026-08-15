@@ -1,10 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import type {
-  AccountView,
-  TaskView,
-  WorkspaceView,
-} from "../../bridge/contracts.ts";
+import type { AccountView } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { Button } from "../../components/ui/button.tsx";
 import {
@@ -13,21 +9,8 @@ import {
 } from "../../components/ui/SelectionMenu.tsx";
 import { useI18n, type Locale } from "../../i18n/context.ts";
 import { accountErrorText } from "../../i18n/account-error.ts";
-import {
-  WorkspaceSettings,
-  type WorkspaceChoiceIntent,
-  type WorkspaceChoiceResult,
-  type WorkspaceRemovalResult,
-} from "./WorkspaceSettings.tsx";
-
-export type {
-  WorkspaceChoiceResult,
-  WorkspaceChoiceIntent,
-  WorkspaceRemovalResult,
-} from "./WorkspaceSettings.tsx";
-
 export type SettingsFocusTarget = "title" | "account" | "signout";
-type SettingsSection = "general" | "workspaces" | "account";
+type SettingsSection = "general" | "account";
 type RequestedSelection = {
   selectionId: string;
   label: string;
@@ -56,40 +39,26 @@ function modelLabel(
 
 export function SettingsPage({
   account,
-  manualWorkspaces,
-  tasks,
   focusTarget,
   disabled,
-  workspaceDisabled,
-  workspaceBusy,
   cancelDisabled,
   onBack,
   onRefresh,
   onCancel,
   onSelectApiKey,
   onSelectModel,
-  onChooseWorkspace,
-  onRemoveWorkspace,
   onBeginLogin,
   onLogout,
 }: {
   account: AccountView;
-  manualWorkspaces: WorkspaceView[];
-  tasks: TaskView[];
   focusTarget: SettingsFocusTarget;
   disabled: boolean;
-  workspaceDisabled: boolean;
-  workspaceBusy: boolean;
   cancelDisabled: boolean;
   onBack: () => void;
   onRefresh: () => void;
   onCancel: () => void;
   onSelectApiKey: (id: string) => void;
   onSelectModel: (id: string) => void;
-  onChooseWorkspace: (
-    intent: WorkspaceChoiceIntent,
-  ) => Promise<WorkspaceChoiceResult>;
-  onRemoveWorkspace: (workspaceId: string) => Promise<WorkspaceRemovalResult>;
   onBeginLogin: () => void;
   onLogout: () => void;
 }) {
@@ -104,7 +73,6 @@ export function SettingsPage({
     useState<RequestedSelection | null>(null);
   const content = useRef<HTMLDivElement>(null);
   const title = useRef<HTMLHeadingElement>(null);
-  const workspaceSection = useRef<HTMLElement>(null);
   const accountSection = useRef<HTMLElement>(null);
   const accountHeading = useRef<HTMLHeadingElement>(null);
   const signOut = useRef<HTMLButtonElement>(null);
@@ -345,19 +313,12 @@ export function SettingsPage({
   }
 
   function updateActiveSection() {
-    if (
-      !content.current ||
-      !workspaceSection.current ||
-      !accountSection.current
-    )
-      return;
+    if (!content.current || !accountSection.current) return;
     const readingLine =
       content.current.scrollTop +
       Math.min(160, content.current.clientHeight * 0.3);
     if (contentTop(accountSection.current) <= readingLine)
       setActiveSection("account");
-    else if (contentTop(workspaceSection.current) <= readingLine)
-      setActiveSection("workspaces");
     else setActiveSection("general");
   }
 
@@ -407,24 +368,6 @@ export function SettingsPage({
           </a>
           <a
             className="focus-ring"
-            href="#settings-workspaces"
-            aria-current={
-              activeSection === "workspaces" ? "location" : undefined
-            }
-            onClick={(event) => {
-              event.preventDefault();
-              setActiveSection("workspaces");
-              if (!content.current || !workspaceSection.current) return;
-              content.current.scrollTo({
-                top: contentTop(workspaceSection.current) - 18,
-                behavior: "smooth",
-              });
-            }}
-          >
-            {t("settings.workspaces")}
-          </a>
-          <a
-            className="focus-ring"
             href="#settings-account"
             aria-current={activeSection === "account" ? "location" : undefined}
             onClick={(event) => {
@@ -469,21 +412,6 @@ export function SettingsPage({
                 />
               </div>
             </div>
-          </section>
-
-          <section
-            ref={workspaceSection}
-            id="settings-workspaces"
-            className="settings-section"
-          >
-            <WorkspaceSettings
-              manualWorkspaces={manualWorkspaces}
-              tasks={tasks}
-              disabled={workspaceDisabled}
-              busy={workspaceBusy}
-              onChooseWorkspace={onChooseWorkspace}
-              onRemoveWorkspace={onRemoveWorkspace}
-            />
           </section>
 
           <section

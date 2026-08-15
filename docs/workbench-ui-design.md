@@ -202,7 +202,7 @@ Workspace
 - New task 默认选择 Automatic Workspace，工作目录控件直接显示“默认”；此时不提前创建 Workspace 或 Task，首次发送才请求 Host 分配 Automatic Workspace。用户可以在发送前切换到已有 Manual Workspace 或打开原生目录选择器；选择完成后只更新草稿上下文，不得自动创建 Task 或发送已有内容。Manual Workspace 直接显示 canonical directory，Automatic Workspace 统一显示“默认”，不得暴露随机目录或内部 kind 术语；
 - New task 草稿按 Workspace 隔离。未绑定 Workspace 的临时草稿只在目标 Workspace 没有草稿时迁移；目标已有草稿时保留两边内容并打开目标草稿，不能覆盖或丢弃任一份；
 - Workspace projection 的 `kind` 是 Host 事实；一个 Manual Workspace 可以承载多个 Task，Automatic Workspace 精确归属一个 Task；
-- Composer 的工作目录控件只选择、添加或重新授权 New task 路径；Manual Workspace 的完整列表、移除、移除失败重试和空目录记录管理归正式设置页。两处消费同一 Host projection 与 mutation，不复制 registry 或维护第二套 Renderer 状态；设置作为覆盖整个 Workbench 内容区的长期 surface 打开，保留窗口壳层和底层 Workbench 挂载，关闭后恢复原工作面；
+- Composer 的工作目录控件只选择、添加或重新授权 New task 路径；设置页不提供 Workspace 生命周期管理。设置作为覆盖整个 Workbench 内容区的长期 surface 打开，保留窗口壳层和底层 Workbench 挂载，拥有自己的分区导航与内容滚动，关闭后恢复原工作面；
 - 再次打开历史 Task 只保证可浏览记录；需要访问原目录时重新选择或授权，能否继续执行还必须服从 §6.4 的 Conversation 与 execution binding 规则；
 - MetaWork 重启后，左栏直接使用 Workbench 恢复的 Task 列表和顺序；点击 Task 打开其已保存时间线，不自动创建新 Task、不重放最后一次输入，也不把恢复的 `interrupted` 显示成仍在运行；
 - `taskHistoryPersistenceHealth = degraded` 时，左栏在 Task 列表前显示一条紧凑、可读的部分恢复提示，但新 Task 和其他有效历史仍可用；只有 `read_failed / corrupt / write_failed / outcome_unknown` 这类 canonical store 或提交状态不可相信时才禁用 mutation。历史读取失败或整体损坏不得伪装成空列表，`outcome_unknown` 明确要求重启，Renderer 不提供盲目重试同一命令的入口；
@@ -750,7 +750,7 @@ strict Workspace security 未通过前，不开放 Workspace 级 Read/Edit/Delet
 
 ### 10.3 管理与撤销
 
-每个 Workspace 提供 `Workspace settings > Permissions`，全局设置也可以按 Workspace 查看全部规则。每条规则显示：
+若未来通过独立的 strict Workspace security capability 开放权限管理，应由对应的 Workspace authority surface 展示规则；当前 Settings surface 不提供 Workspace 权限或生命周期管理。每条规则至少显示：
 
 - 允许的动作和资源范围；
 - Workspace；
@@ -910,11 +910,6 @@ MetaWork
 General
 └── Language
 
-Work directories
-├── Trusted Manual Workspace list
-├── Authorization and removal status
-└── Add / reauthorize / remove
-
 Account & models
 ├── Metask identity and connection status
 ├── API catalog and default API
@@ -927,13 +922,7 @@ Account & models
 
 设置树只列当前阶段已经完整设计并通过 capability gate 的项目。显示密度不作为设置；`Appearance` 只有在第二套主题完成设计、可访问性和平台验收后才能加入，首个浅色版本不显示空入口。
 
-`Work directories` 是低频 Workspace 生命周期控制面，不是第二套导航：
-
-- 只列 Host 投影的 `kind = manual` Workspace，按 Host recent order 展示 display name、canonical directory、Task 记录数和授权/移除状态；Automatic Workspace 只随 owning Task 导航，不进入设置；
-- `Add directory` 使用同一 Host-owned native picker 与一次性 authority。重新授权要求用户重新选择目录；Renderer 不持有路径 capability，也不从字符串判断是否为同一目录，而是在 authoritative snapshot 刷新后用 Host 返回的稳定 Workspace identity 校验目标。选择了其他目录时可以保留该新增目录，但必须明确原目标仍需授权；
-- 移除使用行内非模态确认，明确本地文件与 Task 历史保留、live work 会停止；确认打开后聚焦取消，Escape 取消并归还焦点，提交后以 canonical `removing` 状态为准；
-- `lastRemovalFailure` 必须显示为可重试事实。transport 或 typed rejection 就地显示，不把失败藏到当前不可见的 Workspace command-bar scope；
-- 设置页只管理 lifecycle，不改变当前 Task。每个 New task 都默认回到 Automatic；Renderer 只在该 draft 内保存 Manual Workspace identity，不维护 `activeWorkspaceId` 或其他全局活动 Workspace 镜像。
+Workspace 生命周期不属于 Settings surface。New task 路径控件负责选择、添加和重新授权 Manual Workspace；Automatic Workspace 只随 owning Task 导航。Renderer 只在当前 draft 内保存 Manual Workspace identity，不维护 `activeWorkspaceId` 或其他全局活动 Workspace 镜像。
 
 `Account & models` 规则：
 

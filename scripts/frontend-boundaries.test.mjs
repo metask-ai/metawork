@@ -207,35 +207,10 @@ test("Task and draft contexts do not recreate a global active Workspace", async 
   );
 });
 
-test("Workspace lifecycle recovery lives in Settings with explicit focus handling", async () => {
-  const [app, settings] = await Promise.all([
-    readFile(resolve(sourceRoot, "app", "App.tsx"), "utf8"),
-    readFile(
-      resolve(sourceRoot, "features", "settings", "WorkspaceSettings.tsx"),
-      "utf8",
-    ),
-  ]);
-  assert.match(app, /workspace\.kind === "manual"/);
-  assert.match(settings, /manualWorkspaces: WorkspaceView\[\]/);
-  assert.match(settings, /lastRemovalFailure/);
-  assert.match(settings, /removalCancel\.current\?\.focus\(\)/);
-  assert.match(settings, /event\.key !== "Escape"/);
-  assert.match(settings, /onRemoveWorkspace\(workspaceId\)/);
-  assert.match(
-    app,
-    /intent\.kind === "reauthorize"[\s\S]*result\.workspaceId !== intent\.workspaceId[\s\S]*kind: "target_mismatch"/,
-  );
-  assert.doesNotMatch(settings, /dispatchWorkbench|selectWorkspace/);
-});
-
 test("Settings is a full content overlay that preserves the Workbench mount", async () => {
-  const [app, shell, settings, css] = await Promise.all([
+  const [app, shell, css] = await Promise.all([
     readFile(resolve(sourceRoot, "app", "App.tsx"), "utf8"),
     readFile(resolve(sourceRoot, "app", "AppShell.tsx"), "utf8"),
-    readFile(
-      resolve(sourceRoot, "features", "settings", "SettingsPage.tsx"),
-      "utf8",
-    ),
     readFile(resolve(sourceRoot, "index.css"), "utf8"),
   ]);
   assert.match(
@@ -264,8 +239,13 @@ test("Settings is a full content overlay that preserves the Workbench mount", as
     css,
     /\.settings-header,\s*\.settings-layout\s*\{[\s\S]*width: 100%;/,
   );
+  const settings = await readFile(
+    resolve(sourceRoot, "features", "settings", "SettingsPage.tsx"),
+    "utf8",
+  );
   assert.match(settings, /role="dialog"/);
   assert.match(settings, /aria-modal="true"/);
+  assert.doesNotMatch(settings, /settings-workspaces|WorkspaceSettings/);
 });
 
 test("Renderer draws declarative titlebar controls while Bridge and Host own native behavior", async () => {

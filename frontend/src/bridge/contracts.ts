@@ -753,27 +753,6 @@ export type McpConnectionTestResult = {
     | "unavailable";
 };
 
-export type WorkspaceMutationReason =
-  | "workspace_changed"
-  | "workspace_unavailable"
-  | "workspace_removing"
-  | "capacity_reached"
-  | "removal_failed";
-
-export type WorkspaceMutationResult =
-  | {
-      accepted: true;
-      workspaceId: string;
-      workspaceEpoch: string;
-      reason: null;
-    }
-  | {
-      accepted: false;
-      workspaceId: string;
-      workspaceEpoch: null;
-      reason: WorkspaceMutationReason;
-    };
-
 export type TaskCreateReason =
   | "execution_changed"
   | "execution_unavailable"

@@ -47,7 +47,6 @@ import {
   type UiRecord,
   type WorkbenchSnapshot,
   type WorkspaceChoice,
-  type WorkspaceMutationResult,
   type WorkspaceView,
 } from "./contracts.ts";
 
@@ -210,13 +209,6 @@ const scheduledTaskFailureReasons = [
   "timer_unavailable",
   "persistence_failed",
   "host_interrupted",
-] as const;
-const workspaceMutationReasons = [
-  "workspace_changed",
-  "workspace_unavailable",
-  "workspace_removing",
-  "capacity_reached",
-  "removal_failed",
 ] as const;
 const taskCreateReasons = [
   "execution_changed",
@@ -2930,38 +2922,6 @@ export function decodeSkillDetailResult(value: unknown): SkillDetailResult {
     fileCount: 0,
     totalBytes: 0,
     reason: nonEmptyString(item.reason, "$.reason"),
-  };
-}
-
-export function decodeWorkspaceMutationResult(
-  value: unknown,
-  expectedWorkspaceId: string,
-): WorkspaceMutationResult {
-  const item = object(value, "$", [
-    "accepted",
-    "workspaceId",
-    "workspaceEpoch",
-    "reason",
-  ]);
-  const accepted = booleanValue(item.accepted, "$.accepted");
-  const workspaceId = positiveWireId(item.workspaceId, "$.workspaceId");
-  if (workspaceId !== expectedWorkspaceId)
-    fail("$.workspaceId", "response identity mismatch");
-  if (accepted) {
-    if (item.reason !== null) fail("$.reason", "expected null");
-    return {
-      accepted: true,
-      workspaceId,
-      workspaceEpoch: positiveWireId(item.workspaceEpoch, "$.workspaceEpoch"),
-      reason: null,
-    };
-  }
-  if (item.workspaceEpoch !== null) fail("$.workspaceEpoch", "expected null");
-  return {
-    accepted: false,
-    workspaceId,
-    workspaceEpoch: null,
-    reason: enumValue(item.reason, "$.reason", workspaceMutationReasons),
   };
 }
 

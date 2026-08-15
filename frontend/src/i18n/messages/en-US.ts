@@ -631,27 +631,6 @@ export const enUS = {
   "settings.sections": "Settings sections",
   "settings.section_label": "Settings",
   "settings.general": "General",
-  "settings.workspaces": "Work directories",
-  "settings.workspaces_help":
-    "These trusted directories are available when you start a task. Removing one keeps its files and task history.",
-  "settings.workspace_add": "Add directory",
-  "settings.workspace_empty_title": "No work directories",
-  "settings.workspace_empty_help":
-    "Add a trusted local directory before starting work with your files.",
-  "settings.workspace_action_failed": "Work directory action failed",
-  "settings.workspace_status.available": "Ready",
-  "settings.workspace_status.removing": "Removing",
-  "settings.workspace_status.reauthorization_required": "Access required",
-  "settings.workspace_status.removal_failed": "Removal incomplete",
-  "settings.workspace_reauthorize": "Confirm access",
-  "settings.workspace_reauthorize_mismatch":
-    "The selected directory was added, but this directory still needs access.",
-  "settings.workspace_remove": "Remove",
-  "settings.workspace_retry_removal": "Retry removal",
-  "settings.workspace_remove_confirm_title": "Remove this work directory?",
-  "settings.workspace_remove_confirm_body":
-    "Its {count} task records and local files will remain. Any running work in this directory will stop.",
-  "settings.workspace_remove_confirm_action": "Remove directory",
   "settings.account_models": "Account & models",
   "settings.execution_defaults": "Execution defaults",
   "settings.catalog_count": "APIs {apis} · Models {models}",

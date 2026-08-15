@@ -12,7 +12,6 @@ export const commands = {
   windowChromeControl: "metawork.host.windowChrome.control",
   windowChromeDisconnect: "metawork.host.windowChrome.disconnect",
   chooseWorkspace: "metawork.workspaces.choose",
-  removeWorkspace: "metawork.workspaces.remove",
   refreshWorkspaceSkillCatalog: "metawork.workspaces.refreshSkillCatalog",
   refreshSkillCatalog: "metawork.skills.refreshCatalog",
   chooseSkillImport: "metawork.skills.chooseImport",

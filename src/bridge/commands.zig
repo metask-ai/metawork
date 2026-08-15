@@ -13,7 +13,6 @@ pub const window_chrome_begin_drag = "metawork.host.windowChrome.beginDrag";
 pub const window_chrome_control = "metawork.host.windowChrome.control";
 pub const window_chrome_disconnect = "metawork.host.windowChrome.disconnect";
 pub const choose_workspace = "metawork.workspaces.choose";
-pub const remove_workspace = "metawork.workspaces.remove";
 pub const refresh_workspace_skill_catalog = "metawork.workspaces.refreshSkillCatalog";
 pub const refresh_skill_catalog = "metawork.skills.refreshCatalog";
 pub const choose_skill_import = "metawork.skills.chooseImport";
@@ -76,7 +75,6 @@ pub const product = [_][]const u8{
     window_chrome_control,
     window_chrome_disconnect,
     choose_workspace,
-    remove_workspace,
     refresh_workspace_skill_catalog,
     refresh_skill_catalog,
     choose_skill_import,

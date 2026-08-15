@@ -36,9 +36,6 @@ import { accountErrorMessageId } from "../i18n/account-error.ts";
 import {
   SettingsPage,
   type SettingsFocusTarget,
-  type WorkspaceChoiceIntent,
-  type WorkspaceChoiceResult,
-  type WorkspaceRemovalResult,
 } from "../features/settings/SettingsPage.tsx";
 import { ComposerFooter } from "../features/composer/ComposerFooter.tsx";
 import { ApprovalPanel } from "../features/approvals/ApprovalPanel.tsx";
@@ -108,7 +105,6 @@ import type {
   TaskView,
   WorkbenchSnapshot,
   UiResponsePayload,
-  WorkspaceMutationReason,
 } from "../bridge/contracts.ts";
 import { useI18n, type MessageId } from "../i18n/context.ts";
 import {
@@ -139,8 +135,7 @@ type MutationReason =
   | TaskCompactReason
   | TaskRestoreReason
   | TaskRunReason
-  | TaskModelSelectionReason
-  | WorkspaceMutationReason;
+  | TaskModelSelectionReason;
 
 function mutationReasonMessageId(reason: MutationReason): MessageId {
   return `mutation.reason.${reason}`;
@@ -943,87 +938,6 @@ export default function App() {
       );
       window.requestAnimationFrame(() => composer.current?.focus());
       return null;
-    } finally {
-      workspaceBusyRef.current = false;
-      setWorkspaceBusy(false);
-    }
-  }
-
-  async function chooseWorkspaceForSettings(
-    intent: WorkspaceChoiceIntent,
-  ): Promise<WorkspaceChoiceResult> {
-    if (workbenchMutationDisabled || workspaceBusyRef.current)
-      return { kind: "failed" };
-    workspaceBusyRef.current = true;
-    setWorkspaceBusy(true);
-    try {
-      const result = await client.chooseWorkspace();
-      if (!result.selected) return { kind: "cancelled" };
-      await refreshSnapshot();
-      setStatus(
-        quietStatus("workspace.grant_confirmed", {
-          scope: "workspace",
-          workspaceId: result.workspaceId,
-        }),
-      );
-      if (
-        intent.kind === "reauthorize" &&
-        result.workspaceId !== intent.workspaceId
-      )
-        return {
-          kind: "target_mismatch",
-          chosenWorkspaceId: result.workspaceId,
-        };
-      return { kind: "selected", workspaceId: result.workspaceId };
-    } catch (error) {
-      await refreshSnapshot().catch(() => undefined);
-      setStatus(
-        attentionStatus(
-          "workspace.selection_failed",
-          { scope: "workspace", workspaceId: null },
-          { diagnostic: errorText(error) },
-        ),
-      );
-      return { kind: "failed" };
-    } finally {
-      workspaceBusyRef.current = false;
-      setWorkspaceBusy(false);
-    }
-  }
-
-  async function removeWorkspaceById(
-    workspaceId: string,
-  ): Promise<WorkspaceRemovalResult> {
-    if (workbenchMutationDisabled || workspaceBusyRef.current)
-      return { kind: "failed" };
-    const workspace = snapshot.workspaces.find(
-      (candidate) =>
-        candidate.id === workspaceId && candidate.kind === "manual",
-    );
-    if (!workspace) return { kind: "failed" };
-    workspaceBusyRef.current = true;
-    setWorkspaceBusy(true);
-    try {
-      const result = await client.removeWorkspace(
-        workspace.id,
-        workspace.epoch,
-      );
-      if (!result.accepted) {
-        await refreshSnapshot().catch(() => undefined);
-        return { kind: "rejected", reason: result.reason };
-      }
-      await refreshSnapshot();
-      return { kind: "accepted" };
-    } catch (error) {
-      await refreshSnapshot().catch(() => undefined);
-      setStatus(
-        attentionStatus(
-          "mutation.transport_failed",
-          { scope: "workspace", workspaceId },
-          { diagnostic: errorText(error) },
-        ),
-      );
-      return { kind: "failed" };
     } finally {
       workspaceBusyRef.current = false;
       setWorkspaceBusy(false);
@@ -2438,12 +2352,8 @@ export default function App() {
         settingsOpen ? (
           <SettingsPage
             account={snapshot.account}
-            manualWorkspaces={manualWorkspaces}
-            tasks={snapshot.tasks}
             focusTarget={settingsFocus}
             disabled={bridgeUnavailable || accountBusy}
-            workspaceDisabled={workbenchMutationDisabled}
-            workspaceBusy={workspaceBusy}
             cancelDisabled={viewSyncFailed || !bridgeReady || accountCancelBusy}
             onBack={closeSettings}
             onRefresh={() =>
@@ -2468,8 +2378,6 @@ export default function App() {
                 ),
               )
             }
-            onChooseWorkspace={chooseWorkspaceForSettings}
-            onRemoveWorkspace={removeWorkspaceById}
             onBeginLogin={() =>
               void runAccountCommand(() => client.beginLogin())
             }
