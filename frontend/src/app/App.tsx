@@ -1014,6 +1014,14 @@ export default function App() {
   }
 
   function closeSettings() {
+    // Leaving settings mid-reconfiguration abandons the unfinished change:
+    // cancel the parked catalog transaction so the previous execution comes
+    // back and the setup gate releases. First-time setup has nothing to fall
+    // back to, so the gate keeps the surface open after the cancel.
+    if (accountSetupRequired && snapshot.account.canCancel) {
+      void cancelAccountOperation();
+      return;
+    }
     setSettingsOpen(false);
     window.requestAnimationFrame(() => {
       settingsRestoreFocus.current?.focus();
