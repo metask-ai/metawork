@@ -1309,7 +1309,7 @@ pub const Runtime = struct {
             const id = saved.apiKeyId();
             if (catalog.hasApiKey(id)) return id;
         }
-        return catalog.uniqueApiKeyId();
+        return catalog.firstApiKeyId();
     }
 
     fn automaticModelSelection(
@@ -1317,17 +1317,9 @@ pub const Runtime = struct {
         catalog: *const catalog_impl.CatalogSession,
         account_view: contract.AccountView,
     ) ?[]const u8 {
-        if (account_view.execution_generation != 0) {
-            if (account_view.candidate_model.len != 0 or
-                !std.mem.eql(
-                    u8,
-                    catalog.selectedApiKeyId(),
-                    account_view.selected_api_key_id,
-                )) return null;
-            if (catalog.hasModel(account_view.selected_model))
-                return account_view.selected_model;
-            return null;
-        }
+        if (account_view.candidate_model.len != 0) return null;
+        if (catalog.hasModel(account_view.selected_model))
+            return account_view.selected_model;
         if (self.savedPreferenceFor(account_view.account_id)) |saved| {
             const id = saved.modelId();
             if (std.mem.eql(
@@ -1336,7 +1328,7 @@ pub const Runtime = struct {
                 saved.apiKeyId(),
             ) and catalog.hasModel(id)) return id;
         }
-        return catalog.uniqueModelId();
+        return catalog.firstModelId();
     }
 
     fn scheduleRefresh(self: *Runtime) void {
@@ -1695,8 +1687,19 @@ test "Account Runtime owns automatic catalog selection policy" {
     first_login_view.selected_api_key_id = "";
     first_login_view.selected_model = "";
     first_login_view.execution_generation = 0;
-    try std.testing.expect(
-        runtime.automaticApiSelection(&catalog, first_login_view) == null,
+    // First login without a saved preference defaults to the catalog's
+    // first key; the user adjusts in settings afterwards.
+    try std.testing.expectEqualStrings(
+        "key-current",
+        runtime.automaticApiSelection(&catalog, first_login_view).?,
+    );
+    // Model selection also defaults to the first entry when neither the
+    // committed selection nor a saved preference survives in the catalog.
+    var first_model_view = first_login_view;
+    first_model_view.selected_model = "model-missing";
+    try std.testing.expectEqualStrings(
+        "model-current",
+        runtime.automaticModelSelection(&catalog, first_model_view).?,
     );
     runtime.saved_preference = try .init(
         "account-1",

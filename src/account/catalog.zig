@@ -346,15 +346,15 @@ pub const CatalogSession = struct {
         return self.api_keys.items[index].secret.view().len > 0;
     }
 
-    /// Returns a candidate only when the Host can proceed without making a
-    /// user preference decision.
-    pub fn uniqueApiKeyId(self: *const CatalogSession) ?[]const u8 {
-        if (self.api_keys.items.len != 1) return null;
+    /// Default candidate for automatic continuation: the catalog's first
+    /// entry. Selection stays overridable in settings afterwards.
+    pub fn firstApiKeyId(self: *const CatalogSession) ?[]const u8 {
+        if (self.api_keys.items.len == 0) return null;
         return self.api_keys.items[0].id.view();
     }
 
-    pub fn uniqueModelId(self: *const CatalogSession) ?[]const u8 {
-        if (self.models.items.len != 1) return null;
+    pub fn firstModelId(self: *const CatalogSession) ?[]const u8 {
+        if (self.models.items.len == 0) return null;
         return self.models.items[0].id.view();
     }
 
@@ -960,8 +960,8 @@ test "live-shape catalogs expose only masked views and move one key owner" {
     var models = try parseModels(std.testing.allocator, model_fixture);
     session.models = models.entries;
     models.entries = .empty;
-    try std.testing.expectEqualStrings("325", session.uniqueApiKeyId().?);
-    try std.testing.expectEqualStrings("model-1", session.uniqueModelId().?);
+    try std.testing.expectEqualStrings("325", session.firstApiKeyId().?);
+    try std.testing.expectEqualStrings("model-1", session.firstModelId().?);
 
     var key_views: [contract.Limits.api_key_entries]contract.ApiKeyView =
         undefined;
@@ -1198,12 +1198,12 @@ test "failed model reload preserves the committed private catalog" {
     };
 
     try session.loadModelsForApiKey("325", transport, null);
-    try std.testing.expectEqualStrings("model-1", session.uniqueModelId().?);
+    try std.testing.expectEqualStrings("model-1", session.firstModelId().?);
     try std.testing.expectError(
         error.ServiceUnavailable,
         session.loadModelsForApiKey("325", transport, null),
     );
-    try std.testing.expectEqualStrings("model-1", session.uniqueModelId().?);
+    try std.testing.expectEqualStrings("model-1", session.firstModelId().?);
 }
 
 test "catalog enforces response and field bounds before publication" {

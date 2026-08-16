@@ -119,6 +119,10 @@ const CommittedState = struct {
     selected_model: ModelId = .{},
     pending_api_key_id: ApiKeyId = .{},
     pending_model: ModelId = .{},
+    /// A manual API selection arrived while a catalog load was in flight.
+    /// The next completion boundary reloads models for the queued key
+    /// instead of consuming the stale result; user intent beats automation.
+    pending_catalog_reload: bool = false,
     error_code: contract.ErrorCode = .none,
     safe_diagnostic: SafeDiagnostic = .{},
     catalog_generation: u64 = 0,
@@ -505,6 +509,7 @@ pub const Account = struct {
         next.attempt_kind = .none;
         next.pending_api_key_id.clear();
         next.pending_model.clear();
+        next.pending_catalog_reload = false;
         next.error_code = .user_cancelled;
         next.safe_diagnostic.clear();
         var result = transition(
@@ -558,6 +563,40 @@ pub const Account = struct {
                 .session_changed,
                 attempt.current,
                 .load_api_keys,
+            );
+        }
+        if (self.state.attempt_kind == .catalog and
+            self.state.active_attempt_id != null and
+            (self.state.operation == .loading_models or
+                self.state.operation == .selecting_model))
+        {
+            // Automatic continuation is mid-flight (or parked on a model
+            // choice). The user's explicit key choice supersedes it: queue
+            // the key and reload its models at the next completion boundary
+            // instead of discarding the click as invalid_state.
+            var next = self.state;
+            next.pending_api_key_id.set(id) catch
+                return .{ .rejected = .invalid_command };
+            next.pending_model.clear();
+            next.clearError();
+            if (self.state.operation == .selecting_model) {
+                // Parked: no worker in flight, reload immediately.
+                next.operation = .loading_models;
+                next.pending_catalog_reload = false;
+                const effect_id = ApiKeyId.init(id) catch
+                    return .{ .rejected = .invalid_command };
+                return transition(
+                    next,
+                    .session_changed,
+                    next.active_attempt_id.?,
+                    .{ .load_models = effect_id },
+                );
+            }
+            next.pending_catalog_reload = true;
+            return transitionNoEffect(
+                next,
+                .session_changed,
+                next.active_attempt_id.?,
             );
         }
         if (self.state.operation != .selecting_key or
@@ -781,6 +820,22 @@ pub const Account = struct {
             return .{ .rejected = .generation_mismatch };
         var next = self.state;
         next.catalog_generation = generation;
+        if (next.pending_catalog_reload) {
+            // The loaded models belong to a key the user superseded while the
+            // load was in flight. Drop the stale result and reload for the
+            // queued key.
+            next.pending_catalog_reload = false;
+            next.operation = .loading_models;
+            next.clearError();
+            const effect_id = ApiKeyId.init(next.pending_api_key_id.view()) catch
+                return .{ .rejected = .invalid_command };
+            return transition(
+                next,
+                .catalog_changed,
+                next.active_attempt_id.?,
+                .{ .load_models = effect_id },
+            );
+        }
         if (next.pending_model.len != 0) {
             next.execution_state = if (next.execution_generation == 0)
                 .preparing
@@ -892,6 +947,7 @@ pub const Account = struct {
             var parked = self.state;
             parked.pending_api_key_id.clear();
             parked.pending_model.clear();
+            parked.pending_catalog_reload = false;
             if (parked.execution_state == .reconfiguring)
                 parked.execution_state = .ready;
             parked.operation = .selecting_key;
@@ -939,6 +995,7 @@ pub const Account = struct {
             next.execution_state = .ready;
         next.pending_api_key_id.clear();
         next.pending_model.clear();
+        next.pending_catalog_reload = false;
         next.operation = .none;
         next.active_attempt_id = null;
         next.attempt_kind = .none;
@@ -1671,6 +1728,89 @@ test "refresh failure matrix distinguishes retryable and invalid credentials" {
     commitPrepared(&active, &invalid);
     try std.testing.expectEqual(contract.AccountState.signed_out, active.view().state);
     try std.testing.expectEqualStrings("", active.view().account_id);
+}
+
+test "manual key choice supersedes an in-flight automatic continuation" {
+    const allocator = std.testing.allocator;
+    var account = Account.initRestoring();
+    var restored_execution = try contract.OwnedExecutionConfig.initOwned(
+        allocator,
+        .anthropic,
+        try allocator.dupe(u8, "model-old"),
+        try allocator.dupe(u8, contract.metask_anthropic_messages_url),
+        9,
+        try allocator.dupe(u8, "secret"),
+    );
+    defer restored_execution.deinit();
+    var restored = try TestSupport.prepareReady(
+        &account,
+        try .init("account-1", "Metask User"),
+        "key-old",
+        &restored_execution,
+    );
+    var installed = restored.takeExecution().?;
+    installed.deinit();
+    restored.commit(&account);
+    restored.deinit();
+
+    var refresh = switch (account.prepareCommand(.refresh_catalog)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    _ = refresh.takeEffect();
+    commitPrepared(&account, &refresh);
+    var keys: WorkerCompletion = .{
+        .attempt_id = account.activeAttempt().?,
+        .payload = .api_keys_loaded,
+    };
+    var keys_ready = switch (account.prepareCompletion(&keys)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    commitPrepared(&account, &keys_ready);
+    // Automatic continuation picks a key; its model load goes in flight.
+    var auto_select = switch (account.prepareCommand(.{
+        .select_api_key = testSelection("key-auto"),
+    })) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(auto_select.takeEffect() != null);
+    commitPrepared(&account, &auto_select);
+
+    // The user clicks a different key while that load is in flight. The
+    // click must queue instead of bouncing as invalid_state.
+    var manual = switch (account.prepareCommand(.{
+        .select_api_key = testSelection("key-user"),
+    })) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(manual.takeEffect() == null);
+    commitPrepared(&account, &manual);
+
+    // The stale models result for key-auto is dropped and the load restarts
+    // for the user's key inside the same attempt.
+    var stale_models: WorkerCompletion = .{
+        .attempt_id = account.activeAttempt().?,
+        .payload = .models_loaded,
+    };
+    var reload = switch (account.prepareCompletion(&stale_models)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    const effect = reload.takeEffect().?;
+    try std.testing.expect(effect == .load_models);
+    try std.testing.expectEqualStrings("key-user", effect.load_models.view());
+    commitPrepared(&account, &reload);
+    try std.testing.expectEqual(
+        contract.CatalogState.loading,
+        account.view().catalog_state,
+    );
+    try std.testing.expectEqualStrings(
+        "key-user",
+        account.view().candidate_api_key_id,
+    );
 }
 
 test "empty model catalog parks back in choosing with the key list intact" {
