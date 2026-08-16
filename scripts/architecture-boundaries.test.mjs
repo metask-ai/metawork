@@ -773,7 +773,7 @@ test("Account commits OAuth rotation before strict current-user identity", () =>
   assert.match(store, /backend\.deletePreference\(\) catch \{\}/);
 });
 
-test("macOS Apple Development signing is explicit and isolated", () => {
+test("macOS development and Developer ID distribution signing are explicit and isolated", () => {
   const packageJson = JSON.parse(read("package.json"));
   // The invariant is which entries reach the signing script, not how each one
   // spells its command line. One-time identity selection is a documented script
@@ -812,6 +812,19 @@ test("macOS Apple Development signing is explicit and isolated", () => {
   assert.match(signing, /TeamIdentifier/u);
   assert.match(signing, /buildAppleDevelopmentRequirement/u);
   assert.match(signing, /buildCanonicalDesignatedRequirement/u);
+  assert.match(signing, /Developer ID Application/u);
+  assert.match(signing, /resolveDistributionIdentity/u);
+  assert.match(signing, /buildDeveloperIdRequirement/u);
+  assert.match(signing, /verifyDeveloperIdSignature/u);
+  assert.match(signing, /"--options",\s*"runtime"/u);
+  assert.match(signing, /"--timestamp"/u);
+  assert.match(signing, /notarytool/u);
+  assert.match(signing, /"metawork-notary"/u);
+  assert.match(signing, /"Accepted"/u);
+  assert.match(signing, /stapler/u);
+  assert.match(signing, /spctl/u);
+  assert.match(signing, /--sequesterRsrc/u);
+  assert.match(signing, /--keepParent/u);
   assert.match(signing, /validateCanonicalDesignatedRequirement/u);
   assert.match(signing, /"--requirements"/u);
   assert.match(signing, /`-R=\$\{policy\}`/u);
@@ -833,7 +846,9 @@ test("macOS Apple Development signing is explicit and isolated", () => {
 
   const verifier = read("scripts/verify-macos-package.mjs");
   assert.match(verifier, /localProductIdentity\.bundleId/u);
-  assert.match(verifier, /verifyStableSignature/u);
+  assert.match(verifier, /resolveDistributionIdentity/u);
+  assert.match(verifier, /verifyDeveloperIdSignature/u);
+  assert.doesNotMatch(verifier, /verifyStableSignature/u);
 });
 
 test("formal Native test graph runs every product module test root", () => {
